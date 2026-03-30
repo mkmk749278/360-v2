@@ -28,8 +28,6 @@ from src.bootstrap import Bootstrap
 from src.macro_watchdog import MacroWatchdog
 from src.channels.base import Signal
 from src.channels.scalp import ScalpChannel
-from src.channels.swing import SwingChannel
-from src.channels.spot import SpotChannel
 from src.channels.scalp_fvg import ScalpFVGChannel
 from src.channels.scalp_cvd import ScalpCVDChannel
 from src.channels.scalp_vwap import ScalpVWAPChannel
@@ -43,14 +41,12 @@ from src.historical_data import HistoricalDataStore
 from src.onchain import OnChainClient
 from src.openai_evaluator import OpenAIEvaluator
 from src.order_flow import LiquidationEvent, OrderFlowStore, OIPoller
-from src.pair_manager import PairManager, PairTier
+from src.pair_manager import PairManager
 
 from src.performance_tracker import PerformanceTracker
 from src.predictive_ai import PredictiveEngine
 from src.regime import MarketRegimeDetector
 from src.scanner import Scanner
-from src.gem_scanner import GemScanner
-from src.signal_lifecycle import SignalLifecycleMonitor
 from src.signal_router import SignalRouter
 from src.telegram_bot import TelegramBot
 from src.telemetry import TelemetryCollector
@@ -115,15 +111,6 @@ class CryptoSignalEngine:
             redis_client=self._redis_client,
         )
 
-        # Portfolio enrichment: narrative builder and sector comparator
-        from src.narrative import NarrativeBuilder
-        from src.sector import SectorComparator
-        self.router.narrative_builder = NarrativeBuilder()
-        self.router.sector_comparator = SectorComparator(
-            data_store=self.data_store,
-            pair_mgr=self.pair_mgr,
-        )
-
         # Order execution client and manager (feature 3 — off by default)
         _exchange_client: Optional[CCXTClient] = None
         if AUTO_EXECUTION_ENABLED:
@@ -168,8 +155,6 @@ class CryptoSignalEngine:
         # Channel strategies
         self._channels = [
             ScalpChannel(),
-            SwingChannel(),
-            SpotChannel(),
             ScalpFVGChannel(),
             ScalpCVDChannel(),
             ScalpVWAPChannel(),
@@ -182,18 +167,6 @@ class CryptoSignalEngine:
 
         # Wire regime detector into trade monitor for signal invalidation checks
         self.monitor._regime_detector = self._regime_detector
-
-        # Signal Lifecycle Monitor — actively monitors open SPOT/GEM/SWING
-        # signals and posts periodic human-readable updates to subscribers.
-        # Instantiated here; started as an async task in bootstrap.
-        self._lifecycle_monitor = SignalLifecycleMonitor(
-            router=self.router,
-            data_store=self.data_store,
-            regime_detector=self._regime_detector,
-            send_telegram=self.telegram.send_message,
-            exchange_mgr=None,  # wired after _exchange_mgr is created below
-            send_photo=self.telegram.send_photo,  # chart images in lifecycle updates (feature 4)
-        )
 
         # Predictive AI engine
         self.predictive = PredictiveEngine()
@@ -234,8 +207,6 @@ class CryptoSignalEngine:
         self._exchange_mgr = ExchangeManager(
             second_exchange_url=os.getenv("SECOND_EXCHANGE_URL")
         )
-        # Wire exchange manager into lifecycle monitor now that it exists
-        self._lifecycle_monitor._exchange_mgr = self._exchange_mgr
 
         # WebSocket managers (set during boot)
         self._ws_spot: Optional[WebSocketManager] = None
@@ -287,10 +258,6 @@ class CryptoSignalEngine:
             self.router.publish_highlight(sig, tp, pnl)
         )
 
-        # Gem scanner (OFF by default — admin must run /gem_mode on)
-        self._gem_scanner = GemScanner()
-        self._scanner.gem_scanner = self._gem_scanner
-
         # Command handler (delegates all Telegram commands)
         self._command_handler = CommandHandler(
             telegram=self.telegram,
@@ -314,7 +281,6 @@ class CryptoSignalEngine:
             symbols_fn=lambda: self.pair_mgr.symbols,
             performance_tracker=self._performance_tracker,
             circuit_breaker=self._circuit_breaker,
-            gem_scanner=self._gem_scanner,
             trade_observer=self._trade_observer,
         )
 
@@ -565,7 +531,7 @@ class CryptoSignalEngine:
                         f"(e.g. {', '.join(removed_symbols[:5])})"
                     )
 
-                # Seed new pairs — all Tier 1 and Tier 2 pairs (skip Tier 3)
+                # Seed new pairs
                 if new_symbols:
                     log.info(
                         "Discovered %d new pairs — seeding historical data",
@@ -574,9 +540,6 @@ class CryptoSignalEngine:
                 for sym in new_symbols:
                     info = self.pair_mgr.pairs.get(sym)
                     if info is None:
-                        continue
-                    # Tier 3 pairs receive only lightweight scans — no full seed
-                    if info.tier == PairTier.TIER3:
                         continue
                     try:
                         await self.data_store.seed_symbol(sym, info.market)

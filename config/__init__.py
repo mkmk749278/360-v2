@@ -28,19 +28,12 @@ BINANCE_FUTURES_WS_BASE: str = os.getenv("BINANCE_FUTURES_WS_BASE", "wss://fstre
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_SCALP_CHANNEL_ID: str = os.getenv("TELEGRAM_SCALP_CHANNEL_ID", "")
-TELEGRAM_SWING_CHANNEL_ID: str = os.getenv("TELEGRAM_SWING_CHANNEL_ID", "")
-# REQUIRED: These MUST be set in .env for SPOT and GEM signals to be published.
-# If left empty, signals are silently dropped by the signal router.
-TELEGRAM_SPOT_CHANNEL_ID: str = os.getenv("TELEGRAM_SPOT_CHANNEL_ID", "")
 TELEGRAM_FREE_CHANNEL_ID: str = os.getenv("TELEGRAM_FREE_CHANNEL_ID", "")
 TELEGRAM_ADMIN_CHAT_ID: str = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
-# REQUIRED: These MUST be set in .env for SPOT and GEM signals to be published.
-# If left empty, signals are silently dropped by the signal router.
-TELEGRAM_GEM_CHANNEL_ID: str = os.getenv("TELEGRAM_GEM_CHANNEL_ID", "")
 
 # --- Merged Telegram Channel (recommended for user-facing deployment) ---
 # When set, this OVERRIDES the individual per-channel IDs above.
-# "Active Trading" channel receives: SCALP + SWING + SPOT + GEM signals
+# "Active Trading" channel receives SCALP signals
 TELEGRAM_ACTIVE_CHANNEL_ID: str = os.getenv("TELEGRAM_ACTIVE_CHANNEL_ID", "")
 
 # ---------------------------------------------------------------------------
@@ -389,58 +382,6 @@ CHANNEL_SCALP = ChannelConfig(
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
 )
 
-CHANNEL_SWING = ChannelConfig(
-    name="360_SWING",
-    emoji="🏛️",
-    timeframes=["1h", "4h"],
-    sl_pct_range=(0.2, 0.5),
-    tp_ratios=[1.5, 3.0, 5.0],
-    trailing_atr_mult=2.5,
-    adx_min=20,
-    adx_max=40,
-    spread_max=0.02,
-    min_confidence=72,
-    min_volume=10_000_000.0,
-    dca_enabled=True,
-    min_signal_lifespan=int(os.getenv("SWING_MIN_LIFESPAN", "7200")),
-)
-
-CHANNEL_GEM = ChannelConfig(
-    name="360_GEM",
-    emoji="💎",
-    timeframes=["1d", "1w"],
-    sl_pct_range=(0.10, 0.30),
-    tp_ratios=[2.0, 5.0, 10.0],
-    trailing_atr_mult=3.0,
-    adx_min=0,
-    adx_max=100,
-    spread_max=0.03,
-    min_confidence=55,
-    min_volume=1_000_000.0,
-    dca_enabled=False,
-    min_signal_lifespan=int(os.getenv("GEM_MIN_LIFESPAN", "43200")),
-)
-
-CHANNEL_SPOT = ChannelConfig(
-    name="360_SPOT",
-    emoji="📈",
-    timeframes=["4h", "1d"],
-    sl_pct_range=(0.005, 0.02),
-    tp_ratios=[2.0, 5.0, 10.0],
-    trailing_atr_mult=3.0,
-    adx_min=0,
-    adx_max=100,
-    spread_max=0.02,
-    min_confidence=65,
-    min_volume=1_000_000.0,
-    dca_enabled=True,
-    dca_zone_range=(0.30, 0.70),
-    dca_weight_1=0.6,
-    dca_weight_2=0.4,
-    dca_min_momentum=0.2,
-    min_signal_lifespan=int(os.getenv("SPOT_MIN_LIFESPAN", "21600")),
-)
-
 # ---------------------------------------------------------------------------
 # New scalp trigger channel configs (Phase 3)
 # ---------------------------------------------------------------------------
@@ -515,16 +456,10 @@ ALL_CHANNELS: List[ChannelConfig] = [
     CHANNEL_SCALP_CVD,
     CHANNEL_SCALP_VWAP,
     CHANNEL_SCALP_OBI,
-    CHANNEL_SWING,
-    CHANNEL_SPOT,
-    CHANNEL_GEM,
 ]
 
 CHANNEL_EMOJIS: Dict[str, str] = {
     "360_SCALP": "⚡",
-    "360_SWING": "🏛️",
-    "360_SPOT": "📈",
-    "360_GEM": "💎",
 }
 
 def _build_channel_telegram_map() -> Dict[str, str]:
@@ -543,15 +478,10 @@ def _build_channel_telegram_map() -> Dict[str, str]:
         "360_SCALP_CVD":  active or TELEGRAM_SCALP_CHANNEL_ID,
         "360_SCALP_VWAP": active or TELEGRAM_SCALP_CHANNEL_ID,
         "360_SCALP_OBI":  active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SWING":      active or TELEGRAM_SWING_CHANNEL_ID,
-        "360_SPOT":       active or TELEGRAM_SPOT_CHANNEL_ID,
-        "360_GEM":        active or TELEGRAM_GEM_CHANNEL_ID,
     }
 
 
 CHANNEL_TELEGRAM_MAP: Dict[str, str] = _build_channel_telegram_map()
-
-CHART_ENABLED_CHANNELS: set = {"360_SPOT", "360_GEM"}
 
 # ---------------------------------------------------------------------------
 # WebSocket settings
@@ -672,10 +602,7 @@ PERFORMANCE_TRACKER_PATH: str = os.getenv(
 # ---------------------------------------------------------------------------
 # Max concurrent signals per channel.
 #
-# SCALP/SWING: capped for capital protection (leveraged trades).
-# SPOT/GEM:    effectively unlimited (999) — long hold durations (7–30 days).
-#              Natural daily throttle comes from GEM_MAX_DAILY_SIGNALS in
-#              the gem scanner, not from a concurrent-position cap.
+# SCALP: capped for capital protection (leveraged trades).
 # ---------------------------------------------------------------------------
 MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
     "360_SCALP":      int(os.getenv("MAX_SCALP_SIGNALS", "5")),
@@ -683,31 +610,7 @@ MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
     "360_SCALP_CVD":  int(os.getenv("MAX_SCALP_CVD_SIGNALS", "3")),
     "360_SCALP_VWAP": int(os.getenv("MAX_SCALP_VWAP_SIGNALS", "3")),
     "360_SCALP_OBI":  int(os.getenv("MAX_SCALP_OBI_SIGNALS", "3")),
-    "360_SWING":      int(os.getenv("MAX_SWING_SIGNALS", "10")),
-    "360_SPOT":       int(os.getenv("MAX_SPOT_SIGNALS", "999")),
-    "360_GEM":        int(os.getenv("MAX_GEM_SIGNALS", "999")),
 }
-
-# ---------------------------------------------------------------------------
-# Signal Lifecycle Monitor — background loop that actively monitors every
-# open SPOT, GEM, and SWING signal and posts human-readable updates to
-# the Portfolio / Active Trading channels.
-# ---------------------------------------------------------------------------
-LIFECYCLE_CHECK_INTERVAL: Dict[str, int] = {
-    "360_SWING": int(os.getenv("LIFECYCLE_CHECK_INTERVAL_SWING", "14400")),   # 4 hours
-    "360_SPOT":  int(os.getenv("LIFECYCLE_CHECK_INTERVAL_SPOT",  "21600")),   # 6 hours
-    "360_GEM":   int(os.getenv("LIFECYCLE_CHECK_INTERVAL_GEM",  "43200")),    # 12 hours
-}
-
-# Confidence drop thresholds for lifecycle alert levels.
-# YELLOW fires when confidence drops by >= YELLOW points from entry.
-# RED fires when confidence drops by >= RED points from entry (overrides YELLOW).
-LIFECYCLE_CONFIDENCE_DROP_YELLOW: float = float(
-    os.getenv("LIFECYCLE_CONFIDENCE_DROP_YELLOW", "15.0")
-)
-LIFECYCLE_CONFIDENCE_DROP_RED: float = float(
-    os.getenv("LIFECYCLE_CONFIDENCE_DROP_RED", "25.0")
-)
 
 # ---------------------------------------------------------------------------
 # Anti-noise: minimum signal lifespan before SL/TP checks are applied (secs)
@@ -718,9 +621,6 @@ MIN_SIGNAL_LIFESPAN_SECONDS: Dict[str, int] = {
     "360_SCALP_CVD":  int(os.getenv("MIN_LIFESPAN_SCALP_CVD",  "180")),
     "360_SCALP_VWAP": int(os.getenv("MIN_LIFESPAN_SCALP_VWAP", "180")),
     "360_SCALP_OBI":  int(os.getenv("MIN_LIFESPAN_SCALP_OBI",  "180")),
-    "360_SWING":      int(os.getenv("MIN_LIFESPAN_SWING",       "300")),
-    "360_SPOT":       int(os.getenv("MIN_LIFESPAN_SPOT",        "600")),
-    "360_GEM":        int(os.getenv("MIN_LIFESPAN_GEM",         "21600")),
 }
 
 # ---------------------------------------------------------------------------

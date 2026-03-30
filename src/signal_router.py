@@ -130,9 +130,6 @@ class SignalRouter:
         self._free_signal_date: Optional[date] = None
         # Detect whether queue.get() supports a timeout keyword argument
         self._queue_has_timeout = "timeout" in inspect.signature(queue.get).parameters
-        # Signal enrichment (optional — set after construction)
-        self.narrative_builder: Optional[Any] = None
-        self.sector_comparator: Optional[Any] = None
         # AI Trade Observer (optional — set after construction in main.py)
         self.observer: Optional[Any] = None
         # AI Engine integration (PR: AI Engine Refactor)
@@ -621,33 +618,6 @@ class SignalRouter:
                 self.observer.capture_entry_snapshot(signal)
             except Exception as exc:
                 log.debug("TradeObserver.capture_entry_snapshot failed (non-critical): {}", exc)
-
-    # ------------------------------------------------------------------
-    # Portfolio signal enrichment helpers
-    # ------------------------------------------------------------------
-
-    def _build_narrative_context(self, signal: Signal) -> Dict[str, Any]:
-        """Build the context dict for NarrativeBuilder from a signal."""
-        context: Dict[str, Any] = {}
-        # Basic fields extractable from the signal itself
-        if signal.setup_class:
-            context["setup_class"] = signal.setup_class
-        if signal.liquidity_info:
-            context["smc_events"] = [signal.liquidity_info]
-        if signal.risk_label:
-            context["risk"] = signal.risk_label
-        # Sector can be populated if sector_comparator is available
-        if self.sector_comparator is not None:
-            try:
-                context["sector"] = self.sector_comparator.get_sector(signal.symbol)
-            except Exception:
-                pass
-        # AI sentiment fields (populated for SPOT/GEM channels)
-        if signal.ai_sentiment_label:
-            context["sentiment_label"] = signal.ai_sentiment_label
-        if signal.ai_sentiment_summary:
-            context["sentiment_summary"] = signal.ai_sentiment_summary
-        return context
 
     async def _send_photo(self, channel_id: str, photo_bytes: bytes) -> bool:
         """Send a chart image to *channel_id*.
