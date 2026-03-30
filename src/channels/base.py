@@ -12,6 +12,12 @@ from src.channels.signal_params import lookup_signal_params
 from src.dca import compute_dca_zone
 from src.filters import check_spread, check_volume
 from src.smc import Direction
+from src.structural_levels import (
+    find_round_numbers,
+    find_structural_sl,
+    find_structural_tp,
+    find_swing_levels,
+)
 from src.utils import utcnow
 
 # ---------------------------------------------------------------------------
@@ -316,6 +322,9 @@ def build_channel_signal(
     regime: str = "",
     atr_percentile: float = 50.0,
     pair_tier: str = "MIDCAP",
+    candle_highs: Optional[list] = None,
+    candle_lows: Optional[list] = None,
+    candle_closes: Optional[list] = None,
 ) -> Optional[Signal]:
     """Shared signal construction for all scalp-family channels.
 
@@ -398,6 +407,35 @@ def build_channel_signal(
         tp1 = close - sl_dist * adj_ratios[0]
         tp2 = close - sl_dist * adj_ratios[1]
         tp3 = close - sl_dist * adj_ratios[2] if len(adj_ratios) > 2 else close - sl_dist * _DEFAULT_TP3_RATIO
+
+    # ── Structural SL/TP adjustment ──
+    if candle_highs is not None and candle_lows is not None and candle_closes is not None:
+        try:
+            import numpy as np
+
+            swing_levels = find_swing_levels(
+                np.array(candle_highs),
+                np.array(candle_lows),
+                np.array(candle_closes),
+            )
+            round_nums = find_round_numbers(close)
+
+            # Adjust SL to nearest structural support/resistance
+            structural_sl = find_structural_sl(
+                direction, close, sl, swing_levels, round_nums, sl_dist
+            )
+            if structural_sl != sl:
+                sl = structural_sl
+                sig_sl = round(sl, 8)
+
+            # Adjust TP1 to nearest structural level
+            structural_tp1 = find_structural_tp(
+                direction, close, tp1, swing_levels, round_nums, sl_dist
+            )
+            if structural_tp1 != tp1:
+                tp1 = structural_tp1
+        except Exception:
+            pass  # Fail open - use ATR-based levels
 
     sig = Signal(
         channel=config.name,

@@ -488,13 +488,19 @@ class ScalpChannel(BaseChannel):
     def _apply_kill_zone_note(self, sig: Signal, profile=None, now: Optional[datetime] = None) -> Optional[Signal]:
         """Annotate the signal with a reduced-conviction note when outside kill zones.
 
-        For ALTCOIN tier (kill_zone_hard_gate=True), hard-rejects signals outside
-        kill zones.  For other tiers, sets execution_note but still emits the signal.
+        For ALTCOIN tier (kill_zone_hard_gate=True), applies a soft confidence
+        penalty instead of hard-rejecting.  For other tiers, sets execution_note
+        but still emits the signal.
         """
         if not self._is_kill_zone_active(now):
             if profile is not None and profile.kill_zone_hard_gate:
-                return None  # Hard reject — ALTCOIN tier outside kill zone
-            if sig.execution_note:
+                # Soft penalty instead of hard reject for better setup capture
+                sig.confidence = max(0.0, sig.confidence - 8.0)
+                if sig.execution_note:
+                    sig.execution_note += "; Kill zone penalty: -8 pts (ALTCOIN outside session)"
+                else:
+                    sig.execution_note = "Kill zone penalty: -8 pts (ALTCOIN outside session)"
+            elif sig.execution_note:
                 sig.execution_note += "; Outside kill zone — reduced conviction"
             else:
                 sig.execution_note = "Outside kill zone — reduced conviction"

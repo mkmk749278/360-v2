@@ -123,12 +123,12 @@ def test_stat_filter_suppresses_below_threshold():
 
 
 def test_stat_filter_suppress_reason_contains_win_rate():
-    """Suppress reason string must contain the observed win rate."""
+    """Suppress reason string must contain the observed Wilson score."""
     store = RollingWinRateStore(window=30, min_samples=15)
     _fill_store(store, "SWING", "ETHUSDT", "VOLATILE", wins=2, losses=18)
     sf = StatisticalFilter(store)
     _allow, _conf, reason = sf.check("SWING", "ETHUSDT", "VOLATILE", 70.0)
-    assert "wr=" in reason
+    assert "wilson=" in reason
 
 
 # ===========================================================================
@@ -137,22 +137,23 @@ def test_stat_filter_suppress_reason_contains_win_rate():
 
 
 def test_stat_filter_soft_penalty_at_40pct_win_rate():
-    """Soft penalty must fire and deduct 5 pts when WR is in the 25–45% range."""
+    """Soft penalty must fire and deduct 10 pts when Wilson LB is in the 25–45% range."""
     store = RollingWinRateStore(window=30, min_samples=15)
-    # 12 wins + 18 losses = 40% WR (below the 45% soft-penalty threshold)
-    _fill_store(store, "SWING", "ETHUSDT", "VOLATILE", wins=12, losses=18)
+    # 13 wins + 17 losses ≈ 43% raw WR, Wilson LB ~27% → soft penalty zone
+    _fill_store(store, "SWING", "ETHUSDT", "VOLATILE", wins=13, losses=17)
     sf = StatisticalFilter(store)
     allow, conf, reason = sf.check("SWING", "ETHUSDT", "VOLATILE", 70.0)
     assert allow is True
-    assert conf == pytest.approx(65.0)  # –5 pt soft penalty
+    assert conf == pytest.approx(60.0)  # –10 pt soft penalty
     assert "soft_penalty" in reason
 
 
 def test_stat_filter_soft_penalty_clamps_at_zero():
     """Soft penalty must never produce a negative confidence value."""
     store = RollingWinRateStore(window=30, min_samples=15)
-    # 35% WR — inside soft-penalty zone; start with very low confidence
-    _fill_store(store, "360_SCALP", "SOLUSDT", "RANGING", wins=7, losses=13)
+    # 13 wins / 30 total → Wilson LB ~0.27 — inside soft-penalty zone;
+    # start with very low confidence
+    _fill_store(store, "360_SCALP", "SOLUSDT", "RANGING", wins=13, losses=17)
     sf = StatisticalFilter(store)
     _allow, conf, _reason = sf.check("360_SCALP", "SOLUSDT", "RANGING", 2.0)
     assert conf >= 0.0

@@ -24,6 +24,7 @@ class SetupClass(str, Enum):
     EXHAUSTION_FADE = "EXHAUSTION_FADE"
     RANGE_FADE = "RANGE_FADE"
     WHALE_MOMENTUM = "WHALE_MOMENTUM"
+    MULTI_STRATEGY_CONFLUENCE = "MULTI_STRATEGY_CONFLUENCE"
 
 
 class MarketState(str, Enum):
@@ -50,17 +51,20 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.MOMENTUM_EXPANSION,
         SetupClass.WHALE_MOMENTUM,
         SetupClass.RANGE_FADE,
+        SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     "360_SWING": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.BREAKOUT_RETEST,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
+        SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     "360_SPOT": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.BREAKOUT_RETEST,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.MOMENTUM_EXPANSION,
+        SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     "360_GEM": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -69,6 +73,7 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.RANGE_REJECTION,
         SetupClass.MOMENTUM_EXPANSION,
         SetupClass.EXHAUSTION_FADE,
+        SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
 }
 
@@ -79,22 +84,26 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.BREAKOUT_RETEST,
         SetupClass.MOMENTUM_EXPANSION,
         SetupClass.WHALE_MOMENTUM,
+        SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     MarketState.WEAK_TREND: {
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.BREAKOUT_RETEST,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.WHALE_MOMENTUM,
+        SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     MarketState.CLEAN_RANGE: {
         SetupClass.RANGE_REJECTION,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.EXHAUSTION_FADE,
         SetupClass.RANGE_FADE,
+        SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.RANGE_FADE,
+        SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
@@ -102,6 +111,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.WHALE_MOMENTUM,
+        SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     MarketState.VOLATILE_UNSUITABLE: set(),
 }
