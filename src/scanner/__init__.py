@@ -85,6 +85,7 @@ from src.kill_zone import check_kill_zone_gate
 from src.mtf import check_mtf_gate, compute_mtf_confluence, _TF_WEIGHTS as _MTF_TF_WEIGHTS
 from src.oi_filter import analyse_oi, check_oi_gate
 from src.pair_manager import PairTier, classify_pair_tier
+from src.confluence_detector import ConfluenceDetector
 from src.spoof_detect import check_spoof_gate
 from src.tier_manager import TierManager
 from src.utils import get_logger, price_decimal_fmt, utcnow
@@ -403,6 +404,7 @@ class Scanner:
         # Stateful signal-quality enhancement modules
         self.feedback_loop: FeedbackLoop = FeedbackLoop()
         self.cluster_suppressor: ClusterSuppressor = ClusterSuppressor()
+        self.confluence_detector: ConfluenceDetector = ConfluenceDetector()
 
         # Mutable state shared with the engine / command handler
         self.paused_channels: Set[str] = set()
@@ -2227,6 +2229,10 @@ class Scanner:
         if ctx is None:
             return
         ticks = self.data_store.ticks.get(symbol, [])
+
+        # Collect all signals before deciding what to emit (confluence check)
+        _pending_signals: list = []
+
         for chan in self.channels:
             chan_name = chan.config.name
             if self._should_skip_channel(symbol, chan_name, ctx):
@@ -2256,12 +2262,56 @@ class Scanner:
             sig, cross_verified = await self._prepare_signal(symbol, volume_24h, chan, ctx_for_chan)
             if sig is None:
                 continue
-            # Only start scan cooldown after the signal has been accepted by the
-            # queue; rejected/dropped signals must not suppress later scans.
+            _pending_signals.append((sig, chan_name))
+
+        if not _pending_signals:
+            return
+
+        # Check for multi-strategy confluence: group by direction
+        _emitted_directions: set = set()
+        if len(_pending_signals) >= 2:
+            from collections import defaultdict
+
+            _by_direction: dict = defaultdict(list)
+            for sig, ch_name in _pending_signals:
+                _dir = sig.direction.value if hasattr(sig.direction, "value") else str(sig.direction)
+                _by_direction[_dir].append((sig, ch_name))
+
+            for direction, signals_and_channels in _by_direction.items():
+                if len(signals_and_channels) < 2:
+                    continue
+                # Multi-strategy confluence detected – pick highest-confidence signal
+                signals_and_channels.sort(key=lambda x: x[0].confidence, reverse=True)
+                best_sig, best_ch = signals_and_channels[0]
+                contributing = [ch for _, ch in signals_and_channels]
+                count = len(contributing)
+                boost = 5.0 if count == 2 else (8.0 if count == 3 else 12.0)
+                best_sig.confidence = min(100.0, best_sig.confidence + boost)
+                best_sig.setup_class = "MULTI_STRATEGY_CONFLUENCE"
+                best_sig.analyst_reason = (
+                    f"Multi-Strategy Confluence: {', '.join(contributing)} "
+                    f"(+{boost:.0f} boost)"
+                )
+                best_sig.quality_tier = "A+" if best_sig.confidence >= 80 else "A"
+                log.info(
+                    "Multi-Strategy Confluence {} {}: strategies={} boost=+{:.0f} conf={:.1f}",
+                    symbol, direction, contributing, boost, best_sig.confidence,
+                )
+                if await self._enqueue_signal(best_sig):
+                    for _, ch_name in signals_and_channels:
+                        self._set_cooldown(symbol, ch_name)
+                    self.cluster_suppressor.record_signal(symbol, direction)
+                _emitted_directions.add(direction)
+
+        # Emit remaining signals that weren't part of confluence
+        for sig, chan_name in _pending_signals:
+            _dir = sig.direction.value if hasattr(sig.direction, "value") else str(sig.direction)
+            if _dir in _emitted_directions:
+                continue
             if not await self._enqueue_signal(sig):
                 continue
             self._set_cooldown(symbol, chan_name)
-            self.cluster_suppressor.record_signal(symbol, sig.direction.value)
+            self.cluster_suppressor.record_signal(symbol, _dir)
 
     async def _lightweight_tier3_scan(self) -> None:
         """Lightweight volume/momentum scan for Tier 3 pairs.
