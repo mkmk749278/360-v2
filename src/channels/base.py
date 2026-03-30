@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from config import DYNAMIC_SL_TP_ENABLED, ChannelConfig
+from config import DYNAMIC_SL_TP_ENABLED, ChannelConfig, PairProfile
 from src.channels.signal_params import lookup_signal_params
 from src.dca import compute_dca_zone
 from src.filters import check_spread, check_volume
@@ -220,6 +220,46 @@ class BaseChannel:
             check_spread(spread_pct, self.config.spread_max)
             and check_volume(volume_24h_usd, self.config.min_volume)
         )
+
+    def _get_pair_adjusted_thresholds(
+        self,
+        profile: Optional[PairProfile],
+    ) -> dict:
+        """Return channel thresholds adjusted by a PairProfile.
+
+        Applies the previously unused PairProfile multipliers (spread_max_mult,
+        volume_min_mult, adx_min_mult) and per-pair RSI levels on top of the
+        channel config defaults.  (Rec 2)
+
+        Returns
+        -------
+        dict with ``spread_max``, ``min_volume``, ``adx_min``, ``rsi_ob``,
+        ``rsi_os``, ``bb_touch_pct``.
+        """
+        cfg = self.config
+        spread_max = cfg.spread_max
+        min_volume = cfg.min_volume
+        adx_min = cfg.adx_min
+        rsi_ob = 75.0
+        rsi_os = 25.0
+        bb_touch_pct = 0.002
+
+        if profile is not None:
+            spread_max *= profile.spread_max_mult
+            min_volume *= profile.volume_min_mult
+            adx_min *= profile.adx_min_mult
+            rsi_ob = profile.rsi_ob_level
+            rsi_os = profile.rsi_os_level
+            bb_touch_pct = profile.bb_touch_pct
+
+        return {
+            "spread_max": spread_max,
+            "min_volume": min_volume,
+            "adx_min": adx_min,
+            "rsi_ob": rsi_ob,
+            "rsi_os": rsi_os,
+            "bb_touch_pct": bb_touch_pct,
+        }
 
     def evaluate(
         self,

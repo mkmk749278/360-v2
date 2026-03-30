@@ -58,10 +58,12 @@ class ScalpCVDChannel(BaseChannel):
         if m5 is None or len(m5.get("close", [])) < 21:
             return None
 
+        _pair_profile = smc_data.get("pair_profile")
         if not self._pass_basic_filters(spread_pct, volume_24h_usd):
             return None
 
         ind = indicators.get("5m", {})
+        thresholds = self._get_pair_adjusted_thresholds(_pair_profile)
 
         # ADX gate: CVD divergence is unreliable in strong trends (ADX > 35)
         # divergence can persist for 20+ candles without reverting
@@ -131,8 +133,8 @@ class ScalpCVDChannel(BaseChannel):
         else:
             return None
 
-        # RSI extreme gate: don't chase overbought LONGs or fade oversold SHORTs
-        if not check_rsi(ind.get("rsi_last"), overbought=75, oversold=25, direction=direction.value):
+        # RSI extreme gate: use pair-specific OB/OS levels when available
+        if not check_rsi(ind.get("rsi_last"), overbought=thresholds["rsi_ob"], oversold=thresholds["rsi_os"], direction=direction.value):
             return None
 
         atr_for_sl = atr_val if (atr_val is not None and atr_val > 0) else close * 0.002
@@ -155,7 +157,6 @@ class ScalpCVDChannel(BaseChannel):
             return None
 
         _regime_ctx = smc_data.get("regime_context")
-        _pair_profile = smc_data.get("pair_profile")
         return build_channel_signal(
             config=self.config,
             symbol=symbol,

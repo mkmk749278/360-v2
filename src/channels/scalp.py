@@ -36,11 +36,18 @@ class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
         super().__init__(CHANNEL_SCALP)
 
-    def _pass_basic_filters(self, spread_pct: float, volume_24h_usd: float, regime: str = "") -> bool:
-        """Return True if basic spread/volume filters pass (regime-adaptive spread check)."""
+    def _pass_basic_filters(
+        self,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+        profile=None,
+    ) -> bool:
+        """Return True if basic spread/volume filters pass (regime-adaptive, pair-aware)."""
+        thresholds = self._get_pair_adjusted_thresholds(profile)
         return (
-            check_spread_adaptive(spread_pct, self.config.spread_max, regime=regime)
-            and check_volume(volume_24h_usd, self.config.min_volume)
+            check_spread_adaptive(spread_pct, thresholds["spread_max"], regime=regime)
+            and check_volume(volume_24h_usd, thresholds["min_volume"])
         )
 
     def _select_indicator_weights(self, regime: str) -> dict:
@@ -129,9 +136,11 @@ class ScalpChannel(BaseChannel):
             return None
 
         ind = indicators.get("5m", {})
-        if not check_adx(ind.get("adx_last"), self.config.adx_min):
+        profile = smc_data.get("pair_profile")
+        thresholds = self._get_pair_adjusted_thresholds(profile)
+        if not check_adx(ind.get("adx_last"), thresholds["adx_min"]):
             return None
-        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime, profile=profile):
             return None
 
         ema_fast = ind.get("ema9_last")
@@ -171,8 +180,13 @@ class ScalpChannel(BaseChannel):
 
         direction = sweep.direction
 
-        # RSI extreme gate: don't chase overbought LONGs or fade oversold SHORTs
-        if not check_rsi_regime(ind.get("rsi_last"), direction=direction.value, regime=regime):
+        # RSI extreme gate: use pair-specific OB/OS levels when available
+        rsi_val = ind.get("rsi_last")
+        if rsi_val is not None and profile is not None:
+            from src.filters import check_rsi
+            if not check_rsi(rsi_val, thresholds["rsi_ob"], thresholds["rsi_os"], direction.value):
+                return None
+        elif not check_rsi_regime(rsi_val, direction=direction.value, regime=regime):
             return None
 
         # Momentum must agree with sweep direction
