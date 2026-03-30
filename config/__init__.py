@@ -366,6 +366,114 @@ PAIR_TIER_MAP: Dict[str, str] = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Symbol-specific PairProfile overrides  (Rec 1)
+#
+# Per-symbol overrides that layer ON TOP of the tier defaults.  Only the
+# fields that differ from the tier baseline need to be specified; the rest
+# are inherited from PAIR_PROFILES[tier].
+# ---------------------------------------------------------------------------
+
+PAIR_OVERRIDES: Dict[str, Dict[str, Any]] = {
+    "BTCUSDT": {
+        "momentum_threshold_mult": 0.6,   # BTC moves in tight bands
+        "spread_max_mult": 0.4,           # Excellent liquidity
+        "adx_min_mult": 1.1,              # ADX 28 is rare; require stronger trend
+    },
+    "ETHUSDT": {
+        "momentum_threshold_mult": 0.9,   # More volatile momentum than BTC
+        "adx_min_mult": 0.9,              # ETH trends earlier
+    },
+    "DOGEUSDT": {
+        "momentum_threshold_mult": 1.6,   # Less noisy than PEPE
+        "kill_zone_hard_gate": False,      # Decent Asian volume
+        "momentum_persist_candles": 2,     # Faster momentum
+    },
+    "PEPEUSDT": {
+        "momentum_threshold_mult": 2.5,   # Extreme noise
+        "kill_zone_hard_gate": True,       # Needs concentrated liquidity
+        "rsi_ob_level": 62.0,             # Extreme RSI levels more common
+        "rsi_os_level": 38.0,
+    },
+    "SOLUSDT": {
+        "adx_min_mult": 0.85,            # SOL trends decisively
+        "momentum_threshold_mult": 0.9,
+    },
+    "SHIBUSDT": {
+        "spread_max_mult": 2.5,           # Wider spreads typical
+        "volume_min_mult": 0.2,           # Lower volume legitimate
+    },
+}
+
+
+# Per-pair × regime confidence offsets  (Rec 4)
+# Keys: (symbol_or_tier, regime_key) → offset
+# Falls back to tier-level then to global _REGIME_THRESHOLD_OFFSETS.
+PAIR_REGIME_OFFSETS: Dict[str, Dict[str, float]] = {
+    "BTCUSDT": {
+        "TRENDING": -5.0,     # BTC trends reliably
+        "RANGING": +3.0,      # BTC ranges are clean
+        "VOLATILE": +5.0,     # BTC volatile moves are institutional
+        "QUIET": +1.0,
+    },
+    "ETHUSDT": {
+        "TRENDING": -4.0,
+        "RANGING": +4.0,
+        "VOLATILE": +6.0,
+        "QUIET": 0.0,
+    },
+    "DOGEUSDT": {
+        "TRENDING": -2.0,     # Noisy trends
+        "RANGING": +8.0,      # Choppy ranges
+        "VOLATILE": +10.0,    # Retail chaos
+        "QUIET": 0.0,
+    },
+    "PEPEUSDT": {
+        "TRENDING": -1.0,
+        "RANGING": +10.0,
+        "VOLATILE": +12.0,    # PEPE volatility is retail noise
+        "QUIET": +2.0,
+    },
+    "MAJOR": {
+        "TRENDING": -4.0,
+        "RANGING": +3.0,
+        "VOLATILE": +5.0,
+        "QUIET": 0.0,
+    },
+    "MIDCAP": {
+        "TRENDING": -3.0,
+        "RANGING": +5.0,
+        "VOLATILE": +8.0,
+        "QUIET": 0.0,
+    },
+    "ALTCOIN": {
+        "TRENDING": -2.0,
+        "RANGING": +7.0,
+        "VOLATILE": +10.0,
+        "QUIET": +1.0,
+    },
+}
+
+
+# Per-pair session multiplier adjustments  (Rec 10)
+# Adjustments added to the base session multiplier per tier.
+PAIR_SESSION_ADJUSTMENTS: Dict[str, Dict[str, float]] = {
+    "MAJOR": {
+        "ASIAN_SESSION": +0.10,       # BTC/ETH have decent Asian volume
+        "ASIAN_DEAD_ZONE": +0.05,
+        "WEEKEND_DEAD_ZONE": +0.15,   # BTC trades 24/7
+        "POST_NY_LULL": +0.05,
+    },
+    "MIDCAP": {},                      # No adjustment (baseline)
+    "ALTCOIN": {
+        "ASIAN_SESSION": -0.10,       # Very thin liquidity
+        "ASIAN_DEAD_ZONE": -0.15,     # Almost no volume
+        "WEEKEND_DEAD_ZONE": -0.05,   # Even lower liquidity
+        "POST_NY_LULL": -0.10,
+    },
+}
+
+
 CHANNEL_SCALP = ChannelConfig(
     name="360_SCALP",
     emoji="⚡",

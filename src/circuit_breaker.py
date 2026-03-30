@@ -19,6 +19,7 @@ _DEFAULT_MAX_DAILY_DRAWDOWN_PCT: float = 10.0
 _DEFAULT_COOLDOWN_SECONDS: int = 900
 _DEFAULT_PER_SYMBOL_MAX_SL: int = 3
 _DEFAULT_PER_SYMBOL_COOLDOWN_SECONDS: int = 3600
+_DEFAULT_PER_SYMBOL_DAILY_DRAWDOWN_PCT: float = 3.0
 _HOURLY_WINDOW_SECONDS: float = 3600.0
 _DAILY_WINDOW_SECONDS: float = 86_400.0
 
@@ -31,6 +32,7 @@ class OutcomeRecord:
     hit_sl: bool
     pnl_pct: float
     timestamp: float = field(default_factory=time.monotonic)
+    symbol: str = ""
 
 
 class CircuitBreaker:
@@ -58,6 +60,7 @@ class CircuitBreaker:
         cooldown_seconds: int = _DEFAULT_COOLDOWN_SECONDS,
         per_symbol_max_sl: int = _DEFAULT_PER_SYMBOL_MAX_SL,
         per_symbol_cooldown_seconds: int = _DEFAULT_PER_SYMBOL_COOLDOWN_SECONDS,
+        per_symbol_daily_drawdown_pct: float = _DEFAULT_PER_SYMBOL_DAILY_DRAWDOWN_PCT,
         alert_callback: Optional[Callable[..., Any]] = None,
     ) -> None:
         self.max_consecutive_sl = max_consecutive_sl
@@ -66,6 +69,7 @@ class CircuitBreaker:
         self.cooldown_seconds = cooldown_seconds
         self.per_symbol_max_sl = per_symbol_max_sl
         self.per_symbol_cooldown_seconds = per_symbol_cooldown_seconds
+        self.per_symbol_daily_drawdown_pct = per_symbol_daily_drawdown_pct
         self._alert_callback = alert_callback
 
         # Rolling outcome history (keep last 1000 entries)
@@ -121,6 +125,7 @@ class CircuitBreaker:
             hit_sl=loss_hit,
             pnl_pct=normalized_pnl,
             timestamp=time.monotonic(),
+            symbol=symbol or "",
         )
         self._outcomes.append(record)
 
@@ -150,6 +155,29 @@ class CircuitBreaker:
             self._consecutive_sl = 0
             if symbol:
                 self._per_symbol_consecutive_sl[symbol] = 0
+
+        # Per-symbol daily drawdown check  (Rec 14)
+        if symbol:
+            sym_dd = self._symbol_daily_drawdown_pct(symbol)
+            if sym_dd >= self.per_symbol_daily_drawdown_pct:
+                if symbol not in self._per_symbol_tripped_until or (
+                    time.monotonic() >= self._per_symbol_tripped_until.get(symbol, 0)
+                ):
+                    expiry = time.monotonic() + self.per_symbol_cooldown_seconds
+                    self._per_symbol_tripped_until[symbol] = expiry
+                    log.warning(
+                        "Per-symbol drawdown breaker tripped for %s "
+                        "(%.2f%% daily drawdown >= %.2f%%) – suppressed for %ds",
+                        symbol, sym_dd, self.per_symbol_daily_drawdown_pct,
+                        self.per_symbol_cooldown_seconds,
+                    )
+                    self._emit_alert(
+                        f"⚠️ *Per-Symbol Drawdown Breaker TRIPPED*\n"
+                        f"Symbol: {symbol}\n"
+                        f"Daily drawdown: {sym_dd:.2f}%\n"
+                        f"Threshold: {self.per_symbol_daily_drawdown_pct:.2f}%\n"
+                        f"Suppressed for: {self.per_symbol_cooldown_seconds}s"
+                    )
 
         self._refresh_state()
         self._evaluate()
@@ -380,5 +408,20 @@ class CircuitBreaker:
             self._monitoring_started_at,
         )
         pnls = [r.pnl_pct for r in self._outcomes if r.timestamp >= cutoff]
+        current_drawdown, _ = calculate_drawdown_metrics(pnls)
+        return current_drawdown
+
+    def _symbol_daily_drawdown_pct(self, symbol: str) -> float:
+        """Current 24h drawdown (%) for a specific symbol."""
+        cutoff = max(
+            time.monotonic() - _DAILY_WINDOW_SECONDS,
+            self._monitoring_started_at,
+        )
+        pnls = [
+            r.pnl_pct for r in self._outcomes
+            if r.timestamp >= cutoff and r.symbol == symbol
+        ]
+        if not pnls:
+            return 0.0
         current_drawdown, _ = calculate_drawdown_metrics(pnls)
         return current_drawdown

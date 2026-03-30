@@ -72,7 +72,9 @@ class ScalpFVGChannel(BaseChannel):
             return None
 
         ind = indicators.get(tf, {})
-        if not check_adx(ind.get("adx_last"), self.config.adx_min):
+        _pair_profile = smc_data.get("pair_profile")
+        thresholds = self._get_pair_adjusted_thresholds(_pair_profile)
+        if not check_adx(ind.get("adx_last"), thresholds["adx_min"]):
             return None
         if not self._pass_basic_filters(spread_pct, volume_24h_usd):
             return None
@@ -142,8 +144,8 @@ class ScalpFVGChannel(BaseChannel):
             if fill_pct > 0.6:
                 return None  # Zone >60% filled, weak bounce expected
 
-        # RSI extreme gate: don't chase overbought LONGs or fade oversold SHORTs
-        if not check_rsi(ind.get("rsi_last"), overbought=75, oversold=25, direction=direction.value):
+        # RSI extreme gate: use pair-specific OB/OS levels when available
+        if not check_rsi(ind.get("rsi_last"), overbought=thresholds["rsi_ob"], oversold=thresholds["rsi_os"], direction=direction.value):
             return None
 
         gap_high = float(retest_zone.gap_high)
@@ -182,7 +184,6 @@ class ScalpFVGChannel(BaseChannel):
             return None
 
         _regime_ctx = smc_data.get("regime_context")
-        _pair_profile = smc_data.get("pair_profile")
         sig = build_channel_signal(
             config=self.config,
             symbol=symbol,

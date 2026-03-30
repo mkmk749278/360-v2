@@ -52,6 +52,11 @@ class RegimeContext:
     volume_profile: str           # "ACCUMULATION", "DISTRIBUTION", "NEUTRAL"
     is_regime_strengthening: bool  # adx_slope > 0 and adx_value > 20
 
+    # Regime transition tracking  (Rec 3)
+    previous_regime: str = ""       # Previous stable regime label (empty if first call)
+    transition_type: str = ""       # e.g. "RANGING→TRENDING_UP"  (empty if no change)
+    transition_age_candles: int = 0  # Candles since the last transition (0 = just changed)
+
 
 # ---------------------------------------------------------------------------
 # Standalone helper functions
@@ -129,6 +134,11 @@ class MarketRegimeDetector:
         self._regime_dwell_count: int = 0
         # Track the last timeframe used; hysteresis resets when it changes.
         self._last_timeframe: Optional[str] = None
+        # Regime transition tracking state  (Rec 3)
+        self._ctx_prev_stable: str = ""
+        self._ctx_transition_age: int = 0
+        self._ctx_prev_before_change: str = ""
+        self._ctx_last_transition: str = ""
 
     def classify(
         self,
@@ -320,7 +330,12 @@ class MarketRegimeDetector:
         indicators: Optional[Dict[str, Any]] = None,
         vwap: float = 0.0,
     ) -> RegimeContext:
-        """Build a rich RegimeContext from a RegimeResult and raw market data."""
+        """Build a rich RegimeContext from a RegimeResult and raw market data.
+
+        Includes regime transition tracking (Rec 3): the previous stable
+        regime, transition type, and transition age are surfaced so that
+        channels can boost confidence at regime boundaries.
+        """
         adx_val = result.adx if result.adx is not None else 0.0
         adx_slope = 0.0
         atr_pct = 50.0
@@ -362,13 +377,39 @@ class MarketRegimeDetector:
                     vwap,
                 )
 
+        # Transition tracking  (Rec 3)
+        prev_label = ""
+        transition_type = ""
+        transition_age = 0
+        current_label = result.regime.value
+
+        if self._ctx_prev_stable:
+            if self._ctx_prev_stable != current_label:
+                # A transition occurred
+                prev_label = self._ctx_prev_stable
+                transition_type = f"{self._ctx_prev_stable}→{current_label}"
+                self._ctx_transition_age = 0
+                self._ctx_prev_stable = current_label
+            else:
+                prev_label = self._ctx_prev_before_change
+                transition_type = self._ctx_last_transition
+                self._ctx_transition_age += 1
+            transition_age = self._ctx_transition_age
+            self._ctx_prev_before_change = prev_label
+            self._ctx_last_transition = transition_type
+        else:
+            self._ctx_prev_stable = current_label
+
         return RegimeContext(
-            label=result.regime.value,
+            label=current_label,
             adx_value=adx_val,
             adx_slope=adx_slope,
             atr_percentile=atr_pct,
             volume_profile=vol_profile,
             is_regime_strengthening=(adx_slope > 0 and adx_val > 20),
+            previous_regime=prev_label,
+            transition_type=transition_type,
+            transition_age_candles=transition_age,
         )
 
     # ------------------------------------------------------------------

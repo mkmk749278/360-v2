@@ -28,6 +28,7 @@ from config import (
     GEM_MIN_VOLUME_USD,
     GEM_PAIRS_COUNT,
     PAIR_FETCH_INTERVAL_HOURS,
+    PAIR_OVERRIDES,
     PAIR_PROFILES,
     PAIR_PRUNE_ENABLED,
     PAIR_TIER_MAP,
@@ -64,6 +65,10 @@ def classify_pair_tier(symbol: str, volume_24h_usd: float = 0.0) -> PairProfile:
     - volume >= $500M/day → MAJOR
     - volume >= $50M/day  → MIDCAP
     - otherwise           → ALTCOIN
+
+    Symbol-specific overrides from ``PAIR_OVERRIDES`` are merged on top
+    of the tier baseline so that individual pairs can have custom
+    thresholds while inheriting defaults from their tier.
     """
     tier = PAIR_TIER_MAP.get(symbol.upper())
     if tier is None:
@@ -73,7 +78,16 @@ def classify_pair_tier(symbol: str, volume_24h_usd: float = 0.0) -> PairProfile:
             tier = "MIDCAP"
         else:
             tier = "ALTCOIN"
-    return PAIR_PROFILES[tier]
+
+    base = PAIR_PROFILES[tier]
+    overrides = PAIR_OVERRIDES.get(symbol.upper())
+    if not overrides:
+        return base
+
+    # Merge symbol-specific overrides on top of the tier baseline.
+    merged = {f.name: getattr(base, f.name) for f in base.__dataclass_fields__.values()}
+    merged.update(overrides)
+    return PairProfile(**merged)
 
 
 class PairTier(str, Enum):

@@ -73,10 +73,12 @@ class ScalpVWAPChannel(BaseChannel):
         if cd is None or len(cd.get("close", [])) < 20:
             return None
 
+        _pair_profile = smc_data.get("pair_profile")
         if not self._pass_basic_filters(spread_pct, volume_24h_usd):
             return None
 
         ind = indicators.get(tf, {})
+        thresholds = self._get_pair_adjusted_thresholds(_pair_profile)
 
         # ADX check: only valid in low-ADX (ranging/quiet) environment
         adx_val = ind.get("adx_last")
@@ -118,8 +120,8 @@ class ScalpVWAPChannel(BaseChannel):
         else:
             return None
 
-        # RSI extreme gate: don't chase overbought LONGs or fade oversold SHORTs
-        if not check_rsi(ind.get("rsi_last"), overbought=75, oversold=25, direction=direction.value):
+        # RSI extreme gate: use pair-specific OB/OS levels when available
+        if not check_rsi(ind.get("rsi_last"), overbought=thresholds["rsi_ob"], oversold=thresholds["rsi_os"], direction=direction.value):
             return None
 
         # SL: beyond ±2SD band
@@ -149,7 +151,6 @@ class ScalpVWAPChannel(BaseChannel):
         atr_val = ind.get("atr_last", close * 0.002)
 
         _regime_ctx = smc_data.get("regime_context")
-        _pair_profile = smc_data.get("pair_profile")
         sig = build_channel_signal(
             config=self.config,
             symbol=symbol,

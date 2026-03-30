@@ -52,6 +52,7 @@ class SignalRecord:
     timestamp: float = field(default_factory=time.time)
     signal_quality_pnl_pct: float = 0.0   # TP-based PnL for signal quality stats
     signal_quality_hit_tp: int = 0         # highest TP reached (for signal quality classification)
+    session_name: str = ""                 # Trading session label  (Rec 12)
 
 
 @dataclass
@@ -112,6 +113,7 @@ class PerformanceTracker:
         max_adverse_excursion_pct: float = 0.0,
         signal_quality_pnl_pct: Optional[float] = None,
         signal_quality_hit_tp: Optional[int] = None,
+        session_name: str = "",
     ) -> None:
         """Record the outcome of a completed signal."""
         # Default signal quality fields to the actual PnL values when not provided
@@ -143,6 +145,7 @@ class PerformanceTracker:
             max_adverse_excursion_pct=max_adverse_excursion_pct,
             signal_quality_pnl_pct=normalize_pnl_pct(sq_pnl),
             signal_quality_hit_tp=sq_hit_tp,
+            session_name=session_name,
         )
         self._records.append(record)
         self._save()
@@ -475,6 +478,153 @@ class PerformanceTracker:
         )
 
     # ------------------------------------------------------------------
+    # Per-pair, per-regime, per-session analytics  (Rec 5, 12, 13)
+    # ------------------------------------------------------------------
+
+    def get_pair_stats(
+        self,
+        symbol: str,
+        window_days: Optional[int] = None,
+    ) -> ChannelStats:
+        """Compute per-pair stats, optionally within a rolling window.
+
+        Parameters
+        ----------
+        symbol:
+            The trading pair symbol (e.g. ``"BTCUSDT"``).
+        window_days:
+            Optional rolling window in days.
+        """
+        records = self._filter(window_days=window_days)
+        filtered = [r for r in records if r.symbol == symbol]
+        return self._compute_stats(symbol, filtered)
+
+    def get_pair_scoreboard(
+        self,
+        window_days: int = 7,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return per-pair win/loss/winrate/avg_pnl for the last N days.
+
+        Returns
+        -------
+        dict mapping symbol → stats dict with keys:
+            ``wins``, ``losses``, ``breakeven``, ``total_pnl``, ``count``,
+            ``win_rate``, ``avg_pnl``, ``max_drawdown``.
+        """
+        cutoff = time.time() - (window_days * 86400)
+        recent = [r for r in self._records if r.timestamp >= cutoff]
+
+        scoreboard: Dict[str, Dict[str, Any]] = {}
+        for r in recent:
+            sym = r.symbol
+            if sym not in scoreboard:
+                scoreboard[sym] = {
+                    "wins": 0, "losses": 0, "breakeven": 0,
+                    "total_pnl": 0.0, "count": 0, "pnls": [],
+                }
+            entry = scoreboard[sym]
+            entry["count"] += 1
+            entry["total_pnl"] += r.pnl_pct
+            entry["pnls"].append(r.pnl_pct)
+
+            if r.hit_sl:
+                entry["losses"] += 1
+            elif r.hit_tp > 0:
+                entry["wins"] += 1
+            else:
+                entry["breakeven"] += 1
+
+        for sym, data in scoreboard.items():
+            total = data["wins"] + data["losses"]
+            data["win_rate"] = round(data["wins"] / total * 100, 1) if total > 0 else 0.0
+            data["avg_pnl"] = round(data["total_pnl"] / data["count"], 2) if data["count"] > 0 else 0.0
+            _, data["max_drawdown"] = calculate_drawdown_metrics(data.pop("pnls"))
+
+        return scoreboard
+
+    def get_pair_rr(
+        self,
+        symbol: str,
+        window_days: Optional[int] = None,
+    ) -> float:
+        """Return the average risk/reward ratio for a specific pair.
+
+        R:R is computed as ``abs(avg_win) / abs(avg_loss)``.  Returns 0.0
+        when there are insufficient trades.
+        """
+        records = self._filter(window_days=window_days)
+        filtered = [r for r in records if r.symbol == symbol]
+        wins = [r.pnl_pct for r in filtered if r.pnl_pct > 0 and not is_breakeven_pnl(r.pnl_pct)]
+        losses = [r.pnl_pct for r in filtered if r.pnl_pct < 0 and not is_breakeven_pnl(r.pnl_pct)]
+        if not wins or not losses:
+            return 0.0
+        avg_win = sum(wins) / len(wins)
+        avg_loss = abs(sum(losses) / len(losses))
+        return round(avg_win / avg_loss, 2) if avg_loss > 0 else 0.0
+
+    def get_stats_by_regime(
+        self,
+        window_days: Optional[int] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return performance stats grouped by market regime (market_phase).
+
+        Returns
+        -------
+        dict mapping regime label → stats dict with keys:
+            ``wins``, ``losses``, ``count``, ``win_rate``, ``avg_pnl``.
+        """
+        records = self._filter(window_days=window_days)
+        by_regime: Dict[str, List[SignalRecord]] = {}
+        for r in records:
+            phase = r.market_phase or "UNKNOWN"
+            by_regime.setdefault(phase, []).append(r)
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for regime, recs in by_regime.items():
+            wins = sum(1 for r in recs if r.pnl_pct > 0 and not is_breakeven_pnl(r.pnl_pct))
+            losses = sum(1 for r in recs if r.pnl_pct < 0 and not is_breakeven_pnl(r.pnl_pct))
+            total = wins + losses
+            result[regime] = {
+                "wins": wins,
+                "losses": losses,
+                "count": len(recs),
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+                "avg_pnl": round(sum(r.pnl_pct for r in recs) / len(recs), 2) if recs else 0.0,
+            }
+        return result
+
+    def get_stats_by_session(
+        self,
+        window_days: Optional[int] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return performance stats grouped by trading session name.
+
+        Returns
+        -------
+        dict mapping session name → stats dict with keys:
+            ``wins``, ``losses``, ``count``, ``win_rate``, ``avg_pnl``.
+        """
+        records = self._filter(window_days=window_days)
+        by_session: Dict[str, List[SignalRecord]] = {}
+        for r in records:
+            session = r.session_name or "UNKNOWN"
+            by_session.setdefault(session, []).append(r)
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for session, recs in by_session.items():
+            wins = sum(1 for r in recs if r.pnl_pct > 0 and not is_breakeven_pnl(r.pnl_pct))
+            losses = sum(1 for r in recs if r.pnl_pct < 0 and not is_breakeven_pnl(r.pnl_pct))
+            total = wins + losses
+            result[session] = {
+                "wins": wins,
+                "losses": losses,
+                "count": len(recs),
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+                "avg_pnl": round(sum(r.pnl_pct for r in recs) / len(recs), 2) if recs else 0.0,
+            }
+        return result
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
@@ -572,6 +722,8 @@ class PerformanceTracker:
                     item["signal_quality_pnl_pct"] = item.get("pnl_pct", 0.0)
                 if "signal_quality_hit_tp" not in item:
                     item["signal_quality_hit_tp"] = item.get("hit_tp", 0)
+                if "session_name" not in item:
+                    item["session_name"] = ""
                 self._records.append(SignalRecord(**item))
             for record in self._records:
                 record.pnl_pct = normalize_pnl_pct(record.pnl_pct)

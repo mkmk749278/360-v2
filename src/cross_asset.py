@@ -71,6 +71,13 @@ HIGH_VOLATILITY_LABELS: frozenset[str] = frozenset({
     "VOLATILE",
 })
 
+# ---------------------------------------------------------------------------
+# Graduated correlation thresholds for cross-asset gating  (Rec 7)
+# ---------------------------------------------------------------------------
+_CORR_VERY_LOW: float = 0.2   # Below this: pair is independent, no penalty
+_CORR_LOW: float = 0.5        # Below this: minor penalty suggested
+_CORR_HIGH: float = 0.8       # At or above this: hard block
+
 #: Symbols treated as "major" assets that can affect altcoins.
 #: Extend this set as needed (e.g. add "BNBUSDT" for BNB-chain tokens).
 DEFAULT_MAJOR_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT"})
@@ -129,15 +136,18 @@ def check_cross_asset_gate(
     signal_symbol: str,
     asset_states: Sequence[AssetState],
     major_symbols: Optional[frozenset[str]] = None,
+    btc_correlation: Optional[float] = None,
 ) -> tuple[bool, str]:
-    """Block altcoin LONG signals when major assets are dumping, and altcoin
-    SHORT signals when major assets are pumping.
+    """Block or penalise altcoin signals when major assets are dumping/pumping.
 
-    This filter activates when:
-    1. The signal direction is ``"LONG"`` AND at least one major asset has a
-       bearish or high-volatility-down trend state, **OR**
-    2. The signal direction is ``"SHORT"`` AND at least one major asset is in
-       a strongly bullish state (pumping/uptrend).
+    When *btc_correlation* is provided the gate is **graduated** (Rec 7):
+
+    * correlation ≥ 0.8 → hard block (same as before)
+    * 0.5 ≤ corr < 0.8  → soft block with penalty suggestion in *reason*
+    * correlation < 0.5  → pass through (pair is loosely correlated)
+
+    When *btc_correlation* is ``None`` the original binary behaviour is
+    preserved for backwards compatibility.
 
     Parameters
     ----------
@@ -153,6 +163,9 @@ def check_cross_asset_gate(
     major_symbols:
         Set of symbols considered "major".  Defaults to
         :data:`DEFAULT_MAJOR_SYMBOLS` (BTC, ETH).
+    btc_correlation:
+        Optional rolling Pearson correlation vs BTC.  When provided enables
+        graduated gating.
 
     Returns
     -------
@@ -174,6 +187,39 @@ def check_cross_asset_gate(
             if state.symbol.upper() not in _major:
                 continue
 
+            is_negative = state.is_bearish() or (
+                state.is_high_volatility()
+                and state.trend.upper() not in {"BULLISH", "RANGING", "NEUTRAL"}
+            )
+            if not is_negative:
+                continue
+
+            # Graduated gating when correlation is known
+            if btc_correlation is not None:
+                abs_corr = abs(btc_correlation)
+                if abs_corr < _CORR_VERY_LOW:
+                    # Very low correlation – pair is independent
+                    continue
+                if abs_corr < _CORR_LOW:
+                    # Low-medium correlation – allow with penalty note
+                    return (
+                        True,
+                        (
+                            f"Cross-asset: {state.symbol} is {state.trend.upper()} "
+                            f"(corr={btc_correlation:.2f}) – minor penalty suggested"
+                        ),
+                    )
+                if abs_corr < _CORR_HIGH:
+                    # Medium-high correlation – allow with strong penalty note
+                    return (
+                        True,
+                        (
+                            f"Cross-asset: {state.symbol} is {state.trend.upper()} "
+                            f"(corr={btc_correlation:.2f}) – confidence penalty applied"
+                        ),
+                    )
+
+            # High correlation (≥ 0.8) or unknown correlation → block
             if state.is_bearish():
                 return (
                     False,
@@ -197,6 +243,9 @@ def check_cross_asset_gate(
             if state.symbol.upper() not in _major:
                 continue
             if state.trend.upper() in BULLISH_TREND_LABELS:
+                # Graduated gating for SHORTs as well
+                if btc_correlation is not None and abs(btc_correlation) < _CORR_LOW:
+                    continue
                 return (
                     False,
                     (

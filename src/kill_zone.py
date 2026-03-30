@@ -120,12 +120,62 @@ def _match_session(
 
 
 # ---------------------------------------------------------------------------
+# Tier & weekday adjustment helpers  (Rec 10, Rec 11)
+# ---------------------------------------------------------------------------
+
+
+def _apply_tier_adjustment(
+    multiplier: float,
+    session_name: str,
+    pair_tier: Optional[str],
+) -> float:
+    """Adjust session multiplier based on pair tier.
+
+    MAJOR pairs get a boost during off-peak sessions (BTC/ETH trade 24/7).
+    ALTCOIN pairs get a penalty (thin liquidity outside core sessions).
+    """
+    if pair_tier is None:
+        return multiplier
+
+    try:
+        from config import PAIR_SESSION_ADJUSTMENTS
+        adjustments = PAIR_SESSION_ADJUSTMENTS.get(pair_tier, {})
+    except ImportError:
+        return multiplier
+
+    adj = adjustments.get(session_name, 0.0)
+    return max(0.0, min(1.0, multiplier + adj))
+
+
+def _apply_weekday_adjustment(
+    multiplier: float,
+    weekday: int,
+    hour: int,
+) -> float:
+    """Apply Monday/Friday-specific confidence adjustments.
+
+    * **Monday 00:00–04:00 UTC**: CME gap risk → small penalty.
+    * **Friday 20:00+ UTC**: pre-weekend risk → small penalty.
+    """
+    # Monday early hours (CME gap risk)
+    if weekday == 0 and hour < 4:
+        multiplier = max(0.0, multiplier - 0.05)
+
+    # Friday evening (pre-weekend wind-down)
+    if weekday == 4 and hour >= 20:
+        multiplier = max(0.0, multiplier - 0.03)
+
+    return multiplier
+
+
+# ---------------------------------------------------------------------------
 # Core public API
 # ---------------------------------------------------------------------------
 
 
 def classify_session(
     dt: Optional[datetime] = None,
+    pair_tier: Optional[str] = None,
 ) -> SessionResult:
     """Classify the current (or provided) UTC datetime into a trading session.
 
@@ -133,6 +183,10 @@ def classify_session(
     ----------
     dt:
         UTC datetime to classify.  When ``None``, uses ``datetime.now(UTC)``.
+    pair_tier:
+        Optional pair tier (``"MAJOR"``, ``"MIDCAP"``, ``"ALTCOIN"``).
+        When provided, the confidence multiplier is adjusted using
+        ``PAIR_SESSION_ADJUSTMENTS`` from config.
 
     Returns
     -------
@@ -149,9 +203,12 @@ def classify_session(
 
     # Weekend detection takes priority
     if _is_weekend_dead_zone(dt):
+        mult = 0.40
+        name = "WEEKEND_DEAD_ZONE"
+        mult = _apply_tier_adjustment(mult, name, pair_tier)
         return SessionResult(
-            session_name="WEEKEND_DEAD_ZONE",
-            confidence_multiplier=0.40,
+            session_name=name,
+            confidence_multiplier=mult,
             is_kill_zone=True,
             is_weekend=True,
             utc_hour=hour,
@@ -163,6 +220,8 @@ def classify_session(
     high_match = _match_session(hour, _HIGH_LIQUIDITY_SESSIONS)
     if high_match:
         name, mult = high_match
+        mult = _apply_tier_adjustment(mult, name, pair_tier)
+        mult = _apply_weekday_adjustment(mult, weekday, hour)
         return SessionResult(
             session_name=name,
             confidence_multiplier=mult,
@@ -176,6 +235,8 @@ def classify_session(
     dead_match = _match_session(hour, _DEAD_ZONE_SESSIONS)
     if dead_match:
         name, mult = dead_match
+        mult = _apply_tier_adjustment(mult, name, pair_tier)
+        mult = _apply_weekday_adjustment(mult, weekday, hour)
         return SessionResult(
             session_name=name,
             confidence_multiplier=mult,

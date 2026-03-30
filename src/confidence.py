@@ -38,7 +38,12 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Dict, Optional
 
-from config import CONFIDENCE_LOG_ENABLED, CONFIDENCE_LOG_PATH, NEW_PAIR_MIN_CONFIDENCE
+from config import (
+    CONFIDENCE_LOG_ENABLED,
+    CONFIDENCE_LOG_PATH,
+    NEW_PAIR_MIN_CONFIDENCE,
+    PAIR_REGIME_OFFSETS,
+)
 
 # Directory where per-channel learned weight files are stored.
 # Each file is named ``learned_weights_{channel}.json`` and contains a dict
@@ -668,6 +673,8 @@ def compute_adaptive_threshold(
     regime: str = "",
     volatility_percentile: float = 0.5,
     channel: Optional[str] = None,
+    symbol: Optional[str] = None,
+    pair_tier: Optional[str] = None,
 ) -> float:
     """Compute an adaptive minimum confidence threshold.
 
@@ -677,6 +684,8 @@ def compute_adaptive_threshold(
       ranging / volatile markets raise it (fewer but higher quality).
     * **Volatility percentile** — extremely high volatility (>90th pctile)
       adds an extra buffer.
+    * **Per-pair regime offsets** — symbol-specific or tier-specific adjustments
+      from ``PAIR_REGIME_OFFSETS`` (Rec 4).
 
     Parameters
     ----------
@@ -689,6 +698,12 @@ def compute_adaptive_threshold(
         Current volatility relative to historical distribution (0–1).
     channel:
         Optional channel name.  GEM channel gets a lower base threshold.
+    symbol:
+        Optional trading pair symbol.  When provided, per-pair regime offsets
+        are applied instead of the global default.
+    pair_tier:
+        Optional pair tier (``"MAJOR"``/``"MIDCAP"``/``"ALTCOIN"``).  Used
+        as a fallback when no symbol-specific offsets exist.
 
     Returns
     -------
@@ -703,8 +718,18 @@ def compute_adaptive_threshold(
     elif channel and channel.startswith("360_SCALP"):
         threshold += 2.0
 
-    # Regime adjustment
-    threshold += _REGIME_THRESHOLD_OFFSETS.get(regime, 0.0)
+    # Per-pair × regime offset (Rec 4): look up symbol first, then tier, then global
+    regime_offset = 0.0
+    resolved = False
+    if symbol and symbol.upper() in PAIR_REGIME_OFFSETS:
+        regime_offset = PAIR_REGIME_OFFSETS[symbol.upper()].get(regime, 0.0)
+        resolved = True
+    if not resolved and pair_tier and pair_tier in PAIR_REGIME_OFFSETS:
+        regime_offset = PAIR_REGIME_OFFSETS[pair_tier].get(regime, 0.0)
+        resolved = True
+    if not resolved:
+        regime_offset = _REGIME_THRESHOLD_OFFSETS.get(regime, 0.0)
+    threshold += regime_offset
 
     # Extreme volatility buffer
     if volatility_percentile > 0.9:
