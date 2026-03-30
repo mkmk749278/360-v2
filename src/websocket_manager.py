@@ -235,7 +235,7 @@ class WebSocketManager:
 
         log.info("REST fallback loop started for {} critical pairs", len(self._critical_pairs))
 
-        # One-time bulk backfill to warm indicator pipelines (200 candles per
+        # One-time bulk backfill to warm indicator pipelines (50 candles per
         # symbol × timeframe) so scanners can produce signals immediately after
         # a WS outage rather than waiting for candle-by-candle accumulation.
         if self._data_store is not None:

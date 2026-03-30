@@ -856,7 +856,9 @@ class PairManager:
         )
         # Ensure all top-50 futures are registered in self.pairs so the
         # scanner and AI engine can look them up by symbol.
+        top_symbols = set()
         for p in futures_pairs[:count]:
+            top_symbols.add(p.symbol)
             if p.symbol not in self.pairs:
                 p.tier = PairTier.TIER1
                 self.pairs[p.symbol] = p
@@ -864,6 +866,18 @@ class PairManager:
                 self._prev_volumes[p.symbol] = self.pairs[p.symbol].volume_24h_usd
                 self.pairs[p.symbol].volume_24h_usd = p.volume_24h_usd
                 self.pairs[p.symbol].tier = PairTier.TIER1
+
+        # Prune pairs that have dropped out of the top-N so that
+        # self.pairs only contains the active scanning universe.
+        stale = [sym for sym in self.pairs if sym not in top_symbols]
+        for sym in stale:
+            del self.pairs[sym]
+            self._prev_volumes.pop(sym, None)
+        if stale:
+            log.info("Top-50 pruned %d stale pairs: %s%s",
+                     len(stale), stale[:10],
+                     " …" if len(stale) > 10 else "")
+
         return list(self._top50_futures_cache)
 
     async def run_periodic_top50_refresh(self) -> None:

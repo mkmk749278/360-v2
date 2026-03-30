@@ -238,12 +238,12 @@ class TimeframeSeed:
 
 
 SEED_TIMEFRAMES: List[TimeframeSeed] = [
-    TimeframeSeed("1m", 750),
-    TimeframeSeed("5m", 750),
-    TimeframeSeed("15m", 500),
-    TimeframeSeed("1h", 500),
-    TimeframeSeed("4h", 500),
-    TimeframeSeed("1d", 365),
+    TimeframeSeed("1m", 200),
+    TimeframeSeed("5m", 200),
+    TimeframeSeed("15m", 200),
+    TimeframeSeed("1h", 200),
+    TimeframeSeed("4h", 200),
+    TimeframeSeed("1d", 200),
 ]
 SEED_TICK_LIMIT: int = 5000  # recent trades
 
@@ -518,7 +518,7 @@ WS_ALERT_COOLDOWN: int = int(os.getenv("WS_ALERT_COOLDOWN", "600"))
 WS_SESSION_RECYCLE_ATTEMPTS: int = int(os.getenv("WS_SESSION_RECYCLE_ATTEMPTS", "5"))
 # REST fallback — number of historical candles fetched in the one-time bulk
 # backfill that warms indicator pipelines when a WS outage begins.
-WS_FALLBACK_BULK_LIMIT: int = int(os.getenv("WS_FALLBACK_BULK_LIMIT", "200"))
+WS_FALLBACK_BULK_LIMIT: int = int(os.getenv("WS_FALLBACK_BULK_LIMIT", "50"))
 # Timeframes fetched in the bulk backfill (covers all channel strategies).
 WS_FALLBACK_TIMEFRAMES: List[str] = ["1m", "5m", "15m", "1h", "4h"]
 # Timeframes polled in the ongoing limit=1 REST loop (most frequently needed).

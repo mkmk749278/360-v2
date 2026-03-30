@@ -56,7 +56,7 @@ _DEFAULT_BUDGET: int = 5_000
 _DEFAULT_FUTURES_BUDGET: int = 2_000
 
 # Warn when usage reaches this fraction of the budget
-_WARN_THRESHOLD: float = 0.80
+_WARN_THRESHOLD: float = 0.90
 
 # Tier-based preemptive throttling thresholds.
 # When the consumed weight fraction exceeds these levels the corresponding
