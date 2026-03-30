@@ -3,8 +3,6 @@
 import numpy as np
 
 from src.channels.scalp import ScalpChannel
-from src.channels.swing import SwingChannel
-from src.channels.spot import SpotChannel
 from src.smc import Direction, LiquiditySweep, MSSSignal
 
 
@@ -158,112 +156,6 @@ class TestScalpChannel:
         assert sig.dca_zone_lower is not None and sig.dca_zone_lower > 0
         assert sig.dca_zone_upper is not None and sig.dca_zone_upper > 0
         assert sig.dca_zone_lower < sig.dca_zone_upper
-
-
-class TestSwingChannel:
-    def test_signal_with_sweep_and_mss(self):
-        ch = SwingChannel()
-        candles = {
-            "4h": _make_candles(60, base=2300),
-            "1h": _make_candles(60, base=2300),
-        }
-        sweep = LiquiditySweep(
-            index=59, direction=Direction.LONG,
-            sweep_level=2290, close_price=2291,
-            wick_high=2360, wick_low=2285,
-        )
-        mss = MSSSignal(
-            index=59, direction=Direction.LONG,
-            midpoint=2322.5, confirm_close=2330,
-        )
-        indicators = {
-            "4h": _make_indicators(adx_val=25, ema9=2320, ema21=2290, ema200=2200),
-            "1h": _make_indicators(adx_val=25, ema200=2200, bb_lower=2290),
-        }
-        smc_data = {"sweeps": [sweep], "mss": mss}
-
-        sig = ch.evaluate("ETHUSDT", candles, indicators, smc_data, 0.01, 50_000_000)
-        assert sig is not None
-        assert sig.channel == "360_SWING"
-
-    def test_no_signal_without_mss(self):
-        ch = SwingChannel()
-        candles = {"4h": _make_candles(60), "1h": _make_candles(60)}
-        indicators = {"4h": _make_indicators(adx_val=25), "1h": _make_indicators(adx_val=25)}
-        sweep = LiquiditySweep(
-            index=59, direction=Direction.LONG,
-            sweep_level=99, close_price=99.05,
-            wick_high=101, wick_low=98,
-        )
-        smc_data = {"sweeps": [sweep], "mss": None}
-        sig = ch.evaluate("ETHUSDT", candles, indicators, smc_data, 0.01, 50_000_000)
-        assert sig is None
-
-
-class TestSpotChannel:
-    def test_signal_on_h4_breakout(self):
-        """SpotChannel should fire on H4 breakout above recent 20-bar high with volume."""
-        ch = SpotChannel()
-        # Build candles where last close breaks above recent high
-        closes = np.cumsum(np.ones(60) * 0.1) + 100.0
-        # Make last close clearly above the previous 19 bars' high
-        closes[-1] = max(closes[-20:-1]) + 1.0
-        highs = closes + 0.5
-        lows = closes - 0.5
-        # Volume: last bar is 2.0× the 19-bar average (above 1.8× expansion threshold)
-        volumes = np.ones(60) * 1000.0
-        volumes[-1] = volumes[:-1].mean() * 2.0
-        candles_data = {
-            "open": closes - 0.1,
-            "high": highs,
-            "low": lows,
-            "close": closes,
-            "volume": volumes,
-        }
-        candles = {"4h": candles_data}
-        indicators = {"4h": _make_indicators(adx_val=20, ema200=90)}
-        smc_data = {}
-
-        sig = ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 5_000_000)
-        assert sig is not None
-        assert sig.channel == "360_SPOT"
-        assert sig.direction == Direction.LONG
-
-    def test_no_signal_without_h4_data(self):
-        ch = SpotChannel()
-        sig = ch.evaluate("BTCUSDT", {}, {}, {}, 0.01, 5_000_000)
-        assert sig is None
-
-    def test_no_signal_without_breakout(self):
-        """Price below recent 20-bar high → no signal."""
-        ch = SpotChannel()
-        candles_data = _make_candles(60, base=100.0, trend=0.0)
-        candles = {"4h": candles_data}
-        indicators = {"4h": _make_indicators(adx_val=20, ema200=90)}
-        smc_data = {}
-        sig = ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 5_000_000)
-        assert sig is None
-
-    def test_no_signal_when_bearish_mss(self):
-        """SpotChannel is LONG-biased; SHORT MSS should block the signal."""
-        ch = SpotChannel()
-        closes = np.cumsum(np.ones(60) * 0.1) + 100.0
-        closes[-1] = max(closes[-20:-1]) + 1.0
-        volumes = np.ones(60) * 1000.0
-        volumes[-1] = volumes[:-1].mean() * 1.5
-        candles_data = {
-            "open": closes - 0.1,
-            "high": closes + 0.5,
-            "low": closes - 0.5,
-            "close": closes,
-            "volume": volumes,
-        }
-        candles = {"4h": candles_data}
-        indicators = {"4h": _make_indicators(adx_val=20, ema200=90)}
-        mss = MSSSignal(index=59, direction=Direction.SHORT, midpoint=99.0, confirm_close=98.0)
-        smc_data = {"mss": mss}
-        sig = ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 5_000_000)
-        assert sig is None
 
 
 # ---------------------------------------------------------------------------

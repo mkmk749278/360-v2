@@ -82,34 +82,9 @@ class TestConfigChanges:
         """SCALP min lifespan must be at least 180 seconds (was 30s)."""
         assert MIN_SIGNAL_LIFESPAN_SECONDS["360_SCALP"] >= 180
 
-    def test_min_signal_lifespan_swing_increased(self):
-        """SWING min lifespan must be at least 300 seconds (was 60s)."""
-        assert MIN_SIGNAL_LIFESPAN_SECONDS["360_SWING"] >= 300
-
-    def test_min_signal_lifespan_spot_increased(self):
-        """SPOT min lifespan must be at least 600 seconds (was 120s)."""
-        assert MIN_SIGNAL_LIFESPAN_SECONDS["360_SPOT"] >= 600
-
-    def test_min_signal_lifespan_gem_unchanged(self):
-        """GEM min lifespan has been reduced to 6 hours (21600 seconds) to allow
-        GEM signals on volatile small-cap tokens to be evaluated sooner."""
-        assert MIN_SIGNAL_LIFESPAN_SECONDS["360_GEM"] == 21600
-
     def test_signal_valid_for_minutes_scalp(self):
         """SCALP signals should be valid for 15 minutes."""
         assert SIGNAL_VALID_FOR_MINUTES.get("360_SCALP") == 15
-
-    def test_signal_valid_for_minutes_swing(self):
-        """SWING signals should be valid for 60 minutes."""
-        assert SIGNAL_VALID_FOR_MINUTES.get("360_SWING") == 60
-
-    def test_signal_valid_for_minutes_spot(self):
-        """SPOT signals should be valid for 240 minutes."""
-        assert SIGNAL_VALID_FOR_MINUTES.get("360_SPOT") == 240
-
-    def test_signal_valid_for_minutes_gem(self):
-        """GEM signals should be valid for 1440 minutes (24 hours)."""
-        assert SIGNAL_VALID_FOR_MINUTES.get("360_GEM") == 1440
 
     def test_signal_valid_for_minutes_all_scalp_subtypes(self):
         """All SCALP sub-channel types must have a valid_for_minutes entry."""
@@ -267,76 +242,6 @@ class TestScalpChannelEntryZone:
         assert sig.entry_zone_low < sig.entry < sig.entry_zone_high
 
 
-class TestSpotChannelEntryZone:
-    """SpotChannel must use the DCA zone as entry_zone_low/high."""
-
-    def _make_spot_signal(self) -> Signal | None:
-        """Build a minimal SpotChannel signal bypassing evaluate() gates."""
-        from src.channels.spot import SpotChannel
-        from src.dca import compute_dca_zone
-        import uuid
-
-        chan = SpotChannel()
-        close = 30000.0
-        atr_val = close * 0.01  # 1%
-        sl_dist = max(close * chan.config.sl_pct_range[0] / 100, atr_val * 1.5)
-        sl = close - sl_dist
-        tp1 = close + sl_dist * chan.config.tp_ratios[0]
-        tp2 = close + sl_dist * chan.config.tp_ratios[1]
-        tp3 = close + sl_dist * chan.config.tp_ratios[2]
-
-        sig = Signal(
-            channel=chan.config.name,
-            symbol="ETHUSDT",
-            direction=Direction.LONG,
-            entry=close,
-            stop_loss=round(sl, 8),
-            tp1=round(tp1, 8),
-            tp2=round(tp2, 8),
-            tp3=round(tp3, 8),
-            trailing_active=True,
-            trailing_desc=f"{chan.config.trailing_atr_mult}×ATR",
-            confidence=0.0,
-            ai_sentiment_label="",
-            ai_sentiment_summary="",
-            risk_label="Conservative",
-            timestamp=utcnow(),
-            signal_id=f"SPOT-{uuid.uuid4().hex[:8].upper()}",
-            current_price=close,
-            original_sl_distance=sl_dist,
-        )
-
-        if chan.config.dca_enabled:
-            dca_lower, dca_upper = compute_dca_zone(
-                close, round(sl, 8), Direction.LONG, chan.config.dca_zone_range
-            )
-            sig.dca_zone_lower = dca_lower
-            sig.dca_zone_upper = dca_upper
-            sig.original_entry = close
-            sig.original_tp1 = round(tp1, 8)
-            sig.original_tp2 = round(tp2, 8)
-            sig.original_tp3 = round(tp3, 8)
-            # Spot uses DCA zone as entry zone
-            sig.entry_zone_low = dca_lower
-            sig.entry_zone_high = dca_upper
-
-        return sig
-
-    def test_spot_entry_zone_equals_dca_zone(self):
-        sig = self._make_spot_signal()
-        assert sig is not None
-        assert sig.entry_zone_low == pytest.approx(sig.dca_zone_lower)
-        assert sig.entry_zone_high == pytest.approx(sig.dca_zone_upper)
-
-    def test_spot_entry_zone_is_below_entry(self):
-        """For a LONG spot signal the DCA zone should be below the entry price."""
-        sig = self._make_spot_signal()
-        assert sig is not None
-        # DCA zone is an accumulation zone below the breakout price
-        assert sig.entry_zone_low <= sig.entry
-        assert sig.entry_zone_high <= sig.entry
-
-
 # ---------------------------------------------------------------------------
 # Phase 4: Telegram format – entry zone and validity window
 # ---------------------------------------------------------------------------
@@ -491,29 +396,3 @@ class TestTradeMonitorLifespanValues:
 
         assert sig.signal_id in removed
         assert sig.status == "SL_HIT"
-
-    @pytest.mark.asyncio
-    async def test_swing_signal_below_300s_not_triggered(self):
-        """A SWING signal at age=100s (< 300s min) must NOT trigger SL."""
-        sig = self._make_signal_with_age("360_SWING", age_seconds=100.0)
-        sig.current_price = 29800.0  # below SL
-
-        active = {sig.signal_id: sig}
-        monitor, removed = self._build_monitor(active)
-        await monitor._evaluate_signal(sig)
-
-        assert sig.signal_id not in removed
-        assert sig.status == "ACTIVE"
-
-    @pytest.mark.asyncio
-    async def test_spot_signal_below_600s_not_triggered(self):
-        """A SPOT signal at age=400s (< 600s min) must NOT trigger SL."""
-        sig = self._make_signal_with_age("360_SPOT", age_seconds=400.0)
-        sig.current_price = 29800.0  # below SL
-
-        active = {sig.signal_id: sig}
-        monitor, removed = self._build_monitor(active)
-        await monitor._evaluate_signal(sig)
-
-        assert sig.signal_id not in removed
-        assert sig.status == "ACTIVE"

@@ -14,7 +14,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from config import CHANNEL_SWING, CHANNEL_SCALP
+from config import CHANNEL_SCALP
 from src.channels.base import Signal
 from src.dca import check_dca_entry, compute_dca_zone, recalculate_after_dca
 from src.smc import Direction
@@ -29,9 +29,9 @@ def _make_long_signal(
     tp1: float = 2330.0,
     tp2: float = 2360.0,
     tp3: float = 2400.0,
-    channel: str = "360_SWING",
+    channel: str = "360_SCALP",
 ) -> Signal:
-    """Create a LONG swing signal for DCA testing."""
+    """Create a LONG signal for DCA testing."""
     sl_dist = entry - stop_loss
     sig = Signal(
         channel=channel,
@@ -61,9 +61,9 @@ def _make_short_signal(
     tp1: float = 2270.0,
     tp2: float = 2240.0,
     tp3: float = 2200.0,
-    channel: str = "360_SWING",
+    channel: str = "360_SCALP",
 ) -> Signal:
-    """Create a SHORT swing signal for DCA testing."""
+    """Create a SHORT signal for DCA testing."""
     sl_dist = stop_loss - entry
     sig = Signal(
         channel=channel,
@@ -137,7 +137,7 @@ class TestRecalculateAfterDca:
         sig = _make_long_signal(entry=2300.0, stop_loss=2280.0)
         entry_2 = 2294.0  # within DCA zone
 
-        recalculate_after_dca(sig, entry_2, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, entry_2, [1.5, 3.0, 5.0])
 
         # Weighted average: 2300 * 0.6 + 2294 * 0.4 = 1380 + 917.6 = 2297.6
         assert sig.avg_entry == pytest.approx(2297.6, abs=1e-4)
@@ -157,7 +157,7 @@ class TestRecalculateAfterDca:
         sig = _make_short_signal(entry=2300.0, stop_loss=2320.0)
         entry_2 = 2306.0  # within DCA zone (above entry for SHORT)
 
-        recalculate_after_dca(sig, entry_2, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, entry_2, [1.5, 3.0, 5.0])
 
         # Weighted average: 2300 * 0.6 + 2306 * 0.4 = 1380 + 922.4 = 2302.4
         assert sig.avg_entry == pytest.approx(2302.4, abs=1e-4)
@@ -182,7 +182,7 @@ class TestRecalculateAfterDca:
     def test_r_ratio_preserved(self):
         """R:R multiples for each TP must be preserved after DCA recalc."""
         sig = _make_long_signal(entry=2300.0, stop_loss=2280.0)
-        tp_ratios = list(CHANNEL_SWING.tp_ratios)  # [1.5, 3.0, 5.0]
+        tp_ratios = [1.5, 3.0, 5.0]  # [1.5, 3.0, 5.0]
 
         recalculate_after_dca(sig, 2294.0, tp_ratios)
 
@@ -202,7 +202,7 @@ class TestRecalculateAfterDca:
         sig = _make_long_signal(entry=2300.0, stop_loss=2280.0)
         old_tp1, old_tp2, old_tp3 = sig.tp1, sig.tp2, sig.tp3
 
-        recalculate_after_dca(sig, 2294.0, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, 2294.0, [1.5, 3.0, 5.0])
 
         # New TPs should be lower than original (closer to current price)
         assert sig.tp1 < old_tp1
@@ -215,7 +215,7 @@ class TestRecalculateAfterDca:
         # Already set by _make_long_signal; verify they're not overwritten
         expected_orig_tp1 = sig.original_tp1
 
-        recalculate_after_dca(sig, 2294.0, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, 2294.0, [1.5, 3.0, 5.0])
 
         assert sig.original_entry == pytest.approx(2300.0)
         assert sig.original_tp1 == pytest.approx(expected_orig_tp1)
@@ -224,7 +224,7 @@ class TestRecalculateAfterDca:
         """entry_2_filled must be True after DCA."""
         sig = _make_long_signal()
         assert sig.entry_2_filled is False
-        recalculate_after_dca(sig, 2294.0, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, 2294.0, [1.5, 3.0, 5.0])
         assert sig.entry_2_filled is True
 
     def test_dca_weight_variations(self):
@@ -314,26 +314,6 @@ class TestCheckDcaEntry:
         result = check_dca_entry(sig, 95.0)
         assert result is None
 
-    def test_check_dca_entry_swing_ema200_bias_long(self):
-        """SWING LONG: rejected when price is below EMA200."""
-        sig = _make_long_signal(entry=2300.0, stop_loss=2280.0, channel="360_SWING")
-        # Price in DCA zone but below EMA200 — should be rejected
-        indicators = {"1h": {"ema200_last": 2295.0, "momentum_last": 0.5}}
-        result = check_dca_entry(
-            sig, 2290.0, indicators=indicators, channel_config=CHANNEL_SWING
-        )
-        assert result is None
-
-    def test_check_dca_entry_swing_ema200_bias_long_ok(self):
-        """SWING LONG: passes when price is above EMA200."""
-        sig = _make_long_signal(entry=2300.0, stop_loss=2280.0, channel="360_SWING")
-        # EMA200 below the DCA zone — bias intact
-        indicators = {"1h": {"ema200_last": 2285.0, "momentum_last": 0.5}}
-        result = check_dca_entry(
-            sig, 2290.0, indicators=indicators, channel_config=CHANNEL_SWING
-        )
-        assert result == pytest.approx(2290.0)
-
 
 # ---------------------------------------------------------------------------
 # Breakeven and profit math
@@ -343,7 +323,7 @@ class TestBreakevenAndProfit:
     def test_breakeven_at_entry1_gives_profit_long(self):
         """When price returns to Entry 1 after DCA, PnL is positive from avg_entry."""
         sig = _make_long_signal(entry=2300.0, stop_loss=2280.0)
-        recalculate_after_dca(sig, 2294.0, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, 2294.0, [1.5, 3.0, 5.0])
 
         # Price returns to Entry 1 level
         price_at_entry1 = 2300.0
@@ -354,7 +334,7 @@ class TestBreakevenAndProfit:
     def test_breakeven_at_entry1_gives_profit_short(self):
         """SHORT: When price returns to Entry 1, PnL is positive from avg_entry."""
         sig = _make_short_signal(entry=2300.0, stop_loss=2320.0)
-        recalculate_after_dca(sig, 2306.0, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, 2306.0, [1.5, 3.0, 5.0])
 
         # Price returns to Entry 1 level
         price_at_entry1 = 2300.0
@@ -425,88 +405,14 @@ class TestChannelDcaZoneInit:
         assert sig.original_entry == sig.entry
         assert sig.original_tp1 == sig.tp1
 
-    def test_swing_channel_initialises_dca_zone(self):
-        """SwingChannel.evaluate() must populate DCA zone fields on the signal."""
-        from src.channels.swing import SwingChannel
-        from src.smc import LiquiditySweep, MSSSignal
-        import numpy as np
-
-        ch = SwingChannel()
-        n = 60
-        base = 100.0
-        close = np.cumsum(np.ones(n) * 0.1) + base
-        candles_arr = {
-            "open": close - 0.05,
-            "high": close + 0.5,
-            "low": close - 0.5,
-            "close": close,
-            "volume": np.ones(n) * 1000,
-        }
-        candles = {"4h": candles_arr, "1h": candles_arr}
-        mss = MSSSignal(
-            index=59,
-            direction=Direction.LONG,
-            midpoint=close[-1],
-            confirm_close=close[-1],
-        )
-        sweep = LiquiditySweep(
-            index=59, direction=Direction.LONG,
-            sweep_level=99, close_price=99.05,
-            wick_high=101, wick_low=98,
-        )
-        indicators = {
-            "4h": {"adx_last": 30, "atr_last": 1.0},
-            "1h": {
-                "adx_last": 25,
-                "atr_last": 0.5,
-                "ema200_last": close[-1] - 5,
-                "bb_upper_last": close[-1] + 5,
-                "bb_lower_last": close[-1] - 0.2,  # close very near lower BB → bb_position ≈ 0.04 < 0.15
-            },
-        }
-        smc_data = {"sweeps": [sweep], "mss": mss}
-
-        sig = ch.evaluate("ETHUSDT", candles, indicators, smc_data, 0.01, 15_000_000)
-        assert sig is not None
-        assert sig.dca_zone_lower > 0
-        assert sig.dca_zone_upper > 0
-        assert sig.original_entry == sig.entry
-
 
 # ---------------------------------------------------------------------------
 # DCA config tests
 # ---------------------------------------------------------------------------
 
 class TestDcaConfig:
-    def test_swing_dca_enabled(self):
-        assert CHANNEL_SWING.dca_enabled is True
-
     def test_scalp_dca_enabled(self):
         assert CHANNEL_SCALP.dca_enabled is True
-
-    def test_swing_default_weights(self):
-        assert CHANNEL_SWING.dca_weight_1 == pytest.approx(0.6)
-        assert CHANNEL_SWING.dca_weight_2 == pytest.approx(0.4)
-
-    def test_swing_dca_zone_range(self):
-        assert CHANNEL_SWING.dca_zone_range == (0.30, 0.70)
-
-    def test_spot_dca_enabled(self):
-        from config import CHANNEL_SPOT
-        assert CHANNEL_SPOT.dca_enabled is True
-
-    def test_spot_dca_zone_range(self):
-        from config import CHANNEL_SPOT
-        assert CHANNEL_SPOT.dca_zone_range == (0.30, 0.70)
-
-    def test_spot_dca_weights(self):
-        from config import CHANNEL_SPOT
-        assert CHANNEL_SPOT.dca_weight_1 == pytest.approx(0.6)
-        assert CHANNEL_SPOT.dca_weight_2 == pytest.approx(0.4)
-
-    def test_gem_dca_disabled(self):
-        from config import CHANNEL_GEM
-        assert CHANNEL_GEM.dca_enabled is False
 
 
 # ---------------------------------------------------------------------------
@@ -521,7 +427,7 @@ class TestDcaTimestamp:
         assert sig.dca_timestamp is None  # not set before DCA
 
         before = utcnow()
-        recalculate_after_dca(sig, 2294.0, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, 2294.0, [1.5, 3.0, 5.0])
         after = utcnow()
 
         assert sig.dca_timestamp is not None
@@ -530,12 +436,12 @@ class TestDcaTimestamp:
     def test_dca_timestamp_not_overwritten_on_second_call(self):
         """dca_timestamp is updated on each DCA call (recalculate stamps with current time)."""
         sig = _make_long_signal(entry=2300.0, stop_loss=2280.0)
-        recalculate_after_dca(sig, 2294.0, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, 2294.0, [1.5, 3.0, 5.0])
         first_ts = sig.dca_timestamp
 
         # Reset flag to allow a second call (testing timestamp behaviour)
         sig.entry_2_filled = False
-        recalculate_after_dca(sig, 2292.0, list(CHANNEL_SWING.tp_ratios))
+        recalculate_after_dca(sig, 2292.0, [1.5, 3.0, 5.0])
 
         # Each DCA call stamps the current time, so the second stamp >= first
         assert sig.dca_timestamp is not None

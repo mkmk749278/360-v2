@@ -20,8 +20,6 @@ from src.channels.scalp import ScalpChannel
 from src.channels.scalp_cvd import ScalpCVDChannel
 from src.channels.scalp_fvg import ScalpFVGChannel
 from src.channels.scalp_obi import _compute_obi
-from src.channels.spot import SpotChannel
-from src.channels.swing import SwingChannel
 from src.confidence import score_order_flow
 from src.smc import Direction, FVGZone, LiquiditySweep, MSSSignal
 
@@ -389,87 +387,6 @@ class TestFVGPartialFillDetection:
 
 
 # ---------------------------------------------------------------------------
-# 7. Swing Daily Confluence Markup
-# ---------------------------------------------------------------------------
-
-class TestSwingDailyConfluence:
-    """Swing signals near daily S/R should be marked as SWING_D1_CONFLUENCE."""
-
-    def _make_swing_setup(self, close_h1: float = 2300.0, d1_lows=None, d1_highs=None):
-        h4_data = _make_candles(60, base=2300)
-        h1_data = _make_candles(60, base=close_h1, trend=0.0)
-        h1_data["close"][-1] = close_h1
-        candles = {"4h": h4_data, "1h": h1_data}
-
-        if d1_lows is not None or d1_highs is not None:
-            d1_close = np.ones(30) * close_h1
-            d1_high = np.array(d1_highs if d1_highs else [close_h1 + 10] * 30)
-            d1_low = np.array(d1_lows if d1_lows else [close_h1 - 10] * 30)
-            candles["1d"] = {"close": d1_close, "high": d1_high, "low": d1_low}
-
-        sweep = LiquiditySweep(
-            index=59, direction=Direction.LONG,
-            sweep_level=close_h1 - 10, close_price=close_h1 - 9,
-            wick_high=close_h1 + 20, wick_low=close_h1 - 15,
-        )
-        mss = MSSSignal(
-            index=59, direction=Direction.LONG,
-            midpoint=close_h1, confirm_close=close_h1 + 5,
-        )
-        smc_data = {"sweeps": [sweep], "mss": mss}
-
-        h4_ind = _make_indicators(adx_val=25, ema200=2200)
-        h1_ind = _make_indicators(adx_val=25, ema200=2200, bb_lower=close_h1 - 5)
-        indicators = {"4h": h4_ind, "1h": h1_ind}
-
-        return candles, indicators, smc_data
-
-    def test_daily_confluence_markup_applied(self):
-        """Swing signal near daily support gets SWING_D1_CONFLUENCE class and A+ tier."""
-        ch = SwingChannel()
-        close_h1 = 2300.0
-        # Daily lows: last 10 bars around 2295 (support), close_h1=2300 is within 3%
-        d1_lows = [2200.0] * 20 + [2295.0] * 10  # last 10 lows at 2295
-        d1_highs = [2400.0] * 30
-        candles, indicators, smc_data = self._make_swing_setup(
-            close_h1=close_h1, d1_lows=d1_lows, d1_highs=d1_highs
-        )
-
-        sig = ch.evaluate("ETHUSDT", candles, indicators, smc_data, 0.01, 50_000_000)
-        if sig is not None:
-            # close_h1=2300 <= 2295*1.03=2363.85 → within 3% → confluence
-            assert sig.setup_class in ("SWING_D1_CONFLUENCE", "SWING_STANDARD")
-            if sig.setup_class == "SWING_D1_CONFLUENCE":
-                assert sig.quality_tier == "A+"
-
-    def test_no_daily_confluence_gets_standard_class(self):
-        """Swing signal far from daily support gets SWING_STANDARD class."""
-        ch = SwingChannel()
-        close_h1 = 2300.0
-        # Daily lows far below (2000), so close_h1=2300 is NOT within 3%
-        d1_lows = [2000.0] * 30
-        d1_highs = [2400.0] * 30
-        candles, indicators, smc_data = self._make_swing_setup(
-            close_h1=close_h1, d1_lows=d1_lows, d1_highs=d1_highs
-        )
-
-        sig = ch.evaluate("ETHUSDT", candles, indicators, smc_data, 0.01, 50_000_000)
-        if sig is not None:
-            # close_h1=2300 <= 2000*1.03=2060 → NOT within 3% → standard
-            assert sig.setup_class == "SWING_STANDARD"
-
-    def test_no_daily_candles_gets_standard_class(self):
-        """Without 1d candles, swing signal defaults to SWING_STANDARD."""
-        ch = SwingChannel()
-        candles, indicators, smc_data = self._make_swing_setup(close_h1=2300.0)
-        # No "1d" key in candles
-
-        sig = ch.evaluate("ETHUSDT", candles, indicators, smc_data, 0.01, 50_000_000)
-        if sig is not None:
-            assert sig.setup_class == "SWING_STANDARD"
-
-
-# ---------------------------------------------------------------------------
 # 8. Funding Rate Contrarian Bonus/Penalty
 # ---------------------------------------------------------------------------
 
@@ -564,101 +481,6 @@ class TestFundingRateContrarian:
             funding_rate=-0.05,
         )
         assert 0.0 <= s <= 20.0
-
-
-# ---------------------------------------------------------------------------
-# 9. Spot Breakout Retest Detection
-# ---------------------------------------------------------------------------
-
-class TestSpotBreakoutRetestDetection:
-    """Spot channel should detect and mark breakout retests."""
-
-    def _make_spot_candles(self, retest: bool = False) -> tuple:
-        closes = np.cumsum(np.ones(60) * 0.1) + 100.0
-        recent_high = max(closes[-20:-1])
-
-        if retest:
-            # Pattern: [..., above_high, below_high (pullback), above_high (reclaim)]
-            closes[-3] = recent_high + 0.5   # breakout candle
-            closes[-2] = recent_high - 0.2   # pullback below resistance
-            closes[-1] = recent_high + 0.5   # reclaim → this IS a retest
-        else:
-            # Standard initial breakout
-            closes[-1] = recent_high + 1.0
-            closes[-2] = recent_high - 0.5
-            closes[-3] = recent_high - 1.0
-
-        highs = closes + 0.5
-        lows = closes - 0.5
-        volumes = np.ones(60) * 1000.0
-        volumes[-1] = volumes[:-1].mean() * 2.0
-
-        candles_data = {
-            "open": closes - 0.1,
-            "high": highs,
-            "low": lows,
-            "close": closes,
-            "volume": volumes,
-        }
-        return candles_data, recent_high
-
-    def test_retest_pattern_marked_as_breakout_retest(self):
-        """Retest pattern (breakout → pullback → reclaim) → BREAKOUT_RETEST class."""
-        ch = SpotChannel()
-        candles_data, recent_high = self._make_spot_candles(retest=True)
-        candles = {"4h": candles_data}
-        indicators = {"4h": _make_indicators(adx_val=20, ema200=90)}
-        smc_data = {}
-
-        sig = ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 5_000_000)
-        if sig is not None:
-            assert sig.setup_class == "BREAKOUT_RETEST"
-
-    def test_initial_breakout_marked_as_breakout_initial(self):
-        """Standard initial breakout → BREAKOUT_INITIAL class."""
-        ch = SpotChannel()
-        candles_data, _ = self._make_spot_candles(retest=False)
-        candles = {"4h": candles_data}
-        indicators = {"4h": _make_indicators(adx_val=20, ema200=90)}
-        smc_data = {}
-
-        sig = ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 5_000_000)
-        if sig is not None:
-            assert sig.setup_class in ("BREAKOUT_INITIAL", "BREAKOUT_RETEST")
-
-    def test_short_retest_marked_correctly(self):
-        """SHORT breakdown retest → BREAKOUT_RETEST class."""
-        ch = SpotChannel()
-        # Build SHORT scenario: below EMA200 and daily EMA50, breakdown below recent low
-        closes = np.cumsum(np.ones(60) * (-0.1)) + 100.0
-        recent_low = min(closes[-10:-1])
-
-        # Retest pattern for SHORT: breakdown → bounce → re-break
-        closes[-3] = recent_low - 0.5   # breakdown
-        closes[-2] = recent_low + 0.2   # bounce (pullback above support)
-        closes[-1] = recent_low - 0.5   # re-break → retest
-
-        volumes = np.ones(60) * 1000.0
-        volumes[-1] = volumes[:-1].mean() * 2.0
-
-        candles_data = {
-            "open": closes - 0.1,
-            "high": closes + 0.5,
-            "low": closes - 0.5,
-            "close": closes,
-            "volume": volumes,
-        }
-        candles = {"4h": candles_data}
-        # EMA200 above price (bearish), daily EMA50 above price
-        indicators = {
-            "4h": _make_indicators(adx_val=20, ema200=105),
-            "1d": _make_indicators(ema200=105),
-        }
-        smc_data = {}
-
-        sig = ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 5_000_000)
-        if sig is not None and sig.direction == Direction.SHORT:
-            assert sig.setup_class in ("BREAKOUT_RETEST", "BREAKOUT_INITIAL")
 
 
 # ---------------------------------------------------------------------------

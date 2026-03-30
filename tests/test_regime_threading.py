@@ -6,8 +6,6 @@ import pytest
 import numpy as np
 
 from src.channels.scalp import ScalpChannel
-from src.channels.swing import SwingChannel
-from src.channels.spot import SpotChannel
 from src.channels.scalp_cvd import ScalpCVDChannel
 from src.channels.scalp_fvg import ScalpFVGChannel
 from src.channels.scalp_obi import ScalpOBIChannel
@@ -80,90 +78,6 @@ class TestScalpChannelRegimeParam:
         # Calling without regime should still work
         sig = ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
         assert sig is None or sig.channel == "360_SCALP"
-
-
-class TestSwingChannelRegimeParam:
-    def test_evaluate_accepts_regime_parameter(self):
-        """SwingChannel.evaluate() should accept regime kwarg without TypeError."""
-        ch = SwingChannel()
-        candles = {
-            "4h": _make_candles(60, base=100.0),
-            "1h": _make_candles(60, base=100.0),
-        }
-        indicators = {
-            "4h": _make_indicators(adx_val=30),
-            "1h": _make_indicators(adx_val=30, ema200=95),
-        }
-        smc_data = {"sweeps": [], "mss": None}
-        # Should not raise TypeError
-        try:
-            ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
-                        regime="TRENDING_UP")
-        except TypeError:
-            pytest.fail("SwingChannel.evaluate() does not accept regime parameter")
-        except Exception:
-            pass  # Other errors are fine (missing data etc)
-
-    def test_evaluate_regime_default_empty_string(self):
-        """SwingChannel.evaluate() works without regime (backward compatible)."""
-        ch = SwingChannel()
-        candles = {
-            "4h": _make_candles(60, base=100.0),
-            "1h": _make_candles(60, base=100.0),
-        }
-        indicators = {
-            "4h": _make_indicators(adx_val=30),
-            "1h": _make_indicators(adx_val=30, ema200=95),
-        }
-        smc_data = {"sweeps": [], "mss": None}
-        try:
-            ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
-        except TypeError:
-            pytest.fail("SwingChannel.evaluate() is not backward compatible without regime")
-        except Exception:
-            pass
-
-
-class TestSpotChannelRegimeParam:
-    def test_evaluate_accepts_regime_parameter(self):
-        """SpotChannel.evaluate() should accept regime kwarg without TypeError."""
-        ch = SpotChannel()
-        candles = {"4h": _make_candles(60, base=100.0)}
-        indicators = {"4h": _make_indicators(adx_val=30, ema200=95)}
-        smc_data = {}
-        try:
-            ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
-                        regime="RANGING")
-        except TypeError:
-            pytest.fail("SpotChannel.evaluate() does not accept regime parameter")
-        except Exception:
-            pass
-
-    def test_evaluate_stores_regime_as_current_regime(self):
-        """SpotChannel.evaluate() stores regime in self._current_regime."""
-        ch = SpotChannel()
-        candles = {"4h": _make_candles(60, base=100.0)}
-        indicators = {"4h": _make_indicators(adx_val=30, ema200=95)}
-        smc_data = {}
-        try:
-            ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
-                        regime="VOLATILE")
-        except Exception:
-            pass  # May raise due to missing data, but _current_regime should be set
-        assert ch._current_regime == "VOLATILE"
-
-    def test_evaluate_regime_default_empty_string(self):
-        """SpotChannel.evaluate() works without regime (backward compatible)."""
-        ch = SpotChannel()
-        candles = {"4h": _make_candles(60, base=100.0)}
-        indicators = {"4h": _make_indicators(adx_val=30, ema200=95)}
-        smc_data = {}
-        try:
-            ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
-        except TypeError:
-            pytest.fail("SpotChannel.evaluate() is not backward compatible without regime")
-        except Exception:
-            pass
 
 
 class TestAllSubChannelsRegimeParam:

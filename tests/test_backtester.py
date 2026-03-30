@@ -14,7 +14,6 @@ from src.backtester import (
     _simulate_trade,
 )
 from src.channels.scalp import ScalpChannel
-from src.channels.spot import SpotChannel
 
 
 def _make_candles(
@@ -138,7 +137,7 @@ class TestBacktester:
         }
         results = bt.run(candles_by_tf, symbol="BTCUSDT")
         assert isinstance(results, list)
-        assert len(results) == 3  # one per channel (SCALP, SWING, SPOT)
+        assert len(results) == 1  # one per channel (SCALP)
 
     def test_run_single_channel(self):
         bt = Backtester(min_window=30, lookahead_candles=5)
@@ -162,17 +161,6 @@ class TestBacktester:
         candles_by_tf = {"1h": _make_candles(200)}
         results = bt.run(candles_by_tf)
         assert results[0].total_signals == 0
-
-    def test_custom_channel_list(self):
-        bt = Backtester(
-            channels=[SpotChannel()], min_window=30, lookahead_candles=5
-        )
-        candles = _make_candles(n=200)
-        candles_by_tf = {"4h": candles, "5m": candles}
-        results = bt.run(candles_by_tf)
-        assert len(results) == 1
-        assert results[0].channel == "360_SPOT"
-
 
 class TestFeeDeduction:
     """Fee model in _simulate_trade must reduce PnL by fee_pct."""
