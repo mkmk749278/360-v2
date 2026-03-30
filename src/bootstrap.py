@@ -122,6 +122,12 @@ class Bootstrap:
         else:
             await engine.pair_mgr.refresh_pairs()
 
+        if not engine.pair_mgr.pairs:
+            msg = "FATAL: No trading pairs loaded — cannot start engine."
+            log.critical(msg)
+            await engine.telegram.send_admin_alert(f"🛑 {msg}")
+            raise RuntimeError(msg)
+
         # 2. Smart seed — temporarily raise the rate-limit budget since there
         #    is no competing scan traffic during boot.  Spot and Futures use
         #    separate budgets matching Binance's independent per-market caps.
@@ -130,13 +136,22 @@ class Bootstrap:
         cached = engine.data_store.load_snapshot()
         if cached:
             log.info("Disk cache loaded — gap-filling missing data only")
-            await engine.data_store.gap_fill(engine.pair_mgr)
+            seeded = await engine.data_store.gap_fill(engine.pair_mgr)
         else:
             log.info("No disk cache found — performing full historical seed")
-            await engine.data_store.seed_all(engine.pair_mgr)
+            seeded = await engine.data_store.seed_all(engine.pair_mgr)
         # Restore steady-state budgets now that seeding is complete.
         spot_rate_limiter.set_budget(_STEADY_BUDGET)
         futures_rate_limiter.set_budget(_STEADY_BUDGET_FUTURES)
+
+        if seeded == 0:
+            msg = (
+                "FATAL: Historical data seeded for 0 pairs — "
+                "cannot start scanner without candle data."
+            )
+            log.critical(msg)
+            await engine.telegram.send_admin_alert(f"🛑 {msg}")
+            raise RuntimeError(msg)
 
         # 3. Load predictive model
         await engine.predictive.load_model()

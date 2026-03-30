@@ -170,6 +170,158 @@ class TestBootstrapInterface:
         assert engine._tasks == []
 
 
+class TestBootstrapBootGuards:
+    """boot() must abort when pair loading or historical seeding yields zero results."""
+
+    def _make_boot_engine(self, *, pairs=None, seed_return=5):
+        """Return a SimpleNamespace engine with all boot-sequence deps stubbed."""
+        pair_mgr = SimpleNamespace(
+            pairs=pairs if pairs is not None else {"BTCUSDT": SimpleNamespace(market="futures")},
+            refresh_top50_futures=AsyncMock(),
+            refresh_pairs=AsyncMock(),
+        )
+        data_store = SimpleNamespace(
+            load_snapshot=lambda: False,
+            seed_all=AsyncMock(return_value=seed_return),
+            gap_fill=AsyncMock(return_value=seed_return),
+        )
+        return SimpleNamespace(
+            _boot_time=0,
+            _redis_client=SimpleNamespace(connect=AsyncMock()),
+            telemetry=SimpleNamespace(
+                set_redis_client=lambda _: None,
+                record_api_call=lambda *a, **kw: None,
+            ),
+            pair_mgr=pair_mgr,
+            data_store=data_store,
+            predictive=SimpleNamespace(load_model=AsyncMock()),
+            telegram=SimpleNamespace(send_admin_alert=AsyncMock()),
+            _ws_spot=None,
+            _ws_futures=None,
+            _tasks=[],
+        )
+
+    @pytest.mark.asyncio
+    @patch("src.bootstrap.spot_rate_limiter")
+    @patch("src.bootstrap.futures_rate_limiter")
+    @patch("src.bootstrap.BinanceClient")
+    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
+    async def test_boot_aborts_when_no_pairs_loaded(
+        self, _bc, _frl, _srl,
+    ):
+        """boot() must raise RuntimeError when pair_mgr.pairs is empty."""
+        engine = self._make_boot_engine(pairs={})
+        bootstrap = Bootstrap(engine)
+        with pytest.raises(RuntimeError, match="No trading pairs loaded"):
+            await bootstrap.boot()
+
+    @pytest.mark.asyncio
+    @patch("src.bootstrap.spot_rate_limiter")
+    @patch("src.bootstrap.futures_rate_limiter")
+    @patch("src.bootstrap.BinanceClient")
+    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
+    async def test_boot_aborts_when_zero_pairs_seeded(
+        self, _bc, _frl, _srl,
+    ):
+        """boot() must raise RuntimeError when seed_all returns 0."""
+        engine = self._make_boot_engine(seed_return=0)
+        bootstrap = Bootstrap(engine)
+        with pytest.raises(RuntimeError, match="seeded for 0 pairs"):
+            await bootstrap.boot()
+
+    @pytest.mark.asyncio
+    @patch("src.bootstrap.spot_rate_limiter")
+    @patch("src.bootstrap.futures_rate_limiter")
+    @patch("src.bootstrap.BinanceClient")
+    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
+    async def test_boot_sends_alert_on_zero_pairs(
+        self, _bc, _frl, _srl,
+    ):
+        """boot() must send a Telegram admin alert when no pairs are loaded."""
+        engine = self._make_boot_engine(pairs={})
+        bootstrap = Bootstrap(engine)
+        with pytest.raises(RuntimeError):
+            await bootstrap.boot()
+        engine.telegram.send_admin_alert.assert_awaited_once()
+        alert_msg = engine.telegram.send_admin_alert.call_args[0][0]
+        assert "No trading pairs loaded" in alert_msg
+
+    @pytest.mark.asyncio
+    @patch("src.bootstrap.spot_rate_limiter")
+    @patch("src.bootstrap.futures_rate_limiter")
+    @patch("src.bootstrap.BinanceClient")
+    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
+    async def test_boot_sends_alert_on_zero_seeded(
+        self, _bc, _frl, _srl,
+    ):
+        """boot() must send a Telegram admin alert when seeding yields 0."""
+        engine = self._make_boot_engine(seed_return=0)
+        bootstrap = Bootstrap(engine)
+        with pytest.raises(RuntimeError):
+            await bootstrap.boot()
+        engine.telegram.send_admin_alert.assert_awaited_once()
+        alert_msg = engine.telegram.send_admin_alert.call_args[0][0]
+        assert "seeded for 0 pairs" in alert_msg
+
+
+class TestHistoricalSeedReturnCount:
+    """seed_all() must return the number of pairs successfully seeded."""
+
+    @pytest.mark.asyncio
+    async def test_seed_all_returns_seeded_count(self):
+        from src.historical_data import HistoricalDataStore
+
+        store = HistoricalDataStore()
+        store.seed_symbol = AsyncMock()
+        # Simulate candles being populated for BTCUSDT but not ETHUSDT
+        async def _fake_seed(sym, market):
+            if sym == "BTCUSDT":
+                import numpy as np
+                store.candles["BTCUSDT"] = {
+                    "1m": {"close": np.array([1.0, 2.0])}
+                }
+
+        store.seed_symbol = _fake_seed
+
+        pair_mgr = SimpleNamespace(
+            pairs={
+                "BTCUSDT": SimpleNamespace(market="futures"),
+                "ETHUSDT": SimpleNamespace(market="futures"),
+            },
+            record_candles=lambda *a: None,
+        )
+
+        count = await store.seed_all(pair_mgr)
+        assert count == 1  # only BTCUSDT was seeded
+
+    @pytest.mark.asyncio
+    async def test_seed_all_returns_zero_when_all_fail(self):
+        from src.historical_data import HistoricalDataStore
+
+        store = HistoricalDataStore()
+        store.seed_symbol = AsyncMock()  # does not populate candles
+
+        pair_mgr = SimpleNamespace(
+            pairs={
+                "BTCUSDT": SimpleNamespace(market="futures"),
+            },
+            record_candles=lambda *a: None,
+        )
+
+        count = await store.seed_all(pair_mgr)
+        assert count == 0
+
+    @pytest.mark.asyncio
+    async def test_seed_all_returns_zero_for_empty_pairs(self):
+        from src.historical_data import HistoricalDataStore
+
+        store = HistoricalDataStore()
+        pair_mgr = SimpleNamespace(pairs={}, record_candles=lambda *a: None)
+
+        count = await store.seed_all(pair_mgr)
+        assert count == 0
+
+
 class TestScannerInterface:
     def test_scanner_has_scan_loop(self):
         assert hasattr(Scanner, "scan_loop")

@@ -187,7 +187,7 @@ class HistoricalDataStore:
     # Full boot seed
     # ------------------------------------------------------------------
 
-    async def seed_all(self, pair_mgr: PairManager) -> None:
+    async def seed_all(self, pair_mgr: PairManager) -> int:
         """Seed historical data for every active pair.
 
         Up to :data:`_GAP_FILL_CONCURRENT_SYMBOLS` symbols are seeded in
@@ -195,8 +195,14 @@ class HistoricalDataStore:
         parallelised by :meth:`seed_symbol`, so the overall boot time is
         reduced from O(symbols × timeframes) sequential requests to
         O(⌈symbols / concurrency⌉) rounds.
+
+        Returns
+        -------
+        int
+            Number of pairs that were successfully seeded (have candle data).
         """
-        log.info("Starting historical data seed for %d pairs …", len(pair_mgr.pairs))
+        total = len(pair_mgr.pairs)
+        log.info("Starting historical data seed for %d pairs …", total)
 
         semaphore = asyncio.Semaphore(_GAP_FILL_CONCURRENT_SYMBOLS)
 
@@ -207,7 +213,16 @@ class HistoricalDataStore:
                     pair_mgr.record_candles(sym, tf_name, len(data.get("close", [])))
 
         await asyncio.gather(*[_seed_one(sym, info) for sym, info in pair_mgr.pairs.items()])
-        log.info("Historical data seed complete.")
+
+        seeded = sum(1 for sym in pair_mgr.pairs if self.candles.get(sym))
+        log.info(
+            "Historical data seed complete: %d / %d pairs seeded.", seeded, total
+        )
+        if seeded == 0 and total > 0:
+            log.critical(
+                "All %d pairs failed to seed — no candle data available.", total
+            )
+        return seeded
 
     # ------------------------------------------------------------------
     # Disk-cache: save
@@ -317,7 +332,7 @@ class HistoricalDataStore:
     # Disk-cache: gap-fill
     # ------------------------------------------------------------------
 
-    async def gap_fill(self, pair_mgr: PairManager) -> None:
+    async def gap_fill(self, pair_mgr: PairManager) -> int:
         """Fetch only the candles missing since the last snapshot.
 
         For each symbol+timeframe already in cache, calculates how many
@@ -327,21 +342,25 @@ class HistoricalDataStore:
 
         Uses concurrent processing (up to 4 symbols at a time) and skips
         tick refresh when the cache is fresher than 5 minutes.
+
+        Returns
+        -------
+        int
+            Number of pairs that have candle data after gap-fill.
         """
         try:
             if not _META_FILE.exists():
                 log.info("No metadata found — falling back to full seed")
-                await self.seed_all(pair_mgr)
-                return
+                return await self.seed_all(pair_mgr)
 
             with _META_FILE.open("r", encoding="utf-8") as fh:
                 meta: Dict[str, Any] = json.load(fh)
         except Exception as exc:
             log.error("gap_fill: cannot read metadata (%s) — falling back to full seed", exc)
-            await self.seed_all(pair_mgr)
-            return
+            return await self.seed_all(pair_mgr)
 
-        log.info("Gap-filling %d pairs …", len(pair_mgr.pairs))
+        total = len(pair_mgr.pairs)
+        log.info("Gap-filling %d pairs …", total)
 
         semaphore = asyncio.Semaphore(_GAP_FILL_CONCURRENT_SYMBOLS)
 
@@ -349,7 +368,14 @@ class HistoricalDataStore:
             self._gap_fill_symbol(sym, info, meta, semaphore, pair_mgr)
             for sym, info in pair_mgr.pairs.items()
         ])
-        log.info("Gap-fill complete.")
+
+        seeded = sum(1 for sym in pair_mgr.pairs if self.candles.get(sym))
+        log.info("Gap-fill complete: %d / %d pairs have data.", seeded, total)
+        if seeded == 0 and total > 0:
+            log.critical(
+                "Gap-fill produced no candle data for any of %d pairs.", total
+            )
+        return seeded
 
     async def _gap_fill_symbol(
         self,
