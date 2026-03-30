@@ -246,8 +246,25 @@ class TestBootstrapBootGuards:
         alert_msg = engine.telegram.send_admin_alert.call_args[0][0]
         assert "No trading pairs loaded" in alert_msg
 
+    @pytest.mark.asyncio
+    @patch("src.bootstrap.spot_rate_limiter")
+    @patch("src.bootstrap.futures_rate_limiter")
+    @patch("src.bootstrap.BinanceClient")
+    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
+    async def test_boot_sends_alert_on_zero_seeded(
+        self, _bc, _frl, _srl,
+    ):
+        """boot() must send a Telegram admin alert when seeding yields 0."""
+        engine = self._make_boot_engine(seed_return=0)
+        bootstrap = Bootstrap(engine)
+        with pytest.raises(RuntimeError):
+            await bootstrap.boot()
+        engine.telegram.send_admin_alert.assert_awaited_once()
+        alert_msg = engine.telegram.send_admin_alert.call_args[0][0]
+        assert "seeded for 0 pairs" in alert_msg
 
-class TestSeedAllReturnCount:
+
+class TestHistoricalSeedReturnCount:
     """seed_all() must return the number of pairs successfully seeded."""
 
     @pytest.mark.asyncio
