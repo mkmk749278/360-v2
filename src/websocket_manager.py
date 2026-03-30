@@ -383,9 +383,10 @@ class WebSocketManager:
                 self._set_connection_degraded(conn, True)
                 self._total_drops += 1
                 # Only alert after multiple consecutive failures on the same
-                # connection.  The very first drop (reconnect_attempts == 0)
-                # almost always reconnects immediately and is normal network
-                # jitter — no need to spam the admin channel.
+                # connection.  Transient drops reconnect on the first or
+                # second attempt and are normal network jitter — alerting
+                # starts at the third consecutive failure (reconnect_attempts
+                # is 0-indexed, so >= 2 means the third attempt).
                 if self._admin_alert and conn.reconnect_attempts >= 2:
                     now = time.monotonic()
                     if now - self._last_alert_time > WS_ALERT_COOLDOWN:
