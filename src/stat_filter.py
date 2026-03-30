@@ -3,13 +3,16 @@
 Tracks per-(channel, pair, regime) rolling win rates and applies adaptive
 confidence penalties or hard suppression when quality drops below thresholds.
 
+Uses Wilson score lower bound for conservative threshold comparison —
+requires statistical confidence before penalising.
+
 Thresholds are configurable via environment variables:
 
   STAT_FILTER_WINDOW            Rolling window size (default: 30)
   STAT_FILTER_MIN_SAMPLES       Minimum outcomes before filtering (default: 15)
   STAT_FILTER_HARD_SUPPRESS_WR  Hard suppress threshold as % (default: 25)
   STAT_FILTER_SOFT_PENALTY_WR   Soft penalty threshold as % (default: 45)
-  STAT_FILTER_SOFT_PENALTY_PTS  Confidence points deducted (default: 5.0)
+  STAT_FILTER_SOFT_PENALTY_PTS  Confidence points deducted (default: 10.0)
 """
 from __future__ import annotations
 
@@ -19,6 +22,8 @@ from collections import defaultdict, deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Deque, Dict, List, Optional, Tuple
+
+from src.confidence_calibration import wilson_lower_bound
 
 
 def _env_float(name: str, default: float) -> float:
@@ -155,6 +160,16 @@ class RollingWinRateStore:
                 }
         return out
 
+    def wilson_lower(self, channel: str, pair: str, regime: str, z: float = 1.96) -> Optional[float]:
+        """Return Wilson score lower bound (0.0-1.0) or None if below min_samples."""
+        key = (channel, pair, regime)
+        with self._lock:
+            records = self._records.get(key)
+            if records is None or len(records) < self._min_samples:
+                return None
+            wins = sum(1 for r in records if r.won)
+            return wilson_lower_bound(wins, len(records), z)
+
     def all_keys(self) -> List[Tuple[str, str, str]]:
         """Return all (channel, pair, regime) keys that have recorded outcomes."""
         with self._lock:
@@ -175,14 +190,14 @@ class StatisticalFilter:
     Default thresholds (overridable via env vars):
       Hard suppress: WR < 25%  (STAT_FILTER_HARD_SUPPRESS_WR)
       Soft penalty:  WR < 45%  (STAT_FILTER_SOFT_PENALTY_WR)
-      Penalty pts:   -5.0      (STAT_FILTER_SOFT_PENALTY_PTS)
+      Penalty pts:   -10.0     (STAT_FILTER_SOFT_PENALTY_PTS)
     """
 
     def __init__(self, store: Optional[RollingWinRateStore] = None) -> None:
         self._store = store or RollingWinRateStore()
         self._hard_suppress_wr: float = _env_float("STAT_FILTER_HARD_SUPPRESS_WR", 25.0) / 100.0
         self._soft_penalty_wr: float = _env_float("STAT_FILTER_SOFT_PENALTY_WR", 45.0) / 100.0
-        self._soft_penalty_pts: float = _env_float("STAT_FILTER_SOFT_PENALTY_PTS", 5.0)
+        self._soft_penalty_pts: float = _env_float("STAT_FILTER_SOFT_PENALTY_PTS", 10.0)
 
     @property
     def store(self) -> RollingWinRateStore:
@@ -211,7 +226,7 @@ class StatisticalFilter:
             adjusted_confidence: confidence after penalty (may be unchanged).
             reason: human-readable explanation for logs.
         """
-        win_rate = self._store.win_rate(channel, pair, regime)
+        win_rate = self._store.wilson_lower(channel, pair, regime)
 
         if win_rate is None:
             return True, current_confidence, "no_history"
@@ -219,13 +234,13 @@ class StatisticalFilter:
         wr_pct = f"{win_rate:.1%}"
 
         if win_rate < self._hard_suppress_wr:
-            return False, 0.0, f"hard_suppress:wr={wr_pct}"
+            return False, 0.0, f"hard_suppress:wilson={wr_pct}"
 
         if win_rate < self._soft_penalty_wr:
             adj = max(0.0, current_confidence - self._soft_penalty_pts)
-            return True, adj, f"soft_penalty:wr={wr_pct}"
+            return True, adj, f"soft_penalty:wilson={wr_pct}"
 
-        return True, current_confidence, f"ok:wr={wr_pct}"
+        return True, current_confidence, f"ok:wilson={wr_pct}"
 
     def record(self, outcome: SignalOutcome) -> None:
         """Forward a resolved signal outcome to the underlying win-rate store."""

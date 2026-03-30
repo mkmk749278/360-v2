@@ -212,6 +212,133 @@ def compute_mtf_confluence(
 
 
 # ---------------------------------------------------------------------------
+# MTF confluence with staleness decay
+# ---------------------------------------------------------------------------
+
+# Timeframe duration in hours for staleness decay
+_TF_DURATION_HOURS: dict[str, float] = {
+    "1m": 1 / 60,
+    "5m": 5 / 60,
+    "15m": 0.25,
+    "1h": 1.0,
+    "4h": 4.0,
+}
+
+
+def compute_mtf_confluence_with_decay(
+    signal_direction: str,
+    timeframes: Dict[str, Dict[str, float]],
+    min_score: float = MTF_MIN_SCORE,
+    tf_weight_overrides: Optional[Dict[str, float]] = None,
+    candle_ages_hours: Optional[Dict[str, float]] = None,
+) -> MTFResult:
+    """Evaluate MTF confluence with optional staleness decay on candle age.
+
+    Behaves identically to :func:`compute_mtf_confluence` when
+    *candle_ages_hours* is ``None``.  When provided, each timeframe's
+    weight is reduced based on how stale the candle is relative to its
+    duration (clamped to a minimum of 30 % weight).
+
+    Parameters
+    ----------
+    signal_direction:
+        ``"LONG"`` or ``"SHORT"``.
+    timeframes:
+        Same format as :func:`compute_mtf_confluence`.
+    min_score:
+        Minimum passing score.
+    tf_weight_overrides:
+        Optional per-timeframe weight overrides.
+    candle_ages_hours:
+        Maps timeframe label → hours since candle close.  Fresh candles
+        (age ≈ 0) get full weight; a 4 h candle 3 h old decays to 62.5 %.
+    """
+    if candle_ages_hours is None:
+        return compute_mtf_confluence(
+            signal_direction, timeframes, min_score, tf_weight_overrides,
+        )
+
+    direction = signal_direction.upper()
+    states: List[TimeframeState] = []
+    aligned: float = 0.0
+    weighted_total: float = 0.0
+
+    for tf_label, data in timeframes.items():
+        try:
+            ema_fast = float(data["ema_fast"])
+            ema_slow = float(data["ema_slow"])
+            close = float(data["close"])
+        except (KeyError, TypeError, ValueError) as exc:
+            log.debug("MTF-decay: skipping timeframe {} – bad data: {}", tf_label, exc)
+            continue
+
+        trend = _classify_trend(ema_fast, ema_slow, close)
+        states.append(TimeframeState(
+            timeframe=tf_label,
+            trend=trend,
+            ema_fast=ema_fast,
+            ema_slow=ema_slow,
+            close=close,
+        ))
+
+        base_weight = (
+            tf_weight_overrides[tf_label]
+            if tf_weight_overrides and tf_label in tf_weight_overrides
+            else _TF_WEIGHTS.get(tf_label, 1.0)
+        )
+
+        # Apply staleness decay
+        tf_duration = _TF_DURATION_HOURS.get(tf_label, 1.0)
+        age = candle_ages_hours.get(tf_label, 0.0)
+        decay = max(0.3, 1.0 - age / (tf_duration * 2.0))
+        effective_weight = base_weight * decay
+
+        weighted_total += effective_weight
+
+        wanted = "BULLISH" if direction == "LONG" else "BEARISH"
+        if trend == wanted:
+            aligned += effective_weight
+        elif trend == "NEUTRAL":
+            aligned += effective_weight * 0.5
+
+    total = len(states)
+    if total == 0:
+        return MTFResult(
+            signal_direction=direction,
+            score=0.0,
+            aligned_count=0,
+            total_count=0,
+            is_aligned=False,
+            is_strong=False,
+            timeframe_states=states,
+            reason="no valid timeframe data provided",
+        )
+
+    score = aligned / weighted_total if weighted_total > 0 else 0.0
+    is_aligned = score >= min_score
+    is_strong = score >= MTF_STRONG_SCORE
+
+    misaligned = [s.timeframe for s in states if s.trend != ("BULLISH" if direction == "LONG" else "BEARISH")]
+    reason = ""
+    if not is_aligned:
+        reason = (
+            f"MTF misaligned: {aligned:.2f}/{total} TFs agree with {direction}; "
+            f"conflicting TFs: {misaligned}"
+        )
+
+    return MTFResult(
+        signal_direction=direction,
+        score=round(score, 4),
+        aligned_count=aligned,
+        total_count=total,
+        is_aligned=is_aligned,
+        is_strong=is_strong,
+        timeframe_states=states,
+        reason=reason,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Channel-specific gate functions (PR_06)
 # ---------------------------------------------------------------------------
 
