@@ -46,7 +46,7 @@ class ConfluenceDetector:
 
     def record_signal(self, signal: Any) -> None:
         """Record a signal from a channel evaluation."""
-        key = (signal.symbol, signal.direction.value)
+        key = (signal.symbol, signal.direction.value if hasattr(signal.direction, "value") else str(signal.direction))
         pending = _PendingSignal(
             channel=signal.channel,
             confidence=signal.confidence,

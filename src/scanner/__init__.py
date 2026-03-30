@@ -2270,8 +2270,6 @@ class Scanner:
         # Check for multi-strategy confluence: group by direction
         _emitted_directions: set = set()
         if len(_pending_signals) >= 2:
-            from collections import defaultdict
-
             _by_direction: dict = defaultdict(list)
             for sig, ch_name in _pending_signals:
                 _dir = sig.direction.value if hasattr(sig.direction, "value") else str(sig.direction)
