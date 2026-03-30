@@ -191,22 +191,22 @@ class AIConfidenceScorer:
         """
         adj = 0.0
 
-        # Win-rate adjustment (-3 to +3)
+        # Win-rate adjustment (-8 to +8)
         if pair_win_rate > 0.65:
-            adj += min((pair_win_rate - 0.65) * 20.0, 3.0)
+            adj += min((pair_win_rate - 0.65) * 40.0, 8.0)
         elif pair_win_rate < 0.35:
-            adj -= min((0.35 - pair_win_rate) * 20.0, 3.0)
+            adj -= min((0.35 - pair_win_rate) * 40.0, 8.0)
 
         # Volatility penalty: extreme volatility reduces confidence
         if volatility_percentile > 0.9:
-            adj -= (volatility_percentile - 0.9) * 30.0  # up to -3.0 at 100th pctile
+            adj -= (volatility_percentile - 0.9) * 50.0  # up to -5.0 at 100th pctile
 
         # Consistency bonus: if recent scores are consistently high, small boost
         avg = self.get_pair_avg_confidence(symbol)
         if avg > 70.0:
             adj += 1.0
 
-        return max(-5.0, min(5.0, adj))
+        return max(-10.0, min(10.0, adj))
 
     def _compute_dynamic_threshold(
         self,
