@@ -266,6 +266,7 @@ class Bootstrap:
         spot_streams: List[str] = []
         futures_kline_streams: List[str] = []
         futures_liq_streams: List[str] = []
+        tier1_spot: List[str] = []
 
         # When TOP50_FUTURES_ONLY, skip spot WebSocket entirely
         if not TOP50_FUTURES_ONLY:
