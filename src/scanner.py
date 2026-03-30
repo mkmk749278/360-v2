@@ -527,7 +527,7 @@ class Scanner:
                 self._consecutive_ws_degraded_cycles += 1
                 # After WS_DEGRADED_MAX_CYCLES, stop blocking and fall through
                 # to REST-only scanning so the engine is not stuck forever.
-                if self._consecutive_ws_degraded_cycles <= WS_DEGRADED_MAX_CYCLES:
+                if self._consecutive_ws_degraded_cycles < WS_DEGRADED_MAX_CYCLES:
                     log.warning(
                         "WS health degraded (spot={}, futures={}) — skipping full scan "
                         "(degraded cycle #{})",
@@ -554,7 +554,7 @@ class Scanner:
                     await asyncio.sleep(5)
                     continue
                 else:
-                    if self._consecutive_ws_degraded_cycles == WS_DEGRADED_MAX_CYCLES + 1:
+                    if self._consecutive_ws_degraded_cycles == WS_DEGRADED_MAX_CYCLES:
                         log.warning(
                             "WS degraded for {} cycles — falling back to REST-only scanning",
                             self._consecutive_ws_degraded_cycles,
