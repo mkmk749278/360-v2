@@ -19,7 +19,6 @@ import numpy as np
 import uuid
 
 from config import (
-    CHANNEL_GEM,
     MAX_CORRELATED_SCALP_SIGNALS,
     MTF_HARD_BLOCK,
     QUIET_SCALP_MIN_CONFIDENCE,
@@ -660,19 +659,6 @@ class Scanner:
                     self._last_tier3_scan_time = _now
                     await self._lightweight_tier3_scan()
 
-                # Gem scanner (interval-gated by GEM_SCAN_INTERVAL_HOURS)
-                if self.gem_scanner is not None and self.gem_scanner.enabled:
-                    _wall_now = time.time()
-                    _gem_interval_s = self.gem_scanner.scan_interval_hours * 3600
-                    if _wall_now - self.gem_scanner._last_scan >= _gem_interval_s:
-                        self.gem_scanner.update_last_scan()
-                        for _sym, _info in sorted_pairs:
-                            try:
-                                await self._scan_gem_symbol(_sym)
-                            except Exception as _exc:
-                                log.warning(
-                                    "Gem scan error for {} ({}): {}", _sym, type(_exc).__name__, _exc
-                                )
 
             except asyncio.CancelledError:
                 break
@@ -2306,94 +2292,3 @@ class Scanner:
                 len(promoted), promoted[:10],
             )
 
-    async def _scan_gem_symbol(self, symbol: str) -> None:
-        """Evaluate a single symbol through the gem scanner and enqueue if qualifying.
-
-        Loads daily (1d) and weekly (1w) candles from the data store, invokes
-        :meth:`src.gem_scanner.GemScanner.scan`, and converts a qualifying
-        :class:`src.gem_scanner.GemSignal` into a :class:`src.channels.base.Signal`
-        for the ``360_GEM`` channel before enqueuing it.
-        """
-        if self.gem_scanner is None or not self.gem_scanner.enabled:
-            return
-
-        # Adjust gem scanner thresholds for the current market regime (feature 7)
-        try:
-            self.gem_scanner.adjust_for_regime(self._last_market_regime)
-        except Exception as _rexc:
-            log.debug("Regime adjustment for gem scanner failed: {}", _rexc)
-
-        daily_raw = self.data_store.get_candles(symbol, "1d")
-        if not daily_raw:
-            return
-        daily_candles = _normalize_candle_dict(daily_raw)
-
-        weekly_raw = self.data_store.get_candles(symbol, "1w")
-        weekly_candles = _normalize_candle_dict(weekly_raw) if weekly_raw else None
-
-        # Fetch on-chain enrichment data (feature 2) — fail-open on errors
-        onchain_data: Optional[dict] = None
-        if self.onchain_client is not None:
-            try:
-                oc_result = await self.onchain_client.get_exchange_flow(symbol)
-                # Interpret a high (>7.5) exchange-flow score as whale accumulation
-                onchain_data = {
-                    "whale_accumulation": oc_result.score >= 7.5,
-                    "social_volume_ratio": 1.0,  # placeholder; extend with real social API
-                    "unlock_days": None,          # placeholder; extend with token unlock API
-                }
-            except Exception as _oexc:
-                log.debug("On-chain enrichment fetch failed for {}: {}", symbol, _oexc)
-
-        gem_sig = self.gem_scanner.scan(symbol, daily_candles, weekly_candles, onchain_data)
-        if gem_sig is None:
-            return
-
-        if gem_sig.confidence < CHANNEL_GEM.min_confidence:
-            log.debug(
-                "Gem signal for {} below min confidence ({:.1f} < {})",
-                symbol, gem_sig.confidence, CHANNEL_GEM.min_confidence,
-            )
-            return
-
-        close = gem_sig.current_price
-        # CHANNEL_GEM.sl_pct_range stores values as fractions (e.g. 0.10 = 10%),
-        # used directly as a multiplier — NOT divided by 100 — to produce the
-        # SL distance for deeply discounted altcoins (typically 10–30% from entry).
-        sl_dist = close * CHANNEL_GEM.sl_pct_range[0]
-        sl = close - sl_dist
-        tp1 = close + sl_dist * CHANNEL_GEM.tp_ratios[0]
-        tp2 = close + sl_dist * CHANNEL_GEM.tp_ratios[1]
-        tp3 = close + sl_dist * CHANNEL_GEM.tp_ratios[2]
-
-        if sl >= close:
-            return
-
-        sig = _Signal(
-            channel=CHANNEL_GEM.name,
-            symbol=symbol,
-            direction=Direction.LONG,
-            entry=close,
-            stop_loss=round(sl, 8),
-            tp1=round(tp1, 8),
-            tp2=round(tp2, 8),
-            tp3=round(tp3, 8),
-            trailing_active=True,
-            trailing_desc=f"{CHANNEL_GEM.trailing_atr_mult}×ATR",
-            confidence=gem_sig.confidence,
-            ai_sentiment_label="",
-            ai_sentiment_summary="",
-            risk_label="Speculative",
-            timestamp=utcnow(),
-            signal_id=f"GEM-{uuid.uuid4().hex[:8].upper()}",
-            current_price=close,
-            original_sl_distance=sl_dist,
-            valid_for_minutes=SIGNAL_VALID_FOR_MINUTES.get(CHANNEL_GEM.name, 1440),
-        )
-
-        if await self._enqueue_signal(sig):
-            self.gem_scanner.record_published()
-            log.info(
-                "💎 GEM signal enqueued: {} @ {:.8g} (confidence={:.1f})",
-                symbol, close, gem_sig.confidence,
-            )
