@@ -839,6 +839,12 @@ SCAN_LATENCY_REDUCE_MS: float = float(os.getenv("SCAN_LATENCY_REDUCE_MS", "60000
 # an admin alert is sent.
 WS_DEGRADED_CYCLES_ALERT: int = int(os.getenv("WS_DEGRADED_CYCLES_ALERT", "10"))
 
+# Maximum consecutive degraded cycles before the scanner falls back to REST-only
+# scanning instead of blocking indefinitely.  After this many skipped cycles
+# the scanner proceeds with REST-based data fetching for top pairs.
+# Default 60 cycles × 5 s = ~5 minutes.
+WS_DEGRADED_MAX_CYCLES: int = int(os.getenv("WS_DEGRADED_MAX_CYCLES", "60"))
+
 # Health-ratio threshold below which a single WS manager is considered
 # "partially degraded".  When either WS manager drops below this fraction
 # of healthy connections the scanner applies reduced scan limits to avoid

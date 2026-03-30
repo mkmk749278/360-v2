@@ -627,6 +627,8 @@ class WebSocketManager:
 
     @property
     def is_healthy(self) -> bool:
+        if not self._connections:
+            return True
         now = time.monotonic()
         open_connections = [
             c for c in self._connections if c.ws is not None and not c.ws.closed

@@ -37,6 +37,7 @@ from config import (
     TIER3_SCAN_INTERVAL_MINUTES,
     TOP50_FUTURES_ONLY,
     WS_DEGRADED_CYCLES_ALERT,
+    WS_DEGRADED_MAX_CYCLES,
     WS_DEGRADED_MAX_PAIRS,
     WS_PARTIAL_HEALTH_THRESHOLD,
 )
@@ -551,26 +552,49 @@ class Scanner:
             )
             if ws_both_unhealthy:
                 self._consecutive_ws_degraded_cycles += 1
-                log.warning(
-                    "WS health degraded (spot={}, futures={}) — skipping full scan "
-                    "(degraded cycle #{})",
-                    ws_spot_ok, ws_futures_ok, self._consecutive_ws_degraded_cycles,
-                )
-                if self._consecutive_ws_degraded_cycles == WS_DEGRADED_CYCLES_ALERT:
-                    try:
-                        _alert_fn = self.telemetry.get_admin_alert_callback()
-                        if _alert_fn is not None:
-                            await _alert_fn(
-                                f"⚠️ WebSocket unhealthy for "
-                                f"{self._consecutive_ws_degraded_cycles} consecutive scan cycles. "
-                                "Scan is paused until WS recovers. Consider /restart."
-                            )
-                    except Exception:
-                        pass
-                elapsed_ms = (time.monotonic() - t0) * 1000
-                self.telemetry.set_scan_latency(elapsed_ms)
-                await asyncio.sleep(5)
-                continue
+                # After WS_DEGRADED_MAX_CYCLES, stop blocking and fall through
+                # to REST-only scanning so the engine is not stuck forever.
+                if self._consecutive_ws_degraded_cycles <= WS_DEGRADED_MAX_CYCLES:
+                    log.warning(
+                        "WS health degraded (spot={}, futures={}) — skipping full scan "
+                        "(degraded cycle #{})",
+                        ws_spot_ok, ws_futures_ok, self._consecutive_ws_degraded_cycles,
+                    )
+                    if self._consecutive_ws_degraded_cycles == WS_DEGRADED_CYCLES_ALERT:
+                        try:
+                            _alert_fn = self.telemetry.get_admin_alert_callback()
+                            if _alert_fn is not None:
+                                await _alert_fn(
+                                    f"⚠️ WebSocket unhealthy for "
+                                    f"{self._consecutive_ws_degraded_cycles} consecutive scan cycles. "
+                                    "Scan is paused until WS recovers. Consider /restart."
+                                )
+                        except Exception:
+                            pass
+                    elapsed_ms = (time.monotonic() - t0) * 1000
+                    self.telemetry.set_scan_latency(elapsed_ms)
+                    ws_conns = (
+                        (self.ws_spot.stream_count if self.ws_spot else 0)
+                        + (self.ws_futures.stream_count if self.ws_futures else 0)
+                    )
+                    self.telemetry.set_ws_health(False, ws_conns)
+                    await asyncio.sleep(5)
+                    continue
+                else:
+                    if self._consecutive_ws_degraded_cycles == WS_DEGRADED_MAX_CYCLES + 1:
+                        log.warning(
+                            "WS degraded for {} cycles — falling back to REST-only scanning",
+                            self._consecutive_ws_degraded_cycles,
+                        )
+                        try:
+                            _alert_fn = self.telemetry.get_admin_alert_callback()
+                            if _alert_fn is not None:
+                                await _alert_fn(
+                                    f"⚠️ WebSocket degraded for {self._consecutive_ws_degraded_cycles} "
+                                    "cycles — switching to REST-only scanning."
+                                )
+                        except Exception:
+                            pass
             else:
                 if self._consecutive_ws_degraded_cycles > 0:
                     log.info(
