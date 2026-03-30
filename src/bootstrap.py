@@ -14,6 +14,7 @@ from typing import Any, List
 from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_SCALP_CHANNEL_ID,
+    TOP50_FUTURES_ONLY,
 )
 from src.ai_engine import close_shared_session
 from src.binance import BinanceClient
@@ -116,7 +117,10 @@ class Bootstrap:
         BinanceClient.on_api_call = engine.telemetry.record_api_call
 
         # 1. Fetch pairs
-        await engine.pair_mgr.refresh_pairs()
+        if TOP50_FUTURES_ONLY:
+            await engine.pair_mgr.refresh_top50_futures()
+        else:
+            await engine.pair_mgr.refresh_pairs()
 
         # 2. Smart seed — temporarily raise the rate-limit budget since there
         #    is no competing scan traffic during boot.  Spot and Futures use
@@ -263,15 +267,16 @@ class Bootstrap:
         futures_kline_streams: List[str] = []
         futures_liq_streams: List[str] = []
 
-        # Only Tier 1 spot symbols get WebSocket subscriptions
-        tier1_spot = engine.pair_mgr.tier1_spot_symbols
-        for sym in tier1_spot:
-            s = sym.lower()
-            spot_streams.append(f"{s}@kline_1m")
-            spot_streams.append(f"{s}@kline_5m")
-            spot_streams.append(f"{s}@kline_1h")
-            spot_streams.append(f"{s}@kline_4h")
-            spot_streams.append(f"{s}@trade")
+        # When TOP50_FUTURES_ONLY, skip spot WebSocket entirely
+        if not TOP50_FUTURES_ONLY:
+            tier1_spot = engine.pair_mgr.tier1_spot_symbols
+            for sym in tier1_spot:
+                s = sym.lower()
+                spot_streams.append(f"{s}@kline_1m")
+                spot_streams.append(f"{s}@kline_5m")
+                spot_streams.append(f"{s}@kline_1h")
+                spot_streams.append(f"{s}@kline_4h")
+                spot_streams.append(f"{s}@trade")
 
         # Only Tier 1 futures symbols get WebSocket subscriptions
         tier1_futures = engine.pair_mgr.tier1_futures_symbols

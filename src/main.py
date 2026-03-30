@@ -22,6 +22,7 @@ from typing import Dict, Deque, List, Optional, Set
 
 from config import (
     PAIR_FETCH_INTERVAL_HOURS,
+    TOP50_FUTURES_ONLY,
 )
 from src.ai_engine import get_ai_insight
 from src.bootstrap import Bootstrap
@@ -516,7 +517,11 @@ class CryptoSignalEngine:
             await asyncio.sleep(PAIR_FETCH_INTERVAL_HOURS * 3600)
             try:
                 old_spot, old_futures = self._current_ws_symbol_sets()
-                new_symbols, removed_symbols = await self.pair_mgr.refresh_pairs()
+                if TOP50_FUTURES_ONLY:
+                    await self.pair_mgr.refresh_top50_futures(force=True)
+                    new_symbols, removed_symbols = [], []
+                else:
+                    new_symbols, removed_symbols = await self.pair_mgr.refresh_pairs()
 
                 # Handle removed (delisted / dropped) pairs
                 if removed_symbols:

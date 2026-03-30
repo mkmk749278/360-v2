@@ -37,6 +37,7 @@ from config import (
     TIER3_VOLUME_SURGE_MULTIPLIER,
     TOP_PAIRS_COUNT,
     TOP50_FUTURES_COUNT,
+    TOP50_FUTURES_ONLY,
     TOP50_UPDATE_INTERVAL_SECONDS,
 )
 from src.binance import BinanceClient
@@ -375,6 +376,11 @@ class PairManager:
             exchange response (requires ``PAIR_PRUNE_ENABLED=true``).
         """
         log.info("Refreshing pair universe (market=%s) …", market)
+
+        # When TOP50_FUTURES_ONLY, only fetch and register top-50 futures
+        if TOP50_FUTURES_ONLY:
+            await self.refresh_top50_futures()
+            return ([], [])
 
         if market == "spot":
             spot_raw = await self.fetch_all_spot_pairs()

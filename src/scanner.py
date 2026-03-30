@@ -35,6 +35,7 @@ from config import (
     TIER2_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
+    TOP50_FUTURES_ONLY,
     WS_DEGRADED_CYCLES_ALERT,
     WS_DEGRADED_MAX_PAIRS,
     WS_PARTIAL_HEALTH_THRESHOLD,
@@ -590,14 +591,19 @@ class Scanner:
                         rate_limiter.used, rate_limiter.budget,
                         futures_rate_limiter.used, futures_rate_limiter.budget,
                     )
-                pairs_this_cycle = [
-                    (sym, info) for sym, info in sorted_pairs
-                    if info.tier == PairTier.TIER1
-                    or (info.tier == PairTier.TIER2 and scan_tier2
-                        and not skip_tier2_for_latency and not _rl_tier2_paused)
-                    or (info.tier == PairTier.TIER3 and scan_tier3
-                        and not skip_tier2_for_latency and not _rl_tier2_paused)
-                ]
+                # When TOP50_FUTURES_ONLY, all registered pairs are top-50
+                # futures and should be scanned every cycle — no tiering.
+                if TOP50_FUTURES_ONLY:
+                    pairs_this_cycle = list(sorted_pairs)
+                else:
+                    pairs_this_cycle = [
+                        (sym, info) for sym, info in sorted_pairs
+                        if info.tier == PairTier.TIER1
+                        or (info.tier == PairTier.TIER2 and scan_tier2
+                            and not skip_tier2_for_latency and not _rl_tier2_paused)
+                        or (info.tier == PairTier.TIER3 and scan_tier3
+                            and not skip_tier2_for_latency and not _rl_tier2_paused)
+                    ]
 
                 # Apply cheap in-memory pre-filters to reduce the number of
                 # symbols that reach expensive API calls (order book, klines).
