@@ -110,6 +110,7 @@ class TestRefreshPairsTierClassification:
     async def test_first_pairs_are_tier1(self, monkeypatch):
         """The top TIER1_PAIR_COUNT symbols get assigned TIER1."""
         import src.pair_manager as pm_mod
+        monkeypatch.setattr(pm_mod, "TOP50_FUTURES_ONLY", False)
         monkeypatch.setattr(pm_mod, "TIER1_PAIR_COUNT", 2)
         monkeypatch.setattr(pm_mod, "TIER2_PAIR_COUNT", 4)
         monkeypatch.setattr(pm_mod, "PAIR_PRUNE_ENABLED", False)
@@ -140,8 +141,10 @@ class TestRefreshPairsTierClassification:
         assert pm.pairs["EEUSDT"].tier == pm_mod.PairTier.TIER3
 
     @pytest.mark.asyncio
-    async def test_returns_tuple(self):
+    async def test_returns_tuple(self, monkeypatch):
         """refresh_pairs() must return (new_symbols, removed_symbols) tuple."""
+        import src.pair_manager as pm_mod
+        monkeypatch.setattr(pm_mod, "TOP50_FUTURES_ONLY", False)
         pm = PairManager.__new__(PairManager)
         pm.pairs = {}
         pm._prev_volumes = {}
@@ -158,8 +161,10 @@ class TestRefreshPairsTierClassification:
         assert isinstance(removed_syms, list)
 
     @pytest.mark.asyncio
-    async def test_new_symbols_added(self):
+    async def test_new_symbols_added(self, monkeypatch):
         """Symbols not in self.pairs are returned as new_symbols."""
+        import src.pair_manager as pm_mod
+        monkeypatch.setattr(pm_mod, "TOP50_FUTURES_ONLY", False)
         ticker = _make_ticker_data([("BTCUSDT", 5_000_000)])
         pm = PairManager.__new__(PairManager)
         pm.pairs = {}
@@ -173,8 +178,10 @@ class TestRefreshPairsTierClassification:
         assert "BTCUSDT" in new_syms
 
     @pytest.mark.asyncio
-    async def test_existing_symbols_not_in_new_symbols(self):
+    async def test_existing_symbols_not_in_new_symbols(self, monkeypatch):
         """Already-tracked symbols are NOT listed as new_symbols."""
+        import src.pair_manager as pm_mod
+        monkeypatch.setattr(pm_mod, "TOP50_FUTURES_ONLY", False)
         ticker = _make_ticker_data([("BTCUSDT", 5_000_000)])
         pm = PairManager.__new__(PairManager)
         pm.pairs = {"BTCUSDT": PairInfo("BTCUSDT", "spot", volume_24h_usd=4_000_000)}
@@ -198,6 +205,7 @@ class TestPairPruning:
     async def test_stale_pair_removed_when_pruning_enabled(self, monkeypatch):
         """Pairs absent from the exchange response are pruned when PAIR_PRUNE_ENABLED."""
         import src.pair_manager as pm_mod
+        monkeypatch.setattr(pm_mod, "TOP50_FUTURES_ONLY", False)
         monkeypatch.setattr(pm_mod, "PAIR_PRUNE_ENABLED", True)
         monkeypatch.setattr(pm_mod, "TIER1_PAIR_COUNT", 10)
         monkeypatch.setattr(pm_mod, "TIER2_PAIR_COUNT", 20)
@@ -224,6 +232,7 @@ class TestPairPruning:
     async def test_no_pruning_when_disabled(self, monkeypatch):
         """Stale pairs are preserved when PAIR_PRUNE_ENABLED=False."""
         import src.pair_manager as pm_mod
+        monkeypatch.setattr(pm_mod, "TOP50_FUTURES_ONLY", False)
         monkeypatch.setattr(pm_mod, "PAIR_PRUNE_ENABLED", False)
         monkeypatch.setattr(pm_mod, "TIER1_PAIR_COUNT", 10)
         monkeypatch.setattr(pm_mod, "TIER2_PAIR_COUNT", 20)

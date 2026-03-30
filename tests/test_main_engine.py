@@ -86,7 +86,7 @@ class TestCryptoSignalEngineInit:
 
     def test_engine_channels_count(self):
         engine = self._make_engine()
-        assert len(engine._channels) == 7  # SCALP, SWING, SPOT + 4 new scalp triggers
+        assert len(engine._channels) == 5  # 5 SCALP channel variants
 
     def test_signal_history_starts_empty(self):
         engine = self._make_engine()
@@ -141,7 +141,7 @@ class TestBootstrapInterface:
             _tasks=[task],
             router=SimpleNamespace(stop=AsyncMock()),
             monitor=SimpleNamespace(stop=AsyncMock()),
-            _lifecycle_monitor=SimpleNamespace(stop=AsyncMock()),
+
             telemetry=SimpleNamespace(stop=AsyncMock()),
             _ws_spot=None,
             _ws_futures=None,
