@@ -921,8 +921,8 @@ class TestPingPongHeartbeatMonitor:
         assert conn.ping_latency_ms == 0.0
 
     @pytest.mark.asyncio
-    async def test_watchdog_closes_connection_on_ping_timeout(self):
-        """Watchdog must force-close a shard when pong is not received within WS_PING_TIMEOUT_MS."""
+    async def test_watchdog_does_not_close_on_ping_timeout(self):
+        """Watchdog must NOT force-close a shard for ping timeout — aiohttp heartbeat handles keepalive."""
         from config import WS_PING_TIMEOUT_MS
 
         ws = WebSocketManager(lambda data: None, market="spot")
@@ -960,11 +960,11 @@ class TestPingPongHeartbeatMonitor:
             except asyncio.CancelledError:
                 pass
 
-        assert closed, "Watchdog must close the connection when ping times out"
+        assert not closed, "Watchdog must NOT close the connection for ping timeout (aiohttp handles keepalive)"
 
     @pytest.mark.asyncio
-    async def test_watchdog_closes_connection_on_high_latency(self):
-        """Watchdog must force-close a shard when measured RTT exceeds WS_PING_TIMEOUT_MS."""
+    async def test_watchdog_does_not_close_on_high_latency(self):
+        """Watchdog must NOT force-close a shard for high latency — only staleness triggers close."""
         from config import WS_PING_TIMEOUT_MS
 
         ws = WebSocketManager(lambda data: None, market="spot")
@@ -1000,7 +1000,7 @@ class TestPingPongHeartbeatMonitor:
             except asyncio.CancelledError:
                 pass
 
-        assert closed, "Watchdog must close the connection when RTT exceeds threshold"
+        assert not closed, "Watchdog must NOT close the connection for high latency (aiohttp handles keepalive)"
 
     @pytest.mark.asyncio
     async def test_watchdog_sends_ping_when_connection_healthy(self):

@@ -382,12 +382,14 @@ class WebSocketManager:
             if self._running:
                 self._set_connection_degraded(conn, True)
                 self._total_drops += 1
-                if self._admin_alert:
+                # Only alert after multiple consecutive failures on the same
+                # connection.  Transient drops reconnect on the first or
+                # second attempt and are normal network jitter — alerting
+                # starts at the third consecutive failure (reconnect_attempts
+                # is 0-indexed, so >= 2 means the third attempt).
+                if self._admin_alert and conn.reconnect_attempts >= 2:
                     now = time.monotonic()
                     if now - self._last_alert_time > WS_ALERT_COOLDOWN:
-                        # Update timestamp *before* creating the task so that
-                        # other connections resuming in the same event-loop tick
-                        # see the updated value and skip their own alert.
                         self._last_alert_time = now
                         asyncio.create_task(
                             self._admin_alert(
@@ -478,20 +480,26 @@ class WebSocketManager:
     # ------------------------------------------------------------------
 
     async def _health_watchdog(self) -> None:
-        """Periodically force-close stale or lagging connections so _run_connection reconnects.
+        """Periodically force-close truly stale connections so _run_connection reconnects.
 
-        Three checks run on every shard at each tick:
+        Only one actionable check is performed:
 
-        1. **Staleness** - no data at all for ``heartbeat_interval x staleness_multiplier``
-           seconds -> dead connection, force-close.
-        2. **Ping timeout** - a manual ping was sent on the previous tick and no PONG has
-           come back within ``WS_PING_TIMEOUT_MS`` ms -> connection is lagging, force-close.
-        3. **High latency** - the most recently completed ping/pong RTT exceeds
-           ``WS_PING_TIMEOUT_MS`` ms -> connection is degraded, force-close.
+        1. **Staleness** – no data (TEXT, PING, or PONG) for
+           ``heartbeat_interval × staleness_multiplier`` seconds → connection is
+           dead, force-close so ``_run_connection`` can reconnect.
 
-        After the checks a fresh manual ping is sent so the next tick can measure
-        latency.  aiohttp's built-in ``heartbeat=`` keepalive continues to run
-        alongside; these manual pings are additional probes for latency measurement.
+        aiohttp's built-in ``heartbeat=`` keepalive already sends PING frames
+        and closes the connection when the remote end stops responding, so
+        additional manual ping-timeout force-closes are unnecessary and were
+        causing a repeating 10-minute drop/alert cycle (manual pings sent every
+        ``heartbeat_interval`` seconds, but the 5 s ``WS_PING_TIMEOUT_MS``
+        threshold was always exceeded by the next tick, killing healthy
+        connections).
+
+        A manual ping is still sent for **latency measurement** purposes.  If a
+        PONG comes back, ``_listen`` records the RTT in ``conn.ping_latency_ms``
+        which is available to callers.  No connection is force-closed based on
+        the measured latency.
         """
         try:
             while self._running:
@@ -501,9 +509,7 @@ class WebSocketManager:
                     if not (conn.ws and not conn.ws.closed):
                         continue
 
-                    # 1. Staleness check (unchanged from original behaviour)
-                    # Use max(1.0, ...) to guarantee a minimum 1-second threshold
-                    # regardless of the configured heartbeat interval.
+                    # Staleness check: no data at all for an extended period
                     stale_threshold = max(1.0, self._heartbeat_interval * self._staleness_multiplier)
                     if (now - conn.last_pong) >= stale_threshold:
                         log.warning(
@@ -514,33 +520,18 @@ class WebSocketManager:
                         await conn.ws.close()
                         continue
 
-                    # 2. Ping timeout: pong not received within WS_PING_TIMEOUT_MS
+                    # Log (but do NOT force-close) if a previous manual ping
+                    # never received a PONG.  This is informational only;
+                    # aiohttp's built-in heartbeat handles actual keepalive.
                     if conn.last_ping_time > 0:
                         overdue_ms = (now - conn.last_ping_time) * 1000
                         if overdue_ms > WS_PING_TIMEOUT_MS:
-                            log.warning(
-                                "Watchdog: ping timeout ({:.0f}ms > {}ms) — "
-                                "force-closing shard to trigger reconnect",
+                            log.debug(
+                                "Watchdog: manual ping PONG overdue ({:.0f}ms) — "
+                                "informational only, aiohttp heartbeat handles keepalive",
                                 overdue_ms,
-                                WS_PING_TIMEOUT_MS,
                             )
                             conn.last_ping_time = 0.0
-                            conn.ping_latency_ms = 0.0
-                            await conn.ws.close()
-                            continue
-
-                    # 3. High latency: previous ping RTT exceeded threshold
-                    if conn.ping_latency_ms > WS_PING_TIMEOUT_MS:
-                        log.warning(
-                            "Watchdog: high ping latency ({:.0f}ms > {}ms) — "
-                            "force-closing shard to trigger reconnect",
-                            conn.ping_latency_ms,
-                            WS_PING_TIMEOUT_MS,
-                        )
-                        conn.ping_latency_ms = 0.0
-                        conn.last_ping_time = 0.0
-                        await conn.ws.close()
-                        continue
 
                     # Send a fresh manual ping to probe latency on the next tick
                     try:
