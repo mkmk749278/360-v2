@@ -183,6 +183,14 @@ class BinanceClient:
 
             try:
                 async with self._inflight_sem:
+                    # Re-check the depth circuit breaker after potentially
+                    # waiting on the semaphore.  Without this, requests that
+                    # queued behind the semaphore while the breaker was still
+                    # closed proceed to make HTTP calls that will time out
+                    # (3 s each), adding cumulative latency (observed as
+                    # 26 s+ scan cycles with 50 symbols).
+                    if is_depth and time.monotonic() < self._depth_circuit_open_until:
+                        return None
                     async with session.get(
                         url, params=params, timeout=aiohttp.ClientTimeout(total=timeout)
                     ) as resp:

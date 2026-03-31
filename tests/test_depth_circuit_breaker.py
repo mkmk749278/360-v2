@@ -90,6 +90,48 @@ class TestDepthCircuitBreakerConcurrency:
         assert client._depth_consecutive_timeouts <= DEPTH_CIRCUIT_BREAKER_THRESHOLD + 1
         assert client._depth_circuit_open_until > time.monotonic()
 
+    async def test_semaphore_wait_rechecks_breaker(self, client):
+        """Requests waiting on _inflight_sem must re-check the breaker after
+        acquiring the semaphore.  Without this, requests that queued behind
+        the semaphore while the breaker was still closed proceed to make
+        HTTP calls that time out (3 s each), inflating scan latency."""
+        http_calls = 0
+        original_get = _FakeSession.get
+
+        def counting_get(self_sess, *args, **kwargs):
+            nonlocal http_calls
+            http_calls += 1
+            return original_get(self_sess, *args, **kwargs)
+
+        # Shrink the semaphore to 1 so we can control ordering.
+        client._inflight_sem = asyncio.Semaphore(1)
+
+        async def _first_request():
+            """Acquire the sem, trip the breaker, then release."""
+            async with client._inflight_sem:
+                # Simulate: while holding the sem, the breaker is tripped
+                # (e.g. by accumulated timeouts from earlier requests).
+                client._depth_circuit_open_until = time.monotonic() + 60
+
+        async def _second_request():
+            """This request should detect the breaker after acquiring sem."""
+            # Let the first request grab the sem first.
+            await asyncio.sleep(0)
+            return await client._get(
+                "/fapi/v1/depth", params={"symbol": "BTCUSDT", "limit": 20}
+            )
+
+        with mock.patch.object(_FakeSession, "get", counting_get):
+            with mock.patch("asyncio.sleep", return_value=asyncio.sleep(0)):
+                result = await asyncio.gather(
+                    _first_request(), _second_request()
+                )
+
+        # The second request must have returned None without making any
+        # HTTP call — the breaker was open when it finally acquired the sem.
+        assert result[1] is None
+        assert http_calls == 0
+
     async def test_retry_loop_checks_breaker_each_attempt(self, client):
         """A single request that enters the retry loop must re-check the
         breaker before each attempt, not just at _get() entry."""
