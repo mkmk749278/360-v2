@@ -33,7 +33,7 @@ class TestCircuitBreakerTripOnConsecutiveSL:
         assert cb.is_tripped() is True
 
     def test_win_resets_consecutive_counter(self):
-        cb = CircuitBreaker(max_consecutive_sl=3)
+        cb = CircuitBreaker(max_consecutive_sl=3, max_hourly_sl=100)
         cb.record_outcome("sig1", hit_sl=True, pnl_pct=-1.0)
         cb.record_outcome("sig2", hit_sl=True, pnl_pct=-1.0)
         cb.record_outcome("sig3", hit_sl=False, pnl_pct=1.5)  # WIN resets counter

@@ -484,7 +484,7 @@ CHANNEL_SCALP = ChannelConfig(
     adx_min=15,
     adx_max=100,
     spread_max=0.02,
-    min_confidence=68,
+    min_confidence=72,
     min_volume=5_000_000.0,
     dca_enabled=True,
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
@@ -498,13 +498,13 @@ CHANNEL_SCALP_FVG = ChannelConfig(
     name="360_SCALP_FVG",
     emoji="⚡",
     timeframes=["5m", "15m"],
-    sl_pct_range=(0.05, 0.15),
+    sl_pct_range=(0.10, 0.20),
     tp_ratios=[1.5, 2.5, 3.0],
     trailing_atr_mult=1.5,
     adx_min=15,
     adx_max=100,
     spread_max=0.02,
-    min_confidence=68,
+    min_confidence=72,
     min_volume=5_000_000.0,
     dca_enabled=True,
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
@@ -520,7 +520,7 @@ CHANNEL_SCALP_CVD = ChannelConfig(
     adx_min=15,
     adx_max=100,
     spread_max=0.02,
-    min_confidence=68,
+    min_confidence=72,
     min_volume=5_000_000.0,
     dca_enabled=True,
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
@@ -536,7 +536,7 @@ CHANNEL_SCALP_VWAP = ChannelConfig(
     adx_min=0,
     adx_max=25,
     spread_max=0.02,
-    min_confidence=68,
+    min_confidence=72,
     min_volume=5_000_000.0,
     dca_enabled=True,
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
@@ -552,7 +552,7 @@ CHANNEL_SCALP_OBI = ChannelConfig(
     adx_min=0,
     adx_max=100,
     spread_max=0.02,
-    min_confidence=68,
+    min_confidence=72,
     min_volume=5_000_000.0,
     dca_enabled=True,
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
@@ -671,13 +671,13 @@ CIRCUIT_BREAKER_MAX_CONSECUTIVE_SL: int = int(
     os.getenv("CIRCUIT_BREAKER_MAX_CONSECUTIVE_SL", "3")
 )
 CIRCUIT_BREAKER_MAX_HOURLY_SL: int = int(
-    os.getenv("CIRCUIT_BREAKER_MAX_HOURLY_SL", "5")
+    os.getenv("CIRCUIT_BREAKER_MAX_HOURLY_SL", "3")
 )
 CIRCUIT_BREAKER_MAX_DAILY_DRAWDOWN_PCT: float = float(
-    os.getenv("CIRCUIT_BREAKER_MAX_DAILY_DRAWDOWN_PCT", "10.0")
+    os.getenv("CIRCUIT_BREAKER_MAX_DAILY_DRAWDOWN_PCT", "5.0")
 )
 CIRCUIT_BREAKER_COOLDOWN_SECONDS: int = int(
-    os.getenv("CIRCUIT_BREAKER_COOLDOWN_SECONDS", "900")
+    os.getenv("CIRCUIT_BREAKER_COOLDOWN_SECONDS", "1800")
 )
 
 # Per-symbol consecutive SL tracking: after this many consecutive SL hits on
@@ -739,7 +739,7 @@ MIN_SIGNAL_LIFESPAN_SECONDS: Dict[str, int] = {
 #: Acts as a hard floor — only top-tier signals proceed when the market is
 #: compressed.  Configurable via the QUIET_SCALP_MIN_CONFIDENCE env var.
 QUIET_SCALP_MIN_CONFIDENCE: float = float(
-    os.getenv("QUIET_SCALP_MIN_CONFIDENCE", "68.0")
+    os.getenv("QUIET_SCALP_MIN_CONFIDENCE", "72.0")
 )
 
 #: Volume multiplier required for scalp entries in QUIET regime.
