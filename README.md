@@ -2,7 +2,7 @@
 
 A high-performance, fully asynchronous Python engine that scans the **top 50 USDT-M futures pairs** on Binance in real time, detects Smart Money Concepts (SMC) setups, calculates dynamic confidence scores (0–100), and routes signals to a **single Active Trading** Telegram channel.
 
-> **Version:** 2.0.0 &nbsp;|&nbsp; **Python:** ≥ 3.11 &nbsp;|&nbsp; **Tests:** 2 300+ &nbsp;|&nbsp; **Deployment:** Docker Compose (one-click)
+> **Version:** 2.0.0 &nbsp;|&nbsp; **Python:** ≥ 3.11 &nbsp;|&nbsp; **Tests:** 2,300+ &nbsp;|&nbsp; **Deployment:** Docker Compose (one-click)
 
 ---
 
@@ -456,7 +456,7 @@ Signals are updated in real time as targets are hit:
 │   ├── main.py                    # Engine orchestrator & entry point
 │   ├── bootstrap.py               # Boot sequence, WS initialisation, shutdown
 │   ├── scanner/                   # Core scanning loop (10+ gate pipeline)
-│   │   ├── __init__.py            # Main scan loop (1 600+ lines)
+│   │   ├── __init__.py            # Main scan loop (1,600+ lines)
 │   │   ├── data_fetcher.py        # REST / WS data retrieval
 │   │   ├── indicator_compute.py   # Batch indicator calculation
 │   │   ├── common_gates.py        # Shared gating logic
@@ -522,7 +522,7 @@ Signals are updated in real time as targets are hit:
 │   ├── onchain.py                 # Glassnode + Whale Alert
 │   ├── chart_generator.py         # TradingView-style charts
 │   └── cornix_formatter.py        # Cornix auto-execution format
-├── tests/                         # 91 test files, 2 300+ tests
+├── tests/                         # 91 test files, 2,300+ tests
 ├── assets/icons/                  # SVG branding assets
 ├── Dockerfile                     # Python 3.12, non-root, healthcheck
 ├── docker-compose.yml             # Engine + Redis (resource-limited)
@@ -539,7 +539,7 @@ Signals are updated in real time as targets are hit:
 
 ## Testing
 
-The project includes **91 test files** with **2 300+ tests** covering all major subsystems.
+The project includes **91 test files** with **2,300+ tests** covering all major subsystems.
 
 ### Running Tests
 
