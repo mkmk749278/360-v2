@@ -70,7 +70,7 @@ def test_compute_indicators_for_candle_dict():
 
 
 def test_compute_indicators_for_candle_dict_empty_tf():
-    """Timeframes with insufficient data return empty dict."""
+    """Timeframes with insufficient data return minimal dict (only Heikin-Ashi with >=2 bars)."""
     candle_dict = {
         "1m": {
             "close": [100.0, 101.0],
@@ -80,7 +80,12 @@ def test_compute_indicators_for_candle_dict_empty_tf():
         },
     }
     result = compute_indicators_for_candle_dict(candle_dict)
-    assert result["1m"] == {}
+    # Only Heikin-Ashi computes with just 2 bars
+    assert "ha_close_last" in result["1m"]
+    assert "ha_trend" in result["1m"]
+    # All other indicators need more data
+    assert "ema9_last" not in result["1m"]
+    assert "rsi_last" not in result["1m"]
 
 
 def test_volume_statistics():
