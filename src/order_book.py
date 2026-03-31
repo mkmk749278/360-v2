@@ -214,3 +214,220 @@ def check_order_book_execution(
         )
 
     return True, ""
+
+
+# ---------------------------------------------------------------------------
+# Additional order-book analytics
+# ---------------------------------------------------------------------------
+
+
+def detect_order_book_walls(
+    bids: Optional[Sequence] = None,
+    asks: Optional[Sequence] = None,
+    close_price: Optional[float] = None,
+    wall_multiplier: float = 5.0,
+) -> dict:
+    """Detect large buy/sell walls in the order book.
+
+    A "wall" is a price level whose quantity exceeds *wall_multiplier* × the
+    average quantity across all levels on that side.
+
+    Parameters
+    ----------
+    bids:
+        Best bids list (highest price first), each ``[price, qty]``.
+    asks:
+        Best asks list (lowest price first), each ``[price, qty]``.
+    close_price:
+        Current close / last-trade price (used for distance calculations).
+    wall_multiplier:
+        A level must have this many × the average qty to be classified as a wall.
+
+    Returns
+    -------
+    dict with ``bid_walls``, ``ask_walls`` (lists of wall dicts), and
+    ``nearest_bid_wall``, ``nearest_ask_wall`` (price or ``None``).
+    """
+    result: dict = {
+        "bid_walls": [],
+        "ask_walls": [],
+        "nearest_bid_wall": None,
+        "nearest_ask_wall": None,
+    }
+
+    if not bids and not asks:
+        return result
+    if close_price is None or close_price <= 0:
+        return result
+
+    def _find_walls(levels: Sequence) -> List[dict]:
+        if not levels:
+            return []
+        try:
+            parsed = [(float(lv[0]), float(lv[1])) for lv in levels]
+        except (IndexError, TypeError, ValueError):
+            return []
+        if not parsed:
+            return []
+        avg_qty = sum(q for _, q in parsed) / len(parsed)
+        if avg_qty <= 0:
+            return []
+        threshold = avg_qty * wall_multiplier
+        walls: List[dict] = []
+        for price, qty in parsed:
+            if qty >= threshold and close_price > 0:
+                dist_pct = abs(price - close_price) / close_price * 100.0
+                walls.append({
+                    "price": price,
+                    "qty": qty,
+                    "distance_pct": round(dist_pct, 4),
+                })
+        return walls
+
+    bid_walls = _find_walls(bids or [])
+    ask_walls = _find_walls(asks or [])
+
+    result["bid_walls"] = bid_walls
+    result["ask_walls"] = ask_walls
+    if bid_walls:
+        result["nearest_bid_wall"] = max(w["price"] for w in bid_walls)
+    if ask_walls:
+        result["nearest_ask_wall"] = min(w["price"] for w in ask_walls)
+
+    return result
+
+
+def compute_depth_ratio(
+    bids: Optional[Sequence] = None,
+    asks: Optional[Sequence] = None,
+    depth_levels: int = 5,
+) -> dict:
+    """Compute near-touch depth ratio (bid vs ask volume in top *N* levels).
+
+    Parameters
+    ----------
+    bids:
+        Best bids list (highest price first), each ``[price, qty]``.
+    asks:
+        Best asks list (lowest price first), each ``[price, qty]``.
+    depth_levels:
+        Number of levels from each side to include.
+
+    Returns
+    -------
+    dict with ``bid_depth_usd``, ``ask_depth_usd``, ``depth_ratio`` (>1 = bid
+    heavy), ``imbalance_pct``.
+    """
+    neutral: dict = {
+        "bid_depth_usd": 0.0,
+        "ask_depth_usd": 0.0,
+        "depth_ratio": 1.0,
+        "imbalance_pct": 0.0,
+    }
+
+    if not bids and not asks:
+        return neutral
+
+    try:
+        bid_usd = sum(
+            float(b[0]) * float(b[1]) for b in (bids or [])[:depth_levels]
+        )
+        ask_usd = sum(
+            float(a[0]) * float(a[1]) for a in (asks or [])[:depth_levels]
+        )
+    except (IndexError, TypeError, ValueError):
+        return neutral
+
+    total = bid_usd + ask_usd
+    if total <= 0:
+        return neutral
+
+    ratio = (bid_usd / ask_usd) if ask_usd > 0 else 0.0
+    imbalance_pct = (bid_usd - ask_usd) / total * 100.0
+
+    return {
+        "bid_depth_usd": round(bid_usd, 2),
+        "ask_depth_usd": round(ask_usd, 2),
+        "depth_ratio": round(ratio, 4),
+        "imbalance_pct": round(imbalance_pct, 2),
+    }
+
+
+def detect_iceberg_orders(
+    bids: Optional[Sequence] = None,
+    asks: Optional[Sequence] = None,
+    close_price: Optional[float] = None,
+) -> dict:
+    """Heuristic detection of potential iceberg orders.
+
+    Icebergs are detected by looking for unusually frequent *same-size*
+    quantities clustered at similar price levels within each side of the
+    book.  A high count of identical quantities in a narrow price band
+    suggests a single participant refilling a hidden order.
+
+    Parameters
+    ----------
+    bids:
+        Best bids list (highest price first), each ``[price, qty]``.
+    asks:
+        Best asks list (lowest price first), each ``[price, qty]``.
+    close_price:
+        Current close / last-trade price (used for proximity checks).
+
+    Returns
+    -------
+    dict with ``detected``, ``side`` (``"BID"`` / ``"ASK"`` / ``"NONE"``),
+    ``suspected_levels``, ``confidence`` (0–1).
+    """
+    neutral: dict = {
+        "detected": False,
+        "side": "NONE",
+        "suspected_levels": 0,
+        "confidence": 0.0,
+    }
+
+    if not bids and not asks:
+        return neutral
+
+    def _check_side(levels: Sequence) -> Tuple[int, float]:
+        """Return (repeated_count, confidence) for one side."""
+        if not levels or len(levels) < 3:
+            return 0, 0.0
+        try:
+            parsed = [(float(lv[0]), float(lv[1])) for lv in levels]
+        except (IndexError, TypeError, ValueError):
+            return 0, 0.0
+
+        # Group by rounded quantity (8 significant figures to handle floats)
+        qty_counts: dict = {}
+        for _, qty in parsed:
+            rq = round(qty, 8)
+            qty_counts[rq] = qty_counts.get(rq, 0) + 1
+
+        # Iceberg heuristic: a quantity that appears ≥ 3 times
+        max_count = max(qty_counts.values()) if qty_counts else 0
+        if max_count < 3:
+            return 0, 0.0
+
+        confidence = min(1.0, (max_count - 2) / 5.0)  # 3 repeats → 0.2, 7+ → 1.0
+        return max_count, confidence
+
+    bid_count, bid_conf = _check_side(bids or [])
+    ask_count, ask_conf = _check_side(asks or [])
+
+    if bid_conf <= 0 and ask_conf <= 0:
+        return neutral
+
+    if bid_conf >= ask_conf:
+        return {
+            "detected": True,
+            "side": "BID",
+            "suspected_levels": bid_count,
+            "confidence": round(bid_conf, 4),
+        }
+    return {
+        "detected": True,
+        "side": "ASK",
+        "suspected_levels": ask_count,
+        "confidence": round(ask_conf, 4),
+    }

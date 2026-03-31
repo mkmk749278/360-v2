@@ -511,3 +511,323 @@ class OIPoller:
             raise
         except Exception as exc:
             log.debug("OI fetch error for {}: {}", symbol, exc)
+
+
+# ---------------------------------------------------------------------------
+# Additional order-flow analytics
+# ---------------------------------------------------------------------------
+
+
+def detect_absorption(
+    trades_or_ticks: Optional[List[Dict[str, Any]]] = None,
+    window: int = 20,
+) -> Dict[str, Any]:
+    """Detect absorption: large volume at a price level without proportional price movement.
+
+    Absorption occurs when significant volume is transacted at a tight price
+    range (< 0.1 % width) – indicating a large passive participant absorbing
+    aggressive flow – yet price fails to move through that level.
+
+    Parameters
+    ----------
+    trades_or_ticks:
+        List of dicts with ``'price'``, ``'qty'``, ``'is_buyer'`` keys.
+    window:
+        Number of most-recent ticks to analyse.
+
+    Returns
+    -------
+    dict with ``detected``, ``side``, ``volume_absorbed``, ``price_level``,
+    ``strength`` (0–1).
+    """
+    neutral: Dict[str, Any] = {
+        "detected": False,
+        "side": "NONE",
+        "volume_absorbed": 0.0,
+        "price_level": 0.0,
+        "strength": 0.0,
+    }
+
+    if not trades_or_ticks:
+        return neutral
+
+    ticks = trades_or_ticks[-window:]
+    if len(ticks) < 2:
+        return neutral
+
+    try:
+        prices = np.array([float(t["price"]) for t in ticks], dtype=np.float64)
+        qtys = np.array([float(t["qty"]) for t in ticks], dtype=np.float64)
+        sides = [bool(t["is_buyer"]) for t in ticks]
+    except (KeyError, TypeError, ValueError):
+        return neutral
+
+    mid_price = (prices.min() + prices.max()) / 2.0
+    if mid_price <= 0:
+        return neutral
+
+    price_range_pct = (prices.max() - prices.min()) / mid_price
+
+    # Volume per price level (rounded to 4 decimal places for grouping)
+    vol_by_price: Dict[float, float] = {}
+    buy_vol_by_price: Dict[float, float] = {}
+    sell_vol_by_price: Dict[float, float] = {}
+    for p, q, is_buy in zip(prices, qtys, sides):
+        rp = round(float(p), 4)
+        vol_by_price[rp] = vol_by_price.get(rp, 0.0) + float(q)
+        if is_buy:
+            buy_vol_by_price[rp] = buy_vol_by_price.get(rp, 0.0) + float(q)
+        else:
+            sell_vol_by_price[rp] = sell_vol_by_price.get(rp, 0.0) + float(q)
+
+    total_vol = float(qtys.sum())
+    if total_vol <= 0:
+        return neutral
+
+    # Find the price level with the most volume
+    top_price = max(vol_by_price, key=vol_by_price.get)  # type: ignore[arg-type]
+    top_vol = vol_by_price[top_price]
+
+    # Absorption = top-level volume is in the top 20 % AND price range is tight
+    vol_concentration = top_vol / total_vol
+    is_concentrated = vol_concentration >= 0.20
+    is_tight_range = price_range_pct < 0.001  # < 0.1 %
+
+    if not (is_concentrated and is_tight_range):
+        return neutral
+
+    buy_at_level = buy_vol_by_price.get(top_price, 0.0)
+    sell_at_level = sell_vol_by_price.get(top_price, 0.0)
+    side = "BUY" if buy_at_level >= sell_at_level else "SELL"
+
+    strength = min(1.0, vol_concentration / 0.5)  # normalise: 50 %+ → 1.0
+
+    return {
+        "detected": True,
+        "side": side,
+        "volume_absorbed": top_vol,
+        "price_level": top_price,
+        "strength": round(strength, 4),
+    }
+
+
+def classify_aggressive_passive(
+    trades_or_ticks: Optional[List[Dict[str, Any]]] = None,
+    window: int = 50,
+) -> Dict[str, Any]:
+    """Classify recent trades as aggressive (market orders) vs passive (limit fills).
+
+    An aggressive buy is a trade where the buyer is the taker (``is_buyer=True``),
+    and an aggressive sell is where the seller is the taker (``is_buyer=False``).
+
+    Parameters
+    ----------
+    trades_or_ticks:
+        List of dicts with ``'price'``, ``'qty'``, ``'is_buyer'``, ``'time'`` keys.
+    window:
+        Number of most-recent trades to consider.
+
+    Returns
+    -------
+    dict with ``aggressive_buy_pct``, ``aggressive_sell_pct``, ``passive_pct``,
+    ``net_aggression`` (−1 to 1), ``sample_size``.
+    """
+    neutral: Dict[str, Any] = {
+        "aggressive_buy_pct": 0.0,
+        "aggressive_sell_pct": 0.0,
+        "passive_pct": 1.0,
+        "net_aggression": 0.0,
+        "sample_size": 0,
+    }
+
+    if not trades_or_ticks:
+        return neutral
+
+    ticks = trades_or_ticks[-window:]
+    if not ticks:
+        return neutral
+
+    agg_buy_vol = 0.0
+    agg_sell_vol = 0.0
+    total_vol = 0.0
+
+    for t in ticks:
+        try:
+            qty = float(t["qty"])
+            is_buyer = bool(t["is_buyer"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        total_vol += qty
+        if is_buyer:
+            agg_buy_vol += qty
+        else:
+            agg_sell_vol += qty
+
+    if total_vol <= 0:
+        return neutral
+
+    agg_buy_pct = agg_buy_vol / total_vol
+    agg_sell_pct = agg_sell_vol / total_vol
+    passive_pct = max(0.0, 1.0 - agg_buy_pct - agg_sell_pct)
+    net_aggression = agg_buy_pct - agg_sell_pct  # −1 to 1
+
+    return {
+        "aggressive_buy_pct": round(agg_buy_pct, 4),
+        "aggressive_sell_pct": round(agg_sell_pct, 4),
+        "passive_pct": round(passive_pct, 4),
+        "net_aggression": round(max(-1.0, min(1.0, net_aggression)), 4),
+        "sample_size": len(ticks),
+    }
+
+
+def track_whale_orders(
+    trades_or_ticks: Optional[List[Dict[str, Any]]] = None,
+    threshold_usd: float = 50_000,
+) -> Dict[str, Any]:
+    """Identify whale-size orders (single trade > *threshold_usd*).
+
+    Parameters
+    ----------
+    trades_or_ticks:
+        List of dicts with ``'price'``, ``'qty'``, ``'is_buyer'`` keys.
+    threshold_usd:
+        USD notional threshold for a trade to be classified as a whale order.
+
+    Returns
+    -------
+    dict with ``whale_buy_count``, ``whale_sell_count``, ``whale_buy_volume_usd``,
+    ``whale_sell_volume_usd``, ``net_whale_flow``, ``whale_imbalance`` (−1 to 1).
+    """
+    neutral: Dict[str, Any] = {
+        "whale_buy_count": 0,
+        "whale_sell_count": 0,
+        "whale_buy_volume_usd": 0.0,
+        "whale_sell_volume_usd": 0.0,
+        "net_whale_flow": 0.0,
+        "whale_imbalance": 0.0,
+    }
+
+    if not trades_or_ticks:
+        return neutral
+
+    whale_buy_count = 0
+    whale_sell_count = 0
+    whale_buy_vol = 0.0
+    whale_sell_vol = 0.0
+
+    for t in trades_or_ticks:
+        try:
+            price = float(t["price"])
+            qty = float(t["qty"])
+            is_buyer = bool(t["is_buyer"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        notional = price * qty
+        if notional <= threshold_usd:
+            continue
+
+        if is_buyer:
+            whale_buy_count += 1
+            whale_buy_vol += notional
+        else:
+            whale_sell_count += 1
+            whale_sell_vol += notional
+
+    total_whale = whale_buy_vol + whale_sell_vol
+    net_flow = whale_buy_vol - whale_sell_vol
+    imbalance = (net_flow / total_whale) if total_whale > 0 else 0.0
+
+    return {
+        "whale_buy_count": whale_buy_count,
+        "whale_sell_count": whale_sell_count,
+        "whale_buy_volume_usd": round(whale_buy_vol, 2),
+        "whale_sell_volume_usd": round(whale_sell_vol, 2),
+        "net_whale_flow": round(net_flow, 2),
+        "whale_imbalance": round(max(-1.0, min(1.0, imbalance)), 4),
+    }
+
+
+def compute_delta_divergence(
+    closes: Optional[List[float]] = None,
+    buy_volumes: Optional[List[float]] = None,
+    sell_volumes: Optional[List[float]] = None,
+    lookback: int = 20,
+) -> Dict[str, Any]:
+    """Detect delta divergence: price trending one way but volume delta trending opposite.
+
+    Compares the linear trend of price and cumulative volume delta over the
+    last *lookback* bars.  A divergence exists when the two trends move in
+    opposite directions.
+
+    Parameters
+    ----------
+    closes:
+        List of close prices (oldest → newest).
+    buy_volumes:
+        List of per-bar buy volumes (same length as *closes*).
+    sell_volumes:
+        List of per-bar sell volumes (same length as *closes*).
+    lookback:
+        Number of bars to analyse.
+
+    Returns
+    -------
+    dict with ``divergence`` (``"BULLISH"`` / ``"BEARISH"`` / ``"NONE"``),
+    ``price_trend``, ``delta_trend``, ``strength`` (0–1).
+    """
+    neutral: Dict[str, Any] = {
+        "divergence": "NONE",
+        "price_trend": "NONE",
+        "delta_trend": "NONE",
+        "strength": 0.0,
+    }
+
+    if not closes or not buy_volumes or not sell_volumes:
+        return neutral
+
+    n = min(len(closes), len(buy_volumes), len(sell_volumes), lookback)
+    if n < 4:
+        return neutral
+
+    c = np.array(closes[-n:], dtype=np.float64)
+    bv = np.array(buy_volumes[-n:], dtype=np.float64)
+    sv = np.array(sell_volumes[-n:], dtype=np.float64)
+
+    deltas = bv - sv
+    cum_delta = np.cumsum(deltas)
+
+    x = np.arange(n, dtype=np.float64)
+    # Linear regression slopes
+    price_slope = float(np.polyfit(x, c, 1)[0])
+    delta_slope = float(np.polyfit(x, cum_delta, 1)[0])
+
+    # Normalise slopes for comparison
+    price_range = float(c.max() - c.min())
+    delta_range = float(cum_delta.max() - cum_delta.min())
+
+    if price_range <= 0 or delta_range <= 0:
+        return neutral
+
+    norm_price = price_slope / price_range
+    norm_delta = delta_slope / delta_range
+
+    price_trend = "UP" if norm_price > 0.05 else ("DOWN" if norm_price < -0.05 else "FLAT")
+    delta_trend = "UP" if norm_delta > 0.05 else ("DOWN" if norm_delta < -0.05 else "FLAT")
+
+    divergence = "NONE"
+    if price_trend == "DOWN" and delta_trend == "UP":
+        divergence = "BULLISH"
+    elif price_trend == "UP" and delta_trend == "DOWN":
+        divergence = "BEARISH"
+
+    # Strength = how far apart the normalised slopes are (max 1.0)
+    strength = min(1.0, abs(norm_price - norm_delta))
+
+    return {
+        "divergence": divergence,
+        "price_trend": price_trend,
+        "delta_trend": delta_trend,
+        "strength": round(strength, 4),
+    }
