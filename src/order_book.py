@@ -342,7 +342,7 @@ def compute_depth_ratio(
     if total <= 0:
         return neutral
 
-    ratio = (bid_usd / ask_usd) if ask_usd > 0 else 0.0
+    ratio = (bid_usd / ask_usd) if ask_usd > 0 else float("inf")
     imbalance_pct = (bid_usd - ask_usd) / total * 100.0
 
     return {

@@ -813,8 +813,19 @@ def compute_delta_divergence(
     norm_price = price_slope / price_range
     norm_delta = delta_slope / delta_range
 
-    price_trend = "UP" if norm_price > 0.05 else ("DOWN" if norm_price < -0.05 else "FLAT")
-    delta_trend = "UP" if norm_delta > 0.05 else ("DOWN" if norm_delta < -0.05 else "FLAT")
+    if norm_price > 0.05:
+        price_trend = "UP"
+    elif norm_price < -0.05:
+        price_trend = "DOWN"
+    else:
+        price_trend = "FLAT"
+
+    if norm_delta > 0.05:
+        delta_trend = "UP"
+    elif norm_delta < -0.05:
+        delta_trend = "DOWN"
+    else:
+        delta_trend = "FLAT"
 
     divergence = "NONE"
     if price_trend == "DOWN" and delta_trend == "UP":
