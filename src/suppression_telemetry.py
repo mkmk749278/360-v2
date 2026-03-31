@@ -46,6 +46,7 @@ REASON_CONFIDENCE: str = "confidence"
 REASON_REGIME_PENALTY: str = "regime_penalty"
 REASON_PAIR_QUALITY: str = "pair_quality"
 REASON_RANGING_ADX: str = "ranging_adx"
+REASON_PAIR_ANALYSIS: str = "pair_analysis"
 
 # Default rolling window (4 hours)
 _DEFAULT_WINDOW_SECONDS: float = 4 * 3600.0

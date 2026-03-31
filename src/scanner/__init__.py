@@ -94,6 +94,7 @@ from src.vwap import check_vwap_extension, compute_vwap
 from src.ai_engine import get_ai_insight
 from src.chart_patterns import detect_patterns, pattern_confidence_bonus, detect_all_patterns
 from src.stat_filter import StatisticalFilter
+from src.pair_analyzer import compute_pair_signal_quality
 from src.suppression_telemetry import (
     SuppressionTracker,
     SuppressionEvent,
@@ -105,6 +106,7 @@ from src.suppression_telemetry import (
     REASON_STAT_FILTER,
     REASON_LIFESPAN,
     REASON_CONFIDENCE,
+    REASON_PAIR_ANALYSIS,
 )
 
 # --- PR 01-08 new module imports ------------------------------------------
@@ -2176,6 +2178,47 @@ class Scanner:
                 sig.soft_gate_flags = (_existing_flags + f",{_sf_reason}").lstrip(",")
         except Exception as _sf_exc:
             log.debug("stat_filter error for {} {} (fail open): {}", symbol, chan_name, _sf_exc)
+
+        # ── Pair Analysis Quality Gate ─────────────────────────────────────
+        # Suppress signals from pairs with CRITICAL quality label (hit rate
+        # < 35% or max drawdown > 15%).  Apply confidence penalty for WEAK
+        # pairs.  Fail-open when the performance tracker is unavailable or
+        # there is insufficient data.
+        try:
+            if self.router and hasattr(self.router, "performance_tracker"):
+                _pa_quality = compute_pair_signal_quality(
+                    self.router.performance_tracker, symbol, window_days=30,
+                )
+                if _pa_quality.quality_label == "CRITICAL":
+                    log.info(
+                        "pair_analysis suppressed {}/{}: quality=CRITICAL "
+                        "hit_rate={:.1f}% dd={:.1f}%",
+                        symbol, chan_name,
+                        _pa_quality.hit_rate, _pa_quality.max_drawdown,
+                    )
+                    self.suppression_tracker.record(SuppressionEvent(
+                        symbol=symbol,
+                        channel=chan_name,
+                        reason=REASON_PAIR_ANALYSIS,
+                        regime=_regime_key,
+                        would_be_confidence=sig.confidence,
+                    ))
+                    self._suppression_counters[f"pair_analysis:critical:{chan_name}"] += 1
+                    return None, cross_verified
+                if _pa_quality.quality_label == "WEAK":
+                    _pa_penalty = 8.0
+                    sig.confidence = max(0.0, sig.confidence - _pa_penalty)
+                    _existing_flags = sig.soft_gate_flags or ""
+                    sig.soft_gate_flags = (
+                        _existing_flags + f",pair_analysis:weak_penalty"
+                    ).lstrip(",")
+                    self._suppression_counters[f"pair_analysis:weak_penalty:{chan_name}"] += 1
+                    log.debug(
+                        "pair_analysis weak penalty {}/{}: -{}pts → {:.1f}",
+                        symbol, chan_name, _pa_penalty, sig.confidence,
+                    )
+        except Exception as _pa_exc:
+            log.debug("pair_analysis gate error for {} {} (fail open): {}", symbol, chan_name, _pa_exc)
 
         min_conf = self.confidence_overrides.get(chan_name, chan.config.min_confidence)
         # QUIET regime safety net for scalp channels: only the highest-quality
