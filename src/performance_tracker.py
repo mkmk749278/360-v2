@@ -625,6 +625,268 @@ class PerformanceTracker:
         return result
 
     # ------------------------------------------------------------------
+    # Per-pair regime / session / weekday / consistency  (pair analysis)
+    # ------------------------------------------------------------------
+
+    def get_pair_stats_by_regime(
+        self,
+        symbol: str,
+        window_days: Optional[int] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return per-pair stats grouped by market regime.
+
+        Parameters
+        ----------
+        symbol:
+            Trading pair symbol (e.g. ``"BTCUSDT"``).
+        window_days:
+            Optional rolling window in days.
+
+        Returns
+        -------
+        dict mapping regime label → stats dict with keys:
+            ``wins``, ``losses``, ``count``, ``win_rate``, ``avg_pnl``.
+        """
+        records = self._filter(window_days=window_days)
+        filtered = [r for r in records if r.symbol == symbol]
+        by_regime: Dict[str, List[SignalRecord]] = {}
+        for r in filtered:
+            phase = r.market_phase or "UNKNOWN"
+            by_regime.setdefault(phase, []).append(r)
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for regime, recs in by_regime.items():
+            wins = sum(1 for r in recs if r.pnl_pct > 0 and not is_breakeven_pnl(r.pnl_pct))
+            losses = sum(1 for r in recs if r.pnl_pct < 0 and not is_breakeven_pnl(r.pnl_pct))
+            total = wins + losses
+            result[regime] = {
+                "wins": wins,
+                "losses": losses,
+                "count": len(recs),
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+                "avg_pnl": round(sum(r.pnl_pct for r in recs) / len(recs), 2) if recs else 0.0,
+            }
+        return result
+
+    def get_pair_stats_by_session(
+        self,
+        symbol: str,
+        window_days: Optional[int] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return per-pair stats grouped by trading session.
+
+        Parameters
+        ----------
+        symbol:
+            Trading pair symbol.
+        window_days:
+            Optional rolling window in days.
+
+        Returns
+        -------
+        dict mapping session name → stats dict.
+        """
+        records = self._filter(window_days=window_days)
+        filtered = [r for r in records if r.symbol == symbol]
+        by_session: Dict[str, List[SignalRecord]] = {}
+        for r in filtered:
+            session = r.session_name or "UNKNOWN"
+            by_session.setdefault(session, []).append(r)
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for session, recs in by_session.items():
+            wins = sum(1 for r in recs if r.pnl_pct > 0 and not is_breakeven_pnl(r.pnl_pct))
+            losses = sum(1 for r in recs if r.pnl_pct < 0 and not is_breakeven_pnl(r.pnl_pct))
+            total = wins + losses
+            result[session] = {
+                "wins": wins,
+                "losses": losses,
+                "count": len(recs),
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+                "avg_pnl": round(sum(r.pnl_pct for r in recs) / len(recs), 2) if recs else 0.0,
+            }
+        return result
+
+    def get_pair_stats_by_weekday(
+        self,
+        symbol: str,
+        window_days: Optional[int] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        """Return per-pair stats grouped by weekday (Mon=0 … Sun=6).
+
+        Parameters
+        ----------
+        symbol:
+            Trading pair symbol.
+        window_days:
+            Optional rolling window in days.
+
+        Returns
+        -------
+        dict mapping day name → stats dict with ``wins``, ``losses``,
+        ``count``, ``win_rate``, ``avg_pnl``, ``is_weekend``.
+        """
+        import datetime as _dt
+
+        _DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+
+        records = self._filter(window_days=window_days)
+        filtered = [r for r in records if r.symbol == symbol]
+        by_day: Dict[str, List[SignalRecord]] = {}
+        for r in filtered:
+            day_idx = _dt.datetime.fromtimestamp(r.timestamp, tz=_dt.timezone.utc).weekday()
+            day_name = _DAY_NAMES[day_idx]
+            by_day.setdefault(day_name, []).append(r)
+
+        result: Dict[str, Dict[str, Any]] = {}
+        for day_name, recs in by_day.items():
+            wins = sum(1 for r in recs if r.pnl_pct > 0 and not is_breakeven_pnl(r.pnl_pct))
+            losses = sum(1 for r in recs if r.pnl_pct < 0 and not is_breakeven_pnl(r.pnl_pct))
+            total = wins + losses
+            result[day_name] = {
+                "wins": wins,
+                "losses": losses,
+                "count": len(recs),
+                "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+                "avg_pnl": round(sum(r.pnl_pct for r in recs) / len(recs), 2) if recs else 0.0,
+                "is_weekend": day_name in ("Sat", "Sun"),
+            }
+        return result
+
+    def get_pair_consistency(
+        self,
+        symbol: str,
+        window_days: int = 30,
+        chunk_size: int = 7,
+    ) -> Dict[str, Any]:
+        """Evaluate signal consistency over rolling weekly chunks.
+
+        Parameters
+        ----------
+        symbol:
+            Trading pair symbol.
+        window_days:
+            Total lookback period in days.
+        chunk_size:
+            Number of days per chunk for consistency scoring.
+
+        Returns
+        -------
+        dict with ``chunks`` (list of per-chunk win rates), ``avg_wr``,
+        ``std_wr``, ``trend`` (IMPROVING/DEGRADING/STABLE),
+        ``is_consistent`` (bool).
+        """
+        import math as _math
+
+        records = self._filter(window_days=window_days)
+        filtered = sorted(
+            (r for r in records if r.symbol == symbol),
+            key=lambda r: r.timestamp,
+        )
+        if not filtered:
+            return {
+                "chunks": [],
+                "avg_wr": 0.0,
+                "std_wr": 0.0,
+                "trend": "STABLE",
+                "is_consistent": True,
+            }
+
+        chunk_seconds = chunk_size * 86_400.0
+        start_ts = filtered[0].timestamp
+        chunks: list[float] = []
+
+        chunk_start = start_ts
+        while chunk_start < filtered[-1].timestamp + 1:
+            chunk_end = chunk_start + chunk_seconds
+            chunk_recs = [r for r in filtered if chunk_start <= r.timestamp < chunk_end]
+            if chunk_recs:
+                wins = sum(
+                    1 for r in chunk_recs
+                    if r.pnl_pct > 0 and not is_breakeven_pnl(r.pnl_pct)
+                )
+                losses = sum(
+                    1 for r in chunk_recs
+                    if r.pnl_pct < 0 and not is_breakeven_pnl(r.pnl_pct)
+                )
+                total = wins + losses
+                wr = round(wins / total * 100, 1) if total > 0 else 50.0
+                chunks.append(wr)
+            chunk_start = chunk_end
+
+        if not chunks:
+            return {
+                "chunks": [],
+                "avg_wr": 0.0,
+                "std_wr": 0.0,
+                "trend": "STABLE",
+                "is_consistent": True,
+            }
+
+        avg_wr = sum(chunks) / len(chunks)
+        variance = sum((c - avg_wr) ** 2 for c in chunks) / len(chunks) if len(chunks) > 1 else 0.0
+        std_wr = _math.sqrt(variance)
+
+        # Trend: compare first half avg vs second half avg
+        if len(chunks) >= 2:
+            mid = len(chunks) // 2
+            first_half = sum(chunks[:mid]) / mid
+            second_half = sum(chunks[mid:]) / len(chunks[mid:])
+            diff = second_half - first_half
+            if diff > 10:
+                trend = "IMPROVING"
+            elif diff < -10:
+                trend = "DEGRADING"
+            else:
+                trend = "STABLE"
+        else:
+            trend = "STABLE"
+
+        is_consistent = std_wr < 15.0 and all(c >= 30.0 for c in chunks)
+
+        return {
+            "chunks": chunks,
+            "avg_wr": round(avg_wr, 1),
+            "std_wr": round(std_wr, 1),
+            "trend": trend,
+            "is_consistent": is_consistent,
+        }
+
+    def get_pair_pnl_list(
+        self,
+        symbol: str,
+        window_days: Optional[int] = None,
+    ) -> List[float]:
+        """Return chronologically ordered PnL percentages for a pair."""
+        records = self._filter(window_days=window_days)
+        filtered = sorted(
+            (r for r in records if r.symbol == symbol),
+            key=lambda r: r.timestamp,
+        )
+        return [r.pnl_pct for r in filtered]
+
+    def get_pair_mfe_mae(
+        self,
+        symbol: str,
+        window_days: Optional[int] = None,
+    ) -> Dict[str, List[float]]:
+        """Return MFE and MAE lists for a pair."""
+        records = self._filter(window_days=window_days)
+        filtered = [r for r in records if r.symbol == symbol]
+        return {
+            "mfe": [r.max_favorable_excursion_pct for r in filtered],
+            "mae": [r.max_adverse_excursion_pct for r in filtered],
+        }
+
+    def get_all_traded_symbols(
+        self,
+        window_days: Optional[int] = None,
+    ) -> List[str]:
+        """Return a deduplicated list of all symbols with recorded outcomes."""
+        records = self._filter(window_days=window_days)
+        return list(dict.fromkeys(r.symbol for r in records))
+
+    # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------
 
