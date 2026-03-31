@@ -173,6 +173,14 @@ class BinanceClient:
         self._consume_weight(weight)
 
         for attempt in range(max_retries):
+            # Re-check the depth circuit breaker on every retry and before
+            # each attempt.  Without this, concurrent requests that passed the
+            # initial check (above) keep retrying even after another coroutine
+            # has already tripped the breaker, inflating the timeout counter
+            # (observed as 6, 7, 8… in the logs).
+            if is_depth and time.monotonic() < self._depth_circuit_open_until:
+                return None
+
             try:
                 async with self._inflight_sem:
                     async with session.get(
