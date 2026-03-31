@@ -33,6 +33,10 @@ from src.channels.scalp_fvg import ScalpFVGChannel
 from src.channels.scalp_cvd import ScalpCVDChannel
 from src.channels.scalp_vwap import ScalpVWAPChannel
 from src.channels.scalp_obi import ScalpOBIChannel
+from src.channels.scalp_divergence import ScalpDivergenceChannel
+from src.channels.scalp_supertrend import ScalpSupertrendChannel
+from src.channels.scalp_ichimoku import ScalpIchimokuChannel
+from src.channels.scalp_orderblock import ScalpOrderblockChannel
 from src.circuit_breaker import CircuitBreaker
 
 from src.commands import CommandHandler
@@ -160,6 +164,10 @@ class CryptoSignalEngine:
             ScalpCVDChannel(),
             ScalpVWAPChannel(),
             ScalpOBIChannel(),
+            ScalpDivergenceChannel(),
+            ScalpSupertrendChannel(),
+            ScalpIchimokuChannel(),
+            ScalpOrderblockChannel(),
         ]
 
         # SMC detector and market regime classifier

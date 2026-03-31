@@ -649,11 +649,15 @@ def _build_channel_telegram_map() -> Dict[str, str]:
     """
     active = TELEGRAM_ACTIVE_CHANNEL_ID
     return {
-        "360_SCALP":      active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_FVG":  active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_CVD":  active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_VWAP": active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_OBI":  active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP":            active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP_FVG":        active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP_CVD":        active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP_VWAP":       active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP_OBI":        active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP_DIVERGENCE": active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP_SUPERTREND": active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP_ICHIMOKU":   active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP_ORDERBLOCK": active or TELEGRAM_SCALP_CHANNEL_ID,
     }
 
 
@@ -781,22 +785,30 @@ PERFORMANCE_TRACKER_PATH: str = os.getenv(
 # SCALP: capped for capital protection (leveraged trades).
 # ---------------------------------------------------------------------------
 MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
-    "360_SCALP":      int(os.getenv("MAX_SCALP_SIGNALS", "5")),
-    "360_SCALP_FVG":  int(os.getenv("MAX_SCALP_FVG_SIGNALS", "3")),
-    "360_SCALP_CVD":  int(os.getenv("MAX_SCALP_CVD_SIGNALS", "3")),
-    "360_SCALP_VWAP": int(os.getenv("MAX_SCALP_VWAP_SIGNALS", "3")),
-    "360_SCALP_OBI":  int(os.getenv("MAX_SCALP_OBI_SIGNALS", "3")),
+    "360_SCALP":            int(os.getenv("MAX_SCALP_SIGNALS", "5")),
+    "360_SCALP_FVG":        int(os.getenv("MAX_SCALP_FVG_SIGNALS", "3")),
+    "360_SCALP_CVD":        int(os.getenv("MAX_SCALP_CVD_SIGNALS", "3")),
+    "360_SCALP_VWAP":       int(os.getenv("MAX_SCALP_VWAP_SIGNALS", "3")),
+    "360_SCALP_OBI":        int(os.getenv("MAX_SCALP_OBI_SIGNALS", "3")),
+    "360_SCALP_DIVERGENCE": int(os.getenv("MAX_SCALP_DIV_SIGNALS", "3")),
+    "360_SCALP_SUPERTREND": int(os.getenv("MAX_SCALP_STR_SIGNALS", "3")),
+    "360_SCALP_ICHIMOKU":   int(os.getenv("MAX_SCALP_ICH_SIGNALS", "3")),
+    "360_SCALP_ORDERBLOCK": int(os.getenv("MAX_SCALP_ORB_SIGNALS", "3")),
 }
 
 # ---------------------------------------------------------------------------
 # Anti-noise: minimum signal lifespan before SL/TP checks are applied (secs)
 # ---------------------------------------------------------------------------
 MIN_SIGNAL_LIFESPAN_SECONDS: Dict[str, int] = {
-    "360_SCALP":      int(os.getenv("MIN_LIFESPAN_SCALP",      "180")),
-    "360_SCALP_FVG":  int(os.getenv("MIN_LIFESPAN_SCALP_FVG",  "180")),
-    "360_SCALP_CVD":  int(os.getenv("MIN_LIFESPAN_SCALP_CVD",  "180")),
-    "360_SCALP_VWAP": int(os.getenv("MIN_LIFESPAN_SCALP_VWAP", "180")),
-    "360_SCALP_OBI":  int(os.getenv("MIN_LIFESPAN_SCALP_OBI",  "180")),
+    "360_SCALP":            int(os.getenv("MIN_LIFESPAN_SCALP",      "180")),
+    "360_SCALP_FVG":        int(os.getenv("MIN_LIFESPAN_SCALP_FVG",  "180")),
+    "360_SCALP_CVD":        int(os.getenv("MIN_LIFESPAN_SCALP_CVD",  "180")),
+    "360_SCALP_VWAP":       int(os.getenv("MIN_LIFESPAN_SCALP_VWAP", "180")),
+    "360_SCALP_OBI":        int(os.getenv("MIN_LIFESPAN_SCALP_OBI",  "180")),
+    "360_SCALP_DIVERGENCE": int(os.getenv("MIN_LIFESPAN_SCALP_DIV",  "180")),
+    "360_SCALP_SUPERTREND": int(os.getenv("MIN_LIFESPAN_SCALP_STR",  "180")),
+    "360_SCALP_ICHIMOKU":   int(os.getenv("MIN_LIFESPAN_SCALP_ICH",  "180")),
+    "360_SCALP_ORDERBLOCK": int(os.getenv("MIN_LIFESPAN_SCALP_ORB",  "180")),
 }
 
 # ---------------------------------------------------------------------------
@@ -849,11 +861,15 @@ PAIR_QUALITY_VOLUME_FLOOR_GEM:   float = float(os.getenv("PAIR_QUALITY_VOLUME_FL
 # users should NOT enter the trade even if price is still in zone.
 # ---------------------------------------------------------------------------
 SIGNAL_VALID_FOR_MINUTES: Dict[str, int] = {
-    "360_SCALP":      int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
-    "360_SCALP_FVG":  int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
-    "360_SCALP_CVD":  int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
-    "360_SCALP_VWAP": int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
-    "360_SCALP_OBI":  int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
+    "360_SCALP":            int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
+    "360_SCALP_FVG":        int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
+    "360_SCALP_CVD":        int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
+    "360_SCALP_VWAP":       int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
+    "360_SCALP_OBI":        int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
+    "360_SCALP_DIVERGENCE": int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
+    "360_SCALP_SUPERTREND": int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
+    "360_SCALP_ICHIMOKU":   int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
+    "360_SCALP_ORDERBLOCK": int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
     "360_SWING":      int(os.getenv("SIGNAL_VALID_SWING",   "60")),
     "360_SPOT":       int(os.getenv("SIGNAL_VALID_SPOT",   "240")),
     "360_GEM":        int(os.getenv("SIGNAL_VALID_GEM",   "1440")),
