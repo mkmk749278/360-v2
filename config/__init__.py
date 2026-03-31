@@ -558,12 +558,80 @@ CHANNEL_SCALP_OBI = ChannelConfig(
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
 )
 
+CHANNEL_SCALP_DIVERGENCE = ChannelConfig(
+    name="360_SCALP_DIVERGENCE",
+    emoji="⚡",
+    timeframes=["5m"],
+    sl_pct_range=(0.15, 0.30),
+    tp_ratios=[1.5, 2.5, 3.5],
+    trailing_atr_mult=1.5,
+    adx_min=15,
+    adx_max=40,
+    spread_max=0.02,
+    min_confidence=72,
+    min_volume=5_000_000.0,
+    dca_enabled=True,
+    min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
+)
+
+CHANNEL_SCALP_SUPERTREND = ChannelConfig(
+    name="360_SCALP_SUPERTREND",
+    emoji="⚡",
+    timeframes=["5m"],
+    sl_pct_range=(0.10, 0.25),
+    tp_ratios=[1.5, 2.5, 3.5],
+    trailing_atr_mult=1.5,
+    adx_min=15,
+    adx_max=100,
+    spread_max=0.02,
+    min_confidence=72,
+    min_volume=5_000_000.0,
+    dca_enabled=True,
+    min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
+)
+
+CHANNEL_SCALP_ICHIMOKU = ChannelConfig(
+    name="360_SCALP_ICHIMOKU",
+    emoji="⚡",
+    timeframes=["5m", "15m"],
+    sl_pct_range=(0.10, 0.25),
+    tp_ratios=[1.5, 2.5, 3.0],
+    trailing_atr_mult=1.5,
+    adx_min=15,
+    adx_max=100,
+    spread_max=0.02,
+    min_confidence=72,
+    min_volume=5_000_000.0,
+    dca_enabled=True,
+    min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
+)
+
+CHANNEL_SCALP_ORDERBLOCK = ChannelConfig(
+    name="360_SCALP_ORDERBLOCK",
+    emoji="⚡",
+    timeframes=["5m"],
+    sl_pct_range=(0.10, 0.20),
+    tp_ratios=[1.5, 2.5, 3.0],
+    trailing_atr_mult=1.5,
+    adx_min=0,
+    adx_max=100,
+    spread_max=0.02,
+    min_confidence=72,
+    min_volume=5_000_000.0,
+    dca_enabled=True,
+    min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
+)
+
 ALL_CHANNELS: List[ChannelConfig] = [
     CHANNEL_SCALP,
     CHANNEL_SCALP_FVG,
     CHANNEL_SCALP_CVD,
     CHANNEL_SCALP_VWAP,
     CHANNEL_SCALP_OBI,
+    CHANNEL_SCALP_DIVERGENCE,
+    CHANNEL_SCALP_SUPERTREND,
+    CHANNEL_SCALP_ICHIMOKU,
+    CHANNEL_SCALP_ORDERBLOCK,
 ]
 
 CHANNEL_EMOJIS: Dict[str, str] = {
