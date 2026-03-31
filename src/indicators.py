@@ -389,7 +389,7 @@ def supertrend(
     if first_valid is None:
         return st_line, direction
 
-    # Initialise at first valid index
+    # Initialize at first valid index
     direction[first_valid] = 1.0
     st_line[first_valid] = lower_band[first_valid]
 
@@ -598,7 +598,7 @@ def volume_profile(
     poc_idx = int(np.argmax(profile))
     poc = (bin_edges[poc_idx] + bin_edges[poc_idx + 1]) / 2.0
 
-    # Value Area – 70 % of total volume centred around POC
+    # Value Area – 70 % of total volume centered around POC
     total_vol = float(np.sum(profile))
     target_vol = total_vol * 0.70
     va_vol = profile[poc_idx]
