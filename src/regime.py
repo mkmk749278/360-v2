@@ -9,7 +9,8 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, Optional
+from collections import defaultdict
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
@@ -672,3 +673,144 @@ def detect_regime_from_arrays(
     if atr_pct <= 0.3:
         return MarketRegime.QUIET.value
     return MarketRegime.RANGING.value
+
+
+# ---------------------------------------------------------------------------
+# Regime transition probability matrix
+# ---------------------------------------------------------------------------
+
+
+class RegimeTransitionMatrix:
+    """Tracks observed regime transitions and computes empirical probabilities.
+
+    Uses a simple count-based approach with Laplace smoothing so that unseen
+    transitions still have a small non-zero probability.
+
+    Parameters
+    ----------
+    regimes:
+        List of regime labels to track.  Defaults to the five standard
+        :class:`MarketRegime` values.
+    laplace_alpha:
+        Smoothing parameter added to every transition count.  Higher values
+        pull the distribution closer to uniform.
+    """
+
+    def __init__(
+        self,
+        regimes: Optional[List[str]] = None,
+        laplace_alpha: float = 1.0,
+    ) -> None:
+        self._regimes: List[str] = regimes or [r.value for r in MarketRegime]
+        self._alpha: float = laplace_alpha
+        # counts[from][to] = observed transition count
+        self._counts: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+
+    def record_transition(self, from_regime: str, to_regime: str) -> None:
+        """Record an observed regime transition."""
+        self._counts[from_regime][to_regime] += 1
+
+    def get_probability(self, from_regime: str, to_regime: str) -> float:
+        """Return the empirical probability of *from_regime* → *to_regime*.
+
+        Uses Laplace smoothing: P(to | from) = (count + α) / (total + α·K)
+        where K is the number of possible target regimes.
+        """
+        row = self._counts.get(from_regime, {})
+        k = len(self._regimes)
+        total = sum(row.values()) + self._alpha * k
+        if total == 0:
+            return 1.0 / k if k > 0 else 0.0
+        return (row.get(to_regime, 0) + self._alpha) / total
+
+    def get_likely_next(self, current_regime: str) -> Tuple[str, float]:
+        """Return the most likely next regime and its probability.
+
+        Returns
+        -------
+        Tuple[str, float]
+            ``(next_regime, probability)``.  When no transitions have been
+            recorded, returns the first regime in the list with uniform
+            probability.
+        """
+        best_regime = self._regimes[0] if self._regimes else current_regime
+        best_prob = 0.0
+        for regime in self._regimes:
+            prob = self.get_probability(current_regime, regime)
+            if prob > best_prob:
+                best_prob = prob
+                best_regime = regime
+        return best_regime, best_prob
+
+
+# ---------------------------------------------------------------------------
+# Volatility clustering via exponential moving average of ATR%
+# ---------------------------------------------------------------------------
+
+
+class VolatilityCluster:
+    """Simple volatility regime clustering using an EMA of ATR% readings.
+
+    Maintains a rolling window of the most recent ATR% values and classifies
+    the current volatility environment as ``"LOW"``, ``"NORMAL"``, ``"HIGH"``,
+    or ``"EXTREME"`` based on adaptive z-score thresholds.
+
+    Parameters
+    ----------
+    window:
+        Number of ATR% readings to retain for rolling statistics.
+    ema_span:
+        Span (in number of readings) for the EMA smoothing factor
+        ``α = 2 / (span + 1)``.
+    """
+
+    def __init__(self, window: int = 100, ema_span: int = 20) -> None:
+        self._window: int = window
+        self._alpha: float = 2.0 / (ema_span + 1)
+        self._readings: List[float] = []
+        self._ema: Optional[float] = None
+
+    def update(self, atr_pct: float) -> None:
+        """Add a new ATR% reading and update the EMA."""
+        self._readings.append(atr_pct)
+        if len(self._readings) > self._window:
+            self._readings = self._readings[-self._window:]
+        if self._ema is None:
+            self._ema = atr_pct
+        else:
+            self._ema = self._alpha * atr_pct + (1.0 - self._alpha) * self._ema
+
+    def get_cluster(self) -> str:
+        """Return the current volatility cluster label.
+
+        Thresholds are based on the z-score of the current EMA relative to
+        the rolling mean and standard deviation:
+
+        * ``z < -0.5`` → ``"LOW"``
+        * ``-0.5 ≤ z < 1.0`` → ``"NORMAL"``
+        * ``1.0 ≤ z < 2.0`` → ``"HIGH"``
+        * ``z ≥ 2.0`` → ``"EXTREME"``
+        """
+        z = self.get_zscore()
+        if z < -0.5:
+            return "LOW"
+        if z < 1.0:
+            return "NORMAL"
+        if z < 2.0:
+            return "HIGH"
+        return "EXTREME"
+
+    def get_zscore(self) -> float:
+        """Return the z-score of the current EMA vs the rolling window.
+
+        Returns ``0.0`` when insufficient data is available (fewer than 2
+        readings).
+        """
+        if len(self._readings) < 2 or self._ema is None:
+            return 0.0
+        arr = np.asarray(self._readings, dtype=float)
+        mean = float(np.mean(arr))
+        std = float(np.std(arr, ddof=1))
+        if std == 0:
+            return 0.0
+        return (self._ema - mean) / std

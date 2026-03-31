@@ -576,11 +576,59 @@ def log_confidence_breakdown(    signal_id: str,
         pass  # Non-fatal: logging failure must not block signal flow
 
 
+def get_regime_weight_adjustments(regime: str, channel: str) -> Dict[str, float]:
+    """Return regime-specific multiplier adjustments for channel weights.
+
+    These multipliers are applied **on top of** the existing channel weight
+    profiles in :func:`compute_confidence` to tilt sub-score importance
+    based on the current market regime.  For example, in a trending market
+    the trend sub-score is amplified (×1.3) while sentiment is dampened
+    (×0.7).
+
+    Parameters
+    ----------
+    regime:
+        Market regime string (e.g. ``"TRENDING_UP"``, ``"RANGING"``).
+    channel:
+        Channel name (unused currently but reserved for future per-channel
+        regime profiles).
+
+    Returns
+    -------
+    Dict[str, float]
+        Mapping of sub-score name → float multiplier (1.0 = no change).
+    """
+    _REGIME_ADJUSTMENTS: Dict[str, Dict[str, float]] = {
+        "TRENDING_UP": {
+            "smc": 1.2, "trend": 1.3, "liquidity": 0.9, "spread": 0.8,
+            "order_flow": 1.1, "sentiment": 0.7,
+        },
+        "TRENDING_DOWN": {
+            "smc": 1.2, "trend": 1.3, "liquidity": 0.9, "spread": 0.8,
+            "order_flow": 1.1, "sentiment": 0.7,
+        },
+        "RANGING": {
+            "smc": 0.9, "trend": 0.6, "liquidity": 1.2, "spread": 1.3,
+            "order_flow": 1.0, "sentiment": 0.8,
+        },
+        "VOLATILE": {
+            "smc": 1.1, "trend": 0.8, "liquidity": 1.3, "spread": 1.4,
+            "order_flow": 1.5, "sentiment": 0.5,
+        },
+        "QUIET": {
+            "smc": 0.8, "trend": 0.7, "liquidity": 1.0, "spread": 1.5,
+            "order_flow": 0.9, "sentiment": 0.6,
+        },
+    }
+    return _REGIME_ADJUSTMENTS.get(regime.upper(), {})
+
+
 def compute_confidence(
     inp: ConfidenceInput,
     session_now: Optional[datetime] = None,
     channel: Optional[str] = None,
     signal_id: Optional[str] = None,
+    regime: str = "",
 ) -> ConfidenceResult:
     """Combine all sub-scores into the final 0–100 confidence.
 
@@ -602,19 +650,25 @@ def compute_confidence(
         Optional signal identifier.  When provided and
         ``CONFIDENCE_LOG_ENABLED`` is True, the full breakdown is written to
         the confidence log file for offline weight-profile optimisation.
+    regime:
+        Optional market regime string (e.g. ``"TRENDING_UP"``).  When
+        provided, regime-specific weight multipliers from
+        :func:`get_regime_weight_adjustments` are applied on top of the
+        channel weights.
     """
     weights = load_learned_weights(channel or "") or _CHANNEL_WEIGHT_PROFILES.get(channel or "", {})
+    regime_adj = get_regime_weight_adjustments(regime, channel or "")
     breakdown: Dict[str, float] = {
-        "smc": inp.smc_score * weights.get("smc", 1.0),
-        "trend": inp.trend_score * weights.get("trend", 1.0),
-        "liquidity": inp.liquidity_score * weights.get("liquidity", 1.0),
-        "spread": inp.spread_score * weights.get("spread", 1.0),
+        "smc": inp.smc_score * weights.get("smc", 1.0) * regime_adj.get("smc", 1.0),
+        "trend": inp.trend_score * weights.get("trend", 1.0) * regime_adj.get("trend", 1.0),
+        "liquidity": inp.liquidity_score * weights.get("liquidity", 1.0) * regime_adj.get("liquidity", 1.0),
+        "spread": inp.spread_score * weights.get("spread", 1.0) * regime_adj.get("spread", 1.0),
         "data_sufficiency": inp.data_sufficiency * weights.get("data_sufficiency", 1.0),
         "multi_exchange": inp.multi_exchange * weights.get("multi_exchange", 1.0),
         "onchain": inp.onchain_score * weights.get("onchain", 1.0),
-        "order_flow": inp.order_flow_score * weights.get("order_flow", 1.0),
+        "order_flow": inp.order_flow_score * weights.get("order_flow", 1.0) * regime_adj.get("order_flow", 1.0),
         "sentiment": score_sentiment(inp.sentiment_score, channel=channel)
-            * weights.get("sentiment", 0.0),
+            * weights.get("sentiment", 0.0) * regime_adj.get("sentiment", 1.0),
     }
     total = sum(breakdown.values())
 

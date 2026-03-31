@@ -30,7 +30,7 @@ the signal validation pipeline after indicator calculations are available.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 from src.utils import get_logger
 
@@ -515,3 +515,320 @@ def check_mtf_gate(
         return False, result.reason
 
     return True, ""
+
+
+# ---------------------------------------------------------------------------
+# MTF divergence detection
+# ---------------------------------------------------------------------------
+
+#: Lower timeframes used for divergence detection.
+_LOWER_TFS: List[str] = ["1m", "5m"]
+#: Higher timeframes used for divergence detection.
+_HIGHER_TFS: List[str] = ["1h", "4h"]
+
+
+def _infer_bias(indicators: dict) -> str:
+    """Infer directional bias from an indicator dict.
+
+    Returns ``"BULLISH"``, ``"BEARISH"``, or ``"NEUTRAL"`` based on
+    momentum and EMA alignment.
+    """
+    momentum = indicators.get("momentum_last")
+    ema9 = indicators.get("ema9_last")
+    ema21 = indicators.get("ema21_last")
+    rsi = indicators.get("rsi")
+
+    bullish_signals = 0
+    bearish_signals = 0
+
+    if momentum is not None:
+        if momentum > 0:
+            bullish_signals += 1
+        elif momentum < 0:
+            bearish_signals += 1
+
+    if ema9 is not None and ema21 is not None:
+        if ema9 > ema21:
+            bullish_signals += 1
+        elif ema9 < ema21:
+            bearish_signals += 1
+
+    if rsi is not None:
+        if rsi > 55:
+            bullish_signals += 1
+        elif rsi < 45:
+            bearish_signals += 1
+
+    if bullish_signals > bearish_signals:
+        return "BULLISH"
+    if bearish_signals > bullish_signals:
+        return "BEARISH"
+    return "NEUTRAL"
+
+
+def detect_mtf_divergence(
+    indicators_by_tf: Dict[str, dict],
+    direction: str,
+) -> dict:
+    """Detect when lower timeframes diverge from higher timeframes.
+
+    Parameters
+    ----------
+    indicators_by_tf:
+        Mapping of timeframe label → indicator dict.  Expected keys in each
+        indicator dict: ``rsi``, ``momentum_last``, ``ema9_last``,
+        ``ema21_last``.
+    direction:
+        Signal direction: ``"LONG"`` or ``"SHORT"``.
+
+    Returns
+    -------
+    dict
+        ``{"divergent": bool, "lower_tf_bias": str, "higher_tf_bias": str,
+        "severity": float, "recommendation": str}``
+    """
+    if not indicators_by_tf:
+        return {
+            "divergent": False,
+            "lower_tf_bias": "NEUTRAL",
+            "higher_tf_bias": "NEUTRAL",
+            "severity": 0.0,
+            "recommendation": "no data",
+        }
+
+    lower_biases: List[str] = []
+    higher_biases: List[str] = []
+
+    for tf in _LOWER_TFS:
+        if tf in indicators_by_tf:
+            lower_biases.append(_infer_bias(indicators_by_tf[tf]))
+
+    for tf in _HIGHER_TFS:
+        if tf in indicators_by_tf:
+            higher_biases.append(_infer_bias(indicators_by_tf[tf]))
+
+    if not lower_biases and not higher_biases:
+        return {
+            "divergent": False,
+            "lower_tf_bias": "NEUTRAL",
+            "higher_tf_bias": "NEUTRAL",
+            "severity": 0.0,
+            "recommendation": "insufficient timeframe data",
+        }
+
+    def _majority(biases: List[str]) -> str:
+        if not biases:
+            return "NEUTRAL"
+        bull = sum(1 for b in biases if b == "BULLISH")
+        bear = sum(1 for b in biases if b == "BEARISH")
+        if bull > bear:
+            return "BULLISH"
+        if bear > bull:
+            return "BEARISH"
+        return "NEUTRAL"
+
+    lower_bias = _majority(lower_biases)
+    higher_bias = _majority(higher_biases)
+
+    divergent = (
+        lower_bias != "NEUTRAL"
+        and higher_bias != "NEUTRAL"
+        and lower_bias != higher_bias
+    )
+
+    # Severity: 0.0 when aligned, 0.3 when one is neutral, 1.0 when fully opposed
+    if divergent:
+        severity = 1.0
+    elif lower_bias == "NEUTRAL" or higher_bias == "NEUTRAL":
+        severity = 0.3
+    else:
+        severity = 0.0
+
+    # Recommendation
+    wanted = "BULLISH" if direction.upper() == "LONG" else "BEARISH"
+    if not divergent:
+        recommendation = "aligned"
+    elif higher_bias == wanted:
+        recommendation = "lower TFs opposing — consider waiting for realignment"
+    else:
+        recommendation = "higher TFs opposing — potential reversal signal"
+
+    return {
+        "divergent": divergent,
+        "lower_tf_bias": lower_bias,
+        "higher_tf_bias": higher_bias,
+        "severity": severity,
+        "recommendation": recommendation,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Cross-TF volume delta aggregation
+# ---------------------------------------------------------------------------
+
+
+def compute_cross_tf_volume_delta(candles_by_tf: Dict[str, dict]) -> dict:
+    """Aggregate volume delta across timeframes.
+
+    Each entry in *candles_by_tf* should be a dict with at least
+    ``buy_volume`` and ``sell_volume`` keys.  If these are missing, the
+    timeframe is skipped.
+
+    Parameters
+    ----------
+    candles_by_tf:
+        Mapping of timeframe label → candle data dict.
+
+    Returns
+    -------
+    dict
+        ``{"net_delta": float, "aligned": bool, "alignment_score": float,
+        "dominant_tf": str}``
+    """
+    if not candles_by_tf:
+        return {
+            "net_delta": 0.0,
+            "aligned": False,
+            "alignment_score": 0.0,
+            "dominant_tf": "",
+        }
+
+    deltas: Dict[str, float] = {}
+    for tf, data in candles_by_tf.items():
+        buy_vol = data.get("buy_volume")
+        sell_vol = data.get("sell_volume")
+        if buy_vol is None or sell_vol is None:
+            continue
+        try:
+            deltas[tf] = float(buy_vol) - float(sell_vol)
+        except (TypeError, ValueError):
+            continue
+
+    if not deltas:
+        return {
+            "net_delta": 0.0,
+            "aligned": False,
+            "alignment_score": 0.0,
+            "dominant_tf": "",
+        }
+
+    net_delta = sum(deltas.values())
+
+    # Check alignment: all TFs agree on direction (positive or negative)
+    positive = sum(1 for d in deltas.values() if d > 0)
+    negative = sum(1 for d in deltas.values() if d < 0)
+    total = len(deltas)
+    aligned = (positive == total) or (negative == total)
+    alignment_score = max(positive, negative) / total if total > 0 else 0.0
+
+    # Dominant TF: the one with the largest absolute delta
+    dominant_tf = max(deltas, key=lambda t: abs(deltas[t]))
+
+    return {
+        "net_delta": net_delta,
+        "aligned": aligned,
+        "alignment_score": round(alignment_score, 4),
+        "dominant_tf": dominant_tf,
+    }
+
+
+# ---------------------------------------------------------------------------
+# Channel-specific MTF gates: divergence and supertrend
+# ---------------------------------------------------------------------------
+
+
+def mtf_gate_scalp_divergence(
+    indicators_by_tf: Dict[str, dict],
+    direction: str,
+) -> Tuple[bool, str]:
+    """MTF gate specifically for divergence setups.
+
+    More lenient than the standard gate since divergences by nature oppose
+    the prevailing higher-TF trend.  Passes if at least one higher TF is
+    neutral (not actively opposing) or if divergence severity is low.
+
+    Parameters
+    ----------
+    indicators_by_tf:
+        Mapping of timeframe label → indicator dict.
+    direction:
+        ``"LONG"`` or ``"SHORT"``.
+
+    Returns
+    -------
+    Tuple[bool, str]
+        ``(passed, reason)``
+    """
+    if not indicators_by_tf:
+        return True, "mtf_divergence_no_data"
+
+    div = detect_mtf_divergence(indicators_by_tf, direction)
+
+    if not div["divergent"]:
+        return True, "mtf_divergence_aligned"
+
+    # Lenient: allow if severity is moderate (divergence setups are inherently
+    # contrarian, so full opposition is expected)
+    if div["severity"] <= 0.5:
+        return True, f"mtf_divergence_mild_{div['severity']:.1f}"
+
+    # Check if at least one higher TF is neutral — partial agreement is enough
+    higher_neutral = False
+    for tf in _HIGHER_TFS:
+        if tf in indicators_by_tf:
+            bias = _infer_bias(indicators_by_tf[tf])
+            if bias == "NEUTRAL":
+                higher_neutral = True
+                break
+
+    if higher_neutral:
+        return True, "mtf_divergence_higher_neutral"
+
+    return False, f"mtf_divergence_blocked_{div['higher_tf_bias']}_vs_{direction}"
+
+
+def mtf_gate_scalp_supertrend(
+    indicators_by_tf: Dict[str, dict],
+    direction: str,
+) -> Tuple[bool, str]:
+    """MTF gate for supertrend setups.
+
+    Requires at least 2 timeframes to agree on the signal direction.
+    Uses EMA alignment and momentum to infer directional bias per TF.
+
+    Parameters
+    ----------
+    indicators_by_tf:
+        Mapping of timeframe label → indicator dict.
+    direction:
+        ``"LONG"`` or ``"SHORT"``.
+
+    Returns
+    -------
+    Tuple[bool, str]
+        ``(passed, reason)``
+    """
+    if not indicators_by_tf:
+        return True, "mtf_supertrend_no_data"
+
+    wanted = "BULLISH" if direction.upper() == "LONG" else "BEARISH"
+    agreeing: List[str] = []
+    opposing: List[str] = []
+
+    for tf, indicators in indicators_by_tf.items():
+        bias = _infer_bias(indicators)
+        if bias == wanted:
+            agreeing.append(tf)
+        elif bias != "NEUTRAL":
+            opposing.append(tf)
+
+    if len(agreeing) >= 2:
+        return True, f"mtf_supertrend_ok_{len(agreeing)}_agree"
+
+    if len(agreeing) == 1 and not opposing:
+        return True, f"mtf_supertrend_partial_{agreeing[0]}"
+
+    return (
+        False,
+        f"mtf_supertrend_blocked_{len(agreeing)}_agree_{len(opposing)}_oppose",
+    )
