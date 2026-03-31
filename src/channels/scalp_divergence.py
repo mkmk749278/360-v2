@@ -96,7 +96,7 @@ class ScalpDivergenceChannel(BaseChannel):
         rsi_arr = [float(v) if not np.isnan(v) else 50.0 for v in rsi_arr_raw[-_DIV_LOOKBACK:]]
 
         # Compute MACD histogram for confirmation
-        macd_hist: list[float] | None = None
+        macd_hist: Optional[list[float]] = None
         macd_data = ind.get("macd_histogram") or ind.get("macd_hist")
         if macd_data is not None and len(macd_data) >= _DIV_LOOKBACK:
             macd_hist = [float(v) if not np.isnan(v) else 0.0 for v in macd_data[-_DIV_LOOKBACK:]]
