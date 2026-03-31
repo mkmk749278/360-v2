@@ -46,14 +46,14 @@ log = get_logger("rate_limiter")
 # Binance rolling window duration in seconds
 _WEIGHT_WINDOW_S: float = 60.0
 
-# Default budget for Spot: 5,000 out of Binance's 6,000/min Spot limit.
-# The remaining ~1,000 units are reserved for WebSocket reconnects, ad-hoc
+# Default budget for Spot: 5,500 out of Binance's 6,000/min Spot limit.
+# The remaining ~500 units are reserved for WebSocket reconnects, ad-hoc
 # exchange-info calls, and any other requests that bypass the main scan path.
-_DEFAULT_BUDGET: int = 5_000
+_DEFAULT_BUDGET: int = 5_500
 
-# Default budget for Futures: 2,000 out of Binance's 2,400/min Futures limit.
-# The remaining ~400 units are reserved for reconnects and ad-hoc requests.
-_DEFAULT_FUTURES_BUDGET: int = 2_000
+# Default budget for Futures: 2,200 out of Binance's 2,400/min Futures limit.
+# The remaining ~200 units are reserved for reconnects and ad-hoc requests.
+_DEFAULT_FUTURES_BUDGET: int = 2_200
 
 # Warn when usage reaches this fraction of the budget
 _WARN_THRESHOLD: float = 0.90

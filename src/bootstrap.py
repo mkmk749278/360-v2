@@ -27,12 +27,12 @@ log = get_logger("bootstrap")
 # Higher weight budget during boot — no competing scan traffic yet, so we
 # can safely use more of Binance's 6,000/min Spot allowance for fast seeding.
 _BOOT_BUDGET: int = 5_500
-# Normal steady-state Spot budget — leaves ~1,000 headroom for WS reconnects.
-_STEADY_BUDGET: int = 5_000
+# Normal steady-state Spot budget — leaves ~500 headroom for WS reconnects.
+_STEADY_BUDGET: int = 5_500
 
 # Futures budgets — Binance Futures hard cap is 2,400/min.
 _BOOT_BUDGET_FUTURES: int = 2_200
-_STEADY_BUDGET_FUTURES: int = 2_000
+_STEADY_BUDGET_FUTURES: int = 2_200
 
 
 class Bootstrap:

@@ -39,7 +39,7 @@ _BACKOFF_BASE: float = 1.5  # exponential-backoff base (seconds)
 # (see _DEPTH_TIMEOUT_S) since they are small payloads and frequent timeouts
 # inflate scan latency severely.
 _DEFAULT_TIMEOUT_S: float = 8.0
-_DEPTH_TIMEOUT_S: float = 5.0
+_DEPTH_TIMEOUT_S: float = 3.0
 
 # Depth endpoint paths — used by the per-endpoint circuit breaker.
 _DEPTH_PATHS: frozenset = frozenset({"/fapi/v1/depth", "/api/v3/depth"})
@@ -78,7 +78,7 @@ class BinanceClient:
         )
         # Per-endpoint depth circuit breaker: tracks consecutive timeouts so
         # that a sustained Binance depth API outage doesn't block scan cycles
-        # for 75 s per symbol (5 retries × 15 s timeout each).
+        # for 6 s per symbol (2 retries × 3 s timeout each).
         self._depth_consecutive_timeouts: int = 0
         self._depth_circuit_open_until: float = 0.0
         # Semaphore to cap the number of simultaneous in-flight HTTP requests.
@@ -140,7 +140,7 @@ class BinanceClient:
         ----------
         timeout:
             Per-request timeout in seconds.  When ``None``, depth paths use
-            ``_DEPTH_TIMEOUT_S`` (5 s) and all other paths use
+            ``_DEPTH_TIMEOUT_S`` (3 s) and all other paths use
             ``_DEFAULT_TIMEOUT_S`` (8 s).
         """
         is_depth = path in _DEPTH_PATHS

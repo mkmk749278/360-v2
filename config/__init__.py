@@ -1063,8 +1063,8 @@ DEPTH_CIRCUIT_BREAKER_THRESHOLD: int = int(
 DEPTH_CIRCUIT_BREAKER_COOLDOWN: float = float(
     os.getenv("DEPTH_CIRCUIT_BREAKER_COOLDOWN", "60")
 )
-# Maximum retries for depth endpoint specifically (prevents 75 s cumulative wait).
-DEPTH_MAX_RETRIES: int = int(os.getenv("DEPTH_MAX_RETRIES", "3"))
+# Maximum retries for depth endpoint specifically (prevents cumulative wait).
+DEPTH_MAX_RETRIES: int = int(os.getenv("DEPTH_MAX_RETRIES", "2"))
 
 # ---------------------------------------------------------------------------
 # WS reconnection resilience — escalation alert threshold
