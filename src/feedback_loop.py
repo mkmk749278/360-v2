@@ -664,3 +664,240 @@ class FeedbackLoop:
                     "Periodic retraining skipped ({} < {} outcomes)",
                     len(self._outcomes), min_outcomes,
                 )
+
+
+# ---------------------------------------------------------------------------
+# Setup-specific tracking and adaptive gates
+# ---------------------------------------------------------------------------
+
+from typing import List, Tuple  # noqa: E402
+import hashlib as _hashlib  # noqa: E402
+
+
+class SetupWinRateTracker:
+    """Tracks win rate per (setup_class, regime) combination.
+
+    Records individual trade outcomes and provides aggregated statistics
+    for setup/regime pairs to support adaptive confidence adjustments.
+    """
+
+    def __init__(self) -> None:
+        # key = (setup_class, regime) → list of (won, pnl_pct)
+        self._records: Dict[Tuple[str, str], list] = {}
+
+    def record_outcome(
+        self, setup_class: str, regime: str, won: bool, pnl_pct: float
+    ) -> None:
+        """Record a trade outcome for a setup/regime pair."""
+        key = (setup_class, regime)
+        self._records.setdefault(key, []).append((won, pnl_pct))
+
+    def get_setup_win_rate(
+        self, setup_class: str, regime: str
+    ) -> Optional[float]:
+        """Return the win rate for *setup_class* in *regime*, or ``None`` if < 10 samples."""
+        samples = self._records.get((setup_class, regime), [])
+        if len(samples) < 10:
+            return None
+        wins = sum(1 for won, _ in samples if won)
+        return wins / len(samples)
+
+    def get_best_setups(
+        self, regime: str, min_samples: int = 10
+    ) -> List[Tuple[str, float]]:
+        """Return setups sorted by win rate (best first) for *regime*."""
+        results: List[Tuple[str, float]] = []
+        for (sc, reg), samples in self._records.items():
+            if reg != regime or len(samples) < min_samples:
+                continue
+            wr = sum(1 for won, _ in samples if won) / len(samples)
+            results.append((sc, wr))
+        results.sort(key=lambda x: x[1], reverse=True)
+        return results
+
+    def get_worst_setups(
+        self, regime: str, min_samples: int = 10
+    ) -> List[Tuple[str, float]]:
+        """Return setups sorted by win rate (worst first) for *regime*."""
+        results: List[Tuple[str, float]] = []
+        for (sc, reg), samples in self._records.items():
+            if reg != regime or len(samples) < min_samples:
+                continue
+            wr = sum(1 for won, _ in samples if won) / len(samples)
+            results.append((sc, wr))
+        results.sort(key=lambda x: x[1])
+        return results
+
+    def get_setup_adjustment(self, setup_class: str, regime: str) -> float:
+        """Return a confidence adjustment based on historical win rate.
+
+        Returns
+        -------
+        float
+            Adjustment in points: +5, +2, 0, -3, or -8.
+            Returns 0.0 if fewer than 10 samples are available.
+        """
+        wr = self.get_setup_win_rate(setup_class, regime)
+        if wr is None:
+            return 0.0
+        if wr >= 0.65:
+            return 5.0
+        if wr >= 0.55:
+            return 2.0
+        if wr >= 0.45:
+            return 0.0
+        if wr >= 0.35:
+            return -3.0
+        return -8.0
+
+
+class AdaptiveGateThresholds:
+    """Tracks gate firing patterns and adjusts thresholds adaptively.
+
+    A gate that blocks too many eventual winners is loosened; a gate
+    that passes too many eventual losers is tightened.  Adjustments
+    are clamped to ±20 % of the base threshold.
+    """
+
+    def __init__(self) -> None:
+        # gate_name → list of (fired, signal_won)
+        self._records: Dict[str, list] = {}
+
+    def record_gate_outcome(
+        self, gate_name: str, fired: bool, signal_won: Optional[bool] = None
+    ) -> None:
+        """Record whether a gate fired and (optionally) the signal outcome."""
+        self._records.setdefault(gate_name, []).append((fired, signal_won))
+
+    def get_adjusted_threshold(
+        self, gate_name: str, base_threshold: float
+    ) -> float:
+        """Return an adjusted threshold for *gate_name*.
+
+        Logic
+        -----
+        * If the gate fires on >60 % of signals that would have won →
+          loosen (reduce) threshold by 10 %.
+        * If the gate passes >70 % of signals that lose →
+          tighten (increase) threshold by 10 %.
+        * Adjustments clamped to ±20 % of *base_threshold*.
+        * Minimum 30 samples before any adjustment is made.
+        """
+        records = self._records.get(gate_name, [])
+        # Only consider records with known outcomes
+        known = [(fired, won) for fired, won in records if won is not None]
+        if len(known) < 30:
+            return base_threshold
+
+        # Check over-filtering: gate fires on winners
+        winners = [(fired, won) for fired, won in known if won]
+        if winners:
+            fired_on_winners = sum(1 for fired, _ in winners if fired)
+            if fired_on_winners / len(winners) > 0.60:
+                # Too aggressive → loosen by 10 %, clamped to -20 %
+                adjustment = max(-0.20, -0.10)
+                return round(base_threshold * (1.0 + adjustment), 6)
+
+        # Check under-filtering: gate passes losers
+        losers = [(fired, won) for fired, won in known if not won]
+        if losers:
+            passed_losers = sum(1 for fired, _ in losers if not fired)
+            if passed_losers / len(losers) > 0.70:
+                # Too lenient → tighten by 10 %, clamped to +20 %
+                adjustment = min(0.20, 0.10)
+                return round(base_threshold * (1.0 + adjustment), 6)
+
+        return base_threshold
+
+
+class ABTestManager:
+    """Simple A/B testing framework for signal processing variants.
+
+    Allows registering experiments with named variants, deterministically
+    assigning signals to variants, and tracking per-variant outcomes.
+    """
+
+    def __init__(self) -> None:
+        # experiment_name → list of variant names
+        self._experiments: Dict[str, List[str]] = {}
+        # (experiment_name, variant) → list of (won, pnl_pct)
+        self._outcomes: Dict[Tuple[str, str], list] = {}
+
+    def register_experiment(self, name: str, variants: List[str]) -> None:
+        """Register an experiment with the given variant names.
+
+        Parameters
+        ----------
+        name:
+            Unique experiment identifier.
+        variants:
+            List of variant labels (e.g. ``["current", "new_weights"]``).
+        """
+        self._experiments[name] = list(variants)
+        for v in variants:
+            self._outcomes.setdefault((name, v), [])
+
+    def get_variant(self, experiment_name: str, signal_id: str) -> str:
+        """Deterministically assign *signal_id* to a variant.
+
+        Uses a hash of the signal ID to ensure consistent assignment
+        across calls for the same signal.
+
+        Returns the first variant if the experiment is unknown.
+        """
+        variants = self._experiments.get(experiment_name)
+        if not variants:
+            return ""
+        digest = int(_hashlib.sha256(signal_id.encode()).hexdigest(), 16)
+        return variants[digest % len(variants)]
+
+    def record_outcome(
+        self, experiment_name: str, variant: str, won: bool, pnl_pct: float
+    ) -> None:
+        """Record the outcome for a signal assigned to *variant*."""
+        self._outcomes.setdefault((experiment_name, variant), []).append(
+            (won, pnl_pct)
+        )
+
+    def get_results(self, experiment_name: str) -> Dict[str, dict]:
+        """Return per-variant aggregate statistics.
+
+        Returns
+        -------
+        Dict[str, dict]
+            Mapping of variant → ``{"n": int, "win_rate": float, "avg_pnl": float}``.
+        """
+        variants = self._experiments.get(experiment_name, [])
+        results: Dict[str, dict] = {}
+        for v in variants:
+            records = self._outcomes.get((experiment_name, v), [])
+            n = len(records)
+            if n == 0:
+                results[v] = {"n": 0, "win_rate": 0.0, "avg_pnl": 0.0}
+                continue
+            wins = sum(1 for won, _ in records if won)
+            avg_pnl = sum(pnl for _, pnl in records) / n
+            results[v] = {
+                "n": n,
+                "win_rate": round(wins / n, 4),
+                "avg_pnl": round(avg_pnl, 4),
+            }
+        return results
+
+    def get_winner(
+        self, experiment_name: str, min_samples: int = 50
+    ) -> Optional[str]:
+        """Return the best-performing variant, or ``None`` if insufficient data.
+
+        A variant must have at least *min_samples* outcomes to be eligible.
+        The winner is determined by highest win rate.
+        """
+        results = self.get_results(experiment_name)
+        eligible = {
+            v: stats
+            for v, stats in results.items()
+            if stats["n"] >= min_samples
+        }
+        if not eligible:
+            return None
+        return max(eligible, key=lambda v: eligible[v]["win_rate"])

@@ -269,3 +269,153 @@ def calculate_position_size(
 
     size = account_risk_pct * conf_mult * atr_mult
     return round(min(size, 100.0), 2)
+
+
+# ---------------------------------------------------------------------------
+# Kelly Criterion & drawdown-adaptive sizing
+# ---------------------------------------------------------------------------
+
+
+def kelly_criterion(
+    win_rate: float,
+    avg_win: float,
+    avg_loss: float,
+    fraction: float = 0.25,
+) -> float:
+    """Compute fractional Kelly position sizing.
+
+    Full Kelly:  f* = (win_rate * avg_win - (1 - win_rate) * avg_loss) / avg_win
+    Fractional Kelly multiplies by *fraction* (default 0.25 = quarter-Kelly).
+
+    Parameters
+    ----------
+    win_rate:
+        Historical win rate (0-1).
+    avg_win:
+        Average winning trade return (positive).
+    avg_loss:
+        Average losing trade return (positive magnitude).
+    fraction:
+        Kelly fraction to apply (0-1).  Lower is safer.
+
+    Returns
+    -------
+    float
+        Fraction of capital to risk, clamped to ``[0.01, 0.10]``.
+    """
+    if avg_win <= 0:
+        return 0.01
+    full_kelly = (win_rate * avg_win - (1.0 - win_rate) * avg_loss) / avg_win
+    fractional = full_kelly * fraction
+    return round(max(0.01, min(0.10, fractional)), 4)
+
+
+class DrawdownAdaptiveSizer:
+    """Reduces position size as drawdown deepens.
+
+    Parameters
+    ----------
+    base_size_pct:
+        Full position size when equity is at its peak (% of capital).
+    max_drawdown_reduction:
+        Maximum fractional reduction at the 5 % drawdown level (e.g. 0.5 = 50 %).
+    """
+
+    def __init__(
+        self,
+        base_size_pct: float = 2.0,
+        max_drawdown_reduction: float = 0.5,
+    ) -> None:
+        self.base_size_pct = base_size_pct
+        self.max_drawdown_reduction = max_drawdown_reduction
+        self._peak_equity: float = 100.0
+        self._current_equity: float = 100.0
+
+    def update_pnl(self, pnl_pct: float) -> None:
+        """Record a trade PnL result (as % of equity).
+
+        Parameters
+        ----------
+        pnl_pct:
+            Percentage gain/loss (e.g. +1.5 or -0.8).
+        """
+        self._current_equity *= (1.0 + pnl_pct / 100.0)
+        if self._current_equity > self._peak_equity:
+            self._peak_equity = self._current_equity
+
+    def get_position_size_pct(self) -> float:
+        """Return the drawdown-adjusted position size (% of capital).
+
+        - 0 % drawdown → full ``base_size_pct``
+        - 5 % drawdown → reduced by ``max_drawdown_reduction``
+        - 10 %+ drawdown → minimum 25 % of ``base_size_pct``
+        """
+        if self._peak_equity <= 0:
+            return self.base_size_pct * 0.25
+
+        drawdown_pct = (self._peak_equity - self._current_equity) / self._peak_equity * 100.0
+        drawdown_pct = max(0.0, drawdown_pct)
+
+        if drawdown_pct >= 10.0:
+            return round(self.base_size_pct * 0.25, 4)
+
+        # Linear interpolation: 0 % dd → factor 1.0, 5 % dd → factor (1 - max_reduction)
+        reduction_factor = min(drawdown_pct / 5.0, 1.0) * self.max_drawdown_reduction
+        factor = max(0.25, 1.0 - reduction_factor)
+        return round(self.base_size_pct * factor, 4)
+
+    def reset(self) -> None:
+        """Reset equity tracking to initial state."""
+        self._peak_equity = 100.0
+        self._current_equity = 100.0
+
+
+from typing import List  # noqa: E402
+
+
+def compute_correlation_adjusted_risk(
+    positions: List[dict],
+    new_signal: dict,
+    max_portfolio_risk_pct: float = 5.0,
+) -> dict:
+    """Check whether adding *new_signal* would exceed portfolio risk limits.
+
+    Parameters
+    ----------
+    positions:
+        List of open positions, each a dict with keys
+        ``{"symbol": str, "direction": str, "risk_pct": float}``.
+    new_signal:
+        Proposed new signal dict with the same keys.
+    max_portfolio_risk_pct:
+        Maximum acceptable total portfolio risk (%).
+
+    Returns
+    -------
+    dict
+        ``{"allowed": bool, "adjusted_risk_pct": float,
+          "portfolio_risk_pct": float, "reason": str}``
+    """
+    current_risk = sum(float(p.get("risk_pct", 0.0)) for p in positions)
+    new_risk = float(new_signal.get("risk_pct", 0.0))
+    total_risk = current_risk + new_risk
+
+    if total_risk > max_portfolio_risk_pct:
+        remaining = max(0.0, max_portfolio_risk_pct - current_risk)
+        return {
+            "allowed": remaining > 0,
+            "adjusted_risk_pct": round(remaining, 4),
+            "portfolio_risk_pct": round(current_risk, 4),
+            "reason": (
+                f"Portfolio risk would be {total_risk:.2f}% "
+                f"(max {max_portfolio_risk_pct}%). "
+                + ("Reduced to fit." if remaining > 0 else "No room.")
+            ),
+        }
+
+    return {
+        "allowed": True,
+        "adjusted_risk_pct": round(new_risk, 4),
+        "portfolio_risk_pct": round(current_risk, 4),
+        "reason": "",
+    }

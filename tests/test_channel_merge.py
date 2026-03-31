@@ -6,7 +6,10 @@ import importlib
 import os
 from unittest import mock
 
-_SCALP_CHANNELS = ("360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP", "360_SCALP_OBI")
+_SCALP_CHANNELS = (
+    "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP", "360_SCALP_OBI",
+    "360_SCALP_DIVERGENCE", "360_SCALP_SUPERTREND", "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
+)
 
 
 def _build_map(**env_overrides):
@@ -52,8 +55,8 @@ class TestBuildChannelTelegramMap:
         for ch in _SCALP_CHANNELS:
             assert mapping[ch] == "active_id"
 
-    def test_all_five_channels_present(self):
-        """The map always contains exactly 5 scalp channel keys."""
+    def test_all_nine_channels_present(self):
+        """The map always contains exactly 9 scalp channel keys."""
         mapping = _build_map()
         expected_keys = set(_SCALP_CHANNELS)
         assert set(mapping.keys()) == expected_keys

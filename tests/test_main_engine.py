@@ -86,7 +86,7 @@ class TestCryptoSignalEngineInit:
 
     def test_engine_channels_count(self):
         engine = self._make_engine()
-        assert len(engine._channels) == 5  # 5 SCALP channel variants
+        assert len(engine._channels) == 9  # 9 SCALP channel variants
 
     def test_signal_history_starts_empty(self):
         engine = self._make_engine()

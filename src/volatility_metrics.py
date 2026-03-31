@@ -209,3 +209,161 @@ def calculate_dynamic_sl_tp(
         pair, regime, pair_tier, adj_sl, adj_tp,
     )
     return adj_sl, adj_tp
+
+
+# ---------------------------------------------------------------------------
+# GARCH-like volatility forecasting (EWMA / RiskMetrics approximation)
+# ---------------------------------------------------------------------------
+
+
+class GarchLikeForecaster:
+    """Simple EWMA-based volatility forecaster (lightweight GARCH(1,1) approximation).
+
+    Uses the exponentially weighted moving average variance estimator
+    popularised by J.P. Morgan's RiskMetrics methodology:
+
+        σ²_t = α · r²_{t-1} + β · σ²_{t-1}
+
+    Parameters
+    ----------
+    alpha:
+        Weight for the latest squared return (shock weight).
+    beta:
+        Persistence weight for the previous variance estimate.
+    """
+
+    def __init__(self, alpha: float = 0.06, beta: float = 0.94) -> None:
+        self.alpha = alpha
+        self.beta = beta
+        self._variance: float = 1.0
+        self._n_updates: int = 0
+
+    def update(self, return_pct: float) -> float:
+        """Update the variance forecast with a new return observation.
+
+        Parameters
+        ----------
+        return_pct:
+            Percentage return for the latest period.
+
+        Returns
+        -------
+        float
+            Updated annualised volatility forecast (sqrt of variance).
+        """
+        self._variance = self.alpha * (return_pct ** 2) + self.beta * self._variance
+        self._n_updates += 1
+        return self.forecast()
+
+    def forecast(self) -> float:
+        """Return the current volatility forecast (std-dev, same units as input returns)."""
+        return float(np.sqrt(max(self._variance, 0.0)))
+
+    def get_confidence_interval(self, n_periods: int = 1) -> Tuple[float, float]:
+        """Return a 95 % confidence interval for the cumulative volatility over *n_periods*.
+
+        Parameters
+        ----------
+        n_periods:
+            Number of periods ahead.
+
+        Returns
+        -------
+        Tuple[float, float]
+            ``(lower, upper)`` bounds of the 95 % CI.
+        """
+        n_periods = max(1, n_periods)
+        vol = self.forecast() * np.sqrt(n_periods)
+        # 95 % CI ≈ ±1.96 σ
+        return (-1.96 * vol, 1.96 * vol)
+
+
+def forecast_volatility(returns: list, horizon: int = 5) -> dict:
+    """Fit an EWMA volatility model and forecast ahead.
+
+    Parameters
+    ----------
+    returns:
+        List of return percentages (most recent last).
+    horizon:
+        Number of periods to forecast ahead.
+
+    Returns
+    -------
+    dict
+        ``{"current_vol", "forecast_vol", "vol_trend", "vol_percentile"}``
+    """
+    if not returns:
+        return {
+            "current_vol": 0.0,
+            "forecast_vol": 0.0,
+            "vol_trend": "STABLE",
+            "vol_percentile": 50.0,
+        }
+
+    forecaster = GarchLikeForecaster()
+    vol_history: list[float] = []
+    for r in returns:
+        forecaster.update(float(r))
+        vol_history.append(forecaster.forecast())
+
+    current_vol = vol_history[-1] if vol_history else 0.0
+    # EWMA forecast is constant for future periods (variance is persistent)
+    forecast_vol = forecaster.forecast() * float(np.sqrt(max(1, horizon)))
+
+    # Trend detection: compare recent vol to earlier vol
+    if len(vol_history) >= 10:
+        recent_avg = float(np.mean(vol_history[-5:]))
+        earlier_avg = float(np.mean(vol_history[-10:-5]))
+        if earlier_avg > 0:
+            change = (recent_avg - earlier_avg) / earlier_avg
+            if change > 0.10:
+                vol_trend = "INCREASING"
+            elif change < -0.10:
+                vol_trend = "DECREASING"
+            else:
+                vol_trend = "STABLE"
+        else:
+            vol_trend = "STABLE"
+    else:
+        vol_trend = "STABLE"
+
+    # Percentile of current vol vs full history
+    if len(vol_history) >= 2:
+        vol_percentile = float(
+            np.sum(np.array(vol_history) <= current_vol) / len(vol_history) * 100.0
+        )
+    else:
+        vol_percentile = 50.0
+
+    return {
+        "current_vol": round(current_vol, 6),
+        "forecast_vol": round(forecast_vol, 6),
+        "vol_trend": vol_trend,
+        "vol_percentile": round(vol_percentile, 2),
+    }
+
+
+def compute_volatility_regime_sl_adjustment(vol_forecast: float, vol_current: float) -> float:
+    """Return a SL width multiplier based on forecasted vs current volatility.
+
+    Parameters
+    ----------
+    vol_forecast:
+        Forecasted volatility.
+    vol_current:
+        Current (realised) volatility.
+
+    Returns
+    -------
+    float
+        Multiplier: 1.15 (widen), 0.90 (tighten), or 1.0 (no change).
+    """
+    if vol_current <= 0:
+        return 1.0
+    ratio = (vol_forecast - vol_current) / vol_current
+    if ratio > 0.20:
+        return 1.15  # widen SL by 15 %
+    if ratio < -0.20:
+        return 0.90  # tighten SL by 10 %
+    return 1.0
