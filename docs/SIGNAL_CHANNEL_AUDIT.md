@@ -14,7 +14,7 @@
    - [ScalpFVGChannel (FVG_RETEST)](#22-scalpfvgchannel)
    - [ScalpCVDChannel (CVD_DIVERGENCE)](#23-scalpcvdchannel)
    - [ScalpDivergenceChannel (RSI_MACD_DIVERGENCE)](#24-scalpdivergencechannel)
-   - [ScalpSupertrendChannel (SUPERTREND_FLIP)](#25-scalpsupetrendchannel)
+   - [ScalpSupertrendChannel (SUPERTREND_FLIP)](#25-scalpsupertrendchannel)
    - [ScalpIchimokuChannel (ICHIMOKU_TK_CROSS)](#26-scalpichimokuchannel)
    - [ScalpOrderblockChannel (SMC_ORDERBLOCK)](#27-scalporderblockchannel)
    - [ScalpOBIChannel (OBI_ABSORPTION)](#28-scalpobichannel)
