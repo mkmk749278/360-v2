@@ -141,6 +141,15 @@ class ScalpIchimokuChannel(BaseChannel):
         if direction is None:
             return None
 
+        # Volume confirmation: TK crosses without volume participation may be weak.
+        # Current volume must be ≥ 1.2× the 20-bar average.
+        volumes = list(cd.get("volume", []))
+        if len(volumes) >= 21:
+            avg_vol = sum(float(v) for v in volumes[-21:-1]) / 20
+            current_vol = float(volumes[-1])
+            if avg_vol > 0 and current_vol < avg_vol * 1.2:
+                return None
+
         # RSI extreme gate
         if not check_rsi(
             ind.get("rsi_last"),

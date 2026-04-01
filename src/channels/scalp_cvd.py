@@ -157,7 +157,7 @@ class ScalpCVDChannel(BaseChannel):
             return None
 
         _regime_ctx = smc_data.get("regime_context")
-        return build_channel_signal(
+        sig = build_channel_signal(
             config=self.config,
             symbol=symbol,
             direction=direction,
@@ -174,3 +174,8 @@ class ScalpCVDChannel(BaseChannel):
             atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
             pair_tier=_pair_profile.tier if _pair_profile else "MIDCAP",
         )
+        if sig is not None:
+            age_str = f", age={cvd_div_age}" if cvd_div_age is not None else ""
+            strength_str = f", strength={cvd_div_strength:.2f}" if cvd_div_strength is not None else ""
+            sig.analyst_reason = f"CVD {cvd_div} divergence{age_str}{strength_str}"
+        return sig

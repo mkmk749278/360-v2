@@ -154,7 +154,7 @@ class ScalpChannel(BaseChannel):
         sweep = sweeps[0]
 
         close = float(m5["close"][-1])
-        atr_val = ind.get("atr_last", close * 0.001)
+        atr_val = ind.get("atr_last", close * 0.002)
 
         mom = ind.get("momentum_last")
         if mom is None:
@@ -467,19 +467,22 @@ class ScalpChannel(BaseChannel):
         if not check_rsi_regime(indicators.get("1m", {}).get("rsi_last"), direction=direction.value, regime=regime):
             return None
 
-        # Order book imbalance check
+        # Order book imbalance check (mandatory — without OBI confirmation,
+        # whale momentum signals are unreliable)
         order_book = smc_data.get("order_book")
-        if order_book is not None:
-            bids = order_book.get("bids", [])
-            asks = order_book.get("asks", [])
-            bid_depth = sum(float(b[1]) * float(b[0]) for b in bids[:10])
-            ask_depth = sum(float(a[1]) * float(a[0]) for a in asks[:10])
-            if bid_depth > 0 and ask_depth > 0:
-                imbalance_ratio = (
-                    bid_depth / ask_depth if direction == Direction.LONG else ask_depth / bid_depth
-                )
-                if imbalance_ratio < _WHALE_OBI_MIN:
-                    return None
+        if order_book is None:
+            return None
+        bids = order_book.get("bids", [])
+        asks = order_book.get("asks", [])
+        bid_depth = sum(float(b[1]) * float(b[0]) for b in bids[:10])
+        ask_depth = sum(float(a[1]) * float(a[0]) for a in asks[:10])
+        if bid_depth <= 0 or ask_depth <= 0:
+            return None
+        imbalance_ratio = (
+            bid_depth / ask_depth if direction == Direction.LONG else ask_depth / bid_depth
+        )
+        if imbalance_ratio < _WHALE_OBI_MIN:
+            return None
 
         atr_val = indicators.get("1m", {}).get("atr_last", close * 0.002)
         sl_dist = max(close * self.config.sl_pct_range[0] / 100, atr_val)

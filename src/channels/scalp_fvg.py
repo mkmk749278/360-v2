@@ -129,20 +129,22 @@ class ScalpFVGChannel(BaseChannel):
         if direction is None or retest_zone is None:
             return None
 
-        # FVG partial fill check: reject zones that are >60% filled
-        # A heavily-filled FVG has much weaker expected bounce
+        # FVG fill penalty: graduated decay replaces the former binary 60% cliff.
+        # Lightly filled zones get a small penalty; heavily filled zones get a
+        # large penalty that effectively suppresses the signal via reduced SL.
         gap_high_z = float(retest_zone.gap_high)
         gap_low_z = float(retest_zone.gap_low)
         zone_width_z = gap_high_z - gap_low_z
+        fill_decay: float = 1.0
         if zone_width_z > 0:
             if retest_zone.direction == Direction.LONG:
-                # For bullish FVG: how much of the gap has price already filled from above?
                 fill_pct = max(0.0, (gap_high_z - close) / zone_width_z)
             else:
-                # For bearish FVG: how much has price filled from below?
                 fill_pct = max(0.0, (close - gap_low_z) / zone_width_z)
-            if fill_pct > 0.6:
-                return None  # Zone >60% filled, weak bounce expected
+            if fill_pct > 0.75:
+                return None  # Zone >75% filled — too weak to trade
+            # Graduated penalty: 0% fill → 1.0, 50% fill → 0.7, 75% fill → 0.4
+            fill_decay = max(0.4, 1.0 - fill_pct * 0.8)
 
         # RSI extreme gate: use pair-specific OB/OS levels when available
         if not check_rsi(ind.get("rsi_last"), overbought=thresholds["rsi_ob"], oversold=thresholds["rsi_os"], direction=direction.value):
@@ -159,7 +161,7 @@ class ScalpFVGChannel(BaseChannel):
             sl = max(gap_high + atr_val * 0.5, close * (1 + self.config.sl_pct_range[0] / 100))
 
         base_sl_dist = abs(close - sl)
-        sl_dist = base_sl_dist * zone_decay  # Apply age decay (older zone → tighter SL)
+        sl_dist = base_sl_dist * zone_decay * fill_decay  # Apply age + fill decay
         if sl_dist <= 0:
             return None
 

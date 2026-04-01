@@ -19,6 +19,7 @@ from config import CHANNEL_SCALP_DIVERGENCE
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import check_rsi
 from src.indicators import macd as compute_macd, rsi as compute_rsi
+from src.mtf import mtf_gate_scalp_divergence
 from src.smc import Direction
 from src.utils import get_logger
 
@@ -89,11 +90,16 @@ class ScalpDivergenceChannel(BaseChannel):
 
         close = float(closes[-1])
 
-        # Compute RSI array over the lookback window
+        # Compute RSI array over the lookback window.
+        # Drop NaN values instead of replacing with 50.0 to avoid creating
+        # artificial swing points that produce false divergence detections.
         rsi_arr_raw = ind.get("rsi_arr")
         if rsi_arr_raw is None or len(rsi_arr_raw) < _DIV_LOOKBACK:
             rsi_arr_raw = compute_rsi(np.array(closes, dtype=np.float64))
-        rsi_arr = [float(v) if not np.isnan(v) else 50.0 for v in rsi_arr_raw[-_DIV_LOOKBACK:]]
+        rsi_clean = [float(v) for v in rsi_arr_raw[-_DIV_LOOKBACK:] if not np.isnan(v)]
+        if len(rsi_clean) < _DIV_LOOKBACK // 2:
+            return None  # Too many NaN values — insufficient RSI data
+        rsi_arr = rsi_clean
 
         # Compute MACD histogram for confirmation
         macd_hist: Optional[list[float]] = None
@@ -176,6 +182,16 @@ class ScalpDivergenceChannel(BaseChannel):
             oversold=thresholds["rsi_os"],
             direction=direction.value,
         ):
+            return None
+
+        # MTF gate — 15m RSI must not strongly oppose divergence direction
+        mtf_indicators = {
+            tf: indicators.get(tf, {})
+            for tf in ("15m", "1h")
+            if indicators.get(tf)
+        }
+        mtf_ok, _mtf_reason = mtf_gate_scalp_divergence(mtf_indicators, direction.value)
+        if not mtf_ok:
             return None
 
         # SL / TP computation
