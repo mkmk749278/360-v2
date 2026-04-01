@@ -448,13 +448,19 @@ def mtf_gate_scalp_range_fade(
     indicators_15m: dict,
     direction: str,
 ) -> tuple[bool, str, float]:
-    """MTF gate for RANGE_FADE path (5m signal → 15m RSI confirmation)."""
+    """MTF gate for RANGE_FADE path (5m signal → 15m RSI confirmation).
+
+    Requires the 15m RSI to clearly confirm the mean-reversion thesis:
+    LONG needs RSI ≤ 40 (strongly oversold), SHORT needs RSI ≥ 60 (strongly
+    overbought).  This prevents entries where the higher timeframe hasn't
+    committed to the reversal yet.
+    """
     rsi_val = indicators_15m.get("rsi_last")
     if rsi_val is None:
         return True, "mtf_15m_rsi_no_data", 0.0
-    if direction == "LONG" and rsi_val > 45.0:
+    if direction == "LONG" and rsi_val > 40.0:
         return False, f"mtf_15m_rsi_not_oversold_{rsi_val:.1f}", 0.0
-    if direction == "SHORT" and rsi_val < 55.0:
+    if direction == "SHORT" and rsi_val < 60.0:
         return False, f"mtf_15m_rsi_not_overbought_{rsi_val:.1f}", 0.0
     return True, "mtf_15m_rsi_ok", 0.0
 

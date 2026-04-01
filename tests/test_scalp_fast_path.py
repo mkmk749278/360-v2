@@ -48,7 +48,7 @@ def _make_scalp_signal(
         direction=direction,
         entry=32000.0,
         stop_loss=31900.0,
-        tp1=32100.0,
+        tp1=32130.0,
         tp2=32200.0,
         confidence=confidence,
         signal_id=f"TEST-{symbol}-{channel}",

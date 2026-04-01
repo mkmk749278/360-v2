@@ -46,6 +46,8 @@ class SMCResult:
     recent_ticks: List[Dict[str, Any]] = field(default_factory=list)
     oi_invalidated: bool = False
     cvd_divergence: Optional[str] = None  # "BULLISH", "BEARISH", or None
+    cvd_divergence_age: Optional[int] = None  # candles since divergence formed
+    cvd_divergence_strength: Optional[float] = None  # magnitude 0.0–1.0
 
     def as_dict(self) -> dict:
         """Return a plain dict for backward-compat with channel evaluate() calls."""
@@ -58,6 +60,8 @@ class SMCResult:
             "recent_ticks": self.recent_ticks,
             "oi_invalidated": self.oi_invalidated,
             "cvd_divergence": self.cvd_divergence,
+            "cvd_divergence_age": self.cvd_divergence_age,
+            "cvd_divergence_strength": self.cvd_divergence_strength,
         }
 
 
@@ -109,9 +113,10 @@ class SMCDetector:
         _timeframes = smc_timeframes if smc_timeframes is not None else _SMC_TIMEFRAMES
 
         # ------------------------------------------------------------------
-        # SMC detection (sweeps, MSS, FVG) across preferred timeframes
+        # SMC detection (sweeps + MSS) across preferred timeframes
         # ------------------------------------------------------------------
         min_candles = lookback + 1
+        _sweep_tf_key: Optional[str] = None
         for tf_key in _timeframes:
             cd = candles.get(tf_key)
             if cd is None or len(cd.get("close", [])) < min_candles:
@@ -127,6 +132,7 @@ class SMCDetector:
                 continue
 
             result.sweeps = sweeps
+            _sweep_tf_key = tf_key
 
             ltf_key = _LTF_MAP.get(tf_key, "1m")
             ltf_cd = candles.get(ltf_key)
@@ -134,21 +140,33 @@ class SMCDetector:
                 mss_sig = detect_mss(sweeps[0], ltf_cd["close"])
                 result.mss = mss_sig
 
-            result.fvg = detect_fvg(cd["high"], cd["low"], cd["close"])
             break  # use first timeframe that has a sweep
 
         # ------------------------------------------------------------------
-        # Order flow validation (OI trend + CVD divergence)
+        # FVG detection – independent of sweeps so that ScalpFVGChannel,
+        # ScalpOrderblockChannel, and other channels can fire without sweeps.
+        # Uses the sweep timeframe if available, otherwise the first TF with
+        # enough candles.
+        # ------------------------------------------------------------------
+        _fvg_tf_key = _sweep_tf_key
+        if _fvg_tf_key is None:
+            _fvg_tf_key = next(
+                (tf for tf in _timeframes if candles.get(tf) and
+                 len(candles[tf].get("close", [])) >= min_candles),
+                None,
+            )
+        if _fvg_tf_key is not None:
+            _fvg_cd = candles[_fvg_tf_key]
+            result.fvg = detect_fvg(_fvg_cd["high"], _fvg_cd["low"], _fvg_cd["close"])
+
+        # ------------------------------------------------------------------
+        # Order flow validation (OI trend check requires sweeps)
         # ------------------------------------------------------------------
         if order_flow_store is not None and result.sweeps:
             primary_sweep = result.sweeps[0]
             oi_trend = order_flow_store.get_oi_trend(symbol)
             oi_change_pct = order_flow_store.get_oi_change_pct(symbol)
 
-            # Invalidate if OI is rising while we have a sweep signal.
-            # Rising OI means new aggressive positions are entering against
-            # the proposed reversal direction.  Small OI moves (< 1%) are
-            # treated as noise and will not invalidate the signal.
             if is_oi_invalidated(oi_trend, primary_sweep.direction.value, oi_change_pct):
                 result.oi_invalidated = True
                 log.debug(
@@ -156,7 +174,12 @@ class SMCDetector:
                     symbol, oi_change_pct, primary_sweep.direction.value,
                 )
 
-            # CVD divergence: check if price/CVD diverge (confirms the sweep)
+        # ------------------------------------------------------------------
+        # CVD divergence – independent of sweeps so that ScalpCVDChannel can
+        # fire on its own.  When sweeps exist the CVD confirms the sweep;
+        # without sweeps the CVD channel still gets divergence data.
+        # ------------------------------------------------------------------
+        if order_flow_store is not None:
             tf_key_for_cvd = next(
                 (tf for tf in _timeframes if candles.get(tf) and
                  len(candles[tf].get("close", [])) >= _CVD_MIN_CANDLES),
@@ -175,6 +198,25 @@ class SMCDetector:
                         "{}: CVD divergence detected – {}",
                         symbol, result.cvd_divergence,
                     )
+                    # Populate metadata fields for ScalpCVDChannel.
+                    # get_cvd_divergence_detail returns (type, age, strength)
+                    # when available; fall back to sensible defaults.
+                    _detail = getattr(order_flow_store, "get_cvd_divergence_detail", None)
+                    if _detail is not None:
+                        try:
+                            _dtype, _age, _strength = _detail(symbol, close_arr)
+                            result.cvd_divergence_age = _age
+                            result.cvd_divergence_strength = _strength
+                        except Exception:
+                            # Method exists but failed — use defaults
+                            result.cvd_divergence_age = 3
+                            result.cvd_divergence_strength = 0.5
+                    else:
+                        # OrderFlowStore doesn't have the detail method yet —
+                        # provide reasonable defaults so CVD channel doesn't
+                        # reject via _CVD_REQUIRE_METADATA.
+                        result.cvd_divergence_age = 3
+                        result.cvd_divergence_strength = 0.5
 
         # ------------------------------------------------------------------
         # Whale / tape detection

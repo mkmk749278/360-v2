@@ -53,25 +53,25 @@ class TestRRFloor:
         assert result.risk_reward == pytest.approx(2.0)
 
     def test_exact_rr_floor_allowed(self):
-        """Trade with R:R exactly at 1.0 (the floor) must be allowed."""
-        # entry=100, sl=97 (3 pts), tp1=103.0 (3 pts) → R:R = 3/3 = 1.0
-        sig = _make_signal(entry=100.0, stop_loss=97.0, tp1=103.0)
+        """Trade with R:R exactly at 1.3 (the floor) must be allowed."""
+        # entry=100, sl=97 (3 pts), tp1=103.9 (3.9 pts) → R:R = 3.9/3 = 1.3
+        sig = _make_signal(entry=100.0, stop_loss=97.0, tp1=103.9)
         result = self.rm.calculate_risk(sig, {}, 100_000_000)
         assert result.allowed is True
-        assert result.risk_reward >= 1.0
+        assert result.risk_reward >= 1.3
 
     def test_insufficient_rr_rejected(self):
-        """Trade with R:R < 1.0 must be hard-rejected."""
-        # entry=100, sl=95 (5 pts), tp1=103.0 (3 pts) → R:R = 0.6 < 1.0
+        """Trade with R:R < 1.3 must be hard-rejected."""
+        # entry=100, sl=95 (5 pts), tp1=103.0 (3 pts) → R:R = 0.6 < 1.3
         sig = _make_signal(entry=100.0, stop_loss=95.0, tp1=103.0)
         result = self.rm.calculate_risk(sig, {}, 100_000_000)
         assert result.allowed is False
         assert "R:R" in result.reason
-        assert "1.0" in result.reason
+        assert "1.3" in result.reason
 
     def test_very_bad_rr_rejected(self):
         """Trade with inverted R:R (R:R < 1) must be rejected."""
-        # entry=100, sl=95 (5 pts), tp1=102 (2 pts) → R:R = 0.4 < 1.0
+        # entry=100, sl=95 (5 pts), tp1=102 (2 pts) → R:R = 0.4 < 1.3
         sig = _make_signal(entry=100.0, stop_loss=95.0, tp1=102.0)
         result = self.rm.calculate_risk(sig, {}, 100_000_000)
         assert result.allowed is False

@@ -293,12 +293,16 @@ class ScalpChannel(BaseChannel):
         # stricter when trending (range-fade in trends is higher risk).
         adx_val = ind.get("adx_last")
         adx_ceiling = 22.0  # default
+        adx_floor = 8.0  # minimum ADX to avoid dead-market entries
         if regime in ("RANGING", "QUIET"):
             adx_ceiling = 25.0  # More permissive in confirmed ranging regime
+            adx_floor = 6.0  # QUIET markets naturally have lower ADX
         elif regime in ("TRENDING_UP", "TRENDING_DOWN"):
             adx_ceiling = 18.0  # Stricter — shouldn't be doing range-fade in trends
         if adx_val is not None and adx_val > adx_ceiling:
             return None
+        if adx_val is not None and adx_val < adx_floor:
+            return None  # Too little movement — dead market, no edge
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
             return None
@@ -315,6 +319,12 @@ class ScalpChannel(BaseChannel):
         if bb_width_pct is not None and bb_width_prev_pct is not None:
             if bb_width_pct > bb_width_prev_pct * 1.1:  # BB expanding > 10%
                 return None
+
+        # BB too narrow guard: extremely tight BBs indicate a squeeze building
+        # — price is about to break out directionally. Mean-reversion entries
+        # into a coiling squeeze are stop-loss magnets.
+        if bb_width_pct is not None and bb_width_pct < 0.3:
+            return None  # BB width < 0.3% = squeeze, skip range-fade
 
         close = float(m5["close"][-1])
         rsi_val = ind.get("rsi_last")
@@ -335,8 +345,8 @@ class ScalpChannel(BaseChannel):
         # Thresholds adapt to regime: QUIET regime uses wider window (60/40)
         # since RSI ranges are tighter and moves are more significant.
         if rsi_val is not None:
-            rsi_long_max = profile.rsi_ob_level if profile else (60.0 if regime == "QUIET" else 55.0)
-            rsi_short_min = profile.rsi_os_level if profile else (40.0 if regime == "QUIET" else 45.0)
+            rsi_long_max = profile.rsi_ob_level if profile else (55.0 if regime == "QUIET" else 50.0)
+            rsi_short_min = profile.rsi_os_level if profile else (45.0 if regime == "QUIET" else 50.0)
             if direction == Direction.LONG and rsi_val > rsi_long_max:
                 return None  # Not oversold enough for mean-reversion LONG
             if direction == Direction.SHORT and rsi_val < rsi_short_min:
@@ -360,6 +370,24 @@ class ScalpChannel(BaseChannel):
         mtf_ok, mtf_reason, _ = mtf_gate_scalp_range_fade(indicators_15m, direction.value)
         if not mtf_ok:
             return None
+
+        # HTF trend alignment gate — reject range-fade entries against the 1h
+        # trend.  Mean-reversion in a strong counter-trend is the #1 cause of
+        # SL hits (e.g. going LONG at lower BB while the 1h EMA9 < EMA21 and
+        # trending down).  We allow the trade only when the 1h trend is neutral
+        # or aligned with the signal direction.
+        ind_1h = indicators.get("1h", {})
+        ema9_1h = ind_1h.get("ema9_last")
+        ema21_1h = ind_1h.get("ema21_last")
+        if ema9_1h is not None and ema21_1h is not None and ema21_1h != 0:
+            ema_diff_pct = (ema9_1h - ema21_1h) / ema21_1h * 100.0
+            # Threshold: reject when the 1h EMA spread is meaningfully against
+            # the signal (>0.05%).  Small deviations are treated as neutral.
+            _HTF_EMA_REJECTION_PCT = 0.05
+            if direction == Direction.LONG and ema_diff_pct < -_HTF_EMA_REJECTION_PCT:
+                return None  # 1h trend bearish — don't go LONG on mean-reversion
+            if direction == Direction.SHORT and ema_diff_pct > _HTF_EMA_REJECTION_PCT:
+                return None  # 1h trend bullish — don't go SHORT on mean-reversion
 
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
