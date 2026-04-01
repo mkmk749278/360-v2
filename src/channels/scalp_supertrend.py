@@ -18,6 +18,7 @@ from config import CHANNEL_SCALP_SUPERTREND
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import check_rsi
 from src.indicators import ema as compute_ema, supertrend as compute_supertrend
+from src.mtf import mtf_gate_scalp_supertrend
 from src.smc import Direction
 from src.utils import get_logger
 
@@ -125,6 +126,16 @@ class ScalpSupertrendChannel(BaseChannel):
             oversold=thresholds["rsi_os"],
             direction=direction.value,
         ):
+            return None
+
+        # MTF gate — require at least 2 higher TFs to agree on the flip direction
+        mtf_indicators = {
+            tf: indicators.get(tf, {})
+            for tf in ("15m", "1h")
+            if indicators.get(tf)
+        }
+        mtf_ok, _mtf_reason = mtf_gate_scalp_supertrend(mtf_indicators, direction.value)
+        if not mtf_ok:
             return None
 
         # SL at Supertrend line value

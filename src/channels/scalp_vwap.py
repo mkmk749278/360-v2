@@ -169,5 +169,10 @@ class ScalpVWAPChannel(BaseChannel):
             atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
             pair_tier=_pair_profile.tier if _pair_profile else "MIDCAP",
         )
+        if sig is not None:
+            band_label = "lower" if direction == Direction.LONG else "upper"
+            sig.analyst_reason = (
+                f"VWAP {band_label} band bounce ({tf}), VWAP={vwap_mid:.2f}"
+            )
 
         return sig

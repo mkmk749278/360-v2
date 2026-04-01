@@ -105,16 +105,39 @@ class TestScalpChannel:
             {"price": 100.0, "qty": 15000, "isBuyerMaker": False},  # buy: $1.5M
             {"price": 100.0, "qty": 5000, "isBuyerMaker": True},    # sell: $0.5M
         ]
+        # Order book with strong bid imbalance (required for WHALE_MOMENTUM)
+        order_book = {
+            "bids": [[100.0, 500.0]] * 10,  # bid depth: $500K
+            "asks": [[100.1, 100.0]] * 10,   # ask depth: $100K → imbalance 5:1
+        }
         smc_data = {
             "whale_alert": {"amount_usd": 1_500_000},
             "volume_delta_spike": True,
             "recent_ticks": ticks,
+            "order_book": order_book,
         }
 
         sig = ch.evaluate("ETHUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
         assert sig is not None
         assert sig.direction == Direction.LONG
         assert sig.setup_class == "WHALE_MOMENTUM"
+
+    def test_whale_momentum_no_signal_without_order_book(self):
+        """WHALE_MOMENTUM path: missing order book data → no signal (OBI mandatory)."""
+        ch = ScalpChannel()
+        candles = {"1m": _make_candles(20)}
+        indicators = {"1m": _make_indicators()}
+        ticks = [
+            {"price": 100.0, "qty": 15000, "isBuyerMaker": False},
+            {"price": 100.0, "qty": 5000, "isBuyerMaker": True},
+        ]
+        smc_data = {
+            "whale_alert": {"amount_usd": 1_500_000},
+            "volume_delta_spike": True,
+            "recent_ticks": ticks,
+        }
+        sig = ch._evaluate_whale_momentum("ETHUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        assert sig is None
 
     def test_whale_momentum_no_signal_without_whale(self):
         """WHALE_MOMENTUM path: no whale alert and no delta spike → no signal."""
@@ -134,10 +157,15 @@ class TestScalpChannel:
             {"price": 100.0, "qty": 10000, "isBuyerMaker": False},  # buy: $1M
             {"price": 100.0, "qty": 8000, "isBuyerMaker": True},    # sell: $0.8M (ratio 1.25×)
         ]
+        order_book = {
+            "bids": [[100.0, 500.0]] * 10,
+            "asks": [[100.1, 100.0]] * 10,
+        }
         smc_data = {
             "whale_alert": {"amount_usd": 1_500_000},
             "volume_delta_spike": True,
             "recent_ticks": ticks,
+            "order_book": order_book,
         }
         sig = ch._evaluate_whale_momentum("ETHUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
         assert sig is None

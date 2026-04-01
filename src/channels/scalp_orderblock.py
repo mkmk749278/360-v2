@@ -224,16 +224,21 @@ class ScalpOrderblockChannel(BaseChannel):
             sl = best_ob.ob_high + atr_for_sl * 0.2
             sl_dist = abs(close - sl)
 
-        # Ensure sl_dist isn't too tight
-        sl_dist = max(sl_dist, close * self.config.sl_pct_range[0] / 100)
+        # Ensure sl_dist isn't too tight (floor only — don't overwrite the
+        # structural OB-boundary SL with a generic close±sl_dist value)
+        min_sl_dist = close * self.config.sl_pct_range[0] / 100
+        if sl_dist < min_sl_dist:
+            sl_dist = min_sl_dist
+            if direction == Direction.LONG:
+                sl = close - sl_dist
+            else:
+                sl = close + sl_dist
 
         if direction == Direction.LONG:
-            sl = close - sl_dist
             tp1 = close + sl_dist * self.config.tp_ratios[0]
             tp2 = close + sl_dist * self.config.tp_ratios[1]
             tp3 = close + sl_dist * self.config.tp_ratios[2]
         else:
-            sl = close + sl_dist
             tp1 = close - sl_dist * self.config.tp_ratios[0]
             tp2 = close - sl_dist * self.config.tp_ratios[1]
             tp3 = close - sl_dist * self.config.tp_ratios[2]

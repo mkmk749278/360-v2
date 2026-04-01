@@ -496,15 +496,15 @@ All 9 channels are evaluated **independently** in sequence. No channel's output 
 
 | Channel | Test File | Test Count | Edge Cases | Assessment |
 |---------|-----------|-----------|-----------|-----------|
-| ScalpChannel (all 3 paths) | `test_channels.py` | 12 | ✅ Sweep, regime, ADX | ✅ Good |
+| ScalpChannel (all 3 paths) | `test_channels.py` | 13 | ✅ Sweep, regime, ADX, OBI mandatory | ✅ Good |
 | ScalpFVGChannel | `test_signal_quality_improvements.py` | 5-6 | ✅ Fill %, age, HTF | ✅ Good |
 | ScalpCVDChannel | `test_signal_quality_improvements.py` | 8-9 | ✅ Staleness, strength, metadata | ✅ Strong |
 | ScalpOBIChannel | `test_signal_quality_improvements.py` | 5-6 | ✅ Timestamp, depth, spoofing | ✅ Good |
-| ScalpVWAPChannel | Integration refs only | ~3 | ⚠️ Minimal | ⚠️ Weak |
-| **ScalpDivergenceChannel** | **None** | **0** | **❌** | **❌ No tests** |
-| **ScalpSupertrendChannel** | **None** | **0** | **❌** | **❌ No tests** |
-| **ScalpIchimokuChannel** | **None** | **0** | **❌** | **❌ No tests** |
-| **ScalpOrderblockChannel** | **None** | **0** | **❌** | **❌ No tests** |
+| ScalpVWAPChannel | Integration refs + `test_channels_extended.py` | ~4 | ⚠️ Analyst reason verified | ⚠️ Moderate |
+| ScalpDivergenceChannel | `test_channels_extended.py` | 6 | ✅ ADX, RSI, MACD, NaN, volume | ✅ Good |
+| ScalpSupertrendChannel | `test_channels_extended.py` | 5 | ✅ ADX, flip, volume, data min | ✅ Good |
+| ScalpIchimokuChannel | `test_channels_extended.py` | 4 | ✅ Data min, TK cross, fallback | ✅ Good |
+| ScalpOrderblockChannel | `test_channels_extended.py` | 5 | ✅ OB detection, SL boundary, spread | ✅ Good |
 
 ### 5.2 Integration Test Coverage
 
@@ -514,11 +514,11 @@ All 9 channels are evaluated **independently** in sequence. No channel's output 
 
 ### 5.3 Coverage Gaps
 
-1. **4 channels have zero dedicated tests** (Divergence, Supertrend, Ichimoku, Orderblock)
+1. ~~**4 channels have zero dedicated tests**~~ ✅ Fixed — all channels now have dedicated tests in `test_channels_extended.py`
 2. No stress tests for concurrent multi-channel evaluation
 3. No tests for regime transition effects on in-flight signals
 4. No tests for WebSocket degradation impact on OBI/WM channels
-5. Limited VWAP channel testing
+5. ~~Limited VWAP channel testing~~ Improved with analyst_reason verification
 
 ---
 
@@ -526,18 +526,18 @@ All 9 channels are evaluated **independently** in sequence. No channel's output 
 
 ### 6.1 Signal Reliability Improvements
 
-| Priority | Recommendation | Channels | Rationale |
-|----------|---------------|----------|-----------|
-| **P0** | Add unit tests for untested channels | DIV, ST, ICH, OB | 4 channels have zero test coverage — any regression is undetectable |
-| **P0** | Populate `analyst_reason` in CVD and VWAP channels | CVD, VWAP | Missing descriptive text affects user experience and debugging |
-| **P1** | Add MTF gate to Divergence and Supertrend channels | DIV, ST | These channels lack higher-timeframe confirmation, increasing false-positive rate |
-| **P1** | Make OBI check mandatory for WHALE_MOMENTUM | SCALP (WM) | Currently skipped if order_book is None — weakens signal quality significantly |
-| **P1** | Fix ScalpOrderblockChannel SL recomputation | OB | OB-boundary-based SL is overwritten by generic close±sl_dist — loses structural reference |
-| **P2** | Add graduated FVG fill penalty (replace 60% cliff) | FVG | Current binary 60% threshold creates a sharp quality cliff; graduated penalty (e.g., 50%→75% decay) would be smoother |
-| **P2** | Improve NaN handling in Divergence channel | DIV | Replacing NaN with 50.0 can create false swing points; consider using `np.nanmin`/`np.nanmax` or requiring clean data |
-| **P2** | Add volume confirmation to Ichimoku channel | ICH | TK crosses without volume participation may be weak signals |
-| **P3** | Standardize ATR fallback across channels | ALL | Currently ranges from `close×0.001` (OBI) to `close×0.002` (most others) — inconsistent behavior |
-| **P3** | Consider per-sub-path cooldown for ScalpChannel | SCALP | Current design blocks all 3 sub-paths (LSR/RF/WM) when any one fires |
+| Priority | Recommendation | Channels | Status |
+|----------|---------------|----------|--------|
+| **P0** | Add unit tests for untested channels | DIV, ST, ICH, OB | ✅ Done — `tests/test_channels_extended.py` (24 tests) |
+| **P0** | Populate `analyst_reason` in CVD and VWAP channels | CVD, VWAP | ✅ Done — CVD includes divergence type, age, strength; VWAP includes band and VWAP price |
+| **P1** | Add MTF gate to Divergence and Supertrend channels | DIV, ST | ✅ Done — `mtf_gate_scalp_divergence()` and `mtf_gate_scalp_supertrend()` wired in |
+| **P1** | Make OBI check mandatory for WHALE_MOMENTUM | SCALP (WM) | ✅ Done — returns None when `order_book` is None |
+| **P1** | Fix ScalpOrderblockChannel SL recomputation | OB | ✅ Done — OB-boundary SL preserved; floor applied only when sl_dist is too tight |
+| **P2** | Add graduated FVG fill penalty (replace 60% cliff) | FVG | ✅ Done — graduated decay: 0% fill→1.0, 50%→0.7, 75%→0.4; hard reject >75% |
+| **P2** | Improve NaN handling in Divergence channel | DIV | ✅ Done — NaN values dropped instead of replaced with 50.0; rejects if <50% clean data |
+| **P2** | Add volume confirmation to Ichimoku channel | ICH | ✅ Done — requires volume ≥ 1.2× 20-bar average |
+| **P3** | Standardize ATR fallback across channels | ALL | ✅ Done — all channels use `close × 0.002` (OBI keeps `0.001` by design) |
+| **P3** | Consider per-sub-path cooldown for ScalpChannel | SCALP | Deferred — requires scanner-level changes |
 
 ### 6.2 Signal Quality Improvements
 
@@ -568,7 +568,7 @@ All 9 channels are evaluated **independently** in sequence. No channel's output 
 | setup_class | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | direction | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | entry/sl/tp1-3 | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
-| analyst_reason | ✅ | ✅ | ✅ | ✅ | ❌ | ✅ | ✅ | ✅ | ✅ | ✅ | ❌ |
+| analyst_reason | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | regime | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | atr_percentile | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
 | pair_tier | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ | ✅ |
