@@ -248,6 +248,10 @@ _CHANNEL_GATE_PROFILE: Dict[str, Dict[str, bool]] = {
     "360_SCALP_CVD":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_VWAP": {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_OBI":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_DIVERGENCE":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_SUPERTREND":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_ICHIMOKU":    {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_ORDERBLOCK":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     # SWING: trend gates matter, microstructure does not
     "360_SWING":      {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": False, "volume_div": True,  "cluster": False},
     # SPOT: macro gates only — intraday noise is irrelevant at 4h/1d
@@ -265,6 +269,10 @@ _CHANNEL_PENALTY_WEIGHTS: Dict[str, Dict[str, float]] = {
     "360_SCALP_CVD":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 10.0, "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0},
     "360_SCALP_VWAP": {"vwap": 18.0, "kill_zone": 8.0,  "oi": 6.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0},
     "360_SCALP_OBI":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 6.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 15.0},
+    "360_SCALP_DIVERGENCE":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 8.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0},
+    "360_SCALP_SUPERTREND":  {"vwap": 12.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 10.0},
+    "360_SCALP_ICHIMOKU":    {"vwap": 10.0, "kill_zone": 8.0,  "oi": 8.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0},
+    "360_SCALP_ORDERBLOCK":  {"vwap": 12.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0},
     "360_SWING":      {"vwap": 10.0, "kill_zone": 0.0,  "oi": 10.0, "volume_div": 8.0,  "cluster": 0.0,  "spoof": 0.0},
     "360_SPOT":       {"vwap": 0.0,  "kill_zone": 0.0,  "oi": 0.0,  "volume_div": 0.0,  "cluster": 0.0,  "spoof": 0.0},
     "360_GEM":        {"vwap": 0.0,  "kill_zone": 0.0,  "oi": 0.0,  "volume_div": 0.0,  "cluster": 0.0,  "spoof": 0.0},
@@ -2296,16 +2304,28 @@ class Scanner:
                         tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
                         smc_timeframes=_ch_tfs,
                     )
+                    _new_smc_data = _smc_r.as_dict()
+                    # Carry over metadata fields added by _build_scan_context()
+                    # that are not part of the SMCResult dataclass.
+                    _new_smc_data["pair_profile"] = ctx.smc_data.get("pair_profile")
+                    _new_smc_data["regime_context"] = ctx.smc_data.get("regime_context")
                     ctx_for_chan = _dc.replace(
                         ctx,
                         smc_result=_smc_r,
-                        smc_data=_smc_r.as_dict(),
+                        smc_data=_new_smc_data,
                     )
                 except Exception as _exc:
                     log.debug("Per-channel SMC re-detect failed for {} {}: {}", symbol, chan_name, _exc)
                     ctx_for_chan = ctx
             else:
                 ctx_for_chan = ctx
+            # Inject cached order book depth into smc_data so channels like
+            # SCALP_OBI can access it via smc_data.get("order_book").
+            if chan_name == "360_SCALP_OBI":
+                _ob = self._get_order_book_depth(symbol)
+                if _ob is not None:
+                    _ob["fetched_at"] = time.time()
+                    ctx_for_chan.smc_data["order_book"] = _ob
             sig, cross_verified = await self._prepare_signal(symbol, volume_24h, chan, ctx_for_chan)
             if sig is None:
                 continue
