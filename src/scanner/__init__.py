@@ -173,7 +173,13 @@ _SCALP_CHANNELS: frozenset = frozenset({
 })
 
 # Maximum number of symbols scanned concurrently
-_MAX_CONCURRENT_SCANS: int = 15
+_MAX_CONCURRENT_SCANS: int = 20
+
+# In TOP50_FUTURES_ONLY mode all pairs are TIER1, so tier-based filtering
+# is ineffective.  When the depth circuit breaker or latency breaker is
+# active, limit the scan to the top-N pairs by 24h volume to shed CPU
+# work from indicator computation and channel evaluation.
+_TOP50_BREAKER_SCAN_COUNT: int = 10
 
 # Regime-channel compatibility matrix.
 # Maps channel name → list of regimes where that channel is blocked.
@@ -687,14 +693,28 @@ class Scanner:
                         "(last latency={:.0f}ms)", self.telemetry.scan_latency_ms
                     )
                 if skip_lower_tiers_for_depth:
-                    log.warning(
-                        "Depth circuit breaker open — restricting scan to Tier 1 pairs only"
-                    )
+                    if TOP50_FUTURES_ONLY:
+                        log.warning(
+                            "Depth circuit breaker open — restricting scan to top {} pairs",
+                            _TOP50_BREAKER_SCAN_COUNT,
+                        )
+                    else:
+                        log.warning(
+                            "Depth circuit breaker open — restricting scan to Tier 1 pairs only"
+                        )
                 # In top-50 futures-only mode all included pairs are treated as
                 # Tier 1 (full scan every cycle); tier filtering still applies
                 # in the normal multi-tier path.
                 if TOP50_FUTURES_ONLY:
-                    pairs_this_cycle = list(sorted_pairs)
+                    # In TOP50 mode every pair is TIER1 so tier filtering is
+                    # ineffective.  When the depth or latency breaker is
+                    # active, restrict to the top-N by volume to avoid
+                    # scanning 50 symbols without usable depth data.
+                    _skip_lower = skip_tier2_for_latency or skip_lower_tiers_for_depth
+                    if _skip_lower:
+                        pairs_this_cycle = list(sorted_pairs[:_TOP50_BREAKER_SCAN_COUNT])
+                    else:
+                        pairs_this_cycle = list(sorted_pairs)
                 else:
                     _skip_lower = skip_tier2_for_latency or skip_lower_tiers_for_depth
                     pairs_this_cycle = [

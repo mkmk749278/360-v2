@@ -1054,10 +1054,11 @@ WS_DEGRADED_MAX_PAIRS: int = int(os.getenv("WS_DEGRADED_MAX_PAIRS", "50"))
 # Depth endpoint circuit breaker
 # ---------------------------------------------------------------------------
 # Number of depth endpoint timeouts within a rolling 30 s window that trips
-# the circuit breaker.  Lowered from 5 to 3 so the breaker engages sooner
-# when Binance depth is degraded, preventing cascading retry latency.
+# the circuit breaker.  With 10 concurrent inflight requests, a threshold of
+# 5 avoids false trips from brief network blips where multiple concurrent
+# requests all timeout simultaneously.
 DEPTH_CIRCUIT_BREAKER_THRESHOLD: int = int(
-    os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "3")
+    os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "5")
 )
 # How long (seconds) the circuit stays open (depth fetches return None immediately).
 DEPTH_CIRCUIT_BREAKER_COOLDOWN: float = float(
