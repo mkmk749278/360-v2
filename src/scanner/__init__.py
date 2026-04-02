@@ -722,16 +722,15 @@ class Scanner:
                         ws_spot_ratio, ws_futures_ratio, WS_DEGRADED_MAX_PAIRS,
                     )
 
-                # PR 3 — Tier-aware REST fallback: when WS is degraded, issue
-                # a single weight-efficient global bookTicker call (Weight 2)
-                # to pre-populate the spread cache for all Tier 2 and Tier 3
-                # pairs.  This replaces per-symbol /depth calls for those tiers
-                # and reserves the heavier /depth endpoint strictly for Tier 1
-                # (Hot) pairs.  The concurrent symbol scans below will then
-                # find valid cache entries for Tier 2/3 symbols and skip the
-                # per-symbol fetch entirely.
-                if self._ws_any_degraded_this_cycle:
-                    await self._fetch_global_book_tickers(market="futures")
+                # PR 3 — Tier-aware REST fallback: issue a single weight-
+                # efficient global bookTicker call (Weight 2) to pre-populate
+                # the spread cache for all Tier 2 and Tier 3 pairs every cycle.
+                # This replaces per-symbol /depth calls for those tiers and
+                # reserves the heavier /depth endpoint strictly for Tier 1
+                # (Hot) pairs.  Previously gated behind WS-degraded only, but
+                # always running it eliminates 30-50 individual REST calls per
+                # cycle (each Weight 1, timeout-prone) with a single call.
+                await self._fetch_global_book_tickers(market="futures")
 
                 sem = self._scan_semaphore
                 tasks = [
@@ -941,10 +940,10 @@ class Scanner:
         """Pre-populate the spread cache for Tier 2 and Tier 3 pairs using a
         single weight-efficient ``bookTicker`` call.
 
-        When WebSockets degrade, calling ``/fapi/v1/depth`` for every pair
-        individually exhausts the Binance API weight budget and produces
-        30-50 s scan latencies.  Instead, this method issues **one** global
-        ``/fapi/v1/ticker/bookTicker`` request (Weight: 2) that returns the
+        Called every scan cycle to pre-seed spreads for lower-tier pairs,
+        eliminating 30–50 individual ``/fapi/v1/depth`` REST calls (each
+        Weight 1, timeout-prone) with **one** global
+        ``/fapi/v1/ticker/bookTicker`` request (Weight: 2).
         best bid/ask for *all* symbols, then seeds :attr:`_order_book_cache`
         for every Tier 2 and Tier 3 pair found in the response.
 

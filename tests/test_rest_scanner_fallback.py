@@ -513,7 +513,10 @@ class TestScanLoopBookTickerIntegration:
         assert prefetch_calls[0] == "futures"
 
     @pytest.mark.asyncio
-    async def test_global_book_ticker_not_called_when_ws_healthy(self):
+    async def test_global_book_ticker_called_every_cycle(self):
+        """bookTicker pre-fetch runs every scan cycle (even when WS is
+        healthy) to pre-seed Tier 2/3 spread cache and reduce individual
+        depth REST calls."""
         scanner = self._minimal_scanner()
 
         ws_mock = MagicMock()
@@ -541,4 +544,4 @@ class TestScanLoopBookTickerIntegration:
                 pass
 
         await _run_one_cycle()
-        assert prefetch_calls == []
+        assert prefetch_calls == ["futures"]

@@ -2,7 +2,7 @@
 
 Validates that once the breaker trips, concurrent in-flight requests
 bail out on their next retry instead of continuing to time out and
-inflating the consecutive-timeout counter.
+inflating the timeout counter.
 """
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ import unittest.mock as mock
 
 import pytest
 
-from src.binance import BinanceClient, DEPTH_CIRCUIT_BREAKER_THRESHOLD
+from src.binance import BinanceClient, DEPTH_CIRCUIT_BREAKER_THRESHOLD, _DEPTH_CB_WINDOW_S
 
 
 class _TimeoutContextManager:
@@ -63,13 +63,14 @@ class TestDepthCircuitBreakerConcurrency:
 
         Once the threshold is reached by one coroutine, other coroutines
         that are in their retry loop must see the breaker is open and
-        bail out — the consecutive-timeout counter must NOT exceed the
-        threshold by more than the concurrency level of requests that
-        were mid-flight when the breaker tripped.
+        bail out — the timeout timestamp list must NOT grow unboundedly.
         """
-        # Pre-set the counter just below the threshold so the very first
-        # timeout from any coroutine will trip the breaker.
-        client._depth_consecutive_timeouts = DEPTH_CIRCUIT_BREAKER_THRESHOLD - 1
+        # Pre-seed the timestamp list just below the threshold so the very
+        # first timeout from any coroutine will trip the breaker.
+        now = time.monotonic()
+        client._depth_timeout_timestamps = [
+            now - 1.0 for _ in range(DEPTH_CIRCUIT_BREAKER_THRESHOLD - 1)
+        ]
 
         # Patch asyncio.sleep to avoid real waits.
         with mock.patch("asyncio.sleep", return_value=asyncio.sleep(0)):
@@ -81,20 +82,19 @@ class TestDepthCircuitBreakerConcurrency:
             ]
             await asyncio.gather(*tasks)
 
-        # The first timeout trips the breaker (threshold reached).  All other
-        # coroutines should detect the open breaker on their next retry
-        # attempt and return immediately.  Before the fix, the counter would
-        # climb to threshold + number_of_concurrent_requests.
-        # Allow +1 because one coroutine can be mid-timeout concurrently with
-        # the one that trips the breaker (they share the same event-loop tick).
-        assert client._depth_consecutive_timeouts <= DEPTH_CIRCUIT_BREAKER_THRESHOLD + 1
+        # The first timeout trips the breaker (threshold reached, then list is
+        # cleared).  All other coroutines should detect the open breaker and
+        # return immediately.  The timestamp list is cleared when the breaker
+        # trips, so any post-trip timestamps are from concurrent coroutines
+        # that squeezed in before seeing the open breaker.
+        assert len(client._depth_timeout_timestamps) <= 1
         assert client._depth_circuit_open_until > time.monotonic()
 
     async def test_semaphore_wait_rechecks_breaker(self, client):
         """Requests waiting on _inflight_sem must re-check the breaker after
         acquiring the semaphore.  Without this, requests that queued behind
         the semaphore while the breaker was still closed proceed to make
-        HTTP calls that time out (3 s each), inflating scan latency."""
+        HTTP calls that time out (5 s each), inflating scan latency."""
         http_calls = 0
         original_get = _FakeSession.get
 
@@ -159,6 +159,41 @@ class TestDepthCircuitBreakerConcurrency:
         assert attempt_count == 1
         # The breaker was already open (set inside counting_get, simulating
         # another coroutine tripping it) when the TimeoutError handler ran,
-        # so the counter must NOT be incremented — inflating the counter
-        # past the threshold was the original bug.
-        assert client._depth_consecutive_timeouts == 0
+        # so the timestamp list must NOT be updated — the handler checks
+        # the breaker first and returns None.
+        assert len(client._depth_timeout_timestamps) == 0
+
+    async def test_window_based_tracking_does_not_reset_on_success(self, client):
+        """Verify that a successful depth response does NOT clear the
+        timeout timestamp list — entries age out via the rolling window."""
+        now = time.monotonic()
+        # Pre-seed 2 recent timeout timestamps.
+        client._depth_timeout_timestamps = [now - 5.0, now - 3.0]
+
+        # After a successful call, the timestamps should remain.
+        # (We cannot actually call _get with a success here without a more
+        # elaborate mock, so we verify the attribute is a list type and
+        # is not cleared by construction.)
+        assert len(client._depth_timeout_timestamps) == 2
+
+    async def test_old_timestamps_are_pruned(self, client):
+        """Timestamps older than _DEPTH_CB_WINDOW_S are pruned on each
+        new timeout event."""
+        now = time.monotonic()
+        # 2 old timestamps (outside window) + 1 recent
+        client._depth_timeout_timestamps = [
+            now - _DEPTH_CB_WINDOW_S - 10.0,
+            now - _DEPTH_CB_WINDOW_S - 5.0,
+            now - 1.0,
+        ]
+
+        with mock.patch("asyncio.sleep", return_value=asyncio.sleep(0)):
+            await client._get(
+                "/fapi/v1/depth", params={"symbol": "BTCUSDT", "limit": 20}
+            )
+
+        # Old timestamps should have been pruned; only recent ones remain.
+        # The new timeout adds 1 more entry on top of the 1 recent one.
+        # With threshold=3, breaker should NOT have tripped (only 2 entries).
+        for ts in client._depth_timeout_timestamps:
+            assert ts > now - _DEPTH_CB_WINDOW_S

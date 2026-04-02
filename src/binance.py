@@ -35,14 +35,21 @@ _DEFAULT_FUTURES_WEIGHT_LIMIT: int = 2_400
 _MAX_RETRIES: int = 5
 _BACKOFF_BASE: float = 1.5  # exponential-backoff base (seconds)
 
-# Default request timeout (seconds).  Depth snapshots use a shorter timeout
-# (see _DEPTH_TIMEOUT_S) since they are small payloads and frequent timeouts
-# inflate scan latency severely.
+# Default request timeout (seconds).  Depth snapshots use a dedicated timeout
+# (see _DEPTH_TIMEOUT_S).  Raised from 3 s to 5 s because Binance REST
+# responses routinely take 3–4 s under load — a 3 s cutoff caused constant
+# false timeouts and retry cascades that inflated scan latency to 30 s+.
 _DEFAULT_TIMEOUT_S: float = 8.0
-_DEPTH_TIMEOUT_S: float = 3.0
+_DEPTH_TIMEOUT_S: float = 5.0
 
 # Depth endpoint paths — used by the per-endpoint circuit breaker.
 _DEPTH_PATHS: frozenset = frozenset({"/fapi/v1/depth", "/api/v3/depth"})
+
+# Rolling window (seconds) over which depth timeout events are counted
+# toward the circuit breaker threshold.  A time-window approach prevents
+# sporadic successful responses from resetting the counter while the
+# endpoint is fundamentally degraded.
+_DEPTH_CB_WINDOW_S: float = 30.0
 
 
 class BinanceClient:
@@ -76,10 +83,12 @@ class BinanceClient:
         self._rate_limiter = (
             futures_rate_limiter if market == "futures" else spot_rate_limiter
         )
-        # Per-endpoint depth circuit breaker: tracks consecutive timeouts so
-        # that a sustained Binance depth API outage doesn't block scan cycles
-        # for 6 s per symbol (2 retries × 3 s timeout each).
-        self._depth_consecutive_timeouts: int = 0
+        # Per-endpoint depth circuit breaker: tracks timeout timestamps within
+        # a rolling window so that a sustained Binance depth API outage
+        # doesn't block scan cycles.  A time-window approach (vs. consecutive
+        # count) prevents intermittent successes from resetting the counter
+        # while the endpoint is still fundamentally degraded.
+        self._depth_timeout_timestamps: list = []
         self._depth_circuit_open_until: float = 0.0
         # Semaphore to cap the number of simultaneous in-flight HTTP requests.
         # Without this, hundreds of coroutines can bypass the rate limiter and
@@ -221,9 +230,10 @@ class BinanceClient:
                                     pass
                             if BinanceClient.on_api_call is not None:
                                 BinanceClient.on_api_call()
-                            # Reset depth circuit breaker on first successful call.
-                            if is_depth and self._depth_consecutive_timeouts > 0:
-                                self._depth_consecutive_timeouts = 0
+                            # A successful depth response does NOT reset the
+                            # timeout timestamps — they age out naturally via
+                            # the rolling window.  This prevents an intermittent
+                            # success from hiding an ongoing degradation.
                             return data
                         if resp.status in (429, 418):
                             retry_after = int(resp.headers.get("Retry-After", 5))
@@ -241,19 +251,29 @@ class BinanceClient:
                     # If another concurrent coroutine already tripped the
                     # breaker, stop immediately — no counter increment, no
                     # retry, no misleading "retrying" log.
-                    if time.monotonic() < self._depth_circuit_open_until:
+                    now_t = time.monotonic()
+                    if now_t < self._depth_circuit_open_until:
                         return None
-                    self._depth_consecutive_timeouts += 1
-                    if self._depth_consecutive_timeouts >= DEPTH_CIRCUIT_BREAKER_THRESHOLD:
+                    # Time-window tracking: keep only recent timeout events
+                    # and append the new one.  This ensures intermittent
+                    # successes cannot reset the counter.
+                    cutoff = now_t - _DEPTH_CB_WINDOW_S
+                    self._depth_timeout_timestamps = [
+                        t for t in self._depth_timeout_timestamps if t > cutoff
+                    ]
+                    self._depth_timeout_timestamps.append(now_t)
+                    if len(self._depth_timeout_timestamps) >= DEPTH_CIRCUIT_BREAKER_THRESHOLD:
                         self._depth_circuit_open_until = (
-                            time.monotonic() + DEPTH_CIRCUIT_BREAKER_COOLDOWN
+                            now_t + DEPTH_CIRCUIT_BREAKER_COOLDOWN
                         )
                         log.warning(
                             "Depth endpoint circuit breaker open — skipping {} for {:.0f}s "
-                            "({} consecutive timeouts)",
+                            "({} timeouts in last {:.0f}s window)",
                             path, DEPTH_CIRCUIT_BREAKER_COOLDOWN,
-                            self._depth_consecutive_timeouts,
+                            len(self._depth_timeout_timestamps),
+                            _DEPTH_CB_WINDOW_S,
                         )
+                        self._depth_timeout_timestamps.clear()
                         return None
                 wait = _BACKOFF_BASE ** attempt
                 log.warning("Binance %s timeout – retrying in %.1fs", path, wait)

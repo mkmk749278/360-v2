@@ -1053,11 +1053,11 @@ WS_DEGRADED_MAX_PAIRS: int = int(os.getenv("WS_DEGRADED_MAX_PAIRS", "50"))
 # ---------------------------------------------------------------------------
 # Depth endpoint circuit breaker
 # ---------------------------------------------------------------------------
-# Consecutive timeout count for /fapi/v1/depth or /api/v3/depth that triggers
-# the open-circuit state.  Lowered from 10 to 5 so the engine stops hammering
-# a degraded depth endpoint sooner, reducing cumulative timeout latency.
+# Number of depth endpoint timeouts within a rolling 30 s window that trips
+# the circuit breaker.  Lowered from 5 to 3 so the breaker engages sooner
+# when Binance depth is degraded, preventing cascading retry latency.
 DEPTH_CIRCUIT_BREAKER_THRESHOLD: int = int(
-    os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "5")
+    os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "3")
 )
 # How long (seconds) the circuit stays open (depth fetches return None immediately).
 DEPTH_CIRCUIT_BREAKER_COOLDOWN: float = float(
