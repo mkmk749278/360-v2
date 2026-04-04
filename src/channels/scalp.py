@@ -74,8 +74,10 @@ class ScalpChannel(BaseChannel):
             # Order flow signals more reliable in volatile markets
             return {"order_flow": 1.5, "trend": 0.7, "mean_reversion": 0.5, "volume": 1.3}
         if regime_upper in ("QUIET", "RANGING"):
-            # Mean-reversion signals more reliable in ranging/quiet markets
-            return {"order_flow": 0.7, "trend": 0.5, "mean_reversion": 1.5, "volume": 0.8}
+            # Mean-reversion signals preferred but other paths remain competitive.
+            # Previous 0.5 trend weight created a 3× disadvantage for standard
+            # scalp setups, causing RANGE_FADE to win every R-multiple competition.
+            return {"order_flow": 0.8, "trend": 0.75, "mean_reversion": 1.2, "volume": 0.9}
         if regime_upper in ("TRENDING_UP", "TRENDING_DOWN"):
             # Trend-following signals preferred in trending markets
             return {"order_flow": 1.0, "trend": 1.5, "mean_reversion": 0.3, "volume": 1.0}
@@ -138,7 +140,13 @@ class ScalpChannel(BaseChannel):
         ind = indicators.get("5m", {})
         profile = smc_data.get("pair_profile")
         thresholds = self._get_pair_adjusted_thresholds(profile)
-        if not check_adx(ind.get("adx_last"), thresholds["adx_min"]):
+        # Regime-adaptive ADX minimum: in RANGING/QUIET markets ADX hovers at
+        # 15-20 and consistently blocks the standard scalp path.  Lower the
+        # floor so well-formed liquidity-sweep setups can still compete.
+        adx_min_effective = thresholds["adx_min"]
+        if regime and regime.upper() in ("RANGING", "QUIET"):
+            adx_min_effective = max(12.0, thresholds["adx_min"] * 0.75)
+        if not check_adx(ind.get("adx_last"), adx_min_effective):
             return None
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime, profile=profile):
             return None

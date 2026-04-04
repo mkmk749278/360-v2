@@ -470,6 +470,11 @@ class Scanner:
         self._scan_cycle_count: int = 0
         self._last_tier3_scan_time: float = 0.0
 
+        # Setup diversity telemetry: rolling count of evaluated signals per
+        # setup_class, logged every 100 scan cycles for operational visibility.
+        self._setup_eval_counts: Dict[str, int] = defaultdict(int)
+        self._setup_emit_counts: Dict[str, int] = defaultdict(int)
+
         # WS health-aware scan gating: counts consecutive cycles where both
         # WS managers are unhealthy, used to trigger an admin alert.
         self._consecutive_ws_degraded_cycles: int = 0
@@ -830,6 +835,17 @@ class Scanner:
                     dict(self._suppression_counters),
                 )
                 self._suppression_counters.clear()
+
+            # Setup diversity telemetry: log evaluated and emitted counts per
+            # setup_class every 100 scan cycles for operational visibility.
+            if self._scan_cycle_count % 100 == 0 and self._setup_eval_counts:
+                log.info(
+                    "Signal diversity (last 100 cycles): evaluated={} emitted={}",
+                    dict(self._setup_eval_counts),
+                    dict(self._setup_emit_counts),
+                )
+                self._setup_eval_counts.clear()
+                self._setup_emit_counts.clear()
 
             # Touch heartbeat file so healthcheck knows the scanner is alive
             # (FINDING-024).
@@ -2410,6 +2426,9 @@ class Scanner:
             sig, cross_verified = await self._prepare_signal(symbol, volume_24h, chan, ctx_for_chan)
             if sig is None:
                 continue
+            # Track evaluated setup class for diversity telemetry
+            _sc = getattr(sig, "setup_class", chan_name)
+            self._setup_eval_counts[_sc] += 1
             _pending_signals.append((sig, chan_name))
 
         if not _pending_signals:
@@ -2444,6 +2463,7 @@ class Scanner:
                     symbol, direction, contributing, boost, best_sig.confidence,
                 )
                 if await self._enqueue_signal(best_sig):
+                    self._setup_emit_counts[best_sig.setup_class] += 1
                     for _, ch_name in signals_and_channels:
                         self._set_cooldown(symbol, ch_name)
                     self.cluster_suppressor.record_signal(symbol, direction)
@@ -2456,6 +2476,7 @@ class Scanner:
                 continue
             if not await self._enqueue_signal(sig):
                 continue
+            self._setup_emit_counts[sig.setup_class] += 1
             self._set_cooldown(symbol, chan_name)
             self.cluster_suppressor.record_signal(symbol, _dir)
 

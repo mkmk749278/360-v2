@@ -105,17 +105,30 @@ class ScalpVWAPChannel(BaseChannel):
         upper_band_2 = vwap_result.upper_band_2
         vwap_mid = vwap_result.vwap
 
-        # Volume confirmation: current volume > 1.3× average
+        # Volume confirmation: current volume must exceed average by a
+        # regime-adaptive ratio.  In low-volatility (QUIET) markets valid
+        # mean-reversion bounces often show only moderate volume uptick, so
+        # the threshold is relaxed to avoid filtering legitimate setups.
         avg_vol = sum(float(v) for v in volumes[-20:-1]) / 19
         current_vol = float(volumes[-1])
-        if avg_vol <= 0 or current_vol < avg_vol * _MIN_VOLUME_RATIO:
+        atr_val = ind.get("atr_last")
+        if atr_val is not None and close > 0:
+            atr_pct = (atr_val / close) * 100.0
+            # In low ATR environments, lower the volume ratio requirement
+            effective_vol_ratio = max(1.2, _MIN_VOLUME_RATIO * min(1.0, atr_pct / 0.3))
+        else:
+            effective_vol_ratio = _MIN_VOLUME_RATIO
+        if avg_vol <= 0 or current_vol < avg_vol * effective_vol_ratio:
             return None
 
-        # Determine direction based on VWAP band touch
+        # Determine direction based on VWAP band touch.
+        # ATR-adaptive proximity buffer: allow close within 0.5×ATR of the
+        # band boundary so setups are not rejected for missing exact touch.
+        atr_buf = (atr_val * 0.5) if atr_val is not None else 0.0
         direction: Optional[Direction] = None
-        if close <= lower_band_1:
+        if close <= lower_band_1 + atr_buf:
             direction = Direction.LONG
-        elif close >= upper_band_1:
+        elif close >= upper_band_1 - atr_buf:
             direction = Direction.SHORT
         else:
             return None

@@ -20,7 +20,7 @@ from src.smc import Direction
 # Maximum distance from FVG zone boundary (as fraction of zone width) to be
 # considered "retesting" the zone.  0.5 means price must be within 50% of the
 # zone width from the zone boundary.
-_FVG_RETEST_PROXIMITY: float = 0.35  # was 0.5; tighter = higher-probability retests
+_FVG_RETEST_PROXIMITY: float = 0.50  # widened from 0.35 for more FVG signal opportunities
 
 # FVG zone age management.
 # Zones older than _FVG_MAX_AGE_CANDLES are skipped (low institutional relevance).
