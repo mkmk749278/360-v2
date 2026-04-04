@@ -121,13 +121,37 @@ fi
 # ──────────────────────────────────────────────────────────────────────────────
 hdr "PHASE 2 — INSTALL PREREQUISITES"
 
+# Wait for any running apt/dpkg processes to finish (e.g. unattended-upgrades)
+wait_for_apt_lock() {
+    local max_wait=120   # seconds
+    local waited=0
+    while fuser /var/lib/dpkg/lock-frontend /var/lib/dpkg/lock /var/lib/apt/lists/lock \
+          /var/cache/apt/archives/lock >/dev/null 2>&1; do
+        if [ "$waited" -eq 0 ]; then
+            info "Waiting for other apt/dpkg processes to finish …"
+        fi
+        if [ "$waited" -ge "$max_wait" ]; then
+            err "Timed out after ${max_wait}s waiting for apt lock."
+            err "Kill the blocking process or try again later."
+            exit 1
+        fi
+        sleep 5
+        waited=$((waited + 5))
+    done
+    if [ "$waited" -gt 0 ]; then
+        ok "apt lock released after ~${waited}s"
+    fi
+}
+
 # Update packages
 info "Updating system packages …"
 if command -v apt-get &>/dev/null; then
+    wait_for_apt_lock
     # apt-get update often returns non-zero when individual repos are
     # unreachable (stale mirrors, expired GPG keys on a fresh VPS).
     # Allow partial failures — the install step will catch real issues.
     apt-get update -qq || warn "apt-get update had warnings (non-fatal, continuing)"
+    wait_for_apt_lock
     if ! apt-get install -y -qq git curl; then
         err "Failed to install prerequisites (git, curl) via apt-get"
         err "Check your internet connection and package sources, then retry."
