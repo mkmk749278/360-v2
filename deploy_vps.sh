@@ -33,6 +33,15 @@ ok()   { echo -e "${GREEN}✅  $*${NC}"; }
 warn() { echo -e "${YELLOW}⚠️   $*${NC}"; }
 err()  { echo -e "${RED}❌  $*${NC}" >&2; }
 info() { echo -e "${CYAN}ℹ️   $*${NC}"; }
+
+# ─── Error trap — shows which line caused an unexpected exit ───────────────────
+on_error() {
+    local exit_code=$?
+    local line_no=$1
+    err "Script failed at line $line_no (exit code $exit_code)"
+    err "Re-run with 'bash -x deploy_vps.sh' for detailed debug output."
+}
+trap 'on_error $LINENO' ERR
 hdr()  { echo -e "\n${BOLD}${CYAN}══════════════════════════════════════════════${NC}"; \
          echo -e "${BOLD}${CYAN}  $*${NC}"; \
          echo -e "${BOLD}${CYAN}══════════════════════════════════════════════${NC}"; }
@@ -82,8 +91,9 @@ if [ "$DO_CLEAN" = true ]; then
             docker compose down 2>/dev/null || true
         fi
         # Remove 360scalp containers
-        if docker ps -a --format '{{.Names}}' | grep -q "360scalp"; then
-            docker ps -a --format '{{.Names}}' | grep "360scalp" | while read -r c; do
+        SCALP_CONTAINERS=$(docker ps -a --format '{{.Names}}' | grep "360scalp" || true)
+        if [ -n "$SCALP_CONTAINERS" ]; then
+            echo "$SCALP_CONTAINERS" | while read -r c; do
                 docker stop "$c" 2>/dev/null || true
                 docker rm "$c" 2>/dev/null || true
             done
@@ -114,17 +124,37 @@ hdr "PHASE 2 — INSTALL PREREQUISITES"
 # Update packages
 info "Updating system packages …"
 if command -v apt-get &>/dev/null; then
-    apt-get update -qq
-    apt-get install -y -qq git curl >/dev/null 2>&1
+    # apt-get update often returns non-zero when individual repos are
+    # unreachable (stale mirrors, expired GPG keys on a fresh VPS).
+    # Allow partial failures — the install step will catch real issues.
+    apt-get update -qq || warn "apt-get update had warnings (non-fatal, continuing)"
+    if ! apt-get install -y -qq git curl; then
+        err "Failed to install prerequisites (git, curl) via apt-get"
+        err "Check your internet connection and package sources, then retry."
+        exit 1
+    fi
 elif command -v yum &>/dev/null; then
-    yum install -y -q git curl >/dev/null 2>&1
+    if ! yum install -y -q git curl; then
+        err "Failed to install prerequisites (git, curl) via yum"
+        exit 1
+    fi
+elif command -v dnf &>/dev/null; then
+    if ! dnf install -y -q git curl; then
+        err "Failed to install prerequisites (git, curl) via dnf"
+        exit 1
+    fi
+else
+    warn "No supported package manager found (apt/yum/dnf) — assuming git and curl are available"
 fi
 ok "System packages ready"
 
 # Install Docker if not present
 if ! command -v docker &>/dev/null; then
     info "Installing Docker …"
-    curl -fsSL https://get.docker.com | sh
+    if ! curl -fsSL https://get.docker.com | sh; then
+        err "Docker installation failed. Check your internet connection and try again."
+        exit 1
+    fi
     systemctl enable docker
     systemctl start docker
     ok "Docker installed"
