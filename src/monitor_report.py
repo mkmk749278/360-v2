@@ -310,7 +310,7 @@ class MonitorReport:
         # Check diagnostics for patterns.
         diagnostics = self._monitor.get_diagnostics(limit=200)
 
-        dup_count = sum(1 for d in diagnostics if "uplicate" in d.issue)
+        dup_count = sum(1 for d in diagnostics if "duplicate" in d.issue.lower())
         if dup_count >= 3:
             tmpl = _PLAN_TEMPLATES["duplicate_signals"]
             plans.append(ImplementationPlan(
@@ -321,7 +321,7 @@ class MonitorReport:
                 steps=tmpl["steps"],
             ))
 
-        conflict_count = sum(1 for d in diagnostics if "onflict" in d.issue)
+        conflict_count = sum(1 for d in diagnostics if "conflict" in d.issue.lower())
         if conflict_count >= 2:
             tmpl = _PLAN_TEMPLATES["conflicting_signals"]
             plans.append(ImplementationPlan(

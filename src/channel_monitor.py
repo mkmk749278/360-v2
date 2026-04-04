@@ -38,6 +38,9 @@ _DEDUP_WINDOW_S: float = 120.0
 # Confidence threshold below which we flag a signal as low-confidence.
 _LOW_CONFIDENCE_THRESHOLD: float = 50.0
 
+# Maximum relative entry-price difference to consider two signals duplicates.
+_DEDUP_ENTRY_TOLERANCE: float = 0.001  # 0.1%
+
 
 # ---------------------------------------------------------------------------
 # Channel definitions matching the 9-channel architecture
@@ -616,7 +619,7 @@ class ChannelMonitor:
                 prev.symbol == event.symbol
                 and prev.direction == event.direction
                 and prev.channel == event.channel
-                and abs(prev.entry - event.entry) / max(event.entry, 1e-9) < 0.001
+                and abs(prev.entry - event.entry) / max(event.entry, 1e-9) < _DEDUP_ENTRY_TOLERANCE
             ):
                 return True
         return False
