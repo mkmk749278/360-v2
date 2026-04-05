@@ -165,7 +165,7 @@ class TestFetchGlobalBookTickers:
         return scanner
 
     @pytest.mark.asyncio
-    async def test_populates_cache_for_tier2_and_tier3(self):
+    async def test_populates_cache_for_all_tiers(self):
         tier_map = {
             "BTCUSDT": PairTier.TIER1,
             "ETHUSDT": PairTier.TIER2,
@@ -184,11 +184,10 @@ class TestFetchGlobalBookTickers:
 
         await scanner._fetch_global_book_tickers(market="futures")
 
-        # Tier 2 and 3 should be cached
+        # All tiers should be cached — bookTicker now seeds Tier 1 too
+        assert "BTCUSDT" in scanner._order_book_cache
         assert "ETHUSDT" in scanner._order_book_cache
         assert "SOLUSDT" in scanner._order_book_cache
-        # Tier 1 must NOT be seeded by bookTicker (reserved for /depth)
-        assert "BTCUSDT" not in scanner._order_book_cache
 
     @pytest.mark.asyncio
     async def test_computed_spread_stored_in_cache(self):
@@ -332,21 +331,13 @@ class TestFetchGlobalBookTickers:
 # ---------------------------------------------------------------------------
 
 class TestGetSpreadPctTierGating:
-    def _scanner_with_tier(self, symbol: str, tier: PairTier) -> Scanner:
-        scanner = _make_scanner()
-        tm = MagicMock()
-        tm.get_tier = lambda sym: tier if sym == symbol else PairTier.TIER3
-        scanner.tier_manager = tm
-        scanner._ws_any_degraded_this_cycle = True
-        return scanner
+    """_get_spread_pct is now a pure cache lookup with no HTTP calls.
+    Tier-gating is irrelevant — all tiers are seeded by bookTicker pre-fetch."""
 
     @pytest.mark.asyncio
-    async def test_tier2_skips_depth_when_ws_degraded_returns_fallback(self):
-        """When WS is degraded a Tier 2 symbol should return the fallback spread
-        without issuing a /depth call, since the global bookTicker pre-fetch
-        is responsible for its cache entry."""
-        scanner = self._scanner_with_tier("ETHUSDT", PairTier.TIER2)
-
+    async def test_tier2_returns_fallback_when_cache_empty(self):
+        """Tier 2 symbol returns fallback when cache not yet seeded."""
+        scanner = _make_scanner()
         mock_client = MagicMock()
         mock_client.fetch_order_book = AsyncMock()
         scanner.futures_client = mock_client
@@ -357,9 +348,9 @@ class TestGetSpreadPctTierGating:
         mock_client.fetch_order_book.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_tier3_skips_depth_when_ws_degraded(self):
-        scanner = self._scanner_with_tier("DOGEUSDT", PairTier.TIER3)
-
+    async def test_tier3_returns_fallback_when_cache_empty(self):
+        """Tier 3 symbol returns fallback when cache not yet seeded."""
+        scanner = _make_scanner()
         mock_client = MagicMock()
         mock_client.fetch_order_book = AsyncMock()
         scanner.futures_client = mock_client
@@ -370,32 +361,23 @@ class TestGetSpreadPctTierGating:
         mock_client.fetch_order_book.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_tier1_still_fetches_depth_when_ws_degraded(self):
-        """Tier 1 (Hot) pairs must still get the full /depth fetch even when
-        WS is degraded, because they need accurate order-book data."""
-        scanner = self._scanner_with_tier("BTCUSDT", PairTier.TIER1)
-
-        book_response = {
-            "bids": [["50000.0", "1.0"]],
-            "asks": [["50001.0", "1.0"]],
-        }
+    async def test_tier1_returns_fallback_when_cache_empty(self):
+        """Tier 1 symbol also returns fallback when cache not yet seeded — no HTTP call."""
+        scanner = _make_scanner()
         mock_client = MagicMock()
-        mock_client.fetch_order_book = AsyncMock(return_value=book_response)
+        mock_client.fetch_order_book = AsyncMock()
         scanner.futures_client = mock_client
 
-        # Ensure rate-limiter guard passes
-        with patch("src.scanner.futures_rate_limiter") as mock_limiter:
-            mock_limiter.remaining = 9999
-            result = await scanner._get_spread_pct("BTCUSDT", market="futures")
+        result = await scanner._get_spread_pct("BTCUSDT", market="futures")
 
-        assert result > 0.0  # actual spread, not fallback
-        mock_client.fetch_order_book.assert_called_once()
+        assert result == 0.01
+        mock_client.fetch_order_book.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_tier2_returns_cached_spread_from_prefetch(self):
         """If the bookTicker pre-fetch has already seeded the cache for a
         Tier 2 symbol, _get_spread_pct should return the cached value."""
-        scanner = self._scanner_with_tier("ADAUSDT", PairTier.TIER2)
+        scanner = _make_scanner()
 
         # Simulate what _fetch_global_book_tickers writes
         expected_spread = 0.12345
@@ -409,7 +391,7 @@ class TestGetSpreadPctTierGating:
     @pytest.mark.asyncio
     async def test_tier1_returns_cached_spread_without_fetch(self):
         """Even for Tier 1, a valid cache entry must be returned without a new fetch."""
-        scanner = self._scanner_with_tier("BTCUSDT", PairTier.TIER1)
+        scanner = _make_scanner()
 
         cached_spread = 0.02
         scanner._order_book_cache["BTCUSDT"] = (
@@ -425,26 +407,19 @@ class TestGetSpreadPctTierGating:
         mock_client.fetch_order_book.assert_not_called()
 
     @pytest.mark.asyncio
-    async def test_no_depth_guard_when_ws_healthy(self):
-        """When WS is healthy, depth fetches are NOT gated by tier — even Tier 3
-        symbols should reach the /depth call path (subject to other guards)."""
+    async def test_no_http_calls_regardless_of_ws_state(self):
+        """_get_spread_pct never issues HTTP calls regardless of WS health."""
         scanner = _make_scanner()
         scanner._ws_any_degraded_this_cycle = False  # healthy WS
 
-        book_response = {
-            "bids": [["1.0", "100.0"]],
-            "asks": [["1.001", "100.0"]],
-        }
         mock_client = MagicMock()
-        mock_client.fetch_order_book = AsyncMock(return_value=book_response)
+        mock_client.fetch_order_book = AsyncMock()
         scanner.spot_client = mock_client
 
-        with patch("src.scanner.rate_limiter") as mock_limiter:
-            mock_limiter.remaining = 9999
-            result = await scanner._get_spread_pct("XRPUSDT", market="spot")
+        result = await scanner._get_spread_pct("XRPUSDT", market="spot")
 
-        assert result > 0.0
-        mock_client.fetch_order_book.assert_called_once()
+        assert result == 0.01
+        mock_client.fetch_order_book.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

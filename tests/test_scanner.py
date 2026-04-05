@@ -578,109 +578,94 @@ class TestThesisCooldown:
 
 
 class TestSpreadCacheFailureTTL:
-    """Failed order-book fetches (e.g. HTTP 400) must be cached long enough
-    to avoid hammering the endpoint on every scan cycle."""
+    """_get_spread_pct is now a pure cache lookup (no HTTP calls).
+    Spread is seeded by _fetch_global_book_tickers() via bookTicker pre-fetch
+    and by _fetch_depth_for_obi() for 360_SCALP_OBI symbols."""
 
     @pytest.mark.asyncio
-    async def test_failed_fetch_not_retried_within_fail_ttl(self):
-        """When fetch_order_book returns None the fallback is cached for
-        _SPREAD_FAIL_CACHE_TTL seconds, not the shorter _SPREAD_CACHE_TTL."""
+    async def test_returns_fallback_when_cache_empty(self):
+        """Returns 0.01 fallback when no bookTicker data has been cached."""
+        scanner = _make_scanner()
+        spread = await scanner._get_spread_pct("EURUSDT")
+        assert spread == 0.01
+
+    @pytest.mark.asyncio
+    async def test_returns_cached_spread_when_populated(self):
+        """Returns the bookTicker-seeded spread when cache is fresh."""
+        import time
+        scanner = _make_scanner()
+        scanner._order_book_cache["BTCUSDT"] = (0.05, time.monotonic() + 20.0)
+        spread = await scanner._get_spread_pct("BTCUSDT")
+        assert spread == 0.05
+
+    @pytest.mark.asyncio
+    async def test_returns_fallback_when_cache_expired(self):
+        """Returns 0.01 fallback when cache entry has expired."""
+        import time
+        scanner = _make_scanner()
+        scanner._order_book_cache["ETHUSDT"] = (0.03, time.monotonic() - 1.0)
+        spread = await scanner._get_spread_pct("ETHUSDT")
+        assert spread == 0.01
+
+    @pytest.mark.asyncio
+    async def test_no_http_calls_made(self):
+        """_get_spread_pct never calls fetch_order_book regardless of market."""
         scanner = _make_scanner()
         mock_client = MagicMock()
         mock_client.fetch_order_book = AsyncMock(return_value=None)
         scanner.spot_client = mock_client
+        scanner.futures_client = mock_client
 
-        spread1 = await scanner._get_spread_pct("EURUSDT")
-        assert spread1 == 0.01  # fallback
-
-        # Second call within the fail-TTL window should hit cache, not the client
-        spread2 = await scanner._get_spread_pct("EURUSDT")
-        assert spread2 == 0.01
-        # fetch_order_book must only have been called once despite two calls
-        assert mock_client.fetch_order_book.await_count == 1
+        await scanner._get_spread_pct("BTCUSDT", market="spot")
+        await scanner._get_spread_pct("BTCUSDT", market="futures")
+        assert mock_client.fetch_order_book.await_count == 0
 
     @pytest.mark.asyncio
-    async def test_successful_fetch_uses_normal_ttl(self):
-        """Successful fetches are cached and returned on the next call."""
-        scanner = _make_scanner()
-        mock_client = MagicMock()
-        mock_client.fetch_order_book = AsyncMock(
-            return_value={"bids": [["100.0", "1"]], "asks": [["100.01", "1"]]}
-        )
-        scanner.spot_client = mock_client
-
-        spread1 = await scanner._get_spread_pct("BTCUSDT")
-        spread2 = await scanner._get_spread_pct("BTCUSDT")
-        assert spread1 == spread2
-        # Client called only once due to caching
-        assert mock_client.fetch_order_book.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_fail_cache_expires_and_retries(self):
-        """After _SPREAD_FAIL_CACHE_TTL elapses the endpoint is retried."""
-        from src.scanner import _SPREAD_FAIL_CACHE_TTL
-        scanner = _make_scanner()
-        mock_client = MagicMock()
-        mock_client.fetch_order_book = AsyncMock(return_value=None)
-        scanner.spot_client = mock_client
-
-        await scanner._get_spread_pct("EURUSDT")
-        assert mock_client.fetch_order_book.await_count == 1
-
-        # Simulate the fail-TTL expiring by backdating the cached expiry
-        symbol = "EURUSDT"
-        cached_spread, expiry = scanner._order_book_cache[symbol]
-        scanner._order_book_cache[symbol] = (cached_spread, expiry - _SPREAD_FAIL_CACHE_TTL - 1)
-
-        # Reset per-cycle fetch counter so the cap doesn't block the retry
-        scanner._order_book_fetches_this_cycle = 0
-
-        await scanner._get_spread_pct("EURUSDT")
-        # Endpoint must have been called a second time after expiry
-        assert mock_client.fetch_order_book.await_count == 2
-
-    @pytest.mark.asyncio
-    async def test_fail_ttl_longer_than_success_ttl(self):
-        """_SPREAD_FAIL_CACHE_TTL must be greater than _SPREAD_CACHE_TTL."""
-        from src.scanner import _SPREAD_CACHE_TTL, _SPREAD_FAIL_CACHE_TTL
-        assert _SPREAD_FAIL_CACHE_TTL > _SPREAD_CACHE_TTL
-
-    @pytest.mark.asyncio
-    async def test_futures_market_uses_futures_client(self):
-        """When market='futures', the futures client is used instead of spot."""
+    async def test_fetch_depth_for_obi_populates_depth_cache(self):
+        """_fetch_depth_for_obi stores bids/asks in _order_book_depth_cache."""
         scanner = _make_scanner()
         mock_futures = MagicMock()
         mock_futures.fetch_order_book = AsyncMock(
             return_value={"bids": [["2000.0", "1"]], "asks": [["2001.0", "1"]]}
         )
-        mock_spot = MagicMock()
-        mock_spot.fetch_order_book = AsyncMock(return_value=None)
         scanner.futures_client = mock_futures
-        scanner.spot_client = mock_spot
+        scanner._depth_breaker_open_this_cycle = False
 
-        spread = await scanner._get_spread_pct("XAUUSDT", market="futures")
-        # Futures client must have been called, spot client must not
+        await scanner._fetch_depth_for_obi("BTCUSDT")
+
+        assert "BTCUSDT" in scanner._order_book_depth_cache
         assert mock_futures.fetch_order_book.await_count == 1
-        assert mock_spot.fetch_order_book.await_count == 0
-        assert spread > 0
 
     @pytest.mark.asyncio
-    async def test_spot_market_uses_spot_client(self):
-        """When market='spot' (default), the spot client is used."""
+    async def test_fetch_depth_for_obi_skips_when_breaker_open(self):
+        """_fetch_depth_for_obi skips the fetch when depth circuit breaker is open."""
         scanner = _make_scanner()
-        mock_spot = MagicMock()
-        mock_spot.fetch_order_book = AsyncMock(
-            return_value={"bids": [["100.0", "1"]], "asks": [["100.01", "1"]]}
-        )
         mock_futures = MagicMock()
         mock_futures.fetch_order_book = AsyncMock(return_value=None)
-        scanner.spot_client = mock_spot
         scanner.futures_client = mock_futures
+        scanner._depth_breaker_open_this_cycle = True
 
-        spread = await scanner._get_spread_pct("BTCUSDT", market="spot")
-        assert mock_spot.fetch_order_book.await_count == 1
+        await scanner._fetch_depth_for_obi("BTCUSDT")
+
         assert mock_futures.fetch_order_book.await_count == 0
-        assert spread > 0
+
+    @pytest.mark.asyncio
+    async def test_fetch_depth_for_obi_also_updates_spread_cache(self):
+        """_fetch_depth_for_obi also seeds the spread cache from the depth data."""
+        scanner = _make_scanner()
+        mock_futures = MagicMock()
+        mock_futures.fetch_order_book = AsyncMock(
+            return_value={"bids": [["2000.0", "1"]], "asks": [["2001.0", "1"]]}
+        )
+        scanner.futures_client = mock_futures
+        scanner._depth_breaker_open_this_cycle = False
+
+        await scanner._fetch_depth_for_obi("BTCUSDT")
+
+        assert "BTCUSDT" in scanner._order_book_depth_cache
+        assert "BTCUSDT" in scanner._order_book_cache
+        spread_pct, _ = scanner._order_book_cache["BTCUSDT"]
+        assert spread_pct > 0
 
 
 # ---------------------------------------------------------------------------

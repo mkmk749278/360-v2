@@ -131,26 +131,10 @@ _scoring_engine = SignalScoringEngine()
 # and suppresses or penalises signals from historically poor combinations.
 _stat_filter = StatisticalFilter()
 
-# Order book spread cache TTL and per-cycle fetch cap
+# Order book spread cache TTL
 _SPREAD_CACHE_TTL: float = 30.0
-# Longer TTL for symbols that fail (e.g. futures-only on spot) to avoid
-# hammering the endpoint every cycle.
-_SPREAD_FAIL_CACHE_TTL: float = 300.0
-# Upper bound on order book fetches per scan cycle.  The rate limiter in
-# BinanceClient throttles requests globally, so this acts only as a final
-# safety net — not the primary budget enforcement mechanism.
-_MAX_ORDER_BOOK_FETCHES_PER_CYCLE: int = 50
-# Minimum remaining rate-limiter weight required before issuing another order
-# book fetch.  Each order book call costs 1 weight; we reserve 100 units as a
-# buffer for kline fetches, exchange-info calls, and WebSocket reconnects that
-# may occur concurrently — roughly 8% of the 1 200-weight Binance limit.
-_MIN_WEIGHT_FOR_ORDER_BOOK: int = 100
-# When WS is partially degraded, tighten the order book limits to avoid
-# burning REST budget on depth fetches across hundreds of pairs.
-_MAX_ORDER_BOOK_FETCHES_WS_DEGRADED: int = 10
-_MIN_WEIGHT_FOR_ORDER_BOOK_WS_DEGRADED: int = 400
 
-# Timeout for the global bookTicker pre-fetch issued when WS is degraded.
+# Timeout for the global bookTicker pre-fetch issued every scan cycle.
 _BOOK_TICKER_PREFETCH_TIMEOUT_S: float = 8.0
 
 # TTL for spread entries seeded from the global bookTicker endpoint.
@@ -448,7 +432,6 @@ class Scanner:
         # expiry_monotonic_time is an absolute time.monotonic() value; the entry
         # is valid while time.monotonic() < expiry_monotonic_time.
         self._order_book_cache: Dict[str, Tuple[float, float]] = {}
-        self._order_book_fetches_this_cycle: int = 0
 
         # Order book depth cache: symbol → (bids, asks, expiry_monotonic_time)
         # Stores the raw top-level bids/asks for Order Book Imbalance filtering.
@@ -557,7 +540,6 @@ class Scanner:
         log.info("Scanner loop started")
         while True:
             t0 = time.monotonic()
-            self._order_book_fetches_this_cycle = 0
             self._scan_cycle_count += 1
 
             # Always clean up expired signals first (safety net for stuck slots)
@@ -998,20 +980,16 @@ class Scanner:
         return compute_indicators_for_candle_dict(candles)
 
     async def _fetch_global_book_tickers(self, market: str = "futures") -> None:
-        """Pre-populate the spread cache for Tier 2 and Tier 3 pairs using a
-        single weight-efficient ``bookTicker`` call.
+        """Pre-populate the spread cache for ALL pairs using a single weight-efficient
+        bookTicker call.
 
-        Called every scan cycle to pre-seed spreads for lower-tier pairs,
-        eliminating 30–50 individual ``/fapi/v1/depth`` REST calls (each
-        Weight 1, timeout-prone) with **one** global
-        ``/fapi/v1/ticker/bookTicker`` request (Weight: 2).
-        best bid/ask for *all* symbols, then seeds :attr:`_order_book_cache`
-        for every Tier 2 and Tier 3 pair found in the response.
+        Called every scan cycle to seed bid/ask spreads for all 50 symbols from a
+        single /fapi/v1/ticker/bookTicker request (Weight: 2). This completely
+        replaces per-symbol /fapi/v1/depth REST calls for spread calculation across
+        all channels except 360_SCALP_OBI.
 
-        Tier 1 (Hot) pairs are deliberately excluded from this pre-population
-        so that their higher-priority ``/depth`` call (which also captures full
-        order-book depth for OBI filtering) is not suppressed by the shorter
-        bookTicker TTL.
+        360_SCALP_OBI fetches depth lazily via _fetch_depth_for_obi() only when
+        the channel is not suppressed for the symbol being evaluated.
 
         Parameters
         ----------
@@ -1043,11 +1021,11 @@ class Scanner:
             now = time.monotonic()
             populated = 0
             for symbol, entry in tickers.items():
-                # Only seed Tier 2/3; Tier 1 uses the fuller /depth endpoint.
-                tier = self.get_symbol_tier(symbol)
-                if tier == PairTier.TIER1:
-                    continue
-                # Skip if there is already a fresh cache entry for this symbol.
+                # Seed ALL pairs (Tier 1 included) from the global bookTicker response.
+                # Previously Tier 1 was excluded to let /depth handle their spread, but
+                # /depth is now only fetched for 360_SCALP_OBI — bookTicker provides
+                # accurate best-bid/ask spread for all other channels at zero extra cost.
+                # Skip only if there is already a fresh (non-bookTicker) cache entry.
                 existing = self._order_book_cache.get(symbol)
                 if existing and now < existing[1]:
                     continue
@@ -1066,7 +1044,7 @@ class Scanner:
                 populated += 1
 
             log.debug(
-                "Global bookTicker pre-fetch populated {} Tier 2/3 spread cache entries",
+                "Global bookTicker pre-fetch populated {} spread cache entries (all tiers)",
                 populated,
             )
         except asyncio.TimeoutError:
@@ -1075,86 +1053,64 @@ class Scanner:
             log.warning("Global bookTicker pre-fetch error (market={}): {}", market, exc)
 
     async def _get_spread_pct(self, symbol: str, market: str = "spot") -> float:
-        spread_pct = 0.01  # fallback
+        """Return cached spread for *symbol* from the bookTicker pre-fetch.
+
+        Depth endpoint calls (/fapi/v1/depth) have been removed from this path.
+        Spread is now sourced exclusively from the global bookTicker pre-fetch
+        issued at the start of every scan cycle (_fetch_global_book_tickers).
+        This eliminates 50 per-cycle /depth REST calls that were the primary
+        cause of 40s+ scan latency spikes when Binance depth was degraded.
+
+        For 360_SCALP_OBI, depth is fetched lazily per-symbol in _scan_symbol
+        immediately before OBI channel evaluation (see _fetch_depth_for_obi).
+        """
         now = time.monotonic()
         cached = self._order_book_cache.get(symbol)
         if cached and now < cached[1]:
             return cached[0]
-        # Fast-path: when the depth circuit breaker is open, the underlying
-        # BinanceClient will return None immediately, but we still waste a
-        # counter increment and client-instantiation overhead per symbol.
-        # Short-circuit here with a cache TTL aligned to the breaker cooldown
-        # so the cache naturally expires once the breaker closes.
+        # bookTicker pre-fetch hasn't populated this symbol yet — return fallback
+        return 0.01
+
+    async def _fetch_depth_for_obi(self, symbol: str) -> None:
+        """Fetch /fapi/v1/depth for *symbol* and populate _order_book_depth_cache.
+
+        Called lazily in _scan_symbol only when the 360_SCALP_OBI channel is
+        not suppressed for this symbol. This replaces the old per-symbol depth
+        fetch that ran unconditionally for all 50 pairs every cycle.
+
+        Fails silently — if the fetch times out or the circuit breaker is open,
+        ScalpOBIChannel.evaluate() will find no order_book in smc_data and
+        return None (fail-open), which is the correct behaviour.
+        """
+        # Skip if circuit breaker is open
         if self._depth_breaker_open_this_cycle:
-            self._order_book_cache[symbol] = (
-                spread_pct,
-                now + DEPTH_CIRCUIT_BREAKER_COOLDOWN + 5,
-            )
-            return spread_pct
-        # Apply tighter limits when WS is partially degraded to prevent
-        # burning REST rate-limit budget on depth fetches for all pairs.
-        if self._ws_any_degraded_this_cycle:
-            effective_max_fetches = _MAX_ORDER_BOOK_FETCHES_WS_DEGRADED
-            effective_min_weight = _MIN_WEIGHT_FOR_ORDER_BOOK_WS_DEGRADED
-            # PR 3 — Tier-aware REST fallback: when WS is degraded, skip the
-            # heavy per-symbol /depth call for Tier 2 and Tier 3 pairs.
-            # Their spread data was already pre-populated from the global
-            # bookTicker call issued at the start of this scan cycle.
-            # Reserve /depth strictly for Tier 1 (Hot) pairs.
-            symbol_tier = self.get_symbol_tier(symbol)
-            if symbol_tier != PairTier.TIER1:
-                return spread_pct
-        else:
-            effective_max_fetches = _MAX_ORDER_BOOK_FETCHES_PER_CYCLE
-            effective_min_weight = _MIN_WEIGHT_FOR_ORDER_BOOK
-        # Guard 1: hard per-cycle cap (safety net; rate limiter is primary).
-        if self._order_book_fetches_this_cycle >= effective_max_fetches:
-            return spread_pct
-        # Guard 2: rate-limiter budget check — skip fetch when budget is low
-        # to preserve capacity for higher-priority calls (klines, exchange info).
-        # Use the market-appropriate limiter so futures depth checks against the
-        # futures budget rather than the spot budget.
-        active_limiter = futures_rate_limiter if market == "futures" else rate_limiter
-        if active_limiter.remaining < effective_min_weight:
-            log.debug(
-                "Skipping order book fetch for %s – %s rate limiter budget low (%d remaining)",
-                symbol, market, active_limiter.remaining,
-            )
-            return spread_pct
+            return
+        # Skip if already have a fresh depth cache entry
+        now = time.monotonic()
+        cached = self._order_book_depth_cache.get(symbol)
+        if cached and len(cached) == 3:
+            _, _, expiry = cached
+            if now < expiry:
+                return
         try:
-            self._order_book_fetches_this_cycle += 1
-            if market == "futures":
-                if self.futures_client is None:
-                    self.futures_client = BinanceClient("futures")
-                client = self.futures_client
-            else:
-                if self.spot_client is None:
-                    self.spot_client = BinanceClient("spot")
-                client = self.spot_client
-            # Fetch 20 levels: top-of-book bids/asks give the spread while
-            # the full depth is used for Order Book Imbalance (OBI) filtering.
-            book = await client.fetch_order_book(symbol, limit=20)
+            if self.futures_client is None:
+                self.futures_client = BinanceClient("futures")
+            book = await self.futures_client.fetch_order_book(symbol, limit=20)
             if book and book.get("bids") and book.get("asks"):
-                best_bid = float(book["bids"][0][0])
-                best_ask = float(book["asks"][0][0])
-                mid = (best_bid + best_ask) / 2.0
-                if mid > 0:
-                    spread_pct = (best_ask - best_bid) / mid * 100.0
-                # Cache spread with normal TTL
-                self._order_book_cache[symbol] = (spread_pct, now + _SPREAD_CACHE_TTL)
-                # Cache raw depth for OBI filtering (same TTL)
                 self._order_book_depth_cache[symbol] = (
                     book["bids"],
                     book["asks"],
                     now + _SPREAD_CACHE_TTL,
                 )
-            else:
-                # Failed fetch (e.g. futures-only symbol on spot endpoint):
-                # cache with a longer TTL to avoid hammering the endpoint every cycle.
-                self._order_book_cache[symbol] = (spread_pct, now + _SPREAD_FAIL_CACHE_TTL)
-        except Exception:
-            self._order_book_cache[symbol] = (spread_pct, now + _SPREAD_FAIL_CACHE_TTL)
-        return spread_pct
+                # Also update spread cache with fresh data
+                best_bid = float(book["bids"][0][0])
+                best_ask = float(book["asks"][0][0])
+                mid = (best_bid + best_ask) / 2.0
+                if mid > 0:
+                    spread_pct = (best_ask - best_bid) / mid * 100.0
+                    self._order_book_cache[symbol] = (spread_pct, now + _SPREAD_CACHE_TTL)
+        except Exception as exc:
+            log.debug("_fetch_depth_for_obi failed for {}: {}", symbol, exc)
 
     def _get_order_book_depth(self, symbol: str) -> Optional[dict]:
         """Return the most recent cached order book depth for *symbol*, or ``None``."""
@@ -2382,6 +2338,14 @@ class Scanner:
         if ctx is None:
             return
         ticks = self.data_store.ticks.get(symbol, [])
+
+        # Lazy depth fetch: only required for 360_SCALP_OBI.
+        # All other channels use spread from bookTicker cache only.
+        _obi_channel_active = any(
+            c.config.name == "360_SCALP_OBI" for c in self.channels
+        )
+        if _obi_channel_active and not self._should_skip_channel(symbol, "360_SCALP_OBI", ctx):
+            await self._fetch_depth_for_obi(symbol)
 
         # Collect all signals before deciding what to emit (confluence check)
         _pending_signals: list = []
