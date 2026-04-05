@@ -74,7 +74,18 @@ def validate_critical_env_vars() -> None:
         )
     if not TELEGRAM_ADMIN_CHAT_ID:
         logging.warning(
-            "⚠️  TELEGRAM_ADMIN_CHAT_ID is not set — admin commands will be disabled."
+            "⚠️  TELEGRAM_ADMIN_CHAT_ID is not set — admin commands will be disabled. "
+            "Set this to your personal Telegram chat ID (a numeric value like 123456789). "
+            "Send /start to the bot and call https://api.telegram.org/bot<TOKEN>/getUpdates "
+            "to find your chat ID."
+        )
+    else:
+        # Log the length and first/last 2 chars so the operator can verify the format
+        # without exposing the full value in logs.
+        _aid = TELEGRAM_ADMIN_CHAT_ID.strip()
+        logging.info(
+            "ℹ️  TELEGRAM_ADMIN_CHAT_ID configured: length=%d, starts=%r ends=%r",
+            len(_aid), _aid[:2], _aid[-2:],
         )
     if not TELEGRAM_ACTIVE_CHANNEL_ID:
         logging.warning(
@@ -868,7 +879,7 @@ MIN_SIGNAL_LIFESPAN_SECONDS: Dict[str, int] = {
 #: Acts as a hard floor — only top-tier signals proceed when the market is
 #: compressed.  Configurable via the QUIET_SCALP_MIN_CONFIDENCE env var.
 QUIET_SCALP_MIN_CONFIDENCE: float = float(
-    os.getenv("QUIET_SCALP_MIN_CONFIDENCE", "72.0")
+    os.getenv("QUIET_SCALP_MIN_CONFIDENCE", "65.0")
 )
 
 #: Volume multiplier required for scalp entries in QUIET regime.
@@ -1116,13 +1127,18 @@ DEPTH_CIRCUIT_BREAKER_THRESHOLD: int = int(
     os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "3")
 )
 # How long (seconds) the circuit stays open (depth fetches return None immediately).
+# Default 300s (5 min) so Binance has time to recover before the next retry attempt;
+# 90s was too short and caused an infinite trip → cooldown → trip loop during degraded
+# endpoint windows.  Still overridable via the DEPTH_CIRCUIT_BREAKER_COOLDOWN env var.
 DEPTH_CIRCUIT_BREAKER_COOLDOWN: float = float(
-    os.getenv("DEPTH_CIRCUIT_BREAKER_COOLDOWN", "90")
+    os.getenv("DEPTH_CIRCUIT_BREAKER_COOLDOWN", "300")
 )
 # Maximum retries for depth endpoint specifically (prevents cumulative wait).
 DEPTH_MAX_RETRIES: int = _safe_int("DEPTH_MAX_RETRIES", "1")
-# Number of pairs to scan when depth circuit breaker or latency breaker is active (TOP50 mode only)
-TOP50_BREAKER_SCAN_COUNT: int = _safe_int("TOP50_BREAKER_SCAN_COUNT", "25")
+# Number of pairs to scan when depth circuit breaker or latency breaker is active (TOP50 mode only).
+# When the depth circuit breaker fires, depth data is simply skipped per-symbol; the scan universe
+# should not shrink — keep the full TOP50_FUTURES_COUNT so signals from all 50 pairs remain possible.
+TOP50_BREAKER_SCAN_COUNT: int = _safe_int("TOP50_BREAKER_SCAN_COUNT", "50")
 
 # ---------------------------------------------------------------------------
 # WS reconnection resilience — escalation alert threshold
