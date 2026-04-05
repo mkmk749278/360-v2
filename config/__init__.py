@@ -1110,18 +1110,19 @@ WS_DEGRADED_MAX_PAIRS: int = _safe_int("WS_DEGRADED_MAX_PAIRS", "50")
 # Depth endpoint circuit breaker
 # ---------------------------------------------------------------------------
 # Number of depth endpoint timeouts within a rolling 30 s window that trips
-# the circuit breaker.  With 10 concurrent inflight requests, a threshold of
-# 5 avoids false trips from brief network blips where multiple concurrent
-# requests all timeout simultaneously.
+# the circuit breaker.  A threshold of 3 trips faster to prevent scan latency
+# from spiking when Binance depth endpoint degrades.
 DEPTH_CIRCUIT_BREAKER_THRESHOLD: int = int(
-    os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "5")
+    os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "3")
 )
 # How long (seconds) the circuit stays open (depth fetches return None immediately).
 DEPTH_CIRCUIT_BREAKER_COOLDOWN: float = float(
-    os.getenv("DEPTH_CIRCUIT_BREAKER_COOLDOWN", "60")
+    os.getenv("DEPTH_CIRCUIT_BREAKER_COOLDOWN", "90")
 )
 # Maximum retries for depth endpoint specifically (prevents cumulative wait).
-DEPTH_MAX_RETRIES: int = _safe_int("DEPTH_MAX_RETRIES", "2")
+DEPTH_MAX_RETRIES: int = _safe_int("DEPTH_MAX_RETRIES", "1")
+# Number of pairs to scan when depth circuit breaker or latency breaker is active (TOP50 mode only)
+TOP50_BREAKER_SCAN_COUNT: int = _safe_int("TOP50_BREAKER_SCAN_COUNT", "25")
 
 # ---------------------------------------------------------------------------
 # WS reconnection resilience — escalation alert threshold

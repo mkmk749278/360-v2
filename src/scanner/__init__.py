@@ -37,6 +37,7 @@ from config import (
     TIER2_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
+    TOP50_BREAKER_SCAN_COUNT,
     TOP50_FUTURES_ONLY,
     WS_DEGRADED_CYCLES_ALERT,
     WS_DEGRADED_MAX_CYCLES,
@@ -180,7 +181,7 @@ _MAX_CONCURRENT_SCANS: int = 20
 # is ineffective.  When the depth circuit breaker or latency breaker is
 # active, limit the scan to the top-N pairs by 24h volume to shed CPU
 # work from indicator computation and channel evaluation.
-_TOP50_BREAKER_SCAN_COUNT: int = 10
+_TOP50_BREAKER_SCAN_COUNT: int = TOP50_BREAKER_SCAN_COUNT
 
 # Regime-channel compatibility matrix.
 # Maps channel name → list of regimes where that channel is blocked.

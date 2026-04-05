@@ -716,7 +716,12 @@ class TelegramBot:
                     text = msg.get("text", "")
                     chat_id = str(msg.get("chat", {}).get("id", ""))
                     if text.startswith("/"):
-                        await handler(text, chat_id)
+                        _t = asyncio.create_task(handler(text, chat_id))
+                        _t.add_done_callback(
+                            lambda t: log.error("Command handler error: {}", t.exception())
+                            if not t.cancelled() and t.exception() is not None
+                            else None
+                        )
                     # Handle channel subscription events
                     mcm = update.get("my_chat_member", {})
                     if mcm and on_new_member is not None:
