@@ -206,10 +206,25 @@ class CommandHandler:
             if original_cmd == "/reset_circuit_breaker":
                 args = ["reset"]
 
-        is_admin = bool(TELEGRAM_ADMIN_CHAT_ID and chat_id == TELEGRAM_ADMIN_CHAT_ID)
+        is_admin = bool(
+            TELEGRAM_ADMIN_CHAT_ID
+            and chat_id.strip() == TELEGRAM_ADMIN_CHAT_ID.strip()
+        )
+        log.info(
+            "Command received: cmd=%s chat_id=%s is_admin=%s",
+            cmd, chat_id, is_admin,
+        )
 
         ctx = self._make_context(chat_id, is_admin)
-        await _GLOBAL_REGISTRY.dispatch(cmd, args, ctx)
+        try:
+            await _GLOBAL_REGISTRY.dispatch(cmd, args, ctx)
+        except Exception as exc:
+            log.error("Command %s raised unhandled exception: %s", cmd, exc, exc_info=True)
+            try:
+                err_text = f"❌ Command error: {exc}" if is_admin else "❌ An internal error occurred."
+                await self._telegram.send_message(chat_id, err_text)
+            except Exception:
+                pass
         # Propagate any mutable state back
         self._bt_fee_pct = ctx.bt_fee_pct
         self._bt_slippage_pct = ctx.bt_slippage_pct
