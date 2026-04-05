@@ -804,7 +804,7 @@ class SignalRouter:
         emoji = chan_emojis.get(signal.channel, "📡")
         chan_name = TelegramBot._CHANNEL_DISPLAY_NAME.get(signal.channel, signal.channel)
         # Show signal type in the free-channel preview header too.
-        if signal.setup_class and signal.setup_class not in ("UNCLASSIFIED",):
+        if signal.setup_class and signal.setup_class != "UNCLASSIFIED":
             type_suffix = " │ " + signal.setup_class.replace("_", " ")
         else:
             type_suffix = ""

@@ -5,6 +5,9 @@ on:
     branches: [main]
   workflow_dispatch:
 
+permissions:
+  contents: read
+
 jobs:
   deploy:
     name: Deploy engine
@@ -15,10 +18,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Write .env from secrets
-        # Build the .env file on the VPS by echoing each secret over SSH.
-        # Only the four Telegram vars need to be injected; all other settings
-        # use the defaults already present in .env.example on the server.
+      - name: Deploy to VPS
         uses: appleboy/ssh-action@v1.0.3
         with:
           host: ${{ secrets.VPS_HOST }}
@@ -32,10 +32,13 @@ jobs:
             git fetch origin main
             git reset --hard origin/main
 
-            # Regenerate .env from the example template, then inject secrets
-            cp -n .env.example .env || true
+            # Bootstrap .env from template only when it does not already exist
+            if [ ! -f .env ]; then
+              cp .env.example .env
+              echo "ℹ️  Created .env from .env.example"
+            fi
 
-            # Overwrite the four Telegram secrets in place
+            # Inject/update the four Telegram secrets in place
             sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}|" .env
             sed -i "s|^TELEGRAM_ACTIVE_CHANNEL_ID=.*|TELEGRAM_ACTIVE_CHANNEL_ID=${{ secrets.TELEGRAM_ACTIVE_CHANNEL_ID }}|" .env
             sed -i "s|^TELEGRAM_FREE_CHANNEL_ID=.*|TELEGRAM_FREE_CHANNEL_ID=${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}|" .env

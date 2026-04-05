@@ -309,7 +309,7 @@ class TelegramBot:
         # Embed the signal type (setup_class) into the channel label so every
         # message arriving in the single Active channel shows e.g.
         # "SCALP │ RANGE FADE" or "SCALP FVG │ FVG RETEST".
-        if sig.setup_class and sig.setup_class not in ("UNCLASSIFIED",):
+        if sig.setup_class and sig.setup_class != "UNCLASSIFIED":
             type_suffix = " │ " + sig.setup_class.replace("_", " ")
         else:
             type_suffix = ""
@@ -496,7 +496,7 @@ class TelegramBot:
         dir_word = sig.direction.value if sig.direction is not None else "LONG"
         price_str = fmt_price(sig.entry) if sig.entry else "N/A"
         setup_label = ""
-        if sig.setup_class and sig.setup_class not in ("UNCLASSIFIED",):
+        if sig.setup_class and sig.setup_class != "UNCLASSIFIED":
             setup_label = f" | Setup: {TelegramBot._escape_md(sig.setup_class.replace('_', ' ').title())}"
         lines = [
             f"🔍 *WATCHLIST* — {TelegramBot._escape_md(sig.symbol)}",
