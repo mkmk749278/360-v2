@@ -38,13 +38,29 @@ jobs:
               echo "ℹ️  Created .env from .env.example"
             fi
 
-            # Inject/update the four Telegram secrets in place
+            # ── Inject/update all secrets in place ──────────────────────────
+
+            # Telegram
             sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}|" .env
             sed -i "s|^TELEGRAM_ACTIVE_CHANNEL_ID=.*|TELEGRAM_ACTIVE_CHANNEL_ID=${{ secrets.TELEGRAM_ACTIVE_CHANNEL_ID }}|" .env
             sed -i "s|^TELEGRAM_FREE_CHANNEL_ID=.*|TELEGRAM_FREE_CHANNEL_ID=${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}|" .env
             sed -i "s|^TELEGRAM_ADMIN_CHAT_ID=.*|TELEGRAM_ADMIN_CHAT_ID=${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}|" .env
 
-            # Rebuild and restart the engine container
+            # Binance API keys (update if line exists, append if not)
+            grep -q "^BINANCE_API_KEY=" .env \
+              && sed -i "s|^BINANCE_API_KEY=.*|BINANCE_API_KEY=${{ secrets.BINANCE_API_KEY }}|" .env \
+              || echo "BINANCE_API_KEY=${{ secrets.BINANCE_API_KEY }}" >> .env
+
+            grep -q "^BINANCE_API_SECRET=" .env \
+              && sed -i "s|^BINANCE_API_SECRET=.*|BINANCE_API_SECRET=${{ secrets.BINANCE_API_SECRET }}|" .env \
+              || echo "BINANCE_API_SECRET=${{ secrets.BINANCE_API_SECRET }}" >> .env
+
+            # OpenAI API key (update if line exists, append if not)
+            grep -q "^OPENAI_API_KEY=" .env \
+              && sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}|" .env \
+              || echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env
+
+            # ── Rebuild and restart the engine container ─────────────────────
             docker compose pull --quiet || true
             docker compose up -d --build --remove-orphans
 
