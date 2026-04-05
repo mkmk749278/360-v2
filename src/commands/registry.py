@@ -11,6 +11,11 @@ import asyncio
 from dataclasses import dataclass, field
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from config import TELEGRAM_ADMIN_CHAT_ID
+from src.utils import get_logger
+
+log = get_logger("command_registry")
+
 _TELEGRAM_MAX_MSG_CHARS: int = 4_096
 
 
@@ -127,9 +132,16 @@ class CommandRegistry:
         """Dispatch *cmd* to the registered handler, enforcing admin guard."""
         entry = self._commands.get(cmd)
         if entry is None:
+            log.info("Unknown command %r from chat_id=%s — sending help text", cmd, ctx.chat_id)
             await ctx.reply(self._help_text(ctx.is_admin))
             return
         if entry.admin and not ctx.is_admin:
+            log.warning(
+                "Admin command %s blocked: chat_id=%s is not admin (TELEGRAM_ADMIN_CHAT_ID=%r)",
+                cmd,
+                ctx.chat_id,
+                TELEGRAM_ADMIN_CHAT_ID,
+            )
             await ctx.reply("⛔ This command is restricted to administrators.")
             return
         await entry.handler(args, ctx)
