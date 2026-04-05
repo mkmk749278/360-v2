@@ -28,7 +28,7 @@ A high-performance, fully asynchronous Python engine that scans the **top 50 USD
 
 360-Crypto-Scalping V2 is a **production-grade, 24/7 crypto signal engine** built on these core principles:
 
-- **Single Channel** — All signals go to one **Active Trading** Telegram channel. No separate portfolio channels; simpler for users, easier to maintain.
+- **Single Active Channel** — All nine scalp strategy signals go to one **Active Trading** Telegram channel. Each message header shows the signal type (e.g. `SCALP │ RANGE FADE`) so users can distinguish setups instantly. A separate **Free Channel** receives one condensed preview per day.
 - **Top-50 Futures Only** — Scans the top 50 USDT-M futures by 24 h volume. Reduces API weight, memory, and scan latency compared to scanning 800+ pairs.
 - **Docker-First** — One-click VPS deployment with Docker Compose. No manual Python/venv setup needed.
 - **Async-First** — Full `asyncio` + `aiohttp` architecture with WebSocket + REST parallelism.
@@ -55,10 +55,10 @@ Binance WS ──► WebSocketManager (multi-conn, heartbeat, auto-reconnect)
         ATR, BB)
            └───────────┤────────────────┘──────────────┘
                        ▼
-              5 × Scalp Strategies
-        ┌──────┬───────┬───────┬───────┐
-      SCALP   FVG    CVD   VWAP    OBI
-        └──────┴───────┴───────┴───────┘
+              9 × Scalp Strategies
+        ┌──────┬───────┬───────┬───────┬─────┬─────┬──────────┬──────────┬────────────┐
+      SCALP   FVG    CVD   VWAP   OBI  DIV   STREND   ICHIMOKU   ORDERBLOCK
+        └──────┴───────┴───────┴───────┴─────┴─────┴──────────┴──────────┴────────────┘
                        │
             Gating Filters & Quality Checks
          (MTF confluence, correlation, kill-zone,
@@ -103,7 +103,7 @@ Binance WS ──► WebSocketManager (multi-conn, heartbeat, auto-reconnect)
 | Feature | Module(s) | Description |
 |---|---|---|
 | **SMC Detection** | `src/smc.py` | Liquidity sweeps, Market Structure Shifts (MSS), Fair Value Gaps (FVG) |
-| **5 Scalp Strategies** | `src/channels/` | Standard Scalp, FVG, CVD Divergence, VWAP Deviation, Order Book Imbalance |
+| **9 Scalp Strategies** | `src/channels/` | Standard Scalp (3 paths), FVG, CVD Divergence, VWAP Deviation, Order Book Imbalance, RSI/MACD Divergence, Supertrend Flip, Ichimoku TK-Cross, SMC Orderblock |
 | **Confidence Scoring** | `src/confidence.py` | Multi-layer 0–100 scorer with 8+ sub-components (SMC, trend, liquidity, spread, data sufficiency, multi-exchange, on-chain, order flow, AI sentiment, correlation) |
 | **Multi-Timeframe** | `src/mtf.py` | 1 m / 5 m / 15 m / 1 h / 4 h / 1 d confluence and gating |
 | **Market Regime** | `src/regime.py` | Trending Up/Down, Ranging, Volatile, Quiet classification with penalty system |
@@ -253,8 +253,11 @@ All configuration is managed through environment variables. Copy `.env.example` 
 | Variable | Description | How to Get |
 |---|---|---|
 | `TELEGRAM_BOT_TOKEN` | Bot token | [@BotFather](https://t.me/BotFather) on Telegram |
-| `TELEGRAM_ACTIVE_CHANNEL_ID` | Active Trading channel ID | Add [@RawDataBot](https://t.me/RawDataBot) to the channel |
+| `TELEGRAM_ACTIVE_CHANNEL_ID` | Active Trading channel — receives **all** signals | Add [@RawDataBot](https://t.me/RawDataBot) to the channel |
+| `TELEGRAM_FREE_CHANNEL_ID` | Free channel — receives one condensed preview per day | Add [@RawDataBot](https://t.me/RawDataBot) to the channel |
 | `TELEGRAM_ADMIN_CHAT_ID` | Your personal chat ID | Send `/start` to [@userinfobot](https://t.me/userinfobot) |
+
+> **Channel design**: All nine signal strategies (SCALP, FVG, CVD, VWAP, OBI, DIVERGENCE, SUPERTREND, ICHIMOKU, ORDERBLOCK) route to the single `TELEGRAM_ACTIVE_CHANNEL_ID`. Each message header shows the specific signal type (e.g. `SCALP │ RANGE FADE`, `SCALP FVG │ FVG RETEST`) so subscribers can distinguish setups at a glance.
 
 ### Optional — AI APIs
 
@@ -308,6 +311,23 @@ Public market-data endpoints require **no keys**. Only set these for authenticat
 | `MAX_SCALP_OBI_SIGNALS` | `3` | Max concurrent OBI signals |
 
 > See `.env.example` for the full list of all configurable variables.
+
+### GitHub Actions CD — Secrets
+
+The included `.github/workflows/deploy.yml` workflow deploys on every push to `main`.  
+Add the following **repository secrets** under *Settings → Secrets and variables → Actions*:
+
+| Secret | Description |
+|---|---|
+| `VPS_HOST` | VPS IP or hostname |
+| `VPS_USER` | SSH username (e.g. `ubuntu`) |
+| `VPS_SSH_KEY` | Private SSH key (PEM format) — add the corresponding public key to `~/.ssh/authorized_keys` on the VPS |
+| `TELEGRAM_BOT_TOKEN` | Bot token from [@BotFather](https://t.me/BotFather) |
+| `TELEGRAM_ACTIVE_CHANNEL_ID` | Active Trading channel ID |
+| `TELEGRAM_FREE_CHANNEL_ID` | Free channel ID (optional) |
+| `TELEGRAM_ADMIN_CHAT_ID` | Admin personal chat ID |
+
+The workflow SSHes into the VPS, pulls the latest code, injects the secrets into `.env`, and restarts the engine via `docker compose up -d --build`.
 
 ---
 
@@ -419,28 +439,48 @@ Or via Telegram (admin only):
 
 ## Signal Format
 
-Signals are posted to the Active Trading Telegram channel in the following format:
+All nine signal strategies post to the single **Active Trading** Telegram channel. Each message header contains the **signal type** so subscribers can distinguish setups at a glance:
 
 ```
-⚡ SCALP ALERT 💎
-Pair: BTCUSDT (Futures)
-📈 LONG 🚀
-🚀 Entry: 68,150
-🛡️ SL: 68,080
-🎯 TP1: 68,250 (1R)
-🎯 TP2: 68,350 (1.5R)
-🎯 TP3: 68,500 (2R)
-💹 Trailing: 1.5×ATR
-🤖 Confidence: 87%
-📰 AI: Bullish — Whale accumulation detected
-⚠️ Risk: Moderate
+⚡ SCALP │ RANGE FADE │ BTCUSDT │ LONG
+━━━━━━━━━━━━━━━━━━━━━━━━
+
+📍 Entry Zone: 67,150 – 67,250 (limit order)
+   Mid: 67,200
+🛑 SL: 66,950 (-0.37%)
+🎯 TP1: 67,520 (+0.48%)
+🎯 TP2: 67,800 (+0.89%)
+🎯 TP3: 68,100 (+1.34%)
+
+📊 Setup: RANGE FADE | Confidence: 84.2 (A+)
+⏱ Hold: ~1-2h | R:R 1:2.4
+⏰ Valid for: ~15 min | Execution: LIMIT ORDER
+💡 BTC ranging near support + OBI absorption signal
+
+🏷 Risk: LOW | Quality: PREMIUM
 ```
+
+Signal types by strategy:
+
+| Strategy channel | Signal type shown |
+|---|---|
+| `360_SCALP` standard path | `SCALP │ LIQUIDITY SWEEP REVERSAL` |
+| `360_SCALP` range path | `SCALP │ RANGE FADE` |
+| `360_SCALP` momentum path | `SCALP │ WHALE MOMENTUM` |
+| `360_SCALP_FVG` | `SCALP FVG │ FVG RETEST` |
+| `360_SCALP_CVD` | `SCALP CVD │ CVD DIVERGENCE` |
+| `360_SCALP_VWAP` | `SCALP VWAP │ VWAP BOUNCE` |
+| `360_SCALP_OBI` | `SCALP OBI │ OBI ABSORPTION` |
+| `360_SCALP_DIVERGENCE` | `SCALP DIVERGENCE │ RSI MACD DIVERGENCE` |
+| `360_SCALP_SUPERTREND` | `SCALP SUPERTREND │ SUPERTREND FLIP` |
+| `360_SCALP_ICHIMOKU` | `SCALP ICHIMOKU │ ICHIMOKU TK CROSS` |
+| `360_SCALP_ORDERBLOCK` | `SCALP ORDERBLOCK │ SMC ORDERBLOCK` |
 
 Signals are updated in real time as targets are hit:
 
 ```
-✅ TP1 HIT — BTCUSDT +1R (+0.15%)
-✅ TP2 HIT — BTCUSDT +1.5R (+0.22%)
+✅ TP1 HIT — BTCUSDT +0.48% (+1R)
+✅ TP2 HIT — BTCUSDT +0.89% (+1.9R)
 🔒 Trailing stop moved to breakeven
 ```
 
@@ -465,11 +505,15 @@ Signals are updated in real time as targets are hit:
 │   │   └── ws_optimizer.py        # WS stream optimisation
 │   ├── channels/                  # Strategy implementations
 │   │   ├── base.py                # Base channel class & signal model
-│   │   ├── scalp.py               # Standard Scalp (M1/M5)
+│   │   ├── scalp.py               # Standard Scalp — 3 paths: SMC, Range Fade, Whale Momentum
 │   │   ├── scalp_fvg.py           # Fair Value Gap scalp
 │   │   ├── scalp_cvd.py           # CVD divergence scalp
 │   │   ├── scalp_vwap.py          # VWAP deviation scalp
 │   │   ├── scalp_obi.py           # Order Book Imbalance scalp
+│   │   ├── scalp_divergence.py    # RSI/MACD divergence scalp
+│   │   ├── scalp_supertrend.py    # Supertrend flip scalp
+│   │   ├── scalp_ichimoku.py      # Ichimoku TK-cross scalp
+│   │   ├── scalp_orderblock.py    # SMC orderblock scalp
 │   │   └── signal_params.py       # Risk / TP parameter tables
 │   ├── commands/                  # Telegram command handlers
 │   │   ├── __init__.py            # CommandHandler (dispatcher)

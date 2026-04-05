@@ -788,17 +788,26 @@ class SignalRouter:
         from src.utils import fmt_price
 
         chan_emojis = {
-            "360_SCALP": "⚡",
-            "360_SCALP_FVG": "⚡",
-            "360_SCALP_CVD": "⚡",
-            "360_SCALP_VWAP": "⚡",
-            "360_SCALP_OBI": "⚡",
-            "360_SWING": "🏛️",
-            "360_SPOT": "📈",
-            "360_GEM": "💎",
+            "360_SCALP":            "⚡",
+            "360_SCALP_FVG":        "⚡",
+            "360_SCALP_CVD":        "⚡",
+            "360_SCALP_VWAP":       "⚡",
+            "360_SCALP_OBI":        "⚡",
+            "360_SCALP_DIVERGENCE": "⚡",
+            "360_SCALP_SUPERTREND": "⚡",
+            "360_SCALP_ICHIMOKU":   "⚡",
+            "360_SCALP_ORDERBLOCK": "⚡",
+            "360_SWING":            "🏛️",
+            "360_SPOT":             "📈",
+            "360_GEM":              "💎",
         }
         emoji = chan_emojis.get(signal.channel, "📡")
         chan_name = TelegramBot._CHANNEL_DISPLAY_NAME.get(signal.channel, signal.channel)
+        # Show signal type in the free-channel preview header too.
+        if signal.setup_class and signal.setup_class not in ("UNCLASSIFIED",):
+            type_suffix = " │ " + signal.setup_class.replace("_", " ")
+        else:
+            type_suffix = ""
         dir_word = signal.direction.value
 
         def _pct(price: float) -> str:
@@ -810,7 +819,7 @@ class SignalRouter:
         lines = [
             "🆓 *FREE SIGNAL PREVIEW* 🆓",
             "",
-            f"{emoji} *{TelegramBot._escape_md(chan_name)}* │ *{TelegramBot._escape_md(signal.symbol)}* │ *{dir_word}*",
+            f"{emoji} *{TelegramBot._escape_md(chan_name + type_suffix)}* │ *{TelegramBot._escape_md(signal.symbol)}* │ *{dir_word}*",
             TelegramBot._escape_md("━" * 24),
             "",
             f"📍 Entry: `{fmt_price(signal.entry)}`",
@@ -818,7 +827,7 @@ class SignalRouter:
             f"🎯 TP1: `{fmt_price(signal.tp1)}` ({TelegramBot._escape_md(_pct(signal.tp1))})",
             "",
             "🔒 _Premium members see TP2, TP3 and full analysis_",
-            "📲 _Join our premium channels for real-time signals_",
+            "📲 _Join our premium channel for real-time signals_",
         ]
         return "\n".join(lines)
 
@@ -846,24 +855,32 @@ class SignalRouter:
     def _format_scoreboard(scoreboard: Dict[str, Any]) -> str:
         """Format the weekly scoreboard for Telegram."""
         chan_emojis = {
-            "360_SCALP": "⚡",
-            "360_SCALP_FVG": "⚡",
-            "360_SCALP_CVD": "⚡",
-            "360_SCALP_VWAP": "⚡",
-            "360_SCALP_OBI": "⚡",
-            "360_SWING": "🏛️",
-            "360_SPOT": "📈",
-            "360_GEM": "💎",
+            "360_SCALP":            "⚡",
+            "360_SCALP_FVG":        "⚡",
+            "360_SCALP_CVD":        "⚡",
+            "360_SCALP_VWAP":       "⚡",
+            "360_SCALP_OBI":        "⚡",
+            "360_SCALP_DIVERGENCE": "⚡",
+            "360_SCALP_SUPERTREND": "⚡",
+            "360_SCALP_ICHIMOKU":   "⚡",
+            "360_SCALP_ORDERBLOCK": "⚡",
+            "360_SWING":            "🏛️",
+            "360_SPOT":             "📈",
+            "360_GEM":              "💎",
         }
         chan_labels = {
-            "360_SCALP": "Scalp",
-            "360_SCALP_FVG": "Scalp FVG",
-            "360_SCALP_CVD": "Scalp CVD",
-            "360_SCALP_VWAP": "Scalp VWAP",
-            "360_SCALP_OBI": "Scalp OBI",
-            "360_SWING": "Swing",
-            "360_SPOT": "Spot",
-            "360_GEM": "Gem",
+            "360_SCALP":            "Scalp",
+            "360_SCALP_FVG":        "Scalp FVG",
+            "360_SCALP_CVD":        "Scalp CVD",
+            "360_SCALP_VWAP":       "Scalp VWAP",
+            "360_SCALP_OBI":        "Scalp OBI",
+            "360_SCALP_DIVERGENCE": "Scalp Divergence",
+            "360_SCALP_SUPERTREND": "Scalp Supertrend",
+            "360_SCALP_ICHIMOKU":   "Scalp Ichimoku",
+            "360_SCALP_ORDERBLOCK": "Scalp Orderblock",
+            "360_SWING":            "Swing",
+            "360_SPOT":             "Spot",
+            "360_GEM":              "Gem",
         }
         separator = "━" * 30
         lines = [
@@ -877,8 +894,10 @@ class SignalRouter:
 
         for channel in [
             "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
-            "360_SCALP_VWAP", "360_SCALP_OBI", "360_SWING",
-            "360_SPOT", "360_GEM",
+            "360_SCALP_VWAP", "360_SCALP_OBI",
+            "360_SCALP_DIVERGENCE", "360_SCALP_SUPERTREND",
+            "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
+            "360_SWING", "360_SPOT", "360_GEM",
         ]:
             data = scoreboard.get(channel)
             if not data:

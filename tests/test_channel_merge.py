@@ -1,4 +1,4 @@
-"""Tests for Phase 1: merged Telegram channel routing (config._build_channel_telegram_map)."""
+"""Tests for single-channel Telegram routing (config._build_channel_telegram_map)."""
 
 from __future__ import annotations
 
@@ -15,7 +15,6 @@ _SCALP_CHANNELS = (
 def _build_map(**env_overrides):
     """Re-import config with specific env vars set and return CHANNEL_TELEGRAM_MAP."""
     env = {
-        "TELEGRAM_SCALP_CHANNEL_ID": "scalp_id",
         "TELEGRAM_ACTIVE_CHANNEL_ID": "",
         **env_overrides,
     }
@@ -26,32 +25,22 @@ def _build_map(**env_overrides):
 
 
 class TestBuildChannelTelegramMap:
-    def test_with_merged_env_var_routes_all_to_active(self):
+    def test_with_active_channel_routes_all_signals(self):
         """When ACTIVE is set, all scalp channels → active_id."""
-        env = {
-            "TELEGRAM_ACTIVE_CHANNEL_ID": "active_id",
-        }
-        mapping = _build_map(**env)
+        mapping = _build_map(TELEGRAM_ACTIVE_CHANNEL_ID="active_id")
 
         for ch in _SCALP_CHANNELS:
             assert mapping[ch] == "active_id", f"{ch} should route to active_id"
 
-    def test_without_merged_env_vars_falls_back_to_individual(self):
-        """When merged var is empty, routing falls back to per-channel IDs."""
-        mapping = _build_map(
-            TELEGRAM_ACTIVE_CHANNEL_ID="",
-        )
-        assert mapping["360_SCALP"] == "scalp_id"
-        assert mapping["360_SCALP_FVG"] == "scalp_id"
-        assert mapping["360_SCALP_CVD"] == "scalp_id"
-        assert mapping["360_SCALP_VWAP"] == "scalp_id"
-        assert mapping["360_SCALP_OBI"] == "scalp_id"
+    def test_without_active_channel_all_empty(self):
+        """When ACTIVE is not set, all channels resolve to an empty string."""
+        mapping = _build_map(TELEGRAM_ACTIVE_CHANNEL_ID="")
+        for ch in _SCALP_CHANNELS:
+            assert mapping[ch] == "", f"{ch} should be empty when ACTIVE is unset"
 
     def test_active_set_routes_all_to_active(self):
-        """ACTIVE set → all channels route to active_id."""
-        mapping = _build_map(
-            TELEGRAM_ACTIVE_CHANNEL_ID="active_id",
-        )
+        """ACTIVE set → all nine channels route to active_id."""
+        mapping = _build_map(TELEGRAM_ACTIVE_CHANNEL_ID="active_id")
         for ch in _SCALP_CHANNELS:
             assert mapping[ch] == "active_id"
 

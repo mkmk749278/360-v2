@@ -1,0 +1,48 @@
+name: Deploy to VPS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    name: Deploy engine
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Write .env from secrets
+        # Build the .env file on the VPS by echoing each secret over SSH.
+        # Only the four Telegram vars need to be injected; all other settings
+        # use the defaults already present in .env.example on the server.
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          script: |
+            set -euo pipefail
+            cd ~/360-v2
+
+            # Pull latest code
+            git fetch origin main
+            git reset --hard origin/main
+
+            # Regenerate .env from the example template, then inject secrets
+            cp -n .env.example .env || true
+
+            # Overwrite the four Telegram secrets in place
+            sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}|" .env
+            sed -i "s|^TELEGRAM_ACTIVE_CHANNEL_ID=.*|TELEGRAM_ACTIVE_CHANNEL_ID=${{ secrets.TELEGRAM_ACTIVE_CHANNEL_ID }}|" .env
+            sed -i "s|^TELEGRAM_FREE_CHANNEL_ID=.*|TELEGRAM_FREE_CHANNEL_ID=${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}|" .env
+            sed -i "s|^TELEGRAM_ADMIN_CHAT_ID=.*|TELEGRAM_ADMIN_CHAT_ID=${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}|" .env
+
+            # Rebuild and restart the engine container
+            docker compose pull --quiet || true
+            docker compose up -d --build --remove-orphans
+
+            echo "✅ Deploy complete"

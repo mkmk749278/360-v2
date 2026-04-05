@@ -235,26 +235,34 @@ class TelegramBot:
 
     # Channel display names (strip 360_ prefix, use friendly names)
     _CHANNEL_DISPLAY_NAME = {
-        "360_SCALP": "SCALP",
-        "360_SCALP_FVG": "SCALP FVG",
-        "360_SCALP_CVD": "SCALP CVD",
-        "360_SCALP_VWAP": "SCALP VWAP",
-        "360_SCALP_OBI": "SCALP OBI",
-        "360_SWING": "SWING",
-        "360_SPOT": "SPOT",
-        "360_GEM": "GEM",
+        "360_SCALP":            "SCALP",
+        "360_SCALP_FVG":        "SCALP FVG",
+        "360_SCALP_CVD":        "SCALP CVD",
+        "360_SCALP_VWAP":       "SCALP VWAP",
+        "360_SCALP_OBI":        "SCALP OBI",
+        "360_SCALP_DIVERGENCE": "SCALP DIVERGENCE",
+        "360_SCALP_SUPERTREND": "SCALP SUPERTREND",
+        "360_SCALP_ICHIMOKU":   "SCALP ICHIMOKU",
+        "360_SCALP_ORDERBLOCK": "SCALP ORDERBLOCK",
+        "360_SWING":            "SWING",
+        "360_SPOT":             "SPOT",
+        "360_GEM":              "GEM",
     }
 
     # Estimated hold time per channel
     _ESTIMATED_HOLD = {
-        "360_SCALP": "~1-2h",
-        "360_SCALP_FVG": "~1-2h",
-        "360_SCALP_CVD": "~1-2h",
-        "360_SCALP_VWAP": "~1-2h",
-        "360_SCALP_OBI": "~1-2h",
-        "360_SWING": "~1-2d",
-        "360_SPOT": "~3-7d",
-        "360_GEM": "~2-4w",
+        "360_SCALP":            "~1-2h",
+        "360_SCALP_FVG":        "~1-2h",
+        "360_SCALP_CVD":        "~1-2h",
+        "360_SCALP_VWAP":       "~1-2h",
+        "360_SCALP_OBI":        "~1-2h",
+        "360_SCALP_DIVERGENCE": "~1-2h",
+        "360_SCALP_SUPERTREND": "~1-2h",
+        "360_SCALP_ICHIMOKU":   "~1-2h",
+        "360_SCALP_ORDERBLOCK": "~1-2h",
+        "360_SWING":            "~1-2d",
+        "360_SPOT":             "~3-7d",
+        "360_GEM":              "~2-4w",
     }
 
     @staticmethod
@@ -283,17 +291,28 @@ class TelegramBot:
             return TelegramBot.format_watchlist_signal(sig)
 
         chan_emojis = {
-            "360_SCALP": "⚡",
-            "360_SCALP_FVG": "⚡",
-            "360_SCALP_CVD": "⚡",
-            "360_SCALP_VWAP": "⚡",
-            "360_SCALP_OBI": "⚡",
-            "360_SWING": "🏛️",
-            "360_SPOT": "📈",
-            "360_GEM": "💎",
+            "360_SCALP":            "⚡",
+            "360_SCALP_FVG":        "⚡",
+            "360_SCALP_CVD":        "⚡",
+            "360_SCALP_VWAP":       "⚡",
+            "360_SCALP_OBI":        "⚡",
+            "360_SCALP_DIVERGENCE": "⚡",
+            "360_SCALP_SUPERTREND": "⚡",
+            "360_SCALP_ICHIMOKU":   "⚡",
+            "360_SCALP_ORDERBLOCK": "⚡",
+            "360_SWING":            "🏛️",
+            "360_SPOT":             "📈",
+            "360_GEM":              "💎",
         }
         emoji = chan_emojis.get(sig.channel, "📡")
         chan_name = TelegramBot._CHANNEL_DISPLAY_NAME.get(sig.channel, sig.channel)
+        # Embed the signal type (setup_class) into the channel label so every
+        # message arriving in the single Active channel shows e.g.
+        # "SCALP │ RANGE FADE" or "SCALP FVG │ FVG RETEST".
+        if sig.setup_class and sig.setup_class not in ("UNCLASSIFIED",):
+            type_suffix = " │ " + sig.setup_class.replace("_", " ")
+        else:
+            type_suffix = ""
         dir_word = sig.direction.value
         separator = "━" * 24
 
@@ -305,7 +324,7 @@ class TelegramBot:
             return ""
 
         lines = [
-            f"{emoji} *{TelegramBot._escape_md(chan_name)}* │ *{TelegramBot._escape_md(sig.symbol)}* │ *{dir_word}*",
+            f"{emoji} *{TelegramBot._escape_md(chan_name + type_suffix)}* │ *{TelegramBot._escape_md(sig.symbol)}* │ *{dir_word}*",
             TelegramBot._escape_md(separator),
             "",
         ]
@@ -396,14 +415,18 @@ class TelegramBot:
             return TelegramBot.format_watchlist_signal(sig)
 
         chan_emojis = {
-            "360_SCALP": "⚡",
-            "360_SCALP_FVG": "⚡",
-            "360_SCALP_CVD": "⚡",
-            "360_SCALP_VWAP": "⚡",
-            "360_SCALP_OBI": "⚡",
-            "360_SWING": "🏛️",
-            "360_SPOT": "📈",
-            "360_GEM": "💎",
+            "360_SCALP":            "⚡",
+            "360_SCALP_FVG":        "⚡",
+            "360_SCALP_CVD":        "⚡",
+            "360_SCALP_VWAP":       "⚡",
+            "360_SCALP_OBI":        "⚡",
+            "360_SCALP_DIVERGENCE": "⚡",
+            "360_SCALP_SUPERTREND": "⚡",
+            "360_SCALP_ICHIMOKU":   "⚡",
+            "360_SCALP_ORDERBLOCK": "⚡",
+            "360_SWING":            "🏛️",
+            "360_SPOT":             "📈",
+            "360_GEM":              "💎",
         }
         emoji = chan_emojis.get(sig.channel, "📡")
         dir_emoji = "🚀" if sig.direction == Direction.LONG else "⬇️"

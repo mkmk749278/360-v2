@@ -94,14 +94,11 @@ BINANCE_FUTURES_WS_BASE: str = os.getenv("BINANCE_FUTURES_WS_BASE", "wss://fstre
 # Telegram
 # ---------------------------------------------------------------------------
 TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-TELEGRAM_SCALP_CHANNEL_ID: str = os.getenv("TELEGRAM_SCALP_CHANNEL_ID", "")
+# Active Trading channel — ALL signals from every scalp strategy are routed here.
+TELEGRAM_ACTIVE_CHANNEL_ID: str = os.getenv("TELEGRAM_ACTIVE_CHANNEL_ID", "")
+# Free channel — receives one condensed preview signal per day (confidence ≥ 75).
 TELEGRAM_FREE_CHANNEL_ID: str = os.getenv("TELEGRAM_FREE_CHANNEL_ID", "")
 TELEGRAM_ADMIN_CHAT_ID: str = os.getenv("TELEGRAM_ADMIN_CHAT_ID", "")
-
-# --- Merged Telegram Channel (recommended for user-facing deployment) ---
-# When set, this OVERRIDES the individual per-channel IDs above.
-# "Active Trading" channel receives SCALP signals
-TELEGRAM_ACTIVE_CHANNEL_ID: str = os.getenv("TELEGRAM_ACTIVE_CHANNEL_ID", "")
 
 # ---------------------------------------------------------------------------
 # AI / Sentiment keys (optional)
@@ -694,23 +691,22 @@ CHANNEL_EMOJIS: Dict[str, str] = {
 def _build_channel_telegram_map() -> Dict[str, str]:
     """Build the channel → Telegram chat-ID mapping.
 
-    If the merged ``TELEGRAM_ACTIVE_CHANNEL_ID`` env var is set it takes
-    precedence over the individual per-channel IDs, routing all signals to a
-    single "Active Trading" channel.  When the merged var is **not** set the
-    mapping falls back to the individual channel IDs, preserving full backward
-    compatibility.
+    All nine scalp strategy channels route to the single
+    ``TELEGRAM_ACTIVE_CHANNEL_ID``.  Each message header already contains the
+    specific signal type (e.g. RANGE FADE, FVG RETEST) so subscribers can
+    distinguish setups within the one channel.
     """
     active = TELEGRAM_ACTIVE_CHANNEL_ID
     return {
-        "360_SCALP":            active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_FVG":        active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_CVD":        active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_VWAP":       active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_OBI":        active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_DIVERGENCE": active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_SUPERTREND": active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_ICHIMOKU":   active or TELEGRAM_SCALP_CHANNEL_ID,
-        "360_SCALP_ORDERBLOCK": active or TELEGRAM_SCALP_CHANNEL_ID,
+        "360_SCALP":            active,
+        "360_SCALP_FVG":        active,
+        "360_SCALP_CVD":        active,
+        "360_SCALP_VWAP":       active,
+        "360_SCALP_OBI":        active,
+        "360_SCALP_DIVERGENCE": active,
+        "360_SCALP_SUPERTREND": active,
+        "360_SCALP_ICHIMOKU":   active,
+        "360_SCALP_ORDERBLOCK": active,
     }
 
 

@@ -16,7 +16,8 @@
 #
 # Required .env variables:
 #   TELEGRAM_BOT_TOKEN           — Telegram bot token
-#   TELEGRAM_ACTIVE_CHANNEL_ID   — Active Trading channel ID
+#   TELEGRAM_ACTIVE_CHANNEL_ID   — Active Trading channel ID (all signals)
+#   TELEGRAM_FREE_CHANNEL_ID     — Free channel ID (optional, condensed preview)
 #   TELEGRAM_ADMIN_CHAT_ID       — Admin chat ID
 
 set -euo pipefail

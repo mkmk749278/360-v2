@@ -13,7 +13,7 @@ from typing import Any, List
 
 from config import (
     TELEGRAM_BOT_TOKEN,
-    TELEGRAM_SCALP_CHANNEL_ID,
+    TELEGRAM_ACTIVE_CHANNEL_ID,
     TOP50_FUTURES_ONLY,
 )
 from src.ai_engine import close_shared_session
@@ -63,8 +63,8 @@ class Bootstrap:
             log.warning("Pre-flight: TELEGRAM_BOT_TOKEN is not set")
             ok = False
 
-        if not TELEGRAM_SCALP_CHANNEL_ID:
-            log.warning("Pre-flight: No Telegram channel IDs configured")
+        if not TELEGRAM_ACTIVE_CHANNEL_ID:
+            log.warning("Pre-flight: TELEGRAM_ACTIVE_CHANNEL_ID is not set — signals will not be delivered")
 
         if not engine.pair_mgr.pairs:
             log.warning("Pre-flight: pair_mgr has no pairs loaded")
