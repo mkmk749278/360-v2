@@ -482,22 +482,27 @@ class ScalpChannel(BaseChannel):
         if not check_rsi_regime(indicators.get("1m", {}).get("rsi_last"), direction=direction.value, regime=regime):
             return None
 
-        # Order book imbalance check (mandatory — without OBI confirmation,
-        # whale momentum signals are unreliable)
+        # Order book imbalance check — confirms the dominant side matches the
+        # whale direction.  When order_book is unavailable (e.g. depth circuit
+        # breaker open) the check is skipped rather than hard-rejecting: the
+        # primary whale signals (alert, delta spike, tick flow) are sufficient
+        # to identify the setup; OBI is a confirmation layer.  Missing OBI is
+        # flagged via obi_confirmed=False so the scanner can apply a penalty.
         order_book = smc_data.get("order_book")
-        if order_book is None:
-            return None
-        bids = order_book.get("bids", [])
-        asks = order_book.get("asks", [])
-        bid_depth = sum(float(b[1]) * float(b[0]) for b in bids[:10])
-        ask_depth = sum(float(a[1]) * float(a[0]) for a in asks[:10])
-        if bid_depth <= 0 or ask_depth <= 0:
-            return None
-        imbalance_ratio = (
-            bid_depth / ask_depth if direction == Direction.LONG else ask_depth / bid_depth
-        )
-        if imbalance_ratio < _WHALE_OBI_MIN:
-            return None
+        obi_confirmed = False
+        if order_book is not None:
+            bids = order_book.get("bids", [])
+            asks = order_book.get("asks", [])
+            bid_depth = sum(float(b[1]) * float(b[0]) for b in bids[:10])
+            ask_depth = sum(float(a[1]) * float(a[0]) for a in asks[:10])
+            if bid_depth <= 0 or ask_depth <= 0:
+                return None
+            imbalance_ratio = (
+                bid_depth / ask_depth if direction == Direction.LONG else ask_depth / bid_depth
+            )
+            if imbalance_ratio < _WHALE_OBI_MIN:
+                return None
+            obi_confirmed = True
 
         atr_val = indicators.get("1m", {}).get("atr_last", close * 0.002)
         sl_dist = max(close * self.config.sl_pct_range[0] / 100, atr_val)
@@ -526,6 +531,11 @@ class ScalpChannel(BaseChannel):
             sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
             sig.trailing_stage = 0
             sig.partial_close_pct = 0.0
+            if not obi_confirmed:
+                # No order book available — signal is valid on tick-flow alone
+                # but carries lower certainty; apply a soft confidence penalty
+                # so only very strong whale setups pass the min_confidence gate.
+                sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + 10.0
         return sig
 
     # ------------------------------------------------------------------

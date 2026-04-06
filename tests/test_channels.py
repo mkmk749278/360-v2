@@ -122,8 +122,13 @@ class TestScalpChannel:
         assert sig.direction == Direction.LONG
         assert sig.setup_class == "WHALE_MOMENTUM"
 
-    def test_whale_momentum_no_signal_without_order_book(self):
-        """WHALE_MOMENTUM path: missing order book data → no signal (OBI mandatory)."""
+    def test_whale_momentum_signal_without_order_book_has_soft_penalty(self):
+        """WHALE_MOMENTUM path: missing order book → signal generated with soft penalty.
+
+        When the depth circuit breaker is open, order_book is None.  The channel
+        must still produce a signal on the strength of the whale alert + tick flow,
+        but mark a soft_penalty_total so the scanner can apply a confidence penalty.
+        """
         ch = ScalpChannel()
         candles = {"1m": _make_candles(20)}
         indicators = {"1m": _make_indicators()}
@@ -137,7 +142,8 @@ class TestScalpChannel:
             "recent_ticks": ticks,
         }
         sig = ch._evaluate_whale_momentum("ETHUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
-        assert sig is None
+        assert sig is not None
+        assert sig.soft_penalty_total >= 10.0
 
     def test_whale_momentum_no_signal_without_whale(self):
         """WHALE_MOMENTUM path: no whale alert and no delta spike → no signal."""

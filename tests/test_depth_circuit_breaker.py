@@ -194,6 +194,6 @@ class TestDepthCircuitBreakerConcurrency:
 
         # Old timestamps should have been pruned; only recent ones remain.
         # The new timeout adds 1 more entry on top of the 1 recent one.
-        # With threshold=3, breaker should NOT have tripped (only 2 entries).
+        # With threshold=5, breaker should NOT have tripped (only 2 entries).
         for ts in client._depth_timeout_timestamps:
             assert ts > now - _DEPTH_CB_WINDOW_S

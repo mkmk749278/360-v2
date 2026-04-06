@@ -166,7 +166,14 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.WHALE_MOMENTUM,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
-    MarketState.VOLATILE_UNSUITABLE: set(),
+    MarketState.VOLATILE_UNSUITABLE: {
+        # Whale-driven and liquidity-sweep signals are valid precisely in
+        # volatile conditions — large actor moves and sweep-driven reversals
+        # are market events that occur during volatility spikes.  All other
+        # setup classes require more orderly price action.
+        SetupClass.WHALE_MOMENTUM,
+        SetupClass.LIQUIDITY_SWEEP_REVERSAL,
+    },
 }
 
 # Maximum SL distance (as a percentage of entry) allowed per channel.

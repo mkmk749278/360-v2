@@ -1037,8 +1037,13 @@ OBSERVER_DIGEST_LOOKBACK_HOURS: int = _safe_int("OBSERVER_DIGEST_LOOKBACK", "24"
 # ---------------------------------------------------------------------------
 # MTF hard block – when True, MTF misalignment is a hard veto (signal blocked)
 # instead of a soft -5.0 confidence penalty.
+# Defaults to False: each channel's own evaluate() method already runs a
+# channel-specific, regime-aware MTF hard gate (e.g. mtf_gate_scalp_standard).
+# A second scanner-level hard block on top of that double-gates every signal
+# and blocks many valid setups where the 1h/4h trend lags the 5m signal.
+# Set MTF_HARD_BLOCK=true to restore the strict scanner-level veto.
 # ---------------------------------------------------------------------------
-MTF_HARD_BLOCK: bool = _safe_bool("MTF_HARD_BLOCK", "true")
+MTF_HARD_BLOCK: bool = _safe_bool("MTF_HARD_BLOCK", "false")
 
 # ---------------------------------------------------------------------------
 # Correlated position exposure cap
@@ -1121,10 +1126,13 @@ WS_DEGRADED_MAX_PAIRS: int = _safe_int("WS_DEGRADED_MAX_PAIRS", "50")
 # Depth endpoint circuit breaker
 # ---------------------------------------------------------------------------
 # Number of depth endpoint timeouts within a rolling 30 s window that trips
-# the circuit breaker.  A threshold of 3 trips faster to prevent scan latency
-# from spiking when Binance depth endpoint degrades.
+# the circuit breaker.  Raised from 3 to 5 because the depth endpoint is now
+# only used for 360_SCALP_OBI (all spread data comes from bookTicker), so
+# concurrent OBI requests can no longer create the 50-timeout bursts seen
+# in the old per-symbol depth architecture.  5 requires sustained degradation
+# rather than a single brief latency spike to trip the breaker.
 DEPTH_CIRCUIT_BREAKER_THRESHOLD: int = int(
-    os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "3")
+    os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "5")
 )
 # How long (seconds) the circuit stays open (depth fetches return None immediately).
 # Default 300s (5 min) so Binance has time to recover before the next retry attempt;
