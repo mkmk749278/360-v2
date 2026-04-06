@@ -50,6 +50,22 @@ jobs:
 
             cd ~/360-v2
 
+            # ── Bootstrap: install Docker if missing (fresh VPS / OS reinstall) ──
+            if ! command -v docker &>/dev/null; then
+              echo "ℹ️  Docker not found — installing..."
+              apt-get update -qq
+              apt-get install -y -qq ca-certificates curl gnupg
+              curl -fsSL https://get.docker.com | sh
+              systemctl enable docker
+              systemctl start docker
+              echo "✅ Docker installed"
+            fi
+
+            # Ensure Docker daemon is running
+            if ! systemctl is-active --quiet docker; then
+              systemctl start docker
+            fi
+
             # Pull latest code
             git fetch origin main
             git reset --hard origin/main
