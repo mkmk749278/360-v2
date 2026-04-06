@@ -40,7 +40,9 @@ class TestFormatSignal:
         # Test the new compact format
         text = TelegramBot.format_signal(sig)
         assert "⚡" in text
-        assert "SCALP" in text
+        # setup_class="BREAKOUT_RETEST" is not in SIGNAL_TYPE_LABELS → header uses
+        # the formatted fallback "BREAKOUT RETEST" instead of the channel name
+        assert "BREAKOUT RETEST" in text
         assert "BTCUSDT" in text
         assert "LONG" in text
         assert "32,150" in text

@@ -214,7 +214,19 @@ NEW_PAIR_MIN_CONFIDENCE: float = 50.0  # lower cap until enough data
 # Minimum 24h USD volume for a symbol to be included in expensive API scans.
 # Symbols below this threshold are skipped by the pre-filter before any
 # order-book or kline fetches, reducing unnecessary weight consumption.
-SCAN_MIN_VOLUME_USD: float = _safe_float("SCAN_MIN_VOLUME_USD", "500000")
+SCAN_MIN_VOLUME_USD: float = _safe_float("SCAN_MIN_VOLUME_USD", "1000000")
+
+# Regime-aware volume floors (USD 24h volume).
+# TRENDING/VOLATILE need depth for follow-through; RANGING/QUIET mean-reversion
+# setups work fine with less liquidity.
+REGIME_MIN_VOLUME_USD: Dict[str, float] = {
+    "TRENDING_UP":   float(os.getenv("VOL_FLOOR_TRENDING",  "3000000")),
+    "TRENDING_DOWN": float(os.getenv("VOL_FLOOR_TRENDING",  "3000000")),
+    "VOLATILE":      float(os.getenv("VOL_FLOOR_VOLATILE",  "5000000")),
+    "RANGING":       float(os.getenv("VOL_FLOOR_RANGING",   "1500000")),
+    "QUIET":         float(os.getenv("VOL_FLOOR_QUIET",     "1000000")),
+    "":              float(os.getenv("VOL_FLOOR_DEFAULT",   "2000000")),  # empty string = regime unknown/unset; intentional lookup key
+}
 # Symbols permanently excluded from scanning (gold-pegged tokens, micro-caps).
 # Configurable via comma-separated env var; defaults cover the known junk pairs.
 SCAN_SYMBOL_BLACKLIST: set = set(
@@ -231,7 +243,7 @@ SCAN_SYMBOL_BLACKLIST: set = set(
 # consumption and scan latency significantly.
 TOP50_FUTURES_ONLY: bool = _safe_bool("TOP50_FUTURES_ONLY", "true")
 # Number of top futures pairs to maintain in top-50 mode.
-TOP50_FUTURES_COUNT: int = _safe_int("TOP50_FUTURES_COUNT", "50")
+TOP50_FUTURES_COUNT: int = _safe_int("TOP50_FUTURES_COUNT", "75")
 # Minimum seconds between consecutive top-50 refresh calls (rate-limiting
 # guard to prevent excessive Binance REST weight consumption).
 TOP50_UPDATE_INTERVAL_SECONDS: int = _safe_int("TOP50_UPDATE_INTERVAL_SECONDS", "3600")
@@ -548,10 +560,10 @@ CHANNEL_SCALP = ChannelConfig(
     sl_pct_range=(0.20, 0.50),
     tp_ratios=[1.5, 2.5, 4.0],
     trailing_atr_mult=1.5,
-    adx_min=15,
+    adx_min=int(os.getenv("ADX_MIN_SCALP", "20")),
     adx_max=100,
     spread_max=0.02,
-    min_confidence=75,
+    min_confidence=int(os.getenv("MIN_CONFIDENCE_SCALP", "80")),
     min_volume=5_000_000.0,
     dca_enabled=True,
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
@@ -568,10 +580,10 @@ CHANNEL_SCALP_FVG = ChannelConfig(
     sl_pct_range=(0.10, 0.20),
     tp_ratios=[1.5, 2.5, 3.0],
     trailing_atr_mult=1.5,
-    adx_min=15,
+    adx_min=int(os.getenv("ADX_MIN_FVG", "18")),
     adx_max=100,
     spread_max=0.02,
-    min_confidence=75,
+    min_confidence=int(os.getenv("MIN_CONFIDENCE_FVG", "78")),
     min_volume=5_000_000.0,
     dca_enabled=True,
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
@@ -635,7 +647,7 @@ CHANNEL_SCALP_DIVERGENCE = ChannelConfig(
     adx_min=15,
     adx_max=40,
     spread_max=0.02,
-    min_confidence=75,
+    min_confidence=int(os.getenv("MIN_CONFIDENCE_DIVERGENCE", "76")),
     min_volume=5_000_000.0,
     dca_enabled=True,
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
@@ -683,7 +695,7 @@ CHANNEL_SCALP_ORDERBLOCK = ChannelConfig(
     adx_min=0,
     adx_max=100,
     spread_max=0.02,
-    min_confidence=75,
+    min_confidence=int(os.getenv("MIN_CONFIDENCE_ORDERBLOCK", "78")),
     min_volume=5_000_000.0,
     dca_enabled=True,
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
@@ -700,6 +712,43 @@ ALL_CHANNELS: List[ChannelConfig] = [
     CHANNEL_SCALP_ICHIMOKU,
     CHANNEL_SCALP_ORDERBLOCK,
 ]
+
+# ---------------------------------------------------------------------------
+# Channel enable/disable flags.
+# Set to false to disable a channel without deleting any code.
+# The channel's evaluate() method still exists and works — the scanner simply
+# skips it. Flip back to true in .env to re-enable instantly.
+# ---------------------------------------------------------------------------
+CHANNEL_SCALP_ENABLED:            bool = _safe_bool("CHANNEL_SCALP_ENABLED",            "true")
+CHANNEL_SCALP_FVG_ENABLED:        bool = _safe_bool("CHANNEL_SCALP_FVG_ENABLED",        "true")
+CHANNEL_SCALP_ORDERBLOCK_ENABLED: bool = _safe_bool("CHANNEL_SCALP_ORDERBLOCK_ENABLED", "true")
+CHANNEL_SCALP_DIVERGENCE_ENABLED: bool = _safe_bool("CHANNEL_SCALP_DIVERGENCE_ENABLED", "true")
+# Soft-disabled noisy channels — set env var to "true" to re-enable instantly
+CHANNEL_SCALP_CVD_ENABLED:        bool = _safe_bool("CHANNEL_SCALP_CVD_ENABLED",        "false")
+CHANNEL_SCALP_VWAP_ENABLED:       bool = _safe_bool("CHANNEL_SCALP_VWAP_ENABLED",       "false")
+CHANNEL_SCALP_SUPERTREND_ENABLED: bool = _safe_bool("CHANNEL_SCALP_SUPERTREND_ENABLED", "false")
+CHANNEL_SCALP_ICHIMOKU_ENABLED:   bool = _safe_bool("CHANNEL_SCALP_ICHIMOKU_ENABLED",   "false")
+
+# ---------------------------------------------------------------------------
+# Mapping from signal setup_class to the display header shown in Telegram.
+# Every signal already has setup_class set in build_channel_signal().
+# Subscribers see exactly what setup they are trading.
+# ---------------------------------------------------------------------------
+SIGNAL_TYPE_LABELS: Dict[str, str] = {
+    "LIQUIDITY_SWEEP_REVERSAL":      "⚡ SWEEP REVERSAL",
+    "RANGE_FADE":                    "📊 RANGE FADE",
+    "WHALE_MOMENTUM":                "🐋 WHALE MOMENTUM",
+    "FVG_RETEST":                    "⚡ FVG RETEST",
+    "FVG_RETEST_HTF_CONFLUENCE":     "⚡ FVG RETEST ★ HTF CONFLUENCE",
+    "CVD_DIVERGENCE":                "📉 CVD DIVERGENCE",
+    "ORDERBLOCK_BOUNCE":             "🧱 ORDER BLOCK",
+    "DIVERGENCE_REVERSAL":           "🔄 DIVERGENCE",
+    "OBI_IMBALANCE":                 "📊 ORDER IMBALANCE",
+    "SUPERTREND_SIGNAL":             "📈 SUPERTREND",
+    "ICHIMOKU_SIGNAL":               "☁️ ICHIMOKU",
+    "VWAP_EXTENSION":                "📏 VWAP EXTENSION",
+    "MULTI_STRATEGY_CONFLUENCE":     "🌟 MULTI-STRATEGY",
+}
 
 CHANNEL_EMOJIS: Dict[str, str] = {
     "360_SCALP": "⚡",
@@ -796,7 +845,7 @@ CHANNEL_COOLDOWN_SECONDS: Dict[str, int] = {
 # within the cooldown window.
 # ---------------------------------------------------------------------------
 SIGNAL_SCAN_COOLDOWN_SECONDS: Dict[str, int] = {
-    "360_SCALP": int(os.getenv("SCALP_SCAN_COOLDOWN", "300")),
+    "360_SCALP": int(os.getenv("SCALP_SCAN_COOLDOWN", "600")),
     "360_SWING": int(os.getenv("SWING_SCAN_COOLDOWN", "60")),
     "360_SPOT": int(os.getenv("SPOT_SCAN_COOLDOWN", "600")),
     "360_GEM": int(os.getenv("GEM_SCAN_COOLDOWN", "21600")),  # 6 hours
@@ -1057,7 +1106,30 @@ MTF_HARD_BLOCK: bool = _safe_bool("MTF_HARD_BLOCK", "false")
 # When this threshold is reached, additional signals in the same direction are
 # blocked to limit correlated exposure (e.g. all LONG scalps stopped out by BTC).
 # ---------------------------------------------------------------------------
-MAX_CORRELATED_SCALP_SIGNALS: int = _safe_int("MAX_CORRELATED_SCALP_SIGNALS", "8")
+MAX_CORRELATED_SCALP_SIGNALS: int = _safe_int("MAX_CORRELATED_SCALP_SIGNALS", "4")
+
+# ---------------------------------------------------------------------------
+# SMC hard gate — minimum structural basis required before a signal can fire.
+# A signal with smc_score < SMC_HARD_GATE_MIN has no institutional footprint;
+# sweep detected (10pts base) + partial depth bonus reaches 12 pts minimum.
+# ---------------------------------------------------------------------------
+SMC_HARD_GATE_MIN: float = _safe_float("SMC_HARD_GATE_MIN", "12.0")
+
+# ---------------------------------------------------------------------------
+# Trend hard gate — minimum indicator sub-score for scalp channels.
+# indicator_score < 10 means MACD/RSI/EMA are not supporting the direction —
+# a structural contradiction for momentum scalp channels.
+# ---------------------------------------------------------------------------
+TREND_HARD_GATE_MIN: float = _safe_float("TREND_HARD_GATE_MIN", "10.0")
+
+# ---------------------------------------------------------------------------
+# Global per-symbol cooldown (seconds) across ALL channels combined.
+# After ANY channel fires on a symbol, that symbol is locked on all channels
+# for this duration. Prevents multiple same-symbol signals in quick succession.
+# ---------------------------------------------------------------------------
+GLOBAL_SYMBOL_COOLDOWN_SECONDS: int = _safe_int(
+    "GLOBAL_SYMBOL_COOLDOWN_SECONDS", "1800"  # 30 minutes
+)
 
 # ---------------------------------------------------------------------------
 # Confidence log (data-driven weight profiling infrastructure)

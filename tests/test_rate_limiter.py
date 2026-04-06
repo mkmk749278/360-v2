@@ -301,6 +301,10 @@ class TestPrefilterPairs:
         # Stub cooldown dict
         scanner._cooldown_until = {}
 
+        # Regime-aware volume floor uses this attribute; set to QUIET (floor =
+        # SCAN_MIN_VOLUME_USD) so existing volume thresholds in tests are valid.
+        scanner._last_market_regime = "QUIET"
+
         return scanner
 
     def _make_pair(self, symbol: str, volume: float):

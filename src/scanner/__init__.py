@@ -20,20 +20,32 @@ import numpy as np
 import uuid
 
 from config import (
+    CHANNEL_SCALP_CVD_ENABLED,
+    CHANNEL_SCALP_DIVERGENCE_ENABLED,
+    CHANNEL_SCALP_ENABLED,
+    CHANNEL_SCALP_FVG_ENABLED,
+    CHANNEL_SCALP_ICHIMOKU_ENABLED,
+    CHANNEL_SCALP_ORDERBLOCK_ENABLED,
+    CHANNEL_SCALP_SUPERTREND_ENABLED,
+    CHANNEL_SCALP_VWAP_ENABLED,
+    GLOBAL_SYMBOL_COOLDOWN_SECONDS,
     MAX_CORRELATED_SCALP_SIGNALS,
     MTF_HARD_BLOCK,
     QUIET_SCALP_MIN_CONFIDENCE,
+    REGIME_MIN_VOLUME_USD,
     SCAN_MIN_VOLUME_USD,
     SCAN_SYMBOL_BLACKLIST,
     SEED_TIMEFRAMES,
     SIGNAL_SCAN_COOLDOWN_SECONDS,
     SIGNAL_VALID_FOR_MINUTES,
+    SMC_HARD_GATE_MIN,
     SMC_SCALP_LOOKBACK,
     SMC_SCALP_TOLERANCE_PCT,
     TIER2_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
     TOP50_FUTURES_ONLY,
+    TREND_HARD_GATE_MIN,
     WS_DEGRADED_CYCLES_ALERT,
     WS_DEGRADED_MAX_CYCLES,
     WS_DEGRADED_MAX_PAIRS,
@@ -156,6 +168,19 @@ _SCALP_CHANNELS: frozenset = frozenset({
 # Symbols permanently excluded from scanning — loaded from config to allow
 # runtime override via the SCAN_SYMBOL_BLACKLIST env var.
 _SYMBOL_BLACKLIST: frozenset = frozenset(SCAN_SYMBOL_BLACKLIST)
+
+# Channel enable/disable map — sourced from config flags so operators can
+# soft-disable noisy channels via env vars without touching code.
+_CHANNEL_ENABLED_FLAGS: Dict[str, bool] = {
+    "360_SCALP":            CHANNEL_SCALP_ENABLED,
+    "360_SCALP_FVG":        CHANNEL_SCALP_FVG_ENABLED,
+    "360_SCALP_ORDERBLOCK": CHANNEL_SCALP_ORDERBLOCK_ENABLED,
+    "360_SCALP_DIVERGENCE": CHANNEL_SCALP_DIVERGENCE_ENABLED,
+    "360_SCALP_CVD":        CHANNEL_SCALP_CVD_ENABLED,
+    "360_SCALP_VWAP":       CHANNEL_SCALP_VWAP_ENABLED,
+    "360_SCALP_SUPERTREND": CHANNEL_SCALP_SUPERTREND_ENABLED,
+    "360_SCALP_ICHIMOKU":   CHANNEL_SCALP_ICHIMOKU_ENABLED,
+}
 
 # Maximum number of symbols scanned concurrently
 _MAX_CONCURRENT_SCANS: int = 20
@@ -428,6 +453,12 @@ class Scanner:
 
         # Cooldown tracking: (symbol, channel_name) → monotonic expiry time
         self._cooldown_until: Dict[Tuple[str, str], float] = {}
+
+        # Global cross-channel per-symbol cooldown tracker.
+        # Maps symbol → monotonic timestamp when the cooldown expires.
+        # After ANY channel fires on a symbol, that symbol is locked across
+        # ALL channels for GLOBAL_SYMBOL_COOLDOWN_SECONDS seconds.
+        self._global_symbol_cooldown: Dict[str, float] = {}
 
         # Regime history: symbol → list of (monotonic_time, regime_value) tuples
         # Used to detect oscillating / unstable regimes (too many flips in window).
@@ -848,8 +879,14 @@ class Scanner:
             if sym in _SYMBOL_BLACKLIST:
                 skipped_blacklist += 1
                 continue
-            # 1. Volume pre-filter
-            if info.volume_24h_usd < SCAN_MIN_VOLUME_USD:
+            # 1. Volume pre-filter — regime-aware volume floor.
+            # Use the current market regime to pick the right threshold;
+            # falls back to SCAN_MIN_VOLUME_USD when regime is unknown.
+            _vol_floor = REGIME_MIN_VOLUME_USD.get(
+                getattr(self, "_last_market_regime", ""),
+                SCAN_MIN_VOLUME_USD,
+            )
+            if info.volume_24h_usd < _vol_floor:
                 skipped_volume += 1
                 continue
             # 2. All channels already have an active signal for this symbol
@@ -2139,6 +2176,48 @@ class Scanner:
         except Exception as _pa_exc:
             log.debug("pair_analysis gate error for {} {} (fail open): {}", symbol, chan_name, _pa_exc)
 
+        # SMC hard gate: require minimum structural basis (sweep OR MSS present).
+        # A signal with smc_score < SMC_HARD_GATE_MIN has no institutional
+        # footprint — it is a pure momentum/liquidity play with no SMC edge.
+        # Fail-open when the PR09 scoring engine did not populate "smc" (engine error).
+        if "smc" in sig.component_scores:
+            _smc_score = sig.component_scores["smc"]
+            if _smc_score < SMC_HARD_GATE_MIN:
+                log.debug(
+                    "SMC hard gate: {} {} smc_score={:.1f} < {:.1f}",
+                    symbol, chan_name, _smc_score, SMC_HARD_GATE_MIN,
+                )
+                self._suppression_counters[f"smc_hard_gate:{chan_name}"] += 1
+                self.suppression_tracker.record(SuppressionEvent(
+                    symbol=symbol,
+                    channel=chan_name,
+                    reason="smc_hard_gate",
+                    regime=_regime_key,
+                    would_be_confidence=sig.confidence,
+                ))
+                return None, cross_verified
+
+        # Trend hard gate: EMA alignment is non-negotiable for scalp channels.
+        # indicator_score < TREND_HARD_GATE_MIN means MACD/RSI/EMA are not
+        # supporting the direction — a structural contradiction.
+        # Fail-open when the PR09 scoring engine did not populate "indicators".
+        if chan_name.startswith("360_SCALP") and "indicators" in sig.component_scores:
+            _ind_score = sig.component_scores["indicators"]
+            if _ind_score < TREND_HARD_GATE_MIN:
+                log.debug(
+                    "Trend hard gate: {} {} ind_score={:.1f} < {:.1f}",
+                    symbol, chan_name, _ind_score, TREND_HARD_GATE_MIN,
+                )
+                self._suppression_counters[f"trend_hard_gate:{chan_name}"] += 1
+                self.suppression_tracker.record(SuppressionEvent(
+                    symbol=symbol,
+                    channel=chan_name,
+                    reason="trend_hard_gate",
+                    regime=_regime_key,
+                    would_be_confidence=sig.confidence,
+                ))
+                return None, cross_verified
+
         min_conf = self.confidence_overrides.get(chan_name, chan.config.min_confidence)
         # QUIET regime safety net for scalp channels: only the highest-quality
         # mean-reversion setups are allowed through when the market is compressed.
@@ -2192,11 +2271,23 @@ class Scanner:
             return
         ticks = self.data_store.ticks.get(symbol, [])
 
+        # Global symbol cooldown check — skip ALL channels for this symbol
+        # if any channel fired recently (cross-channel 30-minute lock).
+        _now = time.monotonic()
+        if symbol in self._global_symbol_cooldown:
+            if _now < self._global_symbol_cooldown[symbol]:
+                return  # Still in global cooldown — skip all channels
+            else:
+                del self._global_symbol_cooldown[symbol]  # Expired — clean up
+
         # Collect all signals before deciding what to emit (confluence check)
         _pending_signals: list = []
 
         for chan in self.channels:
             chan_name = chan.config.name
+            # Skip disabled channels — flip env var to re-enable instantly
+            if not _CHANNEL_ENABLED_FLAGS.get(chan_name, True):
+                continue
             if self._should_skip_channel(symbol, chan_name, ctx):
                 continue
             # Re-detect SMC with channel-specific timeframe preference when available.
@@ -2270,6 +2361,11 @@ class Scanner:
                     for _, ch_name in signals_and_channels:
                         self._set_cooldown(symbol, ch_name)
                     self.cluster_suppressor.record_signal(symbol, direction)
+                    # Set global cross-channel cooldown so this symbol is locked
+                    # across all channels for GLOBAL_SYMBOL_COOLDOWN_SECONDS.
+                    self._global_symbol_cooldown[symbol] = (
+                        time.monotonic() + GLOBAL_SYMBOL_COOLDOWN_SECONDS
+                    )
                 _emitted_directions.add(direction)
 
         # Emit remaining signals that weren't part of confluence
@@ -2282,6 +2378,11 @@ class Scanner:
             self._setup_emit_counts[sig.setup_class] += 1
             self._set_cooldown(symbol, chan_name)
             self.cluster_suppressor.record_signal(symbol, _dir)
+            # Set global cross-channel cooldown so this symbol is locked
+            # across all channels for GLOBAL_SYMBOL_COOLDOWN_SECONDS.
+            self._global_symbol_cooldown[symbol] = (
+                time.monotonic() + GLOBAL_SYMBOL_COOLDOWN_SECONDS
+            )
 
     async def _lightweight_tier3_scan(self) -> None:
         """Lightweight volume/momentum scan for Tier 3 pairs.

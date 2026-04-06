@@ -58,8 +58,8 @@ _HIGH_LIQUIDITY_SESSIONS: list[tuple[int, int, str, float]] = [
 
 #: Dead zone windows: (start_hour, end_hour, name, multiplier)
 _DEAD_ZONE_SESSIONS: list[tuple[int, int, str, float]] = [
-    (4,  7,  "ASIAN_DEAD_ZONE",   0.50),
-    (20, 24, "POST_NY_LULL",      0.60),
+    (4,  7,  "ASIAN_DEAD_ZONE",   0.50),   # unchanged — hard block
+    (20, 24, "POST_NY_LULL",      0.65),   # raised from 0.60 — penalty not hard block
 ]
 
 #: Minimum confidence multiplier below which the kill zone gate fires.

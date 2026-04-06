@@ -34,11 +34,14 @@ def _make_signal(**kwargs) -> Signal:
 
 class TestNewFormatSignal:
     def test_compact_header_format(self):
-        """New format: emoji │ chan_name │ SYMBOL │ DIRECTION on first line."""
+        """New format: setup_label │ SYMBOL │ DIRECTION on first line.
+        When setup_class is set, the header shows the named setup type label.
+        """
         sig = _make_signal()
         text = TelegramBot.format_signal(sig)
         assert "⚡" in text
-        assert "SCALP" in text
+        # setup_class="SWEEP_RECLAIM" → header contains "SWEEP RECLAIM" (fallback label)
+        assert "SWEEP RECLAIM" in text
         assert "BTCUSDT" in text
         assert "LONG" in text
 
@@ -126,7 +129,9 @@ class TestNewFormatSignal:
         assert "bullish FVG" in text
 
     def test_channel_display_name_no_360_prefix(self):
-        """Channel name in header should use short display name (no 360_ prefix)."""
+        """Channel name in header should use short display name (no 360_ prefix).
+        When setup_class is UNCLASSIFIED the header falls back to '{emoji} {chan_name}'.
+        """
         for channel, display in [
             ("360_SCALP", "SCALP"),
             ("360_SCALP_FVG", "SCALP FVG"),
@@ -134,7 +139,7 @@ class TestNewFormatSignal:
             ("360_SPOT", "SPOT"),
             ("360_GEM", "GEM"),
         ]:
-            sig = _make_signal(channel=channel, risk_label="LOW")
+            sig = _make_signal(channel=channel, risk_label="LOW", setup_class="UNCLASSIFIED")
             text = TelegramBot.format_signal(sig)
             assert display in text
             # Should NOT include the 360_ prefix as-is

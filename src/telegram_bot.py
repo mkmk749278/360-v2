@@ -12,7 +12,7 @@ from typing import Any, Optional
 
 import aiohttp
 
-from config import TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN
+from config import SIGNAL_TYPE_LABELS, TELEGRAM_ADMIN_CHAT_ID, TELEGRAM_BOT_TOKEN
 from src.channels.base import Signal
 from src.smc import Direction
 from src.utils import fmt_price, fmt_ts, get_logger
@@ -306,13 +306,18 @@ class TelegramBot:
         }
         emoji = chan_emojis.get(sig.channel, "📡")
         chan_name = TelegramBot._CHANNEL_DISPLAY_NAME.get(sig.channel, sig.channel)
-        # Embed the signal type (setup_class) into the channel label so every
-        # message arriving in the single Active channel shows e.g.
-        # "SCALP │ RANGE FADE" or "SCALP FVG │ FVG RETEST".
+        # Use the named setup label as the header when available so subscribers
+        # see the exact setup type (e.g. "⚡ SWEEP REVERSAL") rather than a
+        # generic channel name. Falls back to the channel emoji + name when
+        # setup_class is absent or unclassified.
         if sig.setup_class and sig.setup_class != "UNCLASSIFIED":
-            type_suffix = " │ " + sig.setup_class.replace("_", " ")
+            _setup_label = SIGNAL_TYPE_LABELS.get(
+                sig.setup_class,
+                f"⚡ {sig.setup_class.replace('_', ' ')}",
+            )
+            header_part = _setup_label
         else:
-            type_suffix = ""
+            header_part = f"{emoji} {chan_name}"
         dir_word = sig.direction.value
         separator = "━" * 24
 
@@ -324,7 +329,7 @@ class TelegramBot:
             return ""
 
         lines = [
-            f"{emoji} *{TelegramBot._escape_md(chan_name + type_suffix)}* │ *{TelegramBot._escape_md(sig.symbol)}* │ *{dir_word}*",
+            f"*{TelegramBot._escape_md(header_part)}* │ *{TelegramBot._escape_md(sig.symbol)}* │ *{dir_word}*",
             TelegramBot._escape_md(separator),
             "",
         ]
