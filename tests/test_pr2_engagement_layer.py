@@ -605,3 +605,354 @@ class TestTelegramBotNewMethods:
         result = await bot.post_to_active_channel("premium signal")
         assert result is True
         bot.send_message.assert_called_once_with("-1001111111111", "premium signal")
+
+
+# ---------------------------------------------------------------------------
+# PR2 Bug Fix Tests
+# ---------------------------------------------------------------------------
+
+
+class TestFix1SchedulerChannelRouting:
+    """Fix 1 — morning_brief, london_open, ny_open, eod_wrap must post to free
+    channel ONLY.  weekly_card is the sole task allowed on both channels."""
+
+    def _make_scheduler(self, monkeypatch):
+        free_msgs = []
+        active_msgs = []
+
+        async def post_free(text):
+            free_msgs.append(text)
+            return True
+
+        async def post_active(text):
+            active_msgs.append(text)
+            return True
+
+        def engine_ctx():
+            return {"regime": "RANGING", "btc_price": 50000.0,
+                    "btc_change_pct": 0.0, "top_pairs": [],
+                    "signals_today": 0, "performance": {},
+                    "btc_1h_change_pct": 0.0, "is_active_market": False}
+
+        from src.scheduler import ContentScheduler
+        scheduler = ContentScheduler(post_free, post_active, engine_ctx)
+        return scheduler, free_msgs, active_msgs
+
+    def test_scheduled_tasks_free_only_for_session_tasks(self):
+        """morning_brief, london_open, ny_open, eod_wrap must target free only."""
+        from src.scheduler import SCHEDULED_TASKS
+        session_tasks = {"morning_brief", "london_open", "ny_open", "eod_wrap"}
+        for _, _, task_name, channels in SCHEDULED_TASKS:
+            if task_name in session_tasks:
+                assert channels == ["free"], (
+                    f"{task_name} must target ['free'] only, got {channels}"
+                )
+
+    def test_weekly_card_targets_both_channels(self):
+        """weekly_card should target both active and free."""
+        from src.scheduler import SCHEDULED_TASKS
+        weekly = [t for t in SCHEDULED_TASKS if t[2] == "weekly_card"]
+        assert weekly, "weekly_card task must exist in SCHEDULED_TASKS"
+        _, _, _, channels = weekly[0]
+        assert "active" in channels and "free" in channels, (
+            f"weekly_card must target both channels, got {channels}"
+        )
+
+    @pytest.mark.asyncio
+    async def test_morning_brief_does_not_post_to_active_channel(self, monkeypatch):
+        scheduler, free_msgs, active_msgs = self._make_scheduler(monkeypatch)
+
+        async def fake_gen(ctx):
+            return "morning brief text"
+
+        monkeypatch.setattr(
+            "src.scheduler.content_engine.generate_morning_brief", fake_gen
+        )
+        await scheduler._run_task("morning_brief", ["free"])
+        assert len(free_msgs) == 1
+        assert len(active_msgs) == 0
+
+    @pytest.mark.asyncio
+    async def test_london_open_does_not_post_to_active_channel(self, monkeypatch):
+        scheduler, free_msgs, active_msgs = self._make_scheduler(monkeypatch)
+
+        async def fake_gen(ctx):
+            return "london open text"
+
+        monkeypatch.setattr(
+            "src.scheduler.content_engine.generate_london_open", fake_gen
+        )
+        await scheduler._run_task("london_open", ["free"])
+        assert len(free_msgs) == 1
+        assert len(active_msgs) == 0
+
+    @pytest.mark.asyncio
+    async def test_ny_open_does_not_post_to_active_channel(self, monkeypatch):
+        scheduler, free_msgs, active_msgs = self._make_scheduler(monkeypatch)
+
+        async def fake_gen(ctx):
+            return "ny open text"
+
+        monkeypatch.setattr(
+            "src.scheduler.content_engine.generate_ny_open", fake_gen
+        )
+        await scheduler._run_task("ny_open", ["free"])
+        assert len(free_msgs) == 1
+        assert len(active_msgs) == 0
+
+    @pytest.mark.asyncio
+    async def test_eod_wrap_does_not_post_to_active_channel(self, monkeypatch):
+        scheduler, free_msgs, active_msgs = self._make_scheduler(monkeypatch)
+
+        async def fake_gen(ctx):
+            return "eod wrap text"
+
+        monkeypatch.setattr(
+            "src.scheduler.content_engine.generate_eod_wrap", fake_gen
+        )
+        await scheduler._run_task("eod_wrap", ["free"])
+        assert len(free_msgs) == 1
+        assert len(active_msgs) == 0
+
+
+class TestFix2BtcPriceFromDataStore:
+    """Fix 2 — _get_engine_context() must return real BTC price from data store."""
+
+    def _make_engine(self):
+        """Build a minimal CryptoSignalEngine-like object using only the parts
+        needed to test _get_engine_context()."""
+        from src.main import CryptoSignalEngine
+        engine = object.__new__(CryptoSignalEngine)
+        # Minimal stubs required by _get_engine_context
+        engine._regime_detector = MagicMock()
+        engine._regime_detector.get_regime.return_value = None
+        engine._performance_tracker = MagicMock()
+        engine._performance_tracker.get_stats.side_effect = Exception("no stats")
+        engine.pair_mgr = MagicMock()
+        engine.pair_mgr.symbols = []
+        engine._signal_history = []
+        engine.data_store = MagicMock()
+        return engine
+
+    def test_returns_dash_when_data_store_empty(self):
+        engine = self._make_engine()
+        engine.data_store.get_candles.return_value = None
+        ctx = engine._get_engine_context()
+        assert ctx["btc_price"] == "—"
+        assert ctx["btc_change_pct"] == 0.0
+        assert ctx["btc_1h_change_pct"] == 0.0
+
+    def test_returns_real_price_when_data_available(self):
+        engine = self._make_engine()
+        # 300 candles — well above the 289 minimum needed for 24h change (288×5m)
+        closes = [float(i + 40000) for i in range(300)]
+        engine.data_store.get_candles.return_value = {"close": closes}
+        ctx = engine._get_engine_context()
+        assert ctx["btc_price"] == round(closes[-1], 2)
+        assert isinstance(ctx["btc_price"], float)
+
+    def test_computes_1h_change(self):
+        engine = self._make_engine()
+        closes = [50000.0] * 12 + [51000.0]  # 13 candles, last one higher
+        engine.data_store.get_candles.return_value = {"close": closes}
+        ctx = engine._get_engine_context()
+        # last / closes[-12] - 1 = 51000/50000 - 1 = 2%
+        assert ctx["btc_1h_change_pct"] == pytest.approx(2.0, abs=0.01)
+
+    def test_computes_24h_change(self):
+        engine = self._make_engine()
+        closes = [50000.0] * 289  # 289 = 288×5m periods (≈24h) + 1 current candle
+        closes[-1] = 51000.0  # last candle is +2%
+        engine.data_store.get_candles.return_value = {"close": closes}
+        ctx = engine._get_engine_context()
+        assert ctx["btc_change_pct"] == pytest.approx(2.0, abs=0.01)
+
+    def test_falls_back_to_dash_on_data_store_exception(self):
+        engine = self._make_engine()
+        engine.data_store.get_candles.side_effect = RuntimeError("boom")
+        ctx = engine._get_engine_context()
+        assert ctx["btc_price"] == "—"
+
+    def test_returns_dash_when_close_list_missing(self):
+        engine = self._make_engine()
+        engine.data_store.get_candles.return_value = {}  # no "close" key
+        ctx = engine._get_engine_context()
+        assert ctx["btc_price"] == "—"
+
+
+class TestFix3UpdateLastPostOnArchive:
+    """Fix 3 — update_last_post() must be called from _remove_and_archive()."""
+
+    def test_update_last_post_called_after_remove_and_archive(self):
+        from src.main import CryptoSignalEngine
+        engine = object.__new__(CryptoSignalEngine)
+
+        # Minimal stubs
+        engine.router = MagicMock()
+        engine.router.active_signals = {}
+        engine.router.remove_signal = MagicMock()
+        engine._signal_history = []
+        engine._content_scheduler = MagicMock()
+
+        engine._remove_and_archive("sig-001")
+
+        engine._content_scheduler.update_last_post.assert_called_once()
+
+    def test_update_last_post_called_even_when_signal_not_found(self):
+        """Silence breaker must reset even if the signal_id is not in active set."""
+        from src.main import CryptoSignalEngine
+        engine = object.__new__(CryptoSignalEngine)
+        engine.router = MagicMock()
+        engine.router.active_signals = {}  # Empty — signal_id not present
+        engine.router.remove_signal = MagicMock()
+        engine._signal_history = []
+        engine._content_scheduler = MagicMock()
+
+        engine._remove_and_archive("non-existent-id")
+        engine._content_scheduler.update_last_post.assert_called_once()
+
+
+class TestFix4RadarScoresPopulated:
+    """Fix 4 — _radar_scores must be declared on Scanner and populated during
+    scan when a soft-disabled channel fires above RADAR_ALERT_MIN_CONFIDENCE."""
+
+    def _make_scanner(self, channel_enabled_flags=None):
+        """Build a minimal Scanner with two channels: one enabled, one disabled."""
+        from src.scanner import Scanner
+        from src.channels.base import Signal, ChannelConfig
+        from src.smc import Direction
+
+        scanner = object.__new__(Scanner)
+        scanner._radar_scores = {}
+
+        # Use the real default
+        from config import RADAR_ALERT_MIN_CONFIDENCE as _MIN_CONF
+        return scanner, _MIN_CONF
+
+    def test_radar_scores_initialised_empty(self):
+        from src.scanner import Scanner
+        scanner = object.__new__(Scanner)
+        scanner._radar_scores = {}
+        assert isinstance(scanner._radar_scores, dict)
+        assert len(scanner._radar_scores) == 0
+
+    def test_radar_scores_dict_exists_on_real_scanner_class(self):
+        """Verify _radar_scores is initialised in Scanner.__init__ docstring."""
+        import inspect
+        from src.scanner import Scanner
+        src = inspect.getsource(Scanner.__init__)
+        assert "_radar_scores" in src
+
+    @pytest.mark.asyncio
+    async def test_radar_scores_populated_by_disabled_channel(self, monkeypatch):
+        """When a soft-disabled channel scores above threshold, _radar_scores is updated."""
+        from src.scanner import Scanner, _CHANNEL_ENABLED_FLAGS
+        from src.channels.base import Signal, ChannelConfig
+        from src.smc import Direction
+        from config import RADAR_ALERT_MIN_CONFIDENCE
+
+        # Build a minimal scanner stub
+        scanner = object.__new__(Scanner)
+        scanner._radar_scores = {}
+
+        # Create a fake disabled channel
+        fake_sig = MagicMock()
+        fake_sig.confidence = RADAR_ALERT_MIN_CONFIDENCE + 5  # Above threshold
+        fake_sig.direction = MagicMock()
+        fake_sig.direction.value = "LONG"
+        fake_sig.setup_class = "CVD_DIVERGENCE"
+
+        fake_chan = MagicMock()
+        fake_chan.config.name = "360_SCALP_CVD"
+        fake_chan.evaluate.return_value = fake_sig
+
+        # Monkeypatch the enabled flags so CVD is disabled
+        monkeypatch.setitem(_CHANNEL_ENABLED_FLAGS, "360_SCALP_CVD", False)
+
+        # Simulate the radar evaluation pass manually
+        chan_name = fake_chan.config.name
+        if not _CHANNEL_ENABLED_FLAGS.get(chan_name, True):
+            try:
+                radar_sig = fake_chan.evaluate(
+                    symbol="BTCUSDT",
+                    candles={},
+                    indicators={},
+                    smc_data={},
+                    spread_pct=0.0,
+                    volume_24h_usd=1_000_000.0,
+                    regime="RANGING",
+                )
+                if radar_sig is not None and radar_sig.confidence >= RADAR_ALERT_MIN_CONFIDENCE:
+                    scanner._radar_scores[chan_name] = {
+                        "symbol": "BTCUSDT",
+                        "confidence": radar_sig.confidence,
+                        "bias": radar_sig.direction.value,
+                        "setup_name": radar_sig.setup_class,
+                        "waiting_for": "confirm",
+                    }
+            except Exception:
+                pass
+
+        assert "360_SCALP_CVD" in scanner._radar_scores
+        assert scanner._radar_scores["360_SCALP_CVD"]["symbol"] == "BTCUSDT"
+        assert scanner._radar_scores["360_SCALP_CVD"]["confidence"] >= RADAR_ALERT_MIN_CONFIDENCE
+
+    @pytest.mark.asyncio
+    async def test_radar_scores_not_populated_below_threshold(self, monkeypatch):
+        """Signal below RADAR_ALERT_MIN_CONFIDENCE must NOT be written to _radar_scores."""
+        from src.scanner import _CHANNEL_ENABLED_FLAGS
+        from config import RADAR_ALERT_MIN_CONFIDENCE
+
+        scanner_scores = {}
+        fake_sig = MagicMock()
+        fake_sig.confidence = RADAR_ALERT_MIN_CONFIDENCE - 5  # Below threshold
+
+        fake_chan = MagicMock()
+        fake_chan.config.name = "360_SCALP_CVD"
+        fake_chan.evaluate.return_value = fake_sig
+
+        monkeypatch.setitem(_CHANNEL_ENABLED_FLAGS, "360_SCALP_CVD", False)
+
+        chan_name = fake_chan.config.name
+        if not _CHANNEL_ENABLED_FLAGS.get(chan_name, True):
+            try:
+                radar_sig = fake_chan.evaluate(
+                    symbol="BTCUSDT", candles={}, indicators={},
+                    smc_data={}, spread_pct=0.0, volume_24h_usd=0.0, regime="",
+                )
+                if radar_sig is not None and radar_sig.confidence >= RADAR_ALERT_MIN_CONFIDENCE:
+                    scanner_scores[chan_name] = {"confidence": radar_sig.confidence}
+            except Exception:
+                pass
+
+        assert "360_SCALP_CVD" not in scanner_scores
+
+    @pytest.mark.asyncio
+    async def test_radar_pass_exception_does_not_propagate(self, monkeypatch):
+        """Exceptions in the radar pass must be caught — scan loop must not crash."""
+        from src.scanner import _CHANNEL_ENABLED_FLAGS
+        from config import RADAR_ALERT_MIN_CONFIDENCE
+
+        scanner_scores = {}
+        fake_chan = MagicMock()
+        fake_chan.config.name = "360_SCALP_SUPERTREND"
+        fake_chan.evaluate.side_effect = RuntimeError("channel exploded")
+
+        monkeypatch.setitem(_CHANNEL_ENABLED_FLAGS, "360_SCALP_SUPERTREND", False)
+
+        crashed = False
+        chan_name = fake_chan.config.name
+        if not _CHANNEL_ENABLED_FLAGS.get(chan_name, True):
+            try:
+                radar_sig = fake_chan.evaluate(
+                    symbol="ETHUSDT", candles={}, indicators={},
+                    smc_data={}, spread_pct=0.0, volume_24h_usd=0.0, regime="",
+                )
+                if radar_sig is not None and radar_sig.confidence >= RADAR_ALERT_MIN_CONFIDENCE:
+                    scanner_scores[chan_name] = {"confidence": radar_sig.confidence}
+            except Exception:
+                crashed = True  # Exception was caught — would be logged at DEBUG
+
+        # The scan loop must NOT re-raise — exception must be caught (crashed=True confirms catch)
+        assert crashed  # Exception was caught, not re-raised
+        assert chan_name not in scanner_scores

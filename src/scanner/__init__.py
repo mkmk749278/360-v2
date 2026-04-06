@@ -32,6 +32,7 @@ from config import (
     MAX_CORRELATED_SCALP_SIGNALS,
     MTF_HARD_BLOCK,
     QUIET_SCALP_MIN_CONFIDENCE,
+    RADAR_ALERT_MIN_CONFIDENCE,
     REGIME_MIN_VOLUME_USD,
     SCAN_MIN_VOLUME_USD,
     SCAN_SYMBOL_BLACKLIST,
@@ -509,6 +510,11 @@ class Scanner:
         # PR 07: Regime-adaptive channel scheduling
         self.regime_manager: RegimeManager = RegimeManager()
         # -----------------------------------------------------------------
+
+        # Radar scores: channel_name → {symbol, confidence, bias, ...}
+        # Populated by the radar evaluation pass for soft-disabled channels.
+        # Read by _get_scanner_context() → RadarChannel every 30s.
+        self._radar_scores: Dict[str, Any] = {}
 
         # Data fetcher — delegates kline and order-book retrieval
         self._data_fetcher = DataFetcher(
@@ -2324,6 +2330,46 @@ class Scanner:
             _sc = getattr(sig, "setup_class", chan_name)
             self._setup_eval_counts[_sc] += 1
             _pending_signals.append((sig, chan_name))
+
+        # --- Radar evaluation pass (soft-disabled channels only) ----------
+        # Evaluates channels that are soft-disabled via _CHANNEL_ENABLED_FLAGS.
+        # Results are written to _radar_scores for RadarChannel to read.
+        # No signals are published here — fail-safe: exceptions are debug-logged.
+        _regime_str = ""
+        try:
+            _regime_str = ctx.regime_result.regime.value
+        except Exception:
+            pass
+        for chan in self.channels:
+            chan_name = chan.config.name
+            if _CHANNEL_ENABLED_FLAGS.get(chan_name, True):
+                continue  # Only evaluate soft-disabled channels here
+            try:
+                _radar_sig = chan.evaluate(
+                    symbol=symbol,
+                    candles=ctx.candles,
+                    indicators=ctx.indicators,
+                    smc_data=ctx.smc_data,
+                    spread_pct=ctx.spread_pct,
+                    volume_24h_usd=volume_24h,
+                    regime=_regime_str,
+                )
+                if _radar_sig is not None and _radar_sig.confidence >= RADAR_ALERT_MIN_CONFIDENCE:
+                    _existing = self._radar_scores.get(chan_name)
+                    if (
+                        _existing is None
+                        or _radar_sig.confidence > _existing.get("confidence", 0)
+                    ):
+                        self._radar_scores[chan_name] = {
+                            "symbol": symbol,
+                            "confidence": _radar_sig.confidence,
+                            "bias": getattr(_radar_sig.direction, "value", str(_radar_sig.direction)),
+                            "setup_name": getattr(_radar_sig, "setup_class", chan_name),
+                            "waiting_for": "confirm",
+                        }
+            except Exception as _radar_exc:
+                log.debug("Radar eval error {} {}: {}", chan_name, symbol, _radar_exc)
+        # ------------------------------------------------------------------
 
         if not _pending_signals:
             return

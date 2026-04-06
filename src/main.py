@@ -18,7 +18,7 @@ import collections
 import os
 import signal
 import time
-from typing import Dict, Deque, List, Optional, Set
+from typing import Dict, Deque, List, Optional, Set, Union
 
 from config import (
     PAIR_FETCH_INTERVAL_HOURS,
@@ -323,6 +323,7 @@ class CryptoSignalEngine:
             self._signal_history.append(sig)
             self._signal_history = self._signal_history[-500:]
         self.router.remove_signal(signal_id)
+        self._content_scheduler.update_last_post()
 
     def _get_engine_context(self) -> dict:
         """Return a snapshot of current engine state for content generation."""
@@ -355,11 +356,30 @@ class CryptoSignalEngine:
             [s for s in self._signal_history if s is not None]
         )
 
+        btc_price: Union[str, float] = "—"
+        btc_change_pct: float = 0.0
+        btc_1h_change_pct: float = 0.0
+        try:
+            btc_cd = self.data_store.get_candles("BTCUSDT", "5m")
+            if btc_cd and btc_cd.get("close"):
+                closes = btc_cd["close"]
+                btc_price = round(float(closes[-1]), 2)
+                if len(closes) >= 12:
+                    btc_1h_change_pct = round(
+                        (float(closes[-1]) / float(closes[-12]) - 1) * 100, 2
+                    )  # 12×5m = 1h
+                if len(closes) >= 289:
+                    btc_change_pct = round(
+                        (float(closes[-1]) / float(closes[-289]) - 1) * 100, 2
+                    )  # 288×5m ≈ 24h
+        except Exception:
+            pass
+
         return {
             "regime": regime,
-            "btc_price": "—",
-            "btc_change_pct": 0,
-            "btc_1h_change_pct": 0,
+            "btc_price": btc_price,
+            "btc_change_pct": btc_change_pct,
+            "btc_1h_change_pct": btc_1h_change_pct,
             "top_pairs": top_pairs,
             "signals_today": signals_today,
             "performance": perf,

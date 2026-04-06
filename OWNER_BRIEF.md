@@ -155,7 +155,7 @@ Every single message — signals, radar, scheduled posts — follows these rules
 
 ---
 
-### PR2 — AI-Powered Engagement Layer 🔄 IN PROGRESS
+### PR2 — AI-Powered Engagement Layer ✅ MERGED
 
 **Business goal:** The engine must never feel silent. Free channel generates leads. Paid channel stays active.
 
@@ -166,11 +166,11 @@ Every single message — signals, radar, scheduled posts — follows these rules
 4. **Smart silence breaker** — No post for 3+ hours during 08:00–22:00 UTC → auto market watch post to paid channel.
 5. **Dynamic presentation** — Rotating variants, GPT-4o-mini analyst voice, emoji pools, template fallback.
 
-**Known issues to fix before PR2 is complete:**
-- [ ] Scheduled content must post to FREE channel only (not active) — except weekly card
-- [ ] `_get_engine_context()` must return real BTC price from data store, not hardcoded `"—"`
-- [ ] `update_last_post()` must be called from scanner when a real signal fires (silence breaker awareness)
-- [ ] `_radar_scores` must be populated in scanner when soft-disabled channels score above radar threshold
+**PR2 fixes applied (merged with PR2):**
+- ✅ Fix 1: Scheduler channel routing corrected — `morning_brief`, `london_open`, `ny_open`, `eod_wrap` now post to `["free"]` only; `weekly_card` keeps `["active", "free"]` (Business Rule B13)
+- ✅ Fix 2: `_get_engine_context()` now reads live BTC price/change from `data_store.get_candles("BTCUSDT", "5m")` with `"—"` fallback if data unavailable
+- ✅ Fix 3: `update_last_post()` now called from `_remove_and_archive()` so silence breaker resets correctly when a signal lifecycle ends
+- ✅ Fix 4: `_radar_scores` now declared in `Scanner.__init__()` and populated during per-symbol scan via a separate radar evaluation pass for soft-disabled channels (fail-safe, never crashes scan loop)
 
 **New modules:**
 - `src/content_engine.py` — GPT wrapper + template renderer

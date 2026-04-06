@@ -29,10 +29,10 @@ log = get_logger("scheduler")
 # ---------------------------------------------------------------------------
 # (hour_utc, minute_utc, task_name, channels)
 SCHEDULED_TASKS: List[Tuple[int, int, str, List[str]]] = [
-    (7,  0,  "morning_brief",  ["active", "free"]),
-    (8,  0,  "london_open",    ["active", "free"]),
-    (13, 30, "ny_open",        ["active", "free"]),
-    (21, 0,  "eod_wrap",       ["active", "free"]),
+    (7,  0,  "morning_brief",  ["free"]),
+    (8,  0,  "london_open",    ["free"]),
+    (13, 30, "ny_open",        ["free"]),
+    (21, 0,  "eod_wrap",       ["free"]),
     # Weekly — Monday only (weekday check inside task runner)
     (9,  0,  "weekly_card",    ["active", "free"]),
 ]
