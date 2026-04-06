@@ -26,11 +26,6 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: 22
           request_pty: true
-          # Skip host key verification so VPS reinstalls (which change the SSH
-          # fingerprint) don't break deployments. The connection is still
-          # authenticated via VPS_SSH_KEY. Update VPS_HOST_KEY secret if you
-          # want strict fingerprint pinning instead.
-          extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
           script: |
             set -euo pipefail
 
