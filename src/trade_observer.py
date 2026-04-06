@@ -69,6 +69,15 @@ ROOT_CAUSE_LABELS = frozenset({
     "tp_hit",
 })
 
+# Outcome labels that count as wins — matches performance_tracker logic exactly
+_DIGEST_WIN_LABELS: frozenset = frozenset({
+    "TP1_HIT", "TP2_HIT", "TP3_HIT", "FULL_TP_HIT", "PROFIT_LOCKED",
+})
+# Outcome labels that count as losses
+_DIGEST_LOSS_LABELS: frozenset = frozenset({"SL_HIT"})
+# Outcome labels that count as breakeven
+_DIGEST_BREAKEVEN_LABELS: frozenset = frozenset({"BREAKEVEN_EXIT"})
+
 
 # ---------------------------------------------------------------------------
 # Data models
@@ -152,6 +161,48 @@ class TradeRecord:
     observations: List[MidTradeObservation] = field(default_factory=list)
     exit: Optional[ExitAnalysis] = None
     complete: bool = False              # True once exit is captured
+
+
+# ---------------------------------------------------------------------------
+# Digest classification helper
+# ---------------------------------------------------------------------------
+
+
+def _classify_digest_records(
+    records: List[TradeRecord],
+) -> "tuple[list[TradeRecord], list[TradeRecord], list[TradeRecord]]":
+    """Classify completed trade records into wins, losses, and breakeven.
+
+    Uses outcome labels first (matches performance_tracker), then falls back
+    to PnL sign for outcomes not in any label set (e.g. CLOSED, EXPIRED,
+    INVALIDATED).
+
+    Returns (wins, losses, breakeven) lists.
+    """
+    wins: list = []
+    losses: list = []
+    breakeven: list = []
+    for r in records:
+        if r.exit is None:
+            continue
+        outcome = r.exit.outcome
+        pnl = r.exit.pnl_pct
+        if outcome in _DIGEST_WIN_LABELS:
+            wins.append(r)
+        elif outcome in _DIGEST_LOSS_LABELS:
+            losses.append(r)
+        elif outcome in _DIGEST_BREAKEVEN_LABELS:
+            breakeven.append(r)
+        else:
+            # CLOSED, EXPIRED, INVALIDATED, or any unknown label —
+            # fall back to PnL sign, matching what performance_tracker does
+            if pnl > 0.01:
+                wins.append(r)
+            elif pnl < -0.01:
+                losses.append(r)
+            else:
+                breakeven.append(r)
+    return wins, losses, breakeven
 
 
 # ---------------------------------------------------------------------------
@@ -600,16 +651,12 @@ class TradeObserver:
     def _build_digest_prompt(self, records: List[TradeRecord]) -> str:
         """Build a structured GPT prompt from completed trade records."""
         lines: List[str] = [
-            "You are an expert crypto trading analyst. Analyse the following completed trades "
-            "and provide actionable insights.\n",
             f"Period: last {OBSERVER_DIGEST_LOOKBACK_HOURS} hours",
             f"Total trades: {len(records)}\n",
         ]
 
-        wins = [r for r in records if r.exit and "TP" in r.exit.outcome]
-        losses = [r for r in records if r.exit and ("SL" in r.exit.outcome or r.exit.pnl_pct < 0)]
-
-        lines.append(f"Wins: {len(wins)}, Losses: {len(losses)}")
+        wins, losses, breakeven = _classify_digest_records(records)
+        lines.append(f"Wins: {len(wins)}, Losses: {len(losses)}, Breakeven: {len(breakeven)}")
 
         # Root cause breakdown
         from collections import Counter
@@ -625,11 +672,16 @@ class TradeObserver:
                 continue
             ch = r.exit.channel
             if ch not in channels:
-                channels[ch] = {"wins": 0, "losses": 0, "pnl": []}
-            if "TP" in r.exit.outcome:
+                channels[ch] = {"wins": 0, "losses": 0, "breakeven": 0, "pnl": []}
+            if r.exit.outcome in _DIGEST_WIN_LABELS or (
+                r.exit.outcome not in _DIGEST_LOSS_LABELS | _DIGEST_BREAKEVEN_LABELS
+                and r.exit.pnl_pct > 0.01
+            ):
                 channels[ch]["wins"] += 1
-            else:
+            elif r.exit.outcome in _DIGEST_LOSS_LABELS or r.exit.pnl_pct < -0.01:
                 channels[ch]["losses"] += 1
+            else:
+                channels[ch]["breakeven"] += 1
             channels[ch]["pnl"].append(r.exit.pnl_pct)
 
         lines.append("\nChannel breakdown:")
@@ -659,12 +711,12 @@ class TradeObserver:
         lines.append(
             "\nRespond with a JSON object with these exact keys:\n"
             '{\n'
-            '  "summary": "<2-3 sentence overview>",\n'
+            '  "summary": "<2-3 sentence post-session review — reference specific symbols and PnL if notable>",\n'
             '  "top_root_causes": ["<cause1>", "<cause2>", "<cause3>"],\n'
-            '  "btc_correlation_note": "<1-2 sentences>",\n'
+            '  "btc_correlation_note": "<1 sentence — was BTC a factor or not>",\n'
             '  "best_channel": "<channel name>",\n'
             '  "worst_channel": "<channel name>",\n'
-            '  "recommendations": ["<rec1>", "<rec2>", "<rec3>"]\n'
+            '  "recommendations": ["<specific observation about what worked or did not work — must reference actual data from above, not generic advice>"]\n'
             '}'
         )
         return "\n".join(lines)
@@ -686,8 +738,19 @@ class TradeObserver:
                 {
                     "role": "system",
                     "content": (
-                        "You are a professional crypto trading analyst. "
-                        "Analyse trade lifecycle data and respond only with valid JSON."
+                        "You are a professional crypto futures trader who runs a paid signal service. "
+                        "You track your own trades and write honest post-session reviews. "
+                        "Your style is direct, minimal, and never uses filler phrases. "
+                        "You sound like a real trader, not a consultant. "
+                        "Analyse the trade lifecycle data provided and respond only with valid JSON. "
+                        "FORBIDDEN in your output: "
+                        "'Consider adjusting', "
+                        "'It is important to', "
+                        "'actionable insights', "
+                        "'diversify', "
+                        "generic advice that applies to any service, "
+                        "bullet points that state the obvious. "
+                        "If sample size is small (< 5 trades), acknowledge it explicitly in the summary."
                     ),
                 },
                 {"role": "user", "content": prompt},
@@ -711,18 +774,31 @@ class TradeObserver:
         self, records: List[TradeRecord], ai_text: Optional[str]
     ) -> str:
         """Build the Telegram message for the admin digest."""
-        wins = sum(1 for r in records if r.exit and "TP" in r.exit.outcome)
-        losses = len(records) - wins
-        win_rate = wins / len(records) * 100.0 if records else 0.0
+        _wins, _losses, _breakeven = _classify_digest_records(records)
+        wins = len(_wins)
+        losses = len(_losses)
+        be_count = len(_breakeven)
+        counted = wins + losses  # breakeven excluded from win rate (same as /stats)
+        win_rate = wins / counted * 100.0 if counted > 0 else 0.0
         avg_pnl = (
             sum(r.exit.pnl_pct for r in records if r.exit) / len(records)
             if records else 0.0
         )
 
+        # Sanity check: positive avg PnL with 0 wins suggests a classification bug
+        if avg_pnl > 0.05 and wins == 0 and len(records) > 0:
+            log.warning(
+                "Digest data inconsistency: avg_pnl={:.2f}% but wins=0 — "
+                "check outcome label classification",
+                avg_pnl,
+            )
+
         header = (
             f"🤖 *AI Trade Observer Digest*\n"
             f"_{OBSERVER_DIGEST_LOOKBACK_HOURS}h window · {len(records)} trades analysed_\n\n"
-            f"📊 *Results:* {wins}W / {losses}L ({win_rate:.0f}% win rate)\n"
+            f"📊 *Results:* {wins}W / {losses}L"
+            + (f" / {be_count}BE" if be_count > 0 else "")
+            + f" ({win_rate:.0f}% win rate)\n"
             f"💰 *Avg PnL:* {avg_pnl:+.2f}%\n\n"
         )
 

@@ -19,6 +19,7 @@ from src.trade_observer import (
     ExitAnalysis,
     TradeRecord,
     ROOT_CAUSE_LABELS,
+    _classify_digest_records,
 )
 from src.utils import utcnow
 
@@ -842,3 +843,183 @@ class TestRunDigestOnDemand:
 
         # send_alert must NOT have been called by run_digest_on_demand
         assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Tests for _classify_digest_records and related digest fixes
+# ---------------------------------------------------------------------------
+
+
+def _make_trade_record(outcome: str, pnl: float) -> TradeRecord:
+    """Minimal helper to build a completed TradeRecord for classification tests."""
+    entry = EntrySnapshot(
+        signal_id="CLS-001",
+        symbol="SOLUSDT",
+        channel="360_SCALP",
+        direction="LONG",
+        entry_price=80.0,
+        stop_loss=79.0,
+        tp1=81.0,
+        tp2=82.0,
+        tp3=83.0,
+        confidence=80.0,
+        spread_pct=0.05,
+        regime="TRENDING",
+        fear_greed_value=None,
+        btc_price=None,
+        eth_price=None,
+        order_book_imbalance=None,
+        pre_signal_momentum=None,
+        setup_class="FVG_RETEST",
+    )
+    exit_ = ExitAnalysis(
+        signal_id="CLS-001",
+        symbol="SOLUSDT",
+        channel="360_SCALP",
+        direction="LONG",
+        outcome=outcome,
+        pnl_pct=pnl,
+        hold_duration_seconds=300.0,
+        root_cause="tp_hit" if pnl > 0 else "normal_sl",
+        btc_change_pct=None,
+        regime_transitions=0,
+        reached_tp1_zone=pnl > 0,
+        time_to_tp1_seconds=None,
+        time_to_sl_seconds=None,
+        mfe_pct=abs(pnl),
+        mae_pct=-0.1,
+        entry_price=80.0,
+        entry_spread_pct=0.05,
+        entry_regime="TRENDING",
+        num_observations=5,
+    )
+    return TradeRecord(entry=entry, exit=exit_, complete=True)
+
+
+class TestClassifyDigestRecords:
+    """_classify_digest_records() must correctly classify all outcome types."""
+
+    def test_invalidated_profit_counts_as_win(self):
+        """PROFIT_LOCKED with positive PnL must be counted as a win."""
+        record = _make_trade_record("PROFIT_LOCKED", 0.20)
+        wins, losses, breakeven = _classify_digest_records([record])
+        assert len(wins) == 1
+        assert len(losses) == 0
+        assert len(breakeven) == 0
+
+    def test_invalidated_loss_counts_as_loss(self):
+        """CLOSED with negative PnL must be counted as a loss."""
+        record = _make_trade_record("CLOSED", -0.15)
+        wins, losses, breakeven = _classify_digest_records([record])
+        assert len(wins) == 0
+        assert len(losses) == 1
+        assert len(breakeven) == 0
+
+    def test_breakeven_excluded_from_win_rate(self):
+        """With 1W / 1L / 1BE, win rate must be 50%, not 33%."""
+        records = [
+            _make_trade_record("TP1_HIT", 0.75),
+            _make_trade_record("SL_HIT", -0.70),
+            _make_trade_record("BREAKEVEN_EXIT", 0.0),
+        ]
+        wins, losses, breakeven = _classify_digest_records(records)
+        assert len(wins) == 1
+        assert len(losses) == 1
+        assert len(breakeven) == 1
+        counted = len(wins) + len(losses)
+        win_rate = len(wins) / counted * 100.0
+        assert win_rate == pytest.approx(50.0)
+
+    def test_sl_hit_counts_as_loss(self):
+        """SL_HIT must be a loss regardless of PnL."""
+        record = _make_trade_record("SL_HIT", -0.50)
+        wins, losses, breakeven = _classify_digest_records([record])
+        assert len(losses) == 1
+        assert len(wins) == 0
+
+    def test_tp_labels_count_as_wins(self):
+        """All TP_HIT variants must be wins."""
+        for outcome in ("TP1_HIT", "TP2_HIT", "TP3_HIT", "FULL_TP_HIT"):
+            record = _make_trade_record(outcome, 1.0)
+            wins, losses, breakeven = _classify_digest_records([record])
+            assert len(wins) == 1, f"{outcome} should be a win"
+
+    def test_record_without_exit_is_skipped(self):
+        """Records with no exit must be ignored."""
+        entry = EntrySnapshot(
+            signal_id="NO-EXIT",
+            symbol="BTCUSDT",
+            channel="360_SCALP",
+            direction="LONG",
+            entry_price=30000.0,
+            stop_loss=29700.0,
+            tp1=30300.0,
+            tp2=30600.0,
+            tp3=30900.0,
+            confidence=80.0,
+            spread_pct=0.05,
+            regime="TRENDING",
+            fear_greed_value=None,
+            btc_price=None,
+            eth_price=None,
+            order_book_imbalance=None,
+            pre_signal_momentum=None,
+            setup_class="BOS_RETEST",
+        )
+        record = TradeRecord(entry=entry, exit=None, complete=False)
+        wins, losses, breakeven = _classify_digest_records([record])
+        assert wins == [] and losses == [] and breakeven == []
+
+
+class TestFormatDigestMessageWinLoss:
+    """_format_digest_message() must use the correct win/loss classification."""
+
+    def test_format_digest_message_wins_match_stats(self, tmp_path: Path):
+        """Bug-report scenario: 2× PROFIT_LOCKED + 1× SL_HIT must show 2W / 1L."""
+        obs = _make_observer(tmp_path)
+        records = [
+            _make_trade_record("PROFIT_LOCKED", 0.20),
+            _make_trade_record("PROFIT_LOCKED", 0.43),
+            _make_trade_record("SL_HIT", -0.05),
+        ]
+        msg = obs._format_digest_message(records, None)
+        assert "2W / 1L" in msg
+        assert "0W" not in msg
+
+    def test_format_digest_message_win_rate_excludes_breakeven(self, tmp_path: Path):
+        """Win rate must be 50% for 1W / 1L / 1BE, not 33%."""
+        obs = _make_observer(tmp_path)
+        records = [
+            _make_trade_record("TP1_HIT", 0.75),
+            _make_trade_record("SL_HIT", -0.70),
+            _make_trade_record("BREAKEVEN_EXIT", 0.0),
+        ]
+        msg = obs._format_digest_message(records, None)
+        assert "50%" in msg
+        assert "BE" in msg  # breakeven count shown in header
+
+    def test_digest_prompt_contains_correct_counts(self, tmp_path: Path):
+        """_build_digest_prompt must contain 'Wins: 2, Losses: 1' for the bug-report scenario."""
+        obs = _make_observer(tmp_path)
+        records = [
+            _make_trade_record("PROFIT_LOCKED", 0.20),
+            _make_trade_record("PROFIT_LOCKED", 0.43),
+            _make_trade_record("SL_HIT", -0.05),
+        ]
+        prompt = obs._build_digest_prompt(records)
+        assert "Wins: 2" in prompt
+        assert "Losses: 1" in prompt
+
+    def test_positive_avg_pnl_with_zero_wins_logs_warning(self, tmp_path: Path):
+        """Inconsistent data (avg_pnl > 0 but wins = 0) must log a warning."""
+        obs = _make_observer(tmp_path)
+        records = [
+            _make_trade_record("BREAKEVEN_EXIT", 0.10),  # avg_pnl = +0.10 but wins=0
+        ]
+        # Patch _classify_digest_records to force wins=0 while avg_pnl > 0.05
+        warning_calls: list = []
+        with patch("src.trade_observer._classify_digest_records", return_value=([], [], records)):
+            with patch("src.trade_observer.log") as mock_log:
+                mock_log.warning.side_effect = lambda *a, **kw: warning_calls.append(a)
+                obs._format_digest_message(records, None)
+        assert len(warning_calls) > 0, "Expected a warning to be logged for avg_pnl>0 with wins=0"
