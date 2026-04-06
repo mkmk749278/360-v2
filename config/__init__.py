@@ -1089,20 +1089,6 @@ NO_SIGNAL_ALERT_COOLDOWN_SECONDS: int = int(
 )
 
 # ---------------------------------------------------------------------------
-# Scan-latency circuit breaker thresholds
-# ---------------------------------------------------------------------------
-# Warn in logs when a single scan cycle exceeds this duration (ms).
-SCAN_LATENCY_WARN_MS: float = _safe_float("SCAN_LATENCY_WARN_MS", "25000")
-# Fire an admin alert when latency exceeds this threshold for N consecutive
-# cycles (see SCAN_LATENCY_ALERT_CONSECUTIVE).
-SCAN_LATENCY_ALERT_MS: float = _safe_float("SCAN_LATENCY_ALERT_MS", "45000")
-# Number of consecutive over-threshold cycles before the admin alert fires.
-SCAN_LATENCY_ALERT_CONSECUTIVE: int = _safe_int("SCAN_LATENCY_ALERT_CONSECUTIVE", "3")
-# When latency exceeds this value, automatically reduce the scan set to
-# Tier 1 only and lower _MAX_ORDER_BOOK_FETCHES_PER_CYCLE temporarily (ms).
-SCAN_LATENCY_REDUCE_MS: float = _safe_float("SCAN_LATENCY_REDUCE_MS", "35000")
-
-# ---------------------------------------------------------------------------
 # WS health-aware scan gating
 # ---------------------------------------------------------------------------
 # Number of consecutive scan cycles with both WS managers unhealthy before
@@ -1127,32 +1113,6 @@ WS_PARTIAL_HEALTH_THRESHOLD: float = float(
 # Maximum number of symbols to scan per cycle when WS is partially degraded.
 # Reduces REST API consumption while still providing signals for top pairs.
 WS_DEGRADED_MAX_PAIRS: int = _safe_int("WS_DEGRADED_MAX_PAIRS", "50")
-
-# ---------------------------------------------------------------------------
-# Depth endpoint circuit breaker
-# ---------------------------------------------------------------------------
-# Number of depth endpoint timeouts within a rolling 30 s window that trips
-# the circuit breaker.  Raised from 3 to 5 because the depth endpoint is now
-# only used for 360_SCALP_OBI (all spread data comes from bookTicker), so
-# concurrent OBI requests can no longer create the 50-timeout bursts seen
-# in the old per-symbol depth architecture.  5 requires sustained degradation
-# rather than a single brief latency spike to trip the breaker.
-DEPTH_CIRCUIT_BREAKER_THRESHOLD: int = int(
-    os.getenv("DEPTH_CIRCUIT_BREAKER_THRESHOLD", "5")
-)
-# How long (seconds) the circuit stays open (depth fetches return None immediately).
-# Default 300s (5 min) so Binance has time to recover before the next retry attempt;
-# 90s was too short and caused an infinite trip → cooldown → trip loop during degraded
-# endpoint windows.  Still overridable via the DEPTH_CIRCUIT_BREAKER_COOLDOWN env var.
-DEPTH_CIRCUIT_BREAKER_COOLDOWN: float = float(
-    os.getenv("DEPTH_CIRCUIT_BREAKER_COOLDOWN", "300")
-)
-# Maximum retries for depth endpoint specifically (prevents cumulative wait).
-DEPTH_MAX_RETRIES: int = _safe_int("DEPTH_MAX_RETRIES", "1")
-# Number of pairs to scan when depth circuit breaker or latency breaker is active (TOP50 mode only).
-# When the depth circuit breaker fires, depth data is simply skipped per-symbol; the scan universe
-# should not shrink — keep the full TOP50_FUTURES_COUNT so signals from all 50 pairs remain possible.
-TOP50_BREAKER_SCAN_COUNT: int = _safe_int("TOP50_BREAKER_SCAN_COUNT", "50")
 
 # ---------------------------------------------------------------------------
 # WS reconnection resilience — escalation alert threshold

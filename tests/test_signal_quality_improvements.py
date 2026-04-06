@@ -315,15 +315,14 @@ class TestOBIChannel:
         assert sig is None
 
     def test_atr_proximity_allows_obi_long_near_support(self):
-        """OBI LONG: price within 1×ATR of recent_low → signal allowed."""
+        """360_SCALP_OBI is disabled — evaluate always returns None."""
         from src.channels.scalp_obi import ScalpOBIChannel
         ch = ScalpOBIChannel()
         candles, ind, smc_data = self._make_obi_context(close_val=100.5, atr_val=1.0)
         candles["5m"]["low"] = np.ones(25) * 100.0
         candles["5m"]["close"] = np.ones(25) * 100.5
-        # close=100.5 <= 100.0 + 1.0 = 101 → near support
         sig = ch.evaluate("BTCUSDT", candles, ind, smc_data, 0.01, 10_000_000)
-        assert sig is not None
+        assert sig is None
 
     def test_stale_order_book_rejected(self):
         """Order book older than _OBI_MAX_STALENESS_SEC → None."""
@@ -343,7 +342,7 @@ class TestOBIChannel:
         assert sig is None
 
     def test_fresh_order_book_allowed(self):
-        """Order book < _OBI_MAX_STALENESS_SEC old → allowed."""
+        """360_SCALP_OBI is disabled — evaluate always returns None."""
         from src.channels.scalp_obi import ScalpOBIChannel
         ch = ScalpOBIChannel()
         candles, ind, _ = self._make_obi_context(close_val=100.5, atr_val=1.0)
@@ -357,7 +356,7 @@ class TestOBIChannel:
         }
         smc_data = {"order_book": order_book}
         sig = ch.evaluate("BTCUSDT", candles, ind, smc_data, 0.01, 10_000_000)
-        assert sig is not None
+        assert sig is None
 
     def test_missing_timestamp_fails_open(self):
         """Missing timestamp in order book → fail-closed when _OBI_REQUIRE_TIMESTAMP=True."""

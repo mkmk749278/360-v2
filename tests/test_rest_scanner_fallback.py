@@ -338,40 +338,31 @@ class TestGetSpreadPctTierGating:
     async def test_tier2_returns_fallback_when_cache_empty(self):
         """Tier 2 symbol returns fallback when cache not yet seeded."""
         scanner = _make_scanner()
-        mock_client = MagicMock()
-        mock_client.fetch_order_book = AsyncMock()
-        scanner.futures_client = mock_client
+        scanner.futures_client = MagicMock()
 
         result = await scanner._get_spread_pct("ETHUSDT", market="futures")
 
         assert result == 0.01  # default fallback
-        mock_client.fetch_order_book.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_tier3_returns_fallback_when_cache_empty(self):
         """Tier 3 symbol returns fallback when cache not yet seeded."""
         scanner = _make_scanner()
-        mock_client = MagicMock()
-        mock_client.fetch_order_book = AsyncMock()
-        scanner.futures_client = mock_client
+        scanner.futures_client = MagicMock()
 
         result = await scanner._get_spread_pct("DOGEUSDT", market="futures")
 
         assert result == 0.01
-        mock_client.fetch_order_book.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_tier1_returns_fallback_when_cache_empty(self):
         """Tier 1 symbol also returns fallback when cache not yet seeded — no HTTP call."""
         scanner = _make_scanner()
-        mock_client = MagicMock()
-        mock_client.fetch_order_book = AsyncMock()
-        scanner.futures_client = mock_client
+        scanner.futures_client = MagicMock()
 
         result = await scanner._get_spread_pct("BTCUSDT", market="futures")
 
         assert result == 0.01
-        mock_client.fetch_order_book.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_tier2_returns_cached_spread_from_prefetch(self):
@@ -397,14 +388,11 @@ class TestGetSpreadPctTierGating:
         scanner._order_book_cache["BTCUSDT"] = (
             cached_spread, time.monotonic() + _SPREAD_CACHE_TTL
         )
-        mock_client = MagicMock()
-        mock_client.fetch_order_book = AsyncMock()
-        scanner.futures_client = mock_client
+        scanner.futures_client = MagicMock()
 
         result = await scanner._get_spread_pct("BTCUSDT", market="futures")
 
         assert result == cached_spread
-        mock_client.fetch_order_book.assert_not_called()
 
     @pytest.mark.asyncio
     async def test_no_http_calls_regardless_of_ws_state(self):
@@ -412,14 +400,11 @@ class TestGetSpreadPctTierGating:
         scanner = _make_scanner()
         scanner._ws_any_degraded_this_cycle = False  # healthy WS
 
-        mock_client = MagicMock()
-        mock_client.fetch_order_book = AsyncMock()
-        scanner.spot_client = mock_client
+        scanner.spot_client = MagicMock()
 
         result = await scanner._get_spread_pct("XRPUSDT", market="spot")
 
         assert result == 0.01
-        mock_client.fetch_order_book.assert_not_called()
 
 
 # ---------------------------------------------------------------------------

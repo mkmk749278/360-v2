@@ -224,33 +224,3 @@ async def handle_suppressed(args: List[str], ctx: CommandContext) -> None:
         return
     digest = tracker.format_telegram_digest()
     await ctx.reply(digest)
-
-
-@registry.command(
-    "/reset_depth_cb",
-    admin=True,
-    group="engine",
-    help_text="Force-reset the depth circuit breaker on futures and spot clients",
-)
-async def handle_reset_depth_cb(args: List[str], ctx: CommandContext) -> None:
-    """Reset the depth circuit breaker immediately without waiting for the cooldown."""
-    scanner = ctx.scanner
-    futures_client = getattr(scanner, "futures_client", None)
-    spot_client = getattr(scanner, "spot_client", None)
-    reset_count = 0
-    if futures_client is not None:
-        futures_client.reset_depth_circuit()
-        reset_count += 1
-    if spot_client is not None:
-        spot_client.reset_depth_circuit()
-        reset_count += 1
-    # Also reset the scanner's own tracking state so it doesn't auto-re-open
-    if hasattr(scanner, "_depth_breaker_open_since"):
-        scanner._depth_breaker_open_since = 0.0
-    if reset_count:
-        await ctx.reply(
-            f"✅ Depth circuit breaker reset on {reset_count} client(s). "
-            "Full scan will resume on the next cycle."
-        )
-    else:
-        await ctx.reply("⚠️ No depth clients found on scanner.")

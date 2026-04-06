@@ -188,11 +188,7 @@ def _make_scan_ready_scanner(
         exchange_mgr=MagicMock(
             verify_signal_cross_exchange=AsyncMock(return_value=True)
         ),
-        spot_client=MagicMock(
-            fetch_order_book=AsyncMock(
-                return_value={"bids": [["100.0", "1"]], "asks": [["100.01", "1"]]}
-            )
-        ),
+        spot_client=MagicMock(),
         signal_queue=signal_queue,
         router=MagicMock(active_signals={}, cleanup_expired=MagicMock(return_value=0)),
         onchain_client=MagicMock(get_exchange_flow=AsyncMock(return_value=None)),

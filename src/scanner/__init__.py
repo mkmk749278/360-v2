@@ -20,14 +20,9 @@ import numpy as np
 import uuid
 
 from config import (
-    DEPTH_CIRCUIT_BREAKER_COOLDOWN,
     MAX_CORRELATED_SCALP_SIGNALS,
     MTF_HARD_BLOCK,
     QUIET_SCALP_MIN_CONFIDENCE,
-    SCAN_LATENCY_ALERT_CONSECUTIVE,
-    SCAN_LATENCY_ALERT_MS,
-    SCAN_LATENCY_REDUCE_MS,
-    SCAN_LATENCY_WARN_MS,
     SCAN_MIN_VOLUME_USD,
     SCAN_SYMBOL_BLACKLIST,
     SEED_TIMEFRAMES,
@@ -38,7 +33,6 @@ from config import (
     TIER2_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
-    TOP50_BREAKER_SCAN_COUNT,
     TOP50_FUTURES_ONLY,
     WS_DEGRADED_CYCLES_ALERT,
     WS_DEGRADED_MAX_CYCLES,
@@ -165,12 +159,6 @@ _SYMBOL_BLACKLIST: frozenset = frozenset(SCAN_SYMBOL_BLACKLIST)
 
 # Maximum number of symbols scanned concurrently
 _MAX_CONCURRENT_SCANS: int = 20
-
-# In TOP50_FUTURES_ONLY mode all pairs are TIER1, so tier-based filtering
-# is ineffective.  When the depth circuit breaker or latency breaker is
-# active, limit the scan to the top-N pairs by 24h volume to shed CPU
-# work from indicator computation and channel evaluation.
-_TOP50_BREAKER_SCAN_COUNT: int = TOP50_BREAKER_SCAN_COUNT
 
 # Regime-channel compatibility matrix.
 # Maps channel name → list of regimes where that channel is blocked.
@@ -438,10 +426,6 @@ class Scanner:
         # is valid while time.monotonic() < expiry_monotonic_time.
         self._order_book_cache: Dict[str, Tuple[float, float]] = {}
 
-        # Order book depth cache: symbol → (bids, asks, expiry_monotonic_time)
-        # Stores the raw top-level bids/asks for Order Book Imbalance filtering.
-        self._order_book_depth_cache: Dict[str, Tuple[list, list, float]] = {}
-
         # Cooldown tracking: (symbol, channel_name) → monotonic expiry time
         self._cooldown_until: Dict[Tuple[str, str], float] = {}
 
@@ -468,26 +452,10 @@ class Scanner:
         # WS managers are unhealthy, used to trigger an admin alert.
         self._consecutive_ws_degraded_cycles: int = 0
 
-        # Scan-latency circuit breaker: counts consecutive cycles where
-        # elapsed_ms exceeded SCAN_LATENCY_ALERT_MS.
-        self._consecutive_high_latency_cycles: int = 0
-
         # Per-cycle WS degradation flag: True when either WS manager is
         # partially degraded.  Set at the start of each scan cycle and used
         # by _get_spread_pct to apply tighter REST fetch limits.
         self._ws_any_degraded_this_cycle: bool = False
-
-        # Per-cycle depth circuit breaker flag: True when the futures or spot
-        # BinanceClient depth circuit breaker is open.  Set at the start of
-        # each scan cycle and used to proactively reduce the scan set and
-        # short-circuit order book fetches.
-        self._depth_breaker_open_this_cycle: bool = False
-
-        # Monotonic timestamp (seconds) when the depth circuit breaker first
-        # opened in the current continuous open streak.  Reset to 0.0 when
-        # the breaker closes.  Used to auto-reset the breaker after
-        # DEPTH_CIRCUIT_BREAKER_COOLDOWN seconds have elapsed.
-        self._depth_breaker_open_since: float = 0.0
 
         # Suppression telemetry: counters per suppression reason, accumulated
         # over each scan cycle and logged as a summary at cycle end.
@@ -632,36 +600,6 @@ class Scanner:
                     )
                 self._consecutive_ws_degraded_cycles = 0
 
-            # Depth circuit breaker awareness: when the futures or spot
-            # BinanceClient depth endpoint breaker is open, depth fetches
-            # return None immediately.  Proactively flag this so the scan
-            # loop can reduce the scan set and _get_spread_pct can skip
-            # the counter-increment / fetch attempt entirely.
-            self._depth_breaker_open_this_cycle = (
-                (self.futures_client is not None and self.futures_client.is_depth_circuit_open)
-                or (self.spot_client is not None and self.spot_client.is_depth_circuit_open)
-            )
-
-            if self._depth_breaker_open_this_cycle:
-                if self._depth_breaker_open_since == 0.0:
-                    self._depth_breaker_open_since = time.monotonic()
-                elif (
-                    time.monotonic() - self._depth_breaker_open_since
-                    >= DEPTH_CIRCUIT_BREAKER_COOLDOWN
-                ):
-                    log.info(
-                        "Depth circuit breaker auto-reset after {:.0f}s open",
-                        time.monotonic() - self._depth_breaker_open_since,
-                    )
-                    if self.futures_client is not None:
-                        self.futures_client.reset_depth_circuit()
-                    if self.spot_client is not None:
-                        self.spot_client.reset_depth_circuit()
-                    self._depth_breaker_open_this_cycle = False
-                    self._depth_breaker_open_since = 0.0
-            else:
-                self._depth_breaker_open_since = 0.0
-
             try:
                 # Prioritise high-volume pairs for order book fetches
                 sorted_pairs = sorted(
@@ -696,57 +634,17 @@ class Scanner:
                 #            OR on the time-based interval (whichever fires first)
                 scan_tier2 = (self._scan_cycle_count % TIER2_SCAN_EVERY_N_CYCLES == 0)
                 scan_tier3 = (self._scan_cycle_count % TIER3_SCAN_EVERY_N_CYCLES == 0)
-                # If scan latency has been extremely high, temporarily skip
-                # Tier 2 pairs to reduce cycle time.
-                skip_tier2_for_latency = (
-                    self._consecutive_high_latency_cycles > 0
-                    and self.telemetry.scan_latency_ms > SCAN_LATENCY_REDUCE_MS
-                )
-                # Proactively skip Tier 2/3 when the depth circuit breaker is
-                # open: depth fetches return None anyway, so processing lower-
-                # tier symbols wastes CPU on indicator computation / channel
-                # evaluation without usable order-book data.
-                skip_lower_tiers_for_depth = self._depth_breaker_open_this_cycle
-                _skip_lower = skip_tier2_for_latency or skip_lower_tiers_for_depth
-                if skip_tier2_for_latency:
-                    log.warning(
-                        "Scan latency circuit breaker: skipping Tier 2 pairs "
-                        "(last latency={:.0f}ms)", self.telemetry.scan_latency_ms
-                    )
-                if skip_lower_tiers_for_depth:
-                    if TOP50_FUTURES_ONLY:
-                        log.warning(
-                            "Depth circuit breaker open — restricting scan to top {} pairs",
-                            _TOP50_BREAKER_SCAN_COUNT,
-                        )
-                    else:
-                        log.warning(
-                            "Depth circuit breaker open — restricting scan to Tier 1 pairs only"
-                        )
-                elif _skip_lower and TOP50_FUTURES_ONLY:
-                    # Latency breaker only (no depth breaker) in TOP50 mode
-                    log.warning(
-                        "Latency breaker — restricting scan to top {} pairs",
-                        _TOP50_BREAKER_SCAN_COUNT,
-                    )
                 # In top-50 futures-only mode all included pairs are treated as
                 # Tier 1 (full scan every cycle); tier filtering still applies
                 # in the normal multi-tier path.
                 if TOP50_FUTURES_ONLY:
-                    # In TOP50 mode every pair is TIER1 so tier filtering is
-                    # ineffective.  When the depth or latency breaker is
-                    # active, restrict to the top-N by volume to avoid
-                    # scanning 50 symbols without usable depth data.
-                    if _skip_lower:
-                        pairs_this_cycle = list(sorted_pairs[:_TOP50_BREAKER_SCAN_COUNT])
-                    else:
-                        pairs_this_cycle = list(sorted_pairs)
+                    pairs_this_cycle = list(sorted_pairs)
                 else:
                     pairs_this_cycle = [
                         (sym, info) for sym, info in sorted_pairs
                         if info.tier == PairTier.TIER1
-                        or (info.tier == PairTier.TIER2 and scan_tier2 and not _skip_lower)
-                        or (info.tier == PairTier.TIER3 and scan_tier3 and not _skip_lower)
+                        or (info.tier == PairTier.TIER2 and scan_tier2)
+                        or (info.tier == PairTier.TIER3 and scan_tier3)
                     ]
 
                 # Apply cheap in-memory pre-filters to reduce the number of
@@ -804,25 +702,6 @@ class Scanner:
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             self.telemetry.set_scan_latency(elapsed_ms)
-
-            # Scan-latency circuit breaker checks
-            if elapsed_ms > SCAN_LATENCY_WARN_MS:
-                log.warning("Scan latency high: {:.0f}ms (threshold {:.0f}ms)", elapsed_ms, SCAN_LATENCY_WARN_MS)
-            if elapsed_ms > SCAN_LATENCY_ALERT_MS:
-                self._consecutive_high_latency_cycles += 1
-                if self._consecutive_high_latency_cycles >= SCAN_LATENCY_ALERT_CONSECUTIVE:
-                    try:
-                        _alert_fn = self.telemetry.get_admin_alert_callback()
-                        if _alert_fn is not None:
-                            await _alert_fn(
-                                f"⚠️ Scan latency critical: {elapsed_ms:.0f}ms for "
-                                f"{self._consecutive_high_latency_cycles} consecutive cycles. "
-                                "WS or depth API may be degraded."
-                            )
-                    except Exception:
-                        pass
-            else:
-                self._consecutive_high_latency_cycles = 0
 
             self.telemetry.set_pairs_monitored(len(self.pair_mgr.pairs))
             self.telemetry.set_active_signals(len(self.router.active_signals))
@@ -1021,10 +900,7 @@ class Scanner:
         Called every scan cycle to seed bid/ask spreads for all 50 symbols from a
         single /fapi/v1/ticker/bookTicker request (Weight: 2). This completely
         replaces per-symbol /fapi/v1/depth REST calls for spread calculation across
-        all channels except 360_SCALP_OBI.
-
-        360_SCALP_OBI fetches depth lazily via _fetch_depth_for_obi() only when
-        the channel is not suppressed for the symbol being evaluated.
+        all channels.
 
         Parameters
         ----------
@@ -1095,9 +971,6 @@ class Scanner:
         issued at the start of every scan cycle (_fetch_global_book_tickers).
         This eliminates 50 per-cycle /depth REST calls that were the primary
         cause of 40s+ scan latency spikes when Binance depth was degraded.
-
-        For 360_SCALP_OBI, depth is fetched lazily per-symbol in _scan_symbol
-        immediately before OBI channel evaluation (see _fetch_depth_for_obi).
         """
         now = time.monotonic()
         cached = self._order_book_cache.get(symbol)
@@ -1105,57 +978,6 @@ class Scanner:
             return cached[0]
         # bookTicker pre-fetch hasn't populated this symbol yet — return fallback
         return 0.01
-
-    async def _fetch_depth_for_obi(self, symbol: str) -> None:
-        """Fetch /fapi/v1/depth for *symbol* and populate _order_book_depth_cache.
-
-        Called lazily in _scan_symbol only when the 360_SCALP_OBI channel is
-        not suppressed for this symbol. This replaces the old per-symbol depth
-        fetch that ran unconditionally for all 50 pairs every cycle.
-
-        Fails silently — if the fetch times out or the circuit breaker is open,
-        ScalpOBIChannel.evaluate() will find no order_book in smc_data and
-        return None (fail-open), which is the correct behaviour.
-        """
-        # Skip if circuit breaker is open
-        if self._depth_breaker_open_this_cycle:
-            return
-        # Skip if already have a fresh depth cache entry
-        now = time.monotonic()
-        cached = self._order_book_depth_cache.get(symbol)
-        if cached and len(cached) == 3:
-            _, _, expiry = cached
-            if now < expiry:
-                return
-        try:
-            if self.futures_client is None:
-                self.futures_client = BinanceClient("futures")
-            book = await self.futures_client.fetch_order_book(symbol, limit=20)
-            if book and book.get("bids") and book.get("asks"):
-                self._order_book_depth_cache[symbol] = (
-                    book["bids"],
-                    book["asks"],
-                    now + _SPREAD_CACHE_TTL,
-                )
-                # Also update spread cache with fresh data
-                best_bid = float(book["bids"][0][0])
-                best_ask = float(book["asks"][0][0])
-                mid = (best_bid + best_ask) / 2.0
-                if mid > 0:
-                    spread_pct = (best_ask - best_bid) / mid * 100.0
-                    self._order_book_cache[symbol] = (spread_pct, now + _SPREAD_CACHE_TTL)
-        except Exception as exc:
-            log.debug("_fetch_depth_for_obi failed for {}: {}", symbol, exc)
-
-    def _get_order_book_depth(self, symbol: str) -> Optional[dict]:
-        """Return the most recent cached order book depth for *symbol*, or ``None``."""
-        cached = self._order_book_depth_cache.get(symbol)
-        if cached is None:
-            return None
-        bids, asks, expiry = cached
-        if time.monotonic() >= expiry:
-            return None
-        return {"bids": bids, "asks": asks}
 
     async def _fetch_onchain_data(self, symbol: str) -> Any:
         try:
@@ -1681,9 +1503,6 @@ class Scanner:
         sig.volume_24h_usd = volume_24h
         sig.pair_quality_score = ctx.pair_quality.score
         sig.pair_quality_label = ctx.pair_quality.label
-        # Attach the cached order book depth snapshot so downstream filters
-        # (RiskManager OBI check) can evaluate it without an extra fetch.
-        sig.order_book = self._get_order_book_depth(sig.symbol)
         # How long (minutes) the setup remains actionable — sourced from config.
         sig.valid_for_minutes = SIGNAL_VALID_FOR_MINUTES.get(sig.channel, 15)
 
@@ -1905,9 +1724,8 @@ class Scanner:
         # ── Filter 6: Spoofing / Layering Detection ───────────────────────
         if _gate_profile.get("spoof", True):
             try:
-                _ob = self._get_order_book_depth(symbol)
                 spoof_allowed, spoof_reason = check_spoof_gate(
-                    sig.direction.value, _ob, sig.entry
+                    sig.direction.value, None, sig.entry
                 )
                 if not spoof_allowed:
                     _base = _penalty_weights.get("spoof", 10.0)
@@ -2374,14 +2192,6 @@ class Scanner:
             return
         ticks = self.data_store.ticks.get(symbol, [])
 
-        # Lazy depth fetch: only required for 360_SCALP_OBI.
-        # All other channels use spread from bookTicker cache only.
-        _obi_channel_active = any(
-            c.config.name == "360_SCALP_OBI" for c in self.channels
-        )
-        if _obi_channel_active and not self._should_skip_channel(symbol, "360_SCALP_OBI", ctx):
-            await self._fetch_depth_for_obi(symbol)
-
         # Collect all signals before deciding what to emit (confluence check)
         _pending_signals: list = []
 
@@ -2416,13 +2226,6 @@ class Scanner:
                     ctx_for_chan = ctx
             else:
                 ctx_for_chan = ctx
-            # Inject cached order book depth into smc_data so channels like
-            # SCALP_OBI can access it via smc_data.get("order_book").
-            if chan_name == "360_SCALP_OBI":
-                _ob = self._get_order_book_depth(symbol)
-                if _ob is not None:
-                    _ob["fetched_at"] = time.time()
-                    ctx_for_chan.smc_data["order_book"] = _ob
             sig, cross_verified = await self._prepare_signal(symbol, volume_24h, chan, ctx_for_chan)
             if sig is None:
                 continue

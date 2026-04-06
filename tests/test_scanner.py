@@ -122,11 +122,7 @@ def _make_scan_ready_scanner(
         exchange_mgr=MagicMock(
             verify_signal_cross_exchange=AsyncMock(return_value=True)
         ),
-        spot_client=MagicMock(
-            fetch_order_book=AsyncMock(
-                return_value={"bids": [["100.0", "1"]], "asks": [["100.01", "1"]]}
-            )
-        ),
+        spot_client=MagicMock(),
         signal_queue=signal_queue,
         router=MagicMock(active_signals={}, cleanup_expired=MagicMock(return_value=0)),
         openai_evaluator=openai_evaluator,
@@ -579,8 +575,7 @@ class TestThesisCooldown:
 
 class TestSpreadCacheFailureTTL:
     """_get_spread_pct is now a pure cache lookup (no HTTP calls).
-    Spread is seeded by _fetch_global_book_tickers() via bookTicker pre-fetch
-    and by _fetch_depth_for_obi() for 360_SCALP_OBI symbols."""
+    Spread is seeded by _fetch_global_book_tickers() via bookTicker pre-fetch."""
 
     @pytest.mark.asyncio
     async def test_returns_fallback_when_cache_empty(self):
@@ -619,53 +614,6 @@ class TestSpreadCacheFailureTTL:
         await scanner._get_spread_pct("BTCUSDT", market="spot")
         await scanner._get_spread_pct("BTCUSDT", market="futures")
         assert mock_client.fetch_order_book.await_count == 0
-
-    @pytest.mark.asyncio
-    async def test_fetch_depth_for_obi_populates_depth_cache(self):
-        """_fetch_depth_for_obi stores bids/asks in _order_book_depth_cache."""
-        scanner = _make_scanner()
-        mock_futures = MagicMock()
-        mock_futures.fetch_order_book = AsyncMock(
-            return_value={"bids": [["2000.0", "1"]], "asks": [["2001.0", "1"]]}
-        )
-        scanner.futures_client = mock_futures
-        scanner._depth_breaker_open_this_cycle = False
-
-        await scanner._fetch_depth_for_obi("BTCUSDT")
-
-        assert "BTCUSDT" in scanner._order_book_depth_cache
-        assert mock_futures.fetch_order_book.await_count == 1
-
-    @pytest.mark.asyncio
-    async def test_fetch_depth_for_obi_skips_when_breaker_open(self):
-        """_fetch_depth_for_obi skips the fetch when depth circuit breaker is open."""
-        scanner = _make_scanner()
-        mock_futures = MagicMock()
-        mock_futures.fetch_order_book = AsyncMock(return_value=None)
-        scanner.futures_client = mock_futures
-        scanner._depth_breaker_open_this_cycle = True
-
-        await scanner._fetch_depth_for_obi("BTCUSDT")
-
-        assert mock_futures.fetch_order_book.await_count == 0
-
-    @pytest.mark.asyncio
-    async def test_fetch_depth_for_obi_also_updates_spread_cache(self):
-        """_fetch_depth_for_obi also seeds the spread cache from the depth data."""
-        scanner = _make_scanner()
-        mock_futures = MagicMock()
-        mock_futures.fetch_order_book = AsyncMock(
-            return_value={"bids": [["2000.0", "1"]], "asks": [["2001.0", "1"]]}
-        )
-        scanner.futures_client = mock_futures
-        scanner._depth_breaker_open_this_cycle = False
-
-        await scanner._fetch_depth_for_obi("BTCUSDT")
-
-        assert "BTCUSDT" in scanner._order_book_depth_cache
-        assert "BTCUSDT" in scanner._order_book_cache
-        spread_pct, _ = scanner._order_book_cache["BTCUSDT"]
-        assert spread_pct > 0
 
 
 # ---------------------------------------------------------------------------

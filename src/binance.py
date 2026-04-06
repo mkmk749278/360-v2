@@ -16,9 +16,6 @@ import aiohttp
 from config import (
     BINANCE_FUTURES_REST_BASE,
     BINANCE_REST_BASE,
-    DEPTH_CIRCUIT_BREAKER_COOLDOWN,
-    DEPTH_CIRCUIT_BREAKER_THRESHOLD,
-    DEPTH_MAX_RETRIES,
 )
 from src.rate_limiter import futures_rate_limiter, spot_rate_limiter
 from src.utils import get_logger
@@ -35,21 +32,10 @@ _DEFAULT_FUTURES_WEIGHT_LIMIT: int = 2_400
 _MAX_RETRIES: int = 5
 _BACKOFF_BASE: float = 1.5  # exponential-backoff base (seconds)
 
-# Default request timeout (seconds).  Depth snapshots use a dedicated timeout
-# (see _DEPTH_TIMEOUT_S).  Raised from 3 s to 5 s because Binance REST
+# Default request timeout (seconds).  Raised from 3 s to 5 s because Binance REST
 # responses routinely take 3–4 s under load — a 3 s cutoff caused constant
 # false timeouts and retry cascades that inflated scan latency to 30 s+.
 _DEFAULT_TIMEOUT_S: float = 8.0
-_DEPTH_TIMEOUT_S: float = 5.0
-
-# Depth endpoint paths — used by the per-endpoint circuit breaker.
-_DEPTH_PATHS: frozenset = frozenset({"/fapi/v1/depth", "/api/v3/depth"})
-
-# Rolling window (seconds) over which depth timeout events are counted
-# toward the circuit breaker threshold.  A time-window approach prevents
-# sporadic successful responses from resetting the counter while the
-# endpoint is fundamentally degraded.
-_DEPTH_CB_WINDOW_S: float = 30.0
 
 
 class BinanceClient:
@@ -83,31 +69,11 @@ class BinanceClient:
         self._rate_limiter = (
             futures_rate_limiter if market == "futures" else spot_rate_limiter
         )
-        # Per-endpoint depth circuit breaker: tracks timeout timestamps within
-        # a rolling window so that a sustained Binance depth API outage
-        # doesn't block scan cycles.  A time-window approach (vs. consecutive
-        # count) prevents intermittent successes from resetting the counter
-        # while the endpoint is still fundamentally degraded.
-        self._depth_timeout_timestamps: list[float] = []
-        self._depth_circuit_open_until: float = 0.0
         # Semaphore to cap the number of simultaneous in-flight HTTP requests.
         # Without this, hundreds of coroutines can bypass the rate limiter and
         # send requests before the first response header arrives to call
         # update_from_header(), leading to in-flight race conditions.
         self._inflight_sem: asyncio.Semaphore = asyncio.Semaphore(10)
-
-    # ------------------------------------------------------------------
-    # Depth circuit breaker queries
-    # ------------------------------------------------------------------
-
-    @property
-    def is_depth_circuit_open(self) -> bool:
-        """Return ``True`` when the depth endpoint circuit breaker is open."""
-        return time.monotonic() < self._depth_circuit_open_until
-
-    def reset_depth_circuit(self) -> None:
-        """Immediately close the depth circuit breaker."""
-        self._depth_circuit_open_until = 0.0
 
     # ------------------------------------------------------------------
     # Weight tracking
@@ -161,28 +127,13 @@ class BinanceClient:
         Parameters
         ----------
         timeout:
-            Per-request timeout in seconds.  When ``None``, depth paths use
-            ``_DEPTH_TIMEOUT_S`` (3 s) and all other paths use
-            ``_DEFAULT_TIMEOUT_S`` (8 s).
+            Per-request timeout in seconds.  When ``None``, ``_DEFAULT_TIMEOUT_S``
+            (8 s) is used.
         """
-        is_depth = path in _DEPTH_PATHS
-
-        # Depth circuit breaker: skip the request entirely if the circuit is
-        # open, preventing cumulative timeout delays of 75 s per symbol.
-        if is_depth:
-            now = time.monotonic()
-            if now < self._depth_circuit_open_until:
-                remaining = self._depth_circuit_open_until - now
-                log.debug(
-                    "Depth endpoint circuit breaker open — skipping {} for {:.0f}s",
-                    path, remaining,
-                )
-                return None
-
         if timeout is None:
-            timeout = _DEPTH_TIMEOUT_S if is_depth else _DEFAULT_TIMEOUT_S
+            timeout = _DEFAULT_TIMEOUT_S
 
-        max_retries = DEPTH_MAX_RETRIES if is_depth else _MAX_RETRIES
+        max_retries = _MAX_RETRIES
 
         session = await self._ensure_session()
         url = self._base_url + path
@@ -195,24 +146,8 @@ class BinanceClient:
         self._consume_weight(weight)
 
         for attempt in range(max_retries):
-            # Re-check the depth circuit breaker on every retry and before
-            # each attempt.  Without this, concurrent requests that passed the
-            # initial check (above) keep retrying even after another coroutine
-            # has already tripped the breaker, inflating the timeout counter
-            # (observed as 6, 7, 8… in the logs).
-            if is_depth and time.monotonic() < self._depth_circuit_open_until:
-                return None
-
             try:
                 async with self._inflight_sem:
-                    # Re-check the depth circuit breaker after potentially
-                    # waiting on the semaphore.  Without this, requests that
-                    # queued behind the semaphore while the breaker was still
-                    # closed proceed to make HTTP calls that will time out
-                    # (3 s each), adding cumulative latency (observed as
-                    # 26 s+ scan cycles with 50 symbols).
-                    if is_depth and time.monotonic() < self._depth_circuit_open_until:
-                        return None
                     async with session.get(
                         url, params=params, timeout=aiohttp.ClientTimeout(total=timeout)
                     ) as resp:
@@ -251,34 +186,6 @@ class BinanceClient:
                         log.warning("Binance %s returned HTTP %s", path, resp.status)
                         return None
             except asyncio.TimeoutError:
-                if is_depth:
-                    # If another concurrent coroutine already tripped the
-                    # breaker, stop immediately — no counter increment, no
-                    # retry, no misleading "retrying" log.
-                    now_t = time.monotonic()
-                    if now_t < self._depth_circuit_open_until:
-                        return None
-                    # Time-window tracking: keep only recent timeout events
-                    # and append the new one.  This ensures intermittent
-                    # successes cannot reset the counter.
-                    cutoff = now_t - _DEPTH_CB_WINDOW_S
-                    self._depth_timeout_timestamps = [
-                        t for t in self._depth_timeout_timestamps if t > cutoff
-                    ]
-                    self._depth_timeout_timestamps.append(now_t)
-                    if len(self._depth_timeout_timestamps) >= DEPTH_CIRCUIT_BREAKER_THRESHOLD:
-                        self._depth_circuit_open_until = (
-                            now_t + DEPTH_CIRCUIT_BREAKER_COOLDOWN
-                        )
-                        log.warning(
-                            "Depth endpoint circuit breaker open — skipping {} for {:.0f}s "
-                            "({} timeouts in last {:.0f}s window)",
-                            path, DEPTH_CIRCUIT_BREAKER_COOLDOWN,
-                            len(self._depth_timeout_timestamps),
-                            _DEPTH_CB_WINDOW_S,
-                        )
-                        self._depth_timeout_timestamps.clear()
-                        return None
                 wait = _BACKOFF_BASE ** attempt
                 log.warning("Binance %s timeout – retrying in %.1fs", path, wait)
                 await asyncio.sleep(wait)
@@ -334,26 +241,6 @@ class BinanceClient:
             path,
             params={"symbol": symbol, "interval": interval, "limit": limit},
             weight=weight,
-        )
-
-    async def fetch_order_book(
-        self,
-        symbol: str,
-        limit: int = 20,
-    ) -> Optional[Dict[str, Any]]:
-        """Fetch the order book depth snapshot.
-
-        Weight: 1 (limit ≤ 100).
-        """
-        if self.market == "futures":
-            path = "/fapi/v1/depth"
-        else:
-            path = "/api/v3/depth"
-        return await self._get(
-            path,
-            params={"symbol": symbol, "limit": limit},
-            weight=1,
-            timeout=_DEPTH_TIMEOUT_S,
         )
 
     async def fetch_all_book_tickers(self) -> Optional[Dict[str, Dict[str, str]]]:
