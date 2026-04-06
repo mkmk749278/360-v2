@@ -342,6 +342,109 @@ class TestCommandHandlerInterface:
         assert hasattr(CommandHandler, "_handle_command")
 
 
+class TestBootstrapBootMessage:
+    """boot() must send a boot test message to the active trading channel."""
+
+    def _make_full_boot_engine(self, *, pair_count=5):
+        """Return a stubbed engine that can complete a full successful boot."""
+        pairs = {f"TOKEN{i}USDT": SimpleNamespace(market="futures") for i in range(pair_count)}
+        pair_mgr = SimpleNamespace(
+            pairs=pairs,
+            refresh_top50_futures=AsyncMock(),
+            refresh_pairs=AsyncMock(),
+            tier1_spot_symbols=[],
+            tier1_futures_symbols=[],
+        )
+        data_store = SimpleNamespace(
+            load_snapshot=lambda: False,
+            seed_all=AsyncMock(return_value=pair_count),
+            gap_fill=AsyncMock(return_value=pair_count),
+        )
+        return SimpleNamespace(
+            _boot_time=0,
+            _redis_client=SimpleNamespace(connect=AsyncMock()),
+            telemetry=SimpleNamespace(
+                set_redis_client=lambda _: None,
+                record_api_call=lambda *a, **kw: None,
+            ),
+            pair_mgr=pair_mgr,
+            data_store=data_store,
+            predictive=SimpleNamespace(load_model=AsyncMock()),
+            telegram=SimpleNamespace(
+                send_admin_alert=AsyncMock(),
+                send_message=AsyncMock(return_value=True),
+            ),
+            _ws_spot=None,
+            _ws_futures=None,
+            _tasks=[],
+        )
+
+    @pytest.mark.asyncio
+    @patch("src.bootstrap.spot_rate_limiter")
+    @patch("src.bootstrap.futures_rate_limiter")
+    @patch("src.bootstrap.BinanceClient")
+    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
+    @patch("src.bootstrap.TELEGRAM_ACTIVE_CHANNEL_ID", "-100123456")
+    @patch("config.validate_critical_env_vars")
+    async def test_boot_sends_test_message_to_active_channel(
+        self, _vcv, _bc, _frl, _srl,
+    ):
+        """boot() sends a boot test message to TELEGRAM_ACTIVE_CHANNEL_ID."""
+        engine = self._make_full_boot_engine(pair_count=3)
+        bootstrap = Bootstrap(engine)
+        with patch.object(bootstrap, "start_websockets", AsyncMock()), \
+             patch.object(bootstrap, "preflight_check", AsyncMock(return_value=True)), \
+             patch.object(bootstrap, "launch_runtime_tasks", return_value=[]):
+            await bootstrap.boot()
+
+        engine.telegram.send_message.assert_awaited_once()
+        call_args = engine.telegram.send_message.call_args
+        assert call_args[0][0] == "-100123456"
+        msg = call_args[0][1]
+        assert "ENGINE BOOT TEST" in msg
+        assert "Scanning 3 pairs" in msg
+
+    @pytest.mark.asyncio
+    @patch("src.bootstrap.spot_rate_limiter")
+    @patch("src.bootstrap.futures_rate_limiter")
+    @patch("src.bootstrap.BinanceClient")
+    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
+    @patch("src.bootstrap.TELEGRAM_ACTIVE_CHANNEL_ID", "")
+    @patch("config.validate_critical_env_vars")
+    async def test_boot_skips_test_message_when_channel_not_set(
+        self, _vcv, _bc, _frl, _srl,
+    ):
+        """boot() must NOT call send_message when TELEGRAM_ACTIVE_CHANNEL_ID is empty."""
+        engine = self._make_full_boot_engine()
+        bootstrap = Bootstrap(engine)
+        with patch.object(bootstrap, "start_websockets", AsyncMock()), \
+             patch.object(bootstrap, "preflight_check", AsyncMock(return_value=True)), \
+             patch.object(bootstrap, "launch_runtime_tasks", return_value=[]):
+            await bootstrap.boot()
+
+        engine.telegram.send_message.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @patch("src.bootstrap.spot_rate_limiter")
+    @patch("src.bootstrap.futures_rate_limiter")
+    @patch("src.bootstrap.BinanceClient")
+    @patch("src.bootstrap.TOP50_FUTURES_ONLY", True)
+    @patch("src.bootstrap.TELEGRAM_ACTIVE_CHANNEL_ID", "-100123456")
+    @patch("config.validate_critical_env_vars")
+    async def test_boot_continues_when_test_message_fails(
+        self, _vcv, _bc, _frl, _srl,
+    ):
+        """boot() must not raise if the boot test message send fails."""
+        engine = self._make_full_boot_engine()
+        engine.telegram.send_message = AsyncMock(side_effect=Exception("Telegram error"))
+        bootstrap = Bootstrap(engine)
+        with patch.object(bootstrap, "start_websockets", AsyncMock()), \
+             patch.object(bootstrap, "preflight_check", AsyncMock(return_value=True)), \
+             patch.object(bootstrap, "launch_runtime_tasks", return_value=[]):
+            # Must NOT raise even though send_message throws
+            await bootstrap.boot()
+
+
 class TestPairRefreshLoopCap:
     """_pair_refresh_loop caps new pair seeding to _MAX_NEW_SEEDS_PER_CYCLE."""
 

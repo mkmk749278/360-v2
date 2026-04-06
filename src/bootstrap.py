@@ -8,6 +8,7 @@ WebSocket connection setup, pre-flight checks, and graceful shutdown.
 from __future__ import annotations
 
 import asyncio
+import datetime
 import time
 from typing import Any, List
 
@@ -180,6 +181,27 @@ class Bootstrap:
         engine._tasks = self.launch_runtime_tasks()
 
         await engine.telegram.send_admin_alert("✅ Engine booted successfully")
+
+        # Send a boot test message to the active channel so operators can
+        # visually confirm the bot is connected and has posting permission.
+        if TELEGRAM_ACTIVE_CHANNEL_ID:
+            boot_utc = datetime.datetime.now(datetime.timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+            pair_count = len(engine.pair_mgr.pairs)
+            test_msg = (
+                "🧪 *ENGINE BOOT TEST*\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "✅ Bot is connected and posting to this channel\n"
+                f"⏰ Booted at: {boot_utc}\n"
+                f"🔍 Scanning {pair_count} pairs\n"
+                "━━━━━━━━━━━━━━━━━━\n"
+                "_(This is a test message, not a trading signal)_"
+            )
+            try:
+                await engine.telegram.send_message(TELEGRAM_ACTIVE_CHANNEL_ID, test_msg)
+                log.info("Boot test message sent to active channel")
+            except Exception as exc:
+                log.warning("Failed to send boot test message to active channel: {}", exc)
+
         log.info("=== Engine RUNNING ===")
 
     def launch_runtime_tasks(self) -> list[asyncio.Task]:
