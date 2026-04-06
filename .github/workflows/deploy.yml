@@ -33,6 +33,26 @@ jobs:
           extra_args: "-o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
           script: |
             set -euo pipefail
+
+            # ── Bootstrap: re-authorize deploy key (survives OS reinstall) ──────
+            DEPLOY_PUBKEY="${{ secrets.VPS_DEPLOY_PUBKEY }}"
+            if [ -n "$DEPLOY_PUBKEY" ]; then
+              mkdir -p ~/.ssh
+              chmod 700 ~/.ssh
+              touch ~/.ssh/authorized_keys
+              chmod 600 ~/.ssh/authorized_keys
+              if ! grep -qF "$DEPLOY_PUBKEY" ~/.ssh/authorized_keys; then
+                echo "$DEPLOY_PUBKEY" >> ~/.ssh/authorized_keys
+                echo "ℹ️  Deploy key re-authorized"
+              fi
+            fi
+
+            # ── Bootstrap: clone repo if missing (fresh VPS / OS reinstall) ─────
+            if [ ! -d ~/360-v2/.git ]; then
+              echo "ℹ️  Fresh VPS detected — cloning repository..."
+              git clone https://github.com/mkmk749278/360-v2.git ~/360-v2
+            fi
+
             cd ~/360-v2
 
             # Pull latest code
@@ -45,7 +65,7 @@ jobs:
               echo "ℹ️  Created .env from .env.example"
             fi
 
-            # ── Inject/update all secrets in place ──────────────────────────
+            # ── Inject/update all secrets in place ──────────────────────────────
 
             # Telegram
             sed -i "s|^TELEGRAM_BOT_TOKEN=.*|TELEGRAM_BOT_TOKEN=${{ secrets.TELEGRAM_BOT_TOKEN }}|" .env
