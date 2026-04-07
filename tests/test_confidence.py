@@ -416,25 +416,18 @@ class TestScoreOrderFlowFundingRate:
 
 
 class TestScoreLiquidityWithChannel:
-    def test_gem_full_score_at_250k(self):
-        """360_GEM achieves max score at $250K."""
-        assert score_liquidity(250_000.0, channel="360_GEM") == pytest.approx(20.0)
-
-    def test_spot_full_score_at_1m(self):
-        """360_SPOT achieves max score at $1M."""
-        assert score_liquidity(1_000_000.0, channel="360_SPOT") == pytest.approx(20.0)
-
-    def test_swing_full_score_at_10m(self):
-        """360_SWING achieves max score at $10M."""
-        assert score_liquidity(10_000_000.0, channel="360_SWING") == pytest.approx(20.0)
-
     def test_scalp_full_score_at_5m(self):
         """360_SCALP uses $5M threshold (default)."""
         assert score_liquidity(5_000_000.0, channel="360_SCALP") == pytest.approx(20.0)
 
-    def test_gem_scores_higher_than_scalp_at_1m(self):
-        """GEM scores 20.0 at $1M; SCALP scores only 4.0."""
-        assert score_liquidity(1_000_000.0, channel="360_GEM") > score_liquidity(1_000_000.0, channel="360_SCALP")
+    def test_scalp_fvg_same_threshold_as_scalp(self):
+        """360_SCALP_FVG uses same $5M threshold as base scalp."""
+        assert score_liquidity(5_000_000.0, channel="360_SCALP_FVG") == pytest.approx(20.0)
+
+    def test_partial_volume_gives_partial_score(self):
+        """$2.5M on a $5M channel → approximately 10.0."""
+        score = score_liquidity(2_500_000.0, channel="360_SCALP")
+        assert score == pytest.approx(10.0)
 
     def test_unknown_channel_uses_default(self):
         """Unknown channel falls back to default $5M threshold."""
@@ -455,28 +448,6 @@ class TestGetSessionMultiplierWithChannel:
     _EU = datetime(2024, 1, 15, 10, 0, 0, tzinfo=timezone.utc)
     _US = datetime(2024, 1, 15, 20, 0, 0, tzinfo=timezone.utc)
 
-    def test_spot_always_one(self):
-        """360_SPOT returns 1.0 regardless of session."""
-        for t in (self._ASIAN, self._EU, self._US):
-            assert get_session_multiplier(t, channel="360_SPOT") == pytest.approx(1.0)
-
-    def test_gem_always_one(self):
-        """360_GEM returns 1.0 regardless of session."""
-        for t in (self._ASIAN, self._EU, self._US):
-            assert get_session_multiplier(t, channel="360_GEM") == pytest.approx(1.0)
-
-    def test_swing_asian_mild_penalty(self):
-        """360_SWING: Asian session → 0.95×."""
-        assert get_session_multiplier(self._ASIAN, channel="360_SWING") == pytest.approx(0.95)
-
-    def test_swing_eu_neutral(self):
-        """360_SWING: EU session → 1.0×."""
-        assert get_session_multiplier(self._EU, channel="360_SWING") == pytest.approx(1.0)
-
-    def test_swing_us_mild_boost(self):
-        """360_SWING: US session → 1.02×."""
-        assert get_session_multiplier(self._US, channel="360_SWING") == pytest.approx(1.02)
-
     def test_scalp_asian_full_penalty(self):
         """360_SCALP: Asian session → 0.90×."""
         assert get_session_multiplier(self._ASIAN, channel="360_SCALP") == pytest.approx(0.90)
@@ -485,16 +456,17 @@ class TestGetSessionMultiplierWithChannel:
         """360_SCALP: US session → 1.05×."""
         assert get_session_multiplier(self._US, channel="360_SCALP") == pytest.approx(1.05)
 
+    def test_scalp_eu_neutral(self):
+        """360_SCALP: EU session → 1.0×."""
+        assert get_session_multiplier(self._EU, channel="360_SCALP") == pytest.approx(1.0)
+
     def test_no_channel_default_behavior(self):
         """Omitting channel behaves like SCALP (full impact)."""
         assert get_session_multiplier(self._ASIAN) == pytest.approx(0.90)
 
-    def test_compute_confidence_spot_ignores_session(self):
-        """360_SPOT: Asian and EU sessions give same total (1.0× always)."""
-        inp = ConfidenceInput(smc_score=20, trend_score=15)
-        r_asian = compute_confidence(inp, session_now=self._ASIAN, channel="360_SPOT")
-        r_eu = compute_confidence(inp, session_now=self._EU, channel="360_SPOT")
-        assert r_asian.total == r_eu.total
+    def test_unknown_channel_gets_full_session_impact(self):
+        """Unknown channels get full session impact (same as SCALP)."""
+        assert get_session_multiplier(self._ASIAN, channel="UNKNOWN") == pytest.approx(0.90)
 
 
 
@@ -519,21 +491,16 @@ class TestScoreSentiment:
             assert score_sentiment(1.0, channel=chan) == pytest.approx(5.0)
             assert score_sentiment(-1.0, channel=chan) == pytest.approx(5.0)
 
-    def test_swing_channel_always_neutral(self):
-        """SWING channel returns 5.0 regardless of sentiment."""
-        assert score_sentiment(1.0, channel="360_SWING") == pytest.approx(5.0)
-        assert score_sentiment(-1.0, channel="360_SWING") == pytest.approx(5.0)
+    def test_unknown_channel_uses_sentiment(self):
+        """Unknown channels return the actual sentiment value (not neutral)."""
+        assert score_sentiment(1.0, channel="360_UNKNOWN") == pytest.approx(10.0)
+        assert score_sentiment(-1.0, channel="360_UNKNOWN") == pytest.approx(0.0)
 
-    def test_spot_channel_uses_sentiment(self):
-        """SPOT channel uses the actual sentiment value."""
+    def test_non_scalp_channel_uses_sentiment(self):
+        """Any non-SCALP channel uses the actual sentiment value."""
         assert score_sentiment(1.0, channel="360_SPOT") == pytest.approx(10.0)
         assert score_sentiment(-1.0, channel="360_SPOT") == pytest.approx(0.0)
         assert score_sentiment(0.0, channel="360_SPOT") == pytest.approx(5.0)
-
-    def test_gem_channel_uses_sentiment(self):
-        """GEM channel uses the actual sentiment value."""
-        assert score_sentiment(1.0, channel="360_GEM") == pytest.approx(10.0)
-        assert score_sentiment(-1.0, channel="360_GEM") == pytest.approx(0.0)
 
     def test_sentiment_clamps_to_range(self):
         """Sentiment values outside [-1, +1] are clamped."""

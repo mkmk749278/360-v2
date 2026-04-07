@@ -66,18 +66,6 @@ class TestOrderManager:
         return client
 
     @pytest.mark.asyncio
-    async def test_place_limit_order_uses_ccxt(self) -> None:
-        from src.order_manager import OrderManager
-        client = self._make_mock_client()
-        mgr = OrderManager(auto_execution_enabled=True, exchange_client=client)
-        sig = _make_signal(channel="360_SPOT")
-
-        order_id = await mgr.place_limit_order(sig)
-
-        assert order_id == "limit-123"
-        client.create_limit_order.assert_called_once()
-
-    @pytest.mark.asyncio
     async def test_place_market_order_uses_ccxt(self) -> None:
         from src.order_manager import OrderManager
         client = self._make_mock_client()
@@ -136,7 +124,6 @@ class TestOrderManager:
         mgr = OrderManager(auto_execution_enabled=False)
         sig = _make_signal()
         assert await mgr.execute_signal(sig) is None
-        assert await mgr.place_limit_order(sig) is None
         assert await mgr.place_market_order(sig) is None
         assert await mgr.cancel_order("x", "BTCUSDT") is False
         assert await mgr.close_partial(sig, 0.33) is None
@@ -223,7 +210,7 @@ class TestCornixFormatWiring:
 
     def test_cornix_signal_format_basic(self) -> None:
         from src.cornix_formatter import format_cornix_signal
-        sig = _make_signal(channel="360_SPOT")
+        sig = _make_signal(channel="360_SCALP")
         result = format_cornix_signal(sig)
         assert "Entry Targets:" in result
         assert "Stop Targets:" in result
@@ -231,7 +218,7 @@ class TestCornixFormatWiring:
 
     def test_cornix_signal_format_includes_symbol(self) -> None:
         from src.cornix_formatter import format_cornix_signal
-        sig = _make_signal(symbol="ETHUSDT", channel="360_SWING")
+        sig = _make_signal(symbol="ETHUSDT", channel="360_SCALP_CVD")
         result = format_cornix_signal(sig)
         assert "ETHUSDT" in result
 
@@ -245,9 +232,9 @@ class TestCornixFormatWiring:
         from src.cornix_formatter import format_cornix_signal
         for channel, expected_leverage in [
             ("360_SCALP", "20x"),
-            ("360_SWING", "5x"),
-            ("360_SPOT", "1x"),
-            ("360_GEM", "1x"),
+            ("360_SCALP_FVG", "15x"),
+            ("360_SCALP_CVD", "15x"),
+            ("360_SCALP_VWAP", "15x"),
         ]:
             sig = _make_signal(channel=channel)
             result = format_cornix_signal(sig)

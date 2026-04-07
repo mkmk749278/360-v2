@@ -8,7 +8,6 @@ import numpy as np
 from src.channels.scalp import ScalpChannel
 from src.channels.scalp_cvd import ScalpCVDChannel
 from src.channels.scalp_fvg import ScalpFVGChannel
-from src.channels.scalp_obi import ScalpOBIChannel
 from src.channels.scalp_vwap import ScalpVWAPChannel
 from src.smc import Direction, LiquiditySweep
 
@@ -86,7 +85,6 @@ class TestAllSubChannelsRegimeParam:
     @pytest.mark.parametrize("ChannelClass", [
         ScalpCVDChannel,
         ScalpFVGChannel,
-        ScalpOBIChannel,
         ScalpVWAPChannel,
     ])
     def test_evaluate_accepts_regime_parameter(self, ChannelClass):
@@ -104,7 +102,6 @@ class TestAllSubChannelsRegimeParam:
     @pytest.mark.parametrize("ChannelClass", [
         ScalpCVDChannel,
         ScalpFVGChannel,
-        ScalpOBIChannel,
         ScalpVWAPChannel,
     ])
     def test_evaluate_backward_compatible_without_regime(self, ChannelClass):

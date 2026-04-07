@@ -68,7 +68,7 @@ def _make_router(
     """Build a router wired to a recording mock sender."""
     for ch in (
         "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
-        "360_SCALP_VWAP", "360_SCALP_OBI", "360_SPOT", "360_SWING", "360_GEM",
+        "360_SCALP_VWAP",
     ):
         monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, ch, "premium")
 
@@ -135,7 +135,7 @@ class TestSignalNewFields:
 
 class TestScalpChannelConstants:
     def test_scalp_channel_names_in_router(self):
-        expected = {"360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP", "360_SCALP_OBI"}
+        expected = {"360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP"}
         assert expected == set(_SCALP_CHANNEL_NAMES)
 
     def test_scanner_scalp_channels_consistent(self):
@@ -184,11 +184,11 @@ class TestStaleSignalGateTimeBased:
 
     @pytest.mark.asyncio
     async def test_non_scalp_signal_not_suppressed_by_scalp_threshold(self, monkeypatch):
-        """A SWING signal 200 s old uses the generous 3600 s threshold and is NOT suppressed."""
+        """A SCALP_DIVERGENCE signal 200 s old uses the generous 3600 s threshold and is NOT suppressed."""
         sent = []
-        queue, router = _make_router(sent, monkeypatch, channel="360_SWING")
+        queue, router = _make_router(sent, monkeypatch, channel="360_SCALP_DIVERGENCE")
         sig = Signal(
-            channel="360_SWING",
+            channel="360_SCALP_DIVERGENCE",
             symbol="ETHUSDT",
             direction=Direction.LONG,
             entry=3000.0,
@@ -196,7 +196,7 @@ class TestStaleSignalGateTimeBased:
             tp1=3200.0,
             tp2=3400.0,
             confidence=85.0,
-            signal_id="TEST-ETH-SWING",
+            signal_id="TEST-ETH-DIV",
             timestamp=utcnow(),
             detected_at=time.time() - 200.0,
         )
@@ -411,13 +411,10 @@ class TestScalpFastPath:
         assert "360_SCALP_FVG" in _SCALP_CHANNELS
         assert "360_SCALP_CVD" in _SCALP_CHANNELS
         assert "360_SCALP_VWAP" in _SCALP_CHANNELS
-        assert "360_SCALP_OBI" in _SCALP_CHANNELS
 
     def test_non_scalp_channels_not_in_scalp_set(self):
         from src.scanner import _SCALP_CHANNELS
-        assert "360_SWING" not in _SCALP_CHANNELS
-        assert "360_SPOT" not in _SCALP_CHANNELS
-        assert "360_GEM" not in _SCALP_CHANNELS
+        assert "360_SCALP_DIVERGENCE" not in _SCALP_CHANNELS
 
     @pytest.mark.asyncio
     async def test_prepare_signal_sets_detected_at(self, monkeypatch):

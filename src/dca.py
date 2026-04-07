@@ -312,32 +312,6 @@ def check_dca_entry(
             )
             return None
 
-    # EMA200 bias check for Swing channel (optional)
-    if (
-        channel_config is not None
-        and channel_config.name == "360_SWING"
-        and indicators is not None
-    ):
-        h1_ind = indicators.get("1h", {})
-        ema200 = h1_ind.get("ema200_last")
-        if ema200 is not None:
-            if sig.direction == Direction.LONG and current_price < ema200:
-                log.debug(
-                    "DCA rejected for %s LONG — price %.6f below EMA200 %.6f",
-                    sig.symbol,
-                    current_price,
-                    ema200,
-                )
-                return None
-            if sig.direction == Direction.SHORT and current_price > ema200:
-                log.debug(
-                    "DCA rejected for %s SHORT — price %.6f above EMA200 %.6f",
-                    sig.symbol,
-                    current_price,
-                    ema200,
-                )
-                return None
-
     log.debug(
         "DCA entry valid for %s %s at %.6f (zone %.6f–%.6f)",
         sig.symbol,

@@ -64,9 +64,9 @@ class TestFormatSignal:
         assert "Thesis" in legacy_text
         assert "Execution" in legacy_text
 
-    def test_swing_short_format(self):
+    def test_scalp_short_format(self):
         sig = Signal(
-            channel="360_SWING",
+            channel="360_SCALP_DIVERGENCE",
             symbol="ETHUSDT",
             direction=Direction.SHORT,
             entry=2350,
@@ -84,20 +84,20 @@ class TestFormatSignal:
         )
         # New format
         text = TelegramBot.format_signal(sig)
-        assert "🏛️" in text
+        assert "⚡" in text
         assert "SHORT" in text
         assert "92.0" in text
 
         # Legacy format keeps old fields
         legacy_text = TelegramBot.format_signal_legacy(sig)
-        assert "🏛️" in legacy_text
+        assert "⚡" in legacy_text
         assert "SHORT" in legacy_text
         assert "⬇️" in legacy_text
         assert "92%" in legacy_text
 
-    def test_spot_format_with_ai_adaptive(self):
+    def test_scalp_format_with_trailing(self):
         sig = Signal(
-            channel="360_SPOT",
+            channel="360_SCALP_VWAP",
             symbol="ETHUSDT",
             direction=Direction.LONG,
             entry=2355,
@@ -109,26 +109,26 @@ class TestFormatSignal:
             trailing_desc="AI Adaptive",
             confidence=95,
             ai_sentiment_label="Bullish",
-            ai_sentiment_summary="Spot Accumulation",
+            ai_sentiment_summary="VWAP Reclaim",
             risk_label="Conservative",
             timestamp=utcnow(),
         )
         # New format
         text = TelegramBot.format_signal(sig)
-        assert "📈" in text
+        assert "⚡" in text
         assert "Dynamic/trailing" in text
         assert "95.0" in text
 
         # Legacy format includes trailing_desc
         legacy_text = TelegramBot.format_signal_legacy(sig)
-        assert "📈" in legacy_text
+        assert "⚡" in legacy_text
         assert "Dynamic/trailing" in legacy_text
         assert "AI Adaptive" in legacy_text
         assert "95%" in legacy_text
 
-    def test_spot_format(self):
+    def test_scalp_format(self):
         sig = Signal(
-            channel="360_SPOT",
+            channel="360_SCALP",
             symbol="BTCUSDT",
             direction=Direction.LONG,
             entry=32100,
@@ -146,13 +146,13 @@ class TestFormatSignal:
         )
         # New format
         text = TelegramBot.format_signal(sig)
-        assert "📈" in text
+        assert "⚡" in text
         assert "Conservative" in text
         assert "80.0" in text
 
         # Legacy format
         legacy_text = TelegramBot.format_signal_legacy(sig)
-        assert "📈" in legacy_text
+        assert "⚡" in legacy_text
         assert "Conservative" in legacy_text
         assert "80%" in legacy_text
 
@@ -281,7 +281,7 @@ class TestFormatSignalEscaping:
 
     def test_premium_fields_render_markdown_safe(self):
         sig = Signal(
-            channel="360_GEM",
+            channel="360_SCALP_ORDERBLOCK",
             symbol="BTCUSDT",
             direction=Direction.LONG,
             entry=32000,
@@ -450,7 +450,7 @@ class TestFormatHighlightMessage:
 
     def test_highlight_short_direction(self):
         sig = Signal(
-            channel="360_SWING",
+            channel="360_SCALP",
             symbol="ETHUSDT",
             direction=Direction.SHORT,
             entry=2000.0,

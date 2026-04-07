@@ -115,9 +115,8 @@ class TestFormatScoreboard:
     def _make_scoreboard(self):
         return {
             "360_SCALP": {"wins": 23, "losses": 4, "breakeven": 0, "win_rate": 85.2, "avg_pnl": 1.3, "total_pnl": 0.0, "count": 27},
-            "360_SWING": {"wins": 8, "losses": 2, "breakeven": 0, "win_rate": 80.0, "avg_pnl": 3.8, "total_pnl": 0.0, "count": 10},
-            "360_SPOT": {"wins": 5, "losses": 1, "breakeven": 0, "win_rate": 83.3, "avg_pnl": 6.2, "total_pnl": 0.0, "count": 6},
-            "360_GEM": {"wins": 2, "losses": 0, "breakeven": 0, "win_rate": 100.0, "avg_pnl": 18.7, "total_pnl": 0.0, "count": 2},
+            "360_SCALP_FVG": {"wins": 8, "losses": 2, "breakeven": 0, "win_rate": 80.0, "avg_pnl": 3.8, "total_pnl": 0.0, "count": 10},
+            "360_SCALP_CVD": {"wins": 5, "losses": 1, "breakeven": 0, "win_rate": 83.3, "avg_pnl": 6.2, "total_pnl": 0.0, "count": 6},
         }
 
     def test_header_present(self):
@@ -128,9 +127,6 @@ class TestFormatScoreboard:
     def test_channel_emojis_present(self):
         text = SignalRouter._format_scoreboard(self._make_scoreboard())
         assert "⚡" in text  # SCALP
-        assert "🏛️" in text  # SWING
-        assert "📈" in text  # SPOT
-        assert "💎" in text  # GEM
 
     def test_wins_and_losses_shown(self):
         text = SignalRouter._format_scoreboard(self._make_scoreboard())
@@ -140,7 +136,7 @@ class TestFormatScoreboard:
     def test_total_shown(self):
         text = SignalRouter._format_scoreboard(self._make_scoreboard())
         assert "Total:" in text
-        assert "38W" in text
+        assert "36W" in text
         assert "7L" in text
 
     def test_empty_scoreboard(self):

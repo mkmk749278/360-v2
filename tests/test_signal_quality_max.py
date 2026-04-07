@@ -19,7 +19,6 @@ import numpy as np
 from src.channels.scalp import ScalpChannel
 from src.channels.scalp_cvd import ScalpCVDChannel
 from src.channels.scalp_fvg import ScalpFVGChannel
-from src.channels.scalp_obi import _compute_obi
 from src.confidence import score_order_flow
 from src.smc import Direction, FVGZone, LiquiditySweep, MSSSignal
 
@@ -268,59 +267,6 @@ class TestCVDADXGate:
         # If the signal fires, it should be LONG direction
         if sig is not None:
             assert sig.direction == Direction.LONG
-
-
-# ---------------------------------------------------------------------------
-# 5. Depth-Weighted OBI
-# ---------------------------------------------------------------------------
-
-class TestDepthWeightedOBI:
-    """Level-1 imbalance should outweigh deep-book levels."""
-
-    def test_obi_gives_more_weight_to_top_levels(self):
-        """Weighted OBI amplifies top-of-book imbalance vs flat (unweighted) approach."""
-        # Bids: 100 at level 1, 1 each at levels 2-10
-        # Asks: 10 each at all levels
-        bids = [[100.0 - i, 100.0 if i == 0 else 1.0] for i in range(10)]
-        asks = [[99.0 - i, 10.0] for i in range(10)]
-
-        obi_weighted = _compute_obi(bids, asks)
-        assert obi_weighted is not None
-
-        # Reference: unweighted OBI
-        bid_qty_flat = sum(float(b[1]) for b in bids[:10])
-        ask_qty_flat = sum(float(a[1]) for a in asks[:10])
-        total_flat = bid_qty_flat + ask_qty_flat
-        obi_flat = (bid_qty_flat - ask_qty_flat) / total_flat
-
-        # Depth-weighted OBI should be MORE positive than flat OBI because
-        # the large level-1 bid (100) gets the highest weight (1.0).
-        assert obi_weighted > obi_flat
-
-    def test_obi_range_bounded(self):
-        """OBI is always in [-1, 1]."""
-        bids = [[100.0, 1000.0]] + [[99.0 - i, 0.1] for i in range(9)]
-        asks = [[101.0 + i, 0.1] for i in range(10)]
-        obi = _compute_obi(bids, asks)
-        assert obi is not None
-        assert -1.0 <= obi <= 1.0
-
-    def test_obi_returns_none_on_empty_data(self):
-        assert _compute_obi([], []) is None
-
-    def test_obi_handles_partial_levels(self):
-        """Only 3 levels available; should still compute correctly."""
-        bids = [[100.0, 10.0], [99.0, 5.0], [98.0, 2.0]]
-        asks = [[101.0, 8.0], [102.0, 4.0], [103.0, 1.0]]
-        obi = _compute_obi(bids, asks)
-        assert obi is not None
-
-    def test_deep_levels_get_lower_weight(self):
-        """Verify that weights decrease monotonically with depth."""
-        weights = [1.0 / (1.0 + 0.25 * i) for i in range(10)]
-        for i in range(9):
-            assert weights[i] > weights[i + 1], f"Weight at level {i} should exceed level {i+1}"
-
 
 # ---------------------------------------------------------------------------
 # 6. FVG Partial Fill Detection
