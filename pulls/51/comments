@@ -1,0 +1,9 @@
+Please complete the remaining 3 checklist items before this PR is ready to merge:
+
+**Remaining work:**
+- [ ] Fix `src/dca.py` — remove the dead `360_SWING` EMA200 block
+- [ ] Fix the 9 test files that still reference dead channels: `test_scalp_fast_path`, `test_signal_router`, `test_telegram_format`, `test_scoreboard`, `test_confidence`, `test_confidence_decay`, `test_feedback_loop`, `test_rate_limiter`, `test_competitive_gap_improvements`
+- [ ] Delete `src/chart_generator.py` — GEM chart generator, no longer needed
+- [ ] Run the full test suite and confirm all tests pass
+
+The 17 files already changed are clean and correct. Just these 3 remaining items, then this is ready to merge.
