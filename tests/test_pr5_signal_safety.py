@@ -28,11 +28,12 @@ def _make_signal(
     direction: Direction = Direction.LONG,
     channel: str = "360_SCALP",
 ) -> SimpleNamespace:
+    stop_loss = entry * 0.98 if direction == Direction.LONG else entry * 1.02
     return SimpleNamespace(
         channel=channel,
         direction=direction,
         entry=entry,
-        stop_loss=entry * 0.98,
+        stop_loss=stop_loss,
         tp1=entry * 1.01,
         tp2=entry * 1.02,
         tp3=entry * 1.03,

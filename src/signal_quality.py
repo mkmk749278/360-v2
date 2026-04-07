@@ -732,7 +732,7 @@ def build_risk_plan(
         _sl_min_required = signal.entry * _MIN_SL_DISTANCE_PCT
         if _sl_dist_abs < _sl_min_required:
             log.warning(
-                "SL near-zero rejection for %s %s: SL=%.8f is only %.6f%% from entry=%.8f (min=%.4f%%)",
+                "SL near-zero rejection for %s %s: SL=%.8f is only %.4f%% from entry=%.8f (min=%.4f%%)",
                 _chan,
                 signal.direction.value,
                 stop_loss,
