@@ -186,6 +186,11 @@ _CHANNEL_ENABLED_FLAGS: Dict[str, bool] = {
 # Maximum number of symbols scanned concurrently
 _MAX_CONCURRENT_SCANS: int = 20
 
+# Protective mode thresholds — trigger when market is too volatile to trade
+_PROTECTIVE_MODE_VOLATILE_THRESHOLD: int = 10   # volatile_unsuitable count across all channels
+_PROTECTIVE_MODE_SPREAD_THRESHOLD: int = 20     # spread too wide count
+_PROTECTIVE_MODE_COOLDOWN_S: float = 7200.0     # 2 hours between broadcasts
+
 # Regime-channel compatibility matrix.
 # Maps channel name → list of regimes where that channel is blocked.
 # SCALP channels (except VWAP) are no longer hard-blocked in QUIET — they
@@ -493,6 +498,11 @@ class Scanner:
         # over each scan cycle and logged as a summary at cycle end.
         self._suppression_counters: Dict[str, int] = defaultdict(int)
 
+        # Protective mode broadcaster state
+        # Tracks whether the engine is currently in protective mode (broadcasted to channels)
+        self._protective_mode_active: bool = False
+        self._protective_mode_broadcast_time: float = 0.0  # monotonic time of last broadcast
+
         # Suppression tracker — records structured suppression events for
         # Telegram digest and data-driven threshold tuning.
         self.suppression_tracker: SuppressionTracker = SuppressionTracker()
@@ -769,6 +779,91 @@ class Scanner:
                     "Scan cycle suppression summary: {}",
                     dict(self._suppression_counters),
                 )
+
+            # ── Protective Mode Broadcaster ─────────────────────────────────────────
+            # Count total volatile_unsuitable hits and spread too wide hits this cycle.
+            try:
+                _volatile_count = sum(
+                    v for k, v in self._suppression_counters.items()
+                    if k.startswith("volatile_unsuitable:")
+                )
+                _spread_count = sum(
+                    v for k, v in self._suppression_counters.items()
+                    if k.startswith("pair_quality:spread too wide")
+                )
+                _now_mono = time.monotonic()
+                _in_protective_mode = (
+                    _volatile_count >= _PROTECTIVE_MODE_VOLATILE_THRESHOLD
+                    or _spread_count >= _PROTECTIVE_MODE_SPREAD_THRESHOLD
+                )
+
+                if _in_protective_mode and not self._protective_mode_active:
+                    # Entering protective mode — broadcast to both free and paid channels
+                    self._protective_mode_active = True
+                    self._protective_mode_broadcast_time = _now_mono
+                    # Build context-aware message that only mentions triggering metric(s)
+                    _trigger_parts = []
+                    if _spread_count >= _PROTECTIVE_MODE_SPREAD_THRESHOLD:
+                        _trigger_parts.append(f"spreads widened across {_spread_count} pairs")
+                    if _volatile_count >= _PROTECTIVE_MODE_VOLATILE_THRESHOLD:
+                        _trigger_parts.append(f"{_volatile_count} setups suppressed due to volatility")
+                    _trigger_str = " · ".join(_trigger_parts) if _trigger_parts else (
+                        f"Spreads widened across {_spread_count} pairs · "
+                        f"{_volatile_count} setups suppressed due to volatility"
+                    )
+                    _protective_msg = (
+                        "⚠️ *Market Alert — Protective Mode Active*\n\n"
+                        f"{_trigger_str.capitalize()}.\n\n"
+                        "Scanner is running but holding entries until conditions stabilise. "
+                        "This is normal during high-impact events — patience protects capital."
+                    )
+                    try:
+                        _alert_fn = self.telemetry.get_admin_alert_callback()
+                        if _alert_fn is not None:
+                            await _alert_fn(_protective_msg)
+                    except Exception:
+                        pass
+                    # Also post to free channel via router if available
+                    try:
+                        if hasattr(self.router, "send_free_channel_message"):
+                            await self.router.send_free_channel_message(_protective_msg)
+                    except Exception:
+                        pass
+                    log.info(
+                        "Protective mode ENTERED (volatile={}, spread_wide={})",
+                        _volatile_count, _spread_count,
+                    )
+
+                elif not _in_protective_mode and self._protective_mode_active:
+                    # Exiting protective mode — only broadcast if cooldown has passed
+                    if _now_mono - self._protective_mode_broadcast_time >= _PROTECTIVE_MODE_COOLDOWN_S:
+                        self._protective_mode_active = False
+                        self._protective_mode_broadcast_time = _now_mono
+                        _recovery_msg = (
+                            "✅ *Market Conditions Normalising*\n\n"
+                            "Spreads compressing · Volatility easing. "
+                            "Scanner resuming full scan — watching for high-quality setups."
+                        )
+                        try:
+                            _alert_fn = self.telemetry.get_admin_alert_callback()
+                            if _alert_fn is not None:
+                                await _alert_fn(_recovery_msg)
+                        except Exception:
+                            pass
+                        try:
+                            if hasattr(self.router, "send_free_channel_message"):
+                                await self.router.send_free_channel_message(_recovery_msg)
+                        except Exception:
+                            pass
+                        log.info("Protective mode EXITED")
+                    else:
+                        # Cooldown not elapsed — silently reset flag without broadcasting
+                        self._protective_mode_active = False
+            except Exception:
+                pass
+            # ── End Protective Mode Broadcaster ─────────────────────────────────────
+
+            if self._suppression_counters:
                 self._suppression_counters.clear()
 
             # Setup diversity telemetry: log evaluated and emitted counts per

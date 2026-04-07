@@ -179,21 +179,24 @@ class TestUserCommands:
         handler._router.active_signals = {}
         await handler._handle_command("/signals", USER_CHAT_ID)
         call_args = handler._telegram.send_message.call_args[0]
-        assert "No active signals" in call_args[1]
+        assert "No active setups" in call_args[1]
 
     @pytest.mark.asyncio
-    async def test_subscribe(self):
+    async def test_subscribe_removed(self):
+        """Removed /subscribe stub now returns help text."""
         handler = _make_handler()
         await handler._handle_command("/subscribe", USER_CHAT_ID)
         call_args = handler._telegram.send_message.call_args[0]
-        assert "subscribed" in call_args[1].lower()
+        # Unknown command → help text
+        assert "Commands" in call_args[1]
 
     @pytest.mark.asyncio
-    async def test_unsubscribe(self):
+    async def test_unsubscribe_removed(self):
+        """Removed /unsubscribe stub now returns help text."""
         handler = _make_handler()
         await handler._handle_command("/unsubscribe", USER_CHAT_ID)
         call_args = handler._telegram.send_message.call_args[0]
-        assert "unsubscribed" in call_args[1].lower()
+        assert "Commands" in call_args[1]
 
     @pytest.mark.asyncio
     async def test_signal_history_empty(self):
@@ -203,12 +206,13 @@ class TestUserCommands:
         assert "No completed" in call_args[1]
 
     @pytest.mark.asyncio
-    async def test_free_signals_empty(self):
+    async def test_free_signals_removed(self):
+        """/free_signals removed — unknown command returns help text."""
         handler = _make_handler()
         handler._router.active_signals = {}
         await handler._handle_command("/free_signals", USER_CHAT_ID)
         call_args = handler._telegram.send_message.call_args[0]
-        assert "No free signals" in call_args[1]
+        assert "Commands" in call_args[1]
 
     @pytest.mark.asyncio
     async def test_unknown_command_returns_help(self):
@@ -308,17 +312,27 @@ class TestCommandAliases:
 
 
 class TestSignalStatsCommands:
-    """Tests for /signal_stats (user), /real_stats (admin), and /stats (admin) commands."""
+    """Tests for /signal_stats (admin-only), /real_stats (admin), and /stats (admin) commands."""
 
     @pytest.mark.asyncio
-    async def test_signal_stats_accessible_to_non_admin(self):
-        """Non-admin users must be able to use /signal_stats."""
+    async def test_signal_stats_blocked_for_non_admin(self):
+        """/signal_stats is now admin-only — non-admin users must be blocked."""
         tracker = MagicMock()
         tracker.format_signal_quality_stats_message.return_value = "🎯 Signal Quality Stats"
         handler = _make_handler(performance_tracker=tracker)
         with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
             await handler._handle_command("/signal_stats", USER_CHAT_ID)
-        # Must NOT say "restricted"
+        call_args = handler._telegram.send_message.call_args[0]
+        assert "restricted" in call_args[1].lower()
+
+    @pytest.mark.asyncio
+    async def test_signal_stats_accessible_to_admin(self):
+        """Admin users must be able to use /signal_stats."""
+        tracker = MagicMock()
+        tracker.format_signal_quality_stats_message.return_value = "🎯 Signal Quality Stats"
+        handler = _make_handler(performance_tracker=tracker)
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/signal_stats", ADMIN_CHAT_ID)
         call_args = handler._telegram.send_message.call_args[0]
         assert "restricted" not in call_args[1].lower()
         assert "Signal Quality Stats" in call_args[1]
@@ -326,20 +340,20 @@ class TestSignalStatsCommands:
 
     @pytest.mark.asyncio
     async def test_signal_stats_with_channel_arg(self):
-        """Non-admin users can pass a channel arg to /signal_stats."""
+        """Admin can pass a channel arg to /signal_stats."""
         tracker = MagicMock()
         tracker.format_signal_quality_stats_message.return_value = "🎯 Stats for 360_SCALP"
         handler = _make_handler(performance_tracker=tracker)
         with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
-            await handler._handle_command("/signal_stats 360_SCALP", USER_CHAT_ID)
+            await handler._handle_command("/signal_stats 360_SCALP", ADMIN_CHAT_ID)
         tracker.format_signal_quality_stats_message.assert_called_once_with(channel="360_SCALP")
 
     @pytest.mark.asyncio
     async def test_signal_stats_no_tracker(self):
-        """Non-admin user with no performance tracker gets informative message."""
+        """Admin user with no performance tracker gets informative message."""
         handler = _make_handler()  # no performance_tracker
         with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
-            await handler._handle_command("/signal_stats", USER_CHAT_ID)
+            await handler._handle_command("/signal_stats", ADMIN_CHAT_ID)
         call_args = handler._telegram.send_message.call_args[0]
         assert "not enabled" in call_args[1].lower()
 
@@ -374,13 +388,13 @@ class TestSignalStatsCommands:
         assert "restricted" in call_args[1].lower()
 
     @pytest.mark.asyncio
-    async def test_unknown_command_help_includes_signal_stats(self):
-        """Unknown command fallback help text must include /signal_stats in the User section."""
+    async def test_unknown_command_help_does_not_include_signal_stats_for_non_admin(self):
+        """/signal_stats is admin-only — must NOT appear in non-admin help text."""
         handler = _make_handler()
         with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
             await handler._handle_command("/unknown_xyz", USER_CHAT_ID)
         call_args = handler._telegram.send_message.call_args[0]
-        assert "signal\\_stats" in call_args[1]
+        assert "signal\\_stats" not in call_args[1]
 
     @pytest.mark.asyncio
     async def test_unknown_command_help_includes_real_stats(self):

@@ -192,7 +192,17 @@ Every single message — signals, radar, scheduled posts — follows these rules
 
 ---
 
-### PR4 — Revenue & Subscriber Features ⏳ PLANNED (after PR3 stable)
+### PR4 — User Interaction Layer ✅ MERGED
+**Business goal:** Turn engine silence during crashes into trust signals. Replace robotic command output with subscriber-facing human-voiced responses.
+
+**Changes:**
+- ✅ Protective Mode Broadcaster — auto-posts to free + paid channels when volatile_unsuitable ≥ 10 or spread too wide ≥ 20. 2hr cooldown. Recovery post when conditions normalise.
+- ✅ Commands revamped — `/signals`, `/history`, `/market`, `/performance`, `/ask` now human-voiced and available to all subscribers
+- ✅ Dead stubs removed — `/subscribe`, `/unsubscribe`, `/free_signals`, `/last_update`, `/info` removed
+- ✅ `/signal_stats` and `/tp_stats` moved to admin-only
+- ✅ Welcome message updated — accurate pair count, real channels, no false promises
+
+### PR5 — Revenue & Subscriber Features ⏳ PLANNED (after PR4 stable)
 
 ---
 
@@ -221,9 +231,10 @@ Every single message — signals, radar, scheduled posts — follows these rules
 
 1. ✅ PR1 merged and running on VPS
 2. ✅ PR2 — AI engagement layer merged and monitored
-3. 🔄 PR3 — Scan latency fix + 75-pair unlock (in progress)
-4. ⏳ Monitor signal volume after PR3 (target: 10–20 signals/day)
-5. ⏳ PR4 — Revenue features (after PR3 is confirmed stable)
+3. ✅ PR3 — Scan latency fix + 75-pair unlock merged
+4. 🔄 PR4 — User interaction layer (in progress)
+5. ⏳ Monitor signal volume after PR4 (target: 10–20 signals/day)
+6. ⏳ PR5 — Revenue features (after PR4 is confirmed stable)
 
 ---
 
@@ -279,6 +290,13 @@ To re-enable any as a live signal channel: set `CHANNEL_SCALP_CVD_ENABLED=true` 
 ## 10. Owner Notes (Running Log)
 
 *Add decisions, ideas, and observations here as we work. Most recent at the top.*
+
+**2026-04-07 (PR4)**
+- Engine silence during April 7 crash exposed need for protective mode broadcaster
+- Subscribers need interactive commands — not just signal posts
+- PR4: protective mode broadcaster + full command revamp
+- New subscriber commands: /market, /performance, /ask — all wired to live engine data
+- Dead stubs removed, admin-only commands properly gated
 
 **2026-04-07**
 - Scan latency was 33–40s due to indicator recomputation on every cycle for every symbol (7,650 indicator calculations per cycle on 75 pairs × 6 TF × 17 indicators)
