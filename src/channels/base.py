@@ -205,6 +205,11 @@ class Signal:
     posted_at: Optional[float] = None
     enrichment_latency_ms: Optional[float] = None
 
+    # ---- Confidence decay rate (item 19) ----
+    # Set at signal creation based on regime. Used by confidence_decay.py.
+    # 2.0 = volatile (goes stale quickly), 0.5 = quiet (holds longer), 1.0 = default
+    confidence_decay_rate: float = 1.0
+
     @property
     def r_multiple(self) -> float:
         risk = abs(self.entry - self.stop_loss)
@@ -538,5 +543,14 @@ def build_channel_signal(
     else:
         sig.entry_zone_low = round(zone_center - zone_width * (1.0 - bias), 8)
         sig.entry_zone_high = round(zone_center + zone_width * bias, 8)
+
+    # Set confidence_decay_rate based on regime (item 19)
+    regime_upper = regime.upper() if regime else ""
+    if regime_upper == "VOLATILE":
+        sig.confidence_decay_rate = 2.0  # Goes stale quickly
+    elif regime_upper == "QUIET":
+        sig.confidence_decay_rate = 0.5  # Holds longer
+    else:
+        sig.confidence_decay_rate = 1.0  # Default
 
     return sig

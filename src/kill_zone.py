@@ -69,6 +69,26 @@ KILL_ZONE_MINIMUM_MULTIPLIER: float = 0.50
 _WEEKEND_KILL_ZONE_SAT_START = 22  # Saturday hour (UTC) when weekend dead zone begins
 _WEEKEND_KILL_ZONE_SUN_END = 21    # Sunday hour (UTC) when weekend dead zone ends
 
+# ---------------------------------------------------------------------------
+# Per-pair session multipliers (item 18)
+# ---------------------------------------------------------------------------
+import os as _os
+
+#: Meme/low-correlation coins hard-blocked during Asian session (no institutional flow).
+#: Configurable via comma-separated env var MEME_COIN_BLOCK_ASIAN_SESSION_SYMBOLS.
+MEME_COIN_SYMBOLS: frozenset[str] = frozenset(
+    s.strip().upper()
+    for s in _os.getenv(
+        "MEME_COIN_BLOCK_ASIAN_SESSION_SYMBOLS",
+        "PEPEUSDT,SHIBUSDT,DOGEUSDT,FLOKIUSDT,BONKUSDT",
+    ).split(",")
+    if s.strip()
+)
+
+#: BTC/ETH during Asian session: less volume but still moves.
+_BTC_ETH_ASIAN_MULT: float = 0.85
+_BTC_ETH_SYMBOLS: frozenset[str] = frozenset({"BTCUSDT", "ETHUSDT"})
+
 
 # ---------------------------------------------------------------------------
 # Data model
@@ -176,6 +196,7 @@ def _apply_weekday_adjustment(
 def classify_session(
     dt: Optional[datetime] = None,
     pair_tier: Optional[str] = None,
+    symbol: Optional[str] = None,
 ) -> SessionResult:
     """Classify the current (or provided) UTC datetime into a trading session.
 
@@ -187,6 +208,10 @@ def classify_session(
         Optional pair tier (``"MAJOR"``, ``"MIDCAP"``, ``"ALTCOIN"``).
         When provided, the confidence multiplier is adjusted using
         ``PAIR_SESSION_ADJUSTMENTS`` from config.
+    symbol:
+        Optional symbol string.  When provided, per-pair session rules apply:
+        meme coins are hard-blocked during Asian session (multiplier=0.0);
+        BTC/ETH get a 0.85× multiplier during Asian session.
 
     Returns
     -------
@@ -200,6 +225,31 @@ def classify_session(
 
     hour = dt.hour
     weekday = dt.weekday()
+    _asian_hours = hour < 8  # 0-7 UTC = Asian session window
+
+    # Per-pair Asian session rules (item 18)
+    if symbol is not None and _asian_hours:
+        sym_upper = symbol.upper()
+        if sym_upper in MEME_COIN_SYMBOLS:
+            return SessionResult(
+                session_name="ASIAN_SESSION",
+                confidence_multiplier=0.0,
+                is_kill_zone=True,
+                is_weekend=False,
+                utc_hour=hour,
+                weekday=weekday,
+                reason=f"{sym_upper} blocked during Asian session — no institutional flow",
+            )
+        if sym_upper in _BTC_ETH_SYMBOLS:
+            # BTC/ETH: allow Asian session but with reduced multiplier
+            return SessionResult(
+                session_name="ASIAN_SESSION",
+                confidence_multiplier=_BTC_ETH_ASIAN_MULT,
+                is_kill_zone=_BTC_ETH_ASIAN_MULT < KILL_ZONE_MINIMUM_MULTIPLIER,
+                is_weekend=False,
+                utc_hour=hour,
+                weekday=weekday,
+            )
 
     # Weekend detection takes priority
     if _is_weekend_dead_zone(dt):

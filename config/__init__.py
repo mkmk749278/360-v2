@@ -369,6 +369,11 @@ class PairProfile:
     bb_touch_pct: float = 0.002       # BB-touch proximity (0.2% default)
     momentum_persist_candles: int = 2  # Required consecutive momentum candles
     kill_zone_hard_gate: bool = False  # Hard-reject signals outside kill zones
+    # Extended per-pair enrichment fields (item 17)
+    session_score: float = 1.0        # Per-pair session affinity score (0-2)
+    liquidity_tier: int = 2           # 1=highest liquidity, 2=mid, 3=smallest
+    avg_spread_bps: float = 3.0       # Average spread in basis points
+    volatility_class: str = "medium"  # "low", "medium", "high"
 
 
 # Tier profiles
@@ -385,6 +390,9 @@ PAIR_PROFILES: Dict[str, PairProfile] = {
         bb_touch_pct=0.003,            # Slightly wider tolerance for majors
         momentum_persist_candles=2,
         kill_zone_hard_gate=False,
+        liquidity_tier=1,
+        avg_spread_bps=1.5,
+        volatility_class="medium",
     ),
     "MIDCAP": PairProfile(
         tier="MIDCAP",
@@ -398,6 +406,9 @@ PAIR_PROFILES: Dict[str, PairProfile] = {
         bb_touch_pct=0.002,
         momentum_persist_candles=2,
         kill_zone_hard_gate=False,
+        liquidity_tier=2,
+        avg_spread_bps=3.0,
+        volatility_class="medium",
     ),
     "ALTCOIN": PairProfile(
         tier="ALTCOIN",
@@ -411,6 +422,9 @@ PAIR_PROFILES: Dict[str, PairProfile] = {
         bb_touch_pct=0.001,            # Tighter touch requirement
         momentum_persist_candles=3,    # Extra confirmation candles
         kill_zone_hard_gate=True,      # Hard-gate: only trade in kill zones
+        liquidity_tier=3,
+        avg_spread_bps=6.0,
+        volatility_class="high",
     ),
 }
 
@@ -1061,7 +1075,17 @@ TREND_HARD_GATE_MIN: float = _safe_float("TREND_HARD_GATE_MIN", "10.0")
 # for this duration. Prevents multiple same-symbol signals in quick succession.
 # ---------------------------------------------------------------------------
 GLOBAL_SYMBOL_COOLDOWN_SECONDS: int = _safe_int(
-    "GLOBAL_SYMBOL_COOLDOWN_SECONDS", "1800"  # 30 minutes
+    "GLOBAL_SYMBOL_COOLDOWN_SECONDS", "900"  # 15 minutes (reduced from 30)
+)
+
+# ---------------------------------------------------------------------------
+# MTF / SMC score relaxation for SHORT signals in TRENDING_DOWN regime.
+# ---------------------------------------------------------------------------
+MTF_MIN_SCORE_TRENDING_SHORT: float = float(
+    os.getenv("MTF_MIN_SCORE_TRENDING_SHORT", "0.45")
+)
+SMC_SCORE_MIN_TRENDING_SHORT: float = float(
+    os.getenv("SMC_SCORE_MIN_TRENDING_SHORT", "6.0")
 )
 
 # ---------------------------------------------------------------------------
@@ -1168,3 +1192,19 @@ RADAR_MAX_PER_HOUR: int = _safe_int("RADAR_MAX_PER_HOUR", "3")
 SILENCE_BREAKER_HOURS: int = _safe_int("SILENCE_BREAKER_HOURS", "3")
 #: GPT model used for content generation (gpt-4o-mini is cost-efficient and fast).
 CONTENT_GPT_MODEL: str = os.getenv("CONTENT_GPT_MODEL", "gpt-4o-mini")
+
+# ---------------------------------------------------------------------------
+# Funding rate gate — soft penalty/boost thresholds (item 13)
+# ---------------------------------------------------------------------------
+#: Funding rate penalty threshold: LONG is expensive when funding > this value.
+FUNDING_RATE_PENALTY_THRESHOLD: float = float(
+    os.getenv("FUNDING_RATE_PENALTY_THRESHOLD", "0.01")
+)
+#: Funding rate boost threshold: confirmation when funding is extreme in opposite direction.
+FUNDING_RATE_BOOST_THRESHOLD: float = float(
+    os.getenv("FUNDING_RATE_BOOST_THRESHOLD", "0.02")
+)
+#: Confidence penalty when funding is crowded against signal direction.
+FUNDING_RATE_PENALTY: float = float(os.getenv("FUNDING_RATE_PENALTY", "-8.0"))
+#: Confidence boost when funding is extreme in opposite direction (high conviction).
+FUNDING_RATE_BOOST: float = float(os.getenv("FUNDING_RATE_BOOST", "5.0"))

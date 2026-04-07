@@ -722,77 +722,127 @@ class TestCheckCrossAssetGate:
     """Tests for check_cross_asset_gate()."""
 
     def test_fails_open_empty_states(self):
-        allowed, reason = check_cross_asset_gate("LONG", "SOLUSDT", [])
+        allowed, reason, conf_adj = check_cross_asset_gate("LONG", "SOLUSDT", [])
         assert allowed is True
         assert reason == ""
+        assert conf_adj == 0.0
 
-    def test_blocks_altcoin_long_when_btc_dumping(self):
+    def test_soft_penalty_altcoin_long_when_btc_dumping_default_corr(self):
+        # Default correlation = 0.7 → soft penalty, NOT hard block
         btc = AssetState(symbol="BTCUSDT", trend="DUMPING")
-        allowed, reason = check_cross_asset_gate("LONG", "SOLUSDT", [btc])
+        allowed, reason, conf_adj = check_cross_asset_gate("LONG", "SOLUSDT", [btc])
+        assert allowed is True  # Soft penalty, not hard block
+        assert conf_adj == -10.0
+        assert "BTCUSDT" in reason
+
+    def test_hard_blocks_altcoin_long_when_btc_dumping_high_corr(self):
+        # High correlation (≥0.8) → hard block
+        btc = AssetState(symbol="BTCUSDT", trend="DUMPING")
+        allowed, reason, conf_adj = check_cross_asset_gate(
+            "LONG", "SOLUSDT", [btc], btc_correlation=0.9
+        )
         assert allowed is False
         assert "BTCUSDT" in reason
-        assert "DUMPING" in reason
 
     def test_blocks_altcoin_long_when_eth_bearish(self):
+        # With high correlation default=0.7 → soft penalty, not hard block
         eth = AssetState(symbol="ETHUSDT", trend="BEARISH")
-        allowed, reason = check_cross_asset_gate("LONG", "AVAXUSDT", [eth])
-        assert allowed is False
+        allowed, reason, conf_adj = check_cross_asset_gate("LONG", "AVAXUSDT", [eth])
+        # BEARISH is in BEARISH_TREND_LABELS → is_dumping() via is_bearish()
+        # Default corr=0.7 → soft -10 penalty
+        assert allowed is True  # Soft penalty, allowed through
+        assert conf_adj == -10.0
 
     def test_allows_altcoin_long_when_btc_bullish(self):
         btc = AssetState(symbol="BTCUSDT", trend="BULLISH")
-        allowed, reason = check_cross_asset_gate("LONG", "SOLUSDT", [btc])
+        allowed, reason, conf_adj = check_cross_asset_gate("LONG", "SOLUSDT", [btc])
         assert allowed is True
 
-    def test_short_not_blocked_even_when_btc_dumping(self):
+    def test_short_boosted_when_btc_dumping(self):
+        # BTC dumping now BOOSTS SHORT signals (direction-aware fix)
         btc = AssetState(symbol="BTCUSDT", trend="DUMPING")
-        allowed, reason = check_cross_asset_gate("SHORT", "SOLUSDT", [btc])
+        allowed, reason, conf_adj = check_cross_asset_gate("SHORT", "SOLUSDT", [btc])
         assert allowed is True
+        assert conf_adj > 0  # Boost applied
 
     def test_btc_signal_not_filtered_by_itself(self):
         btc = AssetState(symbol="BTCUSDT", trend="DUMPING")
         # BTC signalling BTC – should not self-block
-        allowed, reason = check_cross_asset_gate("LONG", "BTCUSDT", [btc])
+        allowed, reason, conf_adj = check_cross_asset_gate("LONG", "BTCUSDT", [btc])
         assert allowed is True
 
     def test_non_major_asset_does_not_trigger_filter(self):
         bnb = AssetState(symbol="BNBUSDT", trend="DUMPING")
-        allowed, reason = check_cross_asset_gate("LONG", "SOLUSDT", [bnb])
+        allowed, reason, conf_adj = check_cross_asset_gate("LONG", "SOLUSDT", [bnb])
         assert allowed is True  # BNBUSDT not in default major set
 
     def test_custom_major_symbols(self):
         bnb = AssetState(symbol="BNBUSDT", trend="DUMPING")
-        allowed, reason = check_cross_asset_gate(
+        allowed, reason, conf_adj = check_cross_asset_gate(
             "LONG", "SOLUSDT", [bnb],
             major_symbols=frozenset({"BNBUSDT"}),
+            btc_correlation=0.9,  # Need high correlation to trigger hard block
         )
         assert allowed is False
 
-    def test_high_volatility_down_blocks_long(self):
+    def test_high_volatility_down_blocks_long_high_corr(self):
         btc = AssetState(
             symbol="BTCUSDT",
             trend="HIGH_VOLATILITY_DOWN",
             volatility="HIGH",
         )
-        allowed, reason = check_cross_asset_gate("LONG", "SOLUSDT", [btc])
+        # HIGH_VOLATILITY_DOWN triggers high-volatility block for LONGs at high corr
+        # is_dumping() via is_bearish() for HIGH_VOLATILITY_DOWN, with high corr
+        allowed, reason, conf_adj = check_cross_asset_gate(
+            "LONG", "SOLUSDT", [btc], btc_correlation=0.9
+        )
         assert allowed is False
 
-    def test_mixed_states_one_bearish_blocks(self):
+    def test_mixed_states_one_bearish_soft_penalty(self):
         btc = AssetState(symbol="BTCUSDT", trend="BULLISH")
         eth = AssetState(symbol="ETHUSDT", trend="DUMPING")
-        allowed, reason = check_cross_asset_gate("LONG", "SOLUSDT", [btc, eth])
-        assert allowed is False
+        # ETH dumping with default corr=0.7 → soft penalty
+        allowed, reason, conf_adj = check_cross_asset_gate("LONG", "SOLUSDT", [btc, eth])
         assert "ETHUSDT" in reason
 
     def test_both_neutral_allows_long(self):
         btc = AssetState(symbol="BTCUSDT", trend="NEUTRAL")
         eth = AssetState(symbol="ETHUSDT", trend="NEUTRAL")
-        allowed, reason = check_cross_asset_gate("LONG", "SOLUSDT", [btc, eth])
+        allowed, reason, conf_adj = check_cross_asset_gate("LONG", "SOLUSDT", [btc, eth])
         assert allowed is True
 
     def test_case_insensitive_direction(self):
         btc = AssetState(symbol="BTCUSDT", trend="DUMPING")
-        allowed, reason = check_cross_asset_gate("long", "SOLUSDT", [btc])
-        assert allowed is False
+        # Default corr=0.7 → soft penalty, not hard block
+        allowed, reason, conf_adj = check_cross_asset_gate("long", "SOLUSDT", [btc])
+        assert conf_adj == -10.0  # Soft penalty applied
+
+    def test_low_correlation_pair_unaffected(self):
+        # Low correlation (< 0.2) = meme coin / near-zero correlation → no impact
+        btc = AssetState(symbol="BTCUSDT", trend="DUMPING")
+        allowed, reason, conf_adj = check_cross_asset_gate(
+            "LONG", "PEPEUSDT", [btc], btc_correlation=0.1
+        )
+        assert allowed is True
+        assert conf_adj == 0.0
+
+    def test_medium_correlation_soft_penalty(self):
+        # 0.5 ≤ corr < 0.8 → soft -10 penalty for LONG
+        btc = AssetState(symbol="BTCUSDT", trend="DUMPING")
+        allowed, reason, conf_adj = check_cross_asset_gate(
+            "LONG", "SOLUSDT", [btc], btc_correlation=0.65
+        )
+        assert allowed is True
+        assert conf_adj == -10.0
+
+    def test_short_boost_high_corr(self):
+        # HIGH correlation + BTC dumping → +5 boost for SHORT
+        btc = AssetState(symbol="BTCUSDT", trend="DUMPING")
+        allowed, reason, conf_adj = check_cross_asset_gate(
+            "SHORT", "SOLUSDT", [btc], btc_correlation=0.9
+        )
+        assert allowed is True
+        assert conf_adj == 5.0
 
 
 class TestGetDominantMarketState:

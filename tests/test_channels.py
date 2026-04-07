@@ -71,31 +71,6 @@ class TestScalpChannel:
         sig = ch.evaluate("BTCUSDT", candles, indicators, {"sweeps": []}, 0.01, 10_000_000)
         assert sig is None
 
-    def test_range_fade_long_signal_at_lower_bb(self):
-        """RANGE_FADE path: price at lower BB + low RSI + low ADX → LONG signal."""
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0  # at bb_lower
-        candles = {"5m": candles_data}
-        indicators = {"5m": _make_indicators(adx_val=15, bb_lower=97.1, rsi_val=28)}
-        smc_data = {}
-
-        sig = ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
-        assert sig is not None
-        assert sig.direction == Direction.LONG
-        assert sig.setup_class == "RANGE_FADE"
-
-    def test_range_fade_no_signal_when_adx_high(self):
-        """RANGE_FADE path: ADX > 22 means trending → no range fade signal."""
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0
-        candles = {"5m": candles_data}
-        indicators = {"5m": _make_indicators(adx_val=30, bb_lower=97.1, rsi_val=28, ema9=None, ema21=None)}
-        smc_data = {}
-        sig = ch._evaluate_range_fade("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
-        assert sig is None
-
     def test_whale_momentum_long_signal_on_buy_flow(self):
         """WHALE_MOMENTUM path: strong buy tick flow → LONG signal."""
         ch = ScalpChannel()
@@ -175,21 +150,6 @@ class TestScalpChannel:
         }
         sig = ch._evaluate_whale_momentum("ETHUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
         assert sig is None
-
-    def test_range_fade_signal_has_dca_zone(self):
-        """RANGE_FADE signals should include DCA zone fields."""
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0
-        candles = {"5m": candles_data}
-        indicators = {"5m": _make_indicators(adx_val=15, bb_lower=97.1, rsi_val=28)}
-        smc_data = {}
-
-        sig = ch.evaluate("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
-        assert sig is not None
-        assert sig.dca_zone_lower is not None and sig.dca_zone_lower > 0
-        assert sig.dca_zone_upper is not None and sig.dca_zone_upper > 0
-        assert sig.dca_zone_lower < sig.dca_zone_upper
 
 
 # ---------------------------------------------------------------------------

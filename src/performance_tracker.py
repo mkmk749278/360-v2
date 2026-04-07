@@ -886,6 +886,44 @@ class PerformanceTracker:
         records = self._filter(window_days=window_days)
         return list(dict.fromkeys(r.symbol for r in records))
 
+    def get_stats_by_regime_single(
+        self,
+        regime: str,
+        window_days: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Return win rate, avg PnL, signal count for a specific regime.
+
+        Returns ``{}`` if no data is available for the requested regime.
+        """
+        all_stats = self.get_stats_by_regime(window_days=window_days)
+        return all_stats.get(regime, {})
+
+    def get_stats_by_method(
+        self,
+        setup_name: str,
+        window_days: Optional[int] = None,
+    ) -> Dict[str, Any]:
+        """Return win rate, avg PnL, signal count for a specific setup/method.
+
+        Returns ``{}`` if no data is available for the requested setup.
+        """
+        records = self._filter(window_days=window_days)
+        filtered = [r for r in records if (r.setup_class or "") == setup_name]
+        if not filtered:
+            return {}
+        wins = sum(1 for r in filtered if r.pnl_pct > 0 and not is_breakeven_pnl(r.pnl_pct))
+        losses = sum(1 for r in filtered if r.pnl_pct < 0 and not is_breakeven_pnl(r.pnl_pct))
+        total = wins + losses
+        return {
+            "wins": wins,
+            "losses": losses,
+            "count": len(filtered),
+            "win_rate": round(wins / total * 100, 1) if total > 0 else 0.0,
+            "avg_pnl": round(sum(r.pnl_pct for r in filtered) / len(filtered), 2),
+        }
+
+
+
     # ------------------------------------------------------------------
     # Internals
     # ------------------------------------------------------------------

@@ -2,23 +2,8 @@
 
 If a major asset (BTC or ETH) is in a high-volatility or dumping regime,
 altcoin LONG signals are paused or rejected to prevent getting caught in
-a market-wide flush.
-
-Typical usage
--------------
-.. code-block:: python
-
-    from src.cross_asset import AssetState, check_cross_asset_gate
-
-    btc_state = AssetState(symbol="BTCUSDT", trend="DUMPING", volatility="HIGH")
-    eth_state = AssetState(symbol="ETHUSDT", trend="NEUTRAL", volatility="NORMAL")
-
-    allowed, reason = check_cross_asset_gate(
-        signal_direction="LONG",
-        signal_symbol="SOLUSDT",
-        asset_states=[btc_state, eth_state],
-    )
-    # (False, "Cross-asset: BTCUSDT is DUMPING – altcoin LONG paused")
+a market-wide flush.  When BTC is dumping, SHORT signals get a confidence
+boost because the macro tailwind confirms the bearish setup.
 
 Design notes
 ------------
@@ -27,6 +12,8 @@ Design notes
 * The ``trend`` field maps naturally to the output of :mod:`src.regime` or
   any external macro classifier.
 * Fails open when no asset states are provided.
+* Returns ``(allowed, reason, confidence_adj)`` where ``confidence_adj`` is a
+  signed float to add to the signal's confidence score (+5 = boost, -10 = penalty).
 """
 
 from __future__ import annotations
@@ -72,11 +59,18 @@ HIGH_VOLATILITY_LABELS: frozenset[str] = frozenset({
 })
 
 # ---------------------------------------------------------------------------
-# Graduated correlation thresholds for cross-asset gating  (Rec 7)
+# Graduated correlation thresholds for cross-asset gating
 # ---------------------------------------------------------------------------
 _CORR_VERY_LOW: float = 0.2   # Below this: pair is independent, no penalty
 _CORR_LOW: float = 0.5        # Below this: minor penalty suggested
-_CORR_HIGH: float = 0.8       # At or above this: hard block
+_CORR_HIGH: float = 0.8       # At or above this: hard block (for LONGs)
+
+#: BTC % change threshold below which BTC is considered "dumping" for gate logic.
+#: Expressed as a fraction (−0.015 = −1.5%).
+_BTC_DUMP_THRESHOLD: float = -0.015
+
+#: Default correlation used when none is available (conservative assumption).
+_DEFAULT_BTC_CORRELATION: float = 0.7
 
 #: Symbols treated as "major" assets that can affect altcoins.
 #: Extend this set as needed (e.g. add "BNBUSDT" for BNB-chain tokens).
@@ -105,8 +99,8 @@ class AssetState:
         Volatility label string.  Expected values: ``"NORMAL"``, ``"HIGH"``,
         ``"EXTREME"``.  ``None`` means unknown.
     price_change_pct:
-        Optional recent percentage price change (e.g. ``-0.05`` for −5 %).
-        Used for additional context; not currently used in gate logic.
+        Optional recent percentage price change expressed as a fraction
+        (e.g. ``-0.015`` for −1.5 %).
     """
 
     symbol: str
@@ -125,6 +119,12 @@ class AssetState:
             return False
         return self.volatility.upper() in HIGH_VOLATILITY_LABELS
 
+    def is_dumping(self) -> bool:
+        """Return True when recent price change is below the dump threshold."""
+        if self.price_change_pct is not None:
+            return self.price_change_pct < _BTC_DUMP_THRESHOLD
+        return self.is_bearish()
+
 
 # ---------------------------------------------------------------------------
 # Core public API
@@ -137,124 +137,115 @@ def check_cross_asset_gate(
     asset_states: Sequence[AssetState],
     major_symbols: Optional[frozenset[str]] = None,
     btc_correlation: Optional[float] = None,
-) -> tuple[bool, str]:
-    """Block or penalise altcoin signals when major assets are dumping/pumping.
+) -> tuple[bool, str, float]:
+    """Direction-aware, graduated cross-asset gate.
 
-    When *btc_correlation* is provided the gate is **graduated** (Rec 7):
+    Returns ``(allowed, reason, confidence_adj)`` where:
+    - ``allowed`` is ``False`` only for hard blocks.
+    - ``confidence_adj`` is a float to add to confidence (+ve = boost, -ve = penalty).
 
-    * correlation ≥ 0.8 → hard block (same as before)
-    * 0.5 ≤ corr < 0.8  → soft block with penalty suggestion in *reason*
-    * correlation < 0.5  → pass through (pair is loosely correlated)
+    Graduated by correlation strength:
+    - corr ≥ 0.8:  LONG hard-blocked when BTC dumps; SHORT boosted +5.
+    - 0.5 ≤ corr < 0.8: LONG soft -10; SHORT soft +3.
+    - 0.2 ≤ corr < 0.5: LONG soft -3; SHORT soft +1.
+    - corr < 0.2: no impact (meme coins / near-zero correlation).
 
-    When *btc_correlation* is ``None`` the original binary behaviour is
-    preserved for backwards compatibility.
+    SHORTs are still blocked when BTC is strongly pumping (same as before).
 
     Parameters
     ----------
     signal_direction:
         ``"LONG"`` or ``"SHORT"``.
     signal_symbol:
-        Symbol generating the signal (e.g. ``"SOLUSDT"``).  If the signal
-        symbol is itself a major asset (e.g. ``"BTCUSDT"``), the filter is
-        skipped because the signal *is* the major asset.
+        Symbol generating the signal.  Skipped for major assets themselves.
     asset_states:
         List of :class:`AssetState` objects for the major reference assets.
-        Pass an empty list to fail open.
     major_symbols:
-        Set of symbols considered "major".  Defaults to
-        :data:`DEFAULT_MAJOR_SYMBOLS` (BTC, ETH).
+        Set of symbols considered "major".  Defaults to BTC + ETH.
     btc_correlation:
-        Optional rolling Pearson correlation vs BTC.  When provided enables
-        graduated gating.
+        Optional rolling Pearson correlation vs BTC.  Defaults to 0.7
+        (conservative assumption) when ``None``.
 
     Returns
     -------
-    ``(allowed, reason)``
+    ``(allowed, reason, confidence_adj)``
     """
     if not asset_states:
-        return True, ""
+        return True, "", 0.0
 
     direction = signal_direction.upper()
-
     _major = major_symbols if major_symbols is not None else DEFAULT_MAJOR_SYMBOLS
 
     # If the signal itself is a major asset, skip the correlation filter
     if signal_symbol.upper() in _major:
-        return True, ""
+        return True, "", 0.0
 
-    if direction == "LONG":
-        for state in asset_states:
-            if state.symbol.upper() not in _major:
+    # Use default correlation when none provided
+    corr = btc_correlation if btc_correlation is not None else _DEFAULT_BTC_CORRELATION
+    abs_corr = abs(corr)
+
+    for state in asset_states:
+        if state.symbol.upper() not in _major:
+            continue
+
+        btc_dumping = state.is_dumping()
+        btc_pumping = state.trend.upper() in BULLISH_TREND_LABELS
+
+        if direction == "LONG" and btc_dumping:
+            if abs_corr < _CORR_VERY_LOW:
+                # Near-zero correlation: no impact
                 continue
+            elif abs_corr < _CORR_LOW:
+                return (
+                    True,
+                    f"Cross-asset: {state.symbol} dumping (corr={corr:.2f}) — minor LONG penalty",
+                    -3.0,
+                )
+            elif abs_corr < _CORR_HIGH:
+                return (
+                    True,
+                    f"Cross-asset: {state.symbol} dumping (corr={corr:.2f}) — LONG soft penalty",
+                    -10.0,
+                )
+            else:
+                # High correlation + BTC dumping → hard block LONG
+                return (
+                    False,
+                    f"Cross-asset: {state.symbol} dumping (corr={corr:.2f}) — LONG hard-blocked",
+                    0.0,
+                )
 
-            is_negative = state.is_bearish() or (
-                state.is_high_volatility()
-                and state.trend.upper() not in {"BULLISH", "RANGING", "NEUTRAL"}
+        elif direction == "SHORT" and btc_dumping:
+            # BTC dumping confirms SHORT thesis
+            if abs_corr < _CORR_VERY_LOW:
+                continue
+            elif abs_corr < _CORR_LOW:
+                return True, f"Cross-asset: BTC dump confirms SHORT (corr={corr:.2f})", 1.0
+            elif abs_corr < _CORR_HIGH:
+                return True, f"Cross-asset: BTC dump confirms SHORT (corr={corr:.2f})", 3.0
+            else:
+                return True, f"Cross-asset: BTC dump strongly confirms SHORT (corr={corr:.2f})", 5.0
+
+        elif direction == "SHORT" and btc_pumping:
+            # BTC strongly pumping → short is counter-trend, block when correlated
+            if abs_corr < _CORR_LOW:
+                continue
+            return (
+                False,
+                f"Cross-asset: {state.symbol} is {state.trend.upper()} — altcoin SHORT paused",
+                0.0,
             )
-            if not is_negative:
-                continue
 
-            # Graduated gating when correlation is known
-            if btc_correlation is not None:
-                abs_corr = abs(btc_correlation)
-                if abs_corr < _CORR_VERY_LOW:
-                    # Very low correlation – pair is independent
-                    continue
-                if abs_corr < _CORR_LOW:
-                    # Low-medium correlation – allow with penalty note
-                    return (
-                        True,
-                        (
-                            f"Cross-asset: {state.symbol} is {state.trend.upper()} "
-                            f"(corr={btc_correlation:.2f}) – minor penalty suggested"
-                        ),
-                    )
-                if abs_corr < _CORR_HIGH:
-                    # Medium-high correlation – allow with strong penalty note
-                    return (
-                        True,
-                        (
-                            f"Cross-asset: {state.symbol} is {state.trend.upper()} "
-                            f"(corr={btc_correlation:.2f}) – confidence penalty applied"
-                        ),
-                    )
-
-            # High correlation (≥ 0.8) or unknown correlation → block
-            if state.is_bearish():
+        elif direction == "LONG" and (state.is_high_volatility() and not btc_pumping and not btc_dumping):
+            # High volatility in non-directional state — soft penalty for LONGs
+            if abs_corr >= _CORR_HIGH:
                 return (
                     False,
-                    (
-                        f"Cross-asset: {state.symbol} is {state.trend.upper()} "
-                        f"– altcoin LONG paused"
-                    ),
+                    f"Cross-asset: {state.symbol} high volatility ({state.volatility}) — LONG paused",
+                    0.0,
                 )
 
-            if state.is_high_volatility() and state.trend.upper() not in {"BULLISH", "RANGING", "NEUTRAL"}:
-                return (
-                    False,
-                    (
-                        f"Cross-asset: {state.symbol} has {state.volatility} volatility "
-                        f"in {state.trend.upper()} regime – altcoin LONG paused"
-                    ),
-                )
-
-    elif direction == "SHORT":
-        for state in asset_states:
-            if state.symbol.upper() not in _major:
-                continue
-            if state.trend.upper() in BULLISH_TREND_LABELS:
-                # Graduated gating for SHORTs as well
-                if btc_correlation is not None and abs(btc_correlation) < _CORR_LOW:
-                    continue
-                return (
-                    False,
-                    (
-                        f"Cross-asset: {state.symbol} is {state.trend.upper()} "
-                        f"– altcoin SHORT paused"
-                    ),
-                )
-
-    return True, ""
+    return True, "", 0.0
 
 
 def get_dominant_market_state(

@@ -488,7 +488,15 @@ class TradeMonitor:
         # 2. EMA crossover against signal direction
         # After TP1 has been hit, let trailing stop manage the exit — don't kill
         # a profitable trade just because the 1m EMA crosses (common noise).
-        if ema9 is not None and ema21 is not None and sig.status not in ("TP1_HIT", "TP2_HIT"):
+        # Age gate for EMA crossover: don't apply until signal is at least 300s old
+        # to prevent killing a valid signal before price even moves.
+        _crossover_min_age = 300  # seconds
+        if (
+            ema9 is not None
+            and ema21 is not None
+            and sig.status not in ("TP1_HIT", "TP2_HIT")
+            and age_secs >= _crossover_min_age
+        ):
             if is_long and ema9 < ema21:
                 return "EMA bearish crossover (EMA9 < EMA21) – LONG thesis invalidated"
             if not is_long and ema9 > ema21:
@@ -499,9 +507,16 @@ class TradeMonitor:
         # For micro-cap tokens (entry price < 0.001), scale threshold by 0.1 to
         # avoid false invalidations on tiny absolute price moves (e.g. BONKUSDT).
         mom_threshold = INVALIDATION_MOMENTUM_THRESHOLD.get(sig.channel, 0.15)
+        # ATR-adaptive threshold: scale by ATR/entry_price so volatile pairs
+        # (ETH, SOL) get wider thresholds and stable pairs (BTC) get tighter ones.
+        # Floor: 0.05, Cap: 0.25. Fall back to fixed threshold if ATR unavailable.
+        _atr_val = indicators.get("atr_last") if indicators else None
+        entry_price = sig.entry if sig.entry > 0 else sig.current_price
+        if _atr_val is not None and entry_price > 0:
+            _atr_threshold = 0.1 * float(_atr_val) / entry_price * 100.0
+            mom_threshold = max(0.05, min(0.25, _atr_threshold))
         # Prefer entry price; fall back to current_price only if entry is unset (0).
         # The current_price check guards against a zero fallback.
-        entry_price = sig.entry if sig.entry > 0 else sig.current_price
         if 0 < entry_price < 0.001:
             mom_threshold *= 0.1
         if momentum is not None and abs(momentum) < mom_threshold:

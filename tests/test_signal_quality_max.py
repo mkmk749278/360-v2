@@ -134,45 +134,10 @@ class TestATRAdaptiveMomentumThreshold:
 
 
 # ---------------------------------------------------------------------------
-# 2. ADX Overlap Elimination
+# 2. ADX Overlap Elimination (RANGE_FADE removed — tests removed with it)
 # ---------------------------------------------------------------------------
 
-class TestADXOverlapEliminated:
-    """ADX 23 should NOT fire range fade (was allowed with old threshold of 25)."""
 
-    def test_adx_23_does_not_fire_range_fade(self):
-        """ADX=23 is above the new 22 threshold → range fade blocked."""
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0
-        candles = {"5m": candles_data}
-        indicators = {"5m": _make_indicators(adx_val=23, bb_lower=97.1, rsi_val=28)}
-        sig = ch._evaluate_range_fade("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
-        assert sig is None
-
-    def test_adx_22_fires_range_fade(self):
-        """ADX=22 is at the boundary → should produce range fade signal."""
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0
-        candles = {"5m": candles_data}
-        indicators = {"5m": _make_indicators(adx_val=22, bb_lower=97.1, rsi_val=28)}
-        sig = ch._evaluate_range_fade("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
-        assert sig is not None
-        assert sig.direction == Direction.LONG
-
-    def test_adx_25_was_old_boundary_now_blocked(self):
-        """ADX=25 previously fired range fade but now correctly blocked."""
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0
-        candles = {"5m": candles_data}
-        indicators = {"5m": _make_indicators(adx_val=25, bb_lower=97.1, rsi_val=28)}
-        sig = ch._evaluate_range_fade("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
-        assert sig is None
-
-
-# ---------------------------------------------------------------------------
 # 3. BB Squeeze Guard for Range Fade
 # ---------------------------------------------------------------------------
 

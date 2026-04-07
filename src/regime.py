@@ -140,6 +140,10 @@ class MarketRegimeDetector:
         self._ctx_transition_age: int = 0
         self._ctx_prev_before_change: str = ""
         self._ctx_last_transition: str = ""
+        # Regime history deque for transition detection (item 15)
+        from collections import deque
+        self._regime_history: "deque[str]" = deque(maxlen=5)
+        self._cycles_since_transition: int = 0
 
     def classify(
         self,
@@ -206,12 +210,30 @@ class MarketRegimeDetector:
         if ema_fast is not None and ema_slow is not None and ema_slow != 0.0:
             ema_slope = (ema_fast - ema_slow) / ema_slow * 100.0
 
+        # EMA9 slope over last 3 candles as % of price — fast-path trigger for
+        # TRENDING_DOWN/UP detection before ADX catches up (ADX lags by several candles).
+        ema9_slope_pct: Optional[float] = None
+        _ema9_series = indicators.get("ema9")
+        if (
+            _ema9_series is not None
+            and hasattr(_ema9_series, "__len__")
+            and len(_ema9_series) >= 4
+            and close is not None
+            and close > 0
+        ):
+            try:
+                _e9_now = float(_ema9_series[-1])
+                _e9_3ago = float(_ema9_series[-4])
+                ema9_slope_pct = (_e9_now - _e9_3ago) / close * 100.0
+            except Exception:
+                pass
+
         # Bollinger Band width as % of mid price
         bb_width_pct: Optional[float] = None
         if bb_upper is not None and bb_lower is not None and bb_mid and bb_mid != 0.0:
             bb_width_pct = (bb_upper - bb_lower) / bb_mid * 100.0
 
-        regime = self._decide(adx_val, ema_slope, bb_width_pct, timeframe=timeframe)
+        regime = self._decide(adx_val, ema_slope, bb_width_pct, timeframe=timeframe, ema9_slope_pct=ema9_slope_pct)
 
         # Apply hysteresis to the indicator-derived regime (prevents flapping near
         # EMA crosses and ADX transition zones).
@@ -259,6 +281,9 @@ class MarketRegimeDetector:
                     self._pending_regime = forced_regime
                     self._regime_dwell_count = self._hysteresis_candles
 
+        # Update regime transition history
+        self._update_regime_history(stable_regime)
+
         return RegimeResult(
             regime=stable_regime,
             adx=adx_val,
@@ -266,6 +291,39 @@ class MarketRegimeDetector:
             ema_slope=ema_slope,
             volume_delta_pct=volume_delta_pct,
         )
+
+    def _update_regime_history(self, regime: MarketRegime) -> None:
+        """Update regime history deque and transition tracking."""
+        regime_str = regime.value
+        if self._regime_history and self._regime_history[-1] != regime_str:
+            self._cycles_since_transition = 0
+        else:
+            self._cycles_since_transition += 1
+        self._regime_history.append(regime_str)
+
+    def regime_just_changed(self) -> bool:
+        """Return True if the regime changed within the last 2 scan cycles."""
+        return self._cycles_since_transition <= 2 and len(self._regime_history) >= 2
+
+    def get_transition_boost(self, direction: str) -> float:
+        """Return confidence boost if regime just transitioned in signal's direction.
+
+        - RANGING → TRENDING_DOWN + SHORT: +6.0
+        - RANGING → TRENDING_UP + LONG: +6.0
+        - VOLATILE → RANGING (mean-reversion): +4.0
+        """
+        if not self.regime_just_changed() or len(self._regime_history) < 2:
+            return 0.0
+        prev = self._regime_history[-2]
+        curr = self._regime_history[-1]
+        direction_upper = direction.upper()
+        if prev == "RANGING" and curr == "TRENDING_DOWN" and direction_upper == "SHORT":
+            return 6.0
+        if prev == "RANGING" and curr == "TRENDING_UP" and direction_upper == "LONG":
+            return 6.0
+        if prev == "VOLATILE" and curr == "RANGING":
+            return 4.0  # mean-reversion signals in new ranging regime
+        return 0.0
 
     def _apply_hysteresis(self, raw_regime: MarketRegime) -> MarketRegime:
         """Apply 3-candle dwell-time hysteresis to prevent rapid regime flapping.
@@ -421,6 +479,7 @@ class MarketRegimeDetector:
         ema_slope: Optional[float],
         bb_width_pct: Optional[float],
         timeframe: str = "5m",
+        ema9_slope_pct: Optional[float] = None,
     ) -> MarketRegime:
         # EMA slope threshold – wider for 1m data to reduce noise-driven flips
         ema_slope_threshold = 0.15 if timeframe == "1m" else 0.05
@@ -430,6 +489,16 @@ class MarketRegimeDetector:
                 return MarketRegime.VOLATILE
             if bb_width_pct <= _BB_WIDTH_QUIET_PCT:
                 return MarketRegime.QUIET
+
+        # EMA9 slope fast-path: detect TRENDING_DOWN/UP immediately when EMA9
+        # is sloping strongly, without waiting for ADX to catch up (ADX lags
+        # several candles, causing missed entries in early trend moves).
+        # Threshold: 0.1% of price over 3 candles.
+        if ema9_slope_pct is not None:
+            if ema9_slope_pct < -0.1:
+                return MarketRegime.TRENDING_DOWN
+            if ema9_slope_pct > 0.1:
+                return MarketRegime.TRENDING_UP
 
         # Weak trend zone (ADX 20-25) — use EMA slope to decide before the
         # standard trending/ranging thresholds so the ADX dead zone is resolved.

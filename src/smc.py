@@ -282,3 +282,107 @@ def detect_fvg(
                 ))
 
     return zones
+
+
+# ---------------------------------------------------------------------------
+# Continuation Sweep detection
+# ---------------------------------------------------------------------------
+
+
+def detect_continuation_sweep(
+    candles: dict,
+    direction: str,
+    lookback: int = 10,
+) -> Optional[LiquiditySweep]:
+    """Detect a trend-continuation sweep (opposite of reversal sweep).
+
+    A bearish continuation sweep:
+    - Price broke below a recent swing low
+    - Then closed BELOW the swept level (continuation, not reversal)
+    - Confirms institutional selling / bearish intent
+
+    A bullish continuation sweep:
+    - Price broke above a recent swing high
+    - Then closed ABOVE (continuation)
+
+    Parameters
+    ----------
+    candles:
+        Dict with ``"high"``, ``"low"``, ``"close"`` lists (same timeframe).
+    direction:
+        ``"SHORT"`` for bearish continuation, ``"LONG"`` for bullish.
+    lookback:
+        Number of candles to scan for swing highs/lows.
+
+    Returns
+    -------
+    :class:`LiquiditySweep` if detected, else ``None``.
+    """
+    if not candles:
+        return None
+
+    highs_raw = candles.get("high", [])
+    lows_raw = candles.get("low", [])
+    closes_raw = candles.get("close", [])
+
+    if len(highs_raw) < lookback + 2 or len(lows_raw) < lookback + 2:
+        return None
+
+    h = np.asarray(highs_raw, dtype=np.float64).ravel()
+    l = np.asarray(lows_raw, dtype=np.float64).ravel()
+    c = np.asarray(closes_raw, dtype=np.float64).ravel()
+    n = len(h)
+
+    direction_enum = Direction.SHORT if direction.upper() == "SHORT" else Direction.LONG
+
+    if direction_enum == Direction.SHORT:
+        # Bearish continuation: price swept a swing low and closed below it.
+        # Find the recent swing lows in the lookback window (excluding last candle).
+        scan_start = max(0, n - lookback - 1)
+        for i in range(scan_start, n - 1):
+            # Swing low: low[i] is lower than adjacent candles
+            is_swing_low = (
+                i > 0
+                and l[i] < l[i - 1]
+                and (i + 1 >= n or l[i] < l[i + 1])
+            )
+            if not is_swing_low:
+                continue
+            swing_level = float(l[i])
+            # Last candle wicks below and closes below the swing low
+            last_low = float(l[-1])
+            last_close = float(c[-1])
+            if last_low < swing_level and last_close < swing_level:
+                return LiquiditySweep(
+                    index=n - 1,
+                    direction=Direction.SHORT,
+                    sweep_level=swing_level,
+                    close_price=last_close,
+                    wick_high=float(h[-1]),
+                    wick_low=last_low,
+                )
+    else:
+        # Bullish continuation: price swept a swing high and closed above it.
+        scan_start = max(0, n - lookback - 1)
+        for i in range(scan_start, n - 1):
+            is_swing_high = (
+                i > 0
+                and h[i] > h[i - 1]
+                and (i + 1 >= n or h[i] > h[i + 1])
+            )
+            if not is_swing_high:
+                continue
+            swing_level = float(h[i])
+            last_high = float(h[-1])
+            last_close = float(c[-1])
+            if last_high > swing_level and last_close > swing_level:
+                return LiquiditySweep(
+                    index=n - 1,
+                    direction=Direction.LONG,
+                    sweep_level=swing_level,
+                    close_price=last_close,
+                    wick_high=last_high,
+                    wick_low=float(l[-1]),
+                )
+
+    return None

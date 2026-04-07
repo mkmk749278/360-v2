@@ -28,9 +28,14 @@ from config import (
     CHANNEL_SCALP_ORDERBLOCK_ENABLED,
     CHANNEL_SCALP_SUPERTREND_ENABLED,
     CHANNEL_SCALP_VWAP_ENABLED,
+    FUNDING_RATE_BOOST,
+    FUNDING_RATE_BOOST_THRESHOLD,
+    FUNDING_RATE_PENALTY,
+    FUNDING_RATE_PENALTY_THRESHOLD,
     GLOBAL_SYMBOL_COOLDOWN_SECONDS,
     MAX_CORRELATED_SCALP_SIGNALS,
     MTF_HARD_BLOCK,
+    MTF_MIN_SCORE_TRENDING_SHORT,
     QUIET_SCALP_MIN_CONFIDENCE,
     RADAR_ALERT_MIN_CONFIDENCE,
     REGIME_MIN_VOLUME_USD,
@@ -42,6 +47,7 @@ from config import (
     SMC_HARD_GATE_MIN,
     SMC_SCALP_LOOKBACK,
     SMC_SCALP_TOLERANCE_PCT,
+    SMC_SCORE_MIN_TRENDING_SHORT,
     TIER2_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
@@ -447,11 +453,15 @@ class Scanner:
         # Cooldown tracking: (symbol, channel_name) → monotonic expiry time
         self._cooldown_until: Dict[Tuple[str, str], float] = {}
 
-        # Global cross-channel per-symbol cooldown tracker.
-        # Maps symbol → monotonic timestamp when the cooldown expires.
-        # After ANY channel fires on a symbol, that symbol is locked across
-        # ALL channels for GLOBAL_SYMBOL_COOLDOWN_SECONDS seconds.
-        self._global_symbol_cooldown: Dict[str, float] = {}
+        # Global cross-channel per-symbol+direction cooldown tracker.
+        # Maps (symbol, direction) → monotonic timestamp when the cooldown expires.
+        # Directional: a LONG signal does not block a SHORT on the same symbol.
+        self._global_symbol_cooldown: Dict[Tuple[str, str], float] = {}
+
+        # Rolling BTC correlation cache: symbol → (correlation, expiry_monotonic)
+        # Recomputed once per scan cycle per symbol, cached to avoid redundant work.
+        self._btc_correlation_cache: Dict[str, float] = {}
+        self._btc_correlation_expiry: Dict[str, float] = {}
 
         # Regime history: symbol → list of (monotonic_time, regime_value) tuples
         # Used to detect oscillating / unstable regimes (too many flips in window).
@@ -903,6 +913,59 @@ class Scanner:
                 fh.write(str(time.time()))
         except OSError:
             pass  # Best-effort; don't crash the scan loop
+
+    def _is_in_global_cooldown(self, symbol: str, direction: str) -> bool:
+        """Return True if (symbol, direction) is in the global directional cooldown."""
+        key = (symbol, direction)
+        expiry = self._global_symbol_cooldown.get(key)
+        if expiry is None:
+            return False
+        if time.monotonic() < expiry:
+            return True
+        del self._global_symbol_cooldown[key]
+        return False
+
+    def _update_btc_correlation(self, symbol: str) -> None:
+        """Compute and cache 50-candle rolling Pearson correlation vs BTC.
+
+        Recomputed once per scan cycle per symbol.  Skipped if BTC candles
+        or symbol candles are unavailable.
+        """
+        if symbol in ("BTCUSDT", "ETHUSDT"):
+            self._btc_correlation_cache[symbol] = 1.0
+            return
+
+        _now = time.monotonic()
+        _expiry = self._btc_correlation_expiry.get(symbol, 0.0)
+        if _now < _expiry:
+            return  # Already fresh for this cycle
+
+        try:
+            _btc_candles = self.data_store.get_candles("BTCUSDT", "5m") or {}
+            _sym_candles = self.data_store.get_candles(symbol, "5m") or {}
+            _btc_closes = _btc_candles.get("close", [])
+            _sym_closes = _sym_candles.get("close", [])
+            _n = min(len(_btc_closes), len(_sym_closes), 50)
+            if _n >= 10:
+                _x = np.asarray(_btc_closes[-_n:], dtype=np.float64)
+                _y = np.asarray(_sym_closes[-_n:], dtype=np.float64)
+                _x = _x - _x.mean()
+                _y = _y - _y.mean()
+                _std_x = np.std(_x)
+                _std_y = np.std(_y)
+                if _std_x > 0 and _std_y > 0:
+                    _corr = float(np.dot(_x, _y) / (_n * _std_x * _std_y))
+                    _corr = max(-1.0, min(1.0, _corr))
+                    self._btc_correlation_cache[symbol] = _corr
+                else:
+                    self._btc_correlation_cache[symbol] = 0.7
+            else:
+                self._btc_correlation_cache[symbol] = 0.7  # conservative default
+        except Exception:
+            self._btc_correlation_cache[symbol] = 0.7  # fail-safe default
+
+        # Cache valid for the current scan cycle (expire after 30s)
+        self._btc_correlation_expiry[symbol] = _now + 30.0
 
     def _is_in_cooldown(self, symbol: str, channel_name: str) -> bool:
         """Return True if the (symbol, channel) pair is currently in cooldown."""
@@ -1508,6 +1571,24 @@ class Scanner:
         has_sweep = bool(ctx.smc_data["sweeps"])
         has_mss = ctx.smc_data["mss"] is not None
         has_fvg = bool(ctx.smc_data["fvg"])
+
+        # Wire continuation sweep detection for SHORT in TRENDING_DOWN (item 14)
+        # A bearish continuation sweep adds to SMC conviction for trend-following entries.
+        if (
+            sig.direction.value == "SHORT"
+            and _regime_key == "TRENDING_DOWN"
+            and not has_sweep
+        ):
+            try:
+                from src.smc import detect_continuation_sweep
+                _primary_tf = self._get_primary_timeframe(chan_name)
+                _cont_candles = self._resolve_candles(ctx.candles, _primary_tf)
+                _cont_sweep = detect_continuation_sweep(_cont_candles, "SHORT", lookback=10)
+                if _cont_sweep is not None:
+                    has_sweep = True  # Count continuation sweep as sweep evidence
+            except Exception:
+                pass  # Fail open
+
         ema_aligned = (
             ctx.ind_for_predict.get("ema9_last") is not None
             and ctx.ind_for_predict.get("ema21_last") is not None
@@ -1748,6 +1829,10 @@ class Scanner:
             # Override with regime-specific min_score when configured
             _mtf_cfg = _MTF_REGIME_CONFIG.get(_regime_key, {})
             _mtf_min_score = _mtf_cfg.get("min_score", _base_mtf_min_score)
+            # Relax MTF min_score for SHORT signals in TRENDING_DOWN regime:
+            # lower timeframes are already aligned by definition in a downtrend.
+            if _regime_key == "TRENDING_DOWN" and sig.direction.value == "SHORT":
+                _mtf_min_score = min(_mtf_min_score, MTF_MIN_SCORE_TRENDING_SHORT)
             # Build TF weight overrides from the regime config
             _higher_tfs = {"4h", "1d"}
             _lower_tfs = {"1m", "5m", "15m"}
@@ -1857,10 +1942,52 @@ class Scanner:
             except Exception as _oi_exc:
                 log.debug("OI gate error for {} {} (fail open): {}", symbol, chan_name, _oi_exc)
 
-        # ── Filter 5: Cross-Asset Correlation ───────────────────────────────
+        # ── Funding Rate Gate ────────────────────────────────────────────────
+        # Soft penalty/boost only — never hard blocks a signal alone.
+        # Extreme funding in the direction of the signal = expensive / crowded.
+        # Extreme funding opposite the signal = confirmation of signal thesis.
+        if _funding_rate is not None:
+            try:
+                _dir_upper = sig.direction.value.upper()
+                _fr = _funding_rate
+                _fr_flag: Optional[str] = None
+                _fr_adj: float = 0.0
+                if _dir_upper == "LONG":
+                    if _fr > FUNDING_RATE_BOOST_THRESHOLD:
+                        # Extreme short crowding confirms LONG
+                        _fr_adj = FUNDING_RATE_BOOST
+                        _fr_flag = f"FUNDING_BOOST:{_fr_adj:+.0f}"
+                    elif _fr > FUNDING_RATE_PENALTY_THRESHOLD:
+                        # Moderate long crowding — longs expensive
+                        _fr_adj = FUNDING_RATE_PENALTY
+                        _fr_flag = f"FUNDING_PENALTY:{_fr_adj:+.0f}"
+                elif _dir_upper == "SHORT":
+                    if _fr < -FUNDING_RATE_BOOST_THRESHOLD:
+                        # Extreme long crowding confirms SHORT
+                        _fr_adj = FUNDING_RATE_BOOST
+                        _fr_flag = f"FUNDING_BOOST:{_fr_adj:+.0f}"
+                    elif _fr < -FUNDING_RATE_PENALTY_THRESHOLD:
+                        # Moderate short crowding — shorts expensive
+                        _fr_adj = FUNDING_RATE_PENALTY
+                        _fr_flag = f"FUNDING_PENALTY:{_fr_adj:+.0f}"
+                if _fr_adj != 0.0:
+                    sig.confidence += _fr_adj
+                    if _fr_flag:
+                        sig.soft_gate_flags = (
+                            sig.soft_gate_flags + f",{_fr_flag}"
+                        ).lstrip(",")
+                    log.debug(
+                        "Funding gate {} {} fr={:.4f} {:+.1f}",
+                        symbol, chan_name, _fr, _fr_adj,
+                    )
+            except Exception as _fr_exc:
+                log.debug("Funding rate gate error for {} {} (fail open): {}", symbol, chan_name, _fr_exc)
+
+
         if _gate_profile.get("cross_asset", True) and symbol not in ("BTCUSDT", "ETHUSDT"):
             try:
                 _asset_states: List[AssetState] = []
+                _btc_corr: Optional[float] = self._btc_correlation_cache.get(symbol)
                 for _major in ("BTCUSDT", "ETHUSDT"):
                     _major_cd = self.data_store.get_candles(_major, "5m") or {}
                     _major_closes = _major_cd.get("close", [])
@@ -1870,14 +1997,25 @@ class Scanner:
                             AssetState(symbol=_major, trend=_trend, price_change_pct=_pct)
                         )
                 if _asset_states:
-                    ca_allowed, ca_reason = check_cross_asset_gate(
-                        sig.direction.value, symbol, _asset_states
+                    ca_allowed, ca_reason, ca_conf_adj = check_cross_asset_gate(
+                        sig.direction.value, symbol, _asset_states,
+                        btc_correlation=_btc_corr,
                     )
                     if not ca_allowed:
                         log.debug(
                             "Cross-asset gate blocked {} {}: {}", symbol, chan_name, ca_reason
                         )
                         return None, None
+                    if ca_conf_adj != 0.0:
+                        sig.confidence += ca_conf_adj
+                        if ca_reason:
+                            sig.soft_gate_flags = (
+                                sig.soft_gate_flags + f",CROSS_ASSET:{ca_conf_adj:+.0f}"
+                            ).lstrip(",")
+                        log.debug(
+                            "Cross-asset gate {} {} {:+.1f}: {}",
+                            symbol, chan_name, ca_conf_adj, ca_reason,
+                        )
             except Exception as _ca_exc:
                 log.debug(
                     "Cross-asset gate error for {} {} (fail open): {}", symbol, chan_name, _ca_exc
@@ -2296,12 +2434,19 @@ class Scanner:
         # A signal with smc_score < SMC_HARD_GATE_MIN has no institutional
         # footprint — it is a pure momentum/liquidity play with no SMC edge.
         # Fail-open when the PR09 scoring engine did not populate "smc" (engine error).
+        # Relaxed minimum for SHORT signals in TRENDING_DOWN: market is going
+        # their way, so the structural requirement is slightly eased.
         if "smc" in sig.component_scores:
             _smc_score = sig.component_scores["smc"]
-            if _smc_score < SMC_HARD_GATE_MIN:
+            _smc_min = (
+                SMC_SCORE_MIN_TRENDING_SHORT
+                if _regime_key == "TRENDING_DOWN" and sig.direction.value == "SHORT"
+                else SMC_HARD_GATE_MIN
+            )
+            if _smc_score < _smc_min:
                 log.debug(
                     "SMC hard gate: {} {} smc_score={:.1f} < {:.1f}",
-                    symbol, chan_name, _smc_score, SMC_HARD_GATE_MIN,
+                    symbol, chan_name, _smc_score, _smc_min,
                 )
                 self._suppression_counters[f"smc_hard_gate:{chan_name}"] += 1
                 self.suppression_tracker.record(SuppressionEvent(
@@ -2335,6 +2480,23 @@ class Scanner:
                 return None, cross_verified
 
         min_conf = self.confidence_overrides.get(chan_name, chan.config.min_confidence)
+
+        # Regime transition boost (item 15): if regime just changed in the direction
+        # of this signal, apply a confidence boost (high-probability entry window).
+        try:
+            _trans_boost = self.regime_detector.get_transition_boost(sig.direction.value)
+            if _trans_boost > 0.0:
+                sig.confidence = min(100.0, sig.confidence + _trans_boost)
+                sig.soft_gate_flags = (
+                    sig.soft_gate_flags + f",REGIME_TRANSITION:+{_trans_boost:.0f}"
+                ).lstrip(",")
+                log.debug(
+                    "Regime transition boost {} {}: +{:.1f} → {:.1f}",
+                    symbol, chan_name, _trans_boost, sig.confidence,
+                )
+        except Exception:
+            pass  # Fail-safe
+
         # QUIET regime safety net for scalp channels: only the highest-quality
         # mean-reversion setups are allowed through when the market is compressed.
         if _regime_key == "QUIET" and chan_name.startswith("360_SCALP"):
@@ -2400,14 +2562,8 @@ class Scanner:
             return
         ticks = self.data_store.ticks.get(symbol, [])
 
-        # Global symbol cooldown check — skip ALL channels for this symbol
-        # if any channel fired recently (cross-channel 30-minute lock).
-        _now = time.monotonic()
-        if symbol in self._global_symbol_cooldown:
-            if _now < self._global_symbol_cooldown[symbol]:
-                return  # Still in global cooldown — skip all channels
-            else:
-                del self._global_symbol_cooldown[symbol]  # Expired — clean up
+        # Compute rolling BTC correlation for this symbol (once per scan cycle)
+        self._update_btc_correlation(symbol)
 
         # Collect all signals before deciding what to emit (confluence check)
         _pending_signals: list = []
@@ -2458,6 +2614,15 @@ class Scanner:
                 ctx_for_chan = ctx
             sig, cross_verified = await self._prepare_signal(symbol, volume_24h, chan, ctx_for_chan)
             if sig is None:
+                continue
+            # Directional global cooldown check: skip if same (symbol, direction)
+            # fired recently. Opposite direction is not blocked.
+            _sig_dir = sig.direction.value if hasattr(sig.direction, "value") else str(sig.direction)
+            if self._is_in_global_cooldown(symbol, _sig_dir):
+                log.debug(
+                    "Global directional cooldown: {} {} {} skipped",
+                    symbol, _sig_dir, chan_name,
+                )
                 continue
             # Track evaluated setup class for diversity telemetry
             _sc = getattr(sig, "setup_class", chan_name)
@@ -2540,9 +2705,9 @@ class Scanner:
                     for _, ch_name in signals_and_channels:
                         self._set_cooldown(symbol, ch_name)
                     self.cluster_suppressor.record_signal(symbol, direction)
-                    # Set global cross-channel cooldown so this symbol is locked
-                    # across all channels for GLOBAL_SYMBOL_COOLDOWN_SECONDS.
-                    self._global_symbol_cooldown[symbol] = (
+                    # Directional cooldown: key is (symbol, direction) so the
+                    # same symbol can fire in the opposite direction after cooldown.
+                    self._global_symbol_cooldown[(symbol, direction)] = (
                         time.monotonic() + GLOBAL_SYMBOL_COOLDOWN_SECONDS
                     )
                 _emitted_directions.add(direction)
@@ -2557,9 +2722,9 @@ class Scanner:
             self._setup_emit_counts[sig.setup_class] += 1
             self._set_cooldown(symbol, chan_name)
             self.cluster_suppressor.record_signal(symbol, _dir)
-            # Set global cross-channel cooldown so this symbol is locked
-            # across all channels for GLOBAL_SYMBOL_COOLDOWN_SECONDS.
-            self._global_symbol_cooldown[symbol] = (
+            # Directional cooldown: key is (symbol, direction) so the
+            # same symbol can fire in the opposite direction after cooldown.
+            self._global_symbol_cooldown[(symbol, _dir)] = (
                 time.monotonic() + GLOBAL_SYMBOL_COOLDOWN_SECONDS
             )
 
