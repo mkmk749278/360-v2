@@ -23,39 +23,40 @@ log = get_logger("regime_manager")
 # Channels not in the allowed set for the current regime are skipped.
 _REGIME_ALLOWED_CHANNELS: Dict[str, FrozenSet[str]] = {
     "TRENDING_UP": frozenset({
-        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_OBI",
-        "360_SWING", "360_SPOT", "360_GEM",
+        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
+        "360_SCALP_VWAP", "360_SCALP_DIVERGENCE",
+        "360_SCALP_SUPERTREND", "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
     }),
     "TRENDING_DOWN": frozenset({
-        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_OBI",
-        "360_SWING", "360_SPOT", "360_GEM",
+        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
+        "360_SCALP_VWAP", "360_SCALP_DIVERGENCE",
+        "360_SCALP_SUPERTREND", "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
     }),
     "RANGING": frozenset({
         "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
-        "360_SCALP_VWAP", "360_SCALP_OBI",
-        "360_SWING", "360_SPOT", "360_GEM",
+        "360_SCALP_VWAP", "360_SCALP_DIVERGENCE",
+        "360_SCALP_SUPERTREND", "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
     }),
     "VOLATILE": frozenset({
-        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_OBI",
-        "360_SPOT", "360_GEM",
-        # SWING blocked in VOLATILE (chaotic, stops get swept)
+        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
+        "360_SCALP_DIVERGENCE", "360_SCALP_ORDERBLOCK",
     }),
     "QUIET": frozenset({
-        # Only VWAP scalp variant is fully blocked; other scalp channels
+        # VWAP scalp variant is fully blocked; other scalp channels
         # are allowed but with elevated thresholds (handled by scanner).
-        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_OBI",
-        "360_SWING", "360_SPOT", "360_GEM",
+        "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
+        "360_SCALP_DIVERGENCE", "360_SCALP_SUPERTREND",
+        "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
     }),
 }
 
 # Channels that receive PRIORITY scheduling in specific regimes.
-# Priority channels are evaluated first and with relaxed thresholds.
 _REGIME_PRIORITY_CHANNELS: Dict[str, FrozenSet[str]] = {
-    "TRENDING_UP": frozenset({"360_SCALP", "360_SCALP_FVG", "360_SWING"}),
-    "TRENDING_DOWN": frozenset({"360_SCALP", "360_SCALP_FVG", "360_SWING"}),
+    "TRENDING_UP": frozenset({"360_SCALP", "360_SCALP_FVG", "360_SCALP_SUPERTREND"}),
+    "TRENDING_DOWN": frozenset({"360_SCALP", "360_SCALP_FVG", "360_SCALP_SUPERTREND"}),
     "RANGING": frozenset({"360_SCALP_VWAP", "360_SCALP", "360_SCALP_CVD"}),
-    "VOLATILE": frozenset({"360_SCALP_OBI", "360_SCALP_CVD"}),
-    "QUIET": frozenset({"360_SPOT", "360_GEM"}),
+    "VOLATILE": frozenset({"360_SCALP_CVD"}),
+    "QUIET": frozenset({"360_SCALP_ICHIMOKU"}),
 }
 
 
@@ -106,8 +107,8 @@ class RegimeManager:
         if not allowed:
             allowed = frozenset({
                 "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
-                "360_SCALP_VWAP", "360_SCALP_OBI",
-                "360_SWING", "360_SPOT", "360_GEM",
+                "360_SCALP_VWAP", "360_SCALP_DIVERGENCE",
+                "360_SCALP_SUPERTREND", "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
             })
 
         return RegimeSchedule(

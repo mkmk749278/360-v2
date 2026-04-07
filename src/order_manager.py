@@ -1,22 +1,18 @@
-"""Order manager – structural foundation for direct exchange execution (V3).
+"""Order manager – SCALP market-order execution (V3).
 
-This module provides the :class:`OrderManager` interface so that the rest of
-the engine can already call ``await order_manager.place_limit_order(sig)``
-without any live exchange logic being wired in yet.
+This module provides the :class:`OrderManager` interface for direct exchange
+execution scoped to SCALP strategies only.
 
 When ``AUTO_EXECUTION_ENABLED=true`` and a real :class:`~src.exchange_client.CCXTClient`
-is passed, the manager executes orders directly on the exchange using CCXT.
+is passed, the manager executes market orders directly on the exchange using CCXT.
 
 The stubs log the intent and return ``None`` when the CCXT client is absent.
 The calling code in :class:`src.trade_monitor.TradeMonitor` does not need to change.
 
 Design notes
 ------------
-* Limit orders are used for DCA / swing strategies (``360_SWING``, ``360_SPOT``)
-  to capture maker-fee rebates and reduce slippage on fills.
-* Market orders are used for high-frequency scalp strategies
-  (``360_SCALP``) where immediate fill is more important
-  than the maker/taker fee delta.
+* Market orders are used exclusively — SCALP strategies require immediate fill
+  certainty over maker-fee optimisation.
 * Auto-execution is **off by default** (``AUTO_EXECUTION_ENABLED=false``).
   The engine still publishes to Telegram as normal; the order stubs simply
   no-op until the feature flag is enabled.
@@ -35,9 +31,6 @@ from src.utils import get_logger
 
 log = get_logger("order_manager")
 
-# Channels for which limit orders should be preferred (maker-fee strategy).
-_LIMIT_ORDER_CHANNELS = {"360_SWING", "360_SPOT"}
-
 # Partial TP fractions (must sum to 1.0)
 _TP_FRACTIONS: Dict[int, float] = {1: 0.33, 2: 0.33, 3: 0.34}
 
@@ -52,7 +45,7 @@ def _symbol_to_ccxt(symbol: str) -> str:
 
 
 class OrderManager:
-    """Manages direct exchange order placement.
+    """Manages direct exchange order placement for SCALP strategies.
 
     Parameters
     ----------
@@ -61,9 +54,8 @@ class OrderManager:
         still routed to Telegram as usual.
     exchange_client:
         A :class:`~src.exchange_client.CCXTClient` instance (or any object with
-        ``create_limit_order``, ``create_market_order``, ``cancel_order``, and
-        ``fetch_balance`` coroutines).  Pass ``None`` until the real client is
-        available.
+        ``create_market_order``, ``cancel_order``, and ``fetch_balance``
+        coroutines).  Pass ``None`` until the real client is available.
     position_size_pct:
         Percentage of available balance to risk per trade (default 2.0).
     max_position_usd:
@@ -122,73 +114,6 @@ class OrderManager:
 
         return position_usd / entry_price
 
-    async def place_limit_order(
-        self,
-        signal: Any,
-        *,
-        price: Optional[float] = None,
-        quantity: Optional[float] = None,
-    ) -> Optional[str]:
-        """Place a limit (maker) order on the exchange.
-
-        Used by spot accumulation and swing strategies (``360_SPOT``, ``360_SWING``) to post
-        resting bids/offers and capture maker-fee rebates.
-
-        Parameters
-        ----------
-        signal:
-            The :class:`src.channels.base.Signal` driving the order.
-        price:
-            Explicit limit price.  When ``None`` the signal's ``entry``
-            price is used.
-        quantity:
-            Order size in base currency.  When ``None`` computed from balance.
-
-        Returns
-        -------
-        str or None
-            Exchange order-ID on success; ``None`` when execution is disabled.
-        """
-        if not self._enabled:
-            return None
-
-        limit_price = price if price is not None else signal.entry
-        direction = getattr(signal.direction, "value", str(signal.direction))
-        side = "buy" if direction == "LONG" else "sell"
-
-        if quantity is None:
-            quantity = await self._compute_quantity(limit_price)
-
-        if self._client is not None:
-            try:
-                ccxt_symbol = _symbol_to_ccxt(signal.symbol)
-                order = await self._client.create_limit_order(
-                    ccxt_symbol, side, quantity, limit_price
-                )
-                order_id: str = str(order.get("id", ""))
-                self._open_quantities[signal.signal_id] = quantity
-                log.info(
-                    "[OrderManager] limit order placed: %s %s %s @ %s qty=%s id=%s",
-                    signal.symbol, signal.channel, side, limit_price, quantity, order_id,
-                )
-                return order_id
-            except Exception as exc:
-                log.error(
-                    "[OrderManager] limit order failed for %s: %s",
-                    signal.symbol, exc,
-                )
-                return None
-
-        log.info(
-            "[OrderManager] STUB place_limit_order: {} {} {} @ {} (qty={})",
-            signal.symbol,
-            signal.channel,
-            side,
-            limit_price,
-            quantity,
-        )
-        return None
-
     async def place_market_order(
         self,
         signal: Any,
@@ -197,7 +122,7 @@ class OrderManager:
     ) -> Optional[str]:
         """Place a market (taker) order on the exchange.
 
-        Used by high-frequency strategies (``360_SCALP``) where immediate fill certainty outweighs the taker-fee cost.
+        All SCALP strategies use market orders for immediate fill certainty.
 
         Parameters
         ----------
@@ -256,7 +181,7 @@ class OrderManager:
         ----------
         order_id:
             The exchange-assigned order identifier returned by
-            :meth:`place_limit_order` or :meth:`place_market_order`.
+            :meth:`place_market_order`.
         symbol:
             Trading-pair symbol (e.g. ``"BTCUSDT"``).
 
@@ -380,13 +305,9 @@ class OrderManager:
         return None
 
     async def execute_signal(self, signal: Any) -> Optional[str]:
-        """Dispatch an order for *signal* using the appropriate order type.
+        """Execute a market order for *signal*.
 
-        Convenience wrapper that selects limit vs. market order based on the
-        signal's channel:
-
-        * ``360_SPOT`` / ``360_SWING`` → :meth:`place_limit_order` (maker)
-        * All other channels → :meth:`place_market_order` (taker)
+        All SCALP signals use market orders for immediate fill certainty.
 
         Parameters
         ----------
@@ -401,6 +322,4 @@ class OrderManager:
         if not self._enabled:
             return None
 
-        if signal.channel in _LIMIT_ORDER_CHANNELS:
-            return await self.place_limit_order(signal)
         return await self.place_market_order(signal)

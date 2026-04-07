@@ -14,9 +14,6 @@ registry = CommandRegistry()
 
 _CHANNEL_EMOJIS: Dict[str, str] = {
     "360_SCALP": "⚡",
-    "360_SWING": "🏛️",
-    "360_SPOT": "📈",
-    "360_GEM": "💎",
 }
 
 

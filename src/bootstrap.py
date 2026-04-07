@@ -235,7 +235,6 @@ class Bootstrap:
             asyncio.create_task(engine._daily_performance_report_loop()),
             asyncio.create_task(engine._trade_observer.start()),
             asyncio.create_task(engine._content_scheduler.run(), name="content_scheduler"),
-            asyncio.create_task(engine._radar_channel.run(), name="radar_channel"),
         ]
 
         # OI poller – background REST polling for Binance Futures Open Interest

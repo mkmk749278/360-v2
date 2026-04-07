@@ -28,10 +28,10 @@ CHANNEL_THRESHOLDS: Dict[str, float] = {
     "360_SCALP_FVG": float(os.getenv("FILTER_THRESHOLD_SCALP_FVG", "65.0")),
     "360_SCALP_CVD": float(os.getenv("FILTER_THRESHOLD_SCALP_CVD", "65.0")),
     "360_SCALP_VWAP": float(os.getenv("FILTER_THRESHOLD_SCALP_VWAP", "68.0")),
-    "360_SCALP_OBI": float(os.getenv("FILTER_THRESHOLD_SCALP_OBI", "68.0")),
-    "360_SWING": float(os.getenv("FILTER_THRESHOLD_SWING", "60.0")),
-    "360_SPOT": float(os.getenv("FILTER_THRESHOLD_SPOT", "55.0")),
-    "360_GEM": float(os.getenv("FILTER_THRESHOLD_GEM", "50.0")),
+    "360_SCALP_DIVERGENCE": float(os.getenv("FILTER_THRESHOLD_SCALP_DIVERGENCE", "65.0")),
+    "360_SCALP_SUPERTREND": float(os.getenv("FILTER_THRESHOLD_SCALP_SUPERTREND", "65.0")),
+    "360_SCALP_ICHIMOKU": float(os.getenv("FILTER_THRESHOLD_SCALP_ICHIMOKU", "65.0")),
+    "360_SCALP_ORDERBLOCK": float(os.getenv("FILTER_THRESHOLD_SCALP_ORDERBLOCK", "68.0")),
 }
 
 # Regime-based threshold adjustments.

@@ -134,21 +134,6 @@ OPENAI_MIN_CONFIDENCE_THRESHOLD: float = float(
 OPENAI_HOT_PATH_BYPASS_CHANNELS: List[str] = ["360_SCALP"]
 
 # ---------------------------------------------------------------------------
-# Gem Scanner — macro-reversal detection for deeply discounted altcoins
-# ---------------------------------------------------------------------------
-GEM_SCANNER_ENABLED: bool = _safe_bool("GEM_SCANNER_ENABLED", "true")
-GEM_MIN_DRAWDOWN_PCT: float = _safe_float("GEM_MIN_DRAWDOWN_PCT", "70.0")
-GEM_MAX_RANGE_PCT: float = _safe_float("GEM_MAX_RANGE_PCT", "40.0")
-GEM_MIN_VOLUME_RATIO: float = _safe_float("GEM_MIN_VOLUME_RATIO", "1.5")
-GEM_SCAN_INTERVAL_HOURS: int = _safe_int("GEM_SCAN_INTERVAL_HOURS", "6")
-GEM_MAX_DAILY_SIGNALS: int = _safe_int("GEM_MAX_DAILY_SIGNALS", "3")
-# Separate, wider pair universe for the gem scanner (small-cap gems like LYN)
-GEM_PAIRS_COUNT: int = _safe_int("GEM_PAIRS_COUNT", "200")
-GEM_MIN_VOLUME_USD: float = _safe_float("GEM_MIN_VOLUME_USD", "250000")
-# Chart image generation for gem signals (requires mplfinance)
-GEM_CHART_ENABLED: bool = _safe_bool("GEM_CHART_ENABLED", "true")
-
-# ---------------------------------------------------------------------------
 # Macro Watchdog – async background task for global market-event alerts
 # ---------------------------------------------------------------------------
 MACRO_WATCHDOG_ENABLED: bool = _safe_bool("MACRO_WATCHDOG_ENABLED", "true")
@@ -621,22 +606,6 @@ CHANNEL_SCALP_VWAP = ChannelConfig(
     min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
 )
 
-CHANNEL_SCALP_OBI = ChannelConfig(
-    name="360_SCALP_OBI",
-    emoji="⚡",
-    timeframes=["5m"],
-    sl_pct_range=(0.10, 0.20),
-    tp_ratios=[1.5, 2.5, 3.0],
-    trailing_atr_mult=1.5,
-    adx_min=0,
-    adx_max=100,
-    spread_max=0.02,
-    min_confidence=75,
-    min_volume=5_000_000.0,
-    dca_enabled=True,
-    min_signal_lifespan=int(os.getenv("SCALP_MIN_LIFESPAN", "900")),
-)
-
 CHANNEL_SCALP_DIVERGENCE = ChannelConfig(
     name="360_SCALP_DIVERGENCE",
     emoji="⚡",
@@ -706,7 +675,6 @@ ALL_CHANNELS: List[ChannelConfig] = [
     CHANNEL_SCALP_FVG,
     CHANNEL_SCALP_CVD,
     CHANNEL_SCALP_VWAP,
-    CHANNEL_SCALP_OBI,
     CHANNEL_SCALP_DIVERGENCE,
     CHANNEL_SCALP_SUPERTREND,
     CHANNEL_SCALP_ICHIMOKU,
@@ -768,7 +736,6 @@ def _build_channel_telegram_map() -> Dict[str, str]:
         "360_SCALP_FVG":        active,
         "360_SCALP_CVD":        active,
         "360_SCALP_VWAP":       active,
-        "360_SCALP_OBI":        active,
         "360_SCALP_DIVERGENCE": active,
         "360_SCALP_SUPERTREND": active,
         "360_SCALP_ICHIMOKU":   active,
@@ -834,9 +801,6 @@ TELEMETRY_INTERVAL: float = 60.0  # seconds
 # ---------------------------------------------------------------------------
 CHANNEL_COOLDOWN_SECONDS: Dict[str, int] = {
     "360_SCALP": 60,
-    "360_SWING": 300,
-    "360_SPOT": 600,
-    "360_GEM": 21600,  # 6 hours — macro timeframe
 }
 
 # ---------------------------------------------------------------------------
@@ -846,9 +810,6 @@ CHANNEL_COOLDOWN_SECONDS: Dict[str, int] = {
 # ---------------------------------------------------------------------------
 SIGNAL_SCAN_COOLDOWN_SECONDS: Dict[str, int] = {
     "360_SCALP": int(os.getenv("SCALP_SCAN_COOLDOWN", "600")),
-    "360_SWING": int(os.getenv("SWING_SCAN_COOLDOWN", "60")),
-    "360_SPOT": int(os.getenv("SPOT_SCAN_COOLDOWN", "600")),
-    "360_GEM": int(os.getenv("GEM_SCAN_COOLDOWN", "21600")),  # 6 hours
 }
 
 # ---------------------------------------------------------------------------
@@ -882,9 +843,6 @@ CIRCUIT_BREAKER_PER_SYMBOL_COOLDOWN_SECONDS: int = int(
 # ---------------------------------------------------------------------------
 THESIS_COOLDOWN_AFTER_SL_SECONDS: Dict[str, int] = {
     "360_SCALP": int(os.getenv("THESIS_COOLDOWN_SCALP", "3600")),       # 1 hour
-    "360_SWING": int(os.getenv("THESIS_COOLDOWN_SWING", "14400")),      # 4 hours
-    "360_SPOT": int(os.getenv("THESIS_COOLDOWN_SPOT", "3600")),         # 1 hour
-    "360_GEM": int(os.getenv("THESIS_COOLDOWN_GEM", "604800")),         # 7 days
 }
 
 # ---------------------------------------------------------------------------
@@ -904,7 +862,6 @@ MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
     "360_SCALP_FVG":        int(os.getenv("MAX_SCALP_FVG_SIGNALS", "3")),
     "360_SCALP_CVD":        int(os.getenv("MAX_SCALP_CVD_SIGNALS", "3")),
     "360_SCALP_VWAP":       int(os.getenv("MAX_SCALP_VWAP_SIGNALS", "3")),
-    "360_SCALP_OBI":        int(os.getenv("MAX_SCALP_OBI_SIGNALS", "3")),
     "360_SCALP_DIVERGENCE": int(os.getenv("MAX_SCALP_DIV_SIGNALS", "3")),
     "360_SCALP_SUPERTREND": int(os.getenv("MAX_SCALP_STR_SIGNALS", "3")),
     "360_SCALP_ICHIMOKU":   int(os.getenv("MAX_SCALP_ICH_SIGNALS", "3")),
@@ -919,7 +876,6 @@ MIN_SIGNAL_LIFESPAN_SECONDS: Dict[str, int] = {
     "360_SCALP_FVG":        int(os.getenv("MIN_LIFESPAN_SCALP_FVG",  "180")),
     "360_SCALP_CVD":        int(os.getenv("MIN_LIFESPAN_SCALP_CVD",  "180")),
     "360_SCALP_VWAP":       int(os.getenv("MIN_LIFESPAN_SCALP_VWAP", "180")),
-    "360_SCALP_OBI":        int(os.getenv("MIN_LIFESPAN_SCALP_OBI",  "180")),
     "360_SCALP_DIVERGENCE": int(os.getenv("MIN_LIFESPAN_SCALP_DIV",  "180")),
     "360_SCALP_SUPERTREND": int(os.getenv("MIN_LIFESPAN_SCALP_STR",  "180")),
     "360_SCALP_ICHIMOKU":   int(os.getenv("MIN_LIFESPAN_SCALP_ICH",  "180")),
@@ -963,13 +919,6 @@ RANGING_ADX_SUPPRESS_THRESHOLD: float = float(
 # Per-channel pair quality thresholds (overridable via env vars)
 # ---------------------------------------------------------------------------
 PAIR_QUALITY_THRESHOLD_SCALP: float = _safe_float("PAIR_QUALITY_THRESHOLD_SCALP", "58.0")
-PAIR_QUALITY_THRESHOLD_SWING: float = _safe_float("PAIR_QUALITY_THRESHOLD_SWING", "50.0")
-PAIR_QUALITY_THRESHOLD_SPOT:  float = _safe_float("PAIR_QUALITY_THRESHOLD_SPOT",  "45.0")
-PAIR_QUALITY_THRESHOLD_GEM:   float = _safe_float("PAIR_QUALITY_THRESHOLD_GEM",   "40.0")
-
-PAIR_QUALITY_VOLUME_FLOOR_SWING: float = _safe_float("PAIR_QUALITY_VOLUME_FLOOR_SWING", "500000.0")
-PAIR_QUALITY_VOLUME_FLOOR_SPOT:  float = _safe_float("PAIR_QUALITY_VOLUME_FLOOR_SPOT",  "250000.0")
-PAIR_QUALITY_VOLUME_FLOOR_GEM:   float = _safe_float("PAIR_QUALITY_VOLUME_FLOOR_GEM",   "100000.0")
 
 # ---------------------------------------------------------------------------
 # How long a signal setup remains actionable (minutes).  After this window
@@ -980,14 +929,10 @@ SIGNAL_VALID_FOR_MINUTES: Dict[str, int] = {
     "360_SCALP_FVG":        int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
     "360_SCALP_CVD":        int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
     "360_SCALP_VWAP":       int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
-    "360_SCALP_OBI":        int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
     "360_SCALP_DIVERGENCE": int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
     "360_SCALP_SUPERTREND": int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
     "360_SCALP_ICHIMOKU":   int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
     "360_SCALP_ORDERBLOCK": int(os.getenv("SIGNAL_VALID_SCALP",  "15")),
-    "360_SWING":      int(os.getenv("SIGNAL_VALID_SWING",   "60")),
-    "360_SPOT":       int(os.getenv("SIGNAL_VALID_SPOT",   "240")),
-    "360_GEM":        int(os.getenv("SIGNAL_VALID_GEM",   "1440")),
 }
 
 # ---------------------------------------------------------------------------
@@ -996,9 +941,6 @@ SIGNAL_VALID_FOR_MINUTES: Dict[str, int] = {
 # ---------------------------------------------------------------------------
 MAX_SIGNAL_HOLD_SECONDS: Dict[str, int] = {
     "360_SCALP": int(os.getenv("MAX_SCALP_HOLD", "3600")),       # 1 hour
-    "360_SWING": int(os.getenv("MAX_SWING_HOLD", "172800")),     # 48 hours
-    "360_SPOT": int(os.getenv("MAX_SPOT_HOLD", "604800")),       # 7 days
-    "360_GEM": int(os.getenv("MAX_GEM_HOLD", "2592000")),        # 30 days
 }
 
 # ---------------------------------------------------------------------------
@@ -1011,10 +953,7 @@ MAX_CONCURRENT_SIGNALS: int = 5
 # Signal invalidation – minimum age before market-structure checks apply (secs)
 # ---------------------------------------------------------------------------
 INVALIDATION_MIN_AGE_SECONDS: Dict[str, int] = {
-    "360_SCALP": 600,       # was 300 — scalps need more time to develop on 1m/5m candles
-    "360_SWING": 300,
-    "360_SPOT": 1800,
-    "360_GEM": 604800,      # 7 days — macro positions need much longer before invalidation
+    "360_SCALP": 600,       # scalps need more time to develop on 1m/5m candles
 }
 
 # Momentum threshold below which a signal is considered to have lost its thesis.
@@ -1022,9 +961,6 @@ INVALIDATION_MIN_AGE_SECONDS: Dict[str, int] = {
 # SCALP uses 1m/5m candles which have rapid momentum oscillation — use a lower threshold.
 INVALIDATION_MOMENTUM_THRESHOLD: Dict[str, float] = {
     "360_SCALP": float(os.getenv("INVALIDATION_MOMENTUM_THRESHOLD_SCALP", "0.10")),
-    "360_SWING": float(os.getenv("INVALIDATION_MOMENTUM_THRESHOLD_SWING", "0.20")),
-    "360_SPOT": float(os.getenv("INVALIDATION_MOMENTUM_THRESHOLD_SPOT", "0.30")),
-    "360_GEM": float(os.getenv("INVALIDATION_MOMENTUM_THRESHOLD_GEM", "0.50")),
 }
 
 # Number of *consecutive* below-threshold momentum readings required before a
@@ -1033,9 +969,6 @@ INVALIDATION_MOMENTUM_THRESHOLD: Dict[str, float] = {
 # readings reduces false kills while still catching genuine exhaustion.
 INVALIDATION_CONSECUTIVE_THRESHOLD: Dict[str, int] = {
     "360_SCALP": int(os.getenv("INVALIDATION_CONSECUTIVE_THRESHOLD_SCALP", "2")),
-    "360_SWING": int(os.getenv("INVALIDATION_CONSECUTIVE_THRESHOLD_SWING", "1")),
-    "360_SPOT": int(os.getenv("INVALIDATION_CONSECUTIVE_THRESHOLD_SPOT", "1")),
-    "360_GEM": int(os.getenv("INVALIDATION_CONSECUTIVE_THRESHOLD_GEM", "1")),
 }
 
 # ---------------------------------------------------------------------------

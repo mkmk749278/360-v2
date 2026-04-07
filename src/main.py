@@ -32,7 +32,6 @@ from src.channels.scalp import ScalpChannel
 from src.channels.scalp_fvg import ScalpFVGChannel
 from src.channels.scalp_cvd import ScalpCVDChannel
 from src.channels.scalp_vwap import ScalpVWAPChannel
-from src.channels.scalp_obi import ScalpOBIChannel
 from src.channels.scalp_divergence import ScalpDivergenceChannel
 from src.channels.scalp_supertrend import ScalpSupertrendChannel
 from src.channels.scalp_ichimoku import ScalpIchimokuChannel
@@ -65,7 +64,6 @@ from src.redis_client import RedisClient
 from src.signal_queue import SignalQueue
 from src.state_cache import StateCache
 from src.scheduler import ContentScheduler
-from src.radar_channel import RadarChannel
 from config import (
     CIRCUIT_BREAKER_MAX_CONSECUTIVE_SL,
     CIRCUIT_BREAKER_MAX_HOURLY_SL,
@@ -165,7 +163,6 @@ class CryptoSignalEngine:
             ScalpFVGChannel(),
             ScalpCVDChannel(),
             ScalpVWAPChannel(),
-            ScalpOBIChannel(),
             ScalpDivergenceChannel(),
             ScalpSupertrendChannel(),
             ScalpIchimokuChannel(),
@@ -278,13 +275,6 @@ class CryptoSignalEngine:
             post_to_free=self.telegram.post_to_free_channel,
             post_to_active=self.telegram.post_to_active_channel,
             engine_context_fn=self._get_engine_context,
-        )
-
-        # PR2: Radar channel — evaluates soft-disabled channels and posts radar
-        # alerts to the free channel.
-        self._radar_channel = RadarChannel(
-            post_to_free=self.telegram.post_to_free_channel,
-            scanner_context_fn=self._get_scanner_context,
         )
 
         # Command handler (delegates all Telegram commands)

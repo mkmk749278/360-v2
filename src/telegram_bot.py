@@ -269,14 +269,10 @@ class TelegramBot:
         "360_SCALP_FVG":        "SCALP FVG",
         "360_SCALP_CVD":        "SCALP CVD",
         "360_SCALP_VWAP":       "SCALP VWAP",
-        "360_SCALP_OBI":        "SCALP OBI",
         "360_SCALP_DIVERGENCE": "SCALP DIVERGENCE",
         "360_SCALP_SUPERTREND": "SCALP SUPERTREND",
         "360_SCALP_ICHIMOKU":   "SCALP ICHIMOKU",
         "360_SCALP_ORDERBLOCK": "SCALP ORDERBLOCK",
-        "360_SWING":            "SWING",
-        "360_SPOT":             "SPOT",
-        "360_GEM":              "GEM",
     }
 
     # Estimated hold time per channel
@@ -285,14 +281,10 @@ class TelegramBot:
         "360_SCALP_FVG":        "~1-2h",
         "360_SCALP_CVD":        "~1-2h",
         "360_SCALP_VWAP":       "~1-2h",
-        "360_SCALP_OBI":        "~1-2h",
         "360_SCALP_DIVERGENCE": "~1-2h",
         "360_SCALP_SUPERTREND": "~1-2h",
         "360_SCALP_ICHIMOKU":   "~1-2h",
         "360_SCALP_ORDERBLOCK": "~1-2h",
-        "360_SWING":            "~1-2d",
-        "360_SPOT":             "~3-7d",
-        "360_GEM":              "~2-4w",
     }
 
     @staticmethod
@@ -325,14 +317,10 @@ class TelegramBot:
             "360_SCALP_FVG":        "⚡",
             "360_SCALP_CVD":        "⚡",
             "360_SCALP_VWAP":       "⚡",
-            "360_SCALP_OBI":        "⚡",
             "360_SCALP_DIVERGENCE": "⚡",
             "360_SCALP_SUPERTREND": "⚡",
             "360_SCALP_ICHIMOKU":   "⚡",
             "360_SCALP_ORDERBLOCK": "⚡",
-            "360_SWING":            "🏛️",
-            "360_SPOT":             "📈",
-            "360_GEM":              "💎",
         }
         emoji = chan_emojis.get(sig.channel, "📡")
         chan_name = TelegramBot._CHANNEL_DISPLAY_NAME.get(sig.channel, sig.channel)
@@ -454,14 +442,10 @@ class TelegramBot:
             "360_SCALP_FVG":        "⚡",
             "360_SCALP_CVD":        "⚡",
             "360_SCALP_VWAP":       "⚡",
-            "360_SCALP_OBI":        "⚡",
             "360_SCALP_DIVERGENCE": "⚡",
             "360_SCALP_SUPERTREND": "⚡",
             "360_SCALP_ICHIMOKU":   "⚡",
             "360_SCALP_ORDERBLOCK": "⚡",
-            "360_SWING":            "🏛️",
-            "360_SPOT":             "📈",
-            "360_GEM":              "💎",
         }
         emoji = chan_emojis.get(sig.channel, "📡")
         dir_emoji = "🚀" if sig.direction == Direction.LONG else "⬇️"
@@ -558,46 +542,12 @@ class TelegramBot:
         return header + body + footer
 
     @staticmethod
-    def format_gem_signal(
-        symbol: str,
-        current_price: float,
-        ath: float,
-        drawdown_pct: float,
-        x_potential: float,
-        accumulation_days: int,
-        volume_ratio: float,
-        confidence: float,
-        timestamp: float,
-    ) -> str:
-        """Format a 360_GEM macro-reversal signal for Telegram."""
-        import datetime
-
-        ts_str = datetime.datetime.utcfromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M UTC")
-        lines = [
-            f"💎 360\\_GEM ALERT — POTENTIAL x{x_potential:.0f} 🚀",
-            f"Pair: `{symbol}`",
-            "📈 LONG \\(Macro Reversal\\)",
-            f"💰 Current Price: `{fmt_price(current_price)}`",
-            f"📊 ATH: `{fmt_price(ath)}` | Drawdown: `{drawdown_pct:.0f}%`",
-            f"🏗️ Accumulation Base: `{accumulation_days}` days",
-            f"📈 Volume Surge: `{volume_ratio:.1f}x` average",
-            "🎯 Target: Previous ATH region",
-            "🛡️ SL: Below accumulation base",
-            f"🤖 Confidence: `{confidence:.0f}%`",
-            f"⏰ Time: `{ts_str}`",
-        ]
-        return "\n".join(lines)
-
-    @staticmethod
     def format_highlight_message(sig: Signal, tp_level: int, tp_pnl_pct: float) -> str:
         """Format an eye-catching winning trade highlight for the free channel."""
         from src.utils import utcnow
 
         chan_emojis = {
             "360_SCALP": "⚡",
-            "360_SWING": "🏛️",
-            "360_SPOT": "📈",
-            "360_GEM": "💎",
         }
         chan_emoji = chan_emojis.get(sig.channel, "📡")
         dir_emoji = "🚀" if sig.direction.value == "LONG" else "⬇️"

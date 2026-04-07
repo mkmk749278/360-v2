@@ -72,13 +72,6 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.RANGE_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
-    "360_SCALP_OBI": {
-        SetupClass.TREND_PULLBACK_CONTINUATION,
-        SetupClass.LIQUIDITY_SWEEP_REVERSAL,
-        SetupClass.RANGE_REJECTION,
-        SetupClass.MOMENTUM_EXPANSION,
-        SetupClass.MULTI_STRATEGY_CONFLUENCE,
-    },
     "360_SCALP_DIVERGENCE": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -104,28 +97,6 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.BREAKOUT_RETEST,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.RANGE_REJECTION,
-        SetupClass.MULTI_STRATEGY_CONFLUENCE,
-    },
-    "360_SWING": {
-        SetupClass.TREND_PULLBACK_CONTINUATION,
-        SetupClass.BREAKOUT_RETEST,
-        SetupClass.LIQUIDITY_SWEEP_REVERSAL,
-        SetupClass.MULTI_STRATEGY_CONFLUENCE,
-    },
-    "360_SPOT": {
-        SetupClass.TREND_PULLBACK_CONTINUATION,
-        SetupClass.BREAKOUT_RETEST,
-        SetupClass.LIQUIDITY_SWEEP_REVERSAL,
-        SetupClass.MOMENTUM_EXPANSION,
-        SetupClass.MULTI_STRATEGY_CONFLUENCE,
-    },
-    "360_GEM": {
-        SetupClass.TREND_PULLBACK_CONTINUATION,
-        SetupClass.BREAKOUT_RETEST,
-        SetupClass.LIQUIDITY_SWEEP_REVERSAL,
-        SetupClass.RANGE_REJECTION,
-        SetupClass.MOMENTUM_EXPANSION,
-        SetupClass.EXHAUSTION_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
 }
@@ -183,13 +154,10 @@ _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP_FVG": 1.0,
     "360_SCALP_CVD": 1.0,
     "360_SCALP_VWAP": 1.0,
-    "360_SCALP_OBI": 1.0,
     "360_SCALP_DIVERGENCE": 1.0,
     "360_SCALP_SUPERTREND": 1.2,
     "360_SCALP_ICHIMOKU": 1.2,
     "360_SCALP_ORDERBLOCK": 1.0,
-    "360_SWING": 3.0,
-    "360_SPOT": 2.0,
 }
 
 
@@ -397,11 +365,7 @@ _SPREAD_LIMIT_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP":      0.025,  # Tightest — execution-sensitive
     "360_SCALP_FVG":  0.03,
     "360_SCALP_CVD":  0.03,
-    "360_SCALP_OBI":  0.03,
     "360_SCALP_VWAP": 0.03,
-    "360_SWING":      0.05,   # Wider allowed — longer holding period
-    "360_SPOT":       0.06,   # Widest intraday channel — multi-day holds
-    "360_GEM":        0.08,   # Gem/altcoin pairs have wider spreads
 }
 
 # Minimum 24h volume (USD) for non-SCALP channels.  Scalp channels keep the
@@ -413,11 +377,7 @@ _MIN_COMPOSITE_SCORE_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP":      58.0,
     "360_SCALP_FVG":  58.0,
     "360_SCALP_CVD":  58.0,
-    "360_SCALP_OBI":  58.0,
     "360_SCALP_VWAP": 58.0,
-    "360_SWING":      50.0,
-    "360_SPOT":       45.0,
-    "360_GEM":        40.0,
 }
 
 # Per-channel minimum 24h volume floors (USD).
@@ -425,11 +385,7 @@ _MIN_VOLUME_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP":      1_000_000.0,
     "360_SCALP_FVG":  1_000_000.0,
     "360_SCALP_CVD":  1_000_000.0,
-    "360_SCALP_OBI":  1_000_000.0,
     "360_SCALP_VWAP": 1_000_000.0,
-    "360_SWING":        500_000.0,
-    "360_SPOT":         250_000.0,
-    "360_GEM":          100_000.0,
 }
 
 
@@ -463,7 +419,7 @@ def assess_pair_quality_for_channel(
     candles:
         Candle OHLCV dict for the primary timeframe.
     channel_name:
-        Name of the trading channel (e.g. ``"360_SCALP"``, ``"360_SWING"``).
+        Name of the trading channel (e.g. ``"360_SCALP"``).
 
     Returns
     -------
@@ -532,7 +488,7 @@ def classify_setup(
     smc_data: Dict[str, Any],
     market_state: MarketState,
 ) -> SetupAssessment:
-    primary_tf = "4h" if channel_name == "360_SPOT" else "1h" if channel_name == "360_SWING" else "5m"
+    primary_tf = "5m"
     primary = indicators.get(primary_tf, indicators.get("5m", indicators.get("1m", {})))
     sweeps = smc_data.get("sweeps", [])
     mss = smc_data.get("mss")
@@ -584,7 +540,7 @@ def execution_quality_check(
     setup: SetupClass,
     market_state: MarketState,
 ) -> ExecutionAssessment:
-    primary_tf = "4h" if signal.channel == "360_SPOT" else "1h" if signal.channel == "360_SWING" else "5m"
+    primary_tf = "5m"
     primary = indicators.get(primary_tf, indicators.get("5m", indicators.get("1m", {})))
     atr_val = max(_safe_float(primary.get("atr_last")), signal.entry * 0.01)  # 1% floor
     ema_anchor = _safe_float(primary.get("ema21_last"), signal.entry)
@@ -679,7 +635,7 @@ def build_risk_plan(
     spread_pct: float,
     channel: Optional[str] = None,
 ) -> RiskAssessment:
-    primary_tf = "4h" if signal.channel == "360_SPOT" else "1h" if signal.channel == "360_SWING" else "5m"
+    primary_tf = "5m"
     primary = indicators.get(primary_tf, indicators.get("5m", indicators.get("1m", {})))
     candle_bucket = candles.get(primary_tf, candles.get("5m", candles.get("1m", {})))
     atr_val = max(_safe_float(primary.get("atr_last")), signal.entry * 0.01)  # 1% of price as minimum ATR

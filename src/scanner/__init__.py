@@ -163,7 +163,7 @@ _CHART_BEARISH_PATTERNS: frozenset = frozenset({"DOUBLE_TOP", "DESCENDING_TRIANG
 # SCALP channel names — used for fast-path logic (skip cross-exchange verification).
 _SCALP_CHANNELS: frozenset = frozenset({
     "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
-    "360_SCALP_VWAP", "360_SCALP_OBI",
+    "360_SCALP_VWAP",
 })
 
 # Symbols permanently excluded from scanning — loaded from config to allow
@@ -206,8 +206,6 @@ _CONF_FAIL_COOLDOWN_S: float = 60.0
 # SWING needs sustained trend: block in VOLATILE (chaotic, stops get swept).
 _REGIME_CHANNEL_INCOMPATIBLE: Dict[str, List[str]] = {
     "360_SCALP_VWAP": ["QUIET"],
-    "360_SWING":      ["VOLATILE", "DIRTY_RANGE"],
-    "360_SPOT":       ["DIRTY_RANGE"],
 }
 
 # Penalty multiplier applied to scalp-channel soft gates when the regime is
@@ -243,21 +241,16 @@ _MTF_REGIME_CONFIG: Dict[str, Dict[str, float]] = {
 
 # Per-channel SMC timeframe preference order.
 # SCALP → low-TF sweeps are valid entry triggers.
-# SWING → high-TF institutional sweeps only.
-# SPOT  → institutional only (4h+).
 # Channels not listed here use the detector's default order.
 _CHANNEL_SMC_TIMEFRAMES: Dict[str, tuple[str, ...]] = {
     "360_SCALP":              ("1m", "5m", "15m"),
     "360_SCALP_FVG":          ("5m", "15m"),
     "360_SCALP_CVD":          ("5m", "15m"),
     "360_SCALP_VWAP":         ("5m", "15m"),
-    "360_SCALP_OBI":          ("5m", "15m"),
     "360_SCALP_DIVERGENCE":   ("5m", "15m"),
     "360_SCALP_SUPERTREND":   ("5m", "15m"),
     "360_SCALP_ICHIMOKU":     ("5m", "15m"),
     "360_SCALP_ORDERBLOCK":   ("5m", "15m"),
-    "360_SWING":              ("4h", "1h", "15m"),
-    "360_SPOT":               ("4h", "1h"),
 }
 
 # Which gates are active per channel family.
@@ -269,17 +262,10 @@ _CHANNEL_GATE_PROFILE: Dict[str, Dict[str, bool]] = {
     "360_SCALP_FVG":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_CVD":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_VWAP": {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
-    "360_SCALP_OBI":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_DIVERGENCE":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_SUPERTREND":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_ICHIMOKU":    {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_ORDERBLOCK":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
-    # SWING: trend gates matter, microstructure does not
-    "360_SWING":      {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": False, "volume_div": True,  "cluster": False},
-    # SPOT: macro gates only — intraday noise is irrelevant at 4h/1d
-    "360_SPOT":       {"mtf": True,  "vwap": False, "kill_zone": False, "oi": False, "cross_asset": True,  "spoof": False, "volume_div": False, "cluster": False},
-    # GEM: almost no gates — macro reversal scanner
-    "360_GEM":        {"mtf": False, "vwap": False, "kill_zone": False, "oi": False, "cross_asset": False, "spoof": False, "volume_div": False, "cluster": False},
 }
 
 # Per-channel soft penalty base weights.
@@ -290,14 +276,10 @@ _CHANNEL_PENALTY_WEIGHTS: Dict[str, Dict[str, float]] = {
     "360_SCALP_FVG":  {"vwap": 15.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0},
     "360_SCALP_CVD":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 10.0, "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0},
     "360_SCALP_VWAP": {"vwap": 18.0, "kill_zone": 8.0,  "oi": 6.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0},
-    "360_SCALP_OBI":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 6.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 15.0},
     "360_SCALP_DIVERGENCE":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 8.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0},
     "360_SCALP_SUPERTREND":  {"vwap": 12.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 10.0},
     "360_SCALP_ICHIMOKU":    {"vwap": 10.0, "kill_zone": 8.0,  "oi": 8.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0},
     "360_SCALP_ORDERBLOCK":  {"vwap": 12.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0},
-    "360_SWING":      {"vwap": 10.0, "kill_zone": 0.0,  "oi": 10.0, "volume_div": 8.0,  "cluster": 0.0,  "spoof": 0.0},
-    "360_SPOT":       {"vwap": 0.0,  "kill_zone": 0.0,  "oi": 0.0,  "volume_div": 0.0,  "cluster": 0.0,  "spoof": 0.0},
-    "360_GEM":        {"vwap": 0.0,  "kill_zone": 0.0,  "oi": 0.0,  "volume_div": 0.0,  "cluster": 0.0,  "spoof": 0.0},
 }
 
 
@@ -1094,10 +1076,8 @@ class Scanner:
             now = time.monotonic()
             populated = 0
             for symbol, entry in tickers.items():
-                # Seed ALL pairs (Tier 1 included) from the global bookTicker response.
-                # Previously Tier 1 was excluded to let /depth handle their spread, but
-                # /depth is now only fetched for 360_SCALP_OBI — bookTicker provides
-                # accurate best-bid/ask spread for all other channels at zero extra cost.
+                # /depth is now only fetched for spread via bookTicker — accurate
+                # best-bid/ask spread for all channels at zero extra cost.
                 # Skip only if there is already a fresh (non-bookTicker) cache entry.
                 existing = self._order_book_cache.get(symbol)
                 if existing and now < existing[1]:
@@ -1359,16 +1339,13 @@ class Scanner:
                 self._suppression_counters[f"pair_quality:{ctx.pair_quality.reason}"] += 1
                 return True
         if ctx.market_state == MarketState.VOLATILE_UNSUITABLE:
-            # Higher-timeframe strategies (SPOT/GEM operate on H4/D1/W1) can
-            # tolerate short-term intraday volatility — only block lower-TF channels.
-            if chan_name not in ("360_SPOT", "360_GEM"):
-                log.debug(
-                    "Skipping {} {} – volatile/unsuitable market state",
-                    symbol,
-                    chan_name,
-                )
-                self._suppression_counters[f"volatile_unsuitable:{chan_name}"] += 1
-                return True
+            log.debug(
+                "Skipping {} {} – volatile/unsuitable market state",
+                symbol,
+                chan_name,
+            )
+            self._suppression_counters[f"volatile_unsuitable:{chan_name}"] += 1
+            return True
         if chan_name in self.paused_channels:
             self._suppression_counters[f"paused_channel:{chan_name}"] += 1
             return True
@@ -1482,10 +1459,6 @@ class Scanner:
     @staticmethod
     def _get_primary_timeframe(chan_name: str) -> str:
         """Return the primary timeframe interval string for a given channel name."""
-        if chan_name == "360_SWING":
-            return "1h"
-        if chan_name == "360_SPOT":
-            return "4h"
         return "5m"
 
     @staticmethod
@@ -1998,18 +1971,9 @@ class Scanner:
             symbol, sig.direction.value, sig.entry
         ) if chan_name not in _SCALP_CHANNELS else None
 
-        # Fetch AI sentiment only for SPOT/GEM channels (4h/1d timeframes where
-        # 10 s of network latency is irrelevant).  SCALP/SWING receive 0.0
-        # (neutral) so the hot path has zero extra latency.
+        # Fetch AI sentiment only for channels where latency is acceptable.
+        # SCALP channels receive 0.0 (neutral) so the hot path has zero extra latency.
         sentiment_score = 0.0
-        if chan_name in ("360_SPOT", "360_GEM"):
-            try:
-                ai_result = await get_ai_insight(symbol)
-                sentiment_score = ai_result.score
-                sig.ai_sentiment_label = ai_result.label
-                sig.ai_sentiment_summary = ai_result.summary
-            except Exception as _exc:
-                log.debug("Sentiment fetch failed for {}: {}", symbol, _exc)
 
         legacy_confidence = self._compute_base_confidence(
             symbol,

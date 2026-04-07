@@ -59,24 +59,17 @@ _ORDER_FLOW_LIQ_CAP_USD: float = 500_000.0
 _EXTREME_FUNDING_RATE: float = 0.01
 
 # Per-channel liquidity thresholds (USD 24h volume).
-# SCALP needs $5M+ (tight execution), SWING $10M+ (sustained trend),
-# SPOT $1M+ (macro entry), GEM only $250K (micro-cap discovery).
+# SCALP needs $5M+ (tight execution).
 _LIQUIDITY_THRESHOLDS: Dict[str, float] = {
     "360_SCALP":      5_000_000.0,
     "360_SCALP_FVG":  5_000_000.0,
     "360_SCALP_CVD":  5_000_000.0,
     "360_SCALP_VWAP": 5_000_000.0,
-    "360_SCALP_OBI":  5_000_000.0,
-    "360_SWING":      10_000_000.0,
-    "360_SPOT":       1_000_000.0,
-    "360_GEM":        250_000.0,
 }
 
 # Channel-specific sub-score weight profiles.  Keys match the 8 breakdown
-# sub-scores; missing keys default to 1.0 (no scaling).  Scalp channels
-# are intentionally flat (1.0 everywhere) so they raw-sum identically to
-# the pre-weight behaviour.  SWING, SPOT and GEM profiles tilt weights
-# toward the factors that matter most for each investment horizon.
+# sub-scores; missing keys default to 1.0 (no scaling).  All SCALP channels
+# use flat weights (1.0 everywhere) so they raw-sum identically.
 _SCALP_DEFAULT_WEIGHTS: Dict[str, float] = {
     "smc": 1.0, "trend": 1.0, "liquidity": 1.0, "spread": 1.0,
     "data_sufficiency": 1.0, "multi_exchange": 1.0, "onchain": 1.0,
@@ -88,22 +81,6 @@ _CHANNEL_WEIGHT_PROFILES: Dict[str, Dict[str, float]] = {
     "360_SCALP_FVG":  _SCALP_DEFAULT_WEIGHTS,
     "360_SCALP_CVD":  _SCALP_DEFAULT_WEIGHTS,
     "360_SCALP_VWAP": _SCALP_DEFAULT_WEIGHTS,
-    "360_SCALP_OBI":  _SCALP_DEFAULT_WEIGHTS,
-    "360_SWING": {
-        "smc": 0.7, "trend": 1.4, "liquidity": 1.0, "spread": 0.8,
-        "data_sufficiency": 1.0, "multi_exchange": 1.0, "onchain": 1.2,
-        "order_flow": 0.9, "sentiment": 0.0,
-    },
-    "360_SPOT": {
-        "smc": 0.5, "trend": 1.4, "liquidity": 0.75, "spread": 0.8,
-        "data_sufficiency": 1.0, "multi_exchange": 1.0, "onchain": 1.5,
-        "order_flow": 0.8, "sentiment": 1.0,
-    },
-    "360_GEM": {
-        "smc": 0.2, "trend": 0.8, "liquidity": 0.5, "spread": 0.5,
-        "data_sufficiency": 1.0, "multi_exchange": 0.5, "onchain": 2.0,
-        "order_flow": 0.5, "sentiment": 1.2,
-    },
 }
 
 
@@ -309,7 +286,7 @@ def score_sentiment(sentiment_score: float, channel: Optional[str] = None) -> fl
         Aggregate sentiment in the range [-1, +1] from
         :func:`src.ai_engine.get_ai_insight`.  0.0 is neutral.
     channel:
-        Optional channel name.  When ``"360_SCALP*"`` or ``"360_SWING"``,
+        Optional channel name.  When ``"360_SCALP*"``,
         returns 5.0 regardless of the sentiment value.
 
     Returns
@@ -317,9 +294,7 @@ def score_sentiment(sentiment_score: float, channel: Optional[str] = None) -> fl
     float
         0 (very bearish) → 10 (very bullish); 5.0 is neutral.
     """
-    if channel is not None and (
-        channel.startswith("360_SCALP") or channel == "360_SWING"
-    ):
+    if channel is not None and channel.startswith("360_SCALP"):
         return 5.0  # neutral — no latency added for short-term channels
     return round((max(-1.0, min(1.0, sentiment_score)) + 1.0) / 2.0 * 10.0, 2)
 
@@ -429,9 +404,8 @@ def get_session_multiplier(now: Optional[datetime] = None, channel: Optional[str
     now:
         Optional UTC datetime for testing.  Defaults to the current UTC time.
     channel:
-        Optional channel name.  When ``"360_SPOT"`` or ``"360_GEM"``, the
-        session multiplier is always 1.0 (session is irrelevant at 4h/1d/1w).
-        When ``"360_SWING"``, a reduced impact is applied.
+        Optional channel name.  Session multiplier is always 1.0 for
+        channels where intraday session timing is irrelevant.
 
     Returns
     -------
@@ -441,19 +415,7 @@ def get_session_multiplier(now: Optional[datetime] = None, channel: Optional[str
     if now is None:
         now = datetime.now(timezone.utc)
 
-    # Higher-timeframe channels: session is irrelevant → always 1.0
-    if channel in ("360_SPOT", "360_GEM"):
-        return 1.0
-
     hour = now.hour  # UTC hour 0–23
-
-    # SWING: reduced session impact (half penalty/boost)
-    if channel == "360_SWING":
-        if 0 <= hour < 8:
-            return 0.95   # Asian: mild penalty
-        if 8 <= hour < 16:
-            return 1.0    # European session
-        return 1.02       # US: mild boost
 
     # SCALP channels (and unknown channels): full session impact
     if 0 <= hour < 8:
@@ -545,7 +507,7 @@ def log_confidence_breakdown(    signal_id: str,
     signal_id:
         Unique identifier of the signal being scored.
     channel:
-        Channel name (e.g. ``"360_SCALP"``, ``"360_SWING"``).
+        Channel name (e.g. ``"360_SCALP"``).
     breakdown:
         Dict of sub-score names to weighted values (as returned by
         :func:`compute_confidence`).
@@ -767,9 +729,7 @@ def compute_adaptive_threshold(
     threshold = base_threshold
 
     # Channel-specific base
-    if channel == "360_GEM":
-        threshold -= 5.0
-    elif channel and channel.startswith("360_SCALP"):
+    if channel and channel.startswith("360_SCALP"):
         threshold += 2.0
 
     # Per-pair × regime offset (Rec 4): look up symbol first, then tier, then global

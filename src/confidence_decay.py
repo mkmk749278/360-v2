@@ -39,8 +39,6 @@ log = get_logger("confidence_decay")
 #: Beyond this window the signal is considered stale.
 _MAX_FRESHNESS: dict[str, float] = {
     "360_SCALP":    60.0,
-    "360_SWING":   600.0,
-    "360_SPOT":   3600.0,
 }
 
 #: Default freshness window used when the channel is not found in the table.

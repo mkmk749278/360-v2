@@ -42,10 +42,6 @@ _CHANNEL_LEVERAGE: dict[str, str] = {
     "360_SCALP_FVG":  "Cross 15x",
     "360_SCALP_CVD":  "Cross 15x",
     "360_SCALP_VWAP": "Cross 15x",
-    "360_SCALP_OBI":  "Cross 15x",
-    "360_SWING":      "Cross 5x",
-    "360_SPOT":       "Cross 1x",
-    "360_GEM":        "Cross 1x",
 }
 
 # Signal type labels per direction

@@ -888,14 +888,9 @@ class TradeMonitor:
 
         chan_emojis = {
             "360_SCALP": "⚡",
-            "360_SWING": "🏛️",
-            "360_SPOT": "📈",
-            "360_GEM": "💎",
         }
         chan_emoji = chan_emojis.get(sig.channel, "📡")
         dir_emoji = "🚀" if sig.direction == Direction.LONG else "⬇️"
-
-        # Build R-multiples string from current channel config
         chan_cfg = next((c for c in ALL_CHANNELS if c.name == sig.channel), None)
         rr_str = ""
         if chan_cfg is not None:
@@ -925,9 +920,6 @@ class TradeMonitor:
 
         chan_emojis = {
             "360_SCALP": "⚡",
-            "360_SWING": "🏛️",
-            "360_SPOT": "📈",
-            "360_GEM": "💎",
         }
         chan_emoji = chan_emojis.get(sig.channel, "📡")
         dir_emoji = "🚀" if sig.direction == Direction.LONG else "⬇️"
