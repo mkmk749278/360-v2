@@ -191,6 +191,11 @@ _PROTECTIVE_MODE_VOLATILE_THRESHOLD: int = 10   # volatile_unsuitable count acro
 _PROTECTIVE_MODE_SPREAD_THRESHOLD: int = 20     # spread too wide count
 _PROTECTIVE_MODE_COOLDOWN_S: float = 7200.0     # 2 hours between broadcasts
 
+# Failed-detection cooldown — if a symbol/channel fails the confidence gate
+# this many times consecutively, suppress it for _CONF_FAIL_COOLDOWN_S seconds.
+_CONF_FAIL_MAX_CONSECUTIVE: int = 3
+_CONF_FAIL_COOLDOWN_S: float = 60.0
+
 # Regime-channel compatibility matrix.
 # Maps channel name → list of regimes where that channel is blocked.
 # SCALP channels (except VWAP) are no longer hard-blocked in QUIET — they
@@ -497,6 +502,11 @@ class Scanner:
         # Suppression telemetry: counters per suppression reason, accumulated
         # over each scan cycle and logged as a summary at cycle end.
         self._suppression_counters: Dict[str, int] = defaultdict(int)
+
+        # Failed-detection cooldown: tracks consecutive confidence-gate failures
+        # per (symbol, channel_name) to suppress re-evaluation for a short period.
+        # Key: (symbol, channel_name) → (fail_count: int, suppressed_until: float)
+        self._conf_fail_tracker: Dict[tuple, tuple] = {}
 
         # Protective mode broadcaster state
         # Tracks whether the engine is currently in protective mode (broadcasted to channels)
@@ -865,6 +875,15 @@ class Scanner:
 
             if self._suppression_counters:
                 self._suppression_counters.clear()
+
+            # Periodic cleanup of stale failed-detection entries (every 300 cycles)
+            if self._scan_cycle_count % 300 == 0 and self._conf_fail_tracker:
+                _now_clean = time.monotonic()
+                self._conf_fail_tracker = {
+                    k: v for k, v in self._conf_fail_tracker.items()
+                    if v[1] > _now_clean  # keep only active suppressions
+                    or v[0] < _CONF_FAIL_MAX_CONSECUTIVE  # or not yet at threshold
+                }
 
             # Setup diversity telemetry: log evaluated and emitted counts per
             # setup_class every 100 scan cycles for operational visibility.
@@ -1692,6 +1711,18 @@ class Scanner:
         soft_penalty: float = 0.0  # Accumulated confidence deduction from soft gates
         _fired_gates: list = []
         chan_name = chan.config.name
+
+        # ── Failed-detection cooldown ──────────────────────────────────────────
+        # If this symbol+channel has failed the confidence gate too many times
+        # in a row recently, skip re-evaluation until the cooldown expires.
+        _fail_key = (symbol, chan_name)
+        _fail_entry = self._conf_fail_tracker.get(_fail_key)
+        if _fail_entry is not None:
+            _fail_count, _suppressed_until = _fail_entry
+            if _fail_count >= _CONF_FAIL_MAX_CONSECUTIVE and time.monotonic() < _suppressed_until:
+                return None, False  # Silently skip — cooldown active
+        # ── End failed-detection cooldown check ───────────────────────────────
+
         try:
             sig = chan.evaluate(
                 symbol=symbol,
@@ -2355,6 +2386,17 @@ class Scanner:
                     regime=_regime_key,
                     would_be_confidence=sig.confidence,
                 ))
+                # Track consecutive failures for this symbol+channel
+                _fail_key = (symbol, chan_name)
+                _prev = self._conf_fail_tracker.get(_fail_key, (0, 0.0))
+                _new_count = _prev[0] + 1
+                _until = time.monotonic() + _CONF_FAIL_COOLDOWN_S if _new_count >= _CONF_FAIL_MAX_CONSECUTIVE else _prev[1]
+                self._conf_fail_tracker[_fail_key] = (_new_count, _until)
+                if _new_count >= _CONF_FAIL_MAX_CONSECUTIVE:
+                    log.debug(
+                        "Failed-detection cooldown triggered for {} {} ({}x consecutive) — suppressing for {:.0f}s",
+                        symbol, chan_name, _new_count, _CONF_FAIL_COOLDOWN_S,
+                    )
                 return None, cross_verified
         # WATCHLIST tier: signals with confidence 50-64 are kept as WATCHLIST
         # instead of being discarded.  Only the SCALP channel family generates
@@ -2382,6 +2424,8 @@ class Scanner:
                 would_be_confidence=sig.confidence,
             ))
             return None, cross_verified
+        # Reset failed-detection counter — this symbol+channel produced a valid signal
+        self._conf_fail_tracker.pop((symbol, chan_name), None)
         self._populate_signal_context(sig, volume_24h, ctx)
         return sig, cross_verified
 

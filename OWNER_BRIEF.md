@@ -202,7 +202,15 @@ Every single message — signals, radar, scheduled posts — follows these rules
 - ✅ `/signal_stats` and `/tp_stats` moved to admin-only
 - ✅ Welcome message updated — accurate pair count, real channels, no false promises
 
-### PR5 — Revenue & Subscriber Features ⏳ PLANNED (after PR4 stable)
+### PR5 — Signal Safety ✅ MERGED
+**Business goal:** Prevent broken signals from reaching subscribers. Kill infinite re-evaluation loops. Dynamic pair count in all subscriber-facing commands.
+
+**Changes:**
+- ✅ Near-zero SL rejection — signals where capped SL is < 0.05% from entry are rejected before dispatch. Catches BULLAUSDT-class sub-penny tokens.
+- ✅ Failed-detection cooldown — after 3 consecutive confidence-gate failures on same symbol+channel, suppress re-evaluation for 60s. Eliminates every-2-second QUIET_SCALP_BLOCK loop.
+- ✅ Dynamic pair count in commands — `/signals`, `/ask`, welcome message now read `TOP50_FUTURES_COUNT` from config instead of hardcoded "75".
+
+### PR6 — Revenue & Subscriber Features ⏳ PLANNED (after PR5 stable)
 
 ---
 
@@ -230,11 +238,12 @@ Every single message — signals, radar, scheduled posts — follows these rules
 ## 7. Current Priorities (In Order)
 
 1. ✅ PR1 merged and running on VPS
-2. ✅ PR2 — AI engagement layer merged and monitored
+2. ✅ PR2 — AI engagement layer merged and monitored  
 3. ✅ PR3 — Scan latency fix + 75-pair unlock merged
-4. 🔄 PR4 — User interaction layer (in progress)
-5. ⏳ Monitor signal volume after PR4 (target: 10–20 signals/day)
-6. ⏳ PR5 — Revenue features (after PR4 is confirmed stable)
+4. ✅ PR4 — User interaction layer merged
+5. 🔄 PR5 — Signal safety (in progress)
+6. ⏳ Monitor signal volume after PR5 (target: 10–20 signals/day)
+7. ⏳ PR6 — Revenue features (after PR5 is confirmed stable)
 
 ---
 
@@ -290,6 +299,13 @@ To re-enable any as a live signal channel: set `CHANNEL_SCALP_CVD_ENABLED=true` 
 ## 10. Owner Notes (Running Log)
 
 *Add decisions, ideas, and observations here as we work. Most recent at the top.*
+
+**2026-04-07 (PR5)**
+- BULLAUSDT was generating capped SL of 0.01692033 (near-zero) — would have been a dangerous signal
+- Same pair re-evaluating every 2 seconds in QUIET regime — infinite loop, burning compute
+- PR5: SL safety gate + failed-detection cooldown + dynamic pair count
+- Near-zero SL threshold: 0.05% of entry price
+- Cooldown threshold: 3 consecutive failures → 60s suppression
 
 **2026-04-07 (PR4)**
 - Engine silence during April 7 crash exposed need for protective mode broadcaster

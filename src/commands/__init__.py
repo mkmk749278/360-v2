@@ -23,6 +23,7 @@ import asyncio
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from config import TELEGRAM_ADMIN_CHAT_ID
+from config import TOP50_FUTURES_COUNT as _TOP50_FUTURES_COUNT
 from src.commands.registry import CommandContext, CommandRegistry
 from src.utils import get_logger
 
@@ -40,7 +41,7 @@ _TELEGRAM_MAX_MSG_CHARS: int = 4_096
 _WELCOME_MESSAGE: str = (
     "👁 *360 Crypto Eye*\n\n"
     "AI-powered Smart Money signal engine. "
-    "We scan 75 Binance futures pairs in real time, detect institutional setups, "
+    f"We scan {_TOP50_FUTURES_COUNT} Binance futures pairs in real time, detect institutional setups, "
     "and only fire when the odds are stacked in your favour.\n\n"
     "━━━━━━━━━━━━━━━━━━\n\n"
     "📡 *What We Scan For*\n"

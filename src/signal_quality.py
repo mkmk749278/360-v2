@@ -721,6 +721,36 @@ def build_risk_plan(
                 stop_loss,
             )
 
+    # Near-zero SL guard — reject signals where the capped SL is so close to
+    # entry that it offers no real protection.  This catches edge cases on
+    # sub-penny tokens (e.g. BULLAUSDT) where ATR-based SL exceeds the channel
+    # cap by a large margin and the resulting capped price rounds near zero.
+    # Threshold: SL must be at least 0.05% away from entry.
+    _MIN_SL_DISTANCE_PCT = 0.0005  # 0.05% of entry price
+    if signal.entry > 0:
+        _sl_dist_abs = abs(signal.entry - stop_loss)
+        _sl_min_required = signal.entry * _MIN_SL_DISTANCE_PCT
+        if _sl_dist_abs < _sl_min_required:
+            log.warning(
+                "SL near-zero rejection for %s %s: SL=%.8f is only %.4f%% from entry=%.8f (min=%.4f%%)",
+                _chan,
+                signal.direction.value,
+                stop_loss,
+                (_sl_dist_abs / signal.entry * 100),
+                signal.entry,
+                _MIN_SL_DISTANCE_PCT * 100,
+            )
+            return RiskAssessment(
+                passed=False,
+                stop_loss=stop_loss,
+                tp1=signal.tp1,
+                tp2=signal.tp2,
+                tp3=signal.tp3,
+                r_multiple=0.0,
+                invalidation_summary=f"SL distance {_sl_dist_abs:.8f} below minimum {_sl_min_required:.8f} — near-zero SL rejected.",
+                reason="SL distance below minimum threshold (near-zero SL rejected)",
+            )
+
     # Directional sanity check – reject immediately if the computed SL is on
     # the wrong side of the entry price (can happen with unusual price action
     # or very thin markets where ATR/structure estimates are unreliable).

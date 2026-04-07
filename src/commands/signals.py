@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import List
 
+from config import TOP50_FUTURES_COUNT
 from src.commands.registry import CommandContext, CommandRegistry
 
 registry = CommandRegistry()
@@ -15,7 +16,7 @@ async def handle_signals(args: List[str], ctx: CommandContext) -> None:
     if not sigs:
         await ctx.reply(
             "📡 No active setups right now.\n\n"
-            "The scanner is running across 75 pairs — we only enter when conditions are right."
+            f"The scanner is running across {TOP50_FUTURES_COUNT} pairs — we only enter when conditions are right."
         )
         return
     lines = [f"📡 *{len(sigs)} Active Setup{'s' if len(sigs) != 1 else ''}*\n"]
@@ -179,7 +180,7 @@ async def handle_ask(args: List[str], ctx: CommandContext) -> None:
     # No data
     await ctx.reply(
         f"📋 *{symbol}*\n\nNo active signal and no recent history for this pair.\n\n"
-        "_We scan 75 pairs continuously — a setup will appear here when conditions align._"
+        f"_We scan {TOP50_FUTURES_COUNT} pairs continuously — a setup will appear here when conditions align._"
     )
 
 
