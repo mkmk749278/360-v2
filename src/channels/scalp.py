@@ -1118,7 +1118,7 @@ class ScalpChannel(BaseChannel):
     ) -> Optional[Signal]:
         """OPENING_RANGE_BREAKOUT: session opening-range breakout with SMC basis."""
         now_hour = datetime.now(timezone.utc).hour
-        # Only active during London (07-09 UTC) or NY (12-14 UTC)
+        # Only active during London (07:00–08:59 UTC) or NY (12:00–13:59 UTC)
         in_london = 7 <= now_hour < 9
         in_ny = 12 <= now_hour < 14
         if not (in_london or in_ny):
@@ -1142,9 +1142,10 @@ class ScalpChannel(BaseChannel):
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
             return None
 
-        # Opening range = first 4 candles of session window (candles[-8:-4])
+        # Opening range = the 4 candles immediately before the most recent 4,
+        # acting as a proxy for the first 4 candles of the session window.
         range_highs = [float(h) for h in highs[-8:-4]]
-        range_lows = [float(low_val) for low_val in lows[-8:-4]]
+        range_lows = [float(l) for l in lows[-8:-4]]
         if not range_highs or not range_lows:
             return None
         range_high = max(range_highs)

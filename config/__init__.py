@@ -746,11 +746,11 @@ SIGNAL_TYPE_LABELS: Dict[str, str] = {
     "MULTI_STRATEGY_CONFLUENCE":     "🌟 MULTI-STRATEGY",
     "VOLUME_SURGE_BREAKOUT":         "🚀 SURGE BREAKOUT",
     "BREAKDOWN_SHORT":               "📉 BREAKDOWN SHORT",
-    "OPENING_RANGE_BREAKOUT":        "Opening Range Breakout",
-    "SR_FLIP_RETEST":                "S/R Flip Retest",
-    "FUNDING_EXTREME_SIGNAL":        "Funding Extreme Signal",
-    "QUIET_COMPRESSION_BREAK":       "Quiet Compression Break",
-    "DIVERGENCE_CONTINUATION":       "Divergence Continuation",
+    "OPENING_RANGE_BREAKOUT":        "🕯️ OPENING RANGE BREAKOUT",
+    "SR_FLIP_RETEST":                "🔄 S/R FLIP RETEST",
+    "FUNDING_EXTREME_SIGNAL":        "💰 FUNDING EXTREME",
+    "QUIET_COMPRESSION_BREAK":       "🔋 COMPRESSION BREAK",
+    "DIVERGENCE_CONTINUATION":       "📊 DIVERGENCE CONTINUATION",
 }
 
 CHANNEL_EMOJIS: Dict[str, str] = {
