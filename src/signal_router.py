@@ -951,13 +951,12 @@ class SignalRouter:
             age_secs = (now - sig.timestamp).total_seconds()
             hours = int(age_secs // 3600)
             minutes = int((age_secs % 3600) // 60)
-            entry_price = sig.entry
 
             text = (
                 f"⏰ Signal Expired — {sig.symbol}\n\n"
                 f"{direction_emoji} {sig.direction.value} | {setup_label}\n"
                 f"Entry was not reached or position auto-closed.\n\n"
-                f"📍 Entry: {entry_price}\n"
+                f"📍 Entry: {sig.entry}\n"
                 f"⏱ Time held: {hours}h {minutes}m\n"
                 f"📊 Confidence was: {sig.confidence:.0f}\n\n"
                 f"No P&L recorded."

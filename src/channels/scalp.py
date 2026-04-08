@@ -851,8 +851,10 @@ class ScalpChannel(BaseChannel):
             return None
         rolling_avg = sum(rolling_vols) / len(rolling_vols)
 
-        # Condition 1: 24h volume ≥ SURGE_VOLUME_MULTIPLIER × rolling average
-        if volume_24h_usd < SURGE_VOLUME_MULTIPLIER * rolling_avg:
+        # Condition 1: Current 5m candle volume ≥ SURGE_VOLUME_MULTIPLIER × rolling average
+        # (use current candle volume to confirm active surge, same units as rolling_avg)
+        current_vol = float(volumes[-1]) if len(volumes) >= 1 else 0.0
+        if current_vol < SURGE_VOLUME_MULTIPLIER * rolling_avg:
             return None
 
         # Condition 2: Swing high (20-candle) and breakout in last 3 candles
@@ -992,8 +994,10 @@ class ScalpChannel(BaseChannel):
             return None
         rolling_avg = sum(rolling_vols) / len(rolling_vols)
 
-        # 24h volume ≥ SURGE_VOLUME_MULTIPLIER × rolling average
-        if volume_24h_usd < SURGE_VOLUME_MULTIPLIER * rolling_avg:
+        # Current 5m candle volume ≥ SURGE_VOLUME_MULTIPLIER × rolling average
+        # (use current candle volume to confirm active surge, same units as rolling_avg)
+        current_vol = float(volumes[-1]) if len(volumes) >= 1 else 0.0
+        if current_vol < SURGE_VOLUME_MULTIPLIER * rolling_avg:
             return None
 
         # Swing low (20-candle) and breakdown in last 3 candles

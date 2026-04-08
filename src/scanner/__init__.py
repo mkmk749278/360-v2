@@ -808,12 +808,13 @@ class Scanner:
                 if _promoted:
                     # Add promoted pairs to filtered_pairs (capped at SURGE_PROMOTION_MAX_PAIRS)
                     _added = 0
-                    _promoted_syms = set(sym for sym, _ in filtered_pairs)
+                    _promoted_syms = {sym for sym, _ in filtered_pairs}
+                    filtered_pairs = list(filtered_pairs)  # ensure mutable list once
                     for _promo_sym in _promoted[:SURGE_PROMOTION_MAX_PAIRS]:
                         if _promo_sym not in _promoted_syms:
                             _promo_info = self.pair_mgr.pairs.get(_promo_sym)
                             if _promo_info is not None:
-                                filtered_pairs = list(filtered_pairs) + [(_promo_sym, _promo_info)]
+                                filtered_pairs.append((_promo_sym, _promo_info))
                                 _added += 1
                     if _added:
                         log.info("Added {} dynamically promoted pair(s) to scan cycle", _added)
