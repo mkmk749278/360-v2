@@ -51,6 +51,7 @@ from config import (
     TIER2_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
+    TOP50_FUTURES_COUNT,
     TOP50_FUTURES_ONLY,
     TREND_HARD_GATE_MIN,
     WS_DEGRADED_CYCLES_ALERT,
@@ -571,6 +572,10 @@ class Scanner:
     async def scan_loop(self) -> None:
         """Periodic scan over all pairs / channels."""
         log.info("Scanner loop started")
+        log.info(
+            "Scanner config: TOP50_FUTURES_ONLY={} TOP50_FUTURES_COUNT={} pairs",
+            TOP50_FUTURES_ONLY, TOP50_FUTURES_COUNT,
+        )
         while True:
             t0 = time.monotonic()
             self._scan_cycle_count += 1
@@ -1559,6 +1564,7 @@ class Scanner:
         chan_name: str = "",
         funding_rate: Optional[float] = None,
         sentiment_score: float = 0.0,
+        regime_key: str = "",
     ) -> Optional[float]:
         # Gate: if OI is rising against the sweep direction, block the signal
         if ctx.smc_data.get("oi_invalidated", False):
@@ -1576,7 +1582,7 @@ class Scanner:
         # A bearish continuation sweep adds to SMC conviction for trend-following entries.
         if (
             sig.direction.value == "SHORT"
-            and _regime_key == "TRENDING_DOWN"
+            and regime_key == "TRENDING_DOWN"
             and not has_sweep
         ):
             try:
@@ -2122,6 +2128,7 @@ class Scanner:
             chan_name=chan_name,
             funding_rate=_funding_rate,
             sentiment_score=sentiment_score,
+            regime_key=_regime_key,
         )
         if legacy_confidence is None:
             return None, cross_verified
