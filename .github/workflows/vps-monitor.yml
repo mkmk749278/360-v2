@@ -1,0 +1,170 @@
+name: 🔍 VPS Monitor — Live System Status
+
+on:
+  workflow_dispatch:
+    inputs:
+      log_lines:
+        description: 'Number of engine log lines to tail'
+        required: false
+        default: '150'
+        type: string
+      include_redis:
+        description: 'Include Redis memory and keyspace info'
+        required: false
+        default: 'true'
+        type: boolean
+
+permissions:
+  contents: read
+
+jobs:
+  monitor:
+    name: Collect VPS stats
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Mask secrets
+        run: |
+          echo "::add-mask::${{ secrets.VPS_HOST }}"
+          echo "::add-mask::${{ secrets.VPS_USER }}"
+          echo "::add-mask::${{ secrets.VPS_SSH_KEY }}"
+          echo "::add-mask::${{ secrets.TELEGRAM_BOT_TOKEN }}"
+          echo "::add-mask::${{ secrets.TELEGRAM_ACTIVE_CHANNEL_ID }}"
+          echo "::add-mask::${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}"
+          echo "::add-mask::${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}"
+          echo "::add-mask::${{ secrets.BINANCE_API_KEY }}"
+          echo "::add-mask::${{ secrets.BINANCE_API_SECRET }}"
+          echo "::add-mask::${{ secrets.OPENAI_API_KEY }}"
+
+      - name: Collect VPS data
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          script: |
+            SEP="══════════════════════════════════════════════"
+
+            echo "$SEP"
+            echo "  CONTAINER STATUS"
+            echo "$SEP"
+            docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 ps
+            echo ""
+            docker inspect 360scalp-v2-engine --format='Health: {{.State.Health.Status}} | Status: {{.State.Status}} | Running: {{.State.Running}}' 2>/dev/null || echo "Container not found or not running"
+
+            echo ""
+            echo "$SEP"
+            echo "  RESOURCE USAGE"
+            echo "$SEP"
+            docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}" 2>/dev/null || echo "No containers running"
+            echo ""
+            echo "--- System ---"
+            uptime
+            free -h
+            df -h / 2>/dev/null | tail -2
+
+            echo ""
+            echo "$SEP"
+            echo "  HEARTBEAT CHECK"
+            echo "$SEP"
+            HEARTBEAT_FILE=~/360-v2/data/scanner_heartbeat
+            if [ -f "$HEARTBEAT_FILE" ]; then
+                AGE=$(( $(date +%s) - $(stat -c %Y "$HEARTBEAT_FILE") ))
+                echo "Heartbeat age: ${AGE}s"
+                if [ "$AGE" -gt 120 ]; then
+                    echo "⚠️  WARNING: Heartbeat is STALE (>${AGE}s) — scanner may be hung"
+                else
+                    echo "✅ Heartbeat fresh"
+                fi
+            else
+                CONTAINER_AGE=$(docker exec 360scalp-v2-engine python3 -c "
+            import os, time
+            p='/app/data/scanner_heartbeat'
+            if os.path.exists(p):
+                age=int(time.time()-os.path.getmtime(p))
+                print(f'Heartbeat age: {age}s')
+                print('STALE' if age>120 else 'OK')
+            else:
+                print('Heartbeat file not found yet (engine still booting?)')
+            " 2>/dev/null || echo "Could not read heartbeat from container")
+                echo "$CONTAINER_AGE"
+            fi
+
+            echo ""
+            echo "$SEP"
+            echo "  SIGNAL TELEMETRY"
+            echo "$SEP"
+            LOGS=$(docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=200 engine 2>/dev/null || echo "")
+
+            echo "--- Scan Performance ---"
+            echo "$LOGS" | grep -E "ScanLat|Pairs=|WS=" | tail -5 || echo "(no scan telemetry found in last 200 lines)"
+
+            echo ""
+            echo "--- Signal Activity ---"
+            FIRED=$(echo "$LOGS" | grep -c "SIGNAL FIRED\|signal.*fired\|FIRED" 2>/dev/null || echo "0")
+            TP=$(echo "$LOGS" | grep -c "TP.*hit\|TP1\|TP2\|TP3\|TAKE_PROFIT" 2>/dev/null || echo "0")
+            SL=$(echo "$LOGS" | grep -c "SL.*hit\|STOP_LOSS\|stop loss" 2>/dev/null || echo "0")
+            EXPIRED=$(echo "$LOGS" | grep -c "EXPIRED\|expir" 2>/dev/null || echo "0")
+            echo "Signals fired (last 200 lines): $FIRED"
+            echo "TP hits: $TP | SL hits: $SL | Expired: $EXPIRED"
+
+            echo ""
+            echo "--- Regime / Market State ---"
+            echo "$LOGS" | grep -E "regime|TRENDING|RANGING|VOLATILE|QUIET" | tail -5 || echo "(no regime data in last 200 lines)"
+
+            echo ""
+            echo "$SEP"
+            echo "  ENGINE LOGS (last ${{ inputs.log_lines }} lines)"
+            echo "$SEP"
+            docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=${{ inputs.log_lines }} engine 2>/dev/null || echo "Could not fetch engine logs"
+
+            echo ""
+            echo "$SEP"
+            echo "  ERROR SCAN (last 500 lines)"
+            echo "$SEP"
+            FULL_LOGS=$(docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=500 engine 2>/dev/null || echo "")
+            ERRORS=$(echo "$FULL_LOGS" | grep -E "ERROR|CRITICAL|Traceback|Exception|FATAL" || true)
+            if [ -z "$ERRORS" ]; then
+                echo "✅ No errors/exceptions found in last 500 log lines"
+            else
+                echo "$ERRORS"
+            fi
+
+            if [ "${{ inputs.include_redis }}" = "true" ]; then
+                echo ""
+                echo "$SEP"
+                echo "  REDIS INFO"
+                echo "$SEP"
+                echo "--- Redis Memory ---"
+                docker exec 360scalp-v2-redis redis-cli info memory 2>/dev/null | grep -E "used_memory_human|used_memory_peak_human|maxmemory_human" || echo "Redis not accessible"
+
+                echo ""
+                echo "--- Redis Keyspace ---"
+                docker exec 360scalp-v2-redis redis-cli info keyspace 2>/dev/null || echo "Redis keyspace not accessible"
+
+                echo ""
+                echo "--- Redis DB Size ---"
+                docker exec 360scalp-v2-redis redis-cli dbsize 2>/dev/null || echo "Could not get Redis dbsize"
+            fi
+
+      - name: Health gate — fail if engine is down
+        uses: appleboy/ssh-action@v1.0.3
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: 22
+          script: |
+            STATUS=$(docker inspect 360scalp-v2-engine --format='{{.State.Running}}' 2>/dev/null || echo "false")
+            if [ "$STATUS" != "true" ]; then
+              echo "❌ ENGINE IS NOT RUNNING — immediate attention required"
+              exit 1
+            fi
+            HEALTH=$(docker inspect 360scalp-v2-engine --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
+            if [ "$HEALTH" = "unhealthy" ]; then
+              echo "❌ ENGINE IS UNHEALTHY — container running but healthcheck failing"
+              exit 1
+            fi
+            echo "✅ Engine is running and healthy (health=$HEALTH)"
