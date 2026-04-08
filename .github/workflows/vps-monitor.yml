@@ -141,6 +141,37 @@ jobs:
 
           echo ""
           echo "$SEP"
+          echo "  SIGNAL PERFORMANCE HISTORY"
+          echo "$SEP"
+          echo "--- Last 10 Signals ---"
+          docker exec 360scalp-v2-engine python3 - << 'PYEOF' 2>/dev/null || echo "Container not available"
+          import json, sys, datetime
+          try:
+              with open('/app/data/signal_performance.json') as f:
+                  data = json.load(f)
+              if not data:
+                  print("No signal history yet")
+                  sys.exit(0)
+              records = sorted(data, key=lambda x: x.get('timestamp', 0), reverse=True)[:10]
+              print(f"{'#':<3} {'Symbol':<14} {'Dir':<6} {'Setup':<30} {'Entry':>12} {'Conf':>6} {'Outcome':<12} {'Time'}")
+              print("-" * 100)
+              for i, r in enumerate(records, 1):
+                  ts = r.get('timestamp', 0)
+                  ts_str = datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%dT%H:%M:%S') if ts else '?'
+                  outcome = r.get('outcome_label', r.get('outcome', r.get('status', '?')))
+                  setup = r.get('setup_class', r.get('channel', r.get('setup_type', r.get('signal_type', '?'))))
+                  entry = r.get('entry', r.get('entry_price', 0))
+                  print(f"{i:<3} {r.get('symbol','?'):<14} {r.get('direction','?'):<6} {setup:<30} {entry:>12.4f} {r.get('confidence',0):>6.1f} {outcome:<12} {ts_str}")
+          except FileNotFoundError:
+              print("No signal history yet")
+          except json.JSONDecodeError:
+              print("Signal history file could not be parsed")
+          except Exception as e:
+              print(f"Error reading signal history: {e}")
+          PYEOF
+
+          echo ""
+          echo "$SEP"
           echo "  ENGINE LOGS (last 150 lines)"
           echo "$SEP"
           docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=150 engine 2>/dev/null || echo "Could not fetch engine logs"
