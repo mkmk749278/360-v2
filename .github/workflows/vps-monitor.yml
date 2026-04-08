@@ -65,7 +65,6 @@ jobs:
           mkdir -p monitor
 
           ssh -i ~/.ssh/vps_key \
-              -o StrictHostKeyChecking=no \
               -o ConnectTimeout=30 \
               ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
               'bash -s' << 'ENDSSH' | tee monitor/latest.txt
