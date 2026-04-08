@@ -319,6 +319,17 @@ class HistoricalDataStore:
                 try:
                     with tick_file.open("r", encoding="utf-8") as fh:
                         self.ticks[symbol] = json.load(fh)
+                except json.JSONDecodeError as exc:
+                    log.warning(
+                        "Failed to load ticks for %s: %s — deleting corrupted file %s",
+                        symbol,
+                        exc,
+                        tick_file,
+                    )
+                    try:
+                        tick_file.unlink()
+                    except OSError as del_exc:
+                        log.error("Could not delete corrupted tick file %s: %s", tick_file, del_exc)
                 except Exception as exc:
                     log.warning("Failed to load ticks for %s: %s — skipping", symbol, exc)
 

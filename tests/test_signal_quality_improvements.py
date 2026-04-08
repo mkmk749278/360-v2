@@ -437,7 +437,7 @@ class TestFVGAgeDecay:
                 "volume": np.ones(n) * 1000.0,
             }
         }
-        ind = {"5m": {"adx_last": 25.0, "atr_last": 0.5, "rsi_last": 50.0}}
+        ind = {"5m": {"adx_last": 25.0, "atr_last": 0.1, "rsi_last": 50.0}}
         # Zone at index 20 → candles_ago = 30 - 20 = 10 < 80 → valid
         recent_zone = self._make_fvg_zone(index=20, direction_long=True)
         smc_data = {"fvg": [recent_zone]}

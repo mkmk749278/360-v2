@@ -16,6 +16,9 @@ from config import CHANNEL_SCALP_FVG
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import check_adx, check_rsi
 from src.smc import Direction
+from src.utils import get_logger
+
+log = get_logger("scalp_fvg")
 
 # Maximum distance from FVG zone boundary (as fraction of zone width) to be
 # considered "retesting" the zone.  0.5 means price must be within 50% of the
@@ -170,6 +173,18 @@ class ScalpFVGChannel(BaseChannel):
         base_sl_dist = abs(close - sl)
         sl_dist = base_sl_dist * zone_decay * fill_decay  # Apply age + fill decay
         if sl_dist <= 0:
+            return None
+
+        # Early-reject: SL distance exceeding 2.0% of entry is not a valid scalp setup.
+        # Reject here before build_risk_plan so the SL cap in signal_quality never sees it.
+        sl_dist_pct = sl_dist / close
+        if sl_dist_pct > 0.020:
+            log.warning(
+                "FVG SL rejected for %s %s: sl_dist/close=%.2f%% > 2.00%% max — signal discarded",
+                symbol,
+                direction.value,
+                sl_dist_pct * 100,
+            )
             return None
 
         # Recompute the actual SL price from the decayed distance.
