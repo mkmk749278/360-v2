@@ -1,0 +1,232 @@
+360 Crypto Eye — VPS Monitor Report
+Generated: 2026-04-08 09:42:48 UTC
+
+══════════════════════════════════════════════
+  CONTAINER STATUS
+══════════════════════════════════════════════
+NAME                 IMAGE              COMMAND                  SERVICE   CREATED          STATUS                    PORTS
+360scalp-v2-engine   360-v2-engine      "python -m src.main"     engine    28 minutes ago   Up 28 minutes (healthy)   
+360scalp-v2-redis    redis:7.4-alpine   "docker-entrypoint.s…"   redis     28 hours ago     Up 28 hours               6379/tcp
+
+Health: healthy | Status: running | Running: true
+
+══════════════════════════════════════════════
+  RESOURCE USAGE
+══════════════════════════════════════════════
+NAME                 CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O
+360scalp-v2-engine   101.83%   104.2MiB / 1GiB       10.17%    151MB / 6.04MB    6.17MB / 4.74MB
+360scalp-v2-redis    0.79%     3.426MiB / 7.755GiB   0.04%     6.33MB / 4.53MB   9.39MB / 102kB
+
+--- System ---
+ 11:42:51 up 2 days,  3:52,  2 users,  load average: 1.10, 0.60, 0.61
+               total        used        free      shared  buff/cache   available
+Mem:           7.8Gi       712Mi       6.8Gi       1.3Mi       554Mi       7.1Gi
+Swap:             0B          0B          0B
+Filesystem      Size  Used Avail Use% Mounted on
+/dev/sda1       145G  4.1G  141G   3% /
+
+══════════════════════════════════════════════
+  HEARTBEAT CHECK
+══════════════════════════════════════════════
+Heartbeat file not found yet (engine still booting?)
+
+══════════════════════════════════════════════
+  SIGNAL TELEMETRY
+══════════════════════════════════════════════
+--- Scan Performance ---
+360scalp-v2-engine  | 2026-04-08 09:32:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:33:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:34:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:35:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:36:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:37:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:38:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:39:51 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:40:53 | telemetry                | INFO    | CPU=0.0% | MEM=120MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=48857ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:41:54 | telemetry                | INFO    | CPU=0.0% | MEM=120MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4248ms | API/min=3 | Redis=True
+
+--- Signal Activity ---
+Signals fired (last 200 lines): 0
+0
+TP hits: 0
+0 | SL hits: 0
+0 | Expired: 0
+0
+
+--- Regime / Market State ---
+360scalp-v2-engine  | 2026-04-08 09:41:25 | scanner                  | INFO    | QUIET_SCALP_BLOCK TSLAUSDT 360_SCALP conf=59.6 < min=65.0
+360scalp-v2-engine  | 2026-04-08 09:42:40 | scanner                  | INFO    | QUIET_SCALP_BLOCK TSLAUSDT 360_SCALP conf=59.6 < min=65.0
+
+══════════════════════════════════════════════
+  ENGINE LOGS (last 150 lines)
+══════════════════════════════════════════════
+360scalp-v2-engine  | 2026-04-08 09:29:39 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:29:43 | historical               | INFO    | Snapshot saved: 502 symbol-timeframe combos (saved_at=2026-04-08T09:29:41.619103+00:00)
+360scalp-v2-engine  | 2026-04-08 09:29:44 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:29:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:29:49 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:29:54 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:29:59 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:04 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:09 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:14 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:19 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:24 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:29 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:34 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:39 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:44 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:30:49 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:54 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:30:59 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:04 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:09 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:14 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:19 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:24 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:29 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:34 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:39 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:44 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:31:49 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:54 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:31:59 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:04 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:09 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:14 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:19 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:24 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:29 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:34 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:39 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:44 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:32:49 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:54 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:32:59 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:04 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:09 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:14 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:19 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:24 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:29 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:34 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:39 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:44 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:33:49 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:54 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:33:59 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:04 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:09 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:14 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:19 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:24 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:29 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:35 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:40 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:44 | historical               | INFO    | Snapshot saved: 502 symbol-timeframe combos (saved_at=2026-04-08T09:34:43.269630+00:00)
+360scalp-v2-engine  | 2026-04-08 09:34:45 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:34:50 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:34:55 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:00 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:05 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:10 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:15 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:20 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:25 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:30 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:35 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:40 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:45 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:35:50 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:35:55 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:00 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:05 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:10 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:15 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:20 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:25 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:30 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:35 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:40 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:45 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:36:50 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:36:55 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:00 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:05 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:10 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:15 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:20 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:25 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:30 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:35 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:40 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:45 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:37:50 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:37:55 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:00 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:05 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:10 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:15 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:20 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:25 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:30 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:35 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:40 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:45 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:47 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:38:50 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:38:55 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:00 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:05 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:10 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:15 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:20 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:25 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:30 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:35 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:40 | scanner                  | WARNING | Circuit breaker tripped — skipping scan cycle
+360scalp-v2-engine  | 2026-04-08 09:39:46 | historical               | INFO    | Snapshot saved: 502 symbol-timeframe combos (saved_at=2026-04-08T09:39:44.818302+00:00)
+360scalp-v2-engine  | 2026-04-08 09:39:46 | circuit_breaker          | INFO    | Circuit breaker resumed automatically: Automatic resume after cooldown; rolling losses normalized and a fresh monitoring window was started.
+360scalp-v2-engine  | 2026-04-08 09:39:51 | telemetry                | INFO    | CPU=0.0% | MEM=119MB | WS=300(ok=True) | Signals=1 | Pairs=75 | ScanLat=38282ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:40:53 | telemetry                | INFO    | CPU=0.0% | MEM=120MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=48857ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:41:00 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 4}
+360scalp-v2-engine  | 2026-04-08 09:41:25 | scanner                  | INFO    | QUIET_SCALP_BLOCK TSLAUSDT 360_SCALP conf=59.6 < min=65.0
+360scalp-v2-engine  | 2026-04-08 09:41:38 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 4, 'volatile_unsuitable:360_SCALP': 2, 'volatile_unsuitable:360_SCALP_FVG': 2, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 2, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 2}
+360scalp-v2-engine  | 2026-04-08 09:41:44 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP': 15, 'volatile_unsuitable:360_SCALP_FVG': 15, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 15, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 15, 'pair_quality:spread too wide': 40}
+360scalp-v2-engine  | 2026-04-08 09:41:44 | scanner                  | INFO    | Protective mode ENTERED (volatile=60, spread_wide=40)
+360scalp-v2-engine  | 2026-04-08 09:41:49 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP': 15, 'volatile_unsuitable:360_SCALP_FVG': 15, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 15, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 15, 'pair_quality:spread too wide': 40}
+360scalp-v2-engine  | 2026-04-08 09:41:54 | telemetry                | INFO    | CPU=0.0% | MEM=120MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4248ms | API/min=3 | Redis=True
+360scalp-v2-engine  | 2026-04-08 09:41:54 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP': 15, 'volatile_unsuitable:360_SCALP_FVG': 15, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 15, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 15, 'pair_quality:spread too wide': 40}
+360scalp-v2-engine  | 2026-04-08 09:42:00 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP': 15, 'volatile_unsuitable:360_SCALP_FVG': 15, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 15, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 15, 'pair_quality:spread too wide': 40}
+360scalp-v2-engine  | 2026-04-08 09:42:36 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP': 3, 'volatile_unsuitable:360_SCALP_FVG': 3, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 3, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 3, 'pair_quality:spread too wide': 8}
+360scalp-v2-engine  | 2026-04-08 09:42:40 | scanner                  | INFO    | QUIET_SCALP_BLOCK TSLAUSDT 360_SCALP conf=59.6 < min=65.0
+360scalp-v2-engine  | 2026-04-08 09:42:42 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP': 14, 'volatile_unsuitable:360_SCALP_FVG': 14, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 14, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 14, 'pair_quality:spread too wide': 36, 'cooldown:360_SCALP': 1}
+360scalp-v2-engine  | 2026-04-08 09:42:48 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP': 14, 'volatile_unsuitable:360_SCALP_FVG': 14, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 14, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 14, 'pair_quality:spread too wide': 36, 'cooldown:360_SCALP': 1}
+
+══════════════════════════════════════════════
+  ERROR SCAN (last 500 lines)
+══════════════════════════════════════════════
+OK: No errors/exceptions found in last 500 log lines
+
+══════════════════════════════════════════════
+  REDIS INFO
+══════════════════════════════════════════════
+--- Redis Memory ---
+used_memory_human:1.16M
+used_memory_peak_human:1.16M
+maxmemory_human:128.00M
+
+--- Redis Keyspace ---
+# Keyspace
+db0:keys=3,expires=0,avg_ttl=0,subexpiry=0
+
+--- Redis DB Size ---
+3
