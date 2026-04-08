@@ -64,6 +64,7 @@ class CircuitBreaker:
         per_symbol_cooldown_seconds: int = _DEFAULT_PER_SYMBOL_COOLDOWN_SECONDS,
         per_symbol_daily_drawdown_pct: float = _DEFAULT_PER_SYMBOL_DAILY_DRAWDOWN_PCT,
         alert_callback: Optional[Callable[..., Any]] = None,
+        startup_grace_seconds: int = 0,
     ) -> None:
         self.max_consecutive_sl = max_consecutive_sl
         self.max_hourly_sl = max_hourly_sl
@@ -85,6 +86,13 @@ class CircuitBreaker:
         self._last_resume_time: Optional[float] = None
         self._last_resume_reason: str = ""
         self._monitoring_started_at: float = time.monotonic()
+
+        # Startup grace period: record the process start time so that
+        # is_tripped() can suppress the breaker during cache warm-up.
+        # Defaults to 0 (no grace) so existing callers are unaffected.
+        self._startup_grace_seconds: int = startup_grace_seconds
+        self._startup_time: float = time.monotonic()
+        self._grace_period_logged: bool = False
 
         # Per-symbol consecutive SL counters and cooldown expiry times.
         # After per_symbol_max_sl consecutive SL hits on the same symbol, that
@@ -185,7 +193,23 @@ class CircuitBreaker:
         self._evaluate()
 
     def is_tripped(self) -> bool:
-        """Return ``True`` when the circuit breaker is active."""
+        """Return ``True`` when the circuit breaker is active.
+
+        During the startup grace period (``startup_grace_seconds`` after process
+        start) this always returns ``False`` so that cold-start cache warming
+        does not immediately trip the breaker.
+        """
+        if self._startup_grace_seconds > 0:
+            elapsed = time.monotonic() - self._startup_time
+            if elapsed < self._startup_grace_seconds:
+                remaining = self._startup_grace_seconds - elapsed
+                if not self._grace_period_logged:
+                    log.info(
+                        "Startup grace period active — circuit breaker suppressed for %.0fs",
+                        remaining,
+                    )
+                    self._grace_period_logged = True
+                return False
         self._refresh_state()
         return self._tripped
 

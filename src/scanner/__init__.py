@@ -1627,13 +1627,19 @@ class Scanner:
                 self._suppression_counters[f"pair_quality:{ctx.pair_quality.reason}"] += 1
                 return True
         if ctx.market_state == MarketState.VOLATILE_UNSUITABLE:
-            log.debug(
-                "Skipping {} {} – volatile/unsuitable market state",
-                symbol,
-                chan_name,
-            )
-            self._suppression_counters[f"volatile_unsuitable:{chan_name}"] += 1
-            return True
+            # 360_SCALP contains bypass methods (VOLUME_SURGE_BREAKOUT,
+            # BREAKDOWN_SHORT, OPENING_RANGE_BREAKOUT, FUNDING_EXTREME_SIGNAL)
+            # that are explicitly designed for volatile conditions.  Let the
+            # channel run — the setup-compatibility gate in _prepare_signal
+            # will reject any non-bypass setup class that comes through.
+            if chan_name != "360_SCALP":
+                log.debug(
+                    "Skipping {} {} – volatile/unsuitable market state",
+                    symbol,
+                    chan_name,
+                )
+                self._suppression_counters[f"volatile_unsuitable:{chan_name}"] += 1
+                return True
         if chan_name in self.paused_channels:
             self._suppression_counters[f"paused_channel:{chan_name}"] += 1
             return True

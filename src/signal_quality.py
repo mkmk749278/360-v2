@@ -538,8 +538,25 @@ def classify_setup(
     delta_spike = bool(smc_data.get("volume_delta_spike"))
     momentum = _safe_float(primary.get("momentum_last"))
 
+    # Bypass methods self-identify via signal.setup_class.  Honour that
+    # classification directly so that the regime-compatibility gate uses the
+    # correct SetupClass entry (e.g. VOLUME_SURGE_BREAKOUT is in
+    # REGIME_SETUP_COMPATIBILITY[VOLATILE_UNSUITABLE] and must not be
+    # re-classified as MOMENTUM_EXPANSION which is not).
+    _SELF_CLASSIFYING = frozenset({
+        "VOLUME_SURGE_BREAKOUT",
+        "BREAKDOWN_SHORT",
+        "OPENING_RANGE_BREAKOUT",
+        "FUNDING_EXTREME_SIGNAL",
+    })
+    _sig_setup_class = getattr(signal, "setup_class", "")
+    if _sig_setup_class in _SELF_CLASSIFYING:
+        try:
+            setup = SetupClass(_sig_setup_class)
+        except ValueError:
+            setup = SetupClass.TREND_PULLBACK_CONTINUATION
     # Check for WHALE_MOMENTUM / RANGE_FADE setups (SCALP sub-paths)
-    if channel_name == "360_SCALP" and (whale or delta_spike) and abs(momentum) >= 0.3:
+    elif channel_name == "360_SCALP" and (whale or delta_spike) and abs(momentum) >= 0.3:
         setup = SetupClass.WHALE_MOMENTUM
     elif channel_name == "360_SCALP" and market_state in (MarketState.CLEAN_RANGE, MarketState.DIRTY_RANGE):
         setup = SetupClass.RANGE_FADE

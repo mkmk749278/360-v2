@@ -872,6 +872,14 @@ CIRCUIT_BREAKER_PER_SYMBOL_COOLDOWN_SECONDS: int = int(
     os.getenv("CIRCUIT_BREAKER_PER_SYMBOL_COOLDOWN_SECONDS", "3600")
 )
 
+# Startup grace period: the circuit breaker will not trip for this many
+# seconds after the engine starts.  Cold-start cache warming produces
+# elevated scan latency and temporary elevated SL rates that would
+# otherwise trip the breaker immediately after every deploy.
+CIRCUIT_BREAKER_STARTUP_GRACE_SECONDS: int = int(
+    os.getenv("CIRCUIT_BREAKER_STARTUP_GRACE_SECONDS", "180")
+)
+
 # ---------------------------------------------------------------------------
 # Thesis-based cooldown: after an SL hit, suppress the same (symbol, channel,
 # direction, setup_class) tuple for a much longer period.
