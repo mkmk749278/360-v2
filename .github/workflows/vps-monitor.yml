@@ -144,7 +144,7 @@ jobs:
           echo "  SIGNAL PERFORMANCE HISTORY"
           echo "$SEP"
           echo "--- Last 10 Signals ---"
-          docker exec 360scalp-v2-engine python3 -c '
+          docker exec -i 360scalp-v2-engine python3 - << 'PYEOF' 2>/dev/null || echo "Container not available"
 import json, sys, datetime
 try:
     with open("/app/data/signal_performance.json") as f:
@@ -153,7 +153,7 @@ try:
         print("No signal history yet")
         sys.exit(0)
     records = sorted(data, key=lambda x: x.get("timestamp", 0), reverse=True)[:10]
-    print(f"{\"#\":<3} {\"Symbol\":<14} {\"Dir\":<6} {\"Setup\":<30} {\"Entry\":>12} {\"Conf\":>6} {\"PnL%\":>7} {\"Outcome\":<12} {\"Time\"}")
+    print(f"{'#':<3} {'Symbol':<14} {'Dir':<6} {'Setup':<30} {'Entry':>12} {'Conf':>6} {'PnL%':>7} {'Outcome':<12} {'Time'}")
     print("-" * 110)
     for i, r in enumerate(records, 1):
         ts = r.get("timestamp", 0)
@@ -162,14 +162,14 @@ try:
         setup = r.get("setup_class") or r.get("channel") or r.get("setup_type") or r.get("signal_type") or "?"
         entry = r.get("entry") or r.get("entry_price") or 0
         pnl = r.get("pnl_pct") or 0.0
-        print(f"{i:<3} {r.get(\"symbol\",\"?\"):<14} {r.get(\"direction\",\"?\"):<6} {setup:<30} {entry:>12.4f} {r.get(\"confidence\",0):>6.1f} {pnl:>+7.2f}% {outcome:<12} {ts_str}")
+        print(f"{i:<3} {r.get('symbol','?'):<14} {r.get('direction','?'):<6} {setup:<30} {entry:>12.4f} {r.get('confidence',0):>6.1f} {pnl:>+7.2f}% {outcome:<12} {ts_str}")
 except FileNotFoundError:
     print("No signal history yet")
 except json.JSONDecodeError:
     print("Signal history file could not be parsed")
 except Exception as e:
     print(f"Error reading signal history: {e}")
-' 2>/dev/null || echo "Container not available"
+PYEOF
 
           echo ""
           echo "$SEP"
