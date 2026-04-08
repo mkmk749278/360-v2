@@ -538,7 +538,7 @@ def classify_setup(
     delta_spike = bool(smc_data.get("volume_delta_spike"))
     momentum = _safe_float(primary.get("momentum_last"))
 
-    # Bypass methods self-identify via signal.setup_class.  Honour that
+    # Bypass methods self-identify via signal.setup_class.  Honor that
     # classification directly so that the regime-compatibility gate uses the
     # correct SetupClass entry (e.g. VOLUME_SURGE_BREAKOUT is in
     # REGIME_SETUP_COMPATIBILITY[VOLATILE_UNSUITABLE] and must not be
@@ -554,6 +554,12 @@ def classify_setup(
         try:
             setup = SetupClass(_sig_setup_class)
         except ValueError:
+            import logging as _logging
+            _logging.warning(
+                "classify_setup: unrecognised self-classifying setup_class %r "
+                "— falling back to TREND_PULLBACK_CONTINUATION",
+                _sig_setup_class,
+            )
             setup = SetupClass.TREND_PULLBACK_CONTINUATION
     # Check for WHALE_MOMENTUM / RANGE_FADE setups (SCALP sub-paths)
     elif channel_name == "360_SCALP" and (whale or delta_spike) and abs(momentum) >= 0.3:
