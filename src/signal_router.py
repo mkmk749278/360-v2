@@ -26,6 +26,8 @@ from config import (
     CHANNEL_TELEGRAM_MAP,
     MAX_CONCURRENT_SIGNALS_PER_CHANNEL,
     MAX_SIGNAL_HOLD_SECONDS,
+    SIGNAL_TYPE_LABELS,
+    TELEGRAM_ACTIVE_CHANNEL_ID,
     TELEGRAM_FREE_CHANNEL_ID,
 )
 from src.channels.base import Signal
@@ -935,6 +937,34 @@ class SignalRouter:
                     setattr(sig, k, v)
             self._schedule_persist()
 
+    async def _notify_signal_expiry(self, sig: Signal, now: datetime) -> None:
+        """Post a Telegram notification when a signal expires without being filled.
+
+        Sends to ``TELEGRAM_ACTIVE_CHANNEL_ID`` so subscribers know what happened
+        to the signal instead of it silently disappearing.
+        """
+        if not TELEGRAM_ACTIVE_CHANNEL_ID:
+            return
+        try:
+            direction_emoji = "🟢" if sig.direction == Direction.LONG else "🔴"
+            setup_label = SIGNAL_TYPE_LABELS.get(sig.setup_class, sig.setup_class)
+            age_secs = (now - sig.timestamp).total_seconds()
+            hours = int(age_secs // 3600)
+            minutes = int((age_secs % 3600) // 60)
+
+            text = (
+                f"⏰ Signal Expired — {sig.symbol}\n\n"
+                f"{direction_emoji} {sig.direction.value} | {setup_label}\n"
+                f"Entry was not reached or position auto-closed.\n\n"
+                f"📍 Entry: {sig.entry}\n"
+                f"⏱ Time held: {hours}h {minutes}m\n"
+                f"📊 Confidence was: {sig.confidence:.0f}\n\n"
+                f"No P&L recorded."
+            )
+            await self._send_telegram(TELEGRAM_ACTIVE_CHANNEL_ID, text)
+        except Exception as exc:
+            log.debug("Signal expiry notification failed for {}: {}", sig.symbol, exc)
+
     def cleanup_expired(self) -> int:
         """Remove signals that have exceeded their max hold duration.
 
@@ -962,6 +992,12 @@ class SignalRouter:
                 "Auto-expired signal {} {} {} (exceeded max hold)",
                 signal_id, sig.symbol, sig.channel,
             )
+            # Post expiry notification to Telegram (fire-and-forget)
+            try:
+                loop = asyncio.get_running_loop()
+                loop.create_task(self._notify_signal_expiry(sig, now))
+            except RuntimeError:
+                pass
 
         if expired_ids:
             self._schedule_persist()

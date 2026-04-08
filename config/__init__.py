@@ -201,6 +201,16 @@ NEW_PAIR_MIN_CONFIDENCE: float = 50.0  # lower cap until enough data
 # order-book or kline fetches, reducing unnecessary weight consumption.
 SCAN_MIN_VOLUME_USD: float = _safe_float("SCAN_MIN_VOLUME_USD", "1000000")
 
+# ---------------------------------------------------------------------------
+# PR8 — Volume Surge Breakout & Dynamic Pair Promotion
+# ---------------------------------------------------------------------------
+#: Volume multiplier vs rolling 7-candle average required for a surge signal.
+SURGE_VOLUME_MULTIPLIER: float = _safe_float("SURGE_VOLUME_MULTIPLIER", "3.0")
+#: Volume multiplier vs previous baseline required to promote a non-scanned pair.
+SURGE_PROMOTION_VOLUME_MULTIPLIER: float = _safe_float("SURGE_PROMOTION_VOLUME_MULT", "5.0")
+#: Maximum number of dynamically promoted pairs per scan cycle.
+SURGE_PROMOTION_MAX_PAIRS: int = _safe_int("SURGE_PROMOTION_MAX_PAIRS", "5")
+
 # Regime-aware volume floors (USD 24h volume).
 # TRENDING/VOLATILE need depth for follow-through; RANGING/QUIET mean-reversion
 # setups work fine with less liquidity.
@@ -730,6 +740,8 @@ SIGNAL_TYPE_LABELS: Dict[str, str] = {
     "ICHIMOKU_SIGNAL":               "☁️ ICHIMOKU",
     "VWAP_EXTENSION":                "📏 VWAP EXTENSION",
     "MULTI_STRATEGY_CONFLUENCE":     "🌟 MULTI-STRATEGY",
+    "VOLUME_SURGE_BREAKOUT":         "🚀 SURGE BREAKOUT",
+    "BREAKDOWN_SHORT":               "📉 BREAKDOWN SHORT",
 }
 
 CHANNEL_EMOJIS: Dict[str, str] = {

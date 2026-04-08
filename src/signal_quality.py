@@ -25,6 +25,8 @@ class SetupClass(str, Enum):
     RANGE_FADE = "RANGE_FADE"
     WHALE_MOMENTUM = "WHALE_MOMENTUM"
     MULTI_STRATEGY_CONFLUENCE = "MULTI_STRATEGY_CONFLUENCE"
+    VOLUME_SURGE_BREAKOUT = "VOLUME_SURGE_BREAKOUT"
+    BREAKDOWN_SHORT = "BREAKDOWN_SHORT"
 
 
 class MarketState(str, Enum):
@@ -52,6 +54,8 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.WHALE_MOMENTUM,
         SetupClass.RANGE_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
+        SetupClass.VOLUME_SURGE_BREAKOUT,
+        SetupClass.BREAKDOWN_SHORT,
     },
     "360_SCALP_FVG": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -109,6 +113,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.MOMENTUM_EXPANSION,
         SetupClass.WHALE_MOMENTUM,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
+        SetupClass.VOLUME_SURGE_BREAKOUT,
+        SetupClass.BREAKDOWN_SHORT,
     },
     MarketState.WEAK_TREND: {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -116,6 +122,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.WHALE_MOMENTUM,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
+        SetupClass.VOLUME_SURGE_BREAKOUT,
+        SetupClass.BREAKDOWN_SHORT,
     },
     MarketState.CLEAN_RANGE: {
         SetupClass.RANGE_REJECTION,
@@ -136,6 +144,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.WHALE_MOMENTUM,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
+        SetupClass.VOLUME_SURGE_BREAKOUT,
+        SetupClass.BREAKDOWN_SHORT,
     },
     MarketState.VOLATILE_UNSUITABLE: {
         # Whale-driven and liquidity-sweep signals are valid precisely in
@@ -144,6 +154,9 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         # setup classes require more orderly price action.
         SetupClass.WHALE_MOMENTUM,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
+        # Volume surge breakout/breakdown are designed for volatile conditions
+        SetupClass.VOLUME_SURGE_BREAKOUT,
+        SetupClass.BREAKDOWN_SHORT,
     },
 }
 
@@ -602,7 +615,9 @@ def execution_quality_check(
         SetupClass.EXHAUSTION_FADE: 1.0,
         SetupClass.RANGE_FADE: 1.3,
         SetupClass.WHALE_MOMENTUM: 1.2,
-    }[setup]
+        SetupClass.VOLUME_SURGE_BREAKOUT: 1.5,
+        SetupClass.BREAKDOWN_SHORT: 1.5,
+    }.get(setup, 1.5)
     passed = trigger_confirmed and extension_ratio <= max_extension
     zone_low = min(anchor, signal.entry)
     zone_high = max(anchor, signal.entry)
@@ -899,12 +914,13 @@ class SignalScoringEngine:
     # Setup classes that strongly align with each regime
     _REGIME_SETUP_AFFINITY: Dict[str, List[str]] = {
         "TRENDING_UP": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
-                        "THREE_WHITE_SOLDIERS", "WHALE_MOMENTUM"],
+                        "THREE_WHITE_SOLDIERS", "WHALE_MOMENTUM", "VOLUME_SURGE_BREAKOUT"],
         "TRENDING_DOWN": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
-                          "THREE_BLACK_CROWS", "WHALE_MOMENTUM"],
+                          "THREE_BLACK_CROWS", "WHALE_MOMENTUM", "BREAKDOWN_SHORT"],
         "RANGING": ["RANGE_FADE", "SWING_STANDARD"],
         "QUIET": ["RANGE_FADE"],
-        "VOLATILE": ["WHALE_MOMENTUM", "LIQUIDITY_SWEEP_REVERSAL"],
+        "VOLATILE": ["WHALE_MOMENTUM", "LIQUIDITY_SWEEP_REVERSAL",
+                     "VOLUME_SURGE_BREAKOUT", "BREAKDOWN_SHORT"],
     }
 
     def score(self, inp: ScoringInput) -> Dict[str, float]:

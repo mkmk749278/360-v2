@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
-from config import CHANNEL_SCALP
+from config import CHANNEL_SCALP, SURGE_VOLUME_MULTIPLIER
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import (
     check_adx,
@@ -130,6 +130,8 @@ class ScalpChannel(BaseChannel):
             (self._evaluate_trend_pullback,        "trend"),
             (self._evaluate_liquidation_reversal,  "order_flow"),
             (self._evaluate_whale_momentum,        "order_flow"),
+            (self._evaluate_volume_surge_breakout, "volume"),
+            (self._evaluate_breakdown_short,       "volume"),
         ):
             sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
             if sig is not None:
@@ -270,19 +272,80 @@ class ScalpChannel(BaseChannel):
                 if _moving_toward:
                     return None
 
-        sl_dist = max(close * self.config.sl_pct_range[0] / 100, atr_val * 0.5)
-
-        # Wire PairProfile.volatility_class for SL sizing (item 17)
-        if profile is not None:
-            _vol_class = getattr(profile, "volatility_class", "medium")
-            if _vol_class == "high":
-                sl_dist *= 1.3  # Wider SL for volatile pairs
-        sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
+        # Structure-based SL: use swept level ± buffer if available, else ATR fallback
+        _sweep = sweeps[0] if sweeps else None
+        _sweep_level = None
+        if _sweep is not None:
+            # Try multiple attribute names used by different SMC implementations
+            _sweep_level = getattr(_sweep, "level", None) or getattr(_sweep, "price", None) or getattr(_sweep, "sweep_level", None)
+        if _sweep_level is not None and float(_sweep_level) > 0:
+            _sweep_level = float(_sweep_level)
+            if direction == Direction.LONG:
+                sl = _sweep_level * (1 - 0.001)  # SL just below swept level
+            else:
+                sl = _sweep_level * (1 + 0.001)  # SL just above swept level
+            sl_dist = abs(close - sl)
+            # Ensure minimum SL distance (at least 0.5×ATR)
+            if sl_dist < atr_val * 0.5:
+                sl_dist = atr_val * 0.5
+                sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
+        else:
+            # ATR-based fallback
+            sl_dist = max(close * self.config.sl_pct_range[0] / 100, atr_val * 0.5)
+            # Wire PairProfile.volatility_class for SL sizing (item 17)
+            if profile is not None:
+                _vol_class = getattr(profile, "volatility_class", "medium")
+                if _vol_class == "high":
+                    sl_dist *= 1.3  # Wider SL for volatile pairs
+            sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
 
         if direction == Direction.LONG and sl >= close:
             return None
         if direction == Direction.SHORT and sl <= close:
             return None
+
+        # Structure-based TP: FVG above/below entry for TP1, swing high/low for TP2
+        m5_highs = m5.get("high", [])
+        m5_lows = m5.get("low", [])
+        tp1 = 0.0
+        tp2 = 0.0
+        tp3 = 0.0
+
+        # TP1: nearest FVG in signal direction
+        fvgs = smc_data.get("fvg", [])
+        for fvg_zone in fvgs:
+            fvg_mid = None
+            if hasattr(fvg_zone, "gap_high") and hasattr(fvg_zone, "gap_low"):
+                fvg_mid = (float(fvg_zone.gap_high) + float(fvg_zone.gap_low)) / 2.0
+            elif isinstance(fvg_zone, dict):
+                _gh = fvg_zone.get("gap_high", 0)
+                _gl = fvg_zone.get("gap_low", 0)
+                if _gh and _gl:
+                    fvg_mid = (float(_gh) + float(_gl)) / 2.0
+            if fvg_mid is not None:
+                if direction == Direction.LONG and fvg_mid > close:
+                    tp1 = fvg_mid
+                    break
+                elif direction == Direction.SHORT and fvg_mid < close:
+                    tp1 = fvg_mid
+                    break
+
+        # TP2: 20-candle swing high (LONG) / swing low (SHORT)
+        if direction == Direction.LONG and len(m5_highs) >= 21:
+            tp2 = max(float(h) for h in m5_highs[-21:-1])
+            if tp2 <= close:
+                tp2 = 0.0
+        elif direction == Direction.SHORT and len(m5_lows) >= 21:
+            tp2 = min(float(l) for l in m5_lows[-21:-1])
+            if tp2 >= close:
+                tp2 = 0.0
+
+        # Fall back to ATR-ratio approach for any missing TP levels
+        if tp1 <= 0 or (direction == Direction.LONG and tp1 <= close) or (direction == Direction.SHORT and tp1 >= close):
+            tp1 = close + sl_dist * 1.5 if direction == Direction.LONG else close - sl_dist * 1.5
+        if tp2 <= 0 or (direction == Direction.LONG and tp2 <= tp1) or (direction == Direction.SHORT and tp2 >= tp1):
+            tp2 = close + sl_dist * 2.5 if direction == Direction.LONG else close - sl_dist * 2.5
+        tp3 = close + sl_dist * 4.0 if direction == Direction.LONG else close - sl_dist * 4.0
 
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
@@ -291,9 +354,9 @@ class ScalpChannel(BaseChannel):
             direction=direction,
             close=close,
             sl=sl,
-            tp1=0.0,
-            tp2=0.0,
-            tp3=0.0,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
             sl_dist=sl_dist,
             id_prefix="SCALP",
             atr_val=atr_val,
@@ -305,6 +368,15 @@ class ScalpChannel(BaseChannel):
         if sig is None:
             return None
 
+        # Override with structure-based SL and TP targets
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
@@ -418,6 +490,39 @@ class ScalpChannel(BaseChannel):
         if direction == Direction.SHORT and sl <= close:
             return None
 
+        # Structure-based TP targets
+        m5_highs = m5.get("high", [])
+        m5_lows = m5.get("low", [])
+        # TP1: nearest swing high (LONG) or swing low (SHORT) from last 20 candles
+        if direction == Direction.LONG:
+            tp1 = max(float(h) for h in m5_highs[-21:-1]) if len(m5_highs) >= 21 else close + sl_dist * 1.5
+        else:
+            tp1 = min(float(l) for l in m5_lows[-21:-1]) if len(m5_lows) >= 21 else close - sl_dist * 1.5
+        # Ensure TP1 is beyond entry in the right direction
+        if direction == Direction.LONG and tp1 <= close:
+            tp1 = close + sl_dist * 1.5
+        if direction == Direction.SHORT and tp1 >= close:
+            tp1 = close - sl_dist * 1.5
+
+        # TP2: 4h swing high/low if available, else 2.0 × sl_dist
+        candles_4h = candles.get("4h")
+        if candles_4h and len(candles_4h.get("high", [])) >= 5:
+            _4h_highs = candles_4h.get("high", [])
+            _4h_lows = candles_4h.get("low", [])
+            if direction == Direction.LONG:
+                tp2 = max(float(h) for h in _4h_highs[-10:]) if _4h_highs else close + sl_dist * 2.0
+            else:
+                tp2 = min(float(l) for l in _4h_lows[-10:]) if _4h_lows else close - sl_dist * 2.0
+            if direction == Direction.LONG and tp2 <= tp1:
+                tp2 = close + sl_dist * 2.0
+            if direction == Direction.SHORT and tp2 >= tp1:
+                tp2 = close - sl_dist * 2.0
+        else:
+            tp2 = close + sl_dist * 2.0 if direction == Direction.LONG else close - sl_dist * 2.0
+
+        # TP3: ratio fallback
+        tp3 = close + 4.0 * sl_dist if direction == Direction.LONG else close - 4.0 * sl_dist
+
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
             config=self.config,
@@ -425,9 +530,9 @@ class ScalpChannel(BaseChannel):
             direction=direction,
             close=close,
             sl=sl,
-            tp1=0.0,
-            tp2=0.0,
-            tp3=0.0,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
             sl_dist=sl_dist,
             id_prefix="TPULLBACK",
             atr_val=atr_val,
@@ -439,6 +544,13 @@ class ScalpChannel(BaseChannel):
         if sig is None:
             return None
 
+        # Override with structure-based TP targets
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
@@ -696,6 +808,291 @@ class ScalpChannel(BaseChannel):
                 # but carries lower certainty; apply a soft confidence penalty
                 # so only very strong whale setups pass the min_confidence gate.
                 sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + 10.0
+        return sig
+
+    # ------------------------------------------------------------------
+    # VOLUME_SURGE_BREAKOUT path
+    # Volume surge + pullback to breakout level — fires in volatile/trending markets.
+    # ------------------------------------------------------------------
+
+    def _evaluate_volume_surge_breakout(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """VOLUME_SURGE_BREAKOUT path: price breaks swing high on surge volume then pulls back."""
+        # Block only in QUIET — surge setups need volume, which QUIET lacks.
+        # VOLATILE/VOLATILE_UNSUITABLE are explicitly allowed here.
+        regime_upper = regime.upper() if regime else ""
+        if regime_upper == "QUIET":
+            return None
+
+        m5 = candles.get("5m")
+        if m5 is None or len(m5.get("close", [])) < 25:
+            return None
+
+        closes = m5.get("close", [])
+        highs = m5.get("high", [])
+        volumes = m5.get("volume", [])
+        if len(closes) < 25 or len(highs) < 25 or len(volumes) < 10:
+            return None
+
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+            return None
+
+        # Rolling 7-candle average (last 7 complete candles, not current)
+        rolling_vols = [float(v) for v in volumes[-8:-1]]
+        if len(rolling_vols) < 7 or sum(rolling_vols) <= 0:
+            return None
+        rolling_avg = sum(rolling_vols) / len(rolling_vols)
+
+        # Current 5m candle volume ≥ SURGE_VOLUME_MULTIPLIER × rolling average
+        # (use current candle volume to confirm active surge, same units as rolling_avg)
+        current_vol = float(volumes[-1]) if len(volumes) >= 1 else 0.0
+        if current_vol < SURGE_VOLUME_MULTIPLIER * rolling_avg:
+            return None
+
+        # Swing high (20-candle) and breakout in last 3 candles
+        swing_high_level = max(float(h) for h in highs[-23:-3])
+        if swing_high_level <= 0:
+            return None
+
+        # Check that the breakout candle (candle[-3]) broke above the swing high
+        breakout_candle_high = float(highs[-3])
+        if breakout_candle_high <= swing_high_level:
+            return None
+
+        # Condition 3: Current close is 0.5%–2.0% BELOW the swing high (pullback zone)
+        close = float(closes[-1])
+        if close <= 0:
+            return None
+        dist_from_swing_pct = (swing_high_level - close) / swing_high_level * 100.0
+        if not (0.5 <= dist_from_swing_pct <= 2.0):
+            return None
+
+        # Condition 4: EMA9 > EMA21
+        ind = indicators.get("5m", {})
+        ema9 = ind.get("ema9_last")
+        ema21 = ind.get("ema21_last")
+        if ema9 is None or ema21 is None or ema9 <= ema21:
+            return None
+
+        # Condition 5: RSI between 45–72
+        rsi_val = ind.get("rsi_last")
+        if rsi_val is not None and not (45 <= rsi_val <= 72):
+            return None
+
+        # Condition 6: At least one FVG or orderblock in smc_data
+        fvgs = smc_data.get("fvg", [])
+        orderblocks = smc_data.get("orderblocks", [])
+        if not (fvgs or orderblocks):
+            return None
+
+        # Condition 8: Breakout candle volume ≥ 2.0 × rolling average
+        breakout_vol = float(volumes[-3]) if len(volumes) >= 3 else 0.0
+        if breakout_vol < 2.0 * rolling_avg:
+            return None
+
+        # Method-specific SL/TP
+        sl = swing_high_level * (1 - 0.008)  # 0.8% below breakout level
+        sl_dist = abs(close - sl)
+        if sl_dist <= 0 or sl >= close:
+            return None
+
+        # TP: measured move from base of range
+        lows = m5.get("low", [])
+        base_of_range = min(float(l) for l in lows[-23:-3]) if len(lows) >= 23 else close * 0.98
+        measured_move = swing_high_level - base_of_range
+        if measured_move <= 0:
+            measured_move = sl_dist * 2.0
+
+        tp1 = close + measured_move
+        tp2 = close + measured_move * 1.5
+        tp3 = close + measured_move * 2.0
+
+        profile = smc_data.get("pair_profile")
+        atr_val = ind.get("atr_last", close * 0.002)
+        _regime_ctx = smc_data.get("regime_context")
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=Direction.LONG,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="SURGE",
+            atr_val=atr_val,
+            setup_class="VOLUME_SURGE_BREAKOUT",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return None
+
+        # Override with method-specific structural SL and measured-move TPs
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+        sig.confidence = min(100.0, sig.confidence + 8.0)
+        return sig
+
+    # ------------------------------------------------------------------
+    # BREAKDOWN_SHORT path
+    # Mirror of VOLUME_SURGE_BREAKOUT for the short side.
+    # ------------------------------------------------------------------
+
+    def _evaluate_breakdown_short(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """BREAKDOWN_SHORT path: price breaks swing low on surge volume then dead-cat bounces."""
+        # Block only in QUIET — breakdown setups need volume, which QUIET lacks.
+        regime_upper = regime.upper() if regime else ""
+        if regime_upper == "QUIET":
+            return None
+
+        m5 = candles.get("5m")
+        if m5 is None or len(m5.get("close", [])) < 25:
+            return None
+
+        closes = m5.get("close", [])
+        lows = m5.get("low", [])
+        highs = m5.get("high", [])
+        volumes = m5.get("volume", [])
+        if len(closes) < 25 or len(lows) < 25 or len(volumes) < 10:
+            return None
+
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+            return None
+
+        # Rolling 7-candle average
+        rolling_vols = [float(v) for v in volumes[-8:-1]]
+        if len(rolling_vols) < 7 or sum(rolling_vols) <= 0:
+            return None
+        rolling_avg = sum(rolling_vols) / len(rolling_vols)
+
+        # Current 5m candle volume ≥ SURGE_VOLUME_MULTIPLIER × rolling average
+        # (use current candle volume to confirm active surge, same units as rolling_avg)
+        current_vol = float(volumes[-1]) if len(volumes) >= 1 else 0.0
+        if current_vol < SURGE_VOLUME_MULTIPLIER * rolling_avg:
+            return None
+
+        # Swing low (20-candle) and breakdown in last 3 candles
+        swing_low_level = min(float(l) for l in lows[-23:-3])
+        if swing_low_level <= 0:
+            return None
+
+        # Check that the breakdown candle broke below the swing low
+        breakdown_candle_low = float(lows[-3])
+        if breakdown_candle_low >= swing_low_level:
+            return None
+
+        # Current close is 0.5%–2.0% ABOVE the swing low (dead-cat bounce zone)
+        close = float(closes[-1])
+        if close <= 0:
+            return None
+        dist_from_swing_pct = (close - swing_low_level) / swing_low_level * 100.0
+        if not (0.5 <= dist_from_swing_pct <= 2.0):
+            return None
+
+        # EMA9 < EMA21
+        ind = indicators.get("5m", {})
+        ema9 = ind.get("ema9_last")
+        ema21 = ind.get("ema21_last")
+        if ema9 is None or ema21 is None or ema9 >= ema21:
+            return None
+
+        # RSI between 28–55
+        rsi_val = ind.get("rsi_last")
+        if rsi_val is not None and not (28 <= rsi_val <= 55):
+            return None
+
+        # At least one FVG or orderblock in smc_data
+        fvgs = smc_data.get("fvg", [])
+        orderblocks = smc_data.get("orderblocks", [])
+        if not (fvgs or orderblocks):
+            return None
+
+        # Breakdown candle volume ≥ 2.0 × rolling average
+        breakdown_vol = float(volumes[-3]) if len(volumes) >= 3 else 0.0
+        if breakdown_vol < 2.0 * rolling_avg:
+            return None
+
+        # Method-specific SL/TP
+        sl = swing_low_level * (1 + 0.008)  # 0.8% above breakdown level
+        sl_dist = abs(close - sl)
+        if sl_dist <= 0 or sl <= close:
+            return None
+
+        # TP: measured move downward projection
+        base_of_range = max(float(h) for h in highs[-23:-3]) if len(highs) >= 23 else close * 1.02
+        measured_move = base_of_range - swing_low_level
+        if measured_move <= 0:
+            measured_move = sl_dist * 2.0
+
+        tp1 = close - measured_move
+        tp2 = close - measured_move * 1.5
+        tp3 = close - measured_move * 2.0
+
+        profile = smc_data.get("pair_profile")
+        atr_val = ind.get("atr_last", close * 0.002)
+        _regime_ctx = smc_data.get("regime_context")
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=Direction.SHORT,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="BRKDN",
+            atr_val=atr_val,
+            setup_class="BREAKDOWN_SHORT",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return None
+
+        # Override with method-specific structural SL and measured-move TPs
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+        sig.confidence = min(100.0, sig.confidence + 8.0)
         return sig
 
     # ------------------------------------------------------------------

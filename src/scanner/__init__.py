@@ -48,6 +48,8 @@ from config import (
     SMC_SCALP_LOOKBACK,
     SMC_SCALP_TOLERANCE_PCT,
     SMC_SCORE_MIN_TRENDING_SHORT,
+    SURGE_PROMOTION_MAX_PAIRS,
+    SURGE_PROMOTION_VOLUME_MULTIPLIER,
     TIER2_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
@@ -541,6 +543,12 @@ class Scanner:
         # invalidates automatically whenever any timeframe gets a new candle.
         self._indicator_cache: Dict[str, tuple] = {}
 
+        # PR8: Dynamic pair promotion — volume baseline tracker and promoted pairs
+        # symbol → last known 24h volume (used to detect surge events)
+        self._volume_baseline: Dict[str, float] = {}
+        # symbol → cycles remaining (non-scan pairs temporarily added to universe)
+        self._promoted_pairs: Dict[str, int] = {}
+
     # ------------------------------------------------------------------
     # Dynamic tier query helper
     # ------------------------------------------------------------------
@@ -568,6 +576,65 @@ class Scanner:
     # ------------------------------------------------------------------
     # Public interface
     # ------------------------------------------------------------------
+
+    def _update_volume_baseline(self, sorted_pairs_set: set) -> List[str]:
+        """Detect volume surge events in the full pair universe and temporarily
+        promote non-scanned pairs into the scan cycle.
+
+        Uses ``pair_mgr.pairs`` as the source of truth for current 24h volume.
+        Pairs with a volume that is ``SURGE_PROMOTION_VOLUME_MULTIPLIER`` × higher
+        than their previous baseline AND whose volume exceeds ``SCAN_MIN_VOLUME_USD``
+        are added to ``_promoted_pairs`` for 3 scan cycles.
+
+        Parameters
+        ----------
+        sorted_pairs_set:
+            Set of symbol strings currently in the active scan universe.
+
+        Returns
+        -------
+        List[str]
+            List of currently promoted symbols (symbols NOT in sorted_pairs_set
+            that have been temporarily added to the scan universe).
+        """
+        now_promoted: List[str] = []
+
+        for symbol, info in list(self.pair_mgr.pairs.items()):
+            current_vol = info.volume_24h_usd
+            baseline = self._volume_baseline.get(symbol, 0.0)
+
+            # Detect surge for pairs outside the active scan universe
+            if symbol not in sorted_pairs_set:
+                if (
+                    baseline > 0
+                    and current_vol > baseline * SURGE_PROMOTION_VOLUME_MULTIPLIER
+                    and current_vol > SCAN_MIN_VOLUME_USD
+                ):
+                    ratio = current_vol / baseline
+                    log.info(
+                        "🚀 SURGE PROMOTION: {} volume {:.0f} is {:.1f}× baseline "
+                        "— adding to scan for 3 cycles",
+                        symbol, current_vol, ratio,
+                    )
+                    self._promoted_pairs[symbol] = 3
+
+            # Update baseline for all known pairs
+            self._volume_baseline[symbol] = current_vol
+
+        # Decrement counters for currently promoted pairs; remove when expired
+        for sym in list(self._promoted_pairs.keys()):
+            if sym in sorted_pairs_set:
+                # Pair re-entered the main scan universe — no longer needs promotion
+                del self._promoted_pairs[sym]
+            else:
+                remaining = self._promoted_pairs[sym] - 1
+                if remaining <= 0:
+                    del self._promoted_pairs[sym]
+                else:
+                    self._promoted_pairs[sym] = remaining
+                    now_promoted.append(sym)
+
+        return now_promoted[:SURGE_PROMOTION_MAX_PAIRS]
 
     async def scan_loop(self) -> None:
         """Periodic scan over all pairs / channels."""
@@ -733,6 +800,24 @@ class Scanner:
                 # always running it eliminates 30-50 individual REST calls per
                 # cycle (each Weight 1, timeout-prone) with a single call.
                 await self._fetch_global_book_tickers(market="futures")
+
+                # PR8 — Dynamic pair promotion: detect volume surges in pairs
+                # outside the current scan universe and temporarily add them.
+                _sorted_pairs_set = {sym for sym, _ in sorted_pairs}
+                _promoted = self._update_volume_baseline(_sorted_pairs_set)
+                if _promoted:
+                    # Add promoted pairs to filtered_pairs (capped at SURGE_PROMOTION_MAX_PAIRS)
+                    _added = 0
+                    _promoted_syms = {sym for sym, _ in filtered_pairs}
+                    filtered_pairs = list(filtered_pairs)  # ensure mutable list once
+                    for _promo_sym in _promoted:
+                        if _promo_sym not in _promoted_syms:
+                            _promo_info = self.pair_mgr.pairs.get(_promo_sym)
+                            if _promo_info is not None:
+                                filtered_pairs.append((_promo_sym, _promo_info))
+                                _added += 1
+                    if _added:
+                        log.info("Added {} dynamically promoted pair(s) to scan cycle", _added)
 
                 sem = self._scan_semaphore
                 tasks = [
