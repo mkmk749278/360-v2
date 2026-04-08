@@ -29,6 +29,11 @@ jobs:
           script: |
             set -euo pipefail
 
+            # Mask the PAT so it never appears in plain text in workflow logs.
+            # NOTE: GH_PAT must be added as a repo secret (Settings → Secrets →
+            # Actions → New secret, name: GH_PAT, value: a GitHub PAT with repo scope).
+            echo "::add-mask::${{ secrets.GH_PAT }}"
+
             # ── Bootstrap: re-authorize deploy key (survives OS reinstall) ──────
             DEPLOY_PUBKEY="${{ secrets.VPS_DEPLOY_PUBKEY }}"
             if [ -n "$DEPLOY_PUBKEY" ]; then
@@ -45,10 +50,18 @@ jobs:
             # ── Bootstrap: clone repo if missing (fresh VPS / OS reinstall) ─────
             if [ ! -d ~/360-v2/.git ]; then
               echo "ℹ️  Fresh VPS detected — cloning repository..."
-              git clone https://github.com/mkmk749278/360-v2.git ~/360-v2
+              git clone https://x-access-token:${{ secrets.GH_PAT }}@github.com/mkmk749278/360-v2.git ~/360-v2
             fi
 
             cd ~/360-v2
+
+            # Update remote to use token auth (handles existing clones that lost
+            # credentials when the repo switched to private)
+            git remote set-url origin https://x-access-token:${{ secrets.GH_PAT }}@github.com/mkmk749278/360-v2.git
+
+            # Pull latest code
+            git fetch origin main
+            git reset --hard origin/main
 
             # ── Bootstrap: install Docker if missing (fresh VPS / OS reinstall) ──
             if ! command -v docker &>/dev/null; then
@@ -65,10 +78,6 @@ jobs:
             if ! systemctl is-active --quiet docker; then
               systemctl start docker
             fi
-
-            # Pull latest code
-            git fetch origin main
-            git reset --hard origin/main
 
             # Bootstrap .env from template only when it does not already exist
             if [ ! -f .env ]; then
