@@ -97,27 +97,26 @@ jobs:
           echo "$SEP"
           echo "  HEARTBEAT CHECK"
           echo "$SEP"
-          HEARTBEAT_FILE=~/360-v2/data/scanner_heartbeat
-          if [ -f "$HEARTBEAT_FILE" ]; then
-              AGE=$(( $(date +%s) - $(stat -c %Y "$HEARTBEAT_FILE") ))
-              echo "Heartbeat age: ${AGE}s"
-              if [ "$AGE" -gt 120 ]; then
-                  echo "WARNING: Heartbeat is STALE (>${AGE}s) — scanner may be hung"
-              else
-                  echo "OK: Heartbeat fresh"
-              fi
+          # The heartbeat file lives inside the container on a named Docker volume.
+          # The host path ~/360-v2/data/ does not exist — must read from container directly.
+          HEARTBEAT_RESULT=$(docker exec 360scalp-v2-engine python3 -c "
+import os, time
+p = '/app/data/scanner_heartbeat'
+if os.path.exists(p):
+    age = int(time.time() - os.path.getmtime(p))
+    print(f'Heartbeat age: {age}s')
+    if age > 120:
+        print(f'WARNING: Heartbeat is STALE ({age}s > 120s) — scanner loop may be hung')
+    else:
+        print('OK: Heartbeat fresh — scanner loop is alive')
+else:
+    print('NOT FOUND: /app/data/scanner_heartbeat does not exist inside container')
+    print('Scanner has not completed its first cycle yet, or _touch_heartbeat() is failing silently')
+" 2>/dev/null)
+          if [ -z "$HEARTBEAT_RESULT" ]; then
+              echo "ERROR: Could not exec into container — container may be down or exec disabled"
           else
-              CONTAINER_AGE=$(docker exec 360scalp-v2-engine python3 -c "
-          import os, time
-          p='/app/data/scanner_heartbeat'
-          if os.path.exists(p):
-              age=int(time.time()-os.path.getmtime(p))
-              print(f'Heartbeat age: {age}s')
-              print('STALE' if age>120 else 'OK')
-          else:
-              print('Heartbeat file not found yet (engine still booting?)')
-          " 2>/dev/null || echo "Could not read heartbeat from container")
-              echo "$CONTAINER_AGE"
+              echo "$HEARTBEAT_RESULT"
           fi
 
           echo ""

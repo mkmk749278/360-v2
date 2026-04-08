@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Healthcheck — verifies the 360-Crypto-scalping-V2 engine is running and healthy."""
 import os
+import subprocess
 import sys
 import time
 
@@ -8,6 +9,11 @@ import time
 # considered stale.  Must be longer than a worst-case scan cycle.
 _HEARTBEAT_MAX_AGE_SECONDS = 120.0
 _HEARTBEAT_PATH = os.path.join(os.path.dirname(__file__), "data", "scanner_heartbeat")
+# Grace period: give the engine time to complete its first scan cycle before
+# treating a missing heartbeat file as a failure.
+_HEARTBEAT_GRACE_PERIOD_SECONDS = 180
+# Sentinel used when process uptime cannot be determined — treated as "old enough".
+_UNKNOWN_UPTIME_SECONDS = 999
 
 
 def _engine_process_running() -> bool:
@@ -47,11 +53,32 @@ def _logs_dir_exists() -> bool:
 def _scanner_heartbeat_fresh() -> bool:
     """Return True if the scanner heartbeat file was touched recently.
 
-    If the heartbeat file doesn't exist yet (e.g. during initial boot), the
-    check passes to avoid false negatives before the first scan cycle.
+    A grace period of 180 seconds is applied at startup: if the process has
+    been running for less than 180 seconds and the heartbeat file does not
+    exist yet, the check passes (engine may still be completing its first
+    scan cycle).  After the grace period a missing file is treated as stale.
     """
     if not os.path.isfile(_HEARTBEAT_PATH):
-        return True  # Not yet created — engine is still booting
+        # Determine how long this process has been running.
+        try:
+            result = subprocess.run(
+                ["ps", "-o", "etimes=", "-p", str(os.getpid())],
+                capture_output=True,
+                text=True,
+                timeout=2,
+            )
+            uptime_seconds = (
+                int(result.stdout.strip())
+                if result.stdout.strip().isdigit()
+                else _UNKNOWN_UPTIME_SECONDS
+            )
+        except Exception:
+            uptime_seconds = _UNKNOWN_UPTIME_SECONDS  # Assume old enough — treat missing as stale
+
+        if uptime_seconds < _HEARTBEAT_GRACE_PERIOD_SECONDS:
+            return True  # Still in grace period
+        return False  # Missing after grace period — scanner loop never ran or crashed
+
     try:
         age = time.time() - os.path.getmtime(_HEARTBEAT_PATH)
         return age < _HEARTBEAT_MAX_AGE_SECONDS
