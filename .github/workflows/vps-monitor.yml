@@ -157,10 +157,10 @@ jobs:
               print("-" * 100)
               for i, r in enumerate(records, 1):
                   ts = r.get('timestamp', 0)
-                  ts_str = datetime.datetime.utcfromtimestamp(ts).strftime('%Y-%m-%dT%H:%M:%S') if ts else '?'
+                  ts_str = datetime.datetime.fromtimestamp(ts, tz=datetime.timezone.utc).strftime('%Y-%m-%dT%H:%M:%S') if ts else '?'
                   outcome = r.get('outcome_label', r.get('outcome', r.get('status', '?')))
                   setup = r.get('setup_class', r.get('channel', r.get('setup_type', r.get('signal_type', '?'))))
-                  entry = r.get('entry', r.get('entry_price', 0))
+                  entry = r.get('entry', r.get('entry_price', 0)) or 0
                   print(f"{i:<3} {r.get('symbol','?'):<14} {r.get('direction','?'):<6} {setup:<30} {entry:>12.4f} {r.get('confidence',0):>6.1f} {outcome:<12} {ts_str}")
           except FileNotFoundError:
               print("No signal history yet")
