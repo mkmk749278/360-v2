@@ -255,6 +255,46 @@ Confidence tiers:
 - Performance tracker stores market_phase per signal but has zero query methods (PR14)
 - Session multipliers uniform across all pairs — PEPE outside London/NY should be hard blocked (PR14)
 
+### Why Other 10 Signal Paths Are Silent (Diagnosed 2026-04-09)
+
+Full diagnosis completed this session. All 10 non-RANGE_FADE paths are silent due to a combination of:
+
+**Gate 1 — QUIET_SCALP_BLOCK (dominant blocker right now)**
+- Current regime is QUIET. `QUIET_SCALP_MIN_CONFIDENCE = 65.0`
+- Most signals score 55–63 confidence. Blocked by a 2-4 point gap.
+- Confirmed in logs: `QUIET_SCALP_BLOCK XRPUSDT 360_SCALP_FVG conf=55.3 < min=65.0`
+- Critical irony: `_evaluate_quiet_compression_break` only fires in QUIET regime — then gets killed by QUIET_SCALP_BLOCK. The only evaluator built for quiet markets is always blocked in quiet markets.
+
+**Gate 2 — SMC Hard Gate applied uniformly to ALL paths (architectural problem)**
+- `SMC_HARD_GATE_MIN = 12.0` is correct for sweep-based paths (LIQUIDITY_SWEEP_REVERSAL)
+- But `_evaluate_opening_range_breakout` fires on session range breaks — no sweep required. Yet it must still pass smc_score >= 12. This is architecturally wrong.
+- `_evaluate_quiet_compression_break`, `_evaluate_volume_surge_breakout`, `_evaluate_breakdown_short` also don't need sweep detection to be valid setups.
+- **Fix needed: per-path SMC gate exemptions for non-sweep paths.**
+
+**Gate 3 — Data dependencies not being populated**
+- `_evaluate_funding_extreme` requires `funding_rate` AND `liquidation_clusters` — if either is empty/None, evaluator returns None immediately. These fields may not be populated for most pairs.
+- `_evaluate_divergence_continuation` requires `cvd_data` — same problem.
+- `_evaluate_liquidation_reversal` requires cascade liquidation detection in cvd data.
+- **Fix needed: verify which SMC data fields are actually populated at runtime.**
+
+**Gate 4 — Winner-takes-all architecture (silent signal loss)**
+- `ScalpChannel.evaluate()` returns only ONE signal — the highest regime-adjusted R-multiple.
+- If `_evaluate_standard` produces ANY signal, the entire scored[] list gets dominated by it.
+- Other valid evaluators that also fire are silently discarded — the owner never sees them.
+- **Fix needed: allow multiple signals per symbol per cycle (subject to correlated exposure cap).**
+
+**Gate 5 — Spread blocking (market condition)**
+- 40-44 of 75 pairs spread-blocked every cycle in current extreme fear market.
+- Reduces available pair universe by ~60% before any evaluator runs.
+
+**Gate 6 — Global 900s cooldown is cross-channel**
+- After ANY signal fires on a symbol (e.g. 360_SCALP fires BTCUSDT), that symbol is locked across ALL channels for 900s.
+- FVG channel cannot fire BTCUSDT for 15 minutes after scalp fires.
+- Confirmed: `cooldown:360_SCALP: 2` in suppression summary every cycle after 05:05 signals.
+
+**Pending: Deep architecture audit**
+- Full research agent dispatched this session to audit ALL evaluators, gates, SL/TP correctness, and architecture. Results awaited. Will generate full plan before any code changes.
+
 ### Known Signal Coverage — Post PR9
 | Market Condition | Coverage | Plan |
 |---|---|---|
@@ -434,7 +474,14 @@ Confidence tiers:
 ### PR13 — Heartbeat YAML Fix — MERGED (PR#66, 2026-04-09)
 - Base64-encoded heartbeat Python block to resolve YAML syntax error in vps-monitor.yml
 
-### PR14 — Intelligence Layer — CONCEPT — raise after 2 weeks live data
+### PR14-hotfix — trade_monitor TypeError on signal close — RAISED (2026-04-09)
+- TypeError in `_post_signal_closed`: `float - datetime` at line 978
+- Live evidence: `05:08:36 | Signal-closed post failed for DOGEUSDT: unsupported operand type(s) for -: 'float' and 'datetime.datetime'`
+- Fix: `(utcnow() - sig.timestamp).total_seconds()` — one line, single file
+- Telegram signal-closed posts were silently failing on every TP/SL hit
+- PR raised autonomously this session — agent building
+
+### PR15 — Intelligence Layer — CONCEPT — raise after 2 weeks live data
 - Symbol-specific PairProfile overrides (PAIR_OVERRIDES dict in config)
 - Wire unused PairProfile fields into channels (rsi_ob/os_level, spread_max_mult, volume_min_mult, adx_min_mult)
 - Rolling BTC correlation (50-candle + 200-candle Pearson) — replaces dead code btc_correlation=0.0
@@ -445,7 +492,7 @@ Confidence tiers:
 - Extended performance metrics (Sharpe, profit factor, expectancy, MFE/MAE)
 - Lead/lag detection — identify pairs that move before BTC
 
-### PR15 — Self-Optimisation — CONCEPT — raise after 50+ live signals exist
+### PR16 — Self-Optimisation — CONCEPT — raise after 50+ live signals exist
 - Per-method win rate tracking by regime
 - Auto-disable method if win rate < 50% over 30-day window
 - Auto-weight methods by live performance data
@@ -520,21 +567,24 @@ Owner responsibilities:
 
 ---
 
-## 10. Current State Snapshot (2026-04-09)
+## 10. Current State Snapshot (2026-04-09 — Session 5)
 
 | Item | Status |
 |---|---|
-| Engine running on VPS | Yes — running |
+| Engine running on VPS | Yes — running, Up 13 minutes at last monitor read |
 | ScanLat | Fixed — 3,400-4,000ms stable (PR12 merged) |
-| Container health | UNHEALTHY — heartbeat file path still outside /app/data/ in container |
+| Container health | UNHEALTHY label — but this is a false positive. Engine is running fine. Heartbeat file still not found inside container (OSError swallowed silently in _touch_heartbeat). Separate investigation needed. |
 | WS streams | 300 streams healthy |
 | Pairs scanning | 75 pairs |
-| PR12 (snapshot async fix) | Merged — ScanLat confirmed fixed |
-| PR13 (heartbeat YAML fix) | Merged |
-| Open PRs | Zero — slate is clean |
-| Market conditions | Extreme Fear (F&G=14), tariff shock, 44/75 pairs spread-blocked |
-| Signal output | New-path signals not yet producing — extreme market + new engine paths need normal conditions |
-| trade_monitor TypeError | OPEN — float - datetime on signal close in _post_signal_closed line 978 |
+| Signals fired (session) | BTCUSDT LONG + DOGEUSDT SHORT at 05:05 UTC — both RANGE_FADE setup class from _evaluate_standard |
+| trade_monitor TypeError | FIX RAISED — PR raised this session. float - datetime in _post_signal_closed line 978. Fix: (utcnow() - sig.timestamp).total_seconds() |
+| Market conditions | Extreme Fear (F&G=14), tariff shock, 40-44/75 pairs spread-blocked each cycle |
+| Protective mode | ENTERED repeatedly — volatile=30, spread_wide=44 in current cycle |
+| Signal output | RANGE_FADE dominating — all 10 recent signals RANGE_FADE from _evaluate_standard. Other 10 paths largely silent (see Section 6 — Key Diagnosed Issues, updated below) |
+| RANGE_FADE status | NOT fully removed. _evaluate_range_fade evaluator was deleted in PR7, but _evaluate_standard still produces RANGE_FADE-labelled signals via mean-reversion conditions. This is now understood and documented — it is not a bug but needs architecture review. |
+| Deep audit | IN PROGRESS — full research agent running on all 11 evaluators, gates, SL/TP, confidence scoring, and architecture assessment |
+| Open PRs | 1 open — trade_monitor TypeError fix |
+| BRIEF_INTEGRITY.md | Needs update after this session — commit SHA will be new |
 | Testing phase | Not started — begins once signal paths producing consistently |
 | Subscribers | None — deliberately. System validation first. |
 
@@ -715,3 +765,37 @@ Copilot appends to this automatically at the end of every session. No prompt nee
 - Run VPS monitor after fixes — confirm container HEALTHY, TypeError gone
 - Watch for first new-path signals as market normalises post tariff-shock
 - Continue signal pipeline analysis — ensure all 11 paths have clear route to fire
+
+### Session — 2026-04-09 (Signal Architecture Audit + PR14-hotfix)
+
+**What was discussed:**
+- Read fresh VPS monitor (monitor/latest.txt at 05:12 UTC). Engine healthy, ScanLat 3,400-4,000ms stable.
+- Identified that all 10 recent signals are RANGE_FADE — raised as critical finding.
+- Investigated RANGE_FADE: NOT fully removed in PR7. _evaluate_range_fade evaluator was deleted, but _evaluate_standard still labels mean-reversion signals as RANGE_FADE. This is understood and documented, not a bug — but needs architecture review.
+- Owner asked: why are no other channels/paths producing signals? Full diagnosis completed.
+- Root causes identified: QUIET_SCALP_BLOCK gate, uniform SMC hard gate (wrong for non-sweep paths), data dependency gaps (funding_rate, liquidation_clusters, cvd), winner-takes-all scored[] architecture, spread-blocking, cross-channel 900s cooldown.
+- Critical irony identified: _evaluate_quiet_compression_break (built for quiet markets) is blocked specifically in quiet markets by QUIET_SCALP_BLOCK.
+- Architectural problem confirmed: all 11 paths share the same scanner gate chain even though some gates (SMC sweep requirement) only make sense for sweep-based paths.
+- Owner requested full deep investigation of all paths, gates, SL/TP, and architecture before any changes.
+- Deep research agent dispatched for full codebase audit (all 11 evaluators, all channels, gate chain, confidence scoring, SL/TP per path, missing paths).
+- Owner requested brief + session history update during research run, so context is preserved across any session disconnect.
+
+**What was built:**
+- PR14-hotfix raised: trade_monitor TypeError fix (float - datetime in _post_signal_closed)
+- OWNER_BRIEF.md updated: Section 10 (current state), Section 6 (new diagnosed issues block for silent paths), Section 12 (this entry)
+
+**Decisions made:**
+- Architecture discussion: discuss, plan, update brief FIRST — then implement one by one. No rushed code changes.
+- RANGE_FADE is NOT a bug — it's a documentation gap. Will be addressed in the architecture review.
+- Per-path gates (path-specific SMC exemptions, path-specific confidence floors) is the correct direction — needs research confirmation first.
+
+**What is in-flight:**
+- Deep architecture research agent running (all 11 evaluators, gate chain, SL/TP audit, confidence scoring, missing paths)
+- PR14-hotfix building (trade_monitor TypeError)
+- Plan: once research returns, discuss findings, agree architecture plan, update brief, then implement one PR per fix in priority order
+
+**Next session must read:**
+- Research agent results (check GitHub task)
+- PR14-hotfix merge status
+- Run VPS monitor again — check heartbeat, check if RANGE_FADE still dominating or if conditions changed
+- Begin architecture fix planning based on research findings

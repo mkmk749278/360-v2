@@ -7,9 +7,9 @@ Every Copilot session must check this file if OWNER_BRIEF.md appears short or co
 
 | Field | Value |
 |---|---|
-| Commit SHA | 90d02391ecd296a476a6740ddbeff4ab9cac34da |
-| Blob SHA | adc51c18740d4ba75573a431185578dce0fa2631 |
-| Line count | 720 |
+| Commit SHA | efad0286557e342194453606b2bd94a073b1ff43 |
+| Blob SHA | 60860afdef86a39c6014260429d4278806741ffd |
+| Line count | 801 |
 | Date verified | 2026-04-09 |
 | Verified by | Copilot + owner (mkmk749278) |
 
