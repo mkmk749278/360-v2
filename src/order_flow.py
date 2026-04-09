@@ -279,6 +279,8 @@ class OrderFlowStore:
         self._running_cvd: Dict[str, float] = {}
         # CVD values snapshotted at each candle close (candle-aligned for divergence)
         self._cvd_candle: Dict[str, Deque[float]] = {}
+        # Latest funding rate (decimal) per symbol, updated by OIPoller.
+        self._funding_rates: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # OI
@@ -315,6 +317,22 @@ class OrderFlowStore:
         if first_oi <= 0:
             return 0.0
         return (last_oi - first_oi) / first_oi
+
+    # ------------------------------------------------------------------
+    # Funding Rate
+    # ------------------------------------------------------------------
+
+    def add_funding_rate(self, symbol: str, rate: float) -> None:
+        """Record the latest funding rate for *symbol*.
+
+        Called by :class:`OIPoller` after each successful premium-index fetch.
+        The value is the raw decimal rate (e.g. ``0.0001`` = 0.01%).
+        """
+        self._funding_rates[symbol] = rate
+
+    def get_funding_rate(self, symbol: str) -> Optional[float]:
+        """Return the most recently recorded funding rate for *symbol*, or ``None``."""
+        return self._funding_rates.get(symbol)
 
     # ------------------------------------------------------------------
     # Liquidations
@@ -511,6 +529,28 @@ class OIPoller:
             raise
         except Exception as exc:
             log.debug("OI fetch error for {}: {}", symbol, exc)
+
+        # Also fetch the current funding rate from the premium-index endpoint.
+        # Fail silently — funding rate is advisory only; OI recording above must succeed.
+        funding_url = f"{self._base}/fapi/v1/premiumIndex"
+        try:
+            async with self._session.get(
+                funding_url,
+                params={"symbol": symbol},
+                timeout=aiohttp.ClientTimeout(total=5),
+            ) as resp:
+                if resp.status != 200:
+                    log.debug("Funding rate fetch {} status {}", symbol, resp.status)
+                    return
+                data = await resp.json()
+                fr_str = data.get("lastFundingRate")
+                if fr_str is None:
+                    return
+                self._store.add_funding_rate(symbol, float(fr_str))
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.debug("Funding rate fetch error for {}: {}", symbol, exc)
 
 
 # ---------------------------------------------------------------------------
