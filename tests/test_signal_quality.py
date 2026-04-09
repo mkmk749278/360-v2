@@ -124,6 +124,32 @@ class TestRegimeSetupCompatibility:
         assert setup.channel_compatible is True
         assert setup.regime_compatible is True
 
+    def test_liquidity_sweep_reversal_self_classifying(self):
+        """LIQUIDITY_SWEEP_REVERSAL on signal.setup_class must not be remapped to RANGE_FADE (PR-ARCH-4)."""
+        signal = _signal(channel="360_SCALP")
+        signal.setup_class = "LIQUIDITY_SWEEP_REVERSAL"
+        setup = classify_setup(
+            "360_SCALP",
+            signal,
+            _indicators(),
+            {"sweeps": [], "mss": None, "fvg": [], "whale_alert": None, "volume_delta_spike": False},
+            MarketState.CLEAN_RANGE,
+        )
+        assert setup.setup_class == SetupClass.LIQUIDITY_SWEEP_REVERSAL
+
+    def test_quiet_compression_break_self_classifying(self):
+        """QUIET_COMPRESSION_BREAK on signal.setup_class must not be remapped to RANGE_FADE (PR-ARCH-4)."""
+        signal = _signal(channel="360_SCALP")
+        signal.setup_class = "QUIET_COMPRESSION_BREAK"
+        setup = classify_setup(
+            "360_SCALP",
+            signal,
+            _indicators(),
+            {"sweeps": [], "mss": None, "fvg": [], "whale_alert": None, "volume_delta_spike": False},
+            MarketState.DIRTY_RANGE,
+        )
+        assert setup.setup_class == SetupClass.QUIET_COMPRESSION_BREAK
+
 
 class TestExecutionAndRiskChecks:
     def test_overextended_entry_is_rejected(self):
