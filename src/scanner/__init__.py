@@ -241,6 +241,13 @@ _TREND_GATE_EXEMPT_SETUPS: frozenset = frozenset({
 # top-tier signals — genuine mean-reversion setups — pass through.
 _SCALP_QUIET_REGIME_PENALTY: float = 1.8
 
+# Path-specific QUIET confidence floor for DIVERGENCE_CONTINUATION.
+# Live evidence (PR-ARCH-5) shows this evaluator produces structurally valid
+# candidates near 64.3 that are blocked by the global 65.0 floor.  A narrow
+# override of 64.0 captures these genuine near-threshold setups without opening
+# the gate to weaker quiet-market noise (53–58 range).
+_QUIET_DIVERGENCE_MIN_CONFIDENCE: float = 64.0
+
 # Penalty multiplier applied to soft-gate base penalties depending on live market regime.
 # Trending markets → lenient (clear direction, fewer false signals).
 # Volatile markets → strict (high chaos, amplify quality gates).
@@ -2801,6 +2808,11 @@ class Scanner:
                 log.debug(
                     "QUIET_SCALP_BLOCK exempt for {} {} setup_class=QUIET_COMPRESSION_BREAK",
                     symbol, chan_name,
+                )
+            elif _setup == "DIVERGENCE_CONTINUATION" and sig.confidence >= _QUIET_DIVERGENCE_MIN_CONFIDENCE:
+                log.debug(
+                    "QUIET_SCALP_BLOCK exempt for {} {} setup_class=DIVERGENCE_CONTINUATION conf={:.1f} >= path_min={:.1f}",
+                    symbol, chan_name, sig.confidence, _QUIET_DIVERGENCE_MIN_CONFIDENCE,
                 )
             elif sig.confidence < QUIET_SCALP_MIN_CONFIDENCE:
                 log.info(
