@@ -624,18 +624,19 @@ Owner responsibilities:
 
 | Item | Status |
 |---|---|
-| Engine running on VPS | Yes — Up 34 minutes at last monitor read (07:33 UTC) |
+| Engine running on VPS | Yes — Up at 07:33 UTC, ScanLat 3,723–5,259ms |
 | ScanLat | 3,723–5,259ms stable (PR12 fix holding) |
-| Container health | UNHEALTHY label persists — false positive. Engine running fine. Heartbeat file missing inside container (_touch_heartbeat() OSError swallowed silently). Known issue, deferred. |
+| Container health | UNHEALTHY label persists — confirmed false positive. _touch_heartbeat() writes to src/data/scanner_heartbeat but healthcheck probes /app/data/scanner_heartbeat. Path mismatch. Deferred. |
 | WS streams | 300 streams healthy |
 | Pairs scanning | 75 pairs |
-| Signals fired today | 1 active (XAUUSDT LONG RANGE_FADE at 07:26) + 9 closed in last 10 records — all RANGE_FADE from _evaluate_standard |
-| Signal path diversity | 0 non-RANGE_FADE signals — root cause fully confirmed (see Section 6) |
+| Signals fired today | All RANGE_FADE from _evaluate_standard. Zero path diversity confirmed. |
+| Signal path diversity | 0 non-RANGE_FADE signals — architecture problem still live, fix in progress |
 | Architecture audit | COMPLETE — all 6 root causes identified and confirmed by direct code read |
 | Architecture fix plan | 3 PRs agreed: ARCH-1 (gate fixes), ARCH-2 (winner-takes-all removal), ARCH-3 (data pipeline wiring) |
-| PR-ARCH-1 | IN PROGRESS — raising now |
+| PR-ARCH-1 | IN EXECUTION — gate fix PR being raised this session |
 | PR14-hotfix | MERGED (PR#70) — TypeError in _post_signal_closed fixed |
-| Market conditions | Extreme Fear (F&G=14), tariff shock, 40-44/75 pairs spread-blocked each cycle |
+| PR-session5-brief | MERGED (PR#71) — OWNER_BRIEF.md updated with session 5 state |
+| Market conditions | Extreme Fear (F&G~14), tariff shock, 40-44/75 pairs spread-blocked each cycle |
 | Protective mode | ENTERED repeatedly — volatile=21-33, spread_wide=16-52 per cycle |
 | Testing phase | Not started — begins once signal paths producing consistently |
 | Subscribers | None — deliberately. System validation first. |
@@ -869,4 +870,29 @@ Copilot appends to this automatically at the end of every session. No prompt nee
 - PR-ARCH-1 raises immediately after brief write
 - PR-ARCH-2 queued
 - PR-ARCH-3 queued
+
+### Session 6 — 2026-04-09 (Architecture Fix Execution — PR-ARCH-1)
+
+**What was discussed:**
+- Resumed from session 5. Architecture audit was complete, 3-PR fix plan was agreed.
+- Reviewed live monitor output: engine running, ScanLat stable at 3,723–5,259ms, WS 300 streams healthy.
+- UNHEALTHY container health label confirmed as false positive — path mismatch between _touch_heartbeat() write path and healthcheck probe path. Logged. Deferred.
+- Signals confirmed as 100% RANGE_FADE from _evaluate_standard — zero path diversity. Architecture problem still live.
+- QUIET_SCALP_BLOCK confirmed firing every cycle — self-defeating loop (QUIET_COMPRESSION_BREAK generates signals, QUIET_SCALP_BLOCK kills them before dispatch).
+
+**What was decided:**
+- Execute PR-ARCH-1 immediately — gate fixes are the unblock for 5 of 10 silent evaluators.
+- OWNER_BRIEF.md update raised as a PR (this PR) before the code PR — brief always stays current.
+- PR-ARCH-2 (winner-takes-all removal) and PR-ARCH-3 (data pipeline wiring) follow in sequence after ARCH-1 merges.
+
+**What was built:**
+- This PR: OWNER_BRIEF.md updated — Section 10 current state refreshed, Session 6 history entry appended.
+- PR-ARCH-1: Gate fixes — SMC gate exempt for non-sweep setups, trend gate exempt for non-EMA setups, QUIET_SCALP_BLOCK exempt for QUIET_COMPRESSION_BREAK. Being raised in parallel.
+
+**Next actions:**
+- Merge this brief update PR
+- Merge PR-ARCH-1 once raised and reviewed
+- Raise PR-ARCH-2 (winner-takes-all removal) immediately after ARCH-1 merges
+- Raise PR-ARCH-3 (data pipeline wiring) after ARCH-2 merges
+- Monitor live signals post-ARCH-1 for path diversity improvement
 - Run VPS monitor after ARCH-1 merges — confirm new evaluator paths starting to appear in logs.
