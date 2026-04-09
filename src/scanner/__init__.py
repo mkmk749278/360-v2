@@ -220,12 +220,25 @@ _REGIME_CHANNEL_INCOMPATIBLE: Dict[str, List[str]] = {
 # Setup classes that do not require a liquidity sweep or SMC structural basis.
 # These evaluators fire on session range, volume, or structure events that are
 # valid without a sweep score >= SMC_HARD_GATE_MIN.
+#
+# PR-ARCH-6 additions:
+#   LIQUIDATION_REVERSAL   — thesis: liquidation cascade + RSI extreme + CVD divergence.
+#                            No sweep required; SMC hard gate is structurally wrong here.
+#   FUNDING_EXTREME_SIGNAL — thesis: funding-rate extremity + RSI + CVD divergence.
+#                            Funding is the primary edge; sweep-style SMC is not the gate.
+#   DIVERGENCE_CONTINUATION — thesis: CVD / order-flow divergence continuation.
+#                            PR09 SMC scoring under-represents this path, making the
+#                            shared hard gate a false suppressor after the evaluator
+#                            has already validated the setup.
 _SMC_GATE_EXEMPT_SETUPS: frozenset = frozenset({
     "OPENING_RANGE_BREAKOUT",
     "QUIET_COMPRESSION_BREAK",
     "VOLUME_SURGE_BREAKOUT",
     "BREAKDOWN_SHORT",
     "SR_FLIP_RETEST",
+    "LIQUIDATION_REVERSAL",
+    "FUNDING_EXTREME_SIGNAL",
+    "DIVERGENCE_CONTINUATION",
 })
 
 # Setup classes whose signal thesis is NOT based on EMA alignment.

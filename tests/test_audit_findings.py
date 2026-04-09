@@ -497,3 +497,69 @@ class TestQuietGateDivergenceContinuation:
             "DIVERGENCE_CONTINUATION conf=58.3 is below the path-specific floor of 64.0 "
             "and should remain blocked"
         )
+
+
+# ---------------------------------------------------------------------------
+# PR-ARCH-6: SMC hard-gate exemptions for non-sweep setup families
+# ---------------------------------------------------------------------------
+
+
+class TestSmcGateExemptionSetups:
+    """Verify that _SMC_GATE_EXEMPT_SETUPS includes the non-sweep setup families
+    added in PR-ARCH-6, while the original sweep-based exemptions are retained.
+    """
+
+    # --- presence of new PR-ARCH-6 entries ---
+
+    def test_liquidation_reversal_is_exempt(self):
+        """LIQUIDATION_REVERSAL must be in _SMC_GATE_EXEMPT_SETUPS (PR-ARCH-6)."""
+        from src.scanner import _SMC_GATE_EXEMPT_SETUPS
+        assert "LIQUIDATION_REVERSAL" in _SMC_GATE_EXEMPT_SETUPS, (
+            "LIQUIDATION_REVERSAL thesis is liquidation cascade + CVD; "
+            "it does not require sweep-based SMC confirmation"
+        )
+
+    def test_funding_extreme_signal_is_exempt(self):
+        """FUNDING_EXTREME_SIGNAL must be in _SMC_GATE_EXEMPT_SETUPS (PR-ARCH-6)."""
+        from src.scanner import _SMC_GATE_EXEMPT_SETUPS
+        assert "FUNDING_EXTREME_SIGNAL" in _SMC_GATE_EXEMPT_SETUPS, (
+            "FUNDING_EXTREME_SIGNAL thesis is funding-rate extremity + CVD; "
+            "sweep-style SMC is not the defining requirement"
+        )
+
+    def test_divergence_continuation_is_exempt(self):
+        """DIVERGENCE_CONTINUATION must be in _SMC_GATE_EXEMPT_SETUPS (PR-ARCH-6)."""
+        from src.scanner import _SMC_GATE_EXEMPT_SETUPS
+        assert "DIVERGENCE_CONTINUATION" in _SMC_GATE_EXEMPT_SETUPS, (
+            "DIVERGENCE_CONTINUATION thesis is CVD/order-flow divergence; "
+            "PR09 SMC scoring under-represents this path"
+        )
+
+    # --- original exemptions still present (regression guard) ---
+
+    def test_original_exemptions_retained(self):
+        """Pre-ARCH-6 exemptions must still be present after PR-ARCH-6 additions."""
+        from src.scanner import _SMC_GATE_EXEMPT_SETUPS
+        original = {
+            "OPENING_RANGE_BREAKOUT",
+            "QUIET_COMPRESSION_BREAK",
+            "VOLUME_SURGE_BREAKOUT",
+            "BREAKDOWN_SHORT",
+            "SR_FLIP_RETEST",
+        }
+        missing = original - _SMC_GATE_EXEMPT_SETUPS
+        assert not missing, (
+            f"Original SMC gate exemptions must be preserved; missing: {missing}"
+        )
+
+    # --- sweep-dependent setups must NOT be in the exemption set ---
+
+    def test_range_fade_is_not_exempt(self):
+        """RANGE_FADE depends on SMC structure and must not be exempt."""
+        from src.scanner import _SMC_GATE_EXEMPT_SETUPS
+        assert "RANGE_FADE" not in _SMC_GATE_EXEMPT_SETUPS
+
+    def test_liquidity_sweep_reversal_is_not_exempt(self):
+        """LIQUIDITY_SWEEP_REVERSAL is sweep-driven and must not be exempt."""
+        from src.scanner import _SMC_GATE_EXEMPT_SETUPS
+        assert "LIQUIDITY_SWEEP_REVERSAL" not in _SMC_GATE_EXEMPT_SETUPS
