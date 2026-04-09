@@ -975,7 +975,7 @@ class TradeMonitor:
                 return
 
             engine_ctx = self.engine_context_fn()
-            hold_sec = utcnow().timestamp() - sig.timestamp if hasattr(sig, "timestamp") else 0
+            hold_sec = (utcnow() - sig.timestamp).total_seconds() if hasattr(sig, "timestamp") and sig.timestamp else 0
             entry = sig.original_entry if hasattr(sig, "original_entry") and sig.original_entry else sig.entry
             actual_close = close_price if close_price is not None else sig.current_price
 
