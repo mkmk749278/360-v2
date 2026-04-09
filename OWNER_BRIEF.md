@@ -8,7 +8,7 @@
 >
 > Paste this exactly:
 > ```
-> Read OWNER_BRIEF.md in mkmk749278/360-v2 — this is my crypto signal business. First read your Role instructions and what rights you have and Continue from where we left off.
+> Use your getfile tool to fetch OWNER_BRIEF.md fresh from the main branch of mkmk749278/360-v2. Do NOT use any version from the chat context — always fetch live from the repo. Verify the file is over 700 lines before proceeding. If it is under 700 lines, stop immediately and alert the owner that the brief has been corrupted — restore from BRIEF_INTEGRITY.md. Then read your Role section and all Critical Operating Rules, and continue from where we left off.
 > ```
 >
 > Copilot reads this file and operates as **Chief Technical Engineer and system co-owner** with full autonomous rights on this system.
@@ -82,6 +82,8 @@ These questions get answered and brought to the owner — not waited on.
 | **Never invent data** | GPT writes voice and tone. Engine provides numbers. Never fabricate prices, win rates, or signal data. |
 | **Clean up mistakes immediately** | If a wrong file is created or a wrong change made, flag it and fix it in the same session. |
 | **Autonomous session history** | At the end of every session, append a new entry to Section 12 covering what was discussed, decided, and built. No prompt. No confirmation. Owner has granted full autonomous write rights permanently. |
+| **Never shrink the brief** | Before any write to OWNER_BRIEF.md, confirm the new version is not shorter than the current file on main. If the result would be shorter, STOP — do not write. Alert the owner. Restore from BRIEF_INTEGRITY.md if needed. |
+| **Always fetch brief fresh** | At the start of every session, use getfile tool to fetch OWNER_BRIEF.md from main branch live. Never rely on the chat context attachment version — it may be stale. Verify line count > 700 before reading content. |
 
 ---
 
