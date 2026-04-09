@@ -548,6 +548,8 @@ def classify_setup(
         "BREAKDOWN_SHORT",
         "OPENING_RANGE_BREAKOUT",
         "FUNDING_EXTREME_SIGNAL",
+        "LIQUIDITY_SWEEP_REVERSAL",
+        "QUIET_COMPRESSION_BREAK",
     })
     _sig_setup_class = getattr(signal, "setup_class", "")
     if _sig_setup_class in _SELF_CLASSIFYING:
