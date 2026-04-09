@@ -228,8 +228,8 @@ class HistoricalDataStore:
     # Disk-cache: save
     # ------------------------------------------------------------------
 
-    async def save_snapshot(self) -> None:
-        """Persist current candle and tick data to disk for fast restarts."""
+    def _save_snapshot_sync(self) -> None:
+        """Blocking disk I/O for save_snapshot — runs in a thread-pool executor."""
         try:
             CACHE_DIR.mkdir(parents=True, exist_ok=True)
             _TICKS_DIR.mkdir(parents=True, exist_ok=True)
@@ -277,6 +277,11 @@ class HistoricalDataStore:
             log.info("Snapshot saved: %d symbol-timeframe combos (saved_at=%s)", saved_count, saved_at)
         except Exception as exc:  # pragma: no cover
             log.error("save_snapshot error: %s", exc)
+
+    async def save_snapshot(self) -> None:
+        """Persist current candle and tick data to disk for fast restarts."""
+        loop = asyncio.get_running_loop()
+        await loop.run_in_executor(None, self._save_snapshot_sync)
 
     # ------------------------------------------------------------------
     # Disk-cache: load
