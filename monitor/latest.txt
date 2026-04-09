@@ -1,26 +1,26 @@
 360 Crypto Eye — VPS Monitor Report
-Generated: 2026-04-09 10:42:01 UTC
+Generated: 2026-04-09 11:34:17 UTC
 
 ══════════════════════════════════════════════
   CONTAINER STATUS
 ══════════════════════════════════════════════
-NAME                 IMAGE              COMMAND                  SERVICE   CREATED         STATUS                     PORTS
-360scalp-v2-engine   360-v2-engine      "python -m src.main"     engine    4 minutes ago   Up 3 minutes (unhealthy)   
-360scalp-v2-redis    redis:7.4-alpine   "docker-entrypoint.s…"   redis     2 days ago      Up 2 days                  6379/tcp
+NAME                 IMAGE              COMMAND                  SERVICE   CREATED              STATUS                             PORTS
+360scalp-v2-engine   360-v2-engine      "python -m src.main"     engine    About a minute ago   Up 51 seconds (health: starting)   
+360scalp-v2-redis    redis:7.4-alpine   "docker-entrypoint.s…"   redis     2 days ago           Up 2 days                          6379/tcp
 
-Health: unhealthy | Status: running | Running: true
+Health: starting | Status: running | Running: true
 
 ══════════════════════════════════════════════
   RESOURCE USAGE
 ══════════════════════════════════════════════
 NAME                 CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O
-360scalp-v2-engine   129.46%   110.2MiB / 1GiB       10.76%    23.3MB / 767kB    12.4MB / 2.63MB
-360scalp-v2-redis    0.76%     3.441MiB / 7.755GiB   0.04%     11.4MB / 8.07MB   30.4MB / 205kB
+360scalp-v2-engine   125.27%   101.1MiB / 1GiB       9.87%     3.95MB / 167kB    0B / 2.03MB
+360scalp-v2-redis    0.80%     3.426MiB / 7.755GiB   0.04%     11.6MB / 8.19MB   32.5MB / 205kB
 
 --- System ---
- 12:42:02 up 3 days,  4:51,  1 user,  load average: 0.98, 0.98, 0.99
+ 13:34:19 up 3 days,  5:43,  1 user,  load average: 1.04, 1.12, 1.09
                total        used        free      shared  buff/cache   available
-Mem:           7.8Gi       734Mi       6.7Gi       1.3Mi       702Mi       7.0Gi
+Mem:           7.8Gi       718Mi       6.7Gi       1.3Mi       709Mi       7.1Gi
 Swap:             0B          0B          0B
 Filesystem      Size  Used Avail Use% Mounted on
 /dev/sda1       145G  4.4G  140G   3% /
@@ -35,10 +35,7 @@ Scanner has not completed its first cycle yet, or _touch_heartbeat() is failing 
   SIGNAL TELEMETRY
 ══════════════════════════════════════════════
 --- Scan Performance ---
-360scalp-v2-engine  | 2026-04-09 10:38:13 | telemetry                | INFO    | CPU=0.0% | MEM=102MB | WS=0(ok=True) | Signals=0 | Pairs=0 | ScanLat=0ms | API/min=368 | Redis=True
-360scalp-v2-engine  | 2026-04-09 10:39:16 | telemetry                | INFO    | CPU=0.0% | MEM=124MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=46750ms | API/min=1 | Redis=True
-360scalp-v2-engine  | 2026-04-09 10:40:17 | telemetry                | INFO    | CPU=0.0% | MEM=124MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4841ms | API/min=5 | Redis=True
-360scalp-v2-engine  | 2026-04-09 10:41:20 | telemetry                | INFO    | CPU=0.0% | MEM=126MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=13862ms | API/min=5 | Redis=True
+360scalp-v2-engine  | 2026-04-09 11:33:30 | telemetry                | INFO    | CPU=0.0% | MEM=99MB | WS=0(ok=True) | Signals=0 | Pairs=0 | ScanLat=0ms | API/min=54 | Redis=True
 
 --- Signal Activity ---
 Signals fired (last 200 lines): 0
@@ -49,9 +46,6 @@ TP hits: 0
 0
 
 --- Regime / Market State ---
-360scalp-v2-engine  | 2026-04-09 10:39:27 | scanner                  | INFO    | QUIET_SCALP_BLOCK CRCLUSDT 360_SCALP conf=63.1 < min=65.0
-360scalp-v2-engine  | 2026-04-09 10:39:36 | scanner                  | INFO    | QUIET_SCALP_BLOCK CRCLUSDT 360_SCALP conf=63.1 < min=65.0
-360scalp-v2-engine  | 2026-04-09 10:39:41 | scanner                  | INFO    | QUIET_SCALP_BLOCK CRCLUSDT 360_SCALP conf=63.1 < min=65.0
 
 ══════════════════════════════════════════════
   SIGNAL PERFORMANCE HISTORY
@@ -73,82 +67,45 @@ TP hits: 0
 ══════════════════════════════════════════════
   ENGINE LOGS (last 150 lines)
 ══════════════════════════════════════════════
-360scalp-v2-engine  | 2026-04-09 10:38:09 | performance_tracker      | INFO    | Loaded 41 performance records from data/signal_performance.json
-360scalp-v2-engine  | 2026-04-09 10:38:09 | bootstrap                | INFO    | === 360-Crypto-Eye-Scalping Engine BOOTING ===
-360scalp-v2-engine  | 2026-04-09 10:38:09 | redis_client             | INFO    | Connected to Redis at redis://redis:6379/0
-360scalp-v2-engine  | 2026-04-09 10:38:09 | pair_manager             | INFO    | Top-50 futures refreshed: 75 pairs (requested=75)
-360scalp-v2-engine  | 2026-04-09 10:38:09 | rate_limiter             | INFO    | Rate limiter budget set to 5500
-360scalp-v2-engine  | 2026-04-09 10:38:09 | rate_limiter             | INFO    | Rate limiter budget set to 2200
-360scalp-v2-engine  | 2026-04-09 10:38:10 | historical               | INFO    | Snapshot loaded: 556 symbol-timeframe combos from disk
-360scalp-v2-engine  | 2026-04-09 10:38:10 | bootstrap                | INFO    | Disk cache loaded — gap-filling missing data only
-360scalp-v2-engine  | 2026-04-09 10:38:10 | historical               | INFO    | Gap-filling 75 pairs …
-360scalp-v2-engine  | 2026-04-09 10:38:12 | historical               | INFO    | Gap-fill complete: 75 / 75 pairs have data.
-360scalp-v2-engine  | 2026-04-09 10:38:12 | rate_limiter             | INFO    | Rate limiter budget set to 5500
-360scalp-v2-engine  | 2026-04-09 10:38:12 | rate_limiter             | INFO    | Rate limiter budget set to 2200
-360scalp-v2-engine  | 2026-04-09 10:38:12 | predictive_ai            | INFO    | Loading predictive model 'multi-feature-v1' …
-360scalp-v2-engine  | 2026-04-09 10:38:12 | predictive_ai            | INFO    | Predictive model 'multi-feature-v1' ready.
-360scalp-v2-engine  | 2026-04-09 10:38:12 | ws_manager               | INFO    | WS manager started: 300 streams across 2 connections (futures)
-360scalp-v2-engine  | 2026-04-09 10:38:12 | ws_manager               | INFO    | WS manager started: 75 streams across 1 connections (futures_liq)
-360scalp-v2-engine  | 2026-04-09 10:38:12 | ws_manager               | INFO    | Critical pairs set (10): ['BTCUSDT', 'ETHUSDT', 'ALPACAUSDT', 'SOLUSDT', 'CLUSDT', 'XAGUSDT', 'XAUUSDT', 'ZECUSDT', 'ENJUSDT', 'XRPUSDT']
-360scalp-v2-engine  | 2026-04-09 10:38:12 | bootstrap                | WARNING | Pre-flight: WebSocket managers are not all healthy
-360scalp-v2-engine  | 2026-04-09 10:38:13 | bootstrap                | INFO    | Pre-flight: Binance REST ping OK
-360scalp-v2-engine  | 2026-04-09 10:38:13 | bootstrap                | INFO    | Pre-flight checks passed
-360scalp-v2-engine  | 2026-04-09 10:38:13 | signal_router            | INFO    | Signal router started
-360scalp-v2-engine  | 2026-04-09 10:38:13 | trade_monitor            | INFO    | Trade monitor started
-360scalp-v2-engine  | 2026-04-09 10:38:13 | telemetry                | INFO    | Telemetry collector started (interval=60s)
-360scalp-v2-engine  | 2026-04-09 10:38:13 | telemetry                | INFO    | CPU=0.0% | MEM=102MB | WS=0(ok=True) | Signals=0 | Pairs=0 | ScanLat=0ms | API/min=368 | Redis=True
-360scalp-v2-engine  | 2026-04-09 10:38:13 | scanner                  | INFO    | Scanner loop started
-360scalp-v2-engine  | 2026-04-09 10:38:13 | scanner                  | INFO    | Scanner config: TOP50_FUTURES_ONLY=True TOP50_FUTURES_COUNT=75 pairs
-360scalp-v2-engine  | 2026-04-09 10:38:13 | circuit_breaker          | INFO    | Startup grace period active — circuit breaker suppressed for 176s
-360scalp-v2-engine  | 2026-04-09 10:38:13 | macro_watchdog           | INFO    | MacroWatchdog started (poll_interval=300.0s, symbols=['BTC', 'ETH', 'SOL', 'BNB'])
-360scalp-v2-engine  | 2026-04-09 10:38:13 | trade_observer           | INFO    | TradeObserver started (digest_interval=21600s, lookback=24h)
-360scalp-v2-engine  | 2026-04-09 10:38:13 | scheduler                | INFO    | Content scheduler started
-360scalp-v2-engine  | 2026-04-09 10:38:13 | order_flow               | INFO    | OIPoller started for 75 symbols (interval=60.0s)
-360scalp-v2-engine  | 2026-04-09 10:38:13 | ws_manager               | INFO    | Connected WS: 100 streams
-360scalp-v2-engine  | 2026-04-09 10:38:13 | ws_manager               | INFO    | Connected WS: 200 streams
-360scalp-v2-engine  | 2026-04-09 10:38:13 | ws_manager               | INFO    | Connected WS: 75 streams
-360scalp-v2-engine  | 2026-04-09 10:38:13 | bootstrap                | INFO    | Boot test message sent to active channel
-360scalp-v2-engine  | 2026-04-09 10:38:13 | bootstrap                | INFO    | === Engine RUNNING ===
-360scalp-v2-engine  | 2026-04-09 10:38:14 | macro_watchdog           | INFO    | MacroWatchdog: Fear & Greed extreme fear alert (value=14)
-360scalp-v2-engine  | 2026-04-09 10:38:21 | scanner                  | INFO    | Multi-Strategy Confluence XAUUSDT LONG: strategies=['360_SCALP', '360_SCALP_FVG'] boost=+5 conf=64.7
-360scalp-v2-engine  | 2026-04-09 10:38:35 | scalp_fvg                | WARNING | FVG SL rejected for BULLAUSDT SHORT: sl_dist/close=5.19% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:38:41 | scalp_fvg                | WARNING | FVG SL rejected for BLURUSDT LONG: sl_dist/close=2.80% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:38:50 | scalp_fvg                | WARNING | FVG SL rejected for TNSRUSDT LONG: sl_dist/close=4.80% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:38:59 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 2, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 2, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 2, 'pair_quality:spread too wide': 8}
-360scalp-v2-engine  | 2026-04-09 10:39:16 | telemetry                | INFO    | CPU=0.0% | MEM=124MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=46750ms | API/min=1 | Redis=True
-360scalp-v2-engine  | 2026-04-09 10:39:27 | scalp_fvg                | WARNING | FVG SL rejected for TNSRUSDT LONG: sl_dist/close=4.80% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:39:27 | scanner                  | INFO    | QUIET_SCALP_BLOCK CRCLUSDT 360_SCALP conf=63.1 < min=65.0
-360scalp-v2-engine  | 2026-04-09 10:39:32 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 20, 'cooldown:360_SCALP': 1, 'cooldown:360_SCALP_FVG': 1, 'volatile_unsuitable:360_SCALP_FVG': 4, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 4, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 4}
-360scalp-v2-engine  | 2026-04-09 10:39:32 | scanner                  | INFO    | Protective mode ENTERED (volatile=12, spread_wide=20)
-360scalp-v2-engine  | 2026-04-09 10:39:36 | scanner                  | INFO    | QUIET_SCALP_BLOCK CRCLUSDT 360_SCALP conf=63.1 < min=65.0
-360scalp-v2-engine  | 2026-04-09 10:39:38 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'cooldown:360_SCALP_FVG': 1, 'volatile_unsuitable:360_SCALP_FVG': 17, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 17, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 17, 'pair_quality:spread too wide': 60}
-360scalp-v2-engine  | 2026-04-09 10:39:41 | scanner                  | INFO    | QUIET_SCALP_BLOCK CRCLUSDT 360_SCALP conf=63.1 < min=65.0
-360scalp-v2-engine  | 2026-04-09 10:39:42 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'cooldown:360_SCALP_FVG': 1, 'volatile_unsuitable:360_SCALP_FVG': 17, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 17, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 17, 'pair_quality:spread too wide': 60}
-360scalp-v2-engine  | 2026-04-09 10:39:47 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 17, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 17, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 17, 'pair_quality:spread too wide': 60}
-360scalp-v2-engine  | 2026-04-09 10:39:52 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 17, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 17, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 17, 'pair_quality:spread too wide': 60}
-360scalp-v2-engine  | 2026-04-09 10:39:55 | scalp_fvg                | WARNING | FVG SL rejected for BULLAUSDT SHORT: sl_dist/close=5.19% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:39:55 | scalp_fvg                | WARNING | FVG SL rejected for BLURUSDT LONG: sl_dist/close=2.80% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:39:56 | scalp_fvg                | WARNING | FVG SL rejected for TNSRUSDT LONG: sl_dist/close=4.80% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:39:58 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 8}
-360scalp-v2-engine  | 2026-04-09 10:40:17 | telemetry                | INFO    | CPU=0.0% | MEM=124MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4841ms | API/min=5 | Redis=True
-360scalp-v2-engine  | 2026-04-09 10:40:19 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10, 'pair_quality:spread too wide': 60}
-360scalp-v2-engine  | 2026-04-09 10:40:42 | scalp_fvg                | WARNING | FVG SL rejected for TNSRUSDT LONG: sl_dist/close=3.19% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:40:44 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11, 'pair_quality:spread too wide': 16}
-360scalp-v2-engine  | 2026-04-09 10:40:49 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 13, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 13, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 13, 'pair_quality:spread too wide': 60}
-360scalp-v2-engine  | 2026-04-09 10:40:53 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 13, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 13, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 13, 'pair_quality:spread too wide': 60}
-360scalp-v2-engine  | 2026-04-09 10:40:58 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 13, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 13, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 13, 'pair_quality:spread too wide': 60}
-360scalp-v2-engine  | 2026-04-09 10:41:09 | scalp_fvg                | WARNING | FVG SL rejected for TNSRUSDT LONG: sl_dist/close=3.19% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:41:13 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 15, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 15, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 15, 'pair_quality:spread too wide': 20}
-360scalp-v2-engine  | 2026-04-09 10:41:20 | telemetry                | INFO    | CPU=0.0% | MEM=126MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=13862ms | API/min=5 | Redis=True
-360scalp-v2-engine  | 2026-04-09 10:41:34 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 60, 'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 12, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 12, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 12}
-360scalp-v2-engine  | 2026-04-09 10:41:39 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 14, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 14, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 14, 'pair_quality:spread too wide': 56}
-360scalp-v2-engine  | 2026-04-09 10:41:44 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 14, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 14, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 14, 'pair_quality:spread too wide': 56}
-360scalp-v2-engine  | 2026-04-09 10:41:48 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 14, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 14, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 14, 'pair_quality:spread too wide': 56}
-360scalp-v2-engine  | 2026-04-09 10:41:53 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 14, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 14, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 14, 'pair_quality:spread too wide': 56}
-360scalp-v2-engine  | 2026-04-09 10:41:56 | scalp_fvg                | WARNING | FVG SL rejected for BULLAUSDT SHORT: sl_dist/close=4.67% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:41:56 | scalp_fvg                | WARNING | FVG SL rejected for BLURUSDT LONG: sl_dist/close=2.80% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:41:57 | scalp_fvg                | WARNING | FVG SL rejected for TNSRUSDT LONG: sl_dist/close=3.19% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-09 10:41:59 | scanner                  | INFO    | Scan cycle suppression summary: {'cooldown:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 8}
+360scalp-v2-engine  | 2026-04-09 11:33:28 | performance_tracker      | INFO    | Loaded 41 performance records from data/signal_performance.json
+360scalp-v2-engine  | 2026-04-09 11:33:28 | bootstrap                | INFO    | === 360-Crypto-Eye-Scalping Engine BOOTING ===
+360scalp-v2-engine  | 2026-04-09 11:33:28 | redis_client             | INFO    | Connected to Redis at redis://redis:6379/0
+360scalp-v2-engine  | 2026-04-09 11:33:28 | pair_manager             | INFO    | Top-50 futures refreshed: 75 pairs (requested=75)
+360scalp-v2-engine  | 2026-04-09 11:33:28 | rate_limiter             | INFO    | Rate limiter budget set to 5500
+360scalp-v2-engine  | 2026-04-09 11:33:28 | rate_limiter             | INFO    | Rate limiter budget set to 2200
+360scalp-v2-engine  | 2026-04-09 11:33:29 | historical               | INFO    | Snapshot loaded: 574 symbol-timeframe combos from disk
+360scalp-v2-engine  | 2026-04-09 11:33:29 | bootstrap                | INFO    | Disk cache loaded — gap-filling missing data only
+360scalp-v2-engine  | 2026-04-09 11:33:29 | historical               | INFO    | Gap-filling 75 pairs …
+360scalp-v2-engine  | 2026-04-09 11:33:29 | historical               | INFO    | Gap-fill complete: 75 / 75 pairs have data.
+360scalp-v2-engine  | 2026-04-09 11:33:29 | rate_limiter             | INFO    | Rate limiter budget set to 5500
+360scalp-v2-engine  | 2026-04-09 11:33:29 | rate_limiter             | INFO    | Rate limiter budget set to 2200
+360scalp-v2-engine  | 2026-04-09 11:33:29 | predictive_ai            | INFO    | Loading predictive model 'multi-feature-v1' …
+360scalp-v2-engine  | 2026-04-09 11:33:29 | predictive_ai            | INFO    | Predictive model 'multi-feature-v1' ready.
+360scalp-v2-engine  | 2026-04-09 11:33:29 | ws_manager               | INFO    | WS manager started: 300 streams across 2 connections (futures)
+360scalp-v2-engine  | 2026-04-09 11:33:29 | ws_manager               | INFO    | WS manager started: 75 streams across 1 connections (futures_liq)
+360scalp-v2-engine  | 2026-04-09 11:33:29 | ws_manager               | INFO    | Critical pairs set (10): ['BTCUSDT', 'ETHUSDT', 'ALPACAUSDT', 'SOLUSDT', 'CLUSDT', 'XAGUSDT', 'XAUUSDT', 'ZECUSDT', 'ENJUSDT', 'XRPUSDT']
+360scalp-v2-engine  | 2026-04-09 11:33:29 | bootstrap                | WARNING | Pre-flight: WebSocket managers are not all healthy
+360scalp-v2-engine  | 2026-04-09 11:33:30 | bootstrap                | INFO    | Pre-flight: Binance REST ping OK
+360scalp-v2-engine  | 2026-04-09 11:33:30 | bootstrap                | INFO    | Pre-flight checks passed
+360scalp-v2-engine  | 2026-04-09 11:33:30 | signal_router            | INFO    | Signal router started
+360scalp-v2-engine  | 2026-04-09 11:33:30 | trade_monitor            | INFO    | Trade monitor started
+360scalp-v2-engine  | 2026-04-09 11:33:30 | telemetry                | INFO    | Telemetry collector started (interval=60s)
+360scalp-v2-engine  | 2026-04-09 11:33:30 | telemetry                | INFO    | CPU=0.0% | MEM=99MB | WS=0(ok=True) | Signals=0 | Pairs=0 | ScanLat=0ms | API/min=54 | Redis=True
+360scalp-v2-engine  | 2026-04-09 11:33:30 | scanner                  | INFO    | Scanner loop started
+360scalp-v2-engine  | 2026-04-09 11:33:30 | scanner                  | INFO    | Scanner config: TOP50_FUTURES_ONLY=True TOP50_FUTURES_COUNT=75 pairs
+360scalp-v2-engine  | 2026-04-09 11:33:30 | circuit_breaker          | INFO    | Startup grace period active — circuit breaker suppressed for 178s
+360scalp-v2-engine  | 2026-04-09 11:33:30 | macro_watchdog           | INFO    | MacroWatchdog started (poll_interval=300.0s, symbols=['BTC', 'ETH', 'SOL', 'BNB'])
+360scalp-v2-engine  | 2026-04-09 11:33:30 | trade_observer           | INFO    | TradeObserver started (digest_interval=21600s, lookback=24h)
+360scalp-v2-engine  | 2026-04-09 11:33:30 | scheduler                | INFO    | Content scheduler started
+360scalp-v2-engine  | 2026-04-09 11:33:30 | order_flow               | INFO    | OIPoller started for 75 symbols (interval=60.0s)
+360scalp-v2-engine  | 2026-04-09 11:33:31 | ws_manager               | INFO    | Connected WS: 100 streams
+360scalp-v2-engine  | 2026-04-09 11:33:31 | ws_manager               | INFO    | Connected WS: 200 streams
+360scalp-v2-engine  | 2026-04-09 11:33:31 | ws_manager               | INFO    | Connected WS: 75 streams
+360scalp-v2-engine  | 2026-04-09 11:33:31 | bootstrap                | INFO    | Boot test message sent to active channel
+360scalp-v2-engine  | 2026-04-09 11:33:31 | bootstrap                | INFO    | === Engine RUNNING ===
+360scalp-v2-engine  | 2026-04-09 11:33:32 | macro_watchdog           | INFO    | MacroWatchdog: Fear & Greed extreme fear alert (value=14)
+360scalp-v2-engine  | 2026-04-09 11:33:58 | scalp_fvg                | WARNING | FVG SL rejected for SWARMSUSDT LONG: sl_dist/close=6.26% > 2.00% max — signal discarded
+360scalp-v2-engine  | 2026-04-09 11:34:00 | scalp_fvg                | WARNING | FVG SL rejected for BLURUSDT LONG: sl_dist/close=2.80% > 2.00% max — signal discarded
 
 ══════════════════════════════════════════════
   ERROR SCAN (last 500 lines)
@@ -159,7 +116,7 @@ OK: No errors/exceptions found in last 500 log lines
   REDIS INFO
 ══════════════════════════════════════════════
 --- Redis Memory ---
-used_memory_human:1.14M
+used_memory_human:1.18M
 used_memory_peak_human:1.19M
 maxmemory_human:128.00M
 
