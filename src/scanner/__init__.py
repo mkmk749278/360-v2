@@ -217,6 +217,25 @@ _REGIME_CHANNEL_INCOMPATIBLE: Dict[str, List[str]] = {
     "360_SCALP_VWAP": ["QUIET"],
 }
 
+# Setup classes that do not require a liquidity sweep or SMC structural basis.
+# These evaluators fire on session range, volume, or structure events that are
+# valid without a sweep score >= SMC_HARD_GATE_MIN.
+_SMC_GATE_EXEMPT_SETUPS: frozenset = frozenset({
+    "OPENING_RANGE_BREAKOUT",
+    "QUIET_COMPRESSION_BREAK",
+    "VOLUME_SURGE_BREAKOUT",
+    "BREAKDOWN_SHORT",
+    "SR_FLIP_RETEST",
+})
+
+# Setup classes whose signal thesis is NOT based on EMA alignment.
+# Applying the trend hard gate (EMA alignment score) to these is incorrect.
+_TREND_GATE_EXEMPT_SETUPS: frozenset = frozenset({
+    "LIQUIDATION_REVERSAL",
+    "FUNDING_EXTREME_SIGNAL",
+    "WHALE_MOMENTUM",
+})
+
 # Penalty multiplier applied to scalp-channel soft gates when the regime is
 # QUIET.  Higher than the default QUIET multiplier (0.8) to ensure only
 # top-tier signals — genuine mean-reversion setups — pass through.
@@ -2669,48 +2688,65 @@ class Scanner:
         # Fail-open when the PR09 scoring engine did not populate "smc" (engine error).
         # Relaxed minimum for SHORT signals in TRENDING_DOWN: market is going
         # their way, so the structural requirement is slightly eased.
+        # Setup classes whose entry conditions are session/volume/structure based
+        # (not sweep-based) are exempt from this gate.
         if "smc" in sig.component_scores:
-            _smc_score = sig.component_scores["smc"]
-            _smc_min = (
-                SMC_SCORE_MIN_TRENDING_SHORT
-                if _regime_key == "TRENDING_DOWN" and sig.direction.value == "SHORT"
-                else SMC_HARD_GATE_MIN
-            )
-            if _smc_score < _smc_min:
+            _setup = getattr(sig, "setup_class", "")
+            if _setup in _SMC_GATE_EXEMPT_SETUPS:
                 log.debug(
-                    "SMC hard gate: {} {} smc_score={:.1f} < {:.1f}",
-                    symbol, chan_name, _smc_score, _smc_min,
+                    "SMC gate exempt for {} {} setup_class={} — skipping sweep requirement",
+                    symbol, chan_name, _setup,
                 )
-                self._suppression_counters[f"smc_hard_gate:{chan_name}"] += 1
-                self.suppression_tracker.record(SuppressionEvent(
-                    symbol=symbol,
-                    channel=chan_name,
-                    reason="smc_hard_gate",
-                    regime=_regime_key,
-                    would_be_confidence=sig.confidence,
-                ))
-                return None, cross_verified
+            else:
+                _smc_score = sig.component_scores["smc"]
+                _smc_min = (
+                    SMC_SCORE_MIN_TRENDING_SHORT
+                    if _regime_key == "TRENDING_DOWN" and sig.direction.value == "SHORT"
+                    else SMC_HARD_GATE_MIN
+                )
+                if _smc_score < _smc_min:
+                    log.debug(
+                        "SMC hard gate: {} {} smc_score={:.1f} < {:.1f}",
+                        symbol, chan_name, _smc_score, _smc_min,
+                    )
+                    self._suppression_counters[f"smc_hard_gate:{chan_name}"] += 1
+                    self.suppression_tracker.record(SuppressionEvent(
+                        symbol=symbol,
+                        channel=chan_name,
+                        reason="smc_hard_gate",
+                        regime=_regime_key,
+                        would_be_confidence=sig.confidence,
+                    ))
+                    return None, cross_verified
 
         # Trend hard gate: EMA alignment is non-negotiable for scalp channels.
         # indicator_score < TREND_HARD_GATE_MIN means MACD/RSI/EMA are not
         # supporting the direction — a structural contradiction.
         # Fail-open when the PR09 scoring engine did not populate "indicators".
+        # Setup classes whose thesis does not depend on EMA alignment are exempt.
         if chan_name.startswith("360_SCALP") and "indicators" in sig.component_scores:
-            _ind_score = sig.component_scores["indicators"]
-            if _ind_score < TREND_HARD_GATE_MIN:
+            _setup = getattr(sig, "setup_class", "")
+            if _setup in _TREND_GATE_EXEMPT_SETUPS:
                 log.debug(
-                    "Trend hard gate: {} {} ind_score={:.1f} < {:.1f}",
-                    symbol, chan_name, _ind_score, TREND_HARD_GATE_MIN,
+                    "Trend gate exempt for {} {} setup_class={} — skipping EMA alignment gate",
+                    symbol, chan_name, _setup,
                 )
-                self._suppression_counters[f"trend_hard_gate:{chan_name}"] += 1
-                self.suppression_tracker.record(SuppressionEvent(
-                    symbol=symbol,
-                    channel=chan_name,
-                    reason="trend_hard_gate",
-                    regime=_regime_key,
-                    would_be_confidence=sig.confidence,
-                ))
-                return None, cross_verified
+            else:
+                _ind_score = sig.component_scores["indicators"]
+                if _ind_score < TREND_HARD_GATE_MIN:
+                    log.debug(
+                        "Trend hard gate: {} {} ind_score={:.1f} < {:.1f}",
+                        symbol, chan_name, _ind_score, TREND_HARD_GATE_MIN,
+                    )
+                    self._suppression_counters[f"trend_hard_gate:{chan_name}"] += 1
+                    self.suppression_tracker.record(SuppressionEvent(
+                        symbol=symbol,
+                        channel=chan_name,
+                        reason="trend_hard_gate",
+                        regime=_regime_key,
+                        would_be_confidence=sig.confidence,
+                    ))
+                    return None, cross_verified
 
         min_conf = self.confidence_overrides.get(chan_name, chan.config.min_confidence)
 
@@ -2732,8 +2768,17 @@ class Scanner:
 
         # QUIET regime safety net for scalp channels: only the highest-quality
         # mean-reversion setups are allowed through when the market is compressed.
+        # QUIET_COMPRESSION_BREAK is exempt — it is the evaluator specifically
+        # designed for QUIET regime (BB squeeze release) and must not be
+        # self-blocked by this gate.
         if _regime_key == "QUIET" and chan_name.startswith("360_SCALP"):
-            if sig.confidence < QUIET_SCALP_MIN_CONFIDENCE:
+            _setup = getattr(sig, "setup_class", "")
+            if _setup == "QUIET_COMPRESSION_BREAK":
+                log.debug(
+                    "QUIET_SCALP_BLOCK exempt for {} {} setup_class=QUIET_COMPRESSION_BREAK",
+                    symbol, chan_name,
+                )
+            elif sig.confidence < QUIET_SCALP_MIN_CONFIDENCE:
                 log.info(
                     "QUIET_SCALP_BLOCK {} {} conf={:.1f} < min={:.1f}",
                     symbol, chan_name, sig.confidence, QUIET_SCALP_MIN_CONFIDENCE,
