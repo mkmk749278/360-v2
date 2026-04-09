@@ -2922,7 +2922,7 @@ class Scanner:
                     _raw_sigs = [_raw_result]
                 else:
                     _raw_sigs = []
-                _seen_scalp_dirs: Set[str] = set()
+                _seen_scalp_dirs = set()
                 for _raw_sig in _raw_sigs:
                     _raw_dir = (
                         _raw_sig.direction.value
@@ -2937,7 +2937,9 @@ class Scanner:
                             symbol, _raw_dir, getattr(_raw_sig, "setup_class", "?"),
                         )
                         continue
-                    sig, _ = await self._prepare_signal(
+                    # cross_verified is None for all scalp channels (cross-exchange
+                    # verification is skipped for 360_SCALP — see _prepare_signal).
+                    sig, _cross_verified = await self._prepare_signal(
                         symbol, volume_24h, chan, ctx_for_chan,
                         _preseed_signal=_raw_sig,
                     )

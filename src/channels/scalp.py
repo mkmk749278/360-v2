@@ -141,8 +141,8 @@ class ScalpChannel(BaseChannel):
             sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
             if sig is not None:
                 # Apply kill zone check and mark reduced-conviction signals
-                sig = self._apply_kill_zone_note(sig, profile=profile)
-                results.append(sig)
+                sig_with_kz = self._apply_kill_zone_note(sig, profile=profile)
+                results.append(sig_with_kz)
         return results
 
     # ------------------------------------------------------------------
