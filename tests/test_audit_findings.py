@@ -8,6 +8,8 @@ Covers:
 - F-033: LOG_LEVEL validation
 - F-039: DCA zone epsilon guard
 - PR-ARCH-5: QUIET gate refinement for DIVERGENCE_CONTINUATION
+- PR-ARCH-6: SMC hard-gate exemption corrections (LIQUIDATION_REVERSAL,
+             FUNDING_EXTREME_SIGNAL, DIVERGENCE_CONTINUATION)
 """
 
 from __future__ import annotations
@@ -496,4 +498,124 @@ class TestQuietGateDivergenceContinuation:
         assert self._quiet_gate_would_block("DIVERGENCE_CONTINUATION", 58.3), (
             "DIVERGENCE_CONTINUATION conf=58.3 is below the path-specific floor of 64.0 "
             "and should remain blocked"
+        )
+
+
+# ---------------------------------------------------------------------------
+# PR-ARCH-6: SMC hard-gate exemption corrections
+# ---------------------------------------------------------------------------
+
+
+class TestSmcGateExemptSetups:
+    """Verify _SMC_GATE_EXEMPT_SETUPS is correct after PR-ARCH-6.
+
+    LIQUIDATION_REVERSAL, FUNDING_EXTREME_SIGNAL, and DIVERGENCE_CONTINUATION
+    must be in the exemption set so they are not blocked solely for lacking
+    sweep-style SMC evidence.  Sweep-dependent paths (e.g. LIQUIDITY_SWEEP_REVERSAL)
+    must remain outside the exempt set.
+    """
+
+    @pytest.fixture
+    def exempt(self):
+        from src.scanner import _SMC_GATE_EXEMPT_SETUPS
+        return _SMC_GATE_EXEMPT_SETUPS
+
+    # --- membership assertions for new PR-ARCH-6 entries -------------------
+
+    def test_liquidation_reversal_is_exempt(self, exempt):
+        """LIQUIDATION_REVERSAL thesis is cascade/CVD — sweep not required."""
+        assert "LIQUIDATION_REVERSAL" in exempt, (
+            "LIQUIDATION_REVERSAL must be in _SMC_GATE_EXEMPT_SETUPS (PR-ARCH-6)"
+        )
+
+    def test_funding_extreme_signal_is_exempt(self, exempt):
+        """FUNDING_EXTREME_SIGNAL thesis is funding-rate extremity — sweep not required."""
+        assert "FUNDING_EXTREME_SIGNAL" in exempt, (
+            "FUNDING_EXTREME_SIGNAL must be in _SMC_GATE_EXEMPT_SETUPS (PR-ARCH-6)"
+        )
+
+    def test_divergence_continuation_is_exempt(self, exempt):
+        """DIVERGENCE_CONTINUATION thesis is CVD/order-flow divergence — sweep not required."""
+        assert "DIVERGENCE_CONTINUATION" in exempt, (
+            "DIVERGENCE_CONTINUATION must be in _SMC_GATE_EXEMPT_SETUPS (PR-ARCH-6)"
+        )
+
+    # --- pre-existing entries must still be present -------------------------
+
+    def test_pre_existing_exempt_setups_unchanged(self, exempt):
+        """Original five exempt setups must still be present after PR-ARCH-6."""
+        pre_existing = {
+            "OPENING_RANGE_BREAKOUT",
+            "QUIET_COMPRESSION_BREAK",
+            "VOLUME_SURGE_BREAKOUT",
+            "BREAKDOWN_SHORT",
+            "SR_FLIP_RETEST",
+        }
+        assert pre_existing.issubset(exempt), (
+            f"Pre-existing exempt setups missing from _SMC_GATE_EXEMPT_SETUPS: "
+            f"{pre_existing - exempt}"
+        )
+
+    # --- sweep-dependent paths must NOT be exempt ---------------------------
+
+    def test_liquidity_sweep_reversal_not_exempt(self, exempt):
+        """LIQUIDITY_SWEEP_REVERSAL requires sweep confirmation — must NOT be exempt."""
+        assert "LIQUIDITY_SWEEP_REVERSAL" not in exempt, (
+            "LIQUIDITY_SWEEP_REVERSAL is sweep-dependent and must not be in the exempt set"
+        )
+
+    # --- gate logic: exempt setup bypasses the SMC hard gate ----------------
+
+    @staticmethod
+    def _smc_gate_would_block(
+        setup_class: str,
+        smc_score: float,
+        regime: str = "RANGING",
+        direction: str = "LONG",
+    ) -> bool:
+        """Mirror the scanner SMC hard-gate decision logic for unit testing.
+
+        Returns True if the signal would be suppressed, False if it passes.
+        """
+        from src.scanner import _SMC_GATE_EXEMPT_SETUPS
+        from config import SMC_HARD_GATE_MIN, SMC_SCORE_MIN_TRENDING_SHORT
+
+        if setup_class in _SMC_GATE_EXEMPT_SETUPS:
+            return False
+        smc_min = (
+            SMC_SCORE_MIN_TRENDING_SHORT
+            if regime == "TRENDING_DOWN" and direction == "SHORT"
+            else SMC_HARD_GATE_MIN
+        )
+        return smc_score < smc_min
+
+    def test_liquidation_reversal_low_smc_not_blocked(self):
+        """smc_score=1.0 (no sweep, no MSS) — LIQUIDATION_REVERSAL must pass."""
+        assert not self._smc_gate_would_block("LIQUIDATION_REVERSAL", smc_score=1.0), (
+            "LIQUIDATION_REVERSAL with smc_score=1.0 should not be blocked by the SMC hard gate"
+        )
+
+    def test_funding_extreme_low_smc_not_blocked(self):
+        """smc_score=2.0 (FVG only) — FUNDING_EXTREME_SIGNAL must pass."""
+        assert not self._smc_gate_would_block("FUNDING_EXTREME_SIGNAL", smc_score=2.0), (
+            "FUNDING_EXTREME_SIGNAL with smc_score=2.0 should not be blocked by the SMC hard gate"
+        )
+
+    def test_divergence_continuation_low_smc_not_blocked(self):
+        """smc_score=0.0 (CVD-only signal) — DIVERGENCE_CONTINUATION must pass."""
+        assert not self._smc_gate_would_block("DIVERGENCE_CONTINUATION", smc_score=0.0), (
+            "DIVERGENCE_CONTINUATION with smc_score=0.0 should not be blocked by the SMC hard gate"
+        )
+
+    def test_non_exempt_low_smc_is_blocked(self):
+        """Non-exempt setup with smc_score=5.0 < SMC_HARD_GATE_MIN must be blocked."""
+        assert self._smc_gate_would_block("LIQUIDITY_SWEEP_REVERSAL", smc_score=5.0), (
+            "LIQUIDITY_SWEEP_REVERSAL with smc_score=5.0 should be blocked by the SMC hard gate"
+        )
+
+    def test_non_exempt_sufficient_smc_passes(self):
+        """Non-exempt setup with smc_score >= SMC_HARD_GATE_MIN must not be blocked."""
+        from config import SMC_HARD_GATE_MIN
+        assert not self._smc_gate_would_block("LIQUIDITY_SWEEP_REVERSAL", smc_score=SMC_HARD_GATE_MIN), (
+            "LIQUIDITY_SWEEP_REVERSAL with smc_score=SMC_HARD_GATE_MIN should pass the SMC hard gate"
         )
