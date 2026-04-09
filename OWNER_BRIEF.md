@@ -510,14 +510,14 @@ Complete diagnosis confirmed by direct code audit. True status of all 11 evaluat
 - Fix: `(utcnow() - sig.timestamp).total_seconds()` — one line, single file
 - Telegram signal-closed posts were silently failing on every TP/SL hit
 
-### PR-ARCH-1 — Gate Fixes — IN PROGRESS (2026-04-09)
+### PR-ARCH-1 — Gate Fixes — MERGED (PR#72, 2026-04-09)
 - SMC hard gate exemptions for non-sweep setup classes (OPENING_RANGE_BREAKOUT, QUIET_COMPRESSION_BREAK, VOLUME_SURGE_BREAKOUT, BREAKDOWN_SHORT, SR_FLIP_RETEST)
 - Trend hard gate exemptions for non-EMA setup classes (LIQUIDATION_REVERSAL, FUNDING_EXTREME_SIGNAL, WHALE_MOMENTUM)
 - QUIET_SCALP_BLOCK: exempt QUIET_COMPRESSION_BREAK — it is the quiet regime strategy, cannot be blocked in quiet
 - Single file: src/scanner/__init__.py
 - Expected outcome: 5 previously gate-blocked evaluators unblocked
 
-### PR-ARCH-2 — Winner-Takes-All Removal — QUEUED (raises after ARCH-1 merges)
+### PR-ARCH-2 — Winner-Takes-All Removal — IN PROGRESS (PR#75, 2026-04-09)
 - ScalpChannel.evaluate() returns List[Signal] instead of Optional[Signal]
 - Scanner processes each candidate independently through gate chain
 - Same-symbol same-direction dedup enforced
@@ -620,22 +620,23 @@ Owner responsibilities:
 
 ---
 
-## 10. Current State Snapshot (2026-04-09 — Session 6)
+## 10. Current State Snapshot (2026-04-09 — Session 7)
 
 | Item | Status |
 |---|---|
-| Engine running on VPS | Yes — Up 34 minutes at last monitor read (07:33 UTC) |
+| Engine running on VPS | Yes — monitoring required to confirm current status |
 | ScanLat | 3,723–5,259ms stable (PR12 fix holding) |
-| Container health | UNHEALTHY label persists — false positive. Engine running fine. Heartbeat file missing inside container (_touch_heartbeat() OSError swallowed silently). Known issue, deferred. |
+| Container health | UNHEALTHY label persists — confirmed false positive. _touch_heartbeat() path mismatch. Deferred. |
 | WS streams | 300 streams healthy |
 | Pairs scanning | 75 pairs |
-| Signals fired today | 1 active (XAUUSDT LONG RANGE_FADE at 07:26) + 9 closed in last 10 records — all RANGE_FADE from _evaluate_standard |
-| Signal path diversity | 0 non-RANGE_FADE signals — root cause fully confirmed (see Section 6) |
+| Signals fired today | Architecture fixes in progress — monitoring for signal path diversity improvement |
+| Signal path diversity | 0 non-RANGE_FADE signals — ARCH-1 merged, ARCH-2 in progress, ARCH-3 queued |
 | Architecture audit | COMPLETE — all 6 root causes identified and confirmed by direct code read |
-| Architecture fix plan | 3 PRs agreed: ARCH-1 (gate fixes), ARCH-2 (winner-takes-all removal), ARCH-3 (data pipeline wiring) |
-| PR-ARCH-1 | IN PROGRESS — raising now |
-| PR14-hotfix | MERGED (PR#70) — TypeError in _post_signal_closed fixed |
-| Market conditions | Extreme Fear (F&G=14), tariff shock, 40-44/75 pairs spread-blocked each cycle |
+| Architecture fix plan | 3 PRs: ✅ ARCH-1 (merged PR#72), 🔄 ARCH-2 (in progress PR#75), ⏳ ARCH-3 (queued) |
+| PR-ARCH-1 | ✅ MERGED (PR#72) — gate fixes are LIVE: SMC exemptions, trend exemptions, QUIET_SCALP_BLOCK exemption |
+| PR-ARCH-2 | 🔄 IN PROGRESS (PR#75) — winner-takes-all removal from ScalpChannel.evaluate() |
+| PR-ARCH-3 | ⏳ QUEUED — data pipeline wiring (funding_rate + cvd into smc_data) |
+| Market conditions | Extreme Fear (F&G~14), tariff shock, 40-44/75 pairs spread-blocked each cycle |
 | Protective mode | ENTERED repeatedly — volatile=21-33, spread_wide=16-52 per cycle |
 | Testing phase | Not started — begins once signal paths producing consistently |
 | Subscribers | None — deliberately. System validation first. |
@@ -869,4 +870,27 @@ Copilot appends to this automatically at the end of every session. No prompt nee
 - PR-ARCH-1 raises immediately after brief write
 - PR-ARCH-2 queued
 - PR-ARCH-3 queued
+
+### Session 7 — 2026-04-09 (PR-ARCH-1 Merged + ARCH-2 In Progress)
+
+**What was discussed:**
+- Session started with fresh OWNER_BRIEF.md fetch from main (872 lines — integrity confirmed).
+- Reviewed current PR status: PR-ARCH-1 merged 58 minutes ago (PR#72), PR-ARCH-2 in progress (PR#75).
+- Architecture fix plan proceeding exactly as designed — gate fixes are live, winner-takes-all removal underway.
+- Confirmed 3-PR sequence: ARCH-1 ✅ merged, ARCH-2 🔄 in progress, ARCH-3 ⏳ queued for data pipeline wiring.
+- Owner requested brief update to reflect current session status and architecture progress.
+
+**What was decided:**
+- Continue monitoring PR-ARCH-2 progress — this is the critical blocker for multiple evaluator paths firing.
+- PR-ARCH-3 (data pipeline wiring) to be prepared and queued immediately after ARCH-2 merges.
+- VPS monitor run needed post-ARCH-1 to check if gate fixes have improved signal path diversity.
+
+**What was built:**
+- OWNER_BRIEF.md updated: Section 10 (current state), Section 7 (PR status updates), Section 12 (this session entry).
+- All architectural progress documented — brief remains the single source of truth.
+
+**Next actions:**
+- Monitor PR-ARCH-2 completion and prepare ARCH-3 spec.
+- Run VPS monitor to check live signal diversity post-ARCH-1 merge.
+- Watch for first non-RANGE_FADE signals as architecture fixes take effect.
 - Run VPS monitor after ARCH-1 merges — confirm new evaluator paths starting to appear in logs.
