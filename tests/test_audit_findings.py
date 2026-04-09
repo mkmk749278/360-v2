@@ -447,6 +447,22 @@ class TestQuietGateDivergenceContinuation:
     other setup classes (PR-ARCH-5).
     """
 
+    @staticmethod
+    def _quiet_gate_would_block(setup_class: str, conf: float) -> bool:
+        """Mirror the scanner QUIET gate decision for unit testing.
+
+        Returns True if the signal would be blocked by the QUIET gate,
+        False if it passes (exempt or above the applicable floor).
+        """
+        from src.scanner import _QUIET_DIVERGENCE_MIN_CONFIDENCE
+        from config import QUIET_SCALP_MIN_CONFIDENCE
+
+        if setup_class == "QUIET_COMPRESSION_BREAK":
+            return False
+        if setup_class == "DIVERGENCE_CONTINUATION" and conf >= _QUIET_DIVERGENCE_MIN_CONFIDENCE:
+            return False
+        return conf < QUIET_SCALP_MIN_CONFIDENCE
+
     def test_divergence_quiet_floor_is_64(self):
         """_QUIET_DIVERGENCE_MIN_CONFIDENCE must be 64.0 (the path-specific floor)."""
         from src.scanner import _QUIET_DIVERGENCE_MIN_CONFIDENCE
@@ -464,62 +480,20 @@ class TestQuietGateDivergenceContinuation:
         assert _QUIET_DIVERGENCE_MIN_CONFIDENCE < QUIET_SCALP_MIN_CONFIDENCE
 
     def test_near_threshold_divergence_passes_path_specific_floor(self):
-        """conf=64.3 is >= 64.0 (path floor), so DIVERGENCE_CONTINUATION is exempt."""
-        from src.scanner import _QUIET_DIVERGENCE_MIN_CONFIDENCE
-        from config import QUIET_SCALP_MIN_CONFIDENCE
-
-        conf = 64.3
-        setup_class = "DIVERGENCE_CONTINUATION"
-
-        # Simulates the gate logic added in PR-ARCH-5
-        is_qcb = setup_class == "QUIET_COMPRESSION_BREAK"
-        is_divergence_exempt = (
-            setup_class == "DIVERGENCE_CONTINUATION"
-            and conf >= _QUIET_DIVERGENCE_MIN_CONFIDENCE
-        )
-        would_block = not is_qcb and not is_divergence_exempt and conf < QUIET_SCALP_MIN_CONFIDENCE
-
-        assert not would_block, (
-            f"DIVERGENCE_CONTINUATION conf={conf} should pass the path-specific "
-            f"floor {_QUIET_DIVERGENCE_MIN_CONFIDENCE}, not be blocked at {QUIET_SCALP_MIN_CONFIDENCE}"
+        """conf=64.3 >= 64.0 (path floor), so DIVERGENCE_CONTINUATION is exempt."""
+        assert not self._quiet_gate_would_block("DIVERGENCE_CONTINUATION", 64.3), (
+            "DIVERGENCE_CONTINUATION conf=64.3 should pass the path-specific floor of 64.0"
         )
 
     def test_generic_setup_at_same_confidence_is_blocked(self):
-        """conf=64.3 is < 65.0 (global floor), so a non-divergence setup is still blocked."""
-        from src.scanner import _QUIET_DIVERGENCE_MIN_CONFIDENCE
-        from config import QUIET_SCALP_MIN_CONFIDENCE
-
-        conf = 64.3
-        setup_class = "RANGE_FADE"
-
-        is_qcb = setup_class == "QUIET_COMPRESSION_BREAK"
-        is_divergence_exempt = (
-            setup_class == "DIVERGENCE_CONTINUATION"
-            and conf >= _QUIET_DIVERGENCE_MIN_CONFIDENCE
-        )
-        would_block = not is_qcb and not is_divergence_exempt and conf < QUIET_SCALP_MIN_CONFIDENCE
-
-        assert would_block, (
-            f"RANGE_FADE conf={conf} should still be blocked by the global "
-            f"floor {QUIET_SCALP_MIN_CONFIDENCE}"
+        """conf=64.3 < 65.0 (global floor), so a non-divergence setup is still blocked."""
+        assert self._quiet_gate_would_block("RANGE_FADE", 64.3), (
+            "RANGE_FADE conf=64.3 should still be blocked by the global floor of 65.0"
         )
 
     def test_divergence_well_below_path_floor_is_blocked(self):
-        """conf=58.3 is < 64.0 (path floor), so DIVERGENCE_CONTINUATION is still blocked."""
-        from src.scanner import _QUIET_DIVERGENCE_MIN_CONFIDENCE
-        from config import QUIET_SCALP_MIN_CONFIDENCE
-
-        conf = 58.3
-        setup_class = "DIVERGENCE_CONTINUATION"
-
-        is_qcb = setup_class == "QUIET_COMPRESSION_BREAK"
-        is_divergence_exempt = (
-            setup_class == "DIVERGENCE_CONTINUATION"
-            and conf >= _QUIET_DIVERGENCE_MIN_CONFIDENCE
-        )
-        would_block = not is_qcb and not is_divergence_exempt and conf < QUIET_SCALP_MIN_CONFIDENCE
-
-        assert would_block, (
-            f"DIVERGENCE_CONTINUATION conf={conf} is below the path-specific "
-            f"floor {_QUIET_DIVERGENCE_MIN_CONFIDENCE} and should remain blocked"
+        """conf=58.3 < 64.0 (path floor), so DIVERGENCE_CONTINUATION is still blocked."""
+        assert self._quiet_gate_would_block("DIVERGENCE_CONTINUATION", 58.3), (
+            "DIVERGENCE_CONTINUATION conf=58.3 is below the path-specific floor of 64.0 "
+            "and should remain blocked"
         )
