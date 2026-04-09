@@ -1479,3 +1479,152 @@ async def test_gem_skips_mtf_gate():
 
     # MTF gate must NOT be called for 360_GEM
     mock_mtf.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# PR-ARCH-3: funding_rate and cvd wired into smc_data before evaluators run
+# ---------------------------------------------------------------------------
+
+
+class TestArch3ScanContextWiring:
+    """Verify that funding_rate and cvd are wired into smc_data by _build_scan_context()."""
+
+    def _make_oi_store(self, funding_rate=None, cvd_history=None):
+        """Create a mock order_flow_store with controllable funding_rate and CVD."""
+        import numpy as np
+        oi_store = MagicMock()
+        oi_store.get_funding_rate = MagicMock(return_value=funding_rate)
+        cvd_arr = np.array(cvd_history or [], dtype=np.float64)
+        oi_store.get_cvd_history = MagicMock(return_value=cvd_arr)
+        oi_store.get_oi_trend = MagicMock()
+        oi_store.get_recent_liq_volume_usd = MagicMock(return_value=0.0)
+        oi_store.get_cvd_divergence = MagicMock(return_value=None)
+        oi_store._oi = {}
+        return oi_store
+
+    @pytest.mark.asyncio
+    async def test_funding_rate_wired_into_smc_data(self):
+        """When order_flow_store has a funding rate, it is in smc_data before evaluate()."""
+        captured_smc: list = []
+
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+
+        def capture_and_return(**kwargs):
+            captured_smc.append(kwargs.get("smc_data", {}))
+            return []
+
+        channel.evaluate.side_effect = capture_and_return
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+        scanner.order_flow_store = self._make_oi_store(funding_rate=0.0005)
+
+        with _common_gate_patches(scanner):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        assert len(captured_smc) >= 1
+        assert captured_smc[0].get("funding_rate") == 0.0005
+
+    @pytest.mark.asyncio
+    async def test_cvd_wired_into_smc_data_when_history_available(self):
+        """When order_flow_store has CVD history, smc_data['cvd'] is a non-empty list."""
+        captured_smc: list = []
+
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+
+        def capture_and_return(**kwargs):
+            captured_smc.append(kwargs.get("smc_data", {}))
+            return []
+
+        channel.evaluate.side_effect = capture_and_return
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+        scanner.order_flow_store = self._make_oi_store(
+            cvd_history=[100.0, 150.0, 120.0, 130.0]
+        )
+
+        with _common_gate_patches(scanner):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        assert len(captured_smc) >= 1
+        cvd = captured_smc[0].get("cvd")
+        assert cvd is not None
+        assert isinstance(cvd, list)
+        assert len(cvd) == 4
+
+    @pytest.mark.asyncio
+    async def test_cvd_is_none_when_no_history(self):
+        """When order_flow_store has no CVD history, smc_data['cvd'] is None (fail-open)."""
+        captured_smc: list = []
+
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+
+        def capture_and_return(**kwargs):
+            captured_smc.append(kwargs.get("smc_data", {}))
+            return []
+
+        channel.evaluate.side_effect = capture_and_return
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+        scanner.order_flow_store = self._make_oi_store(cvd_history=[])
+
+        with _common_gate_patches(scanner):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        assert len(captured_smc) >= 1
+        assert captured_smc[0].get("cvd") is None
+
+    @pytest.mark.asyncio
+    async def test_funding_rate_none_when_not_in_store(self):
+        """When order_flow_store has no funding rate, smc_data['funding_rate'] is None."""
+        captured_smc: list = []
+
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+
+        def capture_and_return(**kwargs):
+            captured_smc.append(kwargs.get("smc_data", {}))
+            return []
+
+        channel.evaluate.side_effect = capture_and_return
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+        scanner.order_flow_store = self._make_oi_store(funding_rate=None)
+
+        with _common_gate_patches(scanner):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        assert len(captured_smc) >= 1
+        assert captured_smc[0].get("funding_rate") is None
+
+    @pytest.mark.asyncio
+    async def test_no_wiring_when_order_flow_store_absent(self):
+        """When order_flow_store is None, smc_data keys are absent (no KeyError)."""
+        captured_smc: list = []
+
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+
+        def capture_and_return(**kwargs):
+            captured_smc.append(kwargs.get("smc_data", {}))
+            return []
+
+        channel.evaluate.side_effect = capture_and_return
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+        assert scanner.order_flow_store is None
+
+        with _common_gate_patches(scanner):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        assert len(captured_smc) >= 1
+        # Keys should be absent when store is not configured
+        assert "funding_rate" not in captured_smc[0]
+        assert "cvd" not in captured_smc[0]

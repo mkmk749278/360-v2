@@ -1565,6 +1565,24 @@ class Scanner:
         # Attach regime context so channel evaluators can access atr_percentile
         # via smc_data.get("regime_context") without any signature changes.
         smc_data["regime_context"] = regime_context
+
+        # ── Wire funding_rate and cvd into smc_data before evaluators run ────
+        # Evaluators (_evaluate_funding_extreme, _evaluate_divergence_continuation,
+        # _evaluate_liquidation_reversal) depend on these keys being present.
+        # Fail-open: if data is unavailable, keys are set to None so evaluators
+        # can degrade gracefully rather than failing on a missing key.
+        if self.order_flow_store is not None:
+            _fr = self.order_flow_store.get_funding_rate(symbol)
+            smc_data["funding_rate"] = _fr
+            _cvd_arr = self.order_flow_store.get_cvd_history(symbol)
+            smc_data["cvd"] = _cvd_arr.tolist() if len(_cvd_arr) > 0 else None
+            log.debug(
+                "{} smc_data: funding_rate={}, cvd_candles={}",
+                symbol,
+                _fr,
+                len(_cvd_arr),
+            )
+
         return ScanContext(
             candles=candles,
             indicators=indicators,
@@ -2885,6 +2903,13 @@ class Scanner:
                         # that are not part of the SMCResult dataclass.
                         _new_smc_data["pair_profile"] = ctx.smc_data.get("pair_profile")
                         _new_smc_data["regime_context"] = ctx.smc_data.get("regime_context")
+                        # Carry over order-flow fields wired in _build_scan_context()
+                        # so evaluators see funding_rate and cvd regardless of which
+                        # channel-specific SMC re-detect path is taken.
+                        # Only carry over when the key was set (i.e. order_flow_store present).
+                        for _of_key in ("funding_rate", "cvd"):
+                            if _of_key in ctx.smc_data:
+                                _new_smc_data[_of_key] = ctx.smc_data[_of_key]
                         _smc_cache[_cache_key] = (_smc_r, _new_smc_data)
                         ctx_for_chan = _dc.replace(
                             ctx,

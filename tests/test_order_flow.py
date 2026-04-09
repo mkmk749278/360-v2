@@ -255,3 +255,25 @@ class TestOrderFlowStore:
         close_arr = np.array([100.0, 101.0, 102.0], dtype=float)
         result = store.get_cvd_divergence("ETHUSDT", close_arr, lookback=10)
         assert result is None
+
+    # ---- Funding Rate ----
+
+    def test_add_and_get_funding_rate(self):
+        store = self._store()
+        store.add_funding_rate("BTCUSDT", 0.0001)
+        assert store.get_funding_rate("BTCUSDT") == pytest.approx(0.0001)
+
+    def test_get_funding_rate_no_data(self):
+        store = self._store()
+        assert store.get_funding_rate("BTCUSDT") is None
+
+    def test_add_funding_rate_overwrites(self):
+        store = self._store()
+        store.add_funding_rate("BTCUSDT", 0.0001)
+        store.add_funding_rate("BTCUSDT", -0.0003)
+        assert store.get_funding_rate("BTCUSDT") == pytest.approx(-0.0003)
+
+    def test_funding_rate_isolated_by_symbol(self):
+        store = self._store()
+        store.add_funding_rate("BTCUSDT", 0.0005)
+        assert store.get_funding_rate("ETHUSDT") is None
