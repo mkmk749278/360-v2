@@ -19,9 +19,10 @@ beginning any Stage A build work (observability framework, `/why` deep diagnosti
 
 ## Current Active Priority
 
-1. **Diagnose zero live signal output** — monitor shows `Signals=0`, `ScanLat=~20s`, WS healthy, suppression summary present. Root cause not yet confirmed. Highest priority before any build work proceeds.
+1. **Diagnose zero live signal output** — monitor shows `Signals=0`, `ScanLat=~20s`, WS healthy, suppression summary present. Root cause not yet confirmed. Resolve before path refinement work begins.
 2. **Confirm evaluator family diversity** — need evidence that more than one or two evaluator families are producing candidates in live conditions.
 3. **Heartbeat file missing** — needs investigation. May indicate healthcheck or I/O issue.
+4. **Signal-engine path quality** — once live output is confirmed, immediately begin path refinement sequence: `VOLUME_SURGE_BREAKOUT` → `BREAKDOWN_SHORT` → `SR_FLIP_RETEST` → `WHALE_MOMENTUM` role review. This is the current business-first strategic direction.
 
 ---
 
@@ -41,16 +42,17 @@ beginning any Stage A build work (observability framework, `/why` deep diagnosti
 
 | Priority | PR | Description | Gate |
 |---|---|---|---|
-| 1 | Diagnosis session | Trace zero-output root cause via code + monitor evidence | Now — no build gate |
-| 2 | PR-A1 | Path-level observability framework | After zero-output cause confirmed |
-| 3 | PR-A2 | `/why SYMBOL` deep diagnostics | After PR-A1 |
-| 4 | PR-A3 | VPS Monitor path health section | After PR-A2 |
-| 5 | PR-B1 | Refine `VOLUME_SURGE_BREAKOUT` | After Stage A complete |
-| 6 | PR-B2 | Refine `BREAKDOWN_SHORT` | After PR-B1 |
-| 7 | PR-B3 | Refine `SR_FLIP_RETEST` | After PR-B2 |
-| 8 | PR-B4 | `WHALE_MOMENTUM` role review | After PR-B3 |
+| 1 | Diagnosis | Trace zero-output root cause via code + monitor evidence | Now — no build gate |
+| 2 | PR-1 | Refine `VOLUME_SURGE_BREAKOUT` | After zero-output diagnosis |
+| 3 | PR-2 | Refine `BREAKDOWN_SHORT` | After PR-1 |
+| 4 | PR-3 | Refine `SR_FLIP_RETEST` | After PR-2 |
+| 5 | PR-4 | `WHALE_MOMENTUM` role review and reclassification | After PR-3 |
+| 6 | PR-5 | Add `CONTINUATION_LIQUIDITY_SWEEP` | After PR-1 through PR-3 stable |
+| 7 | PR-6 | Add `POST_DISPLACEMENT_CONTINUATION` | After PR-5 |
+| 8 | PR-7 | Add `FAILED_AUCTION_RECLAIM` | After PR-6 |
+| 9 | PR-8 | Formalize path portfolio roles (core / support / specialist) | After new paths are live |
 
-Full detailed roadmap: `OWNER_BRIEF.md` Part VI.
+Full current roadmap: `OWNER_BRIEF.md` Part VI section 6.2.
 
 ---
 
@@ -67,5 +69,4 @@ Full detailed roadmap: `OWNER_BRIEF.md` Part VI.
 
 ## Last Updated
 
-2026-04-10 — Initial creation as part of operating-contract upgrade (PR: full technical ownership / operating-contract upgrade).
-Next update: session end of the first diagnostic session on the zero-signal issue.
+2026-04-10 — Roadmap refresh: replaced Stage A–E observability-gated expansion sequence with business-first signal-engine path roadmap. Next PR queue updated to reflect new sequence (path refinements → new path additions → portfolio formalization). Prior operating-contract upgrade (PR #97) is still the base brief version.

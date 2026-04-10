@@ -576,103 +576,74 @@ Copilot is responsible for the following without being prompted:
 - Use the /why SYMBOL command for per-symbol gate diagnostics when needed
 - Flag any discrepancy between expected and actual evaluator coverage
 
-### 6.2 Signal Path Refinement and Expansion Roadmap
+### 6.2 Signal-Engine Path Roadmap (Current Direction)
 
-Before any new evaluator is added to the system, the current path set must be made observable, diagnosable, and honestly assessed against live market reality. The principle is system-first, data-first: architecture stability and observability precede all expansion. No uncontrolled evaluator sprawl.
+**Business objective:** Build the strongest possible signal engine — highest path portfolio quality, broadest situational coverage, and business-grade signal generation at every step. This is the current strategic direction.
 
-This roadmap is sequenced. Each stage gates the next.
-
----
-
-#### Stage A — Observability and Truth-First Audit
-
-**Goal:** Know what the system is actually doing before assuming it is correct.
-
-- **Path-level observability framework** — instrument each evaluator so Copilot can see, per cycle: whether it ran, whether it passed gates, whether it produced candidates, whether candidates survived quality checks, and what blocked them if not. This is the foundation for everything below.
-- **`/why SYMBOL` deep diagnostics** — extend the existing `/why` command to produce full per-path gate traces for a given symbol: which evaluator ran, which gate condition blocked it, what the observed values were, and what threshold was not met. Not a summary — a full traceable breakdown per path.
-- **VPS monitor path health section** — add a path health table to the VPS monitor output showing, for each registered evaluator: last-seen candidate, last-seen emit, gate-block rate, and current status (live / silent / never seen). Copilot reads this at every session start without being asked.
-
-No path refinement begins until this observability layer exists. Diagnosing by theory alone is not acceptable.
+This roadmap is direct and sequenced. Signal quality improvement starts now. Observability work runs concurrently as background infrastructure and informs but does not gate path refinement.
 
 ---
 
-#### Stage B — Refine Weak Current Core Paths
+#### Phase 1 — Core Path Refinement
 
-**Gate: Stage A complete and path health data available.**
+Refine current paths that are architecturally sound but too narrow for real crypto market behavior. Refinement means widening valid geometry, separating hard invalidation from soft confidence contributors, and testing against live market reality — not textbook geometry. Every change must be traceable to a specific observable failure mode. No speculative geometry relaxation.
 
-**Goal:** The current core paths must match real crypto market behavior, not just textbook geometry. Refinement means widening valid geometry ranges where too rigid, separating hard requirements from soft confidence contributors, and reducing over-stacked constraints that produce silence without signal quality benefit.
+**1. Refine `VOLUME_SURGE_BREAKOUT`**
+Breakout timing too specific, pullback zone too tight, RSI band too restrictive, FVG/orderblock requirement too hard in fast momentum environments. Widen valid geometry. Separate hard invalidation from soft confidence boost. Allow realistic continuation shapes.
 
-Paths prioritised for refinement, in order:
+**2. Refine `BREAKDOWN_SHORT`**
+Mirror of VOLUME_SURGE_BREAKOUT on the short side. Dead-cat bounce zone too narrow, timing assumptions too rigid, fast bearish continuation misses. Widen geometry, relax over-stacked requirements, test against real bear market structure.
 
-1. **`VOLUME_SURGE_BREAKOUT`** — current implementation likely too narrow: breakout timing too specific, pullback zone too tight, RSI band too restrictive, FVG/orderblock requirement probably too hard in fast momentum environments. Widen valid geometry. Separate hard invalidation from soft confidence boost. Allow more realistic continuation shapes.
+**3. Refine `SR_FLIP_RETEST`**
+Conceptually strong but too dependent on textbook-clean retests. Real crypto structure is messier. Improve structural tolerance in retest identification. Relax rejection-candle requirements where SMC structural logic supports the entry without a perfect textbook candle.
 
-2. **`BREAKDOWN_SHORT`** — mirror of the above on the short side. Dead-cat bounce zone too narrow, timing assumptions too rigid, fast bearish continuation misses. Same approach: widen geometry, relax over-stacked requirements, test against real bear market structure.
-
-3. **`SR_FLIP_RETEST`** — conceptually strong but likely too dependent on textbook-clean retests. Real crypto structure is messier. Improve structural tolerance in retest identification. Relax rejection-candle requirements where SMC structural logic supports the entry without a perfect textbook candle. Test outcome with live diagnostics.
-
-4. **`WHALE_MOMENTUM` role review** — assess whether this path is a live signal producer or a theoretically interesting path that rarely survives. If it only fires under rare plumbing conditions and seldom produces wins, reclassify it explicitly as a premium specialist or supplemental boost path — not a core signal generator. Honest data required before any decision.
-
-Refinement does not mean random loosening. Every change must be traced to a specific observable failure mode identified in Stage A data. No speculative geometry relaxation without diagnostic evidence.
+**4. Review `WHALE_MOMENTUM` role**
+Assess honestly whether this path is a live signal producer or a theoretically interesting path that rarely survives gates. If it only fires under rare conditions and seldom produces wins, reclassify explicitly as a specialist or supplemental path. Live data required before any decision.
 
 ---
 
-#### Stage C — Downstream Integrity Audit
+#### Phase 2 — New Path Additions
 
-**Gate: Stage B refinements complete or at least one core path materially improved.**
+Add after Phase 1 establishes stable baseline quality for existing paths. Each new path is a full architecture citizen: registered in SetupClass, self-classifying, gate-compatible, family-scored, method-specific SL/TP, `/why`-diagnosable, and fully tested.
 
-**Goal:** Confirm that the entire signal pipeline from evaluator output to Telegram dispatch is working correctly end-to-end. Silent failures in downstream components can mask evaluator output that is actually correct.
+**5. Add `CONTINUATION_LIQUIDITY_SWEEP`**
+Natural SMC extension of the existing sweep reversal path. Setup: trend exists, local pullback sweeps liquidity, price reclaims in trend direction, continuation entry. Strong structural basis, clear invalidation, family-aware continuation gating. Likely the strongest system-fit new path.
 
-- **Confidence pipeline audit** — trace the full confidence computation path for each evaluator family: base score, family-weighted scoring (ARCH-10), soft penalties, gate adjustments. Confirm no phantom scoring suppressions and no confidence values being discarded or miscalculated downstream of the evaluator.
-- **Risk-plan and SL/TP integrity audit** — verify that method-specific SL/TP logic (ARCH-9) is applied correctly for each evaluator. Confirm that no path is falling through to a generic formula when a structural formula was intended. Trace SL placement logic for each family type against actual entry conditions.
-- **DCA / post-entry TP integrity audit** — confirm that DCA trigger logic and post-entry TP update behavior is consistent with the signal family that generated the entry. Family-aware TP must be tracked through the full post-entry lifecycle, not just at signal dispatch.
-- **Cooldown / correlation / suppression audit** — confirm that cooldown logic, cross-pair correlation suppression, and global gates are not over-suppressing valid evaluator output. Quantify the suppression rate per evaluator. Flag any evaluator that is being suppressed at a rate inconsistent with market conditions.
+**6. Add `POST_DISPLACEMENT_CONTINUATION`**
+Captures strong directional displacement followed by small consolidation/absorption and continuation breakout. Requires institutional re-acceleration after genuine displacement — volume, structure, and delta during consolidation must confirm continuation, not just price level.
 
----
-
-#### Stage D — New Path Additions (after refinement only)
-
-**Gate: Stages A–C complete. Live data confirms current paths are performing at their design intent. Real coverage gaps identified and documented.**
-
-**Goal:** Add only the path families that address structurally real and confirmed missing market behavior. These are not retail indicator paths. Each must be a full architecture citizen: registered in SetupClass, self-classifying, gate-compatible, family-scored, method-specific SL/TP, `/why`-diagnosable, and fully tested.
-
-Three paths are cleared for addition, in priority order:
-
-1. **`CONTINUATION_LIQUIDITY_SWEEP`** — natural SMC extension of the existing sweep reversal path. Setup: trend exists, local pullback occurs, liquidity below/above local swing is swept, price reclaims in trend direction, continuation entry. Strong structural basis, clear invalidation, family-aware continuation gating. Likely the strongest system-fit new path.
-
-2. **`POST_DISPLACEMENT_CONTINUATION`** — captures strong directional displacement followed by small consolidation/absorption and continuation breakout. This is broader and more rigorous than a simple "momentum chase" — it requires institutional-style re-acceleration after genuine displacement. Confirmation: volume, structure, and delta behavior during the consolidation phase must support continuation, not just price level.
-
-3. **`FAILED_AUCTION_RECLAIM`** — captures failed breakout / failed breakdown structures. Setup: price breaks an obvious level, acceptance fails, price reclaims prior structure, entry in the direction of reclaim. Clean invalidation, not oscillator-dependent, strong structural logic, well-suited to method-specific SL/TP and family scoring.
+**7. Add `FAILED_AUCTION_RECLAIM`**
+Captures failed breakout / failed breakdown structures. Price breaks obvious level, acceptance fails, price reclaims prior structure, entry in direction of reclaim. Clean invalidation, not oscillator-dependent, strong structural logic, method-specific SL/TP.
 
 No additional paths beyond these three are approved at this stage. Any further expansion requires a fresh architecture review with live diagnostic evidence.
 
 ---
 
-#### Stage E — Live Path Scorecard and Portfolio Rebalance
+#### Phase 3 — Portfolio Formalization and Tuning
 
-**Gate: Stages A–D complete or D in progress with at least one new path live.**
+**8. Formalize path portfolio roles**
+After new paths are live, assign each an explicit portfolio role: **core** (primary business signal generators), **support** (situational contribution), or **specialist** (low-frequency, high-quality edge cases). This drives future prioritisation and tuning decisions.
 
-**Goal:** Establish a structured, evidence-based view of the full path portfolio — not theoretical assessment but live performance data.
-
-- **Two-week live path scorecard** — per evaluator: candidate rate, emit rate, gate-block rate, post-dispatch outcome distribution (win/invalidated/expired), and confidence distribution at emit. Produced automatically from live data; Copilot reads and summarises at session start.
-- **Path portfolio rebalance by live evidence** — using scorecard data: confirm which paths are performing at design intent, which need further refinement, which are confirmed specialist paths (low frequency but high quality), and whether any path should be soft-disabled pending investigation. No path is auto-removed — but any path consistently producing zero quality outcomes is flagged and owner-alerted before any further build continues.
+**9. Path-by-path portfolio tuning**
+Evidence-based tuning per path using live output data — candidate rate, emit rate, gate-block rate, outcome distribution. No speculative adjustments without diagnostic evidence.
 
 ---
 
-#### Governing Philosophy for This Roadmap
+#### Governing Principles
 
-The following principles govern every stage. No stage overrides them.
-
-- **System and data first** — no path change and no new path is introduced without observable evidence. Theory is a starting point, not a conclusion.
-- **Architecture stability** — no sweeping refactors during active refinement phases. Change one thing at a time, verify, then continue.
-- **No uncontrolled evaluator sprawl** — the path set grows only when a confirmed structural gap is evidenced by live data. Conceptual diversity is not a reason to build.
-- **Observability-first** — if a thing cannot be diagnosed, it cannot be trusted. Instrumentation precedes all other work.
+- **Business-first, signal-quality-first** — path portfolio strength and business-grade signal generation are the primary objectives at every step.
+- **Architecture stability** — change one path at a time, verify, then continue. No sweeping refactors during active refinement phases.
+- **No uncontrolled evaluator sprawl** — the path set grows only when there is structural justification and a confirmed coverage gap. Conceptual diversity is not a reason to build.
 - **Family-aware scoring, gating, and SL/TP** — every path operates within the family-aware architecture established in ARCH-8 through ARCH-10. No path bypasses this.
+- **Evidence-led decisions** — every geometry change and new path addition must be traceable to an observable, specific reason.
+
+*(Prior Stage A–E observability-gated expansion sequence has been superseded by this business-first signal-engine direction. Observability instrumentation continues concurrently as background infrastructure.)*
 
 ---
 
-### 6.3 PR15 — Intelligence Layer
+### 6.3 Future Enhancement — Intelligence Layer
 
-**Gate: raise only after 2 weeks of confirmed live data with the current architecture.**
+**Gate: raise only after the Phase 1–2 signal-engine path sequence is complete and 2+ weeks of live path data are available.**
 
 Scope:
 - Symbol-specific PairProfile overrides (PAIR_OVERRIDES dict in config)
@@ -682,7 +653,7 @@ Scope:
 - Per-pair x regime confidence offsets
 - Extended performance metrics (Sharpe ratio, profit factor, expectancy, MFE/MAE per signal)
 
-### 6.4 PR16 — Self-Optimisation
+### 6.4 Future Enhancement — Self-Optimisation
 
 **Gate: raise only after 50+ live signals exist in performance history.**
 

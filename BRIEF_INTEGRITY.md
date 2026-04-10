@@ -8,22 +8,22 @@ Every Copilot session must check this file if OWNER_BRIEF.md appears short or co
 | Field | Value |
 |---|---|
 | Canonical redesign date | 2026-04-10 |
-| Line count | 768 |
+| Line count | 739 |
 | Minimum acceptable lines | 480 |
 | Format | Fresh canonical owner-operating manual (8-part structure) |
 | Verified by | Copilot + owner (mkmk749278) |
 
-## Important — Operating-Contract Upgrade Note (2026-04-10)
+## Important — Roadmap Refresh Note (2026-04-10)
 
-OWNER_BRIEF.md was **strengthened** on 2026-04-10 from its original 686-line canonical form
-into a stronger 768-line operating contract. This was a deliberate, owner-instructed upgrade
-to encode full technical ownership, proactive responsibility, best-system-first standards,
-interactive technical partnership, and anti-passivity rules into the canonical brief.
+OWNER_BRIEF.md was **updated** on 2026-04-10 (roadmap refresh) from its 768-line operating-contract form
+into a 739-line version. This was a deliberate, owner-instructed roadmap refresh to replace the stale
+Stage A–E observability-gated expansion sequence with the current business-first signal-engine path
+roadmap. The PR15 / PR16 sections were reframed as "Future Enhancement" items, removing the old PR
+implementation-map labeling.
 
-The upgrade preserved the full 8-part structure and all business rules (B1–B14). No content
-was removed. New sections 1.11–1.14 were added to Part I. Part II section 2.3, Part I sections
-1.1, 1.2, 1.8, and Part VIII were all strengthened. A new continuity companion file
-`docs/ACTIVE_CONTEXT.md` was added and referenced from the brief.
+The full 8-part structure is preserved. All business rules (B1–B14), hard limits, and operating-contract
+sections (Parts I–V, VII–VIII) are unchanged. Only Part VI section 6.2 and the 6.3/6.4 section titles
+were updated. `docs/ACTIVE_CONTEXT.md` Next PR Queue was updated to match the new roadmap sequence.
 
 ## Restoration Instructions
 
@@ -55,6 +55,6 @@ something went wrong and must be resolved before any work proceeds.
 ## Rule
 
 > OWNER_BRIEF.md must not be accidentally truncated between sessions.
-> The minimum threshold is 480 lines — approximately 62.5% of the current canonical length (768 lines).
+> The minimum threshold is 480 lines — approximately 65% of the current canonical length (739 lines).
 > Deliberate updates (including redesigns and upgrades) are permitted by explicit owner instruction only.
 > If the brief falls below 480 lines without a known redesign, treat it as corruption and restore immediately.
