@@ -511,8 +511,8 @@ class TestVolumeSurgeBreakoutRefinements:
     # ── Minimum data requirement ──────────────────────────────────────────
 
     def test_insufficient_data_returns_none(self):
-        """Fewer than 28 candles must return None."""
-        m5 = _make_surge_candles(n=25, breakout_offset=3)
+        """Fewer than 28 candles must return None (27 is the boundary)."""
+        m5 = _make_surge_candles(n=27, breakout_offset=3)
         candles = {"5m": m5}
         sig = self._call(candles, _surge_indicators(), _surge_smc())
         assert sig is None

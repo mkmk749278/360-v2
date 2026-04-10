@@ -45,6 +45,13 @@ _ADX_RANGING_FLOOR: float = 12.0
 # Multiplier applied to the pair-specific adx_min in RANGING/QUIET regimes.
 _ADX_RANGING_MULTIPLIER: float = 0.75
 
+# Regimes where fast momentum makes FVG/OB detection lag — the VOLUME_SURGE_BREAKOUT
+# path treats the FVG/OB requirement as a soft confidence contributor rather than a
+# hard gate in these regimes.
+_FAST_MOMENTUM_REGIMES: frozenset = frozenset({
+    "VOLATILE", "VOLATILE_UNSUITABLE", "BREAKOUT_EXPANSION", "STRONG_TREND",
+})
+
 
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
@@ -882,11 +889,11 @@ class ScalpChannel(BaseChannel):
             return None
 
         # Find the most recent breakout candle within the last 5 closed candles.
-        # Scanning newest-first so we prefer the candle closest to the current bar.
-        # Candle at -1 is still forming; closed candles occupy -2 through -6.
+        # Scans newest-first (i = -2, -3, -4, -5, -6) to prefer the candle
+        # closest to the current bar. Candle at -1 is still forming.
         breakout_candle_idx: Optional[int] = None
         breakout_vol = 0.0
-        for i in range(-2, -7, -1):  # -2, -3, -4, -5, -6
+        for i in range(-2, -7, -1):  # iterates -2, -3, -4, -5, -6
             if float(highs[i]) > swing_high_level:
                 breakout_candle_idx = i
                 breakout_vol = float(volumes[i])
@@ -939,9 +946,8 @@ class ScalpChannel(BaseChannel):
         orderblocks = smc_data.get("orderblocks", [])
         has_smc_context = bool(fvgs or orderblocks)
         fvg_penalty = 0.0
-        _fast_regimes = frozenset({"VOLATILE", "VOLATILE_UNSUITABLE", "BREAKOUT_EXPANSION", "STRONG_TREND"})
         if not has_smc_context:
-            if regime_upper not in _fast_regimes:
+            if regime_upper not in _FAST_MOMENTUM_REGIMES:
                 return None  # Hard gate in non-fast regimes (behaviour unchanged)
             fvg_penalty = 8.0  # Soft penalty in fast regimes instead of hard block
 
