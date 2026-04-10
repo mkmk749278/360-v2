@@ -637,6 +637,245 @@ class TestSLCap:
 
 
 # ---------------------------------------------------------------------------
+# PR-ARCH-9 — Family-aware TP / risk-plan refinement regression tests
+# ---------------------------------------------------------------------------
+
+
+def _risk_plan_for(setup: SetupClass, direction: Direction = Direction.LONG):
+    """Return a RiskAssessment for *setup* using standard test fixtures."""
+    sig = _signal(channel="360_SCALP", direction=direction)
+    return build_risk_plan(
+        signal=sig,
+        indicators=_indicators(),
+        candles={"5m": _candles()},
+        smc_data=_smc(direction),
+        setup=setup,
+        spread_pct=0.01,
+        channel="360_SCALP",
+    )
+
+
+class TestFamilyAwareTP:
+    """PR-ARCH-9: verify that TP targets are differentiated by setup family.
+
+    Each group assertion checks that:
+    - the family's tp1 distance from entry is within the expected ratio band
+    - tp2 > tp1 (multi-level structure preserved)
+    - the plan passes universal hard risk controls
+    """
+
+    # ── Mean-reversion / snap-back families ────────────────────────────────
+
+    @pytest.mark.parametrize("setup", [
+        SetupClass.LIQUIDATION_REVERSAL,
+        SetupClass.FUNDING_EXTREME_SIGNAL,
+    ])
+    def test_mean_reversion_tp1_is_tight(self, setup):
+        """Snap-back families must use tp1 ≈ 1.0R (tighter than trend families)."""
+        risk = _risk_plan_for(setup)
+        assert risk.passed, f"{setup.value} plan unexpectedly failed: {risk.reason}"
+        entry = 100.0
+        risk_dist = entry - risk.stop_loss
+        tp1_ratio = (risk.tp1 - entry) / risk_dist
+        assert tp1_ratio == pytest.approx(1.0, abs=0.05), (
+            f"{setup.value} tp1 ratio {tp1_ratio:.2f} deviates from expected 1.0R"
+        )
+        assert risk.tp2 > risk.tp1
+
+    def test_mean_reversion_tp1_tighter_than_trend(self):
+        """LIQUIDATION_REVERSAL tp1 must be closer to entry than TREND_PULLBACK_CONTINUATION."""
+        rev = _risk_plan_for(SetupClass.LIQUIDATION_REVERSAL)
+        trend = _risk_plan_for(SetupClass.TREND_PULLBACK_CONTINUATION)
+        assert rev.tp1 < trend.tp1, (
+            "Mean-reversion tp1 should be closer to entry than trend tp1"
+        )
+
+    # ── Measured-move breakout families ────────────────────────────────────
+
+    @pytest.mark.parametrize("setup", [
+        SetupClass.BREAKOUT_RETEST,
+        SetupClass.VOLUME_SURGE_BREAKOUT,
+        SetupClass.OPENING_RANGE_BREAKOUT,
+        SetupClass.QUIET_COMPRESSION_BREAK,
+        SetupClass.BREAKDOWN_SHORT,
+    ])
+    def test_breakout_tp1_is_extended(self, setup):
+        """Measured-move breakout families must use tp1 ≈ 1.5R (larger than default 1.3R)."""
+        risk = _risk_plan_for(setup)
+        assert risk.passed, f"{setup.value} plan unexpectedly failed: {risk.reason}"
+        entry = 100.0
+        risk_dist = entry - risk.stop_loss
+        tp1_ratio = (risk.tp1 - entry) / risk_dist
+        assert tp1_ratio == pytest.approx(1.5, abs=0.05), (
+            f"{setup.value} tp1 ratio {tp1_ratio:.2f} deviates from expected 1.5R"
+        )
+        assert risk.tp2 > risk.tp1
+        assert risk.tp3 is not None and risk.tp3 > risk.tp2
+
+    def test_breakout_tp1_larger_than_sweep_reversal(self):
+        """BREAKOUT_RETEST tp1 must be further than LIQUIDITY_SWEEP_REVERSAL tp1."""
+        bko = _risk_plan_for(SetupClass.BREAKOUT_RETEST)
+        sweep = _risk_plan_for(SetupClass.LIQUIDITY_SWEEP_REVERSAL)
+        assert bko.tp1 > sweep.tp1, (
+            "Breakout tp1 should extend further than sweep-reversal tp1"
+        )
+
+    # ── Divergence / swing continuation family ─────────────────────────────
+
+    def test_divergence_continuation_tp2_extended(self):
+        """DIVERGENCE_CONTINUATION tp2 must be further than default fallback tp2."""
+        div = _risk_plan_for(SetupClass.DIVERGENCE_CONTINUATION)
+        # default fallback uses 2.3R for tp2; DIVERGENCE uses 2.5R
+        assert div.passed, f"DIVERGENCE_CONTINUATION plan failed: {div.reason}"
+        entry = 100.0
+        risk_dist = entry - div.stop_loss
+        tp2_ratio = (div.tp2 - entry) / risk_dist
+        assert tp2_ratio == pytest.approx(2.5, abs=0.05), (
+            f"DIVERGENCE_CONTINUATION tp2 ratio {tp2_ratio:.2f} should be 2.5R"
+        )
+
+    # ── Whale / momentum families ───────────────────────────────────────────
+
+    def test_whale_momentum_tp1_aggressive(self):
+        """WHALE_MOMENTUM tp1 must be ≈ 1.5R (aggressive extension)."""
+        risk = _risk_plan_for(SetupClass.WHALE_MOMENTUM)
+        assert risk.passed, f"WHALE_MOMENTUM plan failed: {risk.reason}"
+        entry = 100.0
+        risk_dist = entry - risk.stop_loss
+        tp1_ratio = (risk.tp1 - entry) / risk_dist
+        assert tp1_ratio == pytest.approx(1.5, abs=0.05), (
+            f"WHALE_MOMENTUM tp1 ratio {tp1_ratio:.2f} should be 1.5R"
+        )
+
+    # ── Trend-following families ────────────────────────────────────────────
+
+    def test_trend_pullback_continuation_tp1_medium(self):
+        """TREND_PULLBACK_CONTINUATION tp1 must be ≈ 1.4R."""
+        risk = _risk_plan_for(SetupClass.TREND_PULLBACK_CONTINUATION)
+        assert risk.passed, f"TREND_PULLBACK_CONTINUATION plan failed: {risk.reason}"
+        entry = 100.0
+        risk_dist = entry - risk.stop_loss
+        tp1_ratio = (risk.tp1 - entry) / risk_dist
+        assert tp1_ratio == pytest.approx(1.4, abs=0.05), (
+            f"TREND_PULLBACK_CONTINUATION tp1 ratio {tp1_ratio:.2f} should be 1.4R"
+        )
+
+    def test_trend_pullback_ema_tp1_moderate(self):
+        """TREND_PULLBACK_EMA tp1 must be ≈ 1.3R (modest trend extension)."""
+        risk = _risk_plan_for(SetupClass.TREND_PULLBACK_EMA)
+        assert risk.passed, f"TREND_PULLBACK_EMA plan failed: {risk.reason}"
+        entry = 100.0
+        risk_dist = entry - risk.stop_loss
+        tp1_ratio = (risk.tp1 - entry) / risk_dist
+        assert tp1_ratio == pytest.approx(1.3, abs=0.05), (
+            f"TREND_PULLBACK_EMA tp1 ratio {tp1_ratio:.2f} should be 1.3R"
+        )
+
+    # ── Range / structured level families ──────────────────────────────────
+
+    def test_range_fade_tp1_conservative(self):
+        """RANGE_FADE tp1 must be ≈ 0.9R (conservative range fade)."""
+        risk = _risk_plan_for(SetupClass.RANGE_FADE)
+        assert risk.passed, f"RANGE_FADE plan failed: {risk.reason}"
+        entry = 100.0
+        risk_dist = entry - risk.stop_loss
+        tp1_ratio = (risk.tp1 - entry) / risk_dist
+        assert tp1_ratio == pytest.approx(0.9, abs=0.05), (
+            f"RANGE_FADE tp1 ratio {tp1_ratio:.2f} should be 0.9R"
+        )
+
+    def test_sr_flip_retest_tp1_structured(self):
+        """SR_FLIP_RETEST tp1 must be ≈ 1.2R (next structural level)."""
+        risk = _risk_plan_for(SetupClass.SR_FLIP_RETEST)
+        assert risk.passed, f"SR_FLIP_RETEST plan failed: {risk.reason}"
+        entry = 100.0
+        risk_dist = entry - risk.stop_loss
+        tp1_ratio = (risk.tp1 - entry) / risk_dist
+        assert tp1_ratio == pytest.approx(1.2, abs=0.05), (
+            f"SR_FLIP_RETEST tp1 ratio {tp1_ratio:.2f} should be 1.2R"
+        )
+
+    # ── Family ordering invariants ──────────────────────────────────────────
+
+    def test_tp1_ordering_mean_rev_lt_trend_lt_breakout(self):
+        """Family TP1 ordering: mean-reversion < trend < breakout (measured move)."""
+        mean_rev = _risk_plan_for(SetupClass.LIQUIDATION_REVERSAL)
+        trend = _risk_plan_for(SetupClass.TREND_PULLBACK_CONTINUATION)
+        breakout = _risk_plan_for(SetupClass.BREAKOUT_RETEST)
+        assert mean_rev.tp1 < trend.tp1 < breakout.tp1, (
+            f"Expected mean_rev.tp1 {mean_rev.tp1:.4f} < trend.tp1 {trend.tp1:.4f}"
+            f" < breakout.tp1 {breakout.tp1:.4f}"
+        )
+
+    # ── SHORT direction parity ──────────────────────────────────────────────
+
+    @pytest.mark.parametrize("setup", [
+        SetupClass.LIQUIDATION_REVERSAL,
+        SetupClass.TREND_PULLBACK_CONTINUATION,
+        SetupClass.BREAKOUT_RETEST,
+        SetupClass.DIVERGENCE_CONTINUATION,
+    ])
+    def test_short_tp_below_entry(self, setup):
+        """For SHORT signals, all TP levels must be below entry."""
+        risk = _risk_plan_for(setup, direction=Direction.SHORT)
+        assert risk.passed, f"{setup.value} SHORT plan failed: {risk.reason}"
+        assert risk.tp1 < 100.0, f"{setup.value} SHORT tp1 {risk.tp1} not below entry"
+        assert risk.tp2 < risk.tp1, f"{setup.value} SHORT tp2 should be lower than tp1"
+
+    # ── Universal hard controls remain enforced ─────────────────────────────
+
+    @pytest.mark.parametrize("setup", [
+        SetupClass.LIQUIDATION_REVERSAL,
+        SetupClass.BREAKOUT_RETEST,
+        SetupClass.DIVERGENCE_CONTINUATION,
+        SetupClass.WHALE_MOMENTUM,
+        SetupClass.TREND_PULLBACK_CONTINUATION,
+        SetupClass.RANGE_FADE,
+    ])
+    def test_sl_cap_enforced_for_all_families(self, setup):
+        """Universal SL cap (1.5% for SCALP) must be enforced regardless of family."""
+        sig = SimpleNamespace(
+            channel="360_SCALP",
+            direction=Direction.LONG,
+            entry=100.0,
+            stop_loss=95.0,
+            tp1=110.0,
+            tp2=120.0,
+            tp3=130.0,
+        )
+        wide_candles = {
+            "high": [110.0] * 60,
+            "low": [90.0] * 60,
+            "close": [100.0] * 60,
+            "volume": [1000.0] * 60,
+        }
+        wide_indicators = {
+            "5m": {
+                "ema9_last": 100.0,
+                "ema21_last": 100.0,
+                "atr_last": 0.5,
+                "momentum_last": 0.1,
+                "bb_upper_last": 110.0,
+                "bb_mid_last": 100.0,
+                "bb_lower_last": 90.0,
+            }
+        }
+        risk = build_risk_plan(
+            signal=sig,
+            indicators=wide_indicators,
+            candles={"5m": wide_candles},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            setup=setup,
+            spread_pct=0.01,
+            channel="360_SCALP",
+        )
+        sl_pct = abs(sig.entry - risk.stop_loss) / sig.entry
+        assert sl_pct <= 0.015 + 1e-9, (
+            f"{setup.value} SL pct {sl_pct:.4f} exceeds 1.5% cap"
+        )
+
+
+# ---------------------------------------------------------------------------
 # PR_09 — Composite Signal Scoring Engine tests
 # ---------------------------------------------------------------------------
 

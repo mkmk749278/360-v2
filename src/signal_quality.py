@@ -217,6 +217,14 @@ _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP_ORDERBLOCK": 1.0,
 }
 
+# Family-aware minimum R:R thresholds used in build_risk_plan().
+# Quick-exit families accept a lower first target because their trade thesis
+# resolves faster; trend / breakout families require a larger reward cushion.
+_MIN_RR_RANGE: float = 0.8           # Range rejection / range fade — BB or extreme fade
+_MIN_RR_MEAN_REVERSION: float = 0.9  # Snap-back / funding extreme — fast thesis resolution
+_MIN_RR_STRUCTURED: float = 1.0      # S/R flip retest — structural confirmation at level
+_MIN_RR_DEFAULT: float = 1.2         # All other families — standard minimum R:R
+
 
 @dataclass
 class PairQualityAssessment:
@@ -840,29 +848,100 @@ def build_risk_plan(
     bb_upper = _safe_float(primary.get("bb_upper_last"), signal.entry + risk)
     bb_lower = _safe_float(primary.get("bb_lower_last"), signal.entry - risk)
 
+    _is_long = signal.direction == Direction.LONG
+
     if setup == SetupClass.RANGE_REJECTION:
-        if signal.direction == Direction.LONG:
+        # Tight Bollinger-band-anchored exits — exits at mid and upper/lower band.
+        if _is_long:
             tp1 = max(signal.entry + risk * 0.9, bb_mid)
             tp2 = max(tp1 + risk * 0.4, bb_upper)
         else:
             tp1 = min(signal.entry - risk * 0.9, bb_mid)
             tp2 = min(tp1 - risk * 0.4, bb_lower)
         tp3 = None
+    elif setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL):
+        # Mean-reversion / snap-back families: take profit quickly before the
+        # reversal fades.  Tighter TP ratios reflect a short-lived, aggressive
+        # counter-trend move.
+        tp1 = signal.entry + risk * 1.0 if _is_long else signal.entry - risk * 1.0
+        tp2 = signal.entry + risk * 1.8 if _is_long else signal.entry - risk * 1.8
+        tp3 = signal.entry + risk * 2.5 if _is_long else signal.entry - risk * 2.5
     elif setup in (SetupClass.LIQUIDITY_SWEEP_REVERSAL, SetupClass.EXHAUSTION_FADE):
-        tp1 = signal.entry + risk * 1.2 if signal.direction == Direction.LONG else signal.entry - risk * 1.2
-        tp2 = signal.entry + risk * 2.1 if signal.direction == Direction.LONG else signal.entry - risk * 2.1
-        tp3 = signal.entry + risk * 3.0 if signal.direction == Direction.LONG else signal.entry - risk * 3.0
+        # Sweep + structural reversal: moderate 1.2/2.1/3.0 R cadence.
+        tp1 = signal.entry + risk * 1.2 if _is_long else signal.entry - risk * 1.2
+        tp2 = signal.entry + risk * 2.1 if _is_long else signal.entry - risk * 2.1
+        tp3 = signal.entry + risk * 3.0 if _is_long else signal.entry - risk * 3.0
+    elif setup == SetupClass.RANGE_FADE:
+        # Conservative fade at range extremes: quick first partial, short
+        # extension.  Mirrors RANGE_REJECTION philosophy but on rate-of-change.
+        tp1 = signal.entry + risk * 0.9 if _is_long else signal.entry - risk * 0.9
+        tp2 = signal.entry + risk * 1.5 if _is_long else signal.entry - risk * 1.5
+        tp3 = signal.entry + risk * 2.2 if _is_long else signal.entry - risk * 2.2
+    elif setup == SetupClass.SR_FLIP_RETEST:
+        # Support/resistance flip-retest: price confirmed flip, target the next
+        # structural level then extend toward prior range high/low.
+        tp1 = signal.entry + risk * 1.2 if _is_long else signal.entry - risk * 1.2
+        tp2 = signal.entry + risk * 2.0 if _is_long else signal.entry - risk * 2.0
+        tp3 = signal.entry + risk * 2.8 if _is_long else signal.entry - risk * 2.8
+    elif setup == SetupClass.TREND_PULLBACK_EMA:
+        # EMA pullback in trend direction: modest extension along the trend.
+        tp1 = signal.entry + risk * 1.3 if _is_long else signal.entry - risk * 1.3
+        tp2 = signal.entry + risk * 2.2 if _is_long else signal.entry - risk * 2.2
+        tp3 = signal.entry + risk * 3.2 if _is_long else signal.entry - risk * 3.2
+    elif setup == SetupClass.TREND_PULLBACK_CONTINUATION:
+        # Clean trend pullback: ride the trend with moderate extension targets.
+        tp1 = signal.entry + risk * 1.4 if _is_long else signal.entry - risk * 1.4
+        tp2 = signal.entry + risk * 2.4 if _is_long else signal.entry - risk * 2.4
+        tp3 = signal.entry + risk * 3.5 if _is_long else signal.entry - risk * 3.5
+    elif setup == SetupClass.DIVERGENCE_CONTINUATION:
+        # RSI/MACD divergence continuation swing: divergence resolves into
+        # an extended swing — targets run past normal ATR cadence.
+        tp1 = signal.entry + risk * 1.3 if _is_long else signal.entry - risk * 1.3
+        tp2 = signal.entry + risk * 2.5 if _is_long else signal.entry - risk * 2.5
+        tp3 = signal.entry + risk * 3.8 if _is_long else signal.entry - risk * 3.8
+    elif setup in (
+        SetupClass.BREAKOUT_RETEST,
+        SetupClass.VOLUME_SURGE_BREAKOUT,
+        SetupClass.OPENING_RANGE_BREAKOUT,
+        SetupClass.QUIET_COMPRESSION_BREAK,
+        SetupClass.BREAKDOWN_SHORT,
+    ):
+        # Measured-move breakout/breakdown families: breakout/breakdown should
+        # travel a full measured move — allow larger extensions than
+        # continuation plays.  BREAKDOWN_SHORT is the directional short
+        # equivalent of the upside breakout families.
+        tp1 = signal.entry + risk * 1.5 if _is_long else signal.entry - risk * 1.5
+        tp2 = signal.entry + risk * 2.8 if _is_long else signal.entry - risk * 2.8
+        tp3 = signal.entry + risk * 4.0 if _is_long else signal.entry - risk * 4.0
+    elif setup == SetupClass.WHALE_MOMENTUM:
+        # Large-block momentum: institutional order drives price impulsively;
+        # allow aggressive extension targets to ride the move.
+        tp1 = signal.entry + risk * 1.5 if _is_long else signal.entry - risk * 1.5
+        tp2 = signal.entry + risk * 2.5 if _is_long else signal.entry - risk * 2.5
+        tp3 = signal.entry + risk * 3.8 if _is_long else signal.entry - risk * 3.8
     elif setup == SetupClass.MOMENTUM_EXPANSION:
-        tp1 = signal.entry + risk * 1.4 if signal.direction == Direction.LONG else signal.entry - risk * 1.4
-        tp2 = signal.entry + risk * 2.2 if signal.direction == Direction.LONG else signal.entry - risk * 2.2
-        tp3 = signal.entry + risk * 3.2 if signal.direction == Direction.LONG else signal.entry - risk * 3.2
+        # Broad momentum expansion: strong directional move confirmed by ATR.
+        tp1 = signal.entry + risk * 1.4 if _is_long else signal.entry - risk * 1.4
+        tp2 = signal.entry + risk * 2.2 if _is_long else signal.entry - risk * 2.2
+        tp3 = signal.entry + risk * 3.2 if _is_long else signal.entry - risk * 3.2
     else:
-        tp1 = signal.entry + risk * 1.3 if signal.direction == Direction.LONG else signal.entry - risk * 1.3
-        tp2 = signal.entry + risk * 2.3 if signal.direction == Direction.LONG else signal.entry - risk * 2.3
-        tp3 = signal.entry + risk * 3.4 if signal.direction == Direction.LONG else signal.entry - risk * 3.4
+        # Fallback for remaining families (MULTI_STRATEGY_CONFLUENCE,
+        # BREAKDOWN_SHORT, and any future setups not yet classified).
+        tp1 = signal.entry + risk * 1.3 if _is_long else signal.entry - risk * 1.3
+        tp2 = signal.entry + risk * 2.3 if _is_long else signal.entry - risk * 2.3
+        tp3 = signal.entry + risk * 3.4 if _is_long else signal.entry - risk * 3.4
 
     r_multiple = round(abs(tp1 - signal.entry) / risk, 2) if risk else 0.0
-    min_rr = 0.9 if setup == SetupClass.RANGE_REJECTION else 1.2
+    # Family-aware minimum R:R threshold — quick-exit families accept a lower
+    # first target because the trade thesis resolves faster.
+    if setup in (SetupClass.RANGE_REJECTION, SetupClass.RANGE_FADE):
+        min_rr = _MIN_RR_RANGE
+    elif setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL):
+        min_rr = _MIN_RR_MEAN_REVERSION
+    elif setup == SetupClass.SR_FLIP_RETEST:
+        min_rr = _MIN_RR_STRUCTURED
+    else:
+        min_rr = _MIN_RR_DEFAULT
     passed = r_multiple >= min_rr
     reason = "" if passed else f"rr {r_multiple:.2f} below {min_rr:.2f}"
     # Sanity check: reject if SL or any TP is negative, or SL distance > 5% of entry
