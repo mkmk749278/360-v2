@@ -8,7 +8,7 @@ Every Copilot session must check this file if OWNER_BRIEF.md appears short or co
 | Field | Value |
 |---|---|
 | Canonical redesign date | 2026-04-10 |
-| Line count | 592 |
+| Line count | 686 |
 | Minimum acceptable lines | 420 |
 | Format | Fresh canonical owner-operating manual (8-part structure) |
 | Verified by | Copilot + owner (mkmk749278) |
