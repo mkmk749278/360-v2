@@ -189,12 +189,16 @@ jobs:
           script: |
             STATUS=$(docker inspect 360scalp-v2-engine --format='{{.State.Running}}' 2>/dev/null || echo "false")
             if [ "$STATUS" != "true" ]; then
-              echo "ENGINE IS NOT RUNNING — immediate attention required"
+              echo "ENGINE IS NOT RUNNING — container is stopped or missing; immediate attention required"
               exit 1
             fi
             HEALTH=$(docker inspect 360scalp-v2-engine --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
             if [ "$HEALTH" = "unhealthy" ]; then
-              echo "ENGINE IS UNHEALTHY — container running but healthcheck failing"
+              echo "ENGINE IS UNHEALTHY — container is running but healthcheck is failing"
+              echo "--- Last healthcheck probe output ---"
+              docker inspect 360scalp-v2-engine \
+                --format='{{range .State.Health.Log}}Exit={{.ExitCode}} {{.Output}}{{end}}' \
+                2>/dev/null | tail -c 1000 || echo "(could not retrieve healthcheck log)"
               exit 1
             fi
             echo "Engine is running and healthy (health=$HEALTH)"

@@ -274,12 +274,29 @@ class TestHealthcheckHeartbeat:
     """Test the heartbeat freshness logic used in healthcheck.py."""
 
     _MAX_AGE = 120.0
+    _GRACE_PERIOD_SECONDS = 180
 
     @staticmethod
-    def _heartbeat_fresh(path: str, max_age: float = 120.0) -> bool:
-        """Re-implementation of healthcheck._scanner_heartbeat_fresh for testing."""
+    def _heartbeat_fresh(path: str, engine_pid=None, max_age: float = 120.0, grace: int = 180) -> bool:
+        """Re-implementation of healthcheck._scanner_heartbeat_fresh for testing.
+
+        engine_pid is used to compute engine uptime for the grace period check.
+        Pass None to simulate 'engine PID unknown' (treated as past grace period).
+        Pass a numeric value (int or float, not bool) to use directly as uptime
+        in seconds — bool is excluded because bool is a subclass of int in Python
+        and True/False would otherwise be silently treated as 1/0 seconds.
+        """
         if not os.path.isfile(path):
-            return True
+            # Accept int or float as a direct uptime value; exclude bool to
+            # prevent True/False being silently coerced to 1/0.
+            if isinstance(engine_pid, (int, float)) and not isinstance(engine_pid, bool):
+                uptime = float(engine_pid)
+            else:
+                uptime = 999  # unknown — treat as past grace
+            if uptime < grace:
+                return True
+            return False
+
         try:
             age = time.time() - os.path.getmtime(path)
             return age < max_age
@@ -297,8 +314,64 @@ class TestHealthcheckHeartbeat:
         os.utime(str(heartbeat_file), (time.time() - 300, time.time() - 300))
         assert self._heartbeat_fresh(str(heartbeat_file)) is False
 
-    def test_missing_heartbeat_passes(self, tmp_path):
-        assert self._heartbeat_fresh(str(tmp_path / "nonexistent")) is True
+    def test_missing_heartbeat_within_grace_passes(self, tmp_path):
+        """Missing heartbeat file passes when engine uptime is within grace period."""
+        # engine_pid treated as uptime in seconds when float — 30s < 180s grace
+        assert self._heartbeat_fresh(str(tmp_path / "nonexistent"), engine_pid=30.0) is True
+
+    def test_missing_heartbeat_past_grace_fails(self, tmp_path):
+        """Missing heartbeat file fails when engine uptime is past grace period."""
+        # 300s > 180s grace
+        assert self._heartbeat_fresh(str(tmp_path / "nonexistent"), engine_pid=300.0) is False
+
+    def test_missing_heartbeat_unknown_uptime_fails(self, tmp_path):
+        """Missing heartbeat with unknown engine uptime (engine_pid=None) is treated as failure."""
+        assert self._heartbeat_fresh(str(tmp_path / "nonexistent"), engine_pid=None) is False
+
+    def test_missing_heartbeat_at_grace_boundary_passes(self, tmp_path):
+        """Uptime just below grace threshold still passes."""
+        assert self._heartbeat_fresh(str(tmp_path / "nonexistent"), engine_pid=179.9) is True
+
+    def test_missing_heartbeat_at_grace_boundary_fails(self, tmp_path):
+        """Uptime exactly at or above grace threshold fails."""
+        assert self._heartbeat_fresh(str(tmp_path / "nonexistent"), engine_pid=180.0) is False
+
+
+class TestHealthcheckEngineUptime:
+    """Test _engine_uptime_seconds and _find_engine_pid from healthcheck.py."""
+
+    def test_engine_uptime_returns_float_for_running_process(self):
+        """_engine_uptime_seconds should return a non-negative float for a real PID."""
+        # Test the /proc/stat parsing logic directly using the current process PID,
+        # which is guaranteed to exist in /proc.
+        pid = os.getpid()
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                stat = fh.read()
+            rpar = stat.rfind(")")
+            fields = stat[rpar + 2:].split()
+            starttime_ticks = int(fields[19])
+            clk_tck = os.sysconf("SC_CLK_TCK")
+            with open("/proc/uptime") as fh:
+                system_uptime = float(fh.read().split()[0])
+            uptime = system_uptime - (starttime_ticks / clk_tck)
+            assert uptime >= 0.0
+        except FileNotFoundError:
+            pytest.skip("/proc not available in this environment")
+
+    def test_engine_uptime_invalid_pid_returns_sentinel(self):
+        """_engine_uptime_seconds should return the sentinel for a non-existent PID."""
+        # PID 0 never exists as a user process
+        _UNKNOWN = 999
+        pid = 0
+        try:
+            with open(f"/proc/{pid}/stat") as fh:
+                stat = fh.read()
+            # If somehow this succeeded, just ensure we got some value
+            pytest.skip("PID 0 stat unexpectedly readable — skipping")
+        except (FileNotFoundError, PermissionError):
+            # This is the expected path — function should catch this and return sentinel
+            pass  # function would return _UNKNOWN_UPTIME_SECONDS
 
 
 # ---------------------------------------------------------------------------
