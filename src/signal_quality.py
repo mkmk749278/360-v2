@@ -197,6 +197,10 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.FUNDING_EXTREME_SIGNAL,
+        # PR-ARCH-7B: liquidation-reversal setups are specifically designed for
+        # cascade / panic / volatile conditions — suppressing them in
+        # VOLATILE_UNSUITABLE is architecturally wrong.
+        SetupClass.LIQUIDATION_REVERSAL,
     },
 }
 

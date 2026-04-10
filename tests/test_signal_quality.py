@@ -190,6 +190,50 @@ class TestRegimeSetupCompatibility:
             f"{setup_name} must be channel-compatible with 360_SCALP"
         )
 
+    # ── PR-ARCH-7B: LIQUIDATION_REVERSAL volatile compatibility ───────────────
+
+    def test_arch7b_liquidation_reversal_in_volatile_unsuitable_compat(self):
+        """LIQUIDATION_REVERSAL must appear in REGIME_SETUP_COMPATIBILITY[VOLATILE_UNSUITABLE]."""
+        from src.signal_quality import REGIME_SETUP_COMPATIBILITY
+        assert SetupClass.LIQUIDATION_REVERSAL in REGIME_SETUP_COMPATIBILITY[MarketState.VOLATILE_UNSUITABLE], (
+            "LIQUIDATION_REVERSAL must be in REGIME_SETUP_COMPATIBILITY[VOLATILE_UNSUITABLE] (PR-ARCH-7B)"
+        )
+
+    def test_arch7b_liquidation_reversal_regime_compatible_in_volatile(self):
+        """classify_setup() must return regime_compatible=True for LIQUIDATION_REVERSAL in VOLATILE_UNSUITABLE."""
+        signal = _signal(channel="360_SCALP")
+        signal.setup_class = "LIQUIDATION_REVERSAL"
+        setup = classify_setup(
+            "360_SCALP",
+            signal,
+            _indicators(),
+            {"sweeps": [], "mss": None, "fvg": [], "whale_alert": None, "volume_delta_spike": False},
+            MarketState.VOLATILE_UNSUITABLE,
+        )
+        assert setup.setup_class == SetupClass.LIQUIDATION_REVERSAL, (
+            f"LIQUIDATION_REVERSAL was remapped to {setup.setup_class!r} in VOLATILE_UNSUITABLE"
+        )
+        assert setup.regime_compatible is True, (
+            "LIQUIDATION_REVERSAL must be regime-compatible in VOLATILE_UNSUITABLE (PR-ARCH-7B)"
+        )
+
+    def test_arch7b_existing_volatile_setups_unchanged(self):
+        """Existing volatile-compatible setup classes must remain in REGIME_SETUP_COMPATIBILITY[VOLATILE_UNSUITABLE]."""
+        from src.signal_quality import REGIME_SETUP_COMPATIBILITY
+        expected = {
+            SetupClass.WHALE_MOMENTUM,
+            SetupClass.LIQUIDITY_SWEEP_REVERSAL,
+            SetupClass.VOLUME_SURGE_BREAKOUT,
+            SetupClass.BREAKDOWN_SHORT,
+            SetupClass.OPENING_RANGE_BREAKOUT,
+            SetupClass.FUNDING_EXTREME_SIGNAL,
+        }
+        actual = REGIME_SETUP_COMPATIBILITY[MarketState.VOLATILE_UNSUITABLE]
+        missing = expected - actual
+        assert not missing, (
+            f"Previously volatile-compatible setups were removed: {missing}"
+        )
+
 
 class TestExecutionAndRiskChecks:
     def test_overextended_entry_is_rejected(self):
