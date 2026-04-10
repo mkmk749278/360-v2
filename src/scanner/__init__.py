@@ -242,6 +242,9 @@ _SMC_GATE_EXEMPT_SETUPS: frozenset = frozenset({
     "LIQUIDATION_REVERSAL",
     "FUNDING_EXTREME_SIGNAL",
     "DIVERGENCE_CONTINUATION",
+    # Phase 2 — new path: displacement-based, not sweep-based; SMC score is
+    # structurally low for this path.
+    "POST_DISPLACEMENT_CONTINUATION",
 })
 
 # Setup classes whose signal thesis is NOT based on EMA alignment.

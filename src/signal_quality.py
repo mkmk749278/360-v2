@@ -35,6 +35,7 @@ class SetupClass(str, Enum):
     QUIET_COMPRESSION_BREAK = "QUIET_COMPRESSION_BREAK"
     DIVERGENCE_CONTINUATION = "DIVERGENCE_CONTINUATION"
     CONTINUATION_LIQUIDITY_SWEEP = "CONTINUATION_LIQUIDITY_SWEEP"
+    POST_DISPLACEMENT_CONTINUATION = "POST_DISPLACEMENT_CONTINUATION"
 
 
 class MarketState(str, Enum):
@@ -72,6 +73,7 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.QUIET_COMPRESSION_BREAK,
         SetupClass.DIVERGENCE_CONTINUATION,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+        SetupClass.POST_DISPLACEMENT_CONTINUATION,
     },
     "360_SCALP_FVG": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -138,6 +140,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.DIVERGENCE_CONTINUATION,
         SetupClass.LIQUIDATION_REVERSAL,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+        SetupClass.POST_DISPLACEMENT_CONTINUATION,
     },
     MarketState.WEAK_TREND: {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -154,6 +157,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.DIVERGENCE_CONTINUATION,
         SetupClass.LIQUIDATION_REVERSAL,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+        SetupClass.POST_DISPLACEMENT_CONTINUATION,
     },
     MarketState.CLEAN_RANGE: {
         SetupClass.RANGE_REJECTION,
@@ -189,6 +193,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.LIQUIDATION_REVERSAL,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+        SetupClass.POST_DISPLACEMENT_CONTINUATION,
     },
     MarketState.VOLATILE_UNSUITABLE: {
         # Whale-driven and liquidity-sweep signals are valid precisely in
@@ -586,6 +591,7 @@ def classify_setup(
         "DIVERGENCE_CONTINUATION",
         "SR_FLIP_RETEST",
         "CONTINUATION_LIQUIDITY_SWEEP",
+        "POST_DISPLACEMENT_CONTINUATION",
     })
     _sig_setup_class = getattr(signal, "setup_class", "")
     if _sig_setup_class in _SELF_CLASSIFYING:

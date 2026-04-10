@@ -102,11 +102,42 @@ _CLS_VALID_REGIMES: frozenset = frozenset({
 _CLS_SWEEP_WINDOW: int = 10
 # Sweep is "very recent" (strong recency bonus) when within this many candles.
 _CLS_SWEEP_RECENT: int = 5
+# CLS_SWEEP_RECENT: int = 5  (already defined above)
 # RSI hard/soft thresholds for the layered gate.
 _CLS_RSI_LONG_HARD_MAX: float = 80.0   # ≥ this → hard reject (overbought)
 _CLS_RSI_LONG_SOFT_MIN: float = 70.0   # ≥ this (< hard) → +6 soft penalty
 _CLS_RSI_SHORT_HARD_MIN: float = 20.0  # ≤ this → hard reject (oversold)
 _CLS_RSI_SHORT_SOFT_MAX: float = 30.0  # ≤ this (> hard) → +6 soft penalty
+
+# POST_DISPLACEMENT_CONTINUATION path constants.
+# Regimes where a displacement + consolidation + re-acceleration setup is valid.
+# VOLATILE/VOLATILE_UNSUITABLE: chaotic orderflow — displacement can't be reliably
+# identified as institutional (too much noise).  RANGING/QUIET: no directional
+# context means the "displacement" is really just a spike, not a sustained move.
+_PDC_VALID_REGIMES: frozenset = frozenset({
+    "TRENDING_UP", "TRENDING_DOWN", "STRONG_TREND", "WEAK_TREND",
+    "BREAKOUT_EXPANSION",
+})
+# Consolidation phase length: candles between the displacement candle and current.
+_PDC_CONSOL_MIN: int = 2   # Minimum — shorter = not yet consolidated
+_PDC_CONSOL_MAX: int = 5   # Maximum — longer = structure has dissipated
+# Displacement candle body must fill at least this fraction of the candle range.
+# Ensures only genuine directional displacement candles qualify (not wicky,
+# indecisive candles with a coincidental volume spike).
+_PDC_DISP_BODY_RATIO_MIN: float = 0.60
+# Displacement candle volume must be at least this multiple of the rolling average.
+# Ensures the displacement was driven by genuine institutional participation.
+_PDC_DISP_VOLUME_MULT: float = 2.5
+# Consolidation range as a fraction of the displacement body.
+# Tight consolidation = genuine absorption. Wide consolidation = continuation move
+# or chop, not absorption.
+_PDC_CONSOL_RANGE_MAX_RATIO: float = 0.50
+# RSI hard/soft thresholds for the layered gate (same pattern as WHALE_MOMENTUM
+# and CLS: hard reject only at true extremes; soft penalty in borderline zone).
+_PDC_RSI_LONG_HARD_MAX: float = 82.0   # ≥ this → hard reject (overbought)
+_PDC_RSI_LONG_SOFT_MIN: float = 72.0   # ≥ this (< hard) → +6 soft penalty
+_PDC_RSI_SHORT_HARD_MIN: float = 18.0  # ≤ this → hard reject (oversold)
+_PDC_RSI_SHORT_SOFT_MAX: float = 28.0  # ≤ this (> hard) → +6 soft penalty
 
 
 class ScalpChannel(BaseChannel):
@@ -201,6 +232,7 @@ class ScalpChannel(BaseChannel):
             self._evaluate_quiet_compression_break,
             self._evaluate_divergence_continuation,
             self._evaluate_continuation_liquidity_sweep,
+            self._evaluate_post_displacement_continuation,
         ):
             sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
             if sig is not None:
@@ -2507,6 +2539,330 @@ class ScalpChannel(BaseChannel):
 
         # Accumulate soft penalties — deducted from confidence post-PR09 by scanner
         total_penalty = rsi_penalty + fvg_ob_penalty + sweep_recency_penalty
+        if total_penalty > 0.0:
+            sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
+
+        return sig
+
+    # ------------------------------------------------------------------
+    # POST_DISPLACEMENT_CONTINUATION path (Phase 2, roadmap step 6)
+    # Strong displacement → tight absorption consolidation → re-acceleration.
+    # ------------------------------------------------------------------
+
+    def _evaluate_post_displacement_continuation(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """POST_DISPLACEMENT_CONTINUATION: re-acceleration after institutional displacement.
+
+        Setup logic:
+        1. A genuine displacement candle (high volume + strong directional body)
+           occurred 2–5 consolidation candles before the current bar.
+        2. Following the displacement, 2–5 tight-range candles formed a
+           consolidation (absorption phase): price holds within the displacement
+           territory while volume contracts — institutions absorbing retail orders.
+        3. Current close breaks beyond the consolidation range in the displacement
+           direction — the re-acceleration that confirms institutional continuation.
+        4. EMA9/EMA21 alignment must agree with the displacement direction (hard gate).
+        5. Regime must be a continuation/expansion context (hard gate).
+        6. RSI is not at exhaustion extremes (layered hard/soft gate).
+
+        This is distinct from VOLUME_SURGE_BREAKOUT (which fires on the initial
+        breakout + pullback) and CONTINUATION_LIQUIDITY_SWEEP (which requires a
+        stop-hunt sweep).  PDC fires specifically on the re-acceleration leg of a
+        two-phase institutional displacement move.
+
+        Structural SL is placed just beyond the consolidation range.  If price
+        re-enters the consolidation the re-acceleration thesis is invalidated.
+
+        Soft penalty contributors (do not hard-reject):
+        - RSI borderline (72-81 LONG / 19-28 SHORT): +6 pts
+        - No FVG or orderblock present: +7 pts
+        - Consolidation volume noisy (avg >= 1.5× displacement volume): +5 pts
+        """
+        # Hard block regimes where displacement + consolidation structure is not
+        # architecturally sound:
+        # - VOLATILE/VOLATILE_UNSUITABLE: chaotic orderflow makes displacement
+        #   identification unreliable (spikes vs. genuine institutional moves blur)
+        # - RANGING/QUIET: no directional context means "displacement" is just a
+        #   spike into noise, not a sustained institutional commitment
+        regime_upper = regime.upper() if regime else ""
+        if regime_upper not in _PDC_VALID_REGIMES:
+            return None
+
+        m5 = candles.get("5m")
+        if m5 is None or len(m5.get("close", [])) < 20:
+            return None
+
+        closes_raw = m5.get("close", [])
+        opens_raw = m5.get("open", [])
+        highs_raw = m5.get("high", [])
+        lows_raw = m5.get("low", [])
+        volumes_raw = m5.get("volume", [])
+
+        n = len(closes_raw)
+        if (n < 20 or len(opens_raw) < n
+                or len(highs_raw) < n or len(lows_raw) < n or len(volumes_raw) < n):
+            return None
+
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+            return None
+
+        ind = indicators.get("5m", {})
+        ema9 = ind.get("ema9_last")
+        ema21 = ind.get("ema21_last")
+        if ema9 is None or ema21 is None:
+            return None
+
+        # Direction from EMA alignment — displacement must agree with the trend
+        if ema9 > ema21:
+            direction = Direction.LONG
+        elif ema9 < ema21:
+            direction = Direction.SHORT
+        else:
+            return None  # EMAs converged — no trend direction
+
+        # Cross-validate direction against strongly stated directional regimes
+        if regime_upper == "TRENDING_DOWN" and direction == Direction.LONG:
+            return None  # EMA not aligned with the established downtrend
+        if regime_upper == "TRENDING_UP" and direction == Direction.SHORT:
+            return None  # EMA not aligned with the established uptrend
+
+        close = float(closes_raw[-1])
+        if close <= 0:
+            return None
+
+        # ADX gate: trend strength required for displacement to be valid
+        profile = smc_data.get("pair_profile")
+        thresholds = self._get_pair_adjusted_thresholds(profile)
+        adx_val = ind.get("adx_last")
+        if adx_val is not None and adx_val < thresholds["adx_min"]:
+            return None
+
+        # Rolling background volume average: computed from candles BEFORE the
+        # displacement + consolidation window.  Excluding the recent event candles
+        # prevents high consolidation volume from inflating the baseline and making
+        # the displacement look insufficiently strong.
+        # The worst case is a 5-candle consolidation + 1 displacement = 6 candles,
+        # so we exclude the last (_PDC_CONSOL_MAX + 2) candles from the average.
+        vol_bg_end = max(1, n - _PDC_CONSOL_MAX - 2)
+        vol_bg_start = max(0, vol_bg_end - 15)
+        vol_window = [float(v) for v in volumes_raw[vol_bg_start:vol_bg_end]]
+        if not vol_window or sum(vol_window) <= 0:
+            return None
+        avg_vol = sum(vol_window) / len(vol_window)
+
+        # ── Displacement + consolidation structure search ────────────────
+        # Iterate from shortest valid consolidation window to longest.
+        # For each consol_count, the displacement candle is exactly
+        # (consol_count + 1) positions back from current:
+        #   closes[-1]                    = current (re-acceleration bar)
+        #   closes[-2] … closes[-consol_count-1]  = consolidation phase
+        #   closes[-(consol_count+2)]     = displacement candle
+        displacement_found = None
+        for consol_count in range(_PDC_CONSOL_MIN, _PDC_CONSOL_MAX + 1):
+            d_back = consol_count + 1  # positions back from current to displacement
+            if d_back + 1 >= n:
+                continue  # Not enough history
+
+            # Absolute index of the displacement candle
+            d_abs = n - 1 - d_back
+
+            disp_open = float(opens_raw[d_abs])
+            disp_close_val = float(closes_raw[d_abs])
+            disp_high = float(highs_raw[d_abs])
+            disp_low = float(lows_raw[d_abs])
+            disp_vol = float(volumes_raw[d_abs])
+
+            disp_body = abs(disp_close_val - disp_open)
+            disp_range = disp_high - disp_low
+            if disp_range <= 0 or disp_body <= 0:
+                continue
+
+            # Displacement quality gates:
+            # 1. Strong directional body (≥ 60% of range) — no wicky indecisive candle
+            if disp_body / disp_range < _PDC_DISP_BODY_RATIO_MIN:
+                continue
+
+            # 2. Volume surge — institutional participation required
+            if disp_vol < avg_vol * _PDC_DISP_VOLUME_MULT:
+                continue
+
+            # 3. Direction agreement — displacement must be in the EMA/regime direction
+            disp_dir = Direction.LONG if disp_close_val > disp_open else Direction.SHORT
+            if disp_dir != direction:
+                continue
+
+            # ── Consolidation phase validation ───────────────────────────
+            # Consolidation candles occupy absolute indices [d_abs+1, d_abs+consol_count]
+            # (i.e., between displacement and current, exclusive of both).
+            consol_highs = [float(highs_raw[d_abs + 1 + i]) for i in range(consol_count)]
+            consol_lows = [float(lows_raw[d_abs + 1 + i]) for i in range(consol_count)]
+            consol_vols = [float(volumes_raw[d_abs + 1 + i]) for i in range(consol_count)]
+
+            consol_high = max(consol_highs)
+            consol_low = min(consol_lows)
+            consol_range = consol_high - consol_low
+
+            # Tight consolidation gate: range must be narrow relative to displacement body.
+            # Wide consolidation means the move has reversed or extended — not absorption.
+            if consol_range > disp_body * _PDC_CONSOL_RANGE_MAX_RATIO:
+                continue
+
+            # Territory gate: consolidation must remain within the displacement territory.
+            # For LONG: consolidation lows stay above the displacement open (price hasn't
+            # fully retraced the displacement body — still holding institutional gains).
+            # For SHORT: consolidation highs stay below the displacement open (price hasn't
+            # fully recovered — institutional sellers still in control).
+            if direction == Direction.LONG and consol_low < disp_open:
+                continue  # Consolidation gave back the full displacement body
+            if direction == Direction.SHORT and consol_high > disp_open:
+                continue  # Consolidation recovered the full displacement body
+
+            consol_avg_vol = sum(consol_vols) / len(consol_vols)
+            displacement_found = (
+                disp_high, disp_low, disp_body,
+                consol_high, consol_low, consol_avg_vol, disp_vol,
+            )
+            break
+
+        if displacement_found is None:
+            return None
+
+        disp_high, disp_low, disp_body, consol_high, consol_low, consol_avg_vol, disp_vol = (
+            displacement_found
+        )
+
+        # ── Re-acceleration breakout gate ───────────────────────────────
+        # Current close must have broken beyond the consolidation range in the
+        # displacement direction.  This is the defining moment of the setup.
+        if direction == Direction.LONG and close <= consol_high:
+            return None  # Not yet broken above consolidation ceiling
+        if direction == Direction.SHORT and close >= consol_low:
+            return None  # Not yet broken below consolidation floor
+
+        # ── RSI layered gate ─────────────────────────────────────────────
+        # Hard reject at true exhaustion extremes; soft penalty in borderline zone.
+        # Same layered pattern as WHALE_MOMENTUM and CLS.
+        rsi_val = ind.get("rsi_last")
+        rsi_penalty = 0.0
+        if rsi_val is not None:
+            if direction == Direction.LONG:
+                if rsi_val >= _PDC_RSI_LONG_HARD_MAX:
+                    return None  # Hard reject: extreme overbought exhaustion
+                if rsi_val >= _PDC_RSI_LONG_SOFT_MIN:
+                    rsi_penalty = 6.0
+            else:
+                if rsi_val <= _PDC_RSI_SHORT_HARD_MIN:
+                    return None  # Hard reject: extreme oversold exhaustion
+                if rsi_val <= _PDC_RSI_SHORT_SOFT_MAX:
+                    rsi_penalty = 6.0
+
+        # ── FVG / orderblock soft quality gate ───────────────────────────
+        # Absence is penalised, not hard-rejected.  In fast regimes SMC detection
+        # may lag; the displacement + consolidation structure is the primary
+        # confirmation and stands alone when structural context is absent.
+        fvgs = smc_data.get("fvg", [])
+        orderblocks = smc_data.get("orderblocks", [])
+        fvg_ob_penalty = 0.0 if (fvgs or orderblocks) else 7.0
+
+        # ── Consolidation volume quality penalty ─────────────────────────
+        # Clean absorption: consolidation average volume should be below the
+        # displacement candle volume.  If consolidation average >= 1.5× displacement
+        # volume, the "absorption" is actually active trading (chop or continuation),
+        # not the quiet institutional accumulation/distribution this path requires.
+        consol_vol_penalty = 0.0
+        if disp_vol > 0 and consol_avg_vol >= disp_vol * 1.5:
+            consol_vol_penalty = 5.0
+
+        # ── SL: just beyond the consolidation range (structural Type 1) ──
+        # If price returns into the consolidation the re-acceleration is failed.
+        atr_val = ind.get("atr_last", close * 0.002)
+        atr_buffer = atr_val * 0.3
+        if direction == Direction.LONG:
+            sl = consol_low - atr_buffer
+        else:
+            sl = consol_high + atr_buffer
+
+        sl_dist = abs(close - sl)
+        min_sl_dist = atr_val * 0.5
+        if sl_dist < min_sl_dist:
+            sl_dist = min_sl_dist
+            sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
+
+        if direction == Direction.LONG and sl >= close:
+            return None
+        if direction == Direction.SHORT and sl <= close:
+            return None
+
+        # ── TP: Measured move from displacement height (Type C) ───────────
+        # The displacement height captures the institutional move magnitude and
+        # projects the expected continuation.  Projected from the current close
+        # (re-acceleration entry point).
+        disp_height = disp_high - disp_low
+        if disp_height <= 0:
+            disp_height = sl_dist * 2.0
+
+        if direction == Direction.LONG:
+            tp1 = close + disp_height * 1.0
+            tp2 = close + disp_height * 1.5
+            tp3 = close + disp_height * 2.5
+        else:
+            tp1 = close - disp_height * 1.0
+            tp2 = close - disp_height * 1.5
+            tp3 = close - disp_height * 2.5
+
+        # Ensure minimum R:R geometry
+        if direction == Direction.LONG and tp1 <= close:
+            tp1 = close + sl_dist * 1.5
+        if direction == Direction.SHORT and tp1 >= close:
+            tp1 = close - sl_dist * 1.5
+        if direction == Direction.LONG and tp2 <= tp1:
+            tp2 = close + sl_dist * 2.5
+        if direction == Direction.SHORT and tp2 >= tp1:
+            tp2 = close - sl_dist * 2.5
+
+        _regime_ctx = smc_data.get("regime_context")
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=direction,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="PDC",
+            atr_val=atr_val,
+            setup_class="POST_DISPLACEMENT_CONTINUATION",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return None
+
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+
+        # Accumulate soft penalties — deducted from confidence post-PR09 by scanner
+        total_penalty = rsi_penalty + fvg_ob_penalty + consol_vol_penalty
         if total_penalty > 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
 
