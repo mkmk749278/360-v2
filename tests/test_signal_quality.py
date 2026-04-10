@@ -150,6 +150,46 @@ class TestRegimeSetupCompatibility:
         )
         assert setup.setup_class == SetupClass.QUIET_COMPRESSION_BREAK
 
+    # ── PR-ARCH-7A: enum membership regression ─────────────────────────────
+
+    @pytest.mark.parametrize("name", [
+        "LIQUIDATION_REVERSAL",
+        "TREND_PULLBACK_EMA",
+        "WHALE_MOMENTUM",
+        "DIVERGENCE_CONTINUATION",
+        "SR_FLIP_RETEST",
+    ])
+    def test_arch7a_setup_class_enum_membership(self, name):
+        """All five PR-ARCH-7A setup identities must exist in SetupClass enum."""
+        assert SetupClass[name].name == name
+
+    # ── PR-ARCH-7A: self-classifying preservation regression ───────────────
+
+    @pytest.mark.parametrize("setup_name,market_state", [
+        ("LIQUIDATION_REVERSAL", MarketState.STRONG_TREND),
+        ("TREND_PULLBACK_EMA", MarketState.STRONG_TREND),
+        ("WHALE_MOMENTUM", MarketState.STRONG_TREND),
+        ("DIVERGENCE_CONTINUATION", MarketState.STRONG_TREND),
+        ("SR_FLIP_RETEST", MarketState.STRONG_TREND),
+    ])
+    def test_arch7a_self_classifying_preserved(self, setup_name, market_state):
+        """Each PR-ARCH-7A setup class must be preserved by classify_setup() and not remapped."""
+        signal = _signal(channel="360_SCALP")
+        signal.setup_class = setup_name  # evaluators assign string values, matching _SELF_CLASSIFYING
+        setup = classify_setup(
+            "360_SCALP",
+            signal,
+            _indicators(),
+            {"sweeps": [], "mss": None, "fvg": [], "whale_alert": None, "volume_delta_spike": False},
+            market_state,
+        )
+        assert setup.setup_class == SetupClass[setup_name], (
+            f"{setup_name} was remapped to {setup.setup_class!r} — self-classifying identity corrupted"
+        )
+        assert setup.channel_compatible is True, (
+            f"{setup_name} must be channel-compatible with 360_SCALP"
+        )
+
 
 class TestExecutionAndRiskChecks:
     def test_overextended_entry_is_rejected(self):

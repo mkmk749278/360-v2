@@ -17,8 +17,10 @@ log = get_logger("signal_quality")
 
 class SetupClass(str, Enum):
     TREND_PULLBACK_CONTINUATION = "TREND_PULLBACK_CONTINUATION"
+    TREND_PULLBACK_EMA = "TREND_PULLBACK_EMA"
     BREAKOUT_RETEST = "BREAKOUT_RETEST"
     LIQUIDITY_SWEEP_REVERSAL = "LIQUIDITY_SWEEP_REVERSAL"
+    LIQUIDATION_REVERSAL = "LIQUIDATION_REVERSAL"
     RANGE_REJECTION = "RANGE_REJECTION"
     MOMENTUM_EXPANSION = "MOMENTUM_EXPANSION"
     EXHAUSTION_FADE = "EXHAUSTION_FADE"
@@ -53,8 +55,10 @@ class QualityTier(str, Enum):
 CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
     "360_SCALP": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
+        SetupClass.TREND_PULLBACK_EMA,
         SetupClass.BREAKOUT_RETEST,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
+        SetupClass.LIQUIDATION_REVERSAL,
         SetupClass.MOMENTUM_EXPANSION,
         SetupClass.WHALE_MOMENTUM,
         SetupClass.RANGE_FADE,
@@ -119,6 +123,7 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
 REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
     MarketState.STRONG_TREND: {
         SetupClass.TREND_PULLBACK_CONTINUATION,
+        SetupClass.TREND_PULLBACK_EMA,
         SetupClass.BREAKOUT_RETEST,
         SetupClass.MOMENTUM_EXPANSION,
         SetupClass.WHALE_MOMENTUM,
@@ -129,9 +134,11 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.DIVERGENCE_CONTINUATION,
+        SetupClass.LIQUIDATION_REVERSAL,
     },
     MarketState.WEAK_TREND: {
         SetupClass.TREND_PULLBACK_CONTINUATION,
+        SetupClass.TREND_PULLBACK_EMA,
         SetupClass.BREAKOUT_RETEST,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.WHALE_MOMENTUM,
@@ -142,6 +149,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.DIVERGENCE_CONTINUATION,
+        SetupClass.LIQUIDATION_REVERSAL,
     },
     MarketState.CLEAN_RANGE: {
         SetupClass.RANGE_REJECTION,
@@ -152,6 +160,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.QUIET_COMPRESSION_BREAK,
+        SetupClass.LIQUIDATION_REVERSAL,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -160,11 +169,13 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.QUIET_COMPRESSION_BREAK,
+        SetupClass.LIQUIDATION_REVERSAL,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
         SetupClass.MOMENTUM_EXPANSION,
         SetupClass.TREND_PULLBACK_CONTINUATION,
+        SetupClass.TREND_PULLBACK_EMA,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.WHALE_MOMENTUM,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
@@ -172,6 +183,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.FUNDING_EXTREME_SIGNAL,
+        SetupClass.LIQUIDATION_REVERSAL,
     },
     MarketState.VOLATILE_UNSUITABLE: {
         # Whale-driven and liquidity-sweep signals are valid precisely in
@@ -550,6 +562,12 @@ def classify_setup(
         "FUNDING_EXTREME_SIGNAL",
         "LIQUIDITY_SWEEP_REVERSAL",
         "QUIET_COMPRESSION_BREAK",
+        # PR-ARCH-7A: preserve evaluator-assigned setup identities
+        "LIQUIDATION_REVERSAL",
+        "TREND_PULLBACK_EMA",
+        "WHALE_MOMENTUM",
+        "DIVERGENCE_CONTINUATION",
+        "SR_FLIP_RETEST",
     })
     _sig_setup_class = getattr(signal, "setup_class", "")
     if _sig_setup_class in _SELF_CLASSIFYING:
