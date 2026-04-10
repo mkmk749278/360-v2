@@ -12,6 +12,13 @@ _HEARTBEAT_PATH = os.path.join(os.path.dirname(__file__), "data", "scanner_heart
 # Grace period: give the engine time to complete its first scan cycle before
 # treating a missing heartbeat file as a failure.
 _HEARTBEAT_GRACE_PERIOD_SECONDS = 180
+# Index of the starttime field in /proc/pid/stat after stripping "pid (comm) ".
+# Corresponds to field 22 in the kernel ABI (1-based).  We need at least this
+# many fields to be present before indexing.
+_STAT_STARTTIME_IDX = 19
+_STAT_MIN_FIELDS = 20
+# Byte offset past ") " that separates the comm field from the remaining fields.
+_STAT_AFTER_COMM_OFFSET = 2
 # Sentinel used when engine uptime cannot be determined — treated as "old
 # enough to have produced a heartbeat" so that a missing file is treated as a
 # real failure rather than hiding bugs.
@@ -63,11 +70,11 @@ def _engine_uptime_seconds(pid: int) -> float:
         # Fields after ')': state ppid pgrp session tty_nr tpgid flags
         #   minflt cminflt majflt cmajflt utime stime cutime cstime
         #   priority nice num_threads itrealvalue starttime …
-        # starttime is at index 19 (0-based) in this slice.
-        fields = stat[rpar + 2:].split()
-        if len(fields) < 20:
+        # starttime is at index _STAT_STARTTIME_IDX (0-based) in this slice.
+        fields = stat[rpar + _STAT_AFTER_COMM_OFFSET:].split()
+        if len(fields) < _STAT_MIN_FIELDS:
             return _UNKNOWN_UPTIME_SECONDS
-        starttime_ticks = int(fields[19])
+        starttime_ticks = int(fields[_STAT_STARTTIME_IDX])
         clk_tck = os.sysconf("SC_CLK_TCK")
         with open("/proc/uptime") as fh:
             system_uptime = float(fh.read().split()[0])
