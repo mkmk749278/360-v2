@@ -545,3 +545,268 @@ class TestVolumeSurgeBreakoutRefinements:
         sig = self._call(candles, _surge_indicators(), _surge_smc())
         assert sig is not None
         assert sig.tp1 > sig.entry
+
+
+# ---------------------------------------------------------------------------
+# BREAKDOWN_SHORT refinement tests
+# ---------------------------------------------------------------------------
+
+def _make_breakdown_candles(n=60, breakdown_offset=3):
+    """Build candle data that satisfies the BREAKDOWN_SHORT conditions.
+
+    Layout (all indices relative to the final candle, i.e. candle[-1]):
+    - Candles at [-26:-6]: prices around 100–101 range, average volume 1000
+    - Candle at -breakdown_offset: low of 97 (breaks swing low ~100.0), volume 3000
+    - Current candle [-1]: close=100.4 (about 0.4% above swing low 100.0)
+      with surge volume 4500 (> 3× the inflated rolling average of ~1285)
+    """
+    swing_low = 100.0
+    closes = np.ones(n) * 100.4
+    highs  = np.ones(n) * 101.5
+    lows   = np.ones(n) * swing_low
+    vols   = np.ones(n) * 1000.0
+
+    # Create a detectable breakdown candle at the given offset from the end
+    idx = n - breakdown_offset
+    lows[idx] = 97.0   # clearly below prior swing low 100.0
+    vols[idx]  = 3000.0  # 3× rolling average → passes 2× breakdown threshold
+
+    # Current candle: surge volume, close above swing low for dead-cat bounce.
+    # Because the breakdown candle (3000) is within the rolling window, the
+    # inflated avg is ~1285; 4500 > 3×1285 = 3857 so the check passes.
+    closes[-1] = 100.4   # 0.4% above swing low 100.0 (premium zone 0.3%–0.6%)
+    highs[-1]  = 101.0
+    vols[-1]   = 4500.0
+
+    return {
+        "open":   closes - 0.1,
+        "high":   highs,
+        "low":    lows,
+        "close":  closes,
+        "volume": vols,
+    }
+
+
+def _breakdown_indicators(rsi_val=38.0, ema9=98.0, ema21=100.0):
+    """Indicators suitable for BREAKDOWN_SHORT: EMA9 < EMA21 (bearish alignment)."""
+    return {"5m": _make_indicators(rsi_val=rsi_val, ema9=ema9, ema21=ema21)}
+
+
+def _breakdown_smc(with_fvg=True):
+    smc: dict = {}
+    if with_fvg:
+        smc["fvg"] = [{"top": 100.5, "bottom": 100.0, "type": "bearish"}]
+    return smc
+
+
+class TestBreakdownShortRefinements:
+    """Tests for the refined BREAKDOWN_SHORT path."""
+
+    def _call(self, candles, indicators, smc_data, regime="TRENDING_DOWN"):
+        ch = ScalpChannel()
+        return ch._evaluate_breakdown_short(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime=regime,
+        )
+
+    # ── Happy path ────────────────────────────────────────────────────────
+
+    def test_signal_fires_on_valid_breakdown_at_minus3(self):
+        """Original breakdown position candle[-3] still fires correctly."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is not None
+        assert sig.setup_class == "BREAKDOWN_SHORT"
+        assert sig.direction == Direction.SHORT
+
+    def test_signal_fires_on_breakdown_at_minus4(self):
+        """Breakdown at candle[-4]: timing tolerance — was a hard miss in original code."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=4)}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is not None, "Breakdown 4 candles ago should now be accepted."
+
+    def test_signal_fires_on_breakdown_at_minus5(self):
+        """Breakdown at candle[-5]: timing tolerance — was a hard miss in original code."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=5)}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is not None, "Breakdown 5 candles ago should now be accepted."
+
+    # ── Timing hard boundary ─────────────────────────────────────────────
+
+    def test_no_signal_when_breakdown_too_old(self):
+        """Breakdown at candle[-7] (outside 5-candle window) must be rejected."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=7)}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is None, "Breakdown older than 5 candles must be rejected."
+
+    # ── Dead-cat bounce zone ─────────────────────────────────────────────
+
+    def test_premium_bounce_zone_has_no_soft_penalty(self):
+        """Bounce in premium zone (0.3%–0.6%) carries zero soft penalty.
+
+        The quality distinction between premium and extended zones is expressed
+        via the soft_penalty_total system (scanner deducts post-PR09), not via
+        evaluator-level confidence mutations, which are overwritten by the pipeline.
+        """
+        m5 = _make_breakdown_candles(n=60, breakdown_offset=3)
+        swing_low = 100.0
+        # 0.45% above swing_low: inside premium zone (0.3%–0.6%)
+        m5["close"][-1] = swing_low * (1 + 0.0045)
+        candles = {"5m": m5}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is not None
+        # Premium zone with FVG present: no bounce penalty, no FVG penalty
+        assert sig.soft_penalty_total == 0.0
+
+    def test_shallow_bounce_accepted_with_soft_penalty(self):
+        """Bounce of 0.2% (below premium zone 0.3%–0.6%) is accepted with soft penalty."""
+        m5 = _make_breakdown_candles(n=60, breakdown_offset=3)
+        swing_low = 100.0
+        # 0.2% above swing_low: in extended zone (0.1%–0.3%)
+        m5["close"][-1] = swing_low * (1 + 0.002)
+        candles = {"5m": m5}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is not None, "Shallow bounce (0.2%) should be accepted."
+        assert sig.soft_penalty_total > 0.0, "Shallow bounce should carry a soft penalty."
+
+    def test_upper_extended_bounce_accepted_with_soft_penalty(self):
+        """Bounce of 0.65% (above premium zone, within extended zone) carries soft penalty."""
+        m5 = _make_breakdown_candles(n=60, breakdown_offset=3)
+        swing_low = 100.0
+        # 0.65% above swing_low — still below SL (0.8% above), valid entry
+        m5["close"][-1] = swing_low * (1 + 0.0065)
+        candles = {"5m": m5}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is not None, "Upper extended bounce (0.65%) should be accepted."
+        assert sig.soft_penalty_total > 0.0, "Upper extended bounce should carry soft penalty."
+
+    def test_bounce_exceeding_0_75pct_rejected(self):
+        """Bounce > 0.75% is rejected (sl ≤ close, or explicit upper bound check)."""
+        m5 = _make_breakdown_candles(n=60, breakdown_offset=3)
+        swing_low = 100.0
+        # 0.9% above swing_low → close (100.9) > sl (100.8) → rejected
+        m5["close"][-1] = swing_low * (1 + 0.009)
+        candles = {"5m": m5}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is None, "Bounce beyond 0.75% must be rejected."
+
+    def test_price_at_or_below_swing_low_rejected(self):
+        """Price at/below swing low (no bounce yet) must be rejected."""
+        m5 = _make_breakdown_candles(n=60, breakdown_offset=3)
+        swing_low = 100.0
+        m5["close"][-1] = swing_low - 0.5  # still below swing low
+        candles = {"5m": m5}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is None, "Price below swing low (no bounce) must be rejected."
+
+    # ── RSI ─────────────────────────────────────────────────────────────
+
+    def test_rsi_56_accepted_with_soft_penalty(self):
+        """RSI = 56 (borderline above optimal zone 28–55) is accepted with a soft penalty."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(candles, _breakdown_indicators(rsi_val=56.0), _breakdown_smc())
+        assert sig is not None, "RSI 56 should be accepted (borderline, not hard-blocked)."
+        assert sig.soft_penalty_total >= 5.0
+
+    def test_rsi_65_accepted_with_soft_penalty(self):
+        """RSI = 65 (near upper hard limit 68) is accepted with a soft penalty."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(candles, _breakdown_indicators(rsi_val=65.0), _breakdown_smc())
+        assert sig is not None, "RSI 65 should be accepted (below hard limit of 68)."
+        assert sig.soft_penalty_total >= 5.0
+
+    def test_rsi_69_hard_rejected(self):
+        """RSI = 69 (above hard limit of 68) must be hard-rejected."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(candles, _breakdown_indicators(rsi_val=69.0), _breakdown_smc())
+        assert sig is None, "RSI above 68 must be hard-rejected."
+
+    def test_rsi_19_hard_rejected(self):
+        """RSI = 19 (below hard limit of 20) must be hard-rejected."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(candles, _breakdown_indicators(rsi_val=19.0), _breakdown_smc())
+        assert sig is None, "RSI below 20 must be hard-rejected."
+
+    def test_rsi_22_accepted_with_soft_penalty(self):
+        """RSI = 22 (borderline below optimal zone 28–55) is accepted with a soft penalty."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(candles, _breakdown_indicators(rsi_val=22.0), _breakdown_smc())
+        assert sig is not None, "RSI 22 should be accepted (borderline, not hard-blocked)."
+        assert sig.soft_penalty_total >= 5.0
+
+    # ── FVG / orderblock in fast vs. calm regimes ────────────────────────
+
+    def test_no_fvg_ob_hard_rejected_in_calm_regime(self):
+        """Without FVG or OB, signal is rejected in a non-fast regime."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(
+            candles, _breakdown_indicators(), _breakdown_smc(with_fvg=False), regime="RANGING",
+        )
+        assert sig is None, "Missing FVG/OB must hard-block in non-fast regimes."
+
+    def test_no_fvg_ob_accepted_with_penalty_in_volatile_regime(self):
+        """Without FVG or OB, signal passes with soft penalty in VOLATILE regime."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(
+            candles, _breakdown_indicators(), _breakdown_smc(with_fvg=False), regime="VOLATILE",
+        )
+        assert sig is not None, "Missing FVG/OB should NOT hard-block in VOLATILE regime."
+        assert sig.soft_penalty_total >= 8.0
+
+    def test_no_fvg_ob_accepted_with_penalty_in_trending_down(self):
+        """Without FVG or OB, signal passes with soft penalty in TRENDING_DOWN regime."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(
+            candles, _breakdown_indicators(), _breakdown_smc(with_fvg=False), regime="TRENDING_DOWN",
+        )
+        assert sig is not None, "Missing FVG/OB should NOT hard-block in TRENDING_DOWN regime."
+        assert sig.soft_penalty_total >= 8.0
+
+    def test_fvg_present_reduces_soft_penalty_vs_absent(self):
+        """FVG presence yields a lower soft_penalty_total than absent FVG (fast regime).
+
+        The evaluator-level sig.confidence is overwritten by the scanner's PR09 composite
+        engine, so quality differentiation must be expressed via soft_penalty_total.
+        FVG absent → +8.0 soft penalty; FVG present → 0.0 FVG penalty.
+        """
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        ind = _breakdown_indicators()
+        sig_with_fvg = self._call(candles, ind, _breakdown_smc(with_fvg=True),  regime="VOLATILE")
+        sig_no_fvg   = self._call(candles, ind, _breakdown_smc(with_fvg=False), regime="VOLATILE")
+        assert sig_with_fvg is not None and sig_no_fvg is not None
+        assert sig_no_fvg.soft_penalty_total >= 8.0, \
+            "Absent FVG in fast regime must accumulate ≥8.0 soft penalty."
+        assert sig_with_fvg.soft_penalty_total < sig_no_fvg.soft_penalty_total, \
+            "FVG present should carry a lower soft penalty than absent FVG."
+
+    # ── Quiet regime blocked ─────────────────────────────────────────────
+
+    def test_quiet_regime_hard_blocked(self):
+        """QUIET regime must always return None."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc(), regime="QUIET")
+        assert sig is None
+
+    # ── Minimum data requirement ──────────────────────────────────────────
+
+    def test_insufficient_data_returns_none(self):
+        """Fewer than 28 candles must return None (27 is the boundary)."""
+        m5 = _make_breakdown_candles(n=27, breakdown_offset=3)
+        candles = {"5m": m5}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is None
+
+    # ── SL/TP geometry ───────────────────────────────────────────────────
+
+    def test_sl_above_entry_on_valid_signal(self):
+        """Stop loss must be strictly above the entry price (short direction)."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is not None
+        assert sig.stop_loss > sig.entry
+
+    def test_tp1_below_entry_on_valid_signal(self):
+        """TP1 must be strictly below the entry price (short direction)."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is not None
+        assert sig.tp1 < sig.entry

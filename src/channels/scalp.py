@@ -52,6 +52,14 @@ _FAST_MOMENTUM_REGIMES: frozenset = frozenset({
     "VOLATILE", "VOLATILE_UNSUITABLE", "BREAKOUT_EXPANSION", "STRONG_TREND",
 })
 
+# Regimes where fast bearish momentum makes FVG/OB detection lag — the BREAKDOWN_SHORT
+# path treats the FVG/OB requirement as a soft confidence contributor rather than a
+# hard gate in these regimes.  Superset of _FAST_MOMENTUM_REGIMES with TRENDING_DOWN
+# added because that regime is the primary fast bearish continuation environment.
+_FAST_BEARISH_REGIMES: frozenset = frozenset({
+    "VOLATILE", "VOLATILE_UNSUITABLE", "BREAKOUT_EXPANSION", "STRONG_TREND", "TRENDING_DOWN",
+})
+
 
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
@@ -1045,27 +1053,48 @@ class ScalpChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
-        """BREAKDOWN_SHORT path: price breaks swing low on surge volume then dead-cat bounces."""
+        """BREAKDOWN_SHORT path: price breaks swing low on surge volume then dead-cat bounces.
+
+        Refinements vs. original:
+        - Breakdown search window extended from exactly candle[-3] to the last 5 closed
+          candles, accommodating 1–4 candle timing variation common in live crypto.
+        - Dead-cat bounce zone corrected from 0.5%–2.0% to 0.1%–0.75%.  The original
+          2.0% upper bound was internally impossible: the structural SL sits 0.8% above
+          the swing low, so any bounce > 0.8% fails the sl > close constraint silently.
+          The new explicit upper bound of 0.75% makes the valid window clear.  The lower
+          bound is widened from 0.5% to 0.1% to accept shallow-sprint entries that the
+          original wrongly rejected.  Premium zone 0.3%–0.6% captures textbook dead-cat
+          geometry; the extended zone (0.1%–0.3% and 0.6%–0.75%) applies a soft penalty.
+        - RSI hard gate relaxed from 28–55 to 20–68.  Borderline values (20–27 or 56–68)
+          attract a soft penalty rather than a hard block, because dead-cat bounces
+          routinely push RSI to 55–68 before bearish continuation resumes.
+        - FVG / orderblock requirement converted to a soft confidence contributor in
+          fast-bearish regimes (VOLATILE, TRENDING_DOWN, BREAKOUT_EXPANSION, STRONG_TREND)
+          where SMC detection may lag fast price action.  Remains a hard gate in calmer
+          regimes.
+        - Breakdown-candle volume check now uses the actual breakdown candle's volume
+          rather than always checking volumes[-3].
+        """
         # Block only in QUIET — breakdown setups need volume, which QUIET lacks.
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "QUIET":
             return None
 
         m5 = candles.get("5m")
-        if m5 is None or len(m5.get("close", [])) < 25:
+        if m5 is None or len(m5.get("close", [])) < 28:
             return None
 
         closes = m5.get("close", [])
         lows = m5.get("low", [])
         highs = m5.get("high", [])
         volumes = m5.get("volume", [])
-        if len(closes) < 25 or len(lows) < 25 or len(volumes) < 10:
+        if len(closes) < 28 or len(lows) < 28 or len(volumes) < 10:
             return None
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
             return None
 
-        # Rolling 7-candle average
+        # Rolling 7-candle average (last 7 complete candles, not current)
         rolling_vols = [float(v) for v in volumes[-8:-1]]
         if len(rolling_vols) < 7 or sum(rolling_vols) <= 0:
             return None
@@ -1077,44 +1106,80 @@ class ScalpChannel(BaseChannel):
         if current_vol < SURGE_VOLUME_MULTIPLIER * rolling_avg:
             return None
 
-        # Swing low (20-candle) and breakdown in last 3 candles
-        swing_low_level = min(float(l) for l in lows[-23:-3])
+        # Swing low: 20-candle lookback from before the 5-candle breakdown search window.
+        # Excluding the search window ensures swing_low is set by genuine prior support,
+        # not by the candles we are testing as the breakdown event itself.
+        # Layout: [...swing_low window (20)│breakdown search (5)│current (1)]
+        #          lows[-26:-6]             lows[-6:-1]           lows[-1]
+        swing_low_level = min(float(l) for l in lows[-26:-6])
         if swing_low_level <= 0:
             return None
 
-        # Check that the breakdown candle broke below the swing low
-        breakdown_candle_low = float(lows[-3])
-        if breakdown_candle_low >= swing_low_level:
+        # Find the most recent breakdown candle within the last 5 closed candles.
+        # Scans newest-first (i = -2, -3, -4, -5, -6) to prefer the candle
+        # closest to the current bar. Candle at -1 is still forming.
+        breakdown_candle_idx: Optional[int] = None
+        breakdown_vol = 0.0
+        for i in range(-2, -7, -1):  # iterates -2, -3, -4, -5, -6
+            if float(lows[i]) < swing_low_level:
+                breakdown_candle_idx = i
+                breakdown_vol = float(volumes[i])
+                break
+
+        if breakdown_candle_idx is None:
             return None
 
-        # Current close is 0.5%–2.0% ABOVE the swing low (dead-cat bounce zone)
+        # Dead-cat bounce zone: current close is above the swing low (bounce from breakdown).
+        # Lower bound: 0.1% ensures a genuine micro-bounce has occurred above the broken
+        # support level rather than price still pressing at the low.
+        # Upper bound: 0.75% — the structural SL is 0.8% above swing_low, so bounces
+        # beyond 0.75% leave sl ≤ close (checked explicitly below), making this bound
+        # consistent with the SL placement.
+        # Premium zone (0.3%–0.6%) captures textbook dead-cat geometry; earns no penalty.
+        # Extended zone (0.1%–0.3% and 0.6%–0.75%) applies a soft penalty.
         close = float(closes[-1])
         if close <= 0:
             return None
         dist_from_swing_pct = (close - swing_low_level) / swing_low_level * 100.0
-        if not (0.5 <= dist_from_swing_pct <= 2.0):
+        if not (0.1 <= dist_from_swing_pct <= 0.75):
             return None
+        bounce_in_premium_zone = (0.3 <= dist_from_swing_pct <= 0.6)
+        bounce_penalty = 0.0 if bounce_in_premium_zone else 3.0
 
-        # EMA9 < EMA21
+        # EMA9 < EMA21 (trend alignment, hard gate unchanged)
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
         if ema9 is None or ema21 is None or ema9 >= ema21:
             return None
 
-        # RSI between 28–55
+        # RSI — layered soft/hard gate replacing the previous hard gate of 28–55.
+        # Hard block below 20 (full capitulation, no tradeable dead-cat bounce) or
+        # above 68 (too bullish, bearish continuation thesis breaks down).
+        # Borderline 20–27 or 56–68 attracts a soft penalty; optimal 28–55 passes
+        # with no adjustment.
         rsi_val = ind.get("rsi_last")
-        if rsi_val is not None and not (28 <= rsi_val <= 55):
-            return None
+        rsi_penalty = 0.0
+        if rsi_val is not None:
+            if rsi_val < 20.0 or rsi_val > 68.0:
+                return None
+            elif not (28.0 <= rsi_val <= 55.0):
+                rsi_penalty = 5.0
 
-        # At least one FVG or orderblock in smc_data
+        # FVG / orderblock — soft confidence contributor in fast-bearish regimes where
+        # SMC detection may lag price.  Hard gate in calmer regimes preserves structural
+        # quality requirements without globally softening the path.
         fvgs = smc_data.get("fvg", [])
         orderblocks = smc_data.get("orderblocks", [])
-        if not (fvgs or orderblocks):
-            return None
+        has_smc_context = bool(fvgs or orderblocks)
+        fvg_penalty = 0.0
+        if not has_smc_context:
+            if regime_upper not in _FAST_BEARISH_REGIMES:
+                return None  # Hard gate in non-fast regimes (behaviour unchanged)
+            fvg_penalty = 8.0  # Soft penalty in fast regimes instead of hard block
 
-        # Breakdown candle volume ≥ 2.0 × rolling average
-        breakdown_vol = float(volumes[-3]) if len(volumes) >= 3 else 0.0
+        # Breakdown candle volume ≥ 2.0 × rolling average (unchanged quality threshold;
+        # now checks the actual breakdown candle's volume rather than always volumes[-3]).
         if breakdown_vol < 2.0 * rolling_avg:
             return None
 
@@ -1124,8 +1189,8 @@ class ScalpChannel(BaseChannel):
         if sl_dist <= 0 or sl <= close:
             return None
 
-        # TP: measured move downward projection
-        base_of_range = max(float(h) for h in highs[-23:-3]) if len(highs) >= 23 else close * 1.02
+        # TP: measured move downward projection (window aligned with swing low window)
+        base_of_range = max(float(h) for h in highs[-26:-6]) if len(highs) >= 26 else close * 1.02
         measured_move = base_of_range - swing_low_level
         if measured_move <= 0:
             measured_move = sl_dist * 2.0
@@ -1169,7 +1234,26 @@ class ScalpChannel(BaseChannel):
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
+
+        # Pre-score confidence annotation (established pattern for all evaluators).
+        # All evaluators in this family add a path-specific base boost to sig.confidence
+        # before returning.  The scanner's _prepare_signal() pipeline overwrites this
+        # value three times (legacy confidence → score_signal_components →
+        # PR09 composite engine) so this mutation does NOT affect the final signal
+        # confidence and does NOT bypass or double-count the family-aware scoring engine.
+        # Quality differentiation (premium bounce zone, SMC context) is expressed
+        # correctly via the soft_penalty_total system below, which the scanner deducts
+        # post-PR09, and via the PR09 engine's own _score_smc(fvg_zones=...) and
+        # _score_volume() dimensions that already capture these signals independently.
         sig.confidence = min(100.0, sig.confidence + 8.0)
+
+        # Accumulate soft penalties — the scanner deducts these from confidence after
+        # the composite scoring pass, preserving the separation between hard gates and
+        # soft quality adjustments.
+        total_penalty = bounce_penalty + rsi_penalty + fvg_penalty
+        if total_penalty > 0.0:
+            sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
+
         return sig
 
     # ------------------------------------------------------------------
