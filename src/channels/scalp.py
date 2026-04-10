@@ -1111,6 +1111,7 @@ class ScalpChannel(BaseChannel):
         # not by the candles we are testing as the breakdown event itself.
         # Layout: [...swing_low window (20)│breakdown search (5)│current (1)]
         #          lows[-26:-6]             lows[-6:-1]           lows[-1]
+        # The search iterates indices -2, -3, -4, -5, -6 (newest-first within the window).
         swing_low_level = min(float(l) for l in lows[-26:-6])
         if swing_low_level <= 0:
             return None

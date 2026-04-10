@@ -573,7 +573,7 @@ def _make_breakdown_candles(n=60, breakdown_offset=3):
 
     # Current candle: surge volume, close above swing low for dead-cat bounce.
     # Because the breakdown candle (3000) is within the rolling window, the
-    # inflated avg is ~1285; 4500 > 3×1285 = 3857 so the check passes.
+    # inflated avg is ~1285; 4500 > 3×1285 = 3855 so the check passes.
     closes[-1] = 100.4   # 0.4% above swing low 100.0 (premium zone 0.3%–0.6%)
     highs[-1]  = 101.0
     vols[-1]   = 4500.0
@@ -672,7 +672,7 @@ class TestBreakdownShortRefinements:
         """Bounce of 0.65% (above premium zone, within extended zone) carries soft penalty."""
         m5 = _make_breakdown_candles(n=60, breakdown_offset=3)
         swing_low = 100.0
-        # 0.65% above swing_low — still below SL (0.8% above), valid entry
+        # 0.65% above swing_low — within extended zone (0.6%–0.75%), still below SL (0.8% above)
         m5["close"][-1] = swing_low * (1 + 0.0065)
         candles = {"5m": m5}
         sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
