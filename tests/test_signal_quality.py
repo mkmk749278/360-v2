@@ -1269,8 +1269,14 @@ class TestFamilyAwareConfidenceScoring:
         r_neutral = engine.score(inp_neutral)
         assert r_oi["total"] > r_neutral["total"]
 
-    def test_whale_momentum_is_in_order_flow_family(self, engine):
-        """WHALE_MOMENTUM gets order-flow thesis adjustment."""
+    def test_whale_momentum_uses_shared_base_scoring(self, engine):
+        """WHALE_MOMENTUM is NOT in _FAMILY_ORDER_FLOW_DIVERGENCE and gets zero
+        thesis adjustment regardless of CVD/OI inputs.
+
+        This reflects that WHALE_MOMENTUM's primary thesis (large-participant
+        impulse) is different from divergence confirmation, and its OI behavior
+        is not universally indicative of a falling-OI squeeze.
+        """
         inp_cvd = self._base_inputs(
             setup_class="WHALE_MOMENTUM",
             cvd_divergence="BULLISH",
@@ -1283,8 +1289,11 @@ class TestFamilyAwareConfidenceScoring:
         )
         r_cvd = engine.score(inp_cvd)
         r_none = engine.score(inp_none)
-        assert r_cvd["total"] > r_none["total"]
-        assert r_cvd["thesis_adj"] > r_none["thesis_adj"]
+        # Both must have zero thesis adjustment (shared base scoring)
+        assert r_cvd["thesis_adj"] == 0.0
+        assert r_none["thesis_adj"] == 0.0
+        # Scores should be equal since order-flow fields do not affect shared base
+        assert r_cvd["total"] == r_none["total"]
 
     def test_divergence_cvd_contra_applies_small_penalty(self, engine):
         """DIVERGENCE_CONTINUATION with contra CVD gets a negative thesis adj."""

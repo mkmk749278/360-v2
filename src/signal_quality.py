@@ -1099,14 +1099,18 @@ class SignalScoringEngine:
     })
 
     # Order-flow / divergence: thesis is CVD or OI divergence confirming
-    # a directional move before price follows.
+    # a directional move before price follows.  WHALE_MOMENTUM is intentionally
+    # excluded: its primary thesis (large-participant impulse) differs from
+    # divergence confirmation and its OI behaviour is not universally "FALLING"
+    # — falling OI is not an obviously positive signal for a momentum burst.
+    # WHALE_MOMENTUM stays on shared base scoring until code-level evidence
+    # supports a justified standalone family treatment.
     _FAMILY_ORDER_FLOW_DIVERGENCE: frozenset = frozenset({
         "DIVERGENCE_CONTINUATION",
-        "WHALE_MOMENTUM",
     })
 
-    # Trend / continuation, breakout / measured-move, and quiet-specialist
-    # families are well-served by the shared base scoring; no thesis
+    # Trend / continuation, breakout / measured-move, quiet-specialist, and
+    # WHALE_MOMENTUM are well-served by the shared base scoring; no thesis
     # adjustment is applied to them.
 
     # Liquidation cap used for scaling liq-volume bonus (in USD)
