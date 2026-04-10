@@ -810,3 +810,445 @@ class TestBreakdownShortRefinements:
         sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
         assert sig is not None
         assert sig.tp1 < sig.entry
+
+
+# ---------------------------------------------------------------------------
+# SR_FLIP_RETEST refinement tests
+# ---------------------------------------------------------------------------
+
+def _make_srflip_candles_long(n=60, flip_offset=3, level=100.0):
+    """Build candle data satisfying LONG SR_FLIP_RETEST conditions.
+
+    Array slice positions (Python negative indexing, n=60):
+    - Prior window highs[-50:-8]: 42 candles; all set to `level`, establishing prior_swing_high.
+    - Flip candle at index n-flip_offset (i.e. highs[-flip_offset]): high = level + 1.0.
+    - Remaining candles in the 8-candle window highs[-8:] (non-flip): high = level + 0.3.
+    - Current candle [-1]: close = level * 1.001 (0.1% above level — premium zone),
+      open = level * 1.0015, high = level * 1.002, low = level * 0.999.
+      → lower_wick = open - low ≈ 0.25, candle_body = |close - open| ≈ 0.05,
+      lower_wick / body ≈ 5.0 → clear rejection, no wick penalty.
+
+    With default level=100.0:
+    - prior_swing_high = 100.0, flip at 101.0 → LONG direction, structural_level = 100.0
+    - close = 100.1 → dist_from_level = 0.1% → premium zone
+    - sl = level * 0.998 = 99.8 < close = 100.1 → valid geometry
+    """
+    closes = np.ones(n) * 99.8
+    highs  = np.ones(n) * (level + 0.3)   # recent non-flip candles
+    lows   = np.ones(n) * (level - 1.0)
+    opens  = np.ones(n) * 99.7
+
+    # Prior window: all highs exactly at level (sets prior_swing_high = level)
+    prior_start = max(0, n - 50)
+    prior_end   = n - 8
+    for i in range(prior_start, prior_end):
+        highs[i] = level
+
+    # Flip candle
+    flip_idx = n - flip_offset
+    highs[flip_idx] = level + 1.0  # breaks prior_swing_high
+
+    # Current candle: premium retest with clear rejection wick
+    closes[-1] = level * 1.001    # 0.1% above level
+    opens[-1]  = level * 1.0015  # slightly above close (bearish body, which is fine)
+    highs[-1]  = level * 1.002
+    lows[-1]   = level * 0.999   # lower wick = open - low > 0.5 * body → no penalty
+
+    return {
+        "open":   opens,
+        "high":   highs,
+        "low":    lows,
+        "close":  closes,
+        "volume": np.ones(n) * 1000.0,
+    }
+
+
+def _make_srflip_candles_short(n=60, flip_offset=3, level=100.0):
+    """Build candle data satisfying SHORT SR_FLIP_RETEST conditions.
+
+    Array slice positions (Python negative indexing, n=60):
+    - Prior window lows[-50:-8]: 42 candles; all set to `level`, establishing prior_swing_low.
+    - Flip candle at index n-flip_offset (i.e. lows[-flip_offset]): low = level - 1.0.
+    - Remaining candles in the 8-candle window lows[-8:] (non-flip): low = level - 0.3.
+    - Current candle [-1]: close = level * 0.999 (0.1% below level — premium zone),
+      open = level * 0.9985, high = level * 1.001, low = level * 0.998.
+      → upper_wick = high - open ≈ 0.25, candle_body ≈ 0.05,
+      upper_wick / body ≈ 5.0 → clear rejection, no wick penalty.
+
+    With default level=100.0:
+    - prior_swing_low = 100.0, flip at 99.0 → SHORT direction, structural_level = 100.0
+    - close = 99.9 → dist_from_level = 0.1% → premium zone
+    - sl = level * 1.002 = 100.2 > close = 99.9 → valid geometry
+    """
+    closes = np.ones(n) * (level + 0.2)
+    highs  = np.ones(n) * (level + 1.0)
+    lows   = np.ones(n) * (level - 0.3)  # recent non-flip candles
+    opens  = np.ones(n) * (level + 0.3)
+
+    # Prior window: all lows exactly at level (sets prior_swing_low = level)
+    prior_start = max(0, n - 50)
+    prior_end   = n - 8
+    for i in range(prior_start, prior_end):
+        lows[i] = level
+
+    # Flip candle
+    flip_idx = n - flip_offset
+    lows[flip_idx] = level - 1.0  # breaks prior_swing_low
+
+    # Current candle: premium retest with clear upper rejection wick
+    closes[-1] = level * 0.999    # 0.1% below level
+    opens[-1]  = level * 0.9985  # slightly below close (bullish body, which is fine)
+    highs[-1]  = level * 1.001   # upper wick = high - open > 0.5 * body → no penalty
+    lows[-1]   = level * 0.998
+
+    return {
+        "open":   opens,
+        "high":   highs,
+        "low":    lows,
+        "close":  closes,
+        "volume": np.ones(n) * 1000.0,
+    }
+
+
+def _srflip_indicators_long(rsi_val=55.0, ema9=102.0, ema21=99.0):
+    """Indicators for LONG SR_FLIP_RETEST: EMA9 > EMA21 (bullish alignment)."""
+    return {"5m": _make_indicators(rsi_val=rsi_val, ema9=ema9, ema21=ema21)}
+
+
+def _srflip_indicators_short(rsi_val=45.0, ema9=98.0, ema21=101.0):
+    """Indicators for SHORT SR_FLIP_RETEST: EMA9 < EMA21 (bearish alignment)."""
+    return {"5m": _make_indicators(rsi_val=rsi_val, ema9=ema9, ema21=ema21)}
+
+
+def _srflip_smc(with_fvg=True, direction="LONG"):
+    smc: dict = {}
+    if with_fvg:
+        if direction == "LONG":
+            smc["fvg"] = [{"top": 100.5, "bottom": 99.8, "type": "bullish"}]
+        else:
+            smc["fvg"] = [{"top": 100.2, "bottom": 99.5, "type": "bearish"}]
+    return smc
+
+
+class TestSrFlipRetestRefinements:
+    """Tests for the refined SR_FLIP_RETEST path."""
+
+    def _call_long(self, candles, indicators, smc_data, regime="RANGING"):
+        ch = ScalpChannel()
+        return ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime=regime,
+        )
+
+    def _call_short(self, candles, indicators, smc_data, regime="RANGING"):
+        ch = ScalpChannel()
+        return ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime=regime,
+        )
+
+    # ── Happy path ────────────────────────────────────────────────────────
+
+    def test_long_signal_fires_on_valid_retest(self):
+        """Valid LONG flip retest should produce a SR_FLIP_RETEST signal."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None
+        assert sig.setup_class == "SR_FLIP_RETEST"
+        assert sig.direction == Direction.LONG
+
+    def test_short_signal_fires_on_valid_retest(self):
+        """Valid SHORT flip retest should produce a SR_FLIP_RETEST signal."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        sig = self._call_short(candles, _srflip_indicators_short(), _srflip_smc(direction="SHORT"))
+        assert sig is not None
+        assert sig.setup_class == "SR_FLIP_RETEST"
+        assert sig.direction == Direction.SHORT
+
+    # ── Flip detection window (extended from 5 to 8 candles) ─────────────
+
+    def test_flip_at_minus3_accepted(self):
+        """Flip at candle[-3]: original position still fires correctly."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None, "Flip 3 candles ago should be accepted."
+
+    def test_flip_at_minus6_accepted(self):
+        """Flip at candle[-6]: extended window — was hard-missed with 5-candle window."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=6)}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None, "Flip 6 candles ago should now be accepted."
+
+    def test_flip_at_minus9_accepted(self):
+        """Flip at candle[-9]: new boundary of closed-candle window — should be accepted."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=9)}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None, "Flip 9 closed candles ago should be accepted (boundary of window)."
+
+    def test_flip_at_minus10_rejected(self):
+        """Flip at candle[-10]: outside the 8-closed-candle window — must be rejected."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=10)}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is None, "Flip 10 candles ago (outside 8-closed-candle window) must be rejected."
+
+    # ── Retest proximity zone ─────────────────────────────────────────────
+
+    def test_premium_zone_has_no_proximity_penalty(self):
+        """Retest at 0.2% from level (premium zone ≤0.3%) carries zero proximity penalty.
+
+        Quality differentiation is expressed via soft_penalty_total (deducted post-PR09),
+        not via evaluator-level confidence mutations.
+        """
+        m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        m5["close"][-1] = 100.2   # 0.2% above level — premium zone
+        candles = {"5m": m5}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None
+        # Premium zone + FVG present: no proximity penalty, no FVG penalty
+        assert sig.soft_penalty_total == 0.0
+
+    def test_extended_zone_accepted_with_proximity_penalty(self):
+        """Retest at 0.45% from level (extended zone 0.3%–0.6%) accepted with soft penalty.
+
+        Premium zone = no penalty.  Extended zone = +3.0 soft penalty.
+        """
+        m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        m5["close"][-1] = 100.45   # 0.45% above level — extended zone
+        m5["open"][-1]  = 100.50   # keep rejection wick valid
+        m5["low"][-1]   = 100.25   # lower_wick = 100.50 - 100.25 = 0.25 >> body
+        candles = {"5m": m5}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None, "0.45% extended retest should be accepted."
+        assert sig.soft_penalty_total >= 3.0, "Extended zone should carry at least +3.0 penalty."
+
+    def test_retest_beyond_0_6pct_hard_rejected(self):
+        """Retest > 0.6% from level must be hard-rejected (too far from structural level)."""
+        m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        m5["close"][-1] = 100.7   # 0.7% above level — beyond extended zone
+        candles = {"5m": m5}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is None, "Retest > 0.6% from level must be hard-rejected."
+
+    # ── Rejection candle (layered soft/hard gate) ─────────────────────────
+
+    def test_clear_rejection_wick_no_penalty(self):
+        """Lower wick ≥ 50% of candle body (clear rejection) carries no wick penalty."""
+        m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        # Default candle already has large wick; verify baseline
+        candles = {"5m": m5}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None
+        # FVG present, premium zone, clear wick: zero soft penalty
+        assert sig.soft_penalty_total == 0.0
+
+    def test_borderline_wick_accepted_with_penalty(self):
+        """Lower wick 20%–50% of body (borderline rejection) accepted with +4.0 penalty."""
+        m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        # Craft candle: body = 0.4, lower_wick = 0.1 (25% of body → borderline)
+        m5["close"][-1] = 100.1
+        m5["open"][-1]  = 100.5   # body = |100.1 - 100.5| = 0.4
+        m5["low"][-1]   = 100.4   # lower_wick = open - low = 100.5 - 100.4 = 0.1 (25%)
+        m5["high"][-1]  = 100.6
+        candles = {"5m": m5}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None, "Borderline wick (25% of body) should be accepted."
+        assert sig.soft_penalty_total >= 4.0, "Borderline wick should carry ≥4.0 soft penalty."
+
+    def test_no_wick_hard_rejected(self):
+        """Lower wick < 20% of body (no rejection evidence) must be hard-rejected."""
+        m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        # Craft candle: body = 0.5, lower_wick = 0.05 (10% of body → below 20% hard limit)
+        m5["close"][-1] = 100.1
+        m5["open"][-1]  = 100.6   # body = |100.1 - 100.6| = 0.5
+        m5["low"][-1]   = 100.55  # lower_wick = open - low = 100.6 - 100.55 = 0.05 (10%)
+        m5["high"][-1]  = 100.7
+        candles = {"5m": m5}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is None, "Wick < 20% of body (no meaningful rejection) must be hard-rejected."
+
+    def test_doji_candle_passes(self):
+        """Doji (zero body) at structural level always passes — indecision at structure is valid."""
+        m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        # Doji: open == close
+        m5["close"][-1] = 100.1
+        m5["open"][-1]  = 100.1   # body = 0 → candle_body == 0 → wick check skipped
+        m5["high"][-1]  = 100.3
+        m5["low"][-1]   = 99.9
+        candles = {"5m": m5}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None, "Doji at structural level should always pass (indecision = valid)."
+
+    def test_short_no_upper_wick_hard_rejected(self):
+        """Upper wick < 20% of body (no rejection at resistance) must be hard-rejected (SHORT)."""
+        m5 = _make_srflip_candles_short(n=60, flip_offset=3, level=100.0)
+        # Craft: body = 0.5, upper_wick = 0.05 (10% of body)
+        m5["close"][-1] = 99.9
+        m5["open"][-1]  = 99.4    # body = |99.9 - 99.4| = 0.5, open < close (bullish body)
+        m5["high"][-1]  = 99.45  # upper_wick = high - open = 99.45 - 99.4 = 0.05 (10%)
+        m5["low"][-1]   = 99.3
+        candles = {"5m": m5}
+        sig = self._call_short(candles, _srflip_indicators_short(), _srflip_smc(direction="SHORT"))
+        assert sig is None, "Upper wick < 20% of body must be hard-rejected (SHORT path)."
+
+    # ── RSI ─────────────────────────────────────────────────────────────
+
+    def test_rsi_70_accepted_with_penalty_long(self):
+        """RSI = 70 (borderline, below new hard limit 80) accepted with +5.0 penalty (LONG)."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(candles, _srflip_indicators_long(rsi_val=70.0), _srflip_smc(direction="LONG"))
+        assert sig is not None, "RSI 70 should be accepted (borderline, not hard-blocked)."
+        assert sig.soft_penalty_total >= 5.0
+
+    def test_rsi_79_accepted_with_penalty_long(self):
+        """RSI = 79 (near upper hard limit 80) accepted with +5.0 penalty (LONG)."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(candles, _srflip_indicators_long(rsi_val=79.0), _srflip_smc(direction="LONG"))
+        assert sig is not None, "RSI 79 should be accepted (below hard limit of 80)."
+        assert sig.soft_penalty_total >= 5.0
+
+    def test_rsi_80_hard_rejected_long(self):
+        """RSI = 80 (at hard limit) must be hard-rejected (LONG)."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(candles, _srflip_indicators_long(rsi_val=80.0), _srflip_smc(direction="LONG"))
+        assert sig is None, "RSI ≥ 80 must be hard-rejected (LONG)."
+
+    def test_rsi_30_accepted_with_penalty_short(self):
+        """RSI = 30 (borderline, above new hard limit 20) accepted with +5.0 penalty (SHORT)."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        sig = self._call_short(candles, _srflip_indicators_short(rsi_val=30.0), _srflip_smc(direction="SHORT"))
+        assert sig is not None, "RSI 30 should be accepted (borderline, not hard-blocked)."
+        assert sig.soft_penalty_total >= 5.0
+
+    def test_rsi_21_accepted_with_penalty_short(self):
+        """RSI = 21 (borderline, above hard limit 20) accepted with +5.0 penalty (SHORT)."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        sig = self._call_short(candles, _srflip_indicators_short(rsi_val=21.0), _srflip_smc(direction="SHORT"))
+        assert sig is not None, "RSI 21 should be accepted (borderline, above hard limit)."
+        assert sig.soft_penalty_total >= 5.0
+
+    def test_rsi_20_hard_rejected_short(self):
+        """RSI = 20 (at hard limit) must be hard-rejected (SHORT)."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        sig = self._call_short(candles, _srflip_indicators_short(rsi_val=20.0), _srflip_smc(direction="SHORT"))
+        assert sig is None, "RSI ≤ 20 must be hard-rejected (SHORT)."
+
+    # ── FVG / orderblock (soft vs hard gate by regime) ────────────────────
+
+    def test_no_fvg_ob_hard_rejected_in_calm_regime(self):
+        """Without FVG or OB, signal is hard-rejected in a calm regime (RANGING)."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(
+            candles, _srflip_indicators_long(), _srflip_smc(with_fvg=False), regime="RANGING",
+        )
+        assert sig is None, "Missing FVG/OB must hard-block in calm regimes."
+
+    def test_no_fvg_ob_accepted_with_penalty_in_trending_up(self):
+        """Without FVG or OB, signal passes with soft penalty in TRENDING_UP regime."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(
+            candles, _srflip_indicators_long(), _srflip_smc(with_fvg=False), regime="TRENDING_UP",
+        )
+        assert sig is not None, "Missing FVG/OB should NOT hard-block in TRENDING_UP regime."
+        assert sig.soft_penalty_total >= 8.0
+
+    def test_no_fvg_ob_accepted_with_penalty_in_breakout_expansion(self):
+        """Without FVG or OB, signal passes with soft penalty in BREAKOUT_EXPANSION regime."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(
+            candles, _srflip_indicators_long(), _srflip_smc(with_fvg=False), regime="BREAKOUT_EXPANSION",
+        )
+        assert sig is not None, "Missing FVG/OB should NOT hard-block in BREAKOUT_EXPANSION."
+        assert sig.soft_penalty_total >= 8.0
+
+    def test_fvg_present_reduces_soft_penalty_vs_absent(self):
+        """FVG presence yields a lower soft_penalty_total than absent FVG (fast regime).
+
+        The evaluator-level sig.confidence is overwritten by the scanner's PR09 engine,
+        so quality differentiation must be expressed via soft_penalty_total.
+        FVG absent in fast regime → +8.0 FVG penalty.  FVG present → 0.0 FVG penalty.
+        """
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        ind = _srflip_indicators_long()
+        sig_with_fvg = self._call_long(
+            candles, ind, _srflip_smc(with_fvg=True,  direction="LONG"), regime="TRENDING_UP",
+        )
+        sig_no_fvg = self._call_long(
+            candles, ind, _srflip_smc(with_fvg=False, direction="LONG"), regime="TRENDING_UP",
+        )
+        assert sig_with_fvg is not None and sig_no_fvg is not None
+        assert sig_no_fvg.soft_penalty_total >= 8.0, \
+            "Absent FVG in fast regime must accumulate ≥8.0 soft penalty."
+        assert sig_with_fvg.soft_penalty_total < sig_no_fvg.soft_penalty_total, \
+            "FVG present should carry a lower soft penalty than absent FVG."
+
+    def test_no_fvg_ob_accepted_with_penalty_in_trending_down_short(self):
+        """Without FVG or OB, SHORT signal passes with soft penalty in TRENDING_DOWN."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        sig = self._call_short(
+            candles, _srflip_indicators_short(), _srflip_smc(with_fvg=False), regime="TRENDING_DOWN",
+        )
+        assert sig is not None, "Missing FVG/OB should NOT hard-block in TRENDING_DOWN (SHORT)."
+        assert sig.soft_penalty_total >= 8.0
+
+    # ── VOLATILE regime blocked ───────────────────────────────────────────
+
+    def test_volatile_regime_hard_blocked(self):
+        """VOLATILE regime must always return None (structural flips are noisy)."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(
+            candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"), regime="VOLATILE",
+        )
+        assert sig is None, "VOLATILE regime must be hard-blocked for SR_FLIP_RETEST."
+
+    # ── SL/TP geometry ───────────────────────────────────────────────────
+
+    def test_sl_below_entry_on_long_signal(self):
+        """Stop loss must be strictly below the entry price (LONG direction)."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None
+        assert sig.stop_loss < sig.entry
+
+    def test_sl_above_entry_on_short_signal(self):
+        """Stop loss must be strictly above the entry price (SHORT direction)."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        sig = self._call_short(candles, _srflip_indicators_short(), _srflip_smc(direction="SHORT"))
+        assert sig is not None
+        assert sig.stop_loss > sig.entry
+
+    def test_tp1_above_entry_on_long_signal(self):
+        """TP1 must be strictly above the entry price (LONG direction)."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None
+        assert sig.tp1 > sig.entry
+
+    def test_tp1_below_entry_on_short_signal(self):
+        """TP1 must be strictly below the entry price (SHORT direction)."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        sig = self._call_short(candles, _srflip_indicators_short(), _srflip_smc(direction="SHORT"))
+        assert sig is not None
+        assert sig.tp1 < sig.entry
+
+    # ── Cumulative soft penalty ordering ─────────────────────────────────
+
+    def test_penalty_accumulates_across_dimensions(self):
+        """Signal with extended zone + borderline wick + borderline RSI accumulates all penalties.
+
+        This verifies that multiple soft quality dimensions stack correctly into
+        soft_penalty_total, as the scoring architecture requires.
+        """
+        m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        # Extended zone: 0.45% from level
+        m5["close"][-1] = 100.45
+        # Borderline wick: body=0.4, lower_wick=0.1 (25% of body → penalty)
+        m5["open"][-1]  = 100.85
+        m5["low"][-1]   = 100.75   # lower_wick = 100.85 - 100.75 = 0.10 (25% of 0.4)
+        m5["high"][-1]  = 101.0
+        candles = {"5m": m5}
+        # Borderline RSI for LONG: 72 → +5.0 penalty
+        ind = _srflip_indicators_long(rsi_val=72.0)
+        sig = self._call_long(candles, ind, _srflip_smc(direction="LONG"))
+        assert sig is not None
+        # proximity (+3.0) + wick (+4.0) + RSI (+5.0) = 12.0 minimum
+        assert sig.soft_penalty_total >= 12.0, (
+            f"Expected ≥12.0 accumulated penalty, got {sig.soft_penalty_total}"
+        )

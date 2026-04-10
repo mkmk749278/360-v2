@@ -60,6 +60,15 @@ _FAST_BEARISH_REGIMES: frozenset = frozenset({
     "VOLATILE", "VOLATILE_UNSUITABLE", "BREAKOUT_EXPANSION", "STRONG_TREND", "TRENDING_DOWN",
 })
 
+# Regimes where trending / expanding momentum makes FVG/OB detection lag — the
+# SR_FLIP_RETEST path treats the FVG/OB requirement as a soft confidence contributor
+# rather than a hard gate in these regimes.  Covers both directional trending contexts
+# (TRENDING_UP / TRENDING_DOWN) and expansion phases.  VOLATILE is excluded because
+# SR_FLIP_RETEST already hard-blocks that regime at entry.
+_FAST_STRUCTURAL_REGIMES: frozenset = frozenset({
+    "BREAKOUT_EXPANSION", "STRONG_TREND", "TRENDING_UP", "TRENDING_DOWN",
+})
+
 
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
@@ -1421,7 +1430,36 @@ class ScalpChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
-        """SR_FLIP_RETEST: support/resistance flip retest with rejection candle."""
+        """SR_FLIP_RETEST: support/resistance flip retest with rejection candle.
+
+        Refinements vs. original:
+        - Flip detection window extended from 5 to 8 closed prior candles.  The current
+          (still-forming) candle is excluded from the flip search, preserving true
+          structural-retest semantics: the flip must be confirmed on a prior closed
+          candle before the current candle can serve as the retest signal.  This
+          accommodates retests that arrive 6–7 bars after the structural break — common
+          in live crypto where the retest candle does not always immediately follow the
+          breakout candle.
+        - Retest proximity expanded from a 0.3% hard gate to a layered zone system.
+          Premium zone (0–0.3% from flipped level) passes with no soft penalty.
+          Extended zone (0.3%–0.6%) accumulates a +3.0 soft penalty, reflecting a
+          messier but still-valid structural retest where price hasn't cleanly returned
+          to the exact level.  Hard block beyond 0.6%.
+        - Rejection candle strictness reduced from a hard-50% wick rule to a layered
+          soft/hard gate: wick < 20% of body is a hard reject (no rejection evidence
+          at the structural level).  Wick 20%–50% of body accumulates a +4.0 soft
+          penalty (borderline rejection — valid but weaker structural push-back).
+          Wick ≥ 50% of body passes with no penalty (clear hammer / shooting star).
+          Doji (zero body) always passes — indecision at structure is inherently valid.
+        - RSI hard gate relaxed from 70/30 to 80/20.  Borderline 70–79 (LONG) or
+          21–30 (SHORT) attracts a +5.0 soft penalty instead of a hard block, because
+          the initial flip move routinely pushes RSI to these levels without invalidating
+          the structural retest thesis.
+        - FVG / orderblock requirement converted to a +8.0 soft penalty in fast
+          structural regimes (TRENDING_UP, TRENDING_DOWN, BREAKOUT_EXPANSION,
+          STRONG_TREND) where SMC detection may lag fast price action.  Remains a hard
+          gate in calm regimes (RANGING, etc.) to preserve structural quality.
+        """
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "VOLATILE":
             return None
@@ -1444,42 +1482,71 @@ class ScalpChannel(BaseChannel):
         if close <= 0:
             return None
 
-        prior_highs = [float(h) for h in highs[-50:-5]]
-        prior_lows = [float(l) for l in lows[-50:-5]]
-        recent_highs = [float(h) for h in highs[-5:]]
-        recent_lows = [float(l) for l in lows[-5:]]
+        # Structural level identification.
+        # Prior window ([-50:-9]) provides 41 candles of genuine prior structure.
+        # Flip search window ([-9:-1]) covers the 8 most recent *closed* candles,
+        # explicitly excluding the current (still-forming) candle at [-1].  This
+        # preserves true structural-retest semantics: the flip must be confirmed on a
+        # prior closed candle before the current candle can be treated as the retest.
+        # Layout: [...prior (41) │ closed flip search (8) │ current (1)]
+        #          highs[-50:-9]   highs[-9:-1]              highs[-1]
+        # The 8-candle closed search window (up from 5) accommodates retests that
+        # arrive 6–7 bars after the structural break.
+        prior_highs = [float(h) for h in highs[-50:-9]]
+        prior_lows = [float(l) for l in lows[-50:-9]]
+        recent_highs = [float(h) for h in highs[-9:-1]]
+        recent_lows = [float(l) for l in lows[-9:-1]]
 
         prior_swing_high = max(prior_highs)
         prior_swing_low = min(prior_lows)
 
-        # Bullish flip: recent high broke prior swing high → LONG
+        # Bullish flip: any candle in the 8-candle window broke prior swing high → LONG
         if max(recent_highs) > prior_swing_high:
             direction = Direction.LONG
             level = prior_swing_high
-        # Bearish flip: recent low broke prior swing low → SHORT
+        # Bearish flip: any candle in the 8-candle window broke prior swing low → SHORT
         elif min(recent_lows) < prior_swing_low:
             direction = Direction.SHORT
             level = prior_swing_low
         else:
             return None
 
-        # Retest: close within 0.3% of level
-        if level <= 0 or abs(close - level) / level > 0.003:
+        # Retest proximity gate — layered zone system replacing the original hard-0.3% gate.
+        # Premium zone (0–0.3% from flipped level) → no soft penalty.
+        # Extended zone (0.3%–0.6%) → +3.0 soft penalty (messier but valid retest).
+        # Hard block beyond 0.6% — price has not genuinely returned to the structural level.
+        if level <= 0:
             return None
+        dist_from_level_pct = abs(close - level) / level
+        if dist_from_level_pct > 0.006:
+            return None
+        retest_in_premium_zone = dist_from_level_pct <= 0.003
+        proximity_penalty = 0.0 if retest_in_premium_zone else 3.0
 
-        # Rejection candle check
+        # Rejection candle check — layered soft/hard gate replacing the original hard-50% rule.
+        # A clear rejection wick (≥50% of candle body) is the ideal structural signal.
+        # Borderline wicks (20%–50%) are weaker but still pass with a +4.0 soft penalty.
+        # No meaningful wick (<20% of body) is hard-rejected — the candle shows no
+        # structural push-back at the level.  Doji (zero body) always passes — indecision
+        # at structure is a valid retest signature.
         last_open = float(opens[-1])
         last_high = float(highs[-1])
         last_low = float(lows[-1])
         candle_body = abs(close - last_open)
-        if direction == Direction.LONG:
-            lower_wick = last_open - last_low if last_open > last_low else close - last_low
-            if candle_body > 0 and lower_wick < 0.5 * candle_body:
-                return None
-        else:
-            upper_wick = last_high - last_open if last_high > last_open else last_high - close
-            if candle_body > 0 and upper_wick < 0.5 * candle_body:
-                return None
+        wick_penalty = 0.0
+        if candle_body > 0:
+            if direction == Direction.LONG:
+                lower_wick = last_open - last_low if last_open > last_low else close - last_low
+                if lower_wick < 0.2 * candle_body:
+                    return None  # No meaningful rejection at support
+                if lower_wick < 0.5 * candle_body:
+                    wick_penalty = 4.0  # Borderline rejection — apply soft penalty
+            else:
+                upper_wick = last_high - last_open if last_high > last_open else last_high - close
+                if upper_wick < 0.2 * candle_body:
+                    return None  # No meaningful rejection at resistance
+                if upper_wick < 0.5 * candle_body:
+                    wick_penalty = 4.0  # Borderline rejection — apply soft penalty
 
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
@@ -1492,19 +1559,39 @@ class ScalpChannel(BaseChannel):
         if direction == Direction.SHORT and ema9 >= ema21:
             return None
 
+        # RSI — layered soft/hard gate replacing the previous hard gate of 70/30.
+        # Hard block at ≥80 (LONG) or ≤20 (SHORT): extreme exhaustion invalidates the
+        # retest thesis regardless of structural clarity.
+        # Borderline 70–79 (LONG) or 21–30 (SHORT): +5.0 soft penalty.  Initial flip
+        # moves routinely push RSI to these levels without breaking the retest setup.
+        # Optimal zones pass with no adjustment.
         rsi_val = ind.get("rsi_last")
+        rsi_penalty = 0.0
         if rsi_val is not None:
-            if direction == Direction.LONG and rsi_val >= 70:
-                return None
-            if direction == Direction.SHORT and rsi_val <= 30:
-                return None
+            if direction == Direction.LONG:
+                if rsi_val >= 80.0:
+                    return None
+                if rsi_val >= 70.0:
+                    rsi_penalty = 5.0
+            else:
+                if rsi_val <= 20.0:
+                    return None
+                if rsi_val <= 30.0:
+                    rsi_penalty = 5.0
 
+        # FVG / orderblock — soft penalty contributor in fast structural regimes where
+        # SMC detection may lag fast price action.  Hard gate in calmer regimes preserves
+        # structural quality requirements without globally softening the path.
         fvgs = smc_data.get("fvg", [])
         orderblocks = smc_data.get("orderblocks", [])
-        if not (fvgs or orderblocks):
-            return None
+        has_smc_context = bool(fvgs or orderblocks)
+        fvg_penalty = 0.0
+        if not has_smc_context:
+            if regime_upper not in _FAST_STRUCTURAL_REGIMES:
+                return None  # Hard gate in calm regimes (behaviour unchanged)
+            fvg_penalty = 8.0  # Soft penalty in fast structural regimes
 
-        # SL beyond flipped level
+        # SL beyond flipped level (structural invalidation point — unchanged)
         if direction == Direction.LONG:
             sl = level * (1 - 0.002)
         else:
@@ -1584,6 +1671,25 @@ class ScalpChannel(BaseChannel):
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
+
+        # Pre-score confidence annotation (established pattern for all evaluators).
+        # All evaluators in this family add a path-specific base boost to sig.confidence
+        # before returning.  The scanner's _prepare_signal() pipeline overwrites this
+        # value (legacy confidence → score_signal_components → PR09 composite engine)
+        # so this mutation does NOT affect the final signal confidence and does NOT
+        # bypass or double-count the family-aware scoring engine.
+        # Quality differentiation (proximity zone, wick quality, RSI, SMC context) is
+        # expressed correctly via the soft_penalty_total system below, which the scanner
+        # deducts post-PR09.
+        sig.confidence = min(100.0, sig.confidence + 8.0)
+
+        # Accumulate soft penalties — the scanner deducts these from confidence after
+        # the composite scoring pass, preserving the separation between hard gates and
+        # soft quality adjustments.
+        total_penalty = proximity_penalty + wick_penalty + rsi_penalty + fvg_penalty
+        if total_penalty > 0.0:
+            sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
+
         return sig
 
     # ------------------------------------------------------------------
