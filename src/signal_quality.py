@@ -217,6 +217,14 @@ _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP_ORDERBLOCK": 1.0,
 }
 
+# Family-aware minimum R:R thresholds used in build_risk_plan().
+# Quick-exit families accept a lower first target because their trade thesis
+# resolves faster; trend / breakout families require a larger reward cushion.
+_MIN_RR_RANGE: float = 0.8           # Range rejection / range fade — BB or extreme fade
+_MIN_RR_MEAN_REVERSION: float = 0.9  # Snap-back / funding extreme — fast thesis resolution
+_MIN_RR_STRUCTURED: float = 1.0      # S/R flip retest — structural confirmation at level
+_MIN_RR_DEFAULT: float = 1.2         # All other families — standard minimum R:R
+
 
 @dataclass
 class PairQualityAssessment:
@@ -924,13 +932,13 @@ def build_risk_plan(
     # Family-aware minimum R:R threshold — quick-exit families accept a lower
     # first target because the trade thesis resolves faster.
     if setup in (SetupClass.RANGE_REJECTION, SetupClass.RANGE_FADE):
-        min_rr = 0.8
+        min_rr = _MIN_RR_RANGE
     elif setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL):
-        min_rr = 0.9
+        min_rr = _MIN_RR_MEAN_REVERSION
     elif setup == SetupClass.SR_FLIP_RETEST:
-        min_rr = 1.0
+        min_rr = _MIN_RR_STRUCTURED
     else:
-        min_rr = 1.2
+        min_rr = _MIN_RR_DEFAULT
     passed = r_multiple >= min_rr
     reason = "" if passed else f"rr {r_multiple:.2f} below {min_rr:.2f}"
     # Sanity check: reject if SL or any TP is negative, or SL distance > 5% of entry
