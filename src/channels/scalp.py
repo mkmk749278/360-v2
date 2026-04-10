@@ -1063,14 +1063,16 @@ class ScalpChannel(BaseChannel):
           the swing low, so any bounce > 0.8% fails the sl > close constraint silently.
           The new explicit upper bound of 0.75% makes the valid window clear.  The lower
           bound is widened from 0.5% to 0.1% to accept shallow-sprint entries that the
-          original wrongly rejected.  Premium zone 0.3%–0.6% captures textbook dead-cat
-          geometry; the extended zone (0.1%–0.3% and 0.6%–0.75%) applies a soft penalty.
+          original wrongly rejected.  Premium zone 0.3%–0.6% passes with no soft penalty;
+          extended zone (0.1%–0.3% and 0.6%–0.75%) accumulates a +3.0 soft penalty via
+          soft_penalty_total (deducted post-PR09 by the scanner).
         - RSI hard gate relaxed from 28–55 to 20–68.  Borderline values (20–27 or 56–68)
-          attract a soft penalty rather than a hard block, because dead-cat bounces
-          routinely push RSI to 55–68 before bearish continuation resumes.
-        - FVG / orderblock requirement converted to a soft confidence contributor in
+          accumulate a +5.0 soft penalty rather than a hard block, because dead-cat
+          bounces routinely push RSI to 55–68 before bearish continuation resumes.
+        - FVG / orderblock requirement converted to a soft penalty contributor in
           fast-bearish regimes (VOLATILE, TRENDING_DOWN, BREAKOUT_EXPANSION, STRONG_TREND)
-          where SMC detection may lag fast price action.  Remains a hard gate in calmer
+          where SMC detection may lag fast price action: missing FVG/OB accumulates a
+          +8.0 soft penalty instead of hard-blocking.  Remains a hard gate in calmer
           regimes.
         - Breakdown-candle volume check now uses the actual breakdown candle's volume
           rather than always checking volumes[-3].
@@ -1167,7 +1169,7 @@ class ScalpChannel(BaseChannel):
             elif not (28.0 <= rsi_val <= 55.0):
                 rsi_penalty = 5.0
 
-        # FVG / orderblock — soft confidence contributor in fast-bearish regimes where
+        # FVG / orderblock — soft penalty contributor in fast-bearish regimes where
         # SMC detection may lag price.  Hard gate in calmer regimes preserves structural
         # quality requirements without globally softening the path.
         fvgs = smc_data.get("fvg", [])
