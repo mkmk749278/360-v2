@@ -2580,19 +2580,11 @@ class Scanner:
         )
         sig.confidence = self._clamp_confidence(sig.confidence)
         sig.post_ai_confidence = sig.confidence
-        # Apply accumulated soft-gate confidence penalty (regime-scaled).
-        # A second clamp follows to prevent negative confidence after large penalty sums.
-        if soft_penalty > 0.0:
-            sig.confidence -= soft_penalty
-            log.debug(
-                "Soft-gate penalty applied {} {}: -{:.1f} → {:.1f}",
-                symbol, chan_name, soft_penalty, sig.confidence,
-            )
+        # Record soft-gate penalty metadata now; the actual deduction is applied
+        # after PR09 sets the final score so penalties are not overwritten.
         sig.soft_penalty_total = soft_penalty
         sig.regime_penalty_multiplier = regime_mult
         sig.soft_gate_flags = ",".join(_fired_gates)
-        # Second clamp: ensures confidence stays in [0, 100] after soft-penalty deduction.
-        sig.confidence = self._clamp_confidence(sig.confidence)
         # Classify signal into quality tier based on final confidence.
         sig.signal_tier = classify_signal_tier(sig.confidence)
         # ── PR_09: Composite Signal Scoring Engine ────────────────────────
@@ -2658,6 +2650,16 @@ class Scanner:
             )
         except Exception as _score_exc:
             log.debug("PR09 scoring engine error for {} {} (fail open): {}", symbol, chan_name, _score_exc)
+
+        # Apply accumulated soft-gate confidence penalty after PR09 final score
+        # assignment so that the penalties are not overwritten by PR09's score.
+        if soft_penalty > 0.0:
+            sig.confidence -= soft_penalty
+            sig.confidence = self._clamp_confidence(sig.confidence)
+            log.debug(
+                "Soft-gate penalty applied {} {}: -{:.1f} → {:.1f} (post-PR09)",
+                symbol, chan_name, soft_penalty, sig.confidence,
+            )
 
         # ── PR_12: Statistical False-Positive Filter ──────────────────────
         # Apply rolling win-rate gate after scoring. Fail-open when no history.

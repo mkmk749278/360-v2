@@ -683,3 +683,214 @@ class TestRegimeMultiplierStoredOnSignal:
         # If it does pass, the regime_penalty_multiplier must be 1.8.
         if sig is not None:
             assert sig.regime_penalty_multiplier == pytest.approx(1.8)
+
+
+# ---------------------------------------------------------------------------
+# 9. Soft penalties survive PR09 final scoring (ARCH-8 regression)
+# ---------------------------------------------------------------------------
+
+class TestSoftPenaltiesSurvivePR09:
+    """Regression tests: soft-gate penalties must reduce confidence after PR09.
+
+    PR-ARCH-8 moved the penalty subtraction to after PR09's
+    ``sig.confidence = _score_result["total"]`` assignment.  These tests
+    patch ``_scoring_engine.score`` directly to return a known base score and
+    then verify that the final ``sig.confidence`` is lower by the expected
+    penalty amount, proving the penalties are not overwritten.
+    """
+
+    @pytest.mark.asyncio
+    async def test_soft_penalty_applied_after_pr09_score(self):
+        """VWAP penalty reduces confidence BELOW the PR09 base score.
+
+        PR09 returns total=75.0.  VWAP soft penalty in RANGING regime
+        (360_SCALP weight 15.0 × mult 1.0 = 15.0).
+        Expected final confidence: 75.0 - 15.0 = 60.0.
+        """
+        import src.scanner as scanner_mod
+
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal()
+        sq = MagicMock()
+        captured = {}
+
+        async def _capture(sig):
+            captured["sig"] = sig
+            return True
+
+        sq.put = AsyncMock(side_effect=_capture)
+        scanner = _make_scan_ready_scanner(
+            channel=channel, signal_queue=sq, regime=MarketRegime.RANGING
+        )
+
+        pr09_score = {
+            "smc": 20.0, "regime": 15.0, "volume": 10.0,
+            "indicators": 15.0, "patterns": 8.0, "mtf": 7.0,
+            "total": 75.0,
+        }
+        with _common_patches(scanner, extra=[
+            patch("src.scanner.check_vwap_extension", return_value=(False, "VWAP: overextended")),
+            patch.object(scanner_mod._scoring_engine, "score", return_value=pr09_score),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        sig = captured.get("sig")
+        assert sig is not None, "Signal must be enqueued (penalty does not kill it)"
+        # PR09 set base=75; RANGING VWAP penalty = 15.0 × 1.0 = 15.0 → final=60.0
+        assert sig.confidence == pytest.approx(60.0, abs=0.2)
+        assert sig.soft_penalty_total == pytest.approx(15.0, abs=0.2)
+        assert "VWAP" in sig.soft_gate_flags
+
+    @pytest.mark.asyncio
+    async def test_same_pr09_score_different_penalty_gives_different_final(self):
+        """Same PR09 base score but different penalties → different final confidences.
+
+        Two signals are evaluated with identical PR09 base scores (70.0) but
+        different soft-gate penalty situations (no penalty vs VWAP + KZ penalty).
+        The penalised signal must end with strictly lower final confidence.
+        """
+        import src.scanner as scanner_mod
+
+        pr09_score = {
+            "smc": 18.0, "regime": 14.0, "volume": 10.0,
+            "indicators": 14.0, "patterns": 7.0, "mtf": 7.0,
+            "total": 70.0,
+        }
+
+        async def _run(extra_patches) -> float:
+            channel = MagicMock()
+            channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+            channel.evaluate.return_value = _make_signal()
+            sq = MagicMock()
+            captured = {}
+
+            async def _capture(sig):
+                captured["sig"] = sig
+                return True
+
+            sq.put = AsyncMock(side_effect=_capture)
+            sc = _make_scan_ready_scanner(
+                channel=channel, signal_queue=sq, regime=MarketRegime.RANGING
+            )
+            with _common_patches(sc, extra=[
+                patch.object(scanner_mod._scoring_engine, "score", return_value=pr09_score),
+            ] + extra_patches):
+                await sc._scan_symbol("BTCUSDT", 10_000_000)
+            sig = captured.get("sig")
+            return sig.confidence if sig is not None else 0.0
+
+        conf_clean = await _run([])
+        conf_penalised = await _run([
+            patch("src.scanner.check_vwap_extension", return_value=(False, "VWAP: overextended")),
+            patch("src.scanner.check_kill_zone_gate", return_value=(False, "Kill zone: WEEKEND")),
+        ])
+
+        assert conf_clean == pytest.approx(70.0, abs=0.2), (
+            "No-penalty signal should equal the PR09 base score"
+        )
+        assert conf_penalised < conf_clean, (
+            "Penalised signal must have strictly lower final confidence than clean signal"
+        )
+        assert conf_clean - conf_penalised >= 25.0, (
+            "Penalty reduction must be at least 25 pts (VWAP 15 + KZ 10, regime mult=1.0)"
+        )
+
+    @pytest.mark.asyncio
+    async def test_soft_penalty_total_recorded_and_confidence_reduced(self):
+        """soft_penalty_total is stored correctly and confidence reflects the deduction.
+
+        This verifies both the flag integrity requirement and the scoring-effect
+        requirement from PR-ARCH-8 acceptance criteria simultaneously.
+        """
+        import src.scanner as scanner_mod
+
+        pr09_score = {
+            "smc": 22.0, "regime": 18.0, "volume": 12.0,
+            "indicators": 18.0, "patterns": 5.0, "mtf": 5.0,
+            "total": 80.0,
+        }
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal()
+        sq = MagicMock()
+        captured = {}
+
+        async def _capture(sig):
+            captured["sig"] = sig
+            return True
+
+        sq.put = AsyncMock(side_effect=_capture)
+        scanner = _make_scan_ready_scanner(
+            channel=channel, signal_queue=sq, regime=MarketRegime.TRENDING_UP
+        )
+
+        with _common_patches(scanner, extra=[
+            patch("src.scanner.check_vwap_extension", return_value=(False, "VWAP: overextended")),
+            patch.object(scanner_mod._scoring_engine, "score", return_value=pr09_score),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        sig = captured.get("sig")
+        assert sig is not None
+        # Metadata integrity: flags and total must be recorded
+        assert "VWAP" in sig.soft_gate_flags
+        assert sig.soft_penalty_total > 0.0
+        # Scoring integrity: final confidence must be strictly less than PR09 base
+        assert sig.confidence < 80.0, (
+            "Final confidence must be below PR09 base score when soft penalty was applied"
+        )
+        # Numeric consistency: final ≈ PR09_base − penalty_total
+        assert sig.confidence == pytest.approx(80.0 - sig.soft_penalty_total, abs=0.2)
+
+    @pytest.mark.asyncio
+    async def test_confidence_clamped_to_zero_when_penalties_exceed_score(self):
+        """Confidence is never negative when accumulated penalties exceed PR09 score.
+
+        PR09 returns total=20.0 and multiple soft penalties accumulate beyond 20 pts.
+        The final confidence must be clamped to 0.0, not negative.
+        """
+        import src.scanner as scanner_mod
+        from src.order_flow import OISnapshot
+
+        pr09_score = {
+            "smc": 5.0, "regime": 5.0, "volume": 4.0,
+            "indicators": 3.0, "patterns": 2.0, "mtf": 1.0,
+            "total": 20.0,
+        }
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=0.0)
+        channel.evaluate.return_value = _make_signal()
+        sq = MagicMock()
+        captured = {}
+
+        async def _capture(sig):
+            captured["sig"] = sig
+            return True
+
+        sq.put = AsyncMock(side_effect=_capture)
+        scanner = _make_scan_ready_scanner(
+            channel=channel, signal_queue=sq, regime=MarketRegime.VOLATILE
+        )
+        oi_store = MagicMock()
+        oi_store._oi = {
+            "BTCUSDT": [
+                OISnapshot(timestamp=1.0, open_interest=5000.0),
+                OISnapshot(timestamp=2.0, open_interest=4800.0),
+            ]
+        }
+        scanner.order_flow_store = oi_store
+
+        with _common_patches(scanner, score=_FAKE_SCORE_MEDIUM, extra=[
+            patch("src.scanner.check_vwap_extension", return_value=(False, "VWAP: overextended")),
+            patch("src.scanner.analyse_oi", return_value=MagicMock()),
+            patch("src.scanner.check_oi_gate", return_value=(False, "OI: squeeze")),
+            patch("src.scanner.check_spoof_gate", return_value=(False, "Spoof: wall detected")),
+            patch.object(scanner_mod._scoring_engine, "score", return_value=pr09_score),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        # Signal may be killed by min_confidence gate or PR09 <50 gate; if enqueued check clamp
+        sig = captured.get("sig")
+        if sig is not None:
+            assert sig.confidence >= 0.0, "Confidence must never be negative after clamping"
