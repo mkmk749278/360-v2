@@ -286,3 +286,262 @@ class TestScalpChannelReturnsListOfSignals:
         )
         assert isinstance(sigs, list)
 
+
+# ---------------------------------------------------------------------------
+# VOLUME_SURGE_BREAKOUT refinement tests
+# ---------------------------------------------------------------------------
+
+def _make_surge_candles(n=60, base=100.0, breakout_offset=3):
+    """Build candle data that satisfies the VOLUME_SURGE_BREAKOUT conditions.
+
+    Layout (all indices relative to the final candle, i.e. candle[-1]):
+    - Candles at [-26:-6]: prices in 98–99 range, average volume 1000
+    - Candle at -breakout_offset: high of 103 (breaks swing high ~99), volume 3000
+    - Current candle [-1]: close=98.5 (about 0.5% below swing high 99.0)
+      with surge volume 4500 (> 3× the inflated rolling average of ~1285)
+    """
+    closes = np.ones(n) * 98.5
+    highs  = np.ones(n) * 99.0
+    lows   = np.ones(n) * 97.5
+    vols   = np.ones(n) * 1000.0
+
+    # Create a detectable breakout candle at the given offset from the end
+    idx = n - breakout_offset
+    highs[idx] = 103.0   # clearly above prior swing high
+    vols[idx]  = 3000.0  # 3× rolling average → passes 2× breakout threshold
+
+    # Current candle: surge volume must exceed 3× rolling average.
+    # Because the breakout candle (3000) is within the rolling window, the
+    # inflated avg is ~1285; 4500 > 3×1285 = 3857 so the check passes.
+    closes[-1] = 98.5
+    highs[-1]  = 99.0
+    vols[-1]   = 4500.0
+
+    return {
+        "open": closes - 0.1,
+        "high": highs,
+        "low": lows,
+        "close": closes,
+        "volume": vols,
+    }
+
+
+def _surge_indicators(rsi_val=58.0, ema9=101.0, ema21=99.0):
+    return {"5m": _make_indicators(rsi_val=rsi_val, ema9=ema9, ema21=ema21)}
+
+
+def _surge_smc(with_fvg=True):
+    smc: dict = {}
+    if with_fvg:
+        smc["fvg"] = [{"top": 100.0, "bottom": 99.0, "type": "bullish"}]
+    return smc
+
+
+class TestVolumeSurgeBreakoutRefinements:
+    """Tests for the refined VOLUME_SURGE_BREAKOUT path."""
+
+    def _call(self, candles, indicators, smc_data, regime="TRENDING_UP"):
+        ch = ScalpChannel()
+        return ch._evaluate_volume_surge_breakout(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime=regime,
+        )
+
+    # ── Happy path ────────────────────────────────────────────────────────
+
+    def test_signal_fires_on_valid_breakout_at_minus3(self):
+        """Original breakout position candle[-3] still fires correctly."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None
+        assert sig.setup_class == "VOLUME_SURGE_BREAKOUT"
+        assert sig.direction == Direction.LONG
+
+    def test_signal_fires_on_breakout_at_minus4(self):
+        """Breakout at candle[-4]: timing tolerance — was a hard miss in original code."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=4)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, "Breakout 4 candles ago should now be accepted."
+
+    def test_signal_fires_on_breakout_at_minus5(self):
+        """Breakout at candle[-5]: timing tolerance — was a hard miss in original code."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=5)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, "Breakout 5 candles ago should now be accepted."
+
+    # ── Timing hard boundary ─────────────────────────────────────────────
+
+    def test_no_signal_when_breakout_too_old(self):
+        """Breakout at candle[-7] (outside 5-candle window) must be rejected."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=7)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is None, "Breakout older than 5 candles must be rejected."
+
+    # ── Pullback zone ─────────────────────────────────────────────────────
+
+    def test_premium_pullback_zone_has_no_soft_penalty(self):
+        """Pullback in premium zone (0.3%–0.6%) carries zero soft penalty.
+
+        The quality distinction between premium and extended zones is expressed
+        via the soft_penalty_total system (scanner deducts post-PR09), not via
+        evaluator-level confidence mutations, which are overwritten by the pipeline.
+        """
+        m5 = _make_surge_candles(n=60, breakout_offset=3)
+        swing_high = 99.0
+        # 0.45% below swing_high: 99.0 * (1 - 0.0045) ≈ 98.554
+        m5["close"][-1] = swing_high * (1 - 0.0045)
+        candles = {"5m": m5}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None
+        # Premium zone with FVG present: no pullback penalty, no FVG penalty
+        assert sig.soft_penalty_total == 0.0
+
+    def test_shallow_pullback_accepted_with_soft_penalty(self):
+        """Pullback of 0.2% (below premium zone 0.3%–0.6%) is accepted with soft penalty."""
+        m5 = _make_surge_candles(n=60, breakout_offset=3)
+        swing_high = 99.0
+        # 0.2% below swing_high: 99.0 * (1 - 0.002) ≈ 98.802
+        m5["close"][-1] = swing_high * (1 - 0.002)
+        candles = {"5m": m5}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, "Shallow pullback (0.2%) should be accepted."
+        assert sig.soft_penalty_total > 0.0, "Shallow pullback should carry a soft penalty."
+
+    def test_upper_extended_zone_accepted_with_soft_penalty(self):
+        """Pullback of 0.65% (above premium zone) is accepted but carries soft penalty."""
+        m5 = _make_surge_candles(n=60, breakout_offset=3)
+        swing_high = 99.0
+        # 0.65% below swing_high: still above SL (0.8% below = 98.208), valid entry
+        m5["close"][-1] = swing_high * (1 - 0.0065)
+        candles = {"5m": m5}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, "Upper extended pullback (0.65%) should be accepted."
+        assert sig.soft_penalty_total > 0.0, "Upper extended pullback should carry soft penalty."
+
+    def test_pullback_exceeding_0_75pct_rejected(self):
+        """Pullback > 0.75% is rejected (sl >= close, or explicit upper bound)."""
+        m5 = _make_surge_candles(n=60, breakout_offset=3)
+        swing_high = 99.0
+        # 0.9% below swing_high → close (98.109) < sl (98.208) → rejected
+        m5["close"][-1] = swing_high * (1 - 0.009)
+        candles = {"5m": m5}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is None, "Pullback beyond 0.75% must be rejected."
+
+    def test_price_at_or_above_swing_high_rejected(self):
+        """Price above swing high (no pullback) must be rejected."""
+        m5 = _make_surge_candles(n=60, breakout_offset=3)
+        swing_high = 99.0
+        m5["close"][-1] = swing_high + 0.5  # still above swing high
+        candles = {"5m": m5}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is None, "Price above swing high (no retest) must be rejected."
+
+    # ── RSI ─────────────────────────────────────────────────────────────
+
+    def test_rsi_73_accepted_with_soft_penalty(self):
+        """RSI = 73 (borderline above optimal) is accepted with a soft penalty."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(rsi_val=73.0), _surge_smc())
+        assert sig is not None, "RSI 73 should be accepted (borderline, not hard-blocked)."
+        assert sig.soft_penalty_total >= 5.0
+
+    def test_rsi_80_accepted_with_soft_penalty(self):
+        """RSI = 80 (near upper hard limit) is accepted with a soft penalty."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(rsi_val=80.0), _surge_smc())
+        assert sig is not None, "RSI 80 should be accepted (below hard limit of 82)."
+        assert sig.soft_penalty_total >= 5.0
+
+    def test_rsi_83_hard_rejected(self):
+        """RSI = 83 (above hard limit of 82) must be hard-rejected."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(rsi_val=83.0), _surge_smc())
+        assert sig is None, "RSI above 82 must be hard-rejected."
+
+    def test_rsi_39_hard_rejected(self):
+        """RSI = 39 (below hard limit of 40) must be hard-rejected."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(rsi_val=39.0), _surge_smc())
+        assert sig is None, "RSI below 40 must be hard-rejected."
+
+    def test_rsi_42_accepted_with_soft_penalty(self):
+        """RSI = 42 (borderline below optimal) is accepted with a soft penalty."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(rsi_val=42.0), _surge_smc())
+        assert sig is not None, "RSI 42 should be accepted (borderline, not hard-blocked)."
+        assert sig.soft_penalty_total >= 5.0
+
+    # ── FVG / orderblock in fast vs. calm regimes ────────────────────────
+
+    def test_no_fvg_ob_hard_rejected_in_calm_regime(self):
+        """Without FVG or OB, signal is rejected in a non-fast regime."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc(with_fvg=False), regime="RANGING")
+        assert sig is None, "Missing FVG/OB must hard-block in non-fast regimes."
+
+    def test_no_fvg_ob_accepted_with_penalty_in_volatile_regime(self):
+        """Without FVG or OB, signal passes with soft penalty in VOLATILE regime."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc(with_fvg=False), regime="VOLATILE")
+        assert sig is not None, "Missing FVG/OB should NOT hard-block in VOLATILE regime."
+        assert sig.soft_penalty_total >= 8.0
+
+    def test_no_fvg_ob_accepted_with_penalty_in_breakout_expansion(self):
+        """Without FVG or OB, signal passes with soft penalty in BREAKOUT_EXPANSION regime."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(
+            candles, _surge_indicators(), _surge_smc(with_fvg=False), regime="BREAKOUT_EXPANSION",
+        )
+        assert sig is not None, "Missing FVG/OB should NOT hard-block in BREAKOUT_EXPANSION regime."
+        assert sig.soft_penalty_total >= 8.0
+
+    def test_fvg_present_reduces_soft_penalty_vs_absent(self):
+        """FVG presence yields a lower soft_penalty_total than absent FVG (fast regime).
+
+        The evaluator-level sig.confidence from the evaluator is overwritten by the
+        scanner's PR09 composite engine, so quality differentiation must be expressed
+        via soft_penalty_total (deducted post-PR09).  FVG absent → +8.0 soft penalty;
+        FVG present → 0.0 FVG penalty, so with-FVG signal will lose less confidence.
+        """
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        ind = _surge_indicators()
+        sig_with_fvg = self._call(candles, ind, _surge_smc(with_fvg=True), regime="VOLATILE")
+        sig_no_fvg   = self._call(candles, ind, _surge_smc(with_fvg=False), regime="VOLATILE")
+        assert sig_with_fvg is not None and sig_no_fvg is not None
+        assert sig_no_fvg.soft_penalty_total >= 8.0, \
+            "Absent FVG in fast regime must accumulate ≥8.0 soft penalty."
+        assert sig_with_fvg.soft_penalty_total < sig_no_fvg.soft_penalty_total, \
+            "FVG present should carry a lower soft penalty than absent FVG."
+
+    # ── Quiet regime blocked ─────────────────────────────────────────────
+
+    def test_quiet_regime_hard_blocked(self):
+        """QUIET regime must always return None."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc(), regime="QUIET")
+        assert sig is None
+
+    # ── Minimum data requirement ──────────────────────────────────────────
+
+    def test_insufficient_data_returns_none(self):
+        """Fewer than 28 candles must return None (27 is the boundary)."""
+        m5 = _make_surge_candles(n=27, breakout_offset=3)
+        candles = {"5m": m5}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is None
+
+    # ── SL/TP geometry ───────────────────────────────────────────────────
+
+    def test_sl_below_entry_on_valid_signal(self):
+        """Stop loss must be strictly below the entry price."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None
+        assert sig.stop_loss < sig.entry
+
+    def test_tp1_above_entry_on_valid_signal(self):
+        """TP1 must be strictly above the entry price (long direction)."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None
+        assert sig.tp1 > sig.entry

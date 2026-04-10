@@ -45,6 +45,13 @@ _ADX_RANGING_FLOOR: float = 12.0
 # Multiplier applied to the pair-specific adx_min in RANGING/QUIET regimes.
 _ADX_RANGING_MULTIPLIER: float = 0.75
 
+# Regimes where fast momentum makes FVG/OB detection lag — the VOLUME_SURGE_BREAKOUT
+# path treats the FVG/OB requirement as a soft confidence contributor rather than a
+# hard gate in these regimes.
+_FAST_MOMENTUM_REGIMES: frozenset = frozenset({
+    "VOLATILE", "VOLATILE_UNSUITABLE", "BREAKOUT_EXPANSION", "STRONG_TREND",
+})
+
 
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
@@ -822,7 +829,25 @@ class ScalpChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
-        """VOLUME_SURGE_BREAKOUT path: price breaks swing high on surge volume then pulls back."""
+        """VOLUME_SURGE_BREAKOUT path: price breaks swing high on surge volume then pulls back.
+
+        Refinements vs. original:
+        - Breakout search window extended from exactly candle[-3] to the last 5 closed
+          candles, accommodating 1–4 candle timing variation common in live crypto.
+        - Pullback zone corrected from 0.5%–2.0% (which was effectively 0.5%–0.8% due
+          to the structural SL constraint) to 0.1%–0.75%.  This adds shallow-sprint
+          entries (0.1%–0.5%) that the original wrongly rejected while making the upper
+          bound explicit.  Premium zone 0.3%–0.6% earns a confidence bonus; extended
+          zone (0.1%–0.3% and 0.6%–0.75%) applies a soft penalty.
+        - RSI hard gate relaxed from 45–72 to 40–82.  Borderline values (40–44 or
+          73–82) attract a soft penalty rather than a hard block, because strong
+          breakout momentum routinely pushes RSI above 72 without invalidating the setup.
+        - FVG / orderblock requirement converted to a soft confidence contributor in
+          fast-momentum regimes (VOLATILE, BREAKOUT_EXPANSION, STRONG_TREND) where SMC
+          detection may lag the price action.  Remains a hard gate in calmer regimes.
+        - Breakout-candle volume check now uses the actual breakout candle's volume
+          rather than always checking volumes[-3].
+        """
         # Block only in QUIET — surge setups need volume, which QUIET lacks.
         # VOLATILE/VOLATILE_UNSUITABLE are explicitly allowed here.
         regime_upper = regime.upper() if regime else ""
@@ -830,13 +855,13 @@ class ScalpChannel(BaseChannel):
             return None
 
         m5 = candles.get("5m")
-        if m5 is None or len(m5.get("close", [])) < 25:
+        if m5 is None or len(m5.get("close", [])) < 28:
             return None
 
         closes = m5.get("close", [])
         highs = m5.get("high", [])
         volumes = m5.get("volume", [])
-        if len(closes) < 25 or len(highs) < 25 or len(volumes) < 10:
+        if len(closes) < 28 or len(highs) < 28 or len(volumes) < 10:
             return None
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
@@ -854,44 +879,80 @@ class ScalpChannel(BaseChannel):
         if current_vol < SURGE_VOLUME_MULTIPLIER * rolling_avg:
             return None
 
-        # Swing high (20-candle) and breakout in last 3 candles
-        swing_high_level = max(float(h) for h in highs[-23:-3])
+        # Swing high: 20-candle lookback from before the 5-candle breakout search window.
+        # Excluding the search window ensures swing_high is set by genuine prior resistance,
+        # not by the candles we are testing as the breakout event itself.
+        # Layout: [...swing_high window (20)│breakout search (5)│current (1)]
+        #          highs[-26:-6]              highs[-6:-1]         highs[-1]
+        swing_high_level = max(float(h) for h in highs[-26:-6])
         if swing_high_level <= 0:
             return None
 
-        # Check that the breakout candle (candle[-3]) broke above the swing high
-        breakout_candle_high = float(highs[-3])
-        if breakout_candle_high <= swing_high_level:
+        # Find the most recent breakout candle within the last 5 closed candles.
+        # Scans newest-first (i = -2, -3, -4, -5, -6) to prefer the candle
+        # closest to the current bar. Candle at -1 is still forming.
+        breakout_candle_idx: Optional[int] = None
+        breakout_vol = 0.0
+        for i in range(-2, -7, -1):  # iterates -2, -3, -4, -5, -6
+            if float(highs[i]) > swing_high_level:
+                breakout_candle_idx = i
+                breakout_vol = float(volumes[i])
+                break
+
+        if breakout_candle_idx is None:
             return None
 
-        # Condition 3: Current close is 0.5%–2.0% BELOW the swing high (pullback zone)
+        # Pullback zone: current close is below the swing high (breakout retest).
+        # Lower bound: 0.1% ensures the price has made a genuine pullback below the
+        # broken resistance level rather than entering right at the top.
+        # Upper bound: 0.75% is a practical limit given the 0.8% structural SL
+        # placement — pullbacks deeper than the SL distance are rejected by the
+        # sl>=close check below, so this bound makes the logic explicit.
+        # Premium zone (0.3%–0.6%) captures textbook breakout-retest geometry and
+        # earns a confidence bonus.  The extended zone (0.1%–0.3% and 0.6%–0.75%)
+        # represents shallow sprints or near-SL entries; a soft penalty is applied.
         close = float(closes[-1])
         if close <= 0:
             return None
         dist_from_swing_pct = (swing_high_level - close) / swing_high_level * 100.0
-        if not (0.5 <= dist_from_swing_pct <= 2.0):
+        if not (0.1 <= dist_from_swing_pct <= 0.75):
             return None
+        pullback_in_premium_zone = (0.3 <= dist_from_swing_pct <= 0.6)
+        pullback_penalty = 0.0 if pullback_in_premium_zone else 3.0
 
-        # Condition 4: EMA9 > EMA21
+        # Condition 4: EMA9 > EMA21 (trend alignment, hard gate unchanged)
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
         if ema9 is None or ema21 is None or ema9 <= ema21:
             return None
 
-        # Condition 5: RSI between 45–72
+        # RSI — layered soft/hard gate replacing the previous hard gate of 45–72.
+        # Hard block below 40 (momentum failure) or above 82 (extreme overbought
+        # exhaustion at entry).  Borderline 40–44 or 73–82 attracts a soft penalty;
+        # optimal zone 45–72 passes with no adjustment.
         rsi_val = ind.get("rsi_last")
-        if rsi_val is not None and not (45 <= rsi_val <= 72):
-            return None
+        rsi_penalty = 0.0
+        if rsi_val is not None:
+            if rsi_val < 40.0 or rsi_val > 82.0:
+                return None
+            elif not (45.0 <= rsi_val <= 72.0):
+                rsi_penalty = 5.0
 
-        # Condition 6: At least one FVG or orderblock in smc_data
+        # FVG / orderblock — soft confidence contributor in fast-momentum regimes where
+        # SMC detection may lag price.  Hard gate in calmer regimes preserves structural
+        # quality requirements without globally softening the path.
         fvgs = smc_data.get("fvg", [])
         orderblocks = smc_data.get("orderblocks", [])
-        if not (fvgs or orderblocks):
-            return None
+        has_smc_context = bool(fvgs or orderblocks)
+        fvg_penalty = 0.0
+        if not has_smc_context:
+            if regime_upper not in _FAST_MOMENTUM_REGIMES:
+                return None  # Hard gate in non-fast regimes (behaviour unchanged)
+            fvg_penalty = 8.0  # Soft penalty in fast regimes instead of hard block
 
-        # Condition 8: Breakout candle volume ≥ 2.0 × rolling average
-        breakout_vol = float(volumes[-3]) if len(volumes) >= 3 else 0.0
+        # Breakout candle volume ≥ 2.0 × rolling average (unchanged quality threshold;
+        # now checks the actual breakout candle's volume rather than always volumes[-3]).
         if breakout_vol < 2.0 * rolling_avg:
             return None
 
@@ -901,9 +962,9 @@ class ScalpChannel(BaseChannel):
         if sl_dist <= 0 or sl >= close:
             return None
 
-        # TP: measured move from base of range
+        # TP: measured move from base of range (window aligned with swing high window)
         lows = m5.get("low", [])
-        base_of_range = min(float(l) for l in lows[-23:-3]) if len(lows) >= 23 else close * 0.98
+        base_of_range = min(float(l) for l in lows[-26:-6]) if len(lows) >= 26 else close * 0.98
         measured_move = swing_high_level - base_of_range
         if measured_move <= 0:
             measured_move = sl_dist * 2.0
@@ -947,7 +1008,26 @@ class ScalpChannel(BaseChannel):
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
+
+        # Pre-score confidence annotation (established pattern for all evaluators).
+        # All evaluators in this family add a path-specific base boost to sig.confidence
+        # before returning.  The scanner's _prepare_signal() pipeline overwrites this
+        # value three times (legacy confidence → score_signal_components →
+        # PR09 composite engine) so this mutation does NOT affect the final signal
+        # confidence and does NOT bypass or double-count the family-aware scoring engine.
+        # Quality differentiation (premium pullback zone, SMC context) is expressed
+        # correctly via the soft_penalty_total system below, which the scanner deducts
+        # post-PR09, and via the PR09 engine's own _score_smc(fvg_zones=...) and
+        # _score_volume() dimensions that already capture these signals independently.
         sig.confidence = min(100.0, sig.confidence + 8.0)
+
+        # Accumulate soft penalties — the scanner deducts these from confidence after
+        # the composite scoring pass, preserving the separation between hard gates and
+        # soft quality adjustments.
+        total_penalty = pullback_penalty + rsi_penalty + fvg_penalty
+        if total_penalty > 0.0:
+            sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
+
         return sig
 
     # ------------------------------------------------------------------
