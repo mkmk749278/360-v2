@@ -1284,7 +1284,7 @@ class SignalScoringEngine:
         Returns
         -------
         float
-            Adjustment in roughly [-3, +8].  Added to base total before the
+            Adjustment in roughly [-2, +8].  Added to base total before the
             100-pt cap is applied in score().
         """
         setup = inp.setup_class
@@ -1315,6 +1315,10 @@ class SignalScoringEngine:
                     (inp.direction == "LONG" and inp.cvd_divergence == "BULLISH") or
                     (inp.direction == "SHORT" and inp.cvd_divergence == "BEARISH")
                 )
+                # Reversal setups have an independent order-flow thesis (OI, liq,
+                # funding); CVD is supplementary.  Penalty for contra CVD is
+                # intentionally smaller (-1) than in the order-flow family (-2)
+                # where CVD is the primary thesis signal.
                 of_bonus += 2.0 if cvd_aligned else -1.0
             if inp.funding_rate is not None and abs(inp.funding_rate) >= 0.01:
                 # Contrarian extreme funding confirms reversal thesis
