@@ -201,6 +201,22 @@ def _weak_obi():
     }
 
 
+def _short_ticks():
+    """Strong sell tick flow → SHORT direction (3:1 sell:buy ratio)."""
+    return [
+        {"price": 100.0, "qty": 5000, "isBuyerMaker": False},   # buy: $0.5M
+        {"price": 100.0, "qty": 15000, "isBuyerMaker": True},   # sell: $1.5M (3×)
+    ]
+
+
+def _short_obi():
+    """Order book with 5:1 ask imbalance — satisfies OBI gate for SHORT."""
+    return {
+        "bids": [[100.0, 100.0]] * 10,   # bid depth: $100K × 10
+        "asks": [[100.1, 500.0]] * 10,   # ask depth: $500K × 10 → 5:1 imbalance
+    }
+
+
 class TestWhaleMomentumRsiRefinements:
     """RSI layered soft/hard gate for WHALE_MOMENTUM (PR-4 refinement)."""
 
@@ -256,20 +272,6 @@ class TestWhaleMomentumRsiRefinements:
 
     # ── SHORT RSI gates ───────────────────────────────────────────────────
 
-    def _short_ticks(self):
-        """Strong sell tick flow → SHORT direction."""
-        return [
-            {"price": 100.0, "qty": 5000, "isBuyerMaker": False},   # buy: $0.5M
-            {"price": 100.0, "qty": 15000, "isBuyerMaker": True},   # sell: $1.5M (3×)
-        ]
-
-    def _short_obi(self):
-        """Order book with 5:1 ask imbalance — satisfies OBI gate for SHORT."""
-        return {
-            "bids": [[100.0, 100.0]] * 10,   # bid depth: $100K × 10
-            "asks": [[100.1, 500.0]] * 10,   # ask depth: $500K × 10 → 5:1 imbalance
-        }
-
     def _call_short(self, rsi_val, regime=""):
         ch = ScalpChannel()
         candles = {"1m": _make_candles(20)}
@@ -277,8 +279,8 @@ class TestWhaleMomentumRsiRefinements:
         smc_data = {
             "whale_alert": {"amount_usd": 1_500_000},
             "volume_delta_spike": True,
-            "recent_ticks": self._short_ticks(),
-            "order_book": self._short_obi(),
+            "recent_ticks": _short_ticks(),
+            "order_book": _short_obi(),
         }
         return ch._evaluate_whale_momentum("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime=regime)
 

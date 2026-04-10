@@ -49,6 +49,13 @@ _WHALE_OBI_SOFT_MIN: float = 1.2
 _WHALE_FAST_REGIMES: frozenset = frozenset({
     "VOLATILE", "VOLATILE_UNSUITABLE", "BREAKOUT_EXPANSION",
 })
+# RSI thresholds for the layered soft/hard gate.  Hard limits reject extreme
+# exhaustion that invalidates the momentum thesis; soft limits penalise
+# borderline readings that may still resolve in the signal's favour.
+_WHALE_RSI_LONG_HARD_MAX: float = 82.0   # ≥ this → hard reject (overbought)
+_WHALE_RSI_LONG_SOFT_MIN: float = 72.0   # ≥ this (< hard) → +5 soft penalty
+_WHALE_RSI_SHORT_HARD_MIN: float = 18.0  # ≤ this → hard reject (oversold)
+_WHALE_RSI_SHORT_SOFT_MAX: float = 28.0  # ≤ this (> hard) → +5 soft penalty
 
 # Regime-adaptive ADX floor for the standard scalp path.  In RANGING/QUIET
 # markets ADX hovers at 15-20 and blocks most liquidity-sweep setups.
@@ -794,14 +801,14 @@ class ScalpChannel(BaseChannel):
         rsi_penalty = 0.0
         if rsi_val_1m is not None:
             if direction == Direction.LONG:
-                if rsi_val_1m >= 82.0:
+                if rsi_val_1m >= _WHALE_RSI_LONG_HARD_MAX:
                     return None  # Hard reject: extreme overbought invalidates momentum thesis
-                if rsi_val_1m >= 72.0:
+                if _WHALE_RSI_LONG_SOFT_MIN <= rsi_val_1m < _WHALE_RSI_LONG_HARD_MAX:
                     rsi_penalty = 5.0  # Borderline: penalise but still allow
             else:
-                if rsi_val_1m <= 18.0:
+                if rsi_val_1m <= _WHALE_RSI_SHORT_HARD_MIN:
                     return None  # Hard reject: extreme oversold invalidates momentum thesis
-                if rsi_val_1m <= 28.0:
+                if _WHALE_RSI_SHORT_HARD_MIN < rsi_val_1m <= _WHALE_RSI_SHORT_SOFT_MAX:
                     rsi_penalty = 5.0  # Borderline: penalise but still allow
 
         # Order book imbalance — confirms the dominant side matches the whale
