@@ -378,8 +378,13 @@ class TestVolumeSurgeBreakoutRefinements:
 
     # ── Pullback zone ─────────────────────────────────────────────────────
 
-    def test_premium_pullback_zone_earns_confidence_bonus(self):
-        """Pullback in premium zone (0.3%–0.6%) earns confidence bonus, no soft penalty."""
+    def test_premium_pullback_zone_has_no_soft_penalty(self):
+        """Pullback in premium zone (0.3%–0.6%) carries zero soft penalty.
+
+        The quality distinction between premium and extended zones is expressed
+        via the soft_penalty_total system (scanner deducts post-PR09), not via
+        evaluator-level confidence mutations, which are overwritten by the pipeline.
+        """
         m5 = _make_surge_candles(n=60, breakout_offset=3)
         swing_high = 99.0
         # 0.45% below swing_high: 99.0 * (1 - 0.0045) ≈ 98.554
@@ -387,7 +392,7 @@ class TestVolumeSurgeBreakoutRefinements:
         candles = {"5m": m5}
         sig = self._call(candles, _surge_indicators(), _surge_smc())
         assert sig is not None
-        # Premium zone + FVG bonus + base boost; pullback penalty should be zero
+        # Premium zone with FVG present: no pullback penalty, no FVG penalty
         assert sig.soft_penalty_total == 0.0
 
     def test_shallow_pullback_accepted_with_soft_penalty(self):
@@ -490,15 +495,23 @@ class TestVolumeSurgeBreakoutRefinements:
         assert sig is not None, "Missing FVG/OB should NOT hard-block in BREAKOUT_EXPANSION regime."
         assert sig.soft_penalty_total >= 8.0
 
-    def test_fvg_present_earns_confidence_bonus(self):
-        """FVG presence should add a confidence bonus vs. a missing FVG (fast regime)."""
+    def test_fvg_present_reduces_soft_penalty_vs_absent(self):
+        """FVG presence yields a lower soft_penalty_total than absent FVG (fast regime).
+
+        The evaluator-level sig.confidence from the evaluator is overwritten by the
+        scanner's PR09 composite engine, so quality differentiation must be expressed
+        via soft_penalty_total (deducted post-PR09).  FVG absent → +8.0 soft penalty;
+        FVG present → 0.0 FVG penalty, so with-FVG signal will lose less confidence.
+        """
         candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
         ind = _surge_indicators()
         sig_with_fvg = self._call(candles, ind, _surge_smc(with_fvg=True), regime="VOLATILE")
         sig_no_fvg   = self._call(candles, ind, _surge_smc(with_fvg=False), regime="VOLATILE")
         assert sig_with_fvg is not None and sig_no_fvg is not None
-        assert sig_with_fvg.confidence > sig_no_fvg.confidence, \
-            "FVG presence should yield higher confidence than absent FVG."
+        assert sig_no_fvg.soft_penalty_total >= 8.0, \
+            "Absent FVG in fast regime must accumulate ≥8.0 soft penalty."
+        assert sig_with_fvg.soft_penalty_total < sig_no_fvg.soft_penalty_total, \
+            "FVG present should carry a lower soft penalty than absent FVG."
 
     # ── Quiet regime blocked ─────────────────────────────────────────────
 

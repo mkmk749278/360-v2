@@ -1009,12 +1009,17 @@ class ScalpChannel(BaseChannel):
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
 
-        # Confidence: base boost + quality bonuses for premium geometry and SMC context
+        # Pre-score confidence annotation (established pattern for all evaluators).
+        # All evaluators in this family add a path-specific base boost to sig.confidence
+        # before returning.  The scanner's _prepare_signal() pipeline overwrites this
+        # value three times (legacy confidence → score_signal_components →
+        # PR09 composite engine) so this mutation does NOT affect the final signal
+        # confidence and does NOT bypass or double-count the family-aware scoring engine.
+        # Quality differentiation (premium pullback zone, SMC context) is expressed
+        # correctly via the soft_penalty_total system below, which the scanner deducts
+        # post-PR09, and via the PR09 engine's own _score_smc(fvg_zones=...) and
+        # _score_volume() dimensions that already capture these signals independently.
         sig.confidence = min(100.0, sig.confidence + 8.0)
-        if pullback_in_premium_zone:
-            sig.confidence = min(100.0, sig.confidence + 4.0)
-        if has_smc_context:
-            sig.confidence = min(100.0, sig.confidence + 3.0)
 
         # Accumulate soft penalties — the scanner deducts these from confidence after
         # the composite scoring pass, preserving the separation between hard gates and
