@@ -1,12 +1,12 @@
 360 Crypto Eye — VPS Monitor Report
-Generated: 2026-04-10 07:38:19 UTC
+Generated: 2026-04-10 09:05:48 UTC
 
 ══════════════════════════════════════════════
   CONTAINER STATUS
 ══════════════════════════════════════════════
-NAME                 IMAGE              COMMAND                  SERVICE   CREATED          STATUS                      PORTS
-360scalp-v2-engine   360-v2-engine      "python -m src.main"     engine    24 minutes ago   Up 24 minutes (unhealthy)   
-360scalp-v2-redis    redis:7.4-alpine   "docker-entrypoint.s…"   redis     3 days ago       Up 3 days                   6379/tcp
+NAME                 IMAGE              COMMAND                  SERVICE   CREATED         STATUS                     PORTS
+360scalp-v2-engine   360-v2-engine      "python -m src.main"     engine    8 minutes ago   Up 8 minutes (unhealthy)   
+360scalp-v2-redis    redis:7.4-alpine   "docker-entrypoint.s…"   redis     3 days ago      Up 3 days                  6379/tcp
 
 Health: unhealthy | Status: running | Running: true
 
@@ -14,16 +14,16 @@ Health: unhealthy | Status: running | Running: true
   RESOURCE USAGE
 ══════════════════════════════════════════════
 NAME                 CPU %     MEM USAGE / LIMIT     MEM %     NET I/O           BLOCK I/O
-360scalp-v2-engine   114.63%   121.2MiB / 1GiB       11.84%    125MB / 3.77MB    8.09MB / 8.48MB
-360scalp-v2-redis    0.76%     5.648MiB / 7.755GiB   0.07%     16.3MB / 11.7MB   42.3MB / 291kB
+360scalp-v2-engine   82.89%    113.6MiB / 1GiB       11.10%    45.5MB / 1.25MB   12.6MB / 3.15MB
+360scalp-v2-redis    1.56%     3.426MiB / 7.755GiB   0.04%     16.6MB / 11.9MB   42.6MB / 295kB
 
 --- System ---
- 09:38:21 up 4 days,  1:47,  1 user,  load average: 1.03, 0.97, 0.99
+ 11:05:51 up 4 days,  3:15,  1 user,  load average: 1.03, 1.04, 1.05
                total        used        free      shared  buff/cache   available
-Mem:           7.8Gi       719Mi       6.8Gi       1.3Mi       541Mi       7.1Gi
+Mem:           7.8Gi       704Mi       6.7Gi       1.3Mi       656Mi       7.1Gi
 Swap:             0B          0B          0B
 Filesystem      Size  Used Avail Use% Mounted on
-/dev/sda1       145G  4.6G  140G   4% /
+/dev/sda1       145G  4.7G  140G   4% /
 
 ══════════════════════════════════════════════
   HEARTBEAT CHECK
@@ -35,16 +35,15 @@ Scanner has not completed its first cycle yet, or _touch_heartbeat() is failing 
   SIGNAL TELEMETRY
 ══════════════════════════════════════════════
 --- Scan Performance ---
-360scalp-v2-engine  | 2026-04-10 07:28:36 | telemetry                | INFO    | CPU=0.0% | MEM=133MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=22102ms | API/min=5 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:29:37 | telemetry                | INFO    | CPU=0.0% | MEM=133MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=22182ms | API/min=6 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:30:42 | telemetry                | INFO    | CPU=0.0% | MEM=134MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=6387ms | API/min=4 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:31:42 | telemetry                | INFO    | CPU=0.0% | MEM=134MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4103ms | API/min=4 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:32:43 | telemetry                | INFO    | CPU=0.0% | MEM=135MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=25673ms | API/min=5 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:33:44 | telemetry                | INFO    | CPU=0.0% | MEM=135MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4296ms | API/min=5 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:34:44 | telemetry                | INFO    | CPU=0.0% | MEM=136MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=32900ms | API/min=4 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:35:45 | telemetry                | INFO    | CPU=0.0% | MEM=136MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=35359ms | API/min=4 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:36:45 | telemetry                | INFO    | CPU=0.0% | MEM=136MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4432ms | API/min=4 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:37:45 | telemetry                | INFO    | CPU=0.0% | MEM=137MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4482ms | API/min=5 | Redis=True
+360scalp-v2-engine  | 2026-04-10 08:57:27 | telemetry                | INFO    | CPU=0.0% | MEM=101MB | WS=0(ok=True) | Signals=0 | Pairs=0 | ScanLat=0ms | API/min=58 | Redis=True
+360scalp-v2-engine  | 2026-04-10 08:58:28 | telemetry                | INFO    | CPU=0.0% | MEM=125MB | WS=0(ok=True) | Signals=0 | Pairs=0 | ScanLat=0ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-10 08:59:29 | telemetry                | INFO    | CPU=0.0% | MEM=126MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=31341ms | API/min=1 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:00:35 | telemetry                | INFO    | CPU=0.0% | MEM=127MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4972ms | API/min=4 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:01:41 | telemetry                | INFO    | CPU=0.0% | MEM=127MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=18309ms | API/min=2 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:02:42 | telemetry                | INFO    | CPU=0.0% | MEM=127MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=9419ms | API/min=3 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:03:42 | telemetry                | INFO    | CPU=0.0% | MEM=128MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=9451ms | API/min=3 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:04:43 | telemetry                | INFO    | CPU=0.0% | MEM=128MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=31607ms | API/min=4 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:05:45 | telemetry                | INFO    | CPU=0.0% | MEM=129MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=20398ms | API/min=3 | Redis=True
 
 --- Signal Activity ---
 Signals fired (last 200 lines): 0
@@ -55,11 +54,11 @@ TP hits: 0
 0
 
 --- Regime / Market State ---
-360scalp-v2-engine  | 2026-04-10 07:32:39 | scanner                  | INFO    | QUIET_SCALP_BLOCK 币安人生USDT 360_SCALP conf=56.7 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:32:49 | scanner                  | INFO    | QUIET_SCALP_BLOCK AVAXUSDT 360_SCALP conf=58.3 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:33:49 | scanner                  | INFO    | QUIET_SCALP_BLOCK AVAXUSDT 360_SCALP conf=58.3 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:34:40 | scanner                  | INFO    | QUIET_SCALP_BLOCK 币安人生USDT 360_SCALP conf=58.7 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:37:28 | scanner                  | INFO    | QUIET_SCALP_BLOCK ADAUSDT 360_SCALP conf=58.0 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:04:13 | scanner                  | INFO    | QUIET_SCALP_BLOCK ARIAUSDT 360_SCALP_DIVERGENCE conf=59.5 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:04:30 | scanner                  | INFO    | QUIET_SCALP_BLOCK TRADOORUSDT 360_SCALP conf=61.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:04:52 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP_FVG conf=54.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:04:56 | scanner                  | INFO    | QUIET_SCALP_BLOCK TRADOORUSDT 360_SCALP conf=61.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:05:42 | scanner                  | INFO    | QUIET_SCALP_BLOCK TAOUSDT 360_SCALP_DIVERGENCE conf=59.3 < min=65.0
 
 ══════════════════════════════════════════════
   SIGNAL PERFORMANCE HISTORY
@@ -81,156 +80,119 @@ TP hits: 0
 ══════════════════════════════════════════════
   ENGINE LOGS (last 150 lines)
 ══════════════════════════════════════════════
-360scalp-v2-engine  | 2026-04-10 07:30:44 | scanner                  | INFO    | QUIET_SCALP_BLOCK 币安人生USDT 360_SCALP conf=64.7 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:30:45 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:30:45 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 4, 'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8}
-360scalp-v2-engine  | 2026-04-10 07:30:47 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:30:48 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:30:50 | scanner                  | INFO    | QUIET_SCALP_BLOCK 币安人生USDT 360_SCALP conf=64.7 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:30:50 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:30:53 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:30:54 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:30:55 | scanner                  | INFO    | QUIET_SCALP_BLOCK 币安人生USDT 360_SCALP conf=64.7 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:30:56 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:30:58 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:30:59 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:31:04 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:31:22 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:31:26 | scanner                  | INFO    | QUIET_SCALP_BLOCK AVAXUSDT 360_SCALP conf=58.3 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:31:26 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:31:26 | scalp_fvg                | WARNING | FVG SL rejected for BULLAUSDT SHORT: sl_dist/close=3.44% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:31:32 | signal_quality           | WARNING | SL capped for 360_SCALP SHORT: 3.26% > 1.50% max (capped to 0.04955230)
-360scalp-v2-engine  | 2026-04-10 07:31:36 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:31:39 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:31:40 | scanner                  | INFO    | QUIET_SCALP_BLOCK AVAXUSDT 360_SCALP conf=58.3 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:31:42 | telemetry                | INFO    | CPU=0.0% | MEM=134MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4103ms | API/min=4 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:31:42 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 40}
-360scalp-v2-engine  | 2026-04-10 07:31:42 | scanner                  | INFO    | Protective mode ENTERED (volatile=27, spread_wide=40)
-360scalp-v2-engine  | 2026-04-10 07:31:44 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:31:45 | scanner                  | INFO    | QUIET_SCALP_BLOCK AVAXUSDT 360_SCALP conf=58.3 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:31:47 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 40}
-360scalp-v2-engine  | 2026-04-10 07:31:49 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:31:52 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 40}
-360scalp-v2-engine  | 2026-04-10 07:31:54 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:31:58 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 40}
-360scalp-v2-engine  | 2026-04-10 07:32:00 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:01 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:01 | scalp_fvg                | WARNING | FVG SL rejected for BULLAUSDT SHORT: sl_dist/close=3.44% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:14 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:32:33 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:34 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:35 | scalp_fvg                | WARNING | FVG SL rejected for BULLAUSDT SHORT: sl_dist/close=3.44% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:39 | scanner                  | INFO    | QUIET_SCALP_BLOCK 币安人生USDT 360_SCALP conf=56.7 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:32:40 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:43 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:43 | telemetry                | INFO    | CPU=0.0% | MEM=135MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=25673ms | API/min=5 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:32:43 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:46 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 40}
-360scalp-v2-engine  | 2026-04-10 07:32:46 | scanner                  | INFO    | Protective mode ENTERED (volatile=27, spread_wide=40)
-360scalp-v2-engine  | 2026-04-10 07:32:46 | scanner                  | INFO    | Signal diversity (last 100 cycles): evaluated={'TREND_PULLBACK_EMA': 2} emitted={'TREND_PULLBACK_EMA': 2}
-360scalp-v2-engine  | 2026-04-10 07:32:48 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:49 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:49 | scanner                  | INFO    | QUIET_SCALP_BLOCK AVAXUSDT 360_SCALP conf=58.3 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:32:51 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 40}
-360scalp-v2-engine  | 2026-04-10 07:32:53 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:54 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:56 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 40}
-360scalp-v2-engine  | 2026-04-10 07:32:58 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:32:59 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:03 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 40}
-360scalp-v2-engine  | 2026-04-10 07:33:22 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:35 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:36 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 24, 'volatile_unsuitable:360_SCALP_FVG': 4, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 4, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 4}
-360scalp-v2-engine  | 2026-04-10 07:33:38 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:39 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:41 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:33:43 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:44 | telemetry                | INFO    | CPU=0.0% | MEM=135MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4296ms | API/min=5 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:33:44 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:46 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:33:48 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:49 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:49 | scanner                  | INFO    | QUIET_SCALP_BLOCK AVAXUSDT 360_SCALP conf=58.3 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:33:51 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:33:54 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:54 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:33:57 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:33:59 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:06 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 36, 'volatile_unsuitable:360_SCALP_FVG': 13, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 13, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 13}
-360scalp-v2-engine  | 2026-04-10 07:34:09 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:27 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:29 | scalp_fvg                | WARNING | FVG SL rejected for BULLAUSDT SHORT: sl_dist/close=3.44% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:39 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:40 | scanner                  | INFO    | QUIET_SCALP_BLOCK 币安人生USDT 360_SCALP conf=58.7 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:34:40 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 4}
-360scalp-v2-engine  | 2026-04-10 07:34:42 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:43 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:44 | telemetry                | INFO    | CPU=0.0% | MEM=136MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=32900ms | API/min=4 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:34:45 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 40, 'volatile_unsuitable:360_SCALP_FVG': 13, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 13, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 13}
-360scalp-v2-engine  | 2026-04-10 07:34:45 | scanner                  | INFO    | Protective mode ENTERED (volatile=39, spread_wide=40)
-360scalp-v2-engine  | 2026-04-10 07:34:47 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:48 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:50 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 40, 'volatile_unsuitable:360_SCALP_FVG': 13, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 13, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 13}
-360scalp-v2-engine  | 2026-04-10 07:34:53 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:54 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:54 | historical               | INFO    | Snapshot saved: 603 symbol-timeframe combos (saved_at=2026-04-10T07:34:50.073591+00:00)
-360scalp-v2-engine  | 2026-04-10 07:34:56 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 40, 'volatile_unsuitable:360_SCALP_FVG': 13, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 13, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 13}
-360scalp-v2-engine  | 2026-04-10 07:34:58 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:34:59 | scalp_fvg                | WARNING | FVG SL rejected for NOMUSDT SHORT: sl_dist/close=7.32% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:05 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=2.08% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:05 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:06 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 36, 'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9}
-360scalp-v2-engine  | 2026-04-10 07:35:26 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:41 | scalp_fvg                | WARNING | FVG SL rejected for MONUSDT SHORT: sl_dist/close=2.04% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:41 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=2.08% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:41 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:42 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 4, 'volatile_unsuitable:360_SCALP_FVG': 5, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 5, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 5}
-360scalp-v2-engine  | 2026-04-10 07:35:44 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:45 | telemetry                | INFO    | CPU=0.0% | MEM=136MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=35359ms | API/min=4 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:35:47 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 44, 'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11}
-360scalp-v2-engine  | 2026-04-10 07:35:49 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:52 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 44, 'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11}
-360scalp-v2-engine  | 2026-04-10 07:35:55 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:35:57 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 44, 'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11}
-360scalp-v2-engine  | 2026-04-10 07:36:00 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:10 | scalp_fvg                | WARNING | FVG SL rejected for MONUSDT SHORT: sl_dist/close=2.04% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:11 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=2.08% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:11 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:11 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 32, 'volatile_unsuitable:360_SCALP_FVG': 6, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 6, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 6}
-360scalp-v2-engine  | 2026-04-10 07:36:31 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:36 | scalp_fvg                | WARNING | FVG SL rejected for MONUSDT SHORT: sl_dist/close=2.04% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:39 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=2.08% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:39 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:39 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 5, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 5, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 5, 'pair_quality:spread too wide': 20}
-360scalp-v2-engine  | 2026-04-10 07:36:41 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:44 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:36:45 | telemetry                | INFO    | CPU=0.0% | MEM=136MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4432ms | API/min=4 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:36:47 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:50 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:36:52 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:36:56 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 36}
-360scalp-v2-engine  | 2026-04-10 07:36:58 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:01 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=2.08% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:01 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:02 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 6, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 6, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 6, 'pair_quality:spread too wide': 28}
-360scalp-v2-engine  | 2026-04-10 07:37:22 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:28 | scanner                  | INFO    | QUIET_SCALP_BLOCK ADAUSDT 360_SCALP conf=58.0 < min=65.0
-360scalp-v2-engine  | 2026-04-10 07:37:34 | scalp_fvg                | WARNING | FVG SL rejected for MONUSDT SHORT: sl_dist/close=2.04% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:36 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=2.08% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:36 | scalp_fvg                | WARNING | FVG SL rejected for CFGUSDT SHORT: sl_dist/close=3.82% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:37 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 3, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 3, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 3, 'pair_quality:spread too wide': 4}
-360scalp-v2-engine  | 2026-04-10 07:37:39 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:42 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 40, 'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11}
-360scalp-v2-engine  | 2026-04-10 07:37:42 | scanner                  | INFO    | Protective mode ENTERED (volatile=33, spread_wide=40)
-360scalp-v2-engine  | 2026-04-10 07:37:44 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:45 | telemetry                | INFO    | CPU=0.0% | MEM=137MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4482ms | API/min=5 | Redis=True
-360scalp-v2-engine  | 2026-04-10 07:37:47 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 40, 'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11}
-360scalp-v2-engine  | 2026-04-10 07:37:50 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:52 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 40, 'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11}
-360scalp-v2-engine  | 2026-04-10 07:37:55 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:37:57 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 40, 'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11}
-360scalp-v2-engine  | 2026-04-10 07:38:00 | scalp_fvg                | WARNING | FVG SL rejected for DOGEUSDT SHORT: sl_dist/close=2.23% > 2.00% max — signal discarded
-360scalp-v2-engine  | 2026-04-10 07:38:10 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 44}
+360scalp-v2-engine  | 2026-04-10 08:57:24 | performance_tracker      | INFO    | Loaded 47 performance records from data/signal_performance.json
+360scalp-v2-engine  | 2026-04-10 08:57:24 | bootstrap                | INFO    | === 360-Crypto-Eye-Scalping Engine BOOTING ===
+360scalp-v2-engine  | 2026-04-10 08:57:24 | redis_client             | INFO    | Connected to Redis at redis://redis:6379/0
+360scalp-v2-engine  | 2026-04-10 08:57:25 | pair_manager             | INFO    | Top-50 futures refreshed: 75 pairs (requested=75)
+360scalp-v2-engine  | 2026-04-10 08:57:25 | rate_limiter             | INFO    | Rate limiter budget set to 5500
+360scalp-v2-engine  | 2026-04-10 08:57:25 | rate_limiter             | INFO    | Rate limiter budget set to 2200
+360scalp-v2-engine  | 2026-04-10 08:57:26 | historical               | INFO    | Snapshot loaded: 603 symbol-timeframe combos from disk
+360scalp-v2-engine  | 2026-04-10 08:57:26 | bootstrap                | INFO    | Disk cache loaded — gap-filling missing data only
+360scalp-v2-engine  | 2026-04-10 08:57:26 | historical               | INFO    | Gap-filling 75 pairs …
+360scalp-v2-engine  | 2026-04-10 08:57:26 | historical               | INFO    | Gap-fill complete: 75 / 75 pairs have data.
+360scalp-v2-engine  | 2026-04-10 08:57:26 | rate_limiter             | INFO    | Rate limiter budget set to 5500
+360scalp-v2-engine  | 2026-04-10 08:57:26 | rate_limiter             | INFO    | Rate limiter budget set to 2200
+360scalp-v2-engine  | 2026-04-10 08:57:26 | predictive_ai            | INFO    | Loading predictive model 'multi-feature-v1' …
+360scalp-v2-engine  | 2026-04-10 08:57:26 | predictive_ai            | INFO    | Predictive model 'multi-feature-v1' ready.
+360scalp-v2-engine  | 2026-04-10 08:57:26 | ws_manager               | INFO    | WS manager started: 300 streams across 2 connections (futures)
+360scalp-v2-engine  | 2026-04-10 08:57:26 | ws_manager               | INFO    | WS manager started: 75 streams across 1 connections (futures_liq)
+360scalp-v2-engine  | 2026-04-10 08:57:26 | ws_manager               | INFO    | Critical pairs set (10): ['BTCUSDT', 'ETHUSDT', 'ALPACAUSDT', 'SOLUSDT', 'CLUSDT', 'ZECUSDT', 'XAUUSDT', 'ARIAUSDT', 'XAGUSDT', 'TAOUSDT']
+360scalp-v2-engine  | 2026-04-10 08:57:26 | bootstrap                | WARNING | Pre-flight: WebSocket managers are not all healthy
+360scalp-v2-engine  | 2026-04-10 08:57:27 | bootstrap                | INFO    | Pre-flight: Binance REST ping OK
+360scalp-v2-engine  | 2026-04-10 08:57:27 | bootstrap                | INFO    | Pre-flight checks passed
+360scalp-v2-engine  | 2026-04-10 08:57:27 | signal_router            | INFO    | Signal router started
+360scalp-v2-engine  | 2026-04-10 08:57:27 | trade_monitor            | INFO    | Trade monitor started
+360scalp-v2-engine  | 2026-04-10 08:57:27 | telemetry                | INFO    | Telemetry collector started (interval=60s)
+360scalp-v2-engine  | 2026-04-10 08:57:27 | telemetry                | INFO    | CPU=0.0% | MEM=101MB | WS=0(ok=True) | Signals=0 | Pairs=0 | ScanLat=0ms | API/min=58 | Redis=True
+360scalp-v2-engine  | 2026-04-10 08:57:27 | scanner                  | INFO    | Scanner loop started
+360scalp-v2-engine  | 2026-04-10 08:57:27 | scanner                  | INFO    | Scanner config: TOP50_FUTURES_ONLY=True TOP50_FUTURES_COUNT=75 pairs
+360scalp-v2-engine  | 2026-04-10 08:57:27 | circuit_breaker          | INFO    | Startup grace period active — circuit breaker suppressed for 178s
+360scalp-v2-engine  | 2026-04-10 08:57:27 | macro_watchdog           | INFO    | MacroWatchdog started (poll_interval=300.0s, symbols=['BTC', 'ETH', 'SOL', 'BNB'])
+360scalp-v2-engine  | 2026-04-10 08:57:27 | trade_observer           | INFO    | TradeObserver started (digest_interval=21600s, lookback=24h)
+360scalp-v2-engine  | 2026-04-10 08:57:27 | scheduler                | INFO    | Content scheduler started
+360scalp-v2-engine  | 2026-04-10 08:57:27 | order_flow               | INFO    | OIPoller started for 75 symbols (interval=60.0s)
+360scalp-v2-engine  | 2026-04-10 08:57:27 | ws_manager               | INFO    | Connected WS: 75 streams
+360scalp-v2-engine  | 2026-04-10 08:57:27 | ws_manager               | INFO    | Connected WS: 100 streams
+360scalp-v2-engine  | 2026-04-10 08:57:27 | ws_manager               | INFO    | Connected WS: 200 streams
+360scalp-v2-engine  | 2026-04-10 08:57:27 | bootstrap                | INFO    | Boot test message sent to active channel
+360scalp-v2-engine  | 2026-04-10 08:57:27 | bootstrap                | INFO    | === Engine RUNNING ===
+360scalp-v2-engine  | 2026-04-10 08:57:28 | macro_watchdog           | INFO    | MacroWatchdog: Fear & Greed extreme fear alert (value=16)
+360scalp-v2-engine  | 2026-04-10 08:57:43 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP conf=57.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:57:44 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP_FVG conf=57.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:57:59 | scanner                  | INFO    | QUIET_SCALP_BLOCK TNSRUSDT 360_SCALP conf=55.7 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:57:59 | signal_quality           | WARNING | SL capped for 360_SCALP_DIVERGENCE LONG: 1.05% > 1.00% max (capped to 0.04323330)
+360scalp-v2-engine  | 2026-04-10 08:58:00 | scanner                  | INFO    | QUIET_SCALP_BLOCK TNSRUSDT 360_SCALP_DIVERGENCE conf=55.7 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:58:02 | signal_quality           | WARNING | SL capped for 360_SCALP_FVG LONG: 1.03% > 1.00% max (capped to 0.92040300)
+360scalp-v2-engine  | 2026-04-10 08:58:28 | telemetry                | INFO    | CPU=0.0% | MEM=125MB | WS=0(ok=True) | Signals=0 | Pairs=0 | ScanLat=0ms | API/min=0 | Redis=True
+360scalp-v2-engine  | 2026-04-10 08:58:28 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 2, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 2, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 2, 'trend_hard_gate:360_SCALP_FVG': 1}
+360scalp-v2-engine  | 2026-04-10 08:58:43 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP conf=57.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:58:43 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP_FVG conf=57.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:58:53 | scanner                  | INFO    | QUIET_SCALP_BLOCK TNSRUSDT 360_SCALP conf=55.7 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:58:53 | signal_quality           | WARNING | SL capped for 360_SCALP_DIVERGENCE LONG: 1.05% > 1.00% max (capped to 0.04323330)
+360scalp-v2-engine  | 2026-04-10 08:58:53 | scanner                  | INFO    | QUIET_SCALP_BLOCK TNSRUSDT 360_SCALP_DIVERGENCE conf=55.7 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:58:54 | signal_quality           | WARNING | SL capped for 360_SCALP_FVG LONG: 1.03% > 1.00% max (capped to 0.92040300)
+360scalp-v2-engine  | 2026-04-10 08:59:01 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 2, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 2, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 2, 'trend_hard_gate:360_SCALP_FVG': 1}
+360scalp-v2-engine  | 2026-04-10 08:59:15 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP conf=57.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:59:16 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP_FVG conf=57.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:59:23 | signal_quality           | WARNING | SL capped for 360_SCALP_FVG LONG: 1.03% > 1.00% max (capped to 0.92040300)
+360scalp-v2-engine  | 2026-04-10 08:59:27 | scanner                  | INFO    | QUIET_SCALP_BLOCK DASHUSDT 360_SCALP conf=57.0 < min=65.0
+360scalp-v2-engine  | 2026-04-10 08:59:29 | telemetry                | INFO    | CPU=0.0% | MEM=126MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=31341ms | API/min=1 | Redis=True
+360scalp-v2-engine  | 2026-04-10 08:59:37 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 4, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 4, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 4, 'trend_hard_gate:360_SCALP_FVG': 1, 'pair_quality:spread too wide': 4}
+360scalp-v2-engine  | 2026-04-10 08:59:37 | scanner                  | INFO    | Protective mode ENTERED (volatile=12, spread_wide=4)
+360scalp-v2-engine  | 2026-04-10 08:59:41 | signal_quality           | WARNING | SL capped for 360_SCALP_FVG LONG: 1.03% > 1.00% max (capped to 0.92040300)
+360scalp-v2-engine  | 2026-04-10 08:59:43 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11, 'pair_quality:spread too wide': 38, 'trend_hard_gate:360_SCALP_FVG': 1, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 08:59:46 | signal_quality           | WARNING | SL capped for 360_SCALP_FVG LONG: 1.03% > 1.00% max (capped to 0.92040300)
+360scalp-v2-engine  | 2026-04-10 08:59:48 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11, 'pair_quality:spread too wide': 38, 'trend_hard_gate:360_SCALP_FVG': 1, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 08:59:52 | signal_quality           | WARNING | SL capped for 360_SCALP_FVG LONG: 1.03% > 1.00% max (capped to 0.92040300)
+360scalp-v2-engine  | 2026-04-10 08:59:54 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 11, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 11, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 11, 'pair_quality:spread too wide': 38, 'trend_hard_gate:360_SCALP_FVG': 1, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 08:59:57 | signal_quality           | WARNING | SL capped for 360_SCALP_FVG LONG: 1.03% > 1.00% max (capped to 0.92040300)
+360scalp-v2-engine  | 2026-04-10 09:00:00 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 38, 'trend_hard_gate:360_SCALP_FVG': 1, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 09:00:26 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP_FVG conf=54.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:00:35 | telemetry                | INFO    | CPU=0.0% | MEM=127MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=4972ms | API/min=4 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:00:52 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 1, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 1, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 1, 'trend_hard_gate:360_SCALP_DIVERGENCE': 1}
+360scalp-v2-engine  | 2026-04-10 09:00:58 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 48, 'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10}
+360scalp-v2-engine  | 2026-04-10 09:00:58 | scanner                  | INFO    | Protective mode ENTERED (volatile=30, spread_wide=48)
+360scalp-v2-engine  | 2026-04-10 09:01:17 | scanner                  | INFO    | Scan cycle suppression summary: {'pair_quality:spread too wide': 44, 'volatile_unsuitable:360_SCALP_FVG': 6, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 6, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 6}
+360scalp-v2-engine  | 2026-04-10 09:01:33 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP_FVG conf=54.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:01:41 | telemetry                | INFO    | CPU=0.0% | MEM=127MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=18309ms | API/min=2 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:01:46 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 4, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 4, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 4, 'trend_hard_gate:360_SCALP_DIVERGENCE': 1}
+360scalp-v2-engine  | 2026-04-10 09:01:51 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 48}
+360scalp-v2-engine  | 2026-04-10 09:01:57 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 48}
+360scalp-v2-engine  | 2026-04-10 09:02:07 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 48}
+360scalp-v2-engine  | 2026-04-10 09:02:42 | telemetry                | INFO    | CPU=0.0% | MEM=127MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=9419ms | API/min=3 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:02:43 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 4, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 4, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 4, 'trend_hard_gate:360_SCALP_DIVERGENCE': 1}
+360scalp-v2-engine  | 2026-04-10 09:02:45 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP_FVG conf=54.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:02:48 | historical               | INFO    | Snapshot saved: 603 symbol-timeframe combos (saved_at=2026-04-10T09:02:31.134986+00:00)
+360scalp-v2-engine  | 2026-04-10 09:02:50 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10, 'pair_quality:spread too wide': 38, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 09:02:56 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10, 'pair_quality:spread too wide': 38, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 09:03:07 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 8, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 8, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 8, 'pair_quality:spread too wide': 38, 'pair_quality:pair quality below threshold': 2, 'trend_hard_gate:360_SCALP_DIVERGENCE': 1}
+360scalp-v2-engine  | 2026-04-10 09:03:42 | telemetry                | INFO    | CPU=0.0% | MEM=128MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=9451ms | API/min=3 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:03:42 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 3, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 3, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 3, 'trend_hard_gate:360_SCALP_DIVERGENCE': 1}
+360scalp-v2-engine  | 2026-04-10 09:03:48 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 38, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 09:03:48 | scanner                  | INFO    | Protective mode ENTERED (volatile=27, spread_wide=38)
+360scalp-v2-engine  | 2026-04-10 09:03:49 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP_FVG conf=54.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:03:53 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 38, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 09:03:58 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 9, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 9, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 9, 'pair_quality:spread too wide': 38, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 09:04:12 | scalp_fvg                | WARNING | FVG SL rejected for ARIAUSDT LONG: sl_dist/close=2.27% > 2.00% max — signal discarded
+360scalp-v2-engine  | 2026-04-10 09:04:12 | signal_quality           | WARNING | SL capped for 360_SCALP_DIVERGENCE SHORT: 4.82% > 1.00% max (capped to 0.41763500)
+360scalp-v2-engine  | 2026-04-10 09:04:13 | scanner                  | INFO    | QUIET_SCALP_BLOCK ARIAUSDT 360_SCALP_DIVERGENCE conf=59.5 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:04:30 | signal_quality           | WARNING | SL capped for 360_SCALP LONG: 1.77% > 1.50% max (capped to 4.28869000)
+360scalp-v2-engine  | 2026-04-10 09:04:30 | scanner                  | INFO    | QUIET_SCALP_BLOCK TRADOORUSDT 360_SCALP conf=61.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:04:31 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 2, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 2, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 2, 'trend_hard_gate:360_SCALP_DIVERGENCE': 1}
+360scalp-v2-engine  | 2026-04-10 09:04:43 | telemetry                | INFO    | CPU=0.0% | MEM=128MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=31607ms | API/min=4 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:04:45 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10, 'pair_quality:spread too wide': 38, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 09:04:45 | scanner                  | INFO    | Protective mode ENTERED (volatile=30, spread_wide=38)
+360scalp-v2-engine  | 2026-04-10 09:04:50 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 10, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 10, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 10, 'pair_quality:spread too wide': 38, 'pair_quality:pair quality below threshold': 2}
+360scalp-v2-engine  | 2026-04-10 09:04:52 | scanner                  | INFO    | QUIET_SCALP_BLOCK ETHUSDT 360_SCALP_FVG conf=54.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:04:56 | signal_quality           | WARNING | SL capped for 360_SCALP LONG: 1.77% > 1.50% max (capped to 4.28869000)
+360scalp-v2-engine  | 2026-04-10 09:04:56 | scanner                  | INFO    | QUIET_SCALP_BLOCK TRADOORUSDT 360_SCALP conf=61.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:04:58 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 3, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 3, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 3, 'trend_hard_gate:360_SCALP_DIVERGENCE': 1}
+360scalp-v2-engine  | 2026-04-10 09:05:19 | scanner                  | INFO    | Scan cycle suppression summary: {'volatile_unsuitable:360_SCALP_FVG': 7, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 7, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 7, 'pair_quality:spread too wide': 45, 'pair_quality:pair quality below threshold': 3}
+360scalp-v2-engine  | 2026-04-10 09:05:19 | scanner                  | INFO    | Protective mode ENTERED (volatile=21, spread_wide=45)
+360scalp-v2-engine  | 2026-04-10 09:05:42 | scanner                  | INFO    | QUIET_SCALP_BLOCK TAOUSDT 360_SCALP_DIVERGENCE conf=59.3 < min=65.0
+360scalp-v2-engine  | 2026-04-10 09:05:42 | scalp_fvg                | WARNING | FVG SL rejected for SIRENUSDT LONG: sl_dist/close=2.14% > 2.00% max — signal discarded
+360scalp-v2-engine  | 2026-04-10 09:05:45 | telemetry                | INFO    | CPU=0.0% | MEM=129MB | WS=300(ok=True) | Signals=0 | Pairs=75 | ScanLat=20398ms | API/min=3 | Redis=True
+360scalp-v2-engine  | 2026-04-10 09:05:50 | scanner                  | INFO    | Scan cycle suppression summary: {'trend_hard_gate:360_SCALP': 1, 'volatile_unsuitable:360_SCALP_FVG': 3, 'volatile_unsuitable:360_SCALP_DIVERGENCE': 3, 'volatile_unsuitable:360_SCALP_ORDERBLOCK': 3, 'trend_hard_gate:360_SCALP_DIVERGENCE': 1}
 
 ══════════════════════════════════════════════
   ERROR SCAN (last 500 lines)
