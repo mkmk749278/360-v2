@@ -249,9 +249,6 @@ _SMC_GATE_EXEMPT_SETUPS: frozenset = frozenset({
     # FAR uses its own structural gates (auction wick + reclaim); SMC sweep
     # score does not measure the failed-acceptance thesis.
     "FAILED_AUCTION_RECLAIM",
-    # RANGE_FADE: Bollinger Band mean-reversion — no sweep required.  Primary
-    # edge is price at BB extreme + RSI confirmation, not institutional sweep.
-    "RANGE_FADE",
 })
 
 # Setup classes whose signal thesis is NOT based on EMA alignment.
@@ -260,11 +257,6 @@ _TREND_GATE_EXEMPT_SETUPS: frozenset = frozenset({
     "LIQUIDATION_REVERSAL",
     "FUNDING_EXTREME_SIGNAL",
     "WHALE_MOMENTUM",
-    # RANGE_FADE: mean-reversion at BB extremes — EMA alignment is counter to
-    # the thesis (price is at an extreme, not in trend direction).  RSI alone
-    # drives the indicator score for this setup; EMA scoring is architecturally
-    # wrong and would block valid mean-reversion entries.
-    "RANGE_FADE",
 })
 
 # Penalty multiplier applied to scalp-channel soft gates when the regime is
