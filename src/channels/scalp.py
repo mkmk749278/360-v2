@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
-from config import CHANNEL_SCALP, SURGE_VOLUME_MULTIPLIER, FUNDING_RATE_EXTREME_THRESHOLD
+from config import CHANNEL_SCALP, SURGE_VOLUME_MULTIPLIER, FUNDING_RATE_EXTREME_THRESHOLD, SCALP_ORB_ENABLED
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import (
     check_adx,
@@ -1431,6 +1431,11 @@ class ScalpChannel(BaseChannel):
         regime: str = "",
     ) -> Optional[Signal]:
         """OPENING_RANGE_BREAKOUT: session opening-range breakout with SMC basis."""
+        # PR-06: disabled by default until rebuilt with true session-opening-range
+        # logic.  The current proxy (last-8-bar window) is not institutional-grade.
+        # Re-enable explicitly via SCALP_ORB_ENABLED=true in .env.
+        if not SCALP_ORB_ENABLED:
+            return None
         now_hour = datetime.now(timezone.utc).hour
         # Only active during London (07:00–08:59 UTC) or NY (12:00–13:59 UTC)
         in_london = 7 <= now_hour < 9

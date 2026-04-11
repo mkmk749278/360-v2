@@ -728,6 +728,11 @@ CHANNEL_SCALP_CVD_ENABLED:        bool = _safe_bool("CHANNEL_SCALP_CVD_ENABLED",
 CHANNEL_SCALP_VWAP_ENABLED:       bool = _safe_bool("CHANNEL_SCALP_VWAP_ENABLED",       "false")
 CHANNEL_SCALP_SUPERTREND_ENABLED: bool = _safe_bool("CHANNEL_SCALP_SUPERTREND_ENABLED", "false")
 CHANNEL_SCALP_ICHIMOKU_ENABLED:   bool = _safe_bool("CHANNEL_SCALP_ICHIMOKU_ENABLED",   "false")
+# PR-06: OPENING_RANGE_BREAKOUT disabled by default pending rebuild with true
+# session-opening-range logic.  The current implementation uses the last 8 bars
+# as a proxy — not an institutional-grade session-anchored range.  Code is
+# preserved; set SCALP_ORB_ENABLED=true in .env to re-enable explicitly.
+SCALP_ORB_ENABLED:                bool = _safe_bool("SCALP_ORB_ENABLED",                "false")
 
 # ---------------------------------------------------------------------------
 # Mapping from signal setup_class to the display header shown in Telegram.
