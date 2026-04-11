@@ -138,6 +138,37 @@ _PDC_RSI_LONG_SOFT_MIN: float = 72.0   # ≥ this (< hard) → +6 soft penalty
 _PDC_RSI_SHORT_HARD_MIN: float = 18.0  # ≤ this → hard reject (oversold)
 _PDC_RSI_SHORT_SOFT_MAX: float = 28.0  # ≤ this (> hard) → +6 soft penalty
 
+# FAILED_AUCTION_RECLAIM path constants.
+# Regimes where a failed breakout / failed breakdown reclaim setup is valid.
+# VOLATILE/VOLATILE_UNSUITABLE: chaotic orderflow makes level identification
+# unreliable — false-auction candles are indistinguishable from genuine breakouts.
+# STRONG_TREND: genuine breakouts succeed in strong trends; FAR has very low
+# edge when directional momentum is overwhelming (false-breakouts rarely hold).
+_FAR_BLOCKED_REGIMES: frozenset = frozenset({
+    "VOLATILE", "VOLATILE_UNSUITABLE", "STRONG_TREND",
+})
+# Lookback for computing the reference structural level (prior swing high/low).
+# Excludes the auction window so the failed-auction candle doesn't contaminate
+# the reference level used to measure the breakout.
+_FAR_STRUCT_LOOKBACK: int = 20
+# Window within which to search for the failed-auction candle (positions back
+# from the current bar, not counting current bar itself).
+_FAR_AUCTION_WINDOW_MIN: int = 1  # Nearest candle that can be the auction bar
+_FAR_AUCTION_WINDOW_MAX: int = 7  # Furthest candle; beyond this the signal is stale
+# A breakout is "failed" when the candle closed within this fraction of the
+# reference level (close was at or near the level, not convincingly beyond it).
+# A value of 0.002 means the close must be within 0.2% of the level to count.
+_FAR_ACCEPTANCE_THRESHOLD: float = 0.002
+# Minimum reclaim distance (as a multiple of ATR) required from the reference
+# level to the current close.  Ensures a genuine reclaim, not a marginal tick.
+_FAR_MIN_RECLAIM_ATR: float = 0.10
+# RSI hard/soft thresholds.  More conservative than PDC because FAR is a
+# reversal-of-failure setup (counter to the initial failed breakout direction).
+_FAR_RSI_LONG_HARD_MAX: float = 75.0   # ≥ this → hard reject (overbought)
+_FAR_RSI_LONG_SOFT_MIN: float = 65.0   # ≥ this (< hard) → +6 soft penalty
+_FAR_RSI_SHORT_HARD_MIN: float = 25.0  # ≤ this → hard reject (oversold)
+_FAR_RSI_SHORT_SOFT_MAX: float = 35.0  # ≤ this (> hard) → +6 soft penalty
+
 
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
@@ -232,6 +263,7 @@ class ScalpChannel(BaseChannel):
             self._evaluate_divergence_continuation,
             self._evaluate_continuation_liquidity_sweep,
             self._evaluate_post_displacement_continuation,
+            self._evaluate_failed_auction_reclaim,
         ):
             sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
             if sig is not None:
@@ -2871,6 +2903,306 @@ class ScalpChannel(BaseChannel):
 
         # Accumulate soft penalties — deducted from confidence post-PR09 by scanner
         total_penalty = rsi_penalty + fvg_ob_penalty + consol_vol_penalty
+        if total_penalty > 0.0:
+            sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
+
+        return sig
+
+    # ------------------------------------------------------------------
+    # FAILED_AUCTION_RECLAIM path (Phase 2, roadmap step 7)
+    # Failed breakout/breakdown → acceptance failure → reclaim.
+    # ------------------------------------------------------------------
+
+    def _evaluate_failed_auction_reclaim(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """FAILED_AUCTION_RECLAIM: failed-acceptance level reclaim entry.
+
+        Setup logic:
+        1. A structural reference level (prior swing high/low) is identified
+           from recent history (excluding the auction window).
+        2. Within the auction window (1–7 bars back from current), a candle
+           probed beyond that level — the "failed auction": it broke the obvious
+           level but its close stayed at or near the level rather than convincingly
+           accepting beyond it.
+        3. The current close has reclaimed back inside the prior range by at least
+           _FAR_MIN_RECLAIM_ATR × ATR — the reclaim confirmation that entries the
+           thesis.
+        4. RSI is not at exhaustion extremes (layered hard/soft gate).
+
+        This is distinct from:
+        - LIQUIDITY_SWEEP_REVERSAL: LSR requires an SMC sweep structure (wick
+          through prior lows/highs with SMC context).  FAR captures the price-
+          structure rejection without requiring a sweep detection event.
+        - CONTINUATION_LIQUIDITY_SWEEP: CLS enters continuation after a sweep in
+          the trend direction.  FAR enters reclaim after a failed directional probe.
+        - SR_FLIP_RETEST: SFR fires on a confirmed support/resistance role-change.
+          FAR fires when a level holds by rejecting an auction attempt.
+
+        Structural SL is placed just beyond the failed-auction wick extreme.  If
+        price moves past that point the rejection was not genuine and the thesis
+        is fully invalidated.
+
+        Soft penalty contributors (do not hard-reject):
+        - RSI in borderline zone (65-75 LONG / 25-35 SHORT): +6 pts
+        - No FVG or orderblock context present: +5 pts
+        """
+        # Hard block regimes where false-auction detection is unreliable or where
+        # genuine breakouts dominate, making FAR structurally incorrect.
+        regime_upper = regime.upper() if regime else ""
+        if regime_upper in _FAR_BLOCKED_REGIMES:
+            return None
+
+        m5 = candles.get("5m")
+        if m5 is None or len(m5.get("close", [])) < 20:
+            return None
+
+        closes_raw = m5.get("close", [])
+        highs_raw = m5.get("high", [])
+        lows_raw = m5.get("low", [])
+
+        n = len(closes_raw)
+        if n < 20 or len(highs_raw) < n or len(lows_raw) < n:
+            return None
+
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+            return None
+
+        ind = indicators.get("5m", {})
+        atr_val = ind.get("atr_last")
+        if atr_val is None or atr_val <= 0:
+            return None
+
+        close = float(closes_raw[-1])
+        if close <= 0:
+            return None
+
+        # ── Reference structure levels ───────────────────────────────────
+        # Compute prior swing high and low from history BEFORE the auction
+        # window.  This prevents the auction candle itself from shifting the
+        # reference (a candle that probed far below/above the prior range
+        # would lower/raise the reference, negating the breakout detection).
+        # Exclude the full auction window (_FAR_AUCTION_WINDOW_MAX bars) so that
+        # no auction-window candle contaminates the struct reference level.
+        struct_end = n - 1 - _FAR_AUCTION_WINDOW_MAX   # exclusive end
+        struct_start = max(0, struct_end - _FAR_STRUCT_LOOKBACK)
+        if struct_end <= struct_start:
+            return None
+
+        struct_highs = [float(highs_raw[i]) for i in range(struct_start, struct_end)]
+        struct_lows = [float(lows_raw[i]) for i in range(struct_start, struct_end)]
+        if not struct_highs or not struct_lows:
+            return None
+        struct_high = max(struct_highs)
+        struct_low = min(struct_lows)
+        if struct_high <= struct_low:
+            return None
+
+        # ── Failed-auction candle search ─────────────────────────────────
+        # Scan the auction window (1 to _FAR_AUCTION_WINDOW_MAX bars back).
+        # For a LONG setup: look for a candle whose LOW was below struct_low but
+        # whose CLOSE was at or above struct_low (failed acceptance below).
+        # For a SHORT setup: look for a candle whose HIGH was above struct_high
+        # but whose CLOSE was at or below struct_high (failed acceptance above).
+        long_auction: Optional[tuple] = None   # (auction_wick_low, struct_low)
+        short_auction: Optional[tuple] = None  # (auction_wick_high, struct_high)
+
+        for offset in range(_FAR_AUCTION_WINDOW_MIN, _FAR_AUCTION_WINDOW_MAX + 1):
+            bar_idx = n - 1 - offset
+            if bar_idx < 0:
+                break
+            bar_low = float(lows_raw[bar_idx])
+            bar_high = float(highs_raw[bar_idx])
+            bar_close = float(closes_raw[bar_idx])
+
+            # LONG candidate: low below struct_low but close accepted back above
+            # (close >= struct_low is "at or above", indicating rejection of the break)
+            if (
+                long_auction is None
+                and bar_low < struct_low
+                and bar_close >= struct_low * (1.0 - _FAR_ACCEPTANCE_THRESHOLD)
+            ):
+                long_auction = (bar_low, struct_low)
+
+            # SHORT candidate: high above struct_high but close rejected back below
+            if (
+                short_auction is None
+                and bar_high > struct_high
+                and bar_close <= struct_high * (1.0 + _FAR_ACCEPTANCE_THRESHOLD)
+            ):
+                short_auction = (bar_high, struct_high)
+
+            # Stop early if both found (shouldn't happen in normal markets but
+            # prevents unnecessary iteration)
+            if long_auction and short_auction:
+                break
+
+        # Determine which direction (if any) has a valid auction
+        if long_auction is None and short_auction is None:
+            return None
+
+        # Prefer the auction whose reference level is currently reclaimed.
+        # If both fire simultaneously (rare) prefer whichever reclaim is larger.
+        direction = None
+        auction_wick_extreme = 0.0
+        reclaim_level = 0.0
+
+        if long_auction is not None:
+            awk_low, ref_low = long_auction
+            reclaim_dist = close - ref_low
+            min_reclaim = atr_val * _FAR_MIN_RECLAIM_ATR
+            if close > ref_low and reclaim_dist >= min_reclaim:
+                direction = Direction.LONG
+                auction_wick_extreme = awk_low
+                reclaim_level = ref_low
+
+        if short_auction is not None:
+            awk_high, ref_high = short_auction
+            reclaim_dist_s = ref_high - close
+            min_reclaim = atr_val * _FAR_MIN_RECLAIM_ATR
+            if close < ref_high and reclaim_dist_s >= min_reclaim:
+                # If long direction already set, compare reclaim distances
+                if direction == Direction.LONG:
+                    long_dist = close - reclaim_level
+                    if reclaim_dist_s > long_dist:
+                        direction = Direction.SHORT
+                        auction_wick_extreme = awk_high
+                        reclaim_level = ref_high
+                else:
+                    direction = Direction.SHORT
+                    auction_wick_extreme = awk_high
+                    reclaim_level = ref_high
+
+        if direction is None:
+            return None
+
+        # ── RSI layered gate ─────────────────────────────────────────────
+        # More conservative thresholds than PDC because FAR is a reversal-of-
+        # failure structure: entering when RSI is near exhaustion contradicts
+        # the thesis that price is genuinely rejecting and reclaiming.
+        rsi_val = ind.get("rsi_last")
+        rsi_penalty = 0.0
+        if rsi_val is not None:
+            if direction == Direction.LONG:
+                if rsi_val >= _FAR_RSI_LONG_HARD_MAX:
+                    return None  # Hard reject: overbought — reclaim won't hold
+                if rsi_val >= _FAR_RSI_LONG_SOFT_MIN:
+                    rsi_penalty = 6.0
+            else:
+                if rsi_val <= _FAR_RSI_SHORT_HARD_MIN:
+                    return None  # Hard reject: oversold — reclaim won't hold
+                if rsi_val <= _FAR_RSI_SHORT_SOFT_MAX:
+                    rsi_penalty = 6.0
+
+        # ── FVG / orderblock soft quality gate ───────────────────────────
+        # SMC context strengthens the reclaim thesis but is not required:
+        # FAR is defined as NOT oscillator-dependent and the structural candle
+        # pattern is primary evidence.  Absence gets a soft penalty only.
+        fvgs = smc_data.get("fvg", [])
+        orderblocks = smc_data.get("orderblocks", [])
+        fvg_ob_penalty = 0.0 if (fvgs or orderblocks) else 5.0
+
+        # ── SL: below / above the failed-auction wick extreme ────────────
+        # This is the hard structural invalidation: if price reaches the wick
+        # extreme the rejection was not genuine — the auction was accepted
+        # and the thesis is fully wrong.
+        atr_buffer = atr_val * 0.3
+        if direction == Direction.LONG:
+            sl = auction_wick_extreme - atr_buffer
+        else:
+            sl = auction_wick_extreme + atr_buffer
+
+        sl_dist = abs(close - sl)
+        min_sl_dist = atr_val * 0.5
+        if sl_dist < min_sl_dist:
+            sl_dist = min_sl_dist
+            sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
+
+        if direction == Direction.LONG and sl >= close:
+            return None
+        if direction == Direction.SHORT and sl <= close:
+            return None
+
+        # ── TP: measured move from failed-auction tail (Type C) ───────────
+        # The "tail" is the distance the auction probed beyond the reference
+        # level before being rejected.  Projecting an equal move from the
+        # current entry in the reclaim direction gives a measured-move target
+        # that is directly calibrated to the strength of the rejection.
+        if direction == Direction.LONG:
+            tail = reclaim_level - auction_wick_extreme  # how far below level it went
+        else:
+            tail = auction_wick_extreme - reclaim_level  # how far above level it went
+
+        if tail <= 0:
+            tail = sl_dist  # fallback: use SL distance as proxy
+
+        if direction == Direction.LONG:
+            tp1 = close + tail * 1.0
+            tp2 = close + tail * 1.5
+            tp3 = close + tail * 2.5
+        else:
+            tp1 = close - tail * 1.0
+            tp2 = close - tail * 1.5
+            tp3 = close - tail * 2.5
+
+        # Ensure minimum R:R geometry
+        if direction == Direction.LONG and tp1 <= close:
+            tp1 = close + sl_dist * 1.5
+        if direction == Direction.SHORT and tp1 >= close:
+            tp1 = close - sl_dist * 1.5
+        if direction == Direction.LONG and tp2 <= tp1:
+            tp2 = close + sl_dist * 2.5
+        if direction == Direction.SHORT and tp2 >= tp1:
+            tp2 = close - sl_dist * 2.5
+
+        profile = smc_data.get("pair_profile")
+        _regime_ctx = smc_data.get("regime_context")
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=direction,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="FAR",
+            atr_val=atr_val,
+            setup_class="FAILED_AUCTION_RECLAIM",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return None
+
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+
+        # Store the reclaim level so that execution_quality_check() can use it
+        # as the structural anchor (the level that was broken and reclaimed).
+        # For LONG: reclaim_level is the struct_low that was broken-then-recovered.
+        # For SHORT: reclaim_level is the struct_high that was broken-then-recovered.
+        sig.far_reclaim_level = round(reclaim_level, 8)
+
+        total_penalty = rsi_penalty + fvg_ob_penalty
         if total_penalty > 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
 

@@ -245,6 +245,10 @@ _SMC_GATE_EXEMPT_SETUPS: frozenset = frozenset({
     # Phase 2 — new path: displacement-based, not sweep-based; SMC score is
     # structurally low for this path.
     "POST_DISPLACEMENT_CONTINUATION",
+    # Phase 2 roadmap step 7: structural price-level rejection, not sweep-based.
+    # FAR uses its own structural gates (auction wick + reclaim); SMC sweep
+    # score does not measure the failed-acceptance thesis.
+    "FAILED_AUCTION_RECLAIM",
 })
 
 # Setup classes whose signal thesis is NOT based on EMA alignment.

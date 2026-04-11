@@ -2742,3 +2742,429 @@ class TestPostDisplacementContinuation:
         pdc_sigs = [s for s in sigs if s.setup_class == "POST_DISPLACEMENT_CONTINUATION"]
         assert len(pdc_sigs) >= 1, "evaluate() must return a PDC signal when conditions are met."
 
+
+
+# ---------------------------------------------------------------------------
+# FAILED_AUCTION_RECLAIM path tests (roadmap step 7)
+# ---------------------------------------------------------------------------
+
+def _make_far_candles_long(
+    n=30,
+    base=100.0,
+    auction_wick_low=99.0,
+    cur_close=100.4,
+    avg_vol=100.0,
+):
+    """Build candle data satisfying LONG FAR conditions.
+
+    Uses FLAT base candles so that no bar in the auction window accidentally
+    triggers a false SHORT auction by having a high above the struct range.
+
+    Structure:
+    - All bars at base (flat) — establishes struct_low = base - 0.1
+    - Bar at offset=3 (n-4): low = auction_wick_low (probes below struct_low),
+      close = base + 0.05 (fails acceptance, recovers back above struct_low)
+    - Bar n-1 (current): close = cur_close (confirmed reclaim above struct_low)
+    """
+    bar_high = base + 0.3
+    bar_low = base - 0.1   # struct_low candidate from flat bars
+    closes = [base] * n
+    highs = [bar_high] * n
+    lows = [bar_low] * n
+    opens = [base - 0.02] * n
+    volumes = [avg_vol] * n
+
+    # Auction bar at offset=3 (bar_idx = n-4):
+    # wick below struct_low, close accepted back above → failed acceptance
+    auction_idx = n - 4
+    lows[auction_idx] = auction_wick_low
+    closes[auction_idx] = base + 0.05
+    highs[auction_idx] = bar_high  # same high as other bars → no SHORT signal
+
+    # Current bar — reclaim confirmed
+    closes[-1] = cur_close
+    highs[-1] = cur_close + 0.2
+    lows[-1] = cur_close - 0.05
+    opens[-1] = cur_close - 0.02
+
+    return {
+        "open": opens, "high": highs, "low": lows,
+        "close": closes, "volume": volumes,
+    }
+
+
+def _make_far_candles_short(
+    n=30,
+    base=100.0,
+    auction_wick_high=101.0,
+    cur_close=99.6,
+    avg_vol=100.0,
+):
+    """Build candle data satisfying SHORT FAR conditions.
+
+    Uses FLAT base candles so that no bar in the auction window accidentally
+    triggers a false LONG auction.
+
+    Structure:
+    - All bars at base (flat) — establishes struct_high = base + 0.1
+    - Bar at offset=3 (n-4): high = auction_wick_high (probes above struct_high),
+      close = base - 0.05 (fails acceptance, recovers back below struct_high)
+    - Bar n-1 (current): close = cur_close (confirmed reclaim below struct_high)
+    """
+    bar_high = base + 0.1   # struct_high candidate from flat bars
+    bar_low = base - 0.3
+    closes = [base] * n
+    highs = [bar_high] * n
+    lows = [bar_low] * n
+    opens = [base + 0.02] * n
+    volumes = [avg_vol] * n
+
+    # Auction bar at offset=3 (bar_idx = n-4):
+    # wick above struct_high, close rejected back below → failed acceptance
+    auction_idx = n - 4
+    highs[auction_idx] = auction_wick_high
+    closes[auction_idx] = base - 0.05
+    lows[auction_idx] = bar_low  # same low → no LONG signal
+
+    # Current bar — reclaim confirmed below struct_high
+    closes[-1] = cur_close
+    lows[-1] = cur_close - 0.2
+    highs[-1] = cur_close + 0.05
+    opens[-1] = cur_close + 0.02
+
+    return {
+        "open": opens, "high": highs, "low": lows,
+        "close": closes, "volume": volumes,
+    }
+
+
+def _far_indicators_long(atr=0.5, rsi=50.0, ema9=101.0, ema21=100.0, adx=22.0):
+    return {
+        "5m": _make_indicators(
+            adx_val=adx, atr_val=atr, ema9=ema9, ema21=ema21,
+            rsi_val=rsi, mom=0.2,
+        )
+    }
+
+
+def _far_indicators_short(atr=0.5, rsi=50.0, ema9=99.0, ema21=100.0, adx=22.0):
+    return {
+        "5m": _make_indicators(
+            adx_val=adx, atr_val=atr, ema9=ema9, ema21=ema21,
+            rsi_val=rsi, mom=-0.2,
+        )
+    }
+
+
+class TestFailedAuctionReclaim:
+    """Tests for the FAILED_AUCTION_RECLAIM path (roadmap step 7)."""
+
+    def _call_long(self, candles, indicators, smc_data, regime="RANGING"):
+        ch = ScalpChannel()
+        return ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, smc_data,
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime=regime,
+        )
+
+    def _call_short(self, candles, indicators, smc_data, regime="RANGING"):
+        ch = ScalpChannel()
+        return ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, smc_data,
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime=regime,
+        )
+
+    # ── Happy path ───────────────────────────────────────────────────────
+
+    def test_happy_path_long(self):
+        """LONG FAR fires when a bar pierced below struct_low and current has reclaimed.
+
+        With flat candles:
+        - struct_low = base - 0.1 = 99.9 (from flat bars in lookback)
+        - auction wick low = 98.5 (< 99.9), close = base+0.05 = 100.05 (failed acceptance)
+        - cur_close = 100.4 > struct_low, reclaim_dist = 0.5 >= min_reclaim_atr (0.05)
+        """
+        candles = {"5m": _make_far_candles_long(base=100.0, auction_wick_low=98.5)}
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
+        assert sig is not None, "LONG FAR should fire when all conditions are met."
+        assert sig.direction == Direction.LONG
+        assert sig.setup_class == "FAILED_AUCTION_RECLAIM"
+
+    def test_happy_path_short(self):
+        """SHORT FAR fires when a bar pierced above struct_high and current has reclaimed.
+
+        With flat candles:
+        - struct_high = base + 0.1 = 100.1 (from flat bars in lookback)
+        - auction wick high = 101.5 (> 100.1), close = base-0.05 = 99.95 (failed acceptance)
+        - cur_close = 99.6 < struct_high, reclaim_dist = 0.5 >= min_reclaim_atr (0.05)
+        """
+        candles = {"5m": _make_far_candles_short(base=100.0, auction_wick_high=101.5)}
+        sig = self._call_short(candles, _far_indicators_short(atr=0.5), {}, regime="RANGING")
+        assert sig is not None, "SHORT FAR should fire when all conditions are met."
+        assert sig.direction == Direction.SHORT
+        assert sig.setup_class == "FAILED_AUCTION_RECLAIM"
+
+    # ── Regime gate ──────────────────────────────────────────────────────
+
+    def test_volatile_blocked(self):
+        """VOLATILE regime hard-blocks FAR (chaotic orderflow)."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {}, regime="VOLATILE")
+        assert sig is None, "VOLATILE must hard-block FAR."
+
+    def test_volatile_unsuitable_blocked(self):
+        """VOLATILE_UNSUITABLE must hard-block FAR."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {}, regime="VOLATILE_UNSUITABLE")
+        assert sig is None, "VOLATILE_UNSUITABLE must hard-block FAR."
+
+    def test_strong_trend_blocked(self):
+        """STRONG_TREND must hard-block FAR (genuine breakouts dominate)."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {}, regime="STRONG_TREND")
+        assert sig is None, "STRONG_TREND must hard-block FAR."
+
+    def test_ranging_allowed(self):
+        """RANGING is a valid regime for FAR."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {}, regime="RANGING")
+        assert sig is not None, "RANGING must allow FAR."
+
+    def test_weak_trend_allowed(self):
+        """WEAK_TREND is a valid regime for FAR."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {}, regime="WEAK_TREND")
+        assert sig is not None, "WEAK_TREND must allow FAR."
+
+    def test_breakout_expansion_allowed(self):
+        """BREAKOUT_EXPANSION is a valid regime for FAR (false breakouts at expansion boundaries)."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {}, regime="BREAKOUT_EXPANSION")
+        assert sig is not None, "BREAKOUT_EXPANSION must allow FAR."
+
+    # ── Failure/reclaim structure gates ─────────────────────────────────
+
+    def test_no_auction_candle_returns_none(self):
+        """Returns None when no candle in the auction window probed beyond struct extremes.
+
+        Uses perfectly flat candles where high == struct_high and low == struct_low
+        for every bar, so no auction window bar can have high > struct_high or
+        low < struct_low.
+        """
+        n = 30
+        # Flat candles: all highs and lows identical — no bar ever exceeds struct extremes
+        flat_high = 100.2
+        flat_low = 99.8
+        closes = [100.0] * n
+        highs = [flat_high] * n
+        lows = [flat_low] * n
+        opens = [99.99] * n
+        volumes = [100.0] * n
+        candles = {"5m": {"open": opens, "high": highs, "low": lows,
+                          "close": closes, "volume": volumes}}
+        sig = self._call_long(candles, _far_indicators_long(), {})
+        assert sig is None, "No auction probe → no FAR signal."
+
+    def test_accepted_auction_not_failed(self):
+        """When the auction candle CLOSED convincingly beyond the level, it is not a failed auction.
+
+        With flat candles (struct_low = base - 0.1 = 99.9), an auction_wick_low=98.5 would
+        normally fire as LONG FAR because the wick pierces below struct_low. However, if we
+        manually override the auction close to be well below struct_low, the acceptance check
+        should reject it.
+        """
+        n = 30
+        base = 100.0
+        bar_high = base + 0.3
+        bar_low = base - 0.1   # struct_low = 99.9
+        closes = [base] * n
+        highs = [bar_high] * n
+        lows = [bar_low] * n
+        opens = [base - 0.02] * n
+        volumes = [100.0] * n
+
+        # Auction bar: wick below struct_low but CLOSE is also well below (accepted!)
+        auction_idx = n - 4
+        lows[auction_idx] = 98.5    # probed below struct_low=99.9
+        closes[auction_idx] = 98.0  # accepted well below struct_low=99.9 (not failed)
+        highs[auction_idx] = bar_high
+
+        # Current bar
+        closes[-1] = 100.4
+        highs[-1] = 100.6
+        lows[-1] = 100.35
+        opens[-1] = 100.38
+
+        candles = {"5m": {"open": opens, "high": highs, "low": lows,
+                          "close": closes, "volume": volumes}}
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
+        assert sig is None, "Accepted auction (close well below level) must not trigger FAR."
+
+    def test_insufficient_reclaim_returns_none(self):
+        """When current close barely exceeds struct_low, reclaim is insufficient.
+
+        struct_low = 99.9 (flat bars at base=100.0, bar_low=99.9).
+        cur_close = 99.92 → reclaim_dist = 0.02 < _FAR_MIN_RECLAIM_ATR * atr (0.10*0.5=0.05).
+        """
+        n = 30
+        base = 100.0
+        bar_high = base + 0.3
+        bar_low = base - 0.1   # struct_low = 99.9
+        closes = [base] * n
+        highs = [bar_high] * n
+        lows = [bar_low] * n
+        opens = [base - 0.02] * n
+        volumes = [100.0] * n
+
+        # Auction bar: valid failed auction
+        auction_idx = n - 4
+        lows[auction_idx] = 98.5
+        closes[auction_idx] = base + 0.05
+        highs[auction_idx] = bar_high
+
+        # Current bar: marginal reclaim (well within min_reclaim threshold)
+        closes[-1] = 99.92
+        highs[-1] = 100.0
+        lows[-1] = 99.9
+        opens[-1] = 99.91
+
+        candles = {"5m": {"open": opens, "high": highs, "low": lows,
+                          "close": closes, "volume": volumes}}
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
+        assert sig is None, "Marginal reclaim below min_reclaim threshold must not trigger FAR."
+
+    # ── RSI gate ────────────────────────────────────────────────────────
+
+    def test_rsi_hard_reject_long_overbought(self):
+        """RSI >= 75 hard-blocks LONG FAR (overbought reclaim won't hold)."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(rsi=76.0), {})
+        assert sig is None, "RSI >= 75 must hard-block LONG FAR."
+
+    def test_rsi_hard_reject_short_oversold(self):
+        """RSI <= 25 hard-blocks SHORT FAR (oversold reclaim won't hold)."""
+        candles = {"5m": _make_far_candles_short()}
+        sig = self._call_short(candles, _far_indicators_short(rsi=24.0), {}, regime="RANGING")
+        assert sig is None, "RSI <= 25 must hard-block SHORT FAR."
+
+    def test_rsi_soft_penalty_long_borderline(self):
+        """RSI in soft zone (65-75) adds penalty but doesn't hard-block LONG FAR."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(rsi=68.0), {})
+        assert sig is not None, "Borderline RSI must not hard-block FAR."
+        assert sig.soft_penalty_total >= 6.0, "Borderline RSI must add ≥6 pts soft penalty."
+
+    def test_rsi_soft_penalty_short_borderline(self):
+        """RSI in soft zone (25-35) adds penalty but doesn't hard-block SHORT FAR."""
+        candles = {"5m": _make_far_candles_short()}
+        sig = self._call_short(candles, _far_indicators_short(rsi=32.0), {}, regime="RANGING")
+        assert sig is not None, "Borderline RSI must not hard-block SHORT FAR."
+        assert sig.soft_penalty_total >= 6.0, "Borderline RSI must add ≥6 pts soft penalty."
+
+    # ── SL/TP geometry ──────────────────────────────────────────────────
+
+    def test_long_sl_below_auction_wick_extreme(self):
+        """SL for LONG FAR must be below the auction wick low (hard structural invalidation)."""
+        candles = {"5m": _make_far_candles_long(auction_wick_low=98.5)}
+        sig = self._call_long(candles, _far_indicators_long(), {})
+        assert sig is not None
+        assert sig.stop_loss < 98.5, (
+            f"SL {sig.stop_loss} must be below auction wick low 98.5"
+        )
+
+    def test_short_sl_above_auction_wick_extreme(self):
+        """SL for SHORT FAR must be above the auction wick high (hard structural invalidation)."""
+        candles = {"5m": _make_far_candles_short(auction_wick_high=101.5)}
+        sig = self._call_short(candles, _far_indicators_short(), {}, regime="RANGING")
+        assert sig is not None
+        assert sig.stop_loss > 101.5, (
+            f"SL {sig.stop_loss} must be above auction wick high 101.5"
+        )
+
+    def test_long_tp1_above_entry(self):
+        """TP1 must be strictly above entry for LONG FAR."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {})
+        assert sig is not None
+        assert sig.tp1 > sig.entry, "TP1 must be above entry for LONG FAR."
+
+    def test_short_tp1_below_entry(self):
+        """TP1 must be strictly below entry for SHORT FAR."""
+        candles = {"5m": _make_far_candles_short()}
+        sig = self._call_short(candles, _far_indicators_short(), {}, regime="RANGING")
+        assert sig is not None
+        assert sig.tp1 < sig.entry, "TP1 must be below entry for SHORT FAR."
+
+    def test_long_tp2_greater_than_tp1(self):
+        """TP2 > TP1 for LONG FAR."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {})
+        assert sig is not None
+        assert sig.tp2 > sig.tp1
+
+    def test_short_tp2_less_than_tp1(self):
+        """TP2 < TP1 for SHORT FAR."""
+        candles = {"5m": _make_far_candles_short()}
+        sig = self._call_short(candles, _far_indicators_short(), {}, regime="RANGING")
+        assert sig is not None
+        assert sig.tp2 < sig.tp1
+
+    def test_long_tp3_greater_than_tp2(self):
+        """TP3 > TP2 for LONG FAR."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {})
+        assert sig is not None
+        assert sig.tp3 > sig.tp2
+
+    # ── far_reclaim_level attribute ──────────────────────────────────────
+
+    def test_far_reclaim_level_stored_on_signal(self):
+        """Signal must store far_reclaim_level for execution_quality_check()."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {})
+        assert sig is not None
+        assert hasattr(sig, "far_reclaim_level"), "Signal must have far_reclaim_level attribute."
+        assert sig.far_reclaim_level > 0, "far_reclaim_level must be positive."
+
+    # ── Setup class and dispatch registration ───────────────────────────
+
+    def test_setup_class_registration(self):
+        """Signal has setup_class == 'FAILED_AUCTION_RECLAIM'."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {})
+        assert sig is not None
+        assert sig.setup_class == "FAILED_AUCTION_RECLAIM"
+
+    def test_registered_in_evaluate(self):
+        """evaluate() returns at least one FAR signal when conditions are met."""
+        ch = ScalpChannel()
+        candles = {"5m": _make_far_candles_long()}
+        sigs = ch.evaluate(
+            "BTCUSDT", candles, _far_indicators_long(),
+            {}, spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
+        )
+        far_sigs = [s for s in sigs if s.setup_class == "FAILED_AUCTION_RECLAIM"]
+        assert len(far_sigs) >= 1, "evaluate() must return a FAR signal when conditions are met."
+
+    # ── FVG/OB soft penalty ──────────────────────────────────────────────
+
+    def test_no_fvg_ob_soft_penalty(self):
+        """Absence of FVG/OB adds a soft penalty of 5 pts."""
+        candles = {"5m": _make_far_candles_long()}
+        sig = self._call_long(candles, _far_indicators_long(), {})
+        assert sig is not None
+        assert sig.soft_penalty_total >= 5.0, "Missing FVG/OB must add ≥5 pts penalty."
+
+    def test_fvg_present_no_ob_penalty(self):
+        """When FVG is present, the 5pt FVG/OB penalty is not applied.
+
+        With clean RSI (50) and FVG present, total penalty should be 0
+        (no RSI penalty and no FVG/OB penalty).
+        """
+        candles = {"5m": _make_far_candles_long()}
+        smc_data = {"fvg": [{"gap_high": 101.0, "gap_low": 100.5}]}
+        sig = self._call_long(candles, _far_indicators_long(rsi=50.0), smc_data)
+        assert sig is not None
+        # FVG present: no FVG/OB penalty applied (0.0), and no RSI penalty (rsi=50)
+        assert sig.soft_penalty_total < 5.0, (
+            "When FVG is present, the 5pt FVG/OB penalty must not be applied."
+        )

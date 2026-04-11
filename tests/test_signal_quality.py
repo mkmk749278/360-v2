@@ -370,6 +370,137 @@ class TestExecutionAndRiskChecks:
         assert risk.tp2 > risk.tp1
         assert "structure" in risk.invalidation_summary
 
+    # ── FAILED_AUCTION_RECLAIM execution-quality tests ───────────────────
+
+    def test_far_long_trigger_confirmed_when_entry_above_reclaim_level(self):
+        """FAR LONG: trigger confirmed when entry > far_reclaim_level."""
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.5
+        signal.far_reclaim_level = 100.0  # broken support that was reclaimed
+        result = execution_quality_check(
+            signal, _indicators(), _smc(), SetupClass.FAILED_AUCTION_RECLAIM,
+            MarketState.CLEAN_RANGE,
+        )
+        assert result.trigger_confirmed is True
+        assert "auction" in result.execution_note.lower()
+
+    def test_far_short_trigger_confirmed_when_entry_below_reclaim_level(self):
+        """FAR SHORT: trigger confirmed when entry < far_reclaim_level."""
+        signal = _signal(channel="360_SCALP", direction=Direction.SHORT)
+        signal.entry = 99.5
+        signal.far_reclaim_level = 100.0  # broken resistance that was reclaimed
+        result = execution_quality_check(
+            signal, _indicators(), _smc(), SetupClass.FAILED_AUCTION_RECLAIM,
+            MarketState.CLEAN_RANGE,
+        )
+        assert result.trigger_confirmed is True
+
+    def test_far_long_trigger_not_confirmed_when_entry_at_level(self):
+        """FAR LONG: trigger NOT confirmed when entry == far_reclaim_level (no clearance)."""
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.far_reclaim_level = 100.0
+        result = execution_quality_check(
+            signal, _indicators(), _smc(), SetupClass.FAILED_AUCTION_RECLAIM,
+            MarketState.CLEAN_RANGE,
+        )
+        assert result.trigger_confirmed is False
+        assert result.passed is False
+
+    def test_far_overextended_entry_rejected(self):
+        """FAR: entry overextended beyond 1.2 ATR from reclaim level is rejected."""
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 103.0
+        signal.far_reclaim_level = 100.0  # 3 ATR away (atr=1.4 → 3/1.4 ≈ 2.1 > 1.2)
+        result = execution_quality_check(
+            signal, _indicators(), _smc(), SetupClass.FAILED_AUCTION_RECLAIM,
+            MarketState.CLEAN_RANGE,
+        )
+        assert result.passed is False
+        assert "overextended" in result.reason
+
+    def test_far_fallback_when_no_reclaim_level_stored(self):
+        """FAR: signal without far_reclaim_level falls back to entry anchor (no KeyError)."""
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        # No far_reclaim_level attribute at all
+        result = execution_quality_check(
+            signal, _indicators(), _smc(), SetupClass.FAILED_AUCTION_RECLAIM,
+            MarketState.CLEAN_RANGE,
+        )
+        # anchor == entry → trigger_confirmed == False (entry is not > entry)
+        assert result is not None
+        assert result.trigger_confirmed is False
+
+    # ── FAILED_AUCTION_RECLAIM regime-compatibility tests ───────────────
+
+    def test_far_regime_compatible_in_clean_range(self):
+        """FAILED_AUCTION_RECLAIM must be regime-compatible with CLEAN_RANGE."""
+        from src.signal_quality import REGIME_SETUP_COMPATIBILITY
+        assert SetupClass.FAILED_AUCTION_RECLAIM in REGIME_SETUP_COMPATIBILITY.get(
+            MarketState.CLEAN_RANGE, set()
+        ), "FAR must be allowed in CLEAN_RANGE (prime regime for failed auctions)."
+
+    def test_far_regime_compatible_in_dirty_range(self):
+        """FAILED_AUCTION_RECLAIM must be regime-compatible with DIRTY_RANGE."""
+        from src.signal_quality import REGIME_SETUP_COMPATIBILITY
+        assert SetupClass.FAILED_AUCTION_RECLAIM in REGIME_SETUP_COMPATIBILITY.get(
+            MarketState.DIRTY_RANGE, set()
+        ), "FAR must be allowed in DIRTY_RANGE."
+
+    def test_far_regime_compatible_in_weak_trend(self):
+        """FAILED_AUCTION_RECLAIM must be regime-compatible with WEAK_TREND."""
+        from src.signal_quality import REGIME_SETUP_COMPATIBILITY
+        assert SetupClass.FAILED_AUCTION_RECLAIM in REGIME_SETUP_COMPATIBILITY.get(
+            MarketState.WEAK_TREND, set()
+        ), "FAR must be allowed in WEAK_TREND (breakouts often fail when trend is weak)."
+
+    def test_far_regime_compatible_in_breakout_expansion(self):
+        """FAILED_AUCTION_RECLAIM must be regime-compatible with BREAKOUT_EXPANSION."""
+        from src.signal_quality import REGIME_SETUP_COMPATIBILITY
+        assert SetupClass.FAILED_AUCTION_RECLAIM in REGIME_SETUP_COMPATIBILITY.get(
+            MarketState.BREAKOUT_EXPANSION, set()
+        ), "FAR must be allowed in BREAKOUT_EXPANSION (false breakouts at expansion boundaries)."
+
+    def test_far_regime_incompatible_in_strong_trend(self):
+        """FAILED_AUCTION_RECLAIM must NOT be regime-compatible with STRONG_TREND."""
+        from src.signal_quality import REGIME_SETUP_COMPATIBILITY
+        assert SetupClass.FAILED_AUCTION_RECLAIM not in REGIME_SETUP_COMPATIBILITY.get(
+            MarketState.STRONG_TREND, set()
+        ), "FAR must be blocked in STRONG_TREND (genuine breakouts succeed; FAR has no edge)."
+
+    def test_far_regime_incompatible_in_volatile_unsuitable(self):
+        """FAILED_AUCTION_RECLAIM must NOT be regime-compatible with VOLATILE_UNSUITABLE."""
+        from src.signal_quality import REGIME_SETUP_COMPATIBILITY
+        assert SetupClass.FAILED_AUCTION_RECLAIM not in REGIME_SETUP_COMPATIBILITY.get(
+            MarketState.VOLATILE_UNSUITABLE, set()
+        ), "FAR must be blocked in VOLATILE_UNSUITABLE (chaotic orderflow)."
+
+    def test_far_channel_compatible_in_360_scalp(self):
+        """FAILED_AUCTION_RECLAIM must be channel-compatible with 360_SCALP."""
+        from src.signal_quality import CHANNEL_SETUP_COMPATIBILITY
+        assert SetupClass.FAILED_AUCTION_RECLAIM in CHANNEL_SETUP_COMPATIBILITY.get(
+            "360_SCALP", set()
+        ), "FAR must be registered in CHANNEL_SETUP_COMPATIBILITY for 360_SCALP."
+
+    def test_far_self_classifying(self):
+        """classify_setup() preserves FAILED_AUCTION_RECLAIM identity (self-classifying)."""
+        signal = _signal(channel="360_SCALP")
+        signal.setup_class = "FAILED_AUCTION_RECLAIM"
+        setup = classify_setup(
+            "360_SCALP",
+            signal,
+            _indicators(),
+            {"sweeps": [], "mss": None, "fvg": [], "whale_alert": None, "volume_delta_spike": False},
+            MarketState.CLEAN_RANGE,
+        )
+        assert setup.setup_class == SetupClass.FAILED_AUCTION_RECLAIM, (
+            f"FAILED_AUCTION_RECLAIM was remapped to {setup.setup_class!r} — "
+            "self-classifying identity corrupted."
+        )
+        assert setup.channel_compatible is True
+        assert setup.regime_compatible is True
+
 
 class TestScoringAndSelectTier:
     def test_stronger_quality_scores_higher_than_weaker(self):
@@ -402,6 +533,64 @@ class TestScoringAndSelectTier:
         assert strong.total > weak.total
         assert strong.quality_tier in {QualityTier.A, QualityTier.A_PLUS}
         assert weak.quality_tier in {QualityTier.B, QualityTier.C}
+
+
+class TestFailedAuctionReclaimRiskPlan:
+    def test_far_risk_plan_uses_structural_stop_loss_long(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.stop_loss = 98.7
+        signal.far_reclaim_level = 99.8
+        risk = build_risk_plan(
+            signal=signal,
+            indicators=_indicators(),
+            candles={"5m": _candles(base=100.0, trend=0.0)},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            setup=SetupClass.FAILED_AUCTION_RECLAIM,
+            spread_pct=0.01,
+            channel="360_SCALP",
+        )
+        assert risk.stop_loss == 98.7
+        assert "reclaimed level" in risk.invalidation_summary.lower()
+        assert "failed-auction" in risk.invalidation_summary.lower()
+
+    def test_far_risk_plan_uses_structural_stop_loss_short(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.SHORT)
+        signal.entry = 100.0
+        signal.stop_loss = 101.3
+        signal.far_reclaim_level = 100.2
+        risk = build_risk_plan(
+            signal=signal,
+            indicators=_indicators(),
+            candles={"5m": _candles(base=100.0, trend=0.0)},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            setup=SetupClass.FAILED_AUCTION_RECLAIM,
+            spread_pct=0.01,
+            channel="360_SCALP",
+        )
+        assert risk.stop_loss == 101.3
+        assert "reclaimed level" in risk.invalidation_summary.lower()
+        assert "failed-auction" in risk.invalidation_summary.lower()
+
+    def test_far_risk_plan_tp_geometry_is_measured_move_style(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.stop_loss = 98.8
+        signal.far_reclaim_level = 99.8
+        risk = build_risk_plan(
+            signal=signal,
+            indicators=_indicators(),
+            candles={"5m": _candles(base=100.0, trend=0.0)},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            setup=SetupClass.FAILED_AUCTION_RECLAIM,
+            spread_pct=0.01,
+            channel="360_SCALP",
+        )
+        assert risk.tp1 > signal.entry
+        assert risk.tp2 > risk.tp1
+        assert risk.tp3 > risk.tp2
+        # FAR branch enforces at least a structured 1.2R first target.
+        assert risk.r_multiple >= 1.2
 
 
 class TestMarketStateClassification:

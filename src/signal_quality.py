@@ -36,6 +36,7 @@ class SetupClass(str, Enum):
     DIVERGENCE_CONTINUATION = "DIVERGENCE_CONTINUATION"
     CONTINUATION_LIQUIDITY_SWEEP = "CONTINUATION_LIQUIDITY_SWEEP"
     POST_DISPLACEMENT_CONTINUATION = "POST_DISPLACEMENT_CONTINUATION"
+    FAILED_AUCTION_RECLAIM = "FAILED_AUCTION_RECLAIM"
 
 
 class MarketState(str, Enum):
@@ -74,6 +75,7 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.DIVERGENCE_CONTINUATION,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
         SetupClass.POST_DISPLACEMENT_CONTINUATION,
+        SetupClass.FAILED_AUCTION_RECLAIM,
     },
     "360_SCALP_FVG": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -158,6 +160,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.LIQUIDATION_REVERSAL,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
         SetupClass.POST_DISPLACEMENT_CONTINUATION,
+        # FAR: valid in weak trend — breakouts often fail when trend conviction is low
+        SetupClass.FAILED_AUCTION_RECLAIM,
     },
     MarketState.CLEAN_RANGE: {
         SetupClass.RANGE_REJECTION,
@@ -169,6 +173,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.QUIET_COMPRESSION_BREAK,
         SetupClass.LIQUIDATION_REVERSAL,
+        # FAR: prime regime — failed breakouts at range extremes are the canonical setup
+        SetupClass.FAILED_AUCTION_RECLAIM,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -178,6 +184,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.QUIET_COMPRESSION_BREAK,
         SetupClass.LIQUIDATION_REVERSAL,
+        # FAR: valid in dirty range — structure still exists despite noise
+        SetupClass.FAILED_AUCTION_RECLAIM,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
@@ -194,6 +202,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.LIQUIDATION_REVERSAL,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
         SetupClass.POST_DISPLACEMENT_CONTINUATION,
+        # FAR: false breakouts at expansion boundaries are structurally valid
+        SetupClass.FAILED_AUCTION_RECLAIM,
     },
     MarketState.VOLATILE_UNSUITABLE: {
         # Whale-driven and liquidity-sweep signals are valid precisely in
@@ -592,6 +602,8 @@ def classify_setup(
         "SR_FLIP_RETEST",
         "CONTINUATION_LIQUIDITY_SWEEP",
         "POST_DISPLACEMENT_CONTINUATION",
+        # Roadmap step 7: failed auction / failed acceptance reversal
+        "FAILED_AUCTION_RECLAIM",
     })
     _sig_setup_class = getattr(signal, "setup_class", "")
     if _sig_setup_class in _SELF_CLASSIFYING:
@@ -711,6 +723,21 @@ def execution_quality_check(
             "Enter on re-acceleration breakout above consolidation; "
             "structural invalidation is a return into the consolidation range."
         )
+    elif setup == SetupClass.FAILED_AUCTION_RECLAIM:
+        # Anchor is the reclaim level — the structural boundary that was broken
+        # and then reclaimed.  Stored on the signal by the evaluator as
+        # far_reclaim_level.  Trigger is confirmed when the current entry is
+        # beyond that level in the reclaim direction (price is already inside
+        # prior structure, not still below/above the tested level).
+        anchor = getattr(signal, "far_reclaim_level", signal.entry)
+        trigger_confirmed = (
+            signal.entry > anchor if signal.direction == Direction.LONG
+            else signal.entry < anchor
+        )
+        note = (
+            "Enter after failed auction reclaim is confirmed; "
+            "structural invalidation is a return to or below the failed-auction wick extreme."
+        )
     else:
         anchor = ema_anchor
         trigger_confirmed = (
@@ -736,6 +763,10 @@ def execution_quality_check(
         # The entry should be very close to the breakout level; cap at 1.0 ATR to reject
         # stale entries taken too far into the re-acceleration move.
         SetupClass.POST_DISPLACEMENT_CONTINUATION: 1.0,
+        # FAR: entry follows the reclaim of the structural level.  Allow slightly
+        # more room than PDC because the reclaim move itself creates separation from
+        # the anchor; cap at 1.2 ATR to reject stale entries chasing the reversal.
+        SetupClass.FAILED_AUCTION_RECLAIM: 1.2,
     }.get(setup, 1.5)
     passed = trigger_confirmed and extension_ratio <= max_extension
     zone_low = min(anchor, signal.entry)
@@ -789,6 +820,26 @@ def build_risk_plan(
     else:
         structure = structure if structure > signal.entry else signal.entry + atr_val
         stop_loss = round(structure + buffer, 8)
+
+    # FAILED_AUCTION_RECLAIM is not a generic recent-structure stop.  Its
+    # invalidation is the failed-auction wick extreme (with buffer), and the
+    # reclaim level is the structural boundary that was recovered.  Re-use the
+    # evaluator-computed stop when available so downstream risk handling stays
+    # aligned with the path thesis rather than drifting into the generic branch.
+    far_reclaim_level = _safe_float(getattr(signal, "far_reclaim_level", None), 0.0)
+    if setup == SetupClass.FAILED_AUCTION_RECLAIM:
+        far_structural_sl = _safe_float(getattr(signal, "stop_loss", None), 0.0)
+        if signal.direction == Direction.LONG and 0 < far_structural_sl < signal.entry:
+            stop_loss = round(far_structural_sl, 8)
+        elif signal.direction == Direction.SHORT and far_structural_sl > signal.entry:
+            stop_loss = round(far_structural_sl, 8)
+
+        # Use the reclaim level as the named structure for FAR invalidation
+        # summaries when it sits on the correct side of the entry.
+        if signal.direction == Direction.LONG and 0 < far_reclaim_level < signal.entry:
+            structure = far_reclaim_level
+        elif signal.direction == Direction.SHORT and far_reclaim_level > signal.entry:
+            structure = far_reclaim_level
 
     # Channel-aware hard cap on SL distance – clamp oversized stops before
     # they inflate risk and produce trades that hit SL within seconds.
@@ -960,6 +1011,22 @@ def build_risk_plan(
         tp1 = signal.entry + risk * 1.4 if _is_long else signal.entry - risk * 1.4
         tp2 = signal.entry + risk * 2.2 if _is_long else signal.entry - risk * 2.2
         tp3 = signal.entry + risk * 3.2 if _is_long else signal.entry - risk * 3.2
+    elif setup == SetupClass.FAILED_AUCTION_RECLAIM:
+        # Failed-auction reclaim: price rejected acceptance beyond a structural
+        # level, reclaimed back through that level, and should now travel away
+        # from the reclaim in a measured-move style continuation.  Anchor TP
+        # geometry to the full reclaim structure: reclaim-to-invalidation span
+        # plus the entry's clearance beyond the reclaimed level.
+        reclaim_to_invalidation_span = abs(structure - stop_loss)
+        reclaim_clearance = abs(signal.entry - structure)
+        measured_move = (
+            reclaim_to_invalidation_span + reclaim_clearance
+            if reclaim_to_invalidation_span > 0
+            else risk
+        )
+        tp1 = signal.entry + measured_move * 1.2 if _is_long else signal.entry - measured_move * 1.2
+        tp2 = signal.entry + measured_move * 1.9 if _is_long else signal.entry - measured_move * 1.9
+        tp3 = signal.entry + measured_move * 3.0 if _is_long else signal.entry - measured_move * 3.0
     else:
         # Fallback for remaining families (MULTI_STRATEGY_CONFLUENCE,
         # BREAKDOWN_SHORT, and any future setups not yet classified).
@@ -974,7 +1041,7 @@ def build_risk_plan(
         min_rr = _MIN_RR_RANGE
     elif setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL):
         min_rr = _MIN_RR_MEAN_REVERSION
-    elif setup == SetupClass.SR_FLIP_RETEST:
+    elif setup in (SetupClass.SR_FLIP_RETEST, SetupClass.FAILED_AUCTION_RECLAIM):
         min_rr = _MIN_RR_STRUCTURED
     else:
         min_rr = _MIN_RR_DEFAULT
@@ -991,6 +1058,22 @@ def build_risk_plan(
     # Dynamic decimal places for invalidation message (micro-cap tokens)
     _struct_fmt = price_decimal_fmt(structure)
     invalidation = f"{'Below' if signal.direction == Direction.LONG else 'Above'} {structure:{_struct_fmt}} structure + volatility buffer"
+    if setup == SetupClass.FAILED_AUCTION_RECLAIM:
+        # Use a tiny positive floor so price_decimal_fmt() never receives zero
+        # (which would otherwise choose an unusably coarse precision bucket).
+        min_fmt_price = 1e-12
+        _sl_fmt = price_decimal_fmt(max(abs(stop_loss), min_fmt_price))
+        if far_reclaim_level > 0:
+            invalidation = (
+                f"{'Back below' if signal.direction == Direction.LONG else 'Back above'} "
+                f"reclaimed level {structure:{_struct_fmt}} and through failed-auction "
+                f"wick/buffer {stop_loss:{_sl_fmt}}"
+            )
+        else:
+            invalidation = (
+                f"{'Below' if signal.direction == Direction.LONG else 'Above'} "
+                f"failed-auction wick/buffer {stop_loss:{_sl_fmt}} after reclaim failure"
+            )
 
     return RiskAssessment(
         passed=passed,
