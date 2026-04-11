@@ -1072,15 +1072,24 @@ class TestFamilyAwareTP:
             f"RANGE_FADE tp1 ratio {tp1_ratio:.2f} should be 0.9R"
         )
 
-    def test_sr_flip_retest_tp1_structured(self):
-        """SR_FLIP_RETEST tp1 must be ≈ 1.2R (next structural level)."""
+    def test_sr_flip_retest_tp1_preserves_evaluator(self):
+        """PR-02: SR_FLIP_RETEST preserves evaluator-authored TP1 (swing-high level).
+
+        SR_FLIP_RETEST is now in STRUCTURAL_SLTP_PROTECTED_SETUPS.  The evaluator
+        computes TP1 from the 20-candle swing high/low (a structural anchor), not
+        from a generic risk multiple.  That evaluator-authored value must survive
+        build_risk_plan() rather than being replaced by the old generic 1.2R target.
+        """
+        sig = _signal(channel="360_SCALP", direction=Direction.LONG)
         risk = _risk_plan_for(SetupClass.SR_FLIP_RETEST)
         assert risk.passed, f"SR_FLIP_RETEST plan failed: {risk.reason}"
-        entry = 100.0
-        risk_dist = entry - risk.stop_loss
-        tp1_ratio = (risk.tp1 - entry) / risk_dist
-        assert tp1_ratio == pytest.approx(1.2, abs=0.05), (
-            f"SR_FLIP_RETEST tp1 ratio {tp1_ratio:.2f} should be 1.2R"
+        # Evaluator-authored TP1 (104.0 in the test signal) must be preserved.
+        assert risk.tp1 == pytest.approx(sig.tp1, rel=1e-6), (
+            f"SR_FLIP_RETEST tp1 {risk.tp1:.6f} should equal evaluator-authored "
+            f"{sig.tp1:.6f} (PR-02 structural TP preservation violated)"
+        )
+        assert risk.tp2 == pytest.approx(sig.tp2, rel=1e-6), (
+            f"SR_FLIP_RETEST tp2 {risk.tp2:.6f} should equal evaluator-authored {sig.tp2:.6f}"
         )
 
     # ── Family ordering invariants ──────────────────────────────────────────

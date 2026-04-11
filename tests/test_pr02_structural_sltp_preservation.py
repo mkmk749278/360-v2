@@ -152,6 +152,7 @@ class TestProtectedPathsPreserveSLTP:
         SetupClass.QUIET_COMPRESSION_BREAK,
         SetupClass.TREND_PULLBACK_EMA,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+        SetupClass.SR_FLIP_RETEST,
     ])
     def test_protected_long_preserves_sl(self, setup_class):
         """PR-02 LONG: evaluator-authored SL survives build_risk_plan()."""
@@ -170,6 +171,7 @@ class TestProtectedPathsPreserveSLTP:
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.QUIET_COMPRESSION_BREAK,
         SetupClass.TREND_PULLBACK_EMA,
+        SetupClass.SR_FLIP_RETEST,
     ])
     def test_protected_short_preserves_sl(self, setup_class):
         """PR-02 SHORT: evaluator-authored SL survives build_risk_plan()."""
@@ -187,6 +189,7 @@ class TestProtectedPathsPreserveSLTP:
         SetupClass.QUIET_COMPRESSION_BREAK,
         SetupClass.TREND_PULLBACK_EMA,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+        SetupClass.SR_FLIP_RETEST,
     ])
     def test_protected_long_preserves_tp1(self, setup_class):
         """PR-02 LONG: evaluator-authored TP1 survives build_risk_plan()."""
@@ -204,6 +207,7 @@ class TestProtectedPathsPreserveSLTP:
         SetupClass.QUIET_COMPRESSION_BREAK,
         SetupClass.TREND_PULLBACK_EMA,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+        SetupClass.SR_FLIP_RETEST,
     ])
     def test_protected_long_preserves_tp2(self, setup_class):
         """PR-02 LONG: evaluator-authored TP2 survives build_risk_plan()."""
@@ -221,6 +225,7 @@ class TestProtectedPathsPreserveSLTP:
         SetupClass.QUIET_COMPRESSION_BREAK,
         SetupClass.TREND_PULLBACK_EMA,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+        SetupClass.SR_FLIP_RETEST,
     ])
     def test_protected_long_preserves_tp3(self, setup_class):
         """PR-02 LONG: evaluator-authored TP3 survives build_risk_plan()."""
@@ -243,7 +248,16 @@ class TestProtectedPathsPreserveSLTP:
         assert risk.tp3 == pytest.approx(sig.tp3, rel=1e-6)
 
     def test_all_protected_setups_are_covered(self):
-        """Sanity: STRUCTURAL_SLTP_PROTECTED_SETUPS contains exactly the expected 6 paths."""
+        """Sanity: STRUCTURAL_SLTP_PROTECTED_SETUPS contains exactly the expected 7 paths.
+
+        SR_FLIP_RETEST is included because:
+        - Its SL is anchored to the flipped structural level (level * 0.998),
+          not a generic recent-swing computation.
+        - Its TP1 is the 20-candle structural swing high/low, TP2 is a 4h level
+          — both are structural anchors, not risk multiples.
+        - It is one of the canonical strongest foundation paths in the audit and
+          owner brief; its structural expression must survive downstream handling.
+        """
         expected = {
             SetupClass.POST_DISPLACEMENT_CONTINUATION,
             SetupClass.VOLUME_SURGE_BREAKOUT,
@@ -251,6 +265,7 @@ class TestProtectedPathsPreserveSLTP:
             SetupClass.QUIET_COMPRESSION_BREAK,
             SetupClass.TREND_PULLBACK_EMA,
             SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+            SetupClass.SR_FLIP_RETEST,
         }
         assert STRUCTURAL_SLTP_PROTECTED_SETUPS == expected, (
             "STRUCTURAL_SLTP_PROTECTED_SETUPS diverged from the PR-02 specification. "
@@ -385,6 +400,7 @@ class TestPredictiveAdjustmentBypassesProtectedPaths:
         "QUIET_COMPRESSION_BREAK",
         "TREND_PULLBACK_EMA",
         "CONTINUATION_LIQUIDITY_SWEEP",
+        "SR_FLIP_RETEST",
         "FAILED_AUCTION_RECLAIM",
     ])
     def test_predictive_does_not_scale_protected_path_tp(self, sc_str):
@@ -555,6 +571,49 @@ class TestFailedAuctionReclaimNotRegressed:
             f"to {risk.stop_loss} (regression)"
         )
 
+    def test_far_preserves_evaluator_tp1_via_dedicated_block(self):
+        """PR-02 FAR: evaluator-authored TP1 (measured-move from tail) must survive
+        build_risk_plan() when directionally valid.
+
+        The evaluator computes TPs from `tail` = probe distance beyond the
+        reference level.  The previous build_risk_plan() FAR block recomputed TPs
+        from reclaim-span geometry, potentially disagreeing with the evaluator's
+        measured-move anchor.  The PR-02 fix preserves the evaluator value first.
+        """
+        sig = _signal(
+            stop_loss=99.2,
+            tp1=101.8,
+            tp2=103.5,
+            tp3=105.2,
+            setup_class="FAILED_AUCTION_RECLAIM",
+        )
+        risk = _build(sig, SetupClass.FAILED_AUCTION_RECLAIM)
+        assert risk.passed, f"FAILED_AUCTION_RECLAIM plan failed: {risk.reason}"
+        assert risk.tp1 == pytest.approx(sig.tp1, rel=1e-6), (
+            f"FAILED_AUCTION_RECLAIM evaluator TP1 {sig.tp1} was overwritten "
+            f"by computed {risk.tp1} (PR-02 FAR TP preservation violated)"
+        )
+        assert risk.tp2 == pytest.approx(sig.tp2, rel=1e-6), (
+            f"FAILED_AUCTION_RECLAIM evaluator TP2 {sig.tp2} was overwritten "
+            f"by computed {risk.tp2} (PR-02 FAR TP preservation violated)"
+        )
+
+    def test_far_tp_fallback_when_evaluator_tp_invalid(self):
+        """When FAR evaluator TPs are invalid (wrong side), the measured-move
+        fallback is used and the plan still passes."""
+        # tp1=0 is invalid for LONG — forces the fallback reclaim-span formula.
+        sig = _signal(
+            stop_loss=99.2,
+            tp1=0.0,      # invalid for LONG
+            tp2=0.0,
+            tp3=None,
+            setup_class="FAILED_AUCTION_RECLAIM",
+        )
+        risk = _build(sig, SetupClass.FAILED_AUCTION_RECLAIM)
+        assert risk.passed, f"FAILED_AUCTION_RECLAIM fallback plan failed: {risk.reason}"
+        assert risk.tp1 > sig.entry, "Fallback TP1 must be above entry for LONG"
+        assert risk.tp2 > risk.tp1, "Fallback TP2 must be above TP1"
+
     def test_far_not_in_structural_sltp_protected_setups(self):
         """FAILED_AUCTION_RECLAIM is handled by its own block and is NOT
         in STRUCTURAL_SLTP_PROTECTED_SETUPS (to avoid duplicate/conflicting logic)."""
@@ -622,6 +681,137 @@ class TestFailedAuctionReclaimNotRegressed:
 
 
 # ---------------------------------------------------------------------------
+# SR_FLIP_RETEST: explicit structural coverage (audit/brief canonical path)
+# ---------------------------------------------------------------------------
+
+class TestSRFlipRetestStructuralPreservation:
+    """Dedicated tests for SR_FLIP_RETEST inclusion in STRUCTURAL_SLTP_PROTECTED_SETUPS.
+
+    SR_FLIP_RETEST is one of the canonical strongest foundation paths in the owner
+    brief / audit.  Its evaluator computes:
+    - SL: beyond the flipped structural level (level * 0.998 for LONG), not a
+      generic recent-swing computation.
+    - TP1: 20-candle structural swing high/low.
+    - TP2: 4h structural target.
+    These must survive build_risk_plan() unchanged.  Generic 1.2/2.0/2.8R multiples
+    would flatten this structural expression and must be excluded for this path.
+    """
+
+    def test_sr_flip_retest_is_in_protected_set(self):
+        """SR_FLIP_RETEST must be in STRUCTURAL_SLTP_PROTECTED_SETUPS."""
+        assert SetupClass.SR_FLIP_RETEST in STRUCTURAL_SLTP_PROTECTED_SETUPS, (
+            "SR_FLIP_RETEST must be in STRUCTURAL_SLTP_PROTECTED_SETUPS — it is one of "
+            "the canonical strongest foundation paths and has structural SL and TP anchors."
+        )
+
+    def test_sr_flip_retest_long_preserves_evaluator_sl(self):
+        """SR_FLIP_RETEST LONG: evaluator-authored structural SL survives build_risk_plan()."""
+        sig = _signal(
+            stop_loss=99.2,  # evaluator-computed: level * 0.998
+            tp1=101.8,
+            tp2=103.5,
+            tp3=105.0,
+            setup_class="SR_FLIP_RETEST",
+        )
+        risk = _build(sig, SetupClass.SR_FLIP_RETEST)
+        assert risk.passed, f"SR_FLIP_RETEST plan failed: {risk.reason}"
+        assert risk.stop_loss == pytest.approx(sig.stop_loss, rel=1e-6), (
+            f"SR_FLIP_RETEST LONG: evaluator SL {sig.stop_loss} was overwritten "
+            f"by generic {risk.stop_loss} (structural SL expression lost)"
+        )
+
+    def test_sr_flip_retest_short_preserves_evaluator_sl(self):
+        """SR_FLIP_RETEST SHORT: evaluator SL (above entry) survives build_risk_plan()."""
+        sig = _signal_short(
+            stop_loss=100.8,  # evaluator-computed: level * 1.002
+            tp1=98.2,
+            tp2=96.5,
+            tp3=94.8,
+            setup_class="SR_FLIP_RETEST",
+        )
+        risk = _build(sig, SetupClass.SR_FLIP_RETEST)
+        assert risk.passed, f"SR_FLIP_RETEST SHORT plan failed: {risk.reason}"
+        assert risk.stop_loss == pytest.approx(sig.stop_loss, rel=1e-6), (
+            f"SR_FLIP_RETEST SHORT: evaluator SL {sig.stop_loss} was overwritten "
+            f"by generic {risk.stop_loss} (structural SL expression lost)"
+        )
+
+    def test_sr_flip_retest_preserves_swing_high_tp1(self):
+        """SR_FLIP_RETEST: evaluator-authored TP1 (swing high) must survive."""
+        sig = _signal(
+            stop_loss=99.2,
+            tp1=101.8,   # evaluator-computed 20-candle swing high
+            tp2=103.5,   # evaluator-computed 4h target
+            tp3=105.0,
+            setup_class="SR_FLIP_RETEST",
+        )
+        risk = _build(sig, SetupClass.SR_FLIP_RETEST)
+        assert risk.passed, f"SR_FLIP_RETEST plan failed: {risk.reason}"
+        assert risk.tp1 == pytest.approx(sig.tp1, rel=1e-6), (
+            f"SR_FLIP_RETEST TP1 {sig.tp1} (swing high) was overwritten by "
+            f"generic 1.2R target {risk.tp1} (structural TP expression lost)"
+        )
+        assert risk.tp2 == pytest.approx(sig.tp2, rel=1e-6), (
+            f"SR_FLIP_RETEST TP2 {sig.tp2} (4h target) was overwritten by "
+            f"generic 2.0R target {risk.tp2} (structural TP expression lost)"
+        )
+
+    def test_sr_flip_retest_predictive_bypass(self):
+        """SR_FLIP_RETEST must be in the predictive bypass set."""
+        sig = SimpleNamespace(
+            symbol="BTCUSDT",
+            setup_class="SR_FLIP_RETEST",
+            direction=Direction.LONG,
+            entry=100.0,
+            tp1=101.8,
+            tp2=103.5,
+            tp3=105.0,
+            stop_loss=99.2,
+        )
+        engine = PredictiveEngine()
+        pred = PredictionResult(
+            suggested_tp_adjustment=1.5,
+            suggested_sl_adjustment=0.7,
+        )
+        engine.adjust_tp_sl(sig, pred)
+        assert sig.tp1 == pytest.approx(101.8, rel=1e-6), (
+            "SR_FLIP_RETEST tp1 was modified by predictive engine — "
+            "structural swing-high TP must not be scaled"
+        )
+        assert sig.stop_loss == pytest.approx(99.2, rel=1e-6), (
+            "SR_FLIP_RETEST stop_loss was modified by predictive engine — "
+            "structural SL must not be scaled"
+        )
+
+    def test_sr_flip_retest_not_using_old_generic_1_2r_tp(self):
+        """Regression: SR_FLIP_RETEST must NOT use the old generic 1.2R TP1.
+
+        Before PR-02 SR_FLIP_RETEST inclusion, build_risk_plan() used
+        1.2/2.0/2.8R generic multiples for this path.  After inclusion in
+        STRUCTURAL_SLTP_PROTECTED_SETUPS the evaluator-authored structural
+        levels are used instead.
+        """
+        sig = _signal(
+            stop_loss=99.2,
+            tp1=103.0,   # much larger than 1.2R * (100.0-99.2) = 0.96 → 100.96
+            tp2=106.0,
+            tp3=109.0,
+            setup_class="SR_FLIP_RETEST",
+        )
+        risk = _build(sig, SetupClass.SR_FLIP_RETEST)
+        assert risk.passed, f"SR_FLIP_RETEST plan failed: {risk.reason}"
+        # If the old generic 1.2R branch were still active, tp1 would be ≈100.96.
+        # With PR-02 preservation, it must equal the evaluator-authored 103.0.
+        assert risk.tp1 > 102.0, (
+            f"SR_FLIP_RETEST tp1 {risk.tp1:.4f} looks like the old 1.2R generic "
+            f"target rather than the evaluator-authored structural level 103.0"
+        )
+        assert risk.tp1 == pytest.approx(sig.tp1, rel=1e-6), (
+            f"SR_FLIP_RETEST tp1 {risk.tp1:.4f} must equal evaluator-authored {sig.tp1}"
+        )
+
+
+# ---------------------------------------------------------------------------
 # Integration: full preservation chain (build_risk_plan → predictive bypass)
 # ---------------------------------------------------------------------------
 
@@ -636,6 +826,7 @@ class TestEndToEndPreservationChain:
         "QUIET_COMPRESSION_BREAK",
         "TREND_PULLBACK_EMA",
         "CONTINUATION_LIQUIDITY_SWEEP",
+        "SR_FLIP_RETEST",
         "FAILED_AUCTION_RECLAIM",
     ])
     def test_full_chain_preserves_evaluator_sl(self, sc):
