@@ -3019,21 +3019,14 @@ class Scanner:
                     _raw_sigs = [_raw_result]
                 else:
                     _raw_sigs = []
-                _seen_scalp_dirs = set()
+                # PR-03: Quality-ranked arbitration — evaluate ALL same-direction
+                # candidates and keep the best one by final confidence score.
+                # This replaces the previous first-wins dedup that allowed a
+                # weaker earlier candidate to suppress a stronger later one purely
+                # because of method-evaluation order.
+                # Format: direction → (best_prepared_sig, chan_name)
+                _scalp_dir_best: dict = {}
                 for _raw_sig in _raw_sigs:
-                    _raw_dir = (
-                        _raw_sig.direction.value
-                        if hasattr(_raw_sig.direction, "value")
-                        else str(_raw_sig.direction)
-                    )
-                    # Same-symbol same-direction dedup: only the first candidate per
-                    # direction passes through gates per scan cycle.
-                    if _raw_dir in _seen_scalp_dirs:
-                        log.debug(
-                            "Scalp same-dir dedup: {} {} {} skipped",
-                            symbol, _raw_dir, getattr(_raw_sig, "setup_class", "?"),
-                        )
-                        continue
                     # cross_verified is None for all scalp channels (cross-exchange
                     # verification is skipped for 360_SCALP — see _prepare_signal).
                     sig, _cross_verified = await self._prepare_signal(
@@ -3051,10 +3044,35 @@ class Scanner:
                             symbol, _sig_dir, chan_name,
                         )
                         continue
-                    _sc = getattr(sig, "setup_class", chan_name)
+                    _existing = _scalp_dir_best.get(_sig_dir)
+                    if _existing is None:
+                        _scalp_dir_best[_sig_dir] = (sig, chan_name)
+                    elif sig.confidence > _existing[0].confidence:
+                        # New candidate is strictly better — replace and log.
+                        log.debug(
+                            "Scalp arbitration: {} {} {} (conf={:.1f}) replaces"
+                            " {} (conf={:.1f})",
+                            symbol, _sig_dir,
+                            getattr(sig, "setup_class", "?"), sig.confidence,
+                            getattr(_existing[0], "setup_class", "?"),
+                            _existing[0].confidence,
+                        )
+                        _scalp_dir_best[_sig_dir] = (sig, chan_name)
+                    else:
+                        # Existing candidate is better (or equal) — suppress new one.
+                        log.debug(
+                            "Scalp arbitration: {} {} {} (conf={:.1f}) suppressed;"
+                            " {} (conf={:.1f}) retained",
+                            symbol, _sig_dir,
+                            getattr(sig, "setup_class", "?"), sig.confidence,
+                            getattr(_existing[0], "setup_class", "?"),
+                            _existing[0].confidence,
+                        )
+                # Emit arbitration winners into the pending signals queue.
+                for _sig_dir, (_best_sig, _best_chan) in _scalp_dir_best.items():
+                    _sc = getattr(_best_sig, "setup_class", chan_name)
                     self._setup_eval_counts[_sc] += 1
-                    _pending_signals.append((sig, chan_name))
-                    _seen_scalp_dirs.add(_raw_dir)
+                    _pending_signals.append((_best_sig, _best_chan))
             else:
                 sig, cross_verified = await self._prepare_signal(symbol, volume_24h, chan, ctx_for_chan)
                 if sig is None:
