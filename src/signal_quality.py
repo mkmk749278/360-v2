@@ -96,14 +96,9 @@ ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
     SetupClass.WHALE_MOMENTUM: PortfolioRole.SPECIALIST,
     SetupClass.FUNDING_EXTREME_SIGNAL: PortfolioRole.SPECIALIST,
     SetupClass.QUIET_COMPRESSION_BREAK: PortfolioRole.SPECIALIST,
-    # ── auxiliary channel identities (PR-01) ──────────────────────────────
-    # Distinct setup classes produced by the active auxiliary evaluators.
-    # Classified as specialist because they are lower-frequency, channel-specific
-    # paths whose governance is still under review (PR-04).
-    SetupClass.FVG_RETEST: PortfolioRole.SPECIALIST,
-    SetupClass.FVG_RETEST_HTF_CONFLUENCE: PortfolioRole.SPECIALIST,
-    SetupClass.RSI_MACD_DIVERGENCE: PortfolioRole.SPECIALIST,
-    SetupClass.SMC_ORDERBLOCK: PortfolioRole.SPECIALIST,
+    # NOTE: Auxiliary channel identities (FVG_RETEST, RSI_MACD_DIVERGENCE, SMC_ORDERBLOCK)
+    # are registered as SetupClass values and preserved through the pipeline (PR-01) but
+    # their portfolio-role assignment is deferred to PR-04 (portfolio governance).
 }
 
 
