@@ -2315,6 +2315,11 @@ class ScalpChannel(BaseChannel):
             # (buyers absorbing selling pressure — continuation signal in uptrend)
             if not (price_low_late < price_low_early and cvd_low_late > cvd_low_early):
                 return None
+            # Divergence magnitude: how far price pulled back that CVD absorbed.
+            # Normalised so a 3 % price drop = strength 1.0; capped at 1.0.
+            _price_drop_pct = (price_low_early - price_low_late) / price_low_early if price_low_early > 0 else 0.0
+            _div_strength = min(1.0, _price_drop_pct / 0.03)
+            _div_label: str = "BULLISH"
         else:
             price_high_early = max(closes[-20:-10])
             price_high_late = max(closes[-10:])
@@ -2324,6 +2329,16 @@ class ScalpChannel(BaseChannel):
             # (sellers absorbing buying pressure — continuation signal in downtrend)
             if not (price_high_late > price_high_early and cvd_high_late < cvd_high_early):
                 return None
+            _price_rise_pct = (price_high_late - price_high_early) / price_high_early if price_high_early > 0 else 0.0
+            _div_strength = min(1.0, _price_rise_pct / 0.03)
+            _div_label = "BEARISH"
+
+        # Propagate confirmed divergence evidence to smc_data so the downstream
+        # composite scorer (PR-09) sees the evaluator's actual thesis signal.
+        # Only overwrite when the evaluator's local detection is definitive — the
+        # evaluator passes all checks above only when divergence is confirmed.
+        smc_data["cvd_divergence"] = _div_label
+        smc_data["cvd_divergence_strength"] = _div_strength
 
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")

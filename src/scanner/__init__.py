@@ -2676,6 +2676,7 @@ class Scanner:
                 chart_patterns=ctx.smc_data.get("chart_patterns", []),
                 mtf_score=getattr(sig, "mtf_score", 0.0),
                 cvd_divergence=ctx.smc_data.get("cvd_divergence"),
+                cvd_divergence_strength=float(ctx.smc_data.get("cvd_divergence_strength") or 0.0),
                 oi_trend=_pr09_oi_trend,
                 liq_vol_usd=_pr09_liq_vol,
                 funding_rate=_funding_rate,

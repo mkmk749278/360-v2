@@ -1344,6 +1344,7 @@ class ScoringInput:
     mtf_score: float = 0.0                  # 0.0–1.0 from MTF gate
     # Order-flow (used for family-aware thesis scoring)
     cvd_divergence: Optional[str] = None    # "BULLISH", "BEARISH", or None
+    cvd_divergence_strength: float = 0.0    # 0.0–1.0 normalised divergence magnitude
     oi_trend: str = "NEUTRAL"               # "RISING", "FALLING", or "NEUTRAL"
     liq_vol_usd: float = 0.0               # Recent USD liquidation volume
     funding_rate: Optional[float] = None    # Latest funding rate (decimal)
@@ -1580,6 +1581,11 @@ class SignalScoringEngine:
         - CVD/OI divergence bonus (max +6 pts): confirmed divergence in the
           trade direction earns a positive thesis bonus; contra divergence
           applies a small penalty.
+        - Divergence magnitude bonus (max +2 pts on top, total cap +8): when
+          the evaluator confirms divergence and propagates its strength
+          (cvd_divergence_strength > 0), a magnitude-weighted bonus rewards
+          stronger absorption evidence.  This makes the score faithful to the
+          evaluator's actual detected evidence rather than a binary check.
 
         **Sweep-Continuation family** (CONTINUATION_LIQUIDITY_SWEEP):
         - CVD trend-alignment bonus (+2 pts): CVD aligned with the trend
@@ -1645,17 +1651,27 @@ class SignalScoringEngine:
             return min(8.0, adj)
 
         if setup in self._FAMILY_ORDER_FLOW_DIVERGENCE:
-            # CVD/OI divergence thesis bonus (max +6 pts)
+            # CVD/OI divergence thesis bonus.
+            # When cvd_divergence is confirmed (evaluator propagates its local
+            # detection into smc_data["cvd_divergence"]), the aligned bonus is
+            # +4 pts.  A magnitude bonus of up to +2 pts further rewards strong
+            # absorption evidence (cvd_divergence_strength, normalised 0–1).
+            # Combined cap is +8 pts when divergence is strong and OI is falling.
             of_bonus = 0.0
             if inp.cvd_divergence is not None:
                 cvd_aligned = (
                     (inp.direction == "LONG" and inp.cvd_divergence == "BULLISH") or
                     (inp.direction == "SHORT" and inp.cvd_divergence == "BEARISH")
                 )
-                of_bonus += 4.0 if cvd_aligned else -2.0
+                if cvd_aligned:
+                    of_bonus += 4.0
+                    # Magnitude bonus: stronger absorption = higher conviction.
+                    of_bonus += min(2.0, inp.cvd_divergence_strength * 2.0)
+                else:
+                    of_bonus += -2.0
             if inp.oi_trend == "FALLING":
                 of_bonus += 2.0
-            return max(-2.0, min(6.0, of_bonus))
+            return max(-2.0, min(8.0, of_bonus))
 
         if setup in self._FAMILY_SWEEP_CONTINUATION:
             # Continuation thesis: CVD aligned with trend + rising OI signal
