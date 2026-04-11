@@ -169,6 +169,85 @@ _FAR_RSI_LONG_SOFT_MIN: float = 65.0   # ≥ this (< hard) → +6 soft penalty
 _FAR_RSI_SHORT_HARD_MIN: float = 25.0  # ≤ this → hard reject (oversold)
 _FAR_RSI_SHORT_SOFT_MAX: float = 35.0  # ≤ this (> hard) → +6 soft penalty
 
+# WHALE_MOMENTUM SL: look at this many closed 1m candles (before the current bar)
+# to find the recent swing low/high as the order-flow invalidation point.
+# A 5-bar window captures the impulse origin without going too far back.
+_WHALE_SWING_LOOKBACK: int = 5
+# Buffer below swing low / above swing high for the invalidation SL (0.1%).
+# Prevents the stop from sitting exactly on a round swing level.
+_WHALE_SWING_BUFFER: float = 0.001
+
+
+def _funding_extreme_structure_tp1(
+    fvgs: list,
+    orderblocks: list,
+    close: float,
+    direction: Direction,
+    sl_dist: float,
+) -> float:
+    """Nearest FVG/OB structure level as thesis-aligned TP1 for FUNDING_EXTREME_SIGNAL.
+
+    The path already requires FVG or OB confluence at entry, so the nearest
+    qualifying structure level in the direction of travel is the natural first
+    normalization target.  Requires at least 1.0R separation so the TP is
+    meaningful rather than trivially close.  Falls back to 1.5R when no
+    qualifying level is found.
+    """
+    candidates: list[float] = []
+    min_dist = sl_dist  # must be at least 1.0R away from entry
+
+    for zone in list(fvgs) + list(orderblocks):
+        level: Optional[float] = None
+        if isinstance(zone, dict):
+            # Prefer the far edge of the FVG in the direction of travel;
+            # fall through to generic 'level' or 'price' if specific keys absent.
+            if direction == Direction.LONG:
+                raw = (
+                    zone.get("gap_high")
+                    or zone.get("top")
+                    or zone.get("level")
+                    or zone.get("high")
+                )
+            else:
+                raw = (
+                    zone.get("gap_low")
+                    or zone.get("bottom")
+                    or zone.get("level")
+                    or zone.get("low")
+                )
+            if raw is not None:
+                level = float(raw)
+        else:
+            # Object-style FVG / OB
+            attr_order = (
+                ("gap_high", "top", "level", "price")
+                if direction == Direction.LONG
+                else ("gap_low", "bottom", "level", "price")
+            )
+            for attr in attr_order:
+                v = getattr(zone, attr, None)
+                if v is not None:
+                    level = float(v)
+                    break
+
+        if level is None or level <= 0:
+            continue
+        if direction == Direction.LONG and level >= close + min_dist:
+            candidates.append(level)
+        elif direction == Direction.SHORT and level <= close - min_dist:
+            candidates.append(level)
+
+    if candidates:
+        # Return the nearest qualifying level in the direction of travel.
+        return min(candidates) if direction == Direction.LONG else max(candidates)
+
+    # Fallback: 1.5R — better than the previous flat 0.5% placeholder.
+    return (
+        close + sl_dist * 1.5
+        if direction == Direction.LONG
+        else close - sl_dist * 1.5
+    )
+
 
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
@@ -936,7 +1015,30 @@ class ScalpChannel(BaseChannel):
                 return None
 
         atr_val = indicators.get("1m", {}).get("atr_last", close * 0.002)
-        sl_dist = max(close * self.config.sl_pct_range[0] / 100, atr_val)
+
+        # SL: use the recent swing low (LONG) or swing high (SHORT) as the
+        # order-flow invalidation point.  If the whale impulse was genuine,
+        # price should not retrace through the swing that preceded the impulse.
+        # ATR acts as a minimum floor to avoid mechanically tight stops when the
+        # swing is extremely recent.  Falls back to the previous % / ATR logic
+        # when the lookback window contains insufficient data.
+        m1_highs = m1.get("high", [])
+        m1_lows = m1.get("low", [])
+        if direction == Direction.LONG and len(m1_lows) > _WHALE_SWING_LOOKBACK:
+            swing_low = min(
+                float(l) for l in m1_lows[-_WHALE_SWING_LOOKBACK - 1 : -1]
+            )
+            invalidation = swing_low * (1.0 - _WHALE_SWING_BUFFER)
+            sl_dist = max(close - invalidation, atr_val)
+        elif direction == Direction.SHORT and len(m1_highs) > _WHALE_SWING_LOOKBACK:
+            swing_high = max(
+                float(h) for h in m1_highs[-_WHALE_SWING_LOOKBACK - 1 : -1]
+            )
+            invalidation = swing_high * (1.0 + _WHALE_SWING_BUFFER)
+            sl_dist = max(invalidation - close, atr_val)
+        else:
+            sl_dist = max(close * self.config.sl_pct_range[0] / 100, atr_val)
+
         sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
 
         _regime_ctx = smc_data.get("regime_context")
@@ -1953,14 +2055,12 @@ class ScalpChannel(BaseChannel):
         if direction == Direction.SHORT and sl <= close:
             return None
 
-        # TP1: small normalization move
-        tp1_candidate = close + close * 0.005 if direction == Direction.LONG else close - close * 0.005
-        if direction == Direction.LONG and tp1_candidate <= close:
-            tp1 = close + sl_dist * 1.0
-        elif direction == Direction.SHORT and tp1_candidate >= close:
-            tp1 = close - sl_dist * 1.0
-        else:
-            tp1 = tp1_candidate
+        # TP1: nearest FVG/OB structure level in the direction of travel.
+        # The path already requires FVG/OB confluence at entry, so the nearest
+        # qualifying structure level is the natural first normalization target.
+        # Falls back to 1.5R when no qualifying level is found — better than
+        # the previous flat 0.5% placeholder which was not thesis-aligned.
+        tp1 = _funding_extreme_structure_tp1(fvgs, orderblocks, close, direction, sl_dist)
 
         tp2 = close + sl_dist * 2.0 if direction == Direction.LONG else close - sl_dist * 2.0
         tp3 = close + sl_dist * 3.5 if direction == Direction.LONG else close - sl_dist * 3.5
