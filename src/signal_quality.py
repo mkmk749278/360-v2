@@ -101,6 +101,26 @@ ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
     # their portfolio-role assignment is deferred to PR-04 (portfolio governance).
 }
 
+# PR-02: Setup classes whose evaluator-authored structural SL/TP geometry must be
+# preserved through downstream risk-plan handling.  For these paths the evaluator
+# already computed method-specific, structurally-anchored SL and measured-move or
+# band-width TPs; generic ATR/structure recomputation must not overwrite them.
+# Universal hard controls (max SL %, near-zero SL guard, directional sanity,
+# minimum R:R) are still enforced after the evaluator geometry is applied.
+# FAILED_AUCTION_RECLAIM is handled by its own dedicated block and is NOT
+# included here to avoid duplicating its structure override logic.
+# SR_FLIP_RETEST is included because its SL is anchored to the flipped structural
+# level (not a generic swing) and its TP1/TP2 are swing-high/4h structural targets.
+STRUCTURAL_SLTP_PROTECTED_SETUPS: frozenset[SetupClass] = frozenset({
+    SetupClass.POST_DISPLACEMENT_CONTINUATION,
+    SetupClass.VOLUME_SURGE_BREAKOUT,
+    SetupClass.BREAKDOWN_SHORT,
+    SetupClass.QUIET_COMPRESSION_BREAK,
+    SetupClass.TREND_PULLBACK_EMA,
+    SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+    SetupClass.SR_FLIP_RETEST,
+})
+
 
 class MarketState(str, Enum):
     STRONG_TREND = "STRONG_TREND"
@@ -936,6 +956,22 @@ def build_risk_plan(
         elif signal.direction == Direction.SHORT and far_reclaim_level > signal.entry:
             structure = far_reclaim_level
 
+    # PR-02: For structurally-protected paths (other than FAILED_AUCTION_RECLAIM
+    # which is handled above), re-use the evaluator-authored stop when it is
+    # directionally valid.  This preserves the method-specific structural
+    # invalidation level (e.g. 0.8% below swing-high for VOLUME_SURGE_BREAKOUT,
+    # beyond consolidation range for POST_DISPLACEMENT_CONTINUATION, beyond band
+    # for QUIET_COMPRESSION_BREAK) rather than drifting to the generic
+    # ATR/recent-structure SL which has no knowledge of the evaluator thesis.
+    # Universal hard controls (max SL %, near-zero guard, directional sanity)
+    # are applied below and remain intact.
+    elif setup in STRUCTURAL_SLTP_PROTECTED_SETUPS:
+        _eval_sl = _safe_float(getattr(signal, "stop_loss", None), 0.0)
+        if signal.direction == Direction.LONG and 0 < _eval_sl < signal.entry:
+            stop_loss = round(_eval_sl, 8)
+        elif signal.direction == Direction.SHORT and _eval_sl > signal.entry:
+            stop_loss = round(_eval_sl, 8)
+
     # Channel-aware hard cap on SL distance – clamp oversized stops before
     # they inflate risk and produce trades that hit SL within seconds.
     _chan = channel or getattr(signal, "channel", None) or ""
@@ -1032,7 +1068,34 @@ def build_risk_plan(
 
     _is_long = signal.direction == Direction.LONG
 
-    if setup == SetupClass.RANGE_REJECTION:
+    # PR-02: Protected structural paths use evaluator-authored TP geometry.
+    # Each target is validated (must be on the correct side of entry); only
+    # valid levels are kept — invalid ones fall back to conservative risk
+    # multiples so the signal is not rejected on an edge-case geometry failure.
+    # The existing FAILED_AUCTION_RECLAIM branch (below) handles its own TP
+    # logic and is excluded from this set.
+    if setup in STRUCTURAL_SLTP_PROTECTED_SETUPS:
+        _e_tp1 = _safe_float(getattr(signal, "tp1", None), 0.0)
+        _e_tp2 = _safe_float(getattr(signal, "tp2", None), 0.0)
+        _e_tp3_raw = getattr(signal, "tp3", None)
+        _e_tp3 = _safe_float(_e_tp3_raw, 0.0) if _e_tp3_raw is not None else None
+        if _is_long:
+            tp1 = _e_tp1 if _e_tp1 > signal.entry else signal.entry + risk * 1.5
+            tp2 = _e_tp2 if _e_tp2 > signal.entry else signal.entry + risk * 2.5
+            tp3 = _e_tp3 if (_e_tp3 is not None and _e_tp3 > signal.entry) else signal.entry + risk * 4.0
+        else:
+            tp1 = _e_tp1 if (0 < _e_tp1 < signal.entry) else signal.entry - risk * 1.5
+            tp2 = _e_tp2 if (0 < _e_tp2 < signal.entry) else signal.entry - risk * 2.5
+            tp3 = _e_tp3 if (_e_tp3 is not None and 0 < _e_tp3 < signal.entry) else signal.entry - risk * 4.0
+        log.debug(
+            "PR-02 structural TP preserved for %s %s: tp1=%.6f tp2=%.6f tp3=%s",
+            getattr(signal, "symbol", "?"),
+            setup.value,
+            tp1,
+            tp2,
+            f"{tp3:.6f}" if tp3 is not None else "None",
+        )
+    elif setup == SetupClass.RANGE_REJECTION:
         # Tight Bollinger-band-anchored exits — exits at mid and upper/lower band.
         if _is_long:
             tp1 = max(signal.entry + risk * 0.9, bb_mid)
@@ -1059,17 +1122,6 @@ def build_risk_plan(
         tp1 = signal.entry + risk * 0.9 if _is_long else signal.entry - risk * 0.9
         tp2 = signal.entry + risk * 1.5 if _is_long else signal.entry - risk * 1.5
         tp3 = signal.entry + risk * 2.2 if _is_long else signal.entry - risk * 2.2
-    elif setup == SetupClass.SR_FLIP_RETEST:
-        # Support/resistance flip-retest: price confirmed flip, target the next
-        # structural level then extend toward prior range high/low.
-        tp1 = signal.entry + risk * 1.2 if _is_long else signal.entry - risk * 1.2
-        tp2 = signal.entry + risk * 2.0 if _is_long else signal.entry - risk * 2.0
-        tp3 = signal.entry + risk * 2.8 if _is_long else signal.entry - risk * 2.8
-    elif setup == SetupClass.TREND_PULLBACK_EMA:
-        # EMA pullback in trend direction: modest extension along the trend.
-        tp1 = signal.entry + risk * 1.3 if _is_long else signal.entry - risk * 1.3
-        tp2 = signal.entry + risk * 2.2 if _is_long else signal.entry - risk * 2.2
-        tp3 = signal.entry + risk * 3.2 if _is_long else signal.entry - risk * 3.2
     elif setup == SetupClass.TREND_PULLBACK_CONTINUATION:
         # Clean trend pullback: ride the trend with moderate extension targets.
         tp1 = signal.entry + risk * 1.4 if _is_long else signal.entry - risk * 1.4
@@ -1083,15 +1135,10 @@ def build_risk_plan(
         tp3 = signal.entry + risk * 3.8 if _is_long else signal.entry - risk * 3.8
     elif setup in (
         SetupClass.BREAKOUT_RETEST,
-        SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.OPENING_RANGE_BREAKOUT,
-        SetupClass.QUIET_COMPRESSION_BREAK,
-        SetupClass.BREAKDOWN_SHORT,
     ):
-        # Measured-move breakout/breakdown families: breakout/breakdown should
-        # travel a full measured move — allow larger extensions than
-        # continuation plays.  BREAKDOWN_SHORT is the directional short
-        # equivalent of the upside breakout families.
+        # Non-protected measured-move breakout families: breakout should travel a
+        # full measured move — allow larger extensions than continuation plays.
         tp1 = signal.entry + risk * 1.5 if _is_long else signal.entry - risk * 1.5
         tp2 = signal.entry + risk * 2.8 if _is_long else signal.entry - risk * 2.8
         tp3 = signal.entry + risk * 4.0 if _is_long else signal.entry - risk * 4.0
@@ -1107,21 +1154,51 @@ def build_risk_plan(
         tp2 = signal.entry + risk * 2.2 if _is_long else signal.entry - risk * 2.2
         tp3 = signal.entry + risk * 3.2 if _is_long else signal.entry - risk * 3.2
     elif setup == SetupClass.FAILED_AUCTION_RECLAIM:
-        # Failed-auction reclaim: price rejected acceptance beyond a structural
-        # level, reclaimed back through that level, and should now travel away
-        # from the reclaim in a measured-move style continuation.  Anchor TP
-        # geometry to the full reclaim structure: reclaim-to-invalidation span
-        # plus the entry's clearance beyond the reclaimed level.
-        reclaim_to_invalidation_span = abs(structure - stop_loss)
-        reclaim_clearance = abs(signal.entry - structure)
-        measured_move = (
-            reclaim_to_invalidation_span + reclaim_clearance
-            if reclaim_to_invalidation_span > 0
-            else risk
+        # PR-02: Prefer evaluator-authored TP geometry (measured-move from tail)
+        # when the values are directionally valid.  The evaluator computes TPs
+        # from `tail` = distance the auction probed beyond the reference level,
+        # which is the most precise structural anchor for this path.  Only fall
+        # back to the reclaim-span measured-move formula when evaluator TPs are
+        # absent or invalid.
+        _far_e_tp1 = _safe_float(getattr(signal, "tp1", None), 0.0)
+        _far_e_tp2 = _safe_float(getattr(signal, "tp2", None), 0.0)
+        _far_e_tp3_raw = getattr(signal, "tp3", None)
+        _far_e_tp3 = _safe_float(_far_e_tp3_raw, 0.0) if _far_e_tp3_raw is not None else None
+        _far_tp1_valid = _far_e_tp1 > signal.entry if _is_long else (0 < _far_e_tp1 < signal.entry)
+        _far_tp2_valid = _far_e_tp2 > signal.entry if _is_long else (0 < _far_e_tp2 < signal.entry)
+        _far_tp3_valid = (
+            (_far_e_tp3 is not None and _far_e_tp3 > signal.entry)
+            if _is_long
+            else (_far_e_tp3 is not None and 0 < _far_e_tp3 < signal.entry)
         )
-        tp1 = signal.entry + measured_move * 1.2 if _is_long else signal.entry - measured_move * 1.2
-        tp2 = signal.entry + measured_move * 1.9 if _is_long else signal.entry - measured_move * 1.9
-        tp3 = signal.entry + measured_move * 3.0 if _is_long else signal.entry - measured_move * 3.0
+        if _far_tp1_valid and _far_tp2_valid:
+            # Evaluator-authored structural TPs are valid — preserve them.
+            tp1 = _far_e_tp1
+            tp2 = _far_e_tp2
+            tp3 = _far_e_tp3 if _far_tp3_valid else (
+                signal.entry + risk * 3.0 if _is_long else signal.entry - risk * 3.0
+            )
+            log.debug(
+                "PR-02 FAR structural TP preserved for %s: tp1=%.6f tp2=%.6f",
+                getattr(signal, "symbol", "?"),
+                tp1,
+                tp2,
+            )
+        else:
+            # Evaluator TPs missing or invalid — recompute from reclaim-span geometry.
+            # Failed-auction reclaim: price rejected acceptance beyond a structural
+            # level, reclaimed back through that level, and should now travel away
+            # from the reclaim in a measured-move style continuation.
+            reclaim_to_invalidation_span = abs(structure - stop_loss)
+            reclaim_clearance = abs(signal.entry - structure)
+            measured_move = (
+                reclaim_to_invalidation_span + reclaim_clearance
+                if reclaim_to_invalidation_span > 0
+                else risk
+            )
+            tp1 = signal.entry + measured_move * 1.2 if _is_long else signal.entry - measured_move * 1.2
+            tp2 = signal.entry + measured_move * 1.9 if _is_long else signal.entry - measured_move * 1.9
+            tp3 = signal.entry + measured_move * 3.0 if _is_long else signal.entry - measured_move * 3.0
     else:
         # Fallback for remaining families (MULTI_STRATEGY_CONFLUENCE,
         # BREAKDOWN_SHORT, and any future setups not yet classified).

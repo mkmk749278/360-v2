@@ -31,6 +31,29 @@ log = get_logger("predictive_ai")
 
 
 # ---------------------------------------------------------------------------
+# PR-02: Structural SL/TP protection set
+# ---------------------------------------------------------------------------
+
+# Setup classes whose evaluator-authored SL/TP geometry must not be scaled by
+# the predictive engine.  These paths use measured-move or structural geometry
+# anchored to the specific market event (swing-high breakout, consolidation
+# range, band-width release) and generic volatility-based scaling would flatten
+# that design into uniform geometry, defeating the structural thesis.
+# Stored as strings to match signal.setup_class (a string field) without
+# importing signal_quality (which would create a circular dependency).
+_PREDICTIVE_SLTP_BYPASS_SETUPS: frozenset[str] = frozenset({
+    "POST_DISPLACEMENT_CONTINUATION",
+    "VOLUME_SURGE_BREAKOUT",
+    "BREAKDOWN_SHORT",
+    "QUIET_COMPRESSION_BREAK",
+    "TREND_PULLBACK_EMA",
+    "CONTINUATION_LIQUIDITY_SWEEP",
+    "SR_FLIP_RETEST",          # flipped-level SL + swing/4h structural TPs
+    "FAILED_AUCTION_RECLAIM",  # already well-preserved; explicit to avoid regression
+})
+
+
+# ---------------------------------------------------------------------------
 # Data structures
 # ---------------------------------------------------------------------------
 
@@ -129,7 +152,22 @@ class PredictiveEngine:
         """Scale signal TP/SL levels by the prediction multipliers.
 
         Adjustments are only applied when the multiplier differs from 1.0.
+
+        Protected structural paths (PR-02) bypass predictive TP/SL scaling to
+        preserve evaluator-authored structural geometry.  Generic
+        volatility-based scaling must not flatten measured-move or
+        band-width targets into uniform multiplier-of-ATR geometry.
         """
+        # PR-02: Skip predictive TP/SL adjustment for structurally-protected paths.
+        _setup_class = getattr(signal, "setup_class", "")
+        if _setup_class in _PREDICTIVE_SLTP_BYPASS_SETUPS:
+            log.debug(
+                "%s predictive TP/SL adjustment bypassed (protected structural path: %s)",
+                getattr(signal, "symbol", "?"),
+                _setup_class,
+            )
+            return
+
         if prediction.suggested_tp_adjustment != 1.0:
             m = prediction.suggested_tp_adjustment
             entry = signal.entry

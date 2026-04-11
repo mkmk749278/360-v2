@@ -950,13 +950,10 @@ class TestFamilyAwareTP:
 
     @pytest.mark.parametrize("setup", [
         SetupClass.BREAKOUT_RETEST,
-        SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.OPENING_RANGE_BREAKOUT,
-        SetupClass.QUIET_COMPRESSION_BREAK,
-        SetupClass.BREAKDOWN_SHORT,
     ])
     def test_breakout_tp1_is_extended(self, setup):
-        """Measured-move breakout families must use tp1 ≈ 1.5R (larger than default 1.3R)."""
+        """Non-protected measured-move breakout families use tp1 ≈ 1.5R (generic multiplier)."""
         risk = _risk_plan_for(setup)
         assert risk.passed, f"{setup.value} plan unexpectedly failed: {risk.reason}"
         entry = 100.0
@@ -964,6 +961,33 @@ class TestFamilyAwareTP:
         tp1_ratio = (risk.tp1 - entry) / risk_dist
         assert tp1_ratio == pytest.approx(1.5, abs=0.05), (
             f"{setup.value} tp1 ratio {tp1_ratio:.2f} deviates from expected 1.5R"
+        )
+        assert risk.tp2 > risk.tp1
+        assert risk.tp3 is not None and risk.tp3 > risk.tp2
+
+    @pytest.mark.parametrize("setup", [
+        SetupClass.VOLUME_SURGE_BREAKOUT,
+        SetupClass.QUIET_COMPRESSION_BREAK,
+        SetupClass.BREAKDOWN_SHORT,
+    ])
+    def test_protected_breakout_preserves_evaluator_tp(self, setup):
+        """PR-02: Protected breakout paths preserve evaluator-authored TP geometry.
+
+        VOLUME_SURGE_BREAKOUT, QUIET_COMPRESSION_BREAK, and BREAKDOWN_SHORT have
+        evaluator-computed measured-move or band-width TPs that must survive
+        downstream risk-plan handling rather than being replaced by generic
+        risk-multiple targets.
+        """
+        sig = _signal(channel="360_SCALP", direction=Direction.LONG)
+        risk = _risk_plan_for(setup)
+        assert risk.passed, f"{setup.value} plan unexpectedly failed: {risk.reason}"
+        # Evaluator-authored TP1 (104.0 in the test signal) must be preserved.
+        assert risk.tp1 == pytest.approx(sig.tp1, rel=1e-6), (
+            f"{setup.value} tp1 {risk.tp1:.6f} should equal evaluator-authored "
+            f"{sig.tp1:.6f} (PR-02 structural TP preservation violated)"
+        )
+        assert risk.tp2 == pytest.approx(sig.tp2, rel=1e-6), (
+            f"{setup.value} tp2 {risk.tp2:.6f} should equal evaluator-authored {sig.tp2:.6f}"
         )
         assert risk.tp2 > risk.tp1
         assert risk.tp3 is not None and risk.tp3 > risk.tp2
@@ -1016,15 +1040,23 @@ class TestFamilyAwareTP:
             f"TREND_PULLBACK_CONTINUATION tp1 ratio {tp1_ratio:.2f} should be 1.4R"
         )
 
-    def test_trend_pullback_ema_tp1_moderate(self):
-        """TREND_PULLBACK_EMA tp1 must be ≈ 1.3R (modest trend extension)."""
+    def test_trend_pullback_ema_tp1_preserves_evaluator(self):
+        """PR-02: TREND_PULLBACK_EMA preserves evaluator-authored TP (not generic 1.3R).
+
+        The TREND_PULLBACK_EMA evaluator computes structure-based TPs anchored to
+        swing highs and 4h structure.  These must survive build_risk_plan() rather
+        than being replaced by the generic 1.3R risk-multiple target.
+        """
+        sig = _signal(channel="360_SCALP", direction=Direction.LONG)
         risk = _risk_plan_for(SetupClass.TREND_PULLBACK_EMA)
         assert risk.passed, f"TREND_PULLBACK_EMA plan failed: {risk.reason}"
-        entry = 100.0
-        risk_dist = entry - risk.stop_loss
-        tp1_ratio = (risk.tp1 - entry) / risk_dist
-        assert tp1_ratio == pytest.approx(1.3, abs=0.05), (
-            f"TREND_PULLBACK_EMA tp1 ratio {tp1_ratio:.2f} should be 1.3R"
+        # Evaluator-authored TP1 (104.0 in the test signal) must be preserved.
+        assert risk.tp1 == pytest.approx(sig.tp1, rel=1e-6), (
+            f"TREND_PULLBACK_EMA tp1 {risk.tp1:.6f} should equal evaluator-authored "
+            f"{sig.tp1:.6f} (PR-02 structural TP preservation violated)"
+        )
+        assert risk.tp2 == pytest.approx(sig.tp2, rel=1e-6), (
+            f"TREND_PULLBACK_EMA tp2 {risk.tp2:.6f} should equal evaluator-authored {sig.tp2:.6f}"
         )
 
     # ── Range / structured level families ──────────────────────────────────
@@ -1040,15 +1072,24 @@ class TestFamilyAwareTP:
             f"RANGE_FADE tp1 ratio {tp1_ratio:.2f} should be 0.9R"
         )
 
-    def test_sr_flip_retest_tp1_structured(self):
-        """SR_FLIP_RETEST tp1 must be ≈ 1.2R (next structural level)."""
+    def test_sr_flip_retest_tp1_preserves_evaluator(self):
+        """PR-02: SR_FLIP_RETEST preserves evaluator-authored TP1 (swing-high level).
+
+        SR_FLIP_RETEST is now in STRUCTURAL_SLTP_PROTECTED_SETUPS.  The evaluator
+        computes TP1 from the 20-candle swing high/low (a structural anchor), not
+        from a generic risk multiple.  That evaluator-authored value must survive
+        build_risk_plan() rather than being replaced by the old generic 1.2R target.
+        """
+        sig = _signal(channel="360_SCALP", direction=Direction.LONG)
         risk = _risk_plan_for(SetupClass.SR_FLIP_RETEST)
         assert risk.passed, f"SR_FLIP_RETEST plan failed: {risk.reason}"
-        entry = 100.0
-        risk_dist = entry - risk.stop_loss
-        tp1_ratio = (risk.tp1 - entry) / risk_dist
-        assert tp1_ratio == pytest.approx(1.2, abs=0.05), (
-            f"SR_FLIP_RETEST tp1 ratio {tp1_ratio:.2f} should be 1.2R"
+        # Evaluator-authored TP1 (104.0 in the test signal) must be preserved.
+        assert risk.tp1 == pytest.approx(sig.tp1, rel=1e-6), (
+            f"SR_FLIP_RETEST tp1 {risk.tp1:.6f} should equal evaluator-authored "
+            f"{sig.tp1:.6f} (PR-02 structural TP preservation violated)"
+        )
+        assert risk.tp2 == pytest.approx(sig.tp2, rel=1e-6), (
+            f"SR_FLIP_RETEST tp2 {risk.tp2:.6f} should equal evaluator-authored {sig.tp2:.6f}"
         )
 
     # ── Family ordering invariants ──────────────────────────────────────────
