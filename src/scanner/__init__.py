@@ -2169,6 +2169,14 @@ class Scanner:
             )
             if not mtf_allowed:
                 log.debug("MTF gate blocked {} {}: {}", symbol, chan_name, mtf_reason)
+                self._suppression_counters[f"mtf_gate:{chan_name}"] += 1
+                self.suppression_tracker.record(SuppressionEvent(
+                    symbol=symbol,
+                    channel=chan_name,
+                    reason="mtf_gate",
+                    regime=_regime_key,
+                    would_be_confidence=sig.confidence,
+                ))
                 return None, None
 
         # Resolve regime penalty multiplier for all soft gates below.
@@ -2661,6 +2669,14 @@ class Scanner:
             elif _score_result["total"] >= 50:
                 sig.signal_tier = "WATCHLIST"
             else:
+                log.debug(
+                    "PR09 below-threshold {} {}: total={:.1f} smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",
+                    symbol, chan_name, _score_result["total"],
+                    _score_result["smc"], _score_result["regime"], _score_result["volume"],
+                    _score_result["indicators"], _score_result["patterns"], _score_result["mtf"],
+                    _score_result["thesis_adj"],
+                )
+                self._suppression_counters[f"pr09_below50:{chan_name}"] += 1
                 return None, cross_verified
             log.debug(
                 "PR09 score {} {} → {:.1f} (tier={}) smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",

@@ -225,13 +225,15 @@ class ScalpChannel(BaseChannel):
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "VOLATILE":
             # Order flow signals more reliable in volatile markets
-            return {"order_flow": 1.5, "trend": 0.7, "volume": 1.3}
+            return {"order_flow": 1.5, "trend": 0.7, "mean_reversion": 0.8, "volume": 1.3}
         if regime_upper in ("QUIET", "RANGING"):
-            return {"order_flow": 0.8, "trend": 0.75, "volume": 0.9}
+            # Mean-reversion setups are preferred in ranging markets while trend
+            # signals have lower edge.
+            return {"order_flow": 0.8, "trend": 0.75, "mean_reversion": 1.2, "volume": 0.9}
         if regime_upper in ("TRENDING_UP", "TRENDING_DOWN"):
             # Trend-following signals preferred in trending markets
-            return {"order_flow": 1.0, "trend": 1.5, "volume": 1.0}
-        return {"order_flow": 1.0, "trend": 1.0, "volume": 1.0}
+            return {"order_flow": 1.0, "trend": 1.5, "mean_reversion": 0.7, "volume": 1.0}
+        return {"order_flow": 1.0, "trend": 1.0, "mean_reversion": 1.0, "volume": 1.0}
 
     def evaluate(
         self,

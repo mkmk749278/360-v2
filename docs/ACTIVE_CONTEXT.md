@@ -13,7 +13,8 @@
 
 Architecture correction sequence (ARCH-2 through ARCH-10) is complete.
 Active roadmap is the business-first signal-engine path sequence (OWNER_BRIEF.md Part VI §6.2).
-Steps 1–8 complete. Next step is step 9 (path-by-path portfolio tuning).
+Steps 1–8 complete. Zero-signal observability PR is the pre-step-9 blocker.
+Step 9 (path-by-path portfolio tuning) remains gated on live evidence.
 
 ### Roadmap completion state
 
@@ -26,17 +27,33 @@ Steps 1–8 complete. Next step is step 9 (path-by-path portfolio tuning).
 | 5 | Add `CONTINUATION_LIQUIDITY_SWEEP` | ✅ merged |
 | 6 | Add `POST_DISPLACEMENT_CONTINUATION` | ✅ merged |
 | 7 | Add `FAILED_AUCTION_RECLAIM` | ✅ merged (PR #105) |
-| 8 | Formalize path portfolio roles | ✅ merged (current PR) |
-| 9 | Path-by-path portfolio tuning | ⏳ next |
+| 8 | Formalize path portfolio roles | ✅ merged (PR #106) |
+| Pre-9 | Diagnose zero live signal — observability fix | ✅ current PR |
+| 9 | Path-by-path portfolio tuning | ⏳ next (needs live signal data) |
 
 ---
 
 ## Current Active Priority
 
-1. **Diagnose zero live signal output** — monitor shows `Signals=0`, `ScanLat=~20s`, WS healthy, suppression summary present. Root cause not yet confirmed.
-2. **Confirm evaluator family diversity** — need evidence that more than one or two evaluator families are producing candidates in live conditions.
-3. **Heartbeat file missing** — needs investigation. May indicate healthcheck or I/O issue.
-4. **Step 9: Path-by-path portfolio tuning** — next roadmap item. Requires live diagnostic evidence (candidate rate, emit rate, gate-block rate, outcome distribution) before any threshold adjustments.
+1. **Gather live diagnostic evidence** — MTF gate and PR09 < 50 rejections are now visible in suppression summary. Next step: review suppression counts to understand what funnel stage is blocking candidates.
+2. **Step 9: Path-by-path portfolio tuning** — next roadmap item. Requires live diagnostic evidence (candidate rate, emit rate, gate-block distribution) before any threshold adjustments.
+
+---
+
+## Zero-Signal Diagnosis — Confirmed Fixes in Current PR
+
+### Fix 1 — `_select_indicator_weights` missing `"mean_reversion"` key
+- **Evidence:** 6 pre-existing test failures in `test_phase4_adaptive_logic.py` (`KeyError: 'mean_reversion'`).
+- **Fix:** Added `"mean_reversion"` key to all regime branches. Values: VOLATILE=0.8, RANGING/QUIET=1.2, TRENDING=0.7, default=1.0.
+- **Note:** `RANGE_FADE` evaluator is permanently removed per OWNER_BRIEF.md. The `"mean_reversion"` weight key is retained as a valid regime-weighting dimension (no evaluator currently uses it as a primary weight, but it fixes the pre-existing KeyError and documents the relative weight for any future brief-approved mean-reversion path).
+
+### Fix 2 — MTF hard gate not tracked in suppression_counters (High observability gap)
+- **Evidence:** `_prepare_signal` returned `None, None` at MTF gate with only a debug log. Suppression summary never showed MTF as a rejection cause.
+- **Fix:** Added `self._suppression_counters[f"mtf_gate:{chan_name}"] += 1` and `suppression_tracker.record()` at MTF gate rejection.
+
+### Fix 3 — PR09 < 50 rejection not logged
+- **Evidence:** PR09 < 50 branch returned `None` with no log or counter.
+- **Fix:** Added `log.debug()` with full component breakdown and `self._suppression_counters[f"pr09_below50:{chan_name}"] += 1`.
 
 ---
 
@@ -44,11 +61,11 @@ Steps 1–8 complete. Next step is step 9 (path-by-path portfolio tuning).
 
 | Issue | Severity | Status |
 |---|---|---|
-| `Signals=0` in live monitor output | Critical | Under investigation |
-| `ScanLat=~20398ms` — elevated scan latency | High | Cause not confirmed |
-| Heartbeat file missing after grace period | Medium | Needs trace |
-| Evaluator family diversity unconfirmed | High | No live emit data yet |
-| Same-symbol same-direction scalp dedup may discard better candidates early | Medium | Identified in code, not root-cause confirmed |
+| Zero live signal output — root cause not yet confirmed from live data | Critical | Observability improved in current PR — live suppression summary needed |
+| `ScanLat=~20398ms` — elevated scan latency | High | Cause not confirmed — not a code defect in signal path |
+| Heartbeat file missing after grace period | Medium | Needs trace — may be related to long scan latency |
+| PR09 score < 50 rejections previously silent | Medium | Fixed — now logged and counted in suppression summary |
+| MTF gate rejections previously silent | High | Fixed — now counted in suppression summary |
 
 ---
 
@@ -56,7 +73,7 @@ Steps 1–8 complete. Next step is step 9 (path-by-path portfolio tuning).
 
 | Priority | PR | Description | Gate |
 |---|---|---|---|
-| 1 | PR-9 | Path-by-path portfolio tuning (evidence-led, per `ACTIVE_PATH_PORTFOLIO_ROLES`) | Live data required first |
+| 1 | PR-9 | Path-by-path portfolio tuning (evidence-led, per `ACTIVE_PATH_PORTFOLIO_ROLES`) | Live signal data required first |
 
 Full current roadmap: `OWNER_BRIEF.md` Part VI section 6.2.
 
@@ -89,4 +106,4 @@ Role assignments:
 
 ## Last Updated
 
-2026-04-11 — Roadmap step 8 complete: `PortfolioRole` enum and `ACTIVE_PATH_PORTFOLIO_ROLES` mapping added to `src/signal_quality.py`. All 14 active evaluators assigned explicit portfolio roles. Focused tests added to `tests/test_signal_quality.py`. Next step is path-by-path portfolio tuning (step 9) using live diagnostic data.
+2026-04-11 — Pre-step-9 observability PR: added `"mean_reversion"` key to `_select_indicator_weights` (fixes 6 pre-existing test failures), added MTF gate and PR09 < 50 rejection tracking to suppression summary. `RANGE_FADE` evaluator remains permanently removed per OWNER_BRIEF.md. Next step is gathering live suppression data and proceeding to step 9 portfolio tuning.
