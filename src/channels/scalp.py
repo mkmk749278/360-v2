@@ -3314,12 +3314,15 @@ class ScalpChannel(BaseChannel):
             if direction == Direction.SHORT and rsi_f < _RANGE_FADE_RSI_SHORT_MIN:
                 return None  # RSI recovering from overbought — entry timing missed
 
-        # Stop-loss: below the entry for LONG, above for SHORT.  Anchor to the
-        # Bollinger Band extreme + ATR buffer so the SL sits beyond the structural
-        # boundary price has already violated.  For LONG the SL is below close
-        # (which is already below bb_lower); for SHORT it is above close.
+        # Stop-loss: below the entry for LONG, above for SHORT.  Use the deeper of
+        # one ATR and (band penetration + half ATR) so the SL sits comfortably
+        # below the price level that has already violated the Bollinger Band.
         atr_val = float(ind.get("atr_last", close * 0.002))
-        buffer = max(atr_val * 1.0, abs(close - bb_lower if direction == Direction.LONG else bb_upper - close) + atr_val * 0.5)
+        if direction == Direction.LONG:
+            band_penetration = abs(bb_lower - close)
+        else:
+            band_penetration = abs(close - bb_upper)
+        buffer = max(atr_val, band_penetration + atr_val * 0.5)
         if direction == Direction.LONG:
             sl = close - buffer
         else:
@@ -3349,19 +3352,19 @@ class ScalpChannel(BaseChannel):
                 tp2 = bb_lower
                 tp3 = bb_lower - band_width * 0.2
         else:
-            tp1 = close + sl_dist * 1.2 if direction == Direction.LONG else close - sl_dist * 1.2
-            tp2 = close + sl_dist * 2.0 if direction == Direction.LONG else close - sl_dist * 2.0
-            tp3 = close + sl_dist * 3.0 if direction == Direction.LONG else close - sl_dist * 3.0
+            dirn = 1 if direction == Direction.LONG else -1
+            tp1 = close + dirn * sl_dist * 1.2
+            tp2 = close + dirn * sl_dist * 2.0
+            tp3 = close + dirn * sl_dist * 3.0
 
         # Sanity-check TP direction and fall back to ATR-ratio if invalid.
-        if direction == Direction.LONG and (tp1 <= close or tp2 <= tp1):
-            tp1 = close + sl_dist * 1.2
-            tp2 = close + sl_dist * 2.0
-            tp3 = close + sl_dist * 3.0
-        if direction == Direction.SHORT and (tp1 >= close or tp2 >= tp1):
-            tp1 = close - sl_dist * 1.2
-            tp2 = close - sl_dist * 2.0
-            tp3 = close - sl_dist * 3.0
+        dirn = 1 if direction == Direction.LONG else -1
+        if (direction == Direction.LONG and (tp1 <= close or tp2 <= tp1)) or (
+            direction == Direction.SHORT and (tp1 >= close or tp2 >= tp1)
+        ):
+            tp1 = close + dirn * sl_dist * 1.2
+            tp2 = close + dirn * sl_dist * 2.0
+            tp3 = close + dirn * sl_dist * 3.0
 
         _regime_ctx = smc_data.get("regime_context") if smc_data else None
         sig = build_channel_signal(
