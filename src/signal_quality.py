@@ -101,6 +101,23 @@ ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
     # their portfolio-role assignment is deferred to PR-04 (portfolio governance).
 }
 
+# PR-02: Setup classes whose evaluator-authored structural SL/TP geometry must be
+# preserved through downstream risk-plan handling.  For these paths the evaluator
+# already computed method-specific, structurally-anchored SL and measured-move or
+# band-width TPs; generic ATR/structure recomputation must not overwrite them.
+# Universal hard controls (max SL %, near-zero SL guard, directional sanity,
+# minimum R:R) are still enforced after the evaluator geometry is applied.
+# FAILED_AUCTION_RECLAIM is handled by its own dedicated block and is NOT
+# included here to avoid duplicating its structure override logic.
+STRUCTURAL_SLTP_PROTECTED_SETUPS: frozenset[SetupClass] = frozenset({
+    SetupClass.POST_DISPLACEMENT_CONTINUATION,
+    SetupClass.VOLUME_SURGE_BREAKOUT,
+    SetupClass.BREAKDOWN_SHORT,
+    SetupClass.QUIET_COMPRESSION_BREAK,
+    SetupClass.TREND_PULLBACK_EMA,
+    SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+})
+
 
 class MarketState(str, Enum):
     STRONG_TREND = "STRONG_TREND"
@@ -936,6 +953,22 @@ def build_risk_plan(
         elif signal.direction == Direction.SHORT and far_reclaim_level > signal.entry:
             structure = far_reclaim_level
 
+    # PR-02: For structurally-protected paths (other than FAILED_AUCTION_RECLAIM
+    # which is handled above), re-use the evaluator-authored stop when it is
+    # directionally valid.  This preserves the method-specific structural
+    # invalidation level (e.g. 0.8% below swing-high for VOLUME_SURGE_BREAKOUT,
+    # beyond consolidation range for POST_DISPLACEMENT_CONTINUATION, beyond band
+    # for QUIET_COMPRESSION_BREAK) rather than drifting to the generic
+    # ATR/recent-structure SL which has no knowledge of the evaluator thesis.
+    # Universal hard controls (max SL %, near-zero guard, directional sanity)
+    # are applied below and remain intact.
+    elif setup in STRUCTURAL_SLTP_PROTECTED_SETUPS:
+        _eval_sl = _safe_float(getattr(signal, "stop_loss", None), 0.0)
+        if signal.direction == Direction.LONG and 0 < _eval_sl < signal.entry:
+            stop_loss = round(_eval_sl, 8)
+        elif signal.direction == Direction.SHORT and _eval_sl > signal.entry:
+            stop_loss = round(_eval_sl, 8)
+
     # Channel-aware hard cap on SL distance – clamp oversized stops before
     # they inflate risk and produce trades that hit SL within seconds.
     _chan = channel or getattr(signal, "channel", None) or ""
@@ -1032,7 +1065,34 @@ def build_risk_plan(
 
     _is_long = signal.direction == Direction.LONG
 
-    if setup == SetupClass.RANGE_REJECTION:
+    # PR-02: Protected structural paths use evaluator-authored TP geometry.
+    # Each target is validated (must be on the correct side of entry); only
+    # valid levels are kept — invalid ones fall back to conservative risk
+    # multiples so the signal is not rejected on an edge-case geometry failure.
+    # The existing FAILED_AUCTION_RECLAIM branch (below) handles its own TP
+    # logic and is excluded from this set.
+    if setup in STRUCTURAL_SLTP_PROTECTED_SETUPS:
+        _e_tp1 = _safe_float(getattr(signal, "tp1", None), 0.0)
+        _e_tp2 = _safe_float(getattr(signal, "tp2", None), 0.0)
+        _e_tp3_raw = getattr(signal, "tp3", None)
+        _e_tp3 = _safe_float(_e_tp3_raw, 0.0) if _e_tp3_raw is not None else None
+        if _is_long:
+            tp1 = _e_tp1 if _e_tp1 > signal.entry else signal.entry + risk * 1.5
+            tp2 = _e_tp2 if _e_tp2 > signal.entry else signal.entry + risk * 2.5
+            tp3 = _e_tp3 if (_e_tp3 is not None and _e_tp3 > signal.entry) else signal.entry + risk * 4.0
+        else:
+            tp1 = _e_tp1 if (0 < _e_tp1 < signal.entry) else signal.entry - risk * 1.5
+            tp2 = _e_tp2 if (0 < _e_tp2 < signal.entry) else signal.entry - risk * 2.5
+            tp3 = _e_tp3 if (_e_tp3 is not None and 0 < _e_tp3 < signal.entry) else signal.entry - risk * 4.0
+        log.debug(
+            "PR-02 structural TP preserved for %s %s: tp1=%.6f tp2=%.6f tp3=%s",
+            getattr(signal, "symbol", "?"),
+            setup.value,
+            tp1,
+            tp2,
+            f"{tp3:.6f}" if tp3 is not None else "None",
+        )
+    elif setup == SetupClass.RANGE_REJECTION:
         # Tight Bollinger-band-anchored exits — exits at mid and upper/lower band.
         if _is_long:
             tp1 = max(signal.entry + risk * 0.9, bb_mid)
