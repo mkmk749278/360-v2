@@ -801,10 +801,10 @@ class TestSRFlipRetestStructuralPreservation:
         risk = _build(sig, SetupClass.SR_FLIP_RETEST)
         assert risk.passed, f"SR_FLIP_RETEST plan failed: {risk.reason}"
         # If the old generic 1.2R branch were still active, tp1 would be ≈100.96.
-        # With PR-02 preservation, it must equal the evaluator-authored 103.0.
+        # With PR-02 preservation, it must equal the evaluator-authored sig.tp1.
         assert risk.tp1 > 102.0, (
             f"SR_FLIP_RETEST tp1 {risk.tp1:.4f} looks like the old 1.2R generic "
-            f"target rather than the evaluator-authored structural level 103.0"
+            f"target rather than the evaluator-authored structural level {sig.tp1}"
         )
         assert risk.tp1 == pytest.approx(sig.tp1, rel=1e-6), (
             f"SR_FLIP_RETEST tp1 {risk.tp1:.4f} must equal evaluator-authored {sig.tp1}"
