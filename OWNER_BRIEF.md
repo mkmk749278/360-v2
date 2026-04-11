@@ -1,6 +1,6 @@
 # 360 Crypto Eye — Owner Operating Manual
 
-> **Canonical version as of 2026-04-10. This supersedes all prior versions.**
+> **Canonical version as of 2026-04-11. This supersedes all prior versions.**
 > This is the single source of truth for system state, architecture, owner priorities, and how every Copilot session must operate.
 
 ---
@@ -253,34 +253,85 @@ If a better technical action is visible, Copilot surfaces it. If the owner says 
 
 ## Part II — Owner Priorities and System Philosophy
 
-### 2.1 Current Top Priorities (as of 2026-04-10)
+### 2.1 Current Top Priorities (as of 2026-04-11)
 
-1. **Live validation** — all 11 evaluators are architecturally unblocked (ARCH-2 through ARCH-10 complete). Current focus is confirming live signal output quality and evaluator diversity.
-2. **Signal quality** — every signal fired must represent a genuine institutional-grade setup with correct SMC structural basis, correct family scoring, and correct SL/TP.
-3. **Architecture stability** — no new evaluators or scoring changes until the current architecture proves stable in live conditions.
-4. **Intelligence Layer (PR15)** — raise only after 2 weeks of live data confirms the current architecture is producing correct and diverse output.
-5. **Testing scorecard** — begin formal Phase 1 validation once signal diversity is confirmed. Pass all exit criteria before any subscriber or business activity.
+1. **Strategy-expression integrity correction** — preserve evaluator identity, penalties, and structural SL/TP intent through the downstream pipeline so live output faithfully expresses the best paths.
+2. **Pre-redeploy correction pass** — the official recommendation is now **redeploy only after one more correction pass**. A fresh VPS reinstall alone is not success.
+3. **Portfolio governance alignment** — align active production defaults with the audited portfolio taxonomy; active-by-default auxiliary paths must be governed explicitly or disabled.
+4. **Signal quality** — every signal fired must represent a genuine institutional-grade setup with correct SMC structural basis, correct family scoring, and correct SL/TP expression.
+5. **Phase 1 scorecard readiness** — formal validation starts only after the pre-redeploy correction gate passes and the live engine becomes trustworthy enough to judge honestly.
 
-### 2.2 Quality Bar
+### 2.2 Current Owner Doctrine — Strategy-Expression Integrity
+
+The engine has a **strong core**. Several internal paths are already business-grade or near-business-grade. But the current business-critical issue is now explicitly:
+
+## **Strategy-expression integrity**
+
+The 2026-04-11 audit established the following canonical truths:
+- evaluator intent is not always preserved downstream
+- path-specific soft penalties can be lost
+- risk-plan / predictive rewriting can distort evaluator SL/TP design
+- same-direction `360_SCALP` candidate suppression is order-driven rather than quality-driven
+- enabled auxiliary channels are active by default without being governed as part of the formal production portfolio
+
+This is **not primarily an infrastructure problem**. The main current problem is downstream expression integrity. Core architecture progress is real, but one more correction pass is required before the engine is treated as trustworthy for redeploy.
+
+### 2.3 Current Official Deploy Judgment
+
+- A fresh VPS reinstall is **not** success by itself.
+- Only a trustworthy engine should be redeployed.
+- The current official recommendation is:
+
+## **Redeploy only after one more correction pass**
+
+### 2.4 Current Portfolio Position Doctrine
+
+This portfolio grouping is now canonical and governs how future work is judged:
+
+**Strongest foundation paths**
+- `FAILED_AUCTION_RECLAIM`
+- `CONTINUATION_LIQUIDITY_SWEEP`
+- `SR_FLIP_RETEST`
+- `TREND_PULLBACK_EMA`
+- `POST_DISPLACEMENT_CONTINUATION`
+
+**Strong secondary / support layer**
+- `VOLUME_SURGE_BREAKOUT`
+- `BREAKDOWN_SHORT`
+- `LIQUIDATION_REVERSAL`
+- `QUIET_COMPRESSION_BREAK`
+
+**Conditional / under-review layer**
+- `DIVERGENCE_CONTINUATION`
+- `FUNDING_EXTREME_SIGNAL`
+- `WHALE_MOMENTUM`
+
+**Active-by-default paths that should be disabled unless rebuilt or fully integrated**
+- `FVG_RETEST`
+- `RSI_MACD_DIVERGENCE`
+- `SMC_ORDERBLOCK`
+- `OPENING_RANGE_BREAKOUT` unless rebuilt with true session-opening-range logic
+
+### 2.5 Quality Bar
 
 A signal meets the bar only when all of the following are true:
 - It has a genuine SMC structural basis (sweep, FVG, or orderblock) — or is explicitly registered as exempt
 - It passes all 13 signal quality gates
 - Its confidence score reflects the actual signal thesis, not a uniform scoring artifact
-- Its SL/TP logic is method-specific (Business Rule B13)
+- Its SL/TP logic is method-specific (Business Rule B13) **and preserved through live downstream handling**
 - It represents a setup a skilled prop trader would genuinely act on
 
-### 2.3 System Philosophy
+### 2.6 System Philosophy
 
 - **The system exists for the business.** 360 Crypto Eye is not a technical hobby — it is the engine that the business depends on. The best business outcome is built on the best possible signal engine foundation. Every architectural decision must be evaluated against that standard.
 - **Signal quality is the business-critical output.** Signals = subscriber trust = revenue. Every improvement to signal quality, evaluator diversity, and system observability directly serves the business. This is not background context — it is the purpose of every PR.
 - **SMC structural basis is non-negotiable.** Every signal requires a sweep, FVG, or orderblock basis unless the setup class is explicitly registered as exempt.
 - **Each evaluator owns its own thesis.** Trend pullback logic is not the same as liquidation reversal logic is not the same as funding extreme logic. Uniform logic applied across families is an architectural defect.
-- **Hybrid downstream model.** Path-specific evaluator generation. Hybrid scoring, gating, and SL/TP by signal family. Never globally uniform downstream.
+- **Hybrid downstream model.** Path-specific evaluator generation. Hybrid scoring, gating, and SL/TP by signal family. Never globally uniform downstream — and never allow downstream rewriting to corrupt evaluator intent.
 - **Correct behavior beats codebase convenience.** If the code does something wrong, the code changes.
 - **Signal quality beats signal count.** Fewer signals of genuine quality are better than more signals of uncertain quality.
 
-### 2.4 Business Rules (Non-Negotiable, B1–B14)
+### 2.7 Business Rules (Non-Negotiable, B1–B14)
 
 | # | Rule |
 |---|---|
@@ -323,7 +374,7 @@ Binance WS / REST
         |
    Scanner (main loop, pair management, circuit breakers, smc_data assembly)
         |
-   ScalpChannel.evaluate() -> List[Signal]  (all 11 evaluators run; all candidates returned)
+   ScalpChannel.evaluate() -> List[Signal]  (all 14 internal evaluators run; all candidates returned)
         |
    Gate chain (per-signal: SMC gate, trend gate, quiet block, confidence floor, spread, volume)
         |
@@ -340,10 +391,10 @@ Binance WS / REST
 
 | Channel | Status | Purpose |
 |---|---|---|
-| 360_SCALP | Active (paid) | Main scalp channel — all 11 evaluation paths |
-| 360_SCALP_FVG | Active (paid) | Fair Value Gap retests |
-| 360_SCALP_ORDERBLOCK | Active (paid) | SMC order block bounces |
-| 360_SCALP_DIVERGENCE | Active (paid) | RSI/MACD divergence reversals |
+| 360_SCALP | Active (paid) | Main scalp channel — all 14 internal evaluation paths |
+| 360_SCALP_FVG | Active by default (paid, under review) | Fair Value Gap retests |
+| 360_SCALP_ORDERBLOCK | Active by default (paid, under review) | SMC order block bounces |
+| 360_SCALP_DIVERGENCE | Active by default (paid, under review) | RSI/MACD divergence reversals |
 | 360_SCALP_CVD | Radar (free) | Free channel alerts at conf >= 65 |
 | 360_SCALP_VWAP | Radar (free) | Free channel alerts at conf >= 65 |
 | 360_SCALP_SUPERTREND | Radar (free) | Free channel alerts at conf >= 65 |
@@ -351,7 +402,9 @@ Binance WS / REST
 
 **Permanently removed:** 360_SPOT, 360_GEM, 360_SWING (out of scope indefinitely), 360_SCALP_OBI (REST depth fetches caused structural scan latency — removed permanently).
 
-### 3.4 Signal Evaluators — All 11 Active
+**Canonical production-governance note:** active-by-default does not mean trusted for redeploy. `360_SCALP_FVG`, `360_SCALP_DIVERGENCE`, and `360_SCALP_ORDERBLOCK` remain outside the trusted pre-redeploy portfolio unless fully integrated or disabled.
+
+### 3.4 Signal Evaluators — 14 Internal `360_SCALP` Paths Active
 
 | # | Evaluator | Setup Class | Signal Family |
 |---|---|---|---|
@@ -366,33 +419,36 @@ Binance WS / REST
 | 9 | _evaluate_funding_extreme | FUNDING_EXTREME_SIGNAL | Order-flow positioning |
 | 10 | _evaluate_quiet_compression_break | QUIET_COMPRESSION_BREAK | Quiet specialist |
 | 11 | _evaluate_divergence_continuation | DIVERGENCE_CONTINUATION | Trend continuation |
+| 12 | _evaluate_continuation_liquidity_sweep | CONTINUATION_LIQUIDITY_SWEEP | Trend continuation |
+| 13 | _evaluate_post_displacement_continuation | POST_DISPLACEMENT_CONTINUATION | Breakout continuation |
+| 14 | _evaluate_failed_auction_reclaim | FAILED_AUCTION_RECLAIM | Structure reclaim |
 
 **Removed permanently:** _evaluate_range_fade — BB mean reversion, no SMC basis, retail strategy, artificially dominated signal output. Not to be reinstated.
 
-ScalpChannel.evaluate() returns **List[Signal]**. Every candidate from every evaluator is processed independently through the full gate chain. Winner-takes-all architecture was eliminated (ARCH-2).
+ScalpChannel.evaluate() returns **List[Signal]**. Winner-takes-all architecture was eliminated (ARCH-2). But the 2026-04-11 audit confirmed that downstream same-direction handling inside `360_SCALP` still remains sequence-biased, so quality-ranked arbitration is not yet fully achieved.
 
 ### 3.5 Signal Flow (per symbol, per scan cycle)
 
 1. **smc_data assembly** — indicators, SMC detection, pair profile, regime context, funding_rate, and CVD are all wired into smc_data before evaluate() is called
-2. **ScalpChannel.evaluate()** — all 11 evaluators run; all non-None results are collected as a list
-3. **Gate chain** applied to each candidate independently:
+2. **ScalpChannel.evaluate()** — all 14 internal evaluators run; all non-None results are collected as a list
+3. **Gate chain** applied per candidate, with current downstream integrity caveats that remain under correction:
    - SMC hard gate (exempt: ORB, QBREAK, SURGE, BREAKDOWN, SR_FLIP, LIQUIDATION_REVERSAL, FUNDING_EXTREME, DIVERGENCE_CONTINUATION)
    - Trend hard gate (exempt: LIQUIDATION_REVERSAL, FUNDING_EXTREME, WHALE_MOMENTUM)
    - QUIET_SCALP_BLOCK (exempt: QUIET_COMPRESSION_BREAK; DIVERGENCE_CONTINUATION exempt if confidence >= 64.0)
    - Spread gate, volume gate (regime-aware floor), confidence floor
-4. **SignalScoringEngine (PR09)** — family-aware hybrid scoring; soft-penalty deduction applied after final score (not overwritten)
-5. **SL/TP validation** — family-specific SL/TP logic enforced; universal risk controls (max SL %, min R:R) applied regardless of family
-6. **Dedup** — same symbol + same direction within cooldown window is suppressed
+4. **SignalScoringEngine (PR09)** — family-aware hybrid scoring is live, but evaluator soft-penalty intent is not yet preserved reliably enough across all downstream paths
+5. **SL/TP validation** — evaluator-specific SL/TP designs exist, but downstream risk-plan / predictive rewriting can still distort structural intent on top-tier paths
+6. **Dedup / arbitration** — same symbol + same direction within cooldown window is suppressed; inside `360_SCALP`, same-direction candidate arbitration is still too method-order-biased and must be replaced with quality-ranked arbitration before redeploy
 7. **Correlated cap** — MAX_CORRELATED_SCALP_SIGNALS=4 enforced across all live signals
 8. **Dispatch** — SignalRouter routes to paid channel / free channel / radar per B1/B9 rules
 
 ### 3.6 Confidence Scoring — Hybrid Model
 
-The scoring architecture is hybrid — not globally uniform. Uniform scoring across heterogeneous signal families is an architectural defect (confirmed, corrected by ARCH-8 and ARCH-10).
+The scoring architecture is hybrid — not globally uniform. Uniform scoring across heterogeneous signal families is an architectural defect. Core scoring architecture improved materially through ARCH-8 and ARCH-10, but downstream expression is still not fully faithful.
 
 - **Shared base score** — dimensions common to all families: SMC basis, regime alignment, MTF alignment, volume, spread
 - **Family-aware thesis dimension** — reversal and order-flow-positioning families use an order-flow thesis dimension (CVD, OI, liquidation); trend and continuation families use EMA/momentum weighting
-- **Soft penalties** — VWAP extension, kill zone, OI divergence, spoof/layering, volume divergence, cluster suppression — deducted AFTER the final score is assigned, not before (ARCH-8)
+- **Soft penalties** — VWAP extension, kill zone, OI divergence, spoof/layering, volume divergence, cluster suppression — must survive downstream intact; preserving evaluator penalties is now a pre-redeploy correction requirement
 
 | Tier | Score | Action |
 |---|---|---|
@@ -401,17 +457,29 @@ The scoring architecture is hybrid — not globally uniform. Uniform scoring acr
 | WATCHLIST | 50–64 | Post to free channel only |
 | FILTERED | < 50 | Reject — never dispatched |
 
+Current known scoring/governance mismatches from the audit:
+- some evaluator-authored penalties are still lost downstream
+- enabled auxiliary channels are active without being governed inside the formal portfolio taxonomy
+- gate-policy mismatches still distort some otherwise valid path expression
+
 ### 3.7 Gating Philosophy — Three-Layer Model
 
 1. **Universal safety gates** — minimum confidence, spread, circuit breaker, dedup — apply to every signal from every path, no exceptions
-2. **Family-aware policy gates** — SMC sweep gate applies to sweep-based families only; EMA trend gate applies to EMA-based families only; exempt sets are named constants in the scanner, not ad-hoc conditions
+2. **Family-aware policy gates** — this is the correct doctrine: SMC sweep gate applies only where structurally justified; EMA trend gate applies only where the thesis requires it; exempt sets are named constants in the scanner, not ad-hoc conditions
 3. **Narrow setup-class exemptions** — QUIET_COMPRESSION_BREAK is exempt from QUIET_SCALP_BLOCK (it is the quiet regime strategy); DIVERGENCE_CONTINUATION is exempt from the 65.0 floor at confidence >= 64.0 via _QUIET_DIVERGENCE_MIN_CONFIDENCE = 64.0
 
 Globally softening a gate to fix one path is not acceptable. The correct fix is always a family-aware exemption with a named constant.
 
+Current known gate-policy mismatches under active review:
+- `TREND_PULLBACK_EMA` likely needs SMC-gate reconsideration
+- `WHALE_MOMENTUM` likely needs SMC treatment reconsideration
+- `FAILED_AUCTION_RECLAIM` likely needs trend-gate reconsideration
+
 ### 3.8 SL/TP Design — Method-Specific (B13)
 
 Every evaluator owns its SL/TP logic. Sharing SL/TP formulas across evaluators violates B13 and is never permitted.
+
+This remains the canonical standard. The audit confirmed that downstream risk-plan / predictive rewriting can still distort evaluator-designed SL/TP expression in live dispatch. Preserving evaluator structural SL/TP intent for top-tier paths is now a binding pre-redeploy correction requirement.
 
 | SL Type | Evaluator(s) | Logic |
 |---|---|---|
@@ -488,7 +556,7 @@ Every signal must pass all 13 before dispatch:
 These are not retrospective notes. They are active operating rules derived from confirmed failures.
 
 **1. Winner-takes-all is wrong for multi-evaluator systems.**
-ScalpChannel.evaluate() previously returned one signal. _evaluate_standard produced a candidate every cycle and dominated. Nine other evaluators were permanently silenced. Fixed by ARCH-2 (List[Signal] return). Every evaluator's output is now independently gated. Do not reintroduce any design that filters to a single winner before the gate chain.
+ScalpChannel.evaluate() previously returned one signal. _evaluate_standard produced a candidate every cycle and dominated. Nine other evaluators were permanently silenced. Fixed by ARCH-2 (List[Signal] return). Every evaluator's output is now surfaced independently from the evaluator layer, but downstream same-direction arbitration still requires correction. Do not reintroduce any design that filters to a single winner before the gate chain.
 
 **2. Uniform gates are wrong for heterogeneous signal families.**
 Applying the SMC sweep gate to OPENING_RANGE_BREAKOUT (which has no sweep thesis) or the EMA trend gate to LIQUIDATION_REVERSAL (which fires precisely when EMA alignment breaks) causes structural false suppression of valid signals. The correct fix is always a family-aware named exemption — never softening the gate universally.
@@ -500,10 +568,10 @@ funding_rate and CVD existed in OrderFlowStore but were never wired into smc_dat
 PR09's original scoring awarded 6 pts for EMA alignment. Reversal signals fire precisely when EMA alignment is broken — producing a structural 12–15 pt confidence deficit for valid signals. Fixed by ARCH-10 (family-based scoring). Do not add new confidence dimensions that penalise reversal paths for not being trend paths.
 
 **5. Soft-gate penalties must be applied after the final score, not before.**
-Soft penalties (VWAP, kill zone, OI, spoof) accumulated correctly but were overwritten when PR09 set sig.confidence = score["total"]. They had zero effect. Fixed by ARCH-8. The penalty application order is now: score assignment first, then penalty subtraction.
+Soft penalties (VWAP, kill zone, OI, spoof) accumulated correctly but were overwritten when PR09 set sig.confidence = score["total"]. They had zero effect. ARCH-8 corrected the score-assignment order, but the 2026-04-11 audit confirmed evaluator-authored `soft_penalty_total` can still be lost downstream. Rule: preserve evaluator penalties end-to-end, not just after score assignment.
 
 **6. Setup classification must be explicit — never inferred.**
-Without _SELF_CLASSIFYING entries, classify_setup() reclassifies known setup classes to RANGE_FADE silently. Every new setup class must be registered in _SELF_CLASSIFYING at creation. Failure produces silent attribution errors that corrupt performance tracking.
+Without _SELF_CLASSIFYING entries, classify_setup() reclassifies known setup classes to RANGE_FADE silently. Every new setup class must be registered in _SELF_CLASSIFYING at creation. Failure produces silent attribution errors that corrupt performance tracking. This rule also applies to auxiliary channels: if they are active, their true identity must survive downstream intact.
 
 **7. Never add an evaluator without completing all required registrations.**
 Missing entries in any of these five locations cause silent rejection or implicit defaults: SetupClass enum, _SELF_CLASSIFYING frozenset, CHANNEL_SETUP_COMPATIBILITY, _CHANNEL_GATE_PROFILE, _CHANNEL_PENALTY_WEIGHTS, _MAX_SL_PCT_BY_CHANNEL. All six must be confirmed before any new evaluator PR is merged.
@@ -514,7 +582,7 @@ np.savez_compressed() blocked for 30–55s every 5 minutes until PR12 wrapped it
 **9. Complete architecture sequences in order. Do not cancel mid-sequence.**
 PR-ARCH-1 was cancelled mid-sequence due to agent task confusion and left fixes half-applied. The resulting inconsistent state required additional correction PRs. Always complete the current PR in an architecture sequence before starting the next one.
 
-### 4.2 Architecture Correction Sequence Completed (as of 2026-04-10)
+### 4.2 Core Architecture Correction Sequence Completed (as of 2026-04-10)
 
 | PR | What It Corrected |
 |---|---|
@@ -530,6 +598,8 @@ PR-ARCH-1 was cancelled mid-sequence due to agent task confusion and left fixes 
 | ARCH-9 | Family-aware SL/TP — uniform build_risk_plan() overwrite replaced with family-specific logic |
 | ARCH-10 | Family-based confidence scoring — order-flow thesis dimension added to PR09 for reversal/positioning families |
 
+This sequence corrected the engine's **core architecture**. It did **not** grant final redeploy clearance. The 2026-04-11 audit established that downstream expression, arbitration, and portfolio-governance integrity still require one more correction pass.
+
 ---
 
 ## Part V — Current Business Phase
@@ -538,7 +608,9 @@ PR-ARCH-1 was cancelled mid-sequence due to agent task confusion and left fixes 
 
 **Status: Active. No subscribers. No business activity.**
 
-All 11 evaluator paths are architecturally unblocked. The current task is confirming live signal output quality and evaluator family diversity before beginning formal scorecard tracking.
+The engine now has a strong architectural core and 14 live internal `360_SCALP` paths, but one more correction pass is required before trusted redeploy and before formal scorecard-grade validation begins.
+
+**Current active Phase 1 direction:** pre-redeploy correction of strategy-expression integrity, then honest live validation.
 
 **Phase 1 Exit Criteria — all must pass before Phase 2:**
 
@@ -553,6 +625,8 @@ All 11 evaluator paths are architecturally unblocked. The current task is confir
 
 Every SL hit is categorised: setup was wrong / regime changed after entry / stop too tight / bad timing / genuine market event.
 
+**Precondition:** the formal pre-redeploy gate in Part VI must pass before these Phase 1 metrics are treated as trustworthy validation evidence.
+
 ### 5.2 Phase 2 — Subscriber Launch (After Phase 1 Passes)
 
 - GPT-powered content goes live
@@ -564,84 +638,86 @@ Every SL hit is categorised: setup was wrong / regime changed after entry / stop
 
 ## Part VI — Roadmap From Here
 
-### 6.1 Immediate — Live Architecture Validation
+### 6.1 Current Direction — Pre-Redeploy Correction
 
-**This is the current active phase.** Architecture is complete. The work now is confirmation.
+**This is the current active phase.** Foundational architecture progress is real. Several internal paths are strong enough to keep. But the live downstream pipeline still distorts strategy expression, so the current direction is not "validation of an already-correct architecture." The current direction is:
+
+## **Pre-redeploy correction of expression and governance integrity**
 
 Copilot is responsible for the following without being prompted:
 - Read monitor-logs output at each session start — confirm scan latency, evaluator output, and error patterns
-- Confirm evaluator family diversity in live signal output — if RANGE_FADE still dominates, diagnose the classification layer
-- Confirm setup class attribution is correct in all dispatched signal messages — no residual RANGE_FADE misclassification
+- Check whether evaluator identity, penalties, and structural SL/TP intent are actually surviving downstream
+- Treat same-direction `360_SCALP` arbitration, gate-policy mismatches, and auxiliary-path governance as active business-critical issues
 - If any evaluator is producing zero output, trace the full path and diagnose before proceeding with anything else
-- Use the /why SYMBOL command for per-symbol gate diagnostics when needed
-- Flag any discrepancy between expected and actual evaluator coverage
+- Use the `/why SYMBOL` command for per-symbol gate diagnostics when needed
+- Flag any discrepancy between expected and actual path expression
 
-### 6.2 Signal-Engine Path Roadmap (Current Direction)
+### 6.2 Formal Pre-Redeploy Correction Roadmap
 
-**Business objective:** Build the strongest possible signal engine — highest path portfolio quality, broadest situational coverage, and business-grade signal generation at every step. This is the current strategic direction.
+This ordered PR sequence is now canonical. Future technical work is judged against this sequence until the pre-redeploy gate passes.
 
-This roadmap is direct and sequenced. Signal quality improvement starts now. Observability work runs concurrently as background infrastructure and informs but does not gate path refinement.
+#### 1. **PR-00 — Owner brief and governance update**
+- **Purpose:** make the audit findings canonical in the owner brief and governance doctrine.
+- **Business problem it solves:** removes stale operating assumptions that would otherwise treat redeploy as validation of an already-correct live engine.
+- **Why this position matters:** governance must change first so every later correction is judged against the correct business truth.
 
----
+#### 2. **PR-01 — Preserve evaluator identity, penalties, and path metadata**
+- **Purpose:** preserve evaluator-authored setup identity, soft penalties, and path metadata through the scanner and dispatch pipeline.
+- **Business problem it solves:** prevents strong paths from being misclassified, under-penalized, or governed as if they were different strategies.
+- **Why this position matters:** downstream truth-preservation is the foundation for every later correction; SL/TP, arbitration, and portfolio governance all depend on correct identity first.
 
-#### Phase 1 — Core Path Refinement
+#### 3. **PR-02 — Preserve structural SL/TP intent for top-tier paths**
+- **Purpose:** stop downstream risk-plan / predictive rewriting from distorting evaluator-designed structural stops and targets on the strongest paths.
+- **Business problem it solves:** prevents live trades from expressing weaker generic risk geometry than the evaluator thesis intended.
+- **Why this position matters:** once identity is preserved, the next priority is preserving actual trade expression for the paths most worth trusting.
 
-Refine current paths that are architecturally sound but too narrow for real crypto market behavior. Refinement means widening valid geometry, separating hard invalidation from soft confidence contributors, and testing against live market reality — not textbook geometry. Every change must be traceable to a specific observable failure mode. No speculative geometry relaxation.
+#### 4. **PR-03 — Replace order-biased same-direction dedup with quality-ranked arbitration**
+- **Purpose:** evaluate same-direction `360_SCALP` candidates fairly and keep the best one by scored quality rather than by method order.
+- **Business problem it solves:** stops mediocre earlier candidates from suppressing better later ones, improving signal trust and portfolio quality.
+- **Why this position matters:** arbitration must happen after identity and scoring inputs are trustworthy, otherwise the ranking logic would still compare distorted candidates.
 
-**1. Refine `VOLUME_SURGE_BREAKOUT`**
-Breakout timing too specific, pullback zone too tight, RSI band too restrictive, FVG/orderblock requirement too hard in fast momentum environments. Widen valid geometry. Separate hard invalidation from soft confidence boost. Allow realistic continuation shapes.
+#### 5. **PR-04 — Align active production portfolio with formal setup taxonomy**
+- **Purpose:** bring active defaults, setup taxonomy, and portfolio-role governance into explicit alignment.
+- **Business problem it solves:** removes the current state where auxiliary paths are live by default but absent from the formal portfolio doctrine.
+- **Why this position matters:** portfolio governance should be corrected only after candidate identity and arbitration logic are reliable enough to classify paths honestly.
 
-**2. Refine `BREAKDOWN_SHORT`**
-Mirror of VOLUME_SURGE_BREAKOUT on the short side. Dead-cat bounce zone too narrow, timing assumptions too rigid, fast bearish continuation misses. Widen geometry, relax over-stacked requirements, test against real bear market structure.
+#### 6. **PR-05 — Correct gate-policy mismatches**
+- **Purpose:** fix path-family gate mismatches that currently overblock or mis-handle valid evaluator theses.
+- **Business problem it solves:** prevents strong paths from being suppressed by gates that do not match their actual strategy logic.
+- **Why this position matters:** gate correction belongs after taxonomy alignment so exemptions and rules are applied to the right preserved identities.
 
-**3. Refine `SR_FLIP_RETEST`**
-Conceptually strong but too dependent on textbook-clean retests. Real crypto structure is messier. Improve structural tolerance in retest identification. Relax rejection-candle requirements where SMC structural logic supports the entry without a perfect textbook candle.
+#### 7. **PR-06 — Rebuild or disable `OPENING_RANGE_BREAKOUT`**
+- **Purpose:** either rebuild `OPENING_RANGE_BREAKOUT` with true session opening-range logic or remove it from the active portfolio.
+- **Business problem it solves:** eliminates the weakest active path from distorting live quality standards and portfolio trust.
+- **Why this position matters:** the engine should first fix systemic integrity defects before deciding whether this path earns a place in the governed active portfolio.
 
-**4. Review `WHALE_MOMENTUM` role**
-Assess honestly whether this path is a live signal producer or a theoretically interesting path that rarely survives gates. If it only fires under rare conditions and seldom produces wins, reclassify explicitly as a specialist or supplemental path. Live data required before any decision.
+#### 8. **PR-07 — Improve specialist-path quality**
+- **Purpose:** refine weaker specialist/support paths whose raw ideas are still useful but whose current live expression is not strong enough.
+- **Business problem it solves:** improves the quality floor of secondary paths without diluting focus away from the strongest foundation paths.
+- **Why this position matters:** specialist refinement should follow the systemic fixes and the `OPENING_RANGE_BREAKOUT` decision so effort is spent on paths that still belong in the active set.
 
----
+#### 9. **PR-08 — Align `DIVERGENCE_CONTINUATION` scoring with evaluator evidence**
+- **Purpose:** make `DIVERGENCE_CONTINUATION` scoring reflect the evaluator's real divergence evidence rather than an incomplete downstream proxy.
+- **Business problem it solves:** prevents a legitimate conditional path from being under-modeled and misjudged in live production.
+- **Why this position matters:** this is a targeted path-level scoring correction best handled after broader specialist-path cleanup clarifies what remains worth preserving.
 
-#### Phase 2 — New Path Additions
+#### 10. **PR-09 — Cleanup / residual architecture polish**
+- **Purpose:** resolve residual inconsistencies left after the main correction pass, including cleanup and remaining architectural polish.
+- **Business problem it solves:** removes lingering friction that could otherwise reintroduce ambiguity after redeploy.
+- **Why this position matters:** cleanup belongs last so it follows the substantive business-critical corrections rather than distracting from them.
 
-Add after Phase 1 establishes stable baseline quality for existing paths. Each new path is a full architecture citizen: registered in SetupClass, self-classifying, gate-compatible, family-scored, method-specific SL/TP, `/why`-diagnosable, and fully tested.
+### 6.3 Formal Pre-Redeploy Gate
 
-**5. Add `CONTINUATION_LIQUIDITY_SWEEP`**
-Natural SMC extension of the existing sweep reversal path. Setup: trend exists, local pullback sweeps liquidity, price reclaims in trend direction, continuation entry. Strong structural basis, clear invalidation, family-aware continuation gating. Likely the strongest system-fit new path.
+Fresh reinstall / fresh deployment should happen only after **all** of the following are true:
+- evaluator identity is preserved
+- evaluator penalties are preserved
+- top-tier structural SL/TP intent is preserved
+- same-direction arbitration is quality-based
+- auxiliary active paths are either governed or disabled
+- gate mismatches are corrected
+- `OPENING_RANGE_BREAKOUT` is rebuilt or disabled
 
-**6. Add `POST_DISPLACEMENT_CONTINUATION`**
-Captures strong directional displacement followed by small consolidation/absorption and continuation breakout. Requires institutional re-acceleration after genuine displacement — volume, structure, and delta during consolidation must confirm continuation, not just price level.
-
-**7. Add `FAILED_AUCTION_RECLAIM`**
-Captures failed breakout / failed breakdown structures. Price breaks obvious level, acceptance fails, price reclaims prior structure, entry in direction of reclaim. Clean invalidation, not oscillator-dependent, strong structural logic, method-specific SL/TP.
-
-No additional paths beyond these three are approved at this stage. Any further expansion requires a fresh architecture review with live diagnostic evidence.
-
----
-
-#### Phase 3 — Portfolio Formalization and Tuning
-
-**8. Formalize path portfolio roles**
-After new paths are live, assign each an explicit portfolio role: **core** (primary business signal generators), **support** (situational contribution), or **specialist** (low-frequency, high-quality edge cases). This drives future prioritisation and tuning decisions.
-
-**9. Path-by-path portfolio tuning**
-Evidence-based tuning per path using live output data — candidate rate, emit rate, gate-block rate, outcome distribution. No speculative adjustments without diagnostic evidence.
-
----
-
-#### Governing Principles
-
-- **Business-first, signal-quality-first** — path portfolio strength and business-grade signal generation are the primary objectives at every step.
-- **Architecture stability** — change one path at a time, verify, then continue. No sweeping refactors during active refinement phases.
-- **No uncontrolled evaluator sprawl** — the path set grows only when there is structural justification and a confirmed coverage gap. Conceptual diversity is not a reason to build.
-- **Family-aware scoring, gating, and SL/TP** — every path operates within the family-aware architecture established in ARCH-8 through ARCH-10. No path bypasses this.
-- **Evidence-led decisions** — every geometry change and new path addition must be traceable to an observable, specific reason.
-
-*(Prior Stage A–E observability-gated expansion sequence has been superseded by this business-first signal-engine direction. Observability instrumentation continues concurrently as background infrastructure.)*
-
----
-
-### 6.3 Future Enhancement — Intelligence Layer
+### 6.4 Future Enhancement — Intelligence Layer
 
 **Gate: raise only after the Phase 1–2 signal-engine path sequence is complete and 2+ weeks of live path data are available.**
 
@@ -653,7 +729,7 @@ Scope:
 - Per-pair x regime confidence offsets
 - Extended performance metrics (Sharpe ratio, profit factor, expectancy, MFE/MAE per signal)
 
-### 6.4 Future Enhancement — Self-Optimisation
+### 6.5 Future Enhancement — Self-Optimisation
 
 **Gate: raise only after 50+ live signals exist in performance history.**
 
@@ -663,7 +739,7 @@ Scope:
 - Auto-weight evaluators by live performance data
 - SL placement using nearest liquidity cluster rather than fixed formula
 
-### 6.5 Ongoing — Observability and Monitoring
+### 6.6 Ongoing — Observability and Monitoring
 
 The VPS Monitor workflow (GitHub Actions → monitor-logs branch) gives Copilot autonomous read access to live system state. Copilot reads monitor output proactively at session start and raises any issues found without waiting to be asked.
 
@@ -673,21 +749,27 @@ If monitor data is unavailable or stale, Copilot flags this to the owner immedia
 
 ## Part VII — Current System Snapshot
 
-*(Updated: 2026-04-10 — post ARCH-10 merge, fresh canonical brief baseline)*
+*(Updated: 2026-04-11 — audit-aligned canonical doctrine refresh)*
 
 | Item | Status |
 |---|---|
 | Engine running on VPS | Yes |
-| Architecture correction sequence | Complete — ARCH-2 through ARCH-10 all merged |
-| All 11 evaluators | Architecturally unblocked and live |
-| Setup classification | Repaired (ARCH-7A) — all 11 classes registered correctly |
+| Core architecture correction sequence | Complete — ARCH-2 through ARCH-10 all merged |
+| Internal `360_SCALP` evaluator set | 14 internal paths live |
+| Core engine quality | Strong core confirmed by audit |
+| Strongest foundation paths | `FAILED_AUCTION_RECLAIM`, `CONTINUATION_LIQUIDITY_SWEEP`, `SR_FLIP_RETEST`, `TREND_PULLBACK_EMA`, `POST_DISPLACEMENT_CONTINUATION` |
+| Main current business-critical issue | **Strategy-expression integrity** |
+| Evaluator identity preservation | Not yet trustworthy enough — correction required |
+| Evaluator penalty preservation | Not yet trustworthy enough — correction required |
+| Structural SL/TP preservation | Partial — top-tier path intent can still be rewritten downstream |
+| Same-direction `360_SCALP` arbitration | Still order-biased — correction required |
+| Auxiliary active path governance | Incomplete — active-by-default auxiliaries must be governed or disabled |
 | Winner-takes-all | Eliminated (ARCH-2) |
 | Data pipeline | Complete (ARCH-3) — funding_rate and CVD wired into smc_data |
-| Family-aware scoring | Live (ARCH-10) |
-| Soft-penalty restoration | Live (ARCH-8) |
-| Family-aware SL/TP | Live (ARCH-9) |
-| Signal output quality | Under observation — evaluator family diversity being confirmed |
-| Phase 1 scorecard | Not yet started — begins once evaluator diversity is confirmed |
+| Family-aware scoring architecture | Live, but downstream preservation still incomplete |
+| Deploy judgment | **Redeploy only after one more correction pass** |
+| Current direction | Pre-redeploy correction of expression/governance integrity |
+| Phase 1 scorecard | Not yet started — begins only after the pre-redeploy gate passes |
 | Subscribers | None — deliberately. Phase 1 validation must complete first. |
 | PR15 Intelligence Layer | Concept only — gate: 2 weeks confirmed live data |
 | PR16 Self-Optimisation | Concept only — gate: 50+ live signals in history |

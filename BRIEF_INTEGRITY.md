@@ -7,11 +7,23 @@ Every Copilot session must check this file if OWNER_BRIEF.md appears short or co
 
 | Field | Value |
 |---|---|
-| Canonical redesign date | 2026-04-10 |
-| Line count | 739 |
+| Canonical baseline date | 2026-04-11 |
+| Line count | 821 |
 | Minimum acceptable lines | 480 |
 | Format | Fresh canonical owner-operating manual (8-part structure) |
 | Verified by | Copilot + owner (mkmk749278) |
+
+## Important — Audit Alignment Note (2026-04-11)
+
+OWNER_BRIEF.md was deliberately updated on 2026-04-11 to align the canonical doctrine with
+`docs/SIGNAL_ENGINE_AUDIT_2026-04-11.md`. The brief now records that the engine has a strong core,
+but still requires one more correction pass before trusted redeploy due to strategy-expression
+integrity issues in downstream preservation, arbitration, and portfolio governance.
+
+The 8-part structure remains intact. The major updates were in Part II (owner doctrine / deploy
+judgment / portfolio doctrine), Part III (current operating-state accuracy), Part IV–VI
+(architecture-reality correction, pre-redeploy roadmap, formal redeploy gate), and Part VII
+(current snapshot).
 
 ## Important — Roadmap Refresh Note (2026-04-10)
 
@@ -55,6 +67,6 @@ something went wrong and must be resolved before any work proceeds.
 ## Rule
 
 > OWNER_BRIEF.md must not be accidentally truncated between sessions.
-> The minimum threshold is 480 lines — approximately 65% of the current canonical length (739 lines).
+> The minimum threshold is 480 lines — approximately 58% of the current canonical length (821 lines).
 > Deliberate updates (including redesigns and upgrades) are permitted by explicit owner instruction only.
 > If the brief falls below 480 lines without a known redesign, treat it as corruption and restore immediately.
