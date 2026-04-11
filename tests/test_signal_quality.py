@@ -1717,10 +1717,12 @@ class TestPortfolioRoles:
     - the mapping stays aligned with the live evaluator list in ScalpChannel
     """
 
-    # The 14 SetupClass values produced by live ScalpChannel evaluators.
-    # This list must stay aligned with ScalpChannel.evaluate()'s evaluator
-    # tuple (src/channels/scalp.py).  If an evaluator is added or removed
-    # there, it must also be reflected here and in ACTIVE_PATH_PORTFOLIO_ROLES.
+    # The SetupClass values produced by all live evaluators across all active channels:
+    # ScalpChannel (14 paths) plus the three active auxiliary channel evaluators
+    # (360_SCALP_FVG, 360_SCALP_DIVERGENCE, 360_SCALP_ORDERBLOCK) which produce
+    # their own distinct setup identities (PR-01).
+    # This list must stay aligned with the live evaluator list in ScalpChannel
+    # (src/channels/scalp.py) and the three active auxiliary channel files.
     ACTIVE_EVALUATOR_CLASSES = frozenset({
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.TREND_PULLBACK_EMA,
@@ -1736,6 +1738,11 @@ class TestPortfolioRoles:
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
         SetupClass.POST_DISPLACEMENT_CONTINUATION,
         SetupClass.FAILED_AUCTION_RECLAIM,
+        # PR-01: active auxiliary channel evaluator identities
+        SetupClass.FVG_RETEST,
+        SetupClass.FVG_RETEST_HTF_CONFLUENCE,
+        SetupClass.RSI_MACD_DIVERGENCE,
+        SetupClass.SMC_ORDERBLOCK,
     })
 
     def test_every_active_path_has_a_role(self):
@@ -1799,6 +1806,12 @@ class TestPortfolioRoles:
             SetupClass.WHALE_MOMENTUM,
             SetupClass.FUNDING_EXTREME_SIGNAL,
             SetupClass.QUIET_COMPRESSION_BREAK,
+            # PR-01: auxiliary channel identities are specialist — narrow context,
+            # low-frequency, pending governance review (PR-04).
+            SetupClass.FVG_RETEST,
+            SetupClass.FVG_RETEST_HTF_CONFLUENCE,
+            SetupClass.RSI_MACD_DIVERGENCE,
+            SetupClass.SMC_ORDERBLOCK,
         }
         actual_specialist = {
             sc for sc, role in ACTIVE_PATH_PORTFOLIO_ROLES.items()

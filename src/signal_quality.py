@@ -37,6 +37,12 @@ class SetupClass(str, Enum):
     CONTINUATION_LIQUIDITY_SWEEP = "CONTINUATION_LIQUIDITY_SWEEP"
     POST_DISPLACEMENT_CONTINUATION = "POST_DISPLACEMENT_CONTINUATION"
     FAILED_AUCTION_RECLAIM = "FAILED_AUCTION_RECLAIM"
+    # PR-01: auxiliary-channel evaluator identities — preserved as distinct setup classes
+    # so that downstream scoring and suppression diagnostics reflect true channel intent.
+    FVG_RETEST = "FVG_RETEST"
+    FVG_RETEST_HTF_CONFLUENCE = "FVG_RETEST_HTF_CONFLUENCE"
+    RSI_MACD_DIVERGENCE = "RSI_MACD_DIVERGENCE"
+    SMC_ORDERBLOCK = "SMC_ORDERBLOCK"
 
 
 class PortfolioRole(str, Enum):
@@ -90,6 +96,14 @@ ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
     SetupClass.WHALE_MOMENTUM: PortfolioRole.SPECIALIST,
     SetupClass.FUNDING_EXTREME_SIGNAL: PortfolioRole.SPECIALIST,
     SetupClass.QUIET_COMPRESSION_BREAK: PortfolioRole.SPECIALIST,
+    # ── auxiliary channel identities (PR-01) ──────────────────────────────
+    # Distinct setup classes produced by the active auxiliary evaluators.
+    # Classified as specialist because they are lower-frequency, channel-specific
+    # paths whose governance is still under review (PR-04).
+    SetupClass.FVG_RETEST: PortfolioRole.SPECIALIST,
+    SetupClass.FVG_RETEST_HTF_CONFLUENCE: PortfolioRole.SPECIALIST,
+    SetupClass.RSI_MACD_DIVERGENCE: PortfolioRole.SPECIALIST,
+    SetupClass.SMC_ORDERBLOCK: PortfolioRole.SPECIALIST,
 }
 
 
@@ -137,6 +151,9 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.RANGE_REJECTION,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
+        # PR-01: preserve evaluator-authored FVG identities as distinct setup classes
+        SetupClass.FVG_RETEST,
+        SetupClass.FVG_RETEST_HTF_CONFLUENCE,
     },
     "360_SCALP_CVD": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -157,6 +174,8 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.RANGE_FADE,
         SetupClass.EXHAUSTION_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
+        # PR-01: preserve evaluator-authored divergence identity
+        SetupClass.RSI_MACD_DIVERGENCE,
     },
     "360_SCALP_SUPERTREND": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -176,6 +195,8 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.RANGE_REJECTION,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
+        # PR-01: preserve evaluator-authored orderblock identity
+        SetupClass.SMC_ORDERBLOCK,
     },
 }
 
@@ -197,6 +218,11 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.LIQUIDATION_REVERSAL,
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
         SetupClass.POST_DISPLACEMENT_CONTINUATION,
+        # PR-01: aux channel identities valid in strong trend
+        SetupClass.FVG_RETEST,
+        SetupClass.FVG_RETEST_HTF_CONFLUENCE,
+        SetupClass.RSI_MACD_DIVERGENCE,
+        SetupClass.SMC_ORDERBLOCK,
     },
     MarketState.WEAK_TREND: {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -216,6 +242,11 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.POST_DISPLACEMENT_CONTINUATION,
         # FAR: valid in weak trend — breakouts often fail when trend conviction is low
         SetupClass.FAILED_AUCTION_RECLAIM,
+        # PR-01: aux channel identities valid in weak trend
+        SetupClass.FVG_RETEST,
+        SetupClass.FVG_RETEST_HTF_CONFLUENCE,
+        SetupClass.RSI_MACD_DIVERGENCE,
+        SetupClass.SMC_ORDERBLOCK,
     },
     MarketState.CLEAN_RANGE: {
         SetupClass.RANGE_REJECTION,
@@ -229,6 +260,9 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.LIQUIDATION_REVERSAL,
         # FAR: prime regime — failed breakouts at range extremes are the canonical setup
         SetupClass.FAILED_AUCTION_RECLAIM,
+        # PR-01: divergence and orderblock are valid at range boundaries
+        SetupClass.RSI_MACD_DIVERGENCE,
+        SetupClass.SMC_ORDERBLOCK,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -240,6 +274,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.LIQUIDATION_REVERSAL,
         # FAR: valid in dirty range — structure still exists despite noise
         SetupClass.FAILED_AUCTION_RECLAIM,
+        # PR-01: divergence valid in dirty range (trend exhaustion detection)
+        SetupClass.RSI_MACD_DIVERGENCE,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
@@ -258,6 +294,10 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.POST_DISPLACEMENT_CONTINUATION,
         # FAR: false breakouts at expansion boundaries are structurally valid
         SetupClass.FAILED_AUCTION_RECLAIM,
+        # PR-01: FVG and orderblock frequently form at expansion boundaries
+        SetupClass.FVG_RETEST,
+        SetupClass.FVG_RETEST_HTF_CONFLUENCE,
+        SetupClass.SMC_ORDERBLOCK,
     },
     MarketState.VOLATILE_UNSUITABLE: {
         # Whale-driven and liquidity-sweep signals are valid precisely in
@@ -658,6 +698,12 @@ def classify_setup(
         "POST_DISPLACEMENT_CONTINUATION",
         # Roadmap step 7: failed auction / failed acceptance reversal
         "FAILED_AUCTION_RECLAIM",
+        # PR-01: active auxiliary channel evaluator identities — these channels
+        # self-classify their output; downstream must not reclassify to a generic class.
+        "FVG_RETEST",
+        "FVG_RETEST_HTF_CONFLUENCE",
+        "RSI_MACD_DIVERGENCE",
+        "SMC_ORDERBLOCK",
     })
     _sig_setup_class = getattr(signal, "setup_class", "")
     if _sig_setup_class in _SELF_CLASSIFYING:

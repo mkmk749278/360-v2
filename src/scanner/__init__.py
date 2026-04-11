@@ -2451,7 +2451,10 @@ class Scanner:
             cross_verified=cross_verified,
         )
         sig.setup_class = setup.setup_class.value
-        sig.analyst_reason = setup.thesis
+        # PR-01: preserve evaluator-authored analyst_reason; only apply the generic
+        # scored thesis when the evaluator did not set a richer path-specific reason.
+        if not getattr(sig, "analyst_reason", ""):
+            sig.analyst_reason = setup.thesis
         sig.execution_note = execution.execution_note
         sig.entry_zone = execution.entry_zone
         sig.component_scores = setup_score.components
@@ -2595,9 +2598,11 @@ class Scanner:
         )
         sig.confidence = self._clamp_confidence(sig.confidence)
         sig.post_ai_confidence = sig.confidence
-        # Record soft-gate penalty metadata now; the actual deduction is applied
-        # after PR09 sets the final score so penalties are not overwritten.
-        sig.soft_penalty_total = soft_penalty
+        # PR-01: accumulate scanner-level soft-gate penalties on top of any evaluator-
+        # authored soft_penalty_total — do not overwrite the evaluator's path-level
+        # penalty state.  The total reflects both evaluator quality judgments and
+        # scanner gate assessments, preserving evaluator intent end-to-end.
+        sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + soft_penalty
         sig.regime_penalty_multiplier = regime_mult
         sig.soft_gate_flags = ",".join(_fired_gates)
         # Classify signal into quality tier based on final confidence.
