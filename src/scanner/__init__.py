@@ -249,6 +249,9 @@ _SMC_GATE_EXEMPT_SETUPS: frozenset = frozenset({
     # FAR uses its own structural gates (auction wick + reclaim); SMC sweep
     # score does not measure the failed-acceptance thesis.
     "FAILED_AUCTION_RECLAIM",
+    # RANGE_FADE: Bollinger Band mean-reversion — no sweep required.  Primary
+    # edge is price at BB extreme + RSI confirmation, not institutional sweep.
+    "RANGE_FADE",
 })
 
 # Setup classes whose signal thesis is NOT based on EMA alignment.
@@ -257,6 +260,11 @@ _TREND_GATE_EXEMPT_SETUPS: frozenset = frozenset({
     "LIQUIDATION_REVERSAL",
     "FUNDING_EXTREME_SIGNAL",
     "WHALE_MOMENTUM",
+    # RANGE_FADE: mean-reversion at BB extremes — EMA alignment is counter to
+    # the thesis (price is at an extreme, not in trend direction).  RSI alone
+    # drives the indicator score for this setup; EMA scoring is architecturally
+    # wrong and would block valid mean-reversion entries.
+    "RANGE_FADE",
 })
 
 # Penalty multiplier applied to scalp-channel soft gates when the regime is
@@ -2169,6 +2177,14 @@ class Scanner:
             )
             if not mtf_allowed:
                 log.debug("MTF gate blocked {} {}: {}", symbol, chan_name, mtf_reason)
+                self._suppression_counters[f"mtf_gate:{chan_name}"] += 1
+                self.suppression_tracker.record(SuppressionEvent(
+                    symbol=symbol,
+                    channel=chan_name,
+                    reason="mtf_gate",
+                    regime=_regime_key,
+                    would_be_confidence=sig.confidence,
+                ))
                 return None, None
 
         # Resolve regime penalty multiplier for all soft gates below.
@@ -2661,6 +2677,14 @@ class Scanner:
             elif _score_result["total"] >= 50:
                 sig.signal_tier = "WATCHLIST"
             else:
+                log.debug(
+                    "PR09 below-threshold {} {}: total={:.1f} smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",
+                    symbol, chan_name, _score_result["total"],
+                    _score_result["smc"], _score_result["regime"], _score_result["volume"],
+                    _score_result["indicators"], _score_result["patterns"], _score_result["mtf"],
+                    _score_result["thesis_adj"],
+                )
+                self._suppression_counters[f"pr09_below50:{chan_name}"] += 1
                 return None, cross_verified
             log.debug(
                 "PR09 score {} {} → {:.1f} (tier={}) smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",

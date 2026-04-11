@@ -169,6 +169,23 @@ _FAR_RSI_LONG_SOFT_MIN: float = 65.0   # ≥ this (< hard) → +6 soft penalty
 _FAR_RSI_SHORT_HARD_MIN: float = 25.0  # ≤ this → hard reject (oversold)
 _FAR_RSI_SHORT_SOFT_MAX: float = 35.0  # ≤ this (> hard) → +6 soft penalty
 
+# RANGE_FADE path constants.
+# Mean-reversion setup: price touches Bollinger Band extreme in a ranging market.
+# Requires low ADX (not trending), RSI confirming oversold/overbought extreme,
+# and BB width not actively expanding (not a breakout).
+_RANGE_FADE_VALID_REGIMES: frozenset = frozenset({"RANGING", "QUIET"})
+# ADX above this value indicates a trend is developing — block range fade.
+_RANGE_FADE_ADX_MAX: float = 25.0
+# RSI threshold for LONG range fade: price must not already be recovering.
+# RSI > 55 means price has bounced too much — entry timing is poor.
+_RANGE_FADE_RSI_LONG_MAX: float = 55.0
+# RSI threshold for SHORT range fade: price must not already be recovering.
+# RSI < 45 means price has already fallen — entry timing is poor.
+_RANGE_FADE_RSI_SHORT_MIN: float = 45.0
+# BB squeeze guard: if current BB width > previous × this ratio, BB is actively
+# expanding — this is a breakout, not a range-fade opportunity.
+_RANGE_FADE_BB_EXPAND_RATIO: float = 1.1
+
 
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
@@ -225,13 +242,14 @@ class ScalpChannel(BaseChannel):
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "VOLATILE":
             # Order flow signals more reliable in volatile markets
-            return {"order_flow": 1.5, "trend": 0.7, "volume": 1.3}
+            return {"order_flow": 1.5, "trend": 0.7, "mean_reversion": 0.8, "volume": 1.3}
         if regime_upper in ("QUIET", "RANGING"):
-            return {"order_flow": 0.8, "trend": 0.75, "volume": 0.9}
+            # Mean-reversion setups (RANGE_FADE) are preferred in ranging markets.
+            return {"order_flow": 0.8, "trend": 0.75, "mean_reversion": 1.2, "volume": 0.9}
         if regime_upper in ("TRENDING_UP", "TRENDING_DOWN"):
             # Trend-following signals preferred in trending markets
-            return {"order_flow": 1.0, "trend": 1.5, "volume": 1.0}
-        return {"order_flow": 1.0, "trend": 1.0, "volume": 1.0}
+            return {"order_flow": 1.0, "trend": 1.5, "mean_reversion": 0.7, "volume": 1.0}
+        return {"order_flow": 1.0, "trend": 1.0, "mean_reversion": 1.0, "volume": 1.0}
 
     def evaluate(
         self,
@@ -264,6 +282,7 @@ class ScalpChannel(BaseChannel):
             self._evaluate_continuation_liquidity_sweep,
             self._evaluate_post_displacement_continuation,
             self._evaluate_failed_auction_reclaim,
+            self._evaluate_range_fade,
         ):
             sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
             if sig is not None:
@@ -3206,6 +3225,176 @@ class ScalpChannel(BaseChannel):
         if total_penalty > 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
 
+        return sig
+
+    # ------------------------------------------------------------------
+    # RANGE_FADE path
+    # Mean-reversion at Bollinger Band extremes in ranging/quiet markets.
+    # ------------------------------------------------------------------
+
+    def _evaluate_range_fade(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """RANGE_FADE: mean-reversion entry at Bollinger Band extreme.
+
+        Fires when price touches or crosses a Bollinger Band in a ranging/quiet
+        market where ADX is low and RSI confirms an extreme without already
+        having started recovering.  Does not require liquidity sweeps.
+
+        LONG: close ≤ lower BB + RSI ≤ 55 (oversold/neutral, not recovering)
+        SHORT: close ≥ upper BB + RSI ≥ 45 (overbought/neutral, not recovering)
+        BB squeeze guard: blocks when BB width is expanding >10% (breakout, not range)
+        """
+        # Hard regime filter: RANGE_FADE is invalid in trending markets.
+        # Fail-open when regime is empty (test context or cold start).
+        regime_upper = regime.upper() if regime else ""
+        if regime_upper and regime_upper not in _RANGE_FADE_VALID_REGIMES:
+            return None
+
+        m5 = candles.get("5m")
+        if m5 is None or len(m5.get("close", [])) < 25:
+            return None
+
+        ind = indicators.get("5m", {})
+        close_arr = m5.get("close", [])
+        close = float(close_arr[-1]) if len(close_arr) > 0 else 0.0
+        if close <= 0:
+            return None
+
+        profile = smc_data.get("pair_profile") if smc_data else None
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime, profile=profile):
+            return None
+
+        # ADX gate: RANGE_FADE is only valid when the market is not trending.
+        # High ADX indicates a trend is active — mean-reversion trades are low-edge.
+        adx_val = ind.get("adx_last")
+        if adx_val is not None and float(adx_val) > _RANGE_FADE_ADX_MAX:
+            return None
+
+        # Bollinger Band proximity — determine signal direction from price location.
+        bb_upper_raw = ind.get("bb_upper_last")
+        bb_lower_raw = ind.get("bb_lower_last")
+        if bb_upper_raw is None or bb_lower_raw is None:
+            return None
+
+        bb_upper = float(bb_upper_raw)
+        bb_lower = float(bb_lower_raw)
+
+        if close <= bb_lower:
+            direction = Direction.LONG
+        elif close >= bb_upper:
+            direction = Direction.SHORT
+        else:
+            return None  # Price not at a BB extreme — no mean-reversion edge
+
+        # BB squeeze guard: block when BB is actively expanding (squeeze-breakout
+        # scenario).  A ratio > 1.1 means BB width grew more than 10% from the
+        # prior bar — price is accelerating out of range, not fading back into it.
+        bb_width_pct = ind.get("bb_width_pct")
+        bb_width_prev_pct = ind.get("bb_width_prev_pct")
+        if bb_width_pct is not None and bb_width_prev_pct is not None:
+            if float(bb_width_pct) > float(bb_width_prev_pct) * _RANGE_FADE_BB_EXPAND_RATIO:
+                return None  # BB expanding — breakout in progress, not a range fade
+
+        # RSI mean-reversion gate: require RSI to confirm the extreme rather than
+        # already being on the way back.  A recovering RSI means the best entry
+        # moment has passed.
+        rsi_val = ind.get("rsi_last")
+        if rsi_val is not None:
+            rsi_f = float(rsi_val)
+            if direction == Direction.LONG and rsi_f > _RANGE_FADE_RSI_LONG_MAX:
+                return None  # RSI recovering from oversold — entry timing missed
+            if direction == Direction.SHORT and rsi_f < _RANGE_FADE_RSI_SHORT_MIN:
+                return None  # RSI recovering from overbought — entry timing missed
+
+        # Stop-loss: below the entry for LONG, above for SHORT.  Anchor to the
+        # Bollinger Band extreme + ATR buffer so the SL sits beyond the structural
+        # boundary price has already violated.  For LONG the SL is below close
+        # (which is already below bb_lower); for SHORT it is above close.
+        atr_val = float(ind.get("atr_last", close * 0.002))
+        buffer = max(atr_val * 1.0, abs(close - bb_lower if direction == Direction.LONG else bb_upper - close) + atr_val * 0.5)
+        if direction == Direction.LONG:
+            sl = close - buffer
+        else:
+            sl = close + buffer
+
+        sl_dist = abs(close - sl)
+        if sl_dist <= 0:
+            return None
+        if direction == Direction.LONG and sl >= close:
+            return None
+        if direction == Direction.SHORT and sl <= close:
+            return None
+
+        # Take-profit: BB mid-band (TP1) and opposite BB extreme (TP2) with a
+        # small extension beyond for TP3.  These anchors match the mean-reversion
+        # thesis: price returns to value (mid-band) then potentially overshoots.
+        bb_mid_raw = ind.get("bb_mid_last")
+        band_width = bb_upper - bb_lower
+        if bb_mid_raw is not None and band_width > 0:
+            bb_mid = float(bb_mid_raw)
+            if direction == Direction.LONG:
+                tp1 = bb_mid
+                tp2 = bb_upper
+                tp3 = bb_upper + band_width * 0.2
+            else:
+                tp1 = bb_mid
+                tp2 = bb_lower
+                tp3 = bb_lower - band_width * 0.2
+        else:
+            tp1 = close + sl_dist * 1.2 if direction == Direction.LONG else close - sl_dist * 1.2
+            tp2 = close + sl_dist * 2.0 if direction == Direction.LONG else close - sl_dist * 2.0
+            tp3 = close + sl_dist * 3.0 if direction == Direction.LONG else close - sl_dist * 3.0
+
+        # Sanity-check TP direction and fall back to ATR-ratio if invalid.
+        if direction == Direction.LONG and (tp1 <= close or tp2 <= tp1):
+            tp1 = close + sl_dist * 1.2
+            tp2 = close + sl_dist * 2.0
+            tp3 = close + sl_dist * 3.0
+        if direction == Direction.SHORT and (tp1 >= close or tp2 >= tp1):
+            tp1 = close - sl_dist * 1.2
+            tp2 = close - sl_dist * 2.0
+            tp3 = close - sl_dist * 3.0
+
+        _regime_ctx = smc_data.get("regime_context") if smc_data else None
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=direction,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="RFADE",
+            atr_val=atr_val,
+            setup_class="RANGE_FADE",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return None
+
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
         return sig
 
     # ------------------------------------------------------------------
