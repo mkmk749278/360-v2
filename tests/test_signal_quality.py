@@ -6,7 +6,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.signal_quality import (
+    ACTIVE_PATH_PORTFOLIO_ROLES,
+    APPROVED_PORTFOLIO_ROLES,
     MarketState,
+    PortfolioRole,
     QualityTier,
     SetupClass,
     SignalScoringEngine,
@@ -1698,3 +1701,134 @@ class TestFamilyAwareConfidenceScoring:
         assert len(unique_scores) > 1, (
             f"All families produced the same score — uniform scoring not resolved: {scores}"
         )
+
+
+# ---------------------------------------------------------------------------
+# Roadmap step 8 — Portfolio role formalization tests
+# ---------------------------------------------------------------------------
+
+class TestPortfolioRoles:
+    """Verify the explicit portfolio-role model introduced in roadmap step 8.
+
+    Guards:
+    - every active evaluator path has an assigned role
+    - roles are limited to the approved taxonomy (core / support / specialist)
+    - no active path is missing from the mapping
+    - the mapping stays aligned with the live evaluator list in ScalpChannel
+    """
+
+    # The 14 SetupClass values produced by live ScalpChannel evaluators.
+    # This list must stay aligned with ScalpChannel.evaluate()'s evaluator
+    # tuple (src/channels/scalp.py).  If an evaluator is added or removed
+    # there, it must also be reflected here and in ACTIVE_PATH_PORTFOLIO_ROLES.
+    ACTIVE_EVALUATOR_CLASSES = frozenset({
+        SetupClass.LIQUIDITY_SWEEP_REVERSAL,
+        SetupClass.TREND_PULLBACK_EMA,
+        SetupClass.LIQUIDATION_REVERSAL,
+        SetupClass.WHALE_MOMENTUM,
+        SetupClass.VOLUME_SURGE_BREAKOUT,
+        SetupClass.BREAKDOWN_SHORT,
+        SetupClass.OPENING_RANGE_BREAKOUT,
+        SetupClass.SR_FLIP_RETEST,
+        SetupClass.FUNDING_EXTREME_SIGNAL,
+        SetupClass.QUIET_COMPRESSION_BREAK,
+        SetupClass.DIVERGENCE_CONTINUATION,
+        SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+        SetupClass.POST_DISPLACEMENT_CONTINUATION,
+        SetupClass.FAILED_AUCTION_RECLAIM,
+    })
+
+    def test_every_active_path_has_a_role(self):
+        """Every active evaluator SetupClass must appear in the role mapping."""
+        missing = self.ACTIVE_EVALUATOR_CLASSES - set(ACTIVE_PATH_PORTFOLIO_ROLES.keys())
+        assert not missing, (
+            f"Active evaluator paths missing from ACTIVE_PATH_PORTFOLIO_ROLES: {missing}"
+        )
+
+    def test_no_extra_classes_in_mapping(self):
+        """The role mapping must not contain classes absent from the active set."""
+        extra = set(ACTIVE_PATH_PORTFOLIO_ROLES.keys()) - self.ACTIVE_EVALUATOR_CLASSES
+        assert not extra, (
+            f"ACTIVE_PATH_PORTFOLIO_ROLES contains non-active path(s): {extra}"
+        )
+
+    def test_all_roles_are_approved_taxonomy(self):
+        """Every assigned role must be a member of the approved role taxonomy."""
+        for setup_class, role in ACTIVE_PATH_PORTFOLIO_ROLES.items():
+            assert role in APPROVED_PORTFOLIO_ROLES, (
+                f"{setup_class} has unapproved role '{role}'. "
+                f"Approved roles: {APPROVED_PORTFOLIO_ROLES}"
+            )
+
+    def test_approved_taxonomy_contains_exactly_three_roles(self):
+        """The approved taxonomy must contain exactly core, support, specialist."""
+        assert APPROVED_PORTFOLIO_ROLES == frozenset({
+            PortfolioRole.CORE,
+            PortfolioRole.SUPPORT,
+            PortfolioRole.SPECIALIST,
+        })
+
+    def test_portfolio_has_all_three_role_tiers_represented(self):
+        """The live portfolio must include at least one path in each role tier."""
+        assigned_roles = set(ACTIVE_PATH_PORTFOLIO_ROLES.values())
+        for role in PortfolioRole:
+            assert role in assigned_roles, (
+                f"No active path assigned to '{role}' — every role tier must be represented."
+            )
+
+    def test_core_paths_include_primary_signal_generators(self):
+        """Core role must include the primary revenue-driving evaluators."""
+        expected_core = {
+            SetupClass.LIQUIDITY_SWEEP_REVERSAL,
+            SetupClass.TREND_PULLBACK_EMA,
+            SetupClass.VOLUME_SURGE_BREAKOUT,
+            SetupClass.BREAKDOWN_SHORT,
+            SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
+            SetupClass.POST_DISPLACEMENT_CONTINUATION,
+        }
+        actual_core = {
+            sc for sc, role in ACTIVE_PATH_PORTFOLIO_ROLES.items()
+            if role == PortfolioRole.CORE
+        }
+        assert expected_core == actual_core
+
+    def test_specialist_paths_include_narrow_context_evaluators(self):
+        """Specialist role must include the low-frequency narrow-context paths."""
+        expected_specialist = {
+            SetupClass.WHALE_MOMENTUM,
+            SetupClass.FUNDING_EXTREME_SIGNAL,
+            SetupClass.QUIET_COMPRESSION_BREAK,
+        }
+        actual_specialist = {
+            sc for sc, role in ACTIVE_PATH_PORTFOLIO_ROLES.items()
+            if role == PortfolioRole.SPECIALIST
+        }
+        assert expected_specialist == actual_specialist
+
+    def test_support_paths_include_situational_contributors(self):
+        """Support role must include situational contributors."""
+        expected_support = {
+            SetupClass.LIQUIDATION_REVERSAL,
+            SetupClass.SR_FLIP_RETEST,
+            SetupClass.DIVERGENCE_CONTINUATION,
+            SetupClass.OPENING_RANGE_BREAKOUT,
+            SetupClass.FAILED_AUCTION_RECLAIM,
+        }
+        actual_support = {
+            sc for sc, role in ACTIVE_PATH_PORTFOLIO_ROLES.items()
+            if role == PortfolioRole.SUPPORT
+        }
+        assert expected_support == actual_support
+
+    def test_mapping_count_matches_active_evaluator_count(self):
+        """Role mapping must contain exactly as many entries as active evaluators."""
+        assert len(ACTIVE_PATH_PORTFOLIO_ROLES) == len(self.ACTIVE_EVALUATOR_CLASSES), (
+            f"Role mapping has {len(ACTIVE_PATH_PORTFOLIO_ROLES)} entries "
+            f"but {len(self.ACTIVE_EVALUATOR_CLASSES)} active evaluators expected."
+        )
+
+    def test_portfolio_role_enum_values(self):
+        """PortfolioRole enum string values match the approved taxonomy language."""
+        assert PortfolioRole.CORE.value == "core"
+        assert PortfolioRole.SUPPORT.value == "support"
+        assert PortfolioRole.SPECIALIST.value == "specialist"

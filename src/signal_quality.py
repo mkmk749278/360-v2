@@ -39,6 +39,60 @@ class SetupClass(str, Enum):
     FAILED_AUCTION_RECLAIM = "FAILED_AUCTION_RECLAIM"
 
 
+class PortfolioRole(str, Enum):
+    """Explicit portfolio role assigned to each active signal path.
+
+    Roles formalise the intentional business-grade structure of the signal
+    portfolio (roadmap step 8).  Every active evaluator must appear in
+    ACTIVE_PATH_PORTFOLIO_ROLES with exactly one of these roles.
+
+    core       — primary business signal generators; broad-regime applicability,
+                 highest expected contribution to live signal output.
+    support    — meaningful situational contributors; fire reliably in specific
+                 but commonly-occurring market conditions.
+    specialist — low-frequency or narrow-context paths; high-selectivity, only
+                 valid in precise conditions, rarely fires in normal operation.
+    """
+
+    CORE = "core"
+    SUPPORT = "support"
+    SPECIALIST = "specialist"
+
+
+# Approved portfolio-role taxonomy — exactly the three roles above.
+APPROVED_PORTFOLIO_ROLES: frozenset[PortfolioRole] = frozenset(PortfolioRole)
+
+# Explicit portfolio-role assignment for every active signal path produced by
+# live evaluators (ScalpChannel._evaluate_* methods, roadmap steps 1–7).
+# This mapping is the canonical record of portfolio intent for the engine.
+# Any new evaluator added to ScalpChannel.evaluate() must also be added here.
+ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
+    # ── core ──────────────────────────────────────────────────────────────
+    # Primary business signal generators.  Wide regime applicability and the
+    # highest expected share of live signal output.
+    SetupClass.LIQUIDITY_SWEEP_REVERSAL: PortfolioRole.CORE,
+    SetupClass.TREND_PULLBACK_EMA: PortfolioRole.CORE,
+    SetupClass.VOLUME_SURGE_BREAKOUT: PortfolioRole.CORE,
+    SetupClass.BREAKDOWN_SHORT: PortfolioRole.CORE,
+    SetupClass.CONTINUATION_LIQUIDITY_SWEEP: PortfolioRole.CORE,
+    SetupClass.POST_DISPLACEMENT_CONTINUATION: PortfolioRole.CORE,
+    # ── support ───────────────────────────────────────────────────────────
+    # Situational contributors.  Fire in specific but commonly-occurring
+    # conditions and provide meaningful signal diversity.
+    SetupClass.LIQUIDATION_REVERSAL: PortfolioRole.SUPPORT,
+    SetupClass.SR_FLIP_RETEST: PortfolioRole.SUPPORT,
+    SetupClass.DIVERGENCE_CONTINUATION: PortfolioRole.SUPPORT,
+    SetupClass.OPENING_RANGE_BREAKOUT: PortfolioRole.SUPPORT,
+    SetupClass.FAILED_AUCTION_RECLAIM: PortfolioRole.SUPPORT,
+    # ── specialist ────────────────────────────────────────────────────────
+    # Low-frequency, narrow-context, high-selectivity paths.  Valid only
+    # under precise market conditions and expected to fire rarely.
+    SetupClass.WHALE_MOMENTUM: PortfolioRole.SPECIALIST,
+    SetupClass.FUNDING_EXTREME_SIGNAL: PortfolioRole.SPECIALIST,
+    SetupClass.QUIET_COMPRESSION_BREAK: PortfolioRole.SPECIALIST,
+}
+
+
 class MarketState(str, Enum):
     STRONG_TREND = "STRONG_TREND"
     WEAK_TREND = "WEAK_TREND"

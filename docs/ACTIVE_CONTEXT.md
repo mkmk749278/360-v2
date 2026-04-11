@@ -12,18 +12,31 @@
 **Phase:** 6.1 — Live Architecture Validation (active)
 
 Architecture correction sequence (ARCH-2 through ARCH-10) is complete.
-Current work is confirming live signal output quality and evaluator family diversity.
-Active roadmap is the business-first signal-engine path sequence (OWNER_BRIEF.md Part VI §6.2):
-refine core paths → add new paths → formalize portfolio roles.
+Active roadmap is the business-first signal-engine path sequence (OWNER_BRIEF.md Part VI §6.2).
+Steps 1–8 complete. Next step is step 9 (path-by-path portfolio tuning).
+
+### Roadmap completion state
+
+| Step | Description | Status |
+|---|---|---|
+| 1 | Refine `VOLUME_SURGE_BREAKOUT` | ✅ merged |
+| 2 | Refine `BREAKDOWN_SHORT` | ✅ merged |
+| 3 | Refine `SR_FLIP_RETEST` | ✅ merged |
+| 4 | Review `WHALE_MOMENTUM` role | ✅ merged |
+| 5 | Add `CONTINUATION_LIQUIDITY_SWEEP` | ✅ merged |
+| 6 | Add `POST_DISPLACEMENT_CONTINUATION` | ✅ merged |
+| 7 | Add `FAILED_AUCTION_RECLAIM` | ✅ merged (PR #105) |
+| 8 | Formalize path portfolio roles | ✅ merged (current PR) |
+| 9 | Path-by-path portfolio tuning | ⏳ next |
 
 ---
 
 ## Current Active Priority
 
-1. **Diagnose zero live signal output** — monitor shows `Signals=0`, `ScanLat=~20s`, WS healthy, suppression summary present. Root cause not yet confirmed. Resolve before path refinement work begins.
+1. **Diagnose zero live signal output** — monitor shows `Signals=0`, `ScanLat=~20s`, WS healthy, suppression summary present. Root cause not yet confirmed.
 2. **Confirm evaluator family diversity** — need evidence that more than one or two evaluator families are producing candidates in live conditions.
 3. **Heartbeat file missing** — needs investigation. May indicate healthcheck or I/O issue.
-4. **Signal-engine path quality** — once live output is confirmed, immediately begin path refinement sequence: `VOLUME_SURGE_BREAKOUT` → `BREAKDOWN_SHORT` → `SR_FLIP_RETEST` → `WHALE_MOMENTUM` role review. This is the current business-first strategic direction.
+4. **Step 9: Path-by-path portfolio tuning** — next roadmap item. Requires live diagnostic evidence (candidate rate, emit rate, gate-block rate, outcome distribution) before any threshold adjustments.
 
 ---
 
@@ -43,17 +56,23 @@ refine core paths → add new paths → formalize portfolio roles.
 
 | Priority | PR | Description | Gate |
 |---|---|---|---|
-| 1 | Diagnosis | Trace zero-output root cause via code + monitor evidence | Now — no build gate |
-| 2 | PR-1 | Refine `VOLUME_SURGE_BREAKOUT` | After zero-output diagnosis |
-| 3 | PR-2 | Refine `BREAKDOWN_SHORT` | After PR-1 |
-| 4 | PR-3 | Refine `SR_FLIP_RETEST` | After PR-2 |
-| 5 | PR-4 | `WHALE_MOMENTUM` role review and reclassification | After PR-3 |
-| 6 | PR-5 | Add `CONTINUATION_LIQUIDITY_SWEEP` | After PR-1 through PR-3 stable |
-| 7 | PR-6 | Add `POST_DISPLACEMENT_CONTINUATION` | After PR-5 |
-| 8 | PR-7 | Add `FAILED_AUCTION_RECLAIM` | After PR-6 |
-| 9 | PR-8 | Formalize path portfolio roles (core / support / specialist) | After new paths are live |
+| 1 | PR-9 | Path-by-path portfolio tuning (evidence-led, per `ACTIVE_PATH_PORTFOLIO_ROLES`) | Live data required first |
 
 Full current roadmap: `OWNER_BRIEF.md` Part VI section 6.2.
+
+---
+
+## Portfolio Role State (step 8 output)
+
+Introduced in `src/signal_quality.py`:
+- `PortfolioRole` enum: `core`, `support`, `specialist`
+- `ACTIVE_PATH_PORTFOLIO_ROLES` dict: explicit role for all 14 active evaluators
+- `APPROVED_PORTFOLIO_ROLES` frozenset: taxonomy guard for future additions
+
+Role assignments:
+- **core (6):** `LIQUIDITY_SWEEP_REVERSAL`, `TREND_PULLBACK_EMA`, `VOLUME_SURGE_BREAKOUT`, `BREAKDOWN_SHORT`, `CONTINUATION_LIQUIDITY_SWEEP`, `POST_DISPLACEMENT_CONTINUATION`
+- **support (5):** `LIQUIDATION_REVERSAL`, `SR_FLIP_RETEST`, `DIVERGENCE_CONTINUATION`, `OPENING_RANGE_BREAKOUT`, `FAILED_AUCTION_RECLAIM`
+- **specialist (3):** `WHALE_MOMENTUM`, `FUNDING_EXTREME_SIGNAL`, `QUIET_COMPRESSION_BREAK`
 
 ---
 
@@ -64,10 +83,10 @@ Full current roadmap: `OWNER_BRIEF.md` Part VI section 6.2.
 | Zero signal output cause may be multi-layer | High | Could be evaluator silence + gate rejection + suppression combined |
 | Elevated scan latency root cause unknown | High | Could be I/O, pair volume, or data assembly cost |
 | Session continuity gap | Medium | This file was created to address this — update it every session end |
-| Path refinement work not yet started | Medium | Blocked by zero-output diagnosis — begin once live output is confirmed |
+| Step 9 tuning requires live data | Medium | No speculative adjustments without diagnostic evidence |
 
 ---
 
 ## Last Updated
 
-2026-04-10 — Roadmap refresh: replaced Stage A–E observability-gated expansion sequence with business-first signal-engine path roadmap. Next PR queue updated to reflect new sequence (path refinements → new path additions → portfolio formalization). Prior operating-contract upgrade (PR #97) is still the base brief version.
+2026-04-11 — Roadmap step 8 complete: `PortfolioRole` enum and `ACTIVE_PATH_PORTFOLIO_ROLES` mapping added to `src/signal_quality.py`. All 14 active evaluators assigned explicit portfolio roles. Focused tests added to `tests/test_signal_quality.py`. Next step is path-by-path portfolio tuning (step 9) using live diagnostic data.
