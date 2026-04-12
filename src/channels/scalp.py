@@ -866,11 +866,13 @@ class ScalpChannel(BaseChannel):
 
         # SL: beyond cascade extremum + 0.3% buffer
         sl_buffer = close_now * 0.003
+        _cascade_slice = [float(c) for c in closes[-4:]]
+        cascade_low = min(_cascade_slice)
+        cascade_high = max(_cascade_slice)
+        cascade_range = cascade_high - cascade_low
         if reversal_direction == Direction.LONG:
-            cascade_low = min(float(closes[-4:]))
             sl = cascade_low - sl_buffer
         else:
-            cascade_high = max(float(closes[-4:]))
             sl = cascade_high + sl_buffer
 
         sl_dist = abs(close_now - sl)
@@ -897,6 +899,36 @@ class ScalpChannel(BaseChannel):
         )
         if sig is None:
             return None
+
+        # B13: Fibonacci retrace TP targets (Type D — Reversion, OWNER_BRIEF)
+        # 38.2%, 61.8%, 100% retrace of the cascade range back toward pre-cascade level.
+        # Fall back to ATR R-multiples when cascade_range is degenerate (< ATR * 0.5).
+        _risk = sl_dist
+        if cascade_range >= atr_val * 0.5:
+            if reversal_direction == Direction.LONG:
+                _tp1_fib = cascade_low + cascade_range * 0.382
+                _tp2_fib = cascade_low + cascade_range * 0.618
+                _tp3_fib = cascade_low + cascade_range * 1.0
+                sig.tp1 = _tp1_fib if _tp1_fib > close_now else close_now + _risk * 1.5
+                sig.tp2 = _tp2_fib if _tp2_fib > close_now else close_now + _risk * 2.5
+                sig.tp3 = _tp3_fib if _tp3_fib > close_now else close_now + _risk * 4.0
+            else:
+                _tp1_fib = cascade_high - cascade_range * 0.382
+                _tp2_fib = cascade_high - cascade_range * 0.618
+                _tp3_fib = cascade_high - cascade_range * 1.0
+                sig.tp1 = _tp1_fib if _tp1_fib < close_now else close_now - _risk * 1.5
+                sig.tp2 = _tp2_fib if _tp2_fib < close_now else close_now - _risk * 2.5
+                sig.tp3 = _tp3_fib if _tp3_fib < close_now else close_now - _risk * 4.0
+        else:
+            # Degenerate cascade range — fall back to ATR-based R-multiples
+            if reversal_direction == Direction.LONG:
+                sig.tp1 = close_now + _risk * 1.5
+                sig.tp2 = close_now + _risk * 2.5
+                sig.tp3 = close_now + _risk * 4.0
+            else:
+                sig.tp1 = close_now - _risk * 1.5
+                sig.tp2 = close_now - _risk * 2.5
+                sig.tp3 = close_now - _risk * 4.0
 
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
@@ -1061,6 +1093,27 @@ class ScalpChannel(BaseChannel):
             pair_tier=_pair_profile.tier if _pair_profile else "MIDCAP",
         )
         if sig is not None:
+            # Override TPs with evaluator-authored R-multiple targets (B13 compliance:
+            # Type A — Fixed Ratio per OWNER_BRIEF.md: 1.5R, 2.5R, 4.0R).
+            # Use the actual SL from the built signal as the risk basis so the
+            # multipliers are consistent with whatever sl_dist adjustments
+            # build_channel_signal applied.  Fall back to ATR when risk is
+            # degenerate (entry ≈ stop_loss).
+            entry = sig.entry
+            risk = abs(entry - sig.stop_loss)
+            if risk < atr_val * 0.01:  # degenerate: SL essentially at entry — fall back to 1× ATR
+                risk = atr_val
+            if direction == Direction.LONG:
+                sig.tp1 = round(entry + risk * 1.5, 8)
+                sig.tp2 = round(entry + risk * 2.5, 8)
+                sig.tp3 = round(entry + risk * 4.0, 8)
+            else:
+                sig.tp1 = round(entry - risk * 1.5, 8)
+                sig.tp2 = round(entry - risk * 2.5, 8)
+                sig.tp3 = round(entry - risk * 4.0, 8)
+            sig.original_tp1 = sig.tp1
+            sig.original_tp2 = sig.tp2
+            sig.original_tp3 = sig.tp3
             sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
             sig.trailing_stage = 0
             sig.partial_close_pct = 0.0
