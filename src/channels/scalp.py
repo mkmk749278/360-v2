@@ -1069,7 +1069,7 @@ class ScalpChannel(BaseChannel):
             # degenerate (entry ≈ stop_loss).
             entry = sig.entry
             risk = abs(entry - sig.stop_loss)
-            if risk < atr_val * 0.01:
+            if risk < atr_val * 0.01:  # degenerate: SL essentially at entry — fall back to 1× ATR
                 risk = atr_val
             if direction == Direction.LONG:
                 sig.tp1 = round(entry + risk * 1.5, 8)
