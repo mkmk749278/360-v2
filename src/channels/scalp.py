@@ -1061,6 +1061,27 @@ class ScalpChannel(BaseChannel):
             pair_tier=_pair_profile.tier if _pair_profile else "MIDCAP",
         )
         if sig is not None:
+            # Override TPs with evaluator-authored R-multiple targets (B13 compliance:
+            # Type A — Fixed Ratio per OWNER_BRIEF.md: 1.5R, 2.5R, 4.0R).
+            # Use the actual SL from the built signal as the risk basis so the
+            # multipliers are consistent with whatever sl_dist adjustments
+            # build_channel_signal applied.  Fall back to ATR when risk is
+            # degenerate (entry ≈ stop_loss).
+            entry = sig.entry
+            risk = abs(entry - sig.stop_loss)
+            if risk < atr_val * 0.01:
+                risk = atr_val
+            if direction == Direction.LONG:
+                sig.tp1 = round(entry + risk * 1.5, 8)
+                sig.tp2 = round(entry + risk * 2.5, 8)
+                sig.tp3 = round(entry + risk * 4.0, 8)
+            else:
+                sig.tp1 = round(entry - risk * 1.5, 8)
+                sig.tp2 = round(entry - risk * 2.5, 8)
+                sig.tp3 = round(entry - risk * 4.0, 8)
+            sig.original_tp1 = sig.tp1
+            sig.original_tp2 = sig.tp2
+            sig.original_tp3 = sig.tp3
             sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
             sig.trailing_stage = 0
             sig.partial_close_pct = 0.0
