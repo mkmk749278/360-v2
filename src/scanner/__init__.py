@@ -551,6 +551,11 @@ class Scanner:
         self._setup_eval_counts: Dict[str, int] = defaultdict(int)
         self._setup_emit_counts: Dict[str, int] = defaultdict(int)
 
+        # Scoring tier telemetry: accumulates candidate counts per setup_class
+        # and score tier across cycles; logged every 100 scan cycles to diagnose
+        # funnel distribution across paths.
+        self._scoring_tier_counters: Dict[str, int] = defaultdict(int)
+
         # WS health-aware scan gating: counts consecutive cycles where both
         # WS managers are unhealthy, used to trigger an admin alert.
         self._consecutive_ws_degraded_cycles: int = 0
@@ -1178,6 +1183,15 @@ class Scanner:
                 )
                 self._setup_eval_counts.clear()
                 self._setup_emit_counts.clear()
+
+            # Scoring tier distribution telemetry: log per-path score tier counts
+            # every 100 scan cycles to diagnose funnel bias across setup classes.
+            if self._scan_cycle_count % 100 == 0 and self._scoring_tier_counters:
+                log.info(
+                    "Scoring tier distribution (last 100 cycles): {}",
+                    dict(self._scoring_tier_counters),
+                )
+                self._scoring_tier_counters.clear()
 
             # Touch heartbeat file so healthcheck knows the scanner is alive
             # (FINDING-024).
@@ -2624,6 +2638,11 @@ class Scanner:
         sig.soft_gate_flags = ",".join(_fired_gates)
         # Classify signal into quality tier based on final confidence.
         sig.signal_tier = classify_signal_tier(sig.confidence)
+        # Per-path scoring telemetry: capture setup_class before entering the
+        # scoring block so tier counters can be keyed by path (not just channel).
+        _sc = getattr(sig, "setup_class", "UNKNOWN")
+        self._suppression_counters[f"candidate_reached_scoring:{_sc}"] += 1
+        self._scoring_tier_counters[f"candidate_reached_scoring:{_sc}"] += 1
         # ── PR_09: Composite Signal Scoring Engine ────────────────────────
         # Overwrites sig.confidence and sig.signal_tier with the structured
         # 0-100 composite score.  Merges new dimension breakdown into the
@@ -2687,19 +2706,27 @@ class Scanner:
             sig.confidence = _score_result["total"]
             if _score_result["total"] >= 80:
                 sig.signal_tier = "A+"
+                self._suppression_counters[f"score_80plus:{_sc}"] += 1
+                self._scoring_tier_counters[f"score_80plus:{_sc}"] += 1
             elif _score_result["total"] >= 65:
                 sig.signal_tier = "B"
+                self._suppression_counters[f"score_65to79:{_sc}"] += 1
+                self._scoring_tier_counters[f"score_65to79:{_sc}"] += 1
             elif _score_result["total"] >= 50:
                 sig.signal_tier = "WATCHLIST"
+                self._suppression_counters[f"score_50to64:{_sc}"] += 1
+                self._scoring_tier_counters[f"score_50to64:{_sc}"] += 1
             else:
                 log.debug(
-                    "scoring below-threshold {} {}: total={:.1f} smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",
-                    symbol, chan_name, _score_result["total"],
+                    "scoring below-threshold {} {} [{}]: total={:.1f} smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",
+                    symbol, chan_name, _sc, _score_result["total"],
                     _score_result["smc"], _score_result["regime"], _score_result["volume"],
                     _score_result["indicators"], _score_result["patterns"], _score_result["mtf"],
                     _score_result["thesis_adj"],
                 )
                 self._suppression_counters[f"score_below50:{chan_name}"] += 1
+                self._suppression_counters[f"score_below50:{_sc}"] += 1
+                self._scoring_tier_counters[f"score_below50:{_sc}"] += 1
                 return None, cross_verified
             log.debug(
                 "composite score {} {} → {:.1f} (tier={}) smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",
