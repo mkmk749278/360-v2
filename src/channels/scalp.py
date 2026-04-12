@@ -866,8 +866,9 @@ class ScalpChannel(BaseChannel):
 
         # SL: beyond cascade extremum + 0.3% buffer
         sl_buffer = close_now * 0.003
-        cascade_low = min(float(c) for c in closes[-4:])
-        cascade_high = max(float(c) for c in closes[-4:])
+        _cascade_slice = [float(c) for c in closes[-4:]]
+        cascade_low = min(_cascade_slice)
+        cascade_high = max(_cascade_slice)
         cascade_range = cascade_high - cascade_low
         if reversal_direction == Direction.LONG:
             sl = cascade_low - sl_buffer
