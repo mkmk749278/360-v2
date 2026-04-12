@@ -923,11 +923,15 @@ class TestFamilyAwareTP:
     # ── Mean-reversion / snap-back families ────────────────────────────────
 
     @pytest.mark.parametrize("setup", [
-        SetupClass.LIQUIDATION_REVERSAL,
         SetupClass.FUNDING_EXTREME_SIGNAL,
     ])
     def test_mean_reversion_tp1_is_tight(self, setup):
-        """Snap-back families must use tp1 ≈ 1.0R (tighter than trend families)."""
+        """Snap-back families must use tp1 ≈ 1.0R (tighter than trend families).
+
+        LIQUIDATION_REVERSAL is excluded here because it now uses evaluator-authored
+        Fibonacci retrace TPs (38.2%/61.8%/100% of cascade range) preserved by
+        STRUCTURAL_SLTP_PROTECTED_SETUPS — its TP1 is no longer a fixed 1.0R multiple.
+        """
         risk = _risk_plan_for(setup)
         assert risk.passed, f"{setup.value} plan unexpectedly failed: {risk.reason}"
         entry = 100.0
@@ -939,11 +943,16 @@ class TestFamilyAwareTP:
         assert risk.tp2 > risk.tp1
 
     def test_mean_reversion_tp1_tighter_than_trend(self):
-        """LIQUIDATION_REVERSAL tp1 must be closer to entry than TREND_PULLBACK_CONTINUATION."""
-        rev = _risk_plan_for(SetupClass.LIQUIDATION_REVERSAL)
+        """FUNDING_EXTREME_SIGNAL tp1 must be closer to entry than TREND_PULLBACK_CONTINUATION.
+
+        LIQUIDATION_REVERSAL is excluded from this comparison because it now uses
+        evaluator-authored Fibonacci retrace TPs preserved by STRUCTURAL_SLTP_PROTECTED_SETUPS,
+        making its TP1 variable and unrelated to a fixed R-multiple ordering.
+        """
+        rev = _risk_plan_for(SetupClass.FUNDING_EXTREME_SIGNAL)
         trend = _risk_plan_for(SetupClass.TREND_PULLBACK_CONTINUATION)
         assert rev.tp1 < trend.tp1, (
-            "Mean-reversion tp1 should be closer to entry than trend tp1"
+            "Mean-reversion (FUNDING_EXTREME_SIGNAL) tp1 should be closer to entry than trend tp1"
         )
 
     # ── Measured-move breakout families ────────────────────────────────────
@@ -1092,11 +1101,37 @@ class TestFamilyAwareTP:
             f"SR_FLIP_RETEST tp2 {risk.tp2:.6f} should equal evaluator-authored {sig.tp2:.6f}"
         )
 
+    def test_liquidation_reversal_tp1_preserves_evaluator(self):
+        """B13: LIQUIDATION_REVERSAL preserves evaluator-authored Fibonacci retrace TPs.
+
+        LIQUIDATION_REVERSAL is now in STRUCTURAL_SLTP_PROTECTED_SETUPS.  The evaluator
+        computes TPs as 38.2%/61.8%/100% Fibonacci retraces of the cascade range.
+        Those evaluator-authored values must survive build_risk_plan() rather than
+        being replaced by the old generic 1.0R/1.8R/2.5R mean-reversion targets.
+        """
+        sig = _signal(channel="360_SCALP", direction=Direction.LONG)
+        risk = _risk_plan_for(SetupClass.LIQUIDATION_REVERSAL)
+        assert risk.passed, f"LIQUIDATION_REVERSAL plan failed: {risk.reason}"
+        # Evaluator-authored TP1 (104.0 in the test signal) must be preserved.
+        assert risk.tp1 == pytest.approx(sig.tp1, rel=1e-6), (
+            f"LIQUIDATION_REVERSAL tp1 {risk.tp1:.6f} should equal evaluator-authored "
+            f"{sig.tp1:.6f} (B13 structural TP preservation violated)"
+        )
+        assert risk.tp2 == pytest.approx(sig.tp2, rel=1e-6), (
+            f"LIQUIDATION_REVERSAL tp2 {risk.tp2:.6f} should equal evaluator-authored {sig.tp2:.6f}"
+        )
+
     # ── Family ordering invariants ──────────────────────────────────────────
 
     def test_tp1_ordering_mean_rev_lt_trend_lt_breakout(self):
-        """Family TP1 ordering: mean-reversion < trend < breakout (measured move)."""
-        mean_rev = _risk_plan_for(SetupClass.LIQUIDATION_REVERSAL)
+        """Family TP1 ordering: mean-reversion < trend < breakout (measured move).
+
+        Uses FUNDING_EXTREME_SIGNAL as the mean-reversion representative because
+        LIQUIDATION_REVERSAL now uses evaluator-authored Fibonacci retrace TPs
+        (preserved by STRUCTURAL_SLTP_PROTECTED_SETUPS) which are variable and not
+        comparable to fixed R-multiple ordering.
+        """
+        mean_rev = _risk_plan_for(SetupClass.FUNDING_EXTREME_SIGNAL)
         trend = _risk_plan_for(SetupClass.TREND_PULLBACK_CONTINUATION)
         breakout = _risk_plan_for(SetupClass.BREAKOUT_RETEST)
         assert mean_rev.tp1 < trend.tp1 < breakout.tp1, (

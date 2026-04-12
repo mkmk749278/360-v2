@@ -123,6 +123,7 @@ STRUCTURAL_SLTP_PROTECTED_SETUPS: frozenset[SetupClass] = frozenset({
     SetupClass.TREND_PULLBACK_EMA,
     SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
     SetupClass.SR_FLIP_RETEST,
+    SetupClass.LIQUIDATION_REVERSAL,  # Fibonacci retrace TPs (Type D — Reversion)
 })
 
 
@@ -1108,10 +1109,11 @@ def build_risk_plan(
             tp1 = min(signal.entry - risk * 0.9, bb_mid)
             tp2 = min(tp1 - risk * 0.4, bb_lower)
         tp3 = None
-    elif setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL):
-        # Mean-reversion / snap-back families: take profit quickly before the
-        # reversal fades.  Tighter TP ratios reflect a short-lived, aggressive
-        # counter-trend move.
+    elif setup == SetupClass.FUNDING_EXTREME_SIGNAL:
+        # Mean-reversion / snap-back: take profit quickly before the reversal fades.
+        # Tighter TP ratios reflect a short-lived, aggressive counter-trend move.
+        # LIQUIDATION_REVERSAL is handled above by STRUCTURAL_SLTP_PROTECTED_SETUPS
+        # using evaluator-authored Fibonacci retrace TPs (B13 compliance).
         tp1 = signal.entry + risk * 1.0 if _is_long else signal.entry - risk * 1.0
         tp2 = signal.entry + risk * 1.8 if _is_long else signal.entry - risk * 1.8
         tp3 = signal.entry + risk * 2.5 if _is_long else signal.entry - risk * 2.5

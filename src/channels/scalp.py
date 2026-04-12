@@ -866,11 +866,12 @@ class ScalpChannel(BaseChannel):
 
         # SL: beyond cascade extremum + 0.3% buffer
         sl_buffer = close_now * 0.003
+        cascade_low = min(float(c) for c in closes[-4:])
+        cascade_high = max(float(c) for c in closes[-4:])
+        cascade_range = cascade_high - cascade_low
         if reversal_direction == Direction.LONG:
-            cascade_low = min(float(closes[-4:]))
             sl = cascade_low - sl_buffer
         else:
-            cascade_high = max(float(closes[-4:]))
             sl = cascade_high + sl_buffer
 
         sl_dist = abs(close_now - sl)
@@ -897,6 +898,36 @@ class ScalpChannel(BaseChannel):
         )
         if sig is None:
             return None
+
+        # B13: Fibonacci retrace TP targets (Type D — Reversion, OWNER_BRIEF)
+        # 38.2%, 61.8%, 100% retrace of the cascade range back toward pre-cascade level.
+        # Fall back to ATR R-multiples when cascade_range is degenerate (< ATR * 0.5).
+        _risk = sl_dist
+        if cascade_range >= atr_val * 0.5:
+            if reversal_direction == Direction.LONG:
+                _tp1_fib = cascade_low + cascade_range * 0.382
+                _tp2_fib = cascade_low + cascade_range * 0.618
+                _tp3_fib = cascade_low + cascade_range * 1.0
+                sig.tp1 = _tp1_fib if _tp1_fib > close_now else close_now + _risk * 1.5
+                sig.tp2 = _tp2_fib if _tp2_fib > close_now else close_now + _risk * 2.5
+                sig.tp3 = _tp3_fib if _tp3_fib > close_now else close_now + _risk * 4.0
+            else:
+                _tp1_fib = cascade_high - cascade_range * 0.382
+                _tp2_fib = cascade_high - cascade_range * 0.618
+                _tp3_fib = cascade_high - cascade_range * 1.0
+                sig.tp1 = _tp1_fib if _tp1_fib < close_now else close_now - _risk * 1.5
+                sig.tp2 = _tp2_fib if _tp2_fib < close_now else close_now - _risk * 2.5
+                sig.tp3 = _tp3_fib if _tp3_fib < close_now else close_now - _risk * 4.0
+        else:
+            # Degenerate cascade range — fall back to ATR-based R-multiples
+            if reversal_direction == Direction.LONG:
+                sig.tp1 = close_now + _risk * 1.5
+                sig.tp2 = close_now + _risk * 2.5
+                sig.tp3 = close_now + _risk * 4.0
+            else:
+                sig.tp1 = close_now - _risk * 1.5
+                sig.tp2 = close_now - _risk * 2.5
+                sig.tp3 = close_now - _risk * 4.0
 
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
