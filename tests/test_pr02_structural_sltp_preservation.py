@@ -248,7 +248,7 @@ class TestProtectedPathsPreserveSLTP:
         assert risk.tp3 == pytest.approx(sig.tp3, rel=1e-6)
 
     def test_all_protected_setups_are_covered(self):
-        """Sanity: STRUCTURAL_SLTP_PROTECTED_SETUPS contains exactly the expected 7 paths.
+        """Sanity: STRUCTURAL_SLTP_PROTECTED_SETUPS contains exactly the expected 8 paths.
 
         SR_FLIP_RETEST is included because:
         - Its SL is anchored to the flipped structural level (level * 0.998),
@@ -257,6 +257,11 @@ class TestProtectedPathsPreserveSLTP:
           — both are structural anchors, not risk multiples.
         - It is one of the canonical strongest foundation paths in the audit and
           owner brief; its structural expression must survive downstream handling.
+
+        DIVERGENCE_CONTINUATION is included because (B13 fix):
+        - Its TPs are anchored to the swing high/low from the divergence detection
+          window — not generic R-multiples.
+        - build_risk_plan() must not overwrite these pattern-based TPs.
         """
         expected = {
             SetupClass.POST_DISPLACEMENT_CONTINUATION,
@@ -266,6 +271,7 @@ class TestProtectedPathsPreserveSLTP:
             SetupClass.TREND_PULLBACK_EMA,
             SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
             SetupClass.SR_FLIP_RETEST,
+            SetupClass.DIVERGENCE_CONTINUATION,
         }
         assert STRUCTURAL_SLTP_PROTECTED_SETUPS == expected, (
             "STRUCTURAL_SLTP_PROTECTED_SETUPS diverged from the PR-02 specification. "
@@ -402,6 +408,7 @@ class TestPredictiveAdjustmentBypassesProtectedPaths:
         "CONTINUATION_LIQUIDITY_SWEEP",
         "SR_FLIP_RETEST",
         "FAILED_AUCTION_RECLAIM",
+        "DIVERGENCE_CONTINUATION",
     ])
     def test_predictive_does_not_scale_protected_path_tp(self, sc_str):
         """PR-02: adjust_tp_sl() must leave TP unchanged for protected structural paths."""
@@ -495,7 +502,6 @@ class TestNonProtectedPathsUnchanged:
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.WHALE_MOMENTUM,
-        SetupClass.DIVERGENCE_CONTINUATION,
     ])
     def test_non_protected_path_uses_generic_tp_not_evaluator(self, setup_class):
         """Non-protected paths must NOT preserve evaluator-authored TPs.

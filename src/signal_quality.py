@@ -123,6 +123,7 @@ STRUCTURAL_SLTP_PROTECTED_SETUPS: frozenset[SetupClass] = frozenset({
     SetupClass.TREND_PULLBACK_EMA,
     SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
     SetupClass.SR_FLIP_RETEST,
+    SetupClass.DIVERGENCE_CONTINUATION,  # swing-based TPs from divergence detection window
 })
 
 

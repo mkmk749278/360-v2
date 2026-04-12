@@ -50,6 +50,7 @@ _PREDICTIVE_SLTP_BYPASS_SETUPS: frozenset[str] = frozenset({
     "CONTINUATION_LIQUIDITY_SWEEP",
     "SR_FLIP_RETEST",          # flipped-level SL + swing/4h structural TPs
     "FAILED_AUCTION_RECLAIM",  # already well-preserved; explicit to avoid regression
+    "DIVERGENCE_CONTINUATION", # divergence-window swing TPs; bypass predictive scaling
 })
 
 

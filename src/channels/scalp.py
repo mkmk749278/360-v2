@@ -2376,33 +2376,59 @@ class ScalpChannel(BaseChannel):
         if direction == Direction.SHORT and sl <= close:
             return None
 
-        # TP1: 20-candle swing high/low
+        # TP1: previous swing high/low from the divergence detection window.
+        # The divergence pattern is detected over closes[-20:]; the highest high
+        # (lowest low for SHORT) in that same window is the natural first target —
+        # the swing from which price diverged and where divergence resolves.
         if direction == Direction.LONG:
-            tp1 = max(float(h) for h in highs[-21:-1]) if len(highs) >= 21 else 0.0
+            _div_win_highs = [float(h) for h in highs[-20:]] if len(highs) >= 20 else []
+            tp1 = max(_div_win_highs) if _div_win_highs else 0.0
             if tp1 <= close:
                 tp1 = close + sl_dist * 1.5
         else:
-            tp1 = min(float(low_val) for low_val in lows[-21:-1]) if len(lows) >= 21 else 0.0
+            _div_win_lows = [float(low_val) for low_val in lows[-20:]] if len(lows) >= 20 else []
+            tp1 = min(_div_win_lows) if _div_win_lows else float("inf")
             if tp1 >= close:
                 tp1 = close - sl_dist * 1.5
 
-        # TP2: 4h target or fallback
+        # TP2: 20-candle 5m swing high/low — structural confirmation level.
+        if direction == Direction.LONG:
+            tp2 = max(float(h) for h in highs[-20:]) if len(highs) >= 20 else 0.0
+            if tp2 <= close:
+                tp2 = close + sl_dist * 2.5
+        else:
+            tp2 = min(float(low_val) for low_val in lows[-20:]) if len(lows) >= 20 else float("inf")
+            if tp2 >= close:
+                tp2 = close - sl_dist * 2.5
+
+        # TP3: HTF (4h/15m) swing high/low — extended target.
+        # Prefer 4h data; fall back to 15m if 4h is not available; then R-multiple.
         candles_4h = candles.get("4h")
+        candles_15m = candles.get("15m")
         if candles_4h and len(candles_4h.get("high", [])) >= 5:
             _4h_highs = candles_4h.get("high", [])
             _4h_lows = candles_4h.get("low", [])
             if direction == Direction.LONG:
-                tp2 = max(float(h) for h in _4h_highs[-10:]) if _4h_highs else close + sl_dist * 2.5
-                if tp2 <= close:
-                    tp2 = close + sl_dist * 2.5
+                tp3 = max(float(h) for h in _4h_highs[-10:]) if _4h_highs else close + sl_dist * 4.0
+                if tp3 <= close:
+                    tp3 = close + sl_dist * 4.0
             else:
-                tp2 = min(float(l) for l in _4h_lows[-10:]) if _4h_lows else close - sl_dist * 2.5
-                if tp2 >= close:
-                    tp2 = close - sl_dist * 2.5
+                tp3 = min(float(l) for l in _4h_lows[-10:]) if _4h_lows else close - sl_dist * 4.0
+                if tp3 >= close:
+                    tp3 = close - sl_dist * 4.0
+        elif candles_15m and len(candles_15m.get("high", [])) >= 5:
+            _15m_highs = candles_15m.get("high", [])
+            _15m_lows = candles_15m.get("low", [])
+            if direction == Direction.LONG:
+                tp3 = max(float(h) for h in _15m_highs[-20:]) if _15m_highs else close + sl_dist * 4.0
+                if tp3 <= close:
+                    tp3 = close + sl_dist * 4.0
+            else:
+                tp3 = min(float(l) for l in _15m_lows[-20:]) if _15m_lows else close - sl_dist * 4.0
+                if tp3 >= close:
+                    tp3 = close - sl_dist * 4.0
         else:
-            tp2 = close + sl_dist * 2.5 if direction == Direction.LONG else close - sl_dist * 2.5
-
-        tp3 = close + sl_dist * 4.0 if direction == Direction.LONG else close - sl_dist * 4.0
+            tp3 = close + sl_dist * 4.0 if direction == Direction.LONG else close - sl_dist * 4.0
 
         profile = smc_data.get("pair_profile")
         atr_val = ind.get("atr_last", close * 0.002)
