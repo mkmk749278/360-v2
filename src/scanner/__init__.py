@@ -2722,15 +2722,24 @@ class Scanner:
         except Exception as _score_exc:
             log.debug("scoring engine error for {} {} (fail open): {}", symbol, chan_name, _score_exc)
 
-        # Apply accumulated soft-gate confidence penalty after composite final score
-        # assignment so that the penalties are not overwritten by the scoring engine.
-        if soft_penalty > 0.0:
-            sig.confidence -= soft_penalty
+        # PR-15: Apply the full accumulated soft-penalty (evaluator-authored + scanner-gate)
+        # after composite score assignment so that the penalties are not overwritten by the
+        # scoring engine.  sig.soft_penalty_total holds evaluator-level quality penalties
+        # plus scanner-gate penalties; previously only the scanner portion (soft_penalty)
+        # was deducted, leaving evaluator-authored penalties un-applied and allowing signals
+        # with inflated pre-penalty confidence to pass downstream floor and tier gates.
+        _total_soft_penalty = sig.soft_penalty_total  # evaluator-authored + scanner-gate combined
+        if _total_soft_penalty > 0.0:
+            sig.confidence -= _total_soft_penalty
             sig.confidence = self._clamp_confidence(sig.confidence)
             log.debug(
-                "Soft-gate penalty applied {} {}: -{:.1f} → {:.1f} (post-scoring)",
-                symbol, chan_name, soft_penalty, sig.confidence,
+                "Soft-gate penalty applied {} {}: -{:.1f} (eval={:.1f} gate={:.1f}) → {:.1f} (post-scoring)",
+                symbol, chan_name, _total_soft_penalty,
+                _total_soft_penalty - soft_penalty, soft_penalty, sig.confidence,
             )
+        # PR-15: Re-classify tier after full penalty so that WATCHLIST/floor decisions are
+        # made on the true post-penalty confidence, not the stale pre-penalty scoring tier.
+        sig.signal_tier = classify_signal_tier(sig.confidence)
 
         # ── PR_12: Statistical False-Positive Filter ──────────────────────
         # Apply rolling win-rate gate after scoring. Fail-open when no history.
