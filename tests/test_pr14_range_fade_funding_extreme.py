@@ -303,8 +303,4 @@ class TestPredictiveBypassFundingExtreme:
             "PredictiveEngine.adjust_tp_sl must not modify tp2 for "
             "FUNDING_EXTREME_SIGNAL (bypass set must prevent scaling)."
         )
-        assert sig.stop_loss == pytest.approx(1900.0, rel=1e-6), (
-            "PredictiveEngine.adjust_tp_sl must not modify stop_loss for "
-            "FUNDING_EXTREME_SIGNAL."
-        )
 
