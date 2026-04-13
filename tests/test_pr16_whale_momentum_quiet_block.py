@@ -146,43 +146,39 @@ class TestWhaleMomentumQuietBlock:
             )
 
     def test_whale_momentum_not_blocked_in_strong_trend(self):
-        """WHALE_MOMENTUM must still be evaluated (not auto-blocked) in STRONG_TREND."""
+        """WHALE_MOMENTUM must produce a Signal in STRONG_TREND when all conditions pass."""
         ch = ScalpChannel()
         candles = {"1m": _make_1m_candles(n=15, base=99.8, trend=0.05)}
         ind = _indicators_1m(rsi_last=55.0, atr=0.3)
         smc = _long_smc()
 
-        # If it returns None it must be for a real trading reason, not a QUIET block.
-        # We call it to confirm the QUIET guard is not incorrectly triggered.
-        # Result may be None due to unrelated conditions — the key invariant is that
-        # a STRONG_TREND regime does not trigger the QUIET block (verified by
-        # test_whale_momentum_blocked_in_quiet_long above being the complement).
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        # Whether the signal fires or not for non-QUIET is tested in other suites.
-        # This assertion just ensures we didn't inadvertently return None from the
-        # QUIET block (i.e., even if None it is not our guard).  There's no way to
-        # distinguish the two from outside without a dedicated sentinel, so we accept
-        # either outcome and rely on the dedicated QUIET tests above.
-        _ = sig  # accepted: None or Signal
+        assert sig is not None, (
+            "WHALE_MOMENTUM must produce a signal in STRONG_TREND when tick-flow, "
+            "OBI, and RSI conditions are met — the QUIET gate must not fire here."
+        )
+        assert sig.setup_class == "WHALE_MOMENTUM"
 
     def test_whale_momentum_not_blocked_in_volatile(self):
-        """WHALE_MOMENTUM must not be blocked by the QUIET gate in VOLATILE regime."""
+        """WHALE_MOMENTUM must produce a Signal in VOLATILE when all conditions pass."""
         ch = ScalpChannel()
         candles = {"1m": _make_1m_candles(n=15, base=99.8, trend=0.05)}
         ind = _indicators_1m(rsi_last=55.0, atr=0.3)
         smc = _long_smc()
 
-        # Should not auto-return None from the QUIET guard.
-        # We cannot assert sig is not None because other gates might apply.
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="VOLATILE"
         )
-        _ = sig  # VOLATILE is in _WHALE_FAST_REGIMES — marginal OBI treated softly.
+        assert sig is not None, (
+            "WHALE_MOMENTUM must produce a signal in VOLATILE when tick-flow, "
+            "OBI, and RSI conditions are met — the QUIET gate must not fire here."
+        )
+        assert sig.setup_class == "WHALE_MOMENTUM"
 
     def test_whale_momentum_not_blocked_in_ranging(self):
-        """RANGING regime must NOT be affected by the QUIET-specific guard."""
+        """WHALE_MOMENTUM must produce a Signal in RANGING when all conditions pass."""
         ch = ScalpChannel()
         candles = {"1m": _make_1m_candles(n=15, base=99.8, trend=0.05)}
         ind = _indicators_1m(rsi_last=55.0, atr=0.3)
@@ -191,9 +187,11 @@ class TestWhaleMomentumQuietBlock:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="RANGING"
         )
-        # RANGING is not QUIET — the QUIET guard must not fire.
-        # (Other gates may still apply, so None is acceptable for unrelated reasons.)
-        _ = sig
+        assert sig is not None, (
+            "WHALE_MOMENTUM must produce a signal in RANGING when tick-flow, "
+            "OBI, and RSI conditions are met — the QUIET gate must not fire here."
+        )
+        assert sig.setup_class == "WHALE_MOMENTUM"
 
 
 # ---------------------------------------------------------------------------
