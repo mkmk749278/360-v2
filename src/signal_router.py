@@ -556,13 +556,13 @@ class SignalRouter:
             (c for c in ALL_CHANNELS if c.name == signal.channel), None
         )
         if chan_cfg and signal.confidence < chan_cfg.min_confidence:
-            # WATCHLIST signals from scalp channels have already been validated
-            # by the scanner's tier-preservation path.  Re-applying the paid-channel
-            # min-confidence floor here would silently destroy WATCHLIST semantics
-            # and contradict the declared tier policy.  Bypass the floor for these.
+            # WATCHLIST signals from the primary 360_SCALP channel have already been
+            # validated by the scanner's tier-preservation path.  Re-applying the
+            # paid-channel min-confidence floor here would silently destroy WATCHLIST
+            # semantics and contradict the declared tier policy for 360_SCALP.
             if (
                 getattr(signal, "signal_tier", "") == "WATCHLIST"
-                and signal.channel in _SCALP_CHANNEL_NAMES
+                and signal.channel == "360_SCALP"
             ):
                 log.debug(
                     "WATCHLIST signal {} {} confidence {:.1f} – bypassing router min-confidence floor",

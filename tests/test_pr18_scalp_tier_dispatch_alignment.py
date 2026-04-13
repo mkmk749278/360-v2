@@ -187,8 +187,12 @@ class TestScalpMinConfidenceConfig:
 # Invariant 3: Router — WATCHLIST bypass
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Invariant 3: Router — WATCHLIST bypass (scoped to 360_SCALP only)
+# ---------------------------------------------------------------------------
+
 class TestRouterWatchlistBypass:
-    """WATCHLIST signals from scalp channels must not be dropped by the router."""
+    """WATCHLIST signals from the primary 360_SCALP channel must not be dropped."""
 
     @pytest.mark.asyncio
     async def test_watchlist_scalp_signal_is_dispatched(self, queue, router, sent_messages):
@@ -199,25 +203,14 @@ class TestRouterWatchlistBypass:
         dispatched = await _route_signal(router, queue, sig)
         assert dispatched, (
             "WATCHLIST 360_SCALP signal with confidence=55 was not dispatched. "
-            "The router must bypass its min-confidence floor for WATCHLIST scalp signals."
-        )
-
-    @pytest.mark.asyncio
-    async def test_watchlist_scalp_fvg_signal_is_dispatched(self, queue, router, sent_messages):
-        """WATCHLIST bypass applies across the full scalp family, not just 360_SCALP."""
-        sig = _make_signal(
-            channel="360_SCALP_FVG", confidence=58.0, signal_tier="WATCHLIST"
-        )
-        dispatched = await _route_signal(router, queue, sig)
-        assert dispatched, (
-            "WATCHLIST 360_SCALP_FVG signal must bypass router min-confidence floor."
+            "The router must bypass its min-confidence floor for WATCHLIST 360_SCALP signals."
         )
 
     @pytest.mark.asyncio
     async def test_non_watchlist_below_floor_is_rejected(self, queue, router, sent_messages):
-        """A B-tier or lower signal that is NOT tagged WATCHLIST must still be rejected
+        """A signal that is NOT tagged WATCHLIST must still be rejected
         if its confidence is below the channel floor.  The bypass must be tier-specific."""
-        # Confidence 55 is below any scalp channel floor, but signal_tier is "B" not "WATCHLIST"
+        # Confidence 55 is below channel floor, but signal_tier is "B" not "WATCHLIST"
         sig = _make_signal(
             channel="360_SCALP", confidence=55.0, signal_tier="B"
         )
@@ -229,44 +222,39 @@ class TestRouterWatchlistBypass:
         )
 
     @pytest.mark.asyncio
-    async def test_watchlist_bypass_is_scoped_to_scalp_channel_names(
+    async def test_watchlist_bypass_scoped_to_360_scalp(
         self, queue, router, sent_messages, monkeypatch
     ):
-        """WATCHLIST bypass only fires when channel is in _SCALP_CHANNEL_NAMES.
-        Verified by injecting a fake channel config with a high floor into ALL_CHANNELS
-        and confirming the bypass does NOT fire for it."""
-        import config as config_module  # noqa: F401 -- imported for monkeypatch reference
-        from src.signal_router import _SCALP_CHANNEL_NAMES
+        """WATCHLIST bypass fires only for channel == '360_SCALP'.
+        A scalp sub-channel (360_SCALP_FVG) WATCHLIST signal with confidence below
+        its own floor must still be rejected — the bypass is not extended to
+        sub-channels without explicit doctrine evidence."""
         from config import ChannelConfig
 
-        # Inject a fake non-scalp channel config with a high floor
+        # Inject a fake scalp sub-channel with a high floor
         fake_chan = ChannelConfig(
-            name="FAKE_NON_SCALP",
-            emoji="🔴",
-            timeframes=["1h"],
-            sl_pct_range=(0.5, 1.5),
-            tp_ratios=[2.0, 3.0],
-            trailing_atr_mult=2.0,
+            name="FAKE_SCALP_SUB",
+            emoji="⚡",
+            timeframes=["5m"],
+            sl_pct_range=(0.1, 0.3),
+            tp_ratios=[1.5, 2.5],
+            trailing_atr_mult=1.5,
             adx_min=20,
             adx_max=100,
-            spread_max=0.03,
+            spread_max=0.02,
             min_confidence=80,
-            min_volume=1_000_000.0,
-            dca_enabled=False,
+            min_volume=5_000_000.0,
+            dca_enabled=True,
             min_signal_lifespan=900,
         )
-        assert "FAKE_NON_SCALP" not in _SCALP_CHANNEL_NAMES, (
-            "Test channel name must not be in _SCALP_CHANNEL_NAMES."
-        )
-
         monkeypatch.setattr(signal_router_module, "ALL_CHANNELS", list(signal_router_module.ALL_CHANNELS) + [fake_chan])
-        monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, "FAKE_NON_SCALP", "premium")
+        monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, "FAKE_SCALP_SUB", "premium")
 
-        sig = _make_signal(channel="FAKE_NON_SCALP", confidence=55.0, signal_tier="WATCHLIST")
+        sig = _make_signal(channel="FAKE_SCALP_SUB", confidence=55.0, signal_tier="WATCHLIST")
         dispatched = await _route_signal(router, queue, sig)
         assert not dispatched, (
-            "WATCHLIST bypass must not fire for non-scalp channels. "
-            "FAKE_NON_SCALP with confidence=55 must be rejected by the router floor (80)."
+            "WATCHLIST bypass must not fire for channels other than '360_SCALP'. "
+            "FAKE_SCALP_SUB WATCHLIST signal with confidence=55 must be rejected."
         )
 
 
