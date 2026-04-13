@@ -48,3 +48,4 @@ htmlcov/
 docker-compose.override.yml
 data/confidence_log.jsonl
 src/data/scanner_heartbeat
+data/scanner_heartbeat
