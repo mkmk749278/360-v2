@@ -235,7 +235,7 @@ class TestRouterWatchlistBypass:
         """WATCHLIST bypass only fires when channel is in _SCALP_CHANNEL_NAMES.
         Verified by injecting a fake channel config with a high floor into ALL_CHANNELS
         and confirming the bypass does NOT fire for it."""
-        import config as config_module  # noqa: F401 – imported for monkeypatch reference
+        import config as config_module  # noqa: F401 -- imported for monkeypatch reference
         from src.signal_router import _SCALP_CHANNEL_NAMES
         from config import ChannelConfig
 
