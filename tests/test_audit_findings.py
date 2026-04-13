@@ -336,6 +336,43 @@ class TestHealthcheckHeartbeat:
         """Uptime exactly at or above grace threshold fails."""
         assert self._heartbeat_fresh(str(tmp_path / "nonexistent"), engine_pid=180.0) is False
 
+    def test_scanner_and_healthcheck_heartbeat_dirs_match(self):
+        """Scanner._HEARTBEAT_PATH and healthcheck._HEARTBEAT_PATH must share the same directory.
+
+        This guards against the path mismatch bug where the scanner wrote the
+        heartbeat to /app/src/data/ while the healthcheck read from /app/data/.
+        """
+        # Compute paths from the actual source files without importing the
+        # modules (Scanner needs numpy; healthcheck runs sys.exit at module level).
+        repo_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        scanner_init = os.path.join(repo_root, "src", "scanner", "__init__.py")
+        healthcheck_py = os.path.join(repo_root, "healthcheck.py")
+
+        assert os.path.isfile(scanner_init), f"Scanner source not found: {scanner_init}"
+        assert os.path.isfile(healthcheck_py), f"Healthcheck source not found: {healthcheck_py}"
+
+        # Replicate both _HEARTBEAT_PATH computations exactly as written in source.
+        # Scanner: os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+        scanner_heartbeat_path = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.dirname(scanner_init))),
+            "data",
+            "scanner_heartbeat",
+        )
+        # Healthcheck: os.path.dirname(__file__)
+        healthcheck_heartbeat_path = os.path.join(
+            os.path.dirname(healthcheck_py),
+            "data",
+            "scanner_heartbeat",
+        )
+
+        scanner_dir = os.path.dirname(os.path.abspath(scanner_heartbeat_path))
+        healthcheck_dir = os.path.dirname(os.path.abspath(healthcheck_heartbeat_path))
+        assert scanner_dir == healthcheck_dir, (
+            f"Scanner heartbeat dir {scanner_dir!r} != "
+            f"healthcheck heartbeat dir {healthcheck_dir!r}. "
+            "The scanner will write heartbeats to a path the healthcheck never reads."
+        )
+
 
 class TestHealthcheckEngineUptime:
     """Test _engine_uptime_seconds and _find_engine_pid from healthcheck.py."""

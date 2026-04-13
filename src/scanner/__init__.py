@@ -1206,7 +1206,7 @@ class Scanner:
     # ------------------------------------------------------------------
 
     _HEARTBEAT_PATH = os.path.join(
-        os.path.dirname(os.path.dirname(__file__)), "data", "scanner_heartbeat"
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "scanner_heartbeat"
     )
 
     def _touch_heartbeat(self) -> None:
