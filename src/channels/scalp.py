@@ -952,6 +952,14 @@ class ScalpChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
+        # Block in QUIET regime — whale momentum setups require directional flow and
+        # volume that QUIET markets structurally lack.  This is a setup-specific gate
+        # that mirrors the same pattern used by VOLUME_SURGE_BREAKOUT and
+        # BREAKDOWN_SHORT.  It does not affect any other evaluator path.
+        regime_upper = regime.upper() if regime else ""
+        if regime_upper == "QUIET":
+            return None
+
         whale = smc_data.get("whale_alert")
         delta_spike = smc_data.get("volume_delta_spike", False)
         if whale is None and not delta_spike:
@@ -1027,7 +1035,6 @@ class ScalpChannel(BaseChannel):
         order_book = smc_data.get("order_book")
         obi_confirmed = False
         obi_penalty = 0.0
-        regime_upper = regime.upper() if regime else ""
         if order_book is not None:
             bids = order_book.get("bids", [])
             asks = order_book.get("asks", [])
