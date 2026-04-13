@@ -2047,7 +2047,10 @@ class Scanner:
         sig.pair_quality_score = ctx.pair_quality.score
         sig.pair_quality_label = ctx.pair_quality.label
         # How long (minutes) the setup remains actionable — sourced from config.
-        sig.valid_for_minutes = SIGNAL_VALID_FOR_MINUTES.get(sig.channel, 15)
+        # Only apply the channel default when the evaluator has not already set
+        # an explicit value (valid_for_minutes == 0 is the "not set" sentinel).
+        if sig.valid_for_minutes == 0:
+            sig.valid_for_minutes = SIGNAL_VALID_FOR_MINUTES.get(sig.channel, 15)
 
     @staticmethod
     def _has_higher_timeframe_alignment(sig: Any, indicators: Dict[str, Dict[str, Any]]) -> bool:

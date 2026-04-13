@@ -166,7 +166,9 @@ class Signal:
     entry_zone_high: Optional[float] = None   # Upper bound of limit order zone
     # How long (minutes) the setup remains actionable.  After this window
     # the signal should no longer be entered even if price is still in zone.
-    valid_for_minutes: int = 15
+    # 0 means "not yet set by an evaluator" — the scanner will apply the
+    # per-channel SIGNAL_VALID_FOR_MINUTES fallback during context population.
+    valid_for_minutes: int = 0
     # Tells the user what order type to use (e.g. "LIMIT_ZONE", "MARKET")
     execution_type: str = "LIMIT_ZONE"
 

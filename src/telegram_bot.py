@@ -399,8 +399,9 @@ class TelegramBot:
         )
 
         # Validity window (how long users have to enter the trade)
+        # Guard against the sentinel value 0 (means "not yet set by evaluator").
         valid_mins = getattr(sig, "valid_for_minutes", None)
-        if valid_mins is not None:
+        if valid_mins and valid_mins > 0:
             exec_label = "LIMIT ORDER" if exec_type == "LIMIT_ZONE" else TelegramBot._escape_md(exec_type)
             lines.append(
                 f"⏰ Valid for: \\~{valid_mins} min | Execution: {exec_label}"
