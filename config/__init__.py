@@ -1227,6 +1227,8 @@ RADAR_ALERT_WATCHING_CLOSELY_CONFIDENCE: int = _safe_int("RADAR_ALERT_WATCHING_C
 RADAR_PER_SYMBOL_COOLDOWN_SECONDS: int = _safe_int("RADAR_PER_SYMBOL_COOLDOWN_SECONDS", "900")
 #: Maximum number of radar alerts posted per hour (cross-symbol rate limit).
 RADAR_MAX_PER_HOUR: int = _safe_int("RADAR_MAX_PER_HOUR", "3")
+#: TTL (seconds) for an open radar watch before it auto-expires (default 4 h).
+RADAR_WATCH_TTL_SECONDS: int = _safe_int("RADAR_WATCH_TTL_SECONDS", "14400")
 #: Hours of channel silence before the silence breaker auto-posts content.
 SILENCE_BREAKER_HOURS: int = _safe_int("SILENCE_BREAKER_HOURS", "3")
 #: GPT model used for content generation (gpt-4o-mini is cost-efficient and fast).

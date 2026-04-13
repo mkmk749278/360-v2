@@ -125,6 +125,10 @@ class Bootstrap:
             if restored:
                 log.info("Circuit breaker state restored from Redis")
 
+        # 0d. Restore free-channel radar watch state from Redis.
+        if hasattr(engine, "_free_watch_service"):
+            await engine._free_watch_service.restore()
+
         # Wire API call tracking
         BinanceClient.on_api_call = engine.telemetry.record_api_call
 
@@ -236,6 +240,10 @@ class Bootstrap:
             asyncio.create_task(engine._trade_observer.start()),
             asyncio.create_task(engine._content_scheduler.run(), name="content_scheduler"),
         ]
+
+        # Free-watch lifecycle — start the background expiry-check loop.
+        if hasattr(engine, "_free_watch_service"):
+            tasks.append(asyncio.create_task(engine._free_watch_service.start()))
 
         # OI poller – background REST polling for Binance Futures Open Interest
         if getattr(engine, "_oi_poller", None) is not None:

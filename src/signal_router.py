@@ -141,6 +141,10 @@ class SignalRouter:
         self._ai_scorer: Optional[AIConfidenceScorer] = None
         # Signal pulse: post periodic status messages for open signals
         self._signal_pulse_enabled: bool = True
+        # Optional callback: called after a paid signal is successfully posted.
+        # Signature: async (symbol: str, bias: str) -> None
+        # Wired to FreeWatchService.on_paid_signal in main.py.
+        self.on_signal_routed: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # AI Engine wiring
@@ -691,6 +695,17 @@ class SignalRouter:
                 self.observer.capture_entry_snapshot(signal)
             except Exception as exc:
                 log.debug("TradeObserver.capture_entry_snapshot failed (non-critical): {}", exc)
+
+        # Notify the free-watch service so any open radar watch for this
+        # symbol+direction can be resolved to "rolled_into_paid_signal".
+        if self.on_signal_routed is not None:
+            try:
+                await self.on_signal_routed(
+                    symbol=signal.symbol,
+                    bias=signal.direction.value,
+                )
+            except Exception as exc:
+                log.debug("on_signal_routed callback error: {}", exc)
 
     async def _send_photo(self, channel_id: str, photo_bytes: bytes) -> bool:
         """Send a chart image to *channel_id*.

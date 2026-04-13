@@ -3166,13 +3166,30 @@ class Scanner:
                         _existing is None
                         or _radar_sig.confidence > _existing.get("confidence", 0)
                     ):
+                        _bias_val = getattr(_radar_sig.direction, "value", str(_radar_sig.direction))
+                        _setup_val = getattr(_radar_sig, "setup_class", chan_name)
                         self._radar_scores[chan_name] = {
                             "symbol": symbol,
                             "confidence": _radar_sig.confidence,
-                            "bias": getattr(_radar_sig.direction, "value", str(_radar_sig.direction)),
-                            "setup_name": getattr(_radar_sig, "setup_class", chan_name),
+                            "bias": _bias_val,
+                            "setup_name": _setup_val,
                             "waiting_for": "confirm",
                         }
+                        # Notify the free-watch service so it can post a radar
+                        # alert to the free channel and create a tracked watch.
+                        _radar_cb = getattr(self, "on_radar_candidate", None)
+                        if _radar_cb is not None:
+                            try:
+                                await _radar_cb(
+                                    symbol=symbol,
+                                    source_channel=chan_name,
+                                    bias=_bias_val,
+                                    setup_name=_setup_val,
+                                    waiting_for="confirm",
+                                    confidence=_radar_sig.confidence,
+                                )
+                            except Exception as _cb_exc:
+                                log.debug("on_radar_candidate callback error: {}", _cb_exc)
             except Exception as _radar_exc:
                 log.debug("Radar eval error {} {}: {}", chan_name, symbol, _radar_exc)
         # ------------------------------------------------------------------

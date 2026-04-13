@@ -507,3 +507,43 @@ def format_weekly_card(ctx: Dict[str, Any]) -> str:
     streak_str = f"  {streak}" if streak else ""
     lines.append(f"{month_label}  {month_winrate:.0f}%{streak_str}")
     return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# Radar watch lifecycle follow-ups (free channel only — no premium details)
+# ---------------------------------------------------------------------------
+
+def format_radar_watch_resolved_paid(
+    symbol: str,
+    bias: str,
+    setup_name: str,
+) -> str:
+    """Free-channel follow-up: radar watch rolled into a live paid signal.
+
+    Intentionally omits entry, TP, and SL values — those are premium details.
+    """
+    bias_label = bias.capitalize()
+    lines = [
+        f"🔔 {symbol}  ·  {bias_label} setup triggered",
+        "",
+        f"The {setup_name} radar watch we flagged earlier has rolled into a live signal.",
+        "",
+        "🔒 Full entry details in Active Trading.",
+    ]
+    return "\n".join(lines)
+
+
+def format_radar_watch_expired(
+    symbol: str,
+    bias: str,
+    setup_name: str,
+) -> str:
+    """Free-channel follow-up: radar watch expired / no trigger."""
+    bias_label = bias.capitalize()
+    lines = [
+        f"⏱ {symbol}  ·  {bias_label} watch expired",
+        "",
+        f"The {setup_name} setup we were watching did not trigger within the session window.",
+        "No trade. Staying patient.",
+    ]
+    return "\n".join(lines)

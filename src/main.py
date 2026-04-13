@@ -64,6 +64,7 @@ from src.redis_client import RedisClient
 from src.signal_queue import SignalQueue
 from src.state_cache import StateCache
 from src.scheduler import ContentScheduler
+from src.free_watch_service import FreeWatchService
 from config import (
     CIRCUIT_BREAKER_MAX_CONSECUTIVE_SL,
     CIRCUIT_BREAKER_MAX_HOURLY_SL,
@@ -279,6 +280,18 @@ class CryptoSignalEngine:
             engine_context_fn=self._get_engine_context,
         )
 
+        # Free-channel radar watch lifecycle service.
+        # Tracks radar_alert posts and resolves them when a paid signal matches
+        # or when the watch TTL expires.  market_watch is NOT tracked here.
+        self._free_watch_service = FreeWatchService(
+            send_free=self.telegram.post_to_free_channel,
+            redis_client=self._redis_client,
+        )
+        # Wire radar candidate callback: scanner → watch creation + free posting.
+        self._scanner.on_radar_candidate = self._handle_radar_candidate
+        # Wire paid-signal callback: router → watch resolution.
+        self.router.on_signal_routed = self._free_watch_service.on_paid_signal
+
         # Command handler (delegates all Telegram commands)
         self._command_handler = CommandHandler(
             telegram=self.telegram,
@@ -386,6 +399,53 @@ class CryptoSignalEngine:
             "channel_scores": getattr(self._scanner, "_radar_scores", {}),
             "is_active_market": False,
         }
+
+    async def _handle_radar_candidate(
+        self,
+        symbol: str,
+        source_channel: str,
+        bias: str,
+        setup_name: str,
+        waiting_for: str,
+        confidence: int,
+    ) -> None:
+        """Handle a new radar candidate from the scanner.
+
+        Generates a radar_alert message, posts it to the free channel, and
+        creates a tracked watch via FreeWatchService.  This is intentionally
+        only called for actual radar_alert candidates — market_watch posts
+        must NOT flow through here.
+        """
+        from src.content_engine import generate_content
+
+        # Attempt to create a tracked watch first; if deduplicated, skip posting.
+        watch = await self._free_watch_service.create_watch(
+            symbol=symbol,
+            source_channel=source_channel,
+            bias=bias,
+            setup_name=setup_name,
+            waiting_for=waiting_for,
+            confidence=confidence,
+        )
+        if watch is None:
+            # Deduplicated or cooldown — do not re-post the radar alert.
+            return
+
+        # Generate and post the free-channel radar alert.
+        try:
+            ctx = {
+                "symbol": symbol,
+                "bias": bias,
+                "confidence": confidence,
+                "waiting_for": waiting_for,
+                "setup_name": setup_name,
+                "is_active_market": False,
+            }
+            text = await generate_content("radar_alert", ctx, use_gpt=False)
+            if text:
+                await self.telegram.post_to_free_channel(text)
+        except Exception as exc:
+            log.debug("Radar alert post failed for {}: {}", symbol, exc)
 
     # ------------------------------------------------------------------
     # Pre-flight checks (delegated to Bootstrap)
