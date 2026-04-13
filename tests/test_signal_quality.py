@@ -924,14 +924,19 @@ class TestFamilyAwareTP:
 
     @pytest.mark.parametrize("setup", [
         SetupClass.EXHAUSTION_FADE,
+        # PR-14: FUNDING_EXTREME_SIGNAL excluded — it is now in
+        # STRUCTURAL_SLTP_PROTECTED_SETUPS so build_risk_plan preserves
+        # evaluator-authored TPs; TP1 is no longer a fixed R-multiple.
     ])
     def test_mean_reversion_tp1_is_tight(self, setup):
         """Snap-back families must use tp1 ≈ 1.2R (tighter than trend families).
 
-        LIQUIDATION_REVERSAL and FUNDING_EXTREME_SIGNAL are excluded here because
-        both now use evaluator-authored structural TPs preserved by
-        STRUCTURAL_SLTP_PROTECTED_SETUPS — their TP1 is no longer a fixed R-multiple.
-        EXHAUSTION_FADE (1.2R) is used as the mean-reversion family representative.
+        LIQUIDATION_REVERSAL is excluded here because it now uses evaluator-authored
+        Fibonacci retrace TPs (38.2%/61.8%/100% of cascade range) preserved by
+        STRUCTURAL_SLTP_PROTECTED_SETUPS — its TP1 is no longer a fixed R-multiple.
+        PR-14: FUNDING_EXTREME_SIGNAL is also excluded for the same reason — added
+        to STRUCTURAL_SLTP_PROTECTED_SETUPS so evaluator-authored TPs are preserved.
+        EXHAUSTION_FADE (1.2R) is used as the snap-back family representative.
         """
         risk = _risk_plan_for(setup)
         assert risk.passed, f"{setup.value} plan unexpectedly failed: {risk.reason}"
@@ -946,10 +951,11 @@ class TestFamilyAwareTP:
     def test_mean_reversion_tp1_tighter_than_trend(self):
         """Mean-reversion tp1 must be closer to entry than TREND_PULLBACK_CONTINUATION.
 
-        LIQUIDATION_REVERSAL and FUNDING_EXTREME_SIGNAL are excluded from this
-        comparison because both now use evaluator-authored structural TPs preserved
-        by STRUCTURAL_SLTP_PROTECTED_SETUPS, making their TP1 variable and unrelated
-        to a fixed R-multiple ordering.  EXHAUSTION_FADE is used instead.
+        LIQUIDATION_REVERSAL is excluded from this comparison because it now uses
+        evaluator-authored Fibonacci retrace TPs preserved by STRUCTURAL_SLTP_PROTECTED_SETUPS,
+        making its TP1 variable and unrelated to a fixed R-multiple ordering.
+        PR-14: FUNDING_EXTREME_SIGNAL is also excluded for the same reason — it is
+        now in STRUCTURAL_SLTP_PROTECTED_SETUPS so its TP is evaluator-authored.
         """
         rev = _risk_plan_for(SetupClass.EXHAUSTION_FADE)
         trend = _risk_plan_for(SetupClass.TREND_PULLBACK_CONTINUATION)
@@ -1130,8 +1136,11 @@ class TestFamilyAwareTP:
 
         Uses EXHAUSTION_FADE as the mean-reversion representative because both
         LIQUIDATION_REVERSAL and FUNDING_EXTREME_SIGNAL now use evaluator-authored
-        structural TPs preserved by STRUCTURAL_SLTP_PROTECTED_SETUPS, which are
+        structural TPs (preserved by STRUCTURAL_SLTP_PROTECTED_SETUPS) which are
         variable and not comparable to fixed R-multiple ordering.
+        PR-14: FUNDING_EXTREME_SIGNAL was previously the representative here;
+        it was moved to STRUCTURAL_SLTP_PROTECTED_SETUPS so its TP is now
+        evaluator-authored and no longer a fixed R-multiple.
         """
         mean_rev = _risk_plan_for(SetupClass.EXHAUSTION_FADE)
         trend = _risk_plan_for(SetupClass.TREND_PULLBACK_CONTINUATION)
