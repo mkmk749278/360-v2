@@ -2617,7 +2617,8 @@ class Scanner:
         # authored soft_penalty_total — do not overwrite the evaluator's path-level
         # penalty state.  The total reflects both evaluator quality judgments and
         # scanner gate assessments, preserving evaluator intent end-to-end.
-        sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + soft_penalty
+        _eval_soft_penalty = getattr(sig, "soft_penalty_total", 0.0)
+        sig.soft_penalty_total = _eval_soft_penalty + soft_penalty
         sig.regime_penalty_multiplier = regime_mult
         sig.soft_gate_flags = ",".join(_fired_gates)
         # Classify signal into quality tier based on final confidence.
@@ -2735,7 +2736,7 @@ class Scanner:
             log.debug(
                 "Soft-gate penalty applied {} {}: -{:.1f} (eval={:.1f} gate={:.1f}) → {:.1f} (post-scoring)",
                 symbol, chan_name, _total_soft_penalty,
-                _total_soft_penalty - soft_penalty, soft_penalty, sig.confidence,
+                _eval_soft_penalty, soft_penalty, sig.confidence,
             )
         # PR-15: Re-classify tier after full penalty so that WATCHLIST/floor decisions are
         # made on the true post-penalty confidence, not the stale pre-penalty scoring tier.

@@ -221,7 +221,7 @@ class TestEvaluatorPenaltiesAppliedPostScoring:
         """
         import src.scanner as scanner_mod
 
-        eval_soft_penalty = 15.0  # set by the evaluator on the signal
+        eval_soft_penalty = 15.0  # evaluator-level quality penalty placed on the signal by channel.evaluate
         pr09_score = {
             "smc": 22.0, "regime": 18.0, "volume": 14.0,
             "indicators": 14.0, "patterns": 7.0, "mtf": 7.0,
