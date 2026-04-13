@@ -7,11 +7,21 @@ Every Copilot session must check this file if OWNER_BRIEF.md appears short or co
 
 | Field | Value |
 |---|---|
-| Canonical baseline date | 2026-04-11 |
-| Line count | 821 |
+| Canonical baseline date | 2026-04-13 |
+| Line count | 875 |
 | Minimum acceptable lines | 480 |
 | Format | Fresh canonical owner-operating manual (8-part structure) |
 | Verified by | Copilot + owner (mkmk749278) |
+
+## Important — Documentation Integrity Refresh Note (2026-04-13)
+
+OWNER_BRIEF.md was refreshed on 2026-04-13 to reflect the completed post-audit correction pass
+(PR-01 through PR-18 all merged). Key updates: header date updated, §2.1 top priorities refreshed
+to post-correction monitoring phase, §2.2 doctrine updated to reflect completion, §2.3 deploy
+judgment updated, §3.5/3.6 caveats cleared as corrected, §3.10 MIN_CONFIDENCE_SCALP updated
+from 80 to 65, Part VI roadmap restructured to mark all planned work as complete and document the
+post-audit correction sequence (PR-10 through PR-18), Part VII snapshot fully refreshed. No
+truncation was found — the brief was stale but complete at 821 lines before this update.
 
 ## Important — Audit Alignment Note (2026-04-11)
 
