@@ -331,6 +331,12 @@ class SignalRouter:
         except RuntimeError:
             pass
 
+    # Maximum unleveraged raw PnL % considered plausible for an active signal
+    # pulse.  If the computed value exceeds this, the signal state is likely
+    # stale or corrupted and the pulse is suppressed instead of posting
+    # misleading numbers.
+    _PULSE_MAX_REASONABLE_PNL_PCT: float = 30.0
+
     async def _signal_pulse_loop(self) -> None:
         """Post a one-liner status pulse for every active open signal every SIGNAL_PULSE_INTERVAL_SECONDS."""
         from config import SIGNAL_PULSE_INTERVAL_SECONDS
@@ -342,18 +348,71 @@ class SignalRouter:
             for sid, sig in list(self._active_signals.items()):
                 if sig.status not in ("ACTIVE", "TP1_HIT", "TP2_HIT"):
                     continue
+                # Skip WATCHLIST-tier signals.  They are pre-confirmation
+                # watches whose TP/SL levels may not be reliable enough to
+                # display as live trade progress.
+                if getattr(sig, "signal_tier", "B") == "WATCHLIST":
+                    log.debug(
+                        "Signal pulse skipped for {} – WATCHLIST tier not eligible for live status",
+                        sig.symbol,
+                    )
+                    continue
                 last_pulse = getattr(sig, "_last_pulse_time", 0.0)
                 if now_ts - last_pulse < SIGNAL_PULSE_INTERVAL_SECONDS:
                     continue
                 try:
-                    current_price = sig.current_price if sig.current_price > 0 else sig.entry
+                    # Require a live current_price supplied by the trade monitor.
+                    # Do NOT fall back to sig.entry: using the entry price as a
+                    # proxy would always show 0% PnL and hide stale-state bugs.
+                    current_price = sig.current_price
+                    if current_price <= 0:
+                        log.debug(
+                            "Signal pulse skipped for {} – current_price not yet populated",
+                            sig.symbol,
+                        )
+                        continue
+
                     direction = sig.direction
+
+                    # Validate TP1 direction before computing distances.  If TP1
+                    # is on the wrong side of entry the signal state is corrupted;
+                    # emit a warning and suppress rather than post bad numbers.
                     if direction == Direction.LONG:
+                        if sig.tp1 <= sig.entry:
+                            log.warning(
+                                "Signal pulse skipped for {} LONG – TP1 {:.8f} <= entry {:.8f} (invalid state)",
+                                sig.symbol, sig.tp1, sig.entry,
+                            )
+                            continue
                         pnl_pct = (current_price - sig.entry) / sig.entry * 100
                         tp1_dist = (sig.tp1 - current_price) / sig.entry * 100 if sig.tp1 > 0 else 0.0
                     else:
+                        if sig.tp1 >= sig.entry:
+                            log.warning(
+                                "Signal pulse skipped for {} SHORT – TP1 {:.8f} >= entry {:.8f} (invalid state)",
+                                sig.symbol, sig.tp1, sig.entry,
+                            )
+                            continue
                         pnl_pct = (sig.entry - current_price) / sig.entry * 100
                         tp1_dist = (current_price - sig.tp1) / sig.entry * 100 if sig.tp1 > 0 else 0.0
+
+                    # Sanity-check PnL magnitude.  An unleveraged raw move beyond
+                    # _PULSE_MAX_REASONABLE_PNL_PCT almost certainly indicates a
+                    # stale or cross-symbol current_price.  Suppress the pulse
+                    # rather than post a number that contradicts the eventual
+                    # close message.
+                    if abs(pnl_pct) > self._PULSE_MAX_REASONABLE_PNL_PCT:
+                        log.warning(
+                            "Signal pulse skipped for {} {} – implausible PnL {:.2f}%"
+                            " (entry={} current={}). State likely stale or corrupted.",
+                            sig.symbol, direction.value, pnl_pct, sig.entry, current_price,
+                        )
+                        continue
+
+                    # Clamp tp1_dist to 0 when TP1 has already been crossed.
+                    # Negative "TP1 in" is meaningless to users.
+                    tp1_dist = max(tp1_dist, 0.0)
+
                     sl_pct = abs(current_price - sig.stop_loss) / sig.entry * 100 if sig.stop_loss > 0 else 999.0
                     if sl_pct <= 0.0:
                         thesis = "broken"
@@ -362,6 +421,10 @@ class SignalRouter:
                     else:
                         thesis = "intact"
                     direction_word = "LONG" if direction == Direction.LONG else "SHORT"
+                    log.debug(
+                        "Signal pulse: {} {} entry={} current={} pnl={:.2f}% tp1_dist={:.2f}%",
+                        sig.symbol, direction_word, sig.entry, current_price, pnl_pct, tp1_dist,
+                    )
                     text = (
                         f"📡 {sig.symbol} {direction_word} — still open\n"
                         f"P&L: {pnl_pct:+.2f}% | TP1 in {tp1_dist:.2f}%\n"
