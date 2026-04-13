@@ -9,75 +9,66 @@
 
 ## Current Phase
 
-**Phase:** 6.2 — Post-Audit Correction Pass (active)
+**Phase:** 7 — Post-Correction Live Monitoring (active as of 2026-04-13)
 
-Two independent signal engine audits were conducted on 2026-04-12 (Audit B: deep codebase analysis, 628 lines; Audit C: GPT-5, 396 lines). Both audits agree: **do not redeploy yet — one more correction pass required**.
+The full correction sequence is complete. Two independent correction passes have been merged:
+- **Pre-redeploy correction pass** (PR-01 through PR-09) — all merged 2026-04-11
+- **Post-audit correction pass** (PR-10 through PR-18) — all merged 2026-04-12 to 2026-04-13
 
-The previous correction pass (PR-01 through PR-09) is **complete and merged**. The current roadmap addresses all remaining findings from both 2026-04-12 audits.
+The engine is live on VPS. Current task is to observe live monitor output after PR-18 before deciding the next technical action. Do not claim successful live recovery until monitor evidence supports it.
 
-### Previous Roadmap (Complete)
+### Completed Roadmap (all merged)
 
-| Step | Description | Status |
-|---|---|---|
-| 1 | Refine `VOLUME_SURGE_BREAKOUT` | ✅ merged |
-| 2 | Refine `BREAKDOWN_SHORT` | ✅ merged |
-| 3 | Refine `SR_FLIP_RETEST` | ✅ merged |
-| 4 | Review `WHALE_MOMENTUM` role | ✅ merged |
-| 5 | Add `CONTINUATION_LIQUIDITY_SWEEP` | ✅ merged |
-| 6 | Add `POST_DISPLACEMENT_CONTINUATION` | ✅ merged |
-| 7 | Add `FAILED_AUCTION_RECLAIM` | ✅ merged (PR #105) |
-| 8 | Formalize path portfolio roles | ✅ merged (PR #106) |
-| Pre-9 | Diagnose zero live signal — observability fix | ✅ merged |
-| PR-01–09 | Pre-redeploy correction pass (identity, SL/TP, dedup, gates, ORB, cleanup) | ✅ all merged |
-
-### Current Post-Audit Correction Roadmap
-
-| PR | Phase | Title | Status | Gate |
-|---|---|---|---|---|
-| **PR-10** | A | Scoring Diagnostic Telemetry | 🔄 Agent running | None |
-| **PR-11** | B | LIQUIDATION_REVERSAL Fibonacci Retrace TP (B13) | 🔄 Agent running | None |
-| **PR-12** | B | WHALE_MOMENTUM Evaluator TP (B13) | 🔄 Agent running | None |
-| **PR-13** | B | DIVERGENCE_CONTINUATION Evaluator TP (B13) | 🔄 Agent running | None |
-| **PR-14** | C | RANGE_FADE Dead Code + FUNDING_EXTREME Protection | ⏳ Next | None |
-| **PR-15** | C | Soft-Penalty-After-Scoring Interaction Fix | ⏳ Next | None |
-| **PR-16** | C | WHALE_MOMENTUM QUIET Regime Block | ⏳ Next | PR-12 |
-| **PR-17** | C | `valid_for_minutes` Preservation | ⏳ Next | None |
-| **PR-18** | D | Regime-Affinity for Non-Sweep Paths | ⏳ Gated | PR-10 data |
-| **PR-19** | D | B-Tier Dead Zone Resolution | ⏳ Gated | PR-10 data + discuss |
-| **PR-20** | D | Family Thesis Adjustments for Non-Sweep | ⏳ Gated | PR-18 data |
-| **PR-21** | E | Post-Correction Audit Report | ⏳ Final | All above |
-| **PR-22** | E | OWNER_BRIEF + ACTIVE_CONTEXT Final Refresh | ⏳ Final | PR-21 |
+| PR | Description | Status | Merged |
+|---|---|---|---|
+| PR-01 | Preserve evaluator identity, penalties, path metadata | ✅ merged | 2026-04-11 |
+| PR-02 | Preserve structural SL/TP intent for top-tier paths | ✅ merged | 2026-04-11 |
+| PR-03 | Quality-ranked same-direction arbitration for `360_SCALP` | ✅ merged | 2026-04-11 |
+| PR-04 | Disable auxiliary paid-channel paths by default | ✅ merged | 2026-04-11 |
+| PR-05 | Fix gate-policy mismatches (TREND_PULLBACK, WHALE, FAR) | ✅ merged | 2026-04-11 |
+| PR-06 | Disable OPENING_RANGE_BREAKOUT from trusted portfolio | ✅ merged | 2026-04-11 |
+| PR-07 | Specialist-path quality tuning (FUNDING_EXTREME TP1, WHALE SL) | ✅ merged | 2026-04-11 |
+| PR-08 | DIVERGENCE_CONTINUATION scoring alignment | ✅ merged | 2026-04-11 |
+| PR-09 | Residual cleanup / final architecture polish | ✅ merged | 2026-04-11 |
+| PR-10 | Per-setup-class scoring tier telemetry | ✅ merged | 2026-04-12 |
+| PR-11 | LIQUIDATION_REVERSAL Fibonacci retrace TP + structural protection (B13) | ✅ merged | 2026-04-12 |
+| PR-12 | WHALE_MOMENTUM evaluator-owned TP targets (B13) | ✅ merged | 2026-04-12 |
+| PR-13 | DIVERGENCE_CONTINUATION swing-based TP + structural protection (B13) | ✅ merged | 2026-04-12 |
+| — | Heartbeat path mismatch fix | ✅ merged | 2026-04-13 |
+| PR-14 | Remove RANGE_FADE dead code + FUNDING_EXTREME_SIGNAL SL/TP protection | ✅ merged | 2026-04-13 |
+| PR-15 | Fix evaluator soft-penalty not applied post-scoring; stale tier in floor gates | ✅ merged | 2026-04-13 |
+| PR-16 | Hard-block WHALE_MOMENTUM in QUIET regime | ✅ merged | 2026-04-13 |
+| PR-17 | Preserve evaluator-authored `valid_for_minutes` through scanner pipeline | ✅ merged | 2026-04-13 |
+| PR-18 | Align `360_SCALP` tier semantics with actual dispatch (A+/B/WATCHLIST) | ✅ merged | 2026-04-13 |
 
 ---
 
 ## Current Active Priority
 
-1. **Phase A+B: 4 parallel agents running** — PR-10 (telemetry), PR-11 (LIQUIDATION_REVERSAL TP), PR-12 (WHALE_MOMENTUM TP), PR-13 (DIVERGENCE_CONTINUATION TP). All independent, no dependencies.
-2. **Review each PR against §1.7 checklist** as agents complete, then merge.
-3. **Launch Phase C** (PR-14 through PR-17) immediately after Phase A+B merges.
-4. **Phase D is gated** on PR-10 live diagnostic data — resolves the Audit B vs GPT-5 divergence on scoring funnel bias.
+1. **Observe live monitor after PR-18** — check whether B-tier signals (65–79) are now dispatching and whether WATCHLIST handling is now preserved as intended downstream. Compare suppressor counts before and after.
+2. **Identify dominant suppressor post-PR-18** — confirmed pre-PR-18 suppressors: spread-quality rejection (~32–60 pairs/cycle), MTF gating (~14/cycle), quiet-regime floor. Determine if the pattern changes.
+3. **Evidence-gated next action** — if MTF gating remains the dominant paid-channel suppressor, prepare a targeted family-aware MTF gate refinement PR. Do not raise this until post-PR-18 evidence is reviewed.
 
 ---
 
-## 2026-04-12 Dual Audit Summary
+## 2026-04-13 Zero-Signal Audit Summary
 
-### Consensus (both audits agree)
-- Do not redeploy yet — one more correction pass
-- Engine has strong evaluator designs — core architecture is sound
-- 3 evaluators violate B13 (LIQUIDATION_REVERSAL, WHALE_MOMENTUM, DIVERGENCE_CONTINUATION lack evaluator TP)
-- `CONTINUATION_LIQUIDITY_SWEEP`, `VOLUME_SURGE_BREAKOUT`, `BREAKDOWN_SHORT` are universally trusted
-- `OPENING_RANGE_BREAKOUT` disabled correctly, needs rebuild
-- RANGE_FADE dead code should be removed
-- FUNDING_EXTREME_SIGNAL missing from protection sets
+Two independent audit documents now exist in `docs/`:
 
-### Key divergence
-- **Audit B** says 9 of 14 paths are deploy-ready; fix TPs and deploy
-- **GPT-5** says only 3-4 paths are deploy-ready; scoring funnel structurally starves non-sweep paths
-- **Resolution:** PR-10 diagnostic telemetry will provide live evidence (per-path scoring distributions) to determine which diagnosis is correct
+### `docs/AUDIT_2026-04-13_ZERO_SIGNAL_DIAGNOSIS_GPT-5.4.md`
+- Engine is alive, scanning, generating real candidates; zero output is suppression-driven, not infrastructure failure
+- Dominant suppressors (confirmed from live monitor 2026-04-13 06:49 UTC):
+  - `pair_quality:spread too wide` — 60 pairs/cycle peak
+  - `mtf_gate:360_SCALP` — 14/cycle peak
+  - `volatile_unsuitable:360_SCALP_FVG` / `_DIVERGENCE` / `_ORDERBLOCK` — 13/cycle peak each
+  - `QUIET_SCALP_BLOCK` — repeated at 63.0, 62.3, 61.2, 60.3, 56.7, 55.3, 49.7 confidence
+  - `score_65to79:LIQUIDITY_SWEEP_REVERSAL` — repeated (B-tier dead zone, now fixed by PR-18)
 
-### Unique findings per audit
-- **Audit B only:** soft-penalty-after-scoring interaction bug, `valid_for_minutes` overwrite, FUNDING_EXTREME protection gap
-- **GPT-5 only:** B-tier dead zone (65-79 signals go nowhere), regime-affinity gaps for non-sweep paths, MTF gate not thesis-aware
+### `docs/AUDIT_2026-04-13_ZERO_SIGNAL_EXECUTION_PLAN_GPT-5.3-Codex.md`
+- Confirmed all GPT-5.4 diagnoses via independent code verification
+- Identified second contradiction: WATCHLIST semantics preserved in scanner but destroyed by router (now fixed by PR-18)
+- Recommended PR-18 as the single best immediate next move (implemented and merged)
+- Classified spread loosening, quiet-floor loosening, volatile-gate removal as "still too speculative" — do not pursue without evidence
 
 ---
 
@@ -85,16 +76,10 @@ The previous correction pass (PR-01 through PR-09) is **complete and merged**. T
 
 | Issue | Severity | Status |
 |---|---|---|
-| Zero live signal output — root cause multi-layer | Critical | Observability improved; diagnostic telemetry (PR-10) in flight |
-| 3 evaluators violate B13 (no evaluator TP) | High | PR-11, PR-12, PR-13 agents running |
-| RANGE_FADE dead code in scanner | Low | PR-14 queued |
-| FUNDING_EXTREME_SIGNAL not in protection sets | Medium | PR-14 queued |
-| Soft-penalty applied after scoring floor check | Medium | PR-15 queued |
-| `valid_for_minutes` overwritten by channel defaults | Medium | PR-17 queued |
-| Scoring funnel may starve non-sweep paths | High | Unconfirmed — PR-10 data will resolve |
-| B-tier dead zone (65-79 scores suppressed) | Medium | Unconfirmed — PR-19 architectural discussion needed |
-| `ScanLat=~20398ms` — elevated scan latency | High | Root cause not confirmed |
-| Heartbeat file missing after grace period | Medium | Needs trace — may be related to scan latency |
+| Zero live signal output — suppression-driven, not infrastructure failure | High | Monitoring post-PR-18; B-tier/WATCHLIST fix in place |
+| Generic scanner MTF gate may be over-generic for some families | Medium | Confirmed strongly likely; evidence-gated — check post-PR-18 monitor |
+| `score_65to79` signals now dispatching? | Medium | Unknown — observe after PR-18 deploys |
+| Scan latency spikes (14.3s, 28.8s, 35.3s seen in 2026-04-13 monitor) | Medium | Root cause not confirmed; baseline 4–5s healthy |
 
 ---
 
@@ -102,18 +87,15 @@ The previous correction pass (PR-01 through PR-09) is **complete and merged**. T
 
 | Priority | PR | Description | Gate |
 |---|---|---|---|
-| 1 | PR-10 | Scoring diagnostic telemetry | 🔄 In flight |
-| 2 | PR-11 | LIQUIDATION_REVERSAL Fibonacci TP | 🔄 In flight |
-| 3 | PR-12 | WHALE_MOMENTUM evaluator TP | 🔄 In flight |
-| 4 | PR-13 | DIVERGENCE_CONTINUATION evaluator TP | 🔄 In flight |
-| 5 | PR-14 | RANGE_FADE dead code + FUNDING_EXTREME protection | After Phase B |
-| 6 | PR-15 | Soft-penalty-after-scoring fix | After Phase B |
-| 7 | PR-16 | WHALE_MOMENTUM QUIET block | After PR-12 |
-| 8 | PR-17 | `valid_for_minutes` preservation | After Phase B |
-| 9 | PR-18–20 | Scoring corrections (gated on evidence) | PR-10 live data |
-| 10 | PR-21–22 | Post-correction audit + doc refresh | After all above |
+| 1 | — | Review post-PR-18 live monitor output | No gate — do this first |
+| 2 | PR-19 (candidate) | Targeted family-aware MTF gate refinement | Evidence: MTF still dominant after PR-18 |
+| 3 | — | Re-assess remaining suppressors from post-PR-19 monitor | After PR-19 if raised |
 
-Full roadmap: `OWNER_BRIEF.md` Part VI section 6.2.
+**What stays deferred (no evidence gate yet):**
+- broad spread threshold loosening
+- broad quiet-floor loosening
+- global volatile-gate removal for auxiliary channels
+- major evaluator redesigns
 
 ---
 
@@ -126,7 +108,7 @@ Introduced in `src/signal_quality.py`:
 
 Role assignments:
 - **core (7):** `LIQUIDITY_SWEEP_REVERSAL`, `TREND_PULLBACK_EMA`, `VOLUME_SURGE_BREAKOUT`, `BREAKDOWN_SHORT`, `SR_FLIP_RETEST`, `CONTINUATION_LIQUIDITY_SWEEP`, `POST_DISPLACEMENT_CONTINUATION`
-- **support (4):** `LIQUIDATION_REVERSAL`, `DIVERGENCE_CONTINUATION`, `OPENING_RANGE_BREAKOUT`, `FAILED_AUCTION_RECLAIM`
+- **support (4):** `LIQUIDATION_REVERSAL`, `DIVERGENCE_CONTINUATION`, `OPENING_RANGE_BREAKOUT` (disabled from trusted portfolio), `FAILED_AUCTION_RECLAIM`
 - **specialist (3):** `WHALE_MOMENTUM`, `FUNDING_EXTREME_SIGNAL`, `QUIET_COMPRESSION_BREAK`
 
 ---
@@ -135,14 +117,13 @@ Role assignments:
 
 | Risk | Impact | Notes |
 |---|---|---|
-| Zero signal output root cause multi-layer | High | PR-10 telemetry will isolate which layer dominates |
-| GPT-5 scoring funnel hypothesis unconfirmed | High | Phase D corrections gated on evidence — no speculative changes |
-| B-tier dead zone may suppress 65-79 signals | Medium | Architectural decision needed (PR-19) — owner discussion required |
-| Elevated scan latency root cause unknown | High | Could be I/O, pair volume, or data assembly cost |
-| 4 agents running in parallel — merge conflicts possible | Medium | All touch different files/evaluators — conflicts unlikely but review carefully |
+| Zero signal output not yet confirmed resolved | High | PR-18 corrected dispatch; live evidence required post-deploy |
+| MTF gate over-generic for non-trend thesis paths | Medium | Evidence-gated; do not change without post-PR-18 confirmation |
+| Scan latency spikes (not baseline 4-5s) | Medium | Root cause unknown; monitor to see if it stabilizes |
+| Spread-quality suppression is market-condition-driven | Medium | Not directly fixable by code; may self-resolve as market conditions improve |
 
 ---
 
 ## Last Updated
 
-2026-04-12 — Post-audit correction roadmap established. Two audits analyzed (Audit B + GPT-5). Unified 13-PR roadmap created (PR-10 through PR-22). Phase A+B (4 PRs) launched in parallel. OWNER_BRIEF.md Part II, VI, VII updated to reflect post-audit state.
+2026-04-13 — Full ACTIVE_CONTEXT refresh. Correction pass (PR-01 through PR-18) confirmed complete. Phase changed to post-correction live monitoring. Next action: review post-PR-18 monitor output. Zero-signal diagnosis audit documents summarized.
