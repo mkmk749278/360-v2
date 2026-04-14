@@ -9,13 +9,14 @@
 
 ## Current Phase
 
-**Phase:** 7 — Post-Correction Live Monitoring (active as of 2026-04-13)
+**Phase:** 7 — Post-Correction Live Monitoring (active as of 2026-04-13; updated 2026-04-14)
 
 The full correction sequence is complete. Two independent correction passes have been merged:
 - **Pre-redeploy correction pass** (PR-01 through PR-09) — all merged 2026-04-11
 - **Post-audit correction pass** (PR-10 through PR-18) — all merged 2026-04-12 to 2026-04-13
+- **WATCHLIST lifecycle correction** (PR #144, PR #145) — merged 2026-04-14
 
-The engine is live on VPS. Current task is to observe live monitor output after PR-18 before deciding the next technical action. Do not claim successful live recovery until monitor evidence supports it.
+The engine is live on VPS. The 2026-04-14 investigation confirmed and fixed the WATCHLIST lifecycle admission defect. Current task is to observe live Telegram/monitor output post-PR #144 before deciding the next technical action. Do not claim operational WATCHLIST confirmation until monitor evidence supports it.
 
 ### Completed Roadmap (all merged)
 
@@ -40,14 +41,16 @@ The engine is live on VPS. Current task is to observe live monitor output after 
 | PR-16 | Hard-block WHALE_MOMENTUM in QUIET regime | ✅ merged | 2026-04-13 |
 | PR-17 | Preserve evaluator-authored `valid_for_minutes` through scanner pipeline | ✅ merged | 2026-04-13 |
 | PR-18 | Align `360_SCALP` tier semantics with actual dispatch (A+/B/WATCHLIST) | ✅ merged | 2026-04-13 |
+| PR #144 | fix: segregate WATCHLIST 360_SCALP signals from paid active lifecycle | ✅ merged | 2026-04-14 |
+| PR #145 | fix: defensive entry guard in `_format_watchlist_preview` for zero-price edge case | ✅ merged | 2026-04-14 |
 
 ---
 
 ## Current Active Priority
 
-1. **Observe live monitor after PR-18** — check whether B-tier signals (65–79) are now dispatching and whether WATCHLIST handling is now preserved as intended downstream. Compare suppressor counts before and after.
-2. **Identify dominant suppressor post-PR-18** — confirmed pre-PR-18 suppressors: spread-quality rejection (~32–60 pairs/cycle), MTF gating (~14/cycle), quiet-regime floor. Determine if the pattern changes.
-3. **Evidence-gated next action** — if MTF gating remains the dominant paid-channel suppressor, prepare a targeted family-aware MTF gate refinement PR. Do not raise this until post-PR-18 evidence is reviewed.
+1. **Verify post-merge WATCHLIST behavior live** — confirm that WATCHLIST (`50–64`) signals no longer appear in paid lifecycle events (TP HIT, SL HIT, INVALIDATED, expiry posts) in Telegram or monitor output. PR #144 and PR #145 are merged on 2026-04-14; operational confirmation requires fresh live evidence.
+2. **Identify duplicate lifecycle posting in live output** — the 2026-04-14 canonical audit (`docs/AUDIT_2026-04-14_REPORT_COMPARISON_AND_CANONICAL_VERDICT.md`) confirmed duplicate terminal lifecycle posting is real. It is the second confirmed defect, deferred until post-PR #144 live evidence is reviewed.
+3. **Evidence-gated next PR** — raise lifecycle idempotency / duplicate-post hardening only after post-merge monitor evidence is reviewed. Do not raise speculatively.
 
 ---
 
@@ -72,13 +75,31 @@ Two independent audit documents now exist in `docs/`:
 
 ---
 
+## 2026-04-14 WATCHLIST Investigation Summary
+
+Three independent audit reports were synthesised into a canonical verdict. Basis for current continuity state:
+
+### `docs/AUDIT_2026-04-14_REPORT_COMPARISON_AND_CANONICAL_VERDICT.md` (canonical)
+- **Primary confirmed defect:** WATCHLIST lifecycle admission — `WATCHLIST` (`50–64`) was documented as free-channel preview only, but runtime admitted it into the paid active lifecycle
+- WATCHLIST signals were entering `_active_signals` and being managed by `TradeMonitor` as live tracked trades
+- Duplicate lifecycle posting was confirmed real but classified as the second defect (not yet fixed)
+- PR #144: segregates WATCHLIST from paid active lifecycle; WATCHLIST now routed to free-channel preview only; WATCHLIST not stored in `_active_signals`; scanner comment corrected; tests updated
+- PR #145: defensive zero-price guard added to `_format_watchlist_preview()`
+
+### Three source audit reports (all in `docs/`)
+- `docs/AUDIT_2026-04-14_LIVE_SIGNAL_EXPRESSION_INVESTIGATION_GPT-5.4.md`
+- `docs/AUDIT_2026-04-14_LIVE_SIGNAL_EXPRESSION_INVESTIGATION_GPT-5.3-CODEX.md`
+- `docs/AUDIT_2026-04-14_LIVE_SIGNAL_EXPRESSION_INVESTIGATION_CLAUDE-OPUS-4.6.md`
+
+---
+
 ## Current Known Live Issues
 
 | Issue | Severity | Status |
 |---|---|---|
-| Zero live signal output — suppression-driven, not infrastructure failure | High | Monitoring post-PR-18; B-tier/WATCHLIST fix in place |
-| Generic scanner MTF gate may be over-generic for some families | Medium | Confirmed strongly likely; evidence-gated — check post-PR-18 monitor |
-| `score_65to79` signals now dispatching? | Medium | Unknown — observe after PR-18 deploys |
+| WATCHLIST signals entering paid active lifecycle | High | ✅ Fixed — PR #144 merged 2026-04-14; live verification pending |
+| Duplicate lifecycle posting (SL/invalidation/expiry terminal events) | High | Confirmed real (2026-04-14 audit); fix deferred to next PR after live verification |
+| Generic scanner MTF gate may be over-generic for some families | Medium | Confirmed likely; deferred behind lifecycle idempotency fix — reassess post-PR #144 monitor |
 | Scan latency spikes (14.3s, 28.8s, 35.3s seen in 2026-04-13 monitor) | Medium | Root cause not confirmed; baseline 4–5s healthy |
 
 ---
@@ -87,9 +108,9 @@ Two independent audit documents now exist in `docs/`:
 
 | Priority | PR | Description | Gate |
 |---|---|---|---|
-| 1 | — | Review post-PR-18 live monitor output | No gate — do this first |
-| 2 | PR-19 (candidate) | Targeted family-aware MTF gate refinement | Evidence: MTF still dominant after PR-18 |
-| 3 | — | Re-assess remaining suppressors from post-PR-19 monitor | After PR-19 if raised |
+| 1 | — | Verify post-PR #144 live Telegram/monitor output | No gate — do this first |
+| 2 | — (candidate) | Lifecycle idempotency / duplicate-post hardening | Evidence: post-PR #144 monitor confirms WATCHLIST clean; duplicate-post pattern still present |
+| 3 | — (candidate) | Targeted family-aware MTF gate refinement | After lifecycle fix; evidence: MTF still dominant suppressor |
 
 **What stays deferred (no evidence gate yet):**
 - broad spread threshold loosening
@@ -117,8 +138,9 @@ Role assignments:
 
 | Risk | Impact | Notes |
 |---|---|---|
-| Zero signal output not yet confirmed resolved | High | PR-18 corrected dispatch; live evidence required post-deploy |
-| MTF gate over-generic for non-trend thesis paths | Medium | Evidence-gated; do not change without post-PR-18 confirmation |
+| WATCHLIST contamination of paid lifecycle not yet confirmed removed in live output | High | PR #144 merged; live Telegram/monitor evidence required to confirm clean |
+| Duplicate terminal lifecycle posting not yet fixed | High | Confirmed real by 2026-04-14 audit; fix queued for next PR after live verification |
+| MTF gate over-generic for non-trend thesis paths | Medium | Evidence-gated; reassess after lifecycle idempotency fix from post-PR #144 monitor |
 | Scan latency spikes (not baseline 4-5s) | Medium | Root cause unknown; monitor to see if it stabilizes |
 | Spread-quality suppression is market-condition-driven | Medium | Not directly fixable by code; may self-resolve as market conditions improve |
 
@@ -126,4 +148,4 @@ Role assignments:
 
 ## Last Updated
 
-2026-04-13 — Full ACTIVE_CONTEXT refresh. Correction pass (PR-01 through PR-18) confirmed complete. Phase changed to post-correction live monitoring. Next action: review post-PR-18 monitor output. Zero-signal diagnosis audit documents summarized.
+2026-04-14 — ACTIVE_CONTEXT updated to reflect 2026-04-14 WATCHLIST investigation and merged PRs. PR #144 (WATCHLIST lifecycle segregation) and PR #145 (formatter defensive guard) merged. Canonical verdict: `docs/AUDIT_2026-04-14_REPORT_COMPARISON_AND_CANONICAL_VERDICT.md`. Next action: verify post-PR #144 live behavior; then lifecycle idempotency / duplicate-post hardening PR.

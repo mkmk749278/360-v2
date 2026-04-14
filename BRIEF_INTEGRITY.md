@@ -7,21 +7,22 @@ Every Copilot session must check this file if OWNER_BRIEF.md appears short or co
 
 | Field | Value |
 |---|---|
-| Canonical baseline date | 2026-04-13 |
-| Line count | 875 |
+| Canonical baseline date | 2026-04-14 |
+| Line count | 901 |
 | Minimum acceptable lines | 480 |
 | Format | Fresh canonical owner-operating manual (8-part structure) |
 | Verified by | Copilot + owner (mkmk749278) |
 
-## Important — Documentation Integrity Refresh Note (2026-04-13)
+## Important — Documentation Integrity Refresh Note (2026-04-14)
 
-OWNER_BRIEF.md was refreshed on 2026-04-13 to reflect the completed post-audit correction pass
-(PR-01 through PR-18 all merged). Key updates: header date updated, §2.1 top priorities refreshed
-to post-correction monitoring phase, §2.2 doctrine updated to reflect completion, §2.3 deploy
-judgment updated, §3.5/3.6 caveats cleared as corrected, §3.10 MIN_CONFIDENCE_SCALP updated
-from 80 to 65, Part VI roadmap restructured to mark all planned work as complete and document the
-post-audit correction sequence (PR-10 through PR-18), Part VII snapshot fully refreshed. No
-truncation was found — the brief was stale but complete at 821 lines before this update.
+OWNER_BRIEF.md was updated on 2026-04-14 to reflect the completed 2026-04-14 WATCHLIST lifecycle
+investigation and merged fixes (PR #144, PR #145). Key updates: header date updated to 2026-04-14,
+§2.1 top priorities refreshed to WATCHLIST-fix-complete / live-verification-pending phase, §2.2
+doctrine updated to reference 2026-04-14 canonical audit and corrected the stale PR-18 WATCHLIST
+claim, §3.5 signal flow step 8 corrected, §3.6 confidence table note corrected, §6.3 extended with
+new §6.3.1 section for PR #144 and #145, §6.5 Next Likely Action replaced (MTF refinement →
+lifecycle idempotency/duplicate-post hardening, evidence-gated), Part VII snapshot fully refreshed.
+No truncation — the brief grew from 875 to 901 lines.
 
 ## Important — Audit Alignment Note (2026-04-11)
 
@@ -77,6 +78,6 @@ something went wrong and must be resolved before any work proceeds.
 ## Rule
 
 > OWNER_BRIEF.md must not be accidentally truncated between sessions.
-> The minimum threshold is 480 lines — approximately 58% of the current canonical length (821 lines).
+> The minimum threshold is 480 lines — approximately 53% of the current canonical length (901 lines).
 > Deliberate updates (including redesigns and upgrades) are permitted by explicit owner instruction only.
 > If the brief falls below 480 lines without a known redesign, treat it as corruption and restore immediately.

@@ -1,6 +1,6 @@
 # 360 Crypto Eye — Owner Operating Manual
 
-> **Canonical version as of 2026-04-13. This supersedes all prior versions.**
+> **Canonical version as of 2026-04-14. This supersedes all prior versions.**
 > This is the single source of truth for system state, architecture, owner priorities, and how every Copilot session must operate.
 
 ---
@@ -253,17 +253,17 @@ If a better technical action is visible, Copilot surfaces it. If the owner says 
 
 ## Part II — Owner Priorities and System Philosophy
 
-### 2.1 Current Top Priorities (as of 2026-04-13)
+### 2.1 Current Top Priorities (as of 2026-04-14)
 
-1. **Zero-signal suppression monitoring** — the engine is confirmed alive and scanning; live output is suppressed by a combination of market-quality spread rejection, generic MTF gating, and quiet-regime filtering. Observe live monitor post-PR-18 before taking additional action. Do not claim successful live recovery until evidence supports it.
-2. **Strategy-expression integrity — correction pass complete** — the full correction pass (PR-01 through PR-18, all merged) has addressed: evaluator identity, penalties, structural SL/TP, quality-ranked arbitration, gate-policy alignment, auxiliary-channel governance, tier dispatch, and `valid_for_minutes` preservation.
-3. **Evidence-gated next action** — if live monitor post-PR-18 still shows dominant MTF suppression on the main paid path, the next likely action is a targeted family-aware MTF gate refinement. No speculative changes before live evidence confirms the right lever.
+1. **WATCHLIST lifecycle fix merged — live verification pending** — the 2026-04-14 investigation confirmed that `WATCHLIST` (`50–64`) signals were entering `_active_signals` and being managed by `TradeMonitor` despite doctrine requiring free-channel-only routing. PR #144 (WATCHLIST lifecycle segregation) and PR #145 (formatter defensive guard) were merged on 2026-04-14. Doctrine/runtime alignment is now correct in code. Fresh Telegram/monitor evidence is required before claiming operational confirmation.
+2. **Strategy-expression integrity — correction pass complete** — the full correction pass (PR-01 through PR-18, all merged) has addressed: evaluator identity, penalties, structural SL/TP, quality-ranked arbitration, gate-policy alignment, auxiliary-channel governance, and `valid_for_minutes` preservation. The 2026-04-14 follow-up (PR #144, PR #145) corrected the remaining WATCHLIST lifecycle admission defect that PR-18 left unresolved at runtime.
+3. **Evidence-gated next action** — after fresh live evidence confirms post-PR #144 behavior, the next likely PR is lifecycle idempotency / duplicate-post hardening. Do not raise that PR until post-merge monitor output is reviewed.
 4. **Signal quality** — every signal fired must represent a genuine institutional-grade setup with correct SMC structural basis, correct family scoring, and correct SL/TP expression.
 5. **Phase 1 scorecard readiness** — formal validation begins only once live output confirms the corrected dispatch path is expressing genuinely qualified signals consistently.
 
 ### 2.2 Current Owner Doctrine — Post-Correction Monitoring Phase
 
-The engine has a **strong core** and has now undergone a complete architecture-correction and governance-correction pass. The 2026-04-11 audit established the canonical doctrine; the 2026-04-12 dual-audit deepened the diagnosis; the 2026-04-13 zero-signal diagnosis audit confirmed the root causes.
+The engine has a **strong core** and has now undergone a complete architecture-correction and governance-correction pass. The 2026-04-11 audit established the canonical doctrine; the 2026-04-12 dual-audit deepened the diagnosis; the 2026-04-13 zero-signal diagnosis audit confirmed the root causes; the 2026-04-14 live-signal-expression investigation confirmed a residual WATCHLIST lifecycle admission defect and produced the canonical verdict.
 
 ## **Strategy-expression integrity correction pass: complete (PR-01 through PR-18 merged)**
 
@@ -277,13 +277,19 @@ The canonical truths established by the 2026-04-11 audit are now addressed:
 - OPENING_RANGE_BREAKOUT is disabled from the trusted production portfolio (PR-06)
 - `valid_for_minutes` is preserved from the evaluator rather than overwritten (PR-17)
 - WHALE_MOMENTUM is hard-blocked in QUIET regime (PR-16)
-- B-tier dead zone resolved and WATCHLIST semantics preserved through router for `360_SCALP` (PR-18)
+- B-tier dead zone resolved and `360_SCALP` tier dispatch corrected (PR-18); WATCHLIST lifecycle admission defect confirmed by 2026-04-14 investigation and fully fixed by PR #144 (2026-04-14)
 
 The **current phase is post-correction live monitoring**. The engine's governance and dispatch architecture are aligned. The remaining question is whether corrected dispatch produces live signal output at acceptable rate under current market conditions, or whether a further targeted intervention (most likely: family-aware MTF gate refinement) is still needed.
 
-Two independent diagnosis audits have been documented:
+Two independent diagnosis audits have been documented for 2026-04-13:
 - `docs/AUDIT_2026-04-13_ZERO_SIGNAL_DIAGNOSIS_GPT-5.4.md` — root-cause analysis of live suppression funnel
 - `docs/AUDIT_2026-04-13_ZERO_SIGNAL_EXECUTION_PLAN_GPT-5.3-Codex.md` — execution prioritization and sequencing
+
+Three independent audit reports and a canonical synthesis were created for the 2026-04-14 WATCHLIST investigation:
+- `docs/AUDIT_2026-04-14_LIVE_SIGNAL_EXPRESSION_INVESTIGATION_GPT-5.4.md`
+- `docs/AUDIT_2026-04-14_LIVE_SIGNAL_EXPRESSION_INVESTIGATION_GPT-5.3-CODEX.md`
+- `docs/AUDIT_2026-04-14_LIVE_SIGNAL_EXPRESSION_INVESTIGATION_CLAUDE-OPUS-4.6.md`
+- `docs/AUDIT_2026-04-14_REPORT_COMPARISON_AND_CANONICAL_VERDICT.md` — canonical verdict establishing WATCHLIST lifecycle admission as the primary confirmed defect
 
 This is **not** a dead-infrastructure incident. The main current suppressors are spread-quality rejection (market conditions), MTF gating (potentially over-generic), and quiet-regime floor filtering.
 
@@ -454,7 +460,7 @@ ScalpChannel.evaluate() returns **List[Signal]**. Winner-takes-all architecture 
 5. **SL/TP validation** — evaluator-specific SL/TP designs exist; structural SL/TP intent for top-tier paths is protected (PR-02, PR-14); `valid_for_minutes` is now preserved from the evaluator rather than overwritten (PR-17)
 6. **Dedup / arbitration** — same symbol + same direction within cooldown window is suppressed; inside `360_SCALP`, quality-ranked arbitration is now live (PR-03)
 7. **Correlated cap** — MAX_CORRELATED_SCALP_SIGNALS=4 enforced across all live signals
-8. **Dispatch** — SignalRouter routes to paid channel / free channel / radar per B1/B9 rules; B-tier (65–79) and WATCHLIST (50–64) semantics for `360_SCALP` are now correctly preserved through router dispatch (PR-18)
+8. **Dispatch** — SignalRouter routes to paid channel / free channel / radar per B1/B9 rules; B-tier (65–79) dispatches to paid; WATCHLIST (50–64) is routed to free channel only and is never stored in `_active_signals` (PR-18 corrected tier dispatch; PR #144 corrected WATCHLIST lifecycle admission)
 
 ### 3.6 Confidence Scoring — Hybrid Model
 
@@ -471,7 +477,7 @@ The scoring architecture is hybrid — not globally uniform. Uniform scoring acr
 | WATCHLIST | 50–64 | Post to free channel only |
 | FILTERED | < 50 | Reject — never dispatched |
 
-All tier/dispatch contradictions for `360_SCALP` (B-tier dead zone and WATCHLIST downstream destruction) were confirmed by the 2026-04-13 zero-signal audit and corrected by PR-18. `MIN_CONFIDENCE_SCALP` is now 65. The tier table above is the current enforced doctrine.
+All tier/dispatch contradictions for `360_SCALP` were confirmed by the 2026-04-13 zero-signal audit and partially corrected by PR-18 (B-tier dead zone, `MIN_CONFIDENCE_SCALP` 80→65). The remaining WATCHLIST lifecycle admission defect — WATCHLIST entering `_active_signals` and being managed by `TradeMonitor` — was confirmed by the 2026-04-14 canonical audit and fully fixed by PR #144. `MIN_CONFIDENCE_SCALP` is now 65. The tier table above is the current enforced doctrine.
 
 ### 3.7 Gating Philosophy — Three-Layer Model
 
@@ -734,9 +740,24 @@ This sequence was triggered by the 2026-04-12 dual-audit findings and the 2026-0
 | PR-17 | #128 | Preserve evaluator-authored `valid_for_minutes` through scanner pipeline | 2026-04-13 |
 | PR-18 | #133 | Align `360_SCALP` tier semantics with actual dispatch (A+/B/WATCHLIST); `MIN_CONFIDENCE_SCALP` 80→65 | 2026-04-13 |
 
-Two diagnostic audit documents now exist in `docs/`:
+Two diagnostic audit documents now exist in `docs/` for the 2026-04-13 investigation:
 - `docs/AUDIT_2026-04-13_ZERO_SIGNAL_DIAGNOSIS_GPT-5.4.md` — root-cause analysis confirming mixed market/architecture suppression
 - `docs/AUDIT_2026-04-13_ZERO_SIGNAL_EXECUTION_PLAN_GPT-5.3-Codex.md` — execution sequencing and prioritization that led to PR-18
+
+### 6.3.1 Completed — 2026-04-14 WATCHLIST Lifecycle Correction (all merged, 2026-04-14)
+
+The 2026-04-14 live-signal-expression investigation confirmed that WATCHLIST (`50–64`) signals were entering `_active_signals` and being managed by `TradeMonitor` despite doctrine requiring free-channel-only routing. Three independent audit reports were synthesised into a canonical verdict, then two PRs were merged.
+
+| PR | GitHub | Title | Merged |
+|---|---|---|---|
+| — | #144 | fix: segregate WATCHLIST 360_SCALP signals from paid active lifecycle | 2026-04-14 |
+| — | #145 | fix: defensive entry guard in `_format_watchlist_preview` for zero-price edge case | 2026-04-14 |
+
+Four audit documents were created in `docs/` for the 2026-04-14 investigation:
+- `docs/AUDIT_2026-04-14_LIVE_SIGNAL_EXPRESSION_INVESTIGATION_GPT-5.4.md`
+- `docs/AUDIT_2026-04-14_LIVE_SIGNAL_EXPRESSION_INVESTIGATION_GPT-5.3-CODEX.md`
+- `docs/AUDIT_2026-04-14_LIVE_SIGNAL_EXPRESSION_INVESTIGATION_CLAUDE-OPUS-4.6.md`
+- `docs/AUDIT_2026-04-14_REPORT_COMPARISON_AND_CANONICAL_VERDICT.md` — canonical verdict
 
 ### 6.4 Formal Pre-Redeploy Gate — Status
 
@@ -751,18 +772,20 @@ The gate items from the 2026-04-11 audit are now all satisfied:
 
 The remaining open question is whether the corrected dispatch architecture produces sustained live signal output under real market conditions. That is a live-monitoring question, not a code-correctness question.
 
-### 6.5 Next Likely Action — Targeted Family-Aware MTF Refinement (Evidence-Gated)
+### 6.5 Next Likely Action — Lifecycle Idempotency / Duplicate-Post Hardening (Evidence-Gated)
 
-The 2026-04-13 zero-signal audit identified generic scanner MTF gating (`mtf_gate:360_SCALP`, peaking at 14/cycle) as the dominant paid-channel suppressor after spread-quality rejection. This is strongly likely to be over-generic for some signal families whose thesis does not require MTF alignment.
+The 2026-04-14 canonical audit confirmed that duplicate lifecycle posting is real but was the second identified defect, not the first. With PR #144 (WATCHLIST lifecycle segregation) now merged, the next likely PR is lifecycle idempotency / duplicate-post hardening.
 
-**This PR is NOT approved yet.** It requires confirmation from post-PR-18 live monitor evidence that MTF gating remains the dominant suppressor after the dispatch alignment is in place.
+**This PR is NOT approved yet.** It must be gated on fresh post-PR #144 live monitor evidence confirming WATCHLIST contamination is removed from paid lifecycle output.
 
 Do not raise this PR until:
-- post-PR-18 monitor snapshot is reviewed
-- `mtf_gate:360_SCALP` is confirmed as still-dominant
-- the specific family or families most affected are identified from telemetry
+- post-PR #144 Telegram/monitor evidence is reviewed
+- WATCHLIST no longer appears in paid lifecycle events (TP HIT, SL HIT, INVALIDATED, expiry posts)
+- duplicate terminal-event behavior is observed and confirmed as the dominant remaining defect
 
-If evidence still points to MTF over-gating, the correction would be a family-aware gate exemption for families whose thesis does not require higher-timeframe confirmation, following the same pattern as the SMC gate exemption set.
+If evidence confirms the duplicate-post pattern, the correction would add idempotency guards to terminal lifecycle event handling (SL, invalidation, expiry) so that `_remove()` runs safely even if `_post_update` throws, preventing re-fire on next poll cycle.
+
+**Previous §6.5 note (MTF gate refinement):** the generic scanner MTF gating (`mtf_gate:360_SCALP`, peaking at ~14/cycle) identified in the 2026-04-13 audit remains a known candidate for future action but is no longer the immediate next item. It should be re-assessed from post-PR #144 telemetry after the lifecycle idempotency fix is evaluated.
 
 ### 6.6 Future Enhancement — Intelligence Layer
 
@@ -796,7 +819,7 @@ If monitor data is unavailable or stale, Copilot flags this to the owner immedia
 
 ## Part VII — Current System Snapshot
 
-*(Updated: 2026-04-13 — post-audit correction pass complete; zero-signal monitoring phase)*
+*(Updated: 2026-04-14 — WATCHLIST lifecycle segregation PRs #144 and #145 merged; live verification pending)*
 
 | Item | Status |
 |---|---|
@@ -804,10 +827,11 @@ If monitor data is unavailable or stale, Copilot flags this to the owner immedia
 | Core architecture correction sequence | Complete — ARCH-2 through ARCH-10 all merged |
 | Pre-redeploy correction pass | ✅ Complete — PR-01 through PR-09 all merged (2026-04-11) |
 | Post-audit correction pass | ✅ Complete — PR-10 through PR-18 all merged (2026-04-12 to 2026-04-13) |
+| 2026-04-14 WATCHLIST lifecycle correction | ✅ Complete — PR #144 and PR #145 merged (2026-04-14) |
 | Internal `360_SCALP` evaluator set | 14 internal paths live |
 | Core engine quality | Strong core confirmed by multiple audits |
 | Strongest foundation paths | `FAILED_AUCTION_RECLAIM`, `CONTINUATION_LIQUIDITY_SWEEP`, `SR_FLIP_RETEST`, `TREND_PULLBACK_EMA`, `POST_DISPLACEMENT_CONTINUATION` |
-| Main current question | **Does corrected dispatch produce live signal output?** — live monitor evidence required |
+| Main current question | **Does post-PR #144 runtime produce clean paid lifecycle output with no WATCHLIST contamination?** — live monitor evidence required |
 | Evaluator identity preservation | ✅ Complete (PR-01) |
 | Evaluator penalty preservation | ✅ Complete (PR-01, PR-15) |
 | Structural SL/TP preservation | ✅ Complete (PR-02, PR-14) |
@@ -817,11 +841,13 @@ If monitor data is unavailable or stale, Copilot flags this to the owner immedia
 | WHALE_MOMENTUM QUIET block | ✅ Hard-blocked in QUIET regime (PR-16) |
 | `MIN_CONFIDENCE_SCALP` | 65 (changed from 80 by PR-18) |
 | `360_SCALP` B-tier dead zone | ✅ Resolved (PR-18) |
-| `360_SCALP` WATCHLIST semantics | ✅ Preserved through router (PR-18) |
+| `360_SCALP` WATCHLIST lifecycle admission | ✅ Fixed — WATCHLIST no longer enters `_active_signals` or paid lifecycle (PR #144, 2026-04-14) |
+| `360_SCALP` WATCHLIST formatter guard | ✅ Defensive zero-price guard added (PR #145, 2026-04-14) |
+| Duplicate lifecycle posting | ⚠️ Confirmed real — pending fix as next PR after live verification |
 | Winner-takes-all | Eliminated (ARCH-2) |
 | Data pipeline | Complete (ARCH-3) — funding_rate and CVD wired into smc_data |
 | Family-aware scoring architecture | Live and downstream-faithful |
-| Current direction | Post-correction live monitoring — observe signal output after PR-18 |
+| Current direction | Verify post-PR #144 WATCHLIST behavior live; then lifecycle idempotency / duplicate-post hardening |
 | Dominant live suppressors (per 2026-04-13 audit) | Spread-quality rejection (~32–60 pairs/cycle), MTF gating (~14/cycle), quiet-regime floor |
 | Phase 1 scorecard | Not yet started — begins only after live output confirms the corrected dispatch is producing qualified signals |
 | Subscribers | None — deliberately. Phase 1 validation must complete first. |
