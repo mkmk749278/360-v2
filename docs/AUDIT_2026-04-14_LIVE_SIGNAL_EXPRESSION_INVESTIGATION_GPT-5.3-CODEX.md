@@ -3,7 +3,7 @@
 - **Date:** 2026-04-14
 - **Repository:** `mkmk749278/360-v2`
 - **Branch investigated:** `main`
-- **Model used:** GPT-5.4
+- **Model used:** GPT-5.3-CODEX
 - **Scope statement:** Deep code-path audit of current `360_SCALP` live signal expression quality, lifecycle correctness, routing semantics, and governance alignment, with explicit separation of hard bugs vs policy mismatch vs architecture-quality concerns.
 
 ## 1) Executive summary
