@@ -214,12 +214,12 @@ jobs:
       - name: Clean up SSH key
         if: always()
         run: |
-          rm -f ~/.ssh/vps_key
-          ssh -i /dev/null \
+          ssh -i ~/.ssh/vps_key \
               -o ConnectTimeout=10 \
               -o StrictHostKeyChecking=no \
               ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
               'rm -rf /tmp/360-monitor-scripts' 2>/dev/null || true
+          rm -f ~/.ssh/vps_key
 
       - name: Health gate — fail if engine is down
         uses: appleboy/ssh-action@v1.0.3
