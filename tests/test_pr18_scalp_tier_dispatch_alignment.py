@@ -94,12 +94,17 @@ def router(queue, sent_messages, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
-# Helper: run router for a single signal and return whether it was registered
-# in _active_signals (i.e. entered the paid active lifecycle).
+# Helper: run router for a single signal and return whether the signal
+# entered _active_signals (i.e. was registered in the paid active lifecycle).
 # ---------------------------------------------------------------------------
 
-async def _route_signal(router: SignalRouter, queue: asyncio.Queue, sig: Signal) -> bool:
-    """Enqueue *sig*, run the router briefly, return True if in active_signals."""
+async def _is_in_active_signals(router: SignalRouter, queue: asyncio.Queue, sig: Signal) -> bool:
+    """Enqueue *sig*, run the router briefly, return True if signal_id is in active_signals.
+
+    Returns True when the signal was registered in ``router.active_signals``,
+    which happens only for signals that completed the paid dispatch path.
+    WATCHLIST signals that are routed to the free channel will return False.
+    """
     await queue.put(sig)
     task = asyncio.create_task(router.start())
     await asyncio.sleep(0.2)
@@ -110,6 +115,9 @@ async def _route_signal(router: SignalRouter, queue: asyncio.Queue, sig: Signal)
     except asyncio.CancelledError:
         pass
     return sig.signal_id in router.active_signals
+
+# Backward-compatible alias used by tests that pre-date the rename.
+_route_signal = _is_in_active_signals
 
 
 # ---------------------------------------------------------------------------
