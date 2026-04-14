@@ -43,6 +43,14 @@ jobs:
           token: ${{ secrets.GITHUB_TOKEN }}
           fetch-depth: 0
 
+      - name: Preserve monitor scripts before branch switch
+        run: |
+          mkdir -p /tmp/monitor-scripts
+          cp scripts/monitor_heartbeat.py \
+             scripts/monitor_signal_history.py \
+             scripts/monitor_sl_followthrough.py \
+             /tmp/monitor-scripts/
+
       - name: Setup monitor-logs branch
         run: |
           git fetch origin monitor-logs:refs/remotes/origin/monitor-logs 2>/dev/null || true
@@ -70,9 +78,9 @@ jobs:
           scp -i ~/.ssh/vps_key \
               -o ConnectTimeout=30 \
               -o StrictHostKeyChecking=no \
-              scripts/monitor_heartbeat.py \
-              scripts/monitor_signal_history.py \
-              scripts/monitor_sl_followthrough.py \
+              /tmp/monitor-scripts/monitor_heartbeat.py \
+              /tmp/monitor-scripts/monitor_signal_history.py \
+              /tmp/monitor-scripts/monitor_sl_followthrough.py \
               ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/360-monitor-scripts/
 
       - name: Collect VPS data and write to file
