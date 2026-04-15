@@ -2015,14 +2015,17 @@ class Scanner:
     def _increment_path_funnel(self, stage: str, chan_name: str, setup_class_name: Any) -> None:
         self._path_funnel_counters[self._path_funnel_key(stage, chan_name, setup_class_name)] += 1
 
+    def _resolve_origin_setup_class(self, sig: Any) -> str:
+        _origin_setup_raw = getattr(sig, "origin_setup_class", None)
+        if _origin_setup_raw in (None, ""):
+            _origin_setup_raw = getattr(sig, "setup_class", None)
+        return self._normalize_setup_class(_origin_setup_raw)
+
     def _stamp_origin_setup_identity(self, sig: Any, chan_name: str) -> None:
         """Persist immutable origin setup identity on a signal."""
-        _origin_setup_class = self._normalize_setup_class(
-            getattr(sig, "origin_setup_class", None) or getattr(sig, "setup_class", None)
-        )
-        _origin_setup_family = (
-            str(getattr(sig, "origin_setup_family", "") or "")
-            or self._setup_family_for_channel(chan_name, _origin_setup_class)
+        _origin_setup_class = self._resolve_origin_setup_class(sig)
+        _origin_setup_family = getattr(sig, "origin_setup_family", "") or self._setup_family_for_channel(
+            chan_name, _origin_setup_class
         )
         setattr(sig, "origin_setup_class", _origin_setup_class)
         setattr(sig, "origin_setup_family", _origin_setup_family)
@@ -2036,12 +2039,9 @@ class Scanner:
     def on_signal_lifecycle_outcome(self, sig: Any, outcome_label: str) -> None:
         """Record final lifecycle outcome against origin setup family/path."""
         _chan_name = getattr(sig, "channel", "") or "UNKNOWN"
-        _setup_class_name = self._normalize_setup_class(
-            getattr(sig, "origin_setup_class", None) or getattr(sig, "setup_class", None)
-        )
-        _setup_family = (
-            str(getattr(sig, "origin_setup_family", "") or "")
-            or self._setup_family_for_channel(_chan_name, _setup_class_name)
+        _setup_class_name = self._resolve_origin_setup_class(sig)
+        _setup_family = getattr(sig, "origin_setup_family", "") or self._setup_family_for_channel(
+            _chan_name, _setup_class_name
         )
         self._path_funnel_counters[
             f"lifecycle:{outcome_label}:{_chan_name}:{_setup_family}:{_setup_class_name}"
@@ -3463,6 +3463,7 @@ class Scanner:
                         else:
                             self._increment_path_funnel("gated", chan_name, _raw_setup)
                         continue
+                    # Stamp before arbitration/confluence can rewrite setup_class.
                     self._stamp_origin_setup_identity(sig, chan_name)
                     _sig_dir = (
                         sig.direction.value if hasattr(sig.direction, "value") else str(sig.direction)
@@ -3531,6 +3532,8 @@ class Scanner:
                     else:
                         self._increment_path_funnel("gated", chan_name, _raw_setup)
                     continue
+                # Stamp before any downstream transformations; _enqueue_signal
+                # performs the same call as an idempotent durability backstop.
                 self._stamp_origin_setup_identity(sig, chan_name)
                 # Directional global cooldown check: skip if same (symbol, direction)
                 # fired recently. Opposite direction is not blocked.
