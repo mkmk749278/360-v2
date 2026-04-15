@@ -221,6 +221,26 @@ class TestOutcomeRecording:
         assert call_kwargs["post_ai_confidence"] == 84.0
 
     @pytest.mark.asyncio
+    async def test_lifecycle_outcome_callback_receives_signal_and_outcome(self):
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.LONG,
+            entry=30000.0,
+            stop_loss=29850.0,
+            age_seconds=200.0,
+        )
+        sig.setup_class = "FAILED_AUCTION_RECLAIM"
+        sig.current_price = 29800.0  # below SL
+
+        active = {sig.signal_id: sig}
+        monitor, *_rest = self._build_monitor_with_mocks(active)
+        monitor.on_lifecycle_outcome_callback = MagicMock()
+
+        await monitor._evaluate_signal(sig)
+
+        monitor.on_lifecycle_outcome_callback.assert_called_once_with(sig, "SL_HIT")
+
+    @pytest.mark.asyncio
     async def test_sl_hit_calls_circuit_breaker(self):
         """SL_HIT must also notify circuit_breaker.record_outcome."""
         sig = _make_signal(

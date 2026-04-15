@@ -103,6 +103,10 @@ class Signal:
     market_phase: str = "N/A"
     liquidity_info: str = "Standard"
     setup_class: str = "UNCLASSIFIED"
+    # Scanner-stamped immutable origin identity used for end-to-end
+    # lifecycle attribution even if setup_class is later transformed.
+    origin_setup_class: str = ""
+    origin_setup_family: str = ""
     quality_tier: str = "B"
     entry_zone: str = ""
     invalidation_summary: str = ""

@@ -268,6 +268,9 @@ class CryptoSignalEngine:
         self.monitor.on_highlight_callback = lambda sig, tp, pnl: asyncio.ensure_future(
             self.router.publish_highlight(sig, tp, pnl)
         )
+        # Wire lifecycle outcome callback so scanner observability can attribute
+        # final outcomes back to setup family/path.
+        self.monitor.on_lifecycle_outcome_callback = self._scanner.on_signal_lifecycle_outcome
 
         # PR2: Wire the engine context provider into the trade monitor so that
         # signal-closed (TP/SL hit) AI posts are generated and sent automatically.

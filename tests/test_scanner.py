@@ -213,6 +213,30 @@ class TestScannerCooldown:
         actual_duration = expiry - time.monotonic()
         assert abs(actual_duration - expected_duration) < 2  # within 2 seconds
 
+    def test_lifecycle_outcome_counter_is_family_attributed(self):
+        scanner = _make_scanner()
+        sig = _make_signal(channel="360_SCALP")
+        sig.setup_class = "FAILED_AUCTION_RECLAIM"
+
+        scanner.on_signal_lifecycle_outcome(sig, "SL_HIT")
+
+        assert scanner._path_funnel_counters[
+            "lifecycle:SL_HIT:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM"
+        ] == 1
+
+    def test_lifecycle_outcome_uses_origin_setup_identity_when_setup_missing(self):
+        scanner = _make_scanner()
+        sig = _make_signal(channel="360_SCALP")
+        sig.setup_class = ""
+        sig.origin_setup_class = "FAILED_AUCTION_RECLAIM"
+        sig.origin_setup_family = "reclaim_retest"
+
+        scanner.on_signal_lifecycle_outcome(sig, "SL_HIT")
+
+        assert scanner._path_funnel_counters[
+            "lifecycle:SL_HIT:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM"
+        ] == 1
+
 
 class TestScannerCircuitBreaker:
     def test_circuit_breaker_not_set_by_default(self):
@@ -458,6 +482,14 @@ class TestPredictiveGeometryRevalidation:
         assert scanner._suppression_counters[
             "geometry_preserved_final:360_SCALP:breakout_momentum"
         ] == 1
+        assert scanner._path_funnel_counters[
+            "geometry:final_live:rejected:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+        assert any(
+            key.startswith("geometry:final_live:rejected_reason:")
+            and key.endswith(":360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT")
+            for key in scanner._path_funnel_counters
+        )
 
     @pytest.mark.asyncio
     async def test_valid_predictive_geometry_change_is_kept(self):
@@ -493,6 +525,9 @@ class TestPredictiveGeometryRevalidation:
         assert scanner._suppression_counters[
             "geometry_changed_final:360_SCALP:breakout_momentum"
         ] == 1
+        assert scanner._path_funnel_counters[
+            "geometry:final_live:changed:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
 
     @pytest.mark.asyncio
     async def test_unchanged_predictive_geometry_is_bypassed(self):
@@ -527,6 +562,9 @@ class TestPredictiveGeometryRevalidation:
         ] == 1
         assert scanner._suppression_counters[
             "geometry_preserved_final:360_SCALP:breakout_momentum"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "geometry:final_live:preserved:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
         ] == 1
 
     @pytest.mark.asyncio
@@ -1180,6 +1218,173 @@ class TestMTFGateInScanner:
         ] == 1
         assert scanner._suppression_counters[
             "geometry_capped_risk_plan:360_SCALP:breakout_momentum"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "geometry:risk_plan:changed:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "geometry:risk_plan:capped:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+
+    @pytest.mark.asyncio
+    async def test_risk_plan_geometry_reject_reason_is_path_attributed(self):
+        scanner, signal_queue = self._scanner_and_queue()
+        rejected_risk = RiskAssessment(
+            passed=False,
+            stop_loss=0.0,
+            tp1=0.0,
+            tp2=0.0,
+            tp3=None,
+            r_multiple=0.0,
+            invalidation_summary="",
+            reason="sl_too_wide",
+        )
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.VOLUME_SURGE_BREAKOUT)),
+            patch.object(scanner, "_evaluate_risk", return_value=rejected_risk),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_not_awaited()
+        assert scanner._path_funnel_counters[
+            "geometry:risk_plan:rejected:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "geometry:risk_plan:rejected_reason:sl_too_wide:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+
+    @pytest.mark.asyncio
+    async def test_path_funnel_distinguishes_no_candidate_and_gated(self):
+        scanner, signal_queue = self._scanner_and_queue()
+        scanner.channels[0].evaluate.return_value = None
+
+        with _common_gate_patches(scanner):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_not_awaited()
+        assert scanner._channel_funnel_counters["no_candidate_generated:360_SCALP"] == 1
+
+        raw_sig = _make_signal(channel="360_SCALP")
+        raw_sig.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
+        scanner.channels[0].evaluate.return_value = raw_sig
+
+        with _common_gate_patches(scanner, [
+            patch("src.scanner.check_mtf_gate", return_value=(False, "MTF misaligned")),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_not_awaited()
+        assert scanner._path_funnel_counters[
+            "generated:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "gated:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+
+    @pytest.mark.asyncio
+    async def test_path_funnel_tracks_scored_filtered_and_emitted(self):
+        scanner, signal_queue = self._scanner_and_queue()
+        raw_sig = _make_signal(channel="360_SCALP")
+        raw_sig.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
+        scanner.channels[0].evaluate.return_value = raw_sig
+
+        low_score = {
+            "total": 40.0,
+            "smc": 10.0,
+            "regime": 10.0,
+            "volume": 5.0,
+            "indicators": 5.0,
+            "patterns": 5.0,
+            "mtf": 5.0,
+            "thesis_adj": 0.0,
+        }
+        with _common_gate_patches(scanner, [
+            patch("src.scanner._scoring_engine.score", return_value=low_score),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_not_awaited()
+        scored = {
+            k: v for k, v in scanner._path_funnel_counters.items()
+            if k.startswith("scored:360_SCALP:")
+        }
+        filtered = {
+            k: v for k, v in scanner._path_funnel_counters.items()
+            if k.startswith("filtered:360_SCALP:")
+        }
+        assert sum(scored.values()) == 1
+        assert sum(filtered.values()) == 1
+
+        scanner._path_funnel_counters.clear()
+        signal_queue.put.reset_mock()
+        high_score = {
+            "total": 85.0,
+            "smc": 20.0,
+            "regime": 15.0,
+            "volume": 10.0,
+            "indicators": 18.0,
+            "patterns": 10.0,
+            "mtf": 10.0,
+            "thesis_adj": 2.0,
+        }
+        with _common_gate_patches(scanner, [
+            patch("src.scanner._scoring_engine.score", return_value=high_score),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_awaited_once()
+        emitted_sig = signal_queue.put.await_args.args[0]
+        assert emitted_sig.origin_setup_class == emitted_sig.setup_class
+        assert emitted_sig.origin_setup_family == scanner._setup_family_for_channel(
+            emitted_sig.channel,
+            emitted_sig.setup_class,
+        )
+        emitted = {
+            k: v for k, v in scanner._path_funnel_counters.items()
+            if k.startswith("emitted:360_SCALP:")
+        }
+        assert sum(emitted.values()) == 1
+
+    @pytest.mark.asyncio
+    async def test_funnel_uses_explicit_prepare_reject_stage(self):
+        scanner, signal_queue = self._scanner_and_queue()
+        raw_sig = _make_signal(channel="360_SCALP")
+        raw_sig.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
+        scanner.channels[0].evaluate.return_value = raw_sig
+
+        async def _fake_prepare_filtered(*args, **kwargs):
+            kwargs["_funnel_meta"]["reject_stage"] = "filtered"
+            return None, None
+
+        with patch.object(scanner, "_prepare_signal", side_effect=_fake_prepare_filtered):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_not_awaited()
+        assert scanner._path_funnel_counters[
+            "filtered:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "gated:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 0
+
+        scanner_gated, signal_queue_gated = self._scanner_and_queue()
+        raw_sig_gated = _make_signal(channel="360_SCALP")
+        raw_sig_gated.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
+        scanner_gated.channels[0].evaluate.return_value = raw_sig_gated
+
+        async def _fake_prepare_gated(*args, **kwargs):
+            kwargs["_funnel_meta"]["reject_stage"] = "gated"
+            return None, None
+
+        with patch.object(scanner_gated, "_prepare_signal", side_effect=_fake_prepare_gated):
+            await scanner_gated._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue_gated.put.assert_not_awaited()
+        assert scanner_gated._path_funnel_counters[
+            "gated:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
         ] == 1
 
 

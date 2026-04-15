@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses as _dc
 import os
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -604,6 +605,9 @@ class Scanner:
         # setup_class, logged every 100 scan cycles for operational visibility.
         self._setup_eval_counts: Dict[str, int] = defaultdict(int)
         self._setup_emit_counts: Dict[str, int] = defaultdict(int)
+        # End-to-end path observability counters (rolling 100-scan window).
+        self._path_funnel_counters: Dict[str, int] = defaultdict(int)
+        self._channel_funnel_counters: Dict[str, int] = defaultdict(int)
 
         # Scoring tier telemetry: accumulates candidate counts per setup_class
         # and score tier across cycles; logged every 100 scan cycles to diagnose
@@ -1289,6 +1293,17 @@ class Scanner:
                     dict(self._scoring_tier_counters),
                 )
                 self._scoring_tier_counters.clear()
+            if (
+                self._scan_cycle_count % 100 == 0
+                and (self._path_funnel_counters or self._channel_funnel_counters)
+            ):
+                log.info(
+                    "Path funnel (last 100 cycles): path={} channel={}",
+                    dict(self._path_funnel_counters),
+                    dict(self._channel_funnel_counters),
+                )
+                self._path_funnel_counters.clear()
+                self._channel_funnel_counters.clear()
 
             # Touch heartbeat file so healthcheck knows the scanner is alive
             # (FINDING-024).
@@ -1987,6 +2002,52 @@ class Scanner:
         return "other"
 
     @staticmethod
+    def _normalize_setup_class(setup_class: Any) -> str:
+        if isinstance(setup_class, str):
+            return setup_class or "UNKNOWN"
+        return str(getattr(setup_class, "value", setup_class) or "UNKNOWN")
+
+    def _path_funnel_key(self, stage: str, chan_name: str, setup_class_name: Any) -> str:
+        _setup_name = self._normalize_setup_class(setup_class_name)
+        _family = self._setup_family_for_channel(chan_name, _setup_name)
+        return f"{stage}:{chan_name}:{_family}:{_setup_name}"
+
+    def _increment_path_funnel(self, stage: str, chan_name: str, setup_class_name: Any) -> None:
+        self._path_funnel_counters[self._path_funnel_key(stage, chan_name, setup_class_name)] += 1
+
+    def _resolve_origin_setup_class(self, sig: Any) -> str:
+        _origin_setup_raw = getattr(sig, "origin_setup_class", None)
+        if _origin_setup_raw in (None, ""):
+            _origin_setup_raw = getattr(sig, "setup_class", None)
+        return self._normalize_setup_class(_origin_setup_raw)
+
+    def _stamp_origin_setup_identity(self, sig: Any, chan_name: str) -> None:
+        """Persist immutable origin setup identity on a signal."""
+        _origin_setup_class = self._resolve_origin_setup_class(sig)
+        _origin_setup_family = getattr(sig, "origin_setup_family", "") or self._setup_family_for_channel(
+            chan_name, _origin_setup_class
+        )
+        setattr(sig, "origin_setup_class", _origin_setup_class)
+        setattr(sig, "origin_setup_family", _origin_setup_family)
+
+    @staticmethod
+    def _metric_token(value: Any) -> str:
+        _text = str(value or "unknown")
+        _token = re.sub(r"[^A-Za-z0-9]+", "_", _text).strip("_")
+        return _token or "unknown"
+
+    def on_signal_lifecycle_outcome(self, sig: Any, outcome_label: str) -> None:
+        """Record final lifecycle outcome against origin setup family/path."""
+        _chan_name = getattr(sig, "channel", "") or "UNKNOWN"
+        _setup_class_name = self._resolve_origin_setup_class(sig)
+        _setup_family = getattr(sig, "origin_setup_family", "") or self._setup_family_for_channel(
+            _chan_name, _setup_class_name
+        )
+        self._path_funnel_counters[
+            f"lifecycle:{outcome_label}:{_chan_name}:{_setup_family}:{_setup_class_name}"
+        ] += 1
+
+    @staticmethod
     def _get_primary_timeframe(chan_name: str) -> str:
         """Return the primary timeframe interval string for a given channel name."""
         return "5m"
@@ -2163,6 +2224,7 @@ class Scanner:
             self._suppression_counters[
                 f"geometry_preserved_final:{chan_name}:{_setup_family}"
             ] += 1
+            self._increment_path_funnel("geometry:final_live:preserved", chan_name, _setup_class_name)
             return
 
         _post_geom = self._capture_geometry(sig)
@@ -2173,6 +2235,7 @@ class Scanner:
             self._suppression_counters[
                 f"geometry_preserved_final:{chan_name}:{_setup_family}"
             ] += 1
+            self._increment_path_funnel("geometry:final_live:preserved", chan_name, _setup_class_name)
             return
 
         self._suppression_counters[
@@ -2191,6 +2254,7 @@ class Scanner:
             self._suppression_counters[
                 f"geometry_changed_final:{chan_name}:{_setup_family}"
             ] += 1
+            self._increment_path_funnel("geometry:final_live:changed", chan_name, _setup_class_name)
             return
 
         self._restore_geometry(sig, _pre_geom)
@@ -2203,6 +2267,13 @@ class Scanner:
         self._suppression_counters[
             f"geometry_preserved_final:{chan_name}:{_setup_family}"
         ] += 1
+        _reason_token = self._metric_token(reason)
+        self._increment_path_funnel("geometry:final_live:rejected", chan_name, _setup_class_name)
+        self._increment_path_funnel(
+            f"geometry:final_live:rejected_reason:{_reason_token}",
+            chan_name,
+            _setup_class_name,
+        )
         log.warning(
             "Predictive geometry rejected for {} {} ({}): reverted to validated plan",
             symbol,
@@ -2266,6 +2337,7 @@ class Scanner:
         return True
 
     async def _enqueue_signal(self, sig: Any) -> bool:
+        self._stamp_origin_setup_identity(sig, getattr(sig, "channel", "") or "UNKNOWN")
         return await self.signal_queue.put(sig)
 
     async def _prepare_signal(
@@ -2275,11 +2347,17 @@ class Scanner:
         chan: Any,
         ctx: ScanContext,
         _preseed_signal: Optional[Any] = None,
+        _funnel_meta: Optional[Dict[str, Any]] = None,
     ) -> Tuple[Optional[Any], Optional[bool]]:
         t0_signal = time.monotonic()
         soft_penalty: float = 0.0  # Accumulated confidence deduction from soft gates
         _fired_gates: list = []
         chan_name = chan.config.name
+
+        def _reject(stage: str, cross: Optional[bool]) -> Tuple[None, Optional[bool]]:
+            if _funnel_meta is not None:
+                _funnel_meta["reject_stage"] = stage
+            return None, cross
 
         # ── Failed-detection cooldown ──────────────────────────────────────────
         # If this symbol+channel has failed the confidence gate too many times
@@ -2289,7 +2367,7 @@ class Scanner:
         if _fail_entry is not None:
             _fail_count, _suppressed_until = _fail_entry
             if _fail_count >= _CONF_FAIL_MAX_CONSECUTIVE and time.monotonic() < _suppressed_until:
-                return None, False  # Silently skip — cooldown active
+                return _reject("gated", False)  # Silently skip — cooldown active
         # ── End failed-detection cooldown check ───────────────────────────────
 
         if _preseed_signal is not None:
@@ -2309,9 +2387,9 @@ class Scanner:
                 )
             except Exception as exc:
                 log.debug("Channel {} eval error for {}: {}", chan_name, symbol, exc)
-                return None, None
+                return _reject("gated", None)
             if sig is None:
-                return None, None
+                return _reject("gated", None)
 
         # Record wall-clock time of signal detection for latency tracking.
         sig.detected_at = time.time()
@@ -2327,12 +2405,12 @@ class Scanner:
             ):
                 self._suppression_counters[f"volatile_unsuitable:family_block:{chan_name}"] += 1
             log.debug("Rejected {} {} setup: {}", symbol, chan_name, setup.reason)
-            return None, None
+            return _reject("gated", None)
 
         execution = self._evaluate_execution(sig, ctx, setup)
         if not execution.passed:
             log.debug("Rejected {} {} execution: {}", symbol, chan_name, execution.reason)
-            return None, None
+            return _reject("gated", None)
 
         # ── Filter 1: MTF Confluence Gate ──────────────────────────────────
         # Resolve the regime key early so regime-specific MTF config can
@@ -2414,7 +2492,7 @@ class Scanner:
                     regime=_regime_key,
                     would_be_confidence=sig.confidence,
                 ))
-                return None, None
+                return _reject("gated", None)
             if chan_name == "360_SCALP" and _mtf_min_score < _generic_mtf_min_score:
                 _generic_allowed, _ = check_mtf_gate(
                     sig.direction.value,
@@ -2567,7 +2645,7 @@ class Scanner:
                         log.debug(
                             "Cross-asset gate blocked {} {}: {}", symbol, chan_name, ca_reason
                         )
-                        return None, None
+                        return _reject("gated", None)
                     if ca_conf_adj != 0.0:
                         sig.confidence += ca_conf_adj
                         if ca_reason:
@@ -2650,7 +2728,14 @@ class Scanner:
             self._suppression_counters[
                 f"geometry_rejected_risk_plan:{chan_name}:{_setup_family}"
             ] += 1
-            return None, None
+            _reason_token = self._metric_token(risk.reason)
+            self._increment_path_funnel("geometry:risk_plan:rejected", chan_name, _setup_class_name)
+            self._increment_path_funnel(
+                f"geometry:risk_plan:rejected_reason:{_reason_token}",
+                chan_name,
+                _setup_class_name,
+            )
+            return _reject("gated", None)
         _eval_geom = self._capture_geometry(sig)
         _risk_geom = (
             float(risk.stop_loss),
@@ -2662,6 +2747,7 @@ class Scanner:
             self._suppression_counters[
                 f"geometry_changed_risk_plan:{chan_name}:{_setup_family}"
             ] += 1
+            self._increment_path_funnel("geometry:risk_plan:changed", chan_name, _setup_class_name)
             _entry = float(getattr(sig, "entry", 0.0) or 0.0)
             _eval_sl = _eval_geom[0]
             if _entry > 0 and _eval_sl > 0:
@@ -2674,10 +2760,12 @@ class Scanner:
                     self._suppression_counters[
                         f"geometry_capped_risk_plan:{chan_name}:{_setup_family}"
                     ] += 1
+                    self._increment_path_funnel("geometry:risk_plan:capped", chan_name, _setup_class_name)
         else:
             self._suppression_counters[
                 f"geometry_preserved_risk_plan:{chan_name}:{_setup_family}"
             ] += 1
+            self._increment_path_funnel("geometry:risk_plan:preserved", chan_name, _setup_class_name)
         self._apply_risk_plan_to_signal(sig, risk)
 
         # ── Correlated position exposure cap ───────────────────────────────
@@ -2695,7 +2783,7 @@ class Scanner:
                     "blocking signal",
                     symbol, chan_name, sig.direction.value, same_dir_count,
                 )
-                return None, None
+                return _reject("gated", None)
 
         cross_verified = await self._verify_cross_exchange(
             symbol, sig.direction.value, sig.entry
@@ -2717,7 +2805,7 @@ class Scanner:
             regime_key=_regime_key,
         )
         if legacy_confidence is None:
-            return None, cross_verified
+            return _reject("gated", cross_verified)
         sig.confidence = legacy_confidence
         await self._apply_predictive_adjustments(
             symbol,
@@ -2870,7 +2958,7 @@ class Scanner:
 
         # Hard MTF block: signal was vetoed — return immediately.
         if sig is None:
-            return None, cross_verified
+            return _reject("gated", cross_verified)
 
         # Apply adaptive confidence decay based on signal freshness.
         # apply_confidence_decay clamps the final value to [0, 100].
@@ -2897,6 +2985,7 @@ class Scanner:
         # Per-path scoring telemetry: capture setup_class before entering the
         # scoring block so tier counters can be keyed by path (not just channel).
         _sc = getattr(sig, "setup_class", "UNKNOWN")
+        self._increment_path_funnel("scored", chan_name, _sc)
         self._suppression_counters[f"candidate_reached_scoring:{_sc}"] += 1
         self._scoring_tier_counters[f"candidate_reached_scoring:{_sc}"] += 1
         # ── PR_09: Composite Signal Scoring Engine ────────────────────────
@@ -2983,7 +3072,7 @@ class Scanner:
                 self._suppression_counters[f"score_below50:{chan_name}"] += 1
                 self._suppression_counters[f"score_below50:{_sc}"] += 1
                 self._scoring_tier_counters[f"score_below50:{_sc}"] += 1
-                return None, cross_verified
+                return _reject("filtered", cross_verified)
             log.debug(
                 "composite score {} {} → {:.1f} (tier={}) smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",
                 symbol, chan_name, _score_result["total"], sig.signal_tier,
@@ -3034,7 +3123,7 @@ class Scanner:
                     regime=_regime_key,
                     would_be_confidence=sig.confidence,
                 ))
-                return None, cross_verified
+                return _reject("filtered", cross_verified)
             sig.confidence = _sf_conf
             if "penalty" in _sf_reason:
                 _existing_flags = sig.soft_gate_flags or ""
@@ -3067,7 +3156,7 @@ class Scanner:
                         would_be_confidence=sig.confidence,
                     ))
                     self._suppression_counters[f"pair_analysis:critical:{chan_name}"] += 1
-                    return None, cross_verified
+                    return _reject("filtered", cross_verified)
                 if _pa_quality.quality_label == "WEAK":
                     _pa_penalty = 8.0
                     sig.confidence = max(0.0, sig.confidence - _pa_penalty)
@@ -3118,7 +3207,7 @@ class Scanner:
                         regime=_regime_key,
                         would_be_confidence=sig.confidence,
                     ))
-                    return None, cross_verified
+                    return _reject("filtered", cross_verified)
 
         # Trend hard gate: EMA alignment is non-negotiable for scalp channels.
         # indicator_score < TREND_HARD_GATE_MIN means MACD/RSI/EMA are not
@@ -3147,7 +3236,7 @@ class Scanner:
                         regime=_regime_key,
                         would_be_confidence=sig.confidence,
                     ))
-                    return None, cross_verified
+                    return _reject("filtered", cross_verified)
 
         min_conf = self.confidence_overrides.get(chan_name, chan.config.min_confidence)
 
@@ -3207,7 +3296,7 @@ class Scanner:
                         "Failed-detection cooldown triggered for {} {} ({}x consecutive) — suppressing for {:.0f}s",
                         symbol, chan_name, _new_count, _CONF_FAIL_COOLDOWN_S,
                     )
-                return None, cross_verified
+                return _reject("filtered", cross_verified)
         # WATCHLIST tier: signals with confidence 50-64 are kept as WATCHLIST
         # instead of being discarded.  Only the SCALP channel family generates
         # watchlist alerts; SWING and SPOT require higher confidence.
@@ -3234,11 +3323,34 @@ class Scanner:
                 regime=_regime_key,
                 would_be_confidence=sig.confidence,
             ))
-            return None, cross_verified
+            return _reject("filtered", cross_verified)
         # Reset failed-detection counter — this symbol+channel produced a valid signal
         self._conf_fail_tracker.pop((symbol, chan_name), None)
         self._populate_signal_context(sig, volume_24h, ctx)
         return sig, cross_verified
+
+    def _get_channel_candidate(
+        self,
+        *,
+        chan: Any,
+        chan_name: str,
+        symbol: str,
+        ctx_for_chan: ScanContext,
+        volume_24h: float,
+    ) -> Any:
+        try:
+            return chan.evaluate(
+                symbol=symbol,
+                candles=ctx_for_chan.candles,
+                indicators=ctx_for_chan.indicators,
+                smc_data=ctx_for_chan.smc_data,
+                spread_pct=ctx_for_chan.spread_pct,
+                volume_24h_usd=volume_24h,
+                regime=ctx_for_chan.regime_result.regime.value,
+            )
+        except Exception as _exc:
+            log.debug("Channel {} eval error for {}: {}", chan_name, symbol, _exc)
+            return None
 
     async def _scan_symbol(self, symbol: str, volume_24h: float) -> None:
         """Run all channel evaluations for one symbol."""
@@ -3310,19 +3422,13 @@ class Scanner:
                 # is processed independently through the gate chain.  Same-direction
                 # signals from the same symbol are deduplicated here so that only one
                 # setup per direction can enter _pending_signals per cycle.
-                try:
-                    _raw_result = chan.evaluate(
-                        symbol=symbol,
-                        candles=ctx_for_chan.candles,
-                        indicators=ctx_for_chan.indicators,
-                        smc_data=ctx_for_chan.smc_data,
-                        spread_pct=ctx_for_chan.spread_pct,
-                        volume_24h_usd=volume_24h,
-                        regime=ctx_for_chan.regime_result.regime.value,
-                    )
-                except Exception as _exc:
-                    log.debug("Channel {} eval error for {}: {}", chan_name, symbol, _exc)
-                    _raw_result = []
+                _raw_result = self._get_channel_candidate(
+                    chan=chan,
+                    chan_name=chan_name,
+                    symbol=symbol,
+                    ctx_for_chan=ctx_for_chan,
+                    volume_24h=volume_24h,
+                )
                 # Normalise: real ScalpChannel returns list; legacy mocks return Signal|None
                 if isinstance(_raw_result, list):
                     _raw_sigs = _raw_result
@@ -3330,6 +3436,8 @@ class Scanner:
                     _raw_sigs = [_raw_result]
                 else:
                     _raw_sigs = []
+                if not _raw_sigs:
+                    self._channel_funnel_counters[f"no_candidate_generated:{chan_name}"] += 1
                 # PR-03: Quality-ranked arbitration — evaluate ALL same-direction
                 # candidates and keep the best one by final confidence score.
                 # This replaces the previous first-wins dedup that allowed a
@@ -3338,14 +3446,25 @@ class Scanner:
                 # Format: direction → (best_prepared_sig, chan_name)
                 _scalp_dir_best: dict = {}
                 for _raw_sig in _raw_sigs:
+                    _raw_setup = self._normalize_setup_class(getattr(_raw_sig, "setup_class", None))
+                    self._increment_path_funnel("generated", chan_name, _raw_setup)
+                    _funnel_meta: Dict[str, Any] = {}
                     # cross_verified is None for all scalp channels (cross-exchange
                     # verification is skipped for 360_SCALP — see _prepare_signal).
                     sig, _cross_verified = await self._prepare_signal(
                         symbol, volume_24h, chan, ctx_for_chan,
                         _preseed_signal=_raw_sig,
+                        _funnel_meta=_funnel_meta,
                     )
                     if sig is None:
+                        _reject_stage = _funnel_meta.get("reject_stage")
+                        if _reject_stage == "filtered":
+                            self._increment_path_funnel("filtered", chan_name, _raw_setup)
+                        else:
+                            self._increment_path_funnel("gated", chan_name, _raw_setup)
                         continue
+                    # Stamp before arbitration/confluence can rewrite setup_class.
+                    self._stamp_origin_setup_identity(sig, chan_name)
                     _sig_dir = (
                         sig.direction.value if hasattr(sig.direction, "value") else str(sig.direction)
                     )
@@ -3385,9 +3504,37 @@ class Scanner:
                     self._setup_eval_counts[_sc] += 1
                     _pending_signals.append((_best_sig, _best_chan))
             else:
-                sig, cross_verified = await self._prepare_signal(symbol, volume_24h, chan, ctx_for_chan)
-                if sig is None:
+                _raw_result = self._get_channel_candidate(
+                    chan=chan,
+                    chan_name=chan_name,
+                    symbol=symbol,
+                    ctx_for_chan=ctx_for_chan,
+                    volume_24h=volume_24h,
+                )
+                if _raw_result is None:
+                    self._channel_funnel_counters[f"no_candidate_generated:{chan_name}"] += 1
                     continue
+                _raw_setup = self._normalize_setup_class(getattr(_raw_result, "setup_class", None))
+                self._increment_path_funnel("generated", chan_name, _raw_setup)
+                _funnel_meta: Dict[str, Any] = {}
+                sig, cross_verified = await self._prepare_signal(
+                    symbol,
+                    volume_24h,
+                    chan,
+                    ctx_for_chan,
+                    _preseed_signal=_raw_result,
+                    _funnel_meta=_funnel_meta,
+                )
+                if sig is None:
+                    _reject_stage = _funnel_meta.get("reject_stage")
+                    if _reject_stage == "filtered":
+                        self._increment_path_funnel("filtered", chan_name, _raw_setup)
+                    else:
+                        self._increment_path_funnel("gated", chan_name, _raw_setup)
+                    continue
+                # Stamp before any downstream transformations; _enqueue_signal
+                # performs the same call as an idempotent durability backstop.
+                self._stamp_origin_setup_identity(sig, chan_name)
                 # Directional global cooldown check: skip if same (symbol, direction)
                 # fired recently. Opposite direction is not blocked.
                 _sig_dir = sig.direction.value if hasattr(sig.direction, "value") else str(sig.direction)
@@ -3500,6 +3647,7 @@ class Scanner:
                 )
                 if await self._enqueue_signal(best_sig):
                     self._setup_emit_counts[best_sig.setup_class] += 1
+                    self._increment_path_funnel("emitted", best_ch, best_sig.setup_class)
                     for _, ch_name in signals_and_channels:
                         self._set_cooldown(symbol, ch_name)
                     self.cluster_suppressor.record_signal(symbol, direction)
@@ -3518,6 +3666,7 @@ class Scanner:
             if not await self._enqueue_signal(sig):
                 continue
             self._setup_emit_counts[sig.setup_class] += 1
+            self._increment_path_funnel("emitted", chan_name, sig.setup_class)
             self._set_cooldown(symbol, chan_name)
             self.cluster_suppressor.record_signal(symbol, _dir)
             # Directional cooldown: key is (symbol, direction) so the

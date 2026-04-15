@@ -205,6 +205,9 @@ class TradeMonitor:
         # Optional callback invoked with (signal, tp_level, tp_pnl_pct) when TP2+ is hit.
         # Used to post highlights to the free channel.
         self.on_highlight_callback: Optional[Any] = None
+        # Optional callback invoked with (signal, outcome_label) for every final
+        # lifecycle resolution (SL/TP/expired). Used for path-level observability.
+        self.on_lifecycle_outcome_callback: Optional[Any] = None
         # Optional AI Trade Observer — captures full trade lifecycle data.
         # Set after construction (e.g. in main.py after router.observer is wired).
         self.observer: Optional[Any] = None
@@ -249,6 +252,11 @@ class TradeMonitor:
             hit_tp=hit_tp,
             hit_sl=hit_sl,
         )
+        if self.on_lifecycle_outcome_callback is not None:
+            try:
+                self.on_lifecycle_outcome_callback(sig, outcome_label)
+            except Exception as exc:
+                log.debug("on_lifecycle_outcome_callback failed (non-critical): {}", exc)
         if self._performance_tracker is not None:
             self._performance_tracker.record_outcome(
                 signal_id=sig.signal_id,
