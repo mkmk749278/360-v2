@@ -8,7 +8,7 @@ Every Copilot session must check this file if OWNER_BRIEF.md appears short or co
 | Field | Value |
 |---|---|
 | Canonical baseline date | 2026-04-15 |
-| Line count | 894 |
+| Line count | 896 |
 | Minimum acceptable lines | 480 |
 | Format | Fresh canonical owner-operating manual (8-part structure) |
 | Verified by | Copilot + owner (mkmk749278) |
@@ -22,7 +22,7 @@ strategic objective, Part III channel-governance truth corrected to reflect conf
 auxiliary channels, Part VI replaced with ordered PR-1..PR-5 roadmap (family-aware gating, geometry
 integrity, governance cleanup, path observability, controlled expansion), explicit KPI framework,
 explicit anti-patterns, and final execution-order decision rationale. No truncation — structure
-remains intact and line count is 894.
+remains intact and line count is 896.
 
 ## Important — Documentation Integrity Refresh Note (2026-04-14)
 
@@ -89,6 +89,6 @@ something went wrong and must be resolved before any work proceeds.
 ## Rule
 
 > OWNER_BRIEF.md must not be accidentally truncated between sessions.
-> The minimum threshold is 480 lines — approximately 54% of the current canonical length (894 lines).
+> The minimum threshold is 480 lines — approximately 54% of the current canonical length (896 lines).
 > Deliberate updates (including redesigns and upgrades) are permitted by explicit owner instruction only.
 > If the brief falls below 480 lines without a known redesign, treat it as corruption and restore immediately.

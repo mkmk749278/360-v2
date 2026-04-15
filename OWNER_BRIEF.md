@@ -383,17 +383,17 @@ Binance WS / REST
 | Channel | Status | Purpose |
 |---|---|---|
 | 360_SCALP | Runtime-active (paid) | Main active paid channel — all 14 internal evaluation paths |
-| 360_SCALP_FVG | Config-default disabled | Specialist FVG retests (candidate source; governance-controlled) |
-| 360_SCALP_ORDERBLOCK | Config-default disabled | Specialist orderblock path (governance-controlled) |
-| 360_SCALP_DIVERGENCE | Config-default disabled | Specialist divergence path (governance-controlled) |
-| 360_SCALP_CVD | Config-default disabled | Specialist order-flow path (role decided by governance) |
-| 360_SCALP_VWAP | Config-default disabled | Specialist mean/reclaim path (role decided by governance) |
-| 360_SCALP_SUPERTREND | Config-default disabled | Specialist trend filter path (role decided by governance) |
-| 360_SCALP_ICHIMOKU | Config-default disabled | Specialist structure/trend path (role decided by governance) |
+| 360_SCALP_FVG | Governance-default disabled | Specialist FVG retests (runtime role must be confirmed from deployed env + monitor evidence) |
+| 360_SCALP_ORDERBLOCK | Governance-default disabled | Specialist orderblock path (runtime role must be confirmed from deployed env + monitor evidence) |
+| 360_SCALP_DIVERGENCE | Governance-default disabled | Specialist divergence path (runtime role must be confirmed from deployed env + monitor evidence) |
+| 360_SCALP_CVD | Governance-default disabled | Specialist order-flow path (runtime role must be confirmed from deployed env + monitor evidence) |
+| 360_SCALP_VWAP | Governance-default disabled | Specialist mean/reclaim path (runtime role must be confirmed from deployed env + monitor evidence) |
+| 360_SCALP_SUPERTREND | Governance-default disabled | Specialist trend filter path (runtime role must be confirmed from deployed env + monitor evidence) |
+| 360_SCALP_ICHIMOKU | Governance-default disabled | Specialist structure/trend path (runtime role must be confirmed from deployed env + monitor evidence) |
 
 **Permanently removed:** 360_SPOT, 360_GEM, 360_SWING (out of scope indefinitely), 360_SCALP_OBI (REST depth fetches caused structural scan latency — removed permanently).
 
-**Canonical production-governance note:** config-default status is not sufficient runtime truth. All channel-role decisions must be documented as runtime-active paid / specialist paid / radar-only / intentionally disabled, and validated against live monitor evidence.
+**Canonical production-governance note:** governance defaults are not deployed runtime truth. All channel-role decisions must be documented as runtime-active paid / specialist paid / radar-only / intentionally disabled, and validated from deployed runtime env plus live monitor evidence.
 
 ### 3.4 Signal Evaluators — 14 Internal `360_SCALP` Paths Active
 
@@ -635,6 +635,8 @@ This section is the canonical execution plan for the next implementation phase.
 - We do not lower requirements to fit current implementation; we change implementation to meet runtime/business truth.
 
 ### 6.2 Ordered PR Plan (Authoritative Sequence)
+
+**Observability sequencing clarification:** PR-4 is the dedicated end-to-end observability build. PR-1 and PR-2 must still include minimal telemetry required to validate their own business effect immediately after merge.
 
 #### PR-1 — Family-aware gate refinement for active `360_SCALP`
 
