@@ -20,6 +20,9 @@ import numpy as np
 import uuid
 
 from config import (
+    CHANNEL_ENABLE_DEFAULTS,
+    CHANNEL_RADAR_ROLE_DEFAULTS,
+    CHANNEL_VOLATILE_FAMILY_GOVERNED,
     CHANNEL_SCALP_CVD_ENABLED,
     CHANNEL_SCALP_DIVERGENCE_ENABLED,
     CHANNEL_SCALP_ENABLED,
@@ -193,6 +196,24 @@ _CHANNEL_ENABLED_FLAGS: Dict[str, bool] = {
     "360_SCALP_VWAP":       CHANNEL_SCALP_VWAP_ENABLED,
     "360_SCALP_SUPERTREND": CHANNEL_SCALP_SUPERTREND_ENABLED,
     "360_SCALP_ICHIMOKU":   CHANNEL_SCALP_ICHIMOKU_ENABLED,
+}
+
+# Product role intent (what the channel is for), independent from runtime
+# activation state (what is currently enabled via env/runtime governance).
+# Naming contract:
+# - "paid" means core paid production role.
+# - "specialist" means specialist strategy role that may be runtime-enabled
+#   later without changing its product role label.
+# Runtime role strings below combine this product role with enablement state.
+_CHANNEL_PRODUCT_ROLES: Dict[str, str] = {
+    "360_SCALP": "paid",
+    "360_SCALP_FVG": "specialist",
+    "360_SCALP_ORDERBLOCK": "specialist",
+    "360_SCALP_DIVERGENCE": "specialist",
+    "360_SCALP_CVD": "specialist",
+    "360_SCALP_VWAP": "specialist",
+    "360_SCALP_SUPERTREND": "specialist",
+    "360_SCALP_ICHIMOKU": "specialist",
 }
 
 # Maximum number of symbols scanned concurrently
@@ -634,6 +655,7 @@ class Scanner:
         # Populated by the radar evaluation pass for soft-disabled channels.
         # Read by _get_scanner_context() → RadarChannel every 30s.
         self._radar_scores: Dict[str, Any] = {}
+        self._last_channel_governance_snapshot: Dict[str, Dict[str, Any]] = {}
 
         # Data fetcher — delegates kline and order-book retrieval
         self._data_fetcher = DataFetcher(
@@ -656,6 +678,40 @@ class Scanner:
     # ------------------------------------------------------------------
     # Dynamic tier query helper
     # ------------------------------------------------------------------
+
+    def _classify_channel_runtime_role(self, channel_name: str) -> str:
+        """Return explicit runtime role for channel governance telemetry."""
+        _runtime_enabled = _CHANNEL_ENABLED_FLAGS.get(channel_name, False)
+        _default_enabled = CHANNEL_ENABLE_DEFAULTS.get(channel_name, False)
+        _product_role = _CHANNEL_PRODUCT_ROLES.get(channel_name, "specialist")
+        _channel_radar_governed = CHANNEL_RADAR_ROLE_DEFAULTS.get(channel_name, False)
+        _radar_callback_wired = getattr(self, "on_radar_candidate", None) is not None
+        if _runtime_enabled:
+            # runtime_active_paid vs specialist_paid are intentionally distinct:
+            # both are runtime-enabled paid paths, but the second is a specialist
+            # product role rather than the core paid production role.
+            if _product_role == "paid":
+                return "runtime_active_paid"
+            return "specialist_paid"
+        if _channel_radar_governed and _radar_callback_wired:
+            return "radar_only"
+        if not _default_enabled:
+            return "intentionally_disabled"
+        return "governance_disabled"
+
+    def _channel_governance_snapshot(self) -> Dict[str, Dict[str, Any]]:
+        """Build inspectable runtime/default governance truth for all channels."""
+        _snapshot: Dict[str, Dict[str, Any]] = {}
+        for _chan_name, _runtime_enabled in _CHANNEL_ENABLED_FLAGS.items():
+            _snapshot[_chan_name] = {
+                "product_role": _CHANNEL_PRODUCT_ROLES.get(_chan_name, "specialist"),
+                "config_default_enabled": CHANNEL_ENABLE_DEFAULTS.get(
+                    _chan_name, False,
+                ),
+                "runtime_enabled": _runtime_enabled,
+                "runtime_role": self._classify_channel_runtime_role(_chan_name),
+            }
+        return _snapshot
 
     def get_symbol_tier(self, symbol: str) -> PairTier:
         """Return the current :class:`~src.pair_manager.PairTier` for *symbol*.
@@ -885,6 +941,14 @@ class Scanner:
         while True:
             t0 = time.monotonic()
             self._scan_cycle_count += 1
+
+            _governance_snapshot = self._channel_governance_snapshot()
+            if _governance_snapshot != self._last_channel_governance_snapshot:
+                self._last_channel_governance_snapshot = _governance_snapshot
+                log.info(
+                    "Channel governance runtime roles: {}",
+                    _governance_snapshot,
+                )
 
             # Always clean up expired signals first (safety net for stuck slots)
             expired_count = self.router.cleanup_expired()
@@ -1758,12 +1822,13 @@ class Scanner:
                 self._suppression_counters[f"pair_quality:{ctx.pair_quality.reason}"] += 1
                 return True
         if ctx.market_state == MarketState.VOLATILE_UNSUITABLE:
-            # 360_SCALP contains bypass methods (VOLUME_SURGE_BREAKOUT,
-            # BREAKDOWN_SHORT, OPENING_RANGE_BREAKOUT, FUNDING_EXTREME_SIGNAL)
-            # that are explicitly designed for volatile conditions.  Let the
-            # channel run — the setup-compatibility gate in _prepare_signal
-            # will reject any non-bypass setup class that comes through.
-            if chan_name != "360_SCALP":
+            if chan_name in CHANNEL_VOLATILE_FAMILY_GOVERNED:
+                # PR-3 contradiction-cleanup scope: only selected channels bypass
+                # channel-level pre-skip so family/setup compatibility can decide.
+                self._suppression_counters[
+                    f"volatile_unsuitable:channel_preskip_bypassed:{chan_name}"
+                ] += 1
+            else:
                 log.debug(
                     "Skipping {} {} – volatile/unsuitable market state",
                     symbol,
@@ -2255,6 +2320,12 @@ class Scanner:
         _setup_class_name = setup.setup_class.value
         _setup_family = self._setup_family_for_channel(chan_name, _setup_class_name)
         if not setup.channel_compatible or not setup.regime_compatible:
+            if (
+                not setup.regime_compatible
+                and ctx.market_state == MarketState.VOLATILE_UNSUITABLE
+                and chan_name in CHANNEL_VOLATILE_FAMILY_GOVERNED
+            ):
+                self._suppression_counters[f"volatile_unsuitable:family_block:{chan_name}"] += 1
             log.debug("Rejected {} {} setup: {}", symbol, chan_name, setup.reason)
             return None, None
 
@@ -3331,8 +3402,9 @@ class Scanner:
                 self._setup_eval_counts[_sc] += 1
                 _pending_signals.append((sig, chan_name))
 
-        # --- Radar evaluation pass (soft-disabled channels only) ----------
-        # Evaluates channels that are soft-disabled via _CHANNEL_ENABLED_FLAGS.
+        # --- Radar evaluation pass (explicit radar-governed channels only) ----------
+        # Evaluates channels that are soft-disabled via _CHANNEL_ENABLED_FLAGS and
+        # explicitly designated for radar participation in CHANNEL_RADAR_ROLE_DEFAULTS.
         # Results are written to _radar_scores for RadarChannel to read.
         # No signals are published here — fail-safe: exceptions are debug-logged.
         _regime_str = ""
@@ -3344,6 +3416,8 @@ class Scanner:
             chan_name = chan.config.name
             if _CHANNEL_ENABLED_FLAGS.get(chan_name, True):
                 continue  # Only evaluate soft-disabled channels here
+            if not CHANNEL_RADAR_ROLE_DEFAULTS.get(chan_name, False):
+                continue  # Explicitly non-radar channels remain fully disabled
             try:
                 _radar_result = chan.evaluate(
                     symbol=symbol,

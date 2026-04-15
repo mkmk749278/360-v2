@@ -715,6 +715,41 @@ ALL_CHANNELS: List[ChannelConfig] = [
 # The channel's evaluate() method still exists and works — the scanner simply
 # skips it. Flip back to true in .env to re-enable instantly.
 # ---------------------------------------------------------------------------
+CHANNEL_ENABLE_DEFAULTS: Dict[str, bool] = {
+    "360_SCALP": True,
+    "360_SCALP_FVG": False,
+    "360_SCALP_ORDERBLOCK": False,
+    "360_SCALP_DIVERGENCE": False,
+    "360_SCALP_CVD": False,
+    "360_SCALP_VWAP": False,
+    "360_SCALP_SUPERTREND": False,
+    "360_SCALP_ICHIMOKU": False,
+}
+
+# Explicit radar-role governance by channel.
+# True means: when runtime-disabled, this channel is allowed to participate in
+# radar/watchlist discovery paths (not paid dispatch).
+CHANNEL_RADAR_ROLE_DEFAULTS: Dict[str, bool] = {
+    "360_SCALP": False,
+    "360_SCALP_FVG": True,
+    "360_SCALP_ORDERBLOCK": True,
+    "360_SCALP_DIVERGENCE": True,
+    "360_SCALP_CVD": False,
+    "360_SCALP_VWAP": False,
+    "360_SCALP_SUPERTREND": False,
+    "360_SCALP_ICHIMOKU": False,
+}
+
+# Volatile contradiction-cleanup scope (PR-3).
+# Only these channels bypass channel-level volatile pre-skip so that setup/family
+# compatibility can decide downstream in _prepare_signal.
+CHANNEL_VOLATILE_FAMILY_GOVERNED: frozenset[str] = frozenset({
+    "360_SCALP",
+    "360_SCALP_FVG",
+    "360_SCALP_DIVERGENCE",
+    "360_SCALP_ORDERBLOCK",
+})
+
 CHANNEL_SCALP_ENABLED:            bool = _safe_bool("CHANNEL_SCALP_ENABLED",            "true")
 # PR-04: Auxiliary paid-channel paths disabled by default pending governance rebuild.
 # These channels (FVG_RETEST, RSI_MACD_DIVERGENCE, SMC_ORDERBLOCK) are under review
