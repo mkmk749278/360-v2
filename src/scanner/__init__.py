@@ -87,7 +87,6 @@ from src.signal_quality import (
     PairQualityAssessment,
     RiskAssessment,
     SetupAssessment,
-    SetupClass,
     SignalScoringEngine,
     ScoringInput,
     assess_pair_quality,
@@ -96,12 +95,9 @@ from src.signal_quality import (
     classify_market_state,
     classify_setup,
     execution_quality_check,
+    is_sl_distance_capped,
     score_signal_components,
-    _MAX_SL_PCT_BY_CHANNEL,
-    _MIN_RR_DEFAULT,
-    _MIN_RR_MEAN_REVERSION,
-    _MIN_RR_RANGE,
-    _MIN_RR_STRUCTURED,
+    validate_geometry_against_policy,
 )
 from src.cluster_suppression import ClusterSuppressor
 from src.confidence_decay import apply_confidence_decay
@@ -1926,74 +1922,6 @@ class Scanner:
         return "other"
 
     @staticmethod
-    def _min_rr_for_setup(setup_class: SetupClass) -> float:
-        """Mirror build_risk_plan() minimum RR policy for post-predictive validation."""
-        if setup_class in (SetupClass.RANGE_REJECTION, SetupClass.RANGE_FADE):
-            return _MIN_RR_RANGE
-        if setup_class in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL):
-            return _MIN_RR_MEAN_REVERSION
-        if setup_class in (SetupClass.SR_FLIP_RETEST, SetupClass.FAILED_AUCTION_RECLAIM):
-            return _MIN_RR_STRUCTURED
-        return _MIN_RR_DEFAULT
-
-    def _validate_post_predictive_geometry(
-        self,
-        sig: Any,
-        setup_class: SetupClass,
-        chan_name: str,
-        max_sl_distance: float,
-    ) -> Tuple[bool, str]:
-        """Validate predictive-adjusted geometry before allowing it downstream.
-
-        Returns (True, "") when geometry remains directionally sane, within
-        channel SL safety limits, does not widen risk beyond the validated
-        risk-plan envelope, and still meets setup-specific minimum RR.
-        """
-        entry = float(getattr(sig, "entry", 0.0) or 0.0)
-        stop = float(getattr(sig, "stop_loss", 0.0) or 0.0)
-        tp1 = float(getattr(sig, "tp1", 0.0) or 0.0)
-        tp2 = float(getattr(sig, "tp2", 0.0) or 0.0)
-        tp3_raw = getattr(sig, "tp3", None)
-        tp3 = float(tp3_raw) if tp3_raw is not None else None
-        if entry <= 0:
-            return False, "invalid_entry"
-        if any(not np.isfinite(v) for v in (entry, stop, tp1, tp2)):
-            return False, "non_finite_geometry"
-        if tp3 is not None and not np.isfinite(tp3):
-            return False, "non_finite_geometry"
-        if stop <= 0 or tp1 <= 0 or tp2 <= 0 or (tp3 is not None and tp3 <= 0):
-            return False, "non_positive_geometry"
-
-        if sig.direction == Direction.LONG:
-            if stop >= entry:
-                return False, "sl_wrong_side"
-            if tp1 <= entry or tp2 <= entry or (tp3 is not None and tp3 <= entry):
-                return False, "tp_wrong_side"
-            if not (tp1 < tp2 and (tp3 is None or tp2 < tp3)):
-                return False, "tp_order_invalid"
-        else:
-            if stop <= entry:
-                return False, "sl_wrong_side"
-            if tp1 >= entry or tp2 >= entry or (tp3 is not None and tp3 >= entry):
-                return False, "tp_wrong_side"
-            if not (tp1 > tp2 and (tp3 is None or tp2 > tp3)):
-                return False, "tp_order_invalid"
-
-        risk = abs(entry - stop)
-        if risk < entry * 0.0005:
-            return False, "near_zero_sl"
-        max_sl_pct = _MAX_SL_PCT_BY_CHANNEL.get(chan_name, 5.0) / 100.0
-        if (risk / entry) > max_sl_pct:
-            return False, "sl_cap_exceeded"
-        if risk > max_sl_distance + (entry * 1e-8):
-            return False, "sl_distance_widened"
-
-        rr = abs(tp1 - entry) / risk if risk > 0 else 0.0
-        if rr < self._min_rr_for_setup(setup_class):
-            return False, "rr_below_min"
-        return True, ""
-
-    @staticmethod
     def _get_primary_timeframe(chan_name: str) -> str:
         """Return the primary timeframe interval string for a given channel name."""
         return "5m"
@@ -2185,10 +2113,10 @@ class Scanner:
         self._suppression_counters[
             f"predictive_revalidation_triggered:{chan_name}:{_setup_family}"
         ] += 1
-        valid, reason = self._validate_post_predictive_geometry(
-            sig=sig,
-            setup_class=setup.setup_class,
-            chan_name=chan_name,
+        valid, reason = validate_geometry_against_policy(
+            signal=sig,
+            setup=setup.setup_class,
+            channel=chan_name,
             max_sl_distance=_baseline_sl_distance,
         )
         if valid:
@@ -2666,10 +2594,12 @@ class Scanner:
             _entry = float(getattr(sig, "entry", 0.0) or 0.0)
             _eval_sl = _eval_geom[0]
             if _entry > 0 and _eval_sl > 0:
-                _eval_sl_pct = abs(_entry - _eval_sl) / _entry
-                _risk_sl_pct = abs(_entry - _risk_geom[0]) / _entry
-                _cap_pct = _MAX_SL_PCT_BY_CHANNEL.get(chan_name, 5.0) / 100.0
-                if _eval_sl_pct > _cap_pct and abs(_risk_sl_pct - _cap_pct) <= 1e-6:
+                if is_sl_distance_capped(
+                    entry=_entry,
+                    original_stop_loss=_eval_sl,
+                    final_stop_loss=_risk_geom[0],
+                    channel=chan_name,
+                ):
                     self._suppression_counters[
                         f"geometry_capped_risk_plan:{chan_name}:{_setup_family}"
                     ] += 1

@@ -362,6 +362,103 @@ _MIN_RR_STRUCTURED: float = 1.0      # S/R flip retest — structural confirmati
 _MIN_RR_DEFAULT: float = 1.2         # All other families — standard minimum R:R
 
 
+def _min_rr_for_setup(setup: SetupClass) -> float:
+    """Return canonical minimum R:R (reward/risk) by setup family policy."""
+    if setup in (SetupClass.RANGE_REJECTION, SetupClass.RANGE_FADE):
+        return _MIN_RR_RANGE
+    if setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL):
+        return _MIN_RR_MEAN_REVERSION
+    if setup in (SetupClass.SR_FLIP_RETEST, SetupClass.FAILED_AUCTION_RECLAIM):
+        return _MIN_RR_STRUCTURED
+    return _MIN_RR_DEFAULT
+
+
+def _channel_max_sl_pct(channel: str) -> float:
+    """Return channel max-SL decimal; unknown channels fall back to 5.0%."""
+    return _MAX_SL_PCT_BY_CHANNEL.get(channel, 5.0) / 100.0
+
+
+def validate_geometry_against_policy(
+    signal: Any,
+    setup: SetupClass,
+    channel: str,
+    *,
+    max_sl_distance: Optional[float] = None,
+) -> tuple[bool, str]:
+    """Validate signal geometry against canonical SL/TP policy.
+
+    This is shared by scanner post-predictive revalidation to avoid duplicating
+    risk-policy constants or setup RR doctrine outside this module.
+    """
+    entry = _safe_float(getattr(signal, "entry", None), 0.0)
+    stop = _safe_float(getattr(signal, "stop_loss", None), 0.0)
+    tp1 = _safe_float(getattr(signal, "tp1", None), 0.0)
+    tp2 = _safe_float(getattr(signal, "tp2", None), 0.0)
+    tp3_raw = getattr(signal, "tp3", None)
+    tp3 = _safe_float(tp3_raw, 0.0) if tp3_raw is not None else None
+
+    if entry <= 0:
+        return False, "invalid_entry"
+    if any(not np.isfinite(v) for v in (entry, stop, tp1, tp2)):
+        return False, "non_finite_geometry"
+    if tp3 is not None and not np.isfinite(tp3):
+        return False, "non_finite_geometry"
+    if stop <= 0 or tp1 <= 0 or tp2 <= 0 or (tp3 is not None and tp3 <= 0):
+        return False, "non_positive_geometry"
+
+    direction = getattr(signal, "direction", None)
+    if direction == Direction.LONG:
+        if stop >= entry:
+            return False, "sl_wrong_side"
+        if tp1 <= entry or tp2 <= entry or (tp3 is not None and tp3 <= entry):
+            return False, "tp_wrong_side"
+        if not (tp1 < tp2 and (tp3 is None or tp2 < tp3)):
+            return False, "tp_order_invalid"
+    elif direction == Direction.SHORT:
+        if stop <= entry:
+            return False, "sl_wrong_side"
+        if tp1 >= entry or tp2 >= entry or (tp3 is not None and tp3 >= entry):
+            return False, "tp_wrong_side"
+        if not (tp1 > tp2 and (tp3 is None or tp2 > tp3)):
+            return False, "tp_order_invalid"
+
+    risk = abs(entry - stop)
+    if risk < entry * 0.0005:
+        return False, "near_zero_sl"
+
+    if (risk / entry) > _channel_max_sl_pct(channel):
+        return False, "sl_cap_exceeded"
+
+    if max_sl_distance is not None and risk > max_sl_distance + (entry * 1e-8):
+        return False, "sl_distance_widened"
+
+    rr = abs(tp1 - entry) / risk if risk > 0 else 0.0
+    if rr < _min_rr_for_setup(setup):
+        return False, "rr_below_min"
+    return True, ""
+
+
+def is_sl_distance_capped(
+    *,
+    entry: float,
+    original_stop_loss: float,
+    final_stop_loss: float,
+    channel: str,
+    tol: float = 1e-6,
+) -> bool:
+    """Return True when post-cap SL equals channel cap while pre-cap exceeded it.
+
+    `original_stop_loss` is the pre-cap/reference SL; `final_stop_loss` is the
+    downstream SL to evaluate for effective cap application.
+    """
+    if entry <= 0 or original_stop_loss <= 0 or final_stop_loss <= 0:
+        return False
+    original_sl_pct = abs(entry - original_stop_loss) / entry
+    final_sl_pct = abs(entry - final_stop_loss) / entry
+    cap_pct = _channel_max_sl_pct(channel)
+    return original_sl_pct > cap_pct and abs(final_sl_pct - cap_pct) <= tol
+
+
 @dataclass
 class PairQualityAssessment:
     passed: bool
