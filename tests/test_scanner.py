@@ -472,9 +472,6 @@ class TestPredictiveGeometryRevalidation:
         assert scanner._path_funnel_counters[
             "geometry:final_live:rejected:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
         ] == 1
-        assert scanner._path_funnel_counters[
-            "geometry:final_live:preserved:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
-        ] == 1
         assert any(
             key.startswith("geometry:final_live:rejected_reason:")
             and key.endswith(":360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT")
@@ -1339,11 +1336,11 @@ class TestMTFGateInScanner:
         raw_sig.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
         scanner.channels[0].evaluate.return_value = raw_sig
 
-        async def _fake_prepare(*args, **kwargs):
+        async def _fake_prepare_filtered(*args, **kwargs):
             kwargs["_funnel_meta"]["reject_stage"] = "filtered"
             return None, None
 
-        with patch.object(scanner, "_prepare_signal", side_effect=_fake_prepare):
+        with patch.object(scanner, "_prepare_signal", side_effect=_fake_prepare_filtered):
             await scanner._scan_symbol("BTCUSDT", 10_000_000)
 
         signal_queue.put.assert_not_awaited()
@@ -1353,6 +1350,23 @@ class TestMTFGateInScanner:
         assert scanner._path_funnel_counters[
             "gated:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
         ] == 0
+
+        scanner_gated, signal_queue_gated = self._scanner_and_queue()
+        raw_sig_gated = _make_signal(channel="360_SCALP")
+        raw_sig_gated.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
+        scanner_gated.channels[0].evaluate.return_value = raw_sig_gated
+
+        async def _fake_prepare_gated(*args, **kwargs):
+            kwargs["_funnel_meta"]["reject_stage"] = "gated"
+            return None, None
+
+        with patch.object(scanner_gated, "_prepare_signal", side_effect=_fake_prepare_gated):
+            await scanner_gated._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue_gated.put.assert_not_awaited()
+        assert scanner_gated._path_funnel_counters[
+            "gated:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
 
 
 class TestVWAPGateInScanner:

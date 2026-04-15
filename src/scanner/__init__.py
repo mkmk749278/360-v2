@@ -10,6 +10,7 @@ from __future__ import annotations
 import asyncio
 import dataclasses as _dc
 import os
+import re
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -2017,7 +2018,8 @@ class Scanner:
     @staticmethod
     def _metric_token(value: Any) -> str:
         _text = str(value or "unknown")
-        return _text.replace(":", "_").replace(" ", "_")
+        _token = re.sub(r"[^A-Za-z0-9]+", "_", _text).strip("_")
+        return _token or "unknown"
 
     def on_signal_lifecycle_outcome(self, sig: Any, outcome_label: str) -> None:
         """Record final lifecycle outcome against origin setup family/path."""
@@ -2252,7 +2254,6 @@ class Scanner:
             chan_name,
             _setup_class_name,
         )
-        self._increment_path_funnel("geometry:final_live:preserved", chan_name, _setup_class_name)
         log.warning(
             "Predictive geometry rejected for {} {} ({}): reverted to validated plan",
             symbol,
