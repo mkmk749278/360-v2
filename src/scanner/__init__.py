@@ -21,6 +21,8 @@ import uuid
 
 from config import (
     CHANNEL_ENABLE_DEFAULTS,
+    CHANNEL_RADAR_ROLE_DEFAULTS,
+    CHANNEL_VOLATILE_FAMILY_GOVERNED,
     CHANNEL_SCALP_CVD_ENABLED,
     CHANNEL_SCALP_DIVERGENCE_ENABLED,
     CHANNEL_SCALP_ENABLED,
@@ -198,6 +200,11 @@ _CHANNEL_ENABLED_FLAGS: Dict[str, bool] = {
 
 # Product role intent (what the channel is for), independent from runtime
 # activation state (what is currently enabled via env/runtime governance).
+# Naming contract:
+# - "paid" means core paid production role.
+# - "specialist" means specialist strategy role that may be runtime-enabled
+#   later without changing its product role label.
+# Runtime role strings below combine this product role with enablement state.
 _CHANNEL_PRODUCT_ROLES: Dict[str, str] = {
     "360_SCALP": "paid",
     "360_SCALP_FVG": "specialist",
@@ -677,12 +684,16 @@ class Scanner:
         _runtime_enabled = _CHANNEL_ENABLED_FLAGS.get(channel_name, False)
         _default_enabled = CHANNEL_ENABLE_DEFAULTS.get(channel_name, False)
         _product_role = _CHANNEL_PRODUCT_ROLES.get(channel_name, "specialist")
-        _radar_enabled = getattr(self, "on_radar_candidate", None) is not None
+        _channel_radar_governed = CHANNEL_RADAR_ROLE_DEFAULTS.get(channel_name, False)
+        _radar_callback_wired = getattr(self, "on_radar_candidate", None) is not None
         if _runtime_enabled:
+            # runtime_active_paid vs specialist_paid are intentionally distinct:
+            # both are runtime-enabled paid paths, but the second is a specialist
+            # product role rather than the core paid production role.
             if _product_role == "paid":
                 return "runtime_active_paid"
             return "specialist_paid"
-        if _radar_enabled:
+        if _channel_radar_governed and _radar_callback_wired:
             return "radar_only"
         if not _default_enabled:
             return "intentionally_disabled"
@@ -1811,10 +1822,20 @@ class Scanner:
                 self._suppression_counters[f"pair_quality:{ctx.pair_quality.reason}"] += 1
                 return True
         if ctx.market_state == MarketState.VOLATILE_UNSUITABLE:
-            # PR-3: avoid whole-channel volatile pre-skip contradiction.
-            # Let family/setup compatibility decide in _prepare_signal() so
-            # volatile-valid families are not blocked before classification.
-            self._suppression_counters[f"volatile_unsuitable:channel_preskip_bypassed:{chan_name}"] += 1
+            if chan_name in CHANNEL_VOLATILE_FAMILY_GOVERNED:
+                # PR-3 contradiction-cleanup scope: only selected channels bypass
+                # channel-level pre-skip so family/setup compatibility can decide.
+                self._suppression_counters[
+                    f"volatile_unsuitable:channel_preskip_bypassed:{chan_name}"
+                ] += 1
+            else:
+                log.debug(
+                    "Skipping {} {} – volatile/unsuitable market state",
+                    symbol,
+                    chan_name,
+                )
+                self._suppression_counters[f"volatile_unsuitable:{chan_name}"] += 1
+                return True
         if chan_name in self.paused_channels:
             self._suppression_counters[f"paused_channel:{chan_name}"] += 1
             return True
@@ -2302,6 +2323,7 @@ class Scanner:
             if (
                 not setup.regime_compatible
                 and ctx.market_state == MarketState.VOLATILE_UNSUITABLE
+                and chan_name in CHANNEL_VOLATILE_FAMILY_GOVERNED
             ):
                 self._suppression_counters[f"volatile_unsuitable:family_block:{chan_name}"] += 1
             log.debug("Rejected {} {} setup: {}", symbol, chan_name, setup.reason)
@@ -3380,8 +3402,9 @@ class Scanner:
                 self._setup_eval_counts[_sc] += 1
                 _pending_signals.append((sig, chan_name))
 
-        # --- Radar evaluation pass (soft-disabled channels only) ----------
-        # Evaluates channels that are soft-disabled via _CHANNEL_ENABLED_FLAGS.
+        # --- Radar evaluation pass (explicit radar-governed channels only) ----------
+        # Evaluates channels that are soft-disabled via _CHANNEL_ENABLED_FLAGS and
+        # explicitly designated for radar participation in CHANNEL_RADAR_ROLE_DEFAULTS.
         # Results are written to _radar_scores for RadarChannel to read.
         # No signals are published here — fail-safe: exceptions are debug-logged.
         _regime_str = ""
@@ -3393,6 +3416,8 @@ class Scanner:
             chan_name = chan.config.name
             if _CHANNEL_ENABLED_FLAGS.get(chan_name, True):
                 continue  # Only evaluate soft-disabled channels here
+            if not CHANNEL_RADAR_ROLE_DEFAULTS.get(chan_name, False):
+                continue  # Explicitly non-radar channels remain fully disabled
             try:
                 _radar_result = chan.evaluate(
                     symbol=symbol,

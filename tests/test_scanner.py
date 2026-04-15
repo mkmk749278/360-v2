@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from config import CHANNEL_ENABLE_DEFAULTS
+from config import CHANNEL_ENABLE_DEFAULTS, CHANNEL_VOLATILE_FAMILY_GOVERNED
 from src.channels.base import Signal
 from src.regime import MarketRegime
 from src.scanner import Scanner, _RANGING_ADX_SUPPRESS_THRESHOLD
@@ -886,6 +886,11 @@ class TestPR3GovernanceRuntimeRoles:
         scanner.on_radar_candidate = AsyncMock()
         assert scanner._classify_channel_runtime_role("360_SCALP_FVG") == "radar_only"
 
+    def test_runtime_role_does_not_mark_non_radar_channel_as_radar_only(self):
+        scanner = _make_scanner()
+        scanner.on_radar_candidate = AsyncMock()
+        assert scanner._classify_channel_runtime_role("360_SCALP_CVD") == "intentionally_disabled"
+
     def test_governance_snapshot_exposes_default_and_runtime_truth(self):
         scanner = _make_scanner()
         snapshot = scanner._channel_governance_snapshot()
@@ -898,6 +903,7 @@ class TestPR3GovernanceRuntimeRoles:
 
     def test_should_not_channel_skip_specialist_in_volatile_unsuitable(self):
         scanner = _make_scanner()
+        assert "360_SCALP_DIVERGENCE" in CHANNEL_VOLATILE_FAMILY_GOVERNED
         ctx = MagicMock()
         ctx.pair_quality.passed = True
         ctx.market_state = MarketState.VOLATILE_UNSUITABLE
@@ -914,6 +920,26 @@ class TestPR3GovernanceRuntimeRoles:
             ] == 1
         )
         assert scanner._suppression_counters["volatile_unsuitable:360_SCALP_DIVERGENCE"] == 0
+
+    def test_should_still_skip_non_governed_channel_in_volatile_unsuitable(self):
+        scanner = _make_scanner()
+        assert "360_SCALP_CVD" not in CHANNEL_VOLATILE_FAMILY_GOVERNED
+        ctx = MagicMock()
+        ctx.pair_quality.passed = True
+        ctx.market_state = MarketState.VOLATILE_UNSUITABLE
+        ctx.regime_result.regime.value = "VOLATILE_UNSUITABLE"
+        scanner.circuit_breaker = None
+        scanner.router.active_signals = {}
+        ctx.is_ranging = False
+        ctx.adx_val = 25.0
+        result = scanner._should_skip_channel("ETHUSDT", "360_SCALP_CVD", ctx)
+        assert result is True
+        assert scanner._suppression_counters["volatile_unsuitable:360_SCALP_CVD"] == 1
+        assert (
+            scanner._suppression_counters[
+                "volatile_unsuitable:channel_preskip_bypassed:360_SCALP_CVD"
+            ] == 0
+        )
 
     @pytest.mark.asyncio
     async def test_prepare_signal_tracks_family_level_volatile_block(self):
