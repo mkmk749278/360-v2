@@ -1004,6 +1004,66 @@ class TestPR3GovernanceRuntimeRoles:
         ]
         assert specialist_live == ["360_SCALP_DIVERGENCE"]
 
+    def test_rollout_exclusion_counter_tracks_limited_live_non_pilot(self):
+        scanner = _make_scanner()
+        scanner._record_rollout_live_exclusion("360_SCALP_DIVERGENCE", "SOLUSDT")
+        assert (
+            scanner._channel_funnel_counters[
+                "rollout_excluded:live:limited_live:360_SCALP_DIVERGENCE"
+            ]
+            == 1
+        )
+        assert (
+            scanner._channel_funnel_counters[
+                "rollout_excluded:live:limited_live_non_pilot:360_SCALP_DIVERGENCE"
+            ]
+            == 1
+        )
+
+    def test_rollout_exclusion_counter_tracks_non_live_state(self):
+        scanner = _make_scanner()
+        scanner._record_rollout_live_exclusion("360_SCALP_FVG", "BTCUSDT")
+        assert scanner._channel_funnel_counters["rollout_excluded:live:radar_only:360_SCALP_FVG"] == 1
+        assert (
+            scanner._channel_funnel_counters[
+                "rollout_excluded:live:limited_live_non_pilot:360_SCALP_FVG"
+            ]
+            == 0
+        )
+
+    @pytest.mark.asyncio
+    async def test_scan_symbol_emits_rollout_exclusion_for_non_pilot_live_skip(self):
+        chan = MagicMock()
+        chan.config.name = "360_SCALP_DIVERGENCE"
+        chan.evaluate.return_value = None
+        scanner = _make_scanner(
+            channels=[chan],
+            data_store=MagicMock(ticks={"SOLUSDT": []}),
+            pair_mgr=MagicMock(pairs={}),
+        )
+        scanner._build_scan_context = AsyncMock(
+            return_value=SimpleNamespace(
+                candles={},
+                indicators={},
+                smc_data={},
+                spread_pct=0.001,
+                regime_result=SimpleNamespace(regime=SimpleNamespace(value="TRENDING_UP")),
+            ),
+        )
+        scanner._update_btc_correlation = MagicMock()
+        with patch.dict(
+            "src.scanner.CHANNEL_LIMITED_LIVE_PILOT_SYMBOLS",
+            {"360_SCALP_DIVERGENCE": frozenset({"BTCUSDT"})},
+            clear=False,
+        ):
+            await scanner._scan_symbol("SOLUSDT", 10_000_000.0)
+        assert (
+            scanner._channel_funnel_counters[
+                "rollout_excluded:live:limited_live_non_pilot:360_SCALP_DIVERGENCE"
+            ]
+            == 1
+        )
+
     def test_should_not_channel_skip_specialist_in_volatile_unsuitable(self):
         scanner = _make_scanner()
         assert "360_SCALP_DIVERGENCE" in CHANNEL_VOLATILE_FAMILY_GOVERNED

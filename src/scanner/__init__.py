@@ -747,6 +747,17 @@ class Scanner:
             return not self._is_live_rollout_enabled_for_symbol(channel_name, symbol)
         return False
 
+    def _record_rollout_live_exclusion(self, channel_name: str, symbol: str) -> None:
+        """Emit explicit telemetry when rollout policy excludes a live-path evaluation."""
+        _state = self._resolve_channel_rollout_state(channel_name)
+        self._channel_funnel_counters[f"rollout_excluded:live:{_state}:{channel_name}"] += 1
+        if _state == "limited_live":
+            _pilot_symbols = CHANNEL_LIMITED_LIVE_PILOT_SYMBOLS.get(channel_name, frozenset())
+            if symbol not in _pilot_symbols:
+                self._channel_funnel_counters[
+                    f"rollout_excluded:live:limited_live_non_pilot:{channel_name}"
+                ] += 1
+
     def _channel_governance_snapshot(self) -> Dict[str, Dict[str, Any]]:
         """Build inspectable runtime/default governance truth for all channels."""
         _snapshot: Dict[str, Dict[str, Any]] = {}
@@ -3424,6 +3435,7 @@ class Scanner:
             # Controlled rollout gating (PR-5): explicit per-channel state
             # decides live eligibility with fail-closed semantics.
             if not self._is_live_rollout_enabled_for_symbol(chan_name, symbol):
+                self._record_rollout_live_exclusion(chan_name, symbol)
                 continue
             if self._should_skip_channel(symbol, chan_name, ctx):
                 continue
