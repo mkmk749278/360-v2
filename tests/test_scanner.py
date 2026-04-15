@@ -908,7 +908,11 @@ class TestPR3GovernanceRuntimeRoles:
         ctx.adx_val = 25.0
         result = scanner._should_skip_channel("ETHUSDT", "360_SCALP_DIVERGENCE", ctx)
         assert result is False
-        assert scanner._suppression_counters["volatile_unsuitable:family_governed:360_SCALP_DIVERGENCE"] == 1
+        assert (
+            scanner._suppression_counters[
+                "volatile_unsuitable:channel_preskip_bypassed:360_SCALP_DIVERGENCE"
+            ] == 1
+        )
         assert scanner._suppression_counters["volatile_unsuitable:360_SCALP_DIVERGENCE"] == 0
 
     @pytest.mark.asyncio

@@ -674,7 +674,7 @@ class Scanner:
 
     def _classify_channel_runtime_role(self, channel_name: str) -> str:
         """Return explicit runtime role for channel governance telemetry."""
-        _runtime_enabled = _CHANNEL_ENABLED_FLAGS.get(channel_name, True)
+        _runtime_enabled = _CHANNEL_ENABLED_FLAGS.get(channel_name, False)
         _default_enabled = CHANNEL_ENABLE_DEFAULTS.get(channel_name, False)
         _product_role = _CHANNEL_PRODUCT_ROLES.get(channel_name, "specialist")
         _radar_enabled = getattr(self, "on_radar_candidate", None) is not None
@@ -1814,7 +1814,7 @@ class Scanner:
             # PR-3: avoid whole-channel volatile pre-skip contradiction.
             # Let family/setup compatibility decide in _prepare_signal() so
             # volatile-valid families are not blocked before classification.
-            self._suppression_counters[f"volatile_unsuitable:family_governed:{chan_name}"] += 1
+            self._suppression_counters[f"volatile_unsuitable:channel_preskip_bypassed:{chan_name}"] += 1
         if chan_name in self.paused_channels:
             self._suppression_counters[f"paused_channel:{chan_name}"] += 1
             return True
