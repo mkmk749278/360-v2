@@ -130,10 +130,13 @@ def _make_scan_ready_scanner(
     )
 
 
-def _setup_pass() -> SetupAssessment:
+def _setup_pass(
+    setup_class: SetupClass = SetupClass.BREAKOUT_RETEST,
+    thesis: str | None = None,
+) -> SetupAssessment:
     return SetupAssessment(
-        setup_class=SetupClass.BREAKOUT_RETEST,
-        thesis="Breakout Retest",
+        setup_class=setup_class,
+        thesis=thesis or setup_class.value,
         channel_compatible=True,
         regime_compatible=True,
     )
@@ -854,6 +857,48 @@ class TestMTFGateInScanner:
 
         # With all gates passing, signal is enqueued.
         signal_queue.put.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_mtf_gate_uses_relaxed_min_score_for_reclaim_family(self):
+        scanner, signal_queue = self._scanner_and_queue()
+        mock_mtf = MagicMock(return_value=(False, "MTF misaligned"))
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.FAILED_AUCTION_RECLAIM)),
+            patch("src.scanner.check_mtf_gate", mock_mtf),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_not_awaited()
+        called_min_score = mock_mtf.call_args.kwargs["min_score"]
+        assert called_min_score == pytest.approx(0.35)
+
+    @pytest.mark.asyncio
+    async def test_mtf_gate_reject_tracks_family_and_setup_counters(self):
+        scanner, signal_queue = self._scanner_and_queue()
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.FAILED_AUCTION_RECLAIM)),
+            patch("src.scanner.check_mtf_gate", return_value=(False, "MTF misaligned")),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_not_awaited()
+        assert scanner._suppression_counters["mtf_gate_family:360_SCALP:reclaim_retest"] == 1
+        assert scanner._suppression_counters["mtf_gate_setup:360_SCALP:FAILED_AUCTION_RECLAIM"] == 1
+
+    @pytest.mark.asyncio
+    async def test_mtf_policy_saved_counter_when_relaxed_policy_preserves_candidate(self):
+        scanner, signal_queue = self._scanner_and_queue()
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.FAILED_AUCTION_RECLAIM)),
+            patch("src.scanner.check_mtf_gate", side_effect=[(True, ""), (False, "generic fails")]),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_awaited_once()
+        assert scanner._suppression_counters["mtf_policy_saved:360_SCALP:reclaim_retest"] == 1
 
 
 class TestVWAPGateInScanner:
