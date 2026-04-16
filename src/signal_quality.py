@@ -368,6 +368,11 @@ _RECLAIM_RETEST_SETUPS: frozenset[SetupClass] = frozenset({
 
 _MIN_SL_DISTANCE_PCT_DEFAULT = 0.0005  # 0.05% of entry price
 _MIN_SL_DISTANCE_PCT_RECLAIM_RETEST = 0.0003  # 0.03% for structural reclaim/retest
+# Separate from near-zero SL policy above: this guard only controls the
+# "risk_distance_too_tight" rejection in build_risk_plan().
+# reclaim/retest thesis requires a tighter structural floor than generic setups.
+_MIN_RISK_DISTANCE_PCT_DEFAULT = 0.0003  # 0.03% baseline floor before buffer scaling
+_MIN_RISK_DISTANCE_PCT_RECLAIM_RETEST = 0.0001  # 0.01% reclaim/retest structural floor
 
 
 def _min_rr_for_setup(setup: SetupClass) -> float:
@@ -394,8 +399,8 @@ def _min_risk_distance_for_setup(
     setup: SetupClass,
 ) -> float:
     if setup in _RECLAIM_RETEST_SETUPS:
-        return entry * 0.0001
-    return max(entry * 0.0003, buffer * 0.5)
+        return entry * _MIN_RISK_DISTANCE_PCT_RECLAIM_RETEST
+    return max(entry * _MIN_RISK_DISTANCE_PCT_DEFAULT, buffer * 0.5)
 
 
 def _channel_max_sl_pct(channel: str) -> float:

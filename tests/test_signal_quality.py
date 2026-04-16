@@ -598,12 +598,12 @@ class TestFailedAuctionReclaimRiskPlan:
 
 
 class TestReclaimRetestGeometryPolicy:
-    def _high_atr_indicators(self) -> dict:
+    def _build_high_atr_indicators(self) -> dict:
         indicators = _indicators()
         indicators["5m"]["atr_last"] = 10.0
         return indicators
 
-    def test_far_tight_structural_risk_not_rejected_by_generic_buffer_floor(self):
+    def test_failed_auction_reclaim_accepts_tight_structural_stop_loss(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
         signal.entry = 100.0
         signal.stop_loss = 99.90  # 0.10% structural invalidation
@@ -614,7 +614,7 @@ class TestReclaimRetestGeometryPolicy:
 
         risk = build_risk_plan(
             signal=signal,
-            indicators=self._high_atr_indicators(),
+            indicators=self._build_high_atr_indicators(),
             candles={"5m": _candles(base=100.0, trend=0.0)},
             smc_data={"sweeps": [], "mss": None, "fvg": []},
             setup=SetupClass.FAILED_AUCTION_RECLAIM,
@@ -626,7 +626,7 @@ class TestReclaimRetestGeometryPolicy:
         assert risk.reason == ""
         assert risk.stop_loss == 99.9
 
-    def test_sr_flip_retest_tight_structural_risk_not_rejected_by_generic_buffer_floor(self):
+    def test_sr_flip_retest_accepts_tight_structural_stop_loss(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
         signal.entry = 100.0
         signal.stop_loss = 99.92  # 0.08% structural invalidation
@@ -636,7 +636,7 @@ class TestReclaimRetestGeometryPolicy:
 
         risk = build_risk_plan(
             signal=signal,
-            indicators=self._high_atr_indicators(),
+            indicators=self._build_high_atr_indicators(),
             candles={"5m": _candles(base=100.0, trend=0.0)},
             smc_data={"sweeps": [], "mss": None, "fvg": []},
             setup=SetupClass.SR_FLIP_RETEST,
@@ -659,7 +659,7 @@ class TestReclaimRetestGeometryPolicy:
 
         risk = build_risk_plan(
             signal=signal,
-            indicators=self._high_atr_indicators(),
+            indicators=self._build_high_atr_indicators(),
             candles={"5m": _candles(base=100.0, trend=0.0)},
             smc_data={"sweeps": [], "mss": None, "fvg": []},
             setup=SetupClass.FAILED_AUCTION_RECLAIM,
@@ -680,7 +680,7 @@ class TestReclaimRetestGeometryPolicy:
 
         risk = build_risk_plan(
             signal=signal,
-            indicators=self._high_atr_indicators(),
+            indicators=self._build_high_atr_indicators(),
             candles={"5m": _candles(base=100.0, trend=0.0)},
             smc_data={"sweeps": [], "mss": None, "fvg": []},
             setup=SetupClass.BREAKOUT_RETEST,
