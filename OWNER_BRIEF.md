@@ -1,43 +1,22 @@
-# OWNER BRIEF
+# Operating Manual
 
-**Date:** 2026-04-16  
+## Date: 2026-04-16
 
-## Part II: Executive Summary
+### Part I: Introduction
+... (rest of the content) 
 
-- PR-1 through PR-5 are merged and deployed.
-- Infrastructure is healthy, and observability has materially improved.
-- The engine is still not validation-ready.
-- Geometry rejection on reclaim/retest families is now the likely binding bottleneck.
-- MTF remains relevant but is no longer the best first lever.
+### Part II: Executive Summary / Current Business Truth
+PR-1 through PR-5 are already merged and deployed, infrastructure is healthy, observability materially improved, the engine is still not validation-ready, geometry rejection on reclaim/retest families is now the likely binding bottleneck, and MTF remains relevant but is no longer the best first lever.
 
-## Part V: Current Phase
+### Part VI: Roadmap
+The authoritative ordered roadmap is now:
+- PR-6: reclaim/retest geometry policy repair
+- PR-7: active-path scoring ceiling correction
+- PR-8: duplicate lifecycle/terminal event integrity hardening
+- PR-9: continuity and operating truth sync
+- PR-10: specialist pilot reassessment
 
-- The current phase reflects healthy infrastructure but insufficient validation-capable expression.
+PR #166 exists as the first implementation attempt for PR-6, review concluded direction is correct but scope is too broad, near_zero_sl doctrine must remain unchanged in the first pass, and the intended narrowed implementation is reclaim/retest-specific risk_distance_too_tight repair plus only strictly necessary targeted SL-cap/R:R interaction repair.
 
-## Part VI: Future Roadmap
-
-- The ordered authoritative roadmap is as follows:  
-  - PR-6: Reclaim/retest geometry policy repair.  
-  - PR-7: Active-path scoring ceiling correction.  
-  - PR-8: Duplicate lifecycle/terminal event integrity hardening.  
-  - PR-9: Continuity and operating truth sync.  
-  - PR-10: Specialist pilot reassessment.  
-
-### PR-6 Details
-
-- PR #166 exists as the first implementation attempt.  
-- Review concluded direction is correct, but the scope is too broad.  
-- The near_zero_sl doctrine must remain unchanged in the first pass.  
-- The intended narrowed implementation is reclaim/retest-specific risk_distance_too_tight repair plus only strictly necessary targeted SL-cap/R:R interaction repair.
-
-## Part VII: Current System Snapshot
-
-- PR-1 through PR-5 are merged and deployed.
-- Executive review reports were added to docs on 2026-04-16 via PRs #163, #164, and #165.
-- The active main blocker is geometry rejection on reclaim/retest paths.
-- PR #166 is in draft and revision-blocked.
-- A GitHub Actions/Copilot billing or spending issue blocked the follow-up revision agent run.
-
----
-
-*The rest of the operating contract and historical material remains intact. This document serves as a full canonical operating manual rather than a short summary.*
+### Part VII: Current System Snapshot
+Reflects PR-1 through PR-5 merged and deployed, executive review reports added to docs on 2026-04-16 via PRs #163, #164, and #165, the active main blocker is geometry rejection on reclaim/retest paths, PR #166 is in draft and revision-blocked, and a GitHub Actions/Copilot billing or spending issue blocked the follow-up revision agent run.
