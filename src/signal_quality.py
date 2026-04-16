@@ -361,6 +361,14 @@ _MIN_RR_MEAN_REVERSION: float = 0.9  # Snap-back / funding extreme — fast thes
 _MIN_RR_STRUCTURED: float = 1.0      # S/R flip retest — structural confirmation at level
 _MIN_RR_DEFAULT: float = 1.2         # All other families — standard minimum R:R
 
+_RECLAIM_RETEST_SETUPS: frozenset[SetupClass] = frozenset({
+    SetupClass.SR_FLIP_RETEST,
+    SetupClass.FAILED_AUCTION_RECLAIM,
+})
+
+_MIN_SL_DISTANCE_PCT_DEFAULT = 0.0005  # 0.05% of entry price
+_MIN_SL_DISTANCE_PCT_RECLAIM_RETEST = 0.0003  # 0.03% for structural reclaim/retest
+
 
 def _min_rr_for_setup(setup: SetupClass) -> float:
     """Return canonical minimum R:R (reward/risk) by setup family policy."""
@@ -371,6 +379,23 @@ def _min_rr_for_setup(setup: SetupClass) -> float:
     if setup in (SetupClass.SR_FLIP_RETEST, SetupClass.FAILED_AUCTION_RECLAIM):
         return _MIN_RR_STRUCTURED
     return _MIN_RR_DEFAULT
+
+
+def _min_sl_distance_pct_for_setup(setup: SetupClass) -> float:
+    if setup in _RECLAIM_RETEST_SETUPS:
+        return _MIN_SL_DISTANCE_PCT_RECLAIM_RETEST
+    return _MIN_SL_DISTANCE_PCT_DEFAULT
+
+
+def _min_risk_distance_for_setup(
+    *,
+    entry: float,
+    buffer: float,
+    setup: SetupClass,
+) -> float:
+    if setup in _RECLAIM_RETEST_SETUPS:
+        return entry * 0.0001
+    return max(entry * 0.0003, buffer * 0.5)
 
 
 def _channel_max_sl_pct(channel: str) -> float:
@@ -423,7 +448,7 @@ def validate_geometry_against_policy(
             return False, "tp_order_invalid"
 
     risk = abs(entry - stop)
-    if risk < entry * 0.0005:
+    if risk < entry * _min_sl_distance_pct_for_setup(setup):
         return False, "near_zero_sl"
 
     if (risk / entry) > _channel_max_sl_pct(channel):
@@ -1102,7 +1127,7 @@ def build_risk_plan(
     # sub-penny tokens (e.g. BULLAUSDT) where ATR-based SL exceeds the channel
     # cap by a large margin and the resulting capped price rounds near zero.
     # Threshold: SL must be at least 0.05% away from entry.
-    _MIN_SL_DISTANCE_PCT = 0.0005  # 0.05% of entry price
+    _MIN_SL_DISTANCE_PCT = _min_sl_distance_pct_for_setup(setup)
     if signal.entry > 0:
         _sl_dist_abs = abs(signal.entry - stop_loss)
         _sl_min_required = signal.entry * _MIN_SL_DISTANCE_PCT
@@ -1154,7 +1179,7 @@ def build_risk_plan(
         )
 
     risk = abs(signal.entry - stop_loss)
-    if risk <= max(signal.entry * 0.0003, buffer * 0.5):
+    if risk <= _min_risk_distance_for_setup(entry=signal.entry, buffer=buffer, setup=setup):
         return RiskAssessment(
             passed=False,
             stop_loss=signal.stop_loss,
@@ -1314,14 +1339,7 @@ def build_risk_plan(
     r_multiple = round(abs(tp1 - signal.entry) / risk, 2) if risk else 0.0
     # Family-aware minimum R:R threshold — quick-exit families accept a lower
     # first target because the trade thesis resolves faster.
-    if setup in (SetupClass.RANGE_REJECTION, SetupClass.RANGE_FADE):
-        min_rr = _MIN_RR_RANGE
-    elif setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL):
-        min_rr = _MIN_RR_MEAN_REVERSION
-    elif setup in (SetupClass.SR_FLIP_RETEST, SetupClass.FAILED_AUCTION_RECLAIM):
-        min_rr = _MIN_RR_STRUCTURED
-    else:
-        min_rr = _MIN_RR_DEFAULT
+    min_rr = _min_rr_for_setup(setup)
     passed = r_multiple >= min_rr
     reason = "" if passed else f"rr {r_multiple:.2f} below {min_rr:.2f}"
     # Sanity check: reject if SL or any TP is negative, or SL distance > 5% of entry

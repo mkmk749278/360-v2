@@ -20,6 +20,7 @@ from src.signal_quality import (
     classify_setup,
     execution_quality_check,
     score_signal_components,
+    validate_geometry_against_policy,
 )
 from src.smc import Direction
 
@@ -594,6 +595,137 @@ class TestFailedAuctionReclaimRiskPlan:
         assert risk.tp3 > risk.tp2
         # FAR branch enforces at least a structured 1.2R first target.
         assert risk.r_multiple >= 1.2
+
+
+class TestReclaimRetestGeometryPolicy:
+    def _high_atr_indicators(self) -> dict:
+        indicators = _indicators()
+        indicators["5m"]["atr_last"] = 10.0
+        return indicators
+
+    def test_far_tight_structural_risk_not_rejected_by_generic_buffer_floor(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.stop_loss = 99.90  # 0.10% structural invalidation
+        signal.tp1 = 100.20
+        signal.tp2 = 100.40
+        signal.tp3 = 100.80
+        signal.far_reclaim_level = 99.95
+
+        risk = build_risk_plan(
+            signal=signal,
+            indicators=self._high_atr_indicators(),
+            candles={"5m": _candles(base=100.0, trend=0.0)},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            setup=SetupClass.FAILED_AUCTION_RECLAIM,
+            spread_pct=0.01,
+            channel="360_SCALP",
+        )
+
+        assert risk.passed is True
+        assert risk.reason == ""
+        assert risk.stop_loss == 99.9
+
+    def test_sr_flip_retest_tight_structural_risk_not_rejected_by_generic_buffer_floor(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.stop_loss = 99.92  # 0.08% structural invalidation
+        signal.tp1 = 100.16
+        signal.tp2 = 100.30
+        signal.tp3 = 100.45
+
+        risk = build_risk_plan(
+            signal=signal,
+            indicators=self._high_atr_indicators(),
+            candles={"5m": _candles(base=100.0, trend=0.0)},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            setup=SetupClass.SR_FLIP_RETEST,
+            spread_pct=0.01,
+            channel="360_SCALP",
+        )
+
+        assert risk.passed is True
+        assert risk.reason == ""
+        assert risk.stop_loss == 99.92
+
+    def test_reclaim_retest_still_rejects_near_zero_sl(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.stop_loss = 99.98  # 0.02% distance
+        signal.tp1 = 100.20
+        signal.tp2 = 100.40
+        signal.tp3 = 100.80
+        signal.far_reclaim_level = 99.95
+
+        risk = build_risk_plan(
+            signal=signal,
+            indicators=self._high_atr_indicators(),
+            candles={"5m": _candles(base=100.0, trend=0.0)},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            setup=SetupClass.FAILED_AUCTION_RECLAIM,
+            spread_pct=0.01,
+            channel="360_SCALP",
+        )
+
+        assert risk.passed is False
+        assert "near-zero SL rejected" in risk.reason
+
+    def test_non_reclaim_setup_keeps_generic_risk_tight_guard(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.stop_loss = 99.90  # same 0.10% distance as FAR test
+        signal.tp1 = 100.20
+        signal.tp2 = 100.40
+        signal.tp3 = 100.80
+
+        risk = build_risk_plan(
+            signal=signal,
+            indicators=self._high_atr_indicators(),
+            candles={"5m": _candles(base=100.0, trend=0.0)},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            setup=SetupClass.BREAKOUT_RETEST,
+            spread_pct=0.01,
+            channel="360_SCALP",
+        )
+
+        assert risk.passed is False
+        assert risk.reason == "risk distance too tight"
+
+
+class TestValidateGeometryPolicyReclaimRetest:
+    def test_reclaim_retest_allows_tighter_non_zero_sl(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.stop_loss = 99.96  # 0.04% distance
+        signal.tp1 = 100.06
+        signal.tp2 = 100.12
+        signal.tp3 = 100.20
+
+        valid, reason = validate_geometry_against_policy(
+            signal=signal,
+            setup=SetupClass.FAILED_AUCTION_RECLAIM,
+            channel="360_SCALP",
+        )
+
+        assert valid is True
+        assert reason == ""
+
+    def test_non_reclaim_setup_keeps_default_near_zero_guard(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.stop_loss = 99.96  # 0.04% distance
+        signal.tp1 = 100.06
+        signal.tp2 = 100.12
+        signal.tp3 = 100.20
+
+        valid, reason = validate_geometry_against_policy(
+            signal=signal,
+            setup=SetupClass.BREAKOUT_RETEST,
+            channel="360_SCALP",
+        )
+
+        assert valid is False
+        assert reason == "near_zero_sl"
 
 
 class TestMarketStateClassification:
