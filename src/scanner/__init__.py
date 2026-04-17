@@ -433,6 +433,8 @@ _PENALTY_MODULATION_BY_FAMILY: Dict[str, Dict[str, float]] = {
     "reclaim_retest": {"vwap": 0.75},
     "continuation": {"volume_div": 0.85},
 }
+_PENALTY_MODULATION_MIN_SCALE: float = 0.1
+_PENALTY_MODULATION_MAX_SCALE: float = 1.0
 
 
 def _normalize_candle_dict(cd: dict) -> dict:
@@ -2175,11 +2177,18 @@ class Scanner:
     ) -> Tuple[float, str]:
         _path_scale = _PENALTY_MODULATION_BY_SETUP.get(setup_class, {}).get(penalty_key)
         if _path_scale is not None:
-            return min(1.0, max(0.1, float(_path_scale))), "path"
+            return self._clamp_penalty_modulation_scale(_path_scale), "path"
         _family_scale = _PENALTY_MODULATION_BY_FAMILY.get(setup_family, {}).get(penalty_key)
         if _family_scale is not None:
-            return min(1.0, max(0.1, float(_family_scale))), "family"
+            return self._clamp_penalty_modulation_scale(_family_scale), "family"
         return 1.0, "none"
+
+    @staticmethod
+    def _clamp_penalty_modulation_scale(scale: float) -> float:
+        return min(
+            _PENALTY_MODULATION_MAX_SCALE,
+            max(_PENALTY_MODULATION_MIN_SCALE, float(scale)),
+        )
 
     def _modulate_penalty_base(
         self,

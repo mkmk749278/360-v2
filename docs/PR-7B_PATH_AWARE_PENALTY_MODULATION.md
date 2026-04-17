@@ -18,7 +18,8 @@ PR-7B introduces a narrow modulation layer for scanner soft penalties in `src/sc
   - `FAILED_AUCTION_RECLAIM`: VWAP `×0.60`
 - Breakout / displacement
   - `VOLUME_SURGE_BREAKOUT`: volume divergence `×0.60`
-  - `POST_DISPLACEMENT_CONTINUATION`: volume divergence `×0.65`, VWAP `×0.80`
+  - `POST_DISPLACEMENT_CONTINUATION`: volume divergence `×0.65`
+  - `POST_DISPLACEMENT_CONTINUATION`: VWAP `×0.80`
 - Trend-pullback
   - `TREND_PULLBACK_EMA`: kill zone `×0.70`
 - Continuation liquidity sweep

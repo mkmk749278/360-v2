@@ -250,6 +250,7 @@ class TestPathAwarePenaltyModulation:
         assert _PENALTY_MODULATION_BY_SETUP["VOLUME_SURGE_BREAKOUT"]["volume_div"] == pytest.approx(0.60)
         assert _PENALTY_MODULATION_BY_SETUP["TREND_PULLBACK_EMA"]["kill_zone"] == pytest.approx(0.70)
         assert _PENALTY_MODULATION_BY_SETUP["POST_DISPLACEMENT_CONTINUATION"]["volume_div"] == pytest.approx(0.65)
+        assert _PENALTY_MODULATION_BY_SETUP["POST_DISPLACEMENT_CONTINUATION"]["vwap"] == pytest.approx(0.80)
         assert _PENALTY_MODULATION_BY_SETUP["CONTINUATION_LIQUIDITY_SWEEP"]["volume_div"] == pytest.approx(0.75)
         # Family fallback remains narrow and bounded.
         assert _PENALTY_MODULATION_BY_FAMILY["reclaim_retest"]["vwap"] == pytest.approx(0.75)
@@ -392,9 +393,10 @@ class TestRegimeScaledVWAPPenalty:
         assert sig is not None
         # Unmapped path keeps full base 15.0 × ranging 1.0.
         assert sig.soft_penalty_total == pytest.approx(15.0, abs=0.1)
-        assert scanner._penalty_modulation_counters[
-            "modulated:vwap:360_SCALP:other:BREAKOUT_RETEST:path:0.60"
-        ] == 0
+        assert "VWAP" in sig.soft_gate_flags, "Gate must fire so zero modulation is meaningful."
+        assert not scanner._penalty_modulation_counters, (
+            "Unmapped path should not emit any modulation telemetry counters."
+        )
 
 
 # ---------------------------------------------------------------------------
