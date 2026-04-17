@@ -814,7 +814,7 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 
 ## Part VII — Current System Snapshot
 
-*(Updated: 2026-04-15 — canonical next-phase roadmap set from multi-model runtime-truth audits)*
+*(Updated: 2026-04-17 — scoring architecture status refreshed for PR-7A / PR-7B and PR-7C next step)*
 
 | Item | Status |
 |---|---|
@@ -823,10 +823,13 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | Pre-redeploy correction pass | ✅ Complete — PR-01 through PR-09 all merged (2026-04-11) |
 | Post-audit correction pass | ✅ Complete — PR-10 through PR-18 all merged (2026-04-12 to 2026-04-13) |
 | 2026-04-14 WATCHLIST lifecycle correction | ✅ Complete — PR #144 and PR #145 merged (2026-04-14) |
+| PR-7A family-aware scoring correction | ✅ Merged — scorer-side family thesis + regime-affinity corrections live; pre/post-penalty distribution telemetry live |
+| PR-7B path-aware penalty modulation | ✅ Merged — scanner-side targeted soft-penalty modulation live (path-targeted only; penalties preserved) |
+| PR-7C runtime validation hardening / observability refinement | 🟡 In progress / next — validation and observability hardening only; no threshold, router, or doctrine changes |
 | Internal `360_SCALP` evaluator set | 14 internal paths live |
 | Core engine quality | Strong core confirmed by multiple audits |
 | Strongest foundation paths | `FAILED_AUCTION_RECLAIM`, `CONTINUATION_LIQUIDITY_SWEEP`, `SR_FLIP_RETEST`, `TREND_PULLBACK_EMA`, `POST_DISPLACEMENT_CONTINUATION` |
-| Main current question | **How do we recover high-integrity multi-family expression while preserving protection and geometry integrity?** |
+| Main current question | **Do targeted paths show WATCHLIST → B migration and better downstream outcomes without broad quality drift after PR-7A/PR-7B?** |
 | Evaluator identity preservation | ✅ Complete (PR-01) |
 | Evaluator penalty preservation | ✅ Complete (PR-01, PR-15) |
 | Structural SL/TP preservation | ✅ Complete (PR-02, PR-14) |
@@ -841,13 +844,30 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | Duplicate lifecycle posting | ⚠️ Confirmed risk — now subordinate to the ordered PR-1..PR-5 roadmap |
 | Winner-takes-all | Eliminated (ARCH-2) |
 | Data pipeline | Complete (ARCH-3) — funding_rate and CVD wired into smc_data |
-| Family-aware scoring architecture | Live and downstream-faithful |
-| Current direction | Execute ordered PR-1..PR-5 roadmap from Part VI (family-aware expression recovery first) |
+| Family-aware scoring architecture | Live in scorer (PR-7A) and path-aware in scanner penalties (PR-7B); thresholds/router doctrine unchanged |
+| Current direction | Run PR-7C observability/validation hardening, then make next scoring decisions from runtime evidence |
 | Dominant live suppressors (multi-model audits + monitor truth) | Spread-quality rejection, `mtf_gate:360_SCALP`, quiet-floor suppression, geometry cap/reject friction |
 | Phase 1 scorecard | Not yet started — begins after PR-1..PR-2 establish trustworthy expression + geometry behavior |
 | Subscribers | None — deliberately. Phase 1 validation must complete first. |
 | Intelligence Layer | Concept only — gate: 2 weeks confirmed live data |
 | Self-Optimisation | Concept only — gate: 50+ live signals in history |
+
+### 7.1 PR-7A / PR-7B / PR-7C sequencing clarity (owner-facing)
+
+- **Already merged**
+  - **PR-7A (scorer-side):** family-aware scoring correction is live, including regime-affinity corrections and pre/post-penalty tier telemetry.
+  - **PR-7B (scanner-side):** path-targeted soft-penalty modulation is live; penalties are scaled (not removed) and only on explicitly mapped paths.
+- **In progress / next**
+  - **PR-7C:** runtime validation hardening and observability refinement to make post-PR-7A/7B effects easier to verify in production-like runtime. This is a visibility/validation pass, not a doctrine change.
+- **Doctrine status (unchanged)**
+  - Tier thresholds remain unchanged (`A+` 80+, `B` 65–79, `WATCHLIST` 50–64).
+  - Router/WATCHLIST doctrine remains unchanged.
+  - Hard safety gates remain unchanged.
+- **Operator validation focus now**
+  1. Confirm targeted paths show measurable **WATCHLIST → B** migration.
+  2. Check **penalty-modulation hit frequency** remains concentrated on intended mapped paths.
+  3. Track **downstream path outcomes** (emission/lifecycle) for those same paths.
+  4. Verify **no broad quality drift** outside targeted families/paths.
 
 ---
 
