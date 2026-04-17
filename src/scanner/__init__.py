@@ -431,6 +431,16 @@ _PENALTY_MODULATION_BY_SETUP: Dict[str, Dict[str, float]] = {
 _PENALTY_MODULATION_MIN_SCALE: float = 0.1
 _PENALTY_MODULATION_MAX_SCALE: float = 1.0
 
+# PR-7C: runtime validation focus paths for concise operator summaries.
+_PR7C_TARGET_SETUPS: frozenset[str] = frozenset({
+    "SR_FLIP_RETEST",
+    "FAILED_AUCTION_RECLAIM",
+    "TREND_PULLBACK_EMA",
+    "VOLUME_SURGE_BREAKOUT",
+    "POST_DISPLACEMENT_CONTINUATION",
+    "CONTINUATION_LIQUIDITY_SWEEP",
+})
+
 
 def _normalize_candle_dict(cd: dict) -> dict:
     """Ensure all array-like values in a candle dict are flat 1-D Python lists.
@@ -641,6 +651,9 @@ class Scanner:
         self._scoring_distribution_counters: Dict[str, int] = defaultdict(int)
         # PR-7B telemetry: explicit penalty modulation usage by gate/path/family.
         self._penalty_modulation_counters: Dict[str, int] = defaultdict(int)
+        # PR-7C telemetry: concise target-path migration and penalty-hit summaries.
+        self._target_path_tier_migration_counters: Dict[str, int] = defaultdict(int)
+        self._target_path_penalty_gate_counters: Dict[str, int] = defaultdict(int)
 
         # WS health-aware scan gating: counts consecutive cycles where both
         # WS managers are unhealthy, used to trigger an admin alert.
@@ -1391,6 +1404,25 @@ class Scanner:
                     dict(self._penalty_modulation_counters),
                 )
                 self._penalty_modulation_counters.clear()
+            if self._scan_cycle_count % 100 == 0:
+                _target_tier_summary = self._build_target_path_tier_migration_summary()
+                _target_penalty_summary = self._build_target_path_penalty_summary()
+                _target_funnel_summary, _target_outcome_summary = self._build_target_path_funnel_summary()
+                if (
+                    _target_tier_summary
+                    or _target_penalty_summary
+                    or _target_funnel_summary
+                    or _target_outcome_summary
+                ):
+                    log.info(
+                        "PR-7C target-path runtime summary (last 100 cycles): tier_migration={} penalty_hits={} funnel={} outcomes={}",
+                        _target_tier_summary,
+                        _target_penalty_summary,
+                        _target_funnel_summary,
+                        _target_outcome_summary,
+                    )
+                self._target_path_tier_migration_counters.clear()
+                self._target_path_penalty_gate_counters.clear()
             if (
                 self._scan_cycle_count % 100 == 0
                 and (self._path_funnel_counters or self._channel_funnel_counters)
@@ -2163,6 +2195,94 @@ class Scanner:
             f"{phase}:tier:{chan_name}:{setup_family}:{setup_class}:{tier}"
         ] += 1
 
+    @staticmethod
+    def _is_pr7c_target_setup(setup_class: Any) -> bool:
+        _setup = Scanner._normalize_setup_class(setup_class)
+        return _setup in _PR7C_TARGET_SETUPS
+
+    @staticmethod
+    def _target_path_summary_token(setup_class: str, setup_family: str) -> str:
+        return f"{setup_class}[{setup_family}]"
+
+    def _record_target_path_tier_migration(
+        self,
+        *,
+        setup_family: str,
+        setup_class: str,
+        pre_tier: str,
+        post_tier: str,
+    ) -> None:
+        """Record pre→post tier migration for PR-7C target paths."""
+        if not self._is_pr7c_target_setup(setup_class):
+            return
+        self._target_path_tier_migration_counters[
+            f"{setup_family}:{setup_class}:{pre_tier}->{post_tier}"
+        ] += 1
+
+    def _build_target_path_tier_migration_summary(self) -> Dict[str, Dict[str, int]]:
+        """Build operator-facing tier migration summary for PR-7C target paths."""
+        _summary: Dict[str, Dict[str, int]] = {}
+        for _key, _count in self._target_path_tier_migration_counters.items():
+            _segments = _key.split(":")
+            if len(_segments) != 3:
+                continue
+            _family, _setup, _transition = _segments
+            _tiers = _transition.split("->")
+            if len(_tiers) != 2:
+                continue
+            _pre_tier, _post_tier = _tiers
+            _token = self._target_path_summary_token(_setup, _family)
+            _bucket = _summary.setdefault(_token, {})
+            _bucket[_transition] = _bucket.get(_transition, 0) + _count
+            if self._is_tier_compressed(_pre_tier, _post_tier):
+                _bucket["pre_B_or_A+_compressed"] = _bucket.get("pre_B_or_A+_compressed", 0) + _count
+        return _summary
+
+    @staticmethod
+    def _is_tier_compressed(pre_tier: str, post_tier: str) -> bool:
+        return pre_tier in {"A+", "B"} and post_tier not in {"A+", "B"}
+
+    def _build_target_path_penalty_summary(self) -> Dict[str, Dict[str, int]]:
+        """Build operator-facing per-path penalty gate hit counts for PR-7C."""
+        _summary: Dict[str, Dict[str, int]] = {}
+        for _key, _count in self._target_path_penalty_gate_counters.items():
+            try:
+                _family, _setup, _gate = _key.split(":", 2)
+            except ValueError:
+                continue
+            _token = self._target_path_summary_token(_setup, _family)
+            _bucket = _summary.setdefault(_token, {})
+            _bucket[_gate] = _bucket.get(_gate, 0) + _count
+        return _summary
+
+    def _build_target_path_funnel_summary(self) -> Tuple[Dict[str, Dict[str, int]], Dict[str, Dict[str, int]]]:
+        """Build target-path stage funnel and lifecycle outcome summaries."""
+        _funnel_summary: Dict[str, Dict[str, int]] = {}
+        _outcome_summary: Dict[str, Dict[str, int]] = {}
+        for _key, _count in self._path_funnel_counters.items():
+            _parts = _key.split(":")
+            if not _parts:
+                continue
+            if _parts[0] == "lifecycle":
+                if len(_parts) != 5:
+                    continue
+                _, _outcome, _, _family, _setup = _parts
+                if not self._is_pr7c_target_setup(_setup):
+                    continue
+                _token = self._target_path_summary_token(_setup, _family)
+                _bucket = _outcome_summary.setdefault(_token, {})
+                _bucket[_outcome] = _bucket.get(_outcome, 0) + _count
+                continue
+            if len(_parts) != 4:
+                continue
+            _stage, _, _family, _setup = _parts
+            if not self._is_pr7c_target_setup(_setup):
+                continue
+            _token = self._target_path_summary_token(_setup, _family)
+            _bucket = _funnel_summary.setdefault(_token, {})
+            _bucket[_stage] = _bucket.get(_stage, 0) + _count
+        return _funnel_summary, _outcome_summary
+
     def _resolve_penalty_modulation_scale(
         self,
         *,
@@ -2202,6 +2322,8 @@ class Scanner:
         self._penalty_modulation_counters[
             f"modulated:{penalty_key}:{chan_name}:{setup_family}:{setup_class}:{_source}:{_scale:.2f}"
         ] += 1
+        if self._is_pr7c_target_setup(setup_class):
+            self._target_path_penalty_gate_counters[f"{setup_family}:{setup_class}:{penalty_key}"] += 1
         return _modulated
 
     def on_signal_lifecycle_outcome(self, sig: Any, outcome_label: str) -> None:
@@ -3178,6 +3300,7 @@ class Scanner:
         self._increment_path_funnel("scored", chan_name, _sc)
         self._suppression_counters[f"candidate_reached_scoring:{_sc}"] += 1
         self._scoring_tier_counters[f"candidate_reached_scoring:{_sc}"] += 1
+        _pre_penalty_tier_for_migration = classify_signal_tier(sig.confidence)
         # ── PR_09: Composite Signal Scoring Engine ────────────────────────
         # Overwrites sig.confidence and sig.signal_tier with the structured
         # 0-100 composite score.  Merges new dimension breakdown into the
@@ -3239,13 +3362,14 @@ class Scanner:
             # Merge new dimension scores into component_scores (preserves existing keys)
             sig.component_scores.update(_score_result)
             sig.confidence = _score_result["total"]
+            _pre_penalty_tier_for_migration = classify_signal_tier(sig.confidence)
             self._record_scoring_distribution(
                 phase="pre_penalty",
                 chan_name=chan_name,
                 setup_family=_sf,
                 setup_class=_sc,
                 score=sig.confidence,
-                tier=classify_signal_tier(sig.confidence),
+                tier=_pre_penalty_tier_for_migration,
             )
             if _score_result["total"] >= 80:
                 sig.signal_tier = "A+"
@@ -3278,6 +3402,12 @@ class Scanner:
                     setup_class=_sc,
                     score=sig.confidence,
                     tier=_below_tier,
+                )
+                self._record_target_path_tier_migration(
+                    setup_family=_sf,
+                    setup_class=_sc,
+                    pre_tier=_pre_penalty_tier_for_migration,
+                    post_tier=_below_tier,
                 )
                 return _reject("filtered", cross_verified)
             log.debug(
@@ -3315,6 +3445,12 @@ class Scanner:
             setup_class=_sc,
             score=sig.confidence,
             tier=sig.signal_tier,
+        )
+        self._record_target_path_tier_migration(
+            setup_family=_sf,
+            setup_class=_sc,
+            pre_tier=_pre_penalty_tier_for_migration,
+            post_tier=sig.signal_tier,
         )
 
         # ── PR_12: Statistical False-Positive Filter ──────────────────────
