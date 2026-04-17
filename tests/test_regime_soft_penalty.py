@@ -19,7 +19,12 @@ import pytest
 
 from src.channels.base import Signal
 from src.regime import MarketRegime
-from src.scanner import Scanner, _REGIME_PENALTY_MULTIPLIER
+from src.scanner import (
+    Scanner,
+    _PENALTY_MODULATION_BY_FAMILY,
+    _PENALTY_MODULATION_BY_SETUP,
+    _REGIME_PENALTY_MULTIPLIER,
+)
 from src.signal_quality import (
     ExecutionAssessment,
     RiskAssessment,
@@ -86,10 +91,10 @@ def _make_scanner(**kwargs) -> Scanner:
     return Scanner(**defaults)
 
 
-def _setup_pass() -> SetupAssessment:
+def _setup_pass(setup_class: SetupClass = SetupClass.BREAKOUT_RETEST) -> SetupAssessment:
     return SetupAssessment(
-        setup_class=SetupClass.BREAKOUT_RETEST,
-        thesis="Breakout Retest",
+        setup_class=setup_class,
+        thesis=setup_class.value,
         channel_compatible=True,
         regime_compatible=True,
     )
@@ -236,6 +241,31 @@ class TestRegimePenaltyMultiplierTable:
         assert _REGIME_PENALTY_MULTIPLIER["RANGING"] == 1.0
 
 
+class TestPathAwarePenaltyModulation:
+    """PR-7B: targeted modulation scales only intended penalty/path pairs."""
+
+    def test_pr7b_mapping_contains_expected_targets(self):
+        assert _PENALTY_MODULATION_BY_SETUP["SR_FLIP_RETEST"]["vwap"] == pytest.approx(0.60)
+        assert _PENALTY_MODULATION_BY_SETUP["FAILED_AUCTION_RECLAIM"]["vwap"] == pytest.approx(0.60)
+        assert _PENALTY_MODULATION_BY_SETUP["VOLUME_SURGE_BREAKOUT"]["volume_div"] == pytest.approx(0.60)
+        assert _PENALTY_MODULATION_BY_SETUP["TREND_PULLBACK_EMA"]["kill_zone"] == pytest.approx(0.70)
+        assert _PENALTY_MODULATION_BY_SETUP["POST_DISPLACEMENT_CONTINUATION"]["volume_div"] == pytest.approx(0.65)
+        assert _PENALTY_MODULATION_BY_SETUP["CONTINUATION_LIQUIDITY_SWEEP"]["volume_div"] == pytest.approx(0.75)
+        # Family fallback remains narrow and bounded.
+        assert _PENALTY_MODULATION_BY_FAMILY["reclaim_retest"]["vwap"] == pytest.approx(0.75)
+        assert _PENALTY_MODULATION_BY_FAMILY["continuation"]["volume_div"] == pytest.approx(0.85)
+
+    def test_family_fallback_resolves_when_path_not_explicit(self):
+        scanner = _make_scanner()
+        scale, source = scanner._resolve_penalty_modulation_scale(
+            setup_class="UNKNOWN_CONTINUATION_PATH",
+            setup_family="continuation",
+            penalty_key="volume_div",
+        )
+        assert scale == pytest.approx(0.85)
+        assert source == "family"
+
+
 # ---------------------------------------------------------------------------
 # 2. Regime-scaled VWAP penalty
 # ---------------------------------------------------------------------------
@@ -303,6 +333,69 @@ class TestRegimeScaledVWAPPenalty:
         assert sig.soft_penalty_total == pytest.approx(9.0, abs=0.1)
         assert sig.regime_penalty_multiplier == pytest.approx(0.6)
 
+    @pytest.mark.asyncio
+    async def test_vwap_penalty_is_modulated_for_reclaim_retest_path(self):
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal()
+        sq = MagicMock()
+        captured = {}
+
+        async def _capture(sig):
+            captured["sig"] = sig
+            return True
+
+        sq.put = AsyncMock(side_effect=_capture)
+        scanner = _make_scan_ready_scanner(
+            channel=channel, signal_queue=sq, regime=MarketRegime.RANGING
+        )
+
+        with _common_patches(scanner, extra=[
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.SR_FLIP_RETEST)),
+            patch("src.scanner.check_vwap_extension", return_value=(False, "VWAP: overextended")),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        sig = captured.get("sig")
+        assert sig is not None
+        # 360_SCALP VWAP base 15.0 × path modulation 0.60 × ranging 1.0 = 9.0
+        assert sig.soft_penalty_total == pytest.approx(9.0, abs=0.1)
+        assert "VWAP" in sig.soft_gate_flags
+        assert scanner._penalty_modulation_counters[
+            "modulated:vwap:360_SCALP:reclaim_retest:SR_FLIP_RETEST:path:0.60"
+        ] == 1
+
+    @pytest.mark.asyncio
+    async def test_vwap_penalty_unaffected_for_unmapped_path(self):
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal()
+        sq = MagicMock()
+        captured = {}
+
+        async def _capture(sig):
+            captured["sig"] = sig
+            return True
+
+        sq.put = AsyncMock(side_effect=_capture)
+        scanner = _make_scan_ready_scanner(
+            channel=channel, signal_queue=sq, regime=MarketRegime.RANGING
+        )
+
+        with _common_patches(scanner, extra=[
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.BREAKOUT_RETEST)),
+            patch("src.scanner.check_vwap_extension", return_value=(False, "VWAP: overextended")),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        sig = captured.get("sig")
+        assert sig is not None
+        # Unmapped path keeps full base 15.0 × ranging 1.0.
+        assert sig.soft_penalty_total == pytest.approx(15.0, abs=0.1)
+        assert scanner._penalty_modulation_counters[
+            "modulated:vwap:360_SCALP:other:BREAKOUT_RETEST:path:0.60"
+        ] == 0
+
 
 # ---------------------------------------------------------------------------
 # 3. Multiple soft gates accumulate
@@ -353,6 +446,44 @@ class TestMultipleSoftGatesAccumulate:
         assert sig.soft_penalty_total == pytest.approx(23.0, abs=0.1)
         assert "VWAP" in sig.soft_gate_flags
         assert "OI" in sig.soft_gate_flags
+
+    @pytest.mark.asyncio
+    async def test_post_displacement_gets_only_relevant_modulation(self):
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal()
+        sq = MagicMock()
+
+        captured = {}
+
+        async def _capture(sig):
+            captured["sig"] = sig
+            return True
+
+        sq.put = AsyncMock(side_effect=_capture)
+        scanner = _make_scan_ready_scanner(
+            channel=channel, signal_queue=sq, regime=MarketRegime.RANGING
+        )
+
+        with _common_patches(scanner, extra=[
+            patch.object(
+                scanner,
+                "_evaluate_setup",
+                return_value=_setup_pass(SetupClass.POST_DISPLACEMENT_CONTINUATION),
+            ),
+            patch("src.scanner.check_kill_zone_gate", return_value=(False, "Kill zone: WEEKEND")),
+            patch("src.scanner.check_volume_divergence_gate", return_value=(False, "Volume divergence")),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        sig = captured.get("sig")
+        assert sig is not None
+        # KZ stays unmodulated for this path (10.0) while VOL_DIV is modulated:
+        # 12.0 × 0.65 = 7.8. Total = 17.8 (ranging multiplier=1.0).
+        assert sig.soft_penalty_total == pytest.approx(17.8, abs=0.1)
+        flags = sig.soft_gate_flags.split(",")
+        assert "KZ" in flags
+        assert "VOL_DIV" in flags
 
 
 # ---------------------------------------------------------------------------

@@ -415,6 +415,25 @@ _CHANNEL_PENALTY_WEIGHTS: Dict[str, Dict[str, float]] = {
     "360_SCALP_ORDERBLOCK":  {"vwap": 12.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0},
 }
 
+# PR-7B: Path/family-aware modulation of soft-penalty base weights.
+# Doctrine guardrails:
+# - penalties are preserved (scale > 0)
+# - hard gates are unchanged
+# - modulation is narrow and explicit (path-first, family fallback)
+_PENALTY_MODULATION_BY_SETUP: Dict[str, Dict[str, float]] = {
+    "SR_FLIP_RETEST": {"vwap": 0.60},
+    "FAILED_AUCTION_RECLAIM": {"vwap": 0.60},
+    "VOLUME_SURGE_BREAKOUT": {"volume_div": 0.60},
+    "POST_DISPLACEMENT_CONTINUATION": {"volume_div": 0.65, "vwap": 0.80},
+    "TREND_PULLBACK_EMA": {"kill_zone": 0.70},
+    "CONTINUATION_LIQUIDITY_SWEEP": {"volume_div": 0.75},
+}
+
+_PENALTY_MODULATION_BY_FAMILY: Dict[str, Dict[str, float]] = {
+    "reclaim_retest": {"vwap": 0.75},
+    "continuation": {"volume_div": 0.85},
+}
+
 
 def _normalize_candle_dict(cd: dict) -> dict:
     """Ensure all array-like values in a candle dict are flat 1-D Python lists.
@@ -623,6 +642,8 @@ class Scanner:
         # Scoring distribution telemetry: pre-penalty vs post-penalty score
         # bands and tiers by channel/family/path for PR-7A runtime validation.
         self._scoring_distribution_counters: Dict[str, int] = defaultdict(int)
+        # PR-7B telemetry: explicit penalty modulation usage by gate/path/family.
+        self._penalty_modulation_counters: Dict[str, int] = defaultdict(int)
 
         # WS health-aware scan gating: counts consecutive cycles where both
         # WS managers are unhealthy, used to trigger an admin alert.
@@ -1367,6 +1388,12 @@ class Scanner:
                     dict(self._scoring_distribution_counters),
                 )
                 self._scoring_distribution_counters.clear()
+            if self._scan_cycle_count % 100 == 0 and self._penalty_modulation_counters:
+                log.info(
+                    "Penalty modulation distribution (last 100 cycles): {}",
+                    dict(self._penalty_modulation_counters),
+                )
+                self._penalty_modulation_counters.clear()
             if (
                 self._scan_cycle_count % 100 == 0
                 and (self._path_funnel_counters or self._channel_funnel_counters)
@@ -2139,6 +2166,43 @@ class Scanner:
             f"{phase}:tier:{chan_name}:{setup_family}:{setup_class}:{tier}"
         ] += 1
 
+    def _resolve_penalty_modulation_scale(
+        self,
+        *,
+        setup_class: str,
+        setup_family: str,
+        penalty_key: str,
+    ) -> Tuple[float, str]:
+        _path_scale = _PENALTY_MODULATION_BY_SETUP.get(setup_class, {}).get(penalty_key)
+        if _path_scale is not None:
+            return min(1.0, max(0.1, float(_path_scale))), "path"
+        _family_scale = _PENALTY_MODULATION_BY_FAMILY.get(setup_family, {}).get(penalty_key)
+        if _family_scale is not None:
+            return min(1.0, max(0.1, float(_family_scale))), "family"
+        return 1.0, "none"
+
+    def _modulate_penalty_base(
+        self,
+        *,
+        base: float,
+        penalty_key: str,
+        chan_name: str,
+        setup_family: str,
+        setup_class: str,
+    ) -> float:
+        _scale, _source = self._resolve_penalty_modulation_scale(
+            setup_class=setup_class,
+            setup_family=setup_family,
+            penalty_key=penalty_key,
+        )
+        if _scale >= 0.999:
+            return base
+        _modulated = round(base * _scale, 1)
+        self._penalty_modulation_counters[
+            f"modulated:{penalty_key}:{chan_name}:{setup_family}:{setup_class}:{_source}:{_scale:.2f}"
+        ] += 1
+        return _modulated
+
     def on_signal_lifecycle_outcome(self, sig: Any, outcome_label: str) -> None:
         """Record final lifecycle outcome against origin setup family/path."""
         _chan_name = getattr(sig, "channel", "") or "UNKNOWN"
@@ -2633,11 +2697,18 @@ class Scanner:
                 )
                 if not vwap_allowed:
                     _base = _penalty_weights.get("vwap", 12.0)
+                    _base = self._modulate_penalty_base(
+                        base=_base,
+                        penalty_key="vwap",
+                        chan_name=chan_name,
+                        setup_family=_setup_family,
+                        setup_class=_setup_class_name,
+                    )
                     _scaled = round(_base * regime_mult, 1)
                     soft_penalty += _scaled
                     _fired_gates.append("VWAP")
                     log.debug(
-                        "SOFT_PENALTY {} {} {:+.1f} (base={:.0f} × regime={:.1f}) total={:.1f}: {}",
+                        "SOFT_PENALTY {} {} {:+.1f} (base={:.1f} × regime={:.1f}) total={:.1f}: {}",
                         symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, vwap_reason,
                     )
             except Exception as _vwap_exc:
@@ -2650,11 +2721,18 @@ class Scanner:
             kz_allowed, kz_reason = check_kill_zone_gate(minimum_multiplier=_kz_min_mult)
             if not kz_allowed:
                 _base = _penalty_weights.get("kill_zone", 10.0)
+                _base = self._modulate_penalty_base(
+                    base=_base,
+                    penalty_key="kill_zone",
+                    chan_name=chan_name,
+                    setup_family=_setup_family,
+                    setup_class=_setup_class_name,
+                )
                 _scaled = round(_base * regime_mult, 1)
                 soft_penalty += _scaled
                 _fired_gates.append("KZ")
                 log.debug(
-                    "SOFT_PENALTY {} {} {:+.1f} (base={:.0f} × regime={:.1f}) total={:.1f}: {}",
+                    "SOFT_PENALTY {} {} {:+.1f} (base={:.1f} × regime={:.1f}) total={:.1f}: {}",
                     symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, kz_reason,
                 )
 
@@ -2797,11 +2875,18 @@ class Scanner:
                 )
                 if not vol_div_allowed:
                     _base = _penalty_weights.get("volume_div", 10.0)
+                    _base = self._modulate_penalty_base(
+                        base=_base,
+                        penalty_key="volume_div",
+                        chan_name=chan_name,
+                        setup_family=_setup_family,
+                        setup_class=_setup_class_name,
+                    )
                     _scaled = round(_base * regime_mult, 1)
                     soft_penalty += _scaled
                     _fired_gates.append("VOL_DIV")
                     log.debug(
-                        "SOFT_PENALTY {} {} {:+.1f} (base={:.0f} × regime={:.1f}) total={:.1f}: {}",
+                        "SOFT_PENALTY {} {} {:+.1f} (base={:.1f} × regime={:.1f}) total={:.1f}: {}",
                         symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, vol_div_reason,
                     )
             except Exception as _vol_div_exc:
