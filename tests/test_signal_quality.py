@@ -693,7 +693,7 @@ class TestReclaimRetestGeometryPolicy:
 
 
 class TestValidateGeometryPolicyReclaimRetest:
-    def test_reclaim_retest_allows_tighter_non_zero_sl(self):
+    def test_reclaim_retest_keeps_default_near_zero_guard(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
         signal.entry = 100.0
         signal.stop_loss = 99.96  # 0.04% distance
@@ -707,8 +707,8 @@ class TestValidateGeometryPolicyReclaimRetest:
             channel="360_SCALP",
         )
 
-        assert valid is True
-        assert reason == ""
+        assert valid is False
+        assert reason == "near_zero_sl"
 
     def test_non_reclaim_setup_keeps_default_near_zero_guard(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
