@@ -1488,18 +1488,29 @@ class SignalScoringEngine:
     is not well captured by the globally uniform base dimensions.
     """
 
-    # Setup classes that strongly align with each regime
+    # Setup classes that strongly align with each regime.
+    # PR-7A doctrine note on full-affinity additions:
+    # - SR_FLIP_RETEST in TRENDING_UP/DOWN: this is not merely trend-compatible;
+    #   in live trend regimes, role-flip continuation/retest is a primary way
+    #   trend persistence expresses with controlled invalidation.
+    # - FAILED_AUCTION_RECLAIM in RANGING: failed acceptance + reclaim is a core
+    #   ranging auction behaviour, not a marginal edge case.
+    # - POST_DISPLACEMENT_CONTINUATION in VOLATILE: post-impulse compression and
+    #   re-acceleration is a first-order continuation pattern in high-ATR states.
     _REGIME_SETUP_AFFINITY: Dict[str, List[str]] = {
         "TRENDING_UP": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
                         "THREE_WHITE_SOLDIERS", "WHALE_MOMENTUM", "VOLUME_SURGE_BREAKOUT",
-                        "CONTINUATION_LIQUIDITY_SWEEP"],
+                        "CONTINUATION_LIQUIDITY_SWEEP", "TREND_PULLBACK_EMA",
+                        "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION"],
         "TRENDING_DOWN": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
                           "THREE_BLACK_CROWS", "WHALE_MOMENTUM", "BREAKDOWN_SHORT",
-                          "CONTINUATION_LIQUIDITY_SWEEP"],
-        "RANGING": ["RANGE_FADE", "SWING_STANDARD"],
+                          "CONTINUATION_LIQUIDITY_SWEEP", "TREND_PULLBACK_EMA",
+                          "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION"],
+        "RANGING": ["RANGE_FADE", "SWING_STANDARD", "SR_FLIP_RETEST", "FAILED_AUCTION_RECLAIM"],
         "QUIET": ["RANGE_FADE"],
         "VOLATILE": ["WHALE_MOMENTUM", "LIQUIDITY_SWEEP_REVERSAL",
-                     "VOLUME_SURGE_BREAKOUT", "BREAKDOWN_SHORT"],
+                     "VOLUME_SURGE_BREAKOUT", "BREAKDOWN_SHORT",
+                     "CONTINUATION_LIQUIDITY_SWEEP", "POST_DISPLACEMENT_CONTINUATION"],
     }
 
     # ── Family classification sets ─────────────────────────────────────────
@@ -1532,12 +1543,43 @@ class SignalScoringEngine:
         "CONTINUATION_LIQUIDITY_SWEEP",
     })
 
-    # Trend / continuation, breakout / measured-move, quiet-specialist, and
-    # WHALE_MOMENTUM are well-served by the shared base scoring; no thesis
-    # adjustment is applied to them.
+    # Reclaim / retest paths need explicit thesis credit for structural reclaim
+    # confirmation; the shared base score under-credits this family.
+    _FAMILY_RECLAIM_RETEST: frozenset = frozenset({
+        "SR_FLIP_RETEST",
+        "FAILED_AUCTION_RECLAIM",
+    })
+
+    # Trend pullback path needs bounded pullback-quality credit on top of
+    # generic indicator alignment.
+    _FAMILY_TREND_PULLBACK: frozenset = frozenset({
+        "TREND_PULLBACK_EMA",
+    })
+
+    # Breakout / displacement continuation paths need bounded thesis credit for
+    # expansion and re-acceleration evidence.
+    _FAMILY_BREAKOUT_DISPLACEMENT: frozenset = frozenset({
+        "VOLUME_SURGE_BREAKOUT",
+        "POST_DISPLACEMENT_CONTINUATION",
+    })
+
+    # Families not listed above remain on shared base scoring only.
 
     # Liquidation cap used for scaling liq-volume bonus (in USD)
     _LIQ_VOL_THESIS_CAP_USD: float = 5_000_000.0
+    # Family-thesis heuristics used by PR-7A scoring corrections.
+    _FRESH_SWEEP_INDEX_THRESHOLD: int = -3
+    # LONG and SHORT pullback ranges intentionally overlap in the neutral band;
+    # LONG uses a slightly tighter upper bound to avoid late-cycle overbought
+    # entries, while SHORT allows a slightly wider upper bound.
+    _PULLBACK_RSI_LONG_MIN: float = 40.0
+    _PULLBACK_RSI_LONG_MAX: float = 58.0
+    _PULLBACK_RSI_SHORT_MIN: float = 42.0
+    _PULLBACK_RSI_SHORT_MAX: float = 60.0
+    _PULLBACK_VOL_RATIO_NORMAL_MIN: float = 0.9
+    _PULLBACK_VOL_RATIO_NORMAL_MAX: float = 2.2
+    _RECLAIM_FRESH_SWEEP_BONUS: float = 1.0
+    _RECLAIM_STALE_SWEEP_BONUS: float = 0.5
 
     def score(self, inp: ScoringInput) -> Dict[str, float]:
         """Return a dict with per-dimension scores and a 'total' key.
@@ -1717,9 +1759,23 @@ class SignalScoringEngine:
         - Total: up to +4 pts, uncapped at zero (contra signals not penalised
           because the sweep itself carries the structural thesis).
 
-        **All other families** (trend/continuation, breakout/measured-move,
-        quiet-specialist, WHALE_MOMENTUM): 0 adjustment — the shared base
-        scoring is appropriate for these paths.
+        **Reclaim / retest family** (SR_FLIP_RETEST, FAILED_AUCTION_RECLAIM):
+        - Structural reclaim quality bonus (max +6 pts): counter-trend EMA at
+          entry, MSS confirmation, fresh sweep context, aligned order-flow.
+
+        **Trend-pullback family** (TREND_PULLBACK_EMA):
+        - Pullback-quality bonus (max +6 pts): EMA trend alignment, pullback RSI
+          zone, non-anomalous pullback volume, MTF alignment, trend regime fit.
+
+        **Breakout / displacement family**
+        (VOLUME_SURGE_BREAKOUT, POST_DISPLACEMENT_CONTINUATION):
+        - Expansion/continuation bonus (max +6 pts): volume expansion, MSS
+          confirmation, MTF support, and displacement continuation evidence.
+          Sweep presence is intentionally excluded for
+          POST_DISPLACEMENT_CONTINUATION to keep scoring thesis-faithful.
+
+        **All other families**: 0 adjustment — shared base scoring remains the
+        dominant model.
 
         Returns
         -------
@@ -1810,6 +1866,91 @@ class SignalScoringEngine:
                 cont_bonus += 2.0
             return min(4.0, cont_bonus)
 
-        # Trend / continuation, breakout / measured-move, quiet-specialist:
-        # shared base scoring is appropriate; no family thesis adjustment.
+        if setup in self._FAMILY_RECLAIM_RETEST:
+            reclaim_bonus = 0.0
+            if inp.ema_fast is not None and inp.ema_slow is not None:
+                ema_counter_trend = (
+                    (inp.direction == "LONG" and inp.ema_fast < inp.ema_slow) or
+                    (inp.direction == "SHORT" and inp.ema_fast > inp.ema_slow)
+                )
+                if ema_counter_trend:
+                    reclaim_bonus += 2.5
+            if inp.mss is not None:
+                reclaim_bonus += 1.5
+            sweeps = inp.sweeps or []
+            if sweeps:
+                reclaim_bonus += (
+                    self._RECLAIM_FRESH_SWEEP_BONUS
+                    if sweeps[0].index >= self._FRESH_SWEEP_INDEX_THRESHOLD
+                    else self._RECLAIM_STALE_SWEEP_BONUS
+                )
+            if inp.cvd_divergence is not None:
+                cvd_aligned = (
+                    (inp.direction == "LONG" and inp.cvd_divergence == "BULLISH") or
+                    (inp.direction == "SHORT" and inp.cvd_divergence == "BEARISH")
+                )
+                if cvd_aligned:
+                    reclaim_bonus += 1.0
+            if inp.oi_trend == "RISING":
+                reclaim_bonus += 1.0
+            return min(6.0, reclaim_bonus)
+
+        if setup in self._FAMILY_TREND_PULLBACK:
+            pullback_bonus = 0.0
+            if inp.ema_fast is not None and inp.ema_slow is not None:
+                ema_aligned = (
+                    (inp.direction == "LONG" and inp.ema_fast > inp.ema_slow) or
+                    (inp.direction == "SHORT" and inp.ema_fast < inp.ema_slow)
+                )
+                if ema_aligned:
+                    pullback_bonus += 2.0
+            if inp.rsi_last is not None:
+                in_pullback_zone = (
+                    (
+                        inp.direction == "LONG"
+                        and self._PULLBACK_RSI_LONG_MIN <= inp.rsi_last <= self._PULLBACK_RSI_LONG_MAX
+                    )
+                    or (
+                        inp.direction == "SHORT"
+                        and self._PULLBACK_RSI_SHORT_MIN <= inp.rsi_last <= self._PULLBACK_RSI_SHORT_MAX
+                    )
+                )
+                if in_pullback_zone:
+                    pullback_bonus += 1.5
+            if inp.volume_avg_usd > 0 and inp.volume_last_usd > 0:
+                ratio = inp.volume_last_usd / inp.volume_avg_usd
+                if self._PULLBACK_VOL_RATIO_NORMAL_MIN <= ratio <= self._PULLBACK_VOL_RATIO_NORMAL_MAX:
+                    pullback_bonus += 1.5
+                elif ratio > self._PULLBACK_VOL_RATIO_NORMAL_MAX:
+                    # Elevated pullback volume can still confirm participation,
+                    # but earns reduced credit vs the normal pullback range.
+                    pullback_bonus += 0.5
+                elif ratio < self._PULLBACK_VOL_RATIO_NORMAL_MIN:
+                    # Thin pullbacks do not add thesis confidence.
+                    pullback_bonus += 0.0
+            if inp.mtf_score >= 0.6:
+                pullback_bonus += 1.0
+            if inp.regime and inp.regime.upper() in {"TRENDING_UP", "TRENDING_DOWN"}:
+                pullback_bonus += 1.0
+            return min(6.0, pullback_bonus)
+
+        if setup in self._FAMILY_BREAKOUT_DISPLACEMENT:
+            breakout_bonus = 0.0
+            if inp.volume_avg_usd > 0 and inp.volume_last_usd > 0:
+                ratio = inp.volume_last_usd / inp.volume_avg_usd
+                if ratio >= 2.0:
+                    breakout_bonus += 3.0
+                elif ratio >= 1.5:
+                    breakout_bonus += 2.0
+                elif ratio >= 1.2:
+                    breakout_bonus += 1.0
+            if inp.mss is not None:
+                breakout_bonus += 1.5
+            if inp.mtf_score >= 0.6:
+                breakout_bonus += 1.0
+            if inp.regime and inp.regime.upper() in {"TRENDING_UP", "TRENDING_DOWN", "VOLATILE"}:
+                breakout_bonus += 0.5
+            return min(6.0, breakout_bonus)
+
+        # Families not explicitly covered above remain on shared base scoring.
         return 0.0

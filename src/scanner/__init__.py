@@ -482,6 +482,10 @@ class ScanContext:
     regime_context: Any = None  # RegimeContext from regime detector
 
 
+_SCORE_MIN: float = 0.0
+_SCORE_MAX: float = 100.0
+
+
 class Scanner:
     """Scans all pairs across channel strategies on every cycle.
 
@@ -616,6 +620,9 @@ class Scanner:
         # and score tier across cycles; logged every 100 scan cycles to diagnose
         # funnel distribution across paths.
         self._scoring_tier_counters: Dict[str, int] = defaultdict(int)
+        # Scoring distribution telemetry: pre-penalty vs post-penalty score
+        # bands and tiers by channel/family/path for PR-7A runtime validation.
+        self._scoring_distribution_counters: Dict[str, int] = defaultdict(int)
 
         # WS health-aware scan gating: counts consecutive cycles where both
         # WS managers are unhealthy, used to trigger an admin alert.
@@ -1354,6 +1361,12 @@ class Scanner:
                     dict(self._scoring_tier_counters),
                 )
                 self._scoring_tier_counters.clear()
+            if self._scan_cycle_count % 100 == 0 and self._scoring_distribution_counters:
+                log.info(
+                    "Scoring pre/post distribution (last 100 cycles): {}",
+                    dict(self._scoring_distribution_counters),
+                )
+                self._scoring_distribution_counters.clear()
             if (
                 self._scan_cycle_count % 100 == 0
                 and (self._path_funnel_counters or self._channel_funnel_counters)
@@ -2096,6 +2109,35 @@ class Scanner:
         _text = str(value or "unknown")
         _token = re.sub(r"[^A-Za-z0-9]+", "_", _text).strip("_")
         return _token or "unknown"
+
+    @staticmethod
+    def _score_band(score: float) -> str:
+        """Return a low-cardinality score band token for telemetry."""
+        _score = max(_SCORE_MIN, min(_SCORE_MAX, float(score)))
+        if _score >= _SCORE_MAX:
+            return "100"
+        _lower = int(_score // 10) * 10
+        _upper = _lower + 9
+        return f"{_lower:02d}-{_upper:02d}"
+
+    def _record_scoring_distribution(
+        self,
+        *,
+        phase: str,
+        chan_name: str,
+        setup_family: str,
+        setup_class: str,
+        score: float,
+        tier: str,
+    ) -> None:
+        """Track score/tier distribution by channel/family/path and phase."""
+        _band = self._score_band(score)
+        self._scoring_distribution_counters[
+            f"{phase}:band:{chan_name}:{setup_family}:{setup_class}:{_band}"
+        ] += 1
+        self._scoring_distribution_counters[
+            f"{phase}:tier:{chan_name}:{setup_family}:{setup_class}:{tier}"
+        ] += 1
 
     def on_signal_lifecycle_outcome(self, sig: Any, outcome_label: str) -> None:
         """Record final lifecycle outcome against origin setup family/path."""
@@ -3046,6 +3088,7 @@ class Scanner:
         # Per-path scoring telemetry: capture setup_class before entering the
         # scoring block so tier counters can be keyed by path (not just channel).
         _sc = getattr(sig, "setup_class", "UNKNOWN")
+        _sf = self._setup_family_for_channel(chan_name, _sc)
         self._increment_path_funnel("scored", chan_name, _sc)
         self._suppression_counters[f"candidate_reached_scoring:{_sc}"] += 1
         self._scoring_tier_counters[f"candidate_reached_scoring:{_sc}"] += 1
@@ -3110,6 +3153,14 @@ class Scanner:
             # Merge new dimension scores into component_scores (preserves existing keys)
             sig.component_scores.update(_score_result)
             sig.confidence = _score_result["total"]
+            self._record_scoring_distribution(
+                phase="pre_penalty",
+                chan_name=chan_name,
+                setup_family=_sf,
+                setup_class=_sc,
+                score=sig.confidence,
+                tier=classify_signal_tier(sig.confidence),
+            )
             if _score_result["total"] >= 80:
                 sig.signal_tier = "A+"
                 self._suppression_counters[f"score_80plus:{_sc}"] += 1
@@ -3133,6 +3184,15 @@ class Scanner:
                 self._suppression_counters[f"score_below50:{chan_name}"] += 1
                 self._suppression_counters[f"score_below50:{_sc}"] += 1
                 self._scoring_tier_counters[f"score_below50:{_sc}"] += 1
+                _below_tier = classify_signal_tier(sig.confidence)
+                self._record_scoring_distribution(
+                    phase="post_penalty",
+                    chan_name=chan_name,
+                    setup_family=_sf,
+                    setup_class=_sc,
+                    score=sig.confidence,
+                    tier=_below_tier,
+                )
                 return _reject("filtered", cross_verified)
             log.debug(
                 "composite score {} {} → {:.1f} (tier={}) smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",
@@ -3162,6 +3222,14 @@ class Scanner:
         # PR-15: Re-classify tier after full penalty so that WATCHLIST/floor decisions are
         # made on the true post-penalty confidence, not the stale pre-penalty scoring tier.
         sig.signal_tier = classify_signal_tier(sig.confidence)
+        self._record_scoring_distribution(
+            phase="post_penalty",
+            chan_name=chan_name,
+            setup_family=_sf,
+            setup_class=_sc,
+            score=sig.confidence,
+            tier=sig.signal_tier,
+        )
 
         # ── PR_12: Statistical False-Positive Filter ──────────────────────
         # Apply rolling win-rate gate after scoring. Fail-open when no history.

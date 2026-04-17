@@ -81,6 +81,58 @@ def test_scoring_tier_counters_dict_exists():
     assert scanner._scoring_tier_counters["nonexistent_key"] == 0
 
 
+def test_scoring_distribution_counters_dict_exists():
+    """Scanner.__init__ must create _scoring_distribution_counters."""
+    scanner = _make_scanner()
+    assert hasattr(scanner, "_scoring_distribution_counters")
+    assert isinstance(scanner._scoring_distribution_counters, defaultdict)
+    assert scanner._scoring_distribution_counters["nonexistent_key"] == 0
+
+
+def test_score_band_boundaries():
+    """_score_band should classify key range boundaries deterministically."""
+    assert Scanner._score_band(-1.0) == "00-09"
+    assert Scanner._score_band(0.0) == "00-09"
+    assert Scanner._score_band(9.9) == "00-09"
+    assert Scanner._score_band(10.0) == "10-19"
+    assert Scanner._score_band(64.9) == "60-69"
+    assert Scanner._score_band(99.9) == "90-99"
+    assert Scanner._score_band(100.0) == "100"
+
+
+def test_record_scoring_distribution_tracks_pre_and_post_keys():
+    """Distribution telemetry records both score-band and tier dimensions."""
+    scanner = _make_scanner()
+    scanner._record_scoring_distribution(
+        phase="pre_penalty",
+        chan_name="360_SCALP",
+        setup_family="reclaim_retest",
+        setup_class="SR_FLIP_RETEST",
+        score=67.5,
+        tier="B",
+    )
+    scanner._record_scoring_distribution(
+        phase="post_penalty",
+        chan_name="360_SCALP",
+        setup_family="reclaim_retest",
+        setup_class="SR_FLIP_RETEST",
+        score=61.0,
+        tier="WATCHLIST",
+    )
+    assert scanner._scoring_distribution_counters[
+        "pre_penalty:band:360_SCALP:reclaim_retest:SR_FLIP_RETEST:60-69"
+    ] == 1
+    assert scanner._scoring_distribution_counters[
+        "pre_penalty:tier:360_SCALP:reclaim_retest:SR_FLIP_RETEST:B"
+    ] == 1
+    assert scanner._scoring_distribution_counters[
+        "post_penalty:band:360_SCALP:reclaim_retest:SR_FLIP_RETEST:60-69"
+    ] == 1
+    assert scanner._scoring_distribution_counters[
+        "post_penalty:tier:360_SCALP:reclaim_retest:SR_FLIP_RETEST:WATCHLIST"
+    ] == 1
+
+
 # ---------------------------------------------------------------------------
 # Async tests: verify counters via injected score results
 # ---------------------------------------------------------------------------
