@@ -693,7 +693,7 @@ class TestReclaimRetestGeometryPolicy:
 
 
 class TestValidateGeometryPolicyReclaimRetest:
-    def test_reclaim_retest_rejects_tight_sl_with_default_guard(self):
+    def test_reclaim_retest_tight_sl_rejected_by_default_guard(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
         signal.entry = 100.0
         signal.stop_loss = 99.96  # 0.04% distance
