@@ -1226,6 +1226,8 @@ class TestMTFGateInScanner:
             await scanner._scan_symbol("BTCUSDT", 10_000_000)
 
         signal_queue.put.assert_not_awaited()
+        assert scanner._suppression_counters["mtf_gate_family:360_SCALP:other"] == 1
+        assert scanner._suppression_counters.get("mtf_semantic_eval:360_SCALP:other", 0) == 0
 
     @pytest.mark.asyncio
     async def test_mtf_gate_passes_signal_when_aligned(self):

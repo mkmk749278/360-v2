@@ -648,7 +648,7 @@ class TestReclaimRetestGeometryPolicy:
         assert risk.reason == ""
         assert risk.stop_loss == 99.92
 
-    def test_reclaim_retest_still_rejects_extreme_near_zero_sl(self):
+    def test_reclaim_retest_rejects_sl_below_family_floor(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
         signal.entry = 100.0
         signal.stop_loss = 99.98  # 0.02% distance

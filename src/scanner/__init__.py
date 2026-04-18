@@ -2169,7 +2169,7 @@ class Scanner:
         if setup_family not in _SCALP_MTF_SEMANTIC_FAMILIES:
             return False, "not_semantic_family"
         if not mtf_data:
-            return True, "semantic_fail_open_no_data"
+            return True, "semantic_allow_no_data"
 
         result = compute_mtf_confluence(
             signal_direction,
@@ -2178,7 +2178,7 @@ class Scanner:
             tf_weight_overrides=tf_weight_overrides,
         )
         if result.total_count == 0:
-            return True, "semantic_fail_open_no_valid_tf"
+            return True, "semantic_allow_no_valid_tf"
 
         wanted = "BULLISH" if signal_direction.upper() == "LONG" else "BEARISH"
         opposed = "BEARISH" if wanted == "BULLISH" else "BULLISH"
