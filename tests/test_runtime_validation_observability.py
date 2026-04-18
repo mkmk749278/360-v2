@@ -118,7 +118,7 @@ def test_target_path_funnel_summary_links_stage_and_outcome_counts():
     assert all("BREAKOUT_RETEST" not in key for key in funnel)
 
 
-def test_pr13_specialist_summary_retains_paths_without_runtime_evidence():
+def test_pr13_specialist_summary_insufficient_evidence_retention():
     scanner = _make_scanner()
     scanner._path_funnel_counters[
         "evaluator_attempted:360_SCALP:other:EVAL::WHALE_MOMENTUM"
@@ -139,7 +139,7 @@ def test_pr13_specialist_summary_retains_paths_without_runtime_evidence():
     assert "VOLUME_SURGE_BREAKOUT" not in summary
 
 
-def test_pr13_specialist_summary_stays_conservative_even_when_path_generates():
+def test_pr13_specialist_summary_conservative_with_evidence():
     scanner = _make_scanner()
     scanner._path_funnel_counters[
         "evaluator_attempted:360_SCALP:other:EVAL::FUNDING_EXTREME_SIGNAL"

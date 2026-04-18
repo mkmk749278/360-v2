@@ -2454,7 +2454,6 @@ class Scanner:
                 "emitted": _bucket["emitted"],
                 "evidence_ready_for_reactivation": _evidence_ready,
                 "decision": _decision,
-                "watch_metrics": "generated,scanner_preparation,emitted",
             }
         return _summary
 
