@@ -11,6 +11,7 @@ import pytest
 
 from config import CHANNEL_ENABLE_DEFAULTS, CHANNEL_VOLATILE_FAMILY_GOVERNED
 from src.channels.base import Signal
+from src.channels.scalp import ScalpChannel
 from src.regime import MarketRegime
 from src.scanner import Scanner, _RANGING_ADX_SUPPRESS_THRESHOLD
 from src.signal_quality import (
@@ -165,6 +166,80 @@ def _risk_pass() -> RiskAssessment:
         r_multiple=1.3,
         invalidation_summary="Below 96.0000 structure + volatility buffer",
     )
+
+
+def test_scalp_channel_exposes_per_evaluator_generation_telemetry(monkeypatch):
+    ch = ScalpChannel()
+    generated_sig = _make_signal(channel="360_SCALP", signal_id="SIG-TELEM")
+    generated_sig.setup_class = "TREND_PULLBACK_EMA"
+
+    for method_name in (
+        "_evaluate_standard",
+        "_evaluate_trend_pullback",
+        "_evaluate_liquidation_reversal",
+        "_evaluate_whale_momentum",
+        "_evaluate_volume_surge_breakout",
+        "_evaluate_breakdown_short",
+        "_evaluate_opening_range_breakout",
+        "_evaluate_sr_flip_retest",
+        "_evaluate_funding_extreme",
+        "_evaluate_quiet_compression_break",
+        "_evaluate_divergence_continuation",
+        "_evaluate_continuation_liquidity_sweep",
+        "_evaluate_post_displacement_continuation",
+        "_evaluate_failed_auction_reclaim",
+    ):
+        monkeypatch.setattr(ch, method_name, lambda *args, **kwargs: None)
+
+    monkeypatch.setattr(ch, "_evaluate_trend_pullback", lambda *args, **kwargs: generated_sig)
+    monkeypatch.setattr(ch, "_apply_kill_zone_note", lambda sig, profile=None: sig)
+
+    sigs = ch.evaluate(
+        "BTCUSDT",
+        {"5m": _candles()},
+        {"5m": {}},
+        {},
+        0.01,
+        10_000_000,
+    )
+
+    assert len(sigs) == 1
+    telemetry = ch.consume_generation_telemetry()
+    assert telemetry["attempts"]["TREND_PULLBACK"] == 1
+    assert telemetry["generated"]["TREND_PULLBACK"] == 1
+    assert telemetry["no_signal"]["STANDARD"] == 1
+    assert telemetry["no_signal_reason"]["STANDARD:none"] == 1
+    # consume_* should reset after read.
+    assert ch.consume_generation_telemetry() == {
+        "attempts": {},
+        "no_signal": {},
+        "no_signal_reason": {},
+        "generated": {},
+    }
+
+
+def test_scalp_channel_tracks_exception_non_generation_reason(monkeypatch):
+    ch = ScalpChannel()
+
+    def _raise_boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ch, "_evaluate_standard", _raise_boom)
+
+    with pytest.raises(RuntimeError):
+        ch.evaluate(
+            "BTCUSDT",
+            {"5m": _candles()},
+            {"5m": {}},
+            {},
+            0.01,
+            10_000_000,
+        )
+
+    telemetry = ch.consume_generation_telemetry()
+    assert telemetry["attempts"]["STANDARD"] == 1
+    assert telemetry["no_signal"]["STANDARD"] == 1
+    assert telemetry["no_signal_reason"]["STANDARD:exception"] == 1
 
 
 class TestScannerCooldown:
@@ -1410,16 +1485,37 @@ class TestMTFGateInScanner:
     async def test_path_funnel_distinguishes_no_candidate_and_gated(self):
         scanner, signal_queue = self._scanner_and_queue()
         scanner.channels[0].evaluate.return_value = None
+        scanner.channels[0].consume_generation_telemetry = MagicMock(return_value={
+            "attempts": {"TREND_PULLBACK": 1},
+            "no_signal": {"TREND_PULLBACK": 1},
+            "no_signal_reason": {"TREND_PULLBACK:none": 1},
+            "generated": {},
+        })
 
         with _common_gate_patches(scanner):
             await scanner._scan_symbol("BTCUSDT", 10_000_000)
 
         signal_queue.put.assert_not_awaited()
         assert scanner._channel_funnel_counters["no_candidate_generated:360_SCALP"] == 1
+        assert scanner._path_funnel_counters[
+            "evaluator_attempted:360_SCALP:other:EVAL::TREND_PULLBACK"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "evaluator_no_signal:360_SCALP:other:EVAL::TREND_PULLBACK"
+        ] == 1
+        assert scanner._channel_funnel_counters[
+            "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:none"
+        ] == 1
 
         raw_sig = _make_signal(channel="360_SCALP")
         raw_sig.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
         scanner.channels[0].evaluate.return_value = raw_sig
+        scanner.channels[0].consume_generation_telemetry = MagicMock(return_value={
+            "attempts": {"VOLUME_SURGE_BREAKOUT": 1},
+            "no_signal": {},
+            "no_signal_reason": {},
+            "generated": {"VOLUME_SURGE_BREAKOUT": 1},
+        })
 
         with _common_gate_patches(scanner, [
             patch("src.scanner.check_mtf_gate", return_value=(False, "MTF misaligned")),
@@ -1431,7 +1527,13 @@ class TestMTFGateInScanner:
             "generated:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
         ] == 1
         assert scanner._path_funnel_counters[
+            "scanner_preparation:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+        assert scanner._path_funnel_counters[
             "gated:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "evaluator_generated:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT"
         ] == 1
 
     @pytest.mark.asyncio
@@ -1499,6 +1601,11 @@ class TestMTFGateInScanner:
             if k.startswith("emitted:360_SCALP:")
         }
         assert sum(emitted.values()) == 1
+        scanner_prepared = {
+            k: v for k, v in scanner._path_funnel_counters.items()
+            if k.startswith("scanner_preparation:360_SCALP:")
+        }
+        assert sum(scanner_prepared.values()) == 1
 
     @pytest.mark.asyncio
     async def test_funnel_uses_explicit_prepare_reject_stage(self):

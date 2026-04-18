@@ -11,6 +11,7 @@ Risk    : SL 0.05–0.1 %, TP1 0.5–1R, TP2 1–1.5R, TP3 optional 20 %, Traili
 from __future__ import annotations
 
 import os
+from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -252,6 +253,33 @@ def _funding_extreme_structure_tp1(
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
         super().__init__(CHANNEL_SCALP)
+        self._generation_telemetry: Dict[str, Dict[str, int]] = {
+            "attempts": defaultdict(int),
+            "no_signal": defaultdict(int),
+            "no_signal_reason": defaultdict(int),
+            "generated": defaultdict(int),
+        }
+
+    def _reset_generation_telemetry(self) -> None:
+        self._generation_telemetry = {
+            "attempts": defaultdict(int),
+            "no_signal": defaultdict(int),
+            "no_signal_reason": defaultdict(int),
+            "generated": defaultdict(int),
+        }
+
+    @staticmethod
+    def _generation_path_token(evaluator_name: str) -> str:
+        token = evaluator_name.replace("_evaluate_", "").upper()
+        return token or "UNKNOWN"
+
+    def consume_generation_telemetry(self) -> Dict[str, Dict[str, int]]:
+        snapshot = {
+            stage: dict(counts)
+            for stage, counts in self._generation_telemetry.items()
+        }
+        self._reset_generation_telemetry()
+        return snapshot
 
     def _pass_basic_filters(
         self,
@@ -329,28 +357,40 @@ class ScalpChannel(BaseChannel):
         # Previously only the winner-takes-all best signal was returned, which
         # silently discarded all other valid setups.
         profile = smc_data.get("pair_profile") if smc_data else None
+        self._reset_generation_telemetry()
         results: List[Signal] = []
-        for evaluator in (
-            self._evaluate_standard,
-            self._evaluate_trend_pullback,
-            self._evaluate_liquidation_reversal,
-            self._evaluate_whale_momentum,
-            self._evaluate_volume_surge_breakout,
-            self._evaluate_breakdown_short,
-            self._evaluate_opening_range_breakout,
-            self._evaluate_sr_flip_retest,
-            self._evaluate_funding_extreme,
-            self._evaluate_quiet_compression_break,
-            self._evaluate_divergence_continuation,
-            self._evaluate_continuation_liquidity_sweep,
-            self._evaluate_post_displacement_continuation,
-            self._evaluate_failed_auction_reclaim,
+        for evaluator_name, evaluator in (
+            ("_evaluate_standard", self._evaluate_standard),
+            ("_evaluate_trend_pullback", self._evaluate_trend_pullback),
+            ("_evaluate_liquidation_reversal", self._evaluate_liquidation_reversal),
+            ("_evaluate_whale_momentum", self._evaluate_whale_momentum),
+            ("_evaluate_volume_surge_breakout", self._evaluate_volume_surge_breakout),
+            ("_evaluate_breakdown_short", self._evaluate_breakdown_short),
+            ("_evaluate_opening_range_breakout", self._evaluate_opening_range_breakout),
+            ("_evaluate_sr_flip_retest", self._evaluate_sr_flip_retest),
+            ("_evaluate_funding_extreme", self._evaluate_funding_extreme),
+            ("_evaluate_quiet_compression_break", self._evaluate_quiet_compression_break),
+            ("_evaluate_divergence_continuation", self._evaluate_divergence_continuation),
+            ("_evaluate_continuation_liquidity_sweep", self._evaluate_continuation_liquidity_sweep),
+            ("_evaluate_post_displacement_continuation", self._evaluate_post_displacement_continuation),
+            ("_evaluate_failed_auction_reclaim", self._evaluate_failed_auction_reclaim),
         ):
-            sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
+            _path = self._generation_path_token(evaluator_name)
+            self._generation_telemetry["attempts"][_path] += 1
+            try:
+                sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
+            except Exception:
+                self._generation_telemetry["no_signal"][_path] += 1
+                self._generation_telemetry["no_signal_reason"][f"{_path}:exception"] += 1
+                raise
             if sig is not None:
+                self._generation_telemetry["generated"][_path] += 1
                 # Apply kill zone check and mark reduced-conviction signals
                 sig_with_kz = self._apply_kill_zone_note(sig, profile=profile)
                 results.append(sig_with_kz)
+            else:
+                self._generation_telemetry["no_signal"][_path] += 1
+                self._generation_telemetry["no_signal_reason"][f"{_path}:none"] += 1
         return results
 
     # ------------------------------------------------------------------
