@@ -1508,16 +1508,19 @@ class SignalScoringEngine:
         "TRENDING_UP": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
                         "THREE_WHITE_SOLDIERS", "WHALE_MOMENTUM", "VOLUME_SURGE_BREAKOUT",
                         "CONTINUATION_LIQUIDITY_SWEEP", "TREND_PULLBACK_EMA",
-                        "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION"],
+                        "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION",
+                        "DIVERGENCE_CONTINUATION"],
         "TRENDING_DOWN": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
                           "THREE_BLACK_CROWS", "WHALE_MOMENTUM", "BREAKDOWN_SHORT",
                           "CONTINUATION_LIQUIDITY_SWEEP", "TREND_PULLBACK_EMA",
-                          "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION"],
+                          "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION",
+                          "DIVERGENCE_CONTINUATION"],
         "RANGING": ["RANGE_FADE", "SWING_STANDARD", "SR_FLIP_RETEST", "FAILED_AUCTION_RECLAIM"],
-        "QUIET": ["RANGE_FADE"],
+        "QUIET": ["RANGE_FADE", "QUIET_COMPRESSION_BREAK"],
         "VOLATILE": ["WHALE_MOMENTUM", "LIQUIDITY_SWEEP_REVERSAL",
                      "VOLUME_SURGE_BREAKOUT", "BREAKDOWN_SHORT",
-                     "CONTINUATION_LIQUIDITY_SWEEP", "POST_DISPLACEMENT_CONTINUATION"],
+                     "CONTINUATION_LIQUIDITY_SWEEP", "POST_DISPLACEMENT_CONTINUATION",
+                     "LIQUIDATION_REVERSAL", "FUNDING_EXTREME_SIGNAL"],
     }
 
     # ── Family classification sets ─────────────────────────────────────────
@@ -1794,6 +1797,14 @@ class SignalScoringEngine:
 
         if setup in self._FAMILY_REVERSAL_LIQUIDATION:
             adj = 0.0
+
+            # LIQUIDATION_REVERSAL evaluator path already hard-validates a
+            # cascade exhaustion + divergence structure before emission.
+            # This setup-specific floor prevents valid liquidation reversals
+            # from being under-credited when generic shared dimensions do not
+            # capture all structural checks explicitly.
+            if setup == "LIQUIDATION_REVERSAL":
+                adj += 1.0
 
             # EMA counter-trend correction: add +3 when EMA is naturally
             # misaligned for a reversal entry (does not double-count when
