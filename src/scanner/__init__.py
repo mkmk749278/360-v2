@@ -378,6 +378,7 @@ _SCALP_MTF_SEMANTIC_FAMILIES: frozenset[str] = frozenset({
     "reclaim_retest",
     "reversal",
 })
+_SCALP_MTF_SEMANTIC_NEAR_MISS_MAX_DELTA: float = 0.10
 
 # Per-channel SMC timeframe preference order.
 # SCALP → low-TF sweeps are valid entry triggers.
@@ -2169,7 +2170,7 @@ class Scanner:
         if setup_family not in _SCALP_MTF_SEMANTIC_FAMILIES:
             return False, "not_semantic_family"
         if not mtf_data:
-            return True, "semantic_allow_no_data"
+            return False, "semantic_fail_no_data"
 
         result = compute_mtf_confluence(
             signal_direction,
@@ -2178,7 +2179,7 @@ class Scanner:
             tf_weight_overrides=tf_weight_overrides,
         )
         if result.total_count == 0:
-            return True, "semantic_allow_no_valid_tf"
+            return False, "semantic_fail_no_valid_tf"
 
         wanted = "BULLISH" if signal_direction.upper() == "LONG" else "BEARISH"
         opposed = "BEARISH" if wanted == "BULLISH" else "BULLISH"
@@ -2187,16 +2188,23 @@ class Scanner:
         lower_states = [s for s in result.timeframe_states if s.timeframe in lower_tfs]
         higher_states = [s for s in result.timeframe_states if s.timeframe in higher_tfs]
 
+        score_deficit = max(0.0, min_score - float(result.score))
+        if score_deficit > _SCALP_MTF_SEMANTIC_NEAR_MISS_MAX_DELTA:
+            return False, "semantic_fail_deep_misalignment"
+
         lower_aligned = sum(1 for s in lower_states if s.trend == wanted)
         lower_opposed = sum(1 for s in lower_states if s.trend == opposed)
-        higher_non_opposed = sum(1 for s in higher_states if s.trend != opposed)
-        higher_total = len(higher_states)
+        if not (lower_aligned >= 2 and lower_opposed == 0):
+            return False, "semantic_fail_lower_tf_weak"
 
-        lower_confirms_thesis = lower_aligned >= 1 and lower_opposed == 0
-        higher_context_not_fully_opposed = higher_total == 0 or higher_non_opposed >= 1
-        if lower_confirms_thesis and higher_context_not_fully_opposed:
+        higher_aligned = sum(1 for s in higher_states if s.trend == wanted)
+        higher_opposed = sum(1 for s in higher_states if s.trend == opposed)
+        if not (higher_aligned >= 1 and higher_opposed == 0):
+            return False, "semantic_fail_higher_tf_weak"
+
+        if lower_states and higher_states:
             return True, "family_semantic_mtf_pass"
-        return False, "family_semantic_mtf_fail"
+        return False, "semantic_fail_missing_tf_context"
 
     def _resolve_origin_setup_class(self, sig: Any) -> str:
         _origin_setup_raw = getattr(sig, "origin_setup_class", None)

@@ -1540,6 +1540,83 @@ class TestMTFGateInScanner:
         ] == 1
 
 
+class TestFamilySemanticMTFPolicy:
+    @staticmethod
+    def _tf(ema_fast: float, ema_slow: float, close: float) -> dict:
+        return {"ema_fast": ema_fast, "ema_slow": ema_slow, "close": close}
+
+    def test_semantic_mtf_fails_closed_without_data(self):
+        allowed, reason = Scanner._evaluate_family_semantic_mtf(
+            setup_family="reclaim_retest",
+            signal_direction="LONG",
+            mtf_data={},
+            min_score=0.35,
+        )
+        assert allowed is False
+        assert reason == "semantic_fail_no_data"
+
+    def test_semantic_mtf_fails_closed_without_valid_timeframes(self):
+        allowed, reason = Scanner._evaluate_family_semantic_mtf(
+            setup_family="reclaim_retest",
+            signal_direction="LONG",
+            mtf_data={"1m": {"ema_fast": 101.0}},  # invalid payload (ema_slow/close missing)
+            min_score=0.35,
+        )
+        assert allowed is False
+        assert reason == "semantic_fail_no_valid_tf"
+
+    def test_semantic_mtf_requires_near_miss_not_deep_fail(self):
+        mtf_data = {
+            "1m": self._tf(101.0, 100.0, 101.5),   # aligned
+            "5m": self._tf(102.0, 101.0, 102.5),   # aligned
+            "15m": self._tf(103.0, 102.0, 103.0),  # neutral
+            "1h": self._tf(104.0, 103.0, 104.5),   # aligned
+            "4h": self._tf(105.0, 104.0, 105.0),   # neutral
+        }
+        allowed, reason = Scanner._evaluate_family_semantic_mtf(
+            setup_family="reclaim_retest",
+            signal_direction="LONG",
+            mtf_data=mtf_data,
+            min_score=0.90,
+        )
+        assert allowed is False
+        assert reason == "semantic_fail_deep_misalignment"
+
+    def test_semantic_mtf_requires_strong_lower_tf_confirmation(self):
+        mtf_data = {
+            "1m": self._tf(101.0, 100.0, 101.5),   # aligned
+            "5m": self._tf(102.0, 101.0, 102.0),   # neutral
+            "15m": self._tf(103.0, 102.0, 103.0),  # neutral
+            "1h": self._tf(104.0, 103.0, 104.5),   # aligned
+            "4h": self._tf(105.0, 104.0, 105.0),   # neutral
+        }
+        allowed, reason = Scanner._evaluate_family_semantic_mtf(
+            setup_family="reclaim_retest",
+            signal_direction="LONG",
+            mtf_data=mtf_data,
+            min_score=0.70,
+        )
+        assert allowed is False
+        assert reason == "semantic_fail_lower_tf_weak"
+
+    def test_semantic_mtf_passes_only_near_miss_with_strong_confirmation(self):
+        mtf_data = {
+            "1m": self._tf(101.0, 100.0, 101.5),   # aligned
+            "5m": self._tf(102.0, 101.0, 102.5),   # aligned
+            "15m": self._tf(103.0, 102.0, 103.0),  # neutral
+            "1h": self._tf(104.0, 103.0, 104.5),   # aligned
+            "4h": self._tf(105.0, 104.0, 105.0),   # neutral
+        }
+        allowed, reason = Scanner._evaluate_family_semantic_mtf(
+            setup_family="reversal",
+            signal_direction="LONG",
+            mtf_data=mtf_data,
+            min_score=0.75,
+        )
+        assert allowed is True
+        assert reason == "family_semantic_mtf_pass"
+
+
 class TestVWAPGateInScanner:
     """Filter 2: VWAP Extension Rejection wired into _prepare_signal."""
 
