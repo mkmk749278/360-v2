@@ -1,27 +1,52 @@
-name: 🔍 VPS Monitor — Live System Status
+name: 🔍 VPS Runtime Audit / Truth Report
 
 on:
   workflow_dispatch:
     inputs:
-      log_lines:
-        description: 'Number of engine log lines to tail'
+      lookback_hours:
+        description: "Lookback window in hours"
         required: false
-        default: '150'
+        default: "24"
         type: string
-      include_redis:
-        description: 'Include Redis memory and keyspace info'
+      compare_previous_window:
+        description: "Compare selected lookback against prior equal window"
         required: false
-        default: 'true'
+        default: true
+        type: boolean
+      channel:
+        description: "Channel to analyze"
+        required: false
+        default: "360_SCALP"
+        type: string
+      symbol_filter:
+        description: "Optional symbol filter (comma-separated, exact)"
+        required: false
+        default: ""
+        type: string
+      setup_filter:
+        description: "Optional setup/path filter (comma-separated substring match)"
+        required: false
+        default: ""
+        type: string
+      include_raw_json:
+        description: "Include raw structured extracts in truth_snapshot.json"
+        required: false
+        default: true
+        type: boolean
+      include_recent_logs:
+        description: "Include recent engine log tail artifact"
+        required: false
+        default: false
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
-  monitor:
-    name: Collect VPS stats
+  runtime-audit:
+    name: Build runtime truth report
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
 
     steps:
       - name: Mask secrets
@@ -29,195 +54,121 @@ jobs:
           echo "::add-mask::${{ secrets.VPS_HOST }}"
           echo "::add-mask::${{ secrets.VPS_USER }}"
           echo "::add-mask::${{ secrets.VPS_SSH_KEY }}"
-          echo "::add-mask::${{ secrets.TELEGRAM_BOT_TOKEN }}"
-          echo "::add-mask::${{ secrets.TELEGRAM_ACTIVE_CHANNEL_ID }}"
-          echo "::add-mask::${{ secrets.TELEGRAM_FREE_CHANNEL_ID }}"
-          echo "::add-mask::${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}"
-          echo "::add-mask::${{ secrets.BINANCE_API_KEY }}"
-          echo "::add-mask::${{ secrets.BINANCE_API_SECRET }}"
-          echo "::add-mask::${{ secrets.OPENAI_API_KEY }}"
 
       - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-          fetch-depth: 0
-
-      - name: Preserve monitor scripts before branch switch
-        run: |
-          mkdir -p /tmp/monitor-scripts
-          cp scripts/monitor_heartbeat.py \
-             scripts/monitor_signal_history.py \
-             scripts/monitor_sl_followthrough.py \
-             /tmp/monitor-scripts/
-
-      - name: Setup monitor-logs branch
-        run: |
-          git fetch origin monitor-logs:refs/remotes/origin/monitor-logs 2>/dev/null || true
-          if git ls-remote --exit-code --heads origin monitor-logs > /dev/null 2>&1; then
-            git checkout -b monitor-logs origin/monitor-logs
-          else
-            git checkout --orphan monitor-logs
-            git rm -rf . 2>/dev/null || true
-          fi
 
       - name: Write SSH key
         run: |
           mkdir -p ~/.ssh
           echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/vps_key
           chmod 600 ~/.ssh/vps_key
-          ssh-keyscan -H ${{ secrets.VPS_HOST }} >> ~/.ssh/known_hosts 2>/dev/null || true
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
 
-      - name: Copy monitor scripts to VPS
+      - name: Stage monitor helper on VPS
         run: |
           ssh -i ~/.ssh/vps_key \
               -o ConnectTimeout=30 \
               -o StrictHostKeyChecking=no \
-              ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
               'mkdir -p /tmp/360-monitor-scripts'
+
           scp -i ~/.ssh/vps_key \
               -o ConnectTimeout=30 \
               -o StrictHostKeyChecking=no \
-              /tmp/monitor-scripts/monitor_heartbeat.py \
-              /tmp/monitor-scripts/monitor_signal_history.py \
-              /tmp/monitor-scripts/monitor_sl_followthrough.py \
-              ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/360-monitor-scripts/
+              scripts/monitor_heartbeat.py \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/360-monitor-scripts/"
 
-      - name: Collect VPS data and write to file
+      - name: Collect structured runtime inputs from VPS
+        env:
+          LOOKBACK_HOURS: ${{ inputs.lookback_hours }}
+          COMPARE_PREVIOUS_WINDOW: ${{ inputs.compare_previous_window }}
+          INCLUDE_RECENT_LOGS: ${{ inputs.include_recent_logs }}
         run: |
-          mkdir -p monitor
+          set -euo pipefail
+          mkdir -p monitor/raw monitor/report
 
-          ssh -i ~/.ssh/vps_key \
-              -o ConnectTimeout=30 \
-              ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
-              'bash -s' << 'ENDSSH' | tee monitor/latest.txt
+          ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "docker inspect 360scalp-v2-engine --format='{\"running\":{{.State.Running}},\"status\":\"{{.State.Status}}\",\"health\":\"{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}\"}'" \
+            > monitor/raw/runtime_health.json || echo '{"running":false,"status":"missing","health":"unknown"}' > monitor/raw/runtime_health.json
 
-          SEP="══════════════════════════════════════════════"
-          TIMESTAMP=$(date -u "+%Y-%m-%d %H:%M:%S UTC")
-          echo "360 Crypto Eye — VPS Monitor Report"
-          echo "Generated: $TIMESTAMP"
-          echo ""
+          ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "cat /tmp/360-monitor-scripts/monitor_heartbeat.py | docker exec -i 360scalp-v2-engine python3" \
+            > monitor/raw/heartbeat.txt || echo 'Heartbeat unavailable' > monitor/raw/heartbeat.txt
 
-          echo "$SEP"
-          echo "  CONTAINER STATUS"
-          echo "$SEP"
-          docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 ps 2>/dev/null || echo "docker compose ps failed"
-          echo ""
-          docker inspect 360scalp-v2-engine --format='Health: {{.State.Health.Status}} | Status: {{.State.Status}} | Running: {{.State.Running}}' 2>/dev/null || echo "Container not found or not running"
+          ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "docker exec 360scalp-v2-engine sh -c 'cat /app/data/signal_performance.json 2>/dev/null || echo []'" \
+            > monitor/raw/signal_performance.json
 
-          echo ""
-          echo "$SEP"
-          echo "  RESOURCE USAGE"
-          echo "$SEP"
-          docker stats --no-stream --format "table {{.Name}}\t{{.CPUPerc}}\t{{.MemUsage}}\t{{.MemPerc}}\t{{.NetIO}}\t{{.BlockIO}}" 2>/dev/null || echo "No containers running"
-          echo ""
-          echo "--- System ---"
-          uptime
-          free -h
-          df -h / 2>/dev/null | tail -2
+          ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --since=${LOOKBACK_HOURS}h engine" \
+            > monitor/raw/engine_current.log || true
 
-          echo ""
-          echo "$SEP"
-          echo "  HEARTBEAT CHECK"
-          echo "$SEP"
-          # The heartbeat file lives inside the container on a named Docker volume.
-          # The host path ~/360-v2/data/ does not exist — must read from container directly.
-          HEARTBEAT_RESULT=$(cat /tmp/360-monitor-scripts/monitor_heartbeat.py | docker exec -i 360scalp-v2-engine python3 2>/dev/null)
-          if [ -z "$HEARTBEAT_RESULT" ]; then
-              echo "ERROR: Could not exec into container — container may be down or exec disabled"
+          if [ "${COMPARE_PREVIOUS_WINDOW}" = "true" ]; then
+            NOW_TS=$(date -u +%s)
+            CURRENT_START_TS=$((NOW_TS - LOOKBACK_HOURS * 3600))
+            PREVIOUS_START_TS=$((CURRENT_START_TS - LOOKBACK_HOURS * 3600))
+            CURRENT_START_ISO=$(date -u -d "@${CURRENT_START_TS}" +%Y-%m-%dT%H:%M:%SZ)
+            PREVIOUS_START_ISO=$(date -u -d "@${PREVIOUS_START_TS}" +%Y-%m-%dT%H:%M:%SZ)
+            ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+              "docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --since=${PREVIOUS_START_ISO} --until=${CURRENT_START_ISO} engine" \
+              > monitor/raw/engine_previous.log || true
           else
-              echo "$HEARTBEAT_RESULT"
+            : > monitor/raw/engine_previous.log
           fi
 
-          echo ""
-          echo "$SEP"
-          echo "  SIGNAL TELEMETRY"
-          echo "$SEP"
-          LOGS=$(docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=200 engine 2>/dev/null || echo "")
-          echo "--- Scan Performance ---"
-          echo "$LOGS" | grep -E "ScanLat|Pairs=|WS=" | tail -10 || echo "(no scan telemetry found in last 200 lines)"
-          echo ""
-          echo "--- Signal Activity ---"
-          FIRED=$(echo "$LOGS" | grep -c "SIGNAL FIRED\|signal.*fired\|FIRED" 2>/dev/null || echo "0")
-          TP=$(echo "$LOGS" | grep -c "TP.*hit\|TP1\|TP2\|TP3\|TAKE_PROFIT" 2>/dev/null || echo "0")
-          SL=$(echo "$LOGS" | grep -c "SL.*hit\|STOP_LOSS\|stop loss" 2>/dev/null || echo "0")
-          EXPIRED=$(echo "$LOGS" | grep -c "EXPIRED\|expir" 2>/dev/null || echo "0")
-          echo "Signals fired (last 200 lines): $FIRED"
-          echo "TP hits: $TP | SL hits: $SL | Expired: $EXPIRED"
-          echo ""
-          echo "--- Regime / Market State ---"
-          echo "$LOGS" | grep -E "regime|TRENDING|RANGING|VOLATILE|QUIET" | tail -5 || echo "(no regime data in last 200 lines)"
-
-          echo ""
-          echo "$SEP"
-          echo "  SUPPRESSOR ANALYSIS (last 500 lines)"
-          echo "$SEP"
-          SUPP_LOGS=$(docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=500 engine 2>/dev/null || echo "")
-          echo "--- Suppression Summary Lines (up to 5 most recent, as available from log stream) ---"
-          echo "$SUPP_LOGS" | grep -iE "suppression summary" | tail -5 || echo "(no suppression summaries in last 500 lines)"
-          echo ""
-          echo "--- Top Suppressor Keys (last 500 lines) ---"
-          echo "$SUPP_LOGS" | grep -oE "(mtf_gate|pair_quality|volatile_unsuitable|score_below|QUIET_SCALP_BLOCK|spread_wide|regime_mismatch|conf_below)[^,}' \"]*" | sort | uniq -c | sort -rn | head -15 || echo "(no suppressor keys found)"
-          echo ""
-          echo "--- Risk Geometry Rejections (last 500 lines) ---"
-          echo "$SUPP_LOGS" | grep -E "only [0-9.]+ ?% from entry|SL capped|FVG SL rejected|sl_dist.*max|[0-9.]+% > [0-9.]+% max" | tail -10 || echo "(no risk geometry rejections found)"
-
-          echo ""
-          echo "$SEP"
-          echo "  SIGNAL PERFORMANCE HISTORY (last 50)"
-          echo "$SEP"
-          echo "--- Recent 50 Signals ---"
-          cat /tmp/360-monitor-scripts/monitor_signal_history.py | docker exec -i 360scalp-v2-engine python3 2>/dev/null || echo "Container not available"
-
-          echo ""
-          echo "$SEP"
-          echo "  SL FOLLOW-THROUGH ANALYSIS"
-          echo "$SEP"
-          echo "--- Post-SL Price Follow-Through (recent SL_HIT signals) ---"
-          echo "Heuristic inference from stored signal_performance.json — MFE/hold data + 24h cross-signal lookahead."
-          echo ""
-          cat /tmp/360-monitor-scripts/monitor_sl_followthrough.py | docker exec -i 360scalp-v2-engine python3 2>/dev/null || echo "Container not available"
-
-          echo ""
-          echo "$SEP"
-          echo "  ENGINE LOGS (last 150 lines)"
-          echo "$SEP"
-          docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=150 engine 2>/dev/null || echo "Could not fetch engine logs"
-
-          echo ""
-          echo "$SEP"
-          echo "  ERROR SCAN (last 500 lines)"
-          echo "$SEP"
-          FULL_LOGS=$(docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=500 engine 2>/dev/null || echo "")
-          ERRORS=$(echo "$FULL_LOGS" | grep -E "ERROR|CRITICAL|Traceback|Exception|FATAL" || true)
-          if [ -z "$ERRORS" ]; then
-              echo "OK: No errors/exceptions found in last 500 log lines"
-          else
-              echo "$ERRORS"
+          if [ "${INCLUDE_RECENT_LOGS}" = "true" ]; then
+            ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+              "docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=200 engine" \
+              > monitor/report/recent_logs.txt || true
           fi
 
-          echo ""
-          echo "$SEP"
-          echo "  REDIS INFO"
-          echo "$SEP"
-          echo "--- Redis Memory ---"
-          docker exec 360scalp-v2-redis redis-cli info memory 2>/dev/null | grep -E "used_memory_human|used_memory_peak_human|maxmemory_human" || echo "Redis not accessible"
-          echo ""
-          echo "--- Redis Keyspace ---"
-          docker exec 360scalp-v2-redis redis-cli info keyspace 2>/dev/null || echo "Redis keyspace not accessible"
-          echo ""
-          echo "--- Redis DB Size ---"
-          docker exec 360scalp-v2-redis redis-cli dbsize 2>/dev/null || echo "Could not get Redis dbsize"
-
-          ENDSSH
-
-      - name: Commit monitor output to monitor-logs branch
+      - name: Build truth report artifacts
+        env:
+          LOOKBACK_HOURS: ${{ inputs.lookback_hours }}
+          COMPARE_PREVIOUS_WINDOW: ${{ inputs.compare_previous_window }}
+          CHANNEL: ${{ inputs.channel }}
+          SYMBOL_FILTER: ${{ inputs.symbol_filter }}
+          SETUP_FILTER: ${{ inputs.setup_filter }}
+          INCLUDE_RAW_JSON: ${{ inputs.include_raw_json }}
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add monitor/latest.txt
-          git diff --staged --quiet || git commit -m "chore: vps monitor snapshot $(date -u '+%Y-%m-%d %H:%M UTC')"
-          git push origin monitor-logs
+          set -euo pipefail
+          ARGS=(
+            --lookback-hours "${LOOKBACK_HOURS}"
+            --channel "${CHANNEL}"
+            --symbol-filter "${SYMBOL_FILTER}"
+            --setup-filter "${SETUP_FILTER}"
+            --runtime-health-json monitor/raw/runtime_health.json
+            --heartbeat-text monitor/raw/heartbeat.txt
+            --performance-json monitor/raw/signal_performance.json
+            --current-log monitor/raw/engine_current.log
+            --previous-log monitor/raw/engine_previous.log
+            --truth-report-md monitor/report/truth_report.md
+            --truth-snapshot-json monitor/report/truth_snapshot.json
+            --window-comparison-json monitor/report/window_comparison.json
+          )
+
+          if [ "${COMPARE_PREVIOUS_WINDOW}" = "true" ]; then
+            ARGS+=(--compare-previous-window)
+          fi
+          if [ "${INCLUDE_RAW_JSON}" = "true" ]; then
+            ARGS+=(--include-raw-json)
+          fi
+
+          python scripts/build_truth_report.py "${ARGS[@]}"
+
+      - name: Upload runtime truth artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-truth-report-${{ github.run_id }}
+          path: monitor/report
+
+      - name: Upload raw extracts
+        if: ${{ inputs.include_raw_json }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: runtime-truth-raw-${{ github.run_id }}
+          path: monitor/raw
 
       - name: Clean up SSH key
         if: always()
@@ -225,30 +176,6 @@ jobs:
           ssh -i ~/.ssh/vps_key \
               -o ConnectTimeout=10 \
               -o StrictHostKeyChecking=no \
-              ${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }} \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
               'rm -rf /tmp/360-monitor-scripts' 2>/dev/null || true
           rm -f ~/.ssh/vps_key
-
-      - name: Health gate — fail if engine is down
-        uses: appleboy/ssh-action@v1.0.3
-        with:
-          host: ${{ secrets.VPS_HOST }}
-          username: ${{ secrets.VPS_USER }}
-          key: ${{ secrets.VPS_SSH_KEY }}
-          port: 22
-          script: |
-            STATUS=$(docker inspect 360scalp-v2-engine --format='{{.State.Running}}' 2>/dev/null || echo "false")
-            if [ "$STATUS" != "true" ]; then
-              echo "ENGINE IS NOT RUNNING — container is stopped or missing; immediate attention required"
-              exit 1
-            fi
-            HEALTH=$(docker inspect 360scalp-v2-engine --format='{{.State.Health.Status}}' 2>/dev/null || echo "unknown")
-            if [ "$HEALTH" = "unhealthy" ]; then
-              echo "ENGINE IS UNHEALTHY — container is running but healthcheck is failing"
-              echo "--- Last healthcheck probe output ---"
-              docker inspect 360scalp-v2-engine \
-                --format='{{range .State.Health.Log}}Exit={{.ExitCode}} {{.Output}}{{end}}' \
-                2>/dev/null | tail -c 1000 || echo "(could not retrieve healthcheck log)"
-              exit 1
-            fi
-            echo "Engine is running and healthy (health=$HEALTH)"
