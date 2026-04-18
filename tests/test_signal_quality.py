@@ -648,7 +648,7 @@ class TestReclaimRetestGeometryPolicy:
         assert risk.reason == ""
         assert risk.stop_loss == 99.92
 
-    def test_reclaim_retest_still_rejects_near_zero_sl(self):
+    def test_reclaim_retest_rejects_sl_below_family_floor(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
         signal.entry = 100.0
         signal.stop_loss = 99.98  # 0.02% distance
@@ -669,6 +669,29 @@ class TestReclaimRetestGeometryPolicy:
 
         assert risk.passed is False
         assert "near-zero SL rejected" in risk.reason
+
+    def test_reclaim_retest_allows_tight_structural_sl_above_family_floor(self):
+        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
+        signal.entry = 100.0
+        signal.stop_loss = 99.96  # 0.04% distance (above reclaim-family 0.03% floor)
+        signal.tp1 = 100.20
+        signal.tp2 = 100.40
+        signal.tp3 = 100.80
+        signal.far_reclaim_level = 99.95
+
+        risk = build_risk_plan(
+            signal=signal,
+            indicators=self._build_high_atr_indicators(),
+            candles={"5m": _candles(base=100.0, trend=0.0)},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            setup=SetupClass.FAILED_AUCTION_RECLAIM,
+            spread_pct=0.01,
+            channel="360_SCALP",
+        )
+
+        assert risk.passed is True
+        assert risk.reason == ""
+        assert risk.stop_loss == 99.96
 
     def test_non_reclaim_setup_keeps_generic_risk_tight_guard(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
@@ -693,7 +716,7 @@ class TestReclaimRetestGeometryPolicy:
 
 
 class TestValidateGeometryPolicyReclaimRetest:
-    def test_reclaim_retest_tight_sl_rejected_by_default_guard(self):
+    def test_reclaim_retest_tight_sl_allows_family_floor(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
         signal.entry = 100.0
         signal.stop_loss = 99.96  # 0.04% distance
@@ -707,8 +730,8 @@ class TestValidateGeometryPolicyReclaimRetest:
             channel="360_SCALP",
         )
 
-        assert valid is False
-        assert reason == "near_zero_sl"
+        assert valid is True
+        assert reason == ""
 
     def test_non_reclaim_setup_keeps_default_near_zero_guard(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)

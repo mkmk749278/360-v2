@@ -367,6 +367,7 @@ _RECLAIM_RETEST_SETUPS: frozenset[SetupClass] = frozenset({
 })
 
 _MIN_SL_DISTANCE_PCT_DEFAULT = 0.0005  # 0.05% of entry price
+_MIN_SL_DISTANCE_PCT_RECLAIM_RETEST = 0.0003  # 0.03% structural reclaim/retest floor
 # Separate from near-zero SL policy above: this guard only controls the
 # "risk_distance_too_tight" rejection in build_risk_plan().
 # reclaim/retest thesis requires a tighter structural floor than generic setups.
@@ -399,6 +400,12 @@ def _min_risk_distance_for_setup(
 def _channel_max_sl_pct(channel: str) -> float:
     """Return channel max-SL decimal; unknown channels fall back to 5.0%."""
     return _MAX_SL_PCT_BY_CHANNEL.get(channel, 5.0) / 100.0
+
+
+def _min_sl_distance_pct_for_setup(setup: SetupClass) -> float:
+    if setup in _RECLAIM_RETEST_SETUPS:
+        return _MIN_SL_DISTANCE_PCT_RECLAIM_RETEST
+    return _MIN_SL_DISTANCE_PCT_DEFAULT
 
 
 def validate_geometry_against_policy(
@@ -446,7 +453,7 @@ def validate_geometry_against_policy(
             return False, "tp_order_invalid"
 
     risk = abs(entry - stop)
-    if risk < entry * _MIN_SL_DISTANCE_PCT_DEFAULT:
+    if risk < entry * _min_sl_distance_pct_for_setup(setup):
         return False, "near_zero_sl"
 
     if (risk / entry) > _channel_max_sl_pct(channel):
@@ -1125,7 +1132,7 @@ def build_risk_plan(
     # sub-penny tokens (e.g. BULLAUSDT) where ATR-based SL exceeds the channel
     # cap by a large margin and the resulting capped price rounds near zero.
     # Threshold: SL must be at least 0.05% away from entry.
-    _MIN_SL_DISTANCE_PCT = _MIN_SL_DISTANCE_PCT_DEFAULT
+    _MIN_SL_DISTANCE_PCT = _min_sl_distance_pct_for_setup(setup)
     if signal.entry > 0:
         _sl_dist_abs = abs(signal.entry - stop_loss)
         _sl_min_required = signal.entry * _MIN_SL_DISTANCE_PCT

@@ -372,6 +372,14 @@ _SCALP_MTF_POLICY_BY_FAMILY: Dict[str, Dict[str, Optional[float]]] = {
     "compression": {"min_score_cap": 0.25},
 }
 
+# Families whose thesis is structural reclaim/reversal and therefore require
+# family-semantic downstream MTF evaluation (not plain trend-alignment only).
+_SCALP_MTF_SEMANTIC_FAMILIES: frozenset[str] = frozenset({
+    "reclaim_retest",
+    "reversal",
+})
+_SCALP_MTF_SEMANTIC_NEAR_MISS_MAX_DELTA: float = 0.10
+
 # Per-channel SMC timeframe preference order.
 # SCALP → low-TF sweeps are valid entry triggers.
 # Channels not listed here use the detector's default order.
@@ -2145,6 +2153,57 @@ class Scanner:
     def _increment_path_funnel(self, stage: str, chan_name: str, setup_class_name: Any) -> None:
         self._path_funnel_counters[self._path_funnel_key(stage, chan_name, setup_class_name)] += 1
 
+    @staticmethod
+    def _evaluate_family_semantic_mtf(
+        *,
+        setup_family: str,
+        signal_direction: str,
+        mtf_data: Dict[str, Dict[str, float]],
+        min_score: float,
+        tf_weight_overrides: Optional[Dict[str, float]] = None,
+    ) -> Tuple[bool, str]:
+        """Evaluate family-semantic MTF pass/fail for structural scalp families.
+
+        This is intentionally scoped to reclaim/retest and reversal families:
+        preserve higher-TF context while avoiding a pure trend-alignment doctrine.
+        """
+        if setup_family not in _SCALP_MTF_SEMANTIC_FAMILIES:
+            return False, "not_semantic_family"
+        if not mtf_data:
+            return False, "semantic_fail_no_data"
+
+        result = compute_mtf_confluence(
+            signal_direction,
+            mtf_data,
+            min_score=min_score,
+            tf_weight_overrides=tf_weight_overrides,
+        )
+        if result.total_count == 0:
+            return False, "semantic_fail_no_valid_tf"
+
+        wanted = "BULLISH" if signal_direction.upper() == "LONG" else "BEARISH"
+        opposed = "BEARISH" if wanted == "BULLISH" else "BULLISH"
+        lower_tfs = {"1m", "5m", "15m"}
+        higher_tfs = {"1h", "4h", "1d"}
+        lower_states = [s for s in result.timeframe_states if s.timeframe in lower_tfs]
+        higher_states = [s for s in result.timeframe_states if s.timeframe in higher_tfs]
+
+        score_deficit = max(0.0, min_score - float(result.score))
+        if score_deficit > _SCALP_MTF_SEMANTIC_NEAR_MISS_MAX_DELTA:
+            return False, "semantic_fail_deep_misalignment"
+
+        lower_aligned = sum(1 for s in lower_states if s.trend == wanted)
+        lower_opposed = sum(1 for s in lower_states if s.trend == opposed)
+        if not (lower_aligned >= 2 and lower_opposed == 0):
+            return False, "semantic_fail_lower_tf_weak"
+
+        higher_aligned = sum(1 for s in higher_states if s.trend == wanted)
+        higher_opposed = sum(1 for s in higher_states if s.trend == opposed)
+        if not (higher_aligned >= 1 and higher_opposed == 0):
+            return False, "semantic_fail_higher_tf_weak"
+
+        return True, "family_semantic_mtf_pass"
+
     def _resolve_origin_setup_class(self, sig: Any) -> str:
         _origin_setup_raw = getattr(sig, "origin_setup_class", None)
         if _origin_setup_raw in (None, ""):
@@ -2769,6 +2828,28 @@ class Scanner:
                 min_score=_mtf_min_score,
                 tf_weight_overrides=_tf_weight_overrides or None,
             )
+            _mtf_semantic_allowed = False
+            if chan_name == "360_SCALP" and _setup_family in _SCALP_MTF_SEMANTIC_FAMILIES:
+                self._suppression_counters[f"mtf_semantic_eval:360_SCALP:{_setup_family}"] += 1
+                _mtf_semantic_allowed, _mtf_semantic_reason = self._evaluate_family_semantic_mtf(
+                    setup_family=_setup_family,
+                    signal_direction=sig.direction.value,
+                    mtf_data=mtf_data,
+                    min_score=_mtf_min_score,
+                    tf_weight_overrides=_tf_weight_overrides or None,
+                )
+                if _mtf_semantic_allowed:
+                    self._suppression_counters[f"mtf_semantic_pass:360_SCALP:{_setup_family}"] += 1
+                else:
+                    self._suppression_counters[f"mtf_semantic_fail:360_SCALP:{_setup_family}"] += 1
+                    self._suppression_counters[
+                        f"mtf_semantic_fail_setup:360_SCALP:{_setup_class_name}"
+                    ] += 1
+            if not mtf_allowed and _mtf_semantic_allowed:
+                self._suppression_counters[f"mtf_semantic_saved:360_SCALP:{_setup_family}"] += 1
+                self._suppression_counters[f"mtf_semantic_saved_setup:360_SCALP:{_setup_class_name}"] += 1
+                mtf_allowed = True
+                mtf_reason = _mtf_semantic_reason
             if not mtf_allowed:
                 log.debug("MTF gate blocked {} {}: {}", symbol, chan_name, mtf_reason)
                 self._suppression_counters[f"mtf_gate:{chan_name}"] += 1
@@ -3040,6 +3121,9 @@ class Scanner:
                 f"geometry_rejected_risk_plan:{chan_name}:{_setup_family}"
             ] += 1
             _reason_token = self._metric_token(risk.reason)
+            self._suppression_counters[
+                f"geometry_rejected_risk_plan_reason:{chan_name}:{_setup_family}:{_reason_token}"
+            ] += 1
             self._increment_path_funnel("geometry:risk_plan:rejected", chan_name, _setup_class_name)
             self._increment_path_funnel(
                 f"geometry:risk_plan:rejected_reason:{_reason_token}",
