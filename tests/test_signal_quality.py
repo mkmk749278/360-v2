@@ -1738,6 +1738,42 @@ class TestFamilyAwareConfidenceScoring:
         assert engine.score(failed_auction)["regime"] >= 18.0
         assert engine.score(post_displacement)["regime"] >= 18.0
 
+    def test_pr11_targeted_paths_get_regime_affinity_credit(self, engine):
+        """PR-11: under-credited valid specialist/support paths get aligned regime credit."""
+        divergence = self._base_inputs(
+            setup_class="DIVERGENCE_CONTINUATION",
+            regime="TRENDING_UP",
+        )
+        quiet_break = self._base_inputs(
+            setup_class="QUIET_COMPRESSION_BREAK",
+            regime="QUIET",
+        )
+        liq_reversal = self._base_inputs(
+            setup_class="LIQUIDATION_REVERSAL",
+            regime="VOLATILE",
+        )
+        funding_extreme = self._base_inputs(
+            setup_class="FUNDING_EXTREME_SIGNAL",
+            regime="VOLATILE",
+        )
+        assert engine.score(divergence)["regime"] >= 18.0
+        assert engine.score(quiet_break)["regime"] >= 18.0
+        assert engine.score(liq_reversal)["regime"] >= 18.0
+        assert engine.score(funding_extreme)["regime"] >= 18.0
+
+    def test_pr11_regime_affinity_remains_narrow_for_unrelated_paths(self, engine):
+        """PR-11: non-targeted setups in the same regimes remain on generic regime credit."""
+        quiet_unrelated = self._base_inputs(
+            setup_class="BREAKOUT_RETEST",
+            regime="QUIET",
+        )
+        volatile_unrelated = self._base_inputs(
+            setup_class="RANGE_FADE",
+            regime="VOLATILE",
+        )
+        assert engine.score(quiet_unrelated)["regime"] == 8.0
+        assert engine.score(volatile_unrelated)["regime"] == 8.0
+
     # ── Reversal family: EMA counter-trend correction ──────────────────
 
     def test_reversal_ema_counter_trend_correction_long(self, engine):
@@ -1800,6 +1836,31 @@ class TestFamilyAwareConfidenceScoring:
         r_neutral = engine.score(inp_neutral)
         assert r_squeeze["total"] > r_neutral["total"]
         assert r_squeeze["thesis_adj"] > r_neutral["thesis_adj"]
+
+    def test_pr11_liquidation_reversal_gets_structural_thesis_floor(self, engine):
+        """PR-11: LIQUIDATION_REVERSAL retains setup-specific structural thesis credit."""
+        liq_reversal = self._base_inputs(
+            setup_class="LIQUIDATION_REVERSAL",
+            ema_fast=101.0,
+            ema_slow=99.0,  # avoid EMA counter-trend credit
+            cvd_divergence=None,
+            oi_trend="NEUTRAL",
+            funding_rate=None,
+            regime="RANGING",
+        )
+        sweep_reversal = self._base_inputs(
+            setup_class="LIQUIDITY_SWEEP_REVERSAL",
+            ema_fast=101.0,
+            ema_slow=99.0,  # avoid EMA counter-trend credit
+            cvd_divergence=None,
+            oi_trend="NEUTRAL",
+            funding_rate=None,
+            regime="RANGING",
+        )
+        r_liq = engine.score(liq_reversal)
+        r_sweep = engine.score(sweep_reversal)
+        assert r_liq["thesis_adj"] > r_sweep["thesis_adj"]
+        assert r_sweep["thesis_adj"] == 0.0
 
     def test_reversal_cvd_aligned_boosts_score(self, engine):
         """LIQUIDATION_REVERSAL LONG with BULLISH CVD earns thesis bonus."""
