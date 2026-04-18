@@ -651,7 +651,6 @@ class ScalpChannel(BaseChannel):
             return None
         last_open = float(opens[-1])
         prev_close = float(closes[-2])
-        prev2_close = float(closes[-3])
         last_low = float(lows[-1])
         last_high = float(highs[-1])
 
@@ -692,39 +691,26 @@ class ScalpChannel(BaseChannel):
         # Entry-quality tightening: require a genuine turn/continuation confirmation,
         # not just EMA proximity while pullback is still moving against direction.
         momentum_last = ind.get("momentum_last")
-        momentum_prev = ind.get("momentum_prev")
-        momentum_array = ind.get("momentum_array")
-        if momentum_array is not None and len(momentum_array) >= 2:
-            momentum_prev = float(momentum_array[-2])
         if momentum_last is None:
             return None
         momentum_last = float(momentum_last)
-        momentum_prev_val = float(momentum_prev) if momentum_prev is not None else None
         if direction == Direction.LONG:
             if close <= ema9 or close <= ema21:
                 return None
             if close <= prev_close:
                 return None
-            if prev_close >= prev2_close:
-                return None
             if last_low > ema21 * 1.001:
                 return None
             if momentum_last <= 0:
-                return None
-            if momentum_prev_val is not None and momentum_last <= momentum_prev_val:
                 return None
         else:
             if close >= ema9 or close >= ema21:
                 return None
             if close >= prev_close:
                 return None
-            if prev_close <= prev2_close:
-                return None
             if last_high < ema21 * 0.999:
                 return None
             if momentum_last >= 0:
-                return None
-            if momentum_prev_val is not None and momentum_last >= momentum_prev_val:
                 return None
 
         # SMC: require at least one FVG or orderblock in the pullback zone

@@ -1605,6 +1605,26 @@ class TestTrendPullbackEntryQuality:
         sig = self._call_long(candles, ind, {"fvg": [{"level": 100.0}]})
         assert sig is None
 
+    def test_trend_pullback_long_accepts_without_strict_micro_sequence(self):
+        m5 = _make_trend_pullback_candles_long()
+        # No strict two-bar reversal shape (prev2 already below prev), but still
+        # valid continuation-side close and directional momentum sign.
+        m5["close"][-3] = 99.96
+        m5["close"][-2] = 100.02
+        m5["close"][-1] = 100.10
+        m5["open"][-1] = 100.04
+        m5["high"][-1] = 100.20
+        m5["low"][-1] = 99.88
+        candles = {"5m": m5}
+        ind = _trend_pullback_indicators_long()
+        # Momentum weakens vs prior sample but remains directionally positive.
+        ind["5m"]["momentum_last"] = 0.04
+        ind["5m"]["momentum_array"] = [0.07, 0.04]
+        ind["5m"]["rsi_prev"] = 48.0
+        ind["5m"]["rsi_last"] = 51.0
+        sig = self._call_long(candles, ind, {"fvg": [{"level": 100.0}]})
+        assert sig is not None
+
 
 # ---------------------------------------------------------------------------
 # CONTINUATION_LIQUIDITY_SWEEP path tests (roadmap step 5)
