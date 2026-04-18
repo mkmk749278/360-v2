@@ -448,6 +448,7 @@ _PR7C_TARGET_SETUPS: frozenset[str] = frozenset({
     "POST_DISPLACEMENT_CONTINUATION",
     "CONTINUATION_LIQUIDITY_SWEEP",
 })
+_EVAL_PATH_PREFIX = "EVAL::"
 
 
 def _normalize_candle_dict(cd: dict) -> dict:
@@ -2173,8 +2174,23 @@ class Scanner:
                 _n = int(_count or 0)
                 if _n <= 0:
                     continue
-                _setup = f"EVAL::{self._normalize_setup_class(_path_name)}"
-                self._path_funnel_counters[self._path_funnel_key(_funnel_stage, chan_name, _setup)] += _n
+                _eval_path_key = f"{_EVAL_PATH_PREFIX}{self._normalize_setup_class(_path_name)}"
+                self._path_funnel_counters[self._path_funnel_key(_funnel_stage, chan_name, _eval_path_key)] += _n
+        _reason_counts = _snapshot.get("no_signal_reason", {})
+        if isinstance(_reason_counts, dict):
+            for _reason_key, _count in _reason_counts.items():
+                _n = int(_count or 0)
+                if _n <= 0:
+                    continue
+                try:
+                    _path_name, _reason = str(_reason_key).rsplit(":", 1)
+                except ValueError:
+                    _path_name, _reason = str(_reason_key), "unknown"
+                _normalized_path = self._normalize_setup_class(_path_name)
+                _normalized_reason = self._metric_token(_reason)
+                self._channel_funnel_counters[
+                    f"evaluator_no_signal_reason:{chan_name}:{_normalized_path}:{_normalized_reason}"
+                ] += _n
 
     @staticmethod
     def _evaluate_family_semantic_mtf(

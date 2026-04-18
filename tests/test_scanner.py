@@ -208,8 +208,38 @@ def test_scalp_channel_exposes_per_evaluator_generation_telemetry(monkeypatch):
     assert telemetry["attempts"]["TREND_PULLBACK"] == 1
     assert telemetry["generated"]["TREND_PULLBACK"] == 1
     assert telemetry["no_signal"]["STANDARD"] == 1
+    assert telemetry["no_signal_reason"]["STANDARD:none"] == 1
     # consume_* should reset after read.
-    assert ch.consume_generation_telemetry() == {"attempts": {}, "no_signal": {}, "generated": {}}
+    assert ch.consume_generation_telemetry() == {
+        "attempts": {},
+        "no_signal": {},
+        "no_signal_reason": {},
+        "generated": {},
+    }
+
+
+def test_scalp_channel_tracks_exception_non_generation_reason(monkeypatch):
+    ch = ScalpChannel()
+
+    def _raise_boom(*args, **kwargs):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(ch, "_evaluate_standard", _raise_boom)
+
+    with pytest.raises(RuntimeError):
+        ch.evaluate(
+            "BTCUSDT",
+            {"5m": _candles()},
+            {"5m": {}},
+            {},
+            0.01,
+            10_000_000,
+        )
+
+    telemetry = ch.consume_generation_telemetry()
+    assert telemetry["attempts"]["STANDARD"] == 1
+    assert telemetry["no_signal"]["STANDARD"] == 1
+    assert telemetry["no_signal_reason"]["STANDARD:exception"] == 1
 
 
 class TestScannerCooldown:
@@ -1458,6 +1488,7 @@ class TestMTFGateInScanner:
         scanner.channels[0].consume_generation_telemetry = MagicMock(return_value={
             "attempts": {"TREND_PULLBACK": 1},
             "no_signal": {"TREND_PULLBACK": 1},
+            "no_signal_reason": {"TREND_PULLBACK:none": 1},
             "generated": {},
         })
 
@@ -1472,6 +1503,9 @@ class TestMTFGateInScanner:
         assert scanner._path_funnel_counters[
             "evaluator_no_signal:360_SCALP:other:EVAL::TREND_PULLBACK"
         ] == 1
+        assert scanner._channel_funnel_counters[
+            "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:none"
+        ] == 1
 
         raw_sig = _make_signal(channel="360_SCALP")
         raw_sig.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
@@ -1479,6 +1513,7 @@ class TestMTFGateInScanner:
         scanner.channels[0].consume_generation_telemetry = MagicMock(return_value={
             "attempts": {"VOLUME_SURGE_BREAKOUT": 1},
             "no_signal": {},
+            "no_signal_reason": {},
             "generated": {"VOLUME_SURGE_BREAKOUT": 1},
         })
 

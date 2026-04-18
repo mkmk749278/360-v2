@@ -256,6 +256,7 @@ class ScalpChannel(BaseChannel):
         self._generation_telemetry: Dict[str, Dict[str, int]] = {
             "attempts": defaultdict(int),
             "no_signal": defaultdict(int),
+            "no_signal_reason": defaultdict(int),
             "generated": defaultdict(int),
         }
 
@@ -263,6 +264,7 @@ class ScalpChannel(BaseChannel):
         self._generation_telemetry = {
             "attempts": defaultdict(int),
             "no_signal": defaultdict(int),
+            "no_signal_reason": defaultdict(int),
             "generated": defaultdict(int),
         }
 
@@ -375,7 +377,12 @@ class ScalpChannel(BaseChannel):
         ):
             _path = self._generation_path_token(evaluator_name)
             self._generation_telemetry["attempts"][_path] += 1
-            sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
+            try:
+                sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
+            except Exception:
+                self._generation_telemetry["no_signal"][_path] += 1
+                self._generation_telemetry["no_signal_reason"][f"{_path}:exception"] += 1
+                raise
             if sig is not None:
                 self._generation_telemetry["generated"][_path] += 1
                 # Apply kill zone check and mark reduced-conviction signals
@@ -383,6 +390,7 @@ class ScalpChannel(BaseChannel):
                 results.append(sig_with_kz)
             else:
                 self._generation_telemetry["no_signal"][_path] += 1
+                self._generation_telemetry["no_signal_reason"][f"{_path}:none"] += 1
         return results
 
     # ------------------------------------------------------------------
