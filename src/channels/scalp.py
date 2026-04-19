@@ -2034,11 +2034,24 @@ class ScalpChannel(BaseChannel):
                 return None  # Hard gate in calm regimes (behaviour unchanged)
             fvg_penalty = 8.0  # Soft penalty in fast structural regimes
 
-        # SL beyond flipped level (structural invalidation point — unchanged)
+        # SR_FLIP_RETEST invalidation must sit beyond reclaim failure structure, not a
+        # flat percent from the flip level.
+        atr_val = float(ind.get("atr_last", close * 0.002))
+        atr_buffer = atr_val * 0.35
+        level_buffer = level * 0.0015
+        wick_overshoot = 0.0
         if direction == Direction.LONG:
-            sl = level * (1 - 0.002)
+            wick_overshoot = max(level - last_low, 0.0)
         else:
-            sl = level * (1 + 0.002)
+            wick_overshoot = max(last_high - level, 0.0)
+        structural_failure_buffer = wick_overshoot + atr_val * 0.15
+        invalidation_buffer = max(level_buffer, atr_buffer, structural_failure_buffer)
+        if direction == Direction.LONG:
+            invalidation_anchor = min(level, last_low)
+            sl = invalidation_anchor - invalidation_buffer
+        else:
+            invalidation_anchor = max(level, last_high)
+            sl = invalidation_anchor + invalidation_buffer
 
         sl_dist = abs(close - sl)
         if sl_dist <= 0:
@@ -2081,7 +2094,6 @@ class ScalpChannel(BaseChannel):
         tp3 = close + sl_dist * 3.5 if direction == Direction.LONG else close - sl_dist * 3.5
 
         profile = smc_data.get("pair_profile")
-        atr_val = ind.get("atr_last", close * 0.002)
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
             config=self.config,

@@ -1104,7 +1104,7 @@ def _make_srflip_candles_long(n=60, flip_offset=3, level=100.0):
     With default level=100.0:
     - prior_swing_high = 100.0, flip at 101.0 → LONG direction, structural_level = 100.0
     - close = 100.1 → dist_from_level = 0.1% → premium zone
-    - sl = level * 0.998 = 99.8 < close = 100.1 → valid geometry
+    - sl is computed adaptively below structural invalidation (flip level / reclaim wick)
     """
     closes = np.ones(n) * 99.8
     highs  = np.ones(n) * (level + 0.3)   # recent non-flip candles
@@ -1156,7 +1156,7 @@ def _make_srflip_candles_short(n=60, flip_offset=3, level=100.0):
     With default level=100.0:
     - prior_swing_low = 100.0, flip at 99.0 → SHORT direction, structural_level = 100.0
     - close = 99.9 → dist_from_level = 0.1% → premium zone
-    - sl = level * 1.002 = 100.2 > close = 99.9 → valid geometry
+    - sl is computed adaptively above structural invalidation (flip level / reclaim wick)
     """
     closes = np.ones(n) * (level + 0.2)
     highs  = np.ones(n) * (level + 1.0)
@@ -1506,6 +1506,40 @@ class TestSrFlipRetestRefinements:
         sig = self._call_short(candles, _srflip_indicators_short(), _srflip_smc(direction="SHORT"))
         assert sig is not None
         assert sig.stop_loss > sig.entry
+
+    def test_long_sl_expands_with_wick_overshoot_and_atr(self):
+        """LONG SR_FLIP_RETEST stop sits beyond wick failure with adaptive buffer."""
+        m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        m5["low"][-1] = 99.6  # reclaim overshoot below level
+        m5["open"][-1] = 100.3
+        m5["close"][-1] = 100.1
+        m5["high"][-1] = 100.35
+        candles = {"5m": m5}
+        indicators = _srflip_indicators_long()
+        indicators["5m"]["atr_last"] = 1.0
+        sig = self._call_long(candles, indicators, _srflip_smc(direction="LONG"))
+        assert sig is not None
+        # anchor=min(level,last_low)=99.6 ; buffer=max(level_buffer=level*0.0015=0.15,
+        # atr_buffer=0.35, failure_buffer=(wick_overshoot=0.4)+(atr*0.15=0.15))=0.55
+        assert sig.stop_loss == pytest.approx(99.05, rel=1e-6)
+        assert sig.stop_loss < m5["low"][-1]
+
+    def test_short_sl_expands_with_wick_overshoot_and_atr(self):
+        """SHORT SR_FLIP_RETEST stop sits beyond wick failure with adaptive buffer."""
+        m5 = _make_srflip_candles_short(n=60, flip_offset=3, level=100.0)
+        m5["high"][-1] = 100.4  # reclaim overshoot above level
+        m5["open"][-1] = 99.7
+        m5["close"][-1] = 99.9
+        m5["low"][-1] = 99.65
+        candles = {"5m": m5}
+        indicators = _srflip_indicators_short()
+        indicators["5m"]["atr_last"] = 1.0
+        sig = self._call_short(candles, indicators, _srflip_smc(direction="SHORT"))
+        assert sig is not None
+        # anchor=max(level,last_high)=100.4 ; buffer=max(level_buffer=level*0.0015=0.15,
+        # atr_buffer=0.35, failure_buffer=(wick_overshoot=0.4)+(atr*0.15=0.15))=0.55
+        assert sig.stop_loss == pytest.approx(100.95, rel=1e-6)
+        assert sig.stop_loss > m5["high"][-1]
 
     def test_tp1_above_entry_on_long_signal(self):
         """TP1 must be strictly above the entry price (LONG direction)."""

@@ -814,7 +814,7 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 
 ## Part VII — Current System Snapshot
 
-*(Updated: 2026-04-17 — scoring architecture status refreshed for PR-7A / PR-7B and PR-7C next step)*
+*(Updated: 2026-04-19 — SR_FLIP_RETEST stop-loss doctrine correction tracked as pending PR review, not canonical merged state)*
 
 | Item | Status |
 |---|---|
@@ -826,6 +826,7 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | PR-7A family-aware scoring correction | ✅ Merged — scorer-side family thesis + regime-affinity corrections live; pre/post-penalty distribution telemetry live |
 | PR-7B path-aware penalty modulation | ✅ Merged — scanner-side targeted soft-penalty modulation live (path-targeted only; penalties preserved) |
 | PR-7C runtime validation hardening / observability refinement | 🟡 In progress / next — validation and observability hardening only; no threshold, router, or doctrine changes |
+| `SR_FLIP_RETEST` stop-loss doctrine correction | 🟡 Pending PR review — candidate change replaces fixed ±0.20% with adaptive structural invalidation beyond reclaim/wick failure (ATR + structural overshoot buffer) |
 | Internal `360_SCALP` evaluator set | 14 internal paths live |
 | Core engine quality | Strong core confirmed by multiple audits |
 | Strongest foundation paths | `FAILED_AUCTION_RECLAIM`, `CONTINUATION_LIQUIDITY_SWEEP`, `SR_FLIP_RETEST`, `TREND_PULLBACK_EMA`, `POST_DISPLACEMENT_CONTINUATION` |
@@ -845,7 +846,7 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | Winner-takes-all | Eliminated (ARCH-2) |
 | Data pipeline | Complete (ARCH-3) — funding_rate and CVD wired into smc_data |
 | Family-aware scoring architecture | Live in scorer (PR-7A) and path-aware in scanner penalties (PR-7B); thresholds/router doctrine unchanged |
-| Current direction | Run PR-7C observability/validation hardening, then make next scoring decisions from runtime evidence |
+| Current direction | Run PR-7C observability/validation hardening and, if approved/merged, validate runtime effects of the pending `SR_FLIP_RETEST` structural stop-doctrine correction before broader policy moves |
 | Dominant live suppressors (multi-model audits + monitor truth) | Spread-quality rejection, `mtf_gate:360_SCALP`, quiet-floor suppression, geometry cap/reject friction |
 | Phase 1 scorecard | Not yet started — begins after PR-1..PR-2 establish trustworthy expression + geometry behavior |
 | Subscribers | None — deliberately. Phase 1 validation must complete first. |
