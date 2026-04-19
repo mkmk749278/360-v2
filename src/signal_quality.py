@@ -369,7 +369,7 @@ _RECLAIM_RETEST_SETUPS: frozenset[SetupClass] = frozenset({
 
 
 def _reject_not_compress_protected_setup(setup: SetupClass) -> bool:
-    return setup in STRUCTURAL_SLTP_PROTECTED_SETUPS or setup == SetupClass.FAILED_AUCTION_RECLAIM
+    return setup in STRUCTURAL_SLTP_PROTECTED_SETUPS or setup in _RECLAIM_RETEST_SETUPS
 
 
 _MIN_SL_DISTANCE_PCT_DEFAULT = 0.0005  # 0.05% of entry price
