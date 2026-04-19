@@ -814,7 +814,7 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 
 ## Part VII — Current System Snapshot
 
-*(Updated: 2026-04-19 — PR #193, #194, #195, and #196 are merged; active doctrine correction is PR-3 RR harmonization to align family-aware risk-plan policy with downstream RR enforcement.)*
+*(Updated: 2026-04-19 — PR #193, #194, #195, #196, and #197 are merged. The doctrine correction chain is complete; repository direction is now post-correction runtime validation mode.)*
 
 | Item | Status |
 |---|---|
@@ -829,10 +829,11 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | `SR_FLIP_RETEST` stop-loss doctrine correction | ✅ Merged (PR #193) — fixed ±0.20% replaced with adaptive structural invalidation beyond reclaim/wick failure (ATR + structural overshoot buffer) |
 | `TREND_PULLBACK_EMA` finish-confirmation correction | ✅ Merged (PR #194) — require explicit pullback-finish evidence (pullback-side prior close + continuation break of prior swing) before entry |
 | Protected structural reject-not-compress enforcement | ✅ Merged (PR #196) — preserve evaluator-owned invalidation; reject oversized protected structural geometry instead of SL cap compression |
+| Family-aware RR doctrine harmonization | ✅ Merged (PR #197) — downstream RR enforcement now aligned with family-aware risk-plan RR doctrine |
 | Internal `360_SCALP` evaluator set | 14 internal paths live |
 | Core engine quality | Strong core confirmed by multiple audits |
 | Strongest foundation paths | `FAILED_AUCTION_RECLAIM`, `CONTINUATION_LIQUIDITY_SWEEP`, `SR_FLIP_RETEST`, `TREND_PULLBACK_EMA`, `POST_DISPLACEMENT_CONTINUATION` |
-| Main current question | **Does PR-3 RR harmonization remove family-aware vs downstream RR mismatch without broadening unrelated path behavior?** |
+| Main current question | **Did merged corrections improve runtime quality truth (not just emissions), and are outcomes now doctrinally honest across corrected paths?** |
 | Evaluator identity preservation | ✅ Complete (PR-01) |
 | Evaluator penalty preservation | ✅ Complete (PR-01, PR-15) |
 | Structural SL/TP preservation | ✅ Complete (PR-02, PR-14) |
@@ -848,29 +849,29 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | Winner-takes-all | Eliminated (ARCH-2) |
 | Data pipeline | Complete (ARCH-3) — funding_rate and CVD wired into smc_data |
 | Family-aware scoring architecture | Live in scorer (PR-7A) and path-aware in scanner penalties (PR-7B); thresholds/router doctrine unchanged |
-| Current direction | Keep PR-3 bounded to RR doctrine harmonization: downstream RR enforcement must respect family-aware policy set in risk planning, with focused regression tests and no broader router/scoring redesign |
+| Current direction | Enter runtime-validation-first operation: review runtime truth reports, verify corrected path outcomes, and do not open another doctrine PR unless runtime evidence shows a still-dominant defect |
 | Dominant live suppressors (multi-model audits + monitor truth) | Spread-quality rejection, `mtf_gate:360_SCALP`, quiet-floor suppression, geometry cap/reject friction |
 | Phase 1 scorecard | Not yet started — begins after PR-1..PR-2 establish trustworthy expression + geometry behavior |
 | Subscribers | None — deliberately. Phase 1 validation must complete first. |
 | Intelligence Layer | Concept only — gate: 2 weeks confirmed live data |
 | Self-Optimisation | Concept only — gate: 50+ live signals in history |
 
-### 7.1 PR-7A / PR-7B / PR-7C sequencing clarity (owner-facing)
+### 7.1 Post-correction doctrine closure and runtime-validation focus (owner-facing)
 
-- **Already merged**
-  - **PR-7A (scorer-side):** family-aware scoring correction is live, including regime-affinity corrections and pre/post-penalty tier telemetry.
-  - **PR-7B (scanner-side):** path-targeted soft-penalty modulation is live; penalties are scaled (not removed) and only on explicitly mapped paths.
-- **Merged follow-up**
-  - **PR-7C (PR #195):** runtime validation hardening and observability refinement shipped. This remained a visibility/validation pass, not a doctrine change.
-- **Doctrine status (unchanged)**
-  - Tier thresholds remain unchanged (`A+` 80+, `B` 65–79, `WATCHLIST` 50–64).
-  - Router/WATCHLIST doctrine remains unchanged.
-  - Hard safety gates remain unchanged.
+- **Merged doctrine correction sequence**
+  - **PR #193:** `SR_FLIP_RETEST` truthful structural invalidation replaced flat ±0.20% stop doctrine.
+  - **PR #194:** `TREND_PULLBACK_EMA` finish-confirmation / continuation-break gating hardened.
+  - **PR #195:** runtime-truth observability hardening shipped for target-path validation.
+  - **PR #196:** protected structural setups now enforce reject-not-compress (explicit reject reason).
+  - **PR #197:** downstream RR enforcement harmonized with family-aware risk-plan doctrine.
+- **Current mode**
+  - Doctrine sequence is complete; this is now a **runtime evidence/validation phase**, not “open next doctrine PR” mode.
 - **Operator validation focus now**
-  1. Confirm targeted paths show measurable **WATCHLIST → B** migration.
-  2. Check **penalty-modulation hit frequency** remains concentrated on intended mapped paths.
-  3. Track **downstream path outcomes** (emission/lifecycle) for those same paths.
-  4. Verify **no broad quality drift** outside targeted families/paths.
+  1. `SR_FLIP_RETEST`: did quality improve, or did emissions only change?
+  2. `TREND_PULLBACK_EMA`: did quality improve, or did emissions only drop?
+  3. Protected structural setups: are oversized geometries honestly rejected (explicit reject-not-compress reasons) instead of cosmetically compressed?
+  4. RR harmonization: did late-stage generic RR mismatch disappear for family-aware paths?
+  5. Validate target-path emitted/win/SL/timing and geometry preserved/changed/rejected patterns before any further doctrine move.
 
 ---
 
