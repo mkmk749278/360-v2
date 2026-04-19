@@ -116,7 +116,7 @@ class TestRRFloor:
         )
         result = self.rm.calculate_risk(sig, {}, 100_000_000)
         assert result.allowed is False
-        assert "1.2" in result.reason
+        assert result.reason == "Insufficient R:R (1.10 < 1.2)"
 
     def test_unknown_setup_falls_back_to_legacy_rr_floor(self):
         """Unknown setup identity keeps legacy fallback floor to avoid broadening."""
@@ -128,7 +128,7 @@ class TestRRFloor:
         )
         result = self.rm.calculate_risk(sig, {}, 100_000_000)
         assert result.allowed is False
-        assert "1.3" in result.reason
+        assert result.reason == "Insufficient R:R (1.10 < 1.3)"
 
 
 # ---------------------------------------------------------------------------
