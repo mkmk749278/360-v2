@@ -8,10 +8,20 @@ Every Copilot session must check this file if OWNER_BRIEF.md appears short or co
 | Field | Value |
 |---|---|
 | Canonical baseline date | 2026-04-19 |
-| Line count | 919 |
+| Line count | 920 |
 | Minimum acceptable lines | 480 |
 | Format | Fresh canonical owner-operating manual (8-part structure) |
 | Verified by | Copilot + owner (mkmk749278) |
+
+## Important — Post-Correction Runtime Validation Refresh Note (2026-04-19)
+
+OWNER_BRIEF.md was updated on 2026-04-19 to reflect the now-complete doctrine correction chain:
+PR #193 (`SR_FLIP_RETEST` stop doctrine repair), PR #194 (`TREND_PULLBACK_EMA`
+finish-confirmation hardening), PR #195 (runtime observability hardening), PR #196
+(reject-not-compress enforcement for protected structural setups), and PR #197 (RR doctrine
+harmonization). Part VII now explicitly marks doctrine correction as complete and shifts
+direction into post-correction runtime validation mode (runtime truth review first, no immediate
+new doctrine PR unless evidence requires it). No truncation — canonical length is now 920 lines.
 
 ## Important — Documentation Integrity Refresh Note (2026-04-15)
 
