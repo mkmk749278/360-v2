@@ -814,7 +814,7 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 
 ## Part VII — Current System Snapshot
 
-*(Updated: 2026-04-19 — SR_FLIP_RETEST stop-loss doctrine correction tracked as pending PR review, not canonical merged state)*
+*(Updated: 2026-04-19 — SR_FLIP_RETEST stop-doctrine correction is merged; TREND_PULLBACK_EMA finish-confirmation correction is tracked as pending PR review)*
 
 | Item | Status |
 |---|---|
@@ -826,11 +826,12 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | PR-7A family-aware scoring correction | ✅ Merged — scorer-side family thesis + regime-affinity corrections live; pre/post-penalty distribution telemetry live |
 | PR-7B path-aware penalty modulation | ✅ Merged — scanner-side targeted soft-penalty modulation live (path-targeted only; penalties preserved) |
 | PR-7C runtime validation hardening / observability refinement | 🟡 In progress / next — validation and observability hardening only; no threshold, router, or doctrine changes |
-| `SR_FLIP_RETEST` stop-loss doctrine correction | 🟡 Pending PR review — candidate change replaces fixed ±0.20% with adaptive structural invalidation beyond reclaim/wick failure (ATR + structural overshoot buffer) |
+| `SR_FLIP_RETEST` stop-loss doctrine correction | ✅ Merged (PR #193) — fixed ±0.20% replaced with adaptive structural invalidation beyond reclaim/wick failure (ATR + structural overshoot buffer) |
+| `TREND_PULLBACK_EMA` finish-confirmation correction | 🟡 Pending PR review — require explicit pullback-finish evidence (pullback-side prior close + continuation break of prior swing) before entry |
 | Internal `360_SCALP` evaluator set | 14 internal paths live |
 | Core engine quality | Strong core confirmed by multiple audits |
 | Strongest foundation paths | `FAILED_AUCTION_RECLAIM`, `CONTINUATION_LIQUIDITY_SWEEP`, `SR_FLIP_RETEST`, `TREND_PULLBACK_EMA`, `POST_DISPLACEMENT_CONTINUATION` |
-| Main current question | **Do targeted paths show WATCHLIST → B migration and better downstream outcomes without broad quality drift after PR-7A/PR-7B?** |
+| Main current question | **After SR flip stop-doctrine merge, does stronger TREND_PULLBACK_EMA finish confirmation improve path quality without broadening unrelated behavior?** |
 | Evaluator identity preservation | ✅ Complete (PR-01) |
 | Evaluator penalty preservation | ✅ Complete (PR-01, PR-15) |
 | Structural SL/TP preservation | ✅ Complete (PR-02, PR-14) |
@@ -846,7 +847,7 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | Winner-takes-all | Eliminated (ARCH-2) |
 | Data pipeline | Complete (ARCH-3) — funding_rate and CVD wired into smc_data |
 | Family-aware scoring architecture | Live in scorer (PR-7A) and path-aware in scanner penalties (PR-7B); thresholds/router doctrine unchanged |
-| Current direction | Run PR-7C observability/validation hardening and, if approved/merged, validate runtime effects of the pending `SR_FLIP_RETEST` structural stop-doctrine correction before broader policy moves |
+| Current direction | Validate merged `SR_FLIP_RETEST` stop-doctrine runtime effects and, if approved/merged, validate `TREND_PULLBACK_EMA` finish-confirmation quality impact before any broader policy move |
 | Dominant live suppressors (multi-model audits + monitor truth) | Spread-quality rejection, `mtf_gate:360_SCALP`, quiet-floor suppression, geometry cap/reject friction |
 | Phase 1 scorecard | Not yet started — begins after PR-1..PR-2 establish trustworthy expression + geometry behavior |
 | Subscribers | None — deliberately. Phase 1 validation must complete first. |

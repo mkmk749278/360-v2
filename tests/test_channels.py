@@ -1622,11 +1622,49 @@ def _trend_pullback_indicators_long():
     }
 
 
+def _make_trend_pullback_candles_short(n=60, level=100.0):
+    closes = np.ones(n) * (level + 0.2)
+    highs = closes + 0.25
+    lows = closes - 0.25
+    opens = closes + 0.05
+
+    closes[-3] = level - 0.12
+    closes[-2] = level + 0.02
+    closes[-1] = level - 0.10
+    opens[-1] = level - 0.03
+    highs[-1] = level + 0.12
+    lows[-1] = level - 0.20
+
+    return {
+        "open": opens,
+        "high": highs,
+        "low": lows,
+        "close": closes,
+        "volume": np.ones(n) * 1000.0,
+    }
+
+
+def _trend_pullback_indicators_short():
+    return {
+        "5m": {
+            **_make_indicators(ema9=99.98, ema21=100.10, ema200=100.70, rsi_val=48.0, mom=-0.08),
+            "rsi_prev": 53.0,
+            "momentum_array": [0.06, -0.08],
+        }
+    }
+
+
 class TestTrendPullbackEntryQuality:
     def _call_long(self, candles, indicators, smc_data):
         ch = ScalpChannel()
         return ch._evaluate_trend_pullback(
             "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+
+    def _call_short(self, candles, indicators, smc_data):
+        ch = ScalpChannel()
+        return ch._evaluate_trend_pullback(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_DOWN",
         )
 
     def test_trend_pullback_long_accepts_turn_confirmation(self):
@@ -1672,6 +1710,39 @@ class TestTrendPullbackEntryQuality:
         ind["5m"]["rsi_last"] = 51.0
         sig = self._call_long(candles, ind, {"fvg": [{"level": 100.0}]})
         assert sig is not None
+
+    def test_trend_pullback_long_rejects_when_pullback_never_finished(self):
+        m5 = _make_trend_pullback_candles_long()
+        m5["close"][-2] = 100.08
+        m5["close"][-1] = 100.16
+        m5["open"][-1] = 100.09
+        m5["high"][-1] = 100.24
+        m5["low"][-1] = 99.94
+        candles = {"5m": m5}
+        ind = _trend_pullback_indicators_long()
+        ind["5m"]["rsi_prev"] = 49.0
+        ind["5m"]["rsi_last"] = 52.0
+        ind["5m"]["momentum_last"] = 0.06
+        sig = self._call_long(candles, ind, {"fvg": [{"level": 100.0}]})
+        assert sig is None
+
+    def test_trend_pullback_short_accepts_finished_pullback_break(self):
+        candles = {"5m": _make_trend_pullback_candles_short()}
+        sig = self._call_short(candles, _trend_pullback_indicators_short(), {"fvg": [{"level": 100.0}]})
+        assert sig is not None
+        assert sig.setup_class == "TREND_PULLBACK_EMA"
+        assert sig.direction == Direction.SHORT
+
+    def test_trend_pullback_short_rejects_without_break_of_pullback_low(self):
+        m5 = _make_trend_pullback_candles_short()
+        m5["close"][-1] = 99.96
+        m5["open"][-1] = 99.96
+        m5["high"][-1] = 100.04
+        m5["low"][-1] = 99.90
+        candles = {"5m": m5}
+        ind = _trend_pullback_indicators_short()
+        sig = self._call_short(candles, ind, {"fvg": [{"level": 100.0}]})
+        assert sig is None
 
 
 # ---------------------------------------------------------------------------

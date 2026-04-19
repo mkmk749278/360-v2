@@ -687,10 +687,12 @@ class ScalpChannel(BaseChannel):
         highs = m5.get("high", [])
         lows = m5.get("low", [])
         opens = m5.get("open", [])
-        if len(opens) < 1 or len(closes) < 3 or len(highs) < 1 or len(lows) < 1:
+        if len(opens) < 1 or len(closes) < 3 or len(highs) < 2 or len(lows) < 2:
             return None
         last_open = float(opens[-1])
         prev_close = float(closes[-2])
+        prev_high = float(highs[-2])
+        prev_low = float(lows[-2])
         last_low = float(lows[-1])
         last_high = float(highs[-1])
 
@@ -735,18 +737,26 @@ class ScalpChannel(BaseChannel):
             return None
         momentum_last = float(momentum_last)
         if direction == Direction.LONG:
+            if prev_close > ema9 and prev_close > ema21:
+                return None
             if close <= ema9 or close <= ema21:
                 return None
             if close <= prev_close:
+                return None
+            if close <= prev_high:
                 return None
             if last_low > ema21 * 1.001:
                 return None
             if momentum_last <= 0:
                 return None
         else:
+            if prev_close < ema9 and prev_close < ema21:
+                return None
             if close >= ema9 or close >= ema21:
                 return None
             if close >= prev_close:
+                return None
+            if close >= prev_low:
                 return None
             if last_high < ema21 * 0.999:
                 return None
