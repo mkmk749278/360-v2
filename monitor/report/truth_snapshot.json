@@ -1,0 +1,377 @@
+{
+  "channel": "360_SCALP",
+  "executive_summary": {
+    "overall_health": "stale",
+    "recommended_next_investigation_target": "SR_FLIP_RETEST",
+    "top_anomalies": [
+      "SR_FLIP_RETEST",
+      "TREND_PULLBACK_EMA",
+      "EVAL::LIQUIDATION_REVERSAL"
+    ],
+    "top_promising_paths": []
+  },
+  "filters": {
+    "setup_filter": "",
+    "symbol_filter": ""
+  },
+  "generated_at": 1776572122,
+  "lifecycle_truth": {
+    "fast_failure_buckets": {
+      "under_120s": {
+        "count": 0,
+        "pct": 0.0
+      },
+      "under_180s": {
+        "count": 0,
+        "pct": 0.0
+      },
+      "under_30s": {
+        "count": 0,
+        "pct": 0.0
+      },
+      "under_60s": {
+        "count": 0,
+        "pct": 0.0
+      }
+    },
+    "median_create_to_dispatch_sec": 1.5443105697631836,
+    "median_create_to_first_breach_sec": 183.88034391403198,
+    "median_create_to_terminal_sec": 186.06871700286865,
+    "median_first_breach_to_terminal_sec": 0.7272298336029053,
+    "terminal_close_around_3m": {
+      "count": 13,
+      "pct": 92.9
+    }
+  },
+  "lookback_hours": 24,
+  "path_funnel_truth": {
+    "CONTINUATION_LIQUIDITY_SWEEP": {
+      "attempts": 0,
+      "classification": "low-sample",
+      "emitted": 7,
+      "gated": 1157,
+      "generated": 1312,
+      "no_signal": 0,
+      "scanner_preparation": 1312
+    },
+    "EVAL::BREAKDOWN_SHORT": {
+      "attempts": 650476,
+      "classification": "non-generating",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "no_signal": 650476,
+      "scanner_preparation": 0
+    },
+    "EVAL::CONTINUATION_LIQUIDITY_SWEEP": {
+      "attempts": 650476,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 1312,
+      "no_signal": 649164,
+      "scanner_preparation": 0
+    },
+    "EVAL::DIVERGENCE_CONTINUATION": {
+      "attempts": 650476,
+      "classification": "non-generating",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "no_signal": 650476,
+      "scanner_preparation": 0
+    },
+    "EVAL::FAILED_AUCTION_RECLAIM": {
+      "attempts": 650476,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 84916,
+      "no_signal": 565560,
+      "scanner_preparation": 0
+    },
+    "EVAL::FUNDING_EXTREME": {
+      "attempts": 650476,
+      "classification": "non-generating",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "no_signal": 650476,
+      "scanner_preparation": 0
+    },
+    "EVAL::LIQUIDATION_REVERSAL": {
+      "attempts": 650476,
+      "classification": "non-generating",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "no_signal": 650476,
+      "scanner_preparation": 0
+    },
+    "EVAL::OPENING_RANGE_BREAKOUT": {
+      "attempts": 650476,
+      "classification": "non-generating",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "no_signal": 650476,
+      "scanner_preparation": 0
+    },
+    "EVAL::POST_DISPLACEMENT_CONTINUATION": {
+      "attempts": 650476,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 46,
+      "no_signal": 650430,
+      "scanner_preparation": 0
+    },
+    "EVAL::QUIET_COMPRESSION_BREAK": {
+      "attempts": 650476,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 703,
+      "no_signal": 649773,
+      "scanner_preparation": 0
+    },
+    "EVAL::SR_FLIP_RETEST": {
+      "attempts": 650476,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 10638,
+      "no_signal": 639838,
+      "scanner_preparation": 0
+    },
+    "EVAL::STANDARD": {
+      "attempts": 650476,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 17321,
+      "no_signal": 633155,
+      "scanner_preparation": 0
+    },
+    "EVAL::TREND_PULLBACK": {
+      "attempts": 650476,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 1025,
+      "no_signal": 649451,
+      "scanner_preparation": 0
+    },
+    "EVAL::VOLUME_SURGE_BREAKOUT": {
+      "attempts": 650476,
+      "classification": "non-generating",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "no_signal": 650476,
+      "scanner_preparation": 0
+    },
+    "EVAL::WHALE_MOMENTUM": {
+      "attempts": 650476,
+      "classification": "non-generating",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "no_signal": 650476,
+      "scanner_preparation": 0
+    },
+    "FAILED_AUCTION_RECLAIM": {
+      "attempts": 0,
+      "classification": "low-sample",
+      "emitted": 4,
+      "gated": 84740,
+      "generated": 84916,
+      "no_signal": 0,
+      "scanner_preparation": 84916
+    },
+    "LIQUIDITY_SWEEP_REVERSAL": {
+      "attempts": 0,
+      "classification": "low-sample",
+      "emitted": 2,
+      "gated": 14175,
+      "generated": 17321,
+      "no_signal": 0,
+      "scanner_preparation": 17321
+    },
+    "POST_DISPLACEMENT_CONTINUATION": {
+      "attempts": 0,
+      "classification": "low-sample",
+      "emitted": 1,
+      "gated": 45,
+      "generated": 46,
+      "no_signal": 0,
+      "scanner_preparation": 46
+    },
+    "QUIET_COMPRESSION_BREAK": {
+      "attempts": 0,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 703,
+      "generated": 703,
+      "no_signal": 0,
+      "scanner_preparation": 703
+    },
+    "SR_FLIP_RETEST": {
+      "attempts": 0,
+      "classification": "active-low-quality",
+      "emitted": 19,
+      "gated": 9278,
+      "generated": 10638,
+      "no_signal": 0,
+      "scanner_preparation": 10638
+    },
+    "TREND_PULLBACK_EMA": {
+      "attempts": 0,
+      "classification": "active-low-quality",
+      "emitted": 15,
+      "gated": 731,
+      "generated": 1025,
+      "no_signal": 0,
+      "scanner_preparation": 1025
+    }
+  },
+  "quality_by_setup": {
+    "CONTINUATION_LIQUIDITY_SWEEP": {
+      "average_pnl_pct": -0.459,
+      "closed": 2,
+      "emitted": 2,
+      "median_first_breach_sec": 180.69527101516724,
+      "median_terminal_duration_sec": 401.8299344778061,
+      "sl_rate": 50.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    },
+    "POST_DISPLACEMENT_CONTINUATION": {
+      "average_pnl_pct": -0.7362,
+      "closed": 1,
+      "emitted": 1,
+      "median_first_breach_sec": 186.36427402496338,
+      "median_terminal_duration_sec": 187.31129384040833,
+      "sl_rate": 100.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    },
+    "SR_FLIP_RETEST": {
+      "average_pnl_pct": -0.4263,
+      "closed": 3,
+      "emitted": 3,
+      "median_first_breach_sec": 181.05250597000122,
+      "median_terminal_duration_sec": 184.48625493049622,
+      "sl_rate": 100.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    },
+    "TREND_PULLBACK_EMA": {
+      "average_pnl_pct": -0.297,
+      "closed": 8,
+      "emitted": 8,
+      "median_first_breach_sec": 184.07737946510315,
+      "median_terminal_duration_sec": 185.82900309562683,
+      "sl_rate": 100.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    }
+  },
+  "raw_extracts": {
+    "current_path_funnel_counters": {
+      "emitted:360_SCALP:continuation:CONTINUATION_LIQUIDITY_SWEEP": 7,
+      "emitted:360_SCALP:continuation:POST_DISPLACEMENT_CONTINUATION": 1,
+      "emitted:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 4,
+      "emitted:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 19,
+      "emitted:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 2,
+      "emitted:360_SCALP:trend_following:TREND_PULLBACK_EMA": 15,
+      "evaluator_attempted:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::CONTINUATION_LIQUIDITY_SWEEP": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::FUNDING_EXTREME": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::OPENING_RANGE_BREAKOUT": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::SR_FLIP_RETEST": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::STANDARD": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::TREND_PULLBACK": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 650476,
+      "evaluator_attempted:360_SCALP:other:EVAL::WHALE_MOMENTUM": 650476,
+      "evaluator_generated:360_SCALP:other:EVAL::CONTINUATION_LIQUIDITY_SWEEP": 1312,
+      "evaluator_generated:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 84916,
+      "evaluator_generated:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 46,
+      "evaluator_generated:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 703,
+      "evaluator_generated:360_SCALP:other:EVAL::SR_FLIP_RETEST": 10638,
+      "evaluator_generated:360_SCALP:other:EVAL::STANDARD": 17321,
+      "evaluator_generated:360_SCALP:other:EVAL::TREND_PULLBACK": 1025,
+      "evaluator_no_signal:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 650476,
+      "evaluator_no_signal:360_SCALP:other:EVAL::CONTINUATION_LIQUIDITY_SWEEP": 649164,
+      "evaluator_no_signal:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 650476,
+      "evaluator_no_signal:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 565560,
+      "evaluator_no_signal:360_SCALP:other:EVAL::FUNDING_EXTREME": 650476,
+      "evaluator_no_signal:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 650476,
+      "evaluator_no_signal:360_SCALP:other:EVAL::OPENING_RANGE_BREAKOUT": 650476,
+      "evaluator_no_signal:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 650430,
+      "evaluator_no_signal:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 649773,
+      "evaluator_no_signal:360_SCALP:other:EVAL::SR_FLIP_RETEST": 639838,
+      "evaluator_no_signal:360_SCALP:other:EVAL::STANDARD": 633155,
+      "evaluator_no_signal:360_SCALP:other:EVAL::TREND_PULLBACK": 649451,
+      "evaluator_no_signal:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 650476,
+      "evaluator_no_signal:360_SCALP:other:EVAL::WHALE_MOMENTUM": 650476,
+      "filtered:360_SCALP:continuation:CONTINUATION_LIQUIDITY_SWEEP": 148,
+      "filtered:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 162,
+      "filtered:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 1340,
+      "filtered:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 3144,
+      "filtered:360_SCALP:trend_following:TREND_PULLBACK_EMA": 278,
+      "gated:360_SCALP:compression:QUIET_COMPRESSION_BREAK": 703,
+      "gated:360_SCALP:continuation:CONTINUATION_LIQUIDITY_SWEEP": 1157,
+      "gated:360_SCALP:continuation:POST_DISPLACEMENT_CONTINUATION": 45,
+      "gated:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 84740,
+      "gated:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 9278,
+      "gated:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 14175,
+      "gated:360_SCALP:trend_following:TREND_PULLBACK_EMA": 731,
+      "generated:360_SCALP:compression:QUIET_COMPRESSION_BREAK": 703,
+      "generated:360_SCALP:continuation:CONTINUATION_LIQUIDITY_SWEEP": 1312,
+      "generated:360_SCALP:continuation:POST_DISPLACEMENT_CONTINUATION": 46,
+      "generated:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 84916,
+      "generated:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 10638,
+      "generated:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 17321,
+      "generated:360_SCALP:trend_following:TREND_PULLBACK_EMA": 1025,
+      "scanner_preparation:360_SCALP:compression:QUIET_COMPRESSION_BREAK": 703,
+      "scanner_preparation:360_SCALP:continuation:CONTINUATION_LIQUIDITY_SWEEP": 1312,
+      "scanner_preparation:360_SCALP:continuation:POST_DISPLACEMENT_CONTINUATION": 46,
+      "scanner_preparation:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 84916,
+      "scanner_preparation:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 10638,
+      "scanner_preparation:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 17321,
+      "scanner_preparation:360_SCALP:trend_following:TREND_PULLBACK_EMA": 1025,
+      "scored:360_SCALP:continuation:CONTINUATION_LIQUIDITY_SWEEP": 155,
+      "scored:360_SCALP:continuation:POST_DISPLACEMENT_CONTINUATION": 1,
+      "scored:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 176,
+      "scored:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 1360,
+      "scored:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 3146,
+      "scored:360_SCALP:trend_following:TREND_PULLBACK_EMA": 294
+    },
+    "previous_path_funnel_counters": {},
+    "record_count_current_window": 14,
+    "record_count_previous_window": 28,
+    "record_count_scoped": 42
+  },
+  "recommended_operator_focus": {
+    "most_likely_bottleneck": "QUIET_COMPRESSION_BREAK",
+    "most_promising_healthy_path": null,
+    "most_suspicious_degradation": "SR_FLIP_RETEST",
+    "suggested_next_investigation_target": "SR_FLIP_RETEST"
+  },
+  "runtime_health": {
+    "health": "healthy",
+    "heartbeat_age_sec": 15,
+    "heartbeat_warning": false,
+    "latest_record_age_sec": 27040,
+    "overall": "stale",
+    "records_fresh": false,
+    "running": true,
+    "status": "running"
+  }
+}

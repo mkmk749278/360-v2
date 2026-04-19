@@ -1,0 +1,25 @@
+{
+  "emissions_delta": 48,
+  "enabled": true,
+  "fast_failures_delta": 0,
+  "gating_delta": 110829,
+  "no_generation_delta": 8990703,
+  "quality_changes": {
+    "SR_FLIP_RETEST": {
+      "avg_pnl_delta": -0.2449,
+      "current_avg_pnl": -0.4263,
+      "current_win_rate": 0.0,
+      "previous_avg_pnl": -0.1814,
+      "previous_win_rate": 0.0,
+      "win_rate_delta": 0.0
+    },
+    "TREND_PULLBACK_EMA": {
+      "avg_pnl_delta": -0.4241,
+      "current_avg_pnl": -0.297,
+      "current_win_rate": 0.0,
+      "previous_avg_pnl": 0.1271,
+      "previous_win_rate": 0.0,
+      "win_rate_delta": 0.0
+    }
+  }
+}
