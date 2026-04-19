@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
+from src.signal_quality import SetupClass, _min_rr_for_setup
 from src.utils import get_logger
 
 log = get_logger("risk")
@@ -31,7 +32,7 @@ _DEFAULT_ACCOUNT_RISK_PCT: float = 1.0
 _MAX_CONCURRENT_SAME_DIRECTION: int = 1
 _MAX_CONCURRENT_PER_SYMBOL: int = 2
 
-# Minimum acceptable Risk:Reward ratio — trades below this floor are hard-rejected
+# Legacy fallback Risk:Reward floor used when setup identity is unavailable.
 _MIN_RR_FLOOR: float = 1.3
 
 
@@ -116,11 +117,12 @@ class RiskManager:
             symbol, direction_val, active_signals or {}
         )
 
-        # R:R floor — hard-reject trades with insufficient reward-to-risk.
-        # Scalping with an inverted R:R is a guaranteed path to account bleed.
-        if rr < _MIN_RR_FLOOR:
+        # R:R floor — enforce coherent family-aware doctrine when setup identity
+        # is available; otherwise keep the legacy fallback for unknown signals.
+        min_rr_floor = self._min_rr_floor_for_signal(signal)
+        if rr < min_rr_floor:
             allowed = False
-            reason = f"Insufficient R:R ({rr:.2f} < {_MIN_RR_FLOOR})"
+            reason = f"Insufficient R:R ({rr:.2f} < {min_rr_floor:.1f})"
 
         # Order book imbalance check — final execution gate.
         # Reads the order book snapshot from the signal (attached by the
@@ -143,6 +145,21 @@ class RiskManager:
             allowed=allowed,
             reason=reason,
         )
+
+    @staticmethod
+    def _min_rr_floor_for_signal(signal: Any) -> float:
+        setup_raw = (
+            getattr(signal, "setup_class", None)
+            or getattr(signal, "origin_setup_class", None)
+        )
+        if isinstance(setup_raw, SetupClass):
+            return _min_rr_for_setup(setup_raw)
+        if isinstance(setup_raw, str):
+            try:
+                return _min_rr_for_setup(SetupClass(setup_raw))
+            except ValueError:
+                pass
+        return _MIN_RR_FLOOR
 
     # ------------------------------------------------------------------
     # Internals

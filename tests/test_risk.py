@@ -21,6 +21,8 @@ def _make_signal(
     symbol: str = "BTCUSDT",
     spread_pct: float = 0.0,
     confidence: float = 70.0,
+    setup_class: str = "",
+    origin_setup_class: str = "",
 ) -> SimpleNamespace:
     dir_ns = SimpleNamespace(value=direction)
     return SimpleNamespace(
@@ -31,6 +33,8 @@ def _make_signal(
         symbol=symbol,
         spread_pct=spread_pct,
         confidence=confidence,
+        setup_class=setup_class,
+        origin_setup_class=origin_setup_class,
     )
 
 
@@ -89,6 +93,42 @@ class TestRRFloor:
         result = self.rm.calculate_risk(sig, {}, 100_000_000, active_signals={})
         assert result.allowed is False
         assert "R:R" in result.reason
+
+    def test_structured_setup_uses_family_rr_floor(self):
+        """SR_FLIP_RETEST should use structured family floor (1.0), not legacy 1.3."""
+        sig = _make_signal(
+            entry=100.0,
+            stop_loss=95.0,
+            tp1=105.0,  # R:R = 1.0
+            setup_class="SR_FLIP_RETEST",
+        )
+        result = self.rm.calculate_risk(sig, {}, 100_000_000)
+        assert result.allowed is True
+        assert result.risk_reward == pytest.approx(1.0)
+
+    def test_default_family_setup_uses_default_family_floor(self):
+        """Default family setup should reject below 1.2 floor (without requiring 1.3)."""
+        sig = _make_signal(
+            entry=100.0,
+            stop_loss=95.0,
+            tp1=105.5,  # R:R = 1.1
+            setup_class="TREND_PULLBACK_CONTINUATION",
+        )
+        result = self.rm.calculate_risk(sig, {}, 100_000_000)
+        assert result.allowed is False
+        assert result.reason == "Insufficient R:R (1.10 < 1.2)"
+
+    def test_unknown_setup_falls_back_to_legacy_rr_floor(self):
+        """Unknown setup identity keeps legacy fallback floor to avoid broadening."""
+        sig = _make_signal(
+            entry=100.0,
+            stop_loss=95.0,
+            tp1=105.5,  # R:R = 1.1
+            setup_class="UNKNOWN_SETUP",
+        )
+        result = self.rm.calculate_risk(sig, {}, 100_000_000)
+        assert result.allowed is False
+        assert result.reason == "Insufficient R:R (1.10 < 1.3)"
 
 
 # ---------------------------------------------------------------------------
