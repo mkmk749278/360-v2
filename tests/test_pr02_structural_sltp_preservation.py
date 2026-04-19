@@ -301,20 +301,28 @@ class TestUniversalHardControlsOnProtectedPaths:
     are still enforced for protected setup classes.
     """
 
-    def test_max_sl_pct_cap_applied_even_for_protected_path(self):
-        """Max SL % cap must clamp an oversized evaluator SL even on protected paths."""
+    def test_max_sl_pct_rejects_not_compresses_for_protected_path(self):
+        """Oversized evaluator SL on protected paths must be rejected, not clamped."""
         # Evaluator SL at 90.0 = 10% below entry — well over the 1.5% channel cap.
         sig = _signal(
             stop_loss=90.0,   # 10% — oversized
             setup_class="VOLUME_SURGE_BREAKOUT",
         )
         risk = _build(sig, SetupClass.VOLUME_SURGE_BREAKOUT)
-        # The plan may pass or fail depending on R:R, but SL must be capped.
-        sl_pct = abs(sig.entry - risk.stop_loss) / sig.entry
-        assert sl_pct <= 0.016, (
-            f"Max SL % cap not applied on VOLUME_SURGE_BREAKOUT: "
-            f"SL is {sl_pct:.1%} from entry (cap is 1.5%)"
+        assert not risk.passed
+        assert risk.stop_loss == pytest.approx(90.0, rel=1e-9)
+        assert risk.reason == "protected_structural_sl_cap_exceeded_reject_not_compress"
+
+    def test_max_sl_pct_rejects_not_compresses_for_failed_auction_reclaim(self):
+        """FAILED_AUCTION_RECLAIM must also reject-not-compress oversized truthful SL."""
+        sig = _signal(
+            stop_loss=90.0,   # 10% — oversized
+            setup_class=SetupClass.FAILED_AUCTION_RECLAIM.value,
         )
+        risk = _build(sig, SetupClass.FAILED_AUCTION_RECLAIM)
+        assert not risk.passed
+        assert risk.stop_loss == pytest.approx(90.0, rel=1e-9)
+        assert risk.reason == "protected_structural_sl_cap_exceeded_reject_not_compress"
 
     def test_directional_sanity_rejects_sl_above_entry_for_long_protected(self):
         """When evaluator SL is invalid (above entry) for LONG, the PR-02 override

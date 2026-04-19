@@ -1461,7 +1461,7 @@ class TestMTFGateInScanner:
             tp3=None,
             r_multiple=0.0,
             invalidation_summary="",
-            reason="sl_too_wide",
+            reason="protected_structural_sl_cap_exceeded_reject_not_compress",
         )
 
         with _common_gate_patches(scanner, [
@@ -1475,10 +1475,10 @@ class TestMTFGateInScanner:
             "geometry:risk_plan:rejected:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
         ] == 1
         assert scanner._path_funnel_counters[
-            "geometry:risk_plan:rejected_reason:sl_too_wide:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+            "geometry:risk_plan:rejected_reason:protected_structural_sl_cap_exceeded_reject_not_compress:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
         ] == 1
         assert scanner._suppression_counters[
-            "geometry_rejected_risk_plan_reason:360_SCALP:breakout_momentum:sl_too_wide"
+            "geometry_rejected_risk_plan_reason:360_SCALP:breakout_momentum:protected_structural_sl_cap_exceeded_reject_not_compress"
         ] == 1
 
     @pytest.mark.asyncio

@@ -341,7 +341,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
 }
 
 # Maximum SL distance (as a percentage of entry) allowed per channel.
-# Signals whose structure-based SL would exceed this cap are clamped.
+# For evaluator-protected structural setups we enforce reject-not-compress:
+# oversized truthful invalidation is rejected, not cosmetically clamped.
 _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP": 1.5,
     "360_SCALP_FVG": 1.0,
@@ -365,6 +366,11 @@ _RECLAIM_RETEST_SETUPS: frozenset[SetupClass] = frozenset({
     SetupClass.SR_FLIP_RETEST,
     SetupClass.FAILED_AUCTION_RECLAIM,
 })
+
+
+def _reject_not_compress_protected_setup(setup: SetupClass) -> bool:
+    return setup in STRUCTURAL_SLTP_PROTECTED_SETUPS or setup == SetupClass.FAILED_AUCTION_RECLAIM
+
 
 _MIN_SL_DISTANCE_PCT_DEFAULT = 0.0005  # 0.05% of entry price
 _MIN_SL_DISTANCE_PCT_RECLAIM_RETEST = 0.0003  # 0.03% structural reclaim/retest floor
@@ -1118,13 +1124,39 @@ def build_risk_plan(
         elif signal.direction == Direction.SHORT and _eval_sl > signal.entry:
             stop_loss = round(_eval_sl, 8)
 
-    # Channel-aware hard cap on SL distance – clamp oversized stops before
-    # they inflate risk and produce trades that hit SL within seconds.
+    # Channel-aware hard cap on SL distance.
+    # For evaluator-protected structural setups, enforce reject-not-compress:
+    # preserve truthful invalidation, and reject if it exceeds doctrine.
+    # Non-protected setups keep legacy clamp behavior.
     _chan = channel or getattr(signal, "channel", None) or ""
     _max_sl_pct = _MAX_SL_PCT_BY_CHANNEL.get(_chan, 5.0) / 100.0
     if signal.entry > 0:
         _sl_dist_pct = abs(signal.entry - stop_loss) / signal.entry
         if _sl_dist_pct > _max_sl_pct:
+            if _reject_not_compress_protected_setup(setup):
+                log.warning(
+                    "Protected structural SL rejected (reject-not-compress) for %s %s %s: "
+                    "%.2f%% > %.2f%% max",
+                    _chan,
+                    setup.value,
+                    signal.direction.value,
+                    _sl_dist_pct * 100,
+                    _max_sl_pct * 100,
+                )
+                return RiskAssessment(
+                    passed=False,
+                    stop_loss=stop_loss,
+                    tp1=signal.tp1,
+                    tp2=signal.tp2,
+                    tp3=signal.tp3,
+                    r_multiple=0.0,
+                    invalidation_summary=(
+                        f"Protected structural invalidation preserved at {stop_loss:.8f} "
+                        f"({(_sl_dist_pct * 100):.2f}% of entry), exceeding "
+                        f"{(_max_sl_pct * 100):.2f}% channel doctrine; rejected (no compression)."
+                    ),
+                    reason="protected_structural_sl_cap_exceeded_reject_not_compress",
+                )
             _capped_dist = signal.entry * _max_sl_pct
             if signal.direction == Direction.LONG:
                 stop_loss = round(signal.entry - _capped_dist, 8)

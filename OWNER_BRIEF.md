@@ -814,7 +814,7 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 
 ## Part VII — Current System Snapshot
 
-*(Updated: 2026-04-19 — SR_FLIP_RETEST stop-doctrine correction and TREND_PULLBACK_EMA finish-confirmation correction are merged; PR-7C now focuses on bounded runtime observability/validation)*
+*(Updated: 2026-04-19 — PR #193, #194, and #195 are merged; next doctrine correction PR enforces reject-not-compress for evaluator-protected structural setups and is pending review.)*
 
 | Item | Status |
 |---|---|
@@ -825,13 +825,14 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | 2026-04-14 WATCHLIST lifecycle correction | ✅ Complete — PR #144 and PR #145 merged (2026-04-14) |
 | PR-7A family-aware scoring correction | ✅ Merged — scorer-side family thesis + regime-affinity corrections live; pre/post-penalty distribution telemetry live |
 | PR-7B path-aware penalty modulation | ✅ Merged — scanner-side targeted soft-penalty modulation live (path-targeted only; penalties preserved) |
-| PR-7C runtime validation hardening / observability refinement | 🟡 In progress / next — validation and observability hardening only; no threshold, router, or doctrine changes |
+| PR-7C runtime validation hardening / observability refinement | ✅ Merged (PR #195) — runtime-truth observability hardening shipped for target-path validation |
 | `SR_FLIP_RETEST` stop-loss doctrine correction | ✅ Merged (PR #193) — fixed ±0.20% replaced with adaptive structural invalidation beyond reclaim/wick failure (ATR + structural overshoot buffer) |
 | `TREND_PULLBACK_EMA` finish-confirmation correction | ✅ Merged (PR #194) — require explicit pullback-finish evidence (pullback-side prior close + continuation break of prior swing) before entry |
+| Protected structural reject-not-compress enforcement | 🟡 Pending PR review — preserve evaluator-owned invalidation; reject oversized protected structural geometry instead of SL cap compression |
 | Internal `360_SCALP` evaluator set | 14 internal paths live |
 | Core engine quality | Strong core confirmed by multiple audits |
 | Strongest foundation paths | `FAILED_AUCTION_RECLAIM`, `CONTINUATION_LIQUIDITY_SWEEP`, `SR_FLIP_RETEST`, `TREND_PULLBACK_EMA`, `POST_DISPLACEMENT_CONTINUATION` |
-| Main current question | **After PR #193 and PR #194 merges, are target-path quality changes real improvements or only emission-volume reduction?** |
+| Main current question | **After PR #195 and reject-not-compress enforcement merge, do protected structural paths show cleaner quality without cosmetic geometry compression?** |
 | Evaluator identity preservation | ✅ Complete (PR-01) |
 | Evaluator penalty preservation | ✅ Complete (PR-01, PR-15) |
 | Structural SL/TP preservation | ✅ Complete (PR-02, PR-14) |
@@ -847,7 +848,7 @@ The completed pre-2026-04-15 correction history remains valid and preserved in:
 | Winner-takes-all | Eliminated (ARCH-2) |
 | Data pipeline | Complete (ARCH-3) — funding_rate and CVD wired into smc_data |
 | Family-aware scoring architecture | Live in scorer (PR-7A) and path-aware in scanner penalties (PR-7B); thresholds/router doctrine unchanged |
-| Current direction | Run bounded PR-7C runtime-truth observability to compare target-path emissions, first-breach/terminal timing, and evaluator-vs-final-live geometry before any broader policy move |
+| Current direction | Keep the correction bounded to protected structural setups: preserve evaluator invalidation geometry when valid, reject-not-compress when doctrine limits are exceeded, and validate runtime outcomes after merge |
 | Dominant live suppressors (multi-model audits + monitor truth) | Spread-quality rejection, `mtf_gate:360_SCALP`, quiet-floor suppression, geometry cap/reject friction |
 | Phase 1 scorecard | Not yet started — begins after PR-1..PR-2 establish trustworthy expression + geometry behavior |
 | Subscribers | None — deliberately. Phase 1 validation must complete first. |
