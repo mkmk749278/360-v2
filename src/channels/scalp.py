@@ -2044,8 +2044,8 @@ class ScalpChannel(BaseChannel):
             wick_overshoot = max(level - last_low, 0.0)
         else:
             wick_overshoot = max(last_high - level, 0.0)
-        failure_buffer = wick_overshoot + atr_val * 0.15
-        invalidation_buffer = max(level_buffer, atr_buffer, failure_buffer)
+        structural_failure_buffer = wick_overshoot + atr_val * 0.15
+        invalidation_buffer = max(level_buffer, atr_buffer, structural_failure_buffer)
         if direction == Direction.LONG:
             invalidation_anchor = min(level, last_low)
             sl = invalidation_anchor - invalidation_buffer
