@@ -354,10 +354,12 @@ _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP_ORDERBLOCK": 1.0,
 }
 
+_SCALP_CHANNEL_NAME = "360_SCALP"
+
 # Family-aware 360_SCALP SL-cap doctrine.
 # This is intentionally narrow and bounded: reclaim/retest and reversal families
-# can use a slightly wider structural invalidation envelope than continuation /
-# breakout families, while all other families remain on the baseline channel cap.
+# can use a slightly wider structural invalidation envelope, while families
+# without explicit overrides remain on the baseline channel cap.
 _SCALP_SL_CAP_PCT_BY_FAMILY: Dict[str, float] = {
     "reclaim_retest": 2.0,
     "reversal": 1.8,
@@ -434,7 +436,7 @@ def _max_sl_pct_for_policy(channel: str, setup: SetupClass) -> tuple[float, str,
     """Return (max_sl_pct_decimal, policy_scope, setup_family)."""
     family = _geometry_family_for_setup(setup)
     channel_cap = _channel_max_sl_pct(channel)
-    if channel == "360_SCALP":
+    if channel == _SCALP_CHANNEL_NAME:
         family_cap_pct = _SCALP_SL_CAP_PCT_BY_FAMILY.get(family)
         if family_cap_pct is not None:
             return family_cap_pct / 100.0, "family", family
