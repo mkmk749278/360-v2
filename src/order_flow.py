@@ -374,6 +374,76 @@ class OrderFlowStore:
             total += e.qty * e.price
         return total
 
+    def get_liquidation_clusters(
+        self,
+        symbol: str,
+        window_seconds: float = 900.0,
+        max_clusters: int = 5,
+        price_band_pct: float = 0.0015,
+    ) -> List[Dict[str, Any]]:
+        """Aggregate recent liquidation events into price clusters.
+
+        Clusters are built from real force-order events only. No synthetic levels
+        are generated when liquidation data is absent.
+        """
+        events: Deque[LiquidationEvent] = self._liqs.get(symbol, deque())
+        if not events:
+            return []
+
+        cutoff = time.monotonic() - max(1.0, float(window_seconds))
+        recent = [e for e in events if e.timestamp >= cutoff and e.price > 0 and e.qty > 0]
+        if not recent:
+            return []
+
+        sorted_events = sorted(recent, key=lambda evt: evt.price)
+        clusters: List[Dict[str, Any]] = []
+        for evt in sorted_events:
+            evt_usd = float(evt.qty) * float(evt.price)
+            if evt_usd <= 0:
+                continue
+            band = max(float(evt.price) * max(float(price_band_pct), 0.0), 1e-8)
+            if clusters and abs(float(evt.price) - clusters[-1]["price"]) <= band:
+                cluster = clusters[-1]
+                total_usd = cluster["volume_usd"] + evt_usd
+                if total_usd > 0:
+                    cluster["price"] = (
+                        (cluster["price"] * cluster["volume_usd"]) + (float(evt.price) * evt_usd)
+                    ) / total_usd
+                cluster["volume_usd"] = total_usd
+                cluster["count"] += 1
+                if evt.side == "BUY":
+                    cluster["buy_count"] += 1
+                else:
+                    cluster["sell_count"] += 1
+                continue
+
+            clusters.append(
+                {
+                    "price": float(evt.price),
+                    "volume_usd": evt_usd,
+                    "count": 1,
+                    "buy_count": 1 if evt.side == "BUY" else 0,
+                    "sell_count": 1 if evt.side == "SELL" else 0,
+                }
+            )
+
+        clusters.sort(key=lambda cluster: float(cluster.get("volume_usd", 0.0)), reverse=True)
+        output: List[Dict[str, Any]] = []
+        for cluster in clusters[: max(1, int(max_clusters))]:
+            output.append(
+                {
+                    "price": round(float(cluster["price"]), 8),
+                    "volume_usd": round(float(cluster["volume_usd"]), 2),
+                    "count": int(cluster["count"]),
+                    "dominant_side": (
+                        "BUY"
+                        if int(cluster["buy_count"]) >= int(cluster["sell_count"])
+                        else "SELL"
+                    ),
+                }
+            )
+        return output
+
     # ------------------------------------------------------------------
     # CVD
     # ------------------------------------------------------------------

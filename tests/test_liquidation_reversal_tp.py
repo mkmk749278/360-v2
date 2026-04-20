@@ -158,6 +158,17 @@ class TestLiquidationReversalFibonacciLong:
         assert sig.tp3 > sig.entry, "TP3 must be above entry for LONG"
 
 
+def test_liquidation_reversal_marks_short_cvd_history_as_insufficient():
+    candles, indicators, smc_data = _make_long_scenario(atr_val=0.5)
+    smc_data["cvd"] = [1.0, 2.0, 3.0]
+    ch = ScalpChannel()
+    sig = ch._evaluate_liquidation_reversal(
+        "TESTUSDT", candles, indicators, smc_data, _SPREAD_PCT, _VOLUME_24H
+    )
+    assert sig is None
+    assert ch._active_no_signal_reason == "cvd_insufficient"
+
+
 # ---------------------------------------------------------------------------
 # Test 2: SHORT — Fibonacci retrace TPs
 # ---------------------------------------------------------------------------

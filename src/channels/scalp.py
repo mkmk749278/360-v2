@@ -286,6 +286,15 @@ class ScalpChannel(BaseChannel):
         self._active_no_signal_reason = self._no_signal_reason_token(reason)
         return None
 
+    @staticmethod
+    def _dependency_state(smc_data: dict, name: str) -> str:
+        state_map = smc_data.get("__dependency_source_state")
+        if isinstance(state_map, dict):
+            state = str(state_map.get(name) or "").strip().lower()
+            if state in {"unavailable", "empty", "populated"}:
+                return state
+        return "unknown"
+
     def consume_generation_telemetry(self) -> Dict[str, Dict[str, int]]:
         snapshot = {
             stage: dict(counts)
@@ -921,7 +930,7 @@ class ScalpChannel(BaseChannel):
             return self._reject("missing_cvd")
         cvd_values = cvd_data if isinstance(cvd_data, list) else cvd_data.get("values", [])
         if len(cvd_values) < 4:
-            return self._reject("missing_cvd")
+            return self._reject("cvd_insufficient")
         cvd_now = float(cvd_values[-1])
         cvd_3ago = float(cvd_values[-4])
         cvd_change = cvd_now - cvd_3ago
@@ -1082,7 +1091,10 @@ class ScalpChannel(BaseChannel):
 
         ticks: List[Dict[str, Any]] = smc_data.get("recent_ticks", [])
         if not ticks:
-            return self._reject("missing_recent_ticks")
+            tick_state = self._dependency_state(smc_data, "recent_ticks")
+            if tick_state == "unavailable":
+                return self._reject("missing_recent_ticks")
+            return self._reject("recent_ticks_empty")
         buy_vol = sum(
             t.get("qty", 0) * t.get("price", 0)
             for t in ticks if not t.get("isBuyerMaker", True)
@@ -1130,36 +1142,47 @@ class ScalpChannel(BaseChannel):
         # Three-tier behaviour:
         #   1. order_book is None (circuit breaker open): skip OBI entirely;
         #      flag obi_confirmed=False so a +10 soft penalty is applied.
-        #   2. order_book present, ratio ≥ _WHALE_OBI_MIN (1.5×): full
+        #   2. order_book source=book_ticker (top-of-book only): treat as
+        #      partial/degraded evidence, never as full depth confirmation.
+        #   3. order_book present, ratio ≥ _WHALE_OBI_MIN (1.5×): full
         #      confirmation, no OBI penalty.
-        #   3. order_book present, ratio in [_WHALE_OBI_SOFT_MIN, _WHALE_OBI_MIN)
+        #   4. order_book present, ratio in [_WHALE_OBI_SOFT_MIN, _WHALE_OBI_MIN)
         #      AND regime is a fast/volatile regime: marginal OBI treated as a
         #      soft contributor (+8 penalty) rather than hard rejection.  In fast
         #      regimes depth books are routinely thin due to market-maker spread
         #      widening; tick flow and whale alert carry more weight.
-        #   4. order_book present, ratio < _WHALE_OBI_MIN in a calm regime, or
+        #   5. order_book present, ratio < _WHALE_OBI_MIN in a calm regime, or
         #      ratio < _WHALE_OBI_SOFT_MIN in any regime: hard reject — the order
         #      book actively contradicts the assumed whale direction.
         order_book = smc_data.get("order_book")
         obi_confirmed = False
         obi_penalty = 0.0
         if order_book is not None:
-            bids = order_book.get("bids", [])
-            asks = order_book.get("asks", [])
-            bid_depth = sum(float(b[1]) * float(b[0]) for b in bids[:10])
-            ask_depth = sum(float(a[1]) * float(a[0]) for a in asks[:10])
-            if bid_depth <= 0 or ask_depth <= 0:
-                return self._reject("order_book_insufficient")
-            imbalance_ratio = (
-                bid_depth / ask_depth if direction == Direction.LONG else ask_depth / bid_depth
+            ob_source = str(order_book.get("source") or "").strip().lower() if isinstance(order_book, dict) else ""
+            ob_quality = (
+                str(order_book.get("depth_quality") or "").strip().lower()
+                if isinstance(order_book, dict)
+                else ""
             )
-            if imbalance_ratio >= _WHALE_OBI_MIN:
-                obi_confirmed = True
-            elif regime_upper in _WHALE_FAST_REGIMES and imbalance_ratio >= _WHALE_OBI_SOFT_MIN:
-                # Marginal OBI in a fast regime: soft penalty, not hard reject
-                obi_penalty = 8.0
+            if ob_source == "book_ticker" or ob_quality == "top_of_book_only":
+                obi_penalty = max(obi_penalty, 10.0)
             else:
-                return self._reject("order_book_imbalance_failed")
+                bids = order_book.get("bids", [])
+                asks = order_book.get("asks", [])
+                bid_depth = sum(float(b[1]) * float(b[0]) for b in bids[:10])
+                ask_depth = sum(float(a[1]) * float(a[0]) for a in asks[:10])
+                if bid_depth <= 0 or ask_depth <= 0:
+                    return self._reject("order_book_insufficient")
+                imbalance_ratio = (
+                    bid_depth / ask_depth if direction == Direction.LONG else ask_depth / bid_depth
+                )
+                if imbalance_ratio >= _WHALE_OBI_MIN:
+                    obi_confirmed = True
+                elif regime_upper in _WHALE_FAST_REGIMES and imbalance_ratio >= _WHALE_OBI_SOFT_MIN:
+                    # Marginal OBI in a fast regime: soft penalty, not hard reject
+                    obi_penalty = 8.0
+                else:
+                    return self._reject("order_book_imbalance_failed")
 
         atr_val = indicators.get("1m", {}).get("atr_last", close * 0.002)
 
@@ -2530,7 +2553,7 @@ class ScalpChannel(BaseChannel):
 
         cvd_values = cvd_data if isinstance(cvd_data, list) else cvd_data.get("values", [])
         if len(cvd_values) < 20:
-            return self._reject("missing_cvd")
+            return self._reject("cvd_insufficient")
 
         closes = [float(c) for c in closes_raw]
         cvd_floats = [float(v) for v in cvd_values]

@@ -276,3 +276,33 @@ def test_build_snapshot_classifies_dependency_missing_and_emits_readiness() -> N
     assert snapshot["dependency_readiness"]["funding_rate"]["presence"]["absent"] == 5
     assert snapshot["dependency_readiness"]["funding_rate"]["states"]["unavailable"] == 5
     assert snapshot["dependency_readiness"]["funding_rate"]["buckets"]["none"] == 5
+
+
+def test_build_snapshot_includes_dependency_source_and_quality_dimensions() -> None:
+    now_ts = 1_000_000.0
+    current_channel_funnel = {
+        "dependency_presence:360_SCALP:order_book:present": 3,
+        "dependency_state:360_SCALP:order_book:populated": 3,
+        "dependency_bucket:360_SCALP:order_book:few": 3,
+        "dependency_source:360_SCALP:order_book:book_ticker": 3,
+        "dependency_quality:360_SCALP:order_book:top_of_book_only": 3,
+    }
+    snapshot, _ = build_snapshot(
+        channel="360_SCALP",
+        lookback_hours=24,
+        compare_previous_window=False,
+        include_raw_json=False,
+        symbol_filter="",
+        setup_filter="",
+        runtime_health={"running": True, "status": "running", "health": "healthy"},
+        heartbeat_text="Heartbeat age: 10s",
+        records=[],
+        current_funnel={},
+        previous_funnel={},
+        current_channel_funnel=current_channel_funnel,
+        previous_channel_funnel={},
+        now_ts=now_ts,
+    )
+    dep = snapshot["dependency_readiness"]["order_book"]
+    assert dep["sources"]["book_ticker"] == 3
+    assert dep["quality"]["top_of_book_only"] == 3
