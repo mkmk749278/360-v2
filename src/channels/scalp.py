@@ -282,7 +282,7 @@ class ScalpChannel(BaseChannel):
         token = "".join(ch for ch in token if ch.isalnum() or ch == "_")
         return token or "none"
 
-    def _reject(self, reason: str) -> None:
+    def _reject(self, reason: str) -> Optional[Signal]:
         self._active_no_signal_reason = self._no_signal_reason_token(reason)
         return None
 
@@ -1991,16 +1991,16 @@ class ScalpChannel(BaseChannel):
             if prev_close <= level:
                 return self._reject("reclaim_confirmation_failed")
             if close <= level * 1.0005:
-                return None
+                return self._reject("reclaim_confirmation_failed")
             if last_low > level * 1.0045:
-                return None
+                return self._reject("reclaim_confirmation_failed")
         else:
             if prev_close >= level:
                 return self._reject("reclaim_confirmation_failed")
             if close >= level * 0.9995:
-                return None
+                return self._reject("reclaim_confirmation_failed")
             if last_high < level * 0.9955:
-                return None
+                return self._reject("reclaim_confirmation_failed")
 
         candle_body = abs(close - last_open)
         candle_range = max(last_high - last_low, 0.0)

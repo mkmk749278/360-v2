@@ -606,8 +606,9 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
     for setup, metrics in sorted(path_truth.items()):
         top_reason = "none"
         _reasons = metrics.get("no_signal_reasons", {}) or {}
-        if _reasons:
-            top_reason = max(_reasons.items(), key=lambda item: int(item[1]))[0]
+        _positive_reasons = {k: int(v or 0) for k, v in _reasons.items() if int(v or 0) > 0}
+        if _positive_reasons:
+            top_reason = max(_positive_reasons.items(), key=lambda item: item[1])[0]
         lines.append(
             "| {setup} | {attempts} | {no_signal} | {generated} | {scanner_preparation} | {gated} | {emitted} | {classification} ({top_reason}) |".format(
                 setup=setup,

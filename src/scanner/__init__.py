@@ -1830,7 +1830,7 @@ class Scanner:
             tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
         )
         smc_data = smc_result.as_dict()
-        smc_data["recent_ticks"] = smc_data.get("recent_ticks") or ticks[-100:]
+        smc_data["recent_ticks"] = smc_data.get("recent_ticks") or self.data_store.ticks.get(symbol, [])[-100:]
         smc_data["orderblocks"] = smc_data.get("orderblocks") or []
         smc_data["order_book"] = smc_data.get("order_book")
         smc_data["liquidation_clusters"] = smc_data.get("liquidation_clusters") or []
@@ -2205,7 +2205,7 @@ class Scanner:
         return {
             "funding_rate": {
                 "present": funding_rate is not None,
-                "bucket": "present" if funding_rate is not None else "absent",
+                "bucket": self._dependency_count_bucket(1 if funding_rate is not None else 0),
             },
             "cvd": {
                 "present": cvd_count > 0,
