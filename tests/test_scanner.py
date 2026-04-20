@@ -242,6 +242,31 @@ def test_scalp_channel_tracks_exception_non_generation_reason(monkeypatch):
     assert telemetry["no_signal_reason"]["STANDARD:exception"] == 1
 
 
+def test_scalp_channel_tracks_explicit_no_signal_reason(monkeypatch):
+    ch = ScalpChannel()
+    monkeypatch.setattr(ch, "_evaluate_standard", lambda *args, **kwargs: ch._reject("missing_cvd"))
+    for method_name in (
+        "_evaluate_trend_pullback",
+        "_evaluate_liquidation_reversal",
+        "_evaluate_whale_momentum",
+        "_evaluate_volume_surge_breakout",
+        "_evaluate_breakdown_short",
+        "_evaluate_opening_range_breakout",
+        "_evaluate_sr_flip_retest",
+        "_evaluate_funding_extreme",
+        "_evaluate_quiet_compression_break",
+        "_evaluate_divergence_continuation",
+        "_evaluate_continuation_liquidity_sweep",
+        "_evaluate_post_displacement_continuation",
+        "_evaluate_failed_auction_reclaim",
+    ):
+        monkeypatch.setattr(ch, method_name, lambda *args, **kwargs: None)
+
+    ch.evaluate("BTCUSDT", {"5m": _candles()}, {"5m": {}}, {}, 0.01, 10_000_000)
+    telemetry = ch.consume_generation_telemetry()
+    assert telemetry["no_signal_reason"]["STANDARD:missing_cvd"] == 1
+
+
 class TestScannerCooldown:
     def test_no_cooldown_initially(self):
         scanner = _make_scanner()
@@ -1535,6 +1560,28 @@ class TestMTFGateInScanner:
         assert scanner._path_funnel_counters[
             "evaluator_generated:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT"
         ] == 1
+
+    @pytest.mark.asyncio
+    async def test_path_funnel_tracks_dependency_missing_reason_per_evaluator(self):
+        scanner, signal_queue = self._scanner_and_queue()
+        scanner.channels[0].evaluate.return_value = None
+        scanner.channels[0].consume_generation_telemetry = MagicMock(return_value={
+            "attempts": {"FUNDING_EXTREME": 2},
+            "no_signal": {"FUNDING_EXTREME": 2},
+            "no_signal_reason": {"FUNDING_EXTREME:missing_funding_rate": 2},
+            "generated": {},
+        })
+
+        with _common_gate_patches(scanner):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_not_awaited()
+        assert scanner._path_funnel_counters[
+            "evaluator_no_signal_reason:missing_funding_rate:360_SCALP:other:EVAL::FUNDING_EXTREME"
+        ] == 2
+        assert scanner._path_funnel_counters[
+            "dependency_missing:missing_funding_rate:360_SCALP:other:EVAL::FUNDING_EXTREME"
+        ] == 2
 
     @pytest.mark.asyncio
     async def test_path_funnel_tracks_scored_filtered_and_emitted(self):

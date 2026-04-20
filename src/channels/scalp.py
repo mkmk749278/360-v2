@@ -259,6 +259,8 @@ class ScalpChannel(BaseChannel):
             "no_signal_reason": defaultdict(int),
             "generated": defaultdict(int),
         }
+        self._active_generation_path: Optional[str] = None
+        self._active_no_signal_reason: Optional[str] = None
 
     def _reset_generation_telemetry(self) -> None:
         self._generation_telemetry = {
@@ -272,6 +274,17 @@ class ScalpChannel(BaseChannel):
     def _generation_path_token(evaluator_name: str) -> str:
         token = evaluator_name.replace("_evaluate_", "").upper()
         return token or "UNKNOWN"
+
+    @staticmethod
+    def _no_signal_reason_token(reason: str) -> str:
+        token = str(reason or "none").strip().lower()
+        token = token.replace("-", "_").replace(" ", "_")
+        token = "".join(ch for ch in token if ch.isalnum() or ch == "_")
+        return token or "none"
+
+    def _reject(self, reason: str) -> None:
+        self._active_no_signal_reason = self._no_signal_reason_token(reason)
+        return None
 
     def consume_generation_telemetry(self) -> Dict[str, Dict[str, int]]:
         snapshot = {
@@ -377,11 +390,14 @@ class ScalpChannel(BaseChannel):
         ):
             _path = self._generation_path_token(evaluator_name)
             self._generation_telemetry["attempts"][_path] += 1
+            self._active_generation_path = _path
+            self._active_no_signal_reason = None
             try:
                 sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
             except Exception:
                 self._generation_telemetry["no_signal"][_path] += 1
-                self._generation_telemetry["no_signal_reason"][f"{_path}:exception"] += 1
+                _reason = self._active_no_signal_reason or "exception"
+                self._generation_telemetry["no_signal_reason"][f"{_path}:{_reason}"] += 1
                 raise
             if sig is not None:
                 self._generation_telemetry["generated"][_path] += 1
@@ -390,7 +406,10 @@ class ScalpChannel(BaseChannel):
                 results.append(sig_with_kz)
             else:
                 self._generation_telemetry["no_signal"][_path] += 1
-                self._generation_telemetry["no_signal_reason"][f"{_path}:none"] += 1
+                _reason = self._active_no_signal_reason or "none"
+                self._generation_telemetry["no_signal_reason"][f"{_path}:{_reason}"] += 1
+            self._active_generation_path = None
+            self._active_no_signal_reason = None
         return results
 
     # ------------------------------------------------------------------
@@ -664,15 +683,15 @@ class ScalpChannel(BaseChannel):
         elif regime_upper == "TRENDING_DOWN":
             direction = Direction.SHORT
         else:
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 50:
-            return None
+            return self._reject("insufficient_candles")
 
         ind = indicators.get("5m", {})
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
@@ -680,7 +699,7 @@ class ScalpChannel(BaseChannel):
         rsi_val = ind.get("rsi_last")
 
         if ema9 is None or ema21 is None:
-            return None
+            return self._reject("ema_alignment_reject")
 
         close = float(m5["close"][-1])
         closes = m5.get("close", [])
@@ -688,7 +707,7 @@ class ScalpChannel(BaseChannel):
         lows = m5.get("low", [])
         opens = m5.get("open", [])
         if len(opens) < 1 or len(closes) < 3 or len(highs) < 2 or len(lows) < 2:
-            return None
+            return self._reject("insufficient_candles")
         last_open = float(opens[-1])
         prev_close = float(closes[-2])
         prev_high = float(highs[-2])
@@ -699,42 +718,42 @@ class ScalpChannel(BaseChannel):
         # EMA alignment check
         if direction == Direction.LONG:
             if ema50 is not None and not (ema9 > ema21 > ema50):
-                return None
+                return self._reject("ema_alignment_reject")
             elif ema50 is None and not (ema9 > ema21):
-                return None
+                return self._reject("ema_alignment_reject")
         else:
             if ema50 is not None and not (ema9 < ema21 < ema50):
-                return None
+                return self._reject("ema_alignment_reject")
             elif ema50 is None and not (ema9 < ema21):
-                return None
+                return self._reject("ema_alignment_reject")
 
         # Price proximity to EMA9 (0.3%) or EMA21 (0.5%)
         near_ema9 = abs(close - ema9) / ema9 <= 0.003 if ema9 > 0 else False
         near_ema21 = abs(close - ema21) / ema21 <= 0.005 if ema21 > 0 else False
         if not (near_ema9 or near_ema21):
-            return None
+            return self._reject("retest_proximity_failed")
 
         # RSI pullback zone: 40–60
         if rsi_val is not None and not (40 <= rsi_val <= 60):
-            return None
+            return self._reject("rsi_reject")
         rsi_prev = ind.get("rsi_prev")
         if rsi_val is not None and rsi_prev is not None:
             if direction == Direction.LONG and float(rsi_val) <= float(rsi_prev):
-                return None
+                return self._reject("rsi_reject")
             if direction == Direction.SHORT and float(rsi_val) >= float(rsi_prev):
-                return None
+                return self._reject("rsi_reject")
 
         # Last candle rejection: close > open for LONG, close < open for SHORT
         if direction == Direction.LONG and close <= last_open:
-            return None
+            return self._reject("momentum_reject")
         if direction == Direction.SHORT and close >= last_open:
-            return None
+            return self._reject("momentum_reject")
 
         # Entry-quality tightening: require a genuine turn/continuation confirmation,
         # not just EMA proximity while pullback is still moving against direction.
         momentum_last = ind.get("momentum_last")
         if momentum_last is None:
-            return None
+            return self._reject("momentum_reject")
         momentum_last = float(momentum_last)
         if direction == Direction.LONG:
             if prev_close > ema9 and prev_close > ema21:
@@ -768,7 +787,7 @@ class ScalpChannel(BaseChannel):
         orderblocks = smc_data.get("orderblocks", [])
         has_smc_support = bool(fvgs) or bool(orderblocks)
         if not has_smc_support:
-            return None
+            return self._reject("missing_fvg_or_orderblock")
 
         profile = smc_data.get("pair_profile")
         atr_val = ind.get("atr_last", close * 0.002)
@@ -778,9 +797,9 @@ class ScalpChannel(BaseChannel):
         sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
 
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         # Structure-based TP targets
         m5_highs = m5.get("high", [])
@@ -834,7 +853,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         # Override with structure-based TP targets
         sig.tp1 = round(tp1, 8)
@@ -869,21 +888,21 @@ class ScalpChannel(BaseChannel):
         """LIQUIDATION_REVERSAL path: cascade exhaustion + CVD divergence."""
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 20:
-            return None
+            return self._reject("insufficient_candles")
 
         closes = m5.get("close", [])
         volumes = m5.get("volume", [])
         if len(closes) < 4 or len(volumes) < 21:
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         # 1. Cascade detection: last 3 candles moved > 2.0% in one direction
         close_now = float(closes[-1])
         close_3ago = float(closes[-4])
         if close_3ago <= 0:
-            return None
+            return self._reject("cascade_not_detected")
         cascade_pct = (close_now - close_3ago) / close_3ago * 100.0
 
         if cascade_pct <= -2.0:
@@ -893,16 +912,16 @@ class ScalpChannel(BaseChannel):
             cascade_direction = Direction.LONG   # Price rose — potential SHORT reversal
             reversal_direction = Direction.SHORT
         else:
-            return None
+            return self._reject("cascade_not_detected")
 
         # 2. CVD divergence: price moving one way, CVD moving opposite
         cvd_data = smc_data.get("cvd")
         if cvd_data is None:
             # CVD unavailable — skip this path gracefully
-            return None
+            return self._reject("missing_cvd")
         cvd_values = cvd_data if isinstance(cvd_data, list) else cvd_data.get("values", [])
         if len(cvd_values) < 4:
-            return None
+            return self._reject("missing_cvd")
         cvd_now = float(cvd_values[-1])
         cvd_3ago = float(cvd_values[-4])
         cvd_change = cvd_now - cvd_3ago
@@ -920,10 +939,10 @@ class ScalpChannel(BaseChannel):
         # 3. RSI extreme gate
         if reversal_direction == Direction.LONG:
             if rsi_val is not None and rsi_val >= 25:
-                return None  # Not oversold enough after cascade
+                return self._reject("rsi_reject")
         else:
             if rsi_val is not None and rsi_val <= 75:
-                return None  # Not overbought enough after cascade
+                return self._reject("rsi_reject")
 
         # 4. Price within 0.5% of a known orderblock or FVG zone
         fvgs = smc_data.get("fvg", [])
@@ -940,13 +959,13 @@ class ScalpChannel(BaseChannel):
                     near_zone = True
                     break
         if not near_zone:
-            return None
+            return self._reject("missing_fvg_or_orderblock")
 
         # 5. Volume spike: last candle volume > 2.5x 20-candle average
         avg_vol = sum(float(v) for v in volumes[-21:-1]) / 20.0 if len(volumes) >= 21 else 0.0
         last_vol = float(volumes[-1])
         if avg_vol <= 0 or last_vol < 2.5 * avg_vol:
-            return None
+            return self._reject("volume_spike_missing")
 
         profile = smc_data.get("pair_profile")
         atr_val = ind.get("atr_last", close_now * 0.002)
@@ -964,7 +983,7 @@ class ScalpChannel(BaseChannel):
 
         sl_dist = abs(close_now - sl)
         if sl_dist <= 0:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
@@ -985,7 +1004,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         # B13: Fibonacci retrace TP targets (Type D — Reversion, OWNER_BRIEF)
         # 38.2%, 61.8%, 100% retrace of the cascade range back toward pre-cascade level.
@@ -1045,23 +1064,25 @@ class ScalpChannel(BaseChannel):
         # BREAKDOWN_SHORT.  It does not affect any other evaluator path.
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "QUIET":
-            return None
+            return self._reject("regime_blocked")
 
         whale = smc_data.get("whale_alert")
         delta_spike = smc_data.get("volume_delta_spike", False)
         if whale is None and not delta_spike:
-            return None
+            return self._reject("momentum_reject")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         m1 = candles.get("1m")
         if m1 is None or len(m1.get("close", [])) < 10:
-            return None
+            return self._reject("insufficient_candles")
 
         close = float(m1["close"][-1])
 
         ticks: List[Dict[str, Any]] = smc_data.get("recent_ticks", [])
+        if not ticks:
+            return self._reject("missing_recent_ticks")
         buy_vol = sum(
             t.get("qty", 0) * t.get("price", 0)
             for t in ticks if not t.get("isBuyerMaker", True)
@@ -1073,14 +1094,14 @@ class ScalpChannel(BaseChannel):
 
         total_vol = buy_vol + sell_vol
         if total_vol < _WHALE_MIN_TICK_VOLUME_USD:
-            return None
+            return self._reject("missing_recent_ticks")
 
         if buy_vol >= sell_vol * _WHALE_DELTA_MIN_RATIO:
             direction = Direction.LONG
         elif sell_vol >= buy_vol * _WHALE_DELTA_MIN_RATIO:
             direction = Direction.SHORT
         else:
-            return None
+            return self._reject("momentum_reject")
 
         # RSI gate — layered soft/hard replacing the prior binary check_rsi_regime
         # call.  Whale buying/selling routinely pushes RSI into borderline zones
@@ -1094,12 +1115,12 @@ class ScalpChannel(BaseChannel):
         if rsi_val_1m is not None:
             if direction == Direction.LONG:
                 if rsi_val_1m >= _WHALE_RSI_LONG_HARD_MAX:
-                    return None  # Hard reject: extreme overbought invalidates momentum thesis
+                    return self._reject("rsi_reject")
                 if _WHALE_RSI_LONG_SOFT_MIN <= rsi_val_1m < _WHALE_RSI_LONG_HARD_MAX:
                     rsi_penalty = 5.0  # Borderline: penalise but still allow
             else:
                 if rsi_val_1m <= _WHALE_RSI_SHORT_HARD_MIN:
-                    return None  # Hard reject: extreme oversold invalidates momentum thesis
+                    return self._reject("rsi_reject")
                 if _WHALE_RSI_SHORT_HARD_MIN < rsi_val_1m <= _WHALE_RSI_SHORT_SOFT_MAX:
                     rsi_penalty = 5.0  # Borderline: penalise but still allow
 
@@ -1128,7 +1149,7 @@ class ScalpChannel(BaseChannel):
             bid_depth = sum(float(b[1]) * float(b[0]) for b in bids[:10])
             ask_depth = sum(float(a[1]) * float(a[0]) for a in asks[:10])
             if bid_depth <= 0 or ask_depth <= 0:
-                return None
+                return self._reject("missing_order_book")
             imbalance_ratio = (
                 bid_depth / ask_depth if direction == Direction.LONG else ask_depth / bid_depth
             )
@@ -1138,7 +1159,7 @@ class ScalpChannel(BaseChannel):
                 # Marginal OBI in a fast regime: soft penalty, not hard reject
                 obi_penalty = 8.0
             else:
-                return None
+                return self._reject("missing_order_book")
 
         atr_val = indicators.get("1m", {}).get("atr_last", close * 0.002)
 
@@ -1264,32 +1285,32 @@ class ScalpChannel(BaseChannel):
         # VOLATILE/VOLATILE_UNSUITABLE are explicitly allowed here.
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "QUIET":
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 28:
-            return None
+            return self._reject("insufficient_candles")
 
         closes = m5.get("close", [])
         highs = m5.get("high", [])
         volumes = m5.get("volume", [])
         if len(closes) < 28 or len(highs) < 28 or len(volumes) < 10:
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         # Rolling 7-candle average (last 7 complete candles, not current)
         rolling_vols = [float(v) for v in volumes[-8:-1]]
         if len(rolling_vols) < 7 or sum(rolling_vols) <= 0:
-            return None
+            return self._reject("volume_spike_missing")
         rolling_avg = sum(rolling_vols) / len(rolling_vols)
 
         # Current 5m candle volume ≥ SURGE_VOLUME_MULTIPLIER × rolling average
         # (use current candle volume to confirm active surge, same units as rolling_avg)
         current_vol = float(volumes[-1]) if len(volumes) >= 1 else 0.0
         if current_vol < SURGE_VOLUME_MULTIPLIER * rolling_avg:
-            return None
+            return self._reject("volume_spike_missing")
 
         # Swing high: 20-candle lookback from before the 5-candle breakout search window.
         # Excluding the search window ensures swing_high is set by genuine prior resistance,
@@ -1298,7 +1319,7 @@ class ScalpChannel(BaseChannel):
         #          highs[-26:-6]              highs[-6:-1]         highs[-1]
         swing_high_level = max(float(h) for h in highs[-26:-6])
         if swing_high_level <= 0:
-            return None
+            return self._reject("breakout_not_found")
 
         # Find the most recent breakout candle within the last 5 closed candles.
         # Scans newest-first (i = -2, -3, -4, -5, -6) to prefer the candle
@@ -1312,7 +1333,7 @@ class ScalpChannel(BaseChannel):
                 break
 
         if breakout_candle_idx is None:
-            return None
+            return self._reject("breakout_not_found")
 
         # Pullback zone: current close is below the swing high (breakout retest).
         # Lower bound: 0.1% ensures the price has made a genuine pullback below the
@@ -1325,10 +1346,10 @@ class ScalpChannel(BaseChannel):
         # represents shallow sprints or near-SL entries; a soft penalty is applied.
         close = float(closes[-1])
         if close <= 0:
-            return None
+            return self._reject("breakout_not_found")
         dist_from_swing_pct = (swing_high_level - close) / swing_high_level * 100.0
         if not (0.1 <= dist_from_swing_pct <= 0.75):
-            return None
+            return self._reject("retest_proximity_failed")
         pullback_in_premium_zone = (0.3 <= dist_from_swing_pct <= 0.6)
         pullback_penalty = 0.0 if pullback_in_premium_zone else 3.0
 
@@ -1337,7 +1358,7 @@ class ScalpChannel(BaseChannel):
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
         if ema9 is None or ema21 is None or ema9 <= ema21:
-            return None
+            return self._reject("ema_alignment_reject")
 
         # RSI — layered soft/hard gate replacing the previous hard gate of 45–72.
         # Hard block below 40 (momentum failure) or above 82 (extreme overbought
@@ -1347,7 +1368,7 @@ class ScalpChannel(BaseChannel):
         rsi_penalty = 0.0
         if rsi_val is not None:
             if rsi_val < 40.0 or rsi_val > 82.0:
-                return None
+                return self._reject("rsi_reject")
             elif not (45.0 <= rsi_val <= 72.0):
                 rsi_penalty = 5.0
 
@@ -1360,19 +1381,19 @@ class ScalpChannel(BaseChannel):
         fvg_penalty = 0.0
         if not has_smc_context:
             if regime_upper not in _FAST_MOMENTUM_REGIMES:
-                return None  # Hard gate in non-fast regimes (behaviour unchanged)
+                return self._reject("missing_fvg_or_orderblock")
             fvg_penalty = 8.0  # Soft penalty in fast regimes instead of hard block
 
         # Breakout candle volume ≥ 2.0 × rolling average (unchanged quality threshold;
         # now checks the actual breakout candle's volume rather than always volumes[-3]).
         if breakout_vol < 2.0 * rolling_avg:
-            return None
+            return self._reject("volume_spike_missing")
 
         # Method-specific SL/TP
         sl = swing_high_level * (1 - 0.008)  # 0.8% below breakout level
         sl_dist = abs(close - sl)
         if sl_dist <= 0 or sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         # TP: measured move from base of range (window aligned with swing high window)
         lows = m5.get("low", [])
@@ -1406,7 +1427,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         # Override with method-specific structural SL and measured-move TPs
         sig.stop_loss = round(sl, 8)
@@ -1484,7 +1505,7 @@ class ScalpChannel(BaseChannel):
         # Block only in QUIET — breakdown setups need volume, which QUIET lacks.
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "QUIET":
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 28:
@@ -1684,47 +1705,47 @@ class ScalpChannel(BaseChannel):
         # logic.  The current proxy (last-8-bar window) is not institutional-grade.
         # Re-enable explicitly via SCALP_ORB_ENABLED=true in .env.
         if not SCALP_ORB_ENABLED:
-            return None
+            return self._reject("regime_blocked")
         now_hour = datetime.now(timezone.utc).hour
         # Only active during London (07:00–08:59 UTC) or NY (12:00–13:59 UTC)
         in_london = 7 <= now_hour < 9
         in_ny = 12 <= now_hour < 14
         if not (in_london or in_ny):
-            return None
+            return self._reject("regime_blocked")
 
         regime_upper = regime.upper() if regime else ""
         if regime_upper in ("QUIET", "RANGING"):
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 20:
-            return None
+            return self._reject("insufficient_candles")
 
         closes = m5.get("close", [])
         highs = m5.get("high", [])
         lows = m5.get("low", [])
         volumes = m5.get("volume", [])
         if len(closes) < 20 or len(highs) < 20 or len(lows) < 20 or len(volumes) < 21:
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         # Opening range = the 4 candles immediately before the most recent 4,
         # acting as a proxy for the first 4 candles of the session window.
         range_highs = [float(h) for h in highs[-8:-4]]
         range_lows = [float(l) for l in lows[-8:-4]]
         if not range_highs or not range_lows:
-            return None
+            return self._reject("breakout_not_found")
         range_high = max(range_highs)
         range_low = min(range_lows)
         range_height = range_high - range_low
         if range_height <= 0:
-            return None
+            return self._reject("breakout_not_found")
 
         close = float(closes[-1])
         if close <= 0:
-            return None
+            return self._reject("breakout_not_found")
 
         # Entry direction
         if close > range_high:
@@ -1732,31 +1753,31 @@ class ScalpChannel(BaseChannel):
         elif close < range_low:
             direction = Direction.SHORT
         else:
-            return None
+            return self._reject("breakout_not_found")
 
         # Volume: current candle >= 1.5x 20-candle avg
         avg_vol = sum(float(v) for v in volumes[-21:-1]) / 20.0 if len(volumes) >= 21 else 0.0
         current_vol = float(volumes[-1])
         if avg_vol <= 0 or current_vol < 1.5 * avg_vol:
-            return None
+            return self._reject("volume_spike_missing")
 
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
         if ema9 is None or ema21 is None:
-            return None
+            return self._reject("ema_alignment_reject")
 
         # EMA9 aligned in signal direction
         if direction == Direction.LONG and ema9 <= ema21:
-            return None
+            return self._reject("ema_alignment_reject")
         if direction == Direction.SHORT and ema9 >= ema21:
-            return None
+            return self._reject("ema_alignment_reject")
 
         # SMC basis: at least one FVG or orderblock
         fvgs = smc_data.get("fvg", [])
         orderblocks = smc_data.get("orderblocks", [])
         if not (fvgs or orderblocks):
-            return None
+            return self._reject("missing_fvg_or_orderblock")
 
         # SL and TP
         if direction == Direction.LONG:
@@ -1772,11 +1793,11 @@ class ScalpChannel(BaseChannel):
 
         sl_dist = abs(close - sl)
         if sl_dist <= 0:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         profile = smc_data.get("pair_profile")
         atr_val = ind.get("atr_last", close * 0.002)
@@ -1799,7 +1820,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         sig.stop_loss = round(sl, 8)
         sig.tp1 = round(tp1, 8)
@@ -1863,25 +1884,25 @@ class ScalpChannel(BaseChannel):
         """
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "VOLATILE":
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 55:
-            return None
+            return self._reject("insufficient_candles")
 
         closes = m5.get("close", [])
         highs = m5.get("high", [])
         lows = m5.get("low", [])
         opens = m5.get("open", [])
         if len(closes) < 55 or len(highs) < 55 or len(lows) < 55 or len(opens) < 1:
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         close = float(closes[-1])
         if close <= 0:
-            return None
+            return self._reject("breakout_not_found")
         prev_close = float(closes[-2])
 
         # Structural level identification.
@@ -1940,17 +1961,17 @@ class ScalpChannel(BaseChannel):
             direction = Direction.SHORT
             level = prior_swing_low
         else:
-            return None
+            return self._reject("breakout_not_found")
 
         # Retest proximity gate — layered zone system replacing the original hard-0.3% gate.
         # Premium zone (0–0.3% from flipped level) → no soft penalty.
         # Extended zone (0.3%–0.6%) → +3.0 soft penalty (messier but valid retest).
         # Hard block beyond 0.6% — price has not genuinely returned to the structural level.
         if level <= 0:
-            return None
+            return self._reject("retest_proximity_failed")
         dist_from_level_pct = abs(close - level) / level
         if dist_from_level_pct > 0.006:
-            return None
+            return self._reject("retest_proximity_failed")
         retest_in_premium_zone = dist_from_level_pct <= 0.003
         proximity_penalty = 0.0 if retest_in_premium_zone else 3.0
 
@@ -1968,14 +1989,14 @@ class ScalpChannel(BaseChannel):
         # weak immediate-touch entries do not pass on a single tap.
         if direction == Direction.LONG:
             if prev_close <= level:
-                return None
+                return self._reject("reclaim_confirmation_failed")
             if close <= level * 1.0005:
                 return None
             if last_low > level * 1.0045:
                 return None
         else:
             if prev_close >= level:
-                return None
+                return self._reject("reclaim_confirmation_failed")
             if close >= level * 0.9995:
                 return None
             if last_high < level * 0.9955:
@@ -1984,9 +2005,9 @@ class ScalpChannel(BaseChannel):
         candle_body = abs(close - last_open)
         candle_range = max(last_high - last_low, 0.0)
         if candle_range <= 0:
-            return None
+            return self._reject("reclaim_confirmation_failed")
         if candle_body / candle_range < 0.12:
-            return None
+            return self._reject("reclaim_confirmation_failed")
         wick_penalty = 0.0
         if direction == Direction.LONG:
             lower_wick = last_open - last_low if last_open > last_low else close - last_low
@@ -2005,12 +2026,12 @@ class ScalpChannel(BaseChannel):
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
         if ema9 is None or ema21 is None:
-            return None
+            return self._reject("ema_alignment_reject")
 
         if direction == Direction.LONG and ema9 <= ema21:
-            return None
+            return self._reject("ema_alignment_reject")
         if direction == Direction.SHORT and ema9 >= ema21:
-            return None
+            return self._reject("ema_alignment_reject")
 
         # RSI — layered soft/hard gate replacing the previous hard gate of 70/30.
         # Hard block at ≥80 (LONG) or ≤20 (SHORT): extreme exhaustion invalidates the
@@ -2023,12 +2044,12 @@ class ScalpChannel(BaseChannel):
         if rsi_val is not None:
             if direction == Direction.LONG:
                 if rsi_val >= 80.0:
-                    return None
+                    return self._reject("rsi_reject")
                 if rsi_val >= 70.0:
                     rsi_penalty = 5.0
             else:
                 if rsi_val <= 20.0:
-                    return None
+                    return self._reject("rsi_reject")
                 if rsi_val <= 30.0:
                     rsi_penalty = 5.0
 
@@ -2041,7 +2062,7 @@ class ScalpChannel(BaseChannel):
         fvg_penalty = 0.0
         if not has_smc_context:
             if regime_upper not in _FAST_STRUCTURAL_REGIMES:
-                return None  # Hard gate in calm regimes (behaviour unchanged)
+                return self._reject("missing_fvg_or_orderblock")
             fvg_penalty = 8.0  # Soft penalty in fast structural regimes
 
         # SR_FLIP_RETEST invalidation must sit beyond reclaim failure structure, not a
@@ -2065,11 +2086,11 @@ class ScalpChannel(BaseChannel):
 
         sl_dist = abs(close - sl)
         if sl_dist <= 0:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         # TP1: 20-candle swing high/low
         if direction == Direction.LONG:
@@ -2123,7 +2144,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         sig.stop_loss = round(sl, 8)
         sig.tp1 = round(tp1, 8)
@@ -2180,22 +2201,22 @@ class ScalpChannel(BaseChannel):
 
         funding_rate = smc_data.get("funding_rate")
         if funding_rate is None:
-            return None
+            return self._reject("missing_funding_rate")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 5:
-            return None
+            return self._reject("insufficient_candles")
 
         closes = m5.get("close", [])
         if len(closes) < 5:
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         close = float(closes[-1])
         if close <= 0:
-            return None
+            return self._reject("funding_not_extreme")
 
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
@@ -2213,32 +2234,32 @@ class ScalpChannel(BaseChannel):
         # LONG signal: deeply negative funding → longs being discounted
         if funding_rate < -FUNDING_RATE_EXTREME_THRESHOLD:
             if ema9 is None or close <= ema9:
-                return None
+                return self._reject("ema_alignment_reject")
             if rsi_last is not None and rsi_last >= 55:
-                return None
+                return self._reject("rsi_reject")
             if rsi_prev is not None and rsi_last is not None and rsi_last <= rsi_prev:
-                return None
+                return self._reject("momentum_reject")
             if cvd_change is not None and cvd_change <= 0:
-                return None
+                return self._reject("missing_cvd")
             direction = Direction.LONG
         # SHORT signal: deeply positive funding → shorts being discounted
         elif funding_rate > FUNDING_RATE_EXTREME_THRESHOLD:
             if ema9 is None or close >= ema9:
-                return None
+                return self._reject("ema_alignment_reject")
             if rsi_last is not None and rsi_last <= 45:
-                return None
+                return self._reject("rsi_reject")
             if rsi_prev is not None and rsi_last is not None and rsi_last >= rsi_prev:
-                return None
+                return self._reject("momentum_reject")
             if cvd_change is not None and cvd_change >= 0:
-                return None
+                return self._reject("missing_cvd")
             direction = Direction.SHORT
         else:
-            return None
+            return self._reject("funding_not_extreme")
 
         fvgs = smc_data.get("fvg", [])
         orderblocks = smc_data.get("orderblocks", [])
         if not (fvgs or orderblocks):
-            return None
+            return self._reject("missing_fvg_or_orderblock")
 
         atr_val = ind.get("atr_last", close * 0.002)
 
@@ -2264,9 +2285,9 @@ class ScalpChannel(BaseChannel):
 
         sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         # TP1: nearest FVG/OB structure level in the direction of travel.
         # The path already requires FVG/OB confluence at entry, so the nearest
@@ -2298,7 +2319,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         sig.stop_loss = round(sl, 8)
         sig.tp1 = round(tp1, 8)
@@ -2488,35 +2509,35 @@ class ScalpChannel(BaseChannel):
         elif regime_upper == "TRENDING_DOWN":
             direction = Direction.SHORT
         else:
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 20:
-            return None
+            return self._reject("insufficient_candles")
 
         closes_raw = m5.get("close", [])
         highs = m5.get("high", [])
         lows = m5.get("low", [])
         if len(closes_raw) < 20:
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         cvd_data = smc_data.get("cvd")
         if cvd_data is None:
-            return None
+            return self._reject("missing_cvd")
 
         cvd_values = cvd_data if isinstance(cvd_data, list) else cvd_data.get("values", [])
         if len(cvd_values) < 20:
-            return None
+            return self._reject("missing_cvd")
 
         closes = [float(c) for c in closes_raw]
         cvd_floats = [float(v) for v in cvd_values]
 
         close = closes[-1]
         if close <= 0:
-            return None
+            return self._reject("momentum_reject")
 
         # CVD divergence detection (price vs CVD divergence signals absorption)
         if direction == Direction.LONG:
@@ -2527,7 +2548,7 @@ class ScalpChannel(BaseChannel):
             # Bullish CVD divergence: price makes lower low but CVD makes higher low
             # (buyers absorbing selling pressure — continuation signal in uptrend)
             if not (price_low_late < price_low_early and cvd_low_late > cvd_low_early):
-                return None
+                return self._reject("momentum_reject")
             # Divergence magnitude: how far price pulled back that CVD absorbed.
             # Normalised so a 3 % price drop = strength 1.0; capped at 1.0.
             _price_drop_pct = (price_low_early - price_low_late) / price_low_early if price_low_early > 0 else 0.0
@@ -2541,7 +2562,7 @@ class ScalpChannel(BaseChannel):
             # Bearish CVD divergence: price makes higher high but CVD makes lower high
             # (sellers absorbing buying pressure — continuation signal in downtrend)
             if not (price_high_late > price_high_early and cvd_high_late < cvd_high_early):
-                return None
+                return self._reject("momentum_reject")
             _price_rise_pct = (price_high_late - price_high_early) / price_high_early if price_high_early > 0 else 0.0
             _div_strength = min(1.0, _price_rise_pct / 0.03)
             _div_label = "BEARISH"
@@ -2557,23 +2578,23 @@ class ScalpChannel(BaseChannel):
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
         if ema9 is None or ema21 is None:
-            return None
+            return self._reject("ema_alignment_reject")
 
         # Price within 1.5% of EMA21
         if ema21 <= 0 or abs(close - ema21) / ema21 > 0.015:
-            return None
+            return self._reject("retest_proximity_failed")
 
         # EMA alignment
         if direction == Direction.LONG and ema9 <= ema21:
-            return None
+            return self._reject("ema_alignment_reject")
         if direction == Direction.SHORT and ema9 >= ema21:
-            return None
+            return self._reject("ema_alignment_reject")
 
         # SMC basis
         fvgs = smc_data.get("fvg", [])
         orderblocks = smc_data.get("orderblocks", [])
         if not (fvgs or orderblocks):
-            return None
+            return self._reject("missing_fvg_or_orderblock")
 
         # SL: beyond EMA21
         if direction == Direction.LONG:
@@ -2583,11 +2604,11 @@ class ScalpChannel(BaseChannel):
 
         sl_dist = abs(close - sl)
         if sl_dist <= 0:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         # TP1: previous swing high/low from the divergence detection window.
         # The divergence pattern is detected over closes[-20:]; the highest high
@@ -2664,7 +2685,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         sig.stop_loss = round(sl, 8)
         sig.tp1 = round(tp1, 8)
@@ -2719,20 +2740,20 @@ class ScalpChannel(BaseChannel):
         # - RANGING/QUIET: no directional trend exists to continue
         regime_upper = regime.upper() if regime else ""
         if regime_upper not in _CLS_VALID_REGIMES:
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 20:
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
         if ema9 is None or ema21 is None:
-            return None
+            return self._reject("ema_alignment_reject")
 
         # Direction determined by EMA alignment — this is a trend-following path
         if ema9 > ema21:
@@ -2740,32 +2761,32 @@ class ScalpChannel(BaseChannel):
         elif ema9 < ema21:
             direction = Direction.SHORT
         else:
-            return None  # EMAs converged — no trend direction
+            return self._reject("ema_alignment_reject")
 
         # Cross-validate direction against strongly-stated directional regimes
         if regime_upper == "TRENDING_DOWN" and direction == Direction.LONG:
-            return None  # EMA not aligned with the established downtrend
+            return self._reject("ema_alignment_reject")
         if regime_upper == "TRENDING_UP" and direction == Direction.SHORT:
-            return None  # EMA not aligned with the established uptrend
+            return self._reject("ema_alignment_reject")
 
         closes_raw = m5.get("close", [])
         close = float(closes_raw[-1])
         if close <= 0:
-            return None
+            return self._reject("momentum_reject")
 
         # ADX gate: trend continuation requires meaningful trend strength
         profile = smc_data.get("pair_profile")
         thresholds = self._get_pair_adjusted_thresholds(profile)
         adx_val = ind.get("adx_last")
         if adx_val is not None and adx_val < thresholds["adx_min"]:
-            return None
+            return self._reject("adx_reject")
 
         # Sweep detection: must have a recent sweep in the trend continuation
         # direction (i.e. swept the stops of participants against the trend,
         # then recovered — confirming a liquidity grab rather than a break).
         sweeps = smc_data.get("sweeps", [])
         if not sweeps:
-            return None
+            return self._reject("missing_sweeps")
 
         trend_sweep = None
         for sweep in sweeps:
@@ -2773,13 +2794,13 @@ class ScalpChannel(BaseChannel):
                 trend_sweep = sweep
                 break
         if trend_sweep is None:
-            return None
+            return self._reject("missing_sweeps")
 
         # Sweep recency gate: sweep must be within the last _CLS_SWEEP_WINDOW
         # closed candles.  Staleer sweeps lose their structural relevance.
         sweep_index = getattr(trend_sweep, "index", None)
         if sweep_index is None or sweep_index < -_CLS_SWEEP_WINDOW:
-            return None
+            return self._reject("missing_sweeps")
 
         # Sweep level extraction
         sweep_level: Optional[float] = None
@@ -2789,25 +2810,25 @@ class ScalpChannel(BaseChannel):
                 sweep_level = float(v)
                 break
         if sweep_level is None or sweep_level <= 0:
-            return None
+            return self._reject("missing_sweeps")
 
         # Reclaim confirmation: current price must already be beyond the swept
         # level in the trend direction.  This is the defining gate that separates
         # CLS from a still-in-progress LIQUIDITY_SWEEP_REVERSAL — the sweep must
         # already be resolved before this path fires.
         if direction == Direction.LONG and close <= sweep_level:
-            return None  # Price hasn't reclaimed above sweep level yet
+            return self._reject("reclaim_confirmation_failed")
         if direction == Direction.SHORT and close >= sweep_level:
-            return None  # Price hasn't reclaimed below sweep level yet
+            return self._reject("reclaim_confirmation_failed")
 
         # Momentum agreement: must confirm trend direction (hard gate)
         mom = ind.get("momentum_last")
         if mom is None:
-            return None
+            return self._reject("momentum_reject")
         if direction == Direction.LONG and mom <= 0:
-            return None
+            return self._reject("momentum_reject")
         if direction == Direction.SHORT and mom >= 0:
-            return None
+            return self._reject("momentum_reject")
 
         # RSI layered gate: hard reject only at true exhaustion extremes;
         # soft penalty in the borderline zone — same pattern as WHALE_MOMENTUM.
@@ -2816,12 +2837,12 @@ class ScalpChannel(BaseChannel):
         if rsi_val is not None:
             if direction == Direction.LONG:
                 if rsi_val >= _CLS_RSI_LONG_HARD_MAX:
-                    return None  # Hard reject: overbought — continuation exhausted
+                    return self._reject("rsi_reject")
                 if rsi_val >= _CLS_RSI_LONG_SOFT_MIN:
                     rsi_penalty = 6.0
             else:
                 if rsi_val <= _CLS_RSI_SHORT_HARD_MIN:
-                    return None  # Hard reject: oversold — continuation exhausted
+                    return self._reject("rsi_reject")
                 if rsi_val <= _CLS_RSI_SHORT_SOFT_MAX:
                     rsi_penalty = 6.0
 
@@ -2851,9 +2872,9 @@ class ScalpChannel(BaseChannel):
             sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
 
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         # ── TP targets: FVG → swing target → ATR fallback ──────────────────
         m5_highs = m5.get("high", [])
@@ -2915,7 +2936,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         sig.stop_loss = round(sl, 8)
         sig.tp1 = round(tp1, 8)
@@ -2986,11 +3007,11 @@ class ScalpChannel(BaseChannel):
         #   spike into noise, not a sustained institutional commitment
         regime_upper = regime.upper() if regime else ""
         if regime_upper not in _PDC_VALID_REGIMES:
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 20:
-            return None
+            return self._reject("insufficient_candles")
 
         closes_raw = m5.get("close", [])
         opens_raw = m5.get("open", [])
@@ -3001,16 +3022,16 @@ class ScalpChannel(BaseChannel):
         n = len(closes_raw)
         if (n < 20 or len(opens_raw) < n
                 or len(highs_raw) < n or len(lows_raw) < n or len(volumes_raw) < n):
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
         if ema9 is None or ema21 is None:
-            return None
+            return self._reject("ema_alignment_reject")
 
         # Direction from EMA alignment — displacement must agree with the trend
         if ema9 > ema21:
@@ -3018,24 +3039,24 @@ class ScalpChannel(BaseChannel):
         elif ema9 < ema21:
             direction = Direction.SHORT
         else:
-            return None  # EMAs converged — no trend direction
+            return self._reject("ema_alignment_reject")
 
         # Cross-validate direction against strongly stated directional regimes
         if regime_upper == "TRENDING_DOWN" and direction == Direction.LONG:
-            return None  # EMA not aligned with the established downtrend
+            return self._reject("ema_alignment_reject")
         if regime_upper == "TRENDING_UP" and direction == Direction.SHORT:
-            return None  # EMA not aligned with the established uptrend
+            return self._reject("ema_alignment_reject")
 
         close = float(closes_raw[-1])
         if close <= 0:
-            return None
+            return self._reject("breakout_not_found")
 
         # ADX gate: trend strength required for displacement to be valid
         profile = smc_data.get("pair_profile")
         thresholds = self._get_pair_adjusted_thresholds(profile)
         adx_val = ind.get("adx_last")
         if adx_val is not None and adx_val < thresholds["adx_min"]:
-            return None
+            return self._reject("adx_reject")
 
         # Rolling background volume average: computed from candles BEFORE the
         # displacement + consolidation window.  Excluding the recent event candles
@@ -3047,7 +3068,7 @@ class ScalpChannel(BaseChannel):
         vol_bg_start = max(0, vol_bg_end - 15)
         vol_window = [float(v) for v in volumes_raw[vol_bg_start:vol_bg_end]]
         if not vol_window or sum(vol_window) <= 0:
-            return None
+            return self._reject("volume_spike_missing")
         avg_vol = sum(vol_window) / len(vol_window)
 
         # ── Displacement + consolidation structure search ────────────────
@@ -3125,7 +3146,7 @@ class ScalpChannel(BaseChannel):
             break
 
         if displacement_found is None:
-            return None
+            return self._reject("breakout_not_found")
 
         disp_high, disp_low, disp_body, consol_high, consol_low, consol_avg_vol, disp_vol = (
             displacement_found
@@ -3135,9 +3156,9 @@ class ScalpChannel(BaseChannel):
         # Current close must have broken beyond the consolidation range in the
         # displacement direction.  This is the defining moment of the setup.
         if direction == Direction.LONG and close <= consol_high:
-            return None  # Not yet broken above consolidation ceiling
+            return self._reject("breakout_not_found")
         if direction == Direction.SHORT and close >= consol_low:
-            return None  # Not yet broken below consolidation floor
+            return self._reject("breakout_not_found")
 
         # ── RSI layered gate ─────────────────────────────────────────────
         # Hard reject at true exhaustion extremes; soft penalty in borderline zone.
@@ -3147,12 +3168,12 @@ class ScalpChannel(BaseChannel):
         if rsi_val is not None:
             if direction == Direction.LONG:
                 if rsi_val >= _PDC_RSI_LONG_HARD_MAX:
-                    return None  # Hard reject: extreme overbought exhaustion
+                    return self._reject("rsi_reject")
                 if rsi_val >= _PDC_RSI_LONG_SOFT_MIN:
                     rsi_penalty = 6.0
             else:
                 if rsi_val <= _PDC_RSI_SHORT_HARD_MIN:
-                    return None  # Hard reject: extreme oversold exhaustion
+                    return self._reject("rsi_reject")
                 if rsi_val <= _PDC_RSI_SHORT_SOFT_MAX:
                     rsi_penalty = 6.0
 
@@ -3189,9 +3210,9 @@ class ScalpChannel(BaseChannel):
             sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
 
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         # ── TP: Measured move from displacement height (Type C) ───────────
         # The displacement height captures the institutional move magnitude and
@@ -3239,7 +3260,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         sig.stop_loss = round(sl, 8)
         sig.tp1 = round(tp1, 8)
@@ -3319,11 +3340,11 @@ class ScalpChannel(BaseChannel):
         # genuine breakouts dominate, making FAR structurally incorrect.
         regime_upper = regime.upper() if regime else ""
         if regime_upper in _FAR_BLOCKED_REGIMES:
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 20:
-            return None
+            return self._reject("insufficient_candles")
 
         closes_raw = m5.get("close", [])
         highs_raw = m5.get("high", [])
@@ -3331,19 +3352,19 @@ class ScalpChannel(BaseChannel):
 
         n = len(closes_raw)
         if n < 20 or len(highs_raw) < n or len(lows_raw) < n:
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         ind = indicators.get("5m", {})
         atr_val = ind.get("atr_last")
         if atr_val is None or atr_val <= 0:
-            return None
+            return self._reject("adx_reject")
 
         close = float(closes_raw[-1])
         if close <= 0:
-            return None
+            return self._reject("breakout_not_found")
 
         # ── Reference structure levels ───────────────────────────────────
         # Compute prior swing high and low from history BEFORE the auction
@@ -3355,16 +3376,16 @@ class ScalpChannel(BaseChannel):
         struct_end = n - 1 - _FAR_AUCTION_WINDOW_MAX   # exclusive end
         struct_start = max(0, struct_end - _FAR_STRUCT_LOOKBACK)
         if struct_end <= struct_start:
-            return None
+            return self._reject("breakout_not_found")
 
         struct_highs = [float(highs_raw[i]) for i in range(struct_start, struct_end)]
         struct_lows = [float(lows_raw[i]) for i in range(struct_start, struct_end)]
         if not struct_highs or not struct_lows:
-            return None
+            return self._reject("breakout_not_found")
         struct_high = max(struct_highs)
         struct_low = min(struct_lows)
         if struct_high <= struct_low:
-            return None
+            return self._reject("breakout_not_found")
 
         # ── Failed-auction candle search ─────────────────────────────────
         # Scan the auction window (1 to _FAR_AUCTION_WINDOW_MAX bars back).
@@ -3407,7 +3428,7 @@ class ScalpChannel(BaseChannel):
 
         # Determine which direction (if any) has a valid auction
         if long_auction is None and short_auction is None:
-            return None
+            return self._reject("breakout_not_found")
 
         # Prefer the auction whose reference level is currently reclaimed.
         # If both fire simultaneously (rare) prefer whichever reclaim is larger.
@@ -3442,7 +3463,7 @@ class ScalpChannel(BaseChannel):
                     reclaim_level = ref_high
 
         if direction is None:
-            return None
+            return self._reject("reclaim_confirmation_failed")
 
         # ── RSI layered gate ─────────────────────────────────────────────
         # More conservative thresholds than PDC because FAR is a reversal-of-
@@ -3453,12 +3474,12 @@ class ScalpChannel(BaseChannel):
         if rsi_val is not None:
             if direction == Direction.LONG:
                 if rsi_val >= _FAR_RSI_LONG_HARD_MAX:
-                    return None  # Hard reject: overbought — reclaim won't hold
+                    return self._reject("rsi_reject")
                 if rsi_val >= _FAR_RSI_LONG_SOFT_MIN:
                     rsi_penalty = 6.0
             else:
                 if rsi_val <= _FAR_RSI_SHORT_HARD_MIN:
-                    return None  # Hard reject: oversold — reclaim won't hold
+                    return self._reject("rsi_reject")
                 if rsi_val <= _FAR_RSI_SHORT_SOFT_MAX:
                     rsi_penalty = 6.0
 
@@ -3487,9 +3508,9 @@ class ScalpChannel(BaseChannel):
             sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
 
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         # ── TP: measured move from failed-auction tail (Type C) ───────────
         # The "tail" is the distance the auction probed beyond the reference
@@ -3543,7 +3564,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         sig.stop_loss = round(sl, 8)
         sig.tp1 = round(tp1, 8)

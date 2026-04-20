@@ -94,6 +94,34 @@ def parse_path_funnel_from_logs(log_text: str, channel: str) -> Dict[str, int]:
     return dict(counters)
 
 
+def parse_channel_funnel_from_logs(log_text: str, channel: str) -> Dict[str, int]:
+    counters: Dict[str, int] = defaultdict(int)
+    if not log_text:
+        return {}
+    channel_prefix = f":{channel}:"
+    for line in log_text.splitlines():
+        if "Path funnel (last 100 cycles): path=" not in line:
+            continue
+        try:
+            fragment = line.split(" channel=", 1)[1]
+            parsed = ast.literal_eval(fragment)
+        except (IndexError, ValueError, SyntaxError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for key, value in parsed.items():
+            key_text = str(key)
+            if channel_prefix not in key_text:
+                continue
+            try:
+                n = int(value or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n > 0:
+                counters[key_text] += n
+    return dict(counters)
+
+
 def stage_totals_by_setup(funnel_counters: Dict[str, int], channel: str) -> Dict[str, Dict[str, int]]:
     by_setup: Dict[str, Dict[str, int]] = {}
     for key, value in funnel_counters.items():
@@ -336,6 +364,8 @@ def build_snapshot(
     records: List[Dict[str, Any]],
     current_funnel: Dict[str, int],
     previous_funnel: Dict[str, int],
+    current_channel_funnel: Optional[Dict[str, int]] = None,
+    previous_channel_funnel: Optional[Dict[str, int]] = None,
     now_ts: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     now_ts = now_ts or time.time()
@@ -368,6 +398,8 @@ def build_snapshot(
 
     current_paths = stage_totals_by_setup(current_funnel, channel)
     previous_paths = stage_totals_by_setup(previous_funnel, channel)
+    current_channel_funnel = current_channel_funnel or {}
+    previous_channel_funnel = previous_channel_funnel or {}
 
     current_quality = build_quality_by_setup(current_records)
     previous_quality = build_quality_by_setup(previous_records)
@@ -380,10 +412,26 @@ def build_snapshot(
             for stage, count in metrics.items()
             if stage.startswith("geometry:final_live:rejected_reason:")
         }
+        no_signal_reasons = {
+            stage.replace("evaluator_no_signal_reason:", ""): int(count or 0)
+            for stage, count in metrics.items()
+            if stage.startswith("evaluator_no_signal_reason:")
+        }
+        dependency_missing_reasons = {
+            stage.replace("dependency_missing:", ""): int(count or 0)
+            for stage, count in metrics.items()
+            if stage.startswith("dependency_missing:")
+        }
+        generated = int(metrics.get("evaluator_generated", 0)) + int(metrics.get("generated", 0))
+        dependency_missing_total = sum(int(v or 0) for v in dependency_missing_reasons.values())
+        if int(metrics.get("evaluator_attempted", 0)) > 0 and generated <= 0 and dependency_missing_total > 0:
+            classification = "dependency-missing"
+        else:
+            classification = classify_path(metrics, quality)
         path_funnel_truth[setup] = {
             "attempts": int(metrics.get("evaluator_attempted", 0)),
             "no_signal": int(metrics.get("evaluator_no_signal", 0)),
-            "generated": int(metrics.get("evaluator_generated", 0)) + int(metrics.get("generated", 0)),
+            "generated": generated,
             "scanner_preparation": int(metrics.get("scanner_preparation", 0)),
             "gated": int(metrics.get("gated", 0)),
             "emitted": int(metrics.get("emitted", 0)),
@@ -391,7 +439,10 @@ def build_snapshot(
             "geometry_final_changed": int(metrics.get("geometry:final_live:changed", 0)),
             "geometry_final_rejected": int(metrics.get("geometry:final_live:rejected", 0)),
             "geometry_rejected_reasons": rejected_reasons,
-            "classification": classify_path(metrics, quality),
+            "no_signal_reasons": no_signal_reasons,
+            "dependency_missing_reasons": dependency_missing_reasons,
+            "dependency_missing_total": dependency_missing_total,
+            "classification": classification,
         }
 
     lifecycle_summary = build_lifecycle_summary(current_records)
@@ -452,6 +503,17 @@ def build_snapshot(
     elif healthiest:
         recommended_target = healthiest[0]
 
+    dependency_readiness: Dict[str, Dict[str, Any]] = {}
+    for key, count in current_channel_funnel.items():
+        if key.startswith(f"dependency_presence:{channel}:"):
+            _, _, dep, state = key.split(":", 3)
+            dep_bucket = dependency_readiness.setdefault(dep, {"presence": {}, "buckets": {}})
+            dep_bucket["presence"][state] = dep_bucket["presence"].get(state, 0) + int(count or 0)
+        elif key.startswith(f"dependency_bucket:{channel}:"):
+            _, _, dep, bucket = key.split(":", 3)
+            dep_bucket = dependency_readiness.setdefault(dep, {"presence": {}, "buckets": {}})
+            dep_bucket["buckets"][bucket] = dep_bucket["buckets"].get(bucket, 0) + int(count or 0)
+
     snapshot = {
         "generated_at": int(now_ts),
         "channel": channel,
@@ -468,6 +530,7 @@ def build_snapshot(
         },
         "runtime_health": runtime_summary,
         "path_funnel_truth": path_funnel_truth,
+        "dependency_readiness": dependency_readiness,
         "lifecycle_truth": lifecycle_summary,
         "quality_by_setup": current_quality,
         "recommended_operator_focus": {
@@ -507,6 +570,8 @@ def build_snapshot(
             "record_count_previous_window": len(previous_records),
             "current_path_funnel_counters": current_funnel,
             "previous_path_funnel_counters": previous_funnel,
+            "current_channel_funnel_counters": current_channel_funnel,
+            "previous_channel_funnel_counters": previous_channel_funnel,
         }
 
     return snapshot, comparison
@@ -539,8 +604,12 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
 
     path_truth = snapshot.get("path_funnel_truth", {})
     for setup, metrics in sorted(path_truth.items()):
+        top_reason = "none"
+        _reasons = metrics.get("no_signal_reasons", {}) or {}
+        if _reasons:
+            top_reason = max(_reasons.items(), key=lambda item: int(item[1]))[0]
         lines.append(
-            "| {setup} | {attempts} | {no_signal} | {generated} | {scanner_preparation} | {gated} | {emitted} | {classification} |".format(
+            "| {setup} | {attempts} | {no_signal} | {generated} | {scanner_preparation} | {gated} | {emitted} | {classification} ({top_reason}) |".format(
                 setup=setup,
                 attempts=metrics.get("attempts", 0),
                 no_signal=metrics.get("no_signal", 0),
@@ -549,8 +618,26 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
                 gated=metrics.get("gated", 0),
                 emitted=metrics.get("emitted", 0),
                 classification=metrics.get("classification", "unknown"),
+                top_reason=top_reason,
             )
         )
+
+    lines.extend(["", "## Evaluator no-signal reasons"])
+    for setup, metrics in sorted(path_truth.items()):
+        reasons = metrics.get("no_signal_reasons", {}) or {}
+        if not reasons:
+            continue
+        top = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items(), key=lambda item: item[1], reverse=True)[:3])
+        lines.append(f"- {setup}: {top}")
+
+    lines.extend(["", "## Dependency readiness"])
+    dependency_readiness = snapshot.get("dependency_readiness", {}) or {}
+    for dep_name, dep_metrics in sorted(dependency_readiness.items()):
+        presence = dep_metrics.get("presence", {})
+        buckets = dep_metrics.get("buckets", {})
+        presence_text = ", ".join(f"{k}={v}" for k, v in sorted(presence.items())) or "none"
+        bucket_text = ", ".join(f"{k}={v}" for k, v in sorted(buckets.items())) or "none"
+        lines.append(f"- {dep_name}: presence[{presence_text}] buckets[{bucket_text}]")
 
     lines.extend(
         [

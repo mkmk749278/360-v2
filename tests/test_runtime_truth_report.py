@@ -5,6 +5,7 @@ from src.runtime_truth_report import (
     build_snapshot,
     classify_path,
     compare_windows,
+    parse_channel_funnel_from_logs,
     parse_path_funnel_from_logs,
 )
 
@@ -153,6 +154,18 @@ def test_parse_path_funnel_from_logs_handles_stage_tokens_with_colons() -> None:
     assert parsed[stage_rejected] == 1
 
 
+def test_parse_channel_funnel_from_logs_extracts_dependency_metrics_for_channel() -> None:
+    logs = "\n".join(
+        [
+            "Path funnel (last 100 cycles): path={} channel={'dependency_presence:360_SCALP:cvd:absent': 4, 'dependency_bucket:360_SCALP:cvd:none': 4, 'dependency_presence:360_SWING:cvd:present': 2}",
+        ]
+    )
+    parsed = parse_channel_funnel_from_logs(logs, "360_SCALP")
+    assert parsed["dependency_presence:360_SCALP:cvd:absent"] == 4
+    assert parsed["dependency_bucket:360_SCALP:cvd:none"] == 4
+    assert "dependency_presence:360_SWING:cvd:present" not in parsed
+
+
 def test_build_snapshot_includes_post_correction_focus_geometry_and_timing() -> None:
     now_ts = 1_000_000.0
     records = [
@@ -224,3 +237,38 @@ def test_build_snapshot_includes_post_correction_focus_geometry_and_timing() -> 
     assert sr_focus["median_first_breach_sec"] == 65.0
     assert sr_focus["median_terminal_duration_sec"] == 210.0
     assert trend_focus["geometry_final_preserved"] == 2
+
+
+def test_build_snapshot_classifies_dependency_missing_and_emits_readiness() -> None:
+    now_ts = 1_000_000.0
+    current_funnel = {
+        "evaluator_attempted:360_SCALP:other:EVAL::FUNDING_EXTREME": 7,
+        "evaluator_no_signal:360_SCALP:other:EVAL::FUNDING_EXTREME": 7,
+        "evaluator_no_signal_reason:missing_funding_rate:360_SCALP:other:EVAL::FUNDING_EXTREME": 6,
+        "dependency_missing:missing_funding_rate:360_SCALP:other:EVAL::FUNDING_EXTREME": 6,
+    }
+    current_channel_funnel = {
+        "dependency_presence:360_SCALP:funding_rate:absent": 5,
+        "dependency_bucket:360_SCALP:funding_rate:absent": 5,
+    }
+    snapshot, _ = build_snapshot(
+        channel="360_SCALP",
+        lookback_hours=24,
+        compare_previous_window=False,
+        include_raw_json=False,
+        symbol_filter="",
+        setup_filter="",
+        runtime_health={"running": True, "status": "running", "health": "healthy"},
+        heartbeat_text="Heartbeat age: 10s",
+        records=[],
+        current_funnel=current_funnel,
+        previous_funnel={},
+        current_channel_funnel=current_channel_funnel,
+        previous_channel_funnel={},
+        now_ts=now_ts,
+    )
+    metrics = snapshot["path_funnel_truth"]["EVAL::FUNDING_EXTREME"]
+    assert metrics["classification"] == "dependency-missing"
+    assert metrics["no_signal_reasons"]["missing_funding_rate"] == 6
+    assert metrics["dependency_missing_reasons"]["missing_funding_rate"] == 6
+    assert snapshot["dependency_readiness"]["funding_rate"]["presence"]["absent"] == 5

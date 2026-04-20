@@ -16,6 +16,7 @@ from src.runtime_truth_report import (
     build_snapshot,
     format_truth_report_markdown,
     load_json_file,
+    parse_channel_funnel_from_logs,
     parse_path_funnel_from_logs,
 )
 
@@ -53,6 +54,8 @@ def main() -> int:
 
     current_funnel = parse_path_funnel_from_logs(current_text, args.channel)
     previous_funnel = parse_path_funnel_from_logs(previous_text, args.channel)
+    current_channel_funnel = parse_channel_funnel_from_logs(current_text, args.channel)
+    previous_channel_funnel = parse_channel_funnel_from_logs(previous_text, args.channel)
 
     snapshot, comparison = build_snapshot(
         channel=args.channel,
@@ -66,6 +69,8 @@ def main() -> int:
         records=records,
         current_funnel=current_funnel,
         previous_funnel=previous_funnel,
+        current_channel_funnel=current_channel_funnel,
+        previous_channel_funnel=previous_channel_funnel,
         now_ts=time.time(),
     )
 
