@@ -1010,6 +1010,27 @@ class TestRegimeStabilityTracker:
         result = scanner._should_skip_channel("ETHUSDT", "360_SWING", ctx)
         assert result is False
 
+    def test_should_not_preskip_scalp_when_ranging_low_adx(self):
+        """RANGING+low ADX must bypass channel preskip and defer to family doctrine."""
+        scanner = _make_scanner()
+        ctx = MagicMock()
+        ctx.pair_quality.passed = True
+        ctx.market_state = MarketState.CLEAN_RANGE
+        ctx.regime_result.regime.value = "RANGING"
+        scanner.circuit_breaker = None
+        scanner.router.active_signals = {}
+        ctx.is_ranging = True
+        ctx.adx_val = _RANGING_ADX_SUPPRESS_THRESHOLD - 1.0
+
+        result = scanner._should_skip_channel("ETHUSDT", "360_SCALP", ctx)
+
+        assert result is False
+        assert (
+            scanner._suppression_counters[
+                "ranging_low_adx:channel_preskip_bypassed:360_SCALP"
+            ] == 1
+        )
+
 
 class TestPR3GovernanceRuntimeRoles:
     """PR-3 governance/runtime truth and volatile contradiction cleanup."""
@@ -1423,6 +1444,106 @@ class TestMTFGateInScanner:
         assert mock_mtf.call_args_list[0].kwargs["min_score"] == pytest.approx(0.35)
         assert mock_mtf.call_args_list[1].kwargs["min_score"] == pytest.approx(0.6)
         assert scanner._suppression_counters["mtf_policy_saved:360_SCALP:reclaim_retest"] == 1
+
+    @pytest.mark.asyncio
+    async def test_ranging_low_adx_family_doctrine_blocks_momentum_setup(self):
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal(channel="360_SCALP")
+        scanner, _signal_queue = self._scanner_and_queue()
+        ctx = SimpleNamespace(
+            candles={"5m": _candles()},
+            indicators={"5m": {"ema9_last": 101.0, "ema21_last": 100.0, "close": 100.5}},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            spread_pct=0.001,
+            regime_result=SimpleNamespace(regime=SimpleNamespace(value="RANGING")),
+            market_state=MarketState.CLEAN_RANGE,
+            pair_quality=SimpleNamespace(passed=True, reason="", label="GOOD", score=80.0),
+            regime_context=None,
+            is_ranging=True,
+            adx_val=_RANGING_ADX_SUPPRESS_THRESHOLD - 1.0,
+        )
+        funnel_meta = {}
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.VOLUME_SURGE_BREAKOUT)),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            sig, _ = await scanner._prepare_signal(
+                symbol="BTCUSDT",
+                volume_24h=10_000_000.0,
+                chan=channel,
+                ctx=ctx,
+                _funnel_meta=funnel_meta,
+            )
+
+        assert sig is None
+        assert funnel_meta.get("reject_stage") == "gated"
+        assert scanner._suppression_counters["ranging_low_adx:360_SCALP"] == 1
+        assert (
+            scanner._suppression_counters[
+                "ranging_low_adx:family_block:360_SCALP:breakout_momentum"
+            ] == 1
+        )
+        assert (
+            scanner._suppression_counters[
+                "ranging_low_adx:setup_block:360_SCALP:VOLUME_SURGE_BREAKOUT"
+            ] == 1
+        )
+
+    def test_ranging_low_adx_family_doctrine_allows_reclaim_retest(self):
+        scanner, _signal_queue = self._scanner_and_queue()
+        assert scanner._is_scalp_family_blocked_in_ranging_low_adx("reclaim_retest") is False
+        assert scanner._is_scalp_family_blocked_in_ranging_low_adx("reversal") is False
+        assert scanner._is_scalp_family_blocked_in_ranging_low_adx("breakout_momentum") is True
+
+    @pytest.mark.asyncio
+    async def test_ranging_low_adx_family_doctrine_allows_reclaim_retest_in_prepare(self):
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal(channel="360_SCALP")
+        scanner, _signal_queue = self._scanner_and_queue()
+        ctx = SimpleNamespace(
+            candles={"5m": _candles()},
+            indicators={"5m": {"ema9_last": 101.0, "ema21_last": 100.0, "close": 100.5}},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            smc_result=SimpleNamespace(sweeps=[], fvg=[]),
+            spread_pct=0.001,
+            regime_result=SimpleNamespace(regime=SimpleNamespace(value="RANGING")),
+            market_state=MarketState.CLEAN_RANGE,
+            pair_quality=SimpleNamespace(passed=True, reason="", label="GOOD", score=80.0),
+            regime_context=None,
+            is_ranging=True,
+            adx_val=_RANGING_ADX_SUPPRESS_THRESHOLD - 1.0,
+        )
+        funnel_meta = {}
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.SR_FLIP_RETEST)),
+            patch.object(scanner, "_compute_base_confidence", return_value=70.0),
+            patch.object(scanner, "_apply_predictive_adjustments", new=AsyncMock(return_value=None)),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            sig, _ = await scanner._prepare_signal(
+                symbol="BTCUSDT",
+                volume_24h=10_000_000.0,
+                chan=channel,
+                ctx=ctx,
+                _funnel_meta=funnel_meta,
+            )
+
+        assert sig is not None
+        assert funnel_meta.get("reject_stage") is None
+        assert (
+            scanner._suppression_counters[
+                "ranging_low_adx:family_allowed:360_SCALP:reclaim_retest"
+            ] == 1
+        )
+        assert (
+            scanner._suppression_counters[
+                "ranging_low_adx:family_block:360_SCALP:reclaim_retest"
+            ] == 0
+        )
 
     @pytest.mark.asyncio
     async def test_mtf_semantic_path_saves_reclaim_family_when_generic_fails(self):

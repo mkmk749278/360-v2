@@ -380,6 +380,21 @@ _SCALP_MTF_SEMANTIC_FAMILIES: frozenset[str] = frozenset({
 })
 _SCALP_MTF_SEMANTIC_NEAR_MISS_MAX_DELTA: float = 0.10
 
+# Families intentionally blocked when the market is explicitly RANGING with
+# weak directional strength (ADX below _RANGING_ADX_SUPPRESS_THRESHOLD).
+# This replaces the previous channel-wide hard pre-skip for 360_SCALP so that
+# structurally valid reclaim/retest and reversal families can still express
+# evaluator-local truth in low-ADX range conditions.
+_SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES: frozenset[str] = frozenset({
+    "trend_following",
+    "breakout_momentum",
+    "continuation",
+    "orderflow_momentum",
+    "divergence",
+    # Fail closed for unmapped/new setup classes until explicitly classified.
+    "other",
+})
+
 # Per-channel SMC timeframe preference order.
 # SCALP → low-TF sweeps are valid entry triggers.
 # Channels not listed here use the detector's default order.
@@ -2128,13 +2143,11 @@ class Scanner:
             and ctx.is_ranging
             and ctx.adx_val < _RANGING_ADX_SUPPRESS_THRESHOLD
         ):
-            log.debug(
-                "Suppressing SCALP signal for {} (RANGING, ADX={:.1f})",
-                symbol,
-                ctx.adx_val,
-            )
-            self._suppression_counters[f"ranging_low_adx:{chan_name}"] += 1
-            return True
+            # Family-aware doctrine routing: do not hard-block the whole channel
+            # pre-evaluator; defer to setup-family logic in _prepare_signal().
+            self._suppression_counters[
+                f"ranging_low_adx:channel_preskip_bypassed:{chan_name}"
+            ] += 1
         # Regime-channel compatibility matrix
         current_regime = ctx.regime_result.regime.value
         incompatible_regimes = _REGIME_CHANNEL_INCOMPATIBLE.get(chan_name, [])
@@ -2250,6 +2263,17 @@ class Scanner:
         if chan_name == "360_SCALP":
             return _SCALP_SETUP_TO_FAMILY.get(setup_class_name, "other")
         return "other"
+
+    @staticmethod
+    def _is_scalp_family_blocked_in_ranging_low_adx(setup_family: str) -> bool:
+        return setup_family in _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES
+
+    @staticmethod
+    def _regime_name_from_ctx(ctx: ScanContext, default: str = "RANGING") -> str:
+        regime_obj = getattr(getattr(ctx, "regime_result", None), "regime", None)
+        if regime_obj is not None and hasattr(regime_obj, "value"):
+            return str(regime_obj.value)
+        return default
 
     @staticmethod
     def _normalize_setup_class(setup_class: Any) -> str:
@@ -3094,6 +3118,39 @@ class Scanner:
         setup = self._evaluate_setup(chan_name, sig, ctx)
         _setup_class_name = setup.setup_class.value
         _setup_family = self._setup_family_for_channel(chan_name, _setup_class_name)
+        if (
+            chan_name == "360_SCALP"
+            and ctx.is_ranging
+            and ctx.adx_val < _RANGING_ADX_SUPPRESS_THRESHOLD
+        ):
+            _regime_name = self._regime_name_from_ctx(ctx, default="RANGING")
+            if self._is_scalp_family_blocked_in_ranging_low_adx(_setup_family):
+                self._suppression_counters[f"ranging_low_adx:{chan_name}"] += 1
+                self._suppression_counters[
+                    f"ranging_low_adx:family_block:{chan_name}:{_setup_family}"
+                ] += 1
+                self._suppression_counters[
+                    f"ranging_low_adx:setup_block:{chan_name}:{_setup_class_name}"
+                ] += 1
+                self.suppression_tracker.record(SuppressionEvent(
+                    symbol=symbol,
+                    channel=chan_name,
+                    reason="ranging_low_adx_family_block",
+                    regime=_regime_name,
+                    would_be_confidence=getattr(sig, "confidence", None),
+                ))
+                log.debug(
+                    "Rejected {} {} setup={} family={} (RANGING low ADX {:.1f})",
+                    symbol,
+                    chan_name,
+                    _setup_class_name,
+                    _setup_family,
+                    ctx.adx_val,
+                )
+                return _reject("gated", None)
+            self._suppression_counters[
+                f"ranging_low_adx:family_allowed:{chan_name}:{_setup_family}"
+            ] += 1
         if not setup.channel_compatible or not setup.regime_compatible:
             if (
                 not setup.regime_compatible
