@@ -2281,14 +2281,6 @@ class Scanner:
             return setup_class or "UNKNOWN"
         return str(getattr(setup_class, "value", setup_class) or "UNKNOWN")
 
-    @staticmethod
-    def _sl_cap_policy_scope_from_reason(reason: str) -> Optional[str]:
-        if reason == "sl_cap_exceeded_family_policy":
-            return "family"
-        if reason == "sl_cap_exceeded_channel_policy":
-            return "channel"
-        return None
-
     def _path_funnel_key(self, stage: str, chan_name: str, setup_class_name: Any) -> str:
         _setup_name = self._normalize_setup_class(setup_class_name)
         _family = self._setup_family_for_channel(chan_name, _setup_name)
@@ -2970,7 +2962,7 @@ class Scanner:
         self._suppression_counters[
             f"predictive_revalidation_triggered:{chan_name}:{_setup_family}"
         ] += 1
-        valid, reason = validate_geometry_against_policy(
+        valid, reason, policy_scope = validate_geometry_against_policy(
             signal=sig,
             setup=setup.setup_class,
             channel=chan_name,
@@ -2993,10 +2985,9 @@ class Scanner:
         self._suppression_counters[
             f"geometry_rejected_final:{chan_name}:{_setup_family}:{reason}"
         ] += 1
-        _policy_scope = self._sl_cap_policy_scope_from_reason(reason)
-        if _policy_scope is not None:
+        if policy_scope is not None:
             self._suppression_counters[
-                f"geometry_rejected_final_policy:{chan_name}:{_setup_family}:{_policy_scope}"
+                f"geometry_rejected_final_policy:{chan_name}:{_setup_family}:{policy_scope}"
             ] += 1
         self._suppression_counters[
             f"geometry_preserved_final:{chan_name}:{_setup_family}"
@@ -3008,9 +2999,9 @@ class Scanner:
             chan_name,
             _setup_class_name,
         )
-        if _policy_scope is not None:
+        if policy_scope is not None:
             self._increment_path_funnel(
-                f"geometry:final_live:rejected_policy:{_policy_scope}",
+                f"geometry:final_live:rejected_policy:{policy_scope}",
                 chan_name,
                 _setup_class_name,
             )

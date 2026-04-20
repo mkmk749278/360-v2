@@ -757,7 +757,7 @@ class TestValidateGeometryPolicyReclaimRetest:
         signal.tp2 = 100.12
         signal.tp3 = 100.20
 
-        valid, reason = validate_geometry_against_policy(
+        valid, reason, policy_scope = validate_geometry_against_policy(
             signal=signal,
             setup=SetupClass.FAILED_AUCTION_RECLAIM,
             channel="360_SCALP",
@@ -765,6 +765,7 @@ class TestValidateGeometryPolicyReclaimRetest:
 
         assert valid is True
         assert reason == ""
+        assert policy_scope is None
 
     def test_non_reclaim_setup_keeps_default_near_zero_guard(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
@@ -774,7 +775,7 @@ class TestValidateGeometryPolicyReclaimRetest:
         signal.tp2 = 100.12
         signal.tp3 = 100.20
 
-        valid, reason = validate_geometry_against_policy(
+        valid, reason, policy_scope = validate_geometry_against_policy(
             signal=signal,
             setup=SetupClass.BREAKOUT_RETEST,
             channel="360_SCALP",
@@ -782,8 +783,9 @@ class TestValidateGeometryPolicyReclaimRetest:
 
         assert valid is False
         assert reason == "near_zero_sl"
+        assert policy_scope is None
 
-    def test_sl_cap_rejection_reason_distinguishes_family_vs_channel_policy(self):
+    def test_sl_cap_rejection_reason_reports_channel_policy_scope(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
         signal.entry = 100.0
         signal.stop_loss = 97.6  # 2.4% SL distance
@@ -791,12 +793,12 @@ class TestValidateGeometryPolicyReclaimRetest:
         signal.tp2 = 108.0
         signal.tp3 = 112.0
 
-        reclaim_valid, reclaim_reason = validate_geometry_against_policy(
+        reclaim_valid, reclaim_reason, reclaim_scope = validate_geometry_against_policy(
             signal=signal,
             setup=SetupClass.FAILED_AUCTION_RECLAIM,
             channel="360_SCALP",
         )
-        breakout_valid, breakout_reason = validate_geometry_against_policy(
+        breakout_valid, breakout_reason, breakout_scope = validate_geometry_against_policy(
             signal=signal,
             setup=SetupClass.BREAKOUT_RETEST,
             channel="360_SCALP",
@@ -804,32 +806,10 @@ class TestValidateGeometryPolicyReclaimRetest:
 
         assert reclaim_valid is False
         assert breakout_valid is False
-        assert reclaim_reason == "sl_cap_exceeded_family_policy"
+        assert reclaim_reason == "sl_cap_exceeded_channel_policy"
         assert breakout_reason == "sl_cap_exceeded_channel_policy"
-
-    def test_reclaim_retest_family_cap_allows_structural_sl_within_bounded_override(self):
-        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
-        signal.entry = 100.0
-        signal.stop_loss = 98.1  # 1.9% SL distance (above channel 1.5%, below family 2.0%)
-        signal.tp1 = 104.0
-        signal.tp2 = 108.0
-        signal.tp3 = 112.0
-        signal.far_reclaim_level = 99.2
-
-        risk = build_risk_plan(
-            signal=signal,
-            indicators=_indicators(),
-            candles={"5m": _candles(base=100.0, trend=0.0)},
-            smc_data={"sweeps": [], "mss": None, "fvg": []},
-            setup=SetupClass.FAILED_AUCTION_RECLAIM,
-            spread_pct=0.01,
-            channel="360_SCALP",
-        )
-
-        assert risk.passed is True
-        assert risk.stop_loss == pytest.approx(98.1, rel=1e-9)
-        assert risk.sl_cap_policy_scope == "family"
-        assert risk.sl_cap_family == "reclaim_retest"
+        assert reclaim_scope == "channel"
+        assert breakout_scope == "channel"
 
 
 class TestMarketStateClassification:

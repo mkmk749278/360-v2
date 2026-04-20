@@ -354,17 +354,6 @@ _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP_ORDERBLOCK": 1.0,
 }
 
-_SCALP_CHANNEL_NAME = "360_SCALP"
-
-# Family-aware 360_SCALP SL-cap doctrine.
-# This is intentionally narrow and bounded: reclaim/retest and reversal families
-# can use a slightly wider structural invalidation envelope, while families
-# without explicit overrides remain on the baseline channel cap.
-_SCALP_SL_CAP_PCT_BY_FAMILY: Dict[str, float] = {
-    "reclaim_retest": 2.0,
-    "reversal": 1.8,
-}
-
 # Family-aware minimum R:R thresholds used in build_risk_plan().
 # Quick-exit families accept a lower first target because their trade thesis
 # resolves faster; trend / breakout families require a larger reward cushion.
@@ -435,12 +424,7 @@ def _geometry_family_for_setup(setup: SetupClass) -> str:
 def _max_sl_pct_for_policy(channel: str, setup: SetupClass) -> tuple[float, str, str]:
     """Return (max_sl_pct_decimal, policy_scope, setup_family)."""
     family = _geometry_family_for_setup(setup)
-    channel_cap = _channel_max_sl_pct(channel)
-    if channel == _SCALP_CHANNEL_NAME:
-        family_cap_pct = _SCALP_SL_CAP_PCT_BY_FAMILY.get(family)
-        if family_cap_pct is not None:
-            return family_cap_pct / 100.0, "family", family
-    return channel_cap, "channel", family
+    return _channel_max_sl_pct(channel), "channel", family
 
 
 def _min_sl_distance_pct_for_setup(setup: SetupClass) -> float:
@@ -455,7 +439,7 @@ def validate_geometry_against_policy(
     channel: str,
     *,
     max_sl_distance: Optional[float] = None,
-) -> tuple[bool, str]:
+) -> tuple[bool, str, Optional[str]]:
     """Validate signal geometry against canonical SL/TP policy.
 
     This is shared by scanner post-predictive revalidation to avoid duplicating
@@ -469,49 +453,45 @@ def validate_geometry_against_policy(
     tp3 = _safe_float(tp3_raw, 0.0) if tp3_raw is not None else None
 
     if entry <= 0:
-        return False, "invalid_entry"
+        return False, "invalid_entry", None
     if any(not np.isfinite(v) for v in (entry, stop, tp1, tp2)):
-        return False, "non_finite_geometry"
+        return False, "non_finite_geometry", None
     if tp3 is not None and not np.isfinite(tp3):
-        return False, "non_finite_geometry"
+        return False, "non_finite_geometry", None
     if stop <= 0 or tp1 <= 0 or tp2 <= 0 or (tp3 is not None and tp3 <= 0):
-        return False, "non_positive_geometry"
+        return False, "non_positive_geometry", None
 
     direction = getattr(signal, "direction", None)
     if direction == Direction.LONG:
         if stop >= entry:
-            return False, "sl_wrong_side"
+            return False, "sl_wrong_side", None
         if tp1 <= entry or tp2 <= entry or (tp3 is not None and tp3 <= entry):
-            return False, "tp_wrong_side"
+            return False, "tp_wrong_side", None
         if not (tp1 < tp2 and (tp3 is None or tp2 < tp3)):
-            return False, "tp_order_invalid"
+            return False, "tp_order_invalid", None
     elif direction == Direction.SHORT:
         if stop <= entry:
-            return False, "sl_wrong_side"
+            return False, "sl_wrong_side", None
         if tp1 >= entry or tp2 >= entry or (tp3 is not None and tp3 >= entry):
-            return False, "tp_wrong_side"
+            return False, "tp_wrong_side", None
         if not (tp1 > tp2 and (tp3 is None or tp2 > tp3)):
-            return False, "tp_order_invalid"
+            return False, "tp_order_invalid", None
 
     risk = abs(entry - stop)
     if risk < entry * _min_sl_distance_pct_for_setup(setup):
-        return False, "near_zero_sl"
+        return False, "near_zero_sl", None
 
     max_sl_pct, sl_cap_scope, _ = _max_sl_pct_for_policy(channel, setup)
     if (risk / entry) > max_sl_pct:
-        return False, (
-            "sl_cap_exceeded_family_policy"
-            if sl_cap_scope == "family"
-            else "sl_cap_exceeded_channel_policy"
-        )
+        return False, "sl_cap_exceeded_channel_policy", sl_cap_scope
 
     if max_sl_distance is not None and risk > max_sl_distance + (entry * 1e-8):
-        return False, "sl_distance_widened"
+        return False, "sl_distance_widened", None
 
     rr = abs(tp1 - entry) / risk if risk > 0 else 0.0
     if rr < _min_rr_for_setup(setup):
-        return False, "rr_below_min"
-    return True, ""
+        return False, "rr_below_min", None
+    return True, "", None
 
 
 def is_sl_distance_capped(

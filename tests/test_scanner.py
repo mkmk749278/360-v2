@@ -592,6 +592,44 @@ class TestPredictiveGeometryRevalidation:
         )
 
     @pytest.mark.asyncio
+    async def test_predictive_sl_cap_rejection_tracks_policy_scope_without_reason_parsing(self):
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(
+            channel=channel,
+            signal_queue=signal_queue,
+            predictive=self._predictive(tp_mult=1.0, sl_mult=1.4),
+        )
+        sig = _make_signal(channel="360_SCALP")
+        sig.stop_loss = 98.8  # 1.2% baseline
+        sig.tp1 = 101.6
+        sig.tp2 = 103.2
+        sig.tp3 = 104.8
+        before = (sig.stop_loss, sig.tp1, sig.tp2, sig.tp3)
+        ctx = SimpleNamespace(candles={"5m": _candles()}, ind_for_predict={"atr_last": 1.0})
+
+        await scanner._apply_predictive_adjustments(
+            "BTCUSDT",
+            sig,
+            ctx,
+            setup=_setup_pass(SetupClass.VOLUME_SURGE_BREAKOUT),
+            chan_name="360_SCALP",
+        )
+
+        assert (sig.stop_loss, sig.tp1, sig.tp2, sig.tp3) == pytest.approx(before, rel=1e-8)
+        assert scanner._suppression_counters[
+            "geometry_rejected_final:360_SCALP:breakout_momentum:sl_cap_exceeded_channel_policy"
+        ] == 1
+        assert scanner._suppression_counters[
+            "geometry_rejected_final_policy:360_SCALP:breakout_momentum:channel"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "geometry:final_live:rejected_policy:channel:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
+
+    @pytest.mark.asyncio
     async def test_valid_predictive_geometry_change_is_kept(self):
         channel = MagicMock()
         channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
