@@ -354,6 +354,15 @@ _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP_ORDERBLOCK": 1.0,
 }
 
+# Family-aware 360_SCALP SL-cap doctrine.
+# This is intentionally narrow and bounded: reclaim/retest and reversal families
+# can use a slightly wider structural invalidation envelope than continuation /
+# breakout families, while all other families remain on the baseline channel cap.
+_SCALP_SL_CAP_PCT_BY_FAMILY: Dict[str, float] = {
+    "reclaim_retest": 2.0,
+    "reversal": 1.8,
+}
+
 # Family-aware minimum R:R thresholds used in build_risk_plan().
 # Quick-exit families accept a lower first target because their trade thesis
 # resolves faster; trend / breakout families require a larger reward cushion.
@@ -365,6 +374,11 @@ _MIN_RR_DEFAULT: float = 1.2         # All other families — standard minimum R
 _RECLAIM_RETEST_SETUPS: frozenset[SetupClass] = frozenset({
     SetupClass.SR_FLIP_RETEST,
     SetupClass.FAILED_AUCTION_RECLAIM,
+})
+_REVERSAL_SETUPS: frozenset[SetupClass] = frozenset({
+    SetupClass.LIQUIDITY_SWEEP_REVERSAL,
+    SetupClass.LIQUIDATION_REVERSAL,
+    SetupClass.EXHAUSTION_FADE,
 })
 
 
@@ -406,6 +420,25 @@ def _min_risk_distance_for_setup(
 def _channel_max_sl_pct(channel: str) -> float:
     """Return channel max-SL decimal; unknown channels fall back to 5.0%."""
     return _MAX_SL_PCT_BY_CHANNEL.get(channel, 5.0) / 100.0
+
+
+def _geometry_family_for_setup(setup: SetupClass) -> str:
+    if setup in _RECLAIM_RETEST_SETUPS:
+        return "reclaim_retest"
+    if setup in _REVERSAL_SETUPS:
+        return "reversal"
+    return "generic"
+
+
+def _max_sl_pct_for_policy(channel: str, setup: SetupClass) -> tuple[float, str, str]:
+    """Return (max_sl_pct_decimal, policy_scope, setup_family)."""
+    family = _geometry_family_for_setup(setup)
+    channel_cap = _channel_max_sl_pct(channel)
+    if channel == "360_SCALP":
+        family_cap_pct = _SCALP_SL_CAP_PCT_BY_FAMILY.get(family)
+        if family_cap_pct is not None:
+            return family_cap_pct / 100.0, "family", family
+    return channel_cap, "channel", family
 
 
 def _min_sl_distance_pct_for_setup(setup: SetupClass) -> float:
@@ -462,8 +495,13 @@ def validate_geometry_against_policy(
     if risk < entry * _min_sl_distance_pct_for_setup(setup):
         return False, "near_zero_sl"
 
-    if (risk / entry) > _channel_max_sl_pct(channel):
-        return False, "sl_cap_exceeded"
+    max_sl_pct, sl_cap_scope, _ = _max_sl_pct_for_policy(channel, setup)
+    if (risk / entry) > max_sl_pct:
+        return False, (
+            "sl_cap_exceeded_family_policy"
+            if sl_cap_scope == "family"
+            else "sl_cap_exceeded_channel_policy"
+        )
 
     if max_sl_distance is not None and risk > max_sl_distance + (entry * 1e-8):
         return False, "sl_distance_widened"
@@ -480,6 +518,7 @@ def is_sl_distance_capped(
     original_stop_loss: float,
     final_stop_loss: float,
     channel: str,
+    setup: Optional[SetupClass] = None,
     tol: float = 1e-6,
 ) -> bool:
     """Return True when post-cap SL equals channel cap while pre-cap exceeded it.
@@ -492,6 +531,8 @@ def is_sl_distance_capped(
     original_sl_pct = abs(entry - original_stop_loss) / entry
     final_sl_pct = abs(entry - final_stop_loss) / entry
     cap_pct = _channel_max_sl_pct(channel)
+    if setup is not None:
+        cap_pct, _scope, _family = _max_sl_pct_for_policy(channel, setup)
     return original_sl_pct > cap_pct and abs(final_sl_pct - cap_pct) <= tol
 
 
@@ -537,6 +578,8 @@ class RiskAssessment:
     r_multiple: float
     invalidation_summary: str
     reason: str = ""
+    sl_cap_policy_scope: str = "channel"
+    sl_cap_family: str = "generic"
 
 
 @dataclass
@@ -1129,7 +1172,7 @@ def build_risk_plan(
     # preserve truthful invalidation, and reject if it exceeds doctrine.
     # Non-protected setups keep legacy clamp behavior.
     _chan = channel or getattr(signal, "channel", None) or ""
-    _max_sl_pct = _MAX_SL_PCT_BY_CHANNEL.get(_chan, 5.0) / 100.0
+    _max_sl_pct, _sl_cap_policy_scope, _sl_cap_family = _max_sl_pct_for_policy(_chan, setup)
     if signal.entry > 0:
         _sl_dist_pct = abs(signal.entry - stop_loss) / signal.entry
         if _sl_dist_pct > _max_sl_pct:
@@ -1153,9 +1196,13 @@ def build_risk_plan(
                     invalidation_summary=(
                         f"Protected structural invalidation preserved at {stop_loss:.8f} "
                         f"({(_sl_dist_pct * 100):.2f}% of entry), exceeding "
-                        f"{(_max_sl_pct * 100):.2f}% channel doctrine; rejected (no compression)."
+                        f"{(_max_sl_pct * 100):.2f}% "
+                        f"{'family-aware' if _sl_cap_policy_scope == 'family' else 'channel'} doctrine; "
+                        "rejected (no compression)."
                     ),
                     reason="protected_structural_sl_cap_exceeded_reject_not_compress",
+                    sl_cap_policy_scope=_sl_cap_policy_scope,
+                    sl_cap_family=_sl_cap_family,
                 )
             _capped_dist = signal.entry * _max_sl_pct
             if signal.direction == Direction.LONG:
@@ -1428,6 +1475,8 @@ def build_risk_plan(
         r_multiple=r_multiple,
         invalidation_summary=invalidation,
         reason=reason,
+        sl_cap_policy_scope=_sl_cap_policy_scope,
+        sl_cap_family=_sl_cap_family,
     )
 
 

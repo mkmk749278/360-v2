@@ -1626,6 +1626,12 @@ class TestMTFGateInScanner:
         assert scanner._suppression_counters[
             "geometry_rejected_risk_plan_reason:360_SCALP:breakout_momentum:protected_structural_sl_cap_exceeded_reject_not_compress"
         ] == 1
+        assert scanner._suppression_counters[
+            "geometry_rejected_risk_plan_policy:360_SCALP:breakout_momentum:channel"
+        ] == 1
+        assert scanner._path_funnel_counters[
+            "geometry:risk_plan:rejected_policy:channel:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+        ] == 1
 
     @pytest.mark.asyncio
     async def test_path_funnel_distinguishes_no_candidate_and_gated(self):
