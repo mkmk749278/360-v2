@@ -507,16 +507,34 @@ def build_snapshot(
     for key, count in current_channel_funnel.items():
         if key.startswith(f"dependency_presence:{channel}:"):
             _, _, dep, state = key.split(":", 3)
-            dep_bucket = dependency_readiness.setdefault(dep, {"presence": {}, "states": {}, "buckets": {}})
+            dep_bucket = dependency_readiness.setdefault(
+                dep, {"presence": {}, "states": {}, "buckets": {}, "sources": {}, "quality": {}}
+            )
             dep_bucket["presence"][state] = dep_bucket["presence"].get(state, 0) + int(count or 0)
         elif key.startswith(f"dependency_state:{channel}:"):
             _, _, dep, state = key.split(":", 3)
-            dep_bucket = dependency_readiness.setdefault(dep, {"presence": {}, "states": {}, "buckets": {}})
+            dep_bucket = dependency_readiness.setdefault(
+                dep, {"presence": {}, "states": {}, "buckets": {}, "sources": {}, "quality": {}}
+            )
             dep_bucket["states"][state] = dep_bucket["states"].get(state, 0) + int(count or 0)
         elif key.startswith(f"dependency_bucket:{channel}:"):
             _, _, dep, bucket = key.split(":", 3)
-            dep_bucket = dependency_readiness.setdefault(dep, {"presence": {}, "states": {}, "buckets": {}})
+            dep_bucket = dependency_readiness.setdefault(
+                dep, {"presence": {}, "states": {}, "buckets": {}, "sources": {}, "quality": {}}
+            )
             dep_bucket["buckets"][bucket] = dep_bucket["buckets"].get(bucket, 0) + int(count or 0)
+        elif key.startswith(f"dependency_source:{channel}:"):
+            _, _, dep, source = key.split(":", 3)
+            dep_bucket = dependency_readiness.setdefault(
+                dep, {"presence": {}, "states": {}, "buckets": {}, "sources": {}, "quality": {}}
+            )
+            dep_bucket["sources"][source] = dep_bucket["sources"].get(source, 0) + int(count or 0)
+        elif key.startswith(f"dependency_quality:{channel}:"):
+            _, _, dep, quality = key.split(":", 3)
+            dep_bucket = dependency_readiness.setdefault(
+                dep, {"presence": {}, "states": {}, "buckets": {}, "sources": {}, "quality": {}}
+            )
+            dep_bucket["quality"][quality] = dep_bucket["quality"].get(quality, 0) + int(count or 0)
 
     snapshot = {
         "generated_at": int(now_ts),
@@ -641,10 +659,17 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         presence = dep_metrics.get("presence", {})
         states = dep_metrics.get("states", {})
         buckets = dep_metrics.get("buckets", {})
+        sources = dep_metrics.get("sources", {})
+        quality = dep_metrics.get("quality", {})
         presence_text = ", ".join(f"{k}={v}" for k, v in sorted(presence.items())) or "none"
         state_text = ", ".join(f"{k}={v}" for k, v in sorted(states.items())) or "none"
         bucket_text = ", ".join(f"{k}={v}" for k, v in sorted(buckets.items())) or "none"
-        lines.append(f"- {dep_name}: presence[{presence_text}] state[{state_text}] buckets[{bucket_text}]")
+        source_text = ", ".join(f"{k}={v}" for k, v in sorted(sources.items())) or "none"
+        quality_text = ", ".join(f"{k}={v}" for k, v in sorted(quality.items())) or "none"
+        lines.append(
+            f"- {dep_name}: presence[{presence_text}] state[{state_text}] buckets[{bucket_text}] "
+            f"sources[{source_text}] quality[{quality_text}]"
+        )
 
     lines.extend(
         [

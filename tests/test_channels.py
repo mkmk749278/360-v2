@@ -381,6 +381,19 @@ class TestWhaleMomentumObiRefinements:
         assert sig is not None
         assert sig.soft_penalty_total >= 10.0
 
+    def test_book_ticker_top_of_book_is_treated_as_degraded_confirmation(self):
+        sig = self._call(
+            order_book={
+                "bids": [[100.0, 500.0]],
+                "asks": [[100.1, 100.0]],
+                "source": "book_ticker",
+                "depth_quality": "top_of_book_only",
+            },
+            regime="VOLATILE",
+        )
+        assert sig is not None
+        assert sig.soft_penalty_total >= 10.0
+
     def test_missing_ticks_uses_empty_reason_when_source_is_present_but_empty(self):
         ch = ScalpChannel()
         candles = {"1m": _make_candles(20)}

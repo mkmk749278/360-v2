@@ -1607,6 +1607,33 @@ class TestMTFGateInScanner:
         assert scanner._channel_funnel_counters[
             "dependency_bucket:360_SCALP:funding_rate:absent"
         ] == 0
+        assert scanner._channel_funnel_counters[
+            "dependency_source:360_SCALP:funding_rate:unavailable"
+        ] == 0
+        assert scanner._channel_funnel_counters[
+            "dependency_quality:360_SCALP:funding_rate:none"
+        ] == 0
+
+    def test_dependency_readiness_telemetry_emits_source_and_quality_counters(self):
+        scanner, _signal_queue = self._scanner_and_queue()
+        scanner._record_dependency_readiness("360_SCALP", {
+            "__dependency_state": {
+                "order_book": {
+                    "present": True,
+                    "state": "populated",
+                    "bucket": "few",
+                    "source": "book_ticker",
+                    "quality": "top_of_book_only",
+                }
+            }
+        })
+
+        assert scanner._channel_funnel_counters[
+            "dependency_source:360_SCALP:order_book:book_ticker"
+        ] == 1
+        assert scanner._channel_funnel_counters[
+            "dependency_quality:360_SCALP:order_book:top_of_book_only"
+        ] == 1
 
     @pytest.mark.asyncio
     async def test_path_funnel_tracks_scored_filtered_and_emitted(self):
@@ -2604,7 +2631,12 @@ class TestArch3ScanContextWiring:
         signal_queue.put = AsyncMock(return_value=True)
         scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
         scanner._order_book_snapshot_cache["BTCUSDT"] = (
-            {"bids": [[100.0, 10.0]], "asks": [[100.1, 12.0]], "source": "book_ticker"},
+            {
+                "bids": [[100.0, 10.0]],
+                "asks": [[100.1, 12.0]],
+                "source": "book_ticker",
+                "depth_quality": "top_of_book_only",
+            },
             time.monotonic() + 30.0,
         )
 
@@ -2615,7 +2647,11 @@ class TestArch3ScanContextWiring:
         order_book = captured_smc[0].get("order_book")
         assert isinstance(order_book, dict)
         assert order_book.get("source") == "book_ticker"
+        assert order_book.get("depth_quality") == "top_of_book_only"
         assert captured_smc[0]["__dependency_source_state"]["order_book"] == "populated"
+        dep_state = captured_smc[0]["__dependency_state"]["order_book"]
+        assert dep_state["source"] == "book_ticker"
+        assert dep_state["quality"] == "top_of_book_only"
 
     @pytest.mark.asyncio
     async def test_no_wiring_when_order_flow_store_absent(self):

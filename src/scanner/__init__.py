@@ -1756,6 +1756,7 @@ class Scanner:
                             "bids": [[best_bid, bid_qty_f]],
                             "asks": [[best_ask, ask_qty_f]],
                             "source": "book_ticker",
+                            "depth_quality": "top_of_book_only",
                         },
                         now + _BOOK_TICKER_CACHE_TTL,
                     )
@@ -2297,10 +2298,26 @@ class Scanner:
         if self.order_flow_store is not None:
             oi_points = len(getattr(self.order_flow_store, "_oi", {}).get(symbol, []))
         order_book_levels = 0
+        order_book_source = "unavailable"
+        order_book_quality = "none"
         if isinstance(order_book, dict):
             bids = order_book.get("bids") or []
             asks = order_book.get("asks") or []
             order_book_levels = min(len(bids), len(asks))
+            _raw_source = str(order_book.get("source") or "").strip().lower()
+            if _raw_source:
+                order_book_source = _raw_source
+            else:
+                order_book_source = "unknown"
+            _raw_quality = str(order_book.get("depth_quality") or "").strip().lower()
+            if _raw_quality:
+                order_book_quality = _raw_quality
+            elif order_book_levels >= 2:
+                order_book_quality = "multi_level"
+            elif order_book_levels == 1:
+                order_book_quality = "single_level"
+            else:
+                order_book_quality = "empty"
         oi_state = _state("oi_snapshot", oi_points, unavailable=self.order_flow_store is None)
         return {
             "funding_rate": {
@@ -2331,6 +2348,8 @@ class Scanner:
                 "present": source_state_map.get("order_book", "unavailable") != "unavailable",
                 "count": order_book_levels,
                 "bucket": self._dependency_count_bucket(order_book_levels),
+                "source": order_book_source,
+                "quality": order_book_quality,
             },
             "liquidation_clusters": {
                 "state": source_state_map.get("liquidation_clusters", _state("liquidation_clusters", len(liq_clusters))),
@@ -2362,6 +2381,12 @@ class Scanner:
             _bucket = str(_details.get("bucket") or "").strip()
             if _bucket:
                 self._channel_funnel_counters[f"dependency_bucket:{chan_name}:{_dep_name}:{_bucket}"] += 1
+            _source = str(_details.get("source") or "").strip()
+            if _source:
+                self._channel_funnel_counters[f"dependency_source:{chan_name}:{_dep_name}:{_source}"] += 1
+            _quality = str(_details.get("quality") or "").strip()
+            if _quality:
+                self._channel_funnel_counters[f"dependency_quality:{chan_name}:{_dep_name}:{_quality}"] += 1
 
     def _record_scalp_generation_telemetry(self, chan: Any, chan_name: str) -> None:
         if chan_name != "360_SCALP":
