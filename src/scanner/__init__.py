@@ -633,6 +633,11 @@ class Scanner:
         # expiry_monotonic_time is an absolute time.monotonic() value; the entry
         # is valid while time.monotonic() < expiry_monotonic_time.
         self._order_book_cache: Dict[str, Tuple[float, float]] = {}
+        # Lightweight order-book snapshot cache sourced from global bookTicker:
+        # symbol → ({"bids": [[price, qty]], "asks": [[price, qty]]}, expiry).
+        # This is not full depth, but it provides a truthful top-of-book snapshot
+        # for evaluator paths that consume order_book.
+        self._order_book_snapshot_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
 
         # Cooldown tracking: (symbol, channel_name) → monotonic expiry time
         self._cooldown_until: Dict[Tuple[str, str], float] = {}
@@ -1737,6 +1742,23 @@ class Scanner:
                     continue
                 spread_pct = (best_ask - best_bid) / mid * 100.0
                 self._order_book_cache[symbol] = (spread_pct, now + _BOOK_TICKER_CACHE_TTL)
+                bid_qty = entry.get("bidQty")
+                ask_qty = entry.get("askQty")
+                try:
+                    bid_qty_f = float(bid_qty)
+                    ask_qty_f = float(ask_qty)
+                except (TypeError, ValueError):
+                    bid_qty_f = 0.0
+                    ask_qty_f = 0.0
+                if bid_qty_f > 0 and ask_qty_f > 0:
+                    self._order_book_snapshot_cache[symbol] = (
+                        {
+                            "bids": [[best_bid, bid_qty_f]],
+                            "asks": [[best_ask, ask_qty_f]],
+                            "source": "book_ticker",
+                        },
+                        now + _BOOK_TICKER_CACHE_TTL,
+                    )
                 populated += 1
 
             log.debug(
@@ -1856,7 +1878,15 @@ class Scanner:
 
         _order_book = smc_data.get("order_book")
         if _order_book is None:
-            dependency_source_state["order_book"] = "unavailable"
+            _book_snapshot = self._order_book_snapshot_cache.get(symbol)
+            if _book_snapshot and time.monotonic() < float(_book_snapshot[1]):
+                _order_book = _book_snapshot[0]
+            if _order_book is None:
+                dependency_source_state["order_book"] = "unavailable"
+            elif isinstance(_order_book, dict) and ((_order_book.get("bids") or []) and (_order_book.get("asks") or [])):
+                dependency_source_state["order_book"] = "populated"
+            else:
+                dependency_source_state["order_book"] = "empty"
         elif isinstance(_order_book, dict) and ((_order_book.get("bids") or []) and (_order_book.get("asks") or [])):
             dependency_source_state["order_book"] = "populated"
         else:
@@ -1865,8 +1895,21 @@ class Scanner:
 
         _liq_clusters = smc_data.get("liquidation_clusters")
         if _liq_clusters is None:
-            dependency_source_state["liquidation_clusters"] = "unavailable"
-            _liq_clusters = []
+            if self.order_flow_store is not None:
+                _cluster_fn = getattr(self.order_flow_store, "get_liquidation_clusters", None)
+                if callable(_cluster_fn):
+                    try:
+                        _cluster_candidates = _cluster_fn(symbol)
+                    except Exception:
+                        _cluster_candidates = []
+                    _liq_clusters = _cluster_candidates if isinstance(_cluster_candidates, list) else []
+                    dependency_source_state["liquidation_clusters"] = "populated" if _liq_clusters else "empty"
+                else:
+                    dependency_source_state["liquidation_clusters"] = "unavailable"
+                    _liq_clusters = []
+            else:
+                dependency_source_state["liquidation_clusters"] = "unavailable"
+                _liq_clusters = []
         else:
             dependency_source_state["liquidation_clusters"] = "populated" if _liq_clusters else "empty"
         smc_data["liquidation_clusters"] = _liq_clusters

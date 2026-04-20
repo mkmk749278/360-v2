@@ -286,6 +286,15 @@ class ScalpChannel(BaseChannel):
         self._active_no_signal_reason = self._no_signal_reason_token(reason)
         return None
 
+    @staticmethod
+    def _dependency_state(smc_data: dict, name: str) -> str:
+        state_map = smc_data.get("__dependency_source_state")
+        if isinstance(state_map, dict):
+            state = str(state_map.get(name) or "").strip().lower()
+            if state in {"unavailable", "empty", "populated"}:
+                return state
+        return "unknown"
+
     def consume_generation_telemetry(self) -> Dict[str, Dict[str, int]]:
         snapshot = {
             stage: dict(counts)
@@ -921,7 +930,7 @@ class ScalpChannel(BaseChannel):
             return self._reject("missing_cvd")
         cvd_values = cvd_data if isinstance(cvd_data, list) else cvd_data.get("values", [])
         if len(cvd_values) < 4:
-            return self._reject("missing_cvd")
+            return self._reject("cvd_insufficient")
         cvd_now = float(cvd_values[-1])
         cvd_3ago = float(cvd_values[-4])
         cvd_change = cvd_now - cvd_3ago
@@ -1082,7 +1091,10 @@ class ScalpChannel(BaseChannel):
 
         ticks: List[Dict[str, Any]] = smc_data.get("recent_ticks", [])
         if not ticks:
-            return self._reject("missing_recent_ticks")
+            tick_state = self._dependency_state(smc_data, "recent_ticks")
+            if tick_state == "unavailable":
+                return self._reject("missing_recent_ticks")
+            return self._reject("recent_ticks_empty")
         buy_vol = sum(
             t.get("qty", 0) * t.get("price", 0)
             for t in ticks if not t.get("isBuyerMaker", True)
@@ -2530,7 +2542,7 @@ class ScalpChannel(BaseChannel):
 
         cvd_values = cvd_data if isinstance(cvd_data, list) else cvd_data.get("values", [])
         if len(cvd_values) < 20:
-            return self._reject("missing_cvd")
+            return self._reject("cvd_insufficient")
 
         closes = [float(c) for c in closes_raw]
         cvd_floats = [float(v) for v in cvd_values]

@@ -381,6 +381,20 @@ class TestWhaleMomentumObiRefinements:
         assert sig is not None
         assert sig.soft_penalty_total >= 10.0
 
+    def test_missing_ticks_uses_empty_reason_when_source_is_present_but_empty(self):
+        ch = ScalpChannel()
+        candles = {"1m": _make_candles(20)}
+        indicators = {"1m": _make_indicators(rsi_val=55.0)}
+        smc_data = {
+            "whale_alert": {"amount_usd": 1_500_000},
+            "volume_delta_spike": True,
+            "recent_ticks": [],
+            "__dependency_source_state": {"recent_ticks": "empty"},
+        }
+        sig = ch._evaluate_whale_momentum("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        assert sig is None
+        assert ch._active_no_signal_reason == "recent_ticks_empty"
+
     # ── Penalty stacking ─────────────────────────────────────────────────
 
     def test_marginal_obi_and_borderline_rsi_stack_penalties(self):

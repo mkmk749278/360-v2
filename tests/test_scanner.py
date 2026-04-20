@@ -2443,13 +2443,14 @@ async def test_gem_skips_mtf_gate():
 class TestArch3ScanContextWiring:
     """Verify that funding_rate and cvd are wired into smc_data by _build_scan_context()."""
 
-    def _make_oi_store(self, funding_rate=None, cvd_history=None):
+    def _make_oi_store(self, funding_rate=None, cvd_history=None, liquidation_clusters=None):
         """Create a mock order_flow_store with controllable funding_rate and CVD."""
         import numpy as np
         oi_store = MagicMock()
         oi_store.get_funding_rate = MagicMock(return_value=funding_rate)
         cvd_arr = np.array(cvd_history or [], dtype=np.float64)
         oi_store.get_cvd_history = MagicMock(return_value=cvd_arr)
+        oi_store.get_liquidation_clusters = MagicMock(return_value=liquidation_clusters or [])
         oi_store.get_oi_trend = MagicMock()
         oi_store.get_recent_liq_volume_usd = MagicMock(return_value=0.0)
         oi_store.get_cvd_divergence = MagicMock(return_value=None)
@@ -2556,6 +2557,65 @@ class TestArch3ScanContextWiring:
 
         assert len(captured_smc) >= 1
         assert captured_smc[0].get("funding_rate") is None
+
+    @pytest.mark.asyncio
+    async def test_liquidation_clusters_wired_into_smc_data_when_available(self):
+        """When order_flow_store exposes liquidation clusters, scanner attaches them."""
+        captured_smc: list = []
+
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+
+        def capture_and_return(**kwargs):
+            captured_smc.append(kwargs.get("smc_data", {}))
+            return []
+
+        channel.evaluate.side_effect = capture_and_return
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+        scanner.order_flow_store = self._make_oi_store(
+            liquidation_clusters=[{"price": 100.0, "volume_usd": 250000.0, "count": 2}]
+        )
+
+        with _common_gate_patches(scanner):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        assert len(captured_smc) >= 1
+        clusters = captured_smc[0].get("liquidation_clusters")
+        assert isinstance(clusters, list)
+        assert clusters
+        assert captured_smc[0]["__dependency_source_state"]["liquidation_clusters"] == "populated"
+
+    @pytest.mark.asyncio
+    async def test_order_book_snapshot_wired_from_book_ticker_cache(self):
+        """Scanner reuses bookTicker top-of-book snapshot as order_book dependency input."""
+        captured_smc: list = []
+
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+
+        def capture_and_return(**kwargs):
+            captured_smc.append(kwargs.get("smc_data", {}))
+            return []
+
+        channel.evaluate.side_effect = capture_and_return
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+        scanner._order_book_snapshot_cache["BTCUSDT"] = (
+            {"bids": [[100.0, 10.0]], "asks": [[100.1, 12.0]], "source": "book_ticker"},
+            time.monotonic() + 30.0,
+        )
+
+        with _common_gate_patches(scanner):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        assert len(captured_smc) >= 1
+        order_book = captured_smc[0].get("order_book")
+        assert isinstance(order_book, dict)
+        assert order_book.get("source") == "book_ticker"
+        assert captured_smc[0]["__dependency_source_state"]["order_book"] == "populated"
 
     @pytest.mark.asyncio
     async def test_no_wiring_when_order_flow_store_absent(self):

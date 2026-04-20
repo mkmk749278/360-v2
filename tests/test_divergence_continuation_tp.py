@@ -184,6 +184,24 @@ def _run_short(close: float = 100.0, candles: dict | None = None, cvd: list | No
     return sig, candles
 
 
+def test_divergence_continuation_marks_short_cvd_history_as_insufficient():
+    channel = ScalpChannel()
+    candles = _make_candles_long()
+    indicators = _make_indicators(close=100.0)
+    smc = _make_smc_data(cvd=[1.0, 2.0, 3.0], fvg_present=True)
+    sig = channel._evaluate_divergence_continuation(
+        symbol="TESTUSDT",
+        candles=candles,
+        indicators=indicators,
+        smc_data=smc,
+        spread_pct=0.001,
+        volume_24h_usd=50_000_000,
+        regime="TRENDING_UP",
+    )
+    assert sig is None
+    assert channel._active_no_signal_reason == "cvd_insufficient"
+
+
 # ---------------------------------------------------------------------------
 # 1. LONG — swing-based TP targets
 # ---------------------------------------------------------------------------
