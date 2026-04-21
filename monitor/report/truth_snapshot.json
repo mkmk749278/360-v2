@@ -1,0 +1,107 @@
+{
+  "channel": "360_SCALP",
+  "dependency_readiness": {},
+  "executive_summary": {
+    "overall_health": "stale",
+    "recommended_next_investigation_target": null,
+    "top_anomalies": [],
+    "top_promising_paths": []
+  },
+  "filters": {
+    "setup_filter": "",
+    "symbol_filter": ""
+  },
+  "generated_at": 1776753690,
+  "lifecycle_truth": {
+    "fast_failure_buckets": {
+      "under_120s": {
+        "count": 0,
+        "pct": 0.0
+      },
+      "under_180s": {
+        "count": 0,
+        "pct": 0.0
+      },
+      "under_30s": {
+        "count": 0,
+        "pct": 0.0
+      },
+      "under_60s": {
+        "count": 0,
+        "pct": 0.0
+      }
+    },
+    "median_create_to_dispatch_sec": null,
+    "median_create_to_first_breach_sec": null,
+    "median_create_to_terminal_sec": null,
+    "median_first_breach_to_terminal_sec": null,
+    "terminal_close_around_3m": {
+      "count": 0,
+      "pct": 0.0
+    }
+  },
+  "lookback_hours": 24,
+  "path_funnel_truth": {},
+  "post_correction_focus": {
+    "SR_FLIP_RETEST": {
+      "attempts": 0,
+      "average_pnl_pct": null,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "median_first_breach_sec": null,
+      "median_terminal_duration_sec": null,
+      "sl_rate": 0.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    },
+    "TREND_PULLBACK_EMA": {
+      "attempts": 0,
+      "average_pnl_pct": null,
+      "classification": "low-sample",
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "median_first_breach_sec": null,
+      "median_terminal_duration_sec": null,
+      "sl_rate": 0.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    }
+  },
+  "quality_by_setup": {},
+  "raw_extracts": {
+    "current_channel_funnel_counters": {},
+    "current_path_funnel_counters": {},
+    "previous_channel_funnel_counters": {},
+    "previous_path_funnel_counters": {},
+    "record_count_current_window": 0,
+    "record_count_previous_window": 0,
+    "record_count_scoped": 0
+  },
+  "recommended_operator_focus": {
+    "most_likely_bottleneck": null,
+    "most_promising_healthy_path": null,
+    "most_suspicious_degradation": null,
+    "suggested_next_investigation_target": null
+  },
+  "runtime_health": {
+    "health": "healthy",
+    "heartbeat_age_sec": 23,
+    "heartbeat_warning": false,
+    "latest_record_age_sec": null,
+    "overall": "stale",
+    "records_fresh": false,
+    "running": true,
+    "status": "running"
+  }
+}
