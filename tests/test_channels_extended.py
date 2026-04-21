@@ -507,3 +507,29 @@ class TestAnalystReasonMetadata:
         if sig is not None:
             assert sig.analyst_reason is not None
             assert "VWAP" in sig.analyst_reason
+
+
+def test_scalp_vwap_is_disabled(monkeypatch):
+    from src.channels.scalp_vwap import ScalpVWAPChannel
+
+    ch = ScalpVWAPChannel()
+    candles = {"5m": _make_candles(100, base=100.0, trend=0.1)}
+    indicators = {"5m": _make_indicators(adx_val=10, rsi_val=30)}
+
+    def _should_not_run(*args, **kwargs):
+        raise AssertionError("_evaluate_tf should not run when channel is code-disabled")
+
+    monkeypatch.setattr(ch, "_evaluate_tf", _should_not_run)
+    assert ch.evaluate("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000) is None
+
+
+def test_scalp_ichimoku_is_disabled(monkeypatch):
+    ch = ScalpIchimokuChannel()
+    candles = {"5m": _make_candles(100, base=100.0, trend=0.2)}
+    indicators = {"5m": _make_indicators(adx_val=25, rsi_val=55)}
+
+    def _should_not_run(*args, **kwargs):
+        raise AssertionError("_evaluate_tf should not run when channel is code-disabled")
+
+    monkeypatch.setattr(ch, "_evaluate_tf", _should_not_run)
+    assert ch.evaluate("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000) is None

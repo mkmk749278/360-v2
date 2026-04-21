@@ -45,6 +45,17 @@ class ScalpIchimokuChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
+        # ── Intentionally disabled ────────────────────────────────────────────
+        # Standard Ichimoku settings (Tenkan=9, Kijun=26, Senkou B=52) are
+        # designed for daily charts. On 5m: Kijun-sen = 2.2h, Senkou B = 4.3h
+        # projected 2.2h forward. The cloud represents structure 4–6 hours old
+        # on a timeframe where setup windows are 5–30 minutes. TK crosses on
+        # 5m are 45-min vs 2.2-hour MA crossovers — not institutional signals.
+        # Re-enable only after redesign with 5m-appropriate period settings or
+        # proper higher-timeframe cloud anchoring.
+        # Config: CHANNEL_SCALP_ICHIMOKU_ENABLED=false / rollout_state=disabled
+        # ─────────────────────────────────────────────────────────────────────
+        return None
         # Try 5m first, fall back to 15m
         for tf in ("5m", "15m"):
             sig = self._evaluate_tf(

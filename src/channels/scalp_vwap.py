@@ -51,6 +51,17 @@ class ScalpVWAPChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
+        # ── Intentionally disabled ────────────────────────────────────────────
+        # Rolling 50-candle VWAP is not session-anchored VWAP.
+        # Institutional mean-reversion VWAP must be anchored to a structural
+        # event (session open, significant swing high/low). A rolling window
+        # drifts continuously and does not represent an institutional reference
+        # price; signals around it are statistically-smoothed noise, not
+        # institutional mean-reversion plays.
+        # Re-enable only after implementing true session-open VWAP anchoring.
+        # Config: CHANNEL_SCALP_VWAP_ENABLED=false / rollout_state=disabled
+        # ─────────────────────────────────────────────────────────────────────
+        return None
         # Regime gate: only valid in RANGING or QUIET
         # Note: regime_result is not directly available in evaluate(); the
         # scanner's regime gating happens upstream.  We rely on the scanner
