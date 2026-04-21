@@ -1,0 +1,30 @@
+{
+  "emissions_delta": 0,
+  "enabled": true,
+  "fast_failures_delta": 0,
+  "gating_delta": 910,
+  "no_generation_delta": 91520,
+  "post_correction_window_delta": {
+    "SR_FLIP_RETEST": {
+      "emitted_delta": 0,
+      "geometry_changed_delta": 0,
+      "geometry_preserved_delta": 5,
+      "geometry_rejected_delta": 0,
+      "median_first_breach_delta_sec": 0.0,
+      "median_terminal_delta_sec": 0.0,
+      "sl_rate_delta": 0.0,
+      "win_rate_delta": 0.0
+    },
+    "TREND_PULLBACK_EMA": {
+      "emitted_delta": 0,
+      "geometry_changed_delta": 0,
+      "geometry_preserved_delta": 0,
+      "geometry_rejected_delta": 0,
+      "median_first_breach_delta_sec": 0.0,
+      "median_terminal_delta_sec": 0.0,
+      "sl_rate_delta": 0.0,
+      "win_rate_delta": 0.0
+    }
+  },
+  "quality_changes": {}
+}
