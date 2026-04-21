@@ -224,22 +224,44 @@ def test_scalp_channel_tracks_exception_non_generation_reason(monkeypatch):
     def _raise_boom(*args, **kwargs):
         raise RuntimeError("boom")
 
+    def _return_none(*args, **kwargs):
+        return None
+
     monkeypatch.setattr(ch, "_evaluate_standard", _raise_boom)
+    for method_name in (
+        "_evaluate_trend_pullback",
+        "_evaluate_liquidation_reversal",
+        "_evaluate_whale_momentum",
+        "_evaluate_volume_surge_breakout",
+        "_evaluate_breakdown_short",
+        "_evaluate_opening_range_breakout",
+        "_evaluate_sr_flip_retest",
+        "_evaluate_funding_extreme",
+        "_evaluate_quiet_compression_break",
+        "_evaluate_divergence_continuation",
+        "_evaluate_continuation_liquidity_sweep",
+        "_evaluate_post_displacement_continuation",
+        "_evaluate_failed_auction_reclaim",
+    ):
+        monkeypatch.setattr(ch, method_name, _return_none)
 
-    with pytest.raises(RuntimeError):
-        ch.evaluate(
-            "BTCUSDT",
-            {"5m": _candles()},
-            {"5m": {}},
-            {},
-            0.01,
-            10_000_000,
-        )
+    sigs = ch.evaluate(
+        "BTCUSDT",
+        {"5m": _candles()},
+        {"5m": {}},
+        {},
+        0.01,
+        10_000_000,
+    )
 
+    assert sigs == []
     telemetry = ch.consume_generation_telemetry()
     assert telemetry["attempts"]["STANDARD"] == 1
     assert telemetry["no_signal"]["STANDARD"] == 1
     assert telemetry["no_signal_reason"]["STANDARD:exception"] == 1
+    assert sum(telemetry["attempts"].values()) == 14
+    assert telemetry["attempts"]["FUNDING_EXTREME"] == 1
+    assert telemetry["no_signal_reason"]["FUNDING_EXTREME:none"] == 1
 
 
 def test_scalp_channel_tracks_explicit_no_signal_reason(monkeypatch):

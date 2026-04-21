@@ -11,6 +11,7 @@ Risk    : SL 0.05–0.1 %, TP1 0.5–1R, TP2 1–1.5R, TP3 optional 20 %, Traili
 from __future__ import annotations
 
 import os
+import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -28,6 +29,9 @@ from src.filters import (
 )
 from src.mtf import mtf_gate_scalp_standard
 from src.smc import Direction
+from src.utils import get_logger
+
+log = get_logger("scalp")
 
 # HTF EMA rejection threshold: only reject if price is within this % of EMA200
 # AND moving toward it. 0.15% is more permissive than the old 0.05% — valid
@@ -402,23 +406,31 @@ class ScalpChannel(BaseChannel):
             self._active_generation_path = _path
             self._active_no_signal_reason = None
             try:
-                sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
-            except Exception:
-                self._generation_telemetry["no_signal"][_path] += 1
-                _reason = self._active_no_signal_reason or "exception"
-                self._generation_telemetry["no_signal_reason"][f"{_path}:{_reason}"] += 1
-                raise
-            if sig is not None:
-                self._generation_telemetry["generated"][_path] += 1
-                # Apply kill zone check and mark reduced-conviction signals
-                sig_with_kz = self._apply_kill_zone_note(sig, profile=profile)
-                results.append(sig_with_kz)
-            else:
-                self._generation_telemetry["no_signal"][_path] += 1
-                _reason = self._active_no_signal_reason or "none"
-                self._generation_telemetry["no_signal_reason"][f"{_path}:{_reason}"] += 1
-            self._active_generation_path = None
-            self._active_no_signal_reason = None
+                try:
+                    sig = evaluator(symbol, candles, indicators, smc_data, spread_pct, volume_24h_usd, regime)
+                except Exception as exc:
+                    self._generation_telemetry["no_signal"][_path] += 1
+                    self._generation_telemetry["no_signal_reason"][f"{_path}:exception"] += 1
+                    log.error(
+                        "ScalpChannel evaluator {} raised for {}: {}\n{}",
+                        _path,
+                        symbol,
+                        exc,
+                        traceback.format_exc(),
+                    )
+                    continue
+                if sig is not None:
+                    self._generation_telemetry["generated"][_path] += 1
+                    # Apply kill zone check and mark reduced-conviction signals
+                    sig_with_kz = self._apply_kill_zone_note(sig, profile=profile)
+                    results.append(sig_with_kz)
+                else:
+                    self._generation_telemetry["no_signal"][_path] += 1
+                    _reason = self._active_no_signal_reason or "none"
+                    self._generation_telemetry["no_signal_reason"][f"{_path}:{_reason}"] += 1
+            finally:
+                self._active_generation_path = None
+                self._active_no_signal_reason = None
         return results
 
     # ------------------------------------------------------------------
