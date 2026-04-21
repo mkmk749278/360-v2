@@ -1264,6 +1264,7 @@ class TestSrFlipRetestRefinements:
         assert sig is not None
         assert sig.setup_class == "SR_FLIP_RETEST"
         assert sig.direction == Direction.LONG
+        assert sig.sr_flip_level is not None
 
     def test_short_signal_fires_on_valid_retest(self):
         """Valid SHORT flip retest should produce a SR_FLIP_RETEST signal."""
@@ -1272,6 +1273,7 @@ class TestSrFlipRetestRefinements:
         assert sig is not None
         assert sig.setup_class == "SR_FLIP_RETEST"
         assert sig.direction == Direction.SHORT
+        assert sig.sr_flip_level is not None
 
     # ── Flip detection window (extended from 5 to 8 candles) ─────────────
 

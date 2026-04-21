@@ -235,6 +235,9 @@ class TestBuildChannelSignalIntegration:
         sig = self._simple_signal()
         assert sig is not None
         assert sig.stop_loss > 0
+        assert sig.sr_flip_level is None
+        assert sig.pdc_breakout_level is None
+        assert sig.far_reclaim_level is None
 
     def test_with_candle_data_adjusts_sl_tp(self):
         """When candle data is provided, structural adjustment is attempted."""

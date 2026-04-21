@@ -138,6 +138,15 @@ class Signal:
     # Level-2 order book snapshot attached by the scanner for OBI filtering.
     # Format: {"bids": [[price, qty], ...], "asks": [[price, qty], ...]}
     order_book: Optional[Dict[str, List[Any]]] = None
+    # ---- Structural path metadata (path-specific anchors) ----
+    # SR_FLIP_RETEST: the flipped S/R level that was broken and retested.
+    sr_flip_level: Optional[float] = None
+    # POST_DISPLACEMENT_CONTINUATION: the consolidation high (LONG) or low (SHORT)
+    # that price broke above/below to confirm re-acceleration.
+    pdc_breakout_level: Optional[float] = None
+    # FAILED_AUCTION_RECLAIM: the struct level (prior swing high/low) that was
+    # broken-then-recovered; used as the structural anchor by execution quality checks.
+    far_reclaim_level: Optional[float] = None
     # Best TP level reached during this signal's lifetime (0 = none, 1 = TP1, 2 = TP2)
     best_tp_hit: int = 0
     # PnL % frozen at the moment the highest TP was hit (used for signal quality stats)
