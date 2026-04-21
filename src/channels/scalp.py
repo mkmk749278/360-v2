@@ -2315,8 +2315,10 @@ class ScalpChannel(BaseChannel):
                 if sl_dist is None or liq_dist < sl_dist:
                     sl_dist = liq_dist
 
+        _sl_degraded = False
         if sl_dist is None or sl_dist <= 0:
             sl_dist = atr_val * 1.5
+            _sl_degraded = True
 
         sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
         if direction == Direction.LONG and sl >= close:
@@ -2367,6 +2369,11 @@ class ScalpChannel(BaseChannel):
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
+        if _sl_degraded:
+            _note = "SL: ATR×1.5 fallback (liquidation clusters absent — thesis-aligned SL unavailable)"
+            sig.execution_note = (getattr(sig, "execution_note", "") + "; " + _note).lstrip("; ")
+            sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + 5.0
+            sig.soft_gate_flags = (getattr(sig, "soft_gate_flags", "") + ",LIQ_CLUSTER_ABSENT").lstrip(",")
         sig.confidence = min(100.0, sig.confidence + 6.0)
         return sig
 
@@ -2826,10 +2833,12 @@ class ScalpChannel(BaseChannel):
             return self._reject("sweeps_not_detected")
 
         # Sweep recency gate: sweep must be within the last _CLS_SWEEP_WINDOW
-        # closed candles.  Staleer sweeps lose their structural relevance.
+        # closed candles.  Staler sweeps lose their structural relevance.
         sweep_index = getattr(trend_sweep, "index", None)
-        if sweep_index is None or sweep_index < -_CLS_SWEEP_WINDOW:
-            return self._reject("sweeps_not_detected")
+        if sweep_index is None:
+            return self._reject("sweep_index_missing")
+        if sweep_index < -_CLS_SWEEP_WINDOW:
+            return self._reject("sweep_too_old")
 
         # Sweep level extraction
         sweep_level: Optional[float] = None

@@ -2012,10 +2012,15 @@ class TestContinuationLiquiditySweep:
 
     def test_no_sweep_blocked(self):
         """No sweeps in smc_data → hard reject."""
+        ch = ScalpChannel()
         candles = {"5m": _make_cls_candles_long(close_price=100.5)}
         smc_data = {"sweeps": []}
-        sig = self._call_long(candles, _cls_indicators_long(), smc_data)
+        sig = ch._evaluate_continuation_liquidity_sweep(
+            "BTCUSDT", candles, _cls_indicators_long(), smc_data,
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="TRENDING_UP",
+        )
         assert sig is None, "Missing sweep must hard-block CLS."
+        assert ch._active_no_signal_reason == "sweeps_not_detected"
 
     def test_wrong_direction_sweep_blocked(self):
         """Sweep direction opposite to EMA trend → no matching sweep → hard reject."""
@@ -2076,6 +2081,36 @@ class TestContinuationLiquiditySweep:
         smc_data = {"sweeps": [sweep]}
         sig = self._call_long(candles, _cls_indicators_long(), smc_data)
         assert sig is None, "Sweep at index=-11 must be hard-rejected (outside window)."
+
+    def test_cls_sweep_index_missing_token(self):
+        """Sweep object without `.index` must reject as model incompatibility token."""
+        class SweepWithoutIndex:
+            def __init__(self):
+                self.direction = Direction.LONG
+                self.sweep_level = 99.0
+
+        ch = ScalpChannel()
+        candles = {"5m": _make_cls_candles_long(close_price=100.5)}
+        smc_data = {"sweeps": [SweepWithoutIndex()]}
+        sig = ch._evaluate_continuation_liquidity_sweep(
+            "BTCUSDT", candles, _cls_indicators_long(), smc_data,
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "sweep_index_missing"
+
+    def test_cls_sweep_too_old_token(self):
+        """Sweep outside recency window must reject with `sweep_too_old` token."""
+        ch = ScalpChannel()
+        candles = {"5m": _make_cls_candles_long(close_price=100.5)}
+        sweep = _cls_sweep_long(sweep_level=99.0, sweep_index=-15)
+        smc_data = {"sweeps": [sweep]}
+        sig = ch._evaluate_continuation_liquidity_sweep(
+            "BTCUSDT", candles, _cls_indicators_long(), smc_data,
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "sweep_too_old"
 
     # ── Reclaim gate ──────────────────────────────────────────────────────
 
