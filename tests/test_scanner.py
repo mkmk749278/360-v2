@@ -1894,6 +1894,74 @@ class TestMTFGateInScanner:
         assert sum(scanner_prepared.values()) == 1
 
     @pytest.mark.asyncio
+    async def test_confidence_gate_reclassifies_watchlist_after_post_score_penalty(self):
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=65.0)
+        raw_sig = _make_signal(channel="360_SCALP")
+        raw_sig.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
+        channel.evaluate.return_value = raw_sig
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+
+        score = {
+            "total": 68.0,
+            "smc": 20.0,
+            "regime": 12.0,
+            "volume": 10.0,
+            "indicators": 12.0,
+            "patterns": 8.0,
+            "mtf": 6.0,
+            "thesis_adj": 0.0,
+        }
+        with _common_gate_patches(scanner, [
+            patch("src.scanner._scoring_engine.score", return_value=score),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+            patch("src.scanner._stat_filter.check", return_value=(True, 53.0, "stat_penalty")),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_awaited_once()
+        emitted_sig = signal_queue.put.await_args.args[0]
+        assert emitted_sig.signal_tier == "WATCHLIST"
+        assert scanner._suppression_counters[
+            "confidence_gate:kept:360_SCALP:other:watchlist_tier_keep"
+        ] == 1
+
+    @pytest.mark.asyncio
+    async def test_confidence_gate_telemetry_tracks_filtered_min_confidence(self):
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=65.0)
+        raw_sig = _make_signal(channel="360_SCALP")
+        raw_sig.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
+        raw_sig.soft_penalty_total = 25.0
+        channel.evaluate.return_value = raw_sig
+        signal_queue = MagicMock()
+        signal_queue.put = AsyncMock(return_value=True)
+        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
+
+        score = {
+            "total": 68.0,
+            "smc": 20.0,
+            "regime": 12.0,
+            "volume": 10.0,
+            "indicators": 12.0,
+            "patterns": 8.0,
+            "mtf": 6.0,
+            "thesis_adj": 0.0,
+        }
+        with _common_gate_patches(scanner, [
+            patch("src.scanner._scoring_engine.score", return_value=score),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+
+        signal_queue.put.assert_not_awaited()
+        assert scanner._suppression_counters[
+            "confidence_gate:filtered:360_SCALP:other:min_confidence"
+        ] == 1
+
+    @pytest.mark.asyncio
     async def test_funnel_uses_explicit_prepare_reject_stage(self):
         scanner, signal_queue = self._scanner_and_queue()
         raw_sig = _make_signal(channel="360_SCALP")

@@ -3645,6 +3645,12 @@ class Scanner:
             legacy_confidence=sig.confidence,
             cross_verified=cross_verified,
         )
+        _composite_score_before_penalty: Optional[float] = None
+        _confidence_before_soft_penalty: Optional[float] = None
+        _feedback_adjustment: float = 0.0
+        _stat_filter_delta: float = 0.0
+        _pair_analysis_penalty: float = 0.0
+        _regime_transition_boost: float = 0.0
         sig.setup_class = setup.setup_class.value
         # PR-01: preserve evaluator-authored analyst_reason; only apply the generic
         # scored thesis when the evaluator did not set a richer path-specific reason.
@@ -3662,6 +3668,7 @@ class Scanner:
             setup_score.components, chan_name, setup.setup_class.value
         )
         if fb_adj != 0.0:
+            _feedback_adjustment = fb_adj
             sig.confidence += fb_adj
             log.debug(
                 "Feedback adjustment for {} {} {}: {:+.1f} → {:.1f}",
@@ -3874,6 +3881,7 @@ class Scanner:
             # Merge new dimension scores into component_scores (preserves existing keys)
             sig.component_scores.update(_score_result)
             sig.confidence = _score_result["total"]
+            _composite_score_before_penalty = _score_result["total"]
             _pre_penalty_tier_for_migration = classify_signal_tier(sig.confidence)
             self._record_scoring_distribution(
                 phase="pre_penalty",
@@ -3939,6 +3947,7 @@ class Scanner:
         # was deducted, leaving evaluator-authored penalties un-applied and allowing signals
         # with inflated pre-penalty confidence to pass downstream floor and tier gates.
         _total_soft_penalty = sig.soft_penalty_total  # evaluator-authored + scanner-gate combined
+        _confidence_before_soft_penalty = sig.confidence
         if _total_soft_penalty > 0.0:
             sig.confidence -= _total_soft_penalty
             sig.confidence = self._clamp_confidence(sig.confidence)
@@ -3987,6 +3996,7 @@ class Scanner:
                     would_be_confidence=sig.confidence,
                 ))
                 return _reject("filtered", cross_verified)
+            _stat_filter_delta = _sf_conf - sig.confidence
             sig.confidence = _sf_conf
             if "penalty" in _sf_reason:
                 _existing_flags = sig.soft_gate_flags or ""
@@ -4022,6 +4032,7 @@ class Scanner:
                     return _reject("filtered", cross_verified)
                 if _pa_quality.quality_label == "WEAK":
                     _pa_penalty = 8.0
+                    _pair_analysis_penalty = _pa_penalty
                     sig.confidence = max(0.0, sig.confidence - _pa_penalty)
                     _existing_flags = sig.soft_gate_flags or ""
                     sig.soft_gate_flags = (
@@ -4103,11 +4114,63 @@ class Scanner:
 
         min_conf = self.confidence_overrides.get(chan_name, chan.config.min_confidence)
 
+        def _record_confidence_gate_decision(
+            *,
+            decision: str,
+            reason: str,
+            threshold: float,
+        ) -> None:
+            """Emit confidence-gate telemetry counters and structured decision logs."""
+            self._suppression_counters[
+                f"confidence_gate:{decision}:{chan_name}:{_setup_family}:{reason}"
+            ] += 1
+            _raw_conf_src = getattr(sig, "pre_ai_confidence", None)
+            _raw_conf = float(_raw_conf_src) if _raw_conf_src is not None else float("nan")
+            _composite_conf = (
+                float(_composite_score_before_penalty)
+                if _composite_score_before_penalty is not None
+                else float(sig.confidence)
+            )
+            _pre_soft_conf = (
+                float(_confidence_before_soft_penalty)
+                if _confidence_before_soft_penalty is not None
+                else float(sig.confidence)
+            )
+            log.info(
+                "confidence_gate {} {} [{}]: decision={} reason={} raw={:.1f} "
+                "composite={:.1f} pre_soft={:.1f} final={:.1f} threshold={:.1f} "
+                "penalties(eval={:.1f},gate={:.1f},total={:.1f},pair_analysis={:.1f}) "
+                "adjustments(feedback={:+.1f},stat_filter={:+.1f},regime_transition={:+.1f}) "
+                "components(market={:.1f},execution={:.1f},risk={:.1f},thesis_adj={:.1f})",
+                symbol,
+                chan_name,
+                _setup_class_name,
+                decision,
+                reason,
+                _raw_conf,
+                _composite_conf,
+                _pre_soft_conf,
+                sig.confidence,
+                threshold,
+                _evaluator_penalty,
+                soft_penalty,
+                _total_soft_penalty,
+                _pair_analysis_penalty,
+                _feedback_adjustment,
+                _stat_filter_delta,
+                _regime_transition_boost,
+                float(sig.component_scores.get("market", 0.0)),
+                float(sig.component_scores.get("execution", 0.0)),
+                float(sig.component_scores.get("risk", 0.0)),
+                float(sig.component_scores.get("thesis_adj", 0.0)),
+            )
+
         # Regime transition boost (item 15): if regime just changed in the direction
         # of this signal, apply a confidence boost (high-probability entry window).
         try:
             _trans_boost = self.regime_detector.get_transition_boost(sig.direction.value)
             if _trans_boost > 0.0:
+                _regime_transition_boost = _trans_boost
                 sig.confidence = min(100.0, sig.confidence + _trans_boost)
                 sig.soft_gate_flags = (
                     sig.soft_gate_flags + f",REGIME_TRANSITION:+{_trans_boost:.0f}"
@@ -4137,6 +4200,11 @@ class Scanner:
                     symbol, chan_name, sig.confidence, _QUIET_DIVERGENCE_MIN_CONFIDENCE,
                 )
             elif sig.confidence < QUIET_SCALP_MIN_CONFIDENCE:
+                _record_confidence_gate_decision(
+                    decision="filtered",
+                    reason="quiet_scalp_min_confidence",
+                    threshold=QUIET_SCALP_MIN_CONFIDENCE,
+                )
                 log.info(
                     "QUIET_SCALP_BLOCK {} {} conf={:.1f} < min={:.1f}",
                     symbol, chan_name, sig.confidence, QUIET_SCALP_MIN_CONFIDENCE,
@@ -4160,10 +4228,16 @@ class Scanner:
                         symbol, chan_name, _new_count, _CONF_FAIL_COOLDOWN_S,
                     )
                 return _reject("filtered", cross_verified)
+        # Reclassify after all post-score confidence adjustments (stat filter, pair-analysis
+        # penalties, transition boost) so WATCHLIST/floor decisions use current confidence.
+        sig.signal_tier = classify_signal_tier(sig.confidence)
         # WATCHLIST tier: signals with confidence 50-64 are kept as WATCHLIST
         # instead of being discarded.  Only the SCALP channel family generates
         # watchlist alerts; SWING and SPOT require higher confidence.
         _watchlist_confidence = 50.0
+        _market_component_floor = 12.0
+        _execution_component_floor = 10.0
+        _risk_component_floor = 10.0
         if (
             sig.signal_tier == "WATCHLIST"
             and chan_name in _SCALP_CHANNELS
@@ -4171,14 +4245,35 @@ class Scanner:
         ):
             # Keep as WATCHLIST — the router will dispatch this to the free
             # channel only (zone-alert preview, not a paid active trade).
+            _record_confidence_gate_decision(
+                decision="kept",
+                reason="watchlist_tier_keep",
+                threshold=_watchlist_confidence,
+            )
             self._populate_signal_context(sig, volume_24h, ctx)
             return sig, cross_verified
         if (
             sig.confidence < min_conf
-            or sig.component_scores.get("market", 0.0) < 12.0
-            or sig.component_scores.get("execution", 0.0) < 10.0
-            or sig.component_scores.get("risk", 0.0) < 10.0
+            or sig.component_scores.get("market", 0.0) < _market_component_floor
+            or sig.component_scores.get("execution", 0.0) < _execution_component_floor
+            or sig.component_scores.get("risk", 0.0) < _risk_component_floor
         ):
+            _reason = "min_confidence"
+            _threshold = float(min_conf)
+            if sig.component_scores.get("market", 0.0) < _market_component_floor:
+                _reason = "market_component_floor"
+                _threshold = _market_component_floor
+            elif sig.component_scores.get("execution", 0.0) < _execution_component_floor:
+                _reason = "execution_component_floor"
+                _threshold = _execution_component_floor
+            elif sig.component_scores.get("risk", 0.0) < _risk_component_floor:
+                _reason = "risk_component_floor"
+                _threshold = _risk_component_floor
+            _record_confidence_gate_decision(
+                decision="filtered",
+                reason=_reason,
+                threshold=_threshold,
+            )
             self.suppression_tracker.record(SuppressionEvent(
                 symbol=symbol,
                 channel=chan_name,
@@ -4189,6 +4284,11 @@ class Scanner:
             return _reject("filtered", cross_verified)
         # Reset failed-detection counter — this symbol+channel produced a valid signal
         self._conf_fail_tracker.pop((symbol, chan_name), None)
+        _record_confidence_gate_decision(
+            decision="kept",
+            reason="min_confidence_pass",
+            threshold=float(min_conf),
+        )
         self._populate_signal_context(sig, volume_24h, ctx)
         return sig, cross_verified
 
