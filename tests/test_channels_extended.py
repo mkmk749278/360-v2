@@ -524,6 +524,8 @@ def test_scalp_vwap_is_disabled(monkeypatch):
 
 
 def test_scalp_ichimoku_is_disabled(monkeypatch):
+    from src.channels.scalp_ichimoku import ScalpIchimokuChannel
+
     ch = ScalpIchimokuChannel()
     candles = {"5m": _make_candles(100, base=100.0, trend=0.2)}
     indicators = {"5m": _make_indicators(adx_val=25, rsi_val=55)}
