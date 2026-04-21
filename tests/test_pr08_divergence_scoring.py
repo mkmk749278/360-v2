@@ -5,8 +5,8 @@ actual CVD-divergence evidence faithfully and that unrelated paths are
 unaffected.
 
 Test surface:
-1. Evaluator propagates confirmed cvd_divergence label to smc_data.
-2. Evaluator propagates normalised cvd_divergence_strength to smc_data.
+1. Evaluator keeps shared smc_data cvd_divergence keys untouched.
+2. Evaluator preserves local divergence evidence in signal analyst_reason.
 3. Scorer gives DIVERGENCE_CONTINUATION a higher score when divergence
    evidence is present (vs None) — the +4-pt aligned bonus now fires.
 4. Divergence strength raises thesis_adj above the base aligned bonus.
@@ -98,12 +98,20 @@ def _make_indicators_long(
     }
 
 
+def _extract_strength(reason: str) -> float:
+    """Extract divergence strength from analyst_reason text."""
+    marker = " CVD divergence (strength="
+    if marker not in reason or not reason.endswith(")"):
+        raise AssertionError(f"Expected strength marker in analyst_reason, got {reason!r}")
+    return float(reason.split(marker, 1)[1][:-1])
+
+
 # ---------------------------------------------------------------------------
 # Section 1: Evaluator evidence propagation
 # ---------------------------------------------------------------------------
 
 class TestEvaluatorPropagation:
-    """The evaluator must write cvd_divergence[_strength] to smc_data."""
+    """The evaluator must preserve divergence details on the signal, not shared smc_data."""
 
     def _run_long(self, close: float = 100.0):
         """Run _evaluate_divergence_continuation for a LONG setup and return
@@ -129,32 +137,36 @@ class TestEvaluatorPropagation:
         sig, _ = self._run_long()
         assert sig is not None, "Expected a signal for valid LONG divergence setup"
 
-    def test_long_writes_bullish_cvd_divergence(self):
-        """Evaluator writes 'BULLISH' to smc_data['cvd_divergence'] for LONG."""
+    def test_long_preserves_shared_smc_data_divergence_keys(self):
+        """Evaluator must not mutate global smc_data divergence keys for LONG."""
         sig, smc = self._run_long()
         if sig is None:
             pytest.skip("Signal did not fire — cannot test propagation")
-        assert smc.get("cvd_divergence") == "BULLISH", (
-            f"Expected smc_data['cvd_divergence'] == 'BULLISH', got {smc.get('cvd_divergence')!r}"
-        )
+        assert "cvd_divergence" not in smc
+        assert "cvd_divergence_strength" not in smc
 
-    def test_long_writes_nonzero_strength(self):
-        """Evaluator writes cvd_divergence_strength > 0 when a price dip exists."""
-        sig, smc = self._run_long()
+    def test_long_sets_analyst_reason_with_label_and_strength(self):
+        """Signal analyst_reason includes local divergence label and strength."""
+        sig, _ = self._run_long()
         if sig is None:
             pytest.skip("Signal did not fire — cannot test propagation")
-        strength = smc.get("cvd_divergence_strength", 0.0)
+        assert sig.analyst_reason is not None
+        assert "Hidden BULLISH CVD divergence" in sig.analyst_reason
+        strength = _extract_strength(sig.analyst_reason)
         assert strength > 0.0, (
-            "cvd_divergence_strength must be > 0 when evaluator detects a measurable price dip"
+            "Divergence strength must be > 0 when evaluator detects a measurable price dip"
         )
         assert strength <= 1.0, (
-            f"cvd_divergence_strength must be ≤ 1.0, got {strength}"
+            f"Divergence strength must be ≤ 1.0, got {strength}"
         )
 
     def test_strength_reflects_price_drop_magnitude(self):
         """A larger price drop produces a higher divergence strength."""
         # Close = 100; dip to ~97 → ~3% drop → strength ≈ 1.0
-        _, smc_big = self._run_long(close=100.0)
+        sig_big, _ = self._run_long(close=100.0)
+        if sig_big is None:
+            pytest.skip("Big-dip signal did not fire — cannot test magnitude")
+        assert sig_big.analyst_reason is not None
         # Smaller dip: build a candle set with only a 1.5% dip
         channel = ScalpChannel()
         close_small = 100.0
@@ -181,8 +193,9 @@ class TestEvaluatorPropagation:
         )
         if sig_s is None:
             pytest.skip("Small-dip signal did not fire — skipping magnitude comparison")
-        big_strength = smc_big.get("cvd_divergence_strength", 0.0)
-        small_strength = smc_small.get("cvd_divergence_strength", 0.0)
+        assert sig_s.analyst_reason is not None
+        big_strength = _extract_strength(sig_big.analyst_reason)
+        small_strength = _extract_strength(sig_s.analyst_reason)
         assert big_strength >= small_strength, (
             f"Larger price drop should produce >= strength: big={big_strength}, small={small_strength}"
         )

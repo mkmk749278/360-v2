@@ -2602,13 +2602,6 @@ class ScalpChannel(BaseChannel):
             _div_strength = min(1.0, _price_rise_pct / 0.03)
             _div_label = "BEARISH"
 
-        # Propagate confirmed divergence evidence to smc_data so the downstream
-        # composite scorer (PR-09) sees the evaluator's actual thesis signal.
-        # Only overwrite when the evaluator's local detection is definitive — the
-        # evaluator passes all checks above only when divergence is confirmed.
-        smc_data["cvd_divergence"] = _div_label
-        smc_data["cvd_divergence_strength"] = _div_strength
-
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
         ema21 = ind.get("ema21_last")
@@ -2733,6 +2726,7 @@ class ScalpChannel(BaseChannel):
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
+        sig.analyst_reason = f"Hidden {_div_label} CVD divergence (strength={_div_strength:.2f})"
         return sig
 
     # ------------------------------------------------------------------
