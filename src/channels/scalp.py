@@ -451,7 +451,7 @@ class ScalpChannel(BaseChannel):
     ) -> Optional[Signal]:
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 50:
-            return None
+            return self._reject("insufficient_candles")
 
         ind = indicators.get("5m", {})
         profile = smc_data.get("pair_profile")
@@ -463,18 +463,18 @@ class ScalpChannel(BaseChannel):
         if regime and regime.upper() in ("RANGING", "QUIET"):
             adx_min_effective = max(_ADX_RANGING_FLOOR, thresholds["adx_min"] * _ADX_RANGING_MULTIPLIER)
         if not check_adx(ind.get("adx_last"), adx_min_effective):
-            return None
+            return self._reject("adx_reject")
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime, profile=profile):
-            return None
+            return self._reject("basic_filters_failed")
 
         ema_fast = ind.get("ema9_last")
         ema_slow = ind.get("ema21_last")
         if ema_fast is None or ema_slow is None:
-            return None
+            return self._reject("ema_alignment_reject")
 
         sweeps = smc_data.get("sweeps", [])
         if not sweeps:
-            return None
+            return self._reject("sweeps_not_detected")
         sweep = sweeps[0]
 
         close = float(m5["close"][-1])
@@ -482,7 +482,7 @@ class ScalpChannel(BaseChannel):
 
         mom = ind.get("momentum_last")
         if mom is None:
-            return None
+            return self._reject("momentum_reject")
         # ATR-adaptive momentum threshold: scales with each pair's volatility
         # BTC (ATR ~0.3%) → threshold ~0.15%, DOGE (ATR ~0.8%) → threshold ~0.30%
         atr_pct = (atr_val / close) * 100.0 if close > 0 else 0.15
@@ -492,7 +492,7 @@ class ScalpChannel(BaseChannel):
             base_momentum *= profile.momentum_threshold_mult
         momentum_threshold = base_momentum
         if abs(mom) < momentum_threshold:
-            return None
+            return self._reject("momentum_reject")
 
         # Momentum persistence: require momentum above threshold for consecutive
         # candles to avoid whipsaws where a single candle briefly spikes momentum.
@@ -500,7 +500,7 @@ class ScalpChannel(BaseChannel):
         persist = profile.momentum_persist_candles if profile else 2
         if mom_arr is not None and len(mom_arr) >= persist:
             if not all(abs(float(mom_arr[-i])) >= momentum_threshold for i in range(1, persist + 1)):
-                return None  # Momentum not persistent — likely whipsaw
+                return self._reject("momentum_reject")  # Momentum not persistent — likely whipsaw
 
         direction = sweep.direction
 
@@ -509,15 +509,15 @@ class ScalpChannel(BaseChannel):
         if rsi_val is not None and profile is not None:
             from src.filters import check_rsi
             if not check_rsi(rsi_val, thresholds["rsi_ob"], thresholds["rsi_os"], direction.value):
-                return None
+                return self._reject("rsi_reject")
         elif not check_rsi_regime(rsi_val, direction=direction.value, regime=regime):
-            return None
+            return self._reject("rsi_reject")
 
         # Momentum must agree with sweep direction
         if direction == Direction.LONG and mom < 0:
-            return None
+            return self._reject("momentum_reject")
         if direction == Direction.SHORT and mom > 0:
-            return None
+            return self._reject("momentum_reject")
 
         pair_tier = profile.tier if profile else "MIDCAP"
         if not check_ema_alignment_adaptive(
@@ -525,7 +525,7 @@ class ScalpChannel(BaseChannel):
             atr_val=atr_val, close=close,
             regime=regime, pair_tier=pair_tier,
         ):
-            return None
+            return self._reject("ema_alignment_reject")
 
         # MACD confirmation gate (PR_04)
         ind_macd_last = ind.get("macd_histogram_last")
@@ -535,13 +535,13 @@ class ScalpChannel(BaseChannel):
             ind_macd_last, ind_macd_prev, direction.value, regime=regime, strict=strict_macd
         )
         if not macd_ok:
-            return None  # Hard reject in strict mode
+            return self._reject("macd_reject")  # Hard reject in strict mode
 
         # MTF gate — 1h EMA/RSI must support the 5m signal direction (PR_06)
         indicators_1h = indicators.get("1h", {})
         mtf_ok, mtf_reason, mtf_adj = mtf_gate_scalp_standard(indicators_1h, direction.value, regime)
         if not mtf_ok:
-            return None
+            return self._reject("mtf_reject")
 
         # HTF EMA200 rejection gate: reject entry if price is within 0.15% of EMA200
         # AND moving toward it (not if it just touched and bounced).
@@ -557,7 +557,7 @@ class ScalpChannel(BaseChannel):
                     or (direction == Direction.SHORT and close > _htf_ema200 and close > _prev_close)
                 )
                 if _moving_toward:
-                    return None
+                    return self._reject("htf_ema_reject")
 
         # Structure-based SL: use swept level ± buffer if available, else ATR fallback
         _sweep = sweeps[0] if sweeps else None
@@ -587,9 +587,9 @@ class ScalpChannel(BaseChannel):
             sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
 
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         # Structure-based TP: FVG above/below entry for TP1, swing high/low for TP2
         m5_highs = m5.get("high", [])
@@ -2236,7 +2236,7 @@ class ScalpChannel(BaseChannel):
         """FUNDING_EXTREME_SIGNAL: contrarian signal when funding rate is extreme."""
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "QUIET":
-            return None
+            return self._reject("regime_blocked")
 
         funding_rate = smc_data.get("funding_rate")
         if funding_rate is None:
@@ -2399,36 +2399,36 @@ class ScalpChannel(BaseChannel):
         """QUIET_COMPRESSION_BREAK: Bollinger Band squeeze breakout."""
         regime_upper = regime.upper() if regime else ""
         if regime_upper not in ("QUIET", "RANGING"):
-            return None
+            return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 25:
-            return None
+            return self._reject("insufficient_candles")
 
         closes = m5.get("close", [])
         volumes = m5.get("volume", [])
         if len(closes) < 25 or len(volumes) < 21:
-            return None
+            return self._reject("insufficient_candles")
 
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
-            return None
+            return self._reject("basic_filters_failed")
 
         close = float(closes[-1])
         if close <= 0:
-            return None
+            return self._reject("invalid_price")
 
         ind = indicators.get("5m", {})
         bb_upper = ind.get("bb_upper_last")
         bb_lower = ind.get("bb_lower_last")
         if bb_upper is None or bb_lower is None:
-            return None
+            return self._reject("missing_bollinger_bands")
 
         bb_upper = float(bb_upper)
         bb_lower = float(bb_lower)
 
         # Compression check: band width / close < 1.5%
         if (bb_upper - bb_lower) / close >= 0.015:
-            return None
+            return self._reject("compression_not_detected")
 
         # Entry direction
         if close > bb_upper:
@@ -2436,36 +2436,36 @@ class ScalpChannel(BaseChannel):
         elif close < bb_lower:
             direction = Direction.SHORT
         else:
-            return None
+            return self._reject("breakout_not_detected")
 
         # MACD histogram zero-cross
         macd_hist_last = ind.get("macd_histogram_last")
         macd_hist_prev = ind.get("macd_histogram_prev")
         if macd_hist_last is not None and macd_hist_prev is not None:
             if direction == Direction.LONG and not (macd_hist_last > 0 and macd_hist_prev < 0):
-                return None
+                return self._reject("macd_reject")
             if direction == Direction.SHORT and not (macd_hist_last < 0 and macd_hist_prev > 0):
-                return None
+                return self._reject("macd_reject")
 
         # Volume: current >= 2.0x 20-candle avg
         avg_vol = sum(float(v) for v in volumes[-21:-1]) / 20.0
         current_vol = float(volumes[-1])
         if avg_vol <= 0 or current_vol < 2.0 * avg_vol:
-            return None
+            return self._reject("volume_reject")
 
         # RSI
         rsi_val = ind.get("rsi_last")
         if rsi_val is not None:
             if direction == Direction.LONG and not (50 <= rsi_val <= 70):
-                return None
+                return self._reject("rsi_reject")
             if direction == Direction.SHORT and not (30 <= rsi_val <= 50):
-                return None
+                return self._reject("rsi_reject")
 
         # SMC: FVG preferred, fallback to orderblocks
         fvgs = smc_data.get("fvg", [])
         orderblocks = smc_data.get("orderblocks", [])
         if not (fvgs or orderblocks):
-            return None
+            return self._reject("missing_fvg_or_orderblock")
 
         atr_val = ind.get("atr_last", close * 0.002)
 
@@ -2481,11 +2481,11 @@ class ScalpChannel(BaseChannel):
 
         sl_dist = abs(close - sl)
         if sl_dist <= 0:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.LONG and sl >= close:
-            return None
+            return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
-            return None
+            return self._reject("invalid_sl_geometry")
 
         band_width = bb_upper - bb_lower
         if band_width > 0:
@@ -2531,7 +2531,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         sig.stop_loss = round(sl, 8)
         sig.tp1 = round(tp1, 8)
