@@ -1894,22 +1894,23 @@ class Scanner:
             _orderblocks = []
         else:
             dependency_source_state["orderblocks"] = "populated" if _orderblocks else "empty"
+        _scanner_orderblocks_count = len(_orderblocks)
         smc_data["orderblocks"] = _orderblocks
         smc_data["__orderblocks_trace"] = {
             "detector_key_present": _orderblocks_key_present,
             "detector_status": _orderblocks_detector_status,
-            "detector_count": len(_orderblocks),
+            "detector_count": _scanner_orderblocks_count,
             "scanner_source_state": dependency_source_state["orderblocks"],
-            "scanner_final_count": len(_orderblocks),
+            "scanner_final_count": _scanner_orderblocks_count,
         }
         log.debug(
             "{} orderblocks trace: detector_key_present={}, detector_status={}, detector_count={}, scanner_state={}, scanner_count={}",
             symbol,
             _orderblocks_key_present,
             _orderblocks_detector_status,
-            len(_orderblocks),
+            _scanner_orderblocks_count,
             dependency_source_state["orderblocks"],
-            len(_orderblocks),
+            _scanner_orderblocks_count,
         )
 
         _order_book = smc_data.get("order_book")
@@ -2339,9 +2340,9 @@ class Scanner:
         orderblock_trace = smc_data.get("__orderblocks_trace")
         orderblocks_source = "unknown"
         if isinstance(orderblock_trace, dict):
-            _source = str(orderblock_trace.get("detector_status") or "").strip().lower()
-            if _source:
-                orderblocks_source = _source
+            _trace_status = str(orderblock_trace.get("detector_status") or "").strip().lower()
+            if _trace_status:
+                orderblocks_source = _trace_status
         order_book = smc_data.get("order_book")
         liq_clusters = smc_data.get("liquidation_clusters") or []
         oi_points = 0
