@@ -163,10 +163,12 @@ _FAR_AUCTION_WINDOW_MAX: int = 7  # Furthest candle; beyond this the signal is s
 # A breakout is "failed" when the candle closed within this fraction of the
 # reference level (close was at or near the level, not convincingly beyond it).
 # A value of 0.002 means the close must be within 0.2% of the level to count.
-_FAR_ACCEPTANCE_THRESHOLD: float = 0.002
+_FAR_ACCEPTANCE_THRESHOLD: float = 0.001
 # Minimum reclaim distance (as a multiple of ATR) required from the reference
 # level to the current close.  Ensures a genuine reclaim, not a marginal tick.
 _FAR_MIN_RECLAIM_ATR: float = 0.10
+_FAR_MIN_TAIL_ATR: float = 0.30
+_FAR_MIN_RR: float = 1.0
 # RSI hard/soft thresholds.  More conservative than PDC because FAR is a
 # reversal-of-failure setup (counter to the initial failed breakout direction).
 _FAR_RSI_LONG_HARD_MAX: float = 75.0   # ≥ this → hard reject (overbought)
@@ -2132,10 +2134,12 @@ class ScalpChannel(BaseChannel):
             tp1 = max(float(h) for h in highs[-21:-1]) if len(highs) >= 21 else 0.0
             if tp1 <= close:
                 tp1 = close + sl_dist * 1.5
+            tp1 = max(tp1, close + sl_dist * 1.2)
         else:
             tp1 = min(float(low_val) for low_val in lows[-21:-1]) if len(lows) >= 21 else 0.0
             if tp1 >= close:
                 tp1 = close - sl_dist * 1.5
+            tp1 = min(tp1, close - sl_dist * 1.2)
 
         # TP2: 4h target or fallback
         candles_4h = candles.get("4h")
@@ -2497,6 +2501,15 @@ class ScalpChannel(BaseChannel):
             tp1 = close + sl_dist * 1.5 if direction == Direction.LONG else close - sl_dist * 1.5
             tp2 = close + sl_dist * 2.5 if direction == Direction.LONG else close - sl_dist * 2.5
             tp3 = close + sl_dist * 4.0 if direction == Direction.LONG else close - sl_dist * 4.0
+
+        if direction == Direction.LONG:
+            tp1 = max(tp1, close + sl_dist * 1.3)
+            tp2 = max(tp2, close + sl_dist * 2.0)
+            tp3 = max(tp3, close + sl_dist * 3.0)
+        else:
+            tp1 = min(tp1, close - sl_dist * 1.3)
+            tp2 = min(tp2, close - sl_dist * 2.0)
+            tp3 = min(tp3, close - sl_dist * 3.0)
 
         profile = smc_data.get("pair_profile")
         _regime_ctx = smc_data.get("regime_context")
@@ -3508,6 +3521,13 @@ class ScalpChannel(BaseChannel):
         if direction is None:
             return self._reject("reclaim_hold_failed")
 
+        if direction == Direction.LONG:
+            tail = reclaim_level - auction_wick_extreme
+        else:
+            tail = auction_wick_extreme - reclaim_level
+        if tail < atr_val * _FAR_MIN_TAIL_ATR:
+            return self._reject("tail_too_small")
+
         # ── RSI layered gate ─────────────────────────────────────────────
         # More conservative thresholds than PDC because FAR is a reversal-of-
         # failure structure: entering when RSI is near exhaustion contradicts
@@ -3555,37 +3575,28 @@ class ScalpChannel(BaseChannel):
         if direction == Direction.SHORT and sl <= close:
             return self._reject("invalid_sl_geometry")
 
-        # ── TP: measured move from failed-auction tail (Type C) ───────────
-        # The "tail" is the distance the auction probed beyond the reference
-        # level before being rejected.  Projecting an equal move from the
-        # current entry in the reclaim direction gives a measured-move target
-        # that is directly calibrated to the strength of the rejection.
         if direction == Direction.LONG:
-            tail = reclaim_level - auction_wick_extreme  # how far below level it went
-        else:
-            tail = auction_wick_extreme - reclaim_level  # how far above level it went
-
-        if tail <= 0:
-            tail = sl_dist  # fallback: use SL distance as proxy
-
-        if direction == Direction.LONG:
-            tp1 = close + tail * 1.0
+            tp1 = max(close + tail, close + sl_dist * _FAR_MIN_RR)
             tp2 = close + tail * 1.5
             tp3 = close + tail * 2.5
         else:
-            tp1 = close - tail * 1.0
+            tp1 = min(close - tail, close - sl_dist * _FAR_MIN_RR)
             tp2 = close - tail * 1.5
             tp3 = close - tail * 2.5
 
         # Ensure minimum R:R geometry
         if direction == Direction.LONG and tp1 <= close:
-            tp1 = close + sl_dist * 1.5
+            tp1 = close + sl_dist * _FAR_MIN_RR
         if direction == Direction.SHORT and tp1 >= close:
-            tp1 = close - sl_dist * 1.5
+            tp1 = close - sl_dist * _FAR_MIN_RR
         if direction == Direction.LONG and tp2 <= tp1:
-            tp2 = close + sl_dist * 2.5
+            tp2 = max(close + sl_dist * 2.5, tp1 + sl_dist * 0.5)
         if direction == Direction.SHORT and tp2 >= tp1:
-            tp2 = close - sl_dist * 2.5
+            tp2 = min(close - sl_dist * 2.5, tp1 - sl_dist * 0.5)
+        if direction == Direction.LONG and tp3 <= tp2:
+            tp3 = max(close + sl_dist * 3.5, tp2 + sl_dist * 0.5)
+        if direction == Direction.SHORT and tp3 >= tp2:
+            tp3 = min(close - sl_dist * 3.5, tp2 - sl_dist * 0.5)
 
         profile = smc_data.get("pair_profile")
         _regime_ctx = smc_data.get("regime_context")

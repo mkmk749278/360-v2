@@ -106,6 +106,30 @@ class TestQuietCompressionBreakStopLoss:
         sl_dist = abs(sig.entry - sig.stop_loss)
         assert sl_dist > sig.entry * 0.001
 
+    def test_qcb_tp_rr_floors_long(self):
+        ch = ScalpChannel()
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET"
+        )
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        assert sig.tp1 >= sig.entry + sl_dist * 1.3 - 1e-6
+        assert sig.tp2 >= sig.entry + sl_dist * 2.0 - 1e-6
+        assert sig.tp3 >= sig.entry + sl_dist * 3.0 - 1e-6
+
+    def test_qcb_tp_rr_floors_short(self):
+        ch = ScalpChannel()
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.SHORT)
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET"
+        )
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        assert sig.tp1 <= sig.entry - sl_dist * 1.3 + 1e-6
+        assert sig.tp2 <= sig.entry - sl_dist * 2.0 + 1e-6
+        assert sig.tp3 <= sig.entry - sl_dist * 3.0 + 1e-6
+
 
 class TestScalpChannel:
     def test_signal_generated_on_valid_conditions(self):
@@ -1381,6 +1405,20 @@ class TestSrFlipRetestRefinements:
         assert sig.setup_class == "SR_FLIP_RETEST"
         assert sig.direction == Direction.SHORT
         assert sig.sr_flip_level is not None
+
+    def test_tp1_min_floor_long_uses_at_least_1_2r(self):
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        assert sig.tp1 >= sig.entry + sl_dist * 1.2
+
+    def test_tp1_min_floor_short_uses_at_least_1_2r(self):
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        sig = self._call_short(candles, _srflip_indicators_short(), _srflip_smc(direction="SHORT"))
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        assert sig.tp1 <= sig.entry - sl_dist * 1.2
 
     # ── Flip detection window (extended from 5 to 8 candles) ─────────────
 
@@ -3421,6 +3459,11 @@ class TestFailedAuctionReclaim:
         sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
         assert sig is None, "Marginal reclaim below min_reclaim threshold must not trigger FAR."
 
+    def test_micro_probe_tail_is_rejected(self):
+        candles = {"5m": _make_far_candles_long(auction_wick_low=99.85, cur_close=100.2)}
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
+        assert sig is None, "Tail below 0.30*ATR must be rejected as a micro-probe."
+
     # ── RSI gate ────────────────────────────────────────────────────────
 
     def test_rsi_hard_reject_long_overbought(self):
@@ -3475,6 +3518,13 @@ class TestFailedAuctionReclaim:
         sig = self._call_long(candles, _far_indicators_long(), {})
         assert sig is not None
         assert sig.tp1 > sig.entry, "TP1 must be above entry for LONG FAR."
+
+    def test_long_tp1_has_minimum_1r_floor(self):
+        candles = {"5m": _make_far_candles_long(auction_wick_low=99.74, cur_close=100.2)}
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        assert sig.tp1 >= sig.entry + sl_dist * 1.0
 
     def test_short_tp1_below_entry(self):
         """TP1 must be strictly below entry for SHORT FAR."""
