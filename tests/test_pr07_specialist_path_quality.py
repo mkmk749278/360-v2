@@ -292,6 +292,47 @@ class TestFundingExtremeTP1TuningIntegration:
             pytest.skip("Evaluator returned None.")
         assert sig.setup_class == "FUNDING_EXTREME_SIGNAL"
 
+    def test_funding_extreme_sl_degraded_execution_note(self):
+        """No liquidation clusters should mark SL as degraded ATR fallback."""
+        ch = ScalpChannel()
+        indicators = _base_indicators_5m(ema9=101.0, rsi_last=50.0, rsi_prev=45.0, atr=0.5)
+        candles = {"5m": _make_candles_5m(20, base=100.0, trend=0.1)}
+        smc = {
+            "funding_rate": -0.0015,
+            "fvg": [{"gap_high": 103.0, "gap_low": 102.5}],
+            "orderblocks": [],
+            "liquidation_clusters": [],
+            "cvd": {"values": [0.0, 1.0, 2.0, 3.0]},
+        }
+        sig = ch._evaluate_funding_extreme(
+            "BTCUSDT", candles, indicators, smc, 0.01, 10_000_000, regime="TRENDING"
+        )
+        assert sig is not None
+        assert "LIQ_CLUSTER_ABSENT" in (sig.soft_gate_flags or "")
+        assert (
+            "LIQ_CLUSTER_ABSENT" in (sig.execution_note or "")
+            or "ATR×1.5 fallback" in (sig.execution_note or "")
+        )
+        assert sig.soft_penalty_total >= 5.0
+
+    def test_funding_extreme_sl_cluster_no_degradation(self):
+        """Valid liquidation-cluster SL should not set LIQ_CLUSTER_ABSENT flag."""
+        ch = ScalpChannel()
+        indicators = _base_indicators_5m(ema9=101.0, rsi_last=50.0, rsi_prev=45.0, atr=0.5)
+        candles = {"5m": _make_candles_5m(20, base=100.0, trend=0.1)}
+        smc = {
+            "funding_rate": -0.0015,
+            "fvg": [{"gap_high": 103.0, "gap_low": 102.5}],
+            "orderblocks": [],
+            "liquidation_clusters": [{"price": 100.9}],
+            "cvd": {"values": [0.0, 1.0, 2.0, 3.0]},
+        }
+        sig = ch._evaluate_funding_extreme(
+            "BTCUSDT", candles, indicators, smc, 0.01, 10_000_000, regime="TRENDING"
+        )
+        assert sig is not None
+        assert "LIQ_CLUSTER_ABSENT" not in (sig.soft_gate_flags or "")
+
 
 # ---------------------------------------------------------------------------
 # 3. WHALE_MOMENTUM SL tuning — swing-based invalidation
