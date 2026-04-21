@@ -142,6 +142,57 @@ class TestScalpChannel:
         sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
         assert sig is None
 
+    def test_standard_telemetry_insufficient_candles_reason(self):
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(49)}
+        sig = ch._evaluate_standard("BTCUSDT", candles, {"5m": _make_indicators()}, {}, 0.01, 10_000_000)
+        assert sig is None
+        assert ch._active_no_signal_reason == "insufficient_candles"
+
+    def test_standard_telemetry_adx_reject_reason(self):
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        indicators = {"5m": _make_indicators(adx_val=10)}
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
+        assert sig is None
+        assert ch._active_no_signal_reason == "adx_reject"
+
+    def test_standard_telemetry_missing_sweeps_reason(self):
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, {"sweeps": []}, 0.01, 10_000_000)
+        assert sig is None
+        assert ch._active_no_signal_reason == "sweeps_not_detected"
+
+    def test_funding_extreme_quiet_regime_blocked_reason(self):
+        ch = ScalpChannel()
+        sig = ch._evaluate_funding_extreme(
+            "BTCUSDT",
+            {"5m": _make_candles(10)},
+            {"5m": _make_indicators()},
+            {"funding_rate": 0.02},
+            0.01,
+            10_000_000,
+            regime="QUIET",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "regime_blocked"
+
+    def test_qcb_telemetry_regime_blocked_reason(self):
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT",
+            {"5m": _make_candles(25)},
+            {"5m": _make_indicators()},
+            {},
+            0.01,
+            10_000_000,
+            regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "regime_blocked"
+
     def test_no_signal_without_sweep(self):
         ch = ScalpChannel()
         candles = {"5m": _make_candles(60)}
