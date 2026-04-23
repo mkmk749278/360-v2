@@ -2,7 +2,7 @@
   "channel": "360_SCALP",
   "dependency_readiness": {},
   "executive_summary": {
-    "overall_health": "healthy",
+    "overall_health": "stale",
     "recommended_next_investigation_target": null,
     "top_anomalies": [],
     "top_promising_paths": []
@@ -11,7 +11,7 @@
     "setup_filter": "",
     "symbol_filter": ""
   },
-  "generated_at": 1776932829,
+  "generated_at": 1776933758,
   "lifecycle_truth": {
     "fast_failure_buckets": {
       "under_120s": {
@@ -31,13 +31,13 @@
         "pct": 0.0
       }
     },
-    "median_create_to_dispatch_sec": 6.18731153011322,
-    "median_create_to_first_breach_sec": 184.27309393882751,
-    "median_create_to_terminal_sec": 196.46404218673706,
-    "median_first_breach_to_terminal_sec": 0.7329949140548706,
+    "median_create_to_dispatch_sec": null,
+    "median_create_to_first_breach_sec": null,
+    "median_create_to_terminal_sec": null,
+    "median_first_breach_to_terminal_sec": null,
     "terminal_close_around_3m": {
-      "count": 15,
-      "pct": 68.2
+      "count": 0,
+      "pct": 0.0
     }
   },
   "lookback_hours": 24,
@@ -45,7 +45,7 @@
   "post_correction_focus": {
     "SR_FLIP_RETEST": {
       "attempts": 0,
-      "average_pnl_pct": -0.4748,
+      "average_pnl_pct": null,
       "classification": "low-sample",
       "emitted": 0,
       "gated": 0,
@@ -54,15 +54,15 @@
       "geometry_final_preserved": 0,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
-      "median_first_breach_sec": 185.3577799797058,
-      "median_terminal_duration_sec": 189.48564898967743,
-      "sl_rate": 75.0,
+      "median_first_breach_sec": null,
+      "median_terminal_duration_sec": null,
+      "sl_rate": 0.0,
       "tp_rate": 0.0,
       "win_rate": 0.0
     },
     "TREND_PULLBACK_EMA": {
       "attempts": 0,
-      "average_pnl_pct": -0.2282,
+      "average_pnl_pct": null,
       "classification": "low-sample",
       "emitted": 0,
       "gated": 0,
@@ -71,73 +71,22 @@
       "geometry_final_preserved": 0,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
-      "median_first_breach_sec": 184.21151995658875,
-      "median_terminal_duration_sec": 194.52683448791504,
-      "sl_rate": 83.3,
-      "tp_rate": 0.0,
-      "win_rate": 0.0
-    }
-  },
-  "quality_by_setup": {
-    "FAILED_AUCTION_RECLAIM": {
-      "average_pnl_pct": 0.1696,
-      "closed": 6,
-      "emitted": 6,
-      "median_first_breach_sec": 182.84176111221313,
-      "median_terminal_duration_sec": 402.55582654476166,
-      "sl_rate": 50.0,
-      "tp_rate": 0.0,
-      "win_rate": 0.0
-    },
-    "LIQUIDITY_SWEEP_REVERSAL": {
-      "average_pnl_pct": -1.296,
-      "closed": 1,
-      "emitted": 1,
-      "median_first_breach_sec": 188.029639005661,
-      "median_terminal_duration_sec": 188.30536484718323,
-      "sl_rate": 100.0,
-      "tp_rate": 0.0,
-      "win_rate": 0.0
-    },
-    "QUIET_COMPRESSION_BREAK": {
-      "average_pnl_pct": 0.7408,
-      "closed": 1,
-      "emitted": 1,
       "median_first_breach_sec": null,
-      "median_terminal_duration_sec": 602.5395729541779,
+      "median_terminal_duration_sec": null,
       "sl_rate": 0.0,
       "tp_rate": 0.0,
       "win_rate": 0.0
-    },
-    "SR_FLIP_RETEST": {
-      "average_pnl_pct": -0.4748,
-      "closed": 8,
-      "emitted": 8,
-      "median_first_breach_sec": 185.3577799797058,
-      "median_terminal_duration_sec": 189.48564898967743,
-      "sl_rate": 75.0,
-      "tp_rate": 0.0,
-      "win_rate": 0.0
-    },
-    "TREND_PULLBACK_EMA": {
-      "average_pnl_pct": -0.2282,
-      "closed": 6,
-      "emitted": 6,
-      "median_first_breach_sec": 184.21151995658875,
-      "median_terminal_duration_sec": 194.52683448791504,
-      "sl_rate": 83.3,
-      "tp_rate": 0.0,
-      "win_rate": 0.0
     }
   },
+  "quality_by_setup": {},
   "raw_extracts": {
     "current_channel_funnel_counters": {},
     "current_path_funnel_counters": {},
     "previous_channel_funnel_counters": {},
     "previous_path_funnel_counters": {},
-    "record_count_current_window": 22,
-    "record_count_previous_window": 43,
-    "record_count_scoped": 65
+    "record_count_current_window": 0,
+    "record_count_previous_window": 0,
+    "record_count_scoped": 0
   },
   "recommended_operator_focus": {
     "most_likely_bottleneck": null,
@@ -147,11 +96,11 @@
   },
   "runtime_health": {
     "health": "healthy",
-    "heartbeat_age_sec": 0,
+    "heartbeat_age_sec": 49,
     "heartbeat_warning": false,
-    "latest_record_age_sec": 3993,
-    "overall": "healthy",
-    "records_fresh": true,
+    "latest_record_age_sec": null,
+    "overall": "stale",
+    "records_fresh": false,
     "running": true,
     "status": "running"
   }
