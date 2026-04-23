@@ -8,7 +8,7 @@
 
 ## Runtime health
 - Engine running: `True` (status=running, health=healthy)
-- Heartbeat age: `49` sec (warning=False)
+- Heartbeat age: `67` sec (warning=False)
 - Latest performance record age: `None` sec
 
 ## Path funnel truth

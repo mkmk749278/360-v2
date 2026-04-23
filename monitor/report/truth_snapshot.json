@@ -11,7 +11,7 @@
     "setup_filter": "",
     "symbol_filter": ""
   },
-  "generated_at": 1776933758,
+  "generated_at": 1776935092,
   "lifecycle_truth": {
     "fast_failure_buckets": {
       "under_120s": {
@@ -96,7 +96,7 @@
   },
   "runtime_health": {
     "health": "healthy",
-    "heartbeat_age_sec": 49,
+    "heartbeat_age_sec": 67,
     "heartbeat_warning": false,
     "latest_record_age_sec": null,
     "overall": "stale",
