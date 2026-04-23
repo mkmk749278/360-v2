@@ -750,11 +750,28 @@ class ScalpChannel(BaseChannel):
             elif ema50 is None and not (ema9 < ema21):
                 return self._reject("ema_alignment_reject")
 
-        # Price proximity to EMA9 (0.3%) or EMA21 (0.5%)
-        near_ema9 = abs(close - ema9) / ema9 <= 0.003 if ema9 > 0 else False
-        near_ema21 = abs(close - ema21) / ema21 <= 0.005 if ema21 > 0 else False
-        if not (near_ema9 or near_ema21):
-            return self._reject("retest_proximity_failed")
+        # BUG FIX 7: Require CONFIRMED bounce, not just proximity.
+        # Old: fired when price TOUCHED EMA (82.6% SL rate — entering on liquidity hunt)
+        # New: require prev candle tested EMA + current candle CLOSES above EMA21
+        if direction == Direction.LONG:
+            if not (prev_low <= ema21 * 1.003):
+                return self._reject("ema_not_tested_prev")
+            if close <= ema21 or close <= ema9:
+                return self._reject("no_ema_reclaim_close")
+        else:
+            if not (prev_high >= ema21 * 0.997):
+                return self._reject("ema_not_tested_prev")
+            if close >= ema21 or close >= ema9:
+                return self._reject("no_ema_reclaim_close")
+        # Body conviction: current candle must be directional (no doji)
+        candle_range = last_high - last_low
+        body_size = abs(close - last_open)
+        if candle_range > 0 and body_size / candle_range < 0.50:
+            return self._reject("body_conviction_fail")
+        if direction == Direction.LONG and close < last_open:
+            return self._reject("body_conviction_fail")
+        if direction == Direction.SHORT and close > last_open:
+            return self._reject("body_conviction_fail")
 
         # RSI pullback zone: 40–60
         if rsi_val is not None and not (40 <= rsi_val <= 60):
@@ -814,10 +831,14 @@ class ScalpChannel(BaseChannel):
 
         profile = smc_data.get("pair_profile")
         atr_val = ind.get("atr_last", close * 0.002)
-        # SL: beyond EMA21 for both directions
-        sl_dist = max(close * self.config.sl_pct_range[0] / 100, abs(close - ema21) * 1.1)
-        sl_dist = max(sl_dist, atr_val * 0.5)
-        sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
+        # BUG FIX 7b: Structural SL at candle low/high, not just EMA distance
+        if direction == Direction.LONG:
+            sl = min(last_low - atr_val * 0.1, close - atr_val * 1.0,
+                     close - close * self.config.sl_pct_range[0] / 100)
+        else:
+            sl = max(last_high + atr_val * 0.1, close + atr_val * 1.0,
+                     close + close * self.config.sl_pct_range[0] / 100)
+        sl_dist = abs(close - sl)
 
         if direction == Direction.LONG and sl >= close:
             return self._reject("invalid_sl_geometry")

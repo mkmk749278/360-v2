@@ -219,7 +219,7 @@ class TradeMonitor:
         # Set after construction (e.g. in main.py: monitor.engine_context_fn = ...).
         self.engine_context_fn: Optional[Any] = None
 
-    def _record_outcome(self, sig: Signal, hit_tp: int, hit_sl: bool) -> None:
+    def _record_outcome(self, sig: Signal, hit_tp: int, hit_sl: bool, expired: bool = False) -> None:
         """Notify performance tracker and circuit breaker of a completed signal.
 
         Called only on final outcomes (semantic stop/TP completion). Intermediate hits
@@ -285,6 +285,7 @@ class TradeMonitor:
             pnl_pct=actual_pnl,
             hit_tp=hit_tp,
             hit_sl=hit_sl,
+            expired=expired,  # BUG FIX
         )
         if self.on_lifecycle_outcome_callback is not None:
             try:
@@ -609,7 +610,7 @@ class TradeMonitor:
             self._set_realized_pnl(sig, price)
             sig.status = "EXPIRED"
             await self._post_update(sig, "⏰ EXPIRED (max hold time reached)")
-            self._record_outcome(sig, hit_tp=0, hit_sl=False)
+            self._record_outcome(sig, hit_tp=0, hit_sl=False, expired=True)  # BUG FIX
             self._remove(sig.signal_id)
             return
 

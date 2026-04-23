@@ -549,10 +549,35 @@ class OIPoller:
         self._symbols = list(symbols)
 
     async def start(self) -> None:
-        """Start the polling loop in the background."""
+        """Start polling. Backfills OI history first (BUG FIX 6)."""
         self._session = aiohttp.ClientSession()
+        await self._backfill_oi_history()
         self._task = asyncio.create_task(self._poll_loop())
         log.info("OIPoller started for {} symbols (interval={}s)", len(self._symbols), self._interval)
+
+    async def _backfill_oi_history(self) -> None:
+        """BUG FIX 6: Fetch 30 historical 5m OI snapshots at boot.
+        Prevents 2-min OI blindness on cold start."""
+        if not self._session or not self._symbols:
+            return
+        url = f"{self._base}/futures/data/openInterestHist"
+        for sym in list(self._symbols):
+            try:
+                async with self._session.get(
+                    url,
+                    params={"symbol": sym, "period": "5m", "limit": "30"},
+                    timeout=aiohttp.ClientTimeout(total=10),
+                ) as resp:
+                    if resp.status != 200:
+                        continue
+                    data = await resp.json()
+                    for item in data:
+                        oi_val = float(item.get("sumOpenInterest", 0))
+                        if oi_val > 0:
+                            self._store.add_oi_snapshot(sym, oi_val)
+            except Exception:
+                pass
+            await asyncio.sleep(0.1)
 
     async def stop(self) -> None:
         """Cancel the polling loop and close the HTTP session."""

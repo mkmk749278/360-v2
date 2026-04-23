@@ -345,7 +345,7 @@ SEED_TIMEFRAMES: List[TimeframeSeed] = [
     TimeframeSeed("4h", 500),
     TimeframeSeed("1d", 500),
 ]
-SEED_TICK_LIMIT: int = 5000  # recent trades
+SEED_TICK_LIMIT: int = 1000  # BUG FIX: REST caps at 1000  # recent trades
 
 # Candle counts for gem scanner daily/weekly seeding (~1 year lookback).
 # These are read from env-vars so they can be tuned without code changes.
@@ -592,7 +592,7 @@ CHANNEL_SCALP = ChannelConfig(
     name="360_SCALP",
     emoji="⚡",
     timeframes=["1m", "5m"],
-    sl_pct_range=(0.20, 0.50),
+    sl_pct_range=(0.35, 0.80),  # BUG FIX: was too tight
     tp_ratios=[1.5, 2.5, 4.0],
     trailing_atr_mult=1.5,
     adx_min=int(os.getenv("ADX_MIN_SCALP", "20")),
@@ -612,7 +612,7 @@ CHANNEL_SCALP_FVG = ChannelConfig(
     name="360_SCALP_FVG",
     emoji="⚡",
     timeframes=["5m", "15m"],
-    sl_pct_range=(0.10, 0.20),
+    sl_pct_range=(0.35, 0.80),  # BUG FIX: was too tight
     tp_ratios=[1.5, 2.5, 3.0],
     trailing_atr_mult=1.5,
     adx_min=int(os.getenv("ADX_MIN_FVG", "18")),
@@ -628,7 +628,7 @@ CHANNEL_SCALP_CVD = ChannelConfig(
     name="360_SCALP_CVD",
     emoji="⚡",
     timeframes=["5m"],
-    sl_pct_range=(0.15, 0.30),
+    sl_pct_range=(0.35, 0.80),  # BUG FIX: was too tight
     tp_ratios=[1.5, 2.5, 3.5],
     trailing_atr_mult=1.5,
     adx_min=15,
@@ -644,7 +644,7 @@ CHANNEL_SCALP_VWAP = ChannelConfig(
     name="360_SCALP_VWAP",
     emoji="⚡",
     timeframes=["5m", "15m"],
-    sl_pct_range=(0.10, 0.20),
+    sl_pct_range=(0.35, 0.80),  # BUG FIX: was too tight
     tp_ratios=[1.5, 2.5, 3.5],
     trailing_atr_mult=1.5,
     adx_min=0,
@@ -660,7 +660,7 @@ CHANNEL_SCALP_DIVERGENCE = ChannelConfig(
     name="360_SCALP_DIVERGENCE",
     emoji="⚡",
     timeframes=["5m"],
-    sl_pct_range=(0.15, 0.30),
+    sl_pct_range=(0.35, 0.80),  # BUG FIX: was too tight
     tp_ratios=[1.5, 2.5, 3.5],
     trailing_atr_mult=1.5,
     adx_min=15,
@@ -676,7 +676,7 @@ CHANNEL_SCALP_SUPERTREND = ChannelConfig(
     name="360_SCALP_SUPERTREND",
     emoji="⚡",
     timeframes=["5m"],
-    sl_pct_range=(0.10, 0.25),
+    sl_pct_range=(0.35, 0.80),  # BUG FIX: was too tight
     tp_ratios=[1.5, 2.5, 3.5],
     trailing_atr_mult=1.5,
     adx_min=15,
@@ -692,7 +692,7 @@ CHANNEL_SCALP_ICHIMOKU = ChannelConfig(
     name="360_SCALP_ICHIMOKU",
     emoji="⚡",
     timeframes=["5m", "15m"],
-    sl_pct_range=(0.10, 0.25),
+    sl_pct_range=(0.35, 0.80),  # BUG FIX: was too tight
     tp_ratios=[1.5, 2.5, 3.0],
     trailing_atr_mult=1.5,
     adx_min=15,
@@ -708,7 +708,7 @@ CHANNEL_SCALP_ORDERBLOCK = ChannelConfig(
     name="360_SCALP_ORDERBLOCK",
     emoji="⚡",
     timeframes=["5m"],
-    sl_pct_range=(0.10, 0.20),
+    sl_pct_range=(0.35, 0.80),  # BUG FIX: was too tight
     tp_ratios=[1.5, 2.5, 3.0],
     trailing_atr_mult=1.5,
     adx_min=0,
@@ -1032,14 +1032,14 @@ MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
 # Anti-noise: minimum signal lifespan before SL/TP checks are applied (secs)
 # ---------------------------------------------------------------------------
 MIN_SIGNAL_LIFESPAN_SECONDS: Dict[str, int] = {
-    "360_SCALP":            int(os.getenv("MIN_LIFESPAN_SCALP",      "180")),
-    "360_SCALP_FVG":        int(os.getenv("MIN_LIFESPAN_SCALP_FVG",  "180")),
-    "360_SCALP_CVD":        int(os.getenv("MIN_LIFESPAN_SCALP_CVD",  "180")),
-    "360_SCALP_VWAP":       int(os.getenv("MIN_LIFESPAN_SCALP_VWAP", "180")),
-    "360_SCALP_DIVERGENCE": int(os.getenv("MIN_LIFESPAN_SCALP_DIV",  "180")),
-    "360_SCALP_SUPERTREND": int(os.getenv("MIN_LIFESPAN_SCALP_STR",  "180")),
-    "360_SCALP_ICHIMOKU":   int(os.getenv("MIN_LIFESPAN_SCALP_ICH",  "180")),
-    "360_SCALP_ORDERBLOCK": int(os.getenv("MIN_LIFESPAN_SCALP_ORB",  "180")),
+    "360_SCALP":            int(os.getenv("MIN_LIFESPAN_SCALP",      "30")),
+    "360_SCALP_FVG":        int(os.getenv("MIN_LIFESPAN_SCALP_FVG",  "30")),
+    "360_SCALP_CVD":        int(os.getenv("MIN_LIFESPAN_SCALP_CVD",  "30")),
+    "360_SCALP_VWAP":       int(os.getenv("MIN_LIFESPAN_SCALP_VWAP",  "30")),
+    "360_SCALP_DIVERGENCE": int(os.getenv("MIN_LIFESPAN_SCALP_DIV",  "30")),
+    "360_SCALP_SUPERTREND": int(os.getenv("MIN_LIFESPAN_SCALP_STR",  "30")),
+    "360_SCALP_ICHIMOKU":   int(os.getenv("MIN_LIFESPAN_SCALP_ICH",  "30")),
+    "360_SCALP_ORDERBLOCK": int(os.getenv("MIN_LIFESPAN_SCALP_ORB",  "30")),
 }
 
 # ---------------------------------------------------------------------------

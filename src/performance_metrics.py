@@ -19,7 +19,7 @@ def is_breakeven_pnl(pnl_pct: float) -> bool:
     return abs(normalize_pnl_pct(pnl_pct)) < _BREAKEVEN_PNL_THRESHOLD_PCT
 
 
-def classify_trade_outcome(pnl_pct: float, hit_tp: int = 0, hit_sl: bool = False) -> str:
+def classify_trade_outcome(pnl_pct: float, hit_tp: int = 0, hit_sl: bool = False, expired: bool = False) -> str:
     """Classify the final realized trade outcome.
 
     The classification is semantic rather than purely mechanical:
@@ -30,6 +30,8 @@ def classify_trade_outcome(pnl_pct: float, hit_tp: int = 0, hit_sl: bool = False
     - exits that are neither stop nor TP completions fall back to ``CLOSED``
     """
     normalized_pnl = normalize_pnl_pct(pnl_pct)
+    if expired and not hit_sl and hit_tp == 0:
+        return "EXPIRED"  # BUG FIX: was CLOSED
     if hit_tp >= 3 and not hit_sl:
         return "FULL_TP_HIT"
     if hit_sl:

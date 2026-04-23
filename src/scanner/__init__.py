@@ -1850,8 +1850,9 @@ class Scanner:
         # Build a cheap fingerprint: tuple of (tf, last_close) for all timeframes.
         # If candles haven't changed since last cycle, reuse cached indicators.
         try:
+            # BUG FIX 5: include len so same-close different candles get own cache
             _fp = tuple(
-                (tf, float(cd["close"][-1]) if cd.get("close") else 0.0)
+                (tf, float(cd["close"][-1]) if cd.get("close") else 0.0, len(cd.get("close", [])))
                 for tf, cd in sorted(candles.items())
             )
         except Exception:
@@ -2379,31 +2380,31 @@ class Scanner:
         return {
             "funding_rate": {
                 "state": source_state_map.get("funding_rate", _state("funding_rate", 1 if funding_rate is not None else 0)),
-                "present": source_state_map.get("funding_rate", "unavailable") != "unavailable",
+                "present": funding_rate is not None,  # BUG FIX: was != unavailable
                 "bucket": self._dependency_count_bucket(1 if funding_rate is not None else 0),
             },
             "cvd": {
                 "state": source_state_map.get("cvd", _state("cvd", cvd_count)),
-                "present": source_state_map.get("cvd", "unavailable") != "unavailable",
+                "present": cvd_count > 0,  # BUG FIX: was != unavailable
                 "count": cvd_count,
                 "bucket": self._dependency_count_bucket(cvd_count),
             },
             "recent_ticks": {
                 "state": source_state_map.get("recent_ticks", _state("recent_ticks", len(recent_ticks))),
-                "present": source_state_map.get("recent_ticks", "unavailable") != "unavailable",
+                "present": len(recent_ticks) > 0,  # BUG FIX
                 "count": len(recent_ticks),
                 "bucket": self._dependency_count_bucket(len(recent_ticks)),
             },
             "orderblocks": {
                 "state": source_state_map.get("orderblocks", _state("orderblocks", len(orderblocks))),
-                "present": source_state_map.get("orderblocks", "unavailable") != "unavailable",
+                "present": len(orderblocks) > 0,  # BUG FIX
                 "count": len(orderblocks),
                 "bucket": self._dependency_count_bucket(len(orderblocks)),
                 "source": orderblocks_source,
             },
             "order_book": {
                 "state": source_state_map.get("order_book", _state("order_book", order_book_levels)),
-                "present": source_state_map.get("order_book", "unavailable") != "unavailable",
+                "present": order_book_levels > 0,  # BUG FIX
                 "count": order_book_levels,
                 "bucket": self._dependency_count_bucket(order_book_levels),
                 "source": order_book_source,
@@ -2411,13 +2412,13 @@ class Scanner:
             },
             "liquidation_clusters": {
                 "state": source_state_map.get("liquidation_clusters", _state("liquidation_clusters", len(liq_clusters))),
-                "present": source_state_map.get("liquidation_clusters", "unavailable") != "unavailable",
+                "present": len(liq_clusters) > 0,  # BUG FIX
                 "count": len(liq_clusters),
                 "bucket": self._dependency_count_bucket(len(liq_clusters)),
             },
             "oi_snapshot": {
                 "state": "populated" if oi_points > 0 else oi_state,
-                "present": oi_state != "unavailable",
+                "present": oi_points > 0,  # BUG FIX: was != unavailable
                 "count": oi_points,
                 "bucket": self._dependency_count_bucket(oi_points),
             },

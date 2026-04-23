@@ -229,9 +229,9 @@ class WebSocketManager:
         """Poll REST klines for critical pairs while WS is down."""
         assert self._session is not None
         if self._market == "futures":
-            url_tpl = f"{self._rest_base_url}/fapi/v1/klines?symbol={{symbol}}&interval={{interval}}&limit=1"
+            url_tpl = f"{self._rest_base_url}/fapi/v1/klines?symbol={{symbol}}&interval={{interval}}&limit=2"  # BUG FIX: limit=2 so raw[0] is truly closed
         else:
-            url_tpl = f"{self._rest_base_url}/api/v3/klines?symbol={{symbol}}&interval={{interval}}&limit=1"
+            url_tpl = f"{self._rest_base_url}/api/v3/klines?symbol={{symbol}}&interval={{interval}}&limit=2"  # BUG FIX: limit=2 so raw[0] is truly closed
 
         log.info("REST fallback loop started for {} critical pairs", len(self._critical_pairs))
 
@@ -268,7 +268,8 @@ class WebSocketManager:
                                     log.debug("REST fallback {} {} status {}", symbol, interval, resp.status)
                                     continue
                                 raw = await resp.json()
-                            if not raw:
+                            # BUG FIX: guard len>=2; raw[0]=last CLOSED candle
+                            if not raw or len(raw) < 2:
                                 continue
                             k = raw[0]
                             msg: dict = {
@@ -282,6 +283,7 @@ class WebSocketManager:
                                     "c": str(k[4]),
                                     "v": str(k[5]),
                                     "x": True,
+                                    "t": k[0],
                                 },
                             }
                             await self._on_message(msg)
