@@ -845,6 +845,12 @@ class ScalpChannel(BaseChannel):
         if direction == Direction.SHORT and sl <= close:
             return self._reject("invalid_sl_geometry")
 
+        # BUG FIX: Enforce minimum SL distance (1×ATR or 0.50%)
+        min_sl_atr = max(atr_val * 1.0, close * self.config.sl_pct_range[0] / 100)
+        if sl_dist < min_sl_atr:
+            sl_dist = min_sl_atr
+            sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
+
         # Structure-based TP targets
         m5_highs = m5.get("high", [])
         m5_lows = m5.get("low", [])
@@ -2149,6 +2155,20 @@ class ScalpChannel(BaseChannel):
             return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
             return self._reject("invalid_sl_geometry")
+
+        # BUG FIX: Enforce minimum SL = max(1.0×ATR, 0.50% of close)
+        # Structural SL from wick+buffer can be too tight (0.3-0.4%)
+        # causing correct-direction signals to be wiped by normal noise
+        min_sl_dist = max(
+            atr_val * 1.0,                          # 1×ATR minimum
+            close * self.config.sl_pct_range[0] / 100  # 0.50% minimum
+        )
+        if sl_dist < min_sl_dist:
+            if direction == Direction.LONG:
+                sl = close - min_sl_dist
+            else:
+                sl = close + min_sl_dist
+            sl_dist = min_sl_dist
 
         # TP1: 20-candle swing high/low
         if direction == Direction.LONG:
