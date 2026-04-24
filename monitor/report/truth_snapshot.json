@@ -1,632 +1,147 @@
 {
   "channel": "360_SCALP",
-  "dependency_readiness": {
-    "cvd": {
-      "buckets": {
-        "few": 259,
-        "many": 3182,
-        "some": 3134
-      },
-      "presence": {
-        "present": 6575
-      },
-      "quality": {},
-      "sources": {},
-      "states": {
-        "populated": 6575
-      }
-    },
-    "funding_rate": {
-      "buckets": {
-        "few": 5865,
-        "none": 710
-      },
-      "presence": {
-        "absent": 710,
-        "present": 5865
-      },
-      "quality": {},
-      "sources": {},
-      "states": {
-        "empty": 710,
-        "populated": 5865
-      }
-    },
-    "liquidation_clusters": {
-      "buckets": {
-        "few": 2385,
-        "none": 3608,
-        "some": 582
-      },
-      "presence": {
-        "absent": 3608,
-        "present": 2967
-      },
-      "quality": {},
-      "sources": {},
-      "states": {
-        "empty": 3608,
-        "populated": 2967
-      }
-    },
-    "oi_snapshot": {
-      "buckets": {
-        "many": 6406,
-        "none": 169
-      },
-      "presence": {
-        "absent": 169,
-        "present": 6406
-      },
-      "quality": {},
-      "sources": {},
-      "states": {
-        "empty": 169,
-        "populated": 6406
-      }
-    },
-    "order_book": {
-      "buckets": {
-        "few": 3068,
-        "none": 3507
-      },
-      "presence": {
-        "absent": 3507,
-        "present": 3068
-      },
-      "quality": {
-        "none": 3507,
-        "top_of_book_only": 3068
-      },
-      "sources": {
-        "book_ticker": 3068,
-        "unavailable": 3507
-      },
-      "states": {
-        "populated": 3068,
-        "unavailable": 3507
-      }
-    },
-    "orderblocks": {
-      "buckets": {
-        "none": 6575
-      },
-      "presence": {
-        "absent": 6575
-      },
-      "quality": {},
-      "sources": {
-        "not_implemented": 6575
-      },
-      "states": {
-        "empty": 6575
-      }
-    },
-    "recent_ticks": {
-      "buckets": {
-        "many": 5810,
-        "none": 765
-      },
-      "presence": {
-        "absent": 765,
-        "present": 5810
-      },
-      "quality": {},
-      "sources": {},
-      "states": {
-        "empty": 765,
-        "populated": 5810
-      }
-    }
-  },
+  "dependency_readiness": {},
   "executive_summary": {
-    "overall_health": "stale",
-    "recommended_next_investigation_target": "EVAL::LIQUIDATION_REVERSAL",
-    "top_anomalies": [
-      "EVAL::LIQUIDATION_REVERSAL",
-      "EVAL::WHALE_MOMENTUM",
-      "EVAL::VOLUME_SURGE_BREAKOUT"
-    ],
+    "overall_health": "healthy",
+    "recommended_next_investigation_target": null,
+    "top_anomalies": [],
     "top_promising_paths": []
   },
   "filters": {
     "setup_filter": "",
     "symbol_filter": ""
   },
-  "generated_at": 1776939505,
+  "generated_at": 1777007318,
   "lifecycle_truth": {
     "fast_failure_buckets": {
       "under_120s": {
-        "count": 0,
-        "pct": 0.0
+        "count": 9,
+        "pct": 100.0
       },
       "under_180s": {
-        "count": 0,
-        "pct": 0.0
+        "count": 9,
+        "pct": 100.0
       },
       "under_30s": {
         "count": 0,
         "pct": 0.0
       },
       "under_60s": {
-        "count": 0,
-        "pct": 0.0
+        "count": 8,
+        "pct": 88.9
       }
     },
-    "median_create_to_dispatch_sec": null,
-    "median_create_to_first_breach_sec": null,
-    "median_create_to_terminal_sec": null,
-    "median_first_breach_to_terminal_sec": null,
+    "median_create_to_dispatch_sec": 2.6598360538482666,
+    "median_create_to_first_breach_sec": 36.95268201828003,
+    "median_create_to_terminal_sec": 47.76076912879944,
+    "median_first_breach_to_terminal_sec": 9.476501941680908,
     "terminal_close_around_3m": {
       "count": 0,
       "pct": 0.0
     }
   },
   "lookback_hours": 24,
-  "path_funnel_truth": {
-    "CONTINUATION_LIQUIDITY_SWEEP": {
-      "attempts": 0,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 5,
-      "generated": 5,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 0,
-      "no_signal_reasons": {},
-      "scanner_preparation": 5
-    },
-    "EVAL::BREAKDOWN_SHORT": {
-      "attempts": 6575,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6575,
-      "no_signal_reasons": {
-        "basic_filters_failed": 17,
-        "breakout_not_found": 5,
-        "regime_blocked": 6149,
-        "retest_proximity_failed": 8,
-        "volume_spike_missing": 396
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::CONTINUATION_LIQUIDITY_SWEEP": {
-      "attempts": 6575,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 5,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6570,
-      "no_signal_reasons": {
-        "adx_reject": 97,
-        "basic_filters_failed": 14,
-        "ema_alignment_reject": 144,
-        "momentum_reject": 16,
-        "reclaim_confirmation_failed": 9,
-        "regime_blocked": 6200,
-        "sweeps_not_detected": 90
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::DIVERGENCE_CONTINUATION": {
-      "attempts": 6575,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6575,
-      "no_signal_reasons": {
-        "basic_filters_failed": 14,
-        "cvd_divergence_failed": 315,
-        "cvd_insufficient": 46,
-        "regime_blocked": 6200
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::FAILED_AUCTION_RECLAIM": {
-      "attempts": 6575,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 569,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6006,
-      "no_signal_reasons": {
-        "auction_not_detected": 1776,
-        "basic_filters_failed": 1060,
-        "reclaim_hold_failed": 2255,
-        "regime_blocked": 40,
-        "tail_too_small": 875
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::FUNDING_EXTREME": {
-      "attempts": 6575,
-      "classification": "dependency-missing",
-      "dependency_missing_reasons": {
-        "missing_funding_rate": 27
-      },
-      "dependency_missing_total": 27,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6575,
-      "no_signal_reasons": {
-        "basic_filters_failed": 14,
-        "ema_alignment_reject": 17,
-        "funding_not_extreme": 364,
-        "missing_funding_rate": 27,
-        "regime_blocked": 6149,
-        "rsi_reject": 4
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::LIQUIDATION_REVERSAL": {
-      "attempts": 6575,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6575,
-      "no_signal_reasons": {
-        "basic_filters_failed": 1063,
-        "cascade_threshold_not_met": 5252,
-        "cvd_divergence_failed": 256,
-        "cvd_insufficient": 4
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::OPENING_RANGE_BREAKOUT": {
-      "attempts": 6575,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6575,
-      "no_signal_reasons": {
-        "regime_blocked": 6575
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::POST_DISPLACEMENT_CONTINUATION": {
-      "attempts": 6575,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6575,
-      "no_signal_reasons": {
-        "adx_reject": 97,
-        "basic_filters_failed": 14,
-        "breakout_not_found": 120,
-        "ema_alignment_reject": 144,
-        "regime_blocked": 6200
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::QUIET_COMPRESSION_BREAK": {
-      "attempts": 6575,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 3,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6572,
-      "no_signal_reasons": {
-        "basic_filters_failed": 1046,
-        "breakout_not_detected": 2669,
-        "compression_not_detected": 1925,
-        "macd_reject": 500,
-        "missing_fvg_or_orderblock": 7,
-        "regime_blocked": 415,
-        "rsi_reject": 4,
-        "volume_reject": 6
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::SR_FLIP_RETEST": {
-      "attempts": 6575,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 253,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6322,
-      "no_signal_reasons": {
-        "basic_filters_failed": 1060,
-        "flip_close_not_confirmed": 3927,
-        "missing_fvg_or_orderblock": 25,
-        "reclaim_hold_failed": 715,
-        "regime_blocked": 40,
-        "retest_out_of_zone": 445,
-        "wick_quality_failed": 110
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::STANDARD": {
-      "attempts": 6575,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 379,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6196,
-      "no_signal_reasons": {
-        "adx_reject": 884,
-        "basic_filters_failed": 1230,
-        "ema_alignment_reject": 28,
-        "htf_ema_reject": 25,
-        "invalid_sl_geometry": 33,
-        "macd_reject": 7,
-        "momentum_reject": 3490,
-        "rsi_reject": 49,
-        "sweeps_not_detected": 450
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::TREND_PULLBACK": {
-      "attempts": 6575,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 3,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6572,
-      "no_signal_reasons": {
-        "basic_filters_failed": 14,
-        "body_conviction_fail": 70,
-        "ema_alignment_reject": 144,
-        "ema_not_tested_prev": 59,
-        "no_ema_reclaim_close": 50,
-        "none": 13,
-        "regime_blocked": 6200,
-        "rsi_reject": 22
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::VOLUME_SURGE_BREAKOUT": {
-      "attempts": 6575,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6575,
-      "no_signal_reasons": {
-        "basic_filters_failed": 17,
-        "breakout_not_found": 13,
-        "regime_blocked": 6149,
-        "retest_proximity_failed": 2,
-        "volume_spike_missing": 394
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::WHALE_MOMENTUM": {
-      "attempts": 6575,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 6575,
-      "no_signal_reasons": {
-        "momentum_reject": 426,
-        "regime_blocked": 6149
-      },
-      "scanner_preparation": 0
-    },
-    "FAILED_AUCTION_RECLAIM": {
-      "attempts": 0,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 7,
-      "gated": 356,
-      "generated": 569,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 213,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 0,
-      "no_signal_reasons": {},
-      "scanner_preparation": 569
-    },
-    "LIQUIDITY_SWEEP_REVERSAL": {
-      "attempts": 0,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 275,
-      "generated": 379,
-      "geometry_final_changed": 104,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 0,
-      "no_signal_reasons": {},
-      "scanner_preparation": 379
-    },
-    "QUIET_COMPRESSION_BREAK": {
-      "attempts": 0,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 3,
-      "generated": 3,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 0,
-      "no_signal_reasons": {},
-      "scanner_preparation": 3
-    },
-    "SR_FLIP_RETEST": {
-      "attempts": 0,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 2,
-      "gated": 150,
-      "generated": 253,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 103,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 0,
-      "no_signal_reasons": {},
-      "scanner_preparation": 253
-    },
-    "TREND_PULLBACK_EMA": {
-      "attempts": 0,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 3,
-      "generated": 3,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 0,
-      "no_signal_reasons": {},
-      "scanner_preparation": 3
-    }
-  },
+  "path_funnel_truth": {},
   "post_correction_focus": {
     "SR_FLIP_RETEST": {
       "attempts": 0,
-      "average_pnl_pct": null,
+      "average_pnl_pct": -0.4559,
       "classification": "low-sample",
-      "emitted": 2,
-      "gated": 150,
-      "generated": 253,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
       "geometry_final_changed": 0,
-      "geometry_final_preserved": 103,
+      "geometry_final_preserved": 0,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
-      "median_first_breach_sec": null,
-      "median_terminal_duration_sec": null,
-      "sl_rate": 0.0,
+      "median_first_breach_sec": 38.0536789894104,
+      "median_terminal_duration_sec": 47.68157601356506,
+      "sl_rate": 100.0,
       "tp_rate": 0.0,
       "win_rate": 0.0
     },
     "TREND_PULLBACK_EMA": {
       "attempts": 0,
-      "average_pnl_pct": null,
+      "average_pnl_pct": 1.2465,
       "classification": "low-sample",
       "emitted": 0,
-      "gated": 3,
-      "generated": 3,
+      "gated": 0,
+      "generated": 0,
       "geometry_final_changed": 0,
       "geometry_final_preserved": 0,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
-      "median_first_breach_sec": null,
-      "median_terminal_duration_sec": null,
-      "sl_rate": 0.0,
+      "median_first_breach_sec": 49.31041097640991,
+      "median_terminal_duration_sec": 62.35355806350708,
+      "sl_rate": 50.0,
       "tp_rate": 0.0,
       "win_rate": 0.0
     }
   },
-  "quality_by_setup": {},
+  "quality_by_setup": {
+    "FAILED_AUCTION_RECLAIM": {
+      "average_pnl_pct": -0.331,
+      "closed": 2,
+      "emitted": 2,
+      "median_first_breach_sec": 34.50114858150482,
+      "median_terminal_duration_sec": 47.256638526916504,
+      "sl_rate": 50.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    },
+    "LIQUIDITY_SWEEP_REVERSAL": {
+      "average_pnl_pct": -1.3448,
+      "closed": 1,
+      "emitted": 1,
+      "median_first_breach_sec": 36.95268201828003,
+      "median_terminal_duration_sec": 37.17920708656311,
+      "sl_rate": 100.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    },
+    "SR_FLIP_RETEST": {
+      "average_pnl_pct": -0.4559,
+      "closed": 4,
+      "emitted": 4,
+      "median_first_breach_sec": 38.0536789894104,
+      "median_terminal_duration_sec": 47.68157601356506,
+      "sl_rate": 100.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    },
+    "TREND_PULLBACK_EMA": {
+      "average_pnl_pct": 1.2465,
+      "closed": 2,
+      "emitted": 2,
+      "median_first_breach_sec": 49.31041097640991,
+      "median_terminal_duration_sec": 62.35355806350708,
+      "sl_rate": 50.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    }
+  },
+  "raw_extracts": {
+    "current_channel_funnel_counters": {},
+    "current_path_funnel_counters": {},
+    "previous_channel_funnel_counters": {},
+    "previous_path_funnel_counters": {},
+    "record_count_current_window": 9,
+    "record_count_previous_window": 0,
+    "record_count_scoped": 9
+  },
   "recommended_operator_focus": {
-    "most_likely_bottleneck": "LIQUIDITY_SWEEP_REVERSAL",
+    "most_likely_bottleneck": null,
     "most_promising_healthy_path": null,
-    "most_suspicious_degradation": "EVAL::LIQUIDATION_REVERSAL",
-    "suggested_next_investigation_target": "EVAL::LIQUIDATION_REVERSAL"
+    "most_suspicious_degradation": null,
+    "suggested_next_investigation_target": null
   },
   "runtime_health": {
     "health": "healthy",
-    "heartbeat_age_sec": 45,
+    "heartbeat_age_sec": 70,
     "heartbeat_warning": false,
-    "latest_record_age_sec": null,
-    "overall": "stale",
-    "records_fresh": false,
+    "latest_record_age_sec": 4943,
+    "overall": "healthy",
+    "records_fresh": true,
     "running": true,
     "status": "running"
   }
