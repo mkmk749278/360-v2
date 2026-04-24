@@ -3104,6 +3104,27 @@ class Scanner:
 
     async def _enqueue_signal(self, sig: Any) -> bool:
         self._stamp_origin_setup_identity(sig, getattr(sig, "channel", "") or "UNKNOWN")
+        try:
+            entry = float(getattr(sig, "entry", 0) or 0)
+            sl    = float(getattr(sig, "stop_loss", 0) or 0)
+            atr   = float(getattr(sig, "atr_val", 0) or 0)
+            direction = getattr(sig, "direction", None)
+            if entry > 0 and sl > 0 and direction is not None:
+                sl_dist = abs(entry - sl)
+                min_dist = max(entry * 0.0080, atr * 1.0 if atr > 0 else 0.0)
+                if sl_dist < min_dist:
+                    is_long = direction.value == "LONG" if hasattr(direction, "value") else str(direction).upper() == "LONG"
+                    new_sl = entry - min_dist if is_long else entry + min_dist
+                    ratio  = min_dist / sl_dist if sl_dist > 0 else 1.0
+                    sig.stop_loss = round(new_sl, 8)
+                    sig.original_sl_distance = min_dist
+                    for tp_attr in ("tp1", "tp2", "tp3"):
+                        tp_val = float(getattr(sig, tp_attr, 0) or 0)
+                        if tp_val > 0:
+                            new_tp = entry + abs(entry - tp_val) * ratio if is_long else entry - abs(entry - tp_val) * ratio
+                            setattr(sig, tp_attr, round(new_tp, 8))
+        except Exception:
+            pass
         return await self.signal_queue.put(sig)
 
     async def _prepare_signal(
