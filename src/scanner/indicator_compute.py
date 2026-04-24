@@ -270,6 +270,7 @@ def compute_indicators_for_candle_dict(candle_dict: Dict[str, dict]) -> Dict[str
                 r = rsi(c, 14)
                 valid = r[~np.isnan(r)]
                 ind["rsi_last"] = float(valid[-1]) if len(valid) else None
+                ind["rsi_prev"] = float(valid[-2]) if len(valid) >= 2 else None
             if len(c) >= 20:
                 u, m, lower = bollinger_bands(c, 20)
                 ind["bb_upper_last"] = float(u[-1]) if not np.isnan(u[-1]) else None
@@ -277,7 +278,9 @@ def compute_indicators_for_candle_dict(candle_dict: Dict[str, dict]) -> Dict[str
                 ind["bb_lower_last"] = float(lower[-1]) if not np.isnan(lower[-1]) else None
             if len(c) >= 4:
                 mom = momentum(c, 3)
-                ind["momentum_last"] = float(mom[-1]) if not np.isnan(mom[-1]) else None
+                valid_mom = mom[~np.isnan(mom)]
+                ind["momentum_last"] = float(valid_mom[-1]) if len(valid_mom) else None
+                ind["momentum_array"] = valid_mom.tolist() if len(valid_mom) else None
             if len(c) >= 35:  # slow_period(26) + signal_period(9)
                 ml, sl_line, hist = macd(c)
                 ind["macd_histogram_last"] = (

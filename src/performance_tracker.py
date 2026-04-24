@@ -61,6 +61,7 @@ class SignalRecord:
     first_breach_to_terminal_sec: Optional[float] = None
     max_favorable_excursion_pct: float = 0.0
     max_adverse_excursion_pct: float = 0.0
+    stop_loss: float = 0.0                 # stop-loss price for SL-geometry analysis
     timestamp: float = field(default_factory=time.time)
     signal_quality_pnl_pct: float = 0.0   # TP-based PnL for signal quality stats
     signal_quality_hit_tp: int = 0         # highest TP reached (for signal quality classification)
@@ -135,6 +136,7 @@ class PerformanceTracker:
         first_breach_to_terminal_sec: Optional[float] = None,
         max_favorable_excursion_pct: float = 0.0,
         max_adverse_excursion_pct: float = 0.0,
+        stop_loss: float = 0.0,
         signal_quality_pnl_pct: Optional[float] = None,
         signal_quality_hit_tp: Optional[int] = None,
         session_name: str = "",
@@ -179,6 +181,7 @@ class PerformanceTracker:
             first_breach_to_terminal_sec=first_breach_to_terminal_sec,
             max_favorable_excursion_pct=max_favorable_excursion_pct,
             max_adverse_excursion_pct=max_adverse_excursion_pct,
+            stop_loss=stop_loss,
             signal_quality_pnl_pct=normalize_pnl_pct(sq_pnl),
             signal_quality_hit_tp=sq_hit_tp,
             session_name=session_name,
@@ -1060,6 +1063,8 @@ class PerformanceTracker:
                     item["signal_quality_hit_tp"] = item.get("hit_tp", 0)
                 if "session_name" not in item:
                     item["session_name"] = ""
+                if "stop_loss" not in item:
+                    item["stop_loss"] = 0.0
                 for _field in (
                     "create_timestamp",
                     "dispatch_timestamp",

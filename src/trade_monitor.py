@@ -326,6 +326,7 @@ class TradeMonitor:
                 first_breach_to_terminal_sec=_duration(first_breach_ts_epoch, terminal_ts_epoch),
                 max_favorable_excursion_pct=sig.max_favorable_excursion_pct,
                 max_adverse_excursion_pct=sig.max_adverse_excursion_pct,
+                stop_loss=float(sig.stop_loss),
                 signal_quality_pnl_pct=signal_quality_pnl,
                 signal_quality_hit_tp=signal_quality_hit_tp,
             )
