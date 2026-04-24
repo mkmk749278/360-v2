@@ -458,17 +458,38 @@ class TradeMonitor:
         await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
 
     def _latest_price(self, symbol: str) -> Optional[float]:
-        # Prefer real-time tick data over (potentially stale) candle close
+        """Return last 1m candle close — used for PnL and general price display."""
+        candles = self._store.get_candles(symbol, "1m")
+        if candles and len(candles.get("close", [])) > 0:
+            return float(candles["close"][-1])
         ticks = self._store.ticks.get(symbol)
         if ticks:
             tick_price = ticks[-1].get("price")
             if tick_price is not None:
                 return float(tick_price)
-        # Fallback to last closed 1m candle
-        candles = self._store.get_candles(symbol, "1m")
-        if candles and len(candles.get("close", [])) > 0:
-            return float(candles["close"][-1])
         return None
+
+    def _candle_extremes(self, symbol: str) -> tuple:
+        """Return (high, low) of last 1m candle.
+
+        Used for SL/TP evaluation:
+        - LONG  SL: low  <= SL  (wick hit stop → stop order filled on Binance)
+        - SHORT SL: high >= SL  (wick hit stop → stop order filled)
+        - LONG  TP: high >= TP  (wick or close reached TP → limit fill)
+        - SHORT TP: low  <= TP
+
+        Using 1m candle high/low instead of single ticks eliminates ultra-thin
+        single-order spikes (1-2 contracts) that move last trade price
+        but do not represent real sustained price discovery.
+        """
+        candles = self._store.get_candles(symbol, "1m")
+        if candles and len(candles.get("high", [])) > 0 and len(candles.get("low", [])) > 0:
+            return float(candles["high"][-1]), float(candles["low"][-1])
+        # Fallback: treat close as both high and low
+        close = self._latest_price(symbol)
+        if close:
+            return close, close
+        return 0.0, 0.0
 
     def _check_invalidation(self, sig: Signal) -> Optional[str]:
         """Return an invalidation reason string if the signal's thesis is no longer valid.
@@ -686,18 +707,21 @@ class TradeMonitor:
 
         # Stop-loss hit — checked BEFORE invalidation so that a price gap
         # through the SL is never exited at a worse price via invalidation.
-        if is_long and price <= sig.stop_loss:
-            if sig.first_sl_touch_timestamp is None:
-                sig.first_sl_touch_timestamp = utcnow()
-            self._set_realized_pnl(sig, sig.stop_loss)
-            outcome_label = self._apply_final_outcome(sig, hit_tp=0, hit_sl=True)
-            outcome_event = _STOP_OUTCOME_MESSAGES.get(outcome_label, "🔴 EXIT")
-            await self._post_update(sig, outcome_event)
-            self._record_outcome(sig, hit_tp=0, hit_sl=True)
-            await self._post_signal_closed(sig, is_tp=False)
-            self._remove(sig.signal_id)
-            return
-        if not is_long and price >= sig.stop_loss:
+        # Get 1m candle high/low for accurate SL/TP evaluation.
+        # Correct behavior matches real Binance stop orders:
+        #   LONG  SL: candle LOW  reaches SL → stop order triggered (even if close above)
+        #   SHORT SL: candle HIGH reaches SL → stop order triggered (even if close below)
+        #   LONG  TP: candle HIGH reaches TP → take profit triggered
+        #   SHORT TP: candle LOW  reaches TP → take profit triggered
+        # Using 1m candle vs individual ticks eliminates ultra-thin single-order
+        # price spikes that don't represent real sustained price movement.
+        _c_high, _c_low = self._candle_extremes(sig.symbol)
+
+        _sl_triggered = (
+            (is_long and _c_low > 0 and _c_low <= sig.stop_loss) or
+            (not is_long and _c_high > 0 and _c_high >= sig.stop_loss)
+        )
+        if _sl_triggered:
             if sig.first_sl_touch_timestamp is None:
                 sig.first_sl_touch_timestamp = utcnow()
             self._set_realized_pnl(sig, sig.stop_loss)
@@ -732,8 +756,10 @@ class TradeMonitor:
             return
 
         # TP hits (progressive)
+        _tp_hit_price = _c_high if is_long else _c_low
+
         if is_long:
-            if sig.tp3 and price >= sig.tp3 and sig.status != "TP3_HIT":
+            if sig.tp3 and _c_high > 0 and _c_high >= sig.tp3 and sig.status != "TP3_HIT":
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 tp3_pnl = calculate_trade_pnl_pct(
@@ -799,7 +825,7 @@ class TradeMonitor:
                     except Exception as _exc:
                         log.warning("Partial TP1 close failed for {}: {}", sig.symbol, _exc)
         else:
-            if sig.tp3 and price <= sig.tp3 and sig.status != "TP3_HIT":
+            if sig.tp3 and _c_low > 0 and _c_low <= sig.tp3 and sig.status != "TP3_HIT":
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 tp3_pnl = calculate_trade_pnl_pct(
