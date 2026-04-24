@@ -797,30 +797,30 @@ class ScalpChannel(BaseChannel):
         momentum_last = float(momentum_last)
         if direction == Direction.LONG:
             if prev_close > ema9 and prev_close > ema21:
-                return None
+                return self._reject("prev_already_above_emas")
             if close <= ema9 or close <= ema21:
-                return None
+                return self._reject("close_below_emas")
             if close <= prev_close:
-                return None
+                return self._reject("no_close_progression")
             if close <= prev_high:
-                return None
+                return self._reject("no_prev_high_break")
             if last_low > ema21 * 1.001:
-                return None
+                return self._reject("ema21_not_tagged")
             if momentum_last <= 0:
-                return None
+                return self._reject("momentum_flat")
         else:
             if prev_close < ema9 and prev_close < ema21:
-                return None
+                return self._reject("prev_already_below_emas")
             if close >= ema9 or close >= ema21:
-                return None
+                return self._reject("close_above_emas")
             if close >= prev_close:
-                return None
+                return self._reject("no_close_progression")
             if close >= prev_low:
-                return None
+                return self._reject("no_prev_low_break")
             if last_high < ema21 * 0.999:
-                return None
+                return self._reject("ema21_not_tagged")
             if momentum_last >= 0:
-                return None
+                return self._reject("momentum_flat")
 
         # SMC: require at least one FVG or orderblock in the pullback zone
         fvgs = smc_data.get("fvg", [])
@@ -2704,30 +2704,33 @@ class ScalpChannel(BaseChannel):
         if direction == Direction.SHORT and sl <= close:
             return self._reject("invalid_sl_geometry")
 
-        # TP1: previous swing high/low from the divergence detection window.
-        # The divergence pattern is detected over closes[-20:]; the highest high
-        # (lowest low for SHORT) in that same window is the natural first target —
-        # the swing from which price diverged and where divergence resolves.
+        # TP1: nearer 10-candle swing — natural first target from the recent
+        # divergence resolution.  Using a 10-bar window (vs the original 20-bar)
+        # prevents TP1 from collapsing onto TP2 when the 20-bar extreme sits in
+        # the last 10 bars.
         if direction == Direction.LONG:
-            _div_win_highs = [float(h) for h in highs[-20:]] if len(highs) >= 20 else []
-            tp1 = max(_div_win_highs) if _div_win_highs else 0.0
+            _tp1_win = [float(h) for h in highs[-10:]] if len(highs) >= 10 else []
+            tp1 = max(_tp1_win) if _tp1_win else 0.0
             if tp1 <= close:
                 tp1 = close + sl_dist * 1.5
         else:
-            _div_win_lows = [float(low_val) for low_val in lows[-20:]] if len(lows) >= 20 else []
-            tp1 = min(_div_win_lows) if _div_win_lows else close  # close triggers fallback below
+            _tp1_win = [float(low_val) for low_val in lows[-10:]] if len(lows) >= 10 else []
+            tp1 = min(_tp1_win) if _tp1_win else close
             if tp1 >= close:
                 tp1 = close - sl_dist * 1.5
 
-        # TP2: 20-candle 5m swing high/low — structural confirmation level.
+        # TP2: 20-candle structural swing — confirmation target.  Must always
+        # sit at least 1R beyond TP1 to preserve two-stage TP progression.
         if direction == Direction.LONG:
-            tp2 = max(float(h) for h in highs[-20:]) if len(highs) >= 20 else 0.0
-            if tp2 <= close:
-                tp2 = close + sl_dist * 2.5
+            _tp2_win = [float(h) for h in highs[-20:]] if len(highs) >= 20 else []
+            tp2_struct = max(_tp2_win) if _tp2_win else 0.0
+            tp2_rmult = close + sl_dist * 2.5
+            tp2 = max(tp2_struct, tp2_rmult, tp1 + sl_dist * 1.0)
         else:
-            tp2 = min(float(low_val) for low_val in lows[-20:]) if len(lows) >= 20 else close
-            if tp2 >= close:
-                tp2 = close - sl_dist * 2.5
+            _tp2_win = [float(low_val) for low_val in lows[-20:]] if len(lows) >= 20 else []
+            tp2_struct = min(_tp2_win) if _tp2_win else close
+            tp2_rmult = close - sl_dist * 2.5
+            tp2 = min(tp2_struct, tp2_rmult, tp1 - sl_dist * 1.0)
 
         # TP3: HTF (4h/15m) swing high/low — extended target.
         # Prefer 4h data; fall back to 15m if 4h is not available; then R-multiple.
