@@ -527,9 +527,9 @@ class SignalRouter:
         # "Post to free channel only" (OWNER_BRIEF.md).  They must never enter
         # the paid active lifecycle — no correlation lock, no cooldown, no
         # _active_signals registration, no TradeMonitor management.
+        # WATCHLIST free-channel alerts disabled — too spammy (190 messages backlog)
         if getattr(signal, "signal_tier", "") == "WATCHLIST" and signal.channel == "360_SCALP":
-            await self._route_watchlist_to_free(signal)
-            return
+            return  # Silently drop — do NOT send to free channel
 
         # Correlation lock – block any signal for a symbol that already has an
         # open position (regardless of direction to prevent same-dir duplicates)

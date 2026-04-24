@@ -4650,19 +4650,8 @@ class Scanner:
                         }
                         # Notify the free-watch service so it can post a radar
                         # alert to the free channel and create a tracked watch.
-                        _radar_cb = getattr(self, "on_radar_candidate", None)
-                        if _radar_cb is not None:
-                            try:
-                                await _radar_cb(
-                                    symbol=symbol,
-                                    source_channel=chan_name,
-                                    bias=_bias_val,
-                                    setup_name=_setup_val,
-                                    waiting_for="confirm",
-                                    confidence=_radar_sig.confidence,
-                                )
-                            except Exception as _cb_exc:
-                                log.debug("on_radar_candidate callback error: {}", _cb_exc)
+                        # Radar/WATCHLIST free-channel alerts disabled — too spammy
+                        pass  # _radar_cb disabled
             except Exception as _radar_exc:
                 log.debug("Radar eval error {} {}: {}", chan_name, symbol, _radar_exc)
         # ------------------------------------------------------------------
