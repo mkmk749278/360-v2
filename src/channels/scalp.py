@@ -956,12 +956,28 @@ class ScalpChannel(BaseChannel):
         regime: str = "",
     ) -> Optional[Signal]:
         """TREND_PULLBACK_EMA path: price pulls back to EMA9/EMA21 in trend direction."""
-        # Only fire in trending regimes
+        # Allowed regimes: TRENDING_UP/DOWN (direction from label) and
+        # WEAK_TREND (Q7-A conservative widening — direction derived from
+        # EMA9 vs EMA21 alignment).  STRONG_TREND and BREAKOUT_EXPANSION
+        # remain blocked because pullbacks are structurally rare in those
+        # regimes; revisit once we have data confirming WEAK_TREND is safe.
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "TRENDING_UP":
             direction = Direction.LONG
         elif regime_upper == "TRENDING_DOWN":
             direction = Direction.SHORT
+        elif regime_upper == "WEAK_TREND":
+            ind_for_dir = indicators.get("5m", {})
+            ema9_for_dir = ind_for_dir.get("ema9_last")
+            ema21_for_dir = ind_for_dir.get("ema21_last")
+            if ema9_for_dir is None or ema21_for_dir is None:
+                return self._reject("ema_alignment_reject")
+            if ema9_for_dir > ema21_for_dir:
+                direction = Direction.LONG
+            elif ema9_for_dir < ema21_for_dir:
+                direction = Direction.SHORT
+            else:
+                return self._reject("ema_alignment_reject")
         else:
             return self._reject("regime_blocked")
 
@@ -2916,11 +2932,31 @@ class ScalpChannel(BaseChannel):
         regime: str = "",
     ) -> Optional[Signal]:
         """DIVERGENCE_CONTINUATION: hidden CVD divergence in trending regime."""
+        # Allowed regimes: TRENDING_UP/DOWN (direction from label) and
+        # WEAK_TREND (Q7-A conservative widening — direction derived from
+        # EMA9 vs EMA21 alignment).  STRONG_TREND and BREAKOUT_EXPANSION
+        # remain blocked because hidden-divergence continuation is rare in
+        # those regimes (momentum is sustained, not slowing); revisit once
+        # we have data confirming WEAK_TREND is safe.  The downstream
+        # `direction == LONG and ema9 <= ema21: reject` check acts as
+        # cross-validation for the EMA-derived direction.
         regime_upper = regime.upper() if regime else ""
         if regime_upper == "TRENDING_UP":
             direction = Direction.LONG
         elif regime_upper == "TRENDING_DOWN":
             direction = Direction.SHORT
+        elif regime_upper == "WEAK_TREND":
+            ind_for_dir = indicators.get("5m", {})
+            ema9_for_dir = ind_for_dir.get("ema9_last")
+            ema21_for_dir = ind_for_dir.get("ema21_last")
+            if ema9_for_dir is None or ema21_for_dir is None:
+                return self._reject("ema_alignment_reject")
+            if ema9_for_dir > ema21_for_dir:
+                direction = Direction.LONG
+            elif ema9_for_dir < ema21_for_dir:
+                direction = Direction.SHORT
+            else:
+                return self._reject("ema_alignment_reject")
         else:
             return self._reject("regime_blocked")
 
