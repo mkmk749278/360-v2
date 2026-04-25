@@ -141,6 +141,12 @@ class Signal:
     # ---- Structural path metadata (path-specific anchors) ----
     # SR_FLIP_RETEST: the flipped S/R level that was broken and retested.
     sr_flip_level: Optional[float] = None
+    # SR_FLIP_RETEST level-quality telemetry (Item #7 audit fix).
+    # One of "CLUSTERED" (multi-touch structural), "VP_ANCHORED" (volume-profile
+    # node), "SCALAR_FALLBACK" (single 41-bar extremum — weakest), or None.
+    sr_flip_level_quality: Optional[str] = None
+    # Number of prior pivot touches that defined the level (1 for fallback, >=2 for CLUSTERED).
+    sr_flip_level_touches: int = 0
     # POST_DISPLACEMENT_CONTINUATION: the consolidation high (LONG) or low (SHORT)
     # that price broke above/below to confirm re-acceleration.
     pdc_breakout_level: Optional[float] = None

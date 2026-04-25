@@ -256,6 +256,263 @@ def _funding_extreme_structure_tp1(
     )
 
 
+# ═══════════════════════════════════════════════════════════════════════════
+# SR_FLIP structural-level detection (Item #7 audit fix)
+# ───────────────────────────────────────────────────────────────────────────
+# Prior implementation used `max(prior_highs)` / `min(prior_lows)` as the
+# flipped S/R level — a single 41-bar scalar extremum, which is not a
+# structural level (no multi-touch history, no volume anchoring).  That
+# caused two failure modes: (1) SL placed against a random past wick that
+# had no reason to hold, and (2) when the scalar-max high sat above a
+# lower level that actually got broken, the evaluator rejected valid
+# retests because it was looking for a breakout of the wrong price.
+#
+# This helper produces a ranked list of structurally-validated resistance
+# and support candidates:
+#   • CLUSTERED      — ≥2 swing-pivot touches within an ATR band
+#   • VP_ANCHORED    — volume-profile POC / VAH / VAL
+#   • SCALAR_FALLBACK — legacy max(highs)/min(lows) (always emitted so the
+#                      path never loses a setup it would have caught before)
+#
+# Selection prefers candidates that were actually broken+closed past in the
+# 8-bar recent window.  All downstream evaluator logic is unchanged.
+# See: audit 2026-04-24, Item #7 design spec.
+# ═══════════════════════════════════════════════════════════════════════════
+
+from dataclasses import dataclass as _dataclass
+
+
+@_dataclass(frozen=True)
+class _StructuralLevel:
+    price: float
+    side: str                    # "RESISTANCE" | "SUPPORT"
+    quality: str                 # "CLUSTERED" | "VP_ANCHORED" | "SCALAR_FALLBACK"
+    touch_count: int             # 1 for fallback, >=2 for CLUSTERED
+    atr_normalized_width: float  # 0.0 for non-clustered
+    was_broken: bool             # did a recent-window candle break+close past it?
+
+
+def _sr_extract_pivots(values: List[float], kind: str) -> List[tuple]:
+    """1-bar fractal pivots: v[i] ≷ v[i-1] AND v[i] ≷ v[i+1]."""
+    pivots: List[tuple] = []
+    n = len(values)
+    if n < 3:
+        return pivots
+    for i in range(1, n - 1):
+        v = values[i]
+        if kind == "high" and v > values[i - 1] and v > values[i + 1]:
+            pivots.append((v, i))
+        elif kind == "low" and v < values[i - 1] and v < values[i + 1]:
+            pivots.append((v, i))
+    return pivots
+
+
+def _sr_cluster_pivots(
+    pivots: List[tuple],
+    atr: float,
+    band_atr: float,
+    min_touches: int,
+) -> List[Dict[str, Any]]:
+    """Greedy band-clustering; returns clusters with >= min_touches."""
+    if atr <= 0 or len(pivots) < min_touches:
+        return []
+    band = atr * band_atr
+    sorted_pivots = sorted(pivots, key=lambda x: x[0])
+
+    clusters: List[List[tuple]] = []
+    current: List[tuple] = [sorted_pivots[0]]
+    cluster_min = sorted_pivots[0][0]
+    for p in sorted_pivots[1:]:
+        if p[0] - cluster_min <= band:
+            current.append(p)
+        else:
+            clusters.append(current)
+            current = [p]
+            cluster_min = p[0]
+    clusters.append(current)
+
+    results: List[Dict[str, Any]] = []
+    for cl in clusters:
+        if len(cl) < min_touches:
+            continue
+        prices = [p[0] for p in cl]
+        price_mean = sum(prices) / len(prices)
+        width = max(prices) - min(prices)
+        results.append({
+            "price": price_mean,
+            "touch_count": len(cl),
+            "atr_normalized_width": width / atr if atr > 0 else 0.0,
+        })
+    return results
+
+
+def _sr_was_broken_up(
+    level: float, recent_highs: List[float], recent_closes: List[float],
+    recent_opens: List[float], prev_closes: List[float],
+) -> bool:
+    """Mirrors the break-check used by _evaluate_sr_flip_retest."""
+    for h, c, o, pc in zip(recent_highs, recent_closes, recent_opens, prev_closes):
+        if h > level and c > level and (o <= level or pc <= level):
+            return True
+    return False
+
+
+def _sr_was_broken_down(
+    level: float, recent_lows: List[float], recent_closes: List[float],
+    recent_opens: List[float], prev_closes: List[float],
+) -> bool:
+    for low_val, c, o, pc in zip(recent_lows, recent_closes, recent_opens, prev_closes):
+        if low_val < level and c < level and (o >= level or pc >= level):
+            return True
+    return False
+
+
+def _sr_quality_rank(quality: str) -> int:
+    return {"CLUSTERED": 3, "VP_ANCHORED": 2, "SCALAR_FALLBACK": 1}.get(quality, 0)
+
+
+def _sr_detect_levels(
+    highs: List[float],
+    lows: List[float],
+    closes: List[float],
+    opens: List[float],
+    atr: float,
+    volume_poc: Optional[float] = None,
+    volume_vah: Optional[float] = None,
+    volume_val: Optional[float] = None,
+    min_touches: int = 2,
+    cluster_band_atr: float = 0.3,
+) -> Dict[str, Optional[_StructuralLevel]]:
+    """Best broken-and-structural resistance/support for SR_FLIP retest.
+
+    Windows match _evaluate_sr_flip_retest exactly:
+      prior window:  [-50:-9]  (41 bars for pivot extraction)
+      recent window: [-9:-2]   (7 closed candles for break search)
+      prev_closes:   [-10:-3]  (for gap-up / gap-down confirmation)
+
+    Returns {"resistance": _StructuralLevel|None, "support": _StructuralLevel|None}
+    """
+    if len(highs) < 55 or len(lows) < 55 or len(closes) < 55 or len(opens) < 1:
+        return {"resistance": None, "support": None}
+
+    prior_highs = [float(h) for h in highs[-50:-9]]
+    prior_lows = [float(low_val) for low_val in lows[-50:-9]]
+    recent_highs = [float(h) for h in highs[-9:-2]]
+    recent_lows = [float(low_val) for low_val in lows[-9:-2]]
+    recent_closes = [float(c) for c in closes[-9:-2]]
+    recent_opens = [float(o) for o in opens[-9:-2]]
+    recent_prev_closes = [float(c) for c in closes[-10:-3]]
+    current_close = float(closes[-1])
+
+    # Pivots + clustering
+    high_pivots = _sr_extract_pivots(prior_highs, "high")
+    low_pivots = _sr_extract_pivots(prior_lows, "low")
+    high_clusters = _sr_cluster_pivots(high_pivots, atr, cluster_band_atr, min_touches)
+    low_clusters = _sr_cluster_pivots(low_pivots, atr, cluster_band_atr, min_touches)
+
+    resistance_cands: List[_StructuralLevel] = []
+    support_cands: List[_StructuralLevel] = []
+
+    for cl in high_clusters:
+        resistance_cands.append(_StructuralLevel(
+            price=cl["price"], side="RESISTANCE", quality="CLUSTERED",
+            touch_count=cl["touch_count"],
+            atr_normalized_width=cl["atr_normalized_width"],
+            was_broken=False,
+        ))
+    for cl in low_clusters:
+        support_cands.append(_StructuralLevel(
+            price=cl["price"], side="SUPPORT", quality="CLUSTERED",
+            touch_count=cl["touch_count"],
+            atr_normalized_width=cl["atr_normalized_width"],
+            was_broken=False,
+        ))
+
+    # VP anchoring (additive)
+    if volume_vah is not None and float(volume_vah) > 0:
+        resistance_cands.append(_StructuralLevel(
+            price=float(volume_vah), side="RESISTANCE", quality="VP_ANCHORED",
+            touch_count=1, atr_normalized_width=0.0, was_broken=False,
+        ))
+    if volume_val is not None and float(volume_val) > 0:
+        support_cands.append(_StructuralLevel(
+            price=float(volume_val), side="SUPPORT", quality="VP_ANCHORED",
+            touch_count=1, atr_normalized_width=0.0, was_broken=False,
+        ))
+    if volume_poc is not None and float(volume_poc) > 0:
+        poc = float(volume_poc)
+        resistance_cands.append(_StructuralLevel(
+            price=poc, side="RESISTANCE", quality="VP_ANCHORED",
+            touch_count=1, atr_normalized_width=0.0, was_broken=False,
+        ))
+        support_cands.append(_StructuralLevel(
+            price=poc, side="SUPPORT", quality="VP_ANCHORED",
+            touch_count=1, atr_normalized_width=0.0, was_broken=False,
+        ))
+
+    # Scalar fallback — always emitted (guarantees non-empty output, preserving
+    # legacy behaviour when no structural level exists).
+    if prior_highs:
+        resistance_cands.append(_StructuralLevel(
+            price=max(prior_highs), side="RESISTANCE", quality="SCALAR_FALLBACK",
+            touch_count=1, atr_normalized_width=0.0, was_broken=False,
+        ))
+    if prior_lows:
+        support_cands.append(_StructuralLevel(
+            price=min(prior_lows), side="SUPPORT", quality="SCALAR_FALLBACK",
+            touch_count=1, atr_normalized_width=0.0, was_broken=False,
+        ))
+
+    # Filter degenerate prices (e.g. VP data from a pair with no volume)
+    resistance_cands = [c for c in resistance_cands if c.price > 0]
+    support_cands = [c for c in support_cands if c.price > 0]
+
+    # Annotate with break detection
+    resistance_with_break = [
+        _StructuralLevel(
+            price=c.price, side=c.side, quality=c.quality,
+            touch_count=c.touch_count,
+            atr_normalized_width=c.atr_normalized_width,
+            was_broken=_sr_was_broken_up(
+                c.price, recent_highs, recent_closes, recent_opens, recent_prev_closes,
+            ),
+        )
+        for c in resistance_cands
+    ]
+    support_with_break = [
+        _StructuralLevel(
+            price=c.price, side=c.side, quality=c.quality,
+            touch_count=c.touch_count,
+            atr_normalized_width=c.atr_normalized_width,
+            was_broken=_sr_was_broken_down(
+                c.price, recent_lows, recent_closes, recent_opens, recent_prev_closes,
+            ),
+        )
+        for c in support_cands
+    ]
+
+    # Rank: was_broken DESC, quality DESC, touches DESC, width ASC, proximity ASC
+    resistance_with_break.sort(key=lambda lv: (
+        -int(lv.was_broken),
+        -_sr_quality_rank(lv.quality),
+        -lv.touch_count,
+        lv.atr_normalized_width,
+        abs(lv.price - current_close),
+    ))
+    support_with_break.sort(key=lambda lv: (
+        -int(lv.was_broken),
+        -_sr_quality_rank(lv.quality),
+        -lv.touch_count,
+        lv.atr_normalized_width,
+        abs(lv.price - current_close),
+    ))
+
+    return {
+        "resistance": resistance_with_break[0] if resistance_with_break else None,
+        "support": support_with_break[0] if support_with_break else None,
+    }
+
+
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
         super().__init__(CHANNEL_SCALP)
@@ -1990,8 +2247,33 @@ class ScalpChannel(BaseChannel):
         recent_opens = [float(o) for o in opens[-9:-2]]
         recent_prev_closes = [float(c) for c in closes[-10:-3]]
 
-        prior_swing_high = max(prior_highs)
-        prior_swing_low = min(prior_lows)
+        # Structural level detection (Item #7 audit fix) — replaces prior
+        # `max(prior_highs) / min(prior_lows)` scalar extrema with a ranked
+        # detector that prefers multi-touch clusters and VP-anchored levels
+        # over one-off wicks.  Falls through to the legacy scalar when no
+        # structural level exists, so the path never loses a setup it would
+        # have previously caught.  See _sr_detect_levels() for algorithm.
+        ind_early = indicators.get("5m", {})
+        atr_for_levels = float(ind_early.get("atr_last") or close * 0.002)
+        _sr_levels = _sr_detect_levels(
+            highs=list(highs),
+            lows=list(lows),
+            closes=list(closes),
+            opens=list(opens),
+            atr=atr_for_levels,
+            volume_poc=ind_early.get("volume_poc"),
+            volume_vah=ind_early.get("volume_vah"),
+            volume_val=ind_early.get("volume_val"),
+        )
+        _resistance_lv = _sr_levels["resistance"]
+        _support_lv = _sr_levels["support"]
+
+        # Preserve legacy variable names so downstream breakout/reclaim logic
+        # (lines below) is untouched.  When a side has no candidate, use a
+        # sentinel that trivially fails the breakout test for that direction
+        # (LONG needs high > resistance; inf makes that impossible).
+        prior_swing_high = _resistance_lv.price if _resistance_lv is not None else float("inf")
+        prior_swing_low = _support_lv.price if _support_lv is not None else float("-inf")
 
         # Bullish flip: require breakout-close acceptance above prior swing high.
         long_breakout_close_confirmed = any(
@@ -2231,6 +2513,13 @@ class ScalpChannel(BaseChannel):
         sig.tp2 = round(tp2, 8)
         sig.tp3 = round(tp3, 8)
         sig.sr_flip_level = round(level, 8)
+        # Item #7 — level quality telemetry.  The fired-direction side of the
+        # structural detector is the one that defines `level`.  Stored on the
+        # Signal for performance tracking so we can measure per-quality SL rate
+        # post-deploy and iterate on the algorithm based on real data.
+        _lv_for_direction = _resistance_lv if direction == Direction.LONG else _support_lv
+        sig.sr_flip_level_quality = _lv_for_direction.quality if _lv_for_direction else None
+        sig.sr_flip_level_touches = _lv_for_direction.touch_count if _lv_for_direction else 0
         sig.original_tp1 = sig.tp1
         sig.original_tp2 = sig.tp2
         sig.original_tp3 = sig.tp3
@@ -2250,11 +2539,27 @@ class ScalpChannel(BaseChannel):
         # deducts post-scoring.
         sig.confidence = min(100.0, sig.confidence + 8.0)
 
+        # Item #7 — level-quality soft penalty.  Biases scoring toward signals
+        # backed by structurally-validated levels without introducing a hard gate.
+        # Magnitudes are intentionally modest (A+ tier threshold is 80).
+        #   CLUSTERED + >=3 touches  → -3.0 (bonus: strongest structural evidence)
+        #   CLUSTERED + 2 touches    →  0.0 (neutral)
+        #   VP_ANCHORED              →  0.0 (neutral)
+        #   SCALAR_FALLBACK          → +5.0 (penalty: level is a guess)
+        level_quality_penalty = 0.0
+        if _lv_for_direction is not None:
+            if _lv_for_direction.quality == "CLUSTERED" and _lv_for_direction.touch_count >= 3:
+                level_quality_penalty = -3.0
+            elif _lv_for_direction.quality == "SCALAR_FALLBACK":
+                level_quality_penalty = 5.0
+
         # Accumulate soft penalties — the scanner deducts these from confidence after
         # the composite scoring pass, preserving the separation between hard gates and
         # soft quality adjustments.
-        total_penalty = proximity_penalty + wick_penalty + rsi_penalty + fvg_penalty
-        if total_penalty > 0.0:
+        total_penalty = (
+            proximity_penalty + wick_penalty + rsi_penalty + fvg_penalty + level_quality_penalty
+        )
+        if total_penalty != 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
 
         return sig
