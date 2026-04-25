@@ -256,6 +256,47 @@ def _funding_extreme_structure_tp1(
     )
 
 
+def _enforce_tp_ladder_monotonicity(
+    tp1: float,
+    tp2: float,
+    tp3: float,
+    close: float,
+    sl_dist: float,
+    direction: Direction,
+    *,
+    tp2_rmult_floor: float = 2.5,
+    tp3_rmult_floor: float = 3.5,
+    tp_gap_rmult: float = 0.5,
+) -> tuple[float, float, float]:
+    """Enforce TP-ladder monotonicity post-fallback (Q4-B audit fix).
+
+    Mirrors the FAILED_AUCTION_RECLAIM pattern (canonical reference at the
+    end of `_evaluate_failed_auction_reclaim`): when the geometry-derived
+    tp2 (or tp3) collapses to-or-past tp1 (or tp2) for LONG / SHORT, set
+    it to a value that is BOTH ≥ R-multiple-from-close AND prior-tp plus
+    a gap of ``tp_gap_rmult × sl_dist``.
+
+    Defaults (``tp2_rmult_floor=2.5``, ``tp3_rmult_floor=3.5``,
+    ``tp_gap_rmult=0.5``) match FAR's deployed values.  Each evaluator
+    overrides via kwargs to preserve its own R-multiple intent (e.g. TPE
+    uses 2.0 / 4.0; FUNDING_EXTREME uses 2.0 / 3.5).
+
+    No-op when the ladder is already monotonic — the helper only widens,
+    never narrows.  Pure arithmetic; no IO, no logging.
+    """
+    if direction == Direction.LONG:
+        if tp2 <= tp1:
+            tp2 = max(close + sl_dist * tp2_rmult_floor, tp1 + sl_dist * tp_gap_rmult)
+        if tp3 <= tp2:
+            tp3 = max(close + sl_dist * tp3_rmult_floor, tp2 + sl_dist * tp_gap_rmult)
+    else:
+        if tp2 >= tp1:
+            tp2 = min(close - sl_dist * tp2_rmult_floor, tp1 - sl_dist * tp_gap_rmult)
+        if tp3 >= tp2:
+            tp3 = min(close - sl_dist * tp3_rmult_floor, tp2 - sl_dist * tp_gap_rmult)
+    return tp1, tp2, tp3
+
+
 # ═══════════════════════════════════════════════════════════════════════════
 # SR_FLIP structural-level detection (Item #7 audit fix)
 # ───────────────────────────────────────────────────────────────────────────
@@ -887,9 +928,16 @@ class ScalpChannel(BaseChannel):
         # Fall back to ATR-ratio approach for any missing TP levels
         if tp1 <= 0 or (direction == Direction.LONG and tp1 <= close) or (direction == Direction.SHORT and tp1 >= close):
             tp1 = close + sl_dist * 1.5 if direction == Direction.LONG else close - sl_dist * 1.5
-        if tp2 <= 0 or (direction == Direction.LONG and tp2 <= tp1) or (direction == Direction.SHORT and tp2 >= tp1):
+        if tp2 <= 0:
             tp2 = close + sl_dist * 2.5 if direction == Direction.LONG else close - sl_dist * 2.5
         tp3 = close + sl_dist * 4.0 if direction == Direction.LONG else close - sl_dist * 4.0
+        # Q4-B: enforce ladder monotonicity post-fallback.  Prior code's
+        # `tp2 <= tp1: tp2 = close ± sl_dist*2.5` could leave tp2 ≤ tp1 when
+        # tp1 came from an FVG sitting > 2.5R past close.
+        tp1, tp2, tp3 = _enforce_tp_ladder_monotonicity(
+            tp1, tp2, tp3, close, sl_dist, direction,
+            tp2_rmult_floor=2.5, tp3_rmult_floor=4.0,
+        )
 
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
@@ -1147,15 +1195,18 @@ class ScalpChannel(BaseChannel):
                 tp2 = max(float(h) for h in _4h_highs[-10:]) if _4h_highs else close + sl_dist * 2.0
             else:
                 tp2 = min(float(l) for l in _4h_lows[-10:]) if _4h_lows else close - sl_dist * 2.0
-            if direction == Direction.LONG and tp2 <= tp1:
-                tp2 = close + sl_dist * 2.0
-            if direction == Direction.SHORT and tp2 >= tp1:
-                tp2 = close - sl_dist * 2.0
         else:
             tp2 = close + sl_dist * 2.0 if direction == Direction.LONG else close - sl_dist * 2.0
 
         # TP3: ratio fallback
         tp3 = close + 4.0 * sl_dist if direction == Direction.LONG else close - 4.0 * sl_dist
+        # Q4-B: enforce ladder monotonicity.  Prior code's no-4h branch
+        # had no tp1-relative floor; the 4h branch fell back to 2.0R which
+        # could still be ≤ tp1 when tp1 sat at the 5m swing-high extreme.
+        tp1, tp2, tp3 = _enforce_tp_ladder_monotonicity(
+            tp1, tp2, tp3, close, sl_dist, direction,
+            tp2_rmult_floor=2.0, tp3_rmult_floor=4.0,
+        )
 
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
@@ -1358,6 +1409,15 @@ class ScalpChannel(BaseChannel):
                 sig.tp1 = close_now - _risk * 1.5
                 sig.tp2 = close_now - _risk * 2.5
                 sig.tp3 = close_now - _risk * 4.0
+
+        # Q4-B: enforce ladder monotonicity.  The fib branch picks each TP
+        # independently against close (not against the prior TP), so a
+        # pathological geometry (small bounce + large cascade) can produce
+        # tp1=fib but tp2=ATR-fallback < tp1.
+        sig.tp1, sig.tp2, sig.tp3 = _enforce_tp_ladder_monotonicity(
+            sig.tp1, sig.tp2, sig.tp3, close_now, _risk, reversal_direction,
+            tp2_rmult_floor=2.5, tp3_rmult_floor=4.0,
+        )
 
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
@@ -2708,6 +2768,13 @@ class ScalpChannel(BaseChannel):
 
         tp2 = close + sl_dist * 2.0 if direction == Direction.LONG else close - sl_dist * 2.0
         tp3 = close + sl_dist * 3.5 if direction == Direction.LONG else close - sl_dist * 3.5
+        # Q4-B: enforce ladder monotonicity.  tp1 from `_funding_extreme_structure_tp1`
+        # can sit > 2R from close when the nearest qualifying FVG/OB is far,
+        # which would invert the flat tp2 = close ± 2R fallback below it.
+        tp1, tp2, tp3 = _enforce_tp_ladder_monotonicity(
+            tp1, tp2, tp3, close, sl_dist, direction,
+            tp2_rmult_floor=2.0, tp3_rmult_floor=3.5,
+        )
 
         profile = smc_data.get("pair_profile")
         _regime_ctx = smc_data.get("regime_context")
@@ -3361,9 +3428,14 @@ class ScalpChannel(BaseChannel):
         # ATR-ratio fallback for any missing targets
         if tp1 <= 0 or (direction == Direction.LONG and tp1 <= close) or (direction == Direction.SHORT and tp1 >= close):
             tp1 = close + sl_dist * 1.5 if direction == Direction.LONG else close - sl_dist * 1.5
-        if tp2 <= 0 or (direction == Direction.LONG and tp2 <= tp1) or (direction == Direction.SHORT and tp2 >= tp1):
+        if tp2 <= 0:
             tp2 = close + sl_dist * 2.5 if direction == Direction.LONG else close - sl_dist * 2.5
         tp3 = close + sl_dist * 4.0 if direction == Direction.LONG else close - sl_dist * 4.0
+        # Q4-B: enforce ladder monotonicity (same pattern as LSR).
+        tp1, tp2, tp3 = _enforce_tp_ladder_monotonicity(
+            tp1, tp2, tp3, close, sl_dist, direction,
+            tp2_rmult_floor=2.5, tp3_rmult_floor=4.0,
+        )
 
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
