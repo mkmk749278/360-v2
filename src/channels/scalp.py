@@ -910,7 +910,7 @@ class ScalpChannel(BaseChannel):
             pair_tier=profile.tier if profile else "MIDCAP",
         )
         if sig is None:
-            return None
+            return self._reject("build_signal_failed")
 
         # Override with structure-based SL and TP targets
         sig.stop_loss = round(sl, 8)
@@ -1528,44 +1528,46 @@ class ScalpChannel(BaseChannel):
             atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
             pair_tier=_pair_profile.tier if _pair_profile else "MIDCAP",
         )
-        if sig is not None:
-            # Override TPs with evaluator-authored R-multiple targets (B13 compliance:
-            # Type A — Fixed Ratio per OWNER_BRIEF.md: 1.5R, 2.5R, 4.0R).
-            # Use the actual SL from the built signal as the risk basis so the
-            # multipliers are consistent with whatever sl_dist adjustments
-            # build_channel_signal applied.  Fall back to ATR when risk is
-            # degenerate (entry ≈ stop_loss).
-            entry = sig.entry
-            risk = abs(entry - sig.stop_loss)
-            if risk < atr_val * 0.01:  # degenerate: SL essentially at entry — fall back to 1× ATR
-                risk = atr_val
-            if direction == Direction.LONG:
-                sig.tp1 = round(entry + risk * 1.5, 8)
-                sig.tp2 = round(entry + risk * 2.5, 8)
-                sig.tp3 = round(entry + risk * 4.0, 8)
-            else:
-                sig.tp1 = round(entry - risk * 1.5, 8)
-                sig.tp2 = round(entry - risk * 2.5, 8)
-                sig.tp3 = round(entry - risk * 4.0, 8)
-            sig.original_tp1 = sig.tp1
-            sig.original_tp2 = sig.tp2
-            sig.original_tp3 = sig.tp3
-            sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
-            sig.trailing_stage = 0
-            sig.partial_close_pct = 0.0
-            # Accumulate soft penalties then assign once.
-            _penalty = getattr(sig, "soft_penalty_total", 0.0)
-            if order_book is None:
-                # No order book available — signal is valid on tick-flow alone
-                # but carries lower certainty.
-                _penalty += 10.0
-            if obi_penalty > 0:
-                # Marginal OBI in fast regime: weaker confirmation layer.
-                _penalty += obi_penalty
-            if rsi_penalty > 0:
-                # Borderline RSI: signal may still be valid but with lower certainty.
-                _penalty += rsi_penalty
-            sig.soft_penalty_total = _penalty
+        if sig is None:
+            return self._reject("build_signal_failed")
+
+        # Override TPs with evaluator-authored R-multiple targets (B13 compliance:
+        # Type A — Fixed Ratio per OWNER_BRIEF.md: 1.5R, 2.5R, 4.0R).
+        # Use the actual SL from the built signal as the risk basis so the
+        # multipliers are consistent with whatever sl_dist adjustments
+        # build_channel_signal applied.  Fall back to ATR when risk is
+        # degenerate (entry ≈ stop_loss).
+        entry = sig.entry
+        risk = abs(entry - sig.stop_loss)
+        if risk < atr_val * 0.01:  # degenerate: SL essentially at entry — fall back to 1× ATR
+            risk = atr_val
+        if direction == Direction.LONG:
+            sig.tp1 = round(entry + risk * 1.5, 8)
+            sig.tp2 = round(entry + risk * 2.5, 8)
+            sig.tp3 = round(entry + risk * 4.0, 8)
+        else:
+            sig.tp1 = round(entry - risk * 1.5, 8)
+            sig.tp2 = round(entry - risk * 2.5, 8)
+            sig.tp3 = round(entry - risk * 4.0, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+        # Accumulate soft penalties then assign once.
+        _penalty = getattr(sig, "soft_penalty_total", 0.0)
+        if order_book is None:
+            # No order book available — signal is valid on tick-flow alone
+            # but carries lower certainty.
+            _penalty += 10.0
+        if obi_penalty > 0:
+            # Marginal OBI in fast regime: weaker confirmation layer.
+            _penalty += obi_penalty
+        if rsi_penalty > 0:
+            # Borderline RSI: signal may still be valid but with lower certainty.
+            _penalty += rsi_penalty
+        sig.soft_penalty_total = _penalty
         return sig
 
     # ------------------------------------------------------------------
@@ -2464,7 +2466,12 @@ class ScalpChannel(BaseChannel):
                 tp1 = close - sl_dist * 1.5
             tp1 = min(tp1, close - sl_dist * 1.2)
 
-        # TP2: 4h target or fallback
+        # TP2: 4h target or fallback.  When the 4h max/min fails the
+        # tp2-vs-tp1 monotonicity check, the fallback must enforce a real gap
+        # above (LONG) / below (SHORT) tp1 — mirroring the FAILED_AUCTION_RECLAIM
+        # pattern.  Pre-fix this branch could leave tp2 ≤ tp1 (collapse when
+        # tp1 came from the same close + sl_dist*1.5 fallback, or inversion
+        # when tp1 sat above the 1.5R fallback).
         candles_4h = candles.get("4h")
         if candles_4h and len(candles_4h.get("high", [])) >= 5:
             _4h_highs = candles_4h.get("high", [])
@@ -2472,11 +2479,11 @@ class ScalpChannel(BaseChannel):
             if direction == Direction.LONG:
                 tp2 = max(float(h) for h in _4h_highs[-10:]) if _4h_highs else close + sl_dist * 1.5
                 if tp2 <= tp1:
-                    tp2 = close + sl_dist * 1.5
+                    tp2 = max(close + sl_dist * 1.5, tp1 + sl_dist * 0.5)
             else:
                 tp2 = min(float(low_val) for low_val in _4h_lows[-10:]) if _4h_lows else close - sl_dist * 1.5
                 if tp2 >= tp1:
-                    tp2 = close - sl_dist * 1.5
+                    tp2 = min(close - sl_dist * 1.5, tp1 - sl_dist * 0.5)
         else:
             tp2 = close + sl_dist * 1.5 if direction == Direction.LONG else close - sl_dist * 1.5
             if direction == Direction.LONG and tp2 <= tp1:
