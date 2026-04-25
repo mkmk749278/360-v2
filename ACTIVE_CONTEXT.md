@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-25 — Audit-2 session end (Q4-A + Q5-A + Q5-B + Q7-A shipped)*
+*Updated: 2026-04-25 — Q4-B session end (Q4-A + Q4-B + Q5-A + Q5-B + Q7-A all shipped)*
 
 ---
 
@@ -51,6 +51,7 @@ What to look for in the next zip:
 | **Q5-B: WHALE `build_signal_failed` telemetry** | `src/channels/scalp.py:~1531` | **Audit-2 (5d81b23)** |
 | **Q4-A: SR_FLIP TP1==TP2 collapse in 4h-data branch** | `src/channels/scalp.py:~2475/2479` | **Audit-2 (5d81b23)** |
 | **Q7-A: TPE/DIV_CONT accept WEAK_TREND (conservative widening)** | `src/channels/scalp.py:~961/2920` | **Audit-2 (759b7fc)** |
+| **Q4-B: TP-ladder monotonicity helper across LSR/TPE/LIQ_REV/FUNDING_EXT/CLS** | `src/channels/scalp.py:259` (helper) + 5 wire-up sites | **Audit-2 (75f5556 / #226)** |
 
 ---
 
@@ -64,14 +65,14 @@ What to look for in the next zip:
 
 ---
 
-## Next PR Queue (post Audit-2)
+## Next PR Queue (post Q4-B)
 
 | Priority | Task | Scope |
 |---|---|---|
-| 1 | Read next monitor zip — validate Q4-A, Q7-A | Observation; data-driven decisions |
-| 2 | **Q4-B — Generalize TP monotonicity guard** across LSR, TPE, LIQ_REV, FUNDING_EXT, CLS | Same FAR/Q4-A pattern; ~25 LOC + 10 tests |
-| 3 | SR_FLIP geometry root-cause (if still > 60% SL post-Q4-A) | Investigate before any further fix |
-| 4 | Decide on STRONG_TREND/BREAKOUT_EXPANSION widening for TPE/DIV_CONT | Needs WEAK_TREND data first |
+| 1 | Read next monitor zip — validate Q4-A, Q4-B, Q7-A all working | Observation; data-driven decisions |
+| 2 | SR_FLIP geometry root-cause (if still > 60% SL post-Q4-A) | Investigate before any further fix |
+| 3 | Decide on STRONG_TREND/BREAKOUT_EXPANSION widening for TPE/DIV_CONT | Needs WEAK_TREND data first |
+| 4 | DRY cleanup: refactor FAR + SR_FLIP_RETEST to use the new `_enforce_tp_ladder_monotonicity` helper | Low value, defer until Phase 1 exits |
 | 5 | **Q2 — Implement orderblock detection** | Out of Phase 1 budget; Phase 2 spec |
 
 ---
@@ -85,13 +86,14 @@ What to look for in the next zip:
 
 ---
 
-## Audit-2 Findings That Did NOT Ship This Session
+## Audit-2 Findings That Did NOT Ship
 
 - **Q1 (per-path SL stats API method)** — skipped: data already in truth-report via `build_quality_by_setup` (`src/runtime_truth_report.py:196`); no operational gap.
-- **Q4-B (generalize TP monotonicity guard)** — queued for next session; same FAR pattern across 5 more evaluators.
-- **Q2 (orderblock detection)** — deferred to Phase 2; out of Phase 1 budget.
+- **Q2 (orderblock detection)** — deferred to Phase 2; out of Phase 1 budget. Algorithm choice (institutional FTB vs engulfing+imbalance) needs spec.
 - **Q6 (FAR scalar struct extrema)** — observation only; FAR's wick-anchored SL + tail/reclaim filters carry the structural load. Not a bug.
 - **Q7-B (ORB env-disabled)** — intentional per PR-06; not a bug.
+
+All other audit findings (Q4-A, Q4-B, Q5-A, Q5-B, Q7-A) are now shipped.
 
 ---
 
