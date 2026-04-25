@@ -338,3 +338,128 @@ class TestSrFlip4hBranchTpMonotonicity:
             f"TP3 must remain below TP2 (SHORT); got tp2={sig.tp2!r}, "
             f"tp3={sig.tp3!r}."
         )
+
+
+# ---------------------------------------------------------------------------
+# Q7-A : Conservative regime widening for TREND_PULLBACK_EMA and
+# DIVERGENCE_CONTINUATION.  Adds WEAK_TREND only; STRONG_TREND and
+# BREAKOUT_EXPANSION must continue to reject.
+#
+# Tests assert reason codes only — they don't depend on the full happy-path
+# fixtures (tests/test_channels.py::TestTrendPullbackEntryQuality has
+# unrelated pre-existing failures).
+# ---------------------------------------------------------------------------
+
+
+def _tpe_indicators(ema9: float = 102.0, ema21: float = 100.0):
+    """Indicators for TREND_PULLBACK_EMA: configurable EMA alignment."""
+    return {"5m": _make_indicators(ema9=ema9, ema21=ema21)}
+
+
+def _div_cont_indicators(ema9: float = 102.0, ema21: float = 100.0):
+    """Indicators for DIVERGENCE_CONTINUATION: configurable EMA alignment."""
+    return {"5m": _make_indicators(ema9=ema9, ema21=ema21)}
+
+
+class TestTpeRegimeWideningWeakTrend:
+    """`_evaluate_trend_pullback` (TREND_PULLBACK_EMA) must accept
+    WEAK_TREND while continuing to block STRONG_TREND and
+    BREAKOUT_EXPANSION (conservative widening, Q7-A)."""
+
+    def _call(self, regime: str, indicators=None):
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sig = ch._evaluate_trend_pullback(
+            "BTCUSDT",
+            candles,
+            indicators if indicators is not None else _tpe_indicators(),
+            {},
+            0.01,
+            10_000_000,
+            regime=regime,
+        )
+        return ch, sig
+
+    def test_weak_trend_passes_regime_gate_long(self):
+        ch, sig = self._call("WEAK_TREND", _tpe_indicators(ema9=102.0, ema21=100.0))
+        # The regime gate must let this through.  Whether the signal then
+        # builds depends on the rest of the pipeline; the regime-gate
+        # contract is "reason is not 'regime_blocked'".
+        assert ch._active_no_signal_reason != "regime_blocked", (
+            "WEAK_TREND must clear the TPE regime gate; got reason "
+            f"{ch._active_no_signal_reason!r}."
+        )
+
+    def test_weak_trend_rejects_when_emas_missing(self):
+        # When EMAs are absent (None) and regime=WEAK_TREND, the new branch
+        # must reject with ema_alignment_reject (direction cannot be derived).
+        bad_ind = {"5m": {k: None for k in (
+            "adx_last", "atr_last", "ema9_last", "ema21_last",
+            "ema200_last", "rsi_last", "momentum_last",
+        )}}
+        ch, sig = self._call("WEAK_TREND", bad_ind)
+        assert sig is None
+        assert ch._active_no_signal_reason == "ema_alignment_reject", (
+            "Missing EMAs in WEAK_TREND must reject with "
+            "'ema_alignment_reject', not 'regime_blocked'; got "
+            f"{ch._active_no_signal_reason!r}."
+        )
+
+    def test_strong_trend_still_blocked(self):
+        ch, sig = self._call("STRONG_TREND")
+        assert sig is None
+        assert ch._active_no_signal_reason == "regime_blocked", (
+            "Conservative widening: STRONG_TREND must still reject for TPE; "
+            f"got {ch._active_no_signal_reason!r}."
+        )
+
+    def test_breakout_expansion_still_blocked(self):
+        ch, sig = self._call("BREAKOUT_EXPANSION")
+        assert sig is None
+        assert ch._active_no_signal_reason == "regime_blocked", (
+            "Conservative widening: BREAKOUT_EXPANSION must still reject "
+            f"for TPE; got {ch._active_no_signal_reason!r}."
+        )
+
+
+class TestDivContRegimeWideningWeakTrend:
+    """`_evaluate_divergence_continuation` (DIVERGENCE_CONTINUATION) must
+    accept WEAK_TREND while continuing to block STRONG_TREND and
+    BREAKOUT_EXPANSION (conservative widening, Q7-A)."""
+
+    def _call(self, regime: str, indicators=None):
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sig = ch._evaluate_divergence_continuation(
+            "BTCUSDT",
+            candles,
+            indicators if indicators is not None else _div_cont_indicators(),
+            {},
+            0.01,
+            10_000_000,
+            regime=regime,
+        )
+        return ch, sig
+
+    def test_weak_trend_passes_regime_gate(self):
+        ch, sig = self._call("WEAK_TREND", _div_cont_indicators(ema9=102.0, ema21=100.0))
+        assert ch._active_no_signal_reason != "regime_blocked", (
+            "WEAK_TREND must clear the DIV_CONT regime gate; got reason "
+            f"{ch._active_no_signal_reason!r}."
+        )
+
+    def test_strong_trend_still_blocked(self):
+        ch, sig = self._call("STRONG_TREND")
+        assert sig is None
+        assert ch._active_no_signal_reason == "regime_blocked", (
+            "Conservative widening: STRONG_TREND must still reject for "
+            f"DIV_CONT; got {ch._active_no_signal_reason!r}."
+        )
+
+    def test_breakout_expansion_still_blocked(self):
+        ch, sig = self._call("BREAKOUT_EXPANSION")
+        assert sig is None
+        assert ch._active_no_signal_reason == "regime_blocked", (
+            "Conservative widening: BREAKOUT_EXPANSION must still reject "
+            f"for DIV_CONT; got {ch._active_no_signal_reason!r}."
+        )
