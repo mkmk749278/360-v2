@@ -6,6 +6,7 @@ on:
     paths-ignore:
       - 'OWNER_BRIEF.md'
       - 'BRIEF_INTEGRITY.md'
+      - 'ACTIVE_CONTEXT.md'
   workflow_dispatch:
 
 permissions:
