@@ -1,22 +1,5 @@
 [
   {
-    "dispatched_at": 1776864953.27099,
-    "signal_id": "TPULLBACK-4A3305D0",
-    "channel": "360_SCALP",
-    "symbol": "ENAUSDT",
-    "direction": "SHORT",
-    "setup_class": "TREND_PULLBACK_EMA",
-    "confidence": 80.5,
-    "signal_tier": "A+",
-    "entry": 0.1106,
-    "sl": 0.11088606,
-    "tp1": 0.10971,
-    "tp2": 0.1093,
-    "tp3": 0.10945574,
-    "market_phase": "TRENDING_DOWN | ATR%ile=48 | Vol=DISTRIBUTION",
-    "telegram_text": "*⚡ TREND PULLBACK EMA* │ *ENAUSDT* │ *SHORT*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `0.110553` – `0.110710` \\(limit order\\)\n   Mid: `0.110600`\n🛑 SL: `0.110886` (+0.26%)\n🎯 TP1: `0.109710` (-0.80%)\n🎯 TP2: `0.109300` (-1.18%)\n🎯 TP3: `0.109456` (-1.03%)\n\n📊 Setup: TREND PULLBACK EMA | Confidence: *80.5* (A)\n⏱ Hold: ~1-2h | R:R 1:3.1\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep LONG at 0.110710 | FVG 0.110960-0.110930 + Above 0.110710 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *A*"
-  },
-  {
     "dispatched_at": 1776866575.0772154,
     "signal_id": "QBREAK-0F21756B",
     "channel": "360_SCALP",
@@ -848,5 +831,22 @@
     "tp3": 0.01281097,
     "market_phase": "TRENDING_DOWN | ATR%ile=35 | Vol=DISTRIBUTION",
     "telegram_text": "*🔄 S/R FLIP RETEST* │ *WUSDT* │ *SHORT*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `0.013173` – `0.013197` \\(limit order\\)\n   Mid: `0.013180`\n🛑 SL: `0.013285` (+0.80%)\n🎯 TP1: `0.013053` (-0.96%)\n🎯 TP2: `0.012712` (-3.55%)\n🎯 TP3: `0.012811` (-2.80%)\n\n📊 Setup: SR FLIP RETEST | Confidence: *81.5* (A)\n⏱ Hold: ~1-2h | R:R 1:1.2\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep LONG at 0.013140 | FVG 0.013200-0.013170 + Above 0.013420 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *A*"
+  },
+  {
+    "dispatched_at": 1777221018.8481364,
+    "signal_id": "SRFLIP-869F6F37",
+    "channel": "360_SCALP",
+    "symbol": "AAVEUSDT",
+    "direction": "LONG",
+    "setup_class": "SR_FLIP_RETEST",
+    "confidence": 84.5,
+    "signal_tier": "A+",
+    "entry": 96.16,
+    "sl": 95.39072,
+    "tp1": 97.31391999,
+    "tp2": 97.69855999,
+    "tp3": 98.85247998,
+    "market_phase": "TRENDING_DOWN | ATR%ile=86 | Vol=ACCUMULATION",
+    "telegram_text": "*🔄 S/R FLIP RETEST* │ *AAVEUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `96.0902` – `96.1899` \\(limit order\\)\n   Mid: `96.1600`\n🛑 SL: `95.3907` (-0.80%)\n🎯 TP1: `97.3139` (+1.20%)\n🎯 TP2: `97.6986` (+1.60%)\n🎯 TP3: `98.8525` (+2.80%)\n\n📊 Setup: SR FLIP RETEST | Confidence: *84.5* (A)\n⏱ Hold: ~1-2h | R:R 1:1.5\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 96.2000 | FVG 96.1200-96.0800 + Below 95.3900 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *A*"
   }
 ]
