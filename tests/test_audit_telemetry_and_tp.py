@@ -741,3 +741,262 @@ class TestQ4BHelperWiredIntoEvaluators:
                 f"{ch._active_no_signal_reason!r}."
             )
 
+
+# ---------------------------------------------------------------------------
+# INV-1 : Make `_check_invalidation` regime-flip & EMA-crossover rules
+# CREATION-relative.
+#
+# Live data (post Q4-A/Q4-B/Q5/Q7-A deploy) showed 19 of 20 closed signals
+# in the last window terminated via `outcome_label="CLOSED"` — i.e. via
+# `TradeMonitor._check_invalidation()` rather than reaching SL or TP.
+# The proximate cause: 9 of 17 SR_FLIP_RETEST LONGs were born in a
+# TRENDING_DOWN regime (they're a counter-trend retest setup by design),
+# but the existing invalidation rule kills any LONG when the current
+# regime is TRENDING_DOWN — regardless of whether the regime CHANGED
+# during the trade.  Same shape for EMA9/EMA21 alignment: counter-trend
+# setups enter with EMAs already misaligned to direction, and the rule
+# fires once the channel age gate (600s) opens.
+#
+# Fix: the rule's docstring says "regime FLIP" but the implementation
+# checks current-only state.  Make it semantically correct — only
+# invalidate when the regime DIFFERS from the regime captured at signal
+# creation (`sig.market_phase`).  For EMA crossover, skip the rule
+# entirely on counter-trend setups (LONG born in TRENDING_DOWN, or SHORT
+# born in TRENDING_UP) because their thesis is structurally counter to
+# short-term EMA alignment from the start.
+# ---------------------------------------------------------------------------
+
+
+from datetime import timedelta as _timedelta
+from unittest.mock import MagicMock as _MagicMock
+from src.channels.base import Signal as _Signal
+from src.trade_monitor import TradeMonitor as _TradeMonitor
+from src.utils import utcnow as _utcnow
+
+
+def _build_invalidation_test_monitor(sig, candles_close=None, regime_detector=None):
+    """Construct a minimal TradeMonitor instance for invalidation testing.
+
+    Mirrors the pattern in tests/test_trade_monitor.py::TestSignalInvalidation
+    but kept local so this test file has no cross-test imports.
+    """
+    sent: list = []
+
+    async def mock_send(chat_id, text):
+        sent.append((chat_id, text))
+
+    data_store = _MagicMock()
+    data_store.ticks = {}
+    if candles_close is not None:
+        closes = list(candles_close)
+        candles_dict = {
+            "close": closes,
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "volume": [1.0] * len(closes),
+        }
+        data_store.get_candles.return_value = candles_dict
+    else:
+        data_store.get_candles.return_value = None
+
+    return _TradeMonitor(
+        data_store=data_store,
+        send_telegram=mock_send,
+        get_active_signals=lambda: {sig.signal_id: sig},
+        remove_signal=lambda sid: None,
+        update_signal=_MagicMock(),
+        regime_detector=regime_detector,
+    )
+
+
+def _make_invalidation_signal(
+    *,
+    direction=Direction.LONG,
+    market_phase: str = "N/A",
+    age_seconds: float = 700.0,
+    entry: float = 30000.0,
+    stop_loss: float = 29850.0,
+    tp1: float = 30150.0,
+):
+    """Return a Signal with controllable market_phase + age for invalidation tests."""
+    sig = _Signal(
+        channel="360_SCALP",
+        symbol="BTCUSDT",
+        direction=direction,
+        entry=entry,
+        stop_loss=stop_loss,
+        tp1=tp1,
+        tp2=entry + (tp1 - entry) * 2.0 if direction == Direction.LONG else entry - (entry - tp1) * 2.0,
+        confidence=85.0,
+        signal_id=f"INV-TEST-{direction.name}",
+    )
+    sig.market_phase = market_phase
+    sig.timestamp = _utcnow() - _timedelta(seconds=age_seconds)
+    return sig
+
+
+class TestInvalidationFlipAware:
+    """`_check_invalidation` regime-flip rule must compare CURRENT regime
+    against the regime captured at signal creation (`sig.market_phase`),
+    not against the signal direction alone.  Counter-trend setups
+    (SR_FLIP, FAR, LIQ_REV, FUNDING_EXT) are intentionally born with
+    regime opposing direction; they must not be invalidated unless the
+    regime actually FLIPS during the trade.
+    """
+
+    # ── Counter-trend signals must NOT be invalidated when regime is unchanged ──
+
+    def test_long_counter_trend_no_invalidation_when_regime_unchanged(self):
+        """LONG signal born in TRENDING_DOWN, regime still TRENDING_DOWN
+        → no invalidation (same regime, no flip)."""
+        sig = _make_invalidation_signal(
+            direction=Direction.LONG, market_phase="TRENDING_DOWN | ATR=18 | Vol=DISTRIBUTION",
+        )
+        regime_detector = _MagicMock()
+        result = _MagicMock()
+        result.regime.value = "TRENDING_DOWN"
+        regime_detector.classify.return_value = result
+        monitor = _build_invalidation_test_monitor(
+            sig, candles_close=[30000.0] * 25, regime_detector=regime_detector,
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None, (
+            f"Counter-trend LONG (born in TRENDING_DOWN) must not be killed "
+            f"when regime is still TRENDING_DOWN; got reason {reason!r}."
+        )
+
+    def test_short_counter_trend_no_invalidation_when_regime_unchanged(self):
+        """SHORT signal born in TRENDING_UP, regime still TRENDING_UP
+        → no invalidation."""
+        sig = _make_invalidation_signal(
+            direction=Direction.SHORT,
+            market_phase="TRENDING_UP | ATR=22 | Vol=ACCUMULATION",
+            entry=30000.0, stop_loss=30150.0, tp1=29850.0,
+        )
+        regime_detector = _MagicMock()
+        result = _MagicMock()
+        result.regime.value = "TRENDING_UP"
+        regime_detector.classify.return_value = result
+        monitor = _build_invalidation_test_monitor(
+            sig, candles_close=[30000.0] * 25, regime_detector=regime_detector,
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None, (
+            f"Counter-trend SHORT (born in TRENDING_UP) must not be killed "
+            f"when regime is still TRENDING_UP; got reason {reason!r}."
+        )
+
+    # ── Genuine regime FLIP must still invalidate (existing rule preserved) ──
+
+    def test_long_invalidated_when_regime_actually_flips(self):
+        """Trend-following LONG born in TRENDING_UP → regime flips to
+        TRENDING_DOWN mid-trade → invalidate (this is the original rule
+        intent and must still fire)."""
+        sig = _make_invalidation_signal(
+            direction=Direction.LONG,
+            market_phase="TRENDING_UP | ATR=15 | Vol=ACCUMULATION",
+        )
+        regime_detector = _MagicMock()
+        result = _MagicMock()
+        result.regime.value = "TRENDING_DOWN"
+        regime_detector.classify.return_value = result
+        monitor = _build_invalidation_test_monitor(
+            sig, candles_close=[30000.0] * 25, regime_detector=regime_detector,
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None, (
+            "Genuine regime flip (TRENDING_UP → TRENDING_DOWN) on a LONG "
+            "signal must still invalidate."
+        )
+        assert "TRENDING_DOWN" in reason
+
+    def test_short_invalidated_when_regime_actually_flips(self):
+        sig = _make_invalidation_signal(
+            direction=Direction.SHORT,
+            market_phase="TRENDING_DOWN | ATR=15 | Vol=DISTRIBUTION",
+            entry=30000.0, stop_loss=30150.0, tp1=29850.0,
+        )
+        regime_detector = _MagicMock()
+        result = _MagicMock()
+        result.regime.value = "TRENDING_UP"
+        regime_detector.classify.return_value = result
+        monitor = _build_invalidation_test_monitor(
+            sig, candles_close=[30000.0] * 25, regime_detector=regime_detector,
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None
+        assert "TRENDING_UP" in reason
+
+    # ── EMA crossover rule must skip counter-trend setups ──
+
+    def test_ema_crossover_skipped_for_counter_trend_long(self):
+        """LONG signal born in TRENDING_DOWN with EMA9 < EMA21 (already
+        misaligned at creation) must NOT be invalidated by the EMA
+        crossover rule — there was no crossover, just the original
+        counter-trend alignment."""
+        sig = _make_invalidation_signal(
+            direction=Direction.LONG,
+            market_phase="TRENDING_DOWN | ATR=18 | Vol=DISTRIBUTION",
+        )
+        # Falling closes → EMA9 < EMA21 (bearish alignment)
+        closes = [30000.0 - i * 10 for i in range(25)]
+        monitor = _build_invalidation_test_monitor(sig, candles_close=closes)
+        reason = monitor._check_invalidation(sig)
+        assert reason is None, (
+            f"Counter-trend LONG must not be killed by EMA crossover "
+            f"rule (EMAs were misaligned at creation); got {reason!r}."
+        )
+
+    def test_ema_crossover_skipped_for_counter_trend_short(self):
+        sig = _make_invalidation_signal(
+            direction=Direction.SHORT,
+            market_phase="TRENDING_UP | ATR=22 | Vol=ACCUMULATION",
+            entry=30000.0, stop_loss=30150.0, tp1=29850.0,
+        )
+        # Rising closes → EMA9 > EMA21
+        closes = [30000.0 + i * 10 for i in range(25)]
+        monitor = _build_invalidation_test_monitor(sig, candles_close=closes)
+        reason = monitor._check_invalidation(sig)
+        assert reason is None
+
+    # ── EMA crossover still fires for trend-following setups ──
+
+    def test_ema_crossover_still_kills_trend_following_long(self):
+        """LONG signal born in TRENDING_UP, EMAs cross to bearish during
+        trade → EMA crossover rule still fires.  Regression guard."""
+        sig = _make_invalidation_signal(
+            direction=Direction.LONG,
+            market_phase="TRENDING_UP | ATR=15 | Vol=ACCUMULATION",
+        )
+        closes = [30000.0 - i * 10 for i in range(25)]  # falling → bearish EMAs
+        monitor = _build_invalidation_test_monitor(sig, candles_close=closes)
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None
+        assert "EMA" in reason
+        assert "LONG" in reason
+
+    # ── Defensive fallback: market_phase missing/empty ──
+
+    def test_default_market_phase_falls_back_to_old_behavior(self):
+        """When market_phase is empty/N-A (older signals or fixtures
+        without market_phase set), the fix must fall back to the
+        pre-existing invalidation behavior so existing tests and live
+        signals don't regress."""
+        sig = _make_invalidation_signal(
+            direction=Direction.LONG, market_phase="N/A",
+        )
+        regime_detector = _MagicMock()
+        result = _MagicMock()
+        result.regime.value = "TRENDING_DOWN"
+        regime_detector.classify.return_value = result
+        monitor = _build_invalidation_test_monitor(
+            sig, candles_close=[30000.0] * 25, regime_detector=regime_detector,
+        )
+        reason = monitor._check_invalidation(sig)
+        # With unknown creation regime, current rule (LONG + TRENDING_DOWN
+        # → kill) must fire.  Backward-compat preserved.
+        assert reason is not None
+        assert "TRENDING_DOWN" in reason
+
+

@@ -543,15 +543,46 @@ class TradeMonitor:
                     "momentum": float(mom_arr[-1]) if len(mom_arr) and not np.isnan(mom_arr[-1]) else None,
                 }
 
-        # 1. Market regime flip – use regime_detector.classify() with indicators
+        # INV-1 audit fix: extract the regime captured at signal CREATION from
+        # `sig.market_phase` (formatted as "REGIME | ATR=... | Vol=...").  The
+        # rules below were buggy when applied to counter-trend setups
+        # (SR_FLIP_RETEST, FAILED_AUCTION_RECLAIM, LIQUIDATION_REVERSAL,
+        # FUNDING_EXTREME_SIGNAL) because those signals are intentionally born
+        # with regime opposing direction — the existing checks fired immediately
+        # at the channel min-age gate even though nothing had changed.
+        # Defensive fallback: when market_phase is missing/N-A, preserve the
+        # pre-existing behaviour so older signals in flight don't regress.
+        _created_regime = (sig.market_phase or "").split("|")[0].strip().upper()
+        _has_creation_regime = _created_regime not in ("", "N/A")
+        _counter_trend = (
+            _has_creation_regime
+            and (
+                (is_long and _created_regime == "TRENDING_DOWN")
+                or (not is_long and _created_regime == "TRENDING_UP")
+            )
+        )
+
+        # 1. Market regime flip – use regime_detector.classify() with indicators.
+        # INV-1: only invalidate when the regime has CHANGED from the creation
+        # regime (a true "flip"), not when the current regime simply matches
+        # the killer condition.
         if self._regime_detector is not None and indicators is not None:
             try:
                 result = self._regime_detector.classify(indicators)
                 regime_label = result.regime.value if result and result.regime else None
-                if is_long and regime_label == "TRENDING_DOWN":
-                    return f"regime shift to {regime_label} – LONG thesis no longer valid"
-                if not is_long and regime_label == "TRENDING_UP":
-                    return f"regime shift to {regime_label} – SHORT thesis no longer valid"
+                if regime_label is not None:
+                    if (
+                        is_long
+                        and regime_label == "TRENDING_DOWN"
+                        and (not _has_creation_regime or _created_regime != "TRENDING_DOWN")
+                    ):
+                        return f"regime shift to {regime_label} – LONG thesis no longer valid"
+                    if (
+                        not is_long
+                        and regime_label == "TRENDING_UP"
+                        and (not _has_creation_regime or _created_regime != "TRENDING_UP")
+                    ):
+                        return f"regime shift to {regime_label} – SHORT thesis no longer valid"
             except Exception as exc:
                 log.debug("Regime detection failed for %s: %s", sig.symbol, exc)
 
@@ -567,9 +598,13 @@ class TradeMonitor:
         # a profitable trade just because the 1m EMA crosses (common noise).
         # Age gate for EMA crossover: don't apply until signal is at least 300s old
         # to prevent killing a valid signal before price even moves.
+        # INV-1: skip the EMA-crossover rule entirely for counter-trend setups —
+        # their EMAs were misaligned at creation, so a "crossover" detection here
+        # is a false positive: nothing crossed, the alignment is unchanged.
         _crossover_min_age = 300  # seconds
         if (
-            ema9 is not None
+            not _counter_trend
+            and ema9 is not None
             and ema21 is not None
             and sig.status not in ("TP1_HIT", "TP2_HIT")
             and age_secs >= _crossover_min_age
