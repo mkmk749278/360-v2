@@ -614,6 +614,20 @@ class TradeMonitor:
             if not is_long and ema9 > ema21:
                 return "EMA bullish crossover (EMA9 > EMA21) – SHORT thesis invalidated"
 
+        # Profit-protection gate: a signal already more than 0.5× its SL distance
+        # in the favourable direction is in meaningful profit.  Momentum commonly
+        # dips during healthy post-move consolidation — killing the signal here
+        # destroys real edge.  Reset the counter and skip; the trailing stop
+        # handles the exit for profitable signals.
+        _entry_px = sig.entry if sig.entry > 0 else sig.current_price
+        _sl_px = getattr(sig, "stop_loss", 0.0) or 0.0
+        if _sl_px > 0 and _entry_px > 0:
+            _sl_dist = abs(_entry_px - _sl_px)
+            _favorable = (sig.current_price - _entry_px) if is_long else (_entry_px - sig.current_price)
+            if _favorable > _sl_dist * 0.5:
+                sig.momentum_invalidation_count = 0
+                return None
+
         # 3. Momentum loss – threshold is per-channel since different timeframes have
         # different noise characteristics (TAPE 1m candles have rapid oscillation).
         # For micro-cap tokens (entry price < 0.001), scale threshold by 0.1 to
