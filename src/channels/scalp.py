@@ -2880,8 +2880,9 @@ class ScalpChannel(BaseChannel):
         bb_upper = float(bb_upper)
         bb_lower = float(bb_lower)
 
-        # Compression check: band width / close < 1.5%
-        if (bb_upper - bb_lower) / close >= 0.015:
+        # Compression check: band width / close < 2.5% (raised from 1.5% — real
+        # accumulation bands sit at 1.8–2.5%, so 1.5% was never reached).
+        if (bb_upper - bb_lower) / close >= 0.025:
             return self._reject("compression_not_detected")
 
         # Entry direction
@@ -2892,13 +2893,15 @@ class ScalpChannel(BaseChannel):
         else:
             return self._reject("breakout_not_detected")
 
-        # MACD histogram zero-cross
+        # MACD momentum confirmation: histogram must be trending in breakout direction.
+        # Zero-cross requirement was too timing-sensitive — breakout candle rarely
+        # lands on the exact zero-cross tick in low-vol accumulation.
         macd_hist_last = ind.get("macd_histogram_last")
         macd_hist_prev = ind.get("macd_histogram_prev")
         if macd_hist_last is not None and macd_hist_prev is not None:
-            if direction == Direction.LONG and not (macd_hist_last > 0 and macd_hist_prev < 0):
+            if direction == Direction.LONG and not (macd_hist_last > macd_hist_prev):
                 return self._reject("macd_reject")
-            if direction == Direction.SHORT and not (macd_hist_last < 0 and macd_hist_prev > 0):
+            if direction == Direction.SHORT and not (macd_hist_last < macd_hist_prev):
                 return self._reject("macd_reject")
 
         # Volume: current >= 2.0x 20-candle avg
@@ -2910,9 +2913,10 @@ class ScalpChannel(BaseChannel):
         # RSI
         rsi_val = ind.get("rsi_last")
         if rsi_val is not None:
-            if direction == Direction.LONG and not (50 <= rsi_val <= 70):
+            # Widened from [50,70]/[30,50] — breakout candles can push RSI to 72-75.
+            if direction == Direction.LONG and not (48 <= rsi_val <= 75):
                 return self._reject("rsi_reject")
-            if direction == Direction.SHORT and not (30 <= rsi_val <= 50):
+            if direction == Direction.SHORT and not (25 <= rsi_val <= 52):
                 return self._reject("rsi_reject")
 
         # SMC: FVG preferred, fallback to orderblocks
