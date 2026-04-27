@@ -794,8 +794,11 @@ class ScalpChannel(BaseChannel):
 
         # Momentum persistence: require momentum above threshold for consecutive
         # candles to avoid whipsaws where a single candle briefly spikes momentum.
+        # In QUIET/RANGING, the sweep itself is the trigger — reduce to 1 candle.
         mom_arr = ind.get("momentum_array")
         persist = profile.momentum_persist_candles if profile else 2
+        if regime and regime.upper() in ("QUIET", "RANGING"):
+            persist = min(persist, 1)
         if mom_arr is not None and len(mom_arr) >= persist:
             if not all(abs(float(mom_arr[-i])) >= momentum_threshold for i in range(1, persist + 1)):
                 return self._reject("momentum_reject")  # Momentum not persistent — likely whipsaw
@@ -1200,6 +1203,18 @@ class ScalpChannel(BaseChannel):
 
         # TP3: ratio fallback
         tp3 = close + 4.0 * sl_dist if direction == Direction.LONG else close - 4.0 * sl_dist
+        # ATR-adaptive TP1 cap: swing-high TP1 can be 3-5% away in low-ATR accumulation
+        _rc_tpe = smc_data.get("regime_context")
+        _atr_pct_tpe = _rc_tpe.atr_percentile if _rc_tpe else 50.0
+        if _atr_pct_tpe < 40.0:
+            _tp1_cap_tpe = sl_dist * 1.8
+        elif _atr_pct_tpe < 65.0:
+            _tp1_cap_tpe = sl_dist * 2.5
+        else:
+            _tp1_cap_tpe = None
+        if _tp1_cap_tpe is not None:
+            tp1 = (min(tp1, close + _tp1_cap_tpe) if direction == Direction.LONG
+                   else max(tp1, close - _tp1_cap_tpe))
         # Q4-B: enforce ladder monotonicity.  Prior code's no-4h branch
         # had no tp1-relative floor; the 4h branch fell back to 2.0R which
         # could still be ≤ tp1 when tp1 sat at the 5m swing-high extreme.
@@ -1272,17 +1287,20 @@ class ScalpChannel(BaseChannel):
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
             return self._reject("basic_filters_failed")
 
-        # 1. Cascade detection: last 3 candles moved > 2.0% in one direction
+        # 1. Cascade detection: ATR-relative threshold (floor 1.5%, cap 3.5%)
+        # Fixed 2.0% never triggered in low-ATR accumulation (cascade_threshold_not_met=162k).
         close_now = float(closes[-1])
         close_3ago = float(closes[-4])
         if close_3ago <= 0:
             return self._reject("cascade_threshold_not_met")
         cascade_pct = (close_now - close_3ago) / close_3ago * 100.0
+        _atr_raw = float(indicators.get("5m", {}).get("atr_last", close_now * 0.002))
+        _cascade_threshold = max(1.5, min(3.5, _atr_raw / close_now * 100.0 * 3.0))
 
-        if cascade_pct <= -2.0:
+        if cascade_pct <= -_cascade_threshold:
             cascade_direction = Direction.SHORT  # Price fell — potential LONG reversal
             reversal_direction = Direction.LONG
-        elif cascade_pct >= 2.0:
+        elif cascade_pct >= _cascade_threshold:
             cascade_direction = Direction.LONG   # Price rose — potential SHORT reversal
             reversal_direction = Direction.SHORT
         else:
@@ -2664,8 +2682,8 @@ class ScalpChannel(BaseChannel):
     ) -> Optional[Signal]:
         """FUNDING_EXTREME_SIGNAL: contrarian signal when funding rate is extreme."""
         regime_upper = regime.upper() if regime else ""
-        if regime_upper == "QUIET":
-            return self._reject("regime_blocked")
+        # QUIET block removed: extreme funding is the quality gate, not regime.
+        # Market spends ~78% of time in QUIET, which was starving this path.
 
         funding_rate = smc_data.get("funding_rate")
         if funding_rate is None:
@@ -3045,7 +3063,7 @@ class ScalpChannel(BaseChannel):
             return self._reject("missing_cvd")
 
         cvd_values = cvd_data if isinstance(cvd_data, list) else cvd_data.get("values", [])
-        if len(cvd_values) < 20:
+        if len(cvd_values) < 10:
             return self._reject("cvd_insufficient")
 
         closes = [float(c) for c in closes_raw]
@@ -3055,32 +3073,57 @@ class ScalpChannel(BaseChannel):
         if close <= 0:
             return self._reject("momentum_reject")
 
-        # CVD divergence detection (price vs CVD divergence signals absorption)
+        # CVD divergence detection: check 20-candle window first; fall back to 10-candle.
+        # 20-candle window required cvd_values ≥ 20; 10-candle needs only 10.
+        # cvd_divergence_failed=31392 with 20-candle only — choppy market shortens windows.
+        _has_20 = len(cvd_floats) >= 20 and len(closes) >= 20
         if direction == Direction.LONG:
-            price_low_early = min(closes[-20:-10])
-            price_low_late = min(closes[-10:])
-            cvd_low_early = min(cvd_floats[-20:-10])
-            cvd_low_late = min(cvd_floats[-10:])
-            # Bullish CVD divergence: price makes lower low but CVD makes higher low
-            # (buyers absorbing selling pressure — continuation signal in uptrend)
-            if not (price_low_late < price_low_early and cvd_low_late > cvd_low_early):
+            _div_detected = False
+            if _has_20:
+                price_low_early = min(closes[-20:-10])
+                price_low_late = min(closes[-10:])
+                cvd_low_early = min(cvd_floats[-20:-10])
+                cvd_low_late = min(cvd_floats[-10:])
+                if price_low_late < price_low_early and cvd_low_late > cvd_low_early:
+                    _div_detected = True
+                    _price_drop_pct = (price_low_early - price_low_late) / price_low_early if price_low_early > 0 else 0.0
+                    _div_strength = min(1.0, _price_drop_pct / 0.03)
+            if not _div_detected and len(cvd_floats) >= 10 and len(closes) >= 10:
+                # 10-candle fallback for shorter divergence structures
+                price_low_early = min(closes[-10:-5])
+                price_low_late = min(closes[-5:])
+                cvd_low_early = min(cvd_floats[-10:-5])
+                cvd_low_late = min(cvd_floats[-5:])
+                if price_low_late < price_low_early and cvd_low_late > cvd_low_early:
+                    _div_detected = True
+                    _price_drop_pct = (price_low_early - price_low_late) / price_low_early if price_low_early > 0 else 0.0
+                    _div_strength = min(1.0, _price_drop_pct / 0.02)
+            if not _div_detected:
                 return self._reject("cvd_divergence_failed")
-            # Divergence magnitude: how far price pulled back that CVD absorbed.
-            # Normalised so a 3 % price drop = strength 1.0; capped at 1.0.
-            _price_drop_pct = (price_low_early - price_low_late) / price_low_early if price_low_early > 0 else 0.0
-            _div_strength = min(1.0, _price_drop_pct / 0.03)
             _div_label: str = "BULLISH"
         else:
-            price_high_early = max(closes[-20:-10])
-            price_high_late = max(closes[-10:])
-            cvd_high_early = max(cvd_floats[-20:-10])
-            cvd_high_late = max(cvd_floats[-10:])
-            # Bearish CVD divergence: price makes higher high but CVD makes lower high
-            # (sellers absorbing buying pressure — continuation signal in downtrend)
-            if not (price_high_late > price_high_early and cvd_high_late < cvd_high_early):
+            _div_detected = False
+            if _has_20:
+                price_high_early = max(closes[-20:-10])
+                price_high_late = max(closes[-10:])
+                cvd_high_early = max(cvd_floats[-20:-10])
+                cvd_high_late = max(cvd_floats[-10:])
+                if price_high_late > price_high_early and cvd_high_late < cvd_high_early:
+                    _div_detected = True
+                    _price_rise_pct = (price_high_late - price_high_early) / price_high_early if price_high_early > 0 else 0.0
+                    _div_strength = min(1.0, _price_rise_pct / 0.03)
+            if not _div_detected and len(cvd_floats) >= 10 and len(closes) >= 10:
+                price_high_early = max(closes[-10:-5])
+                price_high_late = max(closes[-5:])
+                cvd_high_early = max(cvd_floats[-10:-5])
+                cvd_high_late = max(cvd_floats[-5:])
+                if price_high_late > price_high_early and cvd_high_late < cvd_high_early:
+                    _div_detected = True
+                    _price_rise_pct = (price_high_late - price_high_early) / price_high_early if price_high_early > 0 else 0.0
+                    _div_strength = min(1.0, _price_rise_pct / 0.02)
+            if not _div_detected:
                 return self._reject("cvd_divergence_failed")
-            _price_rise_pct = (price_high_late - price_high_early) / price_high_early if price_high_early > 0 else 0.0
-            _div_strength = min(1.0, _price_rise_pct / 0.03)
+            _div_strength = _div_strength if _div_detected else 0.0
             _div_label = "BEARISH"
 
         ind = indicators.get("5m", {})
