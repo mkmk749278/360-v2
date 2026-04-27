@@ -4102,6 +4102,43 @@ class Scanner:
         except Exception as _pa_exc:
             log.debug("pair_analysis gate error for {} {} (fail open): {}", symbol, chan_name, _pa_exc)
 
+        # DISTRIBUTION soft gate: LONG signals in distribution volume profile carry
+        # higher failure risk (market is offloading into retail buyers).
+        try:
+            _rc_dist = ctx.regime_context if ctx is not None else None
+            if (_rc_dist is not None
+                    and getattr(_rc_dist, "volume_profile", None) == "DISTRIBUTION"
+                    and hasattr(sig, "direction")
+                    and sig.direction.value == "LONG"):
+                _dist_penalty = 15.0
+                sig.confidence = max(0.0, sig.confidence - _dist_penalty)
+                _existing_flags = sig.soft_gate_flags or ""
+                sig.soft_gate_flags = (_existing_flags + ",distribution_long_penalty").lstrip(",")
+                self._suppression_counters[f"distribution_long_penalty:{chan_name}"] += 1
+                log.debug(
+                    "distribution soft gate {} {}: LONG in DISTRIBUTION -{}pts → {:.1f}",
+                    symbol, chan_name, _dist_penalty, sig.confidence,
+                )
+        except Exception as _dist_exc:
+            log.debug("distribution gate error for {} {} (fail open): {}", symbol, chan_name, _dist_exc)
+
+        # Meme coin low-volume penalty: thin meme coins (<$150M 24h vol) behave
+        # erratically — SMC patterns are noise-driven, not institutional.
+        _MEME_SYMBOLS = frozenset({"PEPEUSDT", "SHIBUSDT", "BONKUSDT", "FLOKIUSDT"})
+        try:
+            if symbol in _MEME_SYMBOLS and volume_24h < 150_000_000.0:
+                _meme_penalty = sig.confidence * (1.0 - 0.85)
+                sig.confidence = max(0.0, sig.confidence * 0.85)
+                _existing_flags = sig.soft_gate_flags or ""
+                sig.soft_gate_flags = (_existing_flags + ",meme_low_vol_penalty").lstrip(",")
+                self._suppression_counters[f"meme_low_vol_penalty:{chan_name}"] += 1
+                log.debug(
+                    "meme low-vol gate {} {}: vol={:.0f} -{}% → {:.1f}",
+                    symbol, chan_name, volume_24h, 15, sig.confidence,
+                )
+        except Exception as _meme_exc:
+            log.debug("meme gate error for {} {} (fail open): {}", symbol, chan_name, _meme_exc)
+
         # SMC hard gate: require minimum structural basis (sweep OR MSS present).
         # A signal with smc_score < SMC_HARD_GATE_MIN has no institutional
         # footprint — it is a pure momentum/liquidity play with no SMC edge.
