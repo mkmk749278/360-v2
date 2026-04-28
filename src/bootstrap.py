@@ -169,6 +169,20 @@ class Bootstrap:
             await engine.telegram.send_admin_alert(f"🛑 {msg}")
             raise RuntimeError(msg)
 
+        # 2b. Pre-populate CVD from historical 1m klines so evaluators that
+        #     gate on CVD divergence are immediately unblocked after restart.
+        #     Without this, CVD needs ~100 min of live trade streaming before
+        #     the 20-candle lookback is satisfied.
+        _cvd_seeded = 0
+        for _sym, _sym_candles in engine.data_store.candles.items():
+            _kl_1m = _sym_candles.get("1m", {})
+            _tbv = _kl_1m.get("taker_buy_vol_usd")
+            _vusd = _kl_1m.get("volume_usd")
+            if _tbv is not None and _vusd is not None and len(_tbv) > 0:
+                engine._order_flow_store.seed_cvd_from_klines(_sym, _tbv, _vusd)
+                _cvd_seeded += 1
+        log.info("CVD boot seed complete: %d / %d pairs", _cvd_seeded, len(engine.data_store.candles))
+
         # 3. Load predictive model
         await engine.predictive.load_model()
 

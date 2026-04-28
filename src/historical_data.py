@@ -101,8 +101,15 @@ class HistoricalDataStore:
         lows = np.array([float(c[3]) for c in raw])
         closes = np.array([float(c[4]) for c in raw])
         volumes = np.array([float(c[5]) for c in raw])
+        # Binance kline columns: [0]=open_time … [7]=quote_asset_volume …
+        # [10]=taker_buy_quote_asset_volume — USD buy/sell split for CVD seeding
+        volume_usd = np.array([float(c[7]) for c in raw])
+        taker_buy_vol_usd = np.array([float(c[10]) for c in raw])
 
-        return {"open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes}
+        return {
+            "open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes,
+            "volume_usd": volume_usd, "taker_buy_vol_usd": taker_buy_vol_usd,
+        }
 
     # ------------------------------------------------------------------
     # Recent trades fetch
@@ -244,14 +251,17 @@ class HistoricalDataStore:
                         continue
                     try:
                         path = CACHE_DIR / f"{symbol}_{interval}.npz"
-                        np.savez_compressed(
-                            path,
-                            open=arrays["open"],
-                            high=arrays["high"],
-                            low=arrays["low"],
-                            close=arrays["close"],
-                            volume=arrays["volume"],
-                        )
+                        _save_kw: Dict[str, Any] = {
+                            "open": arrays["open"],
+                            "high": arrays["high"],
+                            "low": arrays["low"],
+                            "close": arrays["close"],
+                            "volume": arrays["volume"],
+                        }
+                        for _ek in ("volume_usd", "taker_buy_vol_usd"):
+                            if _ek in arrays and len(arrays[_ek]) > 0:
+                                _save_kw[_ek] = arrays[_ek]
+                        np.savez_compressed(path, **_save_kw)
                         key = f"{symbol}:{interval}"
                         meta[key] = {
                             "count": int(len(arrays["close"])),
@@ -311,10 +321,14 @@ class HistoricalDataStore:
                         log.warning("Cache file missing: %s — skipping", path)
                         continue
                     with np.load(path, allow_pickle=False) as data:
-                        self.candles.setdefault(symbol, {})[interval] = {
+                        _loaded: Dict[str, np.ndarray] = {
                             k: np.asarray(data[k], dtype=np.float64).ravel()
                             for k in ("open", "high", "low", "close", "volume")
                         }
+                        for _ek in ("volume_usd", "taker_buy_vol_usd"):
+                            if _ek in data.files:
+                                _loaded[_ek] = np.asarray(data[_ek], dtype=np.float64).ravel()
+                        self.candles.setdefault(symbol, {})[interval] = _loaded
                     loaded_count += 1
                 except Exception as exc:
                     log.warning("Failed to load cache for %s: %s — skipping", key, exc)
@@ -538,9 +552,16 @@ class HistoricalDataStore:
     ) -> Dict[str, np.ndarray]:
         """Append *new_data* arrays to *existing* and trim to *limit* candles."""
         result: Dict[str, np.ndarray] = {}
-        for key in ("open", "high", "low", "close", "volume"):
+        core_keys = ("open", "high", "low", "close", "volume")
+        extended_keys = ("volume_usd", "taker_buy_vol_usd")
+        for key in core_keys:
             combined = np.concatenate([existing.get(key, np.array([])), new_data.get(key, np.array([]))])
             result[key] = combined[-limit:] if len(combined) > limit else combined
+        # Extended keys: only carry forward if the fresh fetch included them
+        for key in extended_keys:
+            if key in new_data and len(new_data[key]) > 0:
+                combined = np.concatenate([existing.get(key, np.array([])), new_data[key]])
+                result[key] = combined[-limit:] if len(combined) > limit else combined
         return result
 
     # ------------------------------------------------------------------
