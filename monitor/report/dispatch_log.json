@@ -1,22 +1,5 @@
 [
   {
-    "dispatched_at": 1776878328.3683343,
-    "signal_id": "FAR-9A4EC82E",
-    "channel": "360_SCALP",
-    "symbol": "SOLUSDT",
-    "direction": "LONG",
-    "setup_class": "FAILED_AUCTION_RECLAIM",
-    "confidence": 82.5,
-    "signal_tier": "A+",
-    "entry": 87.86,
-    "sl": 87.63394107,
-    "tp1": 88.08605893,
-    "tp2": 88.42514732,
-    "tp3": 88.65120625,
-    "market_phase": "RANGING | ATR%ile=64 | Vol=ACCUMULATION",
-    "telegram_text": "*⚡ FAILED AUCTION RECLAIM* │ *SOLUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `87.7983` – `87.8864` \\(limit order\\)\n   Mid: `87.8600`\n🛑 SL: `87.6339` (-0.26%)\n🎯 TP1: `88.0861` (+0.26%)\n🎯 TP2: `88.4251` (+0.64%)\n🎯 TP3: `88.6512` (+0.90%)\n\n📊 Setup: FAILED AUCTION RECLAIM | Confidence: *82.5* (B)\n⏱ Hold: ~1-2h | R:R 1:1.0\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep LONG at 87.5500 | FVG 88.0200-87.9600 + Back below reclaimed level 87.7700 and through failed-auction wick/buffer 87.6339\n\n🏷 Risk: *Low* | Quality: *B*"
-  },
-  {
     "dispatched_at": 1776879809.719799,
     "signal_id": "FAR-03CEF811",
     "channel": "360_SCALP",
@@ -848,5 +831,22 @@
     "tp3": 0.14856364,
     "market_phase": "TRENDING_DOWN | ATR%ile=100 | Vol=ACCUMULATION",
     "telegram_text": "*🔄 S/R FLIP RETEST* │ *BASEDUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `0.140678` – `0.141495` \\(limit order\\)\n   Mid: `0.141250`\n🛑 SL: `0.139160` (-1.48%)\n🎯 TP1: `0.146800` (+3.93%)\n🎯 TP2: `0.147845` (+4.67%)\n🎯 TP3: `0.148564` (+5.18%)\n\n📊 Setup: SR FLIP RETEST | Confidence: *83.8* (B)\n⏱ Hold: ~1-2h | R:R 1:2.7\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 0.145410 | FVG 0.141450-0.140730 + Below 0.139030 structure + volatility buffer\n\n🏷 Risk: *Medium* | Quality: *B*"
+  },
+  {
+    "dispatched_at": 1777289882.2210174,
+    "signal_id": "SRFLIP-F68509CB",
+    "channel": "360_SCALP",
+    "symbol": "AVNTUSDT",
+    "direction": "SHORT",
+    "setup_class": "SR_FLIP_RETEST",
+    "confidence": 80.5,
+    "signal_tier": "A+",
+    "entry": 0.1528,
+    "sl": 0.1540224,
+    "tp1": 0.15133312,
+    "tp2": 0.1509664,
+    "tp3": 0.1485216,
+    "market_phase": "TRENDING_UP | ATR%ile=1 | Vol=DISTRIBUTION",
+    "telegram_text": "*🔄 S/R FLIP RETEST* │ *AVNTUSDT* │ *SHORT*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `0.152718` – `0.152992` \\(limit order\\)\n   Mid: `0.152800`\n🛑 SL: `0.154022` (+0.80%)\n🎯 TP1: `0.151333` (-0.96%)\n🎯 TP2: `0.150966` (-1.20%)\n🎯 TP3: `0.148522` (-2.80%)\n\n📊 Setup: SR FLIP RETEST | Confidence: *80.5* (B)\n⏱ Hold: ~1-2h | R:R 1:1.2\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep LONG at 0.152400 | FVG 0.153300-0.153100 + Above 0.154100 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *B*"
   }
 ]
