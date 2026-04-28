@@ -484,6 +484,33 @@ class OrderFlowStore:
             self._running_cvd.get(symbol, 0.0)
         )
 
+    def seed_cvd_from_klines(
+        self,
+        symbol: str,
+        taker_buy_vol_usd: "np.ndarray",
+        volume_usd: "np.ndarray",
+    ) -> None:
+        """Pre-populate CVD history from historical 1m kline data at boot.
+
+        Uses taker_buy_quote_asset_volume from Binance REST klines to compute
+        candle-level CVD deltas.  Eliminates the 20-candle / ~100-minute warmup
+        window that otherwise silences CVD-gated evaluators after every restart.
+
+        Only call this once per symbol at boot, before WS events start flowing.
+        """
+        n = min(len(taker_buy_vol_usd), len(volume_usd))
+        if n == 0:
+            return
+        if symbol not in self._cvd_candle:
+            self._cvd_candle[symbol] = deque(maxlen=_CVD_HISTORY_SIZE)
+        running = 0.0
+        for i in range(n):
+            buy = float(taker_buy_vol_usd[i])
+            sell = float(volume_usd[i]) - buy
+            running += buy - sell
+            self._cvd_candle[symbol].append(running)
+        self._running_cvd[symbol] = running
+
     def get_cvd_history(self, symbol: str) -> np.ndarray:
         """Return the candle-aligned CVD history as a numpy array."""
         hist = self._cvd_candle.get(symbol, deque())

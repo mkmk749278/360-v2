@@ -515,6 +515,16 @@ class CryptoSignalEngine:
             }
             if k.get("x"):  # candle closed
                 self.data_store.update_candle(symbol, interval, candle)
+                if interval == "1m":
+                    # Drive CVD from kline taker volumes so it works during REST
+                    # fallback (which sends kline events but never trade events).
+                    # "Q" = taker_buy_quote_asset_volume (USD buys), "q" = total
+                    # quote_asset_volume (total USD traded) for the closed candle.
+                    _buy_usd = float(k.get("Q", 0.0))
+                    _total_usd = float(k.get("q", 0.0))
+                    self._order_flow_store.update_cvd_from_tick(
+                        symbol, _buy_usd, _total_usd - _buy_usd
+                    )
                 # Snapshot CVD at candle close to align with OHLCV for divergence detection
                 self._order_flow_store.snapshot_cvd_at_candle_close(symbol)
 
@@ -526,14 +536,8 @@ class CryptoSignalEngine:
                 "time": data.get("T", 0),
             }
             self.data_store.append_tick(symbol, tick)
-            # Update running CVD from this tick
-            price = tick["price"]
-            qty = tick["qty"]
-            vol_usd = price * qty
-            if tick["isBuyerMaker"]:
-                self._order_flow_store.update_cvd_from_tick(symbol, 0.0, vol_usd)
-            else:
-                self._order_flow_store.update_cvd_from_tick(symbol, vol_usd, 0.0)
+            # CVD is driven from 1m kline taker volumes (see kline handler above)
+            # rather than individual ticks so it stays accurate during REST fallback.
 
         elif event == "forceOrder":
             # Buffer the liquidation event for deferred processing so that a
