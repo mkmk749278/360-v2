@@ -677,11 +677,16 @@ class ScalpChannel(BaseChannel):
         spread_pct: float,
         volume_24h_usd: float,
         regime: str = "",
+        allowed_evaluators: Optional[frozenset] = None,
     ) -> List[Signal]:
         # Evaluate all signal paths and return every valid candidate so that the
         # scanner can process each one independently through the gate chain.
         # Previously only the winner-takes-all best signal was returned, which
         # silently discarded all other valid setups.
+        #
+        # allowed_evaluators: when provided (not None), only run evaluators whose
+        # name is in this frozenset. Used by movers-promotion scan to restrict
+        # mover-promoted pairs to VSB + BREAKDOWN_SHORT only.
         profile = smc_data.get("pair_profile") if smc_data else None
         self._reset_generation_telemetry()
         results: List[Signal] = []
@@ -701,6 +706,8 @@ class ScalpChannel(BaseChannel):
             ("_evaluate_post_displacement_continuation", self._evaluate_post_displacement_continuation),
             ("_evaluate_failed_auction_reclaim", self._evaluate_failed_auction_reclaim),
         ):
+            if allowed_evaluators is not None and evaluator_name not in allowed_evaluators:
+                continue  # restricted scan context — skip evaluators not in allowlist
             _path = self._generation_path_token(evaluator_name)
             self._generation_telemetry["attempts"][_path] += 1
             self._active_generation_path = _path
