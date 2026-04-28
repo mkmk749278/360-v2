@@ -1,37 +1,39 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-27 — Full market-reality audit batch deployed*
+*Updated: 2026-04-28 — Per-setup SL caps + mover pairs dashboard*
 
 ---
 
 ## Current Phase
 **Phase 1 — Signal Quality Validation**
-Engine is live. MOM-PROT profit-protection gate shipped last session.
-This session completed a full market-reality audit and shipped 8 targeted fixes
-across 3 files to unlock 6 previously silent paths.
+Engine is live and scanning. Market-wide QUIET regime as of 07:47 UTC today
+— signal drought is expected, not a system failure.
+
+This session shipped:
+- 17 per-setup SL caps replacing the single channel-wide 2.5% cap
+- EXHAUSTION_FADE moved to 0.9 R:R mean-reversion tier
+- `/dashboard` now shows `Pairs monitored: 75 (+N mover)` when mover-promoted pairs are active
+- Interim 360_SCALP cap raise 1.5% → 2.5% (now superseded by per-setup caps)
+
+PR #236 open on `claude/read-owner-brief-ASkk2`.
 
 ---
 
 ## Current Priority (Do This First)
 
-**Run the VPS monitor** after 6–12 hours of this batch running.
+**Observe next monitor zip** — specifically:
 
-What to look for in the next zip:
-
-1. **New paths firing** — LIQUIDATION_REVERSAL and DIVERGENCE_CONTINUATION should
-   produce first signals (ATR threshold + 10-candle CVD window now accessible).
-2. **FUNDING_EXTREME_SIGNAL** — should now fire in QUIET regime (block removed).
-   Watch that funding_rate extreme condition is real, not noise.
-3. **LSR signal volume up** — momentum_reject=106,547 was dominating; QUIET/RANGING
-   now requires only 1-candle persistence. Should see more LSR signals.
-4. **TP1_HIT rate** — SR_FLIP and TREND_PULLBACK_EMA TP1 caps (1.8–2.5× SL in
-   low-ATR) make TP1 reachable. Expect more TP1_HIT vs CLOSED/EXPIRED.
-5. **DISTRIBUTION+LONG penalty** appearing in soft_gate_flags — confirms gate firing.
-6. **SL rate** — SL cap raised to 1.20%: signals in high-ATR pairs should now
-   have structurally valid SLs instead of getting clipped at 0.80%.
+1. **QCB / FAR no longer perpetually rejected** — the SL cap for QUIET_COMPRESSION_BREAK
+   and FAILED_AUCTION_RECLAIM is now 3.0% (was 2.5% channel-wide). The perpetual
+   `sl_cap_exceeded` rejection loops seen in live logs should be gone.
+2. **Win-rate metric** — TP1_HIT / PROFIT_LOCKED rate post-Audit-3 still unvalidated.
+3. **New paths firing** — LIQ_REV, DIV_CONT, FUNDING_EXT targeted by Audit-3 fixes.
+4. **HYPEUSDT QCB 89.2 composite → 67.6 via -21.6 gate penalty** — single gate is
+   nuking a quality signal. Source unknown; investigate in next session if owner
+   wants to chase it (ask: which soft gate applied 21.6 penalty?).
 
 ---
 
-## All Confirmed Bug Fixes (Deployed to main branch)
+## All Confirmed Bug Fixes (Deployed or in open PR)
 
 | Fix | File | Session |
 |---|---|---|
@@ -48,105 +50,122 @@ What to look for in the next zip:
 | WATCHLIST spam disabled | `src/signal_router.py` | prior |
 | SL/TP uses 1m candle HIGH/LOW | `src/trade_monitor.py` | prior |
 | ATR minimum SL in evaluators | `src/channels/scalp.py` | prior |
-| stop_loss field on SignalRecord | `src/performance_tracker.py` (line 64) + `src/trade_monitor.py:329` | prior |
-| **Q5-A: LSR `build_signal_failed` telemetry** | `src/channels/scalp.py:913` | **Audit-2 (5d81b23)** |
-| **Q5-B: WHALE `build_signal_failed` telemetry** | `src/channels/scalp.py:~1531` | **Audit-2 (5d81b23)** |
-| **Q4-A: SR_FLIP TP1==TP2 collapse in 4h-data branch** | `src/channels/scalp.py:~2475/2479` | **Audit-2 (5d81b23)** |
-| **Q7-A: TPE/DIV_CONT accept WEAK_TREND (conservative widening)** | `src/channels/scalp.py:~961/2920` | **Audit-2 (759b7fc)** |
-| **Q4-B: TP-ladder monotonicity helper across LSR/TPE/LIQ_REV/FUNDING_EXT/CLS** | `src/channels/scalp.py:259` (helper) + 5 wire-up sites | **Audit-2 (75f5556 / #226)** |
-| **deploy.yml: skip VPS deploy on ACTIVE_CONTEXT.md doc-only commits** | `.github/workflows/deploy.yml` | **(44ca45b / #227)** |
-| **INV-1: `_check_invalidation` regime-flip & EMA-crossover rules creation-relative** | `src/trade_monitor.py:555–615` | **INV-1 (750e067 / #228)** |
-| **MOM-PROT: momentum invalidation profit-protection gate** | `src/trade_monitor.py:617` | **MOM-PROT** |
-| **T1.1: SR_FLIP + TREND_PULLBACK_EMA TP1 ATR-adaptive cap (1.8–2.5× SL)** | `src/channels/scalp.py` | **Audit-3 (this session)** |
-| **T1.2: FUNDING_EXTREME remove QUIET regime block** | `src/channels/scalp.py:2679` | **Audit-3 (this session)** |
-| **T1.3: SL cap raised 0.80% → 1.20% across all 8 scalp channel configs** | `config/__init__.py` | **Audit-3 (this session)** |
-| **T2.1: LIQUIDATION_REVERSAL ATR-relative cascade threshold (floor 1.5%, cap 3.5%)** | `src/channels/scalp.py:~1294` | **Audit-3 (this session)** |
-| **T2.2: DIVERGENCE_CONTINUATION dual 10+20 candle CVD window** | `src/channels/scalp.py:~3062` | **Audit-3 (this session)** |
-| **T2.3: LSR momentum persistence 1-candle in QUIET/RANGING (was 2)** | `src/channels/scalp.py:~795` | **Audit-3 (this session)** |
-| **T3.1: DISTRIBUTION soft gate −15pts on LONG signals** | `src/scanner/__init__.py:~4105` | **Audit-3 (this session)** |
-| **T3.2: Meme coin low-volume penalty 0.85× (<$150M 24h)** | `src/scanner/__init__.py:~4124` | **Audit-3 (this session)** |
+| stop_loss field on SignalRecord | `src/performance_tracker.py` + `src/trade_monitor.py` | prior |
+| LSR `build_signal_failed` telemetry | `src/channels/scalp.py:913` | Audit-2 |
+| WHALE `build_signal_failed` telemetry | `src/channels/scalp.py:~1531` | Audit-2 |
+| SR_FLIP TP1==TP2 collapse in 4h-data branch | `src/channels/scalp.py:~2475` | Audit-2 |
+| TPE/DIV_CONT accept WEAK_TREND | `src/channels/scalp.py:~961/2920` | Audit-2 |
+| TP-ladder monotonicity helper (5 sites) | `src/channels/scalp.py:259` | Audit-2 |
+| deploy.yml: skip VPS deploy on doc-only commits | `.github/workflows/deploy.yml` | Audit-2 |
+| `_check_invalidation` regime-flip & EMA-crossover creation-relative | `src/trade_monitor.py:555–615` | INV-1 |
+| MOM-PROT: momentum invalidation profit-protection gate | `src/trade_monitor.py:617` | MOM-PROT |
+| SR_FLIP + TPE TP1 ATR-adaptive cap (1.8–2.5× SL) | `src/channels/scalp.py` | Audit-3 |
+| FUNDING_EXTREME remove QUIET regime block | `src/channels/scalp.py:2679` | Audit-3 |
+| SL cap raised 0.80% → 1.20% across all 8 channel configs | `config/__init__.py` | Audit-3 |
+| LIQ_REV ATR-relative cascade threshold (floor 1.5%, cap 3.5%) | `src/channels/scalp.py:~1294` | Audit-3 |
+| DIV_CONT dual 10+20 candle CVD window | `src/channels/scalp.py:~3062` | Audit-3 |
+| LSR momentum persistence 1-candle in QUIET/RANGING | `src/channels/scalp.py:~795` | Audit-3 |
+| DISTRIBUTION soft gate −15pts on LONG signals | `src/scanner/__init__.py:~4105` | Audit-3 |
+| Meme coin low-volume penalty 0.85× (<$150M 24h) | `src/scanner/__init__.py:~4124` | Audit-3 |
+| CVD 24h starvation: boot seed from historical 1m candles | `src/historical_data.py` + `src/order_flow.py` | CVD-fix |
+| **Mover pairs dashboard: `set_mover_pairs()` + `/dashboard` counter** | `src/telemetry.py` + `src/scanner/__init__.py` | **This session (PR #236)** |
+| **360_SCALP channel SL cap raised 1.5% → 2.5% (interim)** | `src/signal_quality.py` | **This session (PR #236)** |
+| **Per-setup SL caps: 17 values in `_MAX_SL_PCT_BY_SETUP`** | `src/signal_quality.py` | **This session (PR #236)** |
+| **EXHAUSTION_FADE moved to 0.9 R:R mean-reversion tier** | `src/signal_quality.py` | **This session (PR #236)** |
 
 ---
 
-## Known Live Issues (post Audit-3)
+## Per-Setup SL Cap Table (live as of PR #236)
 
-1. **Win-rate metric still unvalidated** — awaiting first post-Audit-3 monitor zip.
-2. **DISTRIBUTION gate untested** — penalty fires but may be too aggressive (−15pts)
-   if volume_profile=="DISTRIBUTION" triggers frequently. Watch for LONG signal
-   suppression rate in next zip.
-3. **FUNDING_EXTREME quality gate** — removing QUIET block exposes the path to
-   markets with no real funding extremes. Watch for false positives — funding_rate
-   threshold is the real gate, but if extreme funding events are rare, path still silent.
-4. **CVD 10-candle window** — shorter divergence may produce lower-quality signals.
-   Monitor DIV_CONT SL rate carefully in first 24h.
-5. **10 of 14 paths still silent at funnel level (pre-fix)** — Audit-3 targets
-   LIQ_REV, DIV_CONT, FUNDING_EXT, LSR. Expect 4 more paths to activate.
-   Remaining 4 (ORB, QCB, CLS, PDC) need separate diagnosis.
+| Setup | Cap | Policy |
+|---|---|---|
+| RANGE_REJECTION | 1.5% | compress |
+| RANGE_FADE | 1.5% | compress |
+| DIVERGENCE_CONTINUATION | 1.5% | reject |
+| EXHAUSTION_FADE | 2.0% | compress |
+| WHALE_MOMENTUM | 2.0% | compress |
+| OPENING_RANGE_BREAKOUT | 2.0% | compress |
+| LIQUIDITY_SWEEP_REVERSAL | 2.0% | compress |
+| LIQUIDATION_REVERSAL | 2.0% | reject |
+| VOLUME_SURGE_BREAKOUT | 2.0% | reject |
+| BREAKDOWN_SHORT | 2.0% | reject |
+| CONTINUATION_LIQUIDITY_SWEEP | 2.0% | reject |
+| SR_FLIP_RETEST | 2.5% | reject |
+| POST_DISPLACEMENT_CONTINUATION | 2.5% | reject |
+| FAILED_AUCTION_RECLAIM | 3.0% | reject |
+| QUIET_COMPRESSION_BREAK | 3.0% | reject |
+| TREND_PULLBACK_EMA | 3.0% | reject |
+| FUNDING_EXTREME_SIGNAL | 3.0% | reject |
+
+Tighter of per-setup cap vs channel cap always wins (`_max_sl_pct_for_policy()`).
 
 ---
 
-## Phase 1 Scorecard (current)
+## Known Live Issues
+
+1. **Win-rate still unvalidated** — need post-Audit-3 monitor zip.
+2. **HYPEUSDT QCB gate penalty** — 89.2 composite → 67.6 due to single -21.6 soft-gate
+   penalty. Source not yet identified. Not blocking, but high-quality signal lost.
+3. **`cvd_candles=0` on some pairs** — ZBTUSDT, BSBUSDT, SWARMSUSDT. Low-volume pairs
+   not covered by boot seed. CVD-gated evaluators silent on these until ~100 live 1m candles
+   accumulate (~100 min post-start).
+4. **`币安人生USDT` in scan universe** — Chinese-character symbol, likely a promo/test ticker.
+   Burns a scan slot. Will fall out on next volume-sort cycle. No action needed.
+5. **Entire market QUIET at 07:47 UTC 2026-04-28** — VSB, BREAKDOWN_SHORT, QCB explicitly
+   blocked in QUIET. Low signal throughput is expected until regime shifts.
+6. **DISTRIBUTION gate untested** — penalty fires but calibration unknown. Watch LONG
+   suppression rate in next zip; reduce to 10pts if > 30% of LONGs suppressed.
+
+---
+
+## Phase 1 Scorecard (last known)
 
 | Metric | Required | Status |
 |---|---|---|
-| Win rate (TP1 or better) | ≥ 40% | ~9% pre-Audit-3 — TP1 cap + MOM-PROT expected to improve |
+| Win rate (TP1 or better) | ≥ 40% | ~9% pre-Audit-3 — unvalidated post-fix |
 | SL hit rate | ≤ 60% | **11.1%** ✅ |
 | Signals per day | ≥ 5 | **~13.6/day** ✅ |
-| Active paths | ≥ 6 | **6 of 14** ✅ (target: remain ≥ 6 post-Audit-3) |
+| Active paths | ≥ 6 | **6 of 14** ✅ |
 | Fast failures | 0 | **0%** ✅ |
 | Max consecutive SL losses | ≤ 5 | Non-consecutive ✅ |
 
-Blocker: win rate. Audit-3 addresses the two main structural causes
-(TP1 unreachable, profitable signals dying at consolidation).
+Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural causes.
 
 ---
 
-## Next PR Queue (post Audit-3)
+## Next PR Queue
 
-| Priority | Task | Scope |
+| Priority | Task | Status |
 |---|---|---|
-| 1 | Run monitor in 6–12h — validate Audit-3 path activation (LIQ_REV, DIV_CONT, FUNDING_EXT, LSR volume) | Observation; data-driven |
-| 2 | Win-rate check — TP1_HIT/PROFIT_LOCKED should increase as TP1 caps take effect | Data validation |
-| 3 | SR_FLIP SL rate post-1.20%-cap — wider SL should reduce premature SL hits | Data validation |
-| 4 | Investigate ORB / QCB / CLS / PDC silence — 4 paths still untouched | Code investigation |
-| 5 | DISTRIBUTION gate calibration — if LONG suppression rate > 30%, reduce penalty to 10pts | Conditional on next zip |
-| 6 | **Q2 — Implement orderblock detection** | Out of Phase 1 budget; Phase 2 spec |
+| 1 | Monitor zip — validate QCB/FAR no longer looping on SL cap | Observation |
+| 2 | Monitor zip — validate Audit-3 path activation (LIQ_REV, DIV_CONT, FUNDING_EXT) | Observation |
+| 3 | Investigate HYPEUSDT QCB -21.6 gate penalty source | Code investigation |
+| 4 | Win-rate check — TP1_HIT/PROFIT_LOCKED rate post Audit-3 + SL cap fixes | Data validation |
+| 5 | Investigate ORB / CLS / PDC silence (3 paths still untouched) | Code investigation |
+| 6 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
 
 ---
 
 ## Open Risks
 
 - **New path signals untested** — LIQ_REV, DIV_CONT, FUNDING_EXT have never fired live.
-  First signals from these paths must be manually reviewed (price, SL geometry, direction quality).
-- **DISTRIBUTION gate false positive** — if volume_profile=="DISTRIBUTION" is misclassified
-  in ranging markets, legitimate LONG setups get penalized.
-- **CVD 10-candle divergence quality** — shorter window means weaker divergence signal.
-  Monitor DIV_CONT SL rate; revert 10-candle window if SL rate > 50% in first 20 signals.
-- **MOM-PROT SL exposure** — signals holding through consolidation means more SL exposure.
-  Watch total SL rate carefully.
-- **FUNDING_EXTREME noise** — path was blocked for reason; removing the block is validated
-  only by the funding_rate threshold. If threshold is too loose, false signals will appear.
+  First signals from these paths must be manually reviewed.
+- **Per-setup cap is tighter-wins** — if channel cap < setup cap, channel wins. Currently
+  360_SCALP=2.5% channel cap is tighter than FAR/QCB/TPE/FUNDING 3.0% setup caps.
+  Channel cap needs to be raised to 3.0% to unlock these paths' full headroom.
+  **Action needed:** raise `360_SCALP` in `_MAX_SL_PCT_BY_CHANNEL` from 2.5 → 3.0.
+- **DISTRIBUTION gate false positive** — ranging market may misclassify as DISTRIBUTION.
+- **MOM-PROT SL exposure** — watch total SL rate.
+- **CVD 10-candle divergence quality** — monitor DIV_CONT SL rate; revert if > 50%.
 
 ---
 
-## Audit-3 Findings That Did NOT Ship
+## Deferred (Not In Phase 1 Budget)
 
-- **T4.1 Daily BTC bias filter** — directional bias from 4h/1d BTC trend. Deferred:
-  requires reading BTC data in per-pair evaluators, cross-instrument dependency.
-  Phase 2 architectural change.
-- **T4.2 Regime-adaptive TP1 multipliers** — per-regime dynamic R-multiple scaling.
-  Framework exists but needs measurement of per-regime TP hit rates first.
-  Deferred until Phase 1 exits or data is available.
-- **Pair universe expansion** (BNB, AVAX, NEAR, APT, SUI) — deferred; current 75
-  pairs need quality validation before expanding.
-
----
-
-## How to Raise Issues in Project Chat
-
-- Share monitor zip → CTE analyzes and responds with findings + action
-- Share Telegram screenshots → CTE reads timing, prices, compares to chart
-- Describe what you observed → CTE reads the actual code before proposing any fix
+- T4.1 Daily BTC bias filter — cross-instrument dependency, Phase 2
+- T4.2 Regime-adaptive TP1 multipliers — needs per-regime hit rate data first
+- Pair universe expansion — validate current 75 first
+- Orderblock detection (Q2) — Phase 2 spec
 
 ---
 
