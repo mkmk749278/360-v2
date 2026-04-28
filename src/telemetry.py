@@ -25,6 +25,7 @@ class TelemetrySnapshot:
     scan_latency_ms: float = 0.0
     api_calls_last_min: int = 0
     pairs_monitored: int = 0
+    mover_pairs: int = 0
     redis_connected: bool = False
     queue_size: int = 0
     signal_latency_ms: float = 0.0       # signal creation → Telegram delivery
@@ -44,6 +45,7 @@ class TelemetryCollector:
         self._ws_connections: int = 0
         self._active_signals: int = 0
         self._pairs_monitored: int = 0
+        self._mover_pairs: int = 0
         self._scan_latency_ms: float = 0.0
         self._queue_size: int = 0
         self._redis_client: Optional[Any] = None
@@ -153,6 +155,9 @@ class TelemetryCollector:
     def set_pairs_monitored(self, count: int) -> None:
         self._pairs_monitored = count
 
+    def set_mover_pairs(self, count: int) -> None:
+        self._mover_pairs = count
+
     def set_scan_latency(self, ms: float) -> None:
         self._scan_latency_ms = ms
 
@@ -248,6 +253,7 @@ class TelemetryCollector:
             scan_latency_ms=self._scan_latency_ms,
             api_calls_last_min=api_rate,
             pairs_monitored=self._pairs_monitored,
+            mover_pairs=self._mover_pairs,
             redis_connected=redis_ok,
             queue_size=self._queue_size,
             signal_latency_ms=self._signal_latency_ms,
@@ -262,7 +268,7 @@ class TelemetryCollector:
             f"CPU: {s.cpu_pct:.1f}% | RAM: {s.mem_mb:.0f} MB\n"
             f"WebSockets: {s.ws_connections} ({'✅' if s.ws_healthy else '❌'})\n"
             f"Active signals: {s.active_signals}\n"
-            f"Pairs monitored: {s.pairs_monitored}\n"
+            f"Pairs monitored: {s.pairs_monitored}{f' (+{s.mover_pairs} mover)' if s.mover_pairs else ''}\n"
             f"Scan latency: {s.scan_latency_ms:.0f} ms\n"
             f"Signal latency: {s.signal_latency_ms:.0f} ms\n"
             f"Queue size: {s.queue_size}\n"
