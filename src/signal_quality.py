@@ -344,7 +344,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
 # For evaluator-protected structural setups we enforce reject-not-compress:
 # oversized truthful invalidation is rejected, not cosmetically clamped.
 _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
-    "360_SCALP": 1.5,
+    "360_SCALP": 2.5,
     "360_SCALP_FVG": 1.0,
     "360_SCALP_CVD": 1.0,
     "360_SCALP_VWAP": 1.0,
