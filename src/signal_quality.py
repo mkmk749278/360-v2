@@ -354,6 +354,32 @@ _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
     "360_SCALP_ORDERBLOCK": 1.0,
 }
 
+# Per-setup SL caps (%) — more granular than channel-level caps.
+# Compress setups: SL is clamped to cap (signal continues).
+# Reject setups: SL exceeding cap causes outright rejection (STRUCTURAL_SLTP_PROTECTED_SETUPS).
+# Values calibrated to evaluator geometry observed in live trading.
+_MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
+    # Compress-policy setups (SL clamped, not rejected)
+    "RANGE_REJECTION":                1.5,  # BB/extreme fade — tight by definition
+    "RANGE_FADE":                     1.5,  # Mirror of RANGE_REJECTION
+    "EXHAUSTION_FADE":                2.0,  # Wick extremes can extend; still compress
+    "WHALE_MOMENTUM":                 2.0,  # Swing-based; generous for momentum entries
+    "OPENING_RANGE_BREAKOUT":         2.0,  # Range height dependent
+    "LIQUIDITY_SWEEP_REVERSAL":       2.0,  # Sweep ± 0.1%; typical 0.5-0.65%
+    # Reject-policy setups (structural SL must be honest or signal is dropped)
+    "DIVERGENCE_CONTINUATION":        1.5,  # EMA21 ± 0.5%; fixed geometry — rare to exceed
+    "LIQUIDATION_REVERSAL":           2.0,  # Cascade ± 0.3%; typical 0.3-0.5%
+    "VOLUME_SURGE_BREAKOUT":          2.0,  # Fixed 0.8% structural SL
+    "BREAKDOWN_SHORT":                2.0,  # Mirror of VSB
+    "CONTINUATION_LIQUIDITY_SWEEP":   2.0,  # Sweep - 0.3×ATR; typical 0.3-0.75%
+    "SR_FLIP_RETEST":                 2.5,  # Wick + ATR buffer; live ~2%
+    "POST_DISPLACEMENT_CONTINUATION": 2.5,  # Consolidation-based; typical 0.5-0.75%
+    "FAILED_AUCTION_RECLAIM":         3.0,  # False-breakdown depth; 1.95% seen live
+    "QUIET_COMPRESSION_BREAK":        3.0,  # BB lower + 0.5×ATR; 2.08% seen live
+    "TREND_PULLBACK_EMA":             3.0,  # ATR×1.0 minimum; high-ATR pairs reach 3%
+    "FUNDING_EXTREME_SIGNAL":         3.0,  # Liq-cluster SL; can be 2-3% away
+}
+
 # Family-aware minimum R:R thresholds used in build_risk_plan().
 # Quick-exit families accept a lower first target because their trade thesis
 # resolves faster; trend / breakout families require a larger reward cushion.
@@ -390,7 +416,8 @@ def _min_rr_for_setup(setup: SetupClass) -> float:
     """Return canonical minimum R:R (reward/risk) by setup family policy."""
     if setup in (SetupClass.RANGE_REJECTION, SetupClass.RANGE_FADE):
         return _MIN_RR_RANGE
-    if setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL):
+    if setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL,
+                 SetupClass.EXHAUSTION_FADE):
         return _MIN_RR_MEAN_REVERSION
     if setup in (SetupClass.SR_FLIP_RETEST, SetupClass.FAILED_AUCTION_RECLAIM):
         return _MIN_RR_STRUCTURED
@@ -422,9 +449,20 @@ def _geometry_family_for_setup(setup: SetupClass) -> str:
 
 
 def _max_sl_pct_for_policy(channel: str, setup: SetupClass) -> tuple[float, str, str]:
-    """Return (max_sl_pct_decimal, policy_scope, setup_family)."""
+    """Return (max_sl_pct_decimal, policy_scope, setup_family).
+
+    Per-setup caps take precedence over the channel-wide cap; whichever is
+    tighter wins so that a loose channel default cannot silently override a
+    tight per-setup limit.
+    """
     family = _geometry_family_for_setup(setup)
-    return _channel_max_sl_pct(channel), "channel", family
+    channel_cap = _channel_max_sl_pct(channel)
+    setup_cap_pct = _MAX_SL_PCT_BY_SETUP.get(setup.value)
+    if setup_cap_pct is not None:
+        setup_cap = setup_cap_pct / 100.0
+        if setup_cap <= channel_cap:
+            return setup_cap, "setup", family
+    return channel_cap, "channel", family
 
 
 def _min_sl_distance_pct_for_setup(setup: SetupClass) -> float:
