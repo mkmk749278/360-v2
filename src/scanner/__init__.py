@@ -55,6 +55,9 @@ from config import (
     SMC_SCALP_LOOKBACK,
     SMC_SCALP_TOLERANCE_PCT,
     SMC_SCORE_MIN_TRENDING_SHORT,
+    MOVER_PROMOTION_CYCLES,
+    MOVER_PROMOTION_MIN_PCT,
+    MOVER_PROMOTION_MIN_VOLUME_USD,
     SURGE_PROMOTION_MAX_PAIRS,
     SURGE_PROMOTION_VOLUME_MULTIPLIER,
     TIER2_SCAN_EVERY_N_CYCLES,
@@ -767,6 +770,9 @@ class Scanner:
         self._volume_baseline: Dict[str, float] = {}
         # symbol → cycles remaining (non-scan pairs temporarily added to universe)
         self._promoted_pairs: Dict[str, int] = {}
+        # Movers promotion: symbol → cycles remaining for pairs promoted by 24h % change.
+        # These are scanned with a RESTRICTED evaluator set (VSB + BREAKDOWN_SHORT only).
+        self._mover_promoted_pairs: Dict[str, int] = {}
 
     # ------------------------------------------------------------------
     # Dynamic tier query helper
@@ -1081,6 +1087,46 @@ class Scanner:
 
         return now_promoted[:SURGE_PROMOTION_MAX_PAIRS]
 
+    def _update_movers_promotion(self, sorted_pairs_set: set) -> List[str]:
+        """Promote non-scanned pairs with extreme 24h % change into the scan universe.
+
+        Only VSB (_evaluate_volume_surge_breakout) and BREAKDOWN_SHORT
+        (_evaluate_breakdown_short) run on mover-promoted pairs — all other
+        evaluators are skipped via allowed_evaluators in _get_channel_candidate.
+
+        Returns the list of currently mover-promoted symbols.
+        """
+        for symbol, info in list(self.pair_mgr.pairs.items()):
+            if symbol in sorted_pairs_set:
+                # Already in main scan — all 14 evaluators run normally; no restriction.
+                if symbol in self._mover_promoted_pairs:
+                    del self._mover_promoted_pairs[symbol]
+                continue
+            if (
+                info.volatility_24h >= MOVER_PROMOTION_MIN_PCT
+                and info.volume_24h_usd >= MOVER_PROMOTION_MIN_VOLUME_USD
+                and symbol not in self._mover_promoted_pairs
+            ):
+                log.info(
+                    "📈 MOVER PROMOTION: {} {:.1f}% vol={:.0f} — VSB/BREAKDOWN scan for {} cycles",
+                    symbol, info.volatility_24h, info.volume_24h_usd, MOVER_PROMOTION_CYCLES,
+                )
+                self._mover_promoted_pairs[symbol] = MOVER_PROMOTION_CYCLES
+
+        # Decrement cycle counters; evict expired promotions
+        for sym in list(self._mover_promoted_pairs.keys()):
+            if sym in sorted_pairs_set:
+                del self._mover_promoted_pairs[sym]
+            else:
+                remaining = self._mover_promoted_pairs[sym] - 1
+                if remaining <= 0:
+                    del self._mover_promoted_pairs[sym]
+                else:
+                    self._mover_promoted_pairs[sym] = remaining
+
+        active = [s for s in self._mover_promoted_pairs if s not in sorted_pairs_set]
+        return active[:SURGE_PROMOTION_MAX_PAIRS]
+
     async def scan_loop(self) -> None:
         """Periodic scan over all pairs / channels."""
         log.info("Scanner loop started")
@@ -1258,19 +1304,25 @@ class Scanner:
                 # outside the current scan universe and temporarily add them.
                 _sorted_pairs_set = {sym for sym, _ in sorted_pairs}
                 _promoted = self._update_volume_baseline(_sorted_pairs_set)
-                if _promoted:
-                    # Add promoted pairs to filtered_pairs (capped at SURGE_PROMOTION_MAX_PAIRS)
+                # Movers promotion: pairs with extreme 24h % change — restricted to VSB+BREAKDOWN
+                _mover_promoted = self._update_movers_promotion(_sorted_pairs_set)
+                _all_promoted = list(dict.fromkeys(_promoted + _mover_promoted))  # dedup, order-stable
+                if _all_promoted:
                     _added = 0
                     _promoted_syms = {sym for sym, _ in filtered_pairs}
-                    filtered_pairs = list(filtered_pairs)  # ensure mutable list once
-                    for _promo_sym in _promoted:
+                    filtered_pairs = list(filtered_pairs)
+                    for _promo_sym in _all_promoted:
                         if _promo_sym not in _promoted_syms:
                             _promo_info = self.pair_mgr.pairs.get(_promo_sym)
                             if _promo_info is not None:
                                 filtered_pairs.append((_promo_sym, _promo_info))
                                 _added += 1
                     if _added:
-                        log.info("Added {} dynamically promoted pair(s) to scan cycle", _added)
+                        log.info(
+                            "Added {} dynamically promoted pair(s) to scan cycle "
+                            "(vol-surge={} movers={})",
+                            _added, len(_promoted), len(_mover_promoted),
+                        )
 
                 sem = self._scan_semaphore
                 tasks = [
@@ -4393,6 +4445,7 @@ class Scanner:
         symbol: str,
         ctx_for_chan: ScanContext,
         volume_24h: float,
+        allowed_evaluators: Optional[frozenset] = None,
     ) -> Any:
         try:
             return chan.evaluate(
@@ -4403,6 +4456,7 @@ class Scanner:
                 spread_pct=ctx_for_chan.spread_pct,
                 volume_24h_usd=volume_24h,
                 regime=ctx_for_chan.regime_result.regime.value,
+                allowed_evaluators=allowed_evaluators,
             )
         except Exception as _exc:
             log.debug("Channel {} eval error for {}: {}", chan_name, symbol, _exc)
@@ -4512,12 +4566,28 @@ class Scanner:
                 # is processed independently through the gate chain.  Same-direction
                 # signals from the same symbol are deduplicated here so that only one
                 # setup per direction can enter _pending_signals per cycle.
+
+                # Movers promotion: restrict to VSB + BREAKDOWN_SHORT only.
+                # Spread pre-check: thin mover pairs with >0.5% spread are skipped.
+                _mover_evaluators = frozenset({
+                    "_evaluate_volume_surge_breakout",
+                    "_evaluate_breakdown_short",
+                })
+                _is_mover = symbol in self._mover_promoted_pairs
+                if _is_mover and ctx_for_chan.spread_pct > 0.005:
+                    self._suppression_counters[f"mover_spread_rejected:{chan_name}"] += 1
+                    log.debug(
+                        "mover spread gate {} {}: spread={:.3f}% > 0.5% — skip",
+                        symbol, chan_name, ctx_for_chan.spread_pct * 100,
+                    )
+                    continue
                 _raw_result = self._get_channel_candidate(
                     chan=chan,
                     chan_name=chan_name,
                     symbol=symbol,
                     ctx_for_chan=ctx_for_chan,
                     volume_24h=volume_24h,
+                    allowed_evaluators=_mover_evaluators if _is_mover else None,
                 )
                 self._record_scalp_generation_telemetry(chan, chan_name)
                 # Normalise: real ScalpChannel returns list; legacy mocks return Signal|None

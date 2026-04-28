@@ -236,6 +236,12 @@ SIGNAL_PULSE_INTERVAL_SECONDS: int = _safe_int("SIGNAL_PULSE_INTERVAL_SECONDS", 
 FUNDING_RATE_EXTREME_THRESHOLD: float = _safe_float("FUNDING_RATE_EXTREME_THRESHOLD", "0.001")
 #: Maximum number of dynamically promoted pairs per scan cycle.
 SURGE_PROMOTION_MAX_PAIRS: int = _safe_int("SURGE_PROMOTION_MAX_PAIRS", "5")
+#: Minimum 24h price change % (absolute) to promote a pair via movers promotion.
+MOVER_PROMOTION_MIN_PCT: float = _safe_float("MOVER_PROMOTION_MIN_PCT", "15.0")
+#: Minimum 24h USD volume for movers-promoted pairs (lower than vol-surge gate).
+MOVER_PROMOTION_MIN_VOLUME_USD: float = _safe_float("MOVER_PROMOTION_MIN_VOLUME", "5000000")
+#: How many scan cycles a movers-promoted pair stays in the scan universe.
+MOVER_PROMOTION_CYCLES: int = _safe_int("MOVER_PROMOTION_CYCLES", "5")
 
 # Regime-aware volume floors (USD 24h volume).
 # TRENDING/VOLATILE need depth for follow-through; RANGING/QUIET mean-reversion
