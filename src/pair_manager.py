@@ -248,6 +248,7 @@ class PairManager:
                     base_asset=sym.replace("USDT", ""),
                     quote_asset="USDT",
                     volume_24h_usd=float(t.get("quoteVolume", 0)),
+                    volatility_24h=abs(float(t.get("priceChangePercent", 0))),
                 ))
         except Exception as exc:
             log.error("fetch_top_futures_pairs error: %s", exc)
@@ -317,6 +318,7 @@ class PairManager:
                     base_asset=sym.replace("USDT", ""),
                     quote_asset="USDT",
                     volume_24h_usd=float(t.get("quoteVolume", 0)),
+                    volatility_24h=abs(float(t.get("priceChangePercent", 0))),
                 ))
         except Exception as exc:
             log.error("fetch_all_futures_pairs error: %s", exc)
