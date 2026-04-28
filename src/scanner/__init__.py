@@ -1353,6 +1353,7 @@ class Scanner:
             self.telemetry.set_scan_latency(elapsed_ms)
 
             self.telemetry.set_pairs_monitored(len(self.pair_mgr.pairs))
+            self.telemetry.set_mover_pairs(len(self._mover_promoted_pairs))
             self.telemetry.set_active_signals(len(self.router.active_signals))
             try:
                 qsize = await self.signal_queue.qsize()
