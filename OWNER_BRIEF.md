@@ -164,6 +164,10 @@ Every item below was verified by reading the actual deployed code from the curre
 | WATCHLIST spam in free channel disabled | ✅ |
 | SL/TP evaluation uses 1m candle HIGH/LOW (not single tick) | ✅ |
 | ATR minimum SL in SR_FLIP and TREND_PULLBACK evaluators | ✅ |
+| CVD 24h starvation eliminated — boot seed from historical 1m candles | ✅ |
+| Per-setup SL caps: 17 values in `_MAX_SL_PCT_BY_SETUP` (`signal_quality.py`) | ✅ |
+| EXHAUSTION_FADE R:R tier: moved to 0.9 mean-reversion family | ✅ |
+| Mover pairs dashboard counter — `/dashboard` shows `(+N mover)` when active | ✅ |
 
 ### Live Performance Data (from 20-hour monitor window)
 
@@ -202,14 +206,16 @@ Dominant suppressors per live scan logs:
 ## 4.3 Best and Worst Performing Paths
 
 **Working well:**
-- `FAILED_AUCTION_RECLAIM` — lowest SL rate, positive avg PnL, 2 full TP hits confirmed
+- `FAILED_AUCTION_RECLAIM` — lowest SL rate, positive avg PnL, 2 full TP hits confirmed. SL cap now 3.0% — room to breathe.
 
 **Needs attention:**
-- `SR_FLIP_RETEST` — 100% SL rate in last window, direction reads often correct but SL too tight structurally
-- `TREND_PULLBACK_EMA` — 82.6% historical SL rate, fix deployed but unconfirmed
+- `SR_FLIP_RETEST` — 100% SL rate in early window; SL cap now 2.5% and TP1 ATR-adaptive cap deployed. Unvalidated post-fix.
+- `TREND_PULLBACK_EMA` — ATR-driven SL can reach 3%; cap now 3.0%. Fix deployed, unvalidated.
+- `QUIET_COMPRESSION_BREAK` — 2.08% SL seen live; was perpetually rejected by 2.5% channel cap. Now capped at 3.0% — should start passing.
 
-**Effectively silent:**
-- 10 of 14 paths produced zero signals in last 20h window
+**Effectively silent (being investigated):**
+- ORB, CLS, PDC — not yet diagnosed; separate investigation needed.
+- LIQ_REV, DIV_CONT, FUNDING_EXT — Audit-3 unlocks applied; awaiting first live signals.
 
 ---
 
@@ -236,31 +242,37 @@ Phase 1 exits when the engine consistently produces signals that a skilled trade
 
 Priority order is fixed. Do not jump ahead.
 
-### Priority 1 — Confirm Candle OHLC Fix Working (In Progress)
-**What:** Verify the 1m candle HIGH/LOW SL/TP fix eliminated phantom hits and 30-60s breach cluster  
-**Evidence needed:** Next monitor run (6-12 hours from now)  
-**Success:** Breach cluster <20%, no phantom TP hits, signals holding open 2-20 minutes
+### Priority 1 — Validate Per-Setup SL Cap Effect (In Progress)
+**What:** Per-setup caps shipped in PR #236. QCB/FAR perpetual rejection loops should be gone.  
+**Evidence needed:** Next monitor zip — check for absence of `sl_cap_exceeded` on QCB/FAR  
+**Success:** QCB and FAR producing candidates that reach confidence gate instead of looping
 
-### Priority 2 — SR_FLIP_RETEST Geometry Diagnosis
-**What:** SR_FLIP has correct direction reads (EDGEUSDT, XLMUSDT directions were right) but SL too structurally tight  
-**Action:** Read the actual SR_FLIP SL calculation against live ATR data for triggered pairs  
-**Success:** SL rate drops below 50% over 20 signals
+### Priority 2 — Win Rate Validation
+**What:** Win rate stuck at ~9% pre-Audit-3. TP1 ATR-adaptive cap + MOM-PROT + wider SL should improve it.  
+**Evidence needed:** Monitor zip with 20+ signals post-Audit-3  
+**Success:** TP1_HIT + PROFIT_LOCKED ≥ 40% of outcomes
 
-### Priority 3 — Signal Volume Recovery
-**What:** 4 of 14 paths producing signals. Diagnose why 10 paths are silent.  
-**Approach:** Per-path MTF gate failure analysis. Family-aware gate exemptions where structurally justified.  
-**Non-scope:** Do not globally loosen thresholds — only targeted family-aware fixes  
-**Success:** 6+ of 14 paths producing at least 1 signal per 24h
+### Priority 3 — Investigate HYPEUSDT QCB Gate Penalty
+**What:** HYPEUSDT QCB scored 89.2 composite but dropped to 67.6 due to a single -21.6 gate penalty.
+The penalty source (which soft gate) is unknown. High-quality signal being killed by a single gate.  
+**Action:** Trace which soft gate applies 21.6 penalty to QCB signals in `scanner/__init__.py`  
+**Success:** Either identify gate is correct and penalty is justified, or recalibrate it
 
-### Priority 4 — Performance Tracker: Add stop_loss Field
-**What:** `stop_loss` shows as 0.00000 in all performance records — field not in SignalRecord dataclass  
-**Action:** Add `stop_loss: float = 0.0` to SignalRecord, pass through `_record_outcome()`  
-**Success:** Monitor data shows real SL values, enables geometry analysis
+### Priority 4 — Raise `360_SCALP` Channel Cap to 3.0%
+**What:** `_MAX_SL_PCT_BY_CHANNEL["360_SCALP"] = 2.5` is still tighter than the 3.0% per-setup cap
+for FAR, QCB, TPE, FUNDING. Tighter-wins logic means these paths are still capped at 2.5%.  
+**Action:** Raise to 3.0% in `signal_quality.py`  
+**Success:** FAR/QCB/TPE/FUNDING can use their full 3.0% structural headroom
 
-### Priority 5 — Path Observability
+### Priority 5 — ORB / CLS / PDC Silence Diagnosis
+**What:** These 3 paths have never produced a signal. Root cause unknown.  
+**Approach:** Per-path gate-failure log analysis  
+**Success:** Each silent path has a traceable reason; fix or document as expected
+
+### Priority 6 — Path Observability
 **What:** Cannot currently tell WHY a path is silent — "no candidate generated" vs "candidate blocked by gate"  
 **Action:** Per-evaluator counters: generated → gated → scored → emitted  
-**Success:** Every silent path has a traceable reason
+**Success:** Every silent path has a traceable reason in telemetry
 
 ---
 
@@ -323,20 +335,21 @@ git add . && git commit -m "fix: description" && git push
 
 # PART VII — SYSTEM SNAPSHOT
 
-*Updated: 2026-04-25 — Fresh start session*
+*Updated: 2026-04-28 — Per-setup SL caps deployed*
 
 | Item | Status |
 |---|---|
 | Engine running | ✅ Healthy |
 | WebSocket streams | ✅ 300 active |
-| Pairs monitored | 75 |
+| Pairs monitored | 75 (+up to 5 mover-promoted) |
 | Active evaluators | 14 |
-| Paths producing signals | 4 of 14 |
-| All bug fixes deployed | ✅ Confirmed on fresh download |
-| Candle OHLC SL/TP fix | ✅ Deployed — awaiting first data |
-| Phase 1 scorecard | Not started — need clean data |
+| Paths producing signals | 6+ of 14 (post Audit-3, exact count pending next zip) |
+| Per-setup SL caps | ✅ 17 caps in `signal_quality.py` — PR #236 open |
+| CVD boot seed fix | ✅ No 24h wait — full CVD from minute 1 |
+| Mover pairs dashboard | ✅ `/dashboard` shows `(+N mover)` counter |
+| Phase 1 scorecard | SL rate ✅, signals/day ✅, win rate ❌ (being fixed) |
 | Paying subscribers | None — Phase 1 validation first |
-| Next action | Run monitor in 6-12h, check candle OHLC fix |
+| Next action | Monitor zip to validate QCB/FAR no longer looping |
 
 ---
 
