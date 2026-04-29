@@ -140,7 +140,7 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore  →  Scanner.scan_lo
 
 - `src/suppression_telemetry.py` records every gate rejection with a tag — first stop when "no signals are firing." `/suppressed` exposes it via Telegram.
 - `src/telemetry.py` reports CPU/memory/WS health/scan latency/queue depth; `/dashboard` and `/status` surface it.
-- `src/runtime_truth_report.py` + `scripts/build_truth_report.py` produce the monitor zips referenced in `OWNER_BRIEF.md` 6.3 (used to validate fixes against live behavior — the workflow is `.github/workflows/vps-monitor.yml`).
+- **Monitor data lives on the `monitor-logs` branch.** `.github/workflows/vps-monitor.yml` ("VPS Runtime Audit") runs on the VPS, builds the truth report via `src/runtime_truth_report.py` + `scripts/build_truth_report.py`, then force-pushes the curated outputs to the `monitor-logs` branch. To inspect: `git fetch origin monitor-logs && git show origin/monitor-logs:<path>` — do not look for downloadable artifact zips. This is the canonical source for validating fixes against live behavior.
 - Scanner emits structured rejection telemetry: `EVAL::<setup>::<reason>` events. Search live logs for these when diagnosing silent paths.
 
 ## What Requires Owner Sign-off Before Coding

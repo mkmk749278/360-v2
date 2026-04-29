@@ -303,13 +303,24 @@ Check: github.com/mkmk749278/360-v2/actions
 
 ## 6.3 Monitor Workflow
 
+Monitor outputs are **committed to the `monitor-logs` branch** (force-push) by
+`.github/workflows/vps-monitor.yml`. There is no artifact zip to download —
+the curated truth report files are the branch contents.
+
 ```
 github.com/mkmk749278/360-v2/actions
 → VPS Runtime Audit / Truth Report
 → Run workflow
 → Lookback: 24h, Compare window: true, Include raw JSON: true
-→ Download artifact zip
-→ Share zip in Project chat
+→ Workflow pushes snapshot to `monitor-logs` branch
+```
+
+To read the latest snapshot from a session:
+
+```bash
+git fetch origin monitor-logs
+git show origin/monitor-logs:<file>          # inspect a single file
+git checkout origin/monitor-logs -- <path>   # pull file into working tree
 ```
 
 ## 6.4 VPS Access (Emergency)
