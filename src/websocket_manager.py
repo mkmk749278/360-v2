@@ -88,7 +88,11 @@ class WebSocketManager:
         self._watchdog_task: Optional[asyncio.Task] = None
         self._admin_alert = admin_alert_callback
         self._last_alert_time: float = 0.0
+        # None = never alerted yet (so the first activation always fires);
+        # subsequent activations within WS_ALERT_COOLDOWN are coalesced.
+        self._last_rest_fallback_alert_time: Optional[float] = None
         self._total_drops: int = 0
+        self._rest_fallback_activations_in_cooldown: int = 0
         self._data_store = data_store
         self._ws_rest_fallback_count: int = 0
         self._ws_reconnection_count: int = 0
@@ -297,7 +301,16 @@ class WebSocketManager:
         log.info("REST fallback loop stopped")
 
     def _start_rest_fallback(self) -> None:
-        """Activate REST fallback if critical pairs are configured."""
+        """Activate REST fallback if critical pairs are configured.
+
+        Admin alert is gated by ``WS_ALERT_COOLDOWN`` to prevent spam when
+        the WS connection drops + reconnects on a regular cadence (e.g.
+        the staleness watchdog force-closes after ``heartbeat_interval ×
+        staleness_multiplier`` of TEXT-message silence, which fires every
+        ~15 min on the futures stream even though reconnect is clean).
+        Sustained outages still surface: once the cooldown expires the
+        next activation re-fires the alert with a coalesced count.
+        """
         if not self._critical_pairs:
             return
         if self._rest_fallback_active:
@@ -305,11 +318,26 @@ class WebSocketManager:
         self._rest_fallback_active = True
         self._fallback_task = asyncio.create_task(self._rest_fallback_loop())
         if self._admin_alert:
-            asyncio.create_task(
-                self._admin_alert(
-                    f"⚠️ REST fallback activated for {self._label} critical pairs."
-                )
+            now = time.monotonic()
+            cooldown_expired = (
+                self._last_rest_fallback_alert_time is None
+                or (now - self._last_rest_fallback_alert_time) > WS_ALERT_COOLDOWN
             )
+            if cooldown_expired:
+                coalesced = self._rest_fallback_activations_in_cooldown
+                self._rest_fallback_activations_in_cooldown = 0
+                self._last_rest_fallback_alert_time = now
+                suffix = (
+                    f" ({coalesced} suppressed during last {int(WS_ALERT_COOLDOWN)}s)"
+                    if coalesced > 0 else ""
+                )
+                asyncio.create_task(
+                    self._admin_alert(
+                        f"⚠️ REST fallback activated for {self._label} critical pairs.{suffix}"
+                    )
+                )
+            else:
+                self._rest_fallback_activations_in_cooldown += 1
 
     def _stop_rest_fallback(self) -> None:
         """Deactivate REST fallback once WS reconnects."""

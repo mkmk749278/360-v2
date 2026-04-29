@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-29 — Mover promotion seeding fix (PR #233 follow-up)*
+*Updated: 2026-04-29 — Mover seeding fix + REST fallback alert cooldown*
 
 ---
 
@@ -127,6 +127,7 @@ statistical confidence.
 | EXHAUSTION_FADE moved to 0.9 R:R mean-reversion tier | `src/signal_quality.py` | PR #236 |
 | **360_SCALP channel SL cap raised 2.5% → 3.0% — unlocks per-setup 3.0% caps for FAR/QCB/TPE/FUNDING** | `src/signal_quality.py:347` | **This session (2026-04-29)** |
 | **Mover-promotion REST seed + CVD seed on promotion (PR #233 follow-up)** | `src/scanner/__init__.py:1090` (`_seed_mover_pair`) | **This session (2026-04-29)** |
+| **REST-fallback admin-alert cooldown (matches `WS_ALERT_COOLDOWN=600s`); coalesced suppressed count on next fire** | `src/websocket_manager.py:299` (`_start_rest_fallback`) | **This session (2026-04-29)** |
 
 ---
 
@@ -180,6 +181,22 @@ Tighter of per-setup cap vs channel cap always wins (`_max_sl_pct_for_policy()`)
 7. **liquidation_clusters absent in 100% of cycles** — Expected in QUIET (no
    liquidation cascades occurring). Wiring is intact (`bootstrap.py:385`).
    Only consumer is FUNDING_EXTREME with graceful ATR fallback. Not a bug.
+8. **Futures WS connection drops every ~15 min (alert spam now silenced).**
+   Owner reported repeating `⚠️ REST fallback activated for futures critical pairs.`
+   alerts every ~15 min for 3 days. Root cause: staleness watchdog at
+   `src/websocket_manager.py:484` force-closes the futures WS when `last_pong`
+   isn't updated for `WS_HEARTBEAT_INTERVAL_FUTURES (60) × WS_STALENESS_MULTIPLIER_FUTURES (15) = 900s`.
+   Reconnect succeeds on first attempt (under 2s); the per-drop "WebSocket
+   connection lost" alert is gated by `reconnect_attempts ≥ 2` so it stays
+   silent — but the REST-fallback alert had no cooldown, firing every time.
+   Most likely underlying cause: aiohttp consumes Binance's server-side PING
+   frames internally with `heartbeat=60` set, and the kline TEXT stream
+   silently stops every ~15 min on Binance's combined `/ws/<s1>/<s2>/...`
+   endpoint without a TCP RST. Watchdog correctly catches it.
+   **System impact: zero** — engine healthy, signals flowing, reconnect
+   clean. **Fix shipped this session**: cooldown the REST-fallback alert
+   the same way as the WS-lost alert (600s); next fire reports the
+   coalesced suppressed-activation count. Sustained outages still surface.
 
 ---
 
@@ -206,14 +223,16 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 2 | Audit-3 fixes verified deployed in code (TPE/DIV_CONT/FUNDING/LIQ_REV) | ✅ Done |
 | 3 | 360_SCALP channel cap 2.5% → 3.0% — unlocks per-setup 3.0% caps | ✅ This session |
 | 4 | Mover promotion REST+CVD seed on promotion (PR #233 follow-up) | ✅ This session |
-| 5 | Validate mover signals firing on next zip — search for VSB/BREAKDOWN_SHORT emissions on non-top-75 symbols | Observation |
-| 6 | Investigate HYPEUSDT QCB -21.6 gate penalty source | Code investigation |
-| 7 | Validate channel cap raise on next monitor zip | Observation |
-| 8 | Monitor zip — validate Audit-3 path activation under non-QUIET regime | Observation (regime-gated) |
-| 9 | Win-rate check — needs ≥20 closed signals in non-QUIET regime | Data validation |
-| 10 | Investigate ORB / CLS / PDC silence under non-QUIET regime | Code investigation |
-| 11 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
-| 12 | Pre-existing test breakage: 139 failures on main (PR #240 channel cap raise + others didn't update fixtures) — clean up in dedicated PR | Tech debt |
+| 5 | REST-fallback admin-alert cooldown (silences 15-min spam loop) | ✅ This session |
+| 6 | Validate mover signals firing on next zip — search for VSB/BREAKDOWN_SHORT emissions on non-top-75 symbols | Observation |
+| 7 | Investigate HYPEUSDT QCB -21.6 gate penalty source | Code investigation |
+| 8 | Validate channel cap raise on next monitor zip | Observation |
+| 9 | Monitor zip — validate Audit-3 path activation under non-QUIET regime | Observation (regime-gated) |
+| 10 | Win-rate check — needs ≥20 closed signals in non-QUIET regime | Data validation |
+| 11 | Investigate ORB / CLS / PDC silence under non-QUIET regime | Code investigation |
+| 12 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
+| 13 | Pre-existing test breakage: 139 failures on main (PR #240 channel cap raise + others didn't update fixtures) — clean up in dedicated PR | Tech debt |
+| 14 | Diagnose underlying 15-min futures WS drop (needs VPS-side `_health_watchdog` "stale WS connection" log) | Investigation |
 
 ---
 
