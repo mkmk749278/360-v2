@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-29 — Mover seeding fix + REST fallback alert cooldown*
+*Updated: 2026-04-29 — Mover seeding + REST fallback alert grace period*
 
 ---
 
@@ -127,7 +127,7 @@ statistical confidence.
 | EXHAUSTION_FADE moved to 0.9 R:R mean-reversion tier | `src/signal_quality.py` | PR #236 |
 | **360_SCALP channel SL cap raised 2.5% → 3.0% — unlocks per-setup 3.0% caps for FAR/QCB/TPE/FUNDING** | `src/signal_quality.py:347` | **This session (2026-04-29)** |
 | **Mover-promotion REST seed + CVD seed on promotion (PR #233 follow-up)** | `src/scanner/__init__.py:1090` (`_seed_mover_pair`) | **This session (2026-04-29)** |
-| **REST-fallback admin-alert cooldown (matches `WS_ALERT_COOLDOWN=600s`); coalesced suppressed count on next fire** | `src/websocket_manager.py:299` (`_start_rest_fallback`) | **This session (2026-04-29)** |
+| **REST-fallback admin-alert grace period (60s) — transient drops stay silent; only sustained outages alert. Cooldown layered on top for prolonged outages.** | `src/websocket_manager.py:303` (`_start_rest_fallback` + `_maybe_alert_after_grace`) | **This session (2026-04-29)** |
 
 ---
 
@@ -194,9 +194,13 @@ Tighter of per-setup cap vs channel cap always wins (`_max_sl_pct_for_policy()`)
    silently stops every ~15 min on Binance's combined `/ws/<s1>/<s2>/...`
    endpoint without a TCP RST. Watchdog correctly catches it.
    **System impact: zero** — engine healthy, signals flowing, reconnect
-   clean. **Fix shipped this session**: cooldown the REST-fallback alert
-   the same way as the WS-lost alert (600s); next fire reports the
-   coalesced suppressed-activation count. Sustained outages still surface.
+   clean. **Two-stage fix this session**: PR #242 added a 600s cooldown,
+   but with drops every 900s the alert still fired every cycle (cooldown
+   < drop interval). Superseded by a **60s grace period**: the alert is
+   delayed by 60s and only fires if REST fallback is still active when
+   the timer expires. Transient drops (reconnect under 2s) stay silent;
+   sustained outages still surface, with a cooldown still layered on top
+   to coalesce repeat alerts during prolonged degradation.
 
 ---
 
@@ -223,7 +227,8 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 2 | Audit-3 fixes verified deployed in code (TPE/DIV_CONT/FUNDING/LIQ_REV) | ✅ Done |
 | 3 | 360_SCALP channel cap 2.5% → 3.0% — unlocks per-setup 3.0% caps | ✅ This session |
 | 4 | Mover promotion REST+CVD seed on promotion (PR #233 follow-up) | ✅ This session |
-| 5 | REST-fallback admin-alert cooldown (silences 15-min spam loop) | ✅ This session |
+| 5 | REST-fallback admin-alert cooldown (PR #242) — *insufficient: 600s cooldown < 900s drop interval, alerts still fired every cycle* | ⚠️ Superseded |
+| 5b | REST-fallback admin-alert 60s grace period (this session) — transient drops stay silent | ✅ This session |
 | 6 | Validate mover signals firing on next zip — search for VSB/BREAKDOWN_SHORT emissions on non-top-75 symbols | Observation |
 | 7 | Investigate HYPEUSDT QCB -21.6 gate penalty source | Code investigation |
 | 8 | Validate channel cap raise on next monitor zip | Observation |

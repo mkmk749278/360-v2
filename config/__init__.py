@@ -933,6 +933,12 @@ WS_STALENESS_MULTIPLIER_FUTURES: int = _safe_int("WS_STALENESS_MULTIPLIER_FUTURE
 # Admin alert dedup window (seconds) — alerts are throttled to at most one per
 # 10-minute window per manager to avoid Telegram spam during prolonged outages.
 WS_ALERT_COOLDOWN: int = _safe_int("WS_ALERT_COOLDOWN", "600")
+# REST-fallback admin-alert grace period (seconds).  Transient WS drops that
+# reconnect inside this window do not fire the "REST fallback activated" alert
+# — only sustained outages do.  This filters out the steady ~15 min staleness-
+# watchdog force-close cycle (clean reconnect under 2 s) which is informational
+# only and was creating Telegram spam.
+WS_REST_FALLBACK_ALERT_GRACE_SEC: int = _safe_int("WS_REST_FALLBACK_ALERT_GRACE_SEC", "60")
 # How many consecutive failed reconnection attempts before the aiohttp session
 # is recycled (clears stale TCP connection pool and DNS cache).
 WS_SESSION_RECYCLE_ATTEMPTS: int = _safe_int("WS_SESSION_RECYCLE_ATTEMPTS", "5")
