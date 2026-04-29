@@ -1,35 +1,75 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-28 — Per-setup SL caps + mover pairs dashboard*
+*Updated: 2026-04-29 — Monitor zip review + 360_SCALP channel cap raise*
 
 ---
 
 ## Current Phase
 **Phase 1 — Signal Quality Validation**
-Engine is live and scanning. Market-wide QUIET regime as of 07:47 UTC today
-— signal drought is expected, not a system failure.
+Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
+window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session shipped:
-- 17 per-setup SL caps replacing the single channel-wide 2.5% cap
-- EXHAUSTION_FADE moved to 0.9 R:R mean-reversion tier
-- `/dashboard` now shows `Pairs monitored: 75 (+N mover)` when mover-promoted pairs are active
-- Interim 360_SCALP cap raise 1.5% → 2.5% (now superseded by per-setup caps)
+This session (2026-04-29):
+- **Reviewed monitor zip 2026-04-29 08:49 UTC** — see "Monitor Zip Findings" below
+- **Confirmed PR #236 fixes are live and working** (QCB went 0 → 12 emissions)
+- **Verified all Audit-3 fixes are deployed** in `src/channels/scalp.py`
+  (TPE/DIV_CONT WEAK_TREND at lines 1027/3044, FUNDING QUIET removed at 2692,
+  LIQ_REV ATR-relative cascade at 1305)
+- **Shipped: 360_SCALP channel cap raise 2.5% → 3.0%** in `signal_quality.py:347`.
+  Unlocks per-setup 3.0% caps for FAR/QCB/TPE/FUNDING which were silently
+  capped at 2.5% by the tighter-wins channel logic. Setups with <3.0% per-setup
+  caps (SR_FLIP=2.5, RANGE_REJECTION=1.5, etc.) are unaffected — math verified
+  in `_max_sl_pct_for_policy()`.
 
-PR #236 open on `claude/read-owner-brief-ASkk2`.
+Prior session (2026-04-28): PR #236 — per-setup SL caps, EXHAUSTION_FADE 0.9 R:R,
+`/dashboard` mover counter, interim 1.5% → 2.5% bump (now superseded).
+
+---
+
+## Monitor Zip Findings (2026-04-29 08:49 UTC, 28h window, 409,322 cycles)
+
+### Engine Health: ✅
+- Heartbeat 3s, status running, healthy.
+- WS streams active, OI populated 99.97%, CVD populated 15.8% (low-vol pairs
+  starved — known issue).
+
+### Path Funnel Truth
+| Path | Generated | Gated | Scored | Emitted | Notes |
+|---|---:|---:|---:|---:|---|
+| QUIET_COMPRESSION_BREAK | 12,374 | 36 | n/a | **12** | ✅ Loop broken (was 0 pre-fix) |
+| FAILED_AUCTION_RECLAIM | 43,033 | 40,845 | n/a | **2** | Heavy gate filter — needs non-QUIET regime |
+| SR_FLIP_RETEST | 27,133 | 22,539 | 4,594 | **0** | All 4,594 scored signals **FILTERED at QUIET_SCALP_BLOCK** |
+| LIQUIDITY_SWEEP_REVERSAL | 7,431 | 7,269 | n/a | **0** | Same QUIET_SCALP_BLOCK structural protection |
+| 9 other paths | 0 | — | — | — | `regime_blocked` (correct in QUIET) |
+
+**Root cause of "0 SR_FLIP emissions"**: `scanner/__init__.py:4336` — the
+`QUIET_SCALP_BLOCK` gate filters all 360_SCALP setups EXCEPT QCB (always exempt)
+and DIV_CONT (when conf ≥ 64) when regime is QUIET. SR_FLIP, FAR, LSR all
+correctly fall through this gate in QUIET. **This is structural protection,
+not a bug.** Threshold `QUIET_SCALP_MIN_CONFIDENCE = 65.0` (config/__init__.py:1058).
+
+### Liquidation Clusters Absent (409,322/409,322)
+**Not a bug.** Per `bootstrap.py:385` the `@forceOrder` subscription is wired,
+events flow through `main.py:542` → `_pending_liquidations` → `OrderFlowStore.add_liquidation()`.
+QUIET markets simply produce no liquidation cascades. Only consumer is
+FUNDING_EXTREME (`scalp.py:2760`) which has graceful ATR×1.5 fallback.
+
+### Win-rate Validation: Still Blocked
+Only **1** signal closed in window (QCB at -0.086% PnL — essentially flat exit,
+not a real SL or TP). Need non-QUIET regime to generate enough signals for
+statistical confidence.
 
 ---
 
 ## Current Priority (Do This First)
 
-**Observe next monitor zip** — specifically:
-
-1. **QCB / FAR no longer perpetually rejected** — the SL cap for QUIET_COMPRESSION_BREAK
-   and FAILED_AUCTION_RECLAIM is now 3.0% (was 2.5% channel-wide). The perpetual
-   `sl_cap_exceeded` rejection loops seen in live logs should be gone.
-2. **Win-rate metric** — TP1_HIT / PROFIT_LOCKED rate post-Audit-3 still unvalidated.
-3. **New paths firing** — LIQ_REV, DIV_CONT, FUNDING_EXT targeted by Audit-3 fixes.
-4. **HYPEUSDT QCB 89.2 composite → 67.6 via -21.6 gate penalty** — single gate is
-   nuking a quality signal. Source unknown; investigate in next session if owner
-   wants to chase it (ask: which soft gate applied 21.6 penalty?).
+1. **Wait for non-QUIET regime data** — 9/14 paths and the QUIET_SCALP_BLOCK
+   gate cannot be evaluated until market shifts to TRENDING / RANGING / WEAK_TREND.
+   Until then, QCB and DIV_CONT are the only paths that can fire.
+2. **Validate channel cap raise effect on next zip** — check FAR/QCB SL distance
+   distribution; some signals should now use 2.5–3.0% range that were previously
+   compressed/rejected at 2.5%.
+3. **HYPEUSDT QCB 89.2 → 67.6 via -21.6 gate penalty** — open mystery from
+   prior session. Source unknown.
 
 ---
 
@@ -68,14 +108,19 @@ PR #236 open on `claude/read-owner-brief-ASkk2`.
 | DISTRIBUTION soft gate −15pts on LONG signals | `src/scanner/__init__.py:~4105` | Audit-3 |
 | Meme coin low-volume penalty 0.85× (<$150M 24h) | `src/scanner/__init__.py:~4124` | Audit-3 |
 | CVD 24h starvation: boot seed from historical 1m candles | `src/historical_data.py` + `src/order_flow.py` | CVD-fix |
-| **Mover pairs dashboard: `set_mover_pairs()` + `/dashboard` counter** | `src/telemetry.py` + `src/scanner/__init__.py` | **This session (PR #236)** |
-| **360_SCALP channel SL cap raised 1.5% → 2.5% (interim)** | `src/signal_quality.py` | **This session (PR #236)** |
-| **Per-setup SL caps: 17 values in `_MAX_SL_PCT_BY_SETUP`** | `src/signal_quality.py` | **This session (PR #236)** |
-| **EXHAUSTION_FADE moved to 0.9 R:R mean-reversion tier** | `src/signal_quality.py` | **This session (PR #236)** |
+| Mover pairs dashboard: `set_mover_pairs()` + `/dashboard` counter | `src/telemetry.py` + `src/scanner/__init__.py` | PR #236 |
+| 360_SCALP channel SL cap raised 1.5% → 2.5% (interim) | `src/signal_quality.py` | PR #236 |
+| Per-setup SL caps: 17 values in `_MAX_SL_PCT_BY_SETUP` | `src/signal_quality.py` | PR #236 |
+| EXHAUSTION_FADE moved to 0.9 R:R mean-reversion tier | `src/signal_quality.py` | PR #236 |
+| **360_SCALP channel SL cap raised 2.5% → 3.0% — unlocks per-setup 3.0% caps for FAR/QCB/TPE/FUNDING** | `src/signal_quality.py:347` | **This session (2026-04-29)** |
 
 ---
 
-## Per-Setup SL Cap Table (live as of PR #236)
+## Per-Setup SL Cap Table (live as of 2026-04-29 channel cap raise)
+
+**Channel cap (`_MAX_SL_PCT_BY_CHANNEL["360_SCALP"]`) is now 3.0%.**
+Before today's change, this acted as a tighter-wins cap that silently capped
+FAR/QCB/TPE/FUNDING at 2.5% even though their per-setup caps are 3.0%.
 
 | Setup | Cap | Policy |
 |---|---|---|
@@ -103,7 +148,8 @@ Tighter of per-setup cap vs channel cap always wins (`_max_sl_pct_for_policy()`)
 
 ## Known Live Issues
 
-1. **Win-rate still unvalidated** — need post-Audit-3 monitor zip.
+1. **Win-rate still unvalidated** — only 1 closed signal in latest 28h zip
+   (QCB at -0.086% PnL). Need non-QUIET regime for meaningful sample.
 2. **HYPEUSDT QCB gate penalty** — 89.2 composite → 67.6 due to single -21.6 soft-gate
    penalty. Source not yet identified. Not blocking, but high-quality signal lost.
 3. **`cvd_candles=0` on some pairs** — ZBTUSDT, BSBUSDT, SWARMSUSDT. Low-volume pairs
@@ -111,10 +157,15 @@ Tighter of per-setup cap vs channel cap always wins (`_max_sl_pct_for_policy()`)
    accumulate (~100 min post-start).
 4. **`币安人生USDT` in scan universe** — Chinese-character symbol, likely a promo/test ticker.
    Burns a scan slot. Will fall out on next volume-sort cycle. No action needed.
-5. **Entire market QUIET at 07:47 UTC 2026-04-28** — VSB, BREAKDOWN_SHORT, QCB explicitly
-   blocked in QUIET. Low signal throughput is expected until regime shifts.
+5. **Market QUIET ~99.7% of latest 28h window** — 9/14 paths regime-blocked
+   (correct behavior); QUIET_SCALP_BLOCK gate filters all 360_SCALP setups
+   except QCB (always exempt) and DIV_CONT (conf ≥ 64). Signal throughput
+   capped until regime shifts.
 6. **DISTRIBUTION gate untested** — penalty fires but calibration unknown. Watch LONG
    suppression rate in next zip; reduce to 10pts if > 30% of LONGs suppressed.
+7. **liquidation_clusters absent in 100% of cycles** — Expected in QUIET (no
+   liquidation cascades occurring). Wiring is intact (`bootstrap.py:385`).
+   Only consumer is FUNDING_EXTREME with graceful ATR fallback. Not a bug.
 
 ---
 
@@ -137,26 +188,30 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 
 | Priority | Task | Status |
 |---|---|---|
-| 1 | Monitor zip — validate QCB/FAR no longer looping on SL cap | Observation |
-| 2 | Monitor zip — validate Audit-3 path activation (LIQ_REV, DIV_CONT, FUNDING_EXT) | Observation |
-| 3 | Investigate HYPEUSDT QCB -21.6 gate penalty source | Code investigation |
-| 4 | Win-rate check — TP1_HIT/PROFIT_LOCKED rate post Audit-3 + SL cap fixes | Data validation |
-| 5 | Investigate ORB / CLS / PDC silence (3 paths still untouched) | Code investigation |
-| 6 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
+| 1 | QCB/FAR cap fix VALIDATED (12 + 2 emissions in latest zip) | ✅ Done |
+| 2 | Audit-3 fixes verified deployed in code (TPE/DIV_CONT/FUNDING/LIQ_REV) | ✅ Done |
+| 3 | 360_SCALP channel cap 2.5% → 3.0% — unlocks per-setup 3.0% caps | ✅ This session |
+| 4 | Investigate HYPEUSDT QCB -21.6 gate penalty source | Code investigation |
+| 5 | Validate channel cap raise on next monitor zip | Observation |
+| 6 | Monitor zip — validate Audit-3 path activation under non-QUIET regime | Observation (regime-gated) |
+| 7 | Win-rate check — needs ≥20 closed signals in non-QUIET regime | Data validation |
+| 8 | Investigate ORB / CLS / PDC silence under non-QUIET regime | Code investigation |
+| 9 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
 
 ---
 
 ## Open Risks
 
-- **New path signals untested** — LIQ_REV, DIV_CONT, FUNDING_EXT have never fired live.
-  First signals from these paths must be manually reviewed.
-- **Per-setup cap is tighter-wins** — if channel cap < setup cap, channel wins. Currently
-  360_SCALP=2.5% channel cap is tighter than FAR/QCB/TPE/FUNDING 3.0% setup caps.
-  Channel cap needs to be raised to 3.0% to unlock these paths' full headroom.
-  **Action needed:** raise `360_SCALP` in `_MAX_SL_PCT_BY_CHANNEL` from 2.5 → 3.0.
+- **New path signals untested** — LIQ_REV, DIV_CONT, FUNDING_EXT have never fired live
+  (only QCB and FAR emitted in latest zip; rest were regime-blocked).
+  First signals from these paths must be manually reviewed when regime allows.
 - **DISTRIBUTION gate false positive** — ranging market may misclassify as DISTRIBUTION.
 - **MOM-PROT SL exposure** — watch total SL rate.
 - **CVD 10-candle divergence quality** — monitor DIV_CONT SL rate; revert if > 50%.
+- **Channel cap raise side effect (this session)** — FAR/QCB/TPE/FUNDING signals
+  may now use 2.5–3.0% SL geometry that was previously rejected. Watch SL hit
+  rate on these 4 paths in the next zip; if > 60%, the per-setup 3.0% cap may
+  be too loose for live conditions.
 
 ---
 
