@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-29 — Monitor zip review + 360_SCALP channel cap raise*
+*Updated: 2026-04-29 — Mover promotion seeding fix (PR #233 follow-up)*
 
 ---
 
@@ -19,6 +19,19 @@ This session (2026-04-29):
   capped at 2.5% by the tighter-wins channel logic. Setups with <3.0% per-setup
   caps (SR_FLIP=2.5, RANGE_REJECTION=1.5, etc.) are unaffected — math verified
   in `_max_sl_pct_for_policy()`.
+- **Shipped: mover promotion data-plumbing fix** (`src/scanner/__init__.py:1090`).
+  Owner flagged that mover-promoted pairs (PR #233) weren't producing signals.
+  Root cause: PR #233 wired the *promotion list* but skipped REST candle
+  seeding and CVD seeding — promoted symbols had 0 candles, failing
+  `insufficient_candles` on every cycle for the entire 5-cycle TTL.
+  Fix: new `_seed_mover_pair()` method awaits `data_store.seed_symbol()`
+  (mirrors `main.py:708` new-pair pattern) + `seed_cvd_from_klines()`
+  (mirrors `bootstrap.py:177` boot pattern) before adding the pair to
+  `_mover_promoted_pairs`. Pairs with <28 5m candles after seed are skipped
+  to avoid burning telemetry on a dead pair. WS subscription deliberately
+  skipped — `update_streams_for_top50()` does a full stop→start which is too
+  disruptive for a 75-second promotion window; REST-seeded data is sufficient
+  for VSB+BREAKDOWN evaluation in that span.
 
 Prior session (2026-04-28): PR #236 — per-setup SL caps, EXHAUSTION_FADE 0.9 R:R,
 `/dashboard` mover counter, interim 1.5% → 2.5% bump (now superseded).
@@ -113,6 +126,7 @@ statistical confidence.
 | Per-setup SL caps: 17 values in `_MAX_SL_PCT_BY_SETUP` | `src/signal_quality.py` | PR #236 |
 | EXHAUSTION_FADE moved to 0.9 R:R mean-reversion tier | `src/signal_quality.py` | PR #236 |
 | **360_SCALP channel SL cap raised 2.5% → 3.0% — unlocks per-setup 3.0% caps for FAR/QCB/TPE/FUNDING** | `src/signal_quality.py:347` | **This session (2026-04-29)** |
+| **Mover-promotion REST seed + CVD seed on promotion (PR #233 follow-up)** | `src/scanner/__init__.py:1090` (`_seed_mover_pair`) | **This session (2026-04-29)** |
 
 ---
 
@@ -191,12 +205,15 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 1 | QCB/FAR cap fix VALIDATED (12 + 2 emissions in latest zip) | ✅ Done |
 | 2 | Audit-3 fixes verified deployed in code (TPE/DIV_CONT/FUNDING/LIQ_REV) | ✅ Done |
 | 3 | 360_SCALP channel cap 2.5% → 3.0% — unlocks per-setup 3.0% caps | ✅ This session |
-| 4 | Investigate HYPEUSDT QCB -21.6 gate penalty source | Code investigation |
-| 5 | Validate channel cap raise on next monitor zip | Observation |
-| 6 | Monitor zip — validate Audit-3 path activation under non-QUIET regime | Observation (regime-gated) |
-| 7 | Win-rate check — needs ≥20 closed signals in non-QUIET regime | Data validation |
-| 8 | Investigate ORB / CLS / PDC silence under non-QUIET regime | Code investigation |
-| 9 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
+| 4 | Mover promotion REST+CVD seed on promotion (PR #233 follow-up) | ✅ This session |
+| 5 | Validate mover signals firing on next zip — search for VSB/BREAKDOWN_SHORT emissions on non-top-75 symbols | Observation |
+| 6 | Investigate HYPEUSDT QCB -21.6 gate penalty source | Code investigation |
+| 7 | Validate channel cap raise on next monitor zip | Observation |
+| 8 | Monitor zip — validate Audit-3 path activation under non-QUIET regime | Observation (regime-gated) |
+| 9 | Win-rate check — needs ≥20 closed signals in non-QUIET regime | Data validation |
+| 10 | Investigate ORB / CLS / PDC silence under non-QUIET regime | Code investigation |
+| 11 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
+| 12 | Pre-existing test breakage: 139 failures on main (PR #240 channel cap raise + others didn't update fixtures) — clean up in dedicated PR | Tech debt |
 
 ---
 
@@ -212,6 +229,19 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
   may now use 2.5–3.0% SL geometry that was previously rejected. Watch SL hit
   rate on these 4 paths in the next zip; if > 60%, the per-setup 3.0% cap may
   be too loose for live conditions.
+- **Mover promotion seed cost** — each newly-promoted mover incurs ~6 REST kline
+  fetches (1m/5m/15m/1h/4h/1d × 500 candles) in parallel within the scan
+  cycle. With `MOVER_PROMOTION_MIN_PCT=15.0` and a typical market this is
+  1–3 movers per cycle = 6–18 weight-1 calls, well within Binance's 1200/min
+  futures budget. Watch scan latency telemetry — if it spikes during high-
+  volatility regimes (many movers qualifying simultaneously), consider
+  staggering seeds across cycles.
+- **Mover WS lag** — promoted pairs do NOT get WS subscriptions (deliberate;
+  `update_streams_for_top50` does a stop→start). For the 75-second TTL, scan
+  works off the REST seed snapshot; 1m candles don't update live. Adequate
+  for VSB/BREAKDOWN setup detection (which look at closed 5m/1h structure)
+  but not suitable if we ever extend the mover allowlist to setups that need
+  live tick data.
 
 ---
 

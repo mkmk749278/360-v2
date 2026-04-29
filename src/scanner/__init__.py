@@ -1087,15 +1087,62 @@ class Scanner:
 
         return now_promoted[:SURGE_PROMOTION_MAX_PAIRS]
 
-    def _update_movers_promotion(self, sorted_pairs_set: set) -> List[str]:
+    async def _seed_mover_pair(self, symbol: str, info: Any) -> bool:
+        """Backfill candles + CVD for a freshly-promoted mover pair.
+
+        Mover pairs sit outside the boot-time `seed_all()` universe and outside
+        the WS subscription set, so without an on-promotion REST seed every
+        evaluator fails on insufficient_candles for the entire 5-cycle TTL.
+
+        Pulls the standard 6-timeframe candle backfill (mirrors
+        `main.py:708` new-pair seed pattern) and the historical CVD seed
+        (mirrors `bootstrap.py:177`). Returns True on success — caller must
+        skip promotion if False so we don't burn telemetry on a dead pair.
+        """
+        try:
+            await self.data_store.seed_symbol(symbol, info.market)
+        except Exception as exc:
+            log.warning("mover seed failed for {}: {}", symbol, exc)
+            return False
+
+        sym_candles = self.data_store.candles.get(symbol, {})
+        c5 = sym_candles.get("5m", {})
+        if not c5 or len(c5.get("close", [])) < 28:
+            log.warning(
+                "mover seed insufficient for {}: 5m={} candles — skip promotion",
+                symbol, len(c5.get("close", [])) if c5 else 0,
+            )
+            return False
+
+        for tf_name, data in sym_candles.items():
+            self.pair_mgr.record_candles(symbol, tf_name, len(data.get("close", [])))
+
+        if self.order_flow_store is not None:
+            kl_1m = sym_candles.get("1m", {})
+            tbv = kl_1m.get("taker_buy_vol_usd")
+            vusd = kl_1m.get("volume_usd")
+            if tbv is not None and vusd is not None and len(tbv) > 0:
+                try:
+                    self.order_flow_store.seed_cvd_from_klines(symbol, tbv, vusd)
+                except Exception as exc:
+                    log.debug("mover CVD seed failed for {}: {}", symbol, exc)
+
+        return True
+
+    async def _update_movers_promotion(self, sorted_pairs_set: set) -> List[str]:
         """Promote non-scanned pairs with extreme 24h % change into the scan universe.
 
         Only VSB (_evaluate_volume_surge_breakout) and BREAKDOWN_SHORT
         (_evaluate_breakdown_short) run on mover-promoted pairs — all other
         evaluators are skipped via allowed_evaluators in _get_channel_candidate.
 
+        Newly-promoted symbols are REST-seeded (candles + CVD) before being
+        added to the active set; pairs that fail to seed are skipped so we
+        don't burn 5 cycles on insufficient_candles rejections.
+
         Returns the list of currently mover-promoted symbols.
         """
+        candidates: List[tuple[str, Any]] = []
         for symbol, info in list(self.pair_mgr.pairs.items()):
             if symbol in sorted_pairs_set:
                 # Already in main scan — all 14 evaluators run normally; no restriction.
@@ -1107,6 +1154,16 @@ class Scanner:
                 and info.volume_24h_usd >= MOVER_PROMOTION_MIN_VOLUME_USD
                 and symbol not in self._mover_promoted_pairs
             ):
+                candidates.append((symbol, info))
+
+        if candidates:
+            seed_results = await asyncio.gather(
+                *[self._seed_mover_pair(sym, info) for sym, info in candidates],
+                return_exceptions=False,
+            )
+            for (symbol, info), seeded in zip(candidates, seed_results):
+                if not seeded:
+                    continue
                 log.info(
                     "📈 MOVER PROMOTION: {} {:.1f}% vol={:.0f} — VSB/BREAKDOWN scan for {} cycles",
                     symbol, info.volatility_24h, info.volume_24h_usd, MOVER_PROMOTION_CYCLES,
@@ -1305,7 +1362,7 @@ class Scanner:
                 _sorted_pairs_set = {sym for sym, _ in sorted_pairs}
                 _promoted = self._update_volume_baseline(_sorted_pairs_set)
                 # Movers promotion: pairs with extreme 24h % change — restricted to VSB+BREAKDOWN
-                _mover_promoted = self._update_movers_promotion(_sorted_pairs_set)
+                _mover_promoted = await self._update_movers_promotion(_sorted_pairs_set)
                 _all_promoted = list(dict.fromkeys(_promoted + _mover_promoted))  # dedup, order-stable
                 if _all_promoted:
                     _added = 0
