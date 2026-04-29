@@ -2,13 +2,13 @@
   "emissions_delta": 14,
   "enabled": true,
   "fast_failures_delta": 0,
-  "gating_delta": 83891,
-  "no_generation_delta": 6356189,
+  "gating_delta": 70689,
+  "no_generation_delta": 5640537,
   "post_correction_window_delta": {
     "SR_FLIP_RETEST": {
       "emitted_delta": 0,
       "geometry_changed_delta": 0,
-      "geometry_preserved_delta": 6313,
+      "geometry_preserved_delta": 4594,
       "geometry_rejected_delta": 0,
       "median_first_breach_delta_sec": 0.0,
       "median_terminal_delta_sec": -768.49,
