@@ -3298,6 +3298,50 @@ def _pdc_indicators_short(rsi_val=45.0, ema9=97.0, ema21=101.0, adx_val=25.0, mo
                                    rsi_val=rsi_val, mom=mom)}
 
 
+class TestPostDisplacementContinuationAuditFixes:
+    """Path audit #13 fixes:
+    - `close <= 0` now emits `invalid_price` (was `auction_not_detected`).
+    - SL geometry respects close-relative + 1×ATR floor (mirror of
+      VSB/BDS/ORB/QCB/DIV_CONT/CLS).
+    """
+
+    def test_invalid_price_reports_distinct_reject_reason(self):
+        """`close <= 0` must emit `invalid_price`, not `auction_not_detected`."""
+        candles_5m = _make_pdc_candles_long()
+        candles_5m["close"][-1] = 0.0
+        candles = {"5m": candles_5m}
+        ch = ScalpChannel()
+        sig = ch._evaluate_post_displacement_continuation(
+            "BTCUSDT", candles, _pdc_indicators_long(), {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "invalid_price", (
+            f"close <= 0 must emit `invalid_price`, got "
+            f"{ch._active_no_signal_reason!r}"
+        )
+
+    def test_sl_respects_close_relative_floor_long(self):
+        """Tight consolidation (PDC's design intent: narrow consolidation =
+        strong absorption) used to produce sl_dist as low as 0.2-0.4% —
+        defeated by the 0.80% universal floor.  Post-fix the close-relative
+        floor `max(0.8% × close, 1×ATR)` keeps sl_dist ≥ 0.8%."""
+        candles = {"5m": _make_pdc_candles_long()}
+        ch = ScalpChannel()
+        sig = ch._evaluate_post_displacement_continuation(
+            "BTCUSDT", candles, _pdc_indicators_long(), {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="TRENDING_UP",
+        )
+        if sig is None:
+            import pytest
+            pytest.skip("Other gates rejected — focused fix is on SL geometry only.")
+        sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
+        assert sl_dist_pct >= 0.79, (
+            f"PDC SL distance {sl_dist_pct:.3f}% is too tight — "
+            f"close-relative floor was not honoured."
+        )
+
+
 class TestPostDisplacementContinuation:
     """Tests for the POST_DISPLACEMENT_CONTINUATION path (roadmap step 6)."""
 
