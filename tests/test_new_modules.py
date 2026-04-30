@@ -50,6 +50,58 @@ class TestSMCDetector:
         result = det.detect("BTCUSDT", {}, ticks)
         assert result.whale_alert is not None  # 50000 * 30 = 1.5M > threshold
 
+    def test_whale_detected_when_buried_in_window(self):
+        """Whale alert must scan the recent_ticks window, not just the latest tick.
+
+        Pre-fix, a $1M+ whale at any position other than the very last was
+        overwritten by every subsequent tick, so the alert was effectively
+        invisible to the 15s scan loop on any active pair.  Post-fix the
+        scan walks newest-first through the window.
+        """
+        det = SMCDetector()
+        # 50 small trades, then one whale, then 49 more small trades.
+        # Latest tick is NOT the whale.
+        ticks = [{"price": 100.0, "qty": 1.0, "isBuyerMaker": False, "time": i}
+                 for i in range(50)]
+        ticks.append({"price": 50000.0, "qty": 30.0, "isBuyerMaker": False, "time": 50})  # $1.5M whale
+        ticks.extend({"price": 100.0, "qty": 1.0, "isBuyerMaker": True, "time": i}
+                     for i in range(51, 100))
+        result = det.detect("BTCUSDT", {}, ticks)
+        assert result.whale_alert is not None, (
+            "whale_alert must be detected when present anywhere in the recent_ticks "
+            "window, not only when it is the most recent tick"
+        )
+
+    def test_no_whale_when_no_tick_exceeds_threshold(self):
+        """If no tick in the window exceeds the threshold → no whale alert."""
+        det = SMCDetector()
+        ticks = [{"price": 100.0, "qty": 50.0, "isBuyerMaker": False, "time": i}
+                 for i in range(100)]  # each tick = $5k notional
+        result = det.detect("BTCUSDT", {}, ticks)
+        assert result.whale_alert is None
+
+    def test_whale_threshold_env_overridable(self, monkeypatch):
+        """B8: WHALE_TRADE_USD_THRESHOLD must be tunable without redeploy."""
+        # Tick is $100k notional — below default 1M threshold, above a 50k env override.
+        monkeypatch.setenv("WHALE_TRADE_USD_THRESHOLD", "50000")
+        # Re-import the detector module so the module-level constant is rebuilt.
+        import importlib
+
+        import src.detector as detector_module
+        importlib.reload(detector_module)
+
+        det = detector_module.SMCDetector()
+        ticks = [{"price": 100.0, "qty": 1000.0, "isBuyerMaker": False, "time": 1}]
+        result = det.detect("BTCUSDT", {}, ticks)
+        assert result.whale_alert is not None, (
+            "WHALE_TRADE_USD_THRESHOLD env override should lower threshold "
+            "so a $100k tick qualifies as a whale"
+        )
+
+        # Restore default for other tests in the session
+        monkeypatch.delenv("WHALE_TRADE_USD_THRESHOLD", raising=False)
+        importlib.reload(detector_module)
+
     def test_as_dict_keys(self):
         det = SMCDetector()
         result = det.detect("BTCUSDT", {}, [])
