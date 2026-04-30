@@ -265,10 +265,75 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 8 | Validate channel cap raise on next monitor zip | Observation |
 | 9 | Monitor zip — validate Audit-3 path activation under non-QUIET regime | Observation (regime-gated) |
 | 10 | Win-rate check — needs ≥20 closed signals in non-QUIET regime | Data validation |
-| 11 | Investigate ORB / CLS / PDC silence under non-QUIET regime | Code investigation |
+| 11 | ORB / CLS / PDC silence — diagnosed, see "Silent-path diagnosis" below; ORB requires rebuild, CLS/PDC structural in QUIET; mover-allowlist expansion is a separate architectural question | ✅ Diagnosed |
 | 12 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
 | 13 | Pre-existing test breakage: 139 failures on main (PR #240 channel cap raise + others didn't update fixtures) — clean up in dedicated PR | Tech debt |
 | 14 | Diagnose underlying 15-min futures WS drop (needs VPS-side `_health_watchdog` "stale WS connection" log) | Investigation |
+
+---
+
+## Silent-path diagnosis (queue #11) — 2026-04-30
+
+ORB / CLS / PDC have never fired live. Diagnosis traces each to a different
+root cause; none are bugs.
+
+**ORB (OPENING_RANGE_BREAKOUT)** — build-time disabled. `SCALP_ORB_ENABLED`
+defaults to `false` (`config/__init__.py:848`). PR-06 deliberately disabled
+the path until rebuilt with true session-opening-range logic; the current
+8-bar proxy is not institutional-grade. Reject reason `regime_blocked` at
+`scalp.py:2132` is a misleading label (root cause is the build flag, not
+regime). Action: leave disabled until rebuild — Phase 2.
+
+**CLS (CONTINUATION_LIQUIDITY_SWEEP)** — regime allowlist
+`{TRENDING_UP, TRENDING_DOWN, STRONG_TREND, WEAK_TREND, BREAKOUT_EXPANSION}`
+hard-blocks QUIET / RANGING / VOLATILE at `scalp.py:3309`. Market is ~99.7%
+QUIET → silence is structural and expected. Action: none. Will activate
+naturally when regime shifts.
+
+**PDC (POST_DISPLACEMENT_CONTINUATION)** — same regime allowlist as CLS at
+`scalp.py:3583`. Same expected silence in QUIET. Action: none.
+
+### Auxiliary scan paths (the user's hint)
+
+Two scan paths exist beyond the top-75 main universe:
+
+1. **Surge-promoted** (`_promoted_pairs`, 3 cycles) — pairs whose volume
+   exceeds `SURGE_PROMOTION_VOLUME_MULTIPLIER` × baseline. Runs all 14
+   evaluators (no setup whitelist). Pair-level regime is computed
+   independently — in current QUIET market most surge-promoted pairs likely
+   still classify QUIET, so CLS/PDC remain regime-blocked there too.
+
+2. **Mover-promoted** (`_mover_promoted_pairs`, 5 cycles) — pairs with ≥15%
+   24h % change. **Hard whitelist: VSB + BREAKDOWN_SHORT only**
+   (`scanner/__init__.py:4635`). Mover pairs by definition have strong
+   directional moves and almost certainly classify TRENDING — which IS in
+   the CLS/PDC regime allowlist. So the only thing keeping CLS/PDC silent
+   on mover-promoted pairs is the evaluator whitelist itself.
+
+**Owner discussion item (B10)**: should we expand the mover-evaluator
+whitelist to include CLS and PDC? The case for:
+
+- Mover pairs are the highest-momentum scan target; CLS (sweep continuation)
+  and PDC (displacement re-acceleration) are exactly the setups designed
+  for that environment.
+- REST seed (PR #241) gives 500 candles per TF — sufficient for CLS's
+  10-candle sweep window and PDC's 2-5-candle consolidation.
+- Both paths use closed 5m candles, not live ticks → no WS dependency
+  (movers deliberately skip WS subscription per `_seed_mover_pair`).
+
+The case against:
+
+- Mover-promoted pairs are highly volatile by definition; CLS/PDC may run
+  hotter SL rates here than on stable top-75 pairs.
+- 75-second TTL is short for setups that need post-sweep / post-displacement
+  re-acceleration confirmation — a stale-by-the-time-it-emerges signal is
+  worse than no signal.
+- VSB+BREAKDOWN-only was a deliberate scope decision in PR #233 — likely to
+  contain the blast radius until movers proved themselves.
+
+Recommend: defer until mover signals show real win rate on VSB+BREAKDOWN
+first (next-PR-queue #6 — observation item). If movers prove out, then
+expand cautiously, one path at a time, with explicit owner sign-off.
 
 ---
 
