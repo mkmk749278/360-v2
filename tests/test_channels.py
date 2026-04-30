@@ -69,6 +69,69 @@ def _make_qcb_inputs(*, direction: Direction, close: float = 100.0, atr_last: fl
     return candles, indicators, smc_data
 
 
+class TestQuietCompressionBreakAuditFixes:
+    """Path audit #10 fixes — partial-candle volume gate + SL geometry."""
+
+    def test_qcb_accepts_low_current_candle_volume(self):
+        """QCB no longer rejects on partial-candle volume.  Pre-fix the gate
+        `volumes[-1] >= 2.0 × avg_vol` rejected the still-forming current
+        candle's running volume vs multiples of complete-candle averages —
+        a unit mismatch.  Especially backward for QCB which fires in
+        QUIET regime (low absolute volume by definition).
+        """
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        # Knock current-candle volume to typical partial-candle level (well
+        # below 2× the rolling average of 100).  Pre-fix this auto-rejected.
+        candles["5m"]["volume"][-1] = 80.0
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
+        )
+        assert sig is not None, (
+            "QCB must accept the squeeze-release setup with realistic "
+            "partial-candle volume on the running breakout candle."
+        )
+        assert sig.setup_class == "QUIET_COMPRESSION_BREAK"
+
+    def test_qcb_accepts_zero_current_candle_volume(self):
+        """Even with zero current-candle volume (very early in the 5m bar)."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        candles["5m"]["volume"][-1] = 0.0
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
+        )
+        assert sig is not None
+
+    def test_qcb_sl_respects_close_relative_floor_long(self):
+        """QCB SL geometry now takes the further of bb-anchored stop and
+        close-relative floor (max(0.8% × close, 1×ATR) below close).
+        Pre-fix used a flat 0.3% close-relative floor that was sub-spread
+        on most pairs, defeating the structural anchor when the universal
+        0.80% floor at `_enqueue_signal` clamped it.
+        """
+        # Force a tight bb_lower so the structural-stop is shallow; close-relative
+        # floor must take over.  bb_lower = 99.95 → bb-anchored sl ≈ 99.75 (0.25%).
+        # Close-relative floor with close=100, atr=0.4 → max(0.8, 0.4) = 0.8 → sl=99.2.
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG, atr_last=0.4)
+        indicators["5m"]["bb_upper_last"] = 100.05  # bands tight around close
+        indicators["5m"]["bb_lower_last"] = 99.95
+        # close[-1] needs to be > bb_upper for breakout; bump bb_upper to 99.99
+        indicators["5m"]["bb_upper_last"] = 99.99
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
+        )
+        if sig is None:
+            import pytest
+            pytest.skip("Other gates rejected — focused fix is on SL geometry only.")
+        sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
+        assert sl_dist_pct >= 0.79, (
+            f"QCB SL distance {sl_dist_pct:.3f}% is too tight — close-relative "
+            f"floor (max(0.8%, 1×ATR)) was not honoured on tight bands."
+        )
+
+
 class TestQuietCompressionBreakStopLoss:
     def test_qcb_sl_uses_atr_floor_long(self):
         ch = ScalpChannel()

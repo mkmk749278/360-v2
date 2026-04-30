@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-02 — Path audit #9 (FUNDING_EXTREME_SIGNAL): invalid_price telemetry truth + TP1 ATR-adaptive cap; QUIET_SCALP_BLOCK bottleneck flagged for owner decision*
+*Updated: 2026-05-02 — Path audit #10 (QUIET_COMPRESSION_BREAK): partial-candle volume gate removed + close-relative SL floor (mirror of VSB/BDS/ORB family fix)*
 
 ---
 
@@ -8,7 +8,51 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-02 — path audit #9):
+This session (2026-05-02 — path audit #10):
+- **QUIET_COMPRESSION_BREAK deep dive** (`_evaluate_quiet_compression_break`,
+  `src/channels/scalp.py:3075-3239`).  Latest monitor zip:
+  `EVAL::QUIET_COMPRESSION_BREAK: regime_blocked=15,126 (82.1%),
+  breakout_not_detected=2,162 (11.7%), basic_filters_failed=539 (2.9%)` —
+  0 generated in latest 18,423-cycle window.  Quality-by-path window
+  shows 3 prior closes all at -0.046% PnL (SL hits at flat — minimal
+  loss but no winners).  Two structural defects found, both mirror
+  VSB/BDS/ORB family bugs.
+- **🔴 Bug A — current-candle volume gate** (was line 3142).  Same
+  `volumes[-1] >= 2.0 × avg_vol` partial-vs-complete-candle unit
+  mismatch removed from VSB/BDS/ORB.  Especially backward for QCB:
+  the path requires QUIET regime (low absolute volume by definition);
+  the squeeze-release thesis tracks the BREAKOUT candle's volume,
+  not a still-forming partial candle's running total.
+  **Fix**: removed the partial-candle volume gate; the rolling-average
+  non-degenerate check remains (`avg_vol > 0`).
+- **🔴 Bug B — tight SL geometry** (was line 3162).  Pre-fix:
+    LONG: `sl = min(bb_lower − 0.5×ATR, close × (1 − 0.003))`
+  The 0.3% close-relative floor was sub-spread on most pairs and
+  ignored ATR; the bb-anchored stop was tight in compressed-band
+  conditions (QCB by definition fires when bb width <2.5%).  Result:
+  the 0.80% universal floor at `_enqueue_signal` clamped most stops,
+  defeating the structural anchor.  Path's 3 prior closes all
+  hovered around break-even SL hits — consistent with the tight-stop
+  thesis.
+  **Fix**: applied close-relative + ATR floor pattern.
+    `sl = min(bb_lower − 0.5×ATR, close − max(0.8% × close, 1×ATR))`
+  Take the further-from-close so the stop respects both band geometry
+  AND minimum room.
+- **Tests added** (`tests/test_channels.py::TestQuietCompressionBreakAuditFixes`):
+  3 new — accepts low/zero current-candle volume, SL respects
+  close-relative floor on tight bands.  All 8 QCB tests pass (5
+  existing + 3 new).  3322 broader tests pass (vs 3319 post-FUNDING
+  baseline — net +3, zero regressions).
+- **Data sufficiency check**: QCB needs 5m candles ≥ 25 (boot seed
+  500), Bollinger Bands (`bb_upper_last`, `bb_lower_last`) — always
+  populated by indicator pass, MACD histogram (last/prev) — present
+  for trending checks, FVG/orderblock — always check FVG (orderblocks
+  not_implemented).  ATR for SL geometry.  All trivially met after
+  boot seed.  Path's silence in current zip is regime-driven (the
+  82% regime_blocked = QUIET market actually doesn't trigger
+  compression+breakout very often, which is correct doctrine).
+
+Prior session (2026-05-02 — path audit #9):
 - **FUNDING_EXTREME_SIGNAL deep dive** (`_evaluate_funding_extreme`,
   `src/channels/scalp.py:2878-3041`).  Latest monitor zip:
   `EVAL::FUNDING_EXTREME: funding_not_extreme=11,763 (63.8%),
@@ -592,6 +636,7 @@ statistical confidence.
 | **ORB path audit (dormant-path triage): path is feature-flag-disabled (`SCALP_ORB_ENABLED=false`); audit clarified the live monitor `regime_blocked=100%` was the disable token, NOT a regime gate.  Telemetry fix: dormant-flag check now reports `feature_disabled` (truthful).  Preserved-code fixes for re-enable readiness: removed broken current-candle volume gate (VSB/BDS-family bug); SL geometry now respects close-relative + 1×ATR floor (was 0.1% structural buffer producing sub-spread stops on tight ranges).  Open question on whether to rebuild session-range proxy or re-enable as-is — owner decision.** | `src/channels/scalp.py:2271` (telemetry) + `:2322` (vol gate) + `:2348` (SL geometry) + 3 new tests in `tests/test_pr06_orb_disable.py::TestORBAuditFixes` | **2026-05-02 (path audit #7)** |
 | **SR_FLIP path audit: (A) TP1 ATR-adaptive cap was claimed deployed in OWNER_BRIEF Audit-3 but actually missing from the SR_FLIP code (only TPE had it) — added 1.8R/2.5R/uncapped-by-atr-percentile cap, addressing the documented historical 100% SL rate; (B) evaluator-level VOLATILE_UNSUITABLE regime block added (was VOLATILE-only — defence-in-depth)** | `src/channels/scalp.py:2479` (regime) + `:2738` (TP1 cap) + 4 new tests in `tests/test_channels.py::TestSrFlipRetestRefinements` | **2026-05-02 (path audit #8)** |
 | **FUNDING path audit (3-fix shipped after CTE recommendation accepted): (A) `close <= 0` now emits `invalid_price` instead of conflating with `funding_not_extreme` telemetry; (B) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) — structure-anchored TP1 could sit 5-10R from close in trending markets, unreachable for mean-reversion contrarian setup before SL; (C) FUNDING_EXTREME_SIGNAL added to QUIET_SCALP_BLOCK exempt list at confidence ≥ 60 — was the truth report's "most likely bottleneck" with 95 candidates/28h all dying at scanner; lower bar than DIV_CONT's 64 because extreme funding is itself the quality evidence** | `src/channels/scalp.py:2910` (reject reason) + `:2989` (TP1 cap) + `src/scanner/__init__.py:318` (`_QUIET_FUNDING_MIN_CONFIDENCE`) + `:4421` (exempt branch) + 10 new tests across `tests/test_pr07_specialist_path_quality.py` and `tests/test_audit_findings.py` | **2026-05-02 (path audit #9)** |
+| **QCB path audit: (A) removed partial-candle volume gate (`volumes[-1] >= 2.0 × avg_vol`) — same VSB/BDS/ORB family bug; especially backward for QCB which requires QUIET regime; (B) SL geometry now respects close-relative + 1×ATR floor (max(0.8% × close, 1×ATR)) — pre-fix flat 0.3% close-floor was sub-spread on most pairs, defeated by universal 0.80% floor downstream** | `src/channels/scalp.py:3142` (vol gate) + `:3163` (SL geometry) + 3 new tests in `tests/test_channels.py::TestQuietCompressionBreakAuditFixes` | **2026-05-02 (path audit #10)** |
 
 ---
 
