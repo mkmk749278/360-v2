@@ -1124,11 +1124,24 @@ class ScalpChannel(BaseChannel):
                 return self._reject("ema_not_tested_prev")
             if close >= ema21 or close >= ema9:
                 return self._reject("no_ema_reclaim_close")
-        # Body conviction: current candle must be directional (no doji)
+        # Close-position-in-range: the canonical TPE entry is a hammer-like
+        # reclaim — large lower wick (testing EMA21) with close near the high
+        # for LONG, or large upper wick with close near the low for SHORT.
+        # The previous `body_size / range >= 0.50` gate was structurally
+        # backward: it punishes the very wick that identifies a valid pullback
+        # test, mistaking hammers for dojis.  Truth-aligned check: close must
+        # be in the trend-direction half of the candle's range.
         candle_range = last_high - last_low
-        body_size = abs(close - last_open)
-        if candle_range > 0 and body_size / candle_range < 0.50:
-            return self._reject("body_conviction_fail")
+        if candle_range > 0:
+            if direction == Direction.LONG:
+                close_position = (close - last_low) / candle_range
+                if close_position < 0.50:
+                    return self._reject("body_conviction_fail")
+            else:
+                close_position = (last_high - close) / candle_range
+                if close_position < 0.50:
+                    return self._reject("body_conviction_fail")
+        # Body must agree with direction (no opposite-coloured close)
         if direction == Direction.LONG and close < last_open:
             return self._reject("body_conviction_fail")
         if direction == Direction.SHORT and close > last_open:

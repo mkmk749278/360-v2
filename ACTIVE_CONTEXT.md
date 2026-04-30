@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-30 — Path audit #2 (WHALE_MOMENTUM): whale-alert single-tick bug fixed; thresholds env-overridable*
+*Updated: 2026-04-30 — Path audit #3 (TREND_PULLBACK_EMA): body-conviction gate replaced with close-position-in-range*
 
 ---
 
@@ -8,7 +8,41 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-04-30, late evening — path audit #2):
+This session (2026-04-30, late evening — path audit #3):
+- **TREND_PULLBACK_EMA deep dive** (`_evaluate_trend_pullback`,
+  `src/channels/scalp.py:1036–1296`). Latest monitor zip showed
+  `EVAL::TREND_PULLBACK: regime_blocked=18,420 (99.98%)` of 18,423 cycles —
+  current QUIET market regime-blocks the path by design. Of the 3 cycles
+  that escaped the regime gate, `body_conviction_fail` killed one. Tiny live
+  sample, but the same gate kills the 3 currently-failing TPE entry-quality
+  tests in `tests/test_channels.py::TestTrendPullbackEntryQuality`.
+- **🔴 BUG FIXED — `body_conviction_fail` is structurally backward**
+  (`src/channels/scalp.py:1127`). Old check:
+    `body_size / candle_range >= 0.50` — punishes the canonical hammer/
+    shooting-star reclaim (large lower wick on LONG, large upper wick on
+    SHORT, small body, close near high/low) that *defines* a valid TPE
+    entry. The 0.50 ratio threshold mistakes hammers for dojis.
+  Fix: replaced with **close-position-in-range** check.
+    LONG: `(close - low) / range >= 0.50` (close in upper half — large
+    lower wick is FINE, that's the EMA-test wick).
+    SHORT: `(high - close) / range >= 0.50` (close in lower half).
+  Body-direction-must-match check (close vs open) retained — catches
+  opposite-color candles, which the new metric alone wouldn't.
+  This is the same architectural mistake family as the LSR mom-sign check
+  from path audit #1: a metric that punishes the *identifying feature* of
+  the setup.
+- **Fix net result**: all 6 `TestTrendPullbackEntryQuality` tests pass
+  (3 were failing on main before this fix). 416 broader tests pass; only 3
+  pre-existing failures remain (down from 6 before — TPE was responsible
+  for 3 of those 6). 0 regressions introduced.
+- **Data sufficiency check (per owner request)**: TPE data needs are met.
+  5m=500 candles boot seed (gate needs ≥50). 4h=500 candles for TP2 with
+  graceful 2.0R fallback. Orderblocks `not_implemented` per dependency
+  report — TPE relies on FVG availability for SMC support gate, which is
+  solid in practice. Path's silence is regime-driven (99.98% QUIET),
+  not data-driven.
+
+Prior session 2026-04-30 (late evening — path audit #2):
 - **WHALE_MOMENTUM deep dive** (`_evaluate_whale_momentum`,
   `src/channels/scalp.py:1488–1701`). Latest monitor zip showed
   `EVAL::WHALE_MOMENTUM: momentum_reject=15,126 (82%)` and
@@ -223,6 +257,7 @@ statistical confidence.
 | **PR-7B path-aware modulation: QCB volume_div = 0.60 — closes structural mismatch where QUIET volume_div thresholds flag QCB's own breakout pattern as manipulation; -21.6 → -13.0** | `src/scanner/__init__.py:449` (`_PENALTY_MODULATION_BY_SETUP`) + test mirror in `tests/test_regime_soft_penalty.py` | **This session (2026-04-30)** |
 | **LSR path audit fix: removed broken 5m-mom-direction-sign check (was rejecting valid sweeps because pre-sweep drift contaminates 3-candle momentum); wired MSS confirmation as soft penalty (missing = -8, mismatch = hard reject)** | `src/channels/scalp.py:_evaluate_standard` + 4 new tests in `tests/test_channels.py::TestScalpChannel` | **2026-04-30 evening (path audit #1)** |
 | **WHALE_MOMENTUM path audit fix: scan recent_ticks window for whale (was only checking latest tick — alert visible ~50–100ms on active pairs vs. 15s scan cycle); thresholds now env-overridable per B8** | `src/detector.py:228` (whale scan) + `src/channels/scalp.py:42` (env-overridable thresholds) + 4 new tests in `tests/test_new_modules.py::TestSMCDetector` | **2026-04-30 late eve (path audit #2)** |
+| **TPE path audit fix: body-conviction gate replaced with close-position-in-range — old `body/range ≥ 0.50` punished the canonical hammer/shooting-star reclaim that defines a valid pullback entry; new gate accepts strong directional close while allowing the EMA-test wick** | `src/channels/scalp.py:1127` | **2026-04-30 late eve (path audit #3)** |
 
 ---
 
@@ -337,12 +372,16 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 13 | Pre-existing test breakage: 139 failures on main (PR #240 channel cap raise + others didn't update fixtures) — clean up in dedicated PR | Tech debt |
 | 14 | Diagnose underlying 15-min futures WS drop (needs VPS-side `_health_watchdog` "stale WS connection" log) | Investigation |
 | 15 | **Path audit #1: LSR (`_evaluate_standard`) — broken mom-sign removed, MSS gate wired** | ✅ Merged |
-| 16 | **Path audit #2: WHALE_MOMENTUM — whale-alert single-tick bug fixed, thresholds env-overridable** | ✅ This session (2026-04-30 late eve) |
-| 17 | Path audit #3 — next path (TREND_PULLBACK_EMA suggested next per the OWNER_BRIEF order) | Pending owner go-ahead |
-| 18 | LSR follow-up: validate momentum_reject rate drops on next monitor zip; check MSS_MISSING flag prevalence in emitted LSRs | Observation |
-| 19 | WHALE_MOMENTUM follow-up: validate whale_alert detection rate jumps in next zip; check that `momentum_reject` count drops substantially on `EVAL::WHALE_MOMENTUM` | Observation |
-| 20 | LSR open question: should LSR be added to `STRUCTURAL_SLTP_PROTECTED_SETUPS` so the FVG-anchored TP1 + 20-candle swing TP2 the evaluator computes survive `_assign_tps`? Currently they're discarded in favour of fixed 1.2/2.1/3.0R cadence. Adding it would also flip the SL cap from compress to reject — owner decision required | Pending owner decision |
-| 21 | WHALE_MOMENTUM open question: tier-aware whale threshold (TOP=$1M, MIDCAP=$250k, SMALLCAP=$100k) — needs `pair_profile` plumbed into `SMCDetector.detect()`. Currently global threshold can be tuned via `WHALE_TRADE_USD_THRESHOLD` env. Tier-aware is cleaner but architecturally invasive | Pending data evidence |
+| 16 | **Path audit #2: WHALE_MOMENTUM — whale-alert single-tick bug fixed, thresholds env-overridable** | ✅ Merged (#246) |
+| 17 | **Path audit #3: TREND_PULLBACK_EMA — body-conviction gate replaced with close-position-in-range** | ✅ This session — fresh PR pending |
+| 18 | Path audit #4 — next path (LIQUIDATION_REVERSAL per OWNER_BRIEF order) | Pending owner go-ahead |
+| 19 | LSR follow-up: validate momentum_reject rate drops on next monitor zip; check MSS_MISSING flag prevalence in emitted LSRs | Observation |
+| 20 | WHALE_MOMENTUM follow-up: validate whale_alert detection rate jumps in next zip; check that `momentum_reject` count drops substantially on `EVAL::WHALE_MOMENTUM` | Observation |
+| 21 | TPE follow-up: validate body_conviction_fail count drops on `EVAL::TREND_PULLBACK` once a non-QUIET regime returns; check whether TPE starts producing emissions when the regime gate finally permits | Observation |
+| 22 | LSR open question: should LSR be added to `STRUCTURAL_SLTP_PROTECTED_SETUPS` so the FVG-anchored TP1 + 20-candle swing TP2 the evaluator computes survive `_assign_tps`? Currently they're discarded in favour of fixed 1.2/2.1/3.0R cadence. Adding it would also flip the SL cap from compress to reject — owner decision required | Pending owner decision |
+| 23 | WHALE_MOMENTUM open question: tier-aware whale threshold (TOP=$1M, MIDCAP=$250k, SMALLCAP=$100k) — needs `pair_profile` plumbed into `SMCDetector.detect()`. Currently global threshold can be tuned via `WHALE_TRADE_USD_THRESHOLD` env. Tier-aware is cleaner but architecturally invasive | Pending data evidence |
+| 24 | TPE open question: evaluator-level hard-block for STRONG_TREND and BREAKOUT_EXPANSION even though `signal_quality.py` allows them — documented as "revisit" but unresolved. Restoring those regimes may unlock more TPE emissions in mature trends | Pending data evidence |
+| 25 | **Branch strategy decision needed**: standing instruction says develop on `claude/session-setup-JnbBe`. Owner asked for "PR every time" — current approach: rebase the branch onto main after each merge so each per-path PR is single-scope. Working pattern this session. | Resolved (rebase-after-merge) |
 
 ---
 
