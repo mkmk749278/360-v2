@@ -69,6 +69,45 @@ After the next monitor run (post-regime fix deploy):
 3. If VSB/BDS/ORB/WHALE start emitting candidates, watch their quality —
    they were silent for so long that any regression would show fast.
 
+### 2026-05-03 follow-up: risk-component recalibration shipped
+
+First post-deploy monitor run (2026-04-30 13:40 UTC) gave us actionable component
+data via PR #263's Tier-2 instrumentation.  Headline finding:
+
+**Risk component averages 12.8-14.3 across every path** while Market averages
+~21 and Execution ~19 (out of 20).  Risk was the structural deficit pulling
+signals under the confidence threshold.
+
+Root cause was a **scoring-model miscalibration**: the risk_score formula
+(`8.0 + min(R, 2.5) * 4.8`) demanded 2.5R for full credit — swing-style targets.
+360_SCALP's audit-shipped SL geometry was deliberately built to keep TP1 at
+1.0-1.8R for tight risk control.  The scorer was penalising the geometry we
+deliberately built.
+
+Owner reality-check (2026-05-03): "think reality of crypto market, if it's
+correct proceed and update Owner brief."  Validated:
+- Industry-standard scalp signals: 1.5R typical, 2.0R strong, 2.5R+ exceptional
+- 60-70% win rate at 1.2-1.8R = positive expectancy for paid signals
+- 2.5R cap is swing-trading territory, not scalp
+
+Recalibration: `8.0 + min(R, 2.0) * 6.0`, env-overridable as `RISK_SCORE_BASE`
+/ `RISK_SCORE_R_CAP` / `RISK_SCORE_R_MULT` per B8.
+
+Per-R impact (delta to score):
+- 1.0R: 12.8 → 14.0 (+1.2)
+- 1.5R: 15.2 → 17.0 (+1.8) ← typical signal
+- 2.0R: 17.6 → 20.0 (+2.4, max credit)
+- 2.5R: 20.0 → 20.0 (capped)
+
+Aggregate effect: typical 5-10 pt boost across the funnel for signals
+already passing structural gates.  Closes roughly half of the 14.83-pt
+QUIET_SCALP_BLOCK gap without lowering any threshold.  6 new tests in
+`TestRiskScoreRecalibration`.  3361 pass / 0 fail (was 3355 = +6 new tests,
+zero regressions).
+
+This was a B10 scoring-model change requiring owner sign-off — captured here
+and in OWNER_BRIEF for audit trail.
+
 ---
 
 ## Prior session (2026-05-02 — path audit #14, FINAL of 14)

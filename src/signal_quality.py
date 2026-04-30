@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Dict, List, Optional
@@ -13,6 +14,35 @@ from src.smc import Direction
 from src.utils import get_logger, price_decimal_fmt
 
 log = get_logger("signal_quality")
+
+
+# ---------------------------------------------------------------------------
+# Risk-component scoring calibration (env-overridable per B8)
+# ---------------------------------------------------------------------------
+# Maps RiskAssessment.r_multiple (= abs(tp1 - entry) / sl_distance) to the
+# 0-20 risk-component score that contributes to the composite confidence.
+#
+# Pre-recalibration formula was hardcoded `8.0 + min(R, 2.5) * 4.8`, calibrated
+# for swing-style targets where 2.5R TP1 is achievable.  Live monitor data
+# (PR #263 confidence-component breakdown, 2026-04-30 13:40 UTC) showed avg
+# risk score 12.8-14.3 across all paths despite Market and Execution averaging
+# ~21 and ~19 respectively — the risk component was the dominant component
+# deficit dragging signals under the confidence threshold.
+#
+# Root cause: this is a SCALP channel.  The audit work I shipped (universal
+# 0.80% SL floor + close-relative + 1×ATR floor + per-setup TP caps) was
+# deliberately designed to keep TP1 R-multiples at 1.0-1.8R for tight risk
+# control.  Demanding 2.5R for full credit penalises the geometry we
+# deliberately built.  Industry-standard scalp scoring caps full credit at
+# ~2.0R (1.0-1.5R is typical, 2.0R is excellent, 2.5R+ is exceptional).
+#
+# Recalibrated to `BASE + min(R, R_CAP) * R_MULT` with defaults that score
+# typical 1.5R scalp signals at 17/20 instead of 15/20 — closing roughly half
+# of the structural deficit observed in the truth report without lowering any
+# confidence threshold.  Owner-approved B10 scoring-model change.
+_RISK_SCORE_BASE: float = float(os.getenv("RISK_SCORE_BASE", "8.0"))
+_RISK_SCORE_R_CAP: float = float(os.getenv("RISK_SCORE_R_CAP", "2.0"))
+_RISK_SCORE_R_MULT: float = float(os.getenv("RISK_SCORE_R_MULT", "6.0"))
 
 
 class SetupClass(str, Enum):
@@ -1528,7 +1558,10 @@ def score_signal_components(
         + max(0.0, 6.0 - max(execution.extension_ratio - 0.4, 0.0) * 4.0),
         2,
     )
-    risk_score = round(8.0 + min(risk.r_multiple, 2.5) * 4.8, 2)
+    risk_score = round(
+        _RISK_SCORE_BASE + min(risk.r_multiple, _RISK_SCORE_R_CAP) * _RISK_SCORE_R_MULT,
+        2,
+    )
     context_score = round(min(max(legacy_confidence, 0.0), 100.0) * 0.1, 2)
     if cross_verified is True:
         context_score = min(10.0, context_score + 1.0)

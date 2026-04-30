@@ -582,6 +582,114 @@ class TestScoringAndSelectTier:
         assert weak.quality_tier in {QualityTier.B, QualityTier.C}
 
 
+class TestRiskScoreRecalibration:
+    """Owner-approved B10 scoring-model change (2026-04-30).
+
+    Pre-fix formula: ``8.0 + min(R, 2.5) * 4.8`` was calibrated for swing-style
+    targets where 2.5R TP1 is achievable.  Live monitor data (PR #263 component
+    breakdown) showed avg risk score 12.8-14.3 across all paths despite Market
+    averaging ~21 and Execution ~19 — risk was the structural deficit dragging
+    signals under the threshold.
+
+    Root cause: 360_SCALP's audit-shipped SL geometry (universal 0.80% floor +
+    close-relative + 1×ATR + per-setup TP caps) deliberately keeps TP1 R-multiples
+    at 1.0-1.8R for tight risk control.  Demanding 2.5R for full credit
+    penalised the geometry we built.
+
+    New formula: ``8.0 + min(R, 2.0) * 6.0`` aligns with industry-standard scalp
+    scoring (1.5R = strong, 2.0R = max credit, > 2.0R = exceptional and capped
+    at 20).  Closes ~half of the structural risk-component deficit without
+    lowering any confidence threshold.
+    """
+
+    def _make_components(self, r_multiple: float):
+        from src.signal_quality import (
+            score_signal_components,
+            assess_pair_quality,
+        )
+        pair = assess_pair_quality(20_000_000.0, 0.008, _indicators()["5m"], _candles())
+        return score_signal_components(
+            pair_quality=pair,
+            setup=SimpleNamespace(
+                setup_class=SetupClass.BREAKOUT_RETEST,
+                channel_compatible=True,
+                regime_compatible=True,
+            ),
+            execution=SimpleNamespace(trigger_confirmed=True, extension_ratio=0.5),
+            risk=SimpleNamespace(r_multiple=r_multiple),
+            legacy_confidence=70.0,
+            cross_verified=True,
+        )
+
+    def test_risk_score_at_typical_scalp_r_multiple_15_is_17(self):
+        """1.5R is the canonical "good scalp" R-multiple — score should be 17."""
+        components = self._make_components(r_multiple=1.5)
+        assert components.components["risk"] == 17.0, (
+            f"1.5R should score 17/20 (vs old 15.2/20). "
+            f"Got {components.components['risk']}"
+        )
+
+    def test_risk_score_at_max_credit_r_2_is_20(self):
+        """2.0R is the new max-credit threshold (was 2.5R)."""
+        components = self._make_components(r_multiple=2.0)
+        assert components.components["risk"] == 20.0
+
+    def test_risk_score_caps_at_20_for_exceptional_r(self):
+        """R > 2.0 still scores 20.0 (capped) — runners get their 20, no more."""
+        components = self._make_components(r_multiple=3.5)
+        assert components.components["risk"] == 20.0
+
+    def test_risk_score_floor_at_8_for_zero_r(self):
+        """The 8.0 base preserves the existing floor — invalid signals still
+        get 8/20 to avoid creating a sharper cliff than necessary; they're
+        rejected at structural gates regardless."""
+        components = self._make_components(r_multiple=0.0)
+        assert components.components["risk"] == 8.0
+
+    def test_typical_signals_score_higher_than_old_formula(self):
+        """Headline assertion: typical 1.0-1.5R signals score noticeably higher
+        post-recalibration.  Pre-fix avg 12.8-15.2; post-fix 14.0-17.0."""
+        for r, expected_min in [(1.0, 13.99), (1.2, 15.19), (1.5, 16.99), (1.8, 18.79)]:
+            components = self._make_components(r_multiple=r)
+            assert components.components["risk"] >= expected_min, (
+                f"R={r} risk score must be >= {expected_min} under new formula; "
+                f"got {components.components['risk']}"
+            )
+
+    def test_env_overrides_apply_to_risk_formula(self, monkeypatch):
+        """B8 — operator can revert to old curve via env vars."""
+        monkeypatch.setenv("RISK_SCORE_BASE", "8.0")
+        monkeypatch.setenv("RISK_SCORE_R_CAP", "2.5")
+        monkeypatch.setenv("RISK_SCORE_R_MULT", "4.8")
+        import importlib
+        import src.signal_quality as sq
+        importlib.reload(sq)
+        try:
+            assert sq._RISK_SCORE_R_CAP == 2.5
+            assert sq._RISK_SCORE_R_MULT == 4.8
+            # Recompute with reloaded module: 1.5R under old curve = 15.2
+            from src.signal_quality import score_signal_components, assess_pair_quality
+            pair = assess_pair_quality(20_000_000.0, 0.008, _indicators()["5m"], _candles())
+            components = score_signal_components(
+                pair_quality=pair,
+                setup=SimpleNamespace(
+                    setup_class=SetupClass.BREAKOUT_RETEST,
+                    channel_compatible=True,
+                    regime_compatible=True,
+                ),
+                execution=SimpleNamespace(trigger_confirmed=True, extension_ratio=0.5),
+                risk=SimpleNamespace(r_multiple=1.5),
+                legacy_confidence=70.0,
+                cross_verified=True,
+            )
+            assert components.components["risk"] == 15.2
+        finally:
+            monkeypatch.delenv("RISK_SCORE_BASE", raising=False)
+            monkeypatch.delenv("RISK_SCORE_R_CAP", raising=False)
+            monkeypatch.delenv("RISK_SCORE_R_MULT", raising=False)
+            importlib.reload(sq)
+
+
 class TestFailedAuctionReclaimRiskPlan:
     def test_far_risk_plan_uses_structural_stop_loss_long(self):
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
