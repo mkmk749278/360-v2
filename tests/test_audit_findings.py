@@ -566,12 +566,17 @@ class TestQuietGateDivergenceContinuation:
         Returns True if the signal would be blocked by the QUIET gate,
         False if it passes (exempt or above the applicable floor).
         """
-        from src.scanner import _QUIET_DIVERGENCE_MIN_CONFIDENCE
+        from src.scanner import (
+            _QUIET_DIVERGENCE_MIN_CONFIDENCE,
+            _QUIET_FUNDING_MIN_CONFIDENCE,
+        )
         from config import QUIET_SCALP_MIN_CONFIDENCE
 
         if setup_class == "QUIET_COMPRESSION_BREAK":
             return False
         if setup_class == "DIVERGENCE_CONTINUATION" and conf >= _QUIET_DIVERGENCE_MIN_CONFIDENCE:
+            return False
+        if setup_class == "FUNDING_EXTREME_SIGNAL" and conf >= _QUIET_FUNDING_MIN_CONFIDENCE:
             return False
         return conf < QUIET_SCALP_MIN_CONFIDENCE
 
@@ -609,6 +614,58 @@ class TestQuietGateDivergenceContinuation:
             "DIVERGENCE_CONTINUATION conf=58.3 is below the path-specific floor of 64.0 "
             "and should remain blocked"
         )
+
+    # ── Path audit #9 — FUNDING_EXTREME_SIGNAL exempt ────────────────────
+
+    def test_funding_quiet_floor_is_60(self):
+        """`_QUIET_FUNDING_MIN_CONFIDENCE` must be 60.0 — slightly more lenient
+        than DIV_CONT's 64 because extreme funding is itself the quality
+        evidence (the trigger was the gate).
+        """
+        from src.scanner import _QUIET_FUNDING_MIN_CONFIDENCE
+        assert _QUIET_FUNDING_MIN_CONFIDENCE == 60.0
+
+    def test_funding_quiet_floor_below_global_and_divergence(self):
+        """Path-specific FUNDING floor must sit below both DIV_CONT and global."""
+        from src.scanner import (
+            _QUIET_DIVERGENCE_MIN_CONFIDENCE,
+            _QUIET_FUNDING_MIN_CONFIDENCE,
+        )
+        from config import QUIET_SCALP_MIN_CONFIDENCE
+        assert _QUIET_FUNDING_MIN_CONFIDENCE < _QUIET_DIVERGENCE_MIN_CONFIDENCE
+        assert _QUIET_FUNDING_MIN_CONFIDENCE < QUIET_SCALP_MIN_CONFIDENCE
+
+    def test_funding_at_path_floor_passes(self):
+        """conf=60.0 >= 60.0 (path floor), so FUNDING_EXTREME_SIGNAL is exempt."""
+        assert not self._quiet_gate_would_block("FUNDING_EXTREME_SIGNAL", 60.0), (
+            "FUNDING_EXTREME_SIGNAL conf=60.0 should pass the path-specific floor of 60.0"
+        )
+
+    def test_funding_above_path_floor_passes(self):
+        """conf=62.5 >= 60.0 → exempt; would have been blocked by global 65."""
+        assert not self._quiet_gate_would_block("FUNDING_EXTREME_SIGNAL", 62.5), (
+            "FUNDING_EXTREME_SIGNAL conf=62.5 should pass — exactly the kind of "
+            "candidate audit #9's truth report flagged as bottlenecked."
+        )
+
+    def test_funding_below_path_floor_is_blocked(self):
+        """conf=58.3 < 60.0 (path floor) → still blocked.  60 captures genuine
+        near-threshold setups; below that is low-quality QUIET-market noise.
+        """
+        assert self._quiet_gate_would_block("FUNDING_EXTREME_SIGNAL", 58.3), (
+            "FUNDING_EXTREME_SIGNAL conf=58.3 is below the path-specific floor of 60.0 "
+            "and should remain blocked"
+        )
+
+    def test_funding_exempt_does_not_leak_to_other_setups(self):
+        """The 60-floor exempt MUST be FUNDING-only.  Non-FUNDING setups at
+        the same conf (60-64) must remain blocked by the global 65 floor.
+        """
+        # Generic setup at 62.5 — would be exempt-pass if the FUNDING floor
+        # leaked to other setup classes; must remain blocked.
+        assert self._quiet_gate_would_block("RANGE_FADE", 62.5)
+        assert self._quiet_gate_would_block("WHALE_MOMENTUM", 62.5)
+        assert self._quiet_gate_would_block("LIQUIDITY_SWEEP_REVERSAL", 62.5)
 
 
 # ---------------------------------------------------------------------------

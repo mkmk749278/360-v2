@@ -15,21 +15,18 @@ This session (2026-05-02 — path audit #9):
   basic_filters_failed=3,879 (21%), missing_funding_rate=1,825 (9.9%)` —
   **95 candidates generated, ALL 95 killed downstream**.  Truth report
   explicitly calls FUNDING the *"most likely bottleneck"*.
-- **🟡 Open question for owner — QUIET_SCALP_BLOCK bottleneck (B10)**.
-  All 95 candidates pass evaluator gates but get killed at the scanner-
-  level QUIET_SCALP_BLOCK gate (since FUNDING isn't QCB-exempt or
-  DIV_CONT≥64-exempt).  Audit-3 already removed the evaluator-level
-  QUIET block — but the scanner-level block still kills FUNDING in QUIET
-  regime (which is 99.7% of the time).  Should FUNDING be added to the
-  QUIET_SCALP_BLOCK exempt list?  Pro: extreme funding IS the quality
-  gate, contrarian setups in QUIET are exactly when funding cascades
-  signal mean-reversion opportunities.  Con: dilutes the QUIET safety
-  net.  **CTE recommendation**: yes, exempt FUNDING when funding rate
-  exceeds extreme threshold AND confidence ≥ 60 (slightly lower bar
-  than DIV_CONT's 64 since the funding signal itself is the quality
-  evidence).  But this is architecture (B10) — needs owner sign-off
-  before shipping.  PR #N includes the data-sufficiency triage but
-  NOT the exempt-list change.
+- **🔴 QUIET_SCALP_BLOCK bottleneck — FUNDING exempt SHIPPED**
+  (`src/scanner/__init__.py:_QUIET_FUNDING_MIN_CONFIDENCE = 60.0`).
+  All 95 evaluator-passing candidates were dying at the scanner-level
+  QUIET_SCALP_BLOCK gate (FUNDING wasn't QCB-exempt or DIV_CONT≥64-
+  exempt).  Audit-3 already removed the evaluator-level QUIET block;
+  this scanner-level exempt completes that doctrine.  Lower bar (60)
+  than DIV_CONT (64) because extreme funding is itself the quality
+  evidence — the trigger gate already filtered for the structural
+  thesis.  Owner authorized the CTE recommendation in this session.
+  6 new dedicated tests in
+  `tests/test_audit_findings.py::TestQuietGateDivergenceContinuation`
+  including a leak-test that verifies the 60-floor is FUNDING-only.
 - **🟡 Bug A — wrong reject reason for `close <= 0`** (was line 2910).
   Pre-fix emitted `funding_not_extreme` for invalid-price rows,
   conflating bad-data telemetry with the actual trigger gate count.
@@ -594,7 +591,7 @@ statistical confidence.
 | **BDS path audit (multi-fix mirror of #5): (A) removed broken current-candle volume gate (same 62.7% pattern — dead-cat bounces have reduced volume by definition); (B) breakdown qualifier now requires close BELOW swing_low — wick-only piercing was being accepted but is a bullish sweep, not a breakdown; (C) SL anchored to HIGHER of `swing_low × 1.008` and `close + max(0.8%×close, 1×ATR)` — pre-fix produced 0.05% stops in extended bounce zones; (D) shares VSB_BREAKOUT_VOL_MULT env constant for breakdown-candle vol gate** | `src/channels/scalp.py:2059` + `:2086` (close gate) + `:2153` (SL geometry) + 6 new tests in `tests/test_channels.py::TestBreakdownShortRefinements` | **2026-05-02 (path audit #6)** |
 | **ORB path audit (dormant-path triage): path is feature-flag-disabled (`SCALP_ORB_ENABLED=false`); audit clarified the live monitor `regime_blocked=100%` was the disable token, NOT a regime gate.  Telemetry fix: dormant-flag check now reports `feature_disabled` (truthful).  Preserved-code fixes for re-enable readiness: removed broken current-candle volume gate (VSB/BDS-family bug); SL geometry now respects close-relative + 1×ATR floor (was 0.1% structural buffer producing sub-spread stops on tight ranges).  Open question on whether to rebuild session-range proxy or re-enable as-is — owner decision.** | `src/channels/scalp.py:2271` (telemetry) + `:2322` (vol gate) + `:2348` (SL geometry) + 3 new tests in `tests/test_pr06_orb_disable.py::TestORBAuditFixes` | **2026-05-02 (path audit #7)** |
 | **SR_FLIP path audit: (A) TP1 ATR-adaptive cap was claimed deployed in OWNER_BRIEF Audit-3 but actually missing from the SR_FLIP code (only TPE had it) — added 1.8R/2.5R/uncapped-by-atr-percentile cap, addressing the documented historical 100% SL rate; (B) evaluator-level VOLATILE_UNSUITABLE regime block added (was VOLATILE-only — defence-in-depth)** | `src/channels/scalp.py:2479` (regime) + `:2738` (TP1 cap) + 4 new tests in `tests/test_channels.py::TestSrFlipRetestRefinements` | **2026-05-02 (path audit #8)** |
-| **FUNDING path audit: (A) `close <= 0` now emits `invalid_price` instead of conflating with `funding_not_extreme` telemetry; (B) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) added — structure-anchored TP1 could sit 5-10R from close in trending markets, unreachable for mean-reversion contrarian setup before SL.  Open question flagged: 95 candidates/28h ALL killed by QUIET_SCALP_BLOCK at scanner; should FUNDING be exempted like QCB and DIV_CONT≥64?** | `src/channels/scalp.py:2910` (reject reason) + `:2989` (TP1 cap) + 4 new tests in `tests/test_pr07_specialist_path_quality.py::TestFundingExtremeAuditFixes` | **2026-05-02 (path audit #9)** |
+| **FUNDING path audit (3-fix shipped after CTE recommendation accepted): (A) `close <= 0` now emits `invalid_price` instead of conflating with `funding_not_extreme` telemetry; (B) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) — structure-anchored TP1 could sit 5-10R from close in trending markets, unreachable for mean-reversion contrarian setup before SL; (C) FUNDING_EXTREME_SIGNAL added to QUIET_SCALP_BLOCK exempt list at confidence ≥ 60 — was the truth report's "most likely bottleneck" with 95 candidates/28h all dying at scanner; lower bar than DIV_CONT's 64 because extreme funding is itself the quality evidence** | `src/channels/scalp.py:2910` (reject reason) + `:2989` (TP1 cap) + `src/scanner/__init__.py:318` (`_QUIET_FUNDING_MIN_CONFIDENCE`) + `:4421` (exempt branch) + 10 new tests across `tests/test_pr07_specialist_path_quality.py` and `tests/test_audit_findings.py` | **2026-05-02 (path audit #9)** |
 
 ---
 

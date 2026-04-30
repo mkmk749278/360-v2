@@ -315,6 +315,19 @@ _SCALP_QUIET_REGIME_PENALTY: float = 1.8
 # the gate to weaker quiet-market noise (53–58 range).
 _QUIET_DIVERGENCE_MIN_CONFIDENCE: float = 64.0
 
+# Path-specific QUIET confidence floor for FUNDING_EXTREME_SIGNAL.
+# Live monitor evidence (path audit #9, 2026-05-02): this evaluator
+# generated 95 candidates / 28h that all died at the global 65 floor —
+# it was the truth report's "most likely bottleneck".  Extreme funding
+# IS the quality gate (the trigger itself is the evidence), so the
+# regime-confidence requirement can be relaxed slightly more than
+# DIV_CONT's 64.  60 captures the genuine near-threshold setups while
+# still excluding low-quality 50–55 noise.
+# Path audit #9 also already removed the evaluator-level QUIET regime
+# block (extreme funding doesn't need regime confirmation); this
+# scanner-level exempt completes that doctrine.
+_QUIET_FUNDING_MIN_CONFIDENCE: float = 60.0
+
 # Penalty multiplier applied to soft-gate base penalties depending on live market regime.
 # Trending markets → lenient (clear direction, fewer false signals).
 # Volatile markets → strict (high chaos, amplify quality gates).
@@ -4406,6 +4419,19 @@ class Scanner:
                 log.debug(
                     "QUIET_SCALP_BLOCK exempt for {} {} setup_class=DIVERGENCE_CONTINUATION conf={:.1f} >= path_min={:.1f}",
                     symbol, chan_name, sig.confidence, _QUIET_DIVERGENCE_MIN_CONFIDENCE,
+                )
+            elif _setup == "FUNDING_EXTREME_SIGNAL" and sig.confidence >= _QUIET_FUNDING_MIN_CONFIDENCE:
+                # Path audit #9 (2026-05-02): truth report flagged FUNDING as
+                # the "most likely bottleneck" — 95 candidates / 28h all
+                # killed by the global 65.0 QUIET floor.  Extreme funding
+                # IS the quality evidence (the trigger itself), so we
+                # exempt it at a slightly lower bar (60) than DIV_CONT (64).
+                # The evaluator-level QUIET block was already removed in
+                # Audit-3 with the same justification; this scanner-level
+                # exempt completes that doctrine.
+                log.debug(
+                    "QUIET_SCALP_BLOCK exempt for {} {} setup_class=FUNDING_EXTREME_SIGNAL conf={:.1f} >= path_min={:.1f}",
+                    symbol, chan_name, sig.confidence, _QUIET_FUNDING_MIN_CONFIDENCE,
                 )
             elif sig.confidence < QUIET_SCALP_MIN_CONFIDENCE:
                 _record_confidence_gate_decision(
