@@ -170,6 +170,7 @@ Every item below was verified by reading the actual deployed code from the curre
 | Mover pairs dashboard counter — `/dashboard` shows `(+N mover)` when active | ✅ |
 | LSR (`_evaluate_standard`) — removed broken 5m-mom-direction-sign check; wired MSS confirmation as soft penalty (missing = -8, mismatch = hard reject) | ✅ 2026-04-30 |
 | WHALE_MOMENTUM — whale-alert producer scans recent_ticks window (was only checking the latest tick — alert visible ~50–100ms on active pairs); WHALE_TRADE_USD_THRESHOLD + WHALE_MIN_TICK_VOLUME_USD + WHALE_OBI_MIN + WHALE_DELTA_MIN_RATIO now env-overridable per B8 | ✅ 2026-04-30 |
+| TREND_PULLBACK_EMA — body-conviction gate replaced with close-position-in-range (was punishing the canonical hammer reclaim that defines a valid pullback entry — large lower wick is the EMA-test feature, not noise) | ✅ 2026-04-30 |
 
 ### Live Performance Data (from 20-hour monitor window)
 
@@ -212,7 +213,7 @@ Dominant suppressors per live scan logs:
 
 **Needs attention:**
 - `SR_FLIP_RETEST` — 100% SL rate in early window; SL cap now 2.5% and TP1 ATR-adaptive cap deployed. Unvalidated post-fix.
-- `TREND_PULLBACK_EMA` — ATR-driven SL can reach 3%; cap now 3.0%. Fix deployed, unvalidated.
+- `TREND_PULLBACK_EMA` — ATR-driven SL can reach 3%; cap now 3.0%. Body-conviction gate replaced with close-position-in-range 2026-04-30 — the prior `body/range ≥ 0.50` gate was rejecting hammer/shooting-star reclaims (the canonical TPE entry). 3 broken entry-quality tests on main now pass. Live validation pending non-QUIET regime.
 - `QUIET_COMPRESSION_BREAK` — 2.08% SL seen live; was perpetually rejected by 2.5% channel cap. Now capped at 3.0% — should start passing.
 - `LIQUIDITY_SWEEP_REVERSAL` — was generating 0 signals in latest 18k-cycle zip; dominant suppressors `momentum_reject` (40%, structurally broken — fix deployed 2026-04-30 evening) and `basic_filters_failed` (20%). Also missing MSS confirmation despite the helper existing — wired same session. Both fixes unvalidated; expect higher emission rate AND higher quality (MSS gate filters false sweeps).
 - `WHALE_MOMENTUM` — was generating 0 signals in latest 18k-cycle zip; root cause was upstream in `detector.py:228` where whale_alert only checked the latest tick (visible ~50–100ms on active pairs vs. 15s scan cycle). Fix scans the 100-tick window newest-first. Thresholds now env-overridable per B8. Unvalidated; expect `momentum_reject` count to drop sharply on next zip.
