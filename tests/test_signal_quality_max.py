@@ -141,47 +141,11 @@ class TestATRAdaptiveMomentumThreshold:
 # 3. BB Squeeze Guard for Range Fade
 # ---------------------------------------------------------------------------
 
-class TestBBSqueezeGuard:
-    """Range fade should be blocked when BB is expanding rapidly (squeeze breakout)."""
-
-    def test_bb_expanding_blocks_range_fade(self):
-        """BB width expanding >10% from previous bar → range fade rejected."""
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0
-        candles = {"5m": candles_data}
-        # bb_width_pct > bb_width_prev_pct * 1.1
-        indicators = {"5m": _make_indicators(
-            adx_val=15, bb_lower=97.1, rsi_val=28,
-            bb_width_pct=4.5, bb_width_prev_pct=4.0,  # 4.5 > 4.0*1.1=4.4 → expanding
-        )}
-        sig = ch._evaluate_range_fade("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
-        assert sig is None
-
-    def test_bb_stable_allows_range_fade(self):
-        """BB width stable (not expanding >10%) → range fade allowed."""
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0
-        candles = {"5m": candles_data}
-        # bb_width_pct <= bb_width_prev_pct * 1.1
-        indicators = {"5m": _make_indicators(
-            adx_val=15, bb_lower=97.1, rsi_val=28,
-            bb_width_pct=4.0, bb_width_prev_pct=4.0,  # 4.0 < 4.0*1.1=4.4 → not expanding
-        )}
-        sig = ch._evaluate_range_fade("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
-        assert sig is not None
-
-    def test_bb_width_missing_does_not_block(self):
-        """Missing BB width indicators → guard skipped, range fade proceeds normally."""
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0
-        candles = {"5m": candles_data}
-        # No bb_width_pct keys → guard is skipped
-        indicators = {"5m": _make_indicators(adx_val=15, bb_lower=97.1, rsi_val=28)}
-        sig = ch._evaluate_range_fade("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
-        assert sig is not None
+# NOTE: TestBBSqueezeGuard removed during test cleanup.  The path it tested
+# (`_evaluate_range_fade`) was removed from ScalpChannel during a prior
+# consolidation pass; the canonical RANGE_FADE behaviour now lives on the
+# specialist channels.  Re-introduce a guarded version of these tests when /
+# if the inline range-fade path returns to ScalpChannel.
 
 
 # ---------------------------------------------------------------------------
@@ -398,94 +362,9 @@ class TestFundingRateContrarian:
 # 10. Direction-Biased Entry Zones
 # ---------------------------------------------------------------------------
 
-class TestDirectionBiasedEntryZones:
-    """Entry zones must be biased toward the trade direction for better fills."""
-
-    def _make_scalp_signal(
-        self,
-        direction: Direction = Direction.LONG,
-        atr_val: float = 0.5,
-    ):
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        candles_data["close"][-1] = 97.0
-        candles = {"5m": candles_data}
-        ind = _make_indicators(adx_val=15, bb_lower=97.1, rsi_val=28, atr_val=atr_val)
-        indicators = {"5m": ind}
-        return ch._evaluate_range_fade("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
-
-    def test_long_zone_biased_below_close(self):
-        """RANGE_FADE LONG entry zone: symmetric around entry (bias=0.5 for mean-reversion)."""
-        import pytest
-        sig = self._make_scalp_signal(direction=Direction.LONG)
-        if sig is None:
-            pytest.skip("Signal filtered by other gates — cannot validate zone bias")
-        close = sig.entry
-        below_dist = close - sig.entry_zone_low
-        above_dist = sig.entry_zone_high - close
-        # RANGE_FADE uses entry_zone_bias=0.5 (symmetric) — below and above are equal
-        assert abs(below_dist - above_dist) < 1e-6, (
-            f"RANGE_FADE LONG zone should be symmetric: below={below_dist}, above={above_dist}"
-        )
-
-    def test_long_entry_zone_brackets_entry(self):
-        """LONG entry zone must contain the entry price."""
-        import pytest
-        sig = self._make_scalp_signal(direction=Direction.LONG)
-        if sig is None:
-            pytest.skip("Signal filtered by other gates — cannot validate zone bracketing")
-        assert sig.entry_zone_low < sig.entry < sig.entry_zone_high
-
-    def test_entry_zone_width_proportional_to_atr(self):
-        """Wider ATR → wider entry zone."""
-        import pytest
-        sig_narrow = self._make_scalp_signal(atr_val=0.3)
-        sig_wide = self._make_scalp_signal(atr_val=1.0)
-        if sig_narrow is None or sig_wide is None:
-            pytest.skip("Signal filtered by other gates — cannot compare zone widths")
-        w_narrow = sig_narrow.entry_zone_high - sig_narrow.entry_zone_low
-        w_wide = sig_wide.entry_zone_high - sig_wide.entry_zone_low
-        assert w_wide > w_narrow
-
-
-# ---------------------------------------------------------------------------
-# 11. RANGE_FADE RSI Fix — mean-reversion RSI gating
-# ---------------------------------------------------------------------------
-
-class TestRangeFadeRSIFix:
-    """RANGE_FADE should gate on mean-reversion RSI thresholds, not trend thresholds."""
-
-    def _range_fade(self, rsi_val: float, direction_long: bool = True) -> object:
-        ch = ScalpChannel()
-        candles_data = _make_candles(60, base=100)
-        if direction_long:
-            # Price at lower BB → LONG mean-reversion
-            candles_data["close"][-1] = 97.0
-            indicators = {"5m": _make_indicators(adx_val=15, bb_lower=97.1, rsi_val=rsi_val)}
-        else:
-            # Price at upper BB → SHORT mean-reversion
-            candles_data["close"][-1] = 103.0
-            indicators = {"5m": _make_indicators(adx_val=15, bb_upper=102.9, rsi_val=rsi_val)}
-        candles = {"5m": candles_data}
-        return ch._evaluate_range_fade("BTCUSDT", candles, indicators, {}, 0.01, 10_000_000)
-
-    def test_long_oversold_rsi_fires(self):
-        """LONG range fade fires when RSI is oversold (< 30)."""
-        sig = self._range_fade(rsi_val=25, direction_long=True)
-        assert sig is not None
-        assert sig.direction == Direction.LONG
-
-    def test_long_rsi_at_boundary_fires(self):
-        """LONG range fade fires at RSI = 50 (below threshold of 55)."""
-        sig = self._range_fade(rsi_val=50, direction_long=True)
-        assert sig is not None
-
-    def test_long_rsi_above_threshold_blocked(self):
-        """LONG range fade blocked when RSI > 55 (price already recovering)."""
-        sig = self._range_fade(rsi_val=60, direction_long=True)
-        assert sig is None
-
-    def test_long_rsi_at_exact_threshold_blocked(self):
-        """LONG range fade blocked at RSI = 56 (strictly above 55)."""
-        sig = self._range_fade(rsi_val=56, direction_long=True)
-        assert sig is None
+# NOTE: TestDirectionBiasedEntryZones and TestRangeFadeRSIFix were removed
+# during the test cleanup pass.  Both tested `_evaluate_range_fade` which has
+# been removed from `ScalpChannel`; the canonical RANGE_FADE behaviour now
+# lives on the specialist channels.  Re-introduce equivalent tests against
+# the specialist-channel API if/when entry-zone biasing or RSI thresholds need
+# regression coverage there.

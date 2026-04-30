@@ -91,20 +91,10 @@ class TestNewFormatSignal:
         text = TelegramBot.format_signal(sig)
         assert "~1-2h" in text
 
-    def test_estimated_hold_time_swing(self):
-        sig = _make_signal(channel="360_SWING", risk_label="LOW")
-        text = TelegramBot.format_signal(sig)
-        assert "~1-2d" in text
-
-    def test_estimated_hold_time_spot(self):
-        sig = _make_signal(channel="360_SPOT", risk_label="LOW")
-        text = TelegramBot.format_signal(sig)
-        assert "~3-7d" in text
-
-    def test_estimated_hold_time_gem(self):
-        sig = _make_signal(channel="360_GEM", risk_label="LOW")
-        text = TelegramBot.format_signal(sig)
-        assert "~2-4w" in text
+    # SWING/SPOT/GEM channels are no longer wired through _ESTIMATED_HOLD —
+    # the engine runs in TOP50_FUTURES_ONLY mode (360_SCALP* family only).
+    # Re-add `test_estimated_hold_time_{swing,spot,gem}` when those channels
+    # return to active service.
 
     def test_risk_reward_ratio(self):
         """R:R is computed from SL distance and TP1 distance."""
@@ -202,30 +192,36 @@ class TestLegacyFormatSignal:
 
 
 class TestEstimatedHold:
+    # SWING/SPOT/GEM/SCALP_OBI channels are no longer first-class — engine
+    # operates on TOP50_FUTURES_ONLY mode (see config) and only the
+    # 360_SCALP* family is wired through `_ESTIMATED_HOLD`.  Keep the
+    # 8 canonical SCALP channels; re-add other rows when/if those channels
+    # return to active service.
     @pytest.mark.parametrize("channel,expected", [
         ("360_SCALP", "~1-2h"),
         ("360_SCALP_FVG", "~1-2h"),
         ("360_SCALP_CVD", "~1-2h"),
         ("360_SCALP_VWAP", "~1-2h"),
-        ("360_SCALP_OBI", "~1-2h"),
-        ("360_SWING", "~1-2d"),
-        ("360_SPOT", "~3-7d"),
-        ("360_GEM", "~2-4w"),
+        ("360_SCALP_DIVERGENCE", "~1-2h"),
+        ("360_SCALP_SUPERTREND", "~1-2h"),
+        ("360_SCALP_ICHIMOKU", "~1-2h"),
+        ("360_SCALP_ORDERBLOCK", "~1-2h"),
     ])
     def test_hold_time_per_channel(self, channel, expected):
         assert TelegramBot._ESTIMATED_HOLD.get(channel) == expected
 
 
 class TestChannelDisplayName:
+    # See note on TestEstimatedHold above.  Only currently-wired channels.
     @pytest.mark.parametrize("channel,expected", [
         ("360_SCALP", "SCALP"),
         ("360_SCALP_FVG", "SCALP FVG"),
         ("360_SCALP_CVD", "SCALP CVD"),
         ("360_SCALP_VWAP", "SCALP VWAP"),
-        ("360_SCALP_OBI", "SCALP OBI"),
-        ("360_SWING", "SWING"),
-        ("360_SPOT", "SPOT"),
-        ("360_GEM", "GEM"),
+        ("360_SCALP_DIVERGENCE", "SCALP DIVERGENCE"),
+        ("360_SCALP_SUPERTREND", "SCALP SUPERTREND"),
+        ("360_SCALP_ICHIMOKU", "SCALP ICHIMOKU"),
+        ("360_SCALP_ORDERBLOCK", "SCALP ORDERBLOCK"),
     ])
     def test_display_name(self, channel, expected):
         assert TelegramBot._CHANNEL_DISPLAY_NAME.get(channel) == expected

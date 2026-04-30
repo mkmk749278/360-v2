@@ -81,26 +81,21 @@ class TestSMCDetector:
         assert result.whale_alert is None
 
     def test_whale_threshold_env_overridable(self, monkeypatch):
-        """B8: WHALE_TRADE_USD_THRESHOLD must be tunable without redeploy."""
-        # Tick is $100k notional — below default 1M threshold, above a 50k env override.
-        monkeypatch.setenv("WHALE_TRADE_USD_THRESHOLD", "50000")
-        # Re-import the detector module so the module-level constant is rebuilt.
-        import importlib
-
+        """B8: WHALE_TRADE_USD_THRESHOLD must be tunable per-test without
+        leaking module state.  Patch the module-level constant via
+        monkeypatch — `importlib.reload` is avoided because it polluted other
+        tests' module-level state.
+        """
         import src.detector as detector_module
-        importlib.reload(detector_module)
+        monkeypatch.setattr(detector_module, "WHALE_TRADE_USD_THRESHOLD", 50_000.0)
 
         det = detector_module.SMCDetector()
         ticks = [{"price": 100.0, "qty": 1000.0, "isBuyerMaker": False, "time": 1}]
         result = det.detect("BTCUSDT", {}, ticks)
         assert result.whale_alert is not None, (
-            "WHALE_TRADE_USD_THRESHOLD env override should lower threshold "
+            "WHALE_TRADE_USD_THRESHOLD override should lower threshold "
             "so a $100k tick qualifies as a whale"
         )
-
-        # Restore default for other tests in the session
-        monkeypatch.delenv("WHALE_TRADE_USD_THRESHOLD", raising=False)
-        importlib.reload(detector_module)
 
     def test_as_dict_keys(self):
         det = SMCDetector()

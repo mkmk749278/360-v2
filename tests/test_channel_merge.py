@@ -13,15 +13,27 @@ _SCALP_CHANNELS = (
 
 
 def _build_map(**env_overrides):
-    """Re-import config with specific env vars set and return CHANNEL_TELEGRAM_MAP."""
+    """Re-import config with specific env vars set and return CHANNEL_TELEGRAM_MAP.
+
+    Restores the original config module state after the call so module-level
+    constants seen by other tests don't leak across test boundaries.  Pre-fix
+    this leaked: tests in `test_scanner.py`, `test_regime_soft_penalty.py`,
+    and others would see whatever state this last call left behind.
+    """
     env = {
         "TELEGRAM_ACTIVE_CHANNEL_ID": "",
         **env_overrides,
     }
-    with mock.patch.dict(os.environ, env, clear=False):
+    try:
+        with mock.patch.dict(os.environ, env, clear=False):
+            import config as cfg_module
+            importlib.reload(cfg_module)
+            return cfg_module._build_channel_telegram_map()
+    finally:
+        # Restore module to the env-clean default so later tests see the
+        # config state they were imported with.
         import config as cfg_module
         importlib.reload(cfg_module)
-        return cfg_module._build_channel_telegram_map()
 
 
 class TestBuildChannelTelegramMap:

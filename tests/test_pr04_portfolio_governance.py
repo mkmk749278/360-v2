@@ -48,11 +48,19 @@ def _reload_config_with_env(env: dict[str, str]):
                 os.environ.pop(k, None)
             else:
                 os.environ[k] = original_v
-        # Reload canonical config back
+        # Reload canonical config back AND reload dependent modules that
+        # captured `from config import X` references at their import time.
+        # Without this, src.scanner / src.signal_quality / etc. retain
+        # stale references to the test's overridden values, which
+        # contaminates downstream tests in the same session.
         for mod_name in list(sys.modules.keys()):
             if mod_name == "config" or mod_name.startswith("config."):
                 del sys.modules[mod_name]
         importlib.import_module("config")
+        # Reload modules whose module-level constants come from `from config import …`
+        for dependent in ("src.scanner", "src.signal_quality"):
+            if dependent in sys.modules:
+                importlib.reload(sys.modules[dependent])
 
 
 # ---------------------------------------------------------------------------

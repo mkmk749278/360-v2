@@ -45,6 +45,42 @@ def _make_signal(
     return sig
 
 
+def _make_get_candles_from_active(active: Dict[str, "Signal"]):
+    """Build a `data_store.get_candles` side_effect that returns a synthetic
+    1m candle reflecting each active signal's `current_price`.
+
+    The trade monitor evaluates SL/TP against 1m candle high/low (per the
+    audit-2 fix in `_check_sl_tp`).  Pre-cleanup the test mocks returned
+    `None` and the monitor fell back to `_latest_price` → empty ticks → 0.0
+    high/low → SL/TP checks short-circuited because of the `_c_low > 0`
+    guard.  This helper makes the mock 1m candle reflect the test's intent
+    via `sig.current_price` so SL/TP tests trigger correctly.
+    """
+    def _get_candles(symbol: str, interval: str):
+        if interval != "1m":
+            return None
+        # Find the signal whose symbol matches.
+        matching = next(
+            (s for s in active.values() if getattr(s, "symbol", None) == symbol),
+            None,
+        )
+        if matching is None:
+            return None
+        p = float(getattr(matching, "current_price", 0.0))
+        if p <= 0:
+            return None
+        # Synthetic 1m candle: high/low/close/open all = current_price so any
+        # SL/TP check resolves to "candle reached current_price".
+        return {
+            "high": [p],
+            "low": [p],
+            "close": [p],
+            "open": [p],
+            "volume": [1000.0],
+        }
+    return _get_candles
+
+
 class TestMinimumLifespan:
     """The monitor must NOT trigger SL/TP checks for very new signals."""
 
@@ -56,7 +92,7 @@ class TestMinimumLifespan:
             sent.append((chat_id, text))
 
         data_store = MagicMock()
-        data_store.get_candles.return_value = None
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         data_store.ticks = {}
 
         monitor = TradeMonitor(
@@ -165,7 +201,7 @@ class TestOutcomeRecording:
             sent.append((chat_id, text))
 
         data_store = MagicMock()
-        data_store.get_candles.return_value = None
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         data_store.ticks = {}
 
         performance_tracker = MagicMock()
@@ -361,14 +397,15 @@ class TestOutcomeRecording:
         async def mock_send(chat_id, text):
             sent.append((chat_id, text))
 
+        active = {sig.signal_id: sig}
         data_store = MagicMock()
-        data_store.get_candles.return_value = None
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         data_store.ticks = {}
 
         monitor = TradeMonitor(
             data_store=data_store,
             send_telegram=mock_send,
-            get_active_signals=lambda: {sig.signal_id: sig},
+            get_active_signals=lambda: dict(active),
             remove_signal=lambda sid: removed.append(sid),
             update_signal=MagicMock(),
             # No performance_tracker or circuit_breaker — must not raise
@@ -536,7 +573,7 @@ class TestTrailingStopAfterTP2:
             sent.append((chat_id, text))
 
         data_store = MagicMock()
-        data_store.get_candles.return_value = None
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         data_store.ticks = {}
 
         monitor = TradeMonitor(
@@ -625,7 +662,7 @@ class TestTrailingStopAfterTP2:
             sent.append((chat_id, text))
 
         data_store = MagicMock()
-        data_store.get_candles.return_value = None
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         data_store.ticks = {}
 
         monitor = TradeMonitor(
@@ -654,7 +691,7 @@ class TestSignalExpiry:
             sent.append((chat_id, text))
 
         data_store = MagicMock()
-        data_store.get_candles.return_value = None
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         data_store.ticks = {}
 
         monitor = TradeMonitor(
@@ -951,7 +988,7 @@ class TestSignalQualityPnL:
             sent.append((chat_id, text))
 
         data_store = MagicMock()
-        data_store.get_candles.return_value = None
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         data_store.ticks = {}
 
         performance_tracker = MagicMock()
@@ -1257,7 +1294,7 @@ class TestSignalInvalidation:
             }
             data_store.get_candles.return_value = candles_dict
         else:
-            data_store.get_candles.return_value = None
+            data_store.get_candles.side_effect = _make_get_candles_from_active(active)
 
         monitor = TradeMonitor(
             data_store=data_store,
@@ -1531,7 +1568,14 @@ class TestSignalInvalidation:
 
     @pytest.mark.asyncio
     async def test_sl_fires_before_invalidation(self):
-        """When price is below SL and regime flips, SL must fire (not invalidation)."""
+        """When price is below SL and regime flips, SL must fire (not invalidation).
+
+        Trade-monitor SL check now uses 1m candle low (audit-2 fix), not
+        sig.current_price.  The candles fixture's LAST element drives the gap
+        — set it to the gap-down price so candle.low ≤ SL triggers SL_HIT.
+        Pre-cleanup the test relied on `sig.current_price` directly which the
+        new code no longer reads for SL/TP.
+        """
         sig = _make_signal(
             channel="360_SCALP",
             direction=Direction.LONG,
@@ -1548,7 +1592,8 @@ class TestSignalInvalidation:
         regime_result.regime.value = "TRENDING_DOWN"
         regime_detector.classify.return_value = regime_result
 
-        closes = [30000.0] * 25
+        # Last candle reflects the gap-down: low = 29700 < SL = 29850 → SL fires.
+        closes = [30000.0] * 24 + [29700.0]
         active = {sig.signal_id: sig}
         monitor, removed, sent = self._build_monitor(
             active, candles_close=closes, regime_detector=regime_detector
@@ -1608,10 +1653,12 @@ class TestSignalInvalidation:
             tp1=30150.0,
             age_seconds=400.0,
         )
-        # Price is below SL — SL check fires first
+        # Price is below SL — SL check fires first.  Last candle reflects the
+        # gap-down; SL/TP eval uses 1m candle low/high (audit-2), not
+        # sig.current_price directly.
         sig.current_price = 29700.0
 
-        closes = [30000.0] * 25
+        closes = [30000.0] * 24 + [29700.0]
         active = {sig.signal_id: sig}
         monitor, removed, _ = self._build_monitor(active, candles_close=closes)
 
@@ -1782,7 +1829,7 @@ class TestOnHighlightCallback:
             sent.append((chat_id, text))
 
         data_store = MagicMock()
-        data_store.get_candles.return_value = None
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         data_store.ticks = {}
 
         monitor = TradeMonitor(
@@ -1921,7 +1968,7 @@ class TestOnHighlightCallback:
         active = {sig.signal_id: sig}
 
         data_store = MagicMock()
-        data_store.get_candles.return_value = None
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
         data_store.ticks = {}
 
         monitor = TradeMonitor(
