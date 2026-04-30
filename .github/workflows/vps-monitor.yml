@@ -121,14 +121,14 @@ jobs:
           CURRENT_START_LOGURU=$(date -u -d "@${CURRENT_START_TS}" +'%Y-%m-%d %H:%M:%S')
           PREVIOUS_START_LOGURU=$(date -u -d "@${PREVIOUS_START_TS}" +'%Y-%m-%d %H:%M:%S')
 
-          # Stage the extractor inside the engine container and run it.
-          ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-            "docker cp /tmp/360-monitor-scripts/extract_engine_logs.sh 360scalp-v2-engine:/tmp/extract_engine_logs.sh && \
-             docker exec 360scalp-v2-engine chmod +x /tmp/extract_engine_logs.sh"
-
+          # Pipe the extractor through stdin and run via `sh -s "$ARGS"` —
+          # mirrors the monitor_heartbeat.py pattern used 30 lines above.
+          # Avoids the docker-cp + chmod path that fails with rc=1 "Operation
+          # not permitted" when the container runs as a non-root user (the
+          # script is copied in as root-owned and chmod is then refused).
           set +e
           ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-            "docker exec 360scalp-v2-engine /tmp/extract_engine_logs.sh '${CURRENT_START_LOGURU}'" \
+            "cat /tmp/360-monitor-scripts/extract_engine_logs.sh | docker exec -i 360scalp-v2-engine sh -s '${CURRENT_START_LOGURU}'" \
             > monitor/raw/engine_current.log
           CURRENT_RC=$?
           set -e
@@ -143,7 +143,7 @@ jobs:
           if [ "${COMPARE_PREVIOUS_WINDOW}" = "true" ]; then
             set +e
             ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-              "docker exec 360scalp-v2-engine /tmp/extract_engine_logs.sh '${PREVIOUS_START_LOGURU}' '${CURRENT_START_LOGURU}'" \
+              "cat /tmp/360-monitor-scripts/extract_engine_logs.sh | docker exec -i 360scalp-v2-engine sh -s '${PREVIOUS_START_LOGURU}' '${CURRENT_START_LOGURU}'" \
               > monitor/raw/engine_previous.log
             PREV_RC=$?
             set -e

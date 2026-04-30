@@ -125,3 +125,44 @@ def test_extractor_emits_zero_lines_inside_empty_window_succeeds(log_root):
     result = _run(EXTRACTOR, log_root, "2026-04-30 10:00:00")
     assert result.returncode == 0
     assert result.stdout.strip() == ""
+
+
+def test_extractor_works_via_sh_s_stdin_invocation(log_root):
+    """The workflow invokes the extractor via `sh -s "$ARG"` reading from
+    stdin (matches the monitor_heartbeat.py pattern at line 99 of
+    vps-monitor.yml).  This avoids the docker-cp + chmod path that fails
+    "Operation not permitted" when the engine container runs as a non-root
+    user.  Verify the script behaves identically when piped vs invoked.
+    """
+    log_file = log_root / "engine_2026-04-30.log"
+    log_file.write_text(
+        "\n".join([
+            "2026-04-30 08:00:00 | scanner | INFO | before window",
+            "2026-04-30 10:00:00 | scanner | INFO | in window",
+        ]),
+        encoding="utf-8",
+    )
+    # Rewrite the hardcoded /app/logs path to point at the test fixture, then
+    # pipe through `sh -s` exactly as the workflow does.
+    script_text = EXTRACTOR.read_text(encoding="utf-8").replace("/app/logs", str(log_root))
+    result = subprocess.run(
+        ["sh", "-s", "2026-04-30 09:30:00"],
+        input=script_text,
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0
+    assert "in window" in result.stdout
+    assert "before window" not in result.stdout
+
+    # rc=2 contract still holds via stdin invocation when the sink is missing.
+    empty_dir = log_root.parent / "empty_logs"
+    empty_dir.mkdir()
+    script_empty = EXTRACTOR.read_text(encoding="utf-8").replace("/app/logs", str(empty_dir))
+    result2 = subprocess.run(
+        ["sh", "-s", "2026-04-30 09:30:00"],
+        input=script_empty,
+        capture_output=True,
+        text=True,
+    )
+    assert result2.returncode == 2
