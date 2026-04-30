@@ -7,12 +7,30 @@ logic into a single, reusable component.  The result is returned as an
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 from src.ai_engine import WhaleAlert, detect_volume_delta_spike, detect_whale_trade
 from src.order_flow import OrderFlowStore, is_oi_invalidated
 from src.smc import FVGZone, LiquiditySweep, MSSSignal, detect_fvg, detect_liquidity_sweeps, detect_mss
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var with a safe default; logs nothing to keep import-time clean."""
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
+# B8 compliance: whale-trade USD threshold must be env-overridable so the
+# operator can tune it without a redeploy.  Default 1M USD matches the prior
+# hard-coded value in `detect_whale_trade(threshold_usd=1_000_000)`.
+WHALE_TRADE_USD_THRESHOLD: float = _env_float("WHALE_TRADE_USD_THRESHOLD", 1_000_000.0)
 from src.utils import get_logger
 
 log = get_logger("detector")
@@ -226,12 +244,27 @@ class SMCDetector:
         # Whale / tape detection
         # ------------------------------------------------------------------
         if ticks:
-            latest = ticks[-1]
-            result.whale_alert = detect_whale_trade(
-                latest.get("price", 0.0), latest.get("qty", 0.0)
-            )
             recent = ticks[-100:]
             result.recent_ticks = recent
+
+            # Scan the recent-tick window for ANY whale trade rather than only
+            # checking the most recent tick.  Pre-fix, a $1M whale at tick[-50]
+            # was overwritten by every subsequent small tick, so the alert was
+            # detectable for ~50–100ms — almost never aligned with a 15s scan
+            # cycle.  The institutional-impact thesis lasts minutes; the
+            # detection window must too.  We walk newest-first so the alert
+            # carries the freshest qualifying trade.
+            whale_alert: Optional[WhaleAlert] = None
+            for t in reversed(recent):
+                candidate = detect_whale_trade(
+                    t.get("price", 0.0),
+                    t.get("qty", 0.0),
+                    threshold_usd=WHALE_TRADE_USD_THRESHOLD,
+                )
+                if candidate is not None:
+                    whale_alert = candidate
+                    break
+            result.whale_alert = whale_alert
 
             buy_v = sum(
                 t.get("qty", 0) * t.get("price", 0)

@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-30 — Path audit #1 (LSR): broken momentum-sign check removed, MSS confirmation wired*
+*Updated: 2026-04-30 — Path audit #2 (WHALE_MOMENTUM): whale-alert single-tick bug fixed; thresholds env-overridable*
 
 ---
 
@@ -8,7 +8,43 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-04-30, evening):
+This session (2026-04-30, late evening — path audit #2):
+- **WHALE_MOMENTUM deep dive** (`_evaluate_whale_momentum`,
+  `src/channels/scalp.py:1488–1701`). Latest monitor zip showed
+  `EVAL::WHALE_MOMENTUM: momentum_reject=15,126 (82%)` and
+  `regime_blocked=3,297 (18%)` of 18,423 cycles — 100% silent.
+  Root cause was upstream of the evaluator, in the trigger producer.
+- **🔴 BUG FIXED — whale-alert single-tick detection** (`src/detector.py:228`).
+  The producer was reading `latest = ticks[-1]; result.whale_alert =
+  detect_whale_trade(latest...)`. A $1M whale at `tick[-50]` was overwritten
+  by every subsequent small tick, leaving the alert detectable for ~50–100ms
+  on any active pair. With WS streaming hundreds of ticks/sec on BTC and a
+  15s scan cycle, the chance of `latest` being a qualifying whale was
+  effectively zero. Institutional impact lasts minutes; the detection
+  window must too.
+  **Fix**: scan the recent_ticks window newest-first and surface the first
+  qualifying whale found. The 100-tick window was already being captured —
+  we were just sampling its end.
+- **B8 compliance — three thresholds now env-overridable**:
+  `WHALE_TRADE_USD_THRESHOLD` (1M default, in `src/detector.py`),
+  `WHALE_DELTA_MIN_RATIO` (2.0), `WHALE_MIN_TICK_VOLUME_USD` (500k),
+  `WHALE_OBI_MIN` (1.5) (all in `src/channels/scalp.py:42–44`). All were
+  hardcoded; B8 says everything must be env-tunable.
+- **Tests added** (`tests/test_new_modules.py::TestSMCDetector`): four new
+  cases — whale buried in middle of window must still be detected, no whale
+  when no tick exceeds threshold, env override lowers threshold, plus the
+  pre-existing latest-tick-is-whale case still passes. All pass; same 6
+  pre-existing failures elsewhere (queue #13).
+- **Data sufficiency check (per owner request)**: 100-tick recent window is
+  count-based not time-based — on a $0.50 alt with ~5 trades/min that's
+  20 minutes of stale data; on BTC ~5 seconds. `SEED_TICK_LIMIT=1000`
+  storage is fine. 1m candle minimum 10 trivial. Time-windowed ticks
+  would be cleaner but requires data-store contract change — deferred.
+- Tier-aware whale threshold (TOP=$1M, MIDCAP=$250k, etc.) noted as a
+  future improvement — needs `pair_profile` plumbed into `SMCDetector.detect()`
+  signature, which is a wider architectural change. Not blocking.
+
+Prior session 2026-04-30 (evening — path audit #1):
 - **Path audit #1 — LIQUIDITY_SWEEP_REVERSAL deep dive.** Owner authorized
   fixing the path before moving on; rule-override permitted where structurally
   justified. Audit identified two real defects in `_evaluate_standard`
@@ -185,7 +221,8 @@ statistical confidence.
 | **Mover-promotion REST seed + CVD seed on promotion (PR #233 follow-up)** | `src/scanner/__init__.py:1090` (`_seed_mover_pair`) | **This session (2026-04-29)** |
 | **REST-fallback admin-alert grace period (60s) — transient drops stay silent; only sustained outages alert. Cooldown layered on top for prolonged outages.** | `src/websocket_manager.py:303` (`_start_rest_fallback` + `_maybe_alert_after_grace`) | Prior 2026-04-29 |
 | **PR-7B path-aware modulation: QCB volume_div = 0.60 — closes structural mismatch where QUIET volume_div thresholds flag QCB's own breakout pattern as manipulation; -21.6 → -13.0** | `src/scanner/__init__.py:449` (`_PENALTY_MODULATION_BY_SETUP`) + test mirror in `tests/test_regime_soft_penalty.py` | **This session (2026-04-30)** |
-| **LSR path audit fix: removed broken 5m-mom-direction-sign check (was rejecting valid sweeps because pre-sweep drift contaminates 3-candle momentum); wired MSS confirmation as soft penalty (missing = -8, mismatch = hard reject)** | `src/channels/scalp.py:_evaluate_standard` + 4 new tests in `tests/test_channels.py::TestScalpChannel` | **This session (2026-04-30 evening)** |
+| **LSR path audit fix: removed broken 5m-mom-direction-sign check (was rejecting valid sweeps because pre-sweep drift contaminates 3-candle momentum); wired MSS confirmation as soft penalty (missing = -8, mismatch = hard reject)** | `src/channels/scalp.py:_evaluate_standard` + 4 new tests in `tests/test_channels.py::TestScalpChannel` | **2026-04-30 evening (path audit #1)** |
+| **WHALE_MOMENTUM path audit fix: scan recent_ticks window for whale (was only checking latest tick — alert visible ~50–100ms on active pairs vs. 15s scan cycle); thresholds now env-overridable per B8** | `src/detector.py:228` (whale scan) + `src/channels/scalp.py:42` (env-overridable thresholds) + 4 new tests in `tests/test_new_modules.py::TestSMCDetector` | **2026-04-30 late eve (path audit #2)** |
 
 ---
 
@@ -299,10 +336,13 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 12 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
 | 13 | Pre-existing test breakage: 139 failures on main (PR #240 channel cap raise + others didn't update fixtures) — clean up in dedicated PR | Tech debt |
 | 14 | Diagnose underlying 15-min futures WS drop (needs VPS-side `_health_watchdog` "stale WS connection" log) | Investigation |
-| 15 | **Path audit #1: LSR (`_evaluate_standard`) — broken mom-sign removed, MSS gate wired** | ✅ This session (2026-04-30 eve) |
-| 16 | Path audit — next path on the list (WHALE_MOMENTUM by default) | Pending owner go-ahead |
-| 17 | LSR follow-up: validate momentum_reject rate drops on next monitor zip; check MSS_MISSING flag prevalence in emitted LSRs | Observation |
-| 18 | LSR open question: should LSR be added to `STRUCTURAL_SLTP_PROTECTED_SETUPS` so the FVG-anchored TP1 + 20-candle swing TP2 the evaluator computes survive `_assign_tps`? Currently they're discarded in favour of fixed 1.2/2.1/3.0R cadence. Adding it would also flip the SL cap from compress to reject — owner decision required | Pending owner decision |
+| 15 | **Path audit #1: LSR (`_evaluate_standard`) — broken mom-sign removed, MSS gate wired** | ✅ Merged |
+| 16 | **Path audit #2: WHALE_MOMENTUM — whale-alert single-tick bug fixed, thresholds env-overridable** | ✅ This session (2026-04-30 late eve) |
+| 17 | Path audit #3 — next path (TREND_PULLBACK_EMA suggested next per the OWNER_BRIEF order) | Pending owner go-ahead |
+| 18 | LSR follow-up: validate momentum_reject rate drops on next monitor zip; check MSS_MISSING flag prevalence in emitted LSRs | Observation |
+| 19 | WHALE_MOMENTUM follow-up: validate whale_alert detection rate jumps in next zip; check that `momentum_reject` count drops substantially on `EVAL::WHALE_MOMENTUM` | Observation |
+| 20 | LSR open question: should LSR be added to `STRUCTURAL_SLTP_PROTECTED_SETUPS` so the FVG-anchored TP1 + 20-candle swing TP2 the evaluator computes survive `_assign_tps`? Currently they're discarded in favour of fixed 1.2/2.1/3.0R cadence. Adding it would also flip the SL cap from compress to reject — owner decision required | Pending owner decision |
+| 21 | WHALE_MOMENTUM open question: tier-aware whale threshold (TOP=$1M, MIDCAP=$250k, SMALLCAP=$100k) — needs `pair_profile` plumbed into `SMCDetector.detect()`. Currently global threshold can be tuned via `WHALE_TRADE_USD_THRESHOLD` env. Tier-aware is cleaner but architecturally invasive | Pending data evidence |
 
 ---
 

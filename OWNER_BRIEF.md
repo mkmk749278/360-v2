@@ -169,6 +169,7 @@ Every item below was verified by reading the actual deployed code from the curre
 | EXHAUSTION_FADE R:R tier: moved to 0.9 mean-reversion family | ✅ |
 | Mover pairs dashboard counter — `/dashboard` shows `(+N mover)` when active | ✅ |
 | LSR (`_evaluate_standard`) — removed broken 5m-mom-direction-sign check; wired MSS confirmation as soft penalty (missing = -8, mismatch = hard reject) | ✅ 2026-04-30 |
+| WHALE_MOMENTUM — whale-alert producer scans recent_ticks window (was only checking the latest tick — alert visible ~50–100ms on active pairs); WHALE_TRADE_USD_THRESHOLD + WHALE_MIN_TICK_VOLUME_USD + WHALE_OBI_MIN + WHALE_DELTA_MIN_RATIO now env-overridable per B8 | ✅ 2026-04-30 |
 
 ### Live Performance Data (from 20-hour monitor window)
 
@@ -214,6 +215,7 @@ Dominant suppressors per live scan logs:
 - `TREND_PULLBACK_EMA` — ATR-driven SL can reach 3%; cap now 3.0%. Fix deployed, unvalidated.
 - `QUIET_COMPRESSION_BREAK` — 2.08% SL seen live; was perpetually rejected by 2.5% channel cap. Now capped at 3.0% — should start passing.
 - `LIQUIDITY_SWEEP_REVERSAL` — was generating 0 signals in latest 18k-cycle zip; dominant suppressors `momentum_reject` (40%, structurally broken — fix deployed 2026-04-30 evening) and `basic_filters_failed` (20%). Also missing MSS confirmation despite the helper existing — wired same session. Both fixes unvalidated; expect higher emission rate AND higher quality (MSS gate filters false sweeps).
+- `WHALE_MOMENTUM` — was generating 0 signals in latest 18k-cycle zip; root cause was upstream in `detector.py:228` where whale_alert only checked the latest tick (visible ~50–100ms on active pairs vs. 15s scan cycle). Fix scans the 100-tick window newest-first. Thresholds now env-overridable per B8. Unvalidated; expect `momentum_reject` count to drop sharply on next zip.
 
 **Effectively silent (being investigated):**
 - ORB, CLS, PDC — not yet diagnosed; separate investigation needed.

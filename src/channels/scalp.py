@@ -38,10 +38,11 @@ log = get_logger("scalp")
 # EMA tests that bounce are no longer rejected.
 _HTF_EMA_REJECTION_PCT: float = float(os.getenv("HTF_EMA_REJECTION_PCT", "0.0015"))
 
-# WHALE_MOMENTUM thresholds (absorbed from former TapeChannel)
-_WHALE_DELTA_MIN_RATIO: float = 2.0
-_WHALE_MIN_TICK_VOLUME_USD: float = 500_000.0
-_WHALE_OBI_MIN: float = 1.5
+# WHALE_MOMENTUM thresholds (absorbed from former TapeChannel).  Env-overridable
+# per B8 so operators can tune for current market conditions without redeploy.
+_WHALE_DELTA_MIN_RATIO: float = float(os.getenv("WHALE_DELTA_MIN_RATIO", "2.0"))
+_WHALE_MIN_TICK_VOLUME_USD: float = float(os.getenv("WHALE_MIN_TICK_VOLUME_USD", "500000"))
+_WHALE_OBI_MIN: float = float(os.getenv("WHALE_OBI_MIN", "1.5"))
 # In fast/volatile regimes the order book can be temporarily thin or skewed by
 # market-maker spread widening.  When the OBI ratio is marginal — present but
 # below the full confirmation threshold — apply a soft penalty rather than
