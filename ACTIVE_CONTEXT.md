@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-29 — Mover seeding + REST fallback alert grace period*
+*Updated: 2026-04-30 — HYPEUSDT QCB -21.6 gate penalty diagnosed + recalibrated*
 
 ---
 
@@ -8,7 +8,34 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-04-29):
+This session (2026-04-30):
+- **Reviewed monitor zip 2026-04-30 04:08 UTC** — flagged stale (last performance
+  record 3.4h old). Window-over-window deltas all zero vs prior window — same
+  QUIET regime, same path silence. Only 3 QCB closes in window, all flat
+  (~ -0.046% PnL each). No new bug surface or anomaly to act on.
+- **Diagnosed HYPEUSDT QCB 89.2 → 67.6 gate penalty** (Priority 3 / queue #7).
+  In `360_SCALP` channel, only two soft-gate bases (`volume_div=12.0` and
+  `spoof=12.0`) yield exactly `12.0 × 1.8 (QUIET regime mult) = 21.6`. Of the
+  two, **`volume_div` has a structural mismatch with QCB's thesis**: QCB by
+  design fires on a primary-TF compression breakout volume spike during a
+  QUIET window where higher-TF (15m) volume is declining — that pattern is
+  exactly what `check_volume_divergence_gate` flags as manipulation
+  (`_REGIME_SPIKE_THRESHOLD["QUIET"]=1.5`, `_REGIME_DECLINE_THRESHOLD["QUIET"]=0.8`).
+  Spoof, by contrast, is an orderbook-anomaly signal that's informative
+  regardless of setup type — leave it alone.
+- **Shipped: PR-7B path-aware modulation entry for QCB on volume_div** at scale 0.60
+  (matches existing VSB/FAR/SR_FLIP precedents). Effect: pre-fix
+  `12.0 × 1.8 = 21.6` → post-fix `12.0 × 0.60 × 1.8 = 12.96`. Penalty preserved
+  (volume_div divergence still meaningfully reflected) but no longer
+  single-handedly drops an A+ tier signal to FILTERED. Edit at
+  `src/scanner/__init__.py:449` plus mirroring assertion in
+  `tests/test_regime_soft_penalty.py::TestPathAwarePenaltyModulation`.
+  TestPathAwarePenaltyModulation passes; no new test failures introduced.
+  Two pre-existing failures (`TestHardGatesStillBlock::test_cross_asset_gate_still_hard_blocks`,
+  `TestRegimeMultiplierStoredOnSignal::test_regime_multiplier_stored_quiet`)
+  exist on main and are unaffected — covered by tech-debt queue #13.
+
+Prior session 2026-04-29:
 - **Reviewed monitor zip 2026-04-29 08:49 UTC** — see "Monitor Zip Findings" below
 - **Confirmed PR #236 fixes are live and working** (QCB went 0 → 12 emissions)
 - **Verified all Audit-3 fixes are deployed** in `src/channels/scalp.py`
@@ -127,7 +154,8 @@ statistical confidence.
 | EXHAUSTION_FADE moved to 0.9 R:R mean-reversion tier | `src/signal_quality.py` | PR #236 |
 | **360_SCALP channel SL cap raised 2.5% → 3.0% — unlocks per-setup 3.0% caps for FAR/QCB/TPE/FUNDING** | `src/signal_quality.py:347` | **This session (2026-04-29)** |
 | **Mover-promotion REST seed + CVD seed on promotion (PR #233 follow-up)** | `src/scanner/__init__.py:1090` (`_seed_mover_pair`) | **This session (2026-04-29)** |
-| **REST-fallback admin-alert grace period (60s) — transient drops stay silent; only sustained outages alert. Cooldown layered on top for prolonged outages.** | `src/websocket_manager.py:303` (`_start_rest_fallback` + `_maybe_alert_after_grace`) | **This session (2026-04-29)** |
+| **REST-fallback admin-alert grace period (60s) — transient drops stay silent; only sustained outages alert. Cooldown layered on top for prolonged outages.** | `src/websocket_manager.py:303` (`_start_rest_fallback` + `_maybe_alert_after_grace`) | Prior 2026-04-29 |
+| **PR-7B path-aware modulation: QCB volume_div = 0.60 — closes structural mismatch where QUIET volume_div thresholds flag QCB's own breakout pattern as manipulation; -21.6 → -13.0** | `src/scanner/__init__.py:449` (`_PENALTY_MODULATION_BY_SETUP`) + test mirror in `tests/test_regime_soft_penalty.py` | **This session (2026-04-30)** |
 
 ---
 
@@ -165,8 +193,11 @@ Tighter of per-setup cap vs channel cap always wins (`_max_sl_pct_for_policy()`)
 
 1. **Win-rate still unvalidated** — only 1 closed signal in latest 28h zip
    (QCB at -0.086% PnL). Need non-QUIET regime for meaningful sample.
-2. **HYPEUSDT QCB gate penalty** — 89.2 composite → 67.6 due to single -21.6 soft-gate
-   penalty. Source not yet identified. Not blocking, but high-quality signal lost.
+2. ~~HYPEUSDT QCB gate penalty — 89.2 → 67.6 due to single -21.6 soft-gate penalty.~~
+   **RESOLVED 2026-04-30**: source was `volume_div` (12.0 × 1.8 QUIET mult = 21.6).
+   Structural mismatch with QCB thesis. Modulation entry shipped; penalty now ~13.0.
+   Spoof gate (also 12.0 × 1.8) intentionally left unmodulated — orderbook
+   anomalies are informative regardless of setup type.
 3. **`cvd_candles=0` on some pairs** — ZBTUSDT, BSBUSDT, SWARMSUSDT. Low-volume pairs
    not covered by boot seed. CVD-gated evaluators silent on these until ~100 live 1m candles
    accumulate (~100 min post-start).
@@ -230,7 +261,7 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 5 | REST-fallback admin-alert cooldown (PR #242) — *insufficient: 600s cooldown < 900s drop interval, alerts still fired every cycle* | ⚠️ Superseded |
 | 5b | REST-fallback admin-alert 60s grace period (this session) — transient drops stay silent | ✅ This session |
 | 6 | Validate mover signals firing on next zip — search for VSB/BREAKDOWN_SHORT emissions on non-top-75 symbols | Observation |
-| 7 | Investigate HYPEUSDT QCB -21.6 gate penalty source | Code investigation |
+| 7 | HYPEUSDT QCB -21.6 gate penalty source — diagnosed (volume_div) + modulation shipped | ✅ This session |
 | 8 | Validate channel cap raise on next monitor zip | Observation |
 | 9 | Monitor zip — validate Audit-3 path activation under non-QUIET regime | Observation (regime-gated) |
 | 10 | Win-rate check — needs ≥20 closed signals in non-QUIET regime | Data validation |

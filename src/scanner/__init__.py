@@ -453,6 +453,11 @@ _PENALTY_MODULATION_BY_SETUP: Dict[str, Dict[str, float]] = {
     "POST_DISPLACEMENT_CONTINUATION": {"volume_div": 0.65, "vwap": 0.80},
     "TREND_PULLBACK_EMA": {"kill_zone": 0.70},
     "CONTINUATION_LIQUIDITY_SWEEP": {"volume_div": 0.75},
+    # QCB thesis = primary-TF compression breakout volume during a QUIET window
+    # (higher-TF volume declining). That's the exact pattern volume_div is
+    # designed to flag as manipulation, so the gate is structurally backward
+    # for this path. Modulate the base before the QUIET 1.8× regime mult.
+    "QUIET_COMPRESSION_BREAK": {"volume_div": 0.60},
 }
 _PENALTY_MODULATION_MIN_SCALE: float = 0.1
 _PENALTY_MODULATION_MAX_SCALE: float = 1.0

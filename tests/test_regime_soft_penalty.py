@@ -251,6 +251,7 @@ class TestPathAwarePenaltyModulation:
         assert _PENALTY_MODULATION_BY_SETUP["POST_DISPLACEMENT_CONTINUATION"]["volume_div"] == pytest.approx(0.65)
         assert _PENALTY_MODULATION_BY_SETUP["POST_DISPLACEMENT_CONTINUATION"]["vwap"] == pytest.approx(0.80)
         assert _PENALTY_MODULATION_BY_SETUP["CONTINUATION_LIQUIDITY_SWEEP"]["volume_div"] == pytest.approx(0.75)
+        assert _PENALTY_MODULATION_BY_SETUP["QUIET_COMPRESSION_BREAK"]["volume_div"] == pytest.approx(0.60)
 
 
 # ---------------------------------------------------------------------------
