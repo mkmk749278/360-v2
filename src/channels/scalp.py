@@ -1377,16 +1377,46 @@ class ScalpChannel(BaseChannel):
 
         ind = indicators.get("5m", {})
         rsi_val = ind.get("rsi_last")
+        rsi_prev = ind.get("rsi_prev")
+
+        # Pre-compute cascade extrema (needed by gate 4 below as well as the
+        # SL block below the RSI gate).
+        _cascade_slice = [float(c) for c in closes[-4:]]
+        cascade_low = min(_cascade_slice)
+        cascade_high = max(_cascade_slice)
+        cascade_range = cascade_high - cascade_low
 
         # 3. RSI extreme gate
+        # A 5m cascade reversal needs OVERSOLD context WITH reversal under way,
+        # not "RSI must be exhausted."  Pre-fix used <25 / >75 thresholds which
+        # 5m RSI rarely hits during a normal 1.5-3% cascade — the gate killed
+        # valid reversal setups at the structural moment they form (RSI in
+        # 28-35 with RSI rising is the canonical bullish-reversal context;
+        # demanding <25 means waiting until the cascade has already exhausted).
+        # New rule: oversold zone (LONG <35 / SHORT >65) AND RSI direction
+        # confirms the reversal is actually under way (rising for LONG, falling
+        # for SHORT) when rsi_prev is available.
         if reversal_direction == Direction.LONG:
-            if rsi_val is not None and rsi_val >= 25:
+            if rsi_val is not None and rsi_val >= 35:
+                return self._reject("rsi_reject")
+            if (rsi_val is not None and rsi_prev is not None
+                    and float(rsi_val) <= float(rsi_prev)):
                 return self._reject("rsi_reject")
         else:
-            if rsi_val is not None and rsi_val <= 75:
+            if rsi_val is not None and rsi_val <= 65:
+                return self._reject("rsi_reject")
+            if (rsi_val is not None and rsi_prev is not None
+                    and float(rsi_val) >= float(rsi_prev)):
                 return self._reject("rsi_reject")
 
-        # 4. Price within 0.5% of a known orderblock or FVG zone
+        # 4. Price within 0.5% of a known orderblock or FVG zone.
+        # Pre-fix only checked close_now — but a cascade by definition
+        # OVERSHOOTS supply/demand zones, then bounces.  By the time we
+        # evaluate, close_now is past the zone (in recovery).  Truth-aligned
+        # check: either close_now or the cascade extremum (low for LONG,
+        # high for SHORT) within the proximity window — the extremum is what
+        # actually tested the zone.
+        cascade_extremum = cascade_low if reversal_direction == Direction.LONG else cascade_high
         fvgs = smc_data.get("fvg", [])
         orderblocks = smc_data.get("orderblocks", [])
         near_zone = False
@@ -1396,8 +1426,11 @@ class ScalpChannel(BaseChannel):
             )
             if zone_level is None and hasattr(zone, "price"):
                 zone_level = zone.price
-            if zone_level is not None and zone_level > 0:
-                if abs(close_now - float(zone_level)) / float(zone_level) <= 0.005:
+            if zone_level is not None and float(zone_level) > 0:
+                _zl = float(zone_level)
+                _close_proximity = abs(close_now - _zl) / _zl
+                _extremum_proximity = abs(cascade_extremum - _zl) / _zl
+                if _close_proximity <= 0.005 or _extremum_proximity <= 0.005:
                     near_zone = True
                     break
         if not near_zone:
@@ -1412,12 +1445,8 @@ class ScalpChannel(BaseChannel):
         profile = smc_data.get("pair_profile")
         atr_val = ind.get("atr_last", close_now * 0.002)
 
-        # SL: beyond cascade extremum + 0.3% buffer
+        # SL: beyond cascade extremum + 0.3% buffer (cascade_low/high computed earlier).
         sl_buffer = close_now * 0.003
-        _cascade_slice = [float(c) for c in closes[-4:]]
-        cascade_low = min(_cascade_slice)
-        cascade_high = max(_cascade_slice)
-        cascade_range = cascade_high - cascade_low
         if reversal_direction == Direction.LONG:
             sl = cascade_low - sl_buffer
         else:

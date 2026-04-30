@@ -171,6 +171,7 @@ Every item below was verified by reading the actual deployed code from the curre
 | LSR (`_evaluate_standard`) — removed broken 5m-mom-direction-sign check; wired MSS confirmation as soft penalty (missing = -8, mismatch = hard reject) | ✅ 2026-04-30 |
 | WHALE_MOMENTUM — whale-alert producer scans recent_ticks window (was only checking the latest tick — alert visible ~50–100ms on active pairs); WHALE_TRADE_USD_THRESHOLD + WHALE_MIN_TICK_VOLUME_USD + WHALE_OBI_MIN + WHALE_DELTA_MIN_RATIO now env-overridable per B8 | ✅ 2026-04-30 |
 | TREND_PULLBACK_EMA — body-conviction gate replaced with close-position-in-range (was punishing the canonical hammer reclaim that defines a valid pullback entry — large lower wick is the EMA-test feature, not noise) | ✅ 2026-04-30 |
+| LIQUIDATION_REVERSAL — RSI thresholds relaxed 25/75 → 35/65 with RSI direction-of-travel check (was demanding extreme exhaustion 5m RSI rarely hits); zone-proximity gate now also accepts cascade extremum within 0.5% of FVG/orderblock (cascades overshoot zones by definition) | ✅ 2026-05-01 |
 
 ### Live Performance Data (from 20-hour monitor window)
 
@@ -220,7 +221,8 @@ Dominant suppressors per live scan logs:
 
 **Effectively silent (being investigated):**
 - ORB, CLS, PDC — not yet diagnosed; separate investigation needed.
-- LIQ_REV, DIV_CONT, FUNDING_EXT — Audit-3 unlocks applied; awaiting first live signals.
+- DIV_CONT, FUNDING_EXT — Audit-3 unlocks applied; awaiting first live signals.
+- `LIQUIDATION_REVERSAL` — was generating 0 signals in latest 18k-cycle zip; cascade_threshold_not_met dominates (76.8%, by-design in QUIET regime). Audit #4 (2026-05-01) relaxed two downstream gates (RSI extreme + zone proximity) that would have killed valid setups when regime returns. Unvalidated; expect emissions when first cascades trigger in non-QUIET regime.
 
 ---
 
