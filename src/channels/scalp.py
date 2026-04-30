@@ -812,6 +812,28 @@ class ScalpChannel(BaseChannel):
 
         direction = sweep.direction
 
+        # MSS (Market Structure Shift) confirmation — SMC doctrine pairs every
+        # sweep with a lower-TF MSS to confirm the reversal has structurally
+        # taken hold.  `detect_mss` is computed upstream by SMCDetector and
+        # reaches us via `smc_data["mss"]`.  Three cases:
+        #   - present + direction matches sweep  → canonical pattern, no penalty
+        #   - present + direction mismatches     → hard reject (LTF moved
+        #                                          against the sweep — the
+        #                                          reversal already failed)
+        #   - missing                            → soft penalty (sweep alone
+        #                                          is still tradeable, but
+        #                                          lower confidence)
+        mss_obj = smc_data.get("mss")
+        mss_adj = 0.0
+        mss_reason = ""
+        if mss_obj is not None:
+            _mss_dir = getattr(mss_obj, "direction", None)
+            if _mss_dir is not None and _mss_dir != direction:
+                return self._reject("mss_direction_mismatch")
+        else:
+            mss_adj = -8.0
+            mss_reason = "MSS_MISSING"
+
         # RSI extreme gate: use pair-specific OB/OS levels when available
         rsi_val = ind.get("rsi_last")
         if rsi_val is not None and profile is not None:
@@ -821,11 +843,13 @@ class ScalpChannel(BaseChannel):
         elif not check_rsi_regime(rsi_val, direction=direction.value, regime=regime):
             return self._reject("rsi_reject")
 
-        # Momentum must agree with sweep direction
-        if direction == Direction.LONG and mom < 0:
-            return self._reject("momentum_reject")
-        if direction == Direction.SHORT and mom > 0:
-            return self._reject("momentum_reject")
+        # NOTE: a 5m 3-candle momentum-sign check used to live here.  It was
+        # structurally inverted: by definition, the 2-3 candles BEFORE a sweep
+        # drift in the direction OPPOSITE to the reversal we want, so demanding
+        # the post-sweep mom sign already match `direction` rejects the very
+        # setups LSR is meant to fire on.  Magnitude (line ~799) and persistence
+        # (line ~809) checks are retained — both are sign-agnostic.  The MSS
+        # gate above is the structurally truthful direction confirmation.
 
         pair_tier = profile.tier if profile else "MIDCAP"
         if not check_ema_alignment_adaptive(
@@ -995,6 +1019,11 @@ class ScalpChannel(BaseChannel):
         if mtf_adj != 0.0:
             sig.confidence += mtf_adj
             sig.soft_gate_flags = (sig.soft_gate_flags + f",MTF:{mtf_reason}").lstrip(",")
+
+        # Apply MSS soft penalty when LTF confirmation is missing
+        if mss_adj != 0.0:
+            sig.confidence += mss_adj
+            sig.soft_gate_flags = (sig.soft_gate_flags + f",{mss_reason}").lstrip(",")
 
         return sig
 
