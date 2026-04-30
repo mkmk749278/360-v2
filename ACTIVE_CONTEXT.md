@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-02 — Path audit #11 (DIVERGENCE_CONTINUATION): invalid_price telemetry + close-relative SL floor + TP1 ATR-adaptive cap*
+*Updated: 2026-05-02 — Path audit #12 (CONTINUATION_LIQUIDITY_SWEEP): invalid_price + close-relative SL floor + TP1 ATR-adaptive cap*
 
 ---
 
@@ -8,7 +8,48 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-02 — path audit #11):
+This session (2026-05-02 — path audit #12):
+- **CONTINUATION_LIQUIDITY_SWEEP deep dive** (`_evaluate_continuation_liquidity_sweep`,
+  `src/channels/scalp.py:3554-3810`).  Path was previously listed as
+  "Effectively silent — never produced a signal" in OWNER_BRIEF §4.3.
+  Live monitor (prior 28h zip) showed 99.98% regime_blocked — correct
+  doctrine since CLS requires TRENDING_UP/DOWN/STRONG_TREND/WEAK_TREND/
+  BREAKOUT_EXPANSION (excludes QUIET/RANGING/VOLATILE), and market is
+  99.7% QUIET.  Latest zip (smaller window) had no funnel data.
+  Three structural defects found, all family bugs already fixed in
+  other paths.
+- **🟡 Bug A — wrong reject reason for `close <= 0`** (was line 3621).
+  Same family as DIV_CONT/FUNDING audits.  Pre-fix emitted
+  `momentum_reject` for invalid candle data.
+  **Fix**: emit `invalid_price`.
+- **🔴 Bug B — tight SL geometry** (was line 3708).
+  Pre-fix: `sl = sweep_level ± 0.3×ATR` with min `0.5×ATR` floor.
+  When sweep_level was very close to close (e.g., 5bp gap), structural
+  sl_dist could be 0.15% — defeated by the 0.80% universal floor at
+  `_enqueue_signal`, structural anchor lost.
+  **Fix**: applied close-relative + 1×ATR floor pattern (mirror of
+  VSB/BDS/ORB/QCB/DIV_CONT).
+    `sl = min(sweep_level − 0.3×ATR, close − max(0.8% × close, 1×ATR))`
+- **🟡 Bug C — missing TP1 ATR-adaptive cap**.
+  TP1 = nearest FVG midpoint in direction.  In strong trends (CLS by
+  definition is a continuation setup → trends), the FVG can sit
+  several R from close.
+  **Fix**: applied 1.8R / 2.5R / uncapped by ATR percentile (consistent
+  with SR_FLIP / TPE / FUNDING / DIV_CONT).
+- **Tests added** (`tests/test_channels.py::TestContinuationLiquiditySweepAuditFixes`):
+  2 new — invalid_price reject reason, SL respects close-relative
+  floor.  All 49 CLS tests pass (47 existing + 2 new).  3326 broader
+  tests pass (vs 3324 post-DIV_CONT baseline — net +2, zero
+  regressions).
+- **Data sufficiency check**: CLS needs 5m candles ≥ 20 (boot 500),
+  EMA9/EMA21/RSI/ADX (always populated), sweeps in `smc_data` (from
+  detector — depends on actual sweep events occurring), FVG/orderblock
+  (FVG always present, orderblocks not_implemented).  ATR for new SL
+  geometry.  All trivially met after seed.  Path's silence is
+  regime-driven (CLS valid only in trending regimes which are
+  rare in current QUIET market).
+
+Prior session (2026-05-02 — path audit #11):
 - **DIVERGENCE_CONTINUATION deep dive** (`_evaluate_divergence_continuation`,
   `src/channels/scalp.py:3263-3530`).  Latest monitor zip:
   `EVAL::DIVERGENCE_CONTINUATION: regime_blocked=18,420 (99.98%),
@@ -689,6 +730,7 @@ statistical confidence.
 | **FUNDING path audit (3-fix shipped after CTE recommendation accepted): (A) `close <= 0` now emits `invalid_price` instead of conflating with `funding_not_extreme` telemetry; (B) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) — structure-anchored TP1 could sit 5-10R from close in trending markets, unreachable for mean-reversion contrarian setup before SL; (C) FUNDING_EXTREME_SIGNAL added to QUIET_SCALP_BLOCK exempt list at confidence ≥ 60 — was the truth report's "most likely bottleneck" with 95 candidates/28h all dying at scanner; lower bar than DIV_CONT's 64 because extreme funding is itself the quality evidence** | `src/channels/scalp.py:2910` (reject reason) + `:2989` (TP1 cap) + `src/scanner/__init__.py:318` (`_QUIET_FUNDING_MIN_CONFIDENCE`) + `:4421` (exempt branch) + 10 new tests across `tests/test_pr07_specialist_path_quality.py` and `tests/test_audit_findings.py` | **2026-05-02 (path audit #9)** |
 | **QCB path audit: (A) removed partial-candle volume gate (`volumes[-1] >= 2.0 × avg_vol`) — same VSB/BDS/ORB family bug; especially backward for QCB which requires QUIET regime; (B) SL geometry now respects close-relative + 1×ATR floor (max(0.8% × close, 1×ATR)) — pre-fix flat 0.3% close-floor was sub-spread on most pairs, defeated by universal 0.80% floor downstream** | `src/channels/scalp.py:3142` (vol gate) + `:3163` (SL geometry) + 3 new tests in `tests/test_channels.py::TestQuietCompressionBreakAuditFixes` | **2026-05-02 (path audit #10)** |
 | **DIV_CONT path audit: (A) `close <= 0` now emits `invalid_price` instead of conflating with `momentum_reject` telemetry; (B) SL geometry now respects close-relative + 1×ATR floor — pre-fix `ema21 × 0.995` could produce 0.6% sl_dist when close was very near EMA21, defeating universal 0.80% floor; (C) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) consistent with SR_FLIP / TPE / FUNDING — 10-candle swing extremum can sit 4-5R from close in strong trends.  Plus updated 1 stale test (test_tp2_*) — strict-equality assertion held only because old tight SL kept sl_dist small; refactored to assert structural invariant** | `src/channels/scalp.py:3327` (reject) + `:3406` (SL) + `:3454` (TP1 cap) + 2 new tests + 1 updated test in `tests/test_divergence_continuation_tp.py` | **2026-05-02 (path audit #11)** |
+| **CLS path audit: (A) `close <= 0` now emits `invalid_price` instead of conflating with `momentum_reject` telemetry; (B) SL geometry now respects close-relative + 1×ATR floor — pre-fix `sweep_level ± 0.3×ATR` with `0.5×ATR` minimum could produce 0.15% sl_dist when sweep_level was very near close, defeating universal 0.80% floor; (C) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) consistent with SR_FLIP / TPE / FUNDING / DIV_CONT — FVG-anchored TP1 can sit several R from close in strong trends** | `src/channels/scalp.py:3621` (reject) + `:3708` (SL) + `:3768` (TP1 cap) + 2 new tests in `tests/test_channels.py::TestContinuationLiquiditySweepAuditFixes` | **2026-05-02 (path audit #12)** |
 
 ---
 

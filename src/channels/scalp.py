@@ -3618,7 +3618,11 @@ class ScalpChannel(BaseChannel):
         closes_raw = m5.get("close", [])
         close = float(closes_raw[-1])
         if close <= 0:
-            return self._reject("momentum_reject")
+            # Telemetry-truth: this is invalid candle data, NOT a "momentum
+            # reject" condition.  Pre-fix conflated bad-data telemetry with
+            # the actual momentum gate count (same family as DIV_CONT /
+            # FUNDING fixes in #256 / #254).
+            return self._reject("invalid_price")
 
         # ADX gate: trend continuation requires meaningful trend strength
         profile = smc_data.get("pair_profile")
@@ -3706,19 +3710,26 @@ class ScalpChannel(BaseChannel):
         sweep_recency_penalty = 0.0 if sweep_index >= -_CLS_SWEEP_RECENT else 5.0
 
         # ── SL: placed beyond the swept level (structural invalidation) ────
+        # Same close-relative + 1×ATR floor pattern as VSB / BDS / ORB / QCB /
+        # DIV_CONT.  Pre-fix used `sweep_level ± 0.3×ATR` with a `0.5×ATR`
+        # minimum.  When sweep_level was very close to close (e.g., 5bp gap),
+        # the structural sl_dist could be 0.15% — well under the 0.80%
+        # universal floor at `_enqueue_signal`, defeating the structural
+        # anchor when clamped.  Now take the further-from-close of:
+        #   - structural floor: sweep_level − 0.3×ATR (anti-sweep-recovery)
+        #   - close-relative floor: max(0.8% × close, 1×ATR)
         atr_val = ind.get("atr_last", close * 0.002)
         atr_buffer = atr_val * 0.3
         if direction == Direction.LONG:
-            sl = sweep_level - atr_buffer
+            structural_sl = sweep_level - atr_buffer
+            close_rel_floor = close - max(close * 0.008, atr_val * 1.0)
+            sl = min(structural_sl, close_rel_floor)
         else:
-            sl = sweep_level + atr_buffer
+            structural_sl = sweep_level + atr_buffer
+            close_rel_ceiling = close + max(close * 0.008, atr_val * 1.0)
+            sl = max(structural_sl, close_rel_ceiling)
 
         sl_dist = abs(close - sl)
-        min_sl_dist = atr_val * 0.5
-        if sl_dist < min_sl_dist:
-            sl_dist = min_sl_dist
-            sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
-
         if direction == Direction.LONG and sl >= close:
             return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:
@@ -3764,6 +3775,24 @@ class ScalpChannel(BaseChannel):
         if tp2 <= 0:
             tp2 = close + sl_dist * 2.5 if direction == Direction.LONG else close - sl_dist * 2.5
         tp3 = close + sl_dist * 4.0 if direction == Direction.LONG else close - sl_dist * 4.0
+
+        # ATR-adaptive TP1 cap (mirror of SR_FLIP / TPE / FUNDING / DIV_CONT).
+        # The FVG-anchored TP1 can sit several R from close in trending
+        # markets; CLS is a continuation setup so by definition fires in
+        # trends.  Cap by ATR percentile so the structural target survives
+        # only when within reach.
+        _rc_cls = smc_data.get("regime_context")
+        _atr_pct_cls = _rc_cls.atr_percentile if _rc_cls else 50.0
+        if _atr_pct_cls < 40.0:
+            _tp1_cap_cls = sl_dist * 1.8
+        elif _atr_pct_cls < 65.0:
+            _tp1_cap_cls = sl_dist * 2.5
+        else:
+            _tp1_cap_cls = None
+        if _tp1_cap_cls is not None:
+            tp1 = (min(tp1, close + _tp1_cap_cls) if direction == Direction.LONG
+                   else max(tp1, close - _tp1_cap_cls))
+
         # Q4-B: enforce ladder monotonicity (same pattern as LSR).
         tp1, tp2, tp3 = _enforce_tp_ladder_monotonicity(
             tp1, tp2, tp3, close, sl_dist, direction,
