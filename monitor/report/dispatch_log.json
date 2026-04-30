@@ -1,22 +1,5 @@
 [
   {
-    "dispatched_at": 1776904549.6713436,
-    "signal_id": "SCALP-F348D98A",
-    "channel": "360_SCALP",
-    "symbol": "MUSDT",
-    "direction": "LONG",
-    "setup_class": "LIQUIDITY_SWEEP_REVERSAL",
-    "confidence": 88.0,
-    "signal_tier": "A+",
-    "entry": 4.5196,
-    "sl": 4.4610240395,
-    "tp1": 4.591491737032,
-    "tp2": 4.645410539806,
-    "tp3": 4.6993293425800005,
-    "market_phase": "TRENDING_DOWN | ATR%ile=42 | Vol=ACCUMULATION",
-    "telegram_text": "*⚡ SWEEP REVERSAL* │ *MUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `4.5096` – `4.5239` \\(limit order\\)\n   Mid: `4.5196`\n🛑 SL: `4.4610` (-1.30%)\n🎯 TP1: `4.5915` (+1.59%)\n🎯 TP2: `4.6454` (+2.78%)\n🎯 TP3: `4.6993` (+3.98%)\n\n📊 Setup: LIQUIDITY SWEEP REVERSAL | Confidence: *88.0* (B)\n⏱ Hold: ~1-2h | R:R 1:1.2\n⏰ Valid for: \\~8 min | Execution: LIMIT ORDER\n💡 Sweep LONG at 4.4764 | FVG 4.4921-4.4877 + Below 4.4764 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *B*"
-  },
-  {
     "dispatched_at": 1776912353.3963437,
     "signal_id": "SRFLIP-F6A38873",
     "channel": "360_SCALP",
@@ -848,5 +831,22 @@
     "tp3": 1.41025155,
     "market_phase": "QUIET | ATR%ile=78 | Vol=ACCUMULATION",
     "telegram_text": "*🔋 COMPRESSION BREAK* │ *XRPUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `1.3747` – `1.3755` \\(limit order\\)\n   Mid: `1.3753`\n🛑 SL: `1.3636` (-0.85%)\n🎯 TP1: `1.3904` (+1.10%)\n🎯 TP2: `1.3986` (+1.69%)\n🎯 TP3: `1.4103` (+2.54%)\n\n📊 Setup: QUIET COMPRESSION BREAK | Confidence: *81.7* (A)\n⏱ Hold: ~1-2h | R:R 1:1.3\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 1.3763 | FVG 1.3703-1.3699 + Below 1.3668 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *A*"
+  },
+  {
+    "dispatched_at": 1777526329.0344794,
+    "signal_id": "DIVCON-0E017A2B",
+    "channel": "360_SCALP",
+    "symbol": "CLUSDT",
+    "direction": "LONG",
+    "setup_class": "DIVERGENCE_CONTINUATION",
+    "confidence": 80.33,
+    "signal_tier": "A+",
+    "entry": 109.25,
+    "sl": 108.376,
+    "tp1": 112.39496579,
+    "tp2": 113.26896579,
+    "tp3": 112.39496579,
+    "market_phase": "TRENDING_UP | ATR%ile=28 | Vol=ACCUMULATION",
+    "telegram_text": "*📊 DIVERGENCE CONTINUATION* │ *CLUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `109.14` – `109.30` \\(limit order\\)\n   Mid: `109.25`\n🛑 SL: `108.38` (-0.80%)\n🎯 TP1: `112.39` (+2.88%)\n🎯 TP2: `113.27` (+3.68%)\n🎯 TP3: `112.39` (+2.88%)\n\n📊 Setup: DIVERGENCE CONTINUATION | Confidence: *80.3* (A)\n⏱ Hold: ~1-2h | R:R 1:3.6\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 110.0800 | FVG 109.3500-109.2700 + Below 108.9400 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *A*"
   }
 ]
