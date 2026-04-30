@@ -8,6 +8,7 @@ from src.runtime_truth_report import (
     count_log_markers,
     format_truth_report_markdown,
     parse_channel_funnel_from_logs,
+    parse_confidence_gate_components_from_logs,
     parse_confidence_gate_decisions_from_logs,
     parse_path_funnel_from_logs,
     parse_quiet_scalp_block_from_logs,
@@ -476,3 +477,99 @@ def test_format_truth_report_markdown_handles_missing_tier1_data() -> None:
     assert "no regime data parsed" in md
     assert "## QUIET_SCALP_BLOCK gate" in md
     assert "no QUIET_SCALP_BLOCK events" in md
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Tier-2 monitor upgrade: confidence component-score histogram.
+# Answers "where are the 14.83 confidence-gap points being lost" by
+# breaking the score into market / execution / risk / thesis_adj +
+# penalties, per setup × decision.
+# ────────────────────────────────────────────────────────────────────────
+
+
+_SAMPLE_CONFIDENCE_LINE = (
+    "2026-04-30 12:00:00 | scanner | INFO | "
+    "confidence_gate BTCUSDT 360_SCALP [QUIET_COMPRESSION_BREAK]: "
+    "decision=filtered reason=min_confidence raw=58.0 "
+    "composite=58.0 pre_soft=58.0 final=58.0 threshold=65.0 "
+    "penalties(eval=2.0,gate=1.0,total=3.0,pair_analysis=0.0) "
+    "adjustments(feedback=+0.0,stat_filter=+0.0,regime_transition=+0.0) "
+    "components(market=20.0,execution=18.0,risk=15.0,thesis_adj=5.0)"
+)
+
+
+def test_parse_confidence_gate_components_aggregates_per_setup_and_decision() -> None:
+    second_line = _SAMPLE_CONFIDENCE_LINE.replace("BTCUSDT", "ETHUSDT").replace(
+        "raw=58.0 composite=58.0 pre_soft=58.0 final=58.0",
+        "raw=62.0 composite=62.0 pre_soft=62.0 final=62.0",
+    ).replace(
+        "components(market=20.0,execution=18.0,risk=15.0,thesis_adj=5.0)",
+        "components(market=22.0,execution=20.0,risk=14.0,thesis_adj=6.0)",
+    )
+    log_text = "\n".join([_SAMPLE_CONFIDENCE_LINE, second_line])
+    result = parse_confidence_gate_components_from_logs(log_text, "360_SCALP")
+    assert "QUIET_COMPRESSION_BREAK" in result
+    bucket = result["QUIET_COMPRESSION_BREAK"]["filtered"]
+    assert bucket["samples"] == 2
+    # Avg final = (58 + 62) / 2 = 60; avg threshold = 65; gap = 5
+    assert bucket["avg_final"] == 60.0
+    assert bucket["avg_threshold"] == 65.0
+    assert bucket["avg_gap_to_threshold"] == 5.0
+    # Component averages.
+    assert bucket["components"]["avg_market"] == 21.0
+    assert bucket["components"]["avg_execution"] == 19.0
+    assert bucket["components"]["avg_risk"] == 14.5
+    assert bucket["components"]["avg_thesis_adj"] == 5.5
+
+
+def test_parse_confidence_gate_components_filters_other_channels() -> None:
+    other_chan = _SAMPLE_CONFIDENCE_LINE.replace("360_SCALP", "360_SWING")
+    log_text = "\n".join([_SAMPLE_CONFIDENCE_LINE, other_chan])
+    result = parse_confidence_gate_components_from_logs(log_text, "360_SCALP")
+    assert result["QUIET_COMPRESSION_BREAK"]["filtered"]["samples"] == 1
+
+
+def test_parse_confidence_gate_components_handles_empty_and_malformed() -> None:
+    assert parse_confidence_gate_components_from_logs("", "360_SCALP") == {}
+    # Lines that match the marker but not the full regex are silently skipped
+    # (matches the existing parser's robustness contract).
+    log_text = "confidence_gate BTCUSDT 360_SCALP [SETUP]: decision=filtered reason=foo"
+    assert parse_confidence_gate_components_from_logs(log_text, "360_SCALP") == {}
+
+
+def test_format_truth_report_markdown_renders_component_breakdown() -> None:
+    components = {
+        "QUIET_COMPRESSION_BREAK": {
+            "filtered": {
+                "samples": 100,
+                "avg_final": 58.4,
+                "avg_threshold": 65.0,
+                "avg_gap_to_threshold": 6.6,
+                "avg_raw": 58.4,
+                "avg_composite": 58.4,
+                "avg_total_penalty": 3.0,
+                "components": {
+                    "avg_market": 20.5,
+                    "avg_execution": 18.2,
+                    "avg_risk": 14.8,
+                    "avg_thesis_adj": 4.9,
+                },
+            }
+        }
+    }
+    snapshot, _ = build_snapshot(
+        channel="360_SCALP", lookback_hours=24, compare_previous_window=False,
+        include_raw_json=False, symbol_filter="", setup_filter="",
+        runtime_health={"running": True, "status": "running", "health": "healthy"},
+        heartbeat_text="", records=[], current_funnel={}, previous_funnel={},
+        confidence_gate_components=components,
+        now_ts=1_777_500_000.0,
+    )
+    assert snapshot["confidence_gate_components"] == components
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Confidence component breakdown" in md
+    # Header + the QCB row should both render.
+    assert "Avg final" in md
+    assert "QUIET_COMPRESSION_BREAK" in md
+    assert "20.50" in md  # market component
+    assert "6.60" in md   # gap to threshold

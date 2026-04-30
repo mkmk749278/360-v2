@@ -272,3 +272,63 @@ class TestBBWidthQuietThreshold:
         bb_width_pct = (bb_upper - bb_lower) / float(np.mean(closes[-20:])) * 100.0
         if bb_width_pct > 1.2:
             assert result.regime != MarketRegime.QUIET
+
+
+class TestBBWidthVolatileThresholdRecalibration:
+    """Default `_BB_WIDTH_VOLATILE_PCT` was 5.0; live monitor data showed
+    83.9% of cycles tagged VOLATILE because routine 4-7% mid-cap BB widths
+    were tripping the gate.  Genuine VOLATILE shows 8-15% BB width.
+
+    Bumped to 8.0 with `BB_WIDTH_VOLATILE_PCT` env override per B8.
+    """
+
+    def test_bb_width_volatile_threshold_default_is_8(self):
+        from src.regime import _BB_WIDTH_VOLATILE_PCT
+        assert _BB_WIDTH_VOLATILE_PCT == pytest.approx(8.0), (
+            "Default VOLATILE threshold should be 8.0% to avoid mis-tagging "
+            "routine mid-cap BB widths (4-7%) as VOLATILE."
+        )
+
+    def test_routine_5_percent_bb_width_no_longer_volatile(self):
+        """At 5% BB width pre-fix → VOLATILE; post-fix → not VOLATILE."""
+        result = MarketRegimeDetector._decide(
+            adx=20.0,
+            ema_slope=0.0,
+            bb_width_pct=5.0,
+            timeframe="5m",
+            ema9_slope_pct=None,
+        )
+        assert result != MarketRegime.VOLATILE, (
+            "5% BB width is routine mid-cap activity and must NOT be tagged "
+            "VOLATILE under the recalibrated threshold."
+        )
+
+    def test_genuinely_volatile_8_percent_bb_width_still_classified(self):
+        """At the new 8% threshold, BB width >= 8 still produces VOLATILE."""
+        result = MarketRegimeDetector._decide(
+            adx=20.0,
+            ema_slope=0.0,
+            bb_width_pct=8.5,
+            timeframe="5m",
+            ema9_slope_pct=None,
+        )
+        assert result == MarketRegime.VOLATILE
+
+    def test_env_override_lowers_threshold_when_requested(self, monkeypatch):
+        """B8 — operator may tighten back to 6.0 via BB_WIDTH_VOLATILE_PCT."""
+        monkeypatch.setenv("BB_WIDTH_VOLATILE_PCT", "6.0")
+        # Reload the module so the env var is consumed by the constant.
+        import importlib
+        import src.regime as regime_mod
+        importlib.reload(regime_mod)
+        try:
+            assert regime_mod._BB_WIDTH_VOLATILE_PCT == pytest.approx(6.0)
+            result = regime_mod.MarketRegimeDetector._decide(
+                adx=20.0, ema_slope=0.0, bb_width_pct=6.5,
+                timeframe="5m", ema9_slope_pct=None,
+            )
+            assert result == regime_mod.MarketRegime.VOLATILE
+        finally:
+            # Restore default for other tests.
+            monkeypatch.delenv("BB_WIDTH_VOLATILE_PCT", raising=False)
+            importlib.reload(regime_mod)

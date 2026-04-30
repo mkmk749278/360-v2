@@ -19,6 +19,7 @@ from src.runtime_truth_report import (
     format_truth_report_markdown,
     load_json_file,
     parse_channel_funnel_from_logs,
+    parse_confidence_gate_components_from_logs,
     parse_confidence_gate_decisions_from_logs,
     parse_path_funnel_from_logs,
     parse_quiet_scalp_block_from_logs,
@@ -104,6 +105,7 @@ def main() -> int:
     regime_distribution = parse_regime_distribution_from_logs(current_text)
     quiet_scalp_block = parse_quiet_scalp_block_from_logs(current_text, args.channel)
     confidence_gate_decisions = parse_confidence_gate_decisions_from_logs(current_text, args.channel)
+    confidence_gate_components = parse_confidence_gate_components_from_logs(current_text, args.channel)
     log_parse_diagnostics = count_log_markers(current_text)
 
     snapshot, comparison = build_snapshot(
@@ -123,6 +125,7 @@ def main() -> int:
         regime_distribution=regime_distribution,
         quiet_scalp_block=quiet_scalp_block,
         confidence_gate_decisions=confidence_gate_decisions,
+        confidence_gate_components=confidence_gate_components,
         log_parse_diagnostics=log_parse_diagnostics,
         now_ts=time.time(),
     )
