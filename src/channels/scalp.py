@@ -3931,7 +3931,11 @@ class ScalpChannel(BaseChannel):
 
         close = float(closes_raw[-1])
         if close <= 0:
-            return self._reject("auction_not_detected")
+            # Telemetry-truth: this is invalid candle data, NOT an auction-
+            # not-detected condition.  Pre-fix conflated bad-data with the
+            # actual auction-detection gate count (same family as DIV_CONT /
+            # FUNDING / CLS fixes).
+            return self._reject("invalid_price")
 
         # ADX gate: trend strength required for displacement to be valid
         profile = smc_data.get("pair_profile")
@@ -4078,19 +4082,24 @@ class ScalpChannel(BaseChannel):
 
         # ── SL: just beyond the consolidation range (structural Type 1) ──
         # If price returns into the consolidation the re-acceleration is failed.
+        # Same close-relative + 1×ATR floor pattern as VSB / BDS / ORB / QCB /
+        # DIV_CONT / CLS.  Pre-fix used `consol_low ± 0.3×ATR` with `0.5×ATR`
+        # min — when consolidation was tight (which is the path's whole
+        # design — narrow consolidation = strong absorption), structural
+        # sl_dist could be 0.2-0.4% — defeated by the 0.80% universal floor
+        # at `_enqueue_signal`, structural anchor lost.
         atr_val = ind.get("atr_last", close * 0.002)
         atr_buffer = atr_val * 0.3
         if direction == Direction.LONG:
-            sl = consol_low - atr_buffer
+            structural_sl = consol_low - atr_buffer
+            close_rel_floor = close - max(close * 0.008, atr_val * 1.0)
+            sl = min(structural_sl, close_rel_floor)
         else:
-            sl = consol_high + atr_buffer
+            structural_sl = consol_high + atr_buffer
+            close_rel_ceiling = close + max(close * 0.008, atr_val * 1.0)
+            sl = max(structural_sl, close_rel_ceiling)
 
         sl_dist = abs(close - sl)
-        min_sl_dist = atr_val * 0.5
-        if sl_dist < min_sl_dist:
-            sl_dist = min_sl_dist
-            sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
-
         if direction == Direction.LONG and sl >= close:
             return self._reject("invalid_sl_geometry")
         if direction == Direction.SHORT and sl <= close:

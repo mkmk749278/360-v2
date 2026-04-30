@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-02 — Path audit #12 (CONTINUATION_LIQUIDITY_SWEEP): invalid_price + close-relative SL floor + TP1 ATR-adaptive cap*
+*Updated: 2026-05-02 — Path audit #13 (POST_DISPLACEMENT_CONTINUATION): invalid_price + close-relative SL floor*
 
 ---
 
@@ -8,7 +8,45 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-02 — path audit #12):
+This session (2026-05-02 — path audit #13):
+- **POST_DISPLACEMENT_CONTINUATION deep dive** (`_evaluate_post_displacement_continuation`,
+  `src/channels/scalp.py:3847-4170`).  Path was previously listed as
+  "Effectively silent — never produced a signal" in OWNER_BRIEF §4.3.
+  Diagnosis: PDC requires TRENDING/STRONG_TREND/WEAK_TREND/BREAKOUT_EXPANSION
+  regimes (`_PDC_VALID_REGIMES`); market is 99.7% QUIET so the path is
+  regime-blocked virtually 100% of the time.  Two structural defects
+  found, both family bugs already fixed in other paths.
+- **🟡 Bug A — wrong reject reason for `close <= 0`** (was line 3933).
+  Pre-fix emitted `auction_not_detected` for invalid candle data.
+  Same family as DIV_CONT/FUNDING/CLS audits.
+  **Fix**: emit `invalid_price`.
+- **🔴 Bug B — tight SL geometry** (was line 4079).
+  Pre-fix: `sl = consol_low ± 0.3×ATR` with min `0.5×ATR` floor.
+  PDC's design intent IS narrow consolidation (strong absorption), so
+  consol_range is structurally tight by definition.  Combined with the
+  0.3×ATR buffer this produced sl_dist as low as 0.2-0.4% in
+  low-ATR/tight-consolidation cases — defeated by the 0.80% universal
+  floor at `_enqueue_signal`, structural anchor lost.
+  **Fix**: applied close-relative + 1×ATR floor pattern (mirror of
+  VSB/BDS/ORB/QCB/DIV_CONT/CLS).
+- **TP cap explicitly NOT applied** for PDC: TP1 = displacement_height
+  × 1.0 (Type C measured-move).  This is structurally tied to the
+  institutional move magnitude — capping by ATR percentile would
+  defeat the projection thesis (different from FVG/swing-anchored TPs
+  in other paths).  Min R:R floor (1.5R) preserved.
+- **Tests added** (`tests/test_channels.py::TestPostDisplacementContinuationAuditFixes`):
+  2 new — invalid_price reject reason, SL respects close-relative floor.
+  All 45 PDC tests pass (43 existing + 2 new).  3328 broader tests
+  pass (vs 3326 post-CLS baseline — net +2, zero regressions).
+- **Data sufficiency check**: PDC needs 5m candles ≥ 20 (boot 500),
+  EMA9/EMA21/RSI/ADX (always populated), volume background (uses 15
+  candles excluded from displacement+consolidation window — fine).
+  FVG/orderblock soft-penalty fallback.  ATR for new SL geometry.
+  All trivially met after seed.  Path's silence is regime-driven
+  (PDC valid only in trending regimes which are rare in current
+  QUIET market).
+
+Prior session (2026-05-02 — path audit #12):
 - **CONTINUATION_LIQUIDITY_SWEEP deep dive** (`_evaluate_continuation_liquidity_sweep`,
   `src/channels/scalp.py:3554-3810`).  Path was previously listed as
   "Effectively silent — never produced a signal" in OWNER_BRIEF §4.3.
@@ -731,6 +769,7 @@ statistical confidence.
 | **QCB path audit: (A) removed partial-candle volume gate (`volumes[-1] >= 2.0 × avg_vol`) — same VSB/BDS/ORB family bug; especially backward for QCB which requires QUIET regime; (B) SL geometry now respects close-relative + 1×ATR floor (max(0.8% × close, 1×ATR)) — pre-fix flat 0.3% close-floor was sub-spread on most pairs, defeated by universal 0.80% floor downstream** | `src/channels/scalp.py:3142` (vol gate) + `:3163` (SL geometry) + 3 new tests in `tests/test_channels.py::TestQuietCompressionBreakAuditFixes` | **2026-05-02 (path audit #10)** |
 | **DIV_CONT path audit: (A) `close <= 0` now emits `invalid_price` instead of conflating with `momentum_reject` telemetry; (B) SL geometry now respects close-relative + 1×ATR floor — pre-fix `ema21 × 0.995` could produce 0.6% sl_dist when close was very near EMA21, defeating universal 0.80% floor; (C) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) consistent with SR_FLIP / TPE / FUNDING — 10-candle swing extremum can sit 4-5R from close in strong trends.  Plus updated 1 stale test (test_tp2_*) — strict-equality assertion held only because old tight SL kept sl_dist small; refactored to assert structural invariant** | `src/channels/scalp.py:3327` (reject) + `:3406` (SL) + `:3454` (TP1 cap) + 2 new tests + 1 updated test in `tests/test_divergence_continuation_tp.py` | **2026-05-02 (path audit #11)** |
 | **CLS path audit: (A) `close <= 0` now emits `invalid_price` instead of conflating with `momentum_reject` telemetry; (B) SL geometry now respects close-relative + 1×ATR floor — pre-fix `sweep_level ± 0.3×ATR` with `0.5×ATR` minimum could produce 0.15% sl_dist when sweep_level was very near close, defeating universal 0.80% floor; (C) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) consistent with SR_FLIP / TPE / FUNDING / DIV_CONT — FVG-anchored TP1 can sit several R from close in strong trends** | `src/channels/scalp.py:3621` (reject) + `:3708` (SL) + `:3768` (TP1 cap) + 2 new tests in `tests/test_channels.py::TestContinuationLiquiditySweepAuditFixes` | **2026-05-02 (path audit #12)** |
+| **PDC path audit: (A) `close <= 0` now emits `invalid_price` instead of conflating with `auction_not_detected` telemetry; (B) SL geometry now respects close-relative + 1×ATR floor — pre-fix `consol_low ± 0.3×ATR` with `0.5×ATR` min could produce 0.2-0.4% sl_dist (PDC's design IS narrow consolidation), defeating universal 0.80% floor.  TP cap explicitly NOT applied — PDC's TP1 = displacement_height × 1.0 is a structural Type-C measured-move target, capping by ATR would defeat the projection thesis** | `src/channels/scalp.py:3933` (reject) + `:4079` (SL) + 2 new tests in `tests/test_channels.py::TestPostDisplacementContinuationAuditFixes` | **2026-05-02 (path audit #13)** |
 
 ---
 
