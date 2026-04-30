@@ -169,6 +169,133 @@ class TestORBReturnsNoneWhenDisabled:
         )
 
 
+class TestORBAuditFixes:
+    """Path audit #7 fixes — preserved within the dormant ORB code so re-enable
+    doesn't ship the same VSB / BDS-family bugs we already removed.
+
+    The path is feature-flag-disabled but the code path is preserved for a
+    future controlled rebuild.  These tests assert the structural fixes are
+    in place when the flag is enabled.
+    """
+
+    def _make_orb_long_setup(self) -> tuple[dict, dict, dict]:
+        """Build candles + indicators + smc_data that pass the active-path
+        ORB gates so we can exercise the post-fix SL geometry and absence
+        of the partial-candle volume gate.
+
+        Layout:
+          * 30 5m candles with the opening-range window (`highs[-8:-4]`)
+            establishing range_high ≈ 100.5 and range_low ≈ 99.5.
+          * Current candle close at 100.6 (above range_high → LONG breakout).
+          * Volume average normal; current-candle volume INTENTIONALLY low
+            (post-fix this must NOT block).
+        """
+        n = 30
+        close = [100.0] * n
+        high = [100.5] * n
+        low = [99.5] * n
+        # Most-recent candle: breaks above range_high = 100.5.
+        close[-1] = 100.6
+        high[-1] = 100.7
+        low[-1] = 100.4
+        volume = [1000.0] * n
+        # Partial-candle volume well below 1.5× average — pre-fix would reject.
+        volume[-1] = 200.0
+        candles = {"5m": {"close": close, "high": high, "low": low,
+                          "open": close, "volume": volume}}
+        indicators = _minimal_indicators()
+        smc_data = _minimal_smc_data()
+        return candles, indicators, smc_data
+
+    def test_disabled_path_reports_feature_disabled_not_regime_blocked(self):
+        """The dormant flag check must report `feature_disabled` so telemetry
+        clearly distinguishes the feature flag from a real regime block.
+        Pre-fix the same `regime_blocked` token was emitted by both, making
+        live monitor data ambiguous."""
+        from src.channels.scalp import ScalpChannel
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(30)}
+        with patch("src.channels.scalp.SCALP_ORB_ENABLED", False):
+            ch._evaluate_opening_range_breakout(
+                "BTCUSDT", candles, _minimal_indicators(), _minimal_smc_data(),
+                0.001, 10_000_000, regime="TRENDING",
+            )
+        assert ch._active_no_signal_reason == "feature_disabled", (
+            "Disabled-flag rejection must report `feature_disabled`, not "
+            "`regime_blocked` — telemetry must distinguish the two causes."
+        )
+
+    def test_active_path_accepts_low_current_candle_volume(self):
+        """ORB no longer rejects on partial-candle volume (mirror of VSB / BDS
+        audit fixes).  The breakout candle is the still-forming current 5m
+        bar; demanding multiples of complete-candle averages on it is a unit
+        mismatch that auto-rejects valid breakouts until the candle is
+        nearly closed.
+        """
+        from datetime import datetime, timezone
+        from src.channels.scalp import ScalpChannel
+        from unittest.mock import MagicMock
+        ch = ScalpChannel()
+        candles, indicators, smc_data = self._make_orb_long_setup()
+        # Force session-time gate (London 7-9 UTC) and active flag.
+        fake_now = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
+        with patch("src.channels.scalp.SCALP_ORB_ENABLED", True), \
+             patch("src.channels.scalp.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            mock_dt.timezone = timezone
+            sig = ch._evaluate_opening_range_breakout(
+                "BTCUSDT", candles, indicators, smc_data,
+                0.001, 10_000_000, regime="TRENDING_UP",
+            )
+        # Path may or may not produce a signal depending on other gates, but
+        # the rejection reason — if any — must NOT be volume_spike_missing.
+        if sig is None:
+            assert ch._active_no_signal_reason != "volume_spike_missing", (
+                f"ORB rejected on partial-candle volume — that gate was supposed "
+                f"to be removed.  Got reason: {ch._active_no_signal_reason!r}"
+            )
+
+    def test_active_path_sl_respects_close_relative_floor(self):
+        """ORB SL geometry now takes the further of the structural anchor
+        (range_low − 0.1%) and a close-relative floor (max(0.8% × close,
+        1×ATR) below close).  Pre-fix used only the structural anchor which
+        could produce sub-spread stops on low-volatility pairs.
+        """
+        from datetime import datetime, timezone
+        from src.channels.scalp import ScalpChannel
+        ch = ScalpChannel()
+        candles, indicators, smc_data = self._make_orb_long_setup()
+        # close=100.6, range_low=99.5; pre-fix sl=99.4 → sl_dist=1.2 → 1.19% (OK)
+        # but on a tighter range the pre-fix sl_dist would collapse.  Use a
+        # tight range to exercise the close-relative floor.
+        candles["5m"]["high"][-8:-4] = [100.55] * 4
+        candles["5m"]["low"][-8:-4] = [100.45] * 4  # range only 0.10 wide
+        candles["5m"]["close"][-1] = 100.56  # just above range_high
+        # Pre-fix: sl = 100.45 × 0.999 = 100.349 → sl_dist = 0.21 → 0.21% (sub-spread).
+        # Post-fix: close-relative floor max(0.8% × 100.56, 1×0.5) = 0.8048,
+        # so sl ≤ 100.56 − 0.8048 = 99.755.
+
+        fake_now = datetime(2026, 5, 1, 8, 0, tzinfo=timezone.utc)
+        with patch("src.channels.scalp.SCALP_ORB_ENABLED", True), \
+             patch("src.channels.scalp.datetime") as mock_dt:
+            mock_dt.now.return_value = fake_now
+            mock_dt.timezone = timezone
+            sig = ch._evaluate_opening_range_breakout(
+                "BTCUSDT", candles, indicators, smc_data,
+                0.001, 10_000_000, regime="TRENDING_UP",
+            )
+        if sig is None:
+            # If the path rejects for other reasons, that's acceptable for this
+            # narrow test — what we're guarding against is sub-0.8% SL distance.
+            return
+        sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
+        assert sl_dist_pct >= 0.79, (
+            f"ORB SL distance {sl_dist_pct:.3f}% is too tight — close-relative "
+            f"floor (0.8% × close OR 1×ATR) was not honoured.  Pre-fix produced "
+            f"~0.2% on tight ranges."
+        )
+
+
 class TestORBCodePreserved:
     """ORB code must remain present and importable for future rebuild."""
 

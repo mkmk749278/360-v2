@@ -2268,8 +2268,11 @@ class ScalpChannel(BaseChannel):
         # PR-06: disabled by default until rebuilt with true session-opening-range
         # logic.  The current proxy (last-8-bar window) is not institutional-grade.
         # Re-enable explicitly via SCALP_ORB_ENABLED=true in .env.
+        # Telemetry: report `feature_disabled` (truthful) rather than the
+        # misleading `regime_blocked` token which conflated two distinct
+        # rejection causes — the dormant flag check vs. an actual regime gate.
         if not SCALP_ORB_ENABLED:
-            return self._reject("regime_blocked")
+            return self._reject("feature_disabled")
         now_hour = datetime.now(timezone.utc).hour
         # Only active during London (07:00–08:59 UTC) or NY (12:00–13:59 UTC)
         in_london = 7 <= now_hour < 9
@@ -2319,10 +2322,20 @@ class ScalpChannel(BaseChannel):
         else:
             return self._reject("breakout_not_found")
 
-        # Volume: current candle >= 1.5x 20-candle avg
+        # Volume: rolling average must be non-degenerate.
+        # Pre-fix this also demanded `volumes[-1] >= 1.5 × avg_vol` — but
+        # volumes[-1] is the STILL-FORMING current 5m candle whose volume is
+        # necessarily a fraction of a complete candle's eventual volume.
+        # Demanding partial-candle volume exceed multiples of complete-candle
+        # averages is the same unit-mismatch bug that was removed from
+        # VSB / BDS (PRs #250 / #251).  Drop the partial-candle multiplier
+        # check; the closed-candle activity is implicitly validated by the
+        # `_pass_basic_filters` 24h-volume gate above and by the EMA-alignment
+        # gate below.  When ORB is rebuilt with true session-anchored range
+        # logic, re-introduce a closed-candle volume confirmation against the
+        # actual breakout candle (whichever 5m candle first crossed the range).
         avg_vol = sum(float(v) for v in volumes[-21:-1]) / 20.0 if len(volumes) >= 21 else 0.0
-        current_vol = float(volumes[-1])
-        if avg_vol <= 0 or current_vol < 1.5 * avg_vol:
+        if avg_vol <= 0:
             return self._reject("volume_spike_missing")
 
         ind = indicators.get("5m", {})
@@ -2343,14 +2356,30 @@ class ScalpChannel(BaseChannel):
         if not (fvgs or orderblocks):
             return self._reject("missing_fvg_or_orderblock")
 
-        # SL and TP
+        # SL and TP — same close-relative+ATR floor pattern as VSB / BDS.
+        # Pre-fix anchored SL purely to the opposite end of the opening range
+        # with a 0.1% buffer (`range_low × 0.999` for LONG).  Two ways wrong:
+        #   (1) On low-volatility pairs the 0.1% buffer is sub-spread.
+        #   (2) When the breakout extends close past the opposite range edge,
+        #       sl_dist could collapse arbitrarily — the 0.80% universal floor
+        #       at `_enqueue_signal` would then clamp it, defeating the
+        #       structural anchor.
+        # Take the LOWER (further-from-close, since LONG) of:
+        #   - structural floor: range_low − 0.1% (anti-bull-trap intent)
+        #   - close-relative floor: max(0.8% of close, 1.0×ATR)
+        # Mirror for SHORT: HIGHER of structural ceiling and close-relative ceiling.
+        atr_val = ind.get("atr_last", close * 0.002)
         if direction == Direction.LONG:
-            sl = range_low * (1 - 0.001)
+            structural_sl = range_low * (1 - 0.001)
+            close_rel_floor = close - max(close * 0.008, atr_val * 1.0)
+            sl = min(structural_sl, close_rel_floor)
             tp1 = close + range_height * 1.0
             tp2 = close + range_height * 1.5
             tp3 = close + range_height * 2.0
         else:
-            sl = range_high * (1 + 0.001)
+            structural_sl = range_high * (1 + 0.001)
+            close_rel_ceiling = close + max(close * 0.008, atr_val * 1.0)
+            sl = max(structural_sl, close_rel_ceiling)
             tp1 = close - range_height * 1.0
             tp2 = close - range_height * 1.5
             tp3 = close - range_height * 2.0
@@ -2364,7 +2393,7 @@ class ScalpChannel(BaseChannel):
             return self._reject("invalid_sl_geometry")
 
         profile = smc_data.get("pair_profile")
-        atr_val = ind.get("atr_last", close * 0.002)
+        # atr_val already computed above for SL.
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
             config=self.config,
