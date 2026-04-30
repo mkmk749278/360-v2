@@ -1,5 +1,6 @@
 {
   "channel": "360_SCALP",
+  "confidence_gate_decisions": {},
   "dependency_readiness": {},
   "executive_summary": {
     "overall_health": "stale",
@@ -11,7 +12,7 @@
     "setup_filter": "",
     "symbol_filter": ""
   },
-  "generated_at": 1777542764,
+  "generated_at": 1777547776,
   "lifecycle_truth": {
     "fast_failure_buckets": {
       "under_120s": {
@@ -33,19 +34,26 @@
     },
     "median_create_to_dispatch_sec": 1.9833545684814453,
     "median_create_to_first_breach_sec": null,
-    "median_create_to_terminal_sec": 609.6404575109482,
+    "median_create_to_terminal_sec": 610.5589411258698,
     "median_first_breach_to_terminal_sec": null,
     "terminal_close_around_3m": {
       "count": 0,
       "pct": 0.0
     }
   },
-  "lookback_hours": 24,
+  "log_parse_diagnostics": {
+    "confidence_gate": 0,
+    "path_funnel": 0,
+    "quiet_scalp_block": 0,
+    "regime_distribution": 0,
+    "total_lines": 49
+  },
+  "lookback_hours": 72,
   "path_funnel_truth": {},
   "post_correction_focus": {
     "SR_FLIP_RETEST": {
       "attempts": 0,
-      "average_pnl_pct": null,
+      "average_pnl_pct": 0.0785,
       "classification": "low-sample",
       "emitted": 0,
       "gated": 0,
@@ -55,7 +63,7 @@
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "median_first_breach_sec": null,
-      "median_terminal_duration_sec": null,
+      "median_terminal_duration_sec": 768.4854030609131,
       "sl_rate": 0.0,
       "tp_rate": 0.0,
       "win_rate": 0.0
@@ -90,23 +98,39 @@
       "win_rate": 0.0
     },
     "QUIET_COMPRESSION_BREAK": {
-      "average_pnl_pct": -0.0457,
-      "closed": 3,
-      "emitted": 3,
+      "average_pnl_pct": -0.0558,
+      "closed": 4,
+      "emitted": 4,
       "median_first_breach_sec": null,
-      "median_terminal_duration_sec": 608.9487729072571,
+      "median_terminal_duration_sec": 609.8672565221786,
+      "sl_rate": 0.0,
+      "tp_rate": 0.0,
+      "win_rate": 0.0
+    },
+    "SR_FLIP_RETEST": {
+      "average_pnl_pct": 0.0785,
+      "closed": 1,
+      "emitted": 1,
+      "median_first_breach_sec": null,
+      "median_terminal_duration_sec": 768.4854030609131,
       "sl_rate": 0.0,
       "tp_rate": 0.0,
       "win_rate": 0.0
     }
+  },
+  "quiet_scalp_block": {
+    "average_gap_to_min": 0.0,
+    "by_symbol": {},
+    "samples": 0,
+    "total": 0
   },
   "raw_extracts": {
     "current_channel_funnel_counters": {},
     "current_path_funnel_counters": {},
     "previous_channel_funnel_counters": {},
     "previous_path_funnel_counters": {},
-    "record_count_current_window": 4,
-    "record_count_previous_window": 1,
+    "record_count_current_window": 6,
+    "record_count_previous_window": 31,
     "record_count_scoped": 37
   },
   "recommended_operator_focus": {
@@ -115,11 +139,12 @@
     "most_suspicious_degradation": null,
     "suggested_next_investigation_target": null
   },
+  "regime_distribution": {},
   "runtime_health": {
     "health": "healthy",
-    "heartbeat_age_sec": 1,
+    "heartbeat_age_sec": 62,
     "heartbeat_warning": false,
-    "latest_record_age_sec": 15826,
+    "latest_record_age_sec": 20838,
     "overall": "stale",
     "records_fresh": false,
     "running": true,
