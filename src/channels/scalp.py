@@ -2062,11 +2062,14 @@ class ScalpChannel(BaseChannel):
             return self._reject("volume_spike_missing")
         rolling_avg = sum(rolling_vols) / len(rolling_vols)
 
-        # Current 5m candle volume ≥ SURGE_VOLUME_MULTIPLIER × rolling average
-        # (use current candle volume to confirm active surge, same units as rolling_avg)
-        current_vol = float(volumes[-1]) if len(volumes) >= 1 else 0.0
-        if current_vol < SURGE_VOLUME_MULTIPLIER * rolling_avg:
-            return self._reject("volume_spike_missing")
+        # NOTE: a current-candle volume gate (volumes[-1] ≥ SURGE_VOLUME_MULTIPLIER ×
+        # rolling_avg) used to live here.  Removed in path audit #6 for the same
+        # reasons it was removed from VSB in #250: volumes[-1] is a STILL-FORMING
+        # candle (unit mismatch with complete-candle averages), and BDS's thesis
+        # is "breakdown + DEAD-CAT BOUNCE" — bounces have REDUCED volume by
+        # definition, so the gate contradicted the very pattern it was meant to
+        # validate.  The breakdown-candle volume check below validates the actual
+        # surge on the closed breakdown candle.
 
         # Swing low: 20-candle lookback from before the 5-candle breakdown search window.
         # Excluding the search window ensures swing_low is set by genuine prior support,
@@ -2081,10 +2084,18 @@ class ScalpChannel(BaseChannel):
         # Find the most recent breakdown candle within the last 5 closed candles.
         # Scans newest-first (i = -2, -3, -4, -5, -6) to prefer the candle
         # closest to the current bar. Candle at -1 is still forming.
+        # Pre-fix only checked `lows[i] < swing_low_level` (a wick that pierces
+        # the level).  But a wick that pierces the level then closes back ABOVE
+        # is a BULLISH SWEEP, not a breakdown — exactly what LSR LONG is designed
+        # to catch.  A genuine breakdown requires the candle to also CLOSE below
+        # the level.  Without this check, BDS was accepting bullish sweeps as
+        # "breakdowns" and treating the subsequent rejection upward as a
+        # "dead-cat bounce" — feeding false SHORT signals into the path's thesis.
         breakdown_candle_idx: Optional[int] = None
         breakdown_vol = 0.0
         for i in range(-2, -7, -1):  # iterates -2, -3, -4, -5, -6
-            if float(lows[i]) < swing_low_level:
+            if (float(lows[i]) < swing_low_level
+                    and float(closes[i]) < swing_low_level):
                 breakdown_candle_idx = i
                 breakdown_vol = float(volumes[i])
                 break
@@ -2141,13 +2152,31 @@ class ScalpChannel(BaseChannel):
                 return self._reject("missing_fvg_or_orderblock")  # Hard gate in non-fast regimes (behaviour unchanged)
             fvg_penalty = 8.0  # Soft penalty in fast regimes instead of hard block
 
-        # Breakdown candle volume ≥ 2.0 × rolling average (unchanged quality threshold;
-        # now checks the actual breakdown candle's volume rather than always volumes[-3]).
-        if breakdown_vol < 2.0 * rolling_avg:
+        # Breakdown candle volume ≥ _VSB_BREAKOUT_VOL_MULT × rolling average
+        # (env-overridable per B8; was hardcoded 2.0).  Validates the surge on
+        # the actual closed breakdown candle.  Shares the constant with VSB
+        # since both paths are surge-confirmation gates of the same shape.
+        if breakdown_vol < _VSB_BREAKOUT_VOL_MULT * rolling_avg:
             return self._reject("volume_spike_missing")
 
-        # Method-specific SL/TP
-        sl = swing_low_level * (1 + 0.008)  # 0.8% above breakdown level
+        # Method-specific SL/TP.
+        # Pre-fix anchored SL purely to swing_low (`swing_low * 1.008`), which
+        # creates absurdly tight stops when close has bounced deep:
+        #   close at 0.30% above swing_low → sl_dist = 0.50% (tight)
+        #   close at 0.60% above swing_low → sl_dist = 0.20% (dangerous)
+        #   close at 0.75% above swing_low → sl_dist = 0.05% (< spread!)
+        # The structural intent ("SL just above the broken support") is right,
+        # but the geometry must respect (a) ATR-based volatility and (b) a
+        # close-relative minimum.  Take the HIGHER (further-from-close, since
+        # this is a SHORT) of two anchors:
+        #   - structural ceiling: 0.8% above swing_low (anti-bear-trap)
+        #   - close-relative ceiling: max(0.8% of close, 1.0×ATR) above close
+        # Final SL is the HIGHER of these (further from close → wider, never
+        # tighter).  Mirrors the VSB fix in #250.
+        atr_val = ind.get("atr_last", close * 0.002)
+        structural_sl = swing_low_level * (1 + 0.008)
+        close_rel_ceiling = close + max(close * 0.008, atr_val * 1.0)
+        sl = max(structural_sl, close_rel_ceiling)
         sl_dist = abs(close - sl)
         if sl_dist <= 0 or sl <= close:
             return self._reject("invalid_sl_geometry")
@@ -2163,7 +2192,7 @@ class ScalpChannel(BaseChannel):
         tp3 = close - measured_move * 2.0
 
         profile = smc_data.get("pair_profile")
-        atr_val = ind.get("atr_last", close * 0.002)
+        # atr_val already computed above for SL.
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
             config=self.config,

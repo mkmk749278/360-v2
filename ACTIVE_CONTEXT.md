@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-01 — Path audit #5 (VOLUME_SURGE_BREAKOUT): removed broken current-candle volume gate*
+*Updated: 2026-05-01 — Path audit #6 (BREAKDOWN_SHORT): mirror of VSB multi-fix — current_vol gate removed + close-below requirement + SL geometry + B8 vol mult*
 
 ---
 
@@ -8,7 +8,57 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-01, very late — path audit #5, multi-fix):
+This session (2026-05-02 — path audit #6):
+- **BREAKDOWN_SHORT deep dive** (`_evaluate_breakdown_short`,
+  `src/channels/scalp.py:2006–2220`). The SHORT mirror of VSB.  Latest
+  monitor zip showed identical numbers to VSB:
+  `EVAL::BREAKDOWN_SHORT: volume_spike_missing=11,557 (62.7%)`,
+  `basic_filters_failed=3,558 (19.3%)`, `regime_blocked=3,297 (17.9%)` of
+  18,423 cycles — **0 generated**.  As predicted in the VSB PR, all 4
+  structural bugs from VSB had exact mirrors in BDS.
+- **🔴 Bug A — current-candle volume gate** (was line 2068).
+  Same `volumes[-1] < SURGE_VOLUME_MULTIPLIER × rolling_avg` partial-vs-
+  complete-candle unit mismatch.  Worse for BDS than VSB: BDS's thesis is
+  "breakdown + DEAD-CAT BOUNCE" — the bounce phase has even more
+  pronounced volume reduction than VSB's pullback.  Fix: removed.
+- **🔴 Bug B — breakdown qualifier ignored close** (was line 2087).
+  Same wick-only check as VSB.  A wick that pierces swing_low and CLOSES
+  back above is a BULLISH SWEEP (LSR LONG bait), not a breakdown.  BDS
+  was accepting bullish sweeps as "breakdowns" and treating the
+  rejection upward as a "dead-cat bounce" — feeding false SHORT signals.
+  Fix: gate now requires `lows[i] < swing_low AND closes[i] < swing_low`.
+  Test fixture had the same papering-over pattern as VSB
+  (`lows[idx]=97, closes[idx]=100.4` — wick pierces, close stays above —
+  classic bullish sweep).  Updated to true breakdown geometry
+  (close=98 below swing_low=100).
+- **🔴 Bug C — catastrophic SL placement** (was line 2150).
+  Same as VSB but mirrored to swing_low side.  `sl = swing_low * 1.008`
+  produced sl_dist as low as 0.05% in extended bounce zones (close near
+  the 0.75% upper bound of the bounce window).  In premium zone
+  (0.3-0.6%) sl_dist was 0.20-0.50% — well below the 0.80% universal
+  floor at `_enqueue_signal`.
+  Fix: SL takes the HIGHER (further-from-close, since SHORT) of:
+    1. structural ceiling: 0.8% above swing_low (anti-bear-trap)
+    2. close-relative ceiling: max(0.8% of close, 1.0×ATR) above close
+- **🟡 Bug D — hardcoded breakdown-vol multiplier 2.0** (was line 2146).
+  B8 violation.  Fix: now uses the `_VSB_BREAKOUT_VOL_MULT` constant
+  (env-overridable via `VSB_BREAKOUT_VOL_MULT`) introduced for VSB in
+  PR #250 — shared because both paths are surge-confirmation gates of
+  the same shape.
+- **Tests added** (`tests/test_channels.py::TestBreakdownShortRefinements`):
+  6 new cases mirroring the VSB family — current-candle vol low/zero
+  (Bug A); wick-only rejected as bullish sweep (Bug B); close marginally
+  below swing_low accepted (Bug B mirror); SL distance ≥ 0.8% in premium
+  bounce zone (Bug C); env override on breakdown vol mult (Bug D).
+  All 31 BDS tests pass (25 original + 6 new).  552 broader tests pass
+  (vs 546 post-VSB-merge baseline — net +6, zero regressions).
+- **Data sufficiency check (per owner request)**: identical to VSB —
+  5m candles ≥ 28 trivially after boot seed; EMA9/EMA21/RSI always
+  populated; FVG solid in practice; orderblocks not_implemented but
+  soft-penalty fallback in fast-bearish regimes.  Path's silence was
+  driven entirely by the same 4 structural gate bugs as VSB, not data.
+
+Prior session (2026-05-01, very late — path audit #5, multi-fix):
 - **VOLUME_SURGE_BREAKOUT deep dive** (`_evaluate_volume_surge_breakout`,
   `src/channels/scalp.py:1751–1960`). Latest monitor zip showed
   `EVAL::VOLUME_SURGE_BREAKOUT: volume_spike_missing=11,557 (62.7%)`,
@@ -403,6 +453,7 @@ statistical confidence.
 | **TPE path audit fix: body-conviction gate replaced with close-position-in-range — old `body/range ≥ 0.50` punished the canonical hammer/shooting-star reclaim that defines a valid pullback entry; new gate accepts strong directional close while allowing the EMA-test wick** | `src/channels/scalp.py:1127` | **2026-04-30 late eve (path audit #3)** |
 | **LIQ_REV path audit fix: RSI thresholds relaxed 25/75 → 35/65 (with RSI direction-of-travel check via rsi_prev) — pre-fix demanded RSI extreme exhaustion that 5m RSI rarely reaches during normal cascades; zone-proximity gate now also accepts cascade extremum (low/high) within 0.5% of zone, not just close_now — cascades overshoot zones by definition** | `src/channels/scalp.py:1382` (RSI gate) + `:1405` (zone gate) + 6 new tests in `tests/test_liquidation_reversal_tp.py` | **2026-05-01 very late (path audit #4)** |
 | **VSB path audit (multi-fix): (A) removed broken current-candle volume gate (62.7% of rejections — was rejecting partial-candle volumes vs complete-candle thresholds, contradicting "surge + pullback" thesis); (B) breakout qualifier now requires close above swing_high — wick-only piercing was being accepted as breakout (was a sweep, not a breakout); (C) SL anchored to LOWER of `swing_high × 0.992` and `close − max(0.8%×close, 1×ATR)` — pre-fix produced 0.05% stops in extended pullback zones; (D) breakout vol multiplier now env-overridable via VSB_BREAKOUT_VOL_MULT (B8)** | `src/channels/scalp.py:1799` + `:1825` (close gate) + `:1907` (SL geometry) + `:46` (env constant) + 6 new tests in `tests/test_channels.py::TestVolumeSurgeBreakoutRefinements` | **2026-05-01 very late (path audit #5, re-audit)** |
+| **BDS path audit (multi-fix mirror of #5): (A) removed broken current-candle volume gate (same 62.7% pattern — dead-cat bounces have reduced volume by definition); (B) breakdown qualifier now requires close BELOW swing_low — wick-only piercing was being accepted but is a bullish sweep, not a breakdown; (C) SL anchored to HIGHER of `swing_low × 1.008` and `close + max(0.8%×close, 1×ATR)` — pre-fix produced 0.05% stops in extended bounce zones; (D) shares VSB_BREAKOUT_VOL_MULT env constant for breakdown-candle vol gate** | `src/channels/scalp.py:2059` + `:2086` (close gate) + `:2153` (SL geometry) + 6 new tests in `tests/test_channels.py::TestBreakdownShortRefinements` | **2026-05-02 (path audit #6)** |
 
 ---
 
