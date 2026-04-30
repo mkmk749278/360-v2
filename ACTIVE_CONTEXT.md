@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-02 — Path audit #13 (POST_DISPLACEMENT_CONTINUATION): invalid_price + close-relative SL floor*
+*Updated: 2026-05-02 — Path audit #14 (FAILED_AUCTION_RECLAIM): invalid_price + atr_invalid + close-relative SL floor — **14-PATH AUDIT COMPLETE***
 
 ---
 
@@ -8,7 +8,56 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-02 — path audit #13):
+**🏁 The 14-evaluator deep audit is complete.**  All 14 paths reviewed end-to-end,
+defects fixed, tests added, OWNER_BRIEF table populated.  Family-bug pattern
+addressed across the entire scoring surface: telemetry-truth tokens
+(`invalid_price`, `atr_invalid`, `feature_disabled`); SL geometry with
+close-relative + 1×ATR floor; TP1 ATR-adaptive caps where structurally
+appropriate; partial-candle volume gates removed; per-channel/per-setup
+SL caps reconciled; QUIET-regime exempts (FUNDING) where confidence justifies.
+
+This session (2026-05-02 — path audit #14, FINAL):
+- **FAILED_AUCTION_RECLAIM deep dive** (`_evaluate_failed_auction_reclaim`,
+  `src/channels/scalp.py:4189-4480`).  Live monitor shows FAR firing in
+  production: 4 dispatched signals on liquid pairs (ORDI SHORT, XLM/LINK/FIL
+  LONG) with confidence 80.33-84.00 (A+ tier).  Unlike PDC/CLS (silent paths
+  audited as preventive), FAR is an **active high-quality producer** — these
+  fixes have direct production impact.
+- **🟡 Bug A — wrong reject reason for `close <= 0`** (line 4258).
+  Pre-fix emitted `breakout_not_found` for invalid candle data.  Same family
+  as DIV_CONT/FUNDING/CLS/PDC audits.
+  **Fix**: emit `invalid_price`.
+- **🟡 Bug B — wrong reject reason for ATR invalid** (line 4254).
+  Pre-fix emitted `adx_reject` for an `atr_val is None or atr_val <= 0`
+  check.  Confirmed via grep that all three other usages of `adx_reject`
+  in scalp.py guard genuine ADX gates (lines 778, 3632, 3945) — FAR's
+  use was a copy-paste defect that conflated two telemetry classes.
+  **Fix**: emit `atr_invalid` (new distinct token).
+- **🔴 Bug C — tight SL geometry** (lines 4392-4406).
+  Pre-fix: `sl = auction_wick_extreme ± 0.3×ATR` with min `0.5×ATR` floor.
+  Tight failed-auction wicks (probe just below/above struct level by ~0.05% of
+  price) yielded sl_dist of 0.5-0.6% — defeated by 0.80% universal floor at
+  `_enqueue_signal`, structural anchor lost.
+  **Fix**: applied close-relative + 1×ATR floor pattern (mirror of
+  VSB/BDS/ORB/QCB/DIV_CONT/CLS/PDC).
+- **TP cap explicitly NOT applied** for FAR: `tp1 = max(close + tail,
+  close + sl_dist × 1.0)` where `tail = wick depth` is the failed-auction
+  rejection magnitude (a Type-C measured-move, mirroring PDC's
+  displacement-height target).  Capping by ATR percentile would defeat
+  the projection thesis: the rejected-probe size IS the relevant move.
+- **Tests added** (`tests/test_channels.py::TestFailedAuctionReclaimAuditFixes`):
+  3 new — invalid_price reject reason, atr_invalid reject reason, SL
+  respects close-relative floor.  Plus one precision-fix on
+  `test_long_tp1_has_minimum_1r_floor` (added 1e-8 tolerance — wider SL
+  causes tp1 to land exactly at the 1R floor, where `round(tp1, 8)`
+  truncates a sub-rounding bit).  3331 broader tests pass (vs 3328
+  post-PDC — net +3, zero regressions).
+- **Data sufficiency check**: FAR needs 5m candles ≥ 20 (boot 500), ATR
+  (always populated), RSI (soft gate, optional), FVG/orderblock soft-quality
+  fallback (optional).  All trivially met after seed.  Path is firing in
+  production — no data starvation observed.
+
+Prior session (2026-05-02 — path audit #13):
 - **POST_DISPLACEMENT_CONTINUATION deep dive** (`_evaluate_post_displacement_continuation`,
   `src/channels/scalp.py:3847-4170`).  Path was previously listed as
   "Effectively silent — never produced a signal" in OWNER_BRIEF §4.3.
