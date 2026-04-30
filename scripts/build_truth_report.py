@@ -15,10 +15,14 @@ if str(ROOT) not in sys.path:
 
 from src.runtime_truth_report import (
     build_snapshot,
+    count_log_markers,
     format_truth_report_markdown,
     load_json_file,
     parse_channel_funnel_from_logs,
+    parse_confidence_gate_decisions_from_logs,
     parse_path_funnel_from_logs,
+    parse_quiet_scalp_block_from_logs,
+    parse_regime_distribution_from_logs,
 )
 
 
@@ -97,6 +101,10 @@ def main() -> int:
     previous_funnel = parse_path_funnel_from_logs(previous_text, args.channel)
     current_channel_funnel = parse_channel_funnel_from_logs(current_text, args.channel)
     previous_channel_funnel = parse_channel_funnel_from_logs(previous_text, args.channel)
+    regime_distribution = parse_regime_distribution_from_logs(current_text)
+    quiet_scalp_block = parse_quiet_scalp_block_from_logs(current_text, args.channel)
+    confidence_gate_decisions = parse_confidence_gate_decisions_from_logs(current_text, args.channel)
+    log_parse_diagnostics = count_log_markers(current_text)
 
     snapshot, comparison = build_snapshot(
         channel=args.channel,
@@ -112,6 +120,10 @@ def main() -> int:
         previous_funnel=previous_funnel,
         current_channel_funnel=current_channel_funnel,
         previous_channel_funnel=previous_channel_funnel,
+        regime_distribution=regime_distribution,
+        quiet_scalp_block=quiet_scalp_block,
+        confidence_gate_decisions=confidence_gate_decisions,
+        log_parse_diagnostics=log_parse_diagnostics,
         now_ts=time.time(),
     )
 

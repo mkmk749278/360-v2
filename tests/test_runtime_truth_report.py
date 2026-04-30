@@ -5,8 +5,13 @@ from src.runtime_truth_report import (
     build_snapshot,
     classify_path,
     compare_windows,
+    count_log_markers,
+    format_truth_report_markdown,
     parse_channel_funnel_from_logs,
+    parse_confidence_gate_decisions_from_logs,
     parse_path_funnel_from_logs,
+    parse_quiet_scalp_block_from_logs,
+    parse_regime_distribution_from_logs,
 )
 
 
@@ -306,3 +311,168 @@ def test_build_snapshot_includes_dependency_source_and_quality_dimensions() -> N
     dep = snapshot["dependency_readiness"]["order_book"]
     assert dep["sources"]["book_ticker"] == 3
     assert dep["quality"]["top_of_book_only"] == 3
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Tier-1 monitor upgrade: regime / QUIET_SCALP_BLOCK / confidence_gate /
+# log-parse diagnostics parsers and end-to-end snapshot/markdown wiring.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def test_parse_regime_distribution_from_logs_aggregates_across_emissions() -> None:
+    log_text = "\n".join([
+        "2026-04-30T10:00:00 | INFO | Regime distribution (last 100 cycles): {'QUIET': 75, 'RANGING': 22, 'TRENDING_UP': 3}",
+        "noise line that should be ignored",
+        "2026-04-30T10:01:40 | INFO | Regime distribution (last 100 cycles): {'QUIET': 80, 'RANGING': 18, 'VOLATILE': 2}",
+    ])
+    counts = parse_regime_distribution_from_logs(log_text)
+    assert counts == {"QUIET": 155, "RANGING": 40, "TRENDING_UP": 3, "VOLATILE": 2}
+
+
+def test_parse_regime_distribution_from_logs_handles_empty_and_malformed() -> None:
+    assert parse_regime_distribution_from_logs("") == {}
+    # Malformed dict literal must not crash the parser.
+    log_text = "Regime distribution (last 100 cycles): {garbage"
+    assert parse_regime_distribution_from_logs(log_text) == {}
+
+
+def test_parse_quiet_scalp_block_from_logs_counts_and_computes_gap() -> None:
+    log_text = "\n".join([
+        "QUIET_SCALP_BLOCK BTCUSDT 360_SCALP conf=58.2 < min=60.0",
+        "QUIET_SCALP_BLOCK ETHUSDT 360_SCALP conf=55.0 < min=60.0",
+        "QUIET_SCALP_BLOCK BTCUSDT 360_SCALP conf=59.5 < min=60.0",
+        # Other channel — must be filtered out.
+        "QUIET_SCALP_BLOCK DOGEUSDT 360_SWING conf=58.0 < min=60.0",
+    ])
+    result = parse_quiet_scalp_block_from_logs(log_text, "360_SCALP")
+    assert result["total"] == 3
+    assert result["by_symbol"] == {"BTCUSDT": 2, "ETHUSDT": 1}
+    # Average gap = ((60-58.2) + (60-55) + (60-59.5)) / 3 = (1.8 + 5.0 + 0.5) / 3 ≈ 2.43
+    assert abs(result["average_gap_to_min"] - 2.43) < 0.01
+    assert result["samples"] == 3
+
+
+def test_parse_quiet_scalp_block_from_logs_handles_empty() -> None:
+    result = parse_quiet_scalp_block_from_logs("", "360_SCALP")
+    assert result == {"total": 0, "by_symbol": {}, "average_gap_to_min": 0.0, "samples": 0}
+
+
+def test_parse_confidence_gate_decisions_from_logs_groups_by_setup_decision_reason() -> None:
+    log_text = "\n".join([
+        "confidence_gate BTCUSDT 360_SCALP [QUIET_COMPRESSION_BREAK]: decision=filtered reason=quiet_scalp_min_confidence raw=58.0 composite=58.0 pre_soft=58.0 final=58.0 threshold=60.0 penalties(eval=0.0,gate=0.0,total=0.0,pair_analysis=0.0) adjustments(feedback=+0.0,stat_filter=+0.0,regime_transition=+0.0) components(market=0.0,execution=0.0,risk=0.0,thesis_adj=0.0)",
+        "confidence_gate ETHUSDT 360_SCALP [QUIET_COMPRESSION_BREAK]: decision=filtered reason=quiet_scalp_min_confidence raw=55.0",
+        "confidence_gate ADAUSDT 360_SCALP [FAILED_AUCTION_RECLAIM]: decision=accepted reason=above_threshold raw=82.0",
+        # Wrong channel filtered out.
+        "confidence_gate FOO 360_SWING [BAR]: decision=filtered reason=other raw=70.0",
+    ])
+    result = parse_confidence_gate_decisions_from_logs(log_text, "360_SCALP")
+    assert "QUIET_COMPRESSION_BREAK" in result
+    assert result["QUIET_COMPRESSION_BREAK"]["filtered"] == {"quiet_scalp_min_confidence": 2}
+    assert result["FAILED_AUCTION_RECLAIM"]["accepted"] == {"above_threshold": 1}
+    assert "BAR" not in result  # other channel correctly excluded
+
+
+def test_count_log_markers_returns_per_marker_counts() -> None:
+    log_text = "\n".join([
+        "Path funnel (last 100 cycles): path={} channel={}",
+        "Regime distribution (last 100 cycles): {'QUIET': 100}",
+        "Regime distribution (last 100 cycles): {'QUIET': 100}",
+        "QUIET_SCALP_BLOCK BTCUSDT 360_SCALP conf=58.0 < min=60.0",
+        "confidence_gate BTCUSDT 360_SCALP [SETUP]: decision=filtered reason=other",
+        "unrelated line",
+    ])
+    counts = count_log_markers(log_text)
+    assert counts["path_funnel"] == 1
+    assert counts["regime_distribution"] == 2
+    assert counts["quiet_scalp_block"] == 1
+    assert counts["confidence_gate"] == 1
+    assert counts["total_lines"] == 6
+
+
+def test_count_log_markers_handles_empty() -> None:
+    counts = count_log_markers("")
+    assert counts == {
+        "path_funnel": 0,
+        "regime_distribution": 0,
+        "quiet_scalp_block": 0,
+        "confidence_gate": 0,
+        "total_lines": 0,
+    }
+
+
+def test_build_snapshot_surfaces_tier1_keys() -> None:
+    snapshot, _ = build_snapshot(
+        channel="360_SCALP",
+        lookback_hours=24,
+        compare_previous_window=False,
+        include_raw_json=False,
+        symbol_filter="",
+        setup_filter="",
+        runtime_health={"running": True, "status": "running", "health": "healthy"},
+        heartbeat_text="",
+        records=[],
+        current_funnel={},
+        previous_funnel={},
+        regime_distribution={"QUIET": 950, "RANGING": 50},
+        quiet_scalp_block={"total": 12, "by_symbol": {"BTCUSDT": 5}, "average_gap_to_min": 2.4, "samples": 12},
+        confidence_gate_decisions={"FOO": {"filtered": {"reason_x": 3}}},
+        log_parse_diagnostics={"path_funnel": 5, "regime_distribution": 5, "quiet_scalp_block": 12, "confidence_gate": 30, "total_lines": 1200},
+        now_ts=1_777_500_000.0,
+    )
+    assert snapshot["regime_distribution"]["QUIET"] == 950
+    assert snapshot["quiet_scalp_block"]["total"] == 12
+    assert snapshot["confidence_gate_decisions"]["FOO"]["filtered"]["reason_x"] == 3
+    assert snapshot["log_parse_diagnostics"]["path_funnel"] == 5
+
+
+def test_format_truth_report_markdown_renders_tier1_sections() -> None:
+    snapshot, _ = build_snapshot(
+        channel="360_SCALP",
+        lookback_hours=24,
+        compare_previous_window=False,
+        include_raw_json=False,
+        symbol_filter="",
+        setup_filter="",
+        runtime_health={"running": True, "status": "running", "health": "healthy"},
+        heartbeat_text="",
+        records=[],
+        current_funnel={},
+        previous_funnel={},
+        regime_distribution={"QUIET": 950, "RANGING": 50},
+        quiet_scalp_block={"total": 12, "by_symbol": {"BTCUSDT": 5}, "average_gap_to_min": 2.4, "samples": 12},
+        confidence_gate_decisions={"QCB": {"filtered": {"quiet_scalp_min_confidence": 3}}},
+        log_parse_diagnostics={"path_funnel": 5, "regime_distribution": 5, "quiet_scalp_block": 12, "confidence_gate": 30, "total_lines": 1200},
+        now_ts=1_777_500_000.0,
+    )
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Regime distribution" in md
+    assert "QUIET" in md and "950" in md
+    assert "## QUIET_SCALP_BLOCK gate" in md
+    assert "Total blocks in window: **12**" in md
+    assert "## Confidence gate decisions" in md
+    assert "QCB" in md and "quiet_scalp_min_confidence" in md
+    assert "## Log parse diagnostics" in md
+    assert "Total log lines in window" in md
+
+
+def test_format_truth_report_markdown_handles_missing_tier1_data() -> None:
+    snapshot, _ = build_snapshot(
+        channel="360_SCALP",
+        lookback_hours=24,
+        compare_previous_window=False,
+        include_raw_json=False,
+        symbol_filter="",
+        setup_filter="",
+        runtime_health={"running": True, "status": "running", "health": "healthy"},
+        heartbeat_text="",
+        records=[],
+        current_funnel={},
+        previous_funnel={},
+        now_ts=1_777_500_000.0,
+    )
+    md = format_truth_report_markdown(snapshot, {})
+    # Sections render with helpful "no data" hints rather than crashing.
+    assert "## Regime distribution" in md
+    assert "no regime data parsed" in md
+    assert "## QUIET_SCALP_BLOCK gate" in md
+    assert "no QUIET_SCALP_BLOCK events" in md

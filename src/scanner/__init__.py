@@ -694,6 +694,11 @@ class Scanner:
         # Most recent overall-market regime value (updated per scan cycle; used by
         # gem scanner for adaptive threshold adjustment — feature 7).
         self._last_market_regime: str = "RANGING"
+        # Per-cycle regime classification counts, cleared and emitted every 100
+        # scan cycles. Surfaces the regime distribution to the runtime truth
+        # report so operators can confirm e.g. "market is 99.7% QUIET" from
+        # structured data instead of grepping debug logs.
+        self._regime_cycle_counts: Dict[str, int] = defaultdict(int)
 
         # Semaphore to limit concurrent symbol scans
         self._scan_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SCANS)
@@ -1615,6 +1620,12 @@ class Scanner:
                 )
                 self._path_funnel_counters.clear()
                 self._channel_funnel_counters.clear()
+            if self._scan_cycle_count % 100 == 0 and self._regime_cycle_counts:
+                log.info(
+                    "Regime distribution (last 100 cycles): {}",
+                    dict(self._regime_cycle_counts),
+                )
+                self._regime_cycle_counts.clear()
 
             # Touch heartbeat file so healthcheck knows the scanner is alive
             # (FINDING-024).
@@ -2094,6 +2105,7 @@ class Scanner:
         regime_candles = candles.get("5m", candles.get("1m"))
         regime_result = self.regime_detector.classify(regime_ind, regime_candles, timeframe=regime_tf)
         log.debug("{} regime: {}", symbol, regime_result.regime.value)
+        self._regime_cycle_counts[regime_result.regime.value] += 1
         # Keep a rolling picture of the overall market regime using BTCUSDT as
         # the representative benchmark (feature 7 – gem adaptive thresholds).
         if "BTC" in symbol.upper():

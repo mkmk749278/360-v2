@@ -122,6 +122,159 @@ def parse_channel_funnel_from_logs(log_text: str, channel: str) -> Dict[str, int
     return dict(counters)
 
 
+_REGIME_LINE_MARKER = "Regime distribution (last 100 cycles):"
+_QUIET_SCALP_BLOCK_MARKER = "QUIET_SCALP_BLOCK "
+_CONFIDENCE_GATE_MARKER = "confidence_gate "
+_PATH_FUNNEL_MARKER = "Path funnel (last 100 cycles):"
+
+# Match e.g. "QUIET_SCALP_BLOCK BTCUSDT 360_SCALP conf=58.2 < min=60.0"
+_QUIET_SCALP_BLOCK_RE = re.compile(
+    r"QUIET_SCALP_BLOCK\s+(?P<symbol>\S+)\s+(?P<channel>\S+)\s+conf=(?P<conf>[-\d.]+)\s+<\s+min=(?P<min>[-\d.]+)"
+)
+
+# Match e.g. "confidence_gate BTCUSDT 360_SCALP [SETUP_NAME]: decision=filtered reason=quiet_scalp_min_confidence raw=58.2 ..."
+_CONFIDENCE_GATE_RE = re.compile(
+    r"confidence_gate\s+(?P<symbol>\S+)\s+(?P<channel>\S+)\s+\[(?P<setup>[^\]]+)\]:\s+"
+    r"decision=(?P<decision>\S+)\s+reason=(?P<reason>\S+)"
+)
+
+
+def parse_regime_distribution_from_logs(log_text: str) -> Dict[str, int]:
+    """Aggregate regime classification counts from periodic scanner emissions.
+
+    Scanner emits ``Regime distribution (last 100 cycles): {QUIET: N, ...}``
+    every 100 cycles. We sum these dicts across the window so the report can
+    show e.g. "QUIET 95.4%, RANGING 4.6%" — answering whether the market itself
+    is the binding constraint on signal flow.
+    """
+    counters: Dict[str, int] = defaultdict(int)
+    if not log_text:
+        return {}
+    for line in log_text.splitlines():
+        if _REGIME_LINE_MARKER not in line:
+            continue
+        try:
+            fragment = line.split(_REGIME_LINE_MARKER, 1)[1].strip()
+            parsed = ast.literal_eval(fragment)
+        except (ValueError, SyntaxError, IndexError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for regime, count in parsed.items():
+            try:
+                n = int(count or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n > 0:
+                counters[str(regime)] += n
+    return dict(counters)
+
+
+def parse_quiet_scalp_block_from_logs(
+    log_text: str,
+    channel: str,
+) -> Dict[str, Any]:
+    """Parse QUIET_SCALP_BLOCK occurrences for the given channel.
+
+    The QUIET_SCALP_BLOCK gate is the historical largest bottleneck during
+    QUIET-regime windows: high-quality candidates die at the confidence-floor
+    check unless their setup is on the exempt list. Returns total count, by-symbol
+    breakdown, and a confidence-distance histogram (how far below threshold).
+    """
+    total = 0
+    by_symbol: Dict[str, int] = defaultdict(int)
+    confidence_gap_sum = 0.0
+    confidence_gap_count = 0
+    if not log_text:
+        return {"total": 0, "by_symbol": {}, "average_gap_to_min": 0.0, "samples": 0}
+    for line in log_text.splitlines():
+        if _QUIET_SCALP_BLOCK_MARKER not in line:
+            continue
+        match = _QUIET_SCALP_BLOCK_RE.search(line)
+        if not match:
+            continue
+        if match.group("channel") != channel:
+            continue
+        total += 1
+        by_symbol[match.group("symbol")] += 1
+        try:
+            gap = float(match.group("min")) - float(match.group("conf"))
+            confidence_gap_sum += gap
+            confidence_gap_count += 1
+        except ValueError:
+            pass
+    avg_gap = (
+        confidence_gap_sum / confidence_gap_count if confidence_gap_count > 0 else 0.0
+    )
+    return {
+        "total": total,
+        "by_symbol": dict(sorted(by_symbol.items(), key=lambda kv: -kv[1])[:20]),
+        "average_gap_to_min": round(avg_gap, 2),
+        "samples": confidence_gap_count,
+    }
+
+
+def parse_confidence_gate_decisions_from_logs(
+    log_text: str,
+    channel: str,
+) -> Dict[str, Dict[str, Dict[str, int]]]:
+    """Parse confidence_gate decisions per setup: {setup: {decision: {reason: count}}}.
+
+    The confidence_gate emit covers every signal that survives evaluation but
+    must clear the final scoring threshold. Histogram surfaces:
+    * which setups consistently get filtered vs accepted
+    * the dominant rejection reason (e.g. quiet_scalp_min_confidence,
+      confidence_below_threshold, regime_penalty)
+    """
+    by_setup: Dict[str, Dict[str, Dict[str, int]]] = {}
+    if not log_text:
+        return {}
+    for line in log_text.splitlines():
+        if _CONFIDENCE_GATE_MARKER not in line:
+            continue
+        match = _CONFIDENCE_GATE_RE.search(line)
+        if not match:
+            continue
+        if match.group("channel") != channel:
+            continue
+        setup = match.group("setup")
+        decision = match.group("decision")
+        reason = match.group("reason")
+        setup_bucket = by_setup.setdefault(setup, {})
+        decision_bucket = setup_bucket.setdefault(decision, defaultdict(int))
+        decision_bucket[reason] += 1
+    # Convert defaultdicts to plain dicts for clean serialization
+    return {
+        setup: {decision: dict(reasons) for decision, reasons in decisions.items()}
+        for setup, decisions in by_setup.items()
+    }
+
+
+def count_log_markers(log_text: str) -> Dict[str, int]:
+    """Count occurrences of key periodic log markers in the window.
+
+    Used to surface a "log parse diagnostics" section in the truth report.
+    If e.g. ``path_funnel`` count is 0 but signals were emitted, the issue
+    is log retention or emission cadence — not parser breakage.
+    """
+    if not log_text:
+        return {
+            "path_funnel": 0,
+            "regime_distribution": 0,
+            "quiet_scalp_block": 0,
+            "confidence_gate": 0,
+            "total_lines": 0,
+        }
+    lines = log_text.splitlines()
+    return {
+        "path_funnel": sum(1 for ln in lines if _PATH_FUNNEL_MARKER in ln),
+        "regime_distribution": sum(1 for ln in lines if _REGIME_LINE_MARKER in ln),
+        "quiet_scalp_block": sum(1 for ln in lines if _QUIET_SCALP_BLOCK_MARKER in ln),
+        "confidence_gate": sum(1 for ln in lines if _CONFIDENCE_GATE_MARKER in ln),
+        "total_lines": len(lines),
+    }
+
+
 def stage_totals_by_setup(funnel_counters: Dict[str, int], channel: str) -> Dict[str, Dict[str, int]]:
     by_setup: Dict[str, Dict[str, int]] = {}
     for key, value in funnel_counters.items():
@@ -366,6 +519,10 @@ def build_snapshot(
     previous_funnel: Dict[str, int],
     current_channel_funnel: Optional[Dict[str, int]] = None,
     previous_channel_funnel: Optional[Dict[str, int]] = None,
+    regime_distribution: Optional[Dict[str, int]] = None,
+    quiet_scalp_block: Optional[Dict[str, Any]] = None,
+    confidence_gate_decisions: Optional[Dict[str, Any]] = None,
+    log_parse_diagnostics: Optional[Dict[str, int]] = None,
     now_ts: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     now_ts = now_ts or time.time()
@@ -555,6 +712,10 @@ def build_snapshot(
         "dependency_readiness": dependency_readiness,
         "lifecycle_truth": lifecycle_summary,
         "quality_by_setup": current_quality,
+        "regime_distribution": regime_distribution or {},
+        "quiet_scalp_block": quiet_scalp_block or {},
+        "confidence_gate_decisions": confidence_gate_decisions or {},
+        "log_parse_diagnostics": log_parse_diagnostics or {},
         "recommended_operator_focus": {
             "most_suspicious_degradation": degraded[0] if degraded else None,
             "most_promising_healthy_path": healthiest[0] if healthiest else None,
@@ -646,12 +807,84 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         )
 
     lines.extend(["", "## Evaluator no-signal reasons"])
+    any_reasons_rendered = False
     for setup, metrics in sorted(path_truth.items()):
         reasons = metrics.get("no_signal_reasons", {}) or {}
-        if not reasons:
+        positive = {k: int(v or 0) for k, v in reasons.items() if int(v or 0) > 0}
+        if not positive:
             continue
-        top = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items(), key=lambda item: item[1], reverse=True)[:3])
-        lines.append(f"- {setup}: {top}")
+        any_reasons_rendered = True
+        sorted_reasons = sorted(positive.items(), key=lambda item: item[1], reverse=True)
+        total = sum(positive.values())
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted_reasons)
+        lines.append(f"- **{setup}** (total={total}): {breakdown}")
+    if not any_reasons_rendered:
+        lines.append("- _no reject-reason data parsed from logs in this window — see Log parse diagnostics below_")
+
+    # ── Regime distribution (Tier-1 monitor upgrade) ──────────────────
+    regime_dist = snapshot.get("regime_distribution", {}) or {}
+    lines.extend(["", "## Regime distribution"])
+    if regime_dist:
+        total = sum(regime_dist.values()) or 1
+        lines.append("| Regime | Count | % of cycles |")
+        lines.append("|---|---:|---:|")
+        for regime, count in sorted(regime_dist.items(), key=lambda kv: -kv[1]):
+            pct = 100.0 * count / total
+            lines.append(f"| {regime} | {count} | {pct:.1f}% |")
+    else:
+        lines.append(
+            "- _no regime data parsed — engine may need redeploy to start emitting "
+            "`Regime distribution (last 100 cycles): ...` log lines_"
+        )
+
+    # ── QUIET_SCALP_BLOCK gate (Tier-1 monitor upgrade) ───────────────
+    qsb = snapshot.get("quiet_scalp_block", {}) or {}
+    lines.extend(["", "## QUIET_SCALP_BLOCK gate"])
+    if qsb.get("total", 0) > 0:
+        lines.append(f"- Total blocks in window: **{qsb['total']}**")
+        lines.append(
+            f"- Average confidence gap to threshold: **{qsb.get('average_gap_to_min', 0.0):.2f}** "
+            f"(samples={qsb.get('samples', 0)}) — small gap means candidates are *close* to "
+            f"clearing the gate."
+        )
+        by_symbol = qsb.get("by_symbol", {}) or {}
+        if by_symbol:
+            top = ", ".join(f"{s}={c}" for s, c in list(by_symbol.items())[:10])
+            lines.append(f"- Top blocked symbols: {top}")
+    else:
+        lines.append("- _no QUIET_SCALP_BLOCK events in window_")
+
+    # ── Confidence gate decisions (Tier-1 monitor upgrade) ────────────
+    conf_gate = snapshot.get("confidence_gate_decisions", {}) or {}
+    lines.extend(["", "## Confidence gate decisions"])
+    if conf_gate:
+        lines.append("| Setup | Decision | Reason | Count |")
+        lines.append("|---|---|---|---:|")
+        for setup in sorted(conf_gate.keys()):
+            for decision in sorted(conf_gate[setup].keys()):
+                for reason, count in sorted(
+                    conf_gate[setup][decision].items(), key=lambda kv: -kv[1]
+                ):
+                    lines.append(f"| {setup} | {decision} | {reason} | {count} |")
+    else:
+        lines.append("- _no confidence_gate decisions parsed in window_")
+
+    # ── Log parse diagnostics (Tier-1 monitor upgrade) ────────────────
+    diag = snapshot.get("log_parse_diagnostics", {}) or {}
+    lines.extend(["", "## Log parse diagnostics"])
+    lines.append(
+        "_If a section above is empty but the matching diagnostic count is also 0, "
+        "the engine isn't emitting that log line in the window (cadence/retention) "
+        "rather than the parser being broken._"
+    )
+    if diag:
+        lines.append(f"- Total log lines in window: `{diag.get('total_lines', 0)}`")
+        lines.append(f"- `Path funnel` emissions: `{diag.get('path_funnel', 0)}`")
+        lines.append(f"- `Regime distribution` emissions: `{diag.get('regime_distribution', 0)}`")
+        lines.append(f"- `QUIET_SCALP_BLOCK` events: `{diag.get('quiet_scalp_block', 0)}`")
+        lines.append(f"- `confidence_gate` events: `{diag.get('confidence_gate', 0)}`")
+    else:
+        lines.append("- _no diagnostics available_")
 
     lines.extend(["", "## Dependency readiness"])
     dependency_readiness = snapshot.get("dependency_readiness", {}) or {}
