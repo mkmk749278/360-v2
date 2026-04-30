@@ -2534,6 +2534,57 @@ def _cls_sweep_short(sweep_level=101.0, sweep_index=-3):
     )
 
 
+class TestContinuationLiquiditySweepAuditFixes:
+    """Path audit #12 fixes:
+    - `close <= 0` now emits `invalid_price` (was `momentum_reject`).
+    - SL geometry respects close-relative + 1×ATR floor (mirror of
+      VSB/BDS/ORB/QCB/DIV_CONT).
+    - TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) consistent with
+      SR_FLIP / TPE / FUNDING / DIV_CONT.
+    """
+
+    def test_invalid_price_reports_distinct_reject_reason(self):
+        """`close <= 0` must emit `invalid_price`, not `momentum_reject`."""
+        candles_5m = _make_cls_candles_long()
+        candles_5m["close"][-1] = 0.0
+        candles = {"5m": candles_5m}
+        sweep = _cls_sweep_long(sweep_level=99.0, sweep_index=-3)
+        smc_data = {"sweeps": [sweep]}
+        ch = ScalpChannel()
+        sig = ch._evaluate_continuation_liquidity_sweep(
+            "BTCUSDT", candles, _cls_indicators_long(), smc_data,
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "invalid_price", (
+            f"close <= 0 must emit `invalid_price`, got "
+            f"{ch._active_no_signal_reason!r}"
+        )
+
+    def test_sl_respects_close_relative_floor_long(self):
+        """When sweep_level is very near close (5bp gap), pre-fix sl_dist
+        could be ≈0.15% — defeated by the 0.80% universal floor.  Post-fix
+        the close-relative floor `max(0.8% × close, 1×ATR)` keeps sl_dist
+        ≥ 0.8% from entry."""
+        # Sweep just 0.05% below close to force the close-relative floor path.
+        candles = {"5m": _make_cls_candles_long(sweep_level=99.95, close_price=100.0)}
+        sweep = _cls_sweep_long(sweep_level=99.95, sweep_index=-3)
+        smc_data = {"sweeps": [sweep]}
+        ch = ScalpChannel()
+        sig = ch._evaluate_continuation_liquidity_sweep(
+            "BTCUSDT", candles, _cls_indicators_long(), smc_data,
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="TRENDING_UP",
+        )
+        if sig is None:
+            import pytest
+            pytest.skip("Other gates rejected — focused fix is on SL geometry only.")
+        sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
+        assert sl_dist_pct >= 0.79, (
+            f"CLS SL distance {sl_dist_pct:.3f}% is too tight — "
+            f"close-relative floor was not honoured."
+        )
+
+
 class TestContinuationLiquiditySweep:
     """Tests for the CONTINUATION_LIQUIDITY_SWEEP path (roadmap step 5)."""
 
