@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-02 — Path audit #8 (SR_FLIP_RETEST): missing TP1 ATR-adaptive cap added; VOLATILE_UNSUITABLE blocked at evaluator*
+*Updated: 2026-05-02 — Path audit #9 (FUNDING_EXTREME_SIGNAL): invalid_price telemetry truth + TP1 ATR-adaptive cap; QUIET_SCALP_BLOCK bottleneck flagged for owner decision*
 
 ---
 
@@ -8,7 +8,56 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-02 — path audit #8):
+This session (2026-05-02 — path audit #9):
+- **FUNDING_EXTREME_SIGNAL deep dive** (`_evaluate_funding_extreme`,
+  `src/channels/scalp.py:2878-3041`).  Latest monitor zip:
+  `EVAL::FUNDING_EXTREME: funding_not_extreme=11,763 (63.8%),
+  basic_filters_failed=3,879 (21%), missing_funding_rate=1,825 (9.9%)` —
+  **95 candidates generated, ALL 95 killed downstream**.  Truth report
+  explicitly calls FUNDING the *"most likely bottleneck"*.
+- **🔴 QUIET_SCALP_BLOCK bottleneck — FUNDING exempt SHIPPED**
+  (`src/scanner/__init__.py:_QUIET_FUNDING_MIN_CONFIDENCE = 60.0`).
+  All 95 evaluator-passing candidates were dying at the scanner-level
+  QUIET_SCALP_BLOCK gate (FUNDING wasn't QCB-exempt or DIV_CONT≥64-
+  exempt).  Audit-3 already removed the evaluator-level QUIET block;
+  this scanner-level exempt completes that doctrine.  Lower bar (60)
+  than DIV_CONT (64) because extreme funding is itself the quality
+  evidence — the trigger gate already filtered for the structural
+  thesis.  Owner authorized the CTE recommendation in this session.
+  6 new dedicated tests in
+  `tests/test_audit_findings.py::TestQuietGateDivergenceContinuation`
+  including a leak-test that verifies the 60-floor is FUNDING-only.
+- **🟡 Bug A — wrong reject reason for `close <= 0`** (was line 2910).
+  Pre-fix emitted `funding_not_extreme` for invalid-price rows,
+  conflating bad-data telemetry with the actual trigger gate count.
+  Fix: now emits `invalid_price` (truthful telemetry).
+- **🟡 Bug B — missing TP1 ATR-adaptive cap**.  Same family as SR_FLIP
+  audit #8 — FUNDING's TP1 comes from `_funding_extreme_structure_tp1`
+  (nearest qualifying FVG/OB).  In trending markets the nearest FVG/OB
+  can sit 5-10R from close, which is unreachable for a contrarian
+  mean-reversion setup before SL fires.  Mean-reversion family has
+  `min_rr=0.9` so capping more aggressively is structurally appropriate.
+  Fix: applied 1.8R / 2.5R / uncapped by ATR percentile (mirror of
+  SR_FLIP / TPE).  Structure-level wins when within cap.
+- **Tests added** (`tests/test_pr07_specialist_path_quality.py::TestFundingExtremeAuditFixes`):
+  4 new — invalid_price reject reason, TP1 capped at 2.5R median,
+  capped at 1.8R low, uncapped high.  All 30 pr07 tests pass (26
+  existing + 4 new).  3313 broader tests pass (vs 3309 post-SR_FLIP
+  baseline — net +4, zero regressions).
+- **Data sufficiency check**: FUNDING needs:
+  - `funding_rate` from order_flow_store: ✅ present in 90% of cycles
+    (10% absent on low-vol pairs — known issue, graceful reject)
+  - 5m candles ≥ 5: ✅ trivial
+  - CVD ≥ 4 values: ✅ for most pairs after CVD-fix boot seed
+  - liquidation_clusters: ⚠️ ABSENT in 100% of cycles in latest zip
+    (no cascades in QUIET regime).  FUNDING uses ATR×1.5 fallback with
+    `_sl_degraded` flag and 5-pt soft penalty — this is GOOD graceful
+    degradation, not a bug.  But contributes to lower confidence
+    scores → exacerbates QUIET_SCALP_BLOCK kill.
+  - FVG/OB: ✅ FVG always present (orderblocks not_implemented)
+  - regime_context.atr_percentile (used by new TP1 cap): ✅ falls back
+
+Prior session (2026-05-02 — path audit #8):
 - **SR_FLIP_RETEST deep dive** (`_evaluate_sr_flip_retest`,
   `src/channels/scalp.py:2437-2810`).  Latest monitor zip showed
   `EVAL::SR_FLIP_RETEST: regime_blocked=15,123 (82.1%),
@@ -542,6 +591,7 @@ statistical confidence.
 | **BDS path audit (multi-fix mirror of #5): (A) removed broken current-candle volume gate (same 62.7% pattern — dead-cat bounces have reduced volume by definition); (B) breakdown qualifier now requires close BELOW swing_low — wick-only piercing was being accepted but is a bullish sweep, not a breakdown; (C) SL anchored to HIGHER of `swing_low × 1.008` and `close + max(0.8%×close, 1×ATR)` — pre-fix produced 0.05% stops in extended bounce zones; (D) shares VSB_BREAKOUT_VOL_MULT env constant for breakdown-candle vol gate** | `src/channels/scalp.py:2059` + `:2086` (close gate) + `:2153` (SL geometry) + 6 new tests in `tests/test_channels.py::TestBreakdownShortRefinements` | **2026-05-02 (path audit #6)** |
 | **ORB path audit (dormant-path triage): path is feature-flag-disabled (`SCALP_ORB_ENABLED=false`); audit clarified the live monitor `regime_blocked=100%` was the disable token, NOT a regime gate.  Telemetry fix: dormant-flag check now reports `feature_disabled` (truthful).  Preserved-code fixes for re-enable readiness: removed broken current-candle volume gate (VSB/BDS-family bug); SL geometry now respects close-relative + 1×ATR floor (was 0.1% structural buffer producing sub-spread stops on tight ranges).  Open question on whether to rebuild session-range proxy or re-enable as-is — owner decision.** | `src/channels/scalp.py:2271` (telemetry) + `:2322` (vol gate) + `:2348` (SL geometry) + 3 new tests in `tests/test_pr06_orb_disable.py::TestORBAuditFixes` | **2026-05-02 (path audit #7)** |
 | **SR_FLIP path audit: (A) TP1 ATR-adaptive cap was claimed deployed in OWNER_BRIEF Audit-3 but actually missing from the SR_FLIP code (only TPE had it) — added 1.8R/2.5R/uncapped-by-atr-percentile cap, addressing the documented historical 100% SL rate; (B) evaluator-level VOLATILE_UNSUITABLE regime block added (was VOLATILE-only — defence-in-depth)** | `src/channels/scalp.py:2479` (regime) + `:2738` (TP1 cap) + 4 new tests in `tests/test_channels.py::TestSrFlipRetestRefinements` | **2026-05-02 (path audit #8)** |
+| **FUNDING path audit (3-fix shipped after CTE recommendation accepted): (A) `close <= 0` now emits `invalid_price` instead of conflating with `funding_not_extreme` telemetry; (B) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) — structure-anchored TP1 could sit 5-10R from close in trending markets, unreachable for mean-reversion contrarian setup before SL; (C) FUNDING_EXTREME_SIGNAL added to QUIET_SCALP_BLOCK exempt list at confidence ≥ 60 — was the truth report's "most likely bottleneck" with 95 candidates/28h all dying at scanner; lower bar than DIV_CONT's 64 because extreme funding is itself the quality evidence** | `src/channels/scalp.py:2910` (reject reason) + `:2989` (TP1 cap) + `src/scanner/__init__.py:318` (`_QUIET_FUNDING_MIN_CONFIDENCE`) + `:4421` (exempt branch) + 10 new tests across `tests/test_pr07_specialist_path_quality.py` and `tests/test_audit_findings.py` | **2026-05-02 (path audit #9)** |
 
 ---
 

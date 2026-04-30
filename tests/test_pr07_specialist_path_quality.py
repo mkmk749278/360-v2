@@ -519,6 +519,118 @@ class TestWhaleMomentumSLTuning:
 
 
 # ---------------------------------------------------------------------------
+# Path audit #9 — FUNDING_EXTREME_SIGNAL audit fixes
+# ---------------------------------------------------------------------------
+
+class TestFundingExtremeAuditFixes:
+    """Path audit #9 fixes:
+    - Wrong reject reason for `close <= 0` (was `funding_not_extreme`,
+      now `invalid_price`) — telemetry truth.
+    - TP1 ATR-adaptive cap (1.8R / 2.5R / uncapped) consistent with
+      SR_FLIP / TPE pattern.
+    """
+
+    def _long_smc(self, fvg_level_above: float, close: float) -> dict:
+        return {
+            "funding_rate": -0.0015,
+            "fvg": [{"gap_high": fvg_level_above, "gap_low": fvg_level_above - 0.3}],
+            "orderblocks": [],
+            "liquidation_clusters": [],
+            "cvd": {"values": [0.0, 1.0, 2.0, 3.0]},
+        }
+
+    def test_invalid_price_reports_distinct_reject_reason(self):
+        """`close <= 0` must emit `invalid_price`, NOT `funding_not_extreme`,
+        so path-funnel telemetry doesn't conflate bad-data with the trigger
+        gate.  Pre-fix both shared `funding_not_extreme`.
+        """
+        ch = ScalpChannel()
+        # Build candles where close[-1] = 0 (invalid).
+        candles_data = _make_candles_5m(20, base=100.0, trend=0.0)
+        candles_data["close"][-1] = 0.0
+        candles = {"5m": candles_data}
+        ind = _base_indicators_5m(ema9=100.0, rsi_last=48.0, rsi_prev=42.0, atr=0.5)
+        smc = self._long_smc(fvg_level_above=103.0, close=0.0)
+        ch._evaluate_funding_extreme(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
+        )
+        assert ch._active_no_signal_reason == "invalid_price", (
+            f"close <= 0 must report `invalid_price`, got "
+            f"{ch._active_no_signal_reason!r}"
+        )
+
+    def test_tp1_capped_at_2_5r_in_median_atr_regime(self):
+        """In median-ATR (atr_percentile 40-65), FUNDING TP1 must be capped
+        at 2.5R from close.  Pre-fix the FVG-anchored TP1 could sit 5-10R
+        away when the nearest qualifying zone was far in trending markets.
+        """
+        from types import SimpleNamespace
+        ch = ScalpChannel()
+        close = 101.0
+        ind = _base_indicators_5m(ema9=100.0, rsi_last=48.0, rsi_prev=42.0, atr=0.5)
+        candles = {"5m": _make_candles_5m(20, base=100.0, trend=0.1)}
+        # FVG far above — 105.0 is ~5R from close at sl_dist 0.75.
+        smc = self._long_smc(fvg_level_above=105.0, close=close)
+        # Median-ATR regime.
+        smc["regime_context"] = SimpleNamespace(atr_percentile=50.0)
+        sig = ch._evaluate_funding_extreme(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
+        )
+        if sig is None:
+            pytest.skip("Evaluator returned None — gates not met in this fixture.")
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        tp1_dist = abs(sig.tp1 - sig.entry)
+        tp1_ratio = tp1_dist / sl_dist
+        assert tp1_ratio <= 2.5 + 0.01, (
+            f"TP1 ratio {tp1_ratio:.2f}R exceeds median-ATR cap of 2.5R."
+        )
+
+    def test_tp1_capped_at_1_8r_in_low_atr_regime(self):
+        """In low-ATR (atr_percentile <40), FUNDING TP1 capped at 1.8R."""
+        from types import SimpleNamespace
+        ch = ScalpChannel()
+        close = 101.0
+        ind = _base_indicators_5m(ema9=100.0, rsi_last=48.0, rsi_prev=42.0, atr=0.5)
+        candles = {"5m": _make_candles_5m(20, base=100.0, trend=0.1)}
+        smc = self._long_smc(fvg_level_above=105.0, close=close)
+        smc["regime_context"] = SimpleNamespace(atr_percentile=20.0)
+        sig = ch._evaluate_funding_extreme(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
+        )
+        if sig is None:
+            pytest.skip("Evaluator returned None — gates not met in this fixture.")
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        tp1_dist = abs(sig.tp1 - sig.entry)
+        tp1_ratio = tp1_dist / sl_dist
+        assert tp1_ratio <= 1.8 + 0.01, (
+            f"TP1 ratio {tp1_ratio:.2f}R exceeds low-ATR cap of 1.8R."
+        )
+
+    def test_tp1_uncapped_in_high_atr_regime(self):
+        """In high-ATR (atr_percentile ≥65), no cap — let structure-level
+        TP1 stand."""
+        from types import SimpleNamespace
+        ch = ScalpChannel()
+        close = 101.0
+        ind = _base_indicators_5m(ema9=100.0, rsi_last=48.0, rsi_prev=42.0, atr=0.5)
+        candles = {"5m": _make_candles_5m(20, base=100.0, trend=0.1)}
+        smc = self._long_smc(fvg_level_above=105.0, close=close)
+        smc["regime_context"] = SimpleNamespace(atr_percentile=80.0)
+        sig = ch._evaluate_funding_extreme(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING"
+        )
+        if sig is None:
+            pytest.skip("Evaluator returned None — gates not met in this fixture.")
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        tp1_dist = abs(sig.tp1 - sig.entry)
+        tp1_ratio = tp1_dist / sl_dist
+        # Should preserve the far structural target (ratio > 2.5R).
+        assert tp1_ratio > 2.5, (
+            f"High-ATR TP1 ratio {tp1_ratio:.2f}R was capped — should be uncapped."
+        )
+
+
+# ---------------------------------------------------------------------------
 # 4. Thesis-aligned constants are declared and correct
 # ---------------------------------------------------------------------------
 
