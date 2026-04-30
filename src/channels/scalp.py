@@ -3325,7 +3325,10 @@ class ScalpChannel(BaseChannel):
 
         close = closes[-1]
         if close <= 0:
-            return self._reject("momentum_reject")
+            # Telemetry-truth: this is invalid candle data, NOT a "momentum
+            # reject" condition.  Pre-fix conflated bad-data with the
+            # momentum gate count (same family as FUNDING fix in #254).
+            return self._reject("invalid_price")
 
         # CVD divergence detection: check 20-candle window first; fall back to 10-candle.
         # 20-candle window required cvd_values ≥ 20; 10-candle needs only 10.
@@ -3402,11 +3405,24 @@ class ScalpChannel(BaseChannel):
         if not (fvgs or orderblocks):
             return self._reject("missing_fvg_or_orderblock")
 
-        # SL: beyond EMA21
+        # SL geometry — same close-relative + ATR floor pattern as VSB / BDS /
+        # ORB / QCB.  Pre-fix anchored SL purely to EMA21 ± 0.5% which could
+        # produce sub-spread stops when close is very near EMA21:
+        #   close=100, ema21=99.9 → sl=99.40 → sl_dist 0.60% (< 0.80% universal floor)
+        # The 0.80% universal floor at `_enqueue_signal` would clamp it,
+        # defeating the structural anchor.  Take the LOWER (further-from-close,
+        # since LONG) of structural floor and close-relative floor:
+        #   - structural floor: ema21 − 0.5% (anti-EMA21-flip-back invalidation)
+        #   - close-relative floor: max(0.8% × close, 1.0×ATR)
+        atr_val = ind.get("atr_last", close * 0.002)
         if direction == Direction.LONG:
-            sl = ema21 * (1 - 0.005)
+            structural_sl = ema21 * (1 - 0.005)
+            close_rel_floor = close - max(close * 0.008, atr_val * 1.0)
+            sl = min(structural_sl, close_rel_floor)
         else:
-            sl = ema21 * (1 + 0.005)
+            structural_sl = ema21 * (1 + 0.005)
+            close_rel_ceiling = close + max(close * 0.008, atr_val * 1.0)
+            sl = max(structural_sl, close_rel_ceiling)
 
         sl_dist = abs(close - sl)
         if sl_dist <= 0:
@@ -3430,6 +3446,26 @@ class ScalpChannel(BaseChannel):
             tp1 = min(_tp1_win) if _tp1_win else close
             if tp1 >= close:
                 tp1 = close - sl_dist * 1.5
+
+        # ATR-adaptive TP1 cap (mirror of SR_FLIP / TPE / FUNDING).
+        # The 10-candle swing extremum can sit several R from close in
+        # trending markets — DIV_CONT is a continuation setup so it sits
+        # in TRENDING regimes by definition.  Cap by ATR percentile so
+        # the structural target survives only when within reach.
+        # 10-candle window (vs SR_FLIP's 20) is naturally more contained,
+        # but the cap still matters on strong-trend pairs where 50min of
+        # one-direction price action can produce 4-5R extrema.
+        _rc_divcont = smc_data.get("regime_context")
+        _atr_pct_divcont = _rc_divcont.atr_percentile if _rc_divcont else 50.0
+        if _atr_pct_divcont < 40.0:
+            _tp1_cap_divcont = sl_dist * 1.8
+        elif _atr_pct_divcont < 65.0:
+            _tp1_cap_divcont = sl_dist * 2.5
+        else:
+            _tp1_cap_divcont = None
+        if _tp1_cap_divcont is not None:
+            tp1 = (min(tp1, close + _tp1_cap_divcont) if direction == Direction.LONG
+                   else max(tp1, close - _tp1_cap_divcont))
 
         # TP2: 20-candle structural swing — confirmation target.  Must always
         # sit at least 1R beyond TP1 to preserve two-stage TP progression.
@@ -3474,7 +3510,7 @@ class ScalpChannel(BaseChannel):
             tp3 = close + sl_dist * 4.0 if direction == Direction.LONG else close - sl_dist * 4.0
 
         profile = smc_data.get("pair_profile")
-        atr_val = ind.get("atr_last", close * 0.002)
+        # atr_val already computed above for SL.
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
             config=self.config,

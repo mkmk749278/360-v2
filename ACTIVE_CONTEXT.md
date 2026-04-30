@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-02 — Path audit #10 (QUIET_COMPRESSION_BREAK): partial-candle volume gate removed + close-relative SL floor (mirror of VSB/BDS/ORB family fix)*
+*Updated: 2026-05-02 — Path audit #11 (DIVERGENCE_CONTINUATION): invalid_price telemetry + close-relative SL floor + TP1 ATR-adaptive cap*
 
 ---
 
@@ -8,7 +8,58 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-02 — path audit #10):
+This session (2026-05-02 — path audit #11):
+- **DIVERGENCE_CONTINUATION deep dive** (`_evaluate_divergence_continuation`,
+  `src/channels/scalp.py:3263-3530`).  Latest monitor zip:
+  `EVAL::DIVERGENCE_CONTINUATION: regime_blocked=18,420 (99.98%),
+  basic_filters_failed=1, cvd_divergence_failed=1` — 0 generated.  Path
+  is exempted from QUIET_SCALP_BLOCK at conf ≥ 64 (`_QUIET_DIVERGENCE_MIN_CONFIDENCE`)
+  but the evaluator-level regime gate restricts to TRENDING_UP/DOWN/WEAK_TREND;
+  market is 99.7% QUIET so 99.98% blocked is correct doctrine.  Audit-3
+  added dual 10+20 candle CVD window which is working.  Three structural
+  defects found.
+- **🟡 Bug A — wrong reject reason for `close <= 0`** (was line 3327).
+  Pre-fix emitted `momentum_reject` for invalid candle data, conflating
+  bad-data telemetry with the actual momentum gate count.  Same family
+  as FUNDING audit #9.
+  **Fix**: now emits `invalid_price`.
+- **🔴 Bug B — tight SL geometry** (was line 3406).
+  Pre-fix: `LONG: sl = ema21 × (1 − 0.005)`.
+  When close sits very near EMA21 (e.g., 0.1% away — well within the
+  1.5% retest_proximity gate), pre-fix sl_dist could be 0.6% — under
+  the 0.80% universal floor at `_enqueue_signal`, defeating the
+  structural anchor when clamped.
+  **Fix**: applied close-relative + 1×ATR floor pattern (mirror of
+  VSB/BDS/ORB/QCB).  `sl = min(ema21 × 0.995, close − max(0.8% × close,
+  1×ATR))` for LONG.
+- **🟡 Bug C — missing TP1 ATR-adaptive cap**.  TP1 = 10-candle swing
+  high (LONG).  In strong-trend regimes the swing high can sit several R
+  from close (DIV_CONT is a continuation setup → trending by definition).
+  10-candle window naturally more contained than SR_FLIP's 20-candle,
+  but the cap still matters on strong-trend pairs where 50min of
+  one-direction price action can produce 4-5R extrema.
+  **Fix**: applied 1.8R / 2.5R / uncapped by ATR percentile (consistent
+  with SR_FLIP / TPE / FUNDING).  Structure-level wins when within cap.
+- **Tests added** (`tests/test_divergence_continuation_tp.py::TestDivergenceContinuationAuditFixes`):
+  2 new — invalid_price reject reason, SL respects close-relative floor.
+  Plus updated `test_tp2_at_least_structural_swing_high_or_monotonicity_floor`
+  (was `test_tp2_equals_20candle_swing_high_or_fallback`) — pre-audit-#11
+  the test asserted strict equality with the swing high which only held
+  because the old tight SL geometry produced small sl_dist values such
+  that `tp1 + sl_dist*1.0` never exceeded the structural target.  Wider
+  SL (correctly) propagates a larger sl_dist into the monotonicity check
+  → tp2 forced above swing_high; updated to assert the looser invariant
+  "tp2 ≥ structural target AND ≥ tp1 + 1R".
+  All 15 DIV_CONT tests pass (12 existing + 2 new + 1 retitled).  3324
+  broader tests pass (vs 3322 post-QCB baseline — net +2, zero
+  regressions).
+- **Data sufficiency check**: DIV_CONT needs 5m candles ≥ 20 (boot seed
+  500), CVD ≥ 10 values (after CVD-fix boot seed), ema9/ema21
+  (always populated), FVG/orderblock (FVG always present).  ATR for
+  new SL geometry.  4h candles for TP3 (boot seed = 500, graceful 4R
+  fallback).  All trivially met; path's silence is regime-driven.
+
+Prior session (2026-05-02 — path audit #10):
 - **QUIET_COMPRESSION_BREAK deep dive** (`_evaluate_quiet_compression_break`,
   `src/channels/scalp.py:3075-3239`).  Latest monitor zip:
   `EVAL::QUIET_COMPRESSION_BREAK: regime_blocked=15,126 (82.1%),
@@ -637,6 +688,7 @@ statistical confidence.
 | **SR_FLIP path audit: (A) TP1 ATR-adaptive cap was claimed deployed in OWNER_BRIEF Audit-3 but actually missing from the SR_FLIP code (only TPE had it) — added 1.8R/2.5R/uncapped-by-atr-percentile cap, addressing the documented historical 100% SL rate; (B) evaluator-level VOLATILE_UNSUITABLE regime block added (was VOLATILE-only — defence-in-depth)** | `src/channels/scalp.py:2479` (regime) + `:2738` (TP1 cap) + 4 new tests in `tests/test_channels.py::TestSrFlipRetestRefinements` | **2026-05-02 (path audit #8)** |
 | **FUNDING path audit (3-fix shipped after CTE recommendation accepted): (A) `close <= 0` now emits `invalid_price` instead of conflating with `funding_not_extreme` telemetry; (B) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) — structure-anchored TP1 could sit 5-10R from close in trending markets, unreachable for mean-reversion contrarian setup before SL; (C) FUNDING_EXTREME_SIGNAL added to QUIET_SCALP_BLOCK exempt list at confidence ≥ 60 — was the truth report's "most likely bottleneck" with 95 candidates/28h all dying at scanner; lower bar than DIV_CONT's 64 because extreme funding is itself the quality evidence** | `src/channels/scalp.py:2910` (reject reason) + `:2989` (TP1 cap) + `src/scanner/__init__.py:318` (`_QUIET_FUNDING_MIN_CONFIDENCE`) + `:4421` (exempt branch) + 10 new tests across `tests/test_pr07_specialist_path_quality.py` and `tests/test_audit_findings.py` | **2026-05-02 (path audit #9)** |
 | **QCB path audit: (A) removed partial-candle volume gate (`volumes[-1] >= 2.0 × avg_vol`) — same VSB/BDS/ORB family bug; especially backward for QCB which requires QUIET regime; (B) SL geometry now respects close-relative + 1×ATR floor (max(0.8% × close, 1×ATR)) — pre-fix flat 0.3% close-floor was sub-spread on most pairs, defeated by universal 0.80% floor downstream** | `src/channels/scalp.py:3142` (vol gate) + `:3163` (SL geometry) + 3 new tests in `tests/test_channels.py::TestQuietCompressionBreakAuditFixes` | **2026-05-02 (path audit #10)** |
+| **DIV_CONT path audit: (A) `close <= 0` now emits `invalid_price` instead of conflating with `momentum_reject` telemetry; (B) SL geometry now respects close-relative + 1×ATR floor — pre-fix `ema21 × 0.995` could produce 0.6% sl_dist when close was very near EMA21, defeating universal 0.80% floor; (C) TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) consistent with SR_FLIP / TPE / FUNDING — 10-candle swing extremum can sit 4-5R from close in strong trends.  Plus updated 1 stale test (test_tp2_*) — strict-equality assertion held only because old tight SL kept sl_dist small; refactored to assert structural invariant** | `src/channels/scalp.py:3327` (reject) + `:3406` (SL) + `:3454` (TP1 cap) + 2 new tests + 1 updated test in `tests/test_divergence_continuation_tp.py` | **2026-05-02 (path audit #11)** |
 
 ---
 
