@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-30 — Path audit #3 (TREND_PULLBACK_EMA): body-conviction gate replaced with close-position-in-range*
+*Updated: 2026-04-30 — Path audit #4 (LIQUIDATION_REVERSAL): RSI thresholds relaxed 25/75→35/65 + cascade-extremum zone proximity*
 
 ---
 
@@ -8,7 +8,62 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-04-30, late evening — path audit #3):
+This session (2026-05-01, very late — path audit #4):
+- **LIQUIDATION_REVERSAL deep dive** (`_evaluate_liquidation_reversal`,
+  `src/channels/scalp.py:1317–1495`). Latest monitor zip showed
+  `EVAL::LIQUIDATION_REVERSAL: cascade_threshold_not_met=14,151 (76.8%)`,
+  `basic_filters_failed=4,097 (22.2%)`, `cvd_divergence_failed=175 (0.95%)`
+  of 18,423 cycles — 0 generated.  Cascade threshold catches everything in
+  the current QUIET market by design (cascade by definition needs ≥1.5%
+  move), but the audit found two structural gates downstream that would
+  block valid setups when the regime returns.
+- **🟡 Bug A — RSI extreme thresholds 25/75 too strict** (was line 1383).
+  A 5m cascade reversal needs OVERSOLD context with reversal under way,
+  not "RSI must be exhausted."  5m RSI rarely hits <25 / >75 during a
+  normal 1.5–3% cascade — the gate killed valid reversal setups at the
+  structural moment they form (RSI 28–35 with rising RSI is the canonical
+  bullish-reversal context; demanding <25 means waiting until the cascade
+  has already exhausted itself and the bounce is half over).
+  **Fix**: thresholds 35/65 (was 25/75) AND require RSI direction confirms
+  reversal under way (`rsi_val > rsi_prev` for LONG, `<` for SHORT) when
+  rsi_prev is available. Same defence-in-depth pattern: standard oversold
+  zone + reversal-direction confirmation rather than a single extreme cutoff.
+  The existing test fixtures bypass the RSI gate by setting `rsi_last` to
+  None — strong tell that the gate was known to be too restrictive even
+  inside the test infrastructure.
+- **🟡 Bug B — Zone proximity only checked close_now** (was line 1400).
+  A cascade by definition OVERSHOOTS supply/demand zones, then bounces.
+  By the time the evaluator runs, close_now is past the zone in recovery —
+  the cascade extremum (low for LONG, high for SHORT) is what actually
+  tested the zone.
+  **Fix**: zone gate now passes if EITHER close_now or the cascade
+  extremum is within 0.5% of an FVG/orderblock.  Strictly more permissive,
+  preserves existing-test passes.  Also moved `cascade_low/high`
+  computation up so the gate can reference them.
+- **Tests added** (`tests/test_liquidation_reversal_tp.py`): 6 new cases
+  covering RSI 30+rising → accept, RSI 36 → reject, RSI 30+falling → reject
+  (cascade still bleeding), short 70+falling → accept, short 64 → reject,
+  zone gate via cascade-extremum when close_now is past the zone.  All
+  pass; 540 broader tests pass (vs 534 main baseline — net +6 from the new
+  tests, zero regressions). 14 pre-existing failures remain (queue #13).
+- **Data sufficiency check (per owner request)**:
+  - 5m candles ≥ 20 (closes ≥ 4, volumes ≥ 21): ✅ boot seed = 500
+  - CVD with ≥ 4 values: ✅ for most pairs after CVD-fix boot seed; 10.1%
+    of cycles have CVD absent (low-vol pairs) — graceful reject as
+    `cvd_insufficient`
+  - 5m RSI / rsi_prev: ✅ always populated by indicator pass (rsi_prev at
+    `src/scanner/indicator_compute.py:273`)
+  - 5m volumes: ✅ always populated
+  - `smc_data["fvg"]` OR `["orderblocks"]`: ⚠️ orderblocks not_implemented;
+    LIQ_REV relies entirely on FVG availability — solid in practice
+  - `liquidation_clusters: presence[absent=18423]` in latest zip: 100%
+    absent — but LIQ_REV evaluator does NOT consume liquidation_clusters
+    directly (only FUNDING_EXTREME does, with graceful fallback).  No
+    impact on LIQ_REV.
+  - **Verdict**: data sufficiency for LIQ_REV is fine; path silence is
+    100% regime-driven (cascade doesn't trigger in QUIET).
+
+Prior session 2026-04-30 (late evening — path audit #3):
 - **TREND_PULLBACK_EMA deep dive** (`_evaluate_trend_pullback`,
   `src/channels/scalp.py:1036–1296`). Latest monitor zip showed
   `EVAL::TREND_PULLBACK: regime_blocked=18,420 (99.98%)` of 18,423 cycles —
@@ -258,6 +313,7 @@ statistical confidence.
 | **LSR path audit fix: removed broken 5m-mom-direction-sign check (was rejecting valid sweeps because pre-sweep drift contaminates 3-candle momentum); wired MSS confirmation as soft penalty (missing = -8, mismatch = hard reject)** | `src/channels/scalp.py:_evaluate_standard` + 4 new tests in `tests/test_channels.py::TestScalpChannel` | **2026-04-30 evening (path audit #1)** |
 | **WHALE_MOMENTUM path audit fix: scan recent_ticks window for whale (was only checking latest tick — alert visible ~50–100ms on active pairs vs. 15s scan cycle); thresholds now env-overridable per B8** | `src/detector.py:228` (whale scan) + `src/channels/scalp.py:42` (env-overridable thresholds) + 4 new tests in `tests/test_new_modules.py::TestSMCDetector` | **2026-04-30 late eve (path audit #2)** |
 | **TPE path audit fix: body-conviction gate replaced with close-position-in-range — old `body/range ≥ 0.50` punished the canonical hammer/shooting-star reclaim that defines a valid pullback entry; new gate accepts strong directional close while allowing the EMA-test wick** | `src/channels/scalp.py:1127` | **2026-04-30 late eve (path audit #3)** |
+| **LIQ_REV path audit fix: RSI thresholds relaxed 25/75 → 35/65 (with RSI direction-of-travel check via rsi_prev) — pre-fix demanded RSI extreme exhaustion that 5m RSI rarely reaches during normal cascades; zone-proximity gate now also accepts cascade extremum (low/high) within 0.5% of zone, not just close_now — cascades overshoot zones by definition** | `src/channels/scalp.py:1382` (RSI gate) + `:1405` (zone gate) + 6 new tests in `tests/test_liquidation_reversal_tp.py` | **2026-05-01 very late (path audit #4)** |
 
 ---
 
@@ -373,8 +429,9 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 14 | Diagnose underlying 15-min futures WS drop (needs VPS-side `_health_watchdog` "stale WS connection" log) | Investigation |
 | 15 | **Path audit #1: LSR (`_evaluate_standard`) — broken mom-sign removed, MSS gate wired** | ✅ Merged |
 | 16 | **Path audit #2: WHALE_MOMENTUM — whale-alert single-tick bug fixed, thresholds env-overridable** | ✅ Merged (#246) |
-| 17 | **Path audit #3: TREND_PULLBACK_EMA — body-conviction gate replaced with close-position-in-range** | ✅ This session — fresh PR pending |
-| 18 | Path audit #4 — next path (LIQUIDATION_REVERSAL per OWNER_BRIEF order) | Pending owner go-ahead |
+| 17 | **Path audit #3: TREND_PULLBACK_EMA — body-conviction gate replaced with close-position-in-range** | ✅ Merged (#248) |
+| 18 | **Path audit #4: LIQUIDATION_REVERSAL — RSI thresholds 25/75→35/65 + cascade-extremum zone proximity** | ✅ This session — fresh PR pending |
+| 18b | Path audit #5 — next path (VOLUME_SURGE_BREAKOUT per OWNER_BRIEF order) | Pending owner go-ahead |
 | 19 | LSR follow-up: validate momentum_reject rate drops on next monitor zip; check MSS_MISSING flag prevalence in emitted LSRs | Observation |
 | 20 | WHALE_MOMENTUM follow-up: validate whale_alert detection rate jumps in next zip; check that `momentum_reject` count drops substantially on `EVAL::WHALE_MOMENTUM` | Observation |
 | 21 | TPE follow-up: validate body_conviction_fail count drops on `EVAL::TREND_PULLBACK` once a non-QUIET regime returns; check whether TPE starts producing emissions when the regime gate finally permits | Observation |

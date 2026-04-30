@@ -170,6 +170,111 @@ def test_liquidation_reversal_marks_short_cvd_history_as_insufficient():
 
 
 # ---------------------------------------------------------------------------
+# RSI gate (path audit #4 — relaxed thresholds + reversal-direction check)
+# ---------------------------------------------------------------------------
+
+class TestLiquidationReversalRsiGate:
+    """RSI thresholds 35/65 (was 25/75) + reversal-direction check via rsi_prev.
+
+    The pre-fix gate (LONG <25 / SHORT >75) rejected the canonical 5m cascade
+    reversal, where RSI typically reaches 28-35 on bullish reversals or 65-72
+    on bearish reversals.  The new gate requires standard oversold/overbought
+    + RSI direction-of-travel matching the reversal thesis.
+    """
+
+    def test_long_accepts_rsi_30_with_recovery(self):
+        """RSI 30 with prior RSI 25 → recovering oversold → must pass."""
+        candles, indicators, smc_data = _make_long_scenario(atr_val=0.5)
+        indicators["5m"]["rsi_last"] = 30.0
+        indicators["5m"]["rsi_prev"] = 25.0  # RSI rising = reversal under way
+        sig = _call_evaluator(candles, indicators, smc_data)
+        assert sig is not None, (
+            "RSI 30 with rsi_prev 25 (rising) is canonical bullish reversal — "
+            "pre-fix `RSI < 25` would have rejected this valid setup"
+        )
+
+    def test_long_rejects_rsi_36(self):
+        """RSI 36 not even in oversold zone → rejected."""
+        candles, indicators, smc_data = _make_long_scenario(atr_val=0.5)
+        indicators["5m"]["rsi_last"] = 36.0
+        ch = ScalpChannel()
+        sig = ch._evaluate_liquidation_reversal(
+            "TESTUSDT", candles, indicators, smc_data, _SPREAD_PCT, _VOLUME_24H,
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "rsi_reject"
+
+    def test_long_rejects_rsi_falling_still_bleeding(self):
+        """RSI 30 with prior RSI 35 → cascade still in progress → rejected."""
+        candles, indicators, smc_data = _make_long_scenario(atr_val=0.5)
+        indicators["5m"]["rsi_last"] = 30.0
+        indicators["5m"]["rsi_prev"] = 35.0  # RSI falling = cascade not done
+        ch = ScalpChannel()
+        sig = ch._evaluate_liquidation_reversal(
+            "TESTUSDT", candles, indicators, smc_data, _SPREAD_PCT, _VOLUME_24H,
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "rsi_reject"
+
+    def test_short_accepts_rsi_70_with_reversal(self):
+        candles, indicators, smc_data = _make_short_scenario(atr_val=0.5)
+        indicators["5m"]["rsi_last"] = 70.0
+        indicators["5m"]["rsi_prev"] = 75.0  # RSI falling = bearish reversal under way
+        sig = _call_evaluator(candles, indicators, smc_data)
+        assert sig is not None
+
+    def test_short_rejects_rsi_64(self):
+        candles, indicators, smc_data = _make_short_scenario(atr_val=0.5)
+        indicators["5m"]["rsi_last"] = 64.0
+        ch = ScalpChannel()
+        sig = ch._evaluate_liquidation_reversal(
+            "TESTUSDT", candles, indicators, smc_data, _SPREAD_PCT, _VOLUME_24H,
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "rsi_reject"
+
+
+# ---------------------------------------------------------------------------
+# Zone-proximity gate (path audit #4 — also accepts cascade extremum)
+# ---------------------------------------------------------------------------
+
+class TestLiquidationReversalZoneGate:
+    """Cascade extremum proximity is now an alternative qualifier.
+
+    A cascade by definition OVERSHOOTS supply/demand zones.  Pre-fix the gate
+    only checked `close_now` — but by the time we evaluate, close_now is
+    bouncing past the zone.  Truth-aligned: the cascade extremum (low for
+    LONG, high for SHORT) is what tested the zone.
+    """
+
+    def test_long_zone_far_from_close_but_near_cascade_low(self):
+        """Cascade overshoots zone, then bounces — close_now is past the zone
+        but cascade_low actually tested it.  Pre-fix gate rejected; new gate
+        accepts via cascade-extremum proximity."""
+        candles, indicators, smc_data = _make_long_scenario(atr_val=0.5)
+        # Rebuild last 4 closes so close_now is well above cascade_low.
+        # closes[-4:] = [100, 99, 97.5, 98.2]:
+        #   cascade_pct = (98.2-100)/100 = -1.8% (passes 1.5% floor)
+        #   cascade_low = 97.5
+        #   close_now   = 98.2 (recovered 0.7 from low)
+        candles["5m"]["close"][-4] = 100.0
+        candles["5m"]["close"][-3] = 99.0
+        candles["5m"]["close"][-2] = 97.5
+        candles["5m"]["close"][-1] = 98.2
+        candles["5m"]["high"][-1] = 98.5
+        candles["5m"]["low"][-1] = 97.5
+        candles["5m"]["open"][-1] = 97.6
+        # FVG at 97.4 — 0.10% from cascade_low (97.5), 0.82% from close (98.2).
+        # close_proximity FAILS (>0.5%); extremum_proximity PASSES (<0.5%).
+        smc_data["fvg"] = [{"level": 97.4}]
+        sig = _call_evaluator(candles, indicators, smc_data)
+        assert sig is not None, (
+            "Pre-fix gate would have rejected this — close_now is past the zone "
+            "but cascade_low actually tested it.  Truth-aligned check passes."
+        )
+
+
+# ---------------------------------------------------------------------------
 # Test 2: SHORT — Fibonacci retrace TPs
 # ---------------------------------------------------------------------------
 
