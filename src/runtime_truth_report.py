@@ -138,6 +138,27 @@ _CONFIDENCE_GATE_RE = re.compile(
     r"decision=(?P<decision>\S+)\s+reason=(?P<reason>\S+)"
 )
 
+# Tier-2: extracts the full numeric breakdown emitted alongside the
+# decision/reason (raw/composite/pre_soft/final/threshold + penalties +
+# adjustments + components).  This is the data that answers "where are the
+# 14.83 confidence-gap points being lost" — without it we have no principled
+# way to decide whether to tune component weights or scoring thresholds.
+_CONFIDENCE_COMPONENT_RE = re.compile(
+    r"confidence_gate\s+(?P<symbol>\S+)\s+(?P<channel>\S+)\s+\[(?P<setup>[^\]]+)\]:\s+"
+    r"decision=(?P<decision>\S+)\s+reason=(?P<reason>\S+)\s+"
+    r"raw=(?P<raw>[-\d.]+)\s+"
+    r"composite=(?P<composite>[-\d.]+)\s+"
+    r"pre_soft=(?P<pre_soft>[-\d.]+)\s+"
+    r"final=(?P<final>[-\d.]+)\s+"
+    r"threshold=(?P<threshold>[-\d.]+)\s+"
+    r"penalties\(eval=(?P<eval_pen>[-\d.]+),gate=(?P<gate_pen>[-\d.]+),"
+    r"total=(?P<total_pen>[-\d.]+),pair_analysis=(?P<pair_pen>[-\d.]+)\)\s+"
+    r"adjustments\(feedback=(?P<feedback>[-+\d.]+),stat_filter=(?P<stat_filter>[-+\d.]+),"
+    r"regime_transition=(?P<regime_trans>[-+\d.]+)\)\s+"
+    r"components\(market=(?P<market>[-\d.]+),execution=(?P<execution>[-\d.]+),"
+    r"risk=(?P<risk>[-\d.]+),thesis_adj=(?P<thesis_adj>[-\d.]+)\)"
+)
+
 
 def parse_regime_distribution_from_logs(log_text: str) -> Dict[str, int]:
     """Aggregate regime classification counts from periodic scanner emissions.
@@ -248,6 +269,86 @@ def parse_confidence_gate_decisions_from_logs(
         setup: {decision: dict(reasons) for decision, reasons in decisions.items()}
         for setup, decisions in by_setup.items()
     }
+
+
+def parse_confidence_gate_components_from_logs(
+    log_text: str,
+    channel: str,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Aggregate component-score statistics per setup × decision.
+
+    Returns ``{setup: {decision: {samples, avg_final, avg_threshold,
+    avg_gap_to_threshold, components: {market, execution, risk, thesis_adj},
+    avg_total_penalty}}}`` — a histogram of where confidence is sourced from
+    and where it's lost.
+
+    The 14.83-pt avg gap visible in PR #260's QUIET_SCALP_BLOCK section
+    was actionable but too coarse — it told us *that* candidates fall short
+    but not *which component* drags them under the threshold.  This data is
+    already emitted in every ``confidence_gate ...`` line by scanner.__init__;
+    we just weren't extracting it.
+    """
+    by_setup: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    if not log_text:
+        return {}
+
+    # Accumulators: setup → decision → field → running sum
+    sums: Dict[str, Dict[str, Dict[str, float]]] = {}
+    counts: Dict[str, Dict[str, int]] = {}
+
+    for line in log_text.splitlines():
+        if _CONFIDENCE_GATE_MARKER not in line:
+            continue
+        match = _CONFIDENCE_COMPONENT_RE.search(line)
+        if not match:
+            continue
+        if match.group("channel") != channel:
+            continue
+        setup = match.group("setup")
+        decision = match.group("decision")
+
+        try:
+            fields = {
+                "final": float(match.group("final")),
+                "threshold": float(match.group("threshold")),
+                "raw": float(match.group("raw")),
+                "composite": float(match.group("composite")),
+                "total_penalty": float(match.group("total_pen")),
+                "market": float(match.group("market")),
+                "execution": float(match.group("execution")),
+                "risk": float(match.group("risk")),
+                "thesis_adj": float(match.group("thesis_adj")),
+            }
+        except (ValueError, TypeError):
+            continue
+
+        bucket = sums.setdefault(setup, {}).setdefault(decision, defaultdict(float))
+        for k, v in fields.items():
+            bucket[k] += v
+        counts.setdefault(setup, {})
+        counts[setup][decision] = counts[setup].get(decision, 0) + 1
+
+    for setup, decisions in sums.items():
+        by_setup[setup] = {}
+        for decision, totals in decisions.items():
+            n = counts[setup][decision]
+            avgs = {k: round(v / n, 2) for k, v in totals.items()}
+            by_setup[setup][decision] = {
+                "samples": n,
+                "avg_final": avgs["final"],
+                "avg_threshold": avgs["threshold"],
+                "avg_gap_to_threshold": round(avgs["threshold"] - avgs["final"], 2),
+                "avg_raw": avgs["raw"],
+                "avg_composite": avgs["composite"],
+                "avg_total_penalty": avgs["total_penalty"],
+                "components": {
+                    "avg_market": avgs["market"],
+                    "avg_execution": avgs["execution"],
+                    "avg_risk": avgs["risk"],
+                    "avg_thesis_adj": avgs["thesis_adj"],
+                },
+            }
+    return by_setup
 
 
 def count_log_markers(log_text: str) -> Dict[str, int]:
@@ -522,6 +623,7 @@ def build_snapshot(
     regime_distribution: Optional[Dict[str, int]] = None,
     quiet_scalp_block: Optional[Dict[str, Any]] = None,
     confidence_gate_decisions: Optional[Dict[str, Any]] = None,
+    confidence_gate_components: Optional[Dict[str, Any]] = None,
     log_parse_diagnostics: Optional[Dict[str, int]] = None,
     now_ts: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -715,6 +817,7 @@ def build_snapshot(
         "regime_distribution": regime_distribution or {},
         "quiet_scalp_block": quiet_scalp_block or {},
         "confidence_gate_decisions": confidence_gate_decisions or {},
+        "confidence_gate_components": confidence_gate_components or {},
         "log_parse_diagnostics": log_parse_diagnostics or {},
         "recommended_operator_focus": {
             "most_suspicious_degradation": degraded[0] if degraded else None,
@@ -868,6 +971,46 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
                     lines.append(f"| {setup} | {decision} | {reason} | {count} |")
     else:
         lines.append("- _no confidence_gate decisions parsed in window_")
+
+    # ── Confidence components histogram (Tier-2 monitor upgrade) ──────
+    # The decisions table above told us "X candidates were filtered for
+    # min_confidence" — this section answers "and *what* did those scores
+    # actually look like, component by component."  Avg final vs threshold
+    # gap localises the deficit; per-component averages tell us whether to
+    # tune market/execution/risk/thesis weighting or the threshold itself.
+    components = snapshot.get("confidence_gate_components", {}) or {}
+    lines.extend(["", "## Confidence component breakdown"])
+    if components:
+        lines.append(
+            "| Setup | Decision | Samples | Avg final | Avg threshold | Gap | "
+            "Market | Execution | Risk | Thesis adj | Avg penalty |"
+        )
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for setup in sorted(components.keys()):
+            for decision in sorted(components[setup].keys()):
+                m = components[setup][decision]
+                comps = m.get("components", {})
+                lines.append(
+                    "| {setup} | {decision} | {samples} | {final:.2f} | {thr:.2f} | "
+                    "{gap:.2f} | {mk:.2f} | {ex:.2f} | {rk:.2f} | {th:.2f} | {pen:.2f} |".format(
+                        setup=setup,
+                        decision=decision,
+                        samples=m.get("samples", 0),
+                        final=m.get("avg_final", 0.0),
+                        thr=m.get("avg_threshold", 0.0),
+                        gap=m.get("avg_gap_to_threshold", 0.0),
+                        mk=comps.get("avg_market", 0.0),
+                        ex=comps.get("avg_execution", 0.0),
+                        rk=comps.get("avg_risk", 0.0),
+                        th=comps.get("avg_thesis_adj", 0.0),
+                        pen=m.get("avg_total_penalty", 0.0),
+                    )
+                )
+    else:
+        lines.append(
+            "- _no confidence_gate component samples parsed in window — "
+            "scoring telemetry may need a refresh after the next deploy_"
+        )
 
     # ── Log parse diagnostics (Tier-1 monitor upgrade) ────────────────
     diag = snapshot.get("log_parse_diagnostics", {}) or {}

@@ -100,7 +100,16 @@ def volume_profile_classify(
 # Thresholds (tunable via environment variables in the future)
 _ADX_TRENDING_MIN: float = 25.0
 _ADX_RANGING_MAX: float = float(os.getenv("ADX_RANGING_MAX", "18.0"))
-_BB_WIDTH_VOLATILE_PCT: float = 5.0   # Bollinger width as % of price
+# Bollinger-band width thresholds.  Pre-fix the VOLATILE threshold was
+# hardcoded at 5.0% — but live monitor data (see ACTIVE_CONTEXT.md
+# "Regime distribution surprise") showed 83.9% of cycles tagged VOLATILE,
+# blocking the regime-sensitive paths (VSB / BDS / ORB / WHALE / FAR / PDC)
+# almost continuously.  In crypto futures a 5% Bollinger width is routine
+# mid-cap activity, not exceptional volatility.  Empirically genuine
+# VOLATILE regimes (news events, liquidation cascades, post-FOMC moves)
+# show 8-15% BB width.  Bumped default to 8.0 and made env-overridable
+# per B8 — same convention as the QUIET threshold one line below.
+_BB_WIDTH_VOLATILE_PCT: float = float(os.getenv("BB_WIDTH_VOLATILE_PCT", "8.0"))
 _BB_WIDTH_QUIET_PCT: float = float(os.getenv("BB_WIDTH_QUIET_PCT", "1.2"))
 # Volume-delta override: if |volume_delta_pct| >= this threshold, the regime
 # is forced out of QUIET / RANGING into VOLATILE or TRENDING.

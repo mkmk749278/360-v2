@@ -1,12 +1,77 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-02 — Path audit #14 (FAILED_AUCTION_RECLAIM): invalid_price + atr_invalid + close-relative SL floor — **14-PATH AUDIT COMPLETE***
+*Updated: 2026-05-02 — Regime classifier recalibration + component-score histogram (Tier-2 monitor)*
 
 ---
 
 ## Current Phase
-**Phase 1 — Signal Quality Validation**
-Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
-window — signal drought is expected and is the dominant constraint, not a bug.
+**Phase 2 — Quality + Volume Tuning**
+Post-audit instrumentation revealed the dominant signal-flow constraint is
+NOT what every prior audit assumed.  The 14-path audit is closed; we now have
+the data to make principled tuning decisions instead of grep-driven guesses.
+
+### Latest live monitor truth (2026-04-30 12:54 UTC, 24h window)
+- **Total log lines processed:** 23.2 M (vs 49 in the pre-PR-#262 run — log
+  source fix worked as designed)
+- **Regime distribution:** VOLATILE 83.9% / QUIET 16.1% / TRENDING 0.0%.
+  The "99.7% QUIET" assumption that drove every prior audit was wrong.  Most
+  paths block on VOLATILE (VSB/BDS/ORB/WHALE/FAR/PDC), and 5% Bollinger width
+  is routine mid-cap activity, not exceptional volatility.  **This was the
+  miscalibration, not the market.**
+- **Funnel health:** evaluators generate plenty of candidates — FAR 387k,
+  SR_FLIP 211k, QCB 90k, LSR 86k.  The bottleneck is the confidence gate.
+- **QUIET_SCALP_BLOCK avg gap to threshold:** 14.83 pts (samples=19,085).
+  Candidates are scoring ~45-50 vs threshold 60 — structurally far away,
+  not "tunable away" by lowering threshold.  Lowering would flood paid
+  channels with low-conviction garbage.
+
+This session (2026-05-02 — Phase 2 kickoff):
+
+- **🔴 Regime classifier recalibration — `_BB_WIDTH_VOLATILE_PCT` 5.0 → 8.0**
+  (`src/regime.py:103`).  Live monitor showed 83.9% VOLATILE; cross-checked
+  against typical crypto BB widths (mid-cap pairs sit at 4-7% during routine
+  ranging/trending activity), confirmed 5% threshold was systematically
+  mistagging normal action as VOLATILE.  Bumped default to 8.0 + made
+  env-overridable as `BB_WIDTH_VOLATILE_PCT` per B8 (matching the
+  `BB_WIDTH_QUIET_PCT` convention immediately below).  4 new tests in
+  `tests/test_regime_context.py::TestBBWidthVolatileThresholdRecalibration`.
+  **Expected impact:** unlocks regime-blocked paths (VSB / BDS / ORB / WHALE /
+  FAR / PDC) on the bulk of pairs that were falsely VOLATILE.  Worst case:
+  fewer signals shift the regime classifier from a hard-blocking VOLATILE to
+  a path-decided RANGING/TRENDING — paths still have to clear their own
+  evaluator gates.
+
+- **🟢 Tier-2 monitor upgrade — confidence component-score histogram**
+  (`src/runtime_truth_report.py::parse_confidence_gate_components_from_logs`).
+  Extracts the full numeric breakdown already emitted by every
+  `confidence_gate ...` log line: avg final / threshold / gap, raw +
+  composite, total penalty, AND per-component averages
+  (market / execution / risk / thesis_adj).  Renders as a markdown table
+  in the truth report.  Once the next monitor run captures post-fix data,
+  this section will tell us *where* the 14.83-pt gap is sourced from —
+  whether to retune component weights, fix specific scorers, or accept that
+  the threshold is right and signals are correctly being filtered.
+
+### What's NOT in this work-stream (deliberate)
+
+- No threshold lowering anywhere.  With a 14.83-pt confidence gap, dropping
+  the floor to manufacture volume is revenue-destroying.  Component data first.
+- No new evaluator paths.  Existing 14 generate 1.2M+ candidates per 24h;
+  scoring is the binding constraint, not setup variety.
+- No watchlist tier (50-64) → paid channel promotion.  B5 prohibits it.
+
+### Open queue for next session
+
+After the next monitor run (post-regime fix deploy):
+1. Verify regime distribution shifts (target: VOLATILE ≤30%, RANGING/TRENDING
+   pick up the slack).
+2. Read the confidence component breakdown table and identify which
+   component(s) are systematically underscored.
+3. If VSB/BDS/ORB/WHALE start emitting candidates, watch their quality —
+   they were silent for so long that any regression would show fast.
+
+---
+
+## Prior session (2026-05-02 — path audit #14, FINAL of 14)
 
 **🏁 The 14-evaluator deep audit is complete.**  All 14 paths reviewed end-to-end,
 defects fixed, tests added, OWNER_BRIEF table populated.  Family-bug pattern
@@ -16,7 +81,6 @@ close-relative + 1×ATR floor; TP1 ATR-adaptive caps where structurally
 appropriate; partial-candle volume gates removed; per-channel/per-setup
 SL caps reconciled; QUIET-regime exempts (FUNDING) where confidence justifies.
 
-This session (2026-05-02 — path audit #14, FINAL):
 - **FAILED_AUCTION_RECLAIM deep dive** (`_evaluate_failed_auction_reclaim`,
   `src/channels/scalp.py:4189-4480`).  Live monitor shows FAR firing in
   production: 4 dispatched signals on liquid pairs (ORDI SHORT, XLM/LINK/FIL
