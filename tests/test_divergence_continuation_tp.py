@@ -233,8 +233,21 @@ class TestDivergenceContinuationTPLongSwingBased:
             f"({expected_tp1})"
         )
 
-    def test_tp2_equals_20candle_swing_high_or_fallback(self):
-        """tp2 must equal the 20-candle 5m swing high or a fallback R-multiple."""
+    def test_tp2_at_least_structural_swing_high_or_monotonicity_floor(self):
+        """tp2 must be at least the 20-candle structural swing high, AND must
+        sit at least 1R beyond tp1 (monotonicity floor).  Whichever is wider.
+
+        Pre-audit-#11 the test asserted strict equality with the swing high,
+        which only held because the old tight SL geometry produced small
+        sl_dist values such that `tp1 + sl_dist*1.0` never exceeded the
+        structural target.  Audit #11 widened SL geometry (close-relative +
+        1×ATR floor consistent with VSB/BDS/ORB/QCB), which propagates a
+        larger sl_dist into the monotonicity check at line 3456 — tp2 is
+        then correctly forced above the swing high.
+
+        The structural invariant the test should guard is "tp2 ≥ structural
+        target AND ≥ tp1 + 1R" — equality with a single value is too strict.
+        """
         close = 100.0
         candles = _make_candles_long(close=close)
         sig, _ = _run_long(close=close, candles=candles)
@@ -242,13 +255,18 @@ class TestDivergenceContinuationTPLongSwingBased:
             pytest.skip("Signal did not fire")
         highs_5m = [float(h) for h in candles["5m"]["high"]]
         swing_high = max(highs_5m[-20:])
-        # tp2 should either be the structural swing high (if valid) or a fallback
+        sl_dist = abs(sig.entry - sig.stop_loss)
         if swing_high > close:
-            assert sig.tp2 == pytest.approx(swing_high, rel=1e-6), (
-                f"tp2 ({sig.tp2}) should equal the 20-candle swing high ({swing_high})"
+            assert sig.tp2 >= swing_high - 1e-6, (
+                f"tp2 ({sig.tp2}) must be at least the 20-candle swing high "
+                f"({swing_high})"
+            )
+            assert sig.tp2 >= sig.tp1 + sl_dist - 1e-6, (
+                f"tp2 ({sig.tp2}) must be ≥ tp1 + 1R (monotonicity); "
+                f"tp1={sig.tp1}, sl_dist={sl_dist}"
             )
         else:
-            # Fallback should be a positive R-multiple above entry
+            # Fallback: positive R-multiple above entry
             assert sig.tp2 > sig.entry, "Fallback tp2 must be above entry for LONG"
 
     def test_all_tps_above_entry(self):
@@ -333,6 +351,55 @@ class TestDivergenceContinuationTPShortSwingBased:
             pytest.skip("Signal did not fire")
         assert sig.stop_loss > sig.entry, (
             f"stop_loss ({sig.stop_loss}) must be above entry ({sig.entry}) for SHORT"
+        )
+
+
+# ---------------------------------------------------------------------------
+# Path audit #11 — DIV_CONT audit fixes
+# ---------------------------------------------------------------------------
+
+class TestDivergenceContinuationAuditFixes:
+    """Path audit #11 fixes:
+    - `close <= 0` now emits `invalid_price` (was `momentum_reject`).
+    - SL geometry respects close-relative + 1×ATR floor (mirror of VSB/BDS
+      family).
+    - TP1 ATR-adaptive cap (1.8R/2.5R/uncapped) consistent with SR_FLIP /
+      TPE / FUNDING.
+    """
+
+    def test_invalid_price_reports_distinct_reject_reason(self):
+        """`close <= 0` must emit `invalid_price`, not `momentum_reject`.
+        Pre-fix the two were conflated in path-funnel telemetry."""
+        candles = _make_candles_long(close=100.0)
+        # Force invalid close on the latest bar.
+        candles["5m"]["close"][-1] = 0.0
+        cvd = _make_cvd_long()
+        smc = _make_smc_data(cvd=cvd)
+        ind = _make_indicators(close=100.0)
+        channel = ScalpChannel()
+        sig = channel._evaluate_divergence_continuation(
+            symbol="TESTUSDT", candles=candles, indicators=ind, smc_data=smc,
+            spread_pct=0.001, volume_24h_usd=50_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert channel._active_no_signal_reason == "invalid_price", (
+            f"close <= 0 must emit `invalid_price`, got "
+            f"{channel._active_no_signal_reason!r}"
+        )
+
+    def test_sl_respects_close_relative_floor(self):
+        """When close sits very near EMA21 (well within the 1.5% retest
+        proximity gate), pre-fix the SL was `ema21 × 0.995` which produced
+        sub-spread sl_dist values.  Post-fix the close-relative floor
+        `max(0.8% × close, 1×ATR)` keeps sl_dist ≥ 0.8%.
+        """
+        sig, _ = _run_long()
+        if sig is None:
+            pytest.skip("Signal did not fire")
+        sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
+        assert sl_dist_pct >= 0.79, (
+            f"DIV_CONT SL distance {sl_dist_pct:.3f}% is too tight — "
+            f"close-relative floor (max(0.8%, 1×ATR)) was not honoured."
         )
 
 
