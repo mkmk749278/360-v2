@@ -3136,10 +3136,18 @@ class ScalpChannel(BaseChannel):
             if direction == Direction.SHORT and not (macd_hist_last < macd_hist_prev):
                 return self._reject("macd_reject")
 
-        # Volume: current >= 2.0x 20-candle avg
+        # Volume: rolling average must be non-degenerate.
+        # Pre-fix this also demanded `volumes[-1] >= 2.0 × avg_vol` — but
+        # volumes[-1] is the STILL-FORMING current 5m candle whose volume is
+        # necessarily a fraction of a complete candle's eventual volume.
+        # Demanding partial-candle volume exceed multiples of complete-candle
+        # averages is the same unit-mismatch bug that was removed from
+        # VSB / BDS / ORB (PRs #250 / #251 / #252).  Especially backward for
+        # QCB which requires QUIET regime (low absolute volume by definition);
+        # the squeeze-release thesis tracks the BREAKOUT candle's volume,
+        # not a still-forming partial candle's running total.
         avg_vol = sum(float(v) for v in volumes[-21:-1]) / 20.0
-        current_vol = float(volumes[-1])
-        if avg_vol <= 0 or current_vol < 2.0 * avg_vol:
+        if avg_vol <= 0:
             return self._reject("volume_reject")
 
         # RSI
@@ -3159,15 +3167,25 @@ class ScalpChannel(BaseChannel):
 
         atr_val = ind.get("atr_last", close * 0.002)
 
-        # SL and TP
+        # SL and TP — same close-relative + ATR floor pattern as VSB / BDS / ORB.
+        # Pre-fix anchored SL to the opposite Bollinger band with a tiny 0.5×ATR
+        # buffer, OR to a flat 0.3% close-relative — whichever was further.
+        # The 0.3% floor was sub-spread on most pairs and ignored ATR; the
+        # bb-anchored stop was tight in compressed-band conditions (QCB by
+        # definition fires when bb width <2.5%).  Result: the 0.80% universal
+        # floor at `_enqueue_signal` clamped most stops, defeating the
+        # structural anchor.  Apply close-relative floor: max(0.8% × close,
+        # 1×ATR) below close (LONG) / above close (SHORT).  Take the
+        # further-from-close of structural and close-relative anchors so
+        # the stop respects both the band geometry AND minimum room.
         if direction == Direction.LONG:
-            sl_from_bb = bb_lower - atr_val * 0.5
-            sl_from_pct = close * (1 - 0.003)
-            sl = min(sl_from_bb, sl_from_pct)
+            structural_sl = bb_lower - atr_val * 0.5
+            close_rel_floor = close - max(close * 0.008, atr_val * 1.0)
+            sl = min(structural_sl, close_rel_floor)
         else:
-            sl_from_bb = bb_upper + atr_val * 0.5
-            sl_from_pct = close * (1 + 0.003)
-            sl = max(sl_from_bb, sl_from_pct)
+            structural_sl = bb_upper + atr_val * 0.5
+            close_rel_ceiling = close + max(close * 0.008, atr_val * 1.0)
+            sl = max(structural_sl, close_rel_ceiling)
 
         sl_dist = abs(close - sl)
         if sl_dist <= 0:
