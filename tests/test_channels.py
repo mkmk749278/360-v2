@@ -189,6 +189,99 @@ class TestScalpChannel:
         assert sig is None
         assert ch._active_no_signal_reason == "sweeps_not_detected"
 
+    # ------------------------------------------------------------------
+    # MSS confirmation (SMC doctrine: sweep + lower-TF MSS)
+    # ------------------------------------------------------------------
+
+    def test_lsr_mss_missing_applies_soft_penalty(self):
+        """MSS absent → signal still fires but carries MSS_MISSING flag and -8 penalty."""
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        smc_data = {"sweeps": [sweep]}  # no "mss" key
+
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        assert sig is not None, "MSS missing should be soft penalty, not hard reject"
+        assert "MSS_MISSING" in (sig.soft_gate_flags or "")
+
+    def test_lsr_mss_match_no_penalty(self):
+        """MSS present with same direction as sweep → canonical SMC pattern, no MSS flag."""
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        mss = MSSSignal(
+            index=59, direction=Direction.LONG,
+            midpoint=99.0, confirm_close=99.5,
+        )
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        smc_data = {"sweeps": [sweep], "mss": mss}
+
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        assert sig is not None
+        assert "MSS_MISSING" not in (sig.soft_gate_flags or "")
+
+    def test_lsr_mss_direction_mismatch_hard_reject(self):
+        """MSS direction mismatches sweep → LTF moved against sweep, signal rejected."""
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        # MSS direction is SHORT but sweep is LONG → reversal failed
+        mss = MSSSignal(
+            index=59, direction=Direction.SHORT,
+            midpoint=99.0, confirm_close=98.5,
+        )
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        smc_data = {"sweeps": [sweep], "mss": mss}
+
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        assert sig is None
+        assert ch._active_no_signal_reason == "mss_direction_mismatch"
+
+    def test_lsr_no_5m_momentum_sign_check(self):
+        """LSR must NOT reject a LONG sweep just because 3-candle 5m momentum is negative.
+
+        Pre-fix: the lines `if direction == LONG and mom < 0: reject` killed valid LSRs
+        because pre-sweep drift is by definition opposite to the post-sweep reversal.
+        """
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        # LONG sweep but negative 3-candle momentum (pre-sweep drift was down)
+        # — must NOT be rejected with momentum_reject post-fix.
+        # Magnitude still meaningful so the |mom| >= threshold check passes.
+        indicators = {"5m": _make_indicators(adx_val=30, mom=-0.5, ema9=101, ema21=100)}
+        smc_data = {"sweeps": [sweep]}
+
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        # Either the signal is produced, or it's rejected for a reason other
+        # than the deleted sign check. The key assertion is that the path no
+        # longer trips on momentum_reject due to pre-sweep mom sign.
+        if sig is None:
+            assert ch._active_no_signal_reason != "momentum_reject", (
+                f"LSR rejected with momentum_reject on negative pre-sweep mom — "
+                f"the structurally-broken sign check has reappeared. "
+                f"reason={ch._active_no_signal_reason!r}"
+            )
+        else:
+            assert sig.direction == Direction.LONG
+
     def test_funding_extreme_quiet_regime_blocked_reason(self):
         ch = ScalpChannel()
         sig = ch._evaluate_funding_extreme(

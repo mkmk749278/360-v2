@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-04-30 — HYPEUSDT QCB -21.6 gate penalty diagnosed + recalibrated*
+*Updated: 2026-04-30 — Path audit #1 (LSR): broken momentum-sign check removed, MSS confirmation wired*
 
 ---
 
@@ -8,7 +8,36 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-04-30):
+This session (2026-04-30, evening):
+- **Path audit #1 — LIQUIDITY_SWEEP_REVERSAL deep dive.** Owner authorized
+  fixing the path before moving on; rule-override permitted where structurally
+  justified. Audit identified two real defects in `_evaluate_standard`
+  (`src/channels/scalp.py:747`):
+  1. **Broken 5m-momentum-direction-sign check** (was lines 824–828).
+     The 3-candle `momentum` indicator is a close-to-close % change measured
+     across 3 bars — for a fresh sweep candle, 2 of those 3 bars are
+     *pre-sweep drift* which by definition moves opposite to the post-sweep
+     reversal. The sign check therefore rejected the very setups LSR is
+     designed to fire on. Latest monitor zip showed `momentum_reject=7,330`
+     (~40% of all `EVAL::STANDARD` cycles); this gate was a major contributor.
+     **Fix**: deleted the sign check entirely. Magnitude (`|mom| ≥ threshold`)
+     and persistence checks remain — both sign-agnostic. The MSS gate below
+     is the structurally truthful direction confirmation.
+  2. **Missing MSS confirmation** despite the helper existing. `detect_mss()`
+     in `src/smc.py:184` is computed by `SMCDetector` and reaches the
+     evaluator via `smc_data["mss"]`, but `_evaluate_standard` never read
+     it — half the SMC pattern was unused.
+     **Fix**: wired three-state MSS check after sweep direction is set —
+     match → no penalty (canonical pattern complete), mismatch → hard reject
+     (`mss_direction_mismatch`, LTF moved against the sweep), missing →
+     soft penalty `MSS_MISSING:-8` applied alongside MTF/MACD penalties.
+     Soft (not hard) when missing because 1m may not have updated past the
+     sweep candle's body yet on a freshly-detected sweep.
+- **Tests added** (`tests/test_channels.py::TestScalpChannel`): four new cases
+  covering MSS missing/match/mismatch and a regression guard against the
+  deleted sign check. All pass; no regressions introduced (the 6 failures in
+  the broader test run are pre-existing per queue item #13, confirmed by
+  `git stash` baseline).
 - **Reviewed monitor zip 2026-04-30 04:08 UTC** — flagged stale (last performance
   record 3.4h old). Window-over-window deltas all zero vs prior window — same
   QUIET regime, same path silence. Only 3 QCB closes in window, all flat
@@ -156,6 +185,7 @@ statistical confidence.
 | **Mover-promotion REST seed + CVD seed on promotion (PR #233 follow-up)** | `src/scanner/__init__.py:1090` (`_seed_mover_pair`) | **This session (2026-04-29)** |
 | **REST-fallback admin-alert grace period (60s) — transient drops stay silent; only sustained outages alert. Cooldown layered on top for prolonged outages.** | `src/websocket_manager.py:303` (`_start_rest_fallback` + `_maybe_alert_after_grace`) | Prior 2026-04-29 |
 | **PR-7B path-aware modulation: QCB volume_div = 0.60 — closes structural mismatch where QUIET volume_div thresholds flag QCB's own breakout pattern as manipulation; -21.6 → -13.0** | `src/scanner/__init__.py:449` (`_PENALTY_MODULATION_BY_SETUP`) + test mirror in `tests/test_regime_soft_penalty.py` | **This session (2026-04-30)** |
+| **LSR path audit fix: removed broken 5m-mom-direction-sign check (was rejecting valid sweeps because pre-sweep drift contaminates 3-candle momentum); wired MSS confirmation as soft penalty (missing = -8, mismatch = hard reject)** | `src/channels/scalp.py:_evaluate_standard` + 4 new tests in `tests/test_channels.py::TestScalpChannel` | **This session (2026-04-30 evening)** |
 
 ---
 
@@ -269,6 +299,10 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 12 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
 | 13 | Pre-existing test breakage: 139 failures on main (PR #240 channel cap raise + others didn't update fixtures) — clean up in dedicated PR | Tech debt |
 | 14 | Diagnose underlying 15-min futures WS drop (needs VPS-side `_health_watchdog` "stale WS connection" log) | Investigation |
+| 15 | **Path audit #1: LSR (`_evaluate_standard`) — broken mom-sign removed, MSS gate wired** | ✅ This session (2026-04-30 eve) |
+| 16 | Path audit — next path on the list (WHALE_MOMENTUM by default) | Pending owner go-ahead |
+| 17 | LSR follow-up: validate momentum_reject rate drops on next monitor zip; check MSS_MISSING flag prevalence in emitted LSRs | Observation |
+| 18 | LSR open question: should LSR be added to `STRUCTURAL_SLTP_PROTECTED_SETUPS` so the FVG-anchored TP1 + 20-candle swing TP2 the evaluator computes survive `_assign_tps`? Currently they're discarded in favour of fixed 1.2/2.1/3.0R cadence. Adding it would also flip the SL cap from compress to reject — owner decision required | Pending owner decision |
 
 ---
 
