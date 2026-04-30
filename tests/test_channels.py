@@ -839,26 +839,29 @@ def _make_surge_candles(n=60, base=100.0, breakout_offset=3):
 
     Layout (all indices relative to the final candle, i.e. candle[-1]):
     - Candles at [-26:-6]: prices in 98–99 range, average volume 1000
-    - Candle at -breakout_offset: high of 103 (breaks swing high ~99), volume 3000
-    - Current candle [-1]: close=98.5 (about 0.5% below swing high 99.0)
-      with surge volume 4500 (> 3× the inflated rolling average of ~1285)
+    - Candle at -breakout_offset: high 103, **close 102** (TRUE close-above
+      breakout — required by the post-audit-#5 close-above gate; pre-fix
+      a fixture with high>swing+close<swing was accepted as a "breakout"
+      but is structurally a sweep, not a breakout)
+    - Current candle [-1]: close=98.5 (~0.5% below the broken level)
     """
     closes = np.ones(n) * 98.5
     highs  = np.ones(n) * 99.0
     lows   = np.ones(n) * 97.5
     vols   = np.ones(n) * 1000.0
 
-    # Create a detectable breakout candle at the given offset from the end
+    # Breakout candle: high 103 + close 102 = genuine close-above breakout.
     idx = n - breakout_offset
-    highs[idx] = 103.0   # clearly above prior swing high
-    vols[idx]  = 3000.0  # 3× rolling average → passes 2× breakout threshold
+    highs[idx]  = 103.0   # wick above prior swing high
+    closes[idx] = 102.0   # close-above too — real breakout, not a sweep
+    lows[idx]   = 99.5    # candle range 99.5–103.0
+    vols[idx]   = 3000.0  # 3× rolling average → passes 2× breakout threshold
 
-    # Current candle: surge volume must exceed 3× rolling average.
-    # Because the breakout candle (3000) is within the rolling window, the
-    # inflated avg is ~1285; 4500 > 3×1285 = 3857 so the check passes.
+    # Current candle: in the pullback retest zone.
     closes[-1] = 98.5
     highs[-1]  = 99.0
-    vols[-1]   = 4500.0
+    lows[-1]   = 98.2
+    vols[-1]   = 1000.0  # typical partial-candle volume (post audit-#5 gate-removal)
 
     return {
         "open": closes - 0.1,
@@ -1013,6 +1016,128 @@ class TestVolumeSurgeBreakoutRefinements:
         sig = self._call(candles, _surge_indicators(rsi_val=42.0), _surge_smc())
         assert sig is not None, "RSI 42 should be accepted (borderline, not hard-blocked)."
         assert sig.soft_penalty_total >= 5.0
+
+    # ── Current-candle volume gate (path audit #5 — gate removed) ────────
+
+    def test_signal_fires_when_current_candle_volume_is_low(self):
+        """Surge breakout with HIGH breakout-candle volume but LOW current-candle
+        volume must still fire.  Pre-fix the gate `volumes[-1] >= 3 × rolling_avg`
+        rejected these as `volume_spike_missing` — but volumes[-1] is a
+        still-forming partial 5m candle whose volume is necessarily a fraction
+        of a complete candle's, AND a breakout pullback has REDUCED volume by
+        thesis (low-volume retest is the canonical setup, not high-volume).
+        The gate was removed in path audit #5.  The breakout-candle volume
+        check (≥ 2× rolling_avg on the closed breakout candle) still validates
+        the surge.
+        """
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        # Knock the current candle's volume down to a realistic partial-candle
+        # value (well below 3× the inflated rolling average).  Pre-fix this
+        # was an automatic reject; post-fix it should fire normally.
+        candles["5m"]["volume"][-1] = 800.0  # ~rolling_avg, no longer 4500
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, (
+            "VSB must accept a valid breakout+pullback when the current "
+            "(still-forming) candle has typical partial-candle volume. "
+            "Pre-fix the path was rejecting 62.7% of cycles on this gate."
+        )
+        assert sig.setup_class == "VOLUME_SURGE_BREAKOUT"
+
+    def test_signal_fires_when_current_candle_volume_is_zero(self):
+        """Even with zero current-candle volume (very early in the 5m bar), the
+        path must accept if the breakout candle had surge volume."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        candles["5m"]["volume"][-1] = 0.0  # imagine we're scanning 1s into the candle
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, (
+            "Zero current-candle volume early in a 5m bar must not block VSB; "
+            "the breakout-candle volume check is what validates the surge"
+        )
+
+    # ── Breakout-close requirement (path audit #5) ────────────────────────
+
+    def test_wick_only_breakout_rejected_as_false_break(self):
+        """A wick that pierces swing_high but closes back BELOW it is a sweep,
+        not a breakout.  Pre-fix VSB accepted these as valid breakouts and
+        treated the subsequent reversal as a 'pullback retest' — a structural
+        misread that fed false positives.  Post-fix it requires the breakout
+        candle to also CLOSE above the swing high."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        # Roll back the breakout candle's close to BELOW swing_high while
+        # leaving the wick above (true sweep geometry, no real breakout).
+        idx = 60 - 3
+        candles["5m"]["close"][idx] = 98.5  # below swing_high (99)
+        candles["5m"]["high"][idx]  = 103.0  # wick still pierces
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is None, (
+            "Wick-only piercing without close-above is a sweep, not a breakout — "
+            "VSB must reject"
+        )
+
+    def test_breakout_close_just_above_swing_high_accepted(self):
+        """Genuine close-above breakout must be accepted even when close is only
+        marginally above swing_high (just barely a real breakout)."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        idx = 60 - 3
+        # Close at 99.05 = 0.05% above swing_high (99.0) — minimally valid.
+        candles["5m"]["close"][idx] = 99.05
+        candles["5m"]["high"][idx]  = 99.5  # wick a bit higher
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, (
+            "Close marginally above swing_high is a genuine breakout, must accept"
+        )
+
+    # ── SL geometry (path audit #5) ──────────────────────────────────────
+
+    def test_sl_distance_minimum_in_premium_pullback_zone(self):
+        """In the 0.3–0.6% pullback zone, pre-fix SL distance was 0.2–0.5%
+        (anchored only to swing_high).  Post-fix SL respects a close-relative
+        floor of max(0.8% of close, 1.0×ATR) so it is never tighter than 0.8%
+        from entry — even when structural anchor (0.8% below swing_high) is
+        much closer."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        # Default fixture: swing_high=99.0, close=98.5, dist 0.505%.
+        # Pre-fix sl=99*0.992=98.208 → sl_dist=0.292 (0.30% of close)
+        # Post-fix sl_dist must be ≥ max(0.8% × 98.5, 1×ATR=0.5) = 0.788
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        sl_dist_pct = sl_dist / sig.entry * 100.0
+        assert sl_dist_pct >= 0.79, (
+            f"SL distance {sl_dist_pct:.3f}% is too tight — must be ≥ 0.8% "
+            f"after the close-relative floor.  Pre-fix this was ~0.3% and "
+            f"would be hit by routine spread+volatility on most futures pairs."
+        )
+
+    # ── B8 — env-overridable breakout volume multiplier ──────────────────
+
+    def test_breakout_vol_multiplier_env_overridable(self, monkeypatch):
+        """VSB_BREAKOUT_VOL_MULT must be tunable via env without redeploy (B8).
+
+        Pre-fix this was hardcoded `2.0` at the call site.  Post-fix it reads
+        from `VSB_BREAKOUT_VOL_MULT` env var.  Module-level constant requires
+        re-import to pick up the override.
+        """
+        monkeypatch.setenv("VSB_BREAKOUT_VOL_MULT", "10.0")
+        import importlib
+
+        import src.channels.scalp as scalp_module
+        importlib.reload(scalp_module)
+        try:
+            ch = scalp_module.ScalpChannel()
+            candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+            # Default fixture: breakout_vol = 3000, rolling_avg ≈ 1285.
+            # 3000 vs 10 × 1285 = 12,850 → fails 10× threshold.
+            sig = ch._evaluate_volume_surge_breakout(
+                "BTCUSDT", candles, _surge_indicators(), _surge_smc(),
+                0.01, 10_000_000, regime="TRENDING_UP",
+            )
+            assert sig is None, (
+                "Env override 10× should reject default fixture (3× breakout vol)"
+            )
+        finally:
+            monkeypatch.delenv("VSB_BREAKOUT_VOL_MULT", raising=False)
+            importlib.reload(scalp_module)
 
     # ── FVG / orderblock in fast vs. calm regimes ────────────────────────
 

@@ -172,6 +172,7 @@ Every item below was verified by reading the actual deployed code from the curre
 | WHALE_MOMENTUM — whale-alert producer scans recent_ticks window (was only checking the latest tick — alert visible ~50–100ms on active pairs); WHALE_TRADE_USD_THRESHOLD + WHALE_MIN_TICK_VOLUME_USD + WHALE_OBI_MIN + WHALE_DELTA_MIN_RATIO now env-overridable per B8 | ✅ 2026-04-30 |
 | TREND_PULLBACK_EMA — body-conviction gate replaced with close-position-in-range (was punishing the canonical hammer reclaim that defines a valid pullback entry — large lower wick is the EMA-test feature, not noise) | ✅ 2026-04-30 |
 | LIQUIDATION_REVERSAL — RSI thresholds relaxed 25/75 → 35/65 with RSI direction-of-travel check (was demanding extreme exhaustion 5m RSI rarely hits); zone-proximity gate now also accepts cascade extremum within 0.5% of FVG/orderblock (cascades overshoot zones by definition) | ✅ 2026-05-01 |
+| VOLUME_SURGE_BREAKOUT — multi-fix audit: (A) removed broken current-candle volume gate (62.7% of rejections — partial-candle vs complete-candle threshold mismatch contradicting the "surge + pullback" thesis); (B) breakout qualifier now requires close above swing_high — wick-only piercing was being accepted as a breakout but is a sweep; (C) SL anchored to lower of swing-relative floor and close-relative floor (max(0.8%, 1×ATR)) — pre-fix produced 0.05% stops in extended pullback zones; (D) breakout vol multiplier now env-overridable per B8 | ✅ 2026-05-01 |
 
 ### Live Performance Data (from 20-hour monitor window)
 
@@ -223,6 +224,7 @@ Dominant suppressors per live scan logs:
 - ORB, CLS, PDC — not yet diagnosed; separate investigation needed.
 - DIV_CONT, FUNDING_EXT — Audit-3 unlocks applied; awaiting first live signals.
 - `LIQUIDATION_REVERSAL` — was generating 0 signals in latest 18k-cycle zip; cascade_threshold_not_met dominates (76.8%, by-design in QUIET regime). Audit #4 (2026-05-01) relaxed two downstream gates (RSI extreme + zone proximity) that would have killed valid setups when regime returns. Unvalidated; expect emissions when first cascades trigger in non-QUIET regime.
+- `VOLUME_SURGE_BREAKOUT` — was generating 0 signals in latest 18k-cycle zip; `volume_spike_missing` was 62.7% (dominant). Audit #5 (2026-05-01) removed the broken current-candle volume gate that demanded the still-forming partial 5m candle exceed multiples of complete-candle averages, contradicting VSB's "surge + pullback" thesis. Unvalidated; expect emissions to surge once non-QUIET regime returns.
 
 ---
 
