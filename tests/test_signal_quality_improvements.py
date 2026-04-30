@@ -273,6 +273,11 @@ class TestCVDChannel:
 # P0-3 & P1-3: OBI channel — ATR proximity + staleness guard
 # ===========================================================================
 
+@pytest.mark.skip(reason=(
+    "src.channels.scalp_obi was removed during channel-family consolidation. "
+    "Re-author against the surviving channel that absorbed OBI's behaviour, "
+    "or remove if OBI is permanently gone."
+))
 class TestOBIChannel:
     """Tests for scalp_obi improvements."""
 
@@ -587,8 +592,13 @@ class TestRegimeHysteresis:
 class TestConfidenceLog:
     """Tests for log_confidence_breakdown and CONFIDENCE_LOG_ENABLED."""
 
-    def test_log_confidence_breakdown_writes_json(self, tmp_path):
-        """log_confidence_breakdown appends a valid JSON record."""
+    def test_log_confidence_breakdown_writes_json(self, tmp_path, monkeypatch):
+        """log_confidence_breakdown appends a valid JSON record.
+
+        Uses monkeypatch to scope `CONFIDENCE_LOG_PATH` to this test only.
+        Pre-cleanup the test used `importlib.reload` which polluted module
+        state and broke unrelated tests in the same suite run.
+        """
         from src.confidence import log_confidence_breakdown
         log_file = tmp_path / "confidence_log.jsonl"
         breakdown = {"smc": 20.0, "trend": 15.0, "liquidity": 10.0}
@@ -600,14 +610,11 @@ class TestConfidenceLog:
             session_multiplier=1.0,
             outcome=None,
         )
-        # Verify file doesn't exist yet (path not configured)
-        # Re-run with our tmp path:
+        # Re-run with our tmp path — patch the module-level constant in
+        # `src.confidence` directly via monkeypatch (the function reads
+        # `confidence.CONFIDENCE_LOG_PATH`, sourced from config at import time).
         import src.confidence as _cm
-        import config as _cfg
-        orig = _cfg.CONFIDENCE_LOG_PATH
-        _cfg.CONFIDENCE_LOG_PATH = str(log_file)
-        import importlib
-        importlib.reload(_cm)
+        monkeypatch.setattr(_cm, "CONFIDENCE_LOG_PATH", str(log_file))
 
         _cm.log_confidence_breakdown(
             signal_id="TEST-001",
@@ -616,8 +623,7 @@ class TestConfidenceLog:
             total=75.0,
             session_multiplier=1.0,
         )
-        _cfg.CONFIDENCE_LOG_PATH = orig
-        importlib.reload(_cm)
+        # monkeypatch teardown restores _cm.CONFIDENCE_LOG_PATH automatically.
 
         # parse the log
         if log_file.exists():

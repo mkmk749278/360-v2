@@ -145,8 +145,12 @@ def _make_prepare_side_effect(mapping: dict):
 
     ``mapping`` must be ``{id(raw_signal): prepared_signal, ...}``.
     Unknown raw signals return ``(None, None)``.
+
+    Accepts arbitrary additional kwargs (notably `_funnel_meta` added in a
+    later refactor) so the side_effect signature stays aligned with the real
+    `_prepare_signal` regardless of further plumbing additions.
     """
-    async def _side_effect(symbol, volume_24h, chan, ctx, _preseed_signal=None):
+    async def _side_effect(symbol, volume_24h, chan, ctx, _preseed_signal=None, **_kwargs):
         if _preseed_signal is None:
             return None, None
         return mapping.get(id(_preseed_signal), (None, None))
@@ -243,7 +247,7 @@ class TestScalpArbitrationQualityRanked:
 
         call_order = []
 
-        async def _tracking_prepare(symbol, volume_24h, chan, ctx, _preseed_signal=None):
+        async def _tracking_prepare(symbol, volume_24h, chan, ctx, _preseed_signal=None, **_kwargs):
             mapping = {
                 id(weak_raw): (weak_prep, None),
                 id(strong_raw): (strong_prep, None),

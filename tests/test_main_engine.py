@@ -86,7 +86,11 @@ class TestCryptoSignalEngineInit:
 
     def test_engine_channels_count(self):
         engine = self._make_engine()
-        assert len(engine._channels) == 9  # 9 SCALP channel variants
+        # Channel-family consolidation reduced the active count from 9 → 8
+        # (scalp_obi was absorbed into other channels).  Assertion updated to
+        # the current count; if the count changes again, update both this
+        # number and the comment, do not silence the test.
+        assert len(engine._channels) == 8
 
     def test_signal_history_starts_empty(self):
         engine = self._make_engine()
@@ -355,10 +359,16 @@ class TestBootstrapBootMessage:
             tier1_spot_symbols=[],
             tier1_futures_symbols=[],
         )
+        # `bootstrap.py:177` iterates `engine.data_store.candles.items()` for
+        # the post-seed CVD priming step.  Earlier fixture omitted `candles`
+        # which caused AttributeError mid-boot — provide an empty dict so the
+        # CVD priming loop is a no-op (the test exercises the boot-message
+        # flow, not CVD seeding).
         data_store = SimpleNamespace(
             load_snapshot=lambda: False,
             seed_all=AsyncMock(return_value=pair_count),
             gap_fill=AsyncMock(return_value=pair_count),
+            candles={},
         )
         return SimpleNamespace(
             _boot_time=0,

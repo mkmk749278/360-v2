@@ -49,6 +49,11 @@ def _reload_config_with_env(env: dict[str, str]):
             if mod_name == "config" or mod_name.startswith("config."):
                 del sys.modules[mod_name]
         importlib.import_module("config")
+        # Reload modules whose constants come from `from config import …` —
+        # otherwise stale references contaminate downstream tests.
+        for dependent in ("src.scanner", "src.signal_quality"):
+            if dependent in sys.modules:
+                importlib.reload(sys.modules[dependent])
 
 
 def _make_candles(n: int = 30, base: float = 100.0) -> dict:

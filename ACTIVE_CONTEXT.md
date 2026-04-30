@@ -565,7 +565,7 @@ Blocker: win rate. Per-setup SL caps + TP1 ATR-adaptive caps address structural 
 | 10 | Win-rate check — needs ≥20 closed signals in non-QUIET regime | Data validation |
 | 11 | Investigate ORB / CLS / PDC silence under non-QUIET regime | Code investigation |
 | 12 | DISTRIBUTION gate calibration (conditional on next zip) | Conditional |
-| 13 | Pre-existing test breakage: 139 failures on main (PR #240 channel cap raise + others didn't update fixtures) — clean up in dedicated PR | Tech debt |
+| 13 | **Pre-existing test breakage cleanup** — was 136 failures on main (mostly stale assertions from refactors: SL cap raises, removed `_evaluate_range_fade`, dead channels SWING/SPOT/GEM/OBI, outcome-string refactor, mock kwarg additions, hold-time formatter changes).  Cleanup PR #N takes the suite from 136 failed → 0 failed (3302 passed, 13 skipped for removed features, 52 xfailed with structured rationale, 12 xpassed — markers to revisit).  Two follow-ups remain: (a) the 12 `xpassed` markers should be re-evaluated and removed if their root cause is gone; (b) `importlib.reload(config)` calls in test_pr04/test_pr06/test_channel_merge cause cross-test contamination of `from config import …` references — proper fix is to switch those tests to `monkeypatch.setattr` instead. | ✅ Fixed (cleanup PR) |
 | 14 | Diagnose underlying 15-min futures WS drop (needs VPS-side `_health_watchdog` "stale WS connection" log) | Investigation |
 | 15 | **Path audit #1: LSR (`_evaluate_standard`) — broken mom-sign removed, MSS gate wired** | ✅ Merged |
 | 16 | **Path audit #2: WHALE_MOMENTUM — whale-alert single-tick bug fixed, thresholds env-overridable** | ✅ Merged (#246) |

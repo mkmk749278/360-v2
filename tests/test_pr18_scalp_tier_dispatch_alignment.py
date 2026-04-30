@@ -220,6 +220,12 @@ class TestRouterWatchlistDoctrine:
             "in _active_signals.  WATCHLIST is free-channel-only per doctrine."
         )
 
+    @pytest.mark.xfail(reason=(
+        "WATCHLIST routing was disabled in OWNER_BRIEF verified-live fix "
+        "'WATCHLIST spam in free channel disabled'.  Test asserts the old "
+        "behaviour (post WATCHLIST to free channel) which is no longer the "
+        "doctrine.  Re-author against the current B5 contract or remove."
+    ))
     @pytest.mark.asyncio
     async def test_watchlist_scalp_signal_posted_to_free_channel(self, queue, router, sent_messages):
         """A WATCHLIST-tier 360_SCALP signal must be posted to the free channel."""
