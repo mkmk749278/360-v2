@@ -38,6 +38,7 @@ from config import (
     WS_RECONNECT_BASE_DELAY,
     WS_RECONNECT_FAIL_ALERT_THRESHOLD,
     WS_RECONNECT_MAX_DELAY,
+    WS_REST_FALLBACK_ALERT_GRACE_SEC,
     WS_SESSION_RECYCLE_ATTEMPTS,
     WS_STALENESS_MULTIPLIER,
     WS_STALENESS_MULTIPLIER_FUTURES,
@@ -303,13 +304,18 @@ class WebSocketManager:
     def _start_rest_fallback(self) -> None:
         """Activate REST fallback if critical pairs are configured.
 
-        Admin alert is gated by ``WS_ALERT_COOLDOWN`` to prevent spam when
-        the WS connection drops + reconnects on a regular cadence (e.g.
-        the staleness watchdog force-closes after ``heartbeat_interval ×
-        staleness_multiplier`` of TEXT-message silence, which fires every
-        ~15 min on the futures stream even though reconnect is clean).
-        Sustained outages still surface: once the cooldown expires the
-        next activation re-fires the alert with a coalesced count.
+        The admin alert is delayed by ``WS_REST_FALLBACK_ALERT_GRACE_SEC``
+        so transient drops that reconnect inside the grace window stay
+        silent — they're informational only and were creating Telegram
+        spam (e.g. the futures staleness watchdog force-closes every
+        ``heartbeat_interval × staleness_multiplier`` ≈ 15 min and
+        reconnect succeeds in <2 s, which would have alerted every cycle).
+
+        Sustained outages (REST fallback still active after the grace
+        period) still fire the alert; subsequent fires within
+        ``WS_ALERT_COOLDOWN`` are coalesced into a suppressed-count
+        suffix on the next post-cooldown alert so prolonged outages
+        don't spam either.
         """
         if not self._critical_pairs:
             return
@@ -318,26 +324,37 @@ class WebSocketManager:
         self._rest_fallback_active = True
         self._fallback_task = asyncio.create_task(self._rest_fallback_loop())
         if self._admin_alert:
-            now = time.monotonic()
-            cooldown_expired = (
-                self._last_rest_fallback_alert_time is None
-                or (now - self._last_rest_fallback_alert_time) > WS_ALERT_COOLDOWN
+            asyncio.create_task(self._maybe_alert_after_grace())
+
+    async def _maybe_alert_after_grace(self) -> None:
+        """Wait the grace period; alert only if REST fallback is still active.
+
+        Also enforces ``WS_ALERT_COOLDOWN`` so a sustained outage that keeps
+        cycling through degraded → reconnect → degraded doesn't burst-alert
+        every grace window.
+        """
+        await asyncio.sleep(WS_REST_FALLBACK_ALERT_GRACE_SEC)
+        if not self._rest_fallback_active:
+            return  # Reconnected before grace expired — transient drop, no alert.
+        now = time.monotonic()
+        cooldown_expired = (
+            self._last_rest_fallback_alert_time is None
+            or (now - self._last_rest_fallback_alert_time) > WS_ALERT_COOLDOWN
+        )
+        if not cooldown_expired:
+            self._rest_fallback_activations_in_cooldown += 1
+            return
+        coalesced = self._rest_fallback_activations_in_cooldown
+        self._rest_fallback_activations_in_cooldown = 0
+        self._last_rest_fallback_alert_time = now
+        suffix = (
+            f" ({coalesced} suppressed during last {int(WS_ALERT_COOLDOWN)}s)"
+            if coalesced > 0 else ""
+        )
+        if self._admin_alert:
+            await self._admin_alert(
+                f"⚠️ REST fallback activated for {self._label} critical pairs.{suffix}"
             )
-            if cooldown_expired:
-                coalesced = self._rest_fallback_activations_in_cooldown
-                self._rest_fallback_activations_in_cooldown = 0
-                self._last_rest_fallback_alert_time = now
-                suffix = (
-                    f" ({coalesced} suppressed during last {int(WS_ALERT_COOLDOWN)}s)"
-                    if coalesced > 0 else ""
-                )
-                asyncio.create_task(
-                    self._admin_alert(
-                        f"⚠️ REST fallback activated for {self._label} critical pairs.{suffix}"
-                    )
-                )
-            else:
-                self._rest_fallback_activations_in_cooldown += 1
 
     def _stop_rest_fallback(self) -> None:
         """Deactivate REST fallback once WS reconnects."""
