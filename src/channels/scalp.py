@@ -1802,11 +1802,21 @@ class ScalpChannel(BaseChannel):
             return self._reject("volume_spike_missing")
         rolling_avg = sum(rolling_vols) / len(rolling_vols)
 
-        # Current 5m candle volume ≥ SURGE_VOLUME_MULTIPLIER × rolling average
-        # (use current candle volume to confirm active surge, same units as rolling_avg)
-        current_vol = float(volumes[-1]) if len(volumes) >= 1 else 0.0
-        if current_vol < SURGE_VOLUME_MULTIPLIER * rolling_avg:
-            return self._reject("volume_spike_missing")
+        # NOTE: a current-candle volume gate (volumes[-1] ≥ SURGE_VOLUME_MULTIPLIER ×
+        # rolling_avg) used to live here.  It was structurally broken: volumes[-1]
+        # is a STILL-FORMING 5m candle whose volume is necessarily a fraction of a
+        # complete candle's, so demanding it exceed multiples of complete-candle
+        # averages is a unit mismatch that rejects valid setups.  Worse, the path's
+        # thesis is "surge breakout + pullback" — pullbacks by definition have
+        # REDUCED volume, so the gate contradicts the very pattern it's meant to
+        # validate.  The breakout-candle volume check below (≥ 2× rolling avg on the
+        # actual closed breakout candle) properly validates the surge.  In the
+        # latest 18,423-cycle zip, `volume_spike_missing` was 62.7% of all VSB
+        # rejections — by far the dominant suppressor — and the bulk of it was
+        # this gate firing on partial current-candle volume.  Existing test
+        # fixtures set `vols[-1] = 4500.0` artificially to bypass this gate;
+        # that's a strong tell the gate was already known broken inside the
+        # test infrastructure.
 
         # Swing high: 20-candle lookback from before the 5-candle breakout search window.
         # Excluding the search window ensures swing_high is set by genuine prior resistance,

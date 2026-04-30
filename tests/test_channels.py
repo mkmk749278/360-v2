@@ -1014,6 +1014,43 @@ class TestVolumeSurgeBreakoutRefinements:
         assert sig is not None, "RSI 42 should be accepted (borderline, not hard-blocked)."
         assert sig.soft_penalty_total >= 5.0
 
+    # ── Current-candle volume gate (path audit #5 — gate removed) ────────
+
+    def test_signal_fires_when_current_candle_volume_is_low(self):
+        """Surge breakout with HIGH breakout-candle volume but LOW current-candle
+        volume must still fire.  Pre-fix the gate `volumes[-1] >= 3 × rolling_avg`
+        rejected these as `volume_spike_missing` — but volumes[-1] is a
+        still-forming partial 5m candle whose volume is necessarily a fraction
+        of a complete candle's, AND a breakout pullback has REDUCED volume by
+        thesis (low-volume retest is the canonical setup, not high-volume).
+        The gate was removed in path audit #5.  The breakout-candle volume
+        check (≥ 2× rolling_avg on the closed breakout candle) still validates
+        the surge.
+        """
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        # Knock the current candle's volume down to a realistic partial-candle
+        # value (well below 3× the inflated rolling average).  Pre-fix this
+        # was an automatic reject; post-fix it should fire normally.
+        candles["5m"]["volume"][-1] = 800.0  # ~rolling_avg, no longer 4500
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, (
+            "VSB must accept a valid breakout+pullback when the current "
+            "(still-forming) candle has typical partial-candle volume. "
+            "Pre-fix the path was rejecting 62.7% of cycles on this gate."
+        )
+        assert sig.setup_class == "VOLUME_SURGE_BREAKOUT"
+
+    def test_signal_fires_when_current_candle_volume_is_zero(self):
+        """Even with zero current-candle volume (very early in the 5m bar), the
+        path must accept if the breakout candle had surge volume."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
+        candles["5m"]["volume"][-1] = 0.0  # imagine we're scanning 1s into the candle
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, (
+            "Zero current-candle volume early in a 5m bar must not block VSB; "
+            "the breakout-candle volume check is what validates the surge"
+        )
+
     # ── FVG / orderblock in fast vs. calm regimes ────────────────────────
 
     def test_no_fvg_ob_hard_rejected_in_calm_regime(self):
