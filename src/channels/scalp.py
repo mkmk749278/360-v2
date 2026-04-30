@@ -2907,7 +2907,11 @@ class ScalpChannel(BaseChannel):
 
         close = float(closes[-1])
         if close <= 0:
-            return self._reject("funding_not_extreme")
+            # Telemetry-truth: this is invalid candle data, NOT a "funding not
+            # extreme" condition.  Pre-fix conflated the two reasons in the
+            # path-funnel, polluting the headline `funding_not_extreme` count
+            # with a small number of bad-price rows.
+            return self._reject("invalid_price")
 
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
@@ -2988,6 +2992,29 @@ class ScalpChannel(BaseChannel):
         # Falls back to 1.5R when no qualifying level is found — better than
         # the previous flat 0.5% placeholder which was not thesis-aligned.
         tp1 = _funding_extreme_structure_tp1(fvgs, orderblocks, close, direction, sl_dist)
+
+        # ATR-adaptive TP1 cap (mirror of SR_FLIP / TPE pattern).
+        # When the nearest qualifying FVG/OB is far from close (e.g., 5-10R in
+        # trending markets), the structural target sits well past where a
+        # mean-reversion contrarian setup can realistically reach before SL.
+        # Cap by ATR percentile so the structure-level target is preserved
+        # only when within reach:
+        #   <40 (low ATR / accumulation):  TP1 ≤ 1.8R
+        #   40-65 (median ATR):            TP1 ≤ 2.5R
+        #   ≥65 (high ATR):                no cap (room to run)
+        # FUNDING is mean-reversion (`min_rr` 0.9 per signal_quality) so the
+        # cap matters more here than for trend-following paths.
+        _rc_funding = smc_data.get("regime_context")
+        _atr_pct_funding = _rc_funding.atr_percentile if _rc_funding else 50.0
+        if _atr_pct_funding < 40.0:
+            _tp1_cap_funding = sl_dist * 1.8
+        elif _atr_pct_funding < 65.0:
+            _tp1_cap_funding = sl_dist * 2.5
+        else:
+            _tp1_cap_funding = None
+        if _tp1_cap_funding is not None:
+            tp1 = (min(tp1, close + _tp1_cap_funding) if direction == Direction.LONG
+                   else max(tp1, close - _tp1_cap_funding))
 
         tp2 = close + sl_dist * 2.0 if direction == Direction.LONG else close - sl_dist * 2.0
         tp3 = close + sl_dist * 3.5 if direction == Direction.LONG else close - sl_dist * 3.5
