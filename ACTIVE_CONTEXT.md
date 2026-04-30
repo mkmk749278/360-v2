@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-02 — Path audit #7 (OPENING_RANGE_BREAKOUT): dormant-path audit — feature_disabled telemetry + VSB-family fixes preserved for re-enable*
+*Updated: 2026-05-02 — Path audit #8 (SR_FLIP_RETEST): missing TP1 ATR-adaptive cap added; VOLATILE_UNSUITABLE blocked at evaluator*
 
 ---
 
@@ -8,7 +8,45 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-02 — path audit #7):
+This session (2026-05-02 — path audit #8):
+- **SR_FLIP_RETEST deep dive** (`_evaluate_sr_flip_retest`,
+  `src/channels/scalp.py:2437-2810`).  Latest monitor zip showed
+  `EVAL::SR_FLIP_RETEST: regime_blocked=15,123 (82.1%),
+  flip_close_not_confirmed=1,562 (8.5%), wick_quality_failed=600 (3.3%)` of
+  18,423 cycles — 1 generated, 0 emitted (filtered downstream by
+  QUIET_SCALP_BLOCK).  Path is well-engineered with layered soft/hard
+  gates and structural-level detection — but two real defects found.
+- **🔴 Bug A — missing TP1 ATR-adaptive cap**.  OWNER_BRIEF Audit-3
+  table claimed *"SR_FLIP + TPE TP1 ATR-adaptive cap (1.8–2.5× SL)"*
+  was deployed, but only TPE (line ~1264) actually had the cap.  SR_FLIP's
+  TP1 was the 20-candle swing high with only a 1.2R FLOOR — no upper cap.
+  In trending markets the swing high can sit 5-10R from close, producing
+  TP1 targets that rarely get hit before the structural SL fires — a
+  documented contributor to the historical 100% SL rate
+  (OWNER_BRIEF Part IV §4.3).
+  **Fix**: applied the same ATR-adaptive cap pattern as TPE.
+    atr_percentile <40  → cap TP1 at 1.8R   (accumulation/low-ATR)
+    atr_percentile 40-65 → cap TP1 at 2.5R   (median ATR)
+    atr_percentile ≥65   → no cap            (room to run in high vol)
+- **🟡 Bug B — VOLATILE_UNSUITABLE block missing at evaluator**
+  (was line 2480).  Evaluator-level regime block only checked
+  `regime_upper == "VOLATILE"`; `VOLATILE_UNSUITABLE` slipped through.
+  The scanner's REGIME_SETUP_COMPATIBILITY excludes SR_FLIP from
+  VOLATILE_UNSUITABLE so this was caught downstream — but defence-in-
+  depth fix mirrors the doctrine at the evaluator.
+- **Tests added** (`tests/test_channels.py::TestSrFlipRetestRefinements`):
+  4 new cases — VOLATILE_UNSUITABLE blocked, TP1 capped at 2.5R in
+  median-ATR, capped at 1.8R in low-ATR, uncapped in high-ATR.
+  All 39 SR_FLIP tests pass (35 existing + 4 new).  3309 broader tests
+  pass (vs 3305 post-ORB-merge baseline — net +4, zero regressions).
+- **Data sufficiency check**: SR_FLIP needs ≥55 5m candles (boot seed
+  500), 4h candles for TP2 (500 from boot), structural-level detection
+  uses 41 prior + 8 closed flip-search + 1 current.  All requirements
+  trivially met after seed.  Path silence is purely regime-driven
+  (QUIET_SCALP_BLOCK at scanner) since SR_FLIP isn't QCB or DIV_CONT≥64
+  exempt.
+
+Prior session (2026-05-02 — path audit #7):
 - **OPENING_RANGE_BREAKOUT deep dive** (`_evaluate_opening_range_breakout`,
   `src/channels/scalp.py:2257`).  Latest monitor zip showed
   `EVAL::OPENING_RANGE_BREAKOUT: regime_blocked=18,423` — 100% of cycles.
@@ -503,6 +541,7 @@ statistical confidence.
 | **VSB path audit (multi-fix): (A) removed broken current-candle volume gate (62.7% of rejections — was rejecting partial-candle volumes vs complete-candle thresholds, contradicting "surge + pullback" thesis); (B) breakout qualifier now requires close above swing_high — wick-only piercing was being accepted as breakout (was a sweep, not a breakout); (C) SL anchored to LOWER of `swing_high × 0.992` and `close − max(0.8%×close, 1×ATR)` — pre-fix produced 0.05% stops in extended pullback zones; (D) breakout vol multiplier now env-overridable via VSB_BREAKOUT_VOL_MULT (B8)** | `src/channels/scalp.py:1799` + `:1825` (close gate) + `:1907` (SL geometry) + `:46` (env constant) + 6 new tests in `tests/test_channels.py::TestVolumeSurgeBreakoutRefinements` | **2026-05-01 very late (path audit #5, re-audit)** |
 | **BDS path audit (multi-fix mirror of #5): (A) removed broken current-candle volume gate (same 62.7% pattern — dead-cat bounces have reduced volume by definition); (B) breakdown qualifier now requires close BELOW swing_low — wick-only piercing was being accepted but is a bullish sweep, not a breakdown; (C) SL anchored to HIGHER of `swing_low × 1.008` and `close + max(0.8%×close, 1×ATR)` — pre-fix produced 0.05% stops in extended bounce zones; (D) shares VSB_BREAKOUT_VOL_MULT env constant for breakdown-candle vol gate** | `src/channels/scalp.py:2059` + `:2086` (close gate) + `:2153` (SL geometry) + 6 new tests in `tests/test_channels.py::TestBreakdownShortRefinements` | **2026-05-02 (path audit #6)** |
 | **ORB path audit (dormant-path triage): path is feature-flag-disabled (`SCALP_ORB_ENABLED=false`); audit clarified the live monitor `regime_blocked=100%` was the disable token, NOT a regime gate.  Telemetry fix: dormant-flag check now reports `feature_disabled` (truthful).  Preserved-code fixes for re-enable readiness: removed broken current-candle volume gate (VSB/BDS-family bug); SL geometry now respects close-relative + 1×ATR floor (was 0.1% structural buffer producing sub-spread stops on tight ranges).  Open question on whether to rebuild session-range proxy or re-enable as-is — owner decision.** | `src/channels/scalp.py:2271` (telemetry) + `:2322` (vol gate) + `:2348` (SL geometry) + 3 new tests in `tests/test_pr06_orb_disable.py::TestORBAuditFixes` | **2026-05-02 (path audit #7)** |
+| **SR_FLIP path audit: (A) TP1 ATR-adaptive cap was claimed deployed in OWNER_BRIEF Audit-3 but actually missing from the SR_FLIP code (only TPE had it) — added 1.8R/2.5R/uncapped-by-atr-percentile cap, addressing the documented historical 100% SL rate; (B) evaluator-level VOLATILE_UNSUITABLE regime block added (was VOLATILE-only — defence-in-depth)** | `src/channels/scalp.py:2479` (regime) + `:2738` (TP1 cap) + 4 new tests in `tests/test_channels.py::TestSrFlipRetestRefinements` | **2026-05-02 (path audit #8)** |
 
 ---
 

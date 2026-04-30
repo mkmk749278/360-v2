@@ -1754,6 +1754,100 @@ class TestSrFlipRetestRefinements:
             "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime=regime,
         )
 
+    # ── Path audit #8 — VOLATILE_UNSUITABLE defence-in-depth ────────────
+
+    def test_volatile_unsuitable_regime_blocked_at_evaluator(self):
+        """SR_FLIP must hard-block VOLATILE_UNSUITABLE at the evaluator level
+        for defence-in-depth.  REGIME_SETUP_COMPATIBILITY in signal_quality.py
+        already excludes SR_FLIP from VOLATILE_UNSUITABLE; the evaluator-level
+        block mirrors that doctrine so the path doesn't rely solely on the
+        scanner gate.  Pre-fix only blocked exact 'VOLATILE'.
+        """
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        ch = ScalpChannel()
+        sig = ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, _srflip_indicators_long(),
+            _srflip_smc(direction="LONG"), 0.01, 10_000_000,
+            regime="VOLATILE_UNSUITABLE",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "regime_blocked"
+
+    # ── Path audit #8 — TP1 ATR-adaptive cap ──────────────────────────────
+
+    def test_tp1_capped_at_2_5r_in_median_atr_regime(self):
+        """In a median-ATR regime (40 ≤ atr_percentile < 65), SR_FLIP TP1 must
+        be capped at 2.5R from close.  Pre-fix the TP1 was the 20-candle swing
+        high which could be 5-10R away in trending markets — a documented
+        contributor to the historical 100% SL rate (TP1 unreachable before
+        SL fires).  OWNER_BRIEF Audit-3 claimed this was deployed but it
+        wasn't in the actual SR_FLIP code.
+        """
+        from types import SimpleNamespace
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        # Inflate the 20-candle swing high so TP1 (pre-cap) would be very far.
+        # Set a high near the start of the window at 110 (≈10% above level).
+        # Inflate the FLIP CANDLE high (index -3) to put a far swing-high
+        # inside the TP1-search window without disturbing the structural
+        # detection's prior-window range (which is highs[-50:-10]).
+        candles["5m"]["high"][-3] = 110.0
+        smc_data = _srflip_smc(direction="LONG")
+        # Median-ATR regime: atr_percentile=50 → cap at 2.5R.
+        smc_data["regime_context"] = SimpleNamespace(atr_percentile=50.0)
+        sig = self._call_long(candles, _srflip_indicators_long(), smc_data)
+        assert sig is not None, "Path should still fire in median-ATR regime"
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        tp1_dist = abs(sig.tp1 - sig.entry)
+        tp1_ratio = tp1_dist / sl_dist
+        assert tp1_ratio <= 2.5 + 0.01, (
+            f"TP1 ratio {tp1_ratio:.2f}R exceeds median-ATR cap of 2.5R — "
+            f"the ATR-adaptive cap is missing."
+        )
+
+    def test_tp1_capped_at_1_8r_in_low_atr_regime(self):
+        """In a low-ATR regime (atr_percentile < 40), SR_FLIP TP1 must be
+        capped at 1.8R from close.  Tighter cap reflects accumulation-phase
+        market where structural retests don't have room to run."""
+        from types import SimpleNamespace
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        # Inflate the FLIP CANDLE high (index -3) to put a far swing-high
+        # inside the TP1-search window without disturbing the structural
+        # detection's prior-window range (which is highs[-50:-10]).
+        candles["5m"]["high"][-3] = 110.0
+        smc_data = _srflip_smc(direction="LONG")
+        smc_data["regime_context"] = SimpleNamespace(atr_percentile=20.0)
+        sig = self._call_long(candles, _srflip_indicators_long(), smc_data)
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        tp1_dist = abs(sig.tp1 - sig.entry)
+        tp1_ratio = tp1_dist / sl_dist
+        assert tp1_ratio <= 1.8 + 0.01, (
+            f"TP1 ratio {tp1_ratio:.2f}R exceeds low-ATR cap of 1.8R."
+        )
+
+    def test_tp1_uncapped_in_high_atr_regime(self):
+        """In a high-ATR regime (atr_percentile ≥ 65), SR_FLIP TP1 has no
+        cap — high-volatility markets can support extended TP1 targets that
+        are structurally appropriate (e.g., 4-5R)."""
+        from types import SimpleNamespace
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        # Inflate the FLIP CANDLE high (index -3) to put a far swing-high
+        # inside the TP1-search window without disturbing the structural
+        # detection's prior-window range (which is highs[-50:-10]).
+        candles["5m"]["high"][-3] = 110.0
+        smc_data = _srflip_smc(direction="LONG")
+        smc_data["regime_context"] = SimpleNamespace(atr_percentile=80.0)
+        sig = self._call_long(candles, _srflip_indicators_long(), smc_data)
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        tp1_dist = abs(sig.tp1 - sig.entry)
+        tp1_ratio = tp1_dist / sl_dist
+        # In high ATR, should preserve the swing-high target (5-10R range).
+        assert tp1_ratio > 2.5, (
+            f"High-ATR TP1 ratio {tp1_ratio:.2f}R was capped — should be "
+            f"uncapped (preserve swing-high target)."
+        )
+
     # ── Happy path ────────────────────────────────────────────────────────
 
     def test_long_signal_fires_on_valid_retest(self):

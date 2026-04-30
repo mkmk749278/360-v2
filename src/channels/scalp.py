@@ -2476,7 +2476,14 @@ class ScalpChannel(BaseChannel):
           gate in calm regimes (RANGING, etc.) to preserve structural quality.
         """
         regime_upper = regime.upper() if regime else ""
-        if regime_upper == "VOLATILE":
+        # SR_FLIP_RETEST is structurally invalid in chaotic regimes — the
+        # role-flip thesis depends on orderly price action around a structural
+        # level.  Pre-fix only blocked "VOLATILE"; "VOLATILE_UNSUITABLE" slipped
+        # through to rely on the scanner's regime gate, which works but is a
+        # defence-in-depth gap.  REGIME_SETUP_COMPATIBILITY in
+        # `signal_quality.py` already excludes SR_FLIP from VOLATILE_UNSUITABLE
+        # — mirror that doctrine here.
+        if regime_upper in ("VOLATILE", "VOLATILE_UNSUITABLE"):
             return self._reject("regime_blocked")
 
         m5 = candles.get("5m")
@@ -2724,7 +2731,7 @@ class ScalpChannel(BaseChannel):
                 sl = close + min_sl_dist
             sl_dist = min_sl_dist
 
-        # TP1: 20-candle swing high/low
+        # TP1: 20-candle swing high/low with floor at 1.2R.
         if direction == Direction.LONG:
             tp1 = max(float(h) for h in highs[-21:-1]) if len(highs) >= 21 else 0.0
             if tp1 <= close:
@@ -2735,6 +2742,28 @@ class ScalpChannel(BaseChannel):
             if tp1 >= close:
                 tp1 = close - sl_dist * 1.5
             tp1 = min(tp1, close - sl_dist * 1.2)
+
+        # ATR-adaptive TP1 cap (mirror of TPE pattern at line ~1264).
+        # OWNER_BRIEF Audit-3 claimed this was deployed for SR_FLIP but the code
+        # had only the 1.2R floor — no upper cap.  In trending markets the
+        # 20-candle swing high can sit 5-10R from close, producing TP1 targets
+        # that rarely get hit before the structural SL fires (a documented
+        # contributor to the 100% SL rate in early-window monitoring).
+        # Cap by ATR percentile:
+        #   <40 (low ATR / accumulation):  TP1 ≤ 1.8R
+        #   40-65 (median ATR):            TP1 ≤ 2.5R
+        #   ≥65 (high ATR):                no cap (room to run)
+        _rc_srflip = smc_data.get("regime_context")
+        _atr_pct_srflip = _rc_srflip.atr_percentile if _rc_srflip else 50.0
+        if _atr_pct_srflip < 40.0:
+            _tp1_cap_srflip = sl_dist * 1.8
+        elif _atr_pct_srflip < 65.0:
+            _tp1_cap_srflip = sl_dist * 2.5
+        else:
+            _tp1_cap_srflip = None
+        if _tp1_cap_srflip is not None:
+            tp1 = (min(tp1, close + _tp1_cap_srflip) if direction == Direction.LONG
+                   else max(tp1, close - _tp1_cap_srflip))
 
         # TP2: 4h target or fallback.  When the 4h max/min fails the
         # tp2-vs-tp1 monotonicity check, the fallback must enforce a real gap
