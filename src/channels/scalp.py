@@ -43,6 +43,12 @@ _HTF_EMA_REJECTION_PCT: float = float(os.getenv("HTF_EMA_REJECTION_PCT", "0.0015
 _WHALE_DELTA_MIN_RATIO: float = float(os.getenv("WHALE_DELTA_MIN_RATIO", "2.0"))
 _WHALE_MIN_TICK_VOLUME_USD: float = float(os.getenv("WHALE_MIN_TICK_VOLUME_USD", "500000"))
 _WHALE_OBI_MIN: float = float(os.getenv("WHALE_OBI_MIN", "1.5"))
+
+# VSB / BREAKDOWN_SHORT breakout-candle volume threshold (was hardcoded 2.0).
+# Env-overridable per B8.  This is the surge-confirmation gate on the closed
+# breakout candle itself — distinct from the (now-removed) current-candle
+# volume gate.
+_VSB_BREAKOUT_VOL_MULT: float = float(os.getenv("VSB_BREAKOUT_VOL_MULT", "2.0"))
 # In fast/volatile regimes the order book can be temporarily thin or skewed by
 # market-maker spread widening.  When the OBI ratio is marginal — present but
 # below the full confirmation threshold — apply a soft penalty rather than
@@ -1830,10 +1836,18 @@ class ScalpChannel(BaseChannel):
         # Find the most recent breakout candle within the last 5 closed candles.
         # Scans newest-first (i = -2, -3, -4, -5, -6) to prefer the candle
         # closest to the current bar. Candle at -1 is still forming.
+        # Pre-fix only checked `highs[i] > swing_high_level` (a wick that pierces
+        # the level).  But a wick that pierces the level then closes back below
+        # is a SWEEP / FALSE BREAK, not a breakout — that's exactly what LSR is
+        # designed to fade.  A genuine breakout requires the candle to close
+        # above the level.  Without this check, VSB was accepting false breakouts
+        # and treating the subsequent reversal as a "pullback retest."
         breakout_candle_idx: Optional[int] = None
         breakout_vol = 0.0
+        closes_arr = closes
         for i in range(-2, -7, -1):  # iterates -2, -3, -4, -5, -6
-            if float(highs[i]) > swing_high_level:
+            if (float(highs[i]) > swing_high_level
+                    and float(closes_arr[i]) > swing_high_level):
                 breakout_candle_idx = i
                 breakout_vol = float(volumes[i])
                 break
@@ -1890,13 +1904,28 @@ class ScalpChannel(BaseChannel):
                 return self._reject("missing_fvg_or_orderblock")
             fvg_penalty = 8.0  # Soft penalty in fast regimes instead of hard block
 
-        # Breakout candle volume ≥ 2.0 × rolling average (unchanged quality threshold;
-        # now checks the actual breakout candle's volume rather than always volumes[-3]).
-        if breakout_vol < 2.0 * rolling_avg:
+        # Breakout candle volume ≥ _VSB_BREAKOUT_VOL_MULT × rolling average
+        # (env-overridable per B8; was hardcoded 2.0).  Validates surge on the
+        # actual closed breakout candle.
+        if breakout_vol < _VSB_BREAKOUT_VOL_MULT * rolling_avg:
             return self._reject("volume_spike_missing")
 
-        # Method-specific SL/TP
-        sl = swing_high_level * (1 - 0.008)  # 0.8% below breakout level
+        # Method-specific SL/TP.
+        # Pre-fix anchored SL purely to swing_high (`swing_high * 0.992`), which
+        # creates absurdly tight stops when close is in deep pullback:
+        #   close at 0.50% below swing_high → sl_dist = 0.30%
+        #   close at 0.60% below swing_high → sl_dist = 0.20%
+        #   close at 0.75% below swing_high → sl_dist = 0.05% (< spread on most pairs!)
+        # The structural intent ("SL just below the broken resistance") is right,
+        # but the geometry must also respect (a) ATR-based volatility and (b) a
+        # close-relative minimum.  Take the tightest-acceptable SL across:
+        #   - structural floor: 0.8% below swing_high (anti-bull-trap)
+        #   - close-relative floor: max(0.8% of close, 1.0×ATR)
+        # Final SL is the LOWER of these (further from close → wider, never tighter).
+        atr_val = ind.get("atr_last", close * 0.002)
+        structural_sl = swing_high_level * (1 - 0.008)
+        close_rel_floor = close - max(close * 0.008, atr_val * 1.0)
+        sl = min(structural_sl, close_rel_floor)
         sl_dist = abs(close - sl)
         if sl_dist <= 0 or sl >= close:
             return self._reject("invalid_sl_geometry")
@@ -1913,7 +1942,7 @@ class ScalpChannel(BaseChannel):
         tp3 = close + measured_move * 2.0
 
         profile = smc_data.get("pair_profile")
-        atr_val = ind.get("atr_last", close * 0.002)
+        # atr_val already computed above for SL.
         _regime_ctx = smc_data.get("regime_context")
         sig = build_channel_signal(
             config=self.config,

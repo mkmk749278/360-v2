@@ -8,14 +8,15 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-01, very late — path audit #5):
+This session (2026-05-01, very late — path audit #5, multi-fix):
 - **VOLUME_SURGE_BREAKOUT deep dive** (`_evaluate_volume_surge_breakout`,
   `src/channels/scalp.py:1751–1960`). Latest monitor zip showed
   `EVAL::VOLUME_SURGE_BREAKOUT: volume_spike_missing=11,557 (62.7%)`,
   `basic_filters_failed=3,558 (19.3%)`, `regime_blocked=3,297 (17.9%)` of
-  18,423 cycles — **0 generated**.  Path was the highest-attrition VSB
-  in the roadmap because the dominant suppressor (`volume_spike_missing`,
-  62.7%) was a structurally-broken gate, not real surge absence.
+  18,423 cycles — **0 generated**.  Owner pushed back ("we are not yet
+  completed with VSB") after the first commit which only addressed the
+  current-candle volume gate.  Re-audit found three more structural
+  defects beyond the original gate.
 - **🔴 Bug FIXED — current-candle volume gate** (was line 1808).
   The pre-fix gate compared `volumes[-1]` (the still-forming current 5m
   candle) to `SURGE_VOLUME_MULTIPLIER × rolling_avg` (3× the average of
@@ -36,12 +37,49 @@ This session (2026-05-01, very late — path audit #5):
   inside the test infrastructure.
   **Fix**: removed the gate.  Replaced with a multi-line explanatory NOTE
   comment for future readers.
+- **🔴 Bug B (re-audit) — breakout qualifier ignored close** (was line 1825).
+  Pre-fix the breakout-candle search only checked `highs[i] > swing_high`
+  (a wick that pierces the level).  But a wick that pierces and CLOSES
+  back below is a **sweep**, not a breakout — that's exactly what LSR
+  is designed to fade.  VSB was accepting sweeps as breakouts and
+  treating the subsequent reversal as a "pullback retest" — feeding
+  false positives directly into the path's thesis.
+  **Fix**: gate now requires `highs[i] > swing_high AND closes[i] >
+  swing_high` — true close-above breakout.  Strong tell: the existing
+  `_make_surge_candles` fixture set `highs[idx]=103, closes[idx]=98.5`
+  (wick pierces, close stays below — classic sweep geometry) and was
+  built to pass the wick-only check.  Fixture updated to true breakout
+  geometry (close=102 above swing_high=99); also added a new test
+  asserting wick-only setups are now correctly rejected.
+- **🔴 Bug C (re-audit) — catastrophic SL placement** (was line 1889).
+  Pre-fix: `sl = swing_high * (1 - 0.008)`.  Anchored to swing_high
+  regardless of where close sat in the pullback zone.  Result:
+    - close at 0.30% below swing_high → sl_dist = 0.50% (tight)
+    - close at 0.50% below swing_high → sl_dist = 0.30% (very tight)
+    - close at 0.60% below swing_high → sl_dist = 0.20% (dangerous)
+    - close at 0.75% below swing_high → sl_dist = **0.05%** (< spread!)
+  In the canonical "premium pullback zone" (0.3–0.6% below swing) the
+  stop was 0.20–0.50% — well below the 0.80% universal floor enforced
+  downstream at `_enqueue_signal`.  Stops getting clamped means the
+  structural anchor is lost AND the actual stop is somewhere arbitrary.
+  **Fix**: SL now takes the LOWER (further-from-close) of two anchors:
+    1. structural floor: 0.8% below swing_high (anti-bull-trap intent)
+    2. close-relative floor: max(0.8% of close, 1.0×ATR)
+  Ensures SL respects both pair volatility AND the structural level
+  while never producing absurdly-tight stops.
+- **🟡 Bug D (re-audit) — hardcoded breakout-vol multiplier** (was 2.0
+  at line 1885).  B8 violation.
+  **Fix**: extracted to `_VSB_BREAKOUT_VOL_MULT` (default 2.0,
+  env-overridable via `VSB_BREAKOUT_VOL_MULT`) at the module-level
+  constants block alongside the WHALE thresholds.
 - **Tests added** (`tests/test_channels.py::TestVolumeSurgeBreakoutRefinements`):
-  2 new cases — VSB fires when current-candle volume is low (typical
-  partial-candle volume, well below 3× rolling avg) and when current-candle
-  volume is zero (very early in the 5m bar).  All 24 VSB tests pass
-  (22 existing + 2 new).  542 broader tests pass (vs 540 main baseline —
-  net +2, zero regressions).  14 pre-existing failures remain (queue #13).
+  6 new cases total — current-candle vol low/zero (Bug A); wick-only
+  rejected as sweep (Bug B); close marginally above swing_high accepted
+  (Bug B mirror); SL distance ≥ 0.8% in premium pullback zone (Bug C);
+  env override on breakout vol mult (Bug D).  All 28 VSB tests pass
+  (22 original + 6 new + 2 from initial #250 commit which were already
+  in branch).  546 broader tests pass (vs 540 main baseline — net +6,
+  zero regressions).  14 pre-existing failures remain (queue #13).
 - **Data sufficiency check (per owner request)**:
   - 5m candles ≥ 28 (closes/highs ≥ 28, volumes ≥ 10): ✅ boot seed = 500
   - swing_high computation (`highs[-26:-6]`): ✅
@@ -364,7 +402,7 @@ statistical confidence.
 | **WHALE_MOMENTUM path audit fix: scan recent_ticks window for whale (was only checking latest tick — alert visible ~50–100ms on active pairs vs. 15s scan cycle); thresholds now env-overridable per B8** | `src/detector.py:228` (whale scan) + `src/channels/scalp.py:42` (env-overridable thresholds) + 4 new tests in `tests/test_new_modules.py::TestSMCDetector` | **2026-04-30 late eve (path audit #2)** |
 | **TPE path audit fix: body-conviction gate replaced with close-position-in-range — old `body/range ≥ 0.50` punished the canonical hammer/shooting-star reclaim that defines a valid pullback entry; new gate accepts strong directional close while allowing the EMA-test wick** | `src/channels/scalp.py:1127` | **2026-04-30 late eve (path audit #3)** |
 | **LIQ_REV path audit fix: RSI thresholds relaxed 25/75 → 35/65 (with RSI direction-of-travel check via rsi_prev) — pre-fix demanded RSI extreme exhaustion that 5m RSI rarely reaches during normal cascades; zone-proximity gate now also accepts cascade extremum (low/high) within 0.5% of zone, not just close_now — cascades overshoot zones by definition** | `src/channels/scalp.py:1382` (RSI gate) + `:1405` (zone gate) + 6 new tests in `tests/test_liquidation_reversal_tp.py` | **2026-05-01 very late (path audit #4)** |
-| **VSB path audit fix: removed broken current-candle volume gate — pre-fix demanded `volumes[-1]` (still-forming 5m candle) exceed 3× rolling_avg of complete candles, a unit mismatch that contradicts VSB's "surge + pullback" thesis (pullbacks have REDUCED volume); was 62.7% of all VSB rejections; breakout-candle volume check still validates the actual surge** | `src/channels/scalp.py:1799` (gate removed) + 2 new tests in `tests/test_channels.py::TestVolumeSurgeBreakoutRefinements` | **2026-05-01 very late (path audit #5)** |
+| **VSB path audit (multi-fix): (A) removed broken current-candle volume gate (62.7% of rejections — was rejecting partial-candle volumes vs complete-candle thresholds, contradicting "surge + pullback" thesis); (B) breakout qualifier now requires close above swing_high — wick-only piercing was being accepted as breakout (was a sweep, not a breakout); (C) SL anchored to LOWER of `swing_high × 0.992` and `close − max(0.8%×close, 1×ATR)` — pre-fix produced 0.05% stops in extended pullback zones; (D) breakout vol multiplier now env-overridable via VSB_BREAKOUT_VOL_MULT (B8)** | `src/channels/scalp.py:1799` + `:1825` (close gate) + `:1907` (SL geometry) + `:46` (env constant) + 6 new tests in `tests/test_channels.py::TestVolumeSurgeBreakoutRefinements` | **2026-05-01 very late (path audit #5, re-audit)** |
 
 ---
 
