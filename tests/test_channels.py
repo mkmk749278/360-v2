@@ -3916,6 +3916,76 @@ def _far_indicators_short(atr=0.5, rsi=50.0, ema9=99.0, ema21=100.0, adx=22.0):
     }
 
 
+class TestFailedAuctionReclaimAuditFixes:
+    """Path audit #14 fixes:
+    - `close <= 0` now emits `invalid_price` (was `breakout_not_found`).
+    - ATR-invalid path now emits `atr_invalid` (was misusing `adx_reject`).
+    - SL geometry respects close-relative + 1×ATR floor (mirror of
+      VSB/BDS/ORB/QCB/DIV_CONT/CLS/PDC).
+
+    NO TP1 ATR-adaptive cap is applied — FAR's `tp1 = max(close + tail,
+    close + sl_dist × 1.0)` is a Type-C measured-move target tied to the
+    failed-auction wick depth (the institutional rejection magnitude).
+    Capping by ATR percentile would defeat the projection thesis, mirroring
+    the explicit decision made for PDC.
+    """
+
+    def test_invalid_price_reports_distinct_reject_reason(self):
+        """`close <= 0` must emit `invalid_price`, not `breakout_not_found`."""
+        candles_5m = _make_far_candles_long(base=100.0, auction_wick_low=98.5)
+        candles_5m["close"][-1] = 0.0
+        candles = {"5m": candles_5m}
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, _far_indicators_long(atr=0.5), {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "invalid_price", (
+            f"close <= 0 must emit `invalid_price`, got "
+            f"{ch._active_no_signal_reason!r}"
+        )
+
+    def test_atr_invalid_reports_distinct_reject_reason(self):
+        """ATR validity gate must emit `atr_invalid`, not the misleading
+        `adx_reject` (which is reserved for actual ADX gate failures)."""
+        candles = {"5m": _make_far_candles_long(base=100.0, auction_wick_low=98.5)}
+        # ATR=0 makes the validity check fail
+        indicators = _far_indicators_long(atr=0.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "atr_invalid", (
+            f"ATR-invalid must emit `atr_invalid`, got "
+            f"{ch._active_no_signal_reason!r}"
+        )
+
+    def test_sl_respects_close_relative_floor_long(self):
+        """A small auction wick (just below struct_low by 0.05% of price)
+        used to leave SL barely beyond the wick — sl_dist well under 0.8% of
+        close.  Post-fix the close-relative floor `max(0.8% × close, 1×ATR)`
+        keeps sl_dist ≥ 0.8%."""
+        # Tight auction wick: only 0.05 below struct_low (struct_low ≈ 99.9).
+        candles = {"5m": _make_far_candles_long(base=100.0, auction_wick_low=99.85, cur_close=100.2)}
+        # Low ATR keeps the structural SL very tight.
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, _far_indicators_long(atr=0.05), {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
+        )
+        if sig is None:
+            import pytest
+            pytest.skip("Other gates rejected — focused fix is on SL geometry only.")
+        sl_dist_pct = abs(sig.entry - sig.stop_loss) / sig.entry * 100.0
+        assert sl_dist_pct >= 0.79, (
+            f"FAR SL distance {sl_dist_pct:.3f}% is too tight — "
+            f"close-relative floor was not honoured."
+        )
+
+
 class TestFailedAuctionReclaim:
     """Tests for the FAILED_AUCTION_RECLAIM path (roadmap step 7)."""
 
@@ -4157,7 +4227,9 @@ class TestFailedAuctionReclaim:
         sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
         assert sig is not None
         sl_dist = abs(sig.entry - sig.stop_loss)
-        assert sig.tp1 >= sig.entry + sl_dist * 1.0
+        # Use tolerance: tp1 is rounded to 8 decimals; sl_dist isn't, so a strict
+        # >= check can fail by ~1e-12 when tp1 lands exactly at the 1R floor.
+        assert sig.tp1 + 1e-8 >= sig.entry + sl_dist * 1.0
 
     def test_short_tp1_below_entry(self):
         """TP1 must be strictly below entry for SHORT FAR."""

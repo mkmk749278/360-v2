@@ -4251,11 +4251,11 @@ class ScalpChannel(BaseChannel):
         ind = indicators.get("5m", {})
         atr_val = ind.get("atr_last")
         if atr_val is None or atr_val <= 0:
-            return self._reject("adx_reject")
+            return self._reject("atr_invalid")
 
         close = float(closes_raw[-1])
         if close <= 0:
-            return self._reject("breakout_not_found")
+            return self._reject("invalid_price")
 
         # ── Reference structure levels ───────────────────────────────────
         # Compute prior swing high and low from history BEFORE the auction
@@ -4395,15 +4395,15 @@ class ScalpChannel(BaseChannel):
         # and the thesis is fully wrong.
         atr_buffer = atr_val * 0.3
         if direction == Direction.LONG:
-            sl = auction_wick_extreme - atr_buffer
+            structural_sl = auction_wick_extreme - atr_buffer
+            close_rel_floor = close - max(close * 0.008, atr_val * 1.0)
+            sl = min(structural_sl, close_rel_floor)
         else:
-            sl = auction_wick_extreme + atr_buffer
+            structural_sl = auction_wick_extreme + atr_buffer
+            close_rel_ceiling = close + max(close * 0.008, atr_val * 1.0)
+            sl = max(structural_sl, close_rel_ceiling)
 
         sl_dist = abs(close - sl)
-        min_sl_dist = atr_val * 0.5
-        if sl_dist < min_sl_dist:
-            sl_dist = min_sl_dist
-            sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
 
         if direction == Direction.LONG and sl >= close:
             return self._reject("invalid_sl_geometry")
