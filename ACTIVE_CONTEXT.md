@@ -1,5 +1,5 @@
 # ACTIVE CONTEXT
-*Updated: 2026-05-01 — Path audit #6 (BREAKDOWN_SHORT): mirror of VSB multi-fix — current_vol gate removed + close-below requirement + SL geometry + B8 vol mult*
+*Updated: 2026-05-02 — Path audit #7 (OPENING_RANGE_BREAKOUT): dormant-path audit — feature_disabled telemetry + VSB-family fixes preserved for re-enable*
 
 ---
 
@@ -8,7 +8,55 @@
 Engine is live, healthy, scanning. Market is QUIET ~99.7% of the latest 28h
 window — signal drought is expected and is the dominant constraint, not a bug.
 
-This session (2026-05-02 — path audit #6):
+This session (2026-05-02 — path audit #7):
+- **OPENING_RANGE_BREAKOUT deep dive** (`_evaluate_opening_range_breakout`,
+  `src/channels/scalp.py:2257`).  Latest monitor zip showed
+  `EVAL::OPENING_RANGE_BREAKOUT: regime_blocked=18,423` — 100% of cycles.
+  Investigation answer: ORB is **feature-flag-disabled**
+  (`SCALP_ORB_ENABLED=false` in `config/__init__.py:848`).  The path's
+  rejection token was conflated with real regime blocks, making telemetry
+  ambiguous.  ACTIVE_CONTEXT had ORB listed as "never produced a signal"
+  needing root-cause investigation — the answer is "feature flag, by
+  design, pending session-range rebuild."
+- **Why ORB is disabled** (per `config/__init__.py:844-847` comment):
+  current implementation uses `highs[-8:-4]` and `lows[-8:-4]` as a proxy
+  for the session opening range — **not** institutional-grade
+  session-anchored logic.  Code preserved for future controlled rebuild.
+- **🟡 Telemetry fix — `feature_disabled` not `regime_blocked`**
+  (`src/channels/scalp.py:2271`).  Disabled-flag rejection now reports
+  `feature_disabled` so live monitor data clearly separates the dormant
+  flag from real regime blocks.  Pre-fix was misleading — both causes
+  shared the same token.
+- **🔴 Bug A (preserved-fix) — current-candle volume gate**
+  (was line 2322).  Same `volumes[-1] < 1.5 × avg_vol` partial-vs-complete
+  candle unit-mismatch bug as VSB / BDS.  Removed for consistency so when
+  ORB is re-enabled it doesn't ship the same family of defects.
+- **🔴 Bug B (preserved-fix) — catastrophic SL placement**
+  (was line 2348).  `sl = range_low × 0.999` for LONG produced sub-spread
+  stops on tight ranges.  Same close-relative + ATR floor pattern as
+  VSB / BDS now applied: `sl = min(range_low × 0.999, close − max(0.8% ×
+  close, 1×ATR))` for LONG (mirror for SHORT).
+- **Tests added** (`tests/test_pr06_orb_disable.py::TestORBAuditFixes`):
+  3 new cases — disabled-path emits `feature_disabled`, active path
+  accepts low partial-candle volume, active path SL respects close-
+  relative floor on tight ranges.  All 13 ORB tests pass (10 existing
+  + 3 new).  3305 broader tests pass (vs 3302 post-cleanup baseline —
+  net +3, zero regressions).
+- **Open question for owner** — ORB is currently disabled because the
+  session-range proxy isn't institutional-grade.  Two paths forward:
+    (a) leave disabled, build true session-anchored opening-range logic
+        as a future evaluator rebuild (B10 territory — needs sign-off)
+    (b) re-enable as-is now that the VSB-family bugs are fixed; the
+        proxy is "good enough" for a MIDCAP scalp window even if not
+        SMC-doctrinal.  Lower bar, more emissions, less institutional
+        accuracy.
+  CTE recommendation: (a) — the current proxy fires on a 20-minute
+  window from "now", which has nothing to do with session-open
+  liquidity dynamics.  Re-enabling would generate signals but not
+  truthfully ORB-themed ones.  Better to either rebuild or keep
+  disabled and surface the slot in an active path.
+
+Prior session (2026-05-02 — path audit #6):
 - **BREAKDOWN_SHORT deep dive** (`_evaluate_breakdown_short`,
   `src/channels/scalp.py:2006–2220`). The SHORT mirror of VSB.  Latest
   monitor zip showed identical numbers to VSB:
@@ -454,6 +502,7 @@ statistical confidence.
 | **LIQ_REV path audit fix: RSI thresholds relaxed 25/75 → 35/65 (with RSI direction-of-travel check via rsi_prev) — pre-fix demanded RSI extreme exhaustion that 5m RSI rarely reaches during normal cascades; zone-proximity gate now also accepts cascade extremum (low/high) within 0.5% of zone, not just close_now — cascades overshoot zones by definition** | `src/channels/scalp.py:1382` (RSI gate) + `:1405` (zone gate) + 6 new tests in `tests/test_liquidation_reversal_tp.py` | **2026-05-01 very late (path audit #4)** |
 | **VSB path audit (multi-fix): (A) removed broken current-candle volume gate (62.7% of rejections — was rejecting partial-candle volumes vs complete-candle thresholds, contradicting "surge + pullback" thesis); (B) breakout qualifier now requires close above swing_high — wick-only piercing was being accepted as breakout (was a sweep, not a breakout); (C) SL anchored to LOWER of `swing_high × 0.992` and `close − max(0.8%×close, 1×ATR)` — pre-fix produced 0.05% stops in extended pullback zones; (D) breakout vol multiplier now env-overridable via VSB_BREAKOUT_VOL_MULT (B8)** | `src/channels/scalp.py:1799` + `:1825` (close gate) + `:1907` (SL geometry) + `:46` (env constant) + 6 new tests in `tests/test_channels.py::TestVolumeSurgeBreakoutRefinements` | **2026-05-01 very late (path audit #5, re-audit)** |
 | **BDS path audit (multi-fix mirror of #5): (A) removed broken current-candle volume gate (same 62.7% pattern — dead-cat bounces have reduced volume by definition); (B) breakdown qualifier now requires close BELOW swing_low — wick-only piercing was being accepted but is a bullish sweep, not a breakdown; (C) SL anchored to HIGHER of `swing_low × 1.008` and `close + max(0.8%×close, 1×ATR)` — pre-fix produced 0.05% stops in extended bounce zones; (D) shares VSB_BREAKOUT_VOL_MULT env constant for breakdown-candle vol gate** | `src/channels/scalp.py:2059` + `:2086` (close gate) + `:2153` (SL geometry) + 6 new tests in `tests/test_channels.py::TestBreakdownShortRefinements` | **2026-05-02 (path audit #6)** |
+| **ORB path audit (dormant-path triage): path is feature-flag-disabled (`SCALP_ORB_ENABLED=false`); audit clarified the live monitor `regime_blocked=100%` was the disable token, NOT a regime gate.  Telemetry fix: dormant-flag check now reports `feature_disabled` (truthful).  Preserved-code fixes for re-enable readiness: removed broken current-candle volume gate (VSB/BDS-family bug); SL geometry now respects close-relative + 1×ATR floor (was 0.1% structural buffer producing sub-spread stops on tight ranges).  Open question on whether to rebuild session-range proxy or re-enable as-is — owner decision.** | `src/channels/scalp.py:2271` (telemetry) + `:2322` (vol gate) + `:2348` (SL geometry) + 3 new tests in `tests/test_pr06_orb_disable.py::TestORBAuditFixes` | **2026-05-02 (path audit #7)** |
 
 ---
 
