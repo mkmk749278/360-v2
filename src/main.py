@@ -188,8 +188,12 @@ class CryptoSignalEngine:
         # Macro Watchdog – async background task for global market-event alerts
         # Polls news, Fear & Greed index, and uses OpenAI to detect significant
         # macro events (FOMC, wars, token listings) and sends alerts to Telegram.
+        # HIGH/CRITICAL severity events also broadcast to the free channel as
+        # subscriber-visible breaking news (paid-conversion funnel content).
+        # MEDIUM/LOW severity stays admin-only.
         self._macro_watchdog = MacroWatchdog(
             send_alert=self.telegram.send_admin_alert,
+            send_to_free=self.telegram.post_to_free_channel,
             openai_evaluator=self._openai_evaluator,
         )
 
