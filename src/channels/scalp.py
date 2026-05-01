@@ -183,18 +183,21 @@ _FAR_RSI_LONG_SOFT_MIN: float = 65.0   # ≥ this (< hard) → +6 soft penalty
 _FAR_RSI_SHORT_HARD_MIN: float = 25.0  # ≤ this → hard reject (oversold)
 _FAR_RSI_SHORT_SOFT_MAX: float = 35.0  # ≤ this (> hard) → +6 soft penalty
 
-# SR_FLIP_RETEST HTF direction veto — see _evaluate_sr_flip_retest header.
-# When True (default), block setups where 1H AND 4H trend BOTH oppose signal
-# direction.  Conservative gate: mixed HTF passes through, only unambiguous
-# counter-trend mismatches are vetoed.  Env-overridable per B8 so the gate
-# can be flipped off without a code deploy if a regression surfaces.
-SR_FLIP_HTF_VETO_ENABLED: bool = os.getenv("SR_FLIP_HTF_VETO_ENABLED", "true").lower() in ("1", "true", "yes")
+# SR_FLIP_RETEST HTF policy — soft penalty for HTF mismatch.
+# Aligned with the scalping doctrine codified in OWNER_BRIEF §2.1a.
+# Counter-trend SR_FLIP setups (e.g., resistance held during an uptrend
+# pullback → SHORT scalp) are legitimate scalp products; hard-blocking
+# them eliminates ~half the path's edge in correlated trending markets.
+# Soft penalty (default 6.0 confidence pts) when BOTH 1H AND 4H oppose
+# direction lets scoring decide.  Env-overridable per B8.
+_SR_FLIP_HTF_MISMATCH_PENALTY: float = float(os.getenv("SR_FLIP_HTF_MISMATCH_PENALTY", "6.0"))
 
-# QUIET_COMPRESSION_BREAK HTF direction veto — same conservative semantic
-# as SR_FLIP.  QCB lives in QUIET/RANGING regimes where HTF trends are
-# typically weaker, but a QCB LONG breakout against a clear 1H+4H downtrend
-# is still a fade-the-trend setup with low edge.  Defense-in-depth.
-QCB_HTF_VETO_ENABLED: bool = os.getenv("QCB_HTF_VETO_ENABLED", "true").lower() in ("1", "true", "yes")
+# QUIET_COMPRESSION_BREAK HTF policy — soft penalty.  QCB lives in
+# QUIET/RANGING regimes where HTF trends are typically weak; the soft
+# penalty rarely fires but adds a conservative confidence haircut on the
+# rare occasions when a compression break does fight an unambiguous HTF.
+# Same env-overridable pattern.
+_QCB_HTF_MISMATCH_PENALTY: float = float(os.getenv("QCB_HTF_MISMATCH_PENALTY", "6.0"))
 
 # FAILED_AUCTION_RECLAIM HTF policy — soft penalty for HTF mismatch.
 # We are a SCALPING system (per OWNER_BRIEF Part II): direction-agnostic,
@@ -2647,22 +2650,23 @@ class ScalpChannel(BaseChannel):
         else:
             return self._reject("flip_close_not_confirmed")
 
-        # HTF direction veto — block the canonical "wrong-direction reclaim" pattern
-        # where a 5m sweep+reclaim fires against a clear 1H+4H trend.  XAGUSDT SHORT
-        # @ 74.18 (2026-04-30) was the trigger case: 1H BULLISH (MA7>MA21>MA99) and
-        # 4H BULLISH (close > ema_fast > ema_slow), yet the 5m mechanics still
-        # qualified.  The signal got correctly killed by regime-shift invalidation
-        # later, but vetoing pre-generation is strictly better — saves a slot, an
-        # alert dispatch, and subscriber attention on a structurally-doomed setup.
-        # Conservative threshold: require BOTH 1H AND 4H to oppose direction
-        # (mixed HTF passes through, only unambiguous mismatches blocked).
-        # Env-overridable per B8.
-        if SR_FLIP_HTF_VETO_ENABLED:
+        # HTF mismatch soft penalty — aligned with scalping doctrine
+        # (OWNER_BRIEF §2.1a).  Counter-trend SR_FLIP setups are legitimate
+        # scalp products: resistance held during an uptrend pullback is a
+        # valid SHORT scalp, support held during a downtrend bounce is a
+        # valid LONG scalp.  Hard-blocking these would eliminate ~half the
+        # path's edge in correlated trending markets where top-75 USDT-M
+        # pairs follow BTC.  Soft penalty (default 6.0 pts) when BOTH 1H
+        # AND 4H oppose direction lets scoring decide whether the signal
+        # clears the confidence-tier threshold.  Replaces the prior hard
+        # `htf_direction_veto` reject (PR #266 → corrected by PR #269).
+        sr_flip_htf_penalty = 0.0
+        if _SR_FLIP_HTF_MISMATCH_PENALTY > 0:
             trend_1h = self._classify_htf_trend(indicators, candles, "1h")
             trend_4h = self._classify_htf_trend(indicators, candles, "4h")
             opposite = "BEARISH" if direction == Direction.LONG else "BULLISH"
             if trend_1h == opposite and trend_4h == opposite:
-                return self._reject("htf_direction_veto")
+                sr_flip_htf_penalty = _SR_FLIP_HTF_MISMATCH_PENALTY
 
         # Retest proximity gate — layered zone system replacing the original hard-0.3% gate.
         # Premium zone (0–0.3% from flipped level) → no soft penalty.
@@ -2939,7 +2943,8 @@ class ScalpChannel(BaseChannel):
         # the composite scoring pass, preserving the separation between hard gates and
         # soft quality adjustments.
         total_penalty = (
-            proximity_penalty + wick_penalty + rsi_penalty + fvg_penalty + level_quality_penalty
+            proximity_penalty + wick_penalty + rsi_penalty + fvg_penalty
+            + level_quality_penalty + sr_flip_htf_penalty
         )
         if total_penalty != 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
@@ -3201,19 +3206,20 @@ class ScalpChannel(BaseChannel):
         else:
             return self._reject("breakout_not_detected")
 
-        # HTF direction veto — block compression breakouts that fight a clear
-        # 1H+4H trend.  QCB lives in QUIET/RANGING regimes where HTFs are
-        # typically weaker, but a LONG break against an unambiguous bearish
-        # HTF (or vice versa) is structurally a fade with low edge.  Same
-        # conservative semantic as SR_FLIP (PR #266): only veto when BOTH
-        # HTFs oppose direction; mixed HTF passes through.  Env-overridable
-        # per B8.
-        if QCB_HTF_VETO_ENABLED:
+        # HTF mismatch soft penalty — aligned with scalping doctrine
+        # (OWNER_BRIEF §2.1a).  QCB lives in QUIET/RANGING regimes where
+        # HTF trends are typically weak, so the penalty rarely fires —
+        # but when 1H AND 4H both clearly oppose direction it adds a
+        # conservative confidence haircut without hard-blocking the
+        # signal.  Replaces the prior hard `htf_direction_veto` reject
+        # (PR #267 → corrected by PR #269).
+        qcb_htf_penalty = 0.0
+        if _QCB_HTF_MISMATCH_PENALTY > 0:
             trend_1h = self._classify_htf_trend(indicators, candles, "1h")
             trend_4h = self._classify_htf_trend(indicators, candles, "4h")
             opposite = "BEARISH" if direction == Direction.LONG else "BULLISH"
             if trend_1h == opposite and trend_4h == opposite:
-                return self._reject("htf_direction_veto")
+                qcb_htf_penalty = _QCB_HTF_MISMATCH_PENALTY
 
         # MACD momentum confirmation: histogram must be trending in breakout direction.
         # Zero-cross requirement was too timing-sensitive — breakout candle rarely
@@ -3343,6 +3349,8 @@ class ScalpChannel(BaseChannel):
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
         sig.confidence = min(100.0, sig.confidence + 4.0)
+        if qcb_htf_penalty > 0.0:
+            sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + qcb_htf_penalty
         return sig
 
     # ------------------------------------------------------------------
