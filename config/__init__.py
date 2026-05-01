@@ -935,10 +935,15 @@ WS_STALENESS_MULTIPLIER_FUTURES: int = _safe_int("WS_STALENESS_MULTIPLIER_FUTURE
 WS_ALERT_COOLDOWN: int = _safe_int("WS_ALERT_COOLDOWN", "600")
 # REST-fallback admin-alert grace period (seconds).  Transient WS drops that
 # reconnect inside this window do not fire the "REST fallback activated" alert
-# — only sustained outages do.  This filters out the steady ~15 min staleness-
-# watchdog force-close cycle (clean reconnect under 2 s) which is informational
-# only and was creating Telegram spam.
-WS_REST_FALLBACK_ALERT_GRACE_SEC: int = _safe_int("WS_REST_FALLBACK_ALERT_GRACE_SEC", "60")
+# — only sustained outages do.  Originally tuned to 60s assuming "<2s clean
+# reconnect" after the staleness-watchdog force-close.  Live evidence
+# (2026-05-04) showed reconnects routinely take 60-180s on the futures stream
+# (likely due to Binance re-subscription latency for the full kline-stream set),
+# so the 60s grace was firing alerts on every 15-min staleness cycle even
+# though signals continued flowing through REST fallback.  Bumped to 180s to
+# filter out the recoverable mid-length outages while still alerting on
+# genuinely prolonged degradations (>3 min reconnect = real problem).
+WS_REST_FALLBACK_ALERT_GRACE_SEC: int = _safe_int("WS_REST_FALLBACK_ALERT_GRACE_SEC", "180")
 # How many consecutive failed reconnection attempts before the aiohttp session
 # is recycled (clears stale TCP connection pool and DNS cache).
 WS_SESSION_RECYCLE_ATTEMPTS: int = _safe_int("WS_SESSION_RECYCLE_ATTEMPTS", "5")
