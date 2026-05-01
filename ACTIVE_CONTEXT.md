@@ -34,6 +34,32 @@
 ### Pending owner decision
 - **OPENING_RANGE_BREAKOUT** — currently `feature_disabled`. Rebuild with proper session-anchored range logic, or delete the path entirely. Not a CTE call.
 
+### Free-channel content rollout (in progress)
+
+Goal: enrich the free channel as a paid-conversion funnel — market updates, major news, eventually charts and explanations.
+
+**Phase 1 — Macro events to free channel** ✅ shipped
+- `MacroWatchdog` now broadcasts HIGH/CRITICAL severity events (FOMC, regulatory action, exchange hacks, F&G ≤10 / ≥90, AI-classified breaking news) to both admin AND free channel
+- MEDIUM/LOW stays admin-only (operational signal, not subscriber content)
+- Backwards compatible: legacy `send_to_free=None` constructions stay admin-only
+- 9 routing tests in `tests/test_macro_watchdog_routing.py`
+
+**Phase 2 (next) — Event-driven market updates**
+- Triggers for: BTC ±3% in 1h, regime shift on majors, BTC dominance ±2%
+- AI-generated explanation + free-channel post
+- Cooldown: max 1 per event-type per hour
+
+**Phase 3 — Charts attached to scheduled posts**
+- New `src/chart_renderer.py` using mplfinance
+- Attached to morning brief, EOD wrap, event-driven alerts
+- Uses existing `Telegram.send_photo`
+
+**Phase 4 — Coin spotlights**
+- Top mover / breakout watch daily posts with charts
+
+**Phase 5 — Signal-close storytelling**
+- Wire `generate_signal_closed_post` to TradeMonitor close events
+
 ---
 
 ## Working Pattern

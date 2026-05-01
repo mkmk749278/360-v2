@@ -13,8 +13,16 @@ macro-level events that could materially move crypto markets:
 * ⚠️  Fear & Greed index extremes
 
 When a significant event is detected it is formatted as a high-priority alert
-and pushed directly to the configured Telegram admin/alerts channel, completely
-bypassing the trade-signal queue so it never delays live signals.
+and routed to the Telegram channels:
+
+* HIGH / CRITICAL severity — broadcast to BOTH the admin alert channel AND
+  the free subscriber channel.  Subscribers see breaking macro context which
+  builds the free-channel value as a paid-conversion funnel.
+* MEDIUM / LOW severity — admin channel only (operational signal, not
+  subscriber content).
+
+The free-channel post is skipped silently when no ``send_to_free`` callable
+is provided (backwards compatible with admin-only usage).
 
 Configuration (via environment variables):
   MACRO_WATCHDOG_ENABLED                  – "true" to enable (default: "true")
@@ -55,6 +63,13 @@ _SEVERITY_EMOJI: Dict[str, str] = {
     "CRITICAL": "🚨",
 }
 
+# Severities that get broadcast to the free subscriber channel in addition
+# to the admin channel.  HIGH/CRITICAL events are subscriber-relevant
+# breaking news (FOMC, regulatory action, exchange hacks, F&G extremes ≤10
+# or ≥90).  MEDIUM/LOW stay admin-only — they're operational signal that
+# would create noise on the free channel.
+_FREE_CHANNEL_SEVERITIES: frozenset = frozenset({"HIGH", "CRITICAL"})
+
 # Minimum Fear & Greed values for automatic alerts (before OpenAI classification)
 _FG_EXTREME_LOW: int = MACRO_WATCHDOG_FEAR_GREED_THRESHOLD_LOW
 _FG_EXTREME_HIGH: int = MACRO_WATCHDOG_FEAR_GREED_THRESHOLD_HIGH
@@ -74,6 +89,13 @@ class MacroWatchdog:
     send_alert:
         Async callable that sends a string message to the admin Telegram channel.
         Typically ``TelegramBot.send_admin_alert``.
+    send_to_free:
+        Optional async callable that posts to the free subscriber channel.
+        When provided, HIGH/CRITICAL severity events are broadcast to both
+        admin and free channels (subscriber-visible breaking news).  When
+        ``None`` (the default), all alerts go to admin only — backwards
+        compatible with the original admin-only behaviour.  Typically
+        ``TelegramBot.post_to_free_channel``.
     openai_evaluator:
         Optional :class:`~src.openai_evaluator.OpenAIEvaluator` instance.
         When ``None`` or disabled, events are still detected via the Fear & Greed
@@ -88,11 +110,13 @@ class MacroWatchdog:
     def __init__(
         self,
         send_alert: Callable[[str], Coroutine[Any, Any, bool]],
+        send_to_free: Optional[Callable[[str], Coroutine[Any, Any, bool]]] = None,
         openai_evaluator: Optional[OpenAIEvaluator] = None,
         poll_interval: Optional[float] = None,
         watch_symbols: Optional[List[str]] = None,
     ) -> None:
         self._send_alert = send_alert
+        self._send_to_free = send_to_free
         self._openai = openai_evaluator
         self._poll_interval: float = poll_interval if poll_interval is not None else MACRO_WATCHDOG_POLL_INTERVAL
         self._watch_symbols: List[str] = watch_symbols or _DEFAULT_WATCH_SYMBOLS
@@ -137,6 +161,31 @@ class MacroWatchdog:
     # ------------------------------------------------------------------
     # Main polling loop
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # Routing helper
+    # ------------------------------------------------------------------
+
+    async def _broadcast(self, msg: str, severity: str) -> None:
+        """Send `msg` to admin and (when severity warrants) the free channel.
+
+        Severity HIGH or CRITICAL → admin + free.  Anything else → admin only.
+        Free-channel post errors are logged but never re-raised — admin alert
+        already succeeded and we don't want a free-channel issue to silence
+        future admin alerts in the same poll cycle.
+        """
+        await self._send_alert(msg)
+        if (
+            self._send_to_free is not None
+            and severity in _FREE_CHANNEL_SEVERITIES
+        ):
+            try:
+                await self._send_to_free(msg)
+            except Exception as exc:
+                log.warning(
+                    "MacroWatchdog free-channel post failed (severity={}): {}",
+                    severity, exc,
+                )
 
     async def _poll_loop(self) -> None:
         """Infinite loop: poll events, send alerts, sleep."""
@@ -194,7 +243,7 @@ class MacroWatchdog:
                 "_Extreme fear often precedes capitulation events or short-squeeze "
                 "bounces.  Review open positions and tighten stop losses._"
             )
-            await self._send_alert(msg)
+            await self._broadcast(msg, severity)
             log.info("MacroWatchdog: Fear & Greed extreme fear alert (value={})", value)
 
         elif value >= _FG_EXTREME_HIGH:
@@ -207,7 +256,7 @@ class MacroWatchdog:
                 "_Extreme greed historically precedes sharp corrections.  "
                 "Consider tightening trailing stops on long positions._"
             )
-            await self._send_alert(msg)
+            await self._broadcast(msg, severity)
             log.info("MacroWatchdog: Fear & Greed extreme greed alert (value={})", value)
 
     async def _check_news(self, coin: str, session: aiohttp.ClientSession) -> None:
@@ -268,7 +317,7 @@ class MacroWatchdog:
             msg += f"*Expected Impact:* {impact}\n"
         msg += "\n_This is an AI-generated macro alert.  No trade signal has been generated._"
 
-        await self._send_alert(msg)
+        await self._broadcast(msg, severity)
         log.info(
             "MacroWatchdog: {} news alert ({}, score={:.2f})",
             coin, severity, result.score,
