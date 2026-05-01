@@ -69,6 +69,29 @@ After the next monitor run (post-regime fix deploy):
 3. If VSB/BDS/ORB/WHALE start emitting candidates, watch their quality —
    they were silent for so long that any regression would show fast.
 
+### 2026-05-04: Phase 2 path audit #2 — QUIET_COMPRESSION_BREAK (entry quality)
+
+Second-most-emitting path (10-179 signals/window post-recalibration).
+Audit found the same HTF-veto gap as SR_FLIP — no 1H/4H trend check
+at the evaluator level.  Other checklist items mostly ✅ or 🟡 deferred.
+
+Shipped:
+- HTF direction veto via reused `_classify_htf_trend` helper.  Conservative
+  semantic: block only when BOTH 1H AND 4H oppose signal direction.
+- Env-overridable as `QCB_HTF_VETO_ENABLED` (B8).
+
+Deferred (will revisit if data shows need):
+- Breakout-candle body quality check (would need fixture redesign)
+- Closed-candle volume confirmation (same)
+- Soft RSI layering (current hard bounds 48-75 / 25-52 are reasonable)
+
+6 new tests in `TestQuietCompressionBreakPhase2EntryQuality`:
+veto fires LONG-into-bearish-HTF, mirror SHORT-into-bullish, mixed-HTF
+doesn't fire, missing data degrades gracefully, aligned signal not vetoed,
+env override toggles.
+
+3397 pass / 0 fail (was 3391 = +6, zero regressions).
+
 ### 2026-05-04: Phase 2 path audit #1 — SR_FLIP_RETEST (entry quality)
 
 Owner-driven per-path audit (mirrors the 14-path workflow from yesterday)
