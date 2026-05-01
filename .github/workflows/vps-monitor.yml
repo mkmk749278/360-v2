@@ -108,6 +108,10 @@ jobs:
             "docker exec 360scalp-v2-engine sh -c 'cat /app/data/dispatch_log.json 2>/dev/null || echo []'" \
             > monitor/raw/dispatch_log.json
 
+          ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "docker exec 360scalp-v2-engine sh -c 'cat /app/data/invalidation_records.json 2>/dev/null || echo []'" \
+            > monitor/raw/invalidation_records.json
+
           # Read engine logs from the persistent loguru file sink at
           # /app/logs/engine_*.log (30 days × 50MB rotation) instead of
           # docker compose logs.  Docker's json-file driver caps at 30MB total
@@ -197,6 +201,7 @@ jobs:
             --window-comparison-json monitor/report/window_comparison.json
             --signals-last100-json monitor/report/signals_last100.json
             --dispatch-log-out-json monitor/report/dispatch_log.json
+            --invalidation-records-json monitor/raw/invalidation_records.json
           )
 
           if [ "${COMPARE_PREVIOUS_WINDOW}" = "true" ]; then

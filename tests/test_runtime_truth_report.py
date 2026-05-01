@@ -13,6 +13,7 @@ from src.runtime_truth_report import (
     parse_path_funnel_from_logs,
     parse_quiet_scalp_block_from_logs,
     parse_regime_distribution_from_logs,
+    summarize_invalidation_audit,
 )
 
 
@@ -573,3 +574,106 @@ def test_format_truth_report_markdown_renders_component_breakdown() -> None:
     assert "QUIET_COMPRESSION_BREAK" in md
     assert "20.50" in md  # market component
     assert "6.60" in md   # gap to threshold
+
+
+# ────────────────────────────────────────────────────────────────────────
+# Invalidation Quality Audit — summarize + markdown render.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _audit_record(setup, family, classification):
+    return {
+        "signal_id": "X", "symbol": "BTCUSDT", "channel": "360_SCALP",
+        "setup_class": setup, "kill_reason_family": family,
+        "classification": classification,
+    }
+
+
+def test_summarize_invalidation_audit_groups_by_setup_and_reason() -> None:
+    records = [
+        _audit_record("SR_FLIP_RETEST", "momentum_loss", "PROTECTIVE"),
+        _audit_record("SR_FLIP_RETEST", "momentum_loss", "PREMATURE"),
+        _audit_record("SR_FLIP_RETEST", "momentum_loss", "PREMATURE"),
+        _audit_record("QUIET_COMPRESSION_BREAK", "regime_shift", "PROTECTIVE"),
+        _audit_record("QUIET_COMPRESSION_BREAK", "regime_shift", "NEUTRAL"),
+        # Stale (no classification) — counted separately.
+        {"signal_id": "Y", "setup_class": "FAR", "kill_reason_family": "ema_crossover",
+         "classification": None},
+    ]
+    audit = summarize_invalidation_audit(records)
+    assert audit["totals"]["PROTECTIVE"] == 2
+    assert audit["totals"]["PREMATURE"] == 2
+    assert audit["totals"]["NEUTRAL"] == 1
+    assert audit["stale"] == 1
+    assert audit["by_setup"]["SR_FLIP_RETEST"]["PROTECTIVE"] == 1
+    assert audit["by_setup"]["SR_FLIP_RETEST"]["PREMATURE"] == 2
+    assert audit["by_reason"]["regime_shift"]["NEUTRAL"] == 1
+
+
+def test_summarize_invalidation_audit_handles_empty() -> None:
+    audit = summarize_invalidation_audit([])
+    assert audit["totals"] == {
+        "PROTECTIVE": 0, "PREMATURE": 0, "NEUTRAL": 0, "INSUFFICIENT_DATA": 0,
+    }
+    assert audit["by_setup"] == {}
+    assert audit["stale"] == 0
+
+
+def test_format_truth_report_renders_audit_section_with_data() -> None:
+    audit = {
+        "totals": {
+            "PROTECTIVE": 8, "PREMATURE": 3, "NEUTRAL": 2, "INSUFFICIENT_DATA": 1,
+        },
+        "by_setup": {
+            "SR_FLIP_RETEST": {"PROTECTIVE": 5, "PREMATURE": 2, "NEUTRAL": 1, "INSUFFICIENT_DATA": 0},
+        },
+        "by_reason": {
+            "momentum_loss": {"PROTECTIVE": 6, "PREMATURE": 2, "NEUTRAL": 1, "INSUFFICIENT_DATA": 0},
+        },
+        "stale": 4,
+    }
+    snapshot, _ = build_snapshot(
+        channel="360_SCALP", lookback_hours=24, compare_previous_window=False,
+        include_raw_json=False, symbol_filter="", setup_filter="",
+        runtime_health={"running": True, "status": "running", "health": "healthy"},
+        heartbeat_text="", records=[], current_funnel={}, previous_funnel={},
+        invalidation_audit=audit,
+        now_ts=1_777_500_000.0,
+    )
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Invalidation Quality Audit" in md
+    assert "PROTECTIVE=8" in md
+    assert "PREMATURE=3" in md
+    assert "Net-helping" in md  # 8 > 3
+    assert "SR_FLIP_RETEST" in md
+    assert "momentum_loss" in md
+
+
+def test_format_truth_report_audit_section_calls_out_net_hurting() -> None:
+    audit = {
+        "totals": {"PROTECTIVE": 2, "PREMATURE": 7, "NEUTRAL": 1, "INSUFFICIENT_DATA": 0},
+        "by_setup": {}, "by_reason": {}, "stale": 0,
+    }
+    snapshot, _ = build_snapshot(
+        channel="360_SCALP", lookback_hours=24, compare_previous_window=False,
+        include_raw_json=False, symbol_filter="", setup_filter="",
+        runtime_health={"running": True, "status": "running", "health": "healthy"},
+        heartbeat_text="", records=[], current_funnel={}, previous_funnel={},
+        invalidation_audit=audit,
+        now_ts=1_777_500_000.0,
+    )
+    md = format_truth_report_markdown(snapshot, {})
+    assert "Net-hurting" in md  # 7 > 2 — surfaces the flag
+
+
+def test_format_truth_report_audit_section_when_no_data() -> None:
+    snapshot, _ = build_snapshot(
+        channel="360_SCALP", lookback_hours=24, compare_previous_window=False,
+        include_raw_json=False, symbol_filter="", setup_filter="",
+        runtime_health={"running": True, "status": "running", "health": "healthy"},
+        heartbeat_text="", records=[], current_funnel={}, previous_funnel={},
+        now_ts=1_777_500_000.0,
+    )
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Invalidation Quality Audit" in md
+    assert "no classified invalidation records yet" in md
