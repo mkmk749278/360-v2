@@ -105,11 +105,13 @@ is much more robust.  Porting FAR to the same is a larger change that
 would significantly affect signal generation rate; needs proper before/after
 testing and a focused PR.
 
-**Pending follow-up:** PRs #266 (SR_FLIP) and #267 (QCB) already merged
-with HARD HTF vetoes that contradict the corrected doctrine.  Single
-follow-up PR to downgrade both to soft-penalty pattern.  Interim mitigation:
-operator can set `SR_FLIP_HTF_VETO_ENABLED=false` and `QCB_HTF_VETO_ENABLED=false`
-on the VPS to disable hard blocks without code deploy.
+**Follow-up shipped (PR #269):** SR_FLIP and QCB hard HTF vetoes
+downgraded to the same soft-penalty pattern shipped here for FAR.  All
+three structural-reversion paths now share a consistent doctrine via
+the `_classify_htf_trend` helper.  Env vars renamed:
+`SR_FLIP_HTF_VETO_ENABLED` → `SR_FLIP_HTF_MISMATCH_PENALTY` (default 6.0,
+set 0 to disable) and `QCB_HTF_VETO_ENABLED` → `QCB_HTF_MISMATCH_PENALTY`
+(same default).
 
 6 new tests in `TestFailedAuctionReclaimPhase2EntryQuality` — all assert
 signal STILL GENERATES on HTF mismatch (only the soft penalty attaches).

@@ -70,14 +70,19 @@ def _make_qcb_inputs(*, direction: Direction, close: float = 100.0, atr_last: fl
 
 
 class TestQuietCompressionBreakPhase2EntryQuality:
-    """Path audit #2 (Phase 2 — entry quality).
+    """Path audit #2 (Phase 2, scalping doctrine — soft penalty, not hard veto).
 
-    HTF direction veto for QCB.  Same conservative semantic as SR_FLIP
-    (PR #266): block setups where 1H AND 4H trend BOTH oppose signal
-    direction.  Mixed HTF passes through, only unambiguous mismatches
-    are vetoed.  QCB lives in QUIET/RANGING regimes where HTF trends are
-    typically weaker — but a compression break against a clear bigger-
-    picture trend is still a fade-the-trend setup with low edge.
+    Originally PR #267 shipped a HARD HTF veto; PR #269 corrected this
+    to a SOFT confidence penalty after the scalping doctrine was clarified
+    in OWNER_BRIEF §2.1a.  Counter-trend QCB setups (rare in QUIET regime
+    but possible) are valid scalp products; hard-blocking them imposed
+    directional bias.
+
+    Tests verify:
+    1. HTF mismatch attaches the soft penalty (signal still fires)
+    2. Aligned HTFs attach no HTF penalty
+    3. Missing HTF data degrades gracefully (no penalty applied)
+    4. `QCB_HTF_MISMATCH_PENALTY=0` disables entirely
     """
 
     def _add_htf(
@@ -96,8 +101,9 @@ class TestQuietCompressionBreakPhase2EntryQuality:
         }
         candles[tf] = {"close": [close]}
 
-    def test_htf_veto_blocks_long_when_both_1h_and_4h_bearish(self):
-        """LONG compression break vetoed when 1H+4H both clearly BEARISH."""
+    def test_htf_mismatch_long_in_bearish_htfs_attaches_soft_penalty(self):
+        """LONG compression break with both HTFs BEARISH: signal STILL fires
+        (counter-trend scalps are valid), soft penalty added."""
         candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
         self._add_htf(indicators, candles, tf="1h", ema_fast=90.0, ema_slow=95.0, close=88.0)
         self._add_htf(indicators, candles, tf="4h", ema_fast=92.0, ema_slow=98.0, close=89.0)
@@ -105,11 +111,15 @@ class TestQuietCompressionBreakPhase2EntryQuality:
         sig = ch._evaluate_quiet_compression_break(
             "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
         )
-        assert sig is None
-        assert ch._active_no_signal_reason == "htf_direction_veto"
+        assert sig is not None, (
+            "HTF mismatch must NOT hard-block the signal — counter-trend "
+            "QCB is a legitimate (rare) scalp setup."
+        )
+        from src.channels.scalp import _QCB_HTF_MISMATCH_PENALTY
+        assert sig.soft_penalty_total >= _QCB_HTF_MISMATCH_PENALTY
 
-    def test_htf_veto_blocks_short_when_both_1h_and_4h_bullish(self):
-        """SHORT compression break vetoed when 1H+4H both clearly BULLISH."""
+    def test_htf_mismatch_short_in_bullish_htfs_attaches_soft_penalty(self):
+        """SHORT compression break with both HTFs BULLISH: signal fires, penalty applied."""
         candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.SHORT)
         self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
         self._add_htf(indicators, candles, tf="4h", ema_fast=108.0, ema_slow=102.0, close=110.0)
@@ -117,36 +127,12 @@ class TestQuietCompressionBreakPhase2EntryQuality:
         sig = ch._evaluate_quiet_compression_break(
             "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
         )
-        assert sig is None
-        assert ch._active_no_signal_reason == "htf_direction_veto"
+        assert sig is not None
+        from src.channels.scalp import _QCB_HTF_MISMATCH_PENALTY
+        assert sig.soft_penalty_total >= _QCB_HTF_MISMATCH_PENALTY
 
-    def test_htf_veto_does_not_fire_on_mixed_htf(self):
-        """Mixed HTF (only one opposite, the other neutral/aligned) must NOT
-        trigger the veto."""
-        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
-        # 1H BEARISH, 4H NEUTRAL.
-        self._add_htf(indicators, candles, tf="1h", ema_fast=90.0, ema_slow=95.0, close=88.0)
-        self._add_htf(indicators, candles, tf="4h", ema_fast=100.0, ema_slow=99.0, close=99.5)
-        ch = ScalpChannel()
-        sig = ch._evaluate_quiet_compression_break(
-            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
-        )
-        if sig is None:
-            assert ch._active_no_signal_reason != "htf_direction_veto"
-
-    def test_htf_veto_degrades_gracefully_when_htf_data_missing(self):
-        """No 1H/4H data: veto must not fire — degrade to existing MTF gate."""
-        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
-        # No HTF injection.
-        ch = ScalpChannel()
-        sig = ch._evaluate_quiet_compression_break(
-            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
-        )
-        if sig is None:
-            assert ch._active_no_signal_reason != "htf_direction_veto"
-
-    def test_htf_veto_passes_when_signal_aligned_with_htfs(self):
-        """LONG aligned with 1H+4H BULLISH must NOT be vetoed."""
+    def test_htf_aligned_signal_attaches_no_htf_penalty(self):
+        """LONG aligned with 1H+4H BULLISH: no HTF penalty added."""
         candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
         self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
         self._add_htf(indicators, candles, tf="4h", ema_fast=108.0, ema_slow=102.0, close=110.0)
@@ -154,20 +140,34 @@ class TestQuietCompressionBreakPhase2EntryQuality:
         sig = ch._evaluate_quiet_compression_break(
             "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
         )
-        assert sig is not None, (
-            "QCB LONG aligned with HTFs must still fire (no veto)"
+        assert sig is not None
+        from src.channels.scalp import _QCB_HTF_MISMATCH_PENALTY
+        assert sig.soft_penalty_total < _QCB_HTF_MISMATCH_PENALTY, (
+            f"Aligned HTF should not carry the HTF mismatch penalty: "
+            f"soft_penalty_total={sig.soft_penalty_total}"
         )
 
-    def test_htf_veto_disabled_via_env(self, monkeypatch):
-        """Operator can flip off `QCB_HTF_VETO_ENABLED=false` without code deploy."""
-        monkeypatch.setenv("QCB_HTF_VETO_ENABLED", "false")
+    def test_htf_data_missing_attaches_no_htf_penalty(self):
+        """No 1H/4H data: degrade gracefully — no HTF penalty applied."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
+        )
+        if sig is not None:
+            from src.channels.scalp import _QCB_HTF_MISMATCH_PENALTY
+            assert sig.soft_penalty_total < _QCB_HTF_MISMATCH_PENALTY
+
+    def test_htf_penalty_disabled_via_env(self, monkeypatch):
+        """Operator can disable via `QCB_HTF_MISMATCH_PENALTY=0`."""
+        monkeypatch.setenv("QCB_HTF_MISMATCH_PENALTY", "0")
         import importlib
         import src.channels.scalp as scalp_mod
         importlib.reload(scalp_mod)
         try:
-            assert scalp_mod.QCB_HTF_VETO_ENABLED is False
+            assert scalp_mod._QCB_HTF_MISMATCH_PENALTY == 0.0
         finally:
-            monkeypatch.delenv("QCB_HTF_VETO_ENABLED", raising=False)
+            monkeypatch.delenv("QCB_HTF_MISMATCH_PENALTY", raising=False)
             importlib.reload(scalp_mod)
 
 
@@ -1905,25 +1905,22 @@ def _srflip_smc(with_fvg=True, direction="LONG"):
 
 
 class TestSrFlipRetestPhase2EntryQuality:
-    """Path audit #1 (Phase 2 — entry quality) fixes.
+    """Path audit #1 (Phase 2, scalping doctrine — soft penalty, not hard veto).
 
-    1. HTF direction veto — block setups where 1H AND 4H trend BOTH oppose
-       signal direction.  Trigger case: XAGUSDT SHORT @ 74.18 (2026-04-30)
-       where 1H (MA7>MA21>MA99) and 4H (close>ema_fast>ema_slow) were both
-       BULLISH yet the 5m sweep+reclaim still fired SHORT.  The signal got
-       correctly killed by regime-shift invalidation later, but vetoing
-       pre-generation saves the slot, alert, and subscriber attention.
-       Conservative threshold: BOTH HTFs must oppose (mixed passes through).
+    Originally PR #266 shipped a HARD HTF veto; PR #269 corrected this to
+    a SOFT confidence penalty after the scalping doctrine was clarified
+    in OWNER_BRIEF §2.1a.  Counter-trend SR_FLIP setups are legitimate
+    scalp products (resistance held during an uptrend pullback → SHORT
+    scalp; support held during a downtrend bounce → LONG scalp); hard-
+    blocking imposed directional bias on a correlated top-75 pair universe.
 
-    2. `close <= 0` now emits `invalid_price` (was `breakout_not_found`).
-       Same family bug fixed yesterday for DIV_CONT/FUNDING/CLS/PDC/FAR.
+    Tests verify:
+    1. HTF mismatch attaches the soft penalty (signal still fires)
+    2. Aligned HTFs attach no HTF penalty
+    3. Missing HTF data degrades gracefully (no penalty applied)
+    4. `SR_FLIP_HTF_MISMATCH_PENALTY=0` disables entirely
+    5. `close <= 0` token fix retained (`invalid_price`)
     """
-
-    def _call(self, candles, indicators, smc_data, regime="RANGING"):
-        ch = ScalpChannel()
-        return ch._evaluate_sr_flip_retest(
-            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime=regime,
-        )
 
     def _add_htf(
         self,
@@ -1942,13 +1939,12 @@ class TestSrFlipRetestPhase2EntryQuality:
         }
         candles[tf] = {"close": [close]}
 
-    def test_htf_veto_blocks_short_when_both_1h_and_4h_bullish(self):
-        """The XAG case: SHORT signal qualifies on 5m mechanics but 1H and 4H
-        are both clearly BULLISH (ema_fast > ema_slow AND close > ema_fast on
-        each) — the veto must reject."""
+    def test_htf_mismatch_short_in_bullish_htfs_attaches_soft_penalty(self):
+        """The XAG case revisited: SHORT qualifies on 5m mechanics, 1H+4H
+        both BULLISH.  Signal STILL generates (counter-trend scalps valid),
+        soft penalty attached."""
         candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
         indicators = _srflip_indicators_short()
-        # Both 1H and 4H BULLISH (opposite of SHORT signal).
         self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
         self._add_htf(indicators, candles, tf="4h", ema_fast=108.0, ema_slow=102.0, close=110.0)
         ch = ScalpChannel()
@@ -1956,13 +1952,18 @@ class TestSrFlipRetestPhase2EntryQuality:
             "BTCUSDT", candles, indicators, _srflip_smc(direction="SHORT"),
             0.01, 10_000_000, regime="RANGING",
         )
-        assert sig is None
-        assert ch._active_no_signal_reason == "htf_direction_veto", (
-            f"Expected htf_direction_veto, got {ch._active_no_signal_reason!r}"
+        assert sig is not None, (
+            "HTF mismatch must NOT hard-block — counter-trend SR_FLIP scalps "
+            "(resistance held in uptrend pullback) are legitimate."
+        )
+        from src.channels.scalp import _SR_FLIP_HTF_MISMATCH_PENALTY
+        assert sig.soft_penalty_total >= _SR_FLIP_HTF_MISMATCH_PENALTY, (
+            f"HTF mismatch penalty not attached: soft_penalty_total="
+            f"{sig.soft_penalty_total} expected >= {_SR_FLIP_HTF_MISMATCH_PENALTY}"
         )
 
-    def test_htf_veto_blocks_long_when_both_1h_and_4h_bearish(self):
-        """Symmetric: LONG signal blocked when 1H+4H both BEARISH."""
+    def test_htf_mismatch_long_in_bearish_htfs_attaches_soft_penalty(self):
+        """LONG with both HTFs BEARISH: signal fires, penalty applied."""
         candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
         indicators = _srflip_indicators_long()
         self._add_htf(indicators, candles, tf="1h", ema_fast=90.0, ema_slow=95.0, close=88.0)
@@ -1972,48 +1973,12 @@ class TestSrFlipRetestPhase2EntryQuality:
             "BTCUSDT", candles, indicators, _srflip_smc(direction="LONG"),
             0.01, 10_000_000, regime="RANGING",
         )
-        assert sig is None
-        assert ch._active_no_signal_reason == "htf_direction_veto"
+        assert sig is not None
+        from src.channels.scalp import _SR_FLIP_HTF_MISMATCH_PENALTY
+        assert sig.soft_penalty_total >= _SR_FLIP_HTF_MISMATCH_PENALTY
 
-    def test_htf_veto_does_not_fire_when_only_one_htf_opposite(self):
-        """Mixed HTF (e.g., 1H BULLISH but 4H NEUTRAL) must NOT trigger the
-        veto — we only block unambiguous mismatches."""
-        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
-        indicators = _srflip_indicators_short()
-        # 1H BULLISH (opposite of SHORT), 4H NEUTRAL (ema_fast > ema_slow but
-        # close < ema_fast — neither bullish nor bearish per _classify_htf_trend).
-        self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
-        self._add_htf(indicators, candles, tf="4h", ema_fast=100.0, ema_slow=99.0, close=99.5)
-        ch = ScalpChannel()
-        sig = ch._evaluate_sr_flip_retest(
-            "BTCUSDT", candles, indicators, _srflip_smc(direction="SHORT"),
-            0.01, 10_000_000, regime="RANGING",
-        )
-        # Test passes if either: (a) signal is generated (no veto fired), or
-        # (b) signal is rejected for a non-HTF reason.  We're proving the veto
-        # specifically did NOT fire.
-        if sig is None:
-            assert ch._active_no_signal_reason != "htf_direction_veto"
-
-    def test_htf_veto_does_not_fire_when_htf_data_missing(self):
-        """When 1H or 4H indicator data is unavailable, the veto must not
-        fire on partial data — we err toward letting the signal through and
-        rely on the existing MTF score gate."""
-        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
-        indicators = _srflip_indicators_long()
-        # No 1H or 4H data injected.
-        ch = ScalpChannel()
-        sig = ch._evaluate_sr_flip_retest(
-            "BTCUSDT", candles, indicators, _srflip_smc(direction="LONG"),
-            0.01, 10_000_000, regime="RANGING",
-        )
-        if sig is None:
-            assert ch._active_no_signal_reason != "htf_direction_veto", (
-                "Veto must not fire when HTF data is missing — we degrade gracefully"
-            )
-
-    def test_htf_veto_passes_when_signal_aligned_with_htfs(self):
-        """LONG aligned with 1H+4H BULLISH must NOT be vetoed."""
+    def test_htf_aligned_signal_attaches_no_htf_penalty(self):
+        """LONG aligned with 1H+4H BULLISH: no HTF penalty added."""
         candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
         indicators = _srflip_indicators_long()
         self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
@@ -2023,26 +1988,61 @@ class TestSrFlipRetestPhase2EntryQuality:
             "BTCUSDT", candles, indicators, _srflip_smc(direction="LONG"),
             0.01, 10_000_000, regime="RANGING",
         )
-        if sig is None:
-            assert ch._active_no_signal_reason != "htf_direction_veto"
+        if sig is not None:
+            from src.channels.scalp import _SR_FLIP_HTF_MISMATCH_PENALTY
+            # Other soft penalties (proximity, wick, level_quality) may exist
+            # for SR_FLIP — assert the HTF mismatch penalty specifically is
+            # NOT contributing (i.e., total < HTF penalty alone, since other
+            # penalties stay below the HTF threshold value of 6.0).
+            assert sig.soft_penalty_total < _SR_FLIP_HTF_MISMATCH_PENALTY, (
+                f"Aligned HTF should not carry the HTF mismatch penalty: "
+                f"soft_penalty_total={sig.soft_penalty_total}"
+            )
 
-    def test_htf_veto_disabled_via_env(self, monkeypatch):
-        """Operator can disable the veto via SR_FLIP_HTF_VETO_ENABLED=false
-        without a code deploy.  Owner-safety lever per B8."""
-        monkeypatch.setenv("SR_FLIP_HTF_VETO_ENABLED", "false")
+    def test_htf_mixed_attaches_no_htf_penalty(self):
+        """Mixed HTF (only one opposite, the other neutral): no HTF penalty."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        indicators = _srflip_indicators_short()
+        self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=100.0, ema_slow=99.0, close=99.5)
+        ch = ScalpChannel()
+        sig = ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, _srflip_smc(direction="SHORT"),
+            0.01, 10_000_000, regime="RANGING",
+        )
+        if sig is not None:
+            from src.channels.scalp import _SR_FLIP_HTF_MISMATCH_PENALTY
+            assert sig.soft_penalty_total < _SR_FLIP_HTF_MISMATCH_PENALTY
+
+    def test_htf_data_missing_attaches_no_htf_penalty(self):
+        """No 1H/4H data: degrade gracefully — no HTF penalty applied."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        indicators = _srflip_indicators_long()
+        ch = ScalpChannel()
+        sig = ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, _srflip_smc(direction="LONG"),
+            0.01, 10_000_000, regime="RANGING",
+        )
+        if sig is not None:
+            from src.channels.scalp import _SR_FLIP_HTF_MISMATCH_PENALTY
+            assert sig.soft_penalty_total < _SR_FLIP_HTF_MISMATCH_PENALTY
+
+    def test_htf_penalty_disabled_via_env(self, monkeypatch):
+        """Operator can disable via `SR_FLIP_HTF_MISMATCH_PENALTY=0`."""
+        monkeypatch.setenv("SR_FLIP_HTF_MISMATCH_PENALTY", "0")
         import importlib
         import src.channels.scalp as scalp_mod
         importlib.reload(scalp_mod)
         try:
-            assert scalp_mod.SR_FLIP_HTF_VETO_ENABLED is False
+            assert scalp_mod._SR_FLIP_HTF_MISMATCH_PENALTY == 0.0
         finally:
-            monkeypatch.delenv("SR_FLIP_HTF_VETO_ENABLED", raising=False)
+            monkeypatch.delenv("SR_FLIP_HTF_MISMATCH_PENALTY", raising=False)
             importlib.reload(scalp_mod)
 
     def test_invalid_price_token_replaces_breakout_not_found(self):
         """`close <= 0` must emit `invalid_price`, not `breakout_not_found`."""
         candles_5m = _make_srflip_candles_long(n=60, flip_offset=3)
-        candles_5m["close"][-1] = 0.0  # invalid current close
+        candles_5m["close"][-1] = 0.0
         candles = {"5m": candles_5m}
         ch = ScalpChannel()
         sig = ch._evaluate_sr_flip_retest(
