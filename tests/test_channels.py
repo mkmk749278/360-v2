@@ -69,6 +69,108 @@ def _make_qcb_inputs(*, direction: Direction, close: float = 100.0, atr_last: fl
     return candles, indicators, smc_data
 
 
+class TestQuietCompressionBreakPhase2EntryQuality:
+    """Path audit #2 (Phase 2 — entry quality).
+
+    HTF direction veto for QCB.  Same conservative semantic as SR_FLIP
+    (PR #266): block setups where 1H AND 4H trend BOTH oppose signal
+    direction.  Mixed HTF passes through, only unambiguous mismatches
+    are vetoed.  QCB lives in QUIET/RANGING regimes where HTF trends are
+    typically weaker — but a compression break against a clear bigger-
+    picture trend is still a fade-the-trend setup with low edge.
+    """
+
+    def _add_htf(
+        self,
+        indicators: dict,
+        candles: dict,
+        *,
+        tf: str,
+        ema_fast: float,
+        ema_slow: float,
+        close: float,
+    ) -> None:
+        indicators[tf] = {
+            "ema9_last": ema_fast,
+            "ema21_last": ema_slow,
+        }
+        candles[tf] = {"close": [close]}
+
+    def test_htf_veto_blocks_long_when_both_1h_and_4h_bearish(self):
+        """LONG compression break vetoed when 1H+4H both clearly BEARISH."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        self._add_htf(indicators, candles, tf="1h", ema_fast=90.0, ema_slow=95.0, close=88.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=92.0, ema_slow=98.0, close=89.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "htf_direction_veto"
+
+    def test_htf_veto_blocks_short_when_both_1h_and_4h_bullish(self):
+        """SHORT compression break vetoed when 1H+4H both clearly BULLISH."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.SHORT)
+        self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=108.0, ema_slow=102.0, close=110.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "htf_direction_veto"
+
+    def test_htf_veto_does_not_fire_on_mixed_htf(self):
+        """Mixed HTF (only one opposite, the other neutral/aligned) must NOT
+        trigger the veto."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        # 1H BEARISH, 4H NEUTRAL.
+        self._add_htf(indicators, candles, tf="1h", ema_fast=90.0, ema_slow=95.0, close=88.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=100.0, ema_slow=99.0, close=99.5)
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
+        )
+        if sig is None:
+            assert ch._active_no_signal_reason != "htf_direction_veto"
+
+    def test_htf_veto_degrades_gracefully_when_htf_data_missing(self):
+        """No 1H/4H data: veto must not fire — degrade to existing MTF gate."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        # No HTF injection.
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
+        )
+        if sig is None:
+            assert ch._active_no_signal_reason != "htf_direction_veto"
+
+    def test_htf_veto_passes_when_signal_aligned_with_htfs(self):
+        """LONG aligned with 1H+4H BULLISH must NOT be vetoed."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=108.0, ema_slow=102.0, close=110.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="QUIET",
+        )
+        assert sig is not None, (
+            "QCB LONG aligned with HTFs must still fire (no veto)"
+        )
+
+    def test_htf_veto_disabled_via_env(self, monkeypatch):
+        """Operator can flip off `QCB_HTF_VETO_ENABLED=false` without code deploy."""
+        monkeypatch.setenv("QCB_HTF_VETO_ENABLED", "false")
+        import importlib
+        import src.channels.scalp as scalp_mod
+        importlib.reload(scalp_mod)
+        try:
+            assert scalp_mod.QCB_HTF_VETO_ENABLED is False
+        finally:
+            monkeypatch.delenv("QCB_HTF_VETO_ENABLED", raising=False)
+            importlib.reload(scalp_mod)
+
+
 class TestQuietCompressionBreakAuditFixes:
     """Path audit #10 fixes — partial-candle volume gate + SL geometry."""
 

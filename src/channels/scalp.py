@@ -190,6 +190,12 @@ _FAR_RSI_SHORT_SOFT_MAX: float = 35.0  # ≤ this (> hard) → +6 soft penalty
 # can be flipped off without a code deploy if a regression surfaces.
 SR_FLIP_HTF_VETO_ENABLED: bool = os.getenv("SR_FLIP_HTF_VETO_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# QUIET_COMPRESSION_BREAK HTF direction veto — same conservative semantic
+# as SR_FLIP.  QCB lives in QUIET/RANGING regimes where HTF trends are
+# typically weaker, but a QCB LONG breakout against a clear 1H+4H downtrend
+# is still a fade-the-trend setup with low edge.  Defense-in-depth.
+QCB_HTF_VETO_ENABLED: bool = os.getenv("QCB_HTF_VETO_ENABLED", "true").lower() in ("1", "true", "yes")
+
 # WHALE_MOMENTUM SL: look at this many closed 1m candles (before the current bar)
 # to find the recent swing low/high as the order-flow invalidation point.
 # A 5-bar window captures the impulse origin without going too far back.
@@ -3180,6 +3186,20 @@ class ScalpChannel(BaseChannel):
             direction = Direction.SHORT
         else:
             return self._reject("breakout_not_detected")
+
+        # HTF direction veto — block compression breakouts that fight a clear
+        # 1H+4H trend.  QCB lives in QUIET/RANGING regimes where HTFs are
+        # typically weaker, but a LONG break against an unambiguous bearish
+        # HTF (or vice versa) is structurally a fade with low edge.  Same
+        # conservative semantic as SR_FLIP (PR #266): only veto when BOTH
+        # HTFs oppose direction; mixed HTF passes through.  Env-overridable
+        # per B8.
+        if QCB_HTF_VETO_ENABLED:
+            trend_1h = self._classify_htf_trend(indicators, candles, "1h")
+            trend_4h = self._classify_htf_trend(indicators, candles, "4h")
+            opposite = "BEARISH" if direction == Direction.LONG else "BULLISH"
+            if trend_1h == opposite and trend_4h == opposite:
+                return self._reject("htf_direction_veto")
 
         # MACD momentum confirmation: histogram must be trending in breakout direction.
         # Zero-cross requirement was too timing-sensitive — breakout candle rarely
