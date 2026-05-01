@@ -6,7 +6,7 @@
 
 ## Current Phase
 
-**Per-path entry-quality audit.** Reviewing each of the 14 evaluators for entry-generation mechanics through the scalping doctrine lens (`OWNER_BRIEF.md` §3.2).
+**Data-driven tuning.** Per-path entry-quality audit complete under the scalping doctrine (`OWNER_BRIEF.md` §3.2). All 14 evaluators reviewed; doctrine-corrections shipped where applicable. Next changes are gated on empirical data from the Phase 1 invalidation audit and the runtime truth report — no further structural per-path work without measurable business-chain justification.
 
 ---
 
@@ -16,39 +16,36 @@
 - **Monitor** runtime truth report on `monitor-logs` branch — regime distribution, gate metrics, confidence component breakdown, invalidation quality audit
 - **Risk-component scoring** calibrated for scalp R-multiples (max credit at 2.0R)
 - **Regime classifier** BB-width VOLATILE threshold at 8.0% (env-overridable)
-- **HTF mismatch policy** soft penalty (not hard block) for SR_FLIP / QCB / FAR
+- **HTF mismatch policy** soft penalty (not hard block) on SR_FLIP / QCB / FAR
 - **QUIET-block doctrine** uniform 65 paid-tier floor — no scrap-routing exempts
 - **Universal 0.80% SL floor** plus per-setup caps active
 - **Invalidation quality audit** classifying every kill as PROTECTIVE / PREMATURE / NEUTRAL post-30-min
-- **Phase 2 entry-quality audit checklist** in working memory (ten dimensions: pattern detection, direction logic, HTF, entry zone, confirmation candle, indicator gates, SMC inputs, risk plan, telemetry truth, invalidation compatibility)
 
 ---
 
 ## Open Queue
 
-### Ready to work
-- **Continue per-path entry-quality audit** through the remaining evaluators. Done so far: SR_FLIP_RETEST, QUIET_COMPRESSION_BREAK, FAILED_AUCTION_RECLAIM. Remaining: LSR / WHALE / TPE / LIQ_REVERSAL / VSB / BDS / ORB / FUNDING / DIV_CONT / CLS / PDC.
-
 ### Pending data
-- **TP1 ATR cap re-derivation** — caps (1.8R / 2.5R / uncapped) on SR_FLIP / FUNDING / DIV_CONT / CLS were shipped before risk recalibration. Wait for Phase 1 invalidation-audit data on TP1 hit rates per setup × ATR-bucket before deciding.
+- **TP1 ATR cap re-derivation** (1.8R / 2.5R / uncapped on SR_FLIP / FUNDING / DIV_CONT / CLS) — wait for Phase 1 invalidation audit data on TP1 hit rates per setup × ATR-bucket.
+- **VSB / BDS generated-but-not-emitted** — recent monitor showed 12 candidates generated, 0 emitted. Identify the downstream gate from the next truth report's confidence-component breakdown.
+- **FAR `STRONG_TREND` regime block** — empirical conjecture ("low edge") rather than structural impossibility. Could be soft penalty per doctrine; needs win-rate data to revisit.
+- **LSR hard 1H MTF reject in TRENDING/VOLATILE** — narrow filter (both 1H EMA AND RSI must oppose). Barely fires per recent telemetry. Could be soft per doctrine; revisit if data shows it's blocking 65+ paid candidates.
 
 ### Pending owner decision
-- **OPENING_RANGE_BREAKOUT** currently `feature_disabled`. Rebuild with proper session-anchored range logic, or delete the path entirely. Not a CTE call.
+- **OPENING_RANGE_BREAKOUT** — currently `feature_disabled`. Rebuild with proper session-anchored range logic, or delete the path entirely. Not a CTE call.
 
 ---
 
-## Working Pattern (per-path audit)
+## Working Pattern
 
-1. Read evaluator end-to-end
-2. Score against the audit checklist
-3. For each defect: ask **"would fixing this make signals more profitable for paid subscribers?"**
-   - If no → defer, document, move on
-   - If yes → implement, tests, OWNER_BRIEF entry, ACTIVE_CONTEXT note, PR
-4. After PR merges, branch off fresh `main`, audit next path
+For any future code change:
+1. Ask: **"how does this make signals more profitable for paid subscribers?"**
+2. If answer is unmeasurable, "engineering hygiene," or speculative — **defer or drop**.
+3. If answer is measurable (win rate, signal volume, R:R, time-to-resolution, fewer subscriber-visible failures), proceed: investigate, implement, test, document, ship.
 
 ---
 
-## Key Files for the Current Phase
+## Key Files
 
 | Concern | File |
 |---|---|
