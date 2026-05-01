@@ -4169,6 +4169,145 @@ def _far_indicators_short(atr=0.5, rsi=50.0, ema9=99.0, ema21=100.0, adx=22.0):
     }
 
 
+class TestFailedAuctionReclaimPhase2EntryQuality:
+    """Path audit #3 (Phase 2, scalping doctrine — soft penalty, not hard veto).
+
+    Owner-promoted CTE thinking on 2026-05-04: 360_SCALP is a SCALPING
+    business (direction-agnostic, fast in/out, profitable signals over
+    directional alignment).  Counter-trend FAR setups (failed auction at
+    resistance during an uptrend, or at support during a downtrend) are
+    legitimate brief-retracement scalp opportunities — hard-blocking them
+    eliminates ~half the path's edge in trending markets where top-75 pairs
+    move correlated.
+
+    HTF mismatch is therefore a SOFT confidence penalty, not a hard reject.
+    Signal still generates; scoring tier decides whether it clears.
+
+    Tests verify:
+    1. HTF mismatch attaches the soft penalty (signal still fires)
+    2. Aligned HTFs attach no HTF penalty
+    3. Missing HTF data degrades gracefully (no penalty applied)
+    4. `FAR_HTF_MISMATCH_PENALTY=0` disables the penalty entirely
+    """
+
+    def _add_htf(
+        self,
+        indicators: dict,
+        candles: dict,
+        *,
+        tf: str,
+        ema_fast: float,
+        ema_slow: float,
+        close: float,
+    ) -> None:
+        indicators[tf] = {
+            "ema9_last": ema_fast,
+            "ema21_last": ema_slow,
+        }
+        candles[tf] = {"close": [close]}
+
+    def test_htf_mismatch_long_in_bearish_htfs_attaches_soft_penalty(self):
+        """LONG FAR with both HTFs BEARISH: signal STILL fires (counter-trend
+        scalps are valid), but soft penalty is added to soft_penalty_total."""
+        candles = {"5m": _make_far_candles_long(base=100.0, auction_wick_low=98.5)}
+        indicators = _far_indicators_long(atr=0.5)
+        self._add_htf(indicators, candles, tf="1h", ema_fast=90.0, ema_slow=95.0, close=88.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=92.0, ema_slow=98.0, close=89.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
+        )
+        # Critical: signal MUST still generate.  HTF mismatch is a soft penalty,
+        # not a hard block — counter-trend scalp setups are legitimate.
+        assert sig is not None, (
+            "HTF mismatch must NOT hard-block the signal — counter-trend "
+            "FAR is a legitimate scalp setup."
+        )
+        from src.channels.scalp import _FAR_HTF_MISMATCH_PENALTY
+        assert sig.soft_penalty_total >= _FAR_HTF_MISMATCH_PENALTY, (
+            f"HTF mismatch penalty not attached: soft_penalty_total="
+            f"{sig.soft_penalty_total} expected >= {_FAR_HTF_MISMATCH_PENALTY}"
+        )
+
+    def test_htf_mismatch_short_in_bullish_htfs_attaches_soft_penalty(self):
+        """SHORT FAR with both HTFs BULLISH: signal fires, soft penalty applied."""
+        candles = {"5m": _make_far_candles_short(base=100.0, auction_wick_high=101.5)}
+        indicators = _far_indicators_short(atr=0.5)
+        self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=108.0, ema_slow=102.0, close=110.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
+        )
+        assert sig is not None
+        from src.channels.scalp import _FAR_HTF_MISMATCH_PENALTY
+        assert sig.soft_penalty_total >= _FAR_HTF_MISMATCH_PENALTY
+
+    def test_htf_aligned_signal_attaches_no_htf_penalty(self):
+        """LONG aligned with 1H+4H BULLISH: no HTF penalty added."""
+        candles = {"5m": _make_far_candles_long(base=100.0, auction_wick_low=98.5)}
+        indicators = _far_indicators_long(atr=0.5)
+        self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=108.0, ema_slow=102.0, close=110.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
+        )
+        assert sig is not None
+        from src.channels.scalp import _FAR_HTF_MISMATCH_PENALTY
+        # Aligned HTFs: HTF mismatch penalty not added.  Other soft penalties
+        # (RSI / FVG_OB) may still apply; this test asserts the HTF-specific
+        # penalty is NOT contributing.
+        assert sig.soft_penalty_total < _FAR_HTF_MISMATCH_PENALTY, (
+            f"Aligned HTF should not carry the HTF mismatch penalty: "
+            f"soft_penalty_total={sig.soft_penalty_total}"
+        )
+
+    def test_htf_mixed_attaches_no_htf_penalty(self):
+        """Mixed HTF (only one opposite, the other neutral): no HTF penalty."""
+        candles = {"5m": _make_far_candles_long(base=100.0, auction_wick_low=98.5)}
+        indicators = _far_indicators_long(atr=0.5)
+        # 1H BEARISH, 4H NEUTRAL.
+        self._add_htf(indicators, candles, tf="1h", ema_fast=90.0, ema_slow=95.0, close=88.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=100.0, ema_slow=99.0, close=99.5)
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
+        )
+        if sig is not None:
+            from src.channels.scalp import _FAR_HTF_MISMATCH_PENALTY
+            assert sig.soft_penalty_total < _FAR_HTF_MISMATCH_PENALTY
+
+    def test_htf_data_missing_attaches_no_htf_penalty(self):
+        """No 1H/4H data: degrade gracefully — no HTF penalty applied."""
+        candles = {"5m": _make_far_candles_long(base=100.0, auction_wick_low=98.5)}
+        indicators = _far_indicators_long(atr=0.5)
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, {},
+            spread_pct=0.01, volume_24h_usd=10_000_000, regime="RANGING",
+        )
+        if sig is not None:
+            from src.channels.scalp import _FAR_HTF_MISMATCH_PENALTY
+            assert sig.soft_penalty_total < _FAR_HTF_MISMATCH_PENALTY
+
+    def test_htf_penalty_disabled_via_env(self, monkeypatch):
+        """Operator can disable via `FAR_HTF_MISMATCH_PENALTY=0`."""
+        monkeypatch.setenv("FAR_HTF_MISMATCH_PENALTY", "0")
+        import importlib
+        import src.channels.scalp as scalp_mod
+        importlib.reload(scalp_mod)
+        try:
+            assert scalp_mod._FAR_HTF_MISMATCH_PENALTY == 0.0
+        finally:
+            monkeypatch.delenv("FAR_HTF_MISMATCH_PENALTY", raising=False)
+            importlib.reload(scalp_mod)
+
+
 class TestFailedAuctionReclaimAuditFixes:
     """Path audit #14 fixes:
     - `close <= 0` now emits `invalid_price` (was `breakout_not_found`).

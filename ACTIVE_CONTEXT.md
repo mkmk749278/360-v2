@@ -69,6 +69,51 @@ After the next monitor run (post-regime fix deploy):
 3. If VSB/BDS/ORB/WHALE start emitting candidates, watch their quality —
    they were silent for so long that any regression would show fast.
 
+### 2026-05-04: Scalping doctrine clarified — soft penalty, not hard veto
+
+Owner-promoted CTE thinking on 2026-05-04 corrected an over-engineered
+direction in the Phase 2 entry-quality audit.  PRs #266 (SR_FLIP) and
+#267 (QCB) shipped HARD HTF vetoes — directly blocking signals where
+1H AND 4H both opposed direction.
+
+Owner's reality check: this is a SCALPING business.  Top-75 USDT-M pairs
+are highly correlated to BTC.  A hard HTF veto across all paths would
+force directional bias — only LONGs in BTC uptrends, only SHORTs in
+downtrends.  That's trend-following, not scalping.  Counter-trend scalps
+(short at resistance during uptrend pullbacks, long at support during
+downtrend bounces) are legitimate scalp products.
+
+**Corrected doctrine:** HTF mismatch is a SOFT confidence penalty, not
+a hard reject.  Signal still generates; scoring tier decides.
+
+**OWNER_BRIEF.md §2.1a "Scalping Doctrine"** added — direction-agnostic,
+fast in/out, soft penalties over hard blocks, per-path HTF policy table.
+**CLAUDE.md** updated with system-owner-not-assistant framing.
+
+### 2026-05-04: Phase 2 path audit #3 — FAILED_AUCTION_RECLAIM (entry quality, soft-penalty doctrine)
+
+Third path. First path to follow the corrected scalping doctrine.
+
+Shipped: `_FAR_HTF_MISMATCH_PENALTY` (default 6.0 confidence pts) attached
+when 1H AND 4H BOTH oppose direction.  Env-overridable; set to 0 to disable.
+Signal still generates; scoring tier decides whether it clears.
+
+Known weakness deferred to focused follow-up: FAR's level detection uses
+scalar `max(highs[-26:-7])` / `min(lows)` — a single wick can define the
+"structural" level.  SR_FLIP's clustered+VP-anchored `_sr_detect_levels()`
+is much more robust.  Porting FAR to the same is a larger change that
+would significantly affect signal generation rate; needs proper before/after
+testing and a focused PR.
+
+**Pending follow-up:** PRs #266 (SR_FLIP) and #267 (QCB) already merged
+with HARD HTF vetoes that contradict the corrected doctrine.  Single
+follow-up PR to downgrade both to soft-penalty pattern.  Interim mitigation:
+operator can set `SR_FLIP_HTF_VETO_ENABLED=false` and `QCB_HTF_VETO_ENABLED=false`
+on the VPS to disable hard blocks without code deploy.
+
+6 new tests in `TestFailedAuctionReclaimPhase2EntryQuality` — all assert
+signal STILL GENERATES on HTF mismatch (only the soft penalty attaches).
+
 ### 2026-05-04: Phase 2 path audit #2 — QUIET_COMPRESSION_BREAK (entry quality)
 
 Second-most-emitting path (10-179 signals/window post-recalibration).

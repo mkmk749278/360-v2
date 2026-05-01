@@ -59,6 +59,28 @@ A 24/7 automated crypto trading signal engine. It scans **75 Binance USDT-M futu
 
 **Business purpose:** Signal quality → subscriber trust → revenue. Every technical decision connects to that chain.
 
+## 2.1a Scalping Doctrine — How Every Engineering Decision Is Judged
+
+This system is a **SCALPING** business. Engineering decisions are judged against this doctrine, not against generic "trading-system best practices":
+
+1. **Direction-agnostic.** LONG and SHORT are equally valid products. The market's HTF trend doesn't tell us "only do longs today" — counter-trend scalps (e.g., short at resistance during an uptrend pullback) are legitimate, profitable setups. Top-75 USDT-M pairs are highly correlated to BTC, so a trend-aligned-only filter would force the system to issue mostly-all-LONGs or mostly-all-SHORTs in a given session — that's directional bias, not scalping.
+2. **Fast in, fast out.** Hold time ~5–60 minutes. TP1 is the primary exit; TP2/TP3 are runners. We do not hold positions through reversals.
+3. **Quality > quantity, but quantity matters.** Subscribers churn if signals dry up. A path that fires 0–1 signal/day is a dormant path even if its rare hits are 100% wins. Per-path tuning aims for 1–10 high-conviction signals/day across the 14-evaluator portfolio.
+4. **Profitable signals → subscribers → revenue.** This is the only chain that matters. Every gate, every threshold, every veto must justify itself against this chain — not against abstract "robustness."
+5. **Soft penalties over hard blocks.** Hard blocks at the evaluator throw away signals that the scoring tier might have correctly classified as B-tier or watchlist. Confidence is a multi-component score with a single threshold gate; let it work. Hard blocks belong only at structural-impossibility checkpoints (invalid SL geometry, missing data, regime guaranteed unsuitable for the path's pattern).
+
+**HTF (1H/4H) policy across the 14 paths:**
+
+| Path category | HTF treatment | Reason |
+|---|---|---|
+| Trend-aligned by regime gate (TPE, DIV_CONT, CLS, PDC) | None — already gated to TRENDING regimes | Pattern requires trend |
+| Internally direction-driven (WHALE, FUNDING, LIQ_REVERSAL) | None — direction comes from tape/funding/cascade, HTF is irrelevant | Setup defines direction independent of HTF |
+| Counter-trend by design (LSR, FAR) | Soft penalty when 1H AND 4H both oppose | Counter-trend setups are the *thesis*; mismatch is signal-quality info, not invalidation |
+| Structure with optional counter-trend (SR_FLIP, QCB) | Soft penalty when 1H AND 4H both oppose | Most fire trend-aligned, but counter-trend variants are valid scalps |
+| Breakout (VSB, BDS, ORB) | None — breakouts fire in any HTF context | Pattern is direction from price-vs-level |
+
+**What this means for ongoing per-path audits:** the question is never "does the signal align with HTF?" but rather "is this a profitable scalp setup regardless of broader direction?" Quality comes from setup mechanics (level quality, confirmation, R:R, momentum), not from forcing alignment with the bigger picture.
+
 ## 2.2 Infrastructure
 
 | Component | Detail |
@@ -186,6 +208,8 @@ Every item below was verified by reading the actual deployed code from the curre
 | **Risk-component scoring recalibration (B10 owner-approved 2026-05-03)** — `src/signal_quality.py:1531` formula `8.0 + min(R, 2.5) × 4.8` → `8.0 + min(R, 2.0) × 6.0`, env-overridable as `RISK_SCORE_BASE` / `RISK_SCORE_R_CAP` / `RISK_SCORE_R_MULT` per B8.  Live monitor (PR #263 confidence-component breakdown) showed risk component averaging 12.8-14.3 across all paths despite Market ~21 and Execution ~19 — risk was the structural deficit dragging signals under threshold.  Root cause: 360_SCALP is a scalp channel; the audit-shipped SL geometry (universal 0.80% floor + close-relative + 1×ATR + per-setup TP caps) was deliberately designed to keep TP1 R-multiples at 1.0-1.8R for tight risk control.  Demanding 2.5R for full credit penalised the geometry we built.  Industry-standard scalp scoring caps at ~2.0R: 1.0R = good baseline, 1.5R = strong (now 17/20 was 15.2/20), 2.0R = max credit (was 17.6/20).  Closes ~half of structural confidence-gap deficit without lowering any threshold.  No threshold change anywhere — only the formula's slope/cap | ✅ 2026-05-03 |
 | SR_FLIP_RETEST — Phase 2 entry quality audit #1: (A) HTF direction veto — block setups where 1H AND 4H trend BOTH oppose signal direction.  Trigger case: XAGUSDT SHORT @ 74.18 (2026-04-30) where 1H (MA7>MA21>MA99) and 4H (close>ema_fast>ema_slow) were both clearly BULLISH yet the 5m sweep+reclaim mechanics still fired SHORT — signal correctly killed by regime-shift invalidation later, but vetoing pre-generation saves the alert dispatch and subscriber attention.  Conservative threshold: BOTH HTFs must oppose (mixed passes through).  Env-overridable as `SR_FLIP_HTF_VETO_ENABLED` per B8.  (B) `close <= 0` now emits `invalid_price` instead of `breakout_not_found` — same family bug fixed yesterday for DIV_CONT/FUNDING/CLS/PDC/FAR | ✅ 2026-05-04 |
 | QUIET_COMPRESSION_BREAK — Phase 2 entry quality audit #2: HTF direction veto applied (mirrors SR_FLIP doctrine) — block compression breakouts that fight a clear 1H+4H trend.  QCB lives in QUIET/RANGING regimes where HTF trends are typically weaker, but a LONG break against an unambiguous 1H+4H bearish (or vice versa) is structurally a fade-the-trend with low edge.  Conservative: BOTH HTFs must oppose, mixed passes through.  Reuses `_classify_htf_trend` helper.  Env-overridable as `QCB_HTF_VETO_ENABLED` per B8.  Other potential improvements (breakout-candle body quality, closed-candle volume confirmation) deliberately deferred — would require fixture redesign and the core pattern check (band width <2.5% + close beyond band + MACD direction) is already solid | ✅ 2026-05-04 |
+| FAILED_AUCTION_RECLAIM — Phase 2 entry quality audit #3 (scalping doctrine — soft penalty, not hard veto).  Owner-promoted CTE thinking on 2026-05-04 corrected the per-path HTF approach: 360_SCALP is a SCALPING business (direction-agnostic), and counter-trend FAR setups (e.g., failed auction at resistance during an uptrend) are legitimate brief-retracement scalps.  Hard-blocking these would eliminate ~half the path's edge in trending markets where top-75 pairs move correlated.  Replaced hard veto with soft penalty (`_FAR_HTF_MISMATCH_PENALTY` default 6.0 confidence pts, env-overridable, set to 0 to disable).  Signal still generates on HTF mismatch — scoring tier decides whether it clears.  Reuses `_classify_htf_trend` helper.  Known weakness deferred to focused follow-up: FAR's level detection uses scalar `max/min` on 13 prior candles — a single wick can define the "structural" level; SR_FLIP's clustered+VP-anchored detection is much more robust | ✅ 2026-05-04 |
+| **PHASE 2 DOCTRINE NOTE** — SR_FLIP_RETEST (PR #266) and QUIET_COMPRESSION_BREAK (PR #267) shipped HARD HTF vetoes before the scalping doctrine was clarified.  Both block legitimate counter-trend scalps in correlated-market sessions.  Pending downgrade to soft-penalty pattern (matching FAR PR #268) in a follow-up PR.  Env vars `SR_FLIP_HTF_VETO_ENABLED=false` and `QCB_HTF_VETO_ENABLED=false` can disable the hard blocks without code deploy as an interim measure | ⚠️ pending follow-up |
 
 ### Live Performance Data (from 20-hour monitor window)
 
