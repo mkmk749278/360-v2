@@ -549,14 +549,21 @@ class TestShutdownNotification:
 
 
 # ---------------------------------------------------------------------------
-# PR-ARCH-5: QUIET gate refinement for DIVERGENCE_CONTINUATION
+# QUIET gate doctrine alignment (PR #270, 2026-05-04)
+#
+# Per OWNER_BRIEF §2.1a "only the final paid signal matters, watchlist is scrap":
+# the global QUIET_SCALP_MIN_CONFIDENCE (65.0, the paid B-tier minimum) now
+# applies uniformly to all 360_SCALP setups in QUIET regime.  Previously
+# shipped per-path exempts (QCB fully, DIV_CONT ≥64, FUNDING ≥60) were
+# lowering the bar to enable sub-65 signals to reach watchlist tier and
+# free channel.  Sub-65 signals = scrap by doctrine, so those exempts
+# generated zero business value.  All three exempts removed in PR #270.
 # ---------------------------------------------------------------------------
 
 
-class TestQuietGateDivergenceContinuation:
-    """Verify that the QUIET gate applies a lower confidence floor for
-    DIVERGENCE_CONTINUATION setups while keeping the global floor for all
-    other setup classes (PR-ARCH-5).
+class TestQuietGateUniformFloor:
+    """Verify the QUIET gate applies the global 65.0 floor uniformly across
+    all 360_SCALP setups (no per-path exempts).
     """
 
     @staticmethod
@@ -564,108 +571,55 @@ class TestQuietGateDivergenceContinuation:
         """Mirror the scanner QUIET gate decision for unit testing.
 
         Returns True if the signal would be blocked by the QUIET gate,
-        False if it passes (exempt or above the applicable floor).
+        False if it passes the global confidence floor.
         """
-        from src.scanner import (
-            _QUIET_DIVERGENCE_MIN_CONFIDENCE,
-            _QUIET_FUNDING_MIN_CONFIDENCE,
-        )
         from config import QUIET_SCALP_MIN_CONFIDENCE
-
-        if setup_class == "QUIET_COMPRESSION_BREAK":
-            return False
-        if setup_class == "DIVERGENCE_CONTINUATION" and conf >= _QUIET_DIVERGENCE_MIN_CONFIDENCE:
-            return False
-        if setup_class == "FUNDING_EXTREME_SIGNAL" and conf >= _QUIET_FUNDING_MIN_CONFIDENCE:
-            return False
         return conf < QUIET_SCALP_MIN_CONFIDENCE
 
-    def test_divergence_quiet_floor_is_64(self):
-        """_QUIET_DIVERGENCE_MIN_CONFIDENCE must be 64.0 (the path-specific floor)."""
-        from src.scanner import _QUIET_DIVERGENCE_MIN_CONFIDENCE
-        assert _QUIET_DIVERGENCE_MIN_CONFIDENCE == 64.0
-
-    def test_global_quiet_floor_unchanged(self):
-        """QUIET_SCALP_MIN_CONFIDENCE must remain 65.0 (the global floor)."""
+    def test_global_quiet_floor_is_65(self):
+        """QUIET_SCALP_MIN_CONFIDENCE must remain 65.0 (paid B-tier minimum)."""
         from config import QUIET_SCALP_MIN_CONFIDENCE
         assert QUIET_SCALP_MIN_CONFIDENCE == 65.0
 
-    def test_divergence_quiet_floor_below_global(self):
-        """The path-specific floor must be strictly below the global floor."""
-        from src.scanner import _QUIET_DIVERGENCE_MIN_CONFIDENCE
-        from config import QUIET_SCALP_MIN_CONFIDENCE
-        assert _QUIET_DIVERGENCE_MIN_CONFIDENCE < QUIET_SCALP_MIN_CONFIDENCE
+    def test_paid_tier_signal_passes_for_all_setups(self):
+        """Conf 65+ passes for every setup — the doctrine applies uniformly."""
+        for setup in (
+            "QUIET_COMPRESSION_BREAK",
+            "DIVERGENCE_CONTINUATION",
+            "FUNDING_EXTREME_SIGNAL",
+            "SR_FLIP_RETEST",
+            "WHALE_MOMENTUM",
+            "LIQUIDITY_SWEEP_REVERSAL",
+        ):
+            assert not self._quiet_gate_would_block(setup, 65.0), (
+                f"{setup} at conf=65 must pass the QUIET floor (paid B-tier minimum)"
+            )
 
-    def test_near_threshold_divergence_passes_path_specific_floor(self):
-        """conf=64.3 >= 64.0 (path floor), so DIVERGENCE_CONTINUATION is exempt."""
-        assert not self._quiet_gate_would_block("DIVERGENCE_CONTINUATION", 64.3), (
-            "DIVERGENCE_CONTINUATION conf=64.3 should pass the path-specific floor of 64.0"
+    def test_watchlist_tier_signal_blocked_for_all_setups(self):
+        """Conf 50-64 (watchlist tier — scrap per doctrine) is blocked for
+        every setup, including paths previously exempted (QCB, DIV_CONT,
+        FUNDING).  Removing the exempts eliminates scrap routing in QUIET."""
+        for setup in (
+            "QUIET_COMPRESSION_BREAK",
+            "DIVERGENCE_CONTINUATION",
+            "FUNDING_EXTREME_SIGNAL",
+        ):
+            for conf in (50.0, 60.0, 62.5, 64.3, 64.9):
+                assert self._quiet_gate_would_block(setup, conf), (
+                    f"{setup} at conf={conf} must be blocked under uniform-floor doctrine "
+                    f"(was previously exempt — generated watchlist-tier scrap)"
+                )
+
+    def test_legacy_exempt_constants_removed(self):
+        """The old per-path exempt constants must no longer be importable."""
+        import src.scanner as scanner_mod
+        assert not hasattr(scanner_mod, "_QUIET_DIVERGENCE_MIN_CONFIDENCE"), (
+            "_QUIET_DIVERGENCE_MIN_CONFIDENCE removed in PR #270 — should not "
+            "be reintroduced (would re-enable watchlist-tier scrap routing)"
         )
-
-    def test_generic_setup_at_same_confidence_is_blocked(self):
-        """conf=64.3 < 65.0 (global floor), so a non-divergence setup is still blocked."""
-        assert self._quiet_gate_would_block("RANGE_FADE", 64.3), (
-            "RANGE_FADE conf=64.3 should still be blocked by the global floor of 65.0"
+        assert not hasattr(scanner_mod, "_QUIET_FUNDING_MIN_CONFIDENCE"), (
+            "_QUIET_FUNDING_MIN_CONFIDENCE removed in PR #270"
         )
-
-    def test_divergence_well_below_path_floor_is_blocked(self):
-        """conf=58.3 < 64.0 (path floor), so DIVERGENCE_CONTINUATION is still blocked."""
-        assert self._quiet_gate_would_block("DIVERGENCE_CONTINUATION", 58.3), (
-            "DIVERGENCE_CONTINUATION conf=58.3 is below the path-specific floor of 64.0 "
-            "and should remain blocked"
-        )
-
-    # ── Path audit #9 — FUNDING_EXTREME_SIGNAL exempt ────────────────────
-
-    def test_funding_quiet_floor_is_60(self):
-        """`_QUIET_FUNDING_MIN_CONFIDENCE` must be 60.0 — slightly more lenient
-        than DIV_CONT's 64 because extreme funding is itself the quality
-        evidence (the trigger was the gate).
-        """
-        from src.scanner import _QUIET_FUNDING_MIN_CONFIDENCE
-        assert _QUIET_FUNDING_MIN_CONFIDENCE == 60.0
-
-    def test_funding_quiet_floor_below_global_and_divergence(self):
-        """Path-specific FUNDING floor must sit below both DIV_CONT and global."""
-        from src.scanner import (
-            _QUIET_DIVERGENCE_MIN_CONFIDENCE,
-            _QUIET_FUNDING_MIN_CONFIDENCE,
-        )
-        from config import QUIET_SCALP_MIN_CONFIDENCE
-        assert _QUIET_FUNDING_MIN_CONFIDENCE < _QUIET_DIVERGENCE_MIN_CONFIDENCE
-        assert _QUIET_FUNDING_MIN_CONFIDENCE < QUIET_SCALP_MIN_CONFIDENCE
-
-    def test_funding_at_path_floor_passes(self):
-        """conf=60.0 >= 60.0 (path floor), so FUNDING_EXTREME_SIGNAL is exempt."""
-        assert not self._quiet_gate_would_block("FUNDING_EXTREME_SIGNAL", 60.0), (
-            "FUNDING_EXTREME_SIGNAL conf=60.0 should pass the path-specific floor of 60.0"
-        )
-
-    def test_funding_above_path_floor_passes(self):
-        """conf=62.5 >= 60.0 → exempt; would have been blocked by global 65."""
-        assert not self._quiet_gate_would_block("FUNDING_EXTREME_SIGNAL", 62.5), (
-            "FUNDING_EXTREME_SIGNAL conf=62.5 should pass — exactly the kind of "
-            "candidate audit #9's truth report flagged as bottlenecked."
-        )
-
-    def test_funding_below_path_floor_is_blocked(self):
-        """conf=58.3 < 60.0 (path floor) → still blocked.  60 captures genuine
-        near-threshold setups; below that is low-quality QUIET-market noise.
-        """
-        assert self._quiet_gate_would_block("FUNDING_EXTREME_SIGNAL", 58.3), (
-            "FUNDING_EXTREME_SIGNAL conf=58.3 is below the path-specific floor of 60.0 "
-            "and should remain blocked"
-        )
-
-    def test_funding_exempt_does_not_leak_to_other_setups(self):
-        """The 60-floor exempt MUST be FUNDING-only.  Non-FUNDING setups at
-        the same conf (60-64) must remain blocked by the global 65 floor.
-        """
-        # Generic setup at 62.5 — would be exempt-pass if the FUNDING floor
-        # leaked to other setup classes; must remain blocked.
-        assert self._quiet_gate_would_block("RANGE_FADE", 62.5)
-        assert self._quiet_gate_would_block("WHALE_MOMENTUM", 62.5)
-        assert self._quiet_gate_would_block("LIQUIDITY_SWEEP_REVERSAL", 62.5)
 
 
 # ---------------------------------------------------------------------------
