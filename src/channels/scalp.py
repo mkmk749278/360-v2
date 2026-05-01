@@ -196,6 +196,20 @@ SR_FLIP_HTF_VETO_ENABLED: bool = os.getenv("SR_FLIP_HTF_VETO_ENABLED", "true").l
 # is still a fade-the-trend setup with low edge.  Defense-in-depth.
 QCB_HTF_VETO_ENABLED: bool = os.getenv("QCB_HTF_VETO_ENABLED", "true").lower() in ("1", "true", "yes")
 
+# FAILED_AUCTION_RECLAIM HTF policy — soft penalty for HTF mismatch.
+# We are a SCALPING system (per OWNER_BRIEF Part II): direction-agnostic,
+# fast in/out, profitable signals matter more than directional alignment.
+# Counter-trend FAR setups are *legitimate* scalp opportunities — a failed
+# auction at resistance during an uptrend is exactly the kind of brief
+# retracement scalp we want to capture.  Hard-blocking these would
+# eliminate ~half the path's edge in trending markets where top-75 pairs
+# move correlated to BTC.
+#
+# Soft penalty (default 6.0 confidence pts) when BOTH 1H AND 4H oppose
+# direction — lets scoring decide whether the signal still clears the
+# tier threshold.  Env-overridable per B8.  Set to 0 to disable entirely.
+_FAR_HTF_MISMATCH_PENALTY: float = float(os.getenv("FAR_HTF_MISMATCH_PENALTY", "6.0"))
+
 # WHALE_MOMENTUM SL: look at this many closed 1m candles (before the current bar)
 # to find the recent swing low/high as the order-flow invalidation point.
 # A 5-bar window captures the impulse origin without going too far back.
@@ -4432,6 +4446,21 @@ class ScalpChannel(BaseChannel):
         if direction is None:
             return self._reject("reclaim_hold_failed")
 
+        # HTF mismatch soft penalty — we are SCALPING, not trend-following.
+        # Counter-trend FAR setups (e.g., failed auction at resistance during
+        # an uptrend) are legitimate brief-retracement scalps; hard-blocking
+        # them would eliminate roughly half the path's edge in trending
+        # markets where top-75 pairs move correlated.  Soft penalty when
+        # BOTH 1H AND 4H oppose direction lets scoring decide whether the
+        # signal still clears the confidence-tier threshold.
+        htf_penalty = 0.0
+        if _FAR_HTF_MISMATCH_PENALTY > 0:
+            trend_1h = self._classify_htf_trend(indicators, candles, "1h")
+            trend_4h = self._classify_htf_trend(indicators, candles, "4h")
+            opposite = "BEARISH" if direction == Direction.LONG else "BULLISH"
+            if trend_1h == opposite and trend_4h == opposite:
+                htf_penalty = _FAR_HTF_MISMATCH_PENALTY
+
         if direction == Direction.LONG:
             tail = reclaim_level - auction_wick_extreme
         else:
@@ -4549,7 +4578,7 @@ class ScalpChannel(BaseChannel):
         # For SHORT: reclaim_level is the struct_high that was broken-then-recovered.
         sig.far_reclaim_level = round(reclaim_level, 8)
 
-        total_penalty = rsi_penalty + fvg_ob_penalty
+        total_penalty = rsi_penalty + fvg_ob_penalty + htf_penalty
         if total_penalty > 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
 
