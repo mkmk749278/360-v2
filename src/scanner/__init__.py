@@ -308,25 +308,15 @@ _TREND_GATE_EXEMPT_SETUPS: frozenset = frozenset({
 # top-tier signals — genuine mean-reversion setups — pass through.
 _SCALP_QUIET_REGIME_PENALTY: float = 1.8
 
-# Path-specific QUIET confidence floor for DIVERGENCE_CONTINUATION.
-# Live evidence (PR-ARCH-5) shows this evaluator produces structurally valid
-# candidates near 64.3 that are blocked by the global 65.0 floor.  A narrow
-# override of 64.0 captures these genuine near-threshold setups without opening
-# the gate to weaker quiet-market noise (53–58 range).
-_QUIET_DIVERGENCE_MIN_CONFIDENCE: float = 64.0
-
-# Path-specific QUIET confidence floor for FUNDING_EXTREME_SIGNAL.
-# Live monitor evidence (path audit #9, 2026-05-02): this evaluator
-# generated 95 candidates / 28h that all died at the global 65 floor —
-# it was the truth report's "most likely bottleneck".  Extreme funding
-# IS the quality gate (the trigger itself is the evidence), so the
-# regime-confidence requirement can be relaxed slightly more than
-# DIV_CONT's 64.  60 captures the genuine near-threshold setups while
-# still excluding low-quality 50–55 noise.
-# Path audit #9 also already removed the evaluator-level QUIET regime
-# block (extreme funding doesn't need regime confirmation); this
-# scanner-level exempt completes that doctrine.
-_QUIET_FUNDING_MIN_CONFIDENCE: float = 60.0
+# Path-specific QUIET confidence floors — REMOVED 2026-05-04 to align with
+# OWNER_BRIEF §2.1a scalping doctrine: "only the final paid signal matters,
+# watchlist is scrap."  Previous exempts (DIV_CONT ≥ 64, FUNDING ≥ 60, QCB
+# fully exempt) were lowering the QUIET-block threshold to enable signals
+# below the 65 paid-tier minimum.  Those sub-65 signals routed to watchlist
+# tier → free channel (scrap by doctrine), generating no business value.
+# The global QUIET_SCALP_MIN_CONFIDENCE (65) now applies uniformly to all
+# 360_SCALP setups in QUIET regime.  No paid signals are affected — every
+# 65+ signal still passes through unchanged.
 
 # Penalty multiplier applied to soft-gate base penalties depending on live market regime.
 # Trending markets → lenient (clear direction, fewer false signals).
@@ -4415,37 +4405,17 @@ class Scanner:
         except Exception:
             pass  # Fail-safe
 
-        # QUIET regime safety net for scalp channels: only the highest-quality
-        # mean-reversion setups are allowed through when the market is compressed.
-        # QUIET_COMPRESSION_BREAK is exempt — it is the evaluator specifically
-        # designed for QUIET regime (BB squeeze release) and must not be
-        # self-blocked by this gate.
+        # QUIET regime safety net for scalp channels: signals must clear the
+        # global 65.0 confidence floor (the paid B-tier minimum) when market
+        # is compressed.  Per OWNER_BRIEF §2.1a "only the final paid signal
+        # matters, watchlist is scrap" — applies uniformly across all setups
+        # including QCB, DIV_CONT, FUNDING.  Previous per-setup exempts (QCB
+        # fully, DIV_CONT ≥64, FUNDING ≥60) were shipped 2026-05-02 to fix
+        # apparent "bottlenecks" but were lowering the bar to enable scrap
+        # routing — sub-65 signals reaching watchlist tier and free channel
+        # generated zero business value.  Removed 2026-05-04 in PR #270.
         if _regime_key == "QUIET" and chan_name.startswith("360_SCALP"):
-            _setup = getattr(sig, "setup_class", "")
-            if _setup == "QUIET_COMPRESSION_BREAK":
-                log.debug(
-                    "QUIET_SCALP_BLOCK exempt for {} {} setup_class=QUIET_COMPRESSION_BREAK",
-                    symbol, chan_name,
-                )
-            elif _setup == "DIVERGENCE_CONTINUATION" and sig.confidence >= _QUIET_DIVERGENCE_MIN_CONFIDENCE:
-                log.debug(
-                    "QUIET_SCALP_BLOCK exempt for {} {} setup_class=DIVERGENCE_CONTINUATION conf={:.1f} >= path_min={:.1f}",
-                    symbol, chan_name, sig.confidence, _QUIET_DIVERGENCE_MIN_CONFIDENCE,
-                )
-            elif _setup == "FUNDING_EXTREME_SIGNAL" and sig.confidence >= _QUIET_FUNDING_MIN_CONFIDENCE:
-                # Path audit #9 (2026-05-02): truth report flagged FUNDING as
-                # the "most likely bottleneck" — 95 candidates / 28h all
-                # killed by the global 65.0 QUIET floor.  Extreme funding
-                # IS the quality evidence (the trigger itself), so we
-                # exempt it at a slightly lower bar (60) than DIV_CONT (64).
-                # The evaluator-level QUIET block was already removed in
-                # Audit-3 with the same justification; this scanner-level
-                # exempt completes that doctrine.
-                log.debug(
-                    "QUIET_SCALP_BLOCK exempt for {} {} setup_class=FUNDING_EXTREME_SIGNAL conf={:.1f} >= path_min={:.1f}",
-                    symbol, chan_name, sig.confidence, _QUIET_FUNDING_MIN_CONFIDENCE,
-                )
-            elif sig.confidence < QUIET_SCALP_MIN_CONFIDENCE:
+            if sig.confidence < QUIET_SCALP_MIN_CONFIDENCE:
                 _record_confidence_gate_decision(
                     decision="filtered",
                     reason="quiet_scalp_min_confidence",
