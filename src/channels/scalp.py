@@ -183,6 +183,13 @@ _FAR_RSI_LONG_SOFT_MIN: float = 65.0   # ≥ this (< hard) → +6 soft penalty
 _FAR_RSI_SHORT_HARD_MIN: float = 25.0  # ≤ this → hard reject (oversold)
 _FAR_RSI_SHORT_SOFT_MAX: float = 35.0  # ≤ this (> hard) → +6 soft penalty
 
+# SR_FLIP_RETEST HTF direction veto — see _evaluate_sr_flip_retest header.
+# When True (default), block setups where 1H AND 4H trend BOTH oppose signal
+# direction.  Conservative gate: mixed HTF passes through, only unambiguous
+# counter-trend mismatches are vetoed.  Env-overridable per B8 so the gate
+# can be flipped off without a code deploy if a regression surfaces.
+SR_FLIP_HTF_VETO_ENABLED: bool = os.getenv("SR_FLIP_HTF_VETO_ENABLED", "true").lower() in ("1", "true", "yes")
+
 # WHALE_MOMENTUM SL: look at this many closed 1m candles (before the current bar)
 # to find the recent swing low/high as the order-flow invalidation point.
 # A 5-bar window captures the impulse origin without going too far back.
@@ -605,6 +612,38 @@ class ScalpChannel(BaseChannel):
             if state in {"unavailable", "empty", "populated"}:
                 return state
         return "unknown"
+
+    @staticmethod
+    def _classify_htf_trend(
+        indicators: Dict[str, dict],
+        candles: Dict[str, dict],
+        tf_label: str,
+    ) -> Optional[str]:
+        """Return 'BULLISH' / 'BEARISH' / 'NEUTRAL' / None for the given timeframe.
+
+        Mirrors the contract used by `src.mtf._classify_trend`: a TF is BULLISH
+        when ema_fast > ema_slow AND close > ema_fast (and BEARISH when both
+        inverted).  Returns None when indicator/candle data for the TF is
+        unavailable so the caller can choose how to handle missing data.
+        """
+        ind_tf = indicators.get(tf_label, {})
+        ema_fast = ind_tf.get("ema9_last")
+        ema_slow = ind_tf.get("ema21_last")
+        cd = candles.get(tf_label, {})
+        closes = cd.get("close", [])
+        if ema_fast is None or ema_slow is None or len(closes) == 0:
+            return None
+        try:
+            ema_fast_f = float(ema_fast)
+            ema_slow_f = float(ema_slow)
+            close_f = float(closes[-1])
+        except (TypeError, ValueError):
+            return None
+        if ema_fast_f > ema_slow_f and close_f > ema_fast_f:
+            return "BULLISH"
+        if ema_fast_f < ema_slow_f and close_f < ema_fast_f:
+            return "BEARISH"
+        return "NEUTRAL"
 
     def consume_generation_telemetry(self) -> Dict[str, Dict[str, int]]:
         snapshot = {
@@ -2502,7 +2541,7 @@ class ScalpChannel(BaseChannel):
 
         close = float(closes[-1])
         if close <= 0:
-            return self._reject("breakout_not_found")
+            return self._reject("invalid_price")
         prev_close = float(closes[-2])
 
         # Structural level identification.
@@ -2587,6 +2626,23 @@ class ScalpChannel(BaseChannel):
             level = prior_swing_low
         else:
             return self._reject("flip_close_not_confirmed")
+
+        # HTF direction veto — block the canonical "wrong-direction reclaim" pattern
+        # where a 5m sweep+reclaim fires against a clear 1H+4H trend.  XAGUSDT SHORT
+        # @ 74.18 (2026-04-30) was the trigger case: 1H BULLISH (MA7>MA21>MA99) and
+        # 4H BULLISH (close > ema_fast > ema_slow), yet the 5m mechanics still
+        # qualified.  The signal got correctly killed by regime-shift invalidation
+        # later, but vetoing pre-generation is strictly better — saves a slot, an
+        # alert dispatch, and subscriber attention on a structurally-doomed setup.
+        # Conservative threshold: require BOTH 1H AND 4H to oppose direction
+        # (mixed HTF passes through, only unambiguous mismatches blocked).
+        # Env-overridable per B8.
+        if SR_FLIP_HTF_VETO_ENABLED:
+            trend_1h = self._classify_htf_trend(indicators, candles, "1h")
+            trend_4h = self._classify_htf_trend(indicators, candles, "4h")
+            opposite = "BEARISH" if direction == Direction.LONG else "BULLISH"
+            if trend_1h == opposite and trend_4h == opposite:
+                return self._reject("htf_direction_veto")
 
         # Retest proximity gate — layered zone system replacing the original hard-0.3% gate.
         # Premium zone (0–0.3% from flipped level) → no soft penalty.

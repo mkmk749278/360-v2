@@ -1802,6 +1802,157 @@ def _srflip_smc(with_fvg=True, direction="LONG"):
     return smc
 
 
+class TestSrFlipRetestPhase2EntryQuality:
+    """Path audit #1 (Phase 2 — entry quality) fixes.
+
+    1. HTF direction veto — block setups where 1H AND 4H trend BOTH oppose
+       signal direction.  Trigger case: XAGUSDT SHORT @ 74.18 (2026-04-30)
+       where 1H (MA7>MA21>MA99) and 4H (close>ema_fast>ema_slow) were both
+       BULLISH yet the 5m sweep+reclaim still fired SHORT.  The signal got
+       correctly killed by regime-shift invalidation later, but vetoing
+       pre-generation saves the slot, alert, and subscriber attention.
+       Conservative threshold: BOTH HTFs must oppose (mixed passes through).
+
+    2. `close <= 0` now emits `invalid_price` (was `breakout_not_found`).
+       Same family bug fixed yesterday for DIV_CONT/FUNDING/CLS/PDC/FAR.
+    """
+
+    def _call(self, candles, indicators, smc_data, regime="RANGING"):
+        ch = ScalpChannel()
+        return ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime=regime,
+        )
+
+    def _add_htf(
+        self,
+        indicators: dict,
+        candles: dict,
+        *,
+        tf: str,
+        ema_fast: float,
+        ema_slow: float,
+        close: float,
+    ) -> None:
+        """Inject indicator + candle data for a higher timeframe."""
+        indicators[tf] = {
+            "ema9_last": ema_fast,
+            "ema21_last": ema_slow,
+        }
+        candles[tf] = {"close": [close]}
+
+    def test_htf_veto_blocks_short_when_both_1h_and_4h_bullish(self):
+        """The XAG case: SHORT signal qualifies on 5m mechanics but 1H and 4H
+        are both clearly BULLISH (ema_fast > ema_slow AND close > ema_fast on
+        each) — the veto must reject."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        indicators = _srflip_indicators_short()
+        # Both 1H and 4H BULLISH (opposite of SHORT signal).
+        self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=108.0, ema_slow=102.0, close=110.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, _srflip_smc(direction="SHORT"),
+            0.01, 10_000_000, regime="RANGING",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "htf_direction_veto", (
+            f"Expected htf_direction_veto, got {ch._active_no_signal_reason!r}"
+        )
+
+    def test_htf_veto_blocks_long_when_both_1h_and_4h_bearish(self):
+        """Symmetric: LONG signal blocked when 1H+4H both BEARISH."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        indicators = _srflip_indicators_long()
+        self._add_htf(indicators, candles, tf="1h", ema_fast=90.0, ema_slow=95.0, close=88.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=92.0, ema_slow=98.0, close=89.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, _srflip_smc(direction="LONG"),
+            0.01, 10_000_000, regime="RANGING",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "htf_direction_veto"
+
+    def test_htf_veto_does_not_fire_when_only_one_htf_opposite(self):
+        """Mixed HTF (e.g., 1H BULLISH but 4H NEUTRAL) must NOT trigger the
+        veto — we only block unambiguous mismatches."""
+        candles = {"5m": _make_srflip_candles_short(n=60, flip_offset=3)}
+        indicators = _srflip_indicators_short()
+        # 1H BULLISH (opposite of SHORT), 4H NEUTRAL (ema_fast > ema_slow but
+        # close < ema_fast — neither bullish nor bearish per _classify_htf_trend).
+        self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=100.0, ema_slow=99.0, close=99.5)
+        ch = ScalpChannel()
+        sig = ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, _srflip_smc(direction="SHORT"),
+            0.01, 10_000_000, regime="RANGING",
+        )
+        # Test passes if either: (a) signal is generated (no veto fired), or
+        # (b) signal is rejected for a non-HTF reason.  We're proving the veto
+        # specifically did NOT fire.
+        if sig is None:
+            assert ch._active_no_signal_reason != "htf_direction_veto"
+
+    def test_htf_veto_does_not_fire_when_htf_data_missing(self):
+        """When 1H or 4H indicator data is unavailable, the veto must not
+        fire on partial data — we err toward letting the signal through and
+        rely on the existing MTF score gate."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        indicators = _srflip_indicators_long()
+        # No 1H or 4H data injected.
+        ch = ScalpChannel()
+        sig = ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, _srflip_smc(direction="LONG"),
+            0.01, 10_000_000, regime="RANGING",
+        )
+        if sig is None:
+            assert ch._active_no_signal_reason != "htf_direction_veto", (
+                "Veto must not fire when HTF data is missing — we degrade gracefully"
+            )
+
+    def test_htf_veto_passes_when_signal_aligned_with_htfs(self):
+        """LONG aligned with 1H+4H BULLISH must NOT be vetoed."""
+        candles = {"5m": _make_srflip_candles_long(n=60, flip_offset=3)}
+        indicators = _srflip_indicators_long()
+        self._add_htf(indicators, candles, tf="1h", ema_fast=110.0, ema_slow=105.0, close=112.0)
+        self._add_htf(indicators, candles, tf="4h", ema_fast=108.0, ema_slow=102.0, close=110.0)
+        ch = ScalpChannel()
+        sig = ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, indicators, _srflip_smc(direction="LONG"),
+            0.01, 10_000_000, regime="RANGING",
+        )
+        if sig is None:
+            assert ch._active_no_signal_reason != "htf_direction_veto"
+
+    def test_htf_veto_disabled_via_env(self, monkeypatch):
+        """Operator can disable the veto via SR_FLIP_HTF_VETO_ENABLED=false
+        without a code deploy.  Owner-safety lever per B8."""
+        monkeypatch.setenv("SR_FLIP_HTF_VETO_ENABLED", "false")
+        import importlib
+        import src.channels.scalp as scalp_mod
+        importlib.reload(scalp_mod)
+        try:
+            assert scalp_mod.SR_FLIP_HTF_VETO_ENABLED is False
+        finally:
+            monkeypatch.delenv("SR_FLIP_HTF_VETO_ENABLED", raising=False)
+            importlib.reload(scalp_mod)
+
+    def test_invalid_price_token_replaces_breakout_not_found(self):
+        """`close <= 0` must emit `invalid_price`, not `breakout_not_found`."""
+        candles_5m = _make_srflip_candles_long(n=60, flip_offset=3)
+        candles_5m["close"][-1] = 0.0  # invalid current close
+        candles = {"5m": candles_5m}
+        ch = ScalpChannel()
+        sig = ch._evaluate_sr_flip_retest(
+            "BTCUSDT", candles, _srflip_indicators_long(),
+            _srflip_smc(direction="LONG"), 0.01, 10_000_000, regime="RANGING",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "invalid_price", (
+            f"close <= 0 must emit `invalid_price`, got {ch._active_no_signal_reason!r}"
+        )
+
+
 class TestSrFlipRetestRefinements:
     """Tests for the refined SR_FLIP_RETEST path."""
 
