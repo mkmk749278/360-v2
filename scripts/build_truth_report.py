@@ -24,6 +24,7 @@ from src.runtime_truth_report import (
     parse_path_funnel_from_logs,
     parse_quiet_scalp_block_from_logs,
     parse_regime_distribution_from_logs,
+    summarize_invalidation_audit,
 )
 
 
@@ -46,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-comparison-json", required=True)
     parser.add_argument("--signals-last100-json", default="")
     parser.add_argument("--dispatch-log-out-json", default="")
+    parser.add_argument("--invalidation-records-json", default="")
     return parser.parse_args()
 
 
@@ -108,6 +110,13 @@ def main() -> int:
     confidence_gate_components = parse_confidence_gate_components_from_logs(current_text, args.channel)
     log_parse_diagnostics = count_log_markers(current_text)
 
+    invalidation_records: list = []
+    if args.invalidation_records_json:
+        loaded_records = load_json_file(Path(args.invalidation_records_json), default=[])
+        if isinstance(loaded_records, list):
+            invalidation_records = loaded_records
+    invalidation_audit = summarize_invalidation_audit(invalidation_records)
+
     snapshot, comparison = build_snapshot(
         channel=args.channel,
         lookback_hours=args.lookback_hours,
@@ -126,6 +135,7 @@ def main() -> int:
         quiet_scalp_block=quiet_scalp_block,
         confidence_gate_decisions=confidence_gate_decisions,
         confidence_gate_components=confidence_gate_components,
+        invalidation_audit=invalidation_audit,
         log_parse_diagnostics=log_parse_diagnostics,
         now_ts=time.time(),
     )

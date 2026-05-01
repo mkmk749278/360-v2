@@ -69,6 +69,43 @@ After the next monitor run (post-regime fix deploy):
 3. If VSB/BDS/ORB/WHALE start emitting candidates, watch their quality —
    they were silent for so long that any regression would show fast.
 
+### 2026-05-04: Phase 3 — Invalidation Quality Audit (instrumentation only)
+
+Owner observation crystallised the next priority: telegram dump showed every
+signal dies at exactly T+10 min via `INVALIDATION_MIN_AGE_SECONDS=600` grace
+expiring + momentum gate firing immediately.  My initial proposal was to
+exempt structural setups from momentum invalidation — but charts showed
+those kills were often *protective* (saving signals from going to SL on
+wrong-direction entries).
+
+The honest answer is we don't actually know what fraction of kills are
+protective vs premature.  Without that, every threshold-tuning decision is
+opinion-driven.
+
+**Phase 3a — instrumentation shipped (this PR):**
+- `src/invalidation_audit.py` — `record_invalidation()` / `classify_record()`
+  pure-function classifier + `classify_pending_records()` periodic worker.
+  Each kill is recorded with entry/SL/TP1; 30 min later, post-kill OHLC is
+  examined and the kill is labelled PROTECTIVE / PREMATURE / NEUTRAL /
+  INSUFFICIENT_DATA.
+- Hooked into `trade_monitor.py` invalidation path with broad-exception
+  guard (audit must never break a close).
+- Periodic loop in `main.py::_invalidation_audit_loop` runs every 5 min,
+  uses 1m candles from the live data store (assumption: each candle = 60s).
+- Workflow extracts `data/invalidation_records.json` from the engine
+  container; truth report renders a histogram per setup × kill_reason
+  family.  When net PROTECTIVE > PREMATURE, surfaces "Net-helping";
+  otherwise "Net-hurting".
+
+**Phase 3b/3c — held until data lands:**
+- Entry quality audit per evaluator (HTF direction filter on SR_FLIP / QCB)
+- Invalidation tuning based on actual classified data (PnL-aware vs
+  blanket exemption — to be decided by data, not opinion)
+
+23 new tests across `test_invalidation_audit.py` (16) and
+`test_runtime_truth_report.py` (5 audit-section tests + 2 misc).  3384 pass
+/ 0 fail (was 3361 = +23 net).  Zero regressions.
+
 ### 2026-05-03 follow-up: risk-component recalibration shipped
 
 First post-deploy monitor run (2026-04-30 13:40 UTC) gave us actionable component

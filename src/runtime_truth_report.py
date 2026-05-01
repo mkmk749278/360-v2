@@ -376,6 +376,56 @@ def count_log_markers(log_text: str) -> Dict[str, int]:
     }
 
 
+def summarize_invalidation_audit(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate invalidation_records.json into a setup × kill_reason histogram.
+
+    Returns ``{by_setup, by_reason, totals, stale}`` where each leaf cell counts
+    classifications (PROTECTIVE / PREMATURE / NEUTRAL / INSUFFICIENT_DATA) and
+    derives a "value impact" estimate.
+
+    The point of this section is to answer "is the invalidation gate net-helping
+    or net-hurting?" with the only honest unit: signal-by-signal counterfactuals
+    on what the post-kill price action did.
+    """
+    by_setup: Dict[str, Dict[str, int]] = {}
+    by_reason: Dict[str, Dict[str, int]] = {}
+    totals: Dict[str, int] = {
+        "PROTECTIVE": 0,
+        "PREMATURE": 0,
+        "NEUTRAL": 0,
+        "INSUFFICIENT_DATA": 0,
+    }
+    stale = 0  # records older than the eval window but still without a classification
+    if not records:
+        return {"by_setup": {}, "by_reason": {}, "totals": totals, "stale": 0}
+
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        label = r.get("classification")
+        if label is None:
+            stale += 1
+            continue
+        setup = str(r.get("setup_class") or "UNKNOWN")
+        reason_family = str(r.get("kill_reason_family") or "other")
+        for bucket, key in ((by_setup, setup), (by_reason, reason_family)):
+            inner = bucket.setdefault(key, {
+                "PROTECTIVE": 0,
+                "PREMATURE": 0,
+                "NEUTRAL": 0,
+                "INSUFFICIENT_DATA": 0,
+            })
+            inner[label] = inner.get(label, 0) + 1
+        totals[label] = totals.get(label, 0) + 1
+
+    return {
+        "by_setup": by_setup,
+        "by_reason": by_reason,
+        "totals": totals,
+        "stale": stale,
+    }
+
+
 def stage_totals_by_setup(funnel_counters: Dict[str, int], channel: str) -> Dict[str, Dict[str, int]]:
     by_setup: Dict[str, Dict[str, int]] = {}
     for key, value in funnel_counters.items():
@@ -624,6 +674,7 @@ def build_snapshot(
     quiet_scalp_block: Optional[Dict[str, Any]] = None,
     confidence_gate_decisions: Optional[Dict[str, Any]] = None,
     confidence_gate_components: Optional[Dict[str, Any]] = None,
+    invalidation_audit: Optional[Dict[str, Any]] = None,
     log_parse_diagnostics: Optional[Dict[str, int]] = None,
     now_ts: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
@@ -818,6 +869,7 @@ def build_snapshot(
         "quiet_scalp_block": quiet_scalp_block or {},
         "confidence_gate_decisions": confidence_gate_decisions or {},
         "confidence_gate_components": confidence_gate_components or {},
+        "invalidation_audit": invalidation_audit or {},
         "log_parse_diagnostics": log_parse_diagnostics or {},
         "recommended_operator_focus": {
             "most_suspicious_degradation": degraded[0] if degraded else None,
@@ -1010,6 +1062,75 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         lines.append(
             "- _no confidence_gate component samples parsed in window — "
             "scoring telemetry may need a refresh after the next deploy_"
+        )
+
+    # ── Invalidation Quality Audit ────────────────────────────────────
+    audit = snapshot.get("invalidation_audit", {}) or {}
+    lines.extend(["", "## Invalidation Quality Audit"])
+    lines.append(
+        "_Each trade-monitor kill is classified after a 30-min window: "
+        "**PROTECTIVE** (price moved further against position by >0.3R — kill saved money), "
+        "**PREMATURE** (price would have hit TP1 — kill destroyed value), "
+        "**NEUTRAL** (price stayed within ±0.3R), "
+        "**INSUFFICIENT_DATA** (no usable post-kill OHLC).  This is the only honest answer to "
+        "'is invalidation net-helping or net-hurting?'_"
+    )
+    totals = audit.get("totals") or {}
+    if any((totals.get(k, 0) for k in ("PROTECTIVE", "PREMATURE", "NEUTRAL"))):
+        total_classified = sum(totals.get(k, 0) for k in ("PROTECTIVE", "PREMATURE", "NEUTRAL"))
+        prot = totals.get("PROTECTIVE", 0)
+        prem = totals.get("PREMATURE", 0)
+        neut = totals.get("NEUTRAL", 0)
+        insuf = totals.get("INSUFFICIENT_DATA", 0)
+        prot_pct = (prot / total_classified * 100.0) if total_classified else 0.0
+        prem_pct = (prem / total_classified * 100.0) if total_classified else 0.0
+        lines.append(
+            f"- Totals: PROTECTIVE={prot} ({prot_pct:.1f}%) | "
+            f"PREMATURE={prem} ({prem_pct:.1f}%) | "
+            f"NEUTRAL={neut} | INSUFFICIENT_DATA={insuf} | "
+            f"stale (awaiting classification)={audit.get('stale', 0)}"
+        )
+        if prot > prem:
+            lines.append(
+                f"- **Net-helping** — invalidation saved on {prot - prem} more signals "
+                "than it killed prematurely.  Tightening would lose that protection."
+            )
+        elif prem > prot:
+            lines.append(
+                f"- **Net-hurting** — invalidation killed {prem - prot} more signals "
+                "prematurely than it saved.  Tightening or adding setup-specific exemptions "
+                "is the right next move."
+            )
+        else:
+            lines.append("- **Neutral** — invalidation is breakeven; tune carefully.")
+        by_reason = audit.get("by_reason") or {}
+        if by_reason:
+            lines.append("")
+            lines.append("| Kill reason | PROTECTIVE | PREMATURE | NEUTRAL | INSUFFICIENT |")
+            lines.append("|---|---:|---:|---:|---:|")
+            for reason in sorted(by_reason.keys()):
+                row = by_reason[reason]
+                lines.append(
+                    f"| {reason} | {row.get('PROTECTIVE', 0)} | "
+                    f"{row.get('PREMATURE', 0)} | {row.get('NEUTRAL', 0)} | "
+                    f"{row.get('INSUFFICIENT_DATA', 0)} |"
+                )
+        by_setup = audit.get("by_setup") or {}
+        if by_setup:
+            lines.append("")
+            lines.append("| Setup | PROTECTIVE | PREMATURE | NEUTRAL | INSUFFICIENT |")
+            lines.append("|---|---:|---:|---:|---:|")
+            for setup in sorted(by_setup.keys()):
+                row = by_setup[setup]
+                lines.append(
+                    f"| {setup} | {row.get('PROTECTIVE', 0)} | "
+                    f"{row.get('PREMATURE', 0)} | {row.get('NEUTRAL', 0)} | "
+                    f"{row.get('INSUFFICIENT_DATA', 0)} |"
+                )
+    else:
+        lines.append(
+            "- _no classified invalidation records yet — engine needs to run for ~30 min "
+            "after a kill before the classifier can label it_"
         )
 
     # ── Log parse diagnostics (Tier-1 monitor upgrade) ────────────────

@@ -248,6 +248,7 @@ class Bootstrap:
             asyncio.create_task(engine._free_channel_loop()),
             asyncio.create_task(engine._weekly_scoreboard_loop()),
             asyncio.create_task(engine._snapshot_loop()),
+            asyncio.create_task(engine._invalidation_audit_loop()),
             asyncio.create_task(engine._macro_watchdog.start()),
             asyncio.create_task(engine._liquidation_flush_loop()),
             asyncio.create_task(engine._daily_performance_report_loop()),
