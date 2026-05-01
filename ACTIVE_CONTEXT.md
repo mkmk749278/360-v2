@@ -69,6 +69,40 @@ After the next monitor run (post-regime fix deploy):
 3. If VSB/BDS/ORB/WHALE start emitting candidates, watch their quality —
    they were silent for so long that any regression would show fast.
 
+### 2026-05-04: Phase 2 path audit #1 — SR_FLIP_RETEST (entry quality)
+
+Owner-driven per-path audit (mirrors the 14-path workflow from yesterday)
+focused on entry-generation mechanics rather than scoring/SL geometry.
+SR_FLIP_RETEST audited first because it's the highest-emit path (67-105
+signals/window) and has the canonical XAG bad-entry case.
+
+Checklist score: most areas ✅ (level detection sophisticated, EMA/RSI gates
+layered, FVG/OB regime-aware) but **2 defects to fix**:
+
+1. 🔴 No HTF direction check — XAG SHORT fired in clear 1H+4H uptrend
+2. 🔴 `close <= 0` emits `breakout_not_found` (family bug from yesterday)
+
+Shipped:
+- HTF direction veto: block when 1H AND 4H BOTH oppose signal direction.
+  Conservative — mixed HTF passes through, only unambiguous mismatches
+  vetoed.  Env-overridable as `SR_FLIP_HTF_VETO_ENABLED` per B8.
+- `invalid_price` token replaces `breakout_not_found` on 0-close.
+- New helper `ScalpChannel._classify_htf_trend()` mirrors `src.mtf._classify_trend`
+  contract for per-evaluator HTF checks (will be reused by the rest of the
+  Phase 2 audit).
+
+7 new tests in `TestSrFlipRetestPhase2EntryQuality`:
+veto-fires for SHORT-into-1H+4H-BULLISH, mirror for LONG-into-bearish,
+veto-doesn't-fire on mixed HTF, missing HTF data degrades gracefully,
+aligned signal not vetoed, env-override toggles, invalid_price token.
+
+3391 pass / 0 fail (was 3384 = +7, zero regressions).
+
+Out of scope for this PR (deferred):
+- Entry zone depth (XAG LONG case — "right direction, wrong timing")
+- ADX/momentum at evaluator level (intentional for reclaim setup)
+- Setup classification doc for invalidation tuning (Phase 3 work)
+
 ### 2026-05-04: Phase 3 — Invalidation Quality Audit (instrumentation only)
 
 Owner observation crystallised the next priority: telegram dump showed every
