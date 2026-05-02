@@ -1303,6 +1303,22 @@ RISK_SETUP_BLACKLIST: frozenset = frozenset(
 )
 
 # ---------------------------------------------------------------------------
+# Position reconciliation — Phase A3
+# ---------------------------------------------------------------------------
+# Periodic drift-check interval (seconds).  Live-mode only.  Default 300
+# (5 min) — frequent enough to catch SL/TP / liquidation drift quickly,
+# infrequent enough not to hammer the exchange API.
+RECONCILER_PERIODIC_INTERVAL_SEC: int = _safe_int(
+    "RECONCILER_PERIODIC_INTERVAL_SEC", "300"
+)
+# When True the reconciler closes orphan positions on boot (positions on
+# the exchange that the engine doesn't know about).  Default False —
+# alerts only.  Owners who want fully unattended recovery flip this on.
+RECONCILER_AUTO_CLOSE_ORPHANS: bool = _safe_bool(
+    "RECONCILER_AUTO_CLOSE_ORPHANS", "false"
+)
+
+# ---------------------------------------------------------------------------
 # Trailing stop – ATR multiplier for adaptive trailing distance
 # ---------------------------------------------------------------------------
 TRAILING_ATR_MULTIPLIER: float = _safe_float("TRAILING_ATR_MULTIPLIER", "1.5")

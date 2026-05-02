@@ -199,6 +199,31 @@ class CCXTClient:
         self._require_exchange()
         return await self._exchange.fetch_balance()  # type: ignore[union-attr]
 
+    async def fetch_positions(self) -> list:
+        """Fetch all open positions on the exchange.
+
+        Used by :class:`~src.auto_trade.position_reconciler.PositionReconciler`
+        to detect orphans (exchange-side positions the engine doesn't know
+        about) on boot and during periodic drift checks.
+
+        Returns
+        -------
+        list of dict
+            CCXT positions list.  Each entry typically contains:
+            ``symbol`` (CCXT format e.g. "BTC/USDT"), ``contracts``
+            (size, 0 for closed), ``side`` ("long"/"short"),
+            ``entryPrice``, ``notional``, ``leverage``.  Empty/closed
+            positions (contracts == 0) are filtered out by the caller.
+        """
+        self._require_exchange()
+        try:
+            positions = await self._exchange.fetch_positions()  # type: ignore[union-attr]
+            # CCXT may return None on some exchanges that don't support it
+            return positions or []
+        except Exception as exc:
+            log.warning("fetch_positions failed: %s", exc)
+            return []
+
     async def close(self) -> None:
         """Close the underlying exchange connection / session."""
         if self._exchange is not None and hasattr(self._exchange, "close"):

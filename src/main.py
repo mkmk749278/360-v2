@@ -60,6 +60,7 @@ from src.exchange_client import CCXTClient
 from src.order_manager import OrderManager
 from src.paper_order_manager import PaperOrderManager
 from src.auto_trade.risk_manager import RiskManager
+from src.auto_trade.position_reconciler import PositionReconciler
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
 from src.redis_client import RedisClient
@@ -90,6 +91,8 @@ from config import (
     RISK_MIN_EQUITY_USD,
     RISK_SETUP_BLACKLIST,
     RISK_STARTING_EQUITY_USD,
+    RECONCILER_AUTO_CLOSE_ORPHANS,
+    RECONCILER_PERIODIC_INTERVAL_SEC,
 )
 
 log = get_logger("main")
@@ -192,6 +195,27 @@ class CryptoSignalEngine:
                 max_position_usd=MAX_POSITION_USD,
             )
             log.info("Auto-execution mode: OFF (signals → Telegram only)")
+
+        # Position reconciler — Phase A3.  Live-mode only (paper has no
+        # exchange state to reconcile).  reconcile_on_boot() is invoked
+        # from Bootstrap once the engine has wired the router; the
+        # periodic loop is started as a background task.
+        self._position_reconciler: Optional[PositionReconciler] = None
+        if AUTO_EXECUTION_MODE == "live" and _exchange_client is not None:
+            self._position_reconciler = PositionReconciler(
+                exchange_client=_exchange_client,
+                # Active signals come from router — set after router init
+                # below via attribute assignment to avoid forward-reference.
+                get_active_signals_fn=lambda: getattr(self, "router", None)
+                    and self.router.active_signals or {},
+                alert_callback=self.telegram.send_admin_alert,
+                auto_close_orphans=RECONCILER_AUTO_CLOSE_ORPHANS,
+                risk_manager=self._risk_manager,
+            )
+            log.info(
+                "PositionReconciler active: interval=%ds auto_close_orphans=%s",
+                RECONCILER_PERIODIC_INTERVAL_SEC, RECONCILER_AUTO_CLOSE_ORPHANS,
+            )
 
         # Circuit breaker (must be created before TradeMonitor)
         self._circuit_breaker = CircuitBreaker(
