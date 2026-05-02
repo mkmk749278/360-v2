@@ -64,8 +64,12 @@ Goal: enrich the free channel as a paid-conversion funnel — market updates, ma
 **Phase 4 — Coin spotlights**
 - Top mover / breakout watch daily posts with charts
 
-**Phase 5 — Signal-close storytelling**
-- Wire `generate_signal_closed_post` to TradeMonitor close events
+**Phase 5 — Signal-close storytelling** ✅ shipped
+- `TradeMonitor._post_signal_closed` mirrors paid-tier closes (TP3 / SL) to the free channel with a `📣 Paid Signal Result` header
+- WATCHLIST tier skipped (defensive guard); free-send failure does not break active-send (best-effort)
+- B3 honoured: SL hits get the same free-channel visibility as TPs (trust > vanity)
+- Skips when free == active (misconfig) or `TELEGRAM_FREE_CHANNEL_ID` empty
+- 7 tests in `tests/test_signal_close_storytelling.py`
 
 ---
 
