@@ -38,14 +38,19 @@
 - **OPENING_RANGE_BREAKOUT** — currently `feature_disabled`. Rebuild with proper session-anchored range logic, or delete the path entirely. Not a CTE call.
 
 ### Pre-TP grab — Phase A ✅ shipped (gated OFF; awaiting first runtime validation)
-- `TradeMonitor._check_pre_tp_grab` fires when a signal moves favourably ≥0.35% raw within 30 min, in a non-trending regime, on a non-breakout setup
+- `TradeMonitor._check_pre_tp_grab` fires when a signal moves favourably by an **ATR-adaptive threshold** within 30 min, in a non-trending regime, on a non-breakout setup
+- Resolved threshold = `max(PRE_TP_FEE_FLOOR_PCT, PRE_TP_ATR_MULTIPLIER × atr_pct)` where `atr_pct = atr_last / entry × 100`
+  - Low-vol pair (5m ATR ≈ 0.30%) → 0.20% floor → +1.30% net @ 10x
+  - Mid-vol (5m ATR ≈ 0.50%) → 0.25% → +1.80% net @ 10x
+  - High-vol alt (5m ATR ≈ 1.00%) → 0.50% → +4.30% net @ 10x
+- Falls back to static `PRE_TP_THRESHOLD_PCT` (0.35%) when ATR unavailable — soft-penalty doctrine
 - Symbolic + breakeven SL — no broker partial; subscriber sees the message and chooses
-- Posts to active + free channels with raw and net-of-fees math at 10x (`+0.35% raw → +2.80% net @ 10x after 0.7% fees`)
+- Posts to active + free channels with raw and net-of-fees math at 10x
 - Free-channel post emits `free_channel_post source=pre_tp` marker for truth-report attribution
 - Feature flag: `PRE_TP_ENABLED` (default false). All thresholds env-overridable per B8.
 - Setup blacklist: VSB / BDS / ORB (built for bigger moves — pre-TP would cap thesis)
 - Regime allowlist: QUIET / RANGING / VOLATILE
-- 21 tests in `tests/test_pre_tp_grab.py`. **Plan: turn on after one truth report verifies fire rate and timing match expectations.**
+- 27 tests in `tests/test_pre_tp_grab.py` (21 mechanism + 6 ATR-adaptive). **Plan: turn on after one truth report verifies fire rate and timing match expectations.**
 
 ### Free-channel content rollout (in progress)
 

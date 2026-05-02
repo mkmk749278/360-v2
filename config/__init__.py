@@ -214,6 +214,20 @@ MACRO_REGIME_SHIFT_COOLDOWN_SEC: int = int(
 # timing match expectations.  Env-overridable per B8.
 PRE_TP_ENABLED: bool = _safe_bool("PRE_TP_ENABLED", "false")
 PRE_TP_THRESHOLD_PCT: float = float(os.getenv("PRE_TP_THRESHOLD_PCT", "0.35"))
+# ATR-adaptive threshold (B11 fee-aware refinement).  Resolved threshold is
+# ``max(PRE_TP_FEE_FLOOR_PCT, PRE_TP_ATR_MULTIPLIER × atr_pct)`` where
+# ``atr_pct = atr_last / entry * 100`` from the latest 5m candle.  This lets
+# pre-TP capture a +0.2-0.3% win on a low-vol pair (BNB-like) where the static
+# 0.35% would never trigger, while still scaling up to +0.5%+ on volatile
+# alts where 0.35% is noise.  When ATR is unavailable we fall back to the
+# static ``PRE_TP_THRESHOLD_PCT`` (per soft-penalty doctrine — never block
+# on missing data).
+PRE_TP_ATR_MULTIPLIER: float = float(os.getenv("PRE_TP_ATR_MULTIPLIER", "0.5"))
+# Hard fee-economic floor.  Below this, +0.2% raw at 10x = +1.3% net which is
+# the minimum ratio where banking the win pays for the fees with margin.
+# 0.07% raw is the breakeven point — anything below 0.20% destroys subscriber
+# value.  Per B11.
+PRE_TP_FEE_FLOOR_PCT: float = float(os.getenv("PRE_TP_FEE_FLOOR_PCT", "0.20"))
 PRE_TP_MIN_AGE_SEC: int = int(os.getenv("PRE_TP_MIN_AGE_SEC", "30"))
 PRE_TP_MAX_AGE_SEC: int = int(os.getenv("PRE_TP_MAX_AGE_SEC", "1800"))
 # Default leverage assumption for subscriber-facing net-of-fees math.

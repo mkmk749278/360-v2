@@ -19,7 +19,9 @@ from config import (
     MAX_SIGNAL_HOLD_SECONDS,
     MIN_SIGNAL_LIFESPAN_SECONDS,
     MONITOR_POLL_INTERVAL,
+    PRE_TP_ATR_MULTIPLIER,
     PRE_TP_ENABLED,
+    PRE_TP_FEE_FLOOR_PCT,
     PRE_TP_FEE_PCT_ROUND_TRIP,
     PRE_TP_LEVERAGE,
     PRE_TP_MAX_AGE_SEC,
@@ -1141,17 +1143,25 @@ class TradeMonitor:
     ) -> bool:
         """Pre-TP grab — bank a small symbolic win and move SL to breakeven.
 
-        Triggered when an active signal moves favourably by
-        ``PRE_TP_THRESHOLD_PCT`` (default 0.35%) within
-        ``PRE_TP_MAX_AGE_SEC`` (default 30 min) of dispatch, in a non-
-        TRENDING regime, and on a non-breakout setup.
+        Triggered when an active signal moves favourably by an ATR-adaptive
+        threshold within ``PRE_TP_MAX_AGE_SEC`` (default 30 min) of dispatch,
+        in a non-TRENDING regime, and on a non-breakout setup.
+
+        Threshold resolution (B11 fee-aware):
+          ``threshold = max(PRE_TP_FEE_FLOOR_PCT,
+                            PRE_TP_ATR_MULTIPLIER × atr_pct)``
+        where ``atr_pct = atr_last / entry × 100`` from the latest 5m
+        candle.  Falls back to the static ``PRE_TP_THRESHOLD_PCT`` when
+        ATR is unavailable.  The fee floor (default 0.20%) guarantees
+        ≥+1.3% net @ 10x even on low-vol pairs; the ATR term scales up
+        to capture larger wins on volatile alts without capping winners.
 
         Why this exists: at typical subscriber leverage (10x) with 0.07%
         round-trip fees the breakeven price move is ~0.07% raw.  Most
         invalidation kills today close at "neutral" which is actually a
         ~0.7% NET LOSS on margin.  Pre-TP turns those would-be-losses
-        into net-positive trades by banking +0.35% (≈ +2.8% net @ 10x)
-        and ratcheting SL to entry so the rest of the position is free.
+        into net-positive trades by banking the ATR-adaptive minimum and
+        ratcheting SL to entry so the rest of the position is free.
 
         Returns True iff pre-TP fired this cycle.  Best-effort — exceptions
         are logged and swallowed so the surrounding SL/TP loop is never
@@ -1175,12 +1185,41 @@ class TradeMonitor:
         if age_secs < PRE_TP_MIN_AGE_SEC or age_secs > PRE_TP_MAX_AGE_SEC:
             return False
 
-        # Threshold check — use the favourable extreme of the last 1m candle.
         is_long = sig.direction == Direction.LONG
         entry = float(sig.entry)
         if entry <= 0:
             return False
-        threshold = PRE_TP_THRESHOLD_PCT / 100.0
+
+        # Fetch indicators once — used for both ATR-adaptive threshold and
+        # regime gate.  Fail-open on either if the call raises or returns nil.
+        indicators: Optional[Dict[str, Any]] = None
+        if self._indicators_fn is not None:
+            try:
+                indicators = self._indicators_fn(sig.symbol)
+            except Exception as exc:
+                log.debug("Pre-TP indicators_fn failed for %s: %s", sig.symbol, exc)
+                indicators = None
+
+        # Resolve threshold — ATR-adaptive with fee floor; fall back to static
+        # constant when ATR is missing/invalid (soft-penalty doctrine).
+        threshold_pct = PRE_TP_THRESHOLD_PCT
+        threshold_source = "static"
+        atr_last: Optional[float] = None
+        if indicators is not None:
+            raw_atr = indicators.get("atr_last")
+            try:
+                if raw_atr is not None:
+                    atr_last = float(raw_atr)
+            except (TypeError, ValueError):
+                atr_last = None
+        if atr_last is not None and atr_last > 0:
+            atr_pct = (atr_last / entry) * 100.0
+            atr_threshold = atr_pct * PRE_TP_ATR_MULTIPLIER
+            threshold_pct = max(PRE_TP_FEE_FLOOR_PCT, atr_threshold)
+            threshold_source = "atr_floored" if atr_threshold < PRE_TP_FEE_FLOOR_PCT else "atr"
+
+        # Threshold check — use the favourable extreme of the last 1m candle.
+        threshold = threshold_pct / 100.0
         if is_long:
             target = entry * (1.0 + threshold)
             if c_high <= 0 or c_high < target:
@@ -1193,20 +1232,18 @@ class TradeMonitor:
         # Regime gate — only fire in non-trending regimes.  Fail-open if we
         # can't classify (per soft-penalty doctrine).
         regime_label: Optional[str] = None
-        if self._regime_detector is not None and self._indicators_fn is not None:
+        if self._regime_detector is not None and indicators is not None:
             try:
-                indicators = self._indicators_fn(sig.symbol)
-                if indicators:
-                    result = self._regime_detector.classify(indicators)
-                    if result and getattr(result, "regime", None) is not None:
-                        regime_label = result.regime.value
+                result = self._regime_detector.classify(indicators)
+                if result and getattr(result, "regime", None) is not None:
+                    regime_label = result.regime.value
             except Exception as exc:
                 log.debug("Pre-TP regime classify failed for %s: %s", sig.symbol, exc)
         if regime_label is not None and regime_label.upper() not in PRE_TP_REGIME_ALLOWLIST:
             return False
 
-        # All gates passed — fire pre-TP
-        favourable_pct = PRE_TP_THRESHOLD_PCT  # symbolic — what we report as banked
+        # All gates passed — fire pre-TP at the resolved threshold
+        favourable_pct = threshold_pct  # symbolic — what we report as banked
         sig.pre_tp_hit = True
         sig.pre_tp_pct = favourable_pct
         sig.pre_tp_timestamp = utcnow()
@@ -1255,11 +1292,14 @@ class TradeMonitor:
                 log.warning("Pre-TP free-channel post failed for %s: %s", sig.symbol, exc)
 
         log.info(
-            "pre_tp_fire %s %s [%s] favourable=%.3f leverage=%.1fx net=%.2f age=%.0fs",
+            "pre_tp_fire %s %s [%s] threshold=%.3f source=%s atr_last=%s "
+            "leverage=%.1fx net=%.2f age=%.0fs",
             sig.symbol,
             sig.direction.value,
             setup_class,
             favourable_pct,
+            threshold_source,
+            f"{atr_last:.6f}" if atr_last is not None else "-",
             PRE_TP_LEVERAGE,
             net_pct,
             age_secs,

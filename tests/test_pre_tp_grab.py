@@ -367,3 +367,150 @@ async def test_free_post_failure_does_not_break_state_change(mock_send):
     assert fired is True
     assert sig.pre_tp_hit is True
     assert sig.stop_loss == pytest.approx(30000.0)
+
+
+# ---------------------------------------------------------------------------
+# ATR-adaptive threshold (B11 fee-aware refinement)
+# ---------------------------------------------------------------------------
+
+
+def _build_monitor_with_atr(send, regime_label: str = "QUIET", atr_last: float = 0.0):
+    """Build monitor whose indicators_fn returns the given atr_last.
+
+    A non-zero ``atr_last`` makes the resolved pre-TP threshold ATR-adaptive
+    (``max(fee_floor, atr_mult × atr_pct)``); zero/missing falls back to the
+    static ``PRE_TP_THRESHOLD_PCT``.
+    """
+    regime_detector = MagicMock()
+    regime_detector.classify.return_value = MagicMock(
+        regime=MagicMock(value=regime_label)
+    )
+    indicators = {"adx_last": 18.0, "ema_slope": 0.0}
+    if atr_last > 0:
+        indicators["atr_last"] = atr_last
+    monitor = TradeMonitor(
+        data_store=MagicMock(),
+        send_telegram=send,
+        get_active_signals=lambda: {},
+        remove_signal=lambda sid: None,
+        update_signal=MagicMock(),
+        regime_detector=regime_detector,
+        indicators_fn=lambda sym: indicators,
+    )
+    return monitor
+
+
+async def test_atr_adaptive_low_vol_pair_uses_fee_floor(mock_send):
+    """Low-vol pair (5m ATR ≈ 0.30%) → 0.5×0.30% = 0.15% < 0.20% floor.
+    Resolved threshold = 0.20%.  Fires at +0.20% raw (would NOT fire under
+    static 0.35%).  Validates the floor protects subscribers from sub-fee
+    moves while still capturing the small-but-real wins on quiet pairs."""
+    send, _ = mock_send
+    entry = 30000.0
+    atr_last = entry * 0.003  # 0.30% of price
+    monitor = _build_monitor_with_atr(send, atr_last=atr_last)
+    sig = _make_signal(direction=Direction.LONG, entry=entry)
+    # Candle high reaches +0.22% — above 0.20% floor, below 0.35% static
+    target_high = entry * 1.0022
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    assert fired is True
+    # Banked pct should reflect the resolved threshold (0.20 floor), not 0.35
+    assert sig.pre_tp_pct == pytest.approx(0.20, abs=0.01)
+    assert sig.stop_loss == pytest.approx(entry)
+
+
+async def test_atr_adaptive_high_vol_pair_lifts_threshold(mock_send):
+    """High-vol pair (5m ATR ≈ 1.0%) → 0.5×1.0% = 0.50% > 0.20% floor.
+    Resolved threshold = 0.50%.  +0.30% raw should NOT fire — pre-TP at 0.30%
+    on a 1.0% ATR pair would cap winners that have plenty of room to run."""
+    send, _ = mock_send
+    entry = 30000.0
+    atr_last = entry * 0.010  # 1.0% of price
+    monitor = _build_monitor_with_atr(send, atr_last=atr_last)
+    sig = _make_signal(direction=Direction.LONG, entry=entry)
+    # Candle high reaches +0.30% — above static 0.35 floor would have fired,
+    # but ATR-adaptive resolved threshold is 0.50% so this should skip.
+    insufficient_high = entry * 1.003
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=insufficient_high, c_low=29990.0)
+
+    assert fired is False
+    assert sig.pre_tp_hit is False
+
+
+async def test_atr_adaptive_high_vol_fires_at_resolved_threshold(mock_send):
+    """High-vol pair fires at +0.50% (the resolved threshold), banking the
+    bigger win the volatility supports."""
+    send, _ = mock_send
+    entry = 30000.0
+    atr_last = entry * 0.010  # 1.0% ATR
+    monitor = _build_monitor_with_atr(send, atr_last=atr_last)
+    sig = _make_signal(direction=Direction.LONG, entry=entry)
+    # +0.51% high — clears the 0.50% resolved threshold
+    target_high = entry * 1.0051
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    assert fired is True
+    assert sig.pre_tp_pct == pytest.approx(0.50, abs=0.01)
+
+
+async def test_atr_adaptive_mid_vol_pair_uses_atr_term(mock_send):
+    """Mid-vol pair (5m ATR ≈ 0.5%) → 0.5×0.5% = 0.25% > 0.20% floor.
+    Resolved threshold = 0.25%.  Fires at +0.26% — between the floor and
+    the static 0.35%, validating the atr-driven middle ground."""
+    send, _ = mock_send
+    entry = 30000.0
+    atr_last = entry * 0.005  # 0.5% ATR
+    monitor = _build_monitor_with_atr(send, atr_last=atr_last)
+    sig = _make_signal(direction=Direction.LONG, entry=entry)
+    target_high = entry * 1.0026
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    assert fired is True
+    assert sig.pre_tp_pct == pytest.approx(0.25, abs=0.01)
+
+
+async def test_falls_back_to_static_when_atr_missing(mock_send):
+    """When ``atr_last`` is missing from indicators we use the static
+    ``PRE_TP_THRESHOLD_PCT`` (0.35%).  Soft-penalty doctrine — never block
+    on missing data."""
+    send, _ = mock_send
+    monitor = _build_monitor_with_atr(send, atr_last=0.0)  # no atr_last
+    sig = _make_signal(direction=Direction.LONG, entry=30000.0)
+    # +0.22% — would fire if ATR-adaptive (0.20 floor), should NOT fire on static 0.35
+    insufficient = 30000.0 * 1.0022
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=insufficient, c_low=29990.0)
+
+    assert fired is False
+
+
+async def test_short_atr_adaptive_low_vol_uses_floor(mock_send):
+    """SHORT side: low-vol → 0.20% floor; +0.22% favourable move fires."""
+    send, _ = mock_send
+    entry = 30000.0
+    atr_last = entry * 0.003  # 0.30% ATR
+    monitor = _build_monitor_with_atr(send, atr_last=atr_last)
+    sig = _make_signal(
+        direction=Direction.SHORT,
+        entry=entry,
+        stop_loss=entry * 1.005,
+        tp1=entry * 0.985,
+    )
+    target_low = entry * (1 - 0.0022)  # -0.22%
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30005.0, c_low=target_low)
+
+    assert fired is True
+    assert sig.pre_tp_pct == pytest.approx(0.20, abs=0.01)
+    assert sig.stop_loss == pytest.approx(entry)
