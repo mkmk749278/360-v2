@@ -37,7 +37,7 @@
 ### Pending owner decision
 - **OPENING_RANGE_BREAKOUT** — currently `feature_disabled`. Rebuild with proper session-anchored range logic, or delete the path entirely. Not a CTE call.
 
-### Pre-TP grab — Phase A ✅ shipped (gated OFF; awaiting first runtime validation)
+### Pre-TP grab — Phase A ✅ shipped + ENABLED in production
 - `TradeMonitor._check_pre_tp_grab` fires when a signal moves favourably by an **ATR-adaptive threshold** within 30 min, in a non-trending regime, on a non-breakout setup
 - Resolved threshold = `max(PRE_TP_FEE_FLOOR_PCT, PRE_TP_ATR_MULTIPLIER × atr_pct)` where `atr_pct = atr_last / entry × 100`
   - Low-vol pair (5m ATR ≈ 0.30%) → 0.20% floor → +1.30% net @ 10x
@@ -50,7 +50,9 @@
 - Feature flag: `PRE_TP_ENABLED` (default false). All thresholds env-overridable per B8.
 - Setup blacklist: VSB / BDS / ORB (built for bigger moves — pre-TP would cap thesis)
 - Regime allowlist: QUIET / RANGING / VOLATILE
-- 27 tests in `tests/test_pre_tp_grab.py` (21 mechanism + 6 ATR-adaptive). **Plan: turn on after one truth report verifies fire rate and timing match expectations.**
+- 27 tests in `tests/test_pre_tp_grab.py` (21 mechanism + 6 ATR-adaptive)
+- **`PRE_TP_ENABLED=true` set in `docker-compose.yml`** — flag is now live in production
+- **Truth-report instrumentation:** new `## Pre-TP grab fire stats` section parses `pre_tp_fire` log markers and reports total fires, threshold-source distribution (atr / atr_floored / static), per-setup × source breakdown, top symbols, avg net @ 10x, avg time-to-fire. The next monitor truth-report run is the empirical validation: if the section is empty after one cycle, either no signals matched all gates or the flag didn't propagate; populated rows confirm fire rate and net economics match design.
 
 ### Free-channel content rollout (in progress)
 
