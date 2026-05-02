@@ -43,6 +43,8 @@ import aiohttp
 from config import (
     MACRO_BTC_MOVE_COOLDOWN_SEC,
     MACRO_BTC_MOVE_THRESHOLD_PCT,
+    MACRO_REGIME_SHIFT_COOLDOWN_SEC,
+    MACRO_REGIME_SHIFT_ENABLED,
     MACRO_WATCHDOG_ENABLED,
     MACRO_WATCHDOG_POLL_INTERVAL,
     MACRO_WATCHDOG_FEAR_GREED_THRESHOLD_LOW,
@@ -129,6 +131,14 @@ class MacroWatchdog:
         # Cooldown tracker for BTC big-move alerts — keyed by direction
         # ("up" | "down") so a sustained large move alerts once per leg.
         self._btc_move_last_alert: Dict[str, float] = {}
+        # Phase 2b — last observed 1h-EMA21 trend direction per symbol
+        # ("UP" or "DOWN").  None until the first observation is made
+        # (so the very first cycle does NOT alert — we need a baseline
+        # before a flip is meaningful).
+        self._regime_last_direction: Dict[str, Optional[str]] = {}
+        # Per-symbol cooldown — absorbs chop when price oscillates around
+        # EMA21.  Same `None` sentinel pattern as `_btc_move_last_alert`.
+        self._regime_last_alert: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -220,6 +230,14 @@ class MacroWatchdog:
         except Exception as exc:
             log.debug("BTC price-move check failed: {}", exc)
 
+        # 2b) BTC/ETH 1h regime-shift check (Phase-2b free-channel content)
+        if MACRO_REGIME_SHIFT_ENABLED:
+            for sym in ("BTCUSDT", "ETHUSDT"):
+                try:
+                    await self._check_regime_shift(sym, session)
+                except Exception as exc:
+                    log.debug("Regime-shift check failed for {}: {}", sym, exc)
+
         # 3) News headlines for each watched symbol
         for symbol in self._watch_symbols:
             try:
@@ -308,6 +326,99 @@ class MacroWatchdog:
         log.info(
             "MacroWatchdog: BTC price-move alert ({:+.2f}%, severity={})",
             pct_change, severity,
+        )
+
+    async def _check_regime_shift(
+        self, symbol: str, session: aiohttp.ClientSession
+    ) -> None:
+        """Alert when BTC or ETH crosses its 1h EMA21 (trend-direction flip).
+
+        Why: 1h EMA21 cross on BTC/ETH is a meaningful trend-context shift
+        for scalpers — correlated alts shift bias along with the leader.
+        This is informational context for free subscribers, not a trade
+        signal.  Routes via :meth:`_broadcast` (HIGH severity → admin + free).
+
+        Detection: fetch the last 22 1h candles, compute EMA21, classify
+        ``UP`` if last close > EMA21 else ``DOWN``.  On the first observation
+        for a symbol the direction is recorded silently (we need a baseline
+        before a flip is meaningful).
+
+        Cooldown: per-symbol ``MACRO_REGIME_SHIFT_COOLDOWN_SEC`` (default 4h)
+        absorbs chop when price hovers around EMA21.  ``None`` sentinel
+        avoids the ``time.monotonic() - 0`` false-cooldown bug that bit
+        the BTC big-move alert pre-fix.
+        """
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": symbol, "interval": "1h", "limit": 22}
+        try:
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    log.debug("{} kline fetch returned status {}", symbol, resp.status)
+                    return
+                data = await resp.json()
+        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            log.debug("{} kline fetch network error: {}", symbol, exc)
+            return
+
+        if not isinstance(data, list) or len(data) < 22:
+            return
+        try:
+            closes = [float(row[4]) for row in data]
+        except (IndexError, TypeError, ValueError) as exc:
+            log.debug("{} kline parse error: {}", symbol, exc)
+            return
+        if any(c <= 0 for c in closes):
+            return
+
+        # Wilder-style EMA21 over the 22-candle window — a simple iterative
+        # EMA is sufficient for a coarse trend-direction signal and avoids
+        # importing numpy / src.indicators (keeps macro_watchdog standalone).
+        period = 21
+        alpha = 2.0 / (period + 1.0)
+        ema_val = sum(closes[:period]) / period  # SMA seed
+        for c in closes[period:]:
+            ema_val = (c - ema_val) * alpha + ema_val
+        last_close = closes[-1]
+        new_direction = "UP" if last_close > ema_val else "DOWN"
+
+        prev_direction = self._regime_last_direction.get(symbol)
+        self._regime_last_direction[symbol] = new_direction
+        if prev_direction is None:
+            log.debug(
+                "MacroWatchdog: regime baseline recorded for {} → {}",
+                symbol, new_direction,
+            )
+            return
+        if prev_direction == new_direction:
+            return
+
+        # Direction flipped — check cooldown
+        now = time.monotonic()
+        last_time = self._regime_last_alert.get(symbol)
+        if last_time is not None and now - last_time < MACRO_REGIME_SHIFT_COOLDOWN_SEC:
+            return
+        self._regime_last_alert[symbol] = now
+
+        emoji = "📈" if new_direction == "UP" else "📉"
+        coin = symbol.replace("USDT", "")
+        msg = (
+            f"{emoji} *{coin} regime shift — {prev_direction} → {new_direction}*\n\n"
+            f"*Symbol:* {symbol}\n"
+            f"*Last close:* ${last_close:,.2f}\n"
+            f"*1h EMA21:* ${ema_val:,.2f}\n"
+            f"*Severity:* HIGH\n\n"
+            f"_{coin} just crossed its 1h EMA21 — short-term trend bias has "
+            f"flipped {new_direction.lower()}.  Correlated alts often follow "
+            f"the leader; setups against the new bias face stronger headwind._"
+        )
+        await self._broadcast(msg, "HIGH")
+        log.info(
+            "MacroWatchdog: regime shift alert {} {} → {}",
+            symbol, prev_direction, new_direction,
         )
 
     async def _check_fear_greed(self, session: aiohttp.ClientSession) -> None:
