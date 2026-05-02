@@ -93,6 +93,7 @@ class PaperOrderManager:
         position_size_pct: float = POSITION_SIZE_PCT,
         max_position_usd: float = MAX_POSITION_USD,
         starting_equity_usd: float = 1000.0,
+        risk_manager: Optional[Any] = None,
     ) -> None:
         self._position_size_pct = position_size_pct
         self._max_position_usd = max_position_usd
@@ -103,6 +104,10 @@ class PaperOrderManager:
         self._realised_pnl_total: float = 0.0
         # Counter for synthetic order IDs.
         self._order_seq: int = 0
+        # Phase A2 — optional risk gates.  Same interface as OrderManager.
+        # When wired, paper-mode obeys the same gates as live so we can
+        # validate the gate chain in zero-risk mode before flipping live.
+        self._risk_manager = risk_manager
 
     # ------------------------------------------------------------------
     # Compatibility surface (mirrors OrderManager)
@@ -159,6 +164,13 @@ class PaperOrderManager:
             # Idempotent — already opened.
             return None
 
+        # Phase A2 — risk gates.  When wired, check before opening.
+        if self._risk_manager is not None:
+            gate = self._risk_manager.check(signal)
+            if not gate.allowed:
+                # Marker emitted by RiskManager; nothing more to do here.
+                return None
+
         direction = getattr(signal.direction, "value", str(signal.direction))
         side = "long" if direction == "LONG" else "short"
         entry = float(getattr(signal, "entry", 0.0) or 0.0)
@@ -184,6 +196,8 @@ class PaperOrderManager:
         # Margin reservation — naive: subtract notional from available.
         # Sufficient for paper-mode P&L tracking; not a real margin model.
         self._available_equity -= notional
+        if self._risk_manager is not None:
+            self._risk_manager.register_open(signal)
 
         log.info(
             "paper_trade_fill event=open signal_id=%s symbol=%s side=%s "
@@ -272,9 +286,13 @@ class PaperOrderManager:
         )
 
         # If position fully closed, drop it from the active map so balance
-        # accounting stays clean.
+        # accounting stays clean and notify the risk manager.
         if (position.quantity - position.closed_quantity) <= 1e-9:
             self._positions.pop(signal_id, None)
+            if self._risk_manager is not None:
+                self._risk_manager.register_close(
+                    signal, realised_pnl_usd=position.realised_pnl_usd
+                )
 
         return order_id
 

@@ -1278,6 +1278,31 @@ POSITION_SIZE_PCT: float = _safe_float("POSITION_SIZE_PCT", "2.0")
 MAX_POSITION_USD: float = _safe_float("MAX_POSITION_USD", "100.0")
 
 # ---------------------------------------------------------------------------
+# Risk gates — Phase A2 (mandatory before any live execution per B12)
+# ---------------------------------------------------------------------------
+# Starting equity reference for daily-loss percentage math.  In paper mode
+# this is the synthetic balance.  In live mode the bootstrap should query
+# the exchange at boot and override via RiskManager.update_equity().
+RISK_STARTING_EQUITY_USD: float = _safe_float("RISK_STARTING_EQUITY_USD", "1000.0")
+# Daily-loss kill threshold (negative percent of starting equity).
+# Default -3% — generous enough that normal-day drawdowns don't trip but
+# tight enough to halt a runaway losing streak before it compounds.
+RISK_DAILY_LOSS_LIMIT_PCT: float = _safe_float("RISK_DAILY_LOSS_LIMIT_PCT", "-3.0")
+# Max concurrent positions across all symbols.
+RISK_MAX_CONCURRENT: int = _safe_int("RISK_MAX_CONCURRENT", "5")
+# Max leverage allowed.  Walbi's 200x is irresponsible; we cap at 30x.
+RISK_MAX_LEVERAGE: float = _safe_float("RISK_MAX_LEVERAGE", "30.0")
+# Min equity floor — auto-pause if equity falls below this.  Default 0
+# (disabled).  Useful in live mode to guard against long-tail bleed.
+RISK_MIN_EQUITY_USD: float = _safe_float("RISK_MIN_EQUITY_USD", "0.0")
+# Comma-separated setups to silently reject at the gate (e.g. emergency
+# disable of a misbehaving path without redeploy).  Empty by default.
+RISK_SETUP_BLACKLIST_RAW: str = os.getenv("RISK_SETUP_BLACKLIST", "")
+RISK_SETUP_BLACKLIST: frozenset = frozenset(
+    s.strip() for s in RISK_SETUP_BLACKLIST_RAW.split(",") if s.strip()
+)
+
+# ---------------------------------------------------------------------------
 # Trailing stop – ATR multiplier for adaptive trailing distance
 # ---------------------------------------------------------------------------
 TRAILING_ATR_MULTIPLIER: float = _safe_float("TRAILING_ATR_MULTIPLIER", "1.5")
