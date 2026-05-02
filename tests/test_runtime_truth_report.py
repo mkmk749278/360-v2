@@ -633,6 +633,157 @@ def test_parse_confidence_gate_components_filters_other_channels() -> None:
     assert result["QUIET_COMPRESSION_BREAK"]["filtered"]["samples"] == 1
 
 
+_SAMPLE_CONFIDENCE_LINE_WITH_ENGINE = (
+    _SAMPLE_CONFIDENCE_LINE
+    + " engine(smc=10.0,regime=8.0,volume=6.0,indicators=12.0,patterns=4.0,mtf=13.0)"
+)
+
+
+def test_parse_confidence_gate_components_picks_up_engine_breakdown() -> None:
+    """Lines that include the new ``engine(...)`` group surface a second
+    component table that explains the gap between the legacy components
+    and ``final``.  Without this breakdown there's no principled way to
+    diagnose why VSB candidates land at 46 vs threshold 80."""
+    log_text = "\n".join([_SAMPLE_CONFIDENCE_LINE_WITH_ENGINE])
+    result = parse_confidence_gate_components_from_logs(log_text, "360_SCALP")
+    bucket = result["QUIET_COMPRESSION_BREAK"]["filtered"]
+    assert "engine_components" in bucket
+    eng = bucket["engine_components"]
+    assert eng["samples"] == 1
+    assert eng["avg_smc"] == 10.0
+    assert eng["avg_regime"] == 8.0
+    assert eng["avg_volume"] == 6.0
+    assert eng["avg_indicators"] == 12.0
+    assert eng["avg_patterns"] == 4.0
+    assert eng["avg_mtf"] == 13.0
+
+
+def test_parse_confidence_gate_components_legacy_lines_have_no_engine_block() -> None:
+    """Older log lines without the ``engine(...)`` group must still parse —
+    they simply omit the ``engine_components`` key."""
+    log_text = "\n".join([_SAMPLE_CONFIDENCE_LINE])
+    result = parse_confidence_gate_components_from_logs(log_text, "360_SCALP")
+    bucket = result["QUIET_COMPRESSION_BREAK"]["filtered"]
+    assert bucket["samples"] == 1
+    assert "engine_components" not in bucket
+
+
+def test_parse_confidence_gate_components_aggregates_engine_across_samples() -> None:
+    """When multiple matching lines have engine breakdowns, the parser
+    averages each engine dimension across those samples only."""
+    second = _SAMPLE_CONFIDENCE_LINE_WITH_ENGINE.replace("BTCUSDT", "ETHUSDT").replace(
+        "engine(smc=10.0,regime=8.0,volume=6.0,indicators=12.0,patterns=4.0,mtf=13.0)",
+        "engine(smc=20.0,regime=12.0,volume=10.0,indicators=18.0,patterns=8.0,mtf=17.0)",
+    )
+    log_text = "\n".join([_SAMPLE_CONFIDENCE_LINE_WITH_ENGINE, second])
+    result = parse_confidence_gate_components_from_logs(log_text, "360_SCALP")
+    eng = result["QUIET_COMPRESSION_BREAK"]["filtered"]["engine_components"]
+    assert eng["samples"] == 2
+    assert eng["avg_smc"] == 15.0
+    assert eng["avg_indicators"] == 15.0
+    assert eng["avg_mtf"] == 15.0
+
+
+def test_format_truth_report_renders_engine_breakdown_section() -> None:
+    from src.runtime_truth_report import format_truth_report_markdown
+    snapshot = {
+        "executive_summary": {},
+        "runtime_health": {"running": True, "status": "running", "health": "healthy"},
+        "path_funnel_truth": {},
+        "dependency_readiness": {},
+        "lifecycle_truth": {},
+        "quality_by_setup": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate_decisions": {},
+        "confidence_gate_components": {
+            "VOLUME_SURGE_BREAKOUT": {
+                "filtered": {
+                    "samples": 314,
+                    "avg_final": 46.78,
+                    "avg_threshold": 80.0,
+                    "avg_gap_to_threshold": 33.22,
+                    "avg_total_penalty": 0.0,
+                    "avg_raw": 46.78,
+                    "avg_composite": 46.78,
+                    "components": {
+                        "avg_market": 20.70,
+                        "avg_execution": 20.00,
+                        "avg_risk": 20.00,
+                        "avg_thesis_adj": 0.50,
+                    },
+                    "engine_components": {
+                        "samples": 314,
+                        "avg_smc": 8.0,
+                        "avg_regime": 5.0,
+                        "avg_volume": 9.0,
+                        "avg_indicators": 14.0,
+                        "avg_patterns": 4.0,
+                        "avg_mtf": 6.78,
+                    },
+                }
+            }
+        },
+        "invalidation_audit": {},
+        "log_parse_diagnostics": {},
+        "free_channel_posts": {},
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Scoring engine breakdown" in md
+    assert "| VOLUME_SURGE_BREAKOUT | filtered |" in md
+    # Each engine dimension surfaces in the table
+    assert "8.00" in md and "14.00" in md
+    assert "5.00" in md  # regime
+    assert "6.78" in md  # mtf
+
+
+def test_format_truth_report_engine_section_placeholder_when_legacy_only() -> None:
+    """Old log windows without engine data should still render the section
+    header with a placeholder line — never a crash, never a blank section."""
+    from src.runtime_truth_report import format_truth_report_markdown
+    snapshot = {
+        "executive_summary": {},
+        "runtime_health": {"running": True, "status": "running", "health": "healthy"},
+        "path_funnel_truth": {},
+        "dependency_readiness": {},
+        "lifecycle_truth": {},
+        "quality_by_setup": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate_decisions": {},
+        "confidence_gate_components": {
+            "QUIET_COMPRESSION_BREAK": {
+                "filtered": {
+                    "samples": 100,
+                    "avg_final": 60.0,
+                    "avg_threshold": 65.0,
+                    "avg_gap_to_threshold": 5.0,
+                    "avg_total_penalty": 0.0,
+                    "avg_raw": 60.0,
+                    "avg_composite": 60.0,
+                    "components": {
+                        "avg_market": 20.0,
+                        "avg_execution": 18.0,
+                        "avg_risk": 15.0,
+                        "avg_thesis_adj": 7.0,
+                    },
+                    # no engine_components → exercise the placeholder path
+                }
+            }
+        },
+        "invalidation_audit": {},
+        "log_parse_diagnostics": {},
+        "free_channel_posts": {},
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Scoring engine breakdown" in md
+    assert "no engine-component data parsed in window" in md
+
+
 def test_parse_confidence_gate_components_handles_empty_and_malformed() -> None:
     assert parse_confidence_gate_components_from_logs("", "360_SCALP") == {}
     # Lines that match the marker but not the full regex are silently skipped

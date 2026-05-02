@@ -166,6 +166,14 @@ _CONFIDENCE_COMPONENT_RE = re.compile(
     r"regime_transition=(?P<regime_trans>[-+\d.]+)\)\s+"
     r"components\(market=(?P<market>[-\d.]+),execution=(?P<execution>[-\d.]+),"
     r"risk=(?P<risk>[-\d.]+),thesis_adj=(?P<thesis_adj>[-\d.]+)\)"
+    # Optional engine breakdown — present after the VSB diagnosis instrumentation.
+    # These six dimensions actually sum to ``final`` (modulo penalties +
+    # adjustments + the 100-cap), so this is the breakdown that answers
+    # "where is the score actually coming from?"  Older log lines without
+    # this group are still parsed correctly thanks to the optional wrapper.
+    r"(?:\s+engine\(smc=(?P<smc>[-\d.]+),regime=(?P<regime>[-\d.]+),"
+    r"volume=(?P<volume>[-\d.]+),indicators=(?P<indicators>[-\d.]+),"
+    r"patterns=(?P<patterns>[-\d.]+),mtf=(?P<mtf>[-\d.]+)\))?"
 )
 
 
@@ -331,9 +339,31 @@ def parse_confidence_gate_components_from_logs(
         except (ValueError, TypeError):
             continue
 
+        # Engine breakdown is optional — older log lines (pre-VSB instrumentation)
+        # don't include it.  When present, these six dimensions actually sum to
+        # ``final`` (modulo penalties/adjustments and the 100-cap), so they're the
+        # breakdown that explains the gap that the legacy components miss.
+        engine_fields: Dict[str, float] = {}
+        if match.group("smc") is not None:
+            try:
+                engine_fields = {
+                    "smc": float(match.group("smc")),
+                    "regime": float(match.group("regime")),
+                    "volume": float(match.group("volume")),
+                    "indicators": float(match.group("indicators")),
+                    "patterns": float(match.group("patterns")),
+                    "mtf": float(match.group("mtf")),
+                }
+            except (ValueError, TypeError):
+                engine_fields = {}
+
         bucket = sums.setdefault(setup, {}).setdefault(decision, defaultdict(float))
         for k, v in fields.items():
             bucket[k] += v
+        for k, v in engine_fields.items():
+            bucket[f"engine_{k}"] += v
+        if engine_fields:
+            bucket["engine_samples"] += 1
         counts.setdefault(setup, {})
         counts[setup][decision] = counts[setup].get(decision, 0) + 1
 
@@ -341,8 +371,8 @@ def parse_confidence_gate_components_from_logs(
         by_setup[setup] = {}
         for decision, totals in decisions.items():
             n = counts[setup][decision]
-            avgs = {k: round(v / n, 2) for k, v in totals.items()}
-            by_setup[setup][decision] = {
+            avgs = {k: round(v / n, 2) for k, v in totals.items() if not k.startswith("engine_")}
+            entry: Dict[str, Any] = {
                 "samples": n,
                 "avg_final": avgs["final"],
                 "avg_threshold": avgs["threshold"],
@@ -357,6 +387,18 @@ def parse_confidence_gate_components_from_logs(
                     "avg_thesis_adj": avgs["thesis_adj"],
                 },
             }
+            engine_n = int(totals.get("engine_samples", 0))
+            if engine_n > 0:
+                entry["engine_components"] = {
+                    "samples": engine_n,
+                    "avg_smc": round(totals["engine_smc"] / engine_n, 2),
+                    "avg_regime": round(totals["engine_regime"] / engine_n, 2),
+                    "avg_volume": round(totals["engine_volume"] / engine_n, 2),
+                    "avg_indicators": round(totals["engine_indicators"] / engine_n, 2),
+                    "avg_patterns": round(totals["engine_patterns"] / engine_n, 2),
+                    "avg_mtf": round(totals["engine_mtf"] / engine_n, 2),
+                }
+            by_setup[setup][decision] = entry
     return by_setup
 
 
@@ -1123,6 +1165,60 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         lines.append(
             "- _no confidence_gate component samples parsed in window — "
             "scoring telemetry may need a refresh after the next deploy_"
+        )
+
+    # ── Scoring engine breakdown (smc/regime/volume/indicators/patterns/mtf)
+    # The legacy components above (market/execution/risk/thesis_adj) are from
+    # the pre-engine scorer and don't sum to ``final``.  This table shows the
+    # actual SignalScoringEngine dimensions whose sum *does* equal ``final``
+    # (modulo penalties + adjustments + the 100-cap), which is the only way
+    # to answer "where are the points coming from?" for a path like VSB.
+    has_engine = any(
+        decision_data.get("engine_components")
+        for decisions in components.values()
+        for decision_data in decisions.values()
+    )
+    lines.extend(["", "## Scoring engine breakdown (per-dimension contribution)"])
+    if has_engine:
+        lines.append(
+            "_These are the actual ``SignalScoringEngine`` dimensions whose sum "
+            "reconstructs ``final`` (before the 100-cap).  Surfacing this answers "
+            "the question the legacy ``components(market/execution/risk/thesis_adj)`` "
+            "table couldn't: which scoring dimension is dragging a path under threshold._"
+        )
+        lines.append(
+            "| Setup | Decision | Samples | Avg final | SMC | Regime | Volume | "
+            "Indicators | Patterns | MTF | Thesis adj |"
+        )
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for setup in sorted(components.keys()):
+            for decision in sorted(components[setup].keys()):
+                m = components[setup][decision]
+                eng = m.get("engine_components")
+                if not eng:
+                    continue
+                comps = m.get("components", {})
+                lines.append(
+                    "| {setup} | {decision} | {samples} | {final:.2f} | "
+                    "{smc:.2f} | {rg:.2f} | {vol:.2f} | {ind:.2f} | {pat:.2f} | "
+                    "{mtf:.2f} | {th:.2f} |".format(
+                        setup=setup,
+                        decision=decision,
+                        samples=eng.get("samples", 0),
+                        final=m.get("avg_final", 0.0),
+                        smc=eng.get("avg_smc", 0.0),
+                        rg=eng.get("avg_regime", 0.0),
+                        vol=eng.get("avg_volume", 0.0),
+                        ind=eng.get("avg_indicators", 0.0),
+                        pat=eng.get("avg_patterns", 0.0),
+                        mtf=eng.get("avg_mtf", 0.0),
+                        th=comps.get("avg_thesis_adj", 0.0),
+                    )
+                )
+    else:
+        lines.append(
+            "- _no engine-component data parsed in window — log line predates "
+            "the engine-breakdown instrumentation, will populate after redeploy_"
         )
 
     # ── Invalidation Quality Audit ────────────────────────────────────
