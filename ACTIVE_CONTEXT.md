@@ -761,6 +761,16 @@ statistical confidence.
 3. **HYPEUSDT QCB 89.2 → 67.6 via -21.6 gate penalty** — open mystery from
    prior session. Source unknown.
 
+### Free-channel content rollout
+- **Phase 5 — Signal-close storytelling** ✅ shipped
+  - `TradeMonitor._post_signal_closed` mirrors paid-tier closes (TP3 / SL) to the
+    free channel with a `📣 Paid Signal Result` header.
+  - WATCHLIST tier skipped (defensive guard); free-send failure does not break
+    active-send (best-effort).
+  - B3 honoured: SL hits get the same free-channel visibility as TPs.
+  - Skips when free == active (misconfig) or `TELEGRAM_FREE_CHANNEL_ID` empty.
+  - 7 tests in `tests/test_signal_close_storytelling.py`.
+
 ---
 
 ## All Confirmed Bug Fixes (Deployed or in open PR)

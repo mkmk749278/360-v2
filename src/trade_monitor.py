@@ -1108,16 +1108,24 @@ class TradeMonitor:
         tp_label: str = "TP",
         close_price: Optional[float] = None,
     ) -> None:
-        """Generate and send an AI-written signal-closed post to the active channel.
+        """Generate and send an AI-written signal-closed post.
 
-        This is a best-effort fire-and-forget — failures are logged but never
-        raise so that the main monitor loop is never disrupted.
+        Posts to the active (paid) channel and — for paid-tier closes — also
+        mirrors to the free channel as social-proof storytelling (Phase 5).
+        WATCHLIST-tier signals never reach here (they are preview-only), but
+        we filter defensively. SL hits get equal visibility per B3.
+
+        Best-effort fire-and-forget — failures are logged but never raise.
         """
         if self.engine_context_fn is None:
             return
         try:
             from src import content_engine  # local import to avoid circular at module level
-            from config import TELEGRAM_ACTIVE_CHANNEL_ID, CONTENT_ENGINE_ENABLED
+            from config import (
+                TELEGRAM_ACTIVE_CHANNEL_ID,
+                TELEGRAM_FREE_CHANNEL_ID,
+                CONTENT_ENGINE_ENABLED,
+            )
             if not CONTENT_ENGINE_ENABLED or not TELEGRAM_ACTIVE_CHANNEL_ID:
                 return
 
@@ -1151,7 +1159,27 @@ class TradeMonitor:
                 is_tp=is_tp,
                 engine_context=engine_ctx,
             )
-            if text:
-                await self._send(TELEGRAM_ACTIVE_CHANNEL_ID, text)
+            if not text:
+                return
+            await self._send(TELEGRAM_ACTIVE_CHANNEL_ID, text)
+
+            # Phase 5 — mirror paid-tier closes to free channel for social proof.
+            # WATCHLIST previews are not tracked positions, but guard explicitly.
+            tier = getattr(sig, "signal_tier", "")
+            if (
+                TELEGRAM_FREE_CHANNEL_ID
+                and tier != "WATCHLIST"
+                and TELEGRAM_FREE_CHANNEL_ID != TELEGRAM_ACTIVE_CHANNEL_ID
+            ):
+                header = (
+                    "📣 *Paid Signal Result*\n"
+                    "_Live trade just closed on the paid channel:_\n\n"
+                )
+                try:
+                    await self._send(TELEGRAM_FREE_CHANNEL_ID, header + text)
+                except Exception as exc:
+                    log.warning(
+                        "Free-channel close mirror failed for %s: %s", sig.symbol, exc
+                    )
         except Exception as exc:
             log.warning("Signal-closed post failed for %s: %s", sig.symbol, exc)
