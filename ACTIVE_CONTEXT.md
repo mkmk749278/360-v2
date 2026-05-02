@@ -37,6 +37,16 @@
 ### Pending owner decision
 - **OPENING_RANGE_BREAKOUT** — currently `feature_disabled`. Rebuild with proper session-anchored range logic, or delete the path entirely. Not a CTE call.
 
+### Pre-TP grab — Phase A ✅ shipped (gated OFF; awaiting first runtime validation)
+- `TradeMonitor._check_pre_tp_grab` fires when a signal moves favourably ≥0.35% raw within 30 min, in a non-trending regime, on a non-breakout setup
+- Symbolic + breakeven SL — no broker partial; subscriber sees the message and chooses
+- Posts to active + free channels with raw and net-of-fees math at 10x (`+0.35% raw → +2.80% net @ 10x after 0.7% fees`)
+- Free-channel post emits `free_channel_post source=pre_tp` marker for truth-report attribution
+- Feature flag: `PRE_TP_ENABLED` (default false). All thresholds env-overridable per B8.
+- Setup blacklist: VSB / BDS / ORB (built for bigger moves — pre-TP would cap thesis)
+- Regime allowlist: QUIET / RANGING / VOLATILE
+- 21 tests in `tests/test_pre_tp_grab.py`. **Plan: turn on after one truth report verifies fire rate and timing match expectations.**
+
 ### Free-channel content rollout (in progress)
 
 Goal: enrich the free channel as a paid-conversion funnel — market updates, major news, eventually charts and explanations.

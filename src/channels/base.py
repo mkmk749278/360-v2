@@ -158,6 +158,16 @@ class Signal:
     # PnL % frozen at the moment the highest TP was hit (used for signal quality stats)
     best_tp_pnl_pct: float = 0.0
 
+    # ---- Pre-TP grab (Phase A) ----
+    # Set to True once a small early-profit threshold (PRE_TP_THRESHOLD_PCT)
+    # has been reached.  Symbolic — we move SL to breakeven and announce on
+    # both channels but do not trigger a partial close on the broker side.
+    pre_tp_hit: bool = False
+    # Raw favourable price move % at the time pre-TP fired.
+    pre_tp_pct: float = 0.0
+    # Wall-clock timestamp at which pre-TP fired (used for telemetry).
+    pre_tp_timestamp: Optional[datetime] = None
+
     # ---- Soft-penalty gate tracking ----
     soft_penalty_total: float = 0.0           # Accumulated soft-gate confidence deduction
     regime_penalty_multiplier: float = 1.0    # Regime multiplier applied to base penalties

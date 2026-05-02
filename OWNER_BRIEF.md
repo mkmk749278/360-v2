@@ -28,7 +28,7 @@ CTE is **not** a code assistant. CTE holds accountability for system quality, pr
 ## 1.3 What Requires Owner Discussion First
 
 - New evaluator paths or scoring models
-- Changes to Business Rules (B1–B10)
+- Changes to Business Rules (B1–B11)
 - Major architecture changes spanning multiple subsystems
 - Deprecating or removing existing functionality
 - Any change to paid-channel routing
@@ -161,6 +161,7 @@ TradeMonitor — polls every 5s using 1m candle OHLC
 | B8 | All config values must be env-var overridable |
 | B9 | Expired signals must post Telegram notification — no silent disappearances |
 | B10 | Discuss and agree before building major architecture changes |
+| B11 | Net-of-fees economics. Subscriber default leverage is 10x; round-trip fee is ~0.07% on price (= 0.7% on margin). Any tunable involving price-move thresholds (pre-TP, invalidation classifier, scoring bands) must be fee-aware. A signal closing at "neutral" raw price = a 0.7% net loss to the subscriber. |
 
 ---
 

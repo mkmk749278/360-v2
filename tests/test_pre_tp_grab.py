@@ -1,0 +1,369 @@
+"""Tests for ``TradeMonitor._check_pre_tp_grab`` — Phase A pre-TP grab.
+
+Verifies:
+* Fires when threshold met in non-trending regime, allowed setup, age window
+* Skipped when feature flag is OFF
+* Skipped on breakout setups (VSB / BDS / ORB)
+* Skipped in TRENDING regimes
+* Skipped if signal too young or too old
+* Skipped if signal already hit pre-TP (idempotent)
+* Skipped if signal already in TP1_HIT / TP2_HIT / TP3_HIT state
+* Moves SL to breakeven (entry) — only ratchets, never widens
+* Posts to free channel for paid-tier signals; suppresses for WATCHLIST
+* Original TP ladder unchanged
+* Threshold math is fee-aware: +0.35% raw → +2.8% net @ 10x with 0.07% fees
+"""
+from __future__ import annotations
+
+from datetime import timedelta
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.channels.base import Signal
+from src.smc import Direction
+from src.trade_monitor import TradeMonitor
+from src.utils import utcnow
+
+
+def _make_signal(
+    *,
+    channel: str = "360_SCALP",
+    symbol: str = "BTCUSDT",
+    direction: Direction = Direction.LONG,
+    entry: float = 30000.0,
+    stop_loss: float = 29850.0,  # -0.5%
+    tp1: float = 30450.0,  # +1.5%
+    setup_class: str = "SR_FLIP_RETEST",
+    signal_tier: str = "B",
+    age_seconds: float = 60.0,
+    pre_tp_hit: bool = False,
+) -> Signal:
+    sig = Signal(
+        channel=channel,
+        symbol=symbol,
+        direction=direction,
+        entry=entry,
+        stop_loss=stop_loss,
+        tp1=tp1,
+        tp2=entry * 1.025,
+        confidence=85.0,
+        signal_id=f"PRETP-{symbol}-001",
+    )
+    sig.tp3 = entry * 1.04
+    sig.original_entry = entry
+    sig.current_price = entry
+    sig.setup_class = setup_class
+    sig.signal_tier = signal_tier
+    sig.pre_tp_hit = pre_tp_hit
+    sig.timestamp = utcnow() - timedelta(seconds=age_seconds)
+    sig.status = "ACTIVE"
+    return sig
+
+
+def _build_monitor(send_telegram, regime_label: str = "QUIET"):
+    """Build monitor with a stub regime detector returning ``regime_label``."""
+    regime_detector = MagicMock()
+    regime_detector.classify.return_value = MagicMock(
+        regime=MagicMock(value=regime_label)
+    )
+    monitor = TradeMonitor(
+        data_store=MagicMock(),
+        send_telegram=send_telegram,
+        get_active_signals=lambda: {},
+        remove_signal=lambda sid: None,
+        update_signal=MagicMock(),
+        regime_detector=regime_detector,
+        indicators_fn=lambda sym: {"adx": 18.0, "ema_slope": 0.0},
+    )
+    return monitor
+
+
+@pytest.fixture
+def mock_send():
+    sent: list[tuple[str, str]] = []
+
+    async def _send(chat_id, text):
+        sent.append((chat_id, text))
+        return True
+
+    return AsyncMock(side_effect=_send), sent
+
+
+# ---------------------------------------------------------------------------
+# Happy path
+# ---------------------------------------------------------------------------
+
+
+async def test_fires_when_long_candle_high_reaches_threshold(mock_send):
+    send, _ = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(direction=Direction.LONG, entry=30000.0)
+    target_high = 30000.0 * 1.0035  # +0.35%
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    assert fired is True
+    assert sig.pre_tp_hit is True
+    assert sig.pre_tp_pct == pytest.approx(0.35)
+    assert sig.pre_tp_timestamp is not None
+    # SL moved to breakeven (entry)
+    assert sig.stop_loss == pytest.approx(30000.0)
+    # Original TP ladder untouched
+    assert sig.tp1 == pytest.approx(30450.0)
+    assert sig.tp2 == pytest.approx(30750.0)
+
+
+async def test_fires_when_short_candle_low_reaches_threshold(mock_send):
+    send, _ = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(
+        direction=Direction.SHORT,
+        entry=30000.0,
+        stop_loss=30150.0,  # SHORT SL above entry
+        tp1=29550.0,  # -1.5%
+    )
+    target_low = 30000.0 * (1 - 0.0035)  # -0.35%
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30005.0, c_low=target_low)
+
+    assert fired is True
+    assert sig.pre_tp_hit is True
+    # SL ratchets DOWN to entry for SHORT
+    assert sig.stop_loss == pytest.approx(30000.0)
+
+
+async def test_posts_to_both_active_and_free_channel(mock_send):
+    send, sent = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(signal_tier="B")
+    target_high = 30000.0 * 1.0035
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
+        await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    chat_ids = [c for c, _ in sent]
+    assert "FREE-CHAN" in chat_ids
+    free_msg = next(t for c, t in sent if c == "FREE-CHAN")
+    assert "Quick Win" in free_msg
+    assert "BTCUSDT" in free_msg
+    # Math sanity: +0.35% raw at 10x = +3.5% gross; minus 0.7% fees = +2.8% net
+    assert "+2.80%" in free_msg or "2.80%" in free_msg
+
+
+# ---------------------------------------------------------------------------
+# Feature flag + status gates
+# ---------------------------------------------------------------------------
+
+
+async def test_does_not_fire_when_feature_disabled(mock_send):
+    send, _ = mock_send
+    monitor = _build_monitor(send)
+    sig = _make_signal()
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", False):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
+
+    assert fired is False
+    assert sig.pre_tp_hit is False
+
+
+async def test_does_not_fire_twice(mock_send):
+    """Idempotent — once pre-TP has fired, subsequent cycles are silent."""
+    send, _ = mock_send
+    monitor = _build_monitor(send)
+    sig = _make_signal(pre_tp_hit=True)
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.01, c_low=29990.0)
+
+    assert fired is False
+
+
+async def test_does_not_fire_after_tp1_hit(mock_send):
+    """Once the original TP ladder starts firing, pre-TP is moot."""
+    send, _ = mock_send
+    monitor = _build_monitor(send)
+    sig = _make_signal()
+    sig.status = "TP1_HIT"
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.01, c_low=29990.0)
+
+    assert fired is False
+
+
+# ---------------------------------------------------------------------------
+# Setup + regime gates
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "blacklisted_setup",
+    ["VOLUME_SURGE_BREAKOUT", "BREAKDOWN_SHORT", "OPENING_RANGE_BREAKOUT"],
+)
+async def test_skipped_for_breakout_family(mock_send, blacklisted_setup):
+    send, _ = mock_send
+    monitor = _build_monitor(send)
+    sig = _make_signal(setup_class=blacklisted_setup)
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
+
+    assert fired is False
+
+
+@pytest.mark.parametrize(
+    "trending_regime",
+    ["TRENDING_UP", "TRENDING_DOWN", "STRONG_TREND", "BREAKOUT_EXPANSION"],
+)
+async def test_skipped_in_trending_regime(mock_send, trending_regime):
+    send, _ = mock_send
+    monitor = _build_monitor(send, regime_label=trending_regime)
+    sig = _make_signal()
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
+
+    assert fired is False
+
+
+async def test_fires_in_volatile_regime(mock_send):
+    """VOLATILE is in the allowlist — pre-TP should fire."""
+    send, _ = mock_send
+    monitor = _build_monitor(send, regime_label="VOLATILE")
+    sig = _make_signal()
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
+
+    assert fired is True
+
+
+async def test_fires_when_regime_classification_unavailable(mock_send):
+    """Fail-open: if we can't classify, allow pre-TP per soft-penalty doctrine."""
+    send, _ = mock_send
+    regime_detector = MagicMock()
+    regime_detector.classify.side_effect = RuntimeError("classifier broken")
+    monitor = TradeMonitor(
+        data_store=MagicMock(),
+        send_telegram=send,
+        get_active_signals=lambda: {},
+        remove_signal=lambda sid: None,
+        update_signal=MagicMock(),
+        regime_detector=regime_detector,
+        indicators_fn=lambda sym: {"adx": 18.0},
+    )
+    sig = _make_signal()
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
+
+    assert fired is True
+
+
+# ---------------------------------------------------------------------------
+# Threshold gate
+# ---------------------------------------------------------------------------
+
+
+async def test_skipped_when_threshold_not_met(mock_send):
+    send, _ = mock_send
+    monitor = _build_monitor(send)
+    sig = _make_signal(direction=Direction.LONG, entry=30000.0)
+    # Only +0.20% — below 0.35 threshold
+    insufficient_high = 30000.0 * 1.002
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=insufficient_high, c_low=29990.0)
+
+    assert fired is False
+    assert sig.pre_tp_hit is False
+
+
+# ---------------------------------------------------------------------------
+# Age gate
+# ---------------------------------------------------------------------------
+
+
+async def test_skipped_when_too_young(mock_send):
+    send, _ = mock_send
+    monitor = _build_monitor(send)
+    sig = _make_signal(age_seconds=5)  # below 30s min
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.01, c_low=29990.0)
+
+    assert fired is False
+
+
+async def test_skipped_when_too_old(mock_send):
+    send, _ = mock_send
+    monitor = _build_monitor(send)
+    sig = _make_signal(age_seconds=2400)  # above 1800s max
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.01, c_low=29990.0)
+
+    assert fired is False
+
+
+# ---------------------------------------------------------------------------
+# SL ratcheting + tier filter
+# ---------------------------------------------------------------------------
+
+
+async def test_sl_ratchets_only_never_widens_long(mock_send):
+    """If SL is already above entry (e.g. trailing), pre-TP must not loosen it."""
+    send, _ = mock_send
+    monitor = _build_monitor(send)
+    sig = _make_signal(direction=Direction.LONG, entry=30000.0, stop_loss=30100.0)
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=30050.0)
+
+    # SL should remain at 30100, NOT drop to 30000
+    assert sig.stop_loss == pytest.approx(30100.0)
+
+
+async def test_watchlist_tier_skips_free_post(mock_send):
+    """WATCHLIST signals never reach trade_monitor in production but the
+    defensive guard must still suppress free-channel post."""
+    send, sent = mock_send
+    monitor = _build_monitor(send)
+    sig = _make_signal(signal_tier="WATCHLIST")
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
+
+    assert fired is True  # mechanism still runs (SL → BE)
+    chat_ids = [c for c, _ in sent]
+    assert "FREE-CHAN" not in chat_ids
+
+
+async def test_free_post_failure_does_not_break_state_change(mock_send):
+    """A free-channel send error must not roll back pre_tp_hit / SL move."""
+    sent: list[tuple[str, str]] = []
+
+    async def _send(chat_id, text):
+        if chat_id == "FREE-CHAN":
+            raise RuntimeError("free channel down")
+        sent.append((chat_id, text))
+        return True
+
+    monitor = _build_monitor(AsyncMock(side_effect=_send))
+    sig = _make_signal()
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
+
+    assert fired is True
+    assert sig.pre_tp_hit is True
+    assert sig.stop_loss == pytest.approx(30000.0)
