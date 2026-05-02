@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from src.runtime_truth_report import (
     build_lifecycle_summary,
     build_snapshot,
@@ -501,8 +503,165 @@ def test_count_log_markers_handles_empty() -> None:
         "quiet_scalp_block": 0,
         "confidence_gate": 0,
         "free_channel_post": 0,
+        "pre_tp_fire": 0,
         "total_lines": 0,
     }
+
+
+# ---------------------------------------------------------------------------
+# Pre-TP fire parsing + rendering (Phase A monitor instrumentation)
+# ---------------------------------------------------------------------------
+
+
+_SAMPLE_PRE_TP_LINE_ATR = (
+    "2026-05-02 14:00:00 | trade_monitor | INFO | "
+    "pre_tp_fire BTCUSDT LONG [SR_FLIP_RETEST] threshold=0.250 source=atr "
+    "atr_last=150.000000 leverage=10.0x net=1.80 age=120s"
+)
+_SAMPLE_PRE_TP_LINE_FLOORED = (
+    "2026-05-02 14:01:00 | trade_monitor | INFO | "
+    "pre_tp_fire BNBUSDT LONG [QUIET_COMPRESSION_BREAK] threshold=0.200 "
+    "source=atr_floored atr_last=2.100000 leverage=10.0x net=1.30 age=240s"
+)
+_SAMPLE_PRE_TP_LINE_STATIC = (
+    "2026-05-02 14:02:00 | trade_monitor | INFO | "
+    "pre_tp_fire ETHUSDT SHORT [LIQUIDITY_SWEEP_REVERSAL] threshold=0.350 "
+    "source=static atr_last=- leverage=10.0x net=2.80 age=480s"
+)
+
+
+def test_parse_pre_tp_fires_aggregates_by_setup_and_source() -> None:
+    from src.runtime_truth_report import parse_pre_tp_fires_from_logs
+    log_text = "\n".join([
+        _SAMPLE_PRE_TP_LINE_ATR,
+        _SAMPLE_PRE_TP_LINE_FLOORED,
+        _SAMPLE_PRE_TP_LINE_STATIC,
+        "unrelated noise line",
+    ])
+    result = parse_pre_tp_fires_from_logs(log_text)
+    assert result["total"] == 3
+    # By source distribution
+    assert result["by_source"] == {"atr": 1, "atr_floored": 1, "static": 1}
+    # By symbol
+    assert result["by_symbol"]["BTCUSDT"] == 1
+    assert result["by_symbol"]["BNBUSDT"] == 1
+    assert result["by_symbol"]["ETHUSDT"] == 1
+    # Per-setup breakdown
+    assert result["by_setup"]["SR_FLIP_RETEST"]["fires"] == 1
+    assert result["by_setup"]["SR_FLIP_RETEST"]["avg_threshold"] == 0.250
+    assert result["by_setup"]["SR_FLIP_RETEST"]["avg_net"] == 1.80
+    assert result["by_setup"]["QUIET_COMPRESSION_BREAK"]["avg_threshold"] == 0.200
+    assert result["by_setup"]["LIQUIDITY_SWEEP_REVERSAL"]["avg_threshold"] == 0.350
+    # Overall averages
+    assert result["avg_threshold"] == pytest.approx((0.250 + 0.200 + 0.350) / 3, abs=0.001)
+    assert result["avg_net"] == pytest.approx((1.80 + 1.30 + 2.80) / 3, abs=0.01)
+
+
+def test_parse_pre_tp_fires_handles_empty() -> None:
+    from src.runtime_truth_report import parse_pre_tp_fires_from_logs
+    result = parse_pre_tp_fires_from_logs("")
+    assert result["total"] == 0
+    assert result["by_setup"] == {}
+    assert result["by_source"] == {}
+
+
+def test_parse_pre_tp_fires_handles_atr_dash() -> None:
+    """A static-source fire records ``atr_last=-`` and must parse cleanly."""
+    from src.runtime_truth_report import parse_pre_tp_fires_from_logs
+    result = parse_pre_tp_fires_from_logs(_SAMPLE_PRE_TP_LINE_STATIC)
+    assert result["total"] == 1
+    assert result["by_source"]["static"] == 1
+
+
+def test_count_log_markers_includes_pre_tp_fire() -> None:
+    log_text = "\n".join([
+        _SAMPLE_PRE_TP_LINE_ATR,
+        _SAMPLE_PRE_TP_LINE_FLOORED,
+        "unrelated",
+    ])
+    counts = count_log_markers(log_text)
+    assert counts["pre_tp_fire"] == 2
+
+
+def test_format_truth_report_renders_pre_tp_section_with_data() -> None:
+    from src.runtime_truth_report import format_truth_report_markdown
+    snapshot = {
+        "executive_summary": {},
+        "runtime_health": {"running": True, "status": "running", "health": "healthy"},
+        "path_funnel_truth": {},
+        "dependency_readiness": {},
+        "lifecycle_truth": {},
+        "quality_by_setup": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate_decisions": {},
+        "confidence_gate_components": {},
+        "invalidation_audit": {},
+        "log_parse_diagnostics": {},
+        "free_channel_posts": {},
+        "pre_tp_fires": {
+            "total": 5,
+            "avg_threshold": 0.27,
+            "avg_net": 1.95,
+            "avg_age_sec": 230.0,
+            "by_source": {"atr": 3, "atr_floored": 1, "static": 1},
+            "by_symbol": {"BTCUSDT": 2, "ETHUSDT": 2, "BNBUSDT": 1},
+            "by_setup": {
+                "SR_FLIP_RETEST": {
+                    "fires": 3,
+                    "avg_threshold": 0.250,
+                    "avg_net": 1.80,
+                    "avg_age_sec": 200.0,
+                    "by_source": {"atr": 3},
+                },
+                "QUIET_COMPRESSION_BREAK": {
+                    "fires": 2,
+                    "avg_threshold": 0.300,
+                    "avg_net": 2.20,
+                    "avg_age_sec": 275.0,
+                    "by_source": {"atr_floored": 1, "static": 1},
+                },
+            },
+        },
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Pre-TP grab fire stats" in md
+    assert "Total fires in window: **5**" in md
+    assert "atr=3" in md
+    assert "atr_floored=1" in md
+    assert "static=1" in md
+    assert "| SR_FLIP_RETEST | 3 |" in md
+    assert "| QUIET_COMPRESSION_BREAK | 2 |" in md
+    # Symbol breakdown
+    assert "BTCUSDT=2" in md
+    assert "ETHUSDT=2" in md
+
+
+def test_format_truth_report_renders_pre_tp_placeholder_when_zero() -> None:
+    from src.runtime_truth_report import format_truth_report_markdown
+    snapshot = {
+        "executive_summary": {},
+        "runtime_health": {"running": True, "status": "running", "health": "healthy"},
+        "path_funnel_truth": {},
+        "dependency_readiness": {},
+        "lifecycle_truth": {},
+        "quality_by_setup": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate_decisions": {},
+        "confidence_gate_components": {},
+        "invalidation_audit": {},
+        "log_parse_diagnostics": {},
+        "free_channel_posts": {},
+        "pre_tp_fires": {},
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Pre-TP grab fire stats" in md
+    assert "no pre-TP fires in this window" in md
 
 
 def test_build_snapshot_surfaces_tier1_keys() -> None:

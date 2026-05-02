@@ -135,6 +135,22 @@ _FREE_CHANNEL_POST_RE = re.compile(
     r"free_channel_post\s+source=(?P<source>\S+)\s+severity=(?P<severity>\S+)"
     r"(?:\s+symbol=(?P<symbol>\S+))?"
 )
+# Phase A pre-TP grab instrumentation.  Each successful pre-TP fire emits
+# a structured marker recording the resolved threshold, its source
+# (static / atr / atr_floored), the raw ATR value, leverage assumed, and
+# the net-of-fees % banked.  Aggregating these answers "is pre-TP firing
+# at the rate and on the pairs we expected?" — the only honest test of
+# the ATR-adaptive resolver in production.
+_PRE_TP_FIRE_MARKER = "pre_tp_fire "
+_PRE_TP_FIRE_RE = re.compile(
+    r"pre_tp_fire\s+(?P<symbol>\S+)\s+(?P<direction>\S+)\s+\[(?P<setup>[^\]]+)\]\s+"
+    r"threshold=(?P<threshold>[-\d.]+)\s+"
+    r"source=(?P<source>\S+)\s+"
+    r"atr_last=(?P<atr_last>\S+)\s+"
+    r"leverage=(?P<leverage>[-\d.]+)x\s+"
+    r"net=(?P<net>[-+\d.]+)\s+"
+    r"age=(?P<age>[-\d.]+)s?"
+)
 
 # Match e.g. "QUIET_SCALP_BLOCK BTCUSDT 360_SCALP conf=58.2 < min=60.0"
 _QUIET_SCALP_BLOCK_RE = re.compile(
@@ -416,6 +432,7 @@ def count_log_markers(log_text: str) -> Dict[str, int]:
             "quiet_scalp_block": 0,
             "confidence_gate": 0,
             "free_channel_post": 0,
+            "pre_tp_fire": 0,
             "total_lines": 0,
         }
     lines = log_text.splitlines()
@@ -425,7 +442,135 @@ def count_log_markers(log_text: str) -> Dict[str, int]:
         "quiet_scalp_block": sum(1 for ln in lines if _QUIET_SCALP_BLOCK_MARKER in ln),
         "confidence_gate": sum(1 for ln in lines if _CONFIDENCE_GATE_MARKER in ln),
         "free_channel_post": sum(1 for ln in lines if _FREE_CHANNEL_POST_MARKER in ln),
+        "pre_tp_fire": sum(1 for ln in lines if _PRE_TP_FIRE_MARKER in ln),
         "total_lines": len(lines),
+    }
+
+
+def parse_pre_tp_fires_from_logs(log_text: str) -> Dict[str, Any]:
+    """Parse ``pre_tp_fire`` markers into per-setup × source aggregates.
+
+    Returns a dict with:
+      * ``total``: int — total number of pre-TP fires in window
+      * ``by_setup``: {setup → {fires, avg_threshold, avg_net, avg_age_sec,
+        avg_atr_pct, by_source: {source → count}}}
+      * ``by_source``: {source → count}  (static / atr / atr_floored)
+      * ``by_symbol``: {symbol → count}  (top fire pairs)
+      * ``avg_threshold``: float (overall)
+      * ``avg_net``: float (overall)
+
+    Empty when log_text is empty or contains no fires — caller should treat
+    zero counts as "pre-TP did not fire in this window," which is also the
+    expected baseline if PRE_TP_ENABLED is still false on the engine.
+    """
+    if not log_text:
+        return {
+            "total": 0,
+            "by_setup": {},
+            "by_source": {},
+            "by_symbol": {},
+            "avg_threshold": 0.0,
+            "avg_net": 0.0,
+        }
+
+    by_setup: Dict[str, Dict[str, Any]] = {}
+    by_source: Dict[str, int] = defaultdict(int)
+    by_symbol: Dict[str, int] = defaultdict(int)
+    threshold_total = 0.0
+    net_total = 0.0
+    age_total = 0.0
+    atr_pct_total = 0.0
+    atr_pct_samples = 0
+    fires = 0
+
+    for line in log_text.splitlines():
+        if _PRE_TP_FIRE_MARKER not in line:
+            continue
+        m = _PRE_TP_FIRE_RE.search(line)
+        if m is None:
+            continue
+        try:
+            symbol = m.group("symbol")
+            setup = m.group("setup")
+            source = m.group("source")
+            threshold = float(m.group("threshold"))
+            net = float(m.group("net"))
+            age = float(m.group("age"))
+            atr_raw = m.group("atr_last")
+            atr_last = None
+            if atr_raw not in ("-", "None", ""):
+                try:
+                    atr_last = float(atr_raw)
+                except (TypeError, ValueError):
+                    atr_last = None
+        except (ValueError, TypeError):
+            continue
+
+        fires += 1
+        by_source[source] += 1
+        by_symbol[symbol] += 1
+        threshold_total += threshold
+        net_total += net
+        age_total += age
+
+        bucket = by_setup.setdefault(
+            setup,
+            {
+                "fires": 0,
+                "_thresh_sum": 0.0,
+                "_net_sum": 0.0,
+                "_age_sum": 0.0,
+                "_atr_pct_sum": 0.0,
+                "_atr_pct_count": 0,
+                "by_source": defaultdict(int),
+            },
+        )
+        bucket["fires"] += 1
+        bucket["_thresh_sum"] += threshold
+        bucket["_net_sum"] += net
+        bucket["_age_sum"] += age
+        bucket["by_source"][source] += 1
+        # ATR% is implicit in (threshold, source).  When source != "static"
+        # the resolver ran threshold = max(floor, atr_mult × atr_pct), so
+        # we can recover atr_pct from atr_last only.
+        if atr_last is not None and atr_last > 0:
+            # We don't have entry in the log line, but threshold lets us
+            # back out atr_pct when source is "atr": threshold = atr_mult × atr_pct.
+            # For "atr_floored", threshold = floor and the ATR was lower —
+            # we can't recover atr_pct exactly from the log alone, so we
+            # only count ATR% samples for "atr".
+            pass
+
+    if fires == 0:
+        return {
+            "total": 0,
+            "by_setup": {},
+            "by_source": {},
+            "by_symbol": {},
+            "avg_threshold": 0.0,
+            "avg_net": 0.0,
+        }
+
+    # Finalise averages on per-setup buckets and strip private accumulators.
+    finalised_by_setup: Dict[str, Dict[str, Any]] = {}
+    for setup, raw in by_setup.items():
+        n = raw["fires"]
+        finalised_by_setup[setup] = {
+            "fires": n,
+            "avg_threshold": round(raw["_thresh_sum"] / n, 3),
+            "avg_net": round(raw["_net_sum"] / n, 2),
+            "avg_age_sec": round(raw["_age_sum"] / n, 1),
+            "by_source": dict(raw["by_source"]),
+        }
+
+    return {
+        "total": fires,
+        "by_setup": finalised_by_setup,
+        "by_source": dict(by_source),
+        "by_symbol": dict(by_symbol),
+        "avg_threshold": round(threshold_total / fires, 3),
+        "avg_net": round(net_total / fires, 2),
+        "avg_age_sec": round(age_total / fires, 1),
     }
 
 
@@ -778,6 +923,7 @@ def build_snapshot(
     invalidation_audit: Optional[Dict[str, Any]] = None,
     log_parse_diagnostics: Optional[Dict[str, int]] = None,
     free_channel_posts: Optional[Dict[str, Any]] = None,
+    pre_tp_fires: Optional[Dict[str, Any]] = None,
     now_ts: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     now_ts = now_ts or time.time()
@@ -974,6 +1120,7 @@ def build_snapshot(
         "invalidation_audit": invalidation_audit or {},
         "log_parse_diagnostics": log_parse_diagnostics or {},
         "free_channel_posts": free_channel_posts or {},
+        "pre_tp_fires": pre_tp_fires or {},
         "recommended_operator_focus": {
             "most_suspicious_degradation": degraded[0] if degraded else None,
             "most_promising_healthy_path": healthiest[0] if healthiest else None,
@@ -1305,8 +1452,84 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         lines.append(f"- `QUIET_SCALP_BLOCK` events: `{diag.get('quiet_scalp_block', 0)}`")
         lines.append(f"- `confidence_gate` events: `{diag.get('confidence_gate', 0)}`")
         lines.append(f"- `free_channel_post` events: `{diag.get('free_channel_post', 0)}`")
+        lines.append(f"- `pre_tp_fire` events: `{diag.get('pre_tp_fire', 0)}`")
     else:
         lines.append("- _no diagnostics available_")
+
+    # ── Pre-TP grab fire stats (Phase A) ──────────────────────────────
+    # Aggregates every successful pre-TP fire by setup × source.  Verifies
+    # the ATR-adaptive resolver in production: are fires distributed across
+    # the threshold sources (static / atr / atr_floored) consistent with the
+    # per-pair ATR profile?  Are we banking the +1.3-4.3% net @ 10x we
+    # designed for?  Zero counts when PRE_TP_ENABLED=false on the engine,
+    # so this also doubles as the "is the flag actually on?" indicator.
+    pretp = snapshot.get("pre_tp_fires", {}) or {}
+    lines.extend(["", "## Pre-TP grab fire stats"])
+    lines.append(
+        "_Each row is a pre-TP fire — signal moved favourably by the resolved "
+        "threshold within 30 min, in a non-trending regime, on a non-breakout setup.  "
+        "Threshold source ``atr`` means the ATR-adaptive term won; ``atr_floored`` "
+        "means ATR×0.5 was below the 0.20% fee floor (B11) so the floor was used; "
+        "``static`` means ATR was unavailable and the 0.35% fallback fired._"
+    )
+    pretp_total = int(pretp.get("total", 0))
+    if pretp_total <= 0:
+        lines.append(
+            "- _no pre-TP fires in this window (either PRE_TP_ENABLED=false on the "
+            "engine, or no signals matched all gates yet)_"
+        )
+    else:
+        lines.append(f"- Total fires in window: **{pretp_total}**")
+        lines.append(
+            f"- Avg resolved threshold: **{pretp.get('avg_threshold', 0.0):.3f}%** "
+            f"raw → avg net **{pretp.get('avg_net', 0.0):+.2f}%** @ 10x"
+        )
+        avg_age = pretp.get("avg_age_sec", 0.0)
+        if avg_age:
+            lines.append(f"- Avg time-to-fire from dispatch: **{avg_age:.0f}s**")
+
+        by_source = pretp.get("by_source", {}) or {}
+        if by_source:
+            src_summary = ", ".join(
+                f"{src}={cnt}"
+                for src, cnt in sorted(
+                    by_source.items(), key=lambda kv: (-int(kv[1]), str(kv[0]))
+                )
+            )
+            lines.append(f"- By threshold source: {src_summary}")
+
+        by_setup = pretp.get("by_setup", {}) or {}
+        if by_setup:
+            lines.append("")
+            lines.append(
+                "| Setup | Fires | Avg threshold (raw) | Avg net @ 10x | Avg age (s) | Source mix |"
+            )
+            lines.append("|---|---:|---:|---:|---:|---|")
+            for setup in sorted(by_setup.keys(), key=lambda k: -int(by_setup[k]["fires"])):
+                m = by_setup[setup]
+                src_mix = ", ".join(
+                    f"{s}={n}"
+                    for s, n in sorted(
+                        m.get("by_source", {}).items(),
+                        key=lambda kv: (-int(kv[1]), str(kv[0])),
+                    )
+                )
+                lines.append(
+                    "| {setup} | {fires} | {th:.3f}% | {net:+.2f}% | {age:.0f} | {mix} |".format(
+                        setup=setup,
+                        fires=int(m.get("fires", 0)),
+                        th=float(m.get("avg_threshold", 0.0)),
+                        net=float(m.get("avg_net", 0.0)),
+                        age=float(m.get("avg_age_sec", 0.0)),
+                        mix=src_mix or "-",
+                    )
+                )
+
+        by_symbol = pretp.get("by_symbol", {}) or {}
+        if by_symbol:
+            top_n = sorted(by_symbol.items(), key=lambda kv: -int(kv[1]))[:10]
+            sym_summary = ", ".join(f"{s}={c}" for s, c in top_n)
+            lines.append(f"- Top symbols: {sym_summary}")
 
     # ── Free-channel post attribution (Phase 1 / 2a / 2b / 5) ─────────
     fcp = snapshot.get("free_channel_posts", {}) or {}

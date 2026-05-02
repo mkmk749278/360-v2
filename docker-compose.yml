@@ -33,6 +33,10 @@ services:
     environment:
       - REDIS_URL=redis://redis:6379/0
       - MPLCONFIGDIR=/tmp/matplotlib
+      # Phase A pre-TP grab — enabled in production after PR #281 ship.
+      # Fires only on signals matching all gates (regime allowlist,
+      # setup blacklist, age window, threshold).  See OWNER_BRIEF B11.
+      - PRE_TP_ENABLED=true
     mem_limit: 1g
     cpus: "1.5"
     logging:
