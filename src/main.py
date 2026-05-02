@@ -58,6 +58,7 @@ from src.trade_monitor import TradeMonitor
 from src.trade_observer import TradeObserver
 from src.exchange_client import CCXTClient
 from src.order_manager import OrderManager
+from src.paper_order_manager import PaperOrderManager
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
 from src.redis_client import RedisClient
@@ -75,6 +76,7 @@ from config import (
     ONCHAIN_API_KEY,
     PERFORMANCE_TRACKER_PATH,
     AUTO_EXECUTION_ENABLED,
+    AUTO_EXECUTION_MODE,
     EXCHANGE_ID,
     EXCHANGE_API_KEY,
     EXCHANGE_API_SECRET,
@@ -118,21 +120,46 @@ class CryptoSignalEngine:
             redis_client=self._redis_client,
         )
 
-        # Order execution client and manager (feature 3 — off by default)
+        # Order execution — three modes (Phase A1):
+        #   off   → no auto-trade (signals → Telegram only)
+        #   paper → PaperOrderManager simulates fills, zero real-money risk
+        #   live  → OrderManager via CCXT places real orders
+        # AUTO_EXECUTION_ENABLED is a derived bool kept for backwards compat.
         _exchange_client: Optional[CCXTClient] = None
-        if AUTO_EXECUTION_ENABLED:
+        if AUTO_EXECUTION_MODE == "paper":
+            self._order_manager = PaperOrderManager(
+                position_size_pct=POSITION_SIZE_PCT,
+                max_position_usd=MAX_POSITION_USD,
+            )
+            log.info(
+                "Auto-execution mode: PAPER (simulated fills, zero real-money risk)"
+            )
+        elif AUTO_EXECUTION_MODE == "live":
             _exchange_client = CCXTClient(
                 exchange_id=EXCHANGE_ID,
                 api_key=EXCHANGE_API_KEY,
                 secret=EXCHANGE_API_SECRET,
                 sandbox=EXCHANGE_SANDBOX,
             )
-        self._order_manager = OrderManager(
-            auto_execution_enabled=AUTO_EXECUTION_ENABLED,
-            exchange_client=_exchange_client,
-            position_size_pct=POSITION_SIZE_PCT,
-            max_position_usd=MAX_POSITION_USD,
-        )
+            self._order_manager = OrderManager(
+                auto_execution_enabled=True,
+                exchange_client=_exchange_client,
+                position_size_pct=POSITION_SIZE_PCT,
+                max_position_usd=MAX_POSITION_USD,
+            )
+            log.info(
+                "Auto-execution mode: LIVE (real orders via %s, sandbox=%s)",
+                EXCHANGE_ID, EXCHANGE_SANDBOX,
+            )
+        else:
+            # mode == "off"
+            self._order_manager = OrderManager(
+                auto_execution_enabled=False,
+                exchange_client=None,
+                position_size_pct=POSITION_SIZE_PCT,
+                max_position_usd=MAX_POSITION_USD,
+            )
+            log.info("Auto-execution mode: OFF (signals → Telegram only)")
 
         # Circuit breaker (must be created before TradeMonitor)
         self._circuit_breaker = CircuitBreaker(

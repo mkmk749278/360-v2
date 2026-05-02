@@ -28,7 +28,7 @@ CTE is **not** a code assistant. CTE holds accountability for system quality, pr
 ## 1.3 What Requires Owner Discussion First
 
 - New evaluator paths or scoring models
-- Changes to Business Rules (B1–B11)
+- Changes to Business Rules (B1–B16)
 - Major architecture changes spanning multiple subsystems
 - Deprecating or removing existing functionality
 - Any change to paid-channel routing
@@ -162,6 +162,11 @@ TradeMonitor — polls every 5s using 1m candle OHLC
 | B9 | Expired signals must post Telegram notification — no silent disappearances |
 | B10 | Discuss and agree before building major architecture changes |
 | B11 | Net-of-fees economics. Subscriber default leverage is 10x; round-trip fee is ~0.07% on price (= 0.7% on margin). Any tunable involving price-move thresholds (pre-TP, invalidation classifier, scoring bands) must be fee-aware. A signal closing at "neutral" raw price = a 0.7% net loss to the subscriber. |
+| B12 | Auto-trade safety. No live execution without all of: daily-loss kill switch, concurrent-position cap, per-symbol exposure cap, leverage cap (≤30x), restart reconciliation, structured order audit log. Paper mode is the only acceptable runtime when any of these are not in place. |
+| B13 | Identity. Telegram user ID is the identity primitive. No email, no password, no SMS auth. Login via Telegram bot one-time code → JWT issued for the Lumin app. |
+| B14 | Build constraint. All build/deploy paths must work from Android+Termux. Mobile app builds via GitHub Actions only — no local Android Studio / Gradle requirement. |
+| B15 | Brand architecture. Lumin = consumer app brand (Play Store, app icon, marketing). 360 Crypto Eye = engine + signal-source brand (Telegram channel, technical identity, "Powered by" attribution). The Telegram channel never renames. The app's About page always credits 360 Crypto Eye. |
+| B16 | Revenue. Subscriptions are crypto-only via the Telegram bot (Lumin app qualifies for the Reader-app Play Store exception). No Google Play billing, no Stripe fiat, no bank account in v1. App is a control panel; payment is in the bot. |
 
 ---
 

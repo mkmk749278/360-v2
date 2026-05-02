@@ -1246,8 +1246,26 @@ BACKTEST_SLIPPAGE_PCT: float = _safe_float("BACKTEST_SLIPPAGE_PCT", "0.03")
 # to place orders directly on the exchange instead of (or in addition to)
 # publishing Telegram signals.  Disabled by default; flip to True once real
 # exchange API keys and order logic are wired in.
+#
+# Phase A1 (Lumin app foundation): introduce a three-state mode in addition
+# to the legacy boolean flag.
+#   - off   : no order execution, signals only Telegram (default)
+#   - paper : PaperOrderManager — simulates fills against 1m candle data,
+#             tracks paper PnL, logs structured paper_trade_fill markers.
+#             ZERO real-money risk — used for Demo mode in the app and for
+#             our own auto-trade testing before flipping to live.
+#   - live  : OrderManager via CCXT — places real orders with real funds.
+#             Requires EXCHANGE_API_KEY + EXCHANGE_API_SECRET set.
+# ``AUTO_EXECUTION_ENABLED`` is preserved as a derived flag (true when mode
+# is not "off") for backwards compatibility with existing call sites.
 # ---------------------------------------------------------------------------
-AUTO_EXECUTION_ENABLED: bool = os.getenv("AUTO_EXECUTION_ENABLED", "false").lower() == "true"
+AUTO_EXECUTION_MODE: str = _safe_choice(
+    "AUTO_EXECUTION_MODE",
+    default="off",
+    allowed=frozenset({"off", "paper", "live"}),
+)
+# Backwards-compat alias — true for paper or live, false for off.
+AUTO_EXECUTION_ENABLED: bool = AUTO_EXECUTION_MODE != "off"
 
 # ---------------------------------------------------------------------------
 # Exchange / CCXT execution config (feature 3)

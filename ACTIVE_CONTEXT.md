@@ -37,6 +37,18 @@
 ### Pending owner decision
 - **OPENING_RANGE_BREAKOUT** — currently `feature_disabled`. Rebuild with proper session-anchored range logic, or delete the path entirely. Not a CTE call.
 
+### Lumin app initiative — kicked off
+- **Brand:** consumer app = "Lumin", engine + signal source = "360 Crypto Eye". Two-tier branding (B15).
+- **Distribution:** GitHub Releases APK (v1) → Play Store (v2 after policy site live).
+- **Stack:** Flutter (Termux + GitHub Actions APK build), FastAPI backend in `360-v2`, three repos (engine + lumin-app + lumin-site).
+- **Subscription:** Crypto-only via Telegram bot (Reader-app Play Store exception). No Google Play billing, no fiat.
+- **Auth:** Telegram bot login token → JWT (no email/password/SMS).
+- **Phase A1 ✅ shipped:** `PaperOrderManager` provides simulated execution behind `AUTO_EXECUTION_MODE=paper`. Powers the app's Demo mode and our own auto-trade testing before live. 15 tests, full interface parity with `OrderManager`.
+- **Phase A2 next:** risk gates (daily-loss kill, concurrent cap, leverage cap, symbol exposure cap) before any live execution.
+- **Phase A3:** position reconciliation on engine restart.
+- **Phase A4:** live with own keys, $50 USDT cap.
+- **Then:** FastAPI backend + Flutter app skeleton + GitHub Actions APK pipeline.
+
 ### Pre-TP grab — Phase A ✅ shipped + ENABLED in production
 - `TradeMonitor._check_pre_tp_grab` fires when a signal moves favourably by an **ATR-adaptive threshold** within 30 min, in a non-trending regime, on a non-breakout setup
 - Resolved threshold = `max(PRE_TP_FEE_FLOOR_PCT, PRE_TP_ATR_MULTIPLIER × atr_pct)` where `atr_pct = atr_last / entry × 100`
