@@ -44,10 +44,13 @@
 - **Subscription:** Crypto-only via Telegram bot (Reader-app Play Store exception). No Google Play billing, no fiat.
 - **Auth:** Telegram bot login token → JWT (no email/password/SMS).
 - **Phase A1 ✅ shipped:** `PaperOrderManager` provides simulated execution behind `AUTO_EXECUTION_MODE=paper`. Powers the app's Demo mode and our own auto-trade testing before live. 15 tests, full interface parity with `OrderManager`.
-- **Phase A2 next:** risk gates (daily-loss kill, concurrent cap, leverage cap, symbol exposure cap) before any live execution.
-- **Phase A3:** position reconciliation on engine restart.
+- **Phase A2 ✅ shipped:** `src/auto_trade/risk_manager.py` enforces 6 gates (daily-loss kill, min equity floor, concurrent cap, per-symbol cap, leverage cap, setup blacklist) plus owner-driven manual pause. Wired into both OrderManager and PaperOrderManager. 23 tests. All env-overridable: `RISK_DAILY_LOSS_LIMIT_PCT`, `RISK_MAX_CONCURRENT`, `RISK_MAX_LEVERAGE`, `RISK_MIN_EQUITY_USD`, `RISK_SETUP_BLACKLIST`.
+- **Phase A3 next:** position reconciliation on engine restart.
 - **Phase A4:** live with own keys, $50 USDT cap.
-- **Then:** FastAPI backend + Flutter app skeleton + GitHub Actions APK pipeline.
+- **Lumin app ✅ first APK shipped** (v0.0.1 bootstrap): GitHub Actions builds signed-when-keystore-set release APKs on every push to `lumin-app` repo. Splash with brand theme + "Powered by 360 Crypto Eye" attribution rendering correctly on owner's phone. Pipeline: phone → CI → APK → phone, fully automated.
+- **Domain registered:** `luminapp.org` for backend API + Privacy/ToS hosting (cheap; users see app name not URL — backend plumbing decision per CTE call).
+- **Next on app track:** 5-tab navigation scaffold (Pulse / Signals / Agents / Trade / Settings) — placeholder layouts that fill in as backend endpoints land.
+- **Then:** FastAPI backend in `360-v2` for the app to read.
 
 ### Pre-TP grab — Phase A ✅ shipped + ENABLED in production
 - `TradeMonitor._check_pre_tp_grab` fires when a signal moves favourably by an **ATR-adaptive threshold** within 30 min, in a non-trending regime, on a non-breakout setup

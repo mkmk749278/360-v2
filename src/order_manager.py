@@ -20,6 +20,10 @@ Design notes
   capped at ``MAX_POSITION_USD`` (default $100).
 * Partial take-profit: ``close_partial()`` sells a fraction of the open
   position at each TP level (TP1: 33%, TP2: 33%, TP3: 34%).
+* Risk gates (Phase A2): when a :class:`RiskManager` is wired in,
+  ``place_market_order`` consults ``risk_manager.check()`` before placing
+  any order.  Blocked signals emit a ``risk_gate_block`` log marker and
+  return ``None``.  Both paper and live modes share the same gate chain.
 """
 
 from __future__ import annotations
@@ -68,11 +72,17 @@ class OrderManager:
         exchange_client: Optional[Any] = None,
         position_size_pct: float = POSITION_SIZE_PCT,
         max_position_usd: float = MAX_POSITION_USD,
+        risk_manager: Optional[Any] = None,
     ) -> None:
         self._enabled = auto_execution_enabled
         self._client = exchange_client
         self._position_size_pct = position_size_pct
         self._max_position_usd = max_position_usd
+        # Optional RiskManager (Phase A2).  When None, no gates are applied —
+        # callers building OrderManager without risk gates get the legacy
+        # behaviour for backwards compatibility.  Production wiring should
+        # always pass a configured RiskManager.
+        self._risk_manager = risk_manager
         # Track open position sizes for partial TP execution: signal_id → quantity
         self._open_quantities: Dict[str, float] = {}
         # Track which TP levels have had partial closes executed to prevent
@@ -139,6 +149,14 @@ class OrderManager:
         if not self._enabled:
             return None
 
+        # Phase A2 — risk gates.  When wired, check before placing.
+        if self._risk_manager is not None:
+            gate = self._risk_manager.check(signal)
+            if not gate.allowed:
+                # RiskManager already emitted the structured marker; we just
+                # short-circuit the placement.
+                return None
+
         direction = getattr(signal.direction, "value", str(signal.direction))
         side = "buy" if direction == "LONG" else "sell"
 
@@ -153,6 +171,8 @@ class OrderManager:
                 )
                 order_id = str(order.get("id", ""))
                 self._open_quantities[signal.signal_id] = quantity
+                if self._risk_manager is not None:
+                    self._risk_manager.register_open(signal)
                 log.info(
                     "[OrderManager] market order placed: %s %s %s qty=%s id=%s",
                     signal.symbol, signal.channel, side, quantity, order_id,

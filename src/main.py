@@ -59,6 +59,7 @@ from src.trade_observer import TradeObserver
 from src.exchange_client import CCXTClient
 from src.order_manager import OrderManager
 from src.paper_order_manager import PaperOrderManager
+from src.auto_trade.risk_manager import RiskManager
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
 from src.redis_client import RedisClient
@@ -83,6 +84,12 @@ from config import (
     EXCHANGE_SANDBOX,
     POSITION_SIZE_PCT,
     MAX_POSITION_USD,
+    RISK_DAILY_LOSS_LIMIT_PCT,
+    RISK_MAX_CONCURRENT,
+    RISK_MAX_LEVERAGE,
+    RISK_MIN_EQUITY_USD,
+    RISK_SETUP_BLACKLIST,
+    RISK_STARTING_EQUITY_USD,
 )
 
 log = get_logger("main")
@@ -120,6 +127,28 @@ class CryptoSignalEngine:
             redis_client=self._redis_client,
         )
 
+        # Risk gates (Phase A2) — mandatory under B12 before any live
+        # execution.  Constructed eagerly so paper mode also obeys the same
+        # gate chain; off-mode skips construction entirely (no auto-trade).
+        self._risk_manager: Optional[RiskManager] = None
+        if AUTO_EXECUTION_MODE != "off":
+            self._risk_manager = RiskManager(
+                starting_equity_usd=RISK_STARTING_EQUITY_USD,
+                daily_loss_limit_pct=RISK_DAILY_LOSS_LIMIT_PCT,
+                max_concurrent=RISK_MAX_CONCURRENT,
+                max_leverage=RISK_MAX_LEVERAGE,
+                min_equity_usd=RISK_MIN_EQUITY_USD,
+                setup_blacklist=set(RISK_SETUP_BLACKLIST),
+            )
+            log.info(
+                "RiskManager active: start_equity=$%.2f daily_kill=%.2f%% "
+                "max_concurrent=%d max_leverage=%.0fx min_equity=$%.2f "
+                "setup_blacklist=%d",
+                RISK_STARTING_EQUITY_USD, RISK_DAILY_LOSS_LIMIT_PCT,
+                RISK_MAX_CONCURRENT, RISK_MAX_LEVERAGE, RISK_MIN_EQUITY_USD,
+                len(RISK_SETUP_BLACKLIST),
+            )
+
         # Order execution — three modes (Phase A1):
         #   off   → no auto-trade (signals → Telegram only)
         #   paper → PaperOrderManager simulates fills, zero real-money risk
@@ -130,6 +159,8 @@ class CryptoSignalEngine:
             self._order_manager = PaperOrderManager(
                 position_size_pct=POSITION_SIZE_PCT,
                 max_position_usd=MAX_POSITION_USD,
+                starting_equity_usd=RISK_STARTING_EQUITY_USD,
+                risk_manager=self._risk_manager,
             )
             log.info(
                 "Auto-execution mode: PAPER (simulated fills, zero real-money risk)"
@@ -146,6 +177,7 @@ class CryptoSignalEngine:
                 exchange_client=_exchange_client,
                 position_size_pct=POSITION_SIZE_PCT,
                 max_position_usd=MAX_POSITION_USD,
+                risk_manager=self._risk_manager,
             )
             log.info(
                 "Auto-execution mode: LIVE (real orders via %s, sandbox=%s)",
