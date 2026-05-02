@@ -42,12 +42,19 @@ Goal: enrich the free channel as a paid-conversion funnel — market updates, ma
 - `MacroWatchdog` now broadcasts HIGH/CRITICAL severity events (FOMC, regulatory action, exchange hacks, F&G ≤10 / ≥90, AI-classified breaking news) to both admin AND free channel
 - MEDIUM/LOW stays admin-only (operational signal, not subscriber content)
 - Backwards compatible: legacy `send_to_free=None` constructions stay admin-only
-- 9 routing tests in `tests/test_macro_watchdog_routing.py`
 
-**Phase 2 (next) — Event-driven market updates**
-- Triggers for: BTC ±3% in 1h, regime shift on majors, BTC dominance ±2%
-- AI-generated explanation + free-channel post
-- Cooldown: max 1 per event-type per hour
+**Phase 2 — BTC big-move alert** ✅ shipped (in progress for additional triggers)
+- `MacroWatchdog._check_btc_price_move()` polls BTC 1h klines from Binance every cycle
+- Move ≥ 3% (env: `MACRO_BTC_MOVE_THRESHOLD_PCT`) → HIGH severity
+- Move ≥ 5% → CRITICAL
+- Per-direction cooldown 1h (env: `MACRO_BTC_MOVE_COOLDOWN_SEC`) — UP doesn't suppress DOWN
+- Routes via existing `_broadcast` helper → admin + free channel for HIGH/CRITICAL
+- Network errors (timeout, non-200, malformed payload) degrade silently
+- 11 tests in `tests/test_macro_watchdog_btc_move.py`
+
+**Phase 2 (still open) — additional event triggers**
+- Regime shift on BTC/ETH (TRENDING_UP ↔ TRENDING_DOWN flip) → free channel
+- BTC dominance ±2% (requires extra data source)
 
 **Phase 3 — Charts attached to scheduled posts**
 - New `src/chart_renderer.py` using mplfinance
