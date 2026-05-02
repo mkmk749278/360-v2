@@ -168,6 +168,22 @@ MACRO_WATCHDOG_FEAR_GREED_THRESHOLD_LOW: int = int(
 MACRO_WATCHDOG_FEAR_GREED_THRESHOLD_HIGH: int = int(
     os.getenv("MACRO_WATCHDOG_FEAR_GREED_THRESHOLD_HIGH", "80")
 )
+# Phase-2 free-channel content rollout: BTC big-move alert.  When BTC
+# moves ≥ this % in the last 1h, MacroWatchdog broadcasts an event-driven
+# market update (HIGH severity at the threshold, CRITICAL at ≥5%).  The
+# alert routes to admin AND free channel via the same _broadcast helper
+# used by macro news / F&G alerts (see PR #274).
+# Default 3.0% — captures a meaningful move while filtering routine
+# intraday volatility on BTC.  Env-overridable per B8.
+MACRO_BTC_MOVE_THRESHOLD_PCT: float = float(
+    os.getenv("MACRO_BTC_MOVE_THRESHOLD_PCT", "3.0")
+)
+# Cooldown (seconds) per direction (up vs down) — prevents alert burst
+# during sustained large moves.  Default 1h matches the candle window
+# used to compute the move; cleaner one-alert-per-leg behaviour.
+MACRO_BTC_MOVE_COOLDOWN_SEC: int = int(
+    os.getenv("MACRO_BTC_MOVE_COOLDOWN_SEC", "3600")
+)
 
 # ---------------------------------------------------------------------------
 # Dynamic Tiering (Market Watchdog) — PR 2
