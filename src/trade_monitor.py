@@ -19,6 +19,16 @@ from config import (
     MAX_SIGNAL_HOLD_SECONDS,
     MIN_SIGNAL_LIFESPAN_SECONDS,
     MONITOR_POLL_INTERVAL,
+    PRE_TP_ATR_MULTIPLIER,
+    PRE_TP_ENABLED,
+    PRE_TP_FEE_FLOOR_PCT,
+    PRE_TP_FEE_PCT_ROUND_TRIP,
+    PRE_TP_LEVERAGE,
+    PRE_TP_MAX_AGE_SEC,
+    PRE_TP_MIN_AGE_SEC,
+    PRE_TP_REGIME_ALLOWLIST,
+    PRE_TP_SETUP_BLACKLIST,
+    PRE_TP_THRESHOLD_PCT,
     TRAILING_ATR_MULTIPLIER,
 )
 from src.channels.base import Signal, TrailingStopState
@@ -767,6 +777,12 @@ class TradeMonitor:
         # price spikes that don't represent real sustained price movement.
         _c_high, _c_low = self._candle_extremes(sig.symbol)
 
+        # Pre-TP grab (Phase A) — fire BEFORE the SL check so that if the same
+        # candle whipped up to the threshold and back down to entry we still
+        # bank the symbolic win and the SL→breakeven move converts what would
+        # have been a small NET LOSS at 10x leverage into a clean breakeven.
+        await self._check_pre_tp_grab(sig, _c_high, _c_low)
+
         _sl_triggered = (
             (is_long and _c_low > 0 and _c_low <= sig.stop_loss) or
             (not is_long and _c_high > 0 and _c_high >= sig.stop_loss)
@@ -1121,6 +1137,174 @@ class TradeMonitor:
 
         text = "\n".join(lines)
         await self._send(channel_id, text)
+
+    async def _check_pre_tp_grab(
+        self, sig: Signal, c_high: float, c_low: float
+    ) -> bool:
+        """Pre-TP grab — bank a small symbolic win and move SL to breakeven.
+
+        Triggered when an active signal moves favourably by an ATR-adaptive
+        threshold within ``PRE_TP_MAX_AGE_SEC`` (default 30 min) of dispatch,
+        in a non-TRENDING regime, and on a non-breakout setup.
+
+        Threshold resolution (B11 fee-aware):
+          ``threshold = max(PRE_TP_FEE_FLOOR_PCT,
+                            PRE_TP_ATR_MULTIPLIER × atr_pct)``
+        where ``atr_pct = atr_last / entry × 100`` from the latest 5m
+        candle.  Falls back to the static ``PRE_TP_THRESHOLD_PCT`` when
+        ATR is unavailable.  The fee floor (default 0.20%) guarantees
+        ≥+1.3% net @ 10x even on low-vol pairs; the ATR term scales up
+        to capture larger wins on volatile alts without capping winners.
+
+        Why this exists: at typical subscriber leverage (10x) with 0.07%
+        round-trip fees the breakeven price move is ~0.07% raw.  Most
+        invalidation kills today close at "neutral" which is actually a
+        ~0.7% NET LOSS on margin.  Pre-TP turns those would-be-losses
+        into net-positive trades by banking the ATR-adaptive minimum and
+        ratcheting SL to entry so the rest of the position is free.
+
+        Returns True iff pre-TP fired this cycle.  Best-effort — exceptions
+        are logged and swallowed so the surrounding SL/TP loop is never
+        disrupted.
+        """
+        if not PRE_TP_ENABLED:
+            return False
+        if getattr(sig, "pre_tp_hit", False):
+            return False
+        if sig.status != "ACTIVE":
+            return False
+        # Setup gate — exclude breakout family (their thesis depends on bigger moves)
+        setup_class = str(getattr(sig, "setup_class", ""))
+        if setup_class in PRE_TP_SETUP_BLACKLIST:
+            return False
+        # Age gate
+        try:
+            age_secs = (utcnow() - sig.timestamp).total_seconds() if sig.timestamp else 0.0
+        except Exception:
+            age_secs = 0.0
+        if age_secs < PRE_TP_MIN_AGE_SEC or age_secs > PRE_TP_MAX_AGE_SEC:
+            return False
+
+        is_long = sig.direction == Direction.LONG
+        entry = float(sig.entry)
+        if entry <= 0:
+            return False
+
+        # Fetch indicators once — used for both ATR-adaptive threshold and
+        # regime gate.  Fail-open on either if the call raises or returns nil.
+        indicators: Optional[Dict[str, Any]] = None
+        if self._indicators_fn is not None:
+            try:
+                indicators = self._indicators_fn(sig.symbol)
+            except Exception as exc:
+                log.debug("Pre-TP indicators_fn failed for %s: %s", sig.symbol, exc)
+                indicators = None
+
+        # Resolve threshold — ATR-adaptive with fee floor; fall back to static
+        # constant when ATR is missing/invalid (soft-penalty doctrine).
+        threshold_pct = PRE_TP_THRESHOLD_PCT
+        threshold_source = "static"
+        atr_last: Optional[float] = None
+        if indicators is not None:
+            raw_atr = indicators.get("atr_last")
+            try:
+                if raw_atr is not None:
+                    atr_last = float(raw_atr)
+            except (TypeError, ValueError):
+                atr_last = None
+        if atr_last is not None and atr_last > 0:
+            atr_pct = (atr_last / entry) * 100.0
+            atr_threshold = atr_pct * PRE_TP_ATR_MULTIPLIER
+            threshold_pct = max(PRE_TP_FEE_FLOOR_PCT, atr_threshold)
+            threshold_source = "atr_floored" if atr_threshold < PRE_TP_FEE_FLOOR_PCT else "atr"
+
+        # Threshold check — use the favourable extreme of the last 1m candle.
+        threshold = threshold_pct / 100.0
+        if is_long:
+            target = entry * (1.0 + threshold)
+            if c_high <= 0 or c_high < target:
+                return False
+        else:
+            target = entry * (1.0 - threshold)
+            if c_low <= 0 or c_low > target:
+                return False
+
+        # Regime gate — only fire in non-trending regimes.  Fail-open if we
+        # can't classify (per soft-penalty doctrine).
+        regime_label: Optional[str] = None
+        if self._regime_detector is not None and indicators is not None:
+            try:
+                result = self._regime_detector.classify(indicators)
+                if result and getattr(result, "regime", None) is not None:
+                    regime_label = result.regime.value
+            except Exception as exc:
+                log.debug("Pre-TP regime classify failed for %s: %s", sig.symbol, exc)
+        if regime_label is not None and regime_label.upper() not in PRE_TP_REGIME_ALLOWLIST:
+            return False
+
+        # All gates passed — fire pre-TP at the resolved threshold
+        favourable_pct = threshold_pct  # symbolic — what we report as banked
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = favourable_pct
+        sig.pre_tp_timestamp = utcnow()
+        sig.execution_note += f" | Pre-TP banked +{favourable_pct:.2f}% raw, SL→breakeven"
+
+        # Move SL to breakeven (entry).  Ratchet only — never widen.
+        if is_long:
+            sig.stop_loss = max(sig.stop_loss, entry)
+        else:
+            sig.stop_loss = min(sig.stop_loss, entry)
+
+        # Subscriber-facing math: show raw and net-of-fees at the assumed leverage.
+        gross_pct = favourable_pct * PRE_TP_LEVERAGE
+        fee_burn_pct = PRE_TP_FEE_PCT_ROUND_TRIP * PRE_TP_LEVERAGE
+        net_pct = gross_pct - fee_burn_pct
+
+        try:
+            await self._post_update(
+                sig,
+                f"⚡ PRE-TP BANKED: +{favourable_pct:.2f}% raw "
+                f"({net_pct:+.2f}% net @ {PRE_TP_LEVERAGE:.0f}x after fees) "
+                f"\\| SL → breakeven \\| Full TP ladder still open",
+            )
+        except Exception as exc:
+            log.warning("Pre-TP active-channel post failed for %s: %s", sig.symbol, exc)
+
+        # Free-channel storytelling — paid-tier only (WATCHLIST never reaches
+        # trade_monitor anyway, but guard defensively).
+        tier = getattr(sig, "signal_tier", "")
+        if tier != "WATCHLIST":
+            try:
+                from config import TELEGRAM_FREE_CHANNEL_ID
+                if TELEGRAM_FREE_CHANNEL_ID:
+                    free_msg = (
+                        f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
+                        f"Banked +{favourable_pct:.2f}% raw "
+                        f"\\({net_pct:+.2f}% net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
+                        f"_SL moved to breakeven — the rest is free._"
+                    )
+                    await self._send(TELEGRAM_FREE_CHANNEL_ID, free_msg)
+                    log.info(
+                        "free_channel_post source=pre_tp severity=HIGH symbol=%s",
+                        sig.symbol,
+                    )
+            except Exception as exc:
+                log.warning("Pre-TP free-channel post failed for %s: %s", sig.symbol, exc)
+
+        log.info(
+            "pre_tp_fire %s %s [%s] threshold=%.3f source=%s atr_last=%s "
+            "leverage=%.1fx net=%.2f age=%.0fs",
+            sig.symbol,
+            sig.direction.value,
+            setup_class,
+            favourable_pct,
+            threshold_source,
+            f"{atr_last:.6f}" if atr_last is not None else "-",
+            PRE_TP_LEVERAGE,
+            net_pct,
+            age_secs,
+        )
+        return True
 
     async def _post_signal_closed(
         self,

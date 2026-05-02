@@ -195,6 +195,69 @@ MACRO_REGIME_SHIFT_COOLDOWN_SEC: int = int(
 )
 
 # ---------------------------------------------------------------------------
+# Pre-TP grab — Phase A
+# ---------------------------------------------------------------------------
+# In QUIET-dominated markets most signals catch a small move (0.2–0.5%
+# raw) before momentum dies and the invalidator kills near-breakeven.
+# Truth-report data shows 2/3 of recent kills are PROTECTIVE — i.e. the
+# kill saved money relative to where price went next.  But at typical
+# subscriber leverage (10x) with 0.07% round-trip fees (= 0.7% on margin),
+# a "near-breakeven" close is actually a ~0.7% NET LOSS.  Pre-TP banks a
+# small symbolic win + moves SL to breakeven so the rest of the position
+# becomes free, turning these would-be-net-losses into net-positive trades.
+#
+# Threshold derivation: at 10x leverage the breakeven price move (after
+# fees) is ~0.07%.  Below that, fees eat the move.  +0.35% raw → +3.5%
+# gross @ 10x → +2.8% net after fees — comfortably above noise.
+#
+# Default OFF until a runtime truth report verifies fire rate / fire
+# timing match expectations.  Env-overridable per B8.
+PRE_TP_ENABLED: bool = _safe_bool("PRE_TP_ENABLED", "false")
+PRE_TP_THRESHOLD_PCT: float = float(os.getenv("PRE_TP_THRESHOLD_PCT", "0.35"))
+# ATR-adaptive threshold (B11 fee-aware refinement).  Resolved threshold is
+# ``max(PRE_TP_FEE_FLOOR_PCT, PRE_TP_ATR_MULTIPLIER × atr_pct)`` where
+# ``atr_pct = atr_last / entry * 100`` from the latest 5m candle.  This lets
+# pre-TP capture a +0.2-0.3% win on a low-vol pair (BNB-like) where the static
+# 0.35% would never trigger, while still scaling up to +0.5%+ on volatile
+# alts where 0.35% is noise.  When ATR is unavailable we fall back to the
+# static ``PRE_TP_THRESHOLD_PCT`` (per soft-penalty doctrine — never block
+# on missing data).
+PRE_TP_ATR_MULTIPLIER: float = float(os.getenv("PRE_TP_ATR_MULTIPLIER", "0.5"))
+# Hard fee-economic floor.  Below this, +0.2% raw at 10x = +1.3% net which is
+# the minimum ratio where banking the win pays for the fees with margin.
+# 0.07% raw is the breakeven point — anything below 0.20% destroys subscriber
+# value.  Per B11.
+PRE_TP_FEE_FLOOR_PCT: float = float(os.getenv("PRE_TP_FEE_FLOOR_PCT", "0.20"))
+PRE_TP_MIN_AGE_SEC: int = int(os.getenv("PRE_TP_MIN_AGE_SEC", "30"))
+PRE_TP_MAX_AGE_SEC: int = int(os.getenv("PRE_TP_MAX_AGE_SEC", "1800"))
+# Default leverage assumption for subscriber-facing net-of-fees math.
+# Engine-side decisions (the threshold itself) are derived assuming this.
+PRE_TP_LEVERAGE: float = float(os.getenv("PRE_TP_LEVERAGE", "10.0"))
+# Round-trip fee on a single-leg trade — taker entry (~0.05%) + maker exit
+# (~0.02%) on Binance USDT-M futures.  At 10x this is 0.7% of margin.
+PRE_TP_FEE_PCT_ROUND_TRIP: float = float(
+    os.getenv("PRE_TP_FEE_PCT_ROUND_TRIP", "0.07")
+)
+# Setups that are STRUCTURALLY built for bigger moves — pre-TP would cap
+# the thesis.  Breakouts (VSB / BDS / ORB) belong here.  Comma-separated.
+PRE_TP_SETUP_BLACKLIST_RAW: str = os.getenv(
+    "PRE_TP_SETUP_BLACKLIST",
+    "VOLUME_SURGE_BREAKOUT,BREAKDOWN_SHORT,OPENING_RANGE_BREAKOUT",
+)
+PRE_TP_SETUP_BLACKLIST: frozenset = frozenset(
+    s.strip() for s in PRE_TP_SETUP_BLACKLIST_RAW.split(",") if s.strip()
+)
+# Regimes in which pre-TP is allowed to fire.  TRENDING regimes are
+# excluded — let TP1 catch the full trend ride.  Comma-separated.
+PRE_TP_REGIME_ALLOWLIST_RAW: str = os.getenv(
+    "PRE_TP_REGIME_ALLOWLIST",
+    "QUIET,RANGING,VOLATILE",
+)
+PRE_TP_REGIME_ALLOWLIST: frozenset = frozenset(
+    s.strip().upper() for s in PRE_TP_REGIME_ALLOWLIST_RAW.split(",") if s.strip()
+)
+
+# ---------------------------------------------------------------------------
 # Dynamic Tiering (Market Watchdog) — PR 2
 # ---------------------------------------------------------------------------
 # Enable/disable the background TierManager that periodically polls Binance
