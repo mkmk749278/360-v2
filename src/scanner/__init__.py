@@ -4364,7 +4364,9 @@ class Scanner:
                 "composite={:.1f} pre_soft={:.1f} final={:.1f} threshold={:.1f} "
                 "penalties(eval={:.1f},gate={:.1f},total={:.1f},pair_analysis={:.1f}) "
                 "adjustments(feedback={:+.1f},stat_filter={:+.1f},regime_transition={:+.1f}) "
-                "components(market={:.1f},execution={:.1f},risk={:.1f},thesis_adj={:.1f})",
+                "components(market={:.1f},execution={:.1f},risk={:.1f},thesis_adj={:.1f}) "
+                "engine(smc={:.1f},regime={:.1f},volume={:.1f},indicators={:.1f},"
+                "patterns={:.1f},mtf={:.1f})",
                 symbol,
                 chan_name,
                 _setup_class_name,
@@ -4386,6 +4388,12 @@ class Scanner:
                 float(sig.component_scores.get("execution", 0.0)),
                 float(sig.component_scores.get("risk", 0.0)),
                 float(sig.component_scores.get("thesis_adj", 0.0)),
+                float(sig.component_scores.get("smc", 0.0)),
+                float(sig.component_scores.get("regime", 0.0)),
+                float(sig.component_scores.get("volume", 0.0)),
+                float(sig.component_scores.get("indicators", 0.0)),
+                float(sig.component_scores.get("patterns", 0.0)),
+                float(sig.component_scores.get("mtf", 0.0)),
             )
 
         # Regime transition boost (item 15): if regime just changed in the direction
