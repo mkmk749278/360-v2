@@ -45,8 +45,8 @@
 - **Auth:** Telegram bot login token → JWT (no email/password/SMS).
 - **Phase A1 ✅ shipped:** `PaperOrderManager` provides simulated execution behind `AUTO_EXECUTION_MODE=paper`. Powers the app's Demo mode and our own auto-trade testing before live. 15 tests, full interface parity with `OrderManager`.
 - **Phase A2 ✅ shipped:** `src/auto_trade/risk_manager.py` enforces 6 gates (daily-loss kill, min equity floor, concurrent cap, per-symbol cap, leverage cap, setup blacklist) plus owner-driven manual pause. Wired into both OrderManager and PaperOrderManager. 23 tests. All env-overridable: `RISK_DAILY_LOSS_LIMIT_PCT`, `RISK_MAX_CONCURRENT`, `RISK_MAX_LEVERAGE`, `RISK_MIN_EQUITY_USD`, `RISK_SETUP_BLACKLIST`.
-- **Phase A3 next:** position reconciliation on engine restart.
-- **Phase A4:** live with own keys, $50 USDT cap.
+- **Phase A3 ✅ shipped:** `src/auto_trade/position_reconciler.py` detects drift between exchange positions and engine signal state. `reconcile_on_boot()` runs once at start (auto-close orphans optional via `RECONCILER_AUTO_CLOSE_ORPHANS`); `periodic_drift_check()` runs every `RECONCILER_PERIODIC_INTERVAL_SEC` (default 300s) for mid-flight drift. Live-mode only — paper has no exchange state. 21 tests covering classification, alerting, auto-close, and resilience.
+- **Phase A4 next:** live with own keys, $50 USDT cap. All safety scaffolding (A1+A2+A3) now in place; B12 doctrine fully satisfied.
 - **Lumin app ✅ first APK shipped** (v0.0.1 bootstrap): GitHub Actions builds signed-when-keystore-set release APKs on every push to `lumin-app` repo. Splash with brand theme + "Powered by 360 Crypto Eye" attribution rendering correctly on owner's phone. Pipeline: phone → CI → APK → phone, fully automated.
 - **Domain registered:** `luminapp.org` for backend API + Privacy/ToS hosting (cheap; users see app name not URL — backend plumbing decision per CTE call).
 - **Next on app track:** 5-tab navigation scaffold (Pulse / Signals / Agents / Trade / Settings) — placeholder layouts that fill in as backend endpoints land.
