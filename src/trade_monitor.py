@@ -798,6 +798,27 @@ class TradeMonitor:
                 capped_price = min(price, sig.stop_loss)
             self._set_realized_pnl(sig, capped_price)
             sig.status = "INVALIDATED"
+            # Invalidation Quality Audit: record the kill so a periodic classifier
+            # can later mark it PROTECTIVE / PREMATURE / NEUTRAL by examining the
+            # post-kill price action.  Without this we have no ground truth on
+            # whether the invalidation gate is helping or hurting.
+            try:
+                from src.invalidation_audit import record_invalidation
+                record_invalidation(
+                    signal_id=sig.signal_id,
+                    symbol=sig.symbol,
+                    channel=sig.channel,
+                    setup_class=sig.setup_class or "",
+                    direction=sig.direction.value,
+                    entry=sig.entry,
+                    stop_loss=sig.stop_loss,
+                    tp1=sig.tp1,
+                    kill_price=capped_price,
+                    kill_reason=invalidation_reason,
+                    pnl_pct_at_kill=sig.pnl_pct,
+                )
+            except Exception as exc:  # noqa: BLE001 — audit must never break the close
+                log.debug("invalidation_audit.record_invalidation failed for {}: {}", sig.symbol, exc)
             await self._post_update(sig, f"🔄 INVALIDATED ({invalidation_reason})")
             self._record_outcome(sig, hit_tp=0, hit_sl=False)
             self._remove(sig.signal_id)

@@ -183,6 +183,36 @@ _FAR_RSI_LONG_SOFT_MIN: float = 65.0   # ≥ this (< hard) → +6 soft penalty
 _FAR_RSI_SHORT_HARD_MIN: float = 25.0  # ≤ this → hard reject (oversold)
 _FAR_RSI_SHORT_SOFT_MAX: float = 35.0  # ≤ this (> hard) → +6 soft penalty
 
+# SR_FLIP_RETEST HTF policy — soft penalty for HTF mismatch.
+# Aligned with the scalping doctrine codified in OWNER_BRIEF §2.1a.
+# Counter-trend SR_FLIP setups (e.g., resistance held during an uptrend
+# pullback → SHORT scalp) are legitimate scalp products; hard-blocking
+# them eliminates ~half the path's edge in correlated trending markets.
+# Soft penalty (default 6.0 confidence pts) when BOTH 1H AND 4H oppose
+# direction lets scoring decide.  Env-overridable per B8.
+_SR_FLIP_HTF_MISMATCH_PENALTY: float = float(os.getenv("SR_FLIP_HTF_MISMATCH_PENALTY", "6.0"))
+
+# QUIET_COMPRESSION_BREAK HTF policy — soft penalty.  QCB lives in
+# QUIET/RANGING regimes where HTF trends are typically weak; the soft
+# penalty rarely fires but adds a conservative confidence haircut on the
+# rare occasions when a compression break does fight an unambiguous HTF.
+# Same env-overridable pattern.
+_QCB_HTF_MISMATCH_PENALTY: float = float(os.getenv("QCB_HTF_MISMATCH_PENALTY", "6.0"))
+
+# FAILED_AUCTION_RECLAIM HTF policy — soft penalty for HTF mismatch.
+# We are a SCALPING system (per OWNER_BRIEF Part II): direction-agnostic,
+# fast in/out, profitable signals matter more than directional alignment.
+# Counter-trend FAR setups are *legitimate* scalp opportunities — a failed
+# auction at resistance during an uptrend is exactly the kind of brief
+# retracement scalp we want to capture.  Hard-blocking these would
+# eliminate ~half the path's edge in trending markets where top-75 pairs
+# move correlated to BTC.
+#
+# Soft penalty (default 6.0 confidence pts) when BOTH 1H AND 4H oppose
+# direction — lets scoring decide whether the signal still clears the
+# tier threshold.  Env-overridable per B8.  Set to 0 to disable entirely.
+_FAR_HTF_MISMATCH_PENALTY: float = float(os.getenv("FAR_HTF_MISMATCH_PENALTY", "6.0"))
+
 # WHALE_MOMENTUM SL: look at this many closed 1m candles (before the current bar)
 # to find the recent swing low/high as the order-flow invalidation point.
 # A 5-bar window captures the impulse origin without going too far back.
@@ -605,6 +635,38 @@ class ScalpChannel(BaseChannel):
             if state in {"unavailable", "empty", "populated"}:
                 return state
         return "unknown"
+
+    @staticmethod
+    def _classify_htf_trend(
+        indicators: Dict[str, dict],
+        candles: Dict[str, dict],
+        tf_label: str,
+    ) -> Optional[str]:
+        """Return 'BULLISH' / 'BEARISH' / 'NEUTRAL' / None for the given timeframe.
+
+        Mirrors the contract used by `src.mtf._classify_trend`: a TF is BULLISH
+        when ema_fast > ema_slow AND close > ema_fast (and BEARISH when both
+        inverted).  Returns None when indicator/candle data for the TF is
+        unavailable so the caller can choose how to handle missing data.
+        """
+        ind_tf = indicators.get(tf_label, {})
+        ema_fast = ind_tf.get("ema9_last")
+        ema_slow = ind_tf.get("ema21_last")
+        cd = candles.get(tf_label, {})
+        closes = cd.get("close", [])
+        if ema_fast is None or ema_slow is None or len(closes) == 0:
+            return None
+        try:
+            ema_fast_f = float(ema_fast)
+            ema_slow_f = float(ema_slow)
+            close_f = float(closes[-1])
+        except (TypeError, ValueError):
+            return None
+        if ema_fast_f > ema_slow_f and close_f > ema_fast_f:
+            return "BULLISH"
+        if ema_fast_f < ema_slow_f and close_f < ema_fast_f:
+            return "BEARISH"
+        return "NEUTRAL"
 
     def consume_generation_telemetry(self) -> Dict[str, Dict[str, int]]:
         snapshot = {
@@ -2502,7 +2564,7 @@ class ScalpChannel(BaseChannel):
 
         close = float(closes[-1])
         if close <= 0:
-            return self._reject("breakout_not_found")
+            return self._reject("invalid_price")
         prev_close = float(closes[-2])
 
         # Structural level identification.
@@ -2587,6 +2649,24 @@ class ScalpChannel(BaseChannel):
             level = prior_swing_low
         else:
             return self._reject("flip_close_not_confirmed")
+
+        # HTF mismatch soft penalty — aligned with scalping doctrine
+        # (OWNER_BRIEF §2.1a).  Counter-trend SR_FLIP setups are legitimate
+        # scalp products: resistance held during an uptrend pullback is a
+        # valid SHORT scalp, support held during a downtrend bounce is a
+        # valid LONG scalp.  Hard-blocking these would eliminate ~half the
+        # path's edge in correlated trending markets where top-75 USDT-M
+        # pairs follow BTC.  Soft penalty (default 6.0 pts) when BOTH 1H
+        # AND 4H oppose direction lets scoring decide whether the signal
+        # clears the confidence-tier threshold.  Replaces the prior hard
+        # `htf_direction_veto` reject (PR #266 → corrected by PR #269).
+        sr_flip_htf_penalty = 0.0
+        if _SR_FLIP_HTF_MISMATCH_PENALTY > 0:
+            trend_1h = self._classify_htf_trend(indicators, candles, "1h")
+            trend_4h = self._classify_htf_trend(indicators, candles, "4h")
+            opposite = "BEARISH" if direction == Direction.LONG else "BULLISH"
+            if trend_1h == opposite and trend_4h == opposite:
+                sr_flip_htf_penalty = _SR_FLIP_HTF_MISMATCH_PENALTY
 
         # Retest proximity gate — layered zone system replacing the original hard-0.3% gate.
         # Premium zone (0–0.3% from flipped level) → no soft penalty.
@@ -2863,7 +2943,8 @@ class ScalpChannel(BaseChannel):
         # the composite scoring pass, preserving the separation between hard gates and
         # soft quality adjustments.
         total_penalty = (
-            proximity_penalty + wick_penalty + rsi_penalty + fvg_penalty + level_quality_penalty
+            proximity_penalty + wick_penalty + rsi_penalty + fvg_penalty
+            + level_quality_penalty + sr_flip_htf_penalty
         )
         if total_penalty != 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
@@ -3125,6 +3206,21 @@ class ScalpChannel(BaseChannel):
         else:
             return self._reject("breakout_not_detected")
 
+        # HTF mismatch soft penalty — aligned with scalping doctrine
+        # (OWNER_BRIEF §2.1a).  QCB lives in QUIET/RANGING regimes where
+        # HTF trends are typically weak, so the penalty rarely fires —
+        # but when 1H AND 4H both clearly oppose direction it adds a
+        # conservative confidence haircut without hard-blocking the
+        # signal.  Replaces the prior hard `htf_direction_veto` reject
+        # (PR #267 → corrected by PR #269).
+        qcb_htf_penalty = 0.0
+        if _QCB_HTF_MISMATCH_PENALTY > 0:
+            trend_1h = self._classify_htf_trend(indicators, candles, "1h")
+            trend_4h = self._classify_htf_trend(indicators, candles, "4h")
+            opposite = "BEARISH" if direction == Direction.LONG else "BULLISH"
+            if trend_1h == opposite and trend_4h == opposite:
+                qcb_htf_penalty = _QCB_HTF_MISMATCH_PENALTY
+
         # MACD momentum confirmation: histogram must be trending in breakout direction.
         # Zero-cross requirement was too timing-sensitive — breakout candle rarely
         # lands on the exact zero-cross tick in low-vol accumulation.
@@ -3253,6 +3349,8 @@ class ScalpChannel(BaseChannel):
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
         sig.confidence = min(100.0, sig.confidence + 4.0)
+        if qcb_htf_penalty > 0.0:
+            sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + qcb_htf_penalty
         return sig
 
     # ------------------------------------------------------------------
@@ -4356,6 +4454,21 @@ class ScalpChannel(BaseChannel):
         if direction is None:
             return self._reject("reclaim_hold_failed")
 
+        # HTF mismatch soft penalty — we are SCALPING, not trend-following.
+        # Counter-trend FAR setups (e.g., failed auction at resistance during
+        # an uptrend) are legitimate brief-retracement scalps; hard-blocking
+        # them would eliminate roughly half the path's edge in trending
+        # markets where top-75 pairs move correlated.  Soft penalty when
+        # BOTH 1H AND 4H oppose direction lets scoring decide whether the
+        # signal still clears the confidence-tier threshold.
+        htf_penalty = 0.0
+        if _FAR_HTF_MISMATCH_PENALTY > 0:
+            trend_1h = self._classify_htf_trend(indicators, candles, "1h")
+            trend_4h = self._classify_htf_trend(indicators, candles, "4h")
+            opposite = "BEARISH" if direction == Direction.LONG else "BULLISH"
+            if trend_1h == opposite and trend_4h == opposite:
+                htf_penalty = _FAR_HTF_MISMATCH_PENALTY
+
         if direction == Direction.LONG:
             tail = reclaim_level - auction_wick_extreme
         else:
@@ -4473,7 +4586,7 @@ class ScalpChannel(BaseChannel):
         # For SHORT: reclaim_level is the struct_high that was broken-then-recovered.
         sig.far_reclaim_level = round(reclaim_level, 8)
 
-        total_penalty = rsi_penalty + fvg_ob_penalty
+        total_penalty = rsi_penalty + fvg_ob_penalty + htf_penalty
         if total_penalty > 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
 

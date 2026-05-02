@@ -80,6 +80,7 @@ jobs:
               -o ConnectTimeout=30 \
               -o StrictHostKeyChecking=no \
               scripts/monitor_heartbeat.py \
+              scripts/extract_engine_logs.sh \
               "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/360-monitor-scripts/"
 
       - name: Collect structured runtime inputs from VPS
@@ -108,27 +109,71 @@ jobs:
             > monitor/raw/dispatch_log.json
 
           ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-            "docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --since=${LOOKBACK_HOURS}h engine" \
-            > monitor/raw/engine_current.log || true
+            "docker exec 360scalp-v2-engine sh -c 'cat /app/data/invalidation_records.json 2>/dev/null || echo []'" \
+            > monitor/raw/invalidation_records.json
+
+          # Read engine logs from the persistent loguru file sink at
+          # /app/logs/engine_*.log (30 days × 50MB rotation) instead of
+          # docker compose logs.  Docker's json-file driver caps at 30MB total
+          # — see PR #260 Log parse diagnostics, where a 24h request returned
+          # 49 lines after rotation.  extract_engine_logs.sh exits 2 if the
+          # file sink is missing so we can fall back to docker compose logs
+          # on a fresh-deploy VPS.
+          NOW_TS=$(date -u +%s)
+          CURRENT_START_TS=$((NOW_TS - LOOKBACK_HOURS * 3600))
+          PREVIOUS_START_TS=$((CURRENT_START_TS - LOOKBACK_HOURS * 3600))
+          CURRENT_START_LOGURU=$(date -u -d "@${CURRENT_START_TS}" +'%Y-%m-%d %H:%M:%S')
+          PREVIOUS_START_LOGURU=$(date -u -d "@${PREVIOUS_START_TS}" +'%Y-%m-%d %H:%M:%S')
+
+          # Pipe the extractor through stdin and run via `sh -s "$ARGS"` —
+          # mirrors the monitor_heartbeat.py pattern used 30 lines above.
+          # Avoids the docker-cp + chmod path that fails with rc=1 "Operation
+          # not permitted" when the container runs as a non-root user (the
+          # script is copied in as root-owned and chmod is then refused).
+          set +e
+          ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "cat /tmp/360-monitor-scripts/extract_engine_logs.sh | docker exec -i 360scalp-v2-engine sh -s '${CURRENT_START_LOGURU}'" \
+            > monitor/raw/engine_current.log
+          CURRENT_RC=$?
+          set -e
+
+          if [ "${CURRENT_RC}" -ne 0 ]; then
+            echo "extract_engine_logs.sh exited rc=${CURRENT_RC} for current window — falling back to docker compose logs" >&2
+            ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+              "docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --since=${LOOKBACK_HOURS}h engine" \
+              > monitor/raw/engine_current.log || true
+          fi
 
           if [ "${COMPARE_PREVIOUS_WINDOW}" = "true" ]; then
-            NOW_TS=$(date -u +%s)
-            CURRENT_START_TS=$((NOW_TS - LOOKBACK_HOURS * 3600))
-            PREVIOUS_START_TS=$((CURRENT_START_TS - LOOKBACK_HOURS * 3600))
-            CURRENT_START_ISO=$(date -u -d "@${CURRENT_START_TS}" +%Y-%m-%dT%H:%M:%SZ)
-            PREVIOUS_START_ISO=$(date -u -d "@${PREVIOUS_START_TS}" +%Y-%m-%dT%H:%M:%SZ)
+            set +e
             ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-              "docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --since=${PREVIOUS_START_ISO} --until=${CURRENT_START_ISO} engine" \
-              > monitor/raw/engine_previous.log || true
+              "cat /tmp/360-monitor-scripts/extract_engine_logs.sh | docker exec -i 360scalp-v2-engine sh -s '${PREVIOUS_START_LOGURU}' '${CURRENT_START_LOGURU}'" \
+              > monitor/raw/engine_previous.log
+            PREV_RC=$?
+            set -e
+            if [ "${PREV_RC}" -ne 0 ]; then
+              echo "extract_engine_logs.sh exited rc=${PREV_RC} for previous window — using docker compose logs fallback" >&2
+              CURRENT_START_ISO=$(date -u -d "@${CURRENT_START_TS}" +%Y-%m-%dT%H:%M:%SZ)
+              PREVIOUS_START_ISO=$(date -u -d "@${PREVIOUS_START_TS}" +%Y-%m-%dT%H:%M:%SZ)
+              ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+                "docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --since=${PREVIOUS_START_ISO} --until=${CURRENT_START_ISO} engine" \
+                > monitor/raw/engine_previous.log || true
+            fi
           else
             : > monitor/raw/engine_previous.log
           fi
 
           if [ "${INCLUDE_RECENT_LOGS}" = "true" ]; then
             ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
-              "docker compose -f ~/360-v2/docker-compose.yml --project-directory ~/360-v2 logs --tail=200 engine" \
+              "docker exec 360scalp-v2-engine sh -c 'tail -n 200 /app/logs/engine_*.log 2>/dev/null || true'" \
               > monitor/report/recent_logs.txt || true
           fi
+
+          # Log-source diagnostics so an operator can tell at a glance whether
+          # the loguru file sink (high-volume) or the docker fallback (low-volume)
+          # fed this run's report.
+          echo "[engine_current.log] Lines collected: $(wc -l < monitor/raw/engine_current.log)" >&2
+          echo "[engine_previous.log] Lines collected: $(wc -l < monitor/raw/engine_previous.log)" >&2
 
       - name: Build truth report artifacts
         env:
@@ -156,6 +201,7 @@ jobs:
             --window-comparison-json monitor/report/window_comparison.json
             --signals-last100-json monitor/report/signals_last100.json
             --dispatch-log-out-json monitor/report/dispatch_log.json
+            --invalidation-records-json monitor/raw/invalidation_records.json
           )
 
           if [ "${COMPARE_PREVIOUS_WINDOW}" = "true" ]; then

@@ -122,6 +122,310 @@ def parse_channel_funnel_from_logs(log_text: str, channel: str) -> Dict[str, int
     return dict(counters)
 
 
+_REGIME_LINE_MARKER = "Regime distribution (last 100 cycles):"
+_QUIET_SCALP_BLOCK_MARKER = "QUIET_SCALP_BLOCK "
+_CONFIDENCE_GATE_MARKER = "confidence_gate "
+_PATH_FUNNEL_MARKER = "Path funnel (last 100 cycles):"
+
+# Match e.g. "QUIET_SCALP_BLOCK BTCUSDT 360_SCALP conf=58.2 < min=60.0"
+_QUIET_SCALP_BLOCK_RE = re.compile(
+    r"QUIET_SCALP_BLOCK\s+(?P<symbol>\S+)\s+(?P<channel>\S+)\s+conf=(?P<conf>[-\d.]+)\s+<\s+min=(?P<min>[-\d.]+)"
+)
+
+# Match e.g. "confidence_gate BTCUSDT 360_SCALP [SETUP_NAME]: decision=filtered reason=quiet_scalp_min_confidence raw=58.2 ..."
+_CONFIDENCE_GATE_RE = re.compile(
+    r"confidence_gate\s+(?P<symbol>\S+)\s+(?P<channel>\S+)\s+\[(?P<setup>[^\]]+)\]:\s+"
+    r"decision=(?P<decision>\S+)\s+reason=(?P<reason>\S+)"
+)
+
+# Tier-2: extracts the full numeric breakdown emitted alongside the
+# decision/reason (raw/composite/pre_soft/final/threshold + penalties +
+# adjustments + components).  This is the data that answers "where are the
+# 14.83 confidence-gap points being lost" — without it we have no principled
+# way to decide whether to tune component weights or scoring thresholds.
+_CONFIDENCE_COMPONENT_RE = re.compile(
+    r"confidence_gate\s+(?P<symbol>\S+)\s+(?P<channel>\S+)\s+\[(?P<setup>[^\]]+)\]:\s+"
+    r"decision=(?P<decision>\S+)\s+reason=(?P<reason>\S+)\s+"
+    r"raw=(?P<raw>[-\d.]+)\s+"
+    r"composite=(?P<composite>[-\d.]+)\s+"
+    r"pre_soft=(?P<pre_soft>[-\d.]+)\s+"
+    r"final=(?P<final>[-\d.]+)\s+"
+    r"threshold=(?P<threshold>[-\d.]+)\s+"
+    r"penalties\(eval=(?P<eval_pen>[-\d.]+),gate=(?P<gate_pen>[-\d.]+),"
+    r"total=(?P<total_pen>[-\d.]+),pair_analysis=(?P<pair_pen>[-\d.]+)\)\s+"
+    r"adjustments\(feedback=(?P<feedback>[-+\d.]+),stat_filter=(?P<stat_filter>[-+\d.]+),"
+    r"regime_transition=(?P<regime_trans>[-+\d.]+)\)\s+"
+    r"components\(market=(?P<market>[-\d.]+),execution=(?P<execution>[-\d.]+),"
+    r"risk=(?P<risk>[-\d.]+),thesis_adj=(?P<thesis_adj>[-\d.]+)\)"
+)
+
+
+def parse_regime_distribution_from_logs(log_text: str) -> Dict[str, int]:
+    """Aggregate regime classification counts from periodic scanner emissions.
+
+    Scanner emits ``Regime distribution (last 100 cycles): {QUIET: N, ...}``
+    every 100 cycles. We sum these dicts across the window so the report can
+    show e.g. "QUIET 95.4%, RANGING 4.6%" — answering whether the market itself
+    is the binding constraint on signal flow.
+    """
+    counters: Dict[str, int] = defaultdict(int)
+    if not log_text:
+        return {}
+    for line in log_text.splitlines():
+        if _REGIME_LINE_MARKER not in line:
+            continue
+        try:
+            fragment = line.split(_REGIME_LINE_MARKER, 1)[1].strip()
+            parsed = ast.literal_eval(fragment)
+        except (ValueError, SyntaxError, IndexError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for regime, count in parsed.items():
+            try:
+                n = int(count or 0)
+            except (TypeError, ValueError):
+                n = 0
+            if n > 0:
+                counters[str(regime)] += n
+    return dict(counters)
+
+
+def parse_quiet_scalp_block_from_logs(
+    log_text: str,
+    channel: str,
+) -> Dict[str, Any]:
+    """Parse QUIET_SCALP_BLOCK occurrences for the given channel.
+
+    The QUIET_SCALP_BLOCK gate is the historical largest bottleneck during
+    QUIET-regime windows: high-quality candidates die at the confidence-floor
+    check unless their setup is on the exempt list. Returns total count, by-symbol
+    breakdown, and a confidence-distance histogram (how far below threshold).
+    """
+    total = 0
+    by_symbol: Dict[str, int] = defaultdict(int)
+    confidence_gap_sum = 0.0
+    confidence_gap_count = 0
+    if not log_text:
+        return {"total": 0, "by_symbol": {}, "average_gap_to_min": 0.0, "samples": 0}
+    for line in log_text.splitlines():
+        if _QUIET_SCALP_BLOCK_MARKER not in line:
+            continue
+        match = _QUIET_SCALP_BLOCK_RE.search(line)
+        if not match:
+            continue
+        if match.group("channel") != channel:
+            continue
+        total += 1
+        by_symbol[match.group("symbol")] += 1
+        try:
+            gap = float(match.group("min")) - float(match.group("conf"))
+            confidence_gap_sum += gap
+            confidence_gap_count += 1
+        except ValueError:
+            pass
+    avg_gap = (
+        confidence_gap_sum / confidence_gap_count if confidence_gap_count > 0 else 0.0
+    )
+    return {
+        "total": total,
+        "by_symbol": dict(sorted(by_symbol.items(), key=lambda kv: -kv[1])[:20]),
+        "average_gap_to_min": round(avg_gap, 2),
+        "samples": confidence_gap_count,
+    }
+
+
+def parse_confidence_gate_decisions_from_logs(
+    log_text: str,
+    channel: str,
+) -> Dict[str, Dict[str, Dict[str, int]]]:
+    """Parse confidence_gate decisions per setup: {setup: {decision: {reason: count}}}.
+
+    The confidence_gate emit covers every signal that survives evaluation but
+    must clear the final scoring threshold. Histogram surfaces:
+    * which setups consistently get filtered vs accepted
+    * the dominant rejection reason (e.g. quiet_scalp_min_confidence,
+      confidence_below_threshold, regime_penalty)
+    """
+    by_setup: Dict[str, Dict[str, Dict[str, int]]] = {}
+    if not log_text:
+        return {}
+    for line in log_text.splitlines():
+        if _CONFIDENCE_GATE_MARKER not in line:
+            continue
+        match = _CONFIDENCE_GATE_RE.search(line)
+        if not match:
+            continue
+        if match.group("channel") != channel:
+            continue
+        setup = match.group("setup")
+        decision = match.group("decision")
+        reason = match.group("reason")
+        setup_bucket = by_setup.setdefault(setup, {})
+        decision_bucket = setup_bucket.setdefault(decision, defaultdict(int))
+        decision_bucket[reason] += 1
+    # Convert defaultdicts to plain dicts for clean serialization
+    return {
+        setup: {decision: dict(reasons) for decision, reasons in decisions.items()}
+        for setup, decisions in by_setup.items()
+    }
+
+
+def parse_confidence_gate_components_from_logs(
+    log_text: str,
+    channel: str,
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Aggregate component-score statistics per setup × decision.
+
+    Returns ``{setup: {decision: {samples, avg_final, avg_threshold,
+    avg_gap_to_threshold, components: {market, execution, risk, thesis_adj},
+    avg_total_penalty}}}`` — a histogram of where confidence is sourced from
+    and where it's lost.
+
+    The 14.83-pt avg gap visible in PR #260's QUIET_SCALP_BLOCK section
+    was actionable but too coarse — it told us *that* candidates fall short
+    but not *which component* drags them under the threshold.  This data is
+    already emitted in every ``confidence_gate ...`` line by scanner.__init__;
+    we just weren't extracting it.
+    """
+    by_setup: Dict[str, Dict[str, Dict[str, Any]]] = {}
+    if not log_text:
+        return {}
+
+    # Accumulators: setup → decision → field → running sum
+    sums: Dict[str, Dict[str, Dict[str, float]]] = {}
+    counts: Dict[str, Dict[str, int]] = {}
+
+    for line in log_text.splitlines():
+        if _CONFIDENCE_GATE_MARKER not in line:
+            continue
+        match = _CONFIDENCE_COMPONENT_RE.search(line)
+        if not match:
+            continue
+        if match.group("channel") != channel:
+            continue
+        setup = match.group("setup")
+        decision = match.group("decision")
+
+        try:
+            fields = {
+                "final": float(match.group("final")),
+                "threshold": float(match.group("threshold")),
+                "raw": float(match.group("raw")),
+                "composite": float(match.group("composite")),
+                "total_penalty": float(match.group("total_pen")),
+                "market": float(match.group("market")),
+                "execution": float(match.group("execution")),
+                "risk": float(match.group("risk")),
+                "thesis_adj": float(match.group("thesis_adj")),
+            }
+        except (ValueError, TypeError):
+            continue
+
+        bucket = sums.setdefault(setup, {}).setdefault(decision, defaultdict(float))
+        for k, v in fields.items():
+            bucket[k] += v
+        counts.setdefault(setup, {})
+        counts[setup][decision] = counts[setup].get(decision, 0) + 1
+
+    for setup, decisions in sums.items():
+        by_setup[setup] = {}
+        for decision, totals in decisions.items():
+            n = counts[setup][decision]
+            avgs = {k: round(v / n, 2) for k, v in totals.items()}
+            by_setup[setup][decision] = {
+                "samples": n,
+                "avg_final": avgs["final"],
+                "avg_threshold": avgs["threshold"],
+                "avg_gap_to_threshold": round(avgs["threshold"] - avgs["final"], 2),
+                "avg_raw": avgs["raw"],
+                "avg_composite": avgs["composite"],
+                "avg_total_penalty": avgs["total_penalty"],
+                "components": {
+                    "avg_market": avgs["market"],
+                    "avg_execution": avgs["execution"],
+                    "avg_risk": avgs["risk"],
+                    "avg_thesis_adj": avgs["thesis_adj"],
+                },
+            }
+    return by_setup
+
+
+def count_log_markers(log_text: str) -> Dict[str, int]:
+    """Count occurrences of key periodic log markers in the window.
+
+    Used to surface a "log parse diagnostics" section in the truth report.
+    If e.g. ``path_funnel`` count is 0 but signals were emitted, the issue
+    is log retention or emission cadence — not parser breakage.
+    """
+    if not log_text:
+        return {
+            "path_funnel": 0,
+            "regime_distribution": 0,
+            "quiet_scalp_block": 0,
+            "confidence_gate": 0,
+            "total_lines": 0,
+        }
+    lines = log_text.splitlines()
+    return {
+        "path_funnel": sum(1 for ln in lines if _PATH_FUNNEL_MARKER in ln),
+        "regime_distribution": sum(1 for ln in lines if _REGIME_LINE_MARKER in ln),
+        "quiet_scalp_block": sum(1 for ln in lines if _QUIET_SCALP_BLOCK_MARKER in ln),
+        "confidence_gate": sum(1 for ln in lines if _CONFIDENCE_GATE_MARKER in ln),
+        "total_lines": len(lines),
+    }
+
+
+def summarize_invalidation_audit(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate invalidation_records.json into a setup × kill_reason histogram.
+
+    Returns ``{by_setup, by_reason, totals, stale}`` where each leaf cell counts
+    classifications (PROTECTIVE / PREMATURE / NEUTRAL / INSUFFICIENT_DATA) and
+    derives a "value impact" estimate.
+
+    The point of this section is to answer "is the invalidation gate net-helping
+    or net-hurting?" with the only honest unit: signal-by-signal counterfactuals
+    on what the post-kill price action did.
+    """
+    by_setup: Dict[str, Dict[str, int]] = {}
+    by_reason: Dict[str, Dict[str, int]] = {}
+    totals: Dict[str, int] = {
+        "PROTECTIVE": 0,
+        "PREMATURE": 0,
+        "NEUTRAL": 0,
+        "INSUFFICIENT_DATA": 0,
+    }
+    stale = 0  # records older than the eval window but still without a classification
+    if not records:
+        return {"by_setup": {}, "by_reason": {}, "totals": totals, "stale": 0}
+
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        label = r.get("classification")
+        if label is None:
+            stale += 1
+            continue
+        setup = str(r.get("setup_class") or "UNKNOWN")
+        reason_family = str(r.get("kill_reason_family") or "other")
+        for bucket, key in ((by_setup, setup), (by_reason, reason_family)):
+            inner = bucket.setdefault(key, {
+                "PROTECTIVE": 0,
+                "PREMATURE": 0,
+                "NEUTRAL": 0,
+                "INSUFFICIENT_DATA": 0,
+            })
+            inner[label] = inner.get(label, 0) + 1
+        totals[label] = totals.get(label, 0) + 1
+
+    return {
+        "by_setup": by_setup,
+        "by_reason": by_reason,
+        "totals": totals,
+        "stale": stale,
+    }
+
+
 def stage_totals_by_setup(funnel_counters: Dict[str, int], channel: str) -> Dict[str, Dict[str, int]]:
     by_setup: Dict[str, Dict[str, int]] = {}
     for key, value in funnel_counters.items():
@@ -366,6 +670,12 @@ def build_snapshot(
     previous_funnel: Dict[str, int],
     current_channel_funnel: Optional[Dict[str, int]] = None,
     previous_channel_funnel: Optional[Dict[str, int]] = None,
+    regime_distribution: Optional[Dict[str, int]] = None,
+    quiet_scalp_block: Optional[Dict[str, Any]] = None,
+    confidence_gate_decisions: Optional[Dict[str, Any]] = None,
+    confidence_gate_components: Optional[Dict[str, Any]] = None,
+    invalidation_audit: Optional[Dict[str, Any]] = None,
+    log_parse_diagnostics: Optional[Dict[str, int]] = None,
     now_ts: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     now_ts = now_ts or time.time()
@@ -555,6 +865,12 @@ def build_snapshot(
         "dependency_readiness": dependency_readiness,
         "lifecycle_truth": lifecycle_summary,
         "quality_by_setup": current_quality,
+        "regime_distribution": regime_distribution or {},
+        "quiet_scalp_block": quiet_scalp_block or {},
+        "confidence_gate_decisions": confidence_gate_decisions or {},
+        "confidence_gate_components": confidence_gate_components or {},
+        "invalidation_audit": invalidation_audit or {},
+        "log_parse_diagnostics": log_parse_diagnostics or {},
         "recommended_operator_focus": {
             "most_suspicious_degradation": degraded[0] if degraded else None,
             "most_promising_healthy_path": healthiest[0] if healthiest else None,
@@ -646,12 +962,193 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         )
 
     lines.extend(["", "## Evaluator no-signal reasons"])
+    any_reasons_rendered = False
     for setup, metrics in sorted(path_truth.items()):
         reasons = metrics.get("no_signal_reasons", {}) or {}
-        if not reasons:
+        positive = {k: int(v or 0) for k, v in reasons.items() if int(v or 0) > 0}
+        if not positive:
             continue
-        top = ", ".join(f"{k}={v}" for k, v in sorted(reasons.items(), key=lambda item: item[1], reverse=True)[:3])
-        lines.append(f"- {setup}: {top}")
+        any_reasons_rendered = True
+        sorted_reasons = sorted(positive.items(), key=lambda item: item[1], reverse=True)
+        total = sum(positive.values())
+        breakdown = ", ".join(f"{k}={v}" for k, v in sorted_reasons)
+        lines.append(f"- **{setup}** (total={total}): {breakdown}")
+    if not any_reasons_rendered:
+        lines.append("- _no reject-reason data parsed from logs in this window — see Log parse diagnostics below_")
+
+    # ── Regime distribution (Tier-1 monitor upgrade) ──────────────────
+    regime_dist = snapshot.get("regime_distribution", {}) or {}
+    lines.extend(["", "## Regime distribution"])
+    if regime_dist:
+        total = sum(regime_dist.values()) or 1
+        lines.append("| Regime | Count | % of cycles |")
+        lines.append("|---|---:|---:|")
+        for regime, count in sorted(regime_dist.items(), key=lambda kv: -kv[1]):
+            pct = 100.0 * count / total
+            lines.append(f"| {regime} | {count} | {pct:.1f}% |")
+    else:
+        lines.append(
+            "- _no regime data parsed — engine may need redeploy to start emitting "
+            "`Regime distribution (last 100 cycles): ...` log lines_"
+        )
+
+    # ── QUIET_SCALP_BLOCK gate (Tier-1 monitor upgrade) ───────────────
+    qsb = snapshot.get("quiet_scalp_block", {}) or {}
+    lines.extend(["", "## QUIET_SCALP_BLOCK gate"])
+    if qsb.get("total", 0) > 0:
+        lines.append(f"- Total blocks in window: **{qsb['total']}**")
+        lines.append(
+            f"- Average confidence gap to threshold: **{qsb.get('average_gap_to_min', 0.0):.2f}** "
+            f"(samples={qsb.get('samples', 0)}) — small gap means candidates are *close* to "
+            f"clearing the gate."
+        )
+        by_symbol = qsb.get("by_symbol", {}) or {}
+        if by_symbol:
+            top = ", ".join(f"{s}={c}" for s, c in list(by_symbol.items())[:10])
+            lines.append(f"- Top blocked symbols: {top}")
+    else:
+        lines.append("- _no QUIET_SCALP_BLOCK events in window_")
+
+    # ── Confidence gate decisions (Tier-1 monitor upgrade) ────────────
+    conf_gate = snapshot.get("confidence_gate_decisions", {}) or {}
+    lines.extend(["", "## Confidence gate decisions"])
+    if conf_gate:
+        lines.append("| Setup | Decision | Reason | Count |")
+        lines.append("|---|---|---|---:|")
+        for setup in sorted(conf_gate.keys()):
+            for decision in sorted(conf_gate[setup].keys()):
+                for reason, count in sorted(
+                    conf_gate[setup][decision].items(), key=lambda kv: -kv[1]
+                ):
+                    lines.append(f"| {setup} | {decision} | {reason} | {count} |")
+    else:
+        lines.append("- _no confidence_gate decisions parsed in window_")
+
+    # ── Confidence components histogram (Tier-2 monitor upgrade) ──────
+    # The decisions table above told us "X candidates were filtered for
+    # min_confidence" — this section answers "and *what* did those scores
+    # actually look like, component by component."  Avg final vs threshold
+    # gap localises the deficit; per-component averages tell us whether to
+    # tune market/execution/risk/thesis weighting or the threshold itself.
+    components = snapshot.get("confidence_gate_components", {}) or {}
+    lines.extend(["", "## Confidence component breakdown"])
+    if components:
+        lines.append(
+            "| Setup | Decision | Samples | Avg final | Avg threshold | Gap | "
+            "Market | Execution | Risk | Thesis adj | Avg penalty |"
+        )
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for setup in sorted(components.keys()):
+            for decision in sorted(components[setup].keys()):
+                m = components[setup][decision]
+                comps = m.get("components", {})
+                lines.append(
+                    "| {setup} | {decision} | {samples} | {final:.2f} | {thr:.2f} | "
+                    "{gap:.2f} | {mk:.2f} | {ex:.2f} | {rk:.2f} | {th:.2f} | {pen:.2f} |".format(
+                        setup=setup,
+                        decision=decision,
+                        samples=m.get("samples", 0),
+                        final=m.get("avg_final", 0.0),
+                        thr=m.get("avg_threshold", 0.0),
+                        gap=m.get("avg_gap_to_threshold", 0.0),
+                        mk=comps.get("avg_market", 0.0),
+                        ex=comps.get("avg_execution", 0.0),
+                        rk=comps.get("avg_risk", 0.0),
+                        th=comps.get("avg_thesis_adj", 0.0),
+                        pen=m.get("avg_total_penalty", 0.0),
+                    )
+                )
+    else:
+        lines.append(
+            "- _no confidence_gate component samples parsed in window — "
+            "scoring telemetry may need a refresh after the next deploy_"
+        )
+
+    # ── Invalidation Quality Audit ────────────────────────────────────
+    audit = snapshot.get("invalidation_audit", {}) or {}
+    lines.extend(["", "## Invalidation Quality Audit"])
+    lines.append(
+        "_Each trade-monitor kill is classified after a 30-min window: "
+        "**PROTECTIVE** (price moved further against position by >0.3R — kill saved money), "
+        "**PREMATURE** (price would have hit TP1 — kill destroyed value), "
+        "**NEUTRAL** (price stayed within ±0.3R), "
+        "**INSUFFICIENT_DATA** (no usable post-kill OHLC).  This is the only honest answer to "
+        "'is invalidation net-helping or net-hurting?'_"
+    )
+    totals = audit.get("totals") or {}
+    if any((totals.get(k, 0) for k in ("PROTECTIVE", "PREMATURE", "NEUTRAL"))):
+        total_classified = sum(totals.get(k, 0) for k in ("PROTECTIVE", "PREMATURE", "NEUTRAL"))
+        prot = totals.get("PROTECTIVE", 0)
+        prem = totals.get("PREMATURE", 0)
+        neut = totals.get("NEUTRAL", 0)
+        insuf = totals.get("INSUFFICIENT_DATA", 0)
+        prot_pct = (prot / total_classified * 100.0) if total_classified else 0.0
+        prem_pct = (prem / total_classified * 100.0) if total_classified else 0.0
+        lines.append(
+            f"- Totals: PROTECTIVE={prot} ({prot_pct:.1f}%) | "
+            f"PREMATURE={prem} ({prem_pct:.1f}%) | "
+            f"NEUTRAL={neut} | INSUFFICIENT_DATA={insuf} | "
+            f"stale (awaiting classification)={audit.get('stale', 0)}"
+        )
+        if prot > prem:
+            lines.append(
+                f"- **Net-helping** — invalidation saved on {prot - prem} more signals "
+                "than it killed prematurely.  Tightening would lose that protection."
+            )
+        elif prem > prot:
+            lines.append(
+                f"- **Net-hurting** — invalidation killed {prem - prot} more signals "
+                "prematurely than it saved.  Tightening or adding setup-specific exemptions "
+                "is the right next move."
+            )
+        else:
+            lines.append("- **Neutral** — invalidation is breakeven; tune carefully.")
+        by_reason = audit.get("by_reason") or {}
+        if by_reason:
+            lines.append("")
+            lines.append("| Kill reason | PROTECTIVE | PREMATURE | NEUTRAL | INSUFFICIENT |")
+            lines.append("|---|---:|---:|---:|---:|")
+            for reason in sorted(by_reason.keys()):
+                row = by_reason[reason]
+                lines.append(
+                    f"| {reason} | {row.get('PROTECTIVE', 0)} | "
+                    f"{row.get('PREMATURE', 0)} | {row.get('NEUTRAL', 0)} | "
+                    f"{row.get('INSUFFICIENT_DATA', 0)} |"
+                )
+        by_setup = audit.get("by_setup") or {}
+        if by_setup:
+            lines.append("")
+            lines.append("| Setup | PROTECTIVE | PREMATURE | NEUTRAL | INSUFFICIENT |")
+            lines.append("|---|---:|---:|---:|---:|")
+            for setup in sorted(by_setup.keys()):
+                row = by_setup[setup]
+                lines.append(
+                    f"| {setup} | {row.get('PROTECTIVE', 0)} | "
+                    f"{row.get('PREMATURE', 0)} | {row.get('NEUTRAL', 0)} | "
+                    f"{row.get('INSUFFICIENT_DATA', 0)} |"
+                )
+    else:
+        lines.append(
+            "- _no classified invalidation records yet — engine needs to run for ~30 min "
+            "after a kill before the classifier can label it_"
+        )
+
+    # ── Log parse diagnostics (Tier-1 monitor upgrade) ────────────────
+    diag = snapshot.get("log_parse_diagnostics", {}) or {}
+    lines.extend(["", "## Log parse diagnostics"])
+    lines.append(
+        "_If a section above is empty but the matching diagnostic count is also 0, "
+        "the engine isn't emitting that log line in the window (cadence/retention) "
+        "rather than the parser being broken._"
+    )
+    if diag:
+        lines.append(f"- Total log lines in window: `{diag.get('total_lines', 0)}`")
+        lines.append(f"- `Path funnel` emissions: `{diag.get('path_funnel', 0)}`")
+        lines.append(f"- `Regime distribution` emissions: `{diag.get('regime_distribution', 0)}`")
+        lines.append(f"- `QUIET_SCALP_BLOCK` events: `{diag.get('quiet_scalp_block', 0)}`")
+        lines.append(f"- `confidence_gate` events: `{diag.get('confidence_gate', 0)}`")
+    else:
+        lines.append("- _no diagnostics available_")
 
     lines.extend(["", "## Dependency readiness"])
     dependency_readiness = snapshot.get("dependency_readiness", {}) or {}

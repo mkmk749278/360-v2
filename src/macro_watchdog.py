@@ -13,8 +13,16 @@ macro-level events that could materially move crypto markets:
 * ⚠️  Fear & Greed index extremes
 
 When a significant event is detected it is formatted as a high-priority alert
-and pushed directly to the configured Telegram admin/alerts channel, completely
-bypassing the trade-signal queue so it never delays live signals.
+and routed to the Telegram channels:
+
+* HIGH / CRITICAL severity — broadcast to BOTH the admin alert channel AND
+  the free subscriber channel.  Subscribers see breaking macro context which
+  builds the free-channel value as a paid-conversion funnel.
+* MEDIUM / LOW severity — admin channel only (operational signal, not
+  subscriber content).
+
+The free-channel post is skipped silently when no ``send_to_free`` callable
+is provided (backwards compatible with admin-only usage).
 
 Configuration (via environment variables):
   MACRO_WATCHDOG_ENABLED                  – "true" to enable (default: "true")
@@ -33,6 +41,8 @@ from typing import Any, Callable, Coroutine, Dict, List, Optional
 import aiohttp
 
 from config import (
+    MACRO_BTC_MOVE_COOLDOWN_SEC,
+    MACRO_BTC_MOVE_THRESHOLD_PCT,
     MACRO_WATCHDOG_ENABLED,
     MACRO_WATCHDOG_POLL_INTERVAL,
     MACRO_WATCHDOG_FEAR_GREED_THRESHOLD_LOW,
@@ -55,6 +65,13 @@ _SEVERITY_EMOJI: Dict[str, str] = {
     "CRITICAL": "🚨",
 }
 
+# Severities that get broadcast to the free subscriber channel in addition
+# to the admin channel.  HIGH/CRITICAL events are subscriber-relevant
+# breaking news (FOMC, regulatory action, exchange hacks, F&G extremes ≤10
+# or ≥90).  MEDIUM/LOW stay admin-only — they're operational signal that
+# would create noise on the free channel.
+_FREE_CHANNEL_SEVERITIES: frozenset = frozenset({"HIGH", "CRITICAL"})
+
 # Minimum Fear & Greed values for automatic alerts (before OpenAI classification)
 _FG_EXTREME_LOW: int = MACRO_WATCHDOG_FEAR_GREED_THRESHOLD_LOW
 _FG_EXTREME_HIGH: int = MACRO_WATCHDOG_FEAR_GREED_THRESHOLD_HIGH
@@ -74,6 +91,13 @@ class MacroWatchdog:
     send_alert:
         Async callable that sends a string message to the admin Telegram channel.
         Typically ``TelegramBot.send_admin_alert``.
+    send_to_free:
+        Optional async callable that posts to the free subscriber channel.
+        When provided, HIGH/CRITICAL severity events are broadcast to both
+        admin and free channels (subscriber-visible breaking news).  When
+        ``None`` (the default), all alerts go to admin only — backwards
+        compatible with the original admin-only behaviour.  Typically
+        ``TelegramBot.post_to_free_channel``.
     openai_evaluator:
         Optional :class:`~src.openai_evaluator.OpenAIEvaluator` instance.
         When ``None`` or disabled, events are still detected via the Fear & Greed
@@ -88,11 +112,13 @@ class MacroWatchdog:
     def __init__(
         self,
         send_alert: Callable[[str], Coroutine[Any, Any, bool]],
+        send_to_free: Optional[Callable[[str], Coroutine[Any, Any, bool]]] = None,
         openai_evaluator: Optional[OpenAIEvaluator] = None,
         poll_interval: Optional[float] = None,
         watch_symbols: Optional[List[str]] = None,
     ) -> None:
         self._send_alert = send_alert
+        self._send_to_free = send_to_free
         self._openai = openai_evaluator
         self._poll_interval: float = poll_interval if poll_interval is not None else MACRO_WATCHDOG_POLL_INTERVAL
         self._watch_symbols: List[str] = watch_symbols or _DEFAULT_WATCH_SYMBOLS
@@ -100,6 +126,9 @@ class MacroWatchdog:
         self._session: Optional[aiohttp.ClientSession] = None
         self._seen_headlines: Dict[str, float] = {}  # headline_hash → timestamp
         self._last_fg_value: Optional[int] = None    # track F&G changes
+        # Cooldown tracker for BTC big-move alerts — keyed by direction
+        # ("up" | "down") so a sustained large move alerts once per leg.
+        self._btc_move_last_alert: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -138,6 +167,31 @@ class MacroWatchdog:
     # Main polling loop
     # ------------------------------------------------------------------
 
+    # ------------------------------------------------------------------
+    # Routing helper
+    # ------------------------------------------------------------------
+
+    async def _broadcast(self, msg: str, severity: str) -> None:
+        """Send `msg` to admin and (when severity warrants) the free channel.
+
+        Severity HIGH or CRITICAL → admin + free.  Anything else → admin only.
+        Free-channel post errors are logged but never re-raised — admin alert
+        already succeeded and we don't want a free-channel issue to silence
+        future admin alerts in the same poll cycle.
+        """
+        await self._send_alert(msg)
+        if (
+            self._send_to_free is not None
+            and severity in _FREE_CHANNEL_SEVERITIES
+        ):
+            try:
+                await self._send_to_free(msg)
+            except Exception as exc:
+                log.warning(
+                    "MacroWatchdog free-channel post failed (severity={}): {}",
+                    severity, exc,
+                )
+
     async def _poll_loop(self) -> None:
         """Infinite loop: poll events, send alerts, sleep."""
         while True:
@@ -154,18 +208,107 @@ class MacroWatchdog:
     # ------------------------------------------------------------------
 
     async def _check_macro_events(self) -> None:
-        """Run one full polling cycle: Fear & Greed + news headlines."""
+        """Run one full polling cycle: Fear & Greed + BTC move + news headlines."""
         session = await self._get_session()
 
         # 1) Fear & Greed Index extremes
         await self._check_fear_greed(session)
 
-        # 2) News headlines for each watched symbol
+        # 2) BTC big-move check (Phase-2 free-channel content)
+        try:
+            await self._check_btc_price_move(session)
+        except Exception as exc:
+            log.debug("BTC price-move check failed: {}", exc)
+
+        # 3) News headlines for each watched symbol
         for symbol in self._watch_symbols:
             try:
                 await self._check_news(symbol, session)
             except Exception as exc:
                 log.debug("News check failed for {}: {}", symbol, exc)
+
+    async def _check_btc_price_move(self, session: aiohttp.ClientSession) -> None:
+        """Alert when BTC moves ≥ MACRO_BTC_MOVE_THRESHOLD_PCT% over the last hour.
+
+        Why this exists: BTC is the bellwether for the entire crypto market.
+        A 3%+ hourly move precedes correlated moves on alts and is the kind
+        of context subscribers want — informational, not a trade signal.
+        Routes to admin + free channel via :meth:`_broadcast`.
+
+        Severity policy:
+          • |move| in [threshold, 5%) → HIGH
+          • |move| ≥ 5%               → CRITICAL
+
+        Cooldown: per-direction.  An UP move alerting at T does not suppress
+        a subsequent DOWN move alert (legitimate market reversals deserve
+        their own announcement); but the same direction will not re-alert
+        within ``MACRO_BTC_MOVE_COOLDOWN_SEC`` seconds (default 1 h).
+
+        Data source: Binance public klines REST (no API key needed).  Pulls
+        the last two 1h candles and computes close-to-close % change.
+        """
+        url = "https://api.binance.com/api/v3/klines"
+        params = {"symbol": "BTCUSDT", "interval": "1h", "limit": 2}
+        try:
+            async with session.get(
+                url,
+                params=params,
+                timeout=aiohttp.ClientTimeout(total=10),
+            ) as resp:
+                if resp.status != 200:
+                    log.debug("BTC kline fetch returned status {}", resp.status)
+                    return
+                data = await resp.json()
+        except (asyncio.TimeoutError, aiohttp.ClientError) as exc:
+            log.debug("BTC kline fetch network error: {}", exc)
+            return
+
+        if not isinstance(data, list) or len(data) < 2:
+            return
+        try:
+            prev_close = float(data[-2][4])
+            curr_close = float(data[-1][4])
+        except (IndexError, TypeError, ValueError) as exc:
+            log.debug("BTC kline parse error: {}", exc)
+            return
+        if prev_close <= 0:
+            return
+
+        pct_change = (curr_close - prev_close) / prev_close * 100.0
+        abs_change = abs(pct_change)
+        if abs_change < MACRO_BTC_MOVE_THRESHOLD_PCT:
+            return
+
+        direction = "up" if pct_change > 0 else "down"
+        cooldown_key = f"btc_move_{direction}"
+        now = time.monotonic()
+        last_time = self._btc_move_last_alert.get(cooldown_key)
+        # `None` sentinel = "no prior alert in this direction" — must NOT be
+        # treated as last_time=0.0 because in a fresh process `time.monotonic()`
+        # returns a small value, which would falsely trip the cooldown check
+        # `now - 0 < cooldown` on the first alert.
+        if last_time is not None and now - last_time < MACRO_BTC_MOVE_COOLDOWN_SEC:
+            return
+        self._btc_move_last_alert[cooldown_key] = now
+
+        severity = "CRITICAL" if abs_change >= 5.0 else "HIGH"
+        emoji = "🚀" if pct_change > 0 else "📉"
+        direction_label = "UP" if pct_change > 0 else "DOWN"
+
+        msg = (
+            f"{emoji} *BTC {direction_label} {abs_change:.2f}% in last hour*\n\n"
+            f"*Prev close (1 h ago):* ${prev_close:,.2f}\n"
+            f"*Current price:* ${curr_close:,.2f}\n"
+            f"*Severity:* {severity}\n\n"
+            f"_Major BTC moves typically lead the broader crypto market.  "
+            f"Watch for correlated moves on altcoins; existing positions may "
+            f"need attention._"
+        )
+        await self._broadcast(msg, severity)
+        log.info(
+            "MacroWatchdog: BTC price-move alert ({:+.2f}%, severity={})",
+            pct_change, severity,
+        )
 
     async def _check_fear_greed(self, session: aiohttp.ClientSession) -> None:
         """Alert when the Fear & Greed index hits extreme territory."""
@@ -194,7 +337,7 @@ class MacroWatchdog:
                 "_Extreme fear often precedes capitulation events or short-squeeze "
                 "bounces.  Review open positions and tighten stop losses._"
             )
-            await self._send_alert(msg)
+            await self._broadcast(msg, severity)
             log.info("MacroWatchdog: Fear & Greed extreme fear alert (value={})", value)
 
         elif value >= _FG_EXTREME_HIGH:
@@ -207,7 +350,7 @@ class MacroWatchdog:
                 "_Extreme greed historically precedes sharp corrections.  "
                 "Consider tightening trailing stops on long positions._"
             )
-            await self._send_alert(msg)
+            await self._broadcast(msg, severity)
             log.info("MacroWatchdog: Fear & Greed extreme greed alert (value={})", value)
 
     async def _check_news(self, coin: str, session: aiohttp.ClientSession) -> None:
@@ -268,7 +411,7 @@ class MacroWatchdog:
             msg += f"*Expected Impact:* {impact}\n"
         msg += "\n_This is an AI-generated macro alert.  No trade signal has been generated._"
 
-        await self._send_alert(msg)
+        await self._broadcast(msg, severity)
         log.info(
             "MacroWatchdog: {} news alert ({}, score={:.2f})",
             coin, severity, result.score,

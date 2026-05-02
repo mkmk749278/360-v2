@@ -188,8 +188,12 @@ class CryptoSignalEngine:
         # Macro Watchdog – async background task for global market-event alerts
         # Polls news, Fear & Greed index, and uses OpenAI to detect significant
         # macro events (FOMC, wars, token listings) and sends alerts to Telegram.
+        # HIGH/CRITICAL severity events also broadcast to the free channel as
+        # subscriber-visible breaking news (paid-conversion funnel content).
+        # MEDIUM/LOW severity stays admin-only.
         self._macro_watchdog = MacroWatchdog(
             send_alert=self.telegram.send_admin_alert,
+            send_to_free=self.telegram.post_to_free_channel,
             openai_evaluator=self._openai_evaluator,
         )
 
@@ -731,6 +735,51 @@ class CryptoSignalEngine:
                 break
             except Exception as exc:
                 log.error("Snapshot save error: %s", exc)
+
+    async def _invalidation_audit_loop(self) -> None:
+        """Periodically classify pending invalidation kills as PROTECTIVE /
+        PREMATURE / NEUTRAL based on post-kill price action.
+
+        See ``src/invalidation_audit.py``.  Uses 1m candles from the live data
+        store; assumes each candle is exactly 60s (close enough for window
+        classification — we're labelling buckets, not pricing trades).
+        """
+        from src.invalidation_audit import classify_pending_records, prune_old_records
+
+        def fetch_ohlc_since(symbol: str, since_ts: float):
+            candles = self.data_store.get_candles(symbol, "1m")
+            if not candles:
+                return None
+            highs = candles.get("high")
+            lows = candles.get("low")
+            closes = candles.get("close")
+            if highs is None or lows is None or closes is None:
+                return None
+            if len(highs) == 0 or len(lows) == 0:
+                return None
+            now_ts = time.time()
+            elapsed_sec = max(0.0, now_ts - since_ts)
+            n_candles = int(elapsed_sec // 60) + 1
+            if n_candles <= 0:
+                return None
+            n_candles = min(n_candles, len(highs))
+            return {
+                "high": list(highs[-n_candles:]),
+                "low": list(lows[-n_candles:]),
+                "close": list(closes[-n_candles:]),
+            }
+
+        while True:
+            await asyncio.sleep(300)  # 5 min cadence
+            try:
+                counters = classify_pending_records(fetch_ohlc_since=fetch_ohlc_since)
+                if counters:
+                    log.info("Invalidation audit classified: {}", counters)
+                prune_old_records(retention_sec=7 * 24 * 3600)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Invalidation audit loop error: %s", exc)
 
     # ------------------------------------------------------------------
     # Admin command handler (delegated to CommandHandler)

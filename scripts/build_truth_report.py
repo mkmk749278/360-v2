@@ -15,10 +15,16 @@ if str(ROOT) not in sys.path:
 
 from src.runtime_truth_report import (
     build_snapshot,
+    count_log_markers,
     format_truth_report_markdown,
     load_json_file,
     parse_channel_funnel_from_logs,
+    parse_confidence_gate_components_from_logs,
+    parse_confidence_gate_decisions_from_logs,
     parse_path_funnel_from_logs,
+    parse_quiet_scalp_block_from_logs,
+    parse_regime_distribution_from_logs,
+    summarize_invalidation_audit,
 )
 
 
@@ -41,6 +47,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--window-comparison-json", required=True)
     parser.add_argument("--signals-last100-json", default="")
     parser.add_argument("--dispatch-log-out-json", default="")
+    parser.add_argument("--invalidation-records-json", default="")
     return parser.parse_args()
 
 
@@ -97,6 +104,18 @@ def main() -> int:
     previous_funnel = parse_path_funnel_from_logs(previous_text, args.channel)
     current_channel_funnel = parse_channel_funnel_from_logs(current_text, args.channel)
     previous_channel_funnel = parse_channel_funnel_from_logs(previous_text, args.channel)
+    regime_distribution = parse_regime_distribution_from_logs(current_text)
+    quiet_scalp_block = parse_quiet_scalp_block_from_logs(current_text, args.channel)
+    confidence_gate_decisions = parse_confidence_gate_decisions_from_logs(current_text, args.channel)
+    confidence_gate_components = parse_confidence_gate_components_from_logs(current_text, args.channel)
+    log_parse_diagnostics = count_log_markers(current_text)
+
+    invalidation_records: list = []
+    if args.invalidation_records_json:
+        loaded_records = load_json_file(Path(args.invalidation_records_json), default=[])
+        if isinstance(loaded_records, list):
+            invalidation_records = loaded_records
+    invalidation_audit = summarize_invalidation_audit(invalidation_records)
 
     snapshot, comparison = build_snapshot(
         channel=args.channel,
@@ -112,6 +131,12 @@ def main() -> int:
         previous_funnel=previous_funnel,
         current_channel_funnel=current_channel_funnel,
         previous_channel_funnel=previous_channel_funnel,
+        regime_distribution=regime_distribution,
+        quiet_scalp_block=quiet_scalp_block,
+        confidence_gate_decisions=confidence_gate_decisions,
+        confidence_gate_components=confidence_gate_components,
+        invalidation_audit=invalidation_audit,
+        log_parse_diagnostics=log_parse_diagnostics,
         now_ts=time.time(),
     )
 
