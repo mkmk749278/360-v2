@@ -27,7 +27,10 @@
 
 ### Pending data
 - **TP1 ATR cap re-derivation** (1.8R / 2.5R / uncapped on SR_FLIP / FUNDING / DIV_CONT / CLS) — wait for Phase 1 invalidation audit data on TP1 hit rates per setup × ATR-bucket.
-- **VSB / BDS generated-but-not-emitted** — recent monitor showed 12 candidates generated, 0 emitted. Identify the downstream gate from the next truth report's confidence-component breakdown.
+- **VSB / BDS generated-but-not-emitted** — diagnosed against latest truth report (1.77M attempts window):
+  - VSB: **647 generated → 314 reach scoring → 0 emit, 0 watchlist.** All 314 filtered at `min_confidence`. Avg final confidence 46.78 vs threshold 80 (gap 33). Component sum (Market 20.70 + Execution 20.00 + Risk 20.00 + ThesisAdj 0.50) = 61.20 — implies a ~14-point implicit deduction not surfaced in the truth report's component breakdown. Even un-penalised, VSB candidates would still land 19 below the paid B-tier (65) and 4 below WATCHLIST (50), explaining zero routing of any kind.
+  - BDS: **1 generated total** — structurally silent. Funnel rejects 99.999% upstream of scoring (`regime_blocked` 38%, `breakout_not_found` 37%, `basic_filters_failed` 13%, `retest_proximity_failed` 11%). Not a scoring problem — gate chain is doing its job; BDS is just rare in current QUIET-dominated regime mix.
+  - **Next step (CTE):** instrument `signal_quality` to surface the missing component(s) in the confidence-gate log line, OR audit `_score_volume_surge_breakout` for an over-aggressive cap/multiplier that's compressing the final score below sum-of-components. Pending owner direction.
 - **FAR `STRONG_TREND` regime block** — empirical conjecture ("low edge") rather than structural impossibility. Could be soft penalty per doctrine; needs win-rate data to revisit.
 - **LSR hard 1H MTF reject in TRENDING/VOLATILE** — narrow filter (both 1H EMA AND RSI must oppose). Barely fires per recent telemetry. Could be soft per doctrine; revisit if data shows it's blocking 65+ paid candidates.
 

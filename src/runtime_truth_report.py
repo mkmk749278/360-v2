@@ -126,6 +126,15 @@ _REGIME_LINE_MARKER = "Regime distribution (last 100 cycles):"
 _QUIET_SCALP_BLOCK_MARKER = "QUIET_SCALP_BLOCK "
 _CONFIDENCE_GATE_MARKER = "confidence_gate "
 _PATH_FUNNEL_MARKER = "Path funnel (last 100 cycles):"
+# Phase 5 / 2a / 2b free-channel content rollout instrumentation.
+# Each successful free-channel post emits a structured marker so the truth
+# report can attribute volume by source (macro_alert / btc_move / regime_shift
+# / fear_greed / macro_news / signal_close / signal_highlight) and severity.
+_FREE_CHANNEL_POST_MARKER = "free_channel_post "
+_FREE_CHANNEL_POST_RE = re.compile(
+    r"free_channel_post\s+source=(?P<source>\S+)\s+severity=(?P<severity>\S+)"
+    r"(?:\s+symbol=(?P<symbol>\S+))?"
+)
 
 # Match e.g. "QUIET_SCALP_BLOCK BTCUSDT 360_SCALP conf=58.2 < min=60.0"
 _QUIET_SCALP_BLOCK_RE = re.compile(
@@ -364,6 +373,7 @@ def count_log_markers(log_text: str) -> Dict[str, int]:
             "regime_distribution": 0,
             "quiet_scalp_block": 0,
             "confidence_gate": 0,
+            "free_channel_post": 0,
             "total_lines": 0,
         }
     lines = log_text.splitlines()
@@ -372,7 +382,56 @@ def count_log_markers(log_text: str) -> Dict[str, int]:
         "regime_distribution": sum(1 for ln in lines if _REGIME_LINE_MARKER in ln),
         "quiet_scalp_block": sum(1 for ln in lines if _QUIET_SCALP_BLOCK_MARKER in ln),
         "confidence_gate": sum(1 for ln in lines if _CONFIDENCE_GATE_MARKER in ln),
+        "free_channel_post": sum(1 for ln in lines if _FREE_CHANNEL_POST_MARKER in ln),
         "total_lines": len(lines),
+    }
+
+
+def parse_free_channel_posts_from_logs(log_text: str) -> Dict[str, Any]:
+    """Parse `free_channel_post source=... severity=...` markers.
+
+    Emitted by:
+      * ``MacroWatchdog._broadcast`` (sources: ``macro_alert``, ``btc_move``,
+        ``regime_shift``, ``fear_greed``, ``macro_news``)
+      * ``TradeMonitor._post_signal_closed`` (source: ``signal_close``)
+      * ``SignalRouter.publish_highlight`` (source: ``signal_highlight``)
+
+    Returns ``{"by_source": {source: count}, "by_severity": {severity: count},
+    "by_source_severity": {source: {severity: count}}, "total": int}``.
+
+    Empty when log_text is empty or contains no matching markers — caller
+    should treat zero counts as "free-channel posts have not fired in this
+    window," which on a freshly-shipped instrumentation rollout is the
+    expected baseline.
+    """
+    by_source: Dict[str, int] = defaultdict(int)
+    by_severity: Dict[str, int] = defaultdict(int)
+    by_source_severity: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    total = 0
+    if not log_text:
+        return {
+            "by_source": {},
+            "by_severity": {},
+            "by_source_severity": {},
+            "total": 0,
+        }
+    for line in log_text.splitlines():
+        if _FREE_CHANNEL_POST_MARKER not in line:
+            continue
+        m = _FREE_CHANNEL_POST_RE.search(line)
+        if m is None:
+            continue
+        source = m.group("source")
+        severity = m.group("severity")
+        by_source[source] += 1
+        by_severity[severity] += 1
+        by_source_severity[source][severity] += 1
+        total += 1
+    return {
+        "by_source": dict(by_source),
+        "by_severity": dict(by_severity),
+        "by_source_severity": {k: dict(v) for k, v in by_source_severity.items()},
+        "total": total,
     }
 
 
@@ -676,6 +735,7 @@ def build_snapshot(
     confidence_gate_components: Optional[Dict[str, Any]] = None,
     invalidation_audit: Optional[Dict[str, Any]] = None,
     log_parse_diagnostics: Optional[Dict[str, int]] = None,
+    free_channel_posts: Optional[Dict[str, Any]] = None,
     now_ts: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     now_ts = now_ts or time.time()
@@ -871,6 +931,7 @@ def build_snapshot(
         "confidence_gate_components": confidence_gate_components or {},
         "invalidation_audit": invalidation_audit or {},
         "log_parse_diagnostics": log_parse_diagnostics or {},
+        "free_channel_posts": free_channel_posts or {},
         "recommended_operator_focus": {
             "most_suspicious_degradation": degraded[0] if degraded else None,
             "most_promising_healthy_path": healthiest[0] if healthiest else None,
@@ -1147,8 +1208,44 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         lines.append(f"- `Regime distribution` emissions: `{diag.get('regime_distribution', 0)}`")
         lines.append(f"- `QUIET_SCALP_BLOCK` events: `{diag.get('quiet_scalp_block', 0)}`")
         lines.append(f"- `confidence_gate` events: `{diag.get('confidence_gate', 0)}`")
+        lines.append(f"- `free_channel_post` events: `{diag.get('free_channel_post', 0)}`")
     else:
         lines.append("- _no diagnostics available_")
+
+    # ── Free-channel post attribution (Phase 1 / 2a / 2b / 5) ─────────
+    fcp = snapshot.get("free_channel_posts", {}) or {}
+    lines.extend(["", "## Free-channel post attribution"])
+    lines.append(
+        "_Counts every successful post to the free subscriber channel by source.  "
+        "Verifies the Phase-5 close-storytelling, Phase-2a BTC big-move, "
+        "Phase-2b regime-shift, and Phase-1 macro-alert pipelines are firing "
+        "in production.  Zero counts on a freshly-shipped instrumentation rollout "
+        "are the expected baseline._"
+    )
+    fcp_total = int(fcp.get("total", 0))
+    if fcp_total <= 0:
+        lines.append("- _no free-channel posts in this window_")
+    else:
+        lines.append(f"- Total posts in window: **{fcp_total}**")
+        by_source = fcp.get("by_source", {}) or {}
+        if by_source:
+            lines.append("")
+            lines.append("| Source | Count |")
+            lines.append("|---|---:|")
+            for source, count in sorted(
+                by_source.items(), key=lambda kv: (-int(kv[1]), str(kv[0]))
+            ):
+                lines.append(f"| {source} | {int(count)} |")
+        by_severity = fcp.get("by_severity", {}) or {}
+        if by_severity:
+            sev_summary = ", ".join(
+                f"{sev}={cnt}"
+                for sev, cnt in sorted(
+                    by_severity.items(), key=lambda kv: (-int(kv[1]), str(kv[0]))
+                )
+            )
+            lines.append("")
+            lines.append(f"- By severity: {sev_summary}")
 
     lines.extend(["", "## Dependency readiness"])
     dependency_readiness = snapshot.get("dependency_readiness", {}) or {}

@@ -16,6 +16,7 @@ if str(ROOT) not in sys.path:
 from src.runtime_truth_report import (
     build_snapshot,
     count_log_markers,
+    parse_free_channel_posts_from_logs,
     format_truth_report_markdown,
     load_json_file,
     parse_channel_funnel_from_logs,
@@ -109,6 +110,7 @@ def main() -> int:
     confidence_gate_decisions = parse_confidence_gate_decisions_from_logs(current_text, args.channel)
     confidence_gate_components = parse_confidence_gate_components_from_logs(current_text, args.channel)
     log_parse_diagnostics = count_log_markers(current_text)
+    free_channel_posts = parse_free_channel_posts_from_logs(current_text)
 
     invalidation_records: list = []
     if args.invalidation_records_json:
@@ -137,6 +139,7 @@ def main() -> int:
         confidence_gate_components=confidence_gate_components,
         invalidation_audit=invalidation_audit,
         log_parse_diagnostics=log_parse_diagnostics,
+        free_channel_posts=free_channel_posts,
         now_ts=time.time(),
     )
 

@@ -896,6 +896,10 @@ class SignalRouter:
                 "Posted free highlight: {} {} TP{} +{:.2f}%",
                 sig.symbol, sig.direction.value, tp_level, tp_pnl_pct,
             )
+            log.info(
+                "free_channel_post source=signal_highlight severity=HIGH symbol={}",
+                sig.symbol,
+            )
         except Exception as exc:
             log.warning("Failed to post free highlight: {}", exc)
 

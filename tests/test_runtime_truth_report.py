@@ -391,6 +391,108 @@ def test_count_log_markers_returns_per_marker_counts() -> None:
     assert counts["total_lines"] == 6
 
 
+def test_parse_free_channel_posts_groups_by_source_and_severity() -> None:
+    from src.runtime_truth_report import parse_free_channel_posts_from_logs
+    log_text = "\n".join([
+        "free_channel_post source=signal_close severity=HIGH symbol=BTCUSDT",
+        "free_channel_post source=signal_close severity=HIGH symbol=ETHUSDT",
+        "free_channel_post source=btc_move severity=CRITICAL symbol=-",
+        "free_channel_post source=regime_shift severity=HIGH symbol=-",
+        "free_channel_post source=fear_greed severity=HIGH symbol=-",
+        "unrelated line",
+        "free_channel_post source=signal_highlight severity=HIGH symbol=SOLUSDT",
+    ])
+    result = parse_free_channel_posts_from_logs(log_text)
+    assert result["total"] == 6
+    assert result["by_source"]["signal_close"] == 2
+    assert result["by_source"]["btc_move"] == 1
+    assert result["by_source"]["regime_shift"] == 1
+    assert result["by_source"]["fear_greed"] == 1
+    assert result["by_source"]["signal_highlight"] == 1
+    assert result["by_severity"]["HIGH"] == 5
+    assert result["by_severity"]["CRITICAL"] == 1
+    assert result["by_source_severity"]["signal_close"]["HIGH"] == 2
+
+
+def test_parse_free_channel_posts_handles_empty() -> None:
+    from src.runtime_truth_report import parse_free_channel_posts_from_logs
+    result = parse_free_channel_posts_from_logs("")
+    assert result == {
+        "by_source": {},
+        "by_severity": {},
+        "by_source_severity": {},
+        "total": 0,
+    }
+
+
+def test_count_log_markers_includes_free_channel_post() -> None:
+    log_text = "\n".join([
+        "free_channel_post source=signal_close severity=HIGH symbol=BTCUSDT",
+        "free_channel_post source=btc_move severity=CRITICAL symbol=-",
+        "unrelated line",
+    ])
+    counts = count_log_markers(log_text)
+    assert counts["free_channel_post"] == 2
+
+
+def test_format_truth_report_renders_free_channel_section() -> None:
+    from src.runtime_truth_report import format_truth_report_markdown
+    snapshot = {
+        "executive_summary": {},
+        "runtime_health": {"running": True, "status": "running", "health": "healthy"},
+        "path_funnel_truth": {},
+        "dependency_readiness": {},
+        "lifecycle_truth": {},
+        "quality_by_setup": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate_decisions": {},
+        "confidence_gate_components": {},
+        "invalidation_audit": {},
+        "log_parse_diagnostics": {},
+        "free_channel_posts": {
+            "by_source": {"signal_close": 3, "btc_move": 1},
+            "by_severity": {"HIGH": 3, "CRITICAL": 1},
+            "by_source_severity": {},
+            "total": 4,
+        },
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Free-channel post attribution" in md
+    assert "Total posts in window: **4**" in md
+    assert "| signal_close | 3 |" in md
+    assert "| btc_move | 1 |" in md
+    assert "HIGH=3" in md
+    assert "CRITICAL=1" in md
+
+
+def test_format_truth_report_renders_empty_free_channel_section() -> None:
+    """When no free-channel posts fired in window, render the placeholder line."""
+    from src.runtime_truth_report import format_truth_report_markdown
+    snapshot = {
+        "executive_summary": {},
+        "runtime_health": {"running": True, "status": "running", "health": "healthy"},
+        "path_funnel_truth": {},
+        "dependency_readiness": {},
+        "lifecycle_truth": {},
+        "quality_by_setup": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate_decisions": {},
+        "confidence_gate_components": {},
+        "invalidation_audit": {},
+        "log_parse_diagnostics": {},
+        "free_channel_posts": {},
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Free-channel post attribution" in md
+    assert "no free-channel posts in this window" in md
+
+
 def test_count_log_markers_handles_empty() -> None:
     counts = count_log_markers("")
     assert counts == {
@@ -398,6 +500,7 @@ def test_count_log_markers_handles_empty() -> None:
         "regime_distribution": 0,
         "quiet_scalp_block": 0,
         "confidence_gate": 0,
+        "free_channel_post": 0,
         "total_lines": 0,
     }
 

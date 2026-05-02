@@ -181,13 +181,19 @@ class MacroWatchdog:
     # Routing helper
     # ------------------------------------------------------------------
 
-    async def _broadcast(self, msg: str, severity: str) -> None:
+    async def _broadcast(
+        self, msg: str, severity: str, source: str = "macro_alert"
+    ) -> None:
         """Send `msg` to admin and (when severity warrants) the free channel.
 
         Severity HIGH or CRITICAL → admin + free.  Anything else → admin only.
         Free-channel post errors are logged but never re-raised — admin alert
         already succeeded and we don't want a free-channel issue to silence
         future admin alerts in the same poll cycle.
+
+        ``source`` identifies the trigger family for truth-report instrumentation
+        (e.g. ``btc_move``, ``regime_shift``, ``fear_greed``, ``macro_news``).
+        Emitted as a parseable log marker on each successful free-channel post.
         """
         await self._send_alert(msg)
         if (
@@ -196,6 +202,10 @@ class MacroWatchdog:
         ):
             try:
                 await self._send_to_free(msg)
+                log.info(
+                    "free_channel_post source={} severity={} symbol=-",
+                    source, severity,
+                )
             except Exception as exc:
                 log.warning(
                     "MacroWatchdog free-channel post failed (severity={}): {}",
@@ -322,7 +332,7 @@ class MacroWatchdog:
             f"Watch for correlated moves on altcoins; existing positions may "
             f"need attention._"
         )
-        await self._broadcast(msg, severity)
+        await self._broadcast(msg, severity, source="btc_move")
         log.info(
             "MacroWatchdog: BTC price-move alert ({:+.2f}%, severity={})",
             pct_change, severity,
@@ -415,7 +425,7 @@ class MacroWatchdog:
             f"flipped {new_direction.lower()}.  Correlated alts often follow "
             f"the leader; setups against the new bias face stronger headwind._"
         )
-        await self._broadcast(msg, "HIGH")
+        await self._broadcast(msg, "HIGH", source="regime_shift")
         log.info(
             "MacroWatchdog: regime shift alert {} {} → {}",
             symbol, prev_direction, new_direction,
@@ -448,7 +458,7 @@ class MacroWatchdog:
                 "_Extreme fear often precedes capitulation events or short-squeeze "
                 "bounces.  Review open positions and tighten stop losses._"
             )
-            await self._broadcast(msg, severity)
+            await self._broadcast(msg, severity, source="fear_greed")
             log.info("MacroWatchdog: Fear & Greed extreme fear alert (value={})", value)
 
         elif value >= _FG_EXTREME_HIGH:
@@ -461,7 +471,7 @@ class MacroWatchdog:
                 "_Extreme greed historically precedes sharp corrections.  "
                 "Consider tightening trailing stops on long positions._"
             )
-            await self._broadcast(msg, severity)
+            await self._broadcast(msg, severity, source="fear_greed")
             log.info("MacroWatchdog: Fear & Greed extreme greed alert (value={})", value)
 
     async def _check_news(self, coin: str, session: aiohttp.ClientSession) -> None:
@@ -522,7 +532,7 @@ class MacroWatchdog:
             msg += f"*Expected Impact:* {impact}\n"
         msg += "\n_This is an AI-generated macro alert.  No trade signal has been generated._"
 
-        await self._broadcast(msg, severity)
+        await self._broadcast(msg, severity, source="macro_news")
         log.info(
             "MacroWatchdog: {} news alert ({}, score={:.2f})",
             coin, severity, result.score,

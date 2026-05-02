@@ -1198,6 +1198,10 @@ class TradeMonitor:
                 )
                 try:
                     await self._send(TELEGRAM_FREE_CHANNEL_ID, header + text)
+                    log.info(
+                        "free_channel_post source=signal_close severity=HIGH symbol=%s",
+                        sig.symbol,
+                    )
                 except Exception as exc:
                     log.warning(
                         "Free-channel close mirror failed for %s: %s", sig.symbol, exc
