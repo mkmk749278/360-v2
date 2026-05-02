@@ -52,8 +52,16 @@ Goal: enrich the free channel as a paid-conversion funnel — market updates, ma
 - Network errors (timeout, non-200, malformed payload) degrade silently
 - 11 tests in `tests/test_macro_watchdog_btc_move.py`
 
+**Phase 2b — BTC/ETH regime-shift alert** ✅ shipped
+- `MacroWatchdog._check_regime_shift()` polls 22 1h klines for BTCUSDT and ETHUSDT each cycle
+- Computes EMA21; classifies UP (`close > EMA21`) or DOWN (`close < EMA21`)
+- First observation records baseline silently — only flips alert
+- Per-symbol cooldown (env: `MACRO_REGIME_SHIFT_COOLDOWN_SEC`, default 4h) absorbs chop near EMA
+- Routes via `_broadcast` HIGH severity → admin + free channel
+- Feature flag: `MACRO_REGIME_SHIFT_ENABLED` (default true)
+- 12 tests in `tests/test_macro_watchdog_regime_shift.py`
+
 **Phase 2 (still open) — additional event triggers**
-- Regime shift on BTC/ETH (TRENDING_UP ↔ TRENDING_DOWN flip) → free channel
 - BTC dominance ±2% (requires extra data source)
 
 **Phase 3 — Charts attached to scheduled posts**

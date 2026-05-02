@@ -185,6 +185,15 @@ MACRO_BTC_MOVE_COOLDOWN_SEC: int = int(
     os.getenv("MACRO_BTC_MOVE_COOLDOWN_SEC", "3600")
 )
 
+# Phase 2b — BTC/ETH 1h regime-shift alerts.
+# When the 1h close crosses the 21-period EMA on BTC or ETH the watchdog
+# broadcasts a HIGH-severity alert to admin + free channel.  Per-symbol
+# cooldown defaults to 4h to absorb chop when price hovers near EMA21.
+MACRO_REGIME_SHIFT_ENABLED: bool = _safe_bool("MACRO_REGIME_SHIFT_ENABLED", "true")
+MACRO_REGIME_SHIFT_COOLDOWN_SEC: int = int(
+    os.getenv("MACRO_REGIME_SHIFT_COOLDOWN_SEC", "14400")
+)
+
 # ---------------------------------------------------------------------------
 # Dynamic Tiering (Market Watchdog) — PR 2
 # ---------------------------------------------------------------------------
