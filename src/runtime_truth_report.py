@@ -190,6 +190,15 @@ _CONFIDENCE_COMPONENT_RE = re.compile(
     r"(?:\s+engine\(smc=(?P<smc>[-\d.]+),regime=(?P<regime>[-\d.]+),"
     r"volume=(?P<volume>[-\d.]+),indicators=(?P<indicators>[-\d.]+),"
     r"patterns=(?P<patterns>[-\d.]+),mtf=(?P<mtf>[-\d.]+)\))?"
+    # Optional soft-penalty breakdown — present after the LSR-zero-volume
+    # investigation instrumentation (2026-05-03).  Splits the aggregate
+    # ``gate=`` penalty into its 6 sub-types so we can attribute WHICH
+    # soft gate is dragging confidence down (HTF mismatch?  OI flip?
+    # VWAP overextension?  Cluster suppression?).  Older log lines
+    # without this group are still parsed correctly.
+    r"(?:\s+soft_penalties\(vwap=(?P<sp_vwap>[-\d.]+),kz=(?P<sp_kz>[-\d.]+),"
+    r"oi=(?P<sp_oi>[-\d.]+),spoof=(?P<sp_spoof>[-\d.]+),"
+    r"vol_div=(?P<sp_vol_div>[-\d.]+),cluster=(?P<sp_cluster>[-\d.]+)\))?"
 )
 
 
@@ -373,6 +382,24 @@ def parse_confidence_gate_components_from_logs(
             except (ValueError, TypeError):
                 engine_fields = {}
 
+        # Soft-penalty per-type breakdown (LSR diagnosis instrumentation).
+        # Splits the aggregate gate penalty into VWAP / KZ / OI / SPOOF /
+        # VOL_DIV / CLUSTER so the truth report can answer "which gate
+        # is firing hardest?"  Optional — older log lines have no group.
+        soft_penalty_fields: Dict[str, float] = {}
+        if match.group("sp_vwap") is not None:
+            try:
+                soft_penalty_fields = {
+                    "vwap": float(match.group("sp_vwap")),
+                    "kz": float(match.group("sp_kz")),
+                    "oi": float(match.group("sp_oi")),
+                    "spoof": float(match.group("sp_spoof")),
+                    "vol_div": float(match.group("sp_vol_div")),
+                    "cluster": float(match.group("sp_cluster")),
+                }
+            except (ValueError, TypeError):
+                soft_penalty_fields = {}
+
         bucket = sums.setdefault(setup, {}).setdefault(decision, defaultdict(float))
         for k, v in fields.items():
             bucket[k] += v
@@ -380,6 +407,10 @@ def parse_confidence_gate_components_from_logs(
             bucket[f"engine_{k}"] += v
         if engine_fields:
             bucket["engine_samples"] += 1
+        for k, v in soft_penalty_fields.items():
+            bucket[f"sp_{k}"] += v
+        if soft_penalty_fields:
+            bucket["sp_samples"] += 1
         counts.setdefault(setup, {})
         counts[setup][decision] = counts[setup].get(decision, 0) + 1
 
@@ -413,6 +444,17 @@ def parse_confidence_gate_components_from_logs(
                     "avg_indicators": round(totals["engine_indicators"] / engine_n, 2),
                     "avg_patterns": round(totals["engine_patterns"] / engine_n, 2),
                     "avg_mtf": round(totals["engine_mtf"] / engine_n, 2),
+                }
+            sp_n = int(totals.get("sp_samples", 0))
+            if sp_n > 0:
+                entry["soft_penalty_breakdown"] = {
+                    "samples": sp_n,
+                    "avg_vwap": round(totals["sp_vwap"] / sp_n, 2),
+                    "avg_kz": round(totals["sp_kz"] / sp_n, 2),
+                    "avg_oi": round(totals["sp_oi"] / sp_n, 2),
+                    "avg_spoof": round(totals["sp_spoof"] / sp_n, 2),
+                    "avg_vol_div": round(totals["sp_vol_div"] / sp_n, 2),
+                    "avg_cluster": round(totals["sp_cluster"] / sp_n, 2),
                 }
             by_setup[setup][decision] = entry
     return by_setup
@@ -1366,6 +1408,71 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         lines.append(
             "- _no engine-component data parsed in window — log line predates "
             "the engine-breakdown instrumentation, will populate after redeploy_"
+        )
+
+    # ── Soft-penalty per-type breakdown (LSR diagnosis instrumentation)
+    # Splits the aggregate ``gate=`` penalty into the 6 sub-types so we
+    # can attribute WHICH soft gate is dragging confidence down.  When
+    # any single penalty dominates (e.g. avg vwap=8 across LSR filtered
+    # candidates), that's the lever to investigate / tune.  Older log
+    # lines without this group render the placeholder section.
+    has_sp_breakdown = any(
+        decision_data.get("soft_penalty_breakdown")
+        for decisions in components.values()
+        for decision_data in decisions.values()
+    )
+    lines.extend(["", "## Soft-penalty per-type breakdown"])
+    if has_sp_breakdown:
+        lines.append(
+            "_Average per-type contribution to the aggregate ``gate`` penalty.  "
+            "When one column dominates a setup's filtered row, that gate is "
+            "the bottleneck — investigate its trigger conditions before tuning "
+            "the overall threshold.  Sums to the aggregate ``gate`` penalty "
+            "shown in the 'Confidence component breakdown' table above (modulo "
+            "rounding).  VWAP = VWAP overextension; KZ = kill zone / session "
+            "filter; OI = open-interest flip; SPOOF = order-book spoofing; "
+            "VOL_DIV = volume-CVD divergence; CLUSTER = symbol cluster suppression._"
+        )
+        lines.append(
+            "| Setup | Decision | Samples | Avg final | VWAP | KZ | OI | Spoof | Vol_Div | Cluster | Sum |"
+        )
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        for setup in sorted(components.keys()):
+            for decision in sorted(components[setup].keys()):
+                m = components[setup][decision]
+                sp = m.get("soft_penalty_breakdown")
+                if not sp:
+                    continue
+                sp_sum = (
+                    sp.get("avg_vwap", 0.0)
+                    + sp.get("avg_kz", 0.0)
+                    + sp.get("avg_oi", 0.0)
+                    + sp.get("avg_spoof", 0.0)
+                    + sp.get("avg_vol_div", 0.0)
+                    + sp.get("avg_cluster", 0.0)
+                )
+                lines.append(
+                    "| {setup} | {decision} | {samples} | {final:.2f} | "
+                    "{vwap:.2f} | {kz:.2f} | {oi:.2f} | {spoof:.2f} | {vd:.2f} | "
+                    "{cl:.2f} | **{sm:.2f}** |".format(
+                        setup=setup,
+                        decision=decision,
+                        samples=sp.get("samples", 0),
+                        final=m.get("avg_final", 0.0),
+                        vwap=sp.get("avg_vwap", 0.0),
+                        kz=sp.get("avg_kz", 0.0),
+                        oi=sp.get("avg_oi", 0.0),
+                        spoof=sp.get("avg_spoof", 0.0),
+                        vd=sp.get("avg_vol_div", 0.0),
+                        cl=sp.get("avg_cluster", 0.0),
+                        sm=sp_sum,
+                    )
+                )
+    else:
+        lines.append(
+            "- _no soft-penalty per-type data parsed in window — log line "
+            "predates the LSR diagnosis instrumentation, will populate "
+            "after redeploy_"
         )
 
     # ── Invalidation Quality Audit ────────────────────────────────────
