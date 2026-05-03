@@ -3268,6 +3268,13 @@ class Scanner:
     ) -> Tuple[Optional[Any], Optional[bool]]:
         t0_signal = time.monotonic()
         soft_penalty: float = 0.0  # Accumulated confidence deduction from soft gates
+        # Per-type soft-penalty breakdown for the confidence_gate log line.
+        # Truth-report parser surfaces this as a `soft_penalties(...)` group
+        # so we can attribute which gate is dragging confidence down.  Without
+        # this, the aggregate "penalty" number masks WHICH penalty fired —
+        # e.g. is it HTF mismatch, OI flip, VWAP overextension, or a cluster
+        # gate?  Each soft-gate accumulator below appends to this dict.
+        _soft_penalty_by_type: Dict[str, float] = {}
         _fired_gates: list = []
         chan_name = chan.config.name
 
@@ -3511,6 +3518,7 @@ class Scanner:
                     )
                     _scaled = round(_base * regime_mult, 1)
                     soft_penalty += _scaled
+                    _soft_penalty_by_type["vwap"] = _soft_penalty_by_type.get("vwap", 0.0) + _scaled
                     _fired_gates.append("VWAP")
                     log.debug(
                         "SOFT_PENALTY {} {} {:+.1f} (base={:.1f} × regime={:.1f}) total={:.1f}: {}",
@@ -3535,6 +3543,7 @@ class Scanner:
                 )
                 _scaled = round(_base * regime_mult, 1)
                 soft_penalty += _scaled
+                _soft_penalty_by_type["kz"] = _soft_penalty_by_type.get("kz", 0.0) + _scaled
                 _fired_gates.append("KZ")
                 log.debug(
                     "SOFT_PENALTY {} {} {:+.1f} (base={:.1f} × regime={:.1f}) total={:.1f}: {}",
@@ -3560,6 +3569,7 @@ class Scanner:
                         _base = _penalty_weights.get("oi", 15.0)
                         _scaled = round(_base * regime_mult, 1)
                         soft_penalty += _scaled
+                        _soft_penalty_by_type["oi"] = _soft_penalty_by_type.get("oi", 0.0) + _scaled
                         _fired_gates.append("OI")
                         log.debug(
                             "SOFT_PENALTY {} {} {:+.1f} (base={:.0f} × regime={:.1f}) total={:.1f}: {}",
@@ -3657,6 +3667,7 @@ class Scanner:
                     _base = _penalty_weights.get("spoof", 10.0)
                     _scaled = round(_base * regime_mult, 1)
                     soft_penalty += _scaled
+                    _soft_penalty_by_type["spoof"] = _soft_penalty_by_type.get("spoof", 0.0) + _scaled
                     _fired_gates.append("SPOOF")
                     log.debug(
                         "SOFT_PENALTY {} {} {:+.1f} (base={:.0f} × regime={:.1f}) total={:.1f}: {}",
@@ -3689,6 +3700,7 @@ class Scanner:
                     )
                     _scaled = round(_base * regime_mult, 1)
                     soft_penalty += _scaled
+                    _soft_penalty_by_type["vol_div"] = _soft_penalty_by_type.get("vol_div", 0.0) + _scaled
                     _fired_gates.append("VOL_DIV")
                     log.debug(
                         "SOFT_PENALTY {} {} {:+.1f} (base={:.1f} × regime={:.1f}) total={:.1f}: {}",
@@ -3709,6 +3721,7 @@ class Scanner:
                 _base = _penalty_weights.get("cluster", 8.0)
                 _scaled = round(_base * regime_mult, 1)
                 soft_penalty += _scaled
+                _soft_penalty_by_type["cluster"] = _soft_penalty_by_type.get("cluster", 0.0) + _scaled
                 _fired_gates.append("CLUSTER")
                 log.debug(
                     "SOFT_PENALTY {} {} {:+.1f} (base={:.0f} × regime={:.1f}) total={:.1f}: {}",
@@ -4366,7 +4379,8 @@ class Scanner:
                 "adjustments(feedback={:+.1f},stat_filter={:+.1f},regime_transition={:+.1f}) "
                 "components(market={:.1f},execution={:.1f},risk={:.1f},thesis_adj={:.1f}) "
                 "engine(smc={:.1f},regime={:.1f},volume={:.1f},indicators={:.1f},"
-                "patterns={:.1f},mtf={:.1f})",
+                "patterns={:.1f},mtf={:.1f}) "
+                "soft_penalties(vwap={:.1f},kz={:.1f},oi={:.1f},spoof={:.1f},vol_div={:.1f},cluster={:.1f})",
                 symbol,
                 chan_name,
                 _setup_class_name,
@@ -4394,6 +4408,12 @@ class Scanner:
                 float(sig.component_scores.get("indicators", 0.0)),
                 float(sig.component_scores.get("patterns", 0.0)),
                 float(sig.component_scores.get("mtf", 0.0)),
+                float(_soft_penalty_by_type.get("vwap", 0.0)),
+                float(_soft_penalty_by_type.get("kz", 0.0)),
+                float(_soft_penalty_by_type.get("oi", 0.0)),
+                float(_soft_penalty_by_type.get("spoof", 0.0)),
+                float(_soft_penalty_by_type.get("vol_div", 0.0)),
+                float(_soft_penalty_by_type.get("cluster", 0.0)),
             )
 
         # Regime transition boost (item 15): if regime just changed in the direction

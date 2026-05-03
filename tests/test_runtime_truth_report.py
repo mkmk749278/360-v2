@@ -798,6 +798,12 @@ _SAMPLE_CONFIDENCE_LINE_WITH_ENGINE = (
 )
 
 
+_SAMPLE_CONFIDENCE_LINE_WITH_SOFT_PENALTIES = (
+    _SAMPLE_CONFIDENCE_LINE_WITH_ENGINE
+    + " soft_penalties(vwap=4.0,kz=1.5,oi=0.0,spoof=0.0,vol_div=2.5,cluster=0.0)"
+)
+
+
 def test_parse_confidence_gate_components_picks_up_engine_breakdown() -> None:
     """Lines that include the new ``engine(...)`` group surface a second
     component table that explains the gap between the legacy components
@@ -1090,3 +1096,159 @@ def test_format_truth_report_audit_section_when_no_data() -> None:
     md = format_truth_report_markdown(snapshot, {})
     assert "## Invalidation Quality Audit" in md
     assert "no classified invalidation records yet" in md
+
+
+# ---------------------------------------------------------------------------
+# Soft-penalty per-type breakdown (LSR diagnosis instrumentation)
+# ---------------------------------------------------------------------------
+
+
+def test_parse_confidence_gate_picks_up_soft_penalty_breakdown() -> None:
+    """Lines with the new ``soft_penalties(...)`` group surface a
+    per-type breakdown so the report can attribute WHICH gate is firing."""
+    log_text = "\n".join([_SAMPLE_CONFIDENCE_LINE_WITH_SOFT_PENALTIES])
+    result = parse_confidence_gate_components_from_logs(log_text, "360_SCALP")
+    bucket = result["QUIET_COMPRESSION_BREAK"]["filtered"]
+    assert "soft_penalty_breakdown" in bucket
+    sp = bucket["soft_penalty_breakdown"]
+    assert sp["samples"] == 1
+    assert sp["avg_vwap"] == 4.0
+    assert sp["avg_kz"] == 1.5
+    assert sp["avg_oi"] == 0.0
+    assert sp["avg_spoof"] == 0.0
+    assert sp["avg_vol_div"] == 2.5
+    assert sp["avg_cluster"] == 0.0
+
+
+def test_parse_confidence_gate_legacy_lines_have_no_soft_penalty_block() -> None:
+    """Older log lines without ``soft_penalties(...)`` must still parse
+    cleanly — they simply omit the ``soft_penalty_breakdown`` key."""
+    log_text = "\n".join([_SAMPLE_CONFIDENCE_LINE])
+    result = parse_confidence_gate_components_from_logs(log_text, "360_SCALP")
+    bucket = result["QUIET_COMPRESSION_BREAK"]["filtered"]
+    assert bucket["samples"] == 1
+    assert "soft_penalty_breakdown" not in bucket
+
+
+def test_parse_confidence_gate_engine_only_lines_have_no_soft_penalty_block() -> None:
+    """Engine breakdown without soft_penalties is still legitimate during
+    the deploy transition window — must parse cleanly."""
+    log_text = "\n".join([_SAMPLE_CONFIDENCE_LINE_WITH_ENGINE])
+    result = parse_confidence_gate_components_from_logs(log_text, "360_SCALP")
+    bucket = result["QUIET_COMPRESSION_BREAK"]["filtered"]
+    assert "engine_components" in bucket
+    assert "soft_penalty_breakdown" not in bucket
+
+
+def test_parse_confidence_gate_aggregates_soft_penalties_across_samples() -> None:
+    """Multi-sample averaging of soft-penalty breakdowns."""
+    second = _SAMPLE_CONFIDENCE_LINE_WITH_SOFT_PENALTIES.replace("BTCUSDT", "ETHUSDT").replace(
+        "soft_penalties(vwap=4.0,kz=1.5,oi=0.0,spoof=0.0,vol_div=2.5,cluster=0.0)",
+        "soft_penalties(vwap=8.0,kz=0.5,oi=2.0,spoof=0.0,vol_div=1.5,cluster=0.0)",
+    )
+    log_text = "\n".join([_SAMPLE_CONFIDENCE_LINE_WITH_SOFT_PENALTIES, second])
+    result = parse_confidence_gate_components_from_logs(log_text, "360_SCALP")
+    sp = result["QUIET_COMPRESSION_BREAK"]["filtered"]["soft_penalty_breakdown"]
+    assert sp["samples"] == 2
+    assert sp["avg_vwap"] == 6.0     # (4+8)/2
+    assert sp["avg_kz"] == 1.0       # (1.5+0.5)/2
+    assert sp["avg_oi"] == 1.0       # (0+2)/2
+    assert sp["avg_vol_div"] == 2.0  # (2.5+1.5)/2
+
+
+def test_format_truth_report_renders_soft_penalty_section() -> None:
+    snapshot = {
+        "executive_summary": {},
+        "runtime_health": {"running": True, "status": "running", "health": "healthy"},
+        "path_funnel_truth": {},
+        "dependency_readiness": {},
+        "lifecycle_truth": {},
+        "quality_by_setup": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate_decisions": {},
+        "confidence_gate_components": {
+            "LIQUIDITY_SWEEP_REVERSAL": {
+                "filtered": {
+                    "samples": 3138,
+                    "avg_final": 52.36,
+                    "avg_threshold": 68.15,
+                    "avg_gap_to_threshold": 15.79,
+                    "avg_total_penalty": 10.28,
+                    "avg_raw": 0.0,
+                    "avg_composite": 0.0,
+                    "components": {
+                        "avg_market": 20.81,
+                        "avg_execution": 19.33,
+                        "avg_risk": 15.20,
+                        "avg_thesis_adj": 2.59,
+                    },
+                    "soft_penalty_breakdown": {
+                        "samples": 3138,
+                        "avg_vwap": 5.5,
+                        "avg_kz": 1.2,
+                        "avg_oi": 2.8,
+                        "avg_spoof": 0.0,
+                        "avg_vol_div": 0.8,
+                        "avg_cluster": 0.0,
+                    },
+                }
+            }
+        },
+        "invalidation_audit": {},
+        "log_parse_diagnostics": {},
+        "free_channel_posts": {},
+        "pre_tp_fires": {},
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Soft-penalty per-type breakdown" in md
+    assert "| LIQUIDITY_SWEEP_REVERSAL | filtered |" in md
+    assert "5.50" in md  # avg_vwap
+    assert "2.80" in md  # avg_oi
+    # Sum column: 5.5+1.2+2.8+0+0.8+0 = 10.30
+    assert "10.30" in md
+
+
+def test_format_truth_report_renders_soft_penalty_placeholder_when_missing() -> None:
+    snapshot = {
+        "executive_summary": {},
+        "runtime_health": {"running": True, "status": "running", "health": "healthy"},
+        "path_funnel_truth": {},
+        "dependency_readiness": {},
+        "lifecycle_truth": {},
+        "quality_by_setup": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate_decisions": {},
+        "confidence_gate_components": {
+            "QUIET_COMPRESSION_BREAK": {
+                "filtered": {
+                    "samples": 100,
+                    "avg_final": 60.0,
+                    "avg_threshold": 65.0,
+                    "avg_gap_to_threshold": 5.0,
+                    "avg_total_penalty": 0.0,
+                    "avg_raw": 60.0,
+                    "avg_composite": 60.0,
+                    "components": {
+                        "avg_market": 20.0,
+                        "avg_execution": 18.0,
+                        "avg_risk": 15.0,
+                        "avg_thesis_adj": 7.0,
+                    },
+                    # no soft_penalty_breakdown → placeholder path
+                }
+            }
+        },
+        "invalidation_audit": {},
+        "log_parse_diagnostics": {},
+        "free_channel_posts": {},
+        "pre_tp_fires": {},
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "## Soft-penalty per-type breakdown" in md
+    assert "no soft-penalty per-type data" in md
