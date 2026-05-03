@@ -1,22 +1,5 @@
 [
   {
-    "dispatched_at": 1777082758.359828,
-    "signal_id": "SRFLIP-4AA731A4",
-    "channel": "360_SCALP",
-    "symbol": "ADAUSDT",
-    "direction": "LONG",
-    "setup_class": "SR_FLIP_RETEST",
-    "confidence": 83.5,
-    "signal_tier": "A+",
-    "entry": 0.251,
-    "sl": 0.248992,
-    "tp1": 0.2534096,
-    "tp2": 0.25404,
-    "tp3": 0.258028,
-    "market_phase": "TRENDING_UP | ATR%ile=38 | Vol=ACCUMULATION",
-    "telegram_text": "*🔄 S/R FLIP RETEST* │ *ADAUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `0.250864` – `0.251058` \\(limit order\\)\n   Mid: `0.251000`\n🛑 SL: `0.248992` (-0.80%)\n🎯 TP1: `0.253410` (+0.96%)\n🎯 TP2: `0.254040` (+1.21%)\n🎯 TP3: `0.258028` (+2.80%)\n\n📊 Setup: SR FLIP RETEST | Confidence: *83.5* (B)\n⏱ Hold: ~1-2h | R:R 1:1.2\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 0.251500 | FVG 0.251000-0.250300 + Below 0.249700 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *B*"
-  },
-  {
     "dispatched_at": 1777089173.474579,
     "signal_id": "SRFLIP-26F71053",
     "channel": "360_SCALP",
@@ -848,5 +831,22 @@
     "tp3": 81.52528,
     "market_phase": "QUIET | ATR%ile=76 | Vol=DISTRIBUTION",
     "telegram_text": "*🔋 COMPRESSION BREAK* │ *SOLUSDT* │ *SHORT*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `83.5157` – `83.5634` \\(limit order\\)\n   Mid: `83.5300`\n🛑 SL: `84.1982` (+0.80%)\n🎯 TP1: `82.6613` (-1.04%)\n🎯 TP2: `82.1935` (-1.60%)\n🎯 TP3: `81.5253` (-2.40%)\n\n📊 Setup: QUIET COMPRESSION BREAK | Confidence: *82.0* (A)\n⏱ Hold: ~1-2h | R:R 1:1.3\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep LONG at 83.6200 | FVG 83.7200-83.6900 + Above 83.6200 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *A*"
+  },
+  {
+    "dispatched_at": 1777741073.4829862,
+    "signal_id": "QBREAK-51F8D91A",
+    "channel": "360_SCALP",
+    "symbol": "ZECUSDT",
+    "direction": "LONG",
+    "setup_class": "QUIET_COMPRESSION_BREAK",
+    "confidence": 82.5,
+    "signal_tier": "A+",
+    "entry": 376.79,
+    "sl": 371.85965959,
+    "tp1": 383.19944254,
+    "tp2": 386.65068083,
+    "tp3": 391.58102124,
+    "market_phase": "QUIET | ATR%ile=99 | Vol=ACCUMULATION",
+    "telegram_text": "*🔋 COMPRESSION BREAK* │ *ZECUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `376.51` – `376.91` \\(limit order\\)\n   Mid: `376.79`\n🛑 SL: `371.86` (-1.31%)\n🎯 TP1: `383.20` (+1.70%)\n🎯 TP2: `386.65` (+2.62%)\n🎯 TP3: `391.58` (+3.93%)\n\n📊 Setup: QUIET COMPRESSION BREAK | Confidence: *82.5* (A)\n⏱ Hold: ~1-2h | R:R 1:1.3\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 376.4800 | FVG 374.1200-373.9600 + Below 376.4800 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *A*"
   }
 ]
