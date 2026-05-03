@@ -115,6 +115,8 @@ class CommandHandler:
         gem_scanner: Optional[Any] = None,
         trade_observer: Optional[Any] = None,
         stat_filter: Optional[Any] = None,
+        set_auto_execution_mode_fn: Optional[Callable] = None,
+        get_auto_execution_status_fn: Optional[Callable] = None,
     ) -> None:
         self._telegram = telegram
         self._telemetry = telemetry
@@ -140,6 +142,8 @@ class CommandHandler:
         self._gem_scanner = gem_scanner
         self._trade_observer = trade_observer
         self._stat_filter = stat_filter
+        self._set_auto_execution_mode_fn = set_auto_execution_mode_fn
+        self._get_auto_execution_status_fn = get_auto_execution_status_fn
         # Mutable backtest config shared via CommandContext
         self._bt_fee_pct: float = 0.08
         self._bt_slippage_pct: float = 0.02
@@ -257,4 +261,6 @@ class CommandHandler:
             bt_slippage_pct=self._bt_slippage_pct,
             bt_lookahead=self._bt_lookahead,
             bt_min_window=self._bt_min_window,
+            set_auto_execution_mode_fn=self._set_auto_execution_mode_fn,
+            get_auto_execution_status_fn=self._get_auto_execution_status_fn,
         )

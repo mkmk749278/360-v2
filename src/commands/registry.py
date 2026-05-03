@@ -77,6 +77,11 @@ class CommandContext:
     trade_observer: Optional[Any] = None
     alert_subscribers: Set[str] = field(default_factory=set)
     stat_filter: Optional[Any] = None
+    # Auto-execution runtime control (Phase A4 prep — /automode command).
+    # set_auto_execution_mode_fn: ``Callable[[str], Tuple[bool, str]]``
+    # get_auto_execution_status_fn: ``Callable[[], Dict[str, Any]]``
+    set_auto_execution_mode_fn: Optional[Callable] = None
+    get_auto_execution_status_fn: Optional[Callable] = None
     # Backtest config (mutable, shared via context)
     bt_fee_pct: float = 0.08
     bt_slippage_pct: float = 0.02
