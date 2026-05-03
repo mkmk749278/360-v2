@@ -224,3 +224,103 @@ async def handle_suppressed(args: List[str], ctx: CommandContext) -> None:
         return
     digest = tracker.format_telegram_digest()
     await ctx.reply(digest)
+
+
+# ---------------------------------------------------------------------------
+# Auto-execution mode runtime control (Phase A2 / A3 / A4 — Telegram bridge)
+# ---------------------------------------------------------------------------
+
+
+def _format_auto_status(status: dict) -> str:
+    """Render the auto-execution status dict as a Telegram message."""
+    mode = str(status.get("mode", "unknown")).upper()
+    emoji = {"OFF": "⚪", "PAPER": "🧪", "LIVE": "🔴"}.get(mode, "❓")
+    lines = [
+        f"{emoji} *Auto-Execution Mode:* `{mode}`",
+        "",
+        f"Open positions:    {status.get('open_positions', 0)}",
+        f"Daily PnL:         ${status.get('daily_pnl_usd', 0.0):+.2f} ({status.get('daily_loss_pct', 0.0):+.2f}%)",
+        f"Current equity:    ${status.get('current_equity_usd', 0.0):.2f}",
+    ]
+    if status.get("daily_kill_tripped"):
+        lines.append("⚠️ Daily-loss kill TRIPPED — no new opens until UTC midnight")
+    if status.get("manual_paused"):
+        lines.append("⏸️ Manual pause active")
+    if "simulated_pnl_usd" in status:
+        lines.append(f"Paper session PnL: ${status['simulated_pnl_usd']:+.4f}")
+    return "\n".join(lines)
+
+
+@registry.command(
+    "/automode",
+    aliases=["/auto", "/exec_mode"],
+    admin=True,
+    group="engine",
+    help_text="Show or change auto-execution mode: /automode [off|paper|live]",
+)
+async def handle_automode(args: List[str], ctx: CommandContext) -> None:
+    """Show or change the engine's auto-execution mode at runtime.
+
+    Usage:
+        /automode             — show current mode and status
+        /automode paper       — switch to paper-trade mode (simulated fills)
+        /automode live        — switch to live (real orders, requires API keys)
+        /automode off         — disable auto-execution entirely
+
+    Safety: refuses to switch while open positions exist.  Live mode
+    requires EXCHANGE_API_KEY + EXCHANGE_API_SECRET in env.  Changes are
+    ephemeral — engine restart reverts to AUTO_EXECUTION_MODE env var.
+    """
+    if ctx.get_auto_execution_status_fn is None or ctx.set_auto_execution_mode_fn is None:
+        await ctx.reply("⚠️ Auto-execution control not wired into this engine instance.")
+        return
+
+    # No args → show status only
+    if not args:
+        try:
+            status = ctx.get_auto_execution_status_fn() or {}
+        except Exception as exc:
+            await ctx.reply(f"❌ Failed to read auto-execution status: {exc}")
+            return
+        await ctx.reply(_format_auto_status(status))
+        return
+
+    requested = args[0].strip().lower()
+    if requested not in ("off", "paper", "live"):
+        await ctx.reply(
+            "❌ Mode must be one of: `off`, `paper`, `live`.\n"
+            "Usage: `/automode [off|paper|live]`"
+        )
+        return
+
+    # Live-mode confirmation guard — extra friction before the only mode
+    # that actually risks money.  Owner must type "live confirm" rather
+    # than just "live" to flip on real-money execution.
+    if requested == "live" and (len(args) < 2 or args[1].lower() != "confirm"):
+        await ctx.reply(
+            "⚠️ *Live-mode confirmation required.*\n\n"
+            "Live mode places real orders on Binance Futures with real funds. "
+            "Type `/automode live confirm` to proceed.\n\n"
+            "Pre-flight reminders:\n"
+            "• `EXCHANGE_API_KEY` + `EXCHANGE_API_SECRET` must be set\n"
+            "• API key should have *trade-only* permission (no withdraw)\n"
+            "• VPS IP must be whitelisted on Binance\n"
+            "• Start with a small `RISK_STARTING_EQUITY_USD` (e.g. 50)"
+        )
+        return
+
+    try:
+        success, message = ctx.set_auto_execution_mode_fn(requested)
+    except Exception as exc:
+        await ctx.reply(f"❌ Mode change failed: {exc}")
+        return
+
+    if success:
+        # Show the new status alongside the success message.
+        try:
+            status = ctx.get_auto_execution_status_fn() or {}
+            await ctx.reply(f"✅ {message}\n\n{_format_auto_status(status)}")
+        except Exception:
+            await ctx.reply(f"✅ {message}")
+    else:
+        await ctx.reply(f"❌ {message}")

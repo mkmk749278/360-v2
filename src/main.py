@@ -18,7 +18,7 @@ import collections
 import os
 import signal
 import time
-from typing import Dict, Deque, List, Optional, Set, Union
+from typing import Any, Dict, Deque, List, Optional, Set, Tuple, Union
 
 from config import (
     PAIR_FETCH_INTERVAL_HOURS,
@@ -216,6 +216,12 @@ class CryptoSignalEngine:
                 "PositionReconciler active: interval=%ds auto_close_orphans=%s",
                 RECONCILER_PERIODIC_INTERVAL_SEC, RECONCILER_AUTO_CLOSE_ORPHANS,
             )
+        # Track the currently-active auto-execution mode for runtime control.
+        # Initial value comes from the env var; can be changed at runtime via
+        # the /automode Telegram command (ephemeral — env still wins on
+        # engine restart).
+        self._exchange_client = _exchange_client
+        self._current_auto_mode: str = AUTO_EXECUTION_MODE
 
         # Circuit breaker (must be created before TradeMonitor)
         self._circuit_breaker = CircuitBreaker(
@@ -406,6 +412,8 @@ class CryptoSignalEngine:
             performance_tracker=self._performance_tracker,
             circuit_breaker=self._circuit_breaker,
             trade_observer=self._trade_observer,
+            set_auto_execution_mode_fn=self.set_auto_execution_mode,
+            get_auto_execution_status_fn=self.get_auto_execution_status,
         )
 
         # Bootstrap coordinates the boot/shutdown/WS sequence
@@ -419,6 +427,140 @@ class CryptoSignalEngine:
             self._signal_history = self._signal_history[-500:]
         self.router.remove_signal(signal_id)
         self._content_scheduler.update_last_post()
+
+    # ------------------------------------------------------------------
+    # Auto-execution mode runtime control (Telegram /automode command)
+    # ------------------------------------------------------------------
+
+    def get_auto_execution_status(self) -> Dict[str, Any]:
+        """Snapshot of the current auto-trade state for the /automode command."""
+        rm = self._risk_manager
+        om = self._order_manager
+        info: Dict[str, Any] = {
+            "mode": self._current_auto_mode,
+            "open_positions": rm.open_position_count if rm is not None else 0,
+            "daily_pnl_usd": rm.daily_realised_pnl_usd if rm is not None else 0.0,
+            "daily_loss_pct": rm.daily_loss_pct if rm is not None else 0.0,
+            "daily_kill_tripped": rm.daily_kill_tripped if rm is not None else False,
+            "manual_paused": rm.manual_paused if rm is not None else False,
+            "current_equity_usd": rm.current_equity_usd if rm is not None else 0.0,
+        }
+        # Paper mode exposes simulated PnL.
+        if hasattr(om, "simulated_pnl_total"):
+            info["simulated_pnl_usd"] = om.simulated_pnl_total
+        return info
+
+    def set_auto_execution_mode(self, new_mode: str) -> Tuple[bool, str]:
+        """Switch auto-execution mode at runtime.
+
+        Returns ``(success, message)``.  On success the engine's order_manager
+        and risk_manager are torn down and rebuilt for the new mode, and the
+        TradeMonitor's reference is updated so the lifecycle loop picks up
+        the new manager on its next tick.
+
+        Safety gates:
+          * Mode must be one of off/paper/live
+          * No mode change while open positions exist (would orphan them)
+          * Live mode requires EXCHANGE_API_KEY + EXCHANGE_API_SECRET set
+
+        Persistence: this is ephemeral.  AUTO_EXECUTION_MODE env still
+        determines mode at the next engine boot; runtime changes don't
+        survive a restart.
+        """
+        new_mode = (new_mode or "").strip().lower()
+        if new_mode not in {"off", "paper", "live"}:
+            return False, f"invalid mode {new_mode!r} — must be off / paper / live"
+        if new_mode == self._current_auto_mode:
+            return False, f"already in {new_mode.upper()} mode — nothing to do"
+
+        # Refuse if there are open positions (would orphan tracking).
+        if self._risk_manager is not None and self._risk_manager.open_position_count > 0:
+            return (
+                False,
+                f"refused: {self._risk_manager.open_position_count} open position(s) — close them first",
+            )
+
+        # Live mode safety: require credentials.
+        if new_mode == "live":
+            if not EXCHANGE_API_KEY or not EXCHANGE_API_SECRET:
+                return (
+                    False,
+                    "live mode refused: EXCHANGE_API_KEY and EXCHANGE_API_SECRET must be set in env",
+                )
+
+        previous = self._current_auto_mode
+        log.info("Auto-execution mode runtime change: %s → %s", previous, new_mode)
+
+        # Tear down exchange client + reconciler (live-only resources).
+        if self._exchange_client is not None:
+            try:
+                # Best-effort close — schedule but don't await (not in async context here).
+                asyncio.create_task(self._exchange_client.close())
+            except Exception:
+                pass
+            self._exchange_client = None
+        self._position_reconciler = None
+
+        # Build new managers for the requested mode.
+        if new_mode == "off":
+            self._risk_manager = None
+            self._order_manager = OrderManager(
+                auto_execution_enabled=False,
+                exchange_client=None,
+                position_size_pct=POSITION_SIZE_PCT,
+                max_position_usd=MAX_POSITION_USD,
+            )
+        elif new_mode == "paper":
+            self._risk_manager = RiskManager(
+                starting_equity_usd=RISK_STARTING_EQUITY_USD,
+                daily_loss_limit_pct=RISK_DAILY_LOSS_LIMIT_PCT,
+                max_concurrent=RISK_MAX_CONCURRENT,
+                max_leverage=RISK_MAX_LEVERAGE,
+                min_equity_usd=RISK_MIN_EQUITY_USD,
+                setup_blacklist=set(RISK_SETUP_BLACKLIST),
+            )
+            self._order_manager = PaperOrderManager(
+                position_size_pct=POSITION_SIZE_PCT,
+                max_position_usd=MAX_POSITION_USD,
+                starting_equity_usd=RISK_STARTING_EQUITY_USD,
+                risk_manager=self._risk_manager,
+            )
+        else:  # new_mode == "live"
+            self._exchange_client = CCXTClient(
+                exchange_id=EXCHANGE_ID,
+                api_key=EXCHANGE_API_KEY,
+                secret=EXCHANGE_API_SECRET,
+                sandbox=EXCHANGE_SANDBOX,
+            )
+            self._risk_manager = RiskManager(
+                starting_equity_usd=RISK_STARTING_EQUITY_USD,
+                daily_loss_limit_pct=RISK_DAILY_LOSS_LIMIT_PCT,
+                max_concurrent=RISK_MAX_CONCURRENT,
+                max_leverage=RISK_MAX_LEVERAGE,
+                min_equity_usd=RISK_MIN_EQUITY_USD,
+                setup_blacklist=set(RISK_SETUP_BLACKLIST),
+            )
+            self._order_manager = OrderManager(
+                auto_execution_enabled=True,
+                exchange_client=self._exchange_client,
+                position_size_pct=POSITION_SIZE_PCT,
+                max_position_usd=MAX_POSITION_USD,
+                risk_manager=self._risk_manager,
+            )
+            self._position_reconciler = PositionReconciler(
+                exchange_client=self._exchange_client,
+                get_active_signals_fn=lambda: self.router.active_signals,
+                alert_callback=self.telegram.send_admin_alert,
+                auto_close_orphans=RECONCILER_AUTO_CLOSE_ORPHANS,
+                risk_manager=self._risk_manager,
+            )
+
+        # Wire the new order_manager into TradeMonitor so the lifecycle
+        # loop picks it up on the next poll.
+        self.monitor._order_manager = self._order_manager
+
+        self._current_auto_mode = new_mode
+        return True, f"auto-execution mode changed: {previous.upper()} → {new_mode.upper()}"
 
     def _get_engine_context(self) -> dict:
         """Return a snapshot of current engine state for content generation."""
