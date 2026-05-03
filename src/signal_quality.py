@@ -1669,6 +1669,24 @@ class SignalScoringEngine:
                      "LIQUIDATION_REVERSAL", "FUNDING_EXTREME_SIGNAL"],
     }
 
+    # Counter-trend-by-design setups (per OWNER_BRIEF §3.4 HTF policy):
+    # their thesis IS to fade the trend, so regime non-affinity isn't a
+    # quality red flag.  The HTF soft penalty (#268) already filters
+    # bad counter-trend setups (1H + 4H both opposing).  Without this
+    # frozenset we double-penalise: -10 pts via Regime score + ~8 pts
+    # via HTF soft penalty → counter-trend signals stuck below paid
+    # threshold even when SMC structure is near-max.  Truth-report
+    # 2026-05-03 showed LSR avg final 60.69 vs threshold 74.52 with
+    # SMC 24.10/25 (near-perfect structure) — Regime stuck at 8.00 was
+    # the dominant gap.  Giving these setups a neutral 14.0 baseline
+    # in non-affinity regimes preserves the affinity bonus (still 18
+    # in matching regimes) while letting structurally strong counter-
+    # trend setups reach paid B-tier (65+).
+    _REGIME_NEUTRAL_SETUPS: frozenset = frozenset({
+        "LIQUIDITY_SWEEP_REVERSAL",
+        "FAILED_AUCTION_RECLAIM",
+    })
+
     # ── Family classification sets ─────────────────────────────────────────
     # Reversal / liquidation / funding-extreme: primary thesis is an
     # order-flow event (OI squeeze, mass liquidations, contrarian funding,
@@ -1785,15 +1803,21 @@ class SignalScoringEngine:
         """Regime alignment score, max 20 pts."""
         if not inp.regime:
             return 10.0   # Neutral when no regime data
-        affinity = self._REGIME_SETUP_AFFINITY.get(inp.regime.upper(), [])
+        regime_upper = inp.regime.upper()
+        affinity = self._REGIME_SETUP_AFFINITY.get(regime_upper, [])
         if inp.setup_class in affinity:
-            base = 18.0   # Strong alignment
+            base = 18.0   # Strong alignment — affinity match
+        elif inp.setup_class in self._REGIME_NEUTRAL_SETUPS:
+            # Counter-trend by design — see _REGIME_NEUTRAL_SETUPS comment.
+            # Quality filtering for these is handled by the HTF soft
+            # penalty (#268) when 1H + 4H both oppose, not here.
+            base = 14.0
         elif affinity:
             base = 8.0    # Regime known but setup not optimal
         else:
             base = 10.0   # Unknown regime
         # Bonus for high ATR percentile in VOLATILE regime (energy behind the move)
-        if inp.regime.upper() == "VOLATILE" and inp.atr_percentile >= 75:
+        if regime_upper == "VOLATILE" and inp.atr_percentile >= 75:
             base = min(20.0, base + 2.0)
         return min(20.0, base)
 

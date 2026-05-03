@@ -1717,6 +1717,62 @@ class TestScoringDimensions:
         result = engine.score(inp)
         assert result["regime"] == 20.0  # 18 + 2 bonus
 
+    # ── Counter-trend-by-design regime-neutral baseline (truth-report
+    # 2026-05-03 fix: LSR / FAR were stuck at Regime=8 in QUIET/VOLATILE,
+    # double-penalised against the HTF soft penalty for being counter-
+    # trend.  Now they get a 14.0 neutral baseline when not in affinity.)
+
+    def test_regime_lsr_in_quiet_uses_neutral_baseline(self, engine):
+        """LSR in QUIET (not in affinity) gets 14, not 8 — counter-trend
+        setups deserve neutral credit since their thesis is regime-fade."""
+        inp = ScoringInput(regime="QUIET", setup_class="LIQUIDITY_SWEEP_REVERSAL")
+        result = engine.score(inp)
+        assert result["regime"] == 14.0
+
+    def test_regime_lsr_in_trending_keeps_affinity_18(self, engine):
+        """In TRENDING_UP, LSR is in affinity → 18 (unchanged by the fix)."""
+        inp = ScoringInput(regime="TRENDING_UP", setup_class="LIQUIDITY_SWEEP_REVERSAL")
+        result = engine.score(inp)
+        assert result["regime"] == 18.0
+
+    def test_regime_far_in_quiet_uses_neutral_baseline(self, engine):
+        inp = ScoringInput(regime="QUIET", setup_class="FAILED_AUCTION_RECLAIM")
+        result = engine.score(inp)
+        assert result["regime"] == 14.0
+
+    def test_regime_far_in_ranging_keeps_affinity_18(self, engine):
+        """RANGING is FAR's affinity regime — fix must not reduce it."""
+        inp = ScoringInput(regime="RANGING", setup_class="FAILED_AUCTION_RECLAIM")
+        result = engine.score(inp)
+        assert result["regime"] == 18.0
+
+    def test_regime_neutral_baseline_does_not_apply_to_other_setups(self, engine):
+        """SR_FLIP / QCB / TPE / etc. retain the original 8.0 weak-alignment
+        score — only LSR and FAR get the counter-trend neutral baseline."""
+        for setup in ("SR_FLIP_RETEST", "TREND_PULLBACK_EMA", "WHALE_MOMENTUM"):
+            inp = ScoringInput(regime="QUIET", setup_class=setup)
+            assert engine.score(inp)["regime"] == 8.0, f"{setup} should remain at 8.0 in QUIET"
+
+    def test_regime_neutral_setup_in_volatile_with_atr_bonus(self, engine):
+        """LSR in VOLATILE is in affinity (18) + ATR bonus (+2) = 20.
+        The neutral baseline only kicks in when the setup is NOT in
+        affinity — verify it doesn't accidentally cap below 20."""
+        inp = ScoringInput(
+            regime="VOLATILE",
+            setup_class="LIQUIDITY_SWEEP_REVERSAL",
+            atr_percentile=85,
+        )
+        assert engine.score(inp)["regime"] == 20.0
+
+    def test_regime_far_in_volatile_is_neutral_plus_atr(self, engine):
+        """FAR is NOT in VOLATILE affinity; with ATR bonus 14 + 2 = 16."""
+        inp = ScoringInput(
+            regime="VOLATILE",
+            setup_class="FAILED_AUCTION_RECLAIM",
+            atr_percentile=85,
+        )
+        assert engine.score(inp)["regime"] == 16.0
+
     def test_volume_neutral(self, engine):
         inp = ScoringInput(volume_last_usd=0, volume_avg_usd=0)
         result = engine.score(inp)

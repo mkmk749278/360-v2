@@ -110,6 +110,10 @@ Each evaluator lives in `src/channels/scalp.py` as `_evaluate_<name>` and owns i
 
 The right question is never *"does the signal align with HTF?"* but *"is this a profitable scalp setup regardless of broader direction?"*
 
+### Counter-trend Regime-score rule (corollary)
+
+LSR and FAR are counter-trend by design. The `_score_regime` function gives them a **neutral 14.0 baseline** in non-affinity regimes instead of the standard 8.0 weak-alignment penalty. Reason: dropping to 8 there double-penalises with the HTF soft penalty (~8 pts) for the same property — being counter-trend. Quality filtering for these setups happens via the HTF soft penalty (1H+4H opposing), not via a low Regime score. The frozenset is `_REGIME_NEUTRAL_SETUPS` in `SignalScoringEngine`. Affinity regimes still award full 18 pts; the neutral baseline applies only when the setup is not in any regime's affinity list.
+
 ## 3.5 Confidence Tiers and Routing
 
 | Tier | Score | Routing |
