@@ -97,6 +97,7 @@ read_env() {
 hdr "PHASE 1 — API auth token"
 
 CURRENT_TOKEN="$(read_env API_AUTH_TOKEN)"
+TOKEN_FILE="${TOKEN_FILE:-/root/.lumin-api-token}"
 if [[ "$ROTATE_TOKEN" == "true" ]] || [[ -z "$CURRENT_TOKEN" ]]; then
     if [[ -z "$CURRENT_TOKEN" ]]; then
         info "No API_AUTH_TOKEN found — generating a fresh one."
@@ -106,10 +107,20 @@ if [[ "$ROTATE_TOKEN" == "true" ]] || [[ -z "$CURRENT_TOKEN" ]]; then
     NEW_TOKEN="$(openssl rand -hex 32)"
     upsert_env API_AUTH_TOKEN "$NEW_TOKEN"
     ok "API_AUTH_TOKEN set in .env"
+
+    # Write to a root-only file so the operator can `cat` it once and paste
+    # into a password manager without it landing in shell history or the
+    # diagnostic dump that gets shared during debugging.
+    umask 077
+    printf '%s\n' "$NEW_TOKEN" > "$TOKEN_FILE"
+    chmod 600 "$TOKEN_FILE"
     echo
-    echo -e "${BOLD}${YELLOW}YOUR NEW API TOKEN (store securely — only shown once):${NC}"
+    echo -e "${BOLD}${YELLOW}New API token written to $TOKEN_FILE (mode 0600).${NC}"
+    echo "  Read it once with:   sudo cat $TOKEN_FILE"
+    echo "  Then delete it with: sudo shred -u $TOKEN_FILE"
     echo
-    echo "    $NEW_TOKEN"
+    echo "  (If you need to print it inline instead, set TOKEN_FILE='' before"
+    echo "  re-running this script — but be careful where the output goes.)"
     echo
 else
     ok "Existing API_AUTH_TOKEN preserved (use --rotate-token to mint a new one)"
@@ -231,13 +242,20 @@ hdr "PHASE 4 — Let's Encrypt cert"
 if [[ "$SKIP_CERT" == "true" ]]; then
     warn "Skipping cert (--no-cert) — API will be HTTP-only on $DOMAIN"
 elif [[ -f "/etc/letsencrypt/live/$DOMAIN/fullchain.pem" ]]; then
-    ok "Cert already exists for $DOMAIN — certbot will auto-renew"
+    # Cert exists — re-deploy to nginx so the 443 server block is present.
+    # Re-runs of this script rewrite sites-available/lumin-api from scratch,
+    # which wipes the 443 block that certbot --nginx originally injected.
+    # ``certbot install`` is idempotent and re-injects without re-issuing.
+    ok "Cert already exists for $DOMAIN — re-deploying to nginx"
+    certbot install -n --cert-name "$DOMAIN" --nginx --redirect 2>&1 | tail -3
+    systemctl reload nginx
+    ok "443 server block re-injected, nginx reloaded"
 else
     if [[ -z "$EMAIL" ]]; then
         warn "No --email given — using --register-unsafely-without-email"
-        certbot --nginx -n --agree-tos --register-unsafely-without-email -d "$DOMAIN"
+        certbot --nginx -n --agree-tos --redirect --register-unsafely-without-email -d "$DOMAIN"
     else
-        certbot --nginx -n --agree-tos --email "$EMAIL" -d "$DOMAIN"
+        certbot --nginx -n --agree-tos --redirect --email "$EMAIL" -d "$DOMAIN"
     fi
     ok "Cert provisioned for $DOMAIN"
 fi
@@ -255,9 +273,6 @@ else
     warn "Docker not found — restart the engine manually so .env changes take effect"
 fi
 
-# Give the engine a moment to bind to port 8000
-sleep 5
-
 # ─── PHASE 6 — smoke test ──────────────────────────────────────────────────────
 hdr "PHASE 6 — smoke test"
 
@@ -265,16 +280,30 @@ TOKEN="$(read_env API_AUTH_TOKEN)"
 SCHEME="https"
 [[ "$SKIP_CERT" == "true" ]] && SCHEME="http"
 
-# Health endpoint — no auth
+# Engine boot is ~5–7 minutes on a fresh start (pair seeding + WebSocket
+# warm-up + historical data fetch).  Poll /api/health every 10s for up to
+# 10 minutes; bail with diagnostics if it never answers.
 HEALTH_URL="$SCHEME://$DOMAIN/api/health"
-info "GET $HEALTH_URL"
-HEALTH_CODE="$(curl -ks -o /tmp/api-health.json -w '%{http_code}' "$HEALTH_URL" || echo 000)"
-if [[ "$HEALTH_CODE" == "200" ]]; then
-    ok "health: $HEALTH_CODE — $(cat /tmp/api-health.json)"
-else
-    err "health check FAILED: HTTP $HEALTH_CODE"
+info "Waiting for $HEALTH_URL to come up (engine boot ≈ 5–7 min)…"
+HEALTH_CODE=000
+for i in $(seq 1 60); do
+    HEALTH_CODE="$(curl -ks --max-time 5 -o /tmp/api-health.json \
+        -w '%{http_code}' "$HEALTH_URL" 2>/dev/null || echo 000)"
+    if [[ "$HEALTH_CODE" == "200" ]]; then
+        ok "health: 200 (after ~${i}0s) — $(cat /tmp/api-health.json)"
+        break
+    fi
+    printf '.'
+    sleep 10
+done
+echo
+if [[ "$HEALTH_CODE" != "200" ]]; then
+    err "health check FAILED after 10 min: HTTP $HEALTH_CODE"
     err "  body: $(cat /tmp/api-health.json 2>/dev/null || echo '<empty>')"
-    err "  Check: docker compose logs engine | tail -50"
+    err "  Diagnose:"
+    err "    docker compose -f $ENGINE_DIR/docker-compose.yml logs engine | tail -50"
+    err "    ss -tlnp | grep -E ':80|:443|:8000'"
+    err "    systemctl status nginx"
     exit 1
 fi
 
