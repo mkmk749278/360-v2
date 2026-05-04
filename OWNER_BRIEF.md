@@ -114,6 +114,10 @@ The right question is never *"does the signal align with HTF?"* but *"is this a 
 
 LSR and FAR are counter-trend by design. The `_score_regime` function gives them a **neutral 14.0 baseline** in non-affinity regimes instead of the standard 8.0 weak-alignment penalty. Reason: dropping to 8 there double-penalises with the HTF soft penalty (~8 pts) for the same property — being counter-trend. Quality filtering for these setups happens via the HTF soft penalty (1H+4H opposing), not via a low Regime score. The frozenset is `_REGIME_NEUTRAL_SETUPS` in `SignalScoringEngine`. Affinity regimes still award full 18 pts; the neutral baseline applies only when the setup is not in any regime's affinity list.
 
+### Kill Zone gate disabled on 360_SCALP (2026-05-04)
+
+KZ was a session-traded asset filter inherited from non-crypto doctrine. Truth-report data showed it accounting for 80–100% of every filtered SCALP setup's aggregate gate penalty (LSR 96%, FAR 100%, SR_FLIP 94%, QCB 80%, DIV_CONT 100%) — a flat 5–13 confidence-point deduction during "low-liquidity" hours that don't exist in 24/7 crypto futures. Per scalping doctrine §3.2 ("we are 24/7 scalpers"), penalising signals for time-of-day was doctrinally wrong. Disabled via `_CHANNEL_GATE_PROFILE["360_SCALP"]["kill_zone"] = False`. Other SCALP_* auxiliary channels keep KZ pending per-channel data. Reversible by flipping the bool back.
+
 ## 3.5 Confidence Tiers and Routing
 
 | Tier | Score | Routing |

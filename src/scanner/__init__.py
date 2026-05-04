@@ -418,9 +418,23 @@ _CHANNEL_SMC_TIMEFRAMES: Dict[str, tuple[str, ...]] = {
 # Which gates are active per channel family.
 # True = gate runs normally, False = gate is skipped entirely.
 # Channels not listed default to all-True (fail-safe).
+#
+# 2026-05-04 — KZ DISABLED ON 360_SCALP (B10 owner-approved).
+# Truth-report soft-penalty breakdown showed KZ accounts for 80–100% of
+# the aggregate `gate=` penalty across every filtered SCALP setup
+# (LSR 96%, FAR 100%, SR_FLIP 94%, QCB 80%, DIV_CONT 100%).  KZ was
+# inherited from session-traded asset doctrine; it deducts ~5–13 pts of
+# confidence during "low-liquidity" hours that don't exist in 24/7
+# crypto futures (Asia trading hours are very active, US-EU overlap is
+# busy, every clock is someone's session).  Per OWNER_BRIEF §3.2 we are
+# 24/7 scalpers — penalising signals for the time-of-day was doctrinally
+# wrong.  Removing KZ from 360_SCALP is expected to lift LSR avg final
+# 49.42 → 62.58 and unblock several-fold paid signal volume.  Other
+# SCALP_* auxiliary channels keep KZ pending data on their behaviour.
+# Reversible: flip back to True if quality degrades.
 _CHANNEL_GATE_PROFILE: Dict[str, Dict[str, bool]] = {
-    # SCALP channels: ALL gates active — microstructure matters at 1m/5m
-    "360_SCALP":      {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    # SCALP main channel: KZ disabled — 24/7 crypto, no session windows
+    "360_SCALP":      {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_FVG":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_CVD":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
     "360_SCALP_VWAP": {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
