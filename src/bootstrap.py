@@ -264,6 +264,33 @@ class Bootstrap:
         if getattr(engine, "_oi_poller", None) is not None:
             tasks.append(asyncio.create_task(engine._oi_poller.start()))
 
+        # Lumin app HTTP API — opt-in via API_ENABLED env var.  Imported
+        # lazily so engines that don't enable it don't pay the import cost
+        # of FastAPI / uvicorn / pydantic-v2.
+        from config import (
+            API_AUTH_TOKEN,
+            API_CORS_ORIGINS,
+            API_ENABLED,
+            API_HOST,
+            API_PORT,
+        )
+        if API_ENABLED:
+            from src.api import serve_api
+
+            origins = [o.strip() for o in API_CORS_ORIGINS.split(",") if o.strip()]
+            tasks.append(
+                asyncio.create_task(
+                    serve_api(
+                        engine,
+                        host=API_HOST,
+                        port=API_PORT,
+                        auth_token=API_AUTH_TOKEN,
+                        cors_origins=origins,
+                    ),
+                    name="api_server",
+                )
+            )
+
         return tasks
 
     async def shutdown(self) -> None:

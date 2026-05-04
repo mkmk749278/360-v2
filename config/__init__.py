@@ -1520,3 +1520,18 @@ FUNDING_RATE_BOOST_THRESHOLD: float = float(
 FUNDING_RATE_PENALTY: float = float(os.getenv("FUNDING_RATE_PENALTY", "-8.0"))
 #: Confidence boost when funding is extreme in opposite direction (high conviction).
 FUNDING_RATE_BOOST: float = float(os.getenv("FUNDING_RATE_BOOST", "5.0"))
+
+# ---------------------------------------------------------------------------
+# Lumin app HTTP API (FastAPI)
+# ---------------------------------------------------------------------------
+#: Opt-in: set true to start the FastAPI server alongside the engine.
+API_ENABLED: bool = _safe_bool("API_ENABLED", "false")
+#: Bind address for the API server.  Use 127.0.0.1 behind a reverse proxy.
+API_HOST: str = os.getenv("API_HOST", "0.0.0.0")
+#: TCP port for the API server.
+API_PORT: int = _safe_int("API_PORT", "8000")
+#: When set, every endpoint requires ``Authorization: Bearer <token>``.
+#: Empty string disables auth (only safe behind a reverse proxy or for local dev).
+API_AUTH_TOKEN: str = os.getenv("API_AUTH_TOKEN", "")
+#: Comma-separated CORS origins.  ``*`` for any (development only).
+API_CORS_ORIGINS: str = os.getenv("API_CORS_ORIGINS", "*")

@@ -37,6 +37,13 @@ services:
       # Fires only on signals matching all gates (regime allowlist,
       # setup blacklist, age window, threshold).  See OWNER_BRIEF B11.
       - PRE_TP_ENABLED=true
+      # Lumin app HTTP API — opt-in.  Bind to localhost so external
+      # access is forced through a reverse proxy that terminates TLS
+      # and adds rate limiting.  Set API_AUTH_TOKEN to a long random
+      # string before flipping API_ENABLED to true.
+      - API_ENABLED=${API_ENABLED:-false}
+      - API_HOST=${API_HOST:-127.0.0.1}
+      - API_PORT=${API_PORT:-8000}
     mem_limit: 1g
     cpus: "1.5"
     logging:
