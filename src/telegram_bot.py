@@ -13,6 +13,11 @@ from typing import Any, Optional
 import aiohttp
 
 from config import (
+    PRE_TP_ENABLED,
+    PRE_TP_FEE_FLOOR_PCT,
+    PRE_TP_FEE_PCT_ROUND_TRIP,
+    PRE_TP_LEVERAGE,
+    PRE_TP_SETUP_BLACKLIST,
     SIGNAL_TYPE_LABELS,
     TELEGRAM_ACTIVE_CHANNEL_ID,
     TELEGRAM_ADMIN_CHAT_ID,
@@ -374,6 +379,24 @@ class TelegramBot:
             lines.append(f"🎯 TP3: `{fmt_price(sig.tp3)}` ({TelegramBot._escape_md(_pct(sig.tp3))})")
         else:
             lines.append("🎯 TP3: Dynamic/trailing")
+
+        # Pre-TP grab indicator.  Shown when the feature is enabled AND the
+        # setup is eligible (breakouts excluded — they're built for bigger
+        # moves).  Lets subscribers know the system will bank a small
+        # symbolic profit and ratchet SL→breakeven before TP1 if price moves
+        # favourably ≥ the ATR-adaptive threshold within 30 min.  Floor is
+        # PRE_TP_FEE_FLOOR_PCT (0.20% raw → ≥ +1.3% net @ 10x after fees).
+        if PRE_TP_ENABLED and (
+            not sig.setup_class or sig.setup_class not in PRE_TP_SETUP_BLACKLIST
+        ):
+            _floor_raw = PRE_TP_FEE_FLOOR_PCT
+            _net_at_lev = (_floor_raw - PRE_TP_FEE_PCT_ROUND_TRIP) * PRE_TP_LEVERAGE
+            _label = (
+                f"⚡ Pre-TP: +{_floor_raw:.2f}%+ raw "
+                f"\\(≥{_net_at_lev:+.1f}% net @ {PRE_TP_LEVERAGE:.0f}x\\) "
+                f"→ SL → breakeven \\(auto\\)"
+            )
+            lines.append(_label)
 
         lines.append("")
 
