@@ -2645,11 +2645,21 @@ class TestNormalizeCandles:
 class TestChannelGateProfile:
     """_CHANNEL_GATE_PROFILE correctly skips gates for SPOT/GEM/SWING."""
 
-    def test_scalp_all_gates_enabled(self):
-        """360_SCALP has all 8 gates enabled."""
+    def test_scalp_gates_have_kz_disabled_others_enabled(self):
+        """360_SCALP has all gates enabled EXCEPT kill_zone (disabled 2026-05-04).
+
+        Truth-report soft-penalty breakdown showed KZ accounted for 80–100%
+        of every filtered SCALP setup's penalty.  KZ was a session-traded
+        asset filter wrong for 24/7 crypto — disabled per OWNER_BRIEF §3.4
+        corollary.  See `tests/test_kill_zone_disable.py` for the doctrinal
+        contract assertions.
+        """
         from src.scanner import _CHANNEL_GATE_PROFILE
         profile = _CHANNEL_GATE_PROFILE["360_SCALP"]
-        assert all(profile.values()), "All gates must be True for 360_SCALP"
+        # All gates except kill_zone remain on.
+        assert profile["kill_zone"] is False, "KZ must be disabled for 360_SCALP"
+        for gate in ("mtf", "vwap", "oi", "cross_asset", "spoof", "volume_div", "cluster"):
+            assert profile[gate] is True, f"{gate} must remain True for 360_SCALP"
 
     # SPOT/GEM/SWING channels are no longer wired into _CHANNEL_GATE_PROFILE —
     # the engine runs in TOP50_FUTURES_ONLY mode (360_SCALP* family only).
