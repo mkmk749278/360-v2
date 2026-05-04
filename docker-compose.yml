@@ -37,13 +37,18 @@ services:
       # Fires only on signals matching all gates (regime allowlist,
       # setup blacklist, age window, threshold).  See OWNER_BRIEF B11.
       - PRE_TP_ENABLED=true
-      # Lumin app HTTP API — opt-in.  Bind to localhost so external
-      # access is forced through a reverse proxy that terminates TLS
-      # and adds rate limiting.  Set API_AUTH_TOKEN to a long random
-      # string before flipping API_ENABLED to true.
+      # Lumin app HTTP API — opt-in.  Inside the container the server
+      # binds to 0.0.0.0 (the container's own network namespace is
+      # isolated); the host-side ports mapping below pins the published
+      # port to 127.0.0.1 so the only external path is through a reverse
+      # proxy that terminates TLS and adds rate limiting.
       - API_ENABLED=${API_ENABLED:-false}
-      - API_HOST=${API_HOST:-127.0.0.1}
+      - API_HOST=${API_HOST:-0.0.0.0}
       - API_PORT=${API_PORT:-8000}
+    # Publish only to the host loopback so nginx (running on the host)
+    # can proxy the API; the WAN can't reach this port directly.
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:${API_PORT:-8000}"
     mem_limit: 1g
     cpus: "1.5"
     logging:
