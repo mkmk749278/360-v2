@@ -1,22 +1,5 @@
 [
   {
-    "dispatched_at": 1777089173.474579,
-    "signal_id": "SRFLIP-26F71053",
-    "channel": "360_SCALP",
-    "symbol": "AVAXUSDT",
-    "direction": "LONG",
-    "setup_class": "SR_FLIP_RETEST",
-    "confidence": 80.5,
-    "signal_tier": "A+",
-    "entry": 9.446,
-    "sl": 9.370432,
-    "tp1": 9.5366816,
-    "tp2": 9.559352,
-    "tp3": 9.710488,
-    "market_phase": "RANGING | ATR%ile=16 | Vol=ACCUMULATION",
-    "telegram_text": "*🔄 S/R FLIP RETEST* │ *AVAXUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `9.4427` – `9.4474` \\(limit order\\)\n   Mid: `9.4460`\n🛑 SL: `9.3704` (-0.80%)\n🎯 TP1: `9.5367` (+0.96%)\n🎯 TP2: `9.5594` (+1.20%)\n🎯 TP3: `9.7105` (+2.80%)\n\n📊 Setup: SR FLIP RETEST | Confidence: *80.5* (B)\n⏱ Hold: ~1-2h | R:R 1:1.2\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 9.4490 | FVG 9.4340-9.4310 + Below 9.4150 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *B*"
-  },
-  {
     "dispatched_at": 1777089295.8750267,
     "signal_id": "FAR-01048D33",
     "channel": "360_SCALP",
@@ -848,5 +831,22 @@
     "tp3": 391.58102124,
     "market_phase": "QUIET | ATR%ile=99 | Vol=ACCUMULATION",
     "telegram_text": "*🔋 COMPRESSION BREAK* │ *ZECUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `376.51` – `376.91` \\(limit order\\)\n   Mid: `376.79`\n🛑 SL: `371.86` (-1.31%)\n🎯 TP1: `383.20` (+1.70%)\n🎯 TP2: `386.65` (+2.62%)\n🎯 TP3: `391.58` (+3.93%)\n\n📊 Setup: QUIET COMPRESSION BREAK | Confidence: *82.5* (A)\n⏱ Hold: ~1-2h | R:R 1:1.3\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 376.4800 | FVG 374.1200-373.9600 + Below 376.4800 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *A*"
+  },
+  {
+    "dispatched_at": 1777826342.2845242,
+    "signal_id": "SRFLIP-0408ACA6",
+    "channel": "360_SCALP",
+    "symbol": "ETHUSDT",
+    "direction": "LONG",
+    "setup_class": "SR_FLIP_RETEST",
+    "confidence": 83.5,
+    "signal_tier": "A+",
+    "entry": 2328.68,
+    "sl": 2310.05056,
+    "tp1": 2351.035328,
+    "tp2": 2360.350048,
+    "tp3": 2393.88304,
+    "market_phase": "TRENDING_UP | ATR%ile=90 | Vol=ACCUMULATION",
+    "telegram_text": "*🔄 S/R FLIP RETEST* │ *ETHUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `2,328` – `2,329` \\(limit order\\)\n   Mid: `2,329`\n🛑 SL: `2,310` (-0.80%)\n🎯 TP1: `2,351` (+0.96%)\n🎯 TP2: `2,360` (+1.36%)\n🎯 TP3: `2,394` (+2.80%)\n\n📊 Setup: SR FLIP RETEST | Confidence: *83.5* (A)\n⏱ Hold: ~1-2h | R:R 1:1.2\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 2331.5800 | FVG 2328.4200-2327.5300 + Below 2321.2400 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *A*"
   }
 ]
