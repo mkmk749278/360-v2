@@ -33,6 +33,7 @@ DOMAIN="${API_DOMAIN:-api.luminapp.org}"
 EMAIL="${API_LE_EMAIL:-}"
 SKIP_CERT=false
 ROTATE_TOKEN=false
+ROTATE_JWT_SECRET=false
 ENGINE_DIR="${ENGINE_DIR:-/opt/360-v2}"
 NGINX_SITE="lumin-api"
 
@@ -44,6 +45,7 @@ while [[ $# -gt 0 ]]; do
         --engine-dir)   ENGINE_DIR="$2"; shift 2 ;;
         --no-cert)      SKIP_CERT=true; shift ;;
         --rotate-token) ROTATE_TOKEN=true; shift ;;
+        --rotate-jwt-secret) ROTATE_JWT_SECRET=true; shift ;;
         -h|--help)
             sed -n '2,15p' "$0"
             exit 0
@@ -130,6 +132,24 @@ upsert_env API_ENABLED true
 upsert_env API_HOST 0.0.0.0
 upsert_env API_PORT 8000
 ok "API_ENABLED=true, API_HOST=0.0.0.0, API_PORT=8000"
+
+# JWT secret — used to sign anonymous device tokens for the Lumin app.
+# Generated once and kept stable; rotating it invalidates every existing
+# JWT (clients silently re-mint on the next 401, no user action needed).
+# Pass --rotate-jwt-secret to mint a fresh one on demand.
+CURRENT_JWT_SECRET="$(read_env API_JWT_SECRET)"
+if [[ "$ROTATE_JWT_SECRET" == "true" ]] || [[ -z "$CURRENT_JWT_SECRET" ]]; then
+    if [[ -z "$CURRENT_JWT_SECRET" ]]; then
+        info "No API_JWT_SECRET found — generating a fresh one."
+    else
+        warn "Rotating API_JWT_SECRET — every existing JWT will be invalidated."
+    fi
+    NEW_JWT_SECRET="$(openssl rand -hex 64)"
+    upsert_env API_JWT_SECRET "$NEW_JWT_SECRET"
+    ok "API_JWT_SECRET set in .env (kept private — never printed)"
+else
+    ok "Existing API_JWT_SECRET preserved (use --rotate-jwt-secret to mint a new one)"
+fi
 
 # ─── PHASE 2 — nginx + certbot install ─────────────────────────────────────────
 hdr "PHASE 2 — install nginx + certbot"
