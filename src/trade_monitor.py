@@ -692,6 +692,7 @@ class TradeMonitor:
             sig.status = "EXPIRED"
             await self._post_update(sig, "⏰ EXPIRED (max hold time reached)")
             self._record_outcome(sig, hit_tp=0, hit_sl=False, expired=True)  # BUG FIX
+            await self._broker_close_full(sig, reason="expired", fill_price=price)
             self._remove(sig.signal_id)
             return
 
@@ -723,6 +724,23 @@ class TradeMonitor:
                         weight_1=chan_cfg.dca_weight_1,
                         weight_2=chan_cfg.dca_weight_2,
                     )
+                    # Push the DCA Entry-2 to the broker so the auto-trade
+                    # position matches the engine's weighted-avg-entry math.
+                    # Without this, engine assumes 60/40 weighted entry but
+                    # broker has only Entry-1 size — P&L attribution diverges.
+                    if (
+                        self._order_manager is not None
+                        and self._order_manager.is_enabled
+                    ):
+                        try:
+                            await self._order_manager.add_dca_entry(
+                                sig, current_price=dca_price
+                            )
+                        except Exception as exc:
+                            log.warning(
+                                "add_dca_entry failed for %s: %s",
+                                sig.symbol, exc,
+                            )
                     await self._post_dca_update(sig)
 
         # SL direction sanity check – catch misconfigured signals
@@ -734,6 +752,7 @@ class TradeMonitor:
             )
             sig.status = "CANCELLED"
             await self._post_update(sig, "⚠️ CANCELLED (invalid SL)")
+            await self._broker_close_full(sig, reason="cancelled", fill_price=price)
             self._remove(sig.signal_id)
             return
         if not is_long and sig.stop_loss < sig.entry and not protective_stop_active:
@@ -743,6 +762,7 @@ class TradeMonitor:
             )
             sig.status = "CANCELLED"
             await self._post_update(sig, "⚠️ CANCELLED (invalid SL)")
+            await self._broker_close_full(sig, reason="cancelled", fill_price=price)
             self._remove(sig.signal_id)
             return
 
@@ -796,6 +816,9 @@ class TradeMonitor:
             await self._post_update(sig, outcome_event)
             self._record_outcome(sig, hit_tp=0, hit_sl=True)
             await self._post_signal_closed(sig, is_tp=False)
+            await self._broker_close_full(
+                sig, reason="sl_hit", fill_price=sig.stop_loss
+            )
             self._remove(sig.signal_id)
             return
 
@@ -837,6 +860,9 @@ class TradeMonitor:
                 log.debug("invalidation_audit.record_invalidation failed for {}: {}", sig.symbol, exc)
             await self._post_update(sig, f"🔄 INVALIDATED ({invalidation_reason})")
             self._record_outcome(sig, hit_tp=0, hit_sl=False)
+            await self._broker_close_full(
+                sig, reason="invalidated", fill_price=capped_price
+            )
             self._remove(sig.signal_id)
             if self.on_invalidation_callback is not None:
                 self.on_invalidation_callback(sig.symbol, sig.channel, sig.direction.value)
@@ -1111,6 +1137,37 @@ class TradeMonitor:
 
         text = "\n".join(lines)
         await self._send(channel_id, text)
+
+    async def _broker_close_full(
+        self,
+        sig: Signal,
+        *,
+        reason: str,
+        fill_price: Optional[float] = None,
+    ) -> None:
+        """Best-effort full close on the broker (paper or live).
+
+        Called from every non-TP close path (SL_HIT, INVALIDATED,
+        EXPIRED, CANCELLED) to make sure the broker position closes
+        in lockstep with engine state — the B12 safety guarantee.
+
+        Always fail-soft: a broker error logs but never blocks the
+        engine state transition.  PositionReconciler's drift check
+        (Phase A3) is the safety net for any close that slips through.
+        Idempotent on the order-manager side; calling on a closed
+        position is a silent no-op there.
+        """
+        if self._order_manager is None or not self._order_manager.is_enabled:
+            return
+        try:
+            await self._order_manager.close_full(
+                sig, reason=reason, current_price=fill_price
+            )
+        except Exception as exc:
+            log.warning(
+                "broker close_full failed for %s (reason=%s): %s",
+                sig.symbol, reason, exc,
+            )
 
     async def _post_update(self, sig: Signal, event: str) -> None:
         channel_id = CHANNEL_TELEGRAM_MAP.get(sig.channel, "")

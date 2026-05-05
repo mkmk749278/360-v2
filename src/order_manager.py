@@ -343,3 +343,196 @@ class OrderManager:
             return None
 
         return await self.place_market_order(signal)
+
+    # ------------------------------------------------------------------
+    # DCA Entry-2 (auto-trade alignment with engine DCA path)
+    # ------------------------------------------------------------------
+
+    async def add_dca_entry(
+        self,
+        signal: Any,
+        *,
+        current_price: Optional[float] = None,
+    ) -> Optional[str]:
+        """Place the 2nd entry of a DCA-enabled signal at the broker.
+
+        Reads ``signal.entry_2`` and ``signal.position_weight_1/2`` —
+        already populated by :func:`src.dca.recalculate_after_dca` —
+        and places an additional market order on the same side as
+        Entry 1 so the resulting position's weighted average price
+        matches the engine's ``avg_entry``.
+
+        Algorithm
+        ---------
+        ``additional_qty = existing_qty × (weight_2 / weight_1)``
+
+        Both the open-tracking quantity and the partial-TP guard map
+        are updated to reflect the larger position.  Subsequent
+        ``close_partial`` / ``close_full`` calls round-trip against
+        the new total.
+
+        Idempotency
+        -----------
+        If no Entry-1 quantity is tracked (open was refused by the risk
+        gate, or the signal hasn't been opened yet), this is a no-op
+        that surfaces a warning so admins see the engine ↔ broker drift.
+        Callers must NOT retry on failure — engine state has already
+        moved past DCA-not-fired and a retry would double-stamp.
+        """
+        if not self._enabled:
+            return None
+
+        signal_id = getattr(signal, "signal_id", "")
+        existing_qty = self._open_quantities.get(signal_id, 0.0)
+        if existing_qty <= 0:
+            log.warning(
+                "[OrderManager] add_dca_entry: no Entry-1 qty tracked for "
+                "%s (open refused or never placed) — broker has no Entry 2",
+                signal_id,
+            )
+            return None
+
+        if self._risk_manager is not None:
+            gate = self._risk_manager.check(signal)
+            if not gate.allowed:
+                log.warning(
+                    "[OrderManager] add_dca_entry: blocked by risk gate "
+                    "(%s) for %s — broker has no Entry 2 even though "
+                    "engine math assumes DCA filled",
+                    gate.reason or "unknown", signal_id,
+                )
+                return None
+
+        _w1 = getattr(signal, "position_weight_1", None)
+        _w2 = getattr(signal, "position_weight_2", None)
+        weight_1 = float(_w1) if _w1 is not None else 0.6
+        weight_2 = float(_w2) if _w2 is not None else 0.4
+        if weight_1 <= 0:
+            log.warning(
+                "[OrderManager] add_dca_entry: invalid weight_1=%.4f for %s",
+                weight_1, signal_id,
+            )
+            return None
+
+        additional_qty = existing_qty * (weight_2 / weight_1)
+        if additional_qty <= 0:
+            return None
+
+        direction = getattr(signal.direction, "value", str(signal.direction))
+        side = "buy" if direction == "LONG" else "sell"
+
+        if self._client is not None:
+            try:
+                ccxt_symbol = _symbol_to_ccxt(signal.symbol)
+                order = await self._client.create_market_order(
+                    ccxt_symbol, side, additional_qty
+                )
+                order_id = str(order.get("id", ""))
+                self._open_quantities[signal_id] = existing_qty + additional_qty
+                log.info(
+                    "[OrderManager] DCA Entry 2: %s %s qty=%.6f "
+                    "(weight_2/weight_1=%.3f × existing) id=%s",
+                    signal.symbol, side, additional_qty,
+                    weight_2 / weight_1, order_id,
+                )
+                return order_id
+            except Exception as exc:
+                log.error(
+                    "[OrderManager] add_dca_entry failed for %s: %s",
+                    signal.symbol, exc,
+                )
+                return None
+
+        log.info(
+            "[OrderManager] STUB add_dca_entry: {} {} qty={}",
+            signal.symbol, side, additional_qty,
+        )
+        return None
+
+    # ------------------------------------------------------------------
+    # Full close (non-TP exits — invalidation / expiry / SL / cancel)
+    # ------------------------------------------------------------------
+
+    async def close_full(
+        self,
+        signal: Any,
+        *,
+        reason: str,
+        current_price: Optional[float] = None,
+    ) -> Optional[str]:
+        """Close any remaining position for *signal* on the exchange.
+
+        Called by :class:`~src.trade_monitor.TradeMonitor` whenever a
+        non-TP close path fires (SL hit, INVALIDATED, EXPIRED,
+        CANCELLED).  Without this, the broker leaves the position open
+        after the engine has stopped tracking it — a B12 safety hole.
+
+        Idempotent: re-calling on a signal whose tracked qty is zero
+        (e.g. after TP3 closed everything) returns ``None`` silently.
+
+        ``reason`` is logged as part of the audit marker so the truth
+        report can attribute closes by cause.
+        """
+        if not self._enabled:
+            return None
+
+        signal_id = getattr(signal, "signal_id", "")
+        original_qty = self._open_quantities.get(signal_id, 0.0)
+        if original_qty <= 0:
+            return None
+
+        # Sum closed-fraction across recorded partial closes.  TP fractions
+        # are 0.33 / 0.33 / 0.34; if all three fired the remaining is ~0.
+        closed_tps = self._partial_closed_tps.get(signal_id, set())
+        closed_fraction = sum(
+            _TP_FRACTIONS.get(tp, 0.0) for tp in closed_tps
+        )
+        remaining_fraction = max(0.0, 1.0 - closed_fraction)
+        remaining_qty = original_qty * remaining_fraction
+        if remaining_qty <= 1e-9:
+            # Nothing left — drop tracking and exit.
+            self._open_quantities.pop(signal_id, None)
+            self._partial_closed_tps.pop(signal_id, None)
+            return None
+
+        direction = getattr(signal.direction, "value", str(signal.direction))
+        # To close a LONG we sell; to close a SHORT we buy.
+        side = "sell" if direction == "LONG" else "buy"
+
+        if self._client is not None:
+            try:
+                ccxt_symbol = _symbol_to_ccxt(signal.symbol)
+                order = await self._client.create_market_order(
+                    ccxt_symbol, side, remaining_qty
+                )
+                order_id = str(order.get("id", ""))
+                log.info(
+                    "[OrderManager] close_full reason=%s: %s %s qty=%.6f id=%s",
+                    reason, signal.symbol, side, remaining_qty, order_id,
+                )
+                # Drop tracking — subsequent calls are no-ops.
+                self._open_quantities.pop(signal_id, None)
+                self._partial_closed_tps.pop(signal_id, None)
+                if self._risk_manager is not None:
+                    pnl_estimate = (
+                        float(getattr(signal, "pnl_pct", 0.0) or 0.0)
+                        * 0.01
+                        * float(getattr(signal, "entry", 0.0) or 0.0)
+                        * remaining_qty
+                    )
+                    self._risk_manager.register_close(
+                        signal, realised_pnl_usd=pnl_estimate
+                    )
+                return order_id
+            except Exception as exc:
+                log.error(
+                    "[OrderManager] close_full failed for %s (reason=%s): %s",
+                    signal.symbol, reason, exc,
+                )
+                return None
+
+        log.info(
+            "[OrderManager] STUB close_full reason={}: {} {} qty={}",
+            reason, signal.symbol, side, remaining_qty,
+        )
+        return None
