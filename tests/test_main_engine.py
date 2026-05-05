@@ -34,7 +34,16 @@ class TestCryptoSignalEngineImport:
 
 class TestCryptoSignalEngineInit:
     def _make_engine(self):
-        """Create engine with all network calls mocked."""
+        """Create engine with all network calls mocked.
+
+        Also stubs the disk-backed signal-history paths (``load_history`` +
+        ``backfill_from_legacy_sources``) so engine construction is
+        isolated from any pre-existing ``data/`` files.  Without these
+        patches, an existing ``data/signal_history.json`` or
+        ``data/invalidation_records.json`` (left from prior runs or
+        generated in CI) would leak records into ``_signal_history`` and
+        break tests that assert clean-init state.
+        """
         with patch("src.main.TelegramBot"), \
              patch("src.main.TelemetryCollector"), \
              patch("src.main.RedisClient"), \
@@ -47,7 +56,9 @@ class TestCryptoSignalEngineInit:
              patch("src.main.PredictiveEngine"), \
              patch("src.main.ExchangeManager"), \
              patch("src.main.SMCDetector"), \
-             patch("src.main.MarketRegimeDetector"):
+             patch("src.main.MarketRegimeDetector"), \
+             patch("src.main.load_history", return_value=[]), \
+             patch("src.main.backfill_from_legacy_sources", return_value=[]):
             from src.main import CryptoSignalEngine
             return CryptoSignalEngine()
 
