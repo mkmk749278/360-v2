@@ -233,8 +233,17 @@ def build_app(
     async def signals(
         status: str = Query("all", pattern="^(all|open|closed)$"),
         limit: int = Query(50, ge=1, le=500),
+        setup_class: Optional[str] = Query(
+            None,
+            description="Filter to one evaluator's signals (e.g. SR_FLIP_RETEST)",
+        ),
     ) -> SignalsResponse:
-        items = build_signals(engine, status=status, limit=limit)
+        items = build_signals(
+            engine,
+            status=status,
+            limit=limit,
+            setup_class=setup_class,
+        )
         return SignalsResponse(items=items, total=len(items))
 
     @app.get(
@@ -276,8 +285,12 @@ def build_app(
     )
     async def activity(
         limit: int = Query(50, ge=1, le=500),
+        setup_class: Optional[str] = Query(
+            None,
+            description="Filter to one evaluator's lifecycle events",
+        ),
     ) -> ActivityResponse:
-        items = build_activity(engine, limit=limit)
+        items = build_activity(engine, limit=limit, setup_class=setup_class)
         return ActivityResponse(items=items, total=len(items))
 
     # ---- Auto-mode ----

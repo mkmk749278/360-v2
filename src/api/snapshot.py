@@ -195,6 +195,7 @@ def build_signals(
     *,
     status: str = "all",
     limit: int = 50,
+    setup_class: Optional[str] = None,
 ) -> List[SignalDetail]:
     router = getattr(engine, "router", None)
     history = list(getattr(engine, "_signal_history", []) or [])
@@ -206,6 +207,14 @@ def build_signals(
         signals = history
     else:
         signals = active + history
+
+    if setup_class:
+        target = setup_class.strip().upper()
+        signals = [
+            s
+            for s in signals
+            if (getattr(s, "setup_class", "") or "").upper() == target
+        ]
 
     signals.sort(
         key=lambda s: getattr(s, "timestamp", None) or _now(),
@@ -285,15 +294,29 @@ def _activity_kind_for_status(status: str) -> Optional[str]:
     return None
 
 
-def build_activity(engine: Any, *, limit: int = 50) -> List[ActivityEvent]:
+def build_activity(
+    engine: Any,
+    *,
+    limit: int = 50,
+    setup_class: Optional[str] = None,
+) -> List[ActivityEvent]:
     history = list(getattr(engine, "_signal_history", []) or [])
     router = getattr(engine, "router", None)
     active = list(router.active_signals.values()) if router is not None else []
 
+    pool = active + history
+    if setup_class:
+        target = setup_class.strip().upper()
+        pool = [
+            s
+            for s in pool
+            if (getattr(s, "setup_class", "") or "").upper() == target
+        ]
+
     events: List[ActivityEvent] = []
 
     # OPEN events from every signal we know about.
-    for sig in active + history:
+    for sig in pool:
         ts = getattr(sig, "dispatch_timestamp", None) or getattr(
             sig, "timestamp", None
         )
@@ -376,8 +399,68 @@ def build_auto_mode(engine: Any) -> AutoModeStatus:
 # ---------------------------------------------------------------------------
 
 
+_TP_STATUSES = {"TP1_HIT", "TP2_HIT", "TP3_HIT", "FULL_TP_HIT"}
+_SL_STATUSES = {"SL_HIT"}
+_INVAL_STATUSES = {"INVALIDATED", "EXPIRED", "CANCELLED"}
+
+
+def _lifecycle_stats_by_setup(
+    history: List[Any],
+    *,
+    window_minutes: int = 24 * 60,
+) -> Dict[str, Dict[str, Any]]:
+    """Aggregate per-setup-class lifecycle counters from history.
+
+    Counts terminal-state signals whose ``terminal_outcome_timestamp`` falls
+    within the rolling window.  Also tracks ``last_signal_age_minutes`` —
+    the minutes since the most recent emission for that setup, irrespective
+    of outcome status — so the agent grid can show "fired Xm ago" cards.
+    """
+    out: Dict[str, Dict[str, Any]] = {}
+    cutoff_minutes = window_minutes
+    for sig in history:
+        sc = (getattr(sig, "setup_class", "") or "").upper()
+        if not sc:
+            continue
+        bucket = out.setdefault(
+            sc,
+            {
+                "closed_today": 0,
+                "tp_hits": 0,
+                "sl_hits": 0,
+                "invalidated": 0,
+                "last_signal_age_minutes": None,
+            },
+        )
+        emit_ts = getattr(sig, "timestamp", None)
+        emit_age = _minutes_since(emit_ts) if emit_ts is not None else None
+        if emit_age is not None:
+            cur = bucket["last_signal_age_minutes"]
+            if cur is None or emit_age < cur:
+                bucket["last_signal_age_minutes"] = emit_age
+
+        term_ts = getattr(sig, "terminal_outcome_timestamp", None)
+        if term_ts is None:
+            continue
+        term_age = _minutes_since(term_ts)
+        if term_age > cutoff_minutes:
+            continue
+        status = (getattr(sig, "status", "") or "").upper()
+        if status in _TP_STATUSES:
+            bucket["tp_hits"] += 1
+            bucket["closed_today"] += 1
+        elif status in _SL_STATUSES:
+            bucket["sl_hits"] += 1
+            bucket["closed_today"] += 1
+        elif status in _INVAL_STATUSES:
+            bucket["invalidated"] += 1
+            bucket["closed_today"] += 1
+    return out
+
+
 def build_agents(engine: Any) -> List[AgentStat]:
-    """Return per-evaluator stats sourced from ScalpChannel telemetry."""
+    """Return per-evaluator stats sourced from ScalpChannel telemetry +
+    lifecycle counters from ``_signal_history``."""
     channels = getattr(engine, "_channels", []) or []
     scalp = next(
         (c for c in channels if c.__class__.__name__ == "ScalpChannel"),
@@ -393,8 +476,14 @@ def build_agents(engine: Any) -> List[AgentStat]:
     generated = telemetry.get("generated", {})
     no_signal = telemetry.get("no_signal", {})
 
+    history = list(getattr(engine, "_signal_history", []) or [])
+    router = getattr(engine, "router", None)
+    active = list(router.active_signals.values()) if router is not None else []
+    lifecycle = _lifecycle_stats_by_setup(active + history)
+
     items: List[AgentStat] = []
     for path_token, setup_class in _PATH_TO_SETUP.items():
+        bucket = lifecycle.get(setup_class.upper(), {})
         items.append(
             AgentStat(
                 evaluator=path_token,
@@ -406,6 +495,11 @@ def build_agents(engine: Any) -> List[AgentStat]:
                 attempts=int(attempts.get(path_token, 0) or 0),
                 generated=int(generated.get(path_token, 0) or 0),
                 no_signal=int(no_signal.get(path_token, 0) or 0),
+                closed_today=int(bucket.get("closed_today", 0) or 0),
+                tp_hits=int(bucket.get("tp_hits", 0) or 0),
+                sl_hits=int(bucket.get("sl_hits", 0) or 0),
+                invalidated=int(bucket.get("invalidated", 0) or 0),
+                last_signal_age_minutes=bucket.get("last_signal_age_minutes"),
             )
         )
     return items

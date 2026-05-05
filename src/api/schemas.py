@@ -150,7 +150,15 @@ class AutoModeChangeResponse(BaseModel):
 
 
 class AgentStat(BaseModel):
-    """Per-evaluator counters since the last scan-cycle reset."""
+    """Per-evaluator counters + lifecycle stats sourced from history.
+
+    Telemetry counters (``attempts`` / ``generated`` / ``no_signal``) reset
+    on each scan-cycle window — useful for "is the gate chain doing the
+    right thing".  Lifecycle counters (``closed_today`` / ``tp_hits`` /
+    ``sl_hits`` / ``invalidated`` / ``last_signal_age_minutes``) come from
+    ``_signal_history`` and answer "what has this agent actually shipped"
+    — the question the per-agent drill-down in the app needs.
+    """
 
     evaluator: str = Field(..., description="UPPER_SNAKE token, e.g. TREND_PULLBACK")
     setup_class: str = Field(..., description="Setup-class tag of generated signals")
@@ -159,6 +167,20 @@ class AgentStat(BaseModel):
     attempts: int
     generated: int
     no_signal: int
+    closed_today: int = Field(
+        0,
+        description="Terminal-state signals from this agent in the last 24h",
+    )
+    tp_hits: int = Field(0, description="TP1/TP2/TP3 hits in the last 24h")
+    sl_hits: int = Field(0, description="SL hits in the last 24h")
+    invalidated: int = Field(
+        0,
+        description="INVALIDATED / EXPIRED / CANCELLED in the last 24h",
+    )
+    last_signal_age_minutes: Optional[int] = Field(
+        None,
+        description="Minutes since this agent's most recent emission (None if never)",
+    )
 
 
 class AgentsResponse(BaseModel):

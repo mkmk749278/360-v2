@@ -275,6 +275,40 @@ def test_signals_status_closed_filters_to_history(client: TestClient) -> None:
     assert body["items"][0]["agent_name"] == "The Counter-Puncher"
 
 
+def test_signals_filter_by_setup_class(client: TestClient) -> None:
+    r = client.get(
+        "/api/signals",
+        params={"status": "all", "setup_class": "SR_FLIP_RETEST"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 1
+    assert body["items"][0]["setup_class"] == "SR_FLIP_RETEST"
+    assert body["items"][0]["symbol"] == "ETHUSDT"
+
+
+def test_signals_filter_by_setup_class_is_case_insensitive(
+    client: TestClient,
+) -> None:
+    r = client.get(
+        "/api/signals",
+        params={"setup_class": "sr_flip_retest"},
+    )
+    assert r.status_code == 200
+    assert r.json()["total"] == 1
+
+
+def test_signals_filter_by_setup_class_unknown_returns_empty(
+    client: TestClient,
+) -> None:
+    r = client.get(
+        "/api/signals",
+        params={"setup_class": "WHO_DAT"},
+    )
+    assert r.status_code == 200
+    assert r.json()["total"] == 0
+
+
 def test_signal_detail_lookup_by_id(client: TestClient) -> None:
     r = client.get("/api/signals/sig-001")
     assert r.status_code == 200
@@ -316,6 +350,30 @@ def test_activity_includes_open_and_terminal_events(client: TestClient) -> None:
     kinds = [e["kind"] for e in body["items"]]
     assert "OPEN" in kinds
     assert "TP1" in kinds  # closed BTCUSDT had TP1_HIT
+
+
+def test_activity_filter_by_setup_class(client: TestClient) -> None:
+    r = client.get(
+        "/api/activity",
+        params={"setup_class": "LIQUIDITY_SWEEP_REVERSAL"},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    # All events should reference the BTCUSDT closed signal — symbol shows
+    # up in title/subtitle for both OPEN and TP1 kinds.
+    for ev in body["items"]:
+        assert "BTCUSDT" in ev["title"]
+
+
+def test_activity_filter_by_setup_class_unknown_returns_empty(
+    client: TestClient,
+) -> None:
+    r = client.get(
+        "/api/activity",
+        params={"setup_class": "NEVER_SEEN"},
+    )
+    assert r.status_code == 200
+    assert r.json()["total"] == 0
 
 
 # ---------------------------------------------------------------------------
@@ -369,6 +427,43 @@ def test_agents_returns_14_evaluators(client: TestClient) -> None:
     assert by_setup["TREND_PULLBACK_EMA"]["display_name"] == "The Pullback Sniper"
     assert by_setup["TREND_PULLBACK_EMA"]["attempts"] == 5
     assert by_setup["TREND_PULLBACK_EMA"]["generated"] == 1
+
+
+def test_agents_lifecycle_counts_tp_hit_in_window(client: TestClient) -> None:
+    """Closed BTCUSDT signal had TP1_HIT 90 min ago → counts under LSR."""
+    r = client.get("/api/agents")
+    assert r.status_code == 200
+    by_setup = {a["setup_class"]: a for a in r.json()["items"]}
+    lsr = by_setup["LIQUIDITY_SWEEP_REVERSAL"]
+    assert lsr["tp_hits"] == 1
+    assert lsr["sl_hits"] == 0
+    assert lsr["invalidated"] == 0
+    assert lsr["closed_today"] == 1
+
+
+def test_agents_last_signal_age_minutes_populated(client: TestClient) -> None:
+    """Active SR_FLIP_RETEST signal opened 18m ago should populate age."""
+    r = client.get("/api/agents")
+    assert r.status_code == 200
+    by_setup = {a["setup_class"]: a for a in r.json()["items"]}
+    sr_flip = by_setup["SR_FLIP_RETEST"]
+    assert sr_flip["last_signal_age_minutes"] is not None
+    assert 17 <= sr_flip["last_signal_age_minutes"] <= 19
+
+
+def test_agents_lifecycle_counts_zero_when_never_fired(
+    client: TestClient,
+) -> None:
+    """Evaluators without any signal in history report zero counts."""
+    r = client.get("/api/agents")
+    assert r.status_code == 200
+    by_setup = {a["setup_class"]: a for a in r.json()["items"]}
+    far = by_setup["FAILED_AUCTION_RECLAIM"]
+    assert far["tp_hits"] == 0
+    assert far["sl_hits"] == 0
+    assert far["invalidated"] == 0
+    assert far["closed_today"] == 0
+    assert far["last_signal_age_minutes"] is None
 
 
 # ---------------------------------------------------------------------------

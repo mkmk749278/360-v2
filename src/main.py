@@ -51,6 +51,7 @@ from src.performance_tracker import PerformanceTracker
 from src.predictive_ai import PredictiveEngine
 from src.regime import MarketRegimeDetector
 from src.scanner import Scanner
+from src.signal_history_store import load_history, save_history
 from src.signal_router import SignalRouter
 from src.telegram_bot import TelegramBot
 from src.telemetry import TelemetryCollector
@@ -330,6 +331,12 @@ class CryptoSignalEngine:
         self._paused_channels: Set[str] = set()
         self._confidence_overrides: Dict[str, float] = {}
         self._signal_history: List[Signal] = []  # capped at 500 entries
+        # Rehydrate from disk so closed-signal feed survives restarts.  Cap
+        # is applied by the loader; malformed records are skipped.
+        try:
+            self._signal_history.extend(load_history())
+        except Exception as exc:
+            log.warning(f"signal_history rehydrate failed: {exc}")
         self._boot_time: float = 0.0
         self._free_channel_limit: int = 2  # max free signals published per day
         self._alert_subscribers: Set[str] = set()  # admin IDs subscribed to alerts
@@ -425,6 +432,10 @@ class CryptoSignalEngine:
         if sig is not None:
             self._signal_history.append(sig)
             self._signal_history = self._signal_history[-500:]
+            try:
+                save_history(self._signal_history)
+            except Exception as exc:
+                log.warning(f"signal_history flush failed: {exc}")
         self.router.remove_signal(signal_id)
         self._content_scheduler.update_last_post()
 
