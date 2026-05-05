@@ -291,12 +291,27 @@ class TradeMonitor:
             return max(end_ts - start_ts, 0.0)
 
         hold_duration_sec = _duration(create_ts_epoch, terminal_ts_epoch) or 0.0
-        outcome_label = classify_trade_outcome(
-            pnl_pct=actual_pnl,
-            hit_tp=hit_tp,
-            hit_sl=hit_sl,
-            expired=expired,  # BUG FIX
-        )
+        # Honour explicit terminal-state classification when the trade-monitor
+        # has already stamped one on ``sig.status`` (e.g. the invalidation /
+        # expiry close paths set ``sig.status = "INVALIDATED"`` /
+        # ``"EXPIRED"`` before calling here).  ``classify_trade_outcome`` is
+        # derived from (hit_tp, hit_sl, expired) and will mis-label
+        # invalidations as ``"CLOSED"`` because it has no signal that the
+        # close was thesis-driven, not stop-driven.  Perf-tracker records
+        # have been stamping these wrongly ever since the invalidation gate
+        # shipped — see #304's backfill reconciliation for the historical
+        # cleanup; this prevents future records from accumulating the same
+        # bug.
+        sig_status = (getattr(sig, "status", "") or "").upper()
+        if sig_status in {"INVALIDATED", "EXPIRED"}:
+            outcome_label = sig_status
+        else:
+            outcome_label = classify_trade_outcome(
+                pnl_pct=actual_pnl,
+                hit_tp=hit_tp,
+                hit_sl=hit_sl,
+                expired=expired,  # BUG FIX
+            )
         if self.on_lifecycle_outcome_callback is not None:
             try:
                 self.on_lifecycle_outcome_callback(sig, outcome_label)

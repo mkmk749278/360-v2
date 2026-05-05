@@ -491,6 +491,70 @@ class TestOutcomeRecording:
         assert sig.status == "BREAKEVEN_EXIT"
 
     @pytest.mark.asyncio
+    async def test_invalidated_close_records_outcome_label_as_invalidated(self, monkeypatch):
+        """Regression for the historical "CLOSED" mis-labelling: when the
+        invalidation gate fires, ``_record_outcome`` must stamp
+        ``outcome_label="INVALIDATED"`` on the perf-tracker record — NOT
+        derive ``"CLOSED"`` from ``(hit_tp=0, hit_sl=False)``.  Without
+        this, the historical perf JSON labels every invalidation
+        ``CLOSED`` and the Lumin app's Invalidated sub-filter shows
+        empty.
+        """
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.LONG,
+            entry=30000.0,
+            stop_loss=29850.0,
+            age_seconds=600.0,
+        )
+        sig.current_price = 29920.0  # mid-trade, not at SL
+
+        active = {sig.signal_id: sig}
+        monitor, removed, sent, pt, cb = self._build_monitor_with_mocks(active)
+        # Force invalidation — bypass the regime/indicators-driven trigger.
+        monkeypatch.setattr(
+            TradeMonitor, "_check_invalidation",
+            lambda self, s: "momentum_loss test",
+        )
+
+        await monitor._evaluate_signal(sig)
+
+        assert sig.status == "INVALIDATED"
+        pt.record_outcome.assert_called_once()
+        call_kwargs = pt.record_outcome.call_args.kwargs
+        assert call_kwargs["outcome_label"] == "INVALIDATED"
+        # hit_tp / hit_sl stay zero / False — they describe the close
+        # *mechanism*, not the doctrinal classification.
+        assert call_kwargs["hit_tp"] == 0
+        assert call_kwargs["hit_sl"] is False
+
+    @pytest.mark.asyncio
+    async def test_expired_close_records_outcome_label_as_expired(self):
+        """Companion regression — the expiry path also sets ``sig.status``
+        explicitly, so the perf record must round-trip ``EXPIRED``.
+        Uses ``age_seconds`` well past any plausible MAX_SIGNAL_HOLD so
+        the test isn't fragile to other tests' monkeypatches of that
+        config dict.
+        """
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.LONG,
+            entry=30000.0,
+            stop_loss=29850.0,
+            age_seconds=100_000.0,  # ~28h, well past 3600s SCALP hold cap
+        )
+        sig.current_price = 30000.0
+
+        active = {sig.signal_id: sig}
+        monitor, removed, sent, pt, cb = self._build_monitor_with_mocks(active)
+
+        await monitor._evaluate_signal(sig)
+
+        assert sig.status == "EXPIRED"
+        call_kwargs = pt.record_outcome.call_args.kwargs
+        assert call_kwargs["outcome_label"] == "EXPIRED"
+
+    @pytest.mark.asyncio
     async def test_trailing_stop_profit_lock_is_not_reported_as_sl_hit(self):
         sig = _make_signal(
             channel="360_SCALP",
