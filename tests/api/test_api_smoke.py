@@ -182,14 +182,35 @@ def engine() -> _StubEngine:
     return _StubEngine()
 
 
+_TEST_SECRET = "smoke-test-secret-x" * 4
+
+
 @pytest.fixture
 def client(engine: _StubEngine) -> TestClient:
-    return TestClient(build_app(engine))
+    """Authenticated client — mints a JWT and applies it on every request.
+
+    Auth is now mandatory; endpoints reject unauthenticated requests.
+    The smoke tests below exercise endpoint behaviour, not auth — auth
+    itself is covered exhaustively in ``tests/api/test_auth.py``.
+    """
+    from src.api.auth import mint_token  # local import — pyjwt optional
+
+    app = build_app(engine, jwt_secret=_TEST_SECRET, allow_static=False)
+    token = mint_token(secret=_TEST_SECRET)
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
 
 
 @pytest.fixture
 def auth_client(engine: _StubEngine) -> TestClient:
-    return TestClient(build_app(engine, auth_token="secret"))
+    """Static-token client — admin escape hatch, used by static-token tests below."""
+    return TestClient(
+        build_app(
+            engine,
+            jwt_secret=_TEST_SECRET,
+            static_token="secret",
+            allow_static=True,
+        )
+    )
 
 
 # ---------------------------------------------------------------------------

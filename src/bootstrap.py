@@ -268,10 +268,12 @@ class Bootstrap:
         # lazily so engines that don't enable it don't pay the import cost
         # of FastAPI / uvicorn / pydantic-v2.
         from config import (
+            API_ALLOW_STATIC_TOKEN,
             API_AUTH_TOKEN,
             API_CORS_ORIGINS,
             API_ENABLED,
             API_HOST,
+            API_JWT_SECRET,
             API_PORT,
         )
         if API_ENABLED:
@@ -284,7 +286,9 @@ class Bootstrap:
                         engine,
                         host=API_HOST,
                         port=API_PORT,
-                        auth_token=API_AUTH_TOKEN,
+                        jwt_secret=API_JWT_SECRET,
+                        static_token=API_AUTH_TOKEN,
+                        allow_static=API_ALLOW_STATIC_TOKEN,
                         cors_origins=origins,
                     ),
                     name="api_server",
