@@ -185,6 +185,12 @@ def _signal_to_detail(sig: Any) -> SignalDetail:
         current_price=float(getattr(sig, "current_price", 0.0) or 0.0),
         pnl_pct=float(getattr(sig, "pnl_pct", 0.0) or 0.0),
         pre_tp_hit=bool(getattr(sig, "pre_tp_hit", False)),
+        pre_tp_threshold_pct=float(
+            getattr(sig, "pre_tp_threshold_pct", 0.0) or 0.0
+        ),
+        pre_tp_trigger_price=(
+            float(getattr(sig, "pre_tp_trigger_price", 0.0) or 0.0) or None
+        ),
         timestamp=timestamp,
         minutes_ago=_minutes_since(timestamp),
     )

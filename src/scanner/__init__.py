@@ -73,6 +73,7 @@ from config import (
 )
 from src.binance import BinanceClient
 from src.channels.base import Signal as _Signal
+from src.pre_tp_stamping import stamp_pre_tp
 from src.smc import Direction
 from src.rate_limiter import rate_limiter, futures_rate_limiter
 from src.confidence import (
@@ -3269,6 +3270,14 @@ class Scanner:
                             setattr(sig, tp_attr, round(new_tp, 8))
         except Exception:
             pass
+        # Stamp pre-TP threshold + trigger price using the ATR observed at
+        # dispatch.  Locks the promise shown in the Telegram post; trade-
+        # monitor and persistence both round-trip the stamped values.  No-op
+        # when pre-TP is disabled or the setup is in the breakout blacklist.
+        try:
+            stamp_pre_tp(sig)
+        except Exception as exc:
+            log.debug("pre-TP stamp failed for %s: %s", getattr(sig, "symbol", "?"), exc)
         return await self.signal_queue.put(sig)
 
     async def _prepare_signal(

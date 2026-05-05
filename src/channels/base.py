@@ -167,6 +167,20 @@ class Signal:
     pre_tp_pct: float = 0.0
     # Wall-clock timestamp at which pre-TP fired (used for telemetry).
     pre_tp_timestamp: Optional[datetime] = None
+    # Resolved pre-TP threshold stamped at dispatch time (B11 fee-aware).
+    # Locks the trigger so the displayed price in the Telegram post matches
+    # the price that actually fires pre-TP — without stamping, ATR drift
+    # between dispatch and fire makes the threshold a moving target.
+    # Zero means "not stamped / not eligible / pre-TP disabled".
+    pre_tp_threshold_pct: float = 0.0
+    # Absolute price the engine watches for pre-TP fire.  Computed at
+    # dispatch as entry × (1 ± threshold/100) using the resolved threshold.
+    # Zero means "not stamped".  Subscriber-visible in the signal post.
+    pre_tp_trigger_price: float = 0.0
+    # ATR value at dispatch time — kept on the signal so downstream consumers
+    # (pre-TP backfill, monitor, persistence) don't need to refetch
+    # indicators.  Zero when ATR was unavailable at dispatch.
+    atr_val: float = 0.0
 
     # ---- Soft-penalty gate tracking ----
     soft_penalty_total: float = 0.0           # Accumulated soft-gate confidence deduction
@@ -553,6 +567,7 @@ def build_channel_signal(
     sig.original_tp1 = round(tp1, 8)
     sig.original_tp2 = round(tp2, 8)
     sig.original_tp3 = round(tp3, 8)
+    sig.atr_val = atr_val
     if setup_class:
         sig.setup_class = setup_class
 

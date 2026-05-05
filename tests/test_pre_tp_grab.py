@@ -114,6 +114,66 @@ async def test_fires_when_long_candle_high_reaches_threshold(mock_send):
     # Original TP ladder untouched
     assert sig.tp1 == pytest.approx(30450.0)
     assert sig.tp2 == pytest.approx(30750.0)
+    # Backfill — monitor stamps the trigger when it wasn't pre-stamped
+    assert sig.pre_tp_threshold_pct == pytest.approx(0.35)
+    assert sig.pre_tp_trigger_price > sig.entry  # LONG trigger above entry
+
+
+async def test_uses_stamped_trigger_price_when_present(mock_send):
+    """When the signal is dispatched with a stamped trigger price, the
+    monitor must fire against the stamped target — NOT recompute from
+    current ATR.  Locks the dispatch-time promise (B11)."""
+    send, _ = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(direction=Direction.LONG, entry=30000.0)
+    # Stamp values that disagree with what the static fallback would produce —
+    # if the monitor honoured the stamp, it'll fire only at this price.
+    sig.pre_tp_threshold_pct = 0.50  # locked higher than the 0.35 default
+    sig.pre_tp_trigger_price = 30150.0  # entry × 1.005
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
+        # +0.40% high — would fire at 0.35 floor, must NOT fire at 0.50 stamp.
+        fired_below = await monitor._check_pre_tp_grab(
+            sig, c_high=30000.0 * 1.0040, c_low=29990.0
+        )
+        assert fired_below is False
+        assert sig.pre_tp_hit is False
+
+        # +0.55% high — clears the stamped 0.50 target.
+        fired_above = await monitor._check_pre_tp_grab(
+            sig, c_high=30000.0 * 1.0055, c_low=29990.0
+        )
+        assert fired_above is True
+        assert sig.pre_tp_hit is True
+        # The post must report the stamped threshold, not the recomputed value.
+        assert sig.pre_tp_pct == pytest.approx(0.50)
+
+
+async def test_backfills_stamp_for_legacy_unstamped_signals(mock_send):
+    """Pre-rollout signals already in flight have zero in the stamp fields.
+    First monitor tick that resolves the threshold should backfill so that
+    if persistence flushes between this tick and the next the trigger
+    survives a restart."""
+    send, _ = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(direction=Direction.LONG, entry=30000.0)
+    assert sig.pre_tp_threshold_pct == 0.0  # legacy state
+    assert sig.pre_tp_trigger_price == 0.0
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
+        # Probe at +0.10% — below threshold so we don't fire; just exercising
+        # the resolution path which should NOT stamp (because we never
+        # entered the fire branch).  Actually current implementation stamps
+        # before threshold check — verify that.
+        await monitor._check_pre_tp_grab(
+            sig, c_high=30000.0 * 1.0010, c_low=29990.0
+        )
+
+    # Backfill happened during resolution, even though we didn't fire.
+    assert sig.pre_tp_threshold_pct > 0
+    assert sig.pre_tp_trigger_price > sig.entry
 
 
 async def test_fires_when_short_candle_low_reaches_threshold(mock_send):

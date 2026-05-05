@@ -136,3 +136,68 @@ def test_pre_tp_uses_markdown_v2_safe_escaping():
         text = TelegramBot.format_signal(sig)
     # The net% annotation should be wrapped in escaped parens
     assert "\\(≥" in text or "\\(" in text
+
+
+# ---------------------------------------------------------------------------
+# Stamped trigger-price rendering (B11 fee-aware locking).
+#
+# When pre_tp_trigger_price + pre_tp_threshold_pct are stamped on the
+# signal at dispatch (as the scanner now does in `_enqueue_signal`), the
+# Telegram post must show the actual trigger price — not the floor — so
+# subscribers have an actionable number and auto-trade fires against
+# the same locked target.
+# ---------------------------------------------------------------------------
+
+
+def test_pre_tp_line_shows_stamped_trigger_price_when_present():
+    sig = _make_signal()
+    sig.pre_tp_threshold_pct = 0.45
+    sig.pre_tp_trigger_price = 2339.48  # entry 2329 × (1 + 0.45/100)
+    with patch("src.telegram_bot.PRE_TP_ENABLED", True):
+        text = TelegramBot.format_signal(sig)
+    assert "⚡ Pre-TP @" in text
+    assert "0.45%" in text  # locked threshold
+    # Price formatting is currency-aware; the integer part must appear.
+    assert "2339" in text or "2,339" in text
+
+
+def test_pre_tp_line_uses_stamped_threshold_for_net_calc():
+    """Net% must reflect the stamped threshold, not the env floor.
+    Subscriber sees `(+0.45% raw, ≥+3.8% net @ 10x)` not `(≥+1.3%)`.
+    """
+    sig = _make_signal()
+    sig.pre_tp_threshold_pct = 0.45
+    sig.pre_tp_trigger_price = 2339.48
+    with patch("src.telegram_bot.PRE_TP_ENABLED", True):
+        text = TelegramBot.format_signal(sig)
+    # (0.45 - 0.07) × 10 = 3.8 — net at 10x with 0.07% round-trip fees
+    assert "3.8%" in text or "+3.8%" in text
+
+
+def test_pre_tp_line_falls_back_to_floor_template_when_unstamped():
+    """Legacy / pre-rollout signals carry zero in the stamped fields —
+    template must drop back to the floor-only line so we don't leak
+    `Pre-TP @ 0.00` to subscribers.
+    """
+    sig = _make_signal()
+    sig.pre_tp_threshold_pct = 0.0
+    sig.pre_tp_trigger_price = 0.0
+    with patch("src.telegram_bot.PRE_TP_ENABLED", True):
+        text = TelegramBot.format_signal(sig)
+    assert "Pre-TP:" in text  # legacy line uses colon, not "@"
+    assert "Pre-TP @" not in text
+    assert "+0.20%" in text
+
+
+def test_pre_tp_short_uses_below_entry_trigger():
+    """Sanity — SHORT signals should display a trigger BELOW entry."""
+    sig = _make_signal()
+    sig.direction = Direction.SHORT
+    sig.entry = 78240.0
+    sig.pre_tp_threshold_pct = 0.20
+    sig.pre_tp_trigger_price = 78083.5  # entry × (1 - 0.20/100)
+    with patch("src.telegram_bot.PRE_TP_ENABLED", True):
+        text = TelegramBot.format_signal(sig)
+    assert "⚡ Pre-TP @" in text
+    # fmt_price rounds the trigger; just verify the integer-part proximity.
+    assert "78,084" in text or "78,083" in text
