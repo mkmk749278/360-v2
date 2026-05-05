@@ -1,14 +1,14 @@
 {
-  "emissions_delta": 12,
+  "emissions_delta": -11,
   "enabled": true,
   "fast_failures_delta": 1,
-  "gating_delta": 41868,
-  "no_generation_delta": 1115637,
+  "gating_delta": 57128,
+  "no_generation_delta": 1756595,
   "post_correction_window_delta": {
     "SR_FLIP_RETEST": {
-      "emitted_delta": 24,
+      "emitted_delta": 27,
       "geometry_changed_delta": 0,
-      "geometry_preserved_delta": 6007,
+      "geometry_preserved_delta": 8580,
       "geometry_rejected_delta": 0,
       "median_first_breach_delta_sec": 0.0,
       "median_terminal_delta_sec": 36.41,
