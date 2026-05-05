@@ -434,15 +434,21 @@ _CHANNEL_SMC_TIMEFRAMES: Dict[str, tuple[str, ...]] = {
 # SCALP_* auxiliary channels keep KZ pending data on their behaviour.
 # Reversible: flip back to True if quality degrades.
 _CHANNEL_GATE_PROFILE: Dict[str, Dict[str, bool]] = {
-    # SCALP main channel: KZ disabled — 24/7 crypto, no session windows
+    # SCALP channels: KZ disabled across the family — 24/7 crypto, no
+    # session windows. Doctrine §3.2 ("we are 24/7 scalpers") means a
+    # session-time penalty is structurally wrong for any of our scalp
+    # variants. Originally only the main channel was flipped (2026-05-04)
+    # because we wanted per-channel truth-report data first; aux channels
+    # turned out to be too low-volume to ever produce that data, so we
+    # apply the same doctrinal call uniformly.
     "360_SCALP":      {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
-    "360_SCALP_FVG":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
-    "360_SCALP_CVD":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
-    "360_SCALP_VWAP": {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
-    "360_SCALP_DIVERGENCE":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
-    "360_SCALP_SUPERTREND":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
-    "360_SCALP_ICHIMOKU":    {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
-    "360_SCALP_ORDERBLOCK":  {"mtf": True,  "vwap": True,  "kill_zone": True,  "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_FVG":  {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_CVD":  {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_VWAP": {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_DIVERGENCE":  {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_SUPERTREND":  {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_ICHIMOKU":    {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
+    "360_SCALP_ORDERBLOCK":  {"mtf": True,  "vwap": True,  "kill_zone": False, "oi": True,  "cross_asset": True,  "spoof": True,  "volume_div": True,  "cluster": True},
 }
 
 # Per-channel soft penalty base weights.
