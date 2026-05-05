@@ -18,8 +18,12 @@ from pathlib import Path
 
 import pytest
 
+from datetime import datetime, timezone
+
+from src.channels.base import Signal
 from src.signal_history_backfill import (
     backfill_from_legacy_sources,
+    reconcile_invalidation_status,
 )
 from src.signal_history_store import HISTORY_CAP
 from src.smc import Direction
@@ -348,3 +352,173 @@ def test_combined_sources_merge_correctly(tmp_path: Path) -> None:
     assert by_id["P-2"].status == "SL_HIT"
     # Sorted by timestamp DESC: P-2 (1714905000) > I-1 (1714902500) > P-1 (1714900000)
     assert [s.signal_id for s in out] == ["P-2", "I-1", "P-1"]
+
+
+# ---------------------------------------------------------------------------
+# reconcile_invalidation_status — repair wrongly-labelled persisted history
+# ---------------------------------------------------------------------------
+
+
+def _make_signal_for_reconcile(
+    *,
+    signal_id: str,
+    status: str = "CLOSED",
+    current_price: float = 0.0,
+    pnl_pct: float = 0.0,
+    terminal_outcome_timestamp: datetime | None = None,
+) -> Signal:
+    """Construct a Signal directly for reconcile-test purposes."""
+    sig = Signal(
+        channel="360_SCALP",
+        symbol="ETHUSDT",
+        direction=Direction.LONG,
+        entry=2370.0,
+        stop_loss=2351.0,
+        tp1=2392.0,
+        tp2=2416.0,
+        tp3=2436.0,
+        signal_id=signal_id,
+        timestamp=datetime(2026, 5, 5, 10, 0, 0, tzinfo=timezone.utc),
+    )
+    sig.status = status
+    sig.current_price = current_price
+    sig.pnl_pct = pnl_pct
+    if terminal_outcome_timestamp is not None:
+        sig.terminal_outcome_timestamp = terminal_outcome_timestamp
+    return sig
+
+
+def test_reconcile_no_invalidation_records_returns_zero(tmp_path) -> None:
+    history = [_make_signal_for_reconcile(signal_id="X-1")]
+    fixed = reconcile_invalidation_status(
+        history, invalidation_path=str(tmp_path / "missing.json"),
+    )
+    assert fixed == 0
+    assert history[0].status == "CLOSED"  # untouched
+
+
+def test_reconcile_fixes_closed_to_invalidated(tmp_path) -> None:
+    """The doctrinal core: a "CLOSED"-labelled signal whose ID lives in
+    the invalidation audit gets corrected to "INVALIDATED" with the
+    kill_price + kill_timestamp + pnl_pct_at_kill all synced."""
+    inval = tmp_path / "inval.json"
+    _write(inval, [_inval_record(
+        signal_id="WRONG-1",
+        kill_price=2360.0,
+        kill_timestamp=1714905000.0,
+        pnl_pct_at_kill=-0.42,
+    )])
+    sig = _make_signal_for_reconcile(
+        signal_id="WRONG-1",
+        status="CLOSED",
+        pnl_pct=0.0,
+    )
+    history = [sig]
+
+    fixed = reconcile_invalidation_status(
+        history, invalidation_path=str(inval),
+    )
+
+    assert fixed == 1
+    assert sig.status == "INVALIDATED"
+    assert sig.current_price == pytest.approx(2360.0)
+    assert sig.pnl_pct == pytest.approx(-0.42)
+    assert sig.terminal_outcome_timestamp is not None
+
+
+def test_reconcile_skips_already_invalidated(tmp_path) -> None:
+    """No-op when status is already correct — defensive against double-flush."""
+    inval = tmp_path / "inval.json"
+    _write(inval, [_inval_record(signal_id="OK-1", kill_price=2360.0)])
+    sig = _make_signal_for_reconcile(
+        signal_id="OK-1",
+        status="INVALIDATED",
+        current_price=2360.0,  # already correct
+    )
+
+    fixed = reconcile_invalidation_status(
+        [sig], invalidation_path=str(inval),
+    )
+    assert fixed == 0
+
+
+def test_reconcile_leaves_non_invalidated_signals_alone(tmp_path) -> None:
+    """A signal NOT in the invalidation audit (e.g. SL hit, TP1 hit) must not
+    be touched even if its status looks wrong to the reconciler."""
+    inval = tmp_path / "inval.json"
+    _write(inval, [_inval_record(signal_id="WAS-INVAL")])
+    sl_sig = _make_signal_for_reconcile(signal_id="WAS-SL", status="SL_HIT")
+    tp_sig = _make_signal_for_reconcile(signal_id="WAS-TP", status="TP1_HIT")
+    history = [sl_sig, tp_sig]
+
+    fixed = reconcile_invalidation_status(
+        history, invalidation_path=str(inval),
+    )
+    assert fixed == 0
+    assert sl_sig.status == "SL_HIT"
+    assert tp_sig.status == "TP1_HIT"
+
+
+def test_reconcile_idempotent_across_repeat_calls(tmp_path) -> None:
+    """First call fixes; second call on the same history is a no-op."""
+    inval = tmp_path / "inval.json"
+    _write(inval, [_inval_record(signal_id="X-1", kill_price=2360.0)])
+    sig = _make_signal_for_reconcile(signal_id="X-1", status="CLOSED")
+    history = [sig]
+
+    first = reconcile_invalidation_status(history, invalidation_path=str(inval))
+    second = reconcile_invalidation_status(history, invalidation_path=str(inval))
+
+    assert first == 1
+    assert second == 0
+    assert sig.status == "INVALIDATED"
+
+
+def test_reconcile_handles_breakeven_exit_label(tmp_path) -> None:
+    """The breakeven-labelled invalidations (hit_sl=True near zero pnl)
+    that classify_trade_outcome would mark BREAKEVEN_EXIT should still
+    be repaired when the audit log has them as invalidations."""
+    inval = tmp_path / "inval.json"
+    _write(inval, [_inval_record(signal_id="BE-1", kill_price=2370.0)])
+    sig = _make_signal_for_reconcile(signal_id="BE-1", status="BREAKEVEN_EXIT")
+    fixed = reconcile_invalidation_status([sig], invalidation_path=str(inval))
+    assert fixed == 1
+    assert sig.status == "INVALIDATED"
+
+
+def test_reconcile_robust_to_malformed_invalidation_records(tmp_path) -> None:
+    inval = tmp_path / "inval.json"
+    _write(inval, [
+        "not a dict",
+        {},                                   # no signal_id
+        {"signal_id": ""},                    # blank signal_id
+        _inval_record(signal_id="GOOD"),
+    ])
+    sig = _make_signal_for_reconcile(signal_id="GOOD", status="CLOSED")
+    fixed = reconcile_invalidation_status([sig], invalidation_path=str(inval))
+    assert fixed == 1
+    assert sig.status == "INVALIDATED"
+
+
+def test_reconcile_updates_only_provided_fields(tmp_path) -> None:
+    """When invalidation record is missing kill_price / pnl, leave those
+    fields on the sig as-is — only flip the status."""
+    inval = tmp_path / "inval.json"
+    # Record with kill_timestamp only — no kill_price or pnl
+    record = _inval_record(signal_id="PARTIAL")
+    record.pop("kill_price", None)
+    record.pop("pnl_pct_at_kill", None)
+    _write(inval, [record])
+
+    sig = _make_signal_for_reconcile(
+        signal_id="PARTIAL",
+        status="CLOSED",
+        current_price=99.0,  # would-be stale value
+        pnl_pct=42.0,
+    )
+    fixed = reconcile_invalidation_status([sig], invalidation_path=str(inval))
+    assert fixed == 1
+    assert sig.status == "INVALIDATED"
+    # Nothing to override → keep what was there
+    assert sig.current_price == pytest.approx(99.0)
+    assert sig.pnl_pct == pytest.approx(42.0)

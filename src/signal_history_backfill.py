@@ -267,6 +267,92 @@ def backfill_from_legacy_sources(
     return capped
 
 
+def reconcile_invalidation_status(
+    history: List[Signal],
+    *,
+    invalidation_path: str = _DEFAULT_INVAL_PATH,
+) -> int:
+    """Repair ``Signal.status`` against ``invalidation_records.json``.
+
+    Background — bug compounded across two layers:
+
+    1. ``trade_monitor._record_outcome`` historically derived
+       ``outcome_label`` purely from ``(hit_tp, hit_sl, expired)`` via
+       ``classify_trade_outcome``.  Invalidations call it with
+       ``hit_tp=0, hit_sl=False, expired=False`` → label ``"CLOSED"``,
+       even though ``sig.status`` was set to ``"INVALIDATED"`` two lines
+       earlier.  Result: every historical perf record for an
+       invalidation says ``outcome_label="CLOSED"``.
+    2. The backfill (PR #304) prefers perf record over invalidation
+       record on collision (richer fields), so the wrong ``"CLOSED"``
+       label overwrites the correct ``"INVALIDATED"`` from the
+       audit log.  Subscribers see "CLOSED" in the Lumin app's All
+       view but nothing in the Invalidated sub-filter.
+
+    This reconciliation reads ``invalidation_records.json`` (the
+    authoritative truth source for invalidations — written by
+    ``trade_monitor`` directly with the kill semantics) and forces
+    every matching ``signal_id`` in *history* to ``status="INVALIDATED"``,
+    syncing ``current_price`` to ``kill_price``, ``pnl_pct`` to
+    ``pnl_pct_at_kill``, and ``terminal_outcome_timestamp`` to
+    ``kill_timestamp``.
+
+    Idempotent — runs every boot, only mutates when something is wrong.
+    Safe to call after ``load_history()`` and after
+    ``backfill_from_legacy_sources``.
+
+    Returns the count of records mutated so the caller can decide
+    whether to re-flush via ``save_history``.
+    """
+    inval_records = _load_json_array(Path(invalidation_path))
+    inval_by_id: Dict[str, Dict[str, Any]] = {
+        r["signal_id"]: r
+        for r in inval_records
+        if isinstance(r, dict) and r.get("signal_id")
+    }
+    if not inval_by_id:
+        return 0
+
+    fixed = 0
+    for sig in history:
+        sid = getattr(sig, "signal_id", "") or ""
+        if not sid or sid not in inval_by_id:
+            continue
+        if (getattr(sig, "status", "") or "").upper() == "INVALIDATED":
+            continue
+
+        inval = inval_by_id[sid]
+        sig.status = "INVALIDATED"
+
+        kill_price = inval.get("kill_price")
+        if kill_price is not None:
+            try:
+                sig.current_price = float(kill_price)
+            except (TypeError, ValueError):
+                pass
+
+        pnl = inval.get("pnl_pct_at_kill")
+        if pnl is not None:
+            try:
+                sig.pnl_pct = float(pnl)
+            except (TypeError, ValueError):
+                pass
+
+        kill_ts = _to_datetime(inval.get("kill_timestamp"))
+        if kill_ts is not None:
+            sig.terminal_outcome_timestamp = kill_ts
+
+        fixed += 1
+
+    if fixed:
+        log.info(
+            "signal_history reconciliation: corrected %d records to status=INVALIDATED",
+            fixed,
+        )
+    return fixed
+
+
 __all__ = [
     "backfill_from_legacy_sources",
+    "reconcile_invalidation_status",
 ]
