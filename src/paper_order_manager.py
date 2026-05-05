@@ -304,3 +304,184 @@ class PaperOrderManager:
         underlying coroutine choice.
         """
         return await self.place_market_order(signal)
+
+    # ------------------------------------------------------------------
+    # DCA Entry-2 (Phase A4 — auto-trade alignment with engine DCA)
+    # ------------------------------------------------------------------
+
+    async def add_dca_entry(
+        self,
+        signal: Any,
+        *,
+        current_price: Optional[float] = None,
+    ) -> Optional[str]:
+        """Add the 2nd entry of a DCA-enabled signal to the simulated book.
+
+        Reads ``signal.entry_2`` and ``signal.position_weight_1/2`` —
+        already populated by :func:`src.dca.recalculate_after_dca` —
+        and adds simulated qty so the resulting weighted avg-entry
+        matches the engine's ``avg_entry`` (= ``sig.entry`` after
+        recalculate).
+
+        Algorithm
+        ---------
+        ``additional_qty = existing_qty × (weight_2 / weight_1)``
+        ``new_avg = (existing_qty × old_entry + additional_qty × dca_price)
+                    / (existing_qty + additional_qty)``
+
+        Idempotent — if no existing position (Entry 1 was refused by the
+        risk gate, or the signal hasn't been opened yet), this is a
+        no-op that surfaces a warning so admins can see the engine ↔
+        broker mismatch.  Failures of the risk gate at DCA time also
+        surface as warnings (engine math will assume the DCA fired even
+        though the broker won't reflect it — owner's call to either
+        accept the divergence or pause auto-trade).
+        """
+        signal_id = getattr(signal, "signal_id", "")
+        position = self._positions.get(signal_id)
+        if position is None:
+            log.warning(
+                "paper_trade_fill add_dca_entry: no open position for %s "
+                "(Entry 1 was refused by risk gate or never opened); "
+                "engine will treat DCA as filled but broker has no Entry 2",
+                signal_id,
+            )
+            return None
+
+        if self._risk_manager is not None:
+            gate = self._risk_manager.check(signal)
+            if not gate.allowed:
+                log.warning(
+                    "paper_trade_fill add_dca_entry: blocked by risk gate "
+                    "(%s) for %s — engine assumes DCA filled, broker won't",
+                    gate.reason or "unknown", signal_id,
+                )
+                return None
+
+        # Note: explicit None-fallback rather than ``or`` so a legitimate
+        # weight of 0.0 (caller bug) propagates and trips the guard below.
+        _w1 = getattr(signal, "position_weight_1", None)
+        _w2 = getattr(signal, "position_weight_2", None)
+        weight_1 = float(_w1) if _w1 is not None else 0.6
+        weight_2 = float(_w2) if _w2 is not None else 0.4
+        if weight_1 <= 0:
+            log.warning(
+                "paper_trade_fill add_dca_entry: invalid weight_1=%.4f for %s",
+                weight_1, signal_id,
+            )
+            return None
+
+        dca_price = float(getattr(signal, "entry_2", 0.0) or 0.0)
+        if dca_price <= 0:
+            # Fallback to caller-provided price (for callers that haven't
+            # gone through recalculate_after_dca yet).
+            dca_price = float(current_price or 0.0)
+        if dca_price <= 0:
+            log.warning(
+                "paper_trade_fill add_dca_entry: no dca_price for %s",
+                signal_id,
+            )
+            return None
+
+        additional_qty = position.quantity * (weight_2 / weight_1)
+        if additional_qty <= 0:
+            return None
+
+        # Update the in-memory position so the weighted avg matches the
+        # engine's avg_entry.  Subsequent close_partial / close_full
+        # round-trips against the new avg.
+        old_entry = position.entry
+        old_qty = position.quantity
+        new_qty = old_qty + additional_qty
+        new_avg_entry = (
+            (old_entry * old_qty + dca_price * additional_qty) / new_qty
+        )
+        position.entry = new_avg_entry
+        position.quantity = new_qty
+
+        # Margin reservation for the additional size.
+        self._available_equity -= dca_price * additional_qty
+
+        order_id = self._next_order_id(signal_id, "dca")
+        log.info(
+            "paper_trade_fill event=dca_entry signal_id=%s symbol=%s "
+            "existing_qty=%.6f additional_qty=%.6f dca_price=%.6f "
+            "new_avg_entry=%.6f new_total_qty=%.6f order_id=%s",
+            signal_id, position.symbol, old_qty, additional_qty,
+            dca_price, new_avg_entry, new_qty, order_id,
+        )
+        return order_id
+
+    # ------------------------------------------------------------------
+    # Full close (non-TP exits — invalidation / expiry / SL / cancel)
+    # ------------------------------------------------------------------
+
+    async def close_full(
+        self,
+        signal: Any,
+        *,
+        reason: str,
+        current_price: Optional[float] = None,
+    ) -> Optional[str]:
+        """Close any remaining position for *signal*, booking realised PnL.
+
+        Called by :class:`~src.trade_monitor.TradeMonitor` whenever a
+        non-TP close path fires (SL hit, INVALIDATED, EXPIRED,
+        CANCELLED).  Without this, the broker leaves the position open
+        after the engine has stopped tracking it — a B12 safety hole.
+
+        Idempotent: re-calling on a signal whose position has already
+        been closed (e.g. by TP3 partial closes) returns ``None``
+        silently so callers don't have to coordinate state.
+
+        ``reason`` is logged as part of the structured marker for
+        truth-report attribution.
+        """
+        signal_id = getattr(signal, "signal_id", "")
+        position = self._positions.get(signal_id)
+        if position is None:
+            # Already closed (e.g. via TP3) or never opened.  No-op.
+            return None
+
+        remaining_qty = position.quantity - position.closed_quantity
+        if remaining_qty <= 1e-9:
+            self._positions.pop(signal_id, None)
+            return None
+
+        # Fill price preference: caller-provided → signal.current_price →
+        # signal.stop_loss (for SL fills) → position.entry as last resort.
+        fill_price = (
+            current_price
+            if current_price is not None and current_price > 0
+            else float(getattr(signal, "current_price", 0.0) or 0.0)
+            or float(getattr(signal, "stop_loss", 0.0) or 0.0)
+            or position.entry
+        )
+        pnl = (
+            (fill_price - position.entry) * remaining_qty
+            if position.side == "long"
+            else (position.entry - fill_price) * remaining_qty
+        )
+
+        position.closed_quantity += remaining_qty
+        position.realised_pnl_usd += pnl
+        self._realised_pnl_total += pnl
+        self._available_equity += position.entry * remaining_qty + pnl
+
+        order_id = self._next_order_id(signal_id, f"close_{reason}")
+        log.info(
+            "paper_trade_fill event=close_full signal_id=%s symbol=%s "
+            "reason=%s qty=%.6f fill=%.6f pnl=%+.4f session_pnl=%+.4f "
+            "order_id=%s",
+            signal_id, position.symbol, reason, remaining_qty, fill_price,
+            pnl, self._realised_pnl_total, order_id,
+        )
+
+        # Drop the position and notify the risk manager so concurrent-cap
+        # accounting reclaims the slot.
+        self._positions.pop(signal_id, None)
+        if self._risk_manager is not None:
+            self._risk_manager.register_close(
+                signal, realised_pnl_usd=position.realised_pnl_usd
+            )
+        return order_id
