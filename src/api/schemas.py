@@ -63,6 +63,14 @@ class SignalDetail(BaseModel):
     current_price: float
     pnl_pct: float
     pre_tp_hit: bool = False
+    pre_tp_threshold_pct: float = Field(
+        0.0,
+        description="Resolved pre-TP threshold % stamped at dispatch (0 if not eligible)",
+    )
+    pre_tp_trigger_price: Optional[float] = Field(
+        None,
+        description="Absolute price the engine watches for pre-TP fire",
+    )
     timestamp: datetime
     minutes_ago: int
 

@@ -1190,8 +1190,10 @@ class TradeMonitor:
         if entry <= 0:
             return False
 
-        # Fetch indicators once — used for both ATR-adaptive threshold and
-        # regime gate.  Fail-open on either if the call raises or returns nil.
+        # Fetch indicators once — used for the regime gate below.  When the
+        # signal was dispatched after pre-TP stamping shipped, ATR is also
+        # already on the signal so we don't need indicators for threshold
+        # resolution.  Fail-open if the indicators_fn raises or returns nil.
         indicators: Optional[Dict[str, Any]] = None
         if self._indicators_fn is not None:
             try:
@@ -1200,32 +1202,44 @@ class TradeMonitor:
                 log.debug("Pre-TP indicators_fn failed for %s: %s", sig.symbol, exc)
                 indicators = None
 
-        # Resolve threshold — ATR-adaptive with fee floor; fall back to static
-        # constant when ATR is missing/invalid (soft-penalty doctrine).
-        threshold_pct = PRE_TP_THRESHOLD_PCT
-        threshold_source = "static"
+        # Prefer the dispatch-time stamp (B11 fee-aware doctrine — locks the
+        # promise shown in the Telegram post against ATR drift between
+        # dispatch and fire).  Legacy in-flight signals from before stamping
+        # shipped lack the stamp; backfill via the stamping helper using
+        # ATR fetched here.
+        from src.pre_tp_stamping import is_stamped, resolve_pre_tp_threshold
+
         atr_last: Optional[float] = None
-        if indicators is not None:
-            raw_atr = indicators.get("atr_last")
-            try:
-                if raw_atr is not None:
-                    atr_last = float(raw_atr)
-            except (TypeError, ValueError):
-                atr_last = None
-        if atr_last is not None and atr_last > 0:
-            atr_pct = (atr_last / entry) * 100.0
-            atr_threshold = atr_pct * PRE_TP_ATR_MULTIPLIER
-            threshold_pct = max(PRE_TP_FEE_FLOOR_PCT, atr_threshold)
-            threshold_source = "atr_floored" if atr_threshold < PRE_TP_FEE_FLOOR_PCT else "atr"
+        if is_stamped(sig):
+            threshold_pct = float(sig.pre_tp_threshold_pct)
+            target = float(sig.pre_tp_trigger_price)
+            threshold_source = "stamped"
+        else:
+            if indicators is not None:
+                raw_atr = indicators.get("atr_last")
+                try:
+                    if raw_atr is not None:
+                        atr_last = float(raw_atr)
+                except (TypeError, ValueError):
+                    atr_last = None
+            threshold_pct, threshold_source = resolve_pre_tp_threshold(
+                entry, atr_last
+            )
+            if is_long:
+                target = entry * (1.0 + threshold_pct / 100.0)
+            else:
+                target = entry * (1.0 - threshold_pct / 100.0)
+            # Backfill so subsequent ticks (and any persistence flush) see
+            # the same trigger.  Cheap — eligibility was already enforced
+            # above (PRE_TP_ENABLED + setup blacklist).
+            sig.pre_tp_threshold_pct = round(threshold_pct, 4)
+            sig.pre_tp_trigger_price = round(target, 8)
 
         # Threshold check — use the favourable extreme of the last 1m candle.
-        threshold = threshold_pct / 100.0
         if is_long:
-            target = entry * (1.0 + threshold)
             if c_high <= 0 or c_high < target:
                 return False
         else:
-            target = entry * (1.0 - threshold)
             if c_low <= 0 or c_low > target:
                 return False
 
