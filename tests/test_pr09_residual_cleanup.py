@@ -177,6 +177,8 @@ class TestCorePathRolesUnchanged:
         SetupClass.WHALE_MOMENTUM,
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.QUIET_COMPRESSION_BREAK,
+        # PR-8 (2026-05-06): MA-cross discrete trend-shift evaluator (15th path).
+        SetupClass.MA_CROSS_TREND_SHIFT,
     })
 
     def test_core_paths_exactly(self):
@@ -202,8 +204,8 @@ class TestCorePathRolesUnchanged:
         )
 
     def test_total_portfolio_path_count(self):
-        """Exactly 14 paths have explicit portfolio roles (unchanged from PR-04)."""
-        assert len(ACTIVE_PATH_PORTFOLIO_ROLES) == 14, (
-            f"Expected 14 portfolio-role entries, got {len(ACTIVE_PATH_PORTFOLIO_ROLES)}. "
+        """Exactly 15 paths have explicit portfolio roles (PR-8 added MA_CROSS_TREND_SHIFT)."""
+        assert len(ACTIVE_PATH_PORTFOLIO_ROLES) == 15, (
+            f"Expected 15 portfolio-role entries, got {len(ACTIVE_PATH_PORTFOLIO_ROLES)}. "
             f"Add new evaluators to both ScalpChannel.evaluate() and ACTIVE_PATH_PORTFOLIO_ROLES."
         )

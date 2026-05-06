@@ -67,6 +67,11 @@ class SetupClass(str, Enum):
     CONTINUATION_LIQUIDITY_SWEEP = "CONTINUATION_LIQUIDITY_SWEEP"
     POST_DISPLACEMENT_CONTINUATION = "POST_DISPLACEMENT_CONTINUATION"
     FAILED_AUCTION_RECLAIM = "FAILED_AUCTION_RECLAIM"
+    # PR-8 (2026-05-06): MA-cross discrete trend-shift evaluator.  Catches the
+    # *moment* a 4h EMA50/EMA200 (golden / death cross) or 1h EMA21/EMA50
+    # crosses, rather than just confirming an existing trend via stack
+    # alignment.  Low-frequency / high-conviction; cooldown 24h per pair.
+    MA_CROSS_TREND_SHIFT = "MA_CROSS_TREND_SHIFT"
     # PR-01: auxiliary-channel evaluator identities — preserved as distinct setup classes
     # so that downstream scoring and suppression diagnostics reflect true channel intent.
     FVG_RETEST = "FVG_RETEST"
@@ -126,6 +131,7 @@ ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
     SetupClass.WHALE_MOMENTUM: PortfolioRole.SPECIALIST,
     SetupClass.FUNDING_EXTREME_SIGNAL: PortfolioRole.SPECIALIST,
     SetupClass.QUIET_COMPRESSION_BREAK: PortfolioRole.SPECIALIST,
+    SetupClass.MA_CROSS_TREND_SHIFT: PortfolioRole.SPECIALIST,
     # NOTE: Auxiliary channel identities (FVG_RETEST, FVG_RETEST_HTF_CONFLUENCE,
     # RSI_MACD_DIVERGENCE, SMC_ORDERBLOCK) are registered as SetupClass values and
     # preserved through the pipeline (PR-01) but are intentionally absent from this
@@ -408,6 +414,7 @@ _MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
     "QUIET_COMPRESSION_BREAK":        3.0,  # BB lower + 0.5×ATR; 2.08% seen live
     "TREND_PULLBACK_EMA":             3.0,  # ATR×1.0 minimum; high-ATR pairs reach 3%
     "FUNDING_EXTREME_SIGNAL":         3.0,  # Liq-cluster SL; can be 2-3% away
+    "MA_CROSS_TREND_SHIFT":           3.0,  # Structural SL beyond opposite-side swing
 }
 
 # Family-aware minimum R:R thresholds used in build_risk_plan().

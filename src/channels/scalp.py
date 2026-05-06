@@ -602,6 +602,12 @@ class ScalpChannel(BaseChannel):
         }
         self._active_generation_path: Optional[str] = None
         self._active_no_signal_reason: Optional[str] = None
+        # PR-8: per-(symbol, direction) cooldown for MA_CROSS_TREND_SHIFT.
+        # MA crossovers are infrequent — once per pair per direction every
+        # ~24h is the realistic cadence.  Without a cooldown, EMA50/EMA200
+        # straddling each other on a sideways 4h would emit a fresh signal
+        # every cycle.
+        self._ma_cross_last_fire_ts: Dict[tuple, float] = {}
 
     def _reset_generation_telemetry(self) -> None:
         self._generation_telemetry = {
@@ -774,6 +780,7 @@ class ScalpChannel(BaseChannel):
             ("_evaluate_continuation_liquidity_sweep", self._evaluate_continuation_liquidity_sweep),
             ("_evaluate_post_displacement_continuation", self._evaluate_post_displacement_continuation),
             ("_evaluate_failed_auction_reclaim", self._evaluate_failed_auction_reclaim),
+            ("_evaluate_ma_cross_trend_shift", self._evaluate_ma_cross_trend_shift),
         ):
             if allowed_evaluators is not None and evaluator_name not in allowed_evaluators:
                 continue  # restricted scan context — skip evaluators not in allowlist
@@ -4632,4 +4639,211 @@ class ScalpChannel(BaseChannel):
                 sig.execution_note += "; Outside kill zone — reduced conviction"
             else:
                 sig.execution_note = "Outside kill zone — reduced conviction"
+        return sig
+
+    # ------------------------------------------------------------------
+    # MA_CROSS_TREND_SHIFT — discrete EMA crossover event
+    # ------------------------------------------------------------------
+    #
+    # The 15th evaluator (added 2026-05-06).  Catches the *moment* a
+    # 4h EMA50 / EMA200 (golden / death cross) or a 1h EMA21 / EMA50
+    # crosses, rather than confirming an existing trend via stack
+    # alignment (the way other evaluators consume EMAs).
+    #
+    # Rationale: textbook trend-shift signal that no current path
+    # captures cleanly.  Low-frequency / high-conviction (cooldown 24h
+    # per (symbol, direction)) — fits app-era doctrine where Pre-TP
+    # grab + invalidation audit cap downside on additional volume.
+    #
+    # Trigger logic
+    #   golden cross  (LONG):  ema_fast crosses above ema_slow on the most
+    #                          recent closed candle (prev fast ≤ prev slow,
+    #                          last fast > last slow)
+    #   death cross   (SHORT): mirror — fast crosses below slow
+    #
+    # Two trigger sources searched in order:
+    #   1. 4h EMA50/EMA200 (slow / structural) — preferred; high conviction
+    #   2. 1h EMA21/EMA50 (faster / responsive) — secondary trigger
+    #
+    # SL geometry
+    #   Anchored to the most recent 1h swing low (LONG) or swing high (SHORT)
+    #   over the last 30 bars, with a 0.10% buffer.  ATR×1.0 fallback when no
+    #   qualifying swing is found.  Capped by _MAX_SL_PCT_BY_SETUP entry
+    #   "MA_CROSS_TREND_SHIFT": 3.0.
+    #
+    # TP geometry
+    #   TP1 = 1.5R  (conservative scalp first target)
+    #   TP2 = 2.5R
+    #   TP3 = 3.5R  (trailing past this)
+
+    _MA_CROSS_COOLDOWN_SEC: float = 24 * 3600.0  # 24h per (symbol, direction)
+    _MA_CROSS_SL_BUFFER_PCT: float = 0.10        # buffer beyond structural swing
+    _MA_CROSS_SL_LOOKBACK: int = 30              # 1h candles for swing-anchor
+    _MA_CROSS_TP_R_MULT: tuple = (1.5, 2.5, 3.5)
+
+    def _evaluate_ma_cross_trend_shift(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """MA_CROSS_TREND_SHIFT — fires on EMA50/200 (4h) or EMA21/50 (1h) cross."""
+        import time as _time
+
+        # Basic spread / volume gates always run.
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+            return self._reject("basic_filters_failed")
+
+        # Detect cross on a TF.  Returns (direction, label) on hit, None on miss.
+        # `label` is a short string for telemetry / setup_class subtype.
+        def _detect_cross(
+            ind: Dict[str, Any], fast_key: str, slow_key: str,
+        ) -> Optional[tuple]:
+            fast_arr = ind.get(fast_key.replace("_last", ""))
+            slow_arr = ind.get(slow_key.replace("_last", ""))
+            if fast_arr is None or slow_arr is None:
+                return None
+            try:
+                fast = list(fast_arr)
+                slow = list(slow_arr)
+            except TypeError:
+                return None
+            if len(fast) < 2 or len(slow) < 2:
+                return None
+            f_prev, f_last = float(fast[-2]), float(fast[-1])
+            s_prev, s_last = float(slow[-2]), float(slow[-1])
+            # Skip if any value is NaN-ish or non-positive.
+            if not (f_prev > 0 and f_last > 0 and s_prev > 0 and s_last > 0):
+                return None
+            # Golden cross: prev fast ≤ prev slow AND last fast > last slow.
+            if f_prev <= s_prev and f_last > s_last:
+                return (Direction.LONG, f"{fast_key.replace('_last', '')}/{slow_key.replace('_last', '')}")
+            # Death cross.
+            if f_prev >= s_prev and f_last < s_last:
+                return (Direction.SHORT, f"{fast_key.replace('_last', '')}/{slow_key.replace('_last', '')}")
+            return None
+
+        ind_4h = indicators.get("4h", {})
+        ind_1h = indicators.get("1h", {})
+
+        # Try 4h EMA50/EMA200 first (high-conviction structural cross).
+        result = _detect_cross(ind_4h, "ema50_last", "ema200_last")
+        cross_tf = "4h"
+        # Fall back to 1h EMA21/EMA50.
+        if result is None:
+            result = _detect_cross(ind_1h, "ema21_last", "ema50_last")
+            cross_tf = "1h"
+        if result is None:
+            return self._reject("no_ma_cross")
+
+        direction, cross_label = result
+
+        # Cooldown — at most one signal per (symbol, direction) per 24h.
+        cd_key = (symbol, direction.value)
+        last_fire = self._ma_cross_last_fire_ts.get(cd_key)
+        if last_fire is not None and (_time.time() - last_fire) < self._MA_CROSS_COOLDOWN_SEC:
+            return self._reject("ma_cross_cooldown")
+
+        # Need 1m close for entry price + 1h candles for swing-anchor SL.
+        m1 = candles.get("1m")
+        if m1 is None or len(m1.get("close", [])) < 5:
+            return self._reject("insufficient_candles")
+        close = float(m1["close"][-1])
+        if close <= 0:
+            return self._reject("invalid_price")
+
+        # Structural SL: most recent opposite-side swing on 1h within lookback.
+        h1 = candles.get("1h", {})
+        h1_highs = h1.get("high")
+        h1_lows = h1.get("low")
+        atr_1h = ind_1h.get("atr_last") if ind_1h else None
+        atr_val = float(atr_1h) if atr_1h else close * 0.005
+
+        sl_dist: Optional[float] = None
+        if h1_highs is not None and h1_lows is not None:
+            try:
+                highs_list = list(h1_highs)[-self._MA_CROSS_SL_LOOKBACK:]
+                lows_list = list(h1_lows)[-self._MA_CROSS_SL_LOOKBACK:]
+                if direction == Direction.LONG and lows_list:
+                    structural_low = min(float(x) for x in lows_list)
+                    if structural_low < close:
+                        sl_dist = (close - structural_low) * (1 + self._MA_CROSS_SL_BUFFER_PCT / 100.0)
+                elif direction == Direction.SHORT and highs_list:
+                    structural_high = max(float(x) for x in highs_list)
+                    if structural_high > close:
+                        sl_dist = (structural_high - close) * (1 + self._MA_CROSS_SL_BUFFER_PCT / 100.0)
+            except (TypeError, ValueError):
+                sl_dist = None
+
+        if sl_dist is None or sl_dist <= 0:
+            sl_dist = atr_val  # ATR×1.0 fallback
+
+        if sl_dist <= 0:
+            return self._reject("invalid_sl_geometry")
+
+        sl = close - sl_dist if direction == Direction.LONG else close + sl_dist
+        if direction == Direction.LONG and sl >= close:
+            return self._reject("invalid_sl_geometry")
+        if direction == Direction.SHORT and sl <= close:
+            return self._reject("invalid_sl_geometry")
+
+        # TP ladder — fixed R-multiples (1.5R / 2.5R / 3.5R).
+        r1, r2, r3 = self._MA_CROSS_TP_R_MULT
+        if direction == Direction.LONG:
+            tp1 = close + sl_dist * r1
+            tp2 = close + sl_dist * r2
+            tp3 = close + sl_dist * r3
+        else:
+            tp1 = close - sl_dist * r1
+            tp2 = close - sl_dist * r2
+            tp3 = close - sl_dist * r3
+
+        profile = smc_data.get("pair_profile")
+        _regime_ctx = smc_data.get("regime_context")
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=direction,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="MAX",
+            atr_val=atr_val,
+            setup_class="MA_CROSS_TREND_SHIFT",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return self._reject("build_signal_failed")
+
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+
+        # Conviction lift: 4h cross is structurally stronger than 1h cross.
+        if cross_tf == "4h":
+            sig.confidence = min(100.0, sig.confidence + 10.0)
+            sig.execution_note = (getattr(sig, "execution_note", "") + f"; MA cross {cross_label} on 4h").lstrip("; ")
+        else:
+            sig.confidence = min(100.0, sig.confidence + 5.0)
+            sig.execution_note = (getattr(sig, "execution_note", "") + f"; MA cross {cross_label} on 1h").lstrip("; ")
+
+        # Stamp cooldown — only on success so cooldown doesn't trip on rejects.
+        self._ma_cross_last_fire_ts[cd_key] = _time.time()
         return sig

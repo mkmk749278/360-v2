@@ -2490,6 +2490,8 @@ class TestPortfolioRoles:
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
         SetupClass.POST_DISPLACEMENT_CONTINUATION,
         SetupClass.FAILED_AUCTION_RECLAIM,
+        # PR-8 (2026-05-06): MA-cross discrete trend-shift evaluator (15th path).
+        SetupClass.MA_CROSS_TREND_SHIFT,
     })
 
     def test_every_active_path_has_a_role(self):
@@ -2553,6 +2555,8 @@ class TestPortfolioRoles:
             SetupClass.WHALE_MOMENTUM,
             SetupClass.FUNDING_EXTREME_SIGNAL,
             SetupClass.QUIET_COMPRESSION_BREAK,
+            # PR-8: MA_CROSS_TREND_SHIFT — low-frequency (24h cooldown), high-conviction
+            SetupClass.MA_CROSS_TREND_SHIFT,
         }
         actual_specialist = {
             sc for sc, role in ACTIVE_PATH_PORTFOLIO_ROLES.items()
