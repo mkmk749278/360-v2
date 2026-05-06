@@ -145,6 +145,16 @@ class SignalRouter:
         # Signature: async (symbol: str, bias: str) -> None
         # Wired to FreeWatchService.on_paid_signal in main.py.
         self.on_signal_routed: Optional[Any] = None
+        # Optional callback: called by ``cleanup_expired`` BEFORE the signal is
+        # popped from ``_active_signals`` so the engine can compute realised
+        # P&L, archive the signal in ``_signal_history``, close any open
+        # broker position, and stamp a perf-tracker record with
+        # ``outcome_label="EXPIRED"``.
+        # Signature: (sig: Signal, now: datetime) -> None  (sync)
+        # Without this callback the cleanup path would silently drop the
+        # signal — broker stays open, perf-tracker gets no record, the
+        # Lumin app never sees the expiry under the Closed→Expired filter.
+        self.on_signal_expired: Optional[Any] = None
 
     # ------------------------------------------------------------------
     # AI Engine wiring
@@ -1187,10 +1197,15 @@ class SignalRouter:
             self._schedule_persist()
 
     async def _notify_signal_expiry(self, sig: Signal, now: datetime) -> None:
-        """Post a Telegram notification when a signal expires without being filled.
+        """Post a Telegram notification when a signal expires.
 
         Sends to ``TELEGRAM_ACTIVE_CHANNEL_ID`` so subscribers know what happened
-        to the signal instead of it silently disappearing.
+        to the signal instead of it silently disappearing.  When the engine's
+        ``on_signal_expired`` callback has stamped a close price and realised
+        P&L on the signal, surface them honestly — auto-trade users in
+        particular need to see at what price the position closed.  Falls back
+        to a "no P&L" line only when the entry was never filled (no
+        ``current_price`` ever recorded).
         """
         if not TELEGRAM_ACTIVE_CHANNEL_ID:
             return
@@ -1201,16 +1216,40 @@ class SignalRouter:
             hours = int(age_secs // 3600)
             minutes = int((age_secs % 3600) // 60)
 
-            text = (
-                f"⏰ Signal Expired — {sig.symbol}\n\n"
-                f"{direction_emoji} {sig.direction.value} | {setup_label}\n"
-                f"Entry was not reached or position auto-closed.\n\n"
-                f"📍 Entry: {sig.entry}\n"
-                f"⏱ Time held: {hours}h {minutes}m\n"
-                f"📊 Confidence was: {sig.confidence:.0f}\n\n"
-                f"No P&L recorded."
-            )
-            await self._send_telegram(TELEGRAM_ACTIVE_CHANNEL_ID, text)
+            current_price = float(getattr(sig, "current_price", 0.0) or 0.0)
+            entry = float(getattr(sig, "entry", 0.0) or 0.0)
+            pnl_pct = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
+            entry_was_reached = current_price > 0 and entry > 0 and abs(
+                current_price - entry
+            ) > 1e-9 or pnl_pct != 0.0
+
+            lines = [
+                f"⏰ Signal Expired — {sig.symbol}",
+                "",
+                f"{direction_emoji} {sig.direction.value} | {setup_label}",
+            ]
+            if entry_was_reached:
+                pnl_sign = "+" if pnl_pct >= 0 else ""
+                lines += [
+                    "Max-hold reached. Position auto-closed at market.",
+                    "",
+                    f"📍 Entry: {entry}",
+                    f"🏁 Closed at: {current_price}",
+                    f"📊 P&L: {pnl_sign}{pnl_pct:.2f}%",
+                    f"⏱ Time held: {hours}h {minutes}m",
+                    f"📊 Confidence was: {sig.confidence:.0f}",
+                ]
+            else:
+                lines += [
+                    "Entry was not reached within the validity window.",
+                    "",
+                    f"📍 Entry: {entry}",
+                    f"⏱ Time held: {hours}h {minutes}m",
+                    f"📊 Confidence was: {sig.confidence:.0f}",
+                    "",
+                    "No fill — no P&L recorded.",
+                ]
+            await self._send_telegram(TELEGRAM_ACTIVE_CHANNEL_ID, "\n".join(lines))
         except Exception as exc:
             log.debug("Signal expiry notification failed for {}: {}", sig.symbol, exc)
 
@@ -1233,7 +1272,23 @@ class SignalRouter:
                 expired_ids.append(signal_id)
 
         for signal_id in expired_ids:
-            sig = self._active_signals.pop(signal_id)
+            sig = self._active_signals.get(signal_id)
+            if sig is None:
+                continue
+            # Engine hook fires BEFORE we drop the signal so it can compute
+            # realised P&L, archive into _signal_history, close the broker
+            # position, and stamp a perf-tracker record.  Without this the
+            # cleanup silently drops the signal and the app's Closed→Expired
+            # sub-filter shows nothing.
+            if self.on_signal_expired is not None:
+                try:
+                    self.on_signal_expired(sig, now)
+                except Exception as exc:  # noqa: BLE001 — safety-net path
+                    log.warning(
+                        "on_signal_expired callback failed for {}: {}",
+                        sig.signal_id, exc,
+                    )
+            self._active_signals.pop(signal_id, None)
             self._position_lock.pop(sig.symbol, None)
             # Record cooldown timestamp so rapid re-entry is suppressed
             self._cooldown_timestamps[(sig.symbol, sig.channel)] = now
@@ -1241,7 +1296,10 @@ class SignalRouter:
                 "Auto-expired signal {} {} {} (exceeded max hold)",
                 signal_id, sig.symbol, sig.channel,
             )
-            # Post expiry notification to Telegram (fire-and-forget)
+            # Post expiry notification to Telegram (fire-and-forget).
+            # Reads sig.current_price and sig.pnl_pct that on_signal_expired
+            # may have just stamped, so the message includes a real outcome
+            # instead of "No P&L recorded".
             try:
                 loop = asyncio.get_running_loop()
                 loop.create_task(self._notify_signal_expiry(sig, now))

@@ -3,7 +3,7 @@
 import asyncio
 import json
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -899,6 +899,128 @@ class TestCleanupExpired:
     def test_cleanup_returns_zero_on_empty_router(self, router):
         """cleanup_expired with no active signals must return 0."""
         assert router.cleanup_expired() == 0
+
+    def test_cleanup_invokes_on_signal_expired_callback(self, router):
+        """Engine hook must fire BEFORE the signal is popped from
+        _active_signals so the engine can compute P&L, archive, close
+        broker, and stamp a perf record.  Without this hook the signal
+        silently disappears with no record anywhere.
+        """
+        sig = _make_signal(channel="360_SCALP", symbol="SOLUSDT")
+        sig.timestamp = datetime.now(timezone.utc) - timedelta(hours=3)
+        router._active_signals[sig.signal_id] = sig
+
+        captured = []
+
+        def _capture(s, now):
+            captured.append((s.signal_id, s.symbol, s in router._active_signals.values()))
+
+        router.on_signal_expired = _capture
+        router.cleanup_expired()
+
+        assert len(captured) == 1
+        sid, sym, was_in_active_at_callback_time = captured[0]
+        assert sid == sig.signal_id
+        assert sym == "SOLUSDT"
+        # Hook must fire while signal is still in active dict — engine relies
+        # on that for any logic that touches router state mid-archive.
+        assert was_in_active_at_callback_time is True
+
+    def test_cleanup_swallows_callback_exception(self, router):
+        """A failing on_signal_expired callback must not break cleanup —
+        the cooldown / position-lock release must still happen."""
+        sig = _make_signal(channel="360_SCALP", symbol="SOLUSDT")
+        sig.timestamp = datetime.now(timezone.utc) - timedelta(hours=3)
+        router._active_signals[sig.signal_id] = sig
+        router._position_lock["SOLUSDT"] = sig.direction
+
+        def _boom(s, now):
+            raise RuntimeError("simulated callback failure")
+
+        router.on_signal_expired = _boom
+        # Should not raise.
+        router.cleanup_expired()
+        # Cleanup still ran — signal popped, lock cleared.
+        assert sig.signal_id not in router._active_signals
+        assert "SOLUSDT" not in router._position_lock
+
+    def test_cleanup_works_when_callback_is_none(self, router):
+        """Default state (engine never wired the hook) must not crash."""
+        sig = _make_signal(channel="360_SCALP")
+        sig.timestamp = datetime.now(timezone.utc) - timedelta(hours=3)
+        router._active_signals[sig.signal_id] = sig
+
+        # router.on_signal_expired is None by default.
+        removed = router.cleanup_expired()
+        assert removed == 1
+
+
+# ---------------------------------------------------------------------------
+# Telegram expiry message — uses sig.current_price + pnl_pct when stamped
+# ---------------------------------------------------------------------------
+
+
+class TestExpiryTelegramMessage:
+    """_notify_signal_expiry must surface real outcome data when the engine's
+    on_signal_expired callback has stamped a close price + realised P&L."""
+
+    @pytest.mark.asyncio
+    async def test_message_shows_close_price_and_pnl_when_stamped(self, queue):
+        """Stamped sig.current_price + sig.pnl_pct → message includes both."""
+        sent: list = []
+
+        async def _send(chat_id: str, text: str):
+            sent.append((chat_id, text))
+            return True
+
+        router = SignalRouter(
+            queue=queue,
+            send_telegram=_send,
+            format_signal=lambda sig: "",
+        )
+        sig = _make_signal(channel="360_SCALP", symbol="SOLUSDT")
+        sig.entry = 86.99
+        sig.current_price = 87.45
+        sig.pnl_pct = 0.53
+        sig.confidence = 80.0
+
+        with patch("src.signal_router.TELEGRAM_ACTIVE_CHANNEL_ID", "CH"):
+            await router._notify_signal_expiry(sig, datetime.now(timezone.utc))
+
+        assert len(sent) == 1
+        text = sent[0][1]
+        assert "Closed at: 87.45" in text
+        assert "+0.53%" in text or "0.53%" in text
+        assert "No P&L recorded" not in text
+        assert "Position auto-closed at market" in text or "auto-closed" in text
+
+    @pytest.mark.asyncio
+    async def test_message_falls_back_for_unfilled_entry(self, queue):
+        """Entry never reached → keep the legacy "no P&L" message but with
+        clearer copy ("No fill — no P&L recorded")."""
+        sent: list = []
+
+        async def _send(chat_id: str, text: str):
+            sent.append((chat_id, text))
+            return True
+
+        router = SignalRouter(
+            queue=queue,
+            send_telegram=_send,
+            format_signal=lambda sig: "",
+        )
+        sig = _make_signal(channel="360_SCALP", symbol="SOLUSDT")
+        sig.entry = 86.99
+        sig.current_price = 0.0  # never recorded
+        sig.pnl_pct = 0.0
+        sig.confidence = 80.0
+
+        with patch("src.signal_router.TELEGRAM_ACTIVE_CHANNEL_ID", "CH"):
+            await router._notify_signal_expiry(sig, datetime.now(timezone.utc))
+
+        text = sent[0][1]
+        assert "No fill" in text or "Entry was not reached" in text
+        assert "Closed at" not in text
 
 
 # ---------------------------------------------------------------------------

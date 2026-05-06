@@ -428,6 +428,13 @@ class CryptoSignalEngine:
         self._scanner.on_radar_candidate = self._handle_radar_candidate
         # Wire paid-signal callback: router → watch resolution.
         self.router.on_signal_routed = self._free_watch_service.on_paid_signal
+        # Wire expired-signal callback: router.cleanup_expired → engine handler.
+        # Without this, expired signals get dropped from active_signals with no
+        # status flip / no archive / no broker close — broker positions stay
+        # open after the engine has stopped tracking them, perf-tracker gets
+        # no record, and the Lumin app's Closed→Expired sub-filter shows
+        # nothing.  See _handle_signal_expiry below.
+        self.router.on_signal_expired = self._handle_signal_expiry
 
         # Command handler (delegates all Telegram commands)
         self._command_handler = CommandHandler(
@@ -472,6 +479,101 @@ class CryptoSignalEngine:
                 log.warning(f"signal_history flush failed: {exc}")
         self.router.remove_signal(signal_id)
         self._content_scheduler.update_last_post()
+
+    def _handle_signal_expiry(self, sig: "Signal", now: "datetime") -> None:
+        """Finalise an expired signal: P&L, status, archive, broker close, perf.
+
+        Called by ``SignalRouter.cleanup_expired`` BEFORE the signal is popped
+        from ``_active_signals`` so the engine can fully terminate it.
+
+        Without this hook, the cleanup path used to silently drop the signal:
+        ``_signal_history`` got no entry, the broker stayed open in live/paper
+        mode, ``performance_tracker`` got no record, and the Lumin app's
+        Closed→Expired sub-filter rendered empty even when subscribers had
+        just received an "⏰ Signal Expired" Telegram post.
+
+        Idempotent on retries: re-running on a signal whose ``status`` is
+        already a terminal state is a no-op.
+        """
+        if sig is None:
+            return
+        existing_status = (getattr(sig, "status", "") or "").upper()
+        if existing_status not in {"", "ACTIVE", "TP1_HIT", "TP2_HIT"}:
+            # Already terminal (SL_HIT / TP3_HIT / INVALIDATED / EXPIRED /
+            # CANCELLED).  cleanup_expired raced with another close path —
+            # don't double-archive.
+            return
+
+        # Compute realised P&L from the last-known mark price.  Auto-trade
+        # users need an honest close price even when the trade-monitor
+        # didn't get to fire its own expiry path (e.g. WebSocket lost
+        # the symbol or scanner cleanup_expired won the race).
+        entry = float(getattr(sig, "entry", 0.0) or 0.0)
+        current_price = float(getattr(sig, "current_price", 0.0) or 0.0)
+        if entry > 0 and current_price > 0:
+            try:
+                from src.smc import Direction
+                if sig.direction == Direction.LONG:
+                    sig.pnl_pct = (current_price - entry) / entry * 100.0
+                else:
+                    sig.pnl_pct = (entry - current_price) / entry * 100.0
+            except Exception:
+                pass
+
+        sig.status = "EXPIRED"
+        sig.terminal_outcome_timestamp = now
+
+        # Archive into _signal_history + persist.  Mirrors the work
+        # _remove_and_archive does for trade-monitor-driven closes.
+        self._signal_history.append(sig)
+        self._signal_history = self._signal_history[-500:]
+        try:
+            save_history(self._signal_history)
+        except Exception as exc:
+            log.warning(f"signal_history flush failed (expiry): {exc}")
+
+        # Stamp a perf-tracker record so the win-rate / aggregate stats
+        # include this expiry.  outcome_label="EXPIRED" matches what
+        # trade_monitor's expiry path produces post-PR-#305.
+        try:
+            if self._performance_tracker is not None:
+                self._performance_tracker.record_outcome(
+                    signal_id=sig.signal_id,
+                    channel=sig.channel,
+                    symbol=sig.symbol,
+                    direction=sig.direction.value,
+                    entry=sig.entry,
+                    hit_tp=0,
+                    hit_sl=False,
+                    pnl_pct=getattr(sig, "pnl_pct", 0.0) or 0.0,
+                    outcome_label="EXPIRED",
+                    confidence=getattr(sig, "confidence", 0.0) or 0.0,
+                    setup_class=getattr(sig, "setup_class", "") or "",
+                    quality_tier=getattr(sig, "quality_tier", "B") or "B",
+                    stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                )
+        except Exception as exc:
+            log.warning(f"perf_tracker record_outcome failed (expiry): {exc}")
+
+        # Close any broker-side position so auto-trade doesn't bleed an
+        # orphan after the engine has stopped tracking.  Best-effort —
+        # PositionReconciler is the safety net for any failure here.
+        if self._order_manager is not None and getattr(
+            self._order_manager, "is_enabled", False
+        ):
+            try:
+                import asyncio as _asyncio
+                _asyncio.get_running_loop().create_task(
+                    self._order_manager.close_full(
+                        sig, reason="expired", current_price=current_price or None
+                    )
+                )
+            except RuntimeError:
+                # No running loop (test path or sync caller) — skip the
+                # async broker close.  The reconciler will catch the orphan.
+                pass
+            except Exception as exc:
+                log.warning(f"order_manager.close_full failed (expiry): {exc}")
 
     # ------------------------------------------------------------------
     # Auto-execution mode runtime control (Telegram /automode command)
