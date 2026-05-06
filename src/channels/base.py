@@ -187,6 +187,11 @@ class Signal:
     regime_penalty_multiplier: float = 1.0    # Regime multiplier applied to base penalties
     soft_gate_flags: str = ""                 # Comma-separated list of soft gates that fired
 
+    # ---- Multi-TF Level Book confluence (PR-6) ----
+    # Number of distinct multi-TF S/R levels (incl. round numbers) within
+    # CONFLUENCE_QUERY_TOLERANCE_PCT of entry.  ≥2 earns a soft-penalty bonus.
+    confluence_count: int = 0
+
     # ---- Signal tier (set by scanner after confidence scoring) ----
     signal_tier: str = "B"  # "A+" (80-100), "B" (65-79), "FILTERED" (<65)
 
