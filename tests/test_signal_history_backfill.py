@@ -24,6 +24,7 @@ from src.channels.base import Signal
 from src.signal_history_backfill import (
     backfill_from_legacy_sources,
     reconcile_invalidation_status,
+    reconcile_missing_tps,
 )
 from src.signal_history_store import HISTORY_CAP
 from src.smc import Direction
@@ -522,3 +523,170 @@ def test_reconcile_updates_only_provided_fields(tmp_path) -> None:
     # Nothing to override → keep what was there
     assert sig.current_price == pytest.approx(99.0)
     assert sig.pnl_pct == pytest.approx(42.0)
+
+
+# ---------------------------------------------------------------------------
+# reconcile_missing_tps — patch TP2/TP3 from dispatch_log.json
+# ---------------------------------------------------------------------------
+
+
+def _dispatch_record(
+    *,
+    signal_id: str,
+    entry: float = 100.0,
+    sl: float = 99.0,
+    tp1: float = 101.0,
+    tp2: float = 102.0,
+    tp3: float = 103.0,
+) -> dict:
+    return {
+        "dispatched_at": 1700000000.0,
+        "signal_id": signal_id,
+        "channel": "360_SCALP",
+        "symbol": "BTCUSDT",
+        "direction": "LONG",
+        "entry": entry,
+        "sl": sl,
+        "tp1": tp1,
+        "tp2": tp2,
+        "tp3": tp3,
+    }
+
+
+def test_backfill_uses_dispatch_log_to_fill_tp2_tp3(tmp_path: Path) -> None:
+    """A perf record without TP2/TP3 should pick them up from dispatch_log."""
+    perf = tmp_path / "perf.json"
+    inval = tmp_path / "inval.json"
+    dispatch = tmp_path / "dispatch.json"
+    _write(perf, [_perf_record(signal_id="WITH-DISPATCH", tp1=101.0)])
+    _write(dispatch, [_dispatch_record(
+        signal_id="WITH-DISPATCH", tp1=101.5, tp2=103.0, tp3=105.5,
+    )])
+
+    out = backfill_from_legacy_sources(
+        perf_path=str(perf),
+        invalidation_path=str(inval),
+        dispatch_path=str(dispatch),
+    )
+    assert len(out) == 1
+    sig = out[0]
+    # Perf carried tp1, dispatch fills tp2/tp3.
+    assert sig.tp1 == pytest.approx(101.0)
+    assert sig.tp2 == pytest.approx(103.0)
+    assert sig.tp3 == pytest.approx(105.5)
+
+
+def test_backfill_dispatch_fills_missing_tp1_too(tmp_path: Path) -> None:
+    """When perf record has tp1=0 but dispatch has the real tp1, use dispatch."""
+    perf = tmp_path / "perf.json"
+    dispatch = tmp_path / "dispatch.json"
+    record = _perf_record(signal_id="ZERO-TP1")
+    record["tp1"] = 0.0
+    _write(perf, [record])
+    _write(dispatch, [_dispatch_record(
+        signal_id="ZERO-TP1", tp1=101.0, tp2=102.0, tp3=104.0,
+    )])
+
+    out = backfill_from_legacy_sources(
+        perf_path=str(perf),
+        invalidation_path=str(tmp_path / "missing.json"),
+        dispatch_path=str(dispatch),
+    )
+    assert len(out) == 1
+    assert out[0].tp1 == pytest.approx(101.0)
+
+
+def test_backfill_no_dispatch_log_keeps_old_behaviour(tmp_path: Path) -> None:
+    """Absent dispatch log → tp2 stays 0, tp3 None.  No regression."""
+    perf = tmp_path / "perf.json"
+    _write(perf, [_perf_record(signal_id="NO-DISPATCH", tp1=101.0)])
+
+    out = backfill_from_legacy_sources(
+        perf_path=str(perf),
+        invalidation_path=str(tmp_path / "missing.json"),
+        dispatch_path=str(tmp_path / "missing-dispatch.json"),
+    )
+    assert len(out) == 1
+    sig = out[0]
+    assert sig.tp1 == pytest.approx(101.0)
+    assert sig.tp2 == pytest.approx(0.0)
+    assert sig.tp3 is None
+
+
+def test_reconcile_missing_tps_patches_existing_history(tmp_path: Path) -> None:
+    """An already-archived signal with tp2=0/tp3=None gets patched in place
+    when its signal_id appears in dispatch_log."""
+    dispatch = tmp_path / "dispatch.json"
+    _write(dispatch, [_dispatch_record(
+        signal_id="LEGACY-1", tp1=101.0, tp2=102.5, tp3=104.0,
+    )])
+
+    sig = _make_signal_for_reconcile(
+        signal_id="LEGACY-1",
+        status="CLOSED",
+    )
+    sig.tp1 = 101.0
+    sig.tp2 = 0.0
+    sig.tp3 = None
+
+    fixed = reconcile_missing_tps([sig], dispatch_path=str(dispatch))
+    assert fixed == 1
+    assert sig.tp2 == pytest.approx(102.5)
+    assert sig.tp3 == pytest.approx(104.0)
+
+
+def test_reconcile_missing_tps_idempotent(tmp_path: Path) -> None:
+    """Running reconcile twice mutates 0 the second time."""
+    dispatch = tmp_path / "dispatch.json"
+    _write(dispatch, [_dispatch_record(
+        signal_id="ID-1", tp1=101.0, tp2=102.0, tp3=103.0,
+    )])
+    sig = _make_signal_for_reconcile(signal_id="ID-1", status="CLOSED")
+    sig.tp1 = 101.0
+    sig.tp2 = 0.0
+    sig.tp3 = None
+
+    first = reconcile_missing_tps([sig], dispatch_path=str(dispatch))
+    second = reconcile_missing_tps([sig], dispatch_path=str(dispatch))
+    assert first == 1
+    assert second == 0
+
+
+def test_reconcile_missing_tps_skips_already_populated(tmp_path: Path) -> None:
+    """If TP2/TP3 are already real numbers, leave them alone."""
+    dispatch = tmp_path / "dispatch.json"
+    _write(dispatch, [_dispatch_record(
+        signal_id="ALREADY-FULL", tp1=101.0, tp2=999.0, tp3=999.0,
+    )])
+    sig = _make_signal_for_reconcile(signal_id="ALREADY-FULL", status="CLOSED")
+    sig.tp1 = 101.0
+    sig.tp2 = 102.0  # populated, not 0
+    sig.tp3 = 103.0  # populated, not None
+
+    fixed = reconcile_missing_tps([sig], dispatch_path=str(dispatch))
+    assert fixed == 0
+    assert sig.tp2 == pytest.approx(102.0)
+    assert sig.tp3 == pytest.approx(103.0)
+
+
+def test_reconcile_missing_tps_ignores_unknown_signal_ids(tmp_path: Path) -> None:
+    """A history signal not in dispatch_log is left as-is."""
+    dispatch = tmp_path / "dispatch.json"
+    _write(dispatch, [_dispatch_record(signal_id="ID-A")])
+    sig = _make_signal_for_reconcile(signal_id="ID-B", status="CLOSED")
+    sig.tp2 = 0.0
+    sig.tp3 = None
+
+    fixed = reconcile_missing_tps([sig], dispatch_path=str(dispatch))
+    assert fixed == 0
+    assert sig.tp2 == pytest.approx(0.0)
+    assert sig.tp3 is None
+
+
+def test_reconcile_missing_tps_no_dispatch_log_returns_zero(tmp_path: Path) -> None:
+    """Absent dispatch log → no-op, no exception."""
+    sig = _make_signal_for_reconcile(signal_id="X", status="CLOSED")
+    fixed = reconcile_missing_tps(
+        [sig], dispatch_path=str(tmp_path / "missing.json"),
+    )
+    assert fixed == 0

@@ -54,6 +54,7 @@ from src.scanner import Scanner
 from src.signal_history_backfill import (
     backfill_from_legacy_sources,
     reconcile_invalidation_status,
+    reconcile_missing_tps,
 )
 from src.signal_history_store import load_history, save_history
 from src.signal_router import SignalRouter
@@ -371,6 +372,17 @@ class CryptoSignalEngine:
                 save_history(self._signal_history)
         except Exception as exc:
             log.warning(f"signal_history reconciliation failed: {exc}")
+
+        # Also patch missing TPs (TP2/TP3) on signals backfilled from
+        # PerformanceTracker / InvalidationAudit before PR #299 — neither
+        # store carries TP2/TP3, but dispatch_log.json does.  Without this,
+        # the app's history rows show TP1=0/TP3=0 on every old signal.
+        try:
+            tp_fixed = reconcile_missing_tps(self._signal_history)
+            if tp_fixed:
+                save_history(self._signal_history)
+        except Exception as exc:
+            log.warning(f"signal_history TP reconciliation failed: {exc}")
         self._boot_time: float = 0.0
         self._free_channel_limit: int = 2  # max free signals published per day
         self._alert_subscribers: Set[str] = set()  # admin IDs subscribed to alerts

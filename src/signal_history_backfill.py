@@ -60,6 +60,53 @@ log = get_logger(__name__)
 
 _DEFAULT_PERF_PATH = "data/signal_performance.json"
 _DEFAULT_INVAL_PATH = "data/invalidation_records.json"
+_DEFAULT_DISPATCH_PATH = "data/dispatch_log.json"
+
+
+def _build_dispatch_index(
+    path: str = _DEFAULT_DISPATCH_PATH,
+) -> Dict[str, Dict[str, float]]:
+    """Build a {signal_id: {entry, sl, tp1, tp2, tp3}} index from dispatch_log.
+
+    The dispatch log is the only store that captures the **full** original
+    geometry of every signal at the moment it was sent to Telegram.
+    PerformanceTracker only stores entry+SL (TP prices are aggregated as hit
+    counts, not preserved per-record); InvalidationAudit stores entry+SL+TP1
+    only.  As a result, app history rows for older signals show TP1=0 / TP2=0
+    / TP3=null even though the original signal had real TPs.
+
+    This index is used in two ways:
+    1. During first-boot backfill — fill TPs that the perf/invalidation
+       record didn't carry.
+    2. During reconciliation on every boot — repair already-archived
+       Signal objects in `_signal_history` whose TPs are 0/None but whose
+       signal_id matches a dispatch_log entry.
+
+    Returns an empty dict when the file is absent or unreadable.
+    """
+    raw = _load_json_array(Path(path))
+    index: Dict[str, Dict[str, float]] = {}
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        sid = (entry.get("signal_id") or "").strip()
+        if not sid:
+            continue
+        try:
+            geometry: Dict[str, float] = {}
+            if entry.get("entry") is not None:
+                geometry["entry"] = float(entry["entry"])
+            if entry.get("sl") is not None:
+                geometry["sl"] = float(entry["sl"])
+            for k in ("tp1", "tp2", "tp3"):
+                v = entry.get(k)
+                if v is not None:
+                    geometry[k] = float(v)
+        except (TypeError, ValueError):
+            continue
+        if geometry:
+            index[sid] = geometry
+    return index
 
 
 def _to_datetime(value: Any) -> Optional[datetime]:
@@ -104,10 +151,18 @@ def _status_from_perf(record: Dict[str, Any]) -> str:
     return "CLOSED"
 
 
-def _signal_from_perf_dict(record: Dict[str, Any]) -> Optional[Signal]:
+def _signal_from_perf_dict(
+    record: Dict[str, Any],
+    *,
+    dispatch_index: Optional[Dict[str, Dict[str, float]]] = None,
+) -> Optional[Signal]:
     """Build a Signal from a PerformanceTracker JSON record.
 
     Defensive: missing required fields → return None rather than crash.
+
+    When ``dispatch_index`` is supplied, missing tp2/tp3 (and tp1 if absent
+    from the perf record) are filled from the dispatch log, which is the
+    only store that captures the full original geometry of every signal.
     """
     signal_id = (record.get("signal_id") or "").strip()
     symbol = (record.get("symbol") or "").strip()
@@ -122,6 +177,18 @@ def _signal_from_perf_dict(record: Dict[str, Any]) -> Optional[Signal]:
     if entry <= 0:
         return None
 
+    tp2 = 0.0
+    tp3: Optional[float] = None
+    if dispatch_index is not None:
+        geom = dispatch_index.get(signal_id)
+        if geom:
+            if tp1 <= 0 and "tp1" in geom:
+                tp1 = geom["tp1"]
+            if "tp2" in geom:
+                tp2 = geom["tp2"]
+            if "tp3" in geom:
+                tp3 = geom["tp3"]
+
     create_ts = _to_datetime(record.get("create_timestamp"))
     dispatch_ts = _to_datetime(record.get("dispatch_timestamp"))
     terminal_ts = _to_datetime(record.get("terminal_outcome_timestamp"))
@@ -134,9 +201,8 @@ def _signal_from_perf_dict(record: Dict[str, Any]) -> Optional[Signal]:
         entry=entry,
         stop_loss=sl,
         tp1=tp1,
-        # PerformanceTracker doesn't store TP2/TP3 — leave at default 0.
-        # SignalDetail surfaces them as 0/null which the app handles.
-        tp2=0.0,
+        tp2=tp2,
+        tp3=tp3,
         signal_id=signal_id,
         setup_class=record.get("setup_class", "") or "",
         confidence=float(record.get("confidence", 0.0) or 0.0),
@@ -155,8 +221,16 @@ def _signal_from_perf_dict(record: Dict[str, Any]) -> Optional[Signal]:
     )
 
 
-def _signal_from_invalidation_dict(record: Dict[str, Any]) -> Optional[Signal]:
-    """Build a Signal from an InvalidationRecord JSON record."""
+def _signal_from_invalidation_dict(
+    record: Dict[str, Any],
+    *,
+    dispatch_index: Optional[Dict[str, Dict[str, float]]] = None,
+) -> Optional[Signal]:
+    """Build a Signal from an InvalidationRecord JSON record.
+
+    ``dispatch_index`` lookup fills tp2/tp3 (and tp1 if absent), since
+    InvalidationAudit only stores entry/SL/TP1.
+    """
     signal_id = (record.get("signal_id") or "").strip()
     symbol = (record.get("symbol") or "").strip()
     if not signal_id or not symbol:
@@ -171,6 +245,19 @@ def _signal_from_invalidation_dict(record: Dict[str, Any]) -> Optional[Signal]:
         return None
     if entry <= 0:
         return None
+
+    tp2 = 0.0
+    tp3: Optional[float] = None
+    if dispatch_index is not None:
+        geom = dispatch_index.get(signal_id)
+        if geom:
+            if tp1 <= 0 and "tp1" in geom:
+                tp1 = geom["tp1"]
+            if "tp2" in geom:
+                tp2 = geom["tp2"]
+            if "tp3" in geom:
+                tp3 = geom["tp3"]
+
     kill_ts = _to_datetime(record.get("kill_timestamp"))
     timestamp = kill_ts or datetime.now(timezone.utc)
     return Signal(
@@ -180,7 +267,8 @@ def _signal_from_invalidation_dict(record: Dict[str, Any]) -> Optional[Signal]:
         entry=entry,
         stop_loss=sl,
         tp1=tp1,
-        tp2=0.0,
+        tp2=tp2,
+        tp3=tp3,
         signal_id=signal_id,
         setup_class=record.get("setup_class", "") or "",
         status="INVALIDATED",
@@ -214,6 +302,7 @@ def backfill_from_legacy_sources(
     *,
     perf_path: str = _DEFAULT_PERF_PATH,
     invalidation_path: str = _DEFAULT_INVAL_PATH,
+    dispatch_path: str = _DEFAULT_DISPATCH_PATH,
 ) -> List[Signal]:
     """Reconstruct a `_signal_history`-shaped list from legacy sources.
 
@@ -223,24 +312,29 @@ def backfill_from_legacy_sources(
     Sorted by ``timestamp`` descending, capped at :data:`HISTORY_CAP`
     to mirror the in-memory cap.
 
+    ``dispatch_path`` is consulted to fill TP2/TP3 (and TP1 if absent)
+    that the perf/invalidation records don't store — without this the
+    app shows TP1=0/TP2=0/TP3=null on every backfilled row.
+
     Returns an empty list when both source files are absent or unreadable
     — the caller can use that as a "nothing to backfill" signal.
     """
     perf_records = _load_json_array(Path(perf_path))
     inval_records = _load_json_array(Path(invalidation_path))
+    dispatch_index = _build_dispatch_index(dispatch_path)
 
     by_id: Dict[str, Signal] = {}
 
     # Invalidation first so performance overwrites on collision.
     for r in inval_records:
-        sig = _signal_from_invalidation_dict(r)
+        sig = _signal_from_invalidation_dict(r, dispatch_index=dispatch_index)
         if sig is None:
             continue
         by_id[sig.signal_id] = sig
 
     perf_overrides = 0
     for r in perf_records:
-        sig = _signal_from_perf_dict(r)
+        sig = _signal_from_perf_dict(r, dispatch_index=dispatch_index)
         if sig is None:
             continue
         if sig.signal_id in by_id:
@@ -352,7 +446,64 @@ def reconcile_invalidation_status(
     return fixed
 
 
+def reconcile_missing_tps(
+    history: List[Signal],
+    *,
+    dispatch_path: str = _DEFAULT_DISPATCH_PATH,
+) -> int:
+    """Patch missing TP prices on already-archived signals.
+
+    Walks ``history`` and, for any signal whose ``tp1``/``tp2``/``tp3``
+    are unset (0.0 / None) but whose ``signal_id`` matches a
+    ``dispatch_log.json`` entry, fills in the original geometry from
+    that dispatch log.
+
+    Why: PerformanceTracker only stores entry+SL.  InvalidationAudit
+    stores entry+SL+TP1.  Neither stores TP2 or TP3.  Signals archived
+    into ``_signal_history`` before PR #299 (in-memory only) were
+    backfilled from these two stores and so came in with TP2=0 / TP3=null
+    — the app shows "TP1 0.00 / TP3 0.00" on those rows.  The dispatch
+    log keeps the full original geometry indexed by signal_id and is
+    the only source of truth for those missing values.
+
+    Idempotent: a signal whose TPs are already populated is left alone.
+    Returns the number of signals mutated so the caller can decide
+    whether to re-flush via ``save_history``.
+    """
+    dispatch_index = _build_dispatch_index(dispatch_path)
+    if not dispatch_index:
+        return 0
+
+    fixed = 0
+    for sig in history:
+        sid = getattr(sig, "signal_id", "") or ""
+        if not sid or sid not in dispatch_index:
+            continue
+        geom = dispatch_index[sid]
+
+        mutated = False
+        if (getattr(sig, "tp1", 0.0) or 0.0) <= 0 and "tp1" in geom:
+            sig.tp1 = geom["tp1"]
+            mutated = True
+        if (getattr(sig, "tp2", 0.0) or 0.0) <= 0 and "tp2" in geom:
+            sig.tp2 = geom["tp2"]
+            mutated = True
+        if getattr(sig, "tp3", None) in (None, 0, 0.0) and "tp3" in geom:
+            sig.tp3 = geom["tp3"]
+            mutated = True
+        if mutated:
+            fixed += 1
+
+    if fixed:
+        log.info(
+            "signal_history_backfill: reconcile_missing_tps patched %d signals",
+            fixed,
+        )
+    return fixed
+
+
 __all__ = [
     "backfill_from_legacy_sources",
     "reconcile_invalidation_status",
+    "reconcile_missing_tps",
 ]
