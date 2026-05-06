@@ -7,12 +7,16 @@ Contract:
 * SL anchored to opposite-side 1h swing in last 30 bars (or ATR×1.0
   fallback)
 * TP ladder = 1.5R / 2.5R / 3.5R (fixed)
-* Cooldown = 24h per (symbol, direction)
+* Cooldown = 24h per (symbol, direction); persisted to disk for
+  redeploy survival
 * 4h cross gets +10 confidence; 1h cross gets +5
 * Setup class: "MA_CROSS_TREND_SHIFT"
 
 Each test stages indicator arrays so the cross condition is explicit
 and replays exactly what production code sees.
+
+Note: each test isolates the cooldown JSON to a per-test tmp path so
+fires from one test don't leak into another.
 """
 
 from __future__ import annotations
@@ -24,6 +28,17 @@ import pytest
 
 from src.channels.scalp import ScalpChannel
 from src.smc import Direction
+
+
+@pytest.fixture(autouse=True)
+def _isolated_ma_cross_cooldown(tmp_path, monkeypatch):
+    """Per-test cooldown JSON path so fires don't leak across tests."""
+    monkeypatch.setattr(
+        ScalpChannel,
+        "_MA_CROSS_COOLDOWN_PATH",
+        str(tmp_path / "ma_cross_cooldown.json"),
+    )
+    yield
 
 
 # ---------------------------------------------------------------------------

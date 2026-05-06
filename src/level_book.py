@@ -78,6 +78,7 @@ CONFLUENCE_TOLERANCE_PCT: float = 0.30
 
 #: Per-TF score weight.  Higher TF levels are more meaningful.
 TF_WEIGHT: Dict[str, float] = {
+    "1w": 2.5,     # cycle-level highs/lows (added 2026-05-06; seeded via 1w candles)
     "1d": 2.0,
     "4h": 1.5,
     "1h": 1.0,
@@ -106,6 +107,7 @@ ROUND_NUMBER_RANGE_PCT: float = 20.0
 
 #: Swing-detection look-back window per TF (bars on each side of pivot).
 SWING_ORDER_BY_TF: Dict[str, int] = {
+    "1w": 2,  # weekly: 2 bars on each side captures cycle highs/lows cleanly
     "1d": 3,
     "4h": 4,
     "1h": 5,
@@ -402,24 +404,22 @@ class LevelBook:
                         is_round_number=True,
                     ))
 
-        # 3. Volume-profile injection (PR-VP-wire).
+        # 3. Volume-profile injection (PR-VP-wire + macro-VP fix).
         # POC, VAH, VAL come in as `source_tf="vp"`.  They participate in
         # the same clustering and scoring path as swing pivots and round
         # numbers — so a swing high that aligns with VAH within 0.30%
         # collapses into one high-score zone, and a candidate at that
         # price sees the multi-source confluence in `confluence_count`.
+        #
+        # ``volume_profile`` accepts a single VolumeProfileResult or a list
+        # of them (e.g. one micro-VP from 1h candles + one macro-VP from
+        # 1d candles).  Each result contributes its own POC/VAH/VAL.
         if volume_profile is not None:
             try:
-                vp_prices = []
-                vp_poc = float(getattr(volume_profile, "poc", 0.0) or 0.0)
-                vp_vah = float(getattr(volume_profile, "vah", 0.0) or 0.0)
-                vp_val = float(getattr(volume_profile, "val", 0.0) or 0.0)
-                if vp_poc > 0:
-                    vp_prices.append((vp_poc, "support"))    # POC = magnet,
-                if vp_vah > 0:                                # type irrelevant
-                    vp_prices.append((vp_vah, "resistance"))
-                if vp_val > 0:
-                    vp_prices.append((vp_val, "support"))
+                vp_list = (
+                    volume_profile if isinstance(volume_profile, (list, tuple))
+                    else [volume_profile]
+                )
                 # Look up touches against the most-granular candle stream
                 # we have to give VP levels age-decay context.
                 _vp_cd = candles_by_tf.get("1h") or candles_by_tf.get("4h") or {}
@@ -433,18 +433,31 @@ class LevelBook:
                     np.asarray(_vp_lows, dtype=np.float64).ravel()
                     if _vp_lows is not None else np.array([], dtype=np.float64)
                 )
-                for price, sr_type in vp_prices:
-                    touches, last_idx = _count_touches(price, vp_highs_arr, vp_lows_arr)
-                    last_ts = (
-                        _candle_ts(_vp_cd, last_idx) if last_idx is not None else None
-                    )
-                    raw.append(Level(
-                        price=price,
-                        type=sr_type,
-                        source_tf="vp",
-                        touches=max(1, touches),
-                        last_test_ts=last_ts,
-                    ))
+                for vp_result in vp_list:
+                    if vp_result is None:
+                        continue
+                    vp_prices = []
+                    vp_poc = float(getattr(vp_result, "poc", 0.0) or 0.0)
+                    vp_vah = float(getattr(vp_result, "vah", 0.0) or 0.0)
+                    vp_val = float(getattr(vp_result, "val", 0.0) or 0.0)
+                    if vp_poc > 0:
+                        vp_prices.append((vp_poc, "support"))    # POC = magnet,
+                    if vp_vah > 0:                                # type irrelevant
+                        vp_prices.append((vp_vah, "resistance"))
+                    if vp_val > 0:
+                        vp_prices.append((vp_val, "support"))
+                    for price, sr_type in vp_prices:
+                        touches, last_idx = _count_touches(price, vp_highs_arr, vp_lows_arr)
+                        last_ts = (
+                            _candle_ts(_vp_cd, last_idx) if last_idx is not None else None
+                        )
+                        raw.append(Level(
+                            price=price,
+                            type=sr_type,
+                            source_tf="vp",
+                            touches=max(1, touches),
+                            last_test_ts=last_ts,
+                        ))
             except Exception as exc:
                 log.debug("LevelBook VP injection error for {}: {}", symbol, exc)
 
