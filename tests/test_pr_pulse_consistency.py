@@ -268,26 +268,10 @@ class TestPulseLoopGuards:
         # PnL = (32160 - 32000) / 32000 * 100 = +0.50%
         assert "+0.50" in pulse, f"Expected +0.50% in pulse: {pulse}"
 
-    @pytest.mark.asyncio
-    async def test_watchlist_tier_signal_skipped(self, sent_messages, active_chan, monkeypatch):
-        """WATCHLIST-tier signals must not generate a live-trade pulse."""
-        router = _make_router(sent_messages)
-        sig = _make_signal(
-            symbol="DASHUSDT",
-            direction=Direction.SHORT,
-            entry=41.1900,
-            stop_loss=41.40,
-            tp1=36.57,
-            current_price=41.3680,
-            signal_tier="WATCHLIST",
-        )
-        sig._last_pulse_time = 0.0
-        router._active_signals[sig.signal_id] = sig
-
-        await self._run_pulse_once(router, monkeypatch)
-
-        pulses = _extract_pulse_text(sent_messages, "active_chan")
-        assert pulses == [], f"WATCHLIST signal should not pulse, but got: {pulses}"
+    # test_watchlist_tier_signal_skipped removed in the app-era doctrine
+    # reset.  WATCHLIST tier no longer exists; sub-65 signals drop at the
+    # scanner gate and never reach _active_signals, so the pulse-skip
+    # guard for WATCHLIST is no longer necessary or testable.
 
     @pytest.mark.asyncio
     async def test_zero_current_price_skipped(self, sent_messages, active_chan, monkeypatch):

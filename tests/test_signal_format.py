@@ -183,12 +183,14 @@ class TestLegacyFormatSignal:
         assert len(new_text) > 50
         assert len(old_text) > 50
 
-    def test_legacy_watchlist_routing(self):
-        """WATCHLIST signals route to format_watchlist_signal in legacy too."""
+    def test_legacy_watchlist_returns_empty(self):
+        """WATCHLIST tier was removed in the app-era doctrine reset.  Defensive
+        path returns empty string instead of routing to a now-deleted
+        ``format_watchlist_signal``."""
         sig = _make_signal()
         sig.signal_tier = "WATCHLIST"
         text = TelegramBot.format_signal_legacy(sig)
-        assert "WATCHLIST" in text
+        assert text == ""
 
 
 class TestEstimatedHold:

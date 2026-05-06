@@ -552,14 +552,19 @@ def classify_signal_tier(confidence: float) -> str:
     Returns
     -------
     One of: ``"A+"`` (sniper, 80-100), ``"B"`` (setup, 65-79),
-    ``"WATCHLIST"`` (50-64), ``"FILTERED"`` (< 50).
+    A signal-tier classifier returning ``"A+"`` (≥80) / ``"B"`` (65-79) /
+    ``"FILTERED"`` (< 65).
+
+    The WATCHLIST tier (50-64 → free channel preview) was removed in the
+    app-era doctrine reset: subscribers consume signals via the Lumin app,
+    not the Telegram free channel, and watchlist previews were producing
+    spammy free-channel volume with negligible paid-conversion value.
+    Sub-65 confidence now drops cleanly.
     """
     if confidence >= 80:
         return "A+"
     elif confidence >= 65:
         return "B"
-    elif confidence >= 50:
-        return "WATCHLIST"
     return "FILTERED"
 
 
@@ -4127,10 +4132,6 @@ class Scanner:
                 sig.signal_tier = "B"
                 self._suppression_counters[f"score_65to79:{_sc}"] += 1
                 self._scoring_tier_counters[f"score_65to79:{_sc}"] += 1
-            elif _score_result["total"] >= 50:
-                sig.signal_tier = "WATCHLIST"
-                self._suppression_counters[f"score_50to64:{_sc}"] += 1
-                self._scoring_tier_counters[f"score_50to64:{_sc}"] += 1
             else:
                 log.debug(
                     "scoring below-threshold {} {} [{}]: total={:.1f} smc={} regime={} vol={} ind={} pat={} mtf={} thesis_adj={}",
@@ -4502,29 +4503,16 @@ class Scanner:
                     )
                 return _reject("filtered", cross_verified)
         # Reclassify after all post-score confidence adjustments (stat filter, pair-analysis
-        # penalties, transition boost) so WATCHLIST/floor decisions use current confidence.
+        # penalties, transition boost) so paid-tier decisions use current confidence.
         sig.signal_tier = classify_signal_tier(sig.confidence)
-        # WATCHLIST tier: signals with confidence 50-64 are kept as WATCHLIST
-        # instead of being discarded.  Only the SCALP channel family generates
-        # watchlist alerts; SWING and SPOT require higher confidence.
-        _watchlist_confidence = 50.0
+        # WATCHLIST tier removed (app-era doctrine reset).  Sub-65 confidence
+        # signals drop cleanly — no free-channel preview, no router routing,
+        # no monitor management.  Lumin app's per-agent + signals views show
+        # only paid-tier (≥65) outcomes; the free Telegram channel keeps macro
+        # / regime-shift / signal-close storytelling but no preview signals.
         _market_component_floor = 12.0
         _execution_component_floor = 10.0
         _risk_component_floor = 10.0
-        if (
-            sig.signal_tier == "WATCHLIST"
-            and chan_name in _SCALP_CHANNELS
-            and sig.confidence >= _watchlist_confidence
-        ):
-            # Keep as WATCHLIST — the router will dispatch this to the free
-            # channel only (zone-alert preview, not a paid active trade).
-            _record_confidence_gate_decision(
-                decision="kept",
-                reason="watchlist_tier_keep",
-                threshold=_watchlist_confidence,
-            )
-            self._populate_signal_context(sig, volume_24h, ctx)
-            return sig, cross_verified
         if (
             sig.confidence < min_conf
             or sig.component_scores.get("market", 0.0) < _market_component_floor

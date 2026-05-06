@@ -391,20 +391,23 @@ async def test_sl_ratchets_only_never_widens_long(mock_send):
     assert sig.stop_loss == pytest.approx(30100.0)
 
 
-async def test_watchlist_tier_skips_free_post(mock_send):
-    """WATCHLIST signals never reach trade_monitor in production but the
-    defensive guard must still suppress free-channel post."""
+async def test_paid_tier_pre_tp_fires_free_post(mock_send):
+    """Replaces the legacy "WATCHLIST suppresses free-channel post" test.
+    The WATCHLIST tier was removed in the app-era doctrine reset; every
+    signal that reaches trade_monitor is paid (B+) and DOES post pre-TP
+    storytelling to the free channel.
+    """
     send, sent = mock_send
     monitor = _build_monitor(send)
-    sig = _make_signal(signal_tier="WATCHLIST")
+    sig = _make_signal(signal_tier="B")
 
     with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
          patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
         fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
 
-    assert fired is True  # mechanism still runs (SL → BE)
+    assert fired is True
     chat_ids = [c for c, _ in sent]
-    assert "FREE-CHAN" not in chat_ids
+    assert "FREE-CHAN" in chat_ids
 
 
 async def test_free_post_failure_does_not_break_state_change(mock_send):

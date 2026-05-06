@@ -1,4 +1,11 @@
-"""PR-18 tests: 360_SCALP tier dispatch alignment (A+ / B / WATCHLIST).
+"""PR-18 tests: 360_SCALP tier dispatch alignment (A+ / B / FILTERED).
+
+WATCHLIST tier was removed in the app-era doctrine reset.  Sub-65 signals
+drop cleanly at the scanner gate; the free Telegram channel keeps macro /
+regime-shift / signal-close storytelling but no preview signals.  Tests
+below assert sub-65 drop, not WATCHLIST routing.
+
+Original docstring (kept for context):
 
 Verifies the governance correction that aligns 360_SCALP dispatch behavior
 with the declared tier policy:
@@ -137,12 +144,11 @@ class TestClassifySignalTier:
         assert classify_signal_tier(79.9) == "B"
         assert classify_signal_tier(72.0) == "B"
 
-    def test_watchlist_boundary(self):
-        assert classify_signal_tier(50.0) == "WATCHLIST"
-        assert classify_signal_tier(64.9) == "WATCHLIST"
-        assert classify_signal_tier(55.0) == "WATCHLIST"
-
-    def test_filtered_boundary(self):
+    def test_sub_paid_threshold_filtered(self):
+        """WATCHLIST tier removed in app-era reset; sub-65 → FILTERED (drop)."""
+        assert classify_signal_tier(64.9) == "FILTERED"
+        assert classify_signal_tier(55.0) == "FILTERED"
+        assert classify_signal_tier(50.0) == "FILTERED"
         assert classify_signal_tier(49.9) == "FILTERED"
         assert classify_signal_tier(0.0) == "FILTERED"
 
@@ -201,34 +207,38 @@ class TestScalpMinConfidenceConfig:
 # Invariant 3: Router — WATCHLIST doctrine (free channel only, not active_signals)
 # ---------------------------------------------------------------------------
 
-class TestRouterWatchlistDoctrine:
-    """WATCHLIST signals from 360_SCALP must go to the free channel only.
+class TestRouterSubPaidDrop:
+    """Sub-65 confidence signals must drop cleanly — never enter
+    ``_active_signals`` and never reach any Telegram channel.
 
-    They must NOT be registered in _active_signals and must NOT enter the
-    paid active lifecycle.  Doctrine: 'Post to free channel only'.
+    WATCHLIST tier was removed in the app-era doctrine reset; the previous
+    "WATCHLIST → free channel zone alert" routing is gone.  These tests
+    assert the post-removal contract.
     """
 
     @pytest.mark.asyncio
-    async def test_watchlist_scalp_signal_not_in_active_signals(self, queue, router, sent_messages):
-        """A WATCHLIST-tier 360_SCALP signal must NOT enter _active_signals."""
+    async def test_sub_paid_scalp_signal_not_in_active_signals(self, queue, router, sent_messages):
+        """Defensive: a signal tier-stamped legacy "WATCHLIST" (or any
+        sub-65 confidence) must not enter the paid active lifecycle."""
         sig = _make_signal(
             channel="360_SCALP", confidence=55.0, signal_tier="WATCHLIST"
         )
         in_active = await _route_signal(router, queue, sig)
-        assert not in_active, (
-            "WATCHLIST 360_SCALP signal with confidence=55 must NOT be registered "
-            "in _active_signals.  WATCHLIST is free-channel-only per doctrine."
-        )
+        assert not in_active
 
-    @pytest.mark.xfail(reason=(
-        "WATCHLIST routing was disabled in OWNER_BRIEF verified-live fix "
-        "'WATCHLIST spam in free channel disabled'.  Test asserts the old "
-        "behaviour (post WATCHLIST to free channel) which is no longer the "
-        "doctrine.  Re-author against the current B5 contract or remove."
-    ))
     @pytest.mark.asyncio
-    async def test_watchlist_scalp_signal_posted_to_free_channel(self, queue, router, sent_messages):
-        """A WATCHLIST-tier 360_SCALP signal must be posted to the free channel."""
+    async def test_sub_paid_signal_not_posted_to_paid_channel(self, queue, router, sent_messages):
+        sig = _make_signal(
+            channel="360_SCALP", confidence=55.0, signal_tier="WATCHLIST"
+        )
+        await _route_signal(router, queue, sig)
+        paid_posts = [text for chat_id, text in sent_messages if chat_id == "premium"]
+        assert not paid_posts
+
+    @pytest.mark.asyncio
+    async def test_sub_paid_signal_not_posted_to_free_channel(self, queue, router, sent_messages):
+        """Post-removal: free channel keeps macro / signal-close storytelling
+        but no preview signals."""
         sig = _make_signal(
             channel="360_SCALP", confidence=55.0, signal_tier="WATCHLIST"
         )
@@ -236,74 +246,20 @@ class TestRouterWatchlistDoctrine:
         sig.setup_class = "TREND_PULLBACK_EMA"
         await _route_signal(router, queue, sig)
         free_posts = [text for chat_id, text in sent_messages if chat_id == "free_channel"]
-        assert free_posts, (
-            "WATCHLIST 360_SCALP signal with confidence=55 must produce a post "
-            "to the free channel.  No free-channel message was found."
-        )
-        # The post should contain a WATCHLIST zone-alert marker, not a paid signal header.
-        assert any("WATCHLIST" in text for text in free_posts), (
-            "Free-channel post for a WATCHLIST signal must contain 'WATCHLIST'."
+        assert not free_posts, (
+            "Sub-65 signals must not produce free-channel posts after the "
+            "WATCHLIST tier removal."
         )
 
     @pytest.mark.asyncio
-    async def test_watchlist_not_posted_to_paid_channel(self, queue, router, sent_messages):
-        """A WATCHLIST-tier 360_SCALP signal must NOT be posted to the paid channel."""
-        sig = _make_signal(
-            channel="360_SCALP", confidence=55.0, signal_tier="WATCHLIST"
-        )
-        await _route_signal(router, queue, sig)
-        paid_posts = [text for chat_id, text in sent_messages if chat_id == "premium"]
-        assert not paid_posts, (
-            "WATCHLIST 360_SCALP signal must NOT be posted to the paid channel. "
-            f"Found {len(paid_posts)} paid-channel post(s)."
-        )
-
-    @pytest.mark.asyncio
-    async def test_non_watchlist_below_floor_is_rejected(self, queue, router, sent_messages):
-        """A signal that is NOT tagged WATCHLIST must still be rejected
-        if its confidence is below the channel floor."""
+    async def test_explicit_b_tier_below_floor_is_rejected(self, queue, router, sent_messages):
+        """A signal stamped B tier but with sub-floor confidence is still
+        rejected by the router's min-confidence check."""
         sig = _make_signal(
             channel="360_SCALP", confidence=55.0, signal_tier="B"
         )
         dispatched = await _route_signal(router, queue, sig)
-        assert not dispatched, (
-            "A non-WATCHLIST signal with confidence=55 below the channel floor "
-            "must still be rejected by the router."
-        )
-
-    @pytest.mark.asyncio
-    async def test_watchlist_non_360_scalp_not_in_active_signals(
-        self, queue, router, sent_messages, monkeypatch
-    ):
-        """WATCHLIST routing is scoped to channel == '360_SCALP'.
-        A scalp sub-channel WATCHLIST signal with confidence below its own floor
-        must not enter active_signals (dropped at min-confidence filter)."""
-        from config import ChannelConfig
-
-        fake_chan = ChannelConfig(
-            name="FAKE_SCALP_SUB",
-            emoji="⚡",
-            timeframes=["5m"],
-            sl_pct_range=(0.1, 0.3),
-            tp_ratios=[1.5, 2.5],
-            trailing_atr_mult=1.5,
-            adx_min=20,
-            adx_max=100,
-            spread_max=0.02,
-            min_confidence=80,
-            min_volume=5_000_000.0,
-            dca_enabled=True,
-            min_signal_lifespan=900,
-        )
-        monkeypatch.setattr(signal_router_module, "ALL_CHANNELS", list(signal_router_module.ALL_CHANNELS) + [fake_chan])
-        monkeypatch.setitem(signal_router_module.CHANNEL_TELEGRAM_MAP, "FAKE_SCALP_SUB", "premium")
-
-        sig = _make_signal(channel="FAKE_SCALP_SUB", confidence=55.0, signal_tier="WATCHLIST")
-        dispatched = await _route_signal(router, queue, sig)
-        assert not dispatched, (
-            "WATCHLIST free-channel routing is scoped to '360_SCALP' only. "
-            "FAKE_SCALP_SUB WATCHLIST signal must not enter active_signals."
-        )
+        assert not dispatched
 
 
 # ---------------------------------------------------------------------------

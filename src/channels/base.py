@@ -188,7 +188,7 @@ class Signal:
     soft_gate_flags: str = ""                 # Comma-separated list of soft gates that fired
 
     # ---- Signal tier (set by scanner after confidence scoring) ----
-    signal_tier: str = "B"  # "A+" (80-100), "B" (65-79), "WATCHLIST" (50-64), "FILTERED" (<50)
+    signal_tier: str = "B"  # "A+" (80-100), "B" (65-79), "FILTERED" (<65)
 
     # ---- DCA (Double Entry) fields ----
     entry_2: Optional[float] = None           # 2nd entry price

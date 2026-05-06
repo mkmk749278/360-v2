@@ -313,9 +313,10 @@ class TelegramBot:
 
             🏷 Risk: LOW | Quality: PREMIUM
         """
-        # Route WATCHLIST signals to a distinct, lightweight format
+        # WATCHLIST tier removed in app-era doctrine reset.  Sub-65 signals
+        # never reach this formatter; defensive drop here returns empty.
         if getattr(sig, "signal_tier", "B") == "WATCHLIST":
-            return TelegramBot.format_watchlist_signal(sig)
+            return ""
 
         chan_emojis = {
             "360_SCALP":            "⚡",
@@ -478,9 +479,10 @@ class TelegramBot:
 
         This is the pre-redesign format kept for backward compatibility.
         """
-        # Route WATCHLIST signals to a distinct, lightweight format
+        # WATCHLIST tier removed in app-era doctrine reset.  Sub-65 signals
+        # never reach this formatter; defensive drop here returns empty.
         if getattr(sig, "signal_tier", "B") == "WATCHLIST":
-            return TelegramBot.format_watchlist_signal(sig)
+            return ""
 
         chan_emojis = {
             "360_SCALP":            "⚡",
@@ -554,25 +556,10 @@ class TelegramBot:
 
         return "\n".join(lines)
 
-    @staticmethod
-    def format_watchlist_signal(sig: Signal) -> str:
-        """Produce a lightweight WATCHLIST alert message (zone alert, no entry/SL/TP)."""
-        dir_word = sig.direction.value if sig.direction is not None else "LONG"
-        price_str = fmt_price(sig.entry) if sig.entry else "N/A"
-        setup_label = ""
-        if sig.setup_class and sig.setup_class != "UNCLASSIFIED":
-            setup_label = f" | Setup: {TelegramBot._escape_md(sig.setup_class.replace('_', ' ').title())}"
-        lines = [
-            f"🔍 *WATCHLIST* — {TelegramBot._escape_md(sig.symbol)}",
-            f"Zone: *{dir_word}* setup forming near `{price_str}`",
-        ]
-        if sig.analyst_reason:
-            lines.append(f"Reason: {TelegramBot._escape_md(sig.analyst_reason)}{setup_label}")
-        else:
-            lines.append(f"Reason: {TelegramBot._escape_md(sig.channel)} signal approaching zone{setup_label}")
-        lines.append("⏳ Waiting for confirmation\\.\\.\\.")
-        lines.append(f"⏰ Time: `{fmt_ts(sig.timestamp)}`")
-        return "\n".join(lines)
+    # format_watchlist_signal removed in app-era doctrine reset.  Sub-65
+    # confidence signals no longer reach Telegram formatting; the free
+    # channel keeps macro / regime-shift / signal-close storytelling but
+    # no preview signals.
 
     @staticmethod
     def format_free_signal(sig: Signal) -> str:
