@@ -389,6 +389,137 @@ def detect_triangle(
 # Aggregate helper — detects all patterns in one pass
 # ---------------------------------------------------------------------------
 
+def detect_bull_flag(
+    high: NDArray,
+    low: NDArray,
+    close: NDArray,
+    *,
+    impulse_min_pct: float = 3.0,
+    impulse_window: int = 20,
+    flag_window: int = 15,
+    flag_max_retrace_pct: float = 50.0,
+) -> Optional[Dict]:
+    """Detect a bull-flag continuation pattern.
+
+    Bull flag = strong upward impulse (≥``impulse_min_pct`` move in
+    ``impulse_window`` candles), followed by a controlled, descending
+    consolidation (the "flag") that retraces no more than
+    ``flag_max_retrace_pct`` of the impulse.
+
+    Returns ``{"pattern": "BULL_FLAG", "impulse_pct", "retrace_pct",
+    "flagpole_high", "flag_low", "confidence"}`` or ``None``.
+    """
+    h = np.asarray(high, dtype=np.float64)
+    lo = np.asarray(low, dtype=np.float64)
+    c = np.asarray(close, dtype=np.float64)
+    n = min(len(h), len(lo), len(c))
+    needed = impulse_window + flag_window
+    if n < needed:
+        return None
+
+    # Impulse window sits before the flag.
+    impulse_lo = float(np.min(lo[-needed:-flag_window]))
+    impulse_hi = float(np.max(h[-needed:-flag_window]))
+    if impulse_lo <= 0:
+        return None
+    impulse_pct = (impulse_hi - impulse_lo) / impulse_lo * 100.0
+    if impulse_pct < impulse_min_pct:
+        return None
+
+    # Flag window must be after the impulse high and contain a controlled pullback.
+    flag_high = float(np.max(h[-flag_window:]))
+    flag_low = float(np.min(lo[-flag_window:]))
+    if impulse_hi <= 0:
+        return None
+    retrace = (impulse_hi - flag_low) / (impulse_hi - impulse_lo) * 100.0
+    if retrace > flag_max_retrace_pct:
+        return None
+
+    # Flag must descend (lower highs across the flag window) — slope check.
+    x = np.arange(flag_window, dtype=np.float64)
+    high_slope, _ = np.polyfit(x, h[-flag_window:], 1)
+    if high_slope >= 0:
+        # Flat or rising flag — not a flag, possibly a triangle.
+        return None
+
+    # Confidence: stronger impulse + tighter retrace = higher.
+    impulse_conf = min(1.0, impulse_pct / (impulse_min_pct * 2))
+    tightness_conf = max(0.0, 1.0 - (retrace / flag_max_retrace_pct))
+    confidence = round(0.5 * impulse_conf + 0.5 * tightness_conf, 2)
+
+    return {
+        "pattern": "BULL_FLAG",
+        "impulse_pct": round(impulse_pct, 2),
+        "retrace_pct": round(retrace, 2),
+        "flagpole_high": round(impulse_hi, 8),
+        "flag_low": round(flag_low, 8),
+        "flag_high": round(flag_high, 8),
+        "confidence": confidence,
+    }
+
+
+def detect_bear_flag(
+    high: NDArray,
+    low: NDArray,
+    close: NDArray,
+    *,
+    impulse_min_pct: float = 3.0,
+    impulse_window: int = 20,
+    flag_window: int = 15,
+    flag_max_retrace_pct: float = 50.0,
+) -> Optional[Dict]:
+    """Detect a bear-flag continuation pattern (mirror of bull flag).
+
+    Bear flag = strong downward impulse, followed by a controlled,
+    ascending consolidation that retraces no more than
+    ``flag_max_retrace_pct`` of the down-impulse.
+    """
+    h = np.asarray(high, dtype=np.float64)
+    lo = np.asarray(low, dtype=np.float64)
+    c = np.asarray(close, dtype=np.float64)
+    n = min(len(h), len(lo), len(c))
+    needed = impulse_window + flag_window
+    if n < needed:
+        return None
+
+    impulse_lo = float(np.min(lo[-needed:-flag_window]))
+    impulse_hi = float(np.max(h[-needed:-flag_window]))
+    if impulse_hi <= 0:
+        return None
+    impulse_pct = (impulse_hi - impulse_lo) / impulse_hi * 100.0
+    if impulse_pct < impulse_min_pct:
+        return None
+
+    flag_high = float(np.max(h[-flag_window:]))
+    flag_low = float(np.min(lo[-flag_window:]))
+    impulse_range = impulse_hi - impulse_lo
+    if impulse_range <= 0:
+        return None
+    retrace = (flag_high - impulse_lo) / impulse_range * 100.0
+    if retrace > flag_max_retrace_pct:
+        return None
+
+    x = np.arange(flag_window, dtype=np.float64)
+    low_slope, _ = np.polyfit(x, lo[-flag_window:], 1)
+    if low_slope <= 0:
+        # Flat or descending — not a bear flag.
+        return None
+
+    impulse_conf = min(1.0, impulse_pct / (impulse_min_pct * 2))
+    tightness_conf = max(0.0, 1.0 - (retrace / flag_max_retrace_pct))
+    confidence = round(0.5 * impulse_conf + 0.5 * tightness_conf, 2)
+
+    return {
+        "pattern": "BEAR_FLAG",
+        "impulse_pct": round(impulse_pct, 2),
+        "retrace_pct": round(retrace, 2),
+        "flagpole_low": round(impulse_lo, 8),
+        "flag_high": round(flag_high, 8),
+        "flag_low": round(flag_low, 8),
+        "confidence": confidence,
+    }
+
+
 def detect_patterns(candles: Dict) -> List[Dict]:
     """Run all pattern detectors on a single-timeframe candle dict.
 
@@ -415,6 +546,13 @@ def detect_patterns(candles: Dict) -> List[Dict]:
             (detect_double_bottom, (lo,)),
             (detect_bollinger_squeeze, (c,)),
             (detect_triangle, (h, lo, c)),
+            # PR-10: flag continuation patterns + existing H&S reversal
+            # detector (defined later in this module).  H&S emits both
+            # HEAD_AND_SHOULDERS and INVERSE_HEAD_AND_SHOULDERS depending
+            # on which side it finds, so a single call covers both.
+            (detect_bull_flag, (h, lo, c)),
+            (detect_bear_flag, (h, lo, c)),
+            (detect_head_and_shoulders, (h, lo, c)),
         ]:
             try:
                 result = detector(*args)  # type: ignore[operator]
@@ -708,8 +846,10 @@ def pattern_confidence_bonus(patterns: List[Dict], direction: str) -> float:
         The total is clamped to [0, 5].
     """
     bonus = 0.0
-    bullish_patterns = {"DOUBLE_BOTTOM", "ASCENDING_TRIANGLE"}
-    bearish_patterns = {"DOUBLE_TOP", "DESCENDING_TRIANGLE"}
+    # PR-10: BULL_FLAG / BEAR_FLAG (continuation), INVERSE_HEAD_AND_SHOULDERS
+    # (bottom reversal), HEAD_AND_SHOULDERS (top reversal).
+    bullish_patterns = {"DOUBLE_BOTTOM", "ASCENDING_TRIANGLE", "BULL_FLAG", "INVERSE_HEAD_AND_SHOULDERS"}
+    bearish_patterns = {"DOUBLE_TOP", "DESCENDING_TRIANGLE", "BEAR_FLAG", "HEAD_AND_SHOULDERS"}
 
     for p in patterns:
         name = p.get("pattern", "")
