@@ -1,0 +1,287 @@
+"""Tests for the /diag Telegram admin command + TelegramBot.send_document."""
+
+from __future__ import annotations
+
+from collections import Counter
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from src.commands import CommandHandler
+
+
+ADMIN_CHAT_ID = "710718010"
+USER_CHAT_ID = "999999"
+
+
+def _make_handler(**kwargs) -> CommandHandler:
+    telegram = MagicMock()
+    telegram.send_message = AsyncMock(return_value=True)
+    telegram.send_document = AsyncMock(return_value=True)
+
+    defaults = dict(
+        telegram=telegram,
+        telemetry=MagicMock(),
+        pair_mgr=MagicMock(),
+        router=MagicMock(active_signals={}),
+        data_store=MagicMock(),
+        signal_queue=MagicMock(),
+        signal_history=[],
+        paused_channels=set(),
+        confidence_overrides={},
+        scanner=MagicMock(spec=[]),  # bare scanner; per-test we attach attrs
+        ws_spot=None,
+        ws_futures=None,
+        tasks=[],
+        boot_time=0.0,
+        free_channel_limit=2,
+        alert_subscribers=set(),
+    )
+    defaults.update(kwargs)
+    return CommandHandler(**defaults)
+
+
+def _stub_scanner_with_chartist_eye(level_count: int = 10, history_count: int = 20):
+    """Build a Scanner-shaped mock that has all chartist-eye sub-objects."""
+    scanner = MagicMock()
+    # LevelBook
+    scanner.level_book = MagicMock()
+    scanner.level_book._levels = {
+        f"PAIR{i}USDT": [MagicMock(score=10.0 + i)] * 5 for i in range(level_count)
+    }
+    scanner.level_book._refresh_ts = {
+        f"PAIR{i}USDT": 1700000000.0 + i for i in range(level_count)
+    }
+    scanner.level_book.stats = MagicMock(
+        return_value={"total": 5, "support": 2, "resistance": 3, "round_numbers": 1, "from_1d": 1, "from_4h": 2, "from_1h": 2}
+    )
+    # Volume profile stores
+    scanner.volume_profile_store = MagicMock()
+    scanner.volume_profile_store._results = {f"PAIR{i}USDT": MagicMock() for i in range(3)}
+    scanner.volume_profile_store.stats = MagicMock(
+        return_value={"poc": 100.0, "vah": 102.0, "val": 98.0, "total_volume": 1000.0, "value_area_width_pct": 4.0}
+    )
+    scanner.volume_profile_store_macro = MagicMock()
+    scanner.volume_profile_store_macro._results = {f"PAIR{i}USDT": MagicMock() for i in range(2)}
+    scanner.volume_profile_store_macro.stats = MagicMock(
+        return_value={"poc": 90.0, "vah": 95.0, "val": 85.0, "total_volume": 5000.0, "value_area_width_pct": 11.0}
+    )
+    # Structure tracker
+    scanner.structure_tracker = MagicMock()
+    bull_state = MagicMock(state="BULL_LEG", confidence=0.75)
+    bear_state = MagicMock(state="BEAR_LEG", confidence=0.85)
+    range_state = MagicMock(state="RANGE", confidence=0.5)
+    scanner.structure_tracker._state = {
+        ("BTCUSDT", "4h"): bull_state,
+        ("ETHUSDT", "4h"): bear_state,
+        ("SOLUSDT", "4h"): range_state,
+    }
+    # Scalp channel with MA-cross cooldown
+    scalp_ch = MagicMock()
+    scalp_ch._ma_cross_last_fire_ts = {
+        ("BTCUSDT", "LONG"): 1700000000.0,
+        ("ETHUSDT", "SHORT"): 1700001000.0,
+    }
+    scanner.channels = [scalp_ch]
+    # Suppression counters
+    scanner._suppression_counters = {
+        "mtf_semantic_fail:360_SCALP:reclaim_retest": 12,
+        "score_below50:360_SCALP": 4,
+        "candidate_reached_scoring:SR_FLIP_RETEST": 6,
+    }
+    return scanner
+
+
+# ---------------------------------------------------------------------------
+# /diag command — basic dispatch
+# ---------------------------------------------------------------------------
+
+
+class TestDiagCommand:
+    @pytest.mark.asyncio
+    async def test_diag_admin_only(self):
+        handler = _make_handler()
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", USER_CHAT_ID)
+        # Non-admin: no document upload, no diag content.
+        assert not handler._telegram.send_document.called
+
+    @pytest.mark.asyncio
+    async def test_diag_uploads_document_when_available(self):
+        handler = _make_handler(scanner=_stub_scanner_with_chartist_eye())
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        # send_document was called once with reasonable args.
+        handler._telegram.send_document.assert_called_once()
+        call = handler._telegram.send_document.call_args
+        kwargs = call.kwargs
+        assert kwargs["filename"].startswith("chartist_eye_diag_")
+        assert kwargs["filename"].endswith(".txt")
+        assert isinstance(kwargs["document"], bytes)
+        body = kwargs["document"].decode("utf-8")
+        # Sanity: each section header present.
+        for header in (
+            "LEVEL BOOK",
+            "VOLUME PROFILE",
+            "STRUCTURE TRACKER",
+            "MA-CROSS COOLDOWN",
+            "ACTIVE SIGNAL FLAGS",
+            "RECENT TERMINAL FLAGS",
+            "LAST SUPPRESSION SUMMARY",
+            "WIRING HEALTH",
+        ):
+            assert header in body, f"missing section: {header}"
+
+    @pytest.mark.asyncio
+    async def test_diag_reports_chartist_eye_present(self):
+        handler = _make_handler(scanner=_stub_scanner_with_chartist_eye())
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        assert "level_book present:          True" in body
+        assert "volume_profile_store present: True" in body
+        assert "volume_profile_store_macro present: True" in body
+        assert "structure_tracker present:   True" in body
+        assert "ScalpChannel + MA-cross cooldown registry: True" in body
+
+    @pytest.mark.asyncio
+    async def test_diag_reports_chartist_eye_absent_when_old_engine(self):
+        """If the running engine predates the chartist-eye PRs, /diag must
+        still produce a report and call out the missing pieces."""
+        # `spec=[]` means every getattr raises AttributeError → the
+        # ``getattr(scanner, X, None)`` fallback returns None as it would
+        # on a real pre-PR engine.
+        old_scanner = MagicMock(spec=[])
+        # We do need `channels` (non-iterable would crash the dispatcher).
+        # Manually attach an empty list and an empty suppression dict.
+        old_scanner.channels = []
+        old_scanner._suppression_counters = {}
+        handler = _make_handler(scanner=old_scanner)
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        # Wiring-health section calls out every absent piece.
+        assert "level_book present:          False" in body
+        assert "structure_tracker present:   False" in body
+
+    @pytest.mark.asyncio
+    async def test_diag_warns_when_no_confluence_in_recent_history(self):
+        history = []
+        for i in range(10):
+            sig = MagicMock()
+            sig.soft_gate_flags = "VWAP,OI"  # no CONFLUENCE/STRUCT_ALIGN
+            history.append(sig)
+        handler = _make_handler(
+            scanner=_stub_scanner_with_chartist_eye(),
+            signal_history=history,
+        )
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        assert "NO CONFLUENCE bonuses across" in body
+        assert "NO STRUCT_ALIGN bonuses across" in body
+
+    @pytest.mark.asyncio
+    async def test_diag_quiet_when_confluence_present(self):
+        history = []
+        for i in range(10):
+            sig = MagicMock()
+            sig.soft_gate_flags = "CONFLUENCE×2,STRUCT_ALIGN:BULL_LEG"
+            history.append(sig)
+        handler = _make_handler(
+            scanner=_stub_scanner_with_chartist_eye(),
+            signal_history=history,
+        )
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        # Warning text should NOT appear when all 10 history rows have the flag.
+        assert "NO CONFLUENCE bonuses across" not in body
+        assert "NO STRUCT_ALIGN bonuses across" not in body
+
+    @pytest.mark.asyncio
+    async def test_diag_includes_active_flag_distribution(self):
+        active = {
+            "id1": MagicMock(soft_gate_flags="CONFLUENCE×3,VWAP"),
+            "id2": MagicMock(soft_gate_flags="STRUCT_ALIGN:BULL_LEG"),
+            "id3": MagicMock(soft_gate_flags="OI"),
+        }
+        scanner = _stub_scanner_with_chartist_eye()
+        router = MagicMock()
+        router.active_signals = active
+        handler = _make_handler(scanner=scanner, router=router)
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        assert "Active signals: 3" in body
+        # Counter stringification has key=count format.
+        assert "CONFLUENCE" in body
+        assert "STRUCT_ALIGN" in body
+
+    @pytest.mark.asyncio
+    async def test_diag_falls_back_to_text_when_send_document_fails(self):
+        handler = _make_handler(scanner=_stub_scanner_with_chartist_eye())
+        # Force send_document to return False.
+        handler._telegram.send_document = AsyncMock(return_value=False)
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        # Fallback path: a send_message reply containing the body.
+        handler._telegram.send_message.assert_called()
+        last_call = handler._telegram.send_message.call_args_list[-1]
+        text = last_call[0][1]
+        assert "Document upload failed" in text or "LEVEL BOOK" in text
+
+
+# ---------------------------------------------------------------------------
+# TelegramBot.send_document
+# ---------------------------------------------------------------------------
+
+
+class TestSendDocument:
+    @pytest.mark.asyncio
+    async def test_send_document_no_token_returns_false(self):
+        from src.telegram_bot import TelegramBot
+        bot = TelegramBot()
+        bot._token = ""
+        ok = await bot.send_document("123", b"hello", "x.txt")
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_send_document_success_path(self):
+        from src.telegram_bot import TelegramBot
+        bot = TelegramBot()
+        bot._token = "T"
+        # Build a fake aiohttp session with a 200 response.
+        resp = MagicMock()
+        resp.status = 200
+        resp.text = AsyncMock(return_value="ok")
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=resp)
+        cm.__aexit__ = AsyncMock(return_value=None)
+        session = MagicMock()
+        session.post = MagicMock(return_value=cm)
+        session.closed = False
+        bot._session = session
+
+        ok = await bot.send_document("123", b"hello", "x.txt", caption="test")
+        assert ok is True
+        session.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_send_document_4xx_returns_false(self):
+        from src.telegram_bot import TelegramBot
+        bot = TelegramBot()
+        bot._token = "T"
+        resp = MagicMock()
+        resp.status = 400
+        resp.text = AsyncMock(return_value="bad request")
+        cm = MagicMock()
+        cm.__aenter__ = AsyncMock(return_value=resp)
+        cm.__aexit__ = AsyncMock(return_value=None)
+        session = MagicMock()
+        session.post = MagicMock(return_value=cm)
+        session.closed = False
+        bot._session = session
+
+        ok = await bot.send_document("123", b"hello", "x.txt")
+        assert ok is False
