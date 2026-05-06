@@ -261,7 +261,8 @@ def test_scalp_channel_tracks_exception_non_generation_reason(monkeypatch):
     assert telemetry["attempts"]["STANDARD"] == 1
     assert telemetry["no_signal"]["STANDARD"] == 1
     assert telemetry["no_signal_reason"]["STANDARD:exception"] == 1
-    assert sum(telemetry["attempts"].values()) == 14
+    # 15 active evaluators after PR-8 (added MA_CROSS_TREND_SHIFT).
+    assert sum(telemetry["attempts"].values()) == 15
     assert telemetry["attempts"]["FUNDING_EXTREME"] == 1
     assert telemetry["no_signal_reason"]["FUNDING_EXTREME:none"] == 1
 
