@@ -1345,13 +1345,24 @@ class TestVolumeSurgeBreakoutRefinements:
         assert sig_with_fvg.soft_penalty_total < sig_no_fvg.soft_penalty_total, \
             "FVG present should carry a lower soft penalty than absent FVG."
 
-    # ── Quiet regime blocked ─────────────────────────────────────────────
+    # ── Quiet regime: regime gate removed per OWNER_BRIEF §3.4 ─────────────
 
-    def test_quiet_regime_hard_blocked(self):
-        """QUIET regime must always return None."""
+    def test_quiet_regime_no_longer_hard_blocked(self):
+        """VSB regime gate removed — QUIET no longer blocks via regime.
+
+        Breakout setups (VSB/BDS/ORB) "fire in any HTF context" per
+        OWNER_BRIEF §3.4.  When thesis gates pass, VSB now produces a
+        Signal even in QUIET regime.
+        """
+        ch = ScalpChannel()
         candles = {"5m": _make_surge_candles(n=60, breakout_offset=3)}
-        sig = self._call(candles, _surge_indicators(), _surge_smc(), regime="QUIET")
-        assert sig is None
+        sig = ch._evaluate_volume_surge_breakout(
+            "BTCUSDT", candles, _surge_indicators(), _surge_smc(),
+            0.01, 10_000_000, regime="QUIET",
+        )
+        # Signal may still be None if other thesis gates fail, but the
+        # rejection reason must NOT be regime_blocked.
+        assert ch._active_no_signal_reason != "regime_blocked"
 
     # ── Minimum data requirement ──────────────────────────────────────────
 
@@ -1718,13 +1729,23 @@ class TestBreakdownShortRefinements:
             "Env override 10× should reject default fixture (3× breakdown vol)"
         )
 
-    # ── Quiet regime blocked ─────────────────────────────────────────────
+    # ── Quiet regime: regime gate removed per OWNER_BRIEF §3.4 ─────────────
 
-    def test_quiet_regime_hard_blocked(self):
-        """QUIET regime must always return None."""
+    def test_quiet_regime_no_longer_hard_blocked(self):
+        """BDS regime gate removed — QUIET no longer blocks via regime.
+
+        Breakout setups (VSB/BDS/ORB) "fire in any HTF context" per
+        OWNER_BRIEF §3.4.  Rejection in QUIET (if any) must now come from
+        thesis gates (breakout_not_found / volume_spike_missing), never
+        from the regime check.
+        """
+        ch = ScalpChannel()
         candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=3)}
-        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc(), regime="QUIET")
-        assert sig is None
+        sig = ch._evaluate_breakdown_short(
+            "BTCUSDT", candles, _breakdown_indicators(), _breakdown_smc(),
+            0.01, 10_000_000, regime="QUIET",
+        )
+        assert ch._active_no_signal_reason != "regime_blocked"
 
     # ── Minimum data requirement ──────────────────────────────────────────
 

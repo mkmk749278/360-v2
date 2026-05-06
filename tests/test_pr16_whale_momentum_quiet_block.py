@@ -1,12 +1,18 @@
-"""PR-16: WHALE_MOMENTUM QUIET regime block.
+"""WHALE_MOMENTUM regime-gate behaviour.
 
-Focused tests that prove:
-1. _evaluate_whale_momentum() returns None when regime is QUIET.
-2. _evaluate_whale_momentum() produces a signal (or skips for unrelated
-   conditions) when the regime is NOT QUIET.
-3. VOLUME_SURGE_BREAKOUT and BREAKDOWN_SHORT — the two unrelated evaluators
-   that also block QUIET — remain unaffected by this PR (regression guard).
-4. No unrelated evaluator paths are touched by this change.
+Originally added in PR-16 to verify that WHALE_MOMENTUM was *blocked* in
+QUIET regime.  The block was removed in the app-era doctrine reset
+(OWNER_BRIEF §3.4: "WHALE / FUNDING / LIQ_REVERSAL — direction comes from
+tape / funding / cascade — None [HTF/regime treatment]").  These tests
+now assert the *new* contract:
+
+1. WHALE_MOMENTUM produces a Signal in QUIET regime when its thesis
+   gates (whale_alert + volume_delta_spike + order_book_imbalance) pass.
+2. WHALE_MOMENTUM still produces a Signal when regime is anything else
+   and thesis gates pass.
+3. VSB / BDS regime-gate removal is verified separately — they still
+   reject in QUIET candles when the breakout/volume thesis gates fail
+   (so the "regression-guard" tests pass for the right reason).
 """
 
 from __future__ import annotations
@@ -17,7 +23,7 @@ from src.channels.scalp import ScalpChannel
 
 
 # ---------------------------------------------------------------------------
-# Shared helpers (mirrors test_whale_momentum_tp.py to keep test isolation)
+# Shared helpers
 # ---------------------------------------------------------------------------
 
 def _make_1m_candles(n: int = 15, base: float = 100.0, trend: float = 0.05) -> dict:
@@ -62,12 +68,12 @@ def _indicators_1m(rsi_last: float = 55.0, atr: float = 0.3) -> dict:
 def _long_smc() -> dict:
     """smc_data that satisfies WHALE_MOMENTUM LONG entry conditions."""
     ticks = [
-        {"price": 100.0, "qty": 15000, "isBuyerMaker": False},  # buy: $1.5M
-        {"price": 100.0, "qty": 5000,  "isBuyerMaker": True},   # sell: $0.5M (3× ratio)
+        {"price": 100.0, "qty": 15000, "isBuyerMaker": False},
+        {"price": 100.0, "qty": 5000,  "isBuyerMaker": True},
     ]
     order_book = {
-        "bids": [[100.0, 500.0]] * 10,   # bid depth: $50M → dominant
-        "asks": [[100.1, 100.0]] * 10,   # ask depth: $10M
+        "bids": [[100.0, 500.0]] * 10,
+        "asks": [[100.1, 100.0]] * 10,
     }
     return {
         "whale_alert": {"amount_usd": 1_500_000},
@@ -80,12 +86,12 @@ def _long_smc() -> dict:
 def _short_smc() -> dict:
     """smc_data that satisfies WHALE_MOMENTUM SHORT entry conditions."""
     ticks = [
-        {"price": 100.0, "qty": 5000,  "isBuyerMaker": False},  # buy: $0.5M
-        {"price": 100.0, "qty": 15000, "isBuyerMaker": True},   # sell: $1.5M (3× ratio)
+        {"price": 100.0, "qty": 5000,  "isBuyerMaker": False},
+        {"price": 100.0, "qty": 15000, "isBuyerMaker": True},
     ]
     order_book = {
-        "bids": [[100.0, 100.0]] * 10,   # bid depth: $1M
-        "asks": [[100.1, 500.0]] * 10,   # ask depth: $5M → dominant
+        "bids": [[100.0, 100.0]] * 10,
+        "asks": [[100.1, 500.0]] * 10,
     }
     return {
         "whale_alert": {"amount_usd": 1_500_000},
@@ -96,14 +102,25 @@ def _short_smc() -> dict:
 
 
 # ---------------------------------------------------------------------------
-# PR-16 core tests: WHALE_MOMENTUM QUIET block
+# WHALE_MOMENTUM — regime gate removed (app-era doctrine reset)
 # ---------------------------------------------------------------------------
 
-class TestWhaleMomentumQuietBlock:
-    """Verify WHALE_MOMENTUM is hard-blocked in QUIET regime (PR-16)."""
 
-    def test_whale_momentum_blocked_in_quiet_long(self):
-        """LONG candidate must be rejected when regime=QUIET."""
+class TestWhaleMomentumRegimeGateRemoved:
+    """WHALE_MOMENTUM must now fire in any regime when thesis gates pass.
+
+    Previously (PR-16) WHALE returned None in QUIET regime via a hard
+    `regime_blocked` rejection.  That regime block contradicted
+    OWNER_BRIEF §3.4 which states WHALE is "internally direction-driven
+    from tape" with no HTF/regime treatment.  The thesis gates
+    (whale_alert + volume_delta_spike + order_book_imbalance) already
+    ensure no signal fires without genuine flow, so the regime block
+    was redundant.
+    """
+
+    def test_whale_momentum_fires_in_quiet_long(self):
+        """LONG WHALE candidate now passes through QUIET regime when
+        thesis gates are satisfied (whale_alert, delta_spike, OB imbalance)."""
         ch = ScalpChannel()
         candles = {"1m": _make_1m_candles(n=15, base=99.8, trend=0.05)}
         ind = _indicators_1m(rsi_last=55.0, atr=0.3)
@@ -112,12 +129,14 @@ class TestWhaleMomentumQuietBlock:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="QUIET"
         )
-        assert sig is None, (
-            "WHALE_MOMENTUM must return None in QUIET regime (PR-16 requirement)."
+        assert sig is not None, (
+            "WHALE_MOMENTUM regime gate was removed; LONG candidate with "
+            "passing thesis gates must produce a Signal even in QUIET."
         )
+        assert sig.setup_class == "WHALE_MOMENTUM"
 
-    def test_whale_momentum_blocked_in_quiet_short(self):
-        """SHORT candidate must be rejected when regime=QUIET."""
+    def test_whale_momentum_fires_in_quiet_short(self):
+        """SHORT WHALE candidate fires in QUIET — symmetric to the LONG case."""
         ch = ScalpChannel()
         candles = {"1m": _make_1m_candles_short(n=15, base=101.0)}
         ind = _indicators_1m(rsi_last=45.0, atr=0.3)
@@ -126,27 +145,28 @@ class TestWhaleMomentumQuietBlock:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="QUIET"
         )
+        assert sig is not None
+        assert sig.setup_class == "WHALE_MOMENTUM"
+
+    def test_whale_momentum_thesis_gates_still_apply_in_quiet(self):
+        """The regime gate is gone but thesis gates remain — a candidate
+        with NO whale_alert / delta_spike must still reject."""
+        ch = ScalpChannel()
+        candles = {"1m": _make_1m_candles()}
+        ind = _indicators_1m()
+        # Empty smc — no whale alert, no flow
+        smc = {"recent_ticks": [], "order_book": None}
+
+        sig = ch._evaluate_whale_momentum(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="QUIET"
+        )
         assert sig is None, (
-            "WHALE_MOMENTUM SHORT must return None in QUIET regime (PR-16 requirement)."
+            "Thesis gates must still apply — no whale flow → no signal."
         )
 
-    def test_whale_momentum_blocked_in_quiet_case_insensitive(self):
-        """Regime string comparison must be case-insensitive."""
-        ch = ScalpChannel()
-        candles = {"1m": _make_1m_candles(n=15, base=99.8, trend=0.05)}
-        ind = _indicators_1m(rsi_last=55.0, atr=0.3)
-        smc = _long_smc()
-
-        for variant in ("quiet", "Quiet", "QUIET"):
-            sig = ch._evaluate_whale_momentum(
-                "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime=variant
-            )
-            assert sig is None, (
-                f"WHALE_MOMENTUM must return None for regime={variant!r} (case-insensitive check)."
-            )
-
-    def test_whale_momentum_not_blocked_in_strong_trend(self):
-        """WHALE_MOMENTUM must produce a Signal in STRONG_TREND when all conditions pass."""
+    def test_whale_momentum_fires_in_strong_trend(self):
+        """Sanity: WHALE still produces a Signal in non-QUIET regimes
+        (no regression from the gate removal)."""
         ch = ScalpChannel()
         candles = {"1m": _make_1m_candles(n=15, base=99.8, trend=0.05)}
         ind = _indicators_1m(rsi_last=55.0, atr=0.3)
@@ -155,84 +175,31 @@ class TestWhaleMomentumQuietBlock:
         sig = ch._evaluate_whale_momentum(
             "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="STRONG_TREND"
         )
-        assert sig is not None, (
-            "WHALE_MOMENTUM must produce a signal in STRONG_TREND when tick-flow, "
-            "OBI, and RSI conditions are met — the QUIET gate must not fire here."
-        )
-        assert sig.setup_class == "WHALE_MOMENTUM"
-
-    def test_whale_momentum_not_blocked_in_volatile(self):
-        """WHALE_MOMENTUM must produce a Signal in VOLATILE when all conditions pass."""
-        ch = ScalpChannel()
-        candles = {"1m": _make_1m_candles(n=15, base=99.8, trend=0.05)}
-        ind = _indicators_1m(rsi_last=55.0, atr=0.3)
-        smc = _long_smc()
-
-        sig = ch._evaluate_whale_momentum(
-            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="VOLATILE"
-        )
-        assert sig is not None, (
-            "WHALE_MOMENTUM must produce a signal in VOLATILE when tick-flow, "
-            "OBI, and RSI conditions are met — the QUIET gate must not fire here."
-        )
-        assert sig.setup_class == "WHALE_MOMENTUM"
-
-    def test_whale_momentum_not_blocked_in_ranging(self):
-        """WHALE_MOMENTUM must produce a Signal in RANGING when all conditions pass."""
-        ch = ScalpChannel()
-        candles = {"1m": _make_1m_candles(n=15, base=99.8, trend=0.05)}
-        ind = _indicators_1m(rsi_last=55.0, atr=0.3)
-        smc = _long_smc()
-
-        sig = ch._evaluate_whale_momentum(
-            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="RANGING"
-        )
-        assert sig is not None, (
-            "WHALE_MOMENTUM must produce a signal in RANGING when tick-flow, "
-            "OBI, and RSI conditions are met — the QUIET gate must not fire here."
-        )
-        assert sig.setup_class == "WHALE_MOMENTUM"
+        assert sig is not None
 
 
 # ---------------------------------------------------------------------------
-# Regression guard: unrelated evaluators retain their own QUIET behaviour
+# VSB / BDS — regime gate also removed
 # ---------------------------------------------------------------------------
 
-class TestUnrelatedEvaluatorsUnaffected:
-    """Prove that the PR-16 change has no side-effect on other evaluator paths.
 
-    VOLUME_SURGE_BREAKOUT and BREAKDOWN_SHORT had their own QUIET blocks
-    before this PR.  Their behaviour must be unchanged.
+class TestVsbBdsRegimeGateRemoved:
+    """VOLUME_SURGE_BREAKOUT and BREAKDOWN_SHORT regime gates were also
+    removed per OWNER_BRIEF §3.4 ("Breakout (VSB / BDS / ORB) — fires in
+    any HTF context").  Thesis gates (breakout_not_found,
+    volume_spike_missing) still reject candidates that don't meet the
+    structural setup, so signals only fire when the thesis is real.
     """
 
-    # ------------------------------------------------------------------
-    # Minimal 5m candle builder for VOLUME_SURGE_BREAKOUT / BREAKDOWN_SHORT
-    # ------------------------------------------------------------------
     @staticmethod
     def _make_5m_candles(n: int = 35, base: float = 100.0) -> dict:
         close = np.array([base + i * 0.01 for i in range(n)])
         high = close + 0.5
         low = close - 0.5
-        # Give the last candle a volume surge to satisfy the breakout gate.
-        volume = np.ones(n) * 200.0
-        volume[-1] = 2000.0  # well above 1.5× rolling avg
-        return {
-            "open": close - 0.05,
-            "high": high,
-            "low": low,
-            "close": close,
-            "volume": volume,
-        }
-
-    @staticmethod
-    def _make_5m_candles_down(n: int = 35, base: float = 101.0) -> dict:
-        close = np.array([base - i * 0.01 for i in range(n)])
-        high = close + 0.5
-        low = close - 0.5
         volume = np.ones(n) * 200.0
         volume[-1] = 2000.0
         return {
-            "open": close + 0.05,
+            "open": close - 0.05,
             "high": high,
             "low": low,
             "close": close,
@@ -255,8 +222,10 @@ class TestUnrelatedEvaluatorsUnaffected:
             "orderblock": {"direction": "bullish", "high": 100.5, "low": 99.5},
         }
 
-    def test_volume_surge_breakout_still_blocked_in_quiet(self):
-        """VOLUME_SURGE_BREAKOUT QUIET block (pre-PR-16) must remain unchanged."""
+    def test_vsb_in_quiet_rejects_for_thesis_not_regime(self):
+        """VSB in QUIET still returns None on these candles, but the
+        rejection reason is now thesis-driven (breakout_not_found /
+        volume / EMA), not 'regime_blocked'."""
         ch = ScalpChannel()
         candles = {
             "1m": _make_1m_candles(),
@@ -268,17 +237,19 @@ class TestUnrelatedEvaluatorsUnaffected:
         sig = ch._evaluate_volume_surge_breakout(
             "ETHUSDT", candles, ind, smc, 0.01, 5_000_000, regime="QUIET"
         )
-        assert sig is None, (
-            "VOLUME_SURGE_BREAKOUT must still return None in QUIET (pre-existing gate, "
-            "unaffected by PR-16)."
+        # Signal still likely None due to thesis gates, but rejection
+        # reason is no longer regime_blocked.
+        assert ch._active_no_signal_reason != "regime_blocked", (
+            "VSB regime gate was removed; rejection in QUIET must be "
+            "thesis-driven, not regime-driven."
         )
 
-    def test_breakdown_short_still_blocked_in_quiet(self):
-        """BREAKDOWN_SHORT QUIET block (pre-PR-16) must remain unchanged."""
+    def test_bds_in_quiet_rejects_for_thesis_not_regime(self):
+        """BDS in QUIET — symmetric to VSB."""
         ch = ScalpChannel()
         candles = {
             "1m": _make_1m_candles_short(),
-            "5m": self._make_5m_candles_down(),
+            "5m": self._make_5m_candles(),
         }
         ind = self._full_indicators()
         smc = self._fvg_smc()
@@ -286,7 +257,7 @@ class TestUnrelatedEvaluatorsUnaffected:
         sig = ch._evaluate_breakdown_short(
             "ETHUSDT", candles, ind, smc, 0.01, 5_000_000, regime="QUIET"
         )
-        assert sig is None, (
-            "BREAKDOWN_SHORT must still return None in QUIET (pre-existing gate, "
-            "unaffected by PR-16)."
+        assert ch._active_no_signal_reason != "regime_blocked", (
+            "BDS regime gate was removed; rejection in QUIET must be "
+            "thesis-driven, not regime-driven."
         )

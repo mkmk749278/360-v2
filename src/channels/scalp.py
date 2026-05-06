@@ -1606,14 +1606,16 @@ class ScalpChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
-        # Block in QUIET regime — whale momentum setups require directional flow and
-        # volume that QUIET markets structurally lack.  This is a setup-specific gate
-        # that mirrors the same pattern used by VOLUME_SURGE_BREAKOUT and
-        # BREAKDOWN_SHORT.  It does not affect any other evaluator path.
+        # Regime gate removed per OWNER_BRIEF §3.4: WHALE_MOMENTUM is
+        # "internally direction-driven (direction comes from tape)" and
+        # explicitly NOT regime-gated.  The thesis gates below
+        # (whale_alert + volume_delta_spike + order_book_imbalance) already
+        # ensure no signal fires without genuine flow — making the regime
+        # block redundant.  In QUIET cycles those thesis gates simply
+        # reject for the right reason instead of "regime_blocked".
+        # `regime_upper` is still used by the OBI marginal-acceptance branch
+        # to allow looser depth confirmation in fast/volatile regimes.
         regime_upper = regime.upper() if regime else ""
-        if regime_upper == "QUIET":
-            return self._reject("regime_blocked")
-
         whale = smc_data.get("whale_alert")
         delta_spike = smc_data.get("volume_delta_spike", False)
         if whale is None and not delta_spike:
@@ -1845,12 +1847,13 @@ class ScalpChannel(BaseChannel):
         - Breakout-candle volume check now uses the actual breakout candle's volume
           rather than always checking volumes[-3].
         """
-        # Block only in QUIET — surge setups need volume, which QUIET lacks.
-        # VOLATILE/VOLATILE_UNSUITABLE are explicitly allowed here.
+        # Regime gate removed per OWNER_BRIEF §3.4: breakout setups
+        # (VSB/BDS/ORB) "fire in any HTF context" — the volume_spike_missing
+        # and breakout_not_found thesis gates below already catch any
+        # QUIET-period candidate that lacks the structural setup, so the
+        # regime block was redundant.  `regime_upper` is still used by the
+        # fast-momentum FVG-soft branch below.
         regime_upper = regime.upper() if regime else ""
-        if regime_upper == "QUIET":
-            return self._reject("regime_blocked")
-
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 28:
             return self._reject("insufficient_candles")
@@ -2099,11 +2102,12 @@ class ScalpChannel(BaseChannel):
         - Breakdown-candle volume check now uses the actual breakdown candle's volume
           rather than always checking volumes[-3].
         """
-        # Block only in QUIET — breakdown setups need volume, which QUIET lacks.
+        # Regime gate removed per OWNER_BRIEF §3.4: breakout setups
+        # (VSB/BDS/ORB) "fire in any HTF context".  The breakout_not_found
+        # and volume_spike_missing thesis gates below already enforce
+        # structural validity in any regime.  `regime_upper` is still used
+        # by the fast-bearish FVG-soft branch below.
         regime_upper = regime.upper() if regime else ""
-        if regime_upper == "QUIET":
-            return self._reject("regime_blocked")
-
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 28:
             return self._reject("insufficient_candles")
