@@ -607,7 +607,14 @@ class ScalpChannel(BaseChannel):
         # ~24h is the realistic cadence.  Without a cooldown, EMA50/EMA200
         # straddling each other on a sideways 4h would emit a fresh signal
         # every cycle.
+        #
+        # Persisted to ``data/ma_cross_cooldown.json`` (chartist-eye seeding
+        # fix, 2026-05-06).  Without persistence, every redeploy resets the
+        # registry, so a recent MA_CROSS could double-fire if the engine
+        # restarts within the 24h window.  Loaded on init; written on every
+        # successful signal via ``_persist_ma_cross_cooldown``.
         self._ma_cross_last_fire_ts: Dict[tuple, float] = {}
+        self._load_ma_cross_cooldown()
 
     def _reset_generation_telemetry(self) -> None:
         self._generation_telemetry = {
@@ -632,6 +639,61 @@ class ScalpChannel(BaseChannel):
     def _reject(self, reason: str) -> Optional[Signal]:
         self._active_no_signal_reason = self._no_signal_reason_token(reason)
         return None
+
+    # ------------------------------------------------------------------
+    # MA-cross cooldown persistence (chartist-eye seeding fix, 2026-05-06)
+    # ------------------------------------------------------------------
+    #
+    # ``_ma_cross_last_fire_ts`` is in-memory.  Without a disk-backed
+    # mirror, every GitHub-Actions redeploy resets the cooldown registry
+    # — so a recent MA_CROSS_TREND_SHIFT signal can double-fire if the
+    # engine restarts within the 24h window.  Persistence makes the
+    # cooldown survive restarts.
+
+    _MA_CROSS_COOLDOWN_PATH = "data/ma_cross_cooldown.json"
+
+    def _load_ma_cross_cooldown(self) -> None:
+        """Load the cooldown registry from disk on init.  Best-effort."""
+        import json
+        from pathlib import Path
+        path = Path(self._MA_CROSS_COOLDOWN_PATH)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        for key, ts in data.items():
+            if not isinstance(key, str) or "|" not in key:
+                continue
+            try:
+                symbol, direction = key.split("|", 1)
+                self._ma_cross_last_fire_ts[(symbol, direction)] = float(ts)
+            except (ValueError, TypeError):
+                continue
+
+    def _persist_ma_cross_cooldown(self) -> None:
+        """Atomically write the cooldown registry to disk."""
+        import json
+        from pathlib import Path
+        path = Path(self._MA_CROSS_COOLDOWN_PATH)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                f"{symbol}|{direction}": ts
+                for (symbol, direction), ts in self._ma_cross_last_fire_ts.items()
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            # Don't crash the engine over a persistence write failure.
+            from src.utils import get_logger
+            get_logger("scalp").debug(
+                "MA-cross cooldown persist failed: %s", exc,
+            )
 
     @staticmethod
     def _dependency_state(smc_data: dict, name: str) -> str:
@@ -4845,5 +4907,8 @@ class ScalpChannel(BaseChannel):
             sig.execution_note = (getattr(sig, "execution_note", "") + f"; MA cross {cross_label} on 1h").lstrip("; ")
 
         # Stamp cooldown — only on success so cooldown doesn't trip on rejects.
+        # Persisted to disk so the cooldown survives engine restarts (without
+        # this, a redeploy within 24h could let the same cross double-fire).
         self._ma_cross_last_fire_ts[cd_key] = _time.time()
+        self._persist_ma_cross_cooldown()
         return sig

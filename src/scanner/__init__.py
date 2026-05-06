@@ -741,7 +741,13 @@ class Scanner:
         # Volume Profile (PR-9) — POC/VAH/VAL per symbol.  Same TTL pattern
         # as LevelBook.  POC/VAH/VAL injected into LevelBook on each
         # refresh so confluence scoring picks them up automatically.
+        # Two scopes:
+        #   - "micro": 1h candles, last 200 bars (~8 days) — short-window POC
+        #   - "macro": 1d candles, last 200 bars (~6 months) — multi-week
+        #     accumulation zones a chartist sees on the daily chart
+        # Both contribute their POC/VAH/VAL into LevelBook on refresh.
         self.volume_profile_store: VolumeProfileStore = VolumeProfileStore()
+        self.volume_profile_store_macro: VolumeProfileStore = VolumeProfileStore()
 
         # Structure Tracker (PR-7) — bull leg / bear leg / range per (symbol, tf).
         # Used by trend-aligned paths (TPE / DIV_CONT / CLS / PDC) to award
@@ -3306,32 +3312,47 @@ class Scanner:
         last = self._level_book_refresh_ts.get(symbol)
         if last is not None and (now - last) < LEVEL_BOOK_REFRESH_SEC:
             return
-        # Pick whichever of 1d / 4h / 1h candles are present.
+        # Pick whichever of 1w / 1d / 4h / 1h candles are present.  1w added
+        # 2026-05-06 to seed cycle-level S/R into the LevelBook (chartist-eye
+        # seeding-gap fix).  ``LevelBook.refresh`` skips any TF whose data
+        # is missing or has fewer than 20 bars.
         tf_inputs: Dict[str, dict] = {}
-        for tf in ("1d", "4h", "1h"):
+        for tf in ("1w", "1d", "4h", "1h"):
             cd = candles_by_tf.get(tf) if isinstance(candles_by_tf, dict) else None
             if isinstance(cd, dict) and cd.get("high") is not None:
                 tf_inputs[tf] = cd
         if not tf_inputs:
             return
 
-        # Refresh Volume Profile from the most-granular available TF (1h
-        # preferred for resolution; falls back to 4h).  The result is then
-        # passed into LevelBook.refresh() so POC/VAH/VAL participate in
-        # clustering and confluence scoring as additional zones.
-        vp_result = None
+        # Refresh Volume Profile twice — micro (1h × 200 ≈ 8 days) and
+        # macro (1d × 200 ≈ 6 months) — and pass both into LevelBook.refresh
+        # so POC/VAH/VAL from each scope participate in clustering and
+        # confluence scoring as additional zones.
+        vp_results: list = []
         try:
-            vp_candles = candles_by_tf.get("1h") or candles_by_tf.get("4h")
-            if vp_candles is not None and vp_candles.get("volume") is not None:
-                vp_result = self.volume_profile_store.refresh_if_stale(
-                    symbol, vp_candles,
+            micro_candles = candles_by_tf.get("1h") or candles_by_tf.get("4h")
+            if micro_candles is not None and micro_candles.get("volume") is not None:
+                micro_vp = self.volume_profile_store.refresh_if_stale(
+                    symbol, micro_candles,
                 )
+                if micro_vp is not None:
+                    vp_results.append(micro_vp)
         except Exception as exc:
-            log.debug("VolumeProfile refresh failed for {}: {}", symbol, exc)
-            vp_result = None
+            log.debug("Micro VolumeProfile refresh failed for {}: {}", symbol, exc)
 
         try:
-            self.level_book.refresh(symbol, tf_inputs, volume_profile=vp_result)
+            macro_candles = candles_by_tf.get("1d")
+            if macro_candles is not None and macro_candles.get("volume") is not None:
+                macro_vp = self.volume_profile_store_macro.refresh_if_stale(
+                    symbol, macro_candles,
+                )
+                if macro_vp is not None:
+                    vp_results.append(macro_vp)
+        except Exception as exc:
+            log.debug("Macro VolumeProfile refresh failed for {}: {}", symbol, exc)
+
+        try:
+            self.level_book.refresh(symbol, tf_inputs, volume_profile=vp_results or None)
             self._level_book_refresh_ts[symbol] = now
         except Exception as exc:
             log.debug("LevelBook refresh failed for {}: {}", symbol, exc)

@@ -438,6 +438,10 @@ SEED_TIMEFRAMES: List[TimeframeSeed] = [
     TimeframeSeed("1h", 500),
     TimeframeSeed("4h", 500),
     TimeframeSeed("1d", 500),
+    # 1w added 2026-05-06 to seed cycle-level S/R levels into the LevelBook
+    # (chartist-eye seeding-gap fix).  200 weekly candles ≈ ~3.8 years —
+    # enough to capture every major cycle high / low for our universe.
+    TimeframeSeed("1w", 200),
 ]
 SEED_TICK_LIMIT: int = 1000  # BUG FIX: REST caps at 1000  # recent trades
 
