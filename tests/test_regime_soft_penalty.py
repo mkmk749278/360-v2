@@ -251,6 +251,13 @@ class TestPathAwarePenaltyModulation:
         assert _PENALTY_MODULATION_BY_SETUP["POST_DISPLACEMENT_CONTINUATION"]["volume_div"] == pytest.approx(0.65)
         assert _PENALTY_MODULATION_BY_SETUP["POST_DISPLACEMENT_CONTINUATION"]["vwap"] == pytest.approx(0.80)
         assert _PENALTY_MODULATION_BY_SETUP["CONTINUATION_LIQUIDITY_SWEEP"]["volume_div"] == pytest.approx(0.75)
+        # PR-4 top-emitter softening: OI penalty modulated for LSR / SR_FLIP / FAR.
+        # OI was the dominant suppressor (91–100% of soft-penalty stack on truth report).
+        # Counter-trend paths (LSR, FAR) get aggressive 0.30; SR_FLIP (structure
+        # continuation) gets 0.50.
+        assert _PENALTY_MODULATION_BY_SETUP["LIQUIDITY_SWEEP_REVERSAL"]["oi"] == pytest.approx(0.30)
+        assert _PENALTY_MODULATION_BY_SETUP["SR_FLIP_RETEST"]["oi"] == pytest.approx(0.50)
+        assert _PENALTY_MODULATION_BY_SETUP["FAILED_AUCTION_RECLAIM"]["oi"] == pytest.approx(0.30)
         # QCB tightened from 0.60 → 0.20 (app-era doctrine reset).
         # Compression IS volume divergence — at 0.60 the effective QUIET-regime
         # weight (1.8× mult) was ~1.08× base, i.e. essentially uncrushed.

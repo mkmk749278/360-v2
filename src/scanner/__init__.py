@@ -471,8 +471,24 @@ _CHANNEL_PENALTY_WEIGHTS: Dict[str, Dict[str, float]] = {
 # - hard gates are unchanged
 # - modulation is narrow and explicit (path-targeted only)
 _PENALTY_MODULATION_BY_SETUP: Dict[str, Dict[str, float]] = {
-    "SR_FLIP_RETEST": {"vwap": 0.60},
-    "FAILED_AUCTION_RECLAIM": {"vwap": 0.60},
+    # Top-emitter softening (PR-4, 2026-05-06).  Truth-report showed OI gate
+    # contributed 91–100% of the soft-penalty stack on these three paths.
+    # OI base=15 × 1.8 (QUIET regime mult) = 27 points — enough to push a
+    # B-tier candidate (65) below threshold.  Doctrinal rationale per path:
+    #   - LIQUIDITY_SWEEP_REVERSAL: counter-trend by design (§3.4).  When
+    #     OI flips against direction, that's the crowd we're trading
+    #     against — exactly the signal we want, not a penalty.  0.30
+    #     keeps a small contributor for genuine outliers.
+    #   - FAILED_AUCTION_RECLAIM: counter-trend / reclaim.  Same logic
+    #     as LSR — OI mismatch confirms the auction failed against
+    #     positioning.  0.30.
+    #   - SR_FLIP_RETEST: structure / continuation.  Less aggressive than
+    #     the counter-trend pair (OI agreement is more meaningful here),
+    #     but the 27-point penalty still over-suppresses the dominant
+    #     emitter.  0.50.
+    "LIQUIDITY_SWEEP_REVERSAL": {"oi": 0.30},
+    "SR_FLIP_RETEST": {"vwap": 0.60, "oi": 0.50},
+    "FAILED_AUCTION_RECLAIM": {"vwap": 0.60, "oi": 0.30},
     "VOLUME_SURGE_BREAKOUT": {"volume_div": 0.60},
     "POST_DISPLACEMENT_CONTINUATION": {"volume_div": 0.65, "vwap": 0.80},
     "TREND_PULLBACK_EMA": {"kill_zone": 0.70},
