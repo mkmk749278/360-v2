@@ -51,12 +51,12 @@ Paid scalp signals. Subscribers pay for signals that make them money. Profitable
 
 ## 2.2 What Counts as a Product
 
-**Only paid-channel signals (A+ and B tier, 65+ confidence).** Watchlist-tier signals (50–64) routed to the free channel are scrap from a revenue standpoint and are not a goal. Don't optimize for them.
+**Only paid-channel signals (A+ and B tier, 65+ confidence).** WATCHLIST tier was removed from the system entirely on 2026-05-06 (PR #308). Below 65 → FILTERED → dropped silently. There is no free-channel preview routing inside the engine anymore; the free channel is fed exclusively by the close-storytelling mirror (signal-result posts as social proof) and content-engine outputs.
 
 ## 2.3 What Counts as Success
 
 - High-conviction signals that hit TP (TP1 primary, TP2/TP3 runners) at a profitable rate
-- Enough signals per day to keep subscribers engaged (target 1–10 paid signals/day across the 14-evaluator portfolio)
+- **Enough signals per day to keep the app feeling alive.** App-era target is 1–10 paid signals/day across the 14-evaluator portfolio. Empty app = dead app; volume is a feature, not a vice — Pre-TP grab + invalidation audit are the safety net that justifies looser gates.
 - Honest SL outcomes posted with the same visibility as TP wins (B3)
 - Zero subscriber-visible drama (silent expiries, duplicate signals, broken alerts)
 
@@ -76,6 +76,22 @@ This is a SCALPING business. Engineering decisions are judged against this doctr
 2. **Fast in, fast out.** Hold ~5–60 min. TP1 is the primary exit. We don't hold through reversals.
 3. **Quality > quantity, but quantity matters.** A path firing 0–1 signal/day is dormant. Subscribers churn from silence.
 4. **Soft penalties over hard blocks.** Hard blocks throw away signals the scoring tier could correctly classify. Reserve hard blocks for structural-impossibility checkpoints (invalid SL geometry, missing data, regime guaranteed unsuitable).
+
+### App-era doctrine reset (2026-05-06)
+
+Telegram-era reasoning ("more gates, fewer signals, no spam") was correct **only** when Telegram was the sole surface. With the Lumin app live:
+
+- **Empty app = dead app.** A subscriber opening the app and seeing nothing churns faster than one seeing a marginal signal that didn't TP.
+- **Pre-TP grab is the safety net, not a feature.** It fires across ~70% of signals at the +0.20% raw / ATR-adaptive threshold and ratchets SL→breakeven, so the downside on additional volume is structurally capped. A signal that pre-TPs and then fails is a small protected loss, not a full SL.
+- **Invalidation audit is the second safety net.** Live ratio: 5 PROTECTIVE / 0 PREMATURE / 8 NEUTRAL — net-protective. Killing a signal early at minimal loss is preferable to letting it ride to full SL.
+- **Time matters in seconds.** Auto-trade execution is in the path; a gate that adds latency or rejects a recoverable setup costs net win-rate.
+
+What this changes:
+
+1. Hard regime blocks that contradict per-path doctrine (§3.4) are removed (PR #309: WHALE/VSB/BDS).
+2. Modulators on gates that contradict a path's own thesis are tightened (PR #310: QCB `volume_div`).
+3. WATCHLIST tier removed (PR #308) — sub-paid-tier signals don't belong in the engine; the free channel is fed by storytelling mirrors + content-engine, not by scrap signals.
+4. Scoring tiers (§3.5) and hard structural gates (SL geometry, missing data, MTF impossibility) are unchanged. The reset is about removing redundant or backward gates, not about lowering the quality bar at the routing layer.
 
 ## 3.3 The 14 Signal Evaluators
 
@@ -114,6 +130,14 @@ The right question is never *"does the signal align with HTF?"* but *"is this a 
 
 LSR and FAR are counter-trend by design. The `_score_regime` function gives them a **neutral 14.0 baseline** in non-affinity regimes instead of the standard 8.0 weak-alignment penalty. Reason: dropping to 8 there double-penalises with the HTF soft penalty (~8 pts) for the same property — being counter-trend. Quality filtering for these setups happens via the HTF soft penalty (1H+4H opposing), not via a low Regime score. The frozenset is `_REGIME_NEUTRAL_SETUPS` in `SignalScoringEngine`. Affinity regimes still award full 18 pts; the neutral baseline applies only when the setup is not in any regime's affinity list.
 
+### Wrong-regime blocks removed from WHALE / VSB / BDS (2026-05-06, PR #309)
+
+`_evaluate_whale_momentum`, `_evaluate_volume_surge_breakout`, and `_evaluate_breakdown_short` previously rejected with `regime_blocked` when regime was QUIET. That contradicted §3.4 — WHALE is "internally direction-driven from tape" (no regime gate) and breakouts (VSB/BDS/ORB) "fire in any HTF context." The thesis gates inside each evaluator (whale_alert + volume_delta_spike + OBI for WHALE; breakout_not_found + volume_spike_missing for VSB/BDS) already enforce structural validity in any regime, so the regime block was strictly redundant. Truth report data: ~45% of cycles are QUIET — recovering that slice meaningfully widens the shippable funnel for these three paths.
+
+### QCB volume_div modulator tightened 0.60 → 0.20 (2026-05-06, PR #310)
+
+QCB thesis = primary-TF compression breakout volume during a QUIET window with declining higher-TF volume. That's the exact pattern `volume_div` flags as manipulation, so the gate is structurally backward for this path. At 0.60 the effective QUIET-regime weight (1.8× regime mult) was ~1.08× base — i.e. the modulator was a no-op in the regime QCB actually fires in. 0.20 brings QUIET effective weight to ~0.36× base while preserving a small contributor for genuine outlier divergence.
+
 ### Kill Zone gate disabled on the SCALP family (2026-05-04 / 2026-05-05)
 
 KZ was a session-traded asset filter inherited from non-crypto doctrine. Truth-report data showed it accounting for 80–100% of every filtered SCALP setup's aggregate gate penalty (LSR 96%, FAR 100%, SR_FLIP 94%, QCB 80%, DIV_CONT 100%) — a flat 5–13 confidence-point deduction during "low-liquidity" hours that don't exist in 24/7 crypto futures. Per scalping doctrine §3.2 ("we are 24/7 scalpers"), penalising signals for time-of-day was doctrinally wrong. Initially disabled on the main `360_SCALP` channel only (PR #289, 2026-05-04), with auxiliary channels held back pending per-channel data. Subsequent truth reports showed those auxiliaries were too low-volume to ever produce that data and the doctrinal call doesn't depend on per-channel evidence — applied uniformly across all 8 SCALP-family channels (`360_SCALP`, `_FVG`, `_CVD`, `_VWAP`, `_DIVERGENCE`, `_SUPERTREND`, `_ICHIMOKU`, `_ORDERBLOCK`) via PR #303, 2026-05-05. Reversible per channel by flipping the bool back in `_CHANNEL_GATE_PROFILE`.
@@ -124,10 +148,11 @@ KZ was a session-traded asset filter inherited from non-crypto doctrine. Truth-r
 |---|---|---|
 | A+ | 80–100 | Paid channel |
 | B | 65–79 | Paid channel |
-| WATCHLIST | 50–64 | Free channel only — scrap from a revenue standpoint |
-| FILTERED | < 50 | Dropped silently |
+| FILTERED | < 65 | Dropped silently |
 
-The QUIET regime applies an additional safety net: any 360_SCALP signal in QUIET regime needs confidence ≥ 65 (paid B-tier minimum) to pass. **No per-path exempts** — sub-65 in QUIET is scrap routing and is filtered.
+WATCHLIST was retired 2026-05-06 (PR #308). The 50–64 band is now part of FILTERED — no free-channel preview routing inside the engine. The free channel is driven by close-storytelling mirrors (social-proof posts) and content-engine outputs, not by sub-paid-tier engine signals.
+
+The QUIET regime applies an additional safety net: any 360_SCALP signal in QUIET regime needs confidence ≥ 65 (paid B-tier minimum) to pass. **No per-path exempts.**
 
 ## 3.6 Architecture — Signal Flow
 
@@ -148,7 +173,7 @@ SignalScoringEngine — multi-component score (0–100)
         ↓
 _enqueue_signal() — universal SL minimum 0.80%
         ↓
-SignalRouter — paid (A+ / B tier) or free (WATCHLIST)
+SignalRouter — paid (A+ / B tier); sub-65 dropped (no free-channel routing)
         ↓
 TradeMonitor — polls every 5s using 1m candle OHLC
 ```
@@ -163,7 +188,7 @@ TradeMonitor — polls every 5s using 1m candle OHLC
 | B2 | Zero manual effort at runtime — everything self-manages |
 | B3 | SL hits posted honestly — same visual weight as TP hits |
 | B4 | No duplicate signals on same symbol within cooldown window |
-| B5 | WATCHLIST signals go to FREE channel only — never enter paid lifecycle |
+| B5 | _Retired 2026-05-06 (PR #308): WATCHLIST tier removed entirely. Free channel is now fed only by close-storytelling mirrors + content-engine posts, never by sub-paid-tier engine signals._ |
 | B6 | System must survive Binance API degradation gracefully |
 | B7 | Every evaluator owns its own SL/TP calculation — no shared universal formulas |
 | B8 | All config values must be env-var overridable |

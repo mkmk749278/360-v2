@@ -22,7 +22,7 @@ If the answer is unmeasurable or "it's just engineering polish," the change does
 
 A 24/7 automated crypto-scalping signal engine. Scans 75 Binance USDT-M futures pairs continuously, detects setups via Smart Money Concepts (SMC) and order-flow logic, scores candidates, and dispatches qualifying signals to Telegram.
 
-**Only paid-channel signals carry business value.** Watchlist (free channel) signals are scrap from a revenue standpoint — don't optimize for them.
+**Only paid-channel signals carry business value.** WATCHLIST tier was retired 2026-05-06 (PR #308); sub-65 confidence → FILTERED → dropped silently. The free channel is fed only by close-storytelling mirrors + content-engine posts, not by sub-paid-tier engine signals.
 
 ---
 
