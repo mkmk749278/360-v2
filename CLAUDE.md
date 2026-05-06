@@ -32,7 +32,7 @@ This is a SCALPING business, not trend-following:
 
 1. **Direction-agnostic.** LONG and SHORT are equally valid products. Top-75 USDT-M pairs are highly correlated to BTC; trend-aligned-only filtering forces directional bias and stops being scalping.
 2. **Fast in, fast out.** Hold ~5–60 min. TP1 is the primary exit. We don't hold through reversals.
-3. **Quality > quantity, but quantity matters.** Subscribers churn from silence. Aim for 1–10 high-conviction signals per day across the 14-evaluator portfolio.
+3. **Quality > quantity, but quantity matters.** Subscribers churn from silence. Aim for 1–10 high-conviction signals per day across the 15-evaluator portfolio.
 4. **Soft penalties over hard blocks.** Hard blocks throw away signals the scoring tier could correctly classify. Reserve hard blocks for structural-impossibility checkpoints only (invalid SL geometry, missing data, regime-pattern incompatibility).
 
 ---
@@ -82,7 +82,7 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
                                 ↓
                      Scanner.scan_loop (every 15s × 75 pairs)
                                 ↓
-                ScalpChannel.evaluate (14 internal evaluators)
+                ScalpChannel.evaluate (15 internal evaluators)
                                 ↓
                   Gate chain (SMC, MTF, regime, spread, volume)
                                 ↓
@@ -98,11 +98,15 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
 | Concern | File |
 |---|---|
 | Boot, WS/REST init | `src/bootstrap.py`, `src/main.py` |
-| Per-cycle scan + gate chain | `src/scanner/__init__.py` |
-| 14 setup evaluators | `src/channels/scalp.py` |
+| Per-cycle scan + gate chain + chartist-eye wiring | `src/scanner/__init__.py` |
+| 15 setup evaluators | `src/channels/scalp.py` |
 | Confidence scoring | `src/signal_quality.py`, `src/confidence.py` |
 | Regime classification | `src/regime.py` |
 | MTF policy | `src/mtf.py` |
+| Multi-TF S/R Level Book | `src/level_book.py` |
+| Structure-state tracker (HH/HL bull leg vs LH/LL bear leg) | `src/structure_state.py` |
+| Volume Profile (POC + VAH/VAL) | `src/volume_profile.py` |
+| Pattern catalog (DT/DB/triangle/flag/H&S/candlestick) | `src/chart_patterns.py` |
 | Pair universe + tier promotion | `src/pair_manager.py` |
 | Live signal lifecycle | `src/trade_monitor.py` |
 | Telegram routing | `src/signal_router.py`, `src/telegram_bot.py` |
@@ -119,7 +123,7 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
 - **All async.** Engine is asyncio + aiohttp end-to-end. No blocking calls in scanner / router / monitor loops.
 - **Redis is optional.** RedisClient + SignalQueue fall back to in-memory.
 - **Each evaluator owns its SL/TP geometry** (B7). Don't add global formulas.
-- **The 14 setup `enum SetupClass` values are stringly-coupled** to `_MAX_SL_PCT_BY_SETUP` keys and telemetry event names. Rename in all three places.
+- **The 15 setup `enum SetupClass` values are stringly-coupled** to `_MAX_SL_PCT_BY_SETUP` keys and telemetry event names. Rename in all three places.
 
 ---
 
