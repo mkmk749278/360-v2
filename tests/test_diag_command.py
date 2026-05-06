@@ -285,3 +285,63 @@ class TestSendDocument:
 
         ok = await bot.send_document("123", b"hello", "x.txt")
         assert ok is False
+
+
+# ---------------------------------------------------------------------------
+# confidence_gate INFO log surfaces chartist-eye contributions + flags=[]
+# ---------------------------------------------------------------------------
+
+
+class TestConfidenceGateLogSurfacesChartistEye:
+    """The INFO-level confidence_gate log must include:
+      - confluence={signed:.1f}
+      - struct_align={signed:.1f}
+      - flags=[<full soft_gate_flags string>]
+
+    These are the diagnostic surface that lets ``docker compose logs |
+    grep`` reveal whether the chartist-eye wiring is firing without
+    needing DEBUG level enabled.
+    """
+
+    def test_truth_report_regex_matches_new_format(self):
+        """Backward-compat: parser handles both old and new formats."""
+        from src.runtime_truth_report import _CONFIDENCE_COMPONENT_RE
+        new_line = (
+            "confidence_gate BTCUSDT 360_SCALP [SR_FLIP_RETEST]: decision=filtered "
+            "reason=min_confidence raw=79.6 composite=69.8 pre_soft=69.8 "
+            "final=54.8 threshold=80.0 "
+            "penalties(eval=0.0,gate=0.0,total=0.0,pair_analysis=0.0) "
+            "adjustments(feedback=+0.0,stat_filter=+0.0,regime_transition=+0.0) "
+            "components(market=20.4,execution=20.0,risk=15.2,thesis_adj=2.5) "
+            "engine(smc=25.0,regime=18.0,volume=3.0,indicators=11.0,patterns=5.0,mtf=5.3) "
+            "soft_penalties(vwap=0.0,kz=0.0,oi=0.0,spoof=0.0,vol_div=0.0,cluster=0.0,"
+            "confluence=-3.0,struct_align=-3.0) "
+            "flags=[CONFLUENCE×2,STRUCT_ALIGN:BULL_LEG]"
+        )
+        m = _CONFIDENCE_COMPONENT_RE.search(new_line)
+        assert m is not None
+        assert m.group("sp_confluence") == "-3.0"
+        assert m.group("sp_struct_align") == "-3.0"
+        assert m.group("flags") == "CONFLUENCE×2,STRUCT_ALIGN:BULL_LEG"
+
+    def test_truth_report_regex_matches_legacy_format(self):
+        """Old log lines (no confluence/struct_align/flags) still parse."""
+        from src.runtime_truth_report import _CONFIDENCE_COMPONENT_RE
+        legacy_line = (
+            "confidence_gate ETHUSDT 360_SCALP [TREND_PULLBACK_EMA]: decision=filtered "
+            "reason=min_confidence raw=70.0 composite=65.0 pre_soft=65.0 "
+            "final=50.0 threshold=65.0 "
+            "penalties(eval=0.0,gate=15.0,total=15.0,pair_analysis=0.0) "
+            "adjustments(feedback=+0.0,stat_filter=+0.0,regime_transition=+0.0) "
+            "components(market=20.4,execution=20.0,risk=15.2,thesis_adj=0.0) "
+            "engine(smc=25.0,regime=18.0,volume=3.0,indicators=11.0,patterns=5.0,mtf=5.3) "
+            "soft_penalties(vwap=0.0,kz=0.0,oi=15.0,spoof=0.0,vol_div=0.0,cluster=0.0)"
+        )
+        m = _CONFIDENCE_COMPONENT_RE.search(legacy_line)
+        assert m is not None
+        # Old format → optional groups are None (parser unaware).
+        assert m.group("sp_confluence") is None
+        assert m.group("sp_struct_align") is None
+        assert m.group("flags") is None
+        # Existing fields still extracted.
+        assert m.group("sp_oi") == "15.0"

@@ -196,9 +196,23 @@ _CONFIDENCE_COMPONENT_RE = re.compile(
     # soft gate is dragging confidence down (HTF mismatch?  OI flip?
     # VWAP overextension?  Cluster suppression?).  Older log lines
     # without this group are still parsed correctly.
+    #
+    # The chartist-eye stack (PRs #316 + #321) added two additional
+    # contributors: ``confluence`` and ``struct_align`` (negative when
+    # they earn a bonus).  These are emitted with explicit signs so the
+    # parser sees ``+0.0`` / ``-3.0`` etc.  Wrapped in an inner ``(?:..)?``
+    # so log lines emitted by older builds (no confluence/struct_align)
+    # still match.
     r"(?:\s+soft_penalties\(vwap=(?P<sp_vwap>[-\d.]+),kz=(?P<sp_kz>[-\d.]+),"
     r"oi=(?P<sp_oi>[-\d.]+),spoof=(?P<sp_spoof>[-\d.]+),"
-    r"vol_div=(?P<sp_vol_div>[-\d.]+),cluster=(?P<sp_cluster>[-\d.]+)\))?"
+    r"vol_div=(?P<sp_vol_div>[-\d.]+),cluster=(?P<sp_cluster>[-\d.]+)"
+    r"(?:,confluence=(?P<sp_confluence>[+-]?\d+\.\d+),"
+    r"struct_align=(?P<sp_struct_align>[+-]?\d+\.\d+))?"
+    r"\))?"
+    # Optional ``flags=[…]`` trailing block (added 2026-05-06 with /diag).
+    # Captures the literal soft_gate_flags string so a single grep can
+    # surface every gate name without us editing the format string per gate.
+    r"(?:\s+flags=\[(?P<flags>[^\]]*)\])?"
 )
 
 
