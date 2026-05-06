@@ -1,8 +1,11 @@
-"""Channel & safety commands (admin) — /pause, /resume, /confidence, /breaker, /stats, /gem."""
+"""Channel & safety commands (admin) — /pause, /resume, /confidence, /breaker, /stats, /gem, /diag."""
 
 from __future__ import annotations
 
 import json
+import time
+from collections import Counter
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import List
 
@@ -169,6 +172,245 @@ async def handle_reset_full(args: List[str], ctx: CommandContext) -> None:
         f"  • Invalidation records: {inv_cleared} records\n"
         f"\nActive in-flight signals were NOT cleared (would orphan broker positions)."
     )
+
+
+@registry.command(
+    "/diag",
+    aliases=["/diagnostic", "/chartist_diag"],
+    admin=True,
+    group="channels",
+    help_text=(
+        "Snapshot the chartist-eye runtime state — LevelBook coverage, "
+        "VolumeProfile / StructureTracker counts, MA-cross cooldown registry, "
+        "active-signal soft-gate-flag distribution, and the last suppression "
+        "summary.  Replies with the full report as a Telegram document."
+    ),
+)
+async def handle_diag(args: List[str], ctx: CommandContext) -> None:
+    """Snapshot the chartist-eye stack live state and reply as a document."""
+    sections: List[str] = []
+    now = time.time()
+    iso_now = datetime.now(timezone.utc).isoformat()
+    sections.append(f"=== CHARTIST-EYE DIAGNOSTIC @ {iso_now} ===\n")
+
+    scanner = ctx.scanner
+    router = ctx.router
+
+    # --- LevelBook ---
+    sections.append("--- LEVEL BOOK ---")
+    lb = getattr(scanner, "level_book", None)
+    if lb is None:
+        sections.append("scanner.level_book: NOT PRESENT (PR #315 not deployed?)")
+    else:
+        levels_map = getattr(lb, "_levels", {}) or {}
+        refresh_ts = getattr(lb, "_refresh_ts", {}) or {}
+        sections.append(f"Symbols populated: {len(levels_map)}")
+        if refresh_ts:
+            most_recent = max(refresh_ts.values())
+            sections.append(f"Most-recent refresh: {now - most_recent:.0f}s ago")
+        per_symbol_count = sorted(
+            ((sym, len(lvls)) for sym, lvls in levels_map.items()),
+            key=lambda x: x[1], reverse=True,
+        )
+        sections.append("Top-10 symbols by level count:")
+        for sym, n in per_symbol_count[:10]:
+            try:
+                stats = lb.stats(sym)
+                sections.append(f"  {sym}: {n} levels, {stats}")
+            except Exception:
+                sections.append(f"  {sym}: {n} levels")
+    sections.append("")
+
+    # --- Volume Profile (micro + macro) ---
+    sections.append("--- VOLUME PROFILE ---")
+    for store_name, label in (
+        ("volume_profile_store", "micro (1h × 200)"),
+        ("volume_profile_store_macro", "macro (1d × 200)"),
+    ):
+        store = getattr(scanner, store_name, None)
+        if store is None:
+            sections.append(f"  {label}: NOT PRESENT")
+            continue
+        results = getattr(store, "_results", {}) or {}
+        sections.append(f"  {label}: {len(results)} symbols populated")
+        for sym in sorted(results.keys())[:3]:
+            try:
+                s = store.stats(sym)
+                sections.append(f"    {sym}: {s}")
+            except Exception:
+                pass
+    sections.append("")
+
+    # --- Structure Tracker ---
+    sections.append("--- STRUCTURE TRACKER ---")
+    st = getattr(scanner, "structure_tracker", None)
+    if st is None:
+        sections.append("scanner.structure_tracker: NOT PRESENT")
+    else:
+        states = getattr(st, "_state", {}) or {}
+        sections.append(f"States populated: {len(states)}")
+        leg_counter: Counter = Counter(
+            getattr(s, "state", "?") for s in states.values()
+        )
+        sections.append(f"Distribution: {dict(leg_counter)}")
+        bull_examples = [
+            (k[0], getattr(v, "confidence", 0))
+            for k, v in states.items()
+            if getattr(v, "state", "") == "BULL_LEG"
+        ][:5]
+        bear_examples = [
+            (k[0], getattr(v, "confidence", 0))
+            for k, v in states.items()
+            if getattr(v, "state", "") == "BEAR_LEG"
+        ][:5]
+        if bull_examples:
+            sections.append(f"BULL_LEG sample: {bull_examples}")
+        if bear_examples:
+            sections.append(f"BEAR_LEG sample: {bear_examples}")
+    sections.append("")
+
+    # --- MA-cross cooldown ---
+    sections.append("--- MA-CROSS COOLDOWN ---")
+    scalp_ch = next(
+        (
+            ch for ch in getattr(scanner, "channels", [])
+            if hasattr(ch, "_ma_cross_last_fire_ts")
+        ),
+        None,
+    )
+    if scalp_ch is None:
+        sections.append("ScalpChannel not found")
+    else:
+        cd = scalp_ch._ma_cross_last_fire_ts
+        sections.append(f"Cooldown entries: {len(cd)}")
+        sorted_cd = sorted(cd.items(), key=lambda x: x[1], reverse=True)
+        for (sym, dir_), ts in sorted_cd[:15]:
+            age_h = (now - ts) / 3600
+            sections.append(f"  {sym} {dir_}: {age_h:.1f}h ago")
+    cd_path = Path("data/ma_cross_cooldown.json")
+    if cd_path.exists():
+        sections.append(f"On-disk file: {cd_path} ({cd_path.stat().st_size} bytes)")
+    else:
+        sections.append("On-disk file: not yet written (no MA-cross fired since deploy)")
+    sections.append("")
+
+    # --- Active signals: soft-gate-flag distribution ---
+    sections.append("--- ACTIVE SIGNAL FLAGS ---")
+    active = list(getattr(router, "active_signals", {}).values()) if router else []
+    sections.append(f"Active signals: {len(active)}")
+    flag_counter: Counter = Counter()
+    for sig in active:
+        flags = (getattr(sig, "soft_gate_flags", "") or "").split(",")
+        for f in flags:
+            f = f.strip()
+            if not f:
+                continue
+            base = f.split(":")[0].split("×")[0]
+            flag_counter[base] += 1
+    if flag_counter:
+        sections.append(f"Flag distribution: {dict(flag_counter)}")
+    else:
+        sections.append("No flags on any active signal")
+    sections.append("")
+
+    # --- Recent terminal-state signal flags (last 50 of signal_history) ---
+    sections.append("--- RECENT TERMINAL FLAGS (last 50) ---")
+    history = list(ctx.signal_history)[-50:] if ctx.signal_history else []
+    sections.append(f"Sample size: {len(history)}")
+    history_flag_counter: Counter = Counter()
+    confluence_seen = 0
+    struct_seen = 0
+    for sig in history:
+        flags = (getattr(sig, "soft_gate_flags", "") or "").split(",")
+        for f in flags:
+            f = f.strip()
+            if not f:
+                continue
+            base = f.split(":")[0].split("×")[0]
+            history_flag_counter[base] += 1
+            if base.startswith("CONFLUENCE"):
+                confluence_seen += 1
+            elif base.startswith("STRUCT_ALIGN"):
+                struct_seen += 1
+    if history_flag_counter:
+        sections.append(f"Flag distribution: {dict(history_flag_counter)}")
+    sections.append(
+        f"CONFLUENCE_BONUS fired on: {confluence_seen}/{len(history)} recent signals"
+    )
+    sections.append(
+        f"STRUCTURE_ALIGN_BONUS fired on: {struct_seen}/{len(history)} recent signals"
+    )
+    sections.append("")
+
+    # --- Last suppression summary (from telemetry) ---
+    sections.append("--- LAST SUPPRESSION SUMMARY ---")
+    suppression = getattr(scanner, "_suppression_counters", None)
+    if suppression:
+        # Top 25 most-frequent suppression reasons.
+        items = sorted(suppression.items(), key=lambda x: x[1], reverse=True)[:25]
+        for k, v in items:
+            sections.append(f"  {k}: {v}")
+    else:
+        sections.append("scanner._suppression_counters not exposed")
+    sections.append("")
+
+    # --- Wiring health ---
+    sections.append("--- WIRING HEALTH (quick check) ---")
+    sections.append(
+        f"  level_book present:          {lb is not None}"
+    )
+    sections.append(
+        f"  volume_profile_store present: "
+        f"{getattr(scanner, 'volume_profile_store', None) is not None}"
+    )
+    sections.append(
+        f"  volume_profile_store_macro present: "
+        f"{getattr(scanner, 'volume_profile_store_macro', None) is not None}"
+    )
+    sections.append(
+        f"  structure_tracker present:   {st is not None}"
+    )
+    sections.append(
+        f"  ScalpChannel + MA-cross cooldown registry: "
+        f"{scalp_ch is not None}"
+    )
+    if confluence_seen == 0 and len(history) > 5:
+        sections.append(
+            "  ⚠ NO CONFLUENCE bonuses across 50 recent signals — investigate "
+            "(empty LevelBook, no clusters near entries, or wiring bug)."
+        )
+    if struct_seen == 0 and len(history) > 5:
+        sections.append(
+            "  ⚠ NO STRUCT_ALIGN bonuses across 50 recent signals — same "
+            "(no trend-path signals or structure not aligning)."
+        )
+    sections.append("")
+
+    body = "\n".join(sections)
+    filename = f"chartist_eye_diag_{int(now)}.txt"
+    caption = f"🔍 Chartist-eye diagnostic snapshot ({len(body)} bytes)"
+
+    sent = False
+    try:
+        if hasattr(ctx.telegram, "send_document"):
+            sent = await ctx.telegram.send_document(
+                ctx.chat_id,
+                document=body.encode("utf-8"),
+                filename=filename,
+                caption=caption,
+            )
+    except Exception as exc:
+        await ctx.reply(f"⚠ send_document raised: {exc}")
+        sent = False
+
+    if not sent:
+        # Fallback: send as a (chunked) text message.
+        await ctx.reply(
+            "⚠ Document upload failed — sending raw output as text:\n\n```\n"
+            + body[:3500]
+            + ("\n…(truncated)" if len(body) > 3500 else "")
+            + "\n```"
+        )
 
 
 @registry.command(

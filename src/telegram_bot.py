@@ -140,6 +140,65 @@ class TelegramBot:
             return await self.send_message(TELEGRAM_ADMIN_CHAT_ID, f"🔔 *Admin Alert*\n{text}")
         return False
 
+    async def send_document(
+        self,
+        chat_id: str,
+        document: bytes,
+        filename: str,
+        caption: Optional[str] = None,
+    ) -> bool:
+        """Upload a file to *chat_id* via the Bot API ``sendDocument`` endpoint.
+
+        ``document`` is the raw file bytes.  ``filename`` is the name the user
+        sees on the Telegram side (and the filetype Telegram infers from).
+        Returns True on success, False on any failure (token missing, network
+        error, 4xx).  Used by ``/report`` and ``/diag``.
+        """
+        if not self._token:
+            log.debug("Telegram token not configured – document not sent")
+            return False
+        session = await self._ensure_session()
+        url = f"{self._base}/sendDocument"
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                form = aiohttp.FormData()
+                form.add_field("chat_id", str(chat_id))
+                if caption:
+                    form.add_field("caption", caption)
+                form.add_field(
+                    "document",
+                    document,
+                    filename=filename,
+                    content_type="application/octet-stream",
+                )
+                async with session.post(
+                    url, data=form, timeout=aiohttp.ClientTimeout(total=30),
+                ) as resp:
+                    if resp.status == 200:
+                        return True
+                    body = await resp.text()
+                    log.warning("Telegram sendDocument failed (%s): %s", resp.status, body)
+                    if resp.status == 429:
+                        try:
+                            data = await resp.json()
+                            wait = int(data.get("parameters", {}).get("retry_after", 1))
+                        except Exception:
+                            wait = 2 ** attempt
+                        await asyncio.sleep(wait)
+                        continue
+                    if 500 <= resp.status < 600:
+                        await asyncio.sleep(2 ** attempt)
+                        continue
+                    return False
+            except asyncio.TimeoutError:
+                await asyncio.sleep(2 ** attempt)
+                continue
+            except Exception as exc:
+                log.error("Telegram sendDocument error: %s", exc)
+                return False
+        return False
+
     async def post_to_free_channel(self, text: str) -> bool:
         """Post a message to the free (public) Telegram channel.
 

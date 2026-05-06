@@ -4639,7 +4639,9 @@ class Scanner:
                 "components(market={:.1f},execution={:.1f},risk={:.1f},thesis_adj={:.1f}) "
                 "engine(smc={:.1f},regime={:.1f},volume={:.1f},indicators={:.1f},"
                 "patterns={:.1f},mtf={:.1f}) "
-                "soft_penalties(vwap={:.1f},kz={:.1f},oi={:.1f},spoof={:.1f},vol_div={:.1f},cluster={:.1f})",
+                "soft_penalties(vwap={:.1f},kz={:.1f},oi={:.1f},spoof={:.1f},vol_div={:.1f},cluster={:.1f},"
+                "confluence={:+.1f},struct_align={:+.1f}) "
+                "flags=[{}]",
                 symbol,
                 chan_name,
                 _setup_class_name,
@@ -4673,6 +4675,12 @@ class Scanner:
                 float(_soft_penalty_by_type.get("spoof", 0.0)),
                 float(_soft_penalty_by_type.get("vol_div", 0.0)),
                 float(_soft_penalty_by_type.get("cluster", 0.0)),
+                # PR-Diag: surface chartist-eye contributions (negative = bonus).
+                float(_soft_penalty_by_type.get("confluence", 0.0)),
+                float(_soft_penalty_by_type.get("structure_align", 0.0)),
+                # Full flag string so any new gate name appears in INFO logs
+                # without needing a code change to the format string.
+                getattr(sig, "soft_gate_flags", "") or "",
             )
 
         # Regime transition boost (item 15): if regime just changed in the direction
