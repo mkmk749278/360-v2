@@ -119,6 +119,7 @@ from src.mtf import check_mtf_gate, compute_mtf_confluence, _TF_WEIGHTS as _MTF_
 from src.oi_filter import analyse_oi, check_oi_gate
 from src.pair_manager import PairTier, classify_pair_tier
 from src.confluence_detector import ConfluenceDetector
+from src.level_book import LevelBook
 from src.spoof_detect import check_spoof_gate
 from src.tier_manager import TierManager
 from src.utils import get_logger, price_decimal_fmt, utcnow
@@ -507,6 +508,29 @@ _PENALTY_MODULATION_BY_SETUP: Dict[str, Dict[str, float]] = {
 _PENALTY_MODULATION_MIN_SCALE: float = 0.1
 _PENALTY_MODULATION_MAX_SCALE: float = 1.0
 
+# PR-6: Confluence-bonus tunables.
+#
+# When an entry price sits in a band where the multi-TF Level Book reports
+# multiple distinct levels (≥0.30% tolerance — see level_book.CONFLUENCE_TOLERANCE_PCT),
+# subtract a bonus from soft_penalty (= raise final confidence).  Magnitudes
+# are calibrated against existing soft penalties:
+#   - OI base (15) × 1.8 (QUIET) = 27 — single dominant gate
+#   - Confluence-2 bonus (3 pts) ≈ 11% of that — a modest lift
+#   - Confluence-4+ bonus (9 pts) ≈ 33% — meaningful, never enough to
+#     unilaterally lift a sub-50 candidate to paid tier
+#
+# Refresh cadence: per-symbol TTL.  The LevelBook is rebuilt at most once
+# per LEVEL_BOOK_REFRESH_SEC (default 1 hour) per symbol.  Discovery cost
+# is < 100ms × 75 pairs = ~7.5s/hr amortised.
+_CONFLUENCE_BONUS_BY_COUNT: Dict[int, float] = {
+    2: 3.0,
+    3: 6.0,
+    4: 9.0,
+}
+_CONFLUENCE_BONUS_MAX: float = 9.0  # 4+ levels saturate at this bonus
+_CONFLUENCE_QUERY_TOLERANCE_PCT: float = 0.30
+LEVEL_BOOK_REFRESH_SEC: float = 3600.0  # rebuild per-symbol levels at most hourly
+
 # PR-7C: runtime validation focus paths for concise operator summaries.
 _PR7C_TARGET_SETUPS: frozenset[str] = frozenset({
     "SR_FLIP_RETEST",
@@ -686,6 +710,13 @@ class Scanner:
         self.feedback_loop: FeedbackLoop = FeedbackLoop()
         self.cluster_suppressor: ClusterSuppressor = ClusterSuppressor()
         self.confluence_detector: ConfluenceDetector = ConfluenceDetector()
+
+        # Multi-TF Level Book (PR-5).  Auto-discovers and scores S/R levels
+        # per symbol from 1d/4h/1h candles plus round numbers.  Refreshed
+        # lazily per symbol with a TTL so we don't re-scan every cycle.
+        # PR-6 wires confluence_count() into the soft-penalty stack as a bonus.
+        self.level_book: LevelBook = LevelBook()
+        self._level_book_refresh_ts: Dict[str, float] = {}
 
         # Mutable state shared with the engine / command handler
         self.paused_channels: Set[str] = set()
@@ -3228,6 +3259,33 @@ class Scanner:
     def _clamp_confidence(value: float) -> float:
         return max(0.0, min(100.0, round(value, 2)))
 
+    def _refresh_level_book_if_stale(
+        self, symbol: str, candles_by_tf: Dict[str, dict],
+    ) -> None:
+        """Rebuild the LevelBook for *symbol* when the per-symbol TTL elapsed.
+
+        Discovery cost is < 100ms.  TTL of 1h means the budget per symbol is
+        ~3600× cheaper than per-cycle refresh.  No-op when *symbol* has been
+        refreshed recently or when no usable TF candles are present.
+        """
+        now = time.time()
+        last = self._level_book_refresh_ts.get(symbol)
+        if last is not None and (now - last) < LEVEL_BOOK_REFRESH_SEC:
+            return
+        # Pick whichever of 1d / 4h / 1h candles are present.
+        tf_inputs: Dict[str, dict] = {}
+        for tf in ("1d", "4h", "1h"):
+            cd = candles_by_tf.get(tf) if isinstance(candles_by_tf, dict) else None
+            if isinstance(cd, dict) and cd.get("high") is not None:
+                tf_inputs[tf] = cd
+        if not tf_inputs:
+            return
+        try:
+            self.level_book.refresh(symbol, tf_inputs)
+            self._level_book_refresh_ts[symbol] = now
+        except Exception as exc:
+            log.debug("LevelBook refresh failed for {}: {}", symbol, exc)
+
     def _populate_signal_context(self, sig: Any, volume_24h: float, ctx: ScanContext) -> None:
         sig.market_phase = ctx.market_state.value
         if ctx.regime_context is not None:
@@ -4054,6 +4112,43 @@ class Scanner:
         )
         sig.confidence = self._clamp_confidence(sig.confidence)
         sig.post_ai_confidence = sig.confidence
+
+        # ── PR-6: Multi-TF Level Book Confluence Bonus ────────────────────
+        # When the entry sits in a band where ≥2 distinct multi-TF S/R levels
+        # cluster (level + round number + multi-TF swing all count), give a
+        # negative soft_penalty (= bonus).  This is the chartist-confluence
+        # signal: humans treat 100K + a 4h swing high + a 1d resistance at the
+        # same price as one strong wall.  The bonus magnitude is bounded
+        # (max 9 pts) so it can't unilaterally lift a sub-50 candidate to
+        # paid tier — it only nudges borderline B-tier candidates over the
+        # 65 paid threshold.
+        try:
+            self._refresh_level_book_if_stale(symbol, ctx.candles)
+            _confluence_n = self.level_book.confluence_count(
+                symbol, sig.entry, tolerance_pct=_CONFLUENCE_QUERY_TOLERANCE_PCT,
+            )
+            if _confluence_n >= 2:
+                _bonus = _CONFLUENCE_BONUS_BY_COUNT.get(
+                    min(_confluence_n, 4), _CONFLUENCE_BONUS_MAX,
+                )
+                soft_penalty -= _bonus
+                _soft_penalty_by_type["confluence"] = (
+                    _soft_penalty_by_type.get("confluence", 0.0) - _bonus
+                )
+                _fired_gates.append(f"CONFLUENCE×{_confluence_n}")
+                log.debug(
+                    "CONFLUENCE_BONUS {} {} -{:+.1f} (count={}) total_penalty={:.1f}",
+                    symbol, chan_name, _bonus, _confluence_n, soft_penalty,
+                )
+            # Always stash the count on the signal for telemetry / app surface,
+            # even if it didn't earn a bonus (count<2).
+            sig.confluence_count = _confluence_n
+        except Exception as _conf_exc:
+            log.debug(
+                "Confluence-bonus query error for {} {} (fail open): {}",
+                symbol, chan_name, _conf_exc,
+            )
+
         # PR-01: accumulate scanner-level soft-gate penalties on top of any evaluator-
         # authored soft_penalty_total — do not overwrite the evaluator's path-level
         # penalty state.  The total reflects both evaluator quality judgments and
