@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 from src.commands.registry import CommandContext, CommandRegistry
 from src.signal_history_store import save_history
@@ -196,6 +196,49 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
     scanner = ctx.scanner
     router = ctx.router
 
+    # --- Engine boot time + uptime ---
+    sections.append("--- ENGINE ---")
+    boot_ts = float(getattr(ctx, "boot_time", 0.0) or 0.0)
+    if boot_ts > 0:
+        boot_iso = datetime.fromtimestamp(boot_ts, tz=timezone.utc).isoformat()
+        uptime_s = max(0.0, now - boot_ts)
+        h = int(uptime_s // 3600)
+        m = int((uptime_s % 3600) // 60)
+        sections.append(f"Boot: {boot_iso}")
+        sections.append(f"Uptime: {h}h {m}m")
+    else:
+        sections.append("Boot time not available (ctx.boot_time = 0)")
+    sections.append("")
+
+    # --- Effective confidence thresholds per channel ---
+    # Surfaces the actual min_confidence each channel is filtering against
+    # (channel default + any /confidence override).  This is the answer to
+    # "why is SR_FLIP showing threshold=80 in logs" — we read the live
+    # number from the running scanner, not config defaults.
+    sections.append("--- EFFECTIVE THRESHOLDS PER CHANNEL ---")
+    overrides = dict(getattr(ctx, "confidence_overrides", {}) or {})
+    if overrides:
+        sections.append(f"Active /confidence overrides: {overrides}")
+    else:
+        sections.append("Active /confidence overrides: (none)")
+    channels = list(getattr(scanner, "channels", []) or [])
+    if channels:
+        sections.append("Channel → min_confidence (effective):")
+        for ch in channels:
+            cfg = getattr(ch, "config", None)
+            if cfg is None:
+                continue
+            chan_name = getattr(cfg, "name", "?")
+            default_mc = getattr(cfg, "min_confidence", "?")
+            override = overrides.get(chan_name)
+            if override is not None:
+                sections.append(
+                    f"  {chan_name}: {override} (override; default {default_mc})"
+                )
+            else:
+                sections.append(f"  {chan_name}: {default_mc}")
+    sections.append("")
+
     # --- LevelBook ---
     sections.append("--- LEVEL BOOK ---")
     lb = getattr(scanner, "level_book", None)
@@ -317,6 +360,43 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
     sections.append("--- RECENT TERMINAL FLAGS (last 50) ---")
     history = list(ctx.signal_history)[-50:] if ctx.signal_history else []
     sections.append(f"Sample size: {len(history)}")
+
+    # Timestamp range so we can tell pre- from post-deploy samples.
+    def _sig_ts(sig: object) -> Optional[float]:
+        ts = getattr(sig, "timestamp", None)
+        if ts is None:
+            return None
+        if hasattr(ts, "timestamp"):
+            try:
+                return float(ts.timestamp())
+            except Exception:
+                return None
+        try:
+            return float(ts)
+        except (TypeError, ValueError):
+            return None
+
+    timestamps = [t for t in (_sig_ts(s) for s in history) if t is not None]
+    pre_deploy_count = 0
+    post_deploy_count = 0
+    if timestamps:
+        ts_min = min(timestamps)
+        ts_max = max(timestamps)
+        sections.append(
+            f"Timestamp range: {datetime.fromtimestamp(ts_min, tz=timezone.utc).isoformat()}"
+            f" → {datetime.fromtimestamp(ts_max, tz=timezone.utc).isoformat()}"
+        )
+        # Use boot_time as the "post-deploy" cutoff if available — anything
+        # signalled before the running build started cannot have chartist-eye
+        # flags by definition.
+        if boot_ts > 0:
+            post_deploy_count = sum(1 for t in timestamps if t >= boot_ts)
+            pre_deploy_count = len(timestamps) - post_deploy_count
+            sections.append(
+                f"Pre-deploy: {pre_deploy_count} signals; "
+                f"post-deploy: {post_deploy_count} signals"
+            )
+
     history_flag_counter: Counter = Counter()
     confluence_seen = 0
     struct_seen = 0
@@ -374,15 +454,44 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
         f"  ScalpChannel + MA-cross cooldown registry: "
         f"{scalp_ch is not None}"
     )
-    if confluence_seen == 0 and len(history) > 5:
+    # ⚠ warnings only fire when we have a meaningful post-deploy sample.
+    # If every signal in `history` predates the running build's boot, the
+    # absence of chartist-eye flags is expected (the wiring didn't exist
+    # when those signals ran through scoring).  ``boot_ts > 0`` plus
+    # ``post_deploy_count > 5`` is the threshold for "this is a real
+    # diagnostic signal, not a stale-history artifact".
+    _have_meaningful_sample = (
+        boot_ts > 0 and post_deploy_count > 5
+    ) or (boot_ts == 0 and len(history) > 5)
+    if confluence_seen == 0 and _have_meaningful_sample:
+        sample_label = (
+            f"{post_deploy_count} post-deploy"
+            if post_deploy_count > 0
+            else f"{len(history)}"
+        )
         sections.append(
-            "  ⚠ NO CONFLUENCE bonuses across 50 recent signals — investigate "
+            f"  ⚠ NO CONFLUENCE bonuses across {sample_label} signals — investigate "
             "(empty LevelBook, no clusters near entries, or wiring bug)."
         )
-    if struct_seen == 0 and len(history) > 5:
+    if struct_seen == 0 and _have_meaningful_sample:
+        sample_label = (
+            f"{post_deploy_count} post-deploy"
+            if post_deploy_count > 0
+            else f"{len(history)}"
+        )
         sections.append(
-            "  ⚠ NO STRUCT_ALIGN bonuses across 50 recent signals — same "
+            f"  ⚠ NO STRUCT_ALIGN bonuses across {sample_label} signals — same "
             "(no trend-path signals or structure not aligning)."
+        )
+    if (
+        boot_ts > 0
+        and post_deploy_count == 0
+        and len(history) > 0
+    ):
+        sections.append(
+            "  ℹ All recent signals predate the running build — no "
+            "post-deploy sample yet.  Wait for fresh signals to verify "
+            "chartist-eye wiring."
         )
     sections.append("")
 
