@@ -93,7 +93,7 @@ What this changes:
 3. WATCHLIST tier removed (PR #308) — sub-paid-tier signals don't belong in the engine; the free channel is fed by storytelling mirrors + content-engine, not by scrap signals.
 4. Scoring tiers (§3.5) and hard structural gates (SL geometry, missing data, MTF impossibility) are unchanged. The reset is about removing redundant or backward gates, not about lowering the quality bar at the routing layer.
 
-## 3.3 The 14 Signal Evaluators
+## 3.3 The 15 Signal Evaluators
 
 | # | Setup Class | Family | Direction source |
 |---|---|---|---|
@@ -111,6 +111,7 @@ What this changes:
 | 12 | CONTINUATION_LIQUIDITY_SWEEP | Trend continuation | EMA alignment |
 | 13 | POST_DISPLACEMENT_CONTINUATION | Breakout continuation | EMA alignment |
 | 14 | FAILED_AUCTION_RECLAIM | Structure reclaim | Failed-auction side |
+| 15 | MA_CROSS_TREND_SHIFT | Discrete trend-shift event | EMA50/200 4h or EMA21/50 1h crossover |
 
 Each evaluator lives in `src/channels/scalp.py` as `_evaluate_<name>` and owns its own SL/TP geometry (B7).
 
@@ -142,7 +143,32 @@ QCB thesis = primary-TF compression breakout volume during a QUIET window with d
 
 KZ was a session-traded asset filter inherited from non-crypto doctrine. Truth-report data showed it accounting for 80–100% of every filtered SCALP setup's aggregate gate penalty (LSR 96%, FAR 100%, SR_FLIP 94%, QCB 80%, DIV_CONT 100%) — a flat 5–13 confidence-point deduction during "low-liquidity" hours that don't exist in 24/7 crypto futures. Per scalping doctrine §3.2 ("we are 24/7 scalpers"), penalising signals for time-of-day was doctrinally wrong. Initially disabled on the main `360_SCALP` channel only (PR #289, 2026-05-04), with auxiliary channels held back pending per-channel data. Subsequent truth reports showed those auxiliaries were too low-volume to ever produce that data and the doctrinal call doesn't depend on per-channel evidence — applied uniformly across all 8 SCALP-family channels (`360_SCALP`, `_FVG`, `_CVD`, `_VWAP`, `_DIVERGENCE`, `_SUPERTREND`, `_ICHIMOKU`, `_ORDERBLOCK`) via PR #303, 2026-05-05. Reversible per channel by flipping the bool back in `_CHANNEL_GATE_PROFILE`.
 
-## 3.5 Confidence Tiers and Routing
+### Top-emitter OI softening (2026-05-06, PR #314)
+
+LSR / SR_FLIP / FAR were over-suppressed by the OI gate (truth-report data: 91–100% of soft-penalty stack). OI base × 1.8 (QUIET regime mult) = 27 pts — enough to push a B-tier candidate (65) below paid threshold. Modulators added: `LSR oi=0.30`, `FAR oi=0.30`, `SR_FLIP oi=0.50`. Counter-trend paths (LSR/FAR) get the aggressive 0.30 modulator because OI flipping against direction is the crowd we're trading against — exactly the thesis. SR_FLIP gets the milder 0.50.
+
+## 3.5 Chartist-Eye World Model (PRs #314–#321, 2026-05-06)
+
+A shared "world model" every evaluator can consult, closing the gap between rule-based scoring and what a human chartist sees at a glance.
+
+| Component | Module | Role |
+|---|---|---|
+| **LevelBook** | `src/level_book.py` | Multi-TF S/R levels (1d/4h/1h swing pivots + round numbers + VP zones), scored by touches × tf_weight × age_decay. Top 60 retained per symbol, 1 h refresh TTL. |
+| **Confluence bonus** | `scanner._prepare_signal` | When entry sits in a band where ≥2 distinct LevelBook zones cluster, subtract a soft-penalty bonus: 2→3, 3→6, 4+→9. Saturated; cannot lift sub-50 candidate to paid. |
+| **StructureTracker** | `src/structure_state.py` | Per (symbol, tf) classification: BULL_LEG (≥75% HH+HL in last 4 pivots), BEAR_LEG (≥75% LH+LL), or RANGE. Refreshes 30 min TTL. |
+| **Structure-align bonus** | `scanner._prepare_signal` | TPE / DIV_CONT / CLS / PDC paths earn `−3` soft-penalty bonus when entry direction matches the 4h structure leg. Counter-trend / break-event / tape-driven paths intentionally do **not** consume this. |
+| **VolumeProfile** | `src/volume_profile.py` | POC + Value Area High/Low per symbol. Approximate VPVR from candles (volume distributed uniformly across `[low, high]`). POC/VAH/VAL injected into LevelBook with `source_tf="vp"` so they participate in confluence scoring automatically. |
+| **MA_CROSS_TREND_SHIFT** | `_evaluate_ma_cross_trend_shift` | 15th evaluator. Discrete EMA50/200 (4h) or EMA21/50 (1h) crossover trigger. 24h cooldown per (symbol, direction). Specialist role; ~1-3 signals/day expected. |
+| **Pattern catalog** | `src/chart_patterns.py` | Bull flag, bear flag (continuation) + double top/bottom + triangles + H&S/inverse-H&S (reversal) + bollinger squeeze + candlestick zoo. Wired into `pattern_confidence_bonus` (±3 pts). |
+
+### Doctrine guardrails
+
+- **Hard structural gates unchanged.** SL geometry validation, missing-data rejection, and structural-impossibility checks are untouched. The chartist-eye stack is purely a *scoring* layer — it never invents a setup.
+- **Soft-penalty bonus magnitudes are bounded.** `confluence ≤ 9 pts`, `structure_align = 3 pts`. Combined max lift is ~12 pts; calibrated so a sub-50 candidate cannot reach paid (65) by these alone.
+- **Per-path doctrine respected.** Counter-trend paths (LSR/FAR) and tape-driven paths (WHALE/FUNDING/LIQ_REV) deliberately do not consume `STRUCT_ALIGN`. Break-event paths (VSB/BDS/ORB/QCB/SR_FLIP/MA_CROSS) similarly excluded — see `_STRUCTURE_ALIGN_PATHS` in `src/scanner/__init__.py`.
+- **Cost accounted.** All three caches refresh on per-symbol TTL (1 hr LevelBook+VP, 30 min StructureTracker). Combined < 50 ms/refresh × 75 pairs / 1 hr = ~1 s/hr CPU amortised.
+
+## 3.6 Confidence Tiers and Routing
 
 | Tier | Score | Routing |
 |---|---|---|
@@ -154,7 +180,7 @@ WATCHLIST was retired 2026-05-06 (PR #308). The 50–64 band is now part of FILT
 
 The QUIET regime applies an additional safety net: any 360_SCALP signal in QUIET regime needs confidence ≥ 65 (paid B-tier minimum) to pass. **No per-path exempts.**
 
-## 3.6 Architecture — Signal Flow
+## 3.7 Architecture — Signal Flow
 
 ```
 Binance WebSocket (300 streams)
@@ -165,9 +191,13 @@ OrderFlowStore — OI snapshots, CVD, funding rate, liquidations
         ↓
 Scanner — runs every 15s across 75 pairs
         ↓
-ScalpChannel.evaluate() — 14 internal evaluators per pair
+ScalpChannel.evaluate() — 15 internal evaluators per pair
         ↓
 Gate chain — SMC, MTF, regime, spread, volume, confidence
+        ↓
+Chartist-eye stack — LevelBook + VolumeProfile + StructureTracker
+                      contributes soft-penalty bonuses (CONFLUENCE×N,
+                      STRUCT_ALIGN:BULL_LEG/BEAR_LEG)
         ↓
 SignalScoringEngine — multi-component score (0–100)
         ↓

@@ -6,17 +6,22 @@
 
 ## Current Phase
 
-**App-era doctrine reset is in flight.** Owner direction (2026-05-06): "now we fully concentrate on app… too many signals are also lost trust on us; Pre-TP is our New strategy in industry so arrange this carefully with this we get more win rate; analyse the invalidation system, in my view it's actually protecting Signals with minimal risk… analyse all things finalise the plan."
+**Chartist-eye roadmap shipped in full (2026-05-06 evening).** Following the morning's app-era doctrine reset (PRs #308–#311), the owner asked: *"how can we improve real S/R, structure, MA crossovers — what humans do — without manual effort?"*
 
-The reset reframes "more gates → fewer signals" (correct for Telegram-only era) as wrong for app-era because empty app = dead app, and Pre-TP grab + invalidation audit are now the safety net that justifies looser gates upstream. Three PRs shipped today execute the first phase of that reset:
+The answer was a programmatic "world model" every evaluator can consult: persistent multi-TF S/R levels with confluence scoring, structural leg classification, volume profile, a discrete MA-cross emitter, and continuation/reversal patterns. Eight PRs executed the design:
 
-1. **PR #308 — WATCHLIST tier removed entirely.** Engine no longer routes sub-paid-tier signals anywhere. Free channel is fed only by close-storytelling mirrors + content-engine. Sub-65 → FILTERED, dropped silently. B5 retired.
-2. **PR #309 — Wrong-regime blocks dropped from WHALE/VSB/BDS.** §3.4 already said these paths shouldn't be regime-gated; the code disagreed. Truth report shows ~45% of cycles are QUIET — recovers a meaningful slice for these three paths. Thesis gates still enforce structural validity in any regime.
-3. **PR #310 — QCB `volume_div` modulator tightened 0.60 → 0.20.** Compression IS volume divergence; at 0.60 the modulator was a no-op in QUIET (1.08× base after the 1.8× regime mult). 0.20 brings effective QUIET weight to ~0.36× base.
+1. **PR #314 — Top-emitter OI softening.** LSR/SR_FLIP/FAR were over-suppressed by the OI gate (91–100% of soft-penalty stack). Path-aware modulators added.
+2. **PR #315 — LevelBook infrastructure.** Multi-TF S/R levels (1d/4h/1h swing pivots + round numbers), scored by touches/age/timeframe, top 60 retained per symbol.
+3. **PR #316 — Confluence bonus wired.** When entry sits in a band where ≥2 distinct LevelBook zones cluster, a soft-penalty bonus fires (2→3, 3→6, 4+→9).
+4. **PR #317 — StructureTracker infrastructure.** Per (symbol, tf) classification of HH/HL bull leg vs LH/LL bear leg vs RANGE.
+5. **PR #318 — MA_CROSS_TREND_SHIFT 15th evaluator.** Discrete EMA50/200 (4h) or EMA21/50 (1h) crossover trigger. 24h cooldown per (symbol, direction). Specialist role.
+6. **PR #319 — VolumeProfile lite infrastructure.** POC + Value Area High/Low per symbol; in_value_area / is_near_poc / is_at_value_edge helpers.
+7. **PR #320 — Pattern catalog completion.** Bull flag + bear flag added; pre-existing H&S detector wired into `detect_patterns` dispatch; confidence-bonus mapping extended.
+8. **PR #321 — Wiring follow-up.** VolumeProfile POC/VAH/VAL injected into LevelBook so confluence scoring picks them up automatically. Structure-alignment bonus (+3 pts) wired for TPE/DIV_CONT/CLS/PDC when entry direction matches the 4h leg.
 
-**Hard structural gates and scoring tiers are unchanged.** The reset removes redundant or doctrinally-backward gates, not the quality bar at routing.
+**Magnitude bounded.** Combined `confluence + structure_align` max lift is ~12 pts. Calibration: a sub-50 candidate cannot reach paid (65) by chartist-eye lift alone — it only nudges borderline B-tier candidates over the threshold. **Hard structural gates and scoring tiers untouched.**
 
-**Still pending in the master plan:** PR-4 (top-emitter softening — SR_FLIP / FAR / LSR), PR-5 (TPE softening), PR-6 (scanner gates: cross_asset hard→soft, MTF hard→soft), PR-7 (DIV_CONT / CLS / PDC / FUNDING). All deferred until PRs #308–#310 land in production and one truth-report cycle confirms direction.
+**Pending only one truth-report cycle of observation.** Then: act on whatever the data shows. No pre-committed next phase — the chartist-eye roadmap is feature-complete.
 
 ---
 
@@ -30,8 +35,10 @@ The reset reframes "more gates → fewer signals" (correct for Telegram-only era
 - **HTF mismatch policy** soft penalty (not hard block) on SR_FLIP / QCB / FAR
 - **WHALE / VSB / BDS regime gates removed** (PR #309) — these paths now fire in any regime when thesis gates pass; matches §3.4 doctrine
 - **QCB `volume_div` modulator tightened** to 0.20 (PR #310) — effective QUIET weight ~0.36× base
+- **Top-emitter OI softening** (PR #314) — LSR `oi=0.30`, FAR `oi=0.30`, SR_FLIP `oi=0.50`. Recovers borderline B-tier candidates that were being dropped by a single gate.
 - **WATCHLIST tier removed** (PR #308) — sub-65 → FILTERED, dropped silently; free channel fed only by storytelling mirrors + content-engine
 - **QUIET-block doctrine** uniform 65 paid-tier floor — no scrap-routing exempts
+- **Chartist-eye world model** (PRs #314–#321) — multi-TF LevelBook with VP + round-number injection, StructureTracker on 4h, VolumeProfile (POC/VAH/VAL), MA_CROSS_TREND_SHIFT 15th evaluator, bull/bear flag + H&S patterns. Wired into `_prepare_signal` as bounded soft-penalty bonuses (`CONFLUENCE×N` ≤ 9 pts, `STRUCT_ALIGN` 3 pts). Combined max lift ~12 pts; cannot lift sub-50 candidate to paid alone.
 - **Universal 0.80% SL floor** plus per-setup caps active
 - **Invalidation quality audit** classifying every kill as PROTECTIVE / PREMATURE / NEUTRAL post-30-min
 - **Counter-trend Regime-neutral baseline** (LSR / FAR) — `_REGIME_NEUTRAL_SETUPS` frozenset gives 14.0 baseline in non-affinity regimes (avoids HTF-soft-penalty + Regime-score double penalty)
@@ -72,29 +79,52 @@ The reset reframes "more gates → fewer signals" (correct for Telegram-only era
 | #305 | Correct INVALIDATED status everywhere it's persisted | ✅ merged |
 | #306 | End-of-session doc refresh (2026-05-05) | ✅ merged |
 
-### Day 2 (app-era doctrine reset)
+### Day 2 — app-era doctrine reset
 | PR | Title | Status |
 |---|---|---|
 | #307 | Close broker + compute P&L + archive on signal expiry | ✅ merged |
-| #308 | Remove WATCHLIST tier entirely (engine + tests + telegram_bot) | 🟡 open |
-| #309 | Drop wrong-regime blocks from WHALE/VSB/BDS (per §3.4) | 🟡 open |
-| #310 | Tighten QCB volume_div modulator 0.60 → 0.20 | 🟡 open |
+| #308 | Remove WATCHLIST tier entirely (engine + tests + telegram_bot) | ✅ merged |
+| #309 | Drop wrong-regime blocks from WHALE/VSB/BDS (per §3.4) | ✅ merged |
+| #310 | Tighten QCB volume_div modulator 0.60 → 0.20 | ✅ merged |
+| #311 | Doc: app-era doctrine reset | ✅ merged |
+| #312 | `/reset_full` clears all signal-data stores atomically | ✅ merged |
+| #313 | Backfill TP2/TP3 from `dispatch_log.json` + boot reconciliation | ✅ merged |
 
-End-of-session test count: **3792 passed**, 0 failures, 0 regressions.
+### Day 2 — chartist-eye roadmap
+| PR | Title | Status |
+|---|---|---|
+| #314 | Top-emitter OI softening (LSR/SR_FLIP/FAR) | ✅ merged |
+| #315 | LevelBook infrastructure (multi-TF S/R + round numbers) | ✅ merged |
+| #316 | Wire LevelBook confluence into soft-penalty stack | ✅ merged |
+| #317 | StructureTracker (HH/HL bull leg vs LH/LL bear leg) | ✅ merged |
+| #318 | MA_CROSS_TREND_SHIFT 15th evaluator | ✅ merged |
+| #319 | VolumeProfile (POC + VAH/VAL) | ✅ merged |
+| #320 | Pattern catalog: bull/bear flag + wire H&S | ✅ merged |
+| #321 | Wire VolumeProfile + StructureTracker into scoring stack | 🟡 open |
+
+End-of-session test count: **3978 passed**, 0 failures, 0 regressions.
 
 ---
 
 ## Open Queue
 
-### Master plan — remaining PRs (deferred until #308–#310 land + 1 truth-report cycle)
-- **PR-4: Top-emitter softening (SR_FLIP / FAR / LSR).** Convert remaining hard rejection paths to scoring-tier soft penalties where doctrine permits. SR_FLIP especially — currently top emitter but bulk filtered at sub-paid threshold; with WATCHLIST removed those are now silent drops, so the path either earns paid tier or contributes nothing.
-- **PR-5: TPE softening.** Truth report shows ~80% of TPE attempts blocked by `regime_blocked` (1.3M of 1.6M). TPE is regime-aligned by definition (trend-pullback) so the gate is structurally compatible — but the strictness needs an audit against the SOLUSDT-style "beautifully oscillating EMA pullback" cases the owner flagged.
-- **PR-6: Scanner gates conversion.** `cross_asset` hard→soft and MTF hard→soft, where the structural-impossibility condition isn't met. Both are currently hard-blocking signals the scoring tier could correctly classify.
-- **PR-7: Remaining evaluators (DIV_CONT / CLS / PDC / FUNDING).** Per-path audit applying the same THESIS-vs-FILTER classification used in PRs #309/#310.
+### Awaiting truth-report observation cycle
+The chartist-eye roadmap is feature-complete. Before queuing more changes, watch one truth-report cycle (~1 hr post-#321 merge) for:
+- `CONFLUENCE×N` flags appearing in `soft_gate_flags` for some fraction of signals
+- `STRUCT_ALIGN:BULL_LEG` / `STRUCT_ALIGN:BEAR_LEG` flags on TPE/DIV_CONT/CLS/PDC paid-tier signals
+- `MA_CROSS_TREND_SHIFT` attempts ticking each cycle, ~1-3 actual signals/day
+- Borderline B-tier candidates near multi-TF level + VP zones lifted to paid; **no** sub-50 candidate reaching paid by chartist-eye lift alone (regression guard)
+- Invalidation audit ratio (PROTECTIVE / PREMATURE / NEUTRAL) stays net-protective across all paths
+- `VOLUME_SURGE_BREAKOUT` / `BREAKDOWN_SHORT` / `WHALE_MOMENTUM` rejection mix shifts away from `regime_blocked` toward thesis-driven reasons
+
+### Originally-deferred items, still valid
+- **TPE softening.** Truth report (pre-roadmap) showed ~80% of TPE attempts blocked by `regime_blocked`. With STRUCT_ALIGN bonus now wired for TPE, observe whether this changes before further softening the regime gate.
+- **Scanner gates conversion.** `cross_asset` hard→soft and MTF hard→soft, where the structural-impossibility condition isn't met. Both still hard-blocking signals the scoring tier could correctly classify.
+- **DIV_CONT / CLS / PDC / FUNDING per-path audit.** Same THESIS-vs-FILTER classification used in PRs #309/#310.
 
 ### Held — investigation paused
-- **SR_FLIP_RETEST 0% win rate, paid-volume drought.** Backfilled history confirms: most closes are small-pct invalidations or breakevens, **zero TP hits** visible in the recent terminal set. SR_FLIP was previously the dominant emitter but mostly WATCHLIST-tier; with WATCHLIST removed (PR #308) those are now silent drops. PR-4 is the next bite.
-- **OI-flip soft-penalty doctrine audit.** With KZ uniformly disabled, OI flip is the dominant soft-penalty bottleneck — DIV_CONT 100% / FAR 91% / LSR 100% / SR_FLIP 100% of penalty from OI. Same KZ-style question: 24/7-crypto-doctrine gate or inherited noise?
+- **SR_FLIP_RETEST 0% win rate, paid-volume drought.** Pre-roadmap data showed bulk filtering at sub-paid threshold. With OI modulation (PR #314) + confluence bonus (#316) + structure-align bonus (#321), the paid-tier rate is the new headline metric to watch. If still 0% wins after observation, the path's thesis itself needs revisiting — not its scoring.
+- **OI-flip on remaining trend paths (DIV_CONT 100%).** PR #314 covered top emitters only. DIV_CONT may need the same modulation if structure-align bonus doesn't lift enough.
 
 ### Pending data
 - **TP1 ATR cap re-derivation** (1.8R / 2.5R / uncapped on SR_FLIP / FUNDING / DIV_CONT / CLS) — wait for Phase 1 invalidation audit data on TP1 hit rates per setup × ATR-bucket
@@ -171,10 +201,15 @@ For data correctness:
 ### Engine
 | Concern | File |
 |---|---|
-| 14 evaluators | `src/channels/scalp.py` |
+| 15 evaluators | `src/channels/scalp.py` |
 | Confidence scoring | `src/signal_quality.py` |
 | Regime classifier | `src/regime.py` |
-| Scanner gate chain + `_CHANNEL_GATE_PROFILE` | `src/scanner/__init__.py` |
+| Scanner gate chain + `_CHANNEL_GATE_PROFILE` + chartist-eye wiring | `src/scanner/__init__.py` |
+| **LevelBook** (multi-TF S/R + round numbers + VP injection) | `src/level_book.py` |
+| **StructureTracker** (HH/HL bull leg vs LH/LL bear leg) | `src/structure_state.py` |
+| **VolumeProfile** (POC + VAH/VAL) | `src/volume_profile.py` |
+| Pattern catalog (DT/DB/triangle/flag/H&S/candlestick) | `src/chart_patterns.py` |
+| Confluence detector (cross-strategy multi-channel) | `src/confluence_detector.py` |
 | Trade lifecycle + pre-TP + broker close on non-TP exits | `src/trade_monitor.py` |
 | Auto-trade subsystem | `src/auto_trade/` (paper, risk, reconciler) |
 | Live order manager (close_full + add_dca_entry) | `src/order_manager.py` |
