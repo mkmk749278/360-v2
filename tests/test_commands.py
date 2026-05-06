@@ -297,6 +297,66 @@ class TestCircuitBreakerCommands:
         assert "360_SCALP" in call_args[1]
 
 
+class TestResetFull:
+    """Atomic clean-slate reset across all four signal-data stores."""
+
+    @pytest.mark.asyncio
+    async def test_reset_full_clears_all_three_stores(self, tmp_path, monkeypatch):
+        # Stage an invalidation_records.json with 4 entries
+        inv_path = tmp_path / "invalidation_records.json"
+        inv_path.write_text('[{"a":1},{"a":2},{"a":3},{"a":4}]', encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / "data").mkdir()
+        (tmp_path / "data" / "invalidation_records.json").write_text(
+            '[{"a":1},{"a":2},{"a":3},{"a":4}]', encoding="utf-8"
+        )
+
+        tracker = MagicMock()
+        tracker.reset_stats.return_value = 7
+        history = [MagicMock(signal_id=f"S{i}") for i in range(5)]
+        handler = _make_handler(performance_tracker=tracker, signal_history=history)
+
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID), \
+             patch("src.commands.channels.save_history") as mock_save:
+            await handler._handle_command("/reset_full", ADMIN_CHAT_ID)
+
+        tracker.reset_stats.assert_called_once_with(channel=None)
+        assert handler._signal_history == []
+        mock_save.assert_called_once()
+        # invalidation_records.json must be reset to empty list
+        assert (tmp_path / "data" / "invalidation_records.json").read_text() == "[]"
+
+        msg = handler._telegram.send_message.call_args[0][1]
+        assert "7 records" in msg          # perf
+        assert "5 signals" in msg          # history
+        assert "4 records" in msg          # invalidation
+        assert "Active in-flight signals were NOT cleared" in msg
+
+    @pytest.mark.asyncio
+    async def test_reset_full_no_tracker_still_clears_history(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        history = [MagicMock(signal_id="S1"), MagicMock(signal_id="S2")]
+        handler = _make_handler(signal_history=history)
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID), \
+             patch("src.commands.channels.save_history"):
+            await handler._handle_command("/reset_full", ADMIN_CHAT_ID)
+        assert handler._signal_history == []
+        msg = handler._telegram.send_message.call_args[0][1]
+        assert "0 records" in msg          # perf (no tracker)
+        assert "2 signals" in msg          # history
+
+    @pytest.mark.asyncio
+    async def test_reset_full_admin_only(self):
+        handler = _make_handler()
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/reset_full", USER_CHAT_ID)
+        # Non-admin → no reply (silent admin guard) or error
+        assert all(
+            "reset" not in str(c).lower()
+            for c in handler._telegram.send_message.call_args_list
+        )
+
+
 class TestCommandAliases:
     @pytest.mark.asyncio
     async def test_status_alias_calls_engine_status(self):

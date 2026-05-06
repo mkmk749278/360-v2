@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
 from typing import List
 
 from src.commands.registry import CommandContext, CommandRegistry
+from src.signal_history_store import save_history
 
 registry = CommandRegistry()
 
@@ -111,6 +114,61 @@ async def handle_reset_stats(args: List[str], ctx: CommandContext) -> None:
     cleared = ctx.performance_tracker.reset_stats(channel=channel_arg)
     label = channel_arg or "all channels"
     await ctx.reply(f"🗑 Performance stats reset: {cleared} records cleared for {label}.")
+
+
+@registry.command(
+    "/reset_full",
+    admin=True,
+    group="channels",
+    help_text=(
+        "Reset ALL signal stores: performance stats + signal history "
+        "(app feed) + invalidation records.  Use to start a clean cycle "
+        "(e.g. after a doctrinal change) so app + /stats reflect only "
+        "post-reset signals."
+    ),
+)
+async def handle_reset_full(args: List[str], ctx: CommandContext) -> None:
+    """Atomic clean-slate reset across all signal-data stores.
+
+    Clears, in order:
+      1. PerformanceTracker records (driving /stats)
+      2. In-memory _signal_history + data/signal_history.json (driving the app)
+      3. data/invalidation_records.json (truth source for INVALIDATED status)
+
+    Active signals (router.active_signals) are NOT cleared — those are
+    in-flight trades and would orphan auto-trade broker positions if wiped.
+    """
+    perf_cleared = 0
+    if ctx.performance_tracker is not None:
+        perf_cleared = ctx.performance_tracker.reset_stats(channel=None)
+
+    history_cleared = len(ctx.signal_history)
+    ctx.signal_history.clear()
+    try:
+        save_history(ctx.signal_history)
+    except Exception as e:
+        await ctx.reply(f"⚠️ signal_history.json flush failed: {e}")
+
+    inv_path = Path("data/invalidation_records.json")
+    inv_cleared = 0
+    if inv_path.exists():
+        try:
+            existing = json.loads(inv_path.read_text(encoding="utf-8"))
+            inv_cleared = len(existing) if isinstance(existing, list) else 0
+        except (OSError, json.JSONDecodeError):
+            inv_cleared = 0
+        try:
+            inv_path.write_text("[]", encoding="utf-8")
+        except OSError as e:
+            await ctx.reply(f"⚠️ invalidation_records.json clear failed: {e}")
+
+    await ctx.reply(
+        "🗑 Full reset complete:\n"
+        f"  • Performance stats: {perf_cleared} records\n"
+        f"  • Signal history (app): {history_cleared} signals\n"
+        f"  • Invalidation records: {inv_cleared} records\n"
+        f"\nActive in-flight signals were NOT cleared (would orphan broker positions)."
+    )
 
 
 @registry.command(
