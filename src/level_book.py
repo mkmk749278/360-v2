@@ -53,7 +53,7 @@ from __future__ import annotations
 import math
 import time
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 
@@ -82,6 +82,7 @@ TF_WEIGHT: Dict[str, float] = {
     "4h": 1.5,
     "1h": 1.0,
     "round": 1.5,  # round numbers anchor as a ~4h-strength level
+    "vp": 1.8,     # volume-profile (POC / VAH / VAL) — strong magnets per CME doctrine
 }
 
 #: Score decay by age since last test.  Stale levels matter less.
@@ -305,7 +306,13 @@ class LevelBook:
         self._levels: Dict[str, List[Level]] = {}
         self._refresh_ts: Dict[str, float] = {}
 
-    def refresh(self, symbol: str, candles_by_tf: Dict[str, dict]) -> List[Level]:
+    def refresh(
+        self,
+        symbol: str,
+        candles_by_tf: Dict[str, dict],
+        *,
+        volume_profile: Optional[Any] = None,
+    ) -> List[Level]:
         """Rebuild the level book for *symbol* from multi-TF candles.
 
         Expected ``candles_by_tf``:
@@ -315,6 +322,12 @@ class LevelBook:
 
         Missing TFs are skipped.  Returns the resulting clustered+scored
         level list (also stored on self).
+
+        ``volume_profile`` (optional) is a ``VolumeProfileResult`` whose
+        POC / VAH / VAL prices are injected as additional levels with
+        ``source_tf="vp"``.  Per chart-trader doctrine, POC is a magnet
+        and VAH/VAL are textbook bounce zones, so they cluster with
+        existing swing pivots and earn a confluence-bonus contribution.
         """
         raw: List[Level] = []
         now_ts = time.time()
@@ -389,14 +402,60 @@ class LevelBook:
                         is_round_number=True,
                     ))
 
-        # 3. Cluster nearby levels into zones.
+        # 3. Volume-profile injection (PR-VP-wire).
+        # POC, VAH, VAL come in as `source_tf="vp"`.  They participate in
+        # the same clustering and scoring path as swing pivots and round
+        # numbers — so a swing high that aligns with VAH within 0.30%
+        # collapses into one high-score zone, and a candidate at that
+        # price sees the multi-source confluence in `confluence_count`.
+        if volume_profile is not None:
+            try:
+                vp_prices = []
+                vp_poc = float(getattr(volume_profile, "poc", 0.0) or 0.0)
+                vp_vah = float(getattr(volume_profile, "vah", 0.0) or 0.0)
+                vp_val = float(getattr(volume_profile, "val", 0.0) or 0.0)
+                if vp_poc > 0:
+                    vp_prices.append((vp_poc, "support"))    # POC = magnet,
+                if vp_vah > 0:                                # type irrelevant
+                    vp_prices.append((vp_vah, "resistance"))
+                if vp_val > 0:
+                    vp_prices.append((vp_val, "support"))
+                # Look up touches against the most-granular candle stream
+                # we have to give VP levels age-decay context.
+                _vp_cd = candles_by_tf.get("1h") or candles_by_tf.get("4h") or {}
+                _vp_highs = _vp_cd.get("high")
+                _vp_lows = _vp_cd.get("low")
+                vp_highs_arr = (
+                    np.asarray(_vp_highs, dtype=np.float64).ravel()
+                    if _vp_highs is not None else np.array([], dtype=np.float64)
+                )
+                vp_lows_arr = (
+                    np.asarray(_vp_lows, dtype=np.float64).ravel()
+                    if _vp_lows is not None else np.array([], dtype=np.float64)
+                )
+                for price, sr_type in vp_prices:
+                    touches, last_idx = _count_touches(price, vp_highs_arr, vp_lows_arr)
+                    last_ts = (
+                        _candle_ts(_vp_cd, last_idx) if last_idx is not None else None
+                    )
+                    raw.append(Level(
+                        price=price,
+                        type=sr_type,
+                        source_tf="vp",
+                        touches=max(1, touches),
+                        last_test_ts=last_ts,
+                    ))
+            except Exception as exc:
+                log.debug("LevelBook VP injection error for {}: {}", symbol, exc)
+
+        # 4. Cluster nearby levels into zones.
         clustered = _cluster_levels(raw)
 
-        # 4. Score each clustered level.
+        # 5. Score each clustered level.
         for lv in clustered:
             lv.score = _score_level(lv, now_ts=now_ts)
 
-        # 5. Cap to top-N by score.
+        # 6. Cap to top-N by score.
         clustered.sort(key=lambda lv: lv.score, reverse=True)
         final = clustered[:MAX_LEVELS_PER_SYMBOL]
 

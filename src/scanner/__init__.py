@@ -120,6 +120,8 @@ from src.oi_filter import analyse_oi, check_oi_gate
 from src.pair_manager import PairTier, classify_pair_tier
 from src.confluence_detector import ConfluenceDetector
 from src.level_book import LevelBook
+from src.structure_state import StructureTracker
+from src.volume_profile import VolumeProfileStore
 from src.spoof_detect import check_spoof_gate
 from src.tier_manager import TierManager
 from src.utils import get_logger, price_decimal_fmt, utcnow
@@ -531,6 +533,24 @@ _CONFLUENCE_BONUS_MAX: float = 9.0  # 4+ levels saturate at this bonus
 _CONFLUENCE_QUERY_TOLERANCE_PCT: float = 0.30
 LEVEL_BOOK_REFRESH_SEC: float = 3600.0  # rebuild per-symbol levels at most hourly
 
+# PR-Wire: Structure-alignment bonus (PR-7 wiring).
+# When a trend-following path (TPE / DIV_CONT / CLS / PDC) fires with its
+# entry direction matching the 4h structure leg (HH/HL bull or LH/LL
+# bear), award a small soft-penalty bonus.  Counter-trend paths
+# (LSR / FAR / SR_FLIP / WHALE / FUNDING / LIQ_REVERSAL / VSB / BDS / ORB
+# / QCB / MA_CROSS) deliberately do not consume this — their thesis is
+# either counter-trend by design, internally direction-driven, or fires
+# on structural break events.  Value picked to be smaller than the
+# confluence bonus so the chartist-eye stack doesn't overweight either
+# input.
+_STRUCTURE_ALIGN_BONUS: float = 3.0
+_STRUCTURE_ALIGN_PATHS: frozenset = frozenset({
+    "TREND_PULLBACK_EMA",
+    "DIVERGENCE_CONTINUATION",
+    "CONTINUATION_LIQUIDITY_SWEEP",
+    "POST_DISPLACEMENT_CONTINUATION",
+})
+
 # PR-7C: runtime validation focus paths for concise operator summaries.
 _PR7C_TARGET_SETUPS: frozenset[str] = frozenset({
     "SR_FLIP_RETEST",
@@ -717,6 +737,17 @@ class Scanner:
         # PR-6 wires confluence_count() into the soft-penalty stack as a bonus.
         self.level_book: LevelBook = LevelBook()
         self._level_book_refresh_ts: Dict[str, float] = {}
+
+        # Volume Profile (PR-9) — POC/VAH/VAL per symbol.  Same TTL pattern
+        # as LevelBook.  POC/VAH/VAL injected into LevelBook on each
+        # refresh so confluence scoring picks them up automatically.
+        self.volume_profile_store: VolumeProfileStore = VolumeProfileStore()
+
+        # Structure Tracker (PR-7) — bull leg / bear leg / range per (symbol, tf).
+        # Used by trend-aligned paths (TPE / DIV_CONT / CLS / PDC) to award
+        # a small soft-penalty bonus when entry direction aligns with the
+        # 4h structure leg.
+        self.structure_tracker: StructureTracker = StructureTracker()
 
         # Mutable state shared with the engine / command handler
         self.paused_channels: Set[str] = set()
@@ -3267,6 +3298,9 @@ class Scanner:
         Discovery cost is < 100ms.  TTL of 1h means the budget per symbol is
         ~3600× cheaper than per-cycle refresh.  No-op when *symbol* has been
         refreshed recently or when no usable TF candles are present.
+
+        Also refreshes the Volume Profile for *symbol* and injects
+        POC/VAH/VAL into the LevelBook so confluence scoring picks them up.
         """
         now = time.time()
         last = self._level_book_refresh_ts.get(symbol)
@@ -3280,11 +3314,35 @@ class Scanner:
                 tf_inputs[tf] = cd
         if not tf_inputs:
             return
+
+        # Refresh Volume Profile from the most-granular available TF (1h
+        # preferred for resolution; falls back to 4h).  The result is then
+        # passed into LevelBook.refresh() so POC/VAH/VAL participate in
+        # clustering and confluence scoring as additional zones.
+        vp_result = None
         try:
-            self.level_book.refresh(symbol, tf_inputs)
+            vp_candles = candles_by_tf.get("1h") or candles_by_tf.get("4h")
+            if vp_candles is not None and vp_candles.get("volume") is not None:
+                vp_result = self.volume_profile_store.refresh_if_stale(
+                    symbol, vp_candles,
+                )
+        except Exception as exc:
+            log.debug("VolumeProfile refresh failed for {}: {}", symbol, exc)
+            vp_result = None
+
+        try:
+            self.level_book.refresh(symbol, tf_inputs, volume_profile=vp_result)
             self._level_book_refresh_ts[symbol] = now
         except Exception as exc:
             log.debug("LevelBook refresh failed for {}: {}", symbol, exc)
+
+        # Structure tracker on 4h.  Same TTL semantics; cheap.
+        try:
+            cd_4h = candles_by_tf.get("4h")
+            if isinstance(cd_4h, dict) and cd_4h.get("high") is not None:
+                self.structure_tracker.refresh_if_stale(symbol, "4h", cd_4h)
+        except Exception as exc:
+            log.debug("StructureTracker refresh failed for {}: {}", symbol, exc)
 
     def _populate_signal_context(self, sig: Any, volume_24h: float, ctx: ScanContext) -> None:
         sig.market_phase = ctx.market_state.value
@@ -4147,6 +4205,40 @@ class Scanner:
             log.debug(
                 "Confluence-bonus query error for {} {} (fail open): {}",
                 symbol, chan_name, _conf_exc,
+            )
+
+        # ── PR-Wire: Structure-alignment bonus ───────────────────────────
+        # When a trend-following path (TPE / DIV_CONT / CLS / PDC) fires
+        # with its entry direction matching the 4h structure leg, award a
+        # small bonus.  Counter-trend paths and break-event paths
+        # deliberately do not consume this — see _STRUCTURE_ALIGN_PATHS
+        # comment for the doctrine reasoning.
+        try:
+            _setup_class_str = str(getattr(sig, "setup_class", "") or "")
+            if _setup_class_str in _STRUCTURE_ALIGN_PATHS:
+                _struct_state = self.structure_tracker.get_state(symbol, tf="4h")
+                _aligned = self.structure_tracker.is_aligned(
+                    symbol, sig.direction.value, tf="4h",
+                )
+                if _aligned:
+                    soft_penalty -= _STRUCTURE_ALIGN_BONUS
+                    _soft_penalty_by_type["structure_align"] = (
+                        _soft_penalty_by_type.get("structure_align", 0.0)
+                        - _STRUCTURE_ALIGN_BONUS
+                    )
+                    _state_label = (
+                        _struct_state.state if _struct_state is not None else "ALIGNED"
+                    )
+                    _fired_gates.append(f"STRUCT_ALIGN:{_state_label}")
+                    log.debug(
+                        "STRUCTURE_ALIGN_BONUS {} {} -{:+.1f} ({}) total_penalty={:.1f}",
+                        symbol, chan_name, _STRUCTURE_ALIGN_BONUS,
+                        _state_label, soft_penalty,
+                    )
+        except Exception as _sa_exc:
+            log.debug(
+                "Structure-align bonus query error for {} {} (fail open): {}",
+                symbol, chan_name, _sa_exc,
             )
 
         # PR-01: accumulate scanner-level soft-gate penalties on top of any evaluator-
