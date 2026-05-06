@@ -6,13 +6,17 @@
 
 ## Current Phase
 
-**Three parallel tracks:**
+**App-era doctrine reset is in flight.** Owner direction (2026-05-06): "now we fully concentrate on app… too many signals are also lost trust on us; Pre-TP is our New strategy in industry so arrange this carefully with this we get more win rate; analyse the invalidation system, in my view it's actually protecting Signals with minimal risk… analyse all things finalise the plan."
 
-1. **Engine — data integrity layer.** This session shipped persistence (`_signal_history` survives restarts), per-evaluator API filtering, dispatch-time pre-TP stamping, broker-side close on every non-TP exit, DCA Entry-2 execution, KZ uniformity, and self-healing invalidation-status reconciliation. Auto-trade is now a B12-correct system end-to-end: paper or live mode keeps the broker in lockstep with engine state, no stranded positions on thesis kills.
+The reset reframes "more gates → fewer signals" (correct for Telegram-only era) as wrong for app-era because empty app = dead app, and Pre-TP grab + invalidation audit are now the safety net that justifies looser gates upstream. Three PRs shipped today execute the first phase of that reset:
 
-2. **Lumin app — data-honest UX.** v0.0.7 ships live data, v0.0.8 adds cosmetic + UX honesty fixes, v0.0.9 adds per-agent drill-down + closed-status sub-filters + format-helper foundation. The app now renders historical signals, real per-evaluator stats, and status-diverse closes correctly.
+1. **PR #308 — WATCHLIST tier removed entirely.** Engine no longer routes sub-paid-tier signals anywhere. Free channel is fed only by close-storytelling mirrors + content-engine. Sub-65 → FILTERED, dropped silently. B5 retired.
+2. **PR #309 — Wrong-regime blocks dropped from WHALE/VSB/BDS.** §3.4 already said these paths shouldn't be regime-gated; the code disagreed. Truth report shows ~45% of cycles are QUIET — recovers a meaningful slice for these three paths. Thesis gates still enforce structural validity in any regime.
+3. **PR #310 — QCB `volume_div` modulator tightened 0.60 → 0.20.** Compression IS volume divergence; at 0.60 the modulator was a no-op in QUIET (1.08× base after the 1.8× regime mult). 0.20 brings effective QUIET weight to ~0.36× base.
 
-3. **Held — paid-volume drought / SR_FLIP investigation.** Truth report still shows the underlying business problem (engine producing very few paid-tier signals; SR_FLIP firing all watchlist; OI-gate dominating soft-penalty bottleneck post-KZ-disable). Held per owner direction earlier this session — visible in the backfilled history now (mostly small-pct closes, no TP hits in the latest set).
+**Hard structural gates and scoring tiers are unchanged.** The reset removes redundant or doctrinally-backward gates, not the quality bar at routing.
+
+**Still pending in the master plan:** PR-4 (top-emitter softening — SR_FLIP / FAR / LSR), PR-5 (TPE softening), PR-6 (scanner gates: cross_asset hard→soft, MTF hard→soft), PR-7 (DIV_CONT / CLS / PDC / FUNDING). All deferred until PRs #308–#310 land in production and one truth-report cycle confirms direction.
 
 ---
 
@@ -24,6 +28,9 @@
 - **Risk-component scoring** calibrated for scalp R-multiples (max credit at 2.0R)
 - **Regime classifier** BB-width VOLATILE threshold at 8.0% (env-overridable)
 - **HTF mismatch policy** soft penalty (not hard block) on SR_FLIP / QCB / FAR
+- **WHALE / VSB / BDS regime gates removed** (PR #309) — these paths now fire in any regime when thesis gates pass; matches §3.4 doctrine
+- **QCB `volume_div` modulator tightened** to 0.20 (PR #310) — effective QUIET weight ~0.36× base
+- **WATCHLIST tier removed** (PR #308) — sub-65 → FILTERED, dropped silently; free channel fed only by storytelling mirrors + content-engine
 - **QUIET-block doctrine** uniform 65 paid-tier floor — no scrap-routing exempts
 - **Universal 0.80% SL floor** plus per-setup caps active
 - **Invalidation quality audit** classifying every kill as PROTECTIVE / PREMATURE / NEUTRAL post-30-min
@@ -50,8 +57,9 @@
 
 ---
 
-## This Session — PRs Shipped
+## Recent PRs
 
+### Day 1 (data-integrity layer + engine hygiene)
 | PR | Title | Status |
 |---|---|---|
 | #298 | Lumin v0.0.8 cosmetic + UX honesty fixes + ACTIVE_CONTEXT refresh | ✅ merged |
@@ -62,16 +70,31 @@
 | #303 | Disable Kill Zone gate on all SCALP-family channels | ✅ merged |
 | #304 | Backfill `_signal_history` from PerformanceTracker + InvalidationAudit | ✅ merged |
 | #305 | Correct INVALIDATED status everywhere it's persisted | ✅ merged |
+| #306 | End-of-session doc refresh (2026-05-05) | ✅ merged |
 
-End-of-session test count: **3721 passed**, 0 failures, 0 regressions.
+### Day 2 (app-era doctrine reset)
+| PR | Title | Status |
+|---|---|---|
+| #307 | Close broker + compute P&L + archive on signal expiry | ✅ merged |
+| #308 | Remove WATCHLIST tier entirely (engine + tests + telegram_bot) | 🟡 open |
+| #309 | Drop wrong-regime blocks from WHALE/VSB/BDS (per §3.4) | 🟡 open |
+| #310 | Tighten QCB volume_div modulator 0.60 → 0.20 | 🟡 open |
+
+End-of-session test count: **3792 passed**, 0 failures, 0 regressions.
 
 ---
 
 ## Open Queue
 
-### Held — investigation paused per owner direction
-- **SR_FLIP_RETEST 0% win rate, paid-volume drought.** Latest backfilled history confirms: most closes are small-pct invalidations or breakevens, **zero TP hits** visible in the recent terminal set. SR_FLIP is the dominant emitter but mostly watchlist-tier; the few that clear paid threshold underperform. The most-valuable next bite given the visible win-rate problem.
-- **OI-flip soft-penalty doctrine audit.** With KZ now uniformly disabled, OI flip is the dominant soft-penalty bottleneck — DIV_CONT filtered 100% of penalty from OI; FAR 91%; LSR 100%; SR_FLIP kept 100%. Same KZ-style question: is OI flip a 24/7-crypto-doctrine gate or inherited noise?
+### Master plan — remaining PRs (deferred until #308–#310 land + 1 truth-report cycle)
+- **PR-4: Top-emitter softening (SR_FLIP / FAR / LSR).** Convert remaining hard rejection paths to scoring-tier soft penalties where doctrine permits. SR_FLIP especially — currently top emitter but bulk filtered at sub-paid threshold; with WATCHLIST removed those are now silent drops, so the path either earns paid tier or contributes nothing.
+- **PR-5: TPE softening.** Truth report shows ~80% of TPE attempts blocked by `regime_blocked` (1.3M of 1.6M). TPE is regime-aligned by definition (trend-pullback) so the gate is structurally compatible — but the strictness needs an audit against the SOLUSDT-style "beautifully oscillating EMA pullback" cases the owner flagged.
+- **PR-6: Scanner gates conversion.** `cross_asset` hard→soft and MTF hard→soft, where the structural-impossibility condition isn't met. Both are currently hard-blocking signals the scoring tier could correctly classify.
+- **PR-7: Remaining evaluators (DIV_CONT / CLS / PDC / FUNDING).** Per-path audit applying the same THESIS-vs-FILTER classification used in PRs #309/#310.
+
+### Held — investigation paused
+- **SR_FLIP_RETEST 0% win rate, paid-volume drought.** Backfilled history confirms: most closes are small-pct invalidations or breakevens, **zero TP hits** visible in the recent terminal set. SR_FLIP was previously the dominant emitter but mostly WATCHLIST-tier; with WATCHLIST removed (PR #308) those are now silent drops. PR-4 is the next bite.
+- **OI-flip soft-penalty doctrine audit.** With KZ uniformly disabled, OI flip is the dominant soft-penalty bottleneck — DIV_CONT 100% / FAR 91% / LSR 100% / SR_FLIP 100% of penalty from OI. Same KZ-style question: 24/7-crypto-doctrine gate or inherited noise?
 
 ### Pending data
 - **TP1 ATR cap re-derivation** (1.8R / 2.5R / uncapped on SR_FLIP / FUNDING / DIV_CONT / CLS) — wait for Phase 1 invalidation audit data on TP1 hit rates per setup × ATR-bucket
