@@ -546,3 +546,165 @@ class TestPairRefreshLoopCap:
 
         seeded_in_cycle = await _run_one_cycle(engine)
         assert len(seeded_in_cycle) == 5
+
+
+# ---------------------------------------------------------------------------
+# Expiry handler — engine.cleanup_expired callback semantics
+# ---------------------------------------------------------------------------
+
+
+class TestSignalExpiryHandler:
+    """``CryptoSignalEngine._handle_signal_expiry`` is the callback the
+    SignalRouter invokes when a signal's max-hold elapses.  It must:
+      - compute realised P&L from sig.current_price
+      - flip status to EXPIRED + stamp terminal_outcome_timestamp
+      - archive into _signal_history + persist
+      - record a perf-tracker outcome with outcome_label='EXPIRED'
+      - close the broker position when auto-trade is enabled
+      - be idempotent on signals whose status is already terminal
+    """
+
+    def _make_engine_with_mocks(self):
+        """Build a CryptoSignalEngine whose perf-tracker, order-manager,
+        and history persistence are mocked so we can assert on them."""
+        from datetime import datetime, timezone
+        from unittest.mock import MagicMock, patch
+
+        from src.channels.base import Signal
+        from src.smc import Direction
+
+        with patch("src.main.TelegramBot"), \
+             patch("src.main.TelemetryCollector"), \
+             patch("src.main.RedisClient"), \
+             patch("src.main.SignalQueue"), \
+             patch("src.main.StateCache"), \
+             patch("src.main.SignalRouter"), \
+             patch("src.main.TradeMonitor"), \
+             patch("src.main.PairManager"), \
+             patch("src.main.HistoricalDataStore"), \
+             patch("src.main.PredictiveEngine"), \
+             patch("src.main.ExchangeManager"), \
+             patch("src.main.SMCDetector"), \
+             patch("src.main.MarketRegimeDetector"), \
+             patch("src.main.load_history", return_value=[]), \
+             patch("src.main.backfill_from_legacy_sources", return_value=[]), \
+             patch("src.main.save_history") as save_h:
+            from src.main import CryptoSignalEngine
+            engine = CryptoSignalEngine()
+        # Replace tracker + order_manager with simple mocks for assertion.
+        engine._performance_tracker = MagicMock()
+        engine._order_manager = MagicMock()
+        engine._order_manager.is_enabled = False
+        return engine, save_h
+
+    def _make_signal(
+        self,
+        *,
+        direction: str = "LONG",
+        entry: float = 100.0,
+        current_price: float = 102.0,
+        signal_id: str = "EXP-1",
+    ):
+        from src.channels.base import Signal
+        from src.smc import Direction
+
+        d = Direction.LONG if direction == "LONG" else Direction.SHORT
+        sig = Signal(
+            channel="360_SCALP",
+            symbol="SOLUSDT",
+            direction=d,
+            entry=entry,
+            stop_loss=entry * 0.99 if d == Direction.LONG else entry * 1.01,
+            tp1=entry * 1.01 if d == Direction.LONG else entry * 0.99,
+            tp2=entry * 1.02,
+            confidence=80.0,
+            signal_id=signal_id,
+        )
+        sig.current_price = current_price
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.quality_tier = "A"
+        sig.status = "ACTIVE"
+        return sig
+
+    def test_handler_computes_pnl_for_long_above_entry(self):
+        from datetime import datetime, timezone
+        engine, _ = self._make_engine_with_mocks()
+        sig = self._make_signal(direction="LONG", entry=100.0, current_price=102.0)
+
+        engine._handle_signal_expiry(sig, datetime.now(timezone.utc))
+
+        assert sig.status == "EXPIRED"
+        assert sig.pnl_pct == pytest.approx(2.0)
+
+    def test_handler_computes_pnl_for_short_below_entry(self):
+        from datetime import datetime, timezone
+        engine, _ = self._make_engine_with_mocks()
+        sig = self._make_signal(direction="SHORT", entry=100.0, current_price=99.5)
+
+        engine._handle_signal_expiry(sig, datetime.now(timezone.utc))
+
+        assert sig.status == "EXPIRED"
+        assert sig.pnl_pct == pytest.approx(0.5)
+
+    def test_handler_archives_to_signal_history(self):
+        from datetime import datetime, timezone
+        engine, _ = self._make_engine_with_mocks()
+        sig = self._make_signal()
+
+        engine._handle_signal_expiry(sig, datetime.now(timezone.utc))
+
+        # In-memory archive — save_history persistence is exercised
+        # separately in test_signal_history_store.py.
+        assert sig in engine._signal_history
+
+    def test_handler_stamps_terminal_outcome_timestamp(self):
+        from datetime import datetime, timezone
+        engine, _ = self._make_engine_with_mocks()
+        sig = self._make_signal()
+        now = datetime.now(timezone.utc)
+
+        engine._handle_signal_expiry(sig, now)
+
+        assert sig.terminal_outcome_timestamp == now
+
+    def test_handler_records_perf_outcome_as_expired(self):
+        from datetime import datetime, timezone
+        engine, _ = self._make_engine_with_mocks()
+        sig = self._make_signal()
+
+        engine._handle_signal_expiry(sig, datetime.now(timezone.utc))
+
+        engine._performance_tracker.record_outcome.assert_called_once()
+        kwargs = engine._performance_tracker.record_outcome.call_args.kwargs
+        assert kwargs["outcome_label"] == "EXPIRED"
+        assert kwargs["hit_tp"] == 0
+        assert kwargs["hit_sl"] is False
+        assert kwargs["signal_id"] == sig.signal_id
+        assert kwargs["pnl_pct"] == pytest.approx(2.0)
+
+    def test_handler_idempotent_on_already_terminal(self):
+        """If status is already terminal (e.g. a race with trade_monitor closed
+        the signal first), this handler must be a no-op so we don't double-
+        archive or double-record."""
+        from datetime import datetime, timezone
+        engine, save_h = self._make_engine_with_mocks()
+        save_h.reset_mock()
+        sig = self._make_signal()
+        sig.status = "SL_HIT"
+
+        engine._handle_signal_expiry(sig, datetime.now(timezone.utc))
+
+        assert sig.status == "SL_HIT"  # unchanged
+        assert sig not in engine._signal_history
+        engine._performance_tracker.record_outcome.assert_not_called()
+        save_h.assert_not_called()
+
+    def test_handler_skips_broker_close_when_auto_trade_off(self):
+        from datetime import datetime, timezone
+        engine, _ = self._make_engine_with_mocks()
+        engine._order_manager.is_enabled = False
+        sig = self._make_signal()
+
+        engine._handle_signal_expiry(sig, datetime.now(timezone.utc))
+
+        engine._order_manager.close_full.assert_not_called()
