@@ -111,6 +111,11 @@ class Bootstrap:
         engine = self._engine
         log.info("=== 360-Crypto-Eye-Scalping Engine BOOTING ===")
         engine._boot_time = time.monotonic()
+        # Wall-clock equivalent for displaying boot timestamps (e.g. in
+        # /diag's "Boot: <ISO>" line and in pre/post-deploy split logic).
+        # ``_boot_time`` alone is a process-relative counter; subtracting
+        # it from ``time.time()`` yields garbage (1970-ish dates).
+        engine._boot_wall_time = time.time()
 
         # 0a. Validate critical env vars (FINDING-011)
         validate_critical_env_vars()

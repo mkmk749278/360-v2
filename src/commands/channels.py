@@ -197,14 +197,26 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
     router = ctx.router
 
     # --- Engine boot time + uptime ---
+    # ``ctx.boot_time``      = time.monotonic() snapshot (for uptime math)
+    # ``ctx.boot_wall_time`` = time.time() snapshot (for ISO display + the
+    #                         pre/post-deploy split, since signal timestamps
+    #                         are wall-clock too).  Both are captured at
+    #                         bootstrap time so the conversion is exact.
     sections.append("--- ENGINE ---")
     boot_ts = float(getattr(ctx, "boot_time", 0.0) or 0.0)
-    if boot_ts > 0:
-        boot_iso = datetime.fromtimestamp(boot_ts, tz=timezone.utc).isoformat()
-        uptime_s = max(0.0, now - boot_ts)
+    boot_wall = float(getattr(ctx, "boot_wall_time", 0.0) or 0.0)
+    # Backward-compat: if boot_wall wasn't plumbed in (e.g. older deploy),
+    # derive it from boot_ts via the monotonic→wall-clock relationship.
+    if boot_wall <= 0 and boot_ts > 0:
+        uptime_for_derive = max(0.0, time.monotonic() - boot_ts)
+        boot_wall = now - uptime_for_derive
+    if boot_ts > 0 or boot_wall > 0:
+        uptime_s = max(0.0, time.monotonic() - boot_ts) if boot_ts > 0 else 0.0
         h = int(uptime_s // 3600)
         m = int((uptime_s % 3600) // 60)
-        sections.append(f"Boot: {boot_iso}")
+        if boot_wall > 0:
+            boot_iso = datetime.fromtimestamp(boot_wall, tz=timezone.utc).isoformat()
+            sections.append(f"Boot: {boot_iso}")
         sections.append(f"Uptime: {h}h {m}m")
     else:
         sections.append("Boot time not available (ctx.boot_time = 0)")
@@ -386,11 +398,13 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
             f"Timestamp range: {datetime.fromtimestamp(ts_min, tz=timezone.utc).isoformat()}"
             f" → {datetime.fromtimestamp(ts_max, tz=timezone.utc).isoformat()}"
         )
-        # Use boot_time as the "post-deploy" cutoff if available — anything
-        # signalled before the running build started cannot have chartist-eye
-        # flags by definition.
-        if boot_ts > 0:
-            post_deploy_count = sum(1 for t in timestamps if t >= boot_ts)
+        # Use boot wall-clock time as the "post-deploy" cutoff if available —
+        # anything signalled before the running build started cannot have
+        # chartist-eye flags by definition.  Note: signal timestamps are
+        # wall-clock (datetime), so we compare against ``boot_wall`` (also
+        # wall-clock), NOT ``boot_ts`` (monotonic).
+        if boot_wall > 0:
+            post_deploy_count = sum(1 for t in timestamps if t >= boot_wall)
             pre_deploy_count = len(timestamps) - post_deploy_count
             sections.append(
                 f"Pre-deploy: {pre_deploy_count} signals; "

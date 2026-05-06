@@ -107,6 +107,7 @@ class CommandHandler:
         boot_time: float,
         free_channel_limit: int,
         alert_subscribers: Set[str],
+        boot_wall_time: float = 0.0,
         restart_callback: Optional[Callable] = None,
         ai_insight_fn: Optional[Callable] = None,
         symbols_fn: Optional[Callable] = None,
@@ -132,6 +133,7 @@ class CommandHandler:
         self.ws_futures = ws_futures
         self._tasks = tasks
         self.boot_time = boot_time
+        self.boot_wall_time = boot_wall_time
         self.free_channel_limit = free_channel_limit
         self._alert_subscribers = alert_subscribers
         self._restart_callback = restart_callback
@@ -245,6 +247,7 @@ class CommandHandler:
             confidence_overrides=self._confidence_overrides,
             tasks=self._tasks,
             boot_time=self.boot_time,
+            boot_wall_time=getattr(self, "boot_wall_time", 0.0),
             performance_tracker=self._performance_tracker,
             circuit_breaker=self._circuit_breaker,
             gem_scanner=self._gem_scanner,
