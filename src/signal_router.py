@@ -361,15 +361,6 @@ class SignalRouter:
             for sid, sig in list(self._active_signals.items()):
                 if sig.status not in ("ACTIVE", "TP1_HIT", "TP2_HIT"):
                     continue
-                # Skip WATCHLIST-tier signals.  They are pre-confirmation
-                # watches whose TP/SL levels may not be reliable enough to
-                # display as live trade progress.
-                if getattr(sig, "signal_tier", "B") == "WATCHLIST":
-                    log.debug(
-                        "Signal pulse skipped for {} – WATCHLIST tier not eligible for live status",
-                        sig.symbol,
-                    )
-                    continue
                 last_pulse = getattr(sig, "_last_pulse_time", 0.0)
                 if now_ts - last_pulse < SIGNAL_PULSE_INTERVAL_SECONDS:
                     continue
@@ -533,13 +524,12 @@ class SignalRouter:
             log.debug("Failed to write dispatch log: {}", exc)
 
     async def _process(self, signal: Signal) -> None:
-        # WATCHLIST signals (50-64 confidence) are preview-only per doctrine:
-        # "Post to free channel only" (OWNER_BRIEF.md).  They must never enter
-        # the paid active lifecycle — no correlation lock, no cooldown, no
-        # _active_signals registration, no TradeMonitor management.
-        # WATCHLIST free-channel alerts disabled — too spammy (190 messages backlog)
-        if getattr(signal, "signal_tier", "") == "WATCHLIST" and signal.channel == "360_SCALP":
-            return  # Silently drop — do NOT send to free channel
+        # WATCHLIST tier was removed in the app-era doctrine reset; sub-65
+        # confidence signals never reach this path because the scanner drops
+        # them at the min_confidence gate.  Defensive: should anything tier
+        # a signal as WATCHLIST going forward, drop it silently here too.
+        if getattr(signal, "signal_tier", "") == "WATCHLIST":
+            return
 
         # Correlation lock – block any signal for a symbol that already has an
         # open position (regardless of direction to prevent same-dir duplicates)
@@ -952,65 +942,10 @@ class SignalRouter:
     # WATCHLIST free-channel routing (doctrine: 50-64 → free only)
     # ------------------------------------------------------------------
 
-    async def _route_watchlist_to_free(self, signal: Signal) -> None:
-        """Route a WATCHLIST-tier 360_SCALP signal to the free channel only.
-
-        WATCHLIST signals (50-64 confidence) are zone-alert previews per
-        doctrine ("Post to free channel only", OWNER_BRIEF.md).  They are
-        NOT registered in ``_active_signals`` and NOT managed by TradeMonitor.
-        """
-        if not TELEGRAM_FREE_CHANNEL_ID:
-            log.debug(
-                "WATCHLIST {} {} – no free channel configured, discarded",
-                signal.channel, signal.symbol,
-            )
-            return
-        text = self._format_watchlist_preview(signal)
-        try:
-            await self._send_telegram(TELEGRAM_FREE_CHANNEL_ID, text)
-            log.info(
-                "WATCHLIST preview → free channel: {} {} {}",
-                signal.channel, signal.symbol, signal.direction.value,
-            )
-        except Exception as exc:
-            log.warning("Failed to post WATCHLIST preview: {}", exc)
-
-    def _format_watchlist_preview(self, signal: Signal) -> str:
-        """Format a WATCHLIST zone-alert preview for the free channel.
-
-        Renders the 'setup forming / waiting for confirmation' alert that
-        shows only the zone price — no TP/SL targets — consistent with the
-        preview semantics of a WATCHLIST signal.
-        """
-        from src.telegram_bot import TelegramBot
-        from src.utils import fmt_price
-
-        dir_word = signal.direction.value
-        reason = getattr(signal, "analyst_reason", "") or ""
-        setup = getattr(signal, "setup_class", "") or ""
-        if setup and setup != "UNCLASSIFIED":
-            setup_display = setup.replace("_", " ").title()
-        else:
-            setup_display = ""
-
-        now_str = signal.timestamp.strftime("%Y-%m-%d %H:%M:%S") if signal.timestamp else ""
-
-        lines = [
-            f"🔍 WATCHLIST — {TelegramBot._escape_md(signal.symbol)}",
-            f"Zone: {TelegramBot._escape_md(dir_word)} setup forming near "
-            f"{TelegramBot._escape_md(fmt_price(signal.entry))}",
-        ]
-        reason_parts = []
-        if reason:
-            reason_parts.append(TelegramBot._escape_md(reason))
-        if setup_display:
-            reason_parts.append(f"Setup: {TelegramBot._escape_md(setup_display)}")
-        if reason_parts:
-            lines.append("Reason: " + " | ".join(reason_parts))
-        lines.append("⏳ Waiting for confirmation...")
-        if now_str:
-            lines.append(f"⏰ Time: {TelegramBot._escape_md(now_str)}")
-        return "\n".join(lines)
+    # WATCHLIST routing methods removed in the app-era doctrine reset.  The
+    # free Telegram channel keeps macro / regime-shift / signal-close
+    # storytelling but no preview signals; signals below paid threshold
+    # (65 confidence) drop cleanly at the scanner gate.
 
     async def _maybe_publish_free_signal(self, signal: Signal) -> None:
         """Publish a condensed version of the signal to the free channel.

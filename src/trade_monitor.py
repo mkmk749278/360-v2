@@ -1356,26 +1356,25 @@ class TradeMonitor:
         except Exception as exc:
             log.warning("Pre-TP active-channel post failed for %s: %s", sig.symbol, exc)
 
-        # Free-channel storytelling — paid-tier only (WATCHLIST never reaches
-        # trade_monitor anyway, but guard defensively).
-        tier = getattr(sig, "signal_tier", "")
-        if tier != "WATCHLIST":
-            try:
-                from config import TELEGRAM_FREE_CHANNEL_ID
-                if TELEGRAM_FREE_CHANNEL_ID:
-                    free_msg = (
-                        f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
-                        f"Banked +{favourable_pct:.2f}% raw "
-                        f"\\({net_pct:+.2f}% net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
-                        f"_SL moved to breakeven — the rest is free._"
-                    )
-                    await self._send(TELEGRAM_FREE_CHANNEL_ID, free_msg)
-                    log.info(
-                        "free_channel_post source=pre_tp severity=HIGH symbol=%s",
-                        sig.symbol,
-                    )
-            except Exception as exc:
-                log.warning("Pre-TP free-channel post failed for %s: %s", sig.symbol, exc)
+        # Free-channel storytelling — paid-tier only.  WATCHLIST tier was
+        # removed in the app-era doctrine reset; every signal that reaches
+        # trade_monitor is now paid (≥65 confidence).
+        try:
+            from config import TELEGRAM_FREE_CHANNEL_ID
+            if TELEGRAM_FREE_CHANNEL_ID:
+                free_msg = (
+                    f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
+                    f"Banked +{favourable_pct:.2f}% raw "
+                    f"\\({net_pct:+.2f}% net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
+                    f"_SL moved to breakeven — the rest is free._"
+                )
+                await self._send(TELEGRAM_FREE_CHANNEL_ID, free_msg)
+                log.info(
+                    "free_channel_post source=pre_tp severity=HIGH symbol=%s",
+                    sig.symbol,
+                )
+        except Exception as exc:
+            log.warning("Pre-TP free-channel post failed for %s: %s", sig.symbol, exc)
 
         log.info(
             "pre_tp_fire %s %s [%s] threshold=%.3f source=%s atr_last=%s "
@@ -1401,10 +1400,10 @@ class TradeMonitor:
     ) -> None:
         """Generate and send an AI-written signal-closed post.
 
-        Posts to the active (paid) channel and — for paid-tier closes — also
-        mirrors to the free channel as social-proof storytelling (Phase 5).
-        WATCHLIST-tier signals never reach here (they are preview-only), but
-        we filter defensively. SL hits get equal visibility per B3.
+        Posts to the active (paid) channel and mirrors to the free channel as
+        social-proof storytelling (Phase 5).  WATCHLIST tier was removed in
+        the app-era doctrine reset; every signal that reaches here is paid
+        (≥65 confidence).  SL hits get equal visibility per B3.
 
         Best-effort fire-and-forget — failures are logged but never raise.
         """
@@ -1455,11 +1454,8 @@ class TradeMonitor:
             await self._send(TELEGRAM_ACTIVE_CHANNEL_ID, text)
 
             # Phase 5 — mirror paid-tier closes to free channel for social proof.
-            # WATCHLIST previews are not tracked positions, but guard explicitly.
-            tier = getattr(sig, "signal_tier", "")
             if (
                 TELEGRAM_FREE_CHANNEL_ID
-                and tier != "WATCHLIST"
                 and TELEGRAM_FREE_CHANNEL_ID != TELEGRAM_ACTIVE_CHANNEL_ID
             ):
                 header = (

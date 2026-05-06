@@ -125,16 +125,20 @@ async def test_paid_tier_sl_close_posts_to_both_channels(mock_send, patched_clos
     assert chat_ids.count("FREE-CHAN") == 1
 
 
-async def test_watchlist_tier_skips_free_mirror(mock_send, patched_close_post):
-    """WATCHLIST signals never mirror to free channel even if they reach here."""
+async def test_paid_b_tier_mirrors_to_free_channel(mock_send, patched_close_post):
+    """Replaces the legacy "WATCHLIST skips free mirror" test.  WATCHLIST
+    tier was removed in the app-era doctrine reset; every signal that
+    closes is paid-tier and DOES mirror to the free channel for social
+    proof (Phase 5)."""
     send, sent = mock_send
     monitor = _build_monitor(send)
-    sig = _make_signal(signal_tier="WATCHLIST")
+    sig = _make_signal(signal_tier="B")
 
     await monitor._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=30450.0)
 
     chat_ids = [chat for chat, _ in sent]
-    assert chat_ids == ["PAID-CHAN"]
+    assert "PAID-CHAN" in chat_ids
+    assert "FREE-CHAN" in chat_ids
 
 
 # ---------------------------------------------------------------------------
