@@ -462,7 +462,7 @@ class TestConfidenceGateLogSurfacesChartistEye:
         assert m.group("flags") == "CONFLUENCE×2,STRUCT_ALIGN:BULL_LEG"
 
     def test_truth_report_regex_matches_legacy_format(self):
-        """Old log lines (no confluence/struct_align/flags) still parse."""
+        """Old log lines (no confluence/struct_align/flags/decay) still parse."""
         from src.runtime_truth_report import _CONFIDENCE_COMPONENT_RE
         legacy_line = (
             "confidence_gate ETHUSDT 360_SCALP [TREND_PULLBACK_EMA]: decision=filtered "
@@ -480,5 +480,57 @@ class TestConfidenceGateLogSurfacesChartistEye:
         assert m.group("sp_confluence") is None
         assert m.group("sp_struct_align") is None
         assert m.group("flags") is None
+        assert m.group("decay") is None
         # Existing fields still extracted.
         assert m.group("sp_oi") == "15.0"
+
+    def test_truth_report_regex_captures_decay_field(self):
+        """New log lines surface ``decay={signed:.1f}`` in adjustments(...)."""
+        from src.runtime_truth_report import _CONFIDENCE_COMPONENT_RE
+        new_line = (
+            "confidence_gate LINKUSDT 360_SCALP [SR_FLIP_RETEST]: decision=filtered "
+            "reason=min_confidence raw=79.6 composite=69.8 pre_soft=69.8 "
+            "final=54.8 threshold=80.0 "
+            "penalties(eval=0.0,gate=0.0,total=0.0,pair_analysis=0.0) "
+            "adjustments(feedback=+0.0,stat_filter=+0.0,regime_transition=+0.0,decay=-15.0) "
+            "components(market=20.4,execution=20.0,risk=15.2,thesis_adj=2.5) "
+            "engine(smc=25.0,regime=18.0,volume=3.0,indicators=11.0,patterns=5.0,mtf=5.3) "
+            "soft_penalties(vwap=0.0,kz=0.0,oi=0.0,spoof=0.0,vol_div=0.0,cluster=0.0,"
+            "confluence=+0.0,struct_align=+0.0) "
+            "flags=[]"
+        )
+        m = _CONFIDENCE_COMPONENT_RE.search(new_line)
+        assert m is not None
+        assert m.group("decay") == "-15.0"
+        assert m.group("sp_confluence") == "+0.0"
+
+    def test_decay_field_explains_unaccounted_drop(self):
+        """The decay value plus declared penalties should sum to composite-final."""
+        # composite=69.8, final=54.8 → drop of 15.0
+        # All declared penalties total=0.0 ; only decay=-15.0 explains the gap.
+        from src.runtime_truth_report import _CONFIDENCE_COMPONENT_RE
+        line = (
+            "confidence_gate LINKUSDT 360_SCALP [SR_FLIP_RETEST]: decision=filtered "
+            "reason=min_confidence raw=79.6 composite=69.8 pre_soft=69.8 "
+            "final=54.8 threshold=80.0 "
+            "penalties(eval=0.0,gate=0.0,total=0.0,pair_analysis=0.0) "
+            "adjustments(feedback=+0.0,stat_filter=+0.0,regime_transition=+0.0,decay=-15.0) "
+            "components(market=20.4,execution=20.0,risk=15.2,thesis_adj=2.5) "
+            "engine(smc=25.0,regime=18.0,volume=3.0,indicators=11.0,patterns=5.0,mtf=5.3) "
+            "soft_penalties(vwap=0.0,kz=0.0,oi=0.0,spoof=0.0,vol_div=0.0,cluster=0.0,"
+            "confluence=+0.0,struct_align=+0.0) flags=[]"
+        )
+        m = _CONFIDENCE_COMPONENT_RE.search(line)
+        assert m is not None
+        composite = float(m.group("composite"))
+        final = float(m.group("final"))
+        decay = float(m.group("decay"))
+        total_penalty = float(m.group("total_pen"))
+        # composite - final ≈ total_penalty + |decay|
+        accounted = total_penalty + abs(decay)
+        unaccounted = (composite - final) - accounted
+        assert abs(unaccounted) < 0.5, (
+            f"After surfacing decay, unaccounted drop should be ~0. "
+            f"Got {unaccounted:.2f} (composite={composite}, final={final}, "
+            f"penalty={total_penalty}, decay={decay})"
+        )
