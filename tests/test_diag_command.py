@@ -233,6 +233,143 @@ class TestDiagCommand:
 
 
 # ---------------------------------------------------------------------------
+# Self-diagnose enhancements: boot/uptime, threshold table, history timestamps
+# ---------------------------------------------------------------------------
+
+
+class TestDiagSelfDiagnose:
+    """The /diag report must answer:
+    - When did the running build boot?
+    - What is each channel's effective min_confidence (incl. overrides)?
+    - Are recent history signals pre- or post-deploy?
+    """
+
+    @pytest.mark.asyncio
+    async def test_engine_boot_and_uptime_section_present(self):
+        from datetime import datetime, timezone
+        boot_ts = (datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp())
+        handler = _make_handler(
+            scanner=_stub_scanner_with_chartist_eye(),
+            boot_time=boot_ts,
+        )
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        assert "--- ENGINE ---" in body
+        assert "Boot:" in body
+        assert "2026-05-06" in body
+        assert "Uptime:" in body
+
+    @pytest.mark.asyncio
+    async def test_threshold_table_lists_every_channel(self):
+        scanner = _stub_scanner_with_chartist_eye()
+        # Stub channels with config.name + config.min_confidence
+        ch_main = MagicMock()
+        ch_main.config = MagicMock(name="360_SCALP", min_confidence=65)
+        ch_main.config.name = "360_SCALP"
+        ch_main._ma_cross_last_fire_ts = {}
+        ch_fvg = MagicMock()
+        ch_fvg.config = MagicMock(name="360_SCALP_FVG", min_confidence=78)
+        ch_fvg.config.name = "360_SCALP_FVG"
+        scanner.channels = [ch_main, ch_fvg]
+        handler = _make_handler(scanner=scanner)
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        assert "EFFECTIVE THRESHOLDS PER CHANNEL" in body
+        assert "360_SCALP: 65" in body
+        assert "360_SCALP_FVG: 78" in body
+
+    @pytest.mark.asyncio
+    async def test_threshold_table_shows_override_when_set(self):
+        scanner = _stub_scanner_with_chartist_eye()
+        ch = MagicMock()
+        ch.config = MagicMock(min_confidence=65)
+        ch.config.name = "360_SCALP"
+        ch._ma_cross_last_fire_ts = {}
+        scanner.channels = [ch]
+        handler = _make_handler(
+            scanner=scanner,
+            confidence_overrides={"360_SCALP": 80},
+        )
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        # Active overrides surfaced.
+        assert "Active /confidence overrides: {'360_SCALP': 80}" in body
+        # Channel line shows override + default.
+        assert "360_SCALP: 80 (override; default 65)" in body
+
+    @pytest.mark.asyncio
+    async def test_history_timestamp_range_when_present(self):
+        from datetime import datetime, timezone
+        boot_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        history = []
+        for i, ts_offset in enumerate([-7200, -3600, -1800, 600, 1200]):
+            sig = MagicMock()
+            sig.timestamp = datetime.fromtimestamp(
+                boot_ts + ts_offset, tz=timezone.utc,
+            )
+            sig.soft_gate_flags = ""
+            history.append(sig)
+        handler = _make_handler(
+            scanner=_stub_scanner_with_chartist_eye(),
+            signal_history=history,
+            boot_time=boot_ts,
+        )
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        assert "Timestamp range:" in body
+        assert "Pre-deploy: 3 signals; post-deploy: 2 signals" in body
+
+    @pytest.mark.asyncio
+    async def test_warning_suppressed_when_only_pre_deploy_signals(self):
+        """If every history signal predates boot_ts, the ⚠ warning shouldn't
+        fire — instead an info note explains why."""
+        from datetime import datetime, timezone
+        boot_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        history = []
+        for ts_offset in (-7200, -3600, -1800, -900, -600):
+            sig = MagicMock()
+            sig.timestamp = datetime.fromtimestamp(boot_ts + ts_offset, tz=timezone.utc)
+            sig.soft_gate_flags = ""
+            history.append(sig)
+        handler = _make_handler(
+            scanner=_stub_scanner_with_chartist_eye(),
+            signal_history=history,
+            boot_time=boot_ts,
+        )
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        assert "NO CONFLUENCE bonuses across" not in body
+        assert "All recent signals predate the running build" in body
+
+    @pytest.mark.asyncio
+    async def test_warning_fires_when_post_deploy_signals_present_and_no_flags(self):
+        from datetime import datetime, timezone
+        boot_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        # 10 post-deploy signals, all with no chartist-eye flags
+        history = []
+        for i in range(10):
+            sig = MagicMock()
+            sig.timestamp = datetime.fromtimestamp(boot_ts + 60 * (i + 1), tz=timezone.utc)
+            sig.soft_gate_flags = "VWAP,OI"
+            history.append(sig)
+        handler = _make_handler(
+            scanner=_stub_scanner_with_chartist_eye(),
+            signal_history=history,
+            boot_time=boot_ts,
+        )
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+            await handler._handle_command("/diag", ADMIN_CHAT_ID)
+        body = handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+        assert "NO CONFLUENCE bonuses across 10 post-deploy signals" in body
+        assert "NO STRUCT_ALIGN bonuses across 10 post-deploy signals" in body
+
+
+# ---------------------------------------------------------------------------
 # TelegramBot.send_document
 # ---------------------------------------------------------------------------
 
@@ -325,7 +462,7 @@ class TestConfidenceGateLogSurfacesChartistEye:
         assert m.group("flags") == "CONFLUENCE×2,STRUCT_ALIGN:BULL_LEG"
 
     def test_truth_report_regex_matches_legacy_format(self):
-        """Old log lines (no confluence/struct_align/flags) still parse."""
+        """Old log lines (no confluence/struct_align/flags/decay) still parse."""
         from src.runtime_truth_report import _CONFIDENCE_COMPONENT_RE
         legacy_line = (
             "confidence_gate ETHUSDT 360_SCALP [TREND_PULLBACK_EMA]: decision=filtered "
@@ -343,5 +480,57 @@ class TestConfidenceGateLogSurfacesChartistEye:
         assert m.group("sp_confluence") is None
         assert m.group("sp_struct_align") is None
         assert m.group("flags") is None
+        assert m.group("decay") is None
         # Existing fields still extracted.
         assert m.group("sp_oi") == "15.0"
+
+    def test_truth_report_regex_captures_decay_field(self):
+        """New log lines surface ``decay={signed:.1f}`` in adjustments(...)."""
+        from src.runtime_truth_report import _CONFIDENCE_COMPONENT_RE
+        new_line = (
+            "confidence_gate LINKUSDT 360_SCALP [SR_FLIP_RETEST]: decision=filtered "
+            "reason=min_confidence raw=79.6 composite=69.8 pre_soft=69.8 "
+            "final=54.8 threshold=80.0 "
+            "penalties(eval=0.0,gate=0.0,total=0.0,pair_analysis=0.0) "
+            "adjustments(feedback=+0.0,stat_filter=+0.0,regime_transition=+0.0,decay=-15.0) "
+            "components(market=20.4,execution=20.0,risk=15.2,thesis_adj=2.5) "
+            "engine(smc=25.0,regime=18.0,volume=3.0,indicators=11.0,patterns=5.0,mtf=5.3) "
+            "soft_penalties(vwap=0.0,kz=0.0,oi=0.0,spoof=0.0,vol_div=0.0,cluster=0.0,"
+            "confluence=+0.0,struct_align=+0.0) "
+            "flags=[]"
+        )
+        m = _CONFIDENCE_COMPONENT_RE.search(new_line)
+        assert m is not None
+        assert m.group("decay") == "-15.0"
+        assert m.group("sp_confluence") == "+0.0"
+
+    def test_decay_field_explains_unaccounted_drop(self):
+        """The decay value plus declared penalties should sum to composite-final."""
+        # composite=69.8, final=54.8 → drop of 15.0
+        # All declared penalties total=0.0 ; only decay=-15.0 explains the gap.
+        from src.runtime_truth_report import _CONFIDENCE_COMPONENT_RE
+        line = (
+            "confidence_gate LINKUSDT 360_SCALP [SR_FLIP_RETEST]: decision=filtered "
+            "reason=min_confidence raw=79.6 composite=69.8 pre_soft=69.8 "
+            "final=54.8 threshold=80.0 "
+            "penalties(eval=0.0,gate=0.0,total=0.0,pair_analysis=0.0) "
+            "adjustments(feedback=+0.0,stat_filter=+0.0,regime_transition=+0.0,decay=-15.0) "
+            "components(market=20.4,execution=20.0,risk=15.2,thesis_adj=2.5) "
+            "engine(smc=25.0,regime=18.0,volume=3.0,indicators=11.0,patterns=5.0,mtf=5.3) "
+            "soft_penalties(vwap=0.0,kz=0.0,oi=0.0,spoof=0.0,vol_div=0.0,cluster=0.0,"
+            "confluence=+0.0,struct_align=+0.0) flags=[]"
+        )
+        m = _CONFIDENCE_COMPONENT_RE.search(line)
+        assert m is not None
+        composite = float(m.group("composite"))
+        final = float(m.group("final"))
+        decay = float(m.group("decay"))
+        total_penalty = float(m.group("total_pen"))
+        # composite - final ≈ total_penalty + |decay|
+        accounted = total_penalty + abs(decay)
+        unaccounted = (composite - final) - accounted
+        assert abs(unaccounted) < 0.5, (
+            f"After surfacing decay, unaccounted drop should be ~0. "
+            f"Got {unaccounted:.2f} (composite={composite}, final={final}, "
+            f"penalty={total_penalty}, decay={decay})"
+        )

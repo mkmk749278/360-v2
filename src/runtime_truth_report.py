@@ -179,7 +179,12 @@ _CONFIDENCE_COMPONENT_RE = re.compile(
     r"penalties\(eval=(?P<eval_pen>[-\d.]+),gate=(?P<gate_pen>[-\d.]+),"
     r"total=(?P<total_pen>[-\d.]+),pair_analysis=(?P<pair_pen>[-\d.]+)\)\s+"
     r"adjustments\(feedback=(?P<feedback>[-+\d.]+),stat_filter=(?P<stat_filter>[-+\d.]+),"
-    r"regime_transition=(?P<regime_trans>[-+\d.]+)\)\s+"
+    r"regime_transition=(?P<regime_trans>[-+\d.]+)"
+    # Optional ``,decay=…`` (added 2026-05-06 to surface confidence_decay
+    # in INFO logs — explains the previously-unaccounted composite→final
+    # drop).  Wrapped in ``(?:..)?`` for backward compat.
+    r"(?:,decay=(?P<decay>[-+\d.]+))?"
+    r"\)\s+"
     r"components\(market=(?P<market>[-\d.]+),execution=(?P<execution>[-\d.]+),"
     r"risk=(?P<risk>[-\d.]+),thesis_adj=(?P<thesis_adj>[-\d.]+)\)"
     # Optional engine breakdown — present after the VSB diagnosis instrumentation.

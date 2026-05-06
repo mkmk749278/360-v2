@@ -4042,6 +4042,11 @@ class Scanner:
         _stat_filter_delta: float = 0.0
         _pair_analysis_penalty: float = 0.0
         _regime_transition_boost: float = 0.0
+        # Decay applied by ``apply_confidence_decay`` later — captured here
+        # so the confidence_gate INFO log can surface a ``decay={:+.1f}``
+        # term.  Negative-or-zero (decay never boosts).  Initialised early
+        # so early-reject log paths (MTF gate, etc.) still have a safe value.
+        _decay_delta: float = 0.0
         sig.setup_class = setup.setup_class.value
         # PR-01: preserve evaluator-authored analyst_reason; only apply the generic
         # scored thesis when the evaluator did not set a richer path-specific reason.
@@ -4183,6 +4188,12 @@ class Scanner:
 
         # Apply adaptive confidence decay based on signal freshness.
         # apply_confidence_decay clamps the final value to [0, 100].
+        # We capture the delta into the outer-scope ``_decay_delta`` so the
+        # confidence_gate INFO log can surface a ``decay={:+.1f}`` term —
+        # without this the composite→final drop has been invisible in
+        # telemetry (the bug surfaced 2026-05-06 in production logs where
+        # ~15-point drops appeared with no per-type explanation).
+        _confidence_pre_decay = float(sig.confidence)
         sig.confidence = apply_confidence_decay(
             confidence=sig.confidence,
             signal_generated_at=t0_signal,
@@ -4190,6 +4201,7 @@ class Scanner:
             channel=chan_name,
         )
         sig.confidence = self._clamp_confidence(sig.confidence)
+        _decay_delta = float(sig.confidence) - _confidence_pre_decay  # ≤ 0
         sig.post_ai_confidence = sig.confidence
 
         # ── PR-6: Multi-TF Level Book Confluence Bonus ────────────────────
@@ -4635,7 +4647,8 @@ class Scanner:
                 "confidence_gate {} {} [{}]: decision={} reason={} raw={:.1f} "
                 "composite={:.1f} pre_soft={:.1f} final={:.1f} threshold={:.1f} "
                 "penalties(eval={:.1f},gate={:.1f},total={:.1f},pair_analysis={:.1f}) "
-                "adjustments(feedback={:+.1f},stat_filter={:+.1f},regime_transition={:+.1f}) "
+                "adjustments(feedback={:+.1f},stat_filter={:+.1f},regime_transition={:+.1f},"
+                "decay={:+.1f}) "
                 "components(market={:.1f},execution={:.1f},risk={:.1f},thesis_adj={:.1f}) "
                 "engine(smc={:.1f},regime={:.1f},volume={:.1f},indicators={:.1f},"
                 "patterns={:.1f},mtf={:.1f}) "
@@ -4659,6 +4672,7 @@ class Scanner:
                 _feedback_adjustment,
                 _stat_filter_delta,
                 _regime_transition_boost,
+                _decay_delta,
                 float(sig.component_scores.get("market", 0.0)),
                 float(sig.component_scores.get("execution", 0.0)),
                 float(sig.component_scores.get("risk", 0.0)),
