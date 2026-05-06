@@ -251,7 +251,11 @@ class TestPathAwarePenaltyModulation:
         assert _PENALTY_MODULATION_BY_SETUP["POST_DISPLACEMENT_CONTINUATION"]["volume_div"] == pytest.approx(0.65)
         assert _PENALTY_MODULATION_BY_SETUP["POST_DISPLACEMENT_CONTINUATION"]["vwap"] == pytest.approx(0.80)
         assert _PENALTY_MODULATION_BY_SETUP["CONTINUATION_LIQUIDITY_SWEEP"]["volume_div"] == pytest.approx(0.75)
-        assert _PENALTY_MODULATION_BY_SETUP["QUIET_COMPRESSION_BREAK"]["volume_div"] == pytest.approx(0.60)
+        # QCB tightened from 0.60 → 0.20 (app-era doctrine reset).
+        # Compression IS volume divergence — at 0.60 the effective QUIET-regime
+        # weight (1.8× mult) was ~1.08× base, i.e. essentially uncrushed.
+        # 0.20 brings effective QUIET weight to ~0.36× base.
+        assert _PENALTY_MODULATION_BY_SETUP["QUIET_COMPRESSION_BREAK"]["volume_div"] == pytest.approx(0.20)
 
 
 # ---------------------------------------------------------------------------

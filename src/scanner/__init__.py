@@ -480,8 +480,13 @@ _PENALTY_MODULATION_BY_SETUP: Dict[str, Dict[str, float]] = {
     # QCB thesis = primary-TF compression breakout volume during a QUIET window
     # (higher-TF volume declining). That's the exact pattern volume_div is
     # designed to flag as manipulation, so the gate is structurally backward
-    # for this path. Modulate the base before the QUIET 1.8× regime mult.
-    "QUIET_COMPRESSION_BREAK": {"volume_div": 0.60},
+    # for this path. Compression IS volume divergence — penalising it punishes
+    # the setup for matching its own thesis.  At 0.60 the effective weight in
+    # QUIET (1.8× regime mult) is ~1.08× base, i.e. essentially unchanged.
+    # 0.20 brings effective QUIET weight to ~0.36× base, which preserves a
+    # small contributor (so genuine outlier divergence still costs something)
+    # while removing the structural penalty.
+    "QUIET_COMPRESSION_BREAK": {"volume_div": 0.20},
 }
 _PENALTY_MODULATION_MIN_SCALE: float = 0.1
 _PENALTY_MODULATION_MAX_SCALE: float = 1.0
