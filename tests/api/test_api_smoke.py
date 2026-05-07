@@ -417,16 +417,21 @@ def test_auto_mode_post_invalid_payload_returns_422(
 # ---------------------------------------------------------------------------
 
 
-def test_agents_returns_14_evaluators(client: TestClient) -> None:
+def test_agents_returns_15_evaluators(client: TestClient) -> None:
+    """API surface includes one entry per evaluator.  PR #318 added the
+    15th evaluator (MA_CROSS_TREND_SHIFT)."""
     r = client.get("/api/agents")
     assert r.status_code == 200
     body = r.json()
-    assert body["total"] == 14
+    assert body["total"] == 15
     by_setup = {a["setup_class"]: a for a in body["items"]}
     assert "TREND_PULLBACK_EMA" in by_setup
     assert by_setup["TREND_PULLBACK_EMA"]["display_name"] == "The Pullback Sniper"
     assert by_setup["TREND_PULLBACK_EMA"]["attempts"] == 5
     assert by_setup["TREND_PULLBACK_EMA"]["generated"] == 1
+    # MA_CROSS_TREND_SHIFT (PR #318) must be present + labelled.
+    assert "MA_CROSS_TREND_SHIFT" in by_setup
+    assert by_setup["MA_CROSS_TREND_SHIFT"]["display_name"] == "The Trend Shifter"
 
 
 def test_agents_lifecycle_counts_tp_hit_in_window(client: TestClient) -> None:
