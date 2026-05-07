@@ -247,10 +247,17 @@ class TestDiagSelfDiagnose:
     @pytest.mark.asyncio
     async def test_engine_boot_and_uptime_section_present(self):
         from datetime import datetime, timezone
-        boot_ts = (datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp())
+        # boot_time is monotonic-style (small process counter);
+        # boot_wall_time is the wall-clock equivalent.  /diag's ENGINE
+        # section uses boot_wall_time for ISO display, boot_time for uptime.
+        boot_wall_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        # In pytest processes ``time.monotonic()`` may be very small, so use
+        # a tiny positive value as the monotonic reference — that just yields
+        # uptime ≈ current monotonic, which is fine for "Uptime:" assertion.
         handler = _make_handler(
             scanner=_stub_scanner_with_chartist_eye(),
-            boot_time=boot_ts,
+            boot_time=0.001,
+            boot_wall_time=boot_wall_ts,
         )
         with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
             await handler._handle_command("/diag", ADMIN_CHAT_ID)
@@ -303,19 +310,20 @@ class TestDiagSelfDiagnose:
     @pytest.mark.asyncio
     async def test_history_timestamp_range_when_present(self):
         from datetime import datetime, timezone
-        boot_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        boot_wall_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
         history = []
-        for i, ts_offset in enumerate([-7200, -3600, -1800, 600, 1200]):
+        for ts_offset in (-7200, -3600, -1800, 600, 1200):
             sig = MagicMock()
             sig.timestamp = datetime.fromtimestamp(
-                boot_ts + ts_offset, tz=timezone.utc,
+                boot_wall_ts + ts_offset, tz=timezone.utc,
             )
             sig.soft_gate_flags = ""
             history.append(sig)
         handler = _make_handler(
             scanner=_stub_scanner_with_chartist_eye(),
             signal_history=history,
-            boot_time=boot_ts,
+            boot_time=0.001,  # any positive monotonic mark
+            boot_wall_time=boot_wall_ts,
         )
         with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
             await handler._handle_command("/diag", ADMIN_CHAT_ID)
@@ -325,20 +333,23 @@ class TestDiagSelfDiagnose:
 
     @pytest.mark.asyncio
     async def test_warning_suppressed_when_only_pre_deploy_signals(self):
-        """If every history signal predates boot_ts, the ⚠ warning shouldn't
-        fire — instead an info note explains why."""
+        """If every history signal predates boot_wall_time, the ⚠ warning
+        shouldn't fire — instead an info note explains why."""
         from datetime import datetime, timezone
-        boot_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        boot_wall_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
         history = []
         for ts_offset in (-7200, -3600, -1800, -900, -600):
             sig = MagicMock()
-            sig.timestamp = datetime.fromtimestamp(boot_ts + ts_offset, tz=timezone.utc)
+            sig.timestamp = datetime.fromtimestamp(
+                boot_wall_ts + ts_offset, tz=timezone.utc,
+            )
             sig.soft_gate_flags = ""
             history.append(sig)
         handler = _make_handler(
             scanner=_stub_scanner_with_chartist_eye(),
             signal_history=history,
-            boot_time=boot_ts,
+            boot_time=0.001,
+            boot_wall_time=boot_wall_ts,
         )
         with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
             await handler._handle_command("/diag", ADMIN_CHAT_ID)
@@ -349,18 +360,21 @@ class TestDiagSelfDiagnose:
     @pytest.mark.asyncio
     async def test_warning_fires_when_post_deploy_signals_present_and_no_flags(self):
         from datetime import datetime, timezone
-        boot_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
+        boot_wall_ts = datetime(2026, 5, 6, 10, 0, 0, tzinfo=timezone.utc).timestamp()
         # 10 post-deploy signals, all with no chartist-eye flags
         history = []
         for i in range(10):
             sig = MagicMock()
-            sig.timestamp = datetime.fromtimestamp(boot_ts + 60 * (i + 1), tz=timezone.utc)
+            sig.timestamp = datetime.fromtimestamp(
+                boot_wall_ts + 60 * (i + 1), tz=timezone.utc,
+            )
             sig.soft_gate_flags = "VWAP,OI"
             history.append(sig)
         handler = _make_handler(
             scanner=_stub_scanner_with_chartist_eye(),
             signal_history=history,
-            boot_time=boot_ts,
+            boot_time=0.001,
+            boot_wall_time=boot_wall_ts,
         )
         with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
             await handler._handle_command("/diag", ADMIN_CHAT_ID)

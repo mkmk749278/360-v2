@@ -63,8 +63,9 @@ class CommandContext:
     paused_channels: Set[str]
     confidence_overrides: Dict[str, float]
     tasks: List[asyncio.Task]
-    boot_time: float
+    boot_time: float                    # time.monotonic() reference for uptime
     # Optional components
+    boot_wall_time: float = 0.0         # time.time() snapshot at boot — for ISO display
     performance_tracker: Optional[Any] = None
     circuit_breaker: Optional[Any] = None
     gem_scanner: Optional[Any] = None

@@ -383,7 +383,8 @@ class CryptoSignalEngine:
                 save_history(self._signal_history)
         except Exception as exc:
             log.warning(f"signal_history TP reconciliation failed: {exc}")
-        self._boot_time: float = 0.0
+        self._boot_time: float = 0.0          # time.monotonic() — for uptime
+        self._boot_wall_time: float = 0.0     # time.time()      — for ISO display
         self._free_channel_limit: int = 2  # max free signals published per day
         self._alert_subscribers: Set[str] = set()  # admin IDs subscribed to alerts
 
@@ -464,6 +465,7 @@ class CryptoSignalEngine:
             ws_futures=None,
             tasks=self._tasks,
             boot_time=self._boot_time,
+            boot_wall_time=self._boot_wall_time,
             free_channel_limit=self._free_channel_limit,
             alert_subscribers=self._alert_subscribers,
             restart_callback=self._restart_tasks,
@@ -863,8 +865,11 @@ class CryptoSignalEngine:
                     chan_name, chan_name,
                 )
         await self._bootstrap.boot()
-        # Sync boot_time to command handler after boot sets it
+        # Sync boot_time to command handler after boot sets it.
+        # ``_boot_time`` is monotonic (for uptime); ``_boot_wall_time`` is
+        # wall-clock (for ISO display).  Both are used by /diag.
         self._command_handler.boot_time = self._boot_time
+        self._command_handler.boot_wall_time = self._boot_wall_time
         # Sync WS managers to command handler after boot starts them
         self._command_handler.ws_spot = self._ws_spot
         self._command_handler.ws_futures = self._ws_futures
