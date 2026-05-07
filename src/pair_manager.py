@@ -55,6 +55,30 @@ _STABLECOIN_BLACKLIST: frozenset = frozenset({
     "FRAXUSDT", "LUSDUSDT", "SUSDUSDT", "CUSDUSDT",
 })
 
+# Commodity / non-crypto perpetual pairs.  Binance lists synthetic
+# tokenised gold, silver, oil, equity-index and FX perpetuals that share
+# our /USDT margin pool but trade on traditional-market dynamics — gold
+# 24/5 with London/NY session liquidity, FX driven by macro releases,
+# equity indices following stock-market hours.  Our scoring + chartist-
+# eye stack assumes 24/7 crypto microstructure; these pairs systematically
+# mis-score and produce sub-quality signals.  Excluded from every fetch
+# path so they never enter the scanning universe regardless of volume.
+_NON_CRYPTO_BLACKLIST: frozenset = frozenset({
+    # Tokenised precious metals
+    "XAUUSDT", "XAGUSDT", "PAXGUSDT",
+    # Tokenised oil / commodities
+    "WTIUSDT", "BRENTUSDT", "USOILUSDT",
+    # Tokenised FX (carry traditional-market dynamics)
+    "EURUSDT", "GBPUSDT", "JPYUSDT", "AUDUSDT", "CHFUSDT",
+    # Tokenised equity indices / stocks
+    "SPXUSDT", "NDXUSDT", "DJIAUSDT", "TSLAUSDT", "AAPLUSDT",
+    "GOOGLUSDT", "MSFTUSDT", "AMZNUSDT", "NVDAUSDT", "METAUSDT",
+})
+
+# Combined blacklist used by every fetch path.  Easier to reason about
+# one set than to remember to extend two filters at every call site.
+_PAIR_BLACKLIST: frozenset = _STABLECOIN_BLACKLIST | _NON_CRYPTO_BLACKLIST
+
 
 def classify_pair_tier(symbol: str, volume_24h_usd: float = 0.0) -> PairProfile:
     """Return the PairProfile for a given symbol.
@@ -205,7 +229,7 @@ class PairManager:
             usdt_pairs = [
                 t for t in data
                 if t.get("symbol", "").endswith("USDT")
-                and t.get("symbol", "") not in _STABLECOIN_BLACKLIST
+                and t.get("symbol", "") not in _PAIR_BLACKLIST
                 and float(t.get("quoteVolume", 0)) > 0
             ]
             usdt_pairs.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
@@ -235,7 +259,7 @@ class PairManager:
             usdt_pairs = [
                 t for t in data
                 if t.get("symbol", "").endswith("USDT")
-                and t.get("symbol", "") not in _STABLECOIN_BLACKLIST
+                and t.get("symbol", "") not in _PAIR_BLACKLIST
                 and float(t.get("quoteVolume", 0)) > 0
             ]
             usdt_pairs.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
@@ -271,7 +295,7 @@ class PairManager:
             usdt_pairs = [
                 t for t in data
                 if t.get("symbol", "").endswith("USDT")
-                and t.get("symbol", "") not in _STABLECOIN_BLACKLIST
+                and t.get("symbol", "") not in _PAIR_BLACKLIST
                 and float(t.get("quoteVolume", 0)) > 0
             ]
             usdt_pairs.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
@@ -305,7 +329,7 @@ class PairManager:
             usdt_pairs = [
                 t for t in data
                 if t.get("symbol", "").endswith("USDT")
-                and t.get("symbol", "") not in _STABLECOIN_BLACKLIST
+                and t.get("symbol", "") not in _PAIR_BLACKLIST
                 and float(t.get("quoteVolume", 0)) > 0
             ]
             usdt_pairs.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
