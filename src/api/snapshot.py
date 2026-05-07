@@ -22,6 +22,7 @@ from .schemas import (
     PositionDetail,
     PulseSnapshot,
     SignalDetail,
+    TickerItem,
 )
 
 
@@ -105,13 +106,17 @@ def build_pulse(engine: Any) -> PulseSnapshot:
         100.0 * today_pnl_usd / starting_equity if starting_equity > 0 else 0.0
     )
 
-    # Daily-loss budget: pull from RiskManager config.  When mode is off,
-    # there's no risk manager — surface zeros and let the app show "—".
+    # Daily-loss budget: pull from RiskManager config.
+    #
+    # ``RISK_DAILY_LOSS_LIMIT_PCT`` is defined as a NEGATIVE percent (e.g.
+    # -3.0 for a 3% kill threshold), so the previous ``> 0`` guard always
+    # zeroed the budget — owner reported "loss budget zero zero" on Pulse.
+    # ``abs()`` so subscribers see the positive $-amount of risk allowed.
     from config import RISK_DAILY_LOSS_LIMIT_PCT, RISK_STARTING_EQUITY_USD
 
     budget_usd = (
-        (RISK_DAILY_LOSS_LIMIT_PCT / 100.0) * RISK_STARTING_EQUITY_USD
-        if RISK_DAILY_LOSS_LIMIT_PCT > 0
+        abs(RISK_DAILY_LOSS_LIMIT_PCT) / 100.0 * RISK_STARTING_EQUITY_USD
+        if RISK_DAILY_LOSS_LIMIT_PCT != 0 and RISK_STARTING_EQUITY_USD > 0
         else 0.0
     )
     used_usd = abs(min(today_pnl_usd, 0.0))
@@ -158,6 +163,87 @@ def build_pulse(engine: Any) -> PulseSnapshot:
         uptime_seconds=uptime_seconds,
         scanning_pairs=scanning_pairs,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tickers — live prices for the Pulse top-pair strip.
+# ---------------------------------------------------------------------------
+
+
+# Top pairs by trading volume / brand recognition.  Hard-coded so the strip
+# stays stable as PairManager promotes/demotes the universe; subscribers
+# expect to see BTC/ETH first.
+_PULSE_TICKER_SYMBOLS: tuple[str, ...] = (
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT",
+    "DOGEUSDT",
+)
+
+
+def _last_close(store: Any, symbol: str, interval: str = "1m") -> Optional[float]:
+    """Best-effort last-close fetch off the historical-data store."""
+    if store is None:
+        return None
+    try:
+        candles = store.get_candles(symbol, interval)
+    except Exception:
+        return None
+    if not candles:
+        return None
+    closes = candles.get("close")
+    if closes is None or len(closes) == 0:
+        return None
+    last = float(closes[-1])
+    return last if last > 0 else None
+
+
+def _change_pct_24h(store: Any, symbol: str) -> float:
+    """24h % change from 1h candles (~24 candles back vs latest).
+
+    Falls back to 0.0 if the store doesn't have enough history.  Best-effort
+    — a missing change pct should never break the ticker strip.
+    """
+    if store is None:
+        return 0.0
+    try:
+        candles = store.get_candles(symbol, "1h")
+    except Exception:
+        return 0.0
+    if not candles:
+        return 0.0
+    closes = candles.get("close")
+    if closes is None or len(closes) < 2:
+        return 0.0
+    last = float(closes[-1])
+    # Use the 24-bars-ago close when available, else the oldest close in window.
+    idx = max(0, len(closes) - 24)
+    ref = float(closes[idx])
+    if ref <= 0 or last <= 0:
+        return 0.0
+    return (last - ref) / ref * 100.0
+
+
+def build_tickers(engine: Any) -> List[TickerItem]:
+    """Live prices + 24h % change for the Pulse top-pair strip."""
+    store = getattr(engine, "data_store", None) or getattr(engine, "_data_store", None)
+    items: List[TickerItem] = []
+    for sym in _PULSE_TICKER_SYMBOLS:
+        price = _last_close(store, sym)
+        if price is None:
+            # Skip pairs with no seeded data — better to show a shorter list
+            # than mislead with a 0.0 placeholder.
+            continue
+        items.append(
+            TickerItem(
+                symbol=sym,
+                price=price,
+                change_pct_24h=_change_pct_24h(store, sym),
+            )
+        )
+    return items
 
 
 # ---------------------------------------------------------------------------

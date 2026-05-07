@@ -205,3 +205,19 @@ class HealthResponse(BaseModel):
     ok: bool = True
     uptime_seconds: float
     version: str = "0.0.1"
+
+
+# ---------------------------------------------------------------------------
+# Tickers — live prices for the Pulse top-pair strip in the app.
+# ---------------------------------------------------------------------------
+
+
+class TickerItem(BaseModel):
+    symbol: str
+    price: float
+    change_pct_24h: float = 0.0
+
+
+class TickersResponse(BaseModel):
+    items: List[TickerItem]
+    total: int

@@ -49,6 +49,7 @@ from .schemas import (
     PulseSnapshot,
     SignalDetail,
     SignalsResponse,
+    TickersResponse,
 )
 from .snapshot import (
     build_activity,
@@ -57,6 +58,7 @@ from .snapshot import (
     build_positions,
     build_pulse,
     build_signals,
+    build_tickers,
 )
 
 log = get_logger("api.server")
@@ -221,6 +223,16 @@ def build_app(
     )
     async def pulse() -> PulseSnapshot:
         return build_pulse(engine)
+
+    @app.get(
+        "/api/pulse/tickers",
+        response_model=TickersResponse,
+        tags=["pulse"],
+        dependencies=[Depends(auth)],
+    )
+    async def pulse_tickers() -> TickersResponse:
+        items = build_tickers(engine)
+        return TickersResponse(items=items, total=len(items))
 
     # ---- Signals ----
 

@@ -103,9 +103,29 @@ class ScalpChannel:
         }
 
 
+class _StubDataStore:
+    """Minimal stub of HistoricalDataStore — covers ``get_candles`` only."""
+
+    def __init__(self) -> None:
+        # 1m closes for the live-price ticker; 1h closes for the 24h % change.
+        # Just enough history to verify the change-pct math: ref vs latest.
+        self._buckets: Dict[Tuple[str, str], Dict[str, List[float]]] = {
+            ("BTCUSDT", "1m"): {"close": [78000.0] * 5 + [78240.0]},
+            ("BTCUSDT", "1h"): {"close": [76800.0] * 24 + [78240.0]},
+            ("ETHUSDT", "1m"): {"close": [2329.0]},
+            ("ETHUSDT", "1h"): {"close": [2300.0] * 24 + [2329.0]},
+            ("SOLUSDT", "1m"): {"close": [148.0]},
+            ("SOLUSDT", "1h"): {"close": [150.0] * 24 + [148.0]},
+        }
+
+    def get_candles(self, symbol: str, interval: str):
+        return self._buckets.get((symbol, interval))
+
+
 class _StubEngine:
     def __init__(self) -> None:
         now = datetime.now(timezone.utc)
+        self.data_store = _StubDataStore()
         active_sig = _StubSignal(
             signal_id="sig-001",
             symbol="ETHUSDT",
@@ -241,6 +261,25 @@ def test_pulse_returns_engine_snapshot(client: TestClient) -> None:
     assert body["open_positions"] == 1
     assert body["scanning_pairs"] == 75
     assert body["today_pnl_usd"] == pytest.approx(12.84)
+
+
+def test_pulse_tickers_returns_top_pairs(client: TestClient) -> None:
+    """Wave 2: live-price strip for the Pulse top-pair ticker.
+
+    The stub data-store only seeds BTC / ETH / SOL — the build_tickers
+    helper must skip the rest of ``_PULSE_TICKER_SYMBOLS`` rather than
+    return zeroed placeholders that would mislead subscribers.
+    """
+    r = client.get("/api/pulse/tickers")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == len(body["items"])
+    symbols = [item["symbol"] for item in body["items"]]
+    assert symbols == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    btc = next(i for i in body["items"] if i["symbol"] == "BTCUSDT")
+    assert btc["price"] == pytest.approx(78240.0)
+    # 24h change: (78240 - 76800) / 76800 * 100 ≈ +1.875%
+    assert btc["change_pct_24h"] == pytest.approx(1.875, rel=1e-3)
 
 
 # ---------------------------------------------------------------------------
