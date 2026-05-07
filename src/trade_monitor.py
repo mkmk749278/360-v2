@@ -653,10 +653,30 @@ class TradeMonitor:
                 sig.momentum_invalidation_count = 0
                 return None
 
-        # 3. Momentum loss – threshold is per-channel since different timeframes have
-        # different noise characteristics (TAPE 1m candles have rapid oscillation).
-        # For micro-cap tokens (entry price < 0.001), scale threshold by 0.1 to
-        # avoid false invalidations on tiny absolute price moves (e.g. BONKUSDT).
+        # 3. Momentum loss — direction-aware (2026-05-07 fix).
+        #
+        # Previously this was ``abs(momentum) < threshold`` which killed any
+        # signal during normal consolidation (price meandering near zero
+        # momentum is NOT a thesis failure for a continuation setup —
+        # it's just the market resting before the next leg).
+        #
+        # Owner-flagged 2026-05-07 case:
+        #   SOLUSDT CONTINUATION_LIQUIDITY_SWEEP LONG @ 88.57 — invalidated
+        #   10 min after dispatch with ``|momentum|=0.090`` while price
+        #   was effectively flat at 88.58 (+0.01%).  Within the same hour
+        #   price recovered above entry and would have hit TP1.
+        #
+        # Direction-aware check:
+        #   LONG  invalidates only when momentum is significantly NEGATIVE
+        #         (price actively falling against the trade).
+        #   SHORT invalidates only when momentum is significantly POSITIVE
+        #         (price actively rising against the trade).
+        #   Near-zero momentum is consolidation, not failure — the trailing
+        #   stop / SL handles those exits.
+        #
+        # Threshold per-channel; per-channel for TAPE 1m noise reasons.
+        # ATR-adaptive scaling unchanged.  Micro-cap (entry < 0.001) scaling
+        # unchanged.  Consecutive-readings requirement unchanged.
         mom_threshold = INVALIDATION_MOMENTUM_THRESHOLD.get(sig.channel, 0.15)
         # ATR-adaptive threshold: scale by ATR/entry_price so volatile pairs
         # (ETH, SOL) get wider thresholds and stable pairs (BTC) get tighter ones.
@@ -670,18 +690,33 @@ class TradeMonitor:
         # The current_price check guards against a zero fallback.
         if 0 < entry_price < 0.001:
             mom_threshold *= 0.1
-        if momentum is not None and abs(momentum) < mom_threshold:
+        # Direction-aware: positive momentum = price rising, negative = falling.
+        # LONG signals only invalidate when momentum is strongly negative;
+        # SHORT signals only when momentum is strongly positive.
+        _momentum_against_thesis = (
+            momentum is not None
+            and (
+                (is_long and momentum < -mom_threshold)
+                or (not is_long and momentum > mom_threshold)
+            )
+        )
+        if _momentum_against_thesis:
             sig.momentum_invalidation_count += 1
             consecutive_required = INVALIDATION_CONSECUTIVE_THRESHOLD.get(sig.channel, 1)
             if sig.momentum_invalidation_count >= consecutive_required:
+                _direction_label = "LONG" if is_long else "SHORT"
+                _direction_test = (
+                    f"< -{mom_threshold:.3f}" if is_long
+                    else f"> {mom_threshold:.3f}"
+                )
                 return (
-                    f"momentum loss (|momentum|={abs(momentum):.3f} < "
-                    f"{mom_threshold}, {sig.momentum_invalidation_count} consecutive readings)"
-                    " – signal thesis exhausted"
+                    f"momentum against thesis (momentum={momentum:.3f} {_direction_test} "
+                    f"for {_direction_label}, {sig.momentum_invalidation_count} "
+                    f"consecutive readings) – signal thesis invalidated"
                 )
             # Not enough consecutive readings yet — don't invalidate
         else:
-            sig.momentum_invalidation_count = 0  # Reset on recovery
+            sig.momentum_invalidation_count = 0  # Reset on recovery / consolidation
 
         return None
 
