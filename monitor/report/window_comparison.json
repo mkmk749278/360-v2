@@ -1,24 +1,24 @@
 {
-  "emissions_delta": -54,
+  "emissions_delta": -20,
   "enabled": true,
-  "fast_failures_delta": 20,
-  "gating_delta": -95663,
-  "no_generation_delta": -1867244,
+  "fast_failures_delta": 1,
+  "gating_delta": -91100,
+  "no_generation_delta": -2868357,
   "post_correction_window_delta": {
     "SR_FLIP_RETEST": {
-      "emitted_delta": -67,
+      "emitted_delta": -49,
       "geometry_changed_delta": 0,
-      "geometry_preserved_delta": 23786,
+      "geometry_preserved_delta": 22831,
       "geometry_rejected_delta": 0,
-      "median_first_breach_delta_sec": 853.93,
-      "median_terminal_delta_sec": 609.93,
+      "median_first_breach_delta_sec": 1326.0,
+      "median_terminal_delta_sec": 890.06,
       "sl_rate_delta": 0.0,
       "win_rate_delta": 0.0
     },
     "TREND_PULLBACK_EMA": {
       "emitted_delta": 0,
       "geometry_changed_delta": 0,
-      "geometry_preserved_delta": 2,
+      "geometry_preserved_delta": 5,
       "geometry_rejected_delta": 0,
       "median_first_breach_delta_sec": 0.0,
       "median_terminal_delta_sec": 0.0,
@@ -28,32 +28,32 @@
   },
   "quality_changes": {
     "FAILED_AUCTION_RECLAIM": {
-      "avg_pnl_delta": -0.6486,
-      "current_avg_pnl": -0.6486,
+      "avg_pnl_delta": 0.35,
+      "current_avg_pnl": 0.35,
       "current_win_rate": 0.0,
       "previous_avg_pnl": null,
       "previous_win_rate": null,
       "win_rate_delta": 0.0
     },
     "LIQUIDITY_SWEEP_REVERSAL": {
-      "avg_pnl_delta": -0.9285,
-      "current_avg_pnl": -0.9285,
+      "avg_pnl_delta": -0.5167,
+      "current_avg_pnl": -0.5167,
       "current_win_rate": 0.0,
       "previous_avg_pnl": null,
       "previous_win_rate": null,
       "win_rate_delta": 0.0
     },
     "QUIET_COMPRESSION_BREAK": {
-      "avg_pnl_delta": 0.0019,
-      "current_avg_pnl": 0.0019,
+      "avg_pnl_delta": -0.1206,
+      "current_avg_pnl": -0.1206,
       "current_win_rate": 0.0,
       "previous_avg_pnl": null,
       "previous_win_rate": null,
       "win_rate_delta": 0.0
     },
     "SR_FLIP_RETEST": {
-      "avg_pnl_delta": 0.034,
-      "current_avg_pnl": 0.034,
+      "avg_pnl_delta": 0.1961,
+      "current_avg_pnl": 0.1961,
       "current_win_rate": 0.0,
       "previous_avg_pnl": null,
       "previous_win_rate": null,
