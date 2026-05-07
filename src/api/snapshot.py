@@ -42,6 +42,9 @@ _AGENT_DISPLAY_NAMES: Dict[str, str] = {
     "TREND_PULLBACK_EMA": "The Pullback Sniper",
     "POST_DISPLACEMENT_CONTINUATION": "The Aftermath Trader",
     "OPENING_RANGE_BREAKOUT": "The Range Breaker",
+    # PR #318 (15th evaluator) — discrete EMA50/200 (4h) or EMA21/50 (1h)
+    # crossover trigger.  Low-frequency, high-conviction.
+    "MA_CROSS_TREND_SHIFT": "The Trend Shifter",
 }
 
 # Mapping: telemetry path token  →  setup_class string (path tokens come
@@ -63,6 +66,9 @@ _PATH_TO_SETUP: Dict[str, str] = {
     "FAILED_AUCTION_RECLAIM": "FAILED_AUCTION_RECLAIM",
     "TREND_PULLBACK": "TREND_PULLBACK_EMA",
     "STANDARD": "LIQUIDITY_SWEEP_REVERSAL",
+    # _generation_path_token strips "_evaluate_" and uppercases the rest.
+    # _evaluate_ma_cross_trend_shift → MA_CROSS_TREND_SHIFT.
+    "MA_CROSS_TREND_SHIFT": "MA_CROSS_TREND_SHIFT",
 }
 
 
