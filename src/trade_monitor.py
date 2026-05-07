@@ -1214,8 +1214,7 @@ class TradeMonitor:
             f"{chan_emoji} *{_escape_md(sig.channel)}* | {_escape_md(sig.symbol)} *{sig.direction.value}* {dir_emoji}",
             f"💰 Entry 1: `{fmt_price(sig.original_entry)}` → Entry 2: `{fmt_price(sig.entry_2 if sig.entry_2 is not None else 0.0)}`",
             f"📊 Avg Entry: `{fmt_price(sig.avg_entry)}`",
-            f"🎯 New TP1: `{fmt_price(sig.tp1)}` | TP2: `{fmt_price(sig.tp2)}`"
-            + (f" | TP3: `{fmt_price(sig.tp3)}`" if sig.tp3 is not None else ""),
+            f"🎯 New TP1: `{fmt_price(sig.tp1)}` | TP2: `{fmt_price(sig.tp2)}`",
             f"🛑 SL: `{fmt_price(sig.stop_loss)}` (unchanged)",
         ]
         if rr_str:
@@ -1280,6 +1279,35 @@ class TradeMonitor:
         lines.append(f"⏰ {fmt_ts()}")
 
         text = "\n".join(lines)
+        await self._send(channel_id, text)
+
+    async def _post_pre_tp_alert(
+        self, sig: Signal, favourable_pct: float, net_pct: float
+    ) -> None:
+        """Dedicated, eye-catching Pre-TP alert — bypasses the generic update
+        template so subscribers don't scroll past it as a routine status post.
+
+        Doctrine (2026-05-07): Pre-TP is the centerpiece scalp outcome — it's
+        what turns net-loss invalidations into net-positive risk-free trades.
+        The alert must read as an ALERT, not as a status line.
+        """
+        channel_id = CHANNEL_TELEGRAM_MAP.get(sig.channel, "")
+        if not channel_id:
+            return
+        dir_emoji = "🚀" if sig.direction == Direction.LONG else "⬇️"
+        sep = "━" * 24
+        text = "\n".join([
+            "⚡ *PRE-TP BANKED* ⚡",
+            sep,
+            f"{_escape_md(sig.symbol)} *{sig.direction.value}* {dir_emoji}",
+            "",
+            f"💰 Raw move: *+{favourable_pct:.2f}%*",
+            f"💵 Net @ {PRE_TP_LEVERAGE:.0f}x: *{net_pct:+.2f}%* (after fees)",
+            f"🛡️ SL → breakeven `{fmt_price(sig.entry)}`",
+            "",
+            "✅ Trade is now *risk-free* — TP ladder still open",
+            f"⏰ {fmt_ts()}",
+        ])
         await self._send(channel_id, text)
 
     async def _check_pre_tp_grab(
@@ -1419,12 +1447,7 @@ class TradeMonitor:
         net_pct = gross_pct - fee_burn_pct
 
         try:
-            await self._post_update(
-                sig,
-                f"⚡ PRE-TP BANKED: +{favourable_pct:.2f}% raw "
-                f"({net_pct:+.2f}% net @ {PRE_TP_LEVERAGE:.0f}x after fees) "
-                f"\\| SL → breakeven \\| Full TP ladder still open",
-            )
+            await self._post_pre_tp_alert(sig, favourable_pct, net_pct)
         except Exception as exc:
             log.warning("Pre-TP active-channel post failed for %s: %s", sig.symbol, exc)
 

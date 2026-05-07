@@ -204,16 +204,55 @@ async def test_posts_to_both_active_and_free_channel(mock_send):
     target_high = 30000.0 * 1.0035
 
     with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
-         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"):
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"), \
+         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
         await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
 
     chat_ids = [c for c, _ in sent]
     assert "FREE-CHAN" in chat_ids
+    assert "ACTIVE-CHAN" in chat_ids
     free_msg = next(t for c, t in sent if c == "FREE-CHAN")
     assert "Quick Win" in free_msg
     assert "BTCUSDT" in free_msg
     # Math sanity: +0.35% raw at 10x = +3.5% gross; minus 0.7% fees = +2.8% net
     assert "+2.80%" in free_msg or "2.80%" in free_msg
+
+
+async def test_active_channel_alert_is_dedicated_format_not_generic_update(mock_send):
+    """Regression guard for the 2026-05-07 fix.
+
+    The original Pre-TP active-channel post piggybacked on ``_post_update``,
+    so subscribers saw a generic status template (Entry/Current/PnL/SL/Conf
+    rows) with the Pre-TP message buried as the first line.  Worse, the
+    template injected literal ``\\|`` separators (MarkdownV2 escape under
+    legacy parse_mode) so the line rendered with visible backslashes.
+
+    The dedicated alert (``_post_pre_tp_alert``) sends a clean, eye-catching
+    "PRE-TP BANKED" header with no MarkdownV2 leakage.
+    """
+    send, sent = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(signal_tier="B")
+    target_high = 30000.0 * 1.0035
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
+        await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    active_msgs = [t for c, t in sent if c == "ACTIVE-CHAN"]
+    assert len(active_msgs) == 1, "Pre-TP must produce exactly one active-channel alert"
+    msg = active_msgs[0]
+    # Dedicated alert markers
+    assert "PRE-TP BANKED" in msg
+    assert "BTCUSDT" in msg
+    assert "LONG" in msg
+    assert "breakeven" in msg
+    assert "risk-free" in msg
+    # No legacy generic-update artefacts
+    assert "PnL:" not in msg, "Pre-TP alert must not piggyback on the generic status template"
+    assert "Confidence:" not in msg, "Pre-TP alert must not include the generic confidence row"
+    # No MarkdownV2 escape leakage under legacy Markdown parse mode
+    assert "\\|" not in msg, "MarkdownV2 \\| escape must not appear under legacy Markdown"
 
 
 # ---------------------------------------------------------------------------

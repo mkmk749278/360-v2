@@ -59,15 +59,19 @@ def test_pre_tp_line_present_for_paid_signal_when_enabled():
     assert "breakeven" in text
 
 
-def test_pre_tp_line_appears_after_tp3():
+def test_pre_tp_line_appears_after_tp2():
+    """Scalp doctrine 2026-05-07 — TP3 dropped from dispatch.  Pre-TP is now
+    the centerpiece line, sitting just below TP2 and above the Setup metadata."""
     sig = _make_signal()
     with patch("src.telegram_bot.PRE_TP_ENABLED", True):
         text = TelegramBot.format_signal(sig)
-    tp3_idx = text.find("TP3")
+    tp2_idx = text.find("TP2")
     pretp_idx = text.find("Pre-TP")
     setup_idx = text.find("Setup:")
-    assert tp3_idx >= 0 and pretp_idx > tp3_idx
+    assert tp2_idx >= 0 and pretp_idx > tp2_idx
     assert setup_idx > pretp_idx, "Pre-TP must appear before the Setup metadata block"
+    # Hard guard against TP3 leaking back into the dispatch surface.
+    assert "TP3" not in text
 
 
 def test_pre_tp_shows_threshold_floor_and_net_at_leverage():
@@ -115,14 +119,14 @@ def test_pre_tp_line_hidden_for_breakout_setups(blacklisted_setup):
 
 
 def test_pre_tp_addition_preserves_existing_lines():
-    """Adding pre-TP line must not break TP/SL/Setup rendering."""
+    """Adding pre-TP line must not break TP/SL/Setup rendering.
+    TP3 was dropped from dispatch in the 2026-05-07 doctrine update."""
     sig = _make_signal()
     with patch("src.telegram_bot.PRE_TP_ENABLED", True):
         text = TelegramBot.format_signal(sig)
     assert "🛑 SL:" in text
     assert "🎯 TP1:" in text
     assert "🎯 TP2:" in text
-    assert "🎯 TP3:" in text
     assert "Setup:" in text
     assert "Confidence" in text
     assert "R:R" in text
