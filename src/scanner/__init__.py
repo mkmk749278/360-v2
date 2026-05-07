@@ -11,6 +11,7 @@ import asyncio
 import dataclasses as _dc
 import os
 import re
+import json
 import time
 from collections import defaultdict
 from dataclasses import dataclass
@@ -551,6 +552,24 @@ _STRUCTURE_ALIGN_PATHS: frozenset = frozenset({
     "POST_DISPLACEMENT_CONTINUATION",
 })
 
+# Per-(symbol, setup_class, direction) dispatch cooldown.  Default 30 min
+# is short enough to allow re-fires when conditions materially change but
+# long enough to prevent the exact same setup from re-detecting every
+# 15s scan cycle.  Bug observed 2026-05-07: 5 identical
+# FAILED_AUCTION_RECLAIM signals dispatched on BNBUSDT in 5h, all
+# immediately invalidating at SL.  Cooldown persisted to disk so a
+# redeploy doesn't let duplicates through.
+DISPATCH_COOLDOWN_SEC: float = float(os.getenv("DISPATCH_COOLDOWN_SEC", "1800"))
+DISPATCH_COOLDOWN_PATH: str = "data/signal_dispatch_cooldown.json"
+
+# Pre-dispatch staleness check.  Reject if real-time price has drifted
+# more than this percentage from the entry price between setup detection
+# and dispatch.  At 0.5% the check is gentle — allows normal mid-candle
+# drift but catches the "entry says 626.85 but current price is already
+# at 631.86 (SL)" pathology from the 2026-05-07 bug.  Env-overridable
+# per B8 if we need to tune.
+DISPATCH_STALENESS_MAX_DRIFT_PCT: float = 0.5
+
 # PR-7C: runtime validation focus paths for concise operator summaries.
 _PR7C_TARGET_SETUPS: frozenset[str] = frozenset({
     "SR_FLIP_RETEST",
@@ -737,6 +756,15 @@ class Scanner:
         # PR-6 wires confluence_count() into the soft-penalty stack as a bonus.
         self.level_book: LevelBook = LevelBook()
         self._level_book_refresh_ts: Dict[str, float] = {}
+
+        # Per-(symbol, setup_class, direction) dispatch cooldown.  Same
+        # signal shouldn't re-fire within COOLDOWN_SEC after a successful
+        # dispatch — bug observed 2026-05-07: identical FAILED_AUCTION_RECLAIM
+        # signal dispatched 5x on BNBUSDT in 5 hours, all instant-SL'd.
+        # Persisted to data/signal_dispatch_cooldown.json so a redeploy
+        # within the cooldown window doesn't let duplicates through.
+        self._dispatch_cooldown: Dict[tuple, float] = {}
+        self._load_dispatch_cooldown()
 
         # Volume Profile (PR-9) — POC/VAH/VAL per symbol.  Same TTL pattern
         # as LevelBook.  POC/VAH/VAL injected into LevelBook on each
@@ -3439,6 +3467,49 @@ class Scanner:
                             setattr(sig, tp_attr, round(new_tp, 8))
         except Exception:
             pass
+
+        # ── Per-(symbol, setup, direction) dispatch cooldown ─────────────
+        # Prevents the same setup from re-firing within DISPATCH_COOLDOWN_SEC
+        # after a successful dispatch.  Without this, the same FAILED_AUCTION
+        # _RECLAIM pattern keeps re-detecting every cycle (15s) and dispatches
+        # bit-identical signals to Telegram (bug 2026-05-07: 5 identical
+        # BNBUSDT FAR signals in 5 h).
+        try:
+            cd_key = self._cooldown_key_for(sig)
+            if cd_key is not None and self._is_cooldown_active(cd_key):
+                age_s = time.time() - self._dispatch_cooldown[cd_key]
+                self._suppression_counters[
+                    f"dispatch_cooldown:{cd_key[1]}"
+                ] += 1
+                log.info(
+                    "dispatch_cooldown skip {} {} {} (last fire {:.0f}s ago < {:.0f}s)",
+                    cd_key[0], cd_key[1], cd_key[2], age_s, DISPATCH_COOLDOWN_SEC,
+                )
+                return False
+        except Exception as exc:
+            log.debug("dispatch cooldown check error (fail-open): {}", exc)
+
+        # ── Pre-dispatch staleness check ─────────────────────────────────
+        # If real-time price has drifted >DISPATCH_STALENESS_MAX_DRIFT_PCT from
+        # the proposed entry, the signal is stale — by the time the subscriber
+        # reads it, price is too far away for the limit order to fill at sane
+        # levels.  Worst case (bug 2026-05-07): current_price already at SL,
+        # signal dispatches and immediately invalidates.
+        try:
+            if not self._is_entry_fresh(sig):
+                self._suppression_counters[
+                    f"dispatch_staleness:{getattr(sig, 'setup_class', 'UNKNOWN')}"
+                ] += 1
+                log.info(
+                    "dispatch_staleness skip {} {} entry={:.6f} drifted",
+                    getattr(sig, "symbol", "?"),
+                    getattr(sig, "setup_class", "?"),
+                    float(getattr(sig, "entry", 0.0) or 0.0),
+                )
+                return False
+        except Exception as exc:
+            log.debug("staleness check error (fail-open): {}", exc)
+
         # Stamp pre-TP threshold + trigger price using the ATR observed at
         # dispatch.  Locks the promise shown in the Telegram post; trade-
         # monitor and persistence both round-trip the stamped values.  No-op
@@ -3447,7 +3518,121 @@ class Scanner:
             stamp_pre_tp(sig)
         except Exception as exc:
             log.debug("pre-TP stamp failed for %s: %s", getattr(sig, "symbol", "?"), exc)
-        return await self.signal_queue.put(sig)
+
+        # Stamp cooldown on success.  Only persist after queue.put succeeds
+        # (so a queue overflow doesn't lock out future legitimate signals).
+        ok = await self.signal_queue.put(sig)
+        if ok:
+            try:
+                cd_key = self._cooldown_key_for(sig)
+                if cd_key is not None:
+                    self._dispatch_cooldown[cd_key] = time.time()
+                    self._persist_dispatch_cooldown()
+            except Exception as exc:
+                log.debug("cooldown stamp error (non-fatal): {}", exc)
+        return ok
+
+    @staticmethod
+    def _cooldown_key_for(sig: Any) -> Optional[tuple]:
+        """Build the ``(symbol, setup_class, direction)`` cooldown key."""
+        symbol = getattr(sig, "symbol", "") or ""
+        setup_class = getattr(sig, "setup_class", "") or ""
+        direction_obj = getattr(sig, "direction", None)
+        direction = (
+            direction_obj.value
+            if direction_obj is not None and hasattr(direction_obj, "value")
+            else str(direction_obj or "")
+        ).upper()
+        if not symbol or not setup_class or not direction:
+            return None
+        return (symbol, setup_class, direction)
+
+    def _is_cooldown_active(self, key: tuple) -> bool:
+        last = self._dispatch_cooldown.get(key)
+        if last is None:
+            return False
+        return (time.time() - last) < DISPATCH_COOLDOWN_SEC
+
+    def _is_entry_fresh(self, sig: Any) -> bool:
+        """Return True if the proposed entry is within tolerance of current price.
+
+        ``current_price`` is the last close on the most-granular available
+        candle TF for this signal's channel.  Drift > 0.5% (default) means
+        the setup-detection candles are stale relative to live ticks — the
+        signal would dispatch into a price level price has already left.
+        """
+        try:
+            entry = float(getattr(sig, "entry", 0.0) or 0.0)
+            if entry <= 0:
+                return True
+            symbol = getattr(sig, "symbol", "")
+            if not symbol:
+                return True
+            data_store = getattr(self, "data_store", None)
+            if data_store is None:
+                return True
+            # Look up the most-granular candle for this symbol.
+            symbol_candles = (
+                data_store.candles.get(symbol)
+                if hasattr(data_store, "candles") else None
+            )
+            if not symbol_candles:
+                return True
+            # Prefer 1m, fall back to 5m / 15m / 1h.
+            for tf in ("1m", "5m", "15m", "1h"):
+                cd = symbol_candles.get(tf)
+                if not cd or "close" not in cd:
+                    continue
+                closes = cd["close"]
+                if closes is None or len(closes) == 0:
+                    continue
+                current_price = float(closes[-1])
+                if current_price <= 0:
+                    continue
+                drift_pct = abs(current_price - entry) / entry * 100.0
+                return drift_pct <= DISPATCH_STALENESS_MAX_DRIFT_PCT
+        except Exception:
+            return True  # Fail-open
+        return True
+
+    def _load_dispatch_cooldown(self) -> None:
+        """Load the cooldown registry from disk on init.  Best-effort."""
+        from pathlib import Path
+        path = Path(DISPATCH_COOLDOWN_PATH)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        for key, ts in data.items():
+            if not isinstance(key, str) or "|" not in key:
+                continue
+            parts = key.split("|", 2)
+            if len(parts) != 3:
+                continue
+            try:
+                self._dispatch_cooldown[(parts[0], parts[1], parts[2])] = float(ts)
+            except (ValueError, TypeError):
+                continue
+
+    def _persist_dispatch_cooldown(self) -> None:
+        """Atomically write the cooldown registry to disk."""
+        from pathlib import Path
+        path = Path(DISPATCH_COOLDOWN_PATH)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                f"{symbol}|{setup}|{direction}": ts
+                for (symbol, setup, direction), ts in self._dispatch_cooldown.items()
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            log.debug("dispatch cooldown persist failed: %s", exc)
 
     async def _prepare_signal(
         self,

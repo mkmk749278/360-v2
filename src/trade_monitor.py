@@ -812,6 +812,43 @@ class TradeMonitor:
         # price spikes that don't represent real sustained price movement.
         _c_high, _c_low = self._candle_extremes(sig.symbol)
 
+        # Limit-order entry-zone fill check (2026-05-07 fix).
+        # Signals dispatched as "Execution: LIMIT ORDER" carry an
+        # ``entry_zone_low``/``entry_zone_high`` band; the subscriber's
+        # limit order only fills if price actually enters the band.
+        # Skip SL/TP/invalidation monitoring entirely until that has
+        # happened — otherwise a fast-moving setup can ship "instant SL"
+        # signals where price was already past the SL at dispatch time.
+        # Market-order signals (no entry_zone_low/high) are treated as
+        # filled immediately on first eval.
+        if not getattr(sig, "entry_zone_filled", False):
+            zone_low = getattr(sig, "entry_zone_low", None)
+            zone_high = getattr(sig, "entry_zone_high", None)
+            if zone_low is None or zone_high is None:
+                # No entry zone defined — market-order semantics, treat as filled.
+                sig.entry_zone_filled = True
+            else:
+                # Has the 1m candle range overlapped [zone_low, zone_high]?
+                if (
+                    _c_high > 0
+                    and _c_low > 0
+                    and _c_high >= float(zone_low)
+                    and _c_low <= float(zone_high)
+                ):
+                    sig.entry_zone_filled = True
+                    log.debug(
+                        "Entry zone visited for {} {}: zone=[{:.6f},{:.6f}], "
+                        "candle=[{:.6f},{:.6f}] — flipping entry_zone_filled=True",
+                        sig.symbol, sig.signal_id,
+                        float(zone_low), float(zone_high), _c_low, _c_high,
+                    )
+                else:
+                    # Limit order hasn't filled yet.  Don't run SL/TP checks
+                    # — they would fire against the un-filled mid as if real.
+                    # Expiry handling lives in `cleanup_expired` and will
+                    # mark this as EXPIRED if validity elapses.
+                    return
+
         # Pre-TP grab (Phase A) — fire BEFORE the SL check so that if the same
         # candle whipped up to the threshold and back down to entry we still
         # bank the symbolic win and the SL→breakeven move converts what would
