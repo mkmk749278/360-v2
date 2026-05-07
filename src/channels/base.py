@@ -216,6 +216,14 @@ class Signal:
     # the exact entry price.  Populated by each channel's evaluate() method.
     entry_zone_low: Optional[float] = None    # Lower bound of limit order zone
     entry_zone_high: Optional[float] = None   # Upper bound of limit order zone
+    # Whether price has actually visited the [entry_zone_low, entry_zone_high]
+    # band since dispatch.  ``trade_monitor`` flips this to True the first
+    # time a 1m candle's range overlaps the zone; SL/TP monitoring is
+    # gated on this so an "instant SL hit" can't trigger before the
+    # subscriber's limit order would have realistically filled.  Falls
+    # back to True when entry_zone_low/high aren't populated (market-order
+    # signals that always count as filled at dispatch).
+    entry_zone_filled: bool = False
     # How long (minutes) the setup remains actionable.  After this window
     # the signal should no longer be entered even if price is still in zone.
     # 0 means "not yet set by an evaluator" — the scanner will apply the
