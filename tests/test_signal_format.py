@@ -68,16 +68,21 @@ class TestNewFormatSignal:
         # TP1 is above entry → positive percentage
         assert "+" in text
 
-    def test_tp3_shown_when_present(self):
+    def test_tp3_dropped_from_scalp_dispatch(self):
+        """Scalp doctrine 2026-05-07 — TP3 is no longer advertised on
+        dispatch.  Scalps target TP1/TP2; TP3 was runner territory that
+        doesn't fit the 5–60 min hold window.  Internal TP3 partial-close
+        in trade_monitor is unaffected; this guards the dispatch surface only."""
         sig = _make_signal(tp3=68100.00)
         text = TelegramBot.format_signal(sig)
-        assert "TP3" in text
+        assert "TP3" not in text
         assert "Dynamic/trailing" not in text
 
-    def test_tp3_dynamic_when_none(self):
+    def test_tp3_dropped_when_none(self):
         sig = _make_signal(tp3=None)
         text = TelegramBot.format_signal(sig)
-        assert "Dynamic/trailing" in text
+        assert "TP3" not in text
+        assert "Dynamic/trailing" not in text
 
     def test_setup_and_confidence_line(self):
         sig = _make_signal(setup_class="SWEEP_RECLAIM", confidence=82.4, quality_tier="A+")

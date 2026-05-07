@@ -113,16 +113,19 @@ class TestFormatSignal:
             risk_label="Conservative",
             timestamp=utcnow(),
         )
-        # New format
+        # New format — TP3 dropped from scalp dispatch (2026-05-07 doctrine).
         text = TelegramBot.format_signal(sig)
         assert "⚡" in text
-        assert "Dynamic/trailing" in text
+        assert "TP3" not in text
+        assert "Dynamic/trailing" not in text
         assert "95.0" in text
 
-        # Legacy format includes trailing_desc
+        # Legacy format — TP3 also dropped here for consistency with the
+        # new scalp dispatch surface.
         legacy_text = TelegramBot.format_signal_legacy(sig)
         assert "⚡" in legacy_text
-        assert "Dynamic/trailing" in legacy_text
+        assert "TP3" not in legacy_text
+        assert "Dynamic/trailing" not in legacy_text
         assert "AI Adaptive" in legacy_text
         assert "95%" in legacy_text
 

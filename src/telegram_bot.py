@@ -364,7 +364,6 @@ class TelegramBot:
             🛑 SL: 66,980.00 (-0.38%)
             🎯 TP1: 67,520.00 (+0.42%)
             🎯 TP2: 67,800.00 (+0.84%)
-            🎯 TP3: 68,100.00 (+1.29%)
 
             📊 Setup: SWEEP_RECLAIM | Confidence: 82.4 (A+)
             ⏱ Hold: ~2h | R:R 1:2.2
@@ -430,15 +429,16 @@ class TelegramBot:
         else:
             lines.append(f"📍 Entry: `{fmt_price(sig.entry)}`")
 
+        # Scalping doctrine (2026-05-07): TP3 dropped from the promised-target
+        # display.  Scalps target TP1 primary / TP2 secondary; TP3 was runner
+        # territory that doesn't align with the 5–60 min hold window.  Internal
+        # TP3 partial-close logic in trade_monitor stays as a safety net for
+        # outlier runs but is no longer advertised on dispatch.
         lines += [
             f"🛑 SL: `{fmt_price(sig.stop_loss)}` ({TelegramBot._escape_md(_pct(sig.stop_loss))})",
             f"🎯 TP1: `{fmt_price(sig.tp1)}` ({TelegramBot._escape_md(_pct(sig.tp1))})",
             f"🎯 TP2: `{fmt_price(sig.tp2)}` ({TelegramBot._escape_md(_pct(sig.tp2))})",
         ]
-        if sig.tp3 is not None:
-            lines.append(f"🎯 TP3: `{fmt_price(sig.tp3)}` ({TelegramBot._escape_md(_pct(sig.tp3))})")
-        else:
-            lines.append("🎯 TP3: Dynamic/trailing")
 
         # Pre-TP grab indicator.  Shown when the feature is enabled AND the
         # setup is eligible (breakouts excluded — they're built for bigger
@@ -573,10 +573,6 @@ class TelegramBot:
             f"🎯 TP1: `{fmt_price(sig.tp1)}`",
             f"🎯 TP2: `{fmt_price(sig.tp2)}`",
         ]
-        if sig.tp3 is not None:
-            lines.append(f"🎯 TP3: `{fmt_price(sig.tp3)}`")
-        else:
-            lines.append("🎯 TP3: Dynamic/trailing")
 
         if sig.trailing_active:
             lines.append(f"💹 Trailing Active ({TelegramBot._escape_md(sig.trailing_desc)})")
