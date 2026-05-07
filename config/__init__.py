@@ -1263,9 +1263,17 @@ BACKTEST_SLIPPAGE_PCT: float = _safe_float("BACKTEST_SLIPPAGE_PCT", "0.03")
 # ``AUTO_EXECUTION_ENABLED`` is preserved as a derived flag (true when mode
 # is not "off") for backwards compatibility with existing call sites.
 # ---------------------------------------------------------------------------
+# Default flipped from "off" → "paper" 2026-05-07: paper mode is zero-risk
+# (no real orders, no exchange API surface) and turns every dispatched
+# signal into a tracked virtual position.  Without this, subscribers see
+# `today_pnl_usd=$0.00` on Pulse / Trade indefinitely because no broker
+# wires up to record fills — making the dashboards feel empty for
+# off-mode operators.  Paper-as-default makes the "P&L is zero" failure
+# mode explicit (you have to consciously turn it OFF) instead of silent.
+# Live mode still requires explicit opt-in via the env var or app toggle.
 AUTO_EXECUTION_MODE: str = _safe_choice(
     "AUTO_EXECUTION_MODE",
-    default="off",
+    default="paper",
     allowed=frozenset({"off", "paper", "live"}),
 )
 # Backwards-compat alias — true for paper or live, false for off.
