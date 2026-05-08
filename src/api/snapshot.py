@@ -299,10 +299,28 @@ def build_signals(
     history = list(getattr(engine, "_signal_history", []) or [])
     active = list(router.active_signals.values()) if router is not None else []
 
+    # Defensive filter — ``router.active_signals`` can briefly hold signals
+    # that hit a terminal status (INVALIDATED / SL_HIT / TP_HIT / EXPIRED /
+    # CANCELLED) before TradeMonitor pops them, AND the persistent
+    # active-router-state JSON loader (PR #337) restores any signal that
+    # was in the map at shutdown — including ones that closed mid-shutdown.
+    # Owner reported INVALIDATED + SL_HIT signals showing in the app's
+    # "Open" tab; this filter guarantees the API contract matches the
+    # subscriber's mental model: "Open" = currently in-flight only.
     if status == "open":
-        signals = active
+        signals = [
+            s for s in active
+            if str(getattr(s, "status", "")).upper() == "ACTIVE"
+        ]
     elif status == "closed":
-        signals = history
+        # Symmetric — anything in active_signals that has a terminal
+        # status belongs in the closed bucket too, not orphaned between
+        # the two views.
+        terminal_active = [
+            s for s in active
+            if str(getattr(s, "status", "")).upper() != "ACTIVE"
+        ]
+        signals = history + terminal_active
     else:
         signals = active + history
 
