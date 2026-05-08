@@ -15,6 +15,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from src.utils import get_logger
+
 from .schemas import (
     ActivityEvent,
     AgentStat,
@@ -24,6 +26,8 @@ from .schemas import (
     SignalDetail,
     TickerItem,
 )
+
+log = get_logger("api.snapshot")
 
 
 # Mapping: setup_class on Signal  →  display name shown in the app.
@@ -351,42 +355,64 @@ def build_positions(engine: Any) -> List[PositionDetail]:
     that's the canonical view the app needs.  Underlying broker positions
     can drift from signals during live mode — those show up via the
     PositionReconciler's audit logs, not here.
+
+    Per-signal exceptions are caught and logged so a single corrupted
+    entry in ``router.active_signals`` (e.g. from a partial restore where
+    a field has gone out of sync with the schema) doesn't 500 the whole
+    Trade tab.
     """
     router = getattr(engine, "router", None)
     if router is None:
         return []
     out: List[PositionDetail] = []
     for sig in router.active_signals.values():
-        direction = getattr(sig, "direction", None)
-        direction_str = (
-            direction.value
-            if direction is not None and hasattr(direction, "value")
-            else str(direction or "LONG")
-        ).upper()
-        entry = float(getattr(sig, "entry", 0.0) or 0.0)
-        current_price = float(getattr(sig, "current_price", entry) or entry)
-        pnl_pct = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
-        # qty / pnl_usd come from the order_manager's view of the position;
-        # for the v0 API we approximate pnl_usd from pnl_pct on a notional
-        # 1.0-unit basis when broker info isn't available.
-        qty = float(getattr(sig, "qty", 0.0) or 0.0)
-        pnl_usd = float(getattr(sig, "pnl_usd", 0.0) or 0.0)
-        if pnl_usd == 0.0 and entry > 0:
-            pnl_usd = round(qty * entry * pnl_pct / 100.0, 2)
-        ts = getattr(sig, "timestamp", None)
-        out.append(
-            PositionDetail(
-                signal_id=getattr(sig, "signal_id", "") or "",
-                symbol=getattr(sig, "symbol", ""),
-                direction=direction_str,  # type: ignore[arg-type]
-                entry=entry,
-                current_price=current_price,
-                qty=qty,
-                pnl_usd=pnl_usd,
-                pnl_pct=pnl_pct,
-                minutes_open=_minutes_since(ts),
+        try:
+            direction = getattr(sig, "direction", None)
+            direction_str = (
+                direction.value
+                if direction is not None and hasattr(direction, "value")
+                else str(direction or "LONG")
+            ).upper()
+            # Pydantic Literal["LONG", "SHORT"] rejects anything else —
+            # default to LONG if a corrupted signal has a stray value
+            # rather than failing the whole response.
+            if direction_str not in ("LONG", "SHORT"):
+                log.warning(
+                    "build_positions: signal %s has invalid direction %r — "
+                    "defaulting to LONG",
+                    getattr(sig, "signal_id", "?"), direction_str,
+                )
+                direction_str = "LONG"
+            entry = float(getattr(sig, "entry", 0.0) or 0.0)
+            current_price = float(getattr(sig, "current_price", entry) or entry)
+            pnl_pct = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
+            # qty / pnl_usd come from the order_manager's view of the position;
+            # for the v0 API we approximate pnl_usd from pnl_pct on a notional
+            # 1.0-unit basis when broker info isn't available.
+            qty = float(getattr(sig, "qty", 0.0) or 0.0)
+            pnl_usd = float(getattr(sig, "pnl_usd", 0.0) or 0.0)
+            if pnl_usd == 0.0 and entry > 0:
+                pnl_usd = round(qty * entry * pnl_pct / 100.0, 2)
+            ts = getattr(sig, "timestamp", None)
+            out.append(
+                PositionDetail(
+                    signal_id=getattr(sig, "signal_id", "") or "",
+                    symbol=getattr(sig, "symbol", ""),
+                    direction=direction_str,  # type: ignore[arg-type]
+                    entry=entry,
+                    current_price=current_price,
+                    qty=qty,
+                    pnl_usd=pnl_usd,
+                    pnl_pct=pnl_pct,
+                    minutes_open=_minutes_since(ts),
+                )
             )
-        )
+        except Exception:
+            log.exception(
+                "build_positions: skipping malformed signal %s",
+                getattr(sig, "signal_id", "?"),
+            )
+            continue
     return out
 
 
@@ -431,58 +457,66 @@ def build_activity(
 
     events: List[ActivityEvent] = []
 
-    # OPEN events from every signal we know about.
+    # OPEN events from every signal we know about.  Per-signal try/except
+    # so a single corrupted entry doesn't fail the whole feed.
     for sig in pool:
-        ts = getattr(sig, "dispatch_timestamp", None) or getattr(
-            sig, "timestamp", None
-        )
-        if ts is None:
+        try:
+            ts = getattr(sig, "dispatch_timestamp", None) or getattr(
+                sig, "timestamp", None
+            )
+            if ts is None:
+                continue
+            symbol = getattr(sig, "symbol", "")
+            direction = getattr(sig, "direction", None)
+            direction_str = (
+                direction.value if direction is not None and hasattr(direction, "value")
+                else str(direction or "LONG")
+            ).upper()
+            agent = _agent_name_for(getattr(sig, "setup_class", "") or "")
+            events.append(
+                ActivityEvent(
+                    kind="OPEN",
+                    title=f"{symbol} {direction_str} opened",
+                    subtitle=f"entry {getattr(sig, 'entry', 0.0):.4f} — {agent}",
+                    timestamp=ts,
+                    minutes_ago=_minutes_since(ts),
+                )
+            )
+
+            # Pre-TP marker
+            if getattr(sig, "pre_tp_hit", False):
+                pre_ts = getattr(sig, "pre_tp_timestamp", None) or ts
+                events.append(
+                    ActivityEvent(
+                        kind="PRE_TP",
+                        title=f"{symbol} {direction_str} — pre-TP",
+                        subtitle=f"+{getattr(sig, 'pre_tp_pct', 0.0):.2f}% — SL → breakeven",
+                        timestamp=pre_ts,
+                        minutes_ago=_minutes_since(pre_ts),
+                    )
+                )
+
+            # Terminal outcome
+            terminal_ts = getattr(sig, "terminal_outcome_timestamp", None)
+            kind = _activity_kind_for_status(getattr(sig, "status", ""))
+            if terminal_ts is not None and kind is not None:
+                pnl = getattr(sig, "pnl_pct", 0.0) or 0.0
+                sign = "+" if pnl >= 0 else ""
+                events.append(
+                    ActivityEvent(
+                        kind=kind,  # type: ignore[arg-type]
+                        title=f"{symbol} {direction_str} — {kind}",
+                        subtitle=f"{sign}{pnl:.2f}%",
+                        timestamp=terminal_ts,
+                        minutes_ago=_minutes_since(terminal_ts),
+                    )
+                )
+        except Exception:
+            log.exception(
+                "build_activity: skipping malformed signal %s",
+                getattr(sig, "signal_id", "?"),
+            )
             continue
-        symbol = getattr(sig, "symbol", "")
-        direction = getattr(sig, "direction", None)
-        direction_str = (
-            direction.value if direction is not None and hasattr(direction, "value")
-            else str(direction or "LONG")
-        ).upper()
-        agent = _agent_name_for(getattr(sig, "setup_class", "") or "")
-        events.append(
-            ActivityEvent(
-                kind="OPEN",
-                title=f"{symbol} {direction_str} opened",
-                subtitle=f"entry {getattr(sig, 'entry', 0.0):.4f} — {agent}",
-                timestamp=ts,
-                minutes_ago=_minutes_since(ts),
-            )
-        )
-
-        # Pre-TP marker
-        if getattr(sig, "pre_tp_hit", False):
-            pre_ts = getattr(sig, "pre_tp_timestamp", None) or ts
-            events.append(
-                ActivityEvent(
-                    kind="PRE_TP",
-                    title=f"{symbol} {direction_str} — pre-TP",
-                    subtitle=f"+{getattr(sig, 'pre_tp_pct', 0.0):.2f}% — SL → breakeven",
-                    timestamp=pre_ts,
-                    minutes_ago=_minutes_since(pre_ts),
-                )
-            )
-
-        # Terminal outcome
-        terminal_ts = getattr(sig, "terminal_outcome_timestamp", None)
-        kind = _activity_kind_for_status(getattr(sig, "status", ""))
-        if terminal_ts is not None and kind is not None:
-            pnl = getattr(sig, "pnl_pct", 0.0) or 0.0
-            sign = "+" if pnl >= 0 else ""
-            events.append(
-                ActivityEvent(
-                    kind=kind,  # type: ignore[arg-type]
-                    title=f"{symbol} {direction_str} — {kind}",
-                    subtitle=f"{sign}{pnl:.2f}%",
-                    timestamp=terminal_ts,
-                    minutes_ago=_minutes_since(terminal_ts),
-                )
-            )
 
     events.sort(key=lambda e: e.timestamp, reverse=True)
     return events[:limit]

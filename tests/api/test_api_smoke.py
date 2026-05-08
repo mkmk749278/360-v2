@@ -496,6 +496,102 @@ def test_activity_filter_by_setup_class_unknown_returns_empty(
 
 
 # ---------------------------------------------------------------------------
+# Trade-tab error resilience (2026-05-08)
+# ---------------------------------------------------------------------------
+#
+# Owner reported the app showing "Could not load Trade state /
+# ApiError(500): Internal Server Error" on the Trade tab.  Without
+# logs we can't pin which of the three endpoints (auto-mode / positions
+# / activity) is failing — and a single 500 on any of them breaks the
+# entire tab.
+#
+# These tests verify the new defensive behaviour: when one of the
+# build_* helpers raises, the endpoint returns a degraded response
+# (empty list / off-mode default) and logs the traceback rather than
+# 500ing.  Diagnosis happens VPS-side from logs; UX stays graceful.
+
+
+def test_positions_returns_empty_on_per_signal_error(
+    client: TestClient, engine: _StubEngine,
+) -> None:
+    """A single corrupted signal in active_signals must not fail the
+    whole /api/positions response — that was breaking the Trade tab."""
+    bad = _StubSignal(
+        signal_id="BAD-001",
+        symbol="ZECUSDT",
+        # direction with corrupted Direction-style value (not LONG/SHORT)
+        direction=_Direction("CORRUPTED"),
+        entry=100.0,
+        stop_loss=99.0,
+        tp1=101.0,
+        tp2=102.0,
+    )
+    engine.router.active_signals[bad.signal_id] = bad
+
+    r = client.get("/api/positions")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Bad signal skipped; the original good signal still in the list.
+    bad_in = any(it["signal_id"] == "BAD-001" for it in body["items"])
+    # Either the malformed one is sanitized to LONG (so it appears) or
+    # it's dropped entirely — both are acceptable degradation paths;
+    # the contract is "no 500".
+    if bad_in:
+        bad_pos = next(it for it in body["items"] if it["signal_id"] == "BAD-001")
+        assert bad_pos["direction"] in ("LONG", "SHORT")
+
+
+def test_positions_returns_empty_on_router_attribute_error(
+    client: TestClient, engine: _StubEngine, monkeypatch,
+) -> None:
+    """When the whole build_positions call raises (e.g. router state is
+    None or otherwise broken), endpoint returns an empty list."""
+    from src.api import server as _server_mod
+
+    def _broken(_engine):
+        raise RuntimeError("simulated crash inside build_positions")
+
+    monkeypatch.setattr(_server_mod, "build_positions", _broken)
+    r = client.get("/api/positions")
+    assert r.status_code == 200
+    assert r.json() == {"items": [], "total": 0}
+
+
+def test_activity_returns_empty_on_build_error(
+    client: TestClient, engine: _StubEngine, monkeypatch,
+) -> None:
+    from src.api import server as _server_mod
+
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("simulated crash inside build_activity")
+
+    monkeypatch.setattr(_server_mod, "build_activity", _broken)
+    r = client.get("/api/activity")
+    assert r.status_code == 200
+    assert r.json() == {"items": [], "total": 0}
+
+
+def test_auto_mode_returns_off_default_on_build_error(
+    client: TestClient, engine: _StubEngine, monkeypatch,
+) -> None:
+    from src.api import server as _server_mod
+
+    def _broken(_engine):
+        raise RuntimeError("simulated crash inside build_auto_mode")
+
+    monkeypatch.setattr(_server_mod, "build_auto_mode", _broken)
+    r = client.get("/api/auto-mode")
+    assert r.status_code == 200
+    body = r.json()
+    # Safe off-mode default — Trade tab renders the off card cleanly
+    # instead of "Could not load Trade state".
+    assert body["mode"] == "off"
+    assert body["open_positions"] == 0
+    assert body["daily_pnl_usd"] == 0.0
+    assert body["daily_kill_tripped"] is False
+
+
+# ---------------------------------------------------------------------------
 # Auto-mode
 # ---------------------------------------------------------------------------
 
