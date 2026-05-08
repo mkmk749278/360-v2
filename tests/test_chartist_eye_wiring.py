@@ -37,35 +37,54 @@ from src.volume_profile import VolumeProfileResult, VolumeProfileStore
 
 
 class TestWiringConstants:
-    def test_structure_align_paths_only_trend_following(self):
-        """The structure-align bonus only goes to trend-following evaluators."""
+    def test_structure_align_paths_includes_trend_following_and_structure_aware(self):
+        """The structure-align bonus goes to trend-following evaluators AND
+        the structure-aware-with-optional-counter-trend evaluators (SR_FLIP /
+        QCB).  Allowlist widened 2026-05-08 after diag analysis surfaced 0%
+        TP rate across SR_FLIP / QCB emitters — bonus was structurally
+        barred from the paths carrying business volume."""
         expected = {
+            # Pure trend-following — original allowlist.
             "TREND_PULLBACK_EMA",
             "DIVERGENCE_CONTINUATION",
             "CONTINUATION_LIQUIDITY_SWEEP",
             "POST_DISPLACEMENT_CONTINUATION",
+            # Structure-aware with optional counter-trend — added 2026-05-08.
+            "SR_FLIP_RETEST",
+            "QUIET_COMPRESSION_BREAK",
         }
         assert set(_STRUCTURE_ALIGN_PATHS) == expected
 
     def test_structure_align_paths_does_not_include_counter_trend(self):
-        """Counter-trend paths must NOT consume the structure bonus."""
+        """Counter-trend / tape-driven / break-event paths must NOT consume
+        the structure bonus — alignment with 4h leg is either irrelevant to
+        the thesis or directly counter to it."""
         excluded = {
             "LIQUIDITY_SWEEP_REVERSAL",   # counter-trend
             "FAILED_AUCTION_RECLAIM",     # counter-trend
-            "SR_FLIP_RETEST",             # structural break
             "WHALE_MOMENTUM",             # tape-driven
             "FUNDING_EXTREME_SIGNAL",     # contrarian
             "LIQUIDATION_REVERSAL",       # cascade
             "VOLUME_SURGE_BREAKOUT",      # break event
             "BREAKDOWN_SHORT",            # break event
             "OPENING_RANGE_BREAKOUT",     # break event
-            "QUIET_COMPRESSION_BREAK",    # break event
             "MA_CROSS_TREND_SHIFT",       # discrete event
         }
         for path in excluded:
             assert path not in _STRUCTURE_ALIGN_PATHS, (
                 f"{path} must not earn the structure-align bonus"
             )
+
+    def test_sr_flip_and_qcb_now_eligible(self):
+        """Regression guard for the 2026-05-08 allowlist widening.
+
+        SR_FLIP_RETEST and QUIET_COMPRESSION_BREAK take a soft penalty when
+        fighting 4h structure (per the HTF policy table).  The symmetric
+        counterpart — a bonus when aligned — was missing pre-fix and the
+        diag confirmed STRUCT_ALIGN fired on 0/3 recent terminal samples.
+        Re-removing them would re-introduce the same blind spot."""
+        assert "SR_FLIP_RETEST" in _STRUCTURE_ALIGN_PATHS
+        assert "QUIET_COMPRESSION_BREAK" in _STRUCTURE_ALIGN_PATHS
 
     def test_structure_bonus_smaller_than_max_confluence_bonus(self):
         """Structure bonus magnitude shouldn't dominate confluence."""
@@ -362,6 +381,39 @@ class TestStructureAlignmentBonus:
         sig = _make_sig(setup_class="VOLUME_SURGE_BREAKOUT", direction=Direction.LONG)
         sp, _, _ = _apply_structure_bonus(tr, sig, symbol="BTCUSDT")
         assert sp == 0.0
+
+    def test_sr_flip_aligned_with_bull_leg_earns_bonus(self):
+        """SR_FLIP_RETEST eligible after 2026-05-08 widening — flipping a
+        level WITH the 4h structural leg is the strongest version of the
+        setup."""
+        tr = StructureTracker()
+        _seed_bull_leg(tr)
+        sig = _make_sig(setup_class="SR_FLIP_RETEST", direction=Direction.LONG)
+        sp, _, gates = _apply_structure_bonus(tr, sig, symbol="BTCUSDT")
+        assert sp == pytest.approx(-_STRUCTURE_ALIGN_BONUS)
+        assert gates == ["STRUCT_ALIGN:BULL_LEG"]
+
+    def test_sr_flip_counter_to_leg_no_bonus(self):
+        """SR_FLIP fighting the 4h leg is the lower-conviction variant —
+        no bonus."""
+        tr = StructureTracker()
+        _seed_bull_leg(tr)
+        sig = _make_sig(setup_class="SR_FLIP_RETEST", direction=Direction.SHORT)
+        sp, _, _ = _apply_structure_bonus(tr, sig, symbol="BTCUSDT")
+        assert sp == 0.0
+
+    def test_qcb_aligned_with_bear_leg_earns_bonus(self):
+        """QUIET_COMPRESSION_BREAK eligible after 2026-05-08 widening — a
+        compression break that pushes WITH the 4h leg is the strongest
+        version of the setup."""
+        tr = StructureTracker()
+        _seed_bear_leg(tr)
+        sig = _make_sig(
+            setup_class="QUIET_COMPRESSION_BREAK", direction=Direction.SHORT,
+        )
+        sp, _, gates = _apply_structure_bonus(tr, sig, symbol="BTCUSDT")
+        assert sp == pytest.approx(-_STRUCTURE_ALIGN_BONUS)
+        assert gates == ["STRUCT_ALIGN:BEAR_LEG"]
 
     def test_ma_cross_does_not_earn_structure_bonus(self):
         """MA_CROSS_TREND_SHIFT is its own discrete trigger; no double-dipping."""
