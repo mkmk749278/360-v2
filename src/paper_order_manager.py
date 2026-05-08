@@ -59,6 +59,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 from config import MAX_POSITION_USD, POSITION_SIZE_PCT
+from src.auto_trade import pnl_history
 from src.utils import get_logger
 
 log = get_logger("paper_order_manager")
@@ -373,6 +374,9 @@ class PaperOrderManager:
         # Persist cumulative PnL so the dashboard "Paper total since boot"
         # survives engine restarts and paper↔live mode toggles.
         _persist_paper_pnl_state(self._realised_pnl_total)
+        # Append to the daily-bucketed history ledger powering the
+        # weekly / monthly aggregates and the dashboard PnL chart.
+        pnl_history.record_close("paper", pnl)
 
         order_id = self._next_order_id(signal_id, f"tp{tp_level}")
         log.info(
@@ -568,6 +572,9 @@ class PaperOrderManager:
         # Persist cumulative PnL so the dashboard "Paper total since boot"
         # survives engine restarts and paper↔live mode toggles.
         _persist_paper_pnl_state(self._realised_pnl_total)
+        # Append to the daily-bucketed history ledger powering the
+        # weekly / monthly aggregates and the dashboard PnL chart.
+        pnl_history.record_close("paper", pnl)
 
         order_id = self._next_order_id(signal_id, f"close_{reason}")
         log.info(

@@ -45,6 +45,7 @@ from .schemas import (
     AutoModeChangeResponse,
     AutoModeStatus,
     HealthResponse,
+    PnlHistoryResponse,
     PositionsResponse,
     PulseSnapshot,
     SignalDetail,
@@ -54,6 +55,7 @@ from .schemas import (
 from .snapshot import (
     build_activity,
     build_agents,
+    build_pnl_history,
     build_auto_mode,
     build_positions,
     build_pulse,
@@ -315,6 +317,24 @@ def build_app(
     )
     async def auto_mode_get() -> AutoModeStatus:
         return build_auto_mode(engine)
+
+    @app.get(
+        "/api/pnl/history",
+        response_model=PnlHistoryResponse,
+        tags=["pulse"],
+        dependencies=[Depends(auth)],
+    )
+    async def pnl_history_get(
+        days: int = Query(30, ge=1, le=365),
+        mode: Optional[str] = Query(
+            None,
+            pattern="^(off|paper|live)$",
+            description="Override the engine's current mode — useful for "
+            "viewing the other ledger (e.g. paper history while in live).",
+        ),
+    ) -> PnlHistoryResponse:
+        payload = build_pnl_history(engine, mode=mode, days=days)
+        return PnlHistoryResponse(**payload)
 
     @app.post(
         "/api/auto-mode",

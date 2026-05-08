@@ -90,4 +90,12 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
         str(tmp_path / "active_router_state.json"),
     )
 
+    # PnL history ledger (2026-05-08).  Daily buckets + weekly/monthly
+    # aggregates persist across restarts; isolate per-test so paper /
+    # live PnL doesn't leak between cases.
+    monkeypatch.setenv(
+        "PNL_HISTORY_PATH",
+        str(tmp_path / "pnl_history.json"),
+    )
+
     yield

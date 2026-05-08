@@ -489,7 +489,56 @@ def build_auto_mode(engine: Any) -> AutoModeStatus:
             "manual_paused": False,
             "current_equity_usd": 0.0,
         }
+    # Augment with rolling-window aggregates from the pnl_history ledger.
+    # ``mode`` here is the engine's current mode — the ledger keys are
+    # paper / live, so for ``off`` we surface zeros (subscribers see
+    # no aggregates until they switch to paper or live).
+    try:
+        from src.auto_trade import pnl_history
+        active_mode = info.get("mode", "off")
+        if active_mode in ("paper", "live"):
+            info["weekly_pnl_usd"] = pnl_history.get_weekly(active_mode)
+            info["monthly_pnl_usd"] = pnl_history.get_monthly(active_mode)
+    except Exception:
+        # Fail-soft — zeros are the right default.
+        pass
     return AutoModeStatus(**info)
+
+
+def build_pnl_history(
+    engine: Any, *, mode: Optional[str] = None, days: int = 30
+) -> Dict[str, Any]:
+    """Daily-bucketed realised PnL series + rolling aggregates.
+
+    Returns a dict matching ``PnlHistoryResponse``.  ``mode`` defaults to
+    the engine's current auto-execution mode.
+    """
+    if mode is None:
+        mode = getattr(engine, "_current_auto_mode", "off")
+    days = max(1, min(int(days), 365))
+    if mode in ("paper", "live"):
+        from src.auto_trade import pnl_history
+        series = pnl_history.get_history(mode, days=days)
+        weekly = pnl_history.get_weekly(mode)
+        monthly = pnl_history.get_monthly(mode)
+    else:
+        # Off-mode: surface an empty series rather than 404.  Client
+        # renders an "auto-trade off — no history" empty state.
+        from datetime import datetime, timedelta, timezone
+        today = datetime.now(timezone.utc).date()
+        series = [
+            ((today - timedelta(days=offset)).strftime("%Y-%m-%d"), 0.0)
+            for offset in range(days - 1, -1, -1)
+        ]
+        weekly = 0.0
+        monthly = 0.0
+    return {
+        "mode": mode,
+        "days": days,
+        "items": [{"date": d, "pnl_usd": p} for d, p in series],
+        "weekly_pnl_usd": weekly,
+        "monthly_pnl_usd": monthly,
+    }
 
 
 # ---------------------------------------------------------------------------

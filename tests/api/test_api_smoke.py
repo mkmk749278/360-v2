@@ -425,6 +425,53 @@ def test_auto_mode_get_returns_current(client: TestClient) -> None:
     assert r.status_code == 200
     body = r.json()
     assert body["mode"] == "paper"
+    # Weekly/monthly aggregates land alongside daily — default to 0 with no
+    # history yet (clean slate), but the keys must exist so the client
+    # can render zeros without conditional null handling.
+    assert "weekly_pnl_usd" in body
+    assert "monthly_pnl_usd" in body
+
+
+def test_pnl_history_returns_30_day_series(client: TestClient) -> None:
+    """The dashboard chart endpoint — daily series + rolling aggregates."""
+    r = client.get("/api/pnl/history")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "paper"
+    assert body["days"] == 30
+    assert len(body["items"]) == 30
+    # Each item: {date: YYYY-MM-DD, pnl_usd: float}
+    for item in body["items"]:
+        assert "date" in item
+        assert "pnl_usd" in item
+        assert isinstance(item["pnl_usd"], (int, float))
+    # Series oldest → newest (chart left-to-right).
+    dates = [it["date"] for it in body["items"]]
+    assert dates == sorted(dates)
+
+
+def test_pnl_history_respects_days_parameter(client: TestClient) -> None:
+    r = client.get("/api/pnl/history?days=7")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["days"] == 7
+    assert len(body["items"]) == 7
+
+
+def test_pnl_history_clamps_invalid_days(client: TestClient) -> None:
+    """Out-of-range days param is rejected at the FastAPI Query layer."""
+    r = client.get("/api/pnl/history?days=0")
+    assert r.status_code == 422
+    r = client.get("/api/pnl/history?days=999")
+    assert r.status_code == 422
+
+
+def test_pnl_history_mode_override(client: TestClient) -> None:
+    """Mode override lets the client view the live ledger while engine is paper."""
+    r = client.get("/api/pnl/history?mode=live&days=7")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["mode"] == "live"
 
 
 def test_auto_mode_post_switches(client: TestClient, engine: _StubEngine) -> None:
