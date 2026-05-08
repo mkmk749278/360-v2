@@ -16,8 +16,10 @@ import asyncio
 import dataclasses
 import inspect
 import json
+import os
 import time
 from datetime import date, datetime, timezone
+from pathlib import Path
 from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
 
 from config import (
@@ -102,6 +104,66 @@ def _signal_to_dict(sig: Signal) -> dict:
 _REDIS_KEY_SIGNALS = "signal_router:active_signals"
 _REDIS_KEY_POSITION_LOCK = "signal_router:position_lock"
 _REDIS_KEY_COOLDOWNS = "signal_router:cooldown_timestamps"
+
+# JSON fallback for engines without Redis (the default deployment topology
+# per CLAUDE.md: "Redis is optional. RedisClient + SignalQueue fall back to
+# in-memory.").  Pre-fix, Redis-less engines persisted no state at all —
+# every restart silently dropped active signals (owner reported losing
+# 3-4 in-flight trades per restart with the admin-alert "Engine shutting
+# down with N active signal(s). Please monitor open positions manually.").
+#
+# Path is env-overridable so tests can isolate per-fixture.  Default
+# matches the doctrine of other persistence files
+# (signal_dispatch_cooldown.json, ma_cross_cooldown.json,
+# paper_pnl_state.json).
+_ACTIVE_STATE_PATH_DEFAULT = "data/active_router_state.json"
+
+
+def _resolve_active_state_path() -> Path:
+    """Resolve the JSON-fallback path lazily so test fixtures can override
+    via env var after module import."""
+    return Path(os.getenv("ACTIVE_ROUTER_STATE_PATH", _ACTIVE_STATE_PATH_DEFAULT))
+
+
+def _load_active_state_from_disk() -> Optional[Dict[str, Any]]:
+    """Load persisted active-router state from JSON file.
+
+    Returns ``None`` on missing / corrupt / unreadable file (fail-soft —
+    a clean-slate session is the safe default for any IO failure).
+    """
+    path = _resolve_active_state_path()
+    try:
+        with path.open("r") as fp:
+            data = json.load(fp)
+    except FileNotFoundError:
+        return None
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning(
+            "Active-router state file corrupt at %s — starting fresh (%s)",
+            path, exc,
+        )
+        return None
+    if not isinstance(data, dict):
+        return None
+    return data
+
+
+def _persist_active_state_to_disk(payload: Dict[str, Any]) -> None:
+    """Atomic write of router state to JSON file (tmp + rename so a crash
+    mid-write doesn't leave a torn file).  Best-effort: any IO failure is
+    logged at WARNING and swallowed."""
+    path = _resolve_active_state_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(path.suffix + ".tmp")
+        with tmp.open("w") as fp:
+            json.dump(payload, fp)
+        tmp.replace(path)
+    except OSError as exc:
+        log.warning(
+            "Active-router state persist failed at %s: %s — continuing in-memory",
+            path, exc,
+        )
 
 
 class SignalRouter:
@@ -249,13 +311,27 @@ class SignalRouter:
     # ------------------------------------------------------------------
 
     async def restore(self) -> None:
-        """Reload active state from Redis after a process restart.
+        """Reload active state from Redis (or JSON-file fallback) after a
+        process restart.
 
         Should be called once before :meth:`start` to resume monitoring of
         any signals that were active when the process last exited.
+        Without this, an engine restart silently drops in-flight signals —
+        the admin alert "Engine shutting down with N active signal(s)"
+        owners reported losing data on.
+
+        Lookup order:
+          1. Redis (if configured + reachable)
+          2. JSON file at ``data/active_router_state.json`` (default
+             deployment topology — Redis is optional per CLAUDE.md)
         """
-        if self._redis is None or not self._redis.available:
+        if self._redis is not None and self._redis.available:
+            await self._restore_from_redis()
             return
+        # Redis unavailable — fall back to the on-disk JSON file.
+        self._restore_from_disk()
+
+    async def _restore_from_redis(self) -> None:
         try:
             client = self._redis.client
             if client is None:
@@ -299,38 +375,105 @@ class SignalRouter:
         except Exception as exc:
             log.warning("Failed to restore state from Redis: {}", exc)
 
-    async def _persist_state(self) -> None:
-        """Serialize and save active router state to Redis.
+    def _restore_from_disk(self) -> None:
+        """Load active state from the JSON-file fallback (Redis-less mode)."""
+        data = _load_active_state_from_disk()
+        if data is None:
+            return
 
-        Persists :attr:`_active_signals`, :attr:`_position_lock`, and
+        signals_data = data.get("active_signals") or {}
+        if isinstance(signals_data, dict):
+            for sid, sig_data in signals_data.items():
+                if not isinstance(sig_data, dict):
+                    continue
+                sig = _signal_from_dict(sig_data)
+                if sig is not None:
+                    self._active_signals[sid] = sig
+        if self._active_signals:
+            log.info(
+                "Restored {} active signal(s) from disk",
+                len(self._active_signals),
+            )
+
+        lock_data = data.get("position_lock") or {}
+        if isinstance(lock_data, dict):
+            for sym, dir_str in lock_data.items():
+                try:
+                    self._position_lock[sym] = Direction(dir_str)
+                except (ValueError, TypeError):
+                    continue
+
+        cooldown_data = data.get("cooldown_timestamps") or {}
+        if isinstance(cooldown_data, dict):
+            for key, ts_str in cooldown_data.items():
+                parts = str(key).split("|", 1)
+                if len(parts) != 2:
+                    continue
+                sym, chan = parts
+                try:
+                    self._cooldown_timestamps[(sym, chan)] = datetime.fromisoformat(
+                        str(ts_str)
+                    )
+                except ValueError:
+                    continue
+        if self._cooldown_timestamps:
+            log.info(
+                "Restored {} cooldown timestamp(s) from disk",
+                len(self._cooldown_timestamps),
+            )
+
+    async def _persist_state(self) -> None:
+        """Serialize and save active router state.
+
+        Writes :attr:`_active_signals`, :attr:`_position_lock`, and
         :attr:`_cooldown_timestamps` so that state can be restored after a
         process restart via :meth:`restore`.
+
+        Storage backend:
+          1. Redis when configured + reachable (preferred)
+          2. JSON file at ``data/active_router_state.json`` as fallback
+             (default deployment topology — Redis is optional)
         """
-        if self._redis is None or not self._redis.available:
-            return
-        try:
-            client = self._redis.client
-            if client is None:
-                return
-            # Persist active signals
-            signals_payload = {
-                sid: _signal_to_dict(sig)
-                for sid, sig in self._active_signals.items()
-            }
-            await client.set(_REDIS_KEY_SIGNALS, json.dumps(signals_payload))
+        # Build the payload once, dispatch to whichever backend is wired.
+        signals_payload = {
+            sid: _signal_to_dict(sig)
+            for sid, sig in self._active_signals.items()
+        }
+        lock_payload = {
+            sym: dir_.value for sym, dir_ in self._position_lock.items()
+        }
+        cooldown_payload = {
+            f"{sym}|{chan}": ts.isoformat()
+            for (sym, chan), ts in self._cooldown_timestamps.items()
+        }
 
-            # Persist position lock
-            lock_payload = {sym: dir_.value for sym, dir_ in self._position_lock.items()}
-            await client.set(_REDIS_KEY_POSITION_LOCK, json.dumps(lock_payload))
+        if self._redis is not None and self._redis.available:
+            try:
+                client = self._redis.client
+                if client is not None:
+                    await client.set(
+                        _REDIS_KEY_SIGNALS, json.dumps(signals_payload)
+                    )
+                    await client.set(
+                        _REDIS_KEY_POSITION_LOCK, json.dumps(lock_payload)
+                    )
+                    await client.set(
+                        _REDIS_KEY_COOLDOWNS, json.dumps(cooldown_payload)
+                    )
+                    return
+            except Exception as exc:
+                log.warning("Failed to persist state to Redis: {}", exc)
+                # Fall through to disk persistence so we don't lose state
+                # when Redis blips temporarily.
 
-            # Persist cooldown timestamps (tuple keys → "symbol|channel" strings)
-            cooldown_payload = {
-                f"{sym}|{chan}": ts.isoformat()
-                for (sym, chan), ts in self._cooldown_timestamps.items()
+        # Redis unavailable / errored — fall back to JSON file.
+        _persist_active_state_to_disk(
+            {
+                "active_signals": signals_payload,
+                "position_lock": lock_payload,
+                "cooldown_timestamps": cooldown_payload,
             }
-            await client.set(_REDIS_KEY_COOLDOWNS, json.dumps(cooldown_payload))
-        except Exception as exc:
-            log.warning("Failed to persist state to Redis: {}", exc)
+        )
 
     def _schedule_persist(self) -> None:
         """Fire-and-forget: schedule :meth:`_persist_state` on the running loop."""
