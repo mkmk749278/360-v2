@@ -65,6 +65,14 @@ class WSConnection:
     # Health monitoring fields (used by _health_check_loop)
     health_check_ts: float = 0.0   # last time a health check snapshot was taken
     health_msg_count: int = 0      # messages received since last health check
+    # Reconnect-duration instrumentation (Phase 1, 2026-05-08).
+    # ``degraded_since`` stamps monotonic time when the connection went
+    # degraded; cleared when it goes healthy again.  ``last_reconnect_ms``
+    # is the duration of the most recent recovery (drop → restored), in
+    # milliseconds.  Both feed /diag + the truth-report parser to give us
+    # data for tuning the REST-fallback grace window.
+    degraded_since: float = 0.0
+    last_reconnect_ms: float = 0.0
 
 
 class WebSocketManager:
@@ -322,6 +330,14 @@ class WebSocketManager:
         if self._rest_fallback_active:
             return
         self._rest_fallback_active = True
+        # Phase 1 instrumentation: bump the counter so /diag + truth report
+        # can show how often this triggers.  Pre-fix this was declared but
+        # never incremented.
+        self._ws_rest_fallback_count += 1
+        log.info(
+            "ws_rest_fallback_activated label={} total={}",
+            self._label, self._ws_rest_fallback_count,
+        )
         self._fallback_task = asyncio.create_task(self._rest_fallback_loop())
         if self._admin_alert:
             asyncio.create_task(self._maybe_alert_after_grace())
@@ -410,6 +426,38 @@ class WebSocketManager:
         if conn.degraded == degraded:
             return
         conn.degraded = degraded
+        # Reconnect-duration instrumentation (Phase 1, 2026-05-08).
+        #
+        # On drop (degraded=True):  stamp ``degraded_since`` for later diff.
+        # On restore (degraded=False):
+        #   * compute drop → restored duration in ms
+        #   * write to ``last_reconnect_ms`` for /diag exposure
+        #   * emit a parseable ``ws_reconnect_duration_ms`` log marker that
+        #     the truth-report parser will aggregate into a distribution
+        #   * bump the recovery counter so /diag shows total recoveries
+        #     since boot
+        now = time.monotonic()
+        if degraded:
+            conn.degraded_since = now
+        else:
+            if conn.degraded_since > 0:
+                duration_ms = (now - conn.degraded_since) * 1000.0
+                conn.last_reconnect_ms = duration_ms
+                self._ws_reconnection_count += 1
+                # Snapshot the index for log readability — connections
+                # don't carry an explicit ID, so we use the position in
+                # ``_connections``.
+                idx = (
+                    self._connections.index(conn)
+                    if conn in self._connections else -1
+                )
+                log.info(
+                    "ws_reconnect_duration_ms label={} conn={} duration_ms={:.0f} "
+                    "attempts={} streams={}",
+                    self._label, idx, duration_ms,
+                    conn.reconnect_attempts, len(conn.streams),
+                )
+                conn.degraded_since = 0.0
         self._sync_rest_fallback_state()
 
     # ------------------------------------------------------------------
@@ -685,6 +733,54 @@ class WebSocketManager:
     @property
     def ws_reconnection_count(self) -> int:
         return self._ws_reconnection_count
+
+    @property
+    def total_drops(self) -> int:
+        """Public read of the drop counter for /diag rendering."""
+        return self._total_drops
+
+    def get_connection_states(self) -> List[Dict[str, Any]]:
+        """Per-connection snapshot for /diag rendering.
+
+        Each entry: ``{conn: int, streams: int, healthy: bool, degraded: bool,
+        degraded_for_sec: float, last_reconnect_ms: float,
+        sec_since_last_msg: float, ping_latency_ms: float}``.
+
+        ``degraded_for_sec`` is 0 when the connection is healthy; non-zero
+        only while a drop is in-flight.  ``last_reconnect_ms`` shows the
+        most recent recovery time so operators can spot trends.
+        """
+        now = time.monotonic()
+        out: List[Dict[str, Any]] = []
+        for idx, conn in enumerate(self._connections):
+            stale_threshold = max(
+                1.0, self._heartbeat_interval * self._staleness_multiplier
+            )
+            sec_since_msg = (
+                (now - conn.last_pong) if conn.last_pong > 0 else -1.0
+            )
+            healthy = (
+                conn.ws is not None
+                and not conn.ws.closed
+                and sec_since_msg < stale_threshold
+                and sec_since_msg >= 0
+            )
+            degraded_for = (
+                (now - conn.degraded_since) if conn.degraded_since > 0 else 0.0
+            )
+            out.append({
+                "conn": idx,
+                "streams": len(conn.streams),
+                "healthy": healthy,
+                "degraded": conn.degraded,
+                "degraded_for_sec": round(degraded_for, 1),
+                "last_reconnect_ms": round(conn.last_reconnect_ms, 0),
+                "sec_since_last_msg": round(sec_since_msg, 1)
+                    if sec_since_msg >= 0 else -1,
+                "ping_latency_ms": round(conn.ping_latency_ms, 1),
+                "reconnect_attempts": conn.reconnect_attempts,
+            })
+        return out
 
     def get_healthy_connection_ratio(self) -> float:
         """Return ratio of healthy connections (0.0–1.0)."""

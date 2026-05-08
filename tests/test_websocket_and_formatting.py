@@ -128,6 +128,94 @@ class TestWebSocketHealthRatio:
         assert ws.is_healthy is False
 
 
+class TestReconnectDurationInstrumentation:
+    """Phase 1 instrumentation (2026-05-08): drop → restored timing,
+    counter activation, /diag-friendly state snapshot."""
+
+    def test_drop_stamps_degraded_since(self):
+        async def handler(data): pass
+        ws = WebSocketManager(handler, market="futures")
+        conn = WSConnection(streams=["btcusdt@kline_1m"])
+        ws._connections = [conn]
+        assert conn.degraded_since == 0.0
+        ws._set_connection_degraded(conn, True)
+        assert conn.degraded is True
+        assert conn.degraded_since > 0
+
+    def test_restore_records_duration_and_clears_degraded_since(self):
+        """Drop → restored cycle stamps last_reconnect_ms and clears
+        degraded_since (so the next degradation starts fresh)."""
+        async def handler(data): pass
+        ws = WebSocketManager(handler, market="futures")
+        conn = WSConnection(streams=["btcusdt@kline_1m"])
+        ws._connections = [conn]
+        ws._set_connection_degraded(conn, True)
+        # Simulate elapsed time by hand-rolling degraded_since.
+        conn.degraded_since = time.monotonic() - 25.0
+        ws._set_connection_degraded(conn, False)
+        assert conn.degraded is False
+        assert conn.degraded_since == 0.0
+        # ~25s should be ~25000ms ± a tiny epsilon for the stamping itself.
+        assert 24500.0 <= conn.last_reconnect_ms <= 25500.0
+
+    def test_recovery_increments_counter(self):
+        """Activate the previously-dead ``_ws_reconnection_count``."""
+        async def handler(data): pass
+        ws = WebSocketManager(handler, market="futures")
+        conn = WSConnection(streams=["btcusdt@kline_1m"])
+        ws._connections = [conn]
+        assert ws.ws_reconnection_count == 0
+        ws._set_connection_degraded(conn, True)
+        ws._set_connection_degraded(conn, False)
+        assert ws.ws_reconnection_count == 1
+        # Two more cycles.
+        ws._set_connection_degraded(conn, True)
+        ws._set_connection_degraded(conn, False)
+        ws._set_connection_degraded(conn, True)
+        ws._set_connection_degraded(conn, False)
+        assert ws.ws_reconnection_count == 3
+
+    def test_idempotent_set_degraded_no_double_count(self):
+        """Calling _set_connection_degraded with the same value twice is a no-op."""
+        async def handler(data): pass
+        ws = WebSocketManager(handler, market="futures")
+        conn = WSConnection(streams=["btcusdt@kline_1m"])
+        ws._connections = [conn]
+        ws._set_connection_degraded(conn, True)
+        ws._set_connection_degraded(conn, True)  # duplicate — should noop
+        ws._set_connection_degraded(conn, False)
+        ws._set_connection_degraded(conn, False)  # duplicate — should noop
+        # Still exactly 1 recovery counted.
+        assert ws.ws_reconnection_count == 1
+
+    def test_get_connection_states_emits_per_connection_snapshot(self):
+        async def handler(data): pass
+        ws = WebSocketManager(handler, market="futures")
+        now = time.monotonic()
+        mock_open = mock.MagicMock()
+        mock_open.closed = False
+        conn1 = WSConnection(
+            streams=["btcusdt@kline_1m", "ethusdt@kline_1m"],
+            last_pong=now, ws=mock_open,
+        )
+        conn2 = WSConnection(streams=["solusdt@kline_1m"])  # no ws — degraded
+        conn2.degraded = True
+        conn2.degraded_since = now - 30.0
+        ws._connections = [conn1, conn2]
+
+        states = ws.get_connection_states()
+        assert len(states) == 2
+        assert states[0]["conn"] == 0
+        assert states[0]["streams"] == 2
+        assert states[0]["healthy"] is True
+        assert states[0]["degraded"] is False
+        assert states[1]["conn"] == 1
+        assert states[1]["streams"] == 1
+        assert states[1]["healthy"] is False
+        assert states[1]["degraded"] is True
+        assert states[1]["degraded_for_sec"] >= 29.0
+
+
 class TestFormatFreeSignal:
     def test_free_signal_has_header_and_footer(self):
         sig = Signal(

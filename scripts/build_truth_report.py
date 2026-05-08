@@ -18,6 +18,7 @@ from src.runtime_truth_report import (
     count_log_markers,
     parse_free_channel_posts_from_logs,
     parse_pre_tp_fires_from_logs,
+    parse_ws_outages_from_logs,
     format_truth_report_markdown,
     load_json_file,
     parse_channel_funnel_from_logs,
@@ -113,6 +114,7 @@ def main() -> int:
     log_parse_diagnostics = count_log_markers(current_text)
     free_channel_posts = parse_free_channel_posts_from_logs(current_text)
     pre_tp_fires = parse_pre_tp_fires_from_logs(current_text)
+    ws_outages = parse_ws_outages_from_logs(current_text)
 
     invalidation_records: list = []
     if args.invalidation_records_json:
@@ -143,6 +145,7 @@ def main() -> int:
         log_parse_diagnostics=log_parse_diagnostics,
         free_channel_posts=free_channel_posts,
         pre_tp_fires=pre_tp_fires,
+        ws_outages=ws_outages,
         now_ts=time.time(),
     )
 
