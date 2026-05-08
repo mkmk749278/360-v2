@@ -15,6 +15,7 @@ from src.runtime_truth_report import (
     parse_path_funnel_from_logs,
     parse_quiet_scalp_block_from_logs,
     parse_regime_distribution_from_logs,
+    parse_ws_outages_from_logs,
     summarize_invalidation_audit,
 )
 
@@ -1252,3 +1253,136 @@ def test_format_truth_report_renders_soft_penalty_placeholder_when_missing() -> 
     md = format_truth_report_markdown(snapshot, {})
     assert "## Soft-penalty per-type breakdown" in md
     assert "no soft-penalty per-type data" in md
+
+
+# ---------------------------------------------------------------------------
+# WebSocket outage parser (Phase 1 instrumentation, 2026-05-08)
+# ---------------------------------------------------------------------------
+
+
+class TestParseWsOutagesFromLogs:
+    def test_empty_log_returns_zero_counts(self) -> None:
+        out = parse_ws_outages_from_logs("")
+        assert out["reconnects"]["total"] == 0
+        assert out["rest_fallback_activations"]["total"] == 0
+
+    def test_single_reconnect_marker_parsed(self) -> None:
+        log = (
+            "2026-05-08 12:00:00 | ws | INFO | "
+            "ws_reconnect_duration_ms label=futures conn=0 "
+            "duration_ms=25000 attempts=2 streams=200"
+        )
+        out = parse_ws_outages_from_logs(log)
+        assert out["reconnects"]["total"] == 1
+        assert out["reconnects"]["by_label"]["futures"]["count"] == 1
+        assert out["reconnects"]["by_label"]["futures"]["max_ms"] == 25000.0
+
+    def test_exceeds_grace_threshold_counted(self) -> None:
+        """Reconnects > 180_000ms (the WS_REST_FALLBACK_ALERT_GRACE_SEC
+        threshold) are counted in ``exceeds_grace_count`` — those are
+        the ones that actually fired admin alerts."""
+        log = "\n".join([
+            "ws_reconnect_duration_ms label=futures conn=0 "
+            "duration_ms=10000 attempts=1 streams=200",
+            "ws_reconnect_duration_ms label=futures conn=1 "
+            "duration_ms=200000 attempts=4 streams=100",
+            "ws_reconnect_duration_ms label=futures conn=0 "
+            "duration_ms=180001 attempts=4 streams=200",
+        ])
+        out = parse_ws_outages_from_logs(log)
+        assert out["reconnects"]["by_label"]["futures"]["count"] == 3
+        # Two exceed 180_000ms (200_000 and 180_001).
+        assert (
+            out["reconnects"]["by_label"]["futures"]["exceeds_grace_count"] == 2
+        )
+
+    def test_per_label_isolation(self) -> None:
+        """Spot and futures stats are reported separately so we can
+        spot which manager is misbehaving."""
+        log = "\n".join([
+            "ws_reconnect_duration_ms label=spot conn=0 "
+            "duration_ms=5000 attempts=1 streams=100",
+            "ws_reconnect_duration_ms label=futures conn=0 "
+            "duration_ms=200000 attempts=4 streams=200",
+        ])
+        out = parse_ws_outages_from_logs(log)
+        assert "spot" in out["reconnects"]["by_label"]
+        assert "futures" in out["reconnects"]["by_label"]
+        assert (
+            out["reconnects"]["by_label"]["spot"]["exceeds_grace_count"] == 0
+        )
+        assert (
+            out["reconnects"]["by_label"]["futures"]["exceeds_grace_count"]
+            == 1
+        )
+
+    def test_rest_fallback_activations_counted(self) -> None:
+        log = "\n".join([
+            "ws_rest_fallback_activated label=futures total=1",
+            "ws_rest_fallback_activated label=futures total=2",
+            "ws_rest_fallback_activated label=spot total=1",
+        ])
+        out = parse_ws_outages_from_logs(log)
+        assert out["rest_fallback_activations"]["total"] == 3
+        assert (
+            out["rest_fallback_activations"]["by_label"]["futures"] == 2
+        )
+        assert (
+            out["rest_fallback_activations"]["by_label"]["spot"] == 1
+        )
+
+    def test_malformed_lines_skipped(self) -> None:
+        """Garbage / partial lines must not crash the parser — fail-soft."""
+        log = "\n".join([
+            "ws_reconnect_duration_ms not a real marker",
+            "random log line",
+            "ws_reconnect_duration_ms label=futures conn=0 "
+            "duration_ms=5000 attempts=1 streams=200",
+        ])
+        out = parse_ws_outages_from_logs(log)
+        assert out["reconnects"]["total"] == 1
+
+    def test_render_section_in_markdown(self) -> None:
+        """The ws_outages section must appear in the rendered markdown."""
+        snapshot = {
+            "engine_running": True,
+            "engine_health": "healthy",
+            "heartbeat_age": 1,
+            "performance_record_age_sec": 100,
+            "path_funnels": {},
+            "lifecycle_summary": {},
+            "regime_distribution": {},
+            "quiet_scalp_block": {},
+            "confidence_gate_decisions": {},
+            "confidence_gate_components": {},
+            "invalidation_audit": {},
+            "log_parse_diagnostics": {},
+            "free_channel_posts": {},
+            "pre_tp_fires": {},
+            "ws_outages": {
+                "reconnects": {
+                    "total": 5,
+                    "by_label": {
+                        "futures": {
+                            "count": 5,
+                            "p50_ms": 60000.0,
+                            "p95_ms": 200000.0,
+                            "max_ms": 220000.0,
+                            "exceeds_grace_count": 2,
+                        }
+                    },
+                },
+                "rest_fallback_activations": {
+                    "total": 2,
+                    "by_label": {"futures": 2},
+                },
+            },
+            "post_correction_focus": {},
+            "recommended_operator_focus": {},
+        }
+        md = format_truth_report_markdown(snapshot, {})
+        assert "## WebSocket outage stats" in md
+        assert "Total reconnects in window: **5**" in md
+        assert "Total REST-fallback activations: **2**" in md
+        # Per-label table rendered.
+        assert "| futures | 5 | 60000 | 200000 | 220000 | 2 |" in md

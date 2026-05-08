@@ -152,6 +152,21 @@ _PRE_TP_FIRE_RE = re.compile(
     r"age=(?P<age>[-\d.]+)s?"
 )
 
+# WebSocket reconnect-duration instrumentation (Phase 1, 2026-05-08).
+# Each successful drop → restored cycle emits a parseable marker so the
+# truth report can build a distribution and answer "are reconnects taking
+# longer than the 180s REST-fallback grace window?".
+_WS_RECONNECT_MARKER = "ws_reconnect_duration_ms "
+_WS_RECONNECT_RE = re.compile(
+    r"ws_reconnect_duration_ms\s+label=(?P<label>\S+)\s+conn=(?P<conn>\S+)\s+"
+    r"duration_ms=(?P<duration_ms>[-\d.]+)\s+"
+    r"attempts=(?P<attempts>\d+)\s+streams=(?P<streams>\d+)"
+)
+_WS_REST_FALLBACK_MARKER = "ws_rest_fallback_activated "
+_WS_REST_FALLBACK_RE = re.compile(
+    r"ws_rest_fallback_activated\s+label=(?P<label>\S+)\s+total=(?P<total>\d+)"
+)
+
 # Match e.g. "QUIET_SCALP_BLOCK BTCUSDT 360_SCALP conf=58.2 < min=60.0"
 _QUIET_SCALP_BLOCK_RE = re.compile(
     r"QUIET_SCALP_BLOCK\s+(?P<symbol>\S+)\s+(?P<channel>\S+)\s+conf=(?P<conf>[-\d.]+)\s+<\s+min=(?P<min>[-\d.]+)"
@@ -635,6 +650,85 @@ def parse_pre_tp_fires_from_logs(log_text: str) -> Dict[str, Any]:
     }
 
 
+def parse_ws_outages_from_logs(log_text: str) -> Dict[str, Any]:
+    """Parse ``ws_reconnect_duration_ms`` + ``ws_rest_fallback_activated``
+    markers into a distribution + activation count.
+
+    Used to investigate the "REST fallback activated" admin alerts —
+    answers two operational questions:
+
+      1. *How long are reconnects actually taking?* — distribution of
+         drop → restored durations across the window.  Buckets aligned
+         to the 180s ``WS_REST_FALLBACK_ALERT_GRACE_SEC`` threshold so
+         operators can immediately see what fraction of reconnects
+         exceed grace (the ones that actually fire alerts).
+
+      2. *How often does REST fallback activate?* — total activations
+         per WS-manager label, with zero counts a meaningful baseline
+         (no outages in window).
+
+    Returns ``{ "reconnects": {total, by_label: {label → {count, p50_ms,
+    p95_ms, max_ms, exceeds_grace_count}}}, "rest_fallback_activations":
+    {total, by_label: {label → count}} }``.
+    """
+    if not log_text:
+        return {
+            "reconnects": {"total": 0, "by_label": {}},
+            "rest_fallback_activations": {"total": 0, "by_label": {}},
+        }
+
+    grace_ms = 180_000.0  # WS_REST_FALLBACK_ALERT_GRACE_SEC × 1000
+
+    durations_by_label: Dict[str, List[float]] = defaultdict(list)
+    fallback_by_label: Dict[str, int] = defaultdict(int)
+
+    for line in log_text.splitlines():
+        if _WS_RECONNECT_MARKER in line:
+            m = _WS_RECONNECT_RE.search(line)
+            if m is None:
+                continue
+            try:
+                duration = float(m.group("duration_ms"))
+            except (TypeError, ValueError):
+                continue
+            durations_by_label[m.group("label")].append(duration)
+        elif _WS_REST_FALLBACK_MARKER in line:
+            m = _WS_REST_FALLBACK_RE.search(line)
+            if m is None:
+                continue
+            fallback_by_label[m.group("label")] += 1
+
+    def _percentile(sorted_vals: List[float], pct: float) -> float:
+        if not sorted_vals:
+            return 0.0
+        if len(sorted_vals) == 1:
+            return sorted_vals[0]
+        idx = max(0, min(len(sorted_vals) - 1, int(pct * (len(sorted_vals) - 1))))
+        return sorted_vals[idx]
+
+    by_label: Dict[str, Dict[str, Any]] = {}
+    total_reconnects = 0
+    for label, durations in durations_by_label.items():
+        durations.sort()
+        exceeds = sum(1 for d in durations if d > grace_ms)
+        by_label[label] = {
+            "count": len(durations),
+            "p50_ms": round(_percentile(durations, 0.50), 0),
+            "p95_ms": round(_percentile(durations, 0.95), 0),
+            "max_ms": round(durations[-1], 0),
+            "exceeds_grace_count": exceeds,
+        }
+        total_reconnects += len(durations)
+
+    return {
+        "reconnects": {"total": total_reconnects, "by_label": by_label},
+        "rest_fallback_activations": {
+            "total": sum(fallback_by_label.values()),
+            "by_label": dict(fallback_by_label),
+        },
+    }
+
+
 def parse_free_channel_posts_from_logs(log_text: str) -> Dict[str, Any]:
     """Parse `free_channel_post source=... severity=...` markers.
 
@@ -985,6 +1079,7 @@ def build_snapshot(
     log_parse_diagnostics: Optional[Dict[str, int]] = None,
     free_channel_posts: Optional[Dict[str, Any]] = None,
     pre_tp_fires: Optional[Dict[str, Any]] = None,
+    ws_outages: Optional[Dict[str, Any]] = None,
     now_ts: Optional[float] = None,
 ) -> Tuple[Dict[str, Any], Dict[str, Any]]:
     now_ts = now_ts or time.time()
@@ -1182,6 +1277,7 @@ def build_snapshot(
         "log_parse_diagnostics": log_parse_diagnostics or {},
         "free_channel_posts": free_channel_posts or {},
         "pre_tp_fires": pre_tp_fires or {},
+        "ws_outages": ws_outages or {},
         "recommended_operator_focus": {
             "most_suspicious_degradation": degraded[0] if degraded else None,
             "most_promising_healthy_path": healthiest[0] if healthiest else None,
@@ -1656,6 +1752,52 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             top_n = sorted(by_symbol.items(), key=lambda kv: -int(kv[1]))[:10]
             sym_summary = ", ".join(f"{s}={c}" for s, c in top_n)
             lines.append(f"- Top symbols: {sym_summary}")
+
+    # ── WebSocket outage stats (Phase 1 instrumentation, 2026-05-08) ──
+    # Investigates the "REST fallback activated" admin alerts: how many
+    # reconnects in window, percentile durations, and how many exceeded
+    # the WS_REST_FALLBACK_ALERT_GRACE_SEC = 180s threshold (i.e. fired
+    # an alert).  Zero counts = a healthy window (no WS drops worth
+    # reporting).
+    ws_outages = snapshot.get("ws_outages", {}) or {}
+    rec = ws_outages.get("reconnects", {}) or {}
+    fb = ws_outages.get("rest_fallback_activations", {}) or {}
+    lines.extend(["", "## WebSocket outage stats"])
+    lines.append(
+        "_Drop → restored durations and REST-fallback activations parsed from "
+        "engine logs.  Each reconnect emits a `ws_reconnect_duration_ms` "
+        "marker; each REST-fallback start emits `ws_rest_fallback_activated`. "
+        "The 180s grace column shows how many reconnects exceeded "
+        "``WS_REST_FALLBACK_ALERT_GRACE_SEC`` (i.e. fired an admin alert) — "
+        "if `exceeds_grace` >> 0 we should bump the grace, shard further, "
+        "or both._"
+    )
+    lines.append(f"- Total reconnects in window: **{rec.get('total', 0)}**")
+    lines.append(
+        f"- Total REST-fallback activations: **{fb.get('total', 0)}**"
+    )
+    rec_by_label = rec.get("by_label", {}) or {}
+    if rec_by_label:
+        lines.append("")
+        lines.append(
+            "| Label | Reconnects | p50 (ms) | p95 (ms) | Max (ms) | "
+            "Exceeds 180s grace |"
+        )
+        lines.append("|---|---:|---:|---:|---:|---:|")
+        for label, stats in sorted(rec_by_label.items()):
+            lines.append(
+                f"| {label} | {stats.get('count', 0)} | "
+                f"{stats.get('p50_ms', 0):.0f} | {stats.get('p95_ms', 0):.0f} | "
+                f"{stats.get('max_ms', 0):.0f} | "
+                f"{stats.get('exceeds_grace_count', 0)} |"
+            )
+    fb_by_label = fb.get("by_label", {}) or {}
+    if fb_by_label:
+        lines.append("")
+        lines.append("| Label | REST-fallback activations |")
+        lines.append("|---|---:|")
+        for label, count in sorted(fb_by_label.items()):
+            lines.append(f"| {label} | {count} |")
 
     # ── Free-channel post attribution (Phase 1 / 2a / 2b / 5) ─────────
     fcp = snapshot.get("free_channel_posts", {}) or {}

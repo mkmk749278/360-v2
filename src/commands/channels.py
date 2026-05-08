@@ -448,6 +448,45 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
         sections.append("scanner._suppression_counters not exposed")
     sections.append("")
 
+    # --- WebSocket health ---
+    # Phase 1 instrumentation (2026-05-08): per-connection state +
+    # reconnect-duration trail to investigate the "REST fallback
+    # activated" admin alerts.  Surfaces:
+    #   * total drops / reconnections / fallback activations since boot
+    #   * per-connection: streams, healthy/degraded, current degraded
+    #     duration (if active), most-recent reconnect duration in ms,
+    #     seconds since last data, ping latency
+    sections.append("--- WEBSOCKET HEALTH ---")
+    for label, ws in (("spot", ctx.ws_spot), ("futures", ctx.ws_futures)):
+        if ws is None:
+            sections.append(f"  {label}: not configured")
+            continue
+        try:
+            states = ws.get_connection_states()
+        except Exception as exc:
+            sections.append(f"  {label}: error reading state ({exc})")
+            continue
+        total_drops = getattr(ws, "total_drops", 0)
+        recoveries = getattr(ws, "ws_reconnection_count", 0)
+        fb_count = getattr(ws, "ws_rest_fallback_count", 0)
+        fb_active = bool(getattr(ws, "_rest_fallback_active", False))
+        sections.append(
+            f"  {label}: drops={total_drops} recoveries={recoveries} "
+            f"rest_fallback_activations={fb_count} "
+            f"fallback_active_now={fb_active}"
+        )
+        for s in states:
+            sections.append(
+                f"    conn[{s['conn']}] streams={s['streams']} "
+                f"healthy={s['healthy']} degraded={s['degraded']} "
+                f"degraded_for={s['degraded_for_sec']}s "
+                f"last_reconnect_ms={s['last_reconnect_ms']:.0f} "
+                f"sec_since_last_msg={s['sec_since_last_msg']} "
+                f"ping_ms={s['ping_latency_ms']} "
+                f"reconnect_attempts={s['reconnect_attempts']}"
+            )
+    sections.append("")
+
     # --- Wiring health ---
     sections.append("--- WIRING HEALTH (quick check) ---")
     sections.append(
