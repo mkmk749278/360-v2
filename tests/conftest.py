@@ -81,4 +81,13 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
         str(tmp_path / "paper_pnl_state.json"),
     )
 
+    # SignalRouter active-state JSON fallback (2026-05-08).  Same pattern —
+    # ``_resolve_active_state_path`` reads ``ACTIVE_ROUTER_STATE_PATH``
+    # lazily so this env override isolates each test against the production
+    # ``data/active_router_state.json`` ledger.
+    monkeypatch.setenv(
+        "ACTIVE_ROUTER_STATE_PATH",
+        str(tmp_path / "active_router_state.json"),
+    )
+
     yield

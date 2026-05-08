@@ -134,6 +134,16 @@ class Bootstrap:
         if hasattr(engine, "_free_watch_service"):
             await engine._free_watch_service.restore()
 
+        # 0e. Restore active-signal state — Redis if available, JSON fallback
+        # otherwise.  Without this, every engine restart silently dropped
+        # in-flight signals (owner reported "Engine shutting down with N
+        # active signal(s)" admin alerts losing 3-4 trades per redeploy).
+        if hasattr(engine, "router"):
+            try:
+                await engine.router.restore()
+            except Exception as exc:
+                log.warning("Failed to restore router state: {}", exc)
+
         # Wire API call tracking
         BinanceClient.on_api_call = engine.telemetry.record_api_call
 
@@ -313,10 +323,18 @@ class Bootstrap:
             try:
                 await engine.telegram.send_admin_alert(
                     f"⚠️ Engine shutting down with {active_count} active signal(s).\n"
-                    "Please monitor open positions manually."
+                    "State persisted — will resume on next boot."
                 )
             except Exception as exc:
                 log.warning("Failed to send shutdown alert: {}", exc)
+
+        # Force a final synchronous persist of router state so the next boot
+        # picks up every in-flight signal — even ones whose ``_schedule_persist``
+        # task was still in-flight when the shutdown task started.
+        try:
+            await engine.router._persist_state()
+        except Exception as exc:
+            log.warning("Failed to persist router state on shutdown: {}", exc)
 
         # Persist circuit breaker state to Redis (FINDING-021)
         if hasattr(engine, "circuit_breaker"):
