@@ -53,3 +53,4 @@ data/signal_history.json
 data/signal_performance.json
 src/data/scanner_heartbeat
 data/scanner_heartbeat
+data/paper_pnl_state.json

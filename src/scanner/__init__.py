@@ -4006,9 +4006,12 @@ class Scanner:
                 if _fr_adj != 0.0:
                     sig.confidence += _fr_adj
                     if _fr_flag:
-                        sig.soft_gate_flags = (
-                            sig.soft_gate_flags + f",{_fr_flag}"
-                        ).lstrip(",")
+                        # Route through _fired_gates so the join at the end
+                        # of the gate chain (sig.soft_gate_flags assignment
+                        # below) preserves it.  Pre-fix, this wrote directly
+                        # to sig.soft_gate_flags before the join, so the
+                        # join silently overwrote the flag.
+                        _fired_gates.append(_fr_flag)
                     log.debug(
                         "Funding gate {} {} fr={:.4f} {:+.1f}",
                         symbol, chan_name, _fr, _fr_adj,
@@ -4042,9 +4045,12 @@ class Scanner:
                     if ca_conf_adj != 0.0:
                         sig.confidence += ca_conf_adj
                         if ca_reason:
-                            sig.soft_gate_flags = (
-                                sig.soft_gate_flags + f",CROSS_ASSET:{ca_conf_adj:+.0f}"
-                            ).lstrip(",")
+                            # Route through _fired_gates (see Funding gate
+                            # comment above) so the join at the end of the
+                            # gate chain doesn't silently drop the flag.
+                            _fired_gates.append(
+                                f"CROSS_ASSET:{ca_conf_adj:+.0f}"
+                            )
                         log.debug(
                             "Cross-asset gate {} {} {:+.1f}: {}",
                             symbol, chan_name, ca_conf_adj, ca_reason,
