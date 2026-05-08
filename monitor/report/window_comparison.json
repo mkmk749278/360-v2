@@ -1,35 +1,35 @@
 {
-  "emissions_delta": -20,
+  "emissions_delta": 9,
   "enabled": true,
-  "fast_failures_delta": 1,
-  "gating_delta": -91100,
-  "no_generation_delta": -2868357,
+  "fast_failures_delta": 3,
+  "gating_delta": -5222,
+  "no_generation_delta": 1367441,
   "post_correction_window_delta": {
     "SR_FLIP_RETEST": {
-      "emitted_delta": -49,
+      "emitted_delta": -11,
       "geometry_changed_delta": 0,
-      "geometry_preserved_delta": 22831,
+      "geometry_preserved_delta": 17451,
       "geometry_rejected_delta": 0,
-      "median_first_breach_delta_sec": 1326.0,
-      "median_terminal_delta_sec": 890.06,
+      "median_first_breach_delta_sec": 882.08,
+      "median_terminal_delta_sec": 982.48,
       "sl_rate_delta": 0.0,
       "win_rate_delta": 0.0
     },
     "TREND_PULLBACK_EMA": {
-      "emitted_delta": 0,
+      "emitted_delta": 1,
       "geometry_changed_delta": 0,
-      "geometry_preserved_delta": 5,
+      "geometry_preserved_delta": 6,
       "geometry_rejected_delta": 0,
-      "median_first_breach_delta_sec": 0.0,
-      "median_terminal_delta_sec": 0.0,
-      "sl_rate_delta": 0.0,
+      "median_first_breach_delta_sec": 888.88,
+      "median_terminal_delta_sec": 889.11,
+      "sl_rate_delta": 100.0,
       "win_rate_delta": 0.0
     }
   },
   "quality_changes": {
     "FAILED_AUCTION_RECLAIM": {
-      "avg_pnl_delta": 0.35,
-      "current_avg_pnl": 0.35,
+      "avg_pnl_delta": 0.0717,
+      "current_avg_pnl": 0.0717,
       "current_win_rate": 0.0,
       "previous_avg_pnl": null,
       "previous_win_rate": null,
@@ -44,16 +44,16 @@
       "win_rate_delta": 0.0
     },
     "QUIET_COMPRESSION_BREAK": {
-      "avg_pnl_delta": -0.1206,
-      "current_avg_pnl": -0.1206,
+      "avg_pnl_delta": -0.1271,
+      "current_avg_pnl": -0.1271,
       "current_win_rate": 0.0,
       "previous_avg_pnl": null,
       "previous_win_rate": null,
       "win_rate_delta": 0.0
     },
     "SR_FLIP_RETEST": {
-      "avg_pnl_delta": 0.1961,
-      "current_avg_pnl": 0.1961,
+      "avg_pnl_delta": 0.1183,
+      "current_avg_pnl": 0.1183,
       "current_win_rate": 0.0,
       "previous_avg_pnl": null,
       "previous_win_rate": null,
