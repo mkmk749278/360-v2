@@ -286,7 +286,17 @@ def build_app(
         dependencies=[Depends(auth)],
     )
     async def positions() -> PositionsResponse:
-        items = build_positions(engine)
+        # Defensive logging (2026-05-08): the Trade tab fans out to three
+        # endpoints (auto-mode + positions + activity) and a single 500 on
+        # any of them shows the user "Could not load Trade state" with
+        # zero diagnostic context.  Wrapping each endpoint catches the
+        # exception, logs a full traceback for the VPS-side diagnosis,
+        # and returns an empty list so the rest of the page can render.
+        try:
+            items = build_positions(engine)
+        except Exception:
+            log.exception("/api/positions failed — returning empty list")
+            items = []
         return PositionsResponse(items=items, total=len(items))
 
     # ---- Activity ----
@@ -304,7 +314,11 @@ def build_app(
             description="Filter to one evaluator's lifecycle events",
         ),
     ) -> ActivityResponse:
-        items = build_activity(engine, limit=limit, setup_class=setup_class)
+        try:
+            items = build_activity(engine, limit=limit, setup_class=setup_class)
+        except Exception:
+            log.exception("/api/activity failed — returning empty list")
+            items = []
         return ActivityResponse(items=items, total=len(items))
 
     # ---- Auto-mode ----
@@ -316,7 +330,25 @@ def build_app(
         dependencies=[Depends(auth)],
     )
     async def auto_mode_get() -> AutoModeStatus:
-        return build_auto_mode(engine)
+        try:
+            return build_auto_mode(engine)
+        except Exception:
+            log.exception(
+                "/api/auto-mode failed — returning safe default off-mode status"
+            )
+            # Fail-soft: return a synthetic off-mode status so the Trade
+            # tab renders the off-mode card instead of a 500.  The
+            # subscriber sees a valid (if empty) page; we get the full
+            # traceback in logs for diagnosis.
+            return AutoModeStatus(
+                mode="off",
+                open_positions=0,
+                daily_pnl_usd=0.0,
+                daily_loss_pct=0.0,
+                daily_kill_tripped=False,
+                manual_paused=False,
+                current_equity_usd=0.0,
+            )
 
     @app.get(
         "/api/pnl/history",
