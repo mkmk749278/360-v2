@@ -70,4 +70,15 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
         str(tmp_path / "ma_cross_cooldown.json"),
     )
 
+    # PaperOrderManager cumulative-PnL persistence (2026-05-08).  Without
+    # isolation, the on-disk ledger at ``data/paper_pnl_state.json``
+    # accumulates across tests and the broker's ``__init__`` picks up
+    # leftover state — every paper test sees PnL from prior runs.
+    # ``_resolve_paper_pnl_path`` reads ``PAPER_PNL_STATE_PATH`` lazily
+    # per call, so setting the env var here takes effect immediately.
+    monkeypatch.setenv(
+        "PAPER_PNL_STATE_PATH",
+        str(tmp_path / "paper_pnl_state.json"),
+    )
+
     yield

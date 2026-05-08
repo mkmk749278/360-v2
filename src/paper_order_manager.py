@@ -52,7 +52,10 @@ Out of scope (deferred to Phase A2/A3)
 
 from __future__ import annotations
 
+import json
+import os
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from config import MAX_POSITION_USD, POSITION_SIZE_PCT
@@ -63,6 +66,91 @@ log = get_logger("paper_order_manager")
 # Match the partial-TP fractions used by the live OrderManager so paper and
 # live behave identically from TradeMonitor's perspective.
 _TP_FRACTIONS: Dict[int, float] = {1: 0.33, 2: 0.33, 3: 0.34}
+
+# Cumulative paper-realised PnL persistence (2026-05-08).
+#
+# Doctrine: paper mode is the dashboard data source for free-tier
+# subscribers — its "Today's P&L" / "Paper total since boot" surface only
+# makes sense if the number SURVIVES engine restarts and mode switches.
+# Pre-fix, the cumulative paper total reset to $0.00 on every redeploy
+# and on every paper↔live toggle (RiskManager + PaperOrderManager are
+# rebuilt by ``main.set_auto_execution_mode``), so the figure that drives
+# the new ``_ModePnlCard`` (lumin v0.0.13) was effectively transient.
+#
+# Persistence is intentionally narrow: only the cumulative ``_realised_pnl_total``
+# is written to disk.  Open positions stay ephemeral — TradeMonitor +
+# signal-history persistence are the right layer for in-flight lifecycle
+# state, not the paper broker.  On boot with persisted PnL, the broker
+# initialises ``_available_equity = starting_equity + persisted_pnl`` so
+# subsequent position sizing reflects the paper account's true balance.
+_PAPER_PNL_PATH_DEFAULT = Path("data") / "paper_pnl_state.json"
+
+
+def _resolve_paper_pnl_path(override: Optional[Path] = None) -> Path:
+    """Resolve the on-disk ledger path.
+
+    Priority: explicit ``override`` arg → ``PAPER_PNL_STATE_PATH`` env var
+    → default ``data/paper_pnl_state.json``.  Resolved per call so test
+    fixtures that monkeypatch the env var after module import still take
+    effect (the autouse conftest fixture relies on this).
+    """
+    if override is not None:
+        return override
+    return Path(
+        os.getenv("PAPER_PNL_STATE_PATH", str(_PAPER_PNL_PATH_DEFAULT))
+    )
+
+
+def _load_paper_pnl_state(path: Optional[Path] = None) -> float:
+    """Load cumulative paper-realised PnL from disk.
+
+    Fail-soft: returns 0.0 on any error (missing file, malformed JSON,
+    permission denied).  A clean-slate paper session is the safe default.
+    """
+    resolved = _resolve_paper_pnl_path(path)
+    try:
+        with resolved.open("r") as fp:
+            data = json.load(fp)
+    except FileNotFoundError:
+        return 0.0
+    except (json.JSONDecodeError, OSError) as exc:
+        log.warning(
+            "Paper PnL ledger corrupt at %s — starting from $0.00 (%s)",
+            resolved, exc,
+        )
+        return 0.0
+    raw = data.get("realised_pnl_usd", 0.0) if isinstance(data, dict) else 0.0
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        log.warning(
+            "Paper PnL ledger value not numeric at %s (got %r) — resetting",
+            resolved, raw,
+        )
+        return 0.0
+
+
+def _persist_paper_pnl_state(
+    realised_pnl_usd: float, path: Optional[Path] = None
+) -> None:
+    """Write cumulative paper-realised PnL to disk.
+
+    Best-effort: any IO failure is logged at WARNING and swallowed —
+    persistence is a UX nicety, not a safety-critical invariant, so a
+    full disk should never break a paper close.
+    """
+    resolved = _resolve_paper_pnl_path(path)
+    try:
+        resolved.parent.mkdir(parents=True, exist_ok=True)
+        tmp = resolved.with_suffix(resolved.suffix + ".tmp")
+        with tmp.open("w") as fp:
+            json.dump({"realised_pnl_usd": float(realised_pnl_usd)}, fp)
+        tmp.replace(resolved)
+    except OSError as exc:
+        log.warning(
+            "Paper PnL ledger persist failed at %s: %s — continuing in-memory",
+            resolved, exc,
+        )
 
 
 @dataclass
@@ -98,10 +186,17 @@ class PaperOrderManager:
         self._position_size_pct = position_size_pct
         self._max_position_usd = max_position_usd
         self._starting_equity = starting_equity_usd
-        self._available_equity = starting_equity_usd
+        # Persistence (2026-05-08) — load any prior cumulative paper-PnL
+        # so the dashboard "Paper total since boot" survives engine
+        # restarts and paper↔live mode toggles.  Available equity is
+        # reseeded from starting + persisted PnL so position sizing
+        # reflects the paper account's true balance on resume.  Open
+        # positions stay ephemeral (signal-history layer owns lifecycle).
+        _persisted = _load_paper_pnl_state()
+        self._available_equity = starting_equity_usd + _persisted
         self._positions: Dict[str, _PaperPosition] = {}
-        # Cumulative realised PnL across the paper session.
-        self._realised_pnl_total: float = 0.0
+        # Cumulative realised PnL — seeded from disk (see comment above).
+        self._realised_pnl_total: float = _persisted
         # Counter for synthetic order IDs.
         self._order_seq: int = 0
         # Phase A2 — optional risk gates.  Same interface as OrderManager.
@@ -275,6 +370,9 @@ class PaperOrderManager:
         self._realised_pnl_total += pnl
         # Free up margin proportional to closed quantity.
         self._available_equity += position.entry * close_qty + pnl
+        # Persist cumulative PnL so the dashboard "Paper total since boot"
+        # survives engine restarts and paper↔live mode toggles.
+        _persist_paper_pnl_state(self._realised_pnl_total)
 
         order_id = self._next_order_id(signal_id, f"tp{tp_level}")
         log.info(
@@ -467,6 +565,9 @@ class PaperOrderManager:
         position.realised_pnl_usd += pnl
         self._realised_pnl_total += pnl
         self._available_equity += position.entry * remaining_qty + pnl
+        # Persist cumulative PnL so the dashboard "Paper total since boot"
+        # survives engine restarts and paper↔live mode toggles.
+        _persist_paper_pnl_state(self._realised_pnl_total)
 
         order_id = self._next_order_id(signal_id, f"close_{reason}")
         log.info(
