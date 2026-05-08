@@ -8,11 +8,14 @@ from __future__ import annotations
 import asyncio
 import json
 import re
+import time
 from typing import Any, Optional
 
 import aiohttp
 
 from config import (
+    ADMIN_ALERT_DEDUP_KEY_LEN,
+    ADMIN_ALERT_GLOBAL_COOLDOWN_SECONDS,
     PRE_TP_ENABLED,
     PRE_TP_FEE_FLOOR_PCT,
     PRE_TP_FEE_PCT_ROUND_TRIP,
@@ -40,6 +43,18 @@ class TelegramBot:
         self._session: Optional[aiohttp.ClientSession] = None
         self._offset: int = 0
         self._running = False
+        # Per-message-key cooldown for ``send_admin_alert``.  Owner reported
+        # bursts of 40-50 identical admin alerts for a single underlying
+        # event 2026-05-08 — multiple callers (WS manager, telemetry,
+        # circuit breaker, scanner, signal router) each implement their own
+        # cooldowns, but bugs in any one bypass the rate-limit and spam
+        # Telegram.  This is the last-line defense: keyed by the first
+        # ``ADMIN_ALERT_DEDUP_KEY_LEN`` characters of the message so
+        # duplicates with rolling counters (e.g. "total drops: 7" then "8")
+        # share a key.  Suppressed counts surface in a coalesced suffix
+        # on the next post-cooldown alert (no silent dropping).
+        self._admin_alert_last_emit: dict[str, float] = {}
+        self._admin_alert_suppressed: dict[str, int] = {}
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -135,10 +150,69 @@ class TelegramBot:
         return False
 
     async def send_admin_alert(self, text: str) -> bool:
-        """Send a message to the admin chat."""
-        if TELEGRAM_ADMIN_CHAT_ID:
-            return await self.send_message(TELEGRAM_ADMIN_CHAT_ID, f"🔔 *Admin Alert*\n{text}")
-        return False
+        """Send a message to the admin chat with global rate limiting.
+
+        Doctrine 2026-05-08: every caller (WS manager, telemetry, circuit
+        breaker, scanner, signal router, ...) implements its own per-source
+        cooldown.  Owner reported bursts of 40-50 identical alerts for a
+        single underlying event — bugs in any one source bypass its
+        per-source rate limit and spam Telegram.
+
+        This is the last-line defense.  Keyed by the first
+        ``ADMIN_ALERT_DEDUP_KEY_LEN`` characters of the message so
+        duplicates with rolling counters (e.g. "total drops: 7" then
+        "total drops: 8") share a key and coalesce into a "(N suppressed
+        during last Xs)" suffix on the next post-cooldown alert.
+
+        No silent dropping — suppressed counts surface in the next emitted
+        alert so operators always see the noise level.  Set
+        ``ADMIN_ALERT_GLOBAL_COOLDOWN_SECONDS=0`` to disable the limiter
+        (e.g. in tests asserting raw send behaviour).
+        """
+        if not TELEGRAM_ADMIN_CHAT_ID:
+            return False
+
+        if ADMIN_ALERT_GLOBAL_COOLDOWN_SECONDS > 0:
+            now = time.monotonic()
+            # Dedup key derivation: take the first N chars then normalize
+            # rolling numeric counters (e.g. "total drops: 7" → "total
+            # drops: #") so the same template with different counter
+            # values shares a key.  This is what coalesces the "40-50
+            # alerts for one event" spam — those alerts differ only in
+            # the increment.
+            prefix = (text or "")[:ADMIN_ALERT_DEDUP_KEY_LEN]
+            key = re.sub(r"\d+", "#", prefix)
+            last_emit = self._admin_alert_last_emit.get(key)
+            if last_emit is not None and (
+                now - last_emit < ADMIN_ALERT_GLOBAL_COOLDOWN_SECONDS
+            ):
+                self._admin_alert_suppressed[key] = (
+                    self._admin_alert_suppressed.get(key, 0) + 1
+                )
+                log.debug(
+                    "admin_alert suppressed (key=%s, suppressed_count=%d)",
+                    key, self._admin_alert_suppressed[key],
+                )
+                return False
+            # Cooldown expired (or first emission) — fire, with any
+            # accumulated suppression count surfaced as a suffix.
+            suppressed = self._admin_alert_suppressed.pop(key, 0)
+            suffix = (
+                f"\n_(+{suppressed} suppressed during last "
+                f"{ADMIN_ALERT_GLOBAL_COOLDOWN_SECONDS}s)_"
+                if suppressed > 0
+                else ""
+            )
+            self._admin_alert_last_emit[key] = now
+            return await self.send_message(
+                TELEGRAM_ADMIN_CHAT_ID,
+                f"🔔 *Admin Alert*\n{text}{suffix}",
+            )
+
+        # Limiter disabled — preserve original behaviour for tests / opt-out.
+        return await self.send_message(
+            TELEGRAM_ADMIN_CHAT_ID, f"🔔 *Admin Alert*\n{text}"
+        )
 
     async def send_document(
         self,

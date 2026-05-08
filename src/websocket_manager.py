@@ -367,9 +367,13 @@ class WebSocketManager:
             f" ({coalesced} suppressed during last {int(WS_ALERT_COOLDOWN)}s)"
             if coalesced > 0 else ""
         )
+        # Drop count enriches the alert (was previously a separate alert).
+        # Subscribers now get one consolidated message per outage cycle.
         if self._admin_alert:
             await self._admin_alert(
-                f"⚠️ REST fallback activated for {self._label} critical pairs.{suffix}"
+                f"⚠️ REST fallback active ({self._label}, total drops: "
+                f"{self._total_drops}). Signals still flowing via REST polling "
+                f"on critical pairs.{suffix}"
             )
 
     def _stop_rest_fallback(self) -> None:
@@ -477,22 +481,28 @@ class WebSocketManager:
             if self._running:
                 self._set_connection_degraded(conn, True)
                 self._total_drops += 1
-                # Only alert after multiple consecutive failures on the same
-                # connection.  Transient drops reconnect on the first or
-                # second attempt and are normal network jitter — alerting
-                # starts at the third consecutive failure (reconnect_attempts
-                # is 0-indexed, so >= 2 means the third attempt).
-                if self._admin_alert and conn.reconnect_attempts >= 2:
-                    now = time.monotonic()
-                    if now - self._last_alert_time > WS_ALERT_COOLDOWN:
-                        self._last_alert_time = now
-                        asyncio.create_task(
-                            self._admin_alert(
-                                f"⚠️ WebSocket connection lost ({self._label}, "
-                                f"attempt {conn.reconnect_attempts + 1}, "
-                                f"total drops: {self._total_drops}). Reconnecting…"
-                            )
-                        )
+                # Drop telemetry stays in VPS logs for /diag + truth-report
+                # parsing; the user-facing admin alert was removed 2026-05-08
+                # because every outage cycle was firing TWO alerts that
+                # described the same event:
+                #   1. "WebSocket connection lost (attempt N, total drops X)"
+                #   2. "REST fallback activated for {label} critical pairs"
+                # Owner reported "lots alerts for one" — the REST-fallback
+                # alert is more informative (it confirms signals still flow
+                # via fallback) so it's now the sole canonical "outage"
+                # admin alert.  The drop counter is exposed in /diag's WS
+                # HEALTH section + the truth report's WebSocket outage
+                # stats, so operators have the same visibility without
+                # the Telegram noise.  Escalation alert at
+                # WS_RECONNECT_FAIL_ALERT_THRESHOLD attempts stays —
+                # that's a different severity (manual intervention needed).
+                if conn.reconnect_attempts >= 2:
+                    log.warning(
+                        "ws_outage label={} attempt={} total_drops={}",
+                        self._label,
+                        conn.reconnect_attempts + 1,
+                        self._total_drops,
+                    )
                 delay = min(
                     WS_RECONNECT_BASE_DELAY * (2 ** conn.reconnect_attempts),
                     WS_RECONNECT_MAX_DELAY,

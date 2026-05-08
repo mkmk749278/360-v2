@@ -1440,6 +1440,29 @@ NO_SIGNAL_ALERT_COOLDOWN_SECONDS: int = int(
 )
 
 # ---------------------------------------------------------------------------
+# Global admin-alert rate limiter (last-line defense against spam, 2026-05-08)
+# ---------------------------------------------------------------------------
+# Owner reported bursts of 40-50 identical admin alerts for a single underlying
+# event.  Each caller (WS manager, telemetry, circuit breaker, scanner,
+# signal router) implements its own per-source cooldown — bugs in any one
+# bypass the per-source rate-limit and spam Telegram.
+#
+# This rate limiter is enforced inside ``TelegramBot.send_admin_alert`` and
+# applies to every caller, regardless of their own cooldown logic.  Keyed by
+# the first ``ADMIN_ALERT_DEDUP_KEY_LEN`` characters of the message so
+# duplicates with rolling counters (e.g. "total drops: 7" then "8") share a
+# key.  Suppressed counts are coalesced into a "(N suppressed during last Xs)"
+# suffix on the next post-cooldown alert — no silent dropping.
+ADMIN_ALERT_GLOBAL_COOLDOWN_SECONDS: int = _safe_int(
+    "ADMIN_ALERT_GLOBAL_COOLDOWN_SECONDS", "300"
+)
+# Length of the prefix used as the dedup key.  60 characters covers the
+# emoji + first phrase of every existing alert template (e.g. "⚠️ REST
+# fallback active (futures, total drops: ...") so rolling-counter
+# variations of the same event coalesce.
+ADMIN_ALERT_DEDUP_KEY_LEN: int = _safe_int("ADMIN_ALERT_DEDUP_KEY_LEN", "60")
+
+# ---------------------------------------------------------------------------
 # WS health-aware scan gating
 # ---------------------------------------------------------------------------
 # Number of consecutive scan cycles with both WS managers unhealthy before

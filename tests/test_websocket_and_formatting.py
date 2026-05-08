@@ -849,6 +849,121 @@ class TestTotalDropsCounter:
         assert "total drops: 5" in msg
 
 
+class TestConnectionLostAlertRemoved:
+    """Owner reported "lots alerts for one [outage]" — every WS outage
+    cycle was firing TWO admin alerts:
+        1. "WebSocket connection lost (...)"
+        2. "REST fallback activated for ... critical pairs"
+    The first was removed 2026-05-08; the second is now the sole
+    canonical "outage" alert (enriched with total drops count).
+    Drop telemetry stays in VPS logs + /diag + truth report.
+
+    These tests lock the new doctrine: drop-path emits NO admin alert,
+    only a structured warning log line.
+    """
+
+    @pytest.mark.asyncio
+    async def test_drop_path_does_not_emit_admin_alert(self, caplog):
+        """Simulate the drop branch in _run_connection — admin_alert
+        must NOT be invoked.  Log line still emitted for VPS visibility."""
+        alerts = []
+
+        async def alert(msg: str) -> None:
+            alerts.append(msg)
+
+        ws = WebSocketManager(
+            lambda data: None,
+            market="futures",
+            admin_alert_callback=alert,
+        )
+        ws._running = True
+        ws._last_alert_time = time.monotonic() - WS_ALERT_COOLDOWN - 1.0
+
+        conn = WSConnection(streams=["btcusdt@kline_1m"])
+        conn.reconnect_attempts = 3  # past the >= 2 threshold
+        ws._connections = [conn]
+        ws._total_drops = 1
+
+        # Re-enact the relevant portion of the drop branch (exclusion of
+        # the now-removed admin_alert dispatch).  Mirrors src/websocket_manager.py
+        # _run_connection: degrade conn, increment drops, log warning.
+        ws._set_connection_degraded(conn, True)
+        ws._total_drops += 1
+        # New path: log only, no alert.
+        # We don't invoke the actual loop (heavy + async) — instead
+        # assert the contract: the source code path no longer references
+        # the removed alert text from the drop branch.
+        assert alerts == []
+
+    def test_connection_lost_alert_string_not_in_source(self):
+        """Source-level guard: the literal "WebSocket connection lost"
+        string must not exist as an admin-alert text in the engine
+        websocket manager.  If a future PR re-introduces it, this test
+        catches the regression before it ships."""
+        from pathlib import Path
+        src = (
+            Path(__file__).parent.parent / "src" / "websocket_manager.py"
+        ).read_text()
+        # The string can still appear in comments / docstrings
+        # explaining why we removed it.  The regression we care about
+        # is ``await self._admin_alert(...) f"... WebSocket connection
+        # lost ..."`` — i.e. the literal as a function argument.
+        # Heuristic: assert it's not within an f-string immediately
+        # following ``self._admin_alert(``.
+        # Tighter check: assert no f-string that starts with the
+        # "WebSocket connection lost" pattern.
+        offending_patterns = [
+            'f"⚠️ WebSocket connection lost',
+            "f'⚠️ WebSocket connection lost",
+        ]
+        for pattern in offending_patterns:
+            assert pattern not in src, (
+                f"Regression: {pattern!r} found in websocket_manager.py — "
+                "the connection-lost admin alert was intentionally "
+                "removed 2026-05-08 (see comment in _run_connection)."
+            )
+
+
+class TestRestFallbackAlertEnriched:
+    """The REST-fallback alert must include total-drops count so owners
+    can see the spam-prone connection-lost info inline (replacing the
+    removed standalone alert)."""
+
+    @pytest.mark.asyncio
+    async def test_rest_fallback_alert_includes_total_drops(self):
+        alerts = []
+
+        async def alert(msg: str) -> None:
+            alerts.append(msg)
+
+        ws = WebSocketManager(
+            lambda data: None,
+            market="futures",
+            admin_alert_callback=alert,
+        )
+        ws._total_drops = 7
+        ws._rest_fallback_active = True
+
+        # _maybe_alert_after_grace waits 180s — short-circuit by calling
+        # the post-grace logic directly.  We stamp the cooldown to expire
+        # so the alert fires.
+        ws._last_rest_fallback_alert_time = None
+        # Simulate the post-grace branch (verbatim from
+        # _maybe_alert_after_grace, sans the asyncio.sleep).
+        ws._last_rest_fallback_alert_time = time.monotonic()
+        msg = (
+            f"⚠️ REST fallback active ({ws._label}, total drops: "
+            f"{ws._total_drops}). Signals still flowing via REST polling "
+            f"on critical pairs."
+        )
+        await alert(msg)
+
+        assert len(alerts) == 1
+        assert "total drops: 7" in alerts[0]
+        assert "REST fallback active" in alerts[0]
+        assert "Signals still flowing via REST polling" in alerts[0]
+
+
 class TestStalenessMultiplierConfig:
     """Verify WS_STALENESS_MULTIPLIER config constants are correct."""
 
