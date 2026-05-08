@@ -168,6 +168,33 @@ def _escape_md(text: str) -> str:
     return text
 
 
+# Terminal lifecycle states — once a signal hits one of these, ``_evaluate_signal``
+# must NOT re-fire the close event.  Owner reported (2026-05-08) duplicate
+# Telegram messages for the same signal lifecycle event (e.g. INVALIDATED
+# ZECUSDT posted twice at the same timestamp; same FLOCKUSDT SL HIT posted
+# 6 minutes apart).  Root cause: an asyncio race in ``_check_all`` /
+# ``asyncio.gather`` could re-evaluate the same Signal object twice in the
+# same poll cycle (e.g. via duplicate ``_active_signals`` keys after a
+# disk-restore edge case from PR #337), and there was no defensive
+# top-of-function check to short-circuit re-evaluation of an already-closed
+# signal.
+#
+# TP1_HIT and TP2_HIT are NOT in this set — those signals stay active for
+# higher-TP progression.  Only states that mean "fully closed, lifecycle
+# complete" go here.
+_TERMINAL_STATUSES: frozenset = frozenset({
+    "SL_HIT",
+    "BREAKEVEN_EXIT",
+    "PROFIT_LOCKED",
+    "INVALIDATED",
+    "EXPIRED",
+    "CANCELLED",
+    "FULL_TP_HIT",
+    "TP3_HIT",
+    "CLOSED",
+})
+
+
 class TradeMonitor:
     """Watches active signals and emits updates."""
 
@@ -721,6 +748,29 @@ class TradeMonitor:
         return None
 
     async def _evaluate_signal(self, sig: Signal) -> None:
+        # Terminal-status guard (2026-05-08): if the signal already reached
+        # a terminal lifecycle state, return immediately — re-evaluating
+        # would re-fire the SL_HIT / INVALIDATED / EXPIRED / FULL_TP_HIT
+        # close event and post a duplicate Telegram message.
+        #
+        # Owner reported duplicates of the same lifecycle event posted at
+        # identical timestamps (e.g. two INVALIDATED ZECUSDT messages at
+        # 04:10:11) plus 6-minute-apart re-fires of the same SL_HIT
+        # (FLOCKUSDT @ 04:10:11 and 04:16:29 with identical PnL).  Root
+        # cause: ``_check_all`` builds a snapshot of ``router.active_signals``
+        # via ``dict(...)`` then ``gather``s ``_process_signal`` over its
+        # values, and any duplicate keys in the underlying dict (or any
+        # subsequent re-add path) would yield the same Signal object
+        # multiple times within a single tick.  Without this guard, both
+        # tasks raced through the SL/invalidation handlers and both
+        # awaited ``_post_update`` before either reached ``_remove``.
+        #
+        # Note: TP1_HIT and TP2_HIT are NOT terminal — those signals stay
+        # active for TP2 / TP3 progression.  Only fully-closed states are
+        # in ``_TERMINAL_STATUSES``.
+        if sig.status in _TERMINAL_STATUSES:
+            return
+
         price = sig.current_price
         is_long = sig.direction == Direction.LONG
 

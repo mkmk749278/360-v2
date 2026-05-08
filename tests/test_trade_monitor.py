@@ -2254,3 +2254,124 @@ class TestTrailingStopStageTransitions:
         _update_trailing_stage(sig, 49400.0, state)
         assert state.stage == 1
         assert sig.stop_loss == 50000.0  # Breakeven
+
+
+# ---------------------------------------------------------------------------
+# Terminal-status guard (regression: duplicate Telegram messages, 2026-05-08)
+# ---------------------------------------------------------------------------
+# Owner reported (PDF/screenshots) the same lifecycle event posted multiple
+# times for a single signal:
+#   - INVALIDATED ZECUSDT @ 04:10:11 posted TWICE in same second
+#   - SL HIT FLOCKUSDT @ 04:10:11 + identical SL HIT @ 04:16:29 (same PnL)
+#
+# Root cause: ``_evaluate_signal`` had no top-of-function check for
+# already-terminal status.  An asyncio race in ``_check_all`` /
+# ``asyncio.gather`` could re-evaluate the same Signal in a single tick
+# (e.g. if ``_active_signals`` had duplicate keys after a disk-restore
+# edge case), producing duplicate ``_post_update`` calls.  The fix adds
+# a guard so any signal whose status is already in ``_TERMINAL_STATUSES``
+# returns immediately.
+
+
+class TestTerminalStatusGuard:
+    """``_evaluate_signal`` must short-circuit on terminal-status signals."""
+
+    @pytest.fixture
+    def monitor(self):
+        from unittest.mock import AsyncMock
+        active: Dict[str, Signal] = {}
+        send_tg = AsyncMock(return_value=True)
+        data_store = MagicMock()
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
+        m = TradeMonitor(
+            data_store=data_store,
+            send_telegram=send_tg,
+            get_active_signals=lambda: active,
+            remove_signal=lambda sid: active.pop(sid, None),
+            update_signal=MagicMock(),
+        )
+        # Replace _post_update with a tracker — the production helper
+        # short-circuits when CHANNEL_TELEGRAM_MAP[sig.channel] is empty
+        # (which it is in test env), so counting _post_update calls
+        # directly is the reliable way to assert the guard works.
+        post_calls: list = []
+
+        async def _track_post(sig, event):
+            post_calls.append((sig.signal_id, sig.status, event))
+            return None
+
+        m._post_update = _track_post  # type: ignore[assignment]
+        m._post_signal_closed = AsyncMock(return_value=None)  # type: ignore[assignment]
+        m._broker_close_full = AsyncMock(return_value=None)  # type: ignore[assignment]
+        m._active_for_test = active
+        m._post_calls_for_test = post_calls
+        return m
+
+    @pytest.mark.parametrize("terminal_status", [
+        "SL_HIT",
+        "BREAKEVEN_EXIT",
+        "PROFIT_LOCKED",
+        "INVALIDATED",
+        "EXPIRED",
+        "CANCELLED",
+        "FULL_TP_HIT",
+        "TP3_HIT",
+        "CLOSED",
+    ])
+    async def test_terminal_status_short_circuits_evaluation(
+        self, monitor, terminal_status,
+    ):
+        """A signal whose status is already terminal must not re-fire any
+        lifecycle event when ``_evaluate_signal`` is called."""
+        sig = _make_signal(age_seconds=600)
+        sig.status = terminal_status
+        # Set price at or past SL — pre-fix this would re-trigger the SL
+        # handler and post another SL HIT message.
+        sig.current_price = 29800.0  # below SL of 29850
+
+        await monitor._evaluate_signal(sig)
+
+        # Zero Telegram sends.  The guard exited before any handler ran.
+        assert len(monitor._post_calls_for_test) == 0
+
+    @pytest.mark.parametrize("active_status", ["ACTIVE", "TP1_HIT", "TP2_HIT"])
+    async def test_non_terminal_status_continues_evaluation(
+        self, monitor, active_status,
+    ):
+        """Pre-terminal statuses (ACTIVE, TP1_HIT, TP2_HIT) must keep
+        evaluating — those signals are still in flight for higher TPs
+        or invalidation checks."""
+        sig = _make_signal(age_seconds=600)
+        sig.status = active_status
+        # Don't trigger any SL/TP — just verify the guard doesn't block
+        sig.current_price = 30000.0  # at entry, no SL/TP triggers
+
+        # Should not raise; the guard must allow this through.
+        await monitor._evaluate_signal(sig)
+
+    async def test_concurrent_evaluation_only_one_fires(self, monitor):
+        """Reproduce the duplicate-event race: ``asyncio.gather`` over
+        the same Signal should still result in only ONE close event,
+        because the second task sees the terminal status set by the
+        first and short-circuits via the guard."""
+        import asyncio
+
+        sig = _make_signal(age_seconds=600)
+        sig.status = "ACTIVE"
+        sig.current_price = 29800.0  # below SL → SL handler fires
+        monitor._active_for_test[sig.signal_id] = sig
+
+        # Race two concurrent _evaluate_signal calls on the same sig.
+        # Pre-fix, both would race through the SL handler before either
+        # awaited ``_remove`` and produce two SL HIT messages.
+        await asyncio.gather(
+            monitor._evaluate_signal(sig),
+            monitor._evaluate_signal(sig),
+        )
+
+        # Exactly ONE Telegram send for the SL_HIT — the second concurrent
+        # task hit the terminal-status guard and exited.
+        # (Note: signal-closed AI post is fire-and-forget via a separate
+        # async task and isn't counted toward send_telegram here because
+        # engine_context_fn is None in the test fixture.)
+        assert len(monitor._post_calls_for_test) == 1
