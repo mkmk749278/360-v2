@@ -314,6 +314,86 @@ def test_signals_status_closed_filters_to_history(client: TestClient) -> None:
     assert body["items"][0]["agent_name"] == "The Counter-Puncher"
 
 
+def test_signals_status_open_excludes_terminal_status_in_active_map(
+    client: TestClient, engine: _StubEngine,
+) -> None:
+    """Owner reported INVALIDATED + SL_HIT signals appearing in the
+    Lumin app's "Open" tab.  Root cause: ``router.active_signals`` can
+    transiently hold signals with terminal status (post-status-change,
+    pre-_remove call), and the persistence layer can capture them
+    mid-shutdown so a subsequent restart resurrects them in the active
+    map.
+
+    The API contract for ``status=open`` is "currently in-flight only"
+    — defensive filter must drop any signal whose ``status`` isn't
+    exactly ``ACTIVE``.
+    """
+    # Add an INVALIDATED signal to active_signals — mimics the
+    # mid-removal race window.
+    invalidated = _StubSignal(
+        signal_id="INV-001",
+        symbol="ZECUSDT",
+        direction=_Direction("LONG"),
+        entry=572.92,
+        stop_loss=569.14,
+        tp1=578.59,
+        tp2=582.38,
+        status="INVALIDATED",
+        timestamp=datetime.now(timezone.utc) - timedelta(minutes=45),
+        dispatch_timestamp=datetime.now(timezone.utc) - timedelta(minutes=45),
+    )
+    sl_hit = _StubSignal(
+        signal_id="SL-001",
+        symbol="FLOCKUSDT",
+        direction=_Direction("LONG"),
+        entry=0.07797,
+        stop_loss=0.07699,
+        tp1=0.08055,
+        tp2=0.08153,
+        status="SL_HIT",
+        timestamp=datetime.now(timezone.utc) - timedelta(minutes=49),
+        dispatch_timestamp=datetime.now(timezone.utc) - timedelta(minutes=49),
+    )
+    engine.router.active_signals[invalidated.signal_id] = invalidated
+    engine.router.active_signals[sl_hit.signal_id] = sl_hit
+
+    r = client.get("/api/signals", params={"status": "open"})
+    assert r.status_code == 200
+    body = r.json()
+    statuses = [it["status"] for it in body["items"]]
+    assert "INVALIDATED" not in statuses
+    assert "SL_HIT" not in statuses
+    # The genuinely-active stub signal is still present.
+    assert any(it["status"] == "ACTIVE" for it in body["items"])
+
+
+def test_signals_status_closed_includes_terminal_signals_in_active_map(
+    client: TestClient, engine: _StubEngine,
+) -> None:
+    """Symmetric test — terminal-status signals stuck in the active map
+    must still appear in ``status=closed`` so they're not orphaned
+    between the two views."""
+    invalidated = _StubSignal(
+        signal_id="INV-002",
+        symbol="ZECUSDT",
+        direction=_Direction("LONG"),
+        entry=572.92,
+        stop_loss=569.14,
+        tp1=578.59,
+        tp2=582.38,
+        status="INVALIDATED",
+        timestamp=datetime.now(timezone.utc) - timedelta(minutes=45),
+        dispatch_timestamp=datetime.now(timezone.utc) - timedelta(minutes=45),
+    )
+    engine.router.active_signals[invalidated.signal_id] = invalidated
+
+    r = client.get("/api/signals", params={"status": "closed"})
+    assert r.status_code == 200
+    body = r.json()
+    symbols = [it["symbol"] for it in body["items"]]
+    assert "ZECUSDT" in symbols  # the orphan now appears in closed
+
+
 def test_signals_filter_by_setup_class(client: TestClient) -> None:
     r = client.get(
         "/api/signals",

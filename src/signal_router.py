@@ -336,11 +336,18 @@ class SignalRouter:
             client = self._redis.client
             if client is None:
                 return
-            # Restore active signals
+            # Restore active signals — same terminal-status filter as the
+            # disk-backed path.  See _restore_from_disk for rationale.
             raw = await client.get(_REDIS_KEY_SIGNALS)
             if raw:
                 signals_data: Dict[str, Any] = json.loads(raw)
+                skipped_terminal = 0
                 for sid, data in signals_data.items():
+                    if isinstance(data, dict):
+                        status = str(data.get("status", "ACTIVE")).upper()
+                        if status != "ACTIVE":
+                            skipped_terminal += 1
+                            continue
                     sig = _signal_from_dict(data)
                     if sig is not None:
                         self._active_signals[sid] = sig
@@ -348,6 +355,12 @@ class SignalRouter:
                     "Restored {} active signal(s) from Redis",
                     len(self._active_signals),
                 )
+                if skipped_terminal > 0:
+                    log.info(
+                        "Skipped {} terminal-status signal(s) from Redis "
+                        "restore (closed mid-shutdown)",
+                        skipped_terminal,
+                    )
 
             # Restore position lock
             raw = await client.get(_REDIS_KEY_POSITION_LOCK)
@@ -382,9 +395,20 @@ class SignalRouter:
             return
 
         signals_data = data.get("active_signals") or {}
+        skipped_terminal = 0
         if isinstance(signals_data, dict):
             for sid, sig_data in signals_data.items():
                 if not isinstance(sig_data, dict):
+                    continue
+                # Skip signals that hit a terminal status before the
+                # last persist fired.  Pre-fix, they'd reappear in the
+                # app's "Open" tab tagged INVALIDATED / SL_HIT / TP1_HIT
+                # because the persistence layer captures whatever's in
+                # the active map at the moment of write — including
+                # signals mid-removal during shutdown.
+                status = str(sig_data.get("status", "ACTIVE")).upper()
+                if status != "ACTIVE":
+                    skipped_terminal += 1
                     continue
                 sig = _signal_from_dict(sig_data)
                 if sig is not None:
@@ -393,6 +417,12 @@ class SignalRouter:
             log.info(
                 "Restored {} active signal(s) from disk",
                 len(self._active_signals),
+            )
+        if skipped_terminal > 0:
+            log.info(
+                "Skipped {} terminal-status signal(s) from disk restore "
+                "(closed mid-shutdown)",
+                skipped_terminal,
             )
 
         lock_data = data.get("position_lock") or {}

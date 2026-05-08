@@ -230,6 +230,48 @@ class TestRestoreJsonFallback:
         await router.restore()
         assert router._position_lock == {}
 
+    async def test_restore_skips_terminal_status_signals(self, state_path):
+        """Owner reported INVALIDATED + SL_HIT signals appearing in the
+        app's "Open" tab post-restart.  Root cause: the persistence
+        layer captures whatever's in ``_active_signals`` at the moment
+        of write, including signals mid-removal during shutdown.
+
+        Restore must skip any signal whose status has already gone
+        terminal — those belong in history, not the active map.
+        """
+        from src.signal_router import _signal_to_dict
+        active_sig = _make_signal(signal_id="ACT-1", symbol="ETHUSDT")
+        invalidated_sig = _make_signal(signal_id="INV-1", symbol="ZECUSDT")
+        sl_hit_sig = _make_signal(signal_id="SL-1", symbol="FLOCKUSDT")
+        tp1_hit_sig = _make_signal(signal_id="TP1-1", symbol="BTCUSDT")
+        # Stamp terminal statuses on the dict form so the file mirrors
+        # the mid-shutdown reality.
+        invalidated_dict = _signal_to_dict(invalidated_sig)
+        invalidated_dict["status"] = "INVALIDATED"
+        sl_hit_dict = _signal_to_dict(sl_hit_sig)
+        sl_hit_dict["status"] = "SL_HIT"
+        tp1_hit_dict = _signal_to_dict(tp1_hit_sig)
+        tp1_hit_dict["status"] = "TP1_HIT"
+
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({
+            "active_signals": {
+                "ACT-1": _signal_to_dict(active_sig),
+                "INV-1": invalidated_dict,
+                "SL-1": sl_hit_dict,
+                "TP1-1": tp1_hit_dict,
+            },
+            "position_lock": {},
+            "cooldown_timestamps": {},
+        }))
+
+        router = _make_router_no_redis()
+        await router.restore()
+
+        # Only the genuinely-active signal restored; the three terminal
+        # ones dropped on the floor.
+        assert set(router._active_signals.keys()) == {"ACT-1"}
+
 
 # ---------------------------------------------------------------------------
 # End-to-end: persist then restore on a new instance
