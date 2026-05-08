@@ -140,6 +140,28 @@ class AutoModeStatus(BaseModel):
     simulated_pnl_usd: Optional[float] = Field(
         None, description="Paper-mode only — simulated PnL since boot"
     )
+    # Rolling-window aggregates from the persistent pnl_history ledger.
+    # Default to 0.0 when no history exists yet (clean install) so the
+    # client can render zeros without conditional null handling.
+    weekly_pnl_usd: float = Field(
+        0.0, description="Realised PnL over last 7 UTC days (rolling)"
+    )
+    monthly_pnl_usd: float = Field(
+        0.0, description="Realised PnL over last 30 UTC days (rolling)"
+    )
+
+
+class PnlPoint(BaseModel):
+    date: str = Field(..., description="UTC date in YYYY-MM-DD")
+    pnl_usd: float
+
+
+class PnlHistoryResponse(BaseModel):
+    mode: Literal["off", "paper", "live"]
+    days: int
+    items: List[PnlPoint]
+    weekly_pnl_usd: float
+    monthly_pnl_usd: float
 
 
 class AutoModeChangeRequest(BaseModel):

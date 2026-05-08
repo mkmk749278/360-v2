@@ -97,6 +97,7 @@ class RiskManager:
         max_leverage: float = 30.0,
         min_equity_usd: float = 0.0,
         setup_blacklist: Optional[Set[str]] = None,
+        mode: Optional[str] = None,
     ) -> None:
         if starting_equity_usd <= 0:
             raise ValueError("starting_equity_usd must be > 0")
@@ -115,12 +116,33 @@ class RiskManager:
         self._setup_blacklist: Set[str] = set(setup_blacklist or set())
 
         self._daily = _DailyLossState()
+        self._mode = mode
+        # Rehydrate today's realised PnL from the persistent history
+        # ledger so a restart at 23:55 UTC doesn't orphan the day's
+        # loss-budget tracking — pre-fix, the daily kill could be
+        # silently reset by a redeploy.  No-op when ``mode`` is None
+        # (test fixtures, off mode) so existing call sites keep working.
+        if mode:
+            try:
+                from src.auto_trade import pnl_history
+                today_pnl = pnl_history.get_daily(mode)
+                if today_pnl != 0.0:
+                    self._daily.date_utc = datetime.now(timezone.utc).strftime(
+                        "%Y-%m-%d"
+                    )
+                    self._daily.realised_pnl_usd = today_pnl
+            except Exception:
+                # Fail-soft — clean-slate daily counter is the safe
+                # default if persistence is broken.
+                pass
         # Tracked separately from any OrderManager/PaperOrderManager so we
         # don't depend on either's internal representation.  Caller updates
         # via ``register_open()`` / ``register_close()``.
         self._open_signal_ids: Set[str] = set()
         self._open_symbols: Set[str] = set()
-        self._current_equity: float = float(starting_equity_usd)
+        self._current_equity: float = (
+            float(starting_equity_usd) + self._daily.realised_pnl_usd
+        )
         # Manual kill switch (e.g. owner pause via Telegram command).
         self._manual_pause: bool = False
         # Sticky kill — once tripped today, blocks further opens until

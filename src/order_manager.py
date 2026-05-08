@@ -523,6 +523,11 @@ class OrderManager:
                     self._risk_manager.register_close(
                         signal, realised_pnl_usd=pnl_estimate
                     )
+                    # Append to the daily-bucketed history ledger for the
+                    # weekly / monthly aggregates and dashboard chart.
+                    # PaperOrderManager mirrors this on its close paths.
+                    from src.auto_trade import pnl_history
+                    pnl_history.record_close("live", pnl_estimate)
                 return order_id
             except Exception as exc:
                 log.error(

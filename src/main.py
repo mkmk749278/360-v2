@@ -148,6 +148,7 @@ class CryptoSignalEngine:
                 max_leverage=RISK_MAX_LEVERAGE,
                 min_equity_usd=RISK_MIN_EQUITY_USD,
                 setup_blacklist=set(RISK_SETUP_BLACKLIST),
+                mode=AUTO_EXECUTION_MODE,
             )
             log.info(
                 "RiskManager active: start_equity=$%.2f daily_kill=%.2f%% "
@@ -679,6 +680,7 @@ class CryptoSignalEngine:
                 max_leverage=RISK_MAX_LEVERAGE,
                 min_equity_usd=RISK_MIN_EQUITY_USD,
                 setup_blacklist=set(RISK_SETUP_BLACKLIST),
+                mode="paper",
             )
             self._order_manager = PaperOrderManager(
                 position_size_pct=POSITION_SIZE_PCT,
@@ -700,6 +702,7 @@ class CryptoSignalEngine:
                 max_leverage=RISK_MAX_LEVERAGE,
                 min_equity_usd=RISK_MIN_EQUITY_USD,
                 setup_blacklist=set(RISK_SETUP_BLACKLIST),
+                mode="live",
             )
             self._order_manager = OrderManager(
                 auto_execution_enabled=True,
