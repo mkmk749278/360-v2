@@ -535,21 +535,41 @@ _CONFLUENCE_QUERY_TOLERANCE_PCT: float = 0.30
 LEVEL_BOOK_REFRESH_SEC: float = 3600.0  # rebuild per-symbol levels at most hourly
 
 # PR-Wire: Structure-alignment bonus (PR-7 wiring).
-# When a trend-following path (TPE / DIV_CONT / CLS / PDC) fires with its
-# entry direction matching the 4h structure leg (HH/HL bull or LH/LL
-# bear), award a small soft-penalty bonus.  Counter-trend paths
-# (LSR / FAR / SR_FLIP / WHALE / FUNDING / LIQ_REVERSAL / VSB / BDS / ORB
-# / QCB / MA_CROSS) deliberately do not consume this — their thesis is
-# either counter-trend by design, internally direction-driven, or fires
-# on structural break events.  Value picked to be smaller than the
-# confluence bonus so the chartist-eye stack doesn't overweight either
-# input.
+# When a structure-aware path fires with its entry direction matching the
+# 4h structure leg (HH/HL bull or LH/LL bear), award a small soft-penalty
+# bonus.
+#
+# Allowlist widened 2026-05-08: diag + truth-report analysis showed 0% TP
+# rate across the top-emitting setups (SR_FLIP_RETEST 28/28 closed at 0%
+# wins, QUIET_COMPRESSION_BREAK 29/29 same).  The chartist-eye bonus was
+# structurally barred from these paths so the lift never reached the
+# signals carrying actual business volume — STRUCT_ALIGN fired on 0/3
+# recent terminal samples in the diag.
+#
+# Eligibility:
+# * Pure trend-following (TPE / DIV_CONT / CLS / PDC) — original allowlist.
+# * Structure-aware with optional counter-trend (SR_FLIP / QCB) — these
+#   already TAKE a soft penalty when fighting 4h structure (per the HTF
+#   policy table); the symmetric counterpart is a small bonus when
+#   aligned.  An SR_FLIP that flips a level and pushes WITH the structural
+#   leg is the strongest version of that setup; same logic for a QCB
+#   whose compression break direction matches the leg.
+#
+# Still excluded — counter-trend / tape-driven / break-event paths whose
+# thesis is either deliberately counter-trend, internally direction-driven,
+# or fires on structural break events where alignment is irrelevant:
+# LSR / FAR / WHALE / FUNDING / LIQ_REVERSAL / VSB / BDS / ORB / MA_CROSS.
+#
+# Bonus value (3 pts) kept smaller than the max confluence bonus (9 pts)
+# so the chartist-eye stack doesn't overweight either input.
 _STRUCTURE_ALIGN_BONUS: float = 3.0
 _STRUCTURE_ALIGN_PATHS: frozenset = frozenset({
     "TREND_PULLBACK_EMA",
     "DIVERGENCE_CONTINUATION",
     "CONTINUATION_LIQUIDITY_SWEEP",
     "POST_DISPLACEMENT_CONTINUATION",
+    "SR_FLIP_RETEST",
+    "QUIET_COMPRESSION_BREAK",
 })
 
 # Per-(symbol, setup_class, direction) dispatch cooldown.  Default 30 min
