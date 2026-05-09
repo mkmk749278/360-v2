@@ -32,6 +32,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+from dataclasses import fields as _dataclass_fields
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, List, Optional
@@ -58,6 +59,16 @@ _DATETIME_FIELDS = (
     "dca_timestamp",
 )
 
+# Names of fields currently defined on the ``Signal`` dataclass.  Used to
+# strip stale keys from on-disk records before ``Signal(**payload)``.
+# Without this filter, a renamed/removed field on the dataclass causes
+# ``Signal(**payload)`` to raise ``TypeError`` for every record carrying
+# the old key — they get dropped on load, then ``main.py`` reconcile
+# steps re-save the truncated list, permanently wiping the history file.
+# Filtering preserves forward-compat: old records load with whatever
+# fields are still recognised; defaults supply the rest.
+_SIGNAL_FIELDS: frozenset = frozenset(f.name for f in _dataclass_fields(Signal))
+
 
 def _signal_to_dict(sig: Signal) -> dict:
     out: dict = {}
@@ -74,7 +85,18 @@ def _signal_to_dict(sig: Signal) -> dict:
 
 
 def _dict_to_signal(record: dict) -> Optional[Signal]:
-    payload = dict(record)
+    # Strip keys that no longer exist on the Signal dataclass.  Any unknown
+    # key would raise ``TypeError`` from ``Signal(**payload)`` and cause the
+    # record to be dropped — and ``main.py`` reconciliation would then
+    # overwrite the file with the truncated survivors.  Filtering lets old
+    # records survive every dataclass refactor.
+    dropped_keys = [k for k in record.keys() if k not in _SIGNAL_FIELDS]
+    if dropped_keys:
+        log.debug(
+            "signal_history_store: stripping unknown keys %s from record",
+            dropped_keys,
+        )
+    payload = {k: v for k, v in record.items() if k in _SIGNAL_FIELDS}
     try:
         for k in _DATETIME_FIELDS:
             v = payload.get(k)
