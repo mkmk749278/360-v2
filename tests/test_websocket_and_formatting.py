@@ -215,6 +215,79 @@ class TestReconnectDurationInstrumentation:
         assert states[1]["degraded"] is True
         assert states[1]["degraded_for_sec"] >= 29.0
 
+    @pytest.mark.asyncio
+    async def test_connect_does_not_directly_clear_degraded_flag(self):
+        """Regression for the 2026-05-09 diag bug:
+
+        Production diag showed ``futures: drops=26 recoveries=0`` and
+        ``conn.degraded=False`` while ``degraded_for=229.4s`` — both
+        contradictory.  Root cause: ``_connect()`` was directly setting
+        ``conn.degraded = False`` after a successful reconnect.  Then
+        ``_run_connection`` called ``_set_connection_degraded(conn, False)``
+        immediately after, but the wrapper's idempotent guard
+        (``if conn.degraded == degraded: return``) early-returned because
+        the flag was already False.  The recovery instrumentation
+        (duration measurement, counter increment, log marker, clearing
+        ``degraded_since``) never ran.
+
+        This test simulates the post-reconnect state: connection went
+        degraded, then ``_connect`` would normally run.  With the bug,
+        the wrapper call afterwards is a no-op.  Without the bug,
+        ``conn.degraded_since`` is still set when the wrapper runs, so
+        the recovery path executes correctly.
+        """
+        async def handler(data): pass
+        ws = WebSocketManager(handler, market="futures")
+        conn = WSConnection(streams=["btcusdt@kline_1m"])
+        ws._connections = [conn]
+
+        # Simulate the lifecycle: drop, then reconnect via _connect
+        # (which we patch to skip the actual aiohttp call but mirror
+        # the post-fix invariant: do NOT touch conn.degraded).
+        ws._set_connection_degraded(conn, True)
+        assert conn.degraded is True
+        assert conn.degraded_since > 0
+
+        # Mock the session so _connect can run without network.
+        mock_ws = mock.AsyncMock()
+        mock_ws.closed = False
+        ws._session = mock.AsyncMock()
+        ws._session.ws_connect = mock.AsyncMock(return_value=mock_ws)
+
+        # Hand-roll degraded_since to known value for duration assertion.
+        conn.degraded_since = time.monotonic() - 5.0
+
+        await ws._connect(conn)
+
+        # Post-fix invariant: _connect must NOT clear the degraded flag
+        # — leave that to the wrapper so the recovery instrumentation
+        # runs.
+        assert conn.degraded is True, (
+            "_connect must not directly clear conn.degraded — that "
+            "bypasses _set_connection_degraded's recovery instrumentation"
+        )
+        assert conn.degraded_since > 0, (
+            "_connect must not clear degraded_since — the wrapper "
+            "needs it to compute duration"
+        )
+
+        # Now the caller (_run_connection) does what production does
+        # next: call the wrapper.  This time it MUST run the recovery
+        # path because the True→False transition is real.
+        ws._set_connection_degraded(conn, False)
+
+        assert conn.degraded is False
+        assert conn.degraded_since == 0.0, (
+            "Wrapper must clear degraded_since after recovery"
+        )
+        assert conn.last_reconnect_ms > 0, (
+            "Wrapper must record drop→restored duration in ms"
+        )
+        assert ws.ws_reconnection_count == 1, (
+            "Wrapper must increment the recovery counter — pre-fix this "
+            "was 0 because _connect's direct write made the wrapper a no-op"
+        )
+
 
 class TestFormatFreeSignal:
     def test_free_signal_has_header_and_footer(self):
