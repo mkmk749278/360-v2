@@ -537,7 +537,18 @@ class WebSocketManager:
         conn.ws = await self._session.ws_connect(url, heartbeat=self._heartbeat_interval)
         conn.last_pong = time.monotonic()
         conn.reconnect_attempts = 0
-        conn.degraded = False
+        # NOTE: do NOT set ``conn.degraded = False`` here.  The
+        # ``_set_connection_degraded`` wrapper that ``_run_connection``
+        # calls immediately after a successful ``_connect`` carries the
+        # recovery instrumentation (duration measurement, recovery-counter
+        # increment, ``ws_reconnect_duration_ms`` log marker, clearing
+        # ``degraded_since``).  If we set the flag here, the wrapper's
+        # ``if conn.degraded == degraded: return`` early-return hits and
+        # the instrumentation never runs — that's exactly the bug
+        # surfaced by the 2026-05-09 diag where futures showed
+        # ``drops=26 recoveries=0`` and ``degraded_for=229.4s`` while
+        # ``degraded=False`` (contradictory state).  Letting the wrapper
+        # own the False→True→False state machine fixes it.
         conn.last_ping_time = 0.0
         conn.ping_latency_ms = 0.0
         self._subscribed_streams.update(conn.streams)
