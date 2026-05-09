@@ -243,3 +243,64 @@ class TickerItem(BaseModel):
 class TickersResponse(BaseModel):
     items: List[TickerItem]
     total: int
+
+
+# ---------------------------------------------------------------------------
+# User settings — Pre-TP grab page
+# ---------------------------------------------------------------------------
+
+
+class PretpSettings(BaseModel):
+    """User-controllable Pre-TP grab parameters.
+
+    All fields optional on PUT — the API merges the partial payload into
+    the stored state.  GET returns the engine's effective view (user
+    overrides where set, config defaults otherwise) so the app renders
+    the live state without separate calls.
+    """
+
+    enabled: Optional[bool] = Field(
+        default=None,
+        description="Master toggle for the Pre-TP grab feature.",
+    )
+    regime_allowlist: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Regimes in which Pre-TP may fire.  Accepts UI tokens "
+            "(TRENDING / RANGING / CHOPPY) or backend tokens "
+            "(TRENDING_UP / TRENDING_DOWN / RANGING / VOLATILE / QUIET); "
+            "the server normalises to the backend set on write and on read."
+        ),
+    )
+    setup_allowlist: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Setup classes for which Pre-TP may fire.  Reserved — "
+            "the engine read-path is wired in a follow-up PR."
+        ),
+    )
+    threshold_pct: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="Static fall-back threshold for Pre-TP fire (% favourable).",
+    )
+    atr_multiplier: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="ATR-adaptive threshold multiplier.",
+    )
+    fee_floor_pct: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description="Minimum profit (%) before SL → breakeven.",
+    )
+    min_age_sec: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Earliest signal age (seconds) at which Pre-TP may fire.",
+    )
+    max_age_sec: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Latest signal age at which Pre-TP may still fire.",
+    )

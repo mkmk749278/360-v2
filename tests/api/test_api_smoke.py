@@ -762,3 +762,95 @@ def test_auth_rejects_wrong_bearer(auth_client: TestClient) -> None:
 def test_health_does_not_require_auth(auth_client: TestClient) -> None:
     r = auth_client.get("/api/health")
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# /api/settings/pretp — Pre-TP grab settings page
+# ---------------------------------------------------------------------------
+
+
+def test_settings_pretp_get_returns_resolved_view(
+    client: TestClient, tmp_path, monkeypatch,
+) -> None:
+    """GET returns the merged view: user overrides where set, defaults otherwise."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+
+    r = client.get("/api/settings/pretp")
+    assert r.status_code == 200
+    body = r.json()
+    # Default config has TRENDING regimes excluded from the allowlist.
+    from config import PRE_TP_REGIME_ALLOWLIST, PRE_TP_THRESHOLD_PCT
+    assert set(body["regime_allowlist"]) == set(PRE_TP_REGIME_ALLOWLIST)
+    assert body["threshold_pct"] == PRE_TP_THRESHOLD_PCT
+
+
+def test_settings_pretp_put_partial_payload_merges(
+    client: TestClient, tmp_path, monkeypatch,
+) -> None:
+    """PUT with one field must persist that field and leave others on default."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+
+    r = client.put(
+        "/api/settings/pretp",
+        json={"regime_allowlist": ["TRENDING_UP", "TRENDING_DOWN", "RANGING"]},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body["regime_allowlist"]) == {"TRENDING_UP", "TRENDING_DOWN", "RANGING"}
+    # threshold_pct unchanged from default — was NOT in the PUT payload.
+    from config import PRE_TP_THRESHOLD_PCT
+    assert body["threshold_pct"] == PRE_TP_THRESHOLD_PCT
+
+    # Re-GET reflects the persisted state.
+    r2 = client.get("/api/settings/pretp")
+    assert set(r2.json()["regime_allowlist"]) == {
+        "TRENDING_UP", "TRENDING_DOWN", "RANGING",
+    }
+
+
+def test_settings_pretp_put_accepts_ui_tokens(
+    client: TestClient, tmp_path, monkeypatch,
+) -> None:
+    """The app sends UI-friendly tokens (TRENDING / RANGING / CHOPPY); the
+    server normalises to backend tokens on read so the engine sees the
+    expanded set."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+
+    r = client.put(
+        "/api/settings/pretp",
+        json={"regime_allowlist": ["TRENDING", "RANGING"]},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert set(body["regime_allowlist"]) == {
+        "TRENDING_UP", "TRENDING_DOWN", "RANGING",
+    }
+
+
+def test_settings_pretp_put_rejects_negative_numeric(client: TestClient) -> None:
+    """Pydantic ``ge=0.0`` enforces non-negative thresholds at the API boundary."""
+    r = client.put(
+        "/api/settings/pretp",
+        json={"threshold_pct": -1.0},
+    )
+    assert r.status_code == 422
+
+
+def test_settings_pretp_requires_auth(engine: _StubEngine) -> None:
+    """Unauthenticated GET on the settings endpoint must 401."""
+    app = build_app(engine, jwt_secret=_TEST_SECRET, allow_static=False)
+    unauth_client = TestClient(app)
+    r = unauth_client.get("/api/settings/pretp")
+    assert r.status_code == 401

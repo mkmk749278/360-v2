@@ -47,11 +47,13 @@ from .schemas import (
     HealthResponse,
     PnlHistoryResponse,
     PositionsResponse,
+    PretpSettings,
     PulseSnapshot,
     SignalDetail,
     SignalsResponse,
     TickersResponse,
 )
+from src import user_settings as _user_settings
 from .snapshot import (
     build_activity,
     build_agents,
@@ -386,6 +388,65 @@ def build_app(
             message=msg,
             mode=req.mode,
         )
+
+    # ---- Settings: Pre-TP page ----
+
+    def _build_pretp_view() -> PretpSettings:
+        """Compose the engine's effective Pre-TP view: user overrides where
+        set, config defaults otherwise.  Mirrors what the app needs to
+        render the page in its current state — no separate "defaults" call."""
+        from config import (
+            PRE_TP_ATR_MULTIPLIER,
+            PRE_TP_ENABLED,
+            PRE_TP_FEE_FLOOR_PCT,
+            PRE_TP_MAX_AGE_SEC,
+            PRE_TP_MIN_AGE_SEC,
+            PRE_TP_SETUP_BLACKLIST,
+            PRE_TP_THRESHOLD_PCT,
+        )
+        stored = _user_settings.get_pretp()
+        # Resolve each field — user-set if present, else config default.
+        return PretpSettings(
+            enabled=stored.get("enabled", PRE_TP_ENABLED),
+            regime_allowlist=sorted(_user_settings.pretp_regime_allowlist()),
+            setup_allowlist=stored.get(
+                "setup_allowlist",
+                # Engine default exposes a blacklist; the UI is allowlist-shaped.
+                # Until the setup wiring lands, return None so the app shows
+                # "use engine default" rather than a derived list that would
+                # diverge from the active blacklist on the next config change.
+                None,
+            ),
+            threshold_pct=stored.get("threshold_pct", PRE_TP_THRESHOLD_PCT),
+            atr_multiplier=stored.get("atr_multiplier", PRE_TP_ATR_MULTIPLIER),
+            fee_floor_pct=stored.get("fee_floor_pct", PRE_TP_FEE_FLOOR_PCT),
+            min_age_sec=stored.get("min_age_sec", PRE_TP_MIN_AGE_SEC),
+            max_age_sec=stored.get("max_age_sec", PRE_TP_MAX_AGE_SEC),
+        )
+
+    @app.get(
+        "/api/settings/pretp",
+        response_model=PretpSettings,
+        tags=["settings"],
+        dependencies=[Depends(auth)],
+    )
+    async def pretp_settings_get() -> PretpSettings:
+        return _build_pretp_view()
+
+    @app.put(
+        "/api/settings/pretp",
+        response_model=PretpSettings,
+        tags=["settings"],
+        dependencies=[Depends(auth)],
+    )
+    async def pretp_settings_put(payload: PretpSettings) -> PretpSettings:
+        # ``model_dump(exclude_unset=True)`` gives us only the fields the
+        # client actually sent, so a PUT with one field doesn't wipe the
+        # others.  Pydantic validation has already enforced types/ranges.
+        partial = payload.model_dump(exclude_unset=True)
+        if partial:
+            _user_settings.update_pretp(partial)
+        return _build_pretp_view()
 
     # ---- Agents ----
 

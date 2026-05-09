@@ -33,6 +33,7 @@ from config import (
 )
 from src.channels.base import Signal, TrailingStopState
 from src.dca import check_dca_entry, recalculate_after_dca
+from src import user_settings as _user_settings
 from src.historical_data import HistoricalDataStore
 from src.indicators import atr as _compute_atr
 from src.indicators import ema as _compute_ema
@@ -210,6 +211,16 @@ _EMA_CROSSOVER_EXEMPT_SETUPS: frozenset = frozenset({
     "LIQUIDITY_SWEEP_REVERSAL",
     "FAILED_AUCTION_RECLAIM",
 })
+
+
+def _resolved_regime_allowlist() -> frozenset:
+    """Pre-TP regime allowlist with the user-settings override applied.
+
+    Centralised so tests can monkeypatch a single function instead of
+    threading the indirection through the call site.  Returns the
+    user-set value when present, else falls back to the config default.
+    """
+    return _user_settings.pretp_regime_allowlist()
 
 
 class TradeMonitor:
@@ -1499,7 +1510,7 @@ class TradeMonitor:
                     regime_label = result.regime.value
             except Exception as exc:
                 log.debug("Pre-TP regime classify failed for %s: %s", sig.symbol, exc)
-        if regime_label is not None and regime_label.upper() not in PRE_TP_REGIME_ALLOWLIST:
+        if regime_label is not None and regime_label.upper() not in _resolved_regime_allowlist():
             return False
 
         # All gates passed — fire pre-TP at the resolved threshold
