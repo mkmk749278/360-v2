@@ -332,3 +332,100 @@ class TestBBWidthVolatileThresholdRecalibration:
             # Restore default for other tests.
             monkeypatch.delenv("BB_WIDTH_VOLATILE_PCT", raising=False)
             importlib.reload(regime_mod)
+
+
+class TestTrendShortCircuitsVolatile:
+    """Wide Bollinger bands during a clean directional move are an EFFECT of
+    the trend, not chaos.  VOLATILE's intent is "wide bands AND no clear
+    direction"; a strong-trend signal must short-circuit the BB-width
+    VOLATILE check.
+
+    Owner-flagged 2026-05-09 (SOLUSDT charts): multi-TF aligned uptrend
+    with clean MA-pullback continuation entries was being classified
+    VOLATILE because BB-width on the trend leg exceeded 8%.  Truth report
+    confirmed 76.1% of cycles tagged VOLATILE — starving every regime-
+    gated path (TPE / DIV_CONT / CLS / PDC / SR_FLIP / QCB / FAR).
+    """
+
+    def test_trending_up_with_wide_bb_not_volatile(self):
+        """Strong ADX + positive EMA slope must classify TRENDING_UP even
+        when BB width is at the VOLATILE threshold."""
+        result = MarketRegimeDetector._decide(
+            adx=30.0,           # strong (≥25)
+            ema_slope=0.10,     # positive, above 0.05 threshold
+            bb_width_pct=10.0,  # well above the 8.0 VOLATILE gate
+            timeframe="5m",
+            ema9_slope_pct=None,
+        )
+        assert result == MarketRegime.TRENDING_UP, (
+            f"Wide-BB clean uptrend must classify TRENDING_UP, got {result}. "
+            "Pre-fix this returned VOLATILE early and starved every "
+            "regime-gated trend-aligned evaluator."
+        )
+
+    def test_trending_down_with_wide_bb_not_volatile(self):
+        """Symmetric: strong negative slope on wide bands → TRENDING_DOWN."""
+        result = MarketRegimeDetector._decide(
+            adx=32.0,
+            ema_slope=-0.12,
+            bb_width_pct=11.0,
+            timeframe="5m",
+            ema9_slope_pct=None,
+        )
+        assert result == MarketRegime.TRENDING_DOWN
+
+    def test_ema9_fast_path_short_circuits_volatile(self):
+        """Early-trend detection via ema9_slope_pct must also short-circuit
+        the BB VOLATILE gate — otherwise the fast-path below is bypassed."""
+        result = MarketRegimeDetector._decide(
+            adx=22.0,           # below trending_min — trending isn't confirmed yet
+            ema_slope=0.02,     # weak conventional slope
+            bb_width_pct=9.5,   # wide
+            ema9_slope_pct=0.25,  # but EMA9 fast-path is firing strongly
+            timeframe="5m",
+        )
+        assert result == MarketRegime.TRENDING_UP
+
+    def test_wide_bb_with_no_trend_signal_still_volatile(self):
+        """Preserve safety semantic: wide bands AND flat direction = VOLATILE."""
+        result = MarketRegime.VOLATILE
+        actual = MarketRegimeDetector._decide(
+            adx=18.0,           # below trending_min
+            ema_slope=0.01,     # essentially flat
+            bb_width_pct=10.0,  # wide
+            timeframe="5m",
+            ema9_slope_pct=None,
+        )
+        assert actual == result, (
+            "Wide BB + flat direction must still classify VOLATILE — "
+            "the fix is narrow, only short-circuiting on actual trend signal."
+        )
+
+    def test_quiet_check_unaffected_by_strong_trend(self):
+        """Narrow bands always = QUIET regardless of trend state — compression
+        IS the signal, not a trend artefact."""
+        result = MarketRegimeDetector._decide(
+            adx=30.0,           # strong trend signal
+            ema_slope=0.10,
+            bb_width_pct=0.8,   # below QUIET threshold (1.2)
+            timeframe="5m",
+            ema9_slope_pct=None,
+        )
+        assert result == MarketRegime.QUIET
+
+    def test_adaptive_detector_mirrors_fix(self):
+        """``AdaptiveRegimeDetector._decide_adaptive`` must apply the same
+        trend-priority rule with its tier-specific thresholds."""
+        from src.regime import AdaptiveRegimeDetector
+        det = AdaptiveRegimeDetector(pair_tier="MIDCAP")
+        # MIDCAP volatile threshold is 5.0 — wider than global 8.0, so a
+        # 6% BB width would trip VOLATILE pre-fix.
+        result = det._decide_adaptive(
+            adx=30.0,
+            ema_slope=0.10,
+            bb_width_pct=6.0,
+            timeframe="5m",
+        )
+        assert result == MarketRegime.TRENDING_UP, (
+            f"Adaptive detector trend-priority broken: got {result}"
+        )
