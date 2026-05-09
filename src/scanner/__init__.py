@@ -41,6 +41,9 @@ from config import (
     FUNDING_RATE_PENALTY,
     FUNDING_RATE_PENALTY_THRESHOLD,
     GLOBAL_SYMBOL_COOLDOWN_SECONDS,
+    LIFECYCLE_COOLDOWN_EXPIRED_SEC,
+    LIFECYCLE_COOLDOWN_INVALIDATION_SEC,
+    LIFECYCLE_COOLDOWN_SL_SEC,
     MAX_CORRELATED_SCALP_SIGNALS,
     MTF_HARD_BLOCK,
     MTF_MIN_SCORE_TRENDING_SHORT,
@@ -3085,8 +3088,23 @@ class Scanner:
             self._target_path_penalty_gate_counters[f"{setup_family}:{setup_class}:{penalty_key}"] += 1
         return _modulated
 
+    # Outcome → dispatch-cooldown extension duration (seconds).  Owner-
+    # flagged 2026-05-09: same DOGEUSDT SR_FLIP_RETEST SHORT signal
+    # dispatched 4× in 7h, all EXPIRED — the 30-min dispatch cooldown
+    # elapsed mid-trade and nothing prevented re-emission on the same
+    # level.  Outcomes not in this map keep the default 30-min cooldown
+    # set at dispatch time (TP* hits, BREAKEVEN_EXIT, PROFIT_LOCKED,
+    # FULL_TP_HIT, CLOSED).
+    _LIFECYCLE_COOLDOWN_BY_OUTCOME: Dict[str, int] = {
+        "EXPIRED": LIFECYCLE_COOLDOWN_EXPIRED_SEC,
+        "SL_HIT": LIFECYCLE_COOLDOWN_SL_SEC,
+        "INVALIDATED": LIFECYCLE_COOLDOWN_INVALIDATION_SEC,
+    }
+
     def on_signal_lifecycle_outcome(self, sig: Any, outcome_label: str) -> None:
-        """Record final lifecycle outcome against origin setup family/path."""
+        """Record final lifecycle outcome against origin setup family/path,
+        and extend the (symbol, setup_class, direction) dispatch cooldown
+        when the outcome indicates the thesis didn't pan out."""
         _chan_name = getattr(sig, "channel", "") or "UNKNOWN"
         _setup_class_name = self._resolve_origin_setup_class(sig)
         _setup_family = getattr(sig, "origin_setup_family", "") or self._setup_family_for_channel(
@@ -3095,6 +3113,27 @@ class Scanner:
         self._path_funnel_counters[
             f"lifecycle:{outcome_label}:{_chan_name}:{_setup_family}:{_setup_class_name}"
         ] += 1
+
+        extension_sec = self._LIFECYCLE_COOLDOWN_BY_OUTCOME.get(outcome_label)
+        if extension_sec is None or extension_sec <= 0:
+            return
+        try:
+            cd_key = self._cooldown_key_for(sig)
+            if cd_key is None:
+                return
+            new_expiry = time.time() + extension_sec
+            existing = self._dispatch_cooldown.get(cd_key, 0.0)
+            # Ratchet only — never shorten an already-longer cooldown.
+            if new_expiry > existing:
+                self._dispatch_cooldown[cd_key] = new_expiry
+                self._persist_dispatch_cooldown()
+                log.info(
+                    "dispatch_cooldown extend {} {} {} ({} → +{}s after {})",
+                    cd_key[0], cd_key[1], cd_key[2],
+                    outcome_label, extension_sec, outcome_label,
+                )
+        except Exception as exc:
+            log.debug("lifecycle cooldown extension failed (non-fatal): {}", exc)
 
     @staticmethod
     def _get_primary_timeframe(chan_name: str) -> str:
@@ -3497,13 +3536,13 @@ class Scanner:
         try:
             cd_key = self._cooldown_key_for(sig)
             if cd_key is not None and self._is_cooldown_active(cd_key):
-                age_s = time.time() - self._dispatch_cooldown[cd_key]
+                remaining_s = self._dispatch_cooldown[cd_key] - time.time()
                 self._suppression_counters[
                     f"dispatch_cooldown:{cd_key[1]}"
                 ] += 1
                 log.info(
-                    "dispatch_cooldown skip {} {} {} (last fire {:.0f}s ago < {:.0f}s)",
-                    cd_key[0], cd_key[1], cd_key[2], age_s, DISPATCH_COOLDOWN_SEC,
+                    "dispatch_cooldown skip {} {} {} ({:.0f}s remaining)",
+                    cd_key[0], cd_key[1], cd_key[2], max(0.0, remaining_s),
                 )
                 return False
         except Exception as exc:
@@ -3546,7 +3585,7 @@ class Scanner:
             try:
                 cd_key = self._cooldown_key_for(sig)
                 if cd_key is not None:
-                    self._dispatch_cooldown[cd_key] = time.time()
+                    self._dispatch_cooldown[cd_key] = time.time() + DISPATCH_COOLDOWN_SEC
                     self._persist_dispatch_cooldown()
             except Exception as exc:
                 log.debug("cooldown stamp error (non-fatal): {}", exc)
@@ -3568,10 +3607,14 @@ class Scanner:
         return (symbol, setup_class, direction)
 
     def _is_cooldown_active(self, key: tuple) -> bool:
-        last = self._dispatch_cooldown.get(key)
-        if last is None:
+        # Stored value is the EXPIRY timestamp (``time.time() + duration``);
+        # active iff now < expiry.  Migration: legacy entries persisted as
+        # last-dispatch timestamps appear in the past, so the comparison
+        # below naturally treats them as expired (no spurious lockout).
+        expiry = self._dispatch_cooldown.get(key)
+        if expiry is None:
             return False
-        return (time.time() - last) < DISPATCH_COOLDOWN_SEC
+        return time.time() < expiry
 
     def _is_entry_fresh(self, sig: Any) -> bool:
         """Return True if the proposed entry is within tolerance of current price.
