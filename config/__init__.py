@@ -1115,6 +1115,35 @@ THESIS_COOLDOWN_AFTER_SL_SECONDS: Dict[str, int] = {
 }
 
 # ---------------------------------------------------------------------------
+# Lifecycle-aware dispatch cooldown extensions (per (symbol, setup_class,
+# direction)).  Owner-flagged 2026-05-09: 4 identical DOGEUSDT SR_FLIP_RETEST
+# SHORT signals dispatched in 7h, all EXPIRED — same level, same geometry, no
+# learning between dispatches.  Root cause: the existing 30-min dispatch
+# cooldown elapsed mid-trade (max scalp hold = 1h), so by the time the signal
+# expired there was nothing to prevent the next scan from emitting the same
+# setup on the same level.
+#
+# Fix: on each non-TP lifecycle outcome, extend the dispatch cooldown so the
+# next emission is meaningfully delayed — proportional to how strongly the
+# market has rejected the thesis.
+#
+# - EXPIRED: 2h.  Hold timed out without TP / SL / INVAL — the level didn't
+#   resolve; give it time to redevelop or break.
+# - SL_HIT: 1h.  Thesis explicitly proven wrong; let the level reset.
+# - INVALIDATED: 30 min.  Engine killed the signal before the market did —
+#   softer; the level may still matter if regime / structure shifts.
+# ---------------------------------------------------------------------------
+LIFECYCLE_COOLDOWN_EXPIRED_SEC: int = _safe_int(
+    "LIFECYCLE_COOLDOWN_EXPIRED_SEC", "7200"
+)
+LIFECYCLE_COOLDOWN_SL_SEC: int = _safe_int(
+    "LIFECYCLE_COOLDOWN_SL_SEC", "3600"
+)
+LIFECYCLE_COOLDOWN_INVALIDATION_SEC: int = _safe_int(
+    "LIFECYCLE_COOLDOWN_INVALIDATION_SEC", "1800"
+)
+
+# ---------------------------------------------------------------------------
 # Performance Tracker persistence path
 # ---------------------------------------------------------------------------
 PERFORMANCE_TRACKER_PATH: str = os.getenv(

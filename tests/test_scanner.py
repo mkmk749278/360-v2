@@ -363,6 +363,131 @@ class TestScannerCooldown:
         ] == 1
 
 
+class TestLifecycleCooldownExtension:
+    """Regression: owner-flagged 2026-05-09 — same DOGEUSDT SR_FLIP_RETEST
+    SHORT signal dispatched 4× in 7h, all EXPIRED, same level / same SL+TP.
+
+    The 30-min ``_dispatch_cooldown`` set at dispatch elapsed mid-trade
+    (max scalp hold = 1h), so by the time the signal expired there was
+    nothing to prevent the next scan from emitting the same setup on
+    the same level.
+
+    Fix: ``on_signal_lifecycle_outcome`` writes a longer expiry to
+    ``_dispatch_cooldown`` based on the outcome label.
+    """
+
+    def _now(self):
+        import time
+        return time.time()
+
+    def test_expired_extends_cooldown_to_two_hours(self):
+        from config import LIFECYCLE_COOLDOWN_EXPIRED_SEC
+        scanner = _make_scanner()
+        sig = _make_signal(channel="360_SCALP")
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.direction = type("D", (), {"value": "SHORT"})()
+
+        before = self._now()
+        scanner.on_signal_lifecycle_outcome(sig, "EXPIRED")
+        after = self._now()
+
+        cd_key = ("BTCUSDT", "SR_FLIP_RETEST", "SHORT")
+        expiry = scanner._dispatch_cooldown.get(cd_key)
+        assert expiry is not None, "EXPIRED outcome must extend dispatch cooldown"
+        # Expiry sits ~7200s in the future (within scheduling jitter).
+        remaining = expiry - after
+        assert (
+            LIFECYCLE_COOLDOWN_EXPIRED_SEC - 5 <= remaining <= LIFECYCLE_COOLDOWN_EXPIRED_SEC + 5
+        ), f"expected ~{LIFECYCLE_COOLDOWN_EXPIRED_SEC}s remaining, got {remaining}"
+        assert scanner._is_cooldown_active(cd_key) is True
+
+    def test_sl_hit_extends_cooldown_to_one_hour(self):
+        from config import LIFECYCLE_COOLDOWN_SL_SEC
+        scanner = _make_scanner()
+        sig = _make_signal(channel="360_SCALP")
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.direction = type("D", (), {"value": "LONG"})()
+
+        scanner.on_signal_lifecycle_outcome(sig, "SL_HIT")
+        cd_key = ("BTCUSDT", "SR_FLIP_RETEST", "LONG")
+        expiry = scanner._dispatch_cooldown[cd_key]
+        remaining = expiry - self._now()
+        assert (
+            LIFECYCLE_COOLDOWN_SL_SEC - 5 <= remaining <= LIFECYCLE_COOLDOWN_SL_SEC + 5
+        )
+
+    def test_invalidated_extends_cooldown_to_thirty_minutes(self):
+        from config import LIFECYCLE_COOLDOWN_INVALIDATION_SEC
+        scanner = _make_scanner()
+        sig = _make_signal(channel="360_SCALP")
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.direction = type("D", (), {"value": "SHORT"})()
+
+        scanner.on_signal_lifecycle_outcome(sig, "INVALIDATED")
+        cd_key = ("BTCUSDT", "SR_FLIP_RETEST", "SHORT")
+        expiry = scanner._dispatch_cooldown[cd_key]
+        remaining = expiry - self._now()
+        assert (
+            LIFECYCLE_COOLDOWN_INVALIDATION_SEC - 5
+            <= remaining
+            <= LIFECYCLE_COOLDOWN_INVALIDATION_SEC + 5
+        )
+
+    def test_tp1_hit_does_not_extend_cooldown(self):
+        """Thesis worked — leave the standard 30-min dispatch cooldown
+        in place; don't artificially block the next valid setup."""
+        scanner = _make_scanner()
+        sig = _make_signal(channel="360_SCALP")
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.direction = type("D", (), {"value": "LONG"})()
+
+        scanner.on_signal_lifecycle_outcome(sig, "TP1_HIT")
+        cd_key = ("BTCUSDT", "SR_FLIP_RETEST", "LONG")
+        # No entry created (the dispatch path stamps the 30-min cooldown,
+        # but lifecycle_outcome on a TP must not write here).
+        assert cd_key not in scanner._dispatch_cooldown
+
+    def test_extension_ratchets_only_never_shortens(self):
+        """If a longer cooldown is already active, a softer outcome
+        must NOT shorten it.  E.g. an EXPIRED → INVALIDATED sequence
+        must keep the 2h expiry, not drop to 30 min."""
+        import time
+        scanner = _make_scanner()
+        sig = _make_signal(channel="360_SCALP")
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.direction = type("D", (), {"value": "SHORT"})()
+
+        scanner.on_signal_lifecycle_outcome(sig, "EXPIRED")
+        cd_key = ("BTCUSDT", "SR_FLIP_RETEST", "SHORT")
+        long_expiry = scanner._dispatch_cooldown[cd_key]
+
+        # Now a softer outcome arrives (defensive — shouldn't normally
+        # happen, but a queue race could).  Ratchet must hold.
+        scanner.on_signal_lifecycle_outcome(sig, "INVALIDATED")
+        assert scanner._dispatch_cooldown[cd_key] == long_expiry, (
+            "softer outcome must not shorten an already-longer cooldown"
+        )
+
+    def test_dispatch_cooldown_uses_expiry_timestamp_semantic(self):
+        """Migration check: the writer stores ``time.time() + duration``
+        (an expiry timestamp), and ``_is_cooldown_active`` reads it as such.
+        Legacy on-disk values (last-dispatch timestamps in the past)
+        naturally read as expired.
+
+        Note: ``conftest`` sets ``DISPATCH_COOLDOWN_SEC=0`` for tests, so we
+        use an explicit positive duration here rather than the constant."""
+        import time
+        scanner = _make_scanner()
+        cd_key = ("ETHUSDT", "TREND_PULLBACK_EMA", "LONG")
+        # Simulate a dispatch-time stamp under the new semantic.
+        scanner._dispatch_cooldown[cd_key] = time.time() + 1800.0
+        assert scanner._is_cooldown_active(cd_key) is True
+
+        # Simulate a legacy value (last-dispatch timestamp, well in the past).
+        scanner._dispatch_cooldown[cd_key] = time.time() - 10_000
+        assert scanner._is_cooldown_active(cd_key) is False
+
+
 class TestScannerCircuitBreaker:
     def test_circuit_breaker_not_set_by_default(self):
         scanner = _make_scanner()
