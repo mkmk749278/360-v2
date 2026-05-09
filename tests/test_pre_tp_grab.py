@@ -322,8 +322,67 @@ async def test_skipped_for_breakout_family(mock_send, blacklisted_setup):
     ["TRENDING_UP", "TRENDING_DOWN", "STRONG_TREND", "BREAKOUT_EXPANSION"],
 )
 async def test_skipped_in_trending_regime(mock_send, trending_regime):
+    """Default config excludes TRENDING regimes from the allowlist — gate skips."""
     send, _ = mock_send
     monitor = _build_monitor(send, regime_label=trending_regime)
+    sig = _make_signal()
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=30000.0 * 1.005, c_low=29990.0)
+
+    assert fired is False
+
+
+async def test_user_override_unblocks_trending_regime(mock_send, tmp_path, monkeypatch):
+    """Owner-flagged 2026-05-09: a user who turns ON the Trending toggle in
+    the Pre-TP settings page must see Pre-TP fire on TRENDING_UP signals.
+
+    Reproduces the production wiring: ``user_settings`` JSON has Trending in
+    the allowlist; the gate must read through ``_resolved_regime_allowlist``
+    and honour it.  Pre-fix the gate read ``PRE_TP_REGIME_ALLOWLIST``
+    directly — a bare config constant — so user choice was ignored.
+    """
+    from src import user_settings
+
+    # Isolated store rooted at tmp.
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    user_settings.update_pretp(
+        {"regime_allowlist": ["TRENDING_UP", "TRENDING_DOWN", "RANGING"]}
+    )
+
+    send, _ = mock_send
+    monitor = _build_monitor(send, regime_label="TRENDING_UP")
+    sig = _make_signal()
+    entry = sig.entry
+    original_sl = sig.stop_loss
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=entry * 1.005, c_low=entry * 0.999)
+
+    assert fired is True
+    assert sig.pre_tp_hit is True
+    # SL must have ratcheted to breakeven.
+    assert sig.stop_loss == pytest.approx(entry)
+    assert sig.stop_loss != pytest.approx(original_sl)
+
+
+async def test_user_override_blocks_default_allowed_regime(mock_send, tmp_path, monkeypatch):
+    """Symmetric: a user who turns OFF Choppy must see Pre-TP skip in VOLATILE."""
+    from src import user_settings
+
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    user_settings.update_pretp(
+        {"regime_allowlist": ["TRENDING_UP", "TRENDING_DOWN", "RANGING"]}
+    )
+
+    send, _ = mock_send
+    monitor = _build_monitor(send, regime_label="VOLATILE")
     sig = _make_signal()
 
     with patch("src.trade_monitor.PRE_TP_ENABLED", True):
