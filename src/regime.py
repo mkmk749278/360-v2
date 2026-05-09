@@ -492,9 +492,28 @@ class MarketRegimeDetector:
     ) -> MarketRegime:
         # EMA slope threshold – wider for 1m data to reduce noise-driven flips
         ema_slope_threshold = 0.15 if timeframe == "1m" else 0.05
-        # Volatility check (Bollinger width) takes priority
+
+        # Strong-trend short-circuit (2026-05-09 fix).  A clean directional
+        # move produces wide Bollinger bands BY CONSTRUCTION — the bands are
+        # the SIGNATURE of the trend, not chaos.  Pre-fix the BB-width
+        # VOLATILE check below ran first and returned VOLATILE on wide-band
+        # trending pairs (live truth report 2026-05-09: 76.1% of cycles
+        # tagged VOLATILE — the SOLUSDT-style multi-TF trends were being
+        # rejected as "volatility").  VOLATILE's intended semantic is "wide
+        # bands AND no clear direction"; we only invoke it when no trend
+        # signal is present.
+        _strong_trend = (
+            adx is not None and adx >= _ADX_TRENDING_MIN
+            and ema_slope is not None and abs(ema_slope) >= ema_slope_threshold
+        )
+        _strong_ema9_slope = (
+            ema9_slope_pct is not None and abs(ema9_slope_pct) > 0.1
+        )
+        _trend_signal_present = _strong_trend or _strong_ema9_slope
+
+        # Volatility check (Bollinger width) — only when no trend signal.
         if bb_width_pct is not None:
-            if bb_width_pct >= _BB_WIDTH_VOLATILE_PCT:
+            if bb_width_pct >= _BB_WIDTH_VOLATILE_PCT and not _trend_signal_present:
                 return MarketRegime.VOLATILE
             if bb_width_pct <= _BB_WIDTH_QUIET_PCT:
                 return MarketRegime.QUIET
@@ -666,8 +685,14 @@ class AdaptiveRegimeDetector(MarketRegimeDetector):
     ) -> MarketRegime:
         """Like :meth:`_decide` but uses instance-level tier thresholds."""
         ema_slope_threshold = 0.15 if timeframe == "1m" else 0.05
+        # Mirror of ``_decide`` 2026-05-09 fix: trend signal short-circuits
+        # the wide-BB → VOLATILE early return.  See ``_decide`` for rationale.
+        _strong_trend = (
+            adx is not None and adx >= self._adx_trending_min
+            and ema_slope is not None and abs(ema_slope) >= ema_slope_threshold
+        )
         if bb_width_pct is not None:
-            if bb_width_pct >= self._bb_width_volatile:
+            if bb_width_pct >= self._bb_width_volatile and not _strong_trend:
                 return MarketRegime.VOLATILE
             if bb_width_pct <= self._bb_width_quiet:
                 return MarketRegime.QUIET
