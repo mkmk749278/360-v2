@@ -188,3 +188,86 @@ def test_save_drops_none_entries(tmp_path: Path) -> None:
     save_history([None, _make_signal(), None], path=str(p))
     loaded = load_history(path=str(p))
     assert len(loaded) == 1
+
+
+def test_load_strips_unknown_keys_from_old_records(tmp_path: Path) -> None:
+    """Records with keys no longer on the Signal dataclass must still load.
+
+    Owner-flagged 2026-05-09: after engine restart the Lumin app showed only
+    1–2 signals — every older record had been silently dropped on load
+    (Signal(**payload) raises TypeError on unknown kwargs) and the
+    main.py reconcile-then-save then overwrote the file with the truncated
+    survivors.  After the fix, unknown keys are stripped before construction
+    so old records survive every dataclass refactor.
+    """
+    p = tmp_path / "history.json"
+    valid = _make_signal()
+    record_with_stale_keys = {
+        "channel": valid.channel,
+        "symbol": valid.symbol,
+        "direction": valid.direction.value,
+        "entry": valid.entry,
+        "stop_loss": valid.stop_loss,
+        "tp1": valid.tp1,
+        "tp2": valid.tp2,
+        "signal_id": valid.signal_id,
+        "setup_class": valid.setup_class,
+        "status": valid.status,
+        "timestamp": valid.timestamp.isoformat(),
+        # Three keys that don't exist on the current Signal dataclass —
+        # simulating fields removed by past PRs.
+        "deprecated_field_alpha": "old-value",
+        "renamed_metric": 42.0,
+        "ghost_dict": {"nested": True},
+    }
+    p.write_text(json.dumps([record_with_stale_keys]), encoding="utf-8")
+
+    loaded = load_history(path=str(p))
+    assert len(loaded) == 1, "Record with stale keys must survive load"
+    assert loaded[0].signal_id == valid.signal_id
+    assert loaded[0].setup_class == valid.setup_class
+
+
+def test_reload_then_save_does_not_truncate_unknown_keys_records(
+    tmp_path: Path,
+) -> None:
+    """Regression for the production wipe: load → save round-trip on records
+    with stale keys must not drop the records.
+
+    Reproduces the main.py boot sequence: load_history → reconcile_*
+    (mutates list) → save_history.  Pre-fix, stale-key records were
+    dropped on load, and the subsequent save persisted the truncated list,
+    permanently wiping history.  After the fix, records survive the
+    round-trip even though the stale keys themselves are dropped.
+    """
+    p = tmp_path / "history.json"
+    valid_a = _make_signal(signal_id="sig-A")
+    valid_b = _make_signal(signal_id="sig-B")
+    records = []
+    for sig in (valid_a, valid_b):
+        rec = {
+            "channel": sig.channel,
+            "symbol": sig.symbol,
+            "direction": sig.direction.value,
+            "entry": sig.entry,
+            "stop_loss": sig.stop_loss,
+            "tp1": sig.tp1,
+            "tp2": sig.tp2,
+            "signal_id": sig.signal_id,
+            "setup_class": sig.setup_class,
+            "status": sig.status,
+            "timestamp": sig.timestamp.isoformat(),
+            "stale_key_from_old_schema": "X",
+        }
+        records.append(rec)
+    p.write_text(json.dumps(records), encoding="utf-8")
+
+    loaded_first = load_history(path=str(p))
+    assert len(loaded_first) == 2
+    # Simulate main.py's reconcile-then-save step.
+    save_history(loaded_first, path=str(p))
+    # Re-load from disk — both records must still be there.
+    loaded_second = load_history(path=str(p))
+    assert len(loaded_second) == 2
+    ids = {s.signal_id for s in loaded_second}
+    assert ids == {"sig-A", "sig-B"}
