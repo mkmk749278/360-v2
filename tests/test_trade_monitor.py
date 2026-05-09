@@ -1461,6 +1461,64 @@ class TestSignalInvalidation:
         assert "EMA" in reason
         assert "SHORT" in reason
 
+    def test_ema_crossover_exempts_lsr_long(self):
+        """LSR LONG must NOT be EMA-cross-invalidated even with ema9 < ema21.
+
+        LIQUIDITY_SWEEP_REVERSAL is counter-trend by design (CLAUDE.md HTF
+        policy): it fades an existing up-move's exhaustion sweep, so its EMAs
+        are routinely misaligned to the LONG direction at dispatch.  The
+        regime-based ``_counter_trend`` flag does not catch this case (a LONG
+        in TRENDING_UP regime is regime-aligned but thesis-counter-trend).
+        Truth-report 2026-05-09 audit: LSR had 1 PROTECTIVE / 2 PREMATURE / 2
+        NEUTRAL ema-crossover kills — the rule is net-hurting on this path.
+        """
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.setup_class = "LIQUIDITY_SWEEP_REVERSAL"
+
+        # Falling closes → EMA9 < EMA21 (the exact "bearish crossover" trigger).
+        closes = [30000.0 - i * 10 for i in range(25)]
+        monitor, _, _ = self._build_monitor({sig.signal_id: sig}, candles_close=closes)
+        reason = monitor._check_invalidation(sig)
+        assert reason is None or "EMA" not in reason, (
+            f"LSR LONG must be exempt from EMA-crossover invalidation, got: {reason!r}"
+        )
+
+    def test_ema_crossover_exempts_far_short(self):
+        """FAR SHORT must NOT be EMA-cross-invalidated even with ema9 > ema21.
+
+        Symmetric counter-trend exemption for FAILED_AUCTION_RECLAIM SHORT —
+        thesis is to fade an exhausted up-auction.
+        """
+        sig = _make_signal(
+            direction=Direction.SHORT,
+            entry=30000.0,
+            stop_loss=30150.0,
+            tp1=29850.0,
+            age_seconds=700.0,
+        )
+        sig.setup_class = "FAILED_AUCTION_RECLAIM"
+
+        # Rising closes → EMA9 > EMA21 (the bullish-crossover trigger for SHORT).
+        closes = [30000.0 + i * 10 for i in range(25)]
+        monitor, _, _ = self._build_monitor({sig.signal_id: sig}, candles_close=closes)
+        reason = monitor._check_invalidation(sig)
+        assert reason is None or "EMA" not in reason, (
+            f"FAR SHORT must be exempt from EMA-crossover invalidation, got: {reason!r}"
+        )
+
+    def test_ema_crossover_still_kills_non_exempt_setup(self):
+        """A non-exempt setup (e.g. TREND_PULLBACK_EMA) must still be killed by
+        EMA-crossover, ensuring the exemption is narrow and not a regression."""
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.setup_class = "TREND_PULLBACK_EMA"
+
+        closes = [30000.0 - i * 10 for i in range(25)]
+        monitor, _, _ = self._build_monitor({sig.signal_id: sig}, candles_close=closes)
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None
+        assert "EMA" in reason
+        assert "LONG" in reason
+
     def test_momentum_loss_invalidates_after_min_age(self):
         """Signal with momentum AGAINST direction is invalidated after min age.
 
