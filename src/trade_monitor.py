@@ -194,6 +194,23 @@ _TERMINAL_STATUSES: frozenset = frozenset({
     "CLOSED",
 })
 
+# Counter-trend-by-design setups exempted from the EMA9/EMA21 crossover
+# invalidation rule.  Per CLAUDE.md HTF-policy doctrine, LSR and FAR fade an
+# existing move by design — they are dispatched with EMAs intentionally
+# misaligned to the signal direction.  The crossover check at ``_check_invalidation``
+# only inspects the CURRENT alignment (``ema9 < ema21`` for LONG), not whether
+# alignment changed since dispatch, so it fires on the very condition the setup
+# was born under.  Audit data (truth report 2026-05-09) shows LSR with 1
+# PROTECTIVE / 2 PREMATURE / 2 NEUTRAL kills — the rule is net-hurting on this
+# path.  The pre-existing ``_counter_trend`` regime-based exemption only fires
+# when the creation regime is the OPPOSING trend; an LSR LONG fired in
+# TRENDING_UP regime (LSR fading the up-move's exhaustion) is not regime-counter
+# but IS thesis-counter, and was incorrectly killed.
+_EMA_CROSSOVER_EXEMPT_SETUPS: frozenset = frozenset({
+    "LIQUIDITY_SWEEP_REVERSAL",
+    "FAILED_AUCTION_RECLAIM",
+})
+
 
 class TradeMonitor:
     """Watches active signals and emits updates."""
@@ -653,9 +670,16 @@ class TradeMonitor:
         # INV-1: skip the EMA-crossover rule entirely for counter-trend setups —
         # their EMAs were misaligned at creation, so a "crossover" detection here
         # is a false positive: nothing crossed, the alignment is unchanged.
+        # Setup-class exemption (2026-05-09): LSR / FAR fade an existing move
+        # by design and are routinely dispatched in trending regimes that the
+        # regime-based ``_counter_trend`` flag does not catch.  See
+        # ``_EMA_CROSSOVER_EXEMPT_SETUPS`` rationale.
+        _setup_class = str(getattr(sig, "setup_class", "") or "").upper()
+        _setup_exempt = _setup_class in _EMA_CROSSOVER_EXEMPT_SETUPS
         _crossover_min_age = 300  # seconds
         if (
             not _counter_trend
+            and not _setup_exempt
             and ema9 is not None
             and ema21 is not None
             and sig.status not in ("TP1_HIT", "TP2_HIT")
