@@ -1065,7 +1065,7 @@ class TradeMonitor:
                 await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
                 self._remove(sig.signal_id)
                 return
-            if price >= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
+            if _c_high > 0 and _c_high >= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP2_HIT"
@@ -1085,7 +1085,7 @@ class TradeMonitor:
                         await self._order_manager.close_partial(sig, 0.33, tp_level=2)
                     except Exception as _exc:
                         log.warning("Partial TP2 close failed for {}: {}", sig.symbol, _exc)
-            if price >= sig.tp1 and sig.status not in ("TP1_HIT", "TP2_HIT", "TP3_HIT"):
+            if _c_high > 0 and _c_high >= sig.tp1 and sig.status not in ("TP1_HIT", "TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP1_HIT"
@@ -1131,7 +1131,7 @@ class TradeMonitor:
                 await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
                 self._remove(sig.signal_id)
                 return
-            if price <= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
+            if _c_low > 0 and _c_low <= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP2_HIT"
@@ -1150,7 +1150,7 @@ class TradeMonitor:
                         await self._order_manager.close_partial(sig, 0.33, tp_level=2)
                     except Exception as _exc:
                         log.warning("Partial TP2 close failed for {}: {}", sig.symbol, _exc)
-            if price <= sig.tp1 and sig.status not in ("TP1_HIT", "TP2_HIT", "TP3_HIT"):
+            if _c_low > 0 and _c_low <= sig.tp1 and sig.status not in ("TP1_HIT", "TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP1_HIT"

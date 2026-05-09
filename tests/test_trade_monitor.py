@@ -218,6 +218,205 @@ class TestOutcomeRecording:
         )
         return monitor, removed, sent, performance_tracker, circuit_breaker
 
+    def _build_monitor_with_wick_candles(
+        self,
+        active: Dict[str, Signal],
+        *,
+        high: float,
+        low: float,
+        close: float,
+    ):
+        """Build a monitor whose ``get_candles('1m')`` returns a synthetic
+        candle with explicit high/low/close — used to reproduce the
+        wick-through-TP scenario."""
+        removed = []
+        sent = []
+
+        async def mock_send(chat_id, text):
+            sent.append((chat_id, text))
+
+        candle = {
+            "open": [close],
+            "high": [high],
+            "low": [low],
+            "close": [close],
+            "volume": [1000.0],
+        }
+
+        data_store = MagicMock()
+        data_store.get_candles.side_effect = (
+            lambda symbol, interval: candle if interval == "1m" else None
+        )
+        data_store.ticks = {}
+
+        # Set sig.current_price to the candle CLOSE so MFE/PnL use close;
+        # this matches production: ``current_price`` is fed by ``_latest_price``
+        # which returns the last 1m close.
+        for sig in active.values():
+            sig.current_price = close
+
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=mock_send,
+            get_active_signals=lambda: dict(active),
+            remove_signal=lambda sid: removed.append(sid),
+            update_signal=MagicMock(),
+            performance_tracker=MagicMock(),
+            circuit_breaker=MagicMock(),
+        )
+        return monitor, removed, sent
+
+    # ------------------------------------------------------------------
+    # Wick-aware TP1 / TP2 fills (regression for 2026-05-09 bug:
+    # TP1 / TP2 used 1m candle CLOSE while TP3 + SL used 1m HIGH/LOW —
+    # bars where price wicked through TP1 then retraced were marked
+    # EXPIRED instead of TP1_HIT, contributing to the 0% win rate).
+    # ------------------------------------------------------------------
+
+    @pytest.mark.asyncio
+    async def test_long_tp1_fires_on_wick_even_when_close_below_tp1(self):
+        """LONG: 1m bar high wicks through TP1, close back below.  TP1 must
+        fire — Binance limit orders fill on wicks regardless of close."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.LONG,
+            entry=30000.0,
+            stop_loss=29850.0,
+            tp1=30150.0,    # +0.5%
+            tp2=30300.0,    # +1.0%
+            tp3=30450.0,    # +1.5%
+            age_seconds=200.0,
+        )
+        active = {sig.signal_id: sig}
+        # Bar wicks to $30200 (well above TP1 = $30150) but closes back at
+        # $30100 (below TP1).  Pre-fix: TP1 missed; post-fix: TP1 fires.
+        monitor, _, _ = self._build_monitor_with_wick_candles(
+            active, high=30200.0, low=29980.0, close=30100.0
+        )
+        await monitor._evaluate_signal(sig)
+        assert sig.status == "TP1_HIT", (
+            f"Wick-through-TP1 must fire TP1 (status was {sig.status})"
+        )
+        assert sig.best_tp_hit == 1
+
+    @pytest.mark.asyncio
+    async def test_long_tp2_fires_on_wick_even_when_close_below_tp2(self):
+        """LONG: 1m bar high wicks through TP2, close back below TP2 but
+        above TP1.  TP2 must fire."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.LONG,
+            entry=30000.0,
+            stop_loss=29850.0,
+            tp1=30150.0,
+            tp2=30300.0,
+            tp3=30450.0,
+            age_seconds=200.0,
+        )
+        active = {sig.signal_id: sig}
+        # high $30350 (above TP2), close $30200 (between TP1 and TP2).
+        monitor, _, _ = self._build_monitor_with_wick_candles(
+            active, high=30350.0, low=30100.0, close=30200.0
+        )
+        await monitor._evaluate_signal(sig)
+        assert sig.status == "TP2_HIT", (
+            f"Wick-through-TP2 must fire TP2 (status was {sig.status})"
+        )
+        assert sig.best_tp_hit == 2
+
+    @pytest.mark.asyncio
+    async def test_short_tp1_fires_on_wick_even_when_close_above_tp1(self):
+        """SHORT: 1m bar low wicks through TP1, close back above TP1."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.SHORT,
+            entry=30000.0,
+            stop_loss=30150.0,
+            tp1=29850.0,    # -0.5%
+            tp2=29700.0,    # -1.0%
+            tp3=29550.0,    # -1.5%
+            age_seconds=200.0,
+        )
+        active = {sig.signal_id: sig}
+        # Bar wicks down to $29800 (below TP1) but closes back at $29900
+        # (above TP1).  Pre-fix: TP1 missed; post-fix: TP1 fires.
+        monitor, _, _ = self._build_monitor_with_wick_candles(
+            active, high=30000.0, low=29800.0, close=29900.0
+        )
+        await monitor._evaluate_signal(sig)
+        assert sig.status == "TP1_HIT", (
+            f"Wick-through-TP1 must fire TP1 (status was {sig.status})"
+        )
+        assert sig.best_tp_hit == 1
+
+    @pytest.mark.asyncio
+    async def test_short_tp2_fires_on_wick_even_when_close_above_tp2(self):
+        """SHORT: 1m bar low wicks through TP2, close back above TP2."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.SHORT,
+            entry=30000.0,
+            stop_loss=30150.0,
+            tp1=29850.0,
+            tp2=29700.0,
+            tp3=29550.0,
+            age_seconds=200.0,
+        )
+        active = {sig.signal_id: sig}
+        # low $29650 (below TP2), close $29800 (between TP1 and TP2).
+        monitor, _, _ = self._build_monitor_with_wick_candles(
+            active, high=30000.0, low=29650.0, close=29800.0
+        )
+        await monitor._evaluate_signal(sig)
+        assert sig.status == "TP2_HIT", (
+            f"Wick-through-TP2 must fire TP2 (status was {sig.status})"
+        )
+        assert sig.best_tp_hit == 2
+
+    @pytest.mark.asyncio
+    async def test_long_tp1_does_not_fire_when_no_wick_reaches_tp1(self):
+        """Sanity: when neither high nor close reaches TP1, no TP fires."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.LONG,
+            entry=30000.0,
+            stop_loss=29850.0,
+            tp1=30150.0,
+            tp2=30300.0,
+            tp3=30450.0,
+            age_seconds=200.0,
+        )
+        active = {sig.signal_id: sig}
+        monitor, _, _ = self._build_monitor_with_wick_candles(
+            active, high=30100.0, low=29980.0, close=30050.0
+        )
+        await monitor._evaluate_signal(sig)
+        assert sig.status not in ("TP1_HIT", "TP2_HIT", "TP3_HIT")
+
+    @pytest.mark.asyncio
+    async def test_sl_takes_priority_over_tp_wick_in_same_bar(self):
+        """If a single 1m bar wicks BOTH SL and TP1 (LONG: low <= SL AND
+        high >= TP1), SL fires first — preserves the existing SL-first
+        semantic and prevents fake TP wins on volatile spike-and-revert
+        bars."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.LONG,
+            entry=30000.0,
+            stop_loss=29850.0,
+            tp1=30150.0,
+            age_seconds=200.0,
+        )
+        active = {sig.signal_id: sig}
+        # Both barriers tagged in one candle.  Close > entry so the
+        # zero-PnL guard at ``_evaluate_signal`` doesn't short-circuit.
+        monitor, _, _ = self._build_monitor_with_wick_candles(
+            active, high=30200.0, low=29800.0, close=30050.0
+        )
+        await monitor._evaluate_signal(sig)
+        # SL is checked before TP in `_evaluate_signal`.
+        assert sig.status in ("SL_HIT", "BREAKEVEN_EXIT", "PROFIT_LOCKED")
+
     @pytest.mark.asyncio
     async def test_sl_hit_calls_performance_tracker(self):
         """Losing stop exits must record a semantic SL_HIT outcome."""
