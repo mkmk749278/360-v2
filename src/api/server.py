@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from datetime import datetime
 from typing import Any, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
@@ -37,7 +38,15 @@ from .auth import (
     AuthError,
     decode_token,
     mint_token,
+    mint_user_token,
     refresh_token,
+)
+from .billing_callback import SIGNATURE_HEADER, BillingWebhookVerifier
+from .otp import IssueStatus, OtpStore, VerifyStatus
+from .otp_delivery import (
+    DeliveryStatus,
+    LogOnlyOtpProvider,
+    OtpDeliveryProvider,
 )
 from .schemas import (
     ActivityResponse,
@@ -46,7 +55,12 @@ from .schemas import (
     AutoModeChangeResponse,
     AutoModeStatus,
     AutoTradeSettings,
+    BillingGrantRequest,
+    BillingGrantResponse,
     HealthResponse,
+    OtpRequest,
+    OtpRequestResponse,
+    OtpVerify,
     PnlHistoryResponse,
     PositionsResponse,
     PretpSettings,
@@ -66,6 +80,7 @@ from .snapshot import (
     build_signals,
     build_tickers,
 )
+from .users import UserStore
 
 log = get_logger("api.server")
 
@@ -167,8 +182,25 @@ def build_app(
     static_token: str = "",
     allow_static: bool = True,
     cors_origins: Optional[List[str]] = None,
+    user_store: Optional[UserStore] = None,
+    otp_store: Optional[OtpStore] = None,
+    otp_delivery: Optional[OtpDeliveryProvider] = None,
+    billing_verifier: Optional[BillingWebhookVerifier] = None,
 ) -> FastAPI:
-    """Build the FastAPI app bound to a live engine instance."""
+    """Build the FastAPI app bound to a live engine instance.
+
+    Phase-2 additions:
+
+    * ``user_store`` (UserStore): SQLite-backed user registry.  When
+      ``None``, the OTP and billing endpoints return 503 — the
+      pre-Phase-2 endpoints continue to work normally.
+    * ``otp_store`` (OtpStore): in-memory OTP issuer/verifier; auto-
+      created when ``user_store`` is set and this is ``None``.
+    * ``otp_delivery`` (OtpDeliveryProvider): defaults to LogOnly when
+      not provided — owner-mediated forwarding for the closed beta.
+    * ``billing_verifier`` (BillingWebhookVerifier): when ``None`` or
+      ``not is_configured()``, ``/internal/billing/grant`` returns 503.
+    """
     app = FastAPI(
         title="360 Crypto Eye API",
         version=_API_VERSION,
@@ -181,7 +213,9 @@ def build_app(
         CORSMiddleware,
         allow_origins=cors_origins or ["*"],
         allow_credentials=False,
-        allow_methods=["GET", "POST"],
+        # POST/PUT include the OTP + billing-grant endpoints; OPTIONS is
+        # autoplay'd by browsers for any non-trivial CORS preflight.
+        allow_methods=["GET", "POST", "PUT", "OPTIONS"],
         allow_headers=["*"],
     )
 
@@ -192,6 +226,14 @@ def build_app(
     owner_required = _make_auth_dep(
         jwt_secret, static_token, allow_static, required_tier=OWNER_TIER,
     )
+
+    # Auto-construct the OTP defaults so callers (and existing tests)
+    # don't have to plumb every Phase 2 dep through.  When ``user_store``
+    # is None we leave them as None too — the endpoints will 503.
+    if user_store is not None and otp_store is None:
+        otp_store = OtpStore()
+    if user_store is not None and otp_delivery is None:
+        otp_delivery = LogOnlyOtpProvider()
 
     # ---- Health (no auth — used by Docker/k8s probes + first-launch reachability) ----
 
@@ -251,6 +293,161 @@ def build_app(
             tier=claims.tier,
             sub=claims.sub,
             exp_seconds=int((claims.exp - claims.iat).total_seconds()),
+        )
+
+    # ---- Phone OTP auth (Phase 2) ----
+
+    @app.post(
+        "/api/auth/request-otp",
+        response_model=OtpRequestResponse,
+        tags=["auth"],
+    )
+    async def auth_request_otp(req: OtpRequest) -> OtpRequestResponse:
+        if user_store is None or otp_store is None or otp_delivery is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="phone auth not configured",
+            )
+        # Issue first — burns the rate-limit slot before we hit the
+        # paid delivery channel, so an attacker can't burn the WhatsApp
+        # balance by triggering rate-limit faster than they hit it.
+        result = otp_store.issue(req.phone)
+        if result.status is IssueStatus.RATE_LIMITED:
+            # 429 + Retry-After lets the app render a countdown.
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many OTP requests; try again later",
+                headers={"Retry-After": str(result.retry_after_seconds)},
+            )
+        # status==OK → forward to delivery provider chain.
+        assert result.code is not None
+        delivery = await otp_delivery.send(req.phone, result.code)
+        if delivery.status is DeliveryStatus.PROVIDER_ERROR:
+            log.warning(
+                "OTP delivery error for {}: {}", req.phone, delivery.detail,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="failed to deliver OTP",
+            )
+        if delivery.status is DeliveryStatus.UNSUPPORTED_CHANNEL:
+            # No fallback configured (or fallback also unsupported).
+            # Caller can't reach the user — return a clear error rather
+            # than confirm "OTP sent" they'll never receive.
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="recipient unreachable on configured channels",
+            )
+        return OtpRequestResponse(
+            channel_used=delivery.channel_used,
+            expires_in_seconds=result.expires_in_seconds,
+        )
+
+    @app.post(
+        "/api/auth/verify-otp",
+        response_model=_TokenResponse,
+        tags=["auth"],
+    )
+    async def auth_verify_otp(req: OtpVerify) -> _TokenResponse:
+        if user_store is None or otp_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="phone auth not configured",
+            )
+        if not jwt_secret:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="auth not configured: API_JWT_SECRET unset",
+            )
+        verify = otp_store.verify(req.phone, req.code)
+        if verify.status is not VerifyStatus.OK:
+            # 401 (not 403): "this credential isn't valid for any user"
+            # — the same code never works as a generic auth failure.
+            detail_map = {
+                VerifyStatus.NO_RECORD: "no pending OTP for this phone",
+                VerifyStatus.EXPIRED: "OTP expired; request a new one",
+                VerifyStatus.WRONG_CODE: "incorrect OTP",
+                VerifyStatus.TOO_MANY_ATTEMPTS: (
+                    "too many incorrect attempts; request a new OTP"
+                ),
+            }
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=detail_map.get(verify.status, "OTP verification failed"),
+            )
+        # Get-or-create.  First-time signin → tier=free; returning user
+        # keeps their existing tier (paid, owner, etc.).
+        user = user_store.get_or_create_by_phone(req.phone)
+        token = mint_user_token(
+            secret=jwt_secret,
+            user_id=user.user_id,
+            tier=user.tier,
+            paid_until=user.paid_until,
+        )
+        claims = decode_token(token, secret=jwt_secret)
+        return _TokenResponse(
+            token=token,
+            tier=claims.tier,
+            sub=claims.sub,
+            exp_seconds=int((claims.exp - claims.iat).total_seconds()),
+        )
+
+    # ---- Billing webhook (Phase 2; bot/billing-platform → engine) ----
+
+    @app.post(
+        "/internal/billing/grant",
+        response_model=BillingGrantResponse,
+        tags=["internal"],
+    )
+    async def billing_grant(request: Request) -> BillingGrantResponse:
+        # HMAC verifies the RAW body bytes.  Pydantic parses afterwards.
+        if user_store is None or billing_verifier is None or not billing_verifier.is_configured():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="billing webhook not configured",
+            )
+        raw = await request.body()
+        presented = request.headers.get(SIGNATURE_HEADER)
+        result = billing_verifier.verify(raw, presented)
+        if not result.ok:
+            log.warning("Billing webhook rejected: {}", result.detail)
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=f"signature verification failed: {result.detail}",
+            )
+        # Parse the body now that it's authenticated.
+        try:
+            payload = BillingGrantRequest.model_validate_json(raw)
+        except Exception as exc:
+            raise HTTPException(
+                status_code=422,
+                detail=f"invalid grant body: {exc}",
+            )
+        # Get-or-create the user.  The bot legitimately reaches us
+        # before the user has signed in via OTP — pre-paying a tier on
+        # behalf of an invited tester is a valid flow.
+        user = user_store.get_or_create_by_phone(payload.phone)
+        paid_until_dt = None
+        if payload.paid_until_iso is not None:
+            try:
+                paid_until_dt = datetime.fromisoformat(payload.paid_until_iso)
+            except ValueError as exc:
+                raise HTTPException(
+                    status_code=422,
+                    detail=f"paid_until_iso not valid ISO-8601: {exc}",
+                )
+        try:
+            updated = user_store.set_tier(
+                user.user_id,
+                tier=payload.tier,
+                paid_until=paid_until_dt,
+            )
+        except LookupError as exc:  # pragma: no cover — get_or_create above
+            raise HTTPException(status_code=404, detail=str(exc))
+        return BillingGrantResponse(
+            ok=True,
+            user_id=updated.user_id,
+            tier=updated.tier,
         )
 
     # ---- Pulse ----
@@ -570,6 +767,10 @@ async def serve_api(
     static_token: str = "",
     allow_static: bool = True,
     cors_origins: Optional[List[str]] = None,
+    user_store: Optional[UserStore] = None,
+    otp_store: Optional[OtpStore] = None,
+    otp_delivery: Optional[OtpDeliveryProvider] = None,
+    billing_verifier: Optional[BillingWebhookVerifier] = None,
 ) -> None:
     """Run the API server forever.  Cancellation stops it cleanly."""
     import uvicorn  # imported lazily so optional dep stays optional
@@ -580,6 +781,10 @@ async def serve_api(
         static_token=static_token,
         allow_static=allow_static,
         cors_origins=cors_origins,
+        user_store=user_store,
+        otp_store=otp_store,
+        otp_delivery=otp_delivery,
+        billing_verifier=billing_verifier,
     )
     config = uvicorn.Config(
         app=app,

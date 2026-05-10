@@ -72,6 +72,14 @@ class TokenClaims:
     tier: str
     iat: datetime
     exp: datetime
+    # ``paid_until`` is set on user-id JWTs when the user holds a paid
+    # subscription.  It's deliberately separate from ``exp``: ``exp`` is
+    # the JWT's own validity window (7d), ``paid_until`` is the
+    # subscription expiry (30d / 90d / etc.).  When a JWT refreshes the
+    # server consults the UserStore for the live ``paid_until`` and may
+    # downgrade ``tier`` to free if expired.  Anonymous device JWTs
+    # carry no ``paid_until`` (None).
+    paid_until: Optional[datetime] = None
 
     @property
     def is_paid(self) -> bool:
@@ -122,23 +130,52 @@ def mint_token(
     sub: Optional[str] = None,
     tier: str = ALL_ACCESS_TIER,
     ttl: timedelta = DEFAULT_TOKEN_TTL,
+    paid_until: Optional[datetime] = None,
 ) -> str:
-    """Mint a fresh JWT.  ``sub`` defaults to a random device id."""
+    """Mint a fresh JWT.  ``sub`` defaults to a random device id.
+
+    ``paid_until`` (optional): if set, embedded as a claim alongside
+    ``exp``.  Used by user-id JWTs to communicate the subscription end
+    date to clients.  Anonymous device JWTs leave this None.
+    """
     if not secret:
         raise ValueError("JWT secret not configured (API_JWT_SECRET)")
     now = _now()
     sub = sub or f"device-{secrets.token_hex(8)}"
-    payload = {
+    payload: Dict[str, Any] = {
         "sub": sub,
         "tier": tier,
         "iat": int(now.timestamp()),
         "exp": int((now + ttl).timestamp()),
     }
+    if paid_until is not None:
+        payload["paid_until"] = int(paid_until.timestamp())
     header_b64 = _b64url_encode(_json_compact(_HEADER))
     payload_b64 = _b64url_encode(_json_compact(payload))
     signing_input = f"{header_b64}.{payload_b64}".encode("ascii")
     sig_b64 = _sign(signing_input, secret)
     return f"{header_b64}.{payload_b64}.{sig_b64}"
+
+
+def mint_user_token(
+    *,
+    secret: str,
+    user_id: int,
+    tier: str,
+    paid_until: Optional[datetime] = None,
+    ttl: timedelta = DEFAULT_TOKEN_TTL,
+) -> str:
+    """Mint a JWT for a registered user.  Wraps :func:`mint_token` with
+    the ``user-<id>`` subject convention so callers don't have to assemble
+    the string themselves.
+    """
+    return mint_token(
+        secret=secret,
+        sub=f"user-{user_id}",
+        tier=tier,
+        paid_until=paid_until,
+        ttl=ttl,
+    )
 
 
 def decode_token(token: str, *, secret: str) -> TokenClaims:
@@ -170,13 +207,19 @@ def decode_token(token: str, *, secret: str) -> TokenClaims:
         tier = str(payload.get("tier", FREE_TIER))
         iat = datetime.fromtimestamp(int(payload["iat"]), tz=timezone.utc)
         exp = datetime.fromtimestamp(int(payload["exp"]), tz=timezone.utc)
+        paid_until_raw = payload.get("paid_until")
+        paid_until: Optional[datetime] = (
+            datetime.fromtimestamp(int(paid_until_raw), tz=timezone.utc)
+            if paid_until_raw is not None
+            else None
+        )
     except (KeyError, TypeError, ValueError) as exc:
         raise AuthError(f"malformed token payload: {exc}")
 
     if _now() >= exp:
         raise AuthError("token expired")
 
-    return TokenClaims(sub=sub, tier=tier, iat=iat, exp=exp)
+    return TokenClaims(sub=sub, tier=tier, iat=iat, exp=exp, paid_until=paid_until)
 
 
 def refresh_token(token: str, *, secret: str, ttl: timedelta = DEFAULT_TOKEN_TTL) -> str:
@@ -187,6 +230,17 @@ def refresh_token(token: str, *, secret: str, ttl: timedelta = DEFAULT_TOKEN_TTL
     is the design: a leaked JWT can be used to refresh itself, but only
     until natural expiry — limiting window-of-abuse without forcing an
     explicit refresh-token round-trip on every fetch.
+
+    ``paid_until`` carries through unchanged — Phase 3 will switch the
+    refresh path to consult the UserStore so an expired subscription
+    downgrades the tier on next refresh.  For Phase 2 the JWT is
+    self-describing.
     """
     claims = decode_token(token, secret=secret)
-    return mint_token(secret=secret, sub=claims.sub, tier=claims.tier, ttl=ttl)
+    return mint_token(
+        secret=secret,
+        sub=claims.sub,
+        tier=claims.tier,
+        ttl=ttl,
+        paid_until=claims.paid_until,
+    )

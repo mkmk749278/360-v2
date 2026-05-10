@@ -342,3 +342,73 @@ class AutoTradeSettings(BaseModel):
         ge=1,
         description="Maximum concurrent open positions across all symbols.",
     )
+
+
+# ---------------------------------------------------------------------------
+# Phone-OTP auth (Phase 2)
+# ---------------------------------------------------------------------------
+
+
+class OtpRequest(BaseModel):
+    """Body of ``POST /api/auth/request-otp``."""
+
+    phone: str = Field(
+        ...,
+        min_length=8,
+        max_length=18,
+        description="E.164 phone number, including leading ``+``.",
+    )
+
+
+class OtpRequestResponse(BaseModel):
+    """Response from ``POST /api/auth/request-otp``.
+
+    ``channel_used`` lets the app render the right UI hint ("check
+    WhatsApp" vs "check SMS").  ``expires_in_seconds`` drives the
+    countdown on the verify screen.  Don't leak which providers the
+    user lacks beyond the single channel hint.
+    """
+
+    channel_used: Literal["whatsapp", "sms", "log"]
+    expires_in_seconds: int
+
+
+class OtpVerify(BaseModel):
+    """Body of ``POST /api/auth/verify-otp``."""
+
+    phone: str = Field(..., min_length=8, max_length=18)
+    code: str = Field(
+        ...,
+        min_length=6,
+        max_length=6,
+        pattern=r"^\d{6}$",
+        description="6-digit numeric code.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Billing webhook (Phase 2 — bot/billing-platform → engine)
+# ---------------------------------------------------------------------------
+
+
+class BillingGrantRequest(BaseModel):
+    """Body of ``POST /internal/billing/grant``.
+
+    ``paid_until_iso`` is an ISO-8601 UTC timestamp; ``None`` means the
+    grant is being **revoked** (tier downgraded to free).  The server
+    parses this to a datetime and stores it in the user row.  HMAC
+    verification on the raw body happens before this schema is applied.
+    """
+
+    phone: str = Field(..., min_length=8, max_length=18)
+    tier: Literal["free", "paid", "owner"]
+    paid_until_iso: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 UTC; null when revoking (downgrade to free).",
+    )
+
+
+class BillingGrantResponse(BaseModel):
+    ok: bool
+    user_id: int
+    tier: str

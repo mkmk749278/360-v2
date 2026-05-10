@@ -1599,3 +1599,65 @@ API_AUTH_TOKEN: str = os.getenv("API_AUTH_TOKEN", "")
 API_ALLOW_STATIC_TOKEN: bool = _safe_bool("API_ALLOW_STATIC_TOKEN", "true")
 #: Comma-separated CORS origins.  ``*`` for any (development only).
 API_CORS_ORIGINS: str = os.getenv("API_CORS_ORIGINS", "*")
+
+# ---------------------------------------------------------------------------
+# Multi-user expansion (Phase 2 — phone-OTP auth + billing webhook)
+# ---------------------------------------------------------------------------
+#: SQLite path for the user registry (phone, tier, paid_until).  Lives in
+#: the same ``data/`` volume as the JSON state files.  WAL mode enabled
+#: at first open by ``UserStore``.
+LUMIN_DB_PATH: str = os.getenv("LUMIN_DB_PATH", "data/lumin.sqlite")
+#: Owner's E.164 phone.  Inserted as ``user_id=1, tier=owner`` on first
+#: boot of an empty ``LUMIN_DB_PATH``.  Empty string skips bootstrap —
+#: owner falls back to the static admin token until a phone is set.
+OWNER_PHONE_E164: str = os.getenv("OWNER_PHONE_E164", "")
+#: OTP TTL in seconds.  5 min default; users have this long to enter the
+#: code before it expires and they have to request a fresh one.
+OTP_TTL_SECONDS: int = _safe_int("OTP_TTL_SECONDS", "300")
+#: Per-phone rate limit on OTP issuance — N requests per rolling hour.
+#: Defends against an attacker burning the WhatsApp/SMS balance via a
+#: single phone.
+OTP_MAX_ISSUES_PER_HOUR: int = _safe_int("OTP_MAX_ISSUES_PER_HOUR", "3")
+#: Per-code attempt cap on verify.  Wrong-code Nth time drops the record
+#: — user has to request a fresh code rather than brute-force the digits.
+OTP_MAX_ATTEMPTS_PER_CODE: int = _safe_int("OTP_MAX_ATTEMPTS_PER_CODE", "5")
+#: Primary delivery channel for OTPs.  ``log`` (closed-beta default —
+#: writes the code to engine logs for owner-mediated forwarding),
+#: ``whatsapp`` (Twilio Authentication template — production default
+#: once Meta verification clears), or ``sms`` (AWS SNS — used directly
+#: when WhatsApp isn't viable, e.g. corporate-only deployments).
+OTP_PRIMARY_CHANNEL: str = _safe_choice(
+    "OTP_PRIMARY_CHANNEL", "log", frozenset({"log", "whatsapp", "sms"}),
+)
+#: Fallback delivery channel — tried only when the primary returns
+#: ``UNSUPPORTED_CHANNEL`` (recipient unreachable).  Empty string
+#: disables fallback (single-provider mode).
+OTP_FALLBACK_CHANNEL: str = _safe_choice(
+    "OTP_FALLBACK_CHANNEL", "", frozenset({"", "log", "whatsapp", "sms"}),
+)
+
+# Twilio (WhatsApp Authentication template).  Only consulted when
+# ``OTP_PRIMARY_CHANNEL`` or ``OTP_FALLBACK_CHANNEL`` is ``whatsapp``.
+TWILIO_ACCOUNT_SID: str = os.getenv("TWILIO_ACCOUNT_SID", "")
+TWILIO_AUTH_TOKEN: str = os.getenv("TWILIO_AUTH_TOKEN", "")
+#: Verified WhatsApp Business sender (E.164, no ``whatsapp:`` prefix —
+#: provider adds it on the wire).
+TWILIO_WHATSAPP_FROM: str = os.getenv("TWILIO_WHATSAPP_FROM", "")
+#: Twilio Content SID (``HX...``) for the approved Authentication
+#: template.  Body: ``"Your Lumin verification code is {{1}}. ..."``.
+TWILIO_WHATSAPP_CONTENT_SID: str = os.getenv("TWILIO_WHATSAPP_CONTENT_SID", "")
+
+# AWS SNS (SMS fallback).  Only consulted when ``OTP_*_CHANNEL`` is ``sms``.
+AWS_SNS_REGION: str = os.getenv("AWS_SNS_REGION", "us-east-1")
+AWS_SNS_ACCESS_KEY_ID: str = os.getenv("AWS_SNS_ACCESS_KEY_ID", "")
+AWS_SNS_SECRET_ACCESS_KEY: str = os.getenv("AWS_SNS_SECRET_ACCESS_KEY", "")
+#: Optional 11-char alphanumeric sender ID (where the destination
+#: country supports it — varies by carrier).  Empty leaves SNS to use a
+#: default short code.
+AWS_SNS_SENDER_ID: str = os.getenv("AWS_SNS_SENDER_ID", "")
+
+#: HMAC secret shared with ``@LuminProBot`` (or future billing
+#: adapters).  When empty, ``POST /internal/billing/grant`` returns
+#: 503 — failing closed rather than accepting all callers.  Set this in
+#: lockstep with the bot's signing config.
+BILLING_WEBHOOK_SECRET: str = os.getenv("BILLING_WEBHOOK_SECRET", "")

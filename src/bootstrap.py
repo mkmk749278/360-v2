@@ -290,11 +290,41 @@ class Bootstrap:
             API_HOST,
             API_JWT_SECRET,
             API_PORT,
+            BILLING_WEBHOOK_SECRET,
+            LUMIN_DB_PATH,
+            OTP_MAX_ATTEMPTS_PER_CODE,
+            OTP_MAX_ISSUES_PER_HOUR,
+            OTP_TTL_SECONDS,
+            OWNER_PHONE_E164,
         )
         if API_ENABLED:
+            from datetime import timedelta
+
             from src.api import serve_api
+            from src.api.billing_callback import BillingWebhookVerifier
+            from src.api.otp import OtpStore
+            from src.api.otp_delivery import build_provider_from_env
+            from src.api.users import UserStore
 
             origins = [o.strip() for o in API_CORS_ORIGINS.split(",") if o.strip()]
+
+            # Phase-2 multi-user wiring.  UserStore opens (and creates if
+            # absent) the SQLite file under data/.  Owner is bootstrapped
+            # idempotently — only the first boot of an empty DB inserts.
+            user_store = UserStore(LUMIN_DB_PATH)
+            user_store.bootstrap_owner_if_empty(OWNER_PHONE_E164)
+            otp_store = OtpStore(
+                ttl=timedelta(seconds=OTP_TTL_SECONDS),
+                max_attempts_per_code=OTP_MAX_ATTEMPTS_PER_CODE,
+                max_issues_per_hour=OTP_MAX_ISSUES_PER_HOUR,
+            )
+            otp_delivery = build_provider_from_env()
+            billing_verifier = BillingWebhookVerifier(BILLING_WEBHOOK_SECRET)
+
+            # Stash on the engine so other subsystems (e.g. Phase-3
+            # per-user paper P&L) can resolve the same singletons.
+            engine.user_store = user_store
+
             tasks.append(
                 asyncio.create_task(
                     serve_api(
@@ -305,6 +335,10 @@ class Bootstrap:
                         static_token=API_AUTH_TOKEN,
                         allow_static=API_ALLOW_STATIC_TOKEN,
                         cors_origins=origins,
+                        user_store=user_store,
+                        otp_store=otp_store,
+                        otp_delivery=otp_delivery,
+                        billing_verifier=billing_verifier,
                     ),
                     name="api_server",
                 )
