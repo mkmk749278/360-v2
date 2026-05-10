@@ -50,6 +50,13 @@ DEFAULT_TOKEN_TTL = timedelta(days=7)
 ALL_ACCESS_TIER = "all-access"
 PAID_TIER = "paid"
 FREE_TIER = "free"
+# OWNER_TIER gates write endpoints (settings PUT, auto-mode POST).  Anon /
+# all-access / paid / free clients can READ everything but only owner-tier
+# JWTs (or the static admin token bypass) can mutate engine state.  Added
+# 2026-05-10 ahead of multi-tester invites — engine is single-tenant so
+# every client shares the same global settings; without this gate any
+# tester could flip the engine into Live mode or change position size.
+OWNER_TIER = "owner"
 
 
 # ---------------------------------------------------------------------------
