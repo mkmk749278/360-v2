@@ -258,3 +258,91 @@ def pretp_regime_allowlist() -> FrozenSet[str]:
             return _normalise_regime_input(configured)
     from config import PRE_TP_REGIME_ALLOWLIST
     return frozenset(PRE_TP_REGIME_ALLOWLIST)
+
+
+# ---------------------------------------------------------------------------
+# Auto-trade settings
+# ---------------------------------------------------------------------------
+
+_AUTO_TRADE_KEYS = frozenset({
+    "mode",                       # "off" | "paper" | "live"
+    "position_size_pct",          # % of equity per trade (0–100)
+    "leverage_cap",               # 1–30 hard cap
+    "max_concurrent_positions",   # int >= 1
+})
+
+# B12 hard cap on configured leverage.  The user's ``leverage_cap`` is
+# clamped to this on write.
+_LEVERAGE_HARD_CAP: float = 30.0
+
+
+def _coerce_auto_trade_payload(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate + normalise an inbound auto-trade settings payload."""
+    out: Dict[str, Any] = {}
+    for key, value in raw.items():
+        if key not in _AUTO_TRADE_KEYS:
+            log.warning("user_settings.auto_trade: dropping unknown key %r", key)
+            continue
+        if key == "mode":
+            if isinstance(value, str):
+                token = value.strip().lower()
+                if token in ("off", "paper", "live"):
+                    out[key] = token
+        elif key == "position_size_pct":
+            if isinstance(value, (int, float)) and 0 < float(value) <= 100:
+                out[key] = float(value)
+        elif key == "leverage_cap":
+            if isinstance(value, (int, float)) and float(value) > 0:
+                # Clamp to the B12 hard cap on write.
+                out[key] = min(float(value), _LEVERAGE_HARD_CAP)
+        elif key == "max_concurrent_positions":
+            if isinstance(value, int) and value >= 1:
+                out[key] = int(value)
+    return out
+
+
+def get_auto_trade() -> Dict[str, Any]:
+    """Return the user-set auto-trade settings dict (may be partial / empty)."""
+    raw = _STORE.get("auto_trade")
+    return dict(raw) if isinstance(raw, dict) else {}
+
+
+def update_auto_trade(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge a partial auto-trade settings payload into the store."""
+    cleaned = _coerce_auto_trade_payload(payload)
+    return _STORE.update("auto_trade", cleaned)
+
+
+def auto_trade_position_size_pct() -> float:
+    """Engine accessor: % of equity per paper trade.  User-set or
+    ``POSITION_SIZE_PCT`` config default."""
+    raw = _STORE.get("auto_trade")
+    if isinstance(raw, dict):
+        v = raw.get("position_size_pct")
+        if isinstance(v, (int, float)) and v > 0:
+            return float(v)
+    from config import POSITION_SIZE_PCT
+    return float(POSITION_SIZE_PCT)
+
+
+def auto_trade_leverage_cap() -> float:
+    """Engine accessor: hard leverage cap (per RiskManager).  User-set or
+    ``RISK_MAX_LEVERAGE`` config default.  Always ≤ ``_LEVERAGE_HARD_CAP``."""
+    raw = _STORE.get("auto_trade")
+    if isinstance(raw, dict):
+        v = raw.get("leverage_cap")
+        if isinstance(v, (int, float)) and v > 0:
+            return min(float(v), _LEVERAGE_HARD_CAP)
+    from config import RISK_MAX_LEVERAGE
+    return min(float(RISK_MAX_LEVERAGE), _LEVERAGE_HARD_CAP)
+
+
+def auto_trade_max_concurrent() -> int:
+    """Engine accessor: cap on concurrent open positions across all
+    channels.  User-set or constructor default (5)."""
+    raw = _STORE.get("auto_trade")
+    if isinstance(raw, dict):
+        v = raw.get("max_concurrent_positions")
+        if isinstance(v, int) and v >= 1:
+            return int(v)
+    return 5

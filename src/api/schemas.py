@@ -304,3 +304,41 @@ class PretpSettings(BaseModel):
         ge=0,
         description="Latest signal age at which Pre-TP may still fire.",
     )
+
+
+# ---------------------------------------------------------------------------
+# User settings — Auto-trade page
+# ---------------------------------------------------------------------------
+
+
+class AutoTradeSettings(BaseModel):
+    """User-controllable auto-execution and sizing parameters.
+
+    All fields optional on PUT — the API merges the partial payload into
+    the stored state.  GET returns the engine's effective view (user
+    overrides where set, config defaults otherwise).
+    """
+
+    mode: Optional[Literal["off", "paper", "live"]] = Field(
+        default=None,
+        description="Execution mode.  Mirrors `/api/auto-mode`'s POST shape; "
+        "this endpoint is the settings-page counterpart that GET-bundles "
+        "mode with sizing params.",
+    )
+    position_size_pct: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        le=100.0,
+        description="Position size as % of paper equity per trade.",
+    )
+    leverage_cap: Optional[float] = Field(
+        default=None,
+        gt=0.0,
+        le=30.0,  # B12 hard cap.
+        description="Hard leverage cap (RiskManager).  Server clamps to ≤ 30.",
+    )
+    max_concurrent_positions: Optional[int] = Field(
+        default=None,
+        ge=1,
+        description="Maximum concurrent open positions across all symbols.",
+    )

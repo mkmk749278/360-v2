@@ -854,3 +854,107 @@ def test_settings_pretp_requires_auth(engine: _StubEngine) -> None:
     unauth_client = TestClient(app)
     r = unauth_client.get("/api/settings/pretp")
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# /api/settings/auto-trade — owner-flagged 2026-05-10 (Auto-trade page mock).
+# ---------------------------------------------------------------------------
+
+
+def test_settings_auto_trade_get_returns_resolved_view(
+    client: TestClient, tmp_path, monkeypatch,
+) -> None:
+    """GET resolves the page state: mode + sizing knobs.  Defaults come from
+    config when no user override exists."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    r = client.get("/api/settings/auto-trade")
+    assert r.status_code == 200
+    body = r.json()
+    from config import POSITION_SIZE_PCT
+    assert body["position_size_pct"] == pytest.approx(POSITION_SIZE_PCT)
+    assert body["leverage_cap"] is not None
+    assert body["max_concurrent_positions"] == 5
+
+
+def test_settings_auto_trade_put_partial_payload_merges(
+    client: TestClient, tmp_path, monkeypatch,
+) -> None:
+    """One-field PUT must persist that field and leave the others alone."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    r = client.put(
+        "/api/settings/auto-trade",
+        json={"position_size_pct": 4.5},
+    )
+    assert r.status_code == 200
+    assert r.json()["position_size_pct"] == pytest.approx(4.5)
+
+    # Re-GET reflects the persisted state and still has defaults for the rest.
+    r2 = client.get("/api/settings/auto-trade")
+    assert r2.json()["position_size_pct"] == pytest.approx(4.5)
+    assert r2.json()["max_concurrent_positions"] == 5  # untouched
+
+
+def test_settings_auto_trade_put_clamps_leverage_to_hard_cap(
+    client: TestClient, tmp_path, monkeypatch,
+) -> None:
+    """B12: server clamps leverage_cap to ≤ 30.  Pydantic ``le=30.0``
+    enforces this at the boundary; a legitimate-looking 30 must round-trip
+    while >30 must 422."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    r = client.put("/api/settings/auto-trade", json={"leverage_cap": 30.0})
+    assert r.status_code == 200
+    assert r.json()["leverage_cap"] == pytest.approx(30.0)
+
+    r2 = client.put("/api/settings/auto-trade", json={"leverage_cap": 50.0})
+    assert r2.status_code == 422
+
+
+def test_settings_auto_trade_put_routes_mode_through_engine(
+    client: TestClient, engine: _StubEngine, tmp_path, monkeypatch,
+) -> None:
+    """Mode change in the bundled PUT must invoke
+    ``engine.set_auto_execution_mode`` so live state actually changes —
+    not just the persisted preference."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    # Stub engine starts in "paper".  Switching to "live" exercises the
+    # routing path; the stub records the attempt on ``last_mode_change``.
+    r = client.put(
+        "/api/settings/auto-trade",
+        json={"mode": "live", "position_size_pct": 3.0},
+    )
+    assert r.status_code == 200
+    # Stub recorded the mode change.
+    assert engine.last_mode_change == "live"
+    # Sizing knob was still persisted alongside.
+    assert user_settings.get_auto_trade()["position_size_pct"] == pytest.approx(3.0)
+
+
+def test_settings_auto_trade_put_rejects_invalid_size(client: TestClient) -> None:
+    """Pydantic enforces ``gt=0`` and ``le=100`` on position_size_pct."""
+    r = client.put("/api/settings/auto-trade", json={"position_size_pct": 0.0})
+    assert r.status_code == 422
+    r = client.put("/api/settings/auto-trade", json={"position_size_pct": 150.0})
+    assert r.status_code == 422
+
+
+def test_settings_auto_trade_requires_auth(engine: _StubEngine) -> None:
+    app = build_app(engine, jwt_secret=_TEST_SECRET, allow_static=False)
+    unauth_client = TestClient(app)
+    r = unauth_client.get("/api/settings/auto-trade")
+    assert r.status_code == 401

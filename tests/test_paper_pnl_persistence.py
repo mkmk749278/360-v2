@@ -176,7 +176,10 @@ class TestEndToEndPersistenceCycle:
         await pm.close_partial(sig, fraction=0.33, tp_level=1, current_price=105.0)
         assert tmp_pnl_path.exists()
         data = json.loads(tmp_pnl_path.read_text())
-        assert data["realised_pnl_usd"] == pytest.approx(pm.simulated_pnl_total)
+        # Compare against the raw cumulative — ``simulated_pnl_total`` rounds
+        # to 4dp which doesn't match the unrounded float persisted to disk
+        # once Binance fees enter the math (sub-cent precision matters).
+        assert data["realised_pnl_usd"] == pytest.approx(pm._realised_pnl_total, abs=1e-9)
         assert data["realised_pnl_usd"] > 0  # actually banked something
 
     async def test_full_close_persists_to_disk(self, tmp_pnl_path):
@@ -189,7 +192,10 @@ class TestEndToEndPersistenceCycle:
         await pm.close_full(sig, current_price=99.0, reason="SL_HIT")
         assert tmp_pnl_path.exists()
         data = json.loads(tmp_pnl_path.read_text())
-        assert data["realised_pnl_usd"] == pytest.approx(pm.simulated_pnl_total)
+        # Compare against the raw cumulative — ``simulated_pnl_total`` rounds
+        # to 4dp which doesn't match the unrounded float persisted to disk
+        # once Binance fees enter the math (sub-cent precision matters).
+        assert data["realised_pnl_usd"] == pytest.approx(pm._realised_pnl_total, abs=1e-9)
         assert data["realised_pnl_usd"] < 0  # actually lost money
 
     async def test_persistence_survives_broker_rebuild(self, tmp_pnl_path):
@@ -231,4 +237,7 @@ class TestEndToEndPersistenceCycle:
             await pm.place_market_order(sig)
             await pm.close_full(sig, current_price=entry * 1.05, reason="TP1_HIT")
         data = json.loads(tmp_pnl_path.read_text())
-        assert data["realised_pnl_usd"] == pytest.approx(pm.simulated_pnl_total)
+        # Compare against the raw cumulative — ``simulated_pnl_total`` rounds
+        # to 4dp which doesn't match the unrounded float persisted to disk
+        # once Binance fees enter the math (sub-cent precision matters).
+        assert data["realised_pnl_usd"] == pytest.approx(pm._realised_pnl_total, abs=1e-9)
