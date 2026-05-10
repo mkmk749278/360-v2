@@ -33,6 +33,7 @@ from src.utils import get_logger
 
 from .auth import (
     ALL_ACCESS_TIER,
+    OWNER_TIER,
     AuthError,
     decode_token,
     mint_token,
@@ -97,8 +98,25 @@ class _RefreshRequest(BaseModel):
 _bearer = HTTPBearer(auto_error=False)
 
 
-def _make_auth_dep(jwt_secret: str, static_token: str, allow_static: bool):
-    """Return a FastAPI dependency that verifies JWT or accepts a static admin token."""
+def _make_auth_dep(
+    jwt_secret: str,
+    static_token: str,
+    allow_static: bool,
+    *,
+    required_tier: Optional[str] = None,
+):
+    """Return a FastAPI dependency that verifies a bearer credential.
+
+    ``required_tier`` (optional): if set, JWT-authed requests must carry
+    that tier in their claims or 403.  Static-token bypass is treated as
+    owner — an admin presenting the configured static token can hit any
+    endpoint regardless of ``required_tier``.
+
+    Read endpoints use this with ``required_tier=None`` (any auth OK);
+    write endpoints (settings PUT, auto-mode POST) use
+    ``required_tier=OWNER_TIER`` so testers' anonymous JWTs can read
+    state but can't mutate engine config.
+    """
 
     async def _verify(
         request: Request,
@@ -110,18 +128,29 @@ def _make_auth_dep(jwt_secret: str, static_token: str, allow_static: bool):
                 detail="missing bearer token",
             )
         presented = credentials.credentials
-        # Admin escape hatch — owner-only static token, gated behind env flag.
+        # Admin escape hatch — static token bypass is treated as the
+        # highest-privilege caller (owner).  Skips both JWT verification
+        # and the tier check below.
         if allow_static and static_token and presented == static_token:
             return
         # Standard path: verify the JWT signature + expiry.
         try:
-            decode_token(presented, secret=jwt_secret)
-            return
+            claims = decode_token(presented, secret=jwt_secret)
         except AuthError as exc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=str(exc),
             )
+        # Tier check (only enforced when required_tier is set).
+        if required_tier is not None and claims.tier != required_tier:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    f"insufficient privilege: endpoint requires "
+                    f"tier={required_tier!r}, token has tier={claims.tier!r}"
+                ),
+            )
+        return
 
     return _verify
 
@@ -157,6 +186,12 @@ def build_app(
     )
 
     auth = _make_auth_dep(jwt_secret, static_token, allow_static)
+    # Owner-tier dep — enforced on write endpoints so testers' anonymous
+    # JWTs can READ state but can't mutate engine config (mode flip,
+    # settings PUT).  Static-token bypass still works for admin tooling.
+    owner_required = _make_auth_dep(
+        jwt_secret, static_token, allow_static, required_tier=OWNER_TIER,
+    )
 
     # ---- Health (no auth — used by Docker/k8s probes + first-launch reachability) ----
 
@@ -375,7 +410,7 @@ def build_app(
         "/api/auto-mode",
         response_model=AutoModeChangeResponse,
         tags=["auto-mode"],
-        dependencies=[Depends(auth)],
+        dependencies=[Depends(owner_required)],
     )
     async def auto_mode_set(req: AutoModeChangeRequest) -> AutoModeChangeResponse:
         ok, msg = engine.set_auto_execution_mode(req.mode)
@@ -438,7 +473,7 @@ def build_app(
         "/api/settings/pretp",
         response_model=PretpSettings,
         tags=["settings"],
-        dependencies=[Depends(auth)],
+        dependencies=[Depends(owner_required)],
     )
     async def pretp_settings_put(payload: PretpSettings) -> PretpSettings:
         # ``model_dump(exclude_unset=True)`` gives us only the fields the
@@ -486,7 +521,7 @@ def build_app(
         "/api/settings/auto-trade",
         response_model=AutoTradeSettings,
         tags=["settings"],
-        dependencies=[Depends(auth)],
+        dependencies=[Depends(owner_required)],
     )
     async def auto_trade_settings_put(payload: AutoTradeSettings) -> AutoTradeSettings:
         partial = payload.model_dump(exclude_unset=True)
