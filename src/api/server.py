@@ -44,6 +44,7 @@ from .schemas import (
     AutoModeChangeRequest,
     AutoModeChangeResponse,
     AutoModeStatus,
+    AutoTradeSettings,
     HealthResponse,
     PnlHistoryResponse,
     PositionsResponse,
@@ -447,6 +448,63 @@ def build_app(
         if partial:
             _user_settings.update_pretp(partial)
         return _build_pretp_view()
+
+    # ---- Settings: Auto-trade page ----
+
+    def _build_auto_trade_view() -> AutoTradeSettings:
+        """Compose the engine's effective auto-trade view: user overrides
+        where set, config defaults otherwise.  The ``mode`` field is sourced
+        from the engine's live execution state when available so this single
+        endpoint can populate the whole settings page."""
+        stored = _user_settings.get_auto_trade()
+        # Live mode resolution: prefer the engine's actual execution state
+        # so the page always shows reality, not just last-saved preference.
+        live_mode: Optional[str] = None
+        try:
+            current = getattr(engine, "auto_execution_mode", None)
+            if isinstance(current, str):
+                live_mode = current.lower()
+        except Exception:
+            pass
+        return AutoTradeSettings(
+            mode=live_mode or stored.get("mode"),
+            position_size_pct=_user_settings.auto_trade_position_size_pct(),
+            leverage_cap=_user_settings.auto_trade_leverage_cap(),
+            max_concurrent_positions=_user_settings.auto_trade_max_concurrent(),
+        )
+
+    @app.get(
+        "/api/settings/auto-trade",
+        response_model=AutoTradeSettings,
+        tags=["settings"],
+        dependencies=[Depends(auth)],
+    )
+    async def auto_trade_settings_get() -> AutoTradeSettings:
+        return _build_auto_trade_view()
+
+    @app.put(
+        "/api/settings/auto-trade",
+        response_model=AutoTradeSettings,
+        tags=["settings"],
+        dependencies=[Depends(auth)],
+    )
+    async def auto_trade_settings_put(payload: AutoTradeSettings) -> AutoTradeSettings:
+        partial = payload.model_dump(exclude_unset=True)
+        # If ``mode`` is in the partial, route it through the engine's
+        # ``set_auto_execution_mode`` (same path as POST /api/auto-mode) so
+        # the live state actually changes.  Other fields persist via
+        # ``user_settings`` and take effect on the next sizing / risk check.
+        mode = partial.pop("mode", None)
+        if mode is not None:
+            ok, msg = engine.set_auto_execution_mode(mode)
+            if not ok:
+                raise HTTPException(
+                    status_code=status.HTTP_409_CONFLICT,
+                    detail=msg,
+                )
+        if partial:
+            _user_settings.update_auto_trade(partial)
+        return _build_auto_trade_view()
 
     # ---- Agents ----
 

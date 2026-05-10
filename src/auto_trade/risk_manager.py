@@ -243,12 +243,21 @@ class RiskManager:
                 f"equity ${self._current_equity:.2f} < floor ${self._min_equity_usd:.2f}",
             )
 
-        # 3. Concurrent-position cap.
-        if len(self._open_signal_ids) >= self._max_concurrent:
+        # 3. Concurrent-position cap.  User can lower this from the app
+        # via ``/api/settings/auto-trade``; the constructor default is the
+        # engine-side ceiling.
+        try:
+            from src import user_settings as _us
+            _max_concurrent = min(
+                self._max_concurrent, int(_us.auto_trade_max_concurrent())
+            )
+        except Exception:
+            _max_concurrent = self._max_concurrent
+        if len(self._open_signal_ids) >= _max_concurrent:
             return self._block(
                 signal,
                 "max_concurrent",
-                f"open count {len(self._open_signal_ids)} ≥ cap {self._max_concurrent}",
+                f"open count {len(self._open_signal_ids)} ≥ cap {_max_concurrent}",
             )
 
         # 4. Per-symbol cap (no doubling up on the same pair).
@@ -260,14 +269,22 @@ class RiskManager:
                 f"already an open position on {sym}",
             )
 
-        # 5. Leverage cap.
+        # 5. Leverage cap.  User-set value (clamped to engine hard cap)
+        # takes precedence over constructor default.
         if leverage is None:
             leverage = float(getattr(signal, "leverage", 1.0) or 1.0)
-        if leverage > self._max_leverage:
+        try:
+            from src import user_settings as _us
+            _eff_leverage_cap = min(
+                self._max_leverage, float(_us.auto_trade_leverage_cap())
+            )
+        except Exception:
+            _eff_leverage_cap = self._max_leverage
+        if leverage > _eff_leverage_cap:
             return self._block(
                 signal,
                 "leverage_cap",
-                f"requested {leverage:.0f}x > cap {self._max_leverage:.0f}x",
+                f"requested {leverage:.0f}x > cap {_eff_leverage_cap:.0f}x",
             )
 
         # 6. Setup blacklist.

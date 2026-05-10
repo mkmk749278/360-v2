@@ -58,9 +58,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
 
-from config import MAX_POSITION_USD, POSITION_SIZE_PCT
+from config import (
+    BINANCE_FUTURES_MAKER_FEE_PCT,
+    BINANCE_FUTURES_TAKER_FEE_PCT,
+    MAX_POSITION_USD,
+    POSITION_SIZE_PCT,
+)
 from src.auto_trade import pnl_history
 from src.utils import get_logger
+
+
+def _entry_fee(notional: float) -> float:
+    """Taker-side fee on opening a market position."""
+    return abs(notional) * (BINANCE_FUTURES_TAKER_FEE_PCT / 100.0)
+
+
+def _tp_exit_fee(notional: float) -> float:
+    """Maker-side fee — TP fills are limit orders that rest on the book."""
+    return abs(notional) * (BINANCE_FUTURES_MAKER_FEE_PCT / 100.0)
+
+
+def _sl_exit_fee(notional: float) -> float:
+    """Taker-side fee — SL / invalidation / expiry exits use stop-market
+    or market orders that cross the book."""
+    return abs(notional) * (BINANCE_FUTURES_TAKER_FEE_PCT / 100.0)
 
 log = get_logger("paper_order_manager")
 
@@ -164,6 +185,9 @@ class _PaperPosition:
     quantity: float
     closed_quantity: float = 0.0
     realised_pnl_usd: float = 0.0
+    # Total taker fee paid at open (USD), retained on the position so each
+    # close event can attribute its proportional share back into pnl.
+    entry_fee_paid: float = 0.0
     closed_tp_levels: set = field(default_factory=set)
 
 
@@ -231,12 +255,22 @@ class PaperOrderManager:
         self._order_seq += 1
         return f"paper-{signal_id}-{event}-{self._order_seq}"
 
+    def _resolved_position_size_pct(self) -> float:
+        """Read the user-set position-size % from ``user_settings``, falling
+        back to the constructor value when unconfigured.  Lets the app's
+        Auto-trade page change sizing live without an engine restart."""
+        try:
+            from src import user_settings as _us
+            return float(_us.auto_trade_position_size_pct())
+        except Exception:
+            return float(self._position_size_pct)
+
     async def _compute_quantity(self, entry_price: float) -> float:
         """Compute position size from configured percentage of paper equity."""
         if entry_price <= 0:
             return self._max_position_usd / max(entry_price, 1e-12)
         position_usd = min(
-            self._available_equity * (self._position_size_pct / 100.0),
+            self._available_equity * (self._resolved_position_size_pct() / 100.0),
             self._max_position_usd,
         )
         return position_usd / entry_price
@@ -281,6 +315,14 @@ class PaperOrderManager:
             quantity = await self._compute_quantity(entry)
 
         notional = entry * quantity
+        # Entry as a market order pays the taker fee (Binance VIP 0: 0.04%).
+        # We deduct it from available equity immediately (real cash leaves
+        # the account at fill) but defer attribution into ``realised_pnl``
+        # to the close event, where each partial close pays its proportional
+        # share alongside its exit fee.  This keeps the daily PnL ledger
+        # one entry per trade close (fees included) instead of split across
+        # open/close days.
+        entry_fee = _entry_fee(notional)
         order_id = self._next_order_id(signal_id, "open")
         self._positions[signal_id] = _PaperPosition(
             signal_id=signal_id,
@@ -288,10 +330,10 @@ class PaperOrderManager:
             side=side,
             entry=entry,
             quantity=quantity,
+            entry_fee_paid=entry_fee,
         )
-        # Margin reservation — naive: subtract notional from available.
-        # Sufficient for paper-mode P&L tracking; not a real margin model.
-        self._available_equity -= notional
+        # Margin reservation — naive: subtract notional + entry fee from available.
+        self._available_equity -= notional + entry_fee
         if self._risk_manager is not None:
             self._risk_manager.register_open(signal)
 
@@ -360,16 +402,25 @@ class PaperOrderManager:
             else float(getattr(signal, "current_price", 0.0) or 0.0)
             or position.entry
         )
-        pnl = (
+        gross_pnl = (
             (fill_price - position.entry) * close_qty
             if position.side == "long"
             else (position.entry - fill_price) * close_qty
         )
+        # TP fills are limit orders → maker fee.  Plus this close's
+        # proportional share of the entry-time taker fee.
+        exit_fee = _tp_exit_fee(fill_price * close_qty)
+        entry_fee_share = (
+            position.entry_fee_paid * (close_qty / position.quantity)
+            if position.quantity > 0 else 0.0
+        )
+        pnl = gross_pnl - exit_fee - entry_fee_share
 
         position.closed_quantity += close_qty
         position.realised_pnl_usd += pnl
         self._realised_pnl_total += pnl
-        # Free up margin proportional to closed quantity.
+        # Free up margin proportional to closed quantity (entry fee
+        # already deducted at open, exit fee deducted from pnl above).
         self._available_equity += position.entry * close_qty + pnl
         # Persist cumulative PnL so the dashboard "Paper total since boot"
         # survives engine restarts and paper↔live mode toggles.
@@ -559,11 +610,26 @@ class PaperOrderManager:
             or float(getattr(signal, "stop_loss", 0.0) or 0.0)
             or position.entry
         )
-        pnl = (
+        gross_pnl = (
             (fill_price - position.entry) * remaining_qty
             if position.side == "long"
             else (position.entry - fill_price) * remaining_qty
         )
+        # Fee model: production close_full reasons are "sl_hit" / "expired"
+        # / "invalidated" / "cancelled" — all stop-market or market orders
+        # that take liquidity → taker fee.  TP-style reasons (e.g. tests
+        # closing a full position at TP) are limit orders → maker.
+        _reason_lower = (reason or "").lower()
+        _is_tp_close = "tp" in _reason_lower
+        exit_fee = (
+            _tp_exit_fee(fill_price * remaining_qty) if _is_tp_close
+            else _sl_exit_fee(fill_price * remaining_qty)
+        )
+        entry_fee_share = (
+            position.entry_fee_paid * (remaining_qty / position.quantity)
+            if position.quantity > 0 else 0.0
+        )
+        pnl = gross_pnl - exit_fee - entry_fee_share
 
         position.closed_quantity += remaining_qty
         position.realised_pnl_usd += pnl

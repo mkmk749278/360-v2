@@ -1319,6 +1319,21 @@ POSITION_SIZE_PCT: float = _safe_float("POSITION_SIZE_PCT", "2.0")
 MAX_POSITION_USD: float = _safe_float("MAX_POSITION_USD", "100.0")
 
 # ---------------------------------------------------------------------------
+# Binance USDT-M perpetual futures fee schedule (VIP 0, no BNB discount).
+# Used by ``PaperOrderManager`` to deduct realistic fees from simulated
+# fills so paper P&L matches what live execution would produce.
+# https://www.binance.com/en/fee/futureFee  (verified 2026-05-10)
+# Owner-flagged 2026-05-10: pre-fix paper P&L was gross (no fees), making
+# the dashboard +$0.87/30d figure misleading vs. real live results.
+# ---------------------------------------------------------------------------
+BINANCE_FUTURES_MAKER_FEE_PCT: float = _safe_float(
+    "BINANCE_FUTURES_MAKER_FEE_PCT", "0.02"
+)
+BINANCE_FUTURES_TAKER_FEE_PCT: float = _safe_float(
+    "BINANCE_FUTURES_TAKER_FEE_PCT", "0.04"
+)
+
+# ---------------------------------------------------------------------------
 # Risk gates — Phase A2 (mandatory before any live execution per B12)
 # ---------------------------------------------------------------------------
 # Starting equity reference for daily-loss percentage math.  In paper mode

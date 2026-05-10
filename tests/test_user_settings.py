@@ -163,6 +163,82 @@ def test_external_write_picked_up_on_next_read(store: Path, monkeypatch) -> None
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Auto-trade settings
+# ---------------------------------------------------------------------------
+
+
+def test_auto_trade_unconfigured_falls_back_to_config(store: Path) -> None:
+    """No user override → engine accessors return the config defaults."""
+    from config import POSITION_SIZE_PCT, RISK_MAX_LEVERAGE
+    assert user_settings.auto_trade_position_size_pct() == pytest.approx(POSITION_SIZE_PCT)
+    assert user_settings.auto_trade_leverage_cap() == pytest.approx(min(RISK_MAX_LEVERAGE, 30.0))
+    assert user_settings.auto_trade_max_concurrent() == 5
+
+
+def test_auto_trade_user_override_replaces_default(store: Path) -> None:
+    user_settings.update_auto_trade({
+        "position_size_pct": 5.0,
+        "leverage_cap": 15.0,
+        "max_concurrent_positions": 7,
+    })
+    assert user_settings.auto_trade_position_size_pct() == pytest.approx(5.0)
+    assert user_settings.auto_trade_leverage_cap() == pytest.approx(15.0)
+    assert user_settings.auto_trade_max_concurrent() == 7
+
+
+def test_auto_trade_leverage_cap_clamped_to_hard_cap(store: Path) -> None:
+    """B12: leverage > 30x is clamped on write.  User can't bypass the
+    engine-side hard cap by sending an oversized value."""
+    user_settings.update_auto_trade({"leverage_cap": 100.0})
+    assert user_settings.auto_trade_leverage_cap() == pytest.approx(30.0)
+
+
+def test_auto_trade_invalid_position_size_dropped(store: Path) -> None:
+    """0 / negative / >100 sizing values rejected at the boundary."""
+    user_settings.update_auto_trade({"position_size_pct": 0.0})
+    assert user_settings.get_auto_trade() == {}
+    user_settings.update_auto_trade({"position_size_pct": 150.0})
+    assert user_settings.get_auto_trade() == {}
+    user_settings.update_auto_trade({"position_size_pct": -1.0})
+    assert user_settings.get_auto_trade() == {}
+
+
+def test_auto_trade_invalid_max_concurrent_dropped(store: Path) -> None:
+    user_settings.update_auto_trade({"max_concurrent_positions": 0})
+    assert user_settings.get_auto_trade() == {}
+
+
+def test_auto_trade_mode_normalised_to_lowercase(store: Path) -> None:
+    user_settings.update_auto_trade({"mode": "PAPER"})
+    assert user_settings.get_auto_trade()["mode"] == "paper"
+
+
+def test_auto_trade_mode_unknown_value_dropped(store: Path) -> None:
+    user_settings.update_auto_trade({"mode": "ludicrous-speed"})
+    assert user_settings.get_auto_trade() == {}
+
+
+def test_auto_trade_partial_update_does_not_wipe_others(store: Path) -> None:
+    user_settings.update_auto_trade({
+        "position_size_pct": 4.0,
+        "leverage_cap": 12.0,
+    })
+    user_settings.update_auto_trade({"max_concurrent_positions": 9})
+    fetched = user_settings.get_auto_trade()
+    assert fetched["position_size_pct"] == pytest.approx(4.0)
+    assert fetched["leverage_cap"] == pytest.approx(12.0)
+    assert fetched["max_concurrent_positions"] == 9
+
+
+def test_auto_trade_does_not_collide_with_pretp(store: Path) -> None:
+    """Two namespaces in the same store remain isolated."""
+    user_settings.update_pretp({"threshold_pct": 0.40})
+    user_settings.update_auto_trade({"position_size_pct": 3.0})
+    assert user_settings.get_pretp() == {"threshold_pct": 0.40}
+    assert user_settings.get_auto_trade() == {"position_size_pct": 3.0}
+
+
 def test_atomic_write_no_partial_file(store: Path, monkeypatch) -> None:
     """A failing flush must leave the previous file intact."""
     user_settings.update_pretp({"threshold_pct": 0.10})

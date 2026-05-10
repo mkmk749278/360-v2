@@ -307,3 +307,63 @@ async def test_paper_blocked_by_daily_loss_kill():
     blocked = await pm.place_market_order(sig)
     assert blocked is None
     assert pm.open_position_count == 0
+
+
+# ---------------------------------------------------------------------------
+# user_settings override of max_concurrent / leverage_cap (owner-flagged
+# 2026-05-10).  The Auto-trade page can lower the engine-side caps live.
+# ---------------------------------------------------------------------------
+
+
+def test_user_settings_can_lower_max_concurrent(tmp_path, monkeypatch):
+    """When the user sets a lower max_concurrent than the constructor default,
+    ``check`` enforces the user value."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    user_settings.update_auto_trade({"max_concurrent_positions": 1})
+
+    rm = RiskManager(starting_equity_usd=1000, max_concurrent=5)
+    sig_a = _make_signal(signal_id="A")
+    rm.register_open(sig_a)
+    sig_b = _make_signal(signal_id="B")
+    result = rm.check(sig_b)
+    assert result.allowed is False
+    assert result.reason == "max_concurrent"
+
+
+def test_user_settings_cannot_raise_above_constructor_cap(tmp_path, monkeypatch):
+    """Defence in depth: the user can LOWER the cap but not raise it above
+    the constructor default — ratchet-down only."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    user_settings.update_auto_trade({"max_concurrent_positions": 10})
+
+    rm = RiskManager(starting_equity_usd=1000, max_concurrent=3)
+    for sid in ("A", "B", "C"):
+        rm.register_open(_make_signal(signal_id=sid))
+    result = rm.check(_make_signal(signal_id="D"))
+    assert result.allowed is False
+    assert result.reason == "max_concurrent"
+
+
+def test_user_settings_can_lower_leverage_cap(tmp_path, monkeypatch):
+    """User-set leverage_cap below the constructor default takes precedence."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    user_settings.update_auto_trade({"leverage_cap": 5.0})
+
+    rm = RiskManager(starting_equity_usd=1000, max_leverage=30.0)
+    sig = _make_signal()
+    # Requesting 8x exceeds the user-set 5x cap even though constructor allows 30x.
+    result = rm.check(sig, leverage=8.0)
+    assert result.allowed is False
+    assert result.reason == "leverage_cap"
