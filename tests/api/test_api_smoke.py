@@ -207,11 +207,11 @@ _TEST_SECRET = "smoke-test-secret-x" * 4
 
 @pytest.fixture
 def client(engine: _StubEngine) -> TestClient:
-    """Authenticated client — mints a JWT and applies it on every request.
+    """Authenticated client — mints an all-access JWT (default tier).
 
-    Auth is now mandatory; endpoints reject unauthenticated requests.
-    The smoke tests below exercise endpoint behaviour, not auth — auth
-    itself is covered exhaustively in ``tests/api/test_auth.py``.
+    Used for READ endpoints.  Write endpoints (settings PUT, auto-mode
+    POST) now require ``OWNER_TIER`` and will 403 with this client; use
+    ``owner_client`` for those.
     """
     from src.api.auth import mint_token  # local import — pyjwt optional
 
@@ -221,8 +221,27 @@ def client(engine: _StubEngine) -> TestClient:
 
 
 @pytest.fixture
+def owner_client(engine: _StubEngine) -> TestClient:
+    """Owner-tier client — mints a JWT with ``tier=OWNER_TIER``.
+
+    Used for write endpoints (settings PUT, auto-mode POST) added
+    2026-05-10 ahead of multi-tester invites.  Anon / all-access JWTs
+    can READ but only owner-tier can mutate engine state.
+    """
+    from src.api.auth import mint_token, OWNER_TIER  # local import — pyjwt optional
+
+    app = build_app(engine, jwt_secret=_TEST_SECRET, allow_static=False)
+    token = mint_token(secret=_TEST_SECRET, tier=OWNER_TIER)
+    return TestClient(app, headers={"Authorization": f"Bearer {token}"})
+
+
+@pytest.fixture
 def auth_client(engine: _StubEngine) -> TestClient:
-    """Static-token client — admin escape hatch, used by static-token tests below."""
+    """Static-token client — admin escape hatch, used by static-token tests below.
+
+    Static token bypass is treated as OWNER (highest privilege), so this
+    client also passes ``owner_required`` checks.
+    """
     return TestClient(
         build_app(
             engine,
@@ -650,8 +669,8 @@ def test_pnl_history_mode_override(client: TestClient) -> None:
     assert body["mode"] == "live"
 
 
-def test_auto_mode_post_switches(client: TestClient, engine: _StubEngine) -> None:
-    r = client.post("/api/auto-mode", json={"mode": "off"})
+def test_auto_mode_post_switches(owner_client: TestClient, engine: _StubEngine) -> None:
+    r = owner_client.post("/api/auto-mode", json={"mode": "off"})
     assert r.status_code == 200
     body = r.json()
     assert body["success"] is True
@@ -660,16 +679,16 @@ def test_auto_mode_post_switches(client: TestClient, engine: _StubEngine) -> Non
 
 
 def test_auto_mode_post_same_mode_returns_409(
-    client: TestClient,
+    owner_client: TestClient,
 ) -> None:
-    r = client.post("/api/auto-mode", json={"mode": "paper"})
+    r = owner_client.post("/api/auto-mode", json={"mode": "paper"})
     assert r.status_code == 409
 
 
 def test_auto_mode_post_invalid_payload_returns_422(
-    client: TestClient,
+    owner_client: TestClient,
 ) -> None:
-    r = client.post("/api/auto-mode", json={"mode": "yolo"})
+    r = owner_client.post("/api/auto-mode", json={"mode": "yolo"})
     # Pydantic validation rejects literal mismatch with 422
     assert r.status_code == 422
 
@@ -789,16 +808,17 @@ def test_settings_pretp_get_returns_resolved_view(
 
 
 def test_settings_pretp_put_partial_payload_merges(
-    client: TestClient, tmp_path, monkeypatch,
+    owner_client: TestClient, client: TestClient, tmp_path, monkeypatch,
 ) -> None:
-    """PUT with one field must persist that field and leave others on default."""
+    """PUT (owner) with one field must persist that field and leave others
+    on default; subsequent GET (any tier) reflects the persisted state."""
     from src import user_settings
     monkeypatch.setattr(
         user_settings, "_STORE",
         user_settings._Store(path=str(tmp_path / "user_settings.json")),
     )
 
-    r = client.put(
+    r = owner_client.put(
         "/api/settings/pretp",
         json={"regime_allowlist": ["TRENDING_UP", "TRENDING_DOWN", "RANGING"]},
     )
@@ -809,7 +829,7 @@ def test_settings_pretp_put_partial_payload_merges(
     from config import PRE_TP_THRESHOLD_PCT
     assert body["threshold_pct"] == PRE_TP_THRESHOLD_PCT
 
-    # Re-GET reflects the persisted state.
+    # Re-GET (anon all-access tier) reflects the persisted state — read is open.
     r2 = client.get("/api/settings/pretp")
     assert set(r2.json()["regime_allowlist"]) == {
         "TRENDING_UP", "TRENDING_DOWN", "RANGING",
@@ -817,7 +837,7 @@ def test_settings_pretp_put_partial_payload_merges(
 
 
 def test_settings_pretp_put_accepts_ui_tokens(
-    client: TestClient, tmp_path, monkeypatch,
+    owner_client: TestClient, tmp_path, monkeypatch,
 ) -> None:
     """The app sends UI-friendly tokens (TRENDING / RANGING / CHOPPY); the
     server normalises to backend tokens on read so the engine sees the
@@ -828,7 +848,7 @@ def test_settings_pretp_put_accepts_ui_tokens(
         user_settings._Store(path=str(tmp_path / "user_settings.json")),
     )
 
-    r = client.put(
+    r = owner_client.put(
         "/api/settings/pretp",
         json={"regime_allowlist": ["TRENDING", "RANGING"]},
     )
@@ -839,9 +859,9 @@ def test_settings_pretp_put_accepts_ui_tokens(
     }
 
 
-def test_settings_pretp_put_rejects_negative_numeric(client: TestClient) -> None:
+def test_settings_pretp_put_rejects_negative_numeric(owner_client: TestClient) -> None:
     """Pydantic ``ge=0.0`` enforces non-negative thresholds at the API boundary."""
-    r = client.put(
+    r = owner_client.put(
         "/api/settings/pretp",
         json={"threshold_pct": -1.0},
     )
@@ -881,29 +901,29 @@ def test_settings_auto_trade_get_returns_resolved_view(
 
 
 def test_settings_auto_trade_put_partial_payload_merges(
-    client: TestClient, tmp_path, monkeypatch,
+    owner_client: TestClient, client: TestClient, tmp_path, monkeypatch,
 ) -> None:
-    """One-field PUT must persist that field and leave the others alone."""
+    """One-field PUT (owner) must persist; subsequent GET (any tier)
+    reflects the persisted state and still has defaults for the rest."""
     from src import user_settings
     monkeypatch.setattr(
         user_settings, "_STORE",
         user_settings._Store(path=str(tmp_path / "user_settings.json")),
     )
-    r = client.put(
+    r = owner_client.put(
         "/api/settings/auto-trade",
         json={"position_size_pct": 4.5},
     )
     assert r.status_code == 200
     assert r.json()["position_size_pct"] == pytest.approx(4.5)
 
-    # Re-GET reflects the persisted state and still has defaults for the rest.
     r2 = client.get("/api/settings/auto-trade")
     assert r2.json()["position_size_pct"] == pytest.approx(4.5)
     assert r2.json()["max_concurrent_positions"] == 5  # untouched
 
 
 def test_settings_auto_trade_put_clamps_leverage_to_hard_cap(
-    client: TestClient, tmp_path, monkeypatch,
+    owner_client: TestClient, tmp_path, monkeypatch,
 ) -> None:
     """B12: server clamps leverage_cap to ≤ 30.  Pydantic ``le=30.0``
     enforces this at the boundary; a legitimate-looking 30 must round-trip
@@ -913,16 +933,16 @@ def test_settings_auto_trade_put_clamps_leverage_to_hard_cap(
         user_settings, "_STORE",
         user_settings._Store(path=str(tmp_path / "user_settings.json")),
     )
-    r = client.put("/api/settings/auto-trade", json={"leverage_cap": 30.0})
+    r = owner_client.put("/api/settings/auto-trade", json={"leverage_cap": 30.0})
     assert r.status_code == 200
     assert r.json()["leverage_cap"] == pytest.approx(30.0)
 
-    r2 = client.put("/api/settings/auto-trade", json={"leverage_cap": 50.0})
+    r2 = owner_client.put("/api/settings/auto-trade", json={"leverage_cap": 50.0})
     assert r2.status_code == 422
 
 
 def test_settings_auto_trade_put_routes_mode_through_engine(
-    client: TestClient, engine: _StubEngine, tmp_path, monkeypatch,
+    owner_client: TestClient, engine: _StubEngine, tmp_path, monkeypatch,
 ) -> None:
     """Mode change in the bundled PUT must invoke
     ``engine.set_auto_execution_mode`` so live state actually changes —
@@ -934,7 +954,7 @@ def test_settings_auto_trade_put_routes_mode_through_engine(
     )
     # Stub engine starts in "paper".  Switching to "live" exercises the
     # routing path; the stub records the attempt on ``last_mode_change``.
-    r = client.put(
+    r = owner_client.put(
         "/api/settings/auto-trade",
         json={"mode": "live", "position_size_pct": 3.0},
     )
@@ -945,11 +965,11 @@ def test_settings_auto_trade_put_routes_mode_through_engine(
     assert user_settings.get_auto_trade()["position_size_pct"] == pytest.approx(3.0)
 
 
-def test_settings_auto_trade_put_rejects_invalid_size(client: TestClient) -> None:
+def test_settings_auto_trade_put_rejects_invalid_size(owner_client: TestClient) -> None:
     """Pydantic enforces ``gt=0`` and ``le=100`` on position_size_pct."""
-    r = client.put("/api/settings/auto-trade", json={"position_size_pct": 0.0})
+    r = owner_client.put("/api/settings/auto-trade", json={"position_size_pct": 0.0})
     assert r.status_code == 422
-    r = client.put("/api/settings/auto-trade", json={"position_size_pct": 150.0})
+    r = owner_client.put("/api/settings/auto-trade", json={"position_size_pct": 150.0})
     assert r.status_code == 422
 
 
@@ -958,3 +978,77 @@ def test_settings_auto_trade_requires_auth(engine: _StubEngine) -> None:
     unauth_client = TestClient(app)
     r = unauth_client.get("/api/settings/auto-trade")
     assert r.status_code == 401
+
+
+# ---------------------------------------------------------------------------
+# Owner-tier gate on write endpoints (added 2026-05-10 ahead of multi-tester
+# invites).  Anon / all-access JWTs can READ all state but only owner-tier
+# credentials can mutate engine config — without this gate, any tester
+# could flip the engine into Live mode or change position size.
+# ---------------------------------------------------------------------------
+
+
+def test_anon_jwt_can_read_settings(client: TestClient) -> None:
+    """Anon (default all-access) JWTs can still GET /api/settings/* —
+    testers see the configured state, just can't write."""
+    r1 = client.get("/api/settings/pretp")
+    assert r1.status_code == 200
+    r2 = client.get("/api/settings/auto-trade")
+    assert r2.status_code == 200
+
+
+def test_anon_jwt_cannot_put_pretp_settings(client: TestClient) -> None:
+    """Anon JWT (default all-access tier) hitting PUT must 403 — owner-only."""
+    r = client.put("/api/settings/pretp", json={"threshold_pct": 0.4})
+    assert r.status_code == 403
+    assert "owner" in r.json()["detail"].lower()
+
+
+def test_anon_jwt_cannot_put_auto_trade_settings(client: TestClient) -> None:
+    """Anon JWT hitting auto-trade PUT must 403."""
+    r = client.put("/api/settings/auto-trade", json={"position_size_pct": 5.0})
+    assert r.status_code == 403
+
+
+def test_anon_jwt_cannot_post_auto_mode(client: TestClient) -> None:
+    """Anon JWT cannot flip the engine's execution mode."""
+    r = client.post("/api/auto-mode", json={"mode": "live"})
+    assert r.status_code == 403
+
+
+def test_owner_jwt_can_write_all_endpoints(
+    owner_client: TestClient, engine: _StubEngine, tmp_path, monkeypatch,
+) -> None:
+    """Owner-tier JWT passes the gate on every write endpoint."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    assert owner_client.put(
+        "/api/settings/pretp", json={"threshold_pct": 0.4}
+    ).status_code == 200
+    assert owner_client.put(
+        "/api/settings/auto-trade", json={"position_size_pct": 5.0}
+    ).status_code == 200
+    assert owner_client.post(
+        "/api/auto-mode", json={"mode": "off"}
+    ).status_code == 200
+
+
+def test_static_admin_token_treated_as_owner(
+    auth_client: TestClient, tmp_path, monkeypatch,
+) -> None:
+    """The static admin token bypass passes ``owner_required`` so admin
+    tooling (curl, scripts) can hit write endpoints without minting a JWT."""
+    from src import user_settings
+    monkeypatch.setattr(
+        user_settings, "_STORE",
+        user_settings._Store(path=str(tmp_path / "user_settings.json")),
+    )
+    r = auth_client.put(
+        "/api/settings/auto-trade",
+        json={"position_size_pct": 5.0},
+        headers={"Authorization": "Bearer secret"},
+    )
+    assert r.status_code == 200
