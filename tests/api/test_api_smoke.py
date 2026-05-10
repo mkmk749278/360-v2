@@ -1052,3 +1052,307 @@ def test_static_admin_token_treated_as_owner(
         headers={"Authorization": "Bearer secret"},
     )
     assert r.status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — phone OTP auth + billing webhook
+#
+# These exercise the full /api/auth/request-otp -> /api/auth/verify-otp
+# flow and the bot-side /internal/billing/grant webhook end-to-end.  The
+# delivery provider is a stub that captures the issued code so the test
+# can submit it back without scraping logs.
+# ---------------------------------------------------------------------------
+
+
+import hashlib as _hashlib  # noqa: E402
+import hmac as _hmac  # noqa: E402
+import json as _json  # noqa: E402
+from datetime import datetime as _datetime, timedelta as _timedelta, timezone as _tz  # noqa: E402
+
+_BILLING_SECRET = "phase2-billing-test-secret-x" * 2
+
+
+class _CapturingDelivery:
+    """Records every (phone, code) pair sent.  Returns OK / log channel."""
+
+    def __init__(self) -> None:
+        self.sent: list[tuple[str, str]] = []
+
+    async def send(self, phone_e164: str, code: str):
+        from src.api.otp_delivery import DeliveryResult, DeliveryStatus
+
+        self.sent.append((phone_e164, code))
+        return DeliveryResult(
+            status=DeliveryStatus.OK, channel_used="log", detail="captured",
+        )
+
+
+def _phase2_app(engine, tmp_path, *, billing_secret: str = _BILLING_SECRET):
+    """Build a TestClient with the full Phase 2 stack wired in."""
+    from src.api.billing_callback import BillingWebhookVerifier
+    from src.api.otp import OtpStore
+    from src.api.users import UserStore
+
+    user_store = UserStore(tmp_path / "lumin.sqlite")
+    otp_store = OtpStore(max_issues_per_hour=2, max_attempts_per_code=3)
+    delivery = _CapturingDelivery()
+    verifier = BillingWebhookVerifier(billing_secret)
+    app = build_app(
+        engine,
+        jwt_secret=_TEST_SECRET,
+        allow_static=False,
+        user_store=user_store,
+        otp_store=otp_store,
+        otp_delivery=delivery,
+        billing_verifier=verifier,
+    )
+    return TestClient(app), user_store, delivery
+
+
+def _hmac_sig(body: bytes, secret: str = _BILLING_SECRET) -> str:
+    return _hmac.new(secret.encode("utf-8"), body, _hashlib.sha256).hexdigest()
+
+
+# ---- request-otp -----------------------------------------------------------
+
+
+def test_request_otp_returns_503_when_unconfigured(engine: _StubEngine) -> None:
+    """When the app is built without a UserStore, the endpoint should
+    fail closed — phone-auth not configured."""
+    app = build_app(engine, jwt_secret=_TEST_SECRET, allow_static=False)
+    client = TestClient(app)
+    r = client.post("/api/auth/request-otp", json={"phone": "+15551110000"})
+    assert r.status_code == 503
+
+
+def test_request_otp_sends_via_delivery_provider(engine: _StubEngine, tmp_path) -> None:
+    client, _store, delivery = _phase2_app(engine, tmp_path)
+    r = client.post("/api/auth/request-otp", json={"phone": "+15551110000"})
+    assert r.status_code == 200
+    assert r.json()["channel_used"] == "log"
+    assert r.json()["expires_in_seconds"] == 300
+    assert len(delivery.sent) == 1
+    assert delivery.sent[0][0] == "+15551110000"
+    assert len(delivery.sent[0][1]) == 6  # 6-digit code
+
+
+def test_request_otp_rate_limited_returns_429(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    # Test fixture's max_issues_per_hour=2 — 3rd request gets 429.
+    assert client.post("/api/auth/request-otp", json={"phone": "+15551110000"}).status_code == 200
+    assert client.post("/api/auth/request-otp", json={"phone": "+15551110000"}).status_code == 200
+    r = client.post("/api/auth/request-otp", json={"phone": "+15551110000"})
+    assert r.status_code == 429
+    assert "Retry-After" in r.headers
+
+
+def test_request_otp_validates_phone_length(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    # Pydantic min_length=8 — too short.
+    r = client.post("/api/auth/request-otp", json={"phone": "+1"})
+    assert r.status_code == 422
+
+
+# ---- verify-otp ------------------------------------------------------------
+
+
+def test_verify_otp_creates_user_and_mints_user_token(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    client.post("/api/auth/request-otp", json={"phone": "+15551110000"})
+    code = delivery.sent[-1][1]
+
+    r = client.post(
+        "/api/auth/verify-otp",
+        json={"phone": "+15551110000", "code": code},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    # New user → free tier by default; sub is user-<id>.
+    assert body["tier"] == "free"
+    assert body["sub"].startswith("user-")
+    user = store.get_by_phone("+15551110000")
+    assert user is not None
+    assert body["sub"] == f"user-{user.user_id}"
+
+
+def test_verify_otp_returning_user_keeps_tier(engine: _StubEngine, tmp_path) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    # Pre-existing paid user.
+    user = store.get_or_create_by_phone("+15551110000")
+    expiry = _datetime.now(_tz.utc) + _timedelta(days=30)
+    store.set_tier(user.user_id, tier="paid", paid_until=expiry)
+
+    client.post("/api/auth/request-otp", json={"phone": "+15551110000"})
+    code = delivery.sent[-1][1]
+    r = client.post(
+        "/api/auth/verify-otp",
+        json={"phone": "+15551110000", "code": code},
+    )
+    assert r.status_code == 200
+    assert r.json()["tier"] == "paid"
+    # paid_until must round-trip via the JWT payload.
+    from src.api.auth import decode_token
+
+    claims = decode_token(r.json()["token"], secret=_TEST_SECRET)
+    assert claims.paid_until is not None
+    # Truncate to seconds — JWT timestamps are int-seconds.
+    assert int(claims.paid_until.timestamp()) == int(expiry.timestamp())
+
+
+def test_verify_otp_no_record_returns_401(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    # Never issued — no record.
+    r = client.post(
+        "/api/auth/verify-otp",
+        json={"phone": "+15551110000", "code": "123456"},
+    )
+    assert r.status_code == 401
+
+
+def test_verify_otp_wrong_code_returns_401(engine: _StubEngine, tmp_path) -> None:
+    client, _store, delivery = _phase2_app(engine, tmp_path)
+    client.post("/api/auth/request-otp", json={"phone": "+15551110000"})
+    real_code = delivery.sent[-1][1]
+    wrong = "000000" if real_code != "000000" else "999999"
+    r = client.post(
+        "/api/auth/verify-otp",
+        json={"phone": "+15551110000", "code": wrong},
+    )
+    assert r.status_code == 401
+
+
+def test_verify_otp_validates_six_digit_code(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    # Pydantic enforces \d{6} pattern.
+    r = client.post(
+        "/api/auth/verify-otp",
+        json={"phone": "+15551110000", "code": "abcdef"},
+    )
+    assert r.status_code == 422
+
+
+# ---- /internal/billing/grant ----------------------------------------------
+
+
+def test_billing_grant_503_when_unconfigured(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path, billing_secret="")
+    body = _json.dumps(
+        {"phone": "+15551110000", "tier": "paid", "paid_until_iso": None}
+    ).encode()
+    r = client.post(
+        "/internal/billing/grant",
+        content=body,
+        headers={"X-Lumin-Sig": "deadbeef"},
+    )
+    assert r.status_code == 503
+
+
+def test_billing_grant_invalid_signature_401(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    body = _json.dumps(
+        {"phone": "+15551110000", "tier": "paid", "paid_until_iso": None}
+    ).encode()
+    # Sign with the wrong secret.
+    bad_sig = _hmac.new(b"wrong-secret", body, _hashlib.sha256).hexdigest()
+    r = client.post(
+        "/internal/billing/grant",
+        content=body,
+        headers={"X-Lumin-Sig": bad_sig},
+    )
+    assert r.status_code == 401
+
+
+def test_billing_grant_missing_signature_header_401(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    body = _json.dumps(
+        {"phone": "+15551110000", "tier": "paid", "paid_until_iso": None}
+    ).encode()
+    r = client.post("/internal/billing/grant", content=body)
+    assert r.status_code == 401
+
+
+def test_billing_grant_creates_user_and_sets_tier(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    """First grant for an unseen phone — bot pre-pays a tier on behalf of
+    a new tester before they've done OTP signin."""
+    client, store, _delivery = _phase2_app(engine, tmp_path)
+    expiry = (_datetime.now(_tz.utc) + _timedelta(days=30)).replace(microsecond=0)
+    body = _json.dumps(
+        {
+            "phone": "+15551110000",
+            "tier": "paid",
+            "paid_until_iso": expiry.isoformat(),
+        }
+    ).encode()
+    r = client.post(
+        "/internal/billing/grant",
+        content=body,
+        headers={"X-Lumin-Sig": _hmac_sig(body)},
+    )
+    assert r.status_code == 200
+    assert r.json()["ok"] is True
+    user = store.get_by_phone("+15551110000")
+    assert user is not None
+    assert user.tier == "paid"
+    assert user.paid_until == expiry
+
+
+def test_billing_grant_revokes_to_free(engine: _StubEngine, tmp_path) -> None:
+    """paid_until_iso=null = downgrade.  Used when subscription expires
+    or is cancelled."""
+    client, store, _delivery = _phase2_app(engine, tmp_path)
+    # First, grant paid.
+    user = store.get_or_create_by_phone("+15551110000")
+    store.set_tier(
+        user.user_id, tier="paid",
+        paid_until=_datetime.now(_tz.utc) + _timedelta(days=30),
+    )
+    # Now revoke.
+    body = _json.dumps(
+        {"phone": "+15551110000", "tier": "free", "paid_until_iso": None}
+    ).encode()
+    r = client.post(
+        "/internal/billing/grant",
+        content=body,
+        headers={"X-Lumin-Sig": _hmac_sig(body)},
+    )
+    assert r.status_code == 200
+    user_after = store.get_by_phone("+15551110000")
+    assert user_after.tier == "free"
+    assert user_after.paid_until is None
+
+
+def test_billing_grant_rejects_invalid_iso(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    body = _json.dumps(
+        {
+            "phone": "+15551110000",
+            "tier": "paid",
+            "paid_until_iso": "not-a-real-date",
+        }
+    ).encode()
+    r = client.post(
+        "/internal/billing/grant",
+        content=body,
+        headers={"X-Lumin-Sig": _hmac_sig(body)},
+    )
+    assert r.status_code == 422
+
+
+def test_billing_grant_rejects_unknown_tier(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    body = _json.dumps(
+        {"phone": "+15551110000", "tier": "platinum", "paid_until_iso": None}
+    ).encode()
+    r = client.post(
+        "/internal/billing/grant",
+        content=body,
+        headers={"X-Lumin-Sig": _hmac_sig(body)},
+    )
+    # Pydantic Literal["free","paid","owner"] rejects "platinum".
+    assert r.status_code == 422
