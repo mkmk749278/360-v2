@@ -5088,6 +5088,17 @@ class Scanner:
         ctx = await self._build_scan_context(symbol, volume_24h)
         if ctx is None:
             return
+        # Populate the chartist-eye world model (LevelBook +
+        # VolumeProfile + StructureTracker) eagerly per scanned symbol.
+        # Without this, state only populated lazily inside
+        # ``_prepare_signal``, which meant symbols whose candidates
+        # filtered out upstream never got LevelBook entries — depriving
+        # them of the CONFLUENCE / STRUCT_ALIGN bonuses PRs #314–#321
+        # were designed to give them.  Truth report 2026-05-10 showed
+        # 13/75 pairs populated; emissions concentrated to 2 symbols/day
+        # as a result.  TTL-gated (``LEVEL_BOOK_REFRESH_SEC`` = 1 h) so
+        # steady-state cost is a dict-lookup early-return.
+        self._refresh_level_book_if_stale(symbol, ctx.candles)
         ticks = self.data_store.ticks.get(symbol, [])
 
         # Compute rolling BTC correlation for this symbol (once per scan cycle)
