@@ -368,6 +368,100 @@ class TestKlineDataStaleness:
 
 
 # ---------------------------------------------------------------------------
+# Bug #5: structure-readiness gate (2026-05-11 path-eligibility by pair age)
+# ---------------------------------------------------------------------------
+#
+# Structure-based evaluators (SR_FLIP / FAR / QCB / TPE / DIV_CONT / CLS /
+# PDC / MA_CROSS / STANDARD) need an aged multi-TF level foundation.  When
+# the LevelBook has fewer than MIN_1D_LEVELS_FOR_STRUCTURE_PATHS 1d-anchored
+# levels for a symbol, those paths get restricted via the
+# ``_YOUNG_PAIR_EVALUATORS`` allowlist (breakout-/event-family only).
+
+
+class _FakeLevelBookForAgeGate:
+    """Minimal LevelBook stub exposing only ``stats`` for unit-testing
+    ``Scanner._is_pair_structurally_aged``.  Real LevelBook isn't wired
+    in lifecycle-test fixtures."""
+
+    def __init__(self, from_1d_by_symbol=None) -> None:
+        self._stats = from_1d_by_symbol or {}
+
+    def stats(self, symbol):
+        return {"from_1d": self._stats.get(symbol, 0), "total": 0}
+
+
+def _scanner_with_level_book(from_1d_by_symbol=None) -> Scanner:
+    scanner = _make_scanner_for_lifecycle()
+    scanner.level_book = _FakeLevelBookForAgeGate(from_1d_by_symbol)
+    return scanner
+
+
+class TestStructureReadinessGate:
+    def test_aged_pair_is_eligible(self):
+        """Pair with 5+ 1d-anchored levels → structurally aged."""
+        scanner = _scanner_with_level_book({"BTCUSDT": 30})
+        assert scanner._is_pair_structurally_aged("BTCUSDT") is True
+
+    def test_young_pair_is_blocked(self):
+        """Pair with < 5 1d-anchored levels → structurally young."""
+        scanner = _scanner_with_level_book({"QUSDT": 2})
+        assert scanner._is_pair_structurally_aged("QUSDT") is False
+
+    def test_threshold_boundary(self):
+        """Threshold is inclusive at MIN_1D_LEVELS_FOR_STRUCTURE_PATHS."""
+        from src.scanner import MIN_1D_LEVELS_FOR_STRUCTURE_PATHS
+        at_boundary = MIN_1D_LEVELS_FOR_STRUCTURE_PATHS
+        scanner = _scanner_with_level_book({
+            "BTCUSDT": at_boundary,
+            "QUSDT": at_boundary - 1,
+        })
+        assert scanner._is_pair_structurally_aged("BTCUSDT") is True
+        assert scanner._is_pair_structurally_aged("QUSDT") is False
+
+    def test_unknown_symbol_treated_as_young(self):
+        """Pair never seen by LevelBook → from_1d=0 → blocked."""
+        scanner = _scanner_with_level_book({})
+        assert scanner._is_pair_structurally_aged("UNKNOWNUSDT") is False
+
+    def test_no_level_book_fails_open(self):
+        """Scanner without LevelBook → fail-open (don't block).
+
+        Protects unit-test fixtures that pre-date this gate from
+        getting silently broken.
+        """
+        scanner = _make_scanner_for_lifecycle()
+        # No `level_book` attr at all.
+        if hasattr(scanner, "level_book"):
+            delattr(scanner, "level_book")
+        assert scanner._is_pair_structurally_aged("BTCUSDT") is True
+
+    def test_young_pair_allowlist_contains_breakout_and_event_family(self):
+        """Allowlist covers paths whose thesis doesn't need aged structure."""
+        from src.scanner import _YOUNG_PAIR_EVALUATORS
+        expected = {
+            "_evaluate_volume_surge_breakout",
+            "_evaluate_breakdown_short",
+            "_evaluate_opening_range_breakout",
+            "_evaluate_whale_momentum",
+            "_evaluate_liquidation_reversal",
+            "_evaluate_funding_extreme",
+        }
+        assert _YOUNG_PAIR_EVALUATORS == expected
+        # Structure-based paths must NOT be in the allowlist.
+        for blocked in (
+            "_evaluate_sr_flip_retest",
+            "_evaluate_failed_auction_reclaim",
+            "_evaluate_quiet_compression_break",
+            "_evaluate_trend_pullback",
+            "_evaluate_divergence_continuation",
+            "_evaluate_continuation_liquidity_sweep",
+            "_evaluate_post_displacement_continuation",
+            "_evaluate_ma_cross_trend_shift",
+        ):
+            assert blocked not in _YOUNG_PAIR_EVALUATORS
+
+
+# ---------------------------------------------------------------------------
 # Bug #3: limit-order entry-zone fill flag
 # ---------------------------------------------------------------------------
 
