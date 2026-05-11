@@ -16,19 +16,35 @@ Why SQLite (and not JSON like ``user_settings.py``):
 Schema (created on first connect via ``CREATE TABLE IF NOT EXISTS``):
 
     users(
-        user_id        INTEGER PRIMARY KEY AUTOINCREMENT,
-        phone_e164     TEXT NOT NULL UNIQUE,
-        tier           TEXT NOT NULL DEFAULT 'free',
-        paid_until     TEXT,                    -- ISO-8601 UTC; NULL when not paid
-        telegram_chat_id TEXT,
-        created_at     TEXT NOT NULL,           -- ISO-8601 UTC
-        updated_at     TEXT NOT NULL            -- ISO-8601 UTC
+        user_id            INTEGER PRIMARY KEY AUTOINCREMENT,
+        phone_e164         TEXT NOT NULL UNIQUE,
+        tier               TEXT NOT NULL DEFAULT 'free',
+        paid_until         TEXT,                -- ISO-8601 UTC; NULL when not paid
+        telegram_chat_id   TEXT,
+        -- Profile (Phase 3 — per-user expansion).  All NULL on a fresh
+        -- post-OTP row; the app routes to its SignupPage to collect them
+        -- and then PUTs /api/profile to mark ``onboarded_at``.  Owner is
+        -- pre-onboarded by :meth:`bootstrap_owner_if_empty`.
+        display_name       TEXT,
+        country_code       TEXT,                -- ISO 3166-1 alpha-2
+        timezone           TEXT,                -- IANA tz database name
+        currency           TEXT,                -- ISO 4217 ("USD")
+        terms_accepted_at  TEXT,                -- ISO-8601 UTC
+        onboarded_at       TEXT,                -- NULL = needs signup flow
+        created_at         TEXT NOT NULL,       -- ISO-8601 UTC
+        updated_at         TEXT NOT NULL        -- ISO-8601 UTC
     );
 
 Owner bootstrap: on first boot of a fresh ``data/lumin.sqlite`` the
 caller (Bootstrap.boot) invokes :meth:`bootstrap_owner_if_empty` which
 inserts ``user_id=1`` for the configured ``OWNER_PHONE_E164``.  After
 that, the static admin token continues to work in parallel for tooling.
+
+Migration: pre-Phase-3 deployments have a ``users`` table without the
+profile columns.  :meth:`_migrate_schema` adds them in-place via
+``ALTER TABLE ... ADD COLUMN`` (SQLite-safe, in-place, no row rewrite).
+Existing rows get NULL for every profile column → they're routed back
+through the SignupPage on next login.
 """
 
 from __future__ import annotations
@@ -65,6 +81,24 @@ class User:
     telegram_chat_id: Optional[str]
     created_at: datetime
     updated_at: datetime
+    # Profile fields (Phase 3).  All NULL on a freshly-created post-OTP
+    # row; populated by ``PUT /api/profile`` from the app's SignupPage.
+    display_name: Optional[str] = None
+    country_code: Optional[str] = None
+    timezone: Optional[str] = None
+    currency: Optional[str] = None
+    terms_accepted_at: Optional[datetime] = None
+    onboarded_at: Optional[datetime] = None
+
+    @property
+    def needs_onboarding(self) -> bool:
+        """True when the SignupPage hasn't completed for this user yet.
+
+        The app routes to SignupPage iff this is True.  Owner bootstrap
+        sets ``onboarded_at`` so the operator never sees the signup
+        flow.
+        """
+        return self.onboarded_at is None
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +117,14 @@ def _parse_iso(raw: Optional[str]) -> Optional[datetime]:
 
 
 def _row_to_user(row: sqlite3.Row) -> User:
+    # Tolerate pre-migration rows (Phase-2 dbs) by looking up the profile
+    # columns defensively — sqlite3.Row raises IndexError for unknown
+    # keys but tests open fresh tmp-path stores so this rarely fires in
+    # practice.  The defensive ``in row.keys()`` guard keeps the prod
+    # migration path safe.
+    keys = set(row.keys())
+    def _get(name: str):
+        return row[name] if name in keys else None
     return User(
         user_id=int(row["user_id"]),
         phone_e164=str(row["phone_e164"]),
@@ -91,6 +133,12 @@ def _row_to_user(row: sqlite3.Row) -> User:
         telegram_chat_id=row["telegram_chat_id"],
         created_at=_parse_iso(row["created_at"]),  # type: ignore[arg-type]
         updated_at=_parse_iso(row["updated_at"]),  # type: ignore[arg-type]
+        display_name=_get("display_name"),
+        country_code=_get("country_code"),
+        timezone=_get("timezone"),
+        currency=_get("currency"),
+        terms_accepted_at=_parse_iso(_get("terms_accepted_at")),
+        onboarded_at=_parse_iso(_get("onboarded_at")),
     )
 
 
@@ -101,17 +149,36 @@ def _row_to_user(row: sqlite3.Row) -> User:
 
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS users (
-    user_id          INTEGER PRIMARY KEY AUTOINCREMENT,
-    phone_e164       TEXT    NOT NULL UNIQUE,
-    tier             TEXT    NOT NULL DEFAULT 'free',
-    paid_until       TEXT,
-    telegram_chat_id TEXT,
-    created_at       TEXT    NOT NULL,
-    updated_at       TEXT    NOT NULL
+    user_id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    phone_e164        TEXT    NOT NULL UNIQUE,
+    tier              TEXT    NOT NULL DEFAULT 'free',
+    paid_until        TEXT,
+    telegram_chat_id  TEXT,
+    display_name      TEXT,
+    country_code      TEXT,
+    timezone          TEXT,
+    currency          TEXT,
+    terms_accepted_at TEXT,
+    onboarded_at      TEXT,
+    created_at        TEXT    NOT NULL,
+    updated_at        TEXT    NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_e164);
 """
+
+
+# Columns added after Phase-2 GA — kept here so ``_migrate_schema`` can
+# add them to existing dbs without dropping rows.  Order matches the
+# fresh-create schema above for visual consistency.
+_PROFILE_COLUMNS: tuple[tuple[str, str], ...] = (
+    ("display_name", "TEXT"),
+    ("country_code", "TEXT"),
+    ("timezone", "TEXT"),
+    ("currency", "TEXT"),
+    ("terms_accepted_at", "TEXT"),
+    ("onboarded_at", "TEXT"),
+)
 
 
 class UserStore:
@@ -140,7 +207,26 @@ class UserStore:
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA_SQL)
+        self._migrate_schema()
         log.info("UserStore opened at {}", self._path)
+
+    def _migrate_schema(self) -> None:
+        """Add post-GA columns to a pre-Phase-3 ``users`` table.
+
+        ``CREATE TABLE IF NOT EXISTS`` is a no-op when the table already
+        exists, so any columns added after the original schema landed
+        must be applied via ``ALTER TABLE``.  Idempotent: skips columns
+        that already exist.
+        """
+        cur = self._conn.execute("PRAGMA table_info(users)")
+        existing = {row["name"] for row in cur.fetchall()}
+        for name, decl in _PROFILE_COLUMNS:
+            if name in existing:
+                continue
+            self._conn.execute(
+                f"ALTER TABLE users ADD COLUMN {name} {decl}"
+            )
+            log.info("Migrated users table: added column {}", name)
 
     # ---- bootstrap ------------------------------------------------------
 
@@ -162,13 +248,18 @@ class UserStore:
             if not self.is_empty():
                 return None
             now = _now_iso()
+            # Owner is pre-onboarded — set ``onboarded_at`` so the app
+            # skips the SignupPage when the operator signs in via the
+            # admin-token bypass or via phone-OTP.
             self._conn.execute(
                 """
                 INSERT INTO users (user_id, phone_e164, tier, paid_until,
-                                   telegram_chat_id, created_at, updated_at)
-                VALUES (1, ?, ?, NULL, NULL, ?, ?)
+                                   telegram_chat_id, onboarded_at,
+                                   terms_accepted_at,
+                                   created_at, updated_at)
+                VALUES (1, ?, ?, NULL, NULL, ?, ?, ?, ?)
                 """,
-                (phone_e164, _OWNER_TIER, now, now),
+                (phone_e164, _OWNER_TIER, now, now, now, now),
             )
             log.info("Bootstrapped owner: user_id=1, phone={}", phone_e164)
             return self.get_by_id(1)
@@ -261,6 +352,72 @@ class UserStore:
                 user_id, tier, paid_until_iso,
             )
             return user
+
+    def update_profile(
+        self,
+        user_id: int,
+        *,
+        display_name: Optional[str] = None,
+        country_code: Optional[str] = None,
+        timezone: Optional[str] = None,
+        currency: Optional[str] = None,
+        accept_terms: bool = False,
+    ) -> User:
+        """Update profile fields on a user.  Partial updates allowed.
+
+        First successful update with ``display_name`` set and
+        ``accept_terms=True`` marks ``onboarded_at=NOW()`` if not
+        already set — that's the single signal the app uses to decide
+        whether to route to SignupPage on next signin.  Subsequent
+        updates leave ``onboarded_at`` alone (idempotent — editing the
+        profile after onboarding shouldn't un-onboard the user).
+
+        Raises ``LookupError`` if the user doesn't exist.
+        """
+        with self._lock:
+            existing = self.get_by_id(user_id)
+            if existing is None:
+                raise LookupError(f"user_id={user_id} not found")
+            now = _now_iso()
+            # Coalesce: keep prior value when the caller didn't supply one.
+            new_display = display_name if display_name is not None else existing.display_name
+            new_country = country_code if country_code is not None else existing.country_code
+            new_tz = timezone if timezone is not None else existing.timezone
+            new_currency = currency if currency is not None else existing.currency
+            new_terms = (
+                now if (accept_terms and existing.terms_accepted_at is None)
+                else (existing.terms_accepted_at.isoformat() if existing.terms_accepted_at else None)
+            )
+            # Onboarding complete iff: name is now set AND terms have ever
+            # been accepted.  Once set, never cleared by later updates.
+            new_onboarded = (
+                existing.onboarded_at.isoformat() if existing.onboarded_at
+                else (now if (new_display and new_terms) else None)
+            )
+            self._conn.execute(
+                """
+                UPDATE users
+                   SET display_name      = ?,
+                       country_code      = ?,
+                       timezone          = ?,
+                       currency          = ?,
+                       terms_accepted_at = ?,
+                       onboarded_at      = ?,
+                       updated_at        = ?
+                 WHERE user_id = ?
+                """,
+                (
+                    new_display, new_country, new_tz, new_currency,
+                    new_terms, new_onboarded, now, int(user_id),
+                ),
+            )
+            updated = self.get_by_id(user_id)
+            assert updated is not None
+            log.info(
+                "Profile updated: user_id={}, display={!r}, onboarded={}",
+                user_id, new_display, updated.onboarded_at is not None,
+            )
+            return updated
 
     def set_telegram_chat_id(self, user_id: int, chat_id: Optional[str]) -> None:
         with self._lock:

@@ -129,6 +129,113 @@ def test_set_tier_unknown_user_raises(store: UserStore) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Profile / onboarding (Phase 3)
+# ---------------------------------------------------------------------------
+
+
+def test_fresh_user_needs_onboarding(store: UserStore) -> None:
+    user = store.get_or_create_by_phone("+15550000001")
+    assert user.needs_onboarding is True
+    assert user.display_name is None
+    assert user.country_code is None
+    assert user.onboarded_at is None
+
+
+def test_owner_bootstrap_marks_onboarded(store: UserStore) -> None:
+    owner = store.bootstrap_owner_if_empty("+15550000099")
+    assert owner is not None
+    # Operator skips the SignupPage on signin.
+    assert owner.needs_onboarding is False
+    assert owner.onboarded_at is not None
+    assert owner.terms_accepted_at is not None
+
+
+def test_update_profile_marks_onboarded_when_name_and_terms(store: UserStore) -> None:
+    user = store.get_or_create_by_phone("+15550000002")
+    assert user.needs_onboarding is True
+    updated = store.update_profile(
+        user.user_id,
+        display_name="Alice",
+        country_code="SG",
+        timezone="Asia/Singapore",
+        currency="USD",
+        accept_terms=True,
+    )
+    assert updated.display_name == "Alice"
+    assert updated.country_code == "SG"
+    assert updated.timezone == "Asia/Singapore"
+    assert updated.currency == "USD"
+    assert updated.terms_accepted_at is not None
+    assert updated.onboarded_at is not None
+    assert updated.needs_onboarding is False
+
+
+def test_update_profile_without_terms_stays_unonboarded(store: UserStore) -> None:
+    user = store.get_or_create_by_phone("+15550000003")
+    # Display name without terms → still needs onboarding.
+    updated = store.update_profile(
+        user.user_id, display_name="Bob", accept_terms=False,
+    )
+    assert updated.display_name == "Bob"
+    assert updated.needs_onboarding is True
+    assert updated.terms_accepted_at is None
+    assert updated.onboarded_at is None
+
+
+def test_update_profile_partial_preserves_existing(store: UserStore) -> None:
+    user = store.get_or_create_by_phone("+15550000004")
+    store.update_profile(
+        user.user_id,
+        display_name="Carol",
+        country_code="GB",
+        timezone="Europe/London",
+        currency="GBP",
+        accept_terms=True,
+    )
+    # Only update display_name.  Everything else should survive.
+    updated = store.update_profile(user.user_id, display_name="Carol R.")
+    assert updated.display_name == "Carol R."
+    assert updated.country_code == "GB"
+    assert updated.timezone == "Europe/London"
+    assert updated.currency == "GBP"
+    assert updated.needs_onboarding is False  # latched on
+
+
+def test_update_profile_does_not_reset_onboarded_at(store: UserStore) -> None:
+    user = store.get_or_create_by_phone("+15550000005")
+    first = store.update_profile(
+        user.user_id, display_name="Dave", accept_terms=True,
+    )
+    assert first.onboarded_at is not None
+    first_stamp = first.onboarded_at
+    # Edit later — onboarded_at must NOT shift.
+    second = store.update_profile(user.user_id, display_name="David")
+    assert second.onboarded_at == first_stamp
+
+
+def test_update_profile_unknown_user_raises(store: UserStore) -> None:
+    with pytest.raises(LookupError):
+        store.update_profile(9999, display_name="ghost")
+
+
+def test_migration_idempotent_on_existing_db(tmp_path) -> None:
+    """Re-opening a store after the schema migration should be a no-op."""
+    db = tmp_path / "lumin.sqlite"
+    s1 = UserStore(db)
+    s1.get_or_create_by_phone("+15550000077")
+    s1.close()
+    # Opening again triggers _migrate_schema; columns already exist, so
+    # all ADD COLUMN guards should skip.  No exception, data intact.
+    s2 = UserStore(db)
+    try:
+        user = s2.get_by_phone("+15550000077")
+        assert user is not None
+        assert user.display_name is None  # unchanged from initial create
+    finally:
+        s2.close()
+
+
+# ---------------------------------------------------------------------------
 # Persistence across reopens
 # ---------------------------------------------------------------------------
 
