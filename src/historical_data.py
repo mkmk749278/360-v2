@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -75,6 +76,13 @@ class HistoricalDataStore:
         self.candles: Dict[str, Dict[str, Dict[str, np.ndarray]]] = {}
         # ticks[symbol] = [{"price": float, "qty": float, "isBuyerMaker": bool, "time": int}, …]
         self.ticks: Dict[str, List[Dict[str, Any]]] = {}
+        # Per-symbol-per-interval timestamp of the most-recent ``update_candle``
+        # call.  Used by the scanner's data-staleness gate to reject signal
+        # dispatches against frozen kline feeds (e.g. recently-promoted pairs
+        # whose WebSocket subscription hasn't caught up yet — bug 2026-05-11
+        # QUSDT carbon-copy emissions at deterministic -0.10358%).  None /
+        # absent means we've never received a kline for that (symbol, interval).
+        self._last_kline_update_ts: Dict[str, Dict[str, float]] = {}
         self._client = BinanceClient("spot")
         self._futures_client = BinanceClient("futures")
 
@@ -639,6 +647,22 @@ class HistoricalDataStore:
             if len(arr) > _MAX_CANDLES_PER_BUCKET:
                 arr = arr[-_MAX_CANDLES_PER_BUCKET:]
             bucket[key] = arr
+        # Stamp the per-(symbol, interval) last-update wall clock so the
+        # scanner's data-staleness gate can reject dispatch on frozen feeds.
+        self._last_kline_update_ts.setdefault(symbol, {})[interval] = time.time()
+
+    def last_kline_age_seconds(self, symbol: str, interval: str) -> Optional[float]:
+        """Return seconds since the most-recent ``update_candle`` for the
+        given (symbol, interval), or ``None`` if no kline has been recorded.
+
+        Used by the scanner to gate signal dispatch against stale data.
+        Returning ``None`` is treated as "stale" by callers — a pair with
+        zero recorded klines is by definition not ready for trading.
+        """
+        last = self._last_kline_update_ts.get(symbol, {}).get(interval)
+        if last is None:
+            return None
+        return max(0.0, time.time() - last)
 
     def append_tick(self, symbol: str, tick: Dict[str, Any]) -> None:
         self.ticks.setdefault(symbol, []).append(tick)

@@ -259,6 +259,115 @@ class TestEntryStaleness:
 
 
 # ---------------------------------------------------------------------------
+# Bug #4: data-staleness gate (2026-05-11 QUSDT carbon-copy emissions)
+# ---------------------------------------------------------------------------
+#
+# When a pair is promoted to the active universe but its 1m WS subscription
+# hasn't caught up (or the stream died and never recovered), the engine
+# kept dispatching signals against frozen kline data — producing 5+
+# identical SR_FLIP emissions on QUSDT, all closing at the same
+# deterministic -0.10358%.  The new ``_is_kline_data_fresh`` gate rejects
+# dispatch when the most-recent 1m kline for the symbol is older than
+# ``MAX_KLINE_STALENESS_SEC``.
+
+
+class _FakeDataStoreWithKlineAge:
+    """Minimal data store stub exposing the new ``last_kline_age_seconds``
+    accessor.  Replaces the MagicMock default which would auto-attr the
+    method and return a non-controllable Mock.
+    """
+
+    def __init__(self, age_by_key=None) -> None:
+        # age_by_key: dict mapping (symbol, interval) -> seconds-since-update
+        # (or None to mean "never updated").
+        self._ages = age_by_key or {}
+        self.candles = {}
+        self.ticks = {}
+
+    def last_kline_age_seconds(self, symbol, interval):
+        return self._ages.get((symbol, interval))
+
+
+def _make_scanner_with_kline_age(age_by_key=None):
+    queue = MagicMock()
+
+    async def _put(sig):
+        return True
+
+    queue.put = _put
+    data_store = _FakeDataStoreWithKlineAge(age_by_key)
+    return Scanner(
+        pair_mgr=MagicMock(),
+        data_store=data_store,
+        channels=[],
+        smc_detector=MagicMock(),
+        regime_detector=MagicMock(),
+        predictive=MagicMock(),
+        exchange_mgr=MagicMock(),
+        spot_client=None,
+        telemetry=MagicMock(),
+        signal_queue=queue,
+        router=MagicMock(active_signals={}),
+    )
+
+
+class TestKlineDataStaleness:
+    def test_fresh_kline_passes_gate(self):
+        """A 30s-old 1m kline is fresh — gate returns True."""
+        scanner = _make_scanner_with_kline_age({("BTCUSDT", "1m"): 30.0})
+        sig = _make_signal(symbol="BTCUSDT")
+        assert scanner._is_kline_data_fresh(sig) is True
+
+    def test_stale_kline_blocks_gate(self):
+        """A 600s-old 1m kline is stale — gate returns False (QUSDT bug)."""
+        scanner = _make_scanner_with_kline_age({("QUSDT", "1m"): 600.0})
+        sig = _make_signal(symbol="QUSDT")
+        assert scanner._is_kline_data_fresh(sig) is False
+
+    def test_never_updated_blocks_gate(self):
+        """No kline ever recorded for the symbol — block dispatch.
+
+        A pair with zero kline history is by definition not ready for
+        trading; the data layer hasn't seen a single candle for it.
+        """
+        scanner = _make_scanner_with_kline_age({})  # empty age map
+        sig = _make_signal(symbol="NEWUSDT")
+        assert scanner._is_kline_data_fresh(sig) is False
+
+    def test_no_data_store_attribute_fails_open(self):
+        """Data store without the new accessor → fail-open (don't block).
+
+        Protects test harnesses / legacy stubs that pre-date the
+        ``last_kline_age_seconds`` API from getting silently broken.
+        """
+
+        class _LegacyDataStore:
+            candles = {}
+            ticks = {}
+
+        scanner = _make_scanner_with_kline_age({})
+        scanner.data_store = _LegacyDataStore()
+        sig = _make_signal(symbol="BTCUSDT")
+        assert scanner._is_kline_data_fresh(sig) is True
+
+    @pytest.mark.asyncio
+    async def test_stale_kline_blocks_dispatch_end_to_end(
+        self, monkeypatch, _real_staleness_check,
+    ):
+        """End-to-end: stale kline → ``_enqueue_signal`` returns False and
+        the ``data_stale:{setup_class}`` suppression counter increments.
+        """
+        monkeypatch.setattr(_scanner_mod, "DISPATCH_COOLDOWN_SEC", 0.0)
+        scanner = _make_scanner_with_kline_age(
+            {("QUSDT", "1m"): 600.0},  # 10 min stale
+        )
+        sig = _make_signal(symbol="QUSDT", setup_class="SR_FLIP_RETEST")
+        ok = await scanner._enqueue_signal(sig)
+        assert ok is False
+        assert scanner._suppression_counters["data_stale:SR_FLIP_RETEST"] >= 1
+
+
+# ---------------------------------------------------------------------------
 # Bug #3: limit-order entry-zone fill flag
 # ---------------------------------------------------------------------------
 
