@@ -387,6 +387,56 @@ class OtpVerify(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# User profile (Phase 3 — per-user expansion)
+# ---------------------------------------------------------------------------
+
+
+class ProfileResponse(BaseModel):
+    """Body of ``GET /api/profile``.
+
+    Mirrors the user row + a derived ``needs_onboarding`` so the app
+    doesn't have to interpret ``onboarded_at`` directly.  ``phone_e164``
+    is included so the SignupPage can pre-fill the country chip from
+    the leading prefix as a sanity check against the auto-detect.
+    """
+
+    user_id: int
+    phone_e164: str
+    tier: str
+    paid_until: Optional[str] = None  # ISO-8601 UTC; null when not paid
+    display_name: Optional[str] = None
+    country_code: Optional[str] = None
+    timezone: Optional[str] = None
+    currency: Optional[str] = None
+    terms_accepted_at: Optional[str] = None
+    onboarded_at: Optional[str] = None
+    needs_onboarding: bool
+
+
+class ProfileUpdate(BaseModel):
+    """Body of ``PUT /api/profile``.
+
+    All fields optional — partial updates are allowed.  First update
+    with ``display_name`` set and ``accept_terms=True`` flips the
+    user's ``onboarded_at`` to NOW(), which is the single signal the
+    app reads to decide whether to route to SignupPage on next signin.
+
+    Country / timezone / currency are user-editable on the signup form
+    (auto-detected from device locale, but the user can change).  The
+    server treats them as opaque strings and persists what the client
+    sends — validation lives on the client where the picker enforces
+    the ISO alphabets.  Server-side defence is acceptable to skip:
+    these values feed only the user's own display, not engine logic.
+    """
+
+    display_name: Optional[str] = Field(default=None, min_length=1, max_length=64)
+    country_code: Optional[str] = Field(default=None, min_length=2, max_length=2)
+    timezone: Optional[str] = Field(default=None, max_length=64)
+    currency: Optional[str] = Field(default=None, min_length=3, max_length=3)
+    accept_terms: bool = False
+
+
+# ---------------------------------------------------------------------------
 # Billing webhook (Phase 2 — bot/billing-platform → engine)
 # ---------------------------------------------------------------------------
 

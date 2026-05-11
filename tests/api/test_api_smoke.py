@@ -1356,3 +1356,200 @@ def test_billing_grant_rejects_unknown_tier(engine: _StubEngine, tmp_path) -> No
     )
     # Pydantic Literal["free","paid","owner"] rejects "platinum".
     assert r.status_code == 422
+
+
+# =============================================================================
+# Phase 3 — needs_onboarding + /api/profile
+# =============================================================================
+
+
+def _verify_and_get_token(client, store, delivery, phone: str) -> str:
+    """Issue + verify an OTP for ``phone``.  Returns the minted JWT."""
+    client.post("/api/auth/request-otp", json={"phone": phone})
+    code = delivery.sent[-1][1]
+    r = client.post("/api/auth/verify-otp", json={"phone": phone, "code": code})
+    assert r.status_code == 200, r.text
+    return r.json()["token"]
+
+
+# ---- needs_onboarding in token responses -----------------------------------
+
+
+def test_verify_otp_new_user_needs_onboarding_true(engine: _StubEngine, tmp_path) -> None:
+    client, _store, delivery = _phase2_app(engine, tmp_path)
+    client.post("/api/auth/request-otp", json={"phone": "+15551110001"})
+    code = delivery.sent[-1][1]
+    r = client.post(
+        "/api/auth/verify-otp",
+        json={"phone": "+15551110001", "code": code},
+    )
+    body = r.json()
+    assert body["needs_onboarding"] is True
+
+
+def test_verify_otp_onboarded_user_needs_onboarding_false(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    # Pre-onboard.
+    user = store.get_or_create_by_phone("+15551110002")
+    store.update_profile(
+        user.user_id, display_name="Eve", accept_terms=True,
+    )
+    # Verify OTP — token should report onboarded.
+    client.post("/api/auth/request-otp", json={"phone": "+15551110002"})
+    code = delivery.sent[-1][1]
+    r = client.post(
+        "/api/auth/verify-otp",
+        json={"phone": "+15551110002", "code": code},
+    )
+    assert r.json()["needs_onboarding"] is False
+
+
+def test_anonymous_token_needs_onboarding_true(engine: _StubEngine, tmp_path) -> None:
+    """device-id tokens have no profile → always need onboarding."""
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    r = client.post("/api/auth/anonymous")
+    assert r.status_code == 200
+    assert r.json()["needs_onboarding"] is True
+
+
+def test_refresh_carries_onboarding_state(engine: _StubEngine, tmp_path) -> None:
+    """A refresh of a user JWT for an onboarded user should report false."""
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15551110003")
+    # Onboard out-of-band.
+    user = store.get_by_phone("+15551110003")
+    assert user is not None
+    store.update_profile(user.user_id, display_name="Frank", accept_terms=True)
+    # Refresh — engine should consult the now-updated user row.
+    r = client.post("/api/auth/refresh", json={"token": token})
+    assert r.status_code == 200
+    assert r.json()["needs_onboarding"] is False
+
+
+# ---- /api/profile GET ------------------------------------------------------
+
+
+def test_profile_get_returns_user_row(engine: _StubEngine, tmp_path) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15551110010")
+    r = client.get(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["phone_e164"] == "+15551110010"
+    assert body["tier"] == "free"
+    assert body["needs_onboarding"] is True
+    assert body["display_name"] is None
+    assert body["onboarded_at"] is None
+
+
+def test_profile_get_requires_auth(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    r = client.get("/api/profile")
+    assert r.status_code == 401
+
+
+def test_profile_get_rejects_anonymous_device_token(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    """Device-id JWTs have no user row → 404 on profile."""
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    r = client.post("/api/auth/anonymous")
+    anon_token = r.json()["token"]
+    r2 = client.get(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {anon_token}"},
+    )
+    assert r2.status_code == 404
+
+
+# ---- /api/profile PUT ------------------------------------------------------
+
+
+def test_profile_put_completes_onboarding(engine: _StubEngine, tmp_path) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15551110020")
+    r = client.put(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "display_name": "Grace",
+            "country_code": "SG",
+            "timezone": "Asia/Singapore",
+            "currency": "USD",
+            "accept_terms": True,
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["display_name"] == "Grace"
+    assert body["country_code"] == "SG"
+    assert body["timezone"] == "Asia/Singapore"
+    assert body["currency"] == "USD"
+    assert body["needs_onboarding"] is False
+    assert body["onboarded_at"] is not None
+
+
+def test_profile_put_partial_does_not_clobber_fields(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15551110021")
+    # Initial fill.
+    client.put(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "display_name": "Henry",
+            "country_code": "AE",
+            "timezone": "Asia/Dubai",
+            "currency": "AED",
+            "accept_terms": True,
+        },
+    )
+    # Partial — only change display_name.
+    r = client.put(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"display_name": "Henry K."},
+    )
+    body = r.json()
+    assert body["display_name"] == "Henry K."
+    assert body["country_code"] == "AE"
+    assert body["timezone"] == "Asia/Dubai"
+    assert body["currency"] == "AED"
+    assert body["needs_onboarding"] is False  # latched on
+
+
+def test_profile_put_without_terms_stays_unonboarded(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15551110022")
+    r = client.put(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"display_name": "Ivy", "accept_terms": False},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["display_name"] == "Ivy"
+    assert body["needs_onboarding"] is True  # terms not accepted yet
+    assert body["onboarded_at"] is None
+
+
+def test_profile_put_validates_country_code_length(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15551110023")
+    r = client.put(
+        "/api/profile",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"country_code": "USA"},  # 3 chars; pydantic min/max=2
+    )
+    assert r.status_code == 422

@@ -36,6 +36,7 @@ from .auth import (
     ALL_ACCESS_TIER,
     OWNER_TIER,
     AuthError,
+    TokenClaims,
     decode_token,
     mint_token,
     mint_user_token,
@@ -64,6 +65,8 @@ from .schemas import (
     PnlHistoryResponse,
     PositionsResponse,
     PretpSettings,
+    ProfileResponse,
+    ProfileUpdate,
     PulseSnapshot,
     SignalDetail,
     SignalsResponse,
@@ -93,16 +96,48 @@ _API_VERSION = "0.0.2"
 
 
 class _TokenResponse(BaseModel):
-    """JSON body returned by both /auth/anonymous and /auth/refresh."""
+    """JSON body returned by every mint / refresh path.
+
+    ``needs_onboarding`` is true when the caller doesn't have a
+    completed profile yet (``users.onboarded_at IS NULL``).  The app
+    reads this and pushes ``SignupPage`` instead of ``NavShell`` on the
+    next route decision.  Always true for anonymous / device-id tokens
+    (no profile = needs onboarding), but the anonymous flow is debug-
+    only post-Phase-2 so the practical signal is on user-id tokens.
+    """
 
     token: str
     tier: str
     sub: str
     exp_seconds: int
+    needs_onboarding: bool = True
 
 
 class _RefreshRequest(BaseModel):
     token: str
+
+
+def _compute_needs_onboarding(
+    sub: str, user_store: Optional["UserStore"]
+) -> bool:
+    """Resolve ``needs_onboarding`` for a JWT subject.
+
+    ``user-<id>`` subjects consult the UserStore; everything else
+    (``device-*`` anonymous, missing store) defaults to True because
+    they have no profile to onboard from.  Errors fall through to True
+    rather than 500 — the signal is non-load-bearing for protected
+    endpoints (only routes the signup page).
+    """
+    if user_store is None or not sub.startswith("user-"):
+        return True
+    try:
+        uid = int(sub[len("user-"):])
+    except ValueError:
+        return True
+    user = user_store.get_by_id(uid)
+    if user is None:
+        return True
+    return user.needs_onboarding
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +205,72 @@ def _make_auth_dep(
     return _verify
 
 
+def _make_user_claims_dep(
+    jwt_secret: str,
+    static_token: str,
+    allow_static: bool,
+):
+    """Dependency that resolves to the caller's :class:`TokenClaims`.
+
+    Differs from :func:`_make_auth_dep` in that the endpoint receives
+    the decoded claims (or None for static-token bypass — which is
+    treated as owner / user_id=1 by the endpoint).  Used by per-user
+    endpoints (profile, future per-user settings + PnL) that need
+    ``sub`` to look up the right user row.
+    """
+
+    async def _resolve(
+        request: Request,
+        credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
+    ) -> Optional[TokenClaims]:
+        if credentials is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="missing bearer token",
+            )
+        presented = credentials.credentials
+        if allow_static and static_token and presented == static_token:
+            return None  # owner / user_id=1
+        try:
+            return decode_token(presented, secret=jwt_secret)
+        except AuthError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=str(exc),
+            )
+
+    return _resolve
+
+
+def _resolve_user_id(
+    claims: Optional[TokenClaims], *, owner_id: int = 1
+) -> int:
+    """Map JWT claims → user_id.  Static-token bypass → owner_id.
+
+    Anonymous device-id JWTs raise 404 — they aren't users, they can't
+    have a profile.  The signup flow happens AFTER OTP verify so the
+    only legitimate caller here is a user-id JWT (or static-token).
+    """
+    if claims is None:
+        return owner_id
+    sub = claims.sub
+    if not sub.startswith("user-"):
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=(
+                "no profile for anonymous device tokens — "
+                "sign in with phone first"
+            ),
+        )
+    try:
+        return int(sub[len("user-"):])
+    except ValueError:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=f"invalid user id in token subject: {sub!r}",
+        )
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -226,6 +327,10 @@ def build_app(
     owner_required = _make_auth_dep(
         jwt_secret, static_token, allow_static, required_tier=OWNER_TIER,
     )
+    # User-claims dep — for per-user endpoints (profile, future per-user
+    # settings + PnL).  Returns the decoded JWT claims; static-token
+    # bypass returns None (caller treats as owner / user_id=1).
+    user_claims = _make_user_claims_dep(jwt_secret, static_token, allow_static)
 
     # Auto-construct the OTP defaults so callers (and existing tests)
     # don't have to plumb every Phase 2 dep through.  When ``user_store``
@@ -267,6 +372,7 @@ def build_app(
             tier=claims.tier,
             sub=claims.sub,
             exp_seconds=int((claims.exp - claims.iat).total_seconds()),
+            needs_onboarding=_compute_needs_onboarding(claims.sub, user_store),
         )
 
     @app.post(
@@ -293,6 +399,7 @@ def build_app(
             tier=claims.tier,
             sub=claims.sub,
             exp_seconds=int((claims.exp - claims.iat).total_seconds()),
+            needs_onboarding=_compute_needs_onboarding(claims.sub, user_store),
         )
 
     # ---- Phone OTP auth (Phase 2) ----
@@ -390,6 +497,7 @@ def build_app(
             tier=claims.tier,
             sub=claims.sub,
             exp_seconds=int((claims.exp - claims.iat).total_seconds()),
+            needs_onboarding=user.needs_onboarding,
         )
 
     # ---- Billing webhook (Phase 2; bot/billing-platform → engine) ----
@@ -449,6 +557,80 @@ def build_app(
             user_id=updated.user_id,
             tier=updated.tier,
         )
+
+    # ---- Profile (Phase 3 — per-user expansion) ----
+
+    def _profile_response(user) -> ProfileResponse:  # type: ignore[no-untyped-def]
+        return ProfileResponse(
+            user_id=user.user_id,
+            phone_e164=user.phone_e164,
+            tier=user.tier,
+            paid_until=(
+                user.paid_until.isoformat() if user.paid_until else None
+            ),
+            display_name=user.display_name,
+            country_code=user.country_code,
+            timezone=user.timezone,
+            currency=user.currency,
+            terms_accepted_at=(
+                user.terms_accepted_at.isoformat()
+                if user.terms_accepted_at else None
+            ),
+            onboarded_at=(
+                user.onboarded_at.isoformat() if user.onboarded_at else None
+            ),
+            needs_onboarding=user.needs_onboarding,
+        )
+
+    @app.get(
+        "/api/profile",
+        response_model=ProfileResponse,
+        tags=["profile"],
+    )
+    async def profile_get(
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> ProfileResponse:
+        if user_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="user store not configured",
+            )
+        uid = _resolve_user_id(claims)
+        user = user_store.get_by_id(uid)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"user_id={uid} not found",
+            )
+        return _profile_response(user)
+
+    @app.put(
+        "/api/profile",
+        response_model=ProfileResponse,
+        tags=["profile"],
+    )
+    async def profile_put(
+        body: ProfileUpdate,
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> ProfileResponse:
+        if user_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="user store not configured",
+            )
+        uid = _resolve_user_id(claims)
+        try:
+            updated = user_store.update_profile(
+                uid,
+                display_name=body.display_name,
+                country_code=body.country_code,
+                timezone=body.timezone,
+                currency=body.currency,
+                accept_terms=body.accept_terms,
+            )
+        except LookupError as exc:
+            raise HTTPException(status_code=404, detail=str(exc))
+        return _profile_response(updated)
 
     # ---- Pulse ----
 
