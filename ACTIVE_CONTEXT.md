@@ -6,6 +6,50 @@
 
 ## Current Phase
 
+**Signal-quality batch shipped (2026-05-11) — 5 PRs that should transform subscriber experience.** Truth report this morning showed engine emitting 2 pairs/day (DOGE + Q), 10+ identical QUSDT carbon-copies at deterministic -0.10358%, 0% TP1 hit rate, and 7+ silent evaluators. Owner's clear position: **not ready for tester invites in current state.** A coordinated 5-PR batch addresses the dominant problems:
+
+1. **PR #359 — Data-staleness gate.** Reject dispatch when the symbol's 1m kline is older than `MAX_KLINE_STALENESS_SEC` (180s default). Catches frozen-feed pairs (QUSDT-class) before they emit deterministic-loss carbon copies. New `HistoricalDataStore.last_kline_age_seconds()` accessor; `_is_kline_data_fresh()` gate in `_prepare_signal`.
+2. **PR #360 — Structure-readiness gate.** Restrict structure-based evaluators (SR_FLIP / FAR / QCB / TPE / DIV_CONT / CLS / PDC / MA_CROSS / STANDARD) on pairs without aged multi-TF history. Threshold `MIN_1D_LEVELS_FOR_STRUCTURE_PATHS=5` from LevelBook. New `_YOUNG_PAIR_EVALUATORS` allowlist (6 paths: VSB, BDS, ORB, WHALE, LIQ_REVERSAL, FUNDING) for freshly-promoted pairs. Wired next to the existing mover-restriction.
+3. **PR #361 — WHALE_MOMENTUM calibration.** `whale_alert` was 99.92% momentum_reject. `WHALE_TRADE_USD_THRESHOLD` 1M → 250k ($1M was BTC-calibrated, 99.9th-percentile across alts; 250k is ~95th percentile — frequent but still a "size" signal). `VOLUME_DELTA_SPIKE_MULTIPLIER` 2.0 → 1.3 (env-overridable for the first time). Target: 0/day → 3-8/day tape-driven emissions.
+4. **PR #362 — MA_CROSS_TREND_SHIFT wake-up.** Bug in PR #318 integration: `_detect_cross` read full EMA arrays (`ind["ema21"]`) but live indicator API only stored scalar `*_last` values, and `ema50` was missing entirely. Live API now exposes scalar `*_prev` + `*_last` pairs for ema21/50/200. The 15th evaluator finally executes its cross logic after never firing since PR #318.
+5. **PR #363 — VSB/BDS breakout geometry.** Three flaws: 5-candle search window (25 min) too narrow for fast vertical moves; `highs[-26:-6]` swing reference contaminated by recent rally; 0.75% pullback cap rejects deeper retests common in strong trends. Calibrated: search 5→12 candles, reference `[-26:-6]`→`[-50:-15]`, pullback cap 0.75%→1.5%. Mirror-image for BDS. Target: VSB+BDS combined 0/day → 5-12/day.
+
+**Expected post-deploy emission profile:**
+- Structure family (SR_FLIP / FAR / QCB): cleaned up — 5-15/day real signals (was 15-50/day mostly bug-driven)
+- Tape (WHALE_MOMENTUM): 3-8/day (was 0)
+- Specialist (MA_CROSS): 2-8/day (was 0)
+- Breakout (VSB / BDS): 5-12/day (was 0)
+- Trend-aligned (TPE / DIV_CONT / CLS / PDC): unchanged — next investigation
+- **Total**: ~15-43/day across 4+ families instead of ~5-15/day monoculture
+
+**Pending 24h observation cycle on:**
+- TP1 hit rates from waking paths (first measurable on non-bug-polluted data)
+- Subscriber-visible diversity (multiple pairs and families emitting)
+- Suppression counters: `data_stale:{setup_class}`, `young_pair_restriction:{symbol}`, `dispatch_cooldown:*` should all be visible in the next truth report
+
+**Tester invites still BLOCKED** until post-deploy data confirms real signals (not bug-driven, not carbon-copies, real TP1 outcomes).
+
+**Next-priority threads (queued, NOT started — wait for data):**
+- PDC (`POST_DISPLACEMENT_CONTINUATION`) — same `breakout_not_found` pattern (610k attempts), same fix likely applies. After 24h of PR #363 observation.
+- Trend-family upstream filter audit (CLS / DIV_CONT / TPE — choked by shared `regime_blocked` + `ema_alignment_reject` cascade with identical counts across all four). Bigger investigation, needs evidence-based design.
+- ORB (`feature_disabled`) — owner decision per OWNER_BRIEF §1.3: rebuild with proper session-anchored range logic, or delete.
+- 4h indicator loop (so MA_CROSS primary 4h EMA50/200 path lights up). Memory cost vs signal-quality trade-off; observe MA_CROSS 1h emissions first.
+
+---
+
+## Previous Phase — Multi-user expansion + APK auto-update *(2026-05-10, shipped)*
+
+Five PRs across both repos converted engine + app from owner-only to closed-beta-ready multi-user, plus eliminated the manual APK flash loop:
+* PR #355 (engine) — Owner-tier write lock
+* PR #356 (engine) — Phone OTP + user-id JWTs + billing webhook
+* PR #8 (app) — Phone-OTP signin gate
+* PR #9 (app) — Admin-token signin bypass for owner
+* PR #10 (app) — In-app APK update via GitHub Releases poll
+
+Multi-user infra is feature-complete; tester onboarding deferred until signal quality clears the post-#363 observation cycle.
+
+---
+
 **Multi-user expansion + APK auto-update shipped (2026-05-10).** Five PRs across both repos converted the engine + app from owner-only to a closed-beta-ready multi-user system, plus eliminated the manual APK flash loop:
 
 1. **PR #355 (engine) — Owner-tier write lock.** PUT `/api/settings/pretp`, PUT `/api/settings/auto-trade`, POST `/api/auto-mode` now require `OWNER_TIER`. Anonymous / all-access / paid / free JWTs read-only; static `API_AUTH_TOKEN` bypass continues to grant owner.
@@ -165,6 +209,13 @@ The chartist-eye roadmap is feature-complete. Before queuing more changes, watch
 - **Historical perf JSON cleanup (optional)** — pre-merge invalidations stay labelled `"CLOSED"` in `data/signal_performance.json` itself (PR #305 fixes the user-visible signal_history but not the perf JSON). One-shot migration if owner wants the truth-report win-rate stats also corrected for the historical set
 - **Lumin app-side: disable Save buttons when user is not owner** — engine returns 403 today on settings PUT for non-owner JWTs (PR #355); the app shows a toast on the rejected save instead of hiding the button. Cosmetic only (engine 403 is the source of truth) but worth a small follow-up once tester invites scale beyond 5
 - **Verify auto-release pipeline post-PR-#10** — first push to lumin-app/main after merge (commit `bd66765`) should produce GitHub Release `v{run_number}` with attached APK. If the release doesn't appear within ~20min of the CI run, check repo Settings → Actions → General → Workflow permissions (must allow `contents: write`)
+
+### Signal-quality follow-ups (queued, post-2026-05-11 observation cycle)
+- **PDC `breakout_not_found` fix** — `POST_DISPLACEMENT_CONTINUATION` has same rejection pattern as VSB/BDS pre-#363 (610k attempts). Same widened-window + pushed-reference fix likely applies. Defer until VSB/BDS observation data confirms the approach
+- **Trend-family upstream filter audit** — CLS / DIV_CONT / TPE / PDC all killed by shared cascade: `basic_filters_failed ≈ 417k`, `ema_alignment_reject ≈ 425k`, `regime_blocked ≈ 357k` (identical counts → single upstream gate killing 4 paths at once). Needs evidence-based investigation, not a knob tune
+- **Investigate `breakout_not_found` on PDC** — same shape as VSB/BDS; same fix likely
+- **4h indicator loop** — add `4h` to `_build_scan_context`'s indicator dict so MA_CROSS primary 4h EMA50/200 detection path lights up (only 1h fallback works today post-#362). Memory cost vs signal-quality trade-off; observe MA_CROSS 1h emissions first
+- **ORB rebuild or delete decision** (owner per OWNER_BRIEF §1.3) — `feature_disabled` today; in the breakout family but inert
 
 ### Free-channel content rollout
 **Phase 1 — Macro events to free channel** ✅ shipped (HIGH/CRITICAL only)
