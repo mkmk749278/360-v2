@@ -49,6 +49,36 @@ _WHALE_OBI_MIN: float = float(os.getenv("WHALE_OBI_MIN", "1.5"))
 # breakout candle itself — distinct from the (now-removed) current-candle
 # volume gate.
 _VSB_BREAKOUT_VOL_MULT: float = float(os.getenv("VSB_BREAKOUT_VOL_MULT", "2.0"))
+
+# VSB / BDS breakout-detection geometry (calibrated 2026-05-11).
+# Truth report showed VSB at 998k/1.89M (53%) and BDS at 1.19M/1.89M (63%)
+# rejecting on ``breakout_not_found`` — the engine missed every 10%+ pump
+# and dump on the 75-pair universe across the entire window.  The original
+# 5-candle search window (= 25 min on 5m candles) is too narrow for fast
+# vertical moves where the breakout candle slips past index [-6] before
+# the next scan cycle catches the pullback.  The original
+# ``highs[-26:-6]`` swing reference includes early-rally candles, biasing
+# swing_high upward and rejecting genuine pullback retests against the
+# real prior structure.  Calibration:
+#
+# * ``BREAKOUT_SEARCH_WINDOW``: 5 → 12 candles (60 min instead of 25 min).
+# * ``SWING_LOOKBACK_START`` / ``SWING_LOOKBACK_END``: ``[-26:-6]`` →
+#   ``[-50:-15]``.  Pushes the reference 75-250 min back so the rally
+#   itself doesn't bias the level.
+# * ``PULLBACK_MAX_PCT``: 0.75% → 1.5%.  Catches the deeper retests
+#   common in strong moves.  Extended-zone (0.6%-1.5%) keeps the
+#   existing +3.0 soft penalty so quality stays gated.
+#
+# All env-overridable per B8.  VSB / BDS share the same shape — separate
+# knobs so each can be tuned independently from observation data.
+_VSB_BREAKOUT_SEARCH_WINDOW: int = int(os.getenv("VSB_BREAKOUT_SEARCH_WINDOW", "12"))
+_VSB_SWING_LOOKBACK_START: int = int(os.getenv("VSB_SWING_LOOKBACK_START", "-50"))
+_VSB_SWING_LOOKBACK_END: int = int(os.getenv("VSB_SWING_LOOKBACK_END", "-15"))
+_VSB_PULLBACK_MAX_PCT: float = float(os.getenv("VSB_PULLBACK_MAX_PCT", "1.5"))
+_BDS_BREAKOUT_SEARCH_WINDOW: int = int(os.getenv("BDS_BREAKOUT_SEARCH_WINDOW", "12"))
+_BDS_SWING_LOOKBACK_START: int = int(os.getenv("BDS_SWING_LOOKBACK_START", "-50"))
+_BDS_SWING_LOOKBACK_END: int = int(os.getenv("BDS_SWING_LOOKBACK_END", "-15"))
+_BDS_PULLBACK_MAX_PCT: float = float(os.getenv("BDS_PULLBACK_MAX_PCT", "1.5"))
 # In fast/volatile regimes the order book can be temporarily thin or skewed by
 # market-maker spread widening.  When the OBI ratio is marginal — present but
 # below the full confirmation threshold — apply a soft penalty rather than
@@ -1958,28 +1988,34 @@ class ScalpChannel(BaseChannel):
         # that's a strong tell the gate was already known broken inside the
         # test infrastructure.
 
-        # Swing high: 20-candle lookback from before the 5-candle breakout search window.
-        # Excluding the search window ensures swing_high is set by genuine prior resistance,
-        # not by the candles we are testing as the breakout event itself.
-        # Layout: [...swing_high window (20)│breakout search (5)│current (1)]
-        #          highs[-26:-6]              highs[-6:-1]         highs[-1]
-        swing_high_level = max(float(h) for h in highs[-26:-6])
+        # Swing high: configurable lookback window pushed further back from
+        # the search window to isolate real prior resistance from in-rally
+        # peaks.  Original ``highs[-26:-6]`` was vulnerable to fast vertical
+        # moves contaminating the reference; ``[-50:-15]`` (default) places
+        # the reference 75-250 min back where it represents structure that
+        # PRE-DATES the move under test.  Env-overridable per B8.
+        # Layout: [...swing_high window│gap│breakout search│current]
+        #          highs[start:end]    [-15:-WINDOW]  [-WINDOW:-1]  [-1]
+        _swing_window = highs[_VSB_SWING_LOOKBACK_START:_VSB_SWING_LOOKBACK_END]
+        if len(_swing_window) < 5:
+            return self._reject("breakout_not_found")
+        swing_high_level = max(float(h) for h in _swing_window)
         if swing_high_level <= 0:
             return self._reject("breakout_not_found")
 
-        # Find the most recent breakout candle within the last 5 closed candles.
-        # Scans newest-first (i = -2, -3, -4, -5, -6) to prefer the candle
-        # closest to the current bar. Candle at -1 is still forming.
-        # Pre-fix only checked `highs[i] > swing_high_level` (a wick that pierces
-        # the level).  But a wick that pierces the level then closes back below
-        # is a SWEEP / FALSE BREAK, not a breakout — that's exactly what LSR is
-        # designed to fade.  A genuine breakout requires the candle to close
-        # above the level.  Without this check, VSB was accepting false breakouts
-        # and treating the subsequent reversal as a "pullback retest."
+        # Find the most recent breakout candle within the configurable
+        # search window.  Default 12 candles (60 min on 5m) — captures
+        # breakouts that the original 25-min window missed in fast moves
+        # where the breakout candle has already slipped past index [-6]
+        # by the time the next scan cycle catches the pullback geometry.
+        # Scans newest-first to prefer the candle closest to current.
+        # A genuine breakout requires the candle to CLOSE above the
+        # level — a wick that pierces then closes back below is a sweep
+        # (LSR), not a breakout.
         breakout_candle_idx: Optional[int] = None
         breakout_vol = 0.0
         closes_arr = closes
-        for i in range(-2, -7, -1):  # iterates -2, -3, -4, -5, -6
+        for i in range(-2, -(_VSB_BREAKOUT_SEARCH_WINDOW + 1), -1):
             if (float(highs[i]) > swing_high_level
                     and float(closes_arr[i]) > swing_high_level):
                 breakout_candle_idx = i
@@ -1990,19 +2026,18 @@ class ScalpChannel(BaseChannel):
             return self._reject("breakout_not_found")
 
         # Pullback zone: current close is below the swing high (breakout retest).
-        # Lower bound: 0.1% ensures the price has made a genuine pullback below the
-        # broken resistance level rather than entering right at the top.
-        # Upper bound: 0.75% is a practical limit given the 0.8% structural SL
-        # placement — pullbacks deeper than the SL distance are rejected by the
-        # sl>=close check below, so this bound makes the logic explicit.
-        # Premium zone (0.3%–0.6%) captures textbook breakout-retest geometry and
-        # earns a confidence bonus.  The extended zone (0.1%–0.3% and 0.6%–0.75%)
-        # represents shallow sprints or near-SL entries; a soft penalty is applied.
+        # Lower bound 0.1% ensures a genuine pullback below the broken level.
+        # Upper bound expanded 2026-05-11 from 0.75% → ``_VSB_PULLBACK_MAX_PCT``
+        # (default 1.5%) to catch the deeper retests common in strong trending
+        # moves — was responsible for 315k retest_proximity_failed rejections
+        # (17% of VSB attempts).  Premium zone (0.3%-0.6%) keeps the textbook
+        # geometry; extended zone (0.1%-0.3% and 0.6%-max) earns the existing
+        # +3.0 soft penalty so quality stays gated.
         close = float(closes[-1])
         if close <= 0:
             return self._reject("breakout_not_found")
         dist_from_swing_pct = (swing_high_level - close) / swing_high_level * 100.0
-        if not (0.1 <= dist_from_swing_pct <= 0.75):
+        if not (0.1 <= dist_from_swing_pct <= _VSB_PULLBACK_MAX_PCT):
             return self._reject("retest_proximity_failed")
         pullback_in_premium_zone = (0.3 <= dist_from_swing_pct <= 0.6)
         pullback_penalty = 0.0 if pullback_in_premium_zone else 3.0
@@ -2206,29 +2241,29 @@ class ScalpChannel(BaseChannel):
         # validate.  The breakdown-candle volume check below validates the actual
         # surge on the closed breakdown candle.
 
-        # Swing low: 20-candle lookback from before the 5-candle breakdown search window.
-        # Excluding the search window ensures swing_low is set by genuine prior support,
-        # not by the candles we are testing as the breakdown event itself.
-        # Layout: [...swing_low window (20)│breakdown search (5)│current (1)]
-        #          lows[-26:-6]             lows[-6:-1]           lows[-1]
-        # The search iterates indices -2, -3, -4, -5, -6 (newest-first within the window).
-        swing_low_level = min(float(l) for l in lows[-26:-6])
+        # Swing low: configurable lookback window pushed further back from
+        # the search window to isolate real prior support from in-drop troughs.
+        # Same calibration as VSB swing-high reference (2026-05-11).  Default
+        # ``[-50:-15]`` places reference 75-250 min back where it represents
+        # structure that pre-dates the breakdown under test.
+        _swing_window = lows[_BDS_SWING_LOOKBACK_START:_BDS_SWING_LOOKBACK_END]
+        if len(_swing_window) < 5:
+            return self._reject("breakout_not_found")
+        swing_low_level = min(float(l) for l in _swing_window)
         if swing_low_level <= 0:
             return self._reject("breakout_not_found")
 
-        # Find the most recent breakdown candle within the last 5 closed candles.
-        # Scans newest-first (i = -2, -3, -4, -5, -6) to prefer the candle
-        # closest to the current bar. Candle at -1 is still forming.
-        # Pre-fix only checked `lows[i] < swing_low_level` (a wick that pierces
-        # the level).  But a wick that pierces the level then closes back ABOVE
-        # is a BULLISH SWEEP, not a breakdown — exactly what LSR LONG is designed
-        # to catch.  A genuine breakdown requires the candle to also CLOSE below
-        # the level.  Without this check, BDS was accepting bullish sweeps as
-        # "breakdowns" and treating the subsequent rejection upward as a
-        # "dead-cat bounce" — feeding false SHORT signals into the path's thesis.
+        # Find the most recent breakdown candle within the configurable
+        # search window.  Default 12 candles (60 min on 5m) — captures
+        # breakdowns that the original 25-min window missed in fast drops
+        # where the breakdown candle has already slipped past index [-6]
+        # by the time the next scan cycle catches the bounce geometry.
+        # A genuine breakdown requires the candle to CLOSE below the
+        # level — a wick that pierces then closes back above is a
+        # bullish sweep (LSR LONG), not a breakdown.
         breakdown_candle_idx: Optional[int] = None
         breakdown_vol = 0.0
-        for i in range(-2, -7, -1):  # iterates -2, -3, -4, -5, -6
+        for i in range(-2, -(_BDS_BREAKOUT_SEARCH_WINDOW + 1), -1):
             if (float(lows[i]) < swing_low_level
                     and float(closes[i]) < swing_low_level):
                 breakdown_candle_idx = i
@@ -2250,7 +2285,11 @@ class ScalpChannel(BaseChannel):
         if close <= 0:
             return self._reject("retest_proximity_failed")
         dist_from_swing_pct = (close - swing_low_level) / swing_low_level * 100.0
-        if not (0.1 <= dist_from_swing_pct <= 0.75):
+        # Upper bound expanded 2026-05-11 from 0.75% → ``_BDS_PULLBACK_MAX_PCT``
+        # (default 1.5%) to catch the deeper dead-cat bounces common in strong
+        # downtrends.  Premium zone (0.3%-0.6%) keeps the textbook geometry;
+        # extended zone earns +3.0 soft penalty so quality stays gated.
+        if not (0.1 <= dist_from_swing_pct <= _BDS_PULLBACK_MAX_PCT):
             return self._reject("retest_proximity_failed")
         bounce_in_premium_zone = (0.3 <= dist_from_swing_pct <= 0.6)
         bounce_penalty = 0.0 if bounce_in_premium_zone else 3.0

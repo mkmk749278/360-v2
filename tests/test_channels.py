@@ -1090,10 +1090,26 @@ class TestVolumeSurgeBreakoutRefinements:
     # ── Timing hard boundary ─────────────────────────────────────────────
 
     def test_no_signal_when_breakout_too_old(self):
-        """Breakout at candle[-7] (outside 5-candle window) must be rejected."""
-        candles = {"5m": _make_surge_candles(n=60, breakout_offset=7)}
+        """Breakout outside the search window must be rejected.
+
+        Calibrated 2026-05-11: search window widened from 5 → 12 candles
+        on the 5m timeframe (25 min → 60 min) so fast vertical moves
+        don't slip past the window before the next scan cycle catches
+        the pullback geometry.  An offset of 14 is well outside the new
+        window of 12 and must still reject.
+        """
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=14)}
         sig = self._call(candles, _surge_indicators(), _surge_smc())
-        assert sig is None, "Breakout older than 5 candles must be rejected."
+        assert sig is None, "Breakout older than search window must be rejected."
+
+    def test_signal_when_breakout_within_extended_window(self):
+        """Breakout at candle[-10] (within the new 12-candle window) fires."""
+        candles = {"5m": _make_surge_candles(n=60, breakout_offset=10)}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is not None, (
+            "Breakout 10 candles ago should now fire under the widened "
+            "12-candle search window."
+        )
 
     # ── Pullback zone ─────────────────────────────────────────────────────
 
@@ -1136,15 +1152,33 @@ class TestVolumeSurgeBreakoutRefinements:
         assert sig is not None, "Upper extended pullback (0.65%) should be accepted."
         assert sig.soft_penalty_total > 0.0, "Upper extended pullback should carry soft penalty."
 
-    def test_pullback_exceeding_0_75pct_rejected(self):
-        """Pullback > 0.75% is rejected (sl >= close, or explicit upper bound)."""
+    def test_pullback_within_extended_band_accepted_with_penalty(self):
+        """Pullback at 0.9% (was rejected by old 0.75% cap; accepted under
+        2026-05-11 widened band, default 1.5%) fires with soft penalty.
+
+        Catches the deeper retests common in strong trending moves.
+        Extended-zone +3.0 soft penalty stays so quality is gated.
+        """
         m5 = _make_surge_candles(n=60, breakout_offset=3)
         swing_high = 99.0
-        # 0.9% below swing_high → close (98.109) < sl (98.208) → rejected
-        m5["close"][-1] = swing_high * (1 - 0.009)
+        m5["close"][-1] = swing_high * (1 - 0.009)  # 0.9% pullback
         candles = {"5m": m5}
         sig = self._call(candles, _surge_indicators(), _surge_smc())
-        assert sig is None, "Pullback beyond 0.75% must be rejected."
+        assert sig is not None, (
+            "Pullback at 0.9% should now fire under widened 1.5% band."
+        )
+        assert sig.soft_penalty_total > 0.0, (
+            "Extended-zone pullback must carry the +3.0 soft penalty."
+        )
+
+    def test_pullback_exceeding_widened_band_rejected(self):
+        """Pullback > 1.5% (the new max) is still rejected."""
+        m5 = _make_surge_candles(n=60, breakout_offset=3)
+        swing_high = 99.0
+        m5["close"][-1] = swing_high * (1 - 0.02)  # 2.0% pullback — outside band
+        candles = {"5m": m5}
+        sig = self._call(candles, _surge_indicators(), _surge_smc())
+        assert sig is None, "Pullback beyond widened 1.5% band must be rejected."
 
     def test_price_at_or_above_swing_high_rejected(self):
         """Price above swing high (no pullback) must be rejected."""
@@ -1487,10 +1521,23 @@ class TestBreakdownShortRefinements:
     # ── Timing hard boundary ─────────────────────────────────────────────
 
     def test_no_signal_when_breakdown_too_old(self):
-        """Breakdown at candle[-7] (outside 5-candle window) must be rejected."""
-        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=7)}
+        """Breakdown outside the search window must be rejected.
+
+        Calibrated 2026-05-11: search window widened from 5 → 12 candles
+        on the 5m timeframe.  Offset 14 stays well outside the new window.
+        """
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=14)}
         sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
-        assert sig is None, "Breakdown older than 5 candles must be rejected."
+        assert sig is None, "Breakdown older than search window must be rejected."
+
+    def test_signal_when_breakdown_within_extended_window(self):
+        """Breakdown at candle[-10] (within new 12-candle window) fires."""
+        candles = {"5m": _make_breakdown_candles(n=60, breakdown_offset=10)}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is not None, (
+            "Breakdown 10 candles ago should now fire under the widened "
+            "12-candle search window."
+        )
 
     # ── Dead-cat bounce zone ─────────────────────────────────────────────
 
@@ -1533,15 +1580,32 @@ class TestBreakdownShortRefinements:
         assert sig is not None, "Upper extended bounce (0.65%) should be accepted."
         assert sig.soft_penalty_total > 0.0, "Upper extended bounce should carry soft penalty."
 
-    def test_bounce_exceeding_0_75pct_rejected(self):
-        """Bounce > 0.75% is rejected (sl ≤ close, or explicit upper bound check)."""
+    def test_bounce_within_extended_band_accepted_with_penalty(self):
+        """Bounce at 0.9% (rejected by old 0.75% cap; accepted under
+        2026-05-11 widened band, default 1.5%) fires with soft penalty.
+
+        Catches deeper dead-cat bounces common in strong downtrends.
+        """
         m5 = _make_breakdown_candles(n=60, breakdown_offset=3)
         swing_low = 100.0
-        # 0.9% above swing_low → close (100.9) > sl (100.8) → rejected
-        m5["close"][-1] = swing_low * (1 + 0.009)
+        m5["close"][-1] = swing_low * (1 + 0.009)  # 0.9% bounce
         candles = {"5m": m5}
         sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
-        assert sig is None, "Bounce beyond 0.75% must be rejected."
+        assert sig is not None, (
+            "Bounce at 0.9% should now fire under widened 1.5% band."
+        )
+        assert sig.soft_penalty_total > 0.0, (
+            "Extended-zone bounce must carry the +3.0 soft penalty."
+        )
+
+    def test_bounce_exceeding_widened_band_rejected(self):
+        """Bounce > 1.5% (new max) is still rejected."""
+        m5 = _make_breakdown_candles(n=60, breakdown_offset=3)
+        swing_low = 100.0
+        m5["close"][-1] = swing_low * (1 + 0.02)  # 2.0% bounce — outside band
+        candles = {"5m": m5}
+        sig = self._call(candles, _breakdown_indicators(), _breakdown_smc())
+        assert sig is None, "Bounce beyond widened 1.5% band must be rejected."
 
     def test_price_at_or_below_swing_low_rejected(self):
         """Price at/below swing low (no bounce yet) must be rejected."""
