@@ -1,22 +1,5 @@
 [
   {
-    "dispatched_at": 1778249885.61429,
-    "signal_id": "FAR-64208CD9",
-    "channel": "360_SCALP",
-    "symbol": "FILUSDT",
-    "direction": "SHORT",
-    "setup_class": "FAILED_AUCTION_RECLAIM",
-    "confidence": 65.17,
-    "signal_tier": "B",
-    "entry": 1.095,
-    "sl": 1.11217403,
-    "tp1": 1.07782597,
-    "tp2": 1.05206493,
-    "tp3": 1.0348909,
-    "market_phase": "RANGING | ATR%ile=94 | Vol=ACCUMULATION",
-    "telegram_text": "*⚡ FAILED AUCTION RECLAIM* │ *FILUSDT* │ *SHORT*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `1.0937` – `1.0980` \\(limit order\\)\n   Mid: `1.0950`\n🛑 SL: `1.1122` (+1.57%)\n🎯 TP1: `1.0778` (-1.57%)\n🎯 TP2: `1.0521` (-3.92%)\n⚡ Pre-TP @ `1.0897` \\(+0.48% raw, ≥+4.1% net @ 10x\\) → SL → breakeven \\(auto\\)\n\n📊 Setup: FAILED AUCTION RECLAIM | Confidence: *65.2* (B)\n⏱ Hold: ~1-2h | R:R 1:1.0\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 1.1080 | FVG 1.1020-1.1000 + Back above reclaimed level 1.1020 and through failed-auction wick/buffer 1.1122\n\n🏷 Risk: *Low* | Quality: *B*"
-  },
-  {
     "dispatched_at": 1778251718.057371,
     "signal_id": "FAR-7F76596C",
     "channel": "360_SCALP",
@@ -835,6 +818,23 @@
   {
     "dispatched_at": 1778423486.574784,
     "signal_id": "SRFLIP-64FE9CA2",
+    "channel": "360_SCALP",
+    "symbol": "QUSDT",
+    "direction": "LONG",
+    "setup_class": "SR_FLIP_RETEST",
+    "confidence": 65.67,
+    "signal_tier": "B",
+    "entry": 0.010619,
+    "sl": 0.01053405,
+    "tp1": 0.01072094,
+    "tp2": 0.01435861,
+    "tp3": 0.01091634,
+    "market_phase": "TRENDING_UP | ATR%ile=0 | Vol=ACCUMULATION",
+    "telegram_text": "*🔄 S/R FLIP RETEST* │ *QUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `0.010600` – `0.010627` \\(limit order\\)\n   Mid: `0.010619`\n🛑 SL: `0.010534` (-0.80%)\n🎯 TP1: `0.010721` (+0.96%)\n🎯 TP2: `0.014359` (+35.22%)\n⚡ Pre-TP @ `0.010654` \\(+0.33% raw, ≥+2.6% net @ 10x\\) → SL → breakeven \\(auto\\)\n\n📊 Setup: SR FLIP RETEST | Confidence: *65.7* (B)\n⏱ Hold: ~1-2h | R:R 1:1.2\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep LONG at 0.010593 | FVG 0.010663-0.010654 + Below 0.010593 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *B*"
+  },
+  {
+    "dispatched_at": 1778463237.3213074,
+    "signal_id": "SRFLIP-74380ABA",
     "channel": "360_SCALP",
     "symbol": "QUSDT",
     "direction": "LONG",
