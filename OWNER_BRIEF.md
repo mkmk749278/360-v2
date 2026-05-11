@@ -247,7 +247,7 @@ TradeMonitor — polls every 5s using 1m candle OHLC
 | **Telegram** | Paid signal channel + free preview channel |
 | **Engine repo** | `github.com/mkmk749278/360-v2` |
 | **Lumin app repo** | `github.com/mkmk749278/lumin-app` |
-| **Ops dashboard repo (planned)** | `github.com/mkmk749278/360ce-ops` — separate web ops console for diagnostics. See `docs/360CE_OPS_PLAN.md`. Not yet built. |
+| **Ops dashboard repo** | `github.com/mkmk749278/360ce-ops` — separate web ops console for diagnostics at `ops.luminapp.org`. First build shipped 2026-05-11 (PR #1 in that repo). Auto-deploy active once VPS-side secrets are populated. See `docs/360CE_OPS_PLAN.md`. |
 
 ---
 
