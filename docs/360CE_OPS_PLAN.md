@@ -1,8 +1,10 @@
 # 360 CE Ops — Diagnostic Dashboard Design
 
-**Status:** Plan complete 2026-05-11. Build not started. Lives in a separate repo (`github.com/mkmk749278/360ce-ops`) which is **not yet accessible to MCP tooling** — the build resumes in a fresh session after the repo is added to the access list at session boot.
+**Status:** First build shipped 2026-05-11 (PR #1 in `mkmk749278/360ce-ops`) — full MVP, both slices in one push. Awaiting merge + first VPS deploy. Repo is in scope for MCP tooling.
 
-**See also:** `OWNER_BRIEF.md §3.1` and Part V infrastructure table (system context), `ACTIVE_CONTEXT.md § Queued — 360 CE Ops diagnostic dashboard` (current state and decisions).
+This document remains the canonical design reference. Subsequent changes ship via PRs in the `360ce-ops` repo following its own `CLAUDE.md § Change-management protocol`.
+
+**See also:** `OWNER_BRIEF.md §3.1` and Part V infrastructure table (system context), `ACTIVE_CONTEXT.md § Shipped — 360 CE Ops first build` (current state and what's already live).
 
 ---
 
@@ -160,10 +162,12 @@ Polling cadence: HTMX `hx-trigger="every 30s"` for pulse/signals; longer (5 min)
 | Deploy | Owner accepted CTE recommendation: include the GitHub Actions deploy workflow on day one. Owner is mobile-first and shouldn't SSH to ship updates. |
 | Auth | Reuse `API_AUTH_TOKEN` (owner static token). No multi-user. |
 
-## How to resume in a new session
+## Post-merge deploy checklist
 
-1. **Add `mkmk749278/360ce-ops` to the MCP-tool repo-access list at session boot.** The repo selector only appears at session start; mid-session edits aren't possible. After this is done, MCP `mcp__github__*` calls against `360ce-ops` will succeed.
-2. Re-read this plan + `ACTIVE_CONTEXT.md § Queued — 360 CE Ops diagnostic dashboard`.
-3. Confirm with owner: first slice only (recommended) or full MVP in one push.
-4. Bootstrap the new repo, scaffold the FastAPI app, wire the four data sources, ship first slice.
-5. Add Caddy/Nginx route for `ops.luminapp.org`, mount engine `data/` read-only into the ops container, set `API_AUTH_TOKEN` env on the ops service, register the `monitor-logs` shallow clone timer, run an end-to-end smoke from the verification plan above.
+1. **Set GitHub Actions secrets** on `mkmk749278/360ce-ops`:
+   - `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY` — SSH into the engine VPS
+   - `GHCR_READ_TOKEN` — VPS-side `docker login` to pull the private GHCR image
+2. **VPS prep:** `git clone https://github.com/mkmk749278/360ce-ops /opt/360ce-ops`, create `.env` with `OPS_SESSION_SECRET` (generate via `python -c "import secrets; print(secrets.token_urlsafe(32))"`) and `OPS_AUTH_TOKEN` (= engine's `API_AUTH_TOKEN`).
+3. **Reverse-proxy entry:** add `ops.luminapp.org` server block fronting `127.0.0.1:8088`, Let's Encrypt cert via the existing config that already terminates `api.luminapp.org`.
+4. **Trigger the workflow** (push or manual dispatch). With secrets set, build pushes to GHCR and SSH-deploys to the VPS.
+5. **Run the verification plan** above (login → /signals/{id} against a known signal → /diag/geometry smoke → truth-report freshness check after the next monitor-logs run).
