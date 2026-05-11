@@ -41,6 +41,7 @@ This is a SCALPING business, not trend-following:
 
 1. `OWNER_BRIEF.md` — operating contract, role boundaries, business rules, scalping doctrine
 2. `ACTIVE_CONTEXT.md` — what's currently in flight, open queue, recent state
+3. `docs/360CE_OPS_PLAN.md` — design for the planned 360 CE Ops diagnostic dashboard (separate repo `mkmk749278/360ce-ops`, build not started). Read only when working on the ops surface or when answering questions about how diagnostics will be accessed in the browser.
 
 Update `ACTIVE_CONTEXT.md` at session end.
 
@@ -136,6 +137,7 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
   git show origin/monitor-logs:monitor/report/truth_report.md
   ```
 - **Invalidation quality audit** — `data/invalidation_records.json` on the engine VPS. Periodic worker classifies each kill as PROTECTIVE / PREMATURE / NEUTRAL based on post-kill price action.
+- **360 CE Ops dashboard (planned)** — `github.com/mkmk749278/360ce-ops` will surface the truth report, per-signal confidence breakdown, invalidation audit, and on-demand `diag_*` scripts via browser at `ops.luminapp.org`, replacing the SSH + curl + Telegram combo for diagnostic work. Build not started — see `docs/360CE_OPS_PLAN.md` and `ACTIVE_CONTEXT.md § Queued — 360 CE Ops diagnostic dashboard`.
 
 ---
 
