@@ -41,8 +41,26 @@ This is a SCALPING business, not trend-following:
 
 1. `OWNER_BRIEF.md` — operating contract, role boundaries, business rules, scalping doctrine
 2. `ACTIVE_CONTEXT.md` — what's currently in flight, open queue, recent state
+3. `docs/360CE_OPS_PLAN.md` — design for the planned 360 CE Ops diagnostic dashboard (separate repo `mkmk749278/360ce-ops`, build not started). Read only when working on the ops surface or when answering questions about how diagnostics will be accessed in the browser.
 
 Update `ACTIVE_CONTEXT.md` at session end.
+
+---
+
+## Change-management protocol
+
+**Every change ships via a pull request.** Doc-only edits, code, tooling — all of them. Never push commits directly to a long-lived session branch and expect the merge to "just work" — stale commits from prior sessions accumulate on those branches and produce conflict-prone PRs.
+
+Workflow for every change set:
+
+1. **Cut a fresh topic branch off the current `main` HEAD.** Naming: `docs/<topic>`, `feat/<topic>`, `fix/<topic>`, `chore/<topic>`.
+2. **Land all commits for the change set on that topic branch.** Each commit message should describe the *why* of its slice, not the file list.
+3. **Open a PR targeting `main` with a written design summary in the body** (per the multi-user-expansion process: design first, then code). Include test/verification notes.
+4. **Owner reviews and merges** (or requests changes). CTE responds to review comments by pushing follow-up commits to the same topic branch.
+
+Do **not** push to `claude/general-session-*` or similar harness-assigned long-lived branches for new work — they collect drift across sessions and produce conflicted PRs. Even if the harness pre-assigns a session branch, still cut a fresh topic branch off `main` for each change set and open a PR from there.
+
+Never push to `main` directly. The auto-deploy workflow on `main` ships to the VPS in ~45s; uncontrolled pushes there bypass review and risk shipping a regression to live subscribers.
 
 ---
 
@@ -71,7 +89,7 @@ python3 -c "import ast; ast.parse(open('src/<file>.py').read()); print('OK')"
 
 `pyproject.toml` sets `asyncio_mode = auto` — async tests don't need decorators.
 
-`git push origin main` triggers GitHub Actions to deploy to the VPS. Doc-only changes to `OWNER_BRIEF.md` / `ACTIVE_CONTEXT.md` / `CLAUDE.md` are `paths-ignore`'d and don't redeploy.
+`git push origin main` triggers GitHub Actions to deploy to the VPS. Doc-only changes to `OWNER_BRIEF.md` / `ACTIVE_CONTEXT.md` / `CLAUDE.md` are `paths-ignore`'d and don't redeploy. **But** even doc-only changes follow the PR workflow above — never push them directly.
 
 ---
 
@@ -136,6 +154,7 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
   git show origin/monitor-logs:monitor/report/truth_report.md
   ```
 - **Invalidation quality audit** — `data/invalidation_records.json` on the engine VPS. Periodic worker classifies each kill as PROTECTIVE / PREMATURE / NEUTRAL based on post-kill price action.
+- **360 CE Ops dashboard (planned)** — `github.com/mkmk749278/360ce-ops` will surface the truth report, per-signal confidence breakdown, invalidation audit, and on-demand `diag_*` scripts via browser at `ops.luminapp.org`, replacing the SSH + curl + Telegram combo for diagnostic work. Build not started — see `docs/360CE_OPS_PLAN.md` and `ACTIVE_CONTEXT.md § Queued — 360 CE Ops diagnostic dashboard`.
 
 ---
 
@@ -153,6 +172,7 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
 - Never deploy without syntax check + review
 - Never silence a detected problem
 - Never route signals to unconfigured channels
+- Never push to `main` directly or bypass the PR workflow
 
 ---
 

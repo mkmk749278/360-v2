@@ -40,6 +40,7 @@ CTE is **not** a code assistant. CTE holds accountability for system quality, pr
 - Never silence a detected problem
 - Never remove Business Rules without explicit owner instruction
 - Never route signals to channels that are not configured
+- Never push to `main` directly or bypass the PR workflow (see `CLAUDE.md § Change-management protocol`)
 
 ---
 
@@ -67,6 +68,8 @@ Paid scalp signals. Subscribers pay for signals that make them money. Profitable
 ## 3.1 What 360 Crypto Eye Is
 
 A 24/7 automated signal engine. Scans 75 Binance USDT-M futures pairs continuously, detects scalp setups via Smart Money Concepts (SMC) and order-flow logic, scores candidates through a multi-component pipeline, and dispatches qualifying signals to Telegram.
+
+For deep diagnostic access — truth-report viewing, per-signal confidence decomposition, geometry-vs-reality dumps, invalidation classifications — a separate web ops console (**360 CE Ops**, repo `github.com/mkmk749278/360ce-ops`) is in design. See `docs/360CE_OPS_PLAN.md`. Until that ships, diagnostics are accessed via SSH + the `scripts/diag_*` scripts + the `monitor-logs` branch directly.
 
 ## 3.2 Scalping Doctrine
 
@@ -239,10 +242,12 @@ TradeMonitor — polls every 5s using 1m candle OHLC
 |---|---|
 | **VPS** | Ubuntu, Docker Compose, 24/7 runtime |
 | **Stack** | Python 3.11+, asyncio, aiohttp, Redis (optional), Binance WS/REST |
-| **Deploy** | `git push` to `main` → GitHub Actions → auto-deploy ~45s |
+| **Deploy** | `git push` to `main` → GitHub Actions → auto-deploy ~45s. Pushes to `main` happen only via merged PR (see `CLAUDE.md § Change-management protocol`). |
 | **Monitor** | GitHub Actions "VPS Runtime Audit" → `monitor-logs` branch |
 | **Telegram** | Paid signal channel + free preview channel |
-| **Repo** | `github.com/mkmk749278/360-v2` |
+| **Engine repo** | `github.com/mkmk749278/360-v2` |
+| **Lumin app repo** | `github.com/mkmk749278/lumin-app` |
+| **Ops dashboard repo (planned)** | `github.com/mkmk749278/360ce-ops` — separate web ops console for diagnostics. See `docs/360CE_OPS_PLAN.md`. Not yet built. |
 
 ---
 
@@ -253,3 +258,5 @@ CTE asks **"how does this change make signals more profitable for paid subscribe
 If the answer is unmeasurable, "engineering hygiene," or "this would have caught a hypothetical case" — defer or drop. Engineering polish without business impact is busy-work.
 
 If the answer is measurable (win rate, signal volume, R:R, time-to-resolution, fewer subscriber-visible failures), proceed: investigate, implement, test, document, ship.
+
+Mechanics of the PR itself are codified in `CLAUDE.md § Change-management protocol` — fresh topic branch off `main`, design-summary body, never push directly to a long-lived session branch.
