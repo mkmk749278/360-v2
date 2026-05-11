@@ -37,43 +37,42 @@
 
 ---
 
-## Queued — 360 CE Ops diagnostic dashboard
+## Shipped — 360 CE Ops first build *(2026-05-11 evening)*
 
-**Status:** Plan complete (2026-05-11). Build not started.
+**Status:** Full MVP shipped as PR #1 in `mkmk749278/360ce-ops`. Awaiting merge + first VPS deploy.
 
-This will resume in a **fresh session**, once `mkmk749278/360ce-ops` is added to the MCP-tool repo-access list at session boot. The current session is scoped to `mkmk749278/lumin-app` + `mkmk749278/360-v2` only, and the access list is fixed at session-start time — there's no mid-session way to grant a third repo.
+Built in the same session as the morning's signal-quality 5-PR batch, while the engine sat in its 24h post-#359..#363 observation window. Both slices of the original plan landed in one push: pulse + truth + signals + signal_detail (first slice) and diag + invalidations + performance (second slice).
 
-**Why this exists.** Owner's stated need (verbatim): *"this app should help us interact with engine to diagnose errors, signal quality, deep-level analysis of signals … what's our truth report and diag command doing, and all useful things to us, and that you should access directly."* Today every diagnostic touches Telegram, `curl`, or SSH-and-run-a-script. The truth report JSON + per-signal joins should be visible in a browser.
+**Why it shipped now.** The repo became accessible to MCP tooling this session — exactly the precondition `docs/360CE_OPS_PLAN.md § "How to resume in a new session"` was waiting on. Owner picked "full MVP" when asked which thread to work this session.
 
-**Decisions taken (this session):**
+**What shipped (`mkmk749278/360ce-ops` PR #1):**
+- FastAPI + Jinja2 + HTMX server-rendered dashboard, ~30 files / ~1100 LOC
+- Owner-only password gate via starlette `SessionMiddleware`, password = engine's `API_AUTH_TOKEN`
+- Four data sources wired: live engine REST, mounted `data/*.json`, monitor-logs branch (raw.githubusercontent.com, TTL cached), `docker exec` diag runner with script allow-list + shell-metachar rejection
+- Seven authenticated routes (`/`, `/truth`, `/signals`, `/signals/{id}`, `/diag/geometry`, `/invalidations`, `/performance`) plus `/login`/`/logout`/`/healthz`
+- `Dockerfile` (multi-stage, docker CLI copied from `docker:24-cli`), `docker-compose.yml` with read-only mount of `/opt/engine/data` and the docker socket
+- GitHub Actions deploy workflow: pytest → buildx → push to `ghcr.io/mkmk749278/360ce-ops` → SSH-deploy to VPS (SSH step conditional on `secrets.VPS_HOST` so first build doesn't fail before secrets are set)
+- Smoke tests covering healthz, auth gate, login/logout, wrong-password rejection
 
-| Question | Answer |
-|---|---|
-| App name | **360 CE Ops** (engine-brand, per OWNER_BRIEF §B15) |
-| Repo | `github.com/mkmk749278/360ce-ops` — separate repo, not subdirectory of `360-v2` |
-| Stack | Stack-agnostic per owner — *"whatever it is, just do the job."* Chose Python + FastAPI + Jinja2 + HTMX for diagnostic-table fitness and zero build complexity. |
-| Form factor | **Web dashboard** at `ops.luminapp.org`, not a Flutter APK. Mobile-responsive. Diagnostic content is table-/chart-heavy; phone-as-only-surface is the wrong substrate. |
-| Auth | Single owner password gate reusing the engine's `API_AUTH_TOKEN`. No multi-user. |
-| First-build slice (recommended) | `/` pulse + `/truth` + `/signals` + `/signals/{id}`. Exercises all four data sources end-to-end. Second slice (`/diag/geometry`, `/invalidations`, `/performance`) deferred. |
-| Deploy | GitHub Actions on day one — owner is mobile-first and shouldn't SSH to ship updates. |
-| Writes (auto-mode, breaker, settings) | **Deferred.** Owner's framing was diagnostic-first; control stays in Telegram until the dashboard earns trust. |
+**What it deliberately does NOT include** (per plan §"Out of MVP scope"):
+- No writes to engine state — control stays in Telegram + Lumin app
+- No multi-operator access — single owner password
+- No charts beyond tables for MVP
+- No engine code changes
+- Custom per-section truth-report renderers deferred — for MVP every section dumps as JSON; iterate once usage shows which views earn their layout cost
 
-**Data sources (read-only consumer of artifacts the engine already produces):**
+**Before the auto-deploy will actually deploy:**
+- GitHub Actions secrets on `mkmk749278/360ce-ops`: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `GHCR_READ_TOKEN`. Image pushes to GHCR will succeed without these on the first run; SSH-deploy step skips until they're populated.
+- VPS-side prep: clone `360ce-ops` to `/opt/360ce-ops`, create `.env` with `OPS_SESSION_SECRET` (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) and `OPS_AUTH_TOKEN` (= engine's `API_AUTH_TOKEN`).
+- Reverse-proxy entry for `ops.luminapp.org` → `127.0.0.1:8088`, Let's Encrypt cert via the existing nginx/Caddy config that already fronts `api.luminapp.org`.
 
-1. Live `/api/*` endpoints on `api.luminapp.org` for pulse, signals, positions, auto-mode
-2. `monitor-logs` branch JSON: `truth_report.md`, `truth_snapshot.json`, `signals_last100.json`, `dispatch_log.json`, `window_comparison.json`, `monitor/raw/heartbeat.txt`
-3. Engine `data/` directory via read-only Docker volume on the same VPS: `signal_performance.json`, `invalidation_records.json`, `signal_history.json`
-4. On-demand `docker exec engine python /app/scripts/diag_geometry_vs_reality.py …` (second slice)
+**Open follow-ups (post first-deploy):**
+- Replace the `docker.sock` mount with an engine-side `/internal/diag/*` endpoint. Acceptable today because access is owner-only, but the socket grants root-equivalent host access — a sharp edge we should remove before any access broadens beyond owner.
+- Custom-rendered truth-report sections (path funnel, regime distribution, invalidation audit) once dashboard usage shows which views earn their layout cost.
+- Lumin-app side: link to `ops.luminapp.org` from a settings/admin page once tester invites unblock and the dashboard has accumulated a usage trail worth showcasing.
+- `performance_tracker.py` import path — currently duplicated reducer logic locally. If the engine ever publishes pre-reduced rolling stats via the API, ops should pivot to consume those rather than re-reducing from `signal_performance.json`.
 
-**No engine code changes required for MVP.**
-
-**Full plan:** `docs/360CE_OPS_PLAN.md` (this repo).
-
-**How to resume:**
-1. Add `mkmk749278/360ce-ops` to MCP-tool repo-access at session boot.
-2. Re-read `docs/360CE_OPS_PLAN.md` and this section.
-3. Confirm with owner: first slice only (recommended) or full MVP.
-4. Bootstrap repo, scaffold FastAPI app, wire the four data sources, ship first slice — each slice on its own topic branch + PR per `CLAUDE.md § Change-management protocol`.
+**Full plan (still valid as design reference):** `docs/360CE_OPS_PLAN.md` (this repo).
 
 ---
 
