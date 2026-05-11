@@ -594,6 +594,33 @@ DISPATCH_COOLDOWN_PATH: str = "data/signal_dispatch_cooldown.json"
 # per B8 if we need to tune.
 DISPATCH_STALENESS_MAX_DRIFT_PCT: float = 0.5
 
+# Structure-readiness gate (2026-05-11): structure-based evaluators
+# require an aged multi-TF level foundation.  Pairs whose LevelBook
+# entry has fewer than this many 1d-anchored levels are deemed
+# "structurally young" and get restricted to the breakout-/event-family
+# allowlist (see _YOUNG_PAIR_EVALUATORS below).  Default 5 is calibrated
+# against the LevelBook config: 1d swing-pivot detection needs ~3 weeks
+# of 1d candles to produce 5+ distinct levels reliably; a 2-day-old
+# listing won't reach this threshold and shouldn't be running SR_FLIP /
+# FAR / QCB / TPE etc. on nascent structure.
+MIN_1D_LEVELS_FOR_STRUCTURE_PATHS: int = int(
+    os.getenv("MIN_1D_LEVELS_FOR_STRUCTURE_PATHS", "5")
+)
+
+# Evaluators whose thesis does NOT require aged multi-TF structure:
+# breakout family (price-driven), tape/order-flow family (cascade- and
+# whale-driven), funding family (rate-driven).  These can safely fire
+# on freshly-promoted pairs.  Anything not in this set is structure-
+# based and falls under the structure-readiness gate.
+_YOUNG_PAIR_EVALUATORS: frozenset[str] = frozenset({
+    "_evaluate_volume_surge_breakout",
+    "_evaluate_breakdown_short",
+    "_evaluate_opening_range_breakout",
+    "_evaluate_whale_momentum",
+    "_evaluate_liquidation_reversal",
+    "_evaluate_funding_extreme",
+})
+
 # PR-7C: runtime validation focus paths for concise operator summaries.
 _PR7C_TARGET_SETUPS: frozenset[str] = frozenset({
     "SR_FLIP_RETEST",
@@ -3716,6 +3743,35 @@ class Scanner:
         except Exception:
             return True  # Fail-open
 
+    def _is_pair_structurally_aged(self, symbol: str) -> bool:
+        """Return True if the pair has enough 1d-anchored LevelBook levels
+        for structure-based evaluators to evaluate honestly.
+
+        Structure paths (SR_FLIP / FAR / QCB / TPE / DIV_CONT / CLS /
+        PDC / MA_CROSS / STANDARD) need the multi-TF level book to
+        contain at least ``MIN_1D_LEVELS_FOR_STRUCTURE_PATHS`` levels
+        anchored on 1d swing pivots before their thesis is statistically
+        sound.  Newly-promoted pairs typically take days to build that
+        history.
+
+        Fail-open on missing accessor / store so unit tests that don't
+        wire LevelBook don't lose legitimate signals.  The cost of a
+        false-negative here is one carbon-copy emission slipping through
+        until the next scan cycle; the data-staleness gate (PR #359) is
+        the second line of defence.
+        """
+        try:
+            level_book = getattr(self, "level_book", None)
+            if level_book is None or not hasattr(level_book, "stats"):
+                return True
+            stats = level_book.stats(symbol)
+            if not isinstance(stats, dict):
+                return True
+            from_1d = int(stats.get("from_1d", 0) or 0)
+            return from_1d >= MIN_1D_LEVELS_FOR_STRUCTURE_PATHS
+        except Exception:
+            return True  # Fail-open
+
     def _load_dispatch_cooldown(self) -> None:
         """Load the cooldown registry from disk on init.  Best-effort."""
         from pathlib import Path
@@ -5271,13 +5327,44 @@ class Scanner:
                         symbol, chan_name, ctx_for_chan.spread_pct * 100,
                     )
                     continue
+
+                # Structure-readiness gate: structure-based evaluators
+                # (SR_FLIP / FAR / QCB / TPE / DIV_CONT / CLS / PDC /
+                # MA_CROSS / STANDARD) require an aged multi-TF level
+                # foundation to evaluate their thesis honestly.  Pairs
+                # promoted into the active universe in the last few days
+                # don't have enough 1d swing-pivot history for those
+                # evaluators yet — they'd dispatch low-quality signals on
+                # nascent levels (bug 2026-05-11: QUSDT carbon-copy
+                # SR_FLIP emissions on a 2-day-old listing).
+                #
+                # When the LevelBook's 1d-anchored level count for this
+                # symbol is below ``MIN_1D_LEVELS_FOR_STRUCTURE_PATHS``,
+                # restrict to the breakout-/event-family allowlist
+                # (price-driven and tape-driven paths whose thesis does
+                # NOT require aged structure).  This is broader than the
+                # mover restriction (which is 2 paths) because more
+                # young-pair-safe paths exist; the two restrictions
+                # compose — both must allow the evaluator for it to run.
+                _is_structurally_aged = self._is_pair_structurally_aged(symbol)
+                _allowed_evals: Optional[frozenset] = None
+                if not _is_structurally_aged:
+                    _allowed_evals = _YOUNG_PAIR_EVALUATORS
+                    self._suppression_counters[
+                        f"young_pair_restriction:{symbol}"
+                    ] += 1
+                if _is_mover:
+                    # Mover restriction is the stricter of the two — it
+                    # always supersedes when both apply (intersection).
+                    _allowed_evals = _mover_evaluators
+
                 _raw_result = self._get_channel_candidate(
                     chan=chan,
                     chan_name=chan_name,
                     symbol=symbol,
                     ctx_for_chan=ctx_for_chan,
                     volume_24h=volume_24h,
-                    allowed_evaluators=_mover_evaluators if _is_mover else None,
+                    allowed_evaluators=_allowed_evals,
                 )
                 self._record_scalp_generation_telemetry(chan, chan_name)
                 # Normalise: real ScalpChannel returns list; legacy mocks return Signal|None
