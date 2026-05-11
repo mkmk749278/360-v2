@@ -615,3 +615,64 @@ class TestDetectVolumeDeltaSpike:
 
     def test_negative_delta(self):
         assert detect_volume_delta_spike(-500.0, 100.0) is True
+
+
+# ---------------------------------------------------------------------------
+# Calibration locked in 2026-05-11 to wake up WHALE_MOMENTUM from 99.92%
+# momentum_reject (truth report showed both upstream signals over-restrictive).
+# ---------------------------------------------------------------------------
+
+
+class TestWhaleCalibrationDefaults:
+    def test_whale_trade_threshold_default_is_250k(self):
+        """Module-level constant calibrated against alt-pair trade sizes.
+
+        $1M was the original (BTC-calibrated) default; alts rarely produce
+        single trades that large.  $250k is the ~95th-percentile single
+        ticket across top-75 USDT-M futures pairs — frequent enough to
+        wake WHALE_MOMENTUM, large enough to remain a 'size' signal.
+        """
+        from src.detector import WHALE_TRADE_USD_THRESHOLD
+        assert WHALE_TRADE_USD_THRESHOLD == 250_000.0
+
+    def test_volume_delta_spike_multiplier_default_is_1_3(self):
+        """Was 2.0 (extreme: imbalance ≥ total volume).  1.3 = clear
+        directional bias without requiring extremes."""
+        from src.detector import VOLUME_DELTA_SPIKE_MULTIPLIER
+        assert VOLUME_DELTA_SPIKE_MULTIPLIER == 1.3
+
+    def test_250k_trade_fires_under_new_threshold(self):
+        """$250k single trade was BELOW the old $1M threshold and would
+        have returned None; under the new 250k default it fires."""
+        from src.detector import WHALE_TRADE_USD_THRESHOLD
+        alert = detect_whale_trade(
+            price=1.0, quantity=250_000.0,
+            threshold_usd=WHALE_TRADE_USD_THRESHOLD,
+        )
+        assert alert is not None
+
+    def test_249k_trade_does_not_fire(self):
+        """Boundary just below threshold: gate still works."""
+        from src.detector import WHALE_TRADE_USD_THRESHOLD
+        alert = detect_whale_trade(
+            price=1.0, quantity=249_000.0,
+            threshold_usd=WHALE_TRADE_USD_THRESHOLD,
+        )
+        assert alert is None
+
+    def test_1_3x_imbalance_fires_under_new_multiplier(self):
+        """Imbalance of 130 vs avg 100 was BELOW the old 2.0× multiplier
+        (rejected); under the new 1.3× default it fires."""
+        from src.detector import VOLUME_DELTA_SPIKE_MULTIPLIER
+        assert detect_volume_delta_spike(
+            cum_delta=130.0, avg_delta=100.0,
+            multiplier=VOLUME_DELTA_SPIKE_MULTIPLIER,
+        ) is True
+
+    def test_1_2x_imbalance_does_not_fire(self):
+        """Boundary just below the new 1.3× multiplier: gate still works."""
+        from src.detector import VOLUME_DELTA_SPIKE_MULTIPLIER
+        assert detect_volume_delta_spike(
+            cum_delta=120.0, avg_delta=100.0,
+            multiplier=VOLUME_DELTA_SPIKE_MULTIPLIER,
+        ) is False

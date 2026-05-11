@@ -28,9 +28,26 @@ def _env_float(name: str, default: float) -> float:
 
 
 # B8 compliance: whale-trade USD threshold must be env-overridable so the
-# operator can tune it without a redeploy.  Default 1M USD matches the prior
-# hard-coded value in `detect_whale_trade(threshold_usd=1_000_000)`.
-WHALE_TRADE_USD_THRESHOLD: float = _env_float("WHALE_TRADE_USD_THRESHOLD", 1_000_000.0)
+# operator can tune it without a redeploy.  Default $250k (lowered from
+# $1M on 2026-05-11): the original $1M was calibrated against BTC trade
+# tickets and effectively never fired on the alt-pair universe (truth
+# report: WHALE_MOMENTUM 99.92% momentum_reject, with the upstream
+# whale_alert + volume_delta_spike both starved of triggers).  $250k
+# is roughly the 95th-percentile single-trade ticket across top-75 alts —
+# frequent enough to wake the path up, large enough to remain a
+# meaningful "size" signal.
+WHALE_TRADE_USD_THRESHOLD: float = _env_float("WHALE_TRADE_USD_THRESHOLD", 250_000.0)
+
+# Multiplier for `detect_volume_delta_spike` — fires when the absolute
+# cumulative-delta is >= multiplier × average per-side flow.  Was
+# hard-coded at 2.0 (extreme: imbalance ≥ total volume), which combined
+# with whale_alert starvation produced the 99.92% momentum_reject
+# bottleneck on WHALE_MOMENTUM.  1.3 = imbalance ≥ 1.3× average per-side
+# flow — clear directional bias without requiring an extreme.  B8
+# env-overridable so the operator can tune post-observation.
+VOLUME_DELTA_SPIKE_MULTIPLIER: float = _env_float(
+    "VOLUME_DELTA_SPIKE_MULTIPLIER", 1.3,
+)
 from src.utils import get_logger
 
 log = get_logger("detector")
@@ -278,7 +295,8 @@ class SMCDetector:
             )
             avg_delta = (buy_v + sell_v) / 2.0 if (buy_v + sell_v) > 0 else 0.0
             result.volume_delta_spike = detect_volume_delta_spike(
-                buy_v - sell_v, avg_delta
+                buy_v - sell_v, avg_delta,
+                multiplier=VOLUME_DELTA_SPIKE_MULTIPLIER,
             )
 
         return result
