@@ -304,6 +304,7 @@ class Bootstrap:
             from src.api.billing_callback import BillingWebhookVerifier
             from src.api.otp import OtpStore
             from src.api.otp_delivery import build_provider_from_env
+            from src.api.user_overrides import UserOverridesStore
             from src.api.users import UserStore
 
             origins = [o.strip() for o in API_CORS_ORIGINS.split(",") if o.strip()]
@@ -313,6 +314,11 @@ class Bootstrap:
             # idempotently — only the first boot of an empty DB inserts.
             user_store = UserStore(LUMIN_DB_PATH)
             user_store.bootstrap_owner_if_empty(OWNER_PHONE_E164)
+            # Phase-2 per-user overrides — shares the same SQLite file
+            # (WAL mode lets both connections coexist).  Tables are
+            # added with CREATE TABLE IF NOT EXISTS, safe against any
+            # pre-existing data.
+            user_overrides = UserOverridesStore(LUMIN_DB_PATH)
             otp_store = OtpStore(
                 ttl=timedelta(seconds=OTP_TTL_SECONDS),
                 max_attempts_per_code=OTP_MAX_ATTEMPTS_PER_CODE,
@@ -324,6 +330,7 @@ class Bootstrap:
             # Stash on the engine so other subsystems (e.g. Phase-3
             # per-user paper P&L) can resolve the same singletons.
             engine.user_store = user_store
+            engine.user_overrides = user_overrides
 
             tasks.append(
                 asyncio.create_task(
@@ -336,6 +343,7 @@ class Bootstrap:
                         allow_static=API_ALLOW_STATIC_TOKEN,
                         cors_origins=origins,
                         user_store=user_store,
+                        user_overrides=user_overrides,
                         otp_store=otp_store,
                         otp_delivery=otp_delivery,
                         billing_verifier=billing_verifier,

@@ -345,6 +345,45 @@ class AutoTradeSettings(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Per-user setting overrides (Phase 2 of per-user expansion)
+# ---------------------------------------------------------------------------
+
+
+class UserPretpSettings(PretpSettings):
+    """Per-user Pre-TP overrides — same fields as :class:`PretpSettings`
+    plus a ``using_defaults`` flag so the app can render a "Custom
+    settings" badge and offer a Reset-to-defaults action.
+
+    Identical wire schema (subclass adds one field), so the app's
+    existing ``PretpSettings`` data class can deserialise this with a
+    single optional-field addition.
+    """
+
+    using_defaults: bool = Field(
+        default=True,
+        description="True when the user has no override row — every "
+        "value above is the engine default.  False when at least one "
+        "field has been overridden.",
+    )
+
+
+class UserAutoTradeSettings(AutoTradeSettings):
+    """Per-user auto-trade overrides — same shape as
+    :class:`AutoTradeSettings` plus ``using_defaults``.
+
+    Phase 2: the engine itself does not consume per-user mode /
+    position_size_pct / leverage_cap.  Values are stored for Phase 3
+    when the user's app fires their own Binance order using these
+    values for sizing.  The app surfaces this with an honest banner.
+    """
+
+    using_defaults: bool = Field(
+        default=True,
+        description="True when the user has no override row.",
+    )
+
+
+# ---------------------------------------------------------------------------
 # Phone-OTP auth (Phase 2)
 # ---------------------------------------------------------------------------
 
