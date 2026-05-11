@@ -45,6 +45,7 @@ from config import (
     LIFECYCLE_COOLDOWN_INVALIDATION_SEC,
     LIFECYCLE_COOLDOWN_SL_SEC,
     MAX_CORRELATED_SCALP_SIGNALS,
+    MAX_KLINE_STALENESS_SEC,
     MTF_HARD_BLOCK,
     MTF_MIN_SCORE_TRENDING_SHORT,
     QUIET_SCALP_MIN_CONFIDENCE,
@@ -3548,6 +3549,33 @@ class Scanner:
         except Exception as exc:
             log.debug("dispatch cooldown check error (fail-open): {}", exc)
 
+        # ── Pre-dispatch data-staleness check ────────────────────────────
+        # Reject dispatch when the most-recent 1m kline for the symbol is
+        # older than MAX_KLINE_STALENESS_SEC.  Defends against frozen feeds
+        # (e.g. promoted pairs whose WS subscription hasn't caught up,
+        # dropped streams without recovery) that would otherwise dispatch
+        # signals against stale candle data and report deterministic
+        # micro-loss closes.  Bug 2026-05-11: QUSDT was promoted into the
+        # universe but its 1m kline stream was silent for 30+ minutes;
+        # 5+ SR_FLIP signals dispatched at identical entry/SL/exit,
+        # all closing at the same frozen -0.10358%.  This check catches
+        # the symptom regardless of WHY the feed is stale (subscription
+        # gap / stream death / REST-fallback misalignment).
+        try:
+            if not self._is_kline_data_fresh(sig):
+                self._suppression_counters[
+                    f"data_stale:{getattr(sig, 'setup_class', 'UNKNOWN')}"
+                ] += 1
+                log.info(
+                    "data_stale skip {} {} entry={:.6f}",
+                    getattr(sig, "symbol", "?"),
+                    getattr(sig, "setup_class", "?"),
+                    float(getattr(sig, "entry", 0.0) or 0.0),
+                )
+                return False
+        except Exception as exc:
+            log.debug("data-staleness check error (fail-open): {}", exc)
+
         # ── Pre-dispatch staleness check ─────────────────────────────────
         # If real-time price has drifted >DISPATCH_STALENESS_MAX_DRIFT_PCT from
         # the proposed entry, the signal is stale — by the time the subscriber
@@ -3657,6 +3685,36 @@ class Scanner:
         except Exception:
             return True  # Fail-open
         return True
+
+    def _is_kline_data_fresh(self, sig: Any) -> bool:
+        """Return True if the symbol's most-recent 1m kline is fresh enough
+        to dispatch a signal against.
+
+        Reads ``HistoricalDataStore.last_kline_age_seconds(symbol, "1m")``.
+        ``None`` (no klines recorded) and ages > ``MAX_KLINE_STALENESS_SEC``
+        both return False — both indicate the engine's view of the symbol
+        is stale and any signal dispatched against it would carry the
+        deterministic-micro-loss pathology from bug 2026-05-11 (QUSDT).
+
+        Fail-open on any unexpected store shape to avoid suppressing
+        legitimate signals on harness / test contexts that don't expose
+        the new accessor.
+        """
+        try:
+            symbol = getattr(sig, "symbol", "")
+            if not symbol:
+                return True
+            data_store = getattr(self, "data_store", None)
+            if data_store is None or not hasattr(data_store, "last_kline_age_seconds"):
+                return True
+            age = data_store.last_kline_age_seconds(symbol, "1m")
+            if age is None:
+                # Never received a 1m kline for this symbol — by definition
+                # not ready to trade.  Block.
+                return False
+            return age <= MAX_KLINE_STALENESS_SEC
+        except Exception:
+            return True  # Fail-open
 
     def _load_dispatch_cooldown(self) -> None:
         """Load the cooldown registry from disk on init.  Best-effort."""

@@ -300,6 +300,19 @@ CORNIX_FORMAT_ENABLED: bool = _safe_bool("CORNIX_FORMAT_ENABLED", "false")
 DYNAMIC_SL_TP_ENABLED: bool = _safe_bool("DYNAMIC_SL_TP_ENABLED", "true")
 
 # ---------------------------------------------------------------------------
+# Signal dispatch — data freshness gate
+# ---------------------------------------------------------------------------
+#: Reject signal dispatch when the most-recent 1m kline for the symbol is
+#: older than this.  Defends against frozen feeds (e.g. promoted pairs whose
+#: WS subscription hasn't caught up, dropped streams without recovery) that
+#: would otherwise dispatch signals against stale candle data and report
+#: deterministic micro-loss closes (bug 2026-05-11: QUSDT carbon-copy
+#: emissions at -0.10358%, all closing at the same frozen exit price).
+#: 180s = up to 3 missed 1m candles, accommodates a single WS reconnect
+#: + catch-up without false-positives on healthy feeds.
+MAX_KLINE_STALENESS_SEC: int = _safe_int("MAX_KLINE_STALENESS_SEC", "180")
+
+# ---------------------------------------------------------------------------
 # Pair management
 # ---------------------------------------------------------------------------
 PAIR_FETCH_INTERVAL_HOURS: int = _safe_int("PAIR_FETCH_INTERVAL_HOURS", "6")
