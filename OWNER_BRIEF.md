@@ -68,6 +68,8 @@ Paid scalp signals. Subscribers pay for signals that make them money. Profitable
 
 A 24/7 automated signal engine. Scans 75 Binance USDT-M futures pairs continuously, detects scalp setups via Smart Money Concepts (SMC) and order-flow logic, scores candidates through a multi-component pipeline, and dispatches qualifying signals to Telegram.
 
+For deep diagnostic access — truth-report viewing, per-signal confidence decomposition, geometry-vs-reality dumps, invalidation classifications — a separate web ops console (**360 CE Ops**, repo `github.com/mkmk749278/360ce-ops`) is in design. See `docs/360CE_OPS_PLAN.md`. Until that ships, diagnostics are accessed via SSH + the `scripts/diag_*` scripts + the `monitor-logs` branch directly.
+
 ## 3.2 Scalping Doctrine
 
 This is a SCALPING business. Engineering decisions are judged against this doctrine, not against generic "trading-system best practices":
@@ -242,7 +244,9 @@ TradeMonitor — polls every 5s using 1m candle OHLC
 | **Deploy** | `git push` to `main` → GitHub Actions → auto-deploy ~45s |
 | **Monitor** | GitHub Actions "VPS Runtime Audit" → `monitor-logs` branch |
 | **Telegram** | Paid signal channel + free preview channel |
-| **Repo** | `github.com/mkmk749278/360-v2` |
+| **Engine repo** | `github.com/mkmk749278/360-v2` |
+| **Lumin app repo** | `github.com/mkmk749278/lumin-app` |
+| **Ops dashboard repo (planned)** | `github.com/mkmk749278/360ce-ops` — separate web ops console for diagnostics. See `docs/360CE_OPS_PLAN.md`. Not yet built. |
 
 ---
 
