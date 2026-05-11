@@ -1091,9 +1091,12 @@ def _phase2_app(engine, tmp_path, *, billing_secret: str = _BILLING_SECRET):
     """Build a TestClient with the full Phase 2 stack wired in."""
     from src.api.billing_callback import BillingWebhookVerifier
     from src.api.otp import OtpStore
+    from src.api.user_overrides import UserOverridesStore
     from src.api.users import UserStore
 
-    user_store = UserStore(tmp_path / "lumin.sqlite")
+    db = tmp_path / "lumin.sqlite"
+    user_store = UserStore(db)
+    user_overrides = UserOverridesStore(db)
     otp_store = OtpStore(max_issues_per_hour=2, max_attempts_per_code=3)
     delivery = _CapturingDelivery()
     verifier = BillingWebhookVerifier(billing_secret)
@@ -1102,6 +1105,7 @@ def _phase2_app(engine, tmp_path, *, billing_secret: str = _BILLING_SECRET):
         jwt_secret=_TEST_SECRET,
         allow_static=False,
         user_store=user_store,
+        user_overrides=user_overrides,
         otp_store=otp_store,
         otp_delivery=delivery,
         billing_verifier=verifier,
@@ -1553,3 +1557,192 @@ def test_profile_put_validates_country_code_length(
         json={"country_code": "USA"},  # 3 chars; pydantic min/max=2
     )
     assert r.status_code == 422
+
+
+# =============================================================================
+# Phase 2 — per-user settings overrides
+# =============================================================================
+
+
+# ---- /api/settings/user/pretp ----------------------------------------------
+
+
+def test_user_pretp_get_returns_defaults_for_fresh_user(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    """A user with no overrides sees the engine's effective defaults
+    + ``using_defaults=true``."""
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330001")
+    r = client.get(
+        "/api/settings/user/pretp",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["using_defaults"] is True
+    # Engine defaults (config) are exposed via the same schema.
+    assert "threshold_pct" in body
+    assert "atr_multiplier" in body
+
+
+def test_user_pretp_put_persists_override(engine: _StubEngine, tmp_path) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330002")
+    r = client.put(
+        "/api/settings/user/pretp",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"threshold_pct": 0.50, "enabled": True},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["using_defaults"] is False
+    assert body["threshold_pct"] == 0.50
+    assert body["enabled"] is True
+
+
+def test_user_pretp_partial_put_merges(engine: _StubEngine, tmp_path) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330003")
+    client.put(
+        "/api/settings/user/pretp",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"threshold_pct": 0.50},
+    )
+    # Second PUT touches a different field — first override survives.
+    r = client.put(
+        "/api/settings/user/pretp",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"atr_multiplier": 0.75},
+    )
+    body = r.json()
+    assert body["threshold_pct"] == 0.50
+    assert body["atr_multiplier"] == 0.75
+
+
+def test_user_pretp_isolated_per_user(engine: _StubEngine, tmp_path) -> None:
+    """User A's overrides don't leak into User B's view."""
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token_a = _verify_and_get_token(client, store, delivery, "+15553330010")
+    token_b = _verify_and_get_token(client, store, delivery, "+15553330011")
+    client.put(
+        "/api/settings/user/pretp",
+        headers={"Authorization": f"Bearer {token_a}"},
+        json={"threshold_pct": 0.99},
+    )
+    # User B should still see engine default.
+    r = client.get(
+        "/api/settings/user/pretp",
+        headers={"Authorization": f"Bearer {token_b}"},
+    )
+    body = r.json()
+    assert body["using_defaults"] is True
+    assert body["threshold_pct"] != 0.99
+
+
+def test_user_pretp_requires_auth(engine: _StubEngine, tmp_path) -> None:
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    r = client.get("/api/settings/user/pretp")
+    assert r.status_code == 401
+
+
+def test_user_pretp_rejects_anonymous_token(engine: _StubEngine, tmp_path) -> None:
+    """Device-id JWTs aren't users → 404."""
+    client, _store, _delivery = _phase2_app(engine, tmp_path)
+    anon = client.post("/api/auth/anonymous").json()["token"]
+    r = client.get(
+        "/api/settings/user/pretp",
+        headers={"Authorization": f"Bearer {anon}"},
+    )
+    assert r.status_code == 404
+
+
+# ---- /api/settings/user/auto-trade -----------------------------------------
+
+
+def test_user_auto_trade_get_returns_defaults(engine: _StubEngine, tmp_path) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330020")
+    r = client.get(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["using_defaults"] is True
+    assert "position_size_pct" in body
+
+
+def test_user_auto_trade_put_persists_override(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330021")
+    r = client.put(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"position_size_pct": 1.0, "leverage_cap": 10.0},
+    )
+    body = r.json()
+    assert body["using_defaults"] is False
+    assert body["position_size_pct"] == 1.0
+    assert body["leverage_cap"] == 10.0
+
+
+def test_user_auto_trade_mode_does_not_flip_engine_global(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    """Per-user mode is stored but does NOT call set_auto_execution_mode.
+
+    The engine global mode stays unchanged — Phase 3 wires per-user
+    execution on the app side; until then the engine still operates in
+    whatever mode the operator picked.
+    """
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    # Sanity: stub engine starts in some mode (off / paper / live).
+    initial_mode = getattr(engine, "auto_execution_mode", None)
+    token = _verify_and_get_token(client, store, delivery, "+15553330030")
+    client.put(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"mode": "live"},
+    )
+    # Engine's own mode is untouched.
+    assert getattr(engine, "auto_execution_mode", None) == initial_mode
+    # But the user's stored override reflects the change.
+    body = client.get(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+    assert body["mode"] == "live"
+
+
+def test_user_auto_trade_clamps_leverage(engine: _StubEngine, tmp_path) -> None:
+    """B12: leverage_cap > 30 must be clamped to 30 at the store layer."""
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330031")
+    # Pydantic le=30 on the schema rejects 100 with 422 — verify the
+    # write path's coercion isn't reachable for over-cap values.
+    r = client.put(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"leverage_cap": 100.0},
+    )
+    assert r.status_code == 422
+
+
+def test_user_auto_trade_isolated_per_user(engine: _StubEngine, tmp_path) -> None:
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    a = _verify_and_get_token(client, store, delivery, "+15553330040")
+    b = _verify_and_get_token(client, store, delivery, "+15553330041")
+    client.put(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {a}"},
+        json={"position_size_pct": 5.0},
+    )
+    body = client.get(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {b}"},
+    ).json()
+    assert body["using_defaults"] is True
+    assert body["position_size_pct"] != 5.0

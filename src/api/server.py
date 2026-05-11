@@ -71,8 +71,11 @@ from .schemas import (
     SignalDetail,
     SignalsResponse,
     TickersResponse,
+    UserAutoTradeSettings,
+    UserPretpSettings,
 )
 from src import user_settings as _user_settings
+from .user_overrides import UserOverridesStore
 from .snapshot import (
     build_activity,
     build_agents,
@@ -284,6 +287,7 @@ def build_app(
     allow_static: bool = True,
     cors_origins: Optional[List[str]] = None,
     user_store: Optional[UserStore] = None,
+    user_overrides: Optional[UserOverridesStore] = None,
     otp_store: Optional[OtpStore] = None,
     otp_delivery: Optional[OtpDeliveryProvider] = None,
     billing_verifier: Optional[BillingWebhookVerifier] = None,
@@ -920,6 +924,130 @@ def build_app(
             _user_settings.update_auto_trade(partial)
         return _build_auto_trade_view()
 
+    # ---- Settings: Per-user Pre-TP overrides (Phase 2) ----
+
+    def _build_user_pretp_view(user_id: int) -> UserPretpSettings:
+        """Compose per-user Pre-TP view: user-row override where set,
+        engine default (config + engine-wide ``user_settings``) otherwise.
+
+        Engine doesn't yet consume per-user values — Phase 3 wires
+        execution.  Until then, these reads/writes are pure storage so
+        the app's settings UI is functional and we accumulate the data
+        we'll need at the user-side execution path.
+        """
+        defaults = _build_pretp_view()
+        if user_overrides is None:
+            return UserPretpSettings(
+                **defaults.model_dump(),
+                using_defaults=True,
+            )
+        overrides = user_overrides.get_pretp(user_id)
+        resolved = defaults.model_dump()
+        for key, val in overrides.items():
+            resolved[key] = val
+        return UserPretpSettings(
+            **resolved,
+            using_defaults=not bool(overrides),
+        )
+
+    @app.get(
+        "/api/settings/user/pretp",
+        response_model=UserPretpSettings,
+        tags=["settings"],
+    )
+    async def user_pretp_get(
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> UserPretpSettings:
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(claims)
+        return _build_user_pretp_view(uid)
+
+    @app.put(
+        "/api/settings/user/pretp",
+        response_model=UserPretpSettings,
+        tags=["settings"],
+    )
+    async def user_pretp_put(
+        payload: PretpSettings,
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> UserPretpSettings:
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(claims)
+        # ``exclude_unset=True`` mirrors the engine-wide endpoint's
+        # partial-update semantics — the user can change one toggle
+        # without re-sending every other field.
+        partial = payload.model_dump(exclude_unset=True)
+        if partial:
+            user_overrides.update_pretp(uid, partial)
+        return _build_user_pretp_view(uid)
+
+    # ---- Settings: Per-user auto-trade overrides (Phase 2) ----
+
+    def _build_user_auto_trade_view(user_id: int) -> UserAutoTradeSettings:
+        defaults = _build_auto_trade_view()
+        if user_overrides is None:
+            return UserAutoTradeSettings(
+                **defaults.model_dump(),
+                using_defaults=True,
+            )
+        overrides = user_overrides.get_auto_trade(user_id)
+        resolved = defaults.model_dump()
+        for key, val in overrides.items():
+            resolved[key] = val
+        return UserAutoTradeSettings(
+            **resolved,
+            using_defaults=not bool(overrides),
+        )
+
+    @app.get(
+        "/api/settings/user/auto-trade",
+        response_model=UserAutoTradeSettings,
+        tags=["settings"],
+    )
+    async def user_auto_trade_get(
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> UserAutoTradeSettings:
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(claims)
+        return _build_user_auto_trade_view(uid)
+
+    @app.put(
+        "/api/settings/user/auto-trade",
+        response_model=UserAutoTradeSettings,
+        tags=["settings"],
+    )
+    async def user_auto_trade_put(
+        payload: AutoTradeSettings,
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> UserAutoTradeSettings:
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(claims)
+        partial = payload.model_dump(exclude_unset=True)
+        # Note: per-user mode flips do NOT trigger the engine-wide
+        # ``set_auto_execution_mode`` — the engine continues to operate
+        # in whatever mode the operator set via /api/settings/auto-trade.
+        # Per-user mode is stored for Phase 3 when the user's app
+        # decides whether to fire their own Binance order.
+        if partial:
+            user_overrides.update_auto_trade(uid, partial)
+        return _build_user_auto_trade_view(uid)
+
     # ---- Agents ----
 
     @app.get(
@@ -950,6 +1078,7 @@ async def serve_api(
     allow_static: bool = True,
     cors_origins: Optional[List[str]] = None,
     user_store: Optional[UserStore] = None,
+    user_overrides: Optional[UserOverridesStore] = None,
     otp_store: Optional[OtpStore] = None,
     otp_delivery: Optional[OtpDeliveryProvider] = None,
     billing_verifier: Optional[BillingWebhookVerifier] = None,
@@ -964,6 +1093,7 @@ async def serve_api(
         allow_static=allow_static,
         cors_origins=cors_origins,
         user_store=user_store,
+        user_overrides=user_overrides,
         otp_store=otp_store,
         otp_delivery=otp_delivery,
         billing_verifier=billing_verifier,
