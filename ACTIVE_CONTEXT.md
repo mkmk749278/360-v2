@@ -37,6 +37,46 @@
 
 ---
 
+## Queued — 360 CE Ops diagnostic dashboard
+
+**Status:** Plan complete (2026-05-11). Build not started.
+
+This will resume in a **fresh session**, once `mkmk749278/360ce-ops` is added to the MCP-tool repo-access list at session boot. The current session is scoped to `mkmk749278/lumin-app` + `mkmk749278/360-v2` only, and the access list is fixed at session-start time — there's no mid-session way to grant a third repo.
+
+**Why this exists.** Owner's stated need (verbatim): *"this app should help us interact with engine to diagnose errors, signal quality, deep-level analysis of signals … what's our truth report and diag command doing, and all useful things to us, and that you should access directly."* Today every diagnostic touches Telegram, `curl`, or SSH-and-run-a-script. The truth report JSON + per-signal joins should be visible in a browser.
+
+**Decisions taken (this session):**
+
+| Question | Answer |
+|---|---|
+| App name | **360 CE Ops** (engine-brand, per OWNER_BRIEF §B15) |
+| Repo | `github.com/mkmk749278/360ce-ops` — separate repo, not subdirectory of `360-v2` |
+| Stack | Stack-agnostic per owner — *"whatever it is, just do the job."* Chose Python + FastAPI + Jinja2 + HTMX for diagnostic-table fitness and zero build complexity. |
+| Form factor | **Web dashboard** at `ops.luminapp.org`, not a Flutter APK. Mobile-responsive. Diagnostic content is table-/chart-heavy; phone-as-only-surface is the wrong substrate. |
+| Auth | Single owner password gate reusing the engine's `API_AUTH_TOKEN`. No multi-user. |
+| First-build slice (recommended) | `/` pulse + `/truth` + `/signals` + `/signals/{id}`. Exercises all four data sources end-to-end. Second slice (`/diag/geometry`, `/invalidations`, `/performance`) deferred. |
+| Deploy | GitHub Actions on day one — owner is mobile-first and shouldn't SSH to ship updates. |
+| Writes (auto-mode, breaker, settings) | **Deferred.** Owner's framing was diagnostic-first; control stays in Telegram until the dashboard earns trust. |
+
+**Data sources (read-only consumer of artifacts the engine already produces):**
+
+1. Live `/api/*` endpoints on `api.luminapp.org` for pulse, signals, positions, auto-mode
+2. `monitor-logs` branch JSON: `truth_report.md`, `truth_snapshot.json`, `signals_last100.json`, `dispatch_log.json`, `window_comparison.json`, `monitor/raw/heartbeat.txt`
+3. Engine `data/` directory via read-only Docker volume on the same VPS: `signal_performance.json`, `invalidation_records.json`, `signal_history.json`
+4. On-demand `docker exec engine python /app/scripts/diag_geometry_vs_reality.py …` (second slice)
+
+**No engine code changes required for MVP.**
+
+**Full plan:** `docs/360CE_OPS_PLAN.md` (this repo).
+
+**How to resume:**
+1. Add `mkmk749278/360ce-ops` to MCP-tool repo-access at session boot.
+2. Re-read `docs/360CE_OPS_PLAN.md` and this section.
+3. Confirm with owner: first slice only (recommended) or full MVP.
+4. Bootstrap repo, scaffold FastAPI app, wire the four data sources, ship first slice — each slice on its own topic branch + PR per `CLAUDE.md § Change-management protocol`.
+
+---
+
 ## Previous Phase — Multi-user expansion + APK auto-update *(2026-05-10, shipped)*
 
 Five PRs across both repos converted engine + app from owner-only to closed-beta-ready multi-user, plus eliminated the manual APK flash loop:
@@ -259,6 +299,7 @@ For any future code change:
 1. Ask: **"how does this make signals more profitable for paid subscribers?"**
 2. If answer is unmeasurable, "engineering hygiene," or speculative — **defer or drop**.
 3. If answer is measurable (win rate, signal volume, R:R, time-to-resolution, fewer subscriber-visible failures), proceed: investigate, implement, test, document, ship.
+4. **Always via a PR.** Fresh topic branch off `main`, design-summary body, no direct pushes to long-lived session branches. See `CLAUDE.md § Change-management protocol`.
 
 For Lumin app changes:
 1. All app dev happens in Termux on owner's phone — no Android Studio.
