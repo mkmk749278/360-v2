@@ -437,3 +437,92 @@ def test_max_sl_pct_entry_present():
 def test_portfolio_role_assigned():
     from src.signal_quality import ACTIVE_PATH_PORTFOLIO_ROLES, SetupClass, PortfolioRole
     assert ACTIVE_PATH_PORTFOLIO_ROLES.get(SetupClass.MA_CROSS_TREND_SHIFT) == PortfolioRole.SPECIALIST
+
+
+# ---------------------------------------------------------------------------
+# Live-API contract (2026-05-11 fix): scalar ``*_prev`` / ``*_last`` pairs
+# from ``compute_indicators_for_candle_dict``.  Bug: until this fix the
+# 15th evaluator never fired because the live indicator API only stored
+# ``*_last`` scalars and the evaluator read full arrays.
+# ---------------------------------------------------------------------------
+
+
+class TestScalarPrevApiPath:
+    """Confirms the evaluator fires when fed the live indicator API
+    (scalar pairs, no arrays).  Mirrors what production looks like."""
+
+    def test_compute_indicators_populates_ema_prev_scalars(self):
+        """Live compute_indicators_for_candle_dict produces ``*_prev`` for
+        ema21 / ema50 / ema200 when enough candles exist."""
+        from src.scanner.indicator_compute import compute_indicators_for_candle_dict
+        import numpy as np
+
+        # Need >= 200 closes so all three EMAs get computed.
+        n = 250
+        closes = list(np.linspace(1.0, 2.0, n))
+        result = compute_indicators_for_candle_dict({
+            "1h": {
+                "high": [c * 1.01 for c in closes],
+                "low": [c * 0.99 for c in closes],
+                "close": closes,
+                "volume": [100.0] * n,
+            }
+        })
+        ind = result["1h"]
+        for key in (
+            "ema21_prev", "ema21_last",
+            "ema50_prev", "ema50_last",
+            "ema200_prev", "ema200_last",
+        ):
+            assert key in ind, f"{key} missing from live indicator dict"
+            assert isinstance(ind[key], float), f"{key} not a float"
+
+    def test_4h_golden_cross_fires_via_scalar_api(self):
+        """Same trigger contract as the array-fed tests, but feeds the
+        evaluator the live scalar API ``ema*_prev`` / ``ema*_last``."""
+        from src.channels.scalp import ScalpChannel
+        from src.smc import Direction
+
+        ch = ScalpChannel()
+        candles = {"1m": _candles_1m(), "1h": _candles_1h()}
+        indicators = {
+            "1m": {"rsi_last": 60.0, "ema9_last": 100.5,
+                   "ema21_last": 100.0, "atr_last": 0.5},
+            "1h": {"rsi_last": 60.0, "atr_last": 0.5,
+                   "ema21_last": 100.3, "ema50_last": 100.5},
+            "4h": {
+                # ema50 was below ema200 last bar, now above → golden cross
+                "ema50_prev": 99.0, "ema50_last": 100.5,
+                "ema200_prev": 99.5, "ema200_last": 100.0,
+            },
+        }
+        sig = ch._evaluate_ma_cross_trend_shift(
+            "BTCUSDT", candles, indicators, {}, 0.01, 10_000_000,
+            regime="TRENDING_UP",
+        )
+        assert sig is not None
+        assert sig.direction == Direction.LONG
+        assert sig.setup_class == "MA_CROSS_TREND_SHIFT"
+
+    def test_no_cross_when_prev_missing(self):
+        """Without ``*_prev`` AND without arrays, evaluator can't see the
+        transition — returns no_ma_cross.  Protects against silent
+        false-positives on incomplete data."""
+        from src.channels.scalp import ScalpChannel
+
+        ch = ScalpChannel()
+        candles = {"1m": _candles_1m(), "1h": _candles_1h()}
+        # ``*_last`` only, no ``*_prev``, no arrays.  Evaluator should
+        # fail closed (no detection).
+        indicators = {
+            "1m": {"rsi_last": 60.0, "ema9_last": 100.5,
+                   "ema21_last": 100.0, "atr_last": 0.5},
+            "1h": {"rsi_last": 60.0, "atr_last": 0.5,
+                   "ema21_last": 100.3, "ema50_last": 100.5},
+            "4h": {"ema50_last": 100.5, "ema200_last": 100.0},
+        }
+        sig = ch._evaluate_ma_cross_trend_shift(
+            "BTCUSDT", candles, indicators, {}, 0.01, 10_000_000,
+            regime="TRENDING_UP",
+        )
+        assert sig is None

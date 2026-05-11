@@ -254,10 +254,31 @@ def compute_indicators_for_candle_dict(candle_dict: Dict[str, dict]) -> Dict[str
             v = np.asarray(cd.get("volume", cd.get("vol", [])), dtype=np.float64).ravel()
             ind: dict = {}
             if len(c) >= 21:
-                ind["ema9_last"] = float(ema(c, 9)[-1])
-                ind["ema21_last"] = float(ema(c, 21)[-1])
+                _ema9 = ema(c, 9)
+                _ema21 = ema(c, 21)
+                ind["ema9_last"] = float(_ema9[-1])
+                ind["ema21_last"] = float(_ema21[-1])
+                # `*_prev` (the bar-before-last) is what MA-cross detection
+                # needs to spot the transition between two adjacent bars
+                # without retaining the full EMA array.  Bug 2026-05-11:
+                # ``_evaluate_ma_cross_trend_shift`` reads
+                # ``ind["ema21"]`` / ``ind["ema50"]`` as full arrays, which
+                # the live indicator API never populated → 100% no_ma_cross
+                # reject; 0 generations across millions of attempts.  Scalar
+                # ``_prev`` pairs are the minimal contract; the evaluator
+                # is updated in lockstep.
+                if len(_ema21) >= 2:
+                    ind["ema21_prev"] = float(_ema21[-2])
+            if len(c) >= 50:
+                _ema50 = ema(c, 50)
+                ind["ema50_last"] = float(_ema50[-1])
+                if len(_ema50) >= 2:
+                    ind["ema50_prev"] = float(_ema50[-2])
             if len(c) >= 200:
-                ind["ema200_last"] = float(ema(c, 200)[-1])
+                _ema200 = ema(c, 200)
+                ind["ema200_last"] = float(_ema200[-1])
+                if len(_ema200) >= 2:
+                    ind["ema200_prev"] = float(_ema200[-2])
             if len(c) >= 30:
                 a = adx(h, lo, c, 14)
                 valid = a[~np.isnan(a)]

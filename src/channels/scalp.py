@@ -4762,31 +4762,57 @@ class ScalpChannel(BaseChannel):
 
         # Detect cross on a TF.  Returns (direction, label) on hit, None on miss.
         # `label` is a short string for telemetry / setup_class subtype.
+        # Reads scalar ``*_prev`` / ``*_last`` pairs (e.g. ``ema21_prev`` +
+        # ``ema21_last``) populated by ``compute_indicators_for_candle_dict``.
+        # Bug 2026-05-11: this used to read full ``ind["ema21"]`` arrays,
+        # which the live indicator API never populated — every call
+        # returned None, producing 100% no_ma_cross reject for the
+        # 15th evaluator since PR #318 shipped.
         def _detect_cross(
             ind: Dict[str, Any], fast_key: str, slow_key: str,
         ) -> Optional[tuple]:
-            fast_arr = ind.get(fast_key.replace("_last", ""))
-            slow_arr = ind.get(slow_key.replace("_last", ""))
-            if fast_arr is None or slow_arr is None:
+            fast_name = fast_key.replace("_last", "")
+            slow_name = slow_key.replace("_last", "")
+            # Live path: scalar ``*_prev`` / ``*_last`` pairs (added by
+            # compute_indicators_for_candle_dict 2026-05-11).
+            f_prev = ind.get(f"{fast_name}_prev")
+            f_last = ind.get(fast_key)
+            s_prev = ind.get(f"{slow_name}_prev")
+            s_last = ind.get(slow_key)
+            # Fallback for legacy callers (test fixtures, ``diagnose_pair``)
+            # that pass full EMA arrays under the bare name.  Extract the
+            # last two elements to honour the scalar contract above.
+            if f_prev is None or s_prev is None:
+                fast_arr = ind.get(fast_name)
+                slow_arr = ind.get(slow_name)
+                try:
+                    if fast_arr is not None and slow_arr is not None:
+                        fast = list(fast_arr)
+                        slow = list(slow_arr)
+                        if len(fast) >= 2 and len(slow) >= 2:
+                            f_prev = fast[-2] if f_prev is None else f_prev
+                            f_last = fast[-1] if f_last is None else f_last
+                            s_prev = slow[-2] if s_prev is None else s_prev
+                            s_last = slow[-1] if s_last is None else s_last
+                except (TypeError, ValueError):
+                    pass
+            # Missing any of the four scalars (typically at boot before two
+            # candles have closed) → not detectable; fail open quietly.
+            if any(v is None for v in (f_prev, f_last, s_prev, s_last)):
                 return None
-            try:
-                fast = list(fast_arr)
-                slow = list(slow_arr)
-            except TypeError:
-                return None
-            if len(fast) < 2 or len(slow) < 2:
-                return None
-            f_prev, f_last = float(fast[-2]), float(fast[-1])
-            s_prev, s_last = float(slow[-2]), float(slow[-1])
+            f_prev = float(f_prev)
+            f_last = float(f_last)
+            s_prev = float(s_prev)
+            s_last = float(s_last)
             # Skip if any value is NaN-ish or non-positive.
             if not (f_prev > 0 and f_last > 0 and s_prev > 0 and s_last > 0):
                 return None
             # Golden cross: prev fast ≤ prev slow AND last fast > last slow.
             if f_prev <= s_prev and f_last > s_last:
-                return (Direction.LONG, f"{fast_key.replace('_last', '')}/{slow_key.replace('_last', '')}")
+                return (Direction.LONG, f"{fast_name}/{slow_name}")
             # Death cross.
             if f_prev >= s_prev and f_last < s_last:
-                return (Direction.SHORT, f"{fast_key.replace('_last', '')}/{slow_key.replace('_last', '')}")
+                return (Direction.SHORT, f"{fast_name}/{slow_name}")
             return None
 
         ind_4h = indicators.get("4h", {})
