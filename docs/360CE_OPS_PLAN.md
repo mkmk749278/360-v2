@@ -1,10 +1,10 @@
 # 360 CE Ops — Diagnostic Dashboard Design
 
-**Status:** First build shipped 2026-05-11 (PR #1 in `mkmk749278/360ce-ops`) — full MVP, both slices in one push. Awaiting merge + first VPS deploy. Repo is in scope for MCP tooling.
+**Status:** Live at https://ops.luminapp.org since 2026-05-12. Auto-deploy on push to `main` via the workflow in `360ce-ops`. Initial PRs: #1 (full MVP, both slices in one push) + #2 (CI workflow `secrets`-context hotfix).
 
 This document remains the canonical design reference. Subsequent changes ship via PRs in the `360ce-ops` repo following its own `CLAUDE.md § Change-management protocol`.
 
-**See also:** `OWNER_BRIEF.md §3.1` and Part V infrastructure table (system context), `ACTIVE_CONTEXT.md § Shipped — 360 CE Ops first build` (current state and what's already live).
+**See also:** `OWNER_BRIEF.md §3.1` and Part V infrastructure table (system context), `ACTIVE_CONTEXT.md § Shipped + Deployed — 360 CE Ops` (current state and what's already live).
 
 ---
 

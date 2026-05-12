@@ -37,22 +37,25 @@
 
 ---
 
-## Shipped — 360 CE Ops first build *(2026-05-11 evening)*
+## Shipped + Deployed — 360 CE Ops *(build 2026-05-11, first deploy 2026-05-12)*
 
-**Status:** Full MVP shipped as PR #1 in `mkmk749278/360ce-ops`. Awaiting merge + first VPS deploy.
+**Status:** Live at https://ops.luminapp.org. Owner-confirmed login success on first deploy.
 
-Built in the same session as the morning's signal-quality 5-PR batch, while the engine sat in its 24h post-#359..#363 observation window. Both slices of the original plan landed in one push: pulse + truth + signals + signal_detail (first slice) and diag + invalidations + performance (second slice).
+Built same session as the morning's signal-quality 5-PR batch, while the engine sat in its 24h post-#359..#363 observation window. Both slices of the original plan landed in one push: pulse + truth + signals + signal_detail (first slice) and diag + invalidations + performance (second slice). Initial PRs: #1 (full MVP) + #2 (CI hotfix).
 
 **Why it shipped now.** The repo became accessible to MCP tooling this session — exactly the precondition `docs/360CE_OPS_PLAN.md § "How to resume in a new session"` was waiting on. Owner picked "full MVP" when asked which thread to work this session.
 
-**What shipped (`mkmk749278/360ce-ops` PR #1):**
-- FastAPI + Jinja2 + HTMX server-rendered dashboard, ~30 files / ~1100 LOC
-- Owner-only password gate via starlette `SessionMiddleware`, password = engine's `API_AUTH_TOKEN`
-- Four data sources wired: live engine REST, mounted `data/*.json`, monitor-logs branch (raw.githubusercontent.com, TTL cached), `docker exec` diag runner with script allow-list + shell-metachar rejection
-- Seven authenticated routes (`/`, `/truth`, `/signals`, `/signals/{id}`, `/diag/geometry`, `/invalidations`, `/performance`) plus `/login`/`/logout`/`/healthz`
-- `Dockerfile` (multi-stage, docker CLI copied from `docker:24-cli`), `docker-compose.yml` with read-only mount of `/opt/engine/data` and the docker socket
-- GitHub Actions deploy workflow: pytest → buildx → push to `ghcr.io/mkmk749278/360ce-ops` → SSH-deploy to VPS (SSH step conditional on `secrets.VPS_HOST` so first build doesn't fail before secrets are set)
-- Smoke tests covering healthz, auth gate, login/logout, wrong-password rejection
+**What's live:**
+- `https://ops.luminapp.org` — nginx (Let's Encrypt cert via certbot, expires 2026-08-10, auto-renew scheduled), proxying to `127.0.0.1:8088`
+- Container `360ce-ops` from `ghcr.io/mkmk749278/360ce-ops:latest`, alongside the engine on the same VPS
+- Auto-deploy: push to `360ce-ops` `main` → pytest → buildx → push to GHCR → SSH-deploy to VPS → `git pull && docker compose pull && docker compose up -d`
+- Auth: starlette session cookie behind single-password gate using engine's `API_AUTH_TOKEN`
+- Data sources wired:
+  - Live engine REST `/api/*` via httpx
+  - Engine `data/` mounted read-only via the named Docker volume `360-v2_360scalp-v2-data` (not a bind-mount path — see Lessons below)
+  - `monitor-logs` branch artifacts via `raw.githubusercontent.com`, in-memory TTL cache (60s default)
+  - `docker exec 360scalp-v2-engine ...` for on-demand `diag_*.py` (allow-listed script names, shell-metachar rejection)
+- Routes live: `/`, `/truth`, `/truth/raw.{md,json}`, `/signals`, `/signals/{id}`, `/diag/geometry`, `/invalidations`, `/performance`, `/login`, `/logout`, `/healthz`
 
 **What it deliberately does NOT include** (per plan §"Out of MVP scope"):
 - No writes to engine state — control stays in Telegram + Lumin app
@@ -61,16 +64,16 @@ Built in the same session as the morning's signal-quality 5-PR batch, while the 
 - No engine code changes
 - Custom per-section truth-report renderers deferred — for MVP every section dumps as JSON; iterate once usage shows which views earn their layout cost
 
-**Before the auto-deploy will actually deploy:**
-- GitHub Actions secrets on `mkmk749278/360ce-ops`: `VPS_HOST`, `VPS_USER`, `VPS_SSH_KEY`, `GHCR_READ_TOKEN`. Image pushes to GHCR will succeed without these on the first run; SSH-deploy step skips until they're populated.
-- VPS-side prep: clone `360ce-ops` to `/opt/360ce-ops`, create `.env` with `OPS_SESSION_SECRET` (`python -c "import secrets; print(secrets.token_urlsafe(32))"`) and `OPS_AUTH_TOKEN` (= engine's `API_AUTH_TOKEN`).
-- Reverse-proxy entry for `ops.luminapp.org` → `127.0.0.1:8088`, Let's Encrypt cert via the existing nginx/Caddy config that already fronts `api.luminapp.org`.
-
 **Open follow-ups (post first-deploy):**
-- Replace the `docker.sock` mount with an engine-side `/internal/diag/*` endpoint. Acceptable today because access is owner-only, but the socket grants root-equivalent host access — a sharp edge we should remove before any access broadens beyond owner.
+- Replace the `docker.sock` mount with an engine-side `/internal/diag/*` endpoint. Acceptable today because access is owner-only behind the password gate, but the socket grants root-equivalent host access — a sharp edge to remove before any access broadens beyond owner.
 - Custom-rendered truth-report sections (path funnel, regime distribution, invalidation audit) once dashboard usage shows which views earn their layout cost.
 - Lumin-app side: link to `ops.luminapp.org` from a settings/admin page once tester invites unblock and the dashboard has accumulated a usage trail worth showcasing.
 - `performance_tracker.py` import path — currently duplicated reducer logic locally. If the engine ever publishes pre-reduced rolling stats via the API, ops should pivot to consume those rather than re-reducing from `signal_performance.json`.
+
+**Lessons captured (worth reading before similar work):**
+
+1. **GitHub Actions `secrets` context is not allowed in step-level `if:` expressions.** PR #1 had `if: ${{ secrets.VPS_HOST != '' }}` as a "skip-deploy-before-secrets-are-set" guard; GH Actions rejected the workflow at parse time across every run. The blessed pattern is to expose the secret in a job-level `env:` block (where `secrets` IS allowed) and check `env.X` in the `if:`. Direct usage in `if:` is a parse error. Fixed in PR #2; would have been caught by `actionlint` pre-push.
+2. **Engine data lives in a Docker named volume, not a bind path.** First docker-compose used `${ENGINE_DATA_HOST_PATH:-/opt/engine/data}` as a bind mount — wrong, the engine's `data/` is in the named volume `360-v2_360scalp-v2-data` (project-prefixed by `docker-compose`). Sibling-container access should reference the named external volume, not the internal `/var/lib/docker/volumes/.../_data` host path. Fixed mid-deploy by switching the compose to `external: true` + `name: ${ENGINE_DATA_VOLUME:-360-v2_360scalp-v2-data}`.
 
 **Full plan (still valid as design reference):** `docs/360CE_OPS_PLAN.md` (this repo).
 
