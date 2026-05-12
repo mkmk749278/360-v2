@@ -6,34 +6,65 @@
 
 ## Current Phase
 
-**Signal-quality batch shipped (2026-05-11) — 5 PRs that should transform subscriber experience.** Truth report this morning showed engine emitting 2 pairs/day (DOGE + Q), 10+ identical QUSDT carbon-copies at deterministic -0.10358%, 0% TP1 hit rate, and 7+ silent evaluators. Owner's clear position: **not ready for tester invites in current state.** A coordinated 5-PR batch addresses the dominant problems:
+**End-of-day 2026-05-12 — engine recovered from 24h blackout, Telegram OTP shipped, identity-flow doctrine pivoted.** This session ran ~12 hours and resolved three things in sequence:
 
-1. **PR #359 — Data-staleness gate.** Reject dispatch when the symbol's 1m kline is older than `MAX_KLINE_STALENESS_SEC` (180s default). Catches frozen-feed pairs (QUSDT-class) before they emit deterministic-loss carbon copies. New `HistoricalDataStore.last_kline_age_seconds()` accessor; `_is_kline_data_fresh()` gate in `_prepare_signal`.
-2. **PR #360 — Structure-readiness gate.** Restrict structure-based evaluators (SR_FLIP / FAR / QCB / TPE / DIV_CONT / CLS / PDC / MA_CROSS / STANDARD) on pairs without aged multi-TF history. Threshold `MIN_1D_LEVELS_FOR_STRUCTURE_PATHS=5` from LevelBook. New `_YOUNG_PAIR_EVALUATORS` allowlist (6 paths: VSB, BDS, ORB, WHALE, LIQ_REVERSAL, FUNDING) for freshly-promoted pairs. Wired next to the existing mover-restriction.
-3. **PR #361 — WHALE_MOMENTUM calibration.** `whale_alert` was 99.92% momentum_reject. `WHALE_TRADE_USD_THRESHOLD` 1M → 250k ($1M was BTC-calibrated, 99.9th-percentile across alts; 250k is ~95th percentile — frequent but still a "size" signal). `VOLUME_DELTA_SPIKE_MULTIPLIER` 2.0 → 1.3 (env-overridable for the first time). Target: 0/day → 3-8/day tape-driven emissions.
-4. **PR #362 — MA_CROSS_TREND_SHIFT wake-up.** Bug in PR #318 integration: `_detect_cross` read full EMA arrays (`ind["ema21"]`) but live indicator API only stored scalar `*_last` values, and `ema50` was missing entirely. Live API now exposes scalar `*_prev` + `*_last` pairs for ema21/50/200. The 15th evaluator finally executes its cross logic after never firing since PR #318.
-5. **PR #363 — VSB/BDS breakout geometry.** Three flaws: 5-candle search window (25 min) too narrow for fast vertical moves; `highs[-26:-6]` swing reference contaminated by recent rally; 0.75% pullback cap rejects deeper retests common in strong trends. Calibrated: search 5→12 candles, reference `[-26:-6]`→`[-50:-15]`, pullback cap 0.75%→1.5%. Mirror-image for BDS. Target: VSB+BDS combined 0/day → 5-12/day.
+### 1. Engine emission-blackout: diagnosed → fixed → live (PRs #373 + #374)
 
-**Expected post-deploy emission profile:**
-- Structure family (SR_FLIP / FAR / QCB): cleaned up — 5-15/day real signals (was 15-50/day mostly bug-driven)
-- Tape (WHALE_MOMENTUM): 3-8/day (was 0)
-- Specialist (MA_CROSS): 2-8/day (was 0)
-- Breakout (VSB / BDS): 5-12/day (was 0)
-- Trend-aligned (TPE / DIV_CONT / CLS / PDC): unchanged — next investigation
-- **Total**: ~15-43/day across 4+ families instead of ~5-15/day monoculture
+Yesterday's signal-quality 5-PR batch (#359–#363) introduced a regression that wasn't visible until today's truth-report fetch revealed `kept=2159` for SR_FLIP_RETEST with `Emitted=0`. The data-staleness gate from PR #359 (`_is_kline_data_fresh`) was fail-CLOSED on `age is None`, and `_last_kline_update_ts` is stamped only inside `update_candle` — called only from live WS frame handlers. After every restart there's a window where REST-seeded candles populate the store but no WS frame has stamped a timestamp yet. Combined with a separate WS-handshake bug (silent connections at boot until the 903s watchdog fires), this killed every dispatch attempt for ~15 minutes per restart cycle, accumulating to 24h+ silence.
 
-**Pending 24h observation cycle on:**
-- TP1 hit rates from waking paths (first measurable on non-bug-polluted data)
-- Subscriber-visible diversity (multiple pairs and families emitting)
-- Suppression counters: `data_stale:{setup_class}`, `young_pair_restriction:{symbol}`, `dispatch_cooldown:*` should all be visible in the next truth report
+Diagnostic chain:
 
-**Tester invites still BLOCKED** until post-deploy data confirms real signals (not bug-driven, not carbon-copies, real TP1 outcomes).
+- **PR #373 — Dispatch-funnel instrumentation.** Added `enqueue_stage:{stage}:{setup_class}` counters at every rejection point in `_enqueue_signal` + at successful queue.put. Promoted the global directional cooldown skip from DEBUG → INFO. Added new `--- DISPATCH FUNNEL (per setup_class) ---` section in `/diag` that aggregates the counters into a per-evaluator table.
+- The very first `/diag` post-PR-#373 made `data_stale` the dominant column for SR_FLIP_RETEST — and the WS health card showed `sec_since_last_msg=704s` ≈ entire uptime. Smoking gun.
+- **PR #374 — Data-staleness gate fail-open on `age is None`.** Doctrinal fix matching `_is_pair_structurally_aged` (which fails-open on missing accessor). The QUSDT-class detection that PR #359 was designed for is preserved by the `age > MAX_KLINE_STALENESS_SEC` branch, which still hard-blocks once a single live frame has been observed.
 
-**Next-priority threads (queued, NOT started — wait for data):**
-- PDC (`POST_DISPLACEMENT_CONTINUATION`) — same `breakout_not_found` pattern (610k attempts), same fix likely applies. After 24h of PR #363 observation.
-- Trend-family upstream filter audit (CLS / DIV_CONT / TPE — choked by shared `regime_blocked` + `ema_alignment_reject` cascade with identical counts across all four). Bigger investigation, needs evidence-based design.
-- ORB (`feature_disabled`) — owner decision per OWNER_BRIEF §1.3: rebuild with proper session-anchored range logic, or delete.
-- 4h indicator loop (so MA_CROSS primary 4h EMA50/200 path lights up). Memory cost vs signal-quality trade-off; observe MA_CROSS 1h emissions first.
+Within minutes of PR #374 auto-deploy → owner confirmed signals flowing again.
+
+### 2. OTP delivery: Telegram bot DM shipped + critical schema bug squashed (PRs #N1 + #N2)
+
+Tonight's pivot to a viable OTP path. The Twilio/WhatsApp/AWS-SNS detour hit walls — Meta business verification needs documents the owner doesn't have (no GST/Pvt Ltd registration), AWS SNS to Indian numbers needs DLT registration (3–7 days), Twilio WhatsApp production sender needs Meta-verified business. All slow paths.
+
+- **PR #N1 — `TelegramOtpProvider` (engine).** Sends OTPs as Markdown-formatted DMs via the existing `@LuminProBot` instance, looked up by `phone_e164` in UserStore → `telegram_chat_id`. Missing chat_id returns `UNSUPPORTED_CHANNEL` so the chain falls through to fallback. Aligns with the existing PR #356 infrastructure (UserStore, OtpStore, billing webhook).
+- **PR #N2 — `OtpRequestResponse` literal hotfix.** The response Pydantic schema's `channel_used: Literal["whatsapp", "sms", "log"]` rejected `"telegram"` at validation time, causing 500s after the DM had already shipped. One-line fix.
+
+End-to-end test confirmed: OTP `691981` arrived in owner's `@LuminProBot` DM within ~2 seconds. App login flow validated.
+
+VPS state after this session:
+- `OTP_PRIMARY_CHANNEL=telegram`, `OTP_FALLBACK_CHANNEL=log`
+- `OWNER_PHONE_E164=+919618579123` (bootstraps user_id=1)
+- `users` table has owner row with `telegram_chat_id=710718010` (manually set; auto-bind handler is the next task)
+
+### 3. Identity-flow doctrine: pivot from B13-strict to phone+SMS-primary + Telegram-optional
+
+Original OWNER_BRIEF B13 declared Telegram-only ("No email, no password, no SMS auth"). That was viable when the assumption was "all our users have Telegram" — true for a Telegram-channel-fed closed beta. False once Lumin is a real consumer app where a chunk of users won't have Telegram installed (~5-15% of even crypto-aware audiences).
+
+Doctrinal call this session (CTE, owner-confirmed): **flip B13 to phone+SMS primary, Telegram bot as opt-in upgrade.**
+
+- Primary: phone → SMS OTP. Any user, any phone, no prerequisites. Via AuthKey.io (Indian DLT-registered provider) at ~₹0.13/SMS.
+- Opt-in upgrade: from app Settings, user can bind their Telegram chat_id via `@LuminProBot` `/start <phone>` deep link. Future codes route via the (free) Telegram DM instead of (paid) SMS.
+- Identity primitive remains `telegram_user_id` for paid-tier features per B16 (billing webhook, signal routing, ops console access).
+- OWNER_BRIEF B13 amended in this same docs PR.
+
+### Tomorrow / queued
+
+| Task | Notes |
+|---|---|
+| AuthKey.io signup + DLT template submission | Owner side, ~20 min + ~24h DLT clearance |
+| `AuthKeyOtpProvider` engine PR | CTE, ~80-line provider class + env vars + tests |
+| `@LuminProBot` `/start <phone>` bind handler | CTE, ~30 lines in the bot dispatch path |
+| App-side: channel-hint UI + "Bind Telegram for free codes" Settings entry | CTE via lumin-app installer PR |
+| Rotate leaked `TELEGRAM_BOT_TOKEN` | Owner — token appeared in chat transcript today; rotate via @BotFather `/revoke` before bed |
+
+### Still pending from earlier in the session (carried)
+
+- WS silent-at-boot investigation + watchdog timeout drop (15min → 3min, env-overridable). Lower priority now that PR #374's fail-open absorbs the impact, but root cause unidentified.
+- `signal_history.json` vs `signal_performance.json` sync gap surfaced today (app showed 1 closed signal, `/stats` showed 2). PR #305 backfills at boot; needs continuous reconciliation.
+- `dispatch_cooldown` persistence across restarts blocked at least one fresh paid signal today. Default 30min may be too long for current low-emission state; env-override or `/reset_cooldown` Telegram command worth considering.
+- Multi-strategy-confluence direction-clash silent skip (instrumentation hole identified during today's diagnostic). Adding `enqueue_stage:confluence_dir_clash` counter is a small follow-up.
+
+### Tester invites
+
+**Still blocked** pending: (a) AuthKey SMS in production so non-owner phones can sign up self-service; (b) 24h observation of post-#374 emission rate to confirm signals are landing reliably; (c) `/start` bind command so testers can opt-in to Telegram OTP and ongoing bot features.
 
 ---
 
@@ -209,9 +240,25 @@ The answer was a programmatic "world model" every evaluator can consult: persist
 | #318 | MA_CROSS_TREND_SHIFT 15th evaluator | ✅ merged |
 | #319 | VolumeProfile (POC + VAH/VAL) | ✅ merged |
 | #320 | Pattern catalog: bull/bear flag + wire H&S | ✅ merged |
-| #321 | Wire VolumeProfile + StructureTracker into scoring stack | 🟡 open |
+| #321 | Wire VolumeProfile + StructureTracker into scoring stack | ✅ merged |
 
-End-of-session test count: **3978 passed**, 0 failures, 0 regressions.
+### Day 3 — 360 CE Ops *(2026-05-11/12)*
+| PR | Title | Status |
+|---|---|---|
+| 360ce-ops #1 | Bootstrap 360 CE Ops — full MVP (pulse + truth + signals + diag + invalidations + performance) | ✅ merged |
+| 360ce-ops #2 | CI hotfix: remove `secrets` from step-level `if:` | ✅ merged |
+| #371 | Docs: 360 CE Ops shipped (companion to 360ce-ops PRs) | ✅ merged |
+| #372 | Docs: 360 CE Ops live at ops.luminapp.org | ✅ merged |
+
+### Day 4 — Emission-blackout recovery + Telegram OTP *(2026-05-12)*
+| PR | Title | Status |
+|---|---|---|
+| #373 | Instrument `_enqueue_signal` with `enqueue_stage` counters + per-path `/diag` funnel | ✅ merged |
+| #374 | Fail-open data-staleness gate when no kline timestamp stamped yet | ✅ merged |
+| #N1 | `TelegramOtpProvider` — OWNER_BRIEF B13 alignment + B13 amendment scope | ✅ merged |
+| #N2 | `OtpRequestResponse` literal hotfix (allow "telegram") | ✅ merged |
+
+End-of-session test count: **>3978 passed**, 0 failures, 0 regressions.
 
 ---
 
