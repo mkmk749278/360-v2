@@ -1,0 +1,25 @@
+From 17103ca125084aa22d9abfea7a953cf05a39420d Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 12 May 2026 14:53:03 +0000
+Subject: [PATCH] fix(api): allow 'telegram' in OtpRequestResponse.channel_used
+ literal
+
+---
+ src/api/schemas.py | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/src/api/schemas.py b/src/api/schemas.py
+index 5ad51e4..c862450 100644
+--- a/src/api/schemas.py
++++ b/src/api/schemas.py
+@@ -408,7 +408,7 @@ class OtpRequestResponse(BaseModel):
+     user lacks beyond the single channel hint.
+     """
+ 
+-    channel_used: Literal["whatsapp", "sms", "log"]
++    channel_used: Literal["whatsapp", "sms", "log", "telegram"]
+     expires_in_seconds: int
+ 
+ 
+-- 
+2.43.0
