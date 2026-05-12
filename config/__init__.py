@@ -1636,17 +1636,20 @@ OTP_MAX_ISSUES_PER_HOUR: int = _safe_int("OTP_MAX_ISSUES_PER_HOUR", "3")
 OTP_MAX_ATTEMPTS_PER_CODE: int = _safe_int("OTP_MAX_ATTEMPTS_PER_CODE", "5")
 #: Primary delivery channel for OTPs.  ``log`` (closed-beta default —
 #: writes the code to engine logs for owner-mediated forwarding),
-#: ``whatsapp`` (Twilio Authentication template — production default
-#: once Meta verification clears), or ``sms`` (AWS SNS — used directly
-#: when WhatsApp isn't viable, e.g. corporate-only deployments).
+#: ``whatsapp`` (Twilio Authentication template — needs Meta verification),
+#: ``sms`` (AWS SNS — needs DLT registration for India), or ``telegram``
+#: (DM via @LuminProBot — aligns with OWNER_BRIEF B13 "Telegram is the
+#: identity primitive", no Meta/AWS paperwork required).
 OTP_PRIMARY_CHANNEL: str = _safe_choice(
-    "OTP_PRIMARY_CHANNEL", "log", frozenset({"log", "whatsapp", "sms"}),
+    "OTP_PRIMARY_CHANNEL", "log",
+    frozenset({"log", "whatsapp", "sms", "telegram"}),
 )
 #: Fallback delivery channel — tried only when the primary returns
 #: ``UNSUPPORTED_CHANNEL`` (recipient unreachable).  Empty string
 #: disables fallback (single-provider mode).
 OTP_FALLBACK_CHANNEL: str = _safe_choice(
-    "OTP_FALLBACK_CHANNEL", "", frozenset({"", "log", "whatsapp", "sms"}),
+    "OTP_FALLBACK_CHANNEL", "",
+    frozenset({"", "log", "whatsapp", "sms", "telegram"}),
 )
 
 # Twilio (WhatsApp Authentication template).  Only consulted when

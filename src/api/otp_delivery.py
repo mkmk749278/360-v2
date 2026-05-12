@@ -39,6 +39,7 @@ import enum
 from dataclasses import dataclass
 from typing import Literal, Optional, Protocol, runtime_checkable
 
+from typing import Any  # noqa: F401  (used by Telegram provider annotations)
 from src.utils import get_logger
 
 log = get_logger("api.otp_delivery")
@@ -59,7 +60,7 @@ class DeliveryStatus(str, enum.Enum):
     PROVIDER_ERROR = "provider_error"
 
 
-_Channel = Literal["whatsapp", "sms", "log"]
+_Channel = Literal["whatsapp", "sms", "log", "telegram"]
 
 
 @dataclass(frozen=True)
@@ -322,6 +323,83 @@ class SnsSmsOtpProvider:
 
 
 # ---------------------------------------------------------------------------
+# Telegram bot DM — aligns with OWNER_BRIEF B13 (Telegram is the identity primitive)
+# ---------------------------------------------------------------------------
+
+
+class TelegramOtpProvider:
+    """Send the OTP as a Telegram bot DM to the user's stored chat_id.
+
+    OWNER_BRIEF B13 declares Telegram user ID the identity primitive — this
+    provider is the doctrinally-aligned delivery channel.  No Meta business
+    verification, no Twilio sender approval, no DLT/short-code registration
+    required.  Works against the existing ``@LuminProBot`` infrastructure
+    already wired for the billing webhook (PR #356).
+
+    Flow per OTP send:
+
+    1. Look up the user by ``phone_e164`` in ``UserStore``.
+    2. If the user has no ``telegram_chat_id`` yet (i.e. hasn't completed
+       the ``/start`` bind step in the bot), return
+       ``UNSUPPORTED_CHANNEL`` so the chain falls through to fallback —
+       typically ``LogOnlyOtpProvider`` for owner-mediated delivery during
+       onboarding.
+    3. Otherwise send the OTP as a Markdown-formatted DM via the engine's
+       existing :class:`TelegramBot` instance.  ``send_message`` returns
+       ``False`` on Telegram-side error (chat blocked, rate limited, etc.);
+       we surface that as ``PROVIDER_ERROR`` (no fallthrough — the user's
+       Telegram is broken in some way, SMS won't help).
+    """
+
+    def __init__(self, telegram_bot: Any, user_store: Any) -> None:
+        self._bot = telegram_bot
+        self._users = user_store
+
+    async def send(self, phone_e164: str, code: str) -> DeliveryResult:
+        user = self._users.get_by_phone(phone_e164) if self._users else None
+        chat_id = getattr(user, "telegram_chat_id", None) if user else None
+        if not chat_id:
+            log.info(
+                "Telegram OTP unsupported for {} — no telegram_chat_id linked",
+                phone_e164,
+            )
+            return DeliveryResult(
+                status=DeliveryStatus.UNSUPPORTED_CHANNEL,
+                channel_used="telegram",
+                detail="phone not linked to a Telegram chat_id (user needs /start in @LuminProBot)",
+            )
+
+        text = (
+            "\U0001F510 *Lumin verification*\n\n"
+            f"Your code is: `{code}`\n\n"
+            "_Valid for 5 minutes. Do not share this code with anyone._"
+        )
+        try:
+            ok = await self._bot.send_message(str(chat_id), text)
+        except Exception as exc:
+            log.warning(
+                "Telegram OTP send raised for {} chat_id={}: {}",
+                phone_e164, chat_id, exc,
+            )
+            return DeliveryResult(
+                status=DeliveryStatus.PROVIDER_ERROR,
+                channel_used="telegram",
+                detail=f"send_message raised: {exc}",
+            )
+        if not ok:
+            return DeliveryResult(
+                status=DeliveryStatus.PROVIDER_ERROR,
+                channel_used="telegram",
+                detail="send_message returned False (chat blocked, rate-limited, or 4xx)",
+            )
+        return DeliveryResult(
+            status=DeliveryStatus.OK,
+            channel_used="telegram",
+            detail=f"sent to chat_id={str(chat_id)[:6]}…",
+        )
+
+
+# ---------------------------------------------------------------------------
 # Chain — primary then fallback
 # ---------------------------------------------------------------------------
 
@@ -363,16 +441,25 @@ class ChainedOtpProvider:
 # ---------------------------------------------------------------------------
 
 
-def build_provider_from_env() -> OtpDeliveryProvider:
+def build_provider_from_env(
+    telegram_bot: Optional[Any] = None,
+    user_store: Optional[Any] = None,
+) -> OtpDeliveryProvider:
     """Construct the configured delivery provider from env vars.
 
-    Driven by ``OTP_PRIMARY`` and ``OTP_FALLBACK`` (each one of
-    ``log`` / ``whatsapp`` / ``sms``).  Returns a single provider when
-    no fallback is configured, or a :class:`ChainedOtpProvider` when
-    both are set.
+    Driven by ``OTP_PRIMARY_CHANNEL`` and ``OTP_FALLBACK_CHANNEL`` (each
+    one of ``log`` / ``whatsapp`` / ``sms`` / ``telegram``).  Returns a
+    single provider when no fallback is configured, or a
+    :class:`ChainedOtpProvider` when both are set.
 
-    Lazy import of :mod:`config` keeps this file pure and importable
-    in unit tests that don't want the engine's full env load.
+    The ``telegram`` channel requires the engine's ``TelegramBot`` and
+    ``UserStore`` instances — these are injected by ``bootstrap.py`` after
+    both have been constructed.  Selecting ``telegram`` without injecting
+    these is a configuration error and raises ``ValueError`` early (better
+    a boot-time crash than silent OTP failures in production).
+
+    Lazy import of :mod:`config` keeps this file pure and importable in
+    unit tests that don't want the engine's full env load.
     """
     from config import (
         OTP_PRIMARY_CHANNEL,
@@ -404,11 +491,22 @@ def build_provider_from_env() -> OtpDeliveryProvider:
                 secret_access_key=AWS_SNS_SECRET_ACCESS_KEY,
                 sender_id=AWS_SNS_SENDER_ID or None,
             )
+        if name == "telegram":
+            if telegram_bot is None or user_store is None:
+                raise ValueError(
+                    "OTP channel 'telegram' selected but telegram_bot / "
+                    "user_store not injected. bootstrap.py must pass both "
+                    "into build_provider_from_env()."
+                )
+            return TelegramOtpProvider(
+                telegram_bot=telegram_bot,
+                user_store=user_store,
+            )
         if name == "":
             return None
         raise ValueError(
             f"unknown OTP delivery channel: {name!r} "
-            f"(expected one of: log, whatsapp, sms)"
+            f"(expected one of: log, whatsapp, sms, telegram)"
         )
 
     primary = _build(OTP_PRIMARY_CHANNEL)

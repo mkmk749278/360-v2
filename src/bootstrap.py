@@ -324,7 +324,13 @@ class Bootstrap:
                 max_attempts_per_code=OTP_MAX_ATTEMPTS_PER_CODE,
                 max_issues_per_hour=OTP_MAX_ISSUES_PER_HOUR,
             )
-            otp_delivery = build_provider_from_env()
+            # Inject ``telegram_bot`` + ``user_store`` so the ``telegram``
+            # OTP channel (OWNER_BRIEF B13) can DM users by chat_id.
+            # Other channels (log/whatsapp/sms) ignore these args.
+            otp_delivery = build_provider_from_env(
+                telegram_bot=engine.telegram,
+                user_store=user_store,
+            )
             billing_verifier = BillingWebhookVerifier(BILLING_WEBHOOK_SECRET)
 
             # Stash on the engine so other subsystems (e.g. Phase-3
