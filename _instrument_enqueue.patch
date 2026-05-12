@@ -1,0 +1,169 @@
+From 196b6f2d88edf5bc13b6a6db264a477ec994ac3c Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Tue, 12 May 2026 06:52:40 +0000
+Subject: [PATCH] Instrument _enqueue_signal with enqueue_stage counters +
+ per-path /diag funnel
+
+---
+ src/commands/channels.py | 48 +++++++++++++++++++++++++++++++++++++++-
+ src/scanner/__init__.py  | 37 ++++++++++++++++++++++---------
+ 2 files changed, 73 insertions(+), 12 deletions(-)
+
+diff --git a/src/commands/channels.py b/src/commands/channels.py
+index 45bf96d..ab1bac6 100644
+--- a/src/commands/channels.py
++++ b/src/commands/channels.py
+@@ -7,7 +7,7 @@ import time
+ from collections import Counter
+ from datetime import datetime, timezone
+ from pathlib import Path
+-from typing import List, Optional
++from typing import Dict, List, Optional
+ 
+ from src.commands.registry import CommandContext, CommandRegistry
+ from src.signal_history_store import save_history
+@@ -448,6 +448,52 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
+         sections.append("scanner._suppression_counters not exposed")
+     sections.append("")
+ 
++    # --- Per-path dispatch funnel ---
++    # Aggregates the ``enqueue_stage:{stage}:{setup_class}`` counters added
++    # alongside this diag section.  Tells the operator, per evaluator, how
++    # many candidates died at each post-confidence gate vs. how many actually
++    # reached Telegram.  This is the answer to "why is path X kept by the
++    # confidence gate but emitting zero?" without grepping debug logs.
++    sections.append("--- DISPATCH FUNNEL (per setup_class) ---")
++    if suppression:
++        stages = (
++            "global_cooldown", "dispatch_cooldown", "data_stale",
++            "dispatch_staleness", "queue_put_failed", "emitted",
++        )
++        per_setup: Dict[str, Dict[str, int]] = {}
++        for key, count in suppression.items():
++            if not isinstance(key, str) or not key.startswith("enqueue_stage:"):
++                continue
++            try:
++                _, stage, setup_class = key.split(":", 2)
++            except ValueError:
++                continue
++            per_setup.setdefault(setup_class, {s: 0 for s in stages})
++            per_setup[setup_class][stage] = int(count)
++        if not per_setup:
++            sections.append("  (no dispatch attempts yet — engine just booted or no candidates reached _enqueue_signal)")
++        else:
++            # Sort rows by total dispatch attempts desc; emitted column on the right
++            def _row_total(setup_dict: Dict[str, int]) -> int:
++                return sum(setup_dict.get(s, 0) for s in stages)
++            sorted_setups = sorted(
++                per_setup.items(), key=lambda kv: _row_total(kv[1]), reverse=True
++            )
++            header = f"  {'setup_class':<32}" + "".join(f"{s:>14}" for s in stages) + f"{'total':>10}"
++            sections.append(header)
++            sections.append("  " + "-" * (32 + 14 * len(stages) + 10))
++            for setup_class, counts in sorted_setups:
++                row_total = _row_total(counts)
++                row = f"  {setup_class:<32}" + "".join(
++                    f"{counts.get(s, 0):>14}" for s in stages
++                ) + f"{row_total:>10}"
++                sections.append(row)
++            sections.append("")
++            sections.append("  Reading: emitted=hit Telegram. Anything in the other columns died at that gate.")
++    else:
++        sections.append("  (suppression counters not exposed — engine probably mid-boot)")
++    sections.append("")
++
+     # --- WebSocket health ---
+     # Phase 1 instrumentation (2026-05-08): per-connection state +
+     # reconnect-duration trail to investigate the "REST fallback
+diff --git a/src/scanner/__init__.py b/src/scanner/__init__.py
+index fea96ab..739c88e 100644
+--- a/src/scanner/__init__.py
++++ b/src/scanner/__init__.py
+@@ -3568,6 +3568,9 @@ class Scanner:
+                 self._suppression_counters[
+                     f"dispatch_cooldown:{cd_key[1]}"
+                 ] += 1
++                self._suppression_counters[
++                    f"enqueue_stage:dispatch_cooldown:{cd_key[1]}"
++                ] += 1
+                 log.info(
+                     "dispatch_cooldown skip {} {} {} ({:.0f}s remaining)",
+                     cd_key[0], cd_key[1], cd_key[2], max(0.0, remaining_s),
+@@ -3590,13 +3593,13 @@ class Scanner:
+         # gap / stream death / REST-fallback misalignment).
+         try:
+             if not self._is_kline_data_fresh(sig):
+-                self._suppression_counters[
+-                    f"data_stale:{getattr(sig, 'setup_class', 'UNKNOWN')}"
+-                ] += 1
++                _sc = getattr(sig, "setup_class", "UNKNOWN")
++                self._suppression_counters[f"data_stale:{_sc}"] += 1
++                self._suppression_counters[f"enqueue_stage:data_stale:{_sc}"] += 1
+                 log.info(
+                     "data_stale skip {} {} entry={:.6f}",
+                     getattr(sig, "symbol", "?"),
+-                    getattr(sig, "setup_class", "?"),
++                    _sc,
+                     float(getattr(sig, "entry", 0.0) or 0.0),
+                 )
+                 return False
+@@ -3611,13 +3614,13 @@ class Scanner:
+         # signal dispatches and immediately invalidates.
+         try:
+             if not self._is_entry_fresh(sig):
+-                self._suppression_counters[
+-                    f"dispatch_staleness:{getattr(sig, 'setup_class', 'UNKNOWN')}"
+-                ] += 1
++                _sc = getattr(sig, "setup_class", "UNKNOWN")
++                self._suppression_counters[f"dispatch_staleness:{_sc}"] += 1
++                self._suppression_counters[f"enqueue_stage:dispatch_staleness:{_sc}"] += 1
+                 log.info(
+                     "dispatch_staleness skip {} {} entry={:.6f} drifted",
+                     getattr(sig, "symbol", "?"),
+-                    getattr(sig, "setup_class", "?"),
++                    _sc,
+                     float(getattr(sig, "entry", 0.0) or 0.0),
+                 )
+                 return False
+@@ -3636,7 +3639,9 @@ class Scanner:
+         # Stamp cooldown on success.  Only persist after queue.put succeeds
+         # (so a queue overflow doesn't lock out future legitimate signals).
+         ok = await self.signal_queue.put(sig)
++        _sc_final = getattr(sig, "setup_class", "UNKNOWN")
+         if ok:
++            self._suppression_counters[f"enqueue_stage:emitted:{_sc_final}"] += 1
+             try:
+                 cd_key = self._cooldown_key_for(sig)
+                 if cd_key is not None:
+@@ -3644,6 +3649,12 @@ class Scanner:
+                     self._persist_dispatch_cooldown()
+             except Exception as exc:
+                 log.debug("cooldown stamp error (non-fatal): {}", exc)
++        else:
++            self._suppression_counters[f"enqueue_stage:queue_put_failed:{_sc_final}"] += 1
++            log.warning(
++                "signal_queue.put returned False for {} {} — queue full or backend unavailable",
++                getattr(sig, "symbol", "?"), _sc_final,
++            )
+         return ok
+ 
+     @staticmethod
+@@ -5478,9 +5489,13 @@ class Scanner:
+                 # fired recently. Opposite direction is not blocked.
+                 _sig_dir = sig.direction.value if hasattr(sig.direction, "value") else str(sig.direction)
+                 if self._is_in_global_cooldown(symbol, _sig_dir):
+-                    log.debug(
+-                        "Global directional cooldown: {} {} {} skipped",
+-                        symbol, _sig_dir, chan_name,
++                    _sc_for_cd = getattr(sig, "setup_class", chan_name) or chan_name
++                    self._suppression_counters[
++                        f"enqueue_stage:global_cooldown:{_sc_for_cd}"
++                    ] += 1
++                    log.info(
++                        "global_cooldown skip {} {} {} (setup={})",
++                        symbol, _sig_dir, chan_name, _sc_for_cd,
+                     )
+                     continue
+                 # Track evaluated setup class for diversity telemetry
+-- 
+2.43.0
