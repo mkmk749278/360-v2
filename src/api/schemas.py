@@ -408,7 +408,7 @@ class OtpRequestResponse(BaseModel):
     user lacks beyond the single channel hint.
     """
 
-    channel_used: Literal["whatsapp", "sms", "log"]
+    channel_used: Literal["whatsapp", "sms", "log", "telegram"]
     expires_in_seconds: int
 
 
