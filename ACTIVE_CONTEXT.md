@@ -6,34 +6,42 @@
 
 ## Current Phase
 
-**Signal-quality batch shipped (2026-05-11) — 5 PRs that should transform subscriber experience.** Truth report this morning showed engine emitting 2 pairs/day (DOGE + Q), 10+ identical QUSDT carbon-copies at deterministic -0.10358%, 0% TP1 hit rate, and 7+ silent evaluators. Owner's clear position: **not ready for tester invites in current state.** A coordinated 5-PR batch addresses the dominant problems:
+**Engine recovered from 24h+ emission blackout (2026-05-12).** Yesterday's signal-quality 5-PR batch (#359–#363) introduced a regression: the new data-staleness gate (`_is_kline_data_fresh`) was fail-CLOSED on `age is None`, and `_last_kline_update_ts` is only stamped inside `update_candle` — which is only called from WS frame handlers. After every engine restart there's a window where REST-seeded candles populate the store but no WS frame has stamped a timestamp yet. Combined with a separate WS-handshake bug (silent connections at boot until the 903s watchdog fires), this killed every dispatch attempt for ~15 minutes per restart cycle, accumulating to 24h+ of total silence.
 
-1. **PR #359 — Data-staleness gate.** Reject dispatch when the symbol's 1m kline is older than `MAX_KLINE_STALENESS_SEC` (180s default). Catches frozen-feed pairs (QUSDT-class) before they emit deterministic-loss carbon copies. New `HistoricalDataStore.last_kline_age_seconds()` accessor; `_is_kline_data_fresh()` gate in `_prepare_signal`.
-2. **PR #360 — Structure-readiness gate.** Restrict structure-based evaluators (SR_FLIP / FAR / QCB / TPE / DIV_CONT / CLS / PDC / MA_CROSS / STANDARD) on pairs without aged multi-TF history. Threshold `MIN_1D_LEVELS_FOR_STRUCTURE_PATHS=5` from LevelBook. New `_YOUNG_PAIR_EVALUATORS` allowlist (6 paths: VSB, BDS, ORB, WHALE, LIQ_REVERSAL, FUNDING) for freshly-promoted pairs. Wired next to the existing mover-restriction.
-3. **PR #361 — WHALE_MOMENTUM calibration.** `whale_alert` was 99.92% momentum_reject. `WHALE_TRADE_USD_THRESHOLD` 1M → 250k ($1M was BTC-calibrated, 99.9th-percentile across alts; 250k is ~95th percentile — frequent but still a "size" signal). `VOLUME_DELTA_SPIKE_MULTIPLIER` 2.0 → 1.3 (env-overridable for the first time). Target: 0/day → 3-8/day tape-driven emissions.
-4. **PR #362 — MA_CROSS_TREND_SHIFT wake-up.** Bug in PR #318 integration: `_detect_cross` read full EMA arrays (`ind["ema21"]`) but live indicator API only stored scalar `*_last` values, and `ema50` was missing entirely. Live API now exposes scalar `*_prev` + `*_last` pairs for ema21/50/200. The 15th evaluator finally executes its cross logic after never firing since PR #318.
-5. **PR #363 — VSB/BDS breakout geometry.** Three flaws: 5-candle search window (25 min) too narrow for fast vertical moves; `highs[-26:-6]` swing reference contaminated by recent rally; 0.75% pullback cap rejects deeper retests common in strong trends. Calibrated: search 5→12 candles, reference `[-26:-6]`→`[-50:-15]`, pullback cap 0.75%→1.5%. Mirror-image for BDS. Target: VSB+BDS combined 0/day → 5-12/day.
+Today's diagnosis chain (one session):
 
-**Expected post-deploy emission profile:**
-- Structure family (SR_FLIP / FAR / QCB): cleaned up — 5-15/day real signals (was 15-50/day mostly bug-driven)
-- Tape (WHALE_MOMENTUM): 3-8/day (was 0)
-- Specialist (MA_CROSS): 2-8/day (was 0)
-- Breakout (VSB / BDS): 5-12/day (was 0)
-- Trend-aligned (TPE / DIV_CONT / CLS / PDC): unchanged — next investigation
-- **Total**: ~15-43/day across 4+ families instead of ~5-15/day monoculture
+1. **PR #373 — Dispatch-funnel instrumentation.** Added `enqueue_stage:{stage}:{setup_class}` counters at every rejection point in `_enqueue_signal` + at successful queue.put. Promoted the global directional cooldown skip from DEBUG → INFO. Added new `--- DISPATCH FUNNEL (per setup_class) ---` section in `/diag` that aggregates the counters into a per-evaluator table.
+2. **`/diag` immediately revealed `data_stale=1, emitted=0` for SR_FLIP_RETEST** — the smoking gun. Cross-referenced with WS health: `sec_since_last_msg=704s` ≈ entire uptime. WS connections were "healthy" but receiving zero frames.
+3. **PR #374 — Data-staleness gate fail-open on `age is None`.** Doctrinal fix matching `_is_pair_structurally_aged` (which fails-open on missing accessor). The QUSDT-class detection PR #359 was designed for is preserved by the `age > MAX_KLINE_STALENESS_SEC` branch, which still hard-blocks once a single live frame has been observed.
 
-**Pending 24h observation cycle on:**
-- TP1 hit rates from waking paths (first measurable on non-bug-polluted data)
-- Subscriber-visible diversity (multiple pairs and families emitting)
-- Suppression counters: `data_stale:{setup_class}`, `young_pair_restriction:{symbol}`, `dispatch_cooldown:*` should all be visible in the next truth report
+**Engine emitting again** within minutes of PR #374 auto-deploy. Owner-confirmed.
 
-**Tester invites still BLOCKED** until post-deploy data confirms real signals (not bug-driven, not carbon-copies, real TP1 outcomes).
+**Followup queued (separate PR):** WS silent-at-boot bug. The 15-min watchdog timeout is way too generous — should be ~3 min, env-overridable. Worth investigating WHY the WS subscription returns zero frames despite reporting `healthy=True` — possibly a Binance-side rate limit at boot, a subscription-message timing race, or a TCP-alive-but-no-data state the manager doesn't detect. Separate, lower priority because PR #374 now absorbs the impact: blackouts no longer cascade from this WS issue.
 
-**Next-priority threads (queued, NOT started — wait for data):**
-- PDC (`POST_DISPLACEMENT_CONTINUATION`) — same `breakout_not_found` pattern (610k attempts), same fix likely applies. After 24h of PR #363 observation.
-- Trend-family upstream filter audit (CLS / DIV_CONT / TPE — choked by shared `regime_blocked` + `ema_alignment_reject` cascade with identical counts across all four). Bigger investigation, needs evidence-based design.
-- ORB (`feature_disabled`) — owner decision per OWNER_BRIEF §1.3: rebuild with proper session-anchored range logic, or delete.
-- 4h indicator loop (so MA_CROSS primary 4h EMA50/200 path lights up). Memory cost vs signal-quality trade-off; observe MA_CROSS 1h emissions first.
+**Permanent visibility win from PR #373:** the DISPATCH FUNNEL section in `/diag` stays. Any future dispatch-path regression will surface in the next /diag without DEBUG-log spelunking. The instrumentation paid for itself in its first /diag run.
+
+**Tester invites still BLOCKED** until 24h post-#374 observation confirms: emission volume is real (not bug-driven), per-evaluator diversity (not just SR_FLIP), TP1 outcomes on the new flow.
+
+**Next-priority threads (still queued, depend on post-#374 observation):**
+- PDC (`POST_DISPLACEMENT_CONTINUATION`) — same `breakout_not_found` pattern as VSB/BDS pre-#363. Same widened-window fix likely applies.
+- Trend-family upstream filter audit (CLS / DIV_CONT / TPE / PDC) — shared `regime_blocked` + `ema_alignment_reject` cascade with identical counts across all four. Single upstream gate killing 4 paths.
+- ORB (`feature_disabled`) — owner decision per OWNER_BRIEF §1.3: rebuild with session-anchored range logic, or delete.
+- 4h indicator loop (so MA_CROSS primary 4h EMA50/200 detection lights up). Memory cost vs signal-quality trade-off; observe MA_CROSS 1h emissions first.
+- WS silent-at-boot investigation + watchdog timeout drop.
+
+---
+
+## Previous Phase — Signal-quality 5-PR batch *(2026-05-11, shipped, broke engine, fixed by PR #374)*
+
+The morning batch addressed multiple known problems but introduced the regression diagnosed and fixed today. Original batch:
+
+1. **PR #359 — Data-staleness gate.** Reject dispatch when the symbol's 1m kline is older than `MAX_KLINE_STALENESS_SEC` (180s default). Catches frozen-feed pairs (QUSDT-class). **Note:** the original implementation was fail-CLOSED on `age is None`, which combined with the seed/WS-timing pattern caused 24h+ of silence. PR #374 fixed this to fail-OPEN on that branch only; the `age > MAX_KLINE_STALENESS_SEC` branch still hard-blocks QUSDT-class frozen feeds.
+2. **PR #360 — Structure-readiness gate.** Restrict structure-based evaluators on pairs without aged multi-TF history. `MIN_1D_LEVELS_FOR_STRUCTURE_PATHS=5` from LevelBook. Allowlist for freshly-promoted pairs: VSB, BDS, ORB, WHALE, LIQ_REVERSAL, FUNDING.
+3. **PR #361 — WHALE_MOMENTUM calibration.** `WHALE_TRADE_USD_THRESHOLD` 1M → 250k; `VOLUME_DELTA_SPIKE_MULTIPLIER` 2.0 → 1.3 (env-overridable).
+4. **PR #362 — MA_CROSS_TREND_SHIFT wake-up.** Bug in PR #318 integration: scalar `*_prev` + `*_last` pairs added for ema21/50/200.
+5. **PR #363 — VSB/BDS breakout geometry.** Search window 5→12 candles, reference `[-26:-6]`→`[-50:-15]`, pullback cap 0.75%→1.5%.
+
+**Lesson captured:** new dispatch-time gates need explicit visibility into their own kill rates. PR #373's instrumentation makes that automatic for any future gate added inside `_enqueue_signal`.
 
 ---
 
@@ -209,7 +217,17 @@ The answer was a programmatic "world model" every evaluator can consult: persist
 | #318 | MA_CROSS_TREND_SHIFT 15th evaluator | ✅ merged |
 | #319 | VolumeProfile (POC + VAH/VAL) | ✅ merged |
 | #320 | Pattern catalog: bull/bear flag + wire H&S | ✅ merged |
-| #321 | Wire VolumeProfile + StructureTracker into scoring stack | 🟡 open |
+| #321 | Wire VolumeProfile + StructureTracker into scoring stack | ✅ merged |
+
+### Day 3 — 360 CE Ops + signal-blackout fix *(2026-05-12)*
+| PR | Title | Status |
+|---|---|---|
+| 360ce-ops #1 | Bootstrap 360 CE Ops — full MVP (pulse + truth + signals + diag + invalidations + performance) | ✅ merged |
+| 360ce-ops #2 | CI hotfix: remove `secrets` from step-level `if:` | ✅ merged |
+| #371 | Docs: 360 CE Ops shipped (companion to 360ce-ops PRs) | ✅ merged |
+| #372 | Docs: 360 CE Ops live at ops.luminapp.org | ✅ merged |
+| #373 | Instrument `_enqueue_signal` with `enqueue_stage` counters + per-path `/diag` funnel | ✅ merged |
+| #374 | Fail-open data-staleness gate when no kline timestamp stamped yet | ✅ merged |
 
 End-of-session test count: **3978 passed**, 0 failures, 0 regressions.
 
