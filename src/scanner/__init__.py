@@ -3568,6 +3568,9 @@ class Scanner:
                 self._suppression_counters[
                     f"dispatch_cooldown:{cd_key[1]}"
                 ] += 1
+                self._suppression_counters[
+                    f"enqueue_stage:dispatch_cooldown:{cd_key[1]}"
+                ] += 1
                 log.info(
                     "dispatch_cooldown skip {} {} {} ({:.0f}s remaining)",
                     cd_key[0], cd_key[1], cd_key[2], max(0.0, remaining_s),
@@ -3590,13 +3593,13 @@ class Scanner:
         # gap / stream death / REST-fallback misalignment).
         try:
             if not self._is_kline_data_fresh(sig):
-                self._suppression_counters[
-                    f"data_stale:{getattr(sig, 'setup_class', 'UNKNOWN')}"
-                ] += 1
+                _sc = getattr(sig, "setup_class", "UNKNOWN")
+                self._suppression_counters[f"data_stale:{_sc}"] += 1
+                self._suppression_counters[f"enqueue_stage:data_stale:{_sc}"] += 1
                 log.info(
                     "data_stale skip {} {} entry={:.6f}",
                     getattr(sig, "symbol", "?"),
-                    getattr(sig, "setup_class", "?"),
+                    _sc,
                     float(getattr(sig, "entry", 0.0) or 0.0),
                 )
                 return False
@@ -3611,13 +3614,13 @@ class Scanner:
         # signal dispatches and immediately invalidates.
         try:
             if not self._is_entry_fresh(sig):
-                self._suppression_counters[
-                    f"dispatch_staleness:{getattr(sig, 'setup_class', 'UNKNOWN')}"
-                ] += 1
+                _sc = getattr(sig, "setup_class", "UNKNOWN")
+                self._suppression_counters[f"dispatch_staleness:{_sc}"] += 1
+                self._suppression_counters[f"enqueue_stage:dispatch_staleness:{_sc}"] += 1
                 log.info(
                     "dispatch_staleness skip {} {} entry={:.6f} drifted",
                     getattr(sig, "symbol", "?"),
-                    getattr(sig, "setup_class", "?"),
+                    _sc,
                     float(getattr(sig, "entry", 0.0) or 0.0),
                 )
                 return False
@@ -3636,7 +3639,9 @@ class Scanner:
         # Stamp cooldown on success.  Only persist after queue.put succeeds
         # (so a queue overflow doesn't lock out future legitimate signals).
         ok = await self.signal_queue.put(sig)
+        _sc_final = getattr(sig, "setup_class", "UNKNOWN")
         if ok:
+            self._suppression_counters[f"enqueue_stage:emitted:{_sc_final}"] += 1
             try:
                 cd_key = self._cooldown_key_for(sig)
                 if cd_key is not None:
@@ -3644,6 +3649,12 @@ class Scanner:
                     self._persist_dispatch_cooldown()
             except Exception as exc:
                 log.debug("cooldown stamp error (non-fatal): {}", exc)
+        else:
+            self._suppression_counters[f"enqueue_stage:queue_put_failed:{_sc_final}"] += 1
+            log.warning(
+                "signal_queue.put returned False for {} {} — queue full or backend unavailable",
+                getattr(sig, "symbol", "?"), _sc_final,
+            )
         return ok
 
     @staticmethod
@@ -5478,9 +5489,13 @@ class Scanner:
                 # fired recently. Opposite direction is not blocked.
                 _sig_dir = sig.direction.value if hasattr(sig.direction, "value") else str(sig.direction)
                 if self._is_in_global_cooldown(symbol, _sig_dir):
-                    log.debug(
-                        "Global directional cooldown: {} {} {} skipped",
-                        symbol, _sig_dir, chan_name,
+                    _sc_for_cd = getattr(sig, "setup_class", chan_name) or chan_name
+                    self._suppression_counters[
+                        f"enqueue_stage:global_cooldown:{_sc_for_cd}"
+                    ] += 1
+                    log.info(
+                        "global_cooldown skip {} {} {} (setup={})",
+                        symbol, _sig_dir, chan_name, _sc_for_cd,
                     )
                     continue
                 # Track evaluated setup class for diversity telemetry

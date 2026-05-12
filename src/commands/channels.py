@@ -7,7 +7,7 @@ import time
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from src.commands.registry import CommandContext, CommandRegistry
 from src.signal_history_store import save_history
@@ -446,6 +446,52 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
             sections.append(f"  {k}: {v}")
     else:
         sections.append("scanner._suppression_counters not exposed")
+    sections.append("")
+
+    # --- Per-path dispatch funnel ---
+    # Aggregates the ``enqueue_stage:{stage}:{setup_class}`` counters added
+    # alongside this diag section.  Tells the operator, per evaluator, how
+    # many candidates died at each post-confidence gate vs. how many actually
+    # reached Telegram.  This is the answer to "why is path X kept by the
+    # confidence gate but emitting zero?" without grepping debug logs.
+    sections.append("--- DISPATCH FUNNEL (per setup_class) ---")
+    if suppression:
+        stages = (
+            "global_cooldown", "dispatch_cooldown", "data_stale",
+            "dispatch_staleness", "queue_put_failed", "emitted",
+        )
+        per_setup: Dict[str, Dict[str, int]] = {}
+        for key, count in suppression.items():
+            if not isinstance(key, str) or not key.startswith("enqueue_stage:"):
+                continue
+            try:
+                _, stage, setup_class = key.split(":", 2)
+            except ValueError:
+                continue
+            per_setup.setdefault(setup_class, {s: 0 for s in stages})
+            per_setup[setup_class][stage] = int(count)
+        if not per_setup:
+            sections.append("  (no dispatch attempts yet — engine just booted or no candidates reached _enqueue_signal)")
+        else:
+            # Sort rows by total dispatch attempts desc; emitted column on the right
+            def _row_total(setup_dict: Dict[str, int]) -> int:
+                return sum(setup_dict.get(s, 0) for s in stages)
+            sorted_setups = sorted(
+                per_setup.items(), key=lambda kv: _row_total(kv[1]), reverse=True
+            )
+            header = f"  {'setup_class':<32}" + "".join(f"{s:>14}" for s in stages) + f"{'total':>10}"
+            sections.append(header)
+            sections.append("  " + "-" * (32 + 14 * len(stages) + 10))
+            for setup_class, counts in sorted_setups:
+                row_total = _row_total(counts)
+                row = f"  {setup_class:<32}" + "".join(
+                    f"{counts.get(s, 0):>14}" for s in stages
+                ) + f"{row_total:>10}"
+                sections.append(row)
+            sections.append("")
+            sections.append("  Reading: emitted=hit Telegram. Anything in the other columns died at that gate.")
+    else:
+        sections.append("  (suppression counters not exposed — engine probably mid-boot)")
     sections.append("")
 
     # --- WebSocket health ---
