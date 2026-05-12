@@ -324,15 +324,28 @@ class TestKlineDataStaleness:
         sig = _make_signal(symbol="QUSDT")
         assert scanner._is_kline_data_fresh(sig) is False
 
-    def test_never_updated_blocks_gate(self):
-        """No kline ever recorded for the symbol — block dispatch.
+    def test_never_updated_fails_open(self):
+        """No kline timestamp stamped yet — fail-OPEN (post-boot pattern).
 
-        A pair with zero kline history is by definition not ready for
-        trading; the data layer hasn't seen a single candle for it.
+        After every engine restart there's a window where the seed
+        path has loaded candles into the store via REST but no live
+        ``update_candle`` call from a WS frame has stamped
+        ``_last_kline_update_ts`` yet.  Blocking dispatch during
+        that window kept the engine completely silent for ~15 minutes
+        after each restart (2026-05-12 — the WS subscription returned
+        zero frames until the watchdog force-closed at 903s, and the
+        data-staleness gate killed every dispatch attempt in the
+        meantime).  Matches the fail-open doctrine used by
+        ``_is_pair_structurally_aged`` on missing accessor.
+
+        The QUSDT-class frozen-feed pathology PR #359 was designed to
+        catch is still detected via the
+        ``age > MAX_KLINE_STALENESS_SEC`` branch once a single live
+        frame has been observed.
         """
         scanner = _make_scanner_with_kline_age({})  # empty age map
         sig = _make_signal(symbol="NEWUSDT")
-        assert scanner._is_kline_data_fresh(sig) is False
+        assert scanner._is_kline_data_fresh(sig) is True
 
     def test_no_data_store_attribute_fails_open(self):
         """Data store without the new accessor → fail-open (don't block).

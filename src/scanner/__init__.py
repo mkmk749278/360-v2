@@ -3729,14 +3729,26 @@ class Scanner:
         to dispatch a signal against.
 
         Reads ``HistoricalDataStore.last_kline_age_seconds(symbol, "1m")``.
-        ``None`` (no klines recorded) and ages > ``MAX_KLINE_STALENESS_SEC``
-        both return False — both indicate the engine's view of the symbol
-        is stale and any signal dispatched against it would carry the
-        deterministic-micro-loss pathology from bug 2026-05-11 (QUSDT).
+        Two cases are distinguished:
 
-        Fail-open on any unexpected store shape to avoid suppressing
-        legitimate signals on harness / test contexts that don't expose
-        the new accessor.
+        * ``age is None`` — no timestamp has been stamped yet.  Engine just
+          booted and seed-loaded candles via REST/bulk-seed (which writes
+          OHLC into the candle store without stamping
+          ``_last_kline_update_ts``; only live ``update_candle`` calls
+          from WS frames stamp it).  Fail-OPEN here: blocking dispatch
+          until the first WS frame arrives caused a 15-min signal
+          blackout after every restart (2026-05-12 — WS watchdog took
+          903s to detect a silent post-boot subscription, and the
+          data-staleness gate killed every dispatch attempt in the
+          meantime).  Matches the fail-open doctrine used by
+          ``_is_pair_structurally_aged`` on missing accessor.
+        * ``age > MAX_KLINE_STALENESS_SEC`` — pair *has* been observed
+          but the feed has gone silent.  This is the QUSDT-class
+          pathology PR #359 was designed to catch: frozen feed,
+          deterministic-loss carbon-copy emissions.  Hard-block.
+
+        Fail-open on any unexpected store shape (missing accessor) to
+        avoid suppressing legitimate signals on harness / test contexts.
         """
         try:
             symbol = getattr(sig, "symbol", "")
@@ -3747,9 +3759,9 @@ class Scanner:
                 return True
             age = data_store.last_kline_age_seconds(symbol, "1m")
             if age is None:
-                # Never received a 1m kline for this symbol — by definition
-                # not ready to trade.  Block.
-                return False
+                # No live kline observed yet (post-boot, pre-first-WS-frame).
+                # Fail-OPEN — see docstring for rationale.
+                return True
             return age <= MAX_KLINE_STALENESS_SEC
         except Exception:
             return True  # Fail-open
