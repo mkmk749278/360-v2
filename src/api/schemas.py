@@ -104,6 +104,66 @@ class PositionsResponse(BaseModel):
     total: int
 
 
+class PositionDiagDetail(BaseModel):
+    """Operator-facing position diagnostic — superset of ``PositionDetail``.
+
+    Surfaces what ``TradeMonitor._evaluate_signal`` is *actually* comparing
+    against (the engine's view of the 1m candle wick + last tick) so the
+    operator can confirm whether a position that hit SL on Binance but still
+    reads ACTIVE in the engine is (a) a stale candle feed, (b) a monitor
+    evaluation bug, or (c) a state-store sync gap.
+    """
+
+    signal_id: str
+    symbol: str
+    direction: Literal["LONG", "SHORT"]
+    status: str
+    setup_class: str
+    channel: str
+
+    # Stored geometry at signal creation
+    entry: float
+    stop_loss: float
+    tp1: float
+    tp2: float
+    tp3: Optional[float] = None
+
+    # Engine's live view
+    current_price: float
+    pnl_pct: float
+    max_favorable_excursion_pct: float
+    max_adverse_excursion_pct: float
+    best_tp_hit: int
+    pre_tp_hit: bool
+
+    # What the monitor evaluates against
+    candle_1m_high: float
+    candle_1m_low: float
+    candle_1m_age_sec: Optional[float] = None
+
+    # Diag-derived: distance from worst-side wick to SL (signed, in %-of-entry).
+    # LONG:  (candle_1m_low  - stop_loss) / entry * 100  → negative means wick already past SL
+    # SHORT: (stop_loss - candle_1m_high) / entry * 100  → negative means wick already past SL
+    # A row with status == "ACTIVE" and sl_breach_distance_pct <= 0 is a smoking gun
+    # that the monitor failed to mark the signal SL_HIT.
+    sl_breach_distance_pct: Optional[float] = None
+
+    # Lifecycle stamps
+    minutes_open: int
+    timestamp: Optional[datetime] = None
+    dispatch_timestamp: Optional[datetime] = None
+    first_sl_touch_timestamp: Optional[datetime] = None
+    first_tp_touch_timestamp: Optional[datetime] = None
+    terminal_outcome_timestamp: Optional[datetime] = None
+
+
+class PositionsDiagResponse(BaseModel):
+    items: List[PositionDiagDetail]
+    total: int
+    monitor_running: bool
+    generated_at: datetime
+
+
 # ---------------------------------------------------------------------------
 # Activity feed
 # ---------------------------------------------------------------------------

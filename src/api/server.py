@@ -63,6 +63,7 @@ from .schemas import (
     OtpRequestResponse,
     OtpVerify,
     PnlHistoryResponse,
+    PositionsDiagResponse,
     PositionsResponse,
     PretpSettings,
     ProfileResponse,
@@ -82,6 +83,7 @@ from .snapshot import (
     build_pnl_history,
     build_auto_mode,
     build_positions,
+    build_positions_diag,
     build_pulse,
     build_signals,
     build_tickers,
@@ -719,6 +721,37 @@ def build_app(
             log.exception("/api/positions failed — returning empty list")
             items = []
         return PositionsResponse(items=items, total=len(items))
+
+    # ---- Internal diag: position-state X-ray for the ops dashboard ----
+    #
+    # Owner-only (gated by ``owner_required``) — exposes stored SL/TP, the
+    # 1m candle wick the monitor is comparing against, candle-feed age, and
+    # the signed sl_breach_distance_pct per active signal.  Designed so the
+    # 360 CE Ops dashboard's /positions view can tell apart stale-feed,
+    # monitor-evaluation-bug, and state-sync-gap failure modes when a
+    # position closes on Binance but stays ACTIVE in the engine.
+    #
+    # First step of the docker.sock removal noted in
+    # ``ACTIVE_CONTEXT.md`` — future ``/internal/diag/*`` endpoints replace
+    # the ``docker exec ... diag_*.py`` path the dashboard uses today.
+    @app.get(
+        "/internal/diag/positions",
+        response_model=PositionsDiagResponse,
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def positions_diag() -> PositionsDiagResponse:
+        try:
+            return build_positions_diag(engine)
+        except Exception:
+            log.exception(
+                "/internal/diag/positions failed — returning empty diag set",
+            )
+            from datetime import datetime as _dt, timezone as _tz
+            return PositionsDiagResponse(
+                items=[], total=0, monitor_running=False,
+                generated_at=_dt.now(_tz.utc),
+            )
 
     # ---- Activity ----
 

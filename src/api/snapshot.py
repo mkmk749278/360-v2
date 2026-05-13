@@ -22,6 +22,8 @@ from .schemas import (
     AgentStat,
     AutoModeStatus,
     PositionDetail,
+    PositionDiagDetail,
+    PositionsDiagResponse,
     PulseSnapshot,
     SignalDetail,
     TickerItem,
@@ -414,6 +416,153 @@ def build_positions(engine: Any) -> List[PositionDetail]:
             )
             continue
     return out
+
+
+def _candle_1m_extremes_and_age(engine: Any, symbol: str) -> tuple:
+    """Read (high, low, age_sec) for the last 1m candle of ``symbol``.
+
+    Mirrors ``TradeMonitor._candle_extremes`` but also returns the WS-update
+    age so the diag caller can tell stale-feed-vs-monitor-bug apart.  Returns
+    ``(0.0, 0.0, None)`` when no store / no candle data is available.
+    """
+    store = getattr(getattr(engine, "monitor", None), "_store", None)
+    if store is None:
+        return 0.0, 0.0, None
+    high = 0.0
+    low = 0.0
+    try:
+        candles = store.get_candles(symbol, "1m")
+        if candles and len(candles.get("high", [])) > 0 and len(candles.get("low", [])) > 0:
+            high = float(candles["high"][-1])
+            low = float(candles["low"][-1])
+    except Exception:
+        pass
+    age: Optional[float] = None
+    try:
+        age_fn = getattr(store, "last_kline_age_seconds", None)
+        if callable(age_fn):
+            raw = age_fn(symbol, "1m")
+            if raw is not None:
+                age = float(raw)
+    except Exception:
+        pass
+    return high, low, age
+
+
+def _sl_breach_distance_pct(
+    direction: str, entry: float, stop_loss: float, candle_high: float, candle_low: float
+) -> Optional[float]:
+    """Signed distance from the worst-side wick to SL, in %-of-entry.
+
+    Negative result means the 1m wick has already broken through SL — if the
+    signal is still ACTIVE that's a smoking gun for monitor evaluation failure.
+    Returns ``None`` when the inputs are not usable (zero entry, no candle).
+    """
+    if entry <= 0 or stop_loss <= 0 or (candle_high == 0.0 and candle_low == 0.0):
+        return None
+    if direction == "LONG":
+        return round((candle_low - stop_loss) / entry * 100.0, 4)
+    if direction == "SHORT":
+        return round((stop_loss - candle_high) / entry * 100.0, 4)
+    return None
+
+
+def build_positions_diag(engine: Any) -> PositionsDiagResponse:
+    """Operator-facing diag view of the active-signals dict.
+
+    Same source as ``build_positions`` (``router.active_signals``) but
+    surfaces the fields ``TradeMonitor._evaluate_signal`` reads — stored
+    SL/TP, current 1m candle wick, candle age — so the operator can tell
+    apart stale-feed, monitor-bug, and state-sync-gap failure modes when
+    a position closes on Binance but stays ACTIVE in the engine.
+
+    Per-signal exceptions are caught and logged; a corrupted entry in
+    ``active_signals`` is skipped rather than 500-ing the whole response.
+    """
+    router = getattr(engine, "router", None)
+    monitor = getattr(engine, "monitor", None)
+    monitor_running = bool(getattr(monitor, "_running", False)) if monitor is not None else False
+    generated_at = datetime.now(timezone.utc)
+
+    if router is None:
+        return PositionsDiagResponse(
+            items=[], total=0, monitor_running=monitor_running, generated_at=generated_at,
+        )
+
+    out: List[PositionDiagDetail] = []
+    for sig in router.active_signals.values():
+        try:
+            direction = getattr(sig, "direction", None)
+            direction_str = (
+                direction.value
+                if direction is not None and hasattr(direction, "value")
+                else str(direction or "LONG")
+            ).upper()
+            if direction_str not in ("LONG", "SHORT"):
+                direction_str = "LONG"
+
+            symbol = getattr(sig, "symbol", "") or ""
+            entry = float(getattr(sig, "entry", 0.0) or 0.0)
+            stop_loss = float(getattr(sig, "stop_loss", 0.0) or 0.0)
+            tp1 = float(getattr(sig, "tp1", 0.0) or 0.0)
+            tp2 = float(getattr(sig, "tp2", 0.0) or 0.0)
+            tp3_raw = getattr(sig, "tp3", None)
+            tp3 = float(tp3_raw) if tp3_raw is not None else None
+            current_price = float(getattr(sig, "current_price", entry) or entry)
+
+            candle_high, candle_low, candle_age = _candle_1m_extremes_and_age(engine, symbol)
+            sl_breach = _sl_breach_distance_pct(
+                direction_str, entry, stop_loss, candle_high, candle_low
+            )
+
+            out.append(
+                PositionDiagDetail(
+                    signal_id=getattr(sig, "signal_id", "") or "",
+                    symbol=symbol,
+                    direction=direction_str,  # type: ignore[arg-type]
+                    status=str(getattr(sig, "status", "ACTIVE") or "ACTIVE"),
+                    setup_class=str(getattr(sig, "setup_class", "UNCLASSIFIED") or "UNCLASSIFIED"),
+                    channel=str(getattr(sig, "channel", "") or ""),
+                    entry=entry,
+                    stop_loss=stop_loss,
+                    tp1=tp1,
+                    tp2=tp2,
+                    tp3=tp3,
+                    current_price=current_price,
+                    pnl_pct=float(getattr(sig, "pnl_pct", 0.0) or 0.0),
+                    max_favorable_excursion_pct=float(
+                        getattr(sig, "max_favorable_excursion_pct", 0.0) or 0.0
+                    ),
+                    max_adverse_excursion_pct=float(
+                        getattr(sig, "max_adverse_excursion_pct", 0.0) or 0.0
+                    ),
+                    best_tp_hit=int(getattr(sig, "best_tp_hit", 0) or 0),
+                    pre_tp_hit=bool(getattr(sig, "pre_tp_hit", False)),
+                    candle_1m_high=candle_high,
+                    candle_1m_low=candle_low,
+                    candle_1m_age_sec=candle_age,
+                    sl_breach_distance_pct=sl_breach,
+                    minutes_open=_minutes_since(getattr(sig, "timestamp", None)),
+                    timestamp=getattr(sig, "timestamp", None),
+                    dispatch_timestamp=getattr(sig, "dispatch_timestamp", None),
+                    first_sl_touch_timestamp=getattr(sig, "first_sl_touch_timestamp", None),
+                    first_tp_touch_timestamp=getattr(sig, "first_tp_touch_timestamp", None),
+                    terminal_outcome_timestamp=getattr(sig, "terminal_outcome_timestamp", None),
+                )
+            )
+        except Exception:
+            log.exception(
+                "build_positions_diag: skipping malformed signal %s",
+                getattr(sig, "signal_id", "?"),
+            )
+            continue
+
+    return PositionsDiagResponse(
+        items=out,
+        total=len(out),
+        monitor_running=monitor_running,
+        generated_at=generated_at,
+    )
 
 
 # ---------------------------------------------------------------------------
