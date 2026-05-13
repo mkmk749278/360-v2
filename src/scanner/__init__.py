@@ -316,6 +316,14 @@ _TREND_GATE_EXEMPT_SETUPS: frozenset = frozenset({
     #                            Applying the trend hard gate (EMA score) is a
     #                            mismatch for this structural-rejection path.
     "FAILED_AUCTION_RECLAIM",
+    # 2026-05-13 diag (post-#379 deploy) showed 1 B-tier LSR candidate /h
+    # killed by trend_hard_gate.  LSR is counter-trend by design: it sells
+    # into long sweeps and buys into short sweeps — EMA alignment with the
+    # entry direction is *bearish* for the LSR thesis (price has already
+    # moved too far), not bullish.  Requiring trend alignment for LSR
+    # contradicts the path's setup_class doctrine and was the bottleneck
+    # blocking the second-most-active path in the funnel.
+    "LIQUIDITY_SWEEP_REVERSAL",
 })
 
 # Penalty multiplier applied to scalp-channel soft gates when the regime is
