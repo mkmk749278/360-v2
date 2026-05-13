@@ -300,17 +300,12 @@ class Bootstrap:
         if API_ENABLED:
             from datetime import timedelta
 
-            from config import BINANCE_KEY_ENCRYPTION_SECRET
             from src.api import serve_api
             from src.api.billing_callback import BillingWebhookVerifier
             from src.api.otp import OtpStore
             from src.api.otp_delivery import build_provider_from_env
             from src.api.user_overrides import UserOverridesStore
             from src.api.users import UserStore
-            from src.auto_trade.binance_keys_store import (
-                BinanceKeysStore,
-                BinanceKeysStoreError,
-            )
 
             origins = [o.strip() for o in API_CORS_ORIGINS.split(",") if o.strip()]
 
@@ -338,32 +333,10 @@ class Bootstrap:
             )
             billing_verifier = BillingWebhookVerifier(BILLING_WEBHOOK_SECRET)
 
-            # Phase-4: per-user Binance key store for the auto-trade VPS
-            # proxy.  Without an encryption secret we leave it None and
-            # the ``/api/auto-trade/*`` endpoints 503 — users see a
-            # "auto-trade unavailable, ask admin" message in the app.
-            binance_keys_store = None
-            if BINANCE_KEY_ENCRYPTION_SECRET:
-                try:
-                    binance_keys_store = BinanceKeysStore(
-                        LUMIN_DB_PATH, BINANCE_KEY_ENCRYPTION_SECRET,
-                    )
-                except BinanceKeysStoreError as exc:
-                    log.warning(
-                        "BinanceKeysStore init failed — auto-trade proxy disabled: {}",
-                        exc,
-                    )
-            else:
-                log.warning(
-                    "BINANCE_KEY_ENCRYPTION_SECRET unset — auto-trade VPS proxy "
-                    "disabled (Live mode in the app will return 503)"
-                )
-
             # Stash on the engine so other subsystems (e.g. Phase-3
             # per-user paper P&L) can resolve the same singletons.
             engine.user_store = user_store
             engine.user_overrides = user_overrides
-            engine.binance_keys_store = binance_keys_store
 
             tasks.append(
                 asyncio.create_task(
@@ -380,7 +353,6 @@ class Bootstrap:
                         otp_store=otp_store,
                         otp_delivery=otp_delivery,
                         billing_verifier=billing_verifier,
-                        binance_keys_store=binance_keys_store,
                     ),
                     name="api_server",
                 )
