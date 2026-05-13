@@ -313,6 +313,47 @@ DYNAMIC_SL_TP_ENABLED: bool = _safe_bool("DYNAMIC_SL_TP_ENABLED", "true")
 MAX_KLINE_STALENESS_SEC: int = _safe_int("MAX_KLINE_STALENESS_SEC", "180")
 
 # ---------------------------------------------------------------------------
+# Signal dispatch — level-rearm state machine
+# ---------------------------------------------------------------------------
+# Stuck-level repeat-fire suppression for level-anchored evaluators
+# (SR_FLIP_RETEST / VOLUME_SURGE_BREAKOUT / BREAKDOWN_SHORT /
+# FAILED_AUCTION_RECLAIM).  Bug observed 2026-05-13: ETHUSDT SR_FLIP SHORT
+# dispatched 13× over 26h at identical entry 2305.32 while price chopped
+# within 0.3% of the level — every dispatch expired at +0.11% MFE with
+# zero TPs.  68% of paid emission was duplicates of 4 stuck levels.
+#
+# Doctrine: once a signal dispatches at a structural level, that level is
+# "in play".  Block additional dispatches at the same level until price has
+# decisively travelled away (real move).  Then re-arm automatically so the
+# next genuine retest fires normally.
+
+#: Multiplier applied to the dispatched signal's SL distance to derive the
+#: excursion threshold.  SL distance is ATR-calibrated per evaluator at
+#: signal creation, so it tracks per-pair volatility automatically without
+#: us reaching back into indicator state.  1.5× SL = "decisive move past
+#: thesis" benchmark.
+LEVEL_REARM_SL_MULTIPLIER: float = _safe_float("LEVEL_REARM_SL_MULTIPLIER", "1.5")
+#: Hard floor on the excursion threshold (e.g. 0.5%).  Prevents over-tight
+#: gates on stablecoins / very low-vol majors where SL distance can be ~0.3%.
+LEVEL_REARM_FLOOR_PCT: float = _safe_float("LEVEL_REARM_FLOOR_PCT", "0.005")
+#: Hard ceiling on the excursion threshold (e.g. 3.0%).  Prevents over-loose
+#: gates on volatile alt-coins (NAORI / BLUAI class) where SL distance can
+#: spike to 5%+ in fast-moving regimes.
+LEVEL_REARM_CEILING_PCT: float = _safe_float("LEVEL_REARM_CEILING_PCT", "0.030")
+#: Fallback threshold when SL distance cannot be computed (entry or
+#: stop_loss missing / zero on the Signal — should not happen in practice,
+#: defensive only).
+LEVEL_REARM_FALLBACK_PCT: float = _safe_float("LEVEL_REARM_FALLBACK_PCT", "0.012")
+#: Max-age safety net.  After this many seconds with no excursion observed,
+#: drop the level from the state machine (regime has likely shifted; let
+#: the detector re-discover from current structure).
+LEVEL_REARM_TTL_SEC: int = _safe_int("LEVEL_REARM_TTL_SEC", "86400")
+#: Level-bucket granularity in basis points.  Levels within this distance
+#: of a stored level_price are treated as the same level (protects against
+#: clustering noise: 2305.32 vs 2305.33 on different scan cycles).
+LEVEL_REARM_BUCKET_BPS: int = _safe_int("LEVEL_REARM_BUCKET_BPS", "5")
+
+# ---------------------------------------------------------------------------
 # Pair management
 # ---------------------------------------------------------------------------
 PAIR_FETCH_INTERVAL_HOURS: int = _safe_int("PAIR_FETCH_INTERVAL_HOURS", "6")

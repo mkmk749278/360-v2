@@ -33,6 +33,13 @@ from src.scanner import (
 from src.smc import Direction
 
 
+# Capture the production level-rearm methods at module import — BEFORE the
+# autouse conftest fixture replaces them with no-ops.  TestLevelRearmStateMachine
+# uses these references via the ``_real_level_rearm`` fixture to opt back in.
+_REAL_IS_LEVEL_IN_PLAY = Scanner._is_level_in_play
+_REAL_RECORD_LEVEL_IN_PLAY = Scanner._record_level_in_play
+
+
 def _make_scanner_for_lifecycle() -> Scanner:
     """Bare scanner with everything mocked except the cooldown logic."""
     queue = MagicMock()
@@ -532,3 +539,315 @@ class TestCooldownKey:
         sig = _make_signal()
         sig.setup_class = ""
         assert Scanner._cooldown_key_for(sig) is None
+
+
+# ---------------------------------------------------------------------------
+# Bug #6: level-rearm state machine (2026-05-13 stuck-level repeat-fire)
+# ---------------------------------------------------------------------------
+#
+# Level-anchored evaluators (SR_FLIP_RETEST / VSB / BDS / FAR) anchor signal
+# `entry` to a historical structural level.  When price chops within the
+# retest zone for hours, the detector keeps re-finding the same level and
+# the dispatch cooldown only spaces out the refires.  Bug data: ETHUSDT
+# SR_FLIP SHORT dispatched 13× over 26h at identical entry 2305.32, every
+# dispatch expired at +0.11% MFE.  Fix: per-(symbol, direction,
+# level_bucket) "in-play" registry that blocks additional dispatches at the
+# same level until price has travelled the SL-distance-derived excursion
+# threshold (LEVEL_REARM_SL_MULTIPLIER × SL distance, clamped to floor /
+# ceiling).  Re-arms automatically on genuine excursion so the next real
+# retest fires normally.
+
+
+def _make_scanner_with_candle(symbol: str, current_close: float) -> Scanner:
+    """Bare scanner with `data_store.candles[symbol]["1m"]` seeded so the
+    level-excursion tick can read a current price."""
+    queue = MagicMock()
+
+    async def _put(sig):
+        return True
+
+    queue.put = _put
+
+    data_store = MagicMock()
+    data_store.candles = {
+        symbol: {
+            "1m": {
+                "close": np.array([current_close - 0.5, current_close]),
+                "high": np.array([current_close + 0.1, current_close + 0.1]),
+                "low": np.array([current_close - 0.6, current_close - 0.05]),
+            }
+        }
+    }
+
+    return Scanner(
+        pair_mgr=MagicMock(),
+        data_store=data_store,
+        channels=[],
+        smc_detector=MagicMock(),
+        regime_detector=MagicMock(),
+        predictive=MagicMock(),
+        exchange_mgr=MagicMock(),
+        spot_client=None,
+        telemetry=MagicMock(),
+        signal_queue=queue,
+        router=MagicMock(active_signals={}),
+    )
+
+
+@pytest.fixture
+def _real_level_rearm(monkeypatch):
+    """Restore the production ``_is_level_in_play`` and
+    ``_record_level_in_play`` methods (captured at module import, before
+    the autouse conftest fixture no-ops them).  TestLevelRearmStateMachine
+    opts back into the real behaviour so unrelated tests dispatching the
+    same entry repeatedly don't trip the gate.
+
+    Also re-pins ``_is_entry_fresh`` to always-True: the level-rearm
+    tests simulate price moving 1-2% past the level to verify re-arm
+    semantics, but that same movement would otherwise trip the
+    ``DISPATCH_STALENESS_MAX_DRIFT_PCT`` gate (0.5% default).  The
+    conftest patches ``_is_entry_fresh`` to True by default but the
+    patch is sometimes lost across module reloads driven by other
+    tests (e.g. ``test_pr04_portfolio_governance.py`` reloads
+    ``src.scanner`` mid-suite, leaving stale class references on the
+    test module).  Pinning it here makes the test contract explicit
+    and reload-safe.
+    """
+    monkeypatch.setattr(Scanner, "_is_level_in_play", _REAL_IS_LEVEL_IN_PLAY)
+    monkeypatch.setattr(Scanner, "_record_level_in_play", _REAL_RECORD_LEVEL_IN_PLAY)
+    monkeypatch.setattr(Scanner, "_is_entry_fresh", lambda self, sig: True)
+    yield
+
+
+@pytest.mark.usefixtures("_real_level_rearm")
+class TestLevelRearmStateMachine:
+    def test_threshold_derived_from_sl_distance(self):
+        """Threshold = clamp(SL_MULT × sl_distance%, floor, ceiling).
+        At default SL_MULT=1.5: a 0.8% SL → 1.2% threshold.
+        """
+        threshold = Scanner._compute_rearm_threshold_pct(
+            entry=100.0, stop_loss=100.8,
+        )
+        assert abs(threshold - 0.012) < 1e-6
+
+    def test_threshold_clamped_to_floor(self):
+        """A tiny SL distance (0.1%) clamps to the floor (0.5% default)."""
+        threshold = Scanner._compute_rearm_threshold_pct(
+            entry=100.0, stop_loss=100.1,
+        )
+        assert abs(threshold - 0.005) < 1e-6
+
+    def test_threshold_clamped_to_ceiling(self):
+        """A huge SL distance (5%) clamps to the ceiling (3% default)."""
+        threshold = Scanner._compute_rearm_threshold_pct(
+            entry=100.0, stop_loss=105.0,
+        )
+        assert abs(threshold - 0.030) < 1e-6
+
+    def test_threshold_fallback_on_missing_sl(self):
+        """No stop_loss → fallback %."""
+        threshold = Scanner._compute_rearm_threshold_pct(
+            entry=100.0, stop_loss=0.0,
+        )
+        assert threshold > 0  # uses LEVEL_REARM_FALLBACK_PCT
+
+    @pytest.mark.asyncio
+    async def test_first_dispatch_records_state(self):
+        """First dispatch at a fresh level → enqueue ok, registry has the entry."""
+        scanner = _make_scanner_with_candle("ETHUSDT", 2305.32)
+        sig = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        ok = await scanner._enqueue_signal(sig)
+        assert ok is True
+        # Registry now contains the level.
+        key, state = scanner._find_matching_level(sig)
+        assert state is not None
+        assert state.level_price == 2305.32
+
+    @pytest.mark.asyncio
+    async def test_second_dispatch_same_level_blocked(self):
+        """Same entry, same direction, before price moves → rejected with counter."""
+        scanner = _make_scanner_with_candle("ETHUSDT", 2305.32)
+        sig1 = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        sig2 = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        assert await scanner._enqueue_signal(sig1) is True
+        # Price still hugging the level — no excursion since dispatch.
+        ok = await scanner._enqueue_signal(sig2)
+        assert ok is False
+        assert scanner._suppression_counters[
+            "enqueue_stage:level_still_in_play:SR_FLIP_RETEST"
+        ] >= 1
+
+    @pytest.mark.asyncio
+    async def test_excursion_crossing_threshold_rearms(self):
+        """Price moves >= threshold away from the level → entry dropped, next dispatch passes."""
+        scanner = _make_scanner_with_candle("ETHUSDT", 2305.32)
+        sig1 = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        assert await scanner._enqueue_signal(sig1) is True
+        # Simulate price moving 2% away (well above the 1.2% threshold for
+        # this signal — 0.8% SL × 1.5 = 1.2%).
+        scanner.data_store.candles["ETHUSDT"]["1m"]["close"] = np.array(
+            [2305.32, 2305.32 * 1.02]
+        )
+        sig2 = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        ok = await scanner._enqueue_signal(sig2)
+        # Tick during the gate check observed the excursion and dropped
+        # the entry, so this dispatch goes through.
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_ttl_expiry_rearms(self, monkeypatch):
+        """24h since dispatch with no excursion → entry dropped (TTL safety net)."""
+        scanner = _make_scanner_with_candle("ETHUSDT", 2305.32)
+        sig1 = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        assert await scanner._enqueue_signal(sig1) is True
+        # Move dispatched_at into the past beyond TTL.
+        key, state = scanner._find_matching_level(sig1)
+        state.dispatched_at = time.time() - (24 * 3600 + 60)
+        # Next dispatch passes — TTL drop fires in _tick_level_state.
+        sig2 = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        ok = await scanner._enqueue_signal(sig2)
+        assert ok is True
+
+    @pytest.mark.asyncio
+    async def test_opposite_direction_same_level_allowed(self):
+        """Same level, opposite direction → different key, dispatch allowed.
+        A short rejection at L and a long bounce at L are different setups."""
+        scanner = _make_scanner_with_candle("ETHUSDT", 2305.32)
+        sig_short = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        sig_long = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.LONG,
+            entry=2305.32, stop_loss=2286.88,
+        )
+        assert await scanner._enqueue_signal(sig_short) is True
+        # Same level but LONG side — different key, allowed.
+        assert await scanner._enqueue_signal(sig_long) is True
+
+    @pytest.mark.asyncio
+    async def test_different_symbol_same_level_allowed(self):
+        """ETH @ 2305.32 SHORT in play does not block BTC @ 2305.32 SHORT
+        (different symbol → different key)."""
+        scanner = _make_scanner_with_candle("ETHUSDT", 2305.32)
+        # Also seed BTC candles so _is_entry_fresh / excursion check have data
+        # (the helper only seeds the first symbol).
+        scanner.data_store.candles["BTCUSDT"] = scanner.data_store.candles["ETHUSDT"]
+        sig_eth = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        sig_btc = _make_signal(
+            symbol="BTCUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        assert await scanner._enqueue_signal(sig_eth) is True
+        assert await scanner._enqueue_signal(sig_btc) is True
+
+    @pytest.mark.asyncio
+    async def test_cross_evaluator_dedup_on_same_level(self):
+        """If SR_FLIP dispatched at 2305.32 SHORT, then VSB detects the
+        same level later — VSB should also be blocked.  The state machine
+        keys on (symbol, direction, level_bucket) NOT setup_class, because
+        chop is chop regardless of which detector spotted it.
+        """
+        scanner = _make_scanner_with_candle("ETHUSDT", 2305.32)
+        sig_sr_flip = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        sig_bds = _make_signal(
+            symbol="ETHUSDT", setup_class="BREAKDOWN_SHORT",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        assert await scanner._enqueue_signal(sig_sr_flip) is True
+        ok = await scanner._enqueue_signal(sig_bds)
+        assert ok is False
+        assert scanner._suppression_counters[
+            "enqueue_stage:level_still_in_play:BREAKDOWN_SHORT"
+        ] >= 1
+
+    @pytest.mark.asyncio
+    async def test_chop_then_real_move_then_dispatch_integration(self):
+        """End-to-end: dispatch at level → 4 chop attempts blocked →
+        real move past threshold → next attempt succeeds.  Models the
+        ETH 2026-05-13 pattern."""
+        scanner = _make_scanner_with_candle("ETHUSDT", 2305.32)
+        base_sig = lambda: _make_signal(  # noqa: E731
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        # 1) First dispatch at the fresh level — passes.
+        assert await scanner._enqueue_signal(base_sig()) is True
+        # 2-5) Chop dispatches at the same level — all blocked.
+        for _ in range(4):
+            scanner.data_store.candles["ETHUSDT"]["1m"]["close"] = np.array(
+                [2305.32, 2305.32 * 1.002]  # ~0.2% wobble, well under threshold
+            )
+            assert await scanner._enqueue_signal(base_sig()) is False
+        # 6) Real move ~2% past the level → next attempt re-arms and dispatches.
+        scanner.data_store.candles["ETHUSDT"]["1m"]["close"] = np.array(
+            [2305.32, 2305.32 * 1.02]
+        )
+        assert await scanner._enqueue_signal(base_sig()) is True
+
+    @pytest.mark.asyncio
+    async def test_near_bucket_levels_treated_as_same(self):
+        """2305.32 vs 2305.33 differ by ~0.4 bps — well inside the 5 bps
+        default tolerance.  After dispatching at 2305.32, an attempt at
+        2305.33 must be blocked even if the exact bucket key differs
+        (the slow-path tolerance scan in ``_find_matching_level`` is the
+        real same-level enforcement)."""
+        scanner = _make_scanner_with_candle("ETHUSDT", 2305.32)
+        sig1 = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.32, stop_loss=2323.76,
+        )
+        sig2 = _make_signal(
+            symbol="ETHUSDT", setup_class="SR_FLIP_RETEST",
+            direction=Direction.SHORT,
+            entry=2305.33,  # ~0.4 bps drift — clustering noise
+            stop_loss=2323.76,
+        )
+        assert await scanner._enqueue_signal(sig1) is True
+        ok = await scanner._enqueue_signal(sig2)
+        assert ok is False
+        assert scanner._suppression_counters[
+            "enqueue_stage:level_still_in_play:SR_FLIP_RETEST"
+        ] >= 1

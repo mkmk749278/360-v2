@@ -45,6 +45,22 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
     # part of any unit-test contract here.
     monkeypatch.setattr(Scanner, "_load_dispatch_cooldown", lambda self: None)
     monkeypatch.setattr(Scanner, "_persist_dispatch_cooldown", lambda self: None)
+    # Level-rearm state machine — same isolation pattern as the
+    # dispatch cooldown above.  Per-test tmp file + skip disk I/O on
+    # mutations so unit tests can mutate the in-memory dict freely.
+    monkeypatch.setattr(
+        _scanner_mod,
+        "LEVEL_IN_PLAY_PATH",
+        str(tmp_path / "level_in_play.json"),
+    )
+    monkeypatch.setattr(Scanner, "_load_level_in_play", lambda self: None)
+    monkeypatch.setattr(Scanner, "_persist_level_in_play", lambda self: None)
+    # Default: level-rearm gate disabled in tests so unrelated lifecycle
+    # tests (which often dispatch repeated entries at the same price) don't
+    # trip it.  TestLevelRearmStateMachine re-enables the production
+    # method explicitly via the ``_real_level_rearm`` fixture.
+    monkeypatch.setattr(Scanner, "_is_level_in_play", lambda self, sig: False)
+    monkeypatch.setattr(Scanner, "_record_level_in_play", lambda self, sig: None)
     # Default: staleness check passes (tests use mocked data_store
     # whose ``.candles`` attribute is a MagicMock that doesn't
     # behave like real candle data).
@@ -59,6 +75,20 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
     if stale_path.exists():
         try:
             stale_path.unlink()
+        except OSError:
+            pass
+    # Same belt-and-braces for the level-rearm registry — other tests
+    # (e.g. ``test_pr04_portfolio_governance.py``) reload ``src.scanner``
+    # mid-suite, leaving stale class references on previously-imported
+    # test modules; scanners built from those stale references run the
+    # REAL ``_load_level_in_play`` even though the autouse monkeypatch
+    # no-op'd the new class.  Nuking the on-disk file before each test
+    # gives the load a clean baseline regardless of which class the
+    # current scanner was constructed from.
+    stale_level_path = Path("data/level_in_play.json")
+    if stale_level_path.exists():
+        try:
+            stale_level_path.unlink()
         except OSError:
             pass
 

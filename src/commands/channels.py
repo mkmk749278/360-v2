@@ -458,7 +458,8 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
     if suppression:
         stages = (
             "global_cooldown", "dispatch_cooldown", "data_stale",
-            "dispatch_staleness", "queue_put_failed", "emitted",
+            "dispatch_staleness", "level_still_in_play",
+            "queue_put_failed", "emitted",
         )
         per_setup: Dict[str, Dict[str, int]] = {}
         for key, count in suppression.items():

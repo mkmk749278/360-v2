@@ -41,6 +41,12 @@ from config import (
     FUNDING_RATE_PENALTY,
     FUNDING_RATE_PENALTY_THRESHOLD,
     GLOBAL_SYMBOL_COOLDOWN_SECONDS,
+    LEVEL_REARM_BUCKET_BPS,
+    LEVEL_REARM_CEILING_PCT,
+    LEVEL_REARM_FALLBACK_PCT,
+    LEVEL_REARM_FLOOR_PCT,
+    LEVEL_REARM_SL_MULTIPLIER,
+    LEVEL_REARM_TTL_SEC,
     LIFECYCLE_COOLDOWN_EXPIRED_SEC,
     LIFECYCLE_COOLDOWN_INVALIDATION_SEC,
     LIFECYCLE_COOLDOWN_SL_SEC,
@@ -586,6 +592,10 @@ _STRUCTURE_ALIGN_PATHS: frozenset = frozenset({
 DISPATCH_COOLDOWN_SEC: float = float(os.getenv("DISPATCH_COOLDOWN_SEC", "1800"))
 DISPATCH_COOLDOWN_PATH: str = "data/signal_dispatch_cooldown.json"
 
+# Level-rearm state-machine persistence path.  See LEVEL_REARM_* knobs in
+# config/__init__.py.  Mirrors DISPATCH_COOLDOWN_PATH atomic-write pattern.
+LEVEL_IN_PLAY_PATH: str = "data/level_in_play.json"
+
 # Pre-dispatch staleness check.  Reject if real-time price has drifted
 # more than this percentage from the entry price between setup detection
 # and dispatch.  At 0.5% the check is gentle — allows normal mid-candle
@@ -704,6 +714,22 @@ def classify_signal_tier(confidence: float) -> str:
 
 
 @dataclass
+class LevelInPlayState:
+    """Per-(symbol, direction, level_bucket) state for the level-rearm
+    state machine — see ``Scanner._check_and_record_level_in_play``.
+
+    Frozen at dispatch; only ``max_excursion_pct`` mutates over time as
+    live price walks away from the level.  When ``max_excursion_pct``
+    crosses ``threshold_pct``, the entry is dropped and the level is
+    re-armed for the next genuine retest.
+    """
+    level_price: float          # exact entry/level at dispatch
+    dispatched_at: float        # time.time() at dispatch
+    threshold_pct: float        # SL-distance-derived, clamped to floor/ceiling
+    max_excursion_pct: float = 0.0  # max |price - level| / level since dispatch
+
+
+@dataclass
 class ScanContext:
     candles: Dict[str, dict]
     indicators: Dict[str, dict]
@@ -816,6 +842,23 @@ class Scanner:
         # within the cooldown window doesn't let duplicates through.
         self._dispatch_cooldown: Dict[tuple, float] = {}
         self._load_dispatch_cooldown()
+
+        # Per-(symbol, direction, level_bucket) "level in play" registry —
+        # see _check_and_record_level_in_play.  Blocks stuck-level repeat-
+        # fires from level-anchored evaluators (SR_FLIP_RETEST / VSB /
+        # BDS / FAR) until price has decisively travelled away from the
+        # level.  Bug observed 2026-05-13: ETHUSDT SR_FLIP SHORT
+        # dispatched 13× over 26h at identical entry 2305.32 while price
+        # chopped ±0.3% around the level (68% of paid emission was
+        # duplicates of 4 stuck levels).  Persisted to
+        # data/level_in_play.json so the suppression survives redeploys.
+        # NOTE: setup_class is intentionally omitted from the key —
+        # different evaluators may detect the same level (e.g. VSB and
+        # SR_FLIP both anchoring on the same swing high); one being
+        # in-play should suppress the other, because chop is chop
+        # regardless of which detector spotted it.
+        self._level_in_play: Dict[Tuple[str, str, float], LevelInPlayState] = {}
+        self._load_level_in_play()
 
         # Volume Profile (PR-9) — POC/VAH/VAL per symbol.  Same TTL pattern
         # as LevelBook.  POC/VAH/VAL injected into LevelBook on each
@@ -3627,6 +3670,31 @@ class Scanner:
         except Exception as exc:
             log.debug("staleness check error (fail-open): {}", exc)
 
+        # ── Level-rearm gate ─────────────────────────────────────────────
+        # Block stuck-level repeat-fires from level-anchored evaluators
+        # (SR_FLIP_RETEST / VSB / BDS / FAR all anchor `entry` to a
+        # historical structural level).  After a successful dispatch at a
+        # level, additional dispatches at the same level (within
+        # LEVEL_REARM_BUCKET_BPS) are blocked until price has travelled
+        # the SL-distance-derived excursion threshold away from the level
+        # — see LevelInPlayState / _is_level_in_play / _record_level_in_play.
+        # Bug observed 2026-05-13: ETHUSDT SR_FLIP SHORT dispatched 13×
+        # over 26h at identical entry while price chopped within 0.3%.
+        try:
+            if self._is_level_in_play(sig):
+                _sc = getattr(sig, "setup_class", "UNKNOWN")
+                self._suppression_counters[f"level_still_in_play:{_sc}"] += 1
+                self._suppression_counters[f"enqueue_stage:level_still_in_play:{_sc}"] += 1
+                log.info(
+                    "level_still_in_play skip {} {} entry={:.8f} — awaiting genuine excursion",
+                    getattr(sig, "symbol", "?"),
+                    _sc,
+                    float(getattr(sig, "entry", 0.0) or 0.0),
+                )
+                return False
+        except Exception as exc:
+            log.debug("level-in-play check error (fail-open): {}", exc)
+
         # Stamp pre-TP threshold + trigger price using the ATR observed at
         # dispatch.  Locks the promise shown in the Telegram post; trade-
         # monitor and persistence both round-trip the stamped values.  No-op
@@ -3649,6 +3717,12 @@ class Scanner:
                     self._persist_dispatch_cooldown()
             except Exception as exc:
                 log.debug("cooldown stamp error (non-fatal): {}", exc)
+            # Stamp the dispatched level into the registry so the next
+            # candidate at the same level is blocked until price excursion.
+            try:
+                self._record_level_in_play(sig)
+            except Exception as exc:
+                log.debug("level-in-play stamp error (non-fatal): {}", exc)
         else:
             self._suppression_counters[f"enqueue_stage:queue_put_failed:{_sc_final}"] += 1
             log.warning(
@@ -3833,6 +3907,271 @@ class Scanner:
             tmp.replace(path)
         except OSError as exc:
             log.debug("dispatch cooldown persist failed: %s", exc)
+
+    # ------------------------------------------------------------------
+    # Level-rearm state machine — see LevelInPlayState dataclass and the
+    # LEVEL_REARM_* knobs in config/__init__.py.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _level_bucket(price: float) -> float:
+        """Round ``price`` to ``LEVEL_REARM_BUCKET_BPS`` granularity so
+        clustering noise (2305.32 vs 2305.33 on different cycles) keys to
+        the same bucket.  Multiplier = 10000 / BUCKET_BPS gives 2000 for
+        the default 5 bps.
+        """
+        if price <= 0:
+            return 0.0
+        multiplier = max(1, 10_000 // max(1, LEVEL_REARM_BUCKET_BPS))
+        return round(price * multiplier) / multiplier
+
+    @staticmethod
+    def _compute_rearm_threshold_pct(entry: float, stop_loss: float) -> float:
+        """Return the |move from level| % required to re-arm.
+
+        Derived from SL distance (which is ATR-calibrated per evaluator at
+        signal creation, so it tracks pair volatility automatically) —
+        ``LEVEL_REARM_SL_MULTIPLIER × sl_distance`` is the "decisive move
+        past thesis" benchmark.  Clamped to env-tunable floor / ceiling so
+        very tight or very wide SLs don't produce pathological gates.
+        """
+        if entry <= 0 or stop_loss <= 0:
+            return LEVEL_REARM_FALLBACK_PCT
+        sl_distance_pct = abs(stop_loss - entry) / entry
+        raw = LEVEL_REARM_SL_MULTIPLIER * sl_distance_pct
+        return max(LEVEL_REARM_FLOOR_PCT, min(LEVEL_REARM_CEILING_PCT, raw))
+
+    def _level_in_play_key(self, sig: Any) -> Optional[Tuple[str, str, float]]:
+        """Compose ``(symbol, direction, level_bucket)`` from a Signal.
+        Returns ``None`` when any component is missing — caller should
+        treat that as fail-open (no gating)."""
+        symbol = getattr(sig, "symbol", "") or ""
+        direction_obj = getattr(sig, "direction", None)
+        direction = (
+            direction_obj.value
+            if direction_obj is not None and hasattr(direction_obj, "value")
+            else str(direction_obj or "")
+        ).upper()
+        try:
+            entry = float(getattr(sig, "entry", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return None
+        if not symbol or not direction or entry <= 0:
+            return None
+        return (symbol, direction, self._level_bucket(entry))
+
+    def _find_matching_level(
+        self, sig: Any
+    ) -> Tuple[Optional[Tuple[str, str, float]], Optional[LevelInPlayState]]:
+        """Return ``(key, state)`` for an in-play level matching ``sig``.
+
+        Membership uses both the bucket key (cheap O(1) lookup) AND a
+        tolerance check against the stored level_price (defense against
+        boundary-spanning levels: 2305.314 buckets to 2305.31 while
+        2305.318 buckets to 2305.32, but both sit inside the 5 bps zone
+        around either).  Iteration is O(N) where N is small (level
+        registry is typically <50 entries total).
+        """
+        key = self._level_in_play_key(sig)
+        if key is None:
+            return None, None
+        # Fast path: exact bucket match.
+        state = self._level_in_play.get(key)
+        if state is not None:
+            return key, state
+        # Slow path: tolerance check for boundary-spanning buckets.
+        try:
+            entry = float(getattr(sig, "entry", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return None, None
+        symbol, direction, _ = key
+        tolerance = LEVEL_REARM_BUCKET_BPS / 10_000.0
+        for (s, d, _b), st in self._level_in_play.items():
+            if s != symbol or d != direction or st.level_price <= 0:
+                continue
+            if abs(entry - st.level_price) / st.level_price <= tolerance:
+                return (s, d, _b), st
+        return None, None
+
+    def _is_level_in_play(self, sig: Any) -> bool:
+        """True if a level matching ``sig`` is currently in play (blocked).
+
+        Side effect: opportunistically updates the matched entry's
+        ``max_excursion_pct`` against current price, and drops it if the
+        threshold or TTL has been crossed (so a stale level doesn't
+        falsely block a fresh dispatch).
+
+        Fail-OPEN when the data store has no 1m close data for the
+        symbol — we can't measure excursion, so we can't honestly say
+        the level is still in play.  Mirrors the fail-open doctrine
+        used by ``_is_kline_data_fresh`` (missing accessor) and
+        ``_is_entry_fresh`` (no candles).  Also makes the gate
+        naturally inert in unit-test harnesses that mock ``data_store``
+        without seeding 1m candle data.
+        """
+        key, state = self._find_matching_level(sig)
+        if key is None or state is None:
+            return False
+        # Fail-OPEN when we can't read current price.
+        try:
+            symbol = key[0]
+            data_store = getattr(self, "data_store", None)
+            if data_store is None or not hasattr(data_store, "candles"):
+                return False
+            candles_for_symbol = data_store.candles
+            if not isinstance(candles_for_symbol, dict):
+                return False
+            tf_data = candles_for_symbol.get(symbol, {})
+            if not isinstance(tf_data, dict):
+                return False
+            tf = tf_data.get("1m") or tf_data.get("5m")
+            if not tf or "close" not in tf:
+                return False
+            closes = tf["close"]
+            if closes is None or len(closes) == 0:
+                return False
+        except (TypeError, AttributeError):
+            return False
+        # We have price data — tick the excursion update and re-check.
+        try:
+            self._tick_level_state(key, state)
+        except Exception as exc:
+            log.debug("level excursion tick failed for %s: %s", key, exc)
+        # If the tick removed the entry (threshold or TTL crossed), it's
+        # no longer in play.
+        return key in self._level_in_play
+
+    def _tick_level_state(
+        self, key: Tuple[str, str, float], state: LevelInPlayState
+    ) -> None:
+        """Update ``max_excursion_pct`` against current 1m close, and drop
+        the entry when it crosses the threshold or TTL."""
+        symbol = key[0]
+        # TTL drop — regime has likely shifted; let detector re-discover.
+        if time.time() - state.dispatched_at > LEVEL_REARM_TTL_SEC:
+            self._level_in_play.pop(key, None)
+            self._persist_level_in_play()
+            return
+        # Excursion update — read most-recent 1m close (mirrors the
+        # pattern used by _is_entry_fresh).
+        data_store = getattr(self, "data_store", None)
+        if data_store is None:
+            return
+        try:
+            symbol_candles = (
+                data_store.candles.get(symbol, {})
+                if hasattr(data_store, "candles")
+                else {}
+            )
+            tf = symbol_candles.get("1m") or symbol_candles.get("5m")
+            if not tf or "close" not in tf or tf["close"] is None or len(tf["close"]) == 0:
+                return
+            current = float(tf["close"][-1])
+            if current <= 0 or state.level_price <= 0:
+                return
+            excursion = abs(current - state.level_price) / state.level_price
+        except (TypeError, ValueError, IndexError):
+            return
+        if excursion > state.max_excursion_pct:
+            state.max_excursion_pct = excursion
+        if state.max_excursion_pct >= state.threshold_pct:
+            # Real move observed → re-arm.
+            self._level_in_play.pop(key, None)
+            self._persist_level_in_play()
+            log.info(
+                "level rearm: {} {} level={:.8f} excursion={:.4%} threshold={:.4%}",
+                key[0], key[1], state.level_price,
+                state.max_excursion_pct, state.threshold_pct,
+            )
+
+    def _update_level_excursions(self, symbol: str) -> None:
+        """Walk the registry for ``symbol`` and tick every matching entry.
+        Called once per ``_scan_symbol`` cycle so excursions stay current
+        even when no candidate is being dispatched.
+        """
+        # Snapshot keys so deletes inside _tick_level_state don't break iteration.
+        for key in [k for k in self._level_in_play.keys() if k[0] == symbol]:
+            state = self._level_in_play.get(key)
+            if state is None:
+                continue
+            try:
+                self._tick_level_state(key, state)
+            except Exception as exc:
+                log.debug("level excursion update failed for {}: {}", key, exc)
+
+    def _record_level_in_play(self, sig: Any) -> None:
+        """Stamp a successfully-dispatched level into the registry.
+        Idempotent — overwrites any existing entry at the same bucket
+        with a fresh state (zero excursion, current timestamp)."""
+        key = self._level_in_play_key(sig)
+        if key is None:
+            return
+        try:
+            entry = float(getattr(sig, "entry", 0.0) or 0.0)
+            stop_loss = float(getattr(sig, "stop_loss", 0.0) or 0.0)
+        except (TypeError, ValueError):
+            return
+        threshold = self._compute_rearm_threshold_pct(entry, stop_loss)
+        self._level_in_play[key] = LevelInPlayState(
+            level_price=entry,
+            dispatched_at=time.time(),
+            threshold_pct=threshold,
+            max_excursion_pct=0.0,
+        )
+        self._persist_level_in_play()
+
+    def _load_level_in_play(self) -> None:
+        """Load the level-in-play registry from disk on init.  Best-effort."""
+        from pathlib import Path
+        path = Path(LEVEL_IN_PLAY_PATH)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        for key, payload in data.items():
+            if not isinstance(key, str) or "|" not in key:
+                continue
+            parts = key.split("|", 2)
+            if len(parts) != 3:
+                continue
+            try:
+                bucket = float(parts[2])
+                state = LevelInPlayState(
+                    level_price=float(payload.get("level_price", 0.0)),
+                    dispatched_at=float(payload.get("dispatched_at", 0.0)),
+                    threshold_pct=float(payload.get("threshold_pct", LEVEL_REARM_FALLBACK_PCT)),
+                    max_excursion_pct=float(payload.get("max_excursion_pct", 0.0)),
+                )
+            except (ValueError, TypeError, AttributeError):
+                continue
+            if state.level_price <= 0 or state.dispatched_at <= 0:
+                continue
+            self._level_in_play[(parts[0], parts[1], bucket)] = state
+
+    def _persist_level_in_play(self) -> None:
+        """Atomically write the level-in-play registry to disk."""
+        from pathlib import Path
+        path = Path(LEVEL_IN_PLAY_PATH)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                f"{symbol}|{direction}|{bucket}": {
+                    "level_price": state.level_price,
+                    "dispatched_at": state.dispatched_at,
+                    "threshold_pct": state.threshold_pct,
+                    "max_excursion_pct": state.max_excursion_pct,
+                }
+                for (symbol, direction, bucket), state in self._level_in_play.items()
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            log.debug("level-in-play persist failed: %s", exc)
 
     async def _prepare_signal(
         self,
@@ -5236,6 +5575,16 @@ class Scanner:
         # as a result.  TTL-gated (``LEVEL_BOOK_REFRESH_SEC`` = 1 h) so
         # steady-state cost is a dict-lookup early-return.
         self._refresh_level_book_if_stale(symbol, ctx.candles)
+
+        # Update per-cycle excursion for any in-play levels on this symbol
+        # (level-rearm state machine).  Cheap dict walk filtered by symbol;
+        # registry is typically <50 entries total system-wide.  Keeps the
+        # gate honest even when no candidate is being dispatched this cycle.
+        try:
+            self._update_level_excursions(symbol)
+        except Exception as exc:
+            log.debug("level excursion sweep failed for {}: {}", symbol, exc)
+
         ticks = self.data_store.ticks.get(symbol, [])
 
         # Compute rolling BTC correlation for this symbol (once per scan cycle)
