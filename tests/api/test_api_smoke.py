@@ -576,6 +576,222 @@ def test_positions_returns_empty_on_router_attribute_error(
     assert r.json() == {"items": [], "total": 0}
 
 
+# ---------------------------------------------------------------------------
+# /internal/diag/positions — operator-facing position state X-ray
+# ---------------------------------------------------------------------------
+#
+# Owner-tier endpoint shipped to resolve a 2026-05-13 incident: positions
+# closed on Binance (SL filled) showed ACTIVE in the Lumin app.  The diag
+# endpoint surfaces what TradeMonitor._evaluate_signal compares against
+# (stored SL + 1m candle wick + candle-feed age), letting the operator tell
+# stale-feed, monitor-bug, and state-sync gaps apart from one X-ray.
+
+
+class _StubMonitorStore:
+    """Stub of HistoricalDataStore.get_candles + last_kline_age_seconds.
+
+    Maps (symbol, interval) → {high: [...], low: [...]}.  Age map is parallel.
+    """
+
+    def __init__(self) -> None:
+        self._buckets: Dict[Tuple[str, str], Dict[str, List[float]]] = {}
+        self._ages: Dict[Tuple[str, str], Optional[float]] = {}
+
+    def set(
+        self,
+        symbol: str,
+        interval: str,
+        *,
+        high: float,
+        low: float,
+        age_sec: Optional[float],
+    ) -> None:
+        self._buckets[(symbol, interval)] = {"high": [high], "low": [low]}
+        self._ages[(symbol, interval)] = age_sec
+
+    def get_candles(self, symbol: str, interval: str):
+        return self._buckets.get((symbol, interval))
+
+    def last_kline_age_seconds(self, symbol: str, interval: str) -> Optional[float]:
+        return self._ages.get((symbol, interval))
+
+
+class _StubMonitor:
+    def __init__(self, store: _StubMonitorStore, running: bool = True) -> None:
+        self._store = store
+        self._running = running
+
+
+def _attach_monitor(engine: _StubEngine, **store_kwargs) -> _StubMonitorStore:
+    """Helper: attach a _StubMonitor + populate its 1m candle for ETHUSDT."""
+    store = _StubMonitorStore()
+    # Default: fresh candle that does NOT breach the active sig's SL=2310.
+    defaults = dict(symbol="ETHUSDT", interval="1m", high=2342.0, low=2334.0, age_sec=4.0)
+    defaults.update(store_kwargs)
+    store.set(**defaults)
+    engine.monitor = _StubMonitor(store)  # type: ignore[attr-defined]
+    return store
+
+
+def test_positions_diag_requires_owner_tier(
+    client: TestClient, owner_client: TestClient, engine: _StubEngine,
+) -> None:
+    """All-access JWT must 403; owner-tier must 200.
+
+    Diag exposes internal monitor state — keep it behind the owner gate so
+    a tester-tier JWT can't fan out the SL geometry of every active signal.
+    """
+    _attach_monitor(engine)
+    assert client.get("/internal/diag/positions").status_code == 403
+    assert owner_client.get("/internal/diag/positions").status_code == 200
+
+
+def test_positions_diag_empty_when_no_signals(
+    owner_client: TestClient, engine: _StubEngine,
+) -> None:
+    engine.router.active_signals.clear()
+    _attach_monitor(engine)
+    r = owner_client.get("/internal/diag/positions")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 0
+    assert body["items"] == []
+    assert body["monitor_running"] is True
+    assert "generated_at" in body
+
+
+def test_positions_diag_surfaces_candle_extremes_and_age(
+    owner_client: TestClient, engine: _StubEngine,
+) -> None:
+    _attach_monitor(engine, high=2342.0, low=2334.0, age_sec=4.0)
+    r = owner_client.get("/internal/diag/positions")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["symbol"] == "ETHUSDT"
+    assert item["status"] == "ACTIVE"
+    assert item["stop_loss"] == 2310.0
+    assert item["candle_1m_high"] == 2342.0
+    assert item["candle_1m_low"] == 2334.0
+    assert item["candle_1m_age_sec"] == 4.0
+    # LONG, candle_low (2334) > stop_loss (2310) → positive distance
+    assert item["sl_breach_distance_pct"] is not None
+    assert item["sl_breach_distance_pct"] > 0
+
+
+def test_positions_diag_long_sl_breach_distance_negative_when_wick_past_sl(
+    owner_client: TestClient, engine: _StubEngine,
+) -> None:
+    """Smoking-gun case the endpoint exists to detect.
+
+    ETH active LONG with SL=2310; candle low wicks to 2305 (5 below SL) but
+    signal status is still ACTIVE.  sl_breach_distance_pct must be negative
+    so the operator sees the monitor failed to mark SL_HIT.
+    """
+    _attach_monitor(engine, high=2340.0, low=2305.0, age_sec=2.0)
+    r = owner_client.get("/internal/diag/positions")
+    assert r.status_code == 200
+    item = r.json()["items"][0]
+    assert item["status"] == "ACTIVE"  # engine has NOT marked it terminal
+    assert item["sl_breach_distance_pct"] is not None
+    assert item["sl_breach_distance_pct"] < 0  # but the wick already broke SL
+
+
+def test_positions_diag_short_sl_breach_distance_negative_when_wick_past_sl(
+    owner_client: TestClient, engine: _StubEngine,
+) -> None:
+    """Same smoking-gun for SHORT — candle high wicks above stop_loss."""
+    # Replace the seeded LONG with a SHORT, SL=2400, wick to 2410 → breached.
+    engine.router.active_signals.clear()
+    short_sig = _StubSignal(
+        signal_id="sig-short-1",
+        symbol="ETHUSDT",
+        direction=_Direction("SHORT"),
+        entry=2380.0,
+        stop_loss=2400.0,
+        tp1=2350.0,
+        tp2=2330.0,
+        status="ACTIVE",
+        current_price=2410.0,
+    )
+    engine.router.active_signals[short_sig.signal_id] = short_sig
+    _attach_monitor(engine, high=2410.0, low=2370.0, age_sec=3.0)
+
+    r = owner_client.get("/internal/diag/positions")
+    assert r.status_code == 200
+    item = r.json()["items"][0]
+    assert item["direction"] == "SHORT"
+    assert item["status"] == "ACTIVE"
+    assert item["sl_breach_distance_pct"] is not None
+    assert item["sl_breach_distance_pct"] < 0
+
+
+def test_positions_diag_handles_missing_monitor_gracefully(
+    owner_client: TestClient, engine: _StubEngine,
+) -> None:
+    """No monitor wired → candle fields zero, age None, sl_breach None.
+
+    The builder must not 500; the dashboard renders 'monitor not running'
+    instead and the operator knows to investigate the engine boot path.
+    """
+    # Make sure no monitor attribute is set on this engine.
+    if hasattr(engine, "monitor"):
+        delattr(engine, "monitor")
+    r = owner_client.get("/internal/diag/positions")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["monitor_running"] is False
+    item = body["items"][0]
+    assert item["candle_1m_high"] == 0.0
+    assert item["candle_1m_low"] == 0.0
+    assert item["candle_1m_age_sec"] is None
+    assert item["sl_breach_distance_pct"] is None
+
+
+def test_positions_diag_skips_malformed_signal(
+    owner_client: TestClient, engine: _StubEngine,
+) -> None:
+    """A corrupted signal in active_signals must not 500 the whole diag."""
+    bad = _StubSignal(
+        signal_id="BAD-DIAG-001",
+        symbol="ZECUSDT",
+        direction=_Direction("CORRUPTED"),
+        entry=100.0,
+        stop_loss=99.0,
+        tp1=101.0,
+        tp2=102.0,
+    )
+    engine.router.active_signals[bad.signal_id] = bad
+    _attach_monitor(engine)
+    r = owner_client.get("/internal/diag/positions")
+    assert r.status_code == 200
+    body = r.json()
+    # Either bad is sanitized (still appears) or skipped — both are valid.
+    # Contract: no 500, and the legit signal is still in the response.
+    ids = [it["signal_id"] for it in body["items"]]
+    assert "sig-001" in ids
+
+
+def test_positions_diag_returns_empty_on_builder_crash(
+    owner_client: TestClient, engine: _StubEngine, monkeypatch,
+) -> None:
+    """If build_positions_diag itself raises, the endpoint returns a
+    degraded empty response rather than 500."""
+    from src.api import server as _server_mod
+
+    def _broken(_engine):
+        raise RuntimeError("simulated crash inside build_positions_diag")
+
+    monkeypatch.setattr(_server_mod, "build_positions_diag", _broken)
+    r = owner_client.get("/internal/diag/positions")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["items"] == []
+    assert body["total"] == 0
+    assert body["monitor_running"] is False
+
+
 def test_activity_returns_empty_on_build_error(
     client: TestClient, engine: _StubEngine, monkeypatch,
 ) -> None:
