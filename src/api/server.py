@@ -23,7 +23,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -87,6 +87,20 @@ from .snapshot import (
     build_tickers,
 )
 from .users import UserStore
+from src.auto_trade.binance_keys_store import BinanceKeysStore, BinanceKeysStoreError
+from src.auto_trade.binance_proxy import BinanceProxyClient, BinanceProxyError
+from .schemas import (
+    BinanceClosePositionRequest,
+    BinanceCloseResponse,
+    BinanceEquityResponse,
+    BinanceKeysStatusResponse,
+    BinanceKeysUploadRequest,
+    BinanceKeysVerifyResponse,
+    BinanceOrderRequest,
+    BinanceOrderResponse,
+    BinancePositionResponse,
+    BinancePositionsResponse,
+)
 
 log = get_logger("api.server")
 
@@ -291,6 +305,8 @@ def build_app(
     otp_store: Optional[OtpStore] = None,
     otp_delivery: Optional[OtpDeliveryProvider] = None,
     billing_verifier: Optional[BillingWebhookVerifier] = None,
+    binance_keys_store: Optional[BinanceKeysStore] = None,
+    binance_proxy: Optional[BinanceProxyClient] = None,
 ) -> FastAPI:
     """Build the FastAPI app bound to a live engine instance.
 
@@ -305,6 +321,15 @@ def build_app(
       not provided — owner-mediated forwarding for the closed beta.
     * ``billing_verifier`` (BillingWebhookVerifier): when ``None`` or
       ``not is_configured()``, ``/internal/billing/grant`` returns 503.
+
+    Phase-4 (auto-trade VPS proxy):
+
+    * ``binance_keys_store`` (BinanceKeysStore): per-user encrypted
+      Binance credentials.  Required for the ``/api/auto-trade/*``
+      endpoints — when ``None`` they return 503.
+    * ``binance_proxy`` (BinanceProxyClient): server-side signed
+      Binance Futures client.  Auto-created when ``binance_keys_store``
+      is set and this is ``None``.
     """
     app = FastAPI(
         title="360 Crypto Eye API",
@@ -343,6 +368,30 @@ def build_app(
         otp_store = OtpStore()
     if user_store is not None and otp_delivery is None:
         otp_delivery = LogOnlyOtpProvider()
+    # Auto-construct the Binance proxy client once the keys store is
+    # provided so callers don't have to wire both in lock-step.
+    if binance_keys_store is not None and binance_proxy is None:
+        binance_proxy = BinanceProxyClient(binance_keys_store)
+    # Stash on app.state so the shutdown hook can close the aiohttp
+    # session cleanly (avoid leaked-connection warnings on reload).
+    app.state.binance_proxy = binance_proxy
+
+    @app.on_event("shutdown")
+    async def _shutdown_binance_proxy() -> None:  # pragma: no cover — uvicorn hook
+        proxy = getattr(app.state, "binance_proxy", None)
+        if proxy is not None:
+            await proxy.close()
+
+    def _require_binance_proxy() -> BinanceProxyClient:
+        if binance_keys_store is None or binance_proxy is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail=(
+                    "auto-trade proxy not configured: "
+                    "set BINANCE_KEY_ENCRYPTION_SECRET and restart"
+                ),
+            )
+        return binance_proxy
 
     # ---- Health (no auth — used by Docker/k8s probes + first-launch reachability) ----
 
@@ -1060,6 +1109,287 @@ def build_app(
         items = build_agents(engine)
         return AgentsResponse(items=items, total=len(items))
 
+    # ------------------------------------------------------------------
+    # Auto-trade VPS proxy — per-user Binance keys + signed Futures calls
+    # ------------------------------------------------------------------
+    #
+    # Replaces direct ``api.binance.com`` calls that the Flutter app used
+    # to make from ``binance_client.dart``.  Cellular IPs change on every
+    # tower handoff and Binance auto-deletes Futures-enabled keys without
+    # an IP restriction — so the only viable architecture is to route all
+    # signed Binance traffic through the VPS (whose IP is allowlisted).
+
+    def _resolve_proxy_user_id(claims: Optional[TokenClaims]) -> int:
+        """Map JWT claims → user_id for proxy endpoints.  Re-uses the
+        same resolver as the profile endpoints — anonymous device JWTs
+        raise 401 (they can't have Binance keys; sign in first)."""
+        if claims is None:
+            return 1  # static-token bypass = owner
+        sub = claims.sub
+        if not sub.startswith("user-"):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="anonymous JWT cannot use auto-trade — sign in first",
+            )
+        try:
+            return int(sub.split("-", 1)[1])
+        except (IndexError, ValueError) as exc:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="malformed JWT subject",
+            ) from exc
+
+    def _proxy_error_to_http(exc: BinanceProxyError) -> HTTPException:
+        """Translate Binance-side errors into clean HTTP responses for
+        the app.  We preserve the upstream code so the app can branch
+        UX (e.g. -2015 → "IP not whitelisted, contact admin")."""
+        payload = {
+            "detail": str(exc).split(" | ", 1)[0],
+            "code": exc.code,
+            "http_status": exc.http_status,
+            "request_ip": exc.request_ip,
+        }
+        # Map common Binance error classes to sensible HTTP statuses.
+        if exc.code in (-2015, -2014, -2008):
+            http_status = status.HTTP_401_UNAUTHORIZED  # invalid key / perms / IP
+        elif exc.code in (-1021,):
+            http_status = status.HTTP_502_BAD_GATEWAY   # clock skew
+        elif exc.code == -9001:
+            http_status = status.HTTP_404_NOT_FOUND     # no keys stored (our code)
+        elif exc.http_status and 400 <= exc.http_status < 500:
+            http_status = exc.http_status
+        else:
+            http_status = status.HTTP_502_BAD_GATEWAY
+        return HTTPException(status_code=http_status, detail=payload)
+
+    @app.post(
+        "/api/auto-trade/keys",
+        response_model=BinanceKeysVerifyResponse,
+        tags=["auto-trade"],
+    )
+    async def auto_trade_keys_upload(
+        body: BinanceKeysUploadRequest,
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> BinanceKeysVerifyResponse:
+        if binance_keys_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="BINANCE_KEY_ENCRYPTION_SECRET not set",
+            )
+        proxy = _require_binance_proxy()
+        user_id = _resolve_proxy_user_id(claims)
+        try:
+            binance_keys_store.set(
+                user_id,
+                body.api_key.strip(),
+                body.api_secret.strip(),
+                testnet=body.testnet,
+            )
+        except BinanceKeysStoreError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc),
+            ) from exc
+        # Verify inline so the app can decide whether to flip auto-trade
+        # to Live based on a single round-trip.  On failure the row is
+        # kept (user may want to retry verify later) and the error
+        # surfaces with full detail.
+        try:
+            await proxy.verify(user_id)
+        except BinanceProxyError as exc:
+            return BinanceKeysVerifyResponse(
+                verified=False,
+                error_code=exc.code,
+                error_message=str(exc).split(" | ", 1)[0],
+                request_ip_seen_by_binance=exc.request_ip,
+            )
+        status_dict = binance_keys_store.status(user_id) or {}
+        return BinanceKeysVerifyResponse(
+            verified=True,
+            last_verified_at=status_dict.get("last_verified_at"),
+        )
+
+    @app.get(
+        "/api/auto-trade/keys/status",
+        response_model=BinanceKeysStatusResponse,
+        tags=["auto-trade"],
+    )
+    async def auto_trade_keys_status(
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> BinanceKeysStatusResponse:
+        if binance_keys_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="BINANCE_KEY_ENCRYPTION_SECRET not set",
+            )
+        user_id = _resolve_proxy_user_id(claims)
+        info = binance_keys_store.status(user_id)
+        if info is None:
+            return BinanceKeysStatusResponse(stored=False)
+        return BinanceKeysStatusResponse(**info)
+
+    @app.delete(
+        "/api/auto-trade/keys",
+        tags=["auto-trade"],
+    )
+    async def auto_trade_keys_clear(
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> Dict[str, Any]:
+        if binance_keys_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="BINANCE_KEY_ENCRYPTION_SECRET not set",
+            )
+        user_id = _resolve_proxy_user_id(claims)
+        removed = binance_keys_store.clear(user_id)
+        return {"cleared": removed}
+
+    @app.post(
+        "/api/auto-trade/keys/verify",
+        response_model=BinanceKeysVerifyResponse,
+        tags=["auto-trade"],
+    )
+    async def auto_trade_keys_verify(
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> BinanceKeysVerifyResponse:
+        proxy = _require_binance_proxy()
+        user_id = _resolve_proxy_user_id(claims)
+        try:
+            await proxy.verify(user_id)
+        except BinanceProxyError as exc:
+            return BinanceKeysVerifyResponse(
+                verified=False,
+                error_code=exc.code,
+                error_message=str(exc).split(" | ", 1)[0],
+                request_ip_seen_by_binance=exc.request_ip,
+            )
+        assert binance_keys_store is not None
+        info = binance_keys_store.status(user_id) or {}
+        return BinanceKeysVerifyResponse(
+            verified=True,
+            last_verified_at=info.get("last_verified_at"),
+        )
+
+    @app.get(
+        "/api/auto-trade/equity",
+        response_model=BinanceEquityResponse,
+        tags=["auto-trade"],
+    )
+    async def auto_trade_equity(
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> BinanceEquityResponse:
+        proxy = _require_binance_proxy()
+        user_id = _resolve_proxy_user_id(claims)
+        try:
+            account = await proxy.get_account(user_id)
+        except BinanceProxyError as exc:
+            raise _proxy_error_to_http(exc) from exc
+        return BinanceEquityResponse(
+            total_wallet_balance=account.total_wallet_balance,
+            total_unrealized_profit=account.total_unrealized_profit,
+            total_margin_balance=account.total_margin_balance,
+            available_balance=account.available_balance,
+            max_withdraw_amount=account.max_withdraw_amount,
+            open_position_count=account.open_position_count,
+        )
+
+    @app.get(
+        "/api/auto-trade/positions",
+        response_model=BinancePositionsResponse,
+        tags=["auto-trade"],
+    )
+    async def auto_trade_positions(
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> BinancePositionsResponse:
+        proxy = _require_binance_proxy()
+        user_id = _resolve_proxy_user_id(claims)
+        try:
+            positions = await proxy.get_positions(user_id)
+        except BinanceProxyError as exc:
+            raise _proxy_error_to_http(exc) from exc
+        return BinancePositionsResponse(
+            positions=[
+                BinancePositionResponse(
+                    symbol=p.symbol,
+                    side=p.side,  # type: ignore[arg-type]
+                    position_amt=p.position_amt,
+                    entry_price=p.entry_price,
+                    mark_price=p.mark_price,
+                    unrealized_profit=p.unrealized_profit,
+                    leverage=p.leverage,
+                    isolated=p.isolated,
+                )
+                for p in positions
+            ]
+        )
+
+    @app.post(
+        "/api/auto-trade/order",
+        response_model=BinanceOrderResponse,
+        tags=["auto-trade"],
+    )
+    async def auto_trade_order(
+        body: BinanceOrderRequest,
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> BinanceOrderResponse:
+        proxy = _require_binance_proxy()
+        user_id = _resolve_proxy_user_id(claims)
+        try:
+            order = await proxy.place_order(
+                user_id,
+                symbol=body.symbol,
+                side=body.side,
+                type=body.type,
+                quantity=body.quantity,
+                price=body.price,
+                reduce_only=body.reduce_only,
+                time_in_force=body.time_in_force,
+                client_order_id=body.client_order_id,
+            )
+        except BinanceProxyError as exc:
+            raise _proxy_error_to_http(exc) from exc
+        return BinanceOrderResponse(
+            order_id=order.order_id,
+            symbol=order.symbol,
+            side=order.side,
+            type=order.type,
+            status=order.status,
+            executed_qty=order.executed_qty,
+            avg_price=order.avg_price,
+            reduce_only=order.reduce_only,
+        )
+
+    @app.post(
+        "/api/auto-trade/close",
+        response_model=BinanceCloseResponse,
+        tags=["auto-trade"],
+    )
+    async def auto_trade_close(
+        body: BinanceClosePositionRequest,
+        claims: Optional[TokenClaims] = Depends(user_claims),
+    ) -> BinanceCloseResponse:
+        proxy = _require_binance_proxy()
+        user_id = _resolve_proxy_user_id(claims)
+        try:
+            order = await proxy.close_position(user_id, symbol=body.symbol)
+        except BinanceProxyError as exc:
+            raise _proxy_error_to_http(exc) from exc
+        if order is None:
+            return BinanceCloseResponse(closed=False, symbol=body.symbol.upper())
+        return BinanceCloseResponse(
+            closed=True,
+            symbol=order.symbol,
+            order=BinanceOrderResponse(
+                order_id=order.order_id,
+                symbol=order.symbol,
+                side=order.side,
+                type=order.type,
+                status=order.status,
+                executed_qty=order.executed_qty,
+                avg_price=order.avg_price,
+                reduce_only=order.reduce_only,
+            ),
+        )
+
     return app
 
 
@@ -1082,6 +1412,8 @@ async def serve_api(
     otp_store: Optional[OtpStore] = None,
     otp_delivery: Optional[OtpDeliveryProvider] = None,
     billing_verifier: Optional[BillingWebhookVerifier] = None,
+    binance_keys_store: Optional[BinanceKeysStore] = None,
+    binance_proxy: Optional[BinanceProxyClient] = None,
 ) -> None:
     """Run the API server forever.  Cancellation stops it cleanly."""
     import uvicorn  # imported lazily so optional dep stays optional
@@ -1097,6 +1429,8 @@ async def serve_api(
         otp_store=otp_store,
         otp_delivery=otp_delivery,
         billing_verifier=billing_verifier,
+        binance_keys_store=binance_keys_store,
+        binance_proxy=binance_proxy,
     )
     config = uvicorn.Config(
         app=app,

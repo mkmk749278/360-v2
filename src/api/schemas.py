@@ -501,3 +501,122 @@ class BillingGrantResponse(BaseModel):
     ok: bool
     user_id: int
     tier: str
+
+
+# ---------------------------------------------------------------------------
+# Auto-trade VPS proxy — per-user Binance keys + signed calls
+# ---------------------------------------------------------------------------
+
+
+class BinanceKeysUploadRequest(BaseModel):
+    """Body of ``POST /api/auto-trade/keys`` — store + verify in one call.
+
+    The endpoint encrypts the credentials in ``user_binance_keys`` (per-user
+    row keyed off the JWT subject), then immediately probes
+    ``GET /fapi/v2/account`` with them.  Successful probe → ``verified=True``
+    in the response; otherwise the row is still saved but ``verified=False``
+    and ``error_code`` carries the Binance error code so the app can
+    surface a precise hint (typically ``-2015`` = IP not allowlisted).
+    """
+
+    api_key: str = Field(..., min_length=8, max_length=128)
+    api_secret: str = Field(..., min_length=8, max_length=128)
+    testnet: bool = Field(default=False)
+
+
+class BinanceKeysStatusResponse(BaseModel):
+    """Non-secret status returned by ``GET /api/auto-trade/keys/status``.
+
+    Drives the API-keys settings page on the app — never returns key
+    material itself, only presence + verify timestamps."""
+
+    stored: bool
+    testnet: bool = False
+    last_verified_at: Optional[str] = None
+    last_used_at: Optional[str] = None
+    created_at: Optional[str] = None
+    updated_at: Optional[str] = None
+
+
+class BinanceKeysVerifyResponse(BaseModel):
+    """Returned by both ``POST /api/auto-trade/keys`` (after upload) and
+    ``POST /api/auto-trade/keys/verify`` (re-test stored keys)."""
+
+    verified: bool
+    error_code: Optional[int] = Field(
+        default=None,
+        description="Binance error code on verify failure (e.g. -2015 = IP).",
+    )
+    error_message: Optional[str] = None
+    request_ip_seen_by_binance: Optional[str] = Field(
+        default=None,
+        description="IP Binance saw the verify request from — useful for IP-allowlist hints.",
+    )
+    last_verified_at: Optional[str] = None
+
+
+class BinanceEquityResponse(BaseModel):
+    """``GET /api/auto-trade/equity`` — drives auto_trade_watcher.dart."""
+
+    total_wallet_balance: float
+    total_unrealized_profit: float
+    total_margin_balance: float
+    available_balance: float
+    max_withdraw_amount: float
+    open_position_count: int
+
+
+class BinancePositionResponse(BaseModel):
+    symbol: str
+    side: Literal["LONG", "SHORT"]
+    position_amt: float
+    entry_price: float
+    mark_price: float
+    unrealized_profit: float
+    leverage: int
+    isolated: bool
+
+
+class BinancePositionsResponse(BaseModel):
+    positions: List[BinancePositionResponse]
+
+
+class BinanceOrderRequest(BaseModel):
+    """Body of ``POST /api/auto-trade/order``."""
+
+    symbol: str
+    side: Literal["BUY", "SELL"]
+    type: Literal["MARKET", "LIMIT"]
+    quantity: float = Field(..., gt=0)
+    price: Optional[float] = Field(default=None, gt=0)
+    reduce_only: bool = False
+    time_in_force: Optional[Literal["GTC", "IOC", "FOK"]] = None
+    client_order_id: Optional[str] = Field(default=None, max_length=64)
+
+
+class BinanceClosePositionRequest(BaseModel):
+    """Body of ``POST /api/auto-trade/close`` — reduce-only market exit."""
+
+    symbol: str
+
+
+class BinanceOrderResponse(BaseModel):
+    order_id: int
+    symbol: str
+    side: str
+    type: str
+    status: str
+    executed_qty: float
+    avg_price: float
+    reduce_only: bool
+
+
+class BinanceCloseResponse(BaseModel):
+    """Returned by ``POST /api/auto-trade/close``.
+
+    When ``closed=False`` it means no open position existed for the
+    requested symbol — caller should treat as success (already closed)."""
+
+    closed: bool
+    symbol: str
+    order: Optional[BinanceOrderResponse] = None

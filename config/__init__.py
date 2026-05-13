@@ -1655,6 +1655,18 @@ API_ALLOW_STATIC_TOKEN: bool = _safe_bool("API_ALLOW_STATIC_TOKEN", "true")
 API_CORS_ORIGINS: str = os.getenv("API_CORS_ORIGINS", "*")
 
 # ---------------------------------------------------------------------------
+# Per-user Binance key encryption — Phase 4 auto-trade VPS proxy
+# ---------------------------------------------------------------------------
+#: Secret used to derive the AES-128-GCM key that encrypts every user's
+#: Binance API credentials in ``data/lumin.sqlite``.  Without this, the
+#: ``/api/auto-trade/*`` endpoints return 503 so no user can upload keys
+#: into an unencrypted store.  Generate via
+#: ``python -c "import secrets; print(secrets.token_hex(32))"`` and set
+#: in the VPS environment.  Rotating this secret invalidates every
+#: stored row (users will see a one-time re-upload prompt in the app).
+BINANCE_KEY_ENCRYPTION_SECRET: str = os.getenv("BINANCE_KEY_ENCRYPTION_SECRET", "")
+
+# ---------------------------------------------------------------------------
 # Multi-user expansion (Phase 2 — phone-OTP auth + billing webhook)
 # ---------------------------------------------------------------------------
 #: SQLite path for the user registry (phone, tier, paid_until).  Lives in
