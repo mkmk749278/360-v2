@@ -548,3 +548,165 @@ class TestConfidenceGateLogSurfacesChartistEye:
             f"Got {unaccounted:.2f} (composite={composite}, final={final}, "
             f"penalty={total_penalty}, decay={decay})"
         )
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-13: EVALUATOR FUNNEL section (surfaces _path_funnel_counters)
+# ---------------------------------------------------------------------------
+#
+# The DISPATCH FUNNEL section (which already existed) only renders the
+# ``enqueue_stage:*`` counters — i.e. signals that reached
+# ``_enqueue_signal``.  Paths that never produce a candidate are
+# invisible there.  The new EVALUATOR FUNNEL section parses
+# ``scanner._path_funnel_counters`` so we can see per-path attempts vs
+# generated vs scored vs emitted, plus the top "no-signal" reasons.
+
+
+def _stub_scanner_with_path_funnel(extras: dict | None = None):
+    """Minimal scanner stub that exposes a populated _path_funnel_counters.
+
+    The new EVALUATOR FUNNEL renderer doesn't need any of the other
+    chartist-eye state, so we use the bare chartist-eye stub plus a
+    path funnel dict.
+    """
+    scanner = _stub_scanner_with_chartist_eye()
+    base = {
+        # SR_FLIP_RETEST: 3 attempts, 2 generated, 2 scored, 1 emitted
+        "evaluator_attempted:360_SCALP:reclaim_retest:EVAL::SR_FLIP_RETEST": 3,
+        "evaluator_generated:360_SCALP:reclaim_retest:EVAL::SR_FLIP_RETEST": 2,
+        "evaluator_no_signal:360_SCALP:reclaim_retest:EVAL::SR_FLIP_RETEST": 1,
+        "scored:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 2,
+        "emitted:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 1,
+        # VOLUME_SURGE_BREAKOUT: 5 attempts, 0 generated (silent path)
+        "evaluator_attempted:360_SCALP:breakout_momentum:EVAL::VOLUME_SURGE_BREAKOUT": 5,
+        "evaluator_no_signal:360_SCALP:breakout_momentum:EVAL::VOLUME_SURGE_BREAKOUT": 5,
+        "evaluator_no_signal_reason:insufficient_volume:360_SCALP:breakout_momentum:EVAL::VOLUME_SURGE_BREAKOUT": 4,
+        "evaluator_no_signal_reason:no_breakout_candle:360_SCALP:breakout_momentum:EVAL::VOLUME_SURGE_BREAKOUT": 1,
+        # WHALE_MOMENTUM: 2 attempts, dropped at gate
+        "evaluator_attempted:360_SCALP:orderflow_momentum:EVAL::WHALE_MOMENTUM": 2,
+        "evaluator_no_signal:360_SCALP:orderflow_momentum:EVAL::WHALE_MOMENTUM": 2,
+        "evaluator_no_signal_reason:missing_recent_ticks:360_SCALP:orderflow_momentum:EVAL::WHALE_MOMENTUM": 2,
+    }
+    if extras:
+        base.update(extras)
+    scanner._path_funnel_counters = base
+    return scanner
+
+
+async def _run_diag(scanner) -> str:
+    """Invoke /diag and return the rendered body text."""
+    handler = _make_handler(scanner=scanner)
+    with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+        await handler._handle_command("/diag", ADMIN_CHAT_ID)
+    handler._telegram.send_document.assert_called_once()
+    return handler._telegram.send_document.call_args.kwargs["document"].decode("utf-8")
+
+
+class TestEvaluatorFunnelSection:
+    @pytest.mark.asyncio
+    async def test_section_renders_with_header(self):
+        body = await _run_diag(_stub_scanner_with_path_funnel())
+        assert "EVALUATOR FUNNEL (per setup_class)" in body
+
+    @pytest.mark.asyncio
+    async def test_lists_each_active_setup_class(self):
+        """Every setup_class with any path-funnel activity gets a row."""
+        body = await _run_diag(_stub_scanner_with_path_funnel())
+        assert "SR_FLIP_RETEST" in body
+        assert "VOLUME_SURGE_BREAKOUT" in body
+        assert "WHALE_MOMENTUM" in body
+
+    @pytest.mark.asyncio
+    async def test_attempts_and_generated_separately(self):
+        """Eval-stage attempts/generated/no_signal must aggregate per setup
+        from the EVAL::-prefixed keys, separately from the post-eval gate
+        stages (scored/filtered/gated/emitted)."""
+        body = await _run_diag(_stub_scanner_with_path_funnel())
+        # SR_FLIP_RETEST row should show: attempts=3, generated=2, scored=2, emitted=1.
+        # The renderer aligns columns by width, so we look for the row prefix +
+        # presence of the numbers in the right order on that line.
+        rows = [
+            line for line in body.splitlines()
+            if line.strip().startswith("SR_FLIP_RETEST")
+        ]
+        assert rows, "no SR_FLIP_RETEST row found in EVALUATOR FUNNEL"
+        srf_row = rows[0]
+        # Order in renderer: attempts | generated | no_signal | scanner_preparation | scored | filtered | gated | emitted
+        # We only check the columns we set.
+        nums = srf_row.split()
+        # First token is "SR_FLIP_RETEST", then 8 numeric columns.
+        assert nums[0] == "SR_FLIP_RETEST"
+        assert nums[1] == "3"  # attempts
+        assert nums[2] == "2"  # generated
+        assert nums[3] == "1"  # no_signal
+        # scored is at index 5 (after scanner_preparation column)
+        assert nums[5] == "2"  # scored
+        # emitted is the last column
+        assert nums[-1] == "1"
+
+    @pytest.mark.asyncio
+    async def test_silent_path_visible_with_zero_generated(self):
+        """A path with attempts > 0 but generated = 0 is the "why is this
+        path silent" case — must still appear in the table."""
+        body = await _run_diag(_stub_scanner_with_path_funnel())
+        rows = [
+            line for line in body.splitlines()
+            if line.strip().startswith("VOLUME_SURGE_BREAKOUT")
+        ]
+        assert rows
+        nums = rows[0].split()
+        assert nums[0] == "VOLUME_SURGE_BREAKOUT"
+        assert nums[1] == "5"  # attempts
+        assert nums[2] == "0"  # generated — confirms silent
+        assert nums[3] == "5"  # no_signal
+
+    @pytest.mark.asyncio
+    async def test_top_no_signal_reasons_rendered(self):
+        """Per-setup top no_signal reasons must surface — that's the
+        "why is X silent" answer."""
+        body = await _run_diag(_stub_scanner_with_path_funnel())
+        assert "Top no-signal reasons" in body
+        # VOLUME_SURGE_BREAKOUT's top reasons should appear.
+        assert "VOLUME_SURGE_BREAKOUT:" in body
+        assert "insufficient_volume=4" in body
+        assert "no_breakout_candle=1" in body
+        # WHALE_MOMENTUM's missing_recent_ticks reason should also appear.
+        assert "missing_recent_ticks=2" in body
+
+    @pytest.mark.asyncio
+    async def test_empty_funnel_renders_clear_message(self):
+        """When _path_funnel_counters is empty (fresh boot, no scan cycles),
+        render a clear "(path funnel counters empty …)" line instead of an
+        unhelpful blank section."""
+        scanner = _stub_scanner_with_chartist_eye()
+        scanner._path_funnel_counters = {}
+        body = await _run_diag(scanner)
+        assert "EVALUATOR FUNNEL" in body
+        assert "path funnel counters empty" in body
+
+    @pytest.mark.asyncio
+    async def test_sort_order_busy_paths_first(self):
+        """Setups with more total activity (attempts + generated + emitted)
+        sort to the top — silent paths sink to the bottom so busy ones
+        surface first in the table."""
+        scanner = _stub_scanner_with_path_funnel({
+            # ZERO-activity path — must sort below any with activity.
+            "evaluator_attempted:360_SCALP:other:EVAL::ZERO_ACTIVITY_PATH": 0,
+        })
+        body = await _run_diag(scanner)
+        lines = body.splitlines()
+        # Find the order of setup rows after the header.
+        in_funnel = False
+        seen: list[str] = []
+        for line in lines:
+            if "EVALUATOR FUNNEL" in line:
+                in_funnel = True
+                continue
+            if in_funnel:
+                stripped = line.strip()
+                if stripped.startswith(("SR_FLIP_RETEST", "VOLUME_SURGE_BREAKOUT", "WHALE_MOMENTUM")):
+                    seen.append(stripped.split()[0])
+                if "Reading:" in stripped or "no-signal reasons" in stripped:
+                    break
+        # VOLUME_SURGE_BREAKOUT (5 attempts) should come before WHALE_MOMENTUM (2 attempts).
+        assert seen.index("VOLUME_SURGE_BREAKOUT") < seen.index("WHALE_MOMENTUM"), seen

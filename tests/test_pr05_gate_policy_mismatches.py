@@ -279,6 +279,12 @@ class TestNoBroadExemptionBleed:
             "FUNDING_EXTREME_SIGNAL",
             "WHALE_MOMENTUM",
             "FAILED_AUCTION_RECLAIM",
+            # 2026-05-13 funnel-diag truth: LSR was the second-most-active
+            # path but every B-tier candidate was being killed by the
+            # trend hard gate (EMA alignment).  LSR is counter-trend by
+            # design — EMA alignment with entry direction is *bearish*
+            # for the thesis, not bullish.  See scanner comment block.
+            "LIQUIDITY_SWEEP_REVERSAL",
         }
         unexpected = _TREND_GATE_EXEMPT_SETUPS - expected
         assert not unexpected, (
@@ -287,4 +293,46 @@ class TestNoBroadExemptionBleed:
         missing = expected - _TREND_GATE_EXEMPT_SETUPS
         assert not missing, (
             f"Expected trend-exempt setups are missing: {missing}"
+        )
+
+
+# ---------------------------------------------------------------------------
+# 2026-05-13: LIQUIDITY_SWEEP_REVERSAL trend-gate exemption
+# ---------------------------------------------------------------------------
+
+
+class TestLsrTrendExemption20260513:
+    """Diag-driven fix: LSR was being killed by trend_hard_gate despite
+    being a counter-trend path.  Covers the new exemption + a smoke check
+    that a low-indicator-score LSR signal now passes."""
+
+    @pytest.fixture
+    def trend_exempt(self):
+        from src.scanner import _TREND_GATE_EXEMPT_SETUPS
+        return _TREND_GATE_EXEMPT_SETUPS
+
+    def test_liquidity_sweep_reversal_is_trend_exempt(self, trend_exempt):
+        """LSR sells into long sweeps and buys into short sweeps — counter-trend
+        by design.  EMA alignment with the entry direction is *bearish* for the
+        LSR thesis, not bullish, so the trend hard gate must not block it."""
+        assert "LIQUIDITY_SWEEP_REVERSAL" in trend_exempt, (
+            "LIQUIDITY_SWEEP_REVERSAL must be in _TREND_GATE_EXEMPT_SETUPS "
+            "(2026-05-13 diag fix — was killing the second-most-active path)"
+        )
+
+    def test_liquidity_sweep_reversal_low_ind_not_blocked(self):
+        """A B-tier LSR candidate with low EMA alignment (ind_score=5) must
+        pass the trend gate.  Pre-fix this fired in production for every
+        post-deploy LSR candidate and zeroed live LSR emission."""
+        assert not _trend_gate_would_block("LIQUIDITY_SWEEP_REVERSAL", ind_score=5.0), (
+            "LIQUIDITY_SWEEP_REVERSAL with ind_score=5.0 should NOT be blocked "
+            "by the trend hard gate — see diag 2026-05-13"
+        )
+
+    def test_liquidity_sweep_reversal_smc_gate_unchanged(self):
+        """LSR is still sweep-dependent — the SMC gate must continue to
+        block low-SMC LSR candidates.  Only the trend gate changed."""
+        from src.scanner import _SMC_GATE_EXEMPT_SETUPS
+        assert "LIQUIDITY_SWEEP_REVERSAL" not in _SMC_GATE_EXEMPT_SETUPS, (
+            "LSR must remain SMC-gated — sweep is its thesis"
         )

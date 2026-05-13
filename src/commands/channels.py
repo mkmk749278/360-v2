@@ -495,6 +495,120 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
         sections.append("  (suppression counters not exposed — engine probably mid-boot)")
     sections.append("")
 
+    # --- Evaluator funnel (per setup_class) ---
+    # Surfaces ``scanner._path_funnel_counters`` so we can see, for every
+    # evaluator the engine knows about, how many times it was *attempted*
+    # vs how many times it actually *generated* a candidate vs reached
+    # scoring vs emitted.  Answers the "why is X silent?" question that
+    # DISPATCH FUNNEL above cannot — DISPATCH FUNNEL only shows
+    # candidates that reached ``_enqueue_signal``, so a path that never
+    # produces a candidate is invisible there.
+    #
+    # Key shape (set by Scanner._increment_path_funnel +
+    # _record_scalp_generation_telemetry): ``stage:chan_name:family:setup``.
+    # For ``evaluator_*`` stages the setup carries the ``EVAL::`` prefix.
+    sections.append("--- EVALUATOR FUNNEL (per setup_class) ---")
+    _path_funnel = getattr(scanner, "_path_funnel_counters", None) or {}
+    if _path_funnel:
+        # Stages we surface, in the order they fire.  Eval-prefixed stages
+        # come from generation telemetry (channel.evaluate()); the rest
+        # come from _prepare_signal / _scan_symbol's flow.
+        _eval_stages = ("attempts", "generated", "no_signal")
+        _gate_stages = ("scanner_preparation", "scored", "filtered", "gated", "emitted")
+
+        # Aggregate into per-setup dicts.
+        # Path-funnel keys are produced by ``Scanner._path_funnel_key``:
+        # ``{stage}:{chan_name}:{family}:{setup_name}``.  Two wrinkles:
+        # (a) Evaluator-stage setups carry an ``EVAL::`` prefix, so the
+        #     suffix is ``...:family:EVAL::SETUP`` and contains 2 colons.
+        # (b) The ``evaluator_no_signal_reason:{reason}`` stage embeds a
+        #     colon in the stage token itself, so a plain split(":",3)
+        #     pulls the reason into chan_name.  We split structurally
+        #     instead: find ``EVAL::`` for eval-stage keys, else rsplit.
+        _by_setup: Dict[str, Dict[str, int]] = {}
+        _no_signal_reasons: Dict[str, Counter] = {}
+        _EVAL_PREFIX = "EVAL::"
+        for key, count in _path_funnel.items():
+            if not isinstance(key, str):
+                continue
+            if _EVAL_PREFIX in key:
+                # Eval-stage key: <stage>:<chan>:<family>:EVAL::<SETUP>
+                idx = key.rindex(_EVAL_PREFIX)
+                setup = key[idx + len(_EVAL_PREFIX):]
+                head = key[:idx].rstrip(":")
+                # head should now be <stage>:<chan>:<family>; split off
+                # the trailing chan:family to recover the stage.
+                head_parts = head.rsplit(":", 2)
+                if len(head_parts) != 3:
+                    continue
+                stage = head_parts[0]
+            else:
+                # Non-eval stage: <stage>:<chan>:<family>:<setup>
+                parts = key.rsplit(":", 3)
+                if len(parts) != 4:
+                    continue
+                stage, _chan_name, _family, setup = parts
+            if not setup or setup == "UNKNOWN":
+                continue
+            bucket = _by_setup.setdefault(setup, {s: 0 for s in _eval_stages + _gate_stages})
+            # Map raw stage names to display columns.
+            if stage == "evaluator_attempted":
+                bucket["attempts"] += int(count)
+            elif stage == "evaluator_generated":
+                bucket["generated"] += int(count)
+            elif stage == "evaluator_no_signal":
+                bucket["no_signal"] += int(count)
+            elif stage.startswith("evaluator_no_signal_reason:"):
+                reason = stage.split(":", 1)[1]
+                _no_signal_reasons.setdefault(setup, Counter())[reason] += int(count)
+            elif stage in _gate_stages:
+                bucket[stage] += int(count)
+            # Ignore the geometry:* / lifecycle:* / dependency_missing:* /
+            # dependency_presence:* sub-counters — they're separate
+            # observability slices, not part of the headline funnel.
+
+        if not _by_setup:
+            sections.append("  (no evaluator activity in this window)")
+        else:
+            # Sort by total attempts desc — silent paths sink to the bottom
+            # so the busy ones surface first.
+            def _row_total(d: Dict[str, int]) -> int:
+                return d.get("attempts", 0) + d.get("generated", 0) + d.get("emitted", 0)
+            sorted_setups = sorted(
+                _by_setup.items(), key=lambda kv: _row_total(kv[1]), reverse=True
+            )
+            _cols = _eval_stages + _gate_stages
+            header = f"  {'setup_class':<32}" + "".join(f"{s:>11}" for s in _cols)
+            sections.append(header)
+            sections.append("  " + "-" * (32 + 11 * len(_cols)))
+            for setup, counts in sorted_setups:
+                row = f"  {setup:<32}" + "".join(
+                    f"{counts.get(c, 0):>11}" for c in _cols
+                )
+                sections.append(row)
+            sections.append("")
+            sections.append("  Reading: attempts=evaluator was invoked; generated=evaluator returned a Signal;")
+            sections.append("           no_signal=evaluator returned None (see top no-signal reasons below);")
+            sections.append("           scored=passed gate chain into composite scoring; filtered=dropped at")
+            sections.append("           a quality gate (stat-filter / SMC / trend / min_conf); gated=blocked")
+            sections.append("           at an earlier scanner gate; emitted=reached Telegram dispatch.")
+
+            # Top 3 no-signal reasons per setup_class — answers "why is this path silent?".
+            if _no_signal_reasons:
+                sections.append("")
+                sections.append("  Top no-signal reasons (per setup_class, evaluator-level):")
+                # Same ordering as the table above for visual continuity.
+                for setup, _counts in sorted_setups:
+                    reasons = _no_signal_reasons.get(setup)
+                    if not reasons:
+                        continue
+                    top = reasons.most_common(3)
+                    detail = ", ".join(f"{name}={n}" for name, n in top)
+                    sections.append(f"    {setup}: {detail}")
+    else:
+        sections.append("  (path funnel counters empty — engine may still be booting, or no scan cycles yet)")
+    sections.append("")
+
     # --- WebSocket health ---
     # Phase 1 instrumentation (2026-05-08): per-connection state +
     # reconnect-duration trail to investigate the "REST fallback
