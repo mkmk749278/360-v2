@@ -2182,8 +2182,19 @@ class TestWsLogCommand:
 
 
 class TestBuildCombinedStreamUrl:
-    """Verify URL construction is correct regardless of how
-    ``BINANCE_FUTURES_WS_BASE`` is configured in .env."""
+    """URL builder must produce ``/market/stream?streams=...`` regardless of
+    how ``BINANCE_FUTURES_WS_BASE`` is configured.
+
+    Binance decommissioned the legacy ``/ws`` and ``/stream`` paths on
+    2026-04-23 ("Important WebSocket Change Notice", 2023-12-15).  Streams
+    belonging to ``/market`` (kline, aggTrade, markPrice, forceOrder,
+    ticker — i.e. everything this engine subscribes to) silently refuse
+    to forward data on unrouted connections.  Builder normalises any
+    legacy path back to the documented ``/market/stream`` form so an
+    operator's stale ``.env`` value can't re-break this.
+    """
+
+    EXPECTED = "wss://fstream.binance.com/market/stream?streams=btcusdt@kline_1m"
 
     def _make_ws(self, base_url: str):
         async def handler(data):
@@ -2193,48 +2204,64 @@ class TestBuildCombinedStreamUrl:
         return ws
 
     def test_legacy_ws_path_gets_normalized(self):
-        """Operator's prod .env had ``wss://fstream.binance.com/ws`` —
-        the legacy single-stream path.  Builder strips /ws and appends
-        /stream."""
+        """Pre-2026-04-23 single-stream path ``/ws`` → normalised to
+        ``/market/stream``.  Operator-facing warning fires (one-shot)."""
         ws = self._make_ws("wss://fstream.binance.com/ws")
         url = ws._build_combined_stream_url(["btcusdt@kline_1m", "ethusdt@kline_1m"])
-        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m/ethusdt@kline_1m"
+        assert url == "wss://fstream.binance.com/market/stream?streams=btcusdt@kline_1m/ethusdt@kline_1m"
         # And the operator-facing warning got stamped
         assert getattr(ws, "_warned_legacy_ws_base", False) is True
 
-    def test_correct_stream_path_preserved(self):
-        """If env is already correct, no normalization shows in output."""
+    def test_legacy_stream_path_gets_normalized(self):
+        """Pre-2026-04-23 combined-stream path ``/stream`` → normalised
+        to ``/market/stream``.  This is the previous "correct" path that
+        was decommissioned 2026-04-23.  Warning fires (one-shot)."""
         ws = self._make_ws("wss://fstream.binance.com/stream")
         url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
-        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m"
-        # /stream path is correct — no legacy-ws warning fires
+        assert url == self.EXPECTED
+        assert getattr(ws, "_warned_legacy_ws_base", False) is True
+
+    def test_correct_market_stream_path_preserved(self):
+        """If env is already the documented routed path, no warning fires
+        and the URL is built directly."""
+        ws = self._make_ws("wss://fstream.binance.com/market/stream")
+        url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
+        assert url == self.EXPECTED
+        # No legacy warning — env is already correct
         assert getattr(ws, "_warned_legacy_ws_base", False) is False
 
     def test_no_trailing_path_still_works(self):
         """Edge case: env set to bare host (no path).  Builder still
-        appends /stream."""
+        appends ``/market/stream`` cleanly."""
         ws = self._make_ws("wss://fstream.binance.com")
         url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
-        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m"
+        assert url == self.EXPECTED
 
     def test_trailing_slash_handled(self):
         """Edge case: ``wss://fstream.binance.com/`` — the trailing
-        slash shouldn't produce ``//stream``."""
+        slash shouldn't produce ``//market/stream``."""
         ws = self._make_ws("wss://fstream.binance.com/")
         url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
-        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m"
+        assert url == self.EXPECTED
 
     def test_trailing_ws_with_slash(self):
         """Edge case: ``wss://fstream.binance.com/ws/`` — trailing slash
-        after /ws still triggers normalization."""
+        after /ws still triggers normalisation."""
         ws = self._make_ws("wss://fstream.binance.com/ws/")
         url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
-        # /ws/ → strip slash → /ws → strip /ws → empty → append /stream
-        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m"
+        assert url == self.EXPECTED
+
+    def test_legacy_market_ws_path_normalized(self):
+        """``/market/ws`` is the single-stream form of the routed path;
+        we always want combined-stream so this becomes ``/market/stream``.
+        No warning — operator is on the new path, just the wrong shape."""
+        ws = self._make_ws("wss://fstream.binance.com/market/ws")
+        url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
+        assert url == self.EXPECTED
 
     def test_warning_fires_only_once(self, monkeypatch):
         """Reconnect storms shouldn't spam the engine log with the
-        same legacy-ws warning every cycle."""
+        same legacy-path warning every cycle."""
         ws = self._make_ws("wss://fstream.binance.com/ws")
         # Trip the warning the first time
         ws._build_combined_stream_url(["btcusdt@kline_1m"])
@@ -2255,19 +2282,32 @@ class TestBuildCombinedStreamUrl:
         ws._build_combined_stream_url(["ethusdt@kline_1m"])
         # Second build should NOT have fired the warning
         assert captured == [], (
-            f"Legacy-ws warning fired more than once — should be one-shot per process. "
+            f"Legacy-path warning fired more than once — should be one-shot per process. "
             f"Captured: {captured}"
         )
 
     def test_many_streams_joined_with_slash(self):
-        """200 streams should join with ``/`` not commas (per Binance
-        docs)."""
-        ws = self._make_ws("wss://fstream.binance.com/stream")
+        """N streams should join with ``/`` not commas (per Binance docs)."""
+        ws = self._make_ws("wss://fstream.binance.com/market/stream")
         streams = [f"sym{i}usdt@kline_1m" for i in range(10)]
         url = ws._build_combined_stream_url(streams)
         # Verify slash-joined, no commas
         assert "/" in url.split("?streams=")[1]
         assert "," not in url
+        # And the prefix is the routed path
+        assert url.startswith("wss://fstream.binance.com/market/stream?streams=")
+
+    def test_default_config_uses_market_routed_path(self):
+        """Pin the env-driven default — protects against someone
+        accidentally reverting the path in config/__init__.py."""
+        from config import BINANCE_FUTURES_WS_BASE, BINANCE_WS_BASE
+        assert BINANCE_FUTURES_WS_BASE == "wss://fstream.binance.com/market/stream", (
+            f"BINANCE_FUTURES_WS_BASE default must be /market/stream per "
+            f"Binance's 2026-04-23 path migration.  Got: {BINANCE_FUTURES_WS_BASE!r}"
+        )
+        assert BINANCE_WS_BASE == "wss://stream.binance.com:9443/market/stream", (
+            f"BINANCE_WS_BASE default must be /market/stream.  Got: {BINANCE_WS_BASE!r}"
+        )
 
 
 # ---------------------------------------------------------------------------
