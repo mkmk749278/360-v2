@@ -1653,6 +1653,14 @@ WS_TRACE_SUMMARY_INTERVAL_SEC: int = _safe_int(
 WS_TRACE_SUMMARY_STALENESS_SEC: int = _safe_int(
     "WS_TRACE_SUMMARY_STALENESS_SEC", "180"
 )
+#: Number of first raw WS messages to log per connection regardless of
+#: type (TEXT / BINARY / CLOSED / etc.).  Diagnostic added 2026-05-14
+#: to identify whether Binance is sending BINARY frames (which our
+#: original ``_listen`` silently dropped) when the stream_summary
+#: showed ``never_seen=all`` even after the URL fix landed.  The
+#: counter resets on each ``_connect``; once exceeded, subsequent
+#: messages are processed normally without the sample log.
+WS_TRACE_SAMPLE_FIRST_N: int = _safe_int("WS_TRACE_SAMPLE_FIRST_N", "10")
 #: Pairs that get dedicated (non-multiplexed) WebSocket connections for lowest latency.
 WS_PRIORITY_DEDICATED_PAIRS: List[str] = [
     p.strip() for p in os.getenv(
