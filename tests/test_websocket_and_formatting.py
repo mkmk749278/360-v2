@@ -2270,6 +2270,93 @@ class TestBuildCombinedStreamUrl:
         assert "," not in url
 
 
+# ---------------------------------------------------------------------------
+# Regression — _health_check_loop must be scheduled by start() (2026-05-14)
+# ---------------------------------------------------------------------------
+#
+# The loop existed in the module since its first iteration but was
+# defined-not-scheduled.  PR #386 added the actionable msg-rate
+# force-close + per-symbol staleness check INSIDE the loop.  PR #389
+# added the periodic ``stream_summary`` trace emit, also inside the
+# loop.  All three subsystems were dead in prod — only the separately-
+# scheduled ``_health_watchdog`` task ran.  Pin the invariant.
+
+
+class TestHealthCheckLoopScheduled:
+    """start() must create a task for _health_check_loop alongside the
+    watchdog task; stop() must cancel both."""
+
+    async def test_start_schedules_health_check_task(self):
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(handler, market="futures")
+        # Patch out the actual WS connect — we only care about which
+        # tasks get scheduled, not whether they connect to Binance.
+        import aiohttp as _aiohttp
+        original_session_cls = _aiohttp.ClientSession
+
+        class _StubSession:
+            def __init__(self, *a, **kw):
+                self.closed = False
+            async def ws_connect(self, *a, **kw):
+                # Return a fake ws that immediately ends the listen loop
+                class _W:
+                    closed = False
+                    async def close(self): self.closed = True
+                    def __aiter__(self): return self
+                    async def __anext__(self): raise StopAsyncIteration
+                return _W()
+            async def close(self): self.closed = True
+
+        try:
+            _aiohttp.ClientSession = _StubSession  # type: ignore[misc]
+            assert ws._health_check_task is None, (
+                "Pre-start invariant: task slot should be None before start()"
+            )
+            await ws.start(["btcusdt@kline_1m"])
+            assert ws._health_check_task is not None, (
+                "REGRESSION: _health_check_task was not created by start(). "
+                "The loop's actionable behaviors (msg-rate force-close, "
+                "per-symbol staleness, stream_summary trace) won't run."
+            )
+            assert not ws._health_check_task.done(), (
+                "Health check task should be running, not already terminated"
+            )
+            await ws.stop()
+            assert ws._health_check_task is None, (
+                "stop() should clear the task reference"
+            )
+        finally:
+            _aiohttp.ClientSession = original_session_cls  # type: ignore[misc]
+
+    async def test_stop_cancels_health_check_task(self):
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(handler, market="futures")
+        # Simulate a running task by directly constructing one
+        captured_cancelled: list = []
+
+        async def _fake_loop():
+            try:
+                while True:
+                    await asyncio.sleep(60)
+            except asyncio.CancelledError:
+                captured_cancelled.append(True)
+                raise
+
+        ws._running = True
+        ws._health_check_task = asyncio.create_task(_fake_loop())
+        # Let it start
+        await asyncio.sleep(0)
+        await ws.stop()
+        # stop() must have cancelled the task
+        assert captured_cancelled == [True], (
+            f"_health_check_task was not cancelled by stop(); cancelled list: {captured_cancelled}"
+        )
+
+
 def test_trace_sink_survives_logger_module_reconfigure(tmp_path, monkeypatch):
     """Simulate the production import order: src.utils first (trace sink
     added), then src.logger (which calls _loguru_logger.remove()).

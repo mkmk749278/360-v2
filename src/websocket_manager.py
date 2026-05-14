@@ -129,6 +129,16 @@ class WebSocketManager:
         self._critical_pairs: Set[str] = set()
         self._fallback_task: Optional[asyncio.Task] = None
         self._watchdog_task: Optional[asyncio.Task] = None
+        # 2026-05-14: ``_health_check_loop`` task was never created — defined
+        # but unstarted since the module existed.  PR #386 added the
+        # actionable msg-rate force-close + per-symbol staleness check
+        # INSIDE that loop, but the loop itself was still never scheduled.
+        # PR #389 added the periodic ``stream_summary`` trace emit, also
+        # inside the unstarted loop.  Result: every loop-resident feature
+        # was dead in prod, only the ``_health_watchdog`` (started at
+        # line 171) actually ran.  This task attribute + the create_task
+        # call in start() bring the loop online.
+        self._health_check_task: Optional[asyncio.Task] = None
         self._admin_alert = admin_alert_callback
         self._last_alert_time: float = 0.0
         # None = never alerted yet (so the first activation always fires);
@@ -169,6 +179,11 @@ class WebSocketManager:
             len(streams), len(self._connections), self._label,
         )
         self._watchdog_task = asyncio.create_task(self._health_watchdog())
+        # Start the health-check loop too — it owns the actionable
+        # msg-rate force-close, the per-symbol staleness check, AND the
+        # periodic stream_summary trace emit.  This was previously never
+        # started, leaving all three subsystems dead in prod.
+        self._health_check_task = asyncio.create_task(self._health_check_loop())
 
     async def stop(self) -> None:
         self._running = False
@@ -180,6 +195,9 @@ class WebSocketManager:
         if self._watchdog_task and not self._watchdog_task.done():
             self._watchdog_task.cancel()
             tasks.append(self._watchdog_task)
+        if self._health_check_task and not self._health_check_task.done():
+            self._health_check_task.cancel()
+            tasks.append(self._health_check_task)
         for conn in self._connections:
             conn.degraded = False
             if conn.task and not conn.task.done():
@@ -191,6 +209,7 @@ class WebSocketManager:
             await asyncio.gather(*tasks, return_exceptions=True)
         self._fallback_task = None
         self._watchdog_task = None
+        self._health_check_task = None
         if self._session and not self._session.closed:
             await self._session.close()
         self._session = None
