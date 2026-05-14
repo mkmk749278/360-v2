@@ -2153,3 +2153,45 @@ class TestWsLogCommand:
 
         await handle_ws_log([], _StubCtx())
         assert any("empty" in r.lower() for r in replies)
+
+
+# ---------------------------------------------------------------------------
+# Regression — trace sink must survive src/logger.py's remove() call
+# ---------------------------------------------------------------------------
+#
+# PR #389 shipped the trace sink registered in src/utils.py.  Production
+# import order loads src/utils.py first, then src/logger.py later (via
+# src.commands.engine).  src/logger.py._configure() calls
+# _loguru_logger.remove() which wiped the trace sink and left the file
+# empty.  This test pins the post-hotfix invariant: events emitted
+# AFTER both modules have configured must still reach the trace file.
+
+
+def test_trace_sink_survives_logger_module_reconfigure(tmp_path, monkeypatch):
+    """Simulate the production import order: src.utils first (trace sink
+    added), then src.logger (which calls _loguru_logger.remove()).
+    Without the hotfix in src/logger.py._configure(), trace events
+    written after the second import never reach the file.  With the
+    hotfix, src/logger.py re-registers the trace sink after its
+    remove(), so events still land."""
+    from importlib import reload
+    import config as cfg_mod
+    trace_path = tmp_path / "ws_trace_regression.log"
+    monkeypatch.setenv("WS_TRACE_LOG_PATH", str(trace_path))
+    # Reload config + both logger modules so both run their _configure()
+    # paths in the order utils → logger (production order).
+    reload(cfg_mod)
+    import src.utils as utils_mod
+    reload(utils_mod)
+    import src.logger as logger_mod
+    reload(logger_mod)
+    # NOW emit a trace event AFTER both modules have configured.
+    ws = utils_mod.get_ws_trace_logger()
+    ws.info("<WS:REGRESSION> proof_of_life event=42")
+    # Loguru flushes synchronously for enqueue=False sinks; the file
+    # should contain our event immediately.
+    contents = trace_path.read_text(encoding="utf-8") if trace_path.exists() else ""
+    assert "<WS:REGRESSION> proof_of_life event=42" in contents, (
+        f"Trace sink was wiped by src/logger.py reconfigure — hotfix regressed. "
+        f"File contents: {contents!r}"
+    )
