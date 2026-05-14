@@ -550,10 +550,6 @@ class TestScannerAttributes:
         scanner.force_scan = True
         assert scanner.force_scan is True
 
-    def test_ws_spot_starts_none(self):
-        scanner = _make_scanner()
-        assert scanner.ws_spot is None
-
     def test_ws_futures_starts_none(self):
         scanner = _make_scanner()
         assert scanner.ws_futures is None

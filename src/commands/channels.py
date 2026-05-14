@@ -618,7 +618,8 @@ async def handle_diag(args: List[str], ctx: CommandContext) -> None:
     #     duration (if active), most-recent reconnect duration in ms,
     #     seconds since last data, ping latency
     sections.append("--- WEBSOCKET HEALTH ---")
-    for label, ws in (("spot", ctx.ws_spot), ("futures", ctx.ws_futures)):
+    # 2026-05-14: spot WS removed; only futures (kline + forceOrder pools).
+    for label, ws in (("futures", ctx.ws_futures),):
         if ws is None:
             sections.append(f"  {label}: not configured")
             continue

@@ -441,11 +441,13 @@ class TestScanLoopBookTickerIntegration:
     async def test_global_book_ticker_called_when_ws_degraded(self):
         scanner = self._minimal_scanner()
 
+        # 2026-05-14: spot WS removed; degraded WS is detected solely via the
+        # futures manager.  Put the below-threshold ratio on ws_futures so the
+        # scanner's ``_ws_any_degraded_this_cycle`` flag fires.
         ws_mock = MagicMock()
-        ws_mock.is_healthy = True  # spot WS healthy
-        ws_mock.health_ratio = 0.3  # below WS_PARTIAL_HEALTH_THRESHOLD → partial degradation
-        scanner.ws_spot = ws_mock
-        scanner.ws_futures = MagicMock(is_healthy=True, health_ratio=1.0)
+        ws_mock.is_healthy = True
+        ws_mock.health_ratio = 0.3  # below WS_PARTIAL_HEALTH_THRESHOLD → degraded
+        scanner.ws_futures = ws_mock
 
         prefetch_calls = []
 
@@ -482,8 +484,7 @@ class TestScanLoopBookTickerIntegration:
         ws_mock = MagicMock()
         ws_mock.is_healthy = True
         ws_mock.health_ratio = 1.0  # fully healthy
-        scanner.ws_spot = ws_mock
-        scanner.ws_futures = MagicMock(is_healthy=True, health_ratio=1.0)
+        scanner.ws_futures = ws_mock
 
         prefetch_calls = []
 

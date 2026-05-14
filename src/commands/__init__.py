@@ -101,7 +101,6 @@ class CommandHandler:
         paused_channels: Set[str],
         confidence_overrides: Dict[str, float],
         scanner: Any,
-        ws_spot: Optional[Any],
         ws_futures: Optional[Any],
         tasks: List[asyncio.Task],
         boot_time: float,
@@ -129,7 +128,6 @@ class CommandHandler:
         self._paused_channels = paused_channels
         self._confidence_overrides = confidence_overrides
         self._scanner = scanner
-        self.ws_spot = ws_spot
         self.ws_futures = ws_futures
         self._tasks = tasks
         self.boot_time = boot_time
@@ -251,7 +249,6 @@ class CommandHandler:
             performance_tracker=self._performance_tracker,
             circuit_breaker=self._circuit_breaker,
             gem_scanner=self._gem_scanner,
-            ws_spot=self.ws_spot,
             ws_futures=self.ws_futures,
             restart_callback=self._restart_callback,
             ai_insight_fn=self._ai_insight_fn,
