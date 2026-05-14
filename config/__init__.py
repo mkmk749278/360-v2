@@ -119,19 +119,25 @@ def validate_critical_env_vars() -> None:
 # Binance endpoints
 # ---------------------------------------------------------------------------
 BINANCE_REST_BASE: str = os.getenv("BINANCE_REST_BASE", "https://api.binance.com")
-# WebSocket base URLs — use Binance's documented COMBINED-STREAM path
-# (``/stream``) rather than raw ``/ws``.  Per docs, ``/ws/<streamName>`` is
-# the single-stream endpoint; appending multiple streams onto it is not
-# documented and Binance Futures behaviour for that pattern has degraded
-# (silent partial-subscription drops observed 2026-05-13/14, evaluator
-# funnel showed 916 candidates generated and 0 emitted while connections
-# read as "healthy" because PING/PONG kept flowing).  Combined-stream
-# is the official path for multi-stream connections; payloads arrive
-# wrapped as ``{"stream": "<name>", "data": <rawPayload>}`` and the
-# message handler unwraps before dispatching.
-BINANCE_WS_BASE: str = os.getenv("BINANCE_WS_BASE", "wss://stream.binance.com:9443/stream")
+# WebSocket base URLs — use Binance's documented routed-path form
+# ``/market/stream`` per the 2023-12-15 "Important WebSocket Change Notice"
+# (legacy ``/ws`` and ``/stream`` decommissioned 2026-04-23).  Connections
+# without a routed path (``/public``, ``/market``, ``/private``) silently
+# refuse to forward streams belonging to ``/market`` (kline, aggTrade,
+# markPrice, forceOrder, ticker) — TCP+WS handshake succeeds but zero
+# application-layer data ever arrives.  Discovered 2026-05-14 after a
+# multi-hour bleeding incident where the engine connected cleanly but
+# received zero TEXT frames; mobile-IP verification confirmed it wasn't
+# our VPS specifically.
+#
+# All streams we subscribe to (``@kline_*``, ``@forceOrder``) belong to
+# the ``/market`` path, so a single base URL works for both kline + liq
+# managers.  ``_build_combined_stream_url`` defensively normalises any
+# legacy value here to always produce the documented form so an
+# env-override of the old path can't silently re-break this.
+BINANCE_WS_BASE: str = os.getenv("BINANCE_WS_BASE", "wss://stream.binance.com:9443/market/stream")
 BINANCE_FUTURES_REST_BASE: str = os.getenv("BINANCE_FUTURES_REST_BASE", "https://fapi.binance.com")
-BINANCE_FUTURES_WS_BASE: str = os.getenv("BINANCE_FUTURES_WS_BASE", "wss://fstream.binance.com/stream")
+BINANCE_FUTURES_WS_BASE: str = os.getenv("BINANCE_FUTURES_WS_BASE", "wss://fstream.binance.com/market/stream")
 
 # ---------------------------------------------------------------------------
 # Telegram

@@ -604,53 +604,69 @@ class WebSocketManager:
                 await asyncio.sleep(actual_delay)
 
     def _build_combined_stream_url(self, streams: List[str]) -> str:
-        """Build a Binance combined-stream WebSocket URL.
+        """Build a Binance combined-stream WebSocket URL on the ``/market`` routed path.
 
-        Per Binance docs:
-          - ``/ws/<single_stream>``          single-stream raw endpoint
-          - ``/stream?streams=<s1>/<s2>``    combined-stream endpoint
+        Per Binance docs (2023-12-15 "Important WebSocket Change Notice";
+        legacy URLs decommissioned 2026-04-23):
 
-        This manager always uses combined-stream because we subscribe to
-        many streams per connection.  The helper exists as a separate
-        method (rather than inline in ``_connect``) so test code can
-        exercise the URL construction without spinning up an aiohttp
-        session — see ``TestBuildCombinedStreamUrl``.
+          - ``/market/ws/<single_stream>``         single-stream raw, ``/market`` path
+          - ``/market/stream?streams=<s1>/<s2>``   combined-stream, ``/market`` path
+          - ``/public/...``, ``/private/...``      different routed paths
+
+        All streams this manager subscribes to (``@kline_*``, ``@forceOrder``,
+        ``@aggTrade``, ``@markPrice``, ``@ticker``) belong to the ``/market``
+        path.  Connections without a routed path silently refuse to forward
+        ``/market`` data — the TCP+WS handshake succeeds and the server
+        keeps the connection alive on PING/PONG, but zero application-layer
+        frames ever arrive.  That was the 2026-05-14 multi-hour blackout
+        root cause.
 
         Normalisation rules (defensive against env-override drift):
-          1. If ``_base_url`` ends in ``/ws`` or ``/stream``, strip it
-             and log a one-time warning if the stripped suffix was
-             ``/ws`` (legacy operators may still have that in .env).
-          2. Always append ``/stream?streams=<joined>``.
+          1. Strip a trailing slash for clean suffix matching.
+          2. Strip ANY recognised legacy suffix from the base URL:
+             ``/market/stream``, ``/market/ws``, ``/stream``, ``/ws``.
+          3. Always append ``/market/stream?streams=<joined>``.
 
-        Result: regardless of what ``BINANCE_FUTURES_WS_BASE`` is set
-        to in the env, the URL we hand to ``ws_connect`` is the
-        documented combined-stream form.
+        Result: regardless of what ``BINANCE_*_WS_BASE`` is set to in env
+        — old default, legacy ``/ws``, legacy ``/stream``, bare host, or
+        already-correct ``/market/stream`` — the URL we hand to
+        ``ws_connect`` is the documented routed-path combined-stream form.
+
+        Log a one-shot warning if the base URL came in with a pre-2026-04-23
+        legacy suffix so the operator knows to update ``.env`` (the code
+        path will keep working without the env update).
         """
         base = self._base_url
         # Strip a trailing slash so the suffix-check is unambiguous.
         if base.endswith("/"):
             base = base[:-1]
-        for legacy_suffix in ("/stream", "/ws"):
+        # Order matters: check longer suffixes before shorter ones so
+        # ``/market/stream`` matches before ``/stream`` would.
+        legacy_warn = False
+        for legacy_suffix in ("/market/stream", "/market/ws", "/stream", "/ws"):
             if base.endswith(legacy_suffix):
                 stripped = legacy_suffix
                 base = base[: -len(legacy_suffix)]
-                # Log once per process if we had to fix the legacy /ws
-                # path — operator should update .env eventually so the
-                # value matches the new config default.  Loguru
-                # dedups identical messages by record signature, so
-                # the warning emits at most once per reconnect cycle.
-                if stripped == "/ws" and not getattr(self, "_warned_legacy_ws_base", False):
-                    log.warning(
-                        "BINANCE_*_WS_BASE ({}) ends in /ws — auto-correcting to /stream "
-                        "(Binance combined-stream endpoint).  Update .env to silence this warning: "
-                        "BINANCE_FUTURES_WS_BASE=wss://fstream.binance.com/stream",
-                        self._label,
-                    )
-                    # Stamp the flag so subsequent reconnects don't spam.
-                    self._warned_legacy_ws_base = True
+                # Anything other than ``/market/stream`` is a pre-2026-04-23
+                # legacy path — warn so operator updates ``.env``.
+                if stripped != "/market/stream":
+                    legacy_warn = True
                 break
+        if legacy_warn and not getattr(self, "_warned_legacy_ws_base", False):
+            log.warning(
+                "BINANCE_*_WS_BASE ({}) uses a pre-2026-04-23 legacy path — "
+                "auto-correcting to /market/stream (Binance documented "
+                "routed-path combined-stream endpoint).  Streams belonging "
+                "to /market (kline, aggTrade, markPrice, forceOrder, ticker) "
+                "won't push data on unrouted connections.  Update .env to "
+                "silence this warning: BINANCE_FUTURES_WS_BASE="
+                "wss://fstream.binance.com/market/stream",
+                self._label,
+            )
+            # Stamp the flag so subsequent reconnects don't spam.
+            self._warned_legacy_ws_base = True
         stream_path = "/".join(streams)
-        return f"{base}/stream?streams={stream_path}"
+        return f"{base}/market/stream?streams={stream_path}"
 
     async def _connect(self, conn: WSConnection) -> None:
         assert self._session is not None
