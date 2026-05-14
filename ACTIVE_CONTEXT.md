@@ -6,6 +6,105 @@
 
 ## Current Phase
 
+**End-of-day 2026-05-14 — multi-hour WS blackout traced to a Binance path-migration deadline; new "real-data-first" diagnostic rule added to CLAUDE.md.** This session spent most of its hours on a single bug chain that turned out to be a vendor-API change we missed, plus a few hours of operational work on yesterday's #380 fallout. Recovered by end of day. Engine receiving 57K+ TEXT frames in 3 min post-fix.
+
+### 1. Engine emission-blackout root cause: Binance `/market/` routed path (PR #394)
+
+Binance Futures decommissioned legacy WebSocket paths (`/ws`, `/stream`) on 2026-04-23 per the 2023-12-15 "Important WebSocket Change Notice." Connections without a routed path (`/public`, `/market`, `/private`) silently refuse to forward `/market` streams — TCP+WS handshake succeeds, PING/PONG keeps the connection alive, but zero application-layer frames ever arrive. All streams this engine subscribes to (`@kline_*`, `@forceOrder`) belong to `/market`.
+
+We discovered this only after burning six prior PRs trying to fix the symptom from the codebase. The actual fix:
+
+- New URL form: `wss://fstream.binance.com/market/stream?streams=<s1>/<s2>/...`
+- `WebSocketManager._build_combined_stream_url` normalises any pre-2026-04-23 legacy suffix (`/ws`, `/stream`, `/market/ws`) back to the documented `/market/stream` form, so env drift can't silently re-break this.
+- 10-test coverage in `TestBuildCombinedStreamUrl` includes a pinning test on the config defaults so a future revert can't slip through.
+
+**Result:** 09:46-09:51 UTC trace pull post-deploy shows:
+- `stream_summary conn=0 active=200/200 silent=0 never_seen=0 msg_types=TEXT=57070` (in ~3 min)
+- `stream_summary conn=1 active=100/100 silent=0 never_seen=0 msg_types=TEXT=14051`
+- `futures_liq active=10-14/75` (forceOrder only fires on real liquidations — `never_seen` for symbols with no recent liq is expected; growing as more pairs see liquidations)
+- "No silent alert since boot" (owner-confirmed)
+- Engine resuming signal emission
+
+### 2. Six prior PRs that found real bugs along the way (but not THE bug)
+
+Necessary debug instrumentation that surfaced the data needed to find the actual root cause:
+
+| PR | Bug fixed | Why it didn't fix the blackout |
+|---|---|---|
+| #387 | Dormant spot WS scaffolding | Hygiene — spot manager was a no-op already; cleanup made code clearer for the bug-hunt |
+| #388 | URL form `/ws/s1/s2/...` (path-component concat) | Right direction (combined-stream), wrong endpoint — `/stream` is also legacy post-2026-04-23 |
+| #389 + #390 | WS trace log to file + `/ws_log` Telegram pull + duplicate-logger-configure sink-survival hotfix | Made the bug visible — without the trace, we'd still be guessing |
+| #391 | Defensive URL normalization | Framework was correct; just normalising to the wrong target path |
+| #392 + (regression test in same PR) | `_health_check_loop` was defined but never scheduled — PR #386 + #389 features were dead in prod | Made `stream_summary` actually fire, surfaced `never_seen=ALL` pattern |
+| #393 | Raw-message sampling + BINARY/gzip frame handler + per-msg-type counts | Confirmed `msg_types=(none)` — definitive proof no application data of any type was arriving |
+| **#394** | **`/market/` routed path** | **Actual root cause — the API path change.** |
+
+The chain wasn't wasted work — each PR's instrumentation gave us the next layer of evidence. But six PRs could have been one if we'd checked Binance's changelog first.
+
+### 3. Yesterday's #380 fallout + Lumin position-state desync (PRs #382, #385)
+
+Started the day recovering yesterday's auto-trade VPS-proxy revert (#382). Then surfaced a position-state desync where Lumin app showed positions ACTIVE that had clearly hit SL on Binance — same root WS bug, but visible to users via the Trade tab. Shipped:
+
+- **PR #382** (revert #380) — engine recovered from 24h boot kill (~30s after merge auto-deployed). 90% of the work was diagnostic; revert itself was 5 lines.
+- **PR #385** (`/internal/diag/positions`) — engine-side endpoint surfacing `(signal_id, symbol, status, stored SL, candle_1m_high/low, candle_1m_age_sec, sl_breach_distance_pct)` per active signal. Owner-tier auth, defensive at builder + endpoint level. Designed to be consumed by the 360 CE Ops dashboard `/positions` view (queued).
+- 360 CE Ops PR #3 (companion dashboard view) — opened in `360ce-ops` repo, not yet merged.
+
+### 4. New diagnostic rule added to CLAUDE.md: "Real-data-first diagnosis"
+
+The owner-flagged lesson from this session: **when subscriber-visible symptoms appear at a vendor-API boundary, check the vendor's changelog / deprecation announcements BEFORE patching engine code.** Codified in a new dedicated CLAUDE.md section between "Telemetry & Diagnosis" and "What Requires Owner Sign-off," with a corresponding line added to "Hard Limits — Never Negotiable":
+
+> Never start patching engine code in response to a vendor-API symptom before checking the vendor's changelog + recent announcements.
+
+Specific diagnostic order of operations in the new section:
+
+1. Read the wire (real data from prod via Telegram-deliverable log / diag)
+2. Check vendor changelog (`developers.binance.com/docs/derivatives/change-log` etc.)
+3. Search vendor announcements (`binance.com/en/support/announcement`)
+4. Verify externally (different IP / browser-based tester) — distinguishes "our code/IP wrong" from "vendor degraded globally"
+5. THEN consider code-side fixes
+
+This rule retroactively explains why this session's debug loop was so long: every step assumed the bug was in our code because that's where the symptoms appeared. The rule prevents the next session from repeating the loop.
+
+### Telemetry / observability now in place (carried forward as live tooling)
+
+- `/internal/diag/positions` endpoint (PR #385) — operator X-ray of TradeMonitor's view of every active signal
+- `logs/ws_trace.log` with dedicated loguru sink (PR #389 + #390 hotfix) — captures every WS lifecycle event tagged `<WS:LABEL>` with `connect_start`, `connect_success`, `connect_fail`, `first_data`, `subscribe_ack`, `subscribe_error`, `close_received`, `error_received`, `watchdog_force_close`, `health_force_close`, `per_symbol_force_close`, `stream_summary`, `raw_sample`
+- `/ws_log` Telegram command (PR #389) — pulls the trace file as a Telegram document; `/ws_log <N>` for last N lines
+- `_health_check_loop` actually scheduled (PR #392) — per-symbol staleness + msg-rate force-close + periodic `stream_summary` now run for real
+- BINARY/gzip frame handler (PR #393) — defensive against future Binance binary-encoded variants
+
+These survived the incident and are valuable steady-state. Don't rip them out.
+
+### Open follow-ups / next-session queue (priority order)
+
+1. **Verify Lumin Trade tab shows clean state** — after #394's data flow resumed, positions should now update correctly. Owner to confirm visually.
+2. **`deploy.yml` concurrency block** (5 LOC PR) — prevents the triple-merge cascade we hit yesterday on PR #383/#384/#385.
+3. **Cleanup duplicate logger configure** — both `src/utils.py` and `src/logger.py` call `_loguru_logger.remove()`; PR #390 hotfixed the immediate bug but unification is queued.
+4. **Forensic on #380 boot failure** — what specifically about the auto-trade-VPS-proxy PR killed engine boot. Informs CI smoke test design.
+5. **CI smoke test for engine boot** — `docker compose up engine → curl /api/health → assert 200` in 60s. Would have caught #380 in CI; informed by #4.
+6. **`360 CE Ops` PR #3 merge** — companion dashboard view consuming PR #385's `/internal/diag/positions` endpoint.
+
+Week 2 backlog (architectural):
+
+- Split `trade_monitor.py` (1656 LOC god-object) into `monitor/poll.py` + `monitor/evaluate.py` + `monitor/lifecycle.py`
+- Reorganize `src/` into subpackages (`signal/`, `lifecycle/`, `observability/`, `exchange/`)
+- Establish PR discipline rules: ≤500 LOC, smoke test required, "what regresses if this breaks" line in every body
+
+VPS state after this session:
+
+- Engine running on PR #394 code (post-2026-04-23 routed-path URL form)
+- All 300 kline streams active across 2 connections (200/100 split)
+- forceOrder streams progressively populating `stream_data_ts` as liquidations occur
+- `.env` may still contain pre-2026-04-23 legacy values for `BINANCE_*_WS_BASE`; the code normaliser handles this and logs a one-shot warning on each manager. Update `.env` to silence:
+  ```
+  BINANCE_FUTURES_WS_BASE=wss://fstream.binance.com/market/stream
+  BINANCE_WS_BASE=wss://stream.binance.com:9443/market/stream
+  ```
+
+---
+
+## Previous Phase
+
 **End-of-day 2026-05-12 — engine recovered from 24h blackout, Telegram OTP shipped, identity-flow doctrine pivoted.** This session ran ~12 hours and resolved three things in sequence:
 
 ### 1. Engine emission-blackout: diagnosed → fixed → live (PRs #373 + #374)

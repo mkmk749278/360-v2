@@ -158,6 +158,31 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
 
 ---
 
+## Real-data-first diagnosis (added 2026-05-14)
+
+**When subscriber-visible symptoms appear at a vendor-API boundary (Binance WS/REST, Telegram, OpenAI, AuthKey, etc.), check the vendor's changelog / deprecation announcements BEFORE patching engine code.**
+
+This is a hard-won rule from the 2026-05-14 WS blackout incident, where six PRs (#387–#393) were spent patching the WS layer in response to "connect succeeds but zero TEXT frames arrive" — when the actual cause was a Binance path-migration deadline that had passed three weeks earlier (legacy `/ws` and `/stream` decommissioned 2026-04-23, all `/market` streams now silently refused on unrouted connections). PR #394 fixed it in 40 LOC; the prior six were necessary debug instrumentation but didn't address the actual bug.
+
+The diagnostic order of operations:
+
+1. **Read the wire** — get real data from prod (Telegram-deliverable log file, /diag, /ws_log). Don't theorize from inside the codebase.
+2. **Check the vendor's changelog** — Binance has a public Change Log at `developers.binance.com/docs/derivatives/change-log`. Search for "WebSocket", "deprecation", "decommission", and any recent date close to when the symptom started.
+3. **Search the vendor's announcements** — `binance.com/en/support/announcement` for system-upgrade notices.
+4. **Verify externally** — if the API itself seems broken, test from a different IP (mobile data, another VPS, browser-based WebSocket tester). Distinguishes "our code/IP is wrong" from "vendor degraded globally" in one step.
+5. **THEN consider code-side fixes** — only after the above rules out vendor-side cause.
+
+Specific anti-patterns the 2026-05-14 incident produced (and the prior rule prevents):
+
+- Assuming the symptom location is the bug location ("WS feed is silent → WS code must be wrong")
+- Shipping defensive instrumentation PRs without checking if the vendor's API contract changed
+- Reading our docs (CLAUDE.md, code comments) before reading the vendor's docs
+- Multi-hour debug loops that could have been a 5-minute web search
+
+If the change date is more than 30 days old and matches when symptoms started, **the vendor change is almost certainly the cause** — fix accordingly and write a regression test that pins the new contract so a future env-override or refactor can't silently re-break it.
+
+---
+
 ## What Requires Owner Sign-off Before Coding
 
 - New evaluator paths or scoring models
@@ -173,6 +198,7 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
 - Never silence a detected problem
 - Never route signals to unconfigured channels
 - Never push to `main` directly or bypass the PR workflow
+- Never start patching engine code in response to a vendor-API symptom before checking the vendor's changelog + recent announcements (see "Real-data-first diagnosis" above)
 
 ---
 
