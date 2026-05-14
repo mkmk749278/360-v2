@@ -569,14 +569,79 @@ class WebSocketManager:
                     )
                 await asyncio.sleep(actual_delay)
 
+    def _build_combined_stream_url(self, streams: List[str]) -> str:
+        """Build a Binance combined-stream WebSocket URL.
+
+        Per Binance docs:
+          - ``/ws/<single_stream>``          single-stream raw endpoint
+          - ``/stream?streams=<s1>/<s2>``    combined-stream endpoint
+
+        This manager always uses combined-stream because we subscribe to
+        many streams per connection.  The helper exists as a separate
+        method (rather than inline in ``_connect``) so test code can
+        exercise the URL construction without spinning up an aiohttp
+        session — see ``TestBuildCombinedStreamUrl``.
+
+        Normalisation rules (defensive against env-override drift):
+          1. If ``_base_url`` ends in ``/ws`` or ``/stream``, strip it
+             and log a one-time warning if the stripped suffix was
+             ``/ws`` (legacy operators may still have that in .env).
+          2. Always append ``/stream?streams=<joined>``.
+
+        Result: regardless of what ``BINANCE_FUTURES_WS_BASE`` is set
+        to in the env, the URL we hand to ``ws_connect`` is the
+        documented combined-stream form.
+        """
+        base = self._base_url
+        # Strip a trailing slash so the suffix-check is unambiguous.
+        if base.endswith("/"):
+            base = base[:-1]
+        for legacy_suffix in ("/stream", "/ws"):
+            if base.endswith(legacy_suffix):
+                stripped = legacy_suffix
+                base = base[: -len(legacy_suffix)]
+                # Log once per process if we had to fix the legacy /ws
+                # path — operator should update .env eventually so the
+                # value matches the new config default.  Loguru
+                # dedups identical messages by record signature, so
+                # the warning emits at most once per reconnect cycle.
+                if stripped == "/ws" and not getattr(self, "_warned_legacy_ws_base", False):
+                    log.warning(
+                        "BINANCE_*_WS_BASE ({}) ends in /ws — auto-correcting to /stream "
+                        "(Binance combined-stream endpoint).  Update .env to silence this warning: "
+                        "BINANCE_FUTURES_WS_BASE=wss://fstream.binance.com/stream",
+                        self._label,
+                    )
+                    # Stamp the flag so subsequent reconnects don't spam.
+                    self._warned_legacy_ws_base = True
+                break
+        stream_path = "/".join(streams)
+        return f"{base}/stream?streams={stream_path}"
+
     async def _connect(self, conn: WSConnection) -> None:
         assert self._session is not None
-        # Combined-stream URL per Binance docs.  See PR #388 for the full
-        # rationale; the short form is "/ws/<s1>/<s2>/..." was unofficial
-        # and Binance Futures silently dropped subscriptions beyond the
-        # first stream.  /stream?streams=... is documented.
-        stream_path = "/".join(conn.streams)
-        url = f"{self._base_url}?streams={stream_path}"
+        # Combined-stream URL per Binance docs.  See PR #388 for the
+        # initial rationale; the short form is "/ws/<s1>/<s2>/..." was
+        # unofficial and Binance Futures silently dropped subscriptions
+        # beyond the first stream.  /stream?streams=... is documented.
+        #
+        # 2026-05-14 trace data revealed the env-override trap: prod
+        # `.env` on the VPS had ``BINANCE_FUTURES_WS_BASE=
+        # wss://fstream.binance.com/ws`` (the legacy value) which
+        # overrode the new config default.  Resulting URLs were
+        # ``/ws?streams=btcusdt@kline_1m/...`` — Binance accepted the
+        # TCP+WS handshake on /ws but then ignored the ?streams= query
+        # (the /ws endpoint takes the stream name as a PATH suffix, not
+        # a query string), leaving the connection subscribed to
+        # NOTHING.  Trace showed connect_success followed by 305 s of
+        # zero frames on both connections before the watchdog tripped.
+        #
+        # Defensive normalisation: regardless of what ``_base_url`` is
+        # set to (e.g. ``.../ws`` legacy, ``.../stream`` correct,
+        # or no trailing path at all), strip any trailing ``/ws`` or
+        # ``/stream`` and always re-append ``/stream``.  Output is
+        # guaranteed to be the documented combined-stream form.
+        url = self._build_combined_stream_url(conn.streams)
 
         # WS-trace: stamp the connect attempt with conn index, label,
         # stream count, and the URL prefix so the operator can correlate
