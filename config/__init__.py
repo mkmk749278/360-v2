@@ -1075,7 +1075,14 @@ WS_RECONNECT_MAX_DELAY: float = 60.0
 # futures value also breaks the exact 600 s = WS_ALERT_COOLDOWN coincidence
 # that was causing the repeating 10-minute drop/alert cycle.
 WS_STALENESS_MULTIPLIER: int = 10  # spot
-WS_STALENESS_MULTIPLIER_FUTURES: int = _safe_int("WS_STALENESS_MULTIPLIER_FUTURES", "15")
+# Futures WS staleness multiplier — 2026-05-14 dropped from 15 to 5 after a 13h
+# emission blackout where conn[0]/conn[1] sat at sec_since_last_msg≈12 min under
+# a 900 s (60×15) threshold that never tripped before subscriber-visible silence
+# became hours.  60 s × 5 = 300 s = 5 min: aggressive enough to catch the
+# silent-but-pingable failure mode the May 12 diag first surfaced, while still
+# leaving 2-3 min reconnect buffer for 200-stream resubscription cycles
+# (per the WS_REST_FALLBACK_ALERT_GRACE_SEC docstring on live evidence).
+WS_STALENESS_MULTIPLIER_FUTURES: int = _safe_int("WS_STALENESS_MULTIPLIER_FUTURES", "5")
 # Admin alert dedup window (seconds) — alerts are throttled to at most one per
 # 10-minute window per manager to avoid Telegram spam during prolonged outages.
 WS_ALERT_COOLDOWN: int = _safe_int("WS_ALERT_COOLDOWN", "600")
@@ -1576,6 +1583,37 @@ WS_RECONNECT_FAIL_ALERT_THRESHOLD: int = int(
 WS_HEALTH_CHECK_INTERVAL: int = _safe_int("WS_HEALTH_CHECK_INTERVAL", "30")
 #: Minimum message rate (messages/minute) below which a connection is flagged unhealthy.
 WS_MIN_MESSAGE_RATE: float = _safe_float("WS_MIN_MESSAGE_RATE", "1.0")
+#: How long a connection must stay below ``WS_MIN_MESSAGE_RATE`` before the
+#: health-check loop force-closes it to trigger reconnect.  2026-05-14: added
+#: to make the previously-passive ``_health_check_loop`` actually act on the
+#: low-rate signal.  Without this, the loop logged "low message rate" forever
+#: while the futures connection sat in silent-but-pingable state.  90 s gives
+#: enough window to absorb a single missed kline frame without churning.
+WS_LOW_MSGRATE_FORCE_CLOSE_AFTER_SEC: int = _safe_int(
+    "WS_LOW_MSGRATE_FORCE_CLOSE_AFTER_SEC", "90"
+)
+#: Skip the health-check force-close for connections that have been open less
+#: than this many seconds.  Prevents post-reconnect churn while the new
+#: connection is still in its resubscribe phase (200 streams typically take
+#: 30-60 s before kline data begins arriving).
+WS_HEALTH_CHECK_MIN_CONN_AGE_SEC: int = _safe_int(
+    "WS_HEALTH_CHECK_MIN_CONN_AGE_SEC", "120"
+)
+#: Per-symbol kline staleness threshold (seconds).  Per-connection health is
+#: necessary but not sufficient — a "healthy" connection can have a subset of
+#: subscribed symbol streams silent inside it.  Every health-check cycle we
+#: read ``data_store.last_kline_age_seconds(symbol, "1m")`` for each subscribed
+#: symbol; symbols with age above this threshold are counted as stale.
+WS_PER_SYMBOL_STALENESS_THRESHOLD_SEC: float = _safe_float(
+    "WS_PER_SYMBOL_STALENESS_THRESHOLD_SEC", "180"
+)
+#: Fraction of subscribed symbols that must be stale (per above threshold)
+#: before the manager force-closes ALL its connections to trigger a full
+#: resubscribe.  Set conservatively at 0.5 so a few low-volume coins don't
+#: trigger reconnects on their own.
+WS_PER_SYMBOL_STALENESS_RATIO: float = _safe_float(
+    "WS_PER_SYMBOL_STALENESS_RATIO", "0.5"
+)
 #: Pairs that get dedicated (non-multiplexed) WebSocket connections for lowest latency.
 WS_PRIORITY_DEDICATED_PAIRS: List[str] = [
     p.strip() for p in os.getenv(

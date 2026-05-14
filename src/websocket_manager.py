@@ -30,10 +30,14 @@ from config import (
     WS_FALLBACK_POLL_INTERVALS,
     WS_FALLBACK_TIMEFRAMES,
     WS_HEALTH_CHECK_INTERVAL,
+    WS_HEALTH_CHECK_MIN_CONN_AGE_SEC,
     WS_HEARTBEAT_INTERVAL,
     WS_HEARTBEAT_INTERVAL_FUTURES,
+    WS_LOW_MSGRATE_FORCE_CLOSE_AFTER_SEC,
     WS_MAX_STREAMS_PER_CONN,
     WS_MIN_MESSAGE_RATE,
+    WS_PER_SYMBOL_STALENESS_RATIO,
+    WS_PER_SYMBOL_STALENESS_THRESHOLD_SEC,
     WS_PING_TIMEOUT_MS,
     WS_RECONNECT_BASE_DELAY,
     WS_RECONNECT_FAIL_ALERT_THRESHOLD,
@@ -64,7 +68,19 @@ class WSConnection:
     ping_latency_ms: float = 0.0  # RTT (ms) of the most recent completed ping/pong
     # Health monitoring fields (used by _health_check_loop)
     health_check_ts: float = 0.0   # last time a health check snapshot was taken
-    health_msg_count: int = 0      # messages received since last health check
+    health_msg_count: int = 0      # TEXT messages received since last health check
+    # Wall-clock monotonic timestamp set when this connection's WS handshake
+    # completed.  Used by the health-check loop's min-conn-age guard so a
+    # freshly-reconnected connection doesn't get force-closed during its
+    # 30-60 s resubscribe window (200 streams take that long to begin
+    # delivering kline frames after the WS handshake).
+    connected_ts: float = 0.0
+    # Monotonic timestamp at which the connection first dropped below
+    # ``WS_MIN_MESSAGE_RATE``.  Cleared as soon as rate recovers.  When this
+    # remains set for ``WS_LOW_MSGRATE_FORCE_CLOSE_AFTER_SEC`` seconds the
+    # health-check loop force-closes the connection.  Pattern matches
+    # ``degraded_since`` so it composes cleanly with /diag reporting.
+    low_msgrate_since: float = 0.0
     # Reconnect-duration instrumentation (Phase 1, 2026-05-08).
     # ``degraded_since`` stamps monotonic time when the connection went
     # degraded; cleared when it goes healthy again.  ``last_reconnect_ms``
@@ -106,6 +122,11 @@ class WebSocketManager:
         self._ws_rest_fallback_count: int = 0
         self._ws_reconnection_count: int = 0
         self._connection_message_rates: Dict[int, float] = {}  # conn_index -> msgs/min
+        # Per-key alert dedup window — keyed by the alert source
+        # (e.g. ``low_msgrate:<idx>``, ``per_symbol_stale``) so the
+        # data-staleness paths don't compete with the REST-fallback path
+        # over a single ``_last_alert_time`` slot.
+        self._alert_keyed_ts: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -551,6 +572,14 @@ class WebSocketManager:
         # own the False→True→False state machine fixes it.
         conn.last_ping_time = 0.0
         conn.ping_latency_ms = 0.0
+        # Reset the data-flow staleness state on fresh connect.  ``connected_ts``
+        # protects the health-check loop from force-closing a connection in its
+        # resubscribe phase; ``low_msgrate_since`` is cleared so a previous
+        # connection's stale state doesn't trip the new connection on its first
+        # health-check tick.
+        conn.connected_ts = time.monotonic()
+        conn.low_msgrate_since = 0.0
+        conn.health_msg_count = 0
         self._subscribed_streams.update(conn.streams)
         log.info("Connected WS: {} streams", len(conn.streams))
 
@@ -561,6 +590,13 @@ class WebSocketManager:
                 # Any incoming data message proves the connection is alive;
                 # update last_pong so is_healthy reflects real liveness.
                 conn.last_pong = time.monotonic()
+                # Count this towards the health-check loop's msgs-per-min
+                # window.  Prior to 2026-05-14 this counter was declared on
+                # WSConnection but never incremented, so ``_health_check_loop``
+                # always read rate=0 and logged "low message rate" forever
+                # without taking action.  Increment-on-TEXT (not on PING/PONG)
+                # so the rate truly reflects kline-data flow.
+                conn.health_msg_count += 1
                 try:
                     data = json.loads(msg.data)
                     await self._on_message(data)
@@ -804,25 +840,201 @@ class WebSocketManager:
         return healthy / len(self._connections)
 
     async def _health_check_loop(self) -> None:
-        """Periodically assess connection message rates and flag stale connections."""
+        """Periodically assess data-flow health and force-close silent connections.
+
+        Two independent checks run every ``WS_HEALTH_CHECK_INTERVAL`` (default
+        30 s):
+
+        1. **Per-connection low-rate check** — message rate (msgs/min) computed
+           over the elapsed window.  When it stays below
+           ``WS_MIN_MESSAGE_RATE`` for ``WS_LOW_MSGRATE_FORCE_CLOSE_AFTER_SEC``
+           (default 90 s) continuous, force-close so ``_run_connection``
+           reconnects.  This catches the silent-but-pingable failure mode:
+           aiohttp's heartbeat keeps the socket alive on PING/PONG even when
+           TEXT frames have stopped arriving, so the ``last_pong``-based
+           ``_health_watchdog`` is fooled.  Increment-on-TEXT in ``_listen``
+           gives the actionable signal.
+
+        2. **Per-symbol staleness check** — when a ``data_store`` is wired,
+           read ``last_kline_age_seconds(symbol, "1m")`` for each subscribed
+           symbol and count those above
+           ``WS_PER_SYMBOL_STALENESS_THRESHOLD_SEC`` (default 180 s) as stale.
+           When the stale ratio exceeds ``WS_PER_SYMBOL_STALENESS_RATIO``
+           (default 0.5), force-close all connections.  This catches the case
+           where a connection's aggregate rate is acceptable but a majority
+           of individual symbol streams have gone silent inside it — e.g.,
+           Binance reusing the WS but quietly dropping a subset of streams
+           after a network blip.
+
+        Both checks honor a ``WS_HEALTH_CHECK_MIN_CONN_AGE_SEC`` (default 120 s)
+        guard so a freshly-reconnected connection isn't churned during the
+        30-60 s resubscribe window before kline data begins arriving.
+
+        Admin Telegram alert fires on every force-close, throttled by
+        ``WS_ALERT_COOLDOWN`` (shared with the REST-fallback alert path) so
+        prolonged outages don't spam.
+        """
         while self._running:
             await asyncio.sleep(WS_HEALTH_CHECK_INTERVAL)
             if not self._connections:
                 continue
             now = time.monotonic()
+
+            # ---- Per-connection low message-rate check ----
             for idx, conn in enumerate(self._connections):
+                if conn.ws is None or conn.ws.closed:
+                    # Connection is already dead; reset counters and skip.
+                    conn.health_check_ts = now
+                    conn.health_msg_count = 0
+                    conn.low_msgrate_since = 0.0
+                    self._connection_message_rates[idx] = 0.0
+                    continue
+
                 elapsed = now - conn.health_check_ts if conn.health_check_ts > 0 else now
                 msg_count = conn.health_msg_count
-                if elapsed > 0:
-                    rate = (msg_count / elapsed) * 60.0  # msgs/min
-                else:
-                    rate = 0.0
+                rate = (msg_count / elapsed) * 60.0 if elapsed > 0 else 0.0
                 self._connection_message_rates[idx] = rate
-                if rate < WS_MIN_MESSAGE_RATE and conn.ws is not None and not conn.ws.closed:
-                    log.info(
-                        "WS connection {} ({}) has low message rate {:.2f} msgs/min — flagging unhealthy",
-                        idx, self._label, rate,
-                    )
-                # Reset counters for next interval
+
+                # Skip newly-connected connections — give them time to
+                # resubscribe before judging their throughput.
+                conn_age = now - conn.connected_ts if conn.connected_ts > 0 else 0.0
+                under_age = conn_age < WS_HEALTH_CHECK_MIN_CONN_AGE_SEC
+
+                if rate < WS_MIN_MESSAGE_RATE:
+                    if conn.low_msgrate_since == 0.0:
+                        conn.low_msgrate_since = now
+                    low_for = now - conn.low_msgrate_since
+                    if not under_age and low_for >= WS_LOW_MSGRATE_FORCE_CLOSE_AFTER_SEC:
+                        log.warning(
+                            "Health-check: WS conn[{}] ({}) silent for {:.0f}s "
+                            "(rate={:.2f} msgs/min, threshold={:.2f}) — force-closing to trigger reconnect",
+                            idx, self._label, low_for, rate, WS_MIN_MESSAGE_RATE,
+                        )
+                        await self._alert_admin_throttled(
+                            f"WS {self._label} conn[{idx}] data-silent {low_for:.0f}s "
+                            f"({rate:.2f} msgs/min) — forcing reconnect",
+                            alert_key=f"low_msgrate:{idx}",
+                        )
+                        try:
+                            await conn.ws.close()
+                        except Exception as exc:
+                            log.debug("Force-close exception (ignored): {}", exc)
+                        conn.low_msgrate_since = 0.0
+                else:
+                    # Rate recovered — clear the timer.
+                    conn.low_msgrate_since = 0.0
+
+                # Reset rolling counters for the next window
                 conn.health_check_ts = now
                 conn.health_msg_count = 0
+
+            # ---- Per-symbol staleness check ----
+            # Runs only when the manager was wired with a ``data_store``
+            # (HistoricalDataStore-like) that exposes
+            # ``last_kline_age_seconds(symbol, interval)``.  The check is
+            # whole-manager, not per-connection, because a stale-symbol
+            # majority signal usually means the upstream WS feed is dropping
+            # a subset of streams across the whole session; restarting just
+            # one connection doesn't help.
+            await self._check_per_symbol_staleness(now)
+
+    async def _check_per_symbol_staleness(self, now_mono: float) -> None:
+        """Force-close all connections when too many symbols have stale klines.
+
+        Separated from ``_health_check_loop`` to keep the loop body readable
+        and to make this leg independently mockable in tests.
+        """
+        store = self._data_store
+        if store is None:
+            return
+        age_fn = getattr(store, "last_kline_age_seconds", None)
+        if not callable(age_fn):
+            return
+
+        # Symbols are the kline streams' first segment, e.g. "btcusdt@kline_1m"
+        # → "BTCUSDT".  Use the union of subscribed streams across all
+        # connections so a disabled connection's symbols aren't double-counted.
+        symbols: Set[str] = set()
+        for conn in self._connections:
+            for stream in conn.streams:
+                head = stream.split("@", 1)[0]
+                if head:
+                    symbols.add(head.upper())
+        if not symbols:
+            return
+
+        threshold = WS_PER_SYMBOL_STALENESS_THRESHOLD_SEC
+        stale_count = 0
+        for symbol in symbols:
+            try:
+                age = age_fn(symbol, "1m")
+            except Exception:
+                continue
+            if age is None:
+                # Never recorded — count as stale only if the manager has been
+                # alive long enough that we should have seen a frame by now.
+                # Use the same min-conn-age guard so a fresh boot doesn't
+                # immediately trip on never-seen-data symbols.
+                stale_count += 1
+                continue
+            if age > threshold:
+                stale_count += 1
+
+        ratio = stale_count / len(symbols)
+        if ratio < WS_PER_SYMBOL_STALENESS_RATIO:
+            return
+
+        # Skip the action if every connection is still under min-conn-age —
+        # we'd just churn a fresh reconnect that hasn't had time to deliver.
+        all_under_age = all(
+            (now_mono - c.connected_ts) < WS_HEALTH_CHECK_MIN_CONN_AGE_SEC
+            for c in self._connections
+            if c.connected_ts > 0
+        )
+        if all_under_age:
+            return
+
+        log.warning(
+            "Per-symbol staleness: {}/{} ({:.0%}) of {} symbols stale "
+            "(threshold={:.0f}s, ratio_threshold={:.0%}) — force-closing all conns",
+            stale_count, len(symbols), ratio, self._label,
+            threshold, WS_PER_SYMBOL_STALENESS_RATIO,
+        )
+        await self._alert_admin_throttled(
+            f"WS {self._label} per-symbol stale: {stale_count}/{len(symbols)} "
+            f"symbols silent >{threshold:.0f}s — forcing all-conn reconnect",
+            alert_key="per_symbol_stale",
+        )
+        for conn in self._connections:
+            if conn.ws is not None and not conn.ws.closed:
+                try:
+                    await conn.ws.close()
+                except Exception as exc:
+                    log.debug("Force-close exception (ignored): {}", exc)
+
+    async def _alert_admin_throttled(self, message: str, *, alert_key: str) -> None:
+        """Send an admin Telegram alert with per-key throttling.
+
+        Uses ``self._alert_keyed_ts[alert_key]`` so the data-staleness paths
+        (low_msgrate:N, per_symbol_stale) dedup independently from the
+        REST-fallback path (which uses ``_last_alert_time`` /
+        ``_last_rest_fallback_alert_time``).  When no callback is wired
+        (tests, or admin-alerts disabled) this is a noop.
+        """
+        if self._admin_alert is None:
+            return
+        now = time.monotonic()
+        last = self._alert_keyed_ts.get(alert_key)
+        # ``last is None`` means never-alerted-yet for this key.  Always let
+        # the first alert through — otherwise an alert that fires within the
+        # first ``WS_ALERT_COOLDOWN`` seconds of process boot would compare
+        # against last=0.0 with ``now`` still small from a fresh monotonic
+        # clock, suppressing the very alert that mattered most (boot-time
+        # WS failures).
+        if last is not None and (now - last) < WS_ALERT_COOLDOWN:
+            return
+        self._alert_keyed_ts[alert_key] = now
+        try:
+            await self._admin_alert(message)
+        except Exception as exc:
+            log.debug("admin_alert exception (ignored): {}", exc)
