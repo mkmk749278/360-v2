@@ -2167,6 +2167,109 @@ class TestWsLogCommand:
 # AFTER both modules have configured must still reach the trace file.
 
 
+# ---------------------------------------------------------------------------
+# URL normalization — defends against env-override drift (2026-05-14)
+# ---------------------------------------------------------------------------
+#
+# Prod trace log revealed that BINANCE_FUTURES_WS_BASE was env-overridden
+# to the legacy "wss://fstream.binance.com/ws" value (which predates
+# PR #388's switch to /stream).  Resulting URLs were
+# ``/ws?streams=...`` — Binance accepted the TCP+WS handshake but
+# ignored the ?streams= query parameter at the /ws path, leaving the
+# connection subscribed to NOTHING.  ``_build_combined_stream_url``
+# normalises any trailing /ws or /stream to always produce
+# ``<host>/stream?streams=<s1>/<s2>/...`` regardless of env value.
+
+
+class TestBuildCombinedStreamUrl:
+    """Verify URL construction is correct regardless of how
+    ``BINANCE_FUTURES_WS_BASE`` is configured in .env."""
+
+    def _make_ws(self, base_url: str):
+        async def handler(data):
+            pass
+        ws = WebSocketManager(handler, market="futures")
+        ws._base_url = base_url
+        return ws
+
+    def test_legacy_ws_path_gets_normalized(self):
+        """Operator's prod .env had ``wss://fstream.binance.com/ws`` —
+        the legacy single-stream path.  Builder strips /ws and appends
+        /stream."""
+        ws = self._make_ws("wss://fstream.binance.com/ws")
+        url = ws._build_combined_stream_url(["btcusdt@kline_1m", "ethusdt@kline_1m"])
+        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m/ethusdt@kline_1m"
+        # And the operator-facing warning got stamped
+        assert getattr(ws, "_warned_legacy_ws_base", False) is True
+
+    def test_correct_stream_path_preserved(self):
+        """If env is already correct, no normalization shows in output."""
+        ws = self._make_ws("wss://fstream.binance.com/stream")
+        url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
+        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m"
+        # /stream path is correct — no legacy-ws warning fires
+        assert getattr(ws, "_warned_legacy_ws_base", False) is False
+
+    def test_no_trailing_path_still_works(self):
+        """Edge case: env set to bare host (no path).  Builder still
+        appends /stream."""
+        ws = self._make_ws("wss://fstream.binance.com")
+        url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
+        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m"
+
+    def test_trailing_slash_handled(self):
+        """Edge case: ``wss://fstream.binance.com/`` — the trailing
+        slash shouldn't produce ``//stream``."""
+        ws = self._make_ws("wss://fstream.binance.com/")
+        url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
+        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m"
+
+    def test_trailing_ws_with_slash(self):
+        """Edge case: ``wss://fstream.binance.com/ws/`` — trailing slash
+        after /ws still triggers normalization."""
+        ws = self._make_ws("wss://fstream.binance.com/ws/")
+        url = ws._build_combined_stream_url(["btcusdt@kline_1m"])
+        # /ws/ → strip slash → /ws → strip /ws → empty → append /stream
+        assert url == "wss://fstream.binance.com/stream?streams=btcusdt@kline_1m"
+
+    def test_warning_fires_only_once(self, monkeypatch):
+        """Reconnect storms shouldn't spam the engine log with the
+        same legacy-ws warning every cycle."""
+        ws = self._make_ws("wss://fstream.binance.com/ws")
+        # Trip the warning the first time
+        ws._build_combined_stream_url(["btcusdt@kline_1m"])
+        assert ws._warned_legacy_ws_base is True
+        # Capture log calls on the second build (would still warn if
+        # the flag check wasn't honored)
+        from src import websocket_manager as wsm_mod
+        original_log = wsm_mod.log
+        captured: list = []
+
+        class _RecordingLog:
+            def warning(self, msg, *args, **kw):
+                captured.append(msg)
+            def __getattr__(self, n):
+                return getattr(original_log, n)
+
+        monkeypatch.setattr(wsm_mod, "log", _RecordingLog())
+        ws._build_combined_stream_url(["ethusdt@kline_1m"])
+        # Second build should NOT have fired the warning
+        assert captured == [], (
+            f"Legacy-ws warning fired more than once — should be one-shot per process. "
+            f"Captured: {captured}"
+        )
+
+    def test_many_streams_joined_with_slash(self):
+        """200 streams should join with ``/`` not commas (per Binance
+        docs)."""
+        ws = self._make_ws("wss://fstream.binance.com/stream")
+        streams = [f"sym{i}usdt@kline_1m" for i in range(10)]
+        url = ws._build_combined_stream_url(streams)
+        # Verify slash-joined, no commas
+        assert "/" in url.split("?streams=")[1]
+        assert "," not in url
+
+
 def test_trace_sink_survives_logger_module_reconfigure(tmp_path, monkeypatch):
     """Simulate the production import order: src.utils first (trace sink
     added), then src.logger (which calls _loguru_logger.remove()).
