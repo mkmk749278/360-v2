@@ -1701,3 +1701,205 @@ class TestFuturesStalenessMultiplierDefault:
         assert WS_STALENESS_MULTIPLIER_FUTURES == 5, (
             "Futures multiplier should default to 5 (300s threshold) per 2026-05-14 fix"
         )
+
+
+# ---------------------------------------------------------------------------
+# Combined-stream URL format (2026-05-14 — Binance-doc-compliant)
+# ---------------------------------------------------------------------------
+#
+# Switching from the unofficial ``/ws/<s1>/<s2>/...`` form (which Binance
+# Futures has been silently partially-dropping for us) to the documented
+# combined-stream form: ``/stream?streams=<s1>/<s2>/...``.  Payloads then
+# arrive wrapped as ``{"stream": "<name>", "data": <rawPayload>}`` and the
+# manager / engine handler must unwrap before dispatching to the typed
+# event handlers.
+
+
+class TestCombinedStreamBaseUrl:
+    """Verify the env-driven WS base URLs point at /stream (combined) not /ws."""
+
+    def test_futures_base_is_combined_stream(self):
+        from config import BINANCE_FUTURES_WS_BASE
+        assert BINANCE_FUTURES_WS_BASE.rstrip("/").endswith("/stream"), (
+            "Futures WS base must end with /stream (combined-stream endpoint) "
+            "per Binance docs.  Raw /ws is the single-stream endpoint and "
+            "doesn't reliably support multi-stream subscriptions."
+        )
+
+    def test_spot_base_is_combined_stream(self):
+        # Spot WS manager was ripped in PR #387 but the base URL is still
+        # imported by ``WebSocketManager.__init__`` when ``market="spot"``
+        # — keep it on /stream so any test/use that constructs a spot
+        # manager doesn't hit the wrong URL form.
+        from config import BINANCE_WS_BASE
+        assert BINANCE_WS_BASE.rstrip("/").endswith("/stream"), (
+            "Spot WS base must end with /stream for consistency with futures."
+        )
+
+
+class TestCombinedStreamUrlConstruction:
+    """``_connect`` builds URL as ``base?streams=<s1>/<s2>/...``."""
+
+    async def test_url_uses_query_string_format(self, monkeypatch):
+        """Patch the session's ws_connect to capture the URL the code
+        actually sends to Binance.  Verifies the new combined-stream
+        format vs the old ``/ws/<s1>/<s2>`` path-component form."""
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(handler, market="futures")
+        captured: list[str] = []
+
+        # Fake session + ws_connect — just record the URL and return a
+        # closed-immediately fake ws so _connect returns cleanly.
+        class _FakeWS:
+            closed = False
+            async def close(self): self.closed = True
+            def __aiter__(self): return self
+            async def __anext__(self): raise StopAsyncIteration
+
+        class _FakeSession:
+            async def ws_connect(self_, url, **kw):
+                captured.append(url)
+                return _FakeWS()
+
+        ws._session = _FakeSession()  # type: ignore[assignment]
+        conn = WSConnection(streams=[
+            "btcusdt@kline_1m",
+            "ethusdt@kline_1m",
+            "solusdt@kline_5m",
+        ])
+        await ws._connect(conn)
+
+        assert len(captured) == 1
+        url = captured[0]
+        # Must use ?streams= query string, not path components.
+        assert "?streams=" in url, f"URL should use combined-stream form: {url}"
+        # Streams concatenated with /
+        assert "btcusdt@kline_1m/ethusdt@kline_1m/solusdt@kline_5m" in url, (
+            f"All streams should appear joined by /: {url}"
+        )
+        # NEGATIVE assertion — the old form would have had path components
+        # like /ws/btcusdt@kline_1m/ethusdt@kline_1m — assert that's NOT
+        # what we built.  ``/ws/`` may still appear in test bases (rare)
+        # but the multi-stream PATH form should not.
+        assert "/ws/btcusdt@kline_1m" not in url, (
+            f"Old /ws/<s1>/<s2> form regressed: {url}"
+        )
+
+
+class TestCombinedStreamPayloadUnwrap:
+    """``_on_ws_message`` accepts both wrapped and raw payloads."""
+
+    async def test_unwraps_combined_stream_kline_payload(self):
+        """Combined-stream wrapper: {"stream":"...","data":{"e":"kline",...}}.
+
+        The handler must reach the kline branch and call
+        ``data_store.update_candle`` on candle close.  Use a SimpleNamespace
+        engine stub with just the surfaces _on_ws_message reads.
+        """
+        from types import SimpleNamespace
+        from src.main import CryptoSignalEngine
+
+        # Build a minimal engine via __new__ to bypass full __init__;
+        # only the attributes used by _on_ws_message need to exist.
+        engine = CryptoSignalEngine.__new__(CryptoSignalEngine)
+        update_calls: list = []
+
+        class _DS:
+            def update_candle(self, symbol, interval, candle):
+                update_calls.append((symbol, interval, candle))
+            def append_tick(self, symbol, tick):
+                pass
+
+        class _OFS:
+            def update_cvd_from_tick(self, *a, **kw):
+                pass
+            def snapshot_cvd_at_candle_close(self, *a, **kw):
+                pass
+
+        engine.data_store = _DS()  # type: ignore[attr-defined]
+        engine._order_flow_store = _OFS()  # type: ignore[attr-defined]
+
+        wrapped = {
+            "stream": "btcusdt@kline_1m",
+            "data": {
+                "e": "kline",
+                "s": "BTCUSDT",
+                "k": {
+                    "i": "1m",
+                    "o": 100.0, "h": 101.0, "l": 99.0, "c": 100.5,
+                    "v": 12.5, "x": True,
+                    "Q": 5.0, "q": 10.0,
+                },
+            },
+        }
+        await engine._on_ws_message(wrapped)
+        assert len(update_calls) == 1
+        assert update_calls[0][0] == "BTCUSDT"
+        assert update_calls[0][1] == "1m"
+        assert update_calls[0][2]["close"] == 100.5
+
+    async def test_accepts_raw_payload_for_backwards_compat(self):
+        """Raw single-stream payload (legacy / REST fallback path):
+        {"e":"kline","s":"BTC","k":{...}} — no wrapper.  Handler must
+        still dispatch to update_candle on close."""
+        from src.main import CryptoSignalEngine
+
+        engine = CryptoSignalEngine.__new__(CryptoSignalEngine)
+        update_calls: list = []
+
+        class _DS:
+            def update_candle(self, symbol, interval, candle):
+                update_calls.append((symbol, interval, candle))
+            def append_tick(self, symbol, tick):
+                pass
+
+        class _OFS:
+            def update_cvd_from_tick(self, *a, **kw):
+                pass
+            def snapshot_cvd_at_candle_close(self, *a, **kw):
+                pass
+
+        engine.data_store = _DS()  # type: ignore[attr-defined]
+        engine._order_flow_store = _OFS()  # type: ignore[attr-defined]
+
+        raw = {
+            "e": "kline",
+            "s": "ETHUSDT",
+            "k": {
+                "i": "5m",
+                "o": 2000.0, "h": 2010.0, "l": 1995.0, "c": 2005.0,
+                "v": 50.0, "x": True,
+                "Q": 20.0, "q": 40.0,
+            },
+        }
+        await engine._on_ws_message(raw)
+        assert len(update_calls) == 1
+        assert update_calls[0][0] == "ETHUSDT"
+        assert update_calls[0][1] == "5m"
+
+    async def test_no_false_unwrap_on_payload_with_stream_field(self):
+        """Defensive: if a payload happens to have a top-level ``stream``
+        key but no ``data`` dict, the handler must not crash — should
+        treat it as raw.  Guards against shape drift breaking the
+        unwrapper without us noticing."""
+        from src.main import CryptoSignalEngine
+
+        engine = CryptoSignalEngine.__new__(CryptoSignalEngine)
+        engine.data_store = type("DS", (), {
+            "update_candle": lambda *a, **k: None,
+            "append_tick": lambda *a, **k: None,
+        })()
+        engine._order_flow_store = type("OFS", (), {
+            "update_cvd_from_tick": lambda *a, **k: None,
+            "snapshot_cvd_at_candle_close": lambda *a, **k: None,
+        })()
+
+        # ``stream`` field present but ``data`` is None — must not unwrap
+        odd = {"stream": "btcusdt@kline_1m", "data": None, "e": "kline"}
+        # Should not raise; should not match the kline branch because
+        # there's no "k" key after non-unwrap, but the test asserts
+        # only that no exception escapes.
+        await engine._on_ws_message(odd)
+        # If we got here, the handler didn't crash — pass.

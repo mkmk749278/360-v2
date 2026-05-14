@@ -553,8 +553,24 @@ class WebSocketManager:
 
     async def _connect(self, conn: WSConnection) -> None:
         assert self._session is not None
+        # Combined-stream URL per Binance docs (2026-05-14):
+        #   wss://<host>/stream?streams=<s1>/<s2>/...
+        # The base URL is ``wss://<host>/stream`` (set in config) and we
+        # append ``?streams=`` with the ``/``-joined stream list.
+        # Payloads arrive as ``{"stream": "<name>", "data": <rawPayload>}``;
+        # ``main._on_ws_message`` detects the wrapper and unwraps before
+        # dispatching to the event handlers.
+        #
+        # Previously the code built ``/ws/<s1>/<s2>/...`` which is the
+        # raw single-stream endpoint with extra path components appended.
+        # That pattern worked for years against Binance Spot but Binance
+        # Futures has tightened path parsing — the May 13-14 diag showed
+        # both futures connections silent-but-pingable for 12+ minutes
+        # (sec_since_last_msg ≈ 729s) while the documented single-stream
+        # field was the only one delivering data and the rest of the
+        # streams were silently unsubscribed.
         stream_path = "/".join(conn.streams)
-        url = f"{self._base_url}/{stream_path}"
+        url = f"{self._base_url}?streams={stream_path}"
         conn.ws = await self._session.ws_connect(url, heartbeat=self._heartbeat_interval)
         conn.last_pong = time.monotonic()
         conn.reconnect_attempts = 0

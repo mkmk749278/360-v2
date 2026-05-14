@@ -119,9 +119,19 @@ def validate_critical_env_vars() -> None:
 # Binance endpoints
 # ---------------------------------------------------------------------------
 BINANCE_REST_BASE: str = os.getenv("BINANCE_REST_BASE", "https://api.binance.com")
-BINANCE_WS_BASE: str = os.getenv("BINANCE_WS_BASE", "wss://stream.binance.com:9443/ws")
+# WebSocket base URLs — use Binance's documented COMBINED-STREAM path
+# (``/stream``) rather than raw ``/ws``.  Per docs, ``/ws/<streamName>`` is
+# the single-stream endpoint; appending multiple streams onto it is not
+# documented and Binance Futures behaviour for that pattern has degraded
+# (silent partial-subscription drops observed 2026-05-13/14, evaluator
+# funnel showed 916 candidates generated and 0 emitted while connections
+# read as "healthy" because PING/PONG kept flowing).  Combined-stream
+# is the official path for multi-stream connections; payloads arrive
+# wrapped as ``{"stream": "<name>", "data": <rawPayload>}`` and the
+# message handler unwraps before dispatching.
+BINANCE_WS_BASE: str = os.getenv("BINANCE_WS_BASE", "wss://stream.binance.com:9443/stream")
 BINANCE_FUTURES_REST_BASE: str = os.getenv("BINANCE_FUTURES_REST_BASE", "https://fapi.binance.com")
-BINANCE_FUTURES_WS_BASE: str = os.getenv("BINANCE_FUTURES_WS_BASE", "wss://fstream.binance.com/ws")
+BINANCE_FUTURES_WS_BASE: str = os.getenv("BINANCE_FUTURES_WS_BASE", "wss://fstream.binance.com/stream")
 
 # ---------------------------------------------------------------------------
 # Telegram
