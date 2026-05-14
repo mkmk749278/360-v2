@@ -896,7 +896,32 @@ class CryptoSignalEngine:
     # ------------------------------------------------------------------
 
     async def _on_ws_message(self, data: dict) -> None:
-        """Handle a raw WebSocket message (kline, trade, or forceOrder)."""
+        """Handle a WebSocket message (kline, trade, or forceOrder).
+
+        Accepts both Binance payload shapes so the handler is callable from
+        the WebSocket transport AND from the REST fallback paths:
+
+        * **Combined-stream wrapper** (``wss://.../stream?streams=...``):
+          ``{"stream": "btcusdt@kline_1m", "data": {"e": "kline", ...}}``.
+          We unwrap ``data["data"]`` before dispatching.  This is the
+          documented Binance format for multi-stream connections and
+          what the engine has used since 2026-05-14 (Binance Futures
+          tightened parsing of the unofficial ``/ws/<s1>/<s2>/...`` form).
+
+        * **Raw payload** (REST fallback, ``_ws_futures_liq`` if it ever
+          reverts to ``/ws`` single-stream, or any future inline test
+          path): ``{"e": "kline", "s": "BTCUSDT", ...}`` — used directly.
+
+        Detect by ``"stream"`` in the top level.  If the wrapper is
+        present, ``data["data"]`` is the raw payload; otherwise ``data``
+        IS the raw payload.
+        """
+        # Combined-stream wrapper unwrap.  ``data.get("data")`` is a dict
+        # for genuine wrapped events; we sanity-check both keys to avoid
+        # mistaking a kline payload (which has no top-level ``stream``)
+        # for a wrapper.
+        if isinstance(data, dict) and isinstance(data.get("data"), dict) and "stream" in data:
+            data = data["data"]
         event = data.get("e")
         symbol = data.get("s", "").upper()
 
