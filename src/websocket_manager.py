@@ -46,6 +46,7 @@ from config import (
     WS_SESSION_RECYCLE_ATTEMPTS,
     WS_STALENESS_MULTIPLIER,
     WS_STALENESS_MULTIPLIER_FUTURES,
+    WS_TRACE_SAMPLE_FIRST_N,
     WS_TRACE_SUMMARY_INTERVAL_SEC,
     WS_TRACE_SUMMARY_STALENESS_SEC,
 )
@@ -99,6 +100,20 @@ class WSConnection:
     # cadence to ``WS_TRACE_SUMMARY_INTERVAL_SEC`` even though the
     # ``_health_check_loop`` ticks every ``WS_HEALTH_CHECK_INTERVAL``.
     trace_summary_last_ts: float = 0.0
+    # Number of first-N raw messages already logged via ``raw_sample``.
+    # Trace data 2026-05-14 showed connect_success on /stream?streams=...
+    # then ZERO ``first_data`` events, ``health_msg_count=0``, and NO
+    # close_received frames.  Hypothesis: Binance is sending BINARY
+    # frames (gzip-compressed JSON, used elsewhere in their stack)
+    # which the original ``_listen`` silently ignored.  Per-connection
+    # sample counter lets us log the first ``WS_TRACE_SAMPLE_FIRST_N``
+    # raw messages (any type) so we can see exactly what comes over
+    # the wire without flooding the log on a healthy connection.
+    samples_logged: int = 0
+    # Per-msg-type counters for the periodic ``stream_summary`` line.
+    # Lets us distinguish "BINARY frames arrived but ignored" from
+    # "absolutely nothing arrived" by visual inspection of the trace.
+    msg_type_counts: Dict[str, int] = field(default_factory=dict)
     # Reconnect-duration instrumentation (Phase 1, 2026-05-08).
     # ``degraded_since`` stamps monotonic time when the connection went
     # degraded; cleared when it goes healthy again.  ``last_reconnect_ms``
@@ -716,6 +731,12 @@ class WebSocketManager:
         # after reconnect doesn't get throttled.
         conn.stream_data_ts.clear()
         conn.trace_summary_last_ts = 0.0
+        # Reset the per-conn sample / msg-type counters so the FIRST
+        # post-reconnect frames are captured for diagnosis (rather
+        # than carrying forward the previous connection's "already
+        # sampled" state).
+        conn.samples_logged = 0
+        conn.msg_type_counts = {}
         self._subscribed_streams.update(conn.streams)
         log.info("Connected WS: {} streams", len(conn.streams))
 
@@ -726,6 +747,36 @@ class WebSocketManager:
         except ValueError:
             conn_idx = -1
         async for msg in conn.ws:
+            # ---- Diagnostic: log the first N raw messages regardless of type ----
+            # Trace 2026-05-14 showed stream_summary with ``never_seen=all``
+            # and ``health_msg_count=0`` despite connect_success on the
+            # correct ``/stream?streams=...`` URL.  The hypothesis is
+            # Binance is sending BINARY frames (or some shape our parser
+            # doesn't recognise) which the previous ``_listen`` silently
+            # skipped.  Per-conn sampling logs the first
+            # ``WS_TRACE_SAMPLE_FIRST_N`` messages so the next /ws_log
+            # pull shows what's actually on the wire.  The counter resets
+            # on _connect so each reconnect gets a fresh sample window.
+            type_name = getattr(msg.type, "name", str(msg.type))
+            conn.msg_type_counts[type_name] = conn.msg_type_counts.get(type_name, 0) + 1
+            if conn.samples_logged < WS_TRACE_SAMPLE_FIRST_N:
+                conn.samples_logged += 1
+                # Truncate data preview at 200 chars and tag whether it's
+                # str or bytes.  Bytes => Binance is sending BINARY which
+                # could be gzip-compressed JSON we need to decode.
+                raw = msg.data
+                kind = "bytes" if isinstance(raw, (bytes, bytearray)) else "str"
+                if isinstance(raw, (bytes, bytearray)):
+                    preview = repr(bytes(raw[:120]))
+                elif raw is None:
+                    preview = "None"
+                else:
+                    preview = repr(str(raw)[:200])
+                ws_trace.info(
+                    f"<WS:{self._label}> raw_sample conn={conn_idx} n={conn.samples_logged} "
+                    f"type={type_name} kind={kind} data={preview}"
+                )
+
             if msg.type == aiohttp.WSMsgType.TEXT:
                 # Any incoming data message proves the connection is alive;
                 # update last_pong so is_healthy reflects real liveness.
@@ -792,6 +843,51 @@ class WebSocketManager:
                 if msg.type == aiohttp.WSMsgType.PONG and conn.last_ping_time > 0:
                     conn.ping_latency_ms = (now_mono - conn.last_ping_time) * 1000
                     conn.last_ping_time = 0.0
+            elif msg.type == aiohttp.WSMsgType.BINARY:
+                # Binance has been observed to send gzip-compressed JSON
+                # over some WS endpoints.  We previously fell through to
+                # the default branch and silently dropped these.  Attempt
+                # to decompress + parse; treat data flow as alive
+                # regardless so the watchdog doesn't trip on a healthy
+                # but binary-encoded connection.
+                now_mono = time.monotonic()
+                conn.last_pong = now_mono
+                conn.health_msg_count += 1
+                raw = msg.data
+                decoded = None
+                decode_method: str = "raw"
+                try:
+                    import gzip
+                    try:
+                        decompressed = gzip.decompress(raw)
+                        decoded = decompressed.decode("utf-8", errors="replace")
+                        decode_method = "gzip"
+                    except (OSError, EOFError):
+                        # Not gzip — try raw bytes-to-str
+                        decoded = raw.decode("utf-8", errors="replace")
+                        decode_method = "utf8"
+                except Exception as exc:
+                    log.debug("BINARY decode error: {}", exc)
+                if decoded is not None:
+                    try:
+                        data = json.loads(decoded)
+                        # Same wrapper-unwrap as TEXT branch — propagates
+                        # to the engine handler.
+                        if isinstance(data, dict):
+                            stream_name = data.get("stream")
+                            if isinstance(stream_name, str) and stream_name:
+                                first_seen = stream_name not in conn.stream_data_ts
+                                conn.stream_data_ts[stream_name] = now_mono
+                                if first_seen:
+                                    delay_s = now_mono - conn.connected_ts if conn.connected_ts > 0 else 0.0
+                                    ws_trace.info(
+                                        f"<WS:{self._label}> first_data conn={conn_idx} "
+                                        f"stream={stream_name} delay_after_connect_s={delay_s:.2f} "
+                                        f"(via BINARY/{decode_method})"
+                                    )
+                        await self._on_message(data)
+                    except Exception as exc:
+                        log.debug("BINARY JSON parse error: {}", exc)
             elif msg.type == aiohttp.WSMsgType.CLOSED:
                 # Capture the close code + reason — previously dropped on
                 # the floor.  Binance close codes:
@@ -1163,10 +1259,17 @@ class WebSocketManager:
                                 silent_streams.append(stream)
                     active = total_subscribed - len(silent_streams)
                     sample = ",".join(silent_streams[:5])
+                    # Per-msg-type counts surface "BINARY frames arrived
+                    # but parser ignored them" as a distinct state from
+                    # "absolutely nothing arrived".  Sorted for stability.
+                    type_counts = ",".join(
+                        f"{k}={v}" for k, v in sorted(conn.msg_type_counts.items())
+                    ) or "(none)"
                     ws_trace.info(
                         f"<WS:{self._label}> stream_summary conn={idx} "
                         f"active={active}/{total_subscribed} silent={len(silent_streams)} "
                         f"never_seen={total_subscribed - seen_streams} "
+                        f"msg_types={type_counts} "
                         f"silent_sample={sample if sample else '(none)'}"
                     )
 
