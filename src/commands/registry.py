@@ -69,7 +69,6 @@ class CommandContext:
     performance_tracker: Optional[Any] = None
     circuit_breaker: Optional[Any] = None
     gem_scanner: Optional[Any] = None
-    ws_spot: Optional[Any] = None
     ws_futures: Optional[Any] = None
     restart_callback: Optional[Callable] = None
     ai_insight_fn: Optional[Callable] = None

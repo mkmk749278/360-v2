@@ -30,7 +30,6 @@ def _make_handler(**kwargs) -> CommandHandler:
         paused_channels=set(),
         confidence_overrides={},
         scanner=MagicMock(spec=[]),  # bare scanner; per-test we attach attrs
-        ws_spot=None,
         ws_futures=None,
         tasks=[],
         boot_time=0.0,

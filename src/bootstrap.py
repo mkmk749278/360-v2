@@ -75,10 +75,7 @@ class Bootstrap:
             log.warning("Pre-flight: data_store has no seeded data")
             ok = False
 
-        ws_healthy = (
-            (engine._ws_spot.is_healthy if engine._ws_spot else True)
-            and (engine._ws_futures.is_healthy if engine._ws_futures else True)
-        )
+        ws_healthy = (engine._ws_futures.is_healthy if engine._ws_futures else True)
         if not ws_healthy:
             log.warning("Pre-flight: WebSocket managers are not all healthy")
 
@@ -397,8 +394,6 @@ class Bootstrap:
         await engine.router.stop()
         await engine.monitor.stop()
         await engine.telemetry.stop()
-        if engine._ws_spot:
-            await engine._ws_spot.stop()
         if engine._ws_futures:
             await engine._ws_futures.stop()
         if getattr(engine, "_ws_futures_liq", None):
@@ -456,21 +451,16 @@ class Bootstrap:
         pressure without proportional signal quality improvement.
         """
         engine = self._engine
-        spot_streams: List[str] = []
         futures_kline_streams: List[str] = []
         futures_liq_streams: List[str] = []
-        tier1_spot: List[str] = []
 
-        # When TOP50_FUTURES_ONLY, skip spot WebSocket entirely
-        if not TOP50_FUTURES_ONLY:
-            tier1_spot = engine.pair_mgr.tier1_spot_symbols
-            for sym in tier1_spot:
-                s = sym.lower()
-                spot_streams.append(f"{s}@kline_1m")
-                spot_streams.append(f"{s}@kline_5m")
-                spot_streams.append(f"{s}@kline_1h")
-                spot_streams.append(f"{s}@kline_4h")
-                spot_streams.append(f"{s}@trade")
+        # 2026-05-14: spot WS removed.  Engine is futures-only per CLAUDE.md
+        # (75 USDT-M futures pairs scalped via SMC + order-flow logic).  The
+        # spot WS manager was already dormant under ``TOP50_FUTURES_ONLY=true``
+        # but the dead scaffolding added cognitive load during the WS bug
+        # hunt.  The ``TOP50_FUTURES_ONLY`` flag is retained for now in case
+        # an env-level rollback is needed; the corresponding pair_manager
+        # paths still exist behind it.
 
         # Only Tier 1 futures symbols get WebSocket subscriptions
         tier1_futures = engine.pair_mgr.tier1_futures_symbols
@@ -487,12 +477,6 @@ class Bootstrap:
             # updates on kline connections, causing false staleness detections.
             futures_liq_streams.append(f"{s}@forceOrder")
 
-        engine._ws_spot = WebSocketManager(
-            engine._on_ws_message,
-            market="spot",
-            admin_alert_callback=engine.telegram.send_admin_alert,
-            data_store=engine.data_store,
-        )
         engine._ws_futures = WebSocketManager(
             engine._on_ws_message,
             market="futures",
@@ -516,23 +500,17 @@ class Bootstrap:
             staleness_multiplier=100,
         )
 
-        if spot_streams:
-            await engine._ws_spot.start(spot_streams)
         if futures_kline_streams:
             await engine._ws_futures.start(futures_kline_streams)
         if futures_liq_streams:
             await engine._ws_futures_liq.start(futures_liq_streams)
 
         # Set critical pairs for REST fallback during WS outages
-        top_spot = tier1_spot[:10]
         top_futures = tier1_futures[:10]
-        if engine._ws_spot and top_spot:
-            engine._ws_spot.set_critical_pairs(top_spot)
         if engine._ws_futures and top_futures:
             engine._ws_futures.set_critical_pairs(top_futures)
 
-        # Wire WS managers into the scanner
-        engine._scanner.ws_spot = engine._ws_spot
+        # Wire WS manager into the scanner
         engine._scanner.ws_futures = engine._ws_futures
 
         # Register Tier 1 futures symbols with the OI poller so it knows what to poll

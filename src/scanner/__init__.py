@@ -890,8 +890,8 @@ class Scanner:
         self.confidence_overrides: Dict[str, float] = {}
         self.force_scan: bool = False
 
-        # WebSocket managers (set after boot)
-        self.ws_spot: Optional[Any] = None
+        # WebSocket manager (set after boot)
+        # 2026-05-14: ws_spot removed — engine is futures-only per CLAUDE.md.
         self.ws_futures: Optional[Any] = None
 
         # Optional circuit breaker (set after construction)
@@ -1472,20 +1472,19 @@ class Scanner:
                 await asyncio.sleep(5)
                 continue
 
-            # WS health-aware scan gating: when both WS managers are unhealthy
-            # (or not set) there is no live kline data, so a full scan over
-            # 796 pairs burns API weight on stale candles and produces no
-            # signals.  Skip the full scan and track degraded-cycle count.
-            ws_spot_ok = self.ws_spot.is_healthy if self.ws_spot else True
+            # WS health-aware scan gating: when the futures WS manager is
+            # unhealthy (or not set) there is no live kline data, so a full
+            # scan over the pair universe burns API weight on stale candles
+            # and produces no signals.  Skip the full scan and track
+            # degraded-cycle count.
+            # 2026-05-14: spot WS removed; this gate now only consults futures.
             ws_futures_ok = self.ws_futures.is_healthy if self.ws_futures else True
-            ws_both_unhealthy = not ws_spot_ok and not ws_futures_ok
-            # Partial degradation: either manager has below-threshold health.
+            ws_both_unhealthy = not ws_futures_ok
+            # Partial degradation: futures manager has below-threshold health.
             # Used to tighten REST fetch limits for the remainder of the cycle.
-            ws_spot_ratio = self.ws_spot.health_ratio if self.ws_spot else 1.0
             ws_futures_ratio = self.ws_futures.health_ratio if self.ws_futures else 1.0
             self._ws_any_degraded_this_cycle = (
-                ws_spot_ratio < WS_PARTIAL_HEALTH_THRESHOLD
-                or ws_futures_ratio < WS_PARTIAL_HEALTH_THRESHOLD
+                ws_futures_ratio < WS_PARTIAL_HEALTH_THRESHOLD
             )
             if ws_both_unhealthy:
                 self._consecutive_ws_degraded_cycles += 1
@@ -1493,9 +1492,9 @@ class Scanner:
                 # to REST-only scanning so the engine is not stuck forever.
                 if self._consecutive_ws_degraded_cycles < WS_DEGRADED_MAX_CYCLES:
                     log.warning(
-                        "WS health degraded (spot={}, futures={}) — skipping full scan "
+                        "WS health degraded (futures={}) — skipping full scan "
                         "(degraded cycle #{})",
-                        ws_spot_ok, ws_futures_ok, self._consecutive_ws_degraded_cycles,
+                        ws_futures_ok, self._consecutive_ws_degraded_cycles,
                     )
                     if self._consecutive_ws_degraded_cycles == WS_DEGRADED_CYCLES_ALERT:
                         try:
@@ -1510,10 +1509,7 @@ class Scanner:
                             pass
                     elapsed_ms = (time.monotonic() - t0) * 1000
                     self.telemetry.set_scan_latency(elapsed_ms)
-                    ws_conns = (
-                        (self.ws_spot.stream_count if self.ws_spot else 0)
-                        + (self.ws_futures.stream_count if self.ws_futures else 0)
-                    )
+                    ws_conns = (self.ws_futures.stream_count if self.ws_futures else 0)
                     self.telemetry.set_ws_health(False, ws_conns)
                     await asyncio.sleep(5)
                     continue
@@ -1676,14 +1672,8 @@ class Scanner:
                 log.warning("Failed to read signal queue size: {}", exc)
                 qsize = 0
             self.telemetry.set_queue_size(qsize)
-            ws_conns = (
-                (self.ws_spot.stream_count if self.ws_spot else 0)
-                + (self.ws_futures.stream_count if self.ws_futures else 0)
-            )
-            ws_ok = (
-                (self.ws_spot.is_healthy if self.ws_spot else True)
-                and (self.ws_futures.is_healthy if self.ws_futures else True)
-            )
+            ws_conns = (self.ws_futures.stream_count if self.ws_futures else 0)
+            ws_ok = (self.ws_futures.is_healthy if self.ws_futures else True)
             self.telemetry.set_ws_health(ws_ok, ws_conns)
 
             # Log suppression telemetry summary for this cycle, then reset.

@@ -320,7 +320,10 @@ class CryptoSignalEngine:
         )
 
         # WebSocket managers (set during boot)
-        self._ws_spot: Optional[WebSocketManager] = None
+        # 2026-05-14: spot WS removed.  Engine is futures-only per CLAUDE.md
+        # (75 USDT-M futures pairs).  The spot manager existed as dormant
+        # scaffolding under ``TOP50_FUTURES_ONLY=true`` and added no runtime
+        # value while adding cognitive load to every WS bug-hunt.
         self._ws_futures: Optional[WebSocketManager] = None
         # Dedicated liquidation WebSocket manager — forceOrder streams run in
         # their own connection pool so that liquidation floods during Extreme
@@ -462,7 +465,6 @@ class CryptoSignalEngine:
             paused_channels=self._paused_channels,
             confidence_overrides=self._confidence_overrides,
             scanner=self._scanner,
-            ws_spot=None,
             ws_futures=None,
             tasks=self._tasks,
             boot_time=self._boot_time,
@@ -874,7 +876,6 @@ class CryptoSignalEngine:
         self._command_handler.boot_time = self._boot_time
         self._command_handler.boot_wall_time = self._boot_wall_time
         # Sync WS managers to command handler after boot starts them
-        self._command_handler.ws_spot = self._ws_spot
         self._command_handler.ws_futures = self._ws_futures
 
     async def shutdown(self) -> None:
@@ -1051,9 +1052,6 @@ class CryptoSignalEngine:
             return
 
         log.info("Tracked pair universe changed; restarting WebSocket subscriptions")
-        if self._ws_spot:
-            await self._ws_spot.stop()
-            self._ws_spot = None
         if self._ws_futures:
             await self._ws_futures.stop()
             self._ws_futures = None
@@ -1062,7 +1060,6 @@ class CryptoSignalEngine:
             self._ws_futures_liq = None
 
         await self._bootstrap.start_websockets()
-        self._command_handler.ws_spot = self._ws_spot
         self._command_handler.ws_futures = self._ws_futures
 
     async def _pair_refresh_loop(self) -> None:
@@ -1199,14 +1196,10 @@ class CryptoSignalEngine:
             await self.monitor.stop()
             await self.telemetry.stop()
             await self.telegram.stop()
-            if self._ws_spot:
-                await self._ws_spot.stop()
-                self._ws_spot = None
             if self._ws_futures:
                 await self._ws_futures.stop()
                 self._ws_futures = None
             await self._bootstrap.start_websockets()
-            self._command_handler.ws_spot = self._ws_spot
             self._command_handler.ws_futures = self._ws_futures
             self._tasks = self._bootstrap.launch_runtime_tasks()
             # Re-sync tasks list into command handler

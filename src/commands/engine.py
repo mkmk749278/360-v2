@@ -27,10 +27,7 @@ async def handle_status(args: List[str], ctx: CommandContext) -> None:
     uptime_s = time.monotonic() - ctx.boot_time
     hours, rem = divmod(int(uptime_s), 3600)
     minutes, secs = divmod(rem, 60)
-    ws_healthy = (
-        (ctx.ws_spot.is_healthy if ctx.ws_spot else True)
-        and (ctx.ws_futures.is_healthy if ctx.ws_futures else True)
-    )
+    ws_healthy = (ctx.ws_futures.is_healthy if ctx.ws_futures else True)
     proc = psutil.Process()
     mem_info = proc.memory_info()
     cpu_pct = proc.cpu_percent(interval=0.1)
