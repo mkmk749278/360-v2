@@ -673,22 +673,26 @@ class TestHeartbeatIntervalPerMarket:
         assert WS_HEARTBEAT_INTERVAL_FUTURES > WS_HEARTBEAT_INTERVAL
 
     def test_futures_staleness_threshold_with_new_heartbeat(self):
-        """Futures connections should be stale after 60×15=900s with no data."""
+        """Futures connections should be stale after heartbeat×multiplier seconds with no data."""
         ws = WebSocketManager(lambda data: None, market="futures")
+        threshold = WS_HEARTBEAT_INTERVAL_FUTURES * WS_STALENESS_MULTIPLIER_FUTURES
         conn = WSConnection()
         mock_ws = type("FakeWS", (), {"closed": False})()
         conn.ws = mock_ws
-        conn.last_pong = time.monotonic() - 950  # 950s > 900s threshold
+        conn.last_pong = time.monotonic() - (threshold + 50)  # over threshold
         ws._connections = [conn]
         assert ws.is_healthy is False
 
     def test_futures_staleness_healthy_under_threshold(self):
-        """Futures connections with data within 900s should still be healthy."""
+        """Futures connections with last_pong within the threshold should still be healthy."""
         ws = WebSocketManager(lambda data: None, market="futures")
+        threshold = WS_HEARTBEAT_INTERVAL_FUTURES * WS_STALENESS_MULTIPLIER_FUTURES
         conn = WSConnection()
         mock_ws = type("FakeWS", (), {"closed": False})()
         conn.ws = mock_ws
-        conn.last_pong = time.monotonic() - 650  # 650s < 900s — still healthy
+        # Use 70% of threshold so the test stays comfortably inside the
+        # healthy band regardless of future config tuning.
+        conn.last_pong = time.monotonic() - (threshold * 0.7)
         ws._connections = [conn]
         assert ws.is_healthy is True
 
@@ -929,10 +933,21 @@ class TestStalenessMultiplierConfig:
         assert WS_STALENESS_MULTIPLIER == 10
 
     def test_staleness_multiplier_futures_default(self):
-        assert WS_STALENESS_MULTIPLIER_FUTURES == 15
+        # 2026-05-14: dropped from 15 to 5 after a 13h emission blackout where
+        # the futures conn sat at sec_since_last_msg≈12 min under a 900s
+        # threshold that never tripped before subscriber-visible silence.
+        assert WS_STALENESS_MULTIPLIER_FUTURES == 5
 
-    def test_futures_staleness_multiplier_greater_than_spot(self):
-        assert WS_STALENESS_MULTIPLIER_FUTURES > WS_STALENESS_MULTIPLIER
+    def test_futures_threshold_bounded(self):
+        """Both multipliers should keep the per-market threshold inside a sane
+        window: too short causes reconnect churn during normal liquidation
+        cascades; too long lets silent-but-pingable feeds drag for tens of
+        minutes (the May 12 / 13 blackout pattern).  Assert both per-market
+        thresholds fall within 180-600s."""
+        spot_threshold = WS_HEARTBEAT_INTERVAL * WS_STALENESS_MULTIPLIER
+        fut_threshold = WS_HEARTBEAT_INTERVAL_FUTURES * WS_STALENESS_MULTIPLIER_FUTURES
+        assert 180 <= spot_threshold <= 600, f"spot threshold {spot_threshold}s out of band"
+        assert 180 <= fut_threshold <= 600, f"futures threshold {fut_threshold}s out of band"
 
     def test_spot_manager_uses_spot_multiplier(self):
         ws = WebSocketManager(lambda data: None, market="spot")
@@ -1305,3 +1320,384 @@ class TestShardResiliency:
         conn1.last_ping_time = 1.0
         assert conn2.ping_latency_ms == 0.0
         assert conn2.last_ping_time == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Data-staleness watchdog — 2026-05-14 fix for 13h emission blackout
+# ---------------------------------------------------------------------------
+#
+# Root cause: ``_health_watchdog`` checked ``last_pong``, which updates on
+# PING/PONG as well as TEXT, so a connection where Binance kept the socket
+# alive on pings but stopped delivering kline TEXT frames read as healthy.
+# ``_health_check_loop`` was supposed to catch low message rates but its
+# ``conn.health_msg_count`` was never incremented in ``_listen``, so rate=0
+# always and the check just logged forever without acting.  Fixed by:
+#   1. Incrementing health_msg_count in _listen on TEXT msgs
+#   2. Making _health_check_loop force-close on sustained low rate
+#   3. Adding per-symbol staleness via data_store.last_kline_age_seconds
+#   4. Dropping WS_STALENESS_MULTIPLIER_FUTURES default 15→5 (15min→5min)
+
+
+class _FakeClosableWS:
+    """Stub aiohttp WS with .closed flag + an async close() that flips it."""
+
+    def __init__(self) -> None:
+        self.closed = False
+        self.close_calls = 0
+
+    async def close(self) -> None:
+        self.close_calls += 1
+        self.closed = True
+
+
+class _FakeDataStore:
+    """Minimal data store: maps (symbol, interval) → age_sec (or None)."""
+
+    def __init__(self) -> None:
+        self._ages: dict = {}
+
+    def set_age(self, symbol: str, interval: str, age_sec):
+        self._ages[(symbol.upper(), interval)] = age_sec
+
+    def last_kline_age_seconds(self, symbol: str, interval: str):
+        return self._ages.get((symbol.upper(), interval))
+
+
+@pytest.fixture
+def alerts_seen() -> list:
+    return []
+
+
+@pytest.fixture
+def alert_cb(alerts_seen: list):
+    async def _cb(msg: str) -> None:
+        alerts_seen.append(msg)
+    return _cb
+
+
+class TestHealthMsgCounter:
+    """_listen must increment conn.health_msg_count on every TEXT message."""
+
+    async def test_listen_increments_health_msg_count_on_text(self):
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(handler, market="futures")
+        conn = WSConnection(streams=["btcusdt@kline_1m"])
+
+        # Build a minimal async iterator that yields one TEXT msg then closes.
+        class _Msg:
+            def __init__(self, type_, data="{}"):
+                self.type = type_
+                self.data = data
+
+        class _AsyncIter:
+            def __init__(self, msgs):
+                self._msgs = list(msgs)
+
+            def __aiter__(self):
+                return self
+
+            async def __anext__(self):
+                if not self._msgs:
+                    raise StopAsyncIteration
+                return self._msgs.pop(0)
+
+        fake_ws = _AsyncIter([
+            _Msg(aiohttp.WSMsgType.TEXT, '{"e":"kline"}'),
+            _Msg(aiohttp.WSMsgType.TEXT, '{"e":"kline"}'),
+            _Msg(aiohttp.WSMsgType.TEXT, '{"e":"kline"}'),
+            _Msg(aiohttp.WSMsgType.CLOSED),
+        ])
+        conn.ws = fake_ws  # type: ignore[assignment]
+        await ws._listen(conn)
+        assert conn.health_msg_count == 3
+
+
+class TestHealthCheckLoopForceClose:
+    """_health_check_loop must force-close connections with sustained low rate."""
+
+    async def test_force_close_after_threshold_window(
+        self, alert_cb, alerts_seen, monkeypatch,
+    ):
+        """When rate stays below threshold for ≥ force-close window AND
+        connection is past min-conn-age, force-close fires + alert sent."""
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(
+            handler, market="futures",
+            admin_alert_callback=alert_cb,
+            label="futures-test",
+        )
+        # Shrink the health interval to 0 so a single iteration runs.
+        # We won't actually loop — we'll call the loop body inline by
+        # constructing the conditions and running a one-shot check.
+
+        fake = _FakeClosableWS()
+        conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
+
+        now = time.monotonic()
+        # Connection is well past min-conn-age (default 120s)
+        conn.connected_ts = now - 300.0
+        # Last health check was 60s ago, with 0 TEXT msgs in the window
+        conn.health_check_ts = now - 60.0
+        conn.health_msg_count = 0
+        # Low-rate state began earlier than the force-close threshold (90s)
+        conn.low_msgrate_since = now - 100.0
+
+        ws._connections = [conn]
+        # Run one cycle of the body by patching asyncio.sleep to break.
+        # Simpler: call the inner logic directly by monkey-stopping after 1 iter.
+        ws._running = True
+
+        async def _stop_after_one(_: float) -> None:
+            ws._running = False
+        monkeypatch.setattr("src.websocket_manager.asyncio.sleep", _stop_after_one)
+
+        await ws._health_check_loop()
+
+        assert fake.close_calls == 1, "force-close should fire when rate stays low past threshold"
+        assert fake.closed is True
+        assert any("data-silent" in a for a in alerts_seen), "admin alert should fire on force-close"
+
+    async def test_skip_force_close_when_under_min_conn_age(
+        self, alert_cb, alerts_seen, monkeypatch,
+    ):
+        """Freshly-reconnected connection (under min-conn-age) must NOT be force-closed."""
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(
+            handler, market="futures",
+            admin_alert_callback=alert_cb,
+            label="futures-test",
+        )
+        fake = _FakeClosableWS()
+        conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
+
+        now = time.monotonic()
+        # Connection is FRESH — only 10s old, well under 120s min-conn-age
+        conn.connected_ts = now - 10.0
+        conn.health_check_ts = now - 60.0
+        conn.health_msg_count = 0
+        conn.low_msgrate_since = now - 200.0  # would otherwise trigger
+
+        ws._connections = [conn]
+        ws._running = True
+
+        async def _stop_after_one(_: float) -> None:
+            ws._running = False
+        monkeypatch.setattr("src.websocket_manager.asyncio.sleep", _stop_after_one)
+
+        await ws._health_check_loop()
+
+        assert fake.close_calls == 0, "fresh connection should be protected by min-conn-age guard"
+        assert alerts_seen == [], "no alert should fire while under min-conn-age"
+
+    async def test_no_action_when_rate_recovers(self, alert_cb, alerts_seen, monkeypatch):
+        """Rate above threshold clears low_msgrate_since; no close, no alert."""
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(
+            handler, market="futures",
+            admin_alert_callback=alert_cb,
+        )
+        fake = _FakeClosableWS()
+        conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
+
+        now = time.monotonic()
+        conn.connected_ts = now - 300.0
+        conn.health_check_ts = now - 60.0
+        # 60 msgs in 60s = 60 msgs/min = healthy
+        conn.health_msg_count = 60
+        conn.low_msgrate_since = now - 200.0  # was previously stuck
+
+        ws._connections = [conn]
+        ws._running = True
+
+        async def _stop_after_one(_: float) -> None:
+            ws._running = False
+        monkeypatch.setattr("src.websocket_manager.asyncio.sleep", _stop_after_one)
+
+        await ws._health_check_loop()
+
+        assert fake.close_calls == 0
+        assert conn.low_msgrate_since == 0.0, "rate recovery should clear the low-rate timer"
+        assert alerts_seen == []
+
+
+class TestPerSymbolStaleness:
+    """Per-symbol staleness check force-closes all conns when majority of
+    subscribed symbols have stale klines, even if per-connection rate is OK."""
+
+    async def test_force_close_all_when_majority_stale(
+        self, alert_cb, alerts_seen,
+    ):
+        async def handler(data):
+            pass
+
+        store = _FakeDataStore()
+        # 4 symbols, 3 stale (>180s) → ratio 0.75 > 0.5 threshold
+        store.set_age("BTCUSDT", "1m", 5.0)     # fresh
+        store.set_age("ETHUSDT", "1m", 250.0)   # stale
+        store.set_age("SOLUSDT", "1m", 220.0)   # stale
+        store.set_age("AVAXUSDT", "1m", 300.0)  # stale
+
+        ws = WebSocketManager(
+            handler, market="futures",
+            admin_alert_callback=alert_cb,
+            data_store=store,
+        )
+
+        fake0 = _FakeClosableWS()
+        fake1 = _FakeClosableWS()
+        now = time.monotonic()
+        # Both connections past min-conn-age
+        conn0 = WSConnection(
+            streams=["btcusdt@kline_1m", "ethusdt@kline_1m"], ws=fake0,  # type: ignore[arg-type]
+        )
+        conn0.connected_ts = now - 300.0
+        conn1 = WSConnection(
+            streams=["solusdt@kline_1m", "avaxusdt@kline_1m"], ws=fake1,  # type: ignore[arg-type]
+        )
+        conn1.connected_ts = now - 300.0
+        ws._connections = [conn0, conn1]
+
+        await ws._check_per_symbol_staleness(now)
+
+        assert fake0.close_calls == 1, "both conns should be force-closed"
+        assert fake1.close_calls == 1
+        assert any("per-symbol stale" in a for a in alerts_seen)
+
+    async def test_no_action_when_minority_stale(self, alert_cb, alerts_seen):
+        async def handler(data):
+            pass
+
+        store = _FakeDataStore()
+        # 4 symbols, only 1 stale → ratio 0.25 < 0.5 threshold
+        store.set_age("BTCUSDT", "1m", 5.0)
+        store.set_age("ETHUSDT", "1m", 5.0)
+        store.set_age("SOLUSDT", "1m", 5.0)
+        store.set_age("AVAXUSDT", "1m", 300.0)
+
+        ws = WebSocketManager(
+            handler, market="futures",
+            admin_alert_callback=alert_cb,
+            data_store=store,
+        )
+
+        fake = _FakeClosableWS()
+        now = time.monotonic()
+        conn = WSConnection(
+            streams=["btcusdt@kline_1m", "ethusdt@kline_1m", "solusdt@kline_1m", "avaxusdt@kline_1m"],
+            ws=fake,  # type: ignore[arg-type]
+        )
+        conn.connected_ts = now - 300.0
+        ws._connections = [conn]
+
+        await ws._check_per_symbol_staleness(now)
+
+        assert fake.close_calls == 0
+        assert alerts_seen == []
+
+    async def test_no_action_when_all_conns_under_min_age(
+        self, alert_cb, alerts_seen,
+    ):
+        """All-fresh-conns guard: don't churn during the resubscribe window."""
+        async def handler(data):
+            pass
+
+        store = _FakeDataStore()
+        # All symbols stale, but conns are too fresh — guard should apply
+        store.set_age("BTCUSDT", "1m", 250.0)
+        store.set_age("ETHUSDT", "1m", 250.0)
+
+        ws = WebSocketManager(
+            handler, market="futures",
+            admin_alert_callback=alert_cb,
+            data_store=store,
+        )
+
+        fake = _FakeClosableWS()
+        now = time.monotonic()
+        conn = WSConnection(
+            streams=["btcusdt@kline_1m", "ethusdt@kline_1m"],
+            ws=fake,  # type: ignore[arg-type]
+        )
+        # Fresh connect — only 30s old
+        conn.connected_ts = now - 30.0
+        ws._connections = [conn]
+
+        await ws._check_per_symbol_staleness(now)
+
+        assert fake.close_calls == 0
+        assert alerts_seen == []
+
+    async def test_no_data_store_skips_check(self, alert_cb, alerts_seen):
+        """When no data_store is wired, per-symbol check is a noop."""
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(
+            handler, market="futures",
+            admin_alert_callback=alert_cb,
+            data_store=None,
+        )
+        fake = _FakeClosableWS()
+        now = time.monotonic()
+        conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
+        conn.connected_ts = now - 300.0
+        ws._connections = [conn]
+
+        await ws._check_per_symbol_staleness(now)
+
+        assert fake.close_calls == 0
+
+
+class TestAlertThrottle:
+    """Per-key alert throttle dedups within WS_ALERT_COOLDOWN window."""
+
+    async def test_alert_deduped_within_cooldown(self, alert_cb, alerts_seen):
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(
+            handler, market="futures",
+            admin_alert_callback=alert_cb,
+        )
+        await ws._alert_admin_throttled("first", alert_key="k1")
+        await ws._alert_admin_throttled("second", alert_key="k1")
+        assert len(alerts_seen) == 1
+        assert alerts_seen[0] == "first"
+
+    async def test_different_keys_alert_independently(self, alert_cb, alerts_seen):
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(
+            handler, market="futures",
+            admin_alert_callback=alert_cb,
+        )
+        await ws._alert_admin_throttled("a", alert_key="low_msgrate:0")
+        await ws._alert_admin_throttled("b", alert_key="per_symbol_stale")
+        assert len(alerts_seen) == 2
+
+    async def test_no_callback_is_noop(self):
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(handler, market="futures", admin_alert_callback=None)
+        # Must not raise
+        await ws._alert_admin_throttled("test", alert_key="k")
+
+
+class TestFuturesStalenessMultiplierDefault:
+    """Verify the env-driven default actually dropped from 15 to 5."""
+
+    def test_default_dropped_to_five(self):
+        # Imported at module top; just assert the value.
+        assert WS_STALENESS_MULTIPLIER_FUTURES == 5, (
+            "Futures multiplier should default to 5 (300s threshold) per 2026-05-14 fix"
+        )
