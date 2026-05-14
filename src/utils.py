@@ -2,13 +2,32 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from datetime import datetime, timezone
 from typing import Any, Optional
 
 from loguru import logger as _loguru_logger
 
-from config import LOG_LEVEL
+from config import (
+    LOG_LEVEL,
+    WS_TRACE_LOG_PATH,
+    WS_TRACE_LOG_RETENTION,
+    WS_TRACE_LOG_ROTATION,
+)
+
+def _ws_trace_filter(record: Any) -> bool:
+    """Loguru filter — admit only records carrying ``extra[ws_trace]=True``."""
+    return bool(record["extra"].get("ws_trace"))
+
+
+def _exclude_ws_trace_filter(record: Any) -> bool:
+    """Loguru filter — reject ``extra[ws_trace]=True`` records.  Used on
+    stderr + engine-log sinks so per-second WS-trace events don't flood
+    operator-visible logs; trace events are owner-pullable via the
+    dedicated file + ``/ws_log`` Telegram command."""
+    return not record["extra"].get("ws_trace")
+
 
 # Configure loguru once
 _loguru_logger.remove()  # remove default handler
@@ -16,6 +35,7 @@ _loguru_logger.add(
     sys.stderr,
     format="{time:YYYY-MM-DD HH:mm:ss} | {extra[name]:<24} | {level:<7} | {message}",
     level=LOG_LEVEL.upper(),
+    filter=_exclude_ws_trace_filter,
 )
 _loguru_logger.add(
     "logs/engine_{time}.log",
@@ -23,8 +43,50 @@ _loguru_logger.add(
     retention="30 days",
     format="{time:YYYY-MM-DD HH:mm:ss} | {extra[name]:<24} | {level:<7} | {message}",
     level="DEBUG",
+    filter=_exclude_ws_trace_filter,
 )
+
+
+# Ensure the trace-log directory exists before loguru opens the sink.
+# loguru auto-creates the parent on first write, but creating it
+# explicitly here avoids a race when two sinks try to mkdir at once.
+try:
+    os.makedirs(os.path.dirname(WS_TRACE_LOG_PATH) or ".", exist_ok=True)
+except OSError:
+    pass
+
+# Dedicated WS-trace sink — single-line records, structured ``<WS:LABEL>``
+# event format, owner-pullable via the ``/ws_log`` Telegram command.
+_loguru_logger.add(
+    WS_TRACE_LOG_PATH,
+    rotation=WS_TRACE_LOG_ROTATION,
+    retention=WS_TRACE_LOG_RETENTION,
+    format="{time:YYYY-MM-DD HH:mm:ss.SSS!UTC} | {message}",
+    level="INFO",
+    filter=_ws_trace_filter,
+    enqueue=False,
+)
+
 _configured = True
+
+
+# Bound logger that all WS-trace events route through.  Records carry
+# ``extra[ws_trace]=True`` so the filter above admits them to the file
+# and the parallel stderr/engine sinks reject them (otherwise every
+# stream_summary line would spam the engine log).
+_ws_trace_logger = _loguru_logger.bind(ws_trace=True, name="ws_trace")
+
+
+def get_ws_trace_logger() -> Any:
+    """Return the loguru logger bound for WS-trace events.
+
+    Callers emit structured ``<WS:LABEL> event_name k=v ...`` records via
+    standard ``info()`` / ``warning()`` calls.  Records are routed by the
+    ``_ws_trace_filter`` sink to the dedicated file and excluded from
+    stderr / engine log.  See ``src/websocket_manager.py`` for the
+    canonical use sites.
+    """
+    return _ws_trace_logger
 
 
 class _LoguroBridge:
