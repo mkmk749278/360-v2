@@ -1903,3 +1903,253 @@ class TestCombinedStreamPayloadUnwrap:
         # only that no exception escapes.
         await engine._on_ws_message(odd)
         # If we got here, the handler didn't crash — pass.
+
+
+# ---------------------------------------------------------------------------
+# WS-trace logger + per-stream tracking + stream_summary (2026-05-14, Phase 3)
+# ---------------------------------------------------------------------------
+#
+# The trace logger writes structured ``<WS:LABEL>`` events to a dedicated
+# file routed via a loguru ``filter=ws_trace`` sink so stderr + engine log
+# stay quiet of per-second WS noise.  Owner pulls the file via the new
+# ``/ws_log`` Telegram command (no SSH needed).
+
+
+class TestWsTraceLoggerSeparation:
+    """Records emitted via ``get_ws_trace_logger()`` must go to the trace
+    file ONLY — never to stderr or the engine rolling log.  This guards
+    the operator's main log from being flooded with per-stream events."""
+
+    def test_trace_logger_writes_to_dedicated_file(self, tmp_path, monkeypatch):
+        from importlib import reload
+        import src.utils as utils_mod
+        # Repoint the trace log to a tmp file by reloading the module with
+        # an env override.  The module-level loguru ``add()`` runs at
+        # import time, so we monkeypatch the path and reload.
+        trace_path = tmp_path / "ws_trace.log"
+        monkeypatch.setenv("WS_TRACE_LOG_PATH", str(trace_path))
+        # Force config re-read AND utils re-init.  Note: this affects
+        # global loguru state for the duration of the test; later tests
+        # that depend on the production path will pick up whichever path
+        # was last set (acceptable for an isolated unit).
+        import config as cfg_mod
+        reload(cfg_mod)
+        reload(utils_mod)
+        ws = utils_mod.get_ws_trace_logger()
+        ws.info("<WS:UNIT> probe_event k=v")
+        # Loguru's file sinks flush synchronously when enqueue=False (our
+        # configured value), so we can read the file immediately.
+        contents = trace_path.read_text(encoding="utf-8")
+        assert "<WS:UNIT> probe_event k=v" in contents
+
+
+class TestWSConnectionStreamDataTracking:
+    """``_listen`` populates ``conn.stream_data_ts`` from combined-stream
+    wrapper payloads so the periodic ``stream_summary`` can report which
+    subscribed streams are actually delivering."""
+
+    async def test_first_data_stamps_stream_ts(self):
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(handler, market="futures")
+        conn = WSConnection(streams=["btcusdt@kline_1m", "ethusdt@kline_1m"])
+        conn.connected_ts = time.monotonic()
+
+        class _Msg:
+            def __init__(self, data):
+                self.type = aiohttp.WSMsgType.TEXT
+                self.data = data
+
+        class _AsyncIter:
+            def __init__(self, msgs):
+                self._msgs = list(msgs)
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if not self._msgs:
+                    raise StopAsyncIteration
+                return self._msgs.pop(0)
+
+        # Combined-stream wrapper payloads for two different streams
+        import json as _json
+        msgs = [
+            _Msg(_json.dumps({"stream": "btcusdt@kline_1m", "data": {"e": "kline"}})),
+            _Msg(_json.dumps({"stream": "ethusdt@kline_1m", "data": {"e": "kline"}})),
+            _Msg(_json.dumps({"stream": "btcusdt@kline_1m", "data": {"e": "kline"}})),  # 2nd hit on BTC
+        ]
+        conn.ws = _AsyncIter(msgs)  # type: ignore[assignment]
+        await ws._listen(conn)
+        assert "btcusdt@kline_1m" in conn.stream_data_ts
+        assert "ethusdt@kline_1m" in conn.stream_data_ts
+        # BTC's timestamp is the *latest* (second hit) — confirms we
+        # update on every TEXT, not just the first
+        btc_ts = conn.stream_data_ts["btcusdt@kline_1m"]
+        eth_ts = conn.stream_data_ts["ethusdt@kline_1m"]
+        # BTC was first, then ETH, then BTC again → BTC's ts > ETH's ts
+        assert btc_ts >= eth_ts
+
+    async def test_raw_payload_does_not_stamp_stream_ts(self):
+        """Raw (non-wrapped) payloads — e.g. from REST fallback — have
+        no top-level ``stream`` key.  Per-stream tracking should skip
+        them; only health_msg_count increments."""
+        async def handler(data):
+            pass
+
+        ws = WebSocketManager(handler, market="futures")
+        conn = WSConnection(streams=["btcusdt@kline_1m"])
+        conn.connected_ts = time.monotonic()
+
+        class _Msg:
+            def __init__(self, data):
+                self.type = aiohttp.WSMsgType.TEXT
+                self.data = data
+
+        class _AsyncIter:
+            def __init__(self, msgs):
+                self._msgs = list(msgs)
+            def __aiter__(self):
+                return self
+            async def __anext__(self):
+                if not self._msgs:
+                    raise StopAsyncIteration
+                return self._msgs.pop(0)
+
+        import json as _json
+        msgs = [
+            _Msg(_json.dumps({"e": "kline", "s": "BTCUSDT", "k": {}})),  # raw, no wrapper
+        ]
+        conn.ws = _AsyncIter(msgs)  # type: ignore[assignment]
+        await ws._listen(conn)
+        # health_msg_count incremented but stream_data_ts stays empty
+        assert conn.health_msg_count == 1
+        assert conn.stream_data_ts == {}
+
+
+class TestWsLogCommand:
+    """``/ws_log`` reads ``WS_TRACE_LOG_PATH`` and sends via send_document."""
+
+    async def test_ws_log_sends_full_file_when_no_args(self, tmp_path, monkeypatch):
+        from src.commands.channels import handle_ws_log
+
+        trace_path = tmp_path / "ws_trace.log"
+        trace_path.write_text(
+            "2026-05-14 06:00:00 | <WS:FUT> connect_start streams=200\n"
+            "2026-05-14 06:00:02 | <WS:FUT> connect_success duration_ms=1834\n",
+            encoding="utf-8",
+        )
+        # Patch the config import inside the handler.  The handler does
+        # ``from config import WS_TRACE_LOG_PATH`` at call time so we can
+        # patch the module attribute.
+        import config as cfg
+        monkeypatch.setattr(cfg, "WS_TRACE_LOG_PATH", str(trace_path), raising=True)
+
+        # Stub Telegram client capturing the document upload.
+        captured: dict = {}
+
+        class _StubTelegram:
+            async def send_document(self, chat_id, document, filename, caption=None):
+                captured["chat_id"] = chat_id
+                captured["document"] = document
+                captured["filename"] = filename
+                captured["caption"] = caption
+                return True
+
+        replies: list = []
+
+        class _StubCtx:
+            telegram = _StubTelegram()
+            chat_id = "owner-chat"
+            async def reply(self, msg):
+                replies.append(msg)
+
+        await handle_ws_log([], _StubCtx())
+        assert "filename" in captured
+        assert captured["filename"].startswith("ws_trace_")
+        assert captured["filename"].endswith(".log")
+        assert b"<WS:FUT> connect_start" in captured["document"]
+        # Caption mentions byte count
+        assert "bytes" in (captured["caption"] or "")
+        # No fallback reply needed — send_document returned True
+        assert replies == []
+
+    async def test_ws_log_tail_limits_output(self, tmp_path, monkeypatch):
+        from src.commands.channels import handle_ws_log
+
+        trace_path = tmp_path / "ws_trace.log"
+        # 20 distinct lines
+        lines = [f"<WS:FUT> event_{i}" for i in range(20)]
+        trace_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+        import config as cfg
+        monkeypatch.setattr(cfg, "WS_TRACE_LOG_PATH", str(trace_path), raising=True)
+
+        captured: dict = {}
+
+        class _StubTelegram:
+            async def send_document(self, chat_id, document, filename, caption=None):
+                captured["document"] = document
+                captured["caption"] = caption
+                return True
+
+        class _StubCtx:
+            telegram = _StubTelegram()
+            chat_id = "owner-chat"
+            async def reply(self, msg):
+                pass
+
+        await handle_ws_log(["5"], _StubCtx())
+        body = captured["document"].decode("utf-8")
+        # Should contain the last 5 events (15..19) but not earlier ones
+        assert "event_19" in body
+        assert "event_15" in body
+        assert "event_5" not in body
+        # Caption reports tail boundaries
+        assert "last 5" in (captured["caption"] or "")
+
+    async def test_ws_log_missing_file(self, tmp_path, monkeypatch):
+        from src.commands.channels import handle_ws_log
+
+        missing = tmp_path / "never_written.log"
+        import config as cfg
+        monkeypatch.setattr(cfg, "WS_TRACE_LOG_PATH", str(missing), raising=True)
+
+        replies: list = []
+
+        class _StubTelegram:
+            async def send_document(self, *a, **kw):
+                raise AssertionError("send_document should not be called")
+
+        class _StubCtx:
+            telegram = _StubTelegram()
+            chat_id = "owner-chat"
+            async def reply(self, msg):
+                replies.append(msg)
+
+        await handle_ws_log([], _StubCtx())
+        assert len(replies) == 1
+        assert "not found" in replies[0]
+
+    async def test_ws_log_empty_file(self, tmp_path, monkeypatch):
+        from src.commands.channels import handle_ws_log
+
+        trace_path = tmp_path / "ws_trace.log"
+        trace_path.write_text("", encoding="utf-8")
+
+        import config as cfg
+        monkeypatch.setattr(cfg, "WS_TRACE_LOG_PATH", str(trace_path), raising=True)
+
+        replies: list = []
+
+        class _StubTelegram:
+            async def send_document(self, *a, **kw):
+                raise AssertionError("send_document should not be called on empty file")
+
+        class _StubCtx:
+            telegram = _StubTelegram()
+            chat_id = "owner-chat"
+            async def reply(self, msg):
+                replies.append(msg)
+
+        await handle_ws_log([], _StubCtx())
+        assert any("empty" in r.lower() for r in replies)

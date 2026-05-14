@@ -858,3 +858,97 @@ async def handle_statstats(args: List[str], ctx: CommandContext) -> None:
     await ctx.reply(ctx.stat_filter.format_statstats())
 
 
+@registry.command(
+    "/ws_log",
+    aliases=["/ws_trace", "/wslog"],
+    admin=True,
+    group="channels",
+    help_text=(
+        "Ship the WebSocket trace log as a Telegram document.  Captures "
+        "every connect/close, subscribe ack/error, force-close (watchdog / "
+        "health-check / per-symbol), and a periodic per-connection "
+        "stream_summary so the operator can see which subscribed streams "
+        "are silent without SSH access.  Usage: /ws_log [tail_lines] "
+        "(default: full file, max 5 MB per Telegram document limits)."
+    ),
+)
+async def handle_ws_log(args: List[str], ctx: CommandContext) -> None:
+    """Send the WS trace file to the requesting chat as a document.
+
+    No engine state mutated.  Reads the configured ``WS_TRACE_LOG_PATH``
+    from disk, optionally tails the last N lines (when ``args[0]`` is
+    a positive integer), and uploads via the existing
+    ``TelegramBot.send_document`` helper.
+    """
+    from config import WS_TRACE_LOG_PATH
+
+    log_path = Path(WS_TRACE_LOG_PATH)
+    if not log_path.exists():
+        await ctx.reply(
+            f"⚠️ WS trace log not found at `{WS_TRACE_LOG_PATH}` — engine "
+            f"may not have written any events yet (boot needs to land "
+            f"`<WS:LABEL> connect_start` first)."
+        )
+        return
+
+    try:
+        raw = log_path.read_bytes()
+    except OSError as exc:
+        await ctx.reply(f"⚠️ Could not read WS trace log: {exc}")
+        return
+    if not raw:
+        await ctx.reply(
+            "ℹ️ WS trace log exists but is empty — engine boot is still in "
+            "progress, or WS_TRACE_LOG_PATH was just rotated."
+        )
+        return
+
+    # Optional tail: ``/ws_log 500`` → last 500 lines.  Useful when the
+    # full file has grown past what Telegram will accept (50 MB cap, but
+    # network reliability degrades well before that).
+    tail_lines: Optional[int] = None
+    if args:
+        try:
+            tail_lines = int(args[0])
+            if tail_lines <= 0:
+                tail_lines = None
+        except ValueError:
+            tail_lines = None
+
+    if tail_lines is not None:
+        # Decode lazily — log lines are ASCII-safe, decoding is cheap.
+        text = raw.decode("utf-8", errors="replace")
+        lines = text.splitlines()
+        kept = lines[-tail_lines:] if tail_lines < len(lines) else lines
+        body = "\n".join(kept).encode("utf-8")
+        size_label = f"{len(body)} bytes / last {len(kept)} of {len(lines)} lines"
+    else:
+        body = raw
+        size_label = f"{len(body)} bytes / full file"
+
+    iso_now = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    filename = f"ws_trace_{iso_now}.log"
+    caption = f"🛰️ WS trace log ({size_label})"
+
+    sent = False
+    try:
+        if hasattr(ctx.telegram, "send_document"):
+            sent = await ctx.telegram.send_document(
+                ctx.chat_id,
+                document=body,
+                filename=filename,
+                caption=caption,
+            )
+    except Exception as exc:
+        await ctx.reply(f"⚠ send_document raised: {exc}")
+        sent = False
+
+    if not sent:
+        # Fall back to inline reply truncated — at least the operator sees
+        # something rather than silence when the file upload fails.
+        snippet = body.decode("utf-8", errors="replace")[-3000:]
+        await ctx.reply(
+            f"⚠️ Document send failed; pasting tail inline:\n```\n{snippet}\n```"
+        )
+
+

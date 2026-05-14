@@ -46,10 +46,17 @@ from config import (
     WS_SESSION_RECYCLE_ATTEMPTS,
     WS_STALENESS_MULTIPLIER,
     WS_STALENESS_MULTIPLIER_FUTURES,
+    WS_TRACE_SUMMARY_INTERVAL_SEC,
+    WS_TRACE_SUMMARY_STALENESS_SEC,
 )
-from src.utils import get_logger
+from src.utils import get_logger, get_ws_trace_logger
 
 log = get_logger("ws_manager")
+# Dedicated logger for ``<WS:LABEL>`` events that the operator pulls via
+# ``/ws_log``.  Routes only to ``logs/ws_trace.log`` (configured in
+# ``src/utils.py``) so stderr and the engine rolling log stay quiet of
+# the per-event noise we need for incident replay.
+ws_trace = get_ws_trace_logger()
 
 MessageHandler = Callable[[dict], Coroutine[Any, Any, None]]
 
@@ -81,6 +88,17 @@ class WSConnection:
     # health-check loop force-closes the connection.  Pattern matches
     # ``degraded_since`` so it composes cleanly with /diag reporting.
     low_msgrate_since: float = 0.0
+    # Per-stream "last data arrived" timestamps (monotonic).  Populated from
+    # ``_listen`` when a combined-stream wrapper arrives ({"stream":..., "data":...}).
+    # The trace summary loop reads this to report ``active/silent`` counts per
+    # connection — the diagnostic that distinguishes "Binance dropped a subset
+    # of subscriptions silently" from "all streams down".
+    stream_data_ts: Dict[str, float] = field(default_factory=dict)
+    # Monotonic timestamp the trace summary loop last emitted a
+    # ``stream_summary`` event for this connection.  Throttles the summary
+    # cadence to ``WS_TRACE_SUMMARY_INTERVAL_SEC`` even though the
+    # ``_health_check_loop`` ticks every ``WS_HEALTH_CHECK_INTERVAL``.
+    trace_summary_last_ts: float = 0.0
     # Reconnect-duration instrumentation (Phase 1, 2026-05-08).
     # ``degraded_since`` stamps monotonic time when the connection went
     # degraded; cleared when it goes healthy again.  ``last_reconnect_ms``
@@ -553,25 +571,38 @@ class WebSocketManager:
 
     async def _connect(self, conn: WSConnection) -> None:
         assert self._session is not None
-        # Combined-stream URL per Binance docs (2026-05-14):
-        #   wss://<host>/stream?streams=<s1>/<s2>/...
-        # The base URL is ``wss://<host>/stream`` (set in config) and we
-        # append ``?streams=`` with the ``/``-joined stream list.
-        # Payloads arrive as ``{"stream": "<name>", "data": <rawPayload>}``;
-        # ``main._on_ws_message`` detects the wrapper and unwraps before
-        # dispatching to the event handlers.
-        #
-        # Previously the code built ``/ws/<s1>/<s2>/...`` which is the
-        # raw single-stream endpoint with extra path components appended.
-        # That pattern worked for years against Binance Spot but Binance
-        # Futures has tightened path parsing — the May 13-14 diag showed
-        # both futures connections silent-but-pingable for 12+ minutes
-        # (sec_since_last_msg ≈ 729s) while the documented single-stream
-        # field was the only one delivering data and the rest of the
-        # streams were silently unsubscribed.
+        # Combined-stream URL per Binance docs.  See PR #388 for the full
+        # rationale; the short form is "/ws/<s1>/<s2>/..." was unofficial
+        # and Binance Futures silently dropped subscriptions beyond the
+        # first stream.  /stream?streams=... is documented.
         stream_path = "/".join(conn.streams)
         url = f"{self._base_url}?streams={stream_path}"
-        conn.ws = await self._session.ws_connect(url, heartbeat=self._heartbeat_interval)
+
+        # WS-trace: stamp the connect attempt with conn index, label,
+        # stream count, and the URL prefix so the operator can correlate
+        # close events to the right connection.  URL is truncated at 220
+        # chars to avoid 200-stream URLs (>5 KB) bloating the trace file.
+        try:
+            conn_idx = self._connections.index(conn) if conn in self._connections else -1
+        except ValueError:
+            conn_idx = -1
+        url_preview = (url if len(url) <= 220 else url[:220] + f"... ({len(url) - 220} chars truncated)")
+        connect_t0 = time.monotonic()
+        ws_trace.info(
+            f"<WS:{self._label}> connect_start conn={conn_idx} streams={len(conn.streams)} url={url_preview}"
+        )
+
+        try:
+            conn.ws = await self._session.ws_connect(url, heartbeat=self._heartbeat_interval)
+        except Exception as exc:
+            ws_trace.warning(
+                f"<WS:{self._label}> connect_fail conn={conn_idx} duration_ms={(time.monotonic() - connect_t0) * 1000:.0f} "
+                f"exc_type={type(exc).__name__} msg={str(exc)[:200]!r}"
+            )
+            raise
+        ws_trace.info(
+            f"<WS:{self._label}> connect_success conn={conn_idx} duration_ms={(time.monotonic() - connect_t0) * 1000:.0f}"
+        )
         conn.last_pong = time.monotonic()
         conn.reconnect_attempts = 0
         # NOTE: do NOT set ``conn.degraded = False`` here.  The
@@ -596,16 +627,26 @@ class WebSocketManager:
         conn.connected_ts = time.monotonic()
         conn.low_msgrate_since = 0.0
         conn.health_msg_count = 0
+        # Clear per-stream timestamps — old stamps from a previous connection
+        # are stale.  trace_summary_last_ts is reset so the first summary
+        # after reconnect doesn't get throttled.
+        conn.stream_data_ts.clear()
+        conn.trace_summary_last_ts = 0.0
         self._subscribed_streams.update(conn.streams)
         log.info("Connected WS: {} streams", len(conn.streams))
 
     async def _listen(self, conn: WSConnection) -> None:
         assert conn.ws is not None
+        try:
+            conn_idx = self._connections.index(conn) if conn in self._connections else -1
+        except ValueError:
+            conn_idx = -1
         async for msg in conn.ws:
             if msg.type == aiohttp.WSMsgType.TEXT:
                 # Any incoming data message proves the connection is alive;
                 # update last_pong so is_healthy reflects real liveness.
-                conn.last_pong = time.monotonic()
+                now_mono = time.monotonic()
+                conn.last_pong = now_mono
                 # Count this towards the health-check loop's msgs-per-min
                 # window.  Prior to 2026-05-14 this counter was declared on
                 # WSConnection but never incremented, so ``_health_check_loop``
@@ -615,9 +656,47 @@ class WebSocketManager:
                 conn.health_msg_count += 1
                 try:
                     data = json.loads(msg.data)
-                    await self._on_message(data)
                 except Exception as exc:
                     log.debug("Message parse error: {}", exc)
+                    continue
+                # WS-trace: capture per-stream data arrival from the
+                # combined-stream wrapper.  Tracks which subscribed streams
+                # are actually delivering data — distinguishes "Binance
+                # silently unsubscribed a subset" from "everything's flowing".
+                # First-data-per-stream gets its own trace event so the
+                # operator can spot streams that connect but never deliver.
+                if isinstance(data, dict):
+                    stream_name = data.get("stream")
+                    if isinstance(stream_name, str) and stream_name:
+                        first_seen = stream_name not in conn.stream_data_ts
+                        conn.stream_data_ts[stream_name] = now_mono
+                        if first_seen:
+                            delay_s = now_mono - conn.connected_ts if conn.connected_ts > 0 else 0.0
+                            ws_trace.info(
+                                f"<WS:{self._label}> first_data conn={conn_idx} stream={stream_name} delay_after_connect_s={delay_s:.2f}"
+                            )
+                    # Subscribe / error response from Binance:
+                    #   success: {"result": null, "id": 1}
+                    #   error:   {"error": {"code": -1121, "msg": "Invalid symbol"}}
+                    # Detect by absence of "stream"/"e" but presence of
+                    # "result" or "error".  These don't reach the engine
+                    # message handler because they don't match any event
+                    # type — but they're gold for diagnosing silent
+                    # subscription failures.
+                    if "stream" not in data and "e" not in data:
+                        raw = str(msg.data)[:200]
+                        if "error" in data:
+                            ws_trace.warning(
+                                f"<WS:{self._label}> subscribe_error conn={conn_idx} raw={raw!r}"
+                            )
+                        elif "result" in data:
+                            ws_trace.info(
+                                f"<WS:{self._label}> subscribe_ack conn={conn_idx} raw={raw!r}"
+                            )
+                try:
+                    await self._on_message(data)
+                except Exception as exc:
+                    log.debug("Message handler error: {}", exc)
             elif msg.type in (aiohttp.WSMsgType.PING, aiohttp.WSMsgType.PONG):
                 # Binance sends PING frames every ~3 minutes; aiohttp auto-replies
                 # with PONG.  Treat both as proof that the connection is alive.
@@ -629,7 +708,30 @@ class WebSocketManager:
                 if msg.type == aiohttp.WSMsgType.PONG and conn.last_ping_time > 0:
                     conn.ping_latency_ms = (now_mono - conn.last_ping_time) * 1000
                     conn.last_ping_time = 0.0
-            elif msg.type in (aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR):
+            elif msg.type == aiohttp.WSMsgType.CLOSED:
+                # Capture the close code + reason — previously dropped on
+                # the floor.  Binance close codes:
+                #   1000 = normal closure
+                #   1006 = abnormal (TCP RST)
+                #   1011 = server error
+                #   4xxx = Binance-specific (rate limit etc.)
+                code = msg.data if isinstance(msg.data, int) else None
+                reason = ""
+                try:
+                    if msg.extra is not None:
+                        reason = str(msg.extra)[:200]
+                except Exception:
+                    reason = ""
+                ws_trace.warning(
+                    f"<WS:{self._label}> close_received conn={conn_idx} code={code} reason={reason!r}"
+                )
+                log.warning("WS closed/error, will reconnect")
+                break
+            elif msg.type == aiohttp.WSMsgType.ERROR:
+                err_data = str(msg.data)[:200] if msg.data is not None else ""
+                ws_trace.warning(
+                    f"<WS:{self._label}> error_received conn={conn_idx} data={err_data!r}"
+                )
                 log.warning("WS closed/error, will reconnect")
                 break
 
@@ -670,9 +772,18 @@ class WebSocketManager:
                     # Staleness check: no data at all for an extended period
                     stale_threshold = max(1.0, self._heartbeat_interval * self._staleness_multiplier)
                     if (now - conn.last_pong) >= stale_threshold:
+                        age_s = now - conn.last_pong
                         log.warning(
                             "Watchdog: stale WS connection ({:.0f}s since last data) — force-closing to trigger reconnect",
-                            now - conn.last_pong,
+                            age_s,
+                        )
+                        conn_idx = -1
+                        try:
+                            conn_idx = self._connections.index(conn)
+                        except ValueError:
+                            pass
+                        ws_trace.warning(
+                            f"<WS:{self._label}> watchdog_force_close conn={conn_idx} age_s={age_s:.0f} threshold_s={stale_threshold:.0f}"
                         )
                         conn.last_ping_time = 0.0
                         await conn.ws.close()
@@ -926,6 +1037,9 @@ class WebSocketManager:
                             "(rate={:.2f} msgs/min, threshold={:.2f}) — force-closing to trigger reconnect",
                             idx, self._label, low_for, rate, WS_MIN_MESSAGE_RATE,
                         )
+                        ws_trace.warning(
+                            f"<WS:{self._label}> health_force_close conn={idx} silent_s={low_for:.0f} rate={rate:.2f} threshold={WS_MIN_MESSAGE_RATE:.2f}"
+                        )
                         await self._alert_admin_throttled(
                             f"WS {self._label} conn[{idx}] data-silent {low_for:.0f}s "
                             f"({rate:.2f} msgs/min) — forcing reconnect",
@@ -943,6 +1057,34 @@ class WebSocketManager:
                 # Reset rolling counters for the next window
                 conn.health_check_ts = now
                 conn.health_msg_count = 0
+
+                # ---- WS-trace: periodic stream summary ----
+                # Emit ``stream_summary`` for this connection every
+                # ``WS_TRACE_SUMMARY_INTERVAL_SEC`` so the operator can spot
+                # silent-stream subsets in real time (this is the central
+                # diagnostic the URL-format / per-conn-limit hypotheses
+                # need to verify).
+                if (now - conn.trace_summary_last_ts) >= WS_TRACE_SUMMARY_INTERVAL_SEC:
+                    conn.trace_summary_last_ts = now
+                    total_subscribed = len(conn.streams)
+                    silent_streams: List[str] = []
+                    seen_streams = 0
+                    for stream in conn.streams:
+                        last_ts = conn.stream_data_ts.get(stream)
+                        if last_ts is None:
+                            silent_streams.append(stream)
+                        else:
+                            seen_streams += 1
+                            if (now - last_ts) > WS_TRACE_SUMMARY_STALENESS_SEC:
+                                silent_streams.append(stream)
+                    active = total_subscribed - len(silent_streams)
+                    sample = ",".join(silent_streams[:5])
+                    ws_trace.info(
+                        f"<WS:{self._label}> stream_summary conn={idx} "
+                        f"active={active}/{total_subscribed} silent={len(silent_streams)} "
+                        f"never_seen={total_subscribed - seen_streams} "
+                        f"silent_sample={sample if sample else '(none)'}"
+                    )
 
             # ---- Per-symbol staleness check ----
             # Runs only when the manager was wired with a ``data_store``
@@ -1015,6 +1157,9 @@ class WebSocketManager:
             "(threshold={:.0f}s, ratio_threshold={:.0%}) — force-closing all conns",
             stale_count, len(symbols), ratio, self._label,
             threshold, WS_PER_SYMBOL_STALENESS_RATIO,
+        )
+        ws_trace.warning(
+            f"<WS:{self._label}> per_symbol_force_close stale={stale_count}/{len(symbols)} ratio={ratio:.2f} threshold_s={threshold:.0f}"
         )
         await self._alert_admin_throttled(
             f"WS {self._label} per-symbol stale: {stale_count}/{len(symbols)} "

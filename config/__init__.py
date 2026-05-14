@@ -1624,6 +1624,35 @@ WS_PER_SYMBOL_STALENESS_THRESHOLD_SEC: float = _safe_float(
 WS_PER_SYMBOL_STALENESS_RATIO: float = _safe_float(
     "WS_PER_SYMBOL_STALENESS_RATIO", "0.5"
 )
+#: WS-trace file — dedicated loguru sink writes structured ``<WS:LABEL>``
+#: events to this path so the operator can pull the file via the ``/ws_log``
+#: Telegram command without SSH access.  Captures every connect, close,
+#: subscribe ack, watchdog/health-check force-close, per-symbol staleness
+#: trip, and a periodic per-connection summary (active vs. silent streams).
+#: Path is relative to the engine working directory; matches the engine
+#: log convention (``logs/engine_{time}.log``).
+WS_TRACE_LOG_PATH: str = os.getenv("WS_TRACE_LOG_PATH", "logs/ws_trace.log")
+#: Rotation size for the WS-trace file.  Loguru rotates on size; rotated
+#: files share the base name with a counter suffix.
+WS_TRACE_LOG_ROTATION: str = os.getenv("WS_TRACE_LOG_ROTATION", "5 MB")
+#: Number of rotated WS-trace files to retain.  5 × 5 MB = 25 MB ceiling
+#: for the rolling history.  More than enough for a multi-hour incident
+#: replay without blowing the data volume.
+WS_TRACE_LOG_RETENTION: int = _safe_int("WS_TRACE_LOG_RETENTION", "5")
+#: How often (seconds) the WS health-check loop emits the periodic
+#: ``stream_summary`` event.  Lower = noisier log, faster diagnostic
+#: signal; higher = quieter file, slower to spot per-symbol drops.
+WS_TRACE_SUMMARY_INTERVAL_SEC: int = _safe_int(
+    "WS_TRACE_SUMMARY_INTERVAL_SEC", "60"
+)
+#: Per-stream staleness threshold (seconds) for the periodic summary.
+#: Streams that haven't delivered a TEXT frame within this window count
+#: as ``silent_*`` in the summary line.  Separate from the per-symbol
+#: force-close threshold (which acts on data_store kline age, not on raw
+#: WS frame arrival).
+WS_TRACE_SUMMARY_STALENESS_SEC: int = _safe_int(
+    "WS_TRACE_SUMMARY_STALENESS_SEC", "180"
+)
 #: Pairs that get dedicated (non-multiplexed) WebSocket connections for lowest latency.
 WS_PRIORITY_DEDICATED_PAIRS: List[str] = [
     p.strip() for p in os.getenv(
