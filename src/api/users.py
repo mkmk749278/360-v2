@@ -31,6 +31,7 @@ Schema (created on first connect via ``CREATE TABLE IF NOT EXISTS``):
         currency           TEXT,                -- ISO 4217 ("USD")
         terms_accepted_at  TEXT,                -- ISO-8601 UTC
         onboarded_at       TEXT,                -- NULL = needs signup flow
+        firebase_uid       TEXT,                -- Phase 4 Firebase migration; UNIQUE when set
         created_at         TEXT NOT NULL,       -- ISO-8601 UTC
         updated_at         TEXT NOT NULL        -- ISO-8601 UTC
     );
@@ -44,7 +45,10 @@ Migration: pre-Phase-3 deployments have a ``users`` table without the
 profile columns.  :meth:`_migrate_schema` adds them in-place via
 ``ALTER TABLE ... ADD COLUMN`` (SQLite-safe, in-place, no row rewrite).
 Existing rows get NULL for every profile column → they're routed back
-through the SignupPage on next login.
+through the SignupPage on next login.  Phase-4 ``firebase_uid`` follows
+the same pattern — added via ``ALTER TABLE`` for existing dbs, populated
+on first Firebase sign-in by phone-match-and-backfill (see
+:meth:`get_or_create_by_firebase_uid`).
 """
 
 from __future__ import annotations
@@ -89,6 +93,12 @@ class User:
     currency: Optional[str] = None
     terms_accepted_at: Optional[datetime] = None
     onboarded_at: Optional[datetime] = None
+    # Firebase identity (Phase 4).  NULL on legacy / unmigrated rows;
+    # populated either on first Firebase sign-in (via phone-match
+    # backfill in ``get_or_create_by_firebase_uid``) or by the
+    # Telegram-OTP-verify endpoint after registering the user with
+    # Firebase Admin and calling ``set_firebase_uid``.
+    firebase_uid: Optional[str] = None
 
     @property
     def needs_onboarding(self) -> bool:
@@ -139,6 +149,7 @@ def _row_to_user(row: sqlite3.Row) -> User:
         currency=_get("currency"),
         terms_accepted_at=_parse_iso(_get("terms_accepted_at")),
         onboarded_at=_parse_iso(_get("onboarded_at")),
+        firebase_uid=_get("firebase_uid"),
     )
 
 
@@ -160,11 +171,14 @@ CREATE TABLE IF NOT EXISTS users (
     currency          TEXT,
     terms_accepted_at TEXT,
     onboarded_at      TEXT,
+    firebase_uid      TEXT,
     created_at        TEXT    NOT NULL,
     updated_at        TEXT    NOT NULL
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_e164);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid
+    ON users(firebase_uid) WHERE firebase_uid IS NOT NULL;
 """
 
 
@@ -178,6 +192,10 @@ _PROFILE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("currency", "TEXT"),
     ("terms_accepted_at", "TEXT"),
     ("onboarded_at", "TEXT"),
+    # Phase-4 Firebase migration — added via ALTER TABLE for pre-Phase-4
+    # dbs; the partial unique index above is also created lazily by
+    # ``_SCHEMA_SQL``'s ``CREATE ... IF NOT EXISTS``.
+    ("firebase_uid", "TEXT"),
 )
 
 
@@ -227,6 +245,9 @@ class UserStore:
                 f"ALTER TABLE users ADD COLUMN {name} {decl}"
             )
             log.info("Migrated users table: added column {}", name)
+        # The partial unique index on firebase_uid is created by
+        # ``_SCHEMA_SQL``'s ``CREATE UNIQUE INDEX IF NOT EXISTS`` —
+        # safe to run again on every open, no-op when present.
 
     # ---- bootstrap ------------------------------------------------------
 
@@ -282,6 +303,14 @@ class UserStore:
             row = cur.fetchone()
             return _row_to_user(row) if row is not None else None
 
+    def get_by_firebase_uid(self, firebase_uid: str) -> Optional[User]:
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM users WHERE firebase_uid = ?", (firebase_uid,)
+            )
+            row = cur.fetchone()
+            return _row_to_user(row) if row is not None else None
+
     # ---- writes ---------------------------------------------------------
 
     def get_or_create_by_phone(self, phone_e164: str) -> User:
@@ -313,6 +342,97 @@ class UserStore:
                 )
             log.info("Created user: user_id={}, phone={}", user.user_id, phone_e164)
             return user
+
+    def get_or_create_by_firebase_uid(
+        self,
+        firebase_uid: str,
+        phone_e164: str,
+    ) -> User:
+        """Atomic upsert keyed by Firebase UID with phone-match backfill.
+
+        Used by the Firebase ID-token auth path (Phase 4).  Resolution:
+
+        1. UID hit → return that row unchanged.
+        2. UID miss + phone hit (existing legacy row) → ``UPDATE`` the
+           row to set ``firebase_uid``, return updated User.  This is
+           the migration path for the 5 testers + owner who already
+           exist in SQLite from the HS256 + OTP era.
+        3. UID miss + phone miss → ``INSERT`` a fresh row at tier=free
+           carrying both ``phone_e164`` and ``firebase_uid``.
+
+        Race-safe: the partial UNIQUE index on ``firebase_uid`` plus
+        serialised writes guarantee one row per UID under concurrent
+        verifies.
+        """
+        with self._lock:
+            existing = self.get_by_firebase_uid(firebase_uid)
+            if existing is not None:
+                return existing
+            # UID miss — try phone-match for backfill.
+            by_phone = self.get_by_phone(phone_e164)
+            now = _now_iso()
+            if by_phone is not None:
+                self._conn.execute(
+                    """
+                    UPDATE users
+                       SET firebase_uid = ?, updated_at = ?
+                     WHERE user_id = ?
+                    """,
+                    (firebase_uid, now, by_phone.user_id),
+                )
+                log.info(
+                    "Backfilled firebase_uid on user_id={}, phone={}",
+                    by_phone.user_id, phone_e164,
+                )
+                updated = self.get_by_id(by_phone.user_id)
+                assert updated is not None  # row exists; we just UPDATE'd it
+                return updated
+            # No phone-match either — fresh row.
+            self._conn.execute(
+                """
+                INSERT INTO users (phone_e164, tier, paid_until,
+                                   telegram_chat_id, firebase_uid,
+                                   created_at, updated_at)
+                VALUES (?, ?, NULL, NULL, ?, ?, ?)
+                """,
+                (phone_e164, _FREE_TIER, firebase_uid, now, now),
+            )
+            user = self.get_by_firebase_uid(firebase_uid)
+            if user is None:  # pragma: no cover — INSERT then SELECT must hit
+                raise RuntimeError(
+                    f"user vanished after insert: firebase_uid={firebase_uid!r}"
+                )
+            log.info(
+                "Created user via Firebase: user_id={}, phone={}, firebase_uid={}",
+                user.user_id, phone_e164, firebase_uid,
+            )
+            return user
+
+    def set_firebase_uid(self, user_id: int, firebase_uid: str) -> None:
+        """Set ``firebase_uid`` on an existing user.
+
+        Used by the Telegram-OTP-verify endpoint after registering the
+        user with Firebase Admin: the engine already has a row for the
+        user (created on the OTP path) and now needs to record the
+        Firebase identity it just minted on their behalf.  Idempotent —
+        calling with an unchanged UID is a no-op write.
+        """
+        with self._lock:
+            now = _now_iso()
+            cur = self._conn.execute(
+                """
+                UPDATE users
+                   SET firebase_uid = ?, updated_at = ?
+                 WHERE user_id = ?
+                """,
+                (firebase_uid, now, int(user_id)),
+            )
+            if cur.rowcount == 0:
+                raise LookupError(f"user_id={user_id} not found")
+            log.info(
+                "Set firebase_uid on user_id={}: uid={}",
+                user_id, firebase_uid,
+            )
 
     def set_tier(
         self,

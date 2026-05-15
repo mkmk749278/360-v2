@@ -561,3 +561,44 @@ class BillingGrantResponse(BaseModel):
     ok: bool
     user_id: int
     tier: str
+
+
+# ---------------------------------------------------------------------------
+# Telegram-OTP → Firebase custom-token bridge (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+class TelegramOtpVerifyRequest(BaseModel):
+    """Body of ``POST /api/auth/telegram-otp/verify``.
+
+    The Telegram-OTP fallback path: the bot already DM'd a 6-digit code
+    to the user's bound chat_id; the app POSTs it here.  On success the
+    engine registers the user with Firebase Admin (idempotent on phone)
+    and returns a Firebase custom token the app exchanges for a real
+    Firebase session via ``signInWithCustomToken``.
+    """
+
+    phone_e164: str = Field(..., min_length=8, max_length=18)
+    code: str = Field(
+        ...,
+        min_length=6,
+        max_length=6,
+        pattern=r"^\d{6}$",
+        description="6-digit numeric code from the Telegram bot DM.",
+    )
+
+
+class TelegramOtpVerifyResponse(BaseModel):
+    """Response from ``POST /api/auth/telegram-otp/verify``.
+
+    ``custom_token`` is single-use — the app calls
+    ``signInWithCustomToken`` immediately to land a Firebase session.
+    The user/tier fields let the app render the initial state without a
+    second round-trip to ``/api/profile``.
+    """
+
+    custom_token: str
+    user_id: int
+    tier: str
+    paid_until: Optional[str] = None  # ISO-8601 UTC; null when not paid
+    needs_onboarding: bool
