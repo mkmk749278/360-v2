@@ -158,6 +158,10 @@ def _row_to_user(row: sqlite3.Row) -> User:
 # ---------------------------------------------------------------------------
 
 
+# NB: The partial unique index on ``firebase_uid`` is INTENTIONALLY
+# omitted from this script — it's created inside ``_migrate_schema``
+# below, AFTER the column ADD step runs, so it works on pre-Phase-4
+# dbs where the column doesn't yet exist when ``executescript`` runs.
 _SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS users (
     user_id           INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -177,8 +181,6 @@ CREATE TABLE IF NOT EXISTS users (
 );
 
 CREATE INDEX IF NOT EXISTS idx_users_phone ON users(phone_e164);
-CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid
-    ON users(firebase_uid) WHERE firebase_uid IS NOT NULL;
 """
 
 
@@ -193,8 +195,8 @@ _PROFILE_COLUMNS: tuple[tuple[str, str], ...] = (
     ("terms_accepted_at", "TEXT"),
     ("onboarded_at", "TEXT"),
     # Phase-4 Firebase migration — added via ALTER TABLE for pre-Phase-4
-    # dbs; the partial unique index above is also created lazily by
-    # ``_SCHEMA_SQL``'s ``CREATE ... IF NOT EXISTS``.
+    # dbs; the partial unique index is created lazily by
+    # ``_migrate_schema`` AFTER this ADD COLUMN runs.
     ("firebase_uid", "TEXT"),
 )
 
@@ -229,12 +231,25 @@ class UserStore:
         log.info("UserStore opened at {}", self._path)
 
     def _migrate_schema(self) -> None:
-        """Add post-GA columns to a pre-Phase-3 ``users`` table.
+        """Add post-GA columns to a pre-Phase-3 ``users`` table, then
+        create the firebase_uid partial unique index.
 
         ``CREATE TABLE IF NOT EXISTS`` is a no-op when the table already
         exists, so any columns added after the original schema landed
         must be applied via ``ALTER TABLE``.  Idempotent: skips columns
         that already exist.
+
+        IMPORTANT: the partial unique index on ``firebase_uid`` MUST be
+        created AFTER the column ADD step.  Putting it in
+        ``_SCHEMA_SQL`` (which runs via ``executescript`` BEFORE this
+        method) breaks on every pre-Phase-4 db: ``CREATE UNIQUE INDEX
+        ON users(firebase_uid)`` raises ``no such column: firebase_uid``
+        because the column hasn't been added yet.  The original Phase-4
+        implementation hit this in production and required a manual
+        ``ALTER TABLE`` on the VPS to recover.  Tests didn't catch it
+        because every test fixture uses ``tmp_path`` which always
+        starts from a fresh CREATE TABLE that already includes the
+        firebase_uid column.
         """
         cur = self._conn.execute("PRAGMA table_info(users)")
         existing = {row["name"] for row in cur.fetchall()}
@@ -245,9 +260,13 @@ class UserStore:
                 f"ALTER TABLE users ADD COLUMN {name} {decl}"
             )
             log.info("Migrated users table: added column {}", name)
-        # The partial unique index on firebase_uid is created by
-        # ``_SCHEMA_SQL``'s ``CREATE UNIQUE INDEX IF NOT EXISTS`` —
-        # safe to run again on every open, no-op when present.
+        # Partial unique index on firebase_uid.  Idempotent — IF NOT
+        # EXISTS makes re-runs safe on every UserStore open.  Must run
+        # after the ALTER TABLE loop above so the column exists.
+        self._conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_firebase_uid "
+            "ON users(firebase_uid) WHERE firebase_uid IS NOT NULL"
+        )
 
     # ---- bootstrap ------------------------------------------------------
 
