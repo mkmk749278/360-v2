@@ -25,11 +25,15 @@ protected request:
 
 When all three reject, the dependency raises 401.
 
-Telegram-OTP → Firebase bridge: ``POST /api/auth/telegram-otp/verify``
-takes the 6-digit code the bot DM'd, validates it via the existing
-:class:`OtpStore`, registers the user with Firebase Admin (idempotent
-on phone), and returns a Firebase custom token.  The app exchanges it
-via ``signInWithCustomToken`` to land a real Firebase session — same
+Telegram-OTP → Firebase bridge: ``POST /api/auth/telegram-otp/issue``
+asks the engine to mint a 6-digit code and deliver it via
+@LuminProBot only (no SMS / WhatsApp fall-through — the architectural
+free fallback for users in regions where Firebase SMS Phone Auth
+isn't viable).  The companion ``POST /api/auth/telegram-otp/verify``
+takes the code, validates it via the existing :class:`OtpStore`,
+registers the user with Firebase Admin (idempotent on phone), and
+returns a Firebase custom token.  The app exchanges it via
+``signInWithCustomToken`` to land a real Firebase session — same
 post-state as the SMS path.
 """
 
@@ -62,9 +66,11 @@ from .auth import (
 from .billing_callback import SIGNATURE_HEADER, BillingWebhookVerifier
 from .otp import IssueStatus, OtpStore, VerifyStatus
 from .otp_delivery import (
+    ChainedOtpProvider,
     DeliveryStatus,
     LogOnlyOtpProvider,
     OtpDeliveryProvider,
+    TelegramOtpProvider,
 )
 from .schemas import (
     ActivityResponse,
@@ -88,6 +94,8 @@ from .schemas import (
     PulseSnapshot,
     SignalDetail,
     SignalsResponse,
+    TelegramOtpIssueRequest,
+    TelegramOtpIssueResponse,
     TelegramOtpVerifyRequest,
     TelegramOtpVerifyResponse,
     TickersResponse,
@@ -162,6 +170,38 @@ def _compute_needs_onboarding(
     if user is None:
         return True
     return user.needs_onboarding
+
+
+def _resolve_telegram_provider(
+    delivery: Optional[OtpDeliveryProvider],
+) -> Optional[TelegramOtpProvider]:
+    """Pull the :class:`TelegramOtpProvider` out of the configured chain.
+
+    The Telegram-OTP issue endpoint forces Telegram-only delivery — no
+    SMS / WhatsApp fall-through — because the user explicitly tapped
+    "Send via Telegram" in the app.  Rather than re-instantiate the
+    provider here (which would require re-reading env + the live
+    ``TelegramBot`` + ``UserStore`` instances), we walk the existing
+    delivery chain and surface whichever ``TelegramOtpProvider``
+    instance the bootstrap layer already wired up.
+
+    Returns ``None`` if no Telegram provider is configured — the caller
+    raises 503 so the app surfaces a clean error rather than silently
+    falling through to SMS (which would defeat the point of the
+    endpoint).
+    """
+    if delivery is None:
+        return None
+    if isinstance(delivery, TelegramOtpProvider):
+        return delivery
+    if isinstance(delivery, ChainedOtpProvider):
+        primary = getattr(delivery, "_primary", None)
+        if isinstance(primary, TelegramOtpProvider):
+            return primary
+        fallback = getattr(delivery, "_fallback", None)
+        if isinstance(fallback, TelegramOtpProvider):
+            return fallback
+    return None
 
 
 # ---------------------------------------------------------------------------
@@ -621,6 +661,99 @@ def build_app(
         )
 
     # ---- Telegram-OTP → Firebase custom-token bridge (Phase 4) ----
+
+    @app.post(
+        "/api/auth/telegram-otp/issue",
+        response_model=TelegramOtpIssueResponse,
+        tags=["auth"],
+    )
+    async def telegram_otp_issue(
+        req: TelegramOtpIssueRequest,
+    ) -> TelegramOtpIssueResponse:
+        """Issue an OTP for ``phone_e164`` and deliver via @LuminProBot only.
+
+        Mirrors ``POST /api/auth/request-otp`` (the SMS / WhatsApp /
+        Telegram-chain issue endpoint) but forces Telegram-only
+        delivery — no SMS / WhatsApp fall-through.  Used by the Lumin
+        app's "Send via Telegram" button, the architectural free
+        fallback for users in regions where Firebase SMS Phone Auth
+        isn't viable (cost or Play Store sideload).
+
+        Pairs with :func:`telegram_otp_verify` to complete the
+        Telegram-OTP → Firebase custom-token bridge described in
+        ``docs/firebase_auth_migration.md``.  Error shape matches
+        :func:`auth_request_otp` so the Lumin app's existing OTP error
+        handler covers both endpoints.
+        """
+        if user_store is None or otp_store is None or otp_delivery is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="phone auth not configured",
+            )
+        telegram = _resolve_telegram_provider(otp_delivery)
+        if telegram is None:
+            # No Telegram provider wired — the user tapped "Send via
+            # Telegram" but the engine isn't configured to deliver
+            # there.  503 (not 500): this is a config gap, not a bug.
+            log.warning(
+                "Telegram OTP issue requested for {} but no "
+                "TelegramOtpProvider is configured in the delivery chain",
+                req.phone_e164,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="telegram delivery not configured",
+            )
+        # Issue first — burns the rate-limit slot before we hit the
+        # delivery channel, matching the safety pattern of the legacy
+        # /api/auth/request-otp endpoint.
+        result = otp_store.issue(req.phone_e164)
+        if result.status is IssueStatus.RATE_LIMITED:
+            raise HTTPException(
+                status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                detail="too many OTP requests; try again later",
+                headers={"Retry-After": str(result.retry_after_seconds)},
+            )
+        if result.status is not IssueStatus.OK or result.code is None:
+            # Defensive — OtpStore.issue contract guarantees a code on
+            # OK; reaching here means the contract has been violated.
+            log.error(
+                "OtpStore.issue returned unexpected status {} (code={}) for {}",
+                result.status, result.code, req.phone_e164,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=result.status.value,
+            )
+        # Telegram-only delivery — bypass the chain (and any SMS /
+        # WhatsApp fall-through it would normally apply).
+        delivery = await telegram.send(req.phone_e164, result.code)
+        if delivery.status is DeliveryStatus.UNSUPPORTED_CHANNEL:
+            # User's phone isn't bound to a Telegram chat_id (no /start
+            # in @LuminProBot yet).  502 with a structured detail so
+            # the app can render "Open @LuminProBot, tap Start, then
+            # try again" rather than a generic failure.
+            log.info(
+                "Telegram OTP unsupported for {}: {}",
+                req.phone_e164, delivery.detail,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="telegram_chat_not_linked",
+            )
+        if delivery.status is not DeliveryStatus.OK:
+            log.warning(
+                "Telegram OTP delivery failed for {}: {}",
+                req.phone_e164, delivery.detail,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_502_BAD_GATEWAY,
+                detail="telegram_delivery_failed",
+            )
+        return TelegramOtpIssueResponse(
+            status="ok",
+            expires_in_seconds=result.expires_in_seconds,
+        )
 
     @app.post(
         "/api/auth/telegram-otp/verify",
