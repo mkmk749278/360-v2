@@ -82,7 +82,7 @@ These survived the incident and are valuable steady-state. Don't rip them out.
 3. **Cleanup duplicate logger configure** — both `src/utils.py` and `src/logger.py` call `_loguru_logger.remove()`; PR #390 hotfixed the immediate bug but unification is queued.
 4. **Forensic on #380 boot failure** — what specifically about the auto-trade-VPS-proxy PR killed engine boot. Informs CI smoke test design.
 5. **CI smoke test for engine boot** — `docker compose up engine → curl /api/health → assert 200` in 60s. Would have caught #380 in CI; informed by #4.
-6. **`360 CE Ops` PR #3 merge** — companion dashboard view consuming PR #385's `/internal/diag/positions` endpoint.
+6. ~~`360 CE Ops` PR #3 merge~~ — **merged** as `e78fea4` (2026-05-14). Signals "Created" column + `/positions` diag view consuming `/internal/diag/positions` are live in the dashboard.
 
 Week 2 backlog (architectural):
 
@@ -100,6 +100,75 @@ VPS state after this session:
   BINANCE_FUTURES_WS_BASE=wss://fstream.binance.com/market/stream
   BINANCE_WS_BASE=wss://stream.binance.com:9443/market/stream
   ```
+
+---
+
+## Previous Phase — 2026-05-13 (per-user expansion Phase 1–3c + Lumin-is-consumer-only architectural shift)
+
+A ~12 PR arc across `360-v2` + `lumin-app` shipped between the 2026-05-12 emission-blackout recovery and the 2026-05-14 WS blackout. This section closes the documentation gap — it wasn't recorded in real time because the WS-blackout fire-drill took the next session's bandwidth.
+
+### Engine side (per-user data foundations)
+
+| PR | Title | What it ships |
+|---|---|---|
+| #367 | Phase 1 — profile schema + signup-routing signal | Adds `display_name / country_code / timezone / currency / terms_accepted_at / onboarded_at` columns to `users`. Token responses gain `needs_onboarding: bool`. New `GET /api/profile` + partial `PUT /api/profile`. Owner row bootstrapped pre-onboarded; existing rows → NULL → routed through SignupPage on next signin. `_make_user_claims_dep` helper reused by every per-user endpoint. |
+| #368 | Phase 2 — per-user pretp + auto-trade override store | New SQLite tables `user_pretp_settings` + `user_auto_trade_settings` (PK user_id, all override columns nullable = "use engine default"). New endpoints `GET/PUT /api/settings/user/pretp` + `GET/PUT /api/settings/user/auto-trade`. Parallel to (not replacing) the engine-wide `user_settings` store — engine signal-evaluation behaviour is bit-identical. `leverage_cap` clamped to B12's 30× at store layer. `mode=live` on the per-user endpoint deliberately does NOT touch engine-global state. |
+| #379 | Level rearm state-machine fix | (Carried — small fix during this arc, separate from per-user expansion.) |
+| #381 | LSR exempt from trend hard gate + evaluator funnel in `/diag` | LSR is counter-trend by design; the trend-family hard gate was over-blocking. Funnel surface in `/diag` adds the per-evaluator visibility that drove this fix. |
+
+### Lumin app side (per-user UX + first-real-money execution)
+
+| PR | Phase | What it ships |
+|---|---|---|
+| #11 | tier-gate writes | App-side companion to engine #355 / #356. Hides Save (rather than disables) on `/settings/pretp` + `/settings/auto-trade` when `tier != owner`. New `OwnerOnlyBanner`. Engine 403 remains the source-of-truth backstop. |
+| #12 | Phase 1 | Country auto-detect (ISO-3166 table, regional-indicator emoji flags, no asset dep) → PhoneSignInPage chip → SignupPage routing fork on `needs_onboarding` from token response. New `Profile` dataclass + `GET/PUT /api/profile` wiring in repository. |
+| #13 | Phase 2 | Per-user Auto-trade + Pre-TP pages re-pointed at `/api/settings/user/*`. New owner-only **Engine defaults** page for engine-wide config. Honest "Saved — takes effect Phase 3" banner under per-user pages until execution wires through. |
+| #14 | Phase 3a | Per-user Binance API keys management. New `BinanceClient` (Futures HMAC-SHA256 REST), `BinanceKeysService` (`flutter_secure_storage`, per-user namespaced, `binance.user.<id>`). Test→Save gate, clock-skew sanity pre-check, friendly error mapping (-2014/-2015/-1022/-1021). |
+| #15 | Phase 3b-1 | Manual "Take signal" → entry + reduce-only SL + reduce-only TP1 triplet. `OrderExecutor.placeFromSignal` sizes from `position_size_pct × leverage_cap`, rounds per symbol filters. Idempotency × 3 layers (app `OrderLog`, broker `newClientOrderId=lumin-<id>-entry`, Confirm-button disable). B12 leverage clamp + reduce-only stops + minQty/minNotional pre-flight. |
+| #16 | Phase 3b-2 | `AutoTradeWatcher` — 15s poll, fires ACTIVE signals when user's mode is `paper`/`live`. Real-money confirmation modal on LIVE flip. Sticky AUTO LIVE / PAPER / PAUSED banner above NavShell with kill switch. One-firing-per-tick throttle. `AppLifecycleState.paused` stops watcher (Android foreground service deferred to Phase 3.5). |
+| #17 | Trade-tab mode fix | Bugfix: Trade tab Off/Paper/Live pills were still calling engine-wide `/api/auto-mode` (owner-gated 403). Re-pointed at per-user `/api/settings/user/auto-trade`. LIVE-flip confirmation modal now gated on both entry points. |
+| #18 | Lumin = consumer-only | **Architectural pivot.** Stripped all operator chrome: admin-token signin panel, anonymous-skip debug, LUMIN BACKEND card, /api/health Test connection, Engine-defaults page, Agents settings, Risk-gates page, dead Appearance/Language stubs, `OwnerOnlyBanner` (unused after this strip). Added Profile settings page + top-level Sign out entry. Settings surface after cleanup: AUTO-TRADE (Auto-trade + Pre-TP + Binance) + ACCOUNT (Profile + Subscription + About + Sign out). Owner now signs into Lumin via phone OTP like every tester. **Operator surfaces relocate to 360 CE Ops dashboard + a planned separate "ops APK"** (not yet built — design summary filed). |
+| #19 | Phase 3c | Trade tab renders **live Binance positions** (real `BinancePosition` data class + signed `getOpenPositions()`) when user has keys connected; engine paper view stays as fallback when no keys / fetch errors. `_ModePnlCard` relabels to "ENGINE PAPER P&L (not yours)" until Phase 4 per-user PnL. **Concurrent-position cap enforcement** — one-liner guard in `AutoTradeWatcher._fireOne` using the existing `getAccount` call (no new round-trip). |
+
+### 360 CE Ops dashboard
+
+- **PR #3 merged** (2026-05-14, `e78fea4`) — Signals page "Created" column now populates (engine surfaces creation time as `timestamp`, not `created_at`; normalizer fixed). New `/positions` route consuming engine `/internal/diag/positions` (PR #385), with per-row risk classification (`sl_breached` / `feed_stale` / `ok`) sorted urgent-first. +25 new tests, 32 passing.
+
+### Doctrinal implications
+
+**Lumin is now strictly consumer-only.** OWNER_BRIEF B15 ("Lumin = consumer app brand") shifted from naming-only to behaviourally enforced via #18. The operator workflow is now:
+
+| Surface | Pre-#18 | Post-#18 |
+|---|---|---|
+| Engine auto-mode flip (off/paper/live) | Lumin Trade tab + Settings → Auto-trade | 360 CE Ops (not yet wired — see follow-up) + Telegram `/automode` |
+| Engine-wide pre-TP config | Lumin Settings → Engine defaults | 360 CE Ops (not yet wired) + env vars / Telegram |
+| Agents toggle, Risk gates | Lumin Settings | 360 CE Ops (not yet wired) |
+| Admin-token signin | Lumin PhoneSignInPage | Removed entirely — owner uses phone OTP in Lumin like every user |
+| Mock/Live data-source toggle | Lumin API keys page | Removed — only live |
+| Per-user Auto-trade / Pre-TP / Binance keys | Lumin Settings | **Unchanged** — these are subscriber-facing |
+
+**B12 status after #15/#16/#19** (auto-trade safety checklist — `OWNER_BRIEF.md`):
+
+| Gate | Status |
+|---|---|
+| Leverage cap ≤ 30× | ✅ enforced (`clamp(1, 30)` in `OrderExecutor`; engine PR #368 also clamps at store layer) |
+| Reduce-only SL / TP | ✅ enforced (`closePosition=true` on SL, `reduceOnly=true` on TP) |
+| Concurrent-position cap | ✅ enforced (Phase 3c, honest count from Binance `getAccount`) |
+| Idempotency (no double-fire) | ✅ × 3 layers (app log + broker `newClientOrderId` + UI disable / one-per-tick throttle) |
+| Restart reconciliation | ✅ engine-side (`PositionReconciler`); app-side relies on Binance state being canonical |
+| Daily-loss kill switch | ❌ **GAP** — needs per-user PnL ledger (Phase 4) |
+| Per-symbol exposure cap | ❌ **GAP** — explicit owner trade-off for v0 (closed-beta cohort mitigates via small `position_size_pct`) |
+| Structured order audit log | ✅ `OrderLog` (per-user, 200 entries, secure storage) |
+
+Until the two gaps close, paid-subscriber LIVE-mode autonomy is acceptable only with conservative settings (`position_size_pct ≤ 1%`, `leverage_cap ≤ 3x`, `max_concurrent_positions ≤ 1–2`). The real-money confirmation modal makes this trade-off owner-visible at the moment of opt-in.
+
+### Open follow-ups from this arc (carried forward)
+
+1. **Ops APK / web ops surface for engine-wide controls** — design summary filed at the bottom of `lumin-app` PR #18. Engine auto-mode flip, agents toggle, risk gates, monitor-logs viewer need a home. 360 CE Ops dashboard already covers read-only diagnostics; writes are a separate question (CLAUDE.md hard limit: "No writes to engine state from this dashboard"). Owner decision needed on whether to broaden 360 CE Ops' scope or ship a separate ops APK.
+2. **Phase 4 — per-user PnL ledger** — closes the daily-loss kill-switch gap (B12) and lets `_ModePnlCard` show the user's own P&L instead of the engine paper trader's.
+3. **Per-symbol exposure cap** — paired with Phase 3c position view; same data source, separate guard.
+4. **Android foreground service** for true auto-trade autonomy when app is backgrounded (Phase 3.5).
+5. **Shared LIVE-flip confirmation modal helper** — currently duplicated between Trade tab and Auto-trade settings page (called out in #17 description).
 
 ---
 
@@ -300,6 +369,15 @@ The answer was a programmatic "world model" every evaluator can consult: persist
 - **`@LuminProBot` billing webhook** (PR #356): `POST /internal/billing/grant {phone, tier, paid_until_iso}` + HMAC-SHA256 verification on the raw body. Bot updates user tier when subscription state changes; engine never handles payment.
 - **Lumin v0.0.9 shipped:** Pulse / Signals / Trade pages on real engine data; per-agent drill-down (bottom sheet with stats card + 10 most-recent signals filtered by `setupClass`); Signals tab status sub-filters (TP / SL / Invalidated / Expired) when "Closed" is active; new `lib/shared/format.dart` pure-Dart price/PnL/pct/age helpers
 - **Lumin Phase 2 app shipped (2026-05-10):** PhoneSignInPage / OtpEntryPage replace anonymous-mint-on-first-launch (PR #8); admin-token signin bypass for owner (PR #9); in-app APK update banner via GitHub Releases poll (PR #10) — every push to main produces a `v{run_number}` Release; banner downloads + hands to Android installer. Manual flash loop eliminated.
+- **Lumin Phase 1+2+3a+3b+3c shipped (2026-05-13):**
+  - **Phase 1 (#12):** Country auto-detect chip on PhoneSignInPage; SignupPage routing fork on `needs_onboarding` from token response (engine #367). Owner pre-onboarded; existing testers see SignupPage once.
+  - **Phase 2 (#13):** Per-user Auto-trade + Pre-TP pages re-pointed at `/api/settings/user/*` (engine #368). Owner-only Engine-defaults page (relocated to ops surface in #18).
+  - **Phase 3a (#14):** Per-user Binance API keys in `flutter_secure_storage` (namespaced `binance.user.<id>`). Test→Save gate. Friendly error mapping for Binance error codes. Clock-skew pre-check.
+  - **Phase 3b-1 (#15):** Manual "Take signal" places entry + reduce-only SL + reduce-only TP1 triplet against user's Binance account. Idempotency × 3 layers. B12 leverage clamp + minQty pre-flight.
+  - **Phase 3b-2 (#16):** `AutoTradeWatcher` polls `/api/signals` every 15s and autonomously fires ACTIVE signals when user's per-user `mode` ∈ {`paper`, `live`}. Sticky AUTO banner + kill switch. Real-money confirmation modal on LIVE flip. One-firing-per-tick throttle. Watcher pauses on `AppLifecycleState.paused`.
+  - **Phase 3c (#19):** Trade tab shows real Binance positions when keys connected; engine paper view stays as fallback. `_ModePnlCard` honestly labelled "ENGINE PAPER P&L (not yours)" until Phase 4. **Concurrent-position cap enforced** in `AutoTradeWatcher._fireOne` using Binance's `getAccount().openPositionCount`.
+  - **Lumin = consumer-only (#18):** All operator chrome stripped from Lumin (admin-token signin, Engine-defaults page, Agents settings, Risk-gates page, `/api/health` Test, Mock/Live toggle, OwnerOnlyBanner). Owner signs into Lumin via phone OTP like every tester. Operator surfaces relocate to **360 CE Ops dashboard + planned ops APK**.
+- **Lumin app v0.0.22+22** (current — Phase 3c shipped).
 
 ---
 
@@ -354,8 +432,55 @@ The answer was a programmatic "world model" every evaluator can consult: persist
 |---|---|---|
 | #373 | Instrument `_enqueue_signal` with `enqueue_stage` counters + per-path `/diag` funnel | ✅ merged |
 | #374 | Fail-open data-staleness gate when no kline timestamp stamped yet | ✅ merged |
-| #N1 | `TelegramOtpProvider` — OWNER_BRIEF B13 alignment + B13 amendment scope | ✅ merged |
-| #N2 | `OtpRequestResponse` literal hotfix (allow "telegram") | ✅ merged |
+| #376 (`#N1`) | `TelegramOtpProvider` — OWNER_BRIEF B13 alignment + B13 amendment scope | ✅ merged |
+| #377 (`#N2`) | `OtpRequestResponse` literal hotfix (allow "telegram") | ✅ merged |
+
+### Day 5 — Per-user expansion Phase 1–3c + Lumin consumer-only shift *(2026-05-13)*
+
+Engine (`360-v2`):
+
+| PR | Title | Status |
+|---|---|---|
+| #367 | Phase 1 — profile schema + `needs_onboarding` signal + GET/PUT `/api/profile` | ✅ merged |
+| #368 | Phase 2 — per-user pretp + auto-trade override store + `/api/settings/user/*` | ✅ merged |
+| #379 | Level rearm state-machine fix | ✅ merged |
+| #381 | LSR exempt from trend hard gate + evaluator funnel in `/diag` | ✅ merged |
+
+Lumin app (`lumin-app`):
+
+| PR | Title | Status |
+|---|---|---|
+| #11 | Tier-gate write controls — hide Save + read-only form for non-owner | ✅ merged |
+| #12 | Phase 1 — country auto-detect + signup routing on `needs_onboarding` | ✅ merged |
+| #13 | Phase 2 — per-user settings + owner Engine-defaults page | ✅ merged |
+| #14 | Phase 3a — per-user Binance keys management + Test connection | ✅ merged |
+| #15 | Phase 3b-1 — manual Take-signal order placement (entry + reduce-only SL/TP1) | ✅ merged |
+| #16 | Phase 3b-2 — autonomous order placement on signal arrival + AUTO banner kill switch | ✅ merged |
+| #17 | Trade-tab mode toggle writes per-user (fixes 403) | ✅ merged |
+| #18 | Strip operator chrome — Lumin is consumer-only | ✅ merged |
+| #19 | Phase 3c — live Binance positions + concurrent-position cap enforcement | ✅ merged |
+
+### Day 6 — 2026-05-14 WS blackout *(documented in "Current Phase" at top of this file)*
+
+| PR | Title | Status |
+|---|---|---|
+| #382 | Revert PR #380 — auto-trade VPS proxy boot-failure recovery | ✅ merged |
+| #383/#384/#385 | `/internal/diag/positions` endpoint (triple-merge cascade — bug informing the deploy.yml concurrency follow-up) | ✅ merged |
+| #386 | Drop futures staleness 15→5 + msg-rate watchdog + per-symbol staleness | ✅ merged |
+| #387 | Rip dormant spot WebSocket scaffolding (futures-only engine) | ✅ merged |
+| #388 | Use Binance-doc-compliant combined-stream URL format | ✅ merged (but path was still legacy — see #394) |
+| #389 + #390 | WS trace log + `/ws_log` Telegram pull + sink-survival hotfix | ✅ merged |
+| #391 | Normalize WS base URL to `/stream` | ✅ merged (still wrong path — see #394) |
+| #392 | Start `_health_check_loop` — was defined but never scheduled | ✅ merged |
+| #393 | Raw msg sample + BINARY frame handler + msg-type counts in `stream_summary` | ✅ merged |
+| #394 | **Use `/market/` routed path — Binance decommissioned legacy `/ws` and `/stream` on 2026-04-23** | ✅ merged (actual fix) |
+| #395 | Docs — WS blackout post-mortem + Real-data-first diagnostic rule in CLAUDE.md | ✅ merged |
+
+360 CE Ops (`360ce-ops`):
+
+| PR | Title | Status |
+|---|---|---|
+| #3 | Signals timestamps + `/positions` diag view consuming `/internal/diag/positions` | ✅ merged 2026-05-14 |
 
 End-of-session test count: **>3978 passed**, 0 failures, 0 regressions.
 
@@ -390,6 +515,13 @@ The chartist-eye roadmap is feature-complete. Before queuing more changes, watch
 ### Pending owner decision
 - **OPENING_RANGE_BREAKOUT** — currently `feature_disabled` (`scalp.py:2337`). Rebuild with proper session-anchored range logic, or delete. Not a CTE call
 - **v0.1.0 settings-persistence architecture** — five decisions awaiting owner sign-off (Telegram-bot auth, SQLite storage, env-ceiling validator, per-agent toggle endpoint, scope). Major-architecture per OWNER_BRIEF §1.3
+- **Operator surface after Lumin consumer-only shift (#18)** — the engine auto-mode flip, engine-wide pre-TP config, agents toggles, risk-gates page, monitor-logs viewer, admin-token signin no longer live in Lumin. Choices: (a) broaden 360 CE Ops dashboard to add a thin write-surface (against its current "no writes" hard limit — see `360ce-ops/CLAUDE.md`); (b) ship a separate **ops APK** with the operator-only chrome; (c) keep operator flows on Telegram bot commands + env vars + SSH for now. Cost / latency / risk trade-off; design summary started in `lumin-app` PR #18 follow-up but not yet PR'd.
+
+### Auto-trade B12 gaps (per-user)
+- **Daily-loss kill switch** — blocked on Phase 4 (per-user PnL ledger). Until Phase 4, paid LIVE-mode autonomy is acceptable only with conservative settings; the LIVE-flip confirmation modal in app PR #16 makes this trade-off owner-visible at opt-in time.
+- **Per-symbol exposure cap** — explicit owner trade-off for v0 closed-beta (cohort of 5 mitigates via small `position_size_pct`). Pair with Phase 3c position data; same source, separate guard.
+- **Android foreground service** for auto-trade autonomy when app backgrounded — currently `AppLifecycleState.paused` stops the watcher and the AUTO banner flips to AUTO PAUSED. Phase 3.5 target.
+- **Shared LIVE-flip confirmation modal helper** — currently duplicated between Trade tab (`trade_page.dart`) and Auto-trade settings page (`auto_trade_settings_page.dart`) per `lumin-app` PR #17. Small follow-up to avoid copy drift.
 
 ### Pending small follow-ups
 - **Lumin v0.0.10 polish** — retrofit `format.dart` helpers (`formatPrice` / `formatPnl` / `formatPct` / `formatAge`) into Pulse + Trade pages. Small installer
@@ -493,12 +625,19 @@ For data correctness:
 |---|---|
 | App shell + nav | `lib/main.dart`, `lib/app/nav_shell.dart` |
 | HTTP client + auth | `lib/data/api_client.dart`, `lib/data/auth_service.dart` |
-| Repository abstraction | `lib/data/repository.dart` |
-| Config + InheritedWidget | `lib/data/app_config.dart` |
+| Repository abstraction | `lib/data/repository.dart` (includes `Profile` + per-user settings methods from Phase 1+2) |
+| Config + InheritedWidget | `lib/data/app_config.dart` (exposes `userId`, `tier`, `autoTradeWatcher` singleton) |
+| Country codes table | `lib/data/country_codes.dart` (Phase 1) |
+| Binance client (signed Futures REST) | `lib/data/binance_client.dart` (Phase 3a/3b/3c — includes `BinancePosition`, `getOpenPositions`, `createMarketOrder`, `createStopOrder`, `BinanceSymbolFilters.roundQty/roundPrice`) |
+| Per-user Binance keys (encrypted) | `lib/data/binance_keys_service.dart` (Phase 3a — `flutter_secure_storage`, per-user namespace) |
+| Order executor (entry + SL + TP1) | `lib/data/order_executor.dart` (Phase 3b-1) |
+| Per-user signal → broker order log | `lib/data/order_log.dart` (Phase 3b-1 — idempotency layer) |
+| Auto-trade watcher (autonomous order placement) | `lib/data/auto_trade_watcher.dart` (Phase 3b-2 — polls signals, fires triplet, AUTO banner state) |
+| Auto-trade sticky banner | `lib/features/auto_trade/auto_trade_indicator.dart` (Phase 3b-2) |
 | Format helpers | `lib/shared/format.dart` (added v0.0.9) |
-| Pages | `lib/features/{pulse,signals,trade,agents,settings}/` |
+| Pages | `lib/features/{pulse,signals,trade,settings,auth,update,auto_trade}/` |
 | Theme + tokens | `lib/theme.dart`, `lib/shared/tokens.dart` |
-| Shared widgets | `lib/shared/widgets/` (PreviewBadge, LuminCard, StatPill) |
+| Shared widgets | `lib/shared/widgets/` (PreviewBadge, LuminCard, StatPill — `OwnerOnlyBanner` deleted in #18 with operator chrome strip) |
 
 ### Installers (in 360-v2)
 | Version | Installer |
