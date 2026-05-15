@@ -568,6 +568,43 @@ class BillingGrantResponse(BaseModel):
 # ---------------------------------------------------------------------------
 
 
+class TelegramOtpIssueRequest(BaseModel):
+    """Body of ``POST /api/auth/telegram-otp/issue``.
+
+    Issues a fresh OTP for ``phone_e164`` and forces delivery via
+    @LuminProBot — no SMS / WhatsApp fall-through.  Paired with
+    :class:`TelegramOtpVerifyRequest` (added in #398) to complete the
+    Telegram-OTP → Firebase custom-token bridge described in
+    ``docs/firebase_auth_migration.md``.
+
+    Field constraints match :class:`TelegramOtpVerifyRequest` and the
+    legacy :class:`OtpRequest` exactly so the Lumin app can reuse a
+    single client-side validator across the whole flow.
+    """
+
+    phone_e164: str = Field(
+        ...,
+        min_length=8,
+        max_length=18,
+        description="E.164 phone number, including leading ``+``.",
+    )
+
+
+class TelegramOtpIssueResponse(BaseModel):
+    """Response from ``POST /api/auth/telegram-otp/issue``.
+
+    ``status`` is always ``"ok"`` on a 2xx response — rate-limit and
+    delivery failures surface as HTTP errors with structured ``detail``
+    strings so the Lumin app's existing error handler (already wired
+    against :class:`OtpRequestResponse` for the legacy SMS path) treats
+    both halves of the flow the same way.  ``expires_in_seconds`` drives
+    the verify-screen countdown.
+    """
+
+    status: Literal["ok"] = "ok"
+    expires_in_seconds: int
+
+
 class TelegramOtpVerifyRequest(BaseModel):
     """Body of ``POST /api/auth/telegram-otp/verify``.
 
