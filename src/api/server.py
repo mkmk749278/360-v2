@@ -5,25 +5,41 @@ construct one against a stub engine without booting the runtime.  In
 production, ``serve_api(engine)`` is awaited as a long-running asyncio
 task spawned from ``Bootstrap.launch_runtime_tasks``.
 
-Auth model: every protected endpoint accepts a JWT in the Authorization
-header.  The app's first request mints an anonymous JWT via
-``/api/auth/anonymous``; tokens are silently refreshed via
-``/api/auth/refresh`` before expiry.  When the JWT secret is rotated
-server-side every existing JWT becomes invalid; clients catch the
-resulting 401 and silently re-mint.
+Auth model (post-Phase-4 migration — transition window):
 
-Admin escape hatch: when ``API_ALLOW_STATIC_TOKEN=true`` AND a static
-``API_AUTH_TOKEN`` is configured, that exact bearer string is accepted
-as if it were a valid JWT.  This is for owner / CTE debugging only —
-clients don't use it.
+The auth dependency tries three credential types in order on every
+protected request:
+
+1. **Static** — Bearer matches ``API_AUTH_TOKEN`` literally → treated
+   as the owner.  Ops tooling, CI, 360 CE Ops.  Permanent.
+2. **Firebase ID token** (RS256) — verified via ``firebase_admin``,
+   resolved to a ``User`` via phone-match-and-backfill in
+   :meth:`UserStore.get_or_create_by_firebase_uid`.  Only consulted
+   when ``FIREBASE_AUTH_ENABLED=true`` AND the Firebase Admin SDK has
+   been initialised.  Permanent post-cutover.
+3. **HS256 JWT** (local) — verified via :func:`decode_token`.  The
+   pre-Phase-4 path; the app's first request to ``/api/auth/anonymous``
+   minted one of these.  Kept alive during the transition window so
+   pre-migration Lumin app versions keep working until every tester
+   is on the post-migration APK.
+
+When all three reject, the dependency raises 401.
+
+Telegram-OTP → Firebase bridge: ``POST /api/auth/telegram-otp/verify``
+takes the 6-digit code the bot DM'd, validates it via the existing
+:class:`OtpStore`, registers the user with Firebase Admin (idempotent
+on phone), and returns a Firebase custom token.  The app exchanges it
+via ``signInWithCustomToken`` to land a real Firebase session — same
+post-state as the SMS path.
 """
 
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 from datetime import datetime
-from typing import Any, List, Optional
+from typing import Any, List, Optional, Union
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -32,6 +48,7 @@ from pydantic import BaseModel
 
 from src.utils import get_logger
 
+from . import firebase_auth
 from .auth import (
     ALL_ACCESS_TIER,
     OWNER_TIER,
@@ -71,6 +88,8 @@ from .schemas import (
     PulseSnapshot,
     SignalDetail,
     SignalsResponse,
+    TelegramOtpVerifyRequest,
+    TelegramOtpVerifyResponse,
     TickersResponse,
     UserAutoTradeSettings,
     UserPretpSettings,
@@ -88,7 +107,7 @@ from .snapshot import (
     build_signals,
     build_tickers,
 )
-from .users import UserStore
+from .users import User, UserStore
 
 log = get_logger("api.server")
 
@@ -146,6 +165,24 @@ def _compute_needs_onboarding(
 
 
 # ---------------------------------------------------------------------------
+# Firebase env flag — read at request time so an .env flip takes effect on
+# the next request without restarting the engine.  The function is small
+# and cheap; reading os.environ is a dict lookup.
+# ---------------------------------------------------------------------------
+
+
+def _firebase_enabled() -> bool:
+    """True iff ``FIREBASE_AUTH_ENABLED=true`` in the environment.
+
+    Read at request time so the operator can flip the flag in
+    ``.env`` and have the next request honour it without engine
+    restart — the design doc's roll-back mechanism (flip false,
+    revert to HS256-only).  Case-insensitive on the value side.
+    """
+    return os.environ.get("FIREBASE_AUTH_ENABLED", "false").lower() == "true"
+
+
+# ---------------------------------------------------------------------------
 # Auth dependency
 # ---------------------------------------------------------------------------
 
@@ -158,19 +195,32 @@ def _make_auth_dep(
     static_token: str,
     allow_static: bool,
     *,
+    user_store: Optional[UserStore] = None,
     required_tier: Optional[str] = None,
 ):
     """Return a FastAPI dependency that verifies a bearer credential.
 
-    ``required_tier`` (optional): if set, JWT-authed requests must carry
-    that tier in their claims or 403.  Static-token bypass is treated as
-    owner — an admin presenting the configured static token can hit any
-    endpoint regardless of ``required_tier``.
+    Validation order (Phase 4 — Firebase migration):
+
+    1. **Static token** (when ``allow_static=True`` and
+       ``presented == static_token``) → treated as owner; bypasses
+       both Firebase and HS256 checks and ignores ``required_tier``.
+    2. **Firebase ID token** (when ``FIREBASE_AUTH_ENABLED=true`` AND
+       :func:`firebase_auth.is_initialised`) → verified via Firebase
+       Admin; resolved to a ``User`` via
+       :meth:`UserStore.get_or_create_by_firebase_uid` (backfills
+       ``firebase_uid`` on the existing row when the user's phone is
+       already known from the legacy OTP path).
+    3. **HS256 JWT** (transition window) → verified via
+       :func:`decode_token`.
+
+    ``required_tier`` (optional): if set, JWT-authed and Firebase-authed
+    requests must carry that tier in their resolved User / claims.
+    Static-token bypass is always treated as owner.
 
     Read endpoints use this with ``required_tier=None`` (any auth OK);
     write endpoints (settings PUT, auto-mode POST) use
-    ``required_tier=OWNER_TIER`` so testers' anonymous JWTs can read
-    state but can't mutate engine config.
+    ``required_tier=OWNER_TIER``.
     """
 
     async def _verify(
@@ -183,26 +233,51 @@ def _make_auth_dep(
                 detail="missing bearer token",
             )
         presented = credentials.credentials
-        # Admin escape hatch — static token bypass is treated as the
-        # highest-privilege caller (owner).  Skips both JWT verification
-        # and the tier check below.
+        # 1. Static-token bypass — owner-equivalent privilege.
         if allow_static and static_token and presented == static_token:
             return
-        # Standard path: verify the JWT signature + expiry.
+        # 2. Firebase ID token path — only when enabled AND wired.
+        if (
+            user_store is not None
+            and _firebase_enabled()
+            and firebase_auth.is_initialised()
+        ):
+            try:
+                claims = firebase_auth.verify_id_token(presented)
+            except AuthError:
+                claims = None
+            if claims is not None:
+                uid = str(claims.get("uid") or claims.get("user_id") or "")
+                phone = str(claims.get("phone_number") or "")
+                if uid and phone:
+                    user = user_store.get_or_create_by_firebase_uid(uid, phone)
+                    if required_tier is not None and user.tier != required_tier:
+                        raise HTTPException(
+                            status_code=status.HTTP_403_FORBIDDEN,
+                            detail=(
+                                f"insufficient privilege: endpoint requires "
+                                f"tier={required_tier!r}, user has tier={user.tier!r}"
+                            ),
+                        )
+                    return
+                # Firebase token verified but missing uid/phone — fall
+                # through to HS256 path rather than 401 immediately.
+                # An ID token without a phone_number claim shouldn't
+                # happen in production but is harmless to skip.
+        # 3. HS256 JWT — legacy path during the transition window.
         try:
-            claims = decode_token(presented, secret=jwt_secret)
+            jwt_claims = decode_token(presented, secret=jwt_secret)
         except AuthError as exc:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail=str(exc),
             )
-        # Tier check (only enforced when required_tier is set).
-        if required_tier is not None and claims.tier != required_tier:
+        if required_tier is not None and jwt_claims.tier != required_tier:
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail=(
                     f"insufficient privilege: endpoint requires "
-                    f"tier={required_tier!r}, token has tier={claims.tier!r}"
+                    f"tier={required_tier!r}, token has tier={jwt_claims.tier!r}"
                 ),
             )
         return
@@ -214,28 +289,53 @@ def _make_user_claims_dep(
     jwt_secret: str,
     static_token: str,
     allow_static: bool,
+    *,
+    user_store: Optional[UserStore] = None,
 ):
-    """Dependency that resolves to the caller's :class:`TokenClaims`.
+    """Dependency that resolves to the caller's identity.
 
-    Differs from :func:`_make_auth_dep` in that the endpoint receives
-    the decoded claims (or None for static-token bypass — which is
-    treated as owner / user_id=1 by the endpoint).  Used by per-user
-    endpoints (profile, future per-user settings + PnL) that need
-    ``sub`` to look up the right user row.
+    Returns:
+      * ``None`` for static-token bypass — caller treats as owner /
+        user_id=1.
+      * A :class:`User` for Firebase-authed requests — the user row
+        is materialised by phone-match-backfill in
+        :meth:`UserStore.get_or_create_by_firebase_uid`.
+      * A :class:`TokenClaims` for legacy HS256-JWT-authed requests.
+
+    Used by per-user endpoints (profile, per-user settings + PnL) that
+    need ``user_id`` to look up the right row.  :func:`_resolve_user_id`
+    maps any of these to an int.
     """
 
     async def _resolve(
         request: Request,
         credentials: Optional[HTTPAuthorizationCredentials] = Depends(_bearer),
-    ) -> Optional[TokenClaims]:
+    ) -> Optional[Union[TokenClaims, User]]:
         if credentials is None:
             raise HTTPException(
                 status_code=status.HTTP_401_UNAUTHORIZED,
                 detail="missing bearer token",
             )
         presented = credentials.credentials
+        # 1. Static-token bypass → None (caller resolves to owner).
         if allow_static and static_token and presented == static_token:
-            return None  # owner / user_id=1
+            return None
+        # 2. Firebase ID token — return the resolved User row.
+        if (
+            user_store is not None
+            and _firebase_enabled()
+            and firebase_auth.is_initialised()
+        ):
+            try:
+                claims = firebase_auth.verify_id_token(presented)
+            except AuthError:
+                claims = None
+            if claims is not None:
+                uid = str(claims.get("uid") or claims.get("user_id") or "")
+                phone = str(claims.get("phone_number") or "")
+                if uid and phone:
+                    return user_store.get_or_create_by_firebase_uid(uid, phone)
+        # 3. HS256 JWT — legacy path.
         try:
             return decode_token(presented, secret=jwt_secret)
         except AuthError as exc:
@@ -248,17 +348,25 @@ def _make_user_claims_dep(
 
 
 def _resolve_user_id(
-    claims: Optional[TokenClaims], *, owner_id: int = 1
+    identity: Optional[Union[TokenClaims, User]],
+    *,
+    owner_id: int = 1,
 ) -> int:
-    """Map JWT claims → user_id.  Static-token bypass → owner_id.
+    """Map an auth-resolved identity to a ``user_id``.
 
-    Anonymous device-id JWTs raise 404 — they aren't users, they can't
-    have a profile.  The signup flow happens AFTER OTP verify so the
-    only legitimate caller here is a user-id JWT (or static-token).
+    * ``None`` (static-token bypass) → ``owner_id``.
+    * :class:`User` (Firebase-authed) → ``user.user_id``.
+    * :class:`TokenClaims` with ``user-<id>`` sub → parsed int.
+    * Anonymous ``device-*`` HS256 tokens → 404 (they aren't users;
+      the signup flow happens AFTER OTP verify so the only legitimate
+      caller is a user-id JWT, a Firebase token, or static-token).
     """
-    if claims is None:
+    if identity is None:
         return owner_id
-    sub = claims.sub
+    if isinstance(identity, User):
+        return identity.user_id
+    # TokenClaims path
+    sub = identity.sub
     if not sub.startswith("user-"):
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -326,17 +434,23 @@ def build_app(
         allow_headers=["*"],
     )
 
-    auth = _make_auth_dep(jwt_secret, static_token, allow_static)
+    auth = _make_auth_dep(
+        jwt_secret, static_token, allow_static, user_store=user_store,
+    )
     # Owner-tier dep — enforced on write endpoints so testers' anonymous
     # JWTs can READ state but can't mutate engine config (mode flip,
     # settings PUT).  Static-token bypass still works for admin tooling.
     owner_required = _make_auth_dep(
-        jwt_secret, static_token, allow_static, required_tier=OWNER_TIER,
+        jwt_secret, static_token, allow_static,
+        user_store=user_store, required_tier=OWNER_TIER,
     )
     # User-claims dep — for per-user endpoints (profile, future per-user
-    # settings + PnL).  Returns the decoded JWT claims; static-token
-    # bypass returns None (caller treats as owner / user_id=1).
-    user_claims = _make_user_claims_dep(jwt_secret, static_token, allow_static)
+    # settings + PnL).  Returns the decoded JWT claims / resolved User /
+    # None depending on the credential type; :func:`_resolve_user_id`
+    # maps any of these to an int.
+    user_claims = _make_user_claims_dep(
+        jwt_secret, static_token, allow_static, user_store=user_store,
+    )
 
     # Auto-construct the OTP defaults so callers (and existing tests)
     # don't have to plumb every Phase 2 dep through.  When ``user_store``
@@ -506,6 +620,56 @@ def build_app(
             needs_onboarding=user.needs_onboarding,
         )
 
+    # ---- Telegram-OTP → Firebase custom-token bridge (Phase 4) ----
+
+    @app.post(
+        "/api/auth/telegram-otp/verify",
+        response_model=TelegramOtpVerifyResponse,
+        tags=["auth"],
+    )
+    async def telegram_otp_verify(
+        req: TelegramOtpVerifyRequest,
+    ) -> TelegramOtpVerifyResponse:
+        if user_store is None or otp_store is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="phone auth not configured",
+            )
+        result = otp_store.verify(req.phone_e164, req.code)
+        if result.status is not VerifyStatus.OK:
+            # Match the OTP store's status tokens directly — the app
+            # already handles "wrong_code" / "expired" / etc. in the UI.
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=result.status.value,
+            )
+        # OTP validated — get-or-create the user row.
+        user = user_store.get_or_create_by_phone(req.phone_e164)
+        if user.firebase_uid is None:
+            if not firebase_auth.is_initialised():
+                # Firebase Admin not wired — engine can't mint a custom
+                # token.  503 so the app's retry / fall-back UX kicks in.
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="firebase_disabled",
+                )
+            firebase_uid = firebase_auth.register_user_by_phone(req.phone_e164)
+            user_store.set_firebase_uid(user.user_id, firebase_uid)
+            # Reload the row with the backfilled uid so the response
+            # carries the freshly-set value.
+            reloaded = user_store.get_by_id(user.user_id)
+            assert reloaded is not None
+            user = reloaded
+        assert user.firebase_uid is not None
+        custom_token = firebase_auth.create_custom_token(user.firebase_uid)
+        return TelegramOtpVerifyResponse(
+            custom_token=custom_token,
+            user_id=user.user_id,
+            tier=user.tier,
+            paid_until=user.paid_until.isoformat() if user.paid_until else None,
+            needs_onboarding=user.needs_onboarding,
+        )
+
     # ---- Billing webhook (Phase 2; bot/billing-platform → engine) ----
 
     @app.post(
@@ -594,14 +758,14 @@ def build_app(
         tags=["profile"],
     )
     async def profile_get(
-        claims: Optional[TokenClaims] = Depends(user_claims),
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> ProfileResponse:
         if user_store is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="user store not configured",
             )
-        uid = _resolve_user_id(claims)
+        uid = _resolve_user_id(identity)
         user = user_store.get_by_id(uid)
         if user is None:
             raise HTTPException(
@@ -617,14 +781,14 @@ def build_app(
     )
     async def profile_put(
         body: ProfileUpdate,
-        claims: Optional[TokenClaims] = Depends(user_claims),
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> ProfileResponse:
         if user_store is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="user store not configured",
             )
-        uid = _resolve_user_id(claims)
+        uid = _resolve_user_id(identity)
         try:
             updated = user_store.update_profile(
                 uid,
@@ -989,14 +1153,14 @@ def build_app(
         tags=["settings"],
     )
     async def user_pretp_get(
-        claims: Optional[TokenClaims] = Depends(user_claims),
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> UserPretpSettings:
         if user_overrides is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="per-user overrides not configured",
             )
-        uid = _resolve_user_id(claims)
+        uid = _resolve_user_id(identity)
         return _build_user_pretp_view(uid)
 
     @app.put(
@@ -1006,14 +1170,14 @@ def build_app(
     )
     async def user_pretp_put(
         payload: PretpSettings,
-        claims: Optional[TokenClaims] = Depends(user_claims),
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> UserPretpSettings:
         if user_overrides is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="per-user overrides not configured",
             )
-        uid = _resolve_user_id(claims)
+        uid = _resolve_user_id(identity)
         # ``exclude_unset=True`` mirrors the engine-wide endpoint's
         # partial-update semantics — the user can change one toggle
         # without re-sending every other field.
@@ -1046,14 +1210,14 @@ def build_app(
         tags=["settings"],
     )
     async def user_auto_trade_get(
-        claims: Optional[TokenClaims] = Depends(user_claims),
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> UserAutoTradeSettings:
         if user_overrides is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="per-user overrides not configured",
             )
-        uid = _resolve_user_id(claims)
+        uid = _resolve_user_id(identity)
         return _build_user_auto_trade_view(uid)
 
     @app.put(
@@ -1063,14 +1227,14 @@ def build_app(
     )
     async def user_auto_trade_put(
         payload: AutoTradeSettings,
-        claims: Optional[TokenClaims] = Depends(user_claims),
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> UserAutoTradeSettings:
         if user_overrides is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="per-user overrides not configured",
             )
-        uid = _resolve_user_id(claims)
+        uid = _resolve_user_id(identity)
         partial = payload.model_dump(exclude_unset=True)
         # Note: per-user mode flips do NOT trigger the engine-wide
         # ``set_auto_execution_mode`` — the engine continues to operate
