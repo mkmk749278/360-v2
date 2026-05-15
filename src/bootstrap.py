@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime
+import os
 import time
 from typing import Any, List
 
@@ -298,6 +299,7 @@ class Bootstrap:
             from datetime import timedelta
 
             from src.api import serve_api
+            from src.api import firebase_auth
             from src.api.billing_callback import BillingWebhookVerifier
             from src.api.otp import OtpStore
             from src.api.otp_delivery import build_provider_from_env
@@ -311,6 +313,34 @@ class Bootstrap:
             # idempotently — only the first boot of an empty DB inserts.
             user_store = UserStore(LUMIN_DB_PATH)
             user_store.bootstrap_owner_if_empty(OWNER_PHONE_E164)
+
+            # Phase-4 Firebase Admin SDK — initialised after UserStore so
+            # the request-time auth dependency can verify ID tokens.
+            # Both env vars must be set; init failures (bad service-account
+            # path, malformed JSON, network) are caught here so engine boot
+            # continues via the legacy HS256 path.  Owner flips
+            # ``FIREBASE_AUTH_ENABLED=true`` once the service-account JSON
+            # is on disk and verified.
+            firebase_project_id = os.environ.get("FIREBASE_PROJECT_ID", "")
+            firebase_sa_path = os.environ.get("FIREBASE_SERVICE_ACCOUNT_PATH", "")
+            if firebase_project_id and firebase_sa_path:
+                try:
+                    firebase_auth.init_firebase_admin(
+                        service_account_path=firebase_sa_path,
+                        project_id=firebase_project_id,
+                    )
+                    log.info(
+                        "Firebase Admin initialised: project={}",
+                        firebase_project_id,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Firebase Admin init failed (engine will serve via HS256 path): {}",
+                        exc,
+                    )
+            else:
+                log.info("Firebase Admin skipped (env vars not set)")
+
             # Phase-2 per-user overrides — shares the same SQLite file
             # (WAL mode lets both connections coexist).  Tables are
             # added with CREATE TABLE IF NOT EXISTS, safe against any
