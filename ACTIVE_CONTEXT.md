@@ -6,6 +6,130 @@
 
 ## Current Phase
 
+**End-of-day 2026-05-16 — Firebase auth migration shipped (engine + Android), paper-trade visibility shipped with two latent paper-broker bugs squashed (`qty=0` open positions, daily-resetting equity), and a definitive pair-bleed diagnosis ruled out the movers path and placed all current PnL bleed on Path-1 SMC evaluators against specific top-75 pairs.** Two-day arc (2026-05-15 → 2026-05-16) covering identity-stack migration, subscriber-visible paper-trader honesty, and an env-only blacklist of three confirmed-bad pairs while the architectural fix (learned per-pair penalty) is queued. Paired follow-up PRs (engine `/close-all` + Lumin Trade-tab UX) dispatched in this session and currently in flight.
+
+### 1. Firebase auth migration — engine + Android (PRs #397, #398, #399, #400 / Lumin #20, #21, #22)
+
+Replaces the bespoke Telegram-OTP + phone-OTP + admin-token chain with Firebase as the identity issuer. Owner motivation: collapse the three-provider auth stack (LogOnly + WhatsApp + AWS-SNS-SMS, plus the @LuminProBot DM path) into one provider that subscribers already trust via Google sign-in, and get Apple-equivalent identity guarantees on Android without per-country SMS DLT paperwork. Telegram-DM OTP remains as an opt-in upgrade per B13.
+
+| PR | Title | Slice |
+|---|---|---|
+| #397 | docs: firebase auth migration design (engine) | Design summary first — endpoint contract, claims shape, migration path for existing user-id JWTs |
+| #398 | feat: Firebase auth migration (engine implementation) | `FirebaseTokenVerifier`, `/api/auth/firebase/verify` endpoint, `firebase_uid` column on `users`, JWT-mint flow re-pointed |
+| #399 | fix(users): move firebase_uid index creation out of _SCHEMA_SQL | First-boot migration crash — index DDL inside `CREATE TABLE` SQL is invalid SQLite; moved to a separate `CREATE INDEX IF NOT EXISTS` step |
+| #400 | fix(api): add missing /api/auth/telegram-otp/issue endpoint | Phase-1 testers still on Telegram-OTP path were 404ing; restored the endpoint the Firebase migration accidentally clipped |
+| Lumin #20 | design: Firebase auth migration (Android, web later) | Android-first design, web deferred |
+| Lumin #21 | feat: Firebase auth migration (Android implementation) | `firebase_auth` Flutter package, Google sign-in flow, ID token → `/api/auth/firebase/verify` → user-id JWT cached in secure storage |
+| Lumin #22 | fix(ci): patch build.gradle.kts so release builds use the release keystore | Release APKs had been signed with the debug keystore — broke Firebase's SHA-1 fingerprint pinning until the CI patch landed |
+
+Migration discipline followed: design PR (#397, #20) merged BEFORE code PR (#398, #21). The three follow-up hotfixes (#399, #400, #22) were caught within hours of first deploy — no subscriber-visible auth failures in production.
+
+### 2. Paper-trade visibility — PR #401 + Lumin #23
+
+The Lumin Trade tab now surfaces per-trade history with leverage, position-size %, ROI%-on-margin, fees, and net PnL — the Binance-style record card subscribers asked for. Built on top of two latent paper-broker bugs the screenshot diagnostic surfaced mid-build:
+
+**Bug A — paper open positions had `qty=0` across the board.** Visible in the 2026-05-16 screenshot: 5 open positions (SIRENUSDT, BCHUSDT, SUIUSDT, etc.) all rendered as `qty 0.0 @ <entry>` with `+$0.00` PnL even when price moved favorably (BCHUSDT was at +0.28% favorable). Root cause in `PaperOrderManager._compute_quantity`: degenerate inputs (`entry_price <= 0` or depleted `_available_equity`) returned `MAX_POSITION_USD / 1e-12` — an astronomical qty that downstream rounding flattened to zero on high-priced symbols. Post-fix funnels every degenerate path through an explicit `return 0.0` + parent-method skip with a `qty_zero_guard` telemetry counter.
+
+**Bug B — paper equity resetting daily, not cumulative.** Screenshot showed `Equity: $999.63` while `Paper total since boot: -$11.97` and `Today's P&L: -$0.37`. Math: `$1000 - $0.37 = $999.63`, not the cumulative `$1000 + (-$11.97) = $988.03`. Root cause in `RiskManager._current_equity = starting_equity + daily_realised_pnl_usd` — only today's bucket was carried. Fix added `PaperOrderManager.current_equity_usd` property as broker-side truth (`starting + cumulative since boot`) with persistence through `_persist_paper_pnl_state` so the figure survives restarts. The engine's `get_auto_execution_status` now reads from here in paper mode.
+
+**The feature itself** (PR #401):
+- New `src/auto_trade/trade_records.py` SQLite store — one row per signal, snapshots leverage + position-size % at open, computes ROI%-on-margin at close
+- `GET /api/trades?mode=paper&limit=&offset=&include_open=` — paginated, fail-soft on SQLite IO errors (returns empty page instead of 500)
+- `POST /api/auto-mode/paper/reset` — owner-only, refuses while open positions exist (B12 lifecycle guard), zeros cumulative PnL, wipes daily buckets, archives per-trade rows to a timestamped table
+- Bot `/stats` reworked to read from `performance_tracker_honest.py` (per-trade rollups from the new store) — no more discrepancy between Telegram `/stats` and the app's Today's P&L card
+- Lumin #23 wires the Paper sub-tab: paginated list view with Binance-style cards (side badge + ROI pill + 4-col stats grid + close-reason label), tap → detail page, "Reset balance" in the AppBar overflow
+
+### 3. Pair-bleed diagnosis + SCAN_SYMBOL_BLACKLIST env update (2026-05-16)
+
+Owner asked: *"are promoted-pairs causing more negative impact on PnL, or what?"* Investigation went deep enough to settle the question definitively.
+
+**Two scan paths confirmed in code (not just PR descriptions):**
+
+| Path | Source | Universe | Allowed evaluators | Count |
+|---|---|---|---|---|
+| Path 1 (standard) | `pair_manager.refresh_top50_futures` (90s refresh) | Top-75 USDT-M futures by 24h volume | All 15 (on structurally-aged pairs) or `_YOUNG_PAIR_EVALUATORS` (on young pairs) | 15 or 6 |
+| Path 2 (movers) | `scanner._update_movers_promotion` (per scan cycle, PR #233) | `|24h Δ| ≥ 15%` AND `volume ≥ $5M` AND NOT in top-75; 5-cycle TTL; skipped if spread > 0.5% | `_mover_evaluators = {VSB, BDS}` — supersedes young-pair restriction | 2 |
+
+Restriction is enforced at the evaluator-loop level (`src/channels/scalp.py:846-877`) with a hard `continue` — not a soft scoring layer. The other 13 evaluators never see mover-promoted pairs.
+
+**Definitive PnL-attribution data (last-100 sample):**
+
+| Volume tier within top-75 | Pairs in sample | Signals | Σ PnL | Avg/signal | SL-touch rate |
+|---|---|---|---|---|---|
+| Mega-cap (>$500M) | 3 | 6 | -0.461% | -0.077% | 50% |
+| Large-cap ($150-500M) | 5 | 13 | -0.394% | -0.030% | 38% |
+| Mid-cap ($50-150M) | 30 | 68 | -0.307% | -0.005% | 47% |
+| Smaller ($10-50M) | 8 | 13 | +0.019% | +0.001% | 69% |
+
+This **contradicted** the "smaller/newer/volatile = more loss" hypothesis. Mega-caps had the WORST avg/signal at -0.077%. Smaller-caps had the HIGHEST SL-touch rate (69%) but the BEST avg PnL (+0.001%). Volume tier doesn't predict outcome — **specific pairs do**.
+
+**MFE=0% (structural smoking gun):** 15/100 signals had zero favorable excursion at any point in their lifetime — engine called a direction and price never moved that way. By pair: SIRENUSDT 3/3 (100% misread), TONUSDT 2/6 (33%), then 1 each for FFUSDT, POLYXUSDT, TAOUSDT, LABUSDT, ICPUSDT, UBUSDT, UNIUSDT, SWARMSUSDT, NEARUSDT, BNBUSDT.
+
+**Path-2 attribution:** VSB generated 852 / emitted 1; BDS generated 1513 / emitted 1. Zero in the 100-sample. Movers path is not contributing meaningfully to the bleed despite PR #363's widening — gates downstream still filtering hard.
+
+**Env-only blacklist applied** (no code PR — `SCAN_SYMBOL_BLACKLIST` env var updated on the VPS and engine restarted):
+
+```
+Before: XAUTUSDT,PAXGUSDT,MMTUSDT,KOMAUSDT,STOUSDT
+After:  XAUTUSDT,PAXGUSDT,MMTUSDT,KOMAUSDT,STOUSDT,SIRENUSDT,TONUSDT,VVVUSDT
+```
+
+These are top-75 pairs whose Path-1 SMC signals were the worst losers in the sample. Existing open positions on SIRENUSDT (and any other newly-blacklisted) will close naturally — blacklist only prevents NEW signals.
+
+### 4. Architectural follow-up queued — learned per-pair penalty (the right structural fix)
+
+The manual blacklist is the polishing-stage move. The actual fix is **option 3**: keep a rolling EMA of (PnL, SL rate) per pair and apply a confidence penalty proportional to recent negative performance. Auto-de-promotes underperforming pairs without manual blacklisting — same idea as `_PAIR_BLACKLIST` but data-driven and self-correcting. Two other options considered and rejected for this slot:
+
+1. **Two-criteria sort** (rank by `volume_24h × order_book_depth_USD` or `volume × N-day-stability`) — filters launch-pumps but doesn't help with established-pair misreads
+2. **Pair age gate** (require ≥N days listed before entering scan universe) — `young_pair_restriction` machinery already exists, just not strict enough; would help with truly-new pairs but not BCH/SUI/BNB-class established misreads
+
+**Queue position:** sits behind Phase 4 (per-user PnL ledger, B12 daily-loss gap) and `deploy.yml` concurrency block. Owner sign-off required before coding because it touches scoring (per OWNER_BRIEF §1.3).
+
+### 5. In flight (this session) — Trade-tab UX redesign + paper `/close-all`
+
+Follow-up #1 from the previous queue is being executed in this session as a paired PR. The trigger: the reset flow is practically unreachable today because almost every paper subscriber has open positions, and PR #401's `/reset` deliberately refuses while positions are open (B12 lifecycle guard, mirroring the live-mode `/reset_full` doctrine of never orphaning broker state).
+
+**Engine — PR #403 `feat/paper-close-all-positions` (open, non-draft, awaiting CI):**
+- New `PaperOrderManager.close_all_open_positions(reason="user_close_all") -> dict` (`src/paper_order_manager.py`) — snapshot-iterates `_positions.keys()`, builds a `types.SimpleNamespace(signal_id, symbol, current_price=position.entry, stop_loss=0.0)` per position, calls `self.close_full(..., reason=reason, current_price=position.entry)` for a zero-move fill, tracks `closed_count` + summed delta of `_realised_pnl_total`, logs a single `paper_close_all: closed N open paper positions (reason=...)` marker
+- New endpoint `POST /api/auto-mode/paper/close-all` (`src/api/paper_trade_routes.py`); new `PaperCloseAllResponse` Pydantic model (`src/api/schemas.py`) — `{ok, closed_count, realised_pnl_total}`; auth + wiring mirror the `/reset` endpoint (**owner-only** via `Depends(owner_required)`)
+- Tests in `tests/test_paper_close_all.py` — 5 broker-level cases (happy-path 3-positions, empty-book idempotency, double-call idempotency, mutation-during-iteration safety, custom-reason propagation) + 4 HTTP cases (owner-required 403, happy-path via real `PaperOrderManager`, empty-book, idempotent double-call)
+- **Realised-PnL is not strictly zero per position** — `close_full` applies taker exit fee + entry-fee share when `"tp" not in reason.lower()`, so `"user_close_all"` pays fees. Tests assert `realised_pnl_total <= 0` within `abs=10.0` of zero, not strictly zero. Behaviourally correct (subscriber pays real fees on a real Binance flatten too); document if this becomes confusing in the app
+- **Deliberately scoped narrow:** `/reset` endpoint and `/reset_full` Telegram handler stay unchanged. Doctrine: paper book is in-memory simulation, but reset preservation matches live-broker safety; users get a separate explicit flatten action instead of bundling
+- **Auth question carried forward:** `/reset` is owner-only, so `/close-all` mirrors that. But the user-facing motivation is "subscribers should be able to flatten their own paper book" — and there is only one global engine-side paper book, owner-controlled. If subscribers are meant to have per-user paper books, that's a Phase 4-style architectural follow-up (paired with per-user PnL ledger), not a one-line auth swap
+
+**Lumin — branch `fix/auto-mode-above-subtabs` (dispatched in this session):**
+- Currently dispatched with the **"hoist auto-execution mode card above the Live|Paper sub-tab strip"** design — keeps the tri-state Off/Paper/Live card but moves it above the sub-tab strip so the duplicate "Paper" UI semantic collision is resolved (sub-tab Paper = view filter; mode card Paper = engine global setting)
+- **Discrepancy with queued design — next session needs to reconcile.** The original queued direction from this arc was *"split the tri-state mode into two per-tab on/off toggles"* (one Off/On toggle on the Live sub-tab body, a separate Off/On toggle on the Paper sub-tab body). The in-flight PR is doing hoist-above-subtabs instead. Both designs resolve the semantic collision; the split-toggle version more cleanly separates engine state from view filter. Accept hoist-above (smaller diff, ships faster) or rework to split-toggle (closer to the design summary) — owner call
+- **Also still open:** `fetchTrades` Paper sub-tab passes `include_open=true` so the Paper sub-tab shows open positions instead of "No paper trades yet" — NOT included in the in-flight PR; queue as a separate small follow-up
+- **Also still open:** wire a "Close all positions" button consuming engine's new `/close-all` endpoint into the Paper sub-tab so reset becomes reachable from the app — NOT included in the in-flight PR; queue as a separate follow-up that consumes the engine endpoint after both PRs merge
+
+### Open follow-ups / next-session queue (priority order)
+
+1. **Land + reconcile the in-flight pair.** Engine PR #403 (`feat/paper-close-all-positions`) and Lumin `fix/auto-mode-above-subtabs` are both open as non-draft PRs by this session. Verify the engine PR, then decide on the Lumin design (hoist vs split-toggle per §5). On the engine PR specifically: confirm the owner-only auth choice is intended (mirrors `/reset`; subscriber-self-flatten requires a per-user paper-book architecture, not just an auth swap).
+2. **App-side wire to `/close-all`.** Once engine merges, add a "Close all positions" button on Lumin Paper sub-tab consuming `POST /api/auto-mode/paper/close-all` — this is the user-visible loop that lets reset actually be reachable.
+3. **Paper sub-tab `include_open` fix.** Add `include_open=true` to `fetchTrades` so the Paper sub-tab shows open positions instead of the empty state.
+4. **Verify Lumin Paper sub-tab end-to-end in production** — qty-zero, cumulative equity, reset gating, close-all loop.
+5. **`deploy.yml` concurrency block** (5 LOC PR) — prevents the triple-merge cascade from 2026-05-13.
+6. **Cleanup duplicate logger configure** (`src/utils.py` + `src/logger.py`) — PR #390 hotfixed; unification queued.
+7. **Forensic on #380 boot failure** → CI smoke test design (`docker compose up engine → curl /api/health` in 60s).
+8. **Path-2 emission watch** — PR #363 widened VSB/BDS gates 2026-05-11 but truth-report still shows ~1 emission across both. After the blacklist + 1-2 weeks of additional data, re-check whether the widening delivered or whether Path 2 needs another pass.
+9. **Learned per-pair penalty (option 3)** — architectural fix for the per-pair PnL bleed; owner sign-off required before coding.
+10. **Phase 4 — per-user PnL ledger** — closes B12 daily-loss-kill-switch gap; unblocks honest per-user PnL on the Lumin Trade tab.
+11. **Per-symbol exposure cap** — paired with Phase 3c position view; B12 gap.
+12. **Android foreground service** for true backgrounded auto-trade (Phase 3.5).
+13. **Shared LIVE-flip confirmation modal helper** — duplicated between Trade tab and Auto-trade settings page.
+
+### VPS state after this arc
+
+- Engine running on PR #401 code with the new SQLite per-trade store + reset endpoint + qty-zero guard + cumulative-equity property
+- `SCAN_SYMBOL_BLACKLIST` env extended with SIREN/TON/VVV; existing positions on those pairs will close naturally
+- Firebase verifier wired; both Firebase ID tokens and legacy phone-OTP user-id JWTs accepted during cutover (deprecation of legacy path is post-Phase-4)
+- Auto-trade gates from 2026-05-13 arc unchanged (concurrent-position cap, reduce-only stops, leverage ≤ 30×); B12 still has the two known gaps (daily-loss kill switch, per-symbol exposure cap)
+
+---
+
+## Previous Phase — 2026-05-14 (WS blackout post-mortem + Real-data-first diagnostic rule)
+
 **End-of-day 2026-05-14 — multi-hour WS blackout traced to a Binance path-migration deadline; new "real-data-first" diagnostic rule added to CLAUDE.md.** This session spent most of its hours on a single bug chain that turned out to be a vendor-API change we missed, plus a few hours of operational work on yesterday's #380 fallout. Recovered by end of day. Engine receiving 57K+ TEXT frames in 3 min post-fix.
 
 ### 1. Engine emission-blackout root cause: Binance `/market/` routed path (PR #394)
@@ -610,7 +734,7 @@ For data correctness:
 | Trade lifecycle + pre-TP + broker close on non-TP exits | `src/trade_monitor.py` |
 | Auto-trade subsystem | `src/auto_trade/` (paper, risk, reconciler) |
 | Live order manager (close_full + add_dca_entry) | `src/order_manager.py` |
-| Paper order manager (close_full + add_dca_entry) | `src/paper_order_manager.py` |
+| Paper order manager (close_full + add_dca_entry + close_all_open_positions) | `src/paper_order_manager.py` |
 | Pre-TP threshold + trigger-price stamping | `src/pre_tp_stamping.py` |
 | Signal-history persistence | `src/signal_history_store.py` |
 | Signal-history backfill + reconciliation | `src/signal_history_backfill.py` |
@@ -618,6 +742,8 @@ For data correctness:
 | Invalidation audit | `src/invalidation_audit.py` |
 | API server + auth | `src/api/server.py`, `src/api/auth.py` |
 | API snapshot adapters | `src/api/snapshot.py` |
+| Paper-trade API routes (`/api/trades`, `/api/auto-mode/paper/reset`, `/api/auto-mode/paper/close-all` in-flight) | `src/api/paper_trade_routes.py` |
+| Paper-trade SQLite store | `src/auto_trade/trade_records.py` |
 | Macro watchdog | `src/macro_watchdog.py` |
 
 ### Lumin app
@@ -635,6 +761,8 @@ For data correctness:
 | Auto-trade watcher (autonomous order placement) | `lib/data/auto_trade_watcher.dart` (Phase 3b-2 — polls signals, fires triplet, AUTO banner state) |
 | Auto-trade sticky banner | `lib/features/auto_trade/auto_trade_indicator.dart` (Phase 3b-2) |
 | Format helpers | `lib/shared/format.dart` (added v0.0.9) |
+| Trade tab (Live | Paper sub-tabs; auto-mode card hoist in-flight) | `lib/features/trade/trade_page.dart` |
+| Paper trades list + detail | `lib/features/trade/paper_trades_page.dart`, `lib/features/trade/paper_trade_detail_page.dart` |
 | Pages | `lib/features/{pulse,signals,trade,settings,auth,update,auto_trade}/` |
 | Theme + tokens | `lib/theme.dart`, `lib/shared/tokens.dart` |
 | Shared widgets | `lib/shared/widgets/` (PreviewBadge, LuminCard, StatPill — `OwnerOnlyBanner` deleted in #18 with operator chrome strip) |
