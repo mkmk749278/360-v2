@@ -128,4 +128,23 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
         str(tmp_path / "pnl_history.json"),
     )
 
+    # Per-trade SQLite ledger (paper-trade visibility, 2026-05-16).
+    # Same env-override pattern — ``trade_records._resolve_db_path`` reads
+    # the env var lazily so test-level monkeypatch works without re-import.
+    # Test modules that exercise this store also call
+    # ``trade_records.reset_for_test()`` between tests to drop the cached
+    # connection (a stale cached conn would otherwise serve a prior
+    # test's tmp_path file).
+    monkeypatch.setenv(
+        "PAPER_TRADES_DB_PATH",
+        str(tmp_path / "paper_trades.sqlite"),
+    )
+    try:
+        from src.auto_trade import trade_records as _tr
+        _tr.reset_for_test()
+    except Exception:
+        # First boot or stale import — safe to swallow; the next access
+        # opens a fresh connection against the just-set env var.
+        pass
+
     yield
