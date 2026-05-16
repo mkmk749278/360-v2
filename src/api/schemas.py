@@ -734,3 +734,39 @@ class PaperResetResponse(BaseModel):
     trades_archived: int = Field(
         0, description="Per-trade rows archived to paper_trades_archive_<ts>"
     )
+
+
+# ---------------------------------------------------------------------------
+# Paper-mode close-all-positions (user-initiated) — follow-up to PR #401
+# ---------------------------------------------------------------------------
+
+
+class PaperCloseAllResponse(BaseModel):
+    """Response shape for ``POST /api/auto-mode/paper/close-all``.
+
+    The user-facing "flatten my paper book" action.  Companion to (but
+    intentionally NOT part of) ``POST /api/auto-mode/paper/reset``:
+    the reset doctrine preserves in-flight signals for live-broker
+    safety, so users need a separate explicit action to close every
+    open paper position before invoking reset.  Two-step flow:
+    ``close-all`` → optional ``reset``.
+
+    ``closed_count`` is the number of positions actually closed by this
+    call — zero on a flat book (the action is idempotent).
+    ``realised_pnl_total`` is the **sum of PnL booked by this batch**
+    of closes only; cumulative paper PnL since boot remains exposed
+    via ``AutoModeStatus.simulated_pnl_usd``.
+    """
+
+    ok: bool = True
+    closed_count: int = Field(
+        ..., description="Number of paper positions closed by this call"
+    )
+    realised_pnl_total: float = Field(
+        ...,
+        description=(
+            "Sum of realised PnL (USD) booked by this batch of closes — "
+            "fees only on a zero-move flatten; cumulative since boot lives "
+            "on AutoModeStatus.simulated_pnl_usd"
+        ),
+    )

@@ -55,6 +55,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import types
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -887,3 +888,102 @@ class PaperOrderManager:
                 signal, realised_pnl_usd=position.realised_pnl_usd
             )
         return order_id
+
+    # ------------------------------------------------------------------
+    # User-facing "close every paper position now"
+    # ------------------------------------------------------------------
+
+    async def close_all_open_positions(
+        self,
+        reason: str = "user_close_all",
+    ) -> Dict[str, Any]:
+        """Flatten the paper book — close every open simulated position.
+
+        Why this exists
+        ---------------
+        ``POST /api/auto-mode/paper/reset`` (PR #401) deliberately leaves
+        ``_positions`` untouched: the reset doctrine preserves in-flight
+        signals so the live-mode counterpart (whose broker positions
+        live on the exchange) doesn't get orphaned by a careless
+        equity-wipe.  But users running paper-only sessions still want a
+        one-shot "flatten my book" action they can fire before
+        ``/reset`` — without it the reset endpoint refuses (open-positions
+        guard) and users are stuck closing positions one-by-one through
+        whatever surface happens to expose ``close_full``.
+
+        This method is the dedicated user-facing action.  It closes every
+        currently-open paper position at a **zero-move fill** (fill price
+        == entry) so the close itself books no price PnL — just the
+        round-trip fee cost.  Zero-move is the right semantic: the user
+        is choosing to flatten, not exit at mark, and we have no live
+        market data dependency to take here.
+
+        Implementation
+        --------------
+        * Snapshot keys upfront — :meth:`close_full` mutates
+          ``self._positions`` so iterating it directly would either skip
+          entries or raise ``RuntimeError: dictionary changed size
+          during iteration``.
+        * Build a minimal signal-like object via :class:`types.SimpleNamespace`
+          carrying just the attributes ``close_full`` reads
+          (``signal_id`` and ``current_price``; ``stop_loss`` defaulted
+          to 0.0 so the fallback chain never trips).
+        * Sum realised PnL across every close so the caller can surface a
+          single aggregate in the response.  Returned PnL totals are
+          **per-close** (not cumulative since boot) — the dashboard's
+          existing ``simulated_pnl_total`` continues to be the cumulative
+          source of truth.
+        * Risk manager is notified via the normal :meth:`close_full`
+          path — no separate bookkeeping.
+
+        Idempotent — calling on an empty book returns ``{closed_count:
+        0, realised_pnl_total: 0.0}`` without side effects.
+
+        Returns
+        -------
+        dict
+            ``{"closed_count": int, "realised_pnl_total": float}``
+        """
+        # Snapshot keys before iteration — close_full pops from
+        # self._positions on success.
+        snapshot_ids = list(self._positions.keys())
+
+        closed_count = 0
+        realised_total = 0.0
+
+        for sid in snapshot_ids:
+            position = self._positions.get(sid)
+            if position is None:
+                # Defensive — concurrent close from another task between
+                # snapshot and now.
+                continue
+            # Zero-move close: fill_price == entry.  close_full prefers an
+            # explicit ``current_price`` arg when > 0, so passing
+            # position.entry pins the fill price exactly.
+            stub_signal = types.SimpleNamespace(
+                signal_id=sid,
+                symbol=position.symbol,
+                current_price=position.entry,
+                # stop_loss kept on the namespace so close_full's
+                # getattr fallback chain doesn't surface AttributeError
+                # under any path.
+                stop_loss=0.0,
+            )
+            pnl_before = self._realised_pnl_total
+            order_id = await self.close_full(
+                stub_signal,
+                reason=reason,
+                current_price=position.entry,
+            )
+            if order_id is not None:
+                closed_count += 1
+                realised_total += (self._realised_pnl_total - pnl_before)
+
+        log.info(
+            "paper_close_all: closed %d open paper positions (reason=%s)",
+            closed_count, reason,
+        )
+        return {
+            "closed_count": closed_count,
+            "realised_pnl_total": round(realised_total, 4),
+        }
