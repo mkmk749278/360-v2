@@ -85,6 +85,7 @@ from .schemas import (
     OtpRequest,
     OtpRequestResponse,
     OtpVerify,
+    PaperResetResponse,
     PnlHistoryResponse,
     PositionsDiagResponse,
     PositionsResponse,
@@ -99,6 +100,8 @@ from .schemas import (
     TelegramOtpVerifyRequest,
     TelegramOtpVerifyResponse,
     TickersResponse,
+    TradeListResponse,
+    TradeRecord,
     UserAutoTradeSettings,
     UserPretpSettings,
 )
@@ -1137,6 +1140,19 @@ def build_app(
             message=msg,
             mode=req.mode,
         )
+
+    # ---- Paper-trade-visibility endpoints (2026-05-16) ----
+    # Registered via register() in paper_trade_routes.py so the
+    # GET /api/trades + POST /api/auto-mode/paper/reset routes live in
+    # their own module.  Same dep wiring as the inline routes above —
+    # auth covers read access, owner_required gates the reset.
+    from . import paper_trade_routes as _paper_trade_routes
+    _paper_trade_routes.register(
+        app,
+        engine=engine,
+        auth=auth,
+        owner_required=owner_required,
+    )
 
     # ---- Settings: Pre-TP page ----
 
