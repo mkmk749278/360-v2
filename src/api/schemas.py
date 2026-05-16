@@ -639,3 +639,98 @@ class TelegramOtpVerifyResponse(BaseModel):
     tier: str
     paid_until: Optional[str] = None  # ISO-8601 UTC; null when not paid
     needs_onboarding: bool
+
+
+# ---------------------------------------------------------------------------
+# Per-trade records (paper-trade visibility — 2026-05-16)
+# ---------------------------------------------------------------------------
+
+
+class TradePartialFill(BaseModel):
+    """One TP-level fill on the way to a fully-closed trade.
+
+    Surfaced inside ``TradeRecord.partial_fills`` so the app's trade-
+    detail view can show TP1/TP2/TP3 hit prices + the proportional
+    PnL each fill contributed.  Helps subscribers see "the strategy
+    locked +0.5% at TP1, the rest stopped out at SL" rather than only
+    the net result.
+    """
+
+    tp_level: int = Field(..., description="TP slot (1, 2, 3) or 0 for ad-hoc partial")
+    fraction: float = Field(..., description="Fraction of total qty closed by this fill")
+    fill_price: float
+    pnl_usd: float = Field(..., description="Net PnL booked by this fill (after fees)")
+    fee_usd: float = Field(..., description="Total fee paid on this fill (entry-share + exit)")
+    ts: str = Field(..., description="ISO-8601 UTC timestamp of the fill")
+
+
+class TradeRecord(BaseModel):
+    """One paper-trade lifecycle row from ``data/paper_trades.sqlite``.
+
+    Snapshot of leverage + position_size_pct AT OPEN so a later
+    settings-page change doesn't retroactively rewrite the row.
+    ``roi_pct_on_margin = net_pnl_usd / margin_usd * 100`` — the
+    headline metric subscribers care about (a $1 PnL on $10 of
+    margin at 10x = +10% ROI, not +0.1% on the underlying).
+    """
+
+    id: int
+    signal_id: str
+    symbol: str
+    side: Literal["long", "short"]
+    entry: float
+    qty: float
+    leverage: float
+    position_size_pct: float
+    notional_usd: float
+    margin_usd: float
+    partial_fills: List[TradePartialFill] = Field(default_factory=list)
+
+    # Close-state fields — null while the trade is still open.
+    close_reason: Optional[str] = None
+    close_price: Optional[float] = None
+    gross_pnl_usd: Optional[float] = None
+    fees_usd: Optional[float] = None
+    net_pnl_usd: Optional[float] = None
+    roi_pct_on_margin: Optional[float] = None
+
+    created_at: str = Field(..., description="ISO-8601 UTC at open")
+    closed_at: Optional[str] = Field(
+        None, description="ISO-8601 UTC at full close; null when still open"
+    )
+
+
+class TradeListResponse(BaseModel):
+    """Response shape for ``GET /api/trades``.
+
+    ``total`` is the count after filters but before pagination — the
+    app uses it to compute total pages for the history list.
+    """
+
+    items: List[TradeRecord]
+    total: int
+
+
+# ---------------------------------------------------------------------------
+# Paper-mode reset (owner-only) — 2026-05-16
+# ---------------------------------------------------------------------------
+
+
+class PaperResetResponse(BaseModel):
+    """Response shape for ``POST /api/auto-mode/paper/reset``.
+
+    ``starting_equity_usd`` echoes the configured starting balance so
+    the app can render "Balance reset to $X.XX as of <reset_at>" without
+    re-fetching the auto-mode status.  ``trades_archived`` is the count
+    of per-trade rows moved into the timestamped archive table —
+    purely informational; 0 means it was a fresh session.
+    """
+
+    reset_at: str = Field(..., description="ISO-8601 UTC of the reset event")
+    starting_equity_usd: float
+    pnl_buckets_cleared: int = Field(
+        0, description="Daily buckets wiped from the paper pnl_history ledger"
+    )
+    trades_archived: int = Field(
+        0, description="Per-trade rows archived to paper_trades_archive_<ts>"
+    )
