@@ -6,11 +6,14 @@ FastAPI app:
 
 * ``GET  /api/trades`` — paginated per-trade ledger
 * ``POST /api/auto-mode/paper/reset`` — owner-only paper account reset
+* ``POST /api/auto-mode/paper/close-all`` — user-initiated flatten of the
+  paper book (companion to reset; reset preserves in-flight signals by
+  design so users need a separate explicit close-all action)
 
-Both depend on dependencies already constructed inside ``build_app``
-(``auth``, ``owner_required``).  The caller passes them in so the dep
-graph stays internal to ``build_app`` — same pattern as the rest of the
-endpoints in this directory.
+All endpoints depend on dependencies already constructed inside
+``build_app`` (``auth``, ``owner_required``).  The caller passes them in
+so the dep graph stays internal to ``build_app`` — same pattern as the
+rest of the endpoints in this directory.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, status
 from src.utils import get_logger
 
 from .schemas import (
+    PaperCloseAllResponse,
     PaperResetResponse,
     TradeListResponse,
     TradeRecord,
@@ -38,16 +42,16 @@ def register(
     auth: Callable,
     owner_required: Callable,
 ) -> None:
-    """Wire ``GET /api/trades`` and ``POST /api/auto-mode/paper/reset``
-    onto the given app.
+    """Wire ``GET /api/trades``, ``POST /api/auto-mode/paper/reset`` and
+    ``POST /api/auto-mode/paper/close-all`` onto the given app.
 
     Idempotent in terms of behaviour — calling twice would register
     duplicate routes (FastAPI would raise), so the caller is expected to
     call this exactly once per ``build_app`` invocation.
 
-    The reset endpoint reads ``engine._order_manager`` directly so the
-    code is portable across the various engine wiring layouts in
-    bootstrap.py — same lookup pattern used by ``build_pulse`` /
+    The reset / close-all endpoints read ``engine._order_manager``
+    directly so the code is portable across the various engine wiring
+    layouts in bootstrap.py — same lookup pattern used by ``build_pulse`` /
     ``build_auto_mode``.
     """
 
@@ -190,4 +194,62 @@ def register(
             starting_equity_usd=starting,
             pnl_buckets_cleared=buckets_cleared,
             trades_archived=trades_archived,
+        )
+
+    # ---- Paper-mode close-all-positions (user-initiated) ----
+    #
+    # Why a separate endpoint instead of folding into /reset
+    # ------------------------------------------------------
+    # ``POST /api/auto-mode/paper/reset`` (PR #401) deliberately
+    # preserves ``PaperOrderManager._positions`` so the live-mode
+    # counterpart — whose positions live on the real exchange — can't
+    # be orphaned by a careless equity-wipe.  Users running paper-only
+    # sessions still want a one-shot "flatten my book" action they can
+    # fire **before** ``/reset`` (the reset endpoint refuses while open
+    # positions exist).  This endpoint is that action.  Two-step flow:
+    # ``close-all`` → optional ``reset``.
+    #
+    # Auth: mirrors ``/reset`` (owner-only).  Same pattern, same
+    # guard rails, same engine-lookup.  Returns 409 when no
+    # PaperOrderManager is wired (live mode / off mode).
+
+    @app.post(
+        "/api/auto-mode/paper/close-all",
+        response_model=PaperCloseAllResponse,
+        tags=["auto-mode"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def paper_close_all() -> PaperCloseAllResponse:
+        """Flatten the paper book at zero-move fills.
+
+        Iterates every entry in ``PaperOrderManager._positions`` and
+        invokes :meth:`PaperOrderManager.close_full` with
+        ``current_price=position.entry`` so the fill books no price
+        PnL — only round-trip fees.  Returns the count of positions
+        closed and the sum of realised PnL from this batch.
+
+        Idempotent on a flat book — returns ``closed_count=0``,
+        ``realised_pnl_total=0.0`` with no side effects.
+        """
+        om = getattr(engine, "_order_manager", None)
+        if om is None or not hasattr(om, "close_all_open_positions"):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="paper close-all requires an active PaperOrderManager — "
+                       "switch to paper mode first",
+            )
+        result = await om.close_all_open_positions("user_close_all")
+        # Defensive: an unwired or stub broker may return a non-dict —
+        # coerce so the response schema validation doesn't 500.
+        closed_count = (
+            int(result.get("closed_count", 0)) if isinstance(result, dict) else 0
+        )
+        realised_pnl_total = (
+            float(result.get("realised_pnl_total", 0.0))
+            if isinstance(result, dict) else 0.0
+        )
+        return PaperCloseAllResponse(
+            ok=True,
+            closed_count=closed_count,
+            realised_pnl_total=realised_pnl_total,
         )
