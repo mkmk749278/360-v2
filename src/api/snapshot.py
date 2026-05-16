@@ -703,6 +703,41 @@ def build_auto_mode(engine: Any) -> AutoModeStatus:
     except Exception:
         # Fail-soft — zeros are the right default.
         pass
+
+    # Equity-resets-daily fix (Phase paper-trade visibility, 2026-05-16).
+    #
+    # ``engine.get_auto_execution_status`` sources ``current_equity_usd``
+    # from ``RiskManager.current_equity_usd``, which is computed as
+    # ``starting_equity + daily_realised_pnl_usd`` (see
+    # ``src/auto_trade/risk_manager.py`` line ~186/189).  Daily PnL only
+    # contains today's bucket — so the dashboard "appears to reset to
+    # starting_equity at UTC midnight" every day even though the broker's
+    # persisted cumulative PnL is intact.  Owner reported this as
+    # "paper equity resets daily" (2026-05-16).
+    #
+    # Fix: in paper mode, prefer the broker's true cumulative equity
+    # (``PaperOrderManager.current_equity_usd``) which carries
+    # ``_starting_equity + _realised_pnl_total`` and survives restarts /
+    # mode toggles via ``data/paper_pnl_state.json``.  Live mode keeps
+    # the existing source (exchange-pushed equity), so we touch only the
+    # paper read-path.
+    try:
+        active_mode = info.get("mode", "off")
+        om = getattr(engine, "_order_manager", None)
+        if (
+            active_mode == "paper"
+            and om is not None
+            and hasattr(om, "current_equity_usd")
+        ):
+            info["current_equity_usd"] = float(om.current_equity_usd)
+    except Exception:
+        # Fail-soft — the daily-only figure is still a valid number to
+        # render, just stale-feeling at UTC rollover.  Don't 500 the
+        # whole Trade tab on a stray broker-attribute issue.
+        log.exception(
+            "build_auto_mode: failed to override current_equity_usd "
+            "from broker — falling back to engine status value"
+        )
     return AutoModeStatus(**info)
 
 
