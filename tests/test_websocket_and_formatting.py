@@ -1923,17 +1923,20 @@ class TestWsTraceLoggerSeparation:
     def test_trace_logger_writes_to_dedicated_file(self, tmp_path, monkeypatch):
         from importlib import reload
         import src.utils as utils_mod
-        # Repoint the trace log to a tmp file by reloading the module with
-        # an env override.  The module-level loguru ``add()`` runs at
-        # import time, so we monkeypatch the path and reload.
+        import src.logger as logger_mod
+        # Repoint the trace log to a tmp file by reloading the configurer
+        # with an env override.  Sink registration runs at module import
+        # time inside ``src.logger._configure()``, so we monkeypatch the
+        # path and reload that module to re-register sinks at the new
+        # path.  Note: this affects global loguru state for the duration
+        # of the test; later tests that depend on the production path
+        # will pick up whichever path was last set (acceptable for an
+        # isolated unit).
         trace_path = tmp_path / "ws_trace.log"
         monkeypatch.setenv("WS_TRACE_LOG_PATH", str(trace_path))
-        # Force config re-read AND utils re-init.  Note: this affects
-        # global loguru state for the duration of the test; later tests
-        # that depend on the production path will pick up whichever path
-        # was last set (acceptable for an isolated unit).
         import config as cfg_mod
         reload(cfg_mod)
+        reload(logger_mod)
         reload(utils_mod)
         ws = utils_mod.get_ws_trace_logger()
         ws.info("<WS:UNIT> probe_event k=v")

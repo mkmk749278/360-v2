@@ -1,29 +1,41 @@
-"""Enhanced logging configuration using loguru.
+"""Loguru sink configuration — single source of truth for the engine.
 
-Provides:
-  - Rotating file logs (50 MB, 30-day retention)
-  - Structured JSON output option (enabled via ``LOG_JSON=true`` in .env)
-  - Log level from ``LOG_LEVEL`` env var
-  - Separate error-only log file
-  - ``get_recent_logs(n)`` helper for the ``/view_logs`` Telegram command
+All loguru sinks (stderr, rotating engine log, error-only log, dedicated
+WS-trace log) are registered here at import time.  No other module
+should call ``_loguru_logger.remove()`` or ``add()`` — see "History"
+below for why.
 
-NOTE 2026-05-14 (PR #389 + this hotfix):
-``src/utils.py`` ALSO calls ``_loguru_logger.remove()`` and adds its own
-sinks (including the WS-trace sink for ``logs/ws_trace.log``).  In
-production import order, ``src/logger.py._configure()`` runs AFTER
-``src/utils.py``, so its bare ``remove()`` was silently wiping the
-trace sink registered by utils.  Result: ``/ws_log`` Telegram replies
-showed "exists but empty" because the file was opened during utils
-init, then orphaned when this module's remove() killed the sink.
+Public surface:
 
-Fix: after the existing add() calls below, ALSO register the trace
-sink here (importing helpers from src/utils so the filter logic stays
-in one place).  And add the inverse-trace filter to the stderr +
-engine sinks so per-second WS events don't flood the operator's main
-log.
+  - ``get_loguru_logger()`` — the bare configured loguru logger.
+    Application code should NOT call this directly; use
+    ``src.utils.get_logger(name)``, which wraps the loguru logger in
+    a ``%``/``{}``-tolerant bridge.
+  - ``get_ws_trace_logger()`` — bound logger for WS-trace events.
+    Records carry ``extra[ws_trace]=True`` so they are admitted to the
+    dedicated trace file and excluded from the operator-visible sinks.
+  - ``get_recent_logs(n)`` — last ``n`` lines of the most recent
+    rotating engine log file, for the ``/view_logs`` Telegram command.
 
-This is a hotfix; the proper unification (one configure module, not
-two) is queued as separate cleanup work.
+Tunables (env-overridable):
+
+  - ``LOG_DIR``     — directory for ``engine_*.log`` and
+                      ``engine_errors.log`` (default ``logs``).
+  - ``LOG_JSON``    — if truthy, file sinks emit serialised JSON.
+  - ``LOG_LEVEL``   — stderr threshold (file sink is always DEBUG).
+
+History:
+
+  Until 2026-05-14, sink configuration lived in BOTH ``src/utils.py``
+  and a private ``_configure()`` here.  Each module called
+  ``_loguru_logger.remove()`` then ``add(...)``; whichever ran last
+  won.  Production import order ran utils first, then this module via
+  ``src.commands.engine``, so the second ``remove()`` silently wiped
+  the WS-trace sink registered by utils — ``/ws_log`` Telegram replies
+  came back "exists but empty".  PR #389 + a follow-up hotfix worked
+  around it by re-registering the trace sink here after the
+  ``remove()``.  This module is now the proper unification: utils no
+  longer touches sinks and imports its loguru handles from here.
 """
 
 from __future__ import annotations
@@ -60,43 +72,38 @@ _WS_TRACE_FORMAT = "{time:YYYY-MM-DD HH:mm:ss.SSS!UTC} | {message}"
 
 
 def _ws_trace_filter(record: Any) -> bool:
-    """Admit only records that carry ``extra[ws_trace]=True``.
-
-    Defined here (and duplicated in src/utils.py with the same logic)
-    so both module paths can register the trace sink without one
-    importing the other — avoids a circular-import risk at boot.
-    """
+    """Admit only records that carry ``extra[ws_trace]=True``."""
     return bool(record["extra"].get("ws_trace"))
 
 
 def _exclude_ws_trace_filter(record: Any) -> bool:
-    """Reject ``extra[ws_trace]=True`` records on stderr + engine sinks.
+    """Reject ``extra[ws_trace]=True`` records on operator-visible sinks.
 
     Without this, every ``stream_summary`` / ``first_data`` event would
-    also print to the operator's main log — defeating the dedicated
-    trace-file design.
+    flood the operator's main log, defeating the dedicated trace-file
+    design.
     """
     return not record["extra"].get("ws_trace")
 
 
 # ---------------------------------------------------------------------------
-# Bootstrap
+# Bootstrap — runs once at module import
 # ---------------------------------------------------------------------------
 
 def _configure() -> None:
-    """Configure loguru sinks.  Called once at import time.
+    """Register all loguru sinks for the engine.
 
-    Wipes any sinks registered by an earlier-loaded module (notably
-    ``src/utils.py``) via ``_loguru_logger.remove()``, then re-installs
-    a clean set including the WS-trace sink so it survives this
-    module's wipe.
+    Called exactly once at module import.  Wipes loguru's default
+    stderr handler, then installs:
+
+      * stderr console sink (LOG_LEVEL threshold, excludes WS-trace)
+      * rotating engine log file (DEBUG, 50 MB / 30 days, excludes WS-trace)
+      * rotating error-only log file (ERROR, 20 MB / 30 days, excludes WS-trace)
+      * dedicated WS-trace log file (admits ONLY WS-trace records)
     """
     _LOG_DIR.mkdir(parents=True, exist_ok=True)
+    _loguru_logger.remove()
 
-    _loguru_logger.remove()  # remove default handler
-
-    # Console sink — excludes WS-trace records so they don't flood
-    # stderr when the trace summary fires every 60 s.
     _loguru_logger.add(
         sys.stderr,
         format=_CONSOLE_FORMAT,
@@ -104,43 +111,33 @@ def _configure() -> None:
         filter=_exclude_ws_trace_filter,
     )
 
-    # Rotating file sink (all levels, also excluding WS-trace).
-    serialize = _LOG_JSON
     _loguru_logger.add(
         str(_LOG_FILE),
         rotation="50 MB",
         retention="30 days",
         format=_FILE_FORMAT,
         level="DEBUG",
-        serialize=serialize,
+        serialize=_LOG_JSON,
         enqueue=True,
         filter=_exclude_ws_trace_filter,
     )
 
-    # Separate error-only sink (also excludes WS-trace — errors there
-    # would show up if we ever emit ws_trace.error(), but operators want
-    # the error file to focus on engine-internal errors, not the
-    # potentially-noisy WS-protocol-layer events).
     _loguru_logger.add(
         str(_ERROR_LOG_FILE),
         rotation="20 MB",
         retention="30 days",
         format=_FILE_FORMAT,
         level="ERROR",
-        serialize=serialize,
+        serialize=_LOG_JSON,
         enqueue=True,
         filter=_exclude_ws_trace_filter,
     )
 
-    # WS-trace sink — admits ONLY records with ``extra[ws_trace]=True``.
-    # Re-registered here after _loguru_logger.remove() above so it
-    # survives this module's wipe even when src/utils.py's earlier
-    # add() got cleared.  Single-line format (no name column, since
-    # all trace records are produced by the same logger).
     try:
         os.makedirs(os.path.dirname(WS_TRACE_LOG_PATH) or ".", exist_ok=True)
     except OSError:
         pass
+
     _loguru_logger.add(
         WS_TRACE_LOG_PATH,
         rotation=WS_TRACE_LOG_ROTATION,
@@ -154,23 +151,49 @@ def _configure() -> None:
 
 _configure()
 
+
+# Bound logger that all WS-trace events route through.  Records carry
+# ``extra[ws_trace]=True`` so the trace-file sink admits them and the
+# operator-visible sinks reject them.
+_ws_trace_logger = _loguru_logger.bind(ws_trace=True, name="ws_trace")
+
+
 # ---------------------------------------------------------------------------
 # Public helpers
 # ---------------------------------------------------------------------------
 
+def get_loguru_logger() -> Any:
+    """Return the bare configured loguru logger.
 
-def get_logger(name: str) -> Any:
-    """Return a loguru logger bound with *name* context."""
-    return _loguru_logger.bind(name=name)
+    Internal helper for ``src.utils.get_logger`` — application code
+    should use ``src.utils.get_logger(name)`` (the formatting bridge).
+    """
+    return _loguru_logger
+
+
+def get_ws_trace_logger() -> Any:
+    """Return the loguru logger bound for WS-trace events.
+
+    Callers emit structured ``<WS:LABEL> event_name k=v ...`` records via
+    standard ``info()`` / ``warning()`` calls.  Records are routed by
+    the ``_ws_trace_filter`` sink to the dedicated file and excluded
+    from stderr / engine log.  See ``src/websocket_manager.py`` for
+    the canonical use sites.
+    """
+    return _ws_trace_logger
 
 
 def get_recent_logs(n: int = 50) -> str:
     """Return the last *n* lines from the most recent engine log file.
 
-    Used by the ``/view_logs`` Telegram command.  Returns an empty string
-    if no log file exists yet.
+    Used by the ``/view_logs`` Telegram command.  Returns an empty
+    string if no log file exists yet, or on I/O error.
     """
-    log_files = sorted(_LOG_DIR.glob("engine_*.log"), key=lambda p: p.stat().st_mtime, reverse=True)
+    log_files = sorted(
+        _LOG_DIR.glob("engine_*.log"),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True,
+    )
     if not log_files:
         return ""
     try:
