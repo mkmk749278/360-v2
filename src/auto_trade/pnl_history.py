@@ -213,3 +213,31 @@ def get_history(
         key = d.strftime("%Y-%m-%d")
         series.append((key, float(state.get(key, 0.0))))
     return series
+
+
+def reset_mode(mode: str) -> int:
+    """Wipe every daily bucket for ``mode`` and persist atomically.
+
+    Returns the number of buckets that were cleared — telemetry for the
+    ``POST /api/auto-mode/paper/reset`` log line so the operator can
+    confirm the reset actually had work to do.
+
+    Other modes' ledgers are untouched: a paper reset never touches
+    ``live`` history, so the operator can flip back to live and see
+    the pre-reset live performance intact.
+
+    Idempotent — calling on an already-empty mode is a no-op that
+    returns 0.
+    """
+    if not isinstance(mode, str) or not mode:
+        return 0
+    state = _load_history()
+    bucket = state.get(mode) or {}
+    cleared = len(bucket)
+    state[mode] = {}
+    _persist_history(state)
+    log.info(
+        "pnl_history.reset_mode: cleared {} daily buckets for mode={}",
+        cleared, mode,
+    )
+    return cleared

@@ -92,14 +92,36 @@ async def handle_breaker(args: List[str], ctx: CommandContext) -> None:
     aliases=["/real_stats"],
     admin=True,
     group="channels",
-    help_text="Performance stats: /stats [channel]",
+    help_text="Performance stats (honest breakdown): /stats [channel]",
 )
 async def handle_stats(args: List[str], ctx: CommandContext) -> None:
+    """Multi-metric performance display (rework — paper-trade visibility,
+    2026-05-16).
+
+    Replaces the legacy ``Win rate: W/(W+L)`` headline with a four-row
+    breakdown that surfaces decisive wins, pre-TP grabs, capital
+    preserved, and clean SL hits separately.  The legacy aggregate
+    formatter remains available via
+    ``ctx.performance_tracker.format_stats_message`` for callers that
+    need the old shape (e.g. legacy alert paths).
+
+    Owner-flagged motivation: PROFIT_LOCKED exits were silently
+    counted as losses in the legacy W/L formula because
+    ``SignalRecord.hit_tp`` is False when pre-TP fires.  The honest
+    formatter branches on ``outcome_label`` (the semantic
+    classification stamped at record-time) so a flat exit no longer
+    looks like a loss.  See
+    :func:`src.performance_tracker_honest.get_honest_outcome_breakdown`
+    for the bucket definitions.
+    """
     if ctx.performance_tracker is None:
         await ctx.reply("ℹ️ Performance tracker is not enabled.")
         return
     channel_arg = args[0] if args else None
-    msg = ctx.performance_tracker.format_stats_message(channel=channel_arg)
+    from src.performance_tracker_honest import format_honest_stats_message
+    msg = format_honest_stats_message(
+        ctx.performance_tracker, channel=channel_arg,
+    )
     await ctx.reply(msg)
 
 

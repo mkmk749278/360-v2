@@ -53,6 +53,7 @@ Out of scope (deferred to Phase A2/A3)
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -64,7 +65,7 @@ from config import (
     MAX_POSITION_USD,
     POSITION_SIZE_PCT,
 )
-from src.auto_trade import pnl_history
+from src.auto_trade import pnl_history, trade_records
 from src.utils import get_logger
 
 
@@ -88,6 +89,14 @@ log = get_logger("paper_order_manager")
 # Match the partial-TP fractions used by the live OrderManager so paper and
 # live behave identically from TradeMonitor's perspective.
 _TP_FRACTIONS: Dict[int, float] = {1: 0.33, 2: 0.33, 3: 0.34}
+
+# Minimum tradable notional in USD.  Below this the simulated fill is
+# meaningless — owner reported (2026-05-16) seeing qty=0 trades in
+# pnl_history because depleted equity + tiny position_size_pct yielded
+# sub-cent notionals that round to nothing.  Set conservatively at $1
+# notional ($0.10 of margin at 10x) so the guard rail trips well before
+# the row becomes useless to a subscriber reading the dashboard.
+_MIN_PAPER_NOTIONAL_USD: float = 1.0
 
 # Cumulative paper-realised PnL persistence (2026-05-08).
 #
@@ -175,6 +184,18 @@ def _persist_paper_pnl_state(
         )
 
 
+def reset_paper_pnl_state(path: Optional[Path] = None) -> None:
+    """Wipe the on-disk paper-PnL ledger back to $0.00.
+
+    Used by the ``POST /api/auto-mode/paper/reset`` endpoint so a fresh
+    paper session starts from the configured starting equity rather than
+    inheriting the prior session's drawdown.  Writes atomically (tmp +
+    rename), mirroring ``_persist_paper_pnl_state``.
+    """
+    _persist_paper_pnl_state(0.0, path=path)
+    log.info("paper_pnl_state ledger reset to $0.00")
+
+
 @dataclass
 class _PaperPosition:
     """In-memory record of a simulated open position."""
@@ -189,6 +210,13 @@ class _PaperPosition:
     # close event can attribute its proportional share back into pnl.
     entry_fee_paid: float = 0.0
     closed_tp_levels: set = field(default_factory=set)
+    # Per-trade lifecycle accounting (Phase: paper-trade visibility) —
+    # tally gross/fees so close_full can pass the right totals to
+    # ``trade_records.close_trade`` without re-computing.  Both reset
+    # to zero on every open; populated incrementally by close_partial
+    # and finalised by close_full.
+    total_gross_pnl_usd: float = 0.0
+    total_fees_usd: float = 0.0
 
 
 class PaperOrderManager:
@@ -244,11 +272,50 @@ class PaperOrderManager:
         return round(self._realised_pnl_total, 4)
 
     @property
+    def current_equity_usd(self) -> float:
+        """Cumulative paper equity: starting + realised PnL since the
+        first paper session.
+
+        Phase paper-trade-visibility (2026-05-16): owner reported that
+        ``current_equity_usd`` "resets daily" on the dashboard.  Root
+        cause is on the RiskManager side — ``_current_equity =
+        starting_equity + daily_realised_pnl_usd`` so the equity
+        figure only carries today's bucket and forgets every prior
+        day.  This property is the broker-side truth (starting +
+        cumulative since boot) and the engine's
+        ``get_auto_execution_status`` now reads from here in paper
+        mode so the dashboard surfaces the right number.
+        """
+        return round(self._starting_equity + self._realised_pnl_total, 4)
+
+    @property
     def open_position_count(self) -> int:
         return sum(
             1
             for p in self._positions.values()
             if (p.quantity - p.closed_quantity) > 0
+        )
+
+    def reset_state(self) -> None:
+        """Zero out cumulative PnL + available equity back to starting.
+
+        Owner-mediated wipe used by ``POST /api/auto-mode/paper/reset``.
+        Open positions are NOT cleared — those are live in-flight trades
+        with active engine signals; clearing them would orphan the
+        engine's state machine.  In practice the reset endpoint is
+        invoked only when the operator has verified no positions are
+        open (the endpoint refuses otherwise).
+
+        Persistence: writes the zeroed cumulative PnL through to the
+        on-disk ledger so a subsequent restart doesn't re-load the old
+        drawdown.
+        """
+        self._realised_pnl_total = 0.0
+        self._available_equity = self._starting_equity
+        reset_paper_pnl_state()
+        log.info(
+            "PaperOrderManager.reset_state: equity → ${:.2f}, cumulative PnL → $0.00",
+            self._starting_equity,
         )
 
     def _next_order_id(self, signal_id: str, event: str) -> str:
@@ -265,14 +332,58 @@ class PaperOrderManager:
         except Exception:
             return float(self._position_size_pct)
 
+    def _resolved_leverage(self) -> float:
+        """Read the user-set leverage cap from ``user_settings``.
+
+        Paper-trade visibility (2026-05-16): the per-trade ROI%-on-margin
+        metric needs to know the leverage the user is conceptually
+        trading at.  The engine has no per-signal leverage parameter
+        today (the broker treats every paper signal as 1x for fill math),
+        so we adopt ``auto_trade_leverage_cap`` as the implicit leverage
+        the dashboard math runs against.  This matches what subscribers
+        see in the auto-trade settings page.  Defaults to 10x when
+        unconfigured — same default the Pre-TP fee math has assumed for
+        months (``PRE_TP_LEVERAGE`` in config).
+        """
+        try:
+            from src import user_settings as _us
+            v = float(_us.auto_trade_leverage_cap())
+            return v if v > 0 else 10.0
+        except Exception:
+            return 10.0
+
     async def _compute_quantity(self, entry_price: float) -> float:
-        """Compute position size from configured percentage of paper equity."""
-        if entry_price <= 0:
-            return self._max_position_usd / max(entry_price, 1e-12)
-        position_usd = min(
-            self._available_equity * (self._resolved_position_size_pct() / 100.0),
-            self._max_position_usd,
-        )
+        """Compute position size from configured percentage of paper equity.
+
+        Returns 0.0 on any degenerate input so ``place_market_order`` can
+        skip the open cleanly via the qty-zero guard rail rather than
+        silently entering a position with meaningless size.  Pre-fix
+        callsites (2026-05-16) returned ``MAX_POSITION_USD / 1e-12`` on a
+        zero-entry price — an astronomical qty that broke every
+        downstream calculation.  Post-fix, every degenerate path
+        funnels through the explicit zero-return + parent-method skip.
+        """
+        if entry_price <= 0 or not math.isfinite(entry_price):
+            log.debug(
+                "_compute_quantity: invalid entry_price=%r — returning 0", entry_price,
+            )
+            return 0.0
+        equity = self._available_equity
+        if not math.isfinite(equity) or equity <= 0:
+            log.debug(
+                "_compute_quantity: depleted/non-finite equity=%r — returning 0",
+                equity,
+            )
+            return 0.0
+        pct = self._resolved_position_size_pct()
+        if not math.isfinite(pct) or pct <= 0:
+            log.debug(
+                "_compute_quantity: invalid position_size_pct=%r — returning 0", pct,
+            )
+            return 0.0
+        position_usd = min(equity * (pct / 100.0), self._max_position_usd)
+        if position_usd <= 0:
+            return 0.0
         return position_usd / entry_price
 
     async def place_market_order(
@@ -285,6 +396,17 @@ class PaperOrderManager:
 
         Returns a synthetic order ID.  Records the open position in memory
         and emits a parseable ``paper_trade_fill`` log marker.
+
+        Skip-with-marker conditions (return ``None`` and log
+        ``paper_trade_skip``; **never** create a degenerate position):
+
+        * Missing ``signal_id`` — caller didn't pass a real signal
+        * Invalid entry price (≤ 0 or NaN)
+        * Idempotent re-open of an already-tracked signal
+        * Risk gate refusal (when a RiskManager is wired)
+        * Depleted equity / zero position_size_pct (caught by
+          :meth:`_compute_quantity` → qty == 0)
+        * Sub-floor notional (notional < ``_MIN_PAPER_NOTIONAL_USD``)
         """
         signal_id = getattr(signal, "signal_id", "")
         if not signal_id:
@@ -304,17 +426,43 @@ class PaperOrderManager:
         direction = getattr(signal.direction, "value", str(signal.direction))
         side = "long" if direction == "LONG" else "short"
         entry = float(getattr(signal, "entry", 0.0) or 0.0)
-        if entry <= 0:
-            log.debug(
-                "PaperOrderManager: invalid entry price for %s — skipping",
-                signal_id,
+        if entry <= 0 or not math.isfinite(entry):
+            log.info(
+                "paper_trade_skip reason=invalid_entry signal_id=%s entry=%r",
+                signal_id, entry,
             )
             return None
 
         if quantity is None:
             quantity = await self._compute_quantity(entry)
 
+        # Quantity guard rail (Phase: paper-trade visibility, 2026-05-16).
+        # Owner reported qty=0 paper trades polluting the per-trade ledger
+        # — pre-fix the broker would open a position with quantity==0,
+        # accumulate zero PnL on every close, and emit dashboard rows that
+        # made no sense.  Guard exhaustively so every "garbage qty" path
+        # surfaces a single parseable marker.
+        if (
+            quantity is None
+            or not math.isfinite(quantity)
+            or quantity <= 0
+        ):
+            log.info(
+                "paper_trade_skip reason=qty_zero signal_id=%s symbol=%s "
+                "entry=%.6f available_equity=$%.2f pos_pct=%.2f%%",
+                signal_id, getattr(signal, "symbol", "?"), entry,
+                self._available_equity, self._resolved_position_size_pct(),
+            )
+            return None
+
         notional = entry * quantity
+        if notional < _MIN_PAPER_NOTIONAL_USD:
+            log.info(
+                "paper_trade_skip reason=notional_floor signal_id=%s "
+                "notional=$%.4f floor=$%.2f",
+                signal_id, notional, _MIN_PAPER_NOTIONAL_USD,
+            )
+            return None
         # Entry as a market order pays the taker fee (Binance VIP 0: 0.04%).
         # We deduct it from available equity immediately (real cash leaves
         # the account at fill) but defer attribution into ``realised_pnl``
@@ -337,11 +485,34 @@ class PaperOrderManager:
         if self._risk_manager is not None:
             self._risk_manager.register_open(signal)
 
+        # Per-trade row in the SQLite ledger (Phase: paper-trade visibility,
+        # 2026-05-16).  Snapshot leverage + position_size_pct AT OPEN so a
+        # later settings-page change doesn't retroactively rewrite the row.
+        leverage_at_open = self._resolved_leverage()
+        pos_pct_at_open = self._resolved_position_size_pct()
+        try:
+            trade_records.open_trade(
+                signal_id=signal_id,
+                symbol=self._positions[signal_id].symbol,
+                side=side,
+                entry=entry,
+                qty=quantity,
+                leverage=leverage_at_open,
+                position_size_pct=pos_pct_at_open,
+            )
+        except Exception:
+            # The per-trade ledger is a visibility feature — failures here
+            # must NOT break the simulated fill path.  Log and continue.
+            log.exception(
+                "trade_records.open_trade failed for signal_id=%s — "
+                "broker state intact, dashboard row missing", signal_id,
+            )
+
         log.info(
             "paper_trade_fill event=open signal_id=%s symbol=%s side=%s "
-            "entry=%.6f qty=%.6f notional=%.2f order_id=%s",
+            "entry=%.6f qty=%.6f notional=%.2f leverage=%.1fx order_id=%s",
             signal_id, self._positions[signal_id].symbol,
-            side, entry, quantity, notional, order_id,
+            side, entry, quantity, notional, leverage_at_open, order_id,
         )
         return order_id
 
@@ -415,9 +586,12 @@ class PaperOrderManager:
             if position.quantity > 0 else 0.0
         )
         pnl = gross_pnl - exit_fee - entry_fee_share
+        total_fee_this_fill = exit_fee + entry_fee_share
 
         position.closed_quantity += close_qty
         position.realised_pnl_usd += pnl
+        position.total_gross_pnl_usd += gross_pnl
+        position.total_fees_usd += total_fee_this_fill
         self._realised_pnl_total += pnl
         # Free up margin proportional to closed quantity (entry fee
         # already deducted at open, exit fee deducted from pnl above).
@@ -428,6 +602,22 @@ class PaperOrderManager:
         # Append to the daily-bucketed history ledger powering the
         # weekly / monthly aggregates and the dashboard PnL chart.
         pnl_history.record_close("paper", pnl)
+        # Per-trade SQLite store — append a fill event so the dashboard's
+        # trade-detail view can show the TP-by-TP breakdown.
+        try:
+            trade_records.record_partial_fill(
+                signal_id=signal_id,
+                tp_level=tp_level,
+                fraction=fraction,
+                fill_price=fill_price,
+                pnl_usd=pnl,
+                fee_usd=total_fee_this_fill,
+            )
+        except Exception:
+            log.exception(
+                "trade_records.record_partial_fill failed for signal_id=%s — "
+                "broker state intact, fill telemetry missing", signal_id,
+            )
 
         order_id = self._next_order_id(signal_id, f"tp{tp_level}")
         log.info(
@@ -445,6 +635,24 @@ class PaperOrderManager:
             if self._risk_manager is not None:
                 self._risk_manager.register_close(
                     signal, realised_pnl_usd=position.realised_pnl_usd
+                )
+            # Per-trade row close — fully-via-TPs path (e.g. TP3 took the
+            # last fraction).  Pass the running totals accumulated across
+            # every partial fill so ROI%-on-margin is computed correctly.
+            close_reason = f"tp{tp_level}" if tp_level else "tp_full"
+            try:
+                trade_records.close_trade(
+                    signal_id=signal_id,
+                    close_reason=close_reason,
+                    close_price=fill_price,
+                    gross_pnl_usd=position.total_gross_pnl_usd,
+                    fees_usd=position.total_fees_usd,
+                    net_pnl_usd=position.realised_pnl_usd,
+                )
+            except Exception:
+                log.exception(
+                    "trade_records.close_trade (TP path) failed for "
+                    "signal_id=%s", signal_id,
                 )
 
         return order_id
@@ -630,9 +838,12 @@ class PaperOrderManager:
             if position.quantity > 0 else 0.0
         )
         pnl = gross_pnl - exit_fee - entry_fee_share
+        total_fee_this_fill = exit_fee + entry_fee_share
 
         position.closed_quantity += remaining_qty
         position.realised_pnl_usd += pnl
+        position.total_gross_pnl_usd += gross_pnl
+        position.total_fees_usd += total_fee_this_fill
         self._realised_pnl_total += pnl
         self._available_equity += position.entry * remaining_qty + pnl
         # Persist cumulative PnL so the dashboard "Paper total since boot"
@@ -641,6 +852,23 @@ class PaperOrderManager:
         # Append to the daily-bucketed history ledger powering the
         # weekly / monthly aggregates and the dashboard PnL chart.
         pnl_history.record_close("paper", pnl)
+        # Per-trade row close — see open_trade comment for why we wrap
+        # in try/except: a SQLite IO failure here must never break the
+        # broker's lifecycle.
+        try:
+            trade_records.close_trade(
+                signal_id=signal_id,
+                close_reason=reason,
+                close_price=fill_price,
+                gross_pnl_usd=position.total_gross_pnl_usd,
+                fees_usd=position.total_fees_usd,
+                net_pnl_usd=position.realised_pnl_usd,
+            )
+        except Exception:
+            log.exception(
+                "trade_records.close_trade (full path) failed for "
+                "signal_id=%s", signal_id,
+            )
 
         order_id = self._next_order_id(signal_id, f"close_{reason}")
         log.info(
