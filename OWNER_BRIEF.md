@@ -211,6 +211,18 @@ SignalRouter — paid (A+ / B tier); sub-65 dropped (no free-channel routing)
 TradeMonitor — polls every 5s using 1m candle OHLC
 ```
 
+## 3.8 Paper-book lifecycle (operator doctrine — added 2026-05-16)
+
+Paper trading shares the live-mode doctrine that **reset never orphans an open position**, even though paper positions are in-memory simulation with no broker risk. This keeps live and paper operationally symmetric and forces an explicit user action to flatten — never a side effect of a counter/equity reset.
+
+| Action | Endpoint | Effect |
+|---|---|---|
+| **Flatten paper book** | `POST /api/auto-mode/paper/close-all` (in-flight PR `feat/paper-close-all-positions`) | Snapshot-iterates `PaperOrderManager._positions`, closes each at entry price (zero-move close), records `close_reason="user_close_all"`, returns `{closed_count, realized_pnl_total}` |
+| **Zero PnL + equity baseline** | `POST /api/auto-mode/paper/reset` (PR #401) | Refuses while open positions exist (B12 lifecycle guard), zeros cumulative paper PnL, resets equity baseline to $1000, archives `paper_trades` per-trade rows |
+| **Live-mode equivalent** | `/reset_full` Telegram command | Preserves in-flight signals to avoid orphaning real Binance positions; **not coordinated with paper-mode reset** by design |
+
+Two-step user flow for a clean paper-book reset: **close-all → reset.** This is why reset is "practically unreachable" on the Lumin Paper sub-tab today (subscribers almost always have open positions) — the resolution is to expose close-all as a button in the app, not to weaken reset's preservation guarantee.
+
 ---
 
 # PART IV — BUSINESS RULES (NON-NEGOTIABLE)
@@ -228,8 +240,8 @@ TradeMonitor — polls every 5s using 1m candle OHLC
 | B9 | Expired signals must post Telegram notification — no silent disappearances |
 | B10 | Discuss and agree before building major architecture changes |
 | B11 | Net-of-fees economics. Subscriber default leverage is 10x; round-trip fee is ~0.07% on price (= 0.7% on margin). Any tunable involving price-move thresholds (pre-TP, invalidation classifier, scoring bands) must be fee-aware. A signal closing at "neutral" raw price = a 0.7% net loss to the subscriber. |
-| B12 | Auto-trade safety. No live execution without all of: daily-loss kill switch, concurrent-position cap, per-symbol exposure cap, leverage cap (≤30x), restart reconciliation, structured order audit log. Paper mode is the only acceptable runtime when any of these are not in place. |
-| B13 | Identity & auth. **Primary signin:** phone + SMS OTP (universal — works for any user without prerequisites, via AuthKey.io or equivalent DLT-registered provider). **Optional upgrade:** users opt-in from in-app Settings to bind their `@LuminProBot` chat_id; future OTPs and ongoing bot interactions route via Telegram DM (free, branded). **Identity primitive for paid-tier features remains `telegram_user_id`** (billing webhook per B16, ops console access, paid signal routing). No email, no password. Doctrine amended 2026-05-12 (was: Telegram-only) once Lumin became a real consumer app — strict-Telegram excluded ~5-15% of even crypto-aware audiences and gated growth on a prerequisite the app shouldn't impose. |
+| B12 | Auto-trade safety. No live execution without all of: daily-loss kill switch, concurrent-position cap, per-symbol exposure cap, leverage cap (≤30x), restart reconciliation, structured order audit log. Paper mode is the only acceptable runtime when any of these are not in place. **Paper-book lifecycle** (see §3.8): `/api/auto-mode/paper/reset` refuses while open positions exist; flattening requires the separate `POST /api/auto-mode/paper/close-all` action — reset never closes positions as a side effect, mirroring the live-mode `/reset_full` preservation doctrine. |
+| B13 | Identity & auth. **Primary signin:** phone + SMS OTP (universal — works for any user without prerequisites, via AuthKey.io or equivalent DLT-registered provider). **Optional upgrade:** users opt-in from in-app Settings to bind their `@LuminProBot` chat_id; future OTPs and ongoing bot interactions route via Telegram DM (free, branded). **Identity primitive for paid-tier features remains `telegram_user_id`** (billing webhook per B16, ops console access, paid signal routing). No email, no password. Doctrine amended 2026-05-12 (was: Telegram-only) once Lumin became a real consumer app — strict-Telegram excluded ~5-15% of even crypto-aware audiences and gated growth on a prerequisite the app shouldn't impose. Re-amended 2026-05-15 (PRs #397/#398, Lumin #20/#21): Firebase is now the primary identity issuer (Google sign-in on Android); Telegram-DM OTP remains an opt-in upgrade for free-code delivery and bot-DM features. Legacy phone-OTP user-id JWTs accepted during cutover; deprecation post-Phase-4. |
 | B14 | Build constraint. All build/deploy paths must work from Android+Termux. Mobile app builds via GitHub Actions only — no local Android Studio / Gradle requirement. |
 | B15 | Brand architecture. Lumin = consumer app brand (Play Store, app icon, marketing). 360 Crypto Eye = engine + signal-source brand (Telegram channel, technical identity, "Powered by" attribution). The Telegram channel never renames. The app's About page always credits 360 Crypto Eye. |
 | B16 | Revenue. Subscriptions are crypto-only via the Telegram bot (Lumin app qualifies for the Reader-app Play Store exception). No Google Play billing, no Stripe fiat, no bank account in v1. App is a control panel; payment is in the bot. |
