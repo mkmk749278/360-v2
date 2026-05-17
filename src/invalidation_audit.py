@@ -89,9 +89,15 @@ def categorise_kill_reason(reason: str) -> str:
             -> "regime_shift"
         "EMA bearish crossover (EMA9 < EMA21) – LONG thesis invalidated"
             -> "ema_crossover"
+        "trailing invalidation (MFE peak +0.42%, retraced 50%...) ..."
+            -> "trailing_invalidation"   # OWNER_BRIEF B17 tight-mode kill
+        "momentum against thesis (...) – signal thesis invalidated"
+            -> "momentum_loss"   # direction-aware momentum-kill alias
     """
     text = (reason or "").lower()
-    if "momentum loss" in text:
+    if "trailing invalidation" in text:
+        return "trailing_invalidation"
+    if "momentum loss" in text or "momentum against thesis" in text:
         return "momentum_loss"
     if "regime shift" in text:
         return "regime_shift"

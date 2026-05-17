@@ -22,6 +22,9 @@ from config import (
     PRE_TP_ATR_MULTIPLIER,
     PRE_TP_ENABLED,
     PRE_TP_FEE_FLOOR_PCT,
+    INVALIDATION_MODE_DEFAULT,
+    INVALIDATION_TRAILING_MFE_R_DEFAULT,
+    INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT,
     PRE_TP_FEE_PCT_ROUND_TRIP,
     PRE_TP_GRAB_FRACTION,
     PRE_TP_LEVERAGE,
@@ -58,6 +61,12 @@ _STOP_OUTCOME_MESSAGES = {
 # Seconds of grace after a DCA entry before invalidation checks are allowed.
 # Gives the averaged position time to develop without being killed prematurely.
 _DCA_GRACE_SECONDS = 600
+
+# OWNER_BRIEF B17 / §3.2a — per-user invalidation aggressiveness modes.
+# Engine-side TradeMonitor uses ``INVALIDATION_MODE_DEFAULT`` from config
+# (default ``standard``); per-user app-side execution reads
+# ``user_invalidation_settings.mode`` directly when Phase 4 lands.
+_VALID_INVALIDATION_MODES: frozenset = frozenset({"loose", "standard", "tight"})
 
 
 def _compute_trailing_stop(
@@ -573,13 +582,92 @@ class TradeMonitor:
             return close, close
         return 0.0, 0.0
 
+    def _check_trailing_invalidation(self, sig: Signal) -> Optional[str]:
+        """Return a kill reason when the ATR-trailing invalidation fires.
+
+        OWNER_BRIEF B17 (tight-mode signature, 2026-05-17 doctrine):
+
+        - Arms when MFE >= ``INVALIDATION_TRAILING_MFE_R_DEFAULT`` × SL distance
+          (default 0.3R — small enough that the trailing kicks in once the
+          signal has proven any meaningful direction, large enough to filter
+          noise wicks).
+        - Fires when current price has retraced ``INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT``
+          of the MFE peak back toward entry (default 0.50 = 50%).
+
+        Pre-2026-05-17 the engine had no equivalent — MFE-positive signals
+        could slide all the way to full SL after peaking.  The audit on 654
+        closed signals found 22 INVALIDATED entries with MFE >= 0.5R that
+        proceeded to retrace and (in many cases) hit SL.  This kill closes
+        the residual before that happens.
+
+        Pure function on signal state — independent of regime / EMA /
+        momentum gates above.  Returns ``None`` when not armed or not
+        retraced enough; returns a structured reason string otherwise.
+        """
+        is_long = sig.direction == Direction.LONG
+        entry = float(getattr(sig, "entry", 0.0) or 0.0)
+        sl_px = float(getattr(sig, "stop_loss", 0.0) or 0.0)
+        mfe_pct = float(getattr(sig, "max_favorable_excursion_pct", 0.0) or 0.0)
+        if entry <= 0 or sl_px <= 0 or mfe_pct <= 0:
+            return None
+
+        # SL distance as a percentage of entry (so MFE_R can be computed in
+        # the same pct units without re-deriving prices).  Guard against
+        # an inverted SL (BE-stop after pre-TP can land at exactly entry,
+        # which yields zero SL distance — no trailing in that case).
+        sl_dist_pct = abs(entry - sl_px) / entry * 100.0
+        if sl_dist_pct <= 0:
+            return None
+
+        mfe_r = mfe_pct / sl_dist_pct
+        if mfe_r < INVALIDATION_TRAILING_MFE_R_DEFAULT:
+            return None  # Not armed yet — MFE hasn't reached the trigger band
+
+        # Current excursion in the favourable direction (negative if reversed
+        # past entry).  Compute in pct space so the comparison with mfe_pct
+        # is unit-consistent.
+        if is_long:
+            current_excursion_pct = (sig.current_price - entry) / entry * 100.0
+        else:
+            current_excursion_pct = (entry - sig.current_price) / entry * 100.0
+
+        # Retracement as a fraction of the MFE peak.  A reversal past entry
+        # (current_excursion_pct < 0) yields retrace > 1.0 — captured by the
+        # >= threshold check the same way; SL itself would also fire in
+        # that band, but the trailing kill exits first to lock the residual.
+        retrace_fraction = (mfe_pct - current_excursion_pct) / mfe_pct
+        if retrace_fraction < INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT:
+            return None  # Still close enough to peak; not retraced enough
+
+        return (
+            f"trailing invalidation (MFE peak +{mfe_pct:.2f}%, current "
+            f"+{current_excursion_pct:.2f}%, retraced {retrace_fraction*100:.0f}% "
+            f"of peak at MFE_R={mfe_r:.2f}) – capital preserved"
+        )
+
     def _check_invalidation(self, sig: Signal) -> Optional[str]:
         """Return an invalidation reason string if the signal's thesis is no longer valid.
 
-        Checks (in order):
-        1. Market regime flip against signal direction
-        2. EMA trend crossover against signal direction
-        3. Momentum loss (signal is flat with no movement)
+        Mode-gated per OWNER_BRIEF B17 / §3.2a (capital preservation doctrine):
+
+        * ``loose``    — only hard structural break (skip momentum / EMA /
+                         regime checks).  For users who want signals to
+                         develop fully before any non-SL exit fires.
+        * ``standard`` — engine baseline.  Regime-flip, EMA crossover, and
+                         momentum-loss checks all active, plus MFE
+                         protection on pre-TP'd signals (default).
+        * ``tight``    — standard + ATR-trailing kill at MFE >=
+                         ``INVALIDATION_TRAILING_MFE_R_DEFAULT`` (default
+                         0.3R).  Closes at ``trailing_retrace_pct``
+                         retracement of the MFE peak.  Capital-preservation
+                         mode that prevents MFE-positive signals from
+                         sliding all the way to full SL.
+
+        Engine-side uses ``INVALIDATION_MODE_DEFAULT`` (default ``standard``).
+        Per-user override from ``user_invalidation_settings.mode`` is consumed
+        by the Lumin app-side OrderExecutor when per-user execution lands
+        (Phase 4).  This engine path is owner-only auto-trade today; one mode
+        for the engine's signal lifecycle.
 
         Returns ``None`` if the signal is still valid.
         """
@@ -598,6 +686,36 @@ class TradeMonitor:
             dca_age = (utcnow() - sig.dca_timestamp).total_seconds()
             if dca_age < _DCA_GRACE_SECONDS:
                 return None
+
+        mode = INVALIDATION_MODE_DEFAULT.strip().lower() if INVALIDATION_MODE_DEFAULT else "standard"
+        if mode not in _VALID_INVALIDATION_MODES:
+            mode = "standard"
+
+        # MFE protection (OWNER_BRIEF §3.2a, 2026-05-17) — applies to standard
+        # and tight modes.  Skip ALL kill checks below when the signal has
+        # already proved its direction via pre-TP (so SL is at BE on the
+        # residual) AND current price is still on the favourable side of entry.
+        # Doctrine: once pre-TP fires and the residual has BE-stop, the
+        # downside is structurally capped at fees.  Killing the residual on
+        # a momentum dip / EMA wobble during normal post-pre-TP consolidation
+        # destroys the optionality on TP1+.  The 2026-05-17 audit found
+        # 22 PREMATURE kills (~9% of INV cohort) where MFE was ≥ 0.5R at
+        # kill time — most of those would have been protected by this rule.
+        if mode != "loose" and getattr(sig, "pre_tp_hit", False):
+            _entry_px = sig.entry if sig.entry > 0 else sig.current_price
+            if _entry_px > 0:
+                still_in_profit = (
+                    (is_long and sig.current_price >= _entry_px)
+                    or (not is_long and sig.current_price <= _entry_px)
+                )
+                if still_in_profit:
+                    return None
+
+        # Loose mode short-circuits here — only the SL itself + max-hold guard
+        # (handled outside this function) can close the signal.  No regime,
+        # EMA, or momentum kill.
+        if mode == "loose":
+            return None
 
         # Build an indicators dict for regime detection and EMA/momentum checks.
         # Priority: caller-supplied indicators_fn → data-store fallback.
@@ -623,6 +741,18 @@ class TradeMonitor:
                     "ema21_last": float(ema21_arr[-1]) if len(ema21_arr) else None,
                     "momentum": float(mom_arr[-1]) if len(mom_arr) and not np.isnan(mom_arr[-1]) else None,
                 }
+
+        # Tight-mode ATR-trailing kill (OWNER_BRIEF B17, 2026-05-17) — fires
+        # when MFE has reached ``trailing_mfe_r_threshold`` (in multiples of
+        # SL distance) AND price has retraced ``trailing_retrace_pct`` of
+        # the MFE peak.  Closes the residual position before it slides back
+        # to full SL.  Independent of regime / EMA / momentum gates — fires
+        # purely off price-action retracement so noise-driven kills can't
+        # contaminate it.
+        if mode == "tight":
+            trailing_kill = self._check_trailing_invalidation(sig)
+            if trailing_kill is not None:
+                return trailing_kill
 
         # INV-1 audit fix: extract the regime captured at signal CREATION from
         # `sig.market_phase` (formatted as "REGIME | ATR=... | Vol=...").  The

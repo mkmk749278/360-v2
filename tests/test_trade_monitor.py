@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import timedelta
 from typing import Dict
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import numpy as np
 import pytest
@@ -2632,3 +2632,372 @@ class TestTerminalStatusGuard:
         # async task and isn't counted toward send_telegram here because
         # engine_context_fn is None in the test fixture.)
         assert len(monitor._post_calls_for_test) == 1
+
+
+# ============================================================================
+# Invalidation user-modes + MFE protection + ATR-trailing kill
+# OWNER_BRIEF B17 + §3.2a (capital preservation doctrine, 2026-05-17)
+# PR #4 — feat/invalidation-user-modes
+# ============================================================================
+
+
+class TestInvalidationModes:
+    """Mode-gated invalidation behaviour: loose / standard / tight.
+
+    Engine-side TradeMonitor uses ``INVALIDATION_MODE_DEFAULT`` from config
+    (default ``standard``).  Per-user app-side execution reads
+    ``user_invalidation_settings.mode`` directly when Phase 4 lands; for now
+    we exercise the engine path via the env-overridable config constant.
+    """
+
+    def _build_monitor(self, active, regime_label="TRENDING_DOWN", **kwargs):
+        """Wire a monitor with a regime detector returning the given label.
+
+        Used by mode tests to force a regime-flip condition; combined with
+        the mode patch, asserts which kills do/don't fire per mode.
+        """
+        removed = []
+        sent = []
+
+        async def mock_send(chat_id, text):
+            sent.append((chat_id, text))
+
+        data_store = MagicMock()
+        data_store.ticks = {}
+        closes = [30000.0] * 25
+        data_store.get_candles.return_value = {
+            "close": closes,
+            "open": closes,
+            "high": closes,
+            "low": closes,
+            "volume": [1.0] * 25,
+        }
+
+        regime_detector = MagicMock()
+        regime_detector.classify.return_value = MagicMock(
+            regime=MagicMock(value=regime_label)
+        )
+
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=mock_send,
+            get_active_signals=lambda: dict(active),
+            remove_signal=lambda sid: removed.append(sid),
+            update_signal=MagicMock(),
+            regime_detector=regime_detector,
+            indicators_fn=lambda sym: {
+                "ema9_last": 99.0, "ema21_last": 100.0,
+                "momentum": -0.5, "atr_last": 0.5,
+            },
+        )
+        return monitor
+
+    def test_loose_mode_skips_all_non_sl_kills(self):
+        """Loose mode: regime-flip / EMA-cross / momentum-loss are all skipped.
+
+        Capital-preservation-conservative — only SL itself + max-hold can
+        close the signal.  For users who want signals to develop fully.
+        """
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.current_price = sig.entry  # neutral position
+        monitor = self._build_monitor({sig.signal_id: sig}, regime_label="TRENDING_DOWN")
+
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "loose"):
+            reason = monitor._check_invalidation(sig)
+        assert reason is None, (
+            "Loose mode must skip the regime-flip kill that standard/tight "
+            f"would fire on a TRENDING_DOWN flip against a LONG signal. "
+            f"Got: {reason!r}"
+        )
+
+    def test_standard_mode_fires_regime_flip_kill(self):
+        """Standard mode = engine baseline: regime-flip against direction kills."""
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.current_price = sig.entry
+        monitor = self._build_monitor({sig.signal_id: sig}, regime_label="TRENDING_DOWN")
+
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "standard"):
+            reason = monitor._check_invalidation(sig)
+        assert reason is not None
+        assert "TRENDING_DOWN" in reason
+
+    def test_unknown_mode_falls_back_to_standard(self):
+        """An invalid mode token must not skip kills — falls back to standard.
+
+        Defense-in-depth: even if a bad env value slips through validation,
+        the engine continues protecting the book by running standard kills.
+        """
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.current_price = sig.entry
+        monitor = self._build_monitor({sig.signal_id: sig}, regime_label="TRENDING_DOWN")
+
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "aggressive_xyz"):
+            reason = monitor._check_invalidation(sig)
+        assert reason is not None
+        assert "TRENDING_DOWN" in reason
+
+    # --------------------------------------------------------------
+    # MFE protection (applies to standard + tight, not loose)
+    # --------------------------------------------------------------
+
+    def test_mfe_protection_skips_regime_kill_after_pre_tp(self):
+        """When pre_tp_hit=True and price still on favourable side of entry,
+        regime-flip kill must NOT fire — MFE protection per §3.2a.
+
+        Rationale: pre-TP fired → real partial banked + residual SL at BE.
+        Killing the residual on a regime wobble destroys TP1 optionality.
+        """
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.pre_tp_hit = True
+        sig.current_price = sig.entry + 50  # still in favourable territory
+        sig.max_favorable_excursion_pct = 0.5  # peaked at +0.5%
+        monitor = self._build_monitor({sig.signal_id: sig}, regime_label="TRENDING_DOWN")
+
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "standard"):
+            reason = monitor._check_invalidation(sig)
+        assert reason is None, (
+            "MFE protection must skip the regime-flip kill on a pre-TP'd "
+            f"signal still in profit.  Got: {reason!r}"
+        )
+
+    def test_mfe_protection_does_not_apply_when_price_below_entry(self):
+        """If price has retraced past entry (BE-stop range), MFE protection
+        no longer applies — standard kill checks resume.
+
+        Doctrinal correctness: once price is at/below entry on a LONG,
+        the residual is sitting on its BE-stop.  At that point the kill
+        gates fire normally to provide an early-exit option before SL.
+        """
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.pre_tp_hit = True
+        sig.current_price = sig.entry - 50  # reversed past entry
+        sig.max_favorable_excursion_pct = 0.5
+        monitor = self._build_monitor({sig.signal_id: sig}, regime_label="TRENDING_DOWN")
+
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "standard"):
+            reason = monitor._check_invalidation(sig)
+        # Regime kill should fire — MFE protection no longer applies
+        assert reason is not None
+        assert "TRENDING_DOWN" in reason
+
+    def test_mfe_protection_skipped_in_loose_mode(self):
+        """Loose mode short-circuits before MFE protection — no kills fire
+        at all on a pre-TP'd signal in loose mode, regardless of MFE state.
+        """
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.pre_tp_hit = True
+        sig.current_price = sig.entry - 50  # reversed past entry
+        sig.max_favorable_excursion_pct = 0.5
+        monitor = self._build_monitor({sig.signal_id: sig}, regime_label="TRENDING_DOWN")
+
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "loose"):
+            reason = monitor._check_invalidation(sig)
+        assert reason is None
+
+
+class TestTrailingInvalidation:
+    """ATR-trailing kill (tight-mode signature per B17, 2026-05-17).
+
+    Arms when MFE >= 0.3R; fires when price retraces >= 50% of MFE peak.
+    Standalone helper ``_check_trailing_invalidation`` is a pure function on
+    signal state — testable independently of the wider mode dispatcher.
+    """
+
+    def _make_monitor(self):
+        async def mock_send(*_a, **_kw):
+            pass
+        data_store = MagicMock()
+        data_store.ticks = {}
+        return TradeMonitor(
+            data_store=data_store,
+            send_telegram=mock_send,
+            get_active_signals=lambda: {},
+            remove_signal=lambda sid: None,
+            update_signal=MagicMock(),
+        )
+
+    def test_trailing_not_armed_below_mfe_r_threshold(self):
+        """MFE < 0.3R → not armed → return None.
+
+        Sig: entry 30000, SL 29400 (200 below) → SL_dist_pct ≈ 0.667%.
+        MFE 0.15% → MFE_R = 0.15 / 0.667 ≈ 0.225 < 0.3 threshold.
+        """
+        sig = _make_signal(entry=30000.0, stop_loss=29800.0)
+        sig.max_favorable_excursion_pct = 0.15
+        sig.current_price = 30030.0  # currently +0.1%
+        monitor = self._make_monitor()
+        assert monitor._check_trailing_invalidation(sig) is None
+
+    def test_trailing_not_fired_when_close_to_peak(self):
+        """MFE >= 0.3R but retrace < 50% → not fired yet.
+
+        SL_dist_pct ≈ 0.667%.  MFE 0.5% → MFE_R ≈ 0.75 (armed).
+        Current +0.4% → retrace = (0.5 - 0.4) / 0.5 = 20% < 50% threshold.
+        """
+        sig = _make_signal(entry=30000.0, stop_loss=29800.0)
+        sig.max_favorable_excursion_pct = 0.5
+        sig.current_price = 30000.0 * 1.004  # +0.4% (20% retrace from 0.5% peak)
+        monitor = self._make_monitor()
+        assert monitor._check_trailing_invalidation(sig) is None
+
+    def test_trailing_fires_at_50pct_retrace(self):
+        """Armed (MFE_R >= 0.3) + retrace >= 50% → kill fires."""
+        sig = _make_signal(entry=30000.0, stop_loss=29800.0)
+        sig.max_favorable_excursion_pct = 0.5
+        sig.current_price = 30000.0 * 1.0025  # +0.25% (50% retrace from 0.5% peak)
+        monitor = self._make_monitor()
+        reason = monitor._check_trailing_invalidation(sig)
+        assert reason is not None
+        assert "trailing invalidation" in reason.lower()
+        assert "MFE peak" in reason
+
+    def test_trailing_fires_when_reversed_past_entry(self):
+        """Retrace > 100% (past entry) → still fires (capital preserved
+        below BE — though typically BE-stop would have already triggered).
+        """
+        sig = _make_signal(entry=30000.0, stop_loss=29800.0)
+        sig.max_favorable_excursion_pct = 0.5
+        sig.current_price = 30000.0 * 0.999  # below entry
+        monitor = self._make_monitor()
+        reason = monitor._check_trailing_invalidation(sig)
+        assert reason is not None
+
+    def test_trailing_short_direction(self):
+        """SHORT signal at +0.5% MFE (price 0.5% below entry), retraces
+        50% back toward entry → kill fires.
+        """
+        sig = _make_signal(direction=Direction.SHORT, entry=30000.0, stop_loss=30200.0)
+        sig.max_favorable_excursion_pct = 0.5
+        sig.current_price = 30000.0 * 0.9975  # -0.25% (50% retrace)
+        monitor = self._make_monitor()
+        reason = monitor._check_trailing_invalidation(sig)
+        assert reason is not None
+
+    def test_trailing_skipped_when_mfe_zero(self):
+        """Signal never went favourable → trailing has nothing to track."""
+        sig = _make_signal(entry=30000.0, stop_loss=29800.0)
+        sig.max_favorable_excursion_pct = 0.0
+        sig.current_price = sig.entry
+        monitor = self._make_monitor()
+        assert monitor._check_trailing_invalidation(sig) is None
+
+    def test_trailing_skipped_when_sl_at_entry(self):
+        """BE-stop at exactly entry → SL_dist_pct=0 → trailing skipped.
+
+        BE-stop already protects the residual; the trailing kill is for
+        the pre-BE phase.  Returning None here prevents division-by-zero.
+        """
+        sig = _make_signal(entry=30000.0, stop_loss=30000.0)
+        sig.max_favorable_excursion_pct = 0.5
+        sig.current_price = 30000.0 * 1.001
+        monitor = self._make_monitor()
+        assert monitor._check_trailing_invalidation(sig) is None
+
+    def test_trailing_kill_runs_in_tight_mode(self):
+        """End-to-end: tight mode dispatches the trailing kill from
+        _check_invalidation when its conditions are met.
+        """
+        sig = _make_signal(entry=30000.0, stop_loss=29800.0, age_seconds=700.0)
+        sig.max_favorable_excursion_pct = 0.5
+        sig.current_price = 30000.0 * 1.0025  # 50% retrace from 0.5% peak
+
+        async def mock_send(*_a, **_kw):
+            pass
+        data_store = MagicMock()
+        data_store.ticks = {}
+        # Provide candles so the regime/momentum path doesn't fall through to None
+        closes = [30000.0] * 25
+        data_store.get_candles.return_value = {
+            "close": closes, "open": closes, "high": closes, "low": closes,
+            "volume": [1.0] * 25,
+        }
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=mock_send,
+            get_active_signals=lambda: {sig.signal_id: sig},
+            remove_signal=lambda sid: None,
+            update_signal=MagicMock(),
+            indicators_fn=lambda sym: {
+                "ema9_last": 101.0, "ema21_last": 100.0,  # bullish-aligned
+                "momentum": 0.5, "atr_last": 0.5,
+            },
+        )
+
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "tight"):
+            reason = monitor._check_invalidation(sig)
+        assert reason is not None
+        assert "trailing" in reason.lower()
+
+    def test_trailing_kill_not_in_standard_mode(self):
+        """Standard mode does NOT fire the trailing kill — that's a
+        tight-mode-only signature per B17.
+        """
+        sig = _make_signal(entry=30000.0, stop_loss=29800.0, age_seconds=700.0)
+        sig.max_favorable_excursion_pct = 0.5
+        sig.current_price = 30000.0 * 1.0025  # 50% retrace condition
+
+        async def mock_send(*_a, **_kw):
+            pass
+        data_store = MagicMock()
+        data_store.ticks = {}
+        closes = [30000.0] * 25
+        data_store.get_candles.return_value = {
+            "close": closes, "open": closes, "high": closes, "low": closes,
+            "volume": [1.0] * 25,
+        }
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=mock_send,
+            get_active_signals=lambda: {sig.signal_id: sig},
+            remove_signal=lambda sid: None,
+            update_signal=MagicMock(),
+            indicators_fn=lambda sym: {
+                "ema9_last": 101.0, "ema21_last": 100.0,
+                "momentum": 0.5, "atr_last": 0.5,
+            },
+        )
+
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "standard"):
+            reason = monitor._check_invalidation(sig)
+        # In standard mode the trailing kill is disarmed.  Other gates may
+        # or may not fire depending on indicators, but specifically no
+        # "trailing" reason should appear.
+        if reason is not None:
+            assert "trailing" not in reason.lower()
+
+
+class TestCategoriseKillReason:
+    """OWNER_BRIEF B17 — the new ``trailing_invalidation`` family token must
+    be recognised by the invalidation audit categoriser so truth-report
+    histograms surface tight-mode kills as a distinct row."""
+
+    def test_trailing_invalidation_categorised(self):
+        from src.invalidation_audit import categorise_kill_reason
+        msg = (
+            "trailing invalidation (MFE peak +0.42%, current +0.20%, "
+            "retraced 50% of peak at MFE_R=0.63) – capital preserved"
+        )
+        assert categorise_kill_reason(msg) == "trailing_invalidation"
+
+    def test_momentum_against_thesis_aliased_to_momentum_loss(self):
+        """The direction-aware 'momentum against thesis' variant must
+        categorise the same as the older 'momentum loss' wording.
+        Pre-PR #4 the audit categoriser only matched 'momentum loss' so
+        all direction-aware kills fell into 'other'.
+        """
+        from src.invalidation_audit import categorise_kill_reason
+        msg = (
+            "momentum against thesis (momentum=-0.250 < -0.100 for LONG, "
+            "2 consecutive readings) – signal thesis invalidated"
+        )
+        assert categorise_kill_reason(msg) == "momentum_loss"
+
+    def test_legacy_categories_unchanged(self):
+        from src.invalidation_audit import categorise_kill_reason
+        assert categorise_kill_reason("regime shift to TRENDING_DOWN") == "regime_shift"
+        assert (
+            categorise_kill_reason("EMA bearish crossover (EMA9 < EMA21)")
+            == "ema_crossover"
+        )
+        assert categorise_kill_reason("momentum loss") == "momentum_loss"
+        assert categorise_kill_reason("some other unmatched") == "other"
