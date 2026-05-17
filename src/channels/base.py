@@ -160,8 +160,11 @@ class Signal:
 
     # ---- Pre-TP grab (Phase A) ----
     # Set to True once a small early-profit threshold (PRE_TP_THRESHOLD_PCT)
-    # has been reached.  Symbolic — we move SL to breakeven and announce on
-    # both channels but do not trigger a partial close on the broker side.
+    # has been reached.  Post-PR-#411 (2026-05-17 doctrine reset) this also
+    # triggers a REAL partial close on the broker — the residual continues
+    # under BE-stop while ``partial_close_pct`` and ``pre_tp_pct`` together
+    # carry enough information for terminal-PnL reconstruction (see
+    # ``TradeMonitor._set_realized_pnl``).
     pre_tp_hit: bool = False
     # Raw favourable price move % at the time pre-TP fired.
     pre_tp_pct: float = 0.0

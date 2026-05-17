@@ -3001,3 +3001,169 @@ class TestCategoriseKillReason:
         )
         assert categorise_kill_reason("momentum loss") == "momentum_loss"
         assert categorise_kill_reason("some other unmatched") == "other"
+
+
+# ============================================================================
+# Pre-TP partial-close weighted PnL (fix/pretp-partial-weighted-pnl)
+# ============================================================================
+# OWNER_BRIEF §3.2a (capital preservation doctrine).  Pre-PR-#fix the signal
+# pnl_pct on a BE-exit reported 0.00% even when 50% of the position banked
+# +0.30% earlier — the Signals tab showed BREAKEVEN_EXIT +0.00% on signals
+# the subscriber had actually netted positive on.  This block exercises the
+# weighted-blend computation in _set_realized_pnl.
+
+
+class TestPreTpPartialWeightedPnl:
+    """OWNER_BRIEF §3.2a — terminal pnl_pct must blend the realised partial
+    contribution with the residual exit when both ``partial_close_pct`` and
+    ``pre_tp_pct`` are set (i.e., the broker actually fired a pre-TP
+    partial per PR #411).  Backward-compat preserved when either field is
+    zero — same residual-only math as pre-PR-#411."""
+
+    def test_be_exit_after_50pct_partial_at_0_30_yields_weighted_pnl(self):
+        """Classic case: pre-TP banked 50% at +0.30%, then BE-stop hit.
+        Weighted PnL = 0.5 * 0.30 + 0.5 * 0.00 = +0.15%.  Reclassifies
+        from BREAKEVEN_EXIT to PROFIT_LOCKED.
+        """
+        sig = _make_signal(entry=30000.0)
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = 0.30
+        sig.partial_close_pct = 0.50
+        # BE-stop exit at exactly entry
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry)
+        assert sig.pnl_pct == pytest.approx(0.15, abs=1e-6)
+
+    def test_be_exit_after_100pct_partial_yields_full_pre_tp_pnl(self):
+        """If the user picked 100% grab fraction, nothing rides; the
+        residual contributes 0 weight and the whole signal's pnl_pct
+        equals pre_tp_pct.
+        """
+        sig = _make_signal(entry=30000.0)
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = 0.40
+        sig.partial_close_pct = 1.00
+        # Even if exit_price implies a loss on the residual, residual
+        # weight is zero, so signal pnl == pre_tp_pct.
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry * 0.99)
+        assert sig.pnl_pct == pytest.approx(0.40, abs=1e-6)
+
+    def test_be_exit_after_30pct_partial_at_0_50_pct_long(self):
+        """User picked B17 floor 30%; pre-TP banked +0.50%; BE-stop hit.
+        Weighted: 0.30 * 0.50 + 0.70 * 0.00 = +0.15%.
+        """
+        sig = _make_signal(entry=30000.0, direction=Direction.LONG)
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = 0.50
+        sig.partial_close_pct = 0.30
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry)
+        assert sig.pnl_pct == pytest.approx(0.15, abs=1e-6)
+
+    def test_residual_loss_after_partial_still_nets_positive(self):
+        """Pre-TP banked 50% at +0.30%; residual exits at -0.20% (somehow
+        moved past BE-stop in test scenario).  Weighted: 0.5*0.30 +
+        0.5*(-0.20) = +0.05%.  Still positive — partial cushioned the
+        residual loss."""
+        sig = _make_signal(entry=30000.0, direction=Direction.LONG)
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = 0.30
+        sig.partial_close_pct = 0.50
+        # Exit at -0.20% from entry
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry * (1 - 0.002))
+        # 0.5 * 0.30 + 0.5 * -0.20 = 0.15 - 0.10 = 0.05
+        assert sig.pnl_pct == pytest.approx(0.05, abs=1e-6)
+
+    def test_short_direction_weighted_pnl(self):
+        """SHORT signal mirror — pre-TP banked 50% at +0.40%, BE-stop at
+        entry → +0.20% weighted."""
+        sig = _make_signal(entry=30000.0, direction=Direction.SHORT)
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = 0.40
+        sig.partial_close_pct = 0.50
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry)
+        assert sig.pnl_pct == pytest.approx(0.20, abs=1e-6)
+
+    def test_partial_close_zero_falls_back_to_residual_only(self):
+        """Pre-TP fired (e.g., broker disabled, no fill) — partial_close_pct
+        stays at 0.  Weighted blend must NOT kick in; signal pnl_pct equals
+        residual-only computation (entry → exit_price).  Backward-compat
+        with the broker-disabled signal-only mode from PR #411.
+        """
+        sig = _make_signal(entry=30000.0)
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = 0.30          # pre-TP "triggered" telemetry
+        sig.partial_close_pct = 0.0    # but broker didn't fill
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry)
+        assert sig.pnl_pct == pytest.approx(0.0, abs=1e-6)
+
+    def test_pre_tp_pct_zero_falls_back_to_residual_only(self):
+        """Defensive: partial_close_pct > 0 but pre_tp_pct missing means
+        we don't have enough info to blend honestly.  Fall through to
+        residual-only — never fabricate a banked %."""
+        sig = _make_signal(entry=30000.0)
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = 0.0  # missing telemetry
+        sig.partial_close_pct = 0.50
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry * 1.01)
+        # Pure residual: +1.0% raw on LONG entry to exit_price
+        assert sig.pnl_pct == pytest.approx(1.0, abs=1e-6)
+
+    def test_no_partial_at_all_is_unchanged(self):
+        """A signal that never hit pre-TP at all (normal SL_HIT path):
+        pnl_pct must be the pure entry-to-exit math, unchanged behaviour.
+        """
+        sig = _make_signal(entry=30000.0, stop_loss=29700.0)  # -1% SL
+        # No pre-TP fields set
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.stop_loss)
+        # Pure residual: -1.0% on LONG
+        assert sig.pnl_pct == pytest.approx(-1.0, abs=1e-6)
+
+    def test_partial_close_pct_capped_at_one(self):
+        """If partial_close_pct somehow exceeds 1.0 (e.g., pre-TP 50% +
+        TP1 40% compounding to 0.9 via the existing partial logic, then
+        a tracking bug pushes it to 1.05), the blend must cap at 100%
+        — never allocate > 100% to the partial slice.
+        """
+        sig = _make_signal(entry=30000.0)
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = 0.40
+        sig.partial_close_pct = 1.05  # over-cap input
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry * 0.99)
+        # Capped: 1.0 * 0.40 + 0.0 * residual = +0.40
+        assert sig.pnl_pct == pytest.approx(0.40, abs=1e-6)
+
+
+class TestPreTpReclassifiesBreakevenToProfitLocked:
+    """Integration: when the weighted pnl_pct lands above the breakeven
+    threshold (|pnl| >= 0.01%), classify_trade_outcome correctly relabels
+    the signal from BREAKEVEN_EXIT to PROFIT_LOCKED.  This is the
+    classifier path that drives the Lumin Signals tab label visible in
+    the owner's 2026-05-17 screenshot."""
+
+    def test_classifier_relabels_be_to_profit_locked_with_partial(self):
+        """50% banked at +0.30% → weighted +0.15% → hit_sl=True →
+        PROFIT_LOCKED (not BREAKEVEN_EXIT, which would require
+        |pnl| < 0.01%).
+        """
+        from src.performance_metrics import classify_trade_outcome
+        sig = _make_signal(entry=30000.0)
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = 0.30
+        sig.partial_close_pct = 0.50
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry)
+        outcome = classify_trade_outcome(
+            pnl_pct=sig.pnl_pct, hit_tp=0, hit_sl=True,
+        )
+        assert outcome == "PROFIT_LOCKED"
+        assert sig.pnl_pct == pytest.approx(0.15, abs=1e-6)
+
+    def test_classifier_stays_breakeven_when_no_partial(self):
+        """No partial fired → pnl_pct = 0.00 → BREAKEVEN_EXIT label is
+        correct.  Regression guard: the weighted fix must not change
+        the no-partial path."""
+        from src.performance_metrics import classify_trade_outcome
+        sig = _make_signal(entry=30000.0)
+        TradeMonitor._set_realized_pnl(sig, exit_price=sig.entry)
+        outcome = classify_trade_outcome(
+            pnl_pct=sig.pnl_pct, hit_tp=0, hit_sl=True,
+        )
+        assert outcome == "BREAKEVEN_EXIT"

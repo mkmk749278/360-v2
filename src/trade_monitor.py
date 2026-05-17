@@ -475,13 +475,53 @@ class TradeMonitor:
 
     @staticmethod
     def _set_realized_pnl(sig: Signal, exit_price: float) -> None:
-        """Freeze final trade PnL at the executed exit level."""
+        """Freeze final trade PnL at the executed exit level.
+
+        When pre-TP fired and a broker partial actually executed (PR #411 /
+        OWNER_BRIEF §3.2a doctrine), the signal's terminal ``pnl_pct`` is
+        the size-weighted blend of:
+
+          * ``partial_close_pct`` of the position at ``pre_tp_pct`` (the
+            raw % move at which pre-TP fired and the partial was filled)
+          * ``(1 - partial_close_pct)`` of the position at the final
+            exit-vs-entry % (the residual that rode under BE-stop)
+
+        Pre-PR #411 the pnl_pct was residual-only — a BE-stop exit reported
+        0.00% regardless of how much was banked at the partial.  The
+        Signals tab on Lumin showed BREAKEVEN_EXIT +0.00% on signals that
+        actually netted +0.15% for the subscriber, and the classifier
+        (``performance_metrics.classify_trade_outcome``) then mis-labelled
+        them BREAKEVEN_EXIT instead of PROFIT_LOCKED.  This honest weighted
+        computation fixes both layers: pnl_pct reports the user's actual
+        realised return, and the classifier naturally re-labels signals
+        to PROFIT_LOCKED because pnl_pct is now > 0.01.
+
+        Backward-compat: signals without a partial fill
+        (``partial_close_pct == 0`` OR ``pre_tp_pct == 0``) compute exactly
+        as before — entry → exit_price only — so SL_HIT / EXPIRED / TP1+
+        paths and pre-PR #411 signals are unchanged.
+        """
         sig.current_price = exit_price
-        sig.pnl_pct = calculate_trade_pnl_pct(
+        residual_pnl = calculate_trade_pnl_pct(
             entry_price=sig.entry,
             exit_price=exit_price,
             direction=sig.direction.value,
         )
+        partial_pct = float(getattr(sig, "partial_close_pct", 0.0) or 0.0)
+        pre_tp_pct = float(getattr(sig, "pre_tp_pct", 0.0) or 0.0)
+        if partial_pct > 0 and pre_tp_pct > 0:
+            # Cap the partial fraction at 1.0 defensively (TP1/TP2 partials
+            # can compound partial_close_pct beyond grab_fraction via the
+            # 0.4 / 0.7 stages — when that happens, pre-TP no longer owns
+            # the whole closed slice, so we cap the blend at 1.0 to avoid
+            # > 100% allocation).
+            partial_pct = min(partial_pct, 1.0)
+            residual_fraction = 1.0 - partial_pct
+            sig.pnl_pct = (
+                partial_pct * pre_tp_pct + residual_fraction * residual_pnl
+            )
+        else:
+            sig.pnl_pct = residual_pnl
 
     @staticmethod
     def _apply_final_outcome(sig: Signal, hit_tp: int, hit_sl: bool) -> str:
