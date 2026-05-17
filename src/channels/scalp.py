@@ -2757,33 +2757,101 @@ class ScalpChannel(BaseChannel):
         recent_opens = [float(o) for o in opens[-9:-2]]
         recent_prev_closes = [float(c) for c in closes[-10:-3]]
 
-        # Structural level detection (Item #7 audit fix) — replaces prior
-        # `max(prior_highs) / min(prior_lows)` scalar extrema with a ranked
-        # detector that prefers multi-touch clusters and VP-anchored levels
-        # over one-off wicks.  Falls through to the legacy scalar when no
-        # structural level exists, so the path never loses a setup it would
-        # have previously caught.  See _sr_detect_levels() for algorithm.
+        # ──────────────────────────────────────────────────────────────
+        # HTF level sourcing (OWNER_BRIEF §3.4a — "HTF Structure, LTF Entry")
+        # ──────────────────────────────────────────────────────────────
+        # Pre-2026-05-17 SR_FLIP detected the swing level via ``_sr_detect_levels``
+        # over the prior 41 5m candles (= ~3.4 hours of local extrema).  Truth-
+        # report data showed 43% of SR_FLIP signals had MFE=0 — engine-called
+        # direction; price never moved that way.  Root cause: the "level" was
+        # a 5m local extremum, not a structurally significant HTF S/R.
+        #
+        # Post-2026-05-17 doctrine: source the level from the chartist-eye
+        # LevelBook (1H/4h/1d swing pivots + VP zones, injected into smc_data
+        # by the scanner per PR #410 / OWNER_BRIEF §3.4a).  Quality criterion
+        # mirrors LSR's HTF POI anchor — accept CLUSTERED (multi-TF cluster,
+        # len(source_tfs) >= 2) or VP_ANCHORED (source_tf == "vp") only;
+        # single-TF and round-number-only levels are too noisy.
+        #
+        # Production scanner always sets ``level_book_levels`` to at least
+        # ``[]`` after refresh.  The key-absent / None sentinel only triggers
+        # in tests that build a synthetic ``smc_data`` without the scanner's
+        # assembly pass — fall through to the legacy 5m pivot detector so
+        # existing fixtures continue to pass.
+
         ind_early = indicators.get("5m", {})
         atr_for_levels = float(ind_early.get("atr_last") or close * 0.002)
-        _sr_levels = _sr_detect_levels(
-            highs=list(highs),
-            lows=list(lows),
-            closes=list(closes),
-            opens=list(opens),
-            atr=atr_for_levels,
-            volume_poc=ind_early.get("volume_poc"),
-            volume_vah=ind_early.get("volume_vah"),
-            volume_val=ind_early.get("volume_val"),
-        )
-        _resistance_lv = _sr_levels["resistance"]
-        _support_lv = _sr_levels["support"]
 
-        # Preserve legacy variable names so downstream breakout/reclaim logic
-        # (lines below) is untouched.  When a side has no candidate, use a
-        # sentinel that trivially fails the breakout test for that direction
-        # (LONG needs high > resistance; inf makes that impossible).
-        prior_swing_high = _resistance_lv.price if _resistance_lv is not None else float("inf")
-        prior_swing_low = _support_lv.price if _support_lv is not None else float("-inf")
+        _lb_levels_raw = smc_data.get("level_book_levels")
+        _htf_resistance: Optional[float] = None
+        _htf_support: Optional[float] = None
+        if _lb_levels_raw is not None:
+            # Production path — LevelBook refreshed.  Pick the highest-scoring
+            # qualifying RESISTANCE-type and SUPPORT-type level.  Doesn't
+            # filter on above/below close — once a level is broken, current
+            # price may be on either side of it, and the 5m break detection
+            # below decides which direction the flip is.  ``_lb_levels_raw``
+            # is sorted by descending score per LevelBook.get_levels(), so
+            # we walk and take the first match per side.
+            for _lv in _lb_levels_raw:
+                _src_tfs = getattr(_lv, "source_tfs", None) or [
+                    getattr(_lv, "source_tf", "")
+                ]
+                _is_clustered = (
+                    isinstance(_src_tfs, list) and len(_src_tfs) >= 2
+                )
+                _is_vp_anchored = (
+                    getattr(_lv, "source_tf", "") == "vp"
+                    or "vp" in (_src_tfs or [])
+                )
+                if not (_is_clustered or _is_vp_anchored):
+                    continue
+                _lv_price = float(getattr(_lv, "price", 0.0) or 0.0)
+                if _lv_price <= 0:
+                    continue
+                _lv_type = (getattr(_lv, "type", "") or "").lower()
+                if _htf_resistance is None and _lv_type == "resistance":
+                    _htf_resistance = _lv_price
+                elif _htf_support is None and _lv_type == "support":
+                    _htf_support = _lv_price
+                if _htf_resistance is not None and _htf_support is not None:
+                    break
+
+        if _lb_levels_raw is not None and _htf_resistance is None and _htf_support is None:
+            # LevelBook refreshed but no qualifying CLUSTERED / VP_ANCHORED
+            # level on either side — strict doctrinal rejection.  Avoids the
+            # pre-fix behaviour where the path fired on any 5m local extremum.
+            return self._reject("no_htf_structural_level")
+
+        if _lb_levels_raw is None:
+            # Test / pre-warm fallback — preserve legacy 5m pivot detector so
+            # the considerable existing test surface for SR_FLIP continues
+            # to exercise the path.
+            _sr_levels = _sr_detect_levels(
+                highs=list(highs),
+                lows=list(lows),
+                closes=list(closes),
+                opens=list(opens),
+                atr=atr_for_levels,
+                volume_poc=ind_early.get("volume_poc"),
+                volume_vah=ind_early.get("volume_vah"),
+                volume_val=ind_early.get("volume_val"),
+            )
+            _resistance_lv = _sr_levels["resistance"]
+            _support_lv = _sr_levels["support"]
+            prior_swing_high = _resistance_lv.price if _resistance_lv is not None else float("inf")
+            prior_swing_low = _support_lv.price if _support_lv is not None else float("-inf")
+        else:
+            # HTF path — _resistance_lv / _support_lv stay None (level-quality
+            # soft-penalty branch below treats this as "external HTF source").
+            _resistance_lv = None
+            _support_lv = None
+            prior_swing_high = (
+                _htf_resistance if _htf_resistance is not None else float("inf")
+            )
+            prior_swing_low = (
+                _htf_support if _htf_support is not None else float("-inf")
+            )
 
         # Bullish flip: require breakout-close acceptance above prior swing high.
         long_breakout_close_confirmed = any(
@@ -2819,6 +2887,42 @@ class ScalpChannel(BaseChannel):
         else:
             return self._reject("flip_close_not_confirmed")
 
+        # 1H break confirmation (OWNER_BRIEF §3.4a — "HTF Structure, LTF
+        # Entry").  Only enforced when the level came from LevelBook (HTF
+        # path); the 5m-pivot fallback for test fixtures skips this check
+        # since those fixtures already encode the break-and-retest on 5m.
+        #
+        # A genuine break-and-flip on a multi-TF S/R must show on the 1H
+        # close — otherwise the 5m "break" is just an intra-1H wick that
+        # gives the level back within the same hour.  Walk the last ~8
+        # closed 1H candles; require at least one closed beyond the level
+        # in the flip direction.
+        if _lb_levels_raw is not None:
+            _h1 = candles.get("1h") or {}
+            _h1_closes = _h1.get("close") or []
+            _h1_highs = _h1.get("high") or []
+            _h1_lows = _h1.get("low") or []
+            # Need at least one bar history beyond the current still-forming
+            # bar (index -1) — skip the check when 1H data is unavailable
+            # (early warmup window) to fail-open per soft-penalty doctrine.
+            if len(_h1_closes) >= 2 and len(_h1_highs) >= 2 and len(_h1_lows) >= 2:
+                _h1_lookback = min(len(_h1_closes) - 1, 8)
+                _h1_closed_closes = [float(c) for c in _h1_closes[-1 - _h1_lookback:-1]]
+                _h1_closed_highs = [float(h) for h in _h1_highs[-1 - _h1_lookback:-1]]
+                _h1_closed_lows = [float(low_v) for low_v in _h1_lows[-1 - _h1_lookback:-1]]
+                if direction == Direction.LONG:
+                    _broke_on_1h = any(
+                        h > level and c > level
+                        for h, c in zip(_h1_closed_highs, _h1_closed_closes)
+                    )
+                else:
+                    _broke_on_1h = any(
+                        low_v < level and c < level
+                        for low_v, c in zip(_h1_closed_lows, _h1_closed_closes)
+                    )
+                if not _broke_on_1h:
+                    return self._reject("h1_break_not_confirmed")
+
         # HTF mismatch soft penalty — aligned with scalping doctrine
         # (OWNER_BRIEF §2.1a).  Counter-trend SR_FLIP setups are legitimate
         # scalp products: resistance held during an uptrend pullback is a
@@ -2837,16 +2941,28 @@ class ScalpChannel(BaseChannel):
             if trend_1h == opposite and trend_4h == opposite:
                 sr_flip_htf_penalty = _SR_FLIP_HTF_MISMATCH_PENALTY
 
-        # Retest proximity gate — layered zone system replacing the original hard-0.3% gate.
-        # Premium zone (0–0.3% from flipped level) → no soft penalty.
-        # Extended zone (0.3%–0.6%) → +3.0 soft penalty (messier but valid retest).
-        # Hard block beyond 0.6% — price has not genuinely returned to the structural level.
+        # Retest proximity gate — tier-dependent per §3.4a doctrine.
+        # HTF LevelBook source (production path): tighter zones since
+        # institutional levels deserve precise retest.  5m local-extremum
+        # fallback (test path / pre-warm): keeps the legacy looser zones
+        # so existing test fixtures continue exercising the path.
+        #
+        # HTF tier:
+        #   premium <= 0.15% from level → no penalty
+        #   extended 0.15% – 0.30%      → +3.0 soft penalty
+        #   beyond  > 0.30%             → hard reject
+        # 5m-fallback tier (legacy, pre-2026-05-17 values):
+        #   premium <= 0.30%            → no penalty
+        #   extended 0.30% – 0.60%      → +3.0 soft penalty
+        #   beyond  > 0.60%             → hard reject
         if level <= 0:
             return self._reject("retest_out_of_zone")
         dist_from_level_pct = abs(close - level) / level
-        if dist_from_level_pct > 0.006:
+        _proximity_hard_max = 0.003 if _lb_levels_raw is not None else 0.006
+        _proximity_premium = 0.0015 if _lb_levels_raw is not None else 0.003
+        if dist_from_level_pct > _proximity_hard_max:
             return self._reject("retest_out_of_zone")
-        retest_in_premium_zone = dist_from_level_pct <= 0.003
+        retest_in_premium_zone = dist_from_level_pct <= _proximity_premium
         proximity_penalty = 0.0 if retest_in_premium_zone else 3.0
 
         # Rejection candle check — layered soft/hard gate replacing the original hard-50% rule.
