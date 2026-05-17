@@ -76,17 +76,26 @@ For deep diagnostic access — truth-report viewing, per-signal confidence decom
 This is a SCALPING business. Engineering decisions are judged against this doctrine, not against generic "trading-system best practices":
 
 1. **Direction-agnostic.** LONG and SHORT are equally valid. Top-75 USDT-M pairs are highly correlated to BTC; a trend-aligned-only filter forces directional bias and stops being scalping.
-2. **Fast in, fast out.** Hold ~5–60 min. TP1 is the primary exit. We don't hold through reversals.
-3. **Quality > quantity, but quantity matters.** A path firing 0–1 signal/day is dormant. Subscribers churn from silence.
+2. **Pre-TP is the primary exit. TP1 is the bonus tail.** Most signals partially close at the pre-TP threshold, banking real profit on a user-chosen fraction (minimum 30%, see B17). The residual rides toward TP1 with SL ratcheted to breakeven and tight thesis-broken invalidation. Hold ~5–60 min. We don't hold through reversals.
+3. **Quality > quantity, but quantity matters.** A path firing 0–1 signal/day is dormant. App users churn from silence.
 4. **Soft penalties over hard blocks.** Hard blocks throw away signals the scoring tier could correctly classify. Reserve hard blocks for structural-impossibility checkpoints (invalid SL geometry, missing data, regime guaranteed unsuitable).
+
+### 3.2a Capital Preservation Doctrine (2026-05-17)
+
+**Protecting capital outranks chasing TPs.** A full SL hit costs subscribers ~7.9% on margin at 10×; a small banked partial + breakeven exit costs ~−0.5% even if the residual flatlines. The asymmetry is decisive: 10 small breakevens cost less than one full SL.
+
+Consequences for engineering:
+- **Pre-TP fires real partial close** (not a "moved SL to entry" Telegram message dressed as a fill — that was the pre-2026-05-17 mechanism, see ACTIVE_CONTEXT for the audit). When threshold hits, broker actually closes the user-configured fraction at market. The residual position then has SL at entry; the realised partial is locked in.
+- **Invalidation must prefer early thesis-broken exit over riding to full SL.** Tight mode adds an ATR-trailing kill at MFE ≥ 0.3R (close at 50% retracement of MFE peak). Loose / Standard / Tight is a per-user setting (see B17); engine default is Standard.
+- **The unique product position:** instead of "one-shot TP/SL signals," we give users small high-frequency banked wins with low downside variance. They control the partial-close fraction and the invalidation aggressiveness per-user. No other Telegram-channel signal provider can replicate that surface.
 
 ### App-era doctrine reset (2026-05-06)
 
 Telegram-era reasoning ("more gates, fewer signals, no spam") was correct **only** when Telegram was the sole surface. With the Lumin app live:
 
 - **Empty app = dead app.** A subscriber opening the app and seeing nothing churns faster than one seeing a marginal signal that didn't TP.
-- **Pre-TP grab is the safety net, not a feature.** It fires across ~70% of signals at the +0.20% raw / ATR-adaptive threshold and ratchets SL→breakeven, so the downside on additional volume is structurally capped. A signal that pre-TPs and then fails is a small protected loss, not a full SL.
-- **Invalidation audit is the second safety net.** Live ratio: 5 PROTECTIVE / 0 PREMATURE / 8 NEUTRAL — net-protective. Killing a signal early at minimal loss is preferable to letting it ride to full SL.
+- **Pre-TP grab** — see §3.2 #2 + §3.2a above for the post-2026-05-17 doctrine. Pre-2026-05-17 the line read "the safety net, not a feature"; the new doctrine inverts that — pre-TP IS the product mechanism.
+- **Invalidation audit is the structural safety net behind tight-mode trailing.** Live ratio (24h window): PROTECTIVE 56.7% / PREMATURE 7.5% / NEUTRAL 35% — net-protective on the audit's threshold, but per-signal data (see ACTIVE_CONTEXT) shows ~9% of invalidations kill signals with MFE ≥ 0.5R. The post-2026-05-17 fix: MFE-protection rule on momentum-loss kills (no kill when `pre_tp_hit=True` and price between entry and MFE peak).
 - **Time matters in seconds.** Auto-trade execution is in the path; a gate that adds latency or rejects a recoverable setup costs net win-rate.
 
 What this changes:
@@ -129,6 +138,28 @@ Each evaluator lives in `src/channels/scalp.py` as `_evaluate_<name>` and owns i
 | Breakout (VSB / BDS / ORB) | None — fires in any HTF context |
 
 The right question is never *"does the signal align with HTF?"* but *"is this a profitable scalp setup regardless of broader direction?"*
+
+## 3.4a Structure Detection Doctrine — "HTF Structure, LTF Entry" (2026-05-17)
+
+**HTF (1H/4H) identifies the structure — the level, the trend, the divergence, the auction failure. LTF (5m) refines the entry timing only.**
+
+A 5m candle never identifies structure. It identifies *when* to enter the structure already identified at HTF. Any evaluator that reads structural meaning from a 5m candle is misusing 5m — that's noise interpreted as signal. This doctrine is the missing piece that explains why §3.4 alone wasn't sufficient: §3.4 dictates *what HTF treatment each path category gets*; this section dictates *where each evaluator must source its structure detection*.
+
+| Concern | Detect on | Confirm on | Enter on |
+|---|---|---|---|
+| Swing levels (S/R, role-flip references) | 1H/4h LevelBook pivots + VP zones | 1H close acceptance / rejection | 5m retest candle |
+| Trend (TPE / DIV_CONT pullback continuation) | 1H EMA21/50 slope + structure state | 1H pullback to EMA21 within ATR | 5m EMA9 reclaim + momentum candle |
+| Divergences (CVD-div) | 15m aggregated CVD bars | 15m hidden-divergence detection | 5m FVG fill in divergence window |
+| Failed auctions / swing failures | 1H struct level | 1H probe-and-reclaim | 5m reclaim candle |
+| BB compression | 15m bands (width < 1.5% of close) | 15m squeeze persistence ≥ 3 bars | 5m breakout candle with volume |
+| Liquidity sweeps (LSR) | SMC sweep at LevelBook entry (ATR×2 of CLUSTERED/VP_ANCHORED level) | 5m MSS in sweep direction | 5m post-sweep candle |
+| Order blocks / FVGs | Consume at HTF | — | Refine entry at 5m |
+
+**Exception — tape-driven and event-driven paths.** WHALE / LIQUIDATION_REVERSAL / FUNDING_EXTREME are direction-driven by realtime order flow (tick imbalance, cascade detection, funding-rate extremes). These are LTF-by-design and the doctrine doesn't apply — they read structure from the tape, not from candle structure.
+
+**Existing infrastructure that implements this doctrine** (per §3.5): `src/level_book.py`, `src/structure_state.py`, `src/volume_profile.py`, and the `_classify_htf_trend(indicators, candles, "1h"/"4h")` helper. The doctrine makes consumption of these mandatory for structure detection, not optional.
+
+**Why this doctrine was needed:** truth-report data (2026-04-21 → 2026-05-17, 654 closed signals) showed direction-call quality (MFE=0 rate, i.e., engine called direction and price never moved that way) was 39–78% on every non-LSR emitting path. LSR — the only path with HTF-anchored detection (SMC sweep) — had 24% MFE=0, the best in the portfolio. The other paths were detecting "structure" inside 5m noise windows (e.g., SR_FLIP using 41 5m candles for a "swing level" = 3.4 hours of local extremes, not a structural level). Forensic in `ACTIVE_CONTEXT.md § In-session checkpoint 2026-05-17`.
 
 ### Counter-trend Regime-score rule (corollary)
 
@@ -245,6 +276,7 @@ Two-step user flow for a clean paper-book reset: **close-all → reset.** This i
 | B14 | Build constraint. All build/deploy paths must work from Android+Termux. Mobile app builds via GitHub Actions only — no local Android Studio / Gradle requirement. |
 | B15 | Brand architecture. Lumin = consumer app brand (Play Store, app icon, marketing). 360 Crypto Eye = engine + signal-source brand (Telegram channel, technical identity, "Powered by" attribution). The Telegram channel never renames. The app's About page always credits 360 Crypto Eye. |
 | B16 | Revenue. Subscriptions are crypto-only via the Telegram bot (Lumin app qualifies for the Reader-app Play Store exception). No Google Play billing, no Stripe fiat, no bank account in v1. App is a control panel; payment is in the bot. |
+| B17 | Pre-TP partial close + invalidation are per-user. **Pre-TP grab fraction** is user-configurable with a hard floor of **30%** (no user can configure 0%, which would collapse to the pre-2026-05-17 broken "SL-to-BE only" behaviour) and a ceiling of 100%. Engine default is 50%. When threshold hits, broker executes a real partial close on the configured fraction; the residual gets SL ratcheted to entry. **Invalidation aggressiveness** is user-selectable (Loose / Standard / Tight); engine default is Standard. Tight adds ATR-trailing kill at MFE ≥ 0.3R (close at 50% retracement of MFE peak). All per-user values stored in `user_pretp_settings` (with new `grab_fraction` column) and `user_invalidation_settings` tables; NULL = use engine default. Per §3.2 + §3.2a doctrine — capital preservation outranks TP chasing, and the user controls the preservation aggressiveness. |
 
 ---
 
