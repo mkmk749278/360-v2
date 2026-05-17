@@ -364,6 +364,95 @@ class PretpSettings(BaseModel):
         ge=0,
         description="Latest signal age at which Pre-TP may still fire.",
     )
+    grab_fraction: Optional[float] = Field(
+        default=None,
+        ge=0.30,
+        le=1.00,
+        description=(
+            "OWNER_BRIEF B17 — fraction of the position to close at market when "
+            "Pre-TP threshold hits.  Hard floor 30% (no user can collapse to the "
+            "pre-2026-05-17 SL-to-BE-only behaviour); 100% ceiling (fully bank "
+            "the partial, leave nothing riding).  Engine default 50%.  The "
+            "residual position has SL ratcheted to entry."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
+# User settings — Invalidation page (OWNER_BRIEF B17, 2026-05-17)
+# ---------------------------------------------------------------------------
+
+
+class InvalidationSettings(BaseModel):
+    """User-controllable invalidation aggressiveness parameters (B17).
+
+    Three preset modes (``loose`` / ``standard`` / ``tight``) cover the
+    common cases.  The remaining fields are advanced-section overrides for
+    users who want fine control without committing to a preset; NULL means
+    "use the preset's value for this knob".
+
+    Tight mode adds an ATR-trailing kill at ``MFE >= trailing_mfe_r_threshold``
+    that closes the signal at market when price retraces ``trailing_retrace_pct``
+    of the MFE peak — the capital-preservation engine that prevents the
+    cohort of MFE-positive signals from sliding all the way to full SL.
+
+    All fields optional on PUT — the API merges into the stored partial.
+    """
+
+    mode: Optional[str] = Field(
+        default=None,
+        description=(
+            "Preset aggressiveness.  ``loose`` = only kill when thesis is "
+            "irrefutably broken (regime flip AND EMA crossover both fire); "
+            "``standard`` = current engine behaviour + MFE-protection on "
+            "momentum kills (default); ``tight`` = standard + ATR-trailing "
+            "kill at MFE >= 0.3R."
+        ),
+    )
+    min_age_sec: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description="Earliest signal age at which invalidation may fire.",
+    )
+    momentum_threshold_mult: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "Multiplier applied to the engine's ATR-adaptive momentum threshold. "
+            "<1.0 = more sensitive (kill earlier); >1.0 = less sensitive."
+        ),
+    )
+    ema_crossover_enabled: Optional[bool] = Field(
+        default=None,
+        description="Whether 5m EMA9/EMA21 cross-against-thesis triggers a kill.",
+    )
+    regime_shift_enabled: Optional[bool] = Field(
+        default=None,
+        description="Whether a regime flip opposing direction triggers a kill.",
+    )
+    trailing_kill_enabled: Optional[bool] = Field(
+        default=None,
+        description=(
+            "Whether the ATR-trailing kill is active (tight-mode signature)."
+        ),
+    )
+    trailing_mfe_r_threshold: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        description=(
+            "MFE threshold (as a multiple of SL distance) above which the "
+            "ATR-trailing kill becomes armed.  Default 0.3R per B17."
+        ),
+    )
+    trailing_retrace_pct: Optional[float] = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "Retracement fraction of the MFE peak at which the trailing kill "
+            "fires.  Default 0.50 (50% retrace) per B17."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -435,6 +524,22 @@ class UserAutoTradeSettings(AutoTradeSettings):
     position_size_pct / leverage_cap.  Values are stored for Phase 3
     when the user's app fires their own Binance order using these
     values for sizing.  The app surfaces this with an honest banner.
+    """
+
+    using_defaults: bool = Field(
+        default=True,
+        description="True when the user has no override row.",
+    )
+
+
+class UserInvalidationSettings(InvalidationSettings):
+    """Per-user invalidation overrides (OWNER_BRIEF B17) — same shape as
+    :class:`InvalidationSettings` plus ``using_defaults``.
+
+    The engine does not consume per-user invalidation values in this PR —
+    schema + API only.  PR #4 (``feat/invalidation-user-modes``) wires
+    the engine read path.  Storing per-user values here unblocks the
+    Lumin invalidation-settings page (PR L2) to be built in parallel.
     """
 
     using_defaults: bool = Field(

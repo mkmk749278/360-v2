@@ -260,6 +260,25 @@ PRE_TP_SETUP_BLACKLIST_RAW: str = os.getenv(
     "PRE_TP_SETUP_BLACKLIST",
     "VOLUME_SURGE_BREAKOUT,BREAKDOWN_SHORT,OPENING_RANGE_BREAKOUT",
 )
+# OWNER_BRIEF B17 — pre-TP fires a REAL partial close (not just SL→BE).
+# Engine default 50%: the residual rides toward TP1, the closed half banks
+# real profit.  Hard 30% floor / 100% ceiling enforced in the API layer
+# (`src/api/user_overrides.py:_coerce_pretp`).
+PRE_TP_GRAB_FRACTION: float = float(os.getenv("PRE_TP_GRAB_FRACTION", "0.50"))
+# OWNER_BRIEF B17 — invalidation aggressiveness mode.  Engine default
+# ``standard`` (current behaviour + MFE-protection on momentum kills).
+# ``loose`` = thesis-conservative (only kill on hard structural break);
+# ``tight`` = capital-preservation (adds ATR-trailing kill at MFE ≥ 0.3R).
+INVALIDATION_MODE_DEFAULT: str = os.getenv("INVALIDATION_MODE_DEFAULT", "standard")
+# Trailing-kill tunables (active in ``tight`` mode by default).  MFE
+# threshold expressed in multiples of SL distance; retrace fraction of
+# the MFE peak at which the kill fires.
+INVALIDATION_TRAILING_MFE_R_DEFAULT: float = float(
+    os.getenv("INVALIDATION_TRAILING_MFE_R_DEFAULT", "0.30")
+)
+INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT: float = float(
+    os.getenv("INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT", "0.50")
+)
 PRE_TP_SETUP_BLACKLIST: frozenset = frozenset(
     s.strip() for s in PRE_TP_SETUP_BLACKLIST_RAW.split(",") if s.strip()
 )

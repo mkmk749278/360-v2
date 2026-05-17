@@ -89,6 +89,7 @@ from .schemas import (
     PnlHistoryResponse,
     PositionsDiagResponse,
     PositionsResponse,
+    InvalidationSettings,
     PretpSettings,
     ProfileResponse,
     ProfileUpdate,
@@ -103,6 +104,7 @@ from .schemas import (
     TradeListResponse,
     TradeRecord,
     UserAutoTradeSettings,
+    UserInvalidationSettings,
     UserPretpSettings,
 )
 from src import user_settings as _user_settings
@@ -1164,6 +1166,7 @@ def build_app(
             PRE_TP_ATR_MULTIPLIER,
             PRE_TP_ENABLED,
             PRE_TP_FEE_FLOOR_PCT,
+            PRE_TP_GRAB_FRACTION,
             PRE_TP_MAX_AGE_SEC,
             PRE_TP_MIN_AGE_SEC,
             PRE_TP_SETUP_BLACKLIST,
@@ -1187,6 +1190,36 @@ def build_app(
             fee_floor_pct=stored.get("fee_floor_pct", PRE_TP_FEE_FLOOR_PCT),
             min_age_sec=stored.get("min_age_sec", PRE_TP_MIN_AGE_SEC),
             max_age_sec=stored.get("max_age_sec", PRE_TP_MAX_AGE_SEC),
+            # OWNER_BRIEF B17 — engine default 50%; engine-wide overrides
+            # not stored in ``user_settings`` yet (only per-user via the
+            # user_pretp_settings table).  Surfaces the config default
+            # so the app can render an authoritative starting value.
+            grab_fraction=PRE_TP_GRAB_FRACTION,
+        )
+
+    def _build_invalidation_view() -> InvalidationSettings:
+        """Compose the engine's effective Invalidation view (OWNER_BRIEF B17).
+
+        Engine-wide invalidation settings live in `config/__init__.py` as
+        the ``INVALIDATION_*`` constants.  This view returns the defaults
+        only — there is no engine-wide settings page for invalidation
+        (PR #4 will add one if/when the operator needs to flip the global
+        mode).  Per-user overrides are composed in ``_build_user_invalidation_view``.
+        """
+        from config import (
+            INVALIDATION_MODE_DEFAULT,
+            INVALIDATION_TRAILING_MFE_R_DEFAULT,
+            INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT,
+        )
+        return InvalidationSettings(
+            mode=INVALIDATION_MODE_DEFAULT,
+            min_age_sec=None,  # Per-channel in `INVALIDATION_MIN_AGE_SECONDS`; no global scalar
+            momentum_threshold_mult=1.0,
+            ema_crossover_enabled=True,
+            regime_shift_enabled=True,
+            trailing_kill_enabled=(INVALIDATION_MODE_DEFAULT == "tight"),
+            trailing_mfe_r_threshold=INVALIDATION_TRAILING_MFE_R_DEFAULT,
+            trailing_retrace_pct=INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT,
         )
 
     @app.get(
@@ -1334,6 +1367,73 @@ def build_app(
         if partial:
             user_overrides.update_pretp(uid, partial)
         return _build_user_pretp_view(uid)
+
+    # ---- Settings: Per-user invalidation overrides (OWNER_BRIEF B17, 2026-05-17) ----
+
+    def _build_user_invalidation_view(user_id: int) -> UserInvalidationSettings:
+        """Compose per-user Invalidation view: user-row override where set,
+        engine default otherwise.
+
+        Engine doesn't yet consume per-user values — PR #4 wires the read
+        path in ``_check_invalidation``.  Until then, these reads/writes
+        are pure storage so the Lumin invalidation-settings page (PR L2)
+        can be built in parallel against the live wire schema.
+        """
+        defaults = _build_invalidation_view()
+        if user_overrides is None:
+            return UserInvalidationSettings(
+                **defaults.model_dump(),
+                using_defaults=True,
+            )
+        overrides = user_overrides.get_invalidation(user_id)
+        resolved = defaults.model_dump()
+        for key, val in overrides.items():
+            resolved[key] = val
+        return UserInvalidationSettings(
+            **resolved,
+            using_defaults=not bool(overrides),
+        )
+
+    @app.get(
+        "/api/settings/user/invalidation",
+        response_model=UserInvalidationSettings,
+        tags=["settings"],
+    )
+    async def user_invalidation_get(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> UserInvalidationSettings:
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(identity)
+        return _build_user_invalidation_view(uid)
+
+    @app.put(
+        "/api/settings/user/invalidation",
+        response_model=UserInvalidationSettings,
+        tags=["settings"],
+    )
+    async def user_invalidation_put(
+        payload: InvalidationSettings,
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> UserInvalidationSettings:
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(identity)
+        # ``exclude_unset=True`` mirrors the pre-TP endpoint's partial-update
+        # semantics — the user can flip a single toggle without re-sending
+        # every other field.  ``UserOverridesStore.update_invalidation``
+        # silently drops invalid mode tokens and ill-typed values; the
+        # Pydantic validator already enforces gt=0/le=1 on the bounded floats.
+        partial = payload.model_dump(exclude_unset=True)
+        if partial:
+            user_overrides.update_invalidation(uid, partial)
+        return _build_user_invalidation_view(uid)
 
     # ---- Settings: Per-user auto-trade overrides (Phase 2) ----
 
