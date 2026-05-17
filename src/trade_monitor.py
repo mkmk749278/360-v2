@@ -23,6 +23,7 @@ from config import (
     PRE_TP_ENABLED,
     PRE_TP_FEE_FLOOR_PCT,
     PRE_TP_FEE_PCT_ROUND_TRIP,
+    PRE_TP_GRAB_FRACTION,
     PRE_TP_LEVERAGE,
     PRE_TP_MAX_AGE_SEC,
     PRE_TP_MIN_AGE_SEC,
@@ -1367,32 +1368,59 @@ class TradeMonitor:
         await self._send(channel_id, text)
 
     async def _post_pre_tp_alert(
-        self, sig: Signal, favourable_pct: float, net_pct: float
+        self,
+        sig: Signal,
+        favourable_pct: float,
+        net_pct: float,
+        *,
+        partial_fraction: float = 0.0,
+        partial_executed: bool = False,
     ) -> None:
         """Dedicated, eye-catching Pre-TP alert — bypasses the generic update
         template so subscribers don't scroll past it as a routine status post.
 
-        Doctrine (2026-05-07): Pre-TP is the centerpiece scalp outcome — it's
-        what turns net-loss invalidations into net-positive risk-free trades.
-        The alert must read as an ALERT, not as a status line.
+        Doctrine (OWNER_BRIEF §3.2 / §3.2a, 2026-05-17): Pre-TP is the PRIMARY
+        exit mechanism, not a safety net.  When the auto-trader is enabled
+        and the broker accepted a partial close, the alert reports the
+        realised fraction *and* the residual SL-to-breakeven move.  When the
+        broker is disabled (signal-only mode) or the partial close didn't
+        execute, the alert falls back to the pre-2026-05-17 SL-to-breakeven
+        framing — but never with the misleading "Banked +X%" wording from
+        before this PR.
         """
         channel_id = CHANNEL_TELEGRAM_MAP.get(sig.channel, "")
         if not channel_id:
             return
         dir_emoji = "🚀" if sig.direction == Direction.LONG else "⬇️"
         sep = "━" * 24
-        text = "\n".join([
-            "⚡ *PRE-TP BANKED* ⚡",
-            sep,
-            f"{_escape_md(sig.symbol)} *{sig.direction.value}* {dir_emoji}",
-            "",
-            f"💰 Raw move: *+{favourable_pct:.2f}%*",
-            f"💵 Net @ {PRE_TP_LEVERAGE:.0f}x: *{net_pct:+.2f}%* (after fees)",
-            f"🛡️ SL → breakeven `{fmt_price(sig.entry)}`",
-            "",
-            "✅ Trade is now *risk-free* — TP ladder still open",
-            f"⏰ {fmt_ts()}",
-        ])
+        if partial_executed and partial_fraction > 0:
+            pct_closed = int(round(partial_fraction * 100))
+            pct_residual = 100 - pct_closed
+            text = "\n".join([
+                "⚡ *PRE-TP PARTIAL CLOSE* ⚡",
+                sep,
+                f"{_escape_md(sig.symbol)} *{sig.direction.value}* {dir_emoji}",
+                "",
+                f"💰 Closed *{pct_closed}%* of position at *+{favourable_pct:.2f}%* raw",
+                f"💵 Realised net @ {PRE_TP_LEVERAGE:.0f}x: *{net_pct * partial_fraction:+.2f}%* on margin",
+                f"🛡️ Residual {pct_residual}% rides to TP1 — SL → breakeven `{fmt_price(sig.entry)}`",
+                "",
+                "✅ Risk-managed — banked profit + remaining position protected",
+                f"⏰ {fmt_ts()}",
+            ])
+        else:
+            text = "\n".join([
+                "⚡ *PRE-TP TRIGGER* ⚡",
+                sep,
+                f"{_escape_md(sig.symbol)} *{sig.direction.value}* {dir_emoji}",
+                "",
+                f"💰 Favourable move: *+{favourable_pct:.2f}%* raw",
+                f"💵 Net @ {PRE_TP_LEVERAGE:.0f}x: *{net_pct:+.2f}%* (after fees, if exited now)",
+                f"🛡️ SL → breakeven `{fmt_price(sig.entry)}`",
+                "",
+                "_Signal-only mode — auto-trade not enabled; close manually to bank._",
+                f"⏰ {fmt_ts()}",
+            ])
         await self._send(channel_id, text)
 
     async def _check_pre_tp_grab(
@@ -1514,40 +1542,123 @@ class TradeMonitor:
             return False
 
         # All gates passed — fire pre-TP at the resolved threshold
-        favourable_pct = threshold_pct  # symbolic — what we report as banked
-        sig.pre_tp_hit = True
-        sig.pre_tp_pct = favourable_pct
-        sig.pre_tp_timestamp = utcnow()
-        sig.execution_note += f" | Pre-TP banked +{favourable_pct:.2f}% raw, SL→breakeven"
+        favourable_pct = threshold_pct  # raw % move from entry to threshold
 
-        # Move SL to breakeven (entry).  Ratchet only — never widen.
-        if is_long:
-            sig.stop_loss = max(sig.stop_loss, entry)
-        else:
-            sig.stop_loss = min(sig.stop_loss, entry)
+        # Resolve the grab fraction (OWNER_BRIEF B17, 2026-05-17 doctrine).
+        # Engine-side TradeMonitor is owner-only auto-trade today; uses the
+        # engine default from config.  Per-user execution (Phase 4, app-side
+        # with user's own Binance keys) reads ``user_pretp_settings.grab_fraction``
+        # directly — that wiring sits in the Lumin OrderExecutor, not here.
+        grab_fraction = float(PRE_TP_GRAB_FRACTION)
+        # Clamp into the B17 bounds defensively even though config validation
+        # should already guarantee this.
+        grab_fraction = max(0.30, min(1.00, grab_fraction))
 
         # Subscriber-facing math: show raw and net-of-fees at the assumed leverage.
         gross_pct = favourable_pct * PRE_TP_LEVERAGE
         fee_burn_pct = PRE_TP_FEE_PCT_ROUND_TRIP * PRE_TP_LEVERAGE
         net_pct = gross_pct - fee_burn_pct
 
+        # Real partial close on the broker (OWNER_BRIEF §3.2a — capital
+        # preservation requires REAL banked profit, not a SL-to-BE move
+        # dressed up as a fill).  Records the partial via the same path TP1
+        # partials use; the residual position keeps SL at entry so the
+        # remaining (1 - grab_fraction) rides toward TP1 with floor at
+        # breakeven.
+        partial_executed = False
+        if (
+            self._order_manager is not None
+            and getattr(self._order_manager, "is_enabled", False)
+        ):
+            try:
+                # tp_level=0 distinguishes pre-TP partials from TP1/TP2/TP3
+                # partials in the trade_records telemetry — same store, new
+                # bucket.  The broker's close_partial is idempotent on
+                # (signal_id, tp_level) so a duplicate-fire across the
+                # 5s poll window is a no-op.
+                fill = await self._order_manager.close_partial(
+                    sig, grab_fraction, tp_level=0
+                )
+                if fill is not None:
+                    partial_executed = True
+            except Exception as exc:
+                log.warning(
+                    "Pre-TP partial close failed for %s (signal_id=%s, "
+                    "fraction=%.2f): %s — falling back to SL→breakeven only",
+                    sig.symbol, sig.signal_id, grab_fraction, exc,
+                )
+
+        sig.pre_tp_hit = True
+        sig.pre_tp_pct = favourable_pct
+        sig.pre_tp_timestamp = utcnow()
+        if partial_executed:
+            # Reflect the partial close on the signal so downstream telemetry
+            # (signal_history, performance tracker) sees the realised
+            # fraction.  ``partial_close_pct`` is also consumed by the TP1
+            # partial path; pre-TP firing first means TP1 will close the
+            # remaining (1 - grab_fraction) × 33% of the original size.
+            sig.partial_close_pct = max(
+                getattr(sig, "partial_close_pct", 0.0) or 0.0,
+                grab_fraction,
+            )
+            sig.execution_note += (
+                f" | Pre-TP closed {grab_fraction*100:.0f}% at +{favourable_pct:.2f}% raw, "
+                f"residual SL→breakeven"
+            )
+        else:
+            # Broker-disabled fallback — preserve the pre-2026-05-17 behaviour
+            # (SL ratchet only) so signal-only subscribers still get the
+            # protection, but with honest messaging that distinguishes
+            # "trigger fired, no fill happened" from "banked + closed."
+            sig.execution_note += (
+                f" | Pre-TP threshold hit at +{favourable_pct:.2f}% raw, "
+                f"SL→breakeven (no broker partial)"
+            )
+
+        # Move SL to breakeven (entry) on the residual.  Ratchet only — never
+        # widen.  Applies even when the broker partial failed, so the residual
+        # protection holds regardless of execution path.
+        if is_long:
+            sig.stop_loss = max(sig.stop_loss, entry)
+        else:
+            sig.stop_loss = min(sig.stop_loss, entry)
+
         try:
-            await self._post_pre_tp_alert(sig, favourable_pct, net_pct)
+            await self._post_pre_tp_alert(
+                sig,
+                favourable_pct,
+                net_pct,
+                partial_fraction=grab_fraction,
+                partial_executed=partial_executed,
+            )
         except Exception as exc:
             log.warning("Pre-TP active-channel post failed for %s: %s", sig.symbol, exc)
 
         # Free-channel storytelling — paid-tier only.  WATCHLIST tier was
         # removed in the app-era doctrine reset; every signal that reaches
-        # trade_monitor is now paid (≥65 confidence).
+        # trade_monitor is now paid (≥65 confidence).  Message reflects what
+        # actually happened on the broker — no "banked" wording when nothing
+        # was banked.
         try:
             from config import TELEGRAM_FREE_CHANNEL_ID
             if TELEGRAM_FREE_CHANNEL_ID:
-                free_msg = (
-                    f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
-                    f"Banked +{favourable_pct:.2f}% raw "
-                    f"\\({net_pct:+.2f}% net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
-                    f"_SL moved to breakeven — the rest is free._"
-                )
+                if partial_executed:
+                    pct_closed = int(round(grab_fraction * 100))
+                    pct_residual = 100 - pct_closed
+                    realised_net = net_pct * grab_fraction
+                    free_msg = (
+                        f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
+                        f"Closed {pct_closed}% at +{favourable_pct:.2f}% raw "
+                        f"\\({realised_net:+.2f}% realised net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
+                        f"_{pct_residual}% rides to TP1 — SL at breakeven._"
+                    )
+                else:
+                    free_msg = (
+                        f"⚡ *Quick Move — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
+                        f"Hit +{favourable_pct:.2f}% raw "
+                        f"\\({net_pct:+.2f}% net @ {PRE_TP_LEVERAGE:.0f}x if exited now\\)\n"
+                        f"_SL moved to breakeven — auto-trader off, exit manually to bank._"
+                    )
                 await self._send(TELEGRAM_FREE_CHANNEL_ID, free_msg)
                 log.info(
                     "free_channel_post source=pre_tp severity=HIGH symbol=%s",
@@ -1558,7 +1669,8 @@ class TradeMonitor:
 
         log.info(
             "pre_tp_fire %s %s [%s] threshold=%.3f source=%s atr_last=%s "
-            "leverage=%.1fx net=%.2f age=%.0fs",
+            "leverage=%.1fx net=%.2f age=%.0fs partial_executed=%s "
+            "grab_fraction=%.2f",
             sig.symbol,
             sig.direction.value,
             setup_class,
@@ -1568,6 +1680,8 @@ class TradeMonitor:
             PRE_TP_LEVERAGE,
             net_pct,
             age_secs,
+            partial_executed,
+            grab_fraction,
         )
         return True
 

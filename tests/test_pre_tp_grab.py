@@ -212,7 +212,11 @@ async def test_posts_to_both_active_and_free_channel(mock_send):
     assert "FREE-CHAN" in chat_ids
     assert "ACTIVE-CHAN" in chat_ids
     free_msg = next(t for c, t in sent if c == "FREE-CHAN")
-    assert "Quick Win" in free_msg
+    # 2026-05-17 (PR #3): no broker attached in this test → no partial close
+    # executed → "Quick Move" (signal-only mode) wording instead of "Quick Win"
+    # (which is reserved for the partial-close-executed path).  See
+    # test_partial_close_fires_when_broker_enabled for the broker-active case.
+    assert "Quick Move" in free_msg
     assert "BTCUSDT" in free_msg
     # Math sanity: +0.35% raw at 10x = +3.5% gross; minus 0.7% fees = +2.8% net
     assert "+2.80%" in free_msg or "2.80%" in free_msg
@@ -242,17 +246,143 @@ async def test_active_channel_alert_is_dedicated_format_not_generic_update(mock_
     active_msgs = [t for c, t in sent if c == "ACTIVE-CHAN"]
     assert len(active_msgs) == 1, "Pre-TP must produce exactly one active-channel alert"
     msg = active_msgs[0]
-    # Dedicated alert markers
-    assert "PRE-TP BANKED" in msg
+    # 2026-05-17 (PR #3): no broker attached → "PRE-TP TRIGGER" (signal-only
+    # mode) instead of "PRE-TP BANKED" (which only fires when a real partial
+    # close was executed).  The dedicated-alert format is preserved either way.
+    assert "PRE-TP TRIGGER" in msg or "PRE-TP PARTIAL CLOSE" in msg
+    # No misleading "BANKED" wording when nothing was banked (B3 honesty fix).
+    assert "BANKED" not in msg, (
+        "Pre-2026-05-17 'Banked +X%' wording must not appear when no broker "
+        "partial executed — B3 honesty fix (PR #3)."
+    )
     assert "BTCUSDT" in msg
     assert "LONG" in msg
     assert "breakeven" in msg
-    assert "risk-free" in msg
     # No legacy generic-update artefacts
     assert "PnL:" not in msg, "Pre-TP alert must not piggyback on the generic status template"
     assert "Confidence:" not in msg, "Pre-TP alert must not include the generic confidence row"
     # No MarkdownV2 escape leakage under legacy Markdown parse mode
     assert "\\|" not in msg, "MarkdownV2 \\| escape must not appear under legacy Markdown"
+
+
+# ---------------------------------------------------------------------------
+# Real partial close (OWNER_BRIEF §3.2a + B17, 2026-05-17)
+# ---------------------------------------------------------------------------
+
+
+async def test_partial_close_fires_when_broker_enabled(mock_send):
+    """When the auto-trade broker is enabled, pre-TP must call ``close_partial``
+    on the order manager with the configured grab fraction and ``tp_level=0``.
+
+    Pre-2026-05-17 behaviour was SL-to-breakeven only — the Telegram message
+    claimed "Banked +X%" but no fill actually executed.  Post-PR-#3 the broker
+    receives a real partial-close instruction, the residual SL moves to entry,
+    and the "PRE-TP PARTIAL CLOSE" + "Quick Win" wording fires.
+    """
+    send, sent = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(signal_tier="B")
+    target_high = 30000.0 * 1.0035
+
+    # Wire a broker mock with is_enabled=True so the partial-close branch runs.
+    order_manager = AsyncMock()
+    order_manager.is_enabled = True
+    order_manager.close_partial.return_value = "fill-id-pre-tp"
+    monitor._order_manager = order_manager
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("src.trade_monitor.PRE_TP_GRAB_FRACTION", 0.50), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"), \
+         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    assert fired is True
+    # Broker received the partial-close instruction with the configured fraction
+    # and tp_level=0 (distinguishes pre-TP partials from TP1/2/3 in telemetry).
+    order_manager.close_partial.assert_awaited_once()
+    args, kwargs = order_manager.close_partial.call_args
+    assert args[0] is sig
+    # close_partial(sig, fraction, tp_level=N) — accept positional or keyword
+    fraction = kwargs.get("fraction") if "fraction" in kwargs else args[1]
+    tp_level = kwargs.get("tp_level") if "tp_level" in kwargs else (args[2] if len(args) > 2 else None)
+    assert fraction == pytest.approx(0.50)
+    assert tp_level == 0, (
+        "tp_level=0 marks this as a pre-TP partial in trade_records — "
+        "distinguishes from TP1/2/3 partials (tp_level=1/2/3)."
+    )
+
+    # Signal state — partial_close_pct reflects the realised fraction; SL at
+    # entry (breakeven) on the residual.
+    assert sig.partial_close_pct == pytest.approx(0.50)
+    assert sig.stop_loss == pytest.approx(sig.entry)
+    assert sig.pre_tp_hit is True
+
+    # Honest active-channel wording: "PARTIAL CLOSE", not "BANKED".  Free
+    # channel uses "Quick Win" only when a real fill happened.
+    active_msg = next(t for c, t in sent if c == "ACTIVE-CHAN")
+    assert "PARTIAL CLOSE" in active_msg
+    assert "BANKED" not in active_msg
+    assert "50%" in active_msg
+    free_msg = next(t for c, t in sent if c == "FREE-CHAN")
+    assert "Quick Win" in free_msg
+    assert "Closed 50%" in free_msg
+
+
+async def test_partial_close_skipped_when_broker_disabled(mock_send):
+    """When ``order_manager.is_enabled`` is False, the path falls back to
+    SL-to-breakeven only — no broker call, no "BANKED" wording, honest
+    "PRE-TP TRIGGER" framing instead.
+    """
+    send, sent = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(signal_tier="B")
+    target_high = 30000.0 * 1.0035
+
+    order_manager = AsyncMock()
+    order_manager.is_enabled = False
+    monitor._order_manager = order_manager
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
+        await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    order_manager.close_partial.assert_not_called()
+    # No partial_close_pct mutation when broker disabled
+    assert sig.partial_close_pct == 0.0
+    # But SL still ratchets to breakeven so signal-only subscribers get the
+    # downside protection
+    assert sig.stop_loss == pytest.approx(sig.entry)
+    active_msg = next(t for c, t in sent if c == "ACTIVE-CHAN")
+    assert "PRE-TP TRIGGER" in active_msg
+    assert "BANKED" not in active_msg
+
+
+async def test_partial_close_failure_falls_through_to_sl_only(mock_send):
+    """If ``broker.close_partial`` raises, the path must still ratchet SL to
+    breakeven and post the signal-only fallback alert.  Capital preservation
+    is the doctrine — never silently fail to protect.
+    """
+    send, sent = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(signal_tier="B")
+    target_high = 30000.0 * 1.0035
+
+    order_manager = AsyncMock()
+    order_manager.is_enabled = True
+    order_manager.close_partial.side_effect = RuntimeError("broker down")
+    monitor._order_manager = order_manager
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    assert fired is True  # Pre-TP still fires even when broker fails
+    assert sig.partial_close_pct == 0.0  # No partial was realised
+    assert sig.stop_loss == pytest.approx(sig.entry)  # SL still ratcheted
+    active_msg = next(t for c, t in sent if c == "ACTIVE-CHAN")
+    assert "PRE-TP TRIGGER" in active_msg or "PRE-TP PARTIAL CLOSE" in active_msg
+    # Critical: no false "BANKED" wording on broker failure
+    assert "BANKED" not in active_msg
 
 
 # ---------------------------------------------------------------------------
