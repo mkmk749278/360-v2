@@ -31,9 +31,18 @@ A 24/7 automated crypto-scalping signal engine. Scans 75 Binance USDT-M futures 
 This is a SCALPING business, not trend-following:
 
 1. **Direction-agnostic.** LONG and SHORT are equally valid products. Top-75 USDT-M pairs are highly correlated to BTC; trend-aligned-only filtering forces directional bias and stops being scalping.
-2. **Fast in, fast out.** Hold ~5–60 min. TP1 is the primary exit. We don't hold through reversals.
-3. **Quality > quantity, but quantity matters.** Subscribers churn from silence. Aim for 1–10 high-conviction signals per day across the 15-evaluator portfolio.
-4. **Soft penalties over hard blocks.** Hard blocks throw away signals the scoring tier could correctly classify. Reserve hard blocks for structural-impossibility checkpoints only (invalid SL geometry, missing data, regime-pattern incompatibility).
+2. **Pre-TP is the primary exit; TP1 is the bonus tail.** Most signals partially close at the pre-TP threshold (banking real profit on the user-configured fraction, minimum 30% per B17). The residual rides toward TP1 with SL ratcheted to breakeven and tight thesis-broken invalidation. Hold ~5–60 min. We don't hold through reversals.
+3. **Capital preservation outranks TP chasing.** A full SL hit costs ~7.9% on margin at 10×; a banked partial + BE exit on the residual costs ~−0.5% even if the residual flatlines. The asymmetry is decisive — see `OWNER_BRIEF §3.2a`.
+4. **Quality > quantity, but quantity matters.** Subscribers churn from silence.
+5. **Soft penalties over hard blocks.** Hard blocks throw away signals the scoring tier could correctly classify. Reserve hard blocks for structural-impossibility checkpoints only (invalid SL geometry, missing data, regime-pattern incompatibility).
+
+## Structure Detection Doctrine — "HTF Structure, LTF Entry" (2026-05-17)
+
+**HTF (1H/4H) identifies the structure; LTF (5m) refines the entry timing only.** A 5m candle never identifies structure — it identifies *when* to enter the structure already identified at HTF. Any evaluator that reads structural meaning from a 5m candle is misusing 5m as if it were noise-free higher-TF data.
+
+See `OWNER_BRIEF §3.4a` for the per-concern detection/entry mapping. Tape-driven paths (WHALE / LIQUIDATION_REVERSAL / FUNDING_EXTREME) are exempt — they read structure from realtime order flow, not from candle structure.
+
+Existing infrastructure to consume: `src/level_book.py` (1d/4h/1h pivots + VP zones), `src/structure_state.py` (bull-leg/bear-leg per TF), `src/volume_profile.py` (POC + VAH/VAL), `_classify_htf_trend()` in `src/channels/scalp.py`. The doctrine makes consumption of these mandatory for structure detection across every non-tape-driven evaluator.
 
 ---
 
