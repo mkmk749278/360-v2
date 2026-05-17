@@ -174,3 +174,195 @@ def test_round_trip_across_reopen(db_path) -> None:
         assert s2.get_auto_trade(1) == {"mode": "paper"}
     finally:
         s2.close()
+
+
+# ---------------------------------------------------------------------------
+# grab_fraction (OWNER_BRIEF B17, 2026-05-17 doctrine amendment)
+# ---------------------------------------------------------------------------
+
+
+def test_grab_fraction_round_trip(store: UserOverridesStore) -> None:
+    """Default-range value (between floor and ceiling) persists exactly."""
+    out = store.update_pretp(1, {"grab_fraction": 0.50})
+    assert out["grab_fraction"] == 0.50
+    assert store.get_pretp(1)["grab_fraction"] == 0.50
+
+
+def test_grab_fraction_clamped_at_floor(store: UserOverridesStore) -> None:
+    """B17 hard 30% floor — no user can collapse to SL-to-BE-only behaviour."""
+    out = store.update_pretp(1, {"grab_fraction": 0.10})
+    assert out["grab_fraction"] == 0.30
+
+
+def test_grab_fraction_clamped_at_ceiling(store: UserOverridesStore) -> None:
+    """B17 ceiling — 100% fully banks the partial, leaves nothing riding."""
+    out = store.update_pretp(1, {"grab_fraction": 1.50})
+    assert out["grab_fraction"] == 1.00
+
+
+def test_grab_fraction_zero_clamped_to_floor(store: UserOverridesStore) -> None:
+    """Zero is the most-dangerous input — it would re-create the broken
+    pre-2026-05-17 behaviour where nothing is closed and only the SL moves
+    to BE.  B17 floor catches this."""
+    out = store.update_pretp(1, {"grab_fraction": 0.0})
+    assert out["grab_fraction"] == 0.30
+
+
+def test_grab_fraction_non_numeric_dropped(store: UserOverridesStore) -> None:
+    """Mirrors existing _coerce_pretp behaviour for ill-typed values."""
+    out = store.update_pretp(1, {"enabled": True, "grab_fraction": "fifty"})
+    assert out["enabled"] is True
+    assert "grab_fraction" not in out
+
+
+def test_grab_fraction_explicit_none_clears(store: UserOverridesStore) -> None:
+    store.update_pretp(1, {"grab_fraction": 0.75})
+    out = store.update_pretp(1, {"grab_fraction": None})
+    assert "grab_fraction" not in out
+
+
+def test_pretp_migration_adds_grab_fraction_to_existing_db(db_path) -> None:
+    """Existing pre-B17 DB rows must survive the schema migration.
+
+    Simulates a deploy where the existing user_pretp_settings table predates
+    the grab_fraction column.  ALTER TABLE adds the column without dropping
+    rows; pre-existing field values stay intact, the new column reads NULL
+    (= use engine default).
+    """
+    import sqlite3
+    # Open a connection and manually create the OLD-shape table (no grab_fraction).
+    # Then write a row, close, and reopen via UserOverridesStore — the migration
+    # should add the column without losing the pre-existing data.
+    conn = sqlite3.connect(str(db_path))
+    conn.execute(
+        """
+        CREATE TABLE IF NOT EXISTS user_pretp_settings (
+            user_id           INTEGER PRIMARY KEY,
+            enabled           INTEGER,
+            regime_allowlist  TEXT,
+            setup_allowlist   TEXT,
+            threshold_pct     REAL,
+            atr_multiplier    REAL,
+            fee_floor_pct     REAL,
+            min_age_sec       INTEGER,
+            max_age_sec       INTEGER,
+            updated_at        TEXT NOT NULL
+        )
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO user_pretp_settings (user_id, enabled, threshold_pct, updated_at)
+        VALUES (?, ?, ?, ?)
+        """,
+        (1, 1, 0.42, "2026-05-16T00:00:00+00:00"),
+    )
+    conn.commit()
+    conn.close()
+
+    # Open via the store — migration runs in __init__.
+    store = UserOverridesStore(db_path)
+    try:
+        # Pre-existing data survives.
+        out = store.get_pretp(1)
+        assert out.get("enabled") is True
+        assert out.get("threshold_pct") == 0.42
+        # New column reads as absent (NULL) — user is on engine default.
+        assert "grab_fraction" not in out
+        # And writing the new column now works.
+        updated = store.update_pretp(1, {"grab_fraction": 0.60})
+        assert updated["grab_fraction"] == 0.60
+        assert updated["threshold_pct"] == 0.42  # Old data still there
+    finally:
+        store.close()
+
+
+# ---------------------------------------------------------------------------
+# Invalidation table (OWNER_BRIEF B17)
+# ---------------------------------------------------------------------------
+
+
+def test_invalidation_empty_for_new_user(store: UserOverridesStore) -> None:
+    assert store.get_invalidation(1) == {}
+
+
+def test_invalidation_update_persists_mode(store: UserOverridesStore) -> None:
+    out = store.update_invalidation(1, {"mode": "tight"})
+    assert out["mode"] == "tight"
+    assert store.get_invalidation(1) == out
+
+
+def test_invalidation_mode_validation(store: UserOverridesStore) -> None:
+    """Only the three B17 modes are accepted; other tokens silently dropped."""
+    out = store.update_invalidation(1, {"mode": "aggressive"})
+    assert out == {}  # Unknown mode dropped → no row update
+    for mode in ("loose", "standard", "tight"):
+        out = store.update_invalidation(1, {"mode": mode})
+        assert out["mode"] == mode
+
+
+def test_invalidation_mode_normalises_case(store: UserOverridesStore) -> None:
+    out = store.update_invalidation(1, {"mode": "TIGHT"})
+    assert out["mode"] == "tight"
+
+
+def test_invalidation_advanced_knobs_round_trip(store: UserOverridesStore) -> None:
+    """Advanced-section overrides persist independently of mode."""
+    out = store.update_invalidation(1, {
+        "mode": "tight",
+        "trailing_mfe_r_threshold": 0.4,
+        "trailing_retrace_pct": 0.6,
+        "ema_crossover_enabled": False,
+        "min_age_sec": 60,
+    })
+    assert out["mode"] == "tight"
+    assert out["trailing_mfe_r_threshold"] == 0.4
+    assert out["trailing_retrace_pct"] == 0.6
+    assert out["ema_crossover_enabled"] is False
+    assert out["min_age_sec"] == 60
+
+
+def test_invalidation_partial_merge(store: UserOverridesStore) -> None:
+    store.update_invalidation(1, {"mode": "tight", "trailing_mfe_r_threshold": 0.4})
+    out = store.update_invalidation(1, {"mode": "standard"})
+    assert out["mode"] == "standard"
+    # Advanced knob is preserved (not cleared by a partial-update that omits it).
+    assert out["trailing_mfe_r_threshold"] == 0.4
+
+
+def test_invalidation_explicit_none_clears_field(store: UserOverridesStore) -> None:
+    store.update_invalidation(1, {"mode": "tight", "trailing_mfe_r_threshold": 0.4})
+    out = store.update_invalidation(1, {"trailing_mfe_r_threshold": None})
+    assert out["mode"] == "tight"
+    assert "trailing_mfe_r_threshold" not in out
+
+
+def test_invalidation_isolated_per_user(store: UserOverridesStore) -> None:
+    store.update_invalidation(1, {"mode": "tight"})
+    store.update_invalidation(2, {"mode": "loose"})
+    assert store.get_invalidation(1)["mode"] == "tight"
+    assert store.get_invalidation(2)["mode"] == "loose"
+
+
+def test_invalidation_unknown_keys_dropped(store: UserOverridesStore) -> None:
+    out = store.update_invalidation(1, {"mode": "tight", "made_up_key": "x"})
+    assert "made_up_key" not in out
+    assert out["mode"] == "tight"
+
+
+def test_invalidation_round_trip_across_reopen(db_path) -> None:
+    s1 = UserOverridesStore(db_path)
+    s1.update_invalidation(
+        1,
+        {"mode": "tight", "trailing_mfe_r_threshold": 0.35, "trailing_retrace_pct": 0.55},
+    )
+    s1.close()
+    s2 = UserOverridesStore(db_path)
+    try:
+        assert s2.get_invalidation(1) == {
+            "mode": "tight",
+            "trailing_mfe_r_threshold": 0.35,
+            "trailing_retrace_pct": 0.55,
+        }
+    finally:
+        s2.close()

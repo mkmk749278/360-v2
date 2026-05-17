@@ -1,13 +1,19 @@
 """Per-user settings overrides (Phase 2 of per-user expansion).
 
-Stores per-user pre-TP + auto-trade preferences in SQLite tables that
-sit alongside the ``users`` table in the same ``lumin.sqlite`` file.
-Two tables, one row per user per surface:
+Stores per-user pre-TP, invalidation, and auto-trade preferences in SQLite
+tables that sit alongside the ``users`` table in the same ``lumin.sqlite``
+file.  Three tables, one row per user per surface:
 
     user_pretp_settings(user_id PK, enabled, regime_allowlist (JSON),
                         setup_allowlist (JSON), threshold_pct,
                         atr_multiplier, fee_floor_pct, min_age_sec,
-                        max_age_sec, updated_at)
+                        max_age_sec, grab_fraction, updated_at)
+
+    user_invalidation_settings(user_id PK, mode, min_age_sec,
+                               momentum_threshold_mult, ema_crossover_enabled,
+                               regime_shift_enabled, trailing_kill_enabled,
+                               trailing_mfe_r_threshold,
+                               trailing_retrace_pct, updated_at)
 
     user_auto_trade_settings(user_id PK, mode, position_size_pct,
                              leverage_cap, max_concurrent_positions,
@@ -19,16 +25,19 @@ NULL semantics: every column except the PK is nullable.  NULL =
 store).  A row exists for a user as soon as they PUT one setting;
 fields they haven't set stay NULL.
 
-The engine signal-evaluation path does NOT consume per-user values
-in Phase 2.  It still reads from ``src.user_settings`` (engine-wide
-defaults set by the operator) — same behaviour as today.  Phase 3
-wires per-user execution: a paid user's app fires their own Binance
-order using their per-user position_size_pct / leverage_cap; the
-engine remains the single signal source.
+``grab_fraction`` realises OWNER_BRIEF B17 — pre-TP fires a real partial
+close of the user-configured fraction.  Range [0.30, 1.00]; engine
+default 0.50.  Hard 30% floor (no user can collapse to the pre-2026-05-17
+"SL-to-BE-only" behaviour); 100% ceiling.
 
-This store deliberately mirrors the API of ``src.user_settings`` so
-the app's existing GET/PUT round-trip pattern works without changes
-on the wire — only the endpoint path differs.
+``user_invalidation_settings.mode`` realises B17's three-mode dial —
+``loose`` / ``standard`` / ``tight``.  Default ``standard``.  Tight adds
+ATR-trailing kill at MFE >= ``trailing_mfe_r_threshold`` (default 0.3R)
+with ``trailing_retrace_pct`` (default 0.5 = 50%) of MFE peak.
+
+The engine signal-evaluation path does NOT consume per-user values
+in this PR — strict schema + API.  PR #3 (pretp partial close) and
+PR #4 (invalidation per-user modes) wire the engine read paths.
 """
 
 from __future__ import annotations
@@ -60,7 +69,28 @@ _PRETP_KEYS = frozenset({
     "fee_floor_pct",
     "min_age_sec",
     "max_age_sec",
+    "grab_fraction",
 })
+
+# OWNER_BRIEF B17 — pre-TP fires a REAL partial close.  Hard floor 30% so no
+# user can accidentally collapse to the pre-2026-05-17 SL-to-BE-only behaviour
+# (which converted MFE-positive signals into fee-burning flat exits).  100%
+# ceiling = fully bank the partial, leave nothing riding.
+_PRETP_GRAB_FRACTION_MIN: float = 0.30
+_PRETP_GRAB_FRACTION_MAX: float = 1.00
+
+_INVALIDATION_KEYS = frozenset({
+    "mode",
+    "min_age_sec",
+    "momentum_threshold_mult",
+    "ema_crossover_enabled",
+    "regime_shift_enabled",
+    "trailing_kill_enabled",
+    "trailing_mfe_r_threshold",
+    "trailing_retrace_pct",
+})
+
+_VALID_INVALIDATION_MODES: FrozenSet[str] = frozenset({"loose", "standard", "tight"})
 
 _REGIME_UI_TO_BACKEND: Dict[str, FrozenSet[str]] = {
     "TRENDING": frozenset({"TRENDING_UP", "TRENDING_DOWN"}),
@@ -92,7 +122,30 @@ CREATE TABLE IF NOT EXISTS user_pretp_settings (
     fee_floor_pct     REAL,
     min_age_sec       INTEGER,
     max_age_sec       INTEGER,
+    grab_fraction     REAL,
     updated_at        TEXT    NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+"""
+
+# OWNER_BRIEF B17 — per-user invalidation aggressiveness.  ``mode`` is the
+# headline knob (loose / standard / tight); the remaining columns are
+# advanced-section overrides for users who want fine control without
+# committing to a preset.  All nullable: NULL → use engine default (which
+# itself reads ``mode`` first, then falls back to ``INVALIDATION_*`` env
+# vars from ``config/__init__.py``).
+_INVALIDATION_SCHEMA = """
+CREATE TABLE IF NOT EXISTS user_invalidation_settings (
+    user_id                   INTEGER PRIMARY KEY,
+    mode                      TEXT,
+    min_age_sec               INTEGER,
+    momentum_threshold_mult   REAL,
+    ema_crossover_enabled     INTEGER,
+    regime_shift_enabled      INTEGER,
+    trailing_kill_enabled     INTEGER,
+    trailing_mfe_r_threshold  REAL,
+    trailing_retrace_pct      REAL,
+    updated_at                TEXT    NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 """
@@ -152,6 +205,16 @@ def _coerce_pretp(raw: Dict[str, Any]) -> Dict[str, Any]:
         elif key in ("min_age_sec", "max_age_sec"):
             if isinstance(value, int) and value >= 0:
                 out[key] = int(value)
+        elif key == "grab_fraction":
+            # B17 — clamp into [0.30, 1.00].  Reject non-numeric silently to
+            # match the existing drop-unknown behaviour; the API layer can
+            # surface a 422 if it wants stricter feedback.
+            if isinstance(value, (int, float)):
+                clamped = max(
+                    _PRETP_GRAB_FRACTION_MIN,
+                    min(_PRETP_GRAB_FRACTION_MAX, float(value)),
+                )
+                out[key] = clamped
         elif key == "regime_allowlist":
             out[key] = _normalise_regime_input(value)
         elif key == "setup_allowlist":
@@ -160,6 +223,40 @@ def _coerce_pretp(raw: Dict[str, Any]) -> Dict[str, Any]:
                     s.strip().upper() for s in value
                     if isinstance(s, str) and s.strip()
                 })
+    return out
+
+
+def _coerce_invalidation(raw: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop unknown keys, validate types, normalise the mode token."""
+    out: Dict[str, Any] = {}
+    for key, value in raw.items():
+        if key not in _INVALIDATION_KEYS:
+            continue
+        if value is None:
+            out[key] = None
+            continue
+        if key == "mode":
+            if isinstance(value, str):
+                token = value.strip().lower()
+                if token in _VALID_INVALIDATION_MODES:
+                    out[key] = token
+        elif key == "min_age_sec":
+            if isinstance(value, int) and value >= 0:
+                out[key] = int(value)
+        elif key in (
+            "momentum_threshold_mult",
+            "trailing_mfe_r_threshold",
+            "trailing_retrace_pct",
+        ):
+            if isinstance(value, (int, float)) and float(value) >= 0:
+                out[key] = float(value)
+        elif key in (
+            "ema_crossover_enabled",
+            "regime_shift_enabled",
+            "trailing_kill_enabled",
+        ):
+            if isinstance(value, bool):
+                out[key] = value
     return out
 
 
@@ -216,8 +313,29 @@ class UserOverridesStore:
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.executescript(_PRETP_SCHEMA + _AUTO_TRADE_SCHEMA)
+        self._conn.executescript(_PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA)
+        self._migrate_pretp_grab_fraction()
         log.info("UserOverridesStore opened at {}", self._path)
+
+    def _migrate_pretp_grab_fraction(self) -> None:
+        """Idempotent ALTER for the B17 ``grab_fraction`` column.
+
+        Existing deploys carry the pre-B17 schema (no ``grab_fraction``
+        column).  ``CREATE TABLE IF NOT EXISTS`` doesn't update existing
+        tables, so we detect the missing column via ``PRAGMA table_info``
+        and ``ALTER TABLE ... ADD COLUMN`` it in if absent.  No-op on
+        fresh DBs where the column is already present from the CREATE.
+        """
+        cur = self._conn.execute("PRAGMA table_info(user_pretp_settings)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "grab_fraction" not in cols:
+            self._conn.execute(
+                "ALTER TABLE user_pretp_settings ADD COLUMN grab_fraction REAL"
+            )
+            log.info(
+                "UserOverridesStore: added user_pretp_settings.grab_fraction "
+                "column (B17 migration)"
+            )
 
     # ---- pretp -----------------------------------------------------------
 
@@ -260,8 +378,8 @@ class UserOverridesStore:
                 INSERT INTO user_pretp_settings (
                     user_id, enabled, regime_allowlist, setup_allowlist,
                     threshold_pct, atr_multiplier, fee_floor_pct,
-                    min_age_sec, max_age_sec, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    min_age_sec, max_age_sec, grab_fraction, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     enabled = excluded.enabled,
                     regime_allowlist = excluded.regime_allowlist,
@@ -271,6 +389,7 @@ class UserOverridesStore:
                     fee_floor_pct = excluded.fee_floor_pct,
                     min_age_sec = excluded.min_age_sec,
                     max_age_sec = excluded.max_age_sec,
+                    grab_fraction = excluded.grab_fraction,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -283,10 +402,73 @@ class UserOverridesStore:
                     merged.get("fee_floor_pct"),
                     merged.get("min_age_sec"),
                     merged.get("max_age_sec"),
+                    merged.get("grab_fraction"),
                     now,
                 ),
             )
             return self.get_pretp(user_id)
+
+    # ---- invalidation ----------------------------------------------------
+
+    def get_invalidation(self, user_id: int) -> Dict[str, Any]:
+        """Return the user's invalidation overrides as a partial dict.
+
+        Realises OWNER_BRIEF B17 — empty dict means user is on engine default
+        (which itself is ``mode="standard"`` per B17).  Fields the user hasn't
+        set (NULL columns) are omitted from the result.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM user_invalidation_settings WHERE user_id = ?",
+                (int(user_id),),
+            )
+            row = cur.fetchone()
+            return _row_to_partial(row, _INVALIDATION_COL_TYPES) if row else {}
+
+    def update_invalidation(self, user_id: int, partial: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = _coerce_invalidation(partial)
+        with self._lock:
+            existing = self.get_invalidation(user_id)
+            merged = dict(existing)
+            for k, v in cleaned.items():
+                if v is None:
+                    merged.pop(k, None)
+                else:
+                    merged[k] = v
+            now = _now_iso()
+            self._conn.execute(
+                """
+                INSERT INTO user_invalidation_settings (
+                    user_id, mode, min_age_sec, momentum_threshold_mult,
+                    ema_crossover_enabled, regime_shift_enabled,
+                    trailing_kill_enabled, trailing_mfe_r_threshold,
+                    trailing_retrace_pct, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    mode = excluded.mode,
+                    min_age_sec = excluded.min_age_sec,
+                    momentum_threshold_mult = excluded.momentum_threshold_mult,
+                    ema_crossover_enabled = excluded.ema_crossover_enabled,
+                    regime_shift_enabled = excluded.regime_shift_enabled,
+                    trailing_kill_enabled = excluded.trailing_kill_enabled,
+                    trailing_mfe_r_threshold = excluded.trailing_mfe_r_threshold,
+                    trailing_retrace_pct = excluded.trailing_retrace_pct,
+                    updated_at = excluded.updated_at
+                """,
+                (
+                    int(user_id),
+                    merged.get("mode"),
+                    merged.get("min_age_sec"),
+                    merged.get("momentum_threshold_mult"),
+                    _bool_to_int(merged.get("ema_crossover_enabled")),
+                    _bool_to_int(merged.get("regime_shift_enabled")),
+                    _bool_to_int(merged.get("trailing_kill_enabled")),
+                    merged.get("trailing_mfe_r_threshold"),
+                    merged.get("trailing_retrace_pct"),
+                    now,
+                ),
+            )
+            return self.get_invalidation(user_id)
 
     # ---- auto-trade ------------------------------------------------------
 
@@ -350,6 +532,18 @@ _PRETP_COL_TYPES: Dict[str, str] = {
     "fee_floor_pct": "float",
     "min_age_sec": "int",
     "max_age_sec": "int",
+    "grab_fraction": "float",
+}
+
+_INVALIDATION_COL_TYPES: Dict[str, str] = {
+    "mode": "str",
+    "min_age_sec": "int",
+    "momentum_threshold_mult": "float",
+    "ema_crossover_enabled": "bool",
+    "regime_shift_enabled": "bool",
+    "trailing_kill_enabled": "bool",
+    "trailing_mfe_r_threshold": "float",
+    "trailing_retrace_pct": "float",
 }
 
 _AUTO_TRADE_COL_TYPES: Dict[str, str] = {
