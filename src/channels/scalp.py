@@ -247,6 +247,17 @@ _SR_FLIP_HTF_MISMATCH_PENALTY: float = float(os.getenv("SR_FLIP_HTF_MISMATCH_PEN
 # Same env-overridable pattern.
 _QCB_HTF_MISMATCH_PENALTY: float = float(os.getenv("QCB_HTF_MISMATCH_PENALTY", "6.0"))
 
+# QCB volume confirmation multiplier (OWNER_BRIEF §3.4a row 5, 2026-05-17).
+# The closed prior 5m candle's volume must be at least this multiple of the
+# 20-bar rolling average for the breakout to be considered volume-confirmed.
+# Literature on BB squeeze breakouts is consistent that breakouts without
+# volume are 40-50% false; the 1.5× threshold is conservative since QCB
+# fires in QUIET regime where absolute volumes are already below cross-
+# regime averages.  Env-overridable per B8.
+_QCB_VOLUME_CONFIRMATION_MULT: float = float(
+    os.getenv("QCB_VOLUME_CONFIRMATION_MULT", "1.5")
+)
+
 # FAILED_AUCTION_RECLAIM HTF policy — soft penalty for HTF mismatch.
 # We are a SCALPING system (per OWNER_BRIEF Part II): direction-agnostic,
 # fast in/out, profitable signals matter more than directional alignment.
@@ -3448,7 +3459,35 @@ class ScalpChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
-        """QUIET_COMPRESSION_BREAK: Bollinger Band squeeze breakout."""
+        """QUIET_COMPRESSION_BREAK: 15m Bollinger Band squeeze breakout.
+
+        Detection on 15m (OWNER_BRIEF §3.4a row 5 — HTF Structure, LTF
+        Entry); entry timing on 5m breakout candle.  Pre-2026-05-17 the
+        compression was detected on 5m which fires dozens of times per
+        day per pair on noise — truth-report data showed 39% MFE=0 on
+        QCB signals with the path running structurally negative
+        (-1.11% NET/sig).
+
+        Three coupled changes vs the pre-fix path:
+
+          1. **15m compression** — band width / close < 1.5% on 15m
+             (vs 5m width < 2.5%).  Real accumulation squeezes show
+             on 15m; 5m wiggles within larger bands aren't the same
+             setup.  Per literature: 15m squeezes are the signature
+             retail traders + market makers actually defend.
+          2. **Real volume confirmation** — the closed PRIOR 5m candle
+             must show ≥ 1.5× the 20-candle volume average.  The pre-
+             fix code removed the volume check entirely citing a
+             still-forming-candle unit-mismatch (correctly); this PR
+             puts the gate back on the *closed* prior candle which
+             has no such unit problem.  Per literature: BB breakouts
+             without volume are 40-50% noise.
+          3. **TP1 widened** — band_width × 1.5 (vs band_width × 0.5).
+             At R:R 1.30 the path mathematically can't profit at
+             realistic 40-50% breakout win rates; the literature
+             requires R:R ≥ 3:1 for positive EV.  TP1 × 1.5 brings
+             the geometry into ~3:1 territory at typical 15m bands.
+        """
         regime_upper = regime.upper() if regime else ""
         if regime_upper not in ("QUIET", "RANGING"):
             return self._reject("regime_blocked")
@@ -3469,24 +3508,61 @@ class ScalpChannel(BaseChannel):
         if close <= 0:
             return self._reject("invalid_price")
 
-        ind = indicators.get("5m", {})
-        bb_upper = ind.get("bb_upper_last")
-        bb_lower = ind.get("bb_lower_last")
-        if bb_upper is None or bb_lower is None:
+        # 15m compression check (OWNER_BRIEF §3.4a row 5).  Production
+        # scanner populates indicators["15m"] via PR #408's 15m pipeline.
+        # When 15m indicators are absent (test fixtures / pre-warm window),
+        # fall through to the legacy 5m check to preserve backward-compat
+        # with existing QCB test fixtures that don't seed 15m data.
+        ind_5m = indicators.get("5m", {})
+        ind_15m = indicators.get("15m", {})
+
+        bb_upper_15m = ind_15m.get("bb_upper_last")
+        bb_lower_15m = ind_15m.get("bb_lower_last")
+        use_15m_compression = (
+            bb_upper_15m is not None and bb_lower_15m is not None
+        )
+
+        # 5m bands are ALWAYS used for the breakout-direction trigger —
+        # this is the "LTF entry" half of the HTF Structure / LTF Entry
+        # doctrine.  The HTF (15m) bands govern compression + SL/TP
+        # geometry but the trigger is a 5m close stepping outside the
+        # 5m bands.
+        bb_upper_5m = ind_5m.get("bb_upper_last")
+        bb_lower_5m = ind_5m.get("bb_lower_last")
+        if bb_upper_5m is None or bb_lower_5m is None:
             return self._reject("missing_bollinger_bands")
+        bb_upper_5m = float(bb_upper_5m)
+        bb_lower_5m = float(bb_lower_5m)
 
-        bb_upper = float(bb_upper)
-        bb_lower = float(bb_lower)
+        if use_15m_compression:
+            bb_upper = float(bb_upper_15m)
+            bb_lower = float(bb_lower_15m)
+            # Tighter 15m squeeze threshold — real accumulation bands on
+            # 15m are <1.5% wide.  Pre-2026-05-17 the 5m threshold was
+            # 2.5% (widened from 1.5% specifically because 5m bands
+            # rarely tighten that much in QUIET; the 15m equivalent IS
+            # the tight version).
+            _compression_threshold = 0.015
+        else:
+            # Legacy 5m-only path for test fixtures that don't seed 15m
+            # data.  Compression + breakout + geometry all use the 5m
+            # bands — identical to the pre-2026-05-17 behaviour.
+            bb_upper = bb_upper_5m
+            bb_lower = bb_lower_5m
+            _compression_threshold = 0.025
 
-        # Compression check: band width / close < 2.5% (raised from 1.5% — real
-        # accumulation bands sit at 1.8–2.5%, so 1.5% was never reached).
-        if (bb_upper - bb_lower) / close >= 0.025:
+        if (bb_upper - bb_lower) / close >= _compression_threshold:
             return self._reject("compression_not_detected")
 
-        # Entry direction
-        if close > bb_upper:
+        # Entry direction — 5m breakout, regardless of which TF the
+        # compression was measured on.  The 15m bands are the structural
+        # context; the 5m close-vs-5m-band tells us the trigger fired.
+        # When the HTF path is active, this lets a 5m breakout fire even
+        # if the close is still inside the wider 15m envelope — which is
+        # exactly the early-entry doctrine §3.4a calls for.
+        if close > bb_upper_5m:
             direction = Direction.LONG
-        elif close < bb_lower:
+        elif close < bb_lower_5m:
             direction = Direction.SHORT
         else:
             return self._reject("breakout_not_detected")
@@ -3509,6 +3585,7 @@ class ScalpChannel(BaseChannel):
         # MACD momentum confirmation: histogram must be trending in breakout direction.
         # Zero-cross requirement was too timing-sensitive — breakout candle rarely
         # lands on the exact zero-cross tick in low-vol accumulation.
+        ind = ind_5m  # Preserve the legacy local name for the rest of the function
         macd_hist_last = ind.get("macd_histogram_last")
         macd_hist_prev = ind.get("macd_histogram_prev")
         if macd_hist_last is not None and macd_hist_prev is not None:
@@ -3517,19 +3594,29 @@ class ScalpChannel(BaseChannel):
             if direction == Direction.SHORT and not (macd_hist_last < macd_hist_prev):
                 return self._reject("macd_reject")
 
-        # Volume: rolling average must be non-degenerate.
-        # Pre-fix this also demanded `volumes[-1] >= 2.0 × avg_vol` — but
-        # volumes[-1] is the STILL-FORMING current 5m candle whose volume is
-        # necessarily a fraction of a complete candle's eventual volume.
-        # Demanding partial-candle volume exceed multiples of complete-candle
-        # averages is the same unit-mismatch bug that was removed from
-        # VSB / BDS / ORB (PRs #250 / #251 / #252).  Especially backward for
-        # QCB which requires QUIET regime (low absolute volume by definition);
-        # the squeeze-release thesis tracks the BREAKOUT candle's volume,
-        # not a still-forming partial candle's running total.
+        # Volume confirmation — REAL gate (2026-05-17 doctrine reset).
+        # The pre-fix path removed the volume check entirely citing a
+        # unit-mismatch on the still-forming current 5m candle.  That
+        # critique was correct as written but the doctrinal need for
+        # volume confirmation wasn't replaced.  Literature on BB squeeze
+        # breakouts (pi42.com / Gate.io Web3 Research) is consistent:
+        # without volume confirmation, 40-50% of breakouts are false.
+        #
+        # This implementation checks the CLOSED PRIOR 5m candle's volume
+        # vs the 20-bar rolling average (using closed bars only) so there's
+        # no unit-mismatch.  The threshold (1.5× avg) is conservative —
+        # lower than the literature's 2× suggestion to account for QCB
+        # firing in QUIET regime where absolute volumes are by definition
+        # below their cross-regime averages.
         avg_vol = sum(float(v) for v in volumes[-21:-1]) / 20.0
         if avg_vol <= 0:
             return self._reject("volume_reject")
+        # ``volumes[-2]`` is the prior closed bar (volumes[-1] is the
+        # still-forming current bar, which is the partial-candle source
+        # the pre-fix removed).  No unit-mismatch here.
+        prior_closed_volume = float(volumes[-2])
+        if prior_closed_volume < avg_vol * _QCB_VOLUME_CONFIRMATION_MULT:
+            return self._reject("volume_confirmation_failed")
 
         # RSI
         rsi_val = ind.get("rsi_last")
@@ -3576,29 +3663,40 @@ class ScalpChannel(BaseChannel):
         if direction == Direction.SHORT and sl <= close:
             return self._reject("invalid_sl_geometry")
 
+        # TP ladder — TP1 widened to ``band_width × 1.5`` (was 0.5).
+        # OWNER_BRIEF §3.2 / B11 economics: at R:R 1.30 the path requires
+        # >50% win rate (taker fees, 10× leverage) to break even net.
+        # Truth report shows QCB at ~1.5% win rate — the geometry was
+        # mathematically incapable of profit.  TP1 × 1.5 produces typical
+        # R:R ≈ 2.5-3.0 at our SL geometry, which the literature says
+        # is the minimum for BB-squeeze breakouts.  TP2 / TP3 widened
+        # proportionally to preserve the ladder structure.
         band_width = bb_upper - bb_lower
         if band_width > 0:
             if direction == Direction.LONG:
-                tp1 = close + band_width * 0.5
-                tp2 = close + band_width * 1.0
-                tp3 = close + band_width * 1.5
+                tp1 = close + band_width * 1.5
+                tp2 = close + band_width * 2.5
+                tp3 = close + band_width * 4.0
             else:
-                tp1 = close - band_width * 0.5
-                tp2 = close - band_width * 1.0
-                tp3 = close - band_width * 1.5
+                tp1 = close - band_width * 1.5
+                tp2 = close - band_width * 2.5
+                tp3 = close - band_width * 4.0
         else:
-            tp1 = close + sl_dist * 1.5 if direction == Direction.LONG else close - sl_dist * 1.5
-            tp2 = close + sl_dist * 2.5 if direction == Direction.LONG else close - sl_dist * 2.5
-            tp3 = close + sl_dist * 4.0 if direction == Direction.LONG else close - sl_dist * 4.0
+            tp1 = close + sl_dist * 3.0 if direction == Direction.LONG else close - sl_dist * 3.0
+            tp2 = close + sl_dist * 4.5 if direction == Direction.LONG else close - sl_dist * 4.5
+            tp3 = close + sl_dist * 6.0 if direction == Direction.LONG else close - sl_dist * 6.0
 
+        # R:R floor — TP1 must be at least 2.5× SL distance from entry
+        # (was 1.3×).  Same doctrinal reason as above; preserves the
+        # ladder when band_width was unusually small relative to SL.
         if direction == Direction.LONG:
-            tp1 = max(tp1, close + sl_dist * 1.3)
-            tp2 = max(tp2, close + sl_dist * 2.0)
-            tp3 = max(tp3, close + sl_dist * 3.0)
+            tp1 = max(tp1, close + sl_dist * 2.5)
+            tp2 = max(tp2, close + sl_dist * 3.5)
+            tp3 = max(tp3, close + sl_dist * 5.0)
         else:
-            tp1 = min(tp1, close - sl_dist * 1.3)
-            tp2 = min(tp2, close - sl_dist * 2.0)
-            tp3 = min(tp3, close - sl_dist * 3.0)
+            tp1 = min(tp1, close - sl_dist * 2.5)
+            tp2 = min(tp2, close - sl_dist * 3.5)
+            tp3 = min(tp3, close - sl_dist * 5.0)
 
         profile = smc_data.get("pair_profile")
         _regime_ctx = smc_data.get("regime_context")

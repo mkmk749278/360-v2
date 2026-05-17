@@ -33,13 +33,20 @@ def _make_indicators(adx_val=30, atr_val=0.5, ema9=101, ema21=100, ema200=95,
 
 
 def _make_qcb_inputs(*, direction: Direction, close: float = 100.0, atr_last: float = 0.4):
+    # ``volumes[-2]`` carries the breakout-confirmation volume per
+    # OWNER_BRIEF §3.4a row 5 (2026-05-17): the closed PRIOR 5m candle's
+    # volume must be >= ``_QCB_VOLUME_CONFIRMATION_MULT`` × the 20-bar
+    # rolling average (default 1.5×).  Average over volumes[-21:-1] of
+    # the [100.0]*22 + [200.0,250.0] = 100; volumes[-2]=200 → 2× → passes.
+    # ``volumes[-1]`` is the still-forming current bar and is NOT checked
+    # by the post-2026-05-17 code (the pre-fix's unit-mismatch bug).
     candles = {
         "5m": {
             "open": [close] * 25,
             "high": [close + 0.2] * 25,
             "low": [close - 0.2] * 25,
             "close": [close] * 25,
-            "volume": [100.0] * 24 + [250.0],
+            "volume": [100.0] * 22 + [100.0, 200.0, 250.0],
         }
     }
     if direction == Direction.LONG:
@@ -5231,3 +5238,232 @@ class TestSrFlipHtfLevelBookIntegration:
         # No level_book_levels key — fallback to 5m pivot path with loose proximity.
         assert sig is not None
         assert sig.soft_penalty_total >= 3.0
+
+
+# ============================================================================
+# QCB 15m squeeze + volume confirmation + R:R 3:1 (feat/qcb-15m-squeeze)
+# OWNER_BRIEF §3.4a row 5 — "HTF Structure (15m BB compression), LTF Entry"
+# ============================================================================
+# Pre-2026-05-17 the path detected compression on 5m bars and had no volume
+# confirmation (removed in an earlier PR citing a unit-mismatch but never
+# replaced).  TP1 sat at band_width × 0.5 + 1.3R floor — R:R ~1.3 against
+# the literature's 3:1 requirement for positive EV at 40-50% BB-squeeze
+# win rates.  Truth report had QCB at 39% MFE=0 and -1.11% NET/sig.
+
+
+def _make_qcb_inputs_with_15m(
+    *, direction: Direction, close: float = 100.0, atr_last: float = 0.4,
+    bb_15m_width_pct: float = 0.012,   # 1.2% — under the new 1.5% threshold
+    prior_5m_volume: float = 200.0,
+):
+    """QCB fixture that exercises the post-2026-05-17 HTF detection path:
+
+    * 15m BB indicators populated → ``use_15m_compression`` branch active
+    * Configurable 15m band width (defaults to 1.2% — inside the new 1.5%
+      compression threshold so the gate passes)
+    * 5m breakout candle still positioned to trigger the entry direction
+      (close above bb_upper for LONG, below bb_lower for SHORT)
+    * ``volumes[-2]`` = ``prior_5m_volume`` so the volume-confirmation
+      gate (defaults 1.5× the 100-bar average) can be exercised
+    """
+    # 5m breakout still detected from 5m bands but the 15m bands govern
+    # whether the squeeze gate passes.  Keep the 5m breakout direction
+    # logic intact: close > bb_upper_5m for LONG, close < bb_lower_5m for SHORT.
+    candles = {
+        "5m": {
+            "open": [close] * 25,
+            "high": [close + 0.2] * 25,
+            "low": [close - 0.2] * 25,
+            "close": [close] * 25,
+            "volume": [100.0] * 22 + [100.0, prior_5m_volume, 250.0],
+        }
+    }
+    half_width_15m = (close * bb_15m_width_pct) / 2
+    bb_upper_15m = close * (1.0 - 0.0005) + half_width_15m
+    bb_lower_15m = close * (1.0 - 0.0005) - half_width_15m
+    if direction == Direction.LONG:
+        indicators = {
+            "5m": _make_indicators(
+                atr_val=atr_last,
+                rsi_val=55,
+                bb_upper=99.8,   # 5m breakout still triggered for LONG
+                bb_lower=98.8,
+            ),
+            "15m": {
+                "bb_upper_last": bb_upper_15m,
+                "bb_lower_last": bb_lower_15m,
+            },
+        }
+        indicators["5m"]["macd_histogram_last"] = 0.1
+        indicators["5m"]["macd_histogram_prev"] = -0.1
+    else:
+        indicators = {
+            "5m": _make_indicators(
+                atr_val=atr_last,
+                rsi_val=45,
+                bb_upper=101.2,
+                bb_lower=100.2,
+            ),
+            "15m": {
+                "bb_upper_last": bb_upper_15m,
+                "bb_lower_last": bb_lower_15m,
+            },
+        }
+        indicators["5m"]["macd_histogram_last"] = -0.1
+        indicators["5m"]["macd_histogram_prev"] = 0.1
+    smc_data = {"fvg": [{"gap_high": close + 0.5, "gap_low": close - 0.5}]}
+    return candles, indicators, smc_data
+
+
+class TestQcb15mSqueezePath:
+    """OWNER_BRIEF §3.4a row 5 — when ``indicators['15m']`` carries the
+    BB upper/lower values, QCB uses the 15m compression threshold
+    (<1.5%) instead of the legacy 5m threshold (<2.5%)."""
+
+    def test_uses_15m_when_15m_indicators_present(self):
+        """1.2% 15m band width passes the new 1.5% gate → signal fires
+        (subject to other gates which the fixture also satisfies)."""
+        candles, indicators, smc_data = _make_qcb_inputs_with_15m(
+            direction=Direction.LONG, bb_15m_width_pct=0.012,
+        )
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="QUIET",
+        )
+        assert sig is not None, (
+            "15m band width 1.2% < 1.5% threshold; path must accept."
+        )
+        assert sig.setup_class == "QUIET_COMPRESSION_BREAK"
+
+    def test_rejects_15m_band_too_wide(self):
+        """1.8% 15m band width fails the 1.5% gate → reject as
+        ``compression_not_detected``.  The legacy 5m bands would still
+        pass at this width (2.5% threshold) — proving the 15m gate is
+        the binding constraint when present."""
+        candles, indicators, smc_data = _make_qcb_inputs_with_15m(
+            direction=Direction.LONG, bb_15m_width_pct=0.018,
+        )
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="QUIET",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "compression_not_detected"
+
+    def test_legacy_5m_path_when_15m_indicators_absent(self):
+        """Backward-compat: no 15m indicators → fallback to legacy 5m
+        path with its 2.5% threshold.  Preserves the existing QCB test
+        surface that doesn't seed 15m data."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        # indicators only has "5m" key — no 15m present.
+        assert "15m" not in indicators
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="QUIET",
+        )
+        # Fixture has 5m bands at width 1.0 / close 100 = 1% < 2.5% legacy
+        # threshold → path proceeds.  This is exactly the pre-2026-05-17
+        # baseline behaviour.
+        assert sig is not None
+
+
+class TestQcbVolumeConfirmation:
+    """OWNER_BRIEF §3.4a row 5 — the closed PRIOR 5m candle's volume must
+    show >= ``_QCB_VOLUME_CONFIRMATION_MULT`` × the 20-bar rolling
+    average for the breakout to be considered volume-confirmed.
+
+    Pre-2026-05-17 the volume gate was removed entirely citing a unit-
+    mismatch on the still-forming current candle (volumes[-1]).  The
+    fix restores the gate on the CLOSED prior candle (volumes[-2]) so
+    there's no unit-mismatch problem."""
+
+    def test_rejects_when_prior_bar_volume_below_threshold(self):
+        """volumes[-2] = 100 (1× average) → below 1.5× default → reject
+        as ``volume_confirmation_failed``."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        # The fixture default has volumes[-2]=200 (passes 1.5× × 100 avg).
+        # Knock it down to 100 (1× average) → fails.
+        candles["5m"]["volume"][-2] = 100.0
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="QUIET",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "volume_confirmation_failed"
+
+    def test_accepts_when_prior_bar_volume_above_threshold(self):
+        """volumes[-2] = 200 (2× average) → above 1.5× → passes."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        # Fixture already sets volumes[-2]=200; just verify it passes.
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="QUIET",
+        )
+        assert sig is not None
+
+    def test_volume_gate_checks_closed_prior_not_still_forming(self):
+        """volumes[-1] (still-forming current candle) varying does NOT
+        affect the volume gate.  Pinning the pre-fix's unit-mismatch
+        fix: the gate must use the closed prior bar, never the running
+        partial-candle volume."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        candles["5m"]["volume"][-1] = 0.0  # extreme: zero current-bar volume
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="QUIET",
+        )
+        # volumes[-2]=200 (from fixture) still passes; volumes[-1]=0 is
+        # ignored by the gate.
+        assert sig is not None
+
+
+class TestQcbTp1RrFloor:
+    """OWNER_BRIEF §3.2 / B11 — TP1 must satisfy a minimum R:R that
+    can fund a 40-50% BB-squeeze win rate after fees.  Literature
+    requires R:R >= 3:1 for positive EV; we settled on 2.5R as the
+    tightest floor that preserves headroom for the SL geometry while
+    still clearing fees comfortably at 10× leverage."""
+
+    def test_tp1_at_least_2_5x_sl_distance_long(self):
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="QUIET",
+        )
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        assert sig.tp1 >= sig.entry + sl_dist * 2.5 - 1e-6, (
+            f"TP1 below 2.5R floor — got {sig.tp1}, entry={sig.entry}, "
+            f"sl_dist={sl_dist}, 2.5R={sig.entry + sl_dist * 2.5}"
+        )
+
+    def test_tp1_at_least_2_5x_sl_distance_short(self):
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.SHORT)
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="QUIET",
+        )
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        assert sig.tp1 <= sig.entry - sl_dist * 2.5 + 1e-6
+
+    def test_tp_ladder_monotonic_with_widened_targets(self):
+        """Floor changes preserve TP1 < TP2 < TP3 ordering (LONG) and
+        TP3 < TP2 < TP1 (SHORT).  Required by enqueue_signal sanity
+        checks downstream."""
+        candles, indicators, smc_data = _make_qcb_inputs(direction=Direction.LONG)
+        ch = ScalpChannel()
+        sig = ch._evaluate_quiet_compression_break(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime="QUIET",
+        )
+        assert sig is not None
+        assert sig.tp1 < sig.tp2 < sig.tp3
