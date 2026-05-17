@@ -947,6 +947,18 @@ class CryptoSignalEngine:
                     self._order_flow_store.update_cvd_from_tick(
                         symbol, _buy_usd, _total_usd - _buy_usd
                     )
+                elif interval == "15m":
+                    # 15m CVD aggregation feeds the 15m-aligned divergence detector
+                    # (OWNER_BRIEF §3.4a — HTF Structure, LTF Entry).  Each closed
+                    # 15m kline carries the same Q/q split as 1m, but the resulting
+                    # CVD series is genuinely on a 15m time grid rather than the
+                    # interleaved mixed-TF series in `_cvd_candle`.
+                    _buy_usd_15m = float(k.get("Q", 0.0))
+                    _total_usd_15m = float(k.get("q", 0.0))
+                    self._order_flow_store.update_cvd_15m_from_kline(
+                        symbol, _buy_usd_15m, _total_usd_15m - _buy_usd_15m
+                    )
+                    self._order_flow_store.snapshot_cvd_15m_at_candle_close(symbol)
                 # Snapshot CVD at candle close to align with OHLCV for divergence detection
                 self._order_flow_store.snapshot_cvd_at_candle_close(symbol)
 

@@ -2397,17 +2397,30 @@ class Scanner:
             smc_data["funding_rate"] = _fr
             _cvd_arr = self.order_flow_store.get_cvd_history(symbol)
             smc_data["cvd"] = _cvd_arr.tolist() if len(_cvd_arr) > 0 else None
+            # 15m CVD (OWNER_BRIEF §3.4a — HTF Structure, LTF Entry).  Separate
+            # 15m-aligned series for divergence detection on 15m bars; consumed
+            # by DIVERGENCE_CONTINUATION after its per-path criteria fix.  None
+            # when uninitialised so consumers can fail-open per soft-penalty doctrine.
+            _cvd_15m_arr = self.order_flow_store.get_cvd_15m_history(symbol)
+            smc_data["cvd_15m"] = (
+                _cvd_15m_arr.tolist() if len(_cvd_15m_arr) > 0 else None
+            )
             dependency_source_state["funding_rate"] = "populated" if _fr is not None else "empty"
             dependency_source_state["cvd"] = "populated" if len(_cvd_arr) > 0 else "empty"
+            dependency_source_state["cvd_15m"] = (
+                "populated" if len(_cvd_15m_arr) > 0 else "empty"
+            )
             log.debug(
-                "{} smc_data: funding_rate={}, cvd_candles={}",
+                "{} smc_data: funding_rate={}, cvd_candles={}, cvd_15m_candles={}",
                 symbol,
                 _fr,
                 len(_cvd_arr),
+                len(_cvd_15m_arr),
             )
         else:
             dependency_source_state["funding_rate"] = "unavailable"
             dependency_source_state["cvd"] = "unavailable"
+            dependency_source_state["cvd_15m"] = "unavailable"
         dependency_source_state["oi_snapshot"] = (
             "unavailable" if self.order_flow_store is None else "empty"
         )

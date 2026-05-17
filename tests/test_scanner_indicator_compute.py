@@ -133,3 +133,53 @@ def test_compute_indicators_for_candle_dict_compat_keys():
     assert "momentum_last" in tf_result
     assert "macd_histogram_last" in tf_result
     assert "macd_histogram_prev" in tf_result
+
+
+def test_15m_indicators_populated_when_15m_candles_present():
+    """15m indicators (BB, EMA, ATR, RSI) populate automatically when the
+    candle dict contains a 15m key.
+
+    OWNER_BRIEF §3.4a (HTF Structure, LTF Entry) requires evaluators to source
+    BB compression from 15m bars (QCB per-path fix) and CVD divergence from 15m
+    bars (DIV_CONT per-path fix).  This test pins the contract that the indicator
+    pipeline already supports 15m — the per-path PRs only need to read the
+    existing ``indicators["15m"][...]`` keys, not extend the compute function.
+
+    Regression guard: if a future refactor splits indicator computation by TF
+    and forgets to wire 15m, this test catches it before per-path code regresses.
+    """
+    np.random.seed(0)
+    n = 300
+    closes = np.random.uniform(100, 200, n)
+    highs = closes * 1.01
+    lows = closes * 0.99
+    candle_dict = {
+        "5m": {
+            "close": list(closes),
+            "high": list(highs),
+            "low": list(lows),
+        },
+        "15m": {
+            "close": list(closes),
+            "high": list(highs),
+            "low": list(lows),
+        },
+        "1h": {
+            "close": list(closes),
+            "high": list(highs),
+            "low": list(lows),
+        },
+    }
+    result = compute_indicators_for_candle_dict(candle_dict)
+    assert "15m" in result
+    tf_15m = result["15m"]
+    # All the indicators per-path PRs will consume must be populated
+    assert tf_15m.get("bb_upper_last") is not None
+    assert tf_15m.get("bb_mid_last") is not None
+    assert tf_15m.get("bb_lower_last") is not None
+    assert tf_15m.get("ema9_last") is not None
+    assert tf_15m.get("ema21_last") is not None
+    assert tf_15m.get("atr_last") is not None
+    assert tf_15m.get("rsi_last") is not None
+    # BB ordering invariant — lower < mid < upper
+    assert tf_15m["bb_lower_last"] < tf_15m["bb_mid_last"] < tf_15m["bb_upper_last"]
