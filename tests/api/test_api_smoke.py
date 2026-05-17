@@ -1962,3 +1962,141 @@ def test_user_auto_trade_isolated_per_user(engine: _StubEngine, tmp_path) -> Non
     ).json()
     assert body["using_defaults"] is True
     assert body["position_size_pct"] != 5.0
+
+
+# ============================================================================
+# Build-positions broker-state filter (fix/positions-skip-broker-rejected)
+# ============================================================================
+# Owner-reported 2026-05-17: Lumin OPEN POSITIONS card showed 4-5 phantom
+# rows at qty=0 alongside 1 real broker-active position visible in the
+# trade_records list.  Root cause: ``sig.qty`` was never set anywhere in
+# the engine; it always defaulted to 0.  ``build_positions`` rendered
+# every router signal as a position regardless of whether the paper
+# broker had actually opened one (qty_zero_guard from PR #401 would
+# return None and skip the open, but the signal lived on in the router).
+
+
+class _StubPaperPosition:
+    """Minimal stand-in for ``PaperOrderManager._PaperPosition`` — only
+    the two fields ``build_positions`` reads when enriching qty from
+    the broker (quantity + closed_quantity)."""
+    def __init__(self, quantity: float, closed_quantity: float = 0.0):
+        self.quantity = quantity
+        self.closed_quantity = closed_quantity
+
+
+class _StubPaperBroker:
+    """Minimal duck-type of ``PaperOrderManager`` — ``build_positions``
+    only inspects ``_positions`` (the dict signal_id → _PaperPosition).
+    Other broker methods aren't called from build_positions; we keep
+    the surface intentionally small."""
+    def __init__(self, positions: Dict[str, _StubPaperPosition]):
+        self._positions = positions
+
+
+def test_positions_filters_signals_without_broker_position(
+    client: TestClient, engine: _StubEngine,
+) -> None:
+    """When a paper broker is wired AND lacks a position for a given
+    signal_id, ``/api/positions`` must skip that signal — it's a phantom
+    from the router's signal-tracking machinery (e.g. broker rejected
+    via qty_zero_guard / notional_floor / risk gate).
+
+    Without this filter the OPEN POSITIONS card showed 4-5 ghost rows
+    at qty=0 (2026-05-17 owner-reported bug).
+    """
+    # Wire a paper broker with EMPTY positions — broker has no record of
+    # any signal_id, even though the router has sig-001 active.
+    engine._order_manager = _StubPaperBroker(positions={})
+
+    r = client.get("/api/positions")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Pre-fix: returns the active router signal (sig-001) at qty=0.
+    # Post-fix: returns empty — the broker filter scrubs out phantoms.
+    assert body["total"] == 0, (
+        "Phantom positions slipping through broker-state filter — "
+        f"got {body['total']} rows when broker has no positions"
+    )
+
+
+def test_positions_returns_only_broker_active(
+    client: TestClient, engine: _StubEngine,
+) -> None:
+    """When the broker has SOME positions, ``/api/positions`` must
+    return ONLY those, scrubbing router signals the broker doesn't
+    have entries for.
+    """
+    # Add a second signal to the router; only the first is "in" the
+    # broker's positions.  Both directions valid for the Pydantic schema.
+    now = datetime.now(timezone.utc)
+    sig_2 = _StubSignal(
+        signal_id="sig-002-broker-rejected",
+        symbol="DOGEUSDT",
+        direction=_Direction("SHORT"),
+        entry=0.12,
+        stop_loss=0.13,
+        tp1=0.11,
+        tp2=0.10,
+        current_price=0.12,
+        pnl_pct=0.0,
+        timestamp=now - timedelta(minutes=5),
+        dispatch_timestamp=now - timedelta(minutes=5),
+    )
+    engine.router.active_signals[sig_2.signal_id] = sig_2
+
+    # Broker has the first signal (sig-001 / ETHUSDT) but NOT sig-002.
+    engine._order_manager = _StubPaperBroker(positions={
+        "sig-001": _StubPaperPosition(quantity=0.0429),
+    })
+
+    r = client.get("/api/positions")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 1
+    p = body["items"][0]
+    assert p["signal_id"] == "sig-001"
+    # Quantity sourced from broker (0.0429 — not the always-zero sig.qty
+    # the pre-fix path used).
+    assert p["qty"] == pytest.approx(0.0429, rel=1e-6)
+
+
+def test_positions_uses_broker_residual_after_partial_close(
+    client: TestClient, engine: _StubEngine,
+) -> None:
+    """The broker tracks ``quantity`` (original) and ``closed_quantity``
+    (already-closed partials).  The OPEN-positions display should show
+    the RESIDUAL (quantity − closed_quantity) — the still-riding slice.
+
+    Example: pre-TP banked 50%, residual rides → broker has
+    quantity=100, closed_quantity=50 → display shows qty=50.
+    """
+    engine._order_manager = _StubPaperBroker(positions={
+        "sig-001": _StubPaperPosition(quantity=100.0, closed_quantity=50.0),
+    })
+
+    r = client.get("/api/positions")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["total"] == 1
+    assert body["items"][0]["qty"] == pytest.approx(50.0, rel=1e-6)
+
+
+def test_positions_no_broker_falls_back_to_router_signals(
+    client: TestClient, engine: _StubEngine,
+) -> None:
+    """When no order_manager is wired (signal-only mode / live mode where
+    Binance is the position source, queried app-side), the broker-state
+    filter is skipped and every router signal renders.  Backward-compat
+    with the pre-2026-05-17 behaviour.
+    """
+    # No _order_manager on the engine.
+    assert not hasattr(engine, "_order_manager") or engine._order_manager is None
+
+    r = client.get("/api/positions")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # The default fixture has one active router signal — it should render
+    # even though there's no broker tracking it.
+    assert body["total"] == 1
+    assert body["items"][0]["symbol"] == "ETHUSDT"
