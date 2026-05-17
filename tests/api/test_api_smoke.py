@@ -1800,6 +1800,36 @@ def test_user_pretp_get_returns_defaults_for_fresh_user(
     # Engine defaults (config) are exposed via the same schema.
     assert "threshold_pct" in body
     assert "atr_multiplier" in body
+    # OWNER_BRIEF B17 (2026-05-17) — manual-entry protection defaults ON
+    # so manual operators get capital preservation without an opt-in step.
+    assert body.get("protect_manual_entries") is True
+
+
+def test_user_pretp_protect_manual_entries_round_trip(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    """User-set False survives the GET→PUT→GET cycle and flips
+    ``using_defaults`` to False even when it's the only field touched."""
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330099")
+    r = client.put(
+        "/api/settings/user/pretp",
+        headers={"Authorization": f"Bearer {token}"},
+        json={"protect_manual_entries": False},
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["protect_manual_entries"] is False
+    assert body["using_defaults"] is False
+
+    # Re-read confirms persistence.
+    r2 = client.get(
+        "/api/settings/user/pretp",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    body2 = r2.json()
+    assert body2["protect_manual_entries"] is False
+    assert body2["using_defaults"] is False
 
 
 def test_user_pretp_put_persists_override(engine: _StubEngine, tmp_path) -> None:

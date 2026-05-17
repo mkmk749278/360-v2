@@ -376,6 +376,18 @@ class PretpSettings(BaseModel):
             "residual position has SL ratcheted to entry."
         ),
     )
+    protect_manual_entries: Optional[bool] = Field(
+        default=None,
+        description=(
+            "OWNER_BRIEF B17 (2026-05-17) — when True, the app-side "
+            "AutoTradeWatcher keeps polling for pre-TP partial closes on "
+            "manually-taken entries even when auto-trade ``mode == 'off'``.  "
+            "Default True extends capital-preservation doctrine to manual "
+            "operators (the most engaged subscriber cohort).  False respects "
+            "'off means off' for users who want pure manual control with no "
+            "background broker activity.  NULL = use engine default (True)."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

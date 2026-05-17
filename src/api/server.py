@@ -1195,6 +1195,11 @@ def build_app(
             # user_pretp_settings table).  Surfaces the config default
             # so the app can render an authoritative starting value.
             grab_fraction=PRE_TP_GRAB_FRACTION,
+            # OWNER_BRIEF B17 (2026-05-17) — default True extends pre-TP
+            # capital preservation to manual entries via the app-side
+            # watcher running in passive mode when auto-trade is off.
+            # Pure engine-side action; doesn't depend on app state here.
+            protect_manual_entries=True,
         )
 
     def _build_invalidation_view() -> InvalidationSettings:

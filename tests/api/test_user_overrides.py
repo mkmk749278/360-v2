@@ -366,3 +366,124 @@ def test_invalidation_round_trip_across_reopen(db_path) -> None:
         }
     finally:
         s2.close()
+
+
+# ---------------------------------------------------------------------------
+# protect_manual_entries (OWNER_BRIEF B17, 2026-05-17 — manual-entry pre-TP coverage)
+# ---------------------------------------------------------------------------
+
+
+def test_protect_manual_entries_round_trip_true(store: UserOverridesStore) -> None:
+    """True persists as bool, not int — the JSON contract returns bool."""
+    out = store.update_pretp(1, {"protect_manual_entries": True})
+    assert out["protect_manual_entries"] is True
+    assert store.get_pretp(1)["protect_manual_entries"] is True
+
+
+def test_protect_manual_entries_round_trip_false(store: UserOverridesStore) -> None:
+    """False persists distinctly from absent.  This is the 'pure manual'
+    opt-out — the watcher must respect it and stay stopped when mode=off."""
+    out = store.update_pretp(1, {"protect_manual_entries": False})
+    assert out["protect_manual_entries"] is False
+    assert store.get_pretp(1)["protect_manual_entries"] is False
+
+
+def test_protect_manual_entries_non_bool_dropped(store: UserOverridesStore) -> None:
+    """Mirrors existing _coerce_pretp behaviour for ill-typed values.
+    Int 1 must not silently become True — the field is strictly bool."""
+    out = store.update_pretp(1, {"enabled": True, "protect_manual_entries": 1})
+    assert out["enabled"] is True
+    assert "protect_manual_entries" not in out
+
+
+def test_protect_manual_entries_explicit_none_clears(
+    store: UserOverridesStore,
+) -> None:
+    store.update_pretp(1, {"protect_manual_entries": False})
+    out = store.update_pretp(1, {"protect_manual_entries": None})
+    assert "protect_manual_entries" not in out
+
+
+def test_protect_manual_entries_isolated_per_user(
+    store: UserOverridesStore,
+) -> None:
+    store.update_pretp(1, {"protect_manual_entries": False})
+    store.update_pretp(2, {"protect_manual_entries": True})
+    assert store.get_pretp(1)["protect_manual_entries"] is False
+    assert store.get_pretp(2)["protect_manual_entries"] is True
+
+
+def test_protect_manual_entries_round_trip_across_reopen(db_path) -> None:
+    s1 = UserOverridesStore(db_path)
+    s1.update_pretp(1, {"protect_manual_entries": False, "grab_fraction": 0.65})
+    s1.close()
+    s2 = UserOverridesStore(db_path)
+    try:
+        out = s2.get_pretp(1)
+        assert out["protect_manual_entries"] is False
+        assert out["grab_fraction"] == 0.65
+    finally:
+        s2.close()
+
+
+def test_pretp_migration_adds_protect_manual_entries_to_existing_db(
+    db_path,
+) -> None:
+    """Existing pre-2026-05-17 DB rows must survive the schema migration.
+
+    Simulates a deploy where the existing user_pretp_settings table predates
+    the protect_manual_entries column.  ALTER TABLE adds the column without
+    dropping rows; pre-existing field values stay intact, the new column
+    reads NULL (interpreted as 'use engine default') for the existing user.
+    """
+    import sqlite3
+
+    # Create the legacy schema by hand — no protect_manual_entries column.
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys=ON")
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS user_pretp_settings (
+            user_id           INTEGER PRIMARY KEY,
+            enabled           INTEGER,
+            regime_allowlist  TEXT,
+            setup_allowlist   TEXT,
+            threshold_pct     REAL,
+            atr_multiplier    REAL,
+            fee_floor_pct     REAL,
+            min_age_sec       INTEGER,
+            max_age_sec       INTEGER,
+            grab_fraction     REAL,
+            updated_at        TEXT NOT NULL,
+            FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+        );
+        """
+    )
+    conn.execute(
+        "INSERT INTO user_pretp_settings (user_id, enabled, threshold_pct, "
+        "grab_fraction, updated_at) VALUES (?, 1, 0.25, 0.60, 'pre-migration')",
+        (1,),
+    )
+    conn.commit()
+    conn.close()
+
+    # Open via the store — triggers the idempotent ALTER TABLE migration.
+    s = UserOverridesStore(db_path)
+    try:
+        existing = s.get_pretp(1)
+        # Pre-migration data preserved untouched.
+        assert existing["enabled"] is True
+        assert existing["threshold_pct"] == 0.25
+        assert existing["grab_fraction"] == 0.60
+        # New column reads NULL → omitted from the partial dict.
+        assert "protect_manual_entries" not in existing
+
+        # A subsequent write must populate the new column without disturbing
+        # the pre-existing values.
+        out = s.update_pretp(1, {"protect_manual_entries": True})
+        assert out["protect_manual_entries"] is True
+        assert out["enabled"] is True
+        assert out["threshold_pct"] == 0.25
+        assert out["grab_fraction"] == 0.60
+    finally:
+        s.close()

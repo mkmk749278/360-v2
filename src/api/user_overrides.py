@@ -70,6 +70,7 @@ _PRETP_KEYS = frozenset({
     "min_age_sec",
     "max_age_sec",
     "grab_fraction",
+    "protect_manual_entries",
 })
 
 # OWNER_BRIEF B17 — pre-TP fires a REAL partial close.  Hard floor 30% so no
@@ -113,17 +114,18 @@ _LEVERAGE_HARD_CAP: float = 30.0  # B12
 
 _PRETP_SCHEMA = """
 CREATE TABLE IF NOT EXISTS user_pretp_settings (
-    user_id           INTEGER PRIMARY KEY,
-    enabled           INTEGER,
-    regime_allowlist  TEXT,
-    setup_allowlist   TEXT,
-    threshold_pct     REAL,
-    atr_multiplier    REAL,
-    fee_floor_pct     REAL,
-    min_age_sec       INTEGER,
-    max_age_sec       INTEGER,
-    grab_fraction     REAL,
-    updated_at        TEXT    NOT NULL,
+    user_id                 INTEGER PRIMARY KEY,
+    enabled                 INTEGER,
+    regime_allowlist        TEXT,
+    setup_allowlist         TEXT,
+    threshold_pct           REAL,
+    atr_multiplier          REAL,
+    fee_floor_pct           REAL,
+    min_age_sec             INTEGER,
+    max_age_sec             INTEGER,
+    grab_fraction           REAL,
+    protect_manual_entries  INTEGER,
+    updated_at              TEXT    NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
 """
@@ -215,6 +217,15 @@ def _coerce_pretp(raw: Dict[str, Any]) -> Dict[str, Any]:
                     min(_PRETP_GRAB_FRACTION_MAX, float(value)),
                 )
                 out[key] = clamped
+        elif key == "protect_manual_entries":
+            # B17 (2026-05-17) — when ON, the app-side AutoTradeWatcher
+            # keeps polling for pre-TP partials on manual entries even
+            # when auto-trade ``mode == 'off'``.  Default ON delivers
+            # capital preservation to the most engaged subscriber cohort
+            # (hand-picked entries); OFF respects "off means off" for
+            # users who want pure manual control.
+            if isinstance(value, bool):
+                out[key] = value
         elif key == "regime_allowlist":
             out[key] = _normalise_regime_input(value)
         elif key == "setup_allowlist":
@@ -315,6 +326,7 @@ class UserOverridesStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA)
         self._migrate_pretp_grab_fraction()
+        self._migrate_pretp_protect_manual_entries()
         log.info("UserOverridesStore opened at {}", self._path)
 
     def _migrate_pretp_grab_fraction(self) -> None:
@@ -335,6 +347,27 @@ class UserOverridesStore:
             log.info(
                 "UserOverridesStore: added user_pretp_settings.grab_fraction "
                 "column (B17 migration)"
+            )
+
+    def _migrate_pretp_protect_manual_entries(self) -> None:
+        """Idempotent ALTER for the ``protect_manual_entries`` column.
+
+        Added 2026-05-17 to support extending pre-TP execution coverage
+        to manual entries when auto-trade is off.  Same migration pattern
+        as ``_migrate_pretp_grab_fraction``: detect via PRAGMA, ADD
+        COLUMN only when missing.  NULL on existing rows is interpreted
+        by the API layer as "use engine default (True)".
+        """
+        cur = self._conn.execute("PRAGMA table_info(user_pretp_settings)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "protect_manual_entries" not in cols:
+            self._conn.execute(
+                "ALTER TABLE user_pretp_settings ADD COLUMN "
+                "protect_manual_entries INTEGER"
+            )
+            log.info(
+                "UserOverridesStore: added user_pretp_settings."
+                "protect_manual_entries column"
             )
 
     # ---- pretp -----------------------------------------------------------
@@ -378,8 +411,9 @@ class UserOverridesStore:
                 INSERT INTO user_pretp_settings (
                     user_id, enabled, regime_allowlist, setup_allowlist,
                     threshold_pct, atr_multiplier, fee_floor_pct,
-                    min_age_sec, max_age_sec, grab_fraction, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    min_age_sec, max_age_sec, grab_fraction,
+                    protect_manual_entries, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     enabled = excluded.enabled,
                     regime_allowlist = excluded.regime_allowlist,
@@ -390,6 +424,7 @@ class UserOverridesStore:
                     min_age_sec = excluded.min_age_sec,
                     max_age_sec = excluded.max_age_sec,
                     grab_fraction = excluded.grab_fraction,
+                    protect_manual_entries = excluded.protect_manual_entries,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -403,6 +438,7 @@ class UserOverridesStore:
                     merged.get("min_age_sec"),
                     merged.get("max_age_sec"),
                     merged.get("grab_fraction"),
+                    _bool_to_int(merged.get("protect_manual_entries")),
                     now,
                 ),
             )
@@ -533,6 +569,7 @@ _PRETP_COL_TYPES: Dict[str, str] = {
     "min_age_sec": "int",
     "max_age_sec": "int",
     "grab_fraction": "float",
+    "protect_manual_entries": "bool",
 }
 
 _INVALIDATION_COL_TYPES: Dict[str, str] = {
