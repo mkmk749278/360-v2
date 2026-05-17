@@ -59,6 +59,18 @@ _TPE_H1_PULLBACK_ATR_MULT: float = float(
     os.getenv("TPE_H1_PULLBACK_ATR_MULT", "0.50")
 )
 
+# DIVERGENCE_CONTINUATION — 15m CVD divergence detection windows
+# (OWNER_BRIEF §3.4a: HTF Structure, LTF Entry).  Pre-2026-05-17 DIV_CONT
+# read CVD divergence off 5m bars where the signal is dominated by
+# microstructure noise (664 sigs, 63% MFE=0 in the forensic — second-worst
+# path after TPE).  15m series carries enough trade-flow integration to
+# express genuine accumulation/distribution divergence vs price.
+# Default 12 bars = 3 hours of 15m candles — matches the natural unwind
+# window for an HTF continuation divergence.  Fallback 6-bar window
+# (1.5h) catches shorter-form divergences when the 12-bar absent.
+_DIV_CONT_15M_LOOKBACK: int = int(os.getenv("DIV_CONT_15M_LOOKBACK", "12"))
+_DIV_CONT_15M_LOOKBACK_MIN: int = int(os.getenv("DIV_CONT_15M_LOOKBACK_MIN", "6"))
+
 # WHALE_MOMENTUM thresholds (absorbed from former TapeChannel).  Env-overridable
 # per B8 so operators can tune for current market conditions without redeploy.
 _WHALE_DELTA_MIN_RATIO: float = float(os.getenv("WHALE_DELTA_MIN_RATIO", "2.0"))
@@ -3880,35 +3892,29 @@ class ScalpChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
-        """DIVERGENCE_CONTINUATION: hidden CVD divergence in trending regime."""
-        # Allowed regimes: TRENDING_UP/DOWN (direction from label) and
-        # WEAK_TREND (Q7-A conservative widening — direction derived from
-        # EMA9 vs EMA21 alignment).  STRONG_TREND and BREAKOUT_EXPANSION
-        # remain blocked because hidden-divergence continuation is rare in
-        # those regimes (momentum is sustained, not slowing); revisit once
-        # we have data confirming WEAK_TREND is safe.  The downstream
-        # `direction == LONG and ema9 <= ema21: reject` check acts as
-        # cross-validation for the EMA-derived direction.
-        regime_upper = regime.upper() if regime else ""
-        if regime_upper == "TRENDING_UP":
-            direction = Direction.LONG
-        elif regime_upper == "TRENDING_DOWN":
-            direction = Direction.SHORT
-        elif regime_upper == "WEAK_TREND":
-            ind_for_dir = indicators.get("5m", {})
-            ema9_for_dir = ind_for_dir.get("ema9_last")
-            ema21_for_dir = ind_for_dir.get("ema21_last")
-            if ema9_for_dir is None or ema21_for_dir is None:
-                return self._reject("ema_alignment_reject")
-            if ema9_for_dir > ema21_for_dir:
-                direction = Direction.LONG
-            elif ema9_for_dir < ema21_for_dir:
-                direction = Direction.SHORT
-            else:
-                return self._reject("ema_alignment_reject")
-        else:
-            return self._reject("regime_blocked")
+        """DIVERGENCE_CONTINUATION: hidden CVD divergence in trending regime.
 
+        Detection on **15m CVD + 15m close divergence** (OWNER_BRIEF §3.4a
+        row 3 — "Detect on 15m CVD divergence vs 15m HH/LL; Confirm on
+        5m EMA21 retest in trend direction; Enter on 5m EMA9 reclaim").
+
+        Pre-2026-05-17 DIV_CONT detected divergence on 5m CVD/5m close
+        (forensic: 19 signals, 63% MFE=0 — second-worst direction-call
+        quality after TPE).  5m CVD is dominated by HFT noise so the
+        signal-to-noise of a "divergence" read is poor.  The 15m series
+        carries enough trade-flow integration to express genuine
+        accumulation/distribution structure.
+
+        Direction comes from **1H EMA21/50 alignment + slope** (HTF
+        trend identification).  Pre-2026-05-17 direction was sourced
+        from the 5m regime label — circular for an evaluator entering
+        on 5m.
+
+        Legacy 5m-divergence + 5m-regime fallback preserved when 15m
+        CVD or 1H indicators absent (warmup / test fixtures) so soft
+        penalty doctrine holds and existing test fixtures still
+        exercise the path.
+        """
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 20:
             return self._reject("insufficient_candles")
@@ -3922,76 +3928,168 @@ class ScalpChannel(BaseChannel):
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
             return self._reject("basic_filters_failed")
 
-        cvd_data = smc_data.get("cvd")
-        if cvd_data is None:
-            return self._reject("missing_cvd")
+        # ── HTF direction (1H EMA21/50 alignment + slope) ────────────
+        # Mirrors TPE PR #418 doctrine.  When 1H indicators absent,
+        # fall back to legacy 5m-regime label path (preserves test
+        # fixtures that don't seed 1H data).
+        ind_1h = indicators.get("1h", {})
+        ema21_1h = ind_1h.get("ema21_last")
+        ema50_1h = ind_1h.get("ema50_last")
+        ema21_1h_prev = ind_1h.get("ema21_prev")
+        _uses_1h_trend = ema21_1h is not None and ema50_1h is not None
 
-        cvd_values = cvd_data if isinstance(cvd_data, list) else cvd_data.get("values", [])
-        if len(cvd_values) < 10:
-            return self._reject("cvd_insufficient")
+        direction: Optional[Direction] = None
+        if _uses_1h_trend:
+            ema21_1h_f = float(ema21_1h)
+            ema50_1h_f = float(ema50_1h)
+            # Slope: when ema21_prev absent (warmup), accept alignment-only.
+            slope_pos = (
+                ema21_1h_prev is None or float(ema21_1h_prev) < ema21_1h_f
+            )
+            slope_neg = (
+                ema21_1h_prev is None or float(ema21_1h_prev) > ema21_1h_f
+            )
+            if ema21_1h_f > ema50_1h_f and slope_pos:
+                direction = Direction.LONG
+            elif ema21_1h_f < ema50_1h_f and slope_neg:
+                direction = Direction.SHORT
+            else:
+                return self._reject("h1_trend_not_aligned")
+        else:
+            # Legacy 5m-regime fallback (test / pre-warm).
+            regime_upper = regime.upper() if regime else ""
+            if regime_upper == "TRENDING_UP":
+                direction = Direction.LONG
+            elif regime_upper == "TRENDING_DOWN":
+                direction = Direction.SHORT
+            elif regime_upper == "WEAK_TREND":
+                ind_for_dir = indicators.get("5m", {})
+                ema9_for_dir = ind_for_dir.get("ema9_last")
+                ema21_for_dir = ind_for_dir.get("ema21_last")
+                if ema9_for_dir is None or ema21_for_dir is None:
+                    return self._reject("ema_alignment_reject")
+                if ema9_for_dir > ema21_for_dir:
+                    direction = Direction.LONG
+                elif ema9_for_dir < ema21_for_dir:
+                    direction = Direction.SHORT
+                else:
+                    return self._reject("ema_alignment_reject")
+            else:
+                return self._reject("regime_blocked")
 
         closes = [float(c) for c in closes_raw]
-        cvd_floats = [float(v) for v in cvd_values]
-
         close = closes[-1]
         if close <= 0:
-            # Telemetry-truth: this is invalid candle data, NOT a "momentum
-            # reject" condition.  Pre-fix conflated bad-data with the
-            # momentum gate count (same family as FUNDING fix in #254).
+            # Telemetry-truth: invalid candle data, NOT a momentum reject.
             return self._reject("invalid_price")
 
-        # CVD divergence detection: check 20-candle window first; fall back to 10-candle.
-        # 20-candle window required cvd_values ≥ 20; 10-candle needs only 10.
-        # cvd_divergence_failed=31392 with 20-candle only — choppy market shortens windows.
-        _has_20 = len(cvd_floats) >= 20 and len(closes) >= 20
-        if direction == Direction.LONG:
-            _div_detected = False
-            if _has_20:
-                price_low_early = min(closes[-20:-10])
-                price_low_late = min(closes[-10:])
-                cvd_low_early = min(cvd_floats[-20:-10])
-                cvd_low_late = min(cvd_floats[-10:])
-                if price_low_late < price_low_early and cvd_low_late > cvd_low_early:
-                    _div_detected = True
-                    _price_drop_pct = (price_low_early - price_low_late) / price_low_early if price_low_early > 0 else 0.0
-                    _div_strength = min(1.0, _price_drop_pct / 0.03)
-            if not _div_detected and len(cvd_floats) >= 10 and len(closes) >= 10:
-                # 10-candle fallback for shorter divergence structures
-                price_low_early = min(closes[-10:-5])
-                price_low_late = min(closes[-5:])
-                cvd_low_early = min(cvd_floats[-10:-5])
-                cvd_low_late = min(cvd_floats[-5:])
-                if price_low_late < price_low_early and cvd_low_late > cvd_low_early:
-                    _div_detected = True
-                    _price_drop_pct = (price_low_early - price_low_late) / price_low_early if price_low_early > 0 else 0.0
-                    _div_strength = min(1.0, _price_drop_pct / 0.02)
+        # ── Divergence detection: HTF 15m path ───────────────────────
+        # 15m CVD + 15m close divergence is the structurally-correct
+        # read.  Fall back to legacy 5m series when 15m unavailable
+        # (warmup / test fixtures that don't seed 15m data).
+        cvd_15m_data = smc_data.get("cvd_15m")
+        candles_15m = candles.get("15m") or {}
+        closes_15m = candles_15m.get("close") or []
+        _uses_15m_cvd = (
+            cvd_15m_data is not None
+            and isinstance(cvd_15m_data, list)
+            and len(cvd_15m_data) >= _DIV_CONT_15M_LOOKBACK_MIN
+            and len(closes_15m) >= _DIV_CONT_15M_LOOKBACK_MIN
+        )
+
+        _div_detected = False
+        _div_strength = 0.0
+        if _uses_15m_cvd:
+            cvd_15m_f = [float(v) for v in cvd_15m_data]
+            closes_15m_f = [float(c) for c in closes_15m]
+            _aligned_len = min(len(cvd_15m_f), len(closes_15m_f))
+            cvd_15m_f = cvd_15m_f[-_aligned_len:]
+            closes_15m_f = closes_15m_f[-_aligned_len:]
+
+            for _win in (_DIV_CONT_15M_LOOKBACK, _DIV_CONT_15M_LOOKBACK_MIN):
+                if _aligned_len < _win or _win < 4:
+                    continue
+                _half = _win // 2
+                _early_price = closes_15m_f[-_win:-_half]
+                _late_price = closes_15m_f[-_half:]
+                _early_cvd = cvd_15m_f[-_win:-_half]
+                _late_cvd = cvd_15m_f[-_half:]
+                if not _early_price or not _late_price:
+                    continue
+                if direction == Direction.LONG:
+                    _ep, _lp = min(_early_price), min(_late_price)
+                    _ec, _lc = min(_early_cvd), min(_late_cvd)
+                    if _lp < _ep and _lc > _ec:
+                        _div_detected = True
+                        _drop = (_ep - _lp) / _ep if _ep > 0 else 0.0
+                        _div_strength = min(1.0, _drop / 0.03)
+                        break
+                else:
+                    _ep, _lp = max(_early_price), max(_late_price)
+                    _ec, _lc = max(_early_cvd), max(_late_cvd)
+                    if _lp > _ep and _lc < _ec:
+                        _div_detected = True
+                        _rise = (_lp - _ep) / _ep if _ep > 0 else 0.0
+                        _div_strength = min(1.0, _rise / 0.03)
+                        break
             if not _div_detected:
                 return self._reject("cvd_divergence_failed")
-            _div_label: str = "BULLISH"
+            _div_label: str = "BULLISH" if direction == Direction.LONG else "BEARISH"
         else:
-            _div_detected = False
-            if _has_20:
-                price_high_early = max(closes[-20:-10])
-                price_high_late = max(closes[-10:])
-                cvd_high_early = max(cvd_floats[-20:-10])
-                cvd_high_late = max(cvd_floats[-10:])
-                if price_high_late > price_high_early and cvd_high_late < cvd_high_early:
-                    _div_detected = True
-                    _price_rise_pct = (price_high_late - price_high_early) / price_high_early if price_high_early > 0 else 0.0
-                    _div_strength = min(1.0, _price_rise_pct / 0.03)
-            if not _div_detected and len(cvd_floats) >= 10 and len(closes) >= 10:
-                price_high_early = max(closes[-10:-5])
-                price_high_late = max(closes[-5:])
-                cvd_high_early = max(cvd_floats[-10:-5])
-                cvd_high_late = max(cvd_floats[-5:])
-                if price_high_late > price_high_early and cvd_high_late < cvd_high_early:
-                    _div_detected = True
-                    _price_rise_pct = (price_high_late - price_high_early) / price_high_early if price_high_early > 0 else 0.0
-                    _div_strength = min(1.0, _price_rise_pct / 0.02)
-            if not _div_detected:
-                return self._reject("cvd_divergence_failed")
-            _div_strength = _div_strength if _div_detected else 0.0
-            _div_label = "BEARISH"
+            # ── Legacy 5m-divergence fallback ─────────────────────────
+            cvd_data = smc_data.get("cvd")
+            if cvd_data is None:
+                return self._reject("missing_cvd")
+            cvd_values = cvd_data if isinstance(cvd_data, list) else cvd_data.get("values", [])
+            if len(cvd_values) < 10:
+                return self._reject("cvd_insufficient")
+            cvd_floats = [float(v) for v in cvd_values]
+
+            _has_20 = len(cvd_floats) >= 20 and len(closes) >= 20
+            if direction == Direction.LONG:
+                if _has_20:
+                    price_low_early = min(closes[-20:-10])
+                    price_low_late = min(closes[-10:])
+                    cvd_low_early = min(cvd_floats[-20:-10])
+                    cvd_low_late = min(cvd_floats[-10:])
+                    if price_low_late < price_low_early and cvd_low_late > cvd_low_early:
+                        _div_detected = True
+                        _drop = (price_low_early - price_low_late) / price_low_early if price_low_early > 0 else 0.0
+                        _div_strength = min(1.0, _drop / 0.03)
+                if not _div_detected and len(cvd_floats) >= 10 and len(closes) >= 10:
+                    price_low_early = min(closes[-10:-5])
+                    price_low_late = min(closes[-5:])
+                    cvd_low_early = min(cvd_floats[-10:-5])
+                    cvd_low_late = min(cvd_floats[-5:])
+                    if price_low_late < price_low_early and cvd_low_late > cvd_low_early:
+                        _div_detected = True
+                        _drop = (price_low_early - price_low_late) / price_low_early if price_low_early > 0 else 0.0
+                        _div_strength = min(1.0, _drop / 0.02)
+                if not _div_detected:
+                    return self._reject("cvd_divergence_failed")
+                _div_label = "BULLISH"
+            else:
+                if _has_20:
+                    price_high_early = max(closes[-20:-10])
+                    price_high_late = max(closes[-10:])
+                    cvd_high_early = max(cvd_floats[-20:-10])
+                    cvd_high_late = max(cvd_floats[-10:])
+                    if price_high_late > price_high_early and cvd_high_late < cvd_high_early:
+                        _div_detected = True
+                        _rise = (price_high_late - price_high_early) / price_high_early if price_high_early > 0 else 0.0
+                        _div_strength = min(1.0, _rise / 0.03)
+                if not _div_detected and len(cvd_floats) >= 10 and len(closes) >= 10:
+                    price_high_early = max(closes[-10:-5])
+                    price_high_late = max(closes[-5:])
+                    cvd_high_early = max(cvd_floats[-10:-5])
+                    cvd_high_late = max(cvd_floats[-5:])
+                    if price_high_late > price_high_early and cvd_high_late < cvd_high_early:
+                        _div_detected = True
+                        _rise = (price_high_late - price_high_early) / price_high_early if price_high_early > 0 else 0.0
+                        _div_strength = min(1.0, _rise / 0.02)
+                if not _div_detected:
+                    return self._reject("cvd_divergence_failed")
+                _div_label = "BEARISH"
 
         ind = indicators.get("5m", {})
         ema9 = ind.get("ema9_last")
