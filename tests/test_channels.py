@@ -5838,3 +5838,249 @@ class TestTpeH1TrendGate:
         )
         assert sig is not None
         assert sig.setup_class == "TREND_PULLBACK_EMA"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# DIVERGENCE_CONTINUATION — HTF 15m CVD + 1H trend gate
+# (OWNER_BRIEF §3.4a row 3 — "HTF Structure, LTF Entry")
+# ─────────────────────────────────────────────────────────────────────
+
+def _div_cont_smc(cvd_15m=None, cvd_5m=None):
+    fvg = [{"top": 105.0, "bottom": 100.0, "direction": "BULLISH"}]
+    return {
+        "fvg": fvg,
+        "orderblocks": [],
+        "sweeps": [],
+        "mss": None,
+        "pair_profile": None,
+        "regime_context": None,
+        "cvd": cvd_5m if cvd_5m is not None else [float(i) for i in range(20)],
+        "cvd_15m": cvd_15m,
+        "funding_rate": None,
+    }
+
+
+def _div_cont_5m_long_setup(close=100.0):
+    """5m candles + indicators staged for a LONG DIV_CONT entry timing.
+
+    Late window has a lower low than early — combined with bullish 15m
+    CVD divergence this exercises the HTF detection + LTF entry pattern.
+    """
+    n = 25
+    closes = [close] * n
+    closes[-5] = close * 0.97
+    highs = [c * 1.002 for c in closes]
+    lows = [c * 0.998 for c in closes]
+    return {
+        "close": closes,
+        "high": highs,
+        "low": lows,
+        "volume": [1000.0] * n,
+    }
+
+
+def _div_cont_15m_bullish_div_closes(ema=100.0, n=14):
+    """15m closes with a lower-low in the late window (bullish hidden div)."""
+    closes = [ema] * n
+    closes[-3] = ema * 0.985  # late-window LL
+    return closes
+
+
+def _div_cont_15m_bearish_div_closes(ema=100.0, n=14):
+    """15m closes with a higher-high in the late window (bearish hidden div)."""
+    closes = [ema] * n
+    closes[-3] = ema * 1.015  # late-window HH
+    return closes
+
+
+def _div_cont_15m_cvd_bullish(base=50.0, n=14):
+    """CVD higher low in late window (absorption supports bullish div)."""
+    cvd = [base] * n
+    for i in range(2, 5):
+        cvd[i] = base - 20.0  # early window: low CVD
+    for i in range(n - 5, n - 2):
+        cvd[i] = base - 5.0  # late window: HIGHER low (absorption)
+    return cvd
+
+
+def _div_cont_15m_cvd_bearish(base=50.0, n=14):
+    """CVD lower high in late window (distribution supports bearish div)."""
+    cvd = [base] * n
+    for i in range(2, 5):
+        cvd[i] = base + 20.0  # early window: high CVD
+    for i in range(n - 5, n - 2):
+        cvd[i] = base + 5.0  # late window: LOWER high (distribution)
+    return cvd
+
+
+def _div_cont_5m_indicators_long(close=100.0, atr=0.2):
+    return {
+        "5m": {
+            "ema9_last": close * 1.015,
+            "ema21_last": close,
+            "atr_last": atr,
+            "rsi_last": 48.0,
+            "macd_histogram_last": 0.1,
+            "macd_histogram_prev": 0.05,
+            "adx_last": 28.0,
+        },
+    }
+
+
+def _div_cont_h1_bullish(ema21=100.0, ema50=98.0, ema21_prev=99.7):
+    return {
+        "ema21_last": ema21,
+        "ema50_last": ema50,
+        "ema21_prev": ema21_prev,
+        "atr_last": 0.4,
+    }
+
+
+def _div_cont_h1_bearish(ema21=100.0, ema50=102.0, ema21_prev=100.3):
+    return {
+        "ema21_last": ema21,
+        "ema50_last": ema50,
+        "ema21_prev": ema21_prev,
+        "atr_last": 0.4,
+    }
+
+
+class TestDivContHtfGate:
+    """OWNER_BRIEF §3.4a row 3 — DIV_CONT detection on 15m CVD + 15m close
+    divergence, direction from 1H EMA21/50 alignment + slope, entry on 5m."""
+
+    def test_htf_long_path_accepts(self):
+        """1H bullish + 15m bullish CVD divergence + 5m LONG entry → fires."""
+        ind = _div_cont_5m_indicators_long()
+        ind["1h"] = _div_cont_h1_bullish()
+        smc = _div_cont_smc(cvd_15m=_div_cont_15m_cvd_bullish())
+        candles = {
+            "5m": _div_cont_5m_long_setup(),
+            "15m": {"close": _div_cont_15m_bullish_div_closes()},
+        }
+        ch = ScalpChannel()
+        sig = ch._evaluate_divergence_continuation(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="",
+        )
+        assert sig is not None
+        assert sig.setup_class == "DIVERGENCE_CONTINUATION"
+        assert sig.direction == Direction.LONG
+
+    def test_h1_trend_misaligned_rejects(self):
+        """Flat 1H (ema21 == ema50) → reject h1_trend_not_aligned even
+        when 15m CVD divergence is present.  1H is authoritative."""
+        ind = _div_cont_5m_indicators_long()
+        ind["1h"] = _div_cont_h1_bullish(ema21=100.0, ema50=100.0)  # flat
+        smc = _div_cont_smc(cvd_15m=_div_cont_15m_cvd_bullish())
+        candles = {
+            "5m": _div_cont_5m_long_setup(),
+            "15m": {"close": _div_cont_15m_bullish_div_closes()},
+        }
+        ch = ScalpChannel()
+        sig = ch._evaluate_divergence_continuation(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "h1_trend_not_aligned"
+
+    def test_h1_slope_against_alignment_rejects(self):
+        """1H bullish alignment but ema21_prev > ema21 (falling slope) → reject."""
+        ind = _div_cont_5m_indicators_long()
+        ind["1h"] = _div_cont_h1_bullish(ema21=100.0, ema50=98.0, ema21_prev=100.5)
+        smc = _div_cont_smc(cvd_15m=_div_cont_15m_cvd_bullish())
+        candles = {
+            "5m": _div_cont_5m_long_setup(),
+            "15m": {"close": _div_cont_15m_bullish_div_closes()},
+        }
+        ch = ScalpChannel()
+        sig = ch._evaluate_divergence_continuation(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "h1_trend_not_aligned"
+
+    def test_h1_aligned_but_no_15m_cvd_divergence_rejects(self):
+        """1H bullish + 15m CVD that LACKS divergence (CVD flat across
+        windows) → reject cvd_divergence_failed.  15m detection is
+        the structural test that must pass even when direction is
+        valid."""
+        ind = _div_cont_5m_indicators_long()
+        ind["1h"] = _div_cont_h1_bullish()
+        # CVD with no divergence — flat across all bars.
+        flat_cvd_15m = [50.0] * 14
+        smc = _div_cont_smc(cvd_15m=flat_cvd_15m)
+        candles = {
+            "5m": _div_cont_5m_long_setup(),
+            "15m": {"close": _div_cont_15m_bullish_div_closes()},
+        }
+        ch = ScalpChannel()
+        sig = ch._evaluate_divergence_continuation(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "cvd_divergence_failed"
+
+    def test_htf_short_path_accepts(self):
+        """1H bearish + 15m bearish CVD divergence → SHORT fires."""
+        # 5m SHORT entry timing: ema9 < ema21 + close near ema21 + HH late
+        n = 25
+        closes = [100.0] * n
+        closes[-5] = 103.0  # late-window HH
+        highs = [c * 1.002 for c in closes]
+        lows = [c * 0.998 for c in closes]
+        m5 = {
+            "close": closes, "high": highs, "low": lows,
+            "volume": [1000.0] * n,
+        }
+        ind = {
+            "5m": {
+                "ema9_last": 98.5,
+                "ema21_last": 100.0,
+                "atr_last": 0.2,
+                "rsi_last": 52.0,
+                "macd_histogram_last": -0.1,
+                "macd_histogram_prev": -0.05,
+                "adx_last": 28.0,
+            },
+            "1h": _div_cont_h1_bearish(),
+        }
+        smc = _div_cont_smc(cvd_15m=_div_cont_15m_cvd_bearish())
+        candles = {
+            "5m": m5,
+            "15m": {"close": _div_cont_15m_bearish_div_closes()},
+        }
+        ch = ScalpChannel()
+        sig = ch._evaluate_divergence_continuation(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="",
+        )
+        assert sig is not None
+        assert sig.setup_class == "DIVERGENCE_CONTINUATION"
+        assert sig.direction == Direction.SHORT
+
+    def test_legacy_5m_path_when_15m_cvd_absent(self):
+        """No 15m CVD seeded (cvd_15m=None) + 1H absent → fall through
+        to legacy 5m-divergence + 5m-regime fallback.  Backward-compat
+        with existing 17 DIV_CONT scoring tests."""
+        ind = _div_cont_5m_indicators_long()
+        # No "1h" key → legacy regime path.
+        # No cvd_15m key → legacy 5m divergence path.
+        smc = _div_cont_smc(cvd_15m=None)
+        # Seed 5m CVD for legacy bullish divergence.
+        smc["cvd"] = [50.0 if i < 10 else 45.0 for i in range(20)]
+        smc["cvd"][2] = 30.0  # early-window LL on CVD
+        smc["cvd"][12] = 40.0  # late-window: higher low on CVD
+        candles = {"5m": _div_cont_5m_long_setup()}
+        ch = ScalpChannel()
+        sig = ch._evaluate_divergence_continuation(
+            "BTCUSDT", candles, ind, smc, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        # Legacy path should at least not blow up; signal may or may not
+        # fire depending on legacy detection windows.  The point: no
+        # h1_trend_not_aligned or cvd_15m-related reject.
+        if sig is None:
+            assert ch._active_no_signal_reason not in (
+                "h1_trend_not_aligned",
+                "cvd_15m_insufficient",
+            )
+        else:
+            assert sig.setup_class == "DIVERGENCE_CONTINUATION"
