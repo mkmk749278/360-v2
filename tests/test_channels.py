@@ -3,7 +3,7 @@
 import pytest
 import numpy as np
 
-from src.channels.scalp import ScalpChannel
+from src.channels.scalp import ScalpChannel, _CLS_DISABLED_2026_05_17
 from src.smc import Direction, LiquiditySweep, MSSSignal
 
 
@@ -446,6 +446,154 @@ class TestScalpChannel:
             )
         else:
             assert sig.direction == Direction.LONG
+
+    # ------------------------------------------------------------------
+    # LSR HTF POI anchor (OWNER_BRIEF §3.4a, PR #5 — 2026-05-17)
+    # ------------------------------------------------------------------
+    # The anchor requires the swept level to sit within ATR×2 of a multi-TF
+    # LevelBook entry with quality CLUSTERED (>=2 source TFs) or VP_ANCHORED
+    # (source_tf == "vp").  ``level_book_levels`` key-absent or None means
+    # "LevelBook not refreshed" — production scanner always sets at least
+    # ``[]``, so this fail-open branch only triggers in tests that don't
+    # build the key (intentional — existing LSR tests continue to pass
+    # without modification).  Tests below explicitly set the key to
+    # exercise the anchor logic.
+
+    def _level(self, price, source_tf="1h", source_tfs=None):
+        """Minimal Level stand-in — duck-types the real LevelBook.Level dataclass."""
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            price=float(price),
+            source_tf=source_tf,
+            source_tfs=source_tfs if source_tfs is not None else [source_tf],
+        )
+
+    def test_lsr_htf_poi_anchor_passes_with_clustered_level(self):
+        """A CLUSTERED level (multi-TF, source_tfs has >=2 entries) within
+        ATR*2 of the swept price → anchor satisfied → signal not blocked by it."""
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        # ATR ~0.5 default; ATR*2 = 1.0 band → level at 98.5 is within band of 99.
+        smc_data = {
+            "sweeps": [sweep],
+            "level_book_levels": [self._level(98.5, source_tfs=["1h", "4h"])],
+        }
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        # Path may still reject for other reasons (FVG missing etc.), but
+        # the htf_poi_unanchored token must NOT be raised when a qualifying
+        # level is in band.
+        if sig is None:
+            assert ch._active_no_signal_reason != "htf_poi_unanchored"
+
+    def test_lsr_htf_poi_anchor_passes_with_vp_anchored_level(self):
+        """A VP_ANCHORED level (source_tf == 'vp') within ATR*2 → anchor satisfied."""
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        smc_data = {
+            "sweeps": [sweep],
+            "level_book_levels": [self._level(99.4, source_tf="vp")],
+        }
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        if sig is None:
+            assert ch._active_no_signal_reason != "htf_poi_unanchored"
+
+    def test_lsr_htf_poi_anchor_rejects_when_no_qualifying_level(self):
+        """LevelBook refreshed (empty list) → no qualifying level → reject."""
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        smc_data = {
+            "sweeps": [sweep],
+            "level_book_levels": [],  # refreshed but empty
+        }
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        assert sig is None
+        assert ch._active_no_signal_reason == "htf_poi_unanchored"
+
+    def test_lsr_htf_poi_anchor_rejects_single_tf_level(self):
+        """Single-TF level (neither CLUSTERED nor VP_ANCHORED) doesn't qualify.
+
+        OWNER_BRIEF §3.4a — round numbers / single-TF pivots in isolation
+        are psychological noise without institutional defence; only multi-
+        TF clusters or volume-profile anchors qualify.
+        """
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        smc_data = {
+            "sweeps": [sweep],
+            "level_book_levels": [self._level(99.0, source_tfs=["1h"])],
+        }
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        assert sig is None
+        assert ch._active_no_signal_reason == "htf_poi_unanchored"
+
+    def test_lsr_htf_poi_anchor_rejects_out_of_band_level(self):
+        """Qualifying level but too far from swept price → anchor not satisfied.
+
+        Band is ATR*2.  With default test ATR ~0.5 (from _make_indicators),
+        band ≈ 1.0 around price 99.  A level at 95 (4 units away) is well
+        outside the band even if it's CLUSTERED.
+        """
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        smc_data = {
+            "sweeps": [sweep],
+            "level_book_levels": [self._level(95.0, source_tfs=["1h", "4h", "1d"])],
+        }
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        assert sig is None
+        assert ch._active_no_signal_reason == "htf_poi_unanchored"
+
+    def test_lsr_htf_poi_anchor_bypassed_when_levelbook_uninitialised(self):
+        """``level_book_levels`` key absent → LevelBook not refreshed (test
+        scenario or pre-warmup engine state).  Anchor check is bypassed
+        to keep existing test fixtures and warmup periods working.
+        Production scanner sets the key to at least ``[]`` always, so
+        this branch only triggers when the data is genuinely unavailable.
+        """
+        ch = ScalpChannel()
+        candles = {"5m": _make_candles(60)}
+        sweep = LiquiditySweep(
+            index=59, direction=Direction.LONG,
+            sweep_level=99, close_price=99.05,
+            wick_high=101, wick_low=98,
+        )
+        indicators = {"5m": _make_indicators(adx_val=30, mom=0.5, ema9=101, ema21=100)}
+        smc_data = {"sweeps": [sweep]}  # NO level_book_levels key at all
+        sig = ch._evaluate_standard("BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000)
+        # The anchor logic must NOT raise htf_poi_unanchored when the key
+        # is absent; the path may still reject for other reasons.
+        if sig is None:
+            assert ch._active_no_signal_reason != "htf_poi_unanchored"
 
     @pytest.mark.xfail(reason=(
         "FUNDING_EXTREME no longer hard-blocks the QUIET regime — Audit-3 "
@@ -2872,6 +3020,14 @@ def _cls_sweep_short(sweep_level=101.0, sweep_index=-3):
     )
 
 
+@pytest.mark.skipif(
+    _CLS_DISABLED_2026_05_17,
+    reason=(
+        "CLS disabled 2026-05-17 per OWNER_BRIEF §3.4a (merged into LSR). "
+        "Audit-fix tests exercise CLS-internal rejection tokens that no "
+        "longer execute when CLS_DISABLED_2026_05_17=true."
+    ),
+)
 class TestContinuationLiquiditySweepAuditFixes:
     """Path audit #12 fixes:
     - `close <= 0` now emits `invalid_price` (was `momentum_reject`).
@@ -2923,8 +3079,22 @@ class TestContinuationLiquiditySweepAuditFixes:
         )
 
 
+@pytest.mark.skipif(
+    _CLS_DISABLED_2026_05_17,
+    reason=(
+        "CLS disabled 2026-05-17 per OWNER_BRIEF §3.4a (merged into LSR via "
+        "the HTF POI anchor).  All CLS internal-behaviour tests skipped; "
+        "restore via CLS_DISABLED_2026_05_17=false to re-run them."
+    ),
+)
 class TestContinuationLiquiditySweep:
-    """Tests for the CONTINUATION_LIQUIDITY_SWEEP path (roadmap step 5)."""
+    """Tests for the CONTINUATION_LIQUIDITY_SWEEP path (roadmap step 5).
+
+    2026-05-17 — CLS disabled per OWNER_BRIEF §3.4a (merged into LSR via the
+    HTF POI anchor).  Class-level ``skipif`` above gates the entire suite on
+    the env override so the doctrine state and the test-runner state stay
+    in sync.
+    """
 
     def _call_long(self, candles, indicators, smc_data, regime="TRENDING_UP"):
         ch = ScalpChannel()

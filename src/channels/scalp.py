@@ -38,6 +38,16 @@ log = get_logger("scalp")
 # EMA tests that bounce are no longer rejected.
 _HTF_EMA_REJECTION_PCT: float = float(os.getenv("HTF_EMA_REJECTION_PCT", "0.0015"))
 
+# LSR HTF POI anchor — multiplier applied to ATR for the band-width check
+# that anchors the swept level to a multi-TF LevelBook entry.  Per
+# OWNER_BRIEF §3.4a "HTF Structure, LTF Entry" — LSR sweeps must occur at
+# structurally significant HTF levels (CLUSTERED in LevelBook or
+# VP_ANCHORED), not at arbitrary 5m local extrema.  ATR×2 is wider than
+# chartist-eye confluence (~0.3%) because the sweep candle itself can
+# wick 1-2 ATR past the level before reclaiming — we anchor on the swept
+# level, not the close.  Env-overridable per B8.
+_LSR_POI_ANCHOR_ATR_MULT: float = float(os.getenv("LSR_POI_ANCHOR_ATR_MULT", "2.0"))
+
 # WHALE_MOMENTUM thresholds (absorbed from former TapeChannel).  Env-overridable
 # per B8 so operators can tune for current market conditions without redeploy.
 _WHALE_DELTA_MIN_RATIO: float = float(os.getenv("WHALE_DELTA_MIN_RATIO", "2.0"))
@@ -139,6 +149,14 @@ _CLS_VALID_REGIMES: frozenset = frozenset({
     "TRENDING_UP", "TRENDING_DOWN", "STRONG_TREND", "WEAK_TREND",
     "BREAKOUT_EXPANSION",
 })
+# OWNER_BRIEF §3.4a — CLS disabled 2026-05-17, merged into LSR via the
+# HTF POI anchor.  Default True (disabled); flip to False via env to
+# re-enable if LSR's HTF anchor proves to under-catch trend-aligned
+# sweeps in the observation window.
+_CLS_DISABLED_2026_05_17: bool = (
+    os.getenv("CLS_DISABLED_2026_05_17", "true").lower()
+    not in {"0", "false", "no", "off"}
+)
 # Max candle offset (back from current) where a sweep is still considered
 # "recent enough" to anchor a continuation entry.
 _CLS_SWEEP_WINDOW: int = 10
@@ -1043,28 +1061,67 @@ class ScalpChannel(BaseChannel):
         if not mtf_ok:
             return self._reject("mtf_reject")
 
-        # HTF EMA200 rejection gate: reject entry if price is within 0.15% of EMA200
-        # AND moving toward it (not if it just touched and bounced).
-        # Use 1h indicators for HTF EMA200 if available, else 5m.
-        _htf_ema200 = indicators_1h.get("ema200_last") or ind.get("ema200_last")
-        if _htf_ema200 is not None and _htf_ema200 > 0:
-            _ema200_diff_pct = abs(close - _htf_ema200) / _htf_ema200
-            if _ema200_diff_pct < _HTF_EMA_REJECTION_PCT:
-                # Only reject if price is moving TOWARD the EMA200 (not bouncing away)
-                _prev_close = float(m5["close"][-2]) if len(m5["close"]) >= 2 else close
-                _moving_toward = (
-                    (direction == Direction.LONG and close < _htf_ema200 and close < _prev_close)
-                    or (direction == Direction.SHORT and close > _htf_ema200 and close > _prev_close)
-                )
-                if _moving_toward:
-                    return self._reject("htf_ema_reject")
-
-        # Structure-based SL: use swept level ± buffer if available, else ATR fallback
+        # HTF POI anchor (OWNER_BRIEF §3.4a — "HTF Structure, LTF Entry").
+        #
+        # The 2026-05-17 audit on 654 closed signals found LSR was the only
+        # path with passable direction-call quality (24% MFE=0 vs 39-78% on
+        # other paths) but still net-negative at -1.13% NET/sig.  Root cause:
+        # SMCDetector finds sweeps wherever it can — 5m local lows, micro
+        # supports, intra-range noise — not just sweeps of structurally
+        # significant HTF levels.  Many of the LSR signals were "real
+        # sweeps of nothing-levels."
+        #
+        # Fix: anchor the sweep to a multi-TF LevelBook entry.  Quality
+        # criteria mirror the §3.5 chartist-eye stack: a level qualifies
+        # if it's CLUSTERED (>=2 source TFs converged on the same band) or
+        # VP_ANCHORED (POC / VAH / VAL from the volume-profile feed).
+        # Single-TF round-number-only levels do NOT qualify — they're
+        # psychological noise without institutional defence.
+        #
+        # Distance criterion: ATR * 2.  Wider than chartist-eye confluence
+        # query (CONFLUENCE_TOLERANCE_PCT ≈ 0.3%) because a sweep candle
+        # can wick 1-2 ATR past the level before reclaiming.
         _sweep = sweeps[0] if sweeps else None
         _sweep_level = None
         if _sweep is not None:
             # Try multiple attribute names used by different SMC implementations
             _sweep_level = getattr(_sweep, "level", None) or getattr(_sweep, "price", None) or getattr(_sweep, "sweep_level", None)
+        if _sweep_level is not None and float(_sweep_level) > 0:
+            _sweep_level_f = float(_sweep_level)
+            # Sentinel distinction: ``None`` / key-absent means "LevelBook has
+            # not been refreshed for this scan cycle" — happens in unit tests
+            # that build a synthetic ``smc_data`` without the scanner's
+            # assembly pass.  Empty list means "refreshed, but no levels
+            # found for this symbol" — that IS a hard-block per §3.4a.  The
+            # production path in ``Scanner._build_scan_context`` always sets
+            # this key (to at least ``[]``) when the refresh succeeds, so
+            # this fail-open branch only triggers in test or pre-warm-up
+            # scenarios where the LevelBook is genuinely uninitialised.
+            _lb_levels_raw = smc_data.get("level_book_levels")
+            if _lb_levels_raw is not None:
+                _anchor_band = atr_val * _LSR_POI_ANCHOR_ATR_MULT
+                _anchored = False
+                for _lv in _lb_levels_raw:
+                    # Quality gate — CLUSTERED (multi-TF cluster, len(source_tfs) >= 2)
+                    # or VP_ANCHORED (volume-profile-sourced).  Skip everything else
+                    # (single-TF pivots, round numbers in isolation).
+                    _src_tfs = getattr(_lv, "source_tfs", None) or [getattr(_lv, "source_tf", "")]
+                    _is_clustered = isinstance(_src_tfs, list) and len(_src_tfs) >= 2
+                    _is_vp_anchored = getattr(_lv, "source_tf", "") == "vp" or "vp" in (_src_tfs or [])
+                    if not (_is_clustered or _is_vp_anchored):
+                        continue
+                    _lv_price = float(getattr(_lv, "price", 0.0) or 0.0)
+                    if _lv_price <= 0:
+                        continue
+                    if abs(_lv_price - _sweep_level_f) <= _anchor_band:
+                        _anchored = True
+                        break
+                if not _anchored:
+                    # Doctrine-correct rejection: the sweep wasn't anchored to a
+                    # structurally significant HTF level.  This is the LSR path's
+                    # primary quality filter; pre-2026-05-17 it didn't exist and
+                    # the path fired on any detected sweep.
+                    return self._reject("htf_poi_unanchored")
         if _sweep_level is not None and float(_sweep_level) > 0:
             _sweep_level = float(_sweep_level)
             if direction == Direction.LONG:
@@ -3771,7 +3828,26 @@ class ScalpChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
-        """CONTINUATION_LIQUIDITY_SWEEP: sweep-confirmed trend continuation.
+        """CONTINUATION_LIQUIDITY_SWEEP — DISABLED 2026-05-17 per OWNER_BRIEF §3.4a.
+
+        After PR #5's HTF POI anchor lands on LSR (_evaluate_standard), any sweep
+        at a real HTF support during an uptrend automatically falls into LSR's
+        catchment — the trend-aligned subset of LSR signals IS the continuation
+        case.  Maintaining a separate evaluator with an additional trend-alignment
+        constraint shrinks the sample without adding edge: 2026-05-17 audit on
+        654 closed signals showed CLS at -2.36% NET/sig vs LSR at -1.13% NET/sig,
+        which the doctrine attributes to CLS firing on micro stop-runs at
+        nothing-levels (the same root cause LSR's HTF POI anchor addresses, but
+        without HTF anchoring CLS still suffers).
+
+        Disablement, not deletion: returning ``None`` here keeps the enum,
+        telemetry constants, and historical-record compatibility intact (so
+        old signal records remain readable).  Reversible via
+        ``CLS_DISABLED_2026_05_17=false`` env override if the LSR HTF POI
+        anchor proves to under-catch trend-aligned sweeps in the
+        observation window.
+
+        Original pre-disablement docstring follows for archival reference:
 
         Setup logic:
         1. Trend is established via EMA9/EMA21 alignment (hard gate).
@@ -3791,6 +3867,14 @@ class ScalpChannel(BaseChannel):
         - No FVG or orderblock in target zone: +8 pts
         - Sweep is older (6–10 candles back, not 1–5): +5 pts
         """
+        # 2026-05-17 disablement (OWNER_BRIEF §3.4a).  Returns the rejection
+        # tag ``cls_disabled_merged_into_lsr`` so the truth report still
+        # surfaces non-zero suppression telemetry for this path during the
+        # observation window — distinguishes "disabled by doctrine" from
+        # "no candidates" cleanly.  Reversible per ``CLS_DISABLED_2026_05_17``.
+        if _CLS_DISABLED_2026_05_17:
+            return self._reject("cls_disabled_merged_into_lsr")
+
         # Hard block regimes where the continuation thesis does not apply:
         # - VOLATILE/VOLATILE_UNSUITABLE: chaotic orderflow invalidates structure
         # - RANGING/QUIET: no directional trend exists to continue

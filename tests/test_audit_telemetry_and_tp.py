@@ -22,7 +22,7 @@ import numpy as np
 import pytest
 
 from src.channels import scalp as scalp_module
-from src.channels.scalp import ScalpChannel
+from src.channels.scalp import ScalpChannel, _CLS_DISABLED_2026_05_17
 from src.smc import Direction, LiquiditySweep
 
 
@@ -594,6 +594,14 @@ class TestQ4BHelperWiredIntoEvaluators:
 
     # ── CLS (`_evaluate_continuation_liquidity_sweep`) ────────────────────
 
+    @pytest.mark.skipif(
+        _CLS_DISABLED_2026_05_17,
+        reason=(
+            "CLS disabled 2026-05-17 per OWNER_BRIEF §3.4a (merged into LSR). "
+            "The helper-wire check assumes the evaluator runs to the SL/TP "
+            "ladder step, which it no longer does."
+        ),
+    )
     def test_cls_calls_helper(self, monkeypatch):
         calls = self._spy(monkeypatch)
         ch = ScalpChannel()

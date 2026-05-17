@@ -2427,6 +2427,27 @@ class Scanner:
         smc_data["__dependency_source_state"] = dependency_source_state
         smc_data["__dependency_state"] = self._build_dependency_readiness(symbol, smc_data)
 
+        # HTF level lookup for evaluators that need to anchor signals to
+        # structural HTF levels (OWNER_BRIEF §3.4a — "HTF Structure, LTF
+        # Entry").  LSR consumes this in the HTF POI anchor check.  Other
+        # evaluators (SR_FLIP / FAR per upcoming PRs) will consume the same
+        # list once their per-path criteria fixes land.
+        #
+        # ``_refresh_level_book_if_stale`` is idempotent (per-symbol TTL),
+        # so calling it here AND from ``_prepare_signal`` (where the
+        # confluence bonus consumes the same data post-evaluator) is safe.
+        # The duplicate call costs at most one extra dict lookup per cycle
+        # in the steady state where the TTL hasn't elapsed.
+        try:
+            self._refresh_level_book_if_stale(symbol, candles)
+            smc_data["level_book_levels"] = self.level_book.get_levels(symbol)
+        except Exception as _lb_exc:
+            log.debug(
+                "LevelBook refresh/lookup failed at smc_data assembly for {}: {}",
+                symbol, _lb_exc,
+            )
+            smc_data["level_book_levels"] = []
+
         return ScanContext(
             candles=candles,
             indicators=indicators,
