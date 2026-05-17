@@ -4877,12 +4877,19 @@ class TestFailedAuctionReclaim:
         assert sig.tp1 > sig.entry, "TP1 must be above entry for LONG FAR."
 
     def test_long_tp1_has_minimum_1r_floor(self):
-        candles = {"5m": _make_far_candles_long(auction_wick_low=99.74, cur_close=100.2)}
+        # Wick depth bumped from 0.16 to 0.50 (struct_low − wick_low) so
+        # the auction wick exceeds the tightened ``_FAR_MIN_TAIL_ATR`` of
+        # 0.50 × ATR (= 0.25 at ATR 0.5).  Pre-2026-05-17 the threshold was
+        # 0.30 × ATR (= 0.15), which the original 0.16 wick narrowly passed.
+        candles = {"5m": _make_far_candles_long(auction_wick_low=99.4, cur_close=100.2)}
         sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
         assert sig is not None
         sl_dist = abs(sig.entry - sig.stop_loss)
         # Use tolerance: tp1 is rounded to 8 decimals; sl_dist isn't, so a strict
-        # >= check can fail by ~1e-12 when tp1 lands exactly at the 1R floor.
+        # >= check can fail by ~1e-12 when tp1 lands exactly at the floor.
+        # Test name says "1R floor" but post-2026-05-17 the actual floor
+        # is 2R (``_FAR_MIN_RR`` raised from 1.0 to 2.0).  Asserting the
+        # weaker 1R floor still holds — anything >= 2R trivially is >= 1R.
         assert sig.tp1 + 1e-8 >= sig.entry + sl_dist * 1.0
 
     def test_short_tp1_below_entry(self):
@@ -5467,3 +5474,163 @@ class TestQcbTp1RrFloor:
         )
         assert sig is not None
         assert sig.tp1 < sig.tp2 < sig.tp3
+
+
+# ============================================================================
+# FAR HTF anchor + R:R 2.0 floor (feat/far-htf-anchor-and-rr-floor)
+# OWNER_BRIEF §3.4a row 4 — "Detect on 1H structural level; Confirm on
+# 1H probe-and-reclaim; Enter on 5m reclaim candle"
+# ============================================================================
+
+
+class TestFarHtfAnchorAndRrFloor:
+    """OWNER_BRIEF §3.4a row 4 — when ``smc_data['level_book_levels']``
+    is populated (production path), FAR sources struct_high / struct_low
+    from multi-TF LevelBook entries (CLUSTERED or VP_ANCHORED) rather
+    than the legacy 5m extremes scan."""
+
+    def _call_long(self, candles, indicators, smc_data, regime="RANGING"):
+        ch = ScalpChannel()
+        return ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime=regime,
+        )
+
+    def _call_short(self, candles, indicators, smc_data, regime="RANGING"):
+        ch = ScalpChannel()
+        return ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime=regime,
+        )
+
+    def test_htf_path_rejects_when_no_qualifying_level(self):
+        """LevelBook refreshed but no CLUSTERED / VP_ANCHORED level on
+        either side → reject as ``no_htf_structural_level``."""
+        candles = {"5m": _make_far_candles_long(auction_wick_low=99.4, cur_close=100.2)}
+        smc = {"level_book_levels": []}  # refreshed, empty
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), smc)
+        assert sig is None
+
+    def test_htf_path_rejects_single_tf_level(self):
+        """Single-TF level doesn't qualify — only CLUSTERED (>=2 TFs) or
+        VP_ANCHORED counts."""
+        candles = {"5m": _make_far_candles_long(auction_wick_low=99.4, cur_close=100.2)}
+        smc = {"level_book_levels": [_lb_level(99.9, source_tfs=["1h"], type_="support")]}
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), smc)
+        assert sig is None
+
+    def test_htf_path_accepts_clustered_level_long(self):
+        """LONG FAR — multi-TF support at 99.9 → 5m wick to 99.4 below it
+        → close-back-inside at 100.2.  Path proceeds (subject to other
+        gates; the key is the HTF anchor was satisfied)."""
+        candles = {"5m": _make_far_candles_long(auction_wick_low=99.4, cur_close=100.2)}
+        smc = {
+            "fvg": [{"gap_high": 100.5, "gap_low": 99.8}],
+            "level_book_levels": [
+                _lb_level(99.9, source_tfs=["1h", "4h"], type_="support"),
+            ],
+        }
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), smc)
+        assert sig is not None
+        assert sig.setup_class == "FAILED_AUCTION_RECLAIM"
+        assert sig.direction == Direction.LONG
+
+    def test_htf_path_accepts_vp_anchored_level_short(self):
+        """SHORT FAR — VP_ANCHORED resistance from volume profile."""
+        candles = {"5m": _make_far_candles_short(auction_wick_high=100.6, cur_close=99.8)}
+        smc = {
+            "fvg": [{"gap_high": 100.5, "gap_low": 99.5}],
+            "level_book_levels": [
+                _lb_level(100.1, source_tf="vp", type_="resistance"),
+            ],
+        }
+        sig = self._call_short(candles, _far_indicators_short(atr=0.5), smc)
+        assert sig is not None
+        assert sig.direction == Direction.SHORT
+
+    def test_legacy_5m_fallback_when_level_book_absent(self):
+        """No ``level_book_levels`` key → fall through to the legacy
+        5m struct-scan path.  Preserves the existing FAR test surface
+        that doesn't seed LevelBook data."""
+        candles = {"5m": _make_far_candles_long(auction_wick_low=99.4, cur_close=100.2)}
+        # No level_book_levels key at all → fallback.
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
+        assert sig is not None
+        # Verify the legacy struct_low came from the 5m scan, not LevelBook
+        # (no HTF-rejection token appears on this path).
+        ch = ScalpChannel()
+        ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, _far_indicators_long(atr=0.5), {},
+            0.01, 10_000_000, regime="RANGING",
+        )
+        assert ch._active_no_signal_reason != "no_htf_structural_level"
+
+
+class TestFarRrFloorAndTightening:
+    """OWNER_BRIEF §3.2 / B11 — FAR R:R floor raised 1.0 → 2.0 so the
+    path is at least breakeven-EV at scalp win rates.  Tail + reclaim
+    thresholds also tightened (0.30 → 0.50 ATR, 0.10 → 0.25 ATR)."""
+
+    def _call_long(self, candles, indicators, smc_data, regime="RANGING"):
+        ch = ScalpChannel()
+        return ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime=regime,
+        )
+
+    def test_tp1_at_least_2r_floor_long(self):
+        """TP1 must be at least 2× SL distance from entry for LONG."""
+        candles = {"5m": _make_far_candles_long(auction_wick_low=99.4, cur_close=100.2)}
+        sig = self._call_long(candles, _far_indicators_long(atr=0.5), {})
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        assert sig.tp1 + 1e-8 >= sig.entry + sl_dist * 2.0, (
+            f"TP1 below 2R floor — entry={sig.entry}, sl_dist={sl_dist}, "
+            f"tp1={sig.tp1}, expected ≥ {sig.entry + sl_dist * 2.0}"
+        )
+
+    def test_tp1_at_least_2r_floor_short(self):
+        candles = {"5m": _make_far_candles_short()}
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, _far_indicators_short(atr=0.5), {},
+            0.01, 10_000_000, regime="RANGING",
+        )
+        assert sig is not None
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        assert sig.tp1 - 1e-8 <= sig.entry - sl_dist * 2.0
+
+    def test_rejects_shallow_auction_wick(self):
+        """Wick depth 0.10 (= 0.20 × ATR 0.5) → below 0.50 × ATR threshold
+        → reject as ``tail_too_small``.  Pre-2026-05-17 the threshold
+        was 0.30 × ATR which this fixture passed."""
+        candles = {"5m": _make_far_candles_long(
+            auction_wick_low=99.8,    # struct_low - wick = 99.9 - 99.8 = 0.10
+            cur_close=100.2,
+        )}
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, _far_indicators_long(atr=0.5), {},
+            0.01, 10_000_000, regime="RANGING",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "tail_too_small"
+
+    def test_rejects_shallow_reclaim(self):
+        """Reclaim distance 0.05 (= 0.10 × ATR 0.5) → below 0.25 × ATR
+        threshold → reject as ``reclaim_hold_failed``."""
+        candles = {"5m": _make_far_candles_long(
+            auction_wick_low=99.0,     # deep wick that passes tail gate
+            cur_close=99.95,           # close = struct_low(99.9) + 0.05 → too shallow
+        )}
+        ch = ScalpChannel()
+        sig = ch._evaluate_failed_auction_reclaim(
+            "BTCUSDT", candles, _far_indicators_long(atr=0.5), {},
+            0.01, 10_000_000, regime="RANGING",
+        )
+        assert sig is None
+        # Path emits ``reclaim_hold_failed`` when reclaim distance is
+        # below the threshold; the specific token name is path-internal.
+        assert ch._active_no_signal_reason in (
+            "reclaim_hold_failed", "auction_not_detected"
+        )
