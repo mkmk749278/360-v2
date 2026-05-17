@@ -187,6 +187,7 @@ class Bootstrap:
         #     Without this, CVD needs ~100 min of live trade streaming before
         #     the 20-candle lookback is satisfied.
         _cvd_seeded = 0
+        _cvd_15m_seeded = 0
         for _sym, _sym_candles in engine.data_store.candles.items():
             _kl_1m = _sym_candles.get("1m", {})
             _tbv = _kl_1m.get("taker_buy_vol_usd")
@@ -194,7 +195,21 @@ class Bootstrap:
             if _tbv is not None and _vusd is not None and len(_tbv) > 0:
                 engine._order_flow_store.seed_cvd_from_klines(_sym, _tbv, _vusd)
                 _cvd_seeded += 1
-        log.info("CVD boot seed complete: %d / %d pairs", _cvd_seeded, len(engine.data_store.candles))
+            # 15m CVD seed (OWNER_BRIEF §3.4a — HTF Structure, LTF Entry).
+            # Same taker_buy / total split as 1m, but on the 15m TF series so
+            # downstream divergence detection on 15m bars is immediately
+            # unblocked post-restart (avoids ~5h warmup at 20 × 15m).
+            _kl_15m = _sym_candles.get("15m", {})
+            _tbv_15m = _kl_15m.get("taker_buy_vol_usd")
+            _vusd_15m = _kl_15m.get("volume_usd")
+            if _tbv_15m is not None and _vusd_15m is not None and len(_tbv_15m) > 0:
+                engine._order_flow_store.seed_cvd_15m_from_klines(_sym, _tbv_15m, _vusd_15m)
+                _cvd_15m_seeded += 1
+        log.info(
+            "CVD boot seed complete: 1m=%d/%d, 15m=%d/%d pairs",
+            _cvd_seeded, len(engine.data_store.candles),
+            _cvd_15m_seeded, len(engine.data_store.candles),
+        )
 
         # 3. Load predictive model
         await engine.predictive.load_model()

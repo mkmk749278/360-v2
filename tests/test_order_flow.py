@@ -277,3 +277,61 @@ class TestOrderFlowStore:
         store = self._store()
         store.add_funding_rate("BTCUSDT", 0.0005)
         assert store.get_funding_rate("ETHUSDT") is None
+
+    # ---- 15m CVD aggregation (OWNER_BRIEF §3.4a — HTF Structure, LTF Entry) ----
+    # The 15m series is independent of the 1m-driven running CVD: a separate
+    # accumulator + deque keyed by 15m kline closes so downstream divergence
+    # detection on 15m bars has a genuinely 15m-aligned input series.
+
+    def test_15m_cvd_initial_state_empty(self):
+        store = self._store()
+        assert store.get_cvd_15m_history("BTCUSDT").size == 0
+
+    def test_15m_cvd_update_accumulates_running(self):
+        store = self._store()
+        # Net buy on first bar (+30), net sell on second (-10) → running 20
+        store.update_cvd_15m_from_kline("BTCUSDT", 100.0, 70.0)
+        store.snapshot_cvd_15m_at_candle_close("BTCUSDT")
+        store.update_cvd_15m_from_kline("BTCUSDT", 40.0, 50.0)
+        store.snapshot_cvd_15m_at_candle_close("BTCUSDT")
+        hist = store.get_cvd_15m_history("BTCUSDT")
+        assert hist.tolist() == pytest.approx([30.0, 20.0])
+
+    def test_15m_cvd_isolated_from_1m_cvd(self):
+        """Updating the 1m running CVD must not touch the 15m series and vice versa."""
+        store = self._store()
+        store.update_cvd_from_tick("BTCUSDT", 100.0, 50.0)  # 1m += 50
+        store.snapshot_cvd_at_candle_close("BTCUSDT")
+        # 15m series unaffected
+        assert store.get_cvd_15m_history("BTCUSDT").size == 0
+        store.update_cvd_15m_from_kline("BTCUSDT", 200.0, 100.0)  # 15m += 100
+        store.snapshot_cvd_15m_at_candle_close("BTCUSDT")
+        assert store.get_cvd_15m_history("BTCUSDT").tolist() == pytest.approx([100.0])
+        # 1m series unchanged by the 15m update — still has the one snapshot of 50
+        assert store.get_cvd_history("BTCUSDT").tolist() == pytest.approx([50.0])
+
+    def test_15m_cvd_seed_matches_incremental(self):
+        """Boot-time seed via array must produce the same series as incremental updates."""
+        seeded = self._store()
+        incremental = self._store()
+        taker_buy = np.array([100.0, 40.0, 80.0], dtype=float)
+        volume = np.array([170.0, 50.0, 120.0], dtype=float)
+        seeded.seed_cvd_15m_from_klines("BTCUSDT", taker_buy, volume)
+        for tb, vol in zip(taker_buy, volume):
+            incremental.update_cvd_15m_from_kline("BTCUSDT", float(tb), float(vol) - float(tb))
+            incremental.snapshot_cvd_15m_at_candle_close("BTCUSDT")
+        assert (
+            seeded.get_cvd_15m_history("BTCUSDT").tolist()
+            == pytest.approx(incremental.get_cvd_15m_history("BTCUSDT").tolist())
+        )
+
+    def test_15m_cvd_seed_handles_empty_arrays(self):
+        store = self._store()
+        store.seed_cvd_15m_from_klines("BTCUSDT", np.array([]), np.array([]))
+        assert store.get_cvd_15m_history("BTCUSDT").size == 0
+
+    def test_15m_cvd_isolated_by_symbol(self):
+        store = self._store()
+        store.update_cvd_15m_from_kline("BTCUSDT", 100.0, 60.0)
+        store.snapshot_cvd_15m_at_candle_close("BTCUSDT")
+        assert store.get_cvd_15m_history("ETHUSDT").size == 0

@@ -279,6 +279,16 @@ class OrderFlowStore:
         self._running_cvd: Dict[str, float] = {}
         # CVD values snapshotted at each candle close (candle-aligned for divergence)
         self._cvd_candle: Dict[str, Deque[float]] = {}
+        # 15m CVD aggregation — independent running sum + per-15m-close snapshot deque.
+        # The legacy `_cvd_candle` deque is snapshotted on every TF close event so its
+        # samples are interleaved 1m/5m/15m/1h points sharing one running sum — fine
+        # for the existing 5m-aligned divergence detector but unusable as a 15m series.
+        # 15m CVD is needed by DIVERGENCE_CONTINUATION (per OWNER_BRIEF §3.4a — divergence
+        # detection on 15m bars, entry timing on 5m FVG fill) and by any future evaluator
+        # that consumes HTF order flow.  Drives off the 15m kline taker_buy / total split
+        # — same fields used by `seed_cvd_from_klines` for the 1m series.
+        self._running_cvd_15m: Dict[str, float] = {}
+        self._cvd_15m_candle: Dict[str, Deque[float]] = {}
         # Latest funding rate (decimal) per symbol, updated by OIPoller.
         self._funding_rates: Dict[str, float] = {}
 
@@ -514,6 +524,80 @@ class OrderFlowStore:
     def get_cvd_history(self, symbol: str) -> np.ndarray:
         """Return the candle-aligned CVD history as a numpy array."""
         hist = self._cvd_candle.get(symbol, deque())
+        return np.array(list(hist), dtype=np.float64)
+
+    # ------------------------------------------------------------------
+    # 15m CVD aggregation (OWNER_BRIEF §3.4a — HTF Structure, LTF Entry)
+    # ------------------------------------------------------------------
+    # Independent of the 1m-driven running CVD above.  Each 15m kline close
+    # contributes its taker_buy − (total − taker_buy) delta to a separate
+    # running sum, then snapshots the cumulative value into a per-symbol
+    # deque.  The resulting series is genuinely 15m-aligned (one sample per
+    # closed 15m candle) and is the right input for divergence detection on
+    # 15m bars.
+
+    def update_cvd_15m_from_kline(
+        self,
+        symbol: str,
+        buy_vol_usd: float,
+        sell_vol_usd: float,
+    ) -> None:
+        """Update the running 15m CVD from a single closed 15m kline.
+
+        Caller passes the closed 15m candle's ``taker_buy_quote_asset_volume``
+        (buy side) and the derived ``quote_asset_volume − taker_buy`` (sell
+        side).  Mirrors the 1m path in :meth:`update_cvd_from_tick` but
+        accumulates a separate running sum keyed on the 15m close cadence.
+        """
+        delta = buy_vol_usd - sell_vol_usd
+        self._running_cvd_15m[symbol] = (
+            self._running_cvd_15m.get(symbol, 0.0) + delta
+        )
+
+    def snapshot_cvd_15m_at_candle_close(self, symbol: str) -> None:
+        """Record the current 15m CVD value at a 15m kline-close boundary.
+
+        Call this immediately after :meth:`update_cvd_15m_from_kline` on each
+        closed 15m candle event.  Aligns the deque samples 1-to-1 with closed
+        15m candles so downstream divergence detection can pair the 15m close
+        array with the 15m CVD array on a shared time grid.
+        """
+        if symbol not in self._cvd_15m_candle:
+            self._cvd_15m_candle[symbol] = deque(maxlen=_CVD_HISTORY_SIZE)
+        self._cvd_15m_candle[symbol].append(
+            self._running_cvd_15m.get(symbol, 0.0)
+        )
+
+    def seed_cvd_15m_from_klines(
+        self,
+        symbol: str,
+        taker_buy_vol_usd: "np.ndarray",
+        volume_usd: "np.ndarray",
+    ) -> None:
+        """Pre-populate 15m CVD history from historical 15m kline data at boot.
+
+        Mirrors :meth:`seed_cvd_from_klines` for the 15m series.  Eliminates
+        the warmup window that would otherwise silence any 15m-CVD-gated
+        evaluator after every restart.
+
+        Only call this once per symbol at boot, before WS events start flowing.
+        """
+        n = min(len(taker_buy_vol_usd), len(volume_usd))
+        if n == 0:
+            return
+        if symbol not in self._cvd_15m_candle:
+            self._cvd_15m_candle[symbol] = deque(maxlen=_CVD_HISTORY_SIZE)
+        running = 0.0
+        for i in range(n):
+            buy = float(taker_buy_vol_usd[i])
+            sell = float(volume_usd[i]) - buy
+            running += buy - sell
+            self._cvd_15m_candle[symbol].append(running)
+        self._running_cvd_15m[symbol] = running
+
+    def get_cvd_15m_history(self, symbol: str) -> np.ndarray:
+        """Return the 15m-aligned CVD history as a numpy array."""
+        hist = self._cvd_15m_candle.get(symbol, deque())
         return np.array(list(hist), dtype=np.float64)
 
     def get_cvd_divergence(
