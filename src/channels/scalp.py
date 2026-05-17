@@ -221,9 +221,18 @@ _FAR_AUCTION_WINDOW_MAX: int = 7  # Furthest candle; beyond this the signal is s
 _FAR_ACCEPTANCE_THRESHOLD: float = 0.001
 # Minimum reclaim distance (as a multiple of ATR) required from the reference
 # level to the current close.  Ensures a genuine reclaim, not a marginal tick.
-_FAR_MIN_RECLAIM_ATR: float = 0.10
-_FAR_MIN_TAIL_ATR: float = 0.30
-_FAR_MIN_RR: float = 1.0
+# Tightened 2026-05-17 (0.10 → 0.25) per OWNER_BRIEF §3.4a row 4 — a 0.10×ATR
+# reclaim is within noise on a 5m bar; 0.25×ATR is meaningful rejection.
+_FAR_MIN_RECLAIM_ATR: float = float(os.getenv("FAR_MIN_RECLAIM_ATR", "0.25"))
+# Minimum auction-candle tail length (as a multiple of ATR).  Real SFP wicks
+# are substantial — the rejection IS the signature.  Tightened 2026-05-17
+# (0.30 → 0.50).
+_FAR_MIN_TAIL_ATR: float = float(os.getenv("FAR_MIN_TAIL_ATR", "0.50"))
+# R:R floor for TP1.  Raised 2026-05-17 (1.0 → 2.0) per OWNER_BRIEF §3.2 /
+# B11 — at 10x leverage and ~0.7% round-trip fees, R:R 1.0 requires > 70%
+# win rate to break even net; truth report had FAR at ~6% win rate.  R:R
+# 2.0 brings the breakeven win rate down to ~40%, which is in scalp range.
+_FAR_MIN_RR: float = float(os.getenv("FAR_MIN_RR", "2.0"))
 # RSI hard/soft thresholds.  More conservative than PDC because FAR is a
 # reversal-of-failure setup (counter to the initial failed breakout direction).
 _FAR_RSI_LONG_HARD_MAX: float = 75.0   # ≥ this → hard reject (overbought)
@@ -4766,25 +4775,85 @@ class ScalpChannel(BaseChannel):
             return self._reject("invalid_price")
 
         # ── Reference structure levels ───────────────────────────────────
-        # Compute prior swing high and low from history BEFORE the auction
-        # window.  This prevents the auction candle itself from shifting the
-        # reference (a candle that probed far below/above the prior range
-        # would lower/raise the reference, negating the breakout detection).
-        # Exclude the full auction window (_FAR_AUCTION_WINDOW_MAX bars) so that
-        # no auction-window candle contaminates the struct reference level.
-        struct_end = n - 1 - _FAR_AUCTION_WINDOW_MAX   # exclusive end
-        struct_start = max(0, struct_end - _FAR_STRUCT_LOOKBACK)
-        if struct_end <= struct_start:
-            return self._reject("auction_not_detected")
+        # HTF anchor (OWNER_BRIEF §3.4a row 4 — "Detect on 1H structural
+        # level; Confirm on 1H probe-and-reclaim; Enter on 5m reclaim
+        # candle").  Pre-2026-05-17 FAR computed struct_high / struct_low
+        # purely from the prior 20 5m candles' high/low extremes — a
+        # ~100-minute window that produced "swing failure" detections on
+        # ordinary intra-trend wicks rather than real structural rejections.
+        # Truth-report data: 115 FAR signals, 39% MFE=0, -0.72% NET/sig.
+        #
+        # When the scanner-injected ``smc_data["level_book_levels"]`` is
+        # available (production path), prefer the highest-scoring
+        # CLUSTERED (>= 2 source_tfs) or VP_ANCHORED level per side.
+        # This is the same HTF anchor pattern used by LSR (PR #410) and
+        # SR_FLIP (PR #414); the FAR thesis applies it to the "swing
+        # failure pattern" reading — a probe of a multi-TF level that
+        # closes back inside is institutional rejection, not just a
+        # short-window 5m wick.
+        #
+        # Fallback to the 5m struct-scan when LevelBook is unavailable
+        # (test fixtures / pre-warm) so the existing FAR test surface
+        # continues exercising the path.
+        _lb_levels_raw = smc_data.get("level_book_levels")
+        struct_high: Optional[float] = None
+        struct_low: Optional[float] = None
+        if _lb_levels_raw is not None:
+            for _lv in _lb_levels_raw:
+                _src_tfs = getattr(_lv, "source_tfs", None) or [
+                    getattr(_lv, "source_tf", "")
+                ]
+                _is_clustered = (
+                    isinstance(_src_tfs, list) and len(_src_tfs) >= 2
+                )
+                _is_vp_anchored = (
+                    getattr(_lv, "source_tf", "") == "vp"
+                    or "vp" in (_src_tfs or [])
+                )
+                if not (_is_clustered or _is_vp_anchored):
+                    continue
+                _lv_price = float(getattr(_lv, "price", 0.0) or 0.0)
+                if _lv_price <= 0:
+                    continue
+                _lv_type = (getattr(_lv, "type", "") or "").lower()
+                if struct_high is None and _lv_type == "resistance":
+                    struct_high = _lv_price
+                elif struct_low is None and _lv_type == "support":
+                    struct_low = _lv_price
+                if struct_high is not None and struct_low is not None:
+                    break
+            if struct_high is None and struct_low is None:
+                # LevelBook refreshed but no qualifying multi-TF level
+                # on either side → strict doctrinal rejection (no SFP
+                # without a real swing to fail at).
+                return self._reject("no_htf_structural_level")
+        else:
+            # Test / pre-warm fallback — preserve the legacy 5m-window
+            # struct-scan so existing FAR test fixtures continue to
+            # exercise the path without needing LevelBook seeding.
+            struct_end = n - 1 - _FAR_AUCTION_WINDOW_MAX   # exclusive end
+            struct_start = max(0, struct_end - _FAR_STRUCT_LOOKBACK)
+            if struct_end <= struct_start:
+                return self._reject("auction_not_detected")
+            struct_highs = [float(highs_raw[i]) for i in range(struct_start, struct_end)]
+            struct_lows = [float(lows_raw[i]) for i in range(struct_start, struct_end)]
+            if not struct_highs or not struct_lows:
+                return self._reject("auction_not_detected")
+            struct_high = max(struct_highs)
+            struct_low = min(struct_lows)
 
-        struct_highs = [float(highs_raw[i]) for i in range(struct_start, struct_end)]
-        struct_lows = [float(lows_raw[i]) for i in range(struct_start, struct_end)]
-        if not struct_highs or not struct_lows:
+        # Sanity: when both sides came from the same source, they must
+        # straddle current price for the SFP thesis to apply.  In the
+        # HTF path one side may be absent (LevelBook returned only a
+        # resistance OR only a support nearby); set the missing side to
+        # a sentinel that trivially fails its branch of the auction
+        # search so we don't fire SFP in a direction with no anchor.
+        if struct_high is not None and struct_low is not None and struct_high <= struct_low:
             return self._reject("auction_not_detected")
-        struct_high = max(struct_highs)
-        struct_low = min(struct_lows)
-        if struct_high <= struct_low:
-            return self._reject("auction_not_detected")
+        if struct_high is None:
+            struct_high = float("inf")    # No upper anchor → no SHORT detection
+        if struct_low is None:
+            struct_low = float("-inf")    # No lower anchor → no LONG detection
 
         # ── Failed-auction candle search ─────────────────────────────────
         # Scan the auction window (1 to _FAR_AUCTION_WINDOW_MAX bars back).
