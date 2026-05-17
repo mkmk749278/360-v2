@@ -362,13 +362,51 @@ def build_positions(engine: Any) -> List[PositionDetail]:
     entry in ``router.active_signals`` (e.g. from a partial restore where
     a field has gone out of sync with the schema) doesn't 500 the whole
     Trade tab.
+
+    Broker-state enrichment (2026-05-17, owner-reported bug): when a
+    paper ``_order_manager`` is wired AND has a ``_positions`` dict,
+    cross-reference each router signal with the broker's view.  Signals
+    where the broker has no current position (e.g., ``qty_zero_guard``
+    from PR #401 caught a degenerate input and ``open_position``
+    returned None, OR the broker already fully closed but the router
+    is still tracking the signal for terminal SL/TP/INVALIDATED) are
+    excluded from the positions display.  Without this filter the
+    OPEN POSITIONS card showed phantom rows at ``qty 0.0`` — owner
+    saw 4-5 ghost positions alongside the one real one
+    (AIAUSDT/qty 248.08) in trade_records.
+
+    Live-mode broker has no in-process ``_positions`` dict (real
+    positions live on Binance, queried app-side via BinanceClient);
+    in that case we skip the cross-reference and fall back to the
+    pre-2026-05-17 behaviour where every router signal renders.
     """
     router = getattr(engine, "router", None)
     if router is None:
         return []
+
+    # Broker-state lookup (paper-mode only).  Treat the broker's
+    # ``_positions`` dict as the source of truth for "is there an
+    # active position for this signal_id?" — even when ``sig.qty``
+    # is zero (because nothing ever sets it on the Signal class).
+    broker = getattr(engine, "_order_manager", None)
+    broker_positions: Optional[dict] = None
+    if broker is not None:
+        _bp = getattr(broker, "_positions", None)
+        if isinstance(_bp, dict):
+            broker_positions = _bp
+
     out: List[PositionDetail] = []
     for sig in router.active_signals.values():
         try:
+            signal_id = getattr(sig, "signal_id", "") or ""
+            # Broker-state filter — skip phantom entries.  When a paper
+            # broker is wired but has no record of this signal_id,
+            # ``open_position`` either rejected (qty_zero_guard,
+            # notional_floor, risk gate) or already fully closed.  Either
+            # way the OPEN POSITIONS card should not display a row.
+            if broker_positions is not None and signal_id not in broker_positions:
+                continue
+
             direction = getattr(sig, "direction", None)
             direction_str = (
                 direction.value
@@ -388,17 +426,28 @@ def build_positions(engine: Any) -> List[PositionDetail]:
             entry = float(getattr(sig, "entry", 0.0) or 0.0)
             current_price = float(getattr(sig, "current_price", entry) or entry)
             pnl_pct = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
-            # qty / pnl_usd come from the order_manager's view of the position;
-            # for the v0 API we approximate pnl_usd from pnl_pct on a notional
-            # 1.0-unit basis when broker info isn't available.
+
+            # Quantity sourcing — prefer the broker's truthful number over
+            # the (always-zero, never-set) ``sig.qty`` attribute.  The
+            # broker also knows the residual after partial closes via
+            # ``quantity - closed_quantity``, which is the right value
+            # for an OPEN position display (closed_quantity is what's
+            # already realised; the residual is what's still riding).
             qty = float(getattr(sig, "qty", 0.0) or 0.0)
             pnl_usd = float(getattr(sig, "pnl_usd", 0.0) or 0.0)
+            if broker_positions is not None and signal_id in broker_positions:
+                _bp_pos = broker_positions[signal_id]
+                _total_qty = float(getattr(_bp_pos, "quantity", 0.0) or 0.0)
+                _closed_qty = float(getattr(_bp_pos, "closed_quantity", 0.0) or 0.0)
+                _residual = max(_total_qty - _closed_qty, 0.0)
+                if _residual > 0:
+                    qty = _residual
             if pnl_usd == 0.0 and entry > 0:
                 pnl_usd = round(qty * entry * pnl_pct / 100.0, 2)
             ts = getattr(sig, "timestamp", None)
             out.append(
                 PositionDetail(
-                    signal_id=getattr(sig, "signal_id", "") or "",
+                    signal_id=signal_id,
                     symbol=getattr(sig, "symbol", ""),
                     direction=direction_str,  # type: ignore[arg-type]
                     entry=entry,
