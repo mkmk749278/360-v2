@@ -110,7 +110,7 @@ Follow-up #1 from the previous queue is being executed in this session as a pair
 3. **Paper sub-tab `include_open` fix.** Add `include_open=true` to `fetchTrades` so the Paper sub-tab shows open positions instead of the empty state.
 4. **Verify Lumin Paper sub-tab end-to-end in production** — qty-zero, cumulative equity, reset gating, close-all loop.
 5. **`deploy.yml` concurrency block** (5 LOC PR) — prevents the triple-merge cascade from 2026-05-13.
-6. **Cleanup duplicate logger configure** (`src/utils.py` + `src/logger.py`) — PR #390 hotfixed; unification queued.
+6. ~~Cleanup duplicate logger configure (`src/utils.py` + `src/logger.py`)~~ — **shipped** as `e05a5fb` (PR #405, 2026-05-16). Sink config consolidated in `src/logger.py` as the single configurer; `src/utils.py` re-exports the loguru handles and keeps the `_LoguroBridge` formatting wrapper, so all 127 `from src.utils import get_logger` call sites are unchanged. The 2026-05-14 dual-configure import-order race (which produced the `/ws_log` "exists but empty" symptom) is eliminated; the regression test pinning the hotfix invariant still passes unchanged because the unified architecture naturally satisfies it.
 7. **Forensic on #380 boot failure** → CI smoke test design (`docker compose up engine → curl /api/health` in 60s).
 8. **Path-2 emission watch** — PR #363 widened VSB/BDS gates 2026-05-11 but truth-report still shows ~1 emission across both. After the blacklist + 1-2 weeks of additional data, re-check whether the widening delivered or whether Path 2 needs another pass.
 9. **Learned per-pair penalty (option 3)** — architectural fix for the per-pair PnL bleed; owner sign-off required before coding.
