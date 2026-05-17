@@ -48,6 +48,17 @@ _HTF_EMA_REJECTION_PCT: float = float(os.getenv("HTF_EMA_REJECTION_PCT", "0.0015
 # level, not the close.  Env-overridable per B8.
 _LSR_POI_ANCHOR_ATR_MULT: float = float(os.getenv("LSR_POI_ANCHOR_ATR_MULT", "2.0"))
 
+# TPE 1H pullback proximity multiplier (OWNER_BRIEF §3.4a row 2, 2026-05-17).
+# At least one of the last 4 closed 1H bars must have approached the 1H
+# EMA21 within ATR_1h × this multiplier.  Defines what "pulled back to
+# EMA21" means structurally — too tight (e.g. 0.10) and ordinary trending
+# bars never qualify; too loose (e.g. 2.0) and the gate is a no-op since
+# almost every bar is within 2×ATR of any EMA.  0.50 is the sweet spot
+# per industry pullback-trading literature.  Env-overridable per B8.
+_TPE_H1_PULLBACK_ATR_MULT: float = float(
+    os.getenv("TPE_H1_PULLBACK_ATR_MULT", "0.50")
+)
+
 # WHALE_MOMENTUM thresholds (absorbed from former TapeChannel).  Env-overridable
 # per B8 so operators can tune for current market conditions without redeploy.
 _WHALE_DELTA_MIN_RATIO: float = float(os.getenv("WHALE_DELTA_MIN_RATIO", "2.0"))
@@ -1287,35 +1298,129 @@ class ScalpChannel(BaseChannel):
         volume_24h_usd: float,
         regime: str = "",
     ) -> Optional[Signal]:
-        """TREND_PULLBACK_EMA path: price pulls back to EMA9/EMA21 in trend direction."""
-        # Allowed regimes: TRENDING_UP/DOWN (direction from label) and
-        # WEAK_TREND (Q7-A conservative widening — direction derived from
-        # EMA9 vs EMA21 alignment).  STRONG_TREND and BREAKOUT_EXPANSION
-        # remain blocked because pullbacks are structurally rare in those
-        # regimes; revisit once we have data confirming WEAK_TREND is safe.
-        regime_upper = regime.upper() if regime else ""
-        if regime_upper == "TRENDING_UP":
-            direction = Direction.LONG
-        elif regime_upper == "TRENDING_DOWN":
-            direction = Direction.SHORT
-        elif regime_upper == "WEAK_TREND":
-            ind_for_dir = indicators.get("5m", {})
-            ema9_for_dir = ind_for_dir.get("ema9_last")
-            ema21_for_dir = ind_for_dir.get("ema21_last")
-            if ema9_for_dir is None or ema21_for_dir is None:
-                return self._reject("ema_alignment_reject")
-            if ema9_for_dir > ema21_for_dir:
-                direction = Direction.LONG
-            elif ema9_for_dir < ema21_for_dir:
-                direction = Direction.SHORT
-            else:
-                return self._reject("ema_alignment_reject")
-        else:
-            return self._reject("regime_blocked")
+        """TREND_PULLBACK_EMA: pullback to EMA in trend direction.
 
+        Detection on 1H trend (OWNER_BRIEF §3.4a row 2 — "Detect on 1H
+        EMA21/50 slope + structure state; Confirm on 1H pullback to
+        EMA21 within ATR; Enter on 5m EMA9 reclaim + momentum candle").
+
+        Pre-2026-05-17 TPE gated on 5m regime label + 5m EMA9/EMA21/EMA50
+        alignment.  Truth-report data: 36 signals, 78% MFE=0 — the worst
+        direction-call quality in the portfolio.  Root cause: a 5m
+        "TRENDING_UP regime" is often noise inside a 1H/4h ranging
+        market — circular reasoning (confirming "trend exists" on the
+        same timeframe we're entering on).  EMAs are also lagging; by
+        the time 5m EMA9 > 21 > 50 aligns and price returns to EMA21,
+        the move is exhausted.
+
+        Post-2026-05-17 doctrine: source the trend identification from
+        1H EMA21/50 alignment + slope, and require a recent 1H bar to
+        have approached 1H EMA21 (the pullback structure).  5m entry
+        gates remain unchanged — they ARE the LTF timing.
+
+        HTF path activates when ``indicators["1h"]`` carries ema21/ema50
+        (production scanner populates).  Fallback to legacy 5m-regime
+        path preserves existing test fixtures that don't seed 1H data.
+        """
         m5 = candles.get("5m")
         if m5 is None or len(m5.get("close", [])) < 50:
             return self._reject("insufficient_candles")
+
+        # ── HTF trend identification (production path) ────────────────────
+        # 1H EMA21 / EMA50 alignment + slope + recent-pullback check.
+        # When 1H indicators are unavailable (test/pre-warm), fall back
+        # to the legacy 5m regime gate so existing TPE test fixtures
+        # continue to exercise the path.
+        ind_1h = indicators.get("1h", {})
+        ema21_1h = ind_1h.get("ema21_last")
+        ema50_1h = ind_1h.get("ema50_last")
+        ema21_1h_prev = ind_1h.get("ema21_prev")
+        _uses_1h_trend = (
+            ema21_1h is not None
+            and ema50_1h is not None
+        )
+
+        direction: Optional[Direction] = None
+        if _uses_1h_trend:
+            # 1H alignment + slope tells us direction and that we're in a
+            # genuine multi-hour trend, not a 5m wiggle.
+            ema21_1h_f = float(ema21_1h)
+            ema50_1h_f = float(ema50_1h)
+            # Slope: when ema21_prev is unavailable (warmup), accept the
+            # alignment-only signal — soft-penalty doctrine on missing data.
+            slope_pos = (
+                ema21_1h_prev is None
+                or float(ema21_1h_prev) < ema21_1h_f
+            )
+            slope_neg = (
+                ema21_1h_prev is None
+                or float(ema21_1h_prev) > ema21_1h_f
+            )
+            if ema21_1h_f > ema50_1h_f and slope_pos:
+                direction = Direction.LONG
+            elif ema21_1h_f < ema50_1h_f and slope_neg:
+                direction = Direction.SHORT
+            else:
+                return self._reject("h1_trend_not_aligned")
+
+            # 1H pullback confirmation — at least one of the last few
+            # closed 1H bars must have approached EMA21 (the pullback
+            # structure that TPE is named for).  Threshold: low (LONG) /
+            # high (SHORT) within ATR_1h × ``_TPE_H1_PULLBACK_ATR_MULT``
+            # of EMA21.  When 1H ATR or candle history is unavailable,
+            # skip this check (fail-open per soft-penalty doctrine —
+            # never block on missing data).
+            atr_1h = ind_1h.get("atr_last")
+            cd_1h = candles.get("1h") or {}
+            h1_highs = cd_1h.get("high") or []
+            h1_lows = cd_1h.get("low") or []
+            if atr_1h is not None and len(h1_highs) >= 2 and len(h1_lows) >= 2:
+                _pullback_band = float(atr_1h) * _TPE_H1_PULLBACK_ATR_MULT
+                # Look at last 4 CLOSED 1H bars (exclude index -1 which is
+                # the still-forming current bar).  Window matches the ~4-hour
+                # window during which a pullback would typically resolve.
+                _h1_lookback = min(len(h1_highs) - 1, 4)
+                if direction == Direction.LONG:
+                    _h1_recent_lows = [
+                        float(low_v) for low_v in h1_lows[-1 - _h1_lookback:-1]
+                    ]
+                    _pulled_back = any(
+                        abs(low_v - ema21_1h_f) <= _pullback_band
+                        for low_v in _h1_recent_lows
+                    )
+                else:
+                    _h1_recent_highs = [
+                        float(h) for h in h1_highs[-1 - _h1_lookback:-1]
+                    ]
+                    _pulled_back = any(
+                        abs(h - ema21_1h_f) <= _pullback_band
+                        for h in _h1_recent_highs
+                    )
+                if not _pulled_back:
+                    return self._reject("h1_pullback_not_confirmed")
+        else:
+            # Legacy 5m-regime fallback path (test / pre-warm).  Allowed
+            # regimes match pre-2026-05-17: TRENDING_UP/DOWN (direction
+            # from label) and WEAK_TREND (direction from 5m EMA alignment).
+            regime_upper = regime.upper() if regime else ""
+            if regime_upper == "TRENDING_UP":
+                direction = Direction.LONG
+            elif regime_upper == "TRENDING_DOWN":
+                direction = Direction.SHORT
+            elif regime_upper == "WEAK_TREND":
+                ind_for_dir = indicators.get("5m", {})
+                ema9_for_dir = ind_for_dir.get("ema9_last")
+                ema21_for_dir = ind_for_dir.get("ema21_last")
+                if ema9_for_dir is None or ema21_for_dir is None:
+                    return self._reject("ema_alignment_reject")
+                if ema9_for_dir > ema21_for_dir:
+                    direction = Direction.LONG
+                elif ema9_for_dir < ema21_for_dir:
+                    direction = Direction.SHORT
+                else:
+                    return self._reject("ema_alignment_reject")
+            else:
+                return self._reject("regime_blocked")
 
         ind = indicators.get("5m", {})
         if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
@@ -1343,17 +1448,32 @@ class ScalpChannel(BaseChannel):
         last_low = float(lows[-1])
         last_high = float(highs[-1])
 
-        # EMA alignment check
-        if direction == Direction.LONG:
-            if ema50 is not None and not (ema9 > ema21 > ema50):
+        # 5m EMA alignment check.  Pre-2026-05-17 this required
+        # EMA9 > EMA21 > EMA50 (LONG) — but the 5m EMA50 ordering is
+        # redundant once 1H trend is the source of truth (HTF path).
+        # On the legacy fallback path the EMA50 check stays in place
+        # to preserve the existing pre-2026-05-17 selectivity.
+        if _uses_1h_trend:
+            # HTF path: only require EMA9 vs EMA21 ordering on 5m.  The
+            # 5m EMA50 ordering would add nothing the 1H trend filter
+            # hasn't already enforced at HTF — and would routinely
+            # reject valid pullbacks during the lower-low / higher-high
+            # phase of a healthy 1H trend.
+            if direction == Direction.LONG and not (ema9 > ema21):
                 return self._reject("ema_alignment_reject")
-            elif ema50 is None and not (ema9 > ema21):
+            if direction == Direction.SHORT and not (ema9 < ema21):
                 return self._reject("ema_alignment_reject")
         else:
-            if ema50 is not None and not (ema9 < ema21 < ema50):
-                return self._reject("ema_alignment_reject")
-            elif ema50 is None and not (ema9 < ema21):
-                return self._reject("ema_alignment_reject")
+            if direction == Direction.LONG:
+                if ema50 is not None and not (ema9 > ema21 > ema50):
+                    return self._reject("ema_alignment_reject")
+                elif ema50 is None and not (ema9 > ema21):
+                    return self._reject("ema_alignment_reject")
+            else:
+                if ema50 is not None and not (ema9 < ema21 < ema50):
+                    return self._reject("ema_alignment_reject")
+                elif ema50 is None and not (ema9 < ema21):
+                    return self._reject("ema_alignment_reject")
 
         # BUG FIX 7: Require CONFIRMED bounce, not just proximity.
         # Old: fired when price TOUCHED EMA (82.6% SL rate — entering on liquidity hunt)

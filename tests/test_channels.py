@@ -5634,3 +5634,207 @@ class TestFarRrFloorAndTightening:
         assert ch._active_no_signal_reason in (
             "reclaim_hold_failed", "auction_not_detected"
         )
+
+
+# ============================================================================
+# TPE 1H trend gate (feat/tpe-1h-trend-gate)
+# OWNER_BRIEF §3.4a row 2 — "Detect on 1H EMA21/50 slope + structure state;
+# Confirm on 1H pullback to EMA21 within ATR; Enter on 5m EMA9 reclaim +
+# momentum candle"
+# ============================================================================
+
+
+def _h1_indicators_bullish(ema21=99.5, ema50=98.5, ema21_prev=99.3, atr=0.4):
+    """1H indicator dict simulating a bullish HTF trend with slope.
+
+    ema21 > ema50 (alignment), ema21_prev < ema21 (positive slope) → LONG.
+    """
+    return {
+        "ema21_last": ema21,
+        "ema50_last": ema50,
+        "ema21_prev": ema21_prev,
+        "atr_last": atr,
+    }
+
+
+def _h1_indicators_bearish(ema21=100.5, ema50=101.5, ema21_prev=100.7, atr=0.4):
+    return {
+        "ema21_last": ema21,
+        "ema50_last": ema50,
+        "ema21_prev": ema21_prev,
+        "atr_last": atr,
+    }
+
+
+def _h1_candles_with_pullback_to_ema21(ema21=99.5, n=6, atr=0.4):
+    """1H candles where the last few closed bars dipped to EMA21.
+
+    Bar index -2 (the most recent closed bar before still-forming -1)
+    has its low at ema21 exactly → satisfies the pullback proximity
+    gate at any positive ``_TPE_H1_PULLBACK_ATR_MULT`` value.
+    """
+    closes = [ema21 + atr * 1.5] * n
+    highs = [ema21 + atr * 2.0] * n
+    lows = [ema21 + atr * 1.0] * n
+    # Bar n-2 (second-to-last) dips down to EMA21 — the pullback candle.
+    lows[-2] = ema21
+    highs[-2] = ema21 + atr * 0.5
+    closes[-2] = ema21 + atr * 0.3
+    return {
+        "open": closes,
+        "high": highs,
+        "low": lows,
+        "close": closes,
+        "volume": [1000.0] * n,
+    }
+
+
+def _h1_candles_no_pullback(ema21=99.5, n=6, atr=0.4):
+    """1H candles that stayed well above EMA21 — never pulled back."""
+    closes = [ema21 + atr * 3.0] * n
+    return {
+        "open": closes,
+        "high": [c + atr * 0.5 for c in closes],
+        "low": [c - atr * 0.5 for c in closes],  # well above EMA21
+        "close": closes,
+        "volume": [1000.0] * n,
+    }
+
+
+class TestTpeH1TrendGate:
+    """OWNER_BRIEF §3.4a row 2 — TPE direction sourced from 1H EMA21/50
+    alignment + slope when ``indicators['1h']`` is populated."""
+
+    def _call(self, candles, indicators, smc_data, regime=""):
+        ch = ScalpChannel()
+        return ch._evaluate_trend_pullback(
+            "BTCUSDT", candles, indicators, smc_data, 0.01, 10_000_000,
+            regime=regime,
+        )
+
+    def test_h1_trend_aligned_long_accepts(self):
+        """1H EMA21 > EMA50 + positive slope + recent 1H pullback to
+        EMA21 + 5m entry confirmation → LONG signal fires."""
+        m5 = _make_trend_pullback_candles_long()
+        indicators = _trend_pullback_indicators_long()
+        indicators["1h"] = _h1_indicators_bullish()
+        candles = {
+            "5m": m5,
+            "1h": _h1_candles_with_pullback_to_ema21(),
+        }
+        sig = self._call(candles, indicators, {"fvg": [{"level": 100.0}]})
+        assert sig is not None
+        assert sig.setup_class == "TREND_PULLBACK_EMA"
+        assert sig.direction == Direction.LONG
+
+    def test_h1_trend_misaligned_rejects(self):
+        """1H EMA21 == EMA50 (flat alignment) → reject with
+        ``h1_trend_not_aligned``.  Pre-2026-05-17 the 5m regime label
+        could carry direction even when 1H had no trend; this PR makes
+        1H alignment authoritative."""
+        m5 = _make_trend_pullback_candles_long()
+        indicators = _trend_pullback_indicators_long()
+        # Flat 1H: ema21 == ema50 → neither LONG nor SHORT alignment.
+        indicators["1h"] = _h1_indicators_bullish(ema21=99.5, ema50=99.5)
+        candles = {
+            "5m": m5,
+            "1h": _h1_candles_with_pullback_to_ema21(),
+        }
+        ch = ScalpChannel()
+        sig = ch._evaluate_trend_pullback(
+            "BTCUSDT", candles, indicators, {"fvg": [{"level": 100.0}]},
+            0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "h1_trend_not_aligned"
+
+    def test_h1_slope_against_alignment_rejects(self):
+        """1H EMA21 > EMA50 (alignment positive) but ema21_prev > ema21
+        (slope negative) → reject.  Slope must agree with alignment."""
+        m5 = _make_trend_pullback_candles_long()
+        indicators = _trend_pullback_indicators_long()
+        # Aligned but flipped slope: ema21_prev (99.7) > ema21 (99.5) → falling
+        indicators["1h"] = _h1_indicators_bullish(ema21=99.5, ema50=98.5, ema21_prev=99.7)
+        candles = {
+            "5m": m5,
+            "1h": _h1_candles_with_pullback_to_ema21(),
+        }
+        ch = ScalpChannel()
+        sig = ch._evaluate_trend_pullback(
+            "BTCUSDT", candles, indicators, {"fvg": [{"level": 100.0}]},
+            0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "h1_trend_not_aligned"
+
+    def test_h1_no_pullback_rejects(self):
+        """1H trend aligned + sloped but no recent 1H bar approached
+        EMA21 → reject with ``h1_pullback_not_confirmed``."""
+        m5 = _make_trend_pullback_candles_long()
+        indicators = _trend_pullback_indicators_long()
+        indicators["1h"] = _h1_indicators_bullish()
+        candles = {
+            "5m": m5,
+            "1h": _h1_candles_no_pullback(),  # never touched EMA21
+        }
+        ch = ScalpChannel()
+        sig = ch._evaluate_trend_pullback(
+            "BTCUSDT", candles, indicators, {"fvg": [{"level": 100.0}]},
+            0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "h1_pullback_not_confirmed"
+
+    def test_h1_pullback_check_skipped_when_atr_missing(self):
+        """1H ATR unavailable (e.g. pre-warm window) → skip the
+        pullback check.  Fail-open per soft-penalty doctrine — never
+        block on missing data."""
+        m5 = _make_trend_pullback_candles_long()
+        indicators = _trend_pullback_indicators_long()
+        indicators["1h"] = _h1_indicators_bullish(atr=None)
+        # Strip the ATR field so the pullback check is skipped:
+        indicators["1h"]["atr_last"] = None
+        candles = {
+            "5m": m5,
+            "1h": _h1_candles_no_pullback(),  # would normally fail
+        }
+        sig = self._call(candles, indicators, {"fvg": [{"level": 100.0}]})
+        # Should still fire — pullback check skipped due to missing ATR.
+        assert sig is not None
+        assert sig.setup_class == "TREND_PULLBACK_EMA"
+
+    def test_h1_slope_accepted_when_ema21_prev_missing(self):
+        """No ema21_prev available (warmup) → soft-penalty fallback
+        accepts the alignment-only signal."""
+        m5 = _make_trend_pullback_candles_long()
+        indicators = _trend_pullback_indicators_long()
+        indicators["1h"] = {
+            "ema21_last": 99.5,
+            "ema50_last": 98.5,
+            # No ema21_prev key
+            "atr_last": 0.4,
+        }
+        candles = {
+            "5m": m5,
+            "1h": _h1_candles_with_pullback_to_ema21(),
+        }
+        sig = self._call(candles, indicators, {"fvg": [{"level": 100.0}]})
+        assert sig is not None
+        assert sig.direction == Direction.LONG
+
+    def test_legacy_5m_regime_fallback_when_h1_absent(self):
+        """No 1H indicators → fall through to legacy 5m regime path
+        and the original TPE behaviour.  Backward-compat with the
+        existing TPE test surface (~6 tests in
+        TestTrendPullbackEntryQuality)."""
+        m5 = _make_trend_pullback_candles_long()
+        indicators = _trend_pullback_indicators_long()
+        # No "1h" key in indicators → fallback to 5m regime path.
+        assert "1h" not in indicators
+        ch = ScalpChannel()
+        sig = ch._evaluate_trend_pullback(
+            "BTCUSDT", {"5m": m5}, indicators, {"fvg": [{"level": 100.0}]},
+            0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is not None
+        assert sig.setup_class == "TREND_PULLBACK_EMA"
