@@ -356,6 +356,60 @@ class Bootstrap:
             else:
                 log.info("Firebase Admin skipped (env vars not set)")
 
+            # Server-side execution custody scaffolding (PR-1 of the
+            # 14-PR roadmap — OWNER_BRIEF §3.9 + B18).  Wires Cloud
+            # KMS for envelope encryption and Firestore for encrypted
+            # key-blob storage.  None of the boot-blocking paths
+            # consume these yet — they're scaffolding that downstream
+            # PRs (signing service, connect flow, Position FSM) call
+            # into.  Init failures here are non-fatal: the engine
+            # serves signals fine; only the server-side execution
+            # subsystem (which doesn't ship until PR-6+) requires
+            # these to be live.
+            gcp_kms_project_id = os.environ.get("GCP_KMS_PROJECT_ID", "")
+            gcp_kms_location = os.environ.get("GCP_KMS_LOCATION", "")
+            gcp_kms_keyring = os.environ.get("GCP_KMS_KEYRING", "")
+            gcp_kms_key_name = os.environ.get("GCP_KMS_KEY_NAME", "")
+            if (
+                gcp_kms_project_id
+                and gcp_kms_location
+                and gcp_kms_keyring
+                and gcp_kms_key_name
+            ):
+                try:
+                    from src.security import kms_client as _kms_client
+
+                    _kms_client.init_kms_client(
+                        project_id=gcp_kms_project_id,
+                        location=gcp_kms_location,
+                        keyring=gcp_kms_keyring,
+                        key_name=gcp_kms_key_name,
+                        service_account_path=firebase_sa_path or None,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "KMS client init failed (server-side execution disabled): {}",
+                        exc,
+                    )
+            else:
+                log.info("KMS client skipped (GCP_KMS_* env vars not set)")
+
+            if firebase_project_id:
+                try:
+                    from src.security import firestore_keystore as _firestore_keystore
+
+                    _firestore_keystore.init_keystore(
+                        service_account_path=firebase_sa_path or None,
+                    )
+                except Exception as exc:
+                    log.warning(
+                        "Firestore keystore init failed "
+                        "(server-side execution disabled): {}",
+                        exc,
+                    )
+            else:
+                log.info("Firestore keystore skipped (Firebase project not set)")
+
             # Phase-2 per-user overrides — shares the same SQLite file
             # (WAL mode lets both connections coexist).  Tables are
             # added with CREATE TABLE IF NOT EXISTS, safe against any
