@@ -1,0 +1,383 @@
+"""Typed Binance order-placement helpers on top of the signing-service client.
+
+Wraps the raw :class:`SigningClient` from PR-4 with three typed
+methods covering the order types the Position FSM needs:
+
+* :meth:`OrderPlacer.place_market_entry` — MARKET order to enter the
+  position with the user's configured quantity.
+* :meth:`OrderPlacer.place_stop_loss` — STOP_MARKET with
+  ``closePosition=true`` so the SL fires for the entire position
+  regardless of partial closes that happen along the way.
+* :meth:`OrderPlacer.place_take_profit` — TAKE_PROFIT_MARKET with an
+  explicit quantity so we can lay multiple TP legs (TP1/TP2/TP3) on
+  the same position per Binance's native split-target support.
+
+* :meth:`OrderPlacer.cancel_order` — DELETE for use in PR-7's BE-shift
+  (cancel old SL, place new SL at entry).
+
+Each method:
+
+* Sets ``newClientOrderId`` via :mod:`src.execution.position_state`'s
+  :func:`coid_*` helpers so the FSM can map incoming
+  ORDER_TRADE_UPDATE events back to the originating phase.
+* Returns the parsed Binance response on success.
+* Raises :class:`OrderPlacementError` (with a typed subclass) on
+  signing-service errors / Binance rejections / network failures.
+  The FSM catches and decides retry vs disable.
+
+This module does NOT decide which orders to place — that's
+:mod:`src.execution.position_fsm`.  This module is a typed adapter
+between "intent" (place a SL at X) and "wire" (Binance HTTP body).
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any, Optional
+
+from src.security.signing_service import client as signing_client
+from src.security.signing_service import protocol as sig_protocol
+from src.utils import get_logger
+
+from . import position_state as _position_state
+
+log = get_logger("execution.order_placer")
+
+
+_FUTURES_ORDER_PATH = "/fapi/v1/order"
+_FUTURES_BASE = "futures"
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class OrderPlacementError(Exception):
+    """Base — caller decides retry / disable / propagate per error type."""
+
+    def __init__(self, message: str, *, signing_response: Optional[sig_protocol.SignResponse] = None) -> None:
+        super().__init__(message)
+        self.signing_response = signing_response
+
+
+class OrderRejectedByBinance(OrderPlacementError):
+    """Binance returned a 4xx with a typed error code (e.g. -2010
+    insufficient margin, -1111 precision-too-high).  Caller inspects
+    ``signing_response.binance_body`` for the specific Binance code."""
+
+
+class OrderPlacementUnreachable(OrderPlacementError):
+    """Network / signing-service unavailable.  Caller may retry."""
+
+
+class OrderPlacementKeyError(OrderPlacementError):
+    """User's key state is bad — KEY_BLOB_NOT_FOUND (not connected),
+    CRYPTO_DECRYPT_FAILED (corrupted blob), or signing service
+    not configured.  Caller marks the user disabled."""
+
+
+# ---------------------------------------------------------------------------
+# Result types
+# ---------------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class OrderPlacementResult:
+    """Parsed Binance response on a successful order placement.
+
+    Only the fields the FSM needs.  Full body available via
+    ``binance_body`` if downstream code needs more.
+    """
+
+    order_id: int
+    client_order_id: str
+    status: str  # "NEW" | "FILLED" | "PARTIALLY_FILLED" | ...
+    avg_price: float
+    binance_body: Any
+
+
+def _parse_result(body: Any) -> OrderPlacementResult:
+    """Map a Binance ``POST /fapi/v1/order`` response body to typed result."""
+    if not isinstance(body, dict):
+        # Unexpected shape — Binance would have to ship a breaking change.
+        raise OrderPlacementError(
+            f"unexpected Binance response shape: {type(body).__name__}"
+        )
+    return OrderPlacementResult(
+        order_id=int(body.get("orderId", 0)),
+        client_order_id=str(body.get("clientOrderId", "")),
+        status=str(body.get("status", "")),
+        avg_price=float(body.get("avgPrice", "0") or 0),
+        binance_body=body,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Direction helpers
+# ---------------------------------------------------------------------------
+
+
+def _entry_side(direction: str) -> str:
+    """LONG → BUY (enter), SHORT → SELL (enter)."""
+    if direction == "LONG":
+        return "BUY"
+    if direction == "SHORT":
+        return "SELL"
+    raise ValueError(f"unknown direction: {direction!r}")
+
+
+def _exit_side(direction: str) -> str:
+    """LONG → SELL (exit), SHORT → BUY (exit).  Used for SL + TP
+    orders that close the position."""
+    if direction == "LONG":
+        return "SELL"
+    if direction == "SHORT":
+        return "BUY"
+    raise ValueError(f"unknown direction: {direction!r}")
+
+
+# ---------------------------------------------------------------------------
+# OrderPlacer — typed wrapper around SigningClient
+# ---------------------------------------------------------------------------
+
+
+class OrderPlacer:
+    """Typed Binance Futures order placement for one user.
+
+    Stateless — methods accept all parameters explicitly.  Constructed
+    per-FSM (one per signal) so each instance carries the firebase_uid
+    + signing client without a thread of context.
+
+    ``client`` is injectable for tests (mock SigningClient).
+    """
+
+    def __init__(
+        self,
+        firebase_uid: str,
+        *,
+        client: Optional[signing_client.SigningClient] = None,
+    ) -> None:
+        self.firebase_uid = firebase_uid
+        self._client = client or signing_client.SigningClient()
+
+    async def place_market_entry(
+        self,
+        *,
+        signal_id: str,
+        symbol: str,
+        direction: str,  # "LONG" | "SHORT"
+        quantity: float,
+    ) -> OrderPlacementResult:
+        """MARKET order to enter the position.
+
+        Uses ``newClientOrderId = lumin_<signal_id>_entry`` so the
+        FSM can identify fill events.  ``positionSide=BOTH`` (one-way
+        mode) — hedge mode is a future option.
+        """
+        params = {
+            "symbol": symbol,
+            "side": _entry_side(direction),
+            "type": "MARKET",
+            "quantity": _qty_str(quantity),
+            "newClientOrderId": _position_state.coid_entry(signal_id),
+        }
+        return await self._submit_order(
+            params=params,
+            phase="entry",
+            signal_id=signal_id,
+        )
+
+    async def place_stop_loss(
+        self,
+        *,
+        signal_id: str,
+        symbol: str,
+        direction: str,
+        stop_price: float,
+        coid_override: Optional[str] = None,
+    ) -> OrderPlacementResult:
+        """STOP_MARKET with ``closePosition=true`` — fires for the
+        full remaining position when ``stop_price`` is touched on
+        the configured ``workingType`` (default MARK_PRICE — less
+        wick-prone than CONTRACT_PRICE).
+
+        ``coid_override`` lets PR-7's BE-shift re-place an SL with a
+        new clientOrderId (since you can't modify SL price in place;
+        you cancel + replace).  Default uses the standard ``_sl``
+        suffix; PR-7 will use ``_sl_be`` to distinguish the
+        BE-shifted SL from the original.
+        """
+        coid = coid_override or _position_state.coid_sl(signal_id)
+        params = {
+            "symbol": symbol,
+            "side": _exit_side(direction),
+            "type": "STOP_MARKET",
+            "stopPrice": _price_str(stop_price),
+            "closePosition": "true",
+            "workingType": "MARK_PRICE",
+            "newClientOrderId": coid,
+        }
+        return await self._submit_order(
+            params=params,
+            phase="sl",
+            signal_id=signal_id,
+        )
+
+    async def place_take_profit(
+        self,
+        *,
+        signal_id: str,
+        symbol: str,
+        direction: str,
+        stop_price: float,
+        quantity: float,
+        tp_phase: str,  # "tp1" | "tp2" | "tp3"
+    ) -> OrderPlacementResult:
+        """TAKE_PROFIT_MARKET with explicit quantity for partial
+        close.  Lumin places TP1 / TP2 / TP3 as separate orders per
+        Binance's native split-target support (up to 4 TP legs per
+        position natively).
+
+        ``reduceOnly=true`` so a TP can't accidentally open a position
+        on the opposite side if the fill arithmetic is off.
+        """
+        if tp_phase not in ("tp1", "tp2", "tp3"):
+            raise ValueError(f"tp_phase must be tp1|tp2|tp3, got {tp_phase!r}")
+        coid_fn = {
+            "tp1": _position_state.coid_tp1,
+            "tp2": _position_state.coid_tp2,
+            "tp3": _position_state.coid_tp3,
+        }[tp_phase]
+        params = {
+            "symbol": symbol,
+            "side": _exit_side(direction),
+            "type": "TAKE_PROFIT_MARKET",
+            "stopPrice": _price_str(stop_price),
+            "quantity": _qty_str(quantity),
+            "reduceOnly": "true",
+            "workingType": "MARK_PRICE",
+            "newClientOrderId": coid_fn(signal_id),
+        }
+        return await self._submit_order(
+            params=params,
+            phase=tp_phase,
+            signal_id=signal_id,
+        )
+
+    async def cancel_order(
+        self,
+        *,
+        symbol: str,
+        order_id: int,
+    ) -> None:
+        """Cancel an open order by Binance ``orderId``.  Used by PR-7
+        to drop the original SL before placing the BE-shifted one.
+
+        Raises :class:`OrderPlacementError` subclasses on failure;
+        a "no such order" rejection is logged + swallowed (the order
+        was already filled or cancelled — caller doesn't care which).
+        """
+        params = {"symbol": symbol, "orderId": order_id}
+        resp = await self._client.binance_signed_delete(
+            firebase_uid=self.firebase_uid,
+            base=_FUTURES_BASE,
+            path=_FUTURES_ORDER_PATH,
+            params=params,
+        )
+        if resp.ok:
+            return
+        # -2011 = "Unknown order sent" — order already filled/cancelled.
+        # Treat as success; we wanted it gone, it's gone.
+        if (
+            resp.error_code == sig_protocol.ERR_BINANCE_HTTP_ERROR
+            and isinstance(resp.binance_body, dict)
+            and resp.binance_body.get("code") == -2011
+        ):
+            log.info(
+                "cancel_order: order already gone (uid={} order_id={})",
+                self.firebase_uid,
+                order_id,
+            )
+            return
+        _raise_for_signing_error(resp, phase="cancel")
+
+    async def _submit_order(
+        self,
+        *,
+        params: dict,
+        phase: str,
+        signal_id: str,
+    ) -> OrderPlacementResult:
+        """Shared POST + error-mapping helper for the place-order verbs."""
+        resp = await self._client.binance_signed_post(
+            firebase_uid=self.firebase_uid,
+            base=_FUTURES_BASE,
+            path=_FUTURES_ORDER_PATH,
+            params=params,
+        )
+        if not resp.ok:
+            _raise_for_signing_error(resp, phase=phase)
+        log.info(
+            "order placed: uid={} signal_id={} phase={} order_id={}",
+            self.firebase_uid,
+            signal_id,
+            phase,
+            (resp.binance_body or {}).get("orderId"),
+        )
+        return _parse_result(resp.binance_body)
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+
+
+def _qty_str(qty: float) -> str:
+    """Format a quantity for Binance's wire format.
+
+    Binance expects string-encoded decimals (precision-preserving).
+    We round to 8 decimal places — well beyond any Futures symbol's
+    actual precision — and strip trailing zeros so the wire form is
+    minimal.  Per-symbol precision (LOT_SIZE / PRICE_FILTER) is the
+    caller's responsibility; this is just lossless serialisation.
+    """
+    return f"{qty:.8f}".rstrip("0").rstrip(".")
+
+
+def _price_str(price: float) -> str:
+    """Same convention as :func:`_qty_str`, separate function for
+    readability at call sites."""
+    return f"{price:.8f}".rstrip("0").rstrip(".")
+
+
+def _raise_for_signing_error(
+    resp: sig_protocol.SignResponse, *, phase: str
+) -> None:
+    """Map a non-ok :class:`SignResponse` to the right typed
+    :class:`OrderPlacementError` subclass.
+
+    Centralised so every order-placing method has consistent error
+    taxonomy — FSM's catch chain only deals with three exception
+    types, not seven."""
+    code = resp.error_code
+    msg = (
+        f"order placement failed (phase={phase}): "
+        f"code={code} status={resp.binance_status} "
+        f"message={resp.error_message}"
+    )
+    if code in (
+        sig_protocol.ERR_KEY_BLOB_NOT_FOUND,
+        sig_protocol.ERR_CRYPTO_DECRYPT_FAILED,
+        sig_protocol.ERR_INTERNAL_ERROR,
+    ):
+        raise OrderPlacementKeyError(msg, signing_response=resp)
+    if code in (
+        sig_protocol.ERR_BINANCE_UNREACHABLE,
+        sig_protocol.ERR_KMS_DECRYPT_FAILED,
+    ):
+        raise OrderPlacementUnreachable(msg, signing_response=resp)
+    if code == sig_protocol.ERR_BINANCE_HTTP_ERROR:
+        raise OrderRejectedByBinance(msg, signing_response=resp)
+    # BAD_REQUEST / unknown — programming bug, surface loudly.
+    raise OrderPlacementError(msg, signing_response=resp)
