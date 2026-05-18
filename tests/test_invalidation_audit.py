@@ -14,6 +14,7 @@ from src.invalidation_audit import (
     categorise_kill_reason,
     classify_pending_records,
     classify_record,
+    compute_rule_ablation_metrics,
     load_classified_records,
     prune_old_records,
     record_invalidation,
@@ -267,3 +268,184 @@ def test_prune_old_records_drops_records_older_than_retention(tmp_path):
     assert pruned == 1
     payload = json.loads(storage.read_text(encoding="utf-8"))
     assert len(payload) == 1
+
+
+# ────────────────────────────────────────────────────────────────────────
+# compute_rule_ablation_metrics — per-rule EV in R-units → DROP/TUNE/KEEP.
+# OWNER_BRIEF B17 ablation question: "If we drop rule X, does the cohort's
+# MFE-give-back get worse?"  EV/kill in R units is the only honest answer.
+# ────────────────────────────────────────────────────────────────────────
+
+
+def _ablation_record(
+    *,
+    family: str,
+    classification: str,
+    direction: str = "LONG",
+    entry: float = 100.0,
+    sl_distance: float = 1.0,
+    tp1: float = 102.0,
+    kill_price: float = 99.7,
+    post_kill_min: float = 99.5,
+    post_kill_max: float = 100.5,
+):
+    return {
+        "kill_reason_family": family,
+        "classification": classification,
+        "direction": direction,
+        "entry": entry,
+        "sl_distance": sl_distance,
+        "tp1": tp1,
+        "kill_price": kill_price,
+        "post_kill_price_min": post_kill_min,
+        "post_kill_price_max": post_kill_max,
+    }
+
+
+def test_ablation_empty_records_returns_empty():
+    result = compute_rule_ablation_metrics([])
+    assert result["by_family"] == {}
+    assert result["drop_candidates"] == []
+
+
+def test_ablation_drop_when_premature_destroys_more_R_than_protective_saves():
+    """Rule with 5 PROTECTIVE (each saves ~0.3R) vs 20 PREMATURE (each misses ~2R)
+    is silently destroying edge: EV/kill = (5*0.3 - 20*2) / 25 = -1.54R/kill → DROP.
+    Min sample = 5 (override) so the 25-record cohort qualifies.
+    """
+    records = []
+    # 5 PROTECTIVE LONG kills: killed at -0.3R, would have dropped to -0.6R only
+    # → saved 0.3R per kill (not full SL — counterfactual_R = -0.6).
+    for _ in range(5):
+        records.append(_ablation_record(
+            family="momentum_loss",
+            classification="PROTECTIVE",
+            kill_price=99.7,        # R_at_kill = -0.3
+            post_kill_min=99.4,     # counterfactual_R = -0.6
+        ))
+    # 20 PREMATURE LONG kills: killed at -0.0R, TP1 at +2R → missed 2R each.
+    for _ in range(20):
+        records.append(_ablation_record(
+            family="momentum_loss",
+            classification="PREMATURE",
+            kill_price=100.0,       # R_at_kill = 0
+            tp1=102.0,              # R_to_tp1 = +2
+        ))
+    result = compute_rule_ablation_metrics(records, min_sample_per_family=5)
+    fam = result["by_family"]["momentum_loss"]
+    assert fam["protective_n"] == 5
+    assert fam["premature_n"] == 20
+    assert fam["total"] == 25
+    assert fam["saved_R_total"] == pytest.approx(5 * 0.3, abs=1e-6)
+    assert fam["missed_R_total"] == pytest.approx(20 * 2.0, abs=1e-6)
+    assert fam["ev_per_kill_R"] < -0.20
+    assert fam["recommendation"] == "DROP"
+    assert "momentum_loss" in result["drop_candidates"]
+
+
+def test_ablation_keep_when_protective_dominates():
+    """Rule with 20 PROTECTIVE (each saves ~0.8R via near-full-SL counterfactual)
+    and 5 PREMATURE (each misses ~0.5R) → EV/kill clearly positive → KEEP.
+    """
+    records = []
+    # 20 PROTECTIVE: killed at -0.2R, post-kill min crashed to -1.0R floor →
+    # counterfactual_R = -1.0, saved_R = -0.2 - (-1.0) = +0.8 each.
+    for _ in range(20):
+        records.append(_ablation_record(
+            family="regime_shift",
+            classification="PROTECTIVE",
+            kill_price=99.8,
+            post_kill_min=98.5,  # post-kill below SL → floored at -1R
+        ))
+    # 5 PREMATURE: killed at +0.5R, TP1 at +1.0R → missed 0.5R each.
+    for _ in range(5):
+        records.append(_ablation_record(
+            family="regime_shift",
+            classification="PREMATURE",
+            kill_price=100.5,
+            tp1=101.0,
+        ))
+    result = compute_rule_ablation_metrics(records, min_sample_per_family=5)
+    fam = result["by_family"]["regime_shift"]
+    assert fam["saved_R_total"] == pytest.approx(20 * 0.8, abs=1e-6)
+    assert fam["missed_R_total"] == pytest.approx(5 * 0.5, abs=1e-6)
+    assert fam["ev_per_kill_R"] > 0.10
+    assert fam["recommendation"] == "KEEP"
+    assert "regime_shift" not in result["drop_candidates"]
+
+
+def test_ablation_insufficient_sample_when_total_below_threshold():
+    """Even a clearly-bleeding rule must not get a DROP recommendation
+    when the classified cohort is too small to be confident."""
+    records = [
+        _ablation_record(family="ema_crossover", classification="PREMATURE",
+                         kill_price=100.0, tp1=102.0)
+        for _ in range(5)
+    ]
+    result = compute_rule_ablation_metrics(records, min_sample_per_family=20)
+    fam = result["by_family"]["ema_crossover"]
+    assert fam["total"] == 5
+    assert fam["recommendation"] == "INSUFFICIENT_SAMPLE"
+    assert result["drop_candidates"] == []
+
+
+def test_ablation_tune_when_ev_is_marginal():
+    """A rule sitting between -0.20 and +0.10 R/kill is not strongly bleeding
+    nor strongly protecting; should surface as TUNE, not DROP/KEEP."""
+    records = []
+    # 10 PROTECTIVE saving ~0.4R each + 10 PREMATURE missing ~0.4R each →
+    # EV ~ 0.0 → TUNE.
+    for _ in range(10):
+        records.append(_ablation_record(
+            family="other",
+            classification="PROTECTIVE",
+            kill_price=99.8,
+            post_kill_min=99.4,
+        ))
+    for _ in range(10):
+        records.append(_ablation_record(
+            family="other",
+            classification="PREMATURE",
+            kill_price=100.4,   # R_at_kill = +0.4
+            tp1=100.8,          # R_to_tp1 = +0.8 → missed 0.4
+        ))
+    result = compute_rule_ablation_metrics(records, min_sample_per_family=20)
+    fam = result["by_family"]["other"]
+    assert fam["recommendation"] == "TUNE"
+    assert "other" not in result["drop_candidates"]
+
+
+def test_ablation_short_direction_math_mirrors_long():
+    """SHORT kills must compute R-units with entry-price polarity flipped."""
+    records = []
+    # PREMATURE SHORT: entry=100, tp1=98 (R_to_tp1 = +2), killed at 100 (R_at_kill = 0).
+    for _ in range(20):
+        records.append(_ablation_record(
+            family="trailing_invalidation",
+            classification="PREMATURE",
+            direction="SHORT",
+            entry=100.0,
+            sl_distance=1.0,
+            tp1=98.0,
+            kill_price=100.0,
+        ))
+    result = compute_rule_ablation_metrics(records, min_sample_per_family=20)
+    fam = result["by_family"]["trailing_invalidation"]
+    assert fam["missed_R_total"] == pytest.approx(20 * 2.0, abs=1e-6)
+    assert fam["recommendation"] == "DROP"
+
+
+def test_ablation_neutral_records_count_but_contribute_zero_ev():
+    """NEUTRAL classifications still count toward sample size but their EV
+    contribution is 0 (counterfactual is ambiguous when price stayed in band)."""
+    records = [
+        _ablation_record(family="momentum_loss", classification="NEUTRAL")
+        for _ in range(25)
+    ]
+    result = compute_rule_ablation_metrics(records, min_sample_per_family=20)
+    fam = result["by_family"]["momentum_loss"]
+    assert fam["neutral_n"] == 25
+    assert fam["saved_R_total"] == 0.0
+    assert fam["missed_R_total"] == 0.0
+    assert fam["ev_per_kill_R"] == 0.0
+    assert fam["recommendation"] == "TUNE"

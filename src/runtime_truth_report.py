@@ -819,11 +819,14 @@ def summarize_invalidation_audit(records: List[Dict[str, Any]]) -> Dict[str, Any
             inner[label] = inner.get(label, 0) + 1
         totals[label] = totals.get(label, 0) + 1
 
+    from src.invalidation_audit import compute_rule_ablation_metrics
+
     return {
         "by_setup": by_setup,
         "by_reason": by_reason,
         "totals": totals,
         "stale": stale,
+        "ablation": compute_rule_ablation_metrics(records),
     }
 
 
@@ -1652,6 +1655,47 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
                     f"| {setup} | {row.get('PROTECTIVE', 0)} | "
                     f"{row.get('PREMATURE', 0)} | {row.get('NEUTRAL', 0)} | "
                     f"{row.get('INSUFFICIENT_DATA', 0)} |"
+                )
+
+        # ── Per-rule ablation recommendation (OWNER_BRIEF B17) ────────
+        # Counts alone hide unit asymmetry: a rule with 10 PROTECTIVE and 8
+        # PREMATURE looks net-helping until you weight each by R-units (saved
+        # ~0.4R/kill vs missed ~1.5R/kill = silently destroying edge).  This
+        # block surfaces EV per kill so the DROP/TUNE/KEEP call is explicit.
+        ablation = audit.get("ablation") or {}
+        by_family = ablation.get("by_family") or {}
+        if by_family:
+            lines.append("")
+            lines.append("### Per-rule ablation (R-units per kill)")
+            min_sample = ablation.get("min_sample_per_family", 20)
+            lines.append(
+                f"_DROP candidate: avg EV < -0.20R/kill across >= {min_sample} kills. "
+                "KEEP: avg EV > +0.10R/kill. TUNE: in between. "
+                "EV model: counterfactual exit at TP1 (PREMATURE) or at worst "
+                "post-kill excursion floored at -1R (PROTECTIVE)._"
+            )
+            lines.append("")
+            lines.append(
+                "| Rule | PROT | PREM | NEUT | Saved R | Missed R | EV/kill (R) | Verdict |"
+            )
+            lines.append("|---|---:|---:|---:|---:|---:|---:|---|")
+            for family in sorted(by_family.keys()):
+                row = by_family[family]
+                lines.append(
+                    f"| {family} | {row.get('protective_n', 0)} | "
+                    f"{row.get('premature_n', 0)} | {row.get('neutral_n', 0)} | "
+                    f"{row.get('saved_R_total', 0.0):.1f} | "
+                    f"{row.get('missed_R_total', 0.0):.1f} | "
+                    f"{row.get('ev_per_kill_R', 0.0):+.2f} | "
+                    f"**{row.get('recommendation', '?')}** — {row.get('verdict', '')} |"
+                )
+            drops = ablation.get("drop_candidates") or []
+            if drops:
+                lines.append("")
+                lines.append(
+                    f"- **Action**: drop candidates = `{', '.join(sorted(drops))}` "
+                    "— these rules are net-destroying R across the cohort. "
+                    "Per-setup exemption is the next step if a full drop is too aggressive."
                 )
     else:
         lines.append(
