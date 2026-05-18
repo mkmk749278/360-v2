@@ -3167,3 +3167,135 @@ class TestPreTpReclassifiesBreakevenToProfitLocked:
             pnl_pct=sig.pnl_pct, hit_tp=0, hit_sl=True,
         )
         assert outcome == "BREAKEVEN_EXIT"
+
+
+# ---------------------------------------------------------------------------
+# PR B (2026-05-18) — gate-rejected opens stay retryable
+# ---------------------------------------------------------------------------
+
+
+class TestRejectedOpenRetry:
+    """trade_monitor.py:572 fix — _order_placed_ids should only catch
+    SUCCESSFUL opens.  When execute_signal returns None (gate rejection:
+    qty_zero, notional_floor, risk-gate concurrent-cap), the signal_id
+    must NOT be marked as placed so a future tick can retry once the
+    rejection cause clears (equity recovered, slot freed).  Owner-
+    reported symptom 2026-05-18: ACTIVE signals on the Signals tab
+    with no corresponding paper position ever firing.
+    """
+
+    def _build_monitor(self, active: Dict[str, Signal]):
+        async def mock_send(chat_id, text):
+            pass
+
+        data_store = MagicMock()
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
+        data_store.ticks = {}
+
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=mock_send,
+            get_active_signals=lambda: dict(active),
+            remove_signal=lambda sid: None,
+            update_signal=MagicMock(),
+        )
+        return monitor
+
+    def _active_sig(self) -> Signal:
+        return Signal(
+            channel="360_SCALP",
+            symbol="BTCUSDT",
+            direction=Direction.LONG,
+            entry=30000.0,
+            stop_loss=29850.0,
+            tp1=30150.0,
+            tp2=30300.0,
+            tp3=30450.0,
+            confidence=75.0,
+            timestamp=utcnow() - timedelta(seconds=300),
+            current_price=30000.5,
+            status="ACTIVE",
+        )
+
+    @pytest.mark.asyncio
+    async def test_rejected_open_is_not_marked_placed(self):
+        """execute_signal returns None (gate rejection) → signal_id stays
+        eligible for future retry; not added to ``_order_placed_ids``."""
+        sig = self._active_sig()
+        active = {sig.signal_id: sig}
+        monitor = self._build_monitor(active)
+
+        om = MagicMock()
+        om.is_enabled = True
+
+        async def _reject(_sig):
+            return None  # gate rejection
+
+        om.execute_signal.side_effect = _reject
+        monitor._order_manager = om
+
+        await monitor._check_all()
+
+        assert sig.signal_id not in monitor._order_placed_ids, (
+            "rejected open must NOT be marked as placed — was the "
+            "exact bug PR B fixes"
+        )
+        assert sig.signal_id in monitor._last_open_attempt_at, (
+            "attempt timestamp must be recorded for cooldown tracking"
+        )
+        assert om.execute_signal.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_cooldown_prevents_immediate_retry(self):
+        """A second _check_all within the cooldown window does NOT
+        re-call execute_signal — otherwise rejected opens would hammer
+        the gate chain every 5s monitor tick."""
+        sig = self._active_sig()
+        active = {sig.signal_id: sig}
+        monitor = self._build_monitor(active)
+
+        om = MagicMock()
+        om.is_enabled = True
+
+        async def _reject(_sig):
+            return None
+
+        om.execute_signal.side_effect = _reject
+        monitor._order_manager = om
+
+        await monitor._check_all()
+        await monitor._check_all()  # immediate retry — should be skipped
+
+        assert om.execute_signal.call_count == 1, (
+            "second call within cooldown must be suppressed"
+        )
+
+    @pytest.mark.asyncio
+    async def test_successful_open_after_prior_rejection_marks_placed(self):
+        """When the rejection cause clears (mocked: second call returns
+        a real order_id), the signal_id is finally marked as placed so
+        we never re-attempt after success."""
+        sig = self._active_sig()
+        active = {sig.signal_id: sig}
+        monitor = self._build_monitor(active)
+
+        om = MagicMock()
+        om.is_enabled = True
+        responses = iter([None, "paper-BTCUSDT-open-1"])
+
+        async def _maybe(_sig):
+            return next(responses)
+
+        om.execute_signal.side_effect = _maybe
+        monitor._order_manager = om
+
+        await monitor._check_all()
+        # Bypass cooldown so the second tick can retry.
+        monitor._last_open_attempt_at.pop(sig.signal_id, None)
+        await monitor._check_all()
+
+        assert sig.signal_id in monitor._order_placed_ids, (
+            "successful retry must finally mark the signal as placed"
+        )
+        assert om.execute_signal.call_count == 2
+

@@ -7,6 +7,7 @@ updating status, PnL, trailing stop, and posting updates to Telegram.
 from __future__ import annotations
 
 import asyncio
+import os
 import numpy as np
 from typing import Any, Callable, Coroutine, Dict, Optional
 
@@ -61,6 +62,18 @@ _STOP_OUTCOME_MESSAGES = {
 # Seconds of grace after a DCA entry before invalidation checks are allowed.
 # Gives the averaged position time to develop without being killed prematurely.
 _DCA_GRACE_SECONDS = 600
+
+# Retry cooldown for paper-mode open attempts that were gate-rejected
+# (qty_zero / notional_floor / risk-gate concurrent-cap).  Without
+# this, the 5s monitor tick re-attempts a rejected open every cycle
+# until the signal goes terminal — gate-rejection chatter that gives
+# the broker no useful information.  60s lets transient rejections
+# (equity recovering, concurrent slot freed) resolve at the rate
+# they realistically can, without storming the gate chain on every
+# tick.  Env-overridable per B8.
+_ORDER_RETRY_COOLDOWN_SEC: float = float(
+    os.getenv("ORDER_RETRY_COOLDOWN_SEC", "60")
+)
 
 # OWNER_BRIEF B17 / §3.2a — per-user invalidation aggressiveness modes.
 # Engine-side TradeMonitor uses ``INVALIDATION_MODE_DEFAULT`` from config
@@ -263,9 +276,21 @@ class TradeMonitor:
         # When provided and auto-execution is enabled, confirmed signals are
         # forwarded to the exchange instead of (or alongside) Telegram.
         self._order_manager = order_manager
-        # Track signal IDs for which an order has already been placed to avoid
-        # duplicate orders across consecutive poll cycles.
+        # Track signal IDs for which an order has already been placed
+        # SUCCESSFULLY so we don't double-fire across consecutive poll
+        # cycles.  Previously this also accumulated gate-rejected
+        # signals (qty_zero, notional_floor, risk-gate concurrent-cap)
+        # because ``add()`` ran unconditionally after ``execute_signal``
+        # — those signals never retried even when the rejection cause
+        # could have cleared (equity recovered, position slot freed).
+        # 2026-05-18 fix: only mark as placed on a non-None order_id.
         self._order_placed_ids: set = set()
+        # Last open-attempt timestamp per signal_id.  Used as a retry
+        # cooldown so a rejected signal doesn't get re-attempted every
+        # 5s monitor tick (which would spam the broker with no-op gate
+        # rejections).  Cleared in ``_record_outcome`` alongside
+        # ``_order_placed_ids``.
+        self._last_open_attempt_at: Dict[str, Any] = {}
         self._running = False
         # Optional callback invoked with the symbol whenever a stop-loss is hit.
         # Set after construction (e.g. to scanner.set_symbol_sl_cooldown).
@@ -446,6 +471,9 @@ class TradeMonitor:
         # Release order-placement tracking for this closed signal so that the
         # set does not grow without bound across many completed signals.
         self._order_placed_ids.discard(sig.signal_id)
+        # Same cleanup for the retry-cooldown map (PR B, 2026-05-18) so it
+        # doesn't grow without bound as signals complete.
+        self._last_open_attempt_at.pop(sig.signal_id, None)
 
         # Notify the AI Trade Observer with exit analysis (fail-open)
         if self.observer is not None:
@@ -561,29 +589,48 @@ class TradeMonitor:
             # Auto-execution: attempt to place an order the first time we see
             # this signal (status == "ACTIVE" and no order has been placed yet).
             # The OrderManager is a no-op when auto-execution is disabled.
+            #
+            # 2026-05-18 fix: previously ``_order_placed_ids.add()`` ran
+            # unconditionally after ``execute_signal`` returned, so a
+            # gate-rejected open (qty_zero / notional_floor / risk-gate
+            # concurrent-cap → execute_signal returns None) was marked
+            # as "placed" and never retried.  Owner-visible symptom:
+            # ACTIVE signals sitting on the Signals tab with no
+            # corresponding paper position, ever.  Now we mark as
+            # placed only on a non-None order_id, and add a per-signal
+            # cooldown so failed retries don't hammer the broker on
+            # every 5s monitor tick.
             if (
                 self._order_manager is not None
                 and self._order_manager.is_enabled
                 and sig.status == "ACTIVE"
                 and sig.signal_id not in self._order_placed_ids
             ):
-                try:
-                    order_id = await self._order_manager.execute_signal(sig)
-                    self._order_placed_ids.add(sig.signal_id)
-                    if order_id:
-                        log.info(
-                            "Auto-execution order placed for {} {}: order_id={}",
+                _last = self._last_open_attempt_at.get(sig.signal_id)
+                _now = utcnow()
+                _should_retry = (
+                    _last is None
+                    or (_now - _last).total_seconds() >= _ORDER_RETRY_COOLDOWN_SEC
+                )
+                if _should_retry:
+                    self._last_open_attempt_at[sig.signal_id] = _now
+                    try:
+                        order_id = await self._order_manager.execute_signal(sig)
+                        if order_id:
+                            self._order_placed_ids.add(sig.signal_id)
+                            log.info(
+                                "Auto-execution order placed for {} {}: order_id={}",
+                                sig.symbol,
+                                sig.channel,
+                                order_id,
+                            )
+                    except Exception as exc:
+                        log.warning(
+                            "Auto-execution failed for {} {}: {}",
                             sig.symbol,
                             sig.channel,
-                            order_id,
+                            exc,
                         )
-                except Exception as exc:
-                    log.warning(
-                        "Auto-execution failed for {} {}: {}",
-                        sig.symbol,
-                        sig.channel,
-                        exc,
-                    )
             await self._evaluate_signal(sig)
 
         await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
