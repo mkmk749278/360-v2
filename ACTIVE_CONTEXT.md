@@ -71,14 +71,41 @@ Reaction-time budget for TP1-hit → BE-SL placed: ~60-100ms total (WS event ~5-
 | 4 | 100 | $1000 | Full | After 1 month clean |
 | 5 | Open beta | $2000 default (user-configurable) | Full | After 2 months clean |
 
-### Open owner-decisions (must be answered before PR 6 ships)
+### Resolved owner-decisions (2026-05-18, post-PR-1 merge)
 
-1. **Geographic restriction.** Geoblock US users via Firebase rules + connect-flow check? (Recommended yes — 3Commas is currently being sued in N.D. Cal., this is the litigation-surface vector.)
-2. **Withdraw permission policy.** Auto-reject keys with withdraw enabled, or warn? (Recommended auto-reject — matches every peer; permissive = liability the industry has chosen not to take.)
-3. **Single-region vs multi-region egress IPs.** Single = simpler for users to whitelist; multi = better failover but every user must whitelist every region. (Recommended single for v1.)
-4. **Apply for Binance Link / Fast API partnership in parallel?** Better long-term UX (Binance hands Lumin an RSA-encrypted key bound to our account, no user copy-paste). Requires entity + KYC. Not blocking v1 but worth applying now.
-5. **Beta cohort selection.** Stage 1 = you only; Stage 2 = which 5 trusted users? Needs explicit list before PR 14 ships.
-6. **Pre-TP partial close fraction default.** B17 sets a 30% floor / 50% engine default. Confirm that's the right server-side default for the FSM, or override.
+| # | Decision | Resolution | Notes |
+|---|---|---|---|
+| 1 | Geographic restriction | **Geoblock US** | Implemented in PR-2 connect-flow (Firebase claims check) + sign-up flow. Defends against the 3Commas N.D. Cal. litigation vector. |
+| 2 | Withdraw permission policy | **Auto-reject keys with withdraw enabled** | Hard-coded in PR-2's connect-flow validator (`B18` non-negotiable). No permissive mode, no admin override. |
+| 3 | Single-region vs multi-region egress IPs | **Single-region for v1** | Engine VPS IP is the single whitelist target. Multi-region failover deferred until subscriber volume justifies the GCP NAT-gateway cost. |
+| 4 | Binance Link / Fast API partnership | **Apply now (solo individual)** | Application submitted as a solo individual without a registered entity. Binance Link's program docs require KYB + min-volume showing; solo applications **may be declined** but submitting puts us in the queue and we can re-apply with an entity later. Does NOT block v1 — IP-whitelist path proceeds in parallel. |
+| 5 | Beta cohort / staged rollout | **OWNER OVERRIDE — ship to all users at once, no staged beta** | Owner explicit decision 2026-05-18 after CTE recommendation for compressed (24h-stage-1-then-open) rollout. **The blast-radius caps (B18, see strengthened defaults below) become the ONLY safety net.** This is a doctrinal override of `B12` "paper mode is the only acceptable runtime when [safety controls] are not in place" — recorded here per `CLAUDE.md § Hard Limits` "never silence a detected problem." |
+| 6 | Pre-TP partial close fraction default | **50% (engine default per B17)** | Server-side FSM uses the same default the existing PaperOrderManager uses; users can override per the B17 30% floor / 100% ceiling. |
+
+### Strengthened blast-radius defaults (compensating for the no-beta override)
+
+Since beta-staging is gone, the **default** values for the B18 blast-radius caps tighten:
+
+| Cap | Original beta-stage default | **Revised solo-launch default** | Why |
+|---|---|---|---|
+| Per-user position cap | $500 (Stage 3) → $1000 (Stage 4) → $2000 (Stage 5 open) | **$500 user-configurable up to $2000** | Conservative default; users opt UP, not DOWN. A FSM bug fires within $500 per user not $2000. |
+| Symbol allowlist | Lumin signal-channel symbols | **Unchanged** — only signal-channel symbols | Already maximally restrictive. |
+| Per-user rate limit | 10 orders/min, 50/hour | **5 orders/min, 30/hour** | Tighter than originally specced; doctrinally a real signal-driven user rarely needs more. |
+| Global engine kill switch | Telegram-flippable | **Unchanged** — but ALWAYS-on monitoring | Reachable in <5s from Telegram bot. |
+| **NEW** Global circuit breaker (added 2026-05-18 to compensate for no-beta) | n/a | **Engine auto-disables auto-trade engine-wide if >10 orders are rejected by Binance with `-2014`/`-2015`/`-4046`/`-2010` errors in a 60s window.** Re-enable requires manual Telegram command. | Catches: FSM bug that fires wrong-permission orders for every user; KMS outage that breaks signing for every user; symbol-allowlist drift. Independent tripwire layer. |
+| **NEW** Per-user circuit breaker | n/a | **User auto-disabled (not engine-wide) if >3 of their orders are rejected within 5 minutes.** Telegram alert + user must reconnect. | Catches: one user's Binance key permissions changed underneath us; key revoked; account suspended at Binance. Bounded blast to one user. |
+
+These two new circuit breakers add ~200 LOC to PR-8 (anomaly tripwires) and absorb most of the safety the staged beta was providing. Not a complete substitute (a coordinated FSM logic bug still fires up to 10 wrong orders before the global breaker trips), but the minimum responsible defence given the owner's no-staged-beta decision.
+
+### Updated 14-PR slice ordering after owner-decisions
+
+PR-14 (beta cohort gating) is downgraded to a **kill-switch + global-enable-flag** shape — no per-cohort logic, just `auto_trade_globally_enabled: bool` in Firestore plus the two new circuit breakers above. Effort: 1 day → unchanged.
+
+All other PRs unchanged.
+
+### Why this section exists
+
+Future sessions / future-CTE need to see the explicit doctrine-override decision (#5) so we don't quietly re-introduce staged-beta thinking later, and so any post-mortem on a launch-day incident has the clear record of "owner was advised, owner decided" — not "CTE shipped recklessly."
 
 ### What ships before owner sign-off vs after
 
