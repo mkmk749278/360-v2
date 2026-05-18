@@ -110,11 +110,17 @@ class KillSwitchClient:
         """Flip the global kill switch ON.  Effective within
         ``_CACHE_TTL_S`` for every reader.  ``reason`` is recorded
         for operator visibility (Telegram bot displays this when
-        showing kill-switch status)."""
+        showing kill-switch status).
+
+        Fires a Telegram alert on engage so the operator gets
+        notified regardless of whether they initiated the engage
+        (programmatic engagement from the global circuit breaker
+        also routes through here)."""
         self._write_global(engaged=True, reason=reason)
         with self._lock:
             self._global_cache = None  # invalidate cache
         log.warning("kill_switch: GLOBAL engaged reason={}", reason)
+        _spawn_engage_alert(reason)
 
     def disengage_global(self) -> None:
         """Manual operator re-enable.  Flips OFF; resumes auto-trade
@@ -271,3 +277,28 @@ def reset_for_test() -> None:
     global _client
     with _lock:
         _client = None
+
+
+# ---------------------------------------------------------------------------
+# Telegram alert dispatch helper — fire-and-forget on engage
+# ---------------------------------------------------------------------------
+
+
+def _spawn_engage_alert(reason: str) -> None:
+    """Fire-and-forget the engage alert.  Mirrors the spawn pattern
+    in tripwires.py — caller is synchronous (the engage call), we
+    schedule the async alert on the running loop without blocking.
+    Silently drops if there's no running loop (sync test path)."""
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    try:
+        # Lazy import to avoid circular dep at module load.
+        from . import telegram_alerts
+
+        loop.create_task(telegram_alerts.alert_kill_switch_engaged(reason=reason))
+    except Exception:
+        log.exception("kill_switch: failed to schedule engage alert")
