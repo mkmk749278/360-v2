@@ -35,6 +35,22 @@ _GLOBAL_KILL_DOC = ("kill_switch", "global")
 _GLOBAL_KILL_FIELD = "engaged"
 _USER_DISABLED_FIELD = "auto_trade_disabled"
 
+# Global auto-trade enable flag (PR-14, per #431 no-staged-beta
+# compensating controls).  Lives on the same kill_switch/global doc
+# as the kill switch field for atomic visibility (one Firestore
+# read covers BOTH flags).  Distinct field name + inverse default:
+#   * ``engaged`` defaults False (kill switch OFF → trading allowed)
+#   * ``auto_trade_globally_enabled`` defaults False
+#       (auto-trade OFF until operator explicitly turns it ON)
+# The combined gate the FSM checks before placing orders:
+#   auto_trade_globally_enabled == True
+#       AND engaged == False
+#       AND user-not-disabled
+# Default-OFF on the enable flag means a fresh deploy ships in a
+# SAFE state — no user can auto-trade until the operator flips the
+# Firestore doc.  This is the operative blast-radius cap per #431.
+_GLOBAL_ENABLED_FIELD = "auto_trade_globally_enabled"
+
 # Cache TTL for reads.  5s gives us the B18 "<5s SLA on kill switch
 # flip taking effect" property while keeping Firestore reads minimal.
 _CACHE_TTL_S = 5.0
@@ -60,10 +76,18 @@ class KillSwitchNotInitialisedError(KillSwitchError):
 
 @dataclass
 class _CachedFlag:
-    """One cached boolean read from Firestore + when it was read."""
+    """One cached read from Firestore + when it was read.
+
+    Carries BOTH flags from the ``kill_switch/global`` doc so a
+    single read covers both ``is_global_engaged`` and
+    ``is_globally_enabled`` lookups without doubling the Firestore
+    quota.  ``enabled_value`` is Optional for backward-compat with
+    cache entries written before PR-14 (treated as cache-miss on
+    subsequent enable-flag reads → triggers a re-fetch)."""
 
     value: bool
     read_at_monotonic: float
+    enabled_value: Optional[bool] = None
 
 
 class KillSwitchClient:
@@ -92,7 +116,10 @@ class KillSwitchClient:
         """True if engine-wide auto-trade is currently halted.
 
         Cached for 5s.  Cheap by design — called on every order
-        placement attempt across all users.
+        placement attempt across all users.  After PR-14 this also
+        populates the cached ``enabled_value`` so a subsequent
+        ``is_globally_enabled`` call hits cache without a second
+        Firestore read.
         """
         with self._lock:
             cached = self._global_cache
@@ -102,9 +129,13 @@ class KillSwitchClient:
                 and (now - cached.read_at_monotonic) < _CACHE_TTL_S
             ):
                 return cached.value
-            value = self._read_global()
-            self._global_cache = _CachedFlag(value=value, read_at_monotonic=now)
-            return value
+            engaged, enabled = self._read_global_both()
+            self._global_cache = _CachedFlag(
+                value=engaged,
+                read_at_monotonic=now,
+                enabled_value=enabled,
+            )
+            return engaged
 
     def engage_global(self, reason: str = "") -> None:
         """Flip the global kill switch ON.  Effective within
@@ -130,20 +161,13 @@ class KillSwitchClient:
             self._global_cache = None
         log.info("kill_switch: GLOBAL disengaged")
 
-    def _read_global(self) -> bool:
-        doc = (
-            self._db.collection(_GLOBAL_KILL_DOC[0])
-            .document(_GLOBAL_KILL_DOC[1])
-            .get()
-        )
-        if not doc.exists:
-            return False
-        data = doc.to_dict() or {}
-        return bool(data.get(_GLOBAL_KILL_FIELD, False))
-
     def _write_global(self, *, engaged: bool, reason: str) -> None:
         from datetime import datetime, timezone
 
+        # ``merge=True`` so we don't clobber ``auto_trade_globally_enabled``
+        # which lives on the same doc.  The two flags are independent
+        # surfaces: kill switch = emergency stop; enable flag = global
+        # opt-in.  Both must be writable without disturbing the other.
         self._db.collection(_GLOBAL_KILL_DOC[0]).document(
             _GLOBAL_KILL_DOC[1]
         ).set(
@@ -151,7 +175,92 @@ class KillSwitchClient:
                 _GLOBAL_KILL_FIELD: engaged,
                 "reason": reason,
                 "updated_at": datetime.now(timezone.utc),
-            }
+            },
+            merge=True,
+        )
+
+    # ---- Global auto-trade enable flag (PR-14) ------------------------
+
+    def is_globally_enabled(self) -> bool:
+        """True if engine-wide auto-trade is currently ENABLED.
+
+        Default is ``False`` — fresh deploy ships with auto-trade
+        OFF for every user until the operator explicitly flips this.
+        This is the operative blast-radius cap per #431's no-staged-
+        beta compensating controls.
+
+        Cached for 5s via the same cache as :meth:`is_global_engaged`
+        — both fields live on the same doc, so the cached read covers
+        both flags.
+        """
+        with self._lock:
+            cached = self._global_cache
+            now = self._clock()
+            if (
+                cached is not None
+                and (now - cached.read_at_monotonic) < _CACHE_TTL_S
+                and cached.enabled_value is not None
+            ):
+                return cached.enabled_value
+            engaged, enabled = self._read_global_both()
+            self._global_cache = _CachedFlag(
+                value=engaged,
+                read_at_monotonic=now,
+                enabled_value=enabled,
+            )
+            return enabled
+
+    def enable_global_auto_trade(self) -> None:
+        """Operator action — flip ``auto_trade_globally_enabled`` to
+        True so auto-trade is allowed engine-wide (subject to per-user
+        disable + kill switch checks).  Survives engine restart.
+        """
+        self._write_enabled(enabled=True)
+        with self._lock:
+            self._global_cache = None
+        log.info("kill_switch: GLOBAL auto-trade ENABLED")
+
+    def disable_global_auto_trade(self) -> None:
+        """Operator action — flip ``auto_trade_globally_enabled`` to
+        False.  Halts new order placement for all users (orders
+        already on Binance are not cancelled — use the kill switch
+        for that scenario)."""
+        self._write_enabled(enabled=False)
+        with self._lock:
+            self._global_cache = None
+        log.warning("kill_switch: GLOBAL auto-trade DISABLED")
+
+    def _read_global_both(self) -> tuple[bool, bool]:
+        """One Firestore read returning ``(engaged, enabled)``.  Both
+        flags default False when the doc is missing — kill switch
+        OFF, enable flag OFF.  Fresh-deploy state is safe-by-default
+        (no trading until operator enables)."""
+        doc = (
+            self._db.collection(_GLOBAL_KILL_DOC[0])
+            .document(_GLOBAL_KILL_DOC[1])
+            .get()
+        )
+        if not doc.exists:
+            return (False, False)
+        data = doc.to_dict() or {}
+        return (
+            bool(data.get(_GLOBAL_KILL_FIELD, False)),
+            bool(data.get(_GLOBAL_ENABLED_FIELD, False)),
+        )
+
+    def _write_enabled(self, *, enabled: bool) -> None:
+        from datetime import datetime, timezone
+
+        # Same merge=True semantics as _write_global so we don't
+        # clobber the engaged field when toggling enable.
+        self._db.collection(_GLOBAL_KILL_DOC[0]).document(
+            _GLOBAL_KILL_DOC[1]
+        ).set(
+            {
+                _GLOBAL_ENABLED_FIELD: enabled,
+                "auto_trade_globally_enabled_at": datetime.now(timezone.utc),
+            },
+            merge=True,
         )
 
     # ---- Per-user disable ---------------------------------------------

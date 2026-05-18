@@ -267,3 +267,98 @@ def test_invalidate_cache_drops_all_entries() -> None:
     client.invalidate_cache()
     client.is_global_engaged()
     assert kill_doc.get.call_count == 2
+
+
+# ---------------------------------------------------------------------------
+# Global auto-trade enable flag (PR-14)
+# ---------------------------------------------------------------------------
+
+
+def test_global_default_is_NOT_enabled() -> None:
+    """Critical doctrine canary: fresh deploy (missing kill_switch doc)
+    must default to ``auto_trade_globally_enabled = False`` so no user
+    can auto-trade until the operator explicitly enables.  This is the
+    operative blast-radius cap per #431's no-staged-beta compensating
+    controls."""
+    client, _, _, _ = _make_client_with_clock()
+    assert client.is_globally_enabled() is False
+
+
+def test_enable_global_auto_trade_writes_true_with_merge() -> None:
+    """Critical: enable_global_auto_trade must use ``merge=True`` on
+    the Firestore write so it doesn't clobber the ``engaged`` field
+    (kill switch lives on the same doc).  A regression here would
+    silently flip the kill switch OFF when the operator turns
+    auto-trade ON, which is the opposite of what they want."""
+    client, _, doc_map, _ = _make_client_with_clock()
+    client.enable_global_auto_trade()
+    kill_doc = doc_map[("kill_switch", "global")]
+    kill_doc.set.assert_called_once()
+    args, kwargs = kill_doc.set.call_args
+    payload = args[0]
+    assert payload["auto_trade_globally_enabled"] is True
+    # merge=True is the regression canary.
+    assert kwargs.get("merge") is True
+
+
+def test_disable_global_auto_trade_writes_false_with_merge() -> None:
+    client, _, doc_map, _ = _make_client_with_clock()
+    client.disable_global_auto_trade()
+    kill_doc = doc_map[("kill_switch", "global")]
+    kill_doc.set.assert_called_once()
+    args, kwargs = kill_doc.set.call_args
+    assert args[0]["auto_trade_globally_enabled"] is False
+    assert kwargs.get("merge") is True
+
+
+def test_kill_switch_engage_also_uses_merge() -> None:
+    """The engage path was updated in PR-14 to use merge=True so it
+    no longer clobbers the auto_trade_globally_enabled field.
+    Regression canary for the inverse scenario: operator engages
+    the kill switch must NOT flip the enable flag back to default."""
+    client, _, doc_map, _ = _make_client_with_clock()
+    client.engage_global(reason="test")
+    kill_doc = doc_map[("kill_switch", "global")]
+    kill_doc.set.assert_called_once()
+    args, kwargs = kill_doc.set.call_args
+    assert kwargs.get("merge") is True
+
+
+def test_is_globally_enabled_reads_both_flags_in_one_doc_get() -> None:
+    """One Firestore read populates BOTH cached flags.  Verifies the
+    cache shape covers the two-flags-one-doc optimisation."""
+    client, _, doc_map, _ = _make_client_with_clock()
+    kill_doc = doc_map[("kill_switch", "global")]
+    kill_doc.get.return_value = SimpleNamespace(
+        exists=True,
+        to_dict=lambda: {
+            "engaged": False,
+            "auto_trade_globally_enabled": True,
+        },
+    )
+    # First call populates cache via _read_global_both.
+    assert client.is_globally_enabled() is True
+    # Subsequent reads of EITHER flag hit cache (no additional get).
+    assert client.is_globally_enabled() is True
+    assert client.is_global_engaged() is False
+    assert kill_doc.get.call_count == 1
+
+
+def test_enable_invalidates_cache_so_subsequent_read_sees_update() -> None:
+    """After enable_global_auto_trade flips the flag, the cached
+    flag must be invalidated so the next read sees the new value
+    even within the TTL window."""
+    client, _, doc_map, _ = _make_client_with_clock()
+    kill_doc = doc_map[("kill_switch", "global")]
+    # Pre-enable state: not enabled.
+    kill_doc.get.return_value = SimpleNamespace(
+        exists=True, to_dict=lambda: {"engaged": False, "auto_trade_globally_enabled": False}
+    )
+    assert client.is_globally_enabled() is False
+    # Operator enables.
+    client.enable_global_auto_trade()
+    # Cache should have been invalidated; next read fetches fresh.
+    kill_doc.get.return_value = SimpleNamespace(
+        exists=True, to_dict=lambda: {"engaged": False, "auto_trade_globally_enabled": True}
+    )
+    assert client.is_globally_enabled() is True
