@@ -887,3 +887,92 @@ class PaperCloseAllResponse(BaseModel):
             "on AutoModeStatus.simulated_pnl_usd"
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Binance connect flow (server-side execution, OWNER_BRIEF B18)
+# ---------------------------------------------------------------------------
+
+
+class BinanceConnectRequest(BaseModel):
+    """Request body for ``POST /api/binance/connect``.
+
+    The user pastes their Binance API key + secret in the Lumin app.
+    The app POSTs them here over HTTPS.  The endpoint validates against
+    Binance, encrypts the secret with a per-user DEK, and persists the
+    encrypted blob.  The plaintext secret is wiped immediately after
+    validation + encryption — never logged, never returned, never
+    written to disk in the clear.
+
+    ``api_key`` and ``api_secret`` are intentionally bare ``str`` (not
+    ``SecretStr``) because we never write the request model to any log
+    sink — the engine's loguru config strips the request body from
+    access logs for this route.  Using ``SecretStr`` here would suggest
+    we sometimes log the model elsewhere, which we do not.
+    """
+
+    api_key: str = Field(..., min_length=8, description="Binance API key (public)")
+    api_secret: str = Field(..., min_length=8, description="Binance API secret")
+
+
+class BinanceConnectResponse(BaseModel):
+    """Response body for ``POST /api/binance/connect`` on success.
+
+    The app displays the ``key_public_id_first8`` so the user can
+    confirm at-a-glance that the key they pasted is the one Lumin
+    stored.  The full key is never returned (it's stored encrypted
+    server-side and never round-trips back to the client).
+    """
+
+    ok: bool = True
+    key_public_id_first8: str = Field(
+        ...,
+        description=(
+            "First 8 characters of the Binance API key — non-secret, "
+            "used for at-a-glance confirmation in the app's connected-key UI"
+        ),
+    )
+    withdraw_disabled_ok: bool = Field(
+        True,
+        description="Validated: withdraw permission is disabled on this key",
+    )
+    futures_enabled_ok: bool = Field(
+        True,
+        description="Validated: Futures permission is enabled on this key",
+    )
+    ip_whitelist_ok: bool = Field(
+        True,
+        description=(
+            "Validated: IP whitelist is enabled AND Lumin's engine IP "
+            "is on the whitelist (proven by a successful signed call)"
+        ),
+    )
+
+
+class BinanceConnectErrorResponse(BaseModel):
+    """Response body for ``POST /api/binance/connect`` on validation failure.
+
+    The ``detail`` carries the human-readable fix-up instruction (which
+    Binance setting to change).  The ``code`` is a short stable token
+    the app can use to render a setting-specific UI affordance — e.g.
+    ``WITHDRAW_ENABLED`` could trigger a deep-link to Binance's API
+    Management page with a one-tap "Open Binance" button.
+    """
+
+    ok: bool = False
+    code: str = Field(
+        ...,
+        description=(
+            "Stable error code: WITHDRAW_ENABLED | FUTURES_DISABLED | "
+            "IP_RESTRICT_DISABLED | IP_NOT_WHITELISTED | KEY_INVALID | "
+            "BINANCE_UNREACHABLE"
+        ),
+    )
+    detail: str = Field(..., description="Human-readable fix-up instruction")
+    engine_vps_ip: Optional[str] = Field(
+        None,
+        description=(
+            "Returned with IP_RESTRICT_DISABLED and IP_NOT_WHITELISTED "
+            "so the app can show the exact IP the user must whitelist"
+        ),
+    )
