@@ -4,6 +4,95 @@
 
 ---
 
+## In-session checkpoint 2026-05-18 — Server-side execution: architecture decided, 14-PR roadmap landed (awaiting owner sign-off on the §1.3 doctrine pieces before code-PR-1 ships)
+
+**Driver:** owner-flagged that Binance now requires IP whitelist on any Futures-trade-enabled API key (policy tightened late 2023). Mobile-IP rotation + WiFi changes make per-device whitelisting unusable; subscribers cannot enable auto-trade without either (a) running a personal VPN with static exit IP, or (b) Lumin moving order execution server-side. Compounded by the structural blocker that pre-TP partial close + BE shift requires sub-second reaction to TP1 fills, which Binance does not support as a native order chain — so an always-on watcher is mandatory for the doctrine to function. The mobile lifecycle (iOS suspends ~30s, Android variable) cannot meet that requirement.
+
+**Decision:** ship server-side execution. Engine VPS holds users' encrypted Binance API keys, signs and places trades from a fixed IP, runs per-user Position FSM workers consuming Binance User Data Stream for sub-100ms reaction to fills. Industry-validated — every commercial 24/7 peer (3Commas, Cornix, Bitsgap, WunderTrading, Coinrule, Cryptohopper) made the same call. The 3Commas Dec-2022 breach validates the approach when implemented with separation of DB access from decryption authority — the class-action allegation is "any employee with webserver access could view sensitive API data," i.e. lack of separation, not weakness of encryption math. Coinrule's published per-user-DEK + segregated-KEK pattern + 3Commas' post-breach Sign Center signing-service boundary are the patterns Lumin adopts.
+
+**Solo-scaled — what we skip vs the enterprise template:** no Cloud HSM (Cloud KMS sufficient), no separate VPC for signing service (separate Python process on the engine VPS, isolated by Linux user + Unix socket), no SOC 2 / audit-log retention machinery (plain log file + Telegram alert), no cyber-insurance (replaced by hard caps + small beta + honest ToS), no MiCA/CFTC legal opinion (geoblock US, operate as personal project per industry peers' early-stage pattern). Adds ~$5/mo (Cloud KMS only) on top of existing VPS.
+
+### Threat model — what each defense protects against (the doctrine in one table)
+
+| Attack | Defense | Residual risk |
+|---|---|---|
+| User's phone stolen | Firebase ID-token expires 1h; biometric required to unlock app; 2FA mandatory on auto-trade enable | ~1h trading window, capped by per-user position size + symbol allowlist |
+| Firestore breach (cloud) | Ciphertext + encrypted DEKs only at rest; KEK in Cloud KMS, no Firestore reader can call KMS | Attacker has bytes, cannot sign anything |
+| Engine VPS rooted | KMS audit log on every decrypt; **withdrawals disabled on every key, validated at connect (no exceptions)**; symbol allowlist + per-user rate limit + per-user position cap | Attacker can trash positions while session alive; cannot drain wallets, cannot trade outside Lumin's signal symbols |
+| Binance API key leaked (Lumin-side) | Mandatory IP whitelist on Binance key = engine VPS IP only | Key unusable from any IP except engine VPS |
+| Insider abuse (future contractor) | All raw-secret access mediated by signing service with audit log; symbol allowlist + position caps apply equally to insiders | Solo today; future-proofs the model |
+
+### Concrete architecture (Hybrid: Firebase/GCP managed + engine VPS for always-on)
+
+```
+┌─── Firebase / GCP (managed) ───┐    ┌──────── Engine VPS ─────────┐
+│ • Firebase Auth (identity)     │    │ • Existing signal engine    │
+│ • Firestore (encrypted blobs)  │◄───┤ • NEW: signing service      │
+│ • Cloud KMS (KEK, HSM-isolated)│    │   (separate process, Unix   │
+│   - service account: Decrypt    │    │    socket, no DB read)      │
+│     only, audit-logged          │    │ • NEW: per-user Position    │
+└────────────────────────────────┘    │   FSM workers (asyncio)     │
+                                       │ • NEW: Binance User Data    │
+                                       │   Stream consumer per user  │
+                                       │ • Fixed egress IP → users   │
+                                       │   whitelist this on Binance │
+                                       └─────────────────────────────┘
+```
+
+Reaction-time budget for TP1-hit → BE-SL placed: ~60-100ms total (WS event ~5-20ms + FSM transition + signing-service Unix-socket call ~1ms + KMS Decrypt cached ~30ms + Binance order POST 20-50ms RTT). Comfortably sub-second.
+
+### 14-PR roadmap (owner-approval-gated for the doctrine slices; the rest are CTE scope)
+
+| # | PR | Days | Owner-touch? | Status |
+|---|---|---:|---|---|
+| 1 | Firebase Admin SDK + Cloud KMS integration on engine VPS (scaffolding only — KMS client wrapper, envelope crypto helpers, deps) | 2 | No — pure scaffolding | **Next — to ship immediately after docs PR merges** |
+| 2 | `/api/binance/connect` endpoint + Binance permission validation (withdraw=false, futures=true, IP=engine_vps_ip) | 2 | **Yes** — paid-channel-adjacent | Queued |
+| 3 | Firestore schema + per-user DEK provisioning + security rules locking user out of own `binance_key` subcollection | 1 | No | Queued |
+| 4 | Signing service (separate Python process, Unix socket, KMS Decrypt, AES-GCM, plaintext wipe) | 3 | **Yes** — security-critical, B12-adjacent | Queued |
+| 5 | Per-user worker scaffold + Binance User Data Stream WS consumer | 3 | No — read-only listener | Queued |
+| 6 | Position FSM: entry placement + native SL/multi-TP (Binance "split target" — up to 4 TP legs natively) + state transitions | 3 | **Yes** — touches B12 | Queued |
+| 7 | Pre-TP partial close + BE shift + reduce-only order flow (the doctrine-critical slice — §3.2a in action) | 2 | **Yes** — B17 + doctrine | Queued |
+| 8 | Anomaly tripwires: symbol allowlist, per-user rate limit, per-user position cap | 1 | **Yes** — B12 blast-radius caps | Queued |
+| 9 | Reconciliation loop (60s per-user Binance state vs FSM diff + self-heal) + permission-drift detector | 1 | No | Queued |
+| 10 | Lumin-app: connect-flow UI + IP-whitelist modal + position view via Firestore realtime listener | 3 | No | Queued |
+| 11 | Kill switch (Firestore doc + worker check, halts all order placement within 5s) + Telegram alerts on tripwire fires | 1 | No | Queued |
+| 12 | 2FA enrollment requirement for auto-trade enable (Firebase TOTP) | 1 | **Yes** — gates B12-adjacent surface | Queued |
+| 13 | ToS + click-through opt-in (records `accepted_at` / `user_agent` / `ip` / `tos_version` in Firestore) | 1 | **Yes** — substitutes legal opinion per solo-scale doctrine | Queued |
+| 14 | Beta gating: per-user position cap + cohort flag in Firestore | 1 | **Yes** — controls who gets access | Queued |
+| **Total** | | **~25 working days ≈ 5-6 weeks solo with AI** | | |
+
+### Beta rollout (blast-radius cap while the system bakes)
+
+| Stage | Users | Max position | Symbols | Min duration before next stage |
+|---|---:|---:|---|---|
+| 1 | You only | $20 | 1 (ETH or BTC) | 1 week |
+| 2 | 5 trusted | $100 | Full allowlist | 2 weeks |
+| 3 | 20 | $500 | Full | 4 weeks |
+| 4 | 100 | $1000 | Full | After 1 month clean |
+| 5 | Open beta | $2000 default (user-configurable) | Full | After 2 months clean |
+
+### Open owner-decisions (must be answered before PR 6 ships)
+
+1. **Geographic restriction.** Geoblock US users via Firebase rules + connect-flow check? (Recommended yes — 3Commas is currently being sued in N.D. Cal., this is the litigation-surface vector.)
+2. **Withdraw permission policy.** Auto-reject keys with withdraw enabled, or warn? (Recommended auto-reject — matches every peer; permissive = liability the industry has chosen not to take.)
+3. **Single-region vs multi-region egress IPs.** Single = simpler for users to whitelist; multi = better failover but every user must whitelist every region. (Recommended single for v1.)
+4. **Apply for Binance Link / Fast API partnership in parallel?** Better long-term UX (Binance hands Lumin an RSA-encrypted key bound to our account, no user copy-paste). Requires entity + KYC. Not blocking v1 but worth applying now.
+5. **Beta cohort selection.** Stage 1 = you only; Stage 2 = which 5 trusted users? Needs explicit list before PR 14 ships.
+6. **Pre-TP partial close fraction default.** B17 sets a 30% floor / 50% engine default. Confirm that's the right server-side default for the FSM, or override.
+
+### What ships before owner sign-off vs after
+
+- **CTE-scope, can ship now:** PRs 1, 3, 5, 9, 10, 11 (scaffolding, schema, WS listener, reconciliation, app UI, kill switch). None touch order-placement logic; none change the production paid-channel signal flow. Total: ~11 days.
+- **Owner sign-off required:** PRs 2, 4, 6, 7, 8, 12, 13, 14. These either touch the security boundary, the order-placement chain, the doctrine-critical pre-TP/BE flow, or the user-facing access controls. Total: ~14 days.
+
+The plan above lets us ship the foundation (KMS plumbing, schema, WS consumer, app shell, kill switch) while the owner reviews the security-critical / B12-adjacent pieces in design form.
+
+### Why this advances the business chain (the test from CLAUDE.md)
+
+The doctrine's profit engine is pre-TP partial close (§3.2a — banking +2.5% net @ 10× on ~50% of signals turns a doctrinally net-losing path into a net-positive one). Today, real users with auto-trade enabled but phone-asleep MISS most pre-TP fires; we have zero telemetry on this gap. Server-side execution restores doctrinal compliance for every subscriber, eliminates the mobile-IP-whitelist UX dead-end, and unblocks the paid-tier growth path that requires "set and forget" execution. Direct business chain impact: **paid-subscriber retention** (auto-trade actually works as advertised) → **revenue retention** → **growth runway**.
+
+---
+
 ## In-session checkpoint 2026-05-17 — 654-signal forensic + per-path structural audit (analysis only, no code yet)
 
 **Owner-driven deep audit triggered by /stats reporting 286 signals in ~20h at 0.3% decisive-TP rate.** Pulled 36 historical `monitor-logs` snapshots, deduped on `signal_id` → 654 unique closed signals over 2026-04-21 to 2026-05-17. All analysis below at this scale, all NET% at 10× / 0.7% round-trip fee per B11.
