@@ -1,0 +1,273 @@
+"""Firestore-backed global kill switch + per-user auto-disable state.
+
+Two flags persisted in Firestore so they survive engine restart AND
+are visible across processes (the Telegram bot may flip them from a
+separate process):
+
+1. **Global kill switch** — ``kill_switch/global`` doc with a single
+   ``engaged: bool`` field.  When True, ALL auto-trade halts within
+   one cache TTL (default 5 seconds — well under the 5s SLA in B18).
+2. **Per-user disabled** — ``users/{uid}/auto_trade_disabled``
+   field on the user's root doc.  Set when the per-user circuit
+   breaker (see :mod:`src.execution.tripwires`) trips.  Survives
+   restart so a tripped user stays disabled until manual operator
+   re-enable from the Telegram bot.
+
+The order placement chain consults BOTH on every order.  The cached
+read (5s TTL) means we only hit Firestore once per ~5s per check,
+which at 50 users × 7 orders/day each is trivial — total Firestore
+reads ~12k/day, well inside the free tier.
+"""
+
+from __future__ import annotations
+
+import threading
+import time
+from dataclasses import dataclass
+from typing import Any, Optional
+
+from src.utils import get_logger
+
+log = get_logger("execution.kill_switch")
+
+
+_GLOBAL_KILL_DOC = ("kill_switch", "global")
+_GLOBAL_KILL_FIELD = "engaged"
+_USER_DISABLED_FIELD = "auto_trade_disabled"
+
+# Cache TTL for reads.  5s gives us the B18 "<5s SLA on kill switch
+# flip taking effect" property while keeping Firestore reads minimal.
+_CACHE_TTL_S = 5.0
+
+
+# ---------------------------------------------------------------------------
+# Errors
+# ---------------------------------------------------------------------------
+
+
+class KillSwitchError(Exception):
+    """Base — caller decides retry / surface."""
+
+
+class KillSwitchNotInitialisedError(KillSwitchError):
+    """Read/write attempted before init."""
+
+
+# ---------------------------------------------------------------------------
+# Client
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class _CachedFlag:
+    """One cached boolean read from Firestore + when it was read."""
+
+    value: bool
+    read_at_monotonic: float
+
+
+class KillSwitchClient:
+    """Firestore-backed kill switch + per-user disable state.
+
+    Constructed once per engine process.  All public methods are
+    thread-safe (RLock).  Reads are cached for 5s; writes are
+    write-through (immediate + invalidate the cache).
+
+    The Firestore SDK is injected at construction time so tests can
+    pass a mock without touching ``google.cloud.firestore``.
+    """
+
+    def __init__(self, firestore_client: Any) -> None:
+        self._db = firestore_client
+        self._lock = threading.RLock()
+        self._global_cache: Optional[_CachedFlag] = None
+        self._user_cache: dict[str, _CachedFlag] = {}
+        # ``time.monotonic`` injectable for tests so cache-expiry
+        # behaviour is testable without ``time.sleep``.
+        self._clock = time.monotonic
+
+    # ---- Global kill switch -------------------------------------------
+
+    def is_global_engaged(self) -> bool:
+        """True if engine-wide auto-trade is currently halted.
+
+        Cached for 5s.  Cheap by design — called on every order
+        placement attempt across all users.
+        """
+        with self._lock:
+            cached = self._global_cache
+            now = self._clock()
+            if (
+                cached is not None
+                and (now - cached.read_at_monotonic) < _CACHE_TTL_S
+            ):
+                return cached.value
+            value = self._read_global()
+            self._global_cache = _CachedFlag(value=value, read_at_monotonic=now)
+            return value
+
+    def engage_global(self, reason: str = "") -> None:
+        """Flip the global kill switch ON.  Effective within
+        ``_CACHE_TTL_S`` for every reader.  ``reason`` is recorded
+        for operator visibility (Telegram bot displays this when
+        showing kill-switch status)."""
+        self._write_global(engaged=True, reason=reason)
+        with self._lock:
+            self._global_cache = None  # invalidate cache
+        log.warning("kill_switch: GLOBAL engaged reason={}", reason)
+
+    def disengage_global(self) -> None:
+        """Manual operator re-enable.  Flips OFF; resumes auto-trade
+        for all non-disabled users."""
+        self._write_global(engaged=False, reason="")
+        with self._lock:
+            self._global_cache = None
+        log.info("kill_switch: GLOBAL disengaged")
+
+    def _read_global(self) -> bool:
+        doc = (
+            self._db.collection(_GLOBAL_KILL_DOC[0])
+            .document(_GLOBAL_KILL_DOC[1])
+            .get()
+        )
+        if not doc.exists:
+            return False
+        data = doc.to_dict() or {}
+        return bool(data.get(_GLOBAL_KILL_FIELD, False))
+
+    def _write_global(self, *, engaged: bool, reason: str) -> None:
+        from datetime import datetime, timezone
+
+        self._db.collection(_GLOBAL_KILL_DOC[0]).document(
+            _GLOBAL_KILL_DOC[1]
+        ).set(
+            {
+                _GLOBAL_KILL_FIELD: engaged,
+                "reason": reason,
+                "updated_at": datetime.now(timezone.utc),
+            }
+        )
+
+    # ---- Per-user disable ---------------------------------------------
+
+    def is_user_disabled(self, firebase_uid: str) -> bool:
+        """True if this user is auto-trade-disabled (tripped circuit
+        breaker, manual operator action, etc.).  Cached for 5s per
+        user."""
+        with self._lock:
+            cached = self._user_cache.get(firebase_uid)
+            now = self._clock()
+            if (
+                cached is not None
+                and (now - cached.read_at_monotonic) < _CACHE_TTL_S
+            ):
+                return cached.value
+            value = self._read_user_disabled(firebase_uid)
+            self._user_cache[firebase_uid] = _CachedFlag(
+                value=value, read_at_monotonic=now
+            )
+            return value
+
+    def disable_user(self, firebase_uid: str, reason: str = "") -> None:
+        """Mark a user auto-trade-disabled.  Called by the per-user
+        circuit breaker (PerUserCircuitBreaker) on trip, or by the
+        operator via the Telegram bot.  Survives engine restart."""
+        self._write_user_disabled(firebase_uid, disabled=True, reason=reason)
+        with self._lock:
+            self._user_cache.pop(firebase_uid, None)
+        log.warning(
+            "kill_switch: user disabled uid={} reason={}",
+            firebase_uid, reason,
+        )
+
+    def enable_user(self, firebase_uid: str) -> None:
+        """Manual operator action — re-enable a disabled user."""
+        self._write_user_disabled(firebase_uid, disabled=False, reason="")
+        with self._lock:
+            self._user_cache.pop(firebase_uid, None)
+        log.info("kill_switch: user enabled uid={}", firebase_uid)
+
+    def _read_user_disabled(self, firebase_uid: str) -> bool:
+        doc = (
+            self._db.collection("users")
+            .document(firebase_uid)
+            .get()
+        )
+        if not doc.exists:
+            return False
+        data = doc.to_dict() or {}
+        return bool(data.get(_USER_DISABLED_FIELD, False))
+
+    def _write_user_disabled(
+        self, firebase_uid: str, *, disabled: bool, reason: str
+    ) -> None:
+        from datetime import datetime, timezone
+
+        update = {
+            _USER_DISABLED_FIELD: disabled,
+            "auto_trade_disabled_reason": reason,
+            "auto_trade_disabled_at": datetime.now(timezone.utc) if disabled else None,
+        }
+        # Use set with merge=True so we don't clobber other fields
+        # on the user doc.
+        (
+            self._db.collection("users")
+            .document(firebase_uid)
+            .set(update, merge=True)
+        )
+
+    # ---- Test helpers -------------------------------------------------
+
+    def invalidate_cache(self) -> None:
+        """Drop ALL cached reads.  Used by tests + by the Telegram
+        bot's debug ``/refresh_kill_switch`` command."""
+        with self._lock:
+            self._global_cache = None
+            self._user_cache.clear()
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton + init
+# ---------------------------------------------------------------------------
+
+
+_lock = threading.RLock()
+_client: Optional[KillSwitchClient] = None
+
+
+def init_kill_switch(firestore_client: Any) -> None:
+    """Initialise the singleton.  Called once at engine boot.
+
+    Idempotent — a second call is a no-op.  ``firestore_client`` is
+    the same Firebase Admin SDK Firestore client used by
+    :mod:`src.security.firestore_keystore` (sharing one client
+    saves Firestore quota + connection overhead).
+    """
+    global _client
+    with _lock:
+        if _client is not None:
+            return
+        _client = KillSwitchClient(firestore_client)
+
+
+def is_initialised() -> bool:
+    with _lock:
+        return _client is not None
+
+
+def get_client() -> KillSwitchClient:
+    """Return the singleton or raise.  FSM / signal-handler call this
+    on every order; the typed exception keeps misconfigured-boot
+    failures obvious in tracebacks."""
+    with _lock:
+        if _client is None:
+            raise KillSwitchNotInitialisedError(
+                "kill switch not initialised — call init_kill_switch at boot"
+            )
+        return _client
+
+
+def reset_for_test() -> None:
+    global _client
+    with _lock:
+        _client = None
