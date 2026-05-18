@@ -47,6 +47,7 @@ from typing import Any, List, Optional, Union
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from pydantic import BaseModel
 
@@ -478,6 +479,16 @@ def build_app(
         allow_methods=["GET", "POST", "PUT", "OPTIONS"],
         allow_headers=["*"],
     )
+
+    # Response compression — kicks in only for payloads >= 1 KiB so the
+    # cheap health/auth-token endpoints don't pay the gzip CPU cost,
+    # while ``/api/signals`` (typically 30-80 KiB JSON) and
+    # ``/api/activity`` (10-40 KiB) shrink ~65-75% on the wire.  Big lift
+    # for Lumin subscribers on flaky 4G: the AutoTradeWatcher polls
+    # ``/api/signals`` every 15s, Pulse and Signals tabs each refetch
+    # on open, so the engine ships this payload 200-300x/hour per active
+    # device — bandwidth + first-paint win compounds.
+    app.add_middleware(GZipMiddleware, minimum_size=1024)
 
     auth = _make_auth_dep(
         jwt_secret, static_token, allow_static, user_store=user_store,
