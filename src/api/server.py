@@ -43,7 +43,7 @@ import asyncio
 import os
 import time
 from datetime import datetime
-from typing import Any, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -1065,6 +1065,66 @@ def build_app(
                 items=[], total=0, monitor_running=False,
                 generated_at=_dt.now(_tz.utc),
             )
+
+    @app.get(
+        "/internal/diag/position_counters",
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def position_counters() -> Dict[str, Any]:
+        """Drift x-ray for the three open-position counters.
+
+        Owner-reported 2026-05-18 bug: Pulse header showed "Open
+        positions: 4" while the list rendered "No open positions" —
+        the two reads were off different sources that had drifted.
+        This endpoint surfaces all three counters side-by-side so
+        future drift is detectable in one place instead of inferred
+        from a UI inconsistency.
+        """
+        rm = getattr(engine, "_risk_manager", None)
+        router = getattr(engine, "router", None)
+        broker = getattr(engine, "_order_manager", None)
+
+        risk_ids: set = set(getattr(rm, "_open_signal_ids", set()) or set())
+        router_ids: set = set(
+            getattr(router, "active_signals", {}).keys()
+            if router is not None else set()
+        )
+        broker_positions = getattr(broker, "_positions", None)
+        if not isinstance(broker_positions, dict):
+            broker_positions = {}
+        broker_ids: set = {
+            sid
+            for sid, p in broker_positions.items()
+            if (
+                float(getattr(p, "quantity", 0.0) or 0.0)
+                - float(getattr(p, "closed_quantity", 0.0) or 0.0)
+            )
+            > 1e-9
+        }
+
+        return {
+            "risk_manager_count": len(risk_ids),
+            "broker_open_count": len(broker_ids),
+            "router_active_count": len(router_ids),
+            # Drift sets — non-empty = a real bug to fix, not just a
+            # transient race.
+            "in_risk_but_not_broker": sorted(risk_ids - broker_ids),
+            "in_broker_but_not_risk": sorted(broker_ids - risk_ids),
+            "in_broker_but_not_router": sorted(broker_ids - router_ids),
+            "in_router_but_not_broker": sorted(router_ids - broker_ids),
+            # Sample of broker entries with zero residual — should be
+            # empty if close_partial/close_full pops correctly.
+            "broker_drained_not_popped": sorted(
+                sid
+                for sid, p in broker_positions.items()
+                if (
+                    float(getattr(p, "quantity", 0.0) or 0.0)
+                    - float(getattr(p, "closed_quantity", 0.0) or 0.0)
+                )
+                <= 1e-9
+            ),
+        }
 
     # ---- Activity ----
 

@@ -102,7 +102,34 @@ def _agent_name_for(setup_class: str) -> str:
 
 def build_pulse(engine: Any) -> PulseSnapshot:
     rm = getattr(engine, "_risk_manager", None)
-    open_positions = rm.open_position_count if rm is not None else 0
+    # Open-position count: prefer the paper broker's ``_positions`` dict
+    # when wired (paper mode) because that's the same source ``/api/positions``
+    # filters by — so the Pulse header always agrees with the OPEN
+    # POSITIONS list below it.  Falls back to ``RiskManager`` for live
+    # mode (where the broker has no in-process positions dict — real
+    # positions live on Binance) and for unwired test fixtures.
+    #
+    # Owner-reported bug 2026-05-18: header showed "Open positions: 4"
+    # while the list rendered "No open positions" — the two reads were
+    # off different counters that had drifted.  Reading from the same
+    # source eliminates the visible inconsistency regardless of
+    # whether the underlying drift is fully healed.
+    open_positions = 0
+    if rm is not None:
+        open_positions = rm.open_position_count
+    broker = getattr(engine, "_order_manager", None)
+    if broker is not None:
+        _bp = getattr(broker, "_positions", None)
+        if isinstance(_bp, dict):
+            open_positions = sum(
+                1
+                for p in _bp.values()
+                if (
+                    float(getattr(p, "quantity", 0.0) or 0.0)
+                    - float(getattr(p, "closed_quantity", 0.0) or 0.0)
+                )
+                > 1e-9
+            )
 
     today_pnl_usd = rm.daily_realised_pnl_usd if rm is not None else 0.0
     starting_equity = (
