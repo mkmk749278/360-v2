@@ -44,6 +44,38 @@ See `OWNER_BRIEF §3.4a` for the per-concern detection/entry mapping. Tape-drive
 
 Existing infrastructure to consume: `src/level_book.py` (1d/4h/1h pivots + VP zones), `src/structure_state.py` (bull-leg/bear-leg per TF), `src/volume_profile.py` (POC + VAH/VAL), `_classify_htf_trend()` in `src/channels/scalp.py`. The doctrine makes consumption of these mandatory for structure detection across every non-tape-driven evaluator.
 
+## Server-side execution doctrine (2026-05-18 — architecture decided, build pending)
+
+**Lumin executes Binance Futures orders server-side from the engine VPS, not from the user's device.** The mobile lifecycle (iOS suspends ~30s, Android variable) cannot meet the sub-second reaction requirement that pre-TP partial close + BE shift impose (§3.2a doctrine), and Binance's late-2023 IP-whitelist requirement on Futures-trade-enabled keys made mobile per-device whitelisting structurally unusable. Both problems converge on the same answer: order execution lives on the engine VPS.
+
+**Custody model is non-custodial of funds, custodial of trade-authorisation keys only.** See `OWNER_BRIEF §3.9` for the full doctrine and `OWNER_BRIEF B18` for the non-negotiable rules.
+
+**The non-negotiables when working in this area:**
+
+- The plaintext Binance API secret must only ever materialise inside the **signing service** process memory, for the duration of one signing operation, and must never be: written to disk (even momentarily), logged at any level, returned to the engine workers, passed across any IPC boundary other than the Unix socket to the signing service, or surfaced in error traces / panics / debug dumps.
+- The signing service is the **only** module that calls `KMS.Decrypt`. Engine workers, scanners, monitors, routers — none of them have KMS IAM access. If you're writing code outside `src/security/signing_service/` and you need to sign a Binance request, call the signing service over the Unix socket — never reach for the KEK directly.
+- The connect-time validation (`/api/binance/connect`) **must** reject keys where any of these are not true: `enableWithdrawals=false`, `enableFutures=true`, `ipRestrict=true` AND the engine VPS IP is on the whitelist. No permissive mode, no "warn and continue" mode, no admin override. This is the foundation of the entire blast-radius story.
+- The blast-radius caps (symbol allowlist, per-user rate limit, per-user position cap, global kill switch) are the operative defence if the engine VPS is rooted — without them, the security story collapses. Never disable them, never expand them silently, never let a single user bypass them.
+- The Position FSM is **the** business-value layer. Pre-TP partial close + BE shift (§3.2a) is what turns a doctrinally net-losing path into a net-positive one. Changes to the FSM transitions (entry → SL/TP placement, pre-TP threshold trigger, BE shift on TP1 fill, trail tightening) require owner sign-off; this is the same gating as changes to confidence scoring.
+
+**Code module locations (post-build — these directories don't exist yet):**
+
+| Concern | Planned file |
+|---|---|
+| Cloud KMS client wrapper | `src/security/kms_client.py` |
+| AES-GCM envelope crypto helpers | `src/security/envelope_crypto.py` |
+| Firestore Admin SDK init + per-user key blob CRUD | `src/security/firestore_keystore.py` |
+| Signing service (separate Python process, Unix socket server) | `src/security/signing_service/` |
+| Binance permission/whitelist validator | `src/security/binance_connect_validator.py` |
+| Per-user Position FSM worker | `src/execution/position_worker.py` |
+| Position FSM state machine | `src/execution/position_fsm.py` |
+| Binance User Data Stream consumer | `src/execution/user_data_stream.py` |
+| Anomaly tripwires (symbol allowlist, rate limit, position cap) | `src/execution/tripwires.py` |
+| Reconciliation loop | `src/execution/reconciler.py` |
+| Kill switch (Firestore-doc-driven) | `src/execution/kill_switch.py` |
+
+**Roadmap:** see `ACTIVE_CONTEXT.md § In-session checkpoint 2026-05-18` for the 14-PR breakdown, beta rollout stages, and the open owner-decision queue.
+
 ---
 
 ## Read These Every Session
@@ -140,6 +172,7 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
 | Tunables (env-overridable) | `config/__init__.py` |
 | Truth report (monitor) | `src/runtime_truth_report.py`, `scripts/build_truth_report.py` |
 | Invalidation quality audit | `src/invalidation_audit.py` |
+| **Server-side execution stack (planned 2026-05-18 — build pending; see `Server-side execution doctrine` above for the planned module map)** | `src/security/` + `src/execution/` |
 
 ---
 
@@ -195,10 +228,12 @@ If the change date is more than 30 days old and matches when symptoms started, *
 ## What Requires Owner Sign-off Before Coding
 
 - New evaluator paths or scoring models
-- Changes to Business Rules B1–B10
+- Changes to Business Rules B1–B10 (or B12 / B17 / B18 — auto-trade safety, pre-TP, server-side custody)
 - Major architecture changes spanning subsystems
 - Deprecating or removing existing functionality
 - Anything touching paid-channel routing
+- Any change to the signing service / KMS integration / connect-time validation / blast-radius caps (per B18 + `Server-side execution doctrine` above)
+- Any change to Position FSM transitions (entry placement, native SL/TP shape, pre-TP trigger threshold, BE shift on TP1 fill, trail tightening)
 
 ## Hard Limits — Never Negotiable
 
@@ -208,6 +243,9 @@ If the change date is more than 30 days old and matches when symptoms started, *
 - Never route signals to unconfigured channels
 - Never push to `main` directly or bypass the PR workflow
 - Never start patching engine code in response to a vendor-API symptom before checking the vendor's changelog + recent announcements (see "Real-data-first diagnosis" above)
+- **Never log a Binance API secret, even at TRACE/DEBUG level. Never write a plaintext secret to disk, even momentarily. Never return a plaintext secret from any function outside the signing service. Never include a secret in an error trace, panic message, exception attribute, or debug dump.**
+- **Never accept a Binance API key at connect time that has withdraw permission enabled.** Auto-reject with a specific error directing the user to disable withdraw on the Binance key page and retry. No permissive mode, no admin override.
+- **Never disable or weaken the blast-radius caps** (symbol allowlist, per-user rate limit, per-user position cap, global kill switch). These are what bound damage if the engine VPS is rooted. Expanding a per-user cap is owner-sign-off; disabling the symbol allowlist is never.
 
 ---
 

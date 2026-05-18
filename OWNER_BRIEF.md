@@ -256,6 +256,45 @@ Two-step user flow for a clean paper-book reset: **close-all → reset.** This i
 
 ---
 
+## 3.9 Server-side execution custody model (architecture decided 2026-05-18, build pending)
+
+**Why we moved off client-side execution:** Binance requires IP whitelist on any Futures-trade-enabled API key (policy tightened late 2023). Mobile-IP rotation makes per-device whitelisting unusable. Independently, pre-TP partial close + BE shift (§3.2a doctrine) requires sub-second reaction to TP1 fills, which is not a Binance-native order chain — it requires an always-on watcher that the mobile lifecycle (iOS suspends ~30s, Android variable) cannot provide. Both problems point to the same answer: order execution must move server-side.
+
+**The custody model — non-custodial of funds, custodial of trade-authorisation keys:**
+
+| Property | Decision |
+|---|---|
+| Funds custody | **None.** Subscriber wallets remain on Binance. Lumin never controls or holds funds. |
+| Key custody | **Encrypted at rest on Lumin infrastructure.** Per-user AES-GCM-encrypted Binance API secret + KMS-wrapped data encryption key. Plaintext secret materialises only inside the signing service's process memory for the duration of one HTTP request. Never logged. Never written to disk. |
+| Key permissions enforced | **Withdraw disabled (validated at connect; auto-reject if enabled). Futures enabled. IP whitelist set to engine VPS IP (validated at connect).** No exceptions, no permissive modes. |
+| Master key location | **Google Cloud KMS HSM-backed key.** Never leaves the HSM. Engine VPS service account has `Decrypt` IAM permission only; cannot read or export the KEK. Every decrypt is audit-logged in GCP. |
+| Encrypted blob storage | **Firestore.** User cannot read or write their own `binance_key` subcollection — security rules deny client access; only the engine's Firebase Admin SDK can read. |
+| Signing service boundary | **Separate Python process on the engine VPS, isolated by Linux user + Unix socket.** Engine workers call it to sign Binance requests; the worker process never sees the plaintext secret. This is the Lumin equivalent of 3Commas' post-breach Sign Center pattern. |
+| Withdrawal-permission validation | Run at connect (`GET /sapi/v1/account/apiRestrictions`) and re-checked nightly. If the user re-enables withdraw on Binance after connecting, key is auto-disabled and user notified. |
+
+**Blast-radius caps (operative even if the engine VPS is rooted):**
+
+| Cap | Default |
+|---|---|
+| Withdraw permission on every connected key | **Disabled — no exceptions.** Worst-case breach = attacker trashes positions; cannot drain wallets. |
+| Symbol allowlist | Only symbols currently in Lumin's signal channels. Order for any other symbol = immediate engine-wide kill + Telegram alert (this is a breach signal). |
+| Per-user rate limit | 10 orders/min, 50/hour. Excess blocks user after 3 violations/hour. |
+| Per-user position cap | Beta defaults: $20 → $100 → $500 → $1000 → $2000 across rollout stages. User-configurable above the floor. |
+| Global kill switch | Single Firestore doc; flipping `kill_switch.enabled = true` halts all order placement engine-wide within 5s. Operable from Telegram bot. |
+| Permission drift detector | N consecutive `-2014/-2015` Binance errors per user → auto-disable user + Telegram alert. |
+
+**What this is NOT:**
+
+- Not custody of funds (funds stay on user's Binance account).
+- Not a regulated broker-dealer service (operate as personal project; users opt in to a click-through ToS that discloses the non-custodial / no-warranty / bounded-blast-radius model — see `ACTIVE_CONTEXT.md § In-session checkpoint 2026-05-18` for the full ToS text).
+- Not a US-available service (geoblocked at sign-up per litigation-surface defense; 3Commas is currently being sued in N.D. Cal. over the Dec-2022 breach).
+
+**Industry validation:** Every commercial 24/7 trading-bot peer (3Commas, Cornix, Bitsgap, WunderTrading, Coinrule, Cryptohopper) operates this same custody model. Hummingbot is the only meaningful exception (self-hosted by user). The 3Commas Dec-2022 breach validates the model when implemented with **separation of DB access from decryption authority** — that's the architectural lesson, and it's what Lumin's signing-service + KMS-IAM split provides.
+
+**Future option:** Binance Link / Fast API partnership (Binance hands Lumin an RSA-encrypted user key bound to Lumin's partner account — no user copy-paste, better UX). Requires entity + KYC + minimum-volume showing. Worth applying in parallel with v1; not blocking.
+
+---
+
 # PART IV — BUSINESS RULES (NON-NEGOTIABLE)
 
 | # | Rule |
@@ -277,6 +316,7 @@ Two-step user flow for a clean paper-book reset: **close-all → reset.** This i
 | B15 | Brand architecture. Lumin = consumer app brand (Play Store, app icon, marketing). 360 Crypto Eye = engine + signal-source brand (Telegram channel, technical identity, "Powered by" attribution). The Telegram channel never renames. The app's About page always credits 360 Crypto Eye. |
 | B16 | Revenue. Subscriptions are crypto-only via the Telegram bot (Lumin app qualifies for the Reader-app Play Store exception). No Google Play billing, no Stripe fiat, no bank account in v1. App is a control panel; payment is in the bot. |
 | B17 | Pre-TP partial close + invalidation are per-user. **Pre-TP grab fraction** is user-configurable with a hard floor of **30%** (no user can configure 0%, which would collapse to the pre-2026-05-17 broken "SL-to-BE only" behaviour) and a ceiling of 100%. Engine default is 50%. When threshold hits, broker executes a real partial close on the configured fraction; the residual gets SL ratcheted to entry. **Invalidation aggressiveness** is user-selectable (Loose / Standard / Tight); engine default is Standard. Tight adds ATR-trailing kill at MFE ≥ 0.3R (close at 50% retracement of MFE peak). All per-user values stored in `user_pretp_settings` (with new `grab_fraction` column) and `user_invalidation_settings` tables; NULL = use engine default. Per §3.2 + §3.2a doctrine — capital preservation outranks TP chasing, and the user controls the preservation aggressiveness. |
+| B18 | Server-side execution custody (see §3.9 for the full doctrine). **Non-custodial of funds, custodial of trade-authorisation keys only.** Every connected Binance key must validate at connect-time: withdraw permission **disabled** (auto-reject if enabled — no permissive mode), Futures permission enabled, IP whitelist set to the engine VPS IP. Plaintext API secret materialises only inside the signing service's process memory for the duration of one request; never logged, never written to disk. Master key in Cloud KMS HSM — engine has Decrypt IAM only, cannot read or export the KEK. Blast-radius caps are non-negotiable: symbol allowlist (only Lumin signal-channel symbols), per-user rate limit (10 orders/min, 50/hour), per-user position cap (beta-stage-gated, see §3.9 table), global kill switch reachable from Telegram. US users geoblocked at sign-up. Subscribers opt in via click-through ToS that discloses the non-custodial / no-warranty / bounded-blast-radius model. Any change to the signing service / KMS integration / connect-time validation / blast-radius caps requires owner sign-off per §1.3. |
 
 ---
 
@@ -292,6 +332,7 @@ Two-step user flow for a clean paper-book reset: **close-all → reset.** This i
 | **Engine repo** | `github.com/mkmk749278/360-v2` |
 | **Lumin app repo** | `github.com/mkmk749278/lumin-app` |
 | **Ops dashboard repo** | `github.com/mkmk749278/360ce-ops` — web ops console live at `https://ops.luminapp.org` since 2026-05-12. Auto-deploy on push to `main` (build → GHCR → SSH-deploy to VPS). Owner-only password gate, FastAPI + Jinja2 + HTMX, read-only consumer of engine artifacts. See `docs/360CE_OPS_PLAN.md`. |
+| **Server-side execution stack (planned, 2026-05-18 design — build pending)** | **Cloud KMS** (GCP, HSM-backed master key, engine-VPS service account has Decrypt IAM only) + **Firestore** (encrypted per-user key blobs in `users/{uid}/binance_key`, security rules deny client reads) + **engine-VPS signing service** (separate Python process, Unix socket, no DB read access to secrets) + **engine-VPS Position FSM workers** (one asyncio task per active user, consumes Binance User Data Stream WS for sub-100ms reaction to fills). Adds ~$5/mo (Cloud KMS only). See B18 + §3.9 + `ACTIVE_CONTEXT.md § In-session checkpoint 2026-05-18` for the 14-PR roadmap. |
 
 ---
 
