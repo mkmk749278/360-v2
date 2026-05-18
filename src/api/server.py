@@ -1242,6 +1242,17 @@ def build_app(
         identity_dep=user_claims,
     )
 
+    # ---- Auto-trade status (server-side execution stack, PR-14 follow-up 3/3) ----
+    # Lightweight GET endpoint that surfaces the user's auto-trade
+    # enablement state.  Powers the Lumin app's "your auto-trade is
+    # disabled" banner.  Cached 5s server-side via KillSwitchClient.
+    from . import auto_trade_status_routes as _auto_trade_status_routes
+    _auto_trade_status_routes.register(
+        app,
+        auth=auth,
+        identity_dep=user_claims,
+    )
+
     # ---- Settings: Pre-TP page ----
 
     def _build_pretp_view() -> PretpSettings:
