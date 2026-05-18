@@ -410,6 +410,50 @@ class Bootstrap:
             else:
                 log.info("Firestore keystore skipped (Firebase project not set)")
 
+            # Server-side execution stack wiring — kill switch + per-
+            # position state + telegram alerts.  Each init is wrapped
+            # so a missing dep doesn't crash engine boot (the
+            # subsystem just stays offline; signal serving still
+            # works via the legacy client-side path).
+            #
+            # Order matters:
+            # 1. KillSwitchClient (needs Firestore client, must init
+            #    BEFORE place_signal can be called by anyone).
+            # 2. position_state (Firestore CRUD for FSM state).
+            # 3. TelegramAlerts (uses engine.telegram, must init
+            #    BEFORE any tripwire trip fires alerts).
+            if firebase_project_id:
+                try:
+                    from src.security import firestore_keystore as _firestore_keystore
+                    from src.execution import kill_switch as _kill_switch
+                    from src.execution import position_state as _position_state
+                    from src.execution import telegram_alerts as _telegram_alerts
+
+                    # Share the same Firestore client as the keystore
+                    # — one client per process keeps the connection
+                    # budget tidy and pools the gRPC stubs.
+                    fs_db = _firestore_keystore._db
+                    if fs_db is not None:
+                        _kill_switch.init_kill_switch(fs_db)
+                        log.info("Kill switch client initialised")
+                    # position_state has its own init that re-uses
+                    # the same SDK; share credentials via the SA path.
+                    _position_state.init_position_state(
+                        service_account_path=firebase_sa_path or None,
+                    )
+                    log.info("Position-state Firestore client initialised")
+                    # Telegram alerts dispatcher — engine.telegram is
+                    # the long-lived TelegramBot already constructed
+                    # in the boot path; we share that single instance.
+                    _telegram_alerts.init_telegram_alerts(engine.telegram)
+                    log.info("Telegram alerts dispatcher wired")
+                except Exception as exc:
+                    log.warning(
+                        "Server-side execution stack init failed "
+                        "(subsystem offline): {}",
+                        exc,
+                    )
+
             # Phase-2 per-user overrides — shares the same SQLite file
             # (WAL mode lets both connections coexist).  Tables are
             # added with CREATE TABLE IF NOT EXISTS, safe against any
