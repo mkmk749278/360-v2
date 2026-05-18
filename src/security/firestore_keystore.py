@@ -14,8 +14,11 @@ Document shape (Firestore ``users/{uid}/binance_key/current``):
     {
       "encrypted_secret_b64": str,   # base64(EncryptedBlob.raw)
       "encrypted_dek_b64": str,      # base64(KMS-wrapped DEK)
+      "api_key_full": str,           # full Binance API key (PUBLIC —
+                                     # not secret; needed by signing
+                                     # service for X-MBX-APIKEY header)
       "key_public_id_first8": str,   # first 8 chars of the Binance key
-                                     # — non-secret, used in admin/diagnostics
+                                     # — used in admin/diagnostics + app UI
       "ip_whitelist_ok": bool,       # validated at connect time
       "withdraw_disabled_ok": bool,  # validated at connect time
       "connected_at": Timestamp,
@@ -84,6 +87,7 @@ class UserKeyBlob:
     uid: str
     encrypted_secret: bytes
     encrypted_dek: bytes
+    api_key_full: str
     key_public_id_first8: str
     ip_whitelist_ok: bool
     withdraw_disabled_ok: bool
@@ -170,7 +174,7 @@ def put_key_blob(
     *,
     encrypted_secret: bytes,
     encrypted_dek: bytes,
-    key_public_id_first8: str,
+    api_key_full: str,
     ip_whitelist_ok: bool,
     withdraw_disabled_ok: bool,
 ) -> None:
@@ -181,16 +185,24 @@ def put_key_blob(
     ``last_validated_at`` likewise (the caller has just validated
     the key with Binance via the connect flow).
 
+    ``api_key_full`` is the user's Binance API key — the PUBLIC half
+    of the pair (not secret).  Stored plaintext because the signing
+    service needs it for the ``X-MBX-APIKEY`` header on every signed
+    request and there's no security benefit to encrypting a public
+    value.  ``key_public_id_first8`` is derived from this for the
+    app's at-a-glance display.
+
     Callers are responsible for: encrypting the secret + KMS-
     wrapping the DEK BEFORE calling this function.  This module
-    never sees plaintext.
+    never sees plaintext secret material.
     """
     now = datetime.now(timezone.utc)
     _doc_ref(uid).set(
         {
             "encrypted_secret_b64": base64.b64encode(encrypted_secret).decode("ascii"),
             "encrypted_dek_b64": base64.b64encode(encrypted_dek).decode("ascii"),
-            "key_public_id_first8": key_public_id_first8,
+            "api_key_full": api_key_full,
+            "key_public_id_first8": api_key_full[:8],
             "ip_whitelist_ok": ip_whitelist_ok,
             "withdraw_disabled_ok": withdraw_disabled_ok,
             "connected_at": now,
@@ -200,7 +212,7 @@ def put_key_blob(
     log.info(
         "Stored encrypted Binance key blob: uid={}, key_id_prefix={}",
         uid,
-        key_public_id_first8,
+        api_key_full[:8],
     )
 
 
@@ -221,6 +233,7 @@ def get_key_blob(uid: str) -> UserKeyBlob:
         uid=uid,
         encrypted_secret=base64.b64decode(data["encrypted_secret_b64"]),
         encrypted_dek=base64.b64decode(data["encrypted_dek_b64"]),
+        api_key_full=str(data.get("api_key_full", "")),
         key_public_id_first8=data.get("key_public_id_first8", ""),
         ip_whitelist_ok=bool(data.get("ip_whitelist_ok", False)),
         withdraw_disabled_ok=bool(data.get("withdraw_disabled_ok", False)),
