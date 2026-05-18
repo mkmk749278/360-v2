@@ -145,18 +145,24 @@ class PositionFSM:
 
         # Dispatch to the per-phase transition.  Each updates the
         # position dataclass in place; we persist once at the end.
+        # Pre-TP and SL-BE may trigger additional async order
+        # placements (BE shift on pre-TP fill) so they're awaited.
         if phase == "entry":
             self._apply_entry_fill(position, event)
+        elif phase == "pretp":
+            await self._apply_pretp_fill(position, event)
         elif phase == "tp1":
-            self._apply_tp1_fill(position, event)
+            await self._apply_tp1_fill(position, event)
         elif phase == "tp2":
             self._apply_tp2_fill(position, event)
         elif phase == "tp3":
             self._apply_tp3_fill(position, event)
         elif phase == "sl":
             self._apply_sl_fill(position, event)
+        elif phase == "sl_be":
+            self._apply_sl_be_fill(position, event)
         else:
-            # parse_coid only emits these five phases, so unreachable
+            # parse_coid only emits known phases, so unreachable
             # in practice.  Defensive log.
             log.warning(
                 "position_fsm: unrecognised phase: {}", phase
@@ -194,31 +200,149 @@ class PositionFSM:
         if event.order_status == "FILLED" or position.filled_qty >= position.total_qty:
             position.state = _position_state.PositionState.OPEN
 
-    def _apply_tp1_fill(
+    async def _apply_pretp_fill(
         self,
         position: _position_state.Position,
         event: _events.OrderTradeUpdate,
     ) -> None:
-        """TP1 fill — OPEN → TP1_HIT.
+        """Pre-TP partial close filled (per §3.2a doctrine).
 
-        Records the closed quantity.  PR-7 will additionally:
+        State: OPEN → PRE_TP_FIRED.
 
-            (a) cancel position.sl_order_id (the original SL at the
-                signal's SL price);
-            (b) place a new SL at position.entry_price_filled
-                (the BE shift).
+        Side effects (the doctrine):
+        1. Record closed qty + realized PnL from the partial.
+        2. **Cancel the original SL** at the signal's SL price.
+        3. **Place a new SL at the entry price** (BE shift) so the
+           residual rides to TP1 with break-even downside protection.
+        4. Cancel TP2 + TP3 — residual is small enough that a single
+           TP at TP1 is sufficient; multi-TP orders for the residual
+           would over-commit qty.  TP1 stays active (it still closes
+           the residual profitably if hit).
 
-        For PR-6 we just transition state and update accounting.  The
-        BE shift is stubbed in :meth:`_post_tp1_fill_hook` so PR-7's
-        diff is small and the FSM tests for PR-6 can pin the
-        accounting transitions in isolation.
+        BE shift order placement is best-effort: if the new SL fails
+        to place, the position is uncovered until manual operator
+        intervention.  PR-8's tripwires will Telegram-alert on this.
         """
         position.closed_qty += event.last_filled_qty
         position.realized_pnl_total += event.realized_pnl
+        position.state = _position_state.PositionState.PRE_TP_FIRED
+        position.pretp_fired = True
+        placer = self._order_placer_factory(self.firebase_uid)
+        # Cancel original SL.  Tolerant of -2011 (order already gone)
+        # so a race between SL hit + pre-TP fill doesn't crash here.
+        if position.sl_order_id:
+            try:
+                await placer.cancel_order(
+                    symbol=position.symbol,
+                    order_id=position.sl_order_id,
+                )
+            except _order_placer.OrderPlacementError as exc:
+                log.warning(
+                    "_apply_pretp_fill: SL cancel failed uid={} signal_id={} "
+                    "exc={}",
+                    self.firebase_uid, position.signal_id, exc,
+                )
+        # Cancel TP2 + TP3 — residual is too small for multi-leg TP.
+        for tp_order_id in (position.tp2_order_id, position.tp3_order_id):
+            if tp_order_id:
+                try:
+                    await placer.cancel_order(
+                        symbol=position.symbol,
+                        order_id=tp_order_id,
+                    )
+                except _order_placer.OrderPlacementError as exc:
+                    log.warning(
+                        "_apply_pretp_fill: TP cancel failed uid={} "
+                        "signal_id={} order_id={} exc={}",
+                        self.firebase_uid, position.signal_id,
+                        tp_order_id, exc,
+                    )
+        position.tp2_order_id = 0
+        position.tp3_order_id = 0
+        # Place the BE-shifted SL at the entry price.  Distinct
+        # clientOrderId suffix so we can tell it apart from the
+        # original on fill events.
+        be_price = (
+            position.entry_price_filled
+            if position.entry_price_filled > 0
+            else position.entry_price_target
+        )
+        try:
+            sl_be = await placer.place_stop_loss(
+                signal_id=position.signal_id,
+                symbol=position.symbol,
+                direction=position.side,
+                stop_price=be_price,
+                coid_override=_position_state.coid_sl_be(position.signal_id),
+            )
+            position.sl_be_order_id = sl_be.order_id
+            position.sl_order_id = 0  # original is gone
+            position.sl_price = be_price
+        except _order_placer.OrderPlacementError as exc:
+            log.error(
+                "_apply_pretp_fill: BE-SL placement failed (residual "
+                "uncovered) uid={} signal_id={} exc={}",
+                self.firebase_uid, position.signal_id, exc,
+            )
+
+    async def _apply_tp1_fill(
+        self,
+        position: _position_state.Position,
+        event: _events.OrderTradeUpdate,
+    ) -> None:
+        """TP1 fill — typically reaches OPEN → TP1_HIT directly when
+        pre-TP didn't fire first (an unusually-fast favourable move),
+        OR PRE_TP_FIRED → TP1_HIT when the residual rides to TP1.
+
+        Side effects:
+        * Record closed qty + realized PnL.
+        * If pre-TP hasn't fired yet (raw OPEN → TP1_HIT path):
+          cancel original SL + place BE-shifted SL.
+        * If pre-TP already fired, the SL is ALREADY at BE — nothing
+          to do, just transition state.
+        """
+        position.closed_qty += event.last_filled_qty
+        position.realized_pnl_total += event.realized_pnl
+        from_open = position.state == _position_state.PositionState.OPEN
         position.state = _position_state.PositionState.TP1_HIT
-        # PR-7 plug-in point.  Default is no-op so PR-6 is self-
-        # contained.
-        # await self._post_tp1_fill_hook(position)
+        if not from_open:
+            return  # already PRE_TP_FIRED → TP1_HIT: SL already at BE
+        # OPEN → TP1_HIT directly: do the BE shift now.
+        placer = self._order_placer_factory(self.firebase_uid)
+        if position.sl_order_id:
+            try:
+                await placer.cancel_order(
+                    symbol=position.symbol,
+                    order_id=position.sl_order_id,
+                )
+            except _order_placer.OrderPlacementError as exc:
+                log.warning(
+                    "_apply_tp1_fill: SL cancel failed uid={} signal_id={} "
+                    "exc={}",
+                    self.firebase_uid, position.signal_id, exc,
+                )
+        be_price = (
+            position.entry_price_filled
+            if position.entry_price_filled > 0
+            else position.entry_price_target
+        )
+        try:
+            sl_be = await placer.place_stop_loss(
+                signal_id=position.signal_id,
+                symbol=position.symbol,
+                direction=position.side,
+                stop_price=be_price,
+                coid_override=_position_state.coid_sl_be(position.signal_id),
+            )
+            position.sl_be_order_id = sl_be.order_id
+            position.sl_order_id = 0
+            position.sl_price = be_price
+        except _order_placer.OrderPlacementError as exc:
+            log.error(
+                "_apply_tp1_fill: BE-SL placement failed uid={} signal_id={} "
+                "exc={}",
+                self.firebase_uid, position.signal_id, exc,
+            )
 
     def _apply_tp2_fill(
         self,
@@ -247,11 +371,13 @@ class PositionFSM:
         position: _position_state.Position,
         event: _events.OrderTradeUpdate,
     ) -> None:
-        """SL fill — any state → CLOSED.  Terminal; stop hit.
+        """Original SL fill — any state → CLOSED.  Terminal; stop hit
+        at the signal's original SL price (i.e. pre-TP / TP1 hadn't
+        fired yet).
 
         The SL order has ``closePosition=true`` so the cumulative
         fill on the SL order equals the remaining position size at
-        the time of the SL firing.  We record realized_pnl + close
+        the time of the SL firing.  Records realized_pnl + closes
         the position; further events on this signal_id are
         late-event-skipped by the terminal check.
         """
@@ -259,10 +385,38 @@ class PositionFSM:
         position.realized_pnl_total += event.realized_pnl
         position.state = _position_state.PositionState.CLOSED
         position.closed_at = datetime.now(timezone.utc)
-        # Record which TP phase was last reached so the close_reason
-        # is informative ("SL after TP1 hit" vs "raw SL hit").
         if position.close_reason == "":
             position.close_reason = "SL"
+
+    def _apply_sl_be_fill(
+        self,
+        position: _position_state.Position,
+        event: _events.OrderTradeUpdate,
+    ) -> None:
+        """BE-shifted SL fill — terminal, fees-only close.
+
+        The BE-SL fires at the entry price after pre-TP (or TP1) has
+        banked profit on a fraction of the position.  At this exit
+        point the user has:
+
+        * Banked: pretp_fraction × move_to_pretp_threshold profit.
+        * Lost: ~0% on the residual (entry → entry = 0 raw, minus
+          round-trip fees ≈ −0.7% on margin for the residual fraction
+          at 10x).
+
+        Net per §3.2a: the asymmetry is decisive — banked partial +
+        BE on residual is the doctrine's "capital preservation"
+        property in action.
+        """
+        position.closed_qty = position.total_qty
+        position.realized_pnl_total += event.realized_pnl
+        position.state = _position_state.PositionState.CLOSED
+        position.closed_at = datetime.now(timezone.utc)
+        # Distinct from "SL" close_reason so the truth report can
+        # classify these correctly (BE-stop is doctrinally healthy;
+        # raw SL is not).
+        if position.close_reason == "":
+            position.close_reason = "SL_BE"
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +439,8 @@ async def place_signal(
     tp1_qty: float,
     tp2_qty: float,
     tp3_qty: float,
+    pretp_threshold_pct: float = 0.32,  # §3.2a default — raw %
+    pretp_fraction: float = 0.5,  # B17 engine default — must be in [0.3, 1.0]
     order_placer_factory: Optional[
         Callable[[str], _order_placer.OrderPlacer]
     ] = None,
@@ -327,6 +483,17 @@ async def place_signal(
     # Step 2: persist immediately with entry_order_id captured so the
     # FSM can handle the entry-fill event even if subsequent SL/TP
     # placements crash this coroutine.
+    # Local import to avoid circular dep (pretp_controller imports
+    # this module via the FSM tests).
+    from . import pretp_controller as _pretp
+
+    # Clamp pretp_fraction to B17 [0.30, 1.0] floor/ceiling.
+    pretp_fraction_clamped = max(0.30, min(1.0, pretp_fraction))
+    pretp_threshold_price = _pretp.compute_pretp_threshold_price(
+        entry_price=entry_price,
+        direction=direction,
+        threshold_pct=pretp_threshold_pct,
+    )
     position = _position_state.Position(
         signal_id=signal_id,
         firebase_uid=firebase_uid,
@@ -344,6 +511,8 @@ async def place_signal(
         tp2_qty=tp2_qty,
         tp3_qty=tp3_qty,
         entry_order_id=entry_result.order_id,
+        pretp_threshold_price=pretp_threshold_price,
+        pretp_fraction=pretp_fraction_clamped,
     )
     _position_state.put_position(position)
 

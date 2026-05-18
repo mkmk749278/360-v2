@@ -75,8 +75,18 @@ class PositionState(str, Enum):
     # "long tail" of a position's lifetime — minutes to hours.
     OPEN = "OPEN"
 
-    # TP1 filled (partial close).  PR-7 moves SL to BE on this
-    # transition; for PR-6 the state just changes.
+    # Pre-TP partial close fired (per §3.2a doctrine).  The user has
+    # banked profit on ``pretp_fraction`` of the position; SL has
+    # moved to entry price (BE shift); residual rides toward TP1
+    # OR closes flat at the BE-SL if reversed.  Most signals end
+    # their lifecycle in this state followed by TP1_HIT or CLOSED
+    # via BE-SL.  This is THE state the §3.2a doctrine optimises
+    # for — banking + BE residual.
+    PRE_TP_FIRED = "PRE_TP_FIRED"
+
+    # TP1 filled (partial close).  Reached when TP1 fires WITHOUT
+    # pre-TP having fired first (an unusually-fast favourable move).
+    # On transition: SL moves to BE on this transition (PR-7).
     TP1_HIT = "TP1_HIT"
 
     # TP2 filled (further partial close).
@@ -131,9 +141,19 @@ class Position:
     closed_qty: float = 0.0
     entry_order_id: int = 0
     sl_order_id: int = 0
+    sl_be_order_id: int = 0  # Replacement SL after BE shift (post-pre-TP / post-TP1)
+    pretp_order_id: int = 0  # Pre-TP partial-close order (when fired)
     tp1_order_id: int = 0
     tp2_order_id: int = 0
     tp3_order_id: int = 0
+    # Per §3.2a doctrine.  Pre-TP threshold price + fraction are
+    # captured at signal-placement time so the controller can fire
+    # without re-reading user settings every tick.  pretp_fraction
+    # honours the B17 30% floor / 100% ceiling enforced at the
+    # signal-placement entry point.
+    pretp_threshold_price: float = 0.0
+    pretp_fraction: float = 0.5  # Engine default per B17 / §3.2a
+    pretp_fired: bool = False
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -152,6 +172,11 @@ class Position:
 
 _COID_ENTRY_SUFFIX = "_entry"
 _COID_SL_SUFFIX = "_sl"
+# After pre-TP fires + SL moves to BE, the replacement SL gets a
+# distinct suffix so the FSM can tell "original SL filled" from "BE
+# SL filled" — different ``close_reason`` for accounting.
+_COID_SL_BE_SUFFIX = "_sl_be"
+_COID_PRETP_SUFFIX = "_pretp"
 _COID_TP1_SUFFIX = "_tp1"
 _COID_TP2_SUFFIX = "_tp2"
 _COID_TP3_SUFFIX = "_tp3"
@@ -180,6 +205,17 @@ def coid_sl(signal_id: str) -> str:
     return coid(signal_id, _COID_SL_SUFFIX)
 
 
+def coid_sl_be(signal_id: str) -> str:
+    """clientOrderId for the BE-shifted SL (post-pre-TP / post-TP1)."""
+    return coid(signal_id, _COID_SL_BE_SUFFIX)
+
+
+def coid_pretp(signal_id: str) -> str:
+    """clientOrderId for the pre-TP partial-close order (REDUCE_ONLY
+    MARKET fired when mark price crosses the pre-TP threshold)."""
+    return coid(signal_id, _COID_PRETP_SUFFIX)
+
+
 def coid_tp1(signal_id: str) -> str:
     return coid(signal_id, _COID_TP1_SUFFIX)
 
@@ -205,7 +241,10 @@ def parse_coid(client_order_id: str) -> Optional[tuple[str, str]]:
     if not client_order_id.startswith("lumin_"):
         return None
     rest = client_order_id[len("lumin_"):]
-    for phase in ("entry", "sl", "tp1", "tp2", "tp3"):
+    # Order matters: longer suffixes must be checked FIRST so
+    # ``..._sl_be`` doesn't get classified as ``..._be`` (and
+    # ``..._pretp`` doesn't shadow a future ``..._tp`` suffix).
+    for phase in ("sl_be", "pretp", "entry", "sl", "tp1", "tp2", "tp3"):
         suffix = f"_{phase}"
         if rest.endswith(suffix):
             signal_id = rest[: -len(suffix)]
@@ -369,9 +408,14 @@ def _to_firestore_dict(position: Position) -> dict:
         "closed_qty": position.closed_qty,
         "entry_order_id": position.entry_order_id,
         "sl_order_id": position.sl_order_id,
+        "sl_be_order_id": position.sl_be_order_id,
+        "pretp_order_id": position.pretp_order_id,
         "tp1_order_id": position.tp1_order_id,
         "tp2_order_id": position.tp2_order_id,
         "tp3_order_id": position.tp3_order_id,
+        "pretp_threshold_price": position.pretp_threshold_price,
+        "pretp_fraction": position.pretp_fraction,
+        "pretp_fired": position.pretp_fired,
         "created_at": position.created_at,
         "last_event_at": position.last_event_at,
         "closed_at": position.closed_at,
@@ -409,9 +453,14 @@ def _from_firestore_dict(data: dict) -> Position:
         closed_qty=float(data.get("closed_qty", 0.0)),
         entry_order_id=int(data.get("entry_order_id", 0)),
         sl_order_id=int(data.get("sl_order_id", 0)),
+        sl_be_order_id=int(data.get("sl_be_order_id", 0)),
+        pretp_order_id=int(data.get("pretp_order_id", 0)),
         tp1_order_id=int(data.get("tp1_order_id", 0)),
         tp2_order_id=int(data.get("tp2_order_id", 0)),
         tp3_order_id=int(data.get("tp3_order_id", 0)),
+        pretp_threshold_price=float(data.get("pretp_threshold_price", 0.0)),
+        pretp_fraction=float(data.get("pretp_fraction", 0.5)),
+        pretp_fired=bool(data.get("pretp_fired", False)),
         created_at=data.get(
             "created_at", datetime.now(timezone.utc)
         ),

@@ -36,6 +36,32 @@ def _reset_state():
     position_state.reset_for_test()
 
 
+def _stub_placer_factory():
+    """Return a (factory, placer) pair.  The factory returns the same
+    mock placer instance so tests can assert against it.  All placer
+    methods are AsyncMocks that return successful OrderPlacementResults
+    by default — override per test if needed."""
+    placer = MagicMock()
+    placer.cancel_order = AsyncMock(return_value=None)
+    placer.place_stop_loss = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=4001, client_order_id="lumin_sig-1_sl_be",
+            status="NEW", avg_price=0.0, binance_body={},
+        )
+    )
+    placer.place_pretp_partial = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=5001, client_order_id="lumin_sig-1_pretp",
+            status="FILLED", avg_price=29100.0, binance_body={},
+        )
+    )
+
+    def _factory(uid):
+        return placer
+
+    return _factory, placer
+
+
 def _otu(
     *,
     client_order_id: str,
@@ -236,10 +262,17 @@ async def test_partial_entry_fill_stays_pending() -> None:
 
 
 @pytest.mark.asyncio
-async def test_tp1_fill_transitions_open_to_tp1_hit() -> None:
-    fsm = position_fsm.PositionFSM("fb-x")
+async def test_tp1_fill_transitions_open_to_tp1_hit_and_does_be_shift() -> None:
+    """OPEN → TP1_HIT.  Per §3.2a (PR-7), this ALSO triggers the BE
+    shift: cancel original SL + place new SL at entry price.  Tests
+    the path where pre-TP didn't fire first (an unusually-fast
+    favourable move)."""
+    factory, placer = _stub_placer_factory()
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
     position = _pending_position()
     position.state = position_state.PositionState.OPEN
+    position.entry_price_filled = 29000.0
+    position.sl_order_id = 2001  # has an original SL to cancel
     captured: list = []
     with patch.object(position_state, "get_position", return_value=position), patch.object(
         position_state, "put_position", side_effect=lambda p: captured.append(p)
@@ -254,6 +287,43 @@ async def test_tp1_fill_transitions_open_to_tp1_hit() -> None:
     assert captured[0].state == position_state.PositionState.TP1_HIT
     assert captured[0].closed_qty == 0.3
     assert captured[0].realized_pnl_total == 15.0
+    # BE shift: original SL cancelled, BE-SL placed at entry price.
+    placer.cancel_order.assert_called_once_with(symbol="BTCUSDT", order_id=2001)
+    placer.place_stop_loss.assert_called_once()
+    sl_kwargs = placer.place_stop_loss.call_args.kwargs
+    assert sl_kwargs["stop_price"] == 29000.0  # entry_price_filled
+    assert sl_kwargs["coid_override"] == position_state.coid_sl_be("sig-1")
+    assert captured[0].sl_be_order_id == 4001
+    assert captured[0].sl_order_id == 0  # original gone
+
+
+@pytest.mark.asyncio
+async def test_tp1_after_pretp_does_not_redo_be_shift() -> None:
+    """Pre-TP already fired (state PRE_TP_FIRED) → TP1 hits on the
+    residual → state TP1_HIT, but BE shift was ALREADY done at
+    pre-TP fill time.  Verify the FSM doesn't redundantly cancel +
+    re-place the SL."""
+    factory, placer = _stub_placer_factory()
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
+    position = _pending_position()
+    position.state = position_state.PositionState.PRE_TP_FIRED
+    position.sl_be_order_id = 4001  # BE-SL already placed
+    position.sl_order_id = 0
+    captured: list = []
+    with patch.object(position_state, "get_position", return_value=position), patch.object(
+        position_state, "put_position", side_effect=lambda p: captured.append(p)
+    ):
+        await fsm.handle_event(
+            _otu(
+                client_order_id=position_state.coid_tp1("sig-1"),
+                last_filled_qty=0.5,
+                realized_pnl=25.0,
+            )
+        )
+    assert captured[0].state == position_state.PositionState.TP1_HIT
+    # No redundant BE shift — the SL was already at BE.
+    placer.cancel_order.assert_not_called()
+    placer.place_stop_loss.assert_not_called()
 
 
 @pytest.mark.asyncio
@@ -299,6 +369,114 @@ async def test_tp3_fill_transitions_to_closed_with_reason() -> None:
     assert captured[0].state == position_state.PositionState.CLOSED
     assert captured[0].close_reason == "TP3"
     assert captured[0].closed_at is not None
+
+
+@pytest.mark.asyncio
+async def test_pretp_fill_transitions_open_to_pretp_fired_with_be_shift() -> None:
+    """**The doctrine-critical transition** (§3.2a).  Pre-TP partial
+    close fills → OPEN → PRE_TP_FIRED.  Side effects:
+    1. Cancel original SL.
+    2. Cancel TP2 + TP3 (residual too small for multi-leg TP).
+    3. Place new SL at entry price (BE shift).
+    """
+    factory, placer = _stub_placer_factory()
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
+    position = _pending_position()
+    position.state = position_state.PositionState.OPEN
+    position.entry_price_filled = 29000.0
+    position.sl_order_id = 2001
+    position.tp1_order_id = 3001  # stays
+    position.tp2_order_id = 3002  # cancelled
+    position.tp3_order_id = 3003  # cancelled
+    captured: list = []
+    with patch.object(position_state, "get_position", return_value=position), patch.object(
+        position_state, "put_position", side_effect=lambda p: captured.append(p)
+    ):
+        await fsm.handle_event(
+            _otu(
+                client_order_id=position_state.coid_pretp("sig-1"),
+                last_filled_qty=0.5,
+                realized_pnl=25.0,
+            )
+        )
+    assert captured[0].state == position_state.PositionState.PRE_TP_FIRED
+    assert captured[0].pretp_fired is True
+    assert captured[0].closed_qty == 0.5
+    assert captured[0].realized_pnl_total == 25.0
+    # 3 cancels: original SL + TP2 + TP3.  TP1 stays.
+    assert placer.cancel_order.await_count == 3
+    cancelled_ids = {
+        call.kwargs["order_id"] for call in placer.cancel_order.call_args_list
+    }
+    assert cancelled_ids == {2001, 3002, 3003}
+    # BE-SL placed at entry price.
+    placer.place_stop_loss.assert_called_once()
+    assert placer.place_stop_loss.call_args.kwargs["stop_price"] == 29000.0
+    assert captured[0].sl_be_order_id == 4001
+    assert captured[0].sl_order_id == 0
+    assert captured[0].tp2_order_id == 0
+    assert captured[0].tp3_order_id == 0
+    # TP1 stays — residual rides toward it.
+    assert captured[0].tp1_order_id == 3001
+    # SL price field updated to BE for app-display.
+    assert captured[0].sl_price == 29000.0
+
+
+@pytest.mark.asyncio
+async def test_pretp_fill_tolerates_sl_cancel_failure() -> None:
+    """Race: SL fires at the same moment as pre-TP fills.  The cancel
+    returns -2011 "Unknown order sent" — already handled by
+    OrderPlacer.cancel_order returning success.  But even if a real
+    error fires, the pre-TP transition must still apply (don't leave
+    the position in an inconsistent state)."""
+    factory, placer = _stub_placer_factory()
+    placer.cancel_order = AsyncMock(
+        side_effect=order_placer.OrderRejectedByBinance("network glitch")
+    )
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
+    position = _pending_position()
+    position.state = position_state.PositionState.OPEN
+    position.sl_order_id = 2001
+    captured: list = []
+    with patch.object(position_state, "get_position", return_value=position), patch.object(
+        position_state, "put_position", side_effect=lambda p: captured.append(p)
+    ):
+        # Must not raise.
+        await fsm.handle_event(
+            _otu(
+                client_order_id=position_state.coid_pretp("sig-1"),
+                last_filled_qty=0.5,
+            )
+        )
+    # Transition still applied.
+    assert captured[0].state == position_state.PositionState.PRE_TP_FIRED
+
+
+@pytest.mark.asyncio
+async def test_sl_be_fill_closes_with_distinct_reason() -> None:
+    """BE-shifted SL fill → CLOSED with close_reason="SL_BE" (not
+    "SL").  Truth report classifies these differently — SL_BE is
+    doctrinally healthy (banked partial + BE on residual), raw SL is
+    not."""
+    factory, _placer = _stub_placer_factory()
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
+    position = _pending_position()
+    position.state = position_state.PositionState.PRE_TP_FIRED
+    position.sl_be_order_id = 4001
+    captured: list = []
+    with patch.object(position_state, "get_position", return_value=position), patch.object(
+        position_state, "put_position", side_effect=lambda p: captured.append(p)
+    ):
+        await fsm.handle_event(
+            _otu(
+                client_order_id=position_state.coid_sl_be("sig-1"),
+                last_filled_qty=0.5,
+                realized_pnl=-2.5,
+            )
+        )
+    assert captured[0].state == position_state.PositionState.CLOSED
+    assert captured[0].close_reason == "SL_BE"
+    assert captured[0].closed_qty == position.total_qty
 
 
 @pytest.mark.asyncio
