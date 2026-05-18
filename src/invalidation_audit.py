@@ -302,6 +302,193 @@ def load_classified_records(
     return [r for r in records if r.get("classification") is not None]
 
 
+# ---------------------------------------------------------------------------
+# Per-rule ablation metrics — answer "which kill rules are net-bleeding?"
+# ---------------------------------------------------------------------------
+#
+# The classifier above buckets every kill into PROTECTIVE / PREMATURE / NEUTRAL.
+# To decide whether a rule should be DROPPED we need an EV estimate in R-units
+# per kill, not just counts: a rule with 10 PROTECTIVE and 8 PREMATURE looks
+# "net-helping" on counts but is net-hurting if each PREMATURE missed +1.8R
+# while each PROTECTIVE saved only +0.4R.
+#
+# Counterfactual model per record (R-units of sl_distance):
+#   * PREMATURE → counterfactual exit at TP1.  missed_R = R_to_tp1 - R_at_kill.
+#   * PROTECTIVE → counterfactual exit at worst post-kill excursion, floored at
+#                  full SL (-1R).  saved_R = R_at_kill - counterfactual_R.
+#   * NEUTRAL    → no EV contribution (counterfactual ambiguous, ~0 by design).
+#
+# ev_per_kill_R = (saved_R_total - missed_R_total) / total_classified
+# Recommendations are thresholded; see ``_ABLATION_*`` constants below.
+
+# DROP when each kill on average destroys more than this much R.  Rationale:
+# B17 capital-preservation doctrine values pre-TP+BE at ~-0.5%/10x margin and
+# a clean TP1 at ~+1.3-4.3%/10x.  A rule that bleeds 0.2R/kill on average is
+# silently giving back the partial-bank edge across the cohort.
+_ABLATION_DROP_EV_THRESHOLD: float = -0.20
+# KEEP when each kill on average preserves more than this much R.
+_ABLATION_KEEP_EV_THRESHOLD: float = 0.10
+# Minimum classified records per family before any recommendation lands —
+# below this, surfaces as INSUFFICIENT_SAMPLE so we don't drop a rule on noise.
+_ABLATION_MIN_SAMPLE_DEFAULT: int = 20
+
+
+def _favorable_r(price: float, entry: float, sl_distance: float, direction: str) -> float:
+    """Convert a raw price into R-units of favorable excursion from entry.
+
+    LONG : (price - entry) / sl_distance.   SHORT : (entry - price) / sl_distance.
+    Both yield positive R when ``price`` is on the favorable side of entry.
+    Returns 0.0 on invalid inputs to keep the EV math defensive.
+    """
+    if sl_distance <= 0 or entry <= 0 or price <= 0:
+        return 0.0
+    if direction == "LONG":
+        return (price - entry) / sl_distance
+    return (entry - price) / sl_distance
+
+
+def _record_value_delta_r(record: Dict[str, Any]) -> Optional[float]:
+    """Return the R-unit value-delta of THIS kill vs its counterfactual.
+
+    Positive = kill was net-good (saved R), negative = kill was net-bad (missed R).
+    Returns None when inputs are insufficient (skip in aggregation).
+    """
+    label = str(record.get("classification") or "")
+    if label not in ("PROTECTIVE", "PREMATURE", "NEUTRAL"):
+        return None
+    direction = str(record.get("direction") or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return None
+    entry = float(record.get("entry") or 0.0)
+    sl_distance = float(record.get("sl_distance") or 0.0)
+    if entry <= 0 or sl_distance <= 0:
+        return None
+    kill_price = float(record.get("kill_price") or 0.0)
+    tp1 = float(record.get("tp1") or 0.0)
+    if kill_price <= 0:
+        return None
+    r_at_kill = _favorable_r(kill_price, entry, sl_distance, direction)
+    if label == "PREMATURE":
+        if tp1 <= 0:
+            return None
+        r_to_tp1 = _favorable_r(tp1, entry, sl_distance, direction)
+        return -(r_to_tp1 - r_at_kill)  # negative: we missed this many R
+    if label == "PROTECTIVE":
+        # Worst excursion price = post_kill min (LONG) or max (SHORT).
+        if direction == "LONG":
+            worst_price = float(record.get("post_kill_price_min") or 0.0)
+        else:
+            worst_price = float(record.get("post_kill_price_max") or 0.0)
+        if worst_price <= 0:
+            return None
+        worst_r = _favorable_r(worst_price, entry, sl_distance, direction)
+        # Floor at -1R: SL would have fired before price went deeper.
+        counterfactual_r = max(worst_r, -1.0)
+        return r_at_kill - counterfactual_r  # positive: we saved this many R
+    return 0.0  # NEUTRAL
+
+
+def compute_rule_ablation_metrics(
+    records: List[Dict[str, Any]],
+    *,
+    min_sample_per_family: int = _ABLATION_MIN_SAMPLE_DEFAULT,
+) -> Dict[str, Any]:
+    """Per-kill-rule-family EV in R-units → DROP / TUNE / KEEP recommendation.
+
+    Answers the OWNER_BRIEF B17 ablation question: "If we remove kill rule X,
+    does the historical cohort's MFE-give-back get worse?"  A rule with
+    ev_per_kill_R < -0.20 is silently cutting winners across the cohort and
+    is a DROP candidate.
+
+    Aggregates over every classified record (PROTECTIVE / PREMATURE / NEUTRAL).
+    INSUFFICIENT_DATA records and unclassified records are excluded.
+
+    Returns ``{by_family, drop_candidates, min_sample_per_family}`` where
+    ``by_family[family]`` carries:
+
+    * ``protective_n``, ``premature_n``, ``neutral_n``, ``total``
+    * ``saved_R_total``, ``missed_R_total``, ``ev_total_R``, ``ev_per_kill_R``
+    * ``recommendation``: "DROP" | "TUNE" | "KEEP" | "INSUFFICIENT_SAMPLE"
+    * ``verdict``: one-line human summary string for the truth-report row
+    """
+    by_family: Dict[str, Dict[str, Any]] = {}
+    if not records:
+        return {
+            "by_family": {},
+            "drop_candidates": [],
+            "min_sample_per_family": min_sample_per_family,
+        }
+
+    for r in records:
+        if not isinstance(r, dict):
+            continue
+        label = r.get("classification")
+        if label not in ("PROTECTIVE", "PREMATURE", "NEUTRAL"):
+            continue
+        family = str(r.get("kill_reason_family") or "other")
+        bucket = by_family.setdefault(family, {
+            "protective_n": 0,
+            "premature_n": 0,
+            "neutral_n": 0,
+            "total": 0,
+            "saved_R_total": 0.0,
+            "missed_R_total": 0.0,
+        })
+        bucket["total"] += 1
+        if label == "PROTECTIVE":
+            bucket["protective_n"] += 1
+        elif label == "PREMATURE":
+            bucket["premature_n"] += 1
+        else:
+            bucket["neutral_n"] += 1
+        delta = _record_value_delta_r(r)
+        if delta is None:
+            continue
+        if delta >= 0:
+            bucket["saved_R_total"] += delta
+        else:
+            bucket["missed_R_total"] += -delta
+
+    drop_candidates: List[str] = []
+    for family, bucket in by_family.items():
+        total = bucket["total"]
+        ev_total = bucket["saved_R_total"] - bucket["missed_R_total"]
+        ev_per_kill = ev_total / total if total > 0 else 0.0
+        bucket["ev_total_R"] = round(ev_total, 3)
+        bucket["ev_per_kill_R"] = round(ev_per_kill, 3)
+        if total < min_sample_per_family:
+            bucket["recommendation"] = "INSUFFICIENT_SAMPLE"
+            bucket["verdict"] = (
+                f"only {total} classified kills (need >= {min_sample_per_family}); "
+                "let data accumulate before tuning"
+            )
+        elif ev_per_kill < _ABLATION_DROP_EV_THRESHOLD:
+            bucket["recommendation"] = "DROP"
+            bucket["verdict"] = (
+                f"net-hurting: avg {ev_per_kill:+.2f}R/kill across {total} kills "
+                f"(missed {bucket['missed_R_total']:.1f}R vs saved {bucket['saved_R_total']:.1f}R)"
+            )
+            drop_candidates.append(family)
+        elif ev_per_kill > _ABLATION_KEEP_EV_THRESHOLD:
+            bucket["recommendation"] = "KEEP"
+            bucket["verdict"] = (
+                f"net-helping: avg {ev_per_kill:+.2f}R/kill across {total} kills "
+                f"(saved {bucket['saved_R_total']:.1f}R vs missed {bucket['missed_R_total']:.1f}R)"
+            )
+        else:
+            bucket["recommendation"] = "TUNE"
+            bucket["verdict"] = (
+                f"marginal: avg {ev_per_kill:+.2f}R/kill across {total} kills — "
+                "consider per-setup exemption or threshold adjustment, not full drop"
+            )
+
+    return {
+        "by_family": by_family,
+        "drop_candidates": drop_candidates,
+        "min_sample_per_family": min_sample_per_family,
+    }
+
+
 def prune_old_records(
     *,
     retention_sec: float = 7 * 24 * 3600.0,

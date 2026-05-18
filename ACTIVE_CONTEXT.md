@@ -4,6 +4,106 @@
 
 ---
 
+## In-session checkpoint 2026-05-17 — 654-signal forensic + per-path structural audit (analysis only, no code yet)
+
+**Owner-driven deep audit triggered by /stats reporting 286 signals in ~20h at 0.3% decisive-TP rate.** Pulled 36 historical `monitor-logs` snapshots, deduped on `signal_id` → 654 unique closed signals over 2026-04-21 to 2026-05-17. All analysis below at this scale, all NET% at 10× / 0.7% round-trip fee per B11.
+
+### Aggregate truth (n=654)
+
+- Mean PnL raw: **−0.022%**
+- Mean NET on margin: **−0.92%**
+- 479 (73.2%) signals net-negative for subscribers after fees
+- 25 (3.8%) FULL_TP_HIT + PROFIT_LOCKED combined
+- Pre-AI mean 72.4 → Post-AI 77.6 (AI delta +5.23) → Final 73.2 (penalties net −4.4)
+- Engine direction-call quality: **41.1% MFE=0** (engine called direction; price never moved that way); **67.9% never reached pre-TP floor of 0.20% favorable**
+
+### Per-path performance + direction-call quality (n=654)
+
+| Setup | N | NET margin | Win% | MFE=0 | Verdict |
+|---|---:|---:|---:|---:|---|
+| SR_FLIP_RETEST | 249 | −0.50% | 3.6% | **42.6%** | Marginal — thesis sound on 15m+, noisy on 5m |
+| QUIET_COMPRESSION_BREAK | 135 | −1.11% | 1.5% | 39.3% | R:R 1.3 cannot fund a 40-50% strategy; literature requires 3:1 |
+| FAILED_AUCTION_RECLAIM | 115 | −0.72% | 6.1% | 39.1% | **Misnamed.** 5m "auction" = stop hunt. Real failed-auction is DAILY pattern |
+| LIQUIDITY_SWEEP_REVERSAL | 89 | −1.13% | 5.6% | **23.6%** | **Best direction-caller.** Thesis sound; needs HTF POI anchoring |
+| TREND_PULLBACK_EMA | 36 | −1.51% | 5.6% | **77.8%** | EMA pullback structurally fails on 5m (mean-reversion in trend) |
+| DIVERGENCE_CONTINUATION | 19 | −3.27% | 0.0% | 63.2% | CVD-div + short TF + trending — fights both literature warnings |
+| CONTINUATION_LIQUIDITY_SWEEP | 9 | −2.36% | 0.0% | 44.4% | Redundant against LSR; trend constraint adds nothing |
+
+**Not a single emitting path is net-positive at scale.** Per-path forensic was confused by 100-sample noise (LSR appeared positive there; at 654-scale it's −1.13%).
+
+### Per-confidence-band (scoring weakly predictive, with one anomaly)
+
+| Band | N | NET margin |
+|---|---:|---:|
+| 65-69 | 258 | −1.49% |
+| 70-74 | 176 | −0.94% |
+| 75-79 | 69 | −0.44% |
+| 80-84 | 125 | **+0.03%** (only break-even band) |
+| 85-100 | 26 | −0.87% |
+
+Scoring discriminates progressively below 80; 80-84 is the only break-even cohort; 85+ falls back (small sample, also 38.5% SL rate).
+
+### AI confidence layer (n=654)
+
+| AI delta | N | NET margin |
+|---|---:|---:|
+| (−∞, −1) | 32 | −1.80% |
+| [−1, +1) | 144 | −0.60% |
+| [+1, +4) | 176 | −0.61% |
+| [+4, +8) | 109 | −0.36% |
+| **[+8, +15)** | **177** | **−1.90%** |
+| [+15, +100) | 16 | +1.69% |
+
+The +8-15 lift band is the largest cohort and the worst-performing. AI mis-boosts moderate candidates.
+
+### Pair concentration (44 of 65 pairs with ≥3 signals net-negative)
+
+Worst losers needing blacklist extension beyond current SIREN/TON/VVV: **ENAUSDT (−6.51%, n=12), BNBUSDT (−4.74%, n=25), LABUSDT (−3.17%, n=11), BZUSDT (−2.49%, n=11), SAHARAUSDT (−4.83%, n=5), TAOUSDT (−1.94%, n=12), SUIUSDT (−2.31%, n=17)**.
+
+**DUSDT B4 violation discovered:** 22 identical-fingerprint QCB SHORT signals in window (all conf 74.83, all PnL −0.1752%, all MFE 0). Cooldown not deduping.
+
+### Time-of-day at scale
+
+00-07 UTC + 18 UTC are the loss windows (all sub-−1.5% net). 12, 14, 17 UTC are the profitable hours. PR #303 KZ-removal lost real edge in dead-zone hours — needs per-hour soft penalty, not legacy KZ revival.
+
+### Per-path structural audit vs current crypto-scalping reality (web-researched 2026-05-17)
+
+Universal economics:
+- Taker fees @ 10×: 92% win-rate break-even at R:R 1:1; 57% break-even at R:R 1.3:1; 33% at R:R 3:1
+- Maker fees @ 10×: 57% break-even at R:R 1:1 (free 35-point gain we don't surface to subscribers)
+- Realistic well-tuned scalping: 3-6% monthly. We're at −0.92% NET per signal × 25/day = subscriber loses ~3% margin/day.
+
+Per-path code-vs-reality (each evaluator read in `src/channels/scalp.py`):
+
+1. **SR_FLIP_RETEST** (line 2611). 41-candle "swing levels" = 3h local extrema, not real structure. 5m S/R retest is below the 15m noise threshold per literature. SCALAR_FALLBACK +5 penalty already exists in code = engine knows ~30% of "levels" are guesses. R:R 1.27.
+2. **QUIET_COMPRESSION_BREAK** (line 3268). BB squeeze breakout: real-world 40-50% win, needs 3:1 R:R for positive EV. We ship R:R 1.30 — mathematically cannot profit. Code explicitly removed volume confirmation citing unit-mismatch but never replaced the doctrinal need.
+3. **FAILED_AUCTION_RECLAIM** (line 4399). Real failed-auction is Market Profile concept on DAILY/4H ("revisits in 5-6 days, 75% of cases"). Our 5m + 7-bar auction window is a stop-hunt pattern, not a failed auction. R:R floor 1.0 (`_FAR_MIN_RR = 1.0`) makes the math impossible. **Path is misnamed and miscalibrated.**
+4. **LIQUIDITY_SWEEP_REVERSAL** (line 915, `_evaluate_standard`). **The only structurally-correct path.** SMC sweep+MSS matches institutional doctrine. 24% MFE=0 (best). Issue: fires on ANY 5m sweep, not just sweeps **at HTF POI**. LevelBook infra already exists to add this gate.
+5. **TREND_PULLBACK_EMA** (line 1203). EMA pullback is a mean-reversion thesis on trending data. EMAs are lagging — by the time price touches EMA21 on 5m, the impulse is exhausted. 78% MFE=0 confirms.
+6. **DIVERGENCE_CONTINUATION** (line 3473). Hidden CVD divergence on 5m in TRENDING regime — fights both literature warnings (short-TF CVD-div noisy; CVD-div in strong trend fails). 63% MFE=0.
+
+Structural cross-cuts:
+- **Correlation collapse:** Altcoin Season Index = 37 (BTC-leaning) → alt-BTC correlation 0.85+. Our 75-pair scan is effectively 5+ duplicate BTC bets per BTC move, masquerading as independent signals.
+- **R:R ceiling on every emitting path is below break-even at our actual win rates.** Geometry assumes 50-60% win; we deliver 3-6%.
+- **Regime classified on 5m** — likely confounded. A "QUIET" 5m inside a 1H trend is noise within trend, not real quiet market.
+
+### Proposed plan tiers (awaiting owner sign-off — touches scoring, paths, paid-channel routing per §1.3)
+
+| Tier | Action | Owner-touch? |
+|---|---|---|
+| 1 | Disable TPE, DIV_CONT, CLS via env flags (structurally broken paths) | **Yes** — deprecation per §1.3 |
+| 2 | Raise R:R floors: FAR 1.0→2.0, SR_FLIP 1.2→1.5, LSR 1.5→1.8, QCB 1.3→2.0 | Per-evaluator B7 — CTE scope, flag if any look owner-touch |
+| 3 | Add HTF POI anchoring to LSR (LevelBook gate) | **Yes** — scoring change |
+| 4 | Extend `SCAN_SYMBOL_BLACKLIST`: ENA, BNB, LAB, BZ, TAO. Env-only | No — env update |
+| 5 | Document maker-order discount to subscribers (92% → 57% break-even) | No — doc only |
+| 6 | Regime classifier on 15m/1H (parked) | Yes — major architecture |
+
+Tier 1+2 alone is expected to drop signal volume by ~30-40% but cut net-losing emissions in half. App surface stays alive.
+
+**Next investigation queued in this session:** Pre-TP grab + invalidation kill effects on net PnL — is the safety net actually protecting from full SL? On what criteria? Reality check.
+
+---
+
 ## Current Phase
 
 **End-of-day 2026-05-16 — Firebase auth migration shipped (engine + Android), paper-trade visibility shipped with two latent paper-broker bugs squashed (`qty=0` open positions, daily-resetting equity), and a definitive pair-bleed diagnosis ruled out the movers path and placed all current PnL bleed on Path-1 SMC evaluators against specific top-75 pairs.** Two-day arc (2026-05-15 → 2026-05-16) covering identity-stack migration, subscriber-visible paper-trader honesty, and an env-only blacklist of three confirmed-bad pairs while the architectural fix (learned per-pair penalty) is queued. Paired follow-up PRs (engine `/close-all` + Lumin Trade-tab UX) dispatched in this session and currently in flight.
