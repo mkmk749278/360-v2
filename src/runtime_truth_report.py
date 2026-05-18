@@ -228,6 +228,7 @@ _CONFIDENCE_COMPONENT_RE = re.compile(
     r"vol_div=(?P<sp_vol_div>[-\d.]+),cluster=(?P<sp_cluster>[-\d.]+)"
     r"(?:,confluence=(?P<sp_confluence>[+-]?\d+\.\d+),"
     r"struct_align=(?P<sp_struct_align>[+-]?\d+\.\d+))?"
+    r"(?:,btc_dir=(?P<sp_btc_dir>[-\d.]+))?"
     r"\))?"
     # Optional ``flags=[…]`` trailing block (added 2026-05-06 with /diag).
     # Captures the literal soft_gate_flags string so a single grep can
@@ -431,6 +432,12 @@ def parse_confidence_gate_components_from_logs(
                     "vol_div": float(match.group("sp_vol_div")),
                     "cluster": float(match.group("sp_cluster")),
                 }
+                # OWNER_BRIEF §2.1 — BTC direction penalty group is
+                # optional in the regex so legacy log lines (no btc_dir)
+                # still parse cleanly.
+                _btc_dir_raw = match.group("sp_btc_dir")
+                if _btc_dir_raw is not None:
+                    soft_penalty_fields["btc_dir"] = float(_btc_dir_raw)
             except (ValueError, TypeError):
                 soft_penalty_fields = {}
 
@@ -489,6 +496,11 @@ def parse_confidence_gate_components_from_logs(
                     "avg_spoof": round(totals["sp_spoof"] / sp_n, 2),
                     "avg_vol_div": round(totals["sp_vol_div"] / sp_n, 2),
                     "avg_cluster": round(totals["sp_cluster"] / sp_n, 2),
+                    # OWNER_BRIEF §2.1 — BTC direction penalty.  Defaults
+                    # to 0.0 when older log lines lack the group, so the
+                    # per-setup table renders consistently across the
+                    # cutover.
+                    "avg_btc_dir": round(totals.get("sp_btc_dir", 0.0) / sp_n, 2),
                 }
             by_setup[setup][decision] = entry
     return by_setup
@@ -1546,12 +1558,14 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             "shown in the 'Confidence component breakdown' table above (modulo "
             "rounding).  VWAP = VWAP overextension; KZ = kill zone / session "
             "filter; OI = open-interest flip; SPOOF = order-book spoofing; "
-            "VOL_DIV = volume-CVD divergence; CLUSTER = symbol cluster suppression._"
+            "VOL_DIV = volume-CVD divergence; CLUSTER = symbol cluster "
+            "suppression; BTC_DIR = BTC 1H+4H counter-direction soft "
+            "penalty (OWNER_BRIEF §2.1)._"
         )
         lines.append(
-            "| Setup | Decision | Samples | Avg final | VWAP | KZ | OI | Spoof | Vol_Div | Cluster | Sum |"
+            "| Setup | Decision | Samples | Avg final | VWAP | KZ | OI | Spoof | Vol_Div | Cluster | BTC_Dir | Sum |"
         )
-        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
         for setup in sorted(components.keys()):
             for decision in sorted(components[setup].keys()):
                 m = components[setup][decision]
@@ -1565,11 +1579,12 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
                     + sp.get("avg_spoof", 0.0)
                     + sp.get("avg_vol_div", 0.0)
                     + sp.get("avg_cluster", 0.0)
+                    + sp.get("avg_btc_dir", 0.0)
                 )
                 lines.append(
                     "| {setup} | {decision} | {samples} | {final:.2f} | "
                     "{vwap:.2f} | {kz:.2f} | {oi:.2f} | {spoof:.2f} | {vd:.2f} | "
-                    "{cl:.2f} | **{sm:.2f}** |".format(
+                    "{cl:.2f} | {bd:.2f} | **{sm:.2f}** |".format(
                         setup=setup,
                         decision=decision,
                         samples=sp.get("samples", 0),
@@ -1580,6 +1595,7 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
                         spoof=sp.get("avg_spoof", 0.0),
                         vd=sp.get("avg_vol_div", 0.0),
                         cl=sp.get("avg_cluster", 0.0),
+                        bd=sp.get("avg_btc_dir", 0.0),
                         sm=sp_sum,
                     )
                 )
