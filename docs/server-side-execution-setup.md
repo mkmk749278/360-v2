@@ -112,10 +112,51 @@ gcloud projects add-iam-policy-binding "$GCP_PROJECT_ID" \
   --role="roles/datastore.user"
 ```
 
-Firestore Security Rules (committed to the Firebase project, not
-configured via `gcloud`) will be wired in PR-3 to deny ALL client
-reads/writes to the `binance_key` subcollection — only the engine's
-Admin SDK (which bypasses security rules by design) may touch it.
+## 3a. Deploy Firestore Security Rules (added in PR-3)
+
+The rules file (`firestore.rules`) at the repo root is the **last-line
+defence** between a stolen Firebase client ID token and the encrypted-
+key blob store. It denies ALL client access to `users/{uid}/binance_key/**`
+(only the engine's Admin SDK can touch it), allows owners to read their
+own positions / orders / anomalies subcollections, and locks down the
+global `kill_switch` document entirely. See `firestore.rules` for the
+full per-collection contract.
+
+Install the Firebase CLI (one-time):
+
+```bash
+npm install -g firebase-tools     # requires Node.js
+firebase login
+firebase use --add                # select your Firebase project
+```
+
+Deploy the rules:
+
+```bash
+cd /path/to/360-v2
+firebase deploy --only firestore:rules
+```
+
+Verify in the Firebase Console → Firestore → Rules tab that the new
+rules are live (the deploy CLI prints "compile succeeded" + a checksum;
+the console shows the deployed text).
+
+The rules are also pinned structurally by
+`tests/security/test_firestore_rules_structure.py` — a future edit
+that accidentally widens access (drops the deny-all default, grants
+client write to `binance_key`, etc.) fails CI before it can ship.
+
+### Re-deploying after a rules change
+
+Any time `firestore.rules` is edited and merged to `main`, redeploy:
+
+```bash
+firebase deploy --only firestore:rules
+```
+
+For solo scale we deploy manually. A future hardening would wire this
+into the GitHub Actions deploy workflow so push-to-main also pushes
+rules — guarded by a `FIREBASE_TOKEN` GitHub secret.
 
 ---
 

@@ -1,0 +1,5 @@
+{
+  "_comment": "Firestore composite indexes. Empty for v1 — single-field indexes are auto-managed by Firestore. As the Position FSM and Orders log grow, we'll add composite indexes here for queries like 'positions where state=OPEN order by created_at desc' that Firestore can't serve from auto-indexes.",
+  "indexes": [],
+  "fieldOverrides": []
+}
