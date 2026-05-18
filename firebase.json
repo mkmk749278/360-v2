@@ -1,0 +1,7 @@
+{
+  "_comment": "Firebase project config. The engine reads users' encrypted Binance keys via the Firebase Admin SDK (which bypasses these client-side security rules); the Lumin app reads its own non-secret data via the Firebase JS / Flutter SDK (subject to these rules). See firestore.rules for the per-collection access doctrine.",
+  "firestore": {
+    "rules": "firestore.rules",
+    "indexes": "firestore.indexes.json"
+  }
+}

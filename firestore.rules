@@ -1,0 +1,116 @@
+// Firestore Security Rules — Lumin server-side execution custody model
+// ----------------------------------------------------------------------
+//
+// Per OWNER_BRIEF §3.9 + B18, the engine VPS holds users' encrypted
+// Binance API keys.  These rules control what CLIENTS (the Lumin app,
+// browser SDK, any code authenticating via Firebase Auth) can do.
+//
+// The engine bypasses these rules entirely — it talks to Firestore via
+// the Firebase Admin SDK using a service-account credential, which is
+// trusted and not subject to security rules.  The rules below are the
+// last-line defense against a compromised CLIENT (stolen Firebase
+// ID token, malicious app build) — they should never become the only
+// defense for any data, but they're the cheapest blast-radius cap we
+// can put between a stolen token and the encrypted-key blob store.
+//
+// Doctrine pinned by ``tests/security/test_firestore_rules_structure.py``
+// so a future edit that accidentally widens access (e.g. removes the
+// deny-all default, or grants client write to binance_key) fails CI.
+//
+// Deploy via:  firebase deploy --only firestore:rules
+// See ``docs/server-side-execution-setup.md`` for the full operator flow.
+
+rules_version = '2';
+
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // --------------------------------------------------------------------
+    // Default deny — explicit so any new collection added without a
+    // matching rule below is locked down by default rather than
+    // accidentally open (Firestore's default IS deny, but pinning it
+    // here makes the doctrine readable in one place).
+    // --------------------------------------------------------------------
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --------------------------------------------------------------------
+    // User profile: each user reads/writes their own root document only.
+    // Used for non-secret settings (display name, notification prefs,
+    // ToS acceptance timestamp, etc.).  Other users' profiles are
+    // invisible — request.auth.uid must equal the path uid.
+    // --------------------------------------------------------------------
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+
+    // --------------------------------------------------------------------
+    // ENCRYPTED BINANCE KEY BLOB — the most sensitive subcollection.
+    //
+    // DENY ALL CLIENT ACCESS.  Even the owning user cannot read or
+    // write here from the client SDK.  The blob can only be:
+    //
+    //   * WRITTEN by the engine's /api/binance/connect endpoint
+    //     (via Firebase Admin SDK, which bypasses these rules).
+    //   * READ by the engine's signing service when an order needs
+    //     signing (via Firebase Admin SDK).
+    //   * DELETED by the engine on user disconnect / password reset /
+    //     permission-drift detection (via Firebase Admin SDK).
+    //
+    // A stolen Firebase ID token therefore cannot exfiltrate the
+    // ciphertext + encrypted DEK, which combined with the KMS IAM
+    // separation (engine VPS holds the only Decrypt permission) means
+    // a stolen token alone yields nothing.  This is the structural
+    // defense `OWNER_BRIEF §3.9` is built around.
+    // --------------------------------------------------------------------
+    match /users/{uid}/binance_key/{doc=**} {
+      allow read, write: if false;
+    }
+
+    // --------------------------------------------------------------------
+    // Positions (FSM state): user can READ their own positions for the
+    // app's live-position view; only the engine writes.  Writes happen
+    // via Admin SDK as the Position FSM transitions through
+    // PENDING → OPEN → PRE_TP_FIRED → TP*_HIT → CLOSED.
+    // --------------------------------------------------------------------
+    match /users/{uid}/positions/{positionId} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // --------------------------------------------------------------------
+    // Orders audit log: user can READ their own order history; only
+    // the engine writes.  Append-only by engine convention; the rules
+    // structurally prevent client tampering even if engine code ever
+    // had a bug that allowed update.
+    // --------------------------------------------------------------------
+    match /users/{uid}/orders/{orderId} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // --------------------------------------------------------------------
+    // Anomaly events: tripwire fires (rate-limit, position-cap,
+    // permission-drift, etc.) per OWNER_BRIEF B18.  User reads their
+    // own; only engine writes.  Useful for the app's "why did my
+    // auto-trade disable?" surface.
+    // --------------------------------------------------------------------
+    match /users/{uid}/anomalies/{eventId} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    // --------------------------------------------------------------------
+    // Global kill switch (single doc): flipping this disables auto-trade
+    // engine-wide for ALL users within 5 seconds (per B18 + the
+    // strengthened blast-radius defaults in #431).  Only the engine
+    // reads/writes; clients have no business here.  Operator flips
+    // via Telegram bot, which talks to the engine's HTTP API, which
+    // writes via Admin SDK.
+    // --------------------------------------------------------------------
+    match /kill_switch/{doc=**} {
+      allow read, write: if false;
+    }
+  }
+}
