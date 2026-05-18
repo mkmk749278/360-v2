@@ -265,6 +265,40 @@ class OrderPlacer:
             signal_id=signal_id,
         )
 
+    async def place_pretp_partial(
+        self,
+        *,
+        signal_id: str,
+        symbol: str,
+        direction: str,
+        quantity: float,
+    ) -> OrderPlacementResult:
+        """REDUCE_ONLY MARKET order for the pre-TP partial close.
+
+        Fired by :mod:`src.execution.pretp_controller` when the mark
+        price crosses the configured pre-TP threshold.  Closes a
+        ``pretp_fraction`` slice of the position immediately — banks
+        the doctrine-critical §3.2a profit before the residual rides
+        toward TP1 or back to the BE-shifted SL.
+
+        REDUCE_ONLY ensures we can't accidentally open a counter-
+        position if the fill arithmetic is off (defence-in-depth on
+        top of the position-cap tripwire from PR-8).
+        """
+        params = {
+            "symbol": symbol,
+            "side": _exit_side(direction),
+            "type": "MARKET",
+            "quantity": _qty_str(quantity),
+            "reduceOnly": "true",
+            "newClientOrderId": _position_state.coid_pretp(signal_id),
+        }
+        return await self._submit_order(
+            params=params,
+            phase="pretp",
+            signal_id=signal_id,
+        )
+
     async def cancel_order(
         self,
         *,
