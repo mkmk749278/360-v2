@@ -469,6 +469,26 @@ async def place_signal(
     Raises :class:`order_placer.OrderPlacementError` only if the
     ENTRY fails.  All other failures are logged + tolerated.
     """
+    # ---- Safety gates (PR-8 + PR-11 + PR-14 wiring follow-up) ----
+    #
+    # Combined check before any order is placed: the engine's auto-
+    # trade must be globally ENABLED, the kill switch must NOT be
+    # engaged, and the user must not be auto-disabled (per-user
+    # circuit breaker tripped).  Plus the tripwires from PR-8 fire
+    # here too — symbol allowlist + position cap.  Rate limit is
+    # checked LAST so that a tripwire-rejection doesn't count toward
+    # the user's order budget.
+    #
+    # Default state on fresh deploy: is_globally_enabled() == False,
+    # so this branch raises ``NotGloballyEnabledError`` and no orders
+    # land until the operator explicitly flips the Firestore flag.
+    # This is the #431 no-staged-beta safety floor in action.
+    _enforce_safety_gates(
+        firebase_uid=firebase_uid,
+        symbol=symbol,
+        signal_id=signal_id,
+    )
+
     factory = order_placer_factory or _default_order_placer_factory
     placer = factory(firebase_uid)
 
@@ -574,3 +594,81 @@ async def place_signal(
 
 def _default_order_placer_factory(firebase_uid: str) -> _order_placer.OrderPlacer:
     return _order_placer.OrderPlacer(firebase_uid)
+
+
+# ---------------------------------------------------------------------------
+# Safety-gate enforcement (PR-8 + PR-11 + PR-14 follow-up wiring)
+# ---------------------------------------------------------------------------
+
+
+class NotGloballyEnabledError(Exception):
+    """Engine's global auto-trade enable flag is OFF.  Default state
+    on fresh deploy.  Operator must flip ``auto_trade_globally_enabled``
+    in Firestore (or via the future Telegram bot command) before any
+    user can auto-trade."""
+
+
+def _enforce_safety_gates(
+    *, firebase_uid: str, symbol: str, signal_id: str
+) -> None:
+    """Run every blast-radius check before an order is placed.
+
+    Raises a typed exception on the first failure — caller (typically
+    the signal-handler orchestrator) catches + decides whether to
+    surface to the user, alert the operator, or silently skip the
+    signal for this user.
+
+    Check order is intentional:
+      1. Global enable flag — cheapest read (cached); rejects every
+         user immediately when auto-trade is off engine-wide.
+      2. Kill switch — same cached read; rejects when emergency
+         halt is engaged.
+      3. Per-user disable — cached read; rejects users tripped by
+         the per-user circuit breaker.
+      4. Symbol allowlist — pure-Python check; rejects out-of-list
+         symbols (the breach-signal tripwire).
+      5. Per-user circuit breaker — same; rejects users with too many
+         recent rejections.
+      6. Global circuit breaker — same; rejects when engine-wide
+         rejection cluster has tripped.
+      7. Rate limit — LAST so a tripwire-rejection above doesn't
+         count against the user's order budget.
+
+    The kill_switch + tripwires modules silently no-op when they're
+    not initialised (e.g. dev path without GCP wired), so this gate
+    chain doesn't crash in test / dev contexts that haven't booted
+    the full server-side execution stack.
+    """
+    from . import kill_switch as _kill_switch
+    from . import tripwires as _tripwires
+
+    # 1 + 2 + 3 — Firestore-backed flags (cached 5s).
+    if _kill_switch.is_initialised():
+        ks = _kill_switch.get_client()
+        if not ks.is_globally_enabled():
+            raise NotGloballyEnabledError(
+                "auto-trade is globally disabled — operator must flip "
+                "auto_trade_globally_enabled = true in Firestore"
+            )
+        if ks.is_global_engaged():
+            raise _tripwires.GlobalKillSwitchEngaged(
+                "global kill switch engaged — orders refused for all users"
+            )
+        if ks.is_user_disabled(firebase_uid):
+            raise _tripwires.UserAutoDisabled(
+                f"user {firebase_uid} is auto-disabled"
+            )
+
+    # 4 — symbol allowlist.  Reads env at call-time so a deploy that
+    # narrows the allowlist takes effect on the next signal without
+    # an engine restart.
+    _tripwires.assert_symbol_allowed(symbol)
+
+    # 5 + 6 — circuit breakers.  These also fire Telegram alerts on
+    # first trip via PR-11's spawn pattern.
+    _tripwires.per_user_breaker().check(firebase_uid)
+    _tripwires.global_breaker().check()
+
+    # 7 — rate limit last.  Records this order in the per-user
+    # sliding window IFF every prior check passed.
+    _tripwires.rate_limiter().check_and_record(firebase_uid)

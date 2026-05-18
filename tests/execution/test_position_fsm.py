@@ -18,6 +18,7 @@ OrderPlacer mocked).  What we pin:
 from __future__ import annotations
 
 from datetime import datetime, timezone
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -30,10 +31,21 @@ from src.execution import position_state
 
 
 @pytest.fixture(autouse=True)
-def _reset_state():
+def _reset_state(monkeypatch: pytest.MonkeyPatch):
     position_state.reset_for_test()
+    # PR-14 follow-up wires safety gates into place_signal.  Tests
+    # that exercise place_signal need the symbol allowlist set AND
+    # the tripwire singletons reset between tests so per-test state
+    # doesn't bleed.
+    monkeypatch.setenv("TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT,ETHUSDT,SOLUSDT")
+    from src.execution import tripwires as _tripwires
+    from src.execution import kill_switch as _kill_switch
+    _tripwires.reset_singletons_for_test()
+    _kill_switch.reset_for_test()
     yield
     position_state.reset_for_test()
+    _tripwires.reset_singletons_for_test()
+    _kill_switch.reset_for_test()
 
 
 def _stub_placer_factory():
@@ -653,3 +665,122 @@ async def test_place_signal_tolerates_sl_failure() -> None:
     assert result.sl_order_id == 0  # didn't land
     # TPs still attempted.
     assert placer.place_take_profit.await_count == 3
+
+
+# ---------------------------------------------------------------------------
+# Safety-gate enforcement on place_signal (PR-14 wiring follow-up)
+# ---------------------------------------------------------------------------
+
+
+def _common_signal_kwargs(placer):
+    return dict(
+        firebase_uid="fb-x",
+        signal_id="sig-1",
+        symbol="BTCUSDT",
+        direction="LONG",
+        entry_price=29000.0,
+        sl_price=28500.0,
+        tp1_price=29500.0,
+        tp2_price=30000.0,
+        tp3_price=30500.0,
+        total_qty=1.0,
+        tp1_qty=0.3,
+        tp2_qty=0.4,
+        tp3_qty=0.3,
+        order_placer_factory=lambda uid: placer,
+    )
+
+
+@pytest.mark.asyncio
+async def test_place_signal_refuses_when_symbol_not_in_allowlist(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The doctrine canary: a signal for a symbol not on the
+    tripwire allowlist must NEVER reach the order-placement chain
+    no matter what.  Default-empty allowlist would block everything;
+    here we explicitly set the allowlist to symbols that DON'T
+    include the signal's symbol to verify the exact gate fires."""
+    from src.execution import tripwires
+    monkeypatch.setenv("TRIPWIRE_SYMBOL_ALLOWLIST", "ETHUSDT,SOLUSDT")
+    placer = _placer_with_mock_results()
+    with patch.object(position_state, "put_position"):
+        with pytest.raises(tripwires.SymbolNotAllowed):
+            await position_fsm.place_signal(**_common_signal_kwargs(placer))
+    # CRITICAL: NO order placement attempt — verify the gate runs
+    # BEFORE the entry order is sent.  A regression here would mean
+    # a malicious / mistaken signal could place orders before the
+    # tripwire fires.
+    placer.place_market_entry.assert_not_called()
+    placer.place_stop_loss.assert_not_called()
+    placer.place_take_profit.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_place_signal_refuses_when_globally_disabled(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The #431 no-staged-beta safety floor: when
+    ``auto_trade_globally_enabled = False`` (which is the DEFAULT on
+    fresh deploy), every signal is rejected.  Operator must
+    explicitly flip the Firestore flag before any user can
+    auto-trade."""
+    from src.execution import kill_switch
+    from unittest.mock import MagicMock
+
+    # Build a KillSwitchClient with a real fake DB so init runs.
+    fake_db = MagicMock()
+    # Document doesn't exist → both flags default False → NOT enabled.
+    fake_doc = MagicMock()
+    fake_doc.get.return_value = SimpleNamespace(exists=False, to_dict=lambda: {})
+    fake_db.collection.return_value.document.return_value = fake_doc
+    kill_switch._client = kill_switch.KillSwitchClient(fake_db)
+    monkeypatch.setenv("TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT")
+    placer = _placer_with_mock_results()
+    with patch.object(position_state, "put_position"):
+        with pytest.raises(position_fsm.NotGloballyEnabledError):
+            await position_fsm.place_signal(**_common_signal_kwargs(placer))
+    placer.place_market_entry.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_place_signal_succeeds_when_globally_enabled() -> None:
+    """Counter-canary: once the operator flips
+    auto_trade_globally_enabled = True, the gate stops firing.
+    Confirms the gate isn't accidentally permanent."""
+    from src.execution import kill_switch
+    from unittest.mock import MagicMock
+
+    fake_db = MagicMock()
+    fake_doc = MagicMock()
+    fake_doc.get.return_value = SimpleNamespace(
+        exists=True,
+        to_dict=lambda: {
+            "engaged": False,
+            "auto_trade_globally_enabled": True,
+            "auto_trade_disabled": False,
+        },
+    )
+    fake_db.collection.return_value.document.return_value = fake_doc
+    kill_switch._client = kill_switch.KillSwitchClient(fake_db)
+    placer = _placer_with_mock_results()
+    with patch.object(position_state, "put_position"):
+        result = await position_fsm.place_signal(**_common_signal_kwargs(placer))
+    assert result.entry_order_id == 1001
+    placer.place_market_entry.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_place_signal_safety_gates_skipped_when_kill_switch_not_initialised() -> None:
+    """In dev / test contexts that haven't booted the full server-
+    side execution stack (no GCP wired), the KillSwitchClient stays
+    uninitialised.  ``_enforce_safety_gates`` skips the Firestore-
+    backed checks in this case — tripwires (symbol allowlist + rate
+    limit) still fire.  Verifies dev path doesn't crash."""
+    from src.execution import kill_switch
+    kill_switch.reset_for_test()  # ensure not initialised
+    placer = _placer_with_mock_results()
+    with patch.object(position_state, "put_position"):
+        # With KS not initialised but symbol on allowlist, signal
+        # places normally.  This is the dev / test happy path.
+        result = await position_fsm.place_signal(**_common_signal_kwargs(placer))
+    assert result.entry_order_id == 1001
