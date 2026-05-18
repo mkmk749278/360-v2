@@ -131,7 +131,7 @@ def test_put_before_init_raises_typed_error() -> None:
             "uid",
             encrypted_secret=b"x",
             encrypted_dek=b"y",
-            key_public_id_first8="abcd1234",
+            api_key_full="abcd1234567890",
             ip_whitelist_ok=True,
             withdraw_disabled_ok=True,
         )
@@ -161,7 +161,7 @@ def test_put_key_blob_base64_encodes_secret_and_dek() -> None:
         "uid-1",
         encrypted_secret=b"\x00\x01\x02\x03",
         encrypted_dek=b"\xff\xfe\xfd",
-        key_public_id_first8="abcd1234",
+        api_key_full="abcd1234extra_chars_in_real_key",
         ip_whitelist_ok=True,
         withdraw_disabled_ok=True,
     )
@@ -171,6 +171,9 @@ def test_put_key_blob_base64_encodes_secret_and_dek() -> None:
     # accepts them losslessly.
     assert payload["encrypted_secret_b64"] == base64.b64encode(b"\x00\x01\x02\x03").decode("ascii")
     assert payload["encrypted_dek_b64"] == base64.b64encode(b"\xff\xfe\xfd").decode("ascii")
+    # api_key_full stored plaintext (it's the public half of the pair);
+    # display-friendly truncation is derived from it.
+    assert payload["api_key_full"] == "abcd1234extra_chars_in_real_key"
     assert payload["key_public_id_first8"] == "abcd1234"
     assert payload["ip_whitelist_ok"] is True
     assert payload["withdraw_disabled_ok"] is True
@@ -200,6 +203,7 @@ def test_get_key_blob_round_trips_bytes_exactly() -> None:
         to_dict=lambda: {
             "encrypted_secret_b64": base64.b64encode(secret_bytes).decode("ascii"),
             "encrypted_dek_b64": base64.b64encode(dek_bytes).decode("ascii"),
+            "api_key_full": "1234abcd_full_key_value",
             "key_public_id_first8": "1234abcd",
             "ip_whitelist_ok": True,
             "withdraw_disabled_ok": True,
@@ -211,6 +215,7 @@ def test_get_key_blob_round_trips_bytes_exactly() -> None:
     assert blob.uid == "uid-1"
     assert blob.encrypted_secret == secret_bytes
     assert blob.encrypted_dek == dek_bytes
+    assert blob.api_key_full == "1234abcd_full_key_value"
     assert blob.key_public_id_first8 == "1234abcd"
     assert blob.ip_whitelist_ok is True
     assert blob.withdraw_disabled_ok is True

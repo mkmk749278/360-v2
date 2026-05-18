@@ -239,7 +239,10 @@ def test_happy_path_validates_encrypts_persists_returns_truncated_key() -> None:
     put_blob_mock.assert_called_once()
     call_kwargs = put_blob_mock.call_args.kwargs
     assert call_kwargs["encrypted_dek"] == b"wrapped-dek-bytes"
-    assert call_kwargs["key_public_id_first8"] == "ABCDEFGH"
+    # api_key_full is the new (PR-4) schema field — full public key
+    # so the signing service can put it in X-MBX-APIKEY at signing
+    # time.  ``key_public_id_first8`` is derived inside the keystore.
+    assert call_kwargs["api_key_full"] == "ABCDEFGH" + "x" * 56
     assert call_kwargs["ip_whitelist_ok"] is True
     assert call_kwargs["withdraw_disabled_ok"] is True
     # Verify the encrypted secret is NOT the plaintext (the encryption

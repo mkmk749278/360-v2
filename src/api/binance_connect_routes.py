@@ -259,7 +259,7 @@ def register(
                 firebase_uid,
                 encrypted_secret=encrypted_blob.raw,
                 encrypted_dek=wrapped_dek,
-                key_public_id_first8=body.api_key[:8],
+                api_key_full=body.api_key,
                 ip_whitelist_ok=validation.ip_whitelist_ok,
                 withdraw_disabled_ok=validation.withdraw_disabled_ok,
             )
