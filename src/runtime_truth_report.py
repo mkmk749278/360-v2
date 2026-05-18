@@ -1924,21 +1924,41 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             f"- ~3 minute terminal-close behavior: `{json.dumps(lifecycle.get('terminal_close_around_3m', {}), sort_keys=True)}`",
             "",
             "## Quality-by-path/setup summary",
-            "| Path/Setup | Emitted | Closed | Win rate | SL rate | TP rate | Avg PnL% | Median first breach (s) | Median terminal (s) |",
-            "|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+            "_``Win rate`` / ``TP rate`` count only TP1/TP2/TP3 hits — they MISS the pre-TP partial-close fires that bank real subscriber value per OWNER_BRIEF §3.2a.  ``Pre-TP win%`` is the rate at which signals hit their pre-TP threshold (typically ~+0.32% raw → ~+2.5% net @ 10×) before terminal close.  The composite truth: a setup with Win=0 + Pre-TP=60% is doctrinally healthy (banking + BE residual), while Win=0 + Pre-TP=0 is the actual quality problem._",
+            "| Path/Setup | Emitted | Closed | Win rate | SL rate | TP rate | Pre-TP win% | Avg PnL% | Median first breach (s) | Median terminal (s) |",
+            "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
         ]
     )
 
     quality = snapshot.get("quality_by_setup", {})
+    # Pre-TP fires per setup — sourced from the same window's
+    # parse_pre_tp_fires_from_logs aggregation.  Setups absent from the
+    # pre-TP map (zero fires) render as ``0.0``.
+    _pretp_by_setup = (snapshot.get("pre_tp_fires", {}) or {}).get(
+        "by_setup", {}
+    )
     for setup, metrics in sorted(quality.items()):
+        _closed = int(metrics.get("closed", 0) or 0)
+        _pretp_fires = int(
+            (_pretp_by_setup.get(setup, {}) or {}).get("fires", 0) or 0
+        )
+        # Cap at 100% defensively — pre-TP can fire on still-open signals
+        # whose terminal-close hasn't landed yet in the window, so a
+        # raw ratio > 1.0 isn't a bug, just window edge-effects.
+        _pretp_pct = (
+            min(100.0, round(_pretp_fires / _closed * 100.0, 1))
+            if _closed > 0
+            else 0.0
+        )
         lines.append(
-            "| {setup} | {emitted} | {closed} | {win_rate} | {sl_rate} | {tp_rate} | {avg_pnl} | {mfb} | {mtd} |".format(
+            "| {setup} | {emitted} | {closed} | {win_rate} | {sl_rate} | {tp_rate} | {pretp} | {avg_pnl} | {mfb} | {mtd} |".format(
                 setup=setup,
                 emitted=metrics.get("emitted", 0),
                 closed=metrics.get("closed", 0),
                 win_rate=metrics.get("win_rate", 0.0),
                 sl_rate=metrics.get("sl_rate", 0.0),
                 tp_rate=metrics.get("tp_rate", 0.0),
+                pretp=_pretp_pct,
                 avg_pnl=metrics.get("average_pnl_pct"),
                 mfb=metrics.get("median_first_breach_sec"),
                 mtd=metrics.get("median_terminal_duration_sec"),
