@@ -431,10 +431,24 @@ REGIME_MIN_VOLUME_USD: Dict[str, float] = {
     "QUIET":         float(os.getenv("VOL_FLOOR_QUIET",     "1000000")),
     "":              float(os.getenv("VOL_FLOOR_DEFAULT",   "2000000")),  # empty string key handles unknown/unset regime states (intentional fallback)
 }
-# Symbols permanently excluded from scanning (gold-pegged tokens, micro-caps).
-# Configurable via comma-separated env var; defaults cover the known junk pairs.
+# Symbols permanently excluded from scanning (gold-pegged tokens, micro-caps,
+# plus the 2026-05-17 654-signal-audit Tier-4 losers).  Configurable via
+# comma-separated env var; defaults below are the conservative baseline an
+# operator can extend in prod env without losing the audit-derived list.
+#
+# Audit-derived additions (n=654, NET margin per signal):
+#   ENAUSDT  −6.51% (n=12)   BNBUSDT  −4.74% (n=25)
+#   LABUSDT  −3.17% (n=11)   BZUSDT   −2.49% (n=11)
+#   TAOUSDT  −1.94% (n=12)
+# These pairs were collectively net-negative across the 2026-04-21 to
+# 2026-05-17 window; blacklisting them strips the worst-bleed contributors
+# while a per-pair learned-penalty model is queued.
 SCAN_SYMBOL_BLACKLIST: set = set(
-    s for s in os.getenv("SCAN_SYMBOL_BLACKLIST", "XAUTUSDT,PAXGUSDT,MMTUSDT,KOMAUSDT,STOUSDT").split(",")
+    s for s in os.getenv(
+        "SCAN_SYMBOL_BLACKLIST",
+        "XAUTUSDT,PAXGUSDT,MMTUSDT,KOMAUSDT,STOUSDT,"
+        "ENAUSDT,BNBUSDT,LABUSDT,BZUSDT,TAOUSDT",
+    ).split(",")
     if s
 )
 
