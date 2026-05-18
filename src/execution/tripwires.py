@@ -289,7 +289,12 @@ class PerUserCircuitBreaker:
     def record_rejection(self, firebase_uid: str) -> bool:
         """Record one Binance rejection for the user.  Returns True
         if THIS rejection tripped the breaker (the caller persists
-        the disable + Telegram-alerts on the first trip)."""
+        the disable + Telegram-alerts on the first trip).
+
+        Fires a Telegram alert via :mod:`src.execution.telegram_alerts`
+        on the first trip — only on the first, so the operator gets
+        ONE notification per trip event rather than one per
+        rejection."""
         now = self._clock()
         with self._lock:
             ts = self._by_user[firebase_uid]
@@ -304,6 +309,15 @@ class PerUserCircuitBreaker:
                 log.warning(
                     "PerUserCircuitBreaker tripped: uid={} rejections={}",
                     firebase_uid, len(ts),
+                )
+                # Telegram alert — fire-and-forget so the caller's
+                # async context doesn't have to handle it.  Lazy
+                # import to avoid circular dep at module load.
+                _spawn_alert(
+                    _alert_user_disabled,
+                    firebase_uid=firebase_uid,
+                    rejection_count=len(ts),
+                    window_s=self._window_s,
                 )
                 return True
             return False
@@ -365,7 +379,13 @@ class GlobalCircuitBreaker:
                 )
 
     def record_rejection(self) -> bool:
-        """Returns True if THIS rejection tripped the breaker."""
+        """Returns True if THIS rejection tripped the breaker.
+
+        Fires a Telegram alert on the first trip — only on the first
+        so the operator gets ONE notification per trip event, not one
+        per rejection burst.  Subsequent rejections after the breaker
+        is tripped return False (the engine already knows; no need
+        to alert again)."""
         now = self._clock()
         with self._lock:
             cutoff = now - self._window_s
@@ -380,6 +400,11 @@ class GlobalCircuitBreaker:
                     "GlobalCircuitBreaker tripped: rejections in last "
                     "{:.0f}s = {}",
                     self._window_s, len(self._timestamps),
+                )
+                _spawn_alert(
+                    _alert_global_breaker_tripped,
+                    rejection_count=len(self._timestamps),
+                    window_s=self._window_s,
                 )
                 return True
             return False
@@ -436,3 +461,53 @@ def reset_singletons_for_test() -> None:
     _rate_limiter = None
     _per_user_breaker = None
     _global_breaker = None
+
+
+# ---------------------------------------------------------------------------
+# Telegram alert dispatch helpers
+# ---------------------------------------------------------------------------
+
+
+# Lazy-imported alert functions.  Imported on first use so that
+# ``src.execution.tripwires`` doesn't pull ``telegram_alerts`` at
+# module-load time (which would create a circular dep through the
+# bot bootstrap path).
+def _alert_user_disabled(**kwargs: Any) -> Any:
+    from . import telegram_alerts
+    return telegram_alerts.alert_user_disabled(
+        firebase_uid=kwargs["firebase_uid"],
+        reason=(
+            f"per-user circuit breaker tripped ("
+            f"{kwargs['rejection_count']} rejections in "
+            f"{kwargs['window_s']:.0f}s)"
+        ),
+        rejection_count=kwargs["rejection_count"],
+    )
+
+
+def _alert_global_breaker_tripped(**kwargs: Any) -> Any:
+    from . import telegram_alerts
+    return telegram_alerts.alert_global_breaker_tripped(
+        rejection_count=kwargs["rejection_count"],
+        window_s=kwargs["window_s"],
+    )
+
+
+def _spawn_alert(coro_factory: Any, **kwargs: Any) -> None:
+    """Fire-and-forget the alert coroutine without blocking the
+    caller (which is typically inside a synchronous ``record_*``
+    call).  Schedules on the running asyncio loop; if there's no
+    loop (e.g. running from a sync test) the alert is silently
+    dropped — the log line in the calling tripwire is the
+    fallback record.
+    """
+    import asyncio
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return  # no loop — fallback to log-only path
+    try:
+        loop.create_task(coro_factory(**kwargs))
+    except Exception:
+        log.exception("tripwires: failed to schedule alert")
