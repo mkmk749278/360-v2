@@ -253,3 +253,47 @@ async def test_close_full_after_dca_closes_the_full_averaged_position():
     assert pm.open_position_count == 0
     # Booked a loss (closed below avg of 2366).
     assert pm.simulated_pnl_total < 0
+
+
+# ---------------------------------------------------------------------------
+# Drained-position drift regression (paper-counter-drift fix, 2026-05-18)
+# ---------------------------------------------------------------------------
+
+
+async def test_close_full_drained_position_still_registers_close():
+    """The line-810 defensive path: when _positions still holds an entry
+    whose remaining_qty has been drained to ~0 (floating-point edge or
+    a partial-close path that did not pop), close_full must still
+    notify the risk manager so ``_open_signal_ids`` does not leak.
+
+    Owner-reported 2026-05-18: "Open positions: 4" header alongside an
+    empty positions list — symptom of RiskManager._open_signal_ids
+    accumulating stale ids that the broker_positions filter then
+    excludes from the list view.
+    """
+    from src.auto_trade.risk_manager import RiskManager
+    rm = RiskManager(
+        starting_equity_usd=10000.0,
+        daily_loss_limit_pct=-10.0,
+        max_concurrent=10,
+    )
+    pm = PaperOrderManager(starting_equity_usd=10000.0, risk_manager=rm)
+    sig = _make_signal(signal_id="DRAIN-TEST-1")
+    await pm.place_market_order(sig)
+    assert rm.open_position_count == 1, "register_open should run on place"
+
+    # Simulate the floating-point edge: position is in _positions but
+    # closed_quantity == quantity (so remaining_qty drops to 0 without
+    # the partial-close path firing the pop).
+    pos = pm._positions[sig.signal_id]
+    pos.closed_quantity = pos.quantity
+
+    result = await pm.close_full(sig, reason="invalidated", current_price=2380.0)
+    assert result is None, "drained path returns None"
+    assert sig.signal_id not in pm._positions, "entry was popped"
+    # The regression: RiskManager must not retain the stale id.
+    assert rm.open_position_count == 0, (
+        "close_full on a drained position must call register_close so "
+        "_open_signal_ids stays in sync — was leaking before the fix"
+    )
+

@@ -807,7 +807,19 @@ class PaperOrderManager:
 
         remaining_qty = position.quantity - position.closed_quantity
         if remaining_qty <= 1e-9:
+            # Position drained by prior partial closes but the entry was
+            # never popped (floating-point edge or partial-close path that
+            # didn't reach the pop branch).  Drop the entry AND notify
+            # the risk manager — otherwise ``_open_signal_ids`` keeps the
+            # signal_id forever and ``open_position_count`` reports
+            # stale state, the visible symptom of the 2026-05-18
+            # "Open positions: 4 / No open positions" UI bug.
             self._positions.pop(signal_id, None)
+            if self._risk_manager is not None:
+                self._risk_manager.register_close(
+                    signal,
+                    realised_pnl_usd=position.realised_pnl_usd,
+                )
             return None
 
         # Fill price preference: caller-provided → signal.current_price →
