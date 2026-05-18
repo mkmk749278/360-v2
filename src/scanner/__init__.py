@@ -124,6 +124,7 @@ from src.signal_quality import (
 from src.cluster_suppression import ClusterSuppressor
 from src.confidence_decay import apply_confidence_decay
 from src.cross_asset import AssetState, check_cross_asset_gate
+from src import pair_penalty as _pair_penalty
 from src.feedback_loop import FeedbackLoop
 from src.kill_zone import check_kill_zone_gate
 from src.mtf import check_mtf_gate, compute_mtf_confluence, _TF_WEIGHTS as _MTF_TF_WEIGHTS
@@ -5096,6 +5097,34 @@ class Scanner:
             log.debug(
                 "Structure-align bonus query error for {} {} (fail open): {}",
                 symbol, chan_name, _sa_exc,
+            )
+
+        # ── Per-pair rolling-window soft penalty ─────────────────────────
+        # Doctrine-aligned replacement for the closed-without-merge hard
+        # blacklist (PR #424).  Pairs that have been net-negative over
+        # the trailing 28-day window get a confidence deduction
+        # proportional to mean raw PnL × scale, capped at 20 pts.
+        # Pair recovers → penalty decays naturally on the next refresh.
+        # See ``src/pair_penalty.py`` for calibration + env-overrides.
+        try:
+            _pair_pen = _pair_penalty.get(symbol)
+            if _pair_pen > 0.0:
+                soft_penalty += _pair_pen
+                _soft_penalty_by_type["pair_perf"] = (
+                    _soft_penalty_by_type.get("pair_perf", 0.0) + _pair_pen
+                )
+                _fired_gates.append("PAIR_PERF")
+                log.debug(
+                    "SOFT_PENALTY {} {} {:+.1f} pair_perf total={:.1f}",
+                    symbol, chan_name, _pair_pen, soft_penalty,
+                )
+        except Exception as _pp_exc:
+            # Fail-open: a bug in the penalty lookup must never block
+            # signal scoring.  Worst case we miss the deduction for one
+            # signal; the next scan tick catches it.
+            log.debug(
+                "pair_penalty lookup error for {} {} (fail open): {}",
+                symbol, chan_name, _pp_exc,
             )
 
         # PR-01: accumulate scanner-level soft-gate penalties on top of any evaluator-

@@ -245,6 +245,13 @@ class CryptoSignalEngine:
             storage_path=PERFORMANCE_TRACKER_PATH
         )
 
+        # Wire the per-pair soft-penalty cache to read from the tracker —
+        # doctrine-aligned replacement for the closed Tier-4 hard
+        # blacklist (PR #424).  Lazy-refreshed on the scan loop via
+        # ``pair_penalty.get(symbol)``; no extra timers needed.
+        from src import pair_penalty as _pair_penalty_module
+        _pair_penalty_module.set_tracker(self._performance_tracker)
+
         self.monitor = TradeMonitor(
             data_store=self.data_store,
             send_telegram=self.telegram.send_message,
