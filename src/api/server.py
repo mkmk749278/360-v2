@@ -1227,6 +1227,21 @@ def build_app(
         owner_required=owner_required,
     )
 
+    # ---- Binance connect flow (server-side execution, B18 + §3.9) ----
+    # Registers POST /api/binance/connect.  Validates the user's
+    # Binance key against B18 rules (withdraw=off, futures=on,
+    # IP=engine VPS) and persists the encrypted blob to Firestore.
+    # The route refuses at runtime if KMS / Firestore aren't wired,
+    # so it's safe to register unconditionally (test harnesses + dev
+    # boots without GCP env vars still get a clean 500 with a clear
+    # operator message rather than a route registration failure).
+    from . import binance_connect_routes as _binance_connect_routes
+    _binance_connect_routes.register(
+        app,
+        auth=auth,
+        identity_dep=user_claims,
+    )
+
     # ---- Settings: Pre-TP page ----
 
     def _build_pretp_view() -> PretpSettings:
