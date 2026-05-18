@@ -1386,3 +1386,155 @@ class TestParseWsOutagesFromLogs:
         assert "Total REST-fallback activations: **2**" in md
         # Per-label table rendered.
         assert "| futures | 5 | 60000 | 200000 | 220000 | 2 |" in md
+
+
+# ---------------------------------------------------------------------------
+# Pre-TP win% column in quality-by-path/setup summary (PR feat/truth-report-pretp-win-column)
+# ---------------------------------------------------------------------------
+
+
+def test_quality_by_path_renders_pretp_win_pct_from_fires() -> None:
+    """The new ``Pre-TP win%`` column joins pre-TP fire counts (from
+    ``pre_tp_fires.by_setup[setup].fires``) against closed-signal
+    counts (from ``quality_by_setup[setup].closed``) so an operator
+    can see at a glance which paths are banking partial profits even
+    when ``Win rate`` reads 0% (TP1/2/3 not hit but pre-TP did fire).
+
+    Owner-noted 2026-05-18: the prior table showed 0% across every
+    path with 127 pre-TP fires in the same window — created a false
+    "everything is broken" read."""
+    from src.runtime_truth_report import format_truth_report_markdown
+    snapshot = {
+        "runtime_health": {"engine_running": True, "status_label": "running"},
+        "path_funnel": {},
+        "evaluator_reasons": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate": {},
+        "lifecycle_summary": {},
+        "quality_by_setup": {
+            "SR_FLIP_RETEST": {
+                "emitted": 191,
+                "closed": 64,
+                "win_rate": 0.0,
+                "sl_rate": 9.4,
+                "tp_rate": 0.0,
+                "average_pnl_pct": 0.0787,
+                "median_first_breach_sec": 607.98,
+                "median_terminal_duration_sec": 732.66,
+            },
+            "LIQUIDITY_SWEEP_REVERSAL": {
+                "emitted": 144,
+                "closed": 28,
+                "win_rate": 0.0,
+                "sl_rate": 25.0,
+                "tp_rate": 0.0,
+                "average_pnl_pct": -0.1246,
+                "median_first_breach_sec": 642.0,
+                "median_terminal_duration_sec": 807.0,
+            },
+            "ZERO_PRETP_SETUP": {
+                "emitted": 10,
+                "closed": 5,
+                "win_rate": 0.0,
+                "sl_rate": 0.0,
+                "tp_rate": 0.0,
+                "average_pnl_pct": 0.0,
+                "median_first_breach_sec": 0,
+                "median_terminal_duration_sec": 0,
+            },
+        },
+        "pre_tp_fires": {
+            "total": 127,
+            "by_setup": {
+                "SR_FLIP_RETEST": {"fires": 32, "avg_threshold": 0.30, "avg_net": 2.5},
+                "LIQUIDITY_SWEEP_REVERSAL": {"fires": 14, "avg_threshold": 0.32, "avg_net": 2.4},
+                # ZERO_PRETP_SETUP absent — should render 0.0
+            },
+        },
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "Pre-TP win%" in md, "new column header missing"
+    # SR_FLIP: 32/64 = 50.0%
+    assert "| SR_FLIP_RETEST | 191 | 64 | 0.0 | 9.4 | 0.0 | 50.0 |" in md
+    # LSR: 14/28 = 50.0%
+    assert "| LIQUIDITY_SWEEP_REVERSAL | 144 | 28 | 0.0 | 25.0 | 0.0 | 50.0 |" in md
+    # ZERO_PRETP: 0 fires → 0.0 column
+    assert "| ZERO_PRETP_SETUP | 10 | 5 | 0.0 | 0.0 | 0.0 | 0.0 |" in md
+
+
+def test_quality_by_path_pretp_pct_caps_at_100_when_fires_exceed_closed() -> None:
+    """Window edge-effect: pre-TP can fire on a still-open signal whose
+    terminal close hasn't landed in the window — raw ratio > 1.0.
+    Render caps at 100.0 so the column stays interpretable."""
+    from src.runtime_truth_report import format_truth_report_markdown
+    snapshot = {
+        "runtime_health": {"engine_running": True, "status_label": "running"},
+        "path_funnel": {},
+        "evaluator_reasons": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate": {},
+        "lifecycle_summary": {},
+        "quality_by_setup": {
+            "EDGE_CASE": {
+                "emitted": 20,
+                "closed": 5,
+                "win_rate": 0.0,
+                "sl_rate": 0.0,
+                "tp_rate": 0.0,
+                "average_pnl_pct": 0.0,
+                "median_first_breach_sec": 0,
+                "median_terminal_duration_sec": 0,
+            },
+        },
+        "pre_tp_fires": {
+            "total": 12,
+            "by_setup": {
+                "EDGE_CASE": {"fires": 12},  # > closed (5) → 240% raw
+            },
+        },
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "| EDGE_CASE | 20 | 5 | 0.0 | 0.0 | 0.0 | 100.0 |" in md, (
+        "ratio > 100% should be capped; raw 240% would be a confusing display"
+    )
+
+
+def test_quality_by_path_pretp_pct_zero_when_closed_is_zero() -> None:
+    """No closed signals → no denominator → render 0.0 not div/0."""
+    from src.runtime_truth_report import format_truth_report_markdown
+    snapshot = {
+        "runtime_health": {"engine_running": True, "status_label": "running"},
+        "path_funnel": {},
+        "evaluator_reasons": {},
+        "regime_distribution": {},
+        "quiet_scalp_block": {},
+        "confidence_gate": {},
+        "lifecycle_summary": {},
+        "quality_by_setup": {
+            "OPEN_BUT_NOT_CLOSED": {
+                "emitted": 3,
+                "closed": 0,
+                "win_rate": 0.0,
+                "sl_rate": 0.0,
+                "tp_rate": 0.0,
+                "average_pnl_pct": 0.0,
+                "median_first_breach_sec": 0,
+                "median_terminal_duration_sec": 0,
+            },
+        },
+        "pre_tp_fires": {
+            "total": 1,
+            "by_setup": {"OPEN_BUT_NOT_CLOSED": {"fires": 1}},
+        },
+        "post_correction_focus": {},
+        "recommended_operator_focus": {},
+    }
+    md = format_truth_report_markdown(snapshot, {})
+    assert "| OPEN_BUT_NOT_CLOSED | 3 | 0 | 0.0 | 0.0 | 0.0 | 0.0 |" in md
+
