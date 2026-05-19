@@ -208,12 +208,19 @@ class OrderPlacer:
         suffix; PR-7 will use ``_sl_be`` to distinguish the
         BE-shifted SL from the original.
         """
+        from src.execution import symbol_filters as _sf
         coid = coid_override or _position_state.coid_sl(signal_id)
+        # Round stop_price to the symbol's tickSize so Binance doesn't
+        # reject with -4014 "Price not increased by tick size".  STOP-
+        # MARKET fires on mark-price cross so the rounding direction
+        # is doctrinally indifferent — floor by default keeps the
+        # behaviour deterministic across calls.
+        rounded = _sf.round_price(symbol, stop_price)
         params = {
             "symbol": symbol,
             "side": _exit_side(direction),
             "type": "STOP_MARKET",
-            "stopPrice": _price_str(stop_price),
+            "stopPrice": _price_str(rounded),
             "closePosition": "true",
             "workingType": "MARK_PRICE",
             "newClientOrderId": coid,
@@ -242,6 +249,7 @@ class OrderPlacer:
         ``reduceOnly=true`` so a TP can't accidentally open a position
         on the opposite side if the fill arithmetic is off.
         """
+        from src.execution import symbol_filters as _sf
         if tp_phase not in ("tp1", "tp2", "tp3"):
             raise ValueError(f"tp_phase must be tp1|tp2|tp3, got {tp_phase!r}")
         coid_fn = {
@@ -249,11 +257,12 @@ class OrderPlacer:
             "tp2": _position_state.coid_tp2,
             "tp3": _position_state.coid_tp3,
         }[tp_phase]
+        rounded_price = _sf.round_price(symbol, stop_price)
         params = {
             "symbol": symbol,
             "side": _exit_side(direction),
             "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": _price_str(stop_price),
+            "stopPrice": _price_str(rounded_price),
             "quantity": _qty_str(quantity),
             "reduceOnly": "true",
             "workingType": "MARK_PRICE",
