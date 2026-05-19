@@ -7,10 +7,15 @@ volumes:
   360scalp-v2-data:
   360scalp-v2-redis:
   # Shared volume for the signing-service Unix socket (PR-4 + #444
-  # wiring).  Engine main process connects to /var/run/lumin/signing.sock
+  # wiring).  Engine main process connects to /run/lumin-signing/signing.sock
   # via this volume; the signing_service container is the only writer
   # — mode 0660 on the socket so only the engine user can read.
   # See OWNER_BRIEF §3.9 + B18 for the custody-boundary doctrine.
+  #
+  # Mount path is ``/run/lumin-signing`` rather than ``/var/run/lumin``
+  # because Docker on Ubuntu 24.04 + AppArmor blocks socket bind under
+  # /var/run/ on volume mounts (errno 13, Permission denied).  See
+  # discussion in PR #449.
   360scalp-v2-signing-socket:
 
 services:
@@ -37,13 +42,13 @@ services:
       - 360scalp-v2-logs:/app/logs
       - 360scalp-v2-data:/app/data
       # Shared with signing_service for the Unix socket.
-      - 360scalp-v2-signing-socket:/var/run/lumin
+      - 360scalp-v2-signing-socket:/run/lumin-signing
     environment:
       - REDIS_URL=redis://redis:6379/0
       - MPLCONFIGDIR=/tmp/matplotlib
       # Path the engine's SigningClient connects to.  Must match
       # the signing_service container's bind path.
-      - SIGNING_SERVICE_SOCKET_PATH=/var/run/lumin/signing.sock
+      - SIGNING_SERVICE_SOCKET_PATH=/run/lumin-signing/signing.sock
       # Phase A pre-TP grab — enabled in production after PR #281 ship.
       # Fires only on signals matching all gates (regime allowlist,
       # setup blacklist, age window, threshold).  See OWNER_BRIEF B11.
@@ -98,11 +103,11 @@ services:
       - 360scalp-v2-data:/app/data
       # The Unix socket the engine connects to.  This container is
       # the listener; the engine is the client.
-      - 360scalp-v2-signing-socket:/var/run/lumin
+      - 360scalp-v2-signing-socket:/run/lumin-signing
     environment:
       # Override the default path so the socket lands on the
       # shared volume rather than the container's own /var/run/.
-      - SIGNING_SERVICE_SOCKET_PATH=/var/run/lumin/signing.sock
+      - SIGNING_SERVICE_SOCKET_PATH=/run/lumin-signing/signing.sock
     command: python -m src.security.signing_service
     mem_limit: 256m
     cpus: "0.5"
