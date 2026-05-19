@@ -368,6 +368,52 @@ def delete_position(firebase_uid: str, signal_id: str) -> None:
     _doc_ref(firebase_uid, signal_id).delete()
 
 
+def list_positions_for_user(
+    firebase_uid: str, *, include_closed: bool = False
+) -> list[Position]:
+    """Return every position document under ``users/{uid}/positions/``.
+
+    Used by the Lumin app's Live-tab "your open positions" card
+    (``GET /api/auto-trade/positions``).  ``include_closed=False``
+    filters out terminal states so the dashboard doesn't show
+    yesterday's closed trades — pair with the trade-records history
+    view for the historical surface.
+
+    Returns empty list when the collection doesn't exist yet (a fresh
+    user who has never had a position).  Raises
+    :class:`PositionStateNotInitialisedError` if the keystore wasn't
+    initialised at boot.
+    """
+    with _lock:
+        if _db is None:
+            raise PositionStateNotInitialisedError(
+                "position_state not initialised — call init_position_state at boot"
+            )
+        coll = (
+            _db.collection("users")
+            .document(firebase_uid)
+            .collection("positions")
+        )
+    docs = coll.stream()
+    out: list[Position] = []
+    for doc in docs:
+        data = doc.to_dict()
+        if not data:
+            continue
+        try:
+            pos = _from_firestore_dict(data)
+        except Exception:
+            log.exception(
+                "list_positions_for_user: skipping malformed doc uid={} doc_id={}",
+                firebase_uid, doc.id,
+            )
+            continue
+        if not include_closed and is_terminal(pos.state):
+            continue
+        out.append(pos)
+    return out
+
+
 def reset_for_test() -> None:
     """Test-only: drop the singleton."""
     global _db

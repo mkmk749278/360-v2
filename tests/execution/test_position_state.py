@@ -206,3 +206,116 @@ def test_put_before_init_raises_typed_error() -> None:
     pos = _sample_position()
     with pytest.raises(position_state.PositionStateNotInitialisedError):
         position_state.put_position(pos)
+
+
+# ---------------------------------------------------------------------------
+# list_positions_for_user — Live-tab "your open positions" backend
+# ---------------------------------------------------------------------------
+
+
+def _make_doc_snap(state_value: str, signal_id: str):
+    """Build a fake Firestore doc snapshot for list_positions_for_user."""
+    return SimpleNamespace(
+        id=signal_id,
+        to_dict=lambda: {
+            "signal_id": signal_id,
+            "firebase_uid": "fb-x",
+            "symbol": "BTCUSDT",
+            "side": "LONG",
+            "state": state_value,
+            "entry_price_target": 29000.0,
+            "entry_price_filled": 29005.5,
+            "sl_price": 28500.0,
+            "tp1_price": 29500.0,
+            "tp2_price": 30000.0,
+            "tp3_price": 30500.0,
+            "total_qty": 1.0,
+            "tp1_qty": 0.3,
+            "tp2_qty": 0.4,
+            "tp3_qty": 0.3,
+            "filled_qty": 1.0,
+            "closed_qty": 0.0,
+            "entry_order_id": 12345,
+            "created_at": datetime.now(timezone.utc),
+            "last_event_at": datetime.now(timezone.utc),
+        },
+    )
+
+
+def _install_fake_db_for_listing(stream_returns: list) -> MagicMock:
+    fake_collection = MagicMock()
+    fake_collection.stream.return_value = iter(stream_returns)
+    fake_user_doc = MagicMock()
+    fake_user_doc.collection.return_value = fake_collection
+    fake_users = MagicMock()
+    fake_users.document.return_value = fake_user_doc
+    fake_db = MagicMock()
+    fake_db.collection.return_value = fake_users
+    position_state._db = fake_db
+    return fake_collection
+
+
+def test_list_positions_filters_terminal_states_by_default() -> None:
+    """The Live-tab card wants what's *open right now* — closed
+    positions belong to the historical PnL view, not the live one."""
+    _install_fake_db_for_listing([
+        _make_doc_snap("OPEN", "sig-open"),
+        _make_doc_snap("CLOSED", "sig-closed"),
+        _make_doc_snap("PENDING", "sig-pending"),
+    ])
+    positions = position_state.list_positions_for_user("fb-x")
+    ids = {p.signal_id for p in positions}
+    assert ids == {"sig-open", "sig-pending"}
+
+
+def test_list_positions_include_closed_when_requested() -> None:
+    _install_fake_db_for_listing([
+        _make_doc_snap("OPEN", "sig-open"),
+        _make_doc_snap("CLOSED", "sig-closed"),
+    ])
+    positions = position_state.list_positions_for_user(
+        "fb-x", include_closed=True,
+    )
+    assert {p.signal_id for p in positions} == {"sig-open", "sig-closed"}
+
+
+def test_list_positions_returns_empty_when_collection_empty() -> None:
+    """A user who has never had a position — the Live-tab card should
+    render the empty-state UI without erroring."""
+    _install_fake_db_for_listing([])
+    assert position_state.list_positions_for_user("fb-x") == []
+
+
+def test_list_positions_skips_empty_docs() -> None:
+    """A doc with no payload (``to_dict()`` returns None / empty dict)
+    is skipped — returning a half-built Position from defaults would
+    surface a phantom signal-id="" row in the Live tab.  The dict-
+    parsing layer remains tolerant for diagnostics; the listing layer
+    filters at the empty-payload boundary so the user-facing card
+    never shows a doc that hadn't been written yet."""
+    empty = SimpleNamespace(id="empty", to_dict=lambda: None)
+    good = _make_doc_snap("OPEN", "sig-good")
+    _install_fake_db_for_listing([empty, good])
+    positions = position_state.list_positions_for_user("fb-x")
+    assert len(positions) == 1
+    assert positions[0].signal_id == "sig-good"
+
+
+def test_list_positions_skips_unparseable_state_string() -> None:
+    """If a Firestore doc somehow carries an unknown state token (env
+    drift, manual edit), the row is logged and skipped — the rest of
+    the user's positions still render."""
+    bad = SimpleNamespace(
+        id="bad",
+        to_dict=lambda: {"signal_id": "bad", "state": "NOT_A_REAL_STATE"},
+    )
+    good = _make_doc_snap("OPEN", "sig-good")
+    _install_fake_db_for_listing([bad, good])
+    positions = position_state.list_positions_for_user("fb-x")
+    assert {p.signal_id for p in positions} == {"sig-good"}
+
+
+def test_list_positions_raises_when_not_initialised() -> None:
+    position_state.reset_for_test()
+    with pytest.raises(position_state.PositionStateNotInitialisedError):
+        position_state.list_positions_for_user("fb-x")
