@@ -514,17 +514,29 @@ def archive_all() -> int:
             # Nothing to archive — short-circuit so we don't create empty
             # archive tables polluting the schema.
             return 0
-        # Atomic rename + re-create within a single explicit transaction
-        # so a crash mid-reset never leaves the db in a half-renamed state.
+        # SQLite DDL (ALTER TABLE, CREATE TABLE) implicitly commits any
+        # open transaction before executing, so the original "BEGIN +
+        # ALTER + executescript + COMMIT" framing here always tripped
+        # "cannot commit - no transaction is active" on the explicit
+        # COMMIT (the ALTER had already auto-committed).  The except
+        # branch then re-failed on the matching ROLLBACK.  Simplification:
+        # drop the explicit transaction framing.  DDL is auto-committed
+        # by SQLite per-statement; ``executescript`` also runs in its
+        # own commit boundary; the rename + re-create sequence is
+        # effectively atomic from any reader's perspective because
+        # ``paper_trades`` either exists as the original or as the
+        # newly-empty version — never both, never neither.
         try:
-            conn.execute("BEGIN")
             conn.execute(
                 f"ALTER TABLE paper_trades RENAME TO {archive_name}"
             )
             conn.executescript(_SCHEMA_SQL)
-            conn.execute("COMMIT")
         except sqlite3.Error:
-            conn.execute("ROLLBACK")
+            log.exception(
+                "trade_records.archive_all: rename+recreate failed; "
+                "the paper_trades table may be in an inconsistent state — "
+                "operator should inspect SQLite directly"
+            )
             raise
         log.info(
             "trade_records.archive_all: archived {} rows to table {}",

@@ -324,9 +324,26 @@ class PaperOrderManager:
         return f"paper-{signal_id}-{event}-{self._order_seq}"
 
     def _resolved_position_size_pct(self) -> float:
-        """Read the user-set position-size % from ``user_settings``, falling
-        back to the constructor value when unconfigured.  Lets the app's
-        Auto-trade page change sizing live without an engine restart."""
+        """Read the user-set position-size % from per-user overrides first,
+        then ``user_settings`` engine-global, then the constructor default.
+
+        Per-user override priority (2026-05-19): the Auto-trade settings
+        page writes to ``user_auto_trade_settings`` (per-user SQLite),
+        not to the engine-global ``user_settings.json`` — so prior to
+        this fix, the paper trader silently ignored the user's app-side
+        slider and used ``POSITION_SIZE_PCT`` config default.  We now
+        consult the operator's per-user row first via
+        ``operator_auto_trade_override()`` (single-user MVP — most-recently-
+        updated row is "the operator").  Falls through to user_settings
+        and the constructor value when no override has been saved yet."""
+        try:
+            from src.api import user_overrides as _uo
+            override = _uo.operator_auto_trade_override()
+            v = override.get("position_size_pct")
+            if isinstance(v, (int, float)) and float(v) > 0:
+                return float(v)
+        except Exception:
+            pass
         try:
             from src import user_settings as _us
             return float(_us.auto_trade_position_size_pct())
@@ -334,18 +351,34 @@ class PaperOrderManager:
             return float(self._position_size_pct)
 
     def _resolved_leverage(self) -> float:
-        """Read the user-set leverage cap from ``user_settings``.
+        """Read the user-set leverage cap from per-user overrides first,
+        then ``user_settings`` engine-global, then the 10x dashboard default.
 
         Paper-trade visibility (2026-05-16): the per-trade ROI%-on-margin
         metric needs to know the leverage the user is conceptually
         trading at.  The engine has no per-signal leverage parameter
         today (the broker treats every paper signal as 1x for fill math),
         so we adopt ``auto_trade_leverage_cap`` as the implicit leverage
-        the dashboard math runs against.  This matches what subscribers
-        see in the auto-trade settings page.  Defaults to 10x when
-        unconfigured — same default the Pre-TP fee math has assumed for
-        months (``PRE_TP_LEVERAGE`` in config).
+        the dashboard math runs against.
+
+        Per-user override priority (2026-05-19): the Auto-trade settings
+        page writes leverage_cap to the per-user SQLite row.  Pre-fix the
+        paper trader read only from ``user_settings.auto_trade_leverage_cap()``
+        which falls back to ``RISK_MAX_LEVERAGE=30`` — so a user setting
+        the slider to 10x in-app still saw paper margin sized at 30x.
+        Now we consult the operator's per-user row first via
+        ``operator_auto_trade_override()`` (single-user MVP — most-recently-
+        updated row is the operator).  Falls through to user_settings
+        and the 10x default ``PRE_TP_LEVERAGE`` has assumed for months.
         """
+        try:
+            from src.api import user_overrides as _uo
+            override = _uo.operator_auto_trade_override()
+            v = override.get("leverage_cap")
+            if isinstance(v, (int, float)) and float(v) > 0:
+                return float(v)
+        except Exception:
+            pass
         try:
             from src import user_settings as _us
             v = float(_us.auto_trade_leverage_cap())

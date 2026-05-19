@@ -170,6 +170,16 @@ def register(
         starting = float(getattr(om, "_starting_equity", 1000.0))
         # 2. Zero broker state.
         om.reset_state()
+        # 2b. Zero the RiskManager's in-memory daily state.  Trade-tab's
+        # ``daily_pnl_usd`` is sourced from ``rm.daily_realised_pnl_usd``
+        # (``src/main.py``) — without this wipe, the dashboard kept
+        # yesterday's number until UTC midnight even after a reset.
+        rm = getattr(engine, "_risk_manager", None)
+        if rm is not None and hasattr(rm, "reset_daily"):
+            try:
+                rm.reset_daily()
+            except Exception:
+                log.exception("paper reset: risk_manager.reset_daily failed")
         # 3. Wipe daily buckets.
         from src.auto_trade import pnl_history as _pnl_history
         buckets_cleared = _pnl_history.reset_mode("paper")

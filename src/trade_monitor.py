@@ -1827,6 +1827,21 @@ class TradeMonitor:
             # (SL ratchet only) so signal-only subscribers still get the
             # protection, but with honest messaging that distinguishes
             # "trigger fired, no fill happened" from "banked + closed."
+            #
+            # Stamp ``partial_close_pct`` even on this path: the signal-level
+            # ``pnl_pct`` blend in ``_set_realized_pnl`` is doctrine-true
+            # (size-weighted blend of pre-TP-banked % and residual %), and
+            # it short-circuits to residual-only when partial_close_pct == 0.
+            # That short-circuit was reporting ~0.00% on signals that, per
+            # doctrine, locked +0.15% (50% × +0.30% banked + 50% × 0% BE
+            # exit on the residual).  The fee math sits below this layer
+            # (trade_records.roi_pct_on_margin); pnl_pct represents the
+            # gross blended move and must reflect what the doctrine actually
+            # executed (SL→BE ratchet IS the residual exit modelled here).
+            sig.partial_close_pct = max(
+                getattr(sig, "partial_close_pct", 0.0) or 0.0,
+                grab_fraction,
+            )
             sig.execution_note += (
                 f" | Pre-TP threshold hit at +{favourable_pct:.2f}% raw, "
                 f"SL→breakeven (no broker partial)"

@@ -135,3 +135,38 @@ class TestEquityPersistenceRegression:
         # broker.current_equity_usd = 1000 + 75 = 1075, regardless of
         # what daily bucket contains.
         assert pm.current_equity_usd == pytest.approx(1075.0)
+
+
+class TestRiskManagerResetDailyOnPaperReset:
+    """Regression for "Paper PnL Today persists after reset" (2026-05-19).
+
+    The Trade tab's ``daily_pnl_usd`` reads from
+    ``RiskManager.daily_realised_pnl_usd`` via ``engine.get_auto_execution_status``.
+    Pre-fix, the paper reset endpoint cleared the PaperOrderManager + on-disk
+    pnl_history but the RiskManager kept yesterday's number until UTC
+    midnight, so the dashboard read stale.  Post-fix, the endpoint also
+    calls ``rm.reset_daily()``.
+    """
+
+    def test_reset_daily_zeros_pnl_and_clears_kill(self):
+        from src.auto_trade.risk_manager import RiskManager
+
+        rm = RiskManager(starting_equity_usd=1000.0)
+        # Simulate a losing day big enough to also trip the kill.
+        from unittest.mock import MagicMock
+        sig = MagicMock()
+        sig.signal_id = "TEST"
+        sig.symbol = "BTCUSDT"
+        rm.register_open(sig)
+        rm.register_close(sig, realised_pnl_usd=-40.0)
+        # Force a check so the daily-loss kill flag flips sticky.
+        rm.check(sig, leverage=1.0)
+        assert rm.daily_realised_pnl_usd == -40.0
+        assert rm.daily_kill_tripped is True
+        assert rm.current_equity_usd == pytest.approx(960.0)
+
+        rm.reset_daily()
+
+        assert rm.daily_realised_pnl_usd == 0.0
+        assert rm.daily_kill_tripped is False
+        assert rm.current_equity_usd == pytest.approx(1000.0)

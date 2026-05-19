@@ -552,9 +552,79 @@ class UserOverridesStore:
             )
             return self.get_auto_trade(user_id)
 
+    def get_operator_auto_trade(self) -> Dict[str, Any]:
+        """Return the operator's effective per-user auto-trade override.
+
+        Single-operator MVP convenience: the engine's PaperOrderManager
+        (and any other engine-side consumer that needs to know "what is
+        the operator's configured leverage / position size") doesn't know
+        which user_id to look up — the per-user overrides table is keyed
+        on user_id, but the paper trader is engine-wide.  Until multi-user
+        execution (Phase 3) attaches a user_id to each signal, we treat
+        the most-recently-updated row as the operator's view.
+
+        Returns an empty dict when no row exists yet — caller should fall
+        back to ``src.user_settings`` engine-global defaults.
+
+        Why this exists (2026-05-19): user reported paper-mode trades
+        opening at 30× margin even though the Auto-trade page leverage
+        slider was 10×.  Root cause was a two-store split — the app
+        writes to ``user_auto_trade_settings`` (per-user, here), the
+        paper trader reads from ``user_settings.json`` (engine-global).
+        This accessor bridges them so paper-mode reflects the app slider.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT * FROM user_auto_trade_settings "
+                "ORDER BY updated_at DESC LIMIT 1"
+            )
+            row = cur.fetchone()
+            return _row_to_partial(row, _AUTO_TRADE_COL_TYPES) if row else {}
+
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton accessor.
+#
+# Mirrors the ``user_settings`` module-level ``_STORE`` pattern so engine-
+# side modules (paper_order_manager, etc.) can look up operator overrides
+# without a constructor-time dependency injection.  ``bootstrap`` registers
+# the store once via ``set_singleton`` after construction.  Tests can
+# register a fresh in-memory store and tear it down via ``clear_singleton``.
+# ---------------------------------------------------------------------------
+
+
+_SINGLETON: Optional["UserOverridesStore"] = None
+
+
+def set_singleton(store: "UserOverridesStore") -> None:
+    global _SINGLETON
+    _SINGLETON = store
+
+
+def clear_singleton() -> None:
+    global _SINGLETON
+    _SINGLETON = None
+
+
+def get_singleton() -> Optional["UserOverridesStore"]:
+    return _SINGLETON
+
+
+def operator_auto_trade_override() -> Dict[str, Any]:
+    """Convenience: ``get_singleton().get_operator_auto_trade()`` with
+    fallback to ``{}`` when the singleton is unset (tests, boot order)."""
+    store = _SINGLETON
+    if store is None:
+        return {}
+    try:
+        return store.get_operator_auto_trade()
+    except Exception:
+        log.exception("operator_auto_trade_override: store read failed")
+        return {}
 
 
 # Column-name → coerce-type tables, used by ``_row_to_partial`` so a

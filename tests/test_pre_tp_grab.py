@@ -347,8 +347,13 @@ async def test_partial_close_skipped_when_broker_disabled(mock_send):
         await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
 
     order_manager.close_partial.assert_not_called()
-    # No partial_close_pct mutation when broker disabled
-    assert sig.partial_close_pct == 0.0
+    # 2026-05-19 update: partial_close_pct IS stamped on the broker-disabled
+    # fallback so the signal-level pnl_pct blend in _set_realized_pnl
+    # reflects the doctrine-true gross return (50% × +0.35% banked + 50%
+    # × 0% BE exit on residual = +0.175%).  Pre-fix, this assertion
+    # required `sig.partial_close_pct == 0.0` and the Signals tab then
+    # showed 0.00% on signals that the doctrine intended to lock +0.15%.
+    assert sig.partial_close_pct == pytest.approx(0.5)
     # But SL still ratchets to breakeven so signal-only subscribers get the
     # downside protection
     assert sig.stop_loss == pytest.approx(sig.entry)
@@ -377,7 +382,13 @@ async def test_partial_close_failure_falls_through_to_sl_only(mock_send):
         fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
 
     assert fired is True  # Pre-TP still fires even when broker fails
-    assert sig.partial_close_pct == 0.0  # No partial was realised
+    # 2026-05-19: partial_close_pct IS stamped on this fallback path so
+    # the signal-level pnl_pct blend reports the doctrine-true gross
+    # return (matches the broker-disabled path above).  The "no broker
+    # fill happened" semantic is now carried by the execution_note
+    # string + the alert wording ("BANKED" must NOT appear) — not by
+    # leaving partial_close_pct at 0.
+    assert sig.partial_close_pct == pytest.approx(0.5)
     assert sig.stop_loss == pytest.approx(sig.entry)  # SL still ratcheted
     active_msg = next(t for c, t in sent if c == "ACTIVE-CHAN")
     assert "PRE-TP TRIGGER" in active_msg or "PRE-TP PARTIAL CLOSE" in active_msg

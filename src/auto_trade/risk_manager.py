@@ -198,6 +198,26 @@ class RiskManager:
         """Owner-driven kill switch — independent of the daily-loss kill."""
         self._manual_pause = bool(paused)
 
+    def reset_daily(self) -> None:
+        """Zero the daily-loss state and equity so a paper-balance reset
+        produces a clean Trade-tab "today" reading immediately.
+
+        The dashboard's ``daily_pnl_usd`` is sourced from
+        ``daily_realised_pnl_usd`` (``src/main.py``) which delegates to
+        ``_daily.realised_pnl_usd`` here.  Without this wipe, the paper
+        reset endpoint cleared the PaperOrderManager + on-disk pnl_history
+        but the in-memory RiskManager kept yesterday's loss number until
+        UTC midnight — Trade tab read stale.  Also clears the sticky daily
+        kill flag and re-anchors ``_current_equity`` to ``_starting_equity``
+        (which itself stays the same — that's the configured paper
+        starting balance, not equity-after-pnl).
+        """
+        now = datetime.now(timezone.utc)
+        self._daily.date_utc = now.strftime("%Y-%m-%d")
+        self._daily.realised_pnl_usd = 0.0
+        self._daily_kill_tripped = False
+        self._current_equity = self._starting_equity
+
     # ------------------------------------------------------------------
     # Gate
     # ------------------------------------------------------------------
@@ -244,13 +264,21 @@ class RiskManager:
             )
 
         # 3. Concurrent-position cap.  User can lower this from the app
-        # via ``/api/settings/auto-trade``; the constructor default is the
-        # engine-side ceiling.
+        # via ``/api/settings/user/auto-trade`` (per-user override) or the
+        # operator via ``/api/settings/auto-trade`` (engine-global).  Per-
+        # user override has priority — matches paper_order_manager's
+        # resolution order.
         try:
-            from src import user_settings as _us
-            _max_concurrent = min(
-                self._max_concurrent, int(_us.auto_trade_max_concurrent())
-            )
+            from src.api import user_overrides as _uo
+            override = _uo.operator_auto_trade_override()
+            v = override.get("max_concurrent_positions")
+            if isinstance(v, int) and v >= 1:
+                _max_concurrent = min(self._max_concurrent, int(v))
+            else:
+                from src import user_settings as _us
+                _max_concurrent = min(
+                    self._max_concurrent, int(_us.auto_trade_max_concurrent())
+                )
         except Exception:
             _max_concurrent = self._max_concurrent
         if len(self._open_signal_ids) >= _max_concurrent:
@@ -270,16 +298,26 @@ class RiskManager:
             )
 
         # 5. Leverage cap.  User-set value (clamped to engine hard cap)
-        # takes precedence over constructor default.
+        # takes precedence over constructor default.  Per-user override
+        # has priority — matches paper_order_manager's resolution order
+        # so paper-mode math and live-mode gate agree on "the leverage
+        # the user picked in the app."
         if leverage is None:
             leverage = float(getattr(signal, "leverage", 1.0) or 1.0)
+        _eff_leverage_cap = self._max_leverage
         try:
-            from src import user_settings as _us
-            _eff_leverage_cap = min(
-                self._max_leverage, float(_us.auto_trade_leverage_cap())
-            )
+            from src.api import user_overrides as _uo
+            override = _uo.operator_auto_trade_override()
+            v = override.get("leverage_cap")
+            if isinstance(v, (int, float)) and float(v) > 0:
+                _eff_leverage_cap = min(self._max_leverage, float(v))
+            else:
+                from src import user_settings as _us
+                _eff_leverage_cap = min(
+                    self._max_leverage, float(_us.auto_trade_leverage_cap())
+                )
         except Exception:
-            _eff_leverage_cap = self._max_leverage
+            pass
         if leverage > _eff_leverage_cap:
             return self._block(
                 signal,
