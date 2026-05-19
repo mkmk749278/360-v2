@@ -257,6 +257,42 @@ async def test_binance_non_2xx_returns_typed_http_error_with_body() -> None:
     assert response.binance_status == 401
     # Body preserved so caller can switch on Binance error code.
     assert response.binance_body == {"code": -2014, "msg": "Invalid API-key"}
+    # 2026-05-19: message now embeds the Binance code + msg so the
+    # FSM's rejection log line names the actual failure instead of
+    # the generic ``Binance returned 400``.
+    assert "-2014" in response.error_message
+    assert "Invalid API-key" in response.error_message
+
+
+@pytest.mark.asyncio
+async def test_binance_4xx_with_non_dict_body_falls_back_to_generic_message():
+    """Binance API has always returned dict errors, but defensively
+    handle ``binance_body`` being a string / list / None — fall back
+    to the generic shape so callers still get a meaningful message."""
+    encrypted_raw, dek = _make_real_encrypted_blob(b"secret")
+    blob = _make_blob(encrypted_secret=encrypted_raw)
+    fake_kms = MagicMock()
+    fake_kms.decrypt.return_value = dek
+    kms_client._client = fake_kms
+
+    with patch.object(
+        firestore_keystore, "get_key_blob", return_value=blob,
+    ), patch.object(
+        handler, "_signed_call", new_callable=AsyncMock,
+    ) as mock_signed:
+        mock_signed.return_value = (502, "<html>Bad Gateway</html>")
+        response = await handler.handle_request(protocol.SignRequest(
+            id="x",
+            verb="binance_signed_get",
+            firebase_uid="test-uid",
+            path="/fapi/v2/balance",
+        ))
+    assert response.error_code == protocol.ERR_BINANCE_HTTP_ERROR
+    assert response.binance_status == 502
+    # Body preserved (even when malformed) for caller debugging.
+    assert response.binance_body == "<html>Bad Gateway</html>"
+    # Message falls back to generic when body isn't a dict.
+    assert response.error_message == "Binance returned 502"
 
 
 # ---------------------------------------------------------------------------

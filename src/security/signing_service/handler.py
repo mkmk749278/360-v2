@@ -270,10 +270,34 @@ async def handle_request(
     # Map Binance non-2xx to ERR_BINANCE_HTTP_ERROR with the status +
     # body preserved so the caller can inspect.
     if not (200 <= binance_status < 300):
+        # Extract Binance's typed code + msg from the response body so
+        # the diagnostic message names the actual failure (e.g.
+        # ``code=-2019 msg='Margin is insufficient'``) instead of the
+        # generic ``Binance returned 400``.  Binance's error JSON is
+        # always ``{"code": <int>, "msg": <str>}`` for 4xx responses;
+        # 5xx may differ but the same key pair is conventional.
+        # Falls back to the generic shape when the body isn't a dict.
+        bcode = None
+        bmsg = None
+        if isinstance(binance_body, dict):
+            bcode = binance_body.get("code")
+            bmsg = binance_body.get("msg") or binance_body.get("message")
+        if bcode is not None or bmsg is not None:
+            message = (
+                f"Binance returned {binance_status} "
+                f"(code={bcode} msg={bmsg!r})"
+            )
+        else:
+            message = f"Binance returned {binance_status}"
+        # B18 safety: Binance's response body never contains secret
+        # material (the API secret only ever flows in the request HMAC,
+        # not in any response).  Therefore embedding ``code`` + ``msg``
+        # here cannot leak the secret per the hard limit on secret
+        # logging in OWNER_BRIEF.
         return SignResponse.error_reply(
             request.id,
             code=ERR_BINANCE_HTTP_ERROR,
-            message=f"Binance returned {binance_status}",
+            message=message,
             binance_status=binance_status,
             binance_body=binance_body,
         )
