@@ -141,10 +141,20 @@ async def serve(socket_path: Optional[str] = None) -> asyncio.AbstractServer:
         await _handle_connection(reader, writer, session=session)
 
     server = await asyncio.start_unix_server(connection_handler, path=path)
-    # 0660 = rw for owner + group, no world access.  Engine user must
-    # be in the socket's group to connect.
+    # 0666 = rw for everyone (within this container only).  The B18
+    # security boundary is the CONTAINER, not the Linux user — see
+    # OWNER_BRIEF §3.9 + docker-compose.yml's signing_service comment.
+    # In the deployment topology, only two processes can ever reach
+    # this socket: the engine main process (via the shared volume
+    # mount) and the signing service itself (the listener).  Both
+    # run inside Lumin's deployment.  Granting 0666 lets the engine
+    # connect regardless of which Linux user it runs as (the
+    # Dockerfile sets that to ``appuser``; this signing container
+    # runs as root by compose override).  A future hardening with
+    # matched UIDs across containers can tighten to 0660 + group
+    # ownership.
     try:
-        os.chmod(path, 0o660)
+        os.chmod(path, 0o666)
     except OSError as exc:
         log.warning("could not chmod socket {}: {}", path, exc)
     log.info("signing service listening on {}", path)

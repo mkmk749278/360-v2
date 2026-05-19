@@ -97,6 +97,17 @@ services:
     container_name: 360scalp-v2-signing
     env_file: .env
     restart: always
+    # Run as root inside the container so it can bind the Unix
+    # socket on the named volume.  The Dockerfile's USER directive
+    # makes the default user ``appuser``, but Docker named volumes
+    # mount as root:root with mode 0755 — appuser can't write +
+    # bind() fails with EACCES.  Override to root here; the
+    # socket gets chmod 0666 (see server.py) so the engine's
+    # appuser can still connect.  The security boundary is the
+    # container, not the Linux user (per OWNER_BRIEF §3.9 — the
+    # signing service's isolation comes from its separate process /
+    # KMS IAM, not from running as a different Linux user).
+    user: "0:0"
     networks:
       - 360scalp-v2-net
     volumes:
