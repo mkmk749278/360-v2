@@ -132,21 +132,56 @@ class SymbolNotInUserPreference(TripwireViolation):
 
 
 def _load_symbol_allowlist() -> Set[str]:
-    """Read the symbol allowlist from env at startup.
+    """Resolve the engine-wide symbol allowlist.
 
-    ``TRIPWIRE_SYMBOL_ALLOWLIST`` is a comma-separated list of
-    Binance Futures symbols (e.g. ``BTCUSDT,ETHUSDT,...``).  Missing
-    or empty env defaults to ALL Lumin engine pairs — but in solo
-    deployment this MUST be set so a code drift can't accidentally
-    widen the allowlist.
+    Sources, in priority order:
 
-    Empty (after parsing) = block ALL orders.  Safer default than
-    accept-all when misconfigured.
+    1. ``TRIPWIRE_SYMBOL_ALLOWLIST`` env (comma-separated symbols) —
+       operator hard-narrow.  When set, the value is the cap; even
+       if the engine's pair universe contains more symbols, only the
+       env list trades.  Doctrine-strict mode for paranoid deployments.
+    2. The live ``PairManager`` singleton's ``futures_symbols`` — the
+       engine's actual scan universe (top-75 USDT-M futures, evolves
+       as Binance lists / delists / volume shifts).  When the env is
+       unset, the allowlist auto-tracks the engine.  Maintains the
+       "every paid signal is potentially executable" doctrine without
+       requiring operator env edits each time the universe drifts.
+    3. Empty set — safe default when neither is available (boot order,
+       test harness).  Every order blocks until one of the above is
+       wired.
+
+    B18 doctrine change (2026-05-19, PR G owner-sign-off): the prior
+    rule was env-only with empty = block-all.  That produced stale
+    coverage gaps whenever PairManager promoted / demoted a pair
+    without an operator env edit.  The new rule auto-tracks PairManager
+    (whose pair-list updates flow through the same GitHub Actions
+    deployment pipeline as the env, so the audit-trail surface is
+    unchanged) while preserving the env override for operator
+    hard-narrow.  Dollar blast-radius cap is unchanged
+    (MAX_POSITION_USD × MAX_CONCURRENT × rate_limit ≈ $2500/user/min).
     """
     raw = os.environ.get("TRIPWIRE_SYMBOL_ALLOWLIST", "").strip()
-    if not raw:
+    if raw:
+        return {s.strip().upper() for s in raw.split(",") if s.strip()}
+    # Env unset → fall back to the engine's live pair universe.
+    try:
+        from src import pair_manager as _pair_manager_module
+        pm = _pair_manager_module.get_singleton()
+        if pm is None:
+            return set()
+        # futures_symbols returns a list of Binance futures pair codes
+        # (e.g. ["BTCUSDT", "ETHUSDT", ...]) currently in the engine's
+        # scan universe.  PairManager refreshes this periodically via
+        # ``refresh_top50_futures`` so newly-promoted pairs appear
+        # without an engine restart.
+        return {s.upper() for s in pm.futures_symbols}
+    except Exception:
+        # Defensive: PairManager not initialised, or read failed mid-
+        # refresh.  Block-all rather than risk a false widen on
+        # transient errors — the env override remains the explicit
+        # path to a known-good list.
+        log.exception("Failed to resolve PairManager allowlist fallback")
         return set()
-    return {s.strip().upper() for s in raw.split(",") if s.strip()}
 
 
 def assert_symbol_allowed(
