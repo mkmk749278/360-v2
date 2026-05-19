@@ -202,10 +202,20 @@ async def dispatch_signal_to_active_users(
             # wiring) + tripwires (PR-8) reach here.  Log + count
             # the rejection but don't raise — other users may still
             # have a valid path.
+            #
+            # ``str(exc)`` carries the full diagnostic when the
+            # exception is an ``OrderPlacementError`` subclass —
+            # specifically the Binance error code + status + message
+            # for ``OrderRejectedByBinance`` (e.g. ``code=-2010
+            # status=400 message=Account has insufficient balance for
+            # requested action``).  Without it, the log only shows
+            # the exception class name and operators can't tell
+            # margin-insufficiency from precision-too-high from
+            # leverage-not-set.  PR-G follow-up 2026-05-19.
             log.info(
                 "signal_dispatch: rejected uid={} signal_id={} symbol={} "
-                "reason={}",
-                uid, signal_id, symbol, type(exc).__name__,
+                "reason={} detail={!r}",
+                uid, signal_id, symbol, type(exc).__name__, str(exc),
             )
             return False
 
