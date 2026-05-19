@@ -938,6 +938,32 @@ class SignalRouter:
             signal.direction.value,
         )
 
+        # ── Server-side execution dispatch (PR-A of the wiring follow-ups) ──
+        # Fan the signal out to every user with a connected Binance
+        # key.  Each per-user FSM call is independent: tripwire
+        # rejections (symbol allowlist, position cap, etc.) and
+        # transient failures (KMS outage) are logged inside the
+        # dispatcher and don't propagate.  No-op when no users have
+        # connected (cold deploy / legacy-only path).
+        try:
+            from src.execution import signal_dispatch as _sd
+
+            await _sd.dispatch_signal_to_active_users(
+                signal_id=signal.signal_id,
+                symbol=signal.symbol,
+                direction=signal.direction.value,
+                entry_price=float(signal.entry),
+                sl_price=float(signal.stop_loss),
+                tp1_price=float(signal.tp1),
+                tp2_price=float(signal.tp2),
+                tp3_price=float(signal.tp3),
+            )
+        except Exception:
+            log.exception(
+                "Server-side dispatch raised — Telegram delivery already "
+                "succeeded; subscribers see the signal regardless"
+            )
+
         # ── Latency tracking ─────────────────────────────────────────────────
         signal.posted_at = time.time()
         signal.dispatch_timestamp = datetime.now(timezone.utc)
