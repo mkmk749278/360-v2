@@ -116,6 +116,16 @@ class GlobalKillSwitchEngaged(TripwireViolation):
     users until manual operator re-enable."""
 
 
+class SymbolNotInUserPreference(TripwireViolation):
+    """Symbol passes the engine-wide allowlist but the user has
+    explicitly excluded it from their per-user symbol preference.
+
+    Distinct from :class:`SymbolNotAllowed` — this is a USER decision,
+    not an engine-wide blast-radius defence.  Lower-severity (operator
+    doesn't need to act); the FSM just skips the order and logs.  No
+    kill-switch engagement on this trip."""
+
+
 # ---------------------------------------------------------------------------
 # Symbol allowlist
 # ---------------------------------------------------------------------------
@@ -155,6 +165,112 @@ def assert_symbol_allowed(
             f"symbol {symbol!r} is not on the tripwire allowlist "
             f"(allowlist size: {len(allowlist)})"
         )
+
+
+def assert_symbol_in_user_preference(
+    symbol: str,
+    firebase_uid: str,
+) -> None:
+    """Raise :class:`SymbolNotInUserPreference` if the user has set a
+    symbol preference and this symbol is not in it.
+
+    Per-user narrowing of the engine-wide allowlist (PR E 2026-05-19).
+    Default behaviour: when the user has no preference set (NULL row,
+    empty resolution), this is a no-op — order proceeds.  When the
+    user has set an explicit list, ``symbol`` must appear in it.  The
+    empty-list case ("user explicitly chose nothing") blocks every
+    order — that's the doctrine-strict opt-out path.
+
+    Soft-failure semantics: if the user-overrides store isn't wired
+    (test harnesses, engine boot order), default to allowing through.
+    The engine-wide ``assert_symbol_allowed`` is still the hard
+    security floor — this gate only narrows.
+    """
+    try:
+        from src.api import user_overrides as _uo
+        from src.api import users as _users_module
+    except Exception:
+        return  # boot order — fall through, engine-wide cap still applies
+
+    store = _uo.get_singleton()
+    user_store = _users_module.get_singleton() if hasattr(
+        _users_module, "get_singleton"
+    ) else None
+    if store is None or user_store is None:
+        return
+
+    try:
+        user = user_store.get_by_firebase_uid(firebase_uid)
+    except Exception:
+        return
+    if user is None or user.user_id is None:
+        return
+
+    try:
+        overrides = store.get_auto_trade(user.user_id)
+    except Exception:
+        return
+
+    pref = overrides.get("symbol_preference")
+    # pref is None (NULL row / no preference) → default = all engine-allowed.
+    # pref is a list (possibly empty) → must contain the symbol.
+    if pref is None:
+        return
+    if not isinstance(pref, list):
+        return  # defensive — corrupted row, fall through
+    if symbol.upper() not in {s.upper() for s in pref}:
+        raise SymbolNotInUserPreference(
+            f"symbol {symbol!r} is not in user {firebase_uid!r}'s "
+            f"symbol preference (pref size: {len(pref)})"
+        )
+
+
+def effective_allowed_symbols_for_user(
+    firebase_uid: str,
+) -> list[str]:
+    """Return the sorted intersection of the engine-wide allowlist and
+    the user's symbol preference.
+
+    Used by ``/api/auto-trade/runtime-status`` so the app's footnote
+    accurately shows "what will actually trade for me" rather than
+    just the engine cap.  Default = engine-wide list when the user has
+    no preference set.
+
+    Soft-failure semantics match ``assert_symbol_in_user_preference``
+    — if the override store isn't wired, return the engine-wide list.
+    """
+    engine_allowlist = _load_symbol_allowlist()
+
+    try:
+        from src.api import user_overrides as _uo
+        from src.api import users as _users_module
+    except Exception:
+        return sorted(engine_allowlist)
+
+    store = _uo.get_singleton()
+    user_store = _users_module.get_singleton() if hasattr(
+        _users_module, "get_singleton"
+    ) else None
+    if store is None or user_store is None:
+        return sorted(engine_allowlist)
+
+    try:
+        user = user_store.get_by_firebase_uid(firebase_uid)
+    except Exception:
+        return sorted(engine_allowlist)
+    if user is None or user.user_id is None:
+        return sorted(engine_allowlist)
+
+    try:
+        overrides = store.get_auto_trade(user.user_id)
+    except Exception:
+        return sorted(engine_allowlist)
+
+    pref = overrides.get("symbol_preference")
+    if pref is None or not isinstance(pref, list):
+        return sorted(engine_allowlist)
+    pref_set = {s.upper() for s in pref if isinstance(s, str)}
+    return sorted(engine_allowlist & pref_set)
 
 
 # ---------------------------------------------------------------------------
