@@ -112,26 +112,53 @@ def reset_cache_for_test() -> None:
     _cache = None
 
 
-def _compute_qty_split(entry_price: float) -> Tuple[float, float, float, float]:
+def _compute_qty_split(
+    symbol: str, entry_price: float,
+) -> Tuple[float, float, float, float]:
     """Return ``(total_qty, tp1_qty, tp2_qty, tp3_qty)`` for a
-    $500-notional position at the given entry price.
+    $500-notional position on ``symbol`` at the given entry price.
 
-    Rounded to 8 decimal places (well beyond any Binance symbol's
-    LOT_SIZE precision).  Per-symbol precision adjustment is
-    Binance's job — orders that violate LOT_SIZE get rejected with
-    a typed error and surface via the per-user circuit breaker.
+    Per-symbol precision enforced via :mod:`symbol_filters`
+    (LOT_SIZE.stepSize floor + MIN_NOTIONAL guard).  Without this
+    rounding, Binance rejects every order on symbols with stepSize
+    ≥ 0.001 (most non-major pairs) with ``code=-1111 "Precision is
+    over the maximum defined for this asset"``.
 
-    Defensive: returns all zeros when entry_price <= 0 so a
-    malformed signal can't trigger a zero-divide.
+    The total_qty is floored to stepSize.  Each TP leg is also
+    floored to stepSize so partial closes don't violate precision.
+    TP3 then absorbs the rounding residual so the three TPs sum to
+    ≤ total_qty (any micro-residual stays open as dust — closes on
+    SL or expiry).
+
+    Defensive: returns all zeros when entry_price <= 0 OR when the
+    rounded total_qty fails MIN_NOTIONAL (the order would be rejected
+    by Binance with -4164; better to skip cleanly than to fire a
+    doomed order through the FSM + circuit-breaker chain).
     """
+    from src.execution import symbol_filters as _sf
+
     if entry_price <= 0:
         return (0.0, 0.0, 0.0, 0.0)
-    total_qty = round(_DEFAULT_NOTIONAL_USD / entry_price, 8)
-    tp1 = round(total_qty * _TP1_FRACTION, 8)
-    tp2 = round(total_qty * _TP2_FRACTION, 8)
-    # tp3 takes the rounding remainder so the three TP qtys
-    # sum exactly to total_qty (no orphan dust).
-    tp3 = round(total_qty - tp1 - tp2, 8)
+
+    raw_qty = _DEFAULT_NOTIONAL_USD / entry_price
+    total_qty = _sf.round_qty(symbol, raw_qty)
+    if total_qty <= 0:
+        return (0.0, 0.0, 0.0, 0.0)
+    if not _sf.meets_min_notional(symbol, total_qty, entry_price):
+        log.info(
+            "signal_dispatch: symbol={} qty={:.8f} price={:.8f} below "
+            "MIN_NOTIONAL after LOT_SIZE rounding — skipping",
+            symbol, total_qty, entry_price,
+        )
+        return (0.0, 0.0, 0.0, 0.0)
+
+    tp1 = _sf.round_qty(symbol, total_qty * _TP1_FRACTION)
+    tp2 = _sf.round_qty(symbol, total_qty * _TP2_FRACTION)
+    # tp3 absorbs the rounding residual; floored again so it stays
+    # on a stepSize boundary.  May be 0 if total_qty is a small
+    # number of stepSize units — that's fine; FSM treats tp3_qty=0
+    # as "no tp3 leg" and the residual rides to SL/pre-TP.
+    tp3 = _sf.round_qty(symbol, total_qty - tp1 - tp2)
     return (total_qty, tp1, tp2, tp3)
 
 
@@ -171,7 +198,7 @@ async def dispatch_signal_to_active_users(
     if not uids:
         return 0
 
-    total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(entry_price)
+    total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(symbol, entry_price)
     if total_qty <= 0:
         log.warning(
             "signal_dispatch: zero qty for signal_id={} symbol={} entry={} — skipping",

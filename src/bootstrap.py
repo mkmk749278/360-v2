@@ -292,6 +292,37 @@ class Bootstrap:
         if getattr(engine, "_oi_poller", None) is not None:
             tasks.append(asyncio.create_task(engine._oi_poller.start()))
 
+        # Binance symbol-filter cache (2026-05-19) — populates the
+        # LOT_SIZE.stepSize / PRICE_FILTER.tickSize / MIN_NOTIONAL
+        # cache used by signal_dispatch to round qty to per-symbol
+        # precision.  Without this every order on a non-major pair
+        # gets rejected by Binance with -1111.
+        from src.execution import symbol_filters as _symbol_filters
+
+        async def _kick_off_symbol_filters() -> None:
+            # Refresh once synchronously at boot so the cache is hot
+            # before the first signal fires.  Then let the periodic
+            # loop take over.
+            try:
+                count = await _symbol_filters.refresh_filters()
+                log.info(
+                    "Symbol-filter cache initialised: {} symbols", count,
+                )
+            except Exception as exc:
+                log.warning(
+                    "Symbol-filter initial refresh failed: {}; "
+                    "periodic loop will retry",
+                    exc,
+                )
+            await _symbol_filters.run_periodic_refresh()
+
+        tasks.append(
+            asyncio.create_task(
+                _kick_off_symbol_filters(),
+                name="symbol_filters_refresh",
+            )
+        )
+
         # Lumin app HTTP API — opt-in via API_ENABLED env var.  Imported
         # lazily so engines that don't enable it don't pay the import cost
         # of FastAPI / uvicorn / pydantic-v2.

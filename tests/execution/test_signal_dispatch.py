@@ -19,13 +19,27 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from src.execution import signal_dispatch
+from src.execution import symbol_filters
 
 
 @pytest.fixture(autouse=True)
 def _reset_cache():
     signal_dispatch.reset_cache_for_test()
+    # Seed the symbol-filter cache so ``_compute_qty_split`` rounds
+    # cleanly in tests.  BTCUSDT stepSize 0.001 + tickSize 0.10 matches
+    # Binance's actual values closely enough for assertion math.
+    symbol_filters._set_cache_for_test({
+        "BTCUSDT": symbol_filters.SymbolFilters(
+            symbol="BTCUSDT",
+            step_size=0.001,
+            tick_size=0.10,
+            min_qty=0.001,
+            min_notional=5.0,
+        ),
+    })
     yield
     signal_dispatch.reset_cache_for_test()
+    symbol_filters.reset_for_test()
 
 
 # ---------------------------------------------------------------------------
@@ -37,19 +51,24 @@ def test_qty_split_sums_to_total_no_dust() -> None:
     """The three TP qtys must sum EXACTLY to total_qty — Binance
     rejects orders that don't reconcile, and dust orphan would
     block the residual from closing cleanly."""
-    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split(29000.0)
+    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split("BTCUSDT", 29000.0)
     assert tp1 + tp2 + tp3 == total
 
 
 def test_qty_split_at_typical_btc_price() -> None:
-    """$500 notional / $29000 entry ≈ 0.01724 BTC.  30/40/30 split
-    on that.  Verify the numbers are in the right ballpark."""
-    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split(29000.0)
-    assert abs(total - 0.01724138) < 1e-6
-    assert abs(tp1 / total - 0.30) < 0.001
-    assert abs(tp2 / total - 0.40) < 0.001
-    # tp3 carries the rounding residue so we don't assert exact 0.30
-    # — we already verified sums match in the test above.
+    """$500 notional / $29000 entry ≈ 0.01724 BTC, then floored to
+    BTCUSDT's stepSize=0.001 → 0.017 BTC.  The TP split is also
+    floored to stepSize so each leg lands on a Binance-valid qty.
+    The 30/40/30 ratio is approximate after rounding (especially on
+    pairs with coarse stepSize like DOGEUSDT stepSize=1)."""
+    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split("BTCUSDT", 29000.0)
+    # 0.5 step-units of slack on the total — actual value depends
+    # on stepSize floor behaviour.
+    assert abs(total - 0.017) < 0.001
+    # TP fractions in the right ballpark, allowing for stepSize floor.
+    assert abs(tp1 / total - 0.30) < 0.05
+    assert abs(tp2 / total - 0.40) < 0.05
+    # Sums-to-total is the doctrine guarantee covered separately.
 
 
 @pytest.mark.parametrize("bad_price", [0.0, -1.0, -29000.0])
@@ -57,7 +76,7 @@ def test_qty_split_defensive_on_invalid_price(bad_price: float) -> None:
     """Defensive: malformed signal with non-positive entry returns
     all zeros.  Caller (dispatcher) treats zero total_qty as
     'skip this signal' rather than placing a zero order."""
-    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split(bad_price)
+    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split("BTCUSDT", bad_price)
     assert total == 0.0
     assert tp1 == 0.0
     assert tp2 == 0.0
