@@ -24,11 +24,16 @@ def main() -> int:
     except KeyboardInterrupt:
         return 0
     except Exception as exc:  # pragma: no cover - top-level guard
-        # Last-resort traceback printer so a misconfigured operator
-        # setup (missing env vars, bad SA JSON path, no KMS IAM)
-        # surfaces a clear error in systemd's journal rather than
-        # silently restarting in a loop.
-        print(f"signing service failed to start: {exc}", file=sys.stderr)
+        # Print BOTH the message AND the full traceback so a
+        # misconfigured operator setup (missing env vars, bad SA JSON
+        # path, no KMS IAM, socket-bind blocked by AppArmor, etc.)
+        # surfaces enough detail in systemd's / docker-compose's
+        # journal to actually diagnose, not just a one-line "failed
+        # to start" with the error class swallowed.
+        import traceback
+
+        print(f"signing service failed to start: {exc!r}", file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return 1
 
 
