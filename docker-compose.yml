@@ -6,6 +6,12 @@ volumes:
   360scalp-v2-logs:
   360scalp-v2-data:
   360scalp-v2-redis:
+  # Shared volume for the signing-service Unix socket (PR-4 + #444
+  # wiring).  Engine main process connects to /var/run/lumin/signing.sock
+  # via this volume; the signing_service container is the only writer
+  # — mode 0660 on the socket so only the engine user can read.
+  # See OWNER_BRIEF §3.9 + B18 for the custody-boundary doctrine.
+  360scalp-v2-signing-socket:
 
 services:
   redis:
@@ -30,9 +36,14 @@ services:
     volumes:
       - 360scalp-v2-logs:/app/logs
       - 360scalp-v2-data:/app/data
+      # Shared with signing_service for the Unix socket.
+      - 360scalp-v2-signing-socket:/var/run/lumin
     environment:
       - REDIS_URL=redis://redis:6379/0
       - MPLCONFIGDIR=/tmp/matplotlib
+      # Path the engine's SigningClient connects to.  Must match
+      # the signing_service container's bind path.
+      - SIGNING_SERVICE_SOCKET_PATH=/var/run/lumin/signing.sock
       # Phase A pre-TP grab — enabled in production after PR #281 ship.
       # Fires only on signals matching all gates (regime allowlist,
       # setup blacklist, age window, threshold).  See OWNER_BRIEF B11.
@@ -63,3 +74,40 @@ services:
       # Longer than V1 — V2 needs time to seed 50 pairs × 5 timeframes
       start_period: 60s
       retries: 3
+
+  signing_service:
+    # Separate process boundary for the Binance-key signing chain
+    # (OWNER_BRIEF §3.9 + B18 — the Lumin equivalent of 3Commas'
+    # post-breach Sign Center pattern).  Same image as the engine
+    # (re-uses the requirements + src layout) but runs only
+    # ``python -m src.security.signing_service`` — no scanner, no
+    # router, no API.  Plaintext API secrets materialise ONLY
+    # inside this container's process memory; the engine container
+    # has no GCP KMS access path of its own (it talks to this
+    # container via the Unix socket).
+    build: .
+    container_name: 360scalp-v2-signing
+    env_file: .env
+    restart: always
+    networks:
+      - 360scalp-v2-net
+    volumes:
+      # Mount the same /app/data as the engine so the
+      # firebase-service-account.json is reachable at the same path
+      # the env var points to.
+      - 360scalp-v2-data:/app/data
+      # The Unix socket the engine connects to.  This container is
+      # the listener; the engine is the client.
+      - 360scalp-v2-signing-socket:/var/run/lumin
+    environment:
+      # Override the default path so the socket lands on the
+      # shared volume rather than the container's own /var/run/.
+      - SIGNING_SERVICE_SOCKET_PATH=/var/run/lumin/signing.sock
+    command: python -m src.security.signing_service
+    mem_limit: 256m
+    cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
