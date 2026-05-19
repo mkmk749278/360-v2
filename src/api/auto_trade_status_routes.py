@@ -227,8 +227,21 @@ def register(
         # Symbol allowlist — re-read at request time so an operator
         # env-var change doesn't require an app refetch + the value
         # the app sees matches what the next order will be checked
-        # against.
+        # against.  ``allowed_symbols`` is the engine-wide cap;
+        # ``effective_allowed_symbols`` is the intersection with this
+        # user's symbol_preference (defaults to engine-wide when the
+        # user has set no preference).
         allowlist = sorted(_tripwires._load_symbol_allowlist())
+        try:
+            effective = _tripwires.effective_allowed_symbols_for_user(
+                firebase_uid
+            )
+        except Exception:
+            log.exception(
+                "runtime_status: effective allowlist resolution failed uid={}",
+                firebase_uid,
+            )
+            effective = allowlist
 
         armed = (
             globally_enabled
@@ -243,6 +256,7 @@ def register(
             "binance_key_connected": binance_key_connected,
             "user_mode": user_mode,
             "allowed_symbols": allowlist,
+            "effective_allowed_symbols": effective,
             "armed": armed,
         }
 

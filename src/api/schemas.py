@@ -503,6 +503,17 @@ class AutoTradeSettings(BaseModel):
         ge=1,
         description="Maximum concurrent open positions across all symbols.",
     )
+    symbol_preference: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "User-chosen subset of the engine-wide symbol allowlist.  "
+            "``None`` means 'all engine-allowed symbols' (default — no "
+            "narrowing).  Non-empty list means 'only these symbols may "
+            "auto-trade for me'.  The engine intersects this with its "
+            "own ``TRIPWIRE_SYMBOL_ALLOWLIST`` cap — per-user values can "
+            "only narrow, never widen, per OWNER_BRIEF B18."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

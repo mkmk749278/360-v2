@@ -659,10 +659,14 @@ def _enforce_safety_gates(
                 f"user {firebase_uid} is auto-disabled"
             )
 
-    # 4 — symbol allowlist.  Reads env at call-time so a deploy that
-    # narrows the allowlist takes effect on the next signal without
-    # an engine restart.
+    # 4a — symbol allowlist (engine-wide).  Reads env at call-time
+    # so a deploy that narrows the allowlist takes effect on the next
+    # signal without an engine restart.
     _tripwires.assert_symbol_allowed(symbol)
+    # 4b — per-user symbol preference (PR E 2026-05-19).  User can
+    # narrow (never widen) the engine-wide list via the app's symbol
+    # picker.  No preference set (NULL) → fall through.
+    _tripwires.assert_symbol_in_user_preference(symbol, firebase_uid)
 
     # 5 + 6 — circuit breakers.  These also fire Telegram alerts on
     # first trip via PR-11's spawn pattern.

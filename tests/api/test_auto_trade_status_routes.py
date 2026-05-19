@@ -214,6 +214,42 @@ def test_runtime_status_reads_symbol_allowlist_from_env(
     assert body["allowed_symbols"] == [
         "BNBUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
     ]
+    # Without a per-user preference set, effective = engine cap.
+    assert body["effective_allowed_symbols"] == body["allowed_symbols"]
+
+
+def test_runtime_status_effective_intersects_user_pref(
+    monkeypatch,
+) -> None:
+    """When the user sets a symbol_preference, the runtime status
+    surfaces the intersection so the app footnote shows the user's
+    actual tradable set, not just the engine cap."""
+    from src.api import user_overrides as _uo
+    from src.api import users as _users_module
+
+    monkeypatch.setenv(
+        "TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT",
+    )
+    fake_user = MagicMock(user_id=1)
+    fake_user_store = MagicMock()
+    fake_user_store.get_by_firebase_uid = MagicMock(return_value=fake_user)
+    monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
+
+    fake_overrides_store = MagicMock()
+    fake_overrides_store.get_auto_trade = MagicMock(
+        return_value={"symbol_preference": ["BTCUSDT", "SOLUSDT"]}
+    )
+    monkeypatch.setattr(
+        _uo, "_SINGLETON", fake_overrides_store, raising=False,
+    )
+
+    app = _build_app(identity=_firebase_user(uid="fb-prefs"))
+    client = TestClient(app)
+    body = client.get("/api/auto-trade/runtime-status").json()
+    assert body["allowed_symbols"] == [
+        "BNBUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
+    ]
+    assert body["effective_allowed_symbols"] == ["BTCUSDT", "SOLUSDT"]
 
 
 def test_runtime_status_armed_when_all_gates_green(monkeypatch) -> None:

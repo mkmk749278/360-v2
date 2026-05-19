@@ -158,6 +158,68 @@ def test_auto_trade_explicit_none_clears(store: UserOverridesStore) -> None:
 
 
 # ---------------------------------------------------------------------------
+# symbol_preference (per-user picker — PR E)
+# ---------------------------------------------------------------------------
+
+
+def test_symbol_preference_persists_as_canonical_uppercase(
+    store: UserOverridesStore,
+) -> None:
+    """Mixed-case input → stored as sorted unique uppercase list."""
+    out = store.update_auto_trade(
+        1, {"symbol_preference": ["btcusdt", "ETHUSDT", "btcusdt"]}
+    )
+    assert out["symbol_preference"] == ["BTCUSDT", "ETHUSDT"]
+
+
+def test_symbol_preference_rejects_non_usdt_symbols(
+    store: UserOverridesStore,
+) -> None:
+    """Doctrine: only USDT-M futures are tradable; reject foreign tokens."""
+    out = store.update_auto_trade(
+        1, {"symbol_preference": ["BTCUSDT", "ETHBTC", "INVALID", "SOLUSDT"]}
+    )
+    assert out["symbol_preference"] == ["BTCUSDT", "SOLUSDT"]
+
+
+def test_symbol_preference_empty_list_persists_as_explicit_block_all(
+    store: UserOverridesStore,
+) -> None:
+    """Empty list ≠ None.  Empty means "user explicitly chose nothing —
+    block ALL orders".  None means "no preference — fall through to
+    engine-wide allowlist".  Both code paths must be storable."""
+    out = store.update_auto_trade(1, {"symbol_preference": []})
+    assert out["symbol_preference"] == []
+
+
+def test_symbol_preference_none_clears(store: UserOverridesStore) -> None:
+    """Passing None drops the column → defaults back to engine-wide
+    allowlist for this user."""
+    store.update_auto_trade(1, {"symbol_preference": ["BTCUSDT"]})
+    out = store.update_auto_trade(1, {"symbol_preference": None})
+    assert "symbol_preference" not in out
+
+
+def test_symbol_preference_survives_other_field_updates(
+    store: UserOverridesStore,
+) -> None:
+    """Setting leverage_cap doesn't clobber a previously-set symbol_preference."""
+    store.update_auto_trade(1, {"symbol_preference": ["BTCUSDT", "ETHUSDT"]})
+    out = store.update_auto_trade(1, {"leverage_cap": 10.0})
+    assert out["symbol_preference"] == ["BTCUSDT", "ETHUSDT"]
+    assert out["leverage_cap"] == 10.0
+
+
+def test_symbol_preference_round_trips_via_get(
+    store: UserOverridesStore,
+) -> None:
+    """JSON column round-trips through get_auto_trade as a list[str]."""
+    store.update_auto_trade(1, {"symbol_preference": ["BTCUSDT", "SOLUSDT"]})
+    out = store.get_auto_trade(1)
+    assert out["symbol_preference"] == ["BTCUSDT", "SOLUSDT"]
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 

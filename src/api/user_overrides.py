@@ -107,6 +107,7 @@ _AUTO_TRADE_KEYS = frozenset({
     "position_size_pct",
     "leverage_cap",
     "max_concurrent_positions",
+    "symbol_preference",
 })
 
 _LEVERAGE_HARD_CAP: float = 30.0  # B12
@@ -159,6 +160,7 @@ CREATE TABLE IF NOT EXISTS user_auto_trade_settings (
     position_size_pct        REAL,
     leverage_cap             REAL,
     max_concurrent_positions INTEGER,
+    symbol_preference        TEXT,     -- JSON list[str] or NULL = all
     updated_at               TEXT    NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
@@ -293,6 +295,23 @@ def _coerce_auto_trade(raw: Dict[str, Any]) -> Dict[str, Any]:
         elif key == "max_concurrent_positions":
             if isinstance(value, int) and value >= 1:
                 out[key] = int(value)
+        elif key == "symbol_preference":
+            # Accept list[str] only.  Empty list → store as ``[]`` to
+            # mean "explicitly chose nothing" (which the FSM treats as
+            # "block ALL orders for this user").  This is the doctrine-
+            # strict opt-out path — distinct from ``None`` which means
+            # "no preference set, fall through to engine-wide allowlist".
+            if isinstance(value, list):
+                cleaned = []
+                for sym in value:
+                    if isinstance(sym, str):
+                        tok = sym.strip().upper()
+                        # USDT-M futures symbol shape: alphanum + ends with USDT.
+                        # Be permissive on character set (Binance lists like
+                        # "1000BONKUSDT") but reject empty / wildly malformed.
+                        if tok and tok.endswith("USDT") and tok.isalnum():
+                            cleaned.append(tok)
+                out[key] = sorted(set(cleaned))  # canonical form
     return out
 
 
@@ -327,7 +346,28 @@ class UserOverridesStore:
         self._conn.executescript(_PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA)
         self._migrate_pretp_grab_fraction()
         self._migrate_pretp_protect_manual_entries()
+        self._migrate_auto_trade_symbol_preference()
         log.info("UserOverridesStore opened at {}", self._path)
+
+    def _migrate_auto_trade_symbol_preference(self) -> None:
+        """Idempotent ALTER for the ``symbol_preference`` column.
+
+        Added 2026-05-19 to support per-user symbol picker (PR E).
+        NULL on existing rows is interpreted by the FSM gate as "no
+        preference — fall through to engine-wide allowlist" (default-
+        all UX path).  Stored as TEXT (JSON list of strings).
+        """
+        cur = self._conn.execute("PRAGMA table_info(user_auto_trade_settings)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "symbol_preference" not in cols:
+            self._conn.execute(
+                "ALTER TABLE user_auto_trade_settings ADD COLUMN "
+                "symbol_preference TEXT"
+            )
+            log.info(
+                "UserOverridesStore: added user_auto_trade_settings."
+                "symbol_preference column (2026-05-19 per-user symbol picker)"
+            )
 
     def _migrate_pretp_grab_fraction(self) -> None:
         """Idempotent ALTER for the B17 ``grab_fraction`` column.
@@ -528,17 +568,22 @@ class UserOverridesStore:
                 else:
                     merged[k] = v
             now = _now_iso()
+            sym_pref = merged.get("symbol_preference")
+            sym_pref_json = (
+                json.dumps(sym_pref) if isinstance(sym_pref, list) else None
+            )
             self._conn.execute(
                 """
                 INSERT INTO user_auto_trade_settings (
                     user_id, mode, position_size_pct, leverage_cap,
-                    max_concurrent_positions, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    max_concurrent_positions, symbol_preference, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     mode = excluded.mode,
                     position_size_pct = excluded.position_size_pct,
                     leverage_cap = excluded.leverage_cap,
                     max_concurrent_positions = excluded.max_concurrent_positions,
+                    symbol_preference = excluded.symbol_preference,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -547,6 +592,7 @@ class UserOverridesStore:
                     merged.get("position_size_pct"),
                     merged.get("leverage_cap"),
                     merged.get("max_concurrent_positions"),
+                    sym_pref_json,
                     now,
                 ),
             )
@@ -658,6 +704,7 @@ _AUTO_TRADE_COL_TYPES: Dict[str, str] = {
     "position_size_pct": "float",
     "leverage_cap": "float",
     "max_concurrent_positions": "int",
+    "symbol_preference": "json_list",
 }
 
 

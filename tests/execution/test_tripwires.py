@@ -73,6 +73,134 @@ def test_symbol_allowlist_loads_from_env(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 # ---------------------------------------------------------------------------
+# Per-user symbol preference (PR E)
+# ---------------------------------------------------------------------------
+
+
+def _install_user_pref_singletons(
+    *,
+    firebase_uid: str = "fb-x",
+    user_id: int = 1,
+    symbol_preference,  # list[str] | None
+) -> None:
+    """Wire mocked user_overrides + users module singletons so the
+    tripwire helpers find the firebase_uid → user_id mapping +
+    symbol_preference row.  Pass ``symbol_preference=None`` to model
+    "user hasn't set a preference"."""
+    from unittest.mock import MagicMock
+    from src.api import user_overrides as _uo
+    from src.api import users as _users
+
+    user = MagicMock(user_id=user_id)
+    fake_user_store = MagicMock()
+    fake_user_store.get_by_firebase_uid = MagicMock(return_value=user)
+    _users.set_singleton(fake_user_store)
+
+    override_dict = (
+        {"symbol_preference": symbol_preference}
+        if symbol_preference is not None
+        else {}
+    )
+    fake_overrides_store = MagicMock()
+    fake_overrides_store.get_auto_trade = MagicMock(return_value=override_dict)
+    _uo.set_singleton(fake_overrides_store)
+
+
+def test_user_pref_no_preference_falls_through() -> None:
+    """Default = all engine-allowed symbols.  When the user has no
+    row (or row with NULL symbol_preference), the gate is a no-op."""
+    _install_user_pref_singletons(symbol_preference=None)
+    try:
+        tripwires.assert_symbol_in_user_preference("BTCUSDT", "fb-x")
+    finally:
+        _reset_pref_singletons()
+
+
+def test_user_pref_blocks_off_list() -> None:
+    """User picked [BTCUSDT].  ETHUSDT must be blocked."""
+    _install_user_pref_singletons(symbol_preference=["BTCUSDT"])
+    try:
+        with pytest.raises(tripwires.SymbolNotInUserPreference):
+            tripwires.assert_symbol_in_user_preference("ETHUSDT", "fb-x")
+    finally:
+        _reset_pref_singletons()
+
+
+def test_user_pref_permits_on_list() -> None:
+    _install_user_pref_singletons(symbol_preference=["BTCUSDT", "ETHUSDT"])
+    try:
+        tripwires.assert_symbol_in_user_preference("ETHUSDT", "fb-x")
+    finally:
+        _reset_pref_singletons()
+
+
+def test_user_pref_empty_list_blocks_everything() -> None:
+    """Empty list = explicit opt-out from auto-trade.  Every symbol
+    blocks; doctrine-strict path for cautious users."""
+    _install_user_pref_singletons(symbol_preference=[])
+    try:
+        with pytest.raises(tripwires.SymbolNotInUserPreference):
+            tripwires.assert_symbol_in_user_preference("BTCUSDT", "fb-x")
+    finally:
+        _reset_pref_singletons()
+
+
+def test_user_pref_is_case_insensitive() -> None:
+    _install_user_pref_singletons(symbol_preference=["btcusdt"])
+    try:
+        tripwires.assert_symbol_in_user_preference("BTCUSDT", "fb-x")
+    finally:
+        _reset_pref_singletons()
+
+
+def test_user_pref_falls_through_when_singletons_missing() -> None:
+    """Boot order / test harnesses without bootstrap → no preference
+    resolution available.  Soft-fail = let the symbol through (engine-
+    wide cap is the actual security floor)."""
+    _reset_pref_singletons()
+    tripwires.assert_symbol_in_user_preference("BTCUSDT", "fb-x")
+
+
+def test_effective_allowlist_intersects_with_user_pref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Engine allowlist = {BTC, ETH, SOL}; user_pref = {BTC, ETH, XRP}.
+    Effective = {BTC, ETH} (XRP not on engine cap can never widen)."""
+    monkeypatch.setenv(
+        "TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT,ETHUSDT,SOLUSDT"
+    )
+    _install_user_pref_singletons(
+        symbol_preference=["BTCUSDT", "ETHUSDT", "XRPUSDT"]
+    )
+    try:
+        effective = tripwires.effective_allowed_symbols_for_user("fb-x")
+        assert effective == ["BTCUSDT", "ETHUSDT"]
+    finally:
+        _reset_pref_singletons()
+
+
+def test_effective_allowlist_returns_engine_full_when_no_pref(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv(
+        "TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT,ETHUSDT,SOLUSDT"
+    )
+    _install_user_pref_singletons(symbol_preference=None)
+    try:
+        effective = tripwires.effective_allowed_symbols_for_user("fb-x")
+        assert effective == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]
+    finally:
+        _reset_pref_singletons()
+
+
+def _reset_pref_singletons() -> None:
+    from src.api import user_overrides as _uo
+    from src.api import users as _users
+    _uo.clear_singleton()
+    _users.set_singleton(None)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
 # Rate limiter
 # ---------------------------------------------------------------------------
 

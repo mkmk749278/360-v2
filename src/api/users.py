@@ -591,6 +591,33 @@ def get_default_store(path: Path | str) -> UserStore:
         return _store
 
 
+def get_singleton() -> Optional["UserStore"]:
+    """Return the cached singleton without lazy-creating it.
+
+    Used by tripwires.py and other engine-side modules that need to
+    look up firebase_uid → user_id but should NOT trigger store
+    creation (boot order: bootstrap creates the store first, then
+    these modules read).  Returns None when bootstrap hasn't run yet
+    (test harnesses, partial-init paths) — caller decides how to
+    handle that.
+    """
+    with _store_lock:
+        return _store
+
+
+def set_singleton(store: "UserStore") -> None:
+    """Register an externally-created store as the process singleton.
+
+    Mirrors the ``user_overrides.set_singleton`` pattern.  Bootstrap
+    calls this once after constructing the store so engine-side
+    modules can resolve firebase_uid → user_id without re-creating
+    the connection.
+    """
+    global _store
+    with _store_lock:
+        _store = store
+
+
 def reset_for_test(path: Optional[Path | str] = None) -> Optional[UserStore]:
     """Drop the cached singleton; re-init against ``path`` if provided.
 

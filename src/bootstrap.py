@@ -329,6 +329,10 @@ class Bootstrap:
             # idempotently — only the first boot of an empty DB inserts.
             user_store = UserStore(LUMIN_DB_PATH)
             user_store.bootstrap_owner_if_empty(OWNER_PHONE_E164)
+            # Module-level singleton so engine-side modules (tripwires, etc.)
+            # can resolve firebase_uid → user_id without re-opening the DB.
+            from src.api import users as users_module
+            users_module.set_singleton(user_store)
 
             # Phase-4 Firebase Admin SDK — initialised after UserStore so
             # the request-time auth dependency can verify ID tokens.
