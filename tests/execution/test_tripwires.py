@@ -73,6 +73,109 @@ def test_symbol_allowlist_loads_from_env(monkeypatch: pytest.MonkeyPatch) -> Non
 
 
 # ---------------------------------------------------------------------------
+# PairManager-dynamic fallback (PR G 2026-05-19)
+# ---------------------------------------------------------------------------
+
+
+def test_allowlist_falls_back_to_pair_manager_when_env_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Env unset + PairManager singleton wired → allowlist tracks the
+    engine's live futures universe.  No operator env edit required as
+    PairManager promotes / demotes pairs."""
+    from unittest.mock import MagicMock
+    from src import pair_manager as _pm
+    monkeypatch.delenv("TRIPWIRE_SYMBOL_ALLOWLIST", raising=False)
+    fake_pm = MagicMock()
+    fake_pm.futures_symbols = ["BTCUSDT", "ETHUSDT", "DOGEUSDT"]
+    _pm.set_singleton(fake_pm)
+    try:
+        allowlist = tripwires._load_symbol_allowlist()
+        assert allowlist == {"BTCUSDT", "ETHUSDT", "DOGEUSDT"}
+    finally:
+        _pm.clear_singleton()
+
+
+def test_env_overrides_pair_manager_when_both_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Operator hard-narrow via env takes precedence over PairManager
+    auto-tracking.  Doctrine-strict mode — env wins.  This is the
+    "paranoid beta" / "VPS rooted, ratchet down before re-enable"
+    operator path."""
+    from unittest.mock import MagicMock
+    from src import pair_manager as _pm
+    monkeypatch.setenv("TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT,ETHUSDT")
+    fake_pm = MagicMock()
+    fake_pm.futures_symbols = [
+        "BTCUSDT", "ETHUSDT", "DOGEUSDT", "SOLUSDT",
+    ]
+    _pm.set_singleton(fake_pm)
+    try:
+        allowlist = tripwires._load_symbol_allowlist()
+        # Env narrows to just 2 — PairManager's wider list is ignored.
+        assert allowlist == {"BTCUSDT", "ETHUSDT"}
+    finally:
+        _pm.clear_singleton()
+
+
+def test_allowlist_empty_when_neither_env_nor_pair_manager(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Boot-order safety: no env, no PairManager singleton → block
+    all orders rather than silently widen to some default."""
+    from src import pair_manager as _pm
+    monkeypatch.delenv("TRIPWIRE_SYMBOL_ALLOWLIST", raising=False)
+    _pm.clear_singleton()
+    allowlist = tripwires._load_symbol_allowlist()
+    assert allowlist == set()
+
+
+def test_allowlist_block_all_when_pair_manager_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If reading PairManager.futures_symbols raises (mid-refresh,
+    rare), default to block-all rather than risk a false widen."""
+    from unittest.mock import MagicMock, PropertyMock
+    from src import pair_manager as _pm
+    monkeypatch.delenv("TRIPWIRE_SYMBOL_ALLOWLIST", raising=False)
+    fake_pm = MagicMock()
+    type(fake_pm).futures_symbols = PropertyMock(
+        side_effect=RuntimeError("mid-refresh")
+    )
+    _pm.set_singleton(fake_pm)
+    try:
+        allowlist = tripwires._load_symbol_allowlist()
+        assert allowlist == set()
+    finally:
+        _pm.clear_singleton()
+
+
+def test_pair_manager_updates_are_reflected_immediately(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The allowlist is re-resolved on every assert_symbol_allowed
+    call — promotions in PairManager are visible on the next signal
+    without an engine restart.  Doctrine: allowlist follows engine's
+    live universe with no env edit needed."""
+    from unittest.mock import MagicMock
+    from src import pair_manager as _pm
+    monkeypatch.delenv("TRIPWIRE_SYMBOL_ALLOWLIST", raising=False)
+    fake_pm = MagicMock()
+    fake_pm.futures_symbols = ["BTCUSDT"]
+    _pm.set_singleton(fake_pm)
+    try:
+        tripwires.assert_symbol_allowed("BTCUSDT")
+        with pytest.raises(tripwires.SymbolNotAllowed):
+            tripwires.assert_symbol_allowed("ETHUSDT")
+        # PairManager promotes ETHUSDT later.
+        fake_pm.futures_symbols = ["BTCUSDT", "ETHUSDT"]
+        tripwires.assert_symbol_allowed("ETHUSDT")
+    finally:
+        _pm.clear_singleton()
+
+
+# ---------------------------------------------------------------------------
 # Per-user symbol preference (PR E)
 # ---------------------------------------------------------------------------
 

@@ -119,6 +119,13 @@ class CryptoSignalEngine:
 
     def __init__(self) -> None:
         self.pair_mgr = PairManager()
+        # Register the module-level singleton so engine-side modules
+        # (tripwires, etc.) can read the live pair universe without
+        # an engine-handle dependency.  Doctrine: blast-radius
+        # allowlist auto-tracks this when ``TRIPWIRE_SYMBOL_ALLOWLIST``
+        # env is unset (PR G 2026-05-19).
+        from src import pair_manager as _pair_manager_module
+        _pair_manager_module.set_singleton(self.pair_mgr)
         self.data_store = HistoricalDataStore()
         self.telegram = TelegramBot()
         self.telemetry = TelemetryCollector()

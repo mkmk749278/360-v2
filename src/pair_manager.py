@@ -898,3 +898,41 @@ class PairManager:
     async def close(self) -> None:
         await self._spot_client.close()
         await self._futures_client.close()
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton accessor (2026-05-19 — PR G).
+#
+# Mirrors the ``user_settings`` / ``user_overrides`` module-level
+# singleton pattern so engine-side modules (tripwires, etc.) can read
+# the live pair universe without an engine-handle dependency.  The
+# bootstrap registers ``engine.pair_mgr`` once after construction;
+# tripwires queries the singleton at call time and gets the current
+# universe (which evolves as PairManager promotes / demotes pairs over
+# the engine's lifetime).
+#
+# Why this matters for B18 doctrine: the engine-wide symbol allowlist
+# was previously env-driven static, which produced stale gaps whenever
+# the engine's pair universe drifted from what the operator last
+# wrote to ``.env``.  After this PR, when the env is unset, the
+# allowlist auto-tracks the engine's universe; when the env IS set,
+# operator hard-narrow still takes precedence (doctrine-strict mode
+# for paranoid deployments).
+# ---------------------------------------------------------------------------
+
+
+_PAIR_MANAGER_SINGLETON: Optional["PairManager"] = None
+
+
+def set_singleton(pair_mgr: "PairManager") -> None:
+    global _PAIR_MANAGER_SINGLETON
+    _PAIR_MANAGER_SINGLETON = pair_mgr
+
+
+def get_singleton() -> Optional["PairManager"]:
+    return _PAIR_MANAGER_SINGLETON
+
+
+def clear_singleton() -> None:
+    global _PAIR_MANAGER_SINGLETON
+    _PAIR_MANAGER_SINGLETON = None

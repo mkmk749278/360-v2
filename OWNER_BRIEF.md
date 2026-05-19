@@ -277,7 +277,7 @@ Two-step user flow for a clean paper-book reset: **close-all → reset.** This i
 | Cap | Default |
 |---|---|
 | Withdraw permission on every connected key | **Disabled — no exceptions.** Worst-case breach = attacker trashes positions; cannot drain wallets. |
-| Symbol allowlist | Only symbols currently in Lumin's signal channels. Order for any other symbol = immediate engine-wide kill + Telegram alert (this is a breach signal). |
+| Symbol allowlist | Only symbols currently in Lumin's signal channels (the engine's live `PairManager.futures_symbols` universe). Order for any other symbol = immediate engine-wide kill + Telegram alert (this is a breach signal). **Source-of-truth (2026-05-19 PR G):** when the `TRIPWIRE_SYMBOL_ALLOWLIST` env var is unset, the allowlist auto-tracks `PairManager.futures_symbols` — promotions / demotions in the engine's scan universe flow through to the cap with no operator action. When env IS set, it hard-narrows below the engine's universe (operator doctrine-strict mode, e.g. paranoid post-incident ratchet-down). Per-user picker (PR E) further narrows on top of whichever source is active. Dollar blast-radius cap (`MAX_POSITION_USD × MAX_CONCURRENT × rate_limit`) is unchanged by this revision. |
 | Per-user rate limit | 10 orders/min, 50/hour. Excess blocks user after 3 violations/hour. |
 | Per-user position cap | Beta defaults: $20 → $100 → $500 → $1000 → $2000 across rollout stages. User-configurable above the floor. |
 | Global kill switch | Single Firestore doc; flipping `kill_switch.enabled = true` halts all order placement engine-wide within 5s. Operable from Telegram bot. |
