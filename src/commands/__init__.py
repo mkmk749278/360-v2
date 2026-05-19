@@ -28,6 +28,7 @@ from src.commands.registry import CommandContext, CommandRegistry
 from src.utils import get_logger
 
 # Import sub-modules so their @registry.command decorators execute
+from src.commands import auto_trade_admin as _ata_mod
 from src.commands import backtest as _bt_mod
 from src.commands import channels as _ch_mod
 from src.commands import deploy as _deploy_mod
@@ -72,6 +73,7 @@ def _build_global_registry() -> CommandRegistry:
         _ch_mod.registry,
         _deploy_mod.registry,
         _bt_mod.registry,
+        _ata_mod.registry,
     ):
         for name, entry in sub_registry._commands.items():
             global_registry._commands[name] = entry

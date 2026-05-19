@@ -976,3 +976,52 @@ class BinanceConnectErrorResponse(BaseModel):
             "so the app can show the exact IP the user must whitelist"
         ),
     )
+
+
+class BinanceConnectStatusResponse(BaseModel):
+    """Response body for ``GET /api/binance/connect/status``.
+
+    Returns the user's current connection state so the Server-side
+    execution settings page can render "connected as XXXXXXXX since
+    <date>" + a Replace/Disconnect affordance on revisit, instead of
+    always showing the connect form (which makes the first connect
+    look unsuccessful from the user's perspective — they connected,
+    they revisit, the form is back, they assume the connect failed).
+
+    ``connected = False`` is the not-yet-connected state.  No key blob
+    fields are returned in that case (everything else is null).
+    """
+
+    connected: bool = Field(
+        ...,
+        description=(
+            "True iff a Firestore key blob exists for the requesting "
+            "Firebase uid (i.e. this user has connected before)."
+        ),
+    )
+    key_public_id_first8: Optional[str] = Field(
+        None,
+        description=(
+            "First 8 characters of the connected key.  Lets the app "
+            "render 'XXXXXXXX…' on revisit so the user can confirm "
+            "the stored key matches what they expect."
+        ),
+    )
+    connected_at: Optional[str] = Field(
+        None,
+        description="ISO-8601 UTC timestamp of the initial connect call",
+    )
+    withdraw_disabled_ok: Optional[bool] = Field(
+        None,
+        description=(
+            "Validation flag captured at connect time — withdraw "
+            "permission was confirmed disabled on the key"
+        ),
+    )
+    ip_whitelist_ok: Optional[bool] = Field(
+        None,
+        description=(
+            "Validation flag captured at connect time — IP whitelist "
+            "enabled AND engine VPS on the list, proven via signed call"
+        ),
+    )

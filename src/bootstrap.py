@@ -318,6 +318,7 @@ class Bootstrap:
             from src.api.billing_callback import BillingWebhookVerifier
             from src.api.otp import OtpStore
             from src.api.otp_delivery import build_provider_from_env
+            from src.api import user_overrides as user_overrides_module
             from src.api.user_overrides import UserOverridesStore
             from src.api.users import UserStore
 
@@ -459,6 +460,10 @@ class Bootstrap:
             # added with CREATE TABLE IF NOT EXISTS, safe against any
             # pre-existing data.
             user_overrides = UserOverridesStore(LUMIN_DB_PATH)
+            # Module-level singleton so engine-side modules (paper_order_manager,
+            # etc.) can resolve operator overrides without a constructor-time
+            # injection.  Mirrors the ``user_settings`` module-level pattern.
+            user_overrides_module.set_singleton(user_overrides)
             otp_store = OtpStore(
                 ttl=timedelta(seconds=OTP_TTL_SECONDS),
                 max_attempts_per_code=OTP_MAX_ATTEMPTS_PER_CODE,

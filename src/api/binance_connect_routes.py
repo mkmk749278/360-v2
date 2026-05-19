@@ -51,6 +51,7 @@ from src.utils import get_logger
 from .schemas import (
     BinanceConnectRequest,
     BinanceConnectResponse,
+    BinanceConnectStatusResponse,
 )
 
 log = get_logger("api.binance_connect_routes")
@@ -300,6 +301,127 @@ def register(
             futures_enabled_ok=validation.futures_enabled_ok,
             ip_whitelist_ok=validation.ip_whitelist_ok,
         )
+
+    @app.get(
+        "/api/binance/connect/status",
+        response_model=BinanceConnectStatusResponse,
+        tags=["binance"],
+        dependencies=[Depends(auth)],
+    )
+    async def binance_connect_status(
+        identity: Any = Depends(identity_dep),
+    ) -> BinanceConnectStatusResponse:
+        """Return the current user's connection state.
+
+        Returns ``connected=False`` (with all other fields null) when no
+        Firestore key blob exists for the requesting Firebase uid.  When
+        a blob exists, returns the non-secret metadata the Server-side
+        execution page needs to render the connected-state UI — the
+        first-8 key chars, connect timestamp, and at-connect validation
+        flags.  Plaintext / encrypted secret material never round-trips.
+        """
+        from src.security import firestore_keystore
+
+        firebase_uid = _resolve_firebase_uid(identity)
+        if firebase_uid is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Binance connect status requires Firebase sign-in. "
+                    "Sign in with your Lumin account and try again."
+                ),
+            )
+
+        if not firestore_keystore.is_initialised():
+            log.error(
+                "binance_connect_status refused: Firestore keystore not "
+                "initialised"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Server misconfiguration — Firestore not initialised.",
+            )
+
+        try:
+            blob = firestore_keystore.get_key_blob(firebase_uid)
+        except firestore_keystore.KeyBlobNotFoundError:
+            return BinanceConnectStatusResponse(connected=False)
+        except Exception:
+            log.exception(
+                "binance_connect_status: Firestore read failed for uid={}",
+                firebase_uid,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not reach the key store. Please retry.",
+            )
+
+        return BinanceConnectStatusResponse(
+            connected=True,
+            key_public_id_first8=blob.key_public_id_first8,
+            connected_at=blob.connected_at.isoformat(),
+            withdraw_disabled_ok=blob.withdraw_disabled_ok,
+            ip_whitelist_ok=blob.ip_whitelist_ok,
+        )
+
+    @app.delete(
+        "/api/binance/connect",
+        status_code=status.HTTP_204_NO_CONTENT,
+        tags=["binance"],
+        dependencies=[Depends(auth)],
+    )
+    async def binance_connect_delete(
+        identity: Any = Depends(identity_dep),
+    ) -> None:
+        """Disconnect the user's Binance key.
+
+        Hard-deletes the Firestore blob — both the encrypted secret and
+        the KMS-wrapped DEK — so the engine has no path back to signed
+        Binance calls for this user until they connect again.  Any
+        positions already open on Binance are NOT closed; the user must
+        close them on Binance directly (the engine has no live order
+        path to them once the key is gone, by design).
+
+        Idempotent: calling on a not-connected user returns 204 the
+        same as calling on a connected user — the wire effect is
+        identical (post-call there is no blob for this uid).
+        """
+        from src.security import firestore_keystore
+
+        firebase_uid = _resolve_firebase_uid(identity)
+        if firebase_uid is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Binance disconnect requires Firebase sign-in. "
+                    "Sign in with your Lumin account and try again."
+                ),
+            )
+
+        if not firestore_keystore.is_initialised():
+            log.error(
+                "binance_connect_delete refused: Firestore keystore not "
+                "initialised"
+            )
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail="Server misconfiguration — Firestore not initialised.",
+            )
+
+        try:
+            firestore_keystore.delete_key_blob(firebase_uid)
+        except Exception:
+            log.exception(
+                "binance_connect_delete: Firestore delete failed for uid={}",
+                firebase_uid,
+            )
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="Could not reach the key store. Please retry.",
+            )
+
+        log.info("binance_connect_delete ok: firebase_uid={}", firebase_uid)
+        return None
 
 
 def _resolve_firebase_uid(identity: Any) -> Optional[str]:
