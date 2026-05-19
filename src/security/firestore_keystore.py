@@ -242,6 +242,49 @@ def get_key_blob(uid: str) -> UserKeyBlob:
     )
 
 
+def list_active_uids() -> list[str]:
+    """Return every firebase_uid that currently has a connected
+    Binance key blob.
+
+    Implementation: collection-group query on the ``binance_key``
+    subcollection, filtered to documents named ``current`` (our
+    naming convention from PR-1).  Returns the parent user's uid
+    for each match.
+
+    Cost: one Firestore query per call.  Caller should cache the
+    result for a short TTL (~30s) rather than enumerating on every
+    signal — there's no need for sub-second freshness here (a
+    newly-connected user can wait one cycle for the engine to
+    notice them, and disconnection takes effect immediately on
+    blob delete via the engine's own action).
+
+    Returns an empty list if the keystore isn't initialised so the
+    signal-dispatch path no-ops cleanly in dev contexts that
+    haven't booted the full server-side execution stack.
+    """
+    with _lock:
+        if _db is None:
+            return []
+        db = _db
+    try:
+        query = db.collection_group("binance_key")
+        uids: list[str] = []
+        for snap in query.stream():
+            # snap.id is the doc id within binance_key; only
+            # 'current' is our convention.  snap.reference.parent.parent
+            # is the user document.
+            if snap.id != "current":
+                continue
+            user_ref = snap.reference.parent.parent
+            if user_ref is None:
+                continue
+            uids.append(user_ref.id)
+        return uids
+    except Exception as exc:
+        log.warning("list_active_uids failed: {}", exc)
+        return []
+
+
 def delete_key_blob(uid: str) -> None:
     """Remove the user's key blob.
 
