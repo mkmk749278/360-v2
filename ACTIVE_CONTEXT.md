@@ -4,7 +4,7 @@
 
 ---
 
-## In-session checkpoint 2026-05-20 — Dispatch event log shipped; DIV_CONT structure-misalign penalty in flight
+## In-session checkpoint 2026-05-20 — Dispatch event log + DIV_CONT structure-misalign penalty shipped; adverse-excursion invalidation in flight
 
 **Shipped (merged to main, deployed):**
 
@@ -34,6 +34,18 @@ Truth-report 2026-05-20 analysis identified DIVERGENCE_CONTINUATION as the singl
 * OWNER_BRIEF §3.4a "HTF Structure, LTF Entry" — uses existing `structure_state.py` infrastructure as the doctrine mandates.
 * B8 — env-overridable.
 * "New evaluator paths or scoring models requires owner sign-off" — owner approved by saying "proceed" after the design summary in this session.
+
+**Also shipped (4th PR in same session):** adverse-excursion invalidation rule (`src/trade_monitor.py`) — the truth-report Priority B follow-up.  Catches the full-SL pattern that `momentum_loss` / `regime_shift` / `ema_crossover` all miss: price grinding from entry → SL with momentum, regime, and EMA structure all intact the whole way down.
+
+* Fires when: age ≥ 600s (matches existing scalp baseline) AND adverse excursion ≥ 70% of SL distance AND momentum not strongly confirming AND pre-TP hasn't fired AND not in TP1_HIT/TP2_HIT.
+* Magnitude: 0.70 default saves ~30% of SL distance per kill (≈ 2.4% on margin at 10× vs full SL ~7.9%).
+* Env-overridable: `INVALIDATION_ADVERSE_EXCURSION_FRACTION` (raise to 0.80 if next window shows > 25% PREMATURE classification; set to 1.0 to disable).
+* New `adverse_excursion` family token in `categorise_kill_reason` — substring-ordering pin: must check `"adverse excursion"` BEFORE `"momentum"` substrings (the diagnostic message contains both).
+* 9 new invalidation tests + 2 new categorise tests.  Next truth-report window will auto-classify this rule's kills as PROTECTIVE / PREMATURE / NEUTRAL via the existing ablation framework — if EV/kill < -0.20R after 20+ kills, raise the threshold or disable.
+
+**Owner-decision queue for next session:**
+* Validate the misalign-penalty enrolment after one truth-report window (expand from `DIVERGENCE_CONTINUATION` to other in `_STRUCTURE_ALIGN_PATHS` showing same asymmetric-quality pattern: TPE, CLS, PDC, SR_FLIP, QCB).
+* Validate adverse-excursion EV after one truth-report window.  If PREMATURE > 25% → raise fraction to 0.80; if < 10% → consider tightening to 0.65.
 
 ---
 
