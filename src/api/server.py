@@ -1253,6 +1253,14 @@ def build_app(
         identity_dep=user_claims,
     )
 
+    # ``GET /api/region`` (Play Store A6 / E2, 2026-05-20) — client
+    # region detection for the Play Store launch.  Public endpoint
+    # (no auth) so the client can call it before sign-in.  Reads
+    # CF-IPCountry / X-Country-Code headers; soft-fail open to
+    # ``"unknown"`` when no header is present.
+    from . import region_routes as _region_routes
+    _region_routes.register(app)
+
     # ---- Settings: Pre-TP page ----
 
     def _build_pretp_view() -> PretpSettings:
