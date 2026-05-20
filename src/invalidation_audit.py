@@ -97,6 +97,13 @@ def categorise_kill_reason(reason: str) -> str:
     text = (reason or "").lower()
     if "trailing invalidation" in text:
         return "trailing_invalidation"
+    # Adverse-excursion check BEFORE momentum-loss: the rule's
+    # diagnostic message contains both "adverse excursion" and
+    # "momentum" (the latter from the "momentum=X not confirming"
+    # tail), so the legacy "momentum loss" / "momentum against
+    # thesis" substring scans would otherwise misclassify.
+    if "adverse excursion" in text:
+        return "adverse_excursion"
     if "momentum loss" in text or "momentum against thesis" in text:
         return "momentum_loss"
     if "regime shift" in text:

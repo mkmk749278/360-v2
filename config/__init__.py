@@ -1365,6 +1365,38 @@ INVALIDATION_CONSECUTIVE_THRESHOLD: Dict[str, int] = {
     "360_SCALP": int(os.getenv("INVALIDATION_CONSECUTIVE_THRESHOLD_SCALP", "2")),
 }
 
+# Adverse-excursion invalidation (2026-05-20 — truth-report follow-up).
+# Catches the full-SL pattern that momentum_loss / regime_shift /
+# ema_crossover all miss: price grinding against the position from
+# entry → SL with momentum reading inside the noise band and the
+# regime/EMA structure intact the whole way down.
+#
+# Rule fires when price has moved against entry by this fraction of
+# the SL distance AND momentum is not strongly confirming.  Default
+# 0.70 saves ~30% of the SL distance per kill (≈ 2.4% on margin at
+# 10×).  Counter-cases: a single deep wick that reverses immediately
+# can trip this — minimum-age gate (300s) + momentum-not-confirming
+# requirement together suppress those.
+#
+# Env-overridable per B8.  If the next truth-report window shows
+# > 25% PREMATURE classification on this rule, raise to 0.80 or
+# disable via setting to 1.0 (no signal can be that far adverse
+# without already hitting SL).
+INVALIDATION_ADVERSE_EXCURSION_FRACTION: float = float(
+    os.getenv("INVALIDATION_ADVERSE_EXCURSION_FRACTION", "0.70")
+)
+
+# Minimum age gate for adverse_excursion.  Defaults to match the
+# 360_SCALP function-level INVALIDATION_MIN_AGE_SECONDS gate (600s)
+# so this rule cannot fire any earlier than the engine's baseline
+# scalp invalidation grace period.  Defense-in-depth — leaving the
+# explicit per-rule gate in case the function-level gate is later
+# loosened, or to allow tighter per-rule tuning via env without
+# affecting other rules.
+INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC: int = int(
+    os.getenv("INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC", "600")
+)
+
 # ---------------------------------------------------------------------------
 # Backtester – default slippage per trade (percent, e.g. 0.03 = 0.03 %)
 # ---------------------------------------------------------------------------

@@ -2225,6 +2225,202 @@ class TestSignalInvalidation:
         assert reason is not None
         assert "momentum" in reason.lower()
 
+    # ------------------------------------------------------------------
+    # Adverse-excursion rule (2026-05-20 — truth-report follow-up)
+    # ------------------------------------------------------------------
+    #
+    # Catches the full-SL pattern that the other three rules miss:
+    # price grinding from entry → SL with momentum, regime, and EMA
+    # structure all intact the whole way down.  Fires when:
+    #   - age ≥ INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC (default 300s)
+    #   - adverse excursion ≥ INVALIDATION_ADVERSE_EXCURSION_FRACTION
+    #     × SL_dist (default 0.70 — saves ~30% of SL distance)
+    #   - momentum NOT strongly confirming thesis
+    #   - status NOT in {TP1_HIT, TP2_HIT}
+    #   - pretp_fired == False (post-pre-TP residuals are BE-protected)
+
+    def test_adverse_excursion_fires_at_70pct_with_flat_momentum(self):
+        """LONG signal: price drops to 70% of SL distance + flat
+        momentum + EMA still aligned LONG → adverse_excursion fires
+        even when the other rules pass.  Sample: entry=30000, SL=29850
+        (150 below) → 70% threshold = drop to 29895.
+
+        Inject EMAs aligned LONG (ema9 > ema21) so the EMA-crossover
+        rule does NOT fire — this isolates the new rule's behaviour.
+        This mirrors the production case: price grinding against the
+        position with momentum, regime, and EMA structure all intact.
+        """
+        from config import INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC + 30,
+            entry=30000.0,
+            stop_loss=29850.0,
+        )
+        sig.current_price = 29895.0
+        # Inject indicators directly: EMA9 still above EMA21 (LONG
+        # alignment intact), momentum near zero (not confirming).
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 30005.0, "ema21_last": 30000.0,
+                "momentum": 0.0, "atr_last": 50.0,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None, (
+            "Adverse excursion at 70%×SL with non-confirming "
+            "momentum should fire"
+        )
+        assert "adverse excursion" in reason.lower()
+        assert "0.70" in reason or "0.71" in reason  # adverse_frac
+
+    def test_adverse_excursion_short_symmetric(self):
+        """SHORT signal: price rises to 70% of SL distance + flat
+        momentum + EMA aligned SHORT → adverse_excursion fires."""
+        from config import INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
+        from src.smc import Direction
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC + 30,
+            direction=Direction.SHORT,
+            entry=30000.0,
+            stop_loss=30150.0,
+            tp1=29850.0,
+            tp2=29700.0,
+            tp3=29550.0,
+        )
+        sig.current_price = 30105.0
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 29995.0, "ema21_last": 30000.0,
+                "momentum": 0.0, "atr_last": 50.0,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None
+        assert "adverse excursion" in reason.lower()
+
+    def test_adverse_excursion_NOT_triggered_under_threshold(self):
+        """Price 50% of SL distance against → below 70% threshold →
+        no kill."""
+        from config import INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC + 30,
+            entry=30000.0,
+            stop_loss=29850.0,
+        )
+        sig.current_price = 29925.0  # 50% of SL_dist adverse
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 30005.0, "ema21_last": 30000.0,
+                "momentum": 0.0, "atr_last": 50.0,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None or "adverse excursion" not in reason.lower()
+
+    def test_adverse_excursion_NOT_triggered_before_min_age(self):
+        """Same setup as the firing test but age below min — no kill."""
+        from config import INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC - 30,
+            entry=30000.0,
+            stop_loss=29850.0,
+        )
+        sig.current_price = 29895.0
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 30005.0, "ema21_last": 30000.0,
+                "momentum": 0.0, "atr_last": 50.0,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None or "adverse excursion" not in reason.lower()
+
+    def test_adverse_excursion_NOT_triggered_when_momentum_confirming(self):
+        """Price at 70% of SL_dist but momentum is strongly POSITIVE
+        (confirming LONG) → engine is hurting but heading our way →
+        let the move play out, no adverse-excursion kill."""
+        from config import (
+            INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC,
+            INVALIDATION_MOMENTUM_THRESHOLD,
+        )
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC + 30,
+            entry=30000.0,
+            stop_loss=29850.0,
+        )
+        sig.current_price = 29895.0
+        # Momentum well above the threshold → strongly confirming LONG.
+        strong_mom = INVALIDATION_MOMENTUM_THRESHOLD[channel] * 5.0
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 30005.0, "ema21_last": 30000.0,
+                "momentum": strong_mom, "atr_last": 50.0,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None or "adverse excursion" not in reason.lower()
+
+    def test_adverse_excursion_NOT_triggered_after_pretp_fire(self):
+        """Once pre-TP has fired, the residual is BE-protected per
+        §3.2a — deeper hold is doctrinally correct, no kill."""
+        from config import INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC + 30,
+            entry=30000.0,
+            stop_loss=29850.0,
+        )
+        sig.pretp_fired = True  # BE protection in place
+        sig.current_price = 29895.0
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 30005.0, "ema21_last": 30000.0,
+                "momentum": 0.0, "atr_last": 50.0,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None or "adverse excursion" not in reason.lower()
+
+    def test_adverse_excursion_NOT_triggered_after_tp1_hit(self):
+        """Post-TP1, the trailing stop manages exits per §3.2a — no
+        adverse_excursion kill."""
+        from config import INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC + 30,
+            entry=30000.0,
+            stop_loss=29850.0,
+        )
+        sig.status = "TP1_HIT"
+        sig.current_price = 29895.0
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 30005.0, "ema21_last": 30000.0,
+                "momentum": 0.0, "atr_last": 50.0,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None or "adverse excursion" not in reason.lower()
+
 
 class TestOnHighlightCallback:
     """TradeMonitor.on_highlight_callback is called for TP2/TP3 but not TP1 or SL."""
@@ -3001,6 +3197,34 @@ class TestCategoriseKillReason:
         )
         assert categorise_kill_reason("momentum loss") == "momentum_loss"
         assert categorise_kill_reason("some other unmatched") == "other"
+
+    def test_adverse_excursion_categorised(self):
+        """New invalidation rule (2026-05-20) must land in its own
+        family token so the truth-report audit table shows it as a
+        distinct row (PROT / PREM / NEUTRAL / EV per kill)."""
+        from src.invalidation_audit import categorise_kill_reason
+        msg = (
+            "adverse excursion (-0.85% against, 0.71×SL_dist, "
+            "momentum=0.030 not confirming) – signal thesis invalidated"
+        )
+        assert categorise_kill_reason(msg) == "adverse_excursion"
+
+    def test_adverse_excursion_does_not_collide_with_momentum_loss(self):
+        """The adverse_excursion diagnostic message contains the
+        substring 'momentum=' which historically would match the
+        'momentum loss' / 'momentum against thesis' branches.  The
+        categoriser must check 'adverse excursion' first to avoid
+        misclassification — pin that ordering here so a future
+        refactor can't silently re-break it."""
+        from src.invalidation_audit import categorise_kill_reason
+        msg_with_momentum_substring = (
+            "adverse excursion (+0.91% against, 0.78×SL_dist, "
+            "momentum=-0.020 not confirming) – signal thesis invalidated"
+        )
+        assert (
+            categorise_kill_reason(msg_with_momentum_substring)
+            == "adverse_excursion"
+        )
 
 
 # ============================================================================
