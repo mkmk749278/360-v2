@@ -4,6 +4,116 @@
 
 ---
 
+## Queued — Play Store Phase 0–3 (decision queued 2026-05-20; SOLO realities applied)
+
+Research + plan PR landing this session. **Build pending owner sign-off** of the solo-operator decision queue at the bottom of `docs/PLAYSTORE_PLAN.md`.
+
+**One-line verdict:** publishable to Play Store by a solo developer with no entity, ~3 weeks for v1 (signals-viewer only) — account already verified ✓ — +2–3 weeks for v2 (auto-execute as feature update). Cornix / 3Commas / Bitsgap / Pionex / WunderTrading all live on Play (entities, but the policy doesn't require entity-based licensing for our launch geos). India NOT on the 15-jurisdiction crypto-custody licensing list.
+
+**Account status (2026-05-20):** owner has a verified personal Play Console account, created ~7–10 days back. Verification step DONE (saves ~3 days off Phase 0). Account is post Nov 13, 2023 → mandatory 14-day Closed Testing gate with 12+ testers applies before Production promotion (NOT skippable).
+
+**KEY STRATEGIC SHIFT — phase the app:**
+
+* **v1 Play submission:** signals-viewer only. No API-key connection, no auto-execute. Purely an information app surfacing the Telegram-channel signals + Recent Activity history. First-attempt Production approval likelihood: ~85–90% (vs. ~50–60% for full auto-execute on day one).
+* **v2 feature update:** add API-key connection + auto-execute, ~4–8 weeks after v1 is live + stable. Feature updates get much lighter review than initial submissions.
+
+**Solo realities applied (vs. original ambition plan):**
+
+* **DROPPED:** FIU-IND lawyer engagement (no budget) — accept the regulatory gray area, Cornix precedent applies, launch UK+EU first
+* **DROPPED:** Designer for store assets — Canva free tier + GIMP + in-app screenshots
+* **SIMPLIFIED:** Legal docs via TermsFeed/FreePrivacyPolicy generators + Claude-drafted custom paragraphs for the API-key + KMS-encryption specifics + Risk Disclosure (Cornix-style, self-written, ~500 words)
+* **SIMPLIFIED:** Hosting via GitHub Pages or Vercel free tier — domain nice but not blocking
+* **TESTERS:** Owner recruits 12+ from existing paid Telegram subscriber base
+
+**Total owner budget:** ~$25 (Play Console one-time fee). Total owner workload to v1 Closed Testing: ~11–12 hours active work over ~7 days plus passive waiting.
+
+**v1 code work (8 PRs, ~5–7 days serial):**
+
+| Repo | PR | Scope |
+|---|---|---|
+| lumin-app | A1 | 18+ age confirmation gate |
+| lumin-app | A2 | First-run risk disclosure modal |
+| lumin-app | A4-partial | In-app account deletion (no API-key revocation in v1 — that's v2) |
+| lumin-app | A5 | Settings → ToS / Privacy / Risk URLs |
+| lumin-app | A6 | Region-block enforcement |
+| lumin-app | A7 | Copy vocabulary audit |
+| lumin-app | feature-flag | Hide existing connect-page / auto-trade UI from v1 build |
+| 360-v2 | E1 | DELETE /api/account endpoint |
+| 360-v2 | E2 | GET /api/region for client region-check |
+| 360-v2 | E3 | Standardised user-facing copy module |
+
+**v2 code work (deferred until v1 is live):** A3 (prominent disclosure pre-API-entry), A4-full (API-key revocation in account deletion), A8 (inline privacy notice on data inputs).
+
+**Owner decision queue (sign-off needed before Phase 0 starts):**
+
+1. Approve the solo + phased plan?
+2. Confirm hosting target — GitHub Pages on a `lumin-legal` repo, or Vercel free tier on `360-v2`?
+3. Confirm tester recruitment path — DM 12+ existing paid Telegram subscribers, or wider opt-in via Telegram channel announcement?
+
+---
+
+## Queued — Play Store Phase 0–3 (original, "with team + budget" plan — superseded by solo reality above)
+
+Research + plan PR landing this session. **Build pending owner sign-off** of the decision queue at the bottom of `docs/PLAYSTORE_PLAN.md`.
+
+**One-line verdict:** publishable to Play Store. ~6–10 weeks from "decision to ship" to Production listing in India + UK + EU. Same pattern as Cornix / 3Commas / Bitsgap / Pionex / WunderTrading (all live). India NOT on the 15-jurisdiction crypto-custody licensing list; our non-custodial model is explicitly excluded from the Oct 2025 policy.
+
+**Read the artefacts:**
+
+1. `docs/PLAYSTORE_RESEARCH_2026-05-20.md` — full policy + competitor research (anchored to URLs)
+2. `docs/PLAYSTORE_PLAN.md` — execution plan: decisions taken, per-row PR breakdown, phased timeline, risk register, decision queue
+
+**Decisions baked in (this PR):**
+
+* Vocabulary discipline: "signal" / "automation" / "strategy execution"; never "advice" / "guaranteed" / specific yield or leverage numbers
+* Subscription billing: OFF-PLAY (Telegram channel content consumed outside app — fits Play Billing carve-out)
+* Launch geo: India + UK + EU; exclude US / China / Bangladesh
+* Account type: personal ($25, PAN + Aadhaar verification; no D-U-N-S needed)
+* Financial Features Declaration: over-declare BOTH "Cryptocurrency exchange" AND "Financial advice" with explanatory free-text
+* Data Safety: over-declare API key under BOTH Personal Info AND Financial Info
+
+**Code work needed (8 app PRs + 3 backend PRs, ~12–20 days serial / 7–10 days parallel):**
+
+| Repo | PR | Scope |
+|---|---|---|
+| lumin-app | A1 | 18+ age confirmation gate |
+| lumin-app | A2 | First-run risk disclosure modal |
+| lumin-app | A3 | Prominent disclosure screen before API-key entry |
+| lumin-app | A4 | In-app account & API-key deletion flow |
+| lumin-app | A5 | Settings → ToS / Privacy / Risk URLs |
+| lumin-app | A6 | Region-block enforcement (US / China / Bangladesh) |
+| lumin-app | A7 | Copy vocabulary audit |
+| lumin-app | A8 | Inline privacy-policy notice on data inputs |
+| 360-v2 | E1 | DELETE /api/account endpoint |
+| 360-v2 | E2 | GET /api/region for client region-check |
+| 360-v2 | E3 | Standardised user-facing copy module |
+
+**Non-code work (parallel track, owner-side):**
+
+* Open Play Console + India personal account verification
+* Reserve + host legal pages (lumin.app/legal/{privacy,terms,risk})
+* Draft Privacy Policy + ToS + Risk Disclosure (Cornix-style risk language)
+* Store listing copy + assets (icon, feature graphic, 4–6 screenshots)
+* Recruit 12+ Closed Testing testers (mandatory 14-day continuous opt-in for personal accounts)
+* Engage Indian crypto-VDA lawyer for FIU-IND registration opinion (separate from Play; not a blocker for UK/EU launch)
+
+**Top risks:**
+
+1. Reviewer classifies us as "in-scope crypto exchange" → pre-empt with declaration free-text + Cornix precedent
+2. FIU-IND enforcement against signal/bot services in India (low today, medium 12-month horizon) → legal opinion before India Production
+3. Store copy reads as "guaranteed returns" → strict vocabulary audit (A7)
+4. US accidentally enabled → triple region block (client + server + Play Console exclude)
+
+**Owner decision queue (sign-off needed before Phase 0 starts):**
+
+1. Approve the plan?
+2. Confirm `lumin.app` domain availability or alternative
+3. FIU-IND lawyer engagement — budget approval
+4. Designer engagement for store assets — budget approval
+5. Closed-testing tester recruitment path
+
+---
+
 ## In-session checkpoint 2026-05-20 — Dispatch event log + DIV_CONT structure-misalign penalty shipped; adverse-excursion invalidation in flight
 
 **Shipped (merged to main, deployed):**
