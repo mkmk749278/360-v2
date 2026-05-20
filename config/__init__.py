@@ -1398,6 +1398,36 @@ INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC: int = int(
 )
 
 # ---------------------------------------------------------------------------
+# Geo-block for Play Store launch (PLAYSTORE_PLAN.md A6 + E2).
+#
+# ISO 3166-1 alpha-2 country codes that the auto-execution feature
+# is NOT available in.  The client app reads ``GET /api/region`` on
+# startup; if the response's ``country_code`` is in this set, the
+# auto-trade UI is hidden and the user is shown a "not available in
+# your region" message.  Defense-in-depth: dispatch never sees these
+# users anyway (since they can't connect a Binance key in the first
+# place), but blocking client-side avoids a confusing UX of asking
+# for a key and then rejecting it later.
+#
+# Default list rationale:
+#   US — CFTC complexity around crypto derivatives; not worth the
+#        risk for a Phase-1 solo-developer product
+#   CN — crypto trading is prohibited; serving Chinese users would
+#        violate local law
+#   BD — crypto trading is banned by Bangladesh Bank circular
+#
+# Env-overridable (B8): set ``BLOCKED_REGIONS`` to a comma-separated
+# list, e.g. ``BLOCKED_REGIONS=US,CN,BD,IR``.  Empty string disables
+# the block (useful for development).
+_BLOCKED_REGIONS_RAW = os.getenv("BLOCKED_REGIONS", "US,CN,BD")
+BLOCKED_REGIONS: frozenset = frozenset(
+    code.strip().upper()
+    for code in _BLOCKED_REGIONS_RAW.split(",")
+    if code.strip()
+)
+
+
+# ---------------------------------------------------------------------------
 # Backtester – default slippage per trade (percent, e.g. 0.03 = 0.03 %)
 # ---------------------------------------------------------------------------
 BACKTEST_SLIPPAGE_PCT: float = _safe_float("BACKTEST_SLIPPAGE_PCT", "0.03")
