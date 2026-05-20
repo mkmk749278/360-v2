@@ -355,6 +355,85 @@ def register(
         }
 
 
+    @app.get(
+        "/api/auto-trade/recent-events",
+        tags=["auto-mode"],
+        dependencies=[Depends(auth)],
+    )
+    async def auto_trade_recent_events(
+        identity: Any = Depends(identity_dep),
+        limit: int = 20,
+    ) -> dict:
+        """Return the user's recent dispatch events (placed + rejected),
+        newest first.  Drives the Trade-tab Recent Activity card so
+        users can see why a signal didn't open on their Binance
+        account (most commonly: ``-2019 'Margin is insufficient'``
+        → empty Futures wallet; ``-2014`` → IP whitelist changed; etc.).
+
+        Response shape::
+
+            {
+              "events": [
+                {
+                  "event_id": str,
+                  "signal_id": str,
+                  "symbol": str,
+                  "direction": "LONG" | "SHORT",
+                  "outcome": "placed" | "rejected",
+                  "timestamp": str (ISO-8601 UTC),
+                  "entry_price": float,
+                  "total_qty": float,
+                  "reject_class": str | null,
+                  "reject_detail": str | null,
+                  "reject_binance_code": int | null,
+                  "reject_binance_msg": str | null,
+                }, ...
+              ]
+            }
+
+        ``limit`` capped server-side at 100 to bound query cost.
+        Returns ``{"events": []}`` when the dispatch_log isn't
+        initialised (engine boot without GCP env) — UI gracefully
+        renders the empty-state copy.
+        """
+        from src.execution import dispatch_log as _dl
+
+        firebase_uid = _extract_firebase_uid(identity)
+        if firebase_uid is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Recent events requires Firebase sign-in. "
+                    "Sign in with your Lumin account and try again."
+                ),
+            )
+
+        events = _dl.list_recent_events(firebase_uid, limit=limit)
+        return {
+            "events": [
+                {
+                    "event_id": e.event_id,
+                    "signal_id": e.signal_id,
+                    "symbol": e.symbol,
+                    "direction": e.direction,
+                    "outcome": e.outcome,
+                    "timestamp": (
+                        e.timestamp.isoformat()
+                        if e.timestamp is not None
+                        else None
+                    ),
+                    "entry_price": e.entry_price,
+                    "total_qty": e.total_qty,
+                    "reject_class": e.reject_class,
+                    "reject_detail": e.reject_detail,
+                    "reject_binance_code": e.reject_binance_code,
+                    "reject_binance_msg": e.reject_binance_msg,
+                }
+                for e in events
+            ],
+        }
+
+
 def _extract_firebase_uid(identity: Any) -> Optional[str]:
     """Same logic as binance_connect_routes — Firebase-authed users
     return their uid; static-token bypass / legacy JWT return None

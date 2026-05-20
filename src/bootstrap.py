@@ -478,6 +478,14 @@ class Bootstrap:
                         service_account_path=firebase_sa_path or None,
                     )
                     log.info("Position-state Firestore client initialised")
+                    # Dispatch-event log — per-user history of every
+                    # order-placement attempt (placed + rejected).
+                    # Shares the same Firestore client as the keystore
+                    # to save quota.  Soft-init: writes are no-ops if
+                    # this stays None (subsystem offline).
+                    from src.execution import dispatch_log as _dispatch_log
+                    _dispatch_log.init_dispatch_log(fs_db)
+                    log.info("Dispatch-event log Firestore client initialised")
                     # Telegram alerts dispatcher — engine.telegram is
                     # the long-lived TelegramBot already constructed
                     # in the boot path; we share that single instance.
