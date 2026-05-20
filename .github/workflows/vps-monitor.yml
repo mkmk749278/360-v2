@@ -70,13 +70,16 @@ jobs:
       - name: Install runtime-truth-report dependencies
         # ``build_truth_report.py`` → ``src/runtime_truth_report.py``
         # → ``src/invalidation_audit.py`` → ``src/utils.py`` →
-        # ``src/logger.py`` → ``import loguru``.  Audited the import
-        # chain: only stdlib + loguru is needed (no numpy / pandas
-        # in the truth-report path).  Slim install keeps the runner
-        # cold-start under 5s vs ~60s for full requirements.txt.
+        # ``src/logger.py`` → ``config/__init__.py`` →
+        # ``from dotenv import load_dotenv`` + ``import loguru``.
+        # Slim install of just these two transitive deps keeps the
+        # runner cold-start under 10s vs ~60s for full
+        # requirements.txt.  Audit refreshed 2026-05-19 — previously
+        # listed only ``loguru`` which silently broke when ``config``
+        # was pulled into the import chain.
         run: |
           python -m pip install --upgrade pip
-          python -m pip install loguru
+          python -m pip install loguru python-dotenv
 
       - name: Write SSH key
         run: |
