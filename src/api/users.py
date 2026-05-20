@@ -453,6 +453,38 @@ class UserStore:
                 user_id, firebase_uid,
             )
 
+    def delete_by_id(self, user_id: int) -> bool:
+        """Hard-delete a user row by id.
+
+        Required by the Play Store in-app account deletion gate
+        (2026-05-20 — see ``docs/PLAYSTORE_PLAN.md`` E1).  Returns
+        ``True`` if a row was deleted, ``False`` if no row matched
+        (caller treats this as idempotent — the user is already
+        gone).
+
+        The per-user override tables (``user_pretp_settings``,
+        ``user_invalidation_settings``, ``user_auto_trade_settings``)
+        carry ``FOREIGN KEY (user_id) REFERENCES users(user_id)
+        ON DELETE CASCADE`` so a single DELETE here cleans them up
+        transitively.  PRAGMA foreign_keys=ON is set on this
+        connection during ``__init__``; the CASCADE rules fire.
+
+        Note: the Firestore Binance-key blob is NOT touched by this
+        method — orchestration of "delete blob + delete row" lives
+        in the account route, which sequences the blob-delete first
+        so a partial failure leaves the user's funds-side state
+        safer than their app-side state.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "DELETE FROM users WHERE user_id = ?",
+                (int(user_id),),
+            )
+            deleted = cur.rowcount > 0
+            if deleted:
+                log.info("Deleted user_id={} (per-user override rows cascade)", user_id)
+            return deleted
+
     def set_tier(
         self,
         user_id: int,

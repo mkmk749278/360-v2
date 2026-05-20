@@ -1261,6 +1261,19 @@ def build_app(
     from . import region_routes as _region_routes
     _region_routes.register(app)
 
+    # ``DELETE /api/account`` (Play Store E1, 2026-05-20) — in-app
+    # account deletion + Binance key revocation.  Required by Play's
+    # User Data policy (answer/13327111); without it, the Data
+    # Safety review stage rejects the listing.  Orchestrates:
+    # Firestore key-blob delete → SQLite user row delete (cascades
+    # per-user override tables) → user-roster cache invalidation.
+    from . import account_routes as _account_routes
+    _account_routes.register(
+        app,
+        auth=auth,
+        identity_dep=user_claims,
+    )
+
     # ---- Settings: Pre-TP page ----
 
     def _build_pretp_view() -> PretpSettings:
