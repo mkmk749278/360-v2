@@ -108,9 +108,27 @@ _AUTO_TRADE_KEYS = frozenset({
     "leverage_cap",
     "max_concurrent_positions",
     "symbol_preference",
+    "notional_usd",
 })
 
 _LEVERAGE_HARD_CAP: float = 30.0  # B12
+
+# Per-user notional override bounds (2026-05-20).
+#
+# Floor:   $5 — Binance USDT-M MIN_NOTIONAL is $5 for most pairs (a few
+#          micro-cap pairs raise it to $10–20).  Anything below $5 is
+#          guaranteed to fail Binance's filter on every symbol → setting
+#          it that low is a foot-gun.
+#
+# Ceiling: $2000 — B18 per-user position cap.  Engine-side ``assert_
+#          position_cap`` tripwire rejects any single position above
+#          this; the override layer enforces it here so we never write
+#          a value that would later be rejected at dispatch time.
+#
+# Default: $500 — preserves the prior hardcoded ``_DEFAULT_NOTIONAL_USD``
+#          behaviour for users who don't set an override.
+_NOTIONAL_USD_MIN: float = 5.0
+_NOTIONAL_USD_MAX: float = 2000.0
 
 
 _PRETP_SCHEMA = """
@@ -161,6 +179,7 @@ CREATE TABLE IF NOT EXISTS user_auto_trade_settings (
     leverage_cap             REAL,
     max_concurrent_positions INTEGER,
     symbol_preference        TEXT,     -- JSON list[str] or NULL = all
+    notional_usd             REAL,     -- per-user notional cap; NULL = engine default ($500)
     updated_at               TEXT    NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
@@ -312,6 +331,15 @@ def _coerce_auto_trade(raw: Dict[str, Any]) -> Dict[str, Any]:
                         if tok and tok.endswith("USDT") and tok.isalnum():
                             cleaned.append(tok)
                 out[key] = sorted(set(cleaned))  # canonical form
+        elif key == "notional_usd":
+            # Per-user notional cap.  Clamp into the [_NOTIONAL_USD_MIN,
+            # _NOTIONAL_USD_MAX] band — silently fixing rather than
+            # rejecting is the same UX as ``leverage_cap`` (which also
+            # min()s into the hard cap rather than 400'ing the request).
+            if isinstance(value, (int, float)) and float(value) > 0:
+                v = float(value)
+                v = max(_NOTIONAL_USD_MIN, min(v, _NOTIONAL_USD_MAX))
+                out[key] = v
     return out
 
 
@@ -347,7 +375,33 @@ class UserOverridesStore:
         self._migrate_pretp_grab_fraction()
         self._migrate_pretp_protect_manual_entries()
         self._migrate_auto_trade_symbol_preference()
+        self._migrate_auto_trade_notional_usd()
         log.info("UserOverridesStore opened at {}", self._path)
+
+    def _migrate_auto_trade_notional_usd(self) -> None:
+        """Idempotent ALTER for the ``notional_usd`` column.
+
+        Added 2026-05-20 — per-user notional override.  Existing
+        deploys carry the pre-override schema (no ``notional_usd``
+        column).  ``CREATE TABLE IF NOT EXISTS`` doesn't update
+        existing tables, so we detect the missing column via
+        ``PRAGMA table_info`` and ``ALTER TABLE ... ADD COLUMN``
+        it in if absent.  No-op on fresh DBs where the column is
+        already present from the CREATE.  NULL on existing rows
+        is interpreted by the dispatch layer as "use engine
+        default ($500)".
+        """
+        cur = self._conn.execute("PRAGMA table_info(user_auto_trade_settings)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "notional_usd" not in cols:
+            self._conn.execute(
+                "ALTER TABLE user_auto_trade_settings ADD COLUMN "
+                "notional_usd REAL"
+            )
+            log.info(
+                "UserOverridesStore: added user_auto_trade_settings."
+                "notional_usd column (2026-05-20 per-user notional override)"
+            )
 
     def _migrate_auto_trade_symbol_preference(self) -> None:
         """Idempotent ALTER for the ``symbol_preference`` column.
@@ -576,14 +630,16 @@ class UserOverridesStore:
                 """
                 INSERT INTO user_auto_trade_settings (
                     user_id, mode, position_size_pct, leverage_cap,
-                    max_concurrent_positions, symbol_preference, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    max_concurrent_positions, symbol_preference,
+                    notional_usd, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     mode = excluded.mode,
                     position_size_pct = excluded.position_size_pct,
                     leverage_cap = excluded.leverage_cap,
                     max_concurrent_positions = excluded.max_concurrent_positions,
                     symbol_preference = excluded.symbol_preference,
+                    notional_usd = excluded.notional_usd,
                     updated_at = excluded.updated_at
                 """,
                 (
@@ -593,6 +649,7 @@ class UserOverridesStore:
                     merged.get("leverage_cap"),
                     merged.get("max_concurrent_positions"),
                     sym_pref_json,
+                    merged.get("notional_usd"),
                     now,
                 ),
             )
@@ -660,6 +717,50 @@ def get_singleton() -> Optional["UserOverridesStore"]:
     return _SINGLETON
 
 
+def resolve_notional_usd(firebase_uid: str, default: float) -> float:
+    """Return the per-user notional override for ``firebase_uid``, or
+    ``default`` if no override is set / store is offline / lookup fails.
+
+    Called per-user by :func:`signal_dispatch.dispatch_signal_to_active_users`
+    so each user's qty is computed from their own override.  Three
+    lookup steps:
+
+    1. ``user_overrides`` singleton → ``user_store`` singleton →
+       ``get_by_firebase_uid(firebase_uid)`` → ``user_id``
+    2. ``get_auto_trade(user_id)`` → ``notional_usd`` field
+    3. Fall back to ``default`` (which the caller sets to
+       ``_DEFAULT_NOTIONAL_USD`` in dispatch — $500).
+
+    Soft-fail: any exception in steps 1–2 returns ``default``.  We
+    must NEVER block a dispatch on an override lookup; the worst
+    case is that a user's intended smaller notional falls back to
+    $500 and Binance returns -2019 (which the dispatch event log
+    surfaces in the Recent Activity card).
+    """
+    if _SINGLETON is None:
+        return default
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return default
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return default
+        row = _SINGLETON.get_auto_trade(int(user.user_id))
+        v = row.get("notional_usd")
+        if isinstance(v, (int, float)) and float(v) > 0:
+            return float(v)
+        return default
+    except Exception as exc:
+        log.debug(
+            "resolve_notional_usd: lookup failed for firebase_uid={} ({}); "
+            "falling back to default ${}",
+            firebase_uid, type(exc).__name__, default,
+        )
+        return default
+
+
 def operator_auto_trade_override() -> Dict[str, Any]:
     """Convenience: ``get_singleton().get_operator_auto_trade()`` with
     fallback to ``{}`` when the singleton is unset (tests, boot order)."""
@@ -705,6 +806,7 @@ _AUTO_TRADE_COL_TYPES: Dict[str, str] = {
     "leverage_cap": "float",
     "max_concurrent_positions": "int",
     "symbol_preference": "json_list",
+    "notional_usd": "float",
 }
 
 

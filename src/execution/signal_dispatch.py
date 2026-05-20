@@ -113,10 +113,14 @@ def reset_cache_for_test() -> None:
 
 
 def _compute_qty_split(
-    symbol: str, entry_price: float,
+    symbol: str,
+    entry_price: float,
+    notional_usd: Optional[float] = None,
 ) -> Tuple[float, float, float, float]:
     """Return ``(total_qty, tp1_qty, tp2_qty, tp3_qty)`` for a
-    $500-notional position on ``symbol`` at the given entry price.
+    ``notional_usd``-notional position on ``symbol`` at the given
+    entry price.  ``notional_usd=None`` → use the engine default
+    (``_DEFAULT_NOTIONAL_USD``, $500).
 
     Per-symbol precision enforced via :mod:`symbol_filters`
     (LOT_SIZE.stepSize floor + MIN_NOTIONAL guard).  Without this
@@ -140,15 +144,16 @@ def _compute_qty_split(
     if entry_price <= 0:
         return (0.0, 0.0, 0.0, 0.0)
 
-    raw_qty = _DEFAULT_NOTIONAL_USD / entry_price
+    notional = float(notional_usd) if notional_usd and notional_usd > 0 else _DEFAULT_NOTIONAL_USD
+    raw_qty = notional / entry_price
     total_qty = _sf.round_qty(symbol, raw_qty)
     if total_qty <= 0:
         return (0.0, 0.0, 0.0, 0.0)
     if not _sf.meets_min_notional(symbol, total_qty, entry_price):
         log.info(
-            "signal_dispatch: symbol={} qty={:.8f} price={:.8f} below "
-            "MIN_NOTIONAL after LOT_SIZE rounding — skipping",
-            symbol, total_qty, entry_price,
+            "signal_dispatch: symbol={} qty={:.8f} price={:.8f} notional=${:.2f} "
+            "below MIN_NOTIONAL after LOT_SIZE rounding — skipping",
+            symbol, total_qty, entry_price, notional,
         )
         return (0.0, 0.0, 0.0, 0.0)
 
@@ -198,15 +203,27 @@ async def dispatch_signal_to_active_users(
     if not uids:
         return 0
 
-    total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(symbol, entry_price)
-    if total_qty <= 0:
-        log.warning(
-            "signal_dispatch: zero qty for signal_id={} symbol={} entry={} — skipping",
-            signal_id, symbol, entry_price,
-        )
-        return 0
-
     async def _one_user(uid: str) -> bool:
+        # Per-user notional override (2026-05-20).  Each user can
+        # set their own ``notional_usd`` via the auto-trade settings
+        # page; falls back to ``_DEFAULT_NOTIONAL_USD`` ($500) when
+        # unset, store offline, or lookup fails.  Computed inside
+        # the per-user closure so a smaller-wallet user's override
+        # doesn't shrink the position for everyone else on the same
+        # signal.
+        from src.api import user_overrides as _uo
+        user_notional = _uo.resolve_notional_usd(uid, _DEFAULT_NOTIONAL_USD)
+        total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(
+            symbol, entry_price, notional_usd=user_notional,
+        )
+        if total_qty <= 0:
+            log.info(
+                "signal_dispatch: zero qty for uid={} signal_id={} symbol={} "
+                "entry={} notional=${} — skipping (below MIN_NOTIONAL after "
+                "LOT_SIZE rounding)",
+                uid, signal_id, symbol, entry_price, user_notional,
+            )
+            return False
         try:
             await _fsm.place_signal(
                 firebase_uid=uid,
