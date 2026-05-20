@@ -83,8 +83,34 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-def _minutes_since(ts: Optional[datetime]) -> int:
+def _minutes_since(ts: Optional[Any]) -> int:
+    """Minutes between ``ts`` and now, naive-tz-aware (assumes UTC
+    when no tzinfo is present).
+
+    Tolerant input: accepts ``datetime``, ISO-8601 ``str`` (the
+    shape stored on a few signal records that survived a Firestore
+    round-trip in production), or ``None``.  An unparseable value
+    returns 0 rather than crashing the API request — a stale or
+    malformed timestamp shouldn't 5xx the whole snapshot endpoint.
+
+    Hardened 2026-05-20 after a prod ``AttributeError: 'str' object
+    has no attribute 'tzinfo'`` traceback on
+    ``/api/snapshot`` (and friends) for a signal whose timestamp
+    had been serialised through JSON at some point in its life
+    cycle.  We can't fix the source (legacy records) — and even
+    once we do, defensive parsing here costs us nothing and keeps
+    the surface area resilient to future serialisation drift."""
     if ts is None:
+        return 0
+    if isinstance(ts, str):
+        try:
+            # Accept the common shapes: ``2026-05-20T04:25:00Z`` (Z
+            # suffix → not native to ``fromisoformat`` until 3.11),
+            # ``2026-05-20T04:25:00+00:00``, naive ``2026-05-20T04:25:00``.
+            ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return 0
+    if not isinstance(ts, datetime):
         return 0
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)

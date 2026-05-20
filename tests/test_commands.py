@@ -257,12 +257,28 @@ class TestCircuitBreakerCommands:
 
     @pytest.mark.asyncio
     async def test_stats_with_tracker(self):
+        """``/stats`` was reworked 2026-05-16 to use the *honest*
+        breakdown (decisive wins / pre-TP grabs / clean SL) instead
+        of the legacy ``Win rate: W/(W+L)`` headline.  The legacy
+        path silently classified PROFIT_LOCKED exits as losses
+        because ``SignalRecord.hit_tp`` is False when pre-TP fires.
+
+        Contract now: when a performance tracker is wired,
+        ``/stats`` calls :func:`format_honest_stats_message` and
+        replies with its output.  We patch the function (it lives
+        in a sibling module imported lazily inside the handler) and
+        assert that the reply carries its return value verbatim."""
         tracker = MagicMock()
-        tracker.format_stats_message.return_value = "📊 Stats"
         handler = _make_handler(performance_tracker=tracker)
-        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID), \
+             patch(
+                "src.performance_tracker_honest.format_honest_stats_message",
+                return_value="📊 Honest Stats",
+            ) as mock_fmt:
             await handler._handle_command("/stats", ADMIN_CHAT_ID)
-        tracker.format_stats_message.assert_called_once()
+        mock_fmt.assert_called_once_with(tracker, channel=None)
+        call_args = handler._telegram.send_message.call_args[0]
+        assert "Honest Stats" in call_args[1]
 
     @pytest.mark.asyncio
     async def test_reset_stats_no_tracker(self):
@@ -427,13 +443,22 @@ class TestSignalStatsCommands:
 
     @pytest.mark.asyncio
     async def test_real_stats_admin_shows_account_pnl(self):
-        """Admin user can use /real_stats and gets the account PnL stats."""
+        """``/real_stats`` is now a legacy alias for ``/stats`` (see
+        ``_legacy_aliases`` in :mod:`src.commands.__init__`).  Admin
+        invocation routes to the same honest-breakdown handler.
+
+        Same contract as :meth:`test_stats_with_tracker` — the
+        reworked handler delegates to
+        :func:`format_honest_stats_message`."""
         tracker = MagicMock()
-        tracker.format_stats_message.return_value = "📊 Account PnL Stats"
         handler = _make_handler(performance_tracker=tracker)
-        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID):
+        with patch("src.commands.TELEGRAM_ADMIN_CHAT_ID", ADMIN_CHAT_ID), \
+             patch(
+                "src.performance_tracker_honest.format_honest_stats_message",
+                return_value="📊 Account PnL Stats",
+            ) as mock_fmt:
             await handler._handle_command("/real_stats", ADMIN_CHAT_ID)
-        tracker.format_stats_message.assert_called_once_with(channel=None)
+        mock_fmt.assert_called_once_with(tracker, channel=None)
         call_args = handler._telegram.send_message.call_args[0]
         assert "Account PnL Stats" in call_args[1]
 
