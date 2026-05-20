@@ -8,7 +8,9 @@
 
 Research + plan PR landing this session. **Build pending owner sign-off** of the solo-operator decision queue at the bottom of `docs/PLAYSTORE_PLAN.md`.
 
-**One-line verdict:** publishable to Play Store by a solo developer with no entity, ~4–5 weeks for v1 (signals-viewer only), +2–4 weeks for v2 (auto-execute as feature update). Cornix / 3Commas / Bitsgap / Pionex / WunderTrading all live on Play (entities, but the policy doesn't require entity-based licensing for our launch geos). India NOT on the 15-jurisdiction crypto-custody licensing list.
+**One-line verdict:** publishable to Play Store by a solo developer with no entity, ~3 weeks for v1 (signals-viewer only) — account already verified ✓ — +2–3 weeks for v2 (auto-execute as feature update). Cornix / 3Commas / Bitsgap / Pionex / WunderTrading all live on Play (entities, but the policy doesn't require entity-based licensing for our launch geos). India NOT on the 15-jurisdiction crypto-custody licensing list.
+
+**Account status (2026-05-20):** owner has a verified personal Play Console account, created ~7–10 days back. Verification step DONE (saves ~3 days off Phase 0). Account is post Nov 13, 2023 → mandatory 14-day Closed Testing gate with 12+ testers applies before Production promotion (NOT skippable).
 
 **KEY STRATEGIC SHIFT — phase the app:**
 

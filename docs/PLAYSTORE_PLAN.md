@@ -87,12 +87,12 @@ The "remove auto-execute from v1" build also means: hide the existing connect-pa
 
 ### New realistic solo timeline
 
-| Phase | Weeks | Outcome |
+| Phase | Days | Outcome |
 |---|---|---|
-| 0 — Foundation (solo) | 1 | Play Console personal account opened ($25, PAN + Aadhaar). Free legal docs generated + customised (1 evening's owner work). GitHub Pages or Vercel hosting set up for legal docs (1 hour). Lowest-effort PRs (A1, A2, A5, A7, E2) opened + merged in parallel. |
-| 1 — Closed Testing (v1, signals-viewer only) | 2–3 | Remaining v1 PRs merged (A4-partial, A6, E1, E3). Store assets (Canva-built, 1 evening). v1 AAB uploaded to Closed Testing. 12+ testers from Telegram subscriber base opt in. 14-day continuous opt-in clock starts. |
-| 2 — v1 Production | 4–5 | Promote to Production (UK + EU first; India added after testing the geo). Reviewer back-and-forth resolved (signals-only listing is straightforward — minimal review-cycle risk). |
-| 3 — v2 Feature Update (auto-execute) | 6–9 | Once v1 is live + stable for 2–3 weeks: feature-flag-enable auto-execute in lumin-app. Ship A3, A8, A4-full as v2 PRs. Push v2 AAB; Play reviews as a feature update (lighter touch). v2 live. |
+| 0 — Foundation (solo) | 1–5 | ~~Play Console account~~ already verified ✓. Free legal docs generated + customised. GitHub Pages or Vercel hosting set up for legal docs. Lowest-effort PRs (A1, A2, A5, A7, E2) opened + merged. Store assets built (Canva). |
+| 1 — Closed Testing (v1, signals-viewer only) | 5–19 (14 mandatory days) | Remaining v1 PRs merged (A4-partial, A6, E1, E3). v1 AAB uploaded to Closed Testing. 12+ testers from Telegram subscriber base opt in. 14-day continuous opt-in clock runs (NOT skippable for accounts post Nov 13, 2023). |
+| 2 — v1 Production | 19–25 | Promote to Production (India + UK + EU). Production review 3–7 days typical. Reviewer back-and-forth resolved (signals-only listing is straightforward — minimal review-cycle risk). |
+| 3 — v2 Feature Update (auto-execute) | 40+ | Once v1 is live + stable for 2–3 weeks: feature-flag-enable auto-execute in lumin-app. Ship A3, A8, A4-full as v2 PRs. Push v2 AAB; Play reviews as a feature update (lighter touch). v2 live. |
 
 **v1 Play Store presence in 4–5 weeks. Auto-execute via v2 in 6–9 weeks.** Comparable to the original 6–10 weeks but with much higher likelihood of first-attempt acceptance (no entity → no FIU questions → no lawyer wait).
 
@@ -108,16 +108,29 @@ The "remove auto-execute from v1" build also means: hide the existing connect-pa
 | Store assets look amateur | New | **Manageable** — Canva produces "good enough"; the bar is policy compliance, not visual polish |
 | Privacy Policy / ToS generated text has gaps | New | **Real risk** — generator tools cover ~80% of typical case. We hand-write the 20% specific to our pattern (API key handling, KMS encryption note) — Claude can draft. Cornix's published terms are an excellent structural reference. |
 
+### Account status (updated 2026-05-20)
+
+**Owner already has a verified personal Play Console account.** Created ~7–10 days before 2026-05-20, so:
+
+* ✓ $25 fee paid, identity verified, account live — Phase 0 verification step is **DONE**
+* ✓ India personal verification (PAN + Aadhaar) complete
+* ✗ Account is post Nov 13, 2023 → **the 12-tester / 14-day Closed Testing gate still applies** before Production promotion (no shortcut available)
+* ✗ No app yet shipped on the account → first app submission goes through full review
+
+This saves ~3 days off Phase 0 (no verification wait) but does not skip the 14-day Closed Testing requirement. Phase 1 is still 14 calendar days minimum.
+
 ### What the owner does (solo workload, ordered)
 
-1. **Day 1 (2 hours):** Open Play Console account — go to `play.google.com/console` → pay $25 → upload PAN + Aadhaar → submit verification. Wait 1–3 days for approval.
-2. **Day 2–3 (3 hours):** Pick a hosting target for legal docs — easiest is GitHub Pages on a public repo (`lumin-legal`). Or Vercel free tier with the existing `360-v2` repo. Get a stable HTTPS URL like `mkmk749278.github.io/lumin-legal/privacy`. Set up the repo, deploy.
-3. **Day 4 (2 hours):** Generate Privacy Policy + ToS via TermsFeed (free). Read what they produce. We add our specific API-key + KMS paragraph (Claude drafts). Self-write the Risk Disclosure (Claude drafts; ~500 words). Push all three to the legal repo.
-4. **Day 5 (3 hours):** Open Canva (free tier). Use a Finance-app template. Make icon (512×512), feature graphic (1024×500), and 4 screenshots taken from the running v1 AAB (just the signals feed views).
-5. **Day 6 (1 hour):** Recruit 12+ testers from Telegram subscriber base. DM them with the Closed Testing opt-in URL once it's available.
-6. **Days 7–14:** Wait. Engage with reviewer comments as they arrive (Claude pre-drafts the response).
+1. ~~**Day 1:** Open Play Console account~~ — **DONE** (account already verified).
+2. **Day 1–2 (3 hours):** Pick a hosting target for legal docs — easiest is GitHub Pages on a public repo (`lumin-legal`). Or Vercel free tier with the existing `360-v2` repo. Get a stable HTTPS URL like `mkmk749278.github.io/lumin-legal/privacy`. Set up the repo, deploy.
+3. **Day 2–3 (2 hours):** Generate Privacy Policy + ToS via TermsFeed (free). Read what they produce. We add our specific API-key + KMS paragraph (Claude drafts). Self-write the Risk Disclosure (Claude drafts; ~500 words). Push all three to the legal repo.
+4. **Day 3–4 (3 hours):** Open Canva (free tier). Use a Finance-app template. Make icon (512×512), feature graphic (1024×500), and 4 screenshots taken from the running v1 AAB (just the signals feed views).
+5. **Day 4–5 (1 hour):** Recruit 12+ testers from Telegram subscriber base. DM them with the Closed Testing opt-in URL once it's available.
+6. **Day 5 (1 hour):** Upload first v1 AAB to Closed Testing track via Play Console. Geo: India + UK + EU. Submit for review.
+7. **Days 6–19 (14 calendar days):** Mandatory Closed Testing window. 12+ testers must be active continuously. Engage with reviewer comments as they arrive (Claude pre-drafts responses).
+8. **Day 19 (1 hour):** Promote build to Production track.
 
-**Owner total workload to launch v1 Closed Testing: ~11–12 hours of active work over ~7 days, plus passive waiting.**
+**Owner total active workload to launch v1 to Production: ~11 hours of active work over ~5 days, plus a 14-day mandatory waiting window. v1 Production live by day ~20.**
 
 ### What Claude does (parallel)
 
