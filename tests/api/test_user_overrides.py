@@ -549,3 +549,164 @@ def test_pretp_migration_adds_protect_manual_entries_to_existing_db(
         assert out["grab_fraction"] == 0.60
     finally:
         s.close()
+
+
+# ---------------------------------------------------------------------------
+# notional_usd (per-user notional override — 2026-05-20)
+# ---------------------------------------------------------------------------
+
+
+def test_notional_usd_persists_within_bounds(store: UserOverridesStore) -> None:
+    """Mid-band value persists as-is."""
+    out = store.update_auto_trade(1, {"notional_usd": 100.0})
+    assert out["notional_usd"] == 100.0
+
+
+def test_notional_usd_clamps_to_ceiling(store: UserOverridesStore) -> None:
+    """Above $2000 (B18 per-user position cap) → clamps to ceiling.
+    Same UX as ``leverage_cap`` clamping into B12."""
+    out = store.update_auto_trade(1, {"notional_usd": 5000.0})
+    assert out["notional_usd"] == 2000.0
+
+
+def test_notional_usd_clamps_to_floor(store: UserOverridesStore) -> None:
+    """Below $5 (Binance MIN_NOTIONAL for most pairs) → clamps to floor.
+    Anything below $5 is guaranteed to fail Binance's filter on every
+    symbol; silently fixing avoids a foot-gun."""
+    out = store.update_auto_trade(1, {"notional_usd": 1.0})
+    assert out["notional_usd"] == 5.0
+
+
+def test_notional_usd_rejects_non_positive(store: UserOverridesStore) -> None:
+    """Zero / negative not stored — caller should clear via explicit None."""
+    out = store.update_auto_trade(1, {"notional_usd": 0})
+    assert "notional_usd" not in out
+    out = store.update_auto_trade(1, {"notional_usd": -10.0})
+    assert "notional_usd" not in out
+
+
+def test_notional_usd_explicit_none_clears(store: UserOverridesStore) -> None:
+    """``notional_usd=None`` clears a previously-set override → dispatch
+    falls back to the engine default ($500)."""
+    store.update_auto_trade(1, {"notional_usd": 50.0})
+    out = store.update_auto_trade(1, {"notional_usd": None})
+    assert "notional_usd" not in out
+
+
+def test_notional_usd_survives_other_field_updates(store: UserOverridesStore) -> None:
+    """Setting leverage_cap doesn't clobber a previously-set notional_usd."""
+    store.update_auto_trade(1, {"notional_usd": 75.0})
+    out = store.update_auto_trade(1, {"leverage_cap": 10.0})
+    assert out["notional_usd"] == 75.0
+    assert out["leverage_cap"] == 10.0
+
+
+def test_notional_usd_migrated_on_pre_existing_db(tmp_path) -> None:
+    """Existing deploys carry a pre-notional_usd schema.  Opening the
+    store must ALTER TABLE in the new column and preserve pre-existing
+    rows."""
+    import sqlite3 as _sqlite3
+    db_path = tmp_path / "lumin.sqlite"
+
+    # Create the pre-migration schema by hand — NO ``notional_usd`` column.
+    conn = _sqlite3.connect(str(db_path))
+    conn.executescript(
+        """
+        CREATE TABLE IF NOT EXISTS users (
+            user_id INTEGER PRIMARY KEY
+        );
+        CREATE TABLE IF NOT EXISTS user_auto_trade_settings (
+            user_id                  INTEGER PRIMARY KEY,
+            mode                     TEXT,
+            position_size_pct        REAL,
+            leverage_cap             REAL,
+            max_concurrent_positions INTEGER,
+            symbol_preference        TEXT,
+            updated_at               TEXT NOT NULL
+        );
+        """
+    )
+    conn.execute("INSERT INTO users (user_id) VALUES (1)")
+    conn.execute(
+        "INSERT INTO user_auto_trade_settings (user_id, mode, leverage_cap, "
+        "updated_at) VALUES (?, 'live', 10.0, 'pre-migration')",
+        (1,),
+    )
+    conn.commit()
+    conn.close()
+
+    # Open via the store — triggers the idempotent ALTER TABLE migration.
+    s = UserOverridesStore(db_path)
+    try:
+        existing = s.get_auto_trade(1)
+        assert existing["mode"] == "live"
+        assert existing["leverage_cap"] == 10.0
+        assert "notional_usd" not in existing  # NULL → omitted
+
+        # A subsequent write must populate the new column without
+        # disturbing the pre-existing fields.
+        out = s.update_auto_trade(1, {"notional_usd": 50.0})
+        assert out["notional_usd"] == 50.0
+        assert out["mode"] == "live"
+        assert out["leverage_cap"] == 10.0
+    finally:
+        s.close()
+
+
+def test_resolve_notional_usd_falls_back_when_singleton_unset() -> None:
+    """No store singleton registered → returns the default unchanged.
+    Soft-fail semantics required because dispatch must never block on
+    an override lookup."""
+    from src.api import user_overrides as _uo
+    _uo.clear_singleton()
+    assert _uo.resolve_notional_usd("any-uid", 500.0) == 500.0
+
+
+def test_resolve_notional_usd_returns_default_when_user_unknown(
+    store: UserOverridesStore, tmp_path,
+) -> None:
+    """Singleton registered but firebase_uid doesn't resolve to a user
+    → return the default.  Mirrors the production case of a stale
+    firebase_uid cache after a user delete."""
+    from src.api import user_overrides as _uo
+    from src.api import users as _users
+    _uo.set_singleton(store)
+    user_store = _users.UserStore(tmp_path / "users.sqlite")
+    _users.set_singleton(user_store)
+    try:
+        assert _uo.resolve_notional_usd("nonexistent-uid", 500.0) == 500.0
+    finally:
+        _uo.clear_singleton()
+        _users.set_singleton(None)
+        user_store.close()
+
+
+def test_resolve_notional_usd_returns_user_override(
+    store: UserOverridesStore, tmp_path,
+) -> None:
+    """End-to-end: user with a set ``notional_usd`` gets that value
+    returned via ``resolve_notional_usd``."""
+    from src.api import user_overrides as _uo
+    from src.api import users as _users
+    _uo.set_singleton(store)
+    user_store = _users.UserStore(tmp_path / "users.sqlite")
+    _users.set_singleton(user_store)
+    try:
+        # Create user + their override.
+        user = user_store.get_or_create_by_firebase_uid(
+            "test-firebase-uid", "+15551234567",
+        )
+        store.update_auto_trade(user.user_id, {"notional_usd": 75.0})
+
+        # Resolve returns the override, not the default.
+        assert _uo.resolve_notional_usd("test-firebase-uid", 500.0) == 75.0
+
+        # User without an override gets the default.
+        user_store.get_or_create_by_firebase_uid(
+            "uid-no-override", "+15557654321",
+        )
+        assert _uo.resolve_notional_usd("uid-no-override", 500.0) == 500.0
+    finally:
+        _uo.clear_singleton()
+        _users.set_singleton(None)
+        user_store.close()

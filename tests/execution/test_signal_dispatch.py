@@ -206,6 +206,136 @@ async def test_dispatch_skips_zero_qty_signal() -> None:
 # ---------------------------------------------------------------------------
 
 
+# ---------------------------------------------------------------------------
+# Per-user notional override (2026-05-20)
+# ---------------------------------------------------------------------------
+
+
+def test_qty_split_honours_user_notional_override() -> None:
+    """When ``notional_usd`` is passed, qty math uses that value
+    instead of the engine default ($500).  Half-default ($250) →
+    roughly half the qty."""
+    total_default, _, _, _ = signal_dispatch._compute_qty_split(
+        "BTCUSDT", 29000.0,
+    )
+    total_half, _, _, _ = signal_dispatch._compute_qty_split(
+        "BTCUSDT", 29000.0, notional_usd=250.0,
+    )
+    # 250/500 = 0.5; both floored to stepSize so we allow one step of
+    # slack ($0.001 BTC ≈ $0.029 of notional).
+    assert abs(total_half - total_default / 2) < 0.002
+
+
+def test_qty_split_user_notional_below_min_returns_zero() -> None:
+    """User sets notional so low that the rounded qty fails
+    Binance MIN_NOTIONAL → returns all zeros so dispatch skips
+    cleanly rather than firing a -4164-doomed order."""
+    # $1 notional / $29000 entry = ~0.00003 BTC → floored to step
+    # 0.001 → 0 → fails MIN_NOTIONAL=5.
+    total, _, _, _ = signal_dispatch._compute_qty_split(
+        "BTCUSDT", 29000.0, notional_usd=1.0,
+    )
+    assert total == 0.0
+
+
+def test_qty_split_user_notional_zero_falls_back_to_default() -> None:
+    """Zero / None notional → use engine default (preserves prior
+    behaviour for users without an override row)."""
+    total_default, _, _, _ = signal_dispatch._compute_qty_split(
+        "BTCUSDT", 29000.0,
+    )
+    total_zero, _, _, _ = signal_dispatch._compute_qty_split(
+        "BTCUSDT", 29000.0, notional_usd=0.0,
+    )
+    total_none, _, _, _ = signal_dispatch._compute_qty_split(
+        "BTCUSDT", 29000.0, notional_usd=None,
+    )
+    assert total_zero == total_default
+    assert total_none == total_default
+
+
+@pytest.mark.asyncio
+async def test_dispatch_uses_per_user_notional_override() -> None:
+    """The doctrine: each user's qty is computed from their own
+    ``notional_usd`` override, not a single value broadcast to all.
+
+    Setup: user fb-A overrides to $100; user fb-B has no override
+    (default $500).  After dispatch, fb-A's place_signal call must
+    carry ~5× smaller total_qty than fb-B's.
+    """
+    def _resolve(uid: str, default: float) -> float:
+        # fb-A: small wallet, $100 override.  fb-B: default.
+        return 100.0 if uid == "fb-A" else default
+
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-A", "fb-B"]
+    ):
+        from src.execution import position_fsm
+        from src.api import user_overrides
+        with patch.object(
+            user_overrides, "resolve_notional_usd", side_effect=_resolve,
+        ), patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock,
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+            )
+        assert placed == 2
+
+        # Pull per-uid total_qty from the recorded calls.
+        per_uid_qty = {
+            call.kwargs["firebase_uid"]: call.kwargs["total_qty"]
+            for call in mock_place.await_args_list
+        }
+        # $100 / $29000 ≈ 0.00345 BTC, floored to step 0.001 → 0.003.
+        # $500 / $29000 ≈ 0.01724 BTC, floored to step 0.001 → 0.017.
+        # Ratio ~5.67×; allow stepSize-rounding slack.
+        assert per_uid_qty["fb-A"] < per_uid_qty["fb-B"]
+        assert per_uid_qty["fb-A"] / per_uid_qty["fb-B"] < 0.25  # < 1/4
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_user_when_their_notional_too_low() -> None:
+    """If a user's override makes the qty fail MIN_NOTIONAL, that
+    user is skipped but other users still get their orders placed."""
+    def _resolve(uid: str, default: float) -> float:
+        # fb-A: $1 (below MIN_NOTIONAL).  fb-B: default $500 (succeeds).
+        return 1.0 if uid == "fb-A" else default
+
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-A", "fb-B"]
+    ):
+        from src.execution import position_fsm
+        from src.api import user_overrides
+        with patch.object(
+            user_overrides, "resolve_notional_usd", side_effect=_resolve,
+        ), patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock,
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+            )
+        assert placed == 1  # only fb-B
+        called_uids = {
+            call.kwargs["firebase_uid"] for call in mock_place.await_args_list
+        }
+        assert called_uids == {"fb-B"}
+
+
 def test_active_uids_cached_within_ttl() -> None:
     """The user-roster cache reduces Firestore load.  Verify the
     underlying ``list_active_uids`` call is amortised across
