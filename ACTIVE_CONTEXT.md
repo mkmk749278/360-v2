@@ -4,6 +4,39 @@
 
 ---
 
+## In-session checkpoint 2026-05-20 — Dispatch event log shipped; DIV_CONT structure-misalign penalty in flight
+
+**Shipped (merged to main, deployed):**
+
+1. **PR #461** — engine-side dispatch event log (`src/execution/dispatch_log.py`) + `GET /api/auto-trade/recent-events`.  Per-user Firestore subcollection captures every order-placement attempt (placed + rejected) with Binance code/msg + typed exception class.  Soft-fails on Firestore errors — never blocks the FSM path.
+2. **PR #462** — fixed two pre-existing test_commands failures + `_minutes_since` AttributeError when snapshot timestamps arrive as strings (was 5xx'ing snapshot endpoints intermittently).  Suite now 5025-passing.
+3. **lumin-app PR #48** — Trade-tab Recent Activity card consuming the new endpoint with plain-English translations of Binance error codes (-2019 margin insufficient, -2014 IP whitelist, -1111 precision, etc.) + engine-class translations (SymbolNotInUserPreference, GlobalKillSwitchActiveError, etc.).  Severity-coloured chips: success/userAction/transient/system.
+
+**In flight — DIV_CONT structure-misalignment penalty:**
+
+Truth-report 2026-05-20 analysis identified DIVERGENCE_CONTINUATION as the single suspicious-degradation path:
+
+* avg PnL delta **-0.30** window-over-window (only path with notable negative trend)
+* SL rate **30%** on n=10 (highest of all active paths; norm is 4-9%)
+* Confidence gate filters only **5%** of eval-passing DIV_CONTs (vs 22-36% on other paths) — gate does almost no work
+* Hypothesis: marginal kept-signals are DIV_CONTs entering against the 4h structural leg with no HTF-structure penalty to suppress them
+
+**The fix:** add a symmetric counterpart to the existing `_STRUCTURE_ALIGN_BONUS` block in scanner.  When the 4h structure is `BULL_LEG`/`BEAR_LEG` with confidence ≥ `LEG_DOMINANCE_THRESHOLD` and **opposes** signal direction, apply `_STRUCTURE_MISALIGN_PENALTY` (default 5.0, env-overridable).  Enrolment is via `_STRUCTURE_MISALIGN_PATHS = frozenset({"DIVERGENCE_CONTINUATION"})` — narrow blast-radius; other paths can be added once a window's worth of telemetry validates the penalty's behaviour.
+
+* 9 new tests cover: long-in-bear-leg + short-in-bull-leg penalty, aligned no-double-counting, RANGE exempt, below-threshold exempt, unenrolled path never penalised, no-structure exempt, enrolment pin (test fails on enrolment changes), magnitude bounds (2.0-10.0).
+* Magnitude calibration: kept DIV_CONT avg final = 72.11 (gap -7.11 below threshold).  +5 brings marginal kept-signals (final 65-70) below threshold while leaving high-conviction signals (final 70+) safely above.
+
+**Caveat — sample size:** the original observation is based on n=10 closed DIV_CONT signals.  Recommend monitoring the next truth-report window for: (a) DIV_CONT emit count drop, (b) SL rate trajectory, (c) avg PnL trajectory.  If emit count drops to zero, the penalty is too aggressive and should be re-tuned via `STRUCTURE_MISALIGN_PENALTY` env (B8).
+
+**Doctrine compliance:**
+
+* B5 — soft penalty, not hard block.
+* OWNER_BRIEF §3.4a "HTF Structure, LTF Entry" — uses existing `structure_state.py` infrastructure as the doctrine mandates.
+* B8 — env-overridable.
+* "New evaluator paths or scoring models requires owner sign-off" — owner approved by saying "proceed" after the design summary in this session.
+
+---
+
 ## In-session checkpoint 2026-05-18 — Server-side execution: 14-PR roadmap SHIPPED + stack live end-to-end
 
 **Session outcome: the entire 14-PR server-side execution roadmap landed in one day** (PRs #430, #432–#440, #441 on the engine + lumin-app #39, #40, #41, #42 on the app), plus three small wiring follow-ups (#442 safety-gate wiring into FSM, #443 bootstrap init, #444 user-status endpoint + lumin-app #42 banner UI).  The stack is now LIVE end-to-end per OWNER_BRIEF §3.9 + B18:

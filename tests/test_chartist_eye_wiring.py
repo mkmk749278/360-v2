@@ -25,6 +25,8 @@ from src.scanner import (
     Scanner,
     _STRUCTURE_ALIGN_BONUS,
     _STRUCTURE_ALIGN_PATHS,
+    _STRUCTURE_MISALIGN_PATHS,
+    _STRUCTURE_MISALIGN_PENALTY,
 )
 from src.smc import Direction
 from src.structure_state import StructureState, StructureTracker
@@ -429,3 +431,167 @@ class TestStructureAlignmentBonus:
         sig = _make_sig(setup_class="TREND_PULLBACK_EMA", direction=Direction.LONG)
         sp, _, _ = _apply_structure_bonus(tr, sig, symbol="UNKNOWN")
         assert sp == 0.0
+
+
+# ---------------------------------------------------------------------------
+# Structure-MISALIGN penalty contract (PR 2026-05-20)
+# ---------------------------------------------------------------------------
+#
+# Symmetric counterpart to the align-bonus.  Truth-report 2026-05-20
+# showed DIV_CONT degrading (-0.30 avg PnL delta, 30% SL rate on n=10).
+# Hypothesis: marginal kept-signals are entering against the 4h leg.
+# This penalty subtracts confidence for DIV_CONT (only path enrolled
+# at first) when 4h structure opposes the signal direction.
+#
+# Replay the snippet from scanner._prepare_signal in isolation — same
+# pattern as the align-bonus tests above.  Keep in sync with the
+# production block in ``src/scanner/__init__.py``.
+
+
+def _apply_structure_misalign_penalty(
+    tracker: StructureTracker, sig: Signal, *, symbol: str,
+):
+    from src.structure_state import LEG_DOMINANCE_THRESHOLD as _THR
+    soft_penalty = 0.0
+    soft_penalty_by_type: dict = {}
+    fired_gates: list = []
+
+    setup_class_str = str(sig.setup_class or "")
+    if setup_class_str in _STRUCTURE_MISALIGN_PATHS:
+        st = tracker.get_state(symbol, tf="4h")
+        if (
+            st is not None
+            and st.state in ("BULL_LEG", "BEAR_LEG")
+            and st.confidence >= _THR
+        ):
+            d = sig.direction.value.upper()
+            opposes = (
+                (st.state == "BEAR_LEG" and d == "LONG")
+                or (st.state == "BULL_LEG" and d == "SHORT")
+            )
+            if opposes:
+                soft_penalty += _STRUCTURE_MISALIGN_PENALTY
+                soft_penalty_by_type["structure_align"] = (
+                    _STRUCTURE_MISALIGN_PENALTY
+                )
+                fired_gates.append(f"STRUCT_MISALIGN:{st.state}")
+    return soft_penalty, soft_penalty_by_type, fired_gates
+
+
+class TestStructureMisalignPenalty:
+    def test_enrolled_path_long_in_bear_leg_gets_penalty(self):
+        """DIV_CONT LONG opposing a 4h BEAR_LEG → +5 penalty."""
+        tr = StructureTracker()
+        _seed_bear_leg(tr)
+        sig = _make_sig(
+            setup_class="DIVERGENCE_CONTINUATION", direction=Direction.LONG,
+        )
+        sp, by_type, gates = _apply_structure_misalign_penalty(
+            tr, sig, symbol="BTCUSDT",
+        )
+        assert sp == pytest.approx(_STRUCTURE_MISALIGN_PENALTY)
+        assert by_type["structure_align"] == pytest.approx(
+            _STRUCTURE_MISALIGN_PENALTY,
+        )
+        assert gates == ["STRUCT_MISALIGN:BEAR_LEG"]
+
+    def test_enrolled_path_short_in_bull_leg_gets_penalty(self):
+        tr = StructureTracker()
+        _seed_bull_leg(tr)
+        sig = _make_sig(
+            setup_class="DIVERGENCE_CONTINUATION", direction=Direction.SHORT,
+        )
+        sp, _, gates = _apply_structure_misalign_penalty(
+            tr, sig, symbol="BTCUSDT",
+        )
+        assert sp == pytest.approx(_STRUCTURE_MISALIGN_PENALTY)
+        assert gates == ["STRUCT_MISALIGN:BULL_LEG"]
+
+    def test_enrolled_path_aligned_no_penalty(self):
+        """DIV_CONT LONG aligned with 4h BULL_LEG → no penalty here
+        (align-bonus block handles that on its own)."""
+        tr = StructureTracker()
+        _seed_bull_leg(tr)
+        sig = _make_sig(
+            setup_class="DIVERGENCE_CONTINUATION", direction=Direction.LONG,
+        )
+        sp, by_type, gates = _apply_structure_misalign_penalty(
+            tr, sig, symbol="BTCUSDT",
+        )
+        assert sp == 0.0
+        assert "structure_align" not in by_type
+        assert gates == []
+
+    def test_range_state_no_penalty(self):
+        """RANGE has no directional structure to oppose."""
+        tr = StructureTracker()
+        _seed_range(tr)
+        sig = _make_sig(
+            setup_class="DIVERGENCE_CONTINUATION", direction=Direction.LONG,
+        )
+        sp, _, _ = _apply_structure_misalign_penalty(
+            tr, sig, symbol="BTCUSDT",
+        )
+        assert sp == 0.0
+
+    def test_low_confidence_no_penalty(self):
+        """Below LEG_DOMINANCE_THRESHOLD — structure read too weak to
+        penalise on."""
+        from src.structure_state import LEG_DOMINANCE_THRESHOLD as _THR
+        tr = StructureTracker()
+        tr._state[("BTCUSDT", "4h")] = StructureState(
+            symbol="BTCUSDT", tf="4h", state="BEAR_LEG",
+            confidence=_THR - 0.01,  # just below threshold
+            pivots_in_window=4, bull_count=0, bear_count=4,
+        )
+        tr._refresh_ts[("BTCUSDT", "4h")] = time.time()
+        sig = _make_sig(
+            setup_class="DIVERGENCE_CONTINUATION", direction=Direction.LONG,
+        )
+        sp, _, _ = _apply_structure_misalign_penalty(
+            tr, sig, symbol="BTCUSDT",
+        )
+        assert sp == 0.0
+
+    def test_unenrolled_path_never_gets_penalty(self):
+        """SR_FLIP_RETEST is in the align-bonus set but NOT yet in the
+        misalign-penalty set — should never get penalised by this
+        block.  Narrow blast-radius is the entire point of the
+        enrolment registry."""
+        tr = StructureTracker()
+        _seed_bull_leg(tr)
+        sig = _make_sig(
+            setup_class="SR_FLIP_RETEST", direction=Direction.SHORT,
+        )
+        sp, _, _ = _apply_structure_misalign_penalty(
+            tr, sig, symbol="BTCUSDT",
+        )
+        assert sp == 0.0
+
+    def test_no_structure_state_no_penalty(self):
+        """Warmup / unrefreshed pair — penalty must not fire."""
+        tr = StructureTracker()
+        sig = _make_sig(
+            setup_class="DIVERGENCE_CONTINUATION", direction=Direction.LONG,
+        )
+        sp, _, _ = _apply_structure_misalign_penalty(
+            tr, sig, symbol="UNKNOWN",
+        )
+        assert sp == 0.0
+
+    def test_enrolment_set_contains_divcont_only_for_now(self):
+        """Blast-radius pin — only DIVERGENCE_CONTINUATION is enrolled
+        at PR ship time.  When the operator adds another path, this
+        test should fail loudly so the change is captured in PR
+        review (and a window of telemetry validates the new
+        enrolment)."""
+        assert _STRUCTURE_MISALIGN_PATHS == frozenset({
+            "DIVERGENCE_CONTINUATION",
+        })
+
+    def test_penalty_magnitude_is_within_calibration_range(self):
+        """Magnitude bounds — too low = ineffective, too high = wipes
+        out the path.  Calibrated 5.0 against DIV_CONT avg-final 72.11
+        on KEPT signals (gap -7.11 below threshold).  Allow a 2x
+        operator tuning range without test failure."""
+        assert 2.0 <= _STRUCTURE_MISALIGN_PENALTY <= 10.0
