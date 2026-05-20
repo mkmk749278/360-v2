@@ -4,7 +4,53 @@
 
 ---
 
-## Queued — Play Store Phase 0–3 (decision queued 2026-05-20)
+## Queued — Play Store Phase 0–3 (decision queued 2026-05-20; SOLO realities applied)
+
+Research + plan PR landing this session. **Build pending owner sign-off** of the solo-operator decision queue at the bottom of `docs/PLAYSTORE_PLAN.md`.
+
+**One-line verdict:** publishable to Play Store by a solo developer with no entity, ~4–5 weeks for v1 (signals-viewer only), +2–4 weeks for v2 (auto-execute as feature update). Cornix / 3Commas / Bitsgap / Pionex / WunderTrading all live on Play (entities, but the policy doesn't require entity-based licensing for our launch geos). India NOT on the 15-jurisdiction crypto-custody licensing list.
+
+**KEY STRATEGIC SHIFT — phase the app:**
+
+* **v1 Play submission:** signals-viewer only. No API-key connection, no auto-execute. Purely an information app surfacing the Telegram-channel signals + Recent Activity history. First-attempt Production approval likelihood: ~85–90% (vs. ~50–60% for full auto-execute on day one).
+* **v2 feature update:** add API-key connection + auto-execute, ~4–8 weeks after v1 is live + stable. Feature updates get much lighter review than initial submissions.
+
+**Solo realities applied (vs. original ambition plan):**
+
+* **DROPPED:** FIU-IND lawyer engagement (no budget) — accept the regulatory gray area, Cornix precedent applies, launch UK+EU first
+* **DROPPED:** Designer for store assets — Canva free tier + GIMP + in-app screenshots
+* **SIMPLIFIED:** Legal docs via TermsFeed/FreePrivacyPolicy generators + Claude-drafted custom paragraphs for the API-key + KMS-encryption specifics + Risk Disclosure (Cornix-style, self-written, ~500 words)
+* **SIMPLIFIED:** Hosting via GitHub Pages or Vercel free tier — domain nice but not blocking
+* **TESTERS:** Owner recruits 12+ from existing paid Telegram subscriber base
+
+**Total owner budget:** ~$25 (Play Console one-time fee). Total owner workload to v1 Closed Testing: ~11–12 hours active work over ~7 days plus passive waiting.
+
+**v1 code work (8 PRs, ~5–7 days serial):**
+
+| Repo | PR | Scope |
+|---|---|---|
+| lumin-app | A1 | 18+ age confirmation gate |
+| lumin-app | A2 | First-run risk disclosure modal |
+| lumin-app | A4-partial | In-app account deletion (no API-key revocation in v1 — that's v2) |
+| lumin-app | A5 | Settings → ToS / Privacy / Risk URLs |
+| lumin-app | A6 | Region-block enforcement |
+| lumin-app | A7 | Copy vocabulary audit |
+| lumin-app | feature-flag | Hide existing connect-page / auto-trade UI from v1 build |
+| 360-v2 | E1 | DELETE /api/account endpoint |
+| 360-v2 | E2 | GET /api/region for client region-check |
+| 360-v2 | E3 | Standardised user-facing copy module |
+
+**v2 code work (deferred until v1 is live):** A3 (prominent disclosure pre-API-entry), A4-full (API-key revocation in account deletion), A8 (inline privacy notice on data inputs).
+
+**Owner decision queue (sign-off needed before Phase 0 starts):**
+
+1. Approve the solo + phased plan?
+2. Confirm hosting target — GitHub Pages on a `lumin-legal` repo, or Vercel free tier on `360-v2`?
+3. Confirm tester recruitment path — DM 12+ existing paid Telegram subscribers, or wider opt-in via Telegram channel announcement?
+
+---
+
+## Queued — Play Store Phase 0–3 (original, "with team + budget" plan — superseded by solo reality above)
 
 Research + plan PR landing this session. **Build pending owner sign-off** of the decision queue at the bottom of `docs/PLAYSTORE_PLAN.md`.
 
