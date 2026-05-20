@@ -132,7 +132,7 @@ from src.oi_filter import analyse_oi, check_oi_gate
 from src.pair_manager import PairTier, classify_pair_tier
 from src.confluence_detector import ConfluenceDetector
 from src.level_book import LevelBook
-from src.structure_state import StructureTracker
+from src.structure_state import LEG_DOMINANCE_THRESHOLD, StructureTracker
 from src.volume_profile import VolumeProfileStore
 from src.spoof_detect import check_spoof_gate
 from src.tier_manager import TierManager
@@ -604,6 +604,40 @@ _STRUCTURE_ALIGN_PATHS: frozenset = frozenset({
     "POST_DISPLACEMENT_CONTINUATION",
     "SR_FLIP_RETEST",
     "QUIET_COMPRESSION_BREAK",
+})
+
+# Structure-MISALIGNMENT penalty (PR 2026-05-20).  The existing
+# ``_STRUCTURE_ALIGN_BONUS`` is asymmetric — alignment gets rewarded,
+# misalignment gets nothing.  Truth-report 2026-05-20 found
+# DIVERGENCE_CONTINUATION has the highest SL rate (30% on n=10) AND
+# the most-degraded avg-PnL window-over-window (-0.30) of all active
+# paths.  DIV_CONT's eval-stage funnel filters 98% of attempts but
+# the confidence gate then passes 95% of the residual — the gate
+# does almost no work.  Hypothesis: marginal kept-signals are
+# DIV_CONTs entering against the 4h structural leg, fighting the
+# higher-TF trend with no HTF-structure penalty to suppress them.
+#
+# This penalty is the symmetric counterpart to the bonus.  When the
+# 4h structure exists with sufficient confidence AND opposes signal
+# direction (BULL_LEG + SHORT or BEAR_LEG + LONG), apply a small
+# soft penalty.  ``RANGE`` and below-confidence states are exempt
+# (the structural read is too weak to penalise on).
+#
+# Per-path enrolment via ``_STRUCTURE_MISALIGN_PATHS`` so the
+# blast-radius stays narrow — only DIV_CONT enrols at first.  Other
+# paths can be added once a window's worth of telemetry validates
+# the penalty's behaviour.
+#
+# Magnitude 5.0 calibration: with DIV_CONT avg-final 72.11 on KEPT
+# signals and 65.0 threshold, +5 brings the marginal kept-signals
+# (final 65-70, ~30% of KEPTs based on the dispersion in the truth
+# report) below threshold while leaving high-conviction signals
+# (final 70+) safely above.  Env-overridable per B8.
+_STRUCTURE_MISALIGN_PENALTY: float = float(
+    os.getenv("STRUCTURE_MISALIGN_PENALTY", "5.0")
+)
+_STRUCTURE_MISALIGN_PATHS: frozenset = frozenset({
+    "DIVERGENCE_CONTINUATION",
 })
 
 # Per-(symbol, setup_class, direction) dispatch cooldown.  Default 30 min
@@ -5097,6 +5131,65 @@ class Scanner:
             log.debug(
                 "Structure-align bonus query error for {} {} (fail open): {}",
                 symbol, chan_name, _sa_exc,
+            )
+
+        # ── Structure-MISALIGN penalty (DIV_CONT only at first) ────────
+        # Symmetric counterpart to the align-bonus block above.  See
+        # ``_STRUCTURE_MISALIGN_PENALTY`` constant docstring for the
+        # truth-report data + magnitude rationale.  Only paths in
+        # ``_STRUCTURE_MISALIGN_PATHS`` participate (currently
+        # DIVERGENCE_CONTINUATION only); other paths can enrol once a
+        # telemetry window validates behaviour.
+        #
+        # No penalty when:
+        #   - structure not yet detected (warmup / new pair)
+        #   - state is RANGE (no directional structure to oppose)
+        #   - confidence below LEG_DOMINANCE_THRESHOLD (weak read)
+        #   - direction matches structure (already got the bonus)
+        try:
+            if _setup_class_str in _STRUCTURE_MISALIGN_PATHS:
+                _struct_state_mis = self.structure_tracker.get_state(
+                    symbol, tf="4h",
+                )
+                if (
+                    _struct_state_mis is not None
+                    and _struct_state_mis.state in ("BULL_LEG", "BEAR_LEG")
+                    and _struct_state_mis.confidence >= LEG_DOMINANCE_THRESHOLD
+                ):
+                    _dir_upper = sig.direction.value.upper()
+                    _opposes = (
+                        (_struct_state_mis.state == "BEAR_LEG"
+                         and _dir_upper == "LONG")
+                        or (_struct_state_mis.state == "BULL_LEG"
+                            and _dir_upper == "SHORT")
+                    )
+                    if _opposes:
+                        soft_penalty += _STRUCTURE_MISALIGN_PENALTY
+                        # Reuse the existing structure_align telemetry
+                        # bucket — the truth report already surfaces it
+                        # per-path so the penalty + bonus delta net out
+                        # naturally in the soft-penalty-per-type table.
+                        _soft_penalty_by_type["structure_align"] = (
+                            _soft_penalty_by_type.get(
+                                "structure_align", 0.0,
+                            )
+                            + _STRUCTURE_MISALIGN_PENALTY
+                        )
+                        _fired_gates.append(
+                            f"STRUCT_MISALIGN:{_struct_state_mis.state}"
+                        )
+                        log.debug(
+                            "STRUCTURE_MISALIGN_PENALTY {} {} +{:.1f} "
+                            "({} conf={:.2f}) total_penalty={:.1f}",
+                            symbol, chan_name, _STRUCTURE_MISALIGN_PENALTY,
+                            _struct_state_mis.state,
+                            _struct_state_mis.confidence,
+                            soft_penalty,
+                        )
+        except Exception as _sm_exc:
+            log.debug(
+                "Structure-misalign penalty query error for {} {} (fail open): {}",
+                symbol, chan_name, _sm_exc,
             )
 
         # ── Per-pair rolling-window soft penalty ─────────────────────────
