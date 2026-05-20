@@ -4,6 +4,82 @@
 
 ---
 
+## In-session checkpoint 2026-05-20 — SESSION END (20 PRs merged: capital-preservation stack + complete Play Store launch prep)
+
+**Massive session.** Two distinct workstreams shipped in parallel: (1) the truth-report Priority-A+B capital-preservation work, (2) the full Play Store launch prep from research → plan → 8 code PRs → 4 paste-ready docs.
+
+### Workstream 1 — Capital preservation (Priority A + B from truth report) — all MERGED
+
+| PR | What | Why |
+|---|---|---|
+| 360-v2 #461 | Per-user dispatch event log + ``GET /api/auto-trade/recent-events`` | Surface every order-placement attempt to the app so users see *why* a signal didn't open |
+| 360-v2 #462 | tzinfo crash fix + 2 pre-existing test fixes | Snapshot API 5xx fix; suite 5025-passing |
+| lumin-app #48 | Recent Activity card with plain-English Binance error translations | -2019 / -2014 / -1111 / typed-exception → human text |
+| 360-v2 #463 | DIV_CONT structure-misalign penalty (-15 / -10 vs 4h leg) | Priority-A from truth report — 30% SL rate on DIV_CONT closed signals (n=10) |
+| 360-v2 #464 | Adverse-excursion invalidation rule (0.70×SL_dist + momentum-not-confirming) | Priority-B — catches the full-SL pattern existing 3 rules miss; saves ~2.4% margin per kill |
+| lumin-app #49 | Recent Activity pull-to-refresh wiring fix | Owner-reported "still showing old binance activity" |
+| 360-v2 #465 | Per-user notional override (notional_usd column + dispatch wiring) | Owner has $20.50 USD wallet → -2019 on $500 default; can now set $50 |
+| lumin-app #50 | Position notional slider on Auto-trade Settings page | App-side for #465 |
+
+### Workstream 2 — Play Store launch prep — all MERGED
+
+| PR | What |
+|---|---|
+| 360-v2 #466 | Deep research + execution plan (docs/PLAYSTORE_RESEARCH_2026-05-20.md + docs/PLAYSTORE_PLAN.md) — verdict: publishable, ~3 weeks v1 |
+| lumin-app #51 | A1+A2 — first-run consent gate (age 18+ + risk + not-advice) |
+| lumin-app #52 | A7 — vocabulary audit (dropped iOS reader-app jargon) |
+| 360-v2 #467 | E2 — ``GET /api/region`` endpoint with CF-IPCountry header reading + soft-fail open |
+| lumin-app #53 | A6 — RegionGate widget wrapping auto-trade entry points |
+| 360-v2 #468 | E1 — ``DELETE /api/account`` with orchestrated blob→row→cache flow + typed failure tags |
+| lumin-app #54 | A5 — Settings → Legal section (Privacy / ToS / Risk URLs via url_launcher) |
+| lumin-app #55 | A4-partial — Settings → Delete account UI with type-DELETE confirmation |
+| lumin-app #56 | AAB build pipeline alongside existing APK output |
+| 360-v2 #469 | docs/PLAYSTORE_LISTING_COPY.md — every Play Console paste-ready field |
+| 360-v2 #470 | docs/PLAYSTORE_VISUAL_ASSETS.md — Canva recipe for icon + feature graphic + 4 screenshots |
+| 360-v2 #471 | docs/PLAYSTORE_TESTER_RECRUITMENT.md — Telegram DM templates for 12+ tester recruitment |
+
+### Adjacent infrastructure shipped (owner-side, this session)
+
+* **mkmk749278/lumin-legal** repo created + populated with index.md + privacy.md + terms.md + risk.md (drafted in chat, pasted by owner). GitHub Pages live at https://mkmk749278.github.io/lumin-legal/ via "GitHub Actions" source + Static HTML workflow.
+* Owner's personal Play Console account verified (PAN + Aadhaar). Post Nov-2023 → 14-day Closed Testing gate applies.
+
+### Final stats
+
+* **Engine tests:** 5093 passing (was 5025 — +68 new)
+* **Lumin tests:** 106 passing (was 79 — +27 new)
+* **Engine PRs merged this session:** 11 (#461–#471 minus #463 → 466 sequence: 8 code PRs + 3 docs PRs in 360-v2)
+* **Lumin PRs merged this session:** 9 (#48–#56)
+* **Total PRs merged:** 20
+
+### Capital-preservation impact stack — now live end-to-end
+
+Four layers working together to keep small-wallet users profitable:
+
+1. **DIV_CONT structure-misalign penalty** (#463) — filters marginal kept-signals against 4h structural leg
+2. **Adverse-excursion invalidation** (#464) — exits at 0.70×SL when momentum/regime/EMA all nominally intact but price still grinding to SL
+3. **Per-user notional override** (#465) — small wallets size to fit their margin budget
+4. **Dispatch event log + Recent Activity card** (#461, #48) — when something does reject, plain-English reason
+
+### Owner remaining workload to v1 Production listing
+
+* Build Canva icon + feature graphic (~30 min) per `docs/PLAYSTORE_VISUAL_ASSETS.md`
+* Take 4 phone screenshots (~20 min) per same doc's framing guide
+* Play Console paste session (~30 min) using `docs/PLAYSTORE_LISTING_COPY.md` verbatim
+* Trigger one lumin-app main push → download AAB from Actions artifacts → upload to Closed Testing
+* DM 12+ paid Telegram subscribers using `docs/PLAYSTORE_TESTER_RECRUITMENT.md` templates
+* 14-day continuous opt-in wait (mandatory for post Nov-2023 personal accounts)
+* Promote to Production + 3-7 day Google review
+* **Production live: ~3-4 weeks wall-clock**
+
+### Decision queue for next session
+
+* Validate the misalign-penalty enrolment after one truth-report window (next run 2026-05-21 or similar) — expand from `DIVERGENCE_CONTINUATION` to other in `_STRUCTURE_ALIGN_PATHS` showing same asymmetric-quality pattern (TPE, CLS, PDC, SR_FLIP, QCB)
+* Validate adverse-excursion EV after one truth-report window — if PREMATURE > 25% raise `INVALIDATION_ADVERSE_EXCURSION_FRACTION` to 0.80; if < 10% consider tightening to 0.65
+* Open queue item dropped earlier: E3 (engine reads lumin-legal URLs for Telegram welcome message) — DEFERRED, the `LegalUrls` constants in lumin-app PR #54 already serve as cross-app source of truth for the launch
+* Closed Testing first-tester opt-in metrics — count + diagnose if conversion below ~60% of DM'd candidates
+
+---
+
 ## Queued — Play Store Phase 0–3 (decision queued 2026-05-20; SOLO realities applied)
 
 Research + plan PR landing this session. **Build pending owner sign-off** of the solo-operator decision queue at the bottom of `docs/PLAYSTORE_PLAN.md`.
