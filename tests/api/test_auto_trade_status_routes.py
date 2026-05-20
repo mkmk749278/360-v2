@@ -413,3 +413,87 @@ def test_positions_returns_user_positions_from_firestore(
     assert pos["entry_price_filled"] == 29005.5
     assert pos["pretp_fired"] is False
     assert pos["created_at"] == now.isoformat()
+
+
+# ---------------------------------------------------------------------------
+# recent-events endpoint — dispatch event log for the user-facing
+# Recent Activity card
+# ---------------------------------------------------------------------------
+
+
+def test_recent_events_requires_firebase_auth() -> None:
+    app = _build_app(identity=None)
+    client = TestClient(app)
+    assert client.get("/api/auto-trade/recent-events").status_code == 401
+
+
+def test_recent_events_returns_empty_when_not_initialised() -> None:
+    """No dispatch_log singleton wired (engine boot without GCP env)
+    → returns ``{"events": []}`` not 5xx.  Matches the safe-default
+    posture of every other server-side read endpoint."""
+    from src.execution import dispatch_log
+    dispatch_log.reset_for_test()
+    app = _build_app(identity=_firebase_user(uid="fb-z"))
+    client = TestClient(app)
+    r = client.get("/api/auto-trade/recent-events")
+    assert r.status_code == 200
+    assert r.json() == {"events": []}
+
+
+def test_recent_events_returns_user_events_from_firestore(
+    monkeypatch,
+) -> None:
+    """End-to-end: a mocked dispatch_log returns one placed event +
+    one rejected event with a Binance code; both surface in the
+    response shape the app expects."""
+    from datetime import datetime, timezone, timedelta
+    from src.execution import dispatch_log
+
+    now = datetime.now(timezone.utc)
+
+    def _fake_list(firebase_uid: str, *, limit: int = 20):
+        return [
+            dispatch_log.DispatchEvent(
+                event_id="evt-1",
+                firebase_uid=firebase_uid,
+                signal_id="sig-A",
+                symbol="BTCUSDT",
+                direction="LONG",
+                outcome="placed",
+                timestamp=now,
+                entry_price=29000.0,
+                total_qty=0.017,
+            ),
+            dispatch_log.DispatchEvent(
+                event_id="evt-2",
+                firebase_uid=firebase_uid,
+                signal_id="sig-B",
+                symbol="PROMUSDT",
+                direction="SHORT",
+                outcome="rejected",
+                timestamp=now - timedelta(minutes=2),
+                entry_price=0.1278,
+                reject_class="OrderRejectedByBinance",
+                reject_detail="full diagnostic",
+                reject_binance_code=-2019,
+                reject_binance_msg="Margin is insufficient.",
+            ),
+        ]
+
+    dispatch_log._db = MagicMock()  # truthy so endpoint passes the init guard
+    monkeypatch.setattr(dispatch_log, "list_recent_events", _fake_list)
+
+    app = _build_app(identity=_firebase_user(uid="fb-w"))
+    client = TestClient(app)
+    body = client.get("/api/auto-trade/recent-events").json()
+    assert len(body["events"]) == 2
+    placed = body["events"][0]
+    rejected = body["events"][1]
+    assert placed["outcome"] == "placed"
+    assert placed["symbol"] == "BTCUSDT"
+    assert placed["reject_binance_code"] is None
+    assert rejected["outcome"] == "rejected"
+    assert rejected["symbol"] == "PROMUSDT"
+    assert rejected["reject_class"] == "OrderRejectedByBinance"
+    assert rejected["reject_binance_code"] == -2019
+    assert rejected["reject_binance_msg"] == "Margin is insufficient."

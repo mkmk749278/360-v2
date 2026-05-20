@@ -223,6 +223,17 @@ async def dispatch_signal_to_active_users(
                 tp2_qty=tp2_qty,
                 tp3_qty=tp3_qty,
             )
+            # Record the successful placement for the user-facing
+            # Recent Activity card.  Soft-fail inside the helper.
+            from src.execution import dispatch_log as _dl
+            _dl.record_placed(
+                firebase_uid=uid,
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                entry_price=entry_price,
+                total_qty=total_qty,
+            )
             return True
         except Exception as exc:
             # Typed exceptions from the safety-gate chain (PR-14
@@ -243,6 +254,38 @@ async def dispatch_signal_to_active_users(
                 "signal_dispatch: rejected uid={} signal_id={} symbol={} "
                 "reason={} detail={!r}",
                 uid, signal_id, symbol, type(exc).__name__, str(exc),
+            )
+            # Extract Binance code + msg from the SignResponse body
+            # when the rejection was an OrderRejectedByBinance — the
+            # app's Recent Activity card surfaces these as the
+            # plain-English explanation (e.g. -2019 → "Margin is
+            # insufficient — top up your Futures wallet").
+            b_code = None
+            b_msg = None
+            sig_resp = getattr(exc, "signing_response", None)
+            if sig_resp is not None:
+                body = getattr(sig_resp, "binance_body", None)
+                if isinstance(body, dict):
+                    raw_code = body.get("code")
+                    if raw_code is not None:
+                        try:
+                            b_code = int(raw_code)
+                        except (TypeError, ValueError):
+                            pass
+                    raw_msg = body.get("msg") or body.get("message")
+                    if isinstance(raw_msg, str):
+                        b_msg = raw_msg
+            from src.execution import dispatch_log as _dl
+            _dl.record_rejected(
+                firebase_uid=uid,
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                entry_price=entry_price,
+                reject_class=type(exc).__name__,
+                reject_detail=str(exc),
+                reject_binance_code=b_code,
+                reject_binance_msg=b_msg,
             )
             return False
 
