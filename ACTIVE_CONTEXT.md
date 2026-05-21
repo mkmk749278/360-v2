@@ -4,6 +4,63 @@
 
 ---
 
+## In-session checkpoint 2026-05-21 — SESSION END (Play Store LIVE in Closed Testing; speed + onboarding polish landed; Firebase Phone Auth fixed)
+
+**App is live.** Lumin is published to the Play Store Closed Testing track at `https://play.google.com/store/apps/details?id=org.luminapp.lumin`. Owner has a working tester opt-in URL; the only block to Production is the 14-day continuous-opt-in clock + 12+ tester count.
+
+### Workstream — Play Store submission execution
+
+Day 2 of the launch arc: yesterday's prep (20 merged PRs from 2026-05-20) was paste-ready; today's job was getting the AAB through the Play Console form pipeline + reacting to each rejection until the submission landed.
+
+| Hurdle | Resolution |
+|---|---|
+| Financial features declaration triggered UK/EU licensing block when "Cryptocurrency exchange" was ticked | Un-declared crypto-exchange; kept only "Financial advice". Same pattern Cornix / 3Commas use. UK/EU stay open without licensing. |
+| Photo / video / audio permissions auto-merged into AAB by transitive Flutter deps (open_filex / permission_handler) | **PR lumin-app #57** — workflow step strips REQUEST_INSTALL_PACKAGES + adds ``tools:node="remove"`` for 6 media permissions on AAB build only. Sideload APK unchanged (in-app updater still works). Resulting AAB ships INTERNET + POST_NOTIFICATIONS only. |
+| Play Console refused the REQUEST_INSTALL_PACKAGES declaration form (mandatory YouTube demo video) | Stripped the permission entirely via the same #57 step rather than fight the form. |
+| Version code 148 rejected after Internal Testing upload | Empty-commit trigger → build 149 with new version code → uploaded to Closed Testing successfully. |
+| Tester instructions field 500-char cap | Rewrote from 1354 → 446 chars. |
+| Firebase Phone Auth: "Invalid app info in play_integrity_token" on Play install | Play re-signs uploaded AABs with its own key; Firebase had only the upload-key SHA. Added **Play app-signing SHA-1 + SHA-256** to Firebase Console (4 fingerprints total now). Owner pasted; propagation ~5-10 min. |
+
+### Workstream — perceived-latency optimisation
+
+Owner-flagged that the app felt laggy compared to Binance/Telegram, particularly for Indian users hitting the EU VPS (~250-400ms RTT). Two-front fix:
+
+| Layer | PR / change | Effect |
+|---|---|---|
+| Server | Cloudflare CDN in front of api.luminapp.org (free tier, proxied A record, SSL/TLS Full mode) | Cuts API RTT from ~400ms to ~50ms for Indian users via the Mumbai edge. Verified live (`country_code: IN`, `source: cf-header`). |
+| App | **PR lumin-app #58** — SWR cache prewarm on sign-in | Fires PulseBundle + TradeEngineSnapshot + RegionInfo fetches in microtasks the moment the user becomes authenticated. First tab switch after sign-in renders synchronously from cache instead of waiting on a cold network round-trip. |
+
+The bigger geographic win — moving the VPS from Europe to Mumbai/Bangalore — is queued but not blocking; Cloudflare absorbs the worst of the latency in the meantime.
+
+### Workstream — onboarding polish (owner feedback)
+
+| Layer | PR / change |
+|---|---|
+| App | **PR lumin-app #59** — three-stage first-run flow: WelcomePage (brand intro + value-prop + Get Started) → WelcomeConsentPage (3-checkbox legal ack, unchanged) → AuthGate. Welcome is one-shot per device; consent re-shows on version bump. Doctrine pinned in tests: a consent-version bump must NOT re-show welcome. |
+| App | Phone signin page copy: "Sign in" → "Sign in or sign up" + clarified subtitle. Same Firebase Phone OTP flow handles both new + returning users; the copy now matches the mechanics. |
+
+### Adjacent infrastructure shipped (this session)
+
+* **mkmk749278/lumin-legal** GitHub Pages now live at `https://mkmk749278.github.io/lumin-legal/{privacy,terms,risk,delete-account}`. Workflow switched from Static HTML → Deploy from a branch so Jekyll renders the markdown into proper HTML. Linked from the Play Console listing.
+* Cloudflare DNS / SSL / proxied A record live for api.luminapp.org. Owner manages the zone.
+
+### Owner remaining workload to v1 Production
+
+1. Wait ~5-10 min for the Firebase SHA propagation; retry phone OTP from the Play install to confirm the auth fix.
+2. Once CI builds 150 (auto-triggered by #59 merge), download the AAB from Actions artifacts and upload as a new release on the Closed Testing track. Release notes (under 500 chars): "Smoother first launch: new welcome page with feature overview; clearer 'sign in or sign up' flow; faster tab switches after sign-in (background cache prewarm); cleaner permission footprint — only network + notifications."
+3. Recruit 12+ testers via personal network + r/AlphaAndBetaUsers + Telegram tester-swap groups (templates in `docs/PLAYSTORE_TESTER_RECRUITMENT.md`).
+4. 14-day continuous-opt-in clock starts when the 12th tester opts in (mandatory for post Nov-2023 personal accounts; not skippable).
+5. Promote to Production → 3-7 day Google review → live worldwide.
+
+### Decision queue for next session
+
+* Truth-report 2026-05-21+ validation of: (a) DIV_CONT misalign-penalty enrolment expansion candidates (TPE / CLS / PDC / SR_FLIP / QCB), (b) adverse-excursion EV trajectory.
+* Closed Testing first-tester opt-in metrics — count + conversion rate from DM'd candidates.
+* App build 150 verification: install fresh from Play, confirm welcome page → consent → phone OTP → main shell works end-to-end on the Play-signed AAB.
+* Decision on VPS migration EU → Mumbai/Bangalore once tester traffic gives a real latency baseline (Cloudflare buys time; migration is the structural fix).
+
+---
+
 ## In-session checkpoint 2026-05-20 — SESSION END (20 PRs merged: capital-preservation stack + complete Play Store launch prep)
 
 **Massive session.** Two distinct workstreams shipped in parallel: (1) the truth-report Priority-A+B capital-preservation work, (2) the full Play Store launch prep from research → plan → 8 code PRs → 4 paste-ready docs.

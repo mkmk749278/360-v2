@@ -174,6 +174,10 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
 | Invalidation quality audit | `src/invalidation_audit.py` |
 | **Server-side execution stack (planned 2026-05-18 — build pending; see `Server-side execution doctrine` above for the planned module map)** | `src/security/` + `src/execution/` |
 
+### Lumin app distribution (2026-05-21)
+
+The companion app (`github.com/mkmk749278/lumin-app`, package `org.luminapp.lumin`) is live on the Play Store Closed Testing track. CI builds the AAB on every push to `main` and **strips REQUEST_INSTALL_PACKAGES + 6 transitive media permissions on the AAB path only** — the sideload APK retains them for the in-app updater. Mobile clients hit the engine through Cloudflare (`api.luminapp.org`) which terminates SSL, sets `CF-IPCountry`, and caches what it can; the engine consumes `CF-IPCountry` on `GET /api/region` for the auto-trade region gate. Firebase Phone Auth needs both the upload-key SHA and the Play app-signing SHA on the Firebase project — Play re-signs the uploaded AAB, so a missing Play SHA produces `Invalid app info in play_integrity_token` only on Play installs, never on sideload.
+
 ---
 
 ## Conventions That Bite
