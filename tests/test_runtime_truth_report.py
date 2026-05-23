@@ -14,6 +14,7 @@ from src.runtime_truth_report import (
     parse_confidence_gate_decisions_from_logs,
     parse_path_funnel_from_logs,
     parse_quiet_scalp_block_from_logs,
+    parse_per_symbol_regime_distribution_from_logs,
     parse_regime_distribution_from_logs,
     parse_ws_outages_from_logs,
     summarize_invalidation_audit,
@@ -341,6 +342,27 @@ def test_parse_regime_distribution_from_logs_handles_empty_and_malformed() -> No
     assert parse_regime_distribution_from_logs(log_text) == {}
 
 
+def test_parse_per_symbol_regime_distribution_aggregates_across_emissions() -> None:
+    log_text = "\n".join([
+        "Per-symbol regime distribution (last 100 cycles): "
+        "{'BTCUSDT': {'QUIET': 80, 'TRENDING_UP': 20}, 'CRCLUSDT': {'QUIET': 100}}",
+        "noise line",
+        "Per-symbol regime distribution (last 100 cycles): "
+        "{'BTCUSDT': {'QUIET': 50, 'VOLATILE': 5}, 'FARTCOINUSDT': {'TRENDING_UP': 100}}",
+    ])
+    counts = parse_per_symbol_regime_distribution_from_logs(log_text)
+    assert counts["BTCUSDT"] == {"QUIET": 130, "TRENDING_UP": 20, "VOLATILE": 5}
+    assert counts["CRCLUSDT"] == {"QUIET": 100}
+    assert counts["FARTCOINUSDT"] == {"TRENDING_UP": 100}
+
+
+def test_parse_per_symbol_regime_distribution_handles_empty_and_malformed() -> None:
+    assert parse_per_symbol_regime_distribution_from_logs("") == {}
+    # Malformed payload must not crash the parser.
+    log_text = "Per-symbol regime distribution (last 100 cycles): {garbage"
+    assert parse_per_symbol_regime_distribution_from_logs(log_text) == {}
+
+
 def test_parse_quiet_scalp_block_from_logs_counts_and_computes_gap() -> None:
     log_text = "\n".join([
         "QUIET_SCALP_BLOCK BTCUSDT 360_SCALP conf=58.2 < min=60.0",
@@ -501,6 +523,7 @@ def test_count_log_markers_handles_empty() -> None:
     assert counts == {
         "path_funnel": 0,
         "regime_distribution": 0,
+        "per_symbol_regime_distribution": 0,
         "quiet_scalp_block": 0,
         "confidence_gate": 0,
         "free_channel_post": 0,

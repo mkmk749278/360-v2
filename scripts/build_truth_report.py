@@ -25,6 +25,7 @@ from src.runtime_truth_report import (
     parse_confidence_gate_components_from_logs,
     parse_confidence_gate_decisions_from_logs,
     parse_path_funnel_from_logs,
+    parse_per_symbol_regime_distribution_from_logs,
     parse_quiet_scalp_block_from_logs,
     parse_regime_distribution_from_logs,
     summarize_invalidation_audit,
@@ -108,6 +109,7 @@ def main() -> int:
     current_channel_funnel = parse_channel_funnel_from_logs(current_text, args.channel)
     previous_channel_funnel = parse_channel_funnel_from_logs(previous_text, args.channel)
     regime_distribution = parse_regime_distribution_from_logs(current_text)
+    per_symbol_regime_distribution = parse_per_symbol_regime_distribution_from_logs(current_text)
     quiet_scalp_block = parse_quiet_scalp_block_from_logs(current_text, args.channel)
     confidence_gate_decisions = parse_confidence_gate_decisions_from_logs(current_text, args.channel)
     confidence_gate_components = parse_confidence_gate_components_from_logs(current_text, args.channel)
@@ -138,6 +140,7 @@ def main() -> int:
         current_channel_funnel=current_channel_funnel,
         previous_channel_funnel=previous_channel_funnel,
         regime_distribution=regime_distribution,
+        per_symbol_regime_distribution=per_symbol_regime_distribution,
         quiet_scalp_block=quiet_scalp_block,
         confidence_gate_decisions=confidence_gate_decisions,
         confidence_gate_components=confidence_gate_components,
