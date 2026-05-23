@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 
-from config import DYNAMIC_SL_TP_ENABLED, ChannelConfig, PairProfile
+from config import DYNAMIC_SL_TP_ENABLED, TP_QUIET_COMPRESSION_FACTOR, ChannelConfig, PairProfile
 from src.channels.signal_params import lookup_signal_params
 from src.dca import compute_dca_zone
 from src.filters import check_spread, check_volume
@@ -397,13 +397,19 @@ def compute_dynamic_sl_tp_ratios(
         "VOLATILE": 1.4,
     }.get(regime_upper, 1.0)
 
-    # TP scaling: in trending regimes, boost TP3 (the runner target) by 20%
+    # TP scaling: in trending regimes, boost TP3 (the runner target) by 20%.
+    # In QUIET regime (~63% of cycles), use TP_QUIET_COMPRESSION_FACTOR (default
+    # 0.6×) — per-signal data showed only 1% of signals hit TP1 with the prior
+    # 0.9× compression, while 9 signals expired in profit at avg +1.39%. RANGING
+    # retains the historical 0.9× compression.
     regime_tp = [1.0] * len(base_tp_ratios)
     if regime_upper in ("TRENDING_UP", "TRENDING_DOWN"):
         if len(regime_tp) >= 3:
             regime_tp[-1] = 1.2   # Boost only the runner TP
-    elif regime_upper in ("RANGING", "QUIET"):
-        regime_tp = [0.9] * len(base_tp_ratios)  # Compress all TPs
+    elif regime_upper == "QUIET":
+        regime_tp = [TP_QUIET_COMPRESSION_FACTOR] * len(base_tp_ratios)
+    elif regime_upper == "RANGING":
+        regime_tp = [0.9] * len(base_tp_ratios)
     elif regime_upper == "VOLATILE":
         regime_tp = [1.1] * len(base_tp_ratios)
 

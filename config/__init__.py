@@ -334,6 +334,28 @@ CORNIX_FORMAT_ENABLED: bool = _safe_bool("CORNIX_FORMAT_ENABLED", "false")
 # Set to "false" to revert to the static signal_params.py behaviour for safety.
 DYNAMIC_SL_TP_ENABLED: bool = _safe_bool("DYNAMIC_SL_TP_ENABLED", "true")
 
+# QUIET-regime TP compression multiplier (2026-05-23 doctrine).
+# Per-signal data showed only 1/100 signals hit TP1; 18.9% reached TP1
+# distance MFE but exited via pre-TP grab or invalidation before TP1 could
+# fire. In QUIET regime (~63% of cycles per truth-snapshot regime
+# distribution) the implied vol does not support the default TP geometry.
+# Apply a single multiplier to all TP rungs in QUIET — bring them within
+# reach of the typical MFE band so the residual position has a realistic
+# chance of hitting TP1 instead of expiring in profit.
+# RANGING regime retains the prior 0.9× compression; only QUIET is tightened.
+TP_QUIET_COMPRESSION_FACTOR: float = float(os.getenv("TP_QUIET_COMPRESSION_FACTOR", "0.6"))
+
+# Feedback-loop confidence adjustment (legacy "AI" history-based modifier).
+# Default OFF as of 2026-05-23 — per-signal analysis of the last 100 closed
+# signals showed the adjustment averaged +3.40 confidence-pts on 70% of
+# signals, but the raised cohort had a 47% SL-rate vs 40% for the
+# flat/lowered cohort (i.e. anti-predictive at current calibration).
+# The history-aware design is correct in principle; the current calibration
+# is not earning its keep. Re-enable only after the win-rate model is
+# refit on a representative sample and the lift is shown to be predictive
+# in a hold-out cycle of the truth report.
+FEEDBACK_LOOP_ENABLED: bool = _safe_bool("FEEDBACK_LOOP_ENABLED", "false")
+
 # ---------------------------------------------------------------------------
 # Signal dispatch — data freshness gate
 # ---------------------------------------------------------------------------
