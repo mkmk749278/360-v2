@@ -1919,6 +1919,46 @@ def test_user_auto_trade_get_returns_defaults(engine: _StubEngine, tmp_path) -> 
     assert "position_size_pct" in body
 
 
+def test_user_auto_trade_mode_does_not_inherit_engine_default(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    """**Per-user isolation pin.**  ``mode`` must be ``None`` for a user
+    who has never written their own row, regardless of what the
+    engine's running ``auto_execution_mode`` is.
+
+    Owner-reported 2026-05-23: "trade > paper there it's still showing
+    default on" + "many owner changes are applying to all users".
+    The pre-fix endpoint inherited ``mode`` from the engine-wide
+    ``_build_auto_trade_view()`` baseline, so the Lumin app's Paper
+    tab toggle (which reads ``userSettings.mode == "paper"``) lit up
+    "on" for every signed-in user as long as the engine ran in paper.
+
+    Other override fields (``position_size_pct``, ``leverage_cap``,
+    ``max_concurrent_positions``) legitimately inherit engine
+    defaults — they're operator-set baselines, not per-user state.
+    Only ``mode`` is the per-user opt-in bit.
+    """
+    # Pin the engine into 'paper' (the typical operator default).
+    engine.auto_execution_mode = "paper"
+
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330022")
+    body = client.get(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+    # The headline regression: ``mode`` must NOT carry the engine's
+    # 'paper' over to a fresh user.
+    assert body["mode"] is None, (
+        f"Fresh user should see mode=None, got {body['mode']!r}.  "
+        "The pre-fix endpoint leaked the engine's running mode here."
+    )
+    # Other engine-default fields still come through as before.
+    assert body["using_defaults"] is True
+    assert "position_size_pct" in body
+    assert "leverage_cap" in body
+
+
 def test_user_auto_trade_put_persists_override(
     engine: _StubEngine, tmp_path,
 ) -> None:

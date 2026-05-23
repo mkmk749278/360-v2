@@ -1562,13 +1562,34 @@ def build_app(
 
     def _build_user_auto_trade_view(user_id: int) -> UserAutoTradeSettings:
         defaults = _build_auto_trade_view()
+        # ``mode`` is per-user opt-in, NOT a field that should inherit
+        # the engine-wide default the way ``position_size_pct`` /
+        # ``leverage_cap`` / ``max_concurrent_positions`` do.  Those
+        # three are legitimate operator-set baselines that take effect
+        # on every user until they customise; ``mode`` is whether the
+        # *user* wants paper, live, or no auto-trade at all — letting
+        # it default to the engine's running mode (currently 'paper')
+        # is the same per-user-isolation leak fixed for the runtime-
+        # status endpoint earlier: every new signed-in user appeared to
+        # already be opted into paper because they inherited the
+        # engine's mode.  Owner-reported 2026-05-23: "trade > paper
+        # there it's still showing default on" + "many owner changes
+        # are applying to all users".
+        #
+        # Resolution: strip ``mode`` from the engine-wide baseline and
+        # set it from the per-user row only.  If the row has no
+        # ``mode`` key (user never opted in), the response carries
+        # ``mode = None`` and the Lumin app renders the Paper tab in
+        # its off-state.
+        defaults_dict = defaults.model_dump()
+        defaults_dict["mode"] = None
         if user_overrides is None:
             return UserAutoTradeSettings(
-                **defaults.model_dump(),
+                **defaults_dict,
                 using_defaults=True,
             )
         overrides = user_overrides.get_auto_trade(user_id)
-        resolved = defaults.model_dump()
+        resolved = defaults_dict
         for key, val in overrides.items():
             resolved[key] = val
         return UserAutoTradeSettings(
