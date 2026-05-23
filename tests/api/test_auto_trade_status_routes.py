@@ -254,8 +254,15 @@ def test_runtime_status_effective_intersects_user_pref(
 
 def test_runtime_status_armed_when_all_gates_green(monkeypatch) -> None:
     """All four gates green AND user_mode=='live' → armed=True.
-    Models the "auto-trade is firing now" UX state."""
+    Models the "auto-trade is firing now" UX state.
+
+    2026-05-23: user_mode now resolves via firebase_uid → user_id →
+    user_auto_trade_settings(user_id).mode (per-user), not the
+    operator_auto_trade_override singleton.  Test mocks the
+    user_store + override_store accordingly.
+    """
     from src.api import user_overrides as _uo
+    from src.api import users as _users_module
     from src.execution import kill_switch
     from src.security import firestore_keystore as _fk
     from src.security.firestore_keystore import UserKeyBlob
@@ -283,10 +290,18 @@ def test_runtime_status_armed_when_all_gates_green(monkeypatch) -> None:
         )
     monkeypatch.setattr(_fk, "get_key_blob", _fake_get_key_blob)
 
-    # User mode = live via per-user override.
-    fake_store = MagicMock()
-    fake_store.get_operator_auto_trade.return_value = {"mode": "live"}
-    monkeypatch.setattr(_uo, "_SINGLETON", fake_store, raising=False)
+    # User mode = live — resolved per-user from
+    # ``user_auto_trade_settings`` keyed by the calling user's
+    # firebase_uid → user_id.  Both stores must mock the chained
+    # lookup since the endpoint walks user_store → override_store.
+    fake_user = MagicMock(user_id=1)
+    fake_user_store = MagicMock()
+    fake_user_store.get_by_firebase_uid = MagicMock(return_value=fake_user)
+    monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
+
+    fake_overrides_store = MagicMock()
+    fake_overrides_store.get_auto_trade = MagicMock(return_value={"mode": "live"})
+    monkeypatch.setattr(_uo, "_SINGLETON", fake_overrides_store, raising=False)
 
     monkeypatch.setenv("TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT")
 
@@ -305,6 +320,7 @@ def test_runtime_status_armed_false_when_user_in_paper(monkeypatch) -> None:
     orders.  ``armed`` reflects "real-money orders flowing" so paper
     keeps ``armed=False`` even when all other gates are green."""
     from src.api import user_overrides as _uo
+    from src.api import users as _users_module
     from src.execution import kill_switch
     from src.security import firestore_keystore as _fk
     from src.security.firestore_keystore import UserKeyBlob
@@ -326,15 +342,69 @@ def test_runtime_status_armed_false_when_user_in_paper(monkeypatch) -> None:
         )
     monkeypatch.setattr(_fk, "get_key_blob", _fake_get_key_blob)
 
-    fake_store = MagicMock()
-    fake_store.get_operator_auto_trade.return_value = {"mode": "paper"}
-    monkeypatch.setattr(_uo, "_SINGLETON", fake_store, raising=False)
+    # Same per-user resolution chain as the armed-live test above —
+    # mode comes from the calling user's own row.
+    fake_user = MagicMock(user_id=2)
+    fake_user_store = MagicMock()
+    fake_user_store.get_by_firebase_uid = MagicMock(return_value=fake_user)
+    monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
+
+    fake_overrides_store = MagicMock()
+    fake_overrides_store.get_auto_trade = MagicMock(return_value={"mode": "paper"})
+    monkeypatch.setattr(_uo, "_SINGLETON", fake_overrides_store, raising=False)
 
     app = _build_app(identity=_firebase_user(uid="fb-paper"))
     client = TestClient(app)
     body = client.get("/api/auto-trade/runtime-status").json()
     assert body["armed"] is False
     assert body["user_mode"] == "paper"
+
+
+def test_runtime_status_no_mode_leak_across_users(monkeypatch) -> None:
+    """**Per-user isolation pin.**  User A sets ``mode = "paper"`` via
+    their own row; user B (different firebase_uid → different user_id
+    → no row in user_auto_trade_settings) must see
+    ``user_mode == None``, NOT user A's "paper".
+
+    Owner-reported 2026-05-23: "many owner changes are applying to all
+    users" — the pre-fix endpoint consulted
+    ``operator_auto_trade_override()`` which returned the most-recently-
+    updated row across the whole table, leaking the operator's mode
+    onto every authenticated user's response.  This test is the
+    regression pin: a per-user row for user A must NOT influence
+    user B's response.
+    """
+    from src.api import user_overrides as _uo
+    from src.api import users as _users_module
+
+    # Two users registered: user_id=1 has mode=paper, user_id=2 has no row.
+    user_a = MagicMock(user_id=1)
+    fake_user_store = MagicMock()
+    fake_user_store.get_by_firebase_uid = MagicMock(return_value=user_a)
+    monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
+
+    fake_overrides_store = MagicMock()
+    # Real per-user resolution: user_id=1 → has paper, user_id=2 → empty.
+    def _fake_get_auto_trade(user_id: int):
+        return {"mode": "paper"} if user_id == 1 else {}
+    fake_overrides_store.get_auto_trade = MagicMock(side_effect=_fake_get_auto_trade)
+    monkeypatch.setattr(_uo, "_SINGLETON", fake_overrides_store, raising=False)
+
+    # User A request — mode resolves to "paper".
+    app = _build_app(identity=_firebase_user(uid="fb-A"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["user_mode"] == "paper"
+
+    # User B has no row.  Re-point the user_store to return user_id=2
+    # and re-request — must come back as None, NOT carried over from
+    # the prior request.
+    user_b = MagicMock(user_id=2)
+    fake_user_store.get_by_firebase_uid = MagicMock(return_value=user_b)
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["user_mode"] is None, (
+        "Per-user isolation: user B without a row must NOT inherit "
+        "user A's mode (regression pin for the operator-override leak)."
+    )
 
 
 # ---------------------------------------------------------------------------
