@@ -37,6 +37,8 @@ from config import (
     CHANNEL_SCALP_SUPERTREND_ENABLED,
     CHANNEL_SCALP_VWAP_ENABLED,
     FEEDBACK_LOOP_ENABLED,
+    NARRATIVE_PAIR_BONUS,
+    NARRATIVE_PAIR_LIST,
     FUNDING_RATE_BOOST,
     FUNDING_RATE_BOOST_THRESHOLD,
     FUNDING_RATE_PENALTY,
@@ -985,6 +987,14 @@ class Scanner:
         # report so operators can confirm e.g. "market is 99.7% QUIET" from
         # structured data instead of grepping debug logs.
         self._regime_cycle_counts: Dict[str, int] = defaultdict(int)
+        # Per-symbol regime classification counts (2026-05-23 telemetry).
+        # Answers: does a given symbol live in QUIET vs TRENDING vs VOLATILE
+        # over the window? Needed to validate the symbol-class bonus: narrative
+        # pairs should spend more cycles in TRENDING; tokenized stocks should
+        # spend more in QUIET. Cleared and re-emitted every 100 cycles.
+        self._regime_cycle_by_symbol: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
 
         # Semaphore to limit concurrent symbol scans
         self._scan_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SCANS)
@@ -1902,6 +1912,21 @@ class Scanner:
                     dict(self._regime_cycle_counts),
                 )
                 self._regime_cycle_counts.clear()
+            if self._scan_cycle_count % 100 == 0 and self._regime_cycle_by_symbol:
+                # Compact: drop symbols with no classifications and convert
+                # nested defaultdicts to plain dicts so the log line is
+                # parseable by ast.literal_eval in the truth-report parser.
+                compact = {
+                    sym: dict(buckets)
+                    for sym, buckets in self._regime_cycle_by_symbol.items()
+                    if buckets
+                }
+                if compact:
+                    log.info(
+                        "Per-symbol regime distribution (last 100 cycles): {}",
+                        compact,
+                    )
+                self._regime_cycle_by_symbol.clear()
 
             # Touch heartbeat file so healthcheck knows the scanner is alive
             # (FINDING-024).
@@ -2382,6 +2407,7 @@ class Scanner:
         regime_result = self.regime_detector.classify(regime_ind, regime_candles, timeframe=regime_tf)
         log.debug("{} regime: {}", symbol, regime_result.regime.value)
         self._regime_cycle_counts[regime_result.regime.value] += 1
+        self._regime_cycle_by_symbol[symbol][regime_result.regime.value] += 1
         # Keep a rolling picture of the overall market regime using BTCUSDT as
         # the representative benchmark (feature 7 – gem adaptive thresholds).
         if "BTC" in symbol.upper():
@@ -4932,6 +4958,17 @@ class Scanner:
                     "Feedback adjustment for {} {} {}: {:+.1f} → {:.1f}",
                     symbol, chan_name, setup.setup_class.value, fb_adj, sig.confidence,
                 )
+
+        # Narrative-pair bonus — lift candidates on the curated narrative
+        # list (FARTCOIN, JTO, FIL, ENA, PLAY by default). Top-5 winners
+        # carried +12.19% of net PnL on 43 signals per the 2026-05-23
+        # per-signal audit. Set NARRATIVE_PAIR_BONUS=0 to disable.
+        if NARRATIVE_PAIR_BONUS != 0.0 and symbol in NARRATIVE_PAIR_LIST:
+            sig.confidence += NARRATIVE_PAIR_BONUS
+            log.debug(
+                "Narrative-pair bonus for {} {}: {:+.1f} → {:.1f}",
+                symbol, chan_name, NARRATIVE_PAIR_BONUS, sig.confidence,
+            )
 
         # Chart pattern bonus: detect confirming patterns from primary-TF candles
         primary_tf = self._get_primary_timeframe(chan_name)

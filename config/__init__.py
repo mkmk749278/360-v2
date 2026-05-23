@@ -356,6 +356,31 @@ TP_QUIET_COMPRESSION_FACTOR: float = float(os.getenv("TP_QUIET_COMPRESSION_FACTO
 # in a hold-out cycle of the truth report.
 FEEDBACK_LOOP_ENABLED: bool = _safe_bool("FEEDBACK_LOOP_ENABLED", "false")
 
+# Symbol-class narrative-pair bonus (2026-05-23 doctrine).
+# Per-signal analysis of the last 100 closed signals showed extreme symbol
+# concentration: 5 pairs (FARTCOIN, JTO, FIL, ENA, PLAY) carried +12.19%
+# of net PnL on 43 signals — 51% of signal volume, 100% of net wins. These
+# share a common structural property: they trade on narrative flow
+# (DeFi-launchpad rotations, restaking, GameFi, memes) which has realistic
+# intraday volatility in the current BTC-dominant compression regime.
+#
+# Apply a small confidence bonus to candidates on this list — enough to lift
+# a marginal 67-conf signal into the 70+ band where SL rate is best (35%),
+# without inflating into the 75-80 band where SL rate is worst (64%).
+#
+# The list is env-overridable so operators can re-tune the narrative cohort
+# as market regime shifts (e.g. AI-token rotation → swap FARTCOIN for TAO).
+# Set NARRATIVE_PAIR_BONUS=0 to disable the modifier without unsetting the
+# list — preserves the symbol-class intent for telemetry.
+NARRATIVE_PAIR_LIST_RAW: str = os.getenv(
+    "NARRATIVE_PAIR_LIST",
+    "FARTCOINUSDT,JTOUSDT,FILUSDT,ENAUSDT,PLAYUSDT",
+)
+NARRATIVE_PAIR_LIST: frozenset = frozenset(
+    s.strip() for s in NARRATIVE_PAIR_LIST_RAW.split(",") if s.strip()
+)
+NARRATIVE_PAIR_BONUS: float = float(os.getenv("NARRATIVE_PAIR_BONUS", "2.0"))
+
 # ---------------------------------------------------------------------------
 # Signal dispatch — data freshness gate
 # ---------------------------------------------------------------------------

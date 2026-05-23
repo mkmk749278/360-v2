@@ -123,6 +123,7 @@ def parse_channel_funnel_from_logs(log_text: str, channel: str) -> Dict[str, int
 
 
 _REGIME_LINE_MARKER = "Regime distribution (last 100 cycles):"
+_PER_SYMBOL_REGIME_LINE_MARKER = "Per-symbol regime distribution (last 100 cycles):"
 _QUIET_SCALP_BLOCK_MARKER = "QUIET_SCALP_BLOCK "
 _CONFIDENCE_GATE_MARKER = "confidence_gate "
 _PATH_FUNNEL_MARKER = "Path funnel (last 100 cycles):"
@@ -266,6 +267,43 @@ def parse_regime_distribution_from_logs(log_text: str) -> Dict[str, int]:
             if n > 0:
                 counters[str(regime)] += n
     return dict(counters)
+
+
+def parse_per_symbol_regime_distribution_from_logs(
+    log_text: str,
+) -> Dict[str, Dict[str, int]]:
+    """Aggregate per-symbol regime classification counts.
+
+    Scanner emits ``Per-symbol regime distribution (last 100 cycles):
+    {SYMBOL: {QUIET: N, TRENDING_UP: M, ...}, ...}`` every 100 cycles.
+    We sum these dicts across the window so the report can validate
+    symbol-class hypotheses (e.g. "tokenized stocks live in QUIET 95%+
+    of the time; narrative pairs spend half their cycles in TRENDING").
+    """
+    counters: Dict[str, Dict[str, int]] = defaultdict(lambda: defaultdict(int))
+    if not log_text:
+        return {}
+    for line in log_text.splitlines():
+        if _PER_SYMBOL_REGIME_LINE_MARKER not in line:
+            continue
+        try:
+            fragment = line.split(_PER_SYMBOL_REGIME_LINE_MARKER, 1)[1].strip()
+            parsed = ast.literal_eval(fragment)
+        except (ValueError, SyntaxError, IndexError):
+            continue
+        if not isinstance(parsed, dict):
+            continue
+        for symbol, buckets in parsed.items():
+            if not isinstance(buckets, dict):
+                continue
+            for regime, count in buckets.items():
+                try:
+                    n = int(count or 0)
+                except (TypeError, ValueError):
+                    n = 0
+                if n > 0:
+                    counters[str(symbol)][str(regime)] += n
+    return {sym: dict(buckets) for sym, buckets in counters.items()}
 
 
 def parse_quiet_scalp_block_from_logs(
@@ -517,6 +555,7 @@ def count_log_markers(log_text: str) -> Dict[str, int]:
         return {
             "path_funnel": 0,
             "regime_distribution": 0,
+            "per_symbol_regime_distribution": 0,
             "quiet_scalp_block": 0,
             "confidence_gate": 0,
             "free_channel_post": 0,
@@ -527,6 +566,9 @@ def count_log_markers(log_text: str) -> Dict[str, int]:
     return {
         "path_funnel": sum(1 for ln in lines if _PATH_FUNNEL_MARKER in ln),
         "regime_distribution": sum(1 for ln in lines if _REGIME_LINE_MARKER in ln),
+        "per_symbol_regime_distribution": sum(
+            1 for ln in lines if _PER_SYMBOL_REGIME_LINE_MARKER in ln
+        ),
         "quiet_scalp_block": sum(1 for ln in lines if _QUIET_SCALP_BLOCK_MARKER in ln),
         "confidence_gate": sum(1 for ln in lines if _CONFIDENCE_GATE_MARKER in ln),
         "free_channel_post": sum(1 for ln in lines if _FREE_CHANNEL_POST_MARKER in ln),
@@ -1087,6 +1129,7 @@ def build_snapshot(
     current_channel_funnel: Optional[Dict[str, int]] = None,
     previous_channel_funnel: Optional[Dict[str, int]] = None,
     regime_distribution: Optional[Dict[str, int]] = None,
+    per_symbol_regime_distribution: Optional[Dict[str, Dict[str, int]]] = None,
     quiet_scalp_block: Optional[Dict[str, Any]] = None,
     confidence_gate_decisions: Optional[Dict[str, Any]] = None,
     confidence_gate_components: Optional[Dict[str, Any]] = None,
@@ -1285,6 +1328,7 @@ def build_snapshot(
         "lifecycle_truth": lifecycle_summary,
         "quality_by_setup": current_quality,
         "regime_distribution": regime_distribution or {},
+        "per_symbol_regime_distribution": per_symbol_regime_distribution or {},
         "quiet_scalp_block": quiet_scalp_block or {},
         "confidence_gate_decisions": confidence_gate_decisions or {},
         "confidence_gate_components": confidence_gate_components or {},
