@@ -36,6 +36,7 @@ from config import (
     CHANNEL_SCALP_ORDERBLOCK_ENABLED,
     CHANNEL_SCALP_SUPERTREND_ENABLED,
     CHANNEL_SCALP_VWAP_ENABLED,
+    FEEDBACK_LOOP_ENABLED,
     FUNDING_RATE_BOOST,
     FUNDING_RATE_BOOST_THRESHOLD,
     FUNDING_RATE_PENALTY,
@@ -4917,18 +4918,20 @@ class Scanner:
         sig.quality_tier = setup_score.quality_tier.value
         sig.pre_ai_confidence = setup_score.total
         sig.confidence = setup_score.total
-        # Apply ML feedback adjustment based on historical outcomes for this
-        # channel / setup combination.
-        fb_adj = self.feedback_loop.get_confidence_adjustment(
-            setup_score.components, chan_name, setup.setup_class.value
-        )
-        if fb_adj != 0.0:
-            _feedback_adjustment = fb_adj
-            sig.confidence += fb_adj
-            log.debug(
-                "Feedback adjustment for {} {} {}: {:+.1f} → {:.1f}",
-                symbol, chan_name, setup.setup_class.value, fb_adj, sig.confidence,
+        # ML feedback adjustment based on historical outcomes for this
+        # channel / setup combination. Disabled by default since 2026-05-23
+        # (per FEEDBACK_LOOP_ENABLED env-flag doctrine in config/__init__.py).
+        if FEEDBACK_LOOP_ENABLED:
+            fb_adj = self.feedback_loop.get_confidence_adjustment(
+                setup_score.components, chan_name, setup.setup_class.value
             )
+            if fb_adj != 0.0:
+                _feedback_adjustment = fb_adj
+                sig.confidence += fb_adj
+                log.debug(
+                    "Feedback adjustment for {} {} {}: {:+.1f} → {:.1f}",
+                    symbol, chan_name, setup.setup_class.value, fb_adj, sig.confidence,
+                )
 
         # Chart pattern bonus: detect confirming patterns from primary-TF candles
         primary_tf = self._get_primary_timeframe(chan_name)
