@@ -4,6 +4,57 @@
 
 ---
 
+## In-session checkpoint 2026-05-23 — Truth-report deep-dive → 3 PRs shipped (signal scoring + per-user paper view)
+
+Two-cycle work driven by the 2026-05-23 per-signal audit on the last 100 closed signals plus a bug report on paper-mode visibility.
+
+### Audit findings (per-signal, 100 closed signals over 19.6h)
+
+- **Only 1/100 hit TP1.** 18.9% reached TP1-distance MFE but exited via pre-TP grab or invalidation. 9 signals expired in profit at avg +1.39% — would have been TP wins if TP1 distance was closer.
+- **Confidence non-monotonic.** 75-80 confidence band has 64.3% SL rate vs 45% at 65-70 — higher score = worse outcomes (anti-predictive at top end).
+- **AI/feedback layer net-negative.** Raised-by-AI cohort (avg +3.4 pts) has 47% SL rate vs 40% flat/lowered.
+- **Symbol concentration extreme.** Top-5 winning symbols (FARTCOIN, JTO, FIL, ENA, PLAY) carried +12.19% of net wins — 51% of signal volume, 100% of net positive.
+- **Macro context confirms structural compression.** BTC IV at 7-month low; BTC dominance ~60%; "selective bull run" concentrated in narrative sectors.
+
+### PRs shipped this session
+
+| PR | Subject | Status |
+|---|---|---|
+| #476 | `FEEDBACK_LOOP_ENABLED=false` (default off); QUIET TPs compressed 0.9× → 0.6× via `TP_QUIET_COMPRESSION_FACTOR` | merged |
+| #477 | +2pt narrative-pair bonus (FARTCOIN/JTO/FIL/ENA/PLAY); per-symbol regime telemetry in truth report | merged |
+| (this PR) | Per-user paper-mode view via subscription windows; fixes fresh-account leak of operator's prior paper trades | open |
+
+### Per-user paper-mode view — bug fix design
+
+**Bug:** Fresh user signs up + enables paper mode → sees operator's prior paper trades. Root cause: `pnl_history.json` and `paper_trades.sqlite` are engine-wide shared state; `PUT /api/settings/user/auto-trade` only wrote a per-user mode preference without isolating visibility.
+
+**Fix shape:** Subscription-windows pattern (rejected alternatives: hard per-user storage duplication, which would scale O(signals × users) without changing the underlying single-engine simulation; user-callable global reset, which would just shift the bug).
+
+- New table `user_paper_subscriptions` (id, user_id, started_at, ended_at) in `user_overrides.py`
+- `PUT /api/settings/user/auto-trade` opens a subscription on mode-transition-to-paper; closes on transition-away
+- `GET /api/trades` filters the engine ledger by the caller's subscription windows (sum-of-windows semantics)
+- New `POST /api/auto-mode/paper/reset-mine` (user-callable, no operator dep) carves a truly fresh window — deletes prior windows so closed-window admit doesn't defeat the "start fresh" promise
+- Engine writes unchanged (PaperOrderManager still writes one shared ledger)
+
+**Doctrine alignment:** Phase-2.5 bridge. True per-user portfolio simulation (per-user PaperOrderManager instances with per-user position sizing) is a Phase-3 prerequisite that lands with the per-user FSM workers. The subscription-windows pattern composes cleanly with that future architecture — when each user has their own simulator, the windows become the per-user instance's lifetime.
+
+### Open follow-ups (not in this session)
+
+- Symbol-class taxonomy: heuristic narrative detection (A2) vs newer-listings dampener (D1). Defer until A1 has 1-2 truth-report cycles of measurement.
+- Per-user `/api/pnl/history` filtering. Currently `/api/trades` is filtered; `/api/pnl/history` still reads the engine-wide ledger. Same pattern would apply via `pnl_history_for_user` helper already shipped in this PR.
+- Phase 3 per-user FSM workers (per server-side execution doctrine).
+
+### Next-cycle validation
+
+Per-signal data should be re-pulled in ~24h to validate this session's changes:
+- Avg PnL/signal trending from +0.073% toward +0.20%
+- 75-80 confidence SL rate dropping below 60%
+- Top-5 narrative pairs hold/grow share of net wins
+- `per_symbol_regime_distribution` populated; tokenized stocks (CRCL/MU/INTC/CL/EWY) confirmed 90%+ in QUIET (validates the "no stock-side filter needed" thesis)
+- Total signal count stays above 80/24h (subscriber-retention floor)
+
+---
+
 ## In-session checkpoint 2026-05-21 — SESSION END (Play Store LIVE in Closed Testing; speed + onboarding polish landed; Firebase Phone Auth fixed)
 
 **App is live.** Lumin is published to the Play Store Closed Testing track at `https://play.google.com/store/apps/details?id=org.luminapp.lumin`. Owner has a working tester opt-in URL; the only block to Production is the 14-day continuous-opt-in clock + 12+ tester count.

@@ -865,6 +865,30 @@ class PaperResetResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Per-user paper visibility reset (2026-05-23 fix for fresh-account bug)
+# ---------------------------------------------------------------------------
+
+
+class PaperResetMineResponse(BaseModel):
+    """Response shape for ``POST /api/auto-mode/paper/reset-mine``.
+
+    Returns the new ``started_at`` so the app can immediately update its
+    local "paper since" label without re-fetching the auto-mode status.
+    """
+
+    ok: bool = True
+    new_started_at: str = Field(
+        ...,
+        description=(
+            "ISO-8601 UTC of the user's new paper-subscription window. "
+            "GET /api/trades will return only rows closed at-or-after "
+            "this stamp until the user disables paper or calls reset-mine "
+            "again."
+        ),
+    )
+
+
+# ---------------------------------------------------------------------------
 # Paper-mode close-all-positions (user-initiated) — follow-up to PR #401
 # ---------------------------------------------------------------------------
 

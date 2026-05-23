@@ -710,3 +710,121 @@ def test_resolve_notional_usd_returns_user_override(
         _uo.clear_singleton()
         _users.set_singleton(None)
         user_store.close()
+
+
+# ---------------------------------------------------------------------------
+# Per-user paper subscription windows (2026-05-23 fix for fresh-account bug)
+# ---------------------------------------------------------------------------
+
+
+def test_paper_subscriptions_empty_for_new_user(
+    store: UserOverridesStore,
+) -> None:
+    """Fresh users have no subscription rows — their trade view is empty."""
+    assert store.get_paper_subscriptions(1) == []
+
+
+def test_paper_enable_opens_active_subscription(
+    store: UserOverridesStore,
+) -> None:
+    """Setting mode=paper inserts an active (ended_at=None) subscription."""
+    store.update_auto_trade(1, {"mode": "paper"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    started_at, ended_at = subs[0]
+    assert started_at  # ISO stamp present
+    assert ended_at is None  # active
+
+
+def test_paper_disable_closes_active_subscription(
+    store: UserOverridesStore,
+) -> None:
+    """Transitioning paper→off stamps ended_at on the active row."""
+    store.update_auto_trade(1, {"mode": "paper"})
+    store.update_auto_trade(1, {"mode": "off"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    assert subs[0][1] is not None  # closed
+
+
+def test_paper_reenable_creates_second_window(
+    store: UserOverridesStore,
+) -> None:
+    """Re-enabling paper after disabling produces two windows, preserving
+    the first as a closed historical record."""
+    store.update_auto_trade(1, {"mode": "paper"})
+    store.update_auto_trade(1, {"mode": "off"})
+    store.update_auto_trade(1, {"mode": "paper"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 2
+    # First window closed, second active.
+    assert subs[0][1] is not None
+    assert subs[1][1] is None
+
+
+def test_paper_mode_stable_update_does_not_add_subscription(
+    store: UserOverridesStore,
+) -> None:
+    """Updating other auto-trade fields while mode is unchanged must not
+    open a new subscription window."""
+    store.update_auto_trade(1, {"mode": "paper"})
+    store.update_auto_trade(1, {"mode": "paper", "leverage_cap": 5.0})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1  # unchanged
+    assert subs[0][1] is None  # still active
+
+
+def test_paper_mode_transition_live_to_paper_opens_subscription(
+    store: UserOverridesStore,
+) -> None:
+    """live → paper is a paper-enable transition; opens a window."""
+    store.update_auto_trade(1, {"mode": "live"})
+    assert store.get_paper_subscriptions(1) == []  # live doesn't open one
+    store.update_auto_trade(1, {"mode": "paper"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    assert subs[0][1] is None
+
+
+def test_paper_mode_transition_paper_to_live_closes_subscription(
+    store: UserOverridesStore,
+) -> None:
+    """paper → live closes the paper window."""
+    store.update_auto_trade(1, {"mode": "paper"})
+    store.update_auto_trade(1, {"mode": "live"})
+    subs = store.get_paper_subscriptions(1)
+    assert len(subs) == 1
+    assert subs[0][1] is not None
+
+
+def test_reset_paper_subscription_discards_history_and_opens_fresh(
+    store: UserOverridesStore,
+) -> None:
+    """reset_paper_subscription deletes ALL prior subscription rows and
+    opens a single new active one. This is the "start truly fresh"
+    semantic — preserving closed windows would still admit trades
+    closed inside them, defeating the bug-fix promise.
+    """
+    store.update_auto_trade(1, {"mode": "paper"})
+    store.update_auto_trade(1, {"mode": "off"})
+    store.update_auto_trade(1, {"mode": "paper"})
+    # Two windows now (one closed, one active).
+    assert len(store.get_paper_subscriptions(1)) == 2
+    new_started_at = store.reset_paper_subscription(1)
+    subs = store.get_paper_subscriptions(1)
+    # Only the freshly-opened subscription remains.
+    assert len(subs) == 1
+    assert subs[0][0] == new_started_at
+    assert subs[0][1] is None
+
+
+def test_paper_subscriptions_isolated_between_users(
+    store: UserOverridesStore,
+) -> None:
+    """One user's subscription windows must not leak into another user's
+    view — the fresh-account bug fix depends on this isolation."""
+    store.update_auto_trade(1, {"mode": "paper"})
+    # User 2 stays off — should have no subscriptions.
+    assert store.get_paper_subscriptions(2) == []
+    # User 1 has exactly one.
+    assert len(store.get_paper_subscriptions(1)) == 1

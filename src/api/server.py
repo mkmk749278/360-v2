@@ -1225,6 +1225,8 @@ def build_app(
         engine=engine,
         auth=auth,
         owner_required=owner_required,
+        user_claims=user_claims,
+        resolve_user_id=_resolve_user_id,
     )
 
     # ---- Binance connect flow (server-side execution, B18 + §3.9) ----
