@@ -47,7 +47,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, Optional
+from typing import Any, Dict, FrozenSet, List, Optional, Tuple
 
 from src.utils import get_logger
 
@@ -183,6 +183,26 @@ CREATE TABLE IF NOT EXISTS user_auto_trade_settings (
     updated_at               TEXT    NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
 );
+
+-- 2026-05-23 — per-user paper-mode subscription windows.
+-- The engine runs a single PaperOrderManager; per-user visibility is
+-- derived by filtering the engine ledger (paper_trades.sqlite,
+-- pnl_history.json) to trades closed during ANY of the user's paper
+-- subscription windows. A fresh user with no subscriptions sees no
+-- trades — which is exactly the bug fix this table enables.
+--
+-- Invariant: at most one row per user has ended_at IS NULL (active
+-- subscription). Enforced by open_paper_subscription closing any
+-- prior active row before inserting the new one.
+CREATE TABLE IF NOT EXISTS user_paper_subscriptions (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    started_at TEXT    NOT NULL,
+    ended_at   TEXT,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_paper_subs_user_started
+ON user_paper_subscriptions(user_id, started_at DESC);
 """
 
 
@@ -653,7 +673,113 @@ class UserOverridesStore:
                     now,
                 ),
             )
+            # Per-user paper subscription bookkeeping (2026-05-23).
+            # Bug fix: fresh accounts were seeing operator's prior paper
+            # trades. Track each user's paper sessions as (started_at,
+            # ended_at) windows so API readers can filter the shared
+            # engine ledger to only trades closed within this user's
+            # visibility windows.
+            #
+            # We compare normalised prior/new mode and toggle the
+            # subscription accordingly. Mode-not-in-partial → no change.
+            prior_mode = (existing.get("mode") or "").lower() or None
+            new_mode = (merged.get("mode") or "").lower() or None
+            if "mode" in cleaned and prior_mode != new_mode:
+                if new_mode == "paper":
+                    self._open_paper_subscription_locked(int(user_id), now)
+                elif prior_mode == "paper":
+                    self._close_paper_subscription_locked(int(user_id), now)
             return self.get_auto_trade(user_id)
+
+    # ---- paper subscription windows -------------------------------------
+
+    def _open_paper_subscription_locked(self, user_id: int, now: str) -> str:
+        """Insert a fresh active subscription, closing any prior active row
+        first to preserve the at-most-one-active invariant. Must be called
+        with self._lock held.
+
+        Returns the new row's started_at (always equal to ``now``).
+        """
+        self._conn.execute(
+            "UPDATE user_paper_subscriptions SET ended_at = ? "
+            "WHERE user_id = ? AND ended_at IS NULL",
+            (now, int(user_id)),
+        )
+        self._conn.execute(
+            "INSERT INTO user_paper_subscriptions (user_id, started_at, ended_at) "
+            "VALUES (?, ?, NULL)",
+            (int(user_id), now),
+        )
+        return now
+
+    def _close_paper_subscription_locked(
+        self, user_id: int, now: str,
+    ) -> Optional[str]:
+        """Stamp ended_at on the user's currently-active subscription, if any.
+        Idempotent — no-op when nothing is active. Returns ended_at when a
+        row was closed, None otherwise. Must hold self._lock.
+        """
+        cur = self._conn.execute(
+            "UPDATE user_paper_subscriptions SET ended_at = ? "
+            "WHERE user_id = ? AND ended_at IS NULL",
+            (now, int(user_id)),
+        )
+        return now if cur.rowcount > 0 else None
+
+    def open_paper_subscription(self, user_id: int) -> str:
+        """Public form of :meth:`_open_paper_subscription_locked` — wraps
+        with the store lock. Used by the user-callable reset endpoint.
+        """
+        now = _now_iso()
+        with self._lock:
+            return self._open_paper_subscription_locked(int(user_id), now)
+
+    def close_paper_subscription(self, user_id: int) -> Optional[str]:
+        """Public form of :meth:`_close_paper_subscription_locked`."""
+        now = _now_iso()
+        with self._lock:
+            return self._close_paper_subscription_locked(int(user_id), now)
+
+    def reset_paper_subscription(self, user_id: int) -> str:
+        """Atomically discard all prior subscription windows and open a
+        single fresh one. Used by ``POST /api/auto-mode/paper/reset-mine``
+        so the user can start truly clean — every pre-reset trade
+        disappears from their view.
+
+        Note we DELETE rather than close-and-mark: a closed (start, end)
+        window would still admit any trade that closed inside it, which
+        would defeat the "start fresh" semantics the bug-fix endpoint
+        promises.
+
+        Returns the new started_at ISO timestamp.
+        """
+        now = _now_iso()
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM user_paper_subscriptions WHERE user_id = ?",
+                (int(user_id),),
+            )
+            return self._open_paper_subscription_locked(int(user_id), now)
+
+    def get_paper_subscriptions(
+        self, user_id: int,
+    ) -> List[Tuple[str, Optional[str]]]:
+        """Return all subscription windows for the user, oldest-first.
+
+        Each tuple is ``(started_at, ended_at_or_None)``. A None ended_at
+        means the subscription is currently active — callers filtering
+        trade rows should treat it as "open-ended through now".
+
+        Empty list = user has never enabled paper. By design, the trade-
+        filter helpers treat this as "show nothing", which is the bug fix.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT started_at, ended_at FROM user_paper_subscriptions "
+                "WHERE user_id = ? ORDER BY started_at ASC",
+                (int(user_id),),
+            )
+            return [(row["started_at"], row["ended_at"]) for row in cur.fetchall()]
 
     def get_operator_auto_trade(self) -> Dict[str, Any]:
         """Return the operator's effective per-user auto-trade override.
