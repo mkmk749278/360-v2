@@ -202,27 +202,56 @@ def register(
                 "runtime_status: keystore read failed uid={}", firebase_uid,
             )
 
-        # Per-user mode — fetched from per-user overrides, falling
-        # back to engine-global user_settings when unset.  Matches the
-        # resolution order paper_order_manager uses for sizing.
+        # Per-user mode — read THIS user's row from
+        # ``user_auto_trade_settings``, keyed by ``firebase_uid →
+        # user_id``.
+        #
+        # Pre-2026-05-23 this consulted
+        # ``operator_auto_trade_override()`` (which returns the
+        # most-recently-updated row across the *whole* table — a
+        # single-operator MVP shortcut for engine-side consumers that
+        # don't know which user_id to look up) and then fell back to
+        # the engine-global ``user_settings.get_auto_trade()``.  Both
+        # paths leak operator/engine-wide state into every user's
+        # response.  Visible consequences owner reported 2026-05-23
+        # ("many owner changes are applying to all users"):
+        #
+        #   1. Owner flips mode → paper on their device → every other
+        #      authenticated user's runtime-status returns
+        #      ``user_mode = "paper"`` because they read the SAME
+        #      most-recently-updated row.  Lumin's Pulse tab keys its
+        #      "Trading not enabled" CTA off that field, so brand-new
+        #      users saw the engine 30-day chart + a $0.00 PnL card
+        #      instead of the CTA.
+        #   2. ``armed`` was evaluated against the operator's mode,
+        #      so the Live-tab armed badge lit green for users who
+        #      had no Binance key connected.
+        #
+        # Correct behaviour: resolve firebase_uid → user_id → read
+        # the per-user row.  Users without a row (haven't opted in
+        # via the Trade tab) get ``user_mode = None`` → ``armed =
+        # false`` → Pulse renders the not-enabled CTA.  No fallback
+        # to operator / engine-global state — both of those are
+        # operator config, never user state.
         user_mode: Optional[str] = None
         try:
             from src.api import user_overrides as _uo
-            override = _uo.operator_auto_trade_override()
-            mode = override.get("mode")
-            if isinstance(mode, str) and mode:
-                user_mode = mode.lower()
+            from src.api import users as _users
+
+            user_store = _users.get_singleton()
+            override_store = _uo.get_singleton()
+            if user_store is not None and override_store is not None:
+                user = user_store.get_by_firebase_uid(firebase_uid)
+                if user is not None:
+                    row = override_store.get_auto_trade(int(user.user_id))
+                    mode = row.get("mode")
+                    if isinstance(mode, str) and mode:
+                        user_mode = mode.lower()
         except Exception:
-            log.exception("runtime_status: user override read failed")
-        if user_mode is None:
-            try:
-                from src import user_settings as _us
-                stored = _us.get_auto_trade()
-                mode = stored.get("mode")
-                if isinstance(mode, str) and mode:
-                    user_mode = mode.lower()
-            except Exception:
-                pass
+            log.exception(
+                "runtime_status: per-user mode read failed uid={}",
+                firebase_uid,
+            )
 
         # Symbol allowlist — re-read at request time so an operator
         # env-var change doesn't require an app refetch + the value
