@@ -51,7 +51,7 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from src.utils import get_logger
 
@@ -234,6 +234,31 @@ async def dispatch_signal_to_active_users(
         return 0
 
     async def _one_user(uid: str) -> bool:
+        # Per-user mode gate (2026-05-24). The pre-2026-05-24 dispatcher
+        # fanned every signal to every user with a connected Binance key
+        # — ignoring the user's ``mode`` preference entirely. A user who
+        # picked "paper" or "off" still got live Binance orders fired
+        # against their wallet, surfaced in Recent Activity as -2019
+        # rejections when the Futures wallet was empty. Owner-reported
+        # 2026-05-24 with screenshots of the Trade > Live tab showing
+        # "Mode = live ✗ (Currently PAPER)" alongside -2019 entries —
+        # the in-app gate label was honest but the dispatcher wasn't
+        # honouring it.
+        #
+        # Skip silently when mode != 'live': no signing service call,
+        # no dispatch_log row, no auto-pause accrual. This makes the
+        # "Mode = live" indicator in the armed card the actual gate
+        # rather than a status display divorced from behaviour.
+        from src.api import user_overrides as _uo
+        user_mode = _uo.resolve_user_mode_uid(uid)
+        if user_mode != "live":
+            log.debug(
+                "signal_dispatch: skipping non-live user uid={} mode={} "
+                "signal_id={}",
+                uid, user_mode, signal_id,
+            )
+            return False
+
         # Auto-pause gate (2026-05-24). After
         # ``_INSUFFICIENT_MARGIN_PAUSE_THRESHOLD`` consecutive ``-2019``
         # rejections we mark the user paused; from then on every
@@ -242,7 +267,6 @@ async def dispatch_signal_to_active_users(
         # the pause state in the user-facing auto-mode status so the
         # user can top up their wallet and call ``POST /api/auto-mode/
         # resume-mine`` to resume.
-        from src.api import user_overrides as _uo
         if _uo.is_user_auto_paused_uid(uid):
             log.debug(
                 "signal_dispatch: skipping paused user uid={} signal_id={}",

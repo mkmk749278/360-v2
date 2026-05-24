@@ -1017,6 +1017,46 @@ def resolve_notional_usd(firebase_uid: str, default: float) -> float:
         return default
 
 
+def resolve_user_mode_uid(firebase_uid: str) -> Optional[str]:
+    """Return the per-user auto-trade ``mode`` for ``firebase_uid``, or
+    None when the user has no row / store is offline / lookup fails.
+
+    The dispatcher uses this to decide whether to fire a real Binance
+    order: ``mode == 'live'`` → dispatch; anything else (``'paper'``,
+    ``'off'``, ``None``) → skip silently. This makes the in-app "Mode =
+    live" gate the actual authority, instead of "user has connected a
+    Binance key" which had been the implicit gate pre-2026-05-24.
+
+    Soft-fail semantics: a lookup failure returns None, which the
+    dispatcher treats as "user hasn't opted into live" and skips. The
+    safe-by-default direction here matches B12 — capital preservation
+    over signal volume — so a transient Firestore/SQLite outage can't
+    accidentally fire live orders.
+    """
+    if _SINGLETON is None:
+        return None
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return None
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return None
+        row = _SINGLETON.get_auto_trade(int(user.user_id))
+        mode = row.get("mode")
+        if isinstance(mode, str) and mode:
+            return mode.lower()
+        return None
+    except Exception as exc:
+        log.debug(
+            "resolve_user_mode_uid: lookup failed for firebase_uid={} "
+            "({}); treating as 'not live'",
+            firebase_uid, type(exc).__name__,
+        )
+        return None
+
+
 def is_user_auto_paused_uid(firebase_uid: str) -> bool:
     """Firebase-UID-keyed wrapper around :meth:`UserOverridesStore.
     is_user_auto_paused`. Mirrors :func:`resolve_notional_usd` — same

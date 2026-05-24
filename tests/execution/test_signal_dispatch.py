@@ -23,7 +23,7 @@ from src.execution import symbol_filters
 
 
 @pytest.fixture(autouse=True)
-def _reset_cache():
+def _reset_cache(monkeypatch):
     signal_dispatch.reset_cache_for_test()
     # Seed the symbol-filter cache so ``_compute_qty_split`` rounds
     # cleanly in tests.  BTCUSDT stepSize 0.001 + tickSize 0.10 matches
@@ -37,6 +37,15 @@ def _reset_cache():
             min_notional=5.0,
         ),
     })
+    # 2026-05-24: dispatch now respects per-user ``mode`` (see
+    # resolve_user_mode_uid + the mode gate in ``_one_user``). Most
+    # existing tests construct stub users without writing to the
+    # user_overrides store, so default ``resolve_user_mode_uid`` to
+    # 'live' here. Tests that exercise the mode-gate behaviour
+    # explicitly (see TestModeGate below) override this with their
+    # own _mode_state_stub fixture.
+    from src.api import user_overrides as _uo
+    monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: "live")
     yield
     signal_dispatch.reset_cache_for_test()
     symbol_filters.reset_for_test()
@@ -594,3 +603,215 @@ async def test_paused_user_is_skipped_no_fsm_call(
             )
     assert placed == 0
     mock_place.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Per-user mode gate (2026-05-24 — dispatch must respect user_mode='live')
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def _mode_state_stub(monkeypatch):
+    """In-memory replacement for user_overrides' mode + pause helpers."""
+    from src.api import user_overrides as _uo
+
+    modes: dict = {}  # uid -> mode string or None
+    paused: dict = {}
+
+    def _resolve_mode(uid: str):
+        return modes.get(uid)
+
+    def _is_paused(uid: str) -> bool:
+        return uid in paused
+
+    def _pause(uid: str, reason: str):
+        paused[uid] = reason
+        return "2026-05-24T00:00:00+00:00"
+
+    monkeypatch.setattr(_uo, "resolve_user_mode_uid", _resolve_mode)
+    monkeypatch.setattr(_uo, "is_user_auto_paused_uid", _is_paused)
+    monkeypatch.setattr(_uo, "pause_user_auto_trade_uid", _pause)
+    signal_dispatch._consec_insufficient_margin.clear()
+    yield modes, paused
+    signal_dispatch._consec_insufficient_margin.clear()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_user_with_mode_paper(
+    _mode_state_stub,
+) -> None:
+    """A user who picked paper mode must NOT get a live Binance order
+    even with a connected key. The headline bug fix."""
+    modes, _paused = _mode_state_stub
+    modes["fb-paper-user"] = "paper"
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-paper-user"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+            )
+    assert placed == 0
+    mock_place.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_user_with_mode_off(
+    _mode_state_stub,
+) -> None:
+    """mode='off' also skips — only mode='live' triggers a real order."""
+    modes, _paused = _mode_state_stub
+    modes["fb-off-user"] = "off"
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-off-user"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+            )
+    assert placed == 0
+    mock_place.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_user_with_no_mode_row(
+    _mode_state_stub,
+) -> None:
+    """User who connected a key but never set their mode (None) is
+    treated as 'not opted into live' and skipped. Safe-by-default."""
+    modes, _paused = _mode_state_stub
+    # Deliberately leave modes empty so resolve returns None.
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-no-mode"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+            )
+    assert placed == 0
+    mock_place.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_proceeds_for_user_with_mode_live(
+    _mode_state_stub,
+) -> None:
+    """mode='live' is the only value that triggers a real Binance order."""
+    modes, _paused = _mode_state_stub
+    modes["fb-live-user"] = "live"
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-live-user"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+            )
+    assert placed == 1
+    mock_place.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_mode_filter_isolates_per_user(
+    _mode_state_stub,
+) -> None:
+    """Mixed roster: one live user gets an order, one paper user does
+    not. The fix is per-user, not engine-wide."""
+    modes, _paused = _mode_state_stub
+    modes["fb-live"] = "live"
+    modes["fb-paper"] = "paper"
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-live", "fb-paper"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+            )
+    assert placed == 1
+    called_uids = [
+        call.kwargs["firebase_uid"] for call in mock_place.await_args_list
+    ]
+    assert called_uids == ["fb-live"]
+
+
+@pytest.mark.asyncio
+async def test_paper_user_not_auto_paused_by_dispatch(
+    _mode_state_stub,
+) -> None:
+    """A paper-mode user must NOT accrue the consecutive-2019 counter:
+    the mode gate skips them before the pause logic ever sees them.
+    This is what prevents stale 'wallet empty' banners on paper users."""
+    modes, paused = _mode_state_stub
+    modes["fb-paper"] = "paper"
+    threshold = signal_dispatch._INSUFFICIENT_MARGIN_PAUSE_THRESHOLD
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-paper"]
+    ):
+        from src.execution import position_fsm
+        # Even if Binance would reject, the mode gate ensures
+        # place_signal is never called, so no -2019 accrues.
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock,
+        ) as mock_place:
+            for i in range(threshold + 2):
+                await signal_dispatch.dispatch_signal_to_active_users(
+                    signal_id=f"sig-{i}",
+                    symbol="BTCUSDT",
+                    direction="LONG",
+                    entry_price=29000.0,
+                    sl_price=28500.0,
+                    tp1_price=29500.0,
+                    tp2_price=30000.0,
+                    tp3_price=30500.0,
+                )
+    assert mock_place.await_count == 0
+    assert "fb-paper" not in paused
