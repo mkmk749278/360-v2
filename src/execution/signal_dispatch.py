@@ -47,9 +47,11 @@ the Telegram dispatch completes.  See :func:`dispatch_signal_to_active_users`.
 from __future__ import annotations
 
 import asyncio
+import os
 import time
+from collections import defaultdict
 from dataclasses import dataclass
-from typing import Any, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.utils import get_logger
 
@@ -61,6 +63,34 @@ log = get_logger("execution.signal_dispatch")
 # without per-user lookup.  A future PR adds user-configurable
 # overrides up to the policy floor ($2000).
 _DEFAULT_NOTIONAL_USD = 500.0
+
+# Auto-pause threshold for consecutive ``-2019 Margin is insufficient``
+# rejections (2026-05-24). After this many in a row for a single user,
+# we stop dispatching to them and mark their auto-trade row with
+# ``paused_reason='insufficient_margin'`` so the app can show the
+# "wallet empty — top up + resume" banner. Resets to zero on the next
+# successful place for that user, OR on any reject reason OTHER than
+# -2019 (since the user clearly engaged Binance but failed for a
+# different reason — wallet emptiness isn't the persistent state).
+#
+# Threshold of 3 chosen so a brief funding gap during the signal-fanout
+# window doesn't pause the user; sustained emptiness does. Env-
+# overridable per B8.
+_INSUFFICIENT_MARGIN_PAUSE_THRESHOLD: int = max(
+    1, int(os.getenv("INSUFFICIENT_MARGIN_PAUSE_THRESHOLD", "3"))
+)
+
+# Binance Futures rejection code we trip on. Stable numeric contract
+# (see Binance Futures API error codes docs) — same constant the app
+# uses for its plain-English translation in
+# ``server_side_execution_models.dart::DispatchEventTranslation``.
+_BINANCE_INSUFFICIENT_MARGIN_CODE = -2019
+
+# Per-user consecutive-reject counter. Process-local — survives the
+# fanout, gets reset on any successful place. On engine restart the
+# counter resets and we re-pause if the wallet is still empty, which
+# is the correct conservative default.
+_consec_insufficient_margin: Dict[str, int] = defaultdict(int)
 
 # TP qty split — sums to 100%.  Matches §3.2a doctrine (banking
 # the bonus tail across TP legs after pre-TP grabs the primary
@@ -204,6 +234,22 @@ async def dispatch_signal_to_active_users(
         return 0
 
     async def _one_user(uid: str) -> bool:
+        # Auto-pause gate (2026-05-24). After
+        # ``_INSUFFICIENT_MARGIN_PAUSE_THRESHOLD`` consecutive ``-2019``
+        # rejections we mark the user paused; from then on every
+        # signal short-circuits here without touching the signing
+        # service or recording a dispatch_log row. The app surfaces
+        # the pause state in the user-facing auto-mode status so the
+        # user can top up their wallet and call ``POST /api/auto-mode/
+        # resume-mine`` to resume.
+        from src.api import user_overrides as _uo
+        if _uo.is_user_auto_paused_uid(uid):
+            log.debug(
+                "signal_dispatch: skipping paused user uid={} signal_id={}",
+                uid, signal_id,
+            )
+            return False
+
         # Per-user notional override (2026-05-20).  Each user can
         # set their own ``notional_usd`` via the auto-trade settings
         # page; falls back to ``_DEFAULT_NOTIONAL_USD`` ($500) when
@@ -211,7 +257,6 @@ async def dispatch_signal_to_active_users(
         # the per-user closure so a smaller-wallet user's override
         # doesn't shrink the position for everyone else on the same
         # signal.
-        from src.api import user_overrides as _uo
         user_notional = _uo.resolve_notional_usd(uid, _DEFAULT_NOTIONAL_USD)
         total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(
             symbol, entry_price, notional_usd=user_notional,
@@ -251,6 +296,12 @@ async def dispatch_signal_to_active_users(
                 entry_price=entry_price,
                 total_qty=total_qty,
             )
+            # Successful placement resets the consecutive -2019 counter.
+            # If the user previously had a string of insufficient-margin
+            # rejects but topped up + resumed, the next place succeeds
+            # here and we wipe the counter so we don't carry stale
+            # state into the next dispatch.
+            _consec_insufficient_margin.pop(uid, None)
             return True
         except Exception as exc:
             # Typed exceptions from the safety-gate chain (PR-14
@@ -304,6 +355,42 @@ async def dispatch_signal_to_active_users(
                 reject_binance_code=b_code,
                 reject_binance_msg=b_msg,
             )
+            # Consecutive-insufficient-margin tracker → auto-pause.
+            # Owner-reported 2026-05-23: every signal was creating a
+            # fresh "Insufficient margin" entry in the user's Recent
+            # Activity card. After ``_INSUFFICIENT_MARGIN_PAUSE_THRESHOLD``
+            # in a row we pause the user's dispatcher so the next
+            # signal short-circuits at the gate above without spamming
+            # the activity log. The pause persists until the user calls
+            # ``POST /api/auto-mode/resume-mine`` (typically after
+            # topping up).
+            #
+            # Any reject reason OTHER than -2019 clears the counter:
+            # the user clearly engaged Binance but failed for a
+            # different reason — wallet emptiness isn't the persistent
+            # state we're tracking here.
+            if b_code == _BINANCE_INSUFFICIENT_MARGIN_CODE:
+                _consec_insufficient_margin[uid] += 1
+                if (
+                    _consec_insufficient_margin[uid]
+                    >= _INSUFFICIENT_MARGIN_PAUSE_THRESHOLD
+                ):
+                    paused_at = _uo.pause_user_auto_trade_uid(
+                        uid, "insufficient_margin",
+                    )
+                    log.warning(
+                        "signal_dispatch: auto-paused uid={} after {} "
+                        "consecutive -2019 rejects (paused_at={})",
+                        uid,
+                        _consec_insufficient_margin[uid],
+                        paused_at,
+                    )
+                    # Counter stays at threshold so a transient store
+                    # failure on the pause persist doesn't double-count
+                    # the next time; resume_user_auto_trade is what
+                    # clears the cycle.
+            else:
+                _consec_insufficient_margin.pop(uid, None)
             return False
 
     results = await asyncio.gather(

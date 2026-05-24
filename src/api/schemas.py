@@ -234,6 +234,18 @@ class AutoModeChangeResponse(BaseModel):
     mode: Literal["off", "paper", "live"]
 
 
+class AutoModeResumeMineResponse(BaseModel):
+    """Response shape for ``POST /api/auto-mode/resume-mine``.
+
+    ``resumed`` is True when an auto-pause was actually cleared,
+    False when the user wasn't paused (idempotent no-op path).
+    The app uses the bool to decide whether to show a success
+    toast vs a silent dismiss.
+    """
+
+    resumed: bool
+
+
 # ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
@@ -541,7 +553,8 @@ class UserPretpSettings(PretpSettings):
 
 class UserAutoTradeSettings(AutoTradeSettings):
     """Per-user auto-trade overrides — same shape as
-    :class:`AutoTradeSettings` plus ``using_defaults``.
+    :class:`AutoTradeSettings` plus ``using_defaults`` and auto-pause
+    state.
 
     Phase 2: the engine itself does not consume per-user mode /
     position_size_pct / leverage_cap.  Values are stored for Phase 3
@@ -552,6 +565,24 @@ class UserAutoTradeSettings(AutoTradeSettings):
     using_defaults: bool = Field(
         default=True,
         description="True when the user has no override row.",
+    )
+    paused_reason: Optional[str] = Field(
+        default=None,
+        description=(
+            "Typed reason when the engine has auto-paused this user's "
+            "dispatcher (currently only 'insufficient_margin' from the "
+            "consecutive -2019 tracker, 2026-05-24). NULL when the user "
+            "is not paused. App shows a 'top up + resume' banner when "
+            "set."
+        ),
+    )
+    paused_at: Optional[str] = Field(
+        default=None,
+        description=(
+            "ISO-8601 UTC timestamp of the pause event. NULL when not "
+            "paused. Pair with ``paused_reason`` to render the banner; "
+            "cleared by POST /api/auto-mode/resume-mine."
+        ),
     )
 
 
