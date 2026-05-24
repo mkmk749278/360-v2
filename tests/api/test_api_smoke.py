@@ -2170,3 +2170,96 @@ def test_positions_no_broker_falls_back_to_router_signals(
     # even though there's no broker tracking it.
     assert body["total"] == 1
     assert body["items"][0]["symbol"] == "ETHUSDT"
+
+
+# ---------------------------------------------------------------------------
+# Auto-pause resume endpoint (2026-05-24 — consecutive -2019 fix)
+# ---------------------------------------------------------------------------
+
+
+def _auth_user_token(user_id: int = 1) -> str:
+    from src.api.auth import mint_token
+    return mint_token(secret=_TEST_SECRET, sub=f"user-{user_id}")
+
+
+def test_auto_mode_resume_mine_returns_false_when_not_paused(
+    engine, tmp_path,
+) -> None:
+    """Idempotent on a non-paused user — no-op, returns resumed=False."""
+    client, user_store, _ = _phase2_app(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")  # uid=1
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    r = client.post("/api/auto-mode/resume-mine")
+    assert r.status_code == 200
+    assert r.json() == {"resumed": False}
+
+
+def _phase2_app_with_overrides(engine, tmp_path):
+    """Variant of _phase2_app that also returns the UserOverridesStore.
+
+    _phase2_app encapsulates the build but doesn't expose the overrides
+    store; rebuilding the same surface here so tests can drive the
+    pause-state directly. Matches the production wiring in
+    src/bootstrap.py which constructs the store and passes it to
+    build_app.
+    """
+    from src.api.billing_callback import BillingWebhookVerifier
+    from src.api.otp import OtpStore
+    from src.api.user_overrides import UserOverridesStore
+    from src.api.users import UserStore
+
+    db = tmp_path / "lumin.sqlite"
+    user_store = UserStore(db)
+    user_overrides = UserOverridesStore(db)
+    otp_store = OtpStore(max_issues_per_hour=2, max_attempts_per_code=3)
+    delivery = _CapturingDelivery()
+    verifier = BillingWebhookVerifier(_BILLING_SECRET)
+    app = build_app(
+        engine,
+        jwt_secret=_TEST_SECRET,
+        allow_static=False,
+        user_store=user_store,
+        user_overrides=user_overrides,
+        otp_store=otp_store,
+        otp_delivery=delivery,
+        billing_verifier=verifier,
+    )
+    return TestClient(app), user_store, user_overrides
+
+
+def test_auto_mode_resume_mine_clears_pause(
+    engine, tmp_path,
+) -> None:
+    """When the user is paused, the endpoint clears the pause and
+    returns resumed=True; a second call returns False (idempotent)."""
+    client, user_store, store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")  # uid=1
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    store.update_auto_trade(1, {"mode": "live"})
+    store.pause_user_auto_trade(1, "insufficient_margin")
+    assert store.is_user_auto_paused(1) is True
+    r1 = client.post("/api/auto-mode/resume-mine")
+    assert r1.status_code == 200
+    assert r1.json() == {"resumed": True}
+    assert store.is_user_auto_paused(1) is False
+    # Idempotent.
+    r2 = client.post("/api/auto-mode/resume-mine")
+    assert r2.status_code == 200
+    assert r2.json() == {"resumed": False}
+
+
+def test_user_auto_trade_get_surfaces_pause_state(
+    engine, tmp_path,
+) -> None:
+    """The user's auto-trade view includes paused_reason + paused_at
+    when paused so the app can render a banner."""
+    client, user_store, store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    store.update_auto_trade(1, {"mode": "live"})
+    store.pause_user_auto_trade(1, "insufficient_margin")
+    r = client.get("/api/settings/user/auto-trade")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["paused_reason"] == "insufficient_margin"
+    assert body["paused_at"]

@@ -396,6 +396,7 @@ class UserOverridesStore:
         self._migrate_pretp_protect_manual_entries()
         self._migrate_auto_trade_symbol_preference()
         self._migrate_auto_trade_notional_usd()
+        self._migrate_auto_trade_pause_columns()
         log.info("UserOverridesStore opened at {}", self._path)
 
     def _migrate_auto_trade_notional_usd(self) -> None:
@@ -441,6 +442,42 @@ class UserOverridesStore:
             log.info(
                 "UserOverridesStore: added user_auto_trade_settings."
                 "symbol_preference column (2026-05-19 per-user symbol picker)"
+            )
+
+    def _migrate_auto_trade_pause_columns(self) -> None:
+        """Idempotent ALTER for the per-user auto-pause columns.
+
+        Added 2026-05-24 to support self-healing dispatch behaviour:
+        when the engine sees N consecutive Binance ``-2019`` (insufficient
+        margin) rejects for a user, it auto-pauses that user's
+        dispatcher with ``paused_reason='insufficient_margin'`` so we
+        stop spamming their Recent Activity feed with the same rejection
+        on every signal. ``paused_at`` is the ISO-8601 UTC stamp of the
+        pause event — surfaced in the user-facing auto-mode status so
+        the app can show a "wallet empty — top up + resume" banner.
+
+        Both columns are NULL on existing rows; the dispatcher treats
+        NULL as "not paused — keep dispatching".
+        """
+        cur = self._conn.execute("PRAGMA table_info(user_auto_trade_settings)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "paused_reason" not in cols:
+            self._conn.execute(
+                "ALTER TABLE user_auto_trade_settings ADD COLUMN "
+                "paused_reason TEXT"
+            )
+            log.info(
+                "UserOverridesStore: added user_auto_trade_settings."
+                "paused_reason column (2026-05-24 auto-pause on -2019)"
+            )
+        if "paused_at" not in cols:
+            self._conn.execute(
+                "ALTER TABLE user_auto_trade_settings ADD COLUMN "
+                "paused_at TEXT"
+            )
+            log.info(
+                "UserOverridesStore: added user_auto_trade_settings."
+                "paused_at column (2026-05-24 auto-pause on -2019)"
             )
 
     def _migrate_pretp_grab_fraction(self) -> None:
@@ -781,6 +818,99 @@ class UserOverridesStore:
             )
             return [(row["started_at"], row["ended_at"]) for row in cur.fetchall()]
 
+    # ---- auto-pause -----------------------------------------------------
+
+    def pause_user_auto_trade(self, user_id: int, reason: str) -> Optional[str]:
+        """Stamp the user as auto-paused with a typed reason. Idempotent:
+        re-pausing a user already paused for the same reason is a no-op
+        that returns the original ``paused_at`` (so the engine can detect
+        "this was already paused" if it cares).
+
+        Returns the ``paused_at`` timestamp on the row after the call,
+        or None if no user row exists (paused state requires the
+        auto-trade row to exist — the engine only dispatches to users
+        who have already opted in).
+
+        Used by :mod:`src.execution.signal_dispatch` after N consecutive
+        Binance ``-2019`` rejects so the dispatcher stops sending new
+        orders to a user whose Futures wallet is empty.
+        """
+        if not isinstance(reason, str) or not reason:
+            return None
+        now = _now_iso()
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT paused_reason, paused_at FROM user_auto_trade_settings "
+                "WHERE user_id = ?",
+                (int(user_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return None
+            existing_reason = row["paused_reason"]
+            existing_at = row["paused_at"]
+            if existing_reason == reason and existing_at:
+                return existing_at  # already paused for this reason
+            self._conn.execute(
+                "UPDATE user_auto_trade_settings "
+                "SET paused_reason = ?, paused_at = ?, updated_at = ? "
+                "WHERE user_id = ?",
+                (reason, now, now, int(user_id)),
+            )
+            log.info(
+                "user_overrides.pause_user_auto_trade user_id={} reason={}",
+                user_id, reason,
+            )
+            return now
+
+    def resume_user_auto_trade(self, user_id: int) -> bool:
+        """Clear ``paused_reason`` + ``paused_at`` so the dispatcher
+        resumes sending orders to this user. Returns True if a paused
+        row was cleared, False if the user wasn't paused.
+
+        Called from the user-facing ``POST /api/auto-mode/resume-mine``
+        endpoint after the user has topped up their Futures wallet (or
+        otherwise resolved the original pause condition).
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT paused_reason FROM user_auto_trade_settings "
+                "WHERE user_id = ? AND paused_reason IS NOT NULL",
+                (int(user_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return False
+            now = _now_iso()
+            self._conn.execute(
+                "UPDATE user_auto_trade_settings "
+                "SET paused_reason = NULL, paused_at = NULL, updated_at = ? "
+                "WHERE user_id = ?",
+                (now, int(user_id)),
+            )
+            log.info(
+                "user_overrides.resume_user_auto_trade user_id={}", user_id,
+            )
+            return True
+
+    def is_user_auto_paused(self, user_id: int) -> bool:
+        """Cheap check used by the dispatcher's per-signal skip-filter.
+
+        Returns False on missing user row (no row → user never opted in;
+        nothing to skip), False when paused_reason is NULL, True when
+        paused_reason has a value.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT paused_reason FROM user_auto_trade_settings "
+                "WHERE user_id = ?",
+                (int(user_id),),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return False
+            return bool(row["paused_reason"])
+
     def get_operator_auto_trade(self) -> Dict[str, Any]:
         """Return the operator's effective per-user auto-trade override.
 
@@ -887,6 +1017,66 @@ def resolve_notional_usd(firebase_uid: str, default: float) -> float:
         return default
 
 
+def is_user_auto_paused_uid(firebase_uid: str) -> bool:
+    """Firebase-UID-keyed wrapper around :meth:`UserOverridesStore.
+    is_user_auto_paused`. Mirrors :func:`resolve_notional_usd` — same
+    lookup path (firebase_uid → user_id via the UserStore singleton →
+    pause-state check via the UserOverridesStore singleton).
+
+    Soft-fail: any exception returns False so a lookup failure NEVER
+    silently suppresses dispatch (the dispatcher can still log the
+    rejection and the operator gets visibility). Worst case is the
+    pre-2026-05-24 behaviour: keep dispatching to a paused user.
+    """
+    if _SINGLETON is None:
+        return False
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return False
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return False
+        return _SINGLETON.is_user_auto_paused(int(user.user_id))
+    except Exception as exc:
+        log.debug(
+            "is_user_auto_paused_uid: lookup failed for firebase_uid={} "
+            "({}); treating as not-paused",
+            firebase_uid, type(exc).__name__,
+        )
+        return False
+
+
+def pause_user_auto_trade_uid(firebase_uid: str, reason: str) -> Optional[str]:
+    """Firebase-UID-keyed wrapper around :meth:`UserOverridesStore.
+    pause_user_auto_trade`. Same lookup pattern as
+    :func:`is_user_auto_paused_uid`.
+
+    Soft-fail: returns None on any lookup or store error. The dispatcher
+    treats None as "couldn't persist the pause" and logs at WARNING so
+    the operator notices — the next signal will retry the pause attempt.
+    """
+    if _SINGLETON is None:
+        return None
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return None
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return None
+        return _SINGLETON.pause_user_auto_trade(int(user.user_id), reason)
+    except Exception as exc:
+        log.warning(
+            "pause_user_auto_trade_uid: persist failed for "
+            "firebase_uid={} reason={} ({})",
+            firebase_uid, reason, type(exc).__name__,
+        )
+        return None
+
+
 def operator_auto_trade_override() -> Dict[str, Any]:
     """Convenience: ``get_singleton().get_operator_auto_trade()`` with
     fallback to ``{}`` when the singleton is unset (tests, boot order)."""
@@ -933,6 +1123,8 @@ _AUTO_TRADE_COL_TYPES: Dict[str, str] = {
     "max_concurrent_positions": "int",
     "symbol_preference": "json_list",
     "notional_usd": "float",
+    "paused_reason": "str",
+    "paused_at": "str",
 }
 
 

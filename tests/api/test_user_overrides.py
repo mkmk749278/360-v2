@@ -828,3 +828,89 @@ def test_paper_subscriptions_isolated_between_users(
     assert store.get_paper_subscriptions(2) == []
     # User 1 has exactly one.
     assert len(store.get_paper_subscriptions(1)) == 1
+
+
+# ---------------------------------------------------------------------------
+# Auto-pause (2026-05-24 — consecutive -2019 insufficient_margin tracker)
+# ---------------------------------------------------------------------------
+
+
+def test_is_user_auto_paused_false_for_new_user(
+    store: UserOverridesStore,
+) -> None:
+    """Fresh user has no auto-trade row at all → not paused."""
+    assert store.is_user_auto_paused(1) is False
+
+
+def test_is_user_auto_paused_false_when_row_exists_unpaused(
+    store: UserOverridesStore,
+) -> None:
+    """User who opted in but isn't paused returns False."""
+    store.update_auto_trade(1, {"mode": "live"})
+    assert store.is_user_auto_paused(1) is False
+
+
+def test_pause_user_auto_trade_sets_reason_and_stamp(
+    store: UserOverridesStore,
+) -> None:
+    """pause_user_auto_trade stamps paused_reason + paused_at."""
+    store.update_auto_trade(1, {"mode": "live"})
+    paused_at = store.pause_user_auto_trade(1, "insufficient_margin")
+    assert paused_at is not None
+    assert store.is_user_auto_paused(1) is True
+    row = store.get_auto_trade(1)
+    assert row["paused_reason"] == "insufficient_margin"
+    assert row["paused_at"] == paused_at
+
+
+def test_pause_returns_none_when_no_row(
+    store: UserOverridesStore,
+) -> None:
+    """Can't pause a user who hasn't opted in — returns None (the
+    dispatcher only fans out to users with rows, so this is just a
+    defensive check)."""
+    assert store.pause_user_auto_trade(99, "insufficient_margin") is None
+
+
+def test_pause_is_idempotent_for_same_reason(
+    store: UserOverridesStore,
+) -> None:
+    """Re-pausing for the same reason preserves the original timestamp."""
+    store.update_auto_trade(1, {"mode": "live"})
+    first = store.pause_user_auto_trade(1, "insufficient_margin")
+    second = store.pause_user_auto_trade(1, "insufficient_margin")
+    assert first == second  # same timestamp returned
+
+
+def test_resume_clears_pause(
+    store: UserOverridesStore,
+) -> None:
+    """resume_user_auto_trade nulls both pause columns."""
+    store.update_auto_trade(1, {"mode": "live"})
+    store.pause_user_auto_trade(1, "insufficient_margin")
+    assert store.is_user_auto_paused(1) is True
+    cleared = store.resume_user_auto_trade(1)
+    assert cleared is True
+    assert store.is_user_auto_paused(1) is False
+    row = store.get_auto_trade(1)
+    assert "paused_reason" not in row  # NULL → filtered out by _row_to_partial
+    assert "paused_at" not in row
+
+
+def test_resume_returns_false_when_not_paused(
+    store: UserOverridesStore,
+) -> None:
+    """Idempotent: resuming a non-paused user is a no-op."""
+    store.update_auto_trade(1, {"mode": "live"})
+    assert store.resume_user_auto_trade(1) is False
+
+
+def test_pause_isolated_between_users(
+    store: UserOverridesStore,
+) -> None:
+    """Pausing user 1 must not pause user 2."""
+    store.update_auto_trade(1, {"mode": "live"})
+    store.update_auto_trade(2, {"mode": "live"})
+    store.pause_user_auto_trade(1, "insufficient_margin")
+    assert store.is_user_auto_paused(1) is True
+    assert store.is_user_auto_paused(2) is False

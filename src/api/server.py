@@ -78,6 +78,7 @@ from .schemas import (
     AgentsResponse,
     AutoModeChangeRequest,
     AutoModeChangeResponse,
+    AutoModeResumeMineResponse,
     AutoModeStatus,
     AutoTradeSettings,
     BillingGrantRequest,
@@ -1213,6 +1214,35 @@ def build_app(
             message=msg,
             mode=req.mode,
         )
+
+    # ---- Per-user auto-pause resume (2026-05-24) ----
+    #
+    # When signal_dispatch sees N consecutive Binance -2019 (insufficient
+    # margin) rejects for a user, it stamps ``paused_reason='insufficient_
+    # margin'`` on the user's auto-trade row so the dispatcher stops
+    # spamming their Recent Activity feed. This endpoint clears that
+    # pause so the user can resume after topping up their wallet.
+    #
+    # User-callable (any tier). Idempotent — calling on a not-paused
+    # user returns ``resumed=False`` with no side effects.
+
+    @app.post(
+        "/api/auto-mode/resume-mine",
+        response_model=AutoModeResumeMineResponse,
+        tags=["auto-mode"],
+        dependencies=[Depends(auth)],
+    )
+    async def auto_mode_resume_mine(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> AutoModeResumeMineResponse:
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        user_id = _resolve_user_id(identity)
+        resumed = user_overrides.resume_user_auto_trade(user_id)
+        return AutoModeResumeMineResponse(resumed=resumed)
 
     # ---- Paper-trade-visibility endpoints (2026-05-16) ----
     # Registered via register() in paper_trade_routes.py so the
