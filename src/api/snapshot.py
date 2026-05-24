@@ -844,17 +844,62 @@ def build_auto_mode(engine: Any) -> AutoModeStatus:
 
 
 def build_pnl_history(
-    engine: Any, *, mode: Optional[str] = None, days: int = 30
+    engine: Any,
+    *,
+    mode: Optional[str] = None,
+    days: int = 30,
+    user_id: Optional[int] = None,
+    user_overrides: Any = None,
 ) -> Dict[str, Any]:
     """Daily-bucketed realised PnL series + rolling aggregates.
 
     Returns a dict matching ``PnlHistoryResponse``.  ``mode`` defaults to
     the engine's current auto-execution mode.
+
+    Per-user filtering (2026-05-24): when both ``user_id`` AND
+    ``user_overrides`` are supplied AND the user has paper subscription
+    windows, the paper-mode series is filtered to trades closed during
+    their windows (extends the per-user visibility pattern shipped in
+    #478 for ``/api/trades``). Without this, every paper user saw the
+    same engine-wide ``pnl_history.json`` line — owner-reported "lots
+    of confusion" 2026-05-24 where the in-app "PAPER P&L TODAY" implied
+    per-user but was engine-wide.
+
+    Fall-back: any missing piece (``user_id=None``, ``user_overrides``
+    not wired, no subscription windows, or live mode) returns the
+    engine-wide ledger as before. Live-mode per-user PnL is a Phase 4
+    build — each user has their own Binance ledger; per-user
+    reconciliation against ``dispatch_log`` ships later.
     """
     if mode is None:
         mode = getattr(engine, "_current_auto_mode", "off")
     days = max(1, min(int(days), 365))
-    if mode in ("paper", "live"):
+    if mode == "paper":
+        windows: list = []
+        if user_id is not None and user_overrides is not None:
+            try:
+                windows = user_overrides.get_paper_subscriptions(int(user_id))
+            except Exception:
+                windows = []
+        if windows:
+            from src.auto_trade import trade_records
+            from src.api.paper_user_view import pnl_history_for_user
+            # Pull a generous slice — the filter is O(N) on
+            # the result. The 500-row cap matches list_trades' own
+            # built-in upper bound. Date filtering is handled inside
+            # pnl_history_for_user via the day-bucket range.
+            ledger_rows = trade_records.list_trades(
+                limit=500, offset=0, include_open=False,
+            )
+            series, weekly, monthly = pnl_history_for_user(
+                ledger_rows, windows, days=days,
+            )
+        else:
+            from src.auto_trade import pnl_history
+            series = pnl_history.get_history(mode, days=days)
+            weekly = pnl_history.get_weekly(mode)
+            monthly = pnl_history.get_monthly(mode)
+    elif mode == "live":
         from src.auto_trade import pnl_history
         series = pnl_history.get_history(mode, days=days)
         weekly = pnl_history.get_weekly(mode)

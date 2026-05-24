@@ -1192,8 +1192,24 @@ def build_app(
             description="Override the engine's current mode — useful for "
             "viewing the other ledger (e.g. paper history while in live).",
         ),
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> PnlHistoryResponse:
-        payload = build_pnl_history(engine, mode=mode, days=days)
+        # Per-user paper PnL filter (2026-05-24). Resolve identity → user_id
+        # → subscription windows → filtered ledger. Anonymous device-token
+        # holders raise HTTPException 404 in _resolve_user_id; catch and
+        # pass user_id=None so the endpoint falls back to engine-wide
+        # (pre-2026-05-24 behaviour) rather than 404'ing the whole call.
+        try:
+            user_id = _resolve_user_id(identity)
+        except HTTPException:
+            user_id = None
+        payload = build_pnl_history(
+            engine,
+            mode=mode,
+            days=days,
+            user_id=user_id,
+            user_overrides=user_overrides,
+        )
         return PnlHistoryResponse(**payload)
 
     @app.post(

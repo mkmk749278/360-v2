@@ -2263,3 +2263,92 @@ def test_user_auto_trade_get_surfaces_pause_state(
     body = r.json()
     assert body["paused_reason"] == "insufficient_margin"
     assert body["paused_at"]
+
+
+# ---------------------------------------------------------------------------
+# /api/pnl/history per-user filter (2026-05-24 — paper "confusion" follow-up)
+# ---------------------------------------------------------------------------
+
+
+def test_pnl_history_paper_falls_back_to_engine_when_no_user(
+    engine, tmp_path,
+) -> None:
+    """Anonymous device-token callers (sub like ``device-X``) get the
+    engine-wide paper ledger — pre-2026-05-24 behaviour, preserved as
+    fallback so OTP / landing-page flows don't 404."""
+    from src.api.auth import mint_token
+    from src.auto_trade import pnl_history
+    pnl_history.record_close("paper", 5.50)
+    client, _user_store, _store = _phase2_app_with_overrides(engine, tmp_path)
+    client.headers["Authorization"] = (
+        f"Bearer {mint_token(secret=_TEST_SECRET)}"
+    )
+    r = client.get("/api/pnl/history?mode=paper&days=7")
+    assert r.status_code == 200
+    assert r.json()["weekly_pnl_usd"] == 5.50
+
+
+def test_pnl_history_paper_excludes_trades_before_user_subscribed(
+    engine, tmp_path,
+) -> None:
+    """Trades closed BEFORE the user opened their paper subscription
+    are NOT visible to them — the whole point of the filter."""
+    from src.auto_trade import pnl_history, trade_records
+    pnl_history.record_close("paper", 99.0)
+    trade_records.open_trade(
+        signal_id="USR-A", symbol="BTCUSDT", side="long",
+        entry=30000.0, qty=0.01, leverage=10.0, position_size_pct=2.0,
+    )
+    trade_records.close_trade(
+        signal_id="USR-A", close_reason="tp1",
+        close_price=30300.0, gross_pnl_usd=3.0, fees_usd=0.18,
+        net_pnl_usd=2.82,
+    )
+    client, user_store, store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    store.update_auto_trade(1, {"mode": "paper"})
+    r = client.get("/api/pnl/history?mode=paper&days=7")
+    assert r.status_code == 200
+    assert r.json()["weekly_pnl_usd"] == 0.0
+
+
+def test_pnl_history_paper_includes_trades_inside_user_window(
+    engine, tmp_path,
+) -> None:
+    """Trades closed AFTER the user opens their paper subscription
+    DO appear in their per-user pnl_history view."""
+    from src.auto_trade import trade_records
+    client, user_store, store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    store.update_auto_trade(1, {"mode": "paper"})
+    trade_records.open_trade(
+        signal_id="USR-AFTER", symbol="ETHUSDT", side="long",
+        entry=3000.0, qty=0.1, leverage=10.0, position_size_pct=2.0,
+    )
+    trade_records.close_trade(
+        signal_id="USR-AFTER", close_reason="tp1",
+        close_price=3030.0, gross_pnl_usd=3.0, fees_usd=0.18,
+        net_pnl_usd=2.82,
+    )
+    r = client.get("/api/pnl/history?mode=paper&days=7")
+    assert r.status_code == 200
+    assert r.json()["weekly_pnl_usd"] == 2.82
+
+
+def test_pnl_history_live_mode_stays_engine_wide(
+    engine, tmp_path,
+) -> None:
+    """Live-mode PnL stays engine-wide — per-user live PnL is Phase 4
+    work (each user has their own Binance ledger; per-user
+    reconciliation against dispatch_log ships then)."""
+    from src.auto_trade import pnl_history
+    pnl_history.record_close("live", 3.30)
+    client, user_store, store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    store.update_auto_trade(1, {"mode": "paper"})
+    r = client.get("/api/pnl/history?mode=live&days=7")
+    assert r.status_code == 200
+    assert r.json()["weekly_pnl_usd"] == 3.30
