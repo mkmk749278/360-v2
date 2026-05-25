@@ -247,6 +247,61 @@ def test_qty_split_user_notional_below_min_returns_zero() -> None:
     assert total == 0.0
 
 
+def test_qty_split_snap_up_clears_min_notional() -> None:
+    """MIN_NOTIONAL snap-up: when floored qty gives notional just below
+    $5 MIN_NOTIONAL, the engine adds one stepSize so the order clears.
+
+    Scenario that matches the production bug: user sets $5 notional, pair
+    is at $17.58, stepSize=0.001.
+      floor(5/17.58 / 0.001) * 0.001 = floor(0.2844..) = 0.284
+      0.284 * 17.58 = $4.993 → below $5 → snap-up to 0.285
+      0.285 * 17.58 = $5.013 → passes MIN_NOTIONAL
+    """
+    symbol_filters._set_cache_for_test({
+        **symbol_filters._FILTERS,
+        "DEXEUSDT": symbol_filters.SymbolFilters(
+            symbol="DEXEUSDT",
+            step_size=0.001,
+            tick_size=0.0001,
+            min_qty=0.001,
+            min_notional=5.0,
+        ),
+    })
+    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split(
+        "DEXEUSDT", 17.58, notional_usd=5.0,
+    )
+    # Snap-up brings total to 0.285 (one step above the floored 0.284).
+    assert total == pytest.approx(0.285, abs=0.001)
+    # Notional after snap-up must clear MIN_NOTIONAL.
+    assert total * 17.58 >= 5.0
+    # TP legs must not exceed total (never over-sell).  Float arithmetic
+    # can leave up to one stepSize as dust (FSM handles it per code comment).
+    assert tp1 + tp2 + tp3 <= total + 1e-9
+    assert total - (tp1 + tp2 + tp3) < 0.002  # at most one step of dust
+
+
+def test_qty_split_snap_up_fails_fundamentally_too_small() -> None:
+    """When even one stepSize snap-up can't clear MIN_NOTIONAL, the
+    function returns zeros.  Example: extremely coarse stepSize (e.g. 10)
+    combined with low price means one step = $10 overshoot which still
+    doesn't clear a $100 MIN_NOTIONAL."""
+    symbol_filters._set_cache_for_test({
+        **symbol_filters._FILTERS,
+        "BIGSTEPUSDT": symbol_filters.SymbolFilters(
+            symbol="BIGSTEPUSDT",
+            step_size=0.001,
+            tick_size=0.01,
+            min_qty=0.001,
+            min_notional=100.0,  # very high MIN_NOTIONAL
+        ),
+    })
+    # $5 notional / $17.58 → 0.284 → $4.99 < $100. Snap to 0.285 → $5.01 still < $100.
+    total, _, _, _ = signal_dispatch._compute_qty_split(
+        "BIGSTEPUSDT", 17.58, notional_usd=5.0,
+    )
+    assert total == 0.0
+
+
 def test_qty_split_user_notional_zero_falls_back_to_default() -> None:
     """Zero / None notional → use engine default (preserves prior
     behaviour for users without an override row)."""

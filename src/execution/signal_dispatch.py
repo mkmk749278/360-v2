@@ -165,9 +165,18 @@ def _compute_qty_split(
     SL or expiry).
 
     Defensive: returns all zeros when entry_price <= 0 OR when the
-    rounded total_qty fails MIN_NOTIONAL (the order would be rejected
-    by Binance with -4164; better to skip cleanly than to fire a
-    doomed order through the FSM + circuit-breaker chain).
+    rounded total_qty fails MIN_NOTIONAL even after a one-stepSize
+    snap-up (see snap-up note below).  A doomed order is never fired
+    through the FSM + circuit-breaker chain; the caller records a
+    "NotionalTooSmall" reject event so the user sees why in the app.
+
+    Snap-up: when the floored qty gives notional < MIN_NOTIONAL, we
+    try adding exactly one stepSize.  For a $5 notional at $17.58
+    price, stepSize=0.001 → floored qty=0.284 → $4.993 (just below
+    Binance's $5 floor). Adding one step → 0.285 × $17.58 = $5.01,
+    which clears MIN_NOTIONAL.  The overage above the user's stated
+    notional is at most ``entry_price × step_size`` (cents for major
+    USDT-M pairs, always < $0.10).
     """
     from src.execution import symbol_filters as _sf
 
@@ -180,12 +189,37 @@ def _compute_qty_split(
     if total_qty <= 0:
         return (0.0, 0.0, 0.0, 0.0)
     if not _sf.meets_min_notional(symbol, total_qty, entry_price):
-        log.info(
-            "signal_dispatch: symbol={} qty={:.8f} price={:.8f} notional=${:.2f} "
-            "below MIN_NOTIONAL after LOT_SIZE rounding — skipping",
-            symbol, total_qty, entry_price, notional,
-        )
-        return (0.0, 0.0, 0.0, 0.0)
+        # Try bumping by one stepSize.  The LOT_SIZE floor often
+        # shaves the last cent below MIN_NOTIONAL on small notionals;
+        # one step up restores compliance with negligible overshoot.
+        sf = _sf.get_filters(symbol)
+        if sf is not None and sf.step_size > 0:
+            qty_snapped = total_qty + sf.step_size
+            if _sf.meets_min_notional(symbol, qty_snapped, entry_price):
+                log.info(
+                    "signal_dispatch: symbol={} MIN_NOTIONAL snap-up "
+                    "{:.8f}→{:.8f} qty (${:.4f}→${:.4f})",
+                    symbol, total_qty, qty_snapped,
+                    total_qty * entry_price, qty_snapped * entry_price,
+                )
+                total_qty = qty_snapped
+            else:
+                log.info(
+                    "signal_dispatch: symbol={} qty={:.8f} price={:.8f} "
+                    "notional=${:.4f} below MIN_NOTIONAL even after snap-up "
+                    "(user notional ${:.2f}) — skipping",
+                    symbol, total_qty, entry_price,
+                    total_qty * entry_price, notional,
+                )
+                return (0.0, 0.0, 0.0, 0.0)
+        else:
+            log.info(
+                "signal_dispatch: symbol={} qty={:.8f} price={:.8f} "
+                "notional=${:.4f} below MIN_NOTIONAL after LOT_SIZE "
+                "rounding, no filter entry for snap-up — skipping",
+                symbol, total_qty, entry_price, total_qty * entry_price,
+            )
+            return (0.0, 0.0, 0.0, 0.0)
 
     tp1 = _sf.round_qty(symbol, total_qty * _TP1_FRACTION)
     tp2 = _sf.round_qty(symbol, total_qty * _TP2_FRACTION)
@@ -293,8 +327,25 @@ async def dispatch_signal_to_active_users(
             log.info(
                 "signal_dispatch: zero qty for uid={} signal_id={} symbol={} "
                 "entry={} notional=${} — skipping (below MIN_NOTIONAL after "
-                "LOT_SIZE rounding)",
+                "LOT_SIZE rounding even with snap-up)",
                 uid, signal_id, symbol, entry_price, user_notional,
+            )
+            # Surface the skip in Recent Activity so the user knows WHY
+            # no order was placed rather than seeing complete silence.
+            from src.execution import dispatch_log as _dl
+            _dl.record_rejected(
+                firebase_uid=uid,
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                entry_price=entry_price,
+                reject_class="NotionalTooSmall",
+                reject_detail=(
+                    f"Position size ${user_notional:.0f} is too small to "
+                    f"place a {symbol} order at ${entry_price:.4f}. "
+                    f"Increase your notional in Settings → Server-side "
+                    f"auto-trade (minimum ~$10 recommended)."
+                ),
             )
             return False
         try:
