@@ -54,7 +54,6 @@ class SetupClass(str, Enum):
     RANGE_REJECTION = "RANGE_REJECTION"
     MOMENTUM_EXPANSION = "MOMENTUM_EXPANSION"
     EXHAUSTION_FADE = "EXHAUSTION_FADE"
-    RANGE_FADE = "RANGE_FADE"
     WHALE_MOMENTUM = "WHALE_MOMENTUM"
     MULTI_STRATEGY_CONFLUENCE = "MULTI_STRATEGY_CONFLUENCE"
     VOLUME_SURGE_BREAKOUT = "VOLUME_SURGE_BREAKOUT"
@@ -190,7 +189,6 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.LIQUIDATION_REVERSAL,
         SetupClass.MOMENTUM_EXPANSION,
         SetupClass.WHALE_MOMENTUM,
-        SetupClass.RANGE_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
@@ -217,19 +215,16 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.RANGE_REJECTION,
-        SetupClass.RANGE_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     "360_SCALP_VWAP": {
         SetupClass.RANGE_REJECTION,
-        SetupClass.RANGE_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
     },
     "360_SCALP_DIVERGENCE": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.RANGE_REJECTION,
-        SetupClass.RANGE_FADE,
         SetupClass.EXHAUSTION_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
         # PR-01: preserve evaluator-authored divergence identity
@@ -310,7 +305,6 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.RANGE_REJECTION,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.EXHAUSTION_FADE,
-        SetupClass.RANGE_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -324,7 +318,6 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
-        SetupClass.RANGE_FADE,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -397,7 +390,6 @@ _MAX_SL_PCT_BY_CHANNEL: Dict[str, float] = {
 _MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
     # Compress-policy setups (SL clamped, not rejected)
     "RANGE_REJECTION":                1.5,  # BB/extreme fade — tight by definition
-    "RANGE_FADE":                     1.5,  # Mirror of RANGE_REJECTION
     "EXHAUSTION_FADE":                2.0,  # Wick extremes can extend; still compress
     "WHALE_MOMENTUM":                 2.0,  # Swing-based; generous for momentum entries
     "OPENING_RANGE_BREAKOUT":         2.0,  # Range height dependent
@@ -451,7 +443,7 @@ _MIN_RISK_DISTANCE_PCT_RECLAIM_RETEST = 0.0001  # 0.01% reclaim/retest structura
 
 def _min_rr_for_setup(setup: SetupClass) -> float:
     """Return canonical minimum R:R (reward/risk) by setup family policy."""
-    if setup in (SetupClass.RANGE_REJECTION, SetupClass.RANGE_FADE):
+    if setup == SetupClass.RANGE_REJECTION:
         return _MIN_RR_RANGE
     if setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL,
                  SetupClass.EXHAUSTION_FADE):
@@ -972,11 +964,9 @@ def classify_setup(
                 _sig_setup_class,
             )
             setup = SetupClass.TREND_PULLBACK_CONTINUATION
-    # Check for WHALE_MOMENTUM / RANGE_FADE setups (SCALP sub-paths)
+    # Check for WHALE_MOMENTUM setups (SCALP sub-paths)
     elif channel_name == "360_SCALP" and (whale or delta_spike) and abs(momentum) >= 0.3:
         setup = SetupClass.WHALE_MOMENTUM
-    elif channel_name == "360_SCALP" and market_state in (MarketState.CLEAN_RANGE, MarketState.DIRTY_RANGE):
-        setup = SetupClass.RANGE_FADE
     elif sweeps and signal.direction == sweeps[0].direction and (mss is not None or abs(momentum) >= 0.2):
         setup = SetupClass.LIQUIDITY_SWEEP_REVERSAL
     elif mss is not None and signal.direction == mss.direction:
@@ -1051,10 +1041,6 @@ def execution_quality_check(
         anchor = bb_mid or sweep_level or signal.entry
         trigger_confirmed = market_state == MarketState.CLEAN_RANGE and bool(smc_data.get("sweeps"))
         note = "Fade only after exhaustion is obvious and reclaim begins."
-    elif setup == SetupClass.RANGE_FADE:
-        anchor = _safe_float(primary.get("bb_lower_last") if signal.direction == Direction.LONG else primary.get("bb_upper_last"), signal.entry)
-        trigger_confirmed = market_state in (MarketState.CLEAN_RANGE, MarketState.DIRTY_RANGE) and abs(signal.entry - anchor) <= atr_val * 0.8
-        note = "Fade at band edge only; avoid mid-range entries."
     elif setup == SetupClass.WHALE_MOMENTUM:
         anchor = _safe_float(primary.get("ema9_last"), ema_anchor)
         trigger_confirmed = abs(_safe_float(primary.get("momentum_last"))) >= 0.3
@@ -1120,7 +1106,6 @@ def execution_quality_check(
         SetupClass.RANGE_REJECTION: 1.2,
         SetupClass.MOMENTUM_EXPANSION: 1.0,
         SetupClass.EXHAUSTION_FADE: 1.0,
-        SetupClass.RANGE_FADE: 1.3,
         SetupClass.WHALE_MOMENTUM: 1.2,
         SetupClass.VOLUME_SURGE_BREAKOUT: 1.5,
         SetupClass.BREAKDOWN_SHORT: 1.5,
@@ -1399,12 +1384,6 @@ def build_risk_plan(
         tp1 = signal.entry + risk * 1.2 if _is_long else signal.entry - risk * 1.2
         tp2 = signal.entry + risk * 2.1 if _is_long else signal.entry - risk * 2.1
         tp3 = signal.entry + risk * 3.0 if _is_long else signal.entry - risk * 3.0
-    elif setup == SetupClass.RANGE_FADE:
-        # Conservative fade at range extremes: quick first partial, short
-        # extension.  Mirrors RANGE_REJECTION philosophy but on rate-of-change.
-        tp1 = signal.entry + risk * 0.9 if _is_long else signal.entry - risk * 0.9
-        tp2 = signal.entry + risk * 1.5 if _is_long else signal.entry - risk * 1.5
-        tp3 = signal.entry + risk * 2.2 if _is_long else signal.entry - risk * 2.2
     elif setup == SetupClass.TREND_PULLBACK_CONTINUATION:
         # Clean trend pullback: ride the trend with moderate extension targets.
         tp1 = signal.entry + risk * 1.4 if _is_long else signal.entry - risk * 1.4
@@ -1668,8 +1647,8 @@ class SignalScoringEngine:
                           "CONTINUATION_LIQUIDITY_SWEEP", "TREND_PULLBACK_EMA",
                           "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION",
                           "DIVERGENCE_CONTINUATION"],
-        "RANGING": ["RANGE_FADE", "SWING_STANDARD", "SR_FLIP_RETEST", "FAILED_AUCTION_RECLAIM"],
-        "QUIET": ["RANGE_FADE", "QUIET_COMPRESSION_BREAK"],
+        "RANGING": ["SWING_STANDARD", "SR_FLIP_RETEST", "FAILED_AUCTION_RECLAIM"],
+        "QUIET": ["QUIET_COMPRESSION_BREAK"],
         "VOLATILE": ["WHALE_MOMENTUM", "LIQUIDITY_SWEEP_REVERSAL",
                      "VOLUME_SURGE_BREAKOUT", "BREAKDOWN_SHORT",
                      "CONTINUATION_LIQUIDITY_SWEEP", "POST_DISPLACEMENT_CONTINUATION",

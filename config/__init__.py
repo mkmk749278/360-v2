@@ -1082,7 +1082,6 @@ SCALP_ORB_ENABLED:                bool = _safe_bool("SCALP_ORB_ENABLED",        
 # ---------------------------------------------------------------------------
 SIGNAL_TYPE_LABELS: Dict[str, str] = {
     "LIQUIDITY_SWEEP_REVERSAL":      "⚡ SWEEP REVERSAL",
-    "RANGE_FADE":                    "📊 RANGE FADE",
     "WHALE_MOMENTUM":                "🐋 WHALE MOMENTUM",
     "FVG_RETEST":                    "⚡ FVG RETEST",
     "FVG_RETEST_HTF_CONFLUENCE":     "⚡ FVG RETEST ★ HTF CONFLUENCE",

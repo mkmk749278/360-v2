@@ -22,7 +22,6 @@ from typing import Any, Dict, Optional
 
 SETUP_EMOJIS: Dict[str, str] = {
     "LIQUIDITY_SWEEP_REVERSAL": "⚡",
-    "RANGE_FADE": "📊",
     "WHALE_MOMENTUM": "🐋",
     "FVG_RETEST": "⚡",
     "FVG_RETEST_HTF_CONFLUENCE": "⚡",

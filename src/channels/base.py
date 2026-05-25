@@ -460,7 +460,7 @@ def build_channel_signal(
         when ``DYNAMIC_SL_TP_ENABLED`` is ``False`` (legacy path) to stretch or
         compress TP ratios based on volatility regime.
     setup_class:
-        Setup class string (e.g. "RANGE_FADE", "WHALE_MOMENTUM").  Used to
+        Setup class string (e.g. "WHALE_MOMENTUM", "BREAKOUT_RETEST").  Used to
         set ``sig.setup_class`` and, together with ``regime``, to look up
         regime-aware signal parameters.
     regime:

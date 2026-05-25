@@ -327,7 +327,7 @@ class TestContentEngineTemplateOnly:
                 "entry_price": 50000.0, "close_price": 50500.0,
                 "sl_price": 50500.0, "tp_label": "SL",
                 "r_multiple": -1.0, "pnl_pct": -1.0,
-                "setup_name": "RANGE_FADE", "hold_duration": "12min",
+                "setup_name": "RANGE_REJECTION", "hold_duration": "12min",
             },
             is_tp=False,
             use_gpt=False,

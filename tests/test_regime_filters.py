@@ -47,14 +47,8 @@ class TestGetRsiThresholds:
 
 
 class TestGetAdxMin:
-    def test_range_fade_in_ranging(self):
-        assert get_adx_min("RANGING", "RANGE_FADE") == 10.0
-
     def test_range_rejection_in_ranging(self):
         assert get_adx_min("RANGING", "RANGE_REJECTION") == 12.0
-
-    def test_range_fade_in_quiet(self):
-        assert get_adx_min("QUIET", "RANGE_FADE") == 8.0
 
     def test_range_rejection_in_quiet(self):
         assert get_adx_min("QUIET", "RANGE_REJECTION") == 10.0
@@ -81,7 +75,7 @@ class TestGetAdxMin:
         assert get_adx_min("") == 20.0
 
     def test_empty_regime_with_setup_defaults(self):
-        assert get_adx_min("", "RANGE_FADE") == 20.0
+        assert get_adx_min("", "RANGE_REJECTION") == 20.0
 
     def test_unknown_setup_falls_back_to_regime_default_ranging(self):
         assert get_adx_min("RANGING", "UNKNOWN_SETUP") == 15.0
@@ -139,9 +133,6 @@ class TestCheckRsiRegime:
 
 
 class TestCheckAdxRegime:
-    def test_low_adx_passes_for_range_fade(self):
-        assert check_adx_regime(12.0, regime="RANGING", setup_class="RANGE_FADE") is True
-
     def test_low_adx_fails_for_trend_continuation(self):
         assert check_adx_regime(12.0, regime="TRENDING_UP", setup_class="TREND_PULLBACK_CONTINUATION") is False
 
@@ -150,10 +141,10 @@ class TestCheckAdxRegime:
         assert check_adx_regime(21.0, regime="") is True
 
     def test_none_adx_fails(self):
-        assert check_adx_regime(None, regime="RANGING", setup_class="RANGE_FADE") is False
+        assert check_adx_regime(None, regime="RANGING", setup_class="RANGE_REJECTION") is False
 
     def test_max_adx_respected(self):
-        assert check_adx_regime(50.0, regime="RANGING", setup_class="RANGE_FADE", max_adx=30.0) is False
+        assert check_adx_regime(50.0, regime="RANGING", setup_class="RANGE_REJECTION", max_adx=30.0) is False
 
     def test_whale_momentum_in_volatile_low_threshold(self):
         # ADX 16 passes for WHALE_MOMENTUM in VOLATILE (min=15)

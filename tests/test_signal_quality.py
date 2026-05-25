@@ -118,18 +118,10 @@ class TestRegimeSetupCompatibility:
         assert setup.channel_compatible is True
         assert setup.regime_compatible is True
 
-    def test_range_fade_regime_incompatible_in_strong_trend(self):
-        """RANGE_FADE should be regime-incompatible with STRONG_TREND."""
-        from src.signal_quality import REGIME_SETUP_COMPATIBILITY
-        assert SetupClass.RANGE_FADE not in REGIME_SETUP_COMPATIBILITY.get(
-            MarketState.STRONG_TREND, set()
-        )
-
     def test_continuation_rejected_in_dirty_range(self):
         signal = _signal(channel="360_SCALP")
         setup = classify_setup("360_SCALP", signal, _indicators(), {"sweeps": [], "mss": None, "fvg": []}, MarketState.DIRTY_RANGE)
-        assert setup.setup_class in {SetupClass.RANGE_REJECTION, SetupClass.RANGE_FADE}
-        assert setup.channel_compatible in {True, False}  # RANGE_REJECTION not in SCALP compat; RANGE_FADE is
+        assert setup.setup_class == SetupClass.RANGE_REJECTION
 
     def test_breakout_setup_allowed_in_breakout_expansion(self):
         signal = _signal(channel="360_SCALP")
@@ -139,7 +131,7 @@ class TestRegimeSetupCompatibility:
         assert setup.regime_compatible is True
 
     def test_liquidity_sweep_reversal_self_classifying(self):
-        """LIQUIDITY_SWEEP_REVERSAL on signal.setup_class must not be remapped to RANGE_FADE (PR-ARCH-4)."""
+        """LIQUIDITY_SWEEP_REVERSAL on signal.setup_class must be preserved by classify_setup (PR-ARCH-4)."""
         signal = _signal(channel="360_SCALP")
         signal.setup_class = "LIQUIDITY_SWEEP_REVERSAL"
         setup = classify_setup(
@@ -152,7 +144,7 @@ class TestRegimeSetupCompatibility:
         assert setup.setup_class == SetupClass.LIQUIDITY_SWEEP_REVERSAL
 
     def test_quiet_compression_break_self_classifying(self):
-        """QUIET_COMPRESSION_BREAK on signal.setup_class must not be remapped to RANGE_FADE (PR-ARCH-4)."""
+        """QUIET_COMPRESSION_BREAK on signal.setup_class must be preserved by classify_setup (PR-ARCH-4)."""
         signal = _signal(channel="360_SCALP")
         signal.setup_class = "QUIET_COMPRESSION_BREAK"
         setup = classify_setup(
@@ -299,32 +291,6 @@ class TestExecutionAndRiskChecks:
         )
         assert result.anchor_price == pytest.approx(indicators["5m"]["ema21_last"])
         assert "pullback confirmation" in result.execution_note
-
-    def test_range_fade_no_key_error(self):
-        """RANGE_FADE must not raise KeyError — this was the P0 production bug."""
-        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
-        # entry near bb_lower (98.0) in a CLEAN_RANGE — should pass
-        signal.entry = 98.5
-        result = execution_quality_check(signal, _indicators(), _smc(), SetupClass.RANGE_FADE, MarketState.CLEAN_RANGE)
-        assert result.trigger_confirmed is True
-        assert result.passed is True
-        assert "band edge" in result.execution_note
-
-    def test_range_fade_mid_range_rejected(self):
-        """RANGE_FADE entry far from band edge should be rejected (trigger not confirmed)."""
-        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
-        # entry at 101.0 which is near bb_mid (101.0), far from bb_lower (98.0) — trigger should fail
-        signal.entry = 101.0
-        result = execution_quality_check(signal, _indicators(), _smc(), SetupClass.RANGE_FADE, MarketState.CLEAN_RANGE)
-        assert result.passed is False
-
-    def test_range_fade_dirty_range_accepted(self):
-        """RANGE_FADE should also trigger-confirm in DIRTY_RANGE, not just CLEAN_RANGE."""
-        signal = _signal(channel="360_SCALP", direction=Direction.LONG)
-        signal.entry = 98.5
-        result = execution_quality_check(signal, _indicators(), _smc(), SetupClass.RANGE_FADE, MarketState.DIRTY_RANGE)
-        assert result.trigger_confirmed is True
-        assert result.passed is True
 
     def test_whale_momentum_no_key_error(self):
         """WHALE_MOMENTUM must not raise KeyError — this was the P0 production bug."""
@@ -1459,17 +1425,6 @@ class TestFamilyAwareTP:
 
     # ── Range / structured level families ──────────────────────────────────
 
-    def test_range_fade_tp1_conservative(self):
-        """RANGE_FADE tp1 must be ≈ 0.9R (conservative range fade)."""
-        risk = _risk_plan_for(SetupClass.RANGE_FADE)
-        assert risk.passed, f"RANGE_FADE plan failed: {risk.reason}"
-        entry = 100.0
-        risk_dist = entry - risk.stop_loss
-        tp1_ratio = (risk.tp1 - entry) / risk_dist
-        assert tp1_ratio == pytest.approx(0.9, abs=0.05), (
-            f"RANGE_FADE tp1 ratio {tp1_ratio:.2f} should be 0.9R"
-        )
-
     def test_sr_flip_retest_tp1_preserves_evaluator(self):
         """PR-02: SR_FLIP_RETEST preserves evaluator-authored TP1 (swing-high level).
 
@@ -1556,7 +1511,7 @@ class TestFamilyAwareTP:
         (SetupClass.BREAKOUT_RETEST, 0.03),                  # no per-setup cap → channel 3.0%
         (SetupClass.WHALE_MOMENTUM, 0.02),                   # per-setup 2.0% (compress)
         (SetupClass.TREND_PULLBACK_CONTINUATION, 0.03),      # no per-setup cap → channel 3.0%
-        (SetupClass.RANGE_FADE, 0.015),                      # per-setup 1.5% (compress)
+        (SetupClass.RANGE_REJECTION, 0.015),                 # per-setup 1.5% (compress)
     ])
     def test_sl_cap_enforced_for_compress_families(self, setup, expected_cap):
         """Compress-policy setups: SL is clamped to the tighter of channel cap
@@ -1708,7 +1663,7 @@ class TestScoringDimensions:
         assert result["regime"] == 18.0
 
     def test_regime_weak_alignment(self, engine):
-        inp = ScoringInput(regime="TRENDING_UP", setup_class="RANGE_FADE")
+        inp = ScoringInput(regime="TRENDING_UP", setup_class="RANGE_REJECTION")
         result = engine.score(inp)
         assert result["regime"] == 8.0
 
@@ -1970,9 +1925,9 @@ class TestFamilyAwareConfidenceScoring:
         result = engine.score(inp)
         assert result["thesis_adj"] == 0.0
 
-    def test_thesis_adj_zero_for_quiet_specialist(self, engine):
-        """Quiet-specialist (range-fade) setup gets zero thesis adjustment."""
-        inp = self._base_inputs(setup_class="RANGE_FADE")
+    def test_thesis_adj_zero_for_range_rejection(self, engine):
+        """RANGE_REJECTION setup gets zero thesis adjustment."""
+        inp = self._base_inputs(setup_class="RANGE_REJECTION")
         result = engine.score(inp)
         assert result["thesis_adj"] == 0.0
 
@@ -2109,7 +2064,7 @@ class TestFamilyAwareConfidenceScoring:
             regime="QUIET",
         )
         volatile_unrelated = self._base_inputs(
-            setup_class="RANGE_FADE",
+            setup_class="RANGE_REJECTION",
             regime="VOLATILE",
         )
         assert engine.score(quiet_unrelated)["regime"] == 8.0
@@ -2429,7 +2384,7 @@ class TestFamilyAwareConfidenceScoring:
             "order_flow": "DIVERGENCE_CONTINUATION",
             "trend": "TREND_PULLBACK_CONTINUATION",
             "breakout": "BREAKOUT_RETEST",
-            "quiet": "RANGE_FADE",
+            "quiet": "RANGE_REJECTION",
         }
         scores = {
             name: engine.score(ScoringInput(setup_class=sc, **shared))["total"]

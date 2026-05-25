@@ -122,9 +122,7 @@ _ADX_MIN_BY_CONTEXT: dict[tuple[str, str], float] = {
     ("TRENDING_DOWN", "TREND_PULLBACK_CONTINUATION"): 22.0,
     ("TRENDING_DOWN", "BREAKOUT_RETEST"): 20.0,
     # Range-bound setups need LOW ADX (ranging confirmation)
-    ("RANGING", "RANGE_FADE"): 10.0,       # Very low ADX is fine for range-fade
     ("RANGING", "RANGE_REJECTION"): 12.0,
-    ("QUIET", "RANGE_FADE"): 8.0,          # Quiet markets: even lower ADX okay
     ("QUIET", "RANGE_REJECTION"): 10.0,
     # Volatile setups
     ("VOLATILE", "WHALE_MOMENTUM"): 15.0,  # Whale momentum doesn't need trend
