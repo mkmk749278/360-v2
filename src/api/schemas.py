@@ -526,6 +526,20 @@ class AutoTradeSettings(BaseModel):
             "only narrow, never widen, per OWNER_BRIEF B18."
         ),
     )
+    notional_usd: Optional[float] = Field(
+        default=None,
+        ge=5.0,
+        le=2000.0,
+        description=(
+            "Per-user live-trading notional in USD.  Engine places each "
+            "signal as a ``notional_usd``-USD position (qty = notional / "
+            "entry_price).  Binance MIN_NOTIONAL floor is ~$5; B18 per-"
+            "user position cap ceiling is $2000.  ``null`` means use the "
+            "engine default ($500).  Lower this when your Futures wallet "
+            "balance is small to avoid -2019 'Margin is insufficient' "
+            "rejections — e.g. $20 notional at 10× requires $2 margin."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------
