@@ -323,7 +323,7 @@ def _coerce_auto_trade(raw: Dict[str, Any]) -> Dict[str, Any]:
         if key == "mode":
             if isinstance(value, str):
                 token = value.strip().lower()
-                if token in ("off", "paper", "live"):
+                if token in ("off", "paper", "live", "both"):
                     out[key] = token
         elif key == "position_size_pct":
             if isinstance(value, (int, float)) and 0 < float(value) <= 100:
