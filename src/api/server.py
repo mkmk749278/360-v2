@@ -1682,6 +1682,16 @@ def build_app(
         # in whatever mode the operator set via /api/settings/auto-trade.
         # Per-user mode is stored for Phase 3 when the user's app
         # decides whether to fire their own Binance order.
+        #
+        # Auto-resume on explicit live re-enable (2026-05-25): if the
+        # user explicitly sets mode='live', clear any outstanding auto-
+        # pause so they don't have to separately navigate to the Trade
+        # tab to tap "Resume".  Root cause: after ≥3 consecutive -2019
+        # rejections the dispatcher auto-pauses the user; changing
+        # notional in Settings and re-saving mode='live' is the natural
+        # recovery path, and it should implicitly resume dispatch.
+        if partial.get("mode") == "live":
+            user_overrides.resume_user_auto_trade(uid)
         if partial:
             user_overrides.update_auto_trade(uid, partial)
         return _build_user_auto_trade_view(uid)

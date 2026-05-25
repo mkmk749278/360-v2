@@ -252,7 +252,7 @@ async def dispatch_signal_to_active_users(
         from src.api import user_overrides as _uo
         user_mode = _uo.resolve_user_mode_uid(uid)
         if user_mode != "live":
-            log.debug(
+            log.info(
                 "signal_dispatch: skipping non-live user uid={} mode={} "
                 "signal_id={}",
                 uid, user_mode, signal_id,
@@ -266,10 +266,14 @@ async def dispatch_signal_to_active_users(
         # service or recording a dispatch_log row. The app surfaces
         # the pause state in the user-facing auto-mode status so the
         # user can top up their wallet and call ``POST /api/auto-mode/
-        # resume-mine`` to resume.
+        # resume-mine`` to resume.  Recovery: go to Trade → Live and
+        # tap "Resume", or save mode='live' in Auto-trade Settings
+        # (which auto-resumes as of 2026-05-25).
         if _uo.is_user_auto_paused_uid(uid):
-            log.debug(
-                "signal_dispatch: skipping paused user uid={} signal_id={}",
+            log.warning(
+                "signal_dispatch: skipping AUTO-PAUSED user uid={} "
+                "signal_id={} — user must resume via Trade tab or "
+                "re-save mode='live' in Settings",
                 uid, signal_id,
             )
             return False
