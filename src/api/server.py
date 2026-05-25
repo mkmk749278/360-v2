@@ -1690,7 +1690,7 @@ def build_app(
         # rejections the dispatcher auto-pauses the user; changing
         # notional in Settings and re-saving mode='live' is the natural
         # recovery path, and it should implicitly resume dispatch.
-        if partial.get("mode") == "live":
+        if partial.get("mode") in ("live", "both"):
             user_overrides.resume_user_auto_trade(uid)
         if partial:
             user_overrides.update_auto_trade(uid, partial)
