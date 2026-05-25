@@ -536,7 +536,12 @@ async def place_signal(
     )
     _position_state.put_position(position)
 
-    # Steps 3-5: SL + 3x TP.  Best-effort.
+    # Steps 3-5: SL + 3x TP.  Best-effort — failures are logged and
+    # surfaced in the user's Recent Activity (dispatch_log) so they
+    # see "SL placement failed — position uncovered" in the app
+    # rather than complete silence.
+    from src.execution import dispatch_log as _dl
+
     try:
         sl_result = await placer.place_stop_loss(
             signal_id=signal_id,
@@ -551,6 +556,35 @@ async def place_signal(
             "uncovered until manual intervention) uid={} signal_id={} "
             "exc={}",
             firebase_uid, signal_id, exc,
+        )
+        # Surface the failure in Recent Activity so the user can act.
+        b_code = None
+        b_msg = None
+        sig_resp = getattr(exc, "signing_response", None)
+        if sig_resp is not None:
+            body = getattr(sig_resp, "binance_body", None)
+            if isinstance(body, dict):
+                try:
+                    b_code = int(body.get("code", 0)) or None
+                except (TypeError, ValueError):
+                    pass
+                raw_msg = body.get("msg") or body.get("message")
+                if isinstance(raw_msg, str):
+                    b_msg = raw_msg
+        _dl.record_rejected(
+            firebase_uid=firebase_uid,
+            signal_id=signal_id,
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            reject_class="SLPlacementFailed",
+            reject_detail=(
+                f"Entry filled but SL order failed for {symbol}: {exc}. "
+                "Position is OPEN WITHOUT stop-loss protection — "
+                "close manually on Binance."
+            ),
+            reject_binance_code=b_code,
+            reject_binance_msg=b_msg,
         )
 
     for tp_phase, tp_price, tp_qty_value in (
@@ -580,6 +614,33 @@ async def place_signal(
                 "place_signal: {} placement failed (position keeps "
                 "remaining TPs) uid={} signal_id={} exc={}",
                 tp_phase, firebase_uid, signal_id, exc,
+            )
+            b_code = None
+            b_msg = None
+            sig_resp = getattr(exc, "signing_response", None)
+            if sig_resp is not None:
+                body = getattr(sig_resp, "binance_body", None)
+                if isinstance(body, dict):
+                    try:
+                        b_code = int(body.get("code", 0)) or None
+                    except (TypeError, ValueError):
+                        pass
+                    raw_msg = body.get("msg") or body.get("message")
+                    if isinstance(raw_msg, str):
+                        b_msg = raw_msg
+            _dl.record_rejected(
+                firebase_uid=firebase_uid,
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                entry_price=entry_price,
+                reject_class="TPPlacementFailed",
+                reject_detail=(
+                    f"Entry filled but {tp_phase.upper()} order failed for "
+                    f"{symbol}: {exc}."
+                ),
+                reject_binance_code=b_code,
+                reject_binance_msg=b_msg,
             )
 
     # Re-persist with all order ids captured.

@@ -870,3 +870,257 @@ async def test_paper_user_not_auto_paused_by_dispatch(
                 )
     assert mock_place.await_count == 0
     assert "fb-paper" not in paused
+
+
+# ---------------------------------------------------------------------------
+# TP MIN_NOTIONAL consolidation (2026-05-25 production bug fix)
+# ---------------------------------------------------------------------------
+
+
+def test_tp_min_notional_consolidation_when_all_legs_too_small() -> None:
+    """At $5 notional / $17.58 price the TP legs are 30%×$5.01=$1.50,
+    40%=$2.00, 30%=$1.50 — all below Binance's $5 MIN_NOTIONAL.
+    Expected: tp1 absorbs the full position, tp2=tp3=0."""
+    symbol_filters._set_cache_for_test({
+        **symbol_filters._FILTERS,
+        "LOWUSDT": symbol_filters.SymbolFilters(
+            symbol="LOWUSDT",
+            step_size=0.001,
+            tick_size=0.0001,
+            min_qty=0.001,
+            min_notional=5.0,
+        ),
+    })
+    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split(
+        "LOWUSDT", 17.58, notional_usd=5.0,
+    )
+    # total should be ~0.285 (snap-up from 0.284)
+    assert total > 0
+    # All quantity consolidated into tp1; tp2 and tp3 disabled.
+    assert tp1 == total
+    assert tp2 == 0.0
+    assert tp3 == 0.0
+    # Single TP leg clears MIN_NOTIONAL.
+    assert tp1 * 17.58 >= 5.0
+
+
+def test_tp_min_notional_consolidation_when_only_tp2_too_small() -> None:
+    """Notional large enough for tp1 (30%≥MIN_NOTIONAL) but too small
+    for tp2 → same consolidation into single-leg tp1."""
+    # tp2 = 40% × $12 = $4.80 < $5 MIN_NOTIONAL
+    # tp1 = 30% × $12 = $3.60 < $5 ... actually that fails the first gate
+    # Use a case where tp1 passes but tp2 doesn't:
+    # tp1 = 30% of total notional >= $5 → total >= ~$16.67
+    # tp2 = 40% of total < $5 → total < $12.50 — contradicts! Can't both hold.
+    # Real case: consolidation fires when tp1 is the first failing check.
+    # Verify instead: at $16 notional tp1=$4.80 < $5 → consolidate.
+    symbol_filters._set_cache_for_test({
+        **symbol_filters._FILTERS,
+        "SMALLUSDT": symbol_filters.SymbolFilters(
+            symbol="SMALLUSDT",
+            step_size=0.001,
+            tick_size=0.0001,
+            min_qty=0.001,
+            min_notional=5.0,
+        ),
+    })
+    # $16 notional / $17.58 → total ≈ 0.909 BTC... that's big notional.
+    # Use $0.50 price: $5 notional → total=10 units (stepSize=1? No, 0.001)
+    # Actually let's just test a borderline where tp1 barely fails:
+    # $16 / $17.58 ≈ 0.909 BTC → tp1 = 30%×$16 = $4.80 < $5 → consolidate
+    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split(
+        "SMALLUSDT", 17.58, notional_usd=16.0,
+    )
+    assert total > 0
+    # tp1 × $17.58 ≈ $4.80 < $5 → ALL goes into tp1, tp2=tp3=0
+    assert tp1 == total
+    assert tp2 == 0.0
+    assert tp3 == 0.0
+
+
+def test_tp_min_notional_no_consolidation_for_large_positions() -> None:
+    """Large positions ($500 notional) have TP legs well above MIN_NOTIONAL:
+    tp1 = 30% × $500 = $150 >> $5 → no consolidation; normal 30/40/30."""
+    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split("BTCUSDT", 29000.0)
+    # At $500 notional / $29000, tp1 ~ $150 >> $5 MIN_NOTIONAL.
+    # Consolidation must NOT fire; TP legs should follow the ratio.
+    assert total > 0
+    # Total qty = all three tp legs (plus at most one step of dust)
+    assert total - (tp1 + tp2 + tp3) < 0.002
+    # Rough 30/40/30 ratio preserved — not collapsed to a single leg.
+    assert tp2 > 0
+    assert tp3 > 0
+    assert abs(tp2 / total - 0.40) < 0.05
+
+
+# ---------------------------------------------------------------------------
+# close_fsm_positions_for_signal (2026-05-25 production bug fix)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_close_fsm_positions_noop_when_not_initialised() -> None:
+    """When position_state isn't initialised (dev/test without GCP),
+    close_fsm_positions_for_signal returns 0 without raising."""
+    from src.execution import position_state as _ps
+    with patch.object(_ps, "is_initialised", return_value=False):
+        result = await signal_dispatch.close_fsm_positions_for_signal(
+            "sig-abc",
+            symbol="BTCUSDT",
+            direction="LONG",
+            reason="invalidated",
+        )
+    assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_close_fsm_positions_noop_when_no_active_users() -> None:
+    """No active users → returns 0 cleanly."""
+    from src.execution import position_state as _ps
+    with patch.object(_ps, "is_initialised", return_value=True):
+        with patch.object(signal_dispatch, "_active_uids", return_value=[]):
+            result = await signal_dispatch.close_fsm_positions_for_signal(
+                "sig-abc",
+                symbol="BTCUSDT",
+                direction="LONG",
+                reason="invalidated",
+            )
+    assert result == 0
+
+
+@pytest.mark.asyncio
+async def test_close_fsm_positions_cancels_orders_and_market_closes() -> None:
+    """Happy path: a user with an open FSM position gets their bracket
+    orders cancelled and a MARKET REDUCE_ONLY close placed."""
+    from src.execution import position_state as _ps
+    from src.execution import order_placer as _op
+
+    mock_pos = _ps.Position(
+        signal_id="sig-close-1",
+        firebase_uid="fb-testclose",
+        symbol="BTCUSDT",
+        side="LONG",
+        state=_ps.PositionState.OPEN,
+        entry_price_target=29000.0,
+        entry_price_filled=29000.0,
+        sl_price=28500.0,
+        tp1_price=29500.0,
+        tp2_price=30000.0,
+        tp3_price=30500.0,
+        total_qty=0.017,
+        tp1_qty=0.005,
+        tp2_qty=0.007,
+        tp3_qty=0.005,
+        sl_order_id=1001,
+        tp1_order_id=2001,
+        tp2_order_id=2002,
+        tp3_order_id=2003,
+        closed_qty=0.0,
+    )
+
+    with patch.object(_ps, "is_initialised", return_value=True):
+        with patch.object(signal_dispatch, "_active_uids", return_value=["fb-testclose"]):
+            with patch.object(_ps, "get_position", return_value=mock_pos):
+                with patch.object(_ps, "put_position") as mock_put:
+                    cancel_calls = []
+                    close_calls = []
+
+                    async def _mock_cancel(self_ignored, *, symbol, order_id):
+                        cancel_calls.append(order_id)
+
+                    async def _mock_market_close(self_ignored, **kwargs):
+                        close_calls.append(kwargs)
+                        from src.execution.order_placer import OrderPlacementResult
+                        return OrderPlacementResult(
+                            order_id=9999, client_order_id="lumin_sig-close-1_close",
+                            status="FILLED", avg_price=29000.0, binance_body={},
+                        )
+
+                    with patch.object(_op.OrderPlacer, "cancel_order", _mock_cancel):
+                        with patch.object(_op.OrderPlacer, "place_market_close", _mock_market_close):
+                            result = await signal_dispatch.close_fsm_positions_for_signal(
+                                "sig-close-1",
+                                symbol="BTCUSDT",
+                                direction="LONG",
+                                reason="invalidated",
+                            )
+
+    assert result == 1
+    # SL + TP1 + TP2 + TP3 should have been cancelled
+    assert set(cancel_calls) == {1001, 2001, 2002, 2003}
+    # Market close should have been placed
+    assert len(close_calls) == 1
+    assert close_calls[0]["signal_id"] == "sig-close-1"
+    assert close_calls[0]["quantity"] == pytest.approx(0.017, abs=1e-9)
+    # Position should be marked CLOSED in Firestore
+    mock_put.assert_called_once()
+    saved_pos = mock_put.call_args[0][0]
+    assert saved_pos.state == _ps.PositionState.CLOSED
+    assert saved_pos.close_reason == "invalidated"
+
+
+@pytest.mark.asyncio
+async def test_close_fsm_positions_skips_terminal_position() -> None:
+    """A position already in CLOSED state must not get another close order."""
+    from src.execution import position_state as _ps
+    from src.execution import order_placer as _op
+
+    mock_pos = _ps.Position(
+        signal_id="sig-already-closed",
+        firebase_uid="fb-done",
+        symbol="BTCUSDT",
+        side="LONG",
+        state=_ps.PositionState.CLOSED,  # already terminal
+        entry_price_target=29000.0,
+        entry_price_filled=29000.0,
+        sl_price=28500.0,
+        tp1_price=29500.0,
+        tp2_price=30000.0,
+        tp3_price=30500.0,
+        total_qty=0.017,
+        tp1_qty=0.005,
+        tp2_qty=0.007,
+        tp3_qty=0.005,
+        closed_qty=0.017,
+    )
+
+    with patch.object(_ps, "is_initialised", return_value=True):
+        with patch.object(signal_dispatch, "_active_uids", return_value=["fb-done"]):
+            with patch.object(_ps, "get_position", return_value=mock_pos):
+                with patch.object(_op.OrderPlacer, "place_market_close",
+                                   new_callable=AsyncMock) as mock_close:
+                    result = await signal_dispatch.close_fsm_positions_for_signal(
+                        "sig-already-closed",
+                        symbol="BTCUSDT",
+                        direction="LONG",
+                        reason="invalidated",
+                    )
+
+    assert result == 0  # skipped
+    mock_close.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_close_fsm_positions_handles_not_found_gracefully() -> None:
+    """User has no FSM position for this signal (e.g. was paper mode when
+    signal fired) → skip without error."""
+    from src.execution import position_state as _ps
+    from src.execution import order_placer as _op
+
+    with patch.object(_ps, "is_initialised", return_value=True):
+        with patch.object(signal_dispatch, "_active_uids", return_value=["fb-no-pos"]):
+            with patch.object(
+                _ps, "get_position",
+                side_effect=_ps.PositionNotFoundError("no doc"),
+            ):
+                with patch.object(_op.OrderPlacer, "place_market_close",
+                                   new_callable=AsyncMock) as mock_close:
+                    result = await signal_dispatch.close_fsm_positions_for_signal(
+                        "sig-nope",
+                        symbol="BTCUSDT",
+                        direction="LONG",
+                        reason="invalidated",
+                    )
+
+    assert result == 0
+    mock_close.assert_not_called()

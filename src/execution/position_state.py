@@ -180,6 +180,11 @@ _COID_PRETP_SUFFIX = "_pretp"
 _COID_TP1_SUFFIX = "_tp1"
 _COID_TP2_SUFFIX = "_tp2"
 _COID_TP3_SUFFIX = "_tp3"
+# Market close placed by the invalidation/expiry/cancellation path in
+# signal_dispatch.close_fsm_positions_for_signal.  Distinct from
+# _pretp so the FSM doesn't mis-classify invalidation closes as pre-TP
+# fills when the ORDER_TRADE_UPDATE event arrives.
+_COID_CLOSE_SUFFIX = "_close"
 
 
 def coid(signal_id: str, phase: str) -> str:
@@ -228,6 +233,16 @@ def coid_tp3(signal_id: str) -> str:
     return coid(signal_id, _COID_TP3_SUFFIX)
 
 
+def coid_close(signal_id: str) -> str:
+    """clientOrderId for a MARKET close placed on invalidation/expiry/
+    cancellation by :func:`signal_dispatch.close_fsm_positions_for_signal`.
+
+    Distinct from ``_pretp`` so the FSM can log these terminal closes
+    without confusing them with pre-TP partial fills.
+    """
+    return coid(signal_id, _COID_CLOSE_SUFFIX)
+
+
 def parse_coid(client_order_id: str) -> Optional[tuple[str, str]]:
     """Parse a clientOrderId back into ``(signal_id, phase)``.
 
@@ -236,15 +251,16 @@ def parse_coid(client_order_id: str) -> Optional[tuple[str, str]]:
     signal placed before this PR landed).  Caller should LOG and
     SKIP for foreign orders rather than crash.
 
-    ``phase`` is one of: "entry" | "sl" | "tp1" | "tp2" | "tp3".
+    ``phase`` is one of: "entry" | "sl" | "sl_be" | "pretp" |
+    "close" | "tp1" | "tp2" | "tp3".
     """
     if not client_order_id.startswith("lumin_"):
         return None
     rest = client_order_id[len("lumin_"):]
     # Order matters: longer suffixes must be checked FIRST so
-    # ``..._sl_be`` doesn't get classified as ``..._be`` (and
+    # ``..._sl_be`` doesn't get classified as ``..._sl`` (and
     # ``..._pretp`` doesn't shadow a future ``..._tp`` suffix).
-    for phase in ("sl_be", "pretp", "entry", "sl", "tp1", "tp2", "tp3"):
+    for phase in ("sl_be", "pretp", "close", "entry", "sl", "tp1", "tp2", "tp3"):
         suffix = f"_{phase}"
         if rest.endswith(suffix):
             signal_id = rest[: -len(suffix)]
