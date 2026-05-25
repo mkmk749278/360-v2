@@ -228,6 +228,54 @@ def _compute_qty_split(
     # number of stepSize units — that's fine; FSM treats tp3_qty=0
     # as "no tp3 leg" and the residual rides to SL/pre-TP.
     tp3 = _sf.round_qty(symbol, total_qty - tp1 - tp2)
+
+    # MIN_NOTIONAL guard on TP legs.  Binance enforces MIN_NOTIONAL
+    # on every TAKE_PROFIT_MARKET order with explicit quantity (code
+    # -4164 "Order's notional must be no smaller than X").  At $5–$10
+    # total notional the 30%/40%/30% legs are $1.50/$2/$1.50 — all
+    # below the $5 Binance floor — so every TP order is rejected
+    # silently.  When any leg is below MIN_NOTIONAL, consolidate all
+    # quantity into tp1 (single-leg full close at TP1 price) and zero
+    # out tp2/tp3.  The SL's ``closePosition=true`` backstop is still
+    # present; pre-TP partial close fires for the fraction regardless.
+    f_check = _sf.get_filters(symbol)
+    min_notional = (
+        f_check.min_notional
+        if f_check is not None and f_check.min_notional > 0
+        else 5.0
+    )
+    if tp1 > 0 and tp1 * entry_price < min_notional:
+        # All legs too small — tp1 takes the full position.
+        tp1 = total_qty
+        tp2 = 0.0
+        tp3 = 0.0
+        log.info(
+            "signal_dispatch: symbol={} tp legs below MIN_NOTIONAL "
+            "(tp1 notional=${:.2f} < ${:.2f}) — consolidating into "
+            "single tp1=full-position",
+            symbol, tp1 * entry_price / total_qty * tp1, min_notional,
+        )
+    elif tp2 > 0 and tp2 * entry_price < min_notional:
+        # tp2/tp3 too small — roll everything into tp1.
+        tp1 = total_qty
+        tp2 = 0.0
+        tp3 = 0.0
+        log.info(
+            "signal_dispatch: symbol={} tp2 leg below MIN_NOTIONAL "
+            "(tp2 notional=${:.2f} < ${:.2f}) — consolidating into "
+            "single tp1=full-position",
+            symbol, tp2 * entry_price, min_notional,
+        )
+    elif tp3 > 0 and tp3 * entry_price < min_notional:
+        # tp3 too small — give its residual to tp1, disable tp3.
+        tp1 = _sf.round_qty(symbol, total_qty - tp2)
+        tp3 = 0.0
+        log.info(
+            "signal_dispatch: symbol={} tp3 leg below MIN_NOTIONAL "
+            "(tp3 notional=${:.2f} < ${:.2f}) — rolling into tp1",
+            symbol, tp3 * entry_price, min_notional,
+        )
+
     return (total_qty, tp1, tp2, tp3)
 
 
@@ -483,3 +531,165 @@ async def dispatch_signal_to_active_users(
         signal_id, symbol, direction, len(uids), placed, len(uids) - placed,
     )
     return placed
+
+
+async def close_fsm_positions_for_signal(
+    signal_id: str,
+    *,
+    symbol: str,
+    direction: str,
+    reason: str,
+) -> int:
+    """Cancel native SL/TP orders + place a MARKET close for every user
+    who has a non-terminal FSM position for ``signal_id``.
+
+    Called by :meth:`src.trade_monitor.TradeMonitor._broker_close_full`
+    on every non-TP close path (INVALIDATED, SL_HIT detected engine-
+    side, EXPIRED, CANCELLED) so the Binance position closes in
+    lockstep with engine signal state — the B12 safety guarantee.
+
+    Returns the count of users whose positions were actually closed
+    (i.e. the MARKET close order was accepted OR the position was
+    already terminal/not found).
+
+    Fail-soft: per-user errors are logged but never propagate — a
+    failure for one user must not prevent the close for others.
+    """
+    from datetime import datetime, timezone
+
+    from src.execution import order_placer as _op
+    from src.execution import position_state as _ps
+
+    if not _ps.is_initialised():
+        # position_state not booted (dev / test context without GCP) —
+        # no-op cleanly rather than raising.
+        return 0
+
+    uids = _active_uids()
+    if not uids:
+        return 0
+
+    closed = 0
+
+    for uid in uids:
+        # Load position from Firestore.  Not found → this user had no
+        # FSM position for this signal (e.g. they were mode=paper when
+        # the signal fired).  Terminal → already closed by native SL/TP.
+        try:
+            pos = _ps.get_position(uid, signal_id)
+        except _ps.PositionNotFoundError:
+            continue
+        except Exception as exc:
+            log.warning(
+                "close_fsm: get_position failed uid={} signal_id={} exc={}",
+                uid, signal_id, exc,
+            )
+            continue
+
+        if _ps.is_terminal(pos.state):
+            continue
+
+        placer = _op.OrderPlacer(uid)
+
+        # Cancel all open bracket orders — tolerant of -2011 (already
+        # gone, filled, or expired).  Cancel first so the MARKET close
+        # below doesn't fight with a pending SL/TP that might otherwise
+        # also close the position and over-reduce.
+        for order_id in (
+            pos.sl_order_id,
+            pos.sl_be_order_id,
+            pos.tp1_order_id,
+            pos.tp2_order_id,
+            pos.tp3_order_id,
+        ):
+            if not order_id:
+                continue
+            try:
+                await placer.cancel_order(symbol=pos.symbol, order_id=order_id)
+            except _op.OrderPlacementError as exc:
+                log.warning(
+                    "close_fsm: cancel_order failed uid={} signal_id={} "
+                    "order_id={} exc={}",
+                    uid, signal_id, order_id, exc,
+                )
+
+        # Place REDUCE_ONLY MARKET to close the remaining position.
+        # ``reduceOnly=true`` is a safety net: if Binance already closed
+        # the position (e.g. native SL fired milliseconds before we got
+        # here), this will fail with -2022 "ReduceOnly Order is rejected"
+        # which we absorb below rather than crashing.
+        remaining = max(pos.total_qty - pos.closed_qty, pos.total_qty)
+        # Defensively: if closed_qty somehow exceeds total_qty (shouldn't
+        # happen but Firestore partial writes are possible), fall back to
+        # total_qty so we don't send a zero-qty order.
+        remaining = pos.total_qty - pos.closed_qty
+        if remaining <= 0:
+            remaining = pos.total_qty
+
+        market_close_ok = False
+        try:
+            await placer.place_market_close(
+                signal_id=signal_id,
+                symbol=pos.symbol,
+                direction=pos.side,
+                quantity=remaining,
+            )
+            market_close_ok = True
+        except _op.OrderRejectedByBinance as exc:
+            sig_resp = getattr(exc, "signing_response", None)
+            b_code = None
+            if sig_resp is not None:
+                body = getattr(sig_resp, "binance_body", None)
+                if isinstance(body, dict):
+                    try:
+                        b_code = int(body.get("code", 0))
+                    except (TypeError, ValueError):
+                        pass
+            if b_code == -2022:
+                # -2022: ReduceOnly rejected — position already flat on
+                # Binance's side (native SL/TP beat us here).  That's
+                # fine — we still want to mark the Firestore doc closed.
+                log.info(
+                    "close_fsm: -2022 ReduceOnly rejected — position "
+                    "already flat on Binance uid={} signal_id={}",
+                    uid, signal_id,
+                )
+                market_close_ok = True  # treat as success
+            else:
+                log.error(
+                    "close_fsm: MARKET close rejected uid={} signal_id={} "
+                    "symbol={} reason={} code={} exc={}",
+                    uid, signal_id, pos.symbol, reason, b_code, exc,
+                )
+        except _op.OrderPlacementError as exc:
+            log.error(
+                "close_fsm: MARKET close FAILED uid={} signal_id={} "
+                "symbol={} reason={} exc={}",
+                uid, signal_id, pos.symbol, reason, exc,
+            )
+
+        # Mark the Firestore position terminal regardless of whether
+        # the MARKET order succeeded — an engine restart / reconciler
+        # will catch any remaining Binance state drift.  Without this
+        # mark the TradeMonitor would re-attempt close on every tick.
+        now = datetime.now(timezone.utc)
+        pos.state = _ps.PositionState.CLOSED
+        pos.close_reason = reason[:20]  # short label fits in the doc
+        pos.closed_at = now
+        pos.last_event_at = now
+        try:
+            _ps.put_position(pos)
+        except Exception as exc:
+            log.error(
+                "close_fsm: put_position failed uid={} signal_id={} exc={}",
+                uid, signal_id, exc,
+            )
+
+        closed += 1
+        log.info(
+            "close_fsm: closed uid={} signal_id={} symbol={} reason={} "
+            "market_close_ok={}",
+            uid, signal_id, pos.symbol, reason, market_close_ok,
+        )
+
+    return closed

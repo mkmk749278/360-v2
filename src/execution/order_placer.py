@@ -308,6 +308,43 @@ class OrderPlacer:
             signal_id=signal_id,
         )
 
+    async def place_market_close(
+        self,
+        *,
+        signal_id: str,
+        symbol: str,
+        direction: str,  # "LONG" | "SHORT"
+        quantity: float,
+    ) -> OrderPlacementResult:
+        """REDUCE_ONLY MARKET order for a full close on invalidation/expiry/
+        cancellation.
+
+        Uses ``coid_close`` so the FSM can identify the fill event as a
+        terminal close (not a pre-TP partial or normal fill).
+
+        Called by :func:`signal_dispatch.close_fsm_positions_for_signal`
+        when the engine's signal-lifecycle monitor decides to exit (regime
+        shift, momentum-loss invalidation, max-hold expiry, or SL hit
+        detected engine-side before the native Binance SL fires).
+
+        ``reduceOnly=true`` ensures this can never accidentally open a
+        counter-position if the position was already closed on Binance
+        (e.g. the native SL fired a millisecond before we got here).
+        """
+        params = {
+            "symbol": symbol,
+            "side": _exit_side(direction),
+            "type": "MARKET",
+            "quantity": _qty_str(quantity),
+            "reduceOnly": "true",
+            "newClientOrderId": _position_state.coid_close(signal_id),
+        }
+        return await self._submit_order(
+            params=params,
+            phase="close",
+            signal_id=signal_id,
+        )
+
     async def cancel_order(
         self,
         *,

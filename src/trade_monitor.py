@@ -1621,21 +1621,50 @@ class TradeMonitor:
         EXPIRED, CANCELLED) to make sure the broker position closes
         in lockstep with engine state — the B12 safety guarantee.
 
-        Always fail-soft: a broker error logs but never blocks the
-        engine state transition.  PositionReconciler's drift check
+        Two independent close paths run here:
+
+        1. Legacy CCXT OrderManager — only active when
+           AUTO_EXECUTION_MODE=live on the engine level (owner's own
+           keys via CCXT).  No-ops when is_enabled=False.
+
+        2. Server-side FSM (per-user Binance keys via signing service)
+           — cancels native SL/TP bracket orders then places a MARKET
+           REDUCE_ONLY close for each user who has an open FSM position
+           for this signal_id.  This is the path that covers positions
+           opened by signal_dispatch → position_fsm.place_signal().
+
+        Always fail-soft: an error in either path logs but never blocks
+        the engine state transition.  PositionReconciler's drift check
         (Phase A3) is the safety net for any close that slips through.
-        Idempotent on the order-manager side; calling on a closed
-        position is a silent no-op there.
+        Idempotent — calling on an already-closed position is a no-op.
         """
-        if self._order_manager is None or not self._order_manager.is_enabled:
-            return
+        # ── Path 1: legacy CCXT OrderManager ─────────────────────────
+        if self._order_manager is not None and self._order_manager.is_enabled:
+            try:
+                await self._order_manager.close_full(
+                    sig, reason=reason, current_price=fill_price
+                )
+            except Exception as exc:
+                log.warning(
+                    "broker close_full failed for %s (reason=%s): %s",
+                    sig.symbol, reason, exc,
+                )
+
+        # ── Path 2: server-side FSM positions (per-user signing svc) ──
+        # Cancel native bracket orders + MARKET-close for every user
+        # who has a non-terminal FSM position for this signal_id.
         try:
-            await self._order_manager.close_full(
-                sig, reason=reason, current_price=fill_price
+            from src.execution import signal_dispatch as _sd
+            await _sd.close_fsm_positions_for_signal(
+                sig.signal_id,
+                symbol=sig.symbol,
+                direction=sig.direction.value,
+                reason=reason,
             )
         except Exception as exc:
             log.warning(
-                "broker close_full failed for %s (reason=%s): %s",
+                "FSM close_fsm_positions_for_signal failed for %s "
+                "(reason=%s): %s",
                 sig.symbol, reason, exc,
             )
 
