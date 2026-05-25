@@ -492,11 +492,14 @@ class AutoTradeSettings(BaseModel):
     overrides where set, config defaults otherwise).
     """
 
-    mode: Optional[Literal["off", "paper", "live"]] = Field(
+    mode: Optional[Literal["off", "paper", "live", "both"]] = Field(
         default=None,
-        description="Execution mode.  Mirrors `/api/auto-mode`'s POST shape; "
-        "this endpoint is the settings-page counterpart that GET-bundles "
-        "mode with sizing params.",
+        description=(
+            "Execution mode.  ``'live'`` dispatches real Binance Futures orders. "
+            "``'paper'`` runs simulated fills only.  ``'both'`` does both "
+            "simultaneously — live orders fire AND paper simulation runs for "
+            "side-by-side comparison.  ``'off'`` disables everything."
+        ),
     )
     position_size_pct: Optional[float] = Field(
         default=None,

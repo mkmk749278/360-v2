@@ -251,7 +251,7 @@ async def dispatch_signal_to_active_users(
         # rather than a status display divorced from behaviour.
         from src.api import user_overrides as _uo
         user_mode = _uo.resolve_user_mode_uid(uid)
-        if user_mode != "live":
+        if user_mode not in ("live", "both"):
             log.info(
                 "signal_dispatch: skipping non-live user uid={} mode={} "
                 "signal_id={}",
