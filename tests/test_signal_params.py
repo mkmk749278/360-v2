@@ -66,11 +66,11 @@ def _simple_signal(
 class TestLookupSignalParams:
     def test_exact_match_returns_correct_params(self):
         """Exact (channel, setup_class, regime) key returns the right params."""
-        params = lookup_signal_params("360_SCALP", "RANGE_FADE", "RANGING")
-        assert params.entry_zone_bias == 0.5
-        assert params.dca_enabled is True
-        assert params.tp_ratios == (0.5, 0.8, 1.2)
-        assert params.validity_minutes == 12
+        params = lookup_signal_params("360_SCALP", "WHALE_MOMENTUM", "VOLATILE")
+        assert params.dca_enabled is False
+        assert params.entry_zone_bias == 0.8
+        assert params.tp_ratios == (0.3, 0.7, 1.0)
+        assert params.validity_minutes == 3
 
     def test_exact_match_whale_momentum_volatile(self):
         params = lookup_signal_params("360_SCALP", "WHALE_MOMENTUM", "VOLATILE")
@@ -101,9 +101,9 @@ class TestLookupSignalParams:
 
     def test_channel_prefix_detection_scalp(self):
         """Various SCALP channel name formats resolve to SCALP prefix."""
-        p1 = lookup_signal_params("360_SCALP", "RANGE_FADE", "RANGING")
-        p2 = lookup_signal_params("SCALP_CVD", "RANGE_FADE", "RANGING")
-        assert p1.entry_zone_bias == p2.entry_zone_bias == 0.5
+        p1 = lookup_signal_params("360_SCALP", "WHALE_MOMENTUM", "VOLATILE")
+        p2 = lookup_signal_params("SCALP_CVD", "WHALE_MOMENTUM", "VOLATILE")
+        assert p1.entry_zone_bias == p2.entry_zone_bias == 0.8
 
     def test_channel_prefix_detection_swing(self):
         params = lookup_signal_params("360_SWING", "BREAKOUT_RETEST", "TRENDING_UP")
@@ -119,25 +119,6 @@ class TestLookupSignalParams:
 # ---------------------------------------------------------------------------
 
 class TestBuildChannelSignalRegimeAware:
-    def test_range_fade_ranging_produces_symmetric_entry_zone(self):
-        """RANGE_FADE + RANGING → entry_zone_bias=0.5 → symmetric zone around entry."""
-        sig = _simple_signal(
-            close=100.0,
-            sl_dist=0.5,
-            direction=Direction.LONG,
-            setup_class="RANGE_FADE",
-            regime="RANGING",
-        )
-        assert sig is not None
-        assert sig.entry_zone_low is not None
-        assert sig.entry_zone_high is not None
-        # With bias=0.5, zone should be roughly symmetric around close
-        low_dist = abs(sig.entry_zone_low - sig.entry)
-        high_dist = abs(sig.entry_zone_high - sig.entry)
-        assert abs(low_dist - high_dist) < 1e-6, (
-            f"Zone should be symmetric: low_dist={low_dist}, high_dist={high_dist}"
-        )
-
     def test_whale_momentum_volatile_dca_disabled(self):
         """WHALE_MOMENTUM + VOLATILE → dca_enabled=False → DCA zone fields are zero."""
         sig = _simple_signal(
@@ -185,15 +166,6 @@ class TestBuildChannelSignalRegimeAware:
         # At least one DCA field should be non-zero (DCA zone was computed)
         assert sig.dca_zone_lower != 0.0 or sig.dca_zone_upper != 0.0
 
-    def test_range_fade_ranging_dca_enabled(self):
-        """RANGE_FADE + RANGING has dca_enabled=True → DCA fields populated."""
-        sig = _simple_signal(
-            close=100.0, sl_dist=0.5, direction=Direction.LONG,
-            setup_class="RANGE_FADE", regime="RANGING",
-        )
-        assert sig is not None
-        assert sig.dca_zone_lower != 0.0 or sig.dca_zone_upper != 0.0
-
     def test_sl_multiplier_applied(self):
         """WHALE_MOMENTUM VOLATILE has sl_multiplier=1.5 → wider SL than default."""
         close = 100.0
@@ -211,28 +183,11 @@ class TestBuildChannelSignalRegimeAware:
         whale_sl_dist = abs(sig_whale.entry - sig_whale.stop_loss)
         assert whale_sl_dist > default_sl_dist
 
-    def test_tp_ratio_override(self):
-        """RANGE_FADE RANGING has custom tp_ratios → TP1 reflects them (legacy path)."""
-        from unittest.mock import patch
-        close = 100.0
-        sl_dist = 0.5
-
-        with patch("src.channels.base.DYNAMIC_SL_TP_ENABLED", False):
-            sig = _simple_signal(
-                close=close, sl_dist=sl_dist, direction=Direction.LONG,
-                setup_class="RANGE_FADE", regime="RANGING",
-            )
-        assert sig is not None
-        # RANGE_FADE RANGING: tp_ratios=(0.5, 0.8, 1.2), sl_multiplier=0.8
-        effective_sl_dist = sl_dist * 0.8
-        expected_tp1 = close + effective_sl_dist * 0.5
-        assert abs(sig.tp1 - expected_tp1) < 1e-6
-
     def test_setup_class_field_set(self):
         """setup_class is propagated to the signal's setup_class field."""
         sig = _simple_signal(
             close=100.0, sl_dist=0.5, direction=Direction.LONG,
-            setup_class="RANGE_FADE", regime="RANGING",
+            setup_class="WHALE_MOMENTUM", regime="VOLATILE",
         )
         assert sig is not None
-        assert sig.setup_class == "RANGE_FADE"
+        assert sig.setup_class == "WHALE_MOMENTUM"

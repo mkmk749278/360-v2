@@ -3,7 +3,6 @@ from src.mtf import (
     check_mtf_rsi,
     check_mtf_adx,
     mtf_gate_scalp_standard,
-    mtf_gate_scalp_range_fade,
     mtf_gate_swing,
 )
 
@@ -97,18 +96,6 @@ def test_scalp_standard_gate_partial():
     ok, reason, adj = mtf_gate_scalp_standard(ind_1h, "LONG", regime="TRENDING_UP")
     assert ok
     assert adj == -5.0
-
-
-def test_range_fade_15m_rsi_oversold_passes_long():
-    ind = {"rsi_last": 35.0}
-    ok, reason, adj = mtf_gate_scalp_range_fade(ind, "LONG")
-    assert ok
-
-
-def test_range_fade_15m_rsi_not_oversold_blocks_long():
-    ind = {"rsi_last": 55.0}
-    ok, reason, adj = mtf_gate_scalp_range_fade(ind, "LONG")
-    assert not ok
 
 
 def test_swing_gate_all_ok():

@@ -45,15 +45,6 @@ PARAM_TABLE: Dict[Tuple[str, str, str], SignalParams] = {
         tp_ratios=(0.7, 1.2, 1.8), sl_multiplier=0.9, entry_zone_bias=0.6,
         dca_enabled=True, validity_minutes=10,
     ),
-    # --- SCALP + RANGE_FADE ---
-    ("SCALP", "RANGE_FADE", "RANGING"): SignalParams(
-        tp_ratios=(0.5, 0.8, 1.2), sl_multiplier=0.8, entry_zone_bias=0.5,
-        dca_enabled=True, validity_minutes=12,
-    ),
-    ("SCALP", "RANGE_FADE", "QUIET"): SignalParams(
-        tp_ratios=(0.4, 0.7, 1.0), sl_multiplier=0.7, entry_zone_bias=0.5,
-        dca_enabled=True, validity_minutes=15,
-    ),
     # --- SCALP + WHALE_MOMENTUM ---
     ("SCALP", "WHALE_MOMENTUM", "VOLATILE"): SignalParams(
         tp_ratios=(0.3, 0.7, 1.0), sl_multiplier=1.5, entry_zone_bias=0.8,

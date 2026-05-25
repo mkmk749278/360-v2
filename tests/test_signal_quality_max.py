@@ -138,14 +138,12 @@ class TestATRAdaptiveMomentumThreshold:
 # ---------------------------------------------------------------------------
 
 
-# 3. BB Squeeze Guard for Range Fade
+# 3. BB Squeeze Guard (RANGE_FADE removed)
 # ---------------------------------------------------------------------------
 
 # NOTE: TestBBSqueezeGuard removed during test cleanup.  The path it tested
 # (`_evaluate_range_fade`) was removed from ScalpChannel during a prior
-# consolidation pass; the canonical RANGE_FADE behaviour now lives on the
-# specialist channels.  Re-introduce a guarded version of these tests when /
-# if the inline range-fade path returns to ScalpChannel.
+# consolidation pass; RANGE_FADE has since been fully eliminated.
 
 
 # ---------------------------------------------------------------------------
@@ -364,7 +362,4 @@ class TestFundingRateContrarian:
 
 # NOTE: TestDirectionBiasedEntryZones and TestRangeFadeRSIFix were removed
 # during the test cleanup pass.  Both tested `_evaluate_range_fade` which has
-# been removed from `ScalpChannel`; the canonical RANGE_FADE behaviour now
-# lives on the specialist channels.  Re-introduce equivalent tests against
-# the specialist-channel API if/when entry-zone biasing or RSI thresholds need
-# regression coverage there.
+# been removed from ScalpChannel.  RANGE_FADE has since been fully eliminated.
