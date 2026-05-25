@@ -1357,6 +1357,11 @@ class TradeMonitor:
                         await self._order_manager.close_partial(sig, 0.34, tp_level=3)
                     except Exception as _exc:
                         log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
+                # FSM positions: close any remaining qty at market.  Native TP3 orders
+                # on Binance already filled → -2022 ReduceOnly rejected → treated as
+                # success.  Positions opened without native TP orders (pre-#488 bug)
+                # still have open qty → MARKET close fires here instead.
+                await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
                 self._set_realized_pnl(sig, sig.tp3)
                 self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
                 await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
@@ -1423,6 +1428,11 @@ class TradeMonitor:
                         await self._order_manager.close_partial(sig, 0.34, tp_level=3)
                     except Exception as _exc:
                         log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
+                # FSM positions: close any remaining qty at market.  Native TP3 orders
+                # on Binance already filled → -2022 ReduceOnly rejected → treated as
+                # success.  Positions opened without native TP orders (pre-#488 bug)
+                # still have open qty → MARKET close fires here instead.
+                await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
                 self._set_realized_pnl(sig, sig.tp3)
                 self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
                 await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
