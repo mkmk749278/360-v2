@@ -381,6 +381,34 @@ async def dispatch_signal_to_active_users(
         total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(
             symbol, entry_price, notional_usd=user_notional,
         )
+        # Hard position-cap tripwire — B18 blast-radius cap.
+        # Fires if user_notional exceeds the system-wide max ($2 000).
+        # Defensive backstop: normal operation always passes since
+        # resolve_notional_usd returns DB-stored values bounded by the UI.
+        from src.execution import tripwires as _tw
+        try:
+            _tw.assert_position_cap(
+                notional_usd=user_notional,
+                cap_usd=user_notional,
+                max_cap_usd=_tw.DEFAULT_POSITION_CAP_MAX_USD,
+            )
+        except _tw.PositionCapExceeded as exc:
+            log.warning(
+                "signal_dispatch: position cap exceeded uid={} signal_id={} "
+                "notional=${:.2f} exc={}",
+                uid, signal_id, user_notional, exc,
+            )
+            from src.execution import dispatch_log as _dl
+            _dl.record_rejected(
+                firebase_uid=uid,
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                entry_price=entry_price,
+                reject_class="PositionCapExceeded",
+                reject_detail=str(exc),
+            )
+            return False
         if total_qty <= 0:
             log.info(
                 "signal_dispatch: zero qty for uid={} signal_id={} symbol={} "

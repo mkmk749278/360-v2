@@ -1125,3 +1125,76 @@ async def test_close_fsm_positions_handles_not_found_gracefully() -> None:
 
     assert result == 0
     mock_close.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Position cap enforcement (roadmap PR-B)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_position_cap_exceeded_blocks_order(
+    _mode_state_stub,
+) -> None:
+    """When assert_position_cap raises PositionCapExceeded the order must be
+    rejected and recorded in dispatch_log — place_signal never called."""
+    from unittest.mock import patch as _patch
+    from src.execution import position_fsm, dispatch_log as _dl
+    from src.execution import tripwires as _tw
+
+    modes, _paused = _mode_state_stub
+    modes["fb-cap-test"] = "live"
+
+    cap_err = _tw.PositionCapExceeded("notional $2500.00 exceeds cap $2000.00")
+
+    with _patch.object(signal_dispatch, "_active_uids", return_value=["fb-cap-test"]):
+        with _patch("src.execution.tripwires.assert_position_cap", side_effect=cap_err):
+            with _patch.object(
+                position_fsm, "place_signal", new_callable=AsyncMock
+            ) as mock_place:
+                with _patch("src.execution.dispatch_log.record_rejected") as mock_reject:
+                    placed = await signal_dispatch.dispatch_signal_to_active_users(
+                        signal_id="sig-cap",
+                        symbol="BTCUSDT",
+                        direction="LONG",
+                        entry_price=29000.0,
+                        sl_price=28500.0,
+                        tp1_price=29500.0,
+                        tp2_price=30000.0,
+                        tp3_price=30500.0,
+                    )
+
+    assert placed == 0
+    mock_place.assert_not_called()
+    mock_reject.assert_called_once()
+    assert mock_reject.call_args.kwargs["reject_class"] == "PositionCapExceeded"
+
+
+@pytest.mark.asyncio
+async def test_position_cap_within_limit_proceeds(
+    _mode_state_stub,
+) -> None:
+    """Normal notional within cap → position cap check passes, order placed."""
+    from unittest.mock import patch as _patch
+    from src.execution import position_fsm
+
+    modes, _paused = _mode_state_stub
+    modes["fb-cap-ok"] = "live"
+
+    with _patch.object(signal_dispatch, "_active_uids", return_value=["fb-cap-ok"]):
+        with _patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-cap-ok",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+            )
+
+    assert placed == 1
+    mock_place.assert_called_once()
