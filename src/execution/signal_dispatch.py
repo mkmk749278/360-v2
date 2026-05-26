@@ -295,6 +295,8 @@ async def dispatch_signal_to_active_users(
     tp1_price: float,
     tp2_price: float,
     tp3_price: float,
+    regime_label: Optional[str] = None,
+    setup_class: Optional[str] = None,
 ) -> int:
     """Fan a signal out to every active user's server-side FSM.
 
@@ -378,6 +380,28 @@ async def dispatch_signal_to_active_users(
         user_grab_fraction = _uo.resolve_grab_fraction_uid(
             uid, float(_DEFAULT_GRAB_FRACTION)
         )
+        # Per-user pre-TP regime + setup allowlist gates (PR-F).
+        # If the user has configured an allowlist and the signal's regime
+        # or setup is not on it, zero the grab fraction so pretp_controller
+        # skips pre-TP for this position (pretp_qty = 0 → SKIPPED on fire).
+        # Empty / None allowlist = "allow all" (default — no restriction).
+        _allowed_regimes, _allowed_setups = _uo.resolve_pretp_allowlists_uid(uid)
+        if _allowed_regimes and regime_label:
+            if regime_label.upper() not in _allowed_regimes:
+                log.debug(
+                    "signal_dispatch: pre-TP suppressed by regime allowlist "
+                    "uid={} regime={} allowed={}",
+                    uid, regime_label, _allowed_regimes,
+                )
+                user_grab_fraction = 0.0
+        if user_grab_fraction > 0 and _allowed_setups and setup_class:
+            if setup_class.upper() not in _allowed_setups:
+                log.debug(
+                    "signal_dispatch: pre-TP suppressed by setup allowlist "
+                    "uid={} setup={} allowed={}",
+                    uid, setup_class, _allowed_setups,
+                )
+                user_grab_fraction = 0.0
         total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(
             symbol, entry_price, notional_usd=user_notional,
         )
