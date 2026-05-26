@@ -256,7 +256,7 @@ Two-step user flow for a clean paper-book reset: **close-all → reset.** This i
 
 ---
 
-## 3.9 Server-side execution custody model (architecture decided 2026-05-18, build pending)
+## 3.9 Server-side execution custody model (architecture decided 2026-05-18, stack live 2026-05-18)
 
 **Why we moved off client-side execution:** Binance requires IP whitelist on any Futures-trade-enabled API key (policy tightened late 2023). Mobile-IP rotation makes per-device whitelisting unusable. Independently, pre-TP partial close + BE shift (§3.2a doctrine) requires sub-second reaction to TP1 fills, which is not a Binance-native order chain — it requires an always-on watcher that the mobile lifecycle (iOS suspends ~30s, Android variable) cannot provide. Both problems point to the same answer: order execution must move server-side.
 
@@ -292,6 +292,47 @@ Two-step user flow for a clean paper-book reset: **close-all → reset.** This i
 **Industry validation:** Every commercial 24/7 trading-bot peer (3Commas, Cornix, Bitsgap, WunderTrading, Coinrule, Cryptohopper) operates this same custody model. Hummingbot is the only meaningful exception (self-hosted by user). The 3Commas Dec-2022 breach validates the model when implemented with **separation of DB access from decryption authority** — that's the architectural lesson, and it's what Lumin's signing-service + KMS-IAM split provides.
 
 **Future option:** Binance Link / Fast API partnership (Binance hands Lumin an RSA-encrypted user key bound to Lumin's partner account — no user copy-paste, better UX). Requires entity + KYC + minimum-volume showing. Worth applying in parallel with v1; not blocking.
+
+## 3.10 Execution completeness audit (2026-05-26) — wired vs not, per-user vs engine-wide
+
+Deep audit run 2026-05-26 after owner-observed pre-TP miss on ZEREBRO SHORT at +0.51–0.60%. See `ACTIVE_CONTEXT.md § In-session checkpoint 2026-05-26 (session 4)` for the full findings. Summary of the gaps that affect the business chain:
+
+### What is built but NOT running
+
+**Reconciler** (`src/execution/reconciler.py`) — instantiated in `main.py` but never started as an asyncio task. `register_user`/`unregister_user` never called by `worker_manager`. Consequence: manual closes on Binance (user closes position from Binance UI or app) are undetected during runtime. Only the startup reconciliation (when a worker restarts after downtime) runs. **This is a live correctness gap** — a user who manually closes their position stays OPEN in the FSM until engine restart.
+
+**Position cap enforcement** (`src/execution/tripwires.py`) — `assert_position_cap()` is defined but has zero callsites in the execution path. The $500 default notional acts as a soft cap by construction but is not hard-enforced. B18 requires this cap be enforced; it currently is not.
+
+**MarkPriceFeed + PretpDispatcher** (`src/execution/mark_price_feed.py`, `pretp_dispatcher.py`) — fully implemented, never instantiated. The entire tick-driven pre-TP detection path is dead code. Pre-TP fires only from the 5s TradeMonitor candle poll.
+
+### What the app settings pages store vs what the engine reads
+
+| App setting | Path | Engine consumes? |
+|---|---|---|
+| Pre-TP grab fraction slider | `user_pretp_settings.grab_fraction` | Partial — FSM path stamps `pos.pretp_fraction` at dispatch; TradeMonitor path uses engine-wide config constant |
+| Pre-TP regime allowlist | `user_pretp_settings.regime_allowlist` | No |
+| Pre-TP setup allowlist | `user_pretp_settings.setup_allowlist` | No |
+| Pre-TP protect_manual_entries toggle | `user_pretp_settings.protect_manual_entries` | No — no read path exists anywhere |
+| Invalidation mode (loose/standard/tight) | `user_invalidation_settings.mode` | No — engine uses `INVALIDATION_MODE_DEFAULT` for all users |
+
+The app's Pre-TP Settings page and Invalidation Settings page are currently UI that saves to database tables the engine never reads. Users believe they are configuring their experience; they are not.
+
+### Pre-TP architecture: the right approach (owner decision needed)
+
+**Current flow:** 5s poll → detect via 1m candle high/low → place REDUCE_ONLY MARKET order. Problems: up to 5s detection lag; candle data lags mark price; MARKET order on thin books (ZEREBRO, PLAY) has meaningful slippage.
+
+**Better approach:** Place a REDUCE_ONLY LIMIT order at `pre_tp_trigger_price` at signal dispatch time alongside the SL + TP orders. Binance holds it passively on their exchange. When it fills, User Data Stream fires `ORDER_TRADE_UPDATE` → FSM `_apply_pretp_fill()` handler (already coded) handles the transition. Zero detection lag. Maker pricing (lower fees, potentially rebate). Works even if the engine is down briefly. Fully per-user — each user's LIMIT sits on Binance independently.
+
+**Owner decision required** (FSM transition change per §1.3): approve placing a pre-TP LIMIT order at dispatch time alongside SL + TP?
+
+### 9-PR roadmap to close all gaps
+
+See `ACTIVE_CONTEXT.md § 9-PR roadmap` for the full table with owner-sign-off flags. High-level phases:
+
+1. **Safety (PRs A–B):** wire reconciler; enforce position cap. No sign-off needed. Ship first.
+2. **Pre-TP architecture (PRs C–D):** native LIMIT at dispatch (sign-off required); MarkPriceFeed wiring for paper mode (no sign-off).
+3. **Per-user settings (PRs E–G):** grab fraction, regime/setup allowlist, invalidation mode end-to-end.
+4. **App display (PRs H–I):** per-user live positions in Trade tab; separate Recent Activity.
 
 ---
 
