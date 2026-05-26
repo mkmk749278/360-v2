@@ -498,6 +498,27 @@ class Bootstrap:
                         exc,
                     )
 
+            # Per-user PositionWorker lifecycle manager — starts one
+            # PositionWorker per active live-mode user so ORDER_TRADE_UPDATE
+            # events (entry fills, SL/TP fires, pre-TP fills) advance the
+            # FSM in real time.  Also runs startup reconciliation on boot
+            # to advance any PENDING positions whose entries filled while
+            # the engine was down (Binance WS does not replay missed events;
+            # without this, positions stay PENDING forever and the BE-shift
+            # never fires after pre-TP).
+            #
+            # Wired here (after execution stack init at firebase_project_id
+            # scope) so Firestore + signing service are already initialised
+            # before the first positionRisk query goes out.
+            if firebase_project_id:
+                from src.execution import worker_manager as _wm
+                tasks.append(
+                    asyncio.create_task(
+                        _wm.start_workers_for_active_users(),
+                        name="worker_manager",
+                    )
+                )
+
             # Phase-2 per-user overrides — shares the same SQLite file
             # (WAL mode lets both connections coexist).  Tables are
             # added with CREATE TABLE IF NOT EXISTS, safe against any

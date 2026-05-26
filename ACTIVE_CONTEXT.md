@@ -4,6 +4,47 @@
 
 ---
 
+## In-session checkpoint 2026-05-26 — Grab fraction wiring + FET pre-TP close fix + invalidation tightening
+
+Three PRs shipped this session, all merged.
+
+### PRs shipped
+
+| PR | Subject | Status |
+|---|---|---|
+| #490 | Tighten invalidation gates + SL cap: `360_SCALP` min age 600→120s, adverse-excursion fraction 0.70→0.55, min-age 600→120s, default mode standard→tight, SL cap 1.20→1.00 across all 8 evaluators | merged |
+| #491 | Fix FET pre-TP close gap: FSM partial close path wired into `trade_monitor._check_pre_tp_grab`; LOT_SIZE rounding via `round_qty`; MIN_NOTIONAL guard with full-position fallback for small wallets ($10 USDT) | merged |
+| #493 | Wire per-user grab fraction into FSM pre-TP partial close: `resolve_grab_fraction_uid()` added; `place_signal()` now stamps `pos.pretp_fraction` from user's Firestore setting at entry time; `close_fsm_partial_for_signal()` uses `pos.pretp_fraction` instead of engine config constant | merged |
+
+### What was broken (grab fraction — PR #493)
+
+The Pre-TP grab fraction slider in the app (`PUT /api/settings/user/pretp → grab_fraction`) was stored in `user_pretp_settings` but never read by the FSM execution path. Every user got 50% (engine default `PRE_TP_GRAB_FRACTION`) regardless of their slider value. Three-layer fix:
+
+1. Added `resolve_grab_fraction_uid(firebase_uid, default)` to `src/api/user_overrides.py` — same soft-fail pattern as `resolve_notional_usd`, clamped to B17 [0.30, 1.00]
+2. `signal_dispatch._dispatch_one_user()` now fetches grab fraction before `place_signal()` → stamps `position.pretp_fraction` with the user's configured value
+3. `close_fsm_partial_for_signal()` uses `pos.pretp_fraction` (per-position) instead of the caller's engine-config `fraction`
+
+### What was broken (FET pre-TP — PR #491)
+
+Three-layer failure for 10 USDT positions:
+- CCXT `close_partial` was a no-op for FSM users (not tracked in `_open_quantities`)
+- FSM path not wired into `trade_monitor._check_pre_tp_grab` at all
+- MIN_NOTIONAL: 50% of 10 USDT FET = ~$4.80 < $5 Binance floor → -4164
+
+All three fixed: FSM close path added; LOT_SIZE rounding via `round_qty()`; MIN_NOTIONAL guard upgrades to full-position close when partial fails the floor.
+
+### Test suite state
+
+5145 passed, 63 skipped, 49 xfailed after all three PRs.
+
+### Next-session queue
+
+- Monitor pre-TP execution in prod: verify grab fraction slider at 100% actually closes full position on next signal
+- Validate invalidation tightening (PR #490) against next truth-report window: PREMATURE rate should not exceed ~25% of kills; if it does, raise `INVALIDATION_ADVERSE_EXCURSION_FRACTION` back toward 0.65
+- Open PRs from prior sessions: check status of any carry-over items from 2026-05-23 session
+
+---
+
 ## In-session checkpoint 2026-05-23 — Truth-report deep-dive → 3 PRs shipped (signal scoring + per-user paper view)
 
 Two-cycle work driven by the 2026-05-23 per-signal audit on the last 100 closed signals plus a bug report on paper-mode visibility.
