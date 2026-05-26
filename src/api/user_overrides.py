@@ -1017,6 +1017,38 @@ def resolve_notional_usd(firebase_uid: str, default: float) -> float:
         return default
 
 
+def resolve_grab_fraction_uid(firebase_uid: str, default: float) -> float:
+    """Return the per-user pre-TP grab fraction for ``firebase_uid``, or
+    ``default`` (engine config ``PRE_TP_GRAB_FRACTION``) when unset.
+
+    Same lookup pattern as :func:`resolve_notional_usd`.  Soft-fail:
+    any exception returns ``default`` so a store blip never blocks dispatch.
+    Result is clamped to B17 bounds [0.30, 1.00].
+    """
+    if _SINGLETON is None:
+        return default
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return default
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return default
+        row = _SINGLETON.get_pretp(int(user.user_id))
+        v = row.get("grab_fraction")
+        if isinstance(v, (int, float)) and 0 < float(v) <= 1.0:
+            return max(0.30, min(1.00, float(v)))
+        return default
+    except Exception as exc:
+        log.debug(
+            "resolve_grab_fraction_uid: lookup failed for firebase_uid={} ({}); "
+            "falling back to default {}",
+            firebase_uid, type(exc).__name__, default,
+        )
+        return default
+
+
 def resolve_user_mode_uid(firebase_uid: str) -> Optional[str]:
     """Return the per-user auto-trade ``mode`` for ``firebase_uid``, or
     None when the user has no row / store is offline / lookup fails.
