@@ -377,6 +377,7 @@ async def dispatch_signal_to_active_users(
         # signal.
         user_notional = _uo.resolve_notional_usd(uid, _DEFAULT_NOTIONAL_USD)
         from config import PRE_TP_GRAB_FRACTION as _DEFAULT_GRAB_FRACTION
+        from config import INVALIDATION_MODE_DEFAULT as _DEFAULT_INV_MODE
         user_grab_fraction = _uo.resolve_grab_fraction_uid(
             uid, float(_DEFAULT_GRAB_FRACTION)
         )
@@ -402,6 +403,15 @@ async def dispatch_signal_to_active_users(
                     uid, setup_class, _allowed_setups,
                 )
                 user_grab_fraction = 0.0
+        # Per-user invalidation aggressiveness (B17).  Stored on the
+        # Position at placement time so the per-user FSM path can
+        # enforce the correct mode when per-user soft-invalidation
+        # lands.  The engine-wide TradeMonitor still uses
+        # INVALIDATION_MODE_DEFAULT for the engine's signal book;
+        # this field is forwarded to the per-user Position only.
+        user_invalidation_mode = _uo.resolve_invalidation_mode_uid(
+            uid, str(_DEFAULT_INV_MODE or "standard")
+        )
         total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(
             symbol, entry_price, notional_usd=user_notional,
         )
@@ -474,6 +484,7 @@ async def dispatch_signal_to_active_users(
                 tp2_qty=tp2_qty,
                 tp3_qty=tp3_qty,
                 pretp_fraction=user_grab_fraction,
+                invalidation_mode=user_invalidation_mode,
             )
             # Record the successful placement for the user-facing
             # Recent Activity card.  Soft-fail inside the helper.
