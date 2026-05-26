@@ -4,6 +4,57 @@
 
 ---
 
+## In-session checkpoint 2026-05-26 (session 3) — EIGENUSDT SL silent-skip root cause fixed (PR #500)
+
+### Incident
+
+EIGENUSDT LONG signal sat at −3.30% for 35+ minutes with no SL action. Owner-reported screenshot; diagnosed and fixed in this session.
+
+### Root cause (two compounding guards)
+
+1. **`_candle_extremes` returning (0, 0)** when no 1m candle data existed for the symbol. The existing guard `if _c_low > 0` correctly blocked false-positive SL triggers on missing data, but also silently skipped the entire SL check — leaving the signal unprotected when candle data was unavailable.
+
+2. **`indicators is None` early return in `_check_invalidation` placed BEFORE the adverse-excursion block.** When `get_indicators()` returned `None` (which also happens when candle data is absent), the function returned `None` immediately — silently skipping adverse-excursion invalidation that only needs `sig.current_price` to function.
+
+Together: no candle data → both the SL check and the adverse-excursion check silently no-op → signal can slide indefinitely past SL with no action.
+
+### Fix (PR #500 — merged)
+
+Three changes to `src/trade_monitor.py`:
+
+1. **Adverse-excursion block moved before `if indicators is None: return None`** — now fires even when candle data is absent, using only `sig.current_price`.
+2. **Mark-price SL backstop** added: when `_c_low <= 0 or _c_high <= 0` (no candle data), SL is checked directly against `sig.current_price` (mark price). Logs a WARNING to make the fallback path visible in prod logs.
+3. **TP3 rounding residual routed to TP2** (bug found during testing): even with `_TP3_FRACTION=0.00`, the LOT_SIZE floor residual (e.g. 0.001 BTC) was going into `tp3`, causing the FSM to place a spurious TP3 order. Fixed in `_compute_qty_split`: residual now goes to `tp2` when `_TP3_FRACTION <= 0.0`.
+
+### Tests updated
+
+- `test_binance_fetch_failure_skips_cycle` — updated from asserting old broken behavior (`len(persisted) == 1`) to correct behavior (`len(persisted) == 0`).
+- `test_qty_split_at_typical_btc_price` — TP2 fraction assertion updated 0.40 → 0.70; added `assert tp3 == 0.0`.
+- `test_tp_min_notional_no_consolidation_for_large_positions` — updated to assert `tp3 == 0.0`.
+- `test_scalp_signal_below_180s_not_triggered` — renamed to `test_scalp_signal_below_min_lifespan_not_triggered`; age changed 100s → 10s (360_SCALP actual min lifespan is 30s, not 180s as test originally assumed).
+
+### PRs shipped this session
+
+| PR | Repo | Subject | Status |
+|---|---|---|---|
+| #500 | 360-v2 | fix(trade_monitor): SL/invalidation silent skip when candle data missing — EIGENUSDT −3.30% root cause | **merged** |
+
+### PRs still open from prior sessions
+
+| PR | Repo | Subject | Status |
+|---|---|---|---|
+| #498 | 360-v2 | P1: reconciler returns None on Binance error; mark-price dispatch task GC fix; deprecated `get_event_loop()`; kill-switch cache race | **open** |
+| #76 | lumin-app | P1: mounted guard in delete-account controller; mounted guard in TradePage._resubscribe; `_livePrices` cleared on filter change | **open** |
+
+### Next-session queue
+
+- Merge PR #498 (engine stability) and PR #76 (app crash fixes)
+- Monitor post-deployment: verify EIGENUSDT signal (or similar zero-candle-data case) is closed within next 5s poll cycle after PR #500 deployment
+- Reconciler order-divergence detection (P2 — audit flag from PR #498 work): FSM doesn't detect externally-cancelled SL/TP orders ("Order in FSM but not in Binance → cancelled externally; clear the order id" — docstring promise, never implemented)
+- Pull next truth-report window to validate TP2-only exit structure after TP3 removal
+
+---
+
 ## In-session checkpoint 2026-05-26 (session 2) — Pre-launch stability sweep + TP3 removal
 
 ### Direction
