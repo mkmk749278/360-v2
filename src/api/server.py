@@ -960,8 +960,29 @@ def build_app(
         tags=["pulse"],
         dependencies=[Depends(auth)],
     )
-    async def pulse() -> PulseSnapshot:
-        return build_pulse(engine)
+    async def pulse(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> PulseSnapshot:
+        # Per-user paper visibility (PR #503, 2026-05-26) — paper-mode
+        # today_pnl_usd + open_positions are filtered by the caller's
+        # subscription windows. Anonymous device-token holders fall
+        # through to engine-wide (legitimate fallback for callers who
+        # haven't completed signup yet — they shouldn't see PnL anyway).
+        try:
+            user_id = _resolve_user_id(identity)
+        except HTTPException:
+            user_id = None
+        # Fall back to the singleton when build_app didn't wire one
+        # explicitly — same pattern as paper_trade_routes so the
+        # existing fixture wiring (set_singleton in test bootstrap)
+        # works for the new endpoint too.
+        effective_uo = user_overrides
+        if effective_uo is None:
+            from .user_overrides import get_singleton as _get_uo_singleton
+            effective_uo = _get_uo_singleton()
+        return build_pulse(
+            engine, user_id=user_id, user_overrides=effective_uo,
+        )
 
     @app.get(
         "/api/pulse/tickers",
@@ -1022,15 +1043,31 @@ def build_app(
         tags=["positions"],
         dependencies=[Depends(auth)],
     )
-    async def positions() -> PositionsResponse:
+    async def positions(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> PositionsResponse:
         # Defensive logging (2026-05-08): the Trade tab fans out to three
         # endpoints (auto-mode + positions + activity) and a single 500 on
         # any of them shows the user "Could not load Trade state" with
         # zero diagnostic context.  Wrapping each endpoint catches the
         # exception, logs a full traceback for the VPS-side diagnosis,
         # and returns an empty list so the rest of the page can render.
+        #
+        # Per-user paper visibility (PR #503, 2026-05-26) — open
+        # positions filtered by the caller's subscription windows in
+        # paper mode. Anonymous tokens fall through to engine-wide.
         try:
-            items = build_positions(engine)
+            user_id = _resolve_user_id(identity)
+        except HTTPException:
+            user_id = None
+        effective_uo = user_overrides
+        if effective_uo is None:
+            from .user_overrides import get_singleton as _get_uo_singleton
+            effective_uo = _get_uo_singleton()
+        try:
+            items = build_positions(
+                engine, user_id=user_id, user_overrides=effective_uo,
+            )
         except Exception:
             log.exception("/api/positions failed — returning empty list")
             items = []
@@ -1157,9 +1194,30 @@ def build_app(
         tags=["auto-mode"],
         dependencies=[Depends(auth)],
     )
-    async def auto_mode_get() -> AutoModeStatus:
+    async def auto_mode_get(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> AutoModeStatus:
+        # Per-user paper visibility (PR #503, 2026-05-26) — Trade-tab
+        # header rolling counters (daily / weekly / monthly / total /
+        # equity / open_positions) filtered to the caller's
+        # subscription windows in paper mode. A fresh user enabling
+        # paper sees equity=$1000 and zeros across every PnL window.
+        # Anonymous device-token holders raise HTTPException 404 in
+        # _resolve_user_id; catch and pass user_id=None so the
+        # endpoint falls back to engine-wide rather than 404'ing
+        # (matches the pattern in /api/pnl/history).
         try:
-            return build_auto_mode(engine)
+            user_id = _resolve_user_id(identity)
+        except HTTPException:
+            user_id = None
+        effective_uo = user_overrides
+        if effective_uo is None:
+            from .user_overrides import get_singleton as _get_uo_singleton
+            effective_uo = _get_uo_singleton()
+        try:
+            return build_auto_mode(
+                engine, user_id=user_id, user_overrides=effective_uo,
+            )
         except Exception:
             log.exception(
                 "/api/auto-mode failed — returning safe default off-mode status"
