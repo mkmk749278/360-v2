@@ -477,6 +477,7 @@ async def place_signal(
     tp3_qty: float,
     pretp_threshold_pct: float = 0.32,  # §3.2a default — raw %
     pretp_fraction: float = 0.5,  # B17 engine default — must be in [0.3, 1.0]
+    invalidation_mode: str = "standard",  # B17: "loose" / "standard" / "tight"
     order_placer_factory: Optional[
         Callable[[str], _order_placer.OrderPlacer]
     ] = None,
@@ -569,6 +570,7 @@ async def place_signal(
         entry_order_id=entry_result.order_id,
         pretp_threshold_price=pretp_threshold_price,
         pretp_fraction=pretp_fraction_clamped,
+        invalidation_mode=invalidation_mode,
     )
     _position_state.put_position(position)
 

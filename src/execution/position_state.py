@@ -154,6 +154,10 @@ class Position:
     pretp_threshold_price: float = 0.0
     pretp_fraction: float = 0.5  # Engine default per B17 / §3.2a
     pretp_fired: bool = False
+    # Per-user soft-invalidation aggressiveness (B17): "loose" / "standard" /
+    # "tight".  Captured at signal-placement time from user_invalidation_settings
+    # so enforcement doesn't need to re-query SQLite on every FSM tick.
+    invalidation_mode: str = "standard"
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -478,6 +482,7 @@ def _to_firestore_dict(position: Position) -> dict:
         "pretp_threshold_price": position.pretp_threshold_price,
         "pretp_fraction": position.pretp_fraction,
         "pretp_fired": position.pretp_fired,
+        "invalidation_mode": position.invalidation_mode,
         "created_at": position.created_at,
         "last_event_at": position.last_event_at,
         "closed_at": position.closed_at,
@@ -523,6 +528,7 @@ def _from_firestore_dict(data: dict) -> Position:
         pretp_threshold_price=float(data.get("pretp_threshold_price", 0.0)),
         pretp_fraction=float(data.get("pretp_fraction", 0.5)),
         pretp_fired=bool(data.get("pretp_fired", False)),
+        invalidation_mode=str(data.get("invalidation_mode", "standard")),
         created_at=data.get(
             "created_at", datetime.now(timezone.utc)
         ),

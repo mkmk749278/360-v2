@@ -1095,6 +1095,41 @@ def resolve_pretp_allowlists_uid(
         return None, None
 
 
+def resolve_invalidation_mode_uid(firebase_uid: str, default: str) -> str:
+    """Return the per-user invalidation mode for ``firebase_uid``, or
+    ``default`` (typically ``INVALIDATION_MODE_DEFAULT`` from config) when
+    the user has no override, the store is offline, or the lookup fails.
+
+    Same lookup pattern as :func:`resolve_grab_fraction_uid`.  Soft-fail:
+    any exception returns ``default`` so a store blip never blocks dispatch.
+    Stored values are validated against ``_VALID_INVALIDATION_MODES``; an
+    invalid stored token (shouldn't happen after ``_coerce_invalidation``,
+    but defensive) falls back to ``default``.
+    """
+    if _SINGLETON is None:
+        return default
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return default
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return default
+        row = _SINGLETON.get_invalidation(int(user.user_id))
+        mode = row.get("mode")
+        if isinstance(mode, str) and mode.lower() in _VALID_INVALIDATION_MODES:
+            return mode.lower()
+        return default
+    except Exception as exc:
+        log.debug(
+            "resolve_invalidation_mode_uid: lookup failed uid={} ({}); "
+            "defaulting to {}",
+            firebase_uid, type(exc).__name__, default,
+        )
+        return default
+
+
 def resolve_user_mode_uid(firebase_uid: str) -> Optional[str]:
     """Return the per-user auto-trade ``mode`` for ``firebase_uid``, or
     None when the user has no row / store is offline / lookup fails.

@@ -914,3 +914,82 @@ def test_pause_isolated_between_users(
     store.pause_user_auto_trade(1, "insufficient_margin")
     assert store.is_user_auto_paused(1) is True
     assert store.is_user_auto_paused(2) is False
+
+
+# ---------------------------------------------------------------------------
+# resolve_invalidation_mode_uid (PR-G: per-user invalidation mode)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_invalidation_mode_uid_falls_back_when_singleton_unset() -> None:
+    """No store singleton → return the default unchanged (soft-fail)."""
+    from src.api import user_overrides as _uo
+    _uo.clear_singleton()
+    assert _uo.resolve_invalidation_mode_uid("any-uid", "standard") == "standard"
+    assert _uo.resolve_invalidation_mode_uid("any-uid", "tight") == "tight"
+
+
+def test_resolve_invalidation_mode_uid_returns_default_when_user_unknown(
+    store: UserOverridesStore, tmp_path,
+) -> None:
+    """Singleton registered but firebase_uid has no user row → return default."""
+    from src.api import user_overrides as _uo
+    from src.api import users as _users
+    _uo.set_singleton(store)
+    user_store = _users.UserStore(tmp_path / "users.sqlite")
+    _users.set_singleton(user_store)
+    try:
+        assert _uo.resolve_invalidation_mode_uid("nonexistent-uid", "standard") == "standard"
+    finally:
+        _uo.clear_singleton()
+        _users.set_singleton(None)
+        user_store.close()
+
+
+def test_resolve_invalidation_mode_uid_returns_user_mode(
+    store: UserOverridesStore, tmp_path,
+) -> None:
+    """User with ``mode='loose'`` in invalidation settings → returns 'loose'."""
+    from src.api import user_overrides as _uo
+    from src.api import users as _users
+    _uo.set_singleton(store)
+    user_store = _users.UserStore(tmp_path / "users.sqlite")
+    _users.set_singleton(user_store)
+    try:
+        user = user_store.get_or_create_by_firebase_uid(
+            "test-inv-uid", "+15551112222",
+        )
+        store.update_invalidation(user.user_id, {"mode": "loose"})
+
+        assert _uo.resolve_invalidation_mode_uid("test-inv-uid", "standard") == "loose"
+
+        # User with no override gets the default.
+        user_store.get_or_create_by_firebase_uid(
+            "uid-no-inv-override", "+15553334444",
+        )
+        assert _uo.resolve_invalidation_mode_uid("uid-no-inv-override", "standard") == "standard"
+    finally:
+        _uo.clear_singleton()
+        _users.set_singleton(None)
+        user_store.close()
+
+
+def test_resolve_invalidation_mode_uid_tight_via_shared_db(
+    store: UserOverridesStore, db_path,
+) -> None:
+    """'tight' mode round-trips through the resolver when user rows share the
+    same SQLite file (so FK constraints are satisfied)."""
+    from src.api import user_overrides as _uo
+    from src.api import users as _users
+    _uo.set_singleton(store)
+    # Open a UserStore on the SAME db file so FK references are valid.
+    user_store = _users.UserStore(db_path)
+    _users.set_singleton(user_store)
+    try:
+        user = user_store.get_or_create_by_firebase_uid("uid-tight-test", "+15550000099")
+        store.update_invalidation(user.user_id, {"mode": "tight"})
+        assert _uo.resolve_invalidation_mode_uid("uid-tight-test", "standard") == "tight"
+    finally:
+        _uo.clear_singleton()
+        _users.set_singleton(None)
+        user_store.close()

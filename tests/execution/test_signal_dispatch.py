@@ -1320,3 +1320,106 @@ async def test_empty_allowlists_allow_all(
     assert placed == 1
     mock_place.assert_called_once()
     assert mock_place.call_args.kwargs["pretp_fraction"] > 0.0
+
+
+# ---------------------------------------------------------------------------
+# Per-user invalidation mode (roadmap PR-G)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_per_user_invalidation_mode_forwarded_to_place_signal(
+    _mode_state_stub,
+) -> None:
+    """The per-user invalidation mode resolved from user_overrides is
+    forwarded to place_signal as the ``invalidation_mode`` kwarg."""
+    from unittest.mock import patch as _patch
+    from src.execution import position_fsm
+    from src.api import user_overrides as _uo
+
+    modes, _paused = _mode_state_stub
+    modes["fb-inv-tight"] = "live"
+
+    with _patch.object(signal_dispatch, "_active_uids", return_value=["fb-inv-tight"]):
+        with _patch.object(_uo, "resolve_invalidation_mode_uid", return_value="tight"):
+            with _patch.object(
+                position_fsm, "place_signal", new_callable=AsyncMock
+            ) as mock_place:
+                placed = await signal_dispatch.dispatch_signal_to_active_users(
+                    signal_id="sig-inv-tight",
+                    symbol="BTCUSDT",
+                    direction="LONG",
+                    entry_price=29000.0,
+                    sl_price=28500.0,
+                    tp1_price=29500.0,
+                    tp2_price=30000.0,
+                    tp3_price=30500.0,
+                )
+
+    assert placed == 1
+    mock_place.assert_called_once()
+    assert mock_place.call_args.kwargs["invalidation_mode"] == "tight"
+
+
+@pytest.mark.asyncio
+async def test_per_user_invalidation_mode_loose_forwarded(
+    _mode_state_stub,
+) -> None:
+    """When the resolver returns 'loose', place_signal receives 'loose'."""
+    from unittest.mock import patch as _patch
+    from src.execution import position_fsm
+    from src.api import user_overrides as _uo
+
+    modes, _paused = _mode_state_stub
+    modes["fb-inv-loose"] = "live"
+
+    with _patch.object(signal_dispatch, "_active_uids", return_value=["fb-inv-loose"]):
+        with _patch.object(_uo, "resolve_invalidation_mode_uid", return_value="loose"):
+            with _patch.object(
+                position_fsm, "place_signal", new_callable=AsyncMock
+            ) as mock_place:
+                placed = await signal_dispatch.dispatch_signal_to_active_users(
+                    signal_id="sig-inv-loose",
+                    symbol="BTCUSDT",
+                    direction="LONG",
+                    entry_price=29000.0,
+                    sl_price=28500.0,
+                    tp1_price=29500.0,
+                    tp2_price=30000.0,
+                    tp3_price=30500.0,
+                )
+
+    assert placed == 1
+    assert mock_place.call_args.kwargs["invalidation_mode"] == "loose"
+
+
+@pytest.mark.asyncio
+async def test_default_invalidation_mode_when_resolver_returns_standard(
+    _mode_state_stub,
+) -> None:
+    """Resolver returning 'standard' (the default) is forwarded unchanged."""
+    from unittest.mock import patch as _patch
+    from src.execution import position_fsm
+    from src.api import user_overrides as _uo
+
+    modes, _paused = _mode_state_stub
+    modes["fb-inv-std"] = "live"
+
+    with _patch.object(signal_dispatch, "_active_uids", return_value=["fb-inv-std"]):
+        with _patch.object(_uo, "resolve_invalidation_mode_uid", return_value="standard"):
+            with _patch.object(
+                position_fsm, "place_signal", new_callable=AsyncMock
+            ) as mock_place:
+                placed = await signal_dispatch.dispatch_signal_to_active_users(
+                    signal_id="sig-inv-std",
+                    symbol="BTCUSDT",
+                    direction="LONG",
+                    entry_price=29000.0,
+                    sl_price=28500.0,
+                    tp1_price=29500.0,
+                    tp2_price=30000.0,
+                    tp3_price=30500.0,
+                )
+
+    assert placed == 1
+    assert mock_place.call_args.kwargs["invalidation_mode"] == "standard"
