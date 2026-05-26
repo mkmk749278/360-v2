@@ -40,6 +40,19 @@ from . import pretp_controller as _pretp_controller
 
 log = get_logger("execution.pretp_dispatcher")
 
+# Module-level singleton — set by bootstrap, called by position_fsm
+# to track/untrack symbols as positions open/close.
+_instance: Optional["PretpDispatcher"] = None
+
+
+def set_instance(d: "PretpDispatcher") -> None:
+    global _instance
+    _instance = d
+
+
+def get_instance() -> Optional["PretpDispatcher"]:
+    return _instance
+
 
 class PretpDispatcher:
     """Per-engine dispatcher that bridges mark prices to pre-TP firing.

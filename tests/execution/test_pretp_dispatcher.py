@@ -176,3 +176,22 @@ async def test_positions_for_symbol_failure_logged_not_raised() -> None:
     )
     # Must not raise.
     await dispatcher._on_tick("BTCUSDT", 29200.0)
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton
+# ---------------------------------------------------------------------------
+
+
+def test_set_and_get_instance() -> None:
+    """set_instance / get_instance round-trip."""
+    from src.execution import mark_price_feed as _mpf
+
+    original = pretp_dispatcher.get_instance()
+    feed = _mpf.MarkPriceFeed()
+    d = pretp_dispatcher.PretpDispatcher(feed)
+    try:
+        pretp_dispatcher.set_instance(d)
+        assert pretp_dispatcher.get_instance() is d
+    finally:
+        pretp_dispatcher.set_instance(original)

@@ -224,3 +224,19 @@ async def test_stop_breaks_main_loop() -> None:
     await asyncio.sleep(0.1)
     await feed.stop()
     await asyncio.wait_for(task, timeout=3.0)
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton
+# ---------------------------------------------------------------------------
+
+
+def test_set_and_get_instance() -> None:
+    """set_instance / get_instance round-trip."""
+    original = mark_price_feed.get_instance()
+    feed = mark_price_feed.MarkPriceFeed()
+    try:
+        mark_price_feed.set_instance(feed)
+        assert mark_price_feed.get_instance() is feed
+    finally:
+        mark_price_feed.set_instance(original)

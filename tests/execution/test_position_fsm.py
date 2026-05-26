@@ -17,6 +17,7 @@ OrderPlacer mocked).  What we pin:
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from types import SimpleNamespace
 from typing import Any
@@ -784,3 +785,93 @@ async def test_place_signal_safety_gates_skipped_when_kill_switch_not_initialise
         # places normally.  This is the dev / test happy path.
         result = await position_fsm.place_signal(**_common_signal_kwargs(placer))
     assert result.entry_order_id == 1001
+
+
+# ---------------------------------------------------------------------------
+# PretpDispatcher track / untrack wiring
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_entry_fill_to_open_calls_track() -> None:
+    """When the FSM transitions PENDING → OPEN on entry fill,
+    it must call pretp_dispatcher.track(symbol) if a dispatcher
+    instance is set."""
+    from src.execution import pretp_dispatcher as _pd
+
+    tracked: list = []
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.track = AsyncMock(side_effect=lambda sym: tracked.append(sym))
+
+    original = _pd.get_instance()
+    _pd.set_instance(mock_dispatcher)
+    try:
+        fsm = position_fsm.PositionFSM("fb-track-test")
+        position = _pending_position("sig-track")
+        with patch.object(position_state, "get_position", return_value=position), \
+             patch.object(position_state, "put_position"):
+            await fsm.handle_event(
+                _otu(
+                    client_order_id=position_state.coid_entry("sig-track"),
+                    cumulative_filled_qty=1.0,
+                    order_status="FILLED",
+                )
+            )
+        await asyncio.sleep(0)
+        assert "BTCUSDT" in tracked
+    finally:
+        _pd.set_instance(original)
+
+
+@pytest.mark.asyncio
+async def test_sl_fill_calls_untrack() -> None:
+    """SL fill → CLOSED must call pretp_dispatcher.untrack(symbol)."""
+    from src.execution import pretp_dispatcher as _pd
+
+    untracked: list = []
+    mock_dispatcher = MagicMock()
+    mock_dispatcher.untrack = AsyncMock(side_effect=lambda sym: untracked.append(sym))
+
+    original = _pd.get_instance()
+    _pd.set_instance(mock_dispatcher)
+    try:
+        fsm = position_fsm.PositionFSM("fb-untrack-sl")
+        position = _pending_position("sig-sl")
+        position.state = position_state.PositionState.OPEN
+        with patch.object(position_state, "get_position", return_value=position), \
+             patch.object(position_state, "put_position"):
+            await fsm.handle_event(
+                _otu(
+                    client_order_id=position_state.coid_sl("sig-sl"),
+                    order_status="FILLED",
+                )
+            )
+        await asyncio.sleep(0)
+        assert "BTCUSDT" in untracked
+    finally:
+        _pd.set_instance(original)
+
+
+@pytest.mark.asyncio
+async def test_no_track_when_dispatcher_not_set() -> None:
+    """No crash when pretp_dispatcher singleton is None (dev / test mode
+    without bootstrap having wired the mark-price feed)."""
+    from src.execution import pretp_dispatcher as _pd
+
+    original = _pd.get_instance()
+    _pd.set_instance(None)
+    try:
+        fsm = position_fsm.PositionFSM("fb-no-dispatcher")
+        position = _pending_position("sig-no-disp")
+        with patch.object(position_state, "get_position", return_value=position), \
+             patch.object(position_state, "put_position"):
+            await fsm.handle_event(
+                _otu(
+                    client_order_id=position_state.coid_entry("sig-no-disp"),
+                    cumulative_filled_qty=1.0,
+                    order_status="FILLED",
+                )
+            )
+        await asyncio.sleep(0)
+    finally:
+        _pd.set_instance(original)
