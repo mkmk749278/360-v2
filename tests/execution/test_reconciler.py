@@ -237,3 +237,75 @@ async def test_stop_breaks_run_loop() -> None:
     await asyncio.sleep(0.02)
     await r.stop()
     await asyncio.wait_for(task, timeout=2.0)
+
+
+# ---------------------------------------------------------------------------
+# Module-level singleton (bootstrap wiring)
+# ---------------------------------------------------------------------------
+
+
+def test_set_and_get_instance() -> None:
+    """set_instance / get_instance round-trip."""
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [],
+        signing_client_factory=lambda: MagicMock(),
+    )
+    original = reconciler.get_instance()
+    try:
+        reconciler.set_instance(r)
+        assert reconciler.get_instance() is r
+    finally:
+        reconciler.set_instance(original)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_worker_manager_registers_user_with_reconciler() -> None:
+    """start_user_worker calls reconciler.register_user when an instance is set."""
+    from src.execution import worker_manager
+    from unittest.mock import AsyncMock, patch
+
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [],
+        signing_client_factory=lambda: MagicMock(),
+    )
+    reconciler.set_instance(r)
+    try:
+        mock_worker = MagicMock()
+        mock_worker.run = AsyncMock(return_value=None)
+        mock_fsm = MagicMock()
+        with (
+            patch("src.execution.worker_manager.PositionWorker", return_value=mock_worker),
+            patch("src.execution.worker_manager.PositionFSM", return_value=mock_fsm),
+            patch.dict(worker_manager._workers, {}, clear=True),
+        ):
+            await worker_manager.start_user_worker("uid-reg-test")
+        assert "uid-reg-test" in r._active_uids
+    finally:
+        reconciler.set_instance(None)  # type: ignore[arg-type]
+
+
+@pytest.mark.asyncio
+async def test_stop_all_workers_unregisters_users() -> None:
+    """stop_all_workers calls reconciler.unregister_user for every worker."""
+    from src.execution import worker_manager
+    from unittest.mock import AsyncMock, patch
+
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [],
+        signing_client_factory=lambda: MagicMock(),
+    )
+    await r.register_user("uid-stop-test")
+    reconciler.set_instance(r)
+    try:
+        mock_worker = MagicMock()
+        mock_worker.stop = AsyncMock()
+        mock_task = MagicMock()
+        with patch.dict(
+            worker_manager._workers,
+            {"uid-stop-test": (mock_worker, mock_task)},
+            clear=True,
+        ):
+            await worker_manager.stop_all_workers()
+        assert "uid-stop-test" not in r._active_uids
+    finally:
+        reconciler.set_instance(None)  # type: ignore[arg-type]

@@ -169,6 +169,12 @@ async def start_user_worker(firebase_uid: str) -> Optional[asyncio.Task]:
     )
     _workers[firebase_uid] = (worker, task)
     log.info("worker_manager: started PositionWorker uid={}", firebase_uid)
+
+    from src.execution import reconciler as _rec_mod
+    rec = _rec_mod.get_instance()
+    if rec is not None:
+        await rec.register_user(firebase_uid)
+
     return task
 
 
@@ -249,9 +255,16 @@ async def _reconcile_and_start(firebase_uid: str) -> None:
 
 async def stop_all_workers() -> None:
     """Signal every running worker to stop.  Called on engine shutdown."""
+    from src.execution import reconciler as _rec_mod
+    rec = _rec_mod.get_instance()
     for uid, (worker, task) in list(_workers.items()):
         try:
             await worker.stop()
         except Exception:
             pass
+        if rec is not None:
+            try:
+                await rec.unregister_user(uid)
+            except Exception:
+                pass
     log.info("worker_manager: stop_all_workers called ({} workers)", len(_workers))
