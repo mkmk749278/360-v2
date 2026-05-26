@@ -48,8 +48,19 @@ from . import position_state as _position_state
 
 log = get_logger("execution.reconciler")
 
-
 _FUTURES_POSITION_RISK_PATH = "/fapi/v2/positionRisk"
+
+# Module-level singleton — set by bootstrap, read by worker_manager.
+_instance: Optional["Reconciler"] = None
+
+
+def set_instance(r: "Reconciler") -> None:
+    global _instance
+    _instance = r
+
+
+def get_instance() -> Optional["Reconciler"]:
+    return _instance
 _FUTURES_OPEN_ORDERS_PATH = "/fapi/v1/openOrders"
 _DEFAULT_INTERVAL_S = 60.0
 

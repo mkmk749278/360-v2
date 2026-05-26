@@ -512,10 +512,19 @@ class Bootstrap:
             # before the first positionRisk query goes out.
             if firebase_project_id:
                 from src.execution import worker_manager as _wm
+                from src.execution import reconciler as _rec_mod
+                _rec = _rec_mod.Reconciler()
+                _rec_mod.set_instance(_rec)
                 tasks.append(
                     asyncio.create_task(
                         _wm.start_workers_for_active_users(),
                         name="worker_manager",
+                    )
+                )
+                tasks.append(
+                    asyncio.create_task(
+                        _rec.run(),
+                        name="reconciler",
                     )
                 )
 
