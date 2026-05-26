@@ -140,10 +140,14 @@ class Reconciler:
         if not positions:
             return  # nothing to reconcile
         client = self._signing_client_factory()
-        # Fetch Binance state.
+        # Fetch Binance state.  None means the request failed — skip
+        # this cycle entirely rather than treating all symbols as flat
+        # and wrongly marking every open position as MANUAL CLOSE.
         binance_positions = await self._fetch_binance_positions(
             firebase_uid, client
         )
+        if binance_positions is None:
+            return
         # Diff + apply.
         for fsm_position in positions:
             self._diff_and_heal(fsm_position, binance_positions)
@@ -182,25 +186,41 @@ class Reconciler:
         self,
         firebase_uid: str,
         client: signing_client.SigningClient,
-    ) -> Dict[str, float]:
+    ) -> Optional[Dict[str, float]]:
         """Call ``GET /fapi/v2/positionRisk`` and return a
-        {symbol -> position_amount} map.  Errors return empty dict
-        (reconciliation skips this cycle for the user)."""
-        resp = await client.binance_signed_get(
-            firebase_uid=firebase_uid,
-            base="futures",
-            path=_FUTURES_POSITION_RISK_PATH,
-        )
+        {symbol -> position_amount} map.
+
+        Returns ``None`` on any fetch error so the caller can skip
+        the diff entirely — returning an empty dict would be
+        indistinguishable from "user has no open positions" and
+        would cause every FSM position to be marked MANUAL CLOSE.
+        """
+        try:
+            resp = await client.binance_signed_get(
+                firebase_uid=firebase_uid,
+                base="futures",
+                path=_FUTURES_POSITION_RISK_PATH,
+            )
+        except Exception as exc:
+            log.warning(
+                "reconciler: positionRisk request raised uid={} exc={}",
+                firebase_uid, exc,
+            )
+            return None
         if not resp.ok:
             log.warning(
                 "reconciler: positionRisk fetch failed uid={} code={}",
                 firebase_uid, resp.error_code,
             )
-            return {}
+            return None
         out: Dict[str, float] = {}
         body = resp.binance_body or []
         if not isinstance(body, list):
-            return {}
+            log.warning(
+                "reconciler: positionRisk returned non-list body uid={}",
+                firebase_uid,
+            )
+            return None
         for entry in body:
             if not isinstance(entry, dict):
                 continue
