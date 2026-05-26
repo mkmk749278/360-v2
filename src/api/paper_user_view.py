@@ -23,6 +23,17 @@ Doctrine alignment: per CLAUDE.md "Server-side execution doctrine",
 true per-user simulation lands with Phase 3. This module is the
 Phase-2.5 bridge so the visibility bug doesn't wait on the full
 multi-user execution stack.
+
+Coverage history:
+
+* PR #478 (2026-05-23) — windowed ``/api/trades`` + ``/api/pnl/history``.
+* PR #503 (2026-05-26, this module) — extends the same window filter to
+  ``/api/auto-mode`` (Trade-tab header + rolling counters), ``/api/positions``
+  (open-position list), and ``/api/pulse`` (header today_pnl_usd +
+  open_positions count). A fresh user enabling paper mode for the first
+  time now sees equity=$1000, 0 open, 0 PnL across every window (matching
+  ``/api/trades`` empty list) instead of inheriting the engine-wide
+  operator's paper book at signup.
 """
 from __future__ import annotations
 
@@ -157,3 +168,139 @@ def pnl_history_for_user(
         return round(total, 4)
 
     return series, _rolling(7), _rolling(30)
+
+
+
+# ---------------------------------------------------------------------------
+# Snapshot-builder helpers (PR #503, 2026-05-26)
+#
+# The ``/api/trades`` + ``/api/pnl/history`` filters above operate on the
+# closed-trade row set. The Trade-tab header + open-positions list +
+# Pulse header pull from different shapes (engine state dicts, router
+# active_signals, AutoModeStatus rolling counters), so they need their
+# own thin helpers that route through the same window-filter primitives.
+# ---------------------------------------------------------------------------
+
+
+def _datetime_to_iso(value: Any) -> Optional[str]:
+    """Coerce a ``datetime | str | None`` into the ISO-8601 string shape
+    the existing ``trade_closed_within_any_window`` helper expects.
+
+    The router's ``Signal`` carries ``dispatch_timestamp`` and
+    ``timestamp`` as tz-aware ``datetime`` objects (see
+    ``src/channels/base.py:Signal``); the trade-records ledger stores
+    ISO strings. This adapter lets both feed into the same window-check
+    without duplicating the parse-and-compare logic.
+    """
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return value.isoformat()
+    if isinstance(value, str):
+        return value
+    return None
+
+
+def signal_visible_within_any_window(
+    timestamp: Any,
+    windows: Iterable[SubscriptionWindow],
+) -> bool:
+    """Return True when a signal's dispatch/open time falls within any
+    subscription window.
+
+    Mirrors :func:`trade_closed_within_any_window` but for objects that
+    expose a ``datetime`` rather than a ledger row's ISO string. Open
+    positions in ``router.active_signals`` are filtered through this so
+    a user who enabled paper after the engine had already opened
+    positions doesn't see those pre-window positions on their Trade tab.
+
+    Window-fall semantics match the trade-row check exactly: the signal
+    is visible iff its dispatch time falls between ``started_at`` and
+    ``ended_at`` (inclusive of the start, inclusive of the close on a
+    closed window, open-ended on an active window).
+    """
+    iso = _datetime_to_iso(timestamp)
+    return trade_closed_within_any_window(iso, windows)
+
+
+def rolling_pnl_for_user(
+    rows: List[Dict[str, Any]],
+    windows: List[SubscriptionWindow],
+) -> Dict[str, float]:
+    """Return windowed daily / weekly / monthly / total PnL counters.
+
+    Sums ``net_pnl_usd`` over user-visible closed trades, bucketed by
+    UTC close-day:
+
+    * ``daily_pnl_usd`` — closed today (UTC).
+    * ``weekly_pnl_usd`` — closed in the last 7 UTC days (inclusive).
+    * ``monthly_pnl_usd`` — closed in the last 30 UTC days (inclusive).
+    * ``total_pnl_usd`` — closed within ANY subscription window
+      (i.e. the user's full visible-since-enable cumulative).
+
+    A fresh user with zero subscription windows gets all zeros — the
+    correct empty-state for the Trade-tab header right after they
+    enable paper mode and before the first engine signal reaches their
+    new window.
+
+    Replaces three independent rolling-window sources for paper mode
+    that were all engine-wide:
+    * ``RiskManager.daily_realised_pnl_usd`` (today)
+    * ``pnl_history.get_weekly/get_monthly("paper")`` (rolling 7/30)
+    * ``PaperOrderManager.simulated_pnl_total`` (cumulative since boot)
+
+    The returned ``total_pnl_usd`` plays the same role
+    ``simulated_pnl_total`` does — but bounded to the user's
+    subscription windows rather than the engine's lifetime. The Trade
+    tab's "Equity" cell adds this to ``PAPER_STARTING_EQUITY`` to render
+    the user's per-user equity figure ($1000 for a fresh enable, drifts
+    with their visible PnL thereafter).
+    """
+    counters = {
+        "daily_pnl_usd": 0.0,
+        "weekly_pnl_usd": 0.0,
+        "monthly_pnl_usd": 0.0,
+        "total_pnl_usd": 0.0,
+    }
+    if not windows:
+        return counters
+
+    visible = filter_trades_for_user(rows, windows, include_open=False)
+    today = datetime.now(timezone.utc).date()
+    # Inclusive-of-today rolling cutoffs match
+    # ``pnl_history.get_rolling_window``: ``days=7`` covers today + the
+    # six prior days; ``days=30`` covers today + the 29 prior days. The
+    # subtraction by ``days - 1`` keeps the user-windowed counters
+    # numerically aligned with the engine-wide series the rest of the
+    # surface still reads from for live mode.
+    week_cutoff = today - timedelta(days=6)
+    month_cutoff = today - timedelta(days=29)
+
+    daily = 0.0
+    weekly = 0.0
+    monthly = 0.0
+    total = 0.0
+    for row in visible:
+        closed_dt = _coerce_iso(row.get("closed_at"))
+        if closed_dt is None:
+            continue
+        try:
+            pnl = float(row.get("net_pnl_usd") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        d = closed_dt.astimezone(timezone.utc).date()
+        total += pnl
+        if d >= month_cutoff:
+            monthly += pnl
+        if d >= week_cutoff:
+            weekly += pnl
+        if d == today:
+            daily += pnl
+
+    counters["daily_pnl_usd"] = round(daily, 4)
+    counters["weekly_pnl_usd"] = round(weekly, 4)
+    counters["monthly_pnl_usd"] = round(monthly, 4)
+    counters["total_pnl_usd"] = round(total, 4)
+    return counters

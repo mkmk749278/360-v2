@@ -126,7 +126,12 @@ def _agent_name_for(setup_class: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_pulse(engine: Any) -> PulseSnapshot:
+def build_pulse(
+    engine: Any,
+    *,
+    user_id: Optional[int] = None,
+    user_overrides: Any = None,
+) -> PulseSnapshot:
     rm = getattr(engine, "_risk_manager", None)
     # Open-position count: prefer the paper broker's ``_positions`` dict
     # when wired (paper mode) because that's the same source ``/api/positions``
@@ -164,6 +169,68 @@ def build_pulse(engine: Any) -> PulseSnapshot:
     today_pnl_pct = (
         100.0 * today_pnl_usd / starting_equity if starting_equity > 0 else 0.0
     )
+
+    # Per-user paper visibility (PR #503, 2026-05-26) — extends PR #478's
+    # ``/api/trades`` window filter to the Pulse header so a fresh user
+    # who just enabled paper mode doesn't see the operator's engine-wide
+    # open-position count + today's PnL on day-zero. Live mode and
+    # off-mode keep the engine-wide reads (no per-user paper book exists
+    # for live, and off-mode has nothing to show anyway).
+    active_mode = getattr(engine, "_current_auto_mode", "off")
+    if (
+        active_mode == "paper"
+        and user_id is not None
+        and user_overrides is not None
+    ):
+        try:
+            windows = user_overrides.get_paper_subscriptions(int(user_id))
+        except Exception:
+            windows = []
+        if windows:
+            from src.auto_trade import trade_records
+            from src.api.paper_user_view import (
+                rolling_pnl_for_user,
+                signal_visible_within_any_window,
+            )
+            try:
+                ledger_rows = trade_records.list_trades(
+                    limit=500, offset=0, include_open=False,
+                )
+            except Exception:
+                ledger_rows = []
+            counters = rolling_pnl_for_user(ledger_rows, windows)
+            today_pnl_usd = counters["daily_pnl_usd"]
+            today_pnl_pct = (
+                100.0 * today_pnl_usd / starting_equity
+                if starting_equity > 0 else 0.0
+            )
+            # Open positions: count router signals dispatched within
+            # the user's windows that the broker still holds.
+            router = getattr(engine, "router", None)
+            user_open = 0
+            if router is not None:
+                for _sig in router.active_signals.values():
+                    sig_id = getattr(_sig, "signal_id", "") or ""
+                    if broker is not None and isinstance(
+                        getattr(broker, "_positions", None), dict
+                    ):
+                        if sig_id not in broker._positions:
+                            continue
+                        _bp_pos = broker._positions[sig_id]
+                        _residual = max(
+                            float(getattr(_bp_pos, "quantity", 0.0) or 0.0)
+                            - float(getattr(_bp_pos, "closed_quantity", 0.0) or 0.0),
+                            0.0,
+                        )
+                        if _residual <= 1e-9:
+                            continue
+                    sig_ts = (
+                        getattr(_sig, "dispatch_timestamp", None)
+                        or getattr(_sig, "timestamp", None)
+                    )
+                    if signal_visible_within_any_window(sig_ts, windows):
+                        user_open += 1
+            open_positions = user_open
 
     # Daily-loss budget: pull from RiskManager config.
     #
@@ -403,7 +470,12 @@ def build_signals(
 # ---------------------------------------------------------------------------
 
 
-def build_positions(engine: Any) -> List[PositionDetail]:
+def build_positions(
+    engine: Any,
+    *,
+    user_id: Optional[int] = None,
+    user_overrides: Any = None,
+) -> List[PositionDetail]:
     """Return open positions sourced from the active-signals dict.
 
     Paper / live positions are tracked at signal granularity by the router;
@@ -437,6 +509,23 @@ def build_positions(engine: Any) -> List[PositionDetail]:
     if router is None:
         return []
 
+    # Per-user paper visibility (PR #503, 2026-05-26) — fresh users in
+    # paper mode see only positions opened within their subscription
+    # windows. Live mode keeps engine-wide router visibility because
+    # there's no per-user paper book to filter against (true per-user
+    # live execution lives on Phase 3's per-user FSM workers).
+    active_mode = getattr(engine, "_current_auto_mode", "off")
+    user_windows: list = []
+    if (
+        active_mode == "paper"
+        and user_id is not None
+        and user_overrides is not None
+    ):
+        try:
+            user_windows = user_overrides.get_paper_subscriptions(int(user_id))
+        except Exception:
+            user_windows = []
+
     # Broker-state lookup (paper-mode only).  Treat the broker's
     # ``_positions`` dict as the source of truth for "is there an
     # active position for this signal_id?" — even when ``sig.qty``
@@ -449,9 +538,24 @@ def build_positions(engine: Any) -> List[PositionDetail]:
             broker_positions = _bp
 
     out: List[PositionDetail] = []
+    # Lazy import — only when paper-mode + windows are wired.
+    if user_windows:
+        from src.api.paper_user_view import signal_visible_within_any_window
     for sig in router.active_signals.values():
         try:
             signal_id = getattr(sig, "signal_id", "") or ""
+            # Per-user paper window filter (PR #503).  Skip positions
+            # whose dispatch time falls outside the caller's
+            # subscription windows — fresh users on day-zero see an
+            # empty list even when the engine has open paper positions
+            # from the operator's earlier session.
+            if user_windows:
+                sig_ts = (
+                    getattr(sig, "dispatch_timestamp", None)
+                    or getattr(sig, "timestamp", None)
+                )
+                if not signal_visible_within_any_window(sig_ts, user_windows):
+                    continue
             # Broker-state filter — skip phantom entries.  When a paper
             # broker is wired but has no record of this signal_id,
             # ``open_position`` either rejected (qty_zero_guard,
@@ -778,7 +882,13 @@ def build_activity(
 # ---------------------------------------------------------------------------
 
 
-def build_auto_mode(engine: Any) -> AutoModeStatus:
+def build_auto_mode(
+    engine: Any,
+    *,
+    user_id: Optional[int] = None,
+    user_overrides: Any = None,
+    starting_equity_usd: Optional[float] = None,
+) -> AutoModeStatus:
     info: Dict[str, Any]
     try:
         info = engine.get_auto_execution_status()
@@ -839,6 +949,121 @@ def build_auto_mode(engine: Any) -> AutoModeStatus:
         log.exception(
             "build_auto_mode: failed to override current_equity_usd "
             "from broker — falling back to engine status value"
+        )
+
+    # Per-user paper visibility (PR #503, 2026-05-26) — extends PR #478
+    # ``/api/trades`` window filter to the Trade-tab header so a fresh
+    # user who just enabled paper mode sees:
+    #   * equity = PAPER_STARTING_EQUITY (default $1000)
+    #   * open_positions = 0
+    #   * daily / weekly / monthly / total = 0.0
+    # Without this, the engine's shared paper book (operator's prior
+    # trades + still-open positions from before signup) leaks onto the
+    # fresh subscriber's day-zero Trade tab — owner-reported 2026-05-26
+    # via screenshot showing $963.97 equity + 4 open positions on a
+    # brand-new install.
+    #
+    # Live mode is untouched — true per-user live execution PnL is a
+    # Phase 3 build (per-user Binance ledgers via ``signal_dispatch``
+    # + the signing service); this filter is paper-only.
+    try:
+        active_mode = info.get("mode", "off")
+        if (
+            active_mode == "paper"
+            and user_id is not None
+            and user_overrides is not None
+        ):
+            try:
+                windows = user_overrides.get_paper_subscriptions(int(user_id))
+            except Exception:
+                windows = []
+            from src.api.paper_user_view import (
+                rolling_pnl_for_user,
+                signal_visible_within_any_window,
+            )
+            from src.auto_trade import trade_records
+            try:
+                ledger_rows = trade_records.list_trades(
+                    limit=500, offset=0, include_open=False,
+                )
+            except Exception:
+                ledger_rows = []
+            counters = rolling_pnl_for_user(ledger_rows, windows)
+
+            # Resolve the user's equity baseline. Default to the
+            # broker's configured starting equity so per-user equity
+            # mirrors the engine's paper-book starting line; allow an
+            # explicit override (test fixtures, future per-user starting
+            # equity from settings).
+            om = getattr(engine, "_order_manager", None)
+            if starting_equity_usd is not None:
+                _baseline = float(starting_equity_usd)
+            elif om is not None and hasattr(om, "_starting_equity"):
+                _baseline = float(getattr(om, "_starting_equity", 1000.0))
+            else:
+                _baseline = 1000.0
+
+            # Open positions: count router signals dispatched within
+            # the user's windows that the broker still holds (matches
+            # ``build_positions`` filter exactly).
+            router = getattr(engine, "router", None)
+            broker = om
+            broker_positions: Optional[Dict[str, Any]] = None
+            if broker is not None:
+                _bp = getattr(broker, "_positions", None)
+                if isinstance(_bp, dict):
+                    broker_positions = _bp
+            user_open = 0
+            if router is not None:
+                for _sig in router.active_signals.values():
+                    sig_id = getattr(_sig, "signal_id", "") or ""
+                    if broker_positions is not None:
+                        if sig_id not in broker_positions:
+                            continue
+                        _bp_pos = broker_positions[sig_id]
+                        _residual = max(
+                            float(getattr(_bp_pos, "quantity", 0.0) or 0.0)
+                            - float(getattr(_bp_pos, "closed_quantity", 0.0) or 0.0),
+                            0.0,
+                        )
+                        if _residual <= 1e-9:
+                            continue
+                    sig_ts = (
+                        getattr(_sig, "dispatch_timestamp", None)
+                        or getattr(_sig, "timestamp", None)
+                    )
+                    if signal_visible_within_any_window(sig_ts, windows):
+                        user_open += 1
+
+            # Apply the windowed counters. Empty windows → all zeros
+            # (rolling_pnl_for_user already short-circuits on empty
+            # windows). The user sees $1000 starting equity + their
+            # own visible PnL drift.
+            info["daily_pnl_usd"] = counters["daily_pnl_usd"]
+            info["weekly_pnl_usd"] = counters["weekly_pnl_usd"]
+            info["monthly_pnl_usd"] = counters["monthly_pnl_usd"]
+            info["simulated_pnl_usd"] = counters["total_pnl_usd"]
+            info["current_equity_usd"] = round(
+                _baseline + counters["total_pnl_usd"], 4
+            )
+            info["open_positions"] = user_open
+            # Daily-loss percent recomputed against the baseline so the
+            # per-user "x% of starting equity" stays consistent with the
+            # rest of the per-user view. ``daily_kill_tripped`` and
+            # ``manual_paused`` remain engine-wide — they're safety
+            # state, not per-user accounting.
+            info["daily_loss_pct"] = (
+                round(100.0 * counters["daily_pnl_usd"] / _baseline, 4)
+                if _baseline > 0 else 0.0
+            )
+    except Exception:
+        # Fail-soft: any error in the per-user filter falls back to the
+        # engine-wide values already set on ``info``. The right user-
+        # visible state is "see the engine-wide book" rather than 500ing
+        # the whole Trade tab.
+        log.exception(
+            "build_auto_mode: per-user paper filter failed — "
+            "falling back to engine-wide values"
         )
     return AutoModeStatus(**info)
 
