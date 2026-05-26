@@ -181,6 +181,13 @@ class Reconciler:
                 fsm_position.close_reason = "MANUAL"
             fsm_position.last_event_at = datetime.now(timezone.utc)
             _position_state.put_position(fsm_position)
+            from src.execution import pretp_dispatcher as _pd
+            _pd_inst = _pd.get_instance()
+            if _pd_inst is not None:
+                asyncio.create_task(
+                    _pd_inst.untrack(symbol),
+                    name=f"pd_untrack_{symbol}",
+                )
 
     async def _fetch_binance_positions(
         self,

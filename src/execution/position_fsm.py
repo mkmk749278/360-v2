@@ -27,6 +27,7 @@ and we're the only writer.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
@@ -209,6 +210,13 @@ class PositionFSM:
             position.entry_price_filled = event.average_price
         if event.order_status == "FILLED" or position.filled_qty >= position.total_qty:
             position.state = _position_state.PositionState.OPEN
+            from src.execution import pretp_dispatcher as _pd
+            _pd_inst = _pd.get_instance()
+            if _pd_inst is not None:
+                asyncio.create_task(
+                    _pd_inst.track(position.symbol),
+                    name=f"pd_track_{position.symbol}",
+                )
 
     async def _apply_pretp_fill(
         self,
@@ -375,6 +383,7 @@ class PositionFSM:
         position.state = _position_state.PositionState.CLOSED
         position.closed_at = datetime.now(timezone.utc)
         position.close_reason = "TP3"
+        self._untrack_symbol(position.symbol)
 
     def _apply_sl_fill(
         self,
@@ -397,6 +406,7 @@ class PositionFSM:
         position.closed_at = datetime.now(timezone.utc)
         if position.close_reason == "":
             position.close_reason = "SL"
+        self._untrack_symbol(position.symbol)
 
     def _apply_sl_be_fill(
         self,
@@ -427,6 +437,22 @@ class PositionFSM:
         # raw SL is not).
         if position.close_reason == "":
             position.close_reason = "SL_BE"
+        self._untrack_symbol(position.symbol)
+
+    def _untrack_symbol(self, symbol: str) -> None:
+        """Schedule an untrack task for ``symbol`` on the running loop.
+
+        Called from sync close methods; safe because they're always
+        invoked from the async ``handle_event`` coroutine.  No-op when
+        the PretpDispatcher singleton isn't set.
+        """
+        from src.execution import pretp_dispatcher as _pd
+        _pd_inst = _pd.get_instance()
+        if _pd_inst is not None:
+            asyncio.create_task(
+                _pd_inst.untrack(symbol),
+                name=f"pd_untrack_{symbol}",
+            )
 
 
 # ---------------------------------------------------------------------------

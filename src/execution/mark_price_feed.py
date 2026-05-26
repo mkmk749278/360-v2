@@ -48,6 +48,19 @@ log = get_logger("execution.mark_price_feed")
 # garbage-collected before it completes.  Tasks remove themselves on done.
 _background_tasks: Set[asyncio.Task[None]] = set()
 
+# Module-level singleton — set by bootstrap, read by anything that needs
+# live mark prices (pretp_dispatcher, future risk monitors, etc.).
+_instance: Optional["MarkPriceFeed"] = None
+
+
+def set_instance(feed: "MarkPriceFeed") -> None:
+    global _instance
+    _instance = feed
+
+
+def get_instance() -> Optional["MarkPriceFeed"]:
+    return _instance
+
 
 _WS_URL = "wss://fstream.binance.com/ws/!markPrice@arr@1s"
 _MIN_BACKOFF_S = 1.0

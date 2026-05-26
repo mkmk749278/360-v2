@@ -519,6 +519,24 @@ class Bootstrap:
                     )
                 )
 
+            # Mark-price feed + pre-TP dispatcher — always started when
+            # the execution stack is active (firebase_project_id set).
+            # The feed is a public WS stream (no auth); the dispatcher
+            # is idle until the FSM calls track() at position open.
+            if firebase_project_id:
+                from src.execution import mark_price_feed as _mpf
+                from src.execution import pretp_dispatcher as _pd
+                _feed = _mpf.MarkPriceFeed()
+                _mpf.set_instance(_feed)
+                _dispatcher = _pd.PretpDispatcher(_feed)
+                _pd.set_instance(_dispatcher)
+                tasks.append(
+                    asyncio.create_task(
+                        _feed.run(),
+                        name="mark_price_feed",
+                    )
+                )
+
             # Phase-2 per-user overrides — shares the same SQLite file
             # (WAL mode lets both connections coexist).  Tables are
             # added with CREATE TABLE IF NOT EXISTS, safe against any
