@@ -886,6 +886,61 @@ class TradeMonitor:
             except Exception as exc:
                 log.debug("Regime detection failed for %s: %s", sig.symbol, exc)
 
+        # Profit-protection gate + adverse-excursion are evaluated here —
+        # BEFORE the `indicators is None` early-return — because both only
+        # need sig.current_price / sl_price / entry_price, not candle data.
+        # The old placement AFTER the early-return meant that when 1m candle
+        # data was unavailable for a symbol (store miss, new listing, WS gap),
+        # adverse excursion was silently skipped even with price 3–4× past SL.
+        _entry_px = sig.entry if sig.entry > 0 else sig.current_price
+        _sl_px = getattr(sig, "stop_loss", 0.0) or 0.0
+        _sl_dist = abs(_entry_px - _sl_px) if (_sl_px > 0 and _entry_px > 0) else 0.0
+
+        # Profit-protection gate: signal already > 0.5× SL distance in profit
+        # → momentum dip during healthy consolidation; don't kill early.
+        if _sl_dist > 0:
+            _favorable = (sig.current_price - _entry_px) if is_long else (_entry_px - sig.current_price)
+            if _favorable > _sl_dist * 0.5:
+                sig.momentum_invalidation_count = 0
+                return None
+
+        # Adverse-excursion: price grinding past SL without regime/EMA/momentum
+        # change.  Fires even without candle data (momentum treated as
+        # non-confirming when indicators is None — conservative kill).
+        if (
+            _sl_dist > 0
+            and sig.current_price > 0
+            and sig.status not in ("TP1_HIT", "TP2_HIT")
+            and not getattr(sig, "pretp_fired", False)
+            and age_secs >= INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
+        ):
+            _adverse = (
+                (_entry_px - sig.current_price) if is_long
+                else (sig.current_price - _entry_px)
+            )
+            _adverse_threshold = _sl_dist * INVALIDATION_ADVERSE_EXCURSION_FRACTION
+            if _adverse >= _adverse_threshold:
+                _mom_thr_adv = INVALIDATION_MOMENTUM_THRESHOLD.get(sig.channel, 0.15)
+                _momentum_now = indicators.get("momentum") if indicators else None
+                _momentum_confirming = (
+                    _momentum_now is not None
+                    and (
+                        (is_long and _momentum_now > _mom_thr_adv)
+                        or (not is_long and _momentum_now < -_mom_thr_adv)
+                    )
+                )
+                if not _momentum_confirming:
+                    _adverse_pct = (_adverse / _entry_px) * 100.0 if _entry_px > 0 else 0.0
+                    _adverse_frac = _adverse / _sl_dist
+                    _mom_str = f"{_momentum_now:.3f}" if _momentum_now is not None else "none"
+                    return (
+                        f"adverse excursion ({_adverse_pct:+.2f}% against, "
+                        f"{_adverse_frac:.2f}×SL_dist, momentum={_mom_str} "
+                        f"not confirming) – signal thesis invalidated"
+                    )
+
+        # No candle data → can't evaluate EMA crossover or momentum-loss.
+        # Adverse excursion and profit-protection already ran above.
         if indicators is None:
             return None
 
@@ -921,100 +976,7 @@ class TradeMonitor:
             if not is_long and ema9 > ema21:
                 return "EMA bullish crossover (EMA9 > EMA21) – SHORT thesis invalidated"
 
-        # Profit-protection gate: a signal already more than 0.5× its SL distance
-        # in the favourable direction is in meaningful profit.  Momentum commonly
-        # dips during healthy post-move consolidation — killing the signal here
-        # destroys real edge.  Reset the counter and skip; the trailing stop
-        # handles the exit for profitable signals.
-        _entry_px = sig.entry if sig.entry > 0 else sig.current_price
-        _sl_px = getattr(sig, "stop_loss", 0.0) or 0.0
-        if _sl_px > 0 and _entry_px > 0:
-            _sl_dist = abs(_entry_px - _sl_px)
-            _favorable = (sig.current_price - _entry_px) if is_long else (_entry_px - sig.current_price)
-            if _favorable > _sl_dist * 0.5:
-                sig.momentum_invalidation_count = 0
-                return None
-
-        # 3. Adverse-excursion (2026-05-20 — truth-report follow-up).
-        #
-        # Catches the full-SL pattern the other three rules miss:
-        # price grinding against the position from entry → SL with
-        # momentum reading inside the noise band, the regime intact,
-        # and EMA structure unchanged.  Truth-report 2026-05-20 showed
-        # DIV_CONT 30% SL rate / SR_FLIP 8.4% / TPE 16.7% — these are
-        # the residual signals where every existing kill rule passed
-        # but price still went straight to SL.
-        #
-        # Fires only when:
-        #   - SL geometry is known (``_sl_dist > 0``)
-        #   - Signal age ≥ INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
-        #     (default 300s, same as EMA crossover gate — avoids
-        #     first-tick noise before price develops in our favour)
-        #   - Adverse excursion ≥ INVALIDATION_ADVERSE_EXCURSION_FRACTION
-        #     × SL_dist (default 0.70 — saves ~30% of SL distance)
-        #   - Momentum is NOT strongly confirming thesis (LONG:
-        #     momentum < +mom_threshold; SHORT: momentum > -mom_threshold)
-        #   - Status NOT in {TP1_HIT, TP2_HIT} (trailing stop manages
-        #     post-TP1 exits per OWNER_BRIEF §3.2a)
-        #   - Pre-TP NOT yet fired (post-pre-TP residuals are BE-
-        #     protected; a deeper hold is doctrinally correct)
-        #
-        # The profit-protection gate above already returns ``None``
-        # when ``_favorable > 0.5 × SL_dist`` — so this block only
-        # ever runs in the "we're hurting, not making progress"
-        # regime where the early exit is the doctrinally correct
-        # capital-preservation move (§3.2a — 0.70×SL early exit
-        # costs ~5.5% at 10× vs full SL ~7.9%; net save ~2.4%).
-        if (
-            _sl_px > 0 and _entry_px > 0
-            and sig.current_price > 0  # need a live price reading
-            and sig.status not in ("TP1_HIT", "TP2_HIT")
-            and not getattr(sig, "pretp_fired", False)
-            and age_secs >= INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
-        ):
-            _adverse = (
-                (_entry_px - sig.current_price) if is_long
-                else (sig.current_price - _entry_px)
-            )
-            _adverse_threshold = _sl_dist * INVALIDATION_ADVERSE_EXCURSION_FRACTION
-            if _adverse >= _adverse_threshold:
-                # Momentum-not-confirming check.  Using the same per-channel
-                # threshold the momentum-loss rule uses below — keeps the
-                # two rules' magnitude calibration aligned.  Missing
-                # momentum reading → treat as not-confirming (more
-                # conservative kill; price is already 70% to SL with no
-                # data to argue otherwise).
-                _mom_thr_adv = INVALIDATION_MOMENTUM_THRESHOLD.get(
-                    sig.channel, 0.15,
-                )
-                _momentum_now = (
-                    indicators.get("momentum") if indicators else None
-                )
-                _momentum_confirming = (
-                    _momentum_now is not None
-                    and (
-                        (is_long and _momentum_now > _mom_thr_adv)
-                        or (not is_long and _momentum_now < -_mom_thr_adv)
-                    )
-                )
-                if not _momentum_confirming:
-                    _adverse_pct = (
-                        (_adverse / _entry_px) * 100.0 if _entry_px > 0 else 0.0
-                    )
-                    _adverse_frac = (
-                        _adverse / _sl_dist if _sl_dist > 0 else 0.0
-                    )
-                    _mom_str = (
-                        f"{_momentum_now:.3f}" if _momentum_now is not None
-                        else "none"
-                    )
-                    return (
-                        f"adverse excursion ({_adverse_pct:+.2f}% against, "
-                        f"{_adverse_frac:.2f}×SL_dist, momentum={_mom_str} "
-                        f"not confirming) – signal thesis invalidated"
-                    )
-
-        # 4. Momentum loss — direction-aware (2026-05-07 fix).
+        # 3. Momentum loss — direction-aware (2026-05-07 fix).
         #
         # Previously this was ``abs(momentum) < threshold`` which killed any
         # signal during normal consolidation (price meandering near zero
@@ -1278,6 +1240,24 @@ class TradeMonitor:
             (is_long and _c_low > 0 and _c_low <= sig.stop_loss) or
             (not is_long and _c_high > 0 and _c_high >= sig.stop_loss)
         )
+
+        # Mark-price SL backstop: when _candle_extremes returns (0, 0) because
+        # the data store has no 1m candle for this symbol (new listing, WS gap,
+        # store miss), the wick-filter guard above silently misses a crossed SL.
+        # Fall back to the mark price only when candle data is absent — so the
+        # existing wick-filter still applies for all normally-tracked symbols.
+        if not _sl_triggered and price > 0 and (_c_low <= 0 or _c_high <= 0):
+            _sl_triggered = (
+                (is_long and price <= sig.stop_loss) or
+                (not is_long and price >= sig.stop_loss)
+            )
+            if _sl_triggered:
+                log.warning(
+                    "SL backstop via mark price (no candle data) "
+                    "symbol={} signal_id={} mark={:.8f} stop={:.8f}",
+                    sig.symbol, sig.signal_id, price, sig.stop_loss,
+                )
+
         if _sl_triggered:
             if sig.first_sl_touch_timestamp is None:
                 sig.first_sl_touch_timestamp = utcnow()

@@ -382,9 +382,10 @@ class TestTradeMonitorLifespanValues:
         return sig
 
     @pytest.mark.asyncio
-    async def test_scalp_signal_below_180s_not_triggered(self):
-        """A SCALP signal at age=100s (< 180s min) must NOT trigger SL."""
-        sig = self._make_signal_with_age("360_SCALP", age_seconds=100.0)
+    async def test_scalp_signal_below_min_lifespan_not_triggered(self):
+        """A 360_SCALP signal younger than min_lifespan (30s) must NOT trigger
+        SL even if price is below the stop-loss level."""
+        sig = self._make_signal_with_age("360_SCALP", age_seconds=10.0)
         sig.current_price = 29800.0  # below SL
 
         active = {sig.signal_id: sig}
