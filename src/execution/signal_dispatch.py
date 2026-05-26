@@ -368,6 +368,10 @@ async def dispatch_signal_to_active_users(
         # doesn't shrink the position for everyone else on the same
         # signal.
         user_notional = _uo.resolve_notional_usd(uid, _DEFAULT_NOTIONAL_USD)
+        from config import PRE_TP_GRAB_FRACTION as _DEFAULT_GRAB_FRACTION
+        user_grab_fraction = _uo.resolve_grab_fraction_uid(
+            uid, float(_DEFAULT_GRAB_FRACTION)
+        )
         total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(
             symbol, entry_price, notional_usd=user_notional,
         )
@@ -411,6 +415,7 @@ async def dispatch_signal_to_active_users(
                 tp1_qty=tp1_qty,
                 tp2_qty=tp2_qty,
                 tp3_qty=tp3_qty,
+                pretp_fraction=user_grab_fraction,
             )
             # Record the successful placement for the user-facing
             # Recent Activity card.  Soft-fail inside the helper.
@@ -760,9 +765,14 @@ async def close_fsm_partial_for_signal(
         if remaining <= 0:
             remaining = base_qty
 
+        # Use the per-position grab fraction stored at dispatch time (= user's
+        # configured setting, stamped onto the position by place_signal).
+        # This honours the per-user slider rather than the engine-wide config.
+        effective_fraction = max(0.30, min(1.00, pos.pretp_fraction)) if pos.pretp_fraction > 0 else fraction
+
         # Compute the fractional close qty and apply LOT_SIZE rounding.
         # round_qty floors to stepSize so Binance never rejects -1111.
-        raw_qty = base_qty * fraction
+        raw_qty = base_qty * effective_fraction
         close_qty = _sf.round_qty(symbol, raw_qty)
 
         if close_qty <= 0:
