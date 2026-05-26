@@ -958,6 +958,8 @@ class SignalRouter:
                 tp1_price=float(signal.tp1),
                 tp2_price=float(signal.tp2),
                 tp3_price=float(signal.tp3),
+                regime_label=getattr(signal, "entry_regime", None),
+                setup_class=getattr(signal, "setup_class", None),
             )
         except Exception:
             log.exception(

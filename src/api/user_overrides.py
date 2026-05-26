@@ -1049,6 +1049,52 @@ def resolve_grab_fraction_uid(firebase_uid: str, default: float) -> float:
         return default
 
 
+def resolve_pretp_allowlists_uid(
+    firebase_uid: str,
+) -> Tuple[Optional[FrozenSet[str]], Optional[FrozenSet[str]]]:
+    """Return ``(regime_allowlist, setup_allowlist)`` for the user.
+
+    Each element is either a non-empty frozenset of allowed values
+    (restricting pre-TP to those regimes/setups) or ``None`` meaning
+    "no restriction — allow all."
+
+    Same soft-fail pattern as :func:`resolve_grab_fraction_uid`:
+    any lookup error returns ``(None, None)`` so a store blip never
+    blocks dispatch.  Callers treat ``None`` as "allow all".
+    """
+    if _SINGLETON is None:
+        return None, None
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return None, None
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return None, None
+        row = _SINGLETON.get_pretp(int(user.user_id))
+        regime_raw = row.get("regime_allowlist")
+        setup_raw = row.get("setup_allowlist")
+        regime_fs = (
+            frozenset(str(r).upper() for r in regime_raw if r)
+            if isinstance(regime_raw, list) and regime_raw
+            else None
+        )
+        setup_fs = (
+            frozenset(str(s).upper() for s in setup_raw if s)
+            if isinstance(setup_raw, list) and setup_raw
+            else None
+        )
+        return regime_fs, setup_fs
+    except Exception as exc:
+        log.debug(
+            "resolve_pretp_allowlists_uid: lookup failed uid={} ({}); "
+            "defaulting to allow-all",
+            firebase_uid, type(exc).__name__,
+        )
+        return None, None
+
+
 def resolve_user_mode_uid(firebase_uid: str) -> Optional[str]:
     """Return the per-user auto-trade ``mode`` for ``firebase_uid``, or
     None when the user has no row / store is offline / lookup fails.

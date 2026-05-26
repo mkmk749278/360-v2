@@ -1198,3 +1198,125 @@ async def test_position_cap_within_limit_proceeds(
 
     assert placed == 1
     mock_place.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Per-user pre-TP regime + setup allowlist gates (PR-F)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_regime_outside_allowlist_zeroes_grab_fraction(
+    _mode_state_stub,
+) -> None:
+    """When a user's regime_allowlist excludes the signal's regime,
+    the position must still be placed but with pretp_fraction=0 so
+    pre-TP never fires for it."""
+    from unittest.mock import patch as _patch
+    from src.execution import position_fsm
+    from src.api import user_overrides as _uo
+
+    modes, _paused = _mode_state_stub
+    modes["fb-regime-gate"] = "live"
+
+    with _patch.object(signal_dispatch, "_active_uids", return_value=["fb-regime-gate"]):
+        with _patch.object(
+            _uo, "resolve_pretp_allowlists_uid",
+            return_value=(frozenset({"RANGING", "VOLATILE"}), None),
+        ):
+            with _patch.object(
+                position_fsm, "place_signal", new_callable=AsyncMock
+            ) as mock_place:
+                placed = await signal_dispatch.dispatch_signal_to_active_users(
+                    signal_id="sig-regime",
+                    symbol="BTCUSDT",
+                    direction="LONG",
+                    entry_price=29000.0,
+                    sl_price=28500.0,
+                    tp1_price=29500.0,
+                    tp2_price=30000.0,
+                    tp3_price=30500.0,
+                    regime_label="TRENDING_UP",
+                )
+
+    assert placed == 1
+    mock_place.assert_called_once()
+    call_kwargs = mock_place.call_args.kwargs
+    assert call_kwargs["pretp_fraction"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_setup_outside_allowlist_zeroes_grab_fraction(
+    _mode_state_stub,
+) -> None:
+    """setup_class not in user's setup_allowlist → pretp_fraction=0."""
+    from unittest.mock import patch as _patch
+    from src.execution import position_fsm
+    from src.api import user_overrides as _uo
+
+    modes, _paused = _mode_state_stub
+    modes["fb-setup-gate"] = "live"
+
+    with _patch.object(signal_dispatch, "_active_uids", return_value=["fb-setup-gate"]):
+        with _patch.object(
+            _uo, "resolve_pretp_allowlists_uid",
+            return_value=(None, frozenset({"SR_FLIP", "QCB"})),
+        ):
+            with _patch.object(
+                position_fsm, "place_signal", new_callable=AsyncMock
+            ) as mock_place:
+                placed = await signal_dispatch.dispatch_signal_to_active_users(
+                    signal_id="sig-setup",
+                    symbol="BTCUSDT",
+                    direction="LONG",
+                    entry_price=29000.0,
+                    sl_price=28500.0,
+                    tp1_price=29500.0,
+                    tp2_price=30000.0,
+                    tp3_price=30500.0,
+                    setup_class="VSB",
+                )
+
+    assert placed == 1
+    mock_place.assert_called_once()
+    assert mock_place.call_args.kwargs["pretp_fraction"] == 0.0
+
+
+@pytest.mark.asyncio
+async def test_empty_allowlists_allow_all(
+    _mode_state_stub,
+) -> None:
+    """None allowlists (user has no restriction configured) must NOT
+    suppress pre-TP — the grab fraction stays at the user's configured
+    value."""
+    from unittest.mock import patch as _patch
+    from src.execution import position_fsm
+    from src.api import user_overrides as _uo
+
+    modes, _paused = _mode_state_stub
+    modes["fb-allowall"] = "live"
+
+    with _patch.object(signal_dispatch, "_active_uids", return_value=["fb-allowall"]):
+        with _patch.object(
+            _uo, "resolve_pretp_allowlists_uid",
+            return_value=(None, None),
+        ):
+            with _patch.object(
+                position_fsm, "place_signal", new_callable=AsyncMock
+            ) as mock_place:
+                placed = await signal_dispatch.dispatch_signal_to_active_users(
+                    signal_id="sig-all",
+                    symbol="BTCUSDT",
+                    direction="LONG",
+                    entry_price=29000.0,
+                    sl_price=28500.0,
+                    tp1_price=29500.0,
+                    tp2_price=30000.0,
+                    tp3_price=30500.0,
+                    regime_label="TRENDING_UP",
+                    setup_class="VSB",
+                )
+
+    assert placed == 1
+    mock_place.assert_called_once()
+    assert mock_place.call_args.kwargs["pretp_fraction"] > 0.0
