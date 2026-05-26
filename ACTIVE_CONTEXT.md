@@ -4,6 +4,55 @@
 
 ---
 
+## In-session checkpoint 2026-05-26 (session 2) — Pre-launch stability sweep + TP3 removal
+
+### Direction
+
+Owner directive: remove TP3, concentrate on stability for public launch (14-day testing window underway). Exit structure is now: **pre-TP** (30–50%) → **TP1** (30%) → **TP2** (70% of remainder). No TP3.
+
+### PRs shipped this session
+
+| PR | Repo | Subject | Status |
+|---|---|---|---|
+| #497 | 360-v2 | TP3 removed: `_TP3_FRACTION=0.00`, `_TP2_FRACTION=0.70`; FSM guard skips zero-qty leg | merged |
+| #496 | 360-v2 | Three pre-launch stability bugs: `self._telegram` AttributeError in signal_router; `get_event_loop()` + silent task failure in worker_manager; unguarded `put_position` in position_fsm | merged |
+| #75 | lumin-app | TextEditingController leak in auto_trade_settings_page; remove chart placeholder from signal detail | merged |
+| #498 | 360-v2 | P1: reconciler empty-dict marks all positions CLOSED on Binance error; P1: mark-price dispatch tasks GC'd before completion; deprecated `get_event_loop()` in circuit_breaker + signal_router; kill-switch cache invalidation race | **open** |
+| #76 | lumin-app | P1: mounted guard in delete-confirmation controller listener; defensive mounted guard in TradePage._resubscribe; _livePrices map cleared on filter change | **open** |
+
+### Engine bugs fixed (P1)
+
+**reconciler.py — all positions marked CLOSED on Binance error (P1)**
+`_fetch_binance_positions` returned `{}` on any error (network, 429, 503). `_diff_and_heal` treated `{}` as "user has no open positions" → every non-terminal FSM position transitioned to `CLOSED` / reason=MANUAL. A single network blip during the 60s reconcile cycle orphaned every user's positions. Fixed: return `None` on error; `reconcile_user` skips the diff when `None`.
+
+**mark_price_feed.py — dispatch tasks GC'd before completion (P1)**
+`asyncio.create_task()` without holding a reference registers the task only in the event loop's WeakSet. Python docs: "Save a reference to create_task result to avoid a task disappearing mid-execution." Slow Firestore subscribers (~200ms) could be cancelled before completing the pre-TP threshold check. Fixed: module-level `_background_tasks` set with `done_callback` self-removal.
+
+### Engine bugs fixed (P2)
+
+**circuit_breaker.py, signal_router.py — `asyncio.get_event_loop()` deprecated**
+Deprecated in Python 3.10; raises RuntimeError in 3.12 inside a running loop. Changed to `asyncio.get_running_loop()` with RuntimeError catch.
+
+**kill_switch.py — cache invalidated after Firestore write**
+~100ms window between Firestore write and cache invalidation allowed concurrent readers to observe stale "not engaged" state after the kill switch was flipped. Cache now invalidated under lock BEFORE the Firestore write.
+
+### App bugs fixed
+
+**settings_page.dart** — `setState` in TextEditingController listener without mounted check → crash if dialog dismissed while typing.
+
+**trade_page.dart** — `_resubscribe()` called `setState` without mounted guard.
+
+**signals_page.dart** — `_livePrices` map accumulated stale symbols across filter switches without pruning. Fixed: map cleared in `_setFilter()`.
+
+### Next-session queue
+
+- Merge and validate PRs #498 (engine) and #76 (app) in prod
+- Pull next truth-report window to validate TP2-only exit structure: check if any signals that previously would have reached TP3 are now captured by TP2 (expected: TP2 absorbs the tail cleanly)
+- Consider whether the post-pre-TP residual gap warrants an explicit TP2 order for the 20% residual (currently protected only by BE-SL + invalidation)
+- Continue reconciler order-divergence detection (PR #498 audit flag P2: FSM doesn't detect externally-cancelled SL/TP orders)
+
+---
+
 ## In-session checkpoint 2026-05-26 — Grab fraction wiring + FET pre-TP close fix + invalidation tightening
 
 Three PRs shipped this session, all merged.
