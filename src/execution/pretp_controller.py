@@ -141,6 +141,7 @@ async def fire_pretp(
     position: _position_state.Position,
     *,
     placer: _order_placer.OrderPlacer,
+    mark_price: float = 0.0,
 ) -> _order_placer.OrderPlacementResult:
     """Place the pre-TP partial close + mark the position as fired.
 
@@ -155,12 +156,15 @@ async def fire_pretp(
     the user (key revoked, account suspended).  We do NOT mark
     pretp_fired=True until the order placement succeeds; a transient
     failure leaves the controller free to retry on the next tick.
+
+    ``mark_price`` is forwarded to :func:`_compute_pretp_qty` for the
+    MIN_NOTIONAL guard (see that function's docstring).
     """
     if position.pretp_fired:
         raise PretpAlreadyFiredError(
             f"pre-TP already fired for signal_id={position.signal_id}"
         )
-    pretp_qty = _compute_pretp_qty(position)
+    pretp_qty = _compute_pretp_qty(position, mark_price=mark_price)
     if pretp_qty <= 0:
         # Nothing to close — pretp_fraction is 0 or position has no
         # filled qty yet.  Mark as fired so we don't retry forever.
@@ -215,7 +219,7 @@ async def maybe_fire_pretp(
     if not should_fire_pretp(position=position, mark_price=mark_price):
         return False
     try:
-        await fire_pretp(position, placer=placer)
+        await fire_pretp(position, placer=placer, mark_price=mark_price)
         return True
     except _order_placer.OrderPlacementError as exc:
         log.warning(
@@ -233,13 +237,50 @@ async def maybe_fire_pretp(
 # ---------------------------------------------------------------------------
 
 
-def _compute_pretp_qty(position: _position_state.Position) -> float:
-    """``pretp_fraction × filled_qty`` (or total_qty if entry fully
-    filled).  Rounded to 8 decimal places to match Binance precision.
+def _compute_pretp_qty(
+    position: _position_state.Position,
+    mark_price: float = 0.0,
+) -> float:
+    """``pretp_fraction × filled_qty`` (or total_qty if entry fully filled),
+    floored to the symbol's LOT_SIZE stepSize.
 
-    B17 enforces the 30%-floor / 100%-ceiling at signal-placement
-    time; this function just multiplies — no validation.
+    B17 enforces the 30%-floor / 100%-ceiling at signal-placement time;
+    this function just multiplies + rounds — no fraction validation.
+
+    ``mark_price`` is used for the MIN_NOTIONAL check only.  When below
+    Binance's per-symbol minimum (typically $5 USDT), the partial qty is
+    bumped to the full remaining position so the pre-TP banking doesn't
+    silently fail with -4164.  Callers that don't have mark_price handy
+    can pass 0 to skip the MIN_NOTIONAL check (Binance will reject if
+    needed; the signing-service error is then the diagnostic).
     """
+    from src.execution import symbol_filters as _sf
+
     base_qty = position.filled_qty if position.filled_qty > 0 else position.total_qty
-    qty = base_qty * position.pretp_fraction
-    return round(qty, 8)
+    remaining = position.total_qty - position.closed_qty
+    if remaining <= 0:
+        remaining = base_qty
+
+    raw_qty = base_qty * position.pretp_fraction
+    # Apply LOT_SIZE stepSize so Binance never returns -1111.
+    qty = _sf.round_qty(position.symbol, raw_qty)
+    if qty <= 0:
+        return 0.0
+
+    # MIN_NOTIONAL guard: for small positions the partial qty × price can
+    # fall below the $5 Binance floor.  Fall back to full remaining qty
+    # so the partial actually executes.
+    if mark_price > 0 and not _sf.meets_min_notional(position.symbol, qty, mark_price):
+        full_qty = _sf.round_qty(position.symbol, remaining)
+        if full_qty > 0 and _sf.meets_min_notional(position.symbol, full_qty, mark_price):
+            log.info(
+                "_compute_pretp_qty: partial {:.8f} below MIN_NOTIONAL — "
+                "using full qty {:.8f} for {}",
+                qty, full_qty, position.symbol,
+            )
+            return full_qty
+        # Both partial and full are below MIN_NOTIONAL (shouldn't happen
+        # since the entry itself passed MIN_NOTIONAL, but be defensive).
+        return 0.0
+
+    return qty

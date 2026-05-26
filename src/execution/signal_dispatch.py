@@ -693,3 +693,153 @@ async def close_fsm_positions_for_signal(
         )
 
     return closed
+
+
+async def close_fsm_partial_for_signal(
+    signal_id: str,
+    *,
+    symbol: str,
+    direction: str,
+    fraction: float,
+    mark_price: float,
+) -> int:
+    """Place a REDUCE_ONLY MARKET order for ``fraction`` of each user's
+    open FSM position for ``signal_id``.
+
+    Called by :meth:`src.trade_monitor.TradeMonitor._check_pre_tp_grab`
+    to execute the §3.2a pre-TP partial close for server-side FSM users
+    whose positions were opened via the signing-service path (not CCXT).
+
+    The CCXT ``OrderManager.close_partial`` path is a no-op for these
+    users because their entry qty is never recorded in
+    ``_open_quantities``.  This function fills that gap.
+
+    **MIN_NOTIONAL guard**: Binance enforces a per-symbol minimum
+    notional (typically $5 USDT) on every order.  For small positions
+    (e.g. 10 USDT notional at 10×), the partial close qty × price can
+    fall below $5 after LOT_SIZE flooring.  When that happens we close
+    the full remaining position instead so the pre-TP banking is never
+    silently skipped — a full close at pre-TP is strictly better than
+    leaving the position open with no protection.
+
+    Returns the count of users for whom a partial order was placed.
+    """
+    from src.execution import order_placer as _op
+    from src.execution import position_state as _ps
+    from src.execution import symbol_filters as _sf
+
+    if not _ps.is_initialised():
+        return 0
+
+    uids = _active_uids()
+    if not uids:
+        return 0
+
+    fraction = max(0.0, min(1.0, fraction))
+    placed = 0
+
+    for uid in uids:
+        try:
+            pos = _ps.get_position(uid, signal_id)
+        except _ps.PositionNotFoundError:
+            continue
+        except Exception as exc:
+            log.warning(
+                "close_fsm_partial: get_position failed uid={} signal_id={} exc={}",
+                uid, signal_id, exc,
+            )
+            continue
+
+        if _ps.is_terminal(pos.state):
+            continue
+        if pos.pretp_fired:
+            continue  # idempotent — don't double-fire
+
+        base_qty = pos.filled_qty if pos.filled_qty > 0 else pos.total_qty
+        remaining = pos.total_qty - pos.closed_qty
+        if remaining <= 0:
+            remaining = base_qty
+
+        # Compute the fractional close qty and apply LOT_SIZE rounding.
+        # round_qty floors to stepSize so Binance never rejects -1111.
+        raw_qty = base_qty * fraction
+        close_qty = _sf.round_qty(symbol, raw_qty)
+
+        if close_qty <= 0:
+            log.warning(
+                "close_fsm_partial: qty=0 after rounding uid={} signal_id={} "
+                "raw_qty={:.8f} symbol={}",
+                uid, signal_id, raw_qty, symbol,
+            )
+            continue
+
+        # MIN_NOTIONAL check.  A small position where `fraction × qty × price`
+        # falls below Binance's $5 floor (-4164) can't be partially closed.
+        # Fall back to closing the full remaining position so the pre-TP banking
+        # actually executes rather than silently failing.
+        if mark_price > 0 and not _sf.meets_min_notional(symbol, close_qty, mark_price):
+            full_qty = _sf.round_qty(symbol, remaining)
+            if full_qty > 0 and _sf.meets_min_notional(symbol, full_qty, mark_price):
+                log.info(
+                    "close_fsm_partial: partial qty {:.8f} (${:.4f}) below "
+                    "MIN_NOTIONAL for {} — upgrading to full close qty={:.8f}",
+                    close_qty, close_qty * mark_price, symbol, full_qty,
+                )
+                close_qty = full_qty
+            else:
+                log.warning(
+                    "close_fsm_partial: qty {:.8f} below MIN_NOTIONAL and "
+                    "full-close fallback also fails for {} — skipping uid={}",
+                    close_qty, symbol, uid,
+                )
+                continue
+
+        placer = _op.OrderPlacer(uid)
+        try:
+            await placer.place_pretp_partial(
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                quantity=close_qty,
+            )
+            # Mark position so the 5s poll doesn't double-fire.
+            pos.pretp_fired = True
+            pos.last_event_at = __import__("datetime").datetime.now(
+                __import__("datetime").timezone.utc
+            )
+            try:
+                _ps.put_position(pos)
+            except Exception as exc:
+                log.warning(
+                    "close_fsm_partial: put_position failed uid={} signal_id={} exc={}",
+                    uid, signal_id, exc,
+                )
+            placed += 1
+            log.info(
+                "close_fsm_partial: pre-TP placed uid={} signal_id={} "
+                "symbol={} qty={:.8f} fraction={:.2f}",
+                uid, signal_id, symbol, close_qty, fraction,
+            )
+        except _op.OrderRejectedByBinance as exc:
+            sig_resp = getattr(exc, "signing_response", None)
+            b_code = None
+            if sig_resp is not None:
+                body = getattr(sig_resp, "binance_body", None)
+                if isinstance(body, dict):
+                    try:
+                        b_code = int(body.get("code", 0))
+                    except (TypeError, ValueError):
+                        pass
+            log.error(
+                "close_fsm_partial: Binance rejected pre-TP uid={} signal_id={} "
+                "symbol={} code={} exc={}",
+                uid, signal_id, symbol, b_code, exc,
+            )
+        except _op.OrderPlacementError as exc:
+            log.error(
+                "close_fsm_partial: placement failed uid={} signal_id={} "
+                "symbol={} exc={}",
+                uid, signal_id, symbol, exc,
+            )
+
+    return placed
