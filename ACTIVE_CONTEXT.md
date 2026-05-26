@@ -4,6 +4,73 @@
 
 ---
 
+## In-session checkpoint 2026-05-26 (session 4) — Execution completeness audit + 9-PR roadmap
+
+### What triggered this
+
+Deep audit of both repos was requested after owner observed pre-TP not firing on ZEREBRO SHORT at +0.51–0.60%. Investigation revealed the pre-TP miss was a symptom of a much broader gap: the entire server-side execution stack has a large class of components that are **built but not wired** and **per-user settings that are stored but never read**.
+
+### Audit summary — built but not wired
+
+| Component | File | Gap |
+|---|---|---|
+| **Reconciler** | `src/execution/reconciler.py` | Instantiated in main.py but never started as an asyncio task. `register_user` / `unregister_user` never called by worker_manager. Manual Binance closes undetected at runtime. |
+| **MarkPriceFeed** | `src/execution/mark_price_feed.py` | Fully implemented, never instantiated. Pre-TP fires from 5s candle poll only. |
+| **PretpDispatcher** | `src/execution/pretp_dispatcher.py` | Fully implemented, never instantiated. Tick-driven pre-TP entirely dead code. |
+| **Position cap** | `src/execution/tripwires.py` | `assert_position_cap()` defined, zero callsites in the execution path. $500 default works as soft cap by accident, not enforcement. |
+
+### Audit summary — per-user settings stored but engine ignores
+
+| Setting | Stored | Consumed |
+|---|---|---|
+| Pre-TP grab fraction (app slider → `user_pretp_settings`) | ✅ SQLite | ❌ TradeMonitor path uses engine-wide config constant. FSM path uses `pos.pretp_fraction` from `resolve_grab_fraction_uid()` — source table needs verification. |
+| Pre-TP regime allowlist | ✅ SQLite | ❌ Engine reads engine-wide JSON config |
+| Pre-TP setup allowlist | ✅ SQLite | ❌ Never read anywhere in codebase |
+| Pre-TP protect_manual_entries | ✅ SQLite | ❌ No read path exists anywhere |
+| Invalidation mode (loose/standard/tight) | ✅ SQLite | ❌ Engine uses `INVALIDATION_MODE_DEFAULT` for all users |
+| Invalidation advanced knobs | ✅ SQLite | ❌ Never read |
+
+### Audit summary — app display gaps
+
+| Display | Actual source | Gap |
+|---|---|---|
+| Trade tab open positions | Engine-wide paper book | Per-user live Binance positions not shown |
+| Signal PnL (+0.41%) | `(mark_price − signal_entry) / signal_entry` | Not per-user fill price; two users with different slippage see identical % |
+| Recent Activity | Engine-wide signals + per-user dispatch events, conflated | No clear separation in UI |
+
+### Pre-TP architecture finding (separate from wiring gaps)
+
+The current approach — poll 5s → detect via 1m candle → place MARKET — has three compounding problems on fast movers:
+1. Up to 5s poll lag (window closed before detection)
+2. Candle-based detection (up to 1 full candle behind mark price)
+3. MARKET order chases thin books (slippage on ZEREBRO-class pairs)
+
+**Better approach (design approved this session):** place a REDUCE_ONLY LIMIT order at `pre_tp_trigger_price` at signal dispatch time, alongside the SL and TP orders. Binance holds it passively. Fill arrives via User Data Stream (already wired per-user). FSM `_apply_pretp_fill()` handler already exists and handles it. Zero poll lag, maker pricing, works during engine downtime, fully per-user by construction.
+
+This requires owner sign-off (FSM transition change, per CLAUDE.md).
+
+### 9-PR roadmap
+
+| PR | Phase | Title | Owner sign-off? |
+|---|---|---|---|
+| **A** | Safety | Wire reconciler: bootstrap task + worker_manager register/unregister | No |
+| **B** | Safety | Enforce per-user position cap at order placement | No |
+| **C** | Pre-TP arch | Pre-TP as native Binance LIMIT at dispatch (replaces poll-based detection for FSM positions) | **Yes — FSM transition** |
+| **D** | Pre-TP arch | Instantiate MarkPriceFeed + PretpDispatcher (tick-driven detection for paper/non-FSM) | No |
+| **E** | Settings | Wire grab fraction end-to-end: verify table, fix TradeMonitor path to use per-user value | No |
+| **F** | Settings | Wire per-user pre-TP regime + setup allowlists into TradeMonitor | No |
+| **G** | Settings | Wire per-user invalidation mode (loose/standard/tight) into trade_monitor | No |
+| **H** | App display | Trade tab: per-user live positions from Firestore (`users/{uid}/positions/`) | No |
+| **I** | App display | Separate per-user Recent Activity from engine-wide signal events | No |
+
+Docs PR (#502) captures this roadmap. PRs A and B are P1 safety and can ship immediately. PR C requires owner sign-off before coding starts. PRs D–I are independent and can be parallelised.
+
+### Owner decision needed
+
+**PR C (pre-TP native LIMIT):** approve the FSM change? The key question is: at `place_signal()` time, should the FSM also place a REDUCE_ONLY LIMIT order at the pre-TP threshold price for `qty × pretp_fraction`? This replaces the current 5s-poll + MARKET-chase path for all FSM (server-side auto-trade) users.
+
+---
+
 ## In-session checkpoint 2026-05-26 (session 3) — EIGENUSDT SL silent-skip root cause fixed (PR #500)
 
 ### Incident

@@ -44,7 +44,7 @@ See `OWNER_BRIEF §3.4a` for the per-concern detection/entry mapping. Tape-drive
 
 Existing infrastructure to consume: `src/level_book.py` (1d/4h/1h pivots + VP zones), `src/structure_state.py` (bull-leg/bear-leg per TF), `src/volume_profile.py` (POC + VAH/VAL), `_classify_htf_trend()` in `src/channels/scalp.py`. The doctrine makes consumption of these mandatory for structure detection across every non-tape-driven evaluator.
 
-## Server-side execution doctrine (2026-05-18 — architecture decided, build pending)
+## Server-side execution doctrine (2026-05-18 — architecture decided; stack live 2026-05-18; completeness gaps documented 2026-05-26)
 
 **Lumin executes Binance Futures orders server-side from the engine VPS, not from the user's device.** The mobile lifecycle (iOS suspends ~30s, Android variable) cannot meet the sub-second reaction requirement that pre-TP partial close + BE shift impose (§3.2a doctrine), and Binance's late-2023 IP-whitelist requirement on Futures-trade-enabled keys made mobile per-device whitelisting structurally unusable. Both problems converge on the same answer: order execution lives on the engine VPS.
 
@@ -58,23 +58,25 @@ Existing infrastructure to consume: `src/level_book.py` (1d/4h/1h pivots + VP zo
 - The blast-radius caps (symbol allowlist, per-user rate limit, per-user position cap, global kill switch) are the operative defence if the engine VPS is rooted — without them, the security story collapses. Never disable them, never expand them silently, never let a single user bypass them.
 - The Position FSM is **the** business-value layer. Pre-TP partial close + BE shift (§3.2a) is what turns a doctrinally net-losing path into a net-positive one. Changes to the FSM transitions (entry → SL/TP placement, pre-TP threshold trigger, BE shift on TP1 fill, trail tightening) require owner sign-off; this is the same gating as changes to confidence scoring.
 
-**Code module locations (post-build — these directories don't exist yet):**
+**Code module locations (all built and live as of 2026-05-18):**
 
-| Concern | Planned file |
-|---|---|
-| Cloud KMS client wrapper | `src/security/kms_client.py` |
-| AES-GCM envelope crypto helpers | `src/security/envelope_crypto.py` |
-| Firestore Admin SDK init + per-user key blob CRUD | `src/security/firestore_keystore.py` |
-| Signing service (separate Python process, Unix socket server) | `src/security/signing_service/` |
-| Binance permission/whitelist validator | `src/security/binance_connect_validator.py` |
-| Per-user Position FSM worker | `src/execution/position_worker.py` |
-| Position FSM state machine | `src/execution/position_fsm.py` |
-| Binance User Data Stream consumer | `src/execution/user_data_stream.py` |
-| Anomaly tripwires (symbol allowlist, rate limit, position cap) | `src/execution/tripwires.py` |
-| Reconciliation loop | `src/execution/reconciler.py` |
-| Kill switch (Firestore-doc-driven) | `src/execution/kill_switch.py` |
+| Concern | File | Running? |
+|---|---|---|
+| Cloud KMS client wrapper | `src/security/kms_client.py` | ✅ (when GCP env set) |
+| AES-GCM envelope crypto helpers | `src/security/envelope_crypto.py` | ✅ |
+| Firestore Admin SDK init + per-user key blob CRUD | `src/security/firestore_keystore.py` | ✅ (when Firebase env set) |
+| Signing service (separate Python process, Unix socket server) | `src/security/signing_service/` | ✅ |
+| Binance permission/whitelist validator | `src/security/binance_connect_validator.py` | ✅ |
+| Per-user Position FSM worker | `src/execution/position_worker.py` | ✅ (per-user, conditional on Firebase) |
+| Position FSM state machine | `src/execution/position_fsm.py` | ✅ |
+| Binance User Data Stream consumer | `src/execution/user_data_stream.py` | ✅ (inside position_worker) |
+| Anomaly tripwires (symbol allowlist, rate limit, position cap) | `src/execution/tripwires.py` | ✅ (position cap not enforced — see gap below) |
+| Reconciliation loop | `src/execution/reconciler.py` | ❌ **built but not wired** — not started as asyncio task |
+| Kill switch (Firestore-doc-driven) | `src/execution/kill_switch.py` | ✅ |
+| Mark price feed (Binance `!markPrice@arr@1s`) | `src/execution/mark_price_feed.py` | ❌ **built but not wired** — never instantiated |
+| Pre-TP tick dispatcher | `src/execution/pretp_dispatcher.py` | ❌ **built but not wired** — never instantiated |
 
-**Roadmap:** see `ACTIVE_CONTEXT.md § In-session checkpoint 2026-05-18` for the 14-PR breakdown, beta rollout stages, and the open owner-decision queue.
+**Known wiring gaps (9-PR roadmap to close them):** see `OWNER_BRIEF §3.10` and `ACTIVE_CONTEXT.md § In-session checkpoint 2026-05-26 (session 4)` for the full audit and PR sequence.
 
 ---
 
@@ -151,8 +153,17 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
                                 ↓
                  SignalRouter → Telegram (paid or free per tier)
                                 ↓
-                       TradeMonitor (5s poll, 1m candle SL/TP)
+              ┌──────────────────────────────────────────────┐
+              │  TradeMonitor (5s poll, 1m candle SL/TP/pre-TP)   │  ← engine-wide
+              │  signal_dispatch → per-user FSM (entry + orders)   │  ← per-user
+              │  PositionWorker (User Data Stream, FSM transitions) │  ← per-user
+              │  Reconciler (60s diff, startup only — NOT YET WIRED)│  ← gap
+              └──────────────────────────────────────────────┘
 ```
+
+**Two parallel SL/TP paths for server-side auto-trade users:**
+- **Native Binance orders** (SL stop-market + TP1/TP2 limit) placed at entry → fills arrive via User Data Stream → FSM advances state. This is the primary path.
+- **TradeMonitor 5s poll** acts as backstop for cases where native orders are absent or candle data shows breach. Mark-price SL backstop (PR #500) covers no-candle-data scenarios.
 
 | Concern | File |
 |---|---|
@@ -167,12 +178,12 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
 | Volume Profile (POC + VAH/VAL) | `src/volume_profile.py` |
 | Pattern catalog (DT/DB/triangle/flag/H&S/candlestick) | `src/chart_patterns.py` |
 | Pair universe + tier promotion | `src/pair_manager.py` |
-| Live signal lifecycle | `src/trade_monitor.py` |
+| Live signal lifecycle (engine-wide backstop) | `src/trade_monitor.py` |
 | Telegram routing | `src/signal_router.py`, `src/telegram_bot.py` |
 | Tunables (env-overridable) | `config/__init__.py` |
 | Truth report (monitor) | `src/runtime_truth_report.py`, `scripts/build_truth_report.py` |
 | Invalidation quality audit | `src/invalidation_audit.py` |
-| **Server-side execution stack (planned 2026-05-18 — build pending; see `Server-side execution doctrine` above for the planned module map)** | `src/security/` + `src/execution/` |
+| Server-side execution stack (live 2026-05-18; gaps documented 2026-05-26) | `src/security/` + `src/execution/` |
 
 ### Lumin app distribution (2026-05-21)
 
