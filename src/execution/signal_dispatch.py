@@ -92,13 +92,14 @@ _BINANCE_INSUFFICIENT_MARGIN_CODE = -2019
 # is the correct conservative default.
 _consec_insufficient_margin: Dict[str, int] = defaultdict(int)
 
-# TP qty split — sums to 100%.  Matches §3.2a doctrine (banking
-# the bonus tail across TP legs after pre-TP grabs the primary
-# slice).  Pre-TP fill cancels TP2 + TP3 (PR-7) so the residual
-# rides toward TP1 only.
+# TP qty split — sums to 100%.  Two legs only (TP3 removed per owner
+# directive 2026-05-26): TP1 takes the first 30%, TP2 closes the
+# remainder.  When pre-TP fires first (the typical path), TP2 is
+# cancelled and the residual rides toward TP1 with SL at BE.
+# FSM skips placement for any leg with qty <= 0.
 _TP1_FRACTION = 0.30
-_TP2_FRACTION = 0.40
-_TP3_FRACTION = 0.30
+_TP2_FRACTION = 0.70
+_TP3_FRACTION = 0.00
 
 # User-roster cache TTL.  30s is the published SLA for "newly-
 # connected user starts receiving signals."  Reduces Firestore
