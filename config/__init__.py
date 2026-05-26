@@ -269,7 +269,7 @@ PRE_TP_GRAB_FRACTION: float = float(os.getenv("PRE_TP_GRAB_FRACTION", "0.50"))
 # ``standard`` (current behaviour + MFE-protection on momentum kills).
 # ``loose`` = thesis-conservative (only kill on hard structural break);
 # ``tight`` = capital-preservation (adds ATR-trailing kill at MFE ≥ 0.3R).
-INVALIDATION_MODE_DEFAULT: str = os.getenv("INVALIDATION_MODE_DEFAULT", "standard")
+INVALIDATION_MODE_DEFAULT: str = os.getenv("INVALIDATION_MODE_DEFAULT", "tight")
 # Trailing-kill tunables (active in ``tight`` mode by default).  MFE
 # threshold expressed in multiples of SL distance; retrace fraction of
 # the MFE peak at which the kill fires.
@@ -826,7 +826,7 @@ CHANNEL_SCALP = ChannelConfig(
     name="360_SCALP",
     emoji="⚡",
     timeframes=["1m", "5m"],
-    sl_pct_range=(0.50, 1.20),  # raised cap: 0.80 too tight for high-ATR regimes
+    sl_pct_range=(0.50, 1.00),  # capped at 1.00%: 1.20% was 12% margin loss at 10×
     tp_ratios=[1.5, 2.5, 4.0],
     trailing_atr_mult=1.5,
     adx_min=int(os.getenv("ADX_MIN_SCALP", "20")),
@@ -846,7 +846,7 @@ CHANNEL_SCALP_FVG = ChannelConfig(
     name="360_SCALP_FVG",
     emoji="⚡",
     timeframes=["5m", "15m"],
-    sl_pct_range=(0.50, 1.20),  # raised cap: 0.80 too tight for high-ATR regimes
+    sl_pct_range=(0.50, 1.00),  # capped at 1.00%: 1.20% was 12% margin loss at 10×
     tp_ratios=[1.5, 2.5, 3.0],
     trailing_atr_mult=1.5,
     adx_min=int(os.getenv("ADX_MIN_FVG", "18")),
@@ -862,7 +862,7 @@ CHANNEL_SCALP_CVD = ChannelConfig(
     name="360_SCALP_CVD",
     emoji="⚡",
     timeframes=["5m"],
-    sl_pct_range=(0.50, 1.20),  # raised cap: 0.80 too tight for high-ATR regimes
+    sl_pct_range=(0.50, 1.00),  # capped at 1.00%: 1.20% was 12% margin loss at 10×
     tp_ratios=[1.5, 2.5, 3.5],
     trailing_atr_mult=1.5,
     adx_min=15,
@@ -878,7 +878,7 @@ CHANNEL_SCALP_VWAP = ChannelConfig(
     name="360_SCALP_VWAP",
     emoji="⚡",
     timeframes=["5m", "15m"],
-    sl_pct_range=(0.50, 1.20),  # raised cap: 0.80 too tight for high-ATR regimes
+    sl_pct_range=(0.50, 1.00),  # capped at 1.00%: 1.20% was 12% margin loss at 10×
     tp_ratios=[1.5, 2.5, 3.5],
     trailing_atr_mult=1.5,
     adx_min=0,
@@ -894,7 +894,7 @@ CHANNEL_SCALP_DIVERGENCE = ChannelConfig(
     name="360_SCALP_DIVERGENCE",
     emoji="⚡",
     timeframes=["5m"],
-    sl_pct_range=(0.50, 1.20),  # raised cap: 0.80 too tight for high-ATR regimes
+    sl_pct_range=(0.50, 1.00),  # capped at 1.00%: 1.20% was 12% margin loss at 10×
     tp_ratios=[1.5, 2.5, 3.5],
     trailing_atr_mult=1.5,
     adx_min=15,
@@ -910,7 +910,7 @@ CHANNEL_SCALP_SUPERTREND = ChannelConfig(
     name="360_SCALP_SUPERTREND",
     emoji="⚡",
     timeframes=["5m"],
-    sl_pct_range=(0.50, 1.20),  # raised cap: 0.80 too tight for high-ATR regimes
+    sl_pct_range=(0.50, 1.00),  # capped at 1.00%: 1.20% was 12% margin loss at 10×
     tp_ratios=[1.5, 2.5, 3.5],
     trailing_atr_mult=1.5,
     adx_min=15,
@@ -926,7 +926,7 @@ CHANNEL_SCALP_ICHIMOKU = ChannelConfig(
     name="360_SCALP_ICHIMOKU",
     emoji="⚡",
     timeframes=["5m", "15m"],
-    sl_pct_range=(0.50, 1.20),  # raised cap: 0.80 too tight for high-ATR regimes
+    sl_pct_range=(0.50, 1.00),  # capped at 1.00%: 1.20% was 12% margin loss at 10×
     tp_ratios=[1.5, 2.5, 3.0],
     trailing_atr_mult=1.5,
     adx_min=15,
@@ -942,7 +942,7 @@ CHANNEL_SCALP_ORDERBLOCK = ChannelConfig(
     name="360_SCALP_ORDERBLOCK",
     emoji="⚡",
     timeframes=["5m"],
-    sl_pct_range=(0.50, 1.20),  # raised cap: 0.80 too tight for high-ATR regimes
+    sl_pct_range=(0.50, 1.00),  # capped at 1.00%: 1.20% was 12% margin loss at 10×
     tp_ratios=[1.5, 2.5, 3.0],
     trailing_atr_mult=1.5,
     adx_min=0,
@@ -1393,7 +1393,7 @@ MAX_CONCURRENT_SIGNALS: int = 5
 # Signal invalidation – minimum age before market-structure checks apply (secs)
 # ---------------------------------------------------------------------------
 INVALIDATION_MIN_AGE_SECONDS: Dict[str, int] = {
-    "360_SCALP": 600,       # scalps need more time to develop on 1m/5m candles
+    "360_SCALP": 120,       # 120s: enough for entry candle to close; 600s was masking real fails
 }
 
 # Momentum threshold below which a signal is considered to have lost its thesis.
@@ -1429,7 +1429,7 @@ INVALIDATION_CONSECUTIVE_THRESHOLD: Dict[str, int] = {
 # disable via setting to 1.0 (no signal can be that far adverse
 # without already hitting SL).
 INVALIDATION_ADVERSE_EXCURSION_FRACTION: float = float(
-    os.getenv("INVALIDATION_ADVERSE_EXCURSION_FRACTION", "0.70")
+    os.getenv("INVALIDATION_ADVERSE_EXCURSION_FRACTION", "0.55")
 )
 
 # Minimum age gate for adverse_excursion.  Defaults to match the
@@ -1440,7 +1440,7 @@ INVALIDATION_ADVERSE_EXCURSION_FRACTION: float = float(
 # loosened, or to allow tighter per-rule tuning via env without
 # affecting other rules.
 INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC: int = int(
-    os.getenv("INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC", "600")
+    os.getenv("INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC", "120")
 )
 
 # ---------------------------------------------------------------------------
