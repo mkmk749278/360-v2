@@ -508,11 +508,9 @@ class SignalRouter:
     def _schedule_persist(self) -> None:
         """Fire-and-forget: schedule :meth:`_persist_state` on the running loop."""
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._persist_state())
+            asyncio.get_running_loop().create_task(self._persist_state())
         except RuntimeError:
-            pass
+            pass  # called outside a running loop (e.g., during unit tests)
 
     # Maximum unleveraged raw PnL % considered plausible for an active signal
     # pulse.  Typical scalp signals move ±0.5–5%; swing signals rarely exceed

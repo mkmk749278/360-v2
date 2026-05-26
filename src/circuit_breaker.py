@@ -394,9 +394,10 @@ class CircuitBreaker:
         import asyncio
 
         try:
-            loop = asyncio.get_event_loop()
-            if loop.is_running():
-                loop.create_task(self._alert_callback(message))
+            loop = asyncio.get_running_loop()
+            loop.create_task(self._alert_callback(message))
+        except RuntimeError:
+            pass  # no running loop — engine not fully booted yet
         except Exception as exc:
             log.warning("Alert callback error (circuit breaker): %s", exc)
 

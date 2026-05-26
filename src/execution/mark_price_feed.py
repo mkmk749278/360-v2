@@ -37,11 +37,16 @@ from __future__ import annotations
 import asyncio
 import json
 from collections import defaultdict
-from typing import Any, Awaitable, Callable, Dict, List, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
 from src.utils import get_logger
 
 log = get_logger("execution.mark_price_feed")
+
+# Strong-reference set for fire-and-forget dispatch tasks.  asyncio keeps
+# tasks in a WeakSet; without an external strong reference a task can be
+# garbage-collected before it completes.  Tasks remove themselves on done.
+_background_tasks: Set[asyncio.Task[None]] = set()
 
 
 _WS_URL = "wss://fstream.binance.com/ws/!markPrice@arr@1s"
@@ -197,9 +202,13 @@ class MarkPriceFeed:
         if not subscribers:
             return
         # Dispatch concurrently — one task per subscriber.  Slow
-        # subscriber doesn't block the rest.
+        # subscriber doesn't block the rest.  Each task is added to
+        # _background_tasks so the event loop's WeakSet doesn't GC it
+        # before it finishes; the done callback removes the reference.
         for cb in subscribers:
-            asyncio.create_task(_safe_dispatch(cb, symbol, mark_price))
+            task = asyncio.create_task(_safe_dispatch(cb, symbol, mark_price))
+            _background_tasks.add(task)
+            task.add_done_callback(_background_tasks.discard)
 
 
 async def _safe_dispatch(

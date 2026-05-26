@@ -147,18 +147,22 @@ class KillSwitchClient:
         notified regardless of whether they initiated the engage
         (programmatic engagement from the global circuit breaker
         also routes through here)."""
-        self._write_global(engaged=True, reason=reason)
+        # Invalidate the cache BEFORE writing to Firestore so any
+        # concurrent reader misses the stale cache and is forced to
+        # re-read rather than seeing an old "not engaged" value after
+        # the Firestore doc has already been updated.
         with self._lock:
-            self._global_cache = None  # invalidate cache
+            self._global_cache = None
+        self._write_global(engaged=True, reason=reason)
         log.warning("kill_switch: GLOBAL engaged reason={}", reason)
         _spawn_engage_alert(reason)
 
     def disengage_global(self) -> None:
         """Manual operator re-enable.  Flips OFF; resumes auto-trade
         for all non-disabled users."""
-        self._write_global(engaged=False, reason="")
         with self._lock:
             self._global_cache = None
+        self._write_global(engaged=False, reason="")
         log.info("kill_switch: GLOBAL disengaged")
 
     def _write_global(self, *, engaged: bool, reason: str) -> None:
