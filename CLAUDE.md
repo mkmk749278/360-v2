@@ -58,7 +58,7 @@ Existing infrastructure to consume: `src/level_book.py` (1d/4h/1h pivots + VP zo
 - The blast-radius caps (symbol allowlist, per-user rate limit, per-user position cap, global kill switch) are the operative defence if the engine VPS is rooted — without them, the security story collapses. Never disable them, never expand them silently, never let a single user bypass them.
 - The Position FSM is **the** business-value layer. Pre-TP partial close + BE shift (§3.2a) is what turns a doctrinally net-losing path into a net-positive one. Changes to the FSM transitions (entry → SL/TP placement, pre-TP threshold trigger, BE shift on TP1 fill, trail tightening) require owner sign-off; this is the same gating as changes to confidence scoring.
 
-**Code module locations (all built and live as of 2026-05-18):**
+**Code module locations (all built and live as of 2026-05-18; wiring gaps closed 2026-05-26):**
 
 | Concern | File | Running? |
 |---|---|---|
@@ -70,13 +70,13 @@ Existing infrastructure to consume: `src/level_book.py` (1d/4h/1h pivots + VP zo
 | Per-user Position FSM worker | `src/execution/position_worker.py` | ✅ (per-user, conditional on Firebase) |
 | Position FSM state machine | `src/execution/position_fsm.py` | ✅ |
 | Binance User Data Stream consumer | `src/execution/user_data_stream.py` | ✅ (inside position_worker) |
-| Anomaly tripwires (symbol allowlist, rate limit, position cap) | `src/execution/tripwires.py` | ✅ (position cap not enforced — see gap below) |
-| Reconciliation loop | `src/execution/reconciler.py` | ❌ **built but not wired** — not started as asyncio task |
+| Anomaly tripwires (symbol allowlist, rate limit, position cap) | `src/execution/tripwires.py` | ✅ (position cap enforced at dispatch — PR #504) |
+| Reconciliation loop | `src/execution/reconciler.py` | ✅ **wired — PR #505** (asyncio task + worker_manager register/unregister) |
 | Kill switch (Firestore-doc-driven) | `src/execution/kill_switch.py` | ✅ |
-| Mark price feed (Binance `!markPrice@arr@1s`) | `src/execution/mark_price_feed.py` | ❌ **built but not wired** — never instantiated |
-| Pre-TP tick dispatcher | `src/execution/pretp_dispatcher.py` | ❌ **built but not wired** — never instantiated |
+| Mark price feed (Binance `!markPrice@arr@1s`) | `src/execution/mark_price_feed.py` | ✅ **wired — PR #506** (asyncio task + singleton) |
+| Pre-TP tick dispatcher | `src/execution/pretp_dispatcher.py` | ✅ **wired — PR #506** (singleton; FSM calls track/untrack) |
 
-**Known wiring gaps (9-PR roadmap to close them):** see `OWNER_BRIEF §3.10` and `ACTIVE_CONTEXT.md § In-session checkpoint 2026-05-26 (session 4)` for the full audit and PR sequence.
+**Remaining gaps (6-PR roadmap):** see `OWNER_BRIEF §3.10` and `ACTIVE_CONTEXT.md` for current status.
 
 ---
 
@@ -157,7 +157,7 @@ Binance WS/REST  →  HistoricalDataStore + OrderFlowStore
               │  TradeMonitor (5s poll, 1m candle SL/TP/pre-TP)   │  ← engine-wide
               │  signal_dispatch → per-user FSM (entry + orders)   │  ← per-user
               │  PositionWorker (User Data Stream, FSM transitions) │  ← per-user
-              │  Reconciler (60s diff, startup only — NOT YET WIRED)│  ← gap
+              │  Reconciler (60s diff — wired PR #505)              │  ← per-engine
               └──────────────────────────────────────────────┘
 ```
 

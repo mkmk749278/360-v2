@@ -4,6 +4,41 @@
 
 ---
 
+## In-session checkpoint 2026-05-26 (session 5) — PRs A/B/D merged; roadmap continuing
+
+### Status
+
+Three execution-completeness PRs shipped and merged this session:
+
+| PR | Title | Status |
+|---|---|---|
+| #505 (PR-A) | Wire Reconciler as asyncio task + register/unregister in worker_manager | **merged** |
+| #504 (PR-B) | Enforce per-user position cap at order placement | **merged** |
+| #506 (PR-D) | Wire MarkPriceFeed + PretpDispatcher as live asyncio tasks | **merged** |
+
+**What's now live (previously broken):**
+- Reconciler runs as a 60s-interval asyncio task; `register_user` / `unregister_user` called by worker_manager on worker start/stop. Manual Binance closes now detected within 60s.
+- MarkPriceFeed runs as a public WS task (`!markPrice@arr@1s`); PretpDispatcher wired to it. FSM calls `track(symbol)` on OPEN transition, `untrack(symbol)` on all CLOSED transitions. Mark-price-driven pre-TP now active.
+- Position cap (`assert_position_cap`) enforced at dispatch time in `signal_dispatch._one_user()`. Cap exceeded → `PositionCapExceeded` recorded in dispatch log.
+
+**Verified already wired (PR-E investigation):**
+- Per-user grab fraction: `signal_dispatch._one_user()` calls `resolve_grab_fraction_uid(uid)` → stored in `Position.pretp_fraction` → `pretp_controller` reads it per tick. End-to-end complete, no change needed.
+
+### Remaining roadmap
+
+| PR | Phase | Title | Sign-off? | Status |
+|---|---|---|---|---|
+| **C** | Pre-TP arch | Pre-TP as native Binance LIMIT at dispatch | **Yes — FSM transition** | Awaiting owner sign-off |
+| **F** | Settings | Wire per-user pre-TP regime + setup allowlists at dispatch | No | Next |
+| **G** | Settings | Wire per-user invalidation mode (loose/standard/tight) | No | After F |
+| **H** | App display | Trade tab: per-user live positions from Firestore | No | lumin-app repo |
+| **I** | App display | Separate per-user Recent Activity from engine-wide signals | No | lumin-app repo |
+
+**Pre-existing test failure (unrelated to our PRs):**
+`tests/test_websocket_and_formatting.py::TestHealthCheckLoopForceClose::test_force_close_after_threshold_window` — was failing on `c3411a4` (pre-session main); not caused by our changes.
+
+---
+
 ## In-session checkpoint 2026-05-26 (session 4) — Execution completeness audit + 9-PR roadmap
 
 ### What triggered this
@@ -51,19 +86,17 @@ This requires owner sign-off (FSM transition change, per CLAUDE.md).
 
 ### 9-PR roadmap
 
-| PR | Phase | Title | Owner sign-off? |
-|---|---|---|---|
-| **A** | Safety | Wire reconciler: bootstrap task + worker_manager register/unregister | No |
-| **B** | Safety | Enforce per-user position cap at order placement | No |
-| **C** | Pre-TP arch | Pre-TP as native Binance LIMIT at dispatch (replaces poll-based detection for FSM positions) | **Yes — FSM transition** |
-| **D** | Pre-TP arch | Instantiate MarkPriceFeed + PretpDispatcher (tick-driven detection for paper/non-FSM) | No |
-| **E** | Settings | Wire grab fraction end-to-end: verify table, fix TradeMonitor path to use per-user value | No |
-| **F** | Settings | Wire per-user pre-TP regime + setup allowlists into TradeMonitor | No |
-| **G** | Settings | Wire per-user invalidation mode (loose/standard/tight) into trade_monitor | No |
-| **H** | App display | Trade tab: per-user live positions from Firestore (`users/{uid}/positions/`) | No |
-| **I** | App display | Separate per-user Recent Activity from engine-wide signal events | No |
-
-Docs PR (#502) captures this roadmap. PRs A and B are P1 safety and can ship immediately. PR C requires owner sign-off before coding starts. PRs D–I are independent and can be parallelised.
+| PR | Phase | Title | Sign-off? | Status |
+|---|---|---|---|---|
+| **A** | Safety | Wire reconciler: bootstrap task + worker_manager register/unregister | No | ✅ merged #505 |
+| **B** | Safety | Enforce per-user position cap at order placement | No | ✅ merged #504 |
+| **C** | Pre-TP arch | Pre-TP as native Binance LIMIT at dispatch | **Yes** | Awaiting sign-off |
+| **D** | Pre-TP arch | Wire MarkPriceFeed + PretpDispatcher | No | ✅ merged #506 |
+| **E** | Settings | Grab fraction end-to-end | No | ✅ already wired |
+| **F** | Settings | Wire per-user pre-TP regime + setup allowlists | No | Next |
+| **G** | Settings | Wire per-user invalidation mode (loose/standard/tight) | No | Queued |
+| **H** | App display | Trade tab: per-user live Firestore positions | No | lumin-app |
+| **I** | App display | Per-user Recent Activity vs engine-wide signals | No | lumin-app |
 
 ### Owner decision needed
 
