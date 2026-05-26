@@ -1925,6 +1925,37 @@ class TradeMonitor:
                     sig.symbol, sig.signal_id, grab_fraction, exc,
                 )
 
+        # FSM path — server-side execution users whose positions were opened via
+        # the signing service (not CCXT).  The CCXT close_partial above is a
+        # no-op for them because _open_quantities is never populated by the FSM
+        # entry path.  Includes LOT_SIZE rounding + MIN_NOTIONAL guard with
+        # full-position fallback for small notionals (e.g. 10 USDT / FET where
+        # 50% = $4.80 < $5 Binance floor — closes full position instead so the
+        # pre-TP banking actually executes rather than silently failing).
+        if not partial_executed:
+            try:
+                from src.execution import signal_dispatch as _sd
+                direction_str = (
+                    sig.direction.value
+                    if hasattr(sig.direction, "value")
+                    else str(sig.direction)
+                )
+                mark_price = self._latest_price(sig.symbol) or 0.0
+                placed = await _sd.close_fsm_partial_for_signal(
+                    sig.signal_id,
+                    symbol=sig.symbol,
+                    direction=direction_str,
+                    fraction=grab_fraction,
+                    mark_price=mark_price,
+                )
+                if placed > 0:
+                    partial_executed = True
+            except Exception as exc:
+                log.warning(
+                    "Pre-TP FSM partial close failed for %s (signal_id=%s): %s",
+                    sig.symbol, sig.signal_id, exc,
+                )
+
         sig.pre_tp_hit = True
         sig.pre_tp_pct = favourable_pct
         sig.pre_tp_timestamp = utcnow()
