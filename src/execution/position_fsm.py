@@ -170,7 +170,17 @@ class PositionFSM:
             return
 
         position.last_event_at = datetime.now(timezone.utc)
-        _position_state.put_position(position)
+        try:
+            _position_state.put_position(position)
+        except Exception as exc:
+            log.error(
+                "position_fsm: put_position FAILED uid={} signal_id={} "
+                "phase={} new_state={} exc={} — in-memory state advanced "
+                "but Firestore not updated; reconciler will re-diverge",
+                self.firebase_uid, signal_id, phase,
+                position.state.value, exc,
+            )
+            return
         log.info(
             "position_fsm: transition uid={} signal_id={} phase={} → state={}",
             self.firebase_uid,

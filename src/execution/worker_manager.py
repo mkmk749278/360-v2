@@ -224,7 +224,7 @@ def _tick() -> None:
             continue  # running fine
 
         # New user or crashed worker — schedule reconcile + start.
-        asyncio.get_event_loop().create_task(
+        asyncio.get_running_loop().create_task(
             _reconcile_and_start(uid),
             name=f"wm_boot_{uid[:12]}",
         )
@@ -232,8 +232,14 @@ def _tick() -> None:
 
 async def _reconcile_and_start(firebase_uid: str) -> None:
     """Run startup reconciliation then start the worker."""
-    await startup_reconcile_pending(firebase_uid)
-    await start_user_worker(firebase_uid)
+    try:
+        await startup_reconcile_pending(firebase_uid)
+        await start_user_worker(firebase_uid)
+    except Exception:
+        log.exception(
+            "worker_manager: _reconcile_and_start failed uid={}",
+            firebase_uid,
+        )
 
 
 # ---------------------------------------------------------------------------
