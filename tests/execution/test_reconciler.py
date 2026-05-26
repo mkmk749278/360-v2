@@ -192,9 +192,13 @@ async def test_short_position_open_recognised_via_negative_amt() -> None:
 
 @pytest.mark.asyncio
 async def test_binance_fetch_failure_skips_cycle() -> None:
-    """positionRisk call returns an error — reconciler logs but does
-    NOT transition any positions.  We don't have ground truth, so
-    leaving state alone is the safest choice."""
+    """positionRisk fetch error → reconciler skips the diff entirely.
+
+    _fetch_binance_positions returns None on any error so the caller
+    can distinguish "fetch failed" from "user has no open positions".
+    Returning {} on error used to cause every non-terminal FSM position
+    to be marked MANUAL CLOSE — fixed in PR #498.
+    """
     open_pos = _make_position()
     persisted: List = []
     signing = MagicMock()
@@ -213,25 +217,8 @@ async def test_binance_fetch_failure_skips_cycle() -> None:
         position_state, "put_position", side_effect=lambda p: persisted.append(p)
     ):
         await r.reconcile_user("fb-x")
-    # Empty Binance state → flat → would have marked closed, BUT
-    # an empty dict was returned NOT because positionAmt=0, but
-    # because the fetch failed.  Verify: the result is the SAME as
-    # if positions were flat (manual close), because we currently
-    # can't distinguish "fetch failed" from "no positions" — log +
-    # treat as flat.  THIS IS A KNOWN LIMITATION — operator review
-    # tag.
-    #
-    # The conservative alternative would be "skip persist on fetch
-    # fail" but that introduces a different race: we'd never detect
-    # a manual close that happened during a Binance outage.
-    #
-    # For PR-9 we accept this behaviour and rely on the manual-close
-    # decision being CONFIRMED by multiple consecutive reconciliation
-    # cycles in a future hardening (require 2-of-2 cycles agreeing).
-    #
-    # The test pins current behaviour so a future change is explicit.
-    assert len(persisted) == 1
-    assert persisted[0].close_reason == "MANUAL"
+    # Fetch failed → None returned → diff skipped → no state change.
+    assert len(persisted) == 0
 
 
 # ---------------------------------------------------------------------------

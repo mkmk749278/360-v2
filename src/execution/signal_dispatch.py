@@ -224,11 +224,16 @@ def _compute_qty_split(
 
     tp1 = _sf.round_qty(symbol, total_qty * _TP1_FRACTION)
     tp2 = _sf.round_qty(symbol, total_qty * _TP2_FRACTION)
-    # tp3 absorbs the rounding residual; floored again so it stays
-    # on a stepSize boundary.  May be 0 if total_qty is a small
-    # number of stepSize units — that's fine; FSM treats tp3_qty=0
-    # as "no tp3 leg" and the residual rides to SL/pre-TP.
-    tp3 = _sf.round_qty(symbol, total_qty - tp1 - tp2)
+    # Rounding residual: the last active TP leg absorbs the dust so
+    # tp1+tp2+tp3 == total_qty exactly (Binance rejects non-reconciling
+    # order sets).  With _TP3_FRACTION=0.00 (TP3 removed), the residual
+    # goes to TP2; otherwise tp3 gets it and FSM skips tp3 when qty=0.
+    _residual = _sf.round_qty(symbol, total_qty - tp1 - tp2)
+    if _TP3_FRACTION <= 0.0:
+        tp2 = tp2 + _residual
+        tp3 = 0.0
+    else:
+        tp3 = _residual
 
     # MIN_NOTIONAL guard on TP legs.  Binance enforces MIN_NOTIONAL
     # on every TAKE_PROFIT_MARKET order with explicit quantity (code

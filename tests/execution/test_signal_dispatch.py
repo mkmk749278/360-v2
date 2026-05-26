@@ -68,15 +68,16 @@ def test_qty_split_at_typical_btc_price() -> None:
     """$500 notional / $29000 entry ≈ 0.01724 BTC, then floored to
     BTCUSDT's stepSize=0.001 → 0.017 BTC.  The TP split is also
     floored to stepSize so each leg lands on a Binance-valid qty.
-    The 30/40/30 ratio is approximate after rounding (especially on
-    pairs with coarse stepSize like DOGEUSDT stepSize=1)."""
+    TP3 removed (owner directive 2026-05-26): 30/70/0 split; TP3 qty
+    should be zero so FSM placement guard skips it."""
     total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split("BTCUSDT", 29000.0)
     # 0.5 step-units of slack on the total — actual value depends
     # on stepSize floor behaviour.
     assert abs(total - 0.017) < 0.001
     # TP fractions in the right ballpark, allowing for stepSize floor.
     assert abs(tp1 / total - 0.30) < 0.05
-    assert abs(tp2 / total - 0.40) < 0.05
+    assert abs(tp2 / total - 0.70) < 0.10  # LOT_SIZE floor on coarse pairs
+    assert tp3 == 0.0  # TP3 removed — FSM guard skips zero-qty legs
     # Sums-to-total is the doctrine guarantee covered separately.
 
 
@@ -940,17 +941,17 @@ def test_tp_min_notional_consolidation_when_only_tp2_too_small() -> None:
 
 def test_tp_min_notional_no_consolidation_for_large_positions() -> None:
     """Large positions ($500 notional) have TP legs well above MIN_NOTIONAL:
-    tp1 = 30% × $500 = $150 >> $5 → no consolidation; normal 30/40/30."""
+    tp1 = 30% × $500 = $150 >> $5 → no consolidation; normal 30/70/0 split."""
     total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split("BTCUSDT", 29000.0)
     # At $500 notional / $29000, tp1 ~ $150 >> $5 MIN_NOTIONAL.
     # Consolidation must NOT fire; TP legs should follow the ratio.
     assert total > 0
-    # Total qty = all three tp legs (plus at most one step of dust)
-    assert total - (tp1 + tp2 + tp3) < 0.002
-    # Rough 30/40/30 ratio preserved — not collapsed to a single leg.
+    # Total qty = all active tp legs (tp3 is zero; tp1+tp2 == total).
+    assert tp1 + tp2 + tp3 == total
+    # 30/70 split with TP3 removed (owner directive 2026-05-26).
     assert tp2 > 0
-    assert tp3 > 0
-    assert abs(tp2 / total - 0.40) < 0.05
+    assert tp3 == 0.0
+    assert abs(tp2 / total - 0.70) < 0.10  # tolerance for LOT_SIZE floor
 
 
 # ---------------------------------------------------------------------------
