@@ -1394,6 +1394,14 @@ MAX_CONCURRENT_SIGNALS: int = 5
 # ---------------------------------------------------------------------------
 INVALIDATION_MIN_AGE_SECONDS: Dict[str, int] = {
     "360_SCALP": 120,       # 120s: enough for entry candle to close; 600s was masking real fails
+    # Per-setup overrides (key format: "{channel}::{setup_class}").
+    # Reversal and flip-structure setups need extra patience before the
+    # momentum/regime gates are allowed to invalidate: truth-report window
+    # shows LSR=16/147 PREMATURE and SR_FLIP=17/175 PREMATURE — both setups
+    # were killing correct-direction trades during normal post-entry reversal
+    # dynamics that look like momentum loss on 1m but resolve within 2-4 min.
+    "360_SCALP::LIQUIDITY_SWEEP_REVERSAL": int(os.getenv("INVALIDATION_MIN_AGE_LSR", "300")),
+    "360_SCALP::SR_FLIP_RETEST":           int(os.getenv("INVALIDATION_MIN_AGE_SR_FLIP", "240")),
 }
 
 # Momentum threshold below which a signal is considered to have lost its thesis.

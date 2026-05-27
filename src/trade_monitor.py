@@ -780,7 +780,14 @@ class TradeMonitor:
 
         # Age gate — ALL invalidation checks require minimum age to avoid
         # reacting to 1m candle noise and killing trades too early.
-        min_age = INVALIDATION_MIN_AGE_SECONDS.get(sig.channel, 120)
+        # Per-setup override key: "{channel}::{setup_class}" — reversal and
+        # flip-structure setups (LSR=300s, SR_FLIP=240s) need longer patience
+        # than trend-following setups to let the post-entry move establish.
+        _setup_class = getattr(sig, "setup_class", "") or ""
+        _setup_key = f"{sig.channel}::{_setup_class}"
+        min_age = INVALIDATION_MIN_AGE_SECONDS.get(
+            _setup_key, INVALIDATION_MIN_AGE_SECONDS.get(sig.channel, 120)
+        )
         age_secs = (utcnow() - sig.timestamp).total_seconds()
         if age_secs < min_age:
             return None  # Too young for any invalidation
