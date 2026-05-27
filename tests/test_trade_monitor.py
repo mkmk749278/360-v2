@@ -3523,3 +3523,163 @@ class TestRejectedOpenRetry:
         )
         assert om.execute_signal.call_count == 2
 
+
+# ---------------------------------------------------------------------------
+# Stale-symbol SL orphan regression (BEATUSDT SHORT -6.52% ACTIVE bug)
+#
+# When a signal fires on a pair that subsequently falls out of the scan
+# universe (e.g. surge-promoted Tier-3 pair), the HistoricalDataStore stops
+# receiving 1m candles for that pair.  `_latest_price()` returns None,
+# `_process_signal()` returned early — SL never fired, PnL ground without
+# bound.  The fix: fall back to the mark-price feed singleton, which covers
+# ALL Binance USDT-M futures symbols via !markPrice@arr@1s.
+# ---------------------------------------------------------------------------
+
+
+class TestStaleSymbolMarkPriceFallback:
+    """Mark-price feed fallback rescues signals on stale-candle symbols."""
+
+    def _build_monitor_no_candles(
+        self,
+        active: Dict[str, Signal],
+    ):
+        """Monitor whose data store has NO candle/tick data for any symbol,
+        simulating a pair that fell out of the scan universe after dispatch."""
+        removed = []
+        sent = []
+
+        async def mock_send(chat_id, text):
+            sent.append((chat_id, text))
+
+        data_store = MagicMock()
+        data_store.get_candles.return_value = None  # no candle data at all
+        data_store.ticks = {}
+
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=mock_send,
+            get_active_signals=lambda: dict(active),
+            remove_signal=lambda sid: removed.append(sid),
+            update_signal=MagicMock(),
+            performance_tracker=MagicMock(),
+            circuit_breaker=MagicMock(),
+        )
+        return monitor, removed, sent
+
+    @pytest.mark.asyncio
+    async def test_short_sl_fires_via_mark_price_when_candles_stale(self) -> None:
+        """BEATUSDT-style: SHORT signal, no 1m candles, mark price above SL.
+        SL must fire via the mark-price fallback; signal must NOT stay ACTIVE."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            symbol="BEATUSDT",
+            direction=Direction.SHORT,
+            entry=0.99540,
+            stop_loss=1.0068,   # 1.145% above entry
+            tp1=0.98000,
+            tp2=0.97000,
+            age_seconds=300.0,  # well past any lifespan guard
+        )
+        active = {sig.signal_id: sig}
+        monitor, removed, sent = self._build_monitor_no_candles(active)
+
+        # Inject a mock mark-price feed whose get_price returns the live
+        # blown-through price (1.0603 — 5.35% above SL).
+        mock_feed = MagicMock()
+        mock_feed.get_price.return_value = 1.0603
+
+        with patch(
+            "src.execution.mark_price_feed.get_instance",
+            return_value=mock_feed,
+        ):
+            await monitor._check_all()
+
+        assert sig.signal_id in removed, (
+            "SL must fire when mark price (1.0603) > SHORT SL (1.0068), "
+            "even when HistoricalDataStore has no candle data for the symbol"
+        )
+        assert sig.status == "SL_HIT", f"expected SL_HIT, got {sig.status}"
+
+    @pytest.mark.asyncio
+    async def test_long_sl_fires_via_mark_price_when_candles_stale(self) -> None:
+        """Symmetrical: LONG signal, no candles, mark price below SL → SL fires."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            symbol="EXAMPLEUSDT",
+            direction=Direction.LONG,
+            entry=100.0,
+            stop_loss=99.0,     # 1% below entry
+            tp1=101.5,
+            tp2=103.0,
+            age_seconds=300.0,
+        )
+        active = {sig.signal_id: sig}
+        monitor, removed, sent = self._build_monitor_no_candles(active)
+
+        mock_feed = MagicMock()
+        mock_feed.get_price.return_value = 98.5  # well below SL
+
+        with patch(
+            "src.execution.mark_price_feed.get_instance",
+            return_value=mock_feed,
+        ):
+            await monitor._check_all()
+
+        assert sig.signal_id in removed, "LONG SL must fire via mark-price fallback"
+        assert sig.status == "SL_HIT", f"expected SL_HIT, got {sig.status}"
+
+    @pytest.mark.asyncio
+    async def test_no_fire_when_mark_price_feed_unavailable(self) -> None:
+        """If the mark-price feed singleton is None (engine not fully booted),
+        the monitor must return early rather than crash."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            symbol="BEATUSDT",
+            direction=Direction.SHORT,
+            entry=0.99540,
+            stop_loss=1.0068,
+            tp1=0.98000,
+            tp2=0.97000,
+            age_seconds=300.0,
+        )
+        active = {sig.signal_id: sig}
+        monitor, removed, sent = self._build_monitor_no_candles(active)
+
+        with patch(
+            "src.execution.mark_price_feed.get_instance",
+            return_value=None,
+        ):
+            await monitor._check_all()  # must not raise
+
+        # Without a fallback price the monitor returns early — signal stays ACTIVE.
+        assert sig.signal_id not in removed
+        assert sig.status == "ACTIVE"
+
+    @pytest.mark.asyncio
+    async def test_mark_price_within_sl_does_not_trigger(self) -> None:
+        """Mark-price fallback must NOT fire SL when price is still on-side."""
+        sig = _make_signal(
+            channel="360_SCALP",
+            symbol="BEATUSDT",
+            direction=Direction.SHORT,
+            entry=0.99540,
+            stop_loss=1.0068,
+            tp1=0.98000,
+            tp2=0.97000,
+            age_seconds=300.0,
+        )
+        active = {sig.signal_id: sig}
+        monitor, removed, sent = self._build_monitor_no_candles(active)
+
+        # Price is on-side of the trade (below SL for a SHORT) — no SL.
+        mock_feed = MagicMock()
+        mock_feed.get_price.return_value = 0.99000
+
+        with patch(
+            "src.execution.mark_price_feed.get_instance",
+            return_value=mock_feed,
+        ):
+            await monitor._check_all()
+
+        assert sig.signal_id not in removed
+        assert sig.status not in ("SL_HIT",)
