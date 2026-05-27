@@ -393,14 +393,14 @@ _MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
     "EXHAUSTION_FADE":                2.0,  # Wick extremes can extend; still compress
     "WHALE_MOMENTUM":                 2.0,  # Swing-based; generous for momentum entries
     "OPENING_RANGE_BREAKOUT":         2.0,  # Range height dependent
-    "LIQUIDITY_SWEEP_REVERSAL":       2.0,  # Sweep ± 0.1%; typical 0.5-0.65%
+    "LIQUIDITY_SWEEP_REVERSAL":       1.2,  # Sweep SL beyond 1.2% → compress; ≤1.2% = scalp-sized
     # Reject-policy setups (structural SL must be honest or signal is dropped)
     "DIVERGENCE_CONTINUATION":        1.5,  # EMA21 ± 0.5%; fixed geometry — rare to exceed
     "LIQUIDATION_REVERSAL":           2.0,  # Cascade ± 0.3%; typical 0.3-0.5%
     "VOLUME_SURGE_BREAKOUT":          2.0,  # Fixed 0.8% structural SL
     "BREAKDOWN_SHORT":                2.0,  # Mirror of VSB
     "CONTINUATION_LIQUIDITY_SWEEP":   2.0,  # Sweep - 0.3×ATR; typical 0.3-0.75%
-    "SR_FLIP_RETEST":                 2.5,  # Wick + ATR buffer; live ~2%
+    "SR_FLIP_RETEST":                 1.2,  # Tightened from 2.5% — scalp doctrine cap
     "POST_DISPLACEMENT_CONTINUATION": 2.5,  # Consolidation-based; typical 0.5-0.75%
     "FAILED_AUCTION_RECLAIM":         3.0,  # False-breakdown depth; 1.95% seen live
     "QUIET_COMPRESSION_BREAK":        3.0,  # BB lower + 0.5×ATR; 2.08% seen live
