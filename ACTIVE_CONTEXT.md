@@ -4,6 +4,52 @@
 
 ---
 
+## In-session checkpoint 2026-05-26 (session 6) — 9-PR roadmap COMPLETE (C pending sign-off)
+
+### Status
+
+All non-sign-off roadmap PRs shipped and merged. Full audit:
+
+| PR | Title | PR # | Status |
+|---|---|---|---|
+| **A** | Wire Reconciler as asyncio task + worker_manager register/unregister | #505 | ✅ merged |
+| **B** | Enforce per-user position cap at order placement | #504 | ✅ merged |
+| **C** | Pre-TP as native Binance LIMIT at dispatch (FSM transition) | — | ⏳ awaiting owner sign-off |
+| **D** | Wire MarkPriceFeed + PretpDispatcher as live asyncio tasks | #506 | ✅ merged |
+| **E** | Per-user grab fraction end-to-end | — | ✅ verified already wired |
+| **F** | Per-user pre-TP regime + setup allowlists at dispatch | #508 | ✅ merged |
+| **G** | Per-user invalidation mode stored on Position at dispatch | #509 | ✅ merged |
+| **H** | Trade tab: per-user live Firestore positions | — | ✅ verified already implemented |
+| **I** | Separate per-user Recent Activity from engine-wide signals | — | ✅ verified already implemented |
+
+### What PR-F wired (merged #508)
+
+`resolve_pretp_allowlists_uid()` added to `user_overrides.py`. `_one_user()` in `signal_dispatch` resolves the user's `user_pretp_settings.regime_allowlist` + `setup_allowlist`. If signal's regime or setup_class isn't in the user's allowlist, `user_grab_fraction` is zeroed → `pretp_controller` returns qty=0 → pre-TP marked SKIPPED. Position still opens with SL/TP. `dispatch_signal_to_active_users` extended with `regime_label` and `setup_class` params; `signal_router.py` passes `signal.entry_regime` / `signal.setup_class`.
+
+### What PR-G wired (merged #509)
+
+`resolve_invalidation_mode_uid()` added to `user_overrides.py`. Reads `user_invalidation_settings.mode` (loose/standard/tight) per firebase_uid. `_one_user()` resolves per-user mode and passes `invalidation_mode=user_invalidation_mode` to `place_signal()`. Stored on `Position.invalidation_mode` (persisted to Firestore). Enforcement scope: `trade_monitor._check_invalidation()` remains engine-wide today (Signal book has no per-user uid context). The per-user mode on Position is the data plumbing for when per-user soft-invalidation enforcement lands.
+
+### PR-H / PR-I — verified already implemented
+
+Inspection of `lumin-app/lib/features/trade/trade_page.dart` confirms the Live tab already renders:
+- `_ServerPositionsCard` sourced from `watchAutoTradePositions()` → `GET /api/auto-trade/positions` (per-user, Firestore-backed)
+- `_RecentDispatchEventsCard` sourced from `watchRecentDispatchEvents()` → `GET /api/auto-trade/recent-events` (per-user, dispatch_log)
+- `_ActivityCard` sourced from `data.activity` (engine-wide signal stream) — distinct from per-user dispatch events
+
+The separation is clean. Both per-user surfaces are gated on `hasBinanceKey` (only shown once the user has connected a key). No code change needed.
+
+### Only remaining item: PR-C (owner sign-off)
+
+**PR-C (pre-TP native LIMIT):** replace the current 5s-poll + MARKET-chase approach with a REDUCE_ONLY LIMIT order placed at `pre_tp_trigger_price` at `place_signal()` time alongside SL and TP orders. Binance holds it passively; fill arrives via User Data Stream; FSM `_apply_pretp_fill()` handles it. Zero poll lag, maker pricing, works during engine downtime, fully per-user by construction.
+
+Requires owner sign-off per CLAUDE.md (FSM transition change). Ping owner to approve or reject.
+
+**Pre-existing test failure (unrelated to our PRs):**
+`tests/test_websocket_and_formatting.py::TestHealthCheckLoopForceClose::test_force_close_after_threshold_window` — was failing on `c3411a4` (pre-session main); not caused by our changes.
+
+---
+
 ## In-session checkpoint 2026-05-26 (session 5) — PRs A/B/D merged; roadmap continuing
 
 ### Status
