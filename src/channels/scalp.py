@@ -271,6 +271,18 @@ _FAR_RSI_SHORT_SOFT_MAX: float = 35.0  # ≤ this (> hard) → +6 soft penalty
 # Soft penalty (default 6.0 confidence pts) when BOTH 1H AND 4H oppose
 # direction lets scoring decide.  Env-overridable per B8.
 _SR_FLIP_HTF_MISMATCH_PENALTY: float = float(os.getenv("SR_FLIP_HTF_MISMATCH_PENALTY", "6.0"))
+# Additional penalty when only 4H (not 1H) opposes SR_FLIP direction.
+# BOTH opposing = full _SR_FLIP_HTF_MISMATCH_PENALTY; 4H-only opposing = this.
+# Truth-report: 17/175 SR_FLIP invalidation kills were PREMATURE but 129/175
+# were PROTECTIVE — adding a 4H-weight haircut reduces directional noise.
+_SR_FLIP_H4_ONLY_PENALTY: float = float(os.getenv("SR_FLIP_H4_ONLY_PENALTY", "3.5"))
+# DIVERGENCE_CONTINUATION 4H conflict penalty.
+# When the 4H EMA21/50 trend opposes the 1H-determined direction, CVD
+# divergence is fighting two-TF structure — the setup is weaker.
+# BEATUSDT SHORT at -6.52% ACTIVE: 1H barely aligned (EMA21 < EMA50) but
+# 4H was still bullish.  Soft penalty keeps correct multi-TF aligned signals
+# while downgrading borderline 1H-only ones.  Env-overridable per B8.
+_DIV_CONT_H4_CONFLICT_PENALTY: float = float(os.getenv("DIV_CONT_H4_CONFLICT_PENALTY", "6.0"))
 
 # QUIET_COMPRESSION_BREAK HTF policy — soft penalty.  QCB lives in
 # QUIET/RANGING regimes where HTF trends are typically weak; the soft
@@ -3091,7 +3103,9 @@ class ScalpChannel(BaseChannel):
             trend_4h = self._classify_htf_trend(indicators, candles, "4h")
             opposite = "BEARISH" if direction == Direction.LONG else "BULLISH"
             if trend_1h == opposite and trend_4h == opposite:
-                sr_flip_htf_penalty = _SR_FLIP_HTF_MISMATCH_PENALTY
+                sr_flip_htf_penalty = _SR_FLIP_HTF_MISMATCH_PENALTY  # both TFs oppose
+            elif trend_4h == opposite:
+                sr_flip_htf_penalty = _SR_FLIP_H4_ONLY_PENALTY  # 4H opposes, 1H aligned
 
         # Retest proximity gate — tier-dependent per §3.4a doctrine.
         # HTF LevelBook source (production path): tighter zones since
@@ -3977,6 +3991,26 @@ class ScalpChannel(BaseChannel):
             else:
                 return self._reject("regime_blocked")
 
+        # 4H conflict penalty: when the 4H EMA21/50 trend opposes the
+        # 1H-determined direction, the CVD divergence is fighting two-TF
+        # structure.  The 1H gate above already hard-rejects if the 1H trend
+        # is absent; this catches the case where 1H is barely aligned but 4H
+        # still says the opposite (BEATUSDT SHORT: 1H EMA21 < EMA50 by a
+        # sliver, 4H EMA21 > EMA50 = firmly bullish → direction call weak).
+        # Only applied on the 1H path (_uses_1h_trend) — legacy 5m fallback
+        # doesn't have 4H context and isn't used in prod.
+        _h4_conflict_penalty = 0.0
+        if _DIV_CONT_H4_CONFLICT_PENALTY > 0 and _uses_1h_trend:
+            _ind_4h = indicators.get("4h", {})
+            _ema21_4h = _ind_4h.get("ema21_last")
+            _ema50_4h = _ind_4h.get("ema50_last")
+            if _ema21_4h is not None and _ema50_4h is not None:
+                _ema21_4h_f, _ema50_4h_f = float(_ema21_4h), float(_ema50_4h)
+                if direction == Direction.SHORT and _ema21_4h_f > _ema50_4h_f:
+                    _h4_conflict_penalty = _DIV_CONT_H4_CONFLICT_PENALTY
+                elif direction == Direction.LONG and _ema21_4h_f < _ema50_4h_f:
+                    _h4_conflict_penalty = _DIV_CONT_H4_CONFLICT_PENALTY
+
         closes = [float(c) for c in closes_raw]
         close = closes[-1]
         if close <= 0:
@@ -4252,6 +4286,8 @@ class ScalpChannel(BaseChannel):
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
         sig.analyst_reason = f"Hidden {_div_label} CVD divergence (strength={_div_strength:.2f})"
+        if _h4_conflict_penalty != 0.0:
+            sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + _h4_conflict_penalty
         return sig
 
     # ------------------------------------------------------------------
