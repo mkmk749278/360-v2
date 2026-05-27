@@ -962,6 +962,10 @@ class Scanner:
         # This is not full depth, but it provides a truthful top-of-book snapshot
         # for evaluator paths that consume order_book.
         self._order_book_snapshot_cache: Dict[str, Tuple[Dict[str, Any], float]] = {}
+        # Timestamp of the last successful bookTicker pre-fetch.  Used to gate
+        # the API call: we only re-fetch when the cache is actually stale, not
+        # every 1-second scan cycle.  0.0 = never fetched → fetch immediately.
+        self._last_book_ticker_fetch_at: float = 0.0
 
         # Cooldown tracking: (symbol, channel_name) → monotonic expiry time
         self._cooldown_until: Dict[Tuple[str, str], float] = {}
@@ -2156,6 +2160,14 @@ class Scanner:
             :class:`~src.binance.BinanceClient` instance is lazily created if
             not already present.
         """
+        # Gate on last-fetch time: only call the API when the cache is actually
+        # stale.  Fetching every 1-second scan cycle costs Weight 2 × 60 = 120
+        # weight/min but discards all 629 results when TTL hasn't expired.
+        # Fetch at 90% of TTL so entries never expire between refreshes.
+        now = time.monotonic()
+        if now - self._last_book_ticker_fetch_at < _BOOK_TICKER_CACHE_TTL * 0.9:
+            return
+
         try:
             if market == "futures":
                 if self.futures_client is None:
@@ -2217,9 +2229,10 @@ class Scanner:
                     )
                 populated += 1
 
+            self._last_book_ticker_fetch_at = now
             log.debug(
-                "Global bookTicker pre-fetch populated {} spread cache entries (all tiers)",
-                populated,
+                "Global bookTicker pre-fetch refreshed {} spread cache entries (market={})",
+                populated, market,
             )
         except asyncio.TimeoutError:
             log.warning("Global bookTicker pre-fetch timed out (market={})", market)
