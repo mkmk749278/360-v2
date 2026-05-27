@@ -377,6 +377,38 @@ def build_tickers(engine: Any) -> List[TickerItem]:
 # ---------------------------------------------------------------------------
 
 
+_TERMINAL_STATUSES: frozenset = frozenset({
+    "SL_HIT", "BREAKEVEN_EXIT", "PROFIT_LOCKED", "INVALIDATED",
+    "EXPIRED", "CANCELLED", "FULL_TP_HIT", "TP3_HIT", "CLOSED",
+})
+
+
+def _hold_mins(dispatch_ts: Optional[Any], terminal_ts: Optional[Any]) -> Optional[int]:
+    """Actual hold duration: dispatch → terminal for closed, dispatch → now for open."""
+    if dispatch_ts is None:
+        return None
+    if isinstance(dispatch_ts, str):
+        try:
+            dispatch_ts = datetime.fromisoformat(dispatch_ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            return None
+    if not isinstance(dispatch_ts, datetime):
+        return None
+    if dispatch_ts.tzinfo is None:
+        dispatch_ts = dispatch_ts.replace(tzinfo=timezone.utc)
+    end_ts = terminal_ts if terminal_ts is not None else _now()
+    if isinstance(end_ts, str):
+        try:
+            end_ts = datetime.fromisoformat(end_ts.replace("Z", "+00:00"))
+        except (ValueError, TypeError):
+            end_ts = _now()
+    if not isinstance(end_ts, datetime):
+        end_ts = _now()
+    if end_ts.tzinfo is None:
+        end_ts = end_ts.replace(tzinfo=timezone.utc)
+    return max(0, int((end_ts - dispatch_ts).total_seconds() // 60))
+
+
 def _signal_to_detail(sig: Any) -> SignalDetail:
     direction = getattr(sig, "direction", None)
     direction_str = (
@@ -386,6 +418,20 @@ def _signal_to_detail(sig: Any) -> SignalDetail:
     ).upper()
     setup_class = getattr(sig, "setup_class", "UNCLASSIFIED") or "UNCLASSIFIED"
     timestamp = getattr(sig, "timestamp", None) or _now()
+    status = getattr(sig, "status", "ACTIVE") or "ACTIVE"
+    dispatch_ts = getattr(sig, "dispatch_timestamp", None)
+    terminal_ts = getattr(sig, "terminal_outcome_timestamp", None)
+
+    # For closed signals minutes_ago reflects recency of the terminal event
+    # ("SL_HIT 3m ago"), not the signal's total age since creation.
+    # For active signals minutes_ago reflects how long the trade has been open.
+    if status in _TERMINAL_STATUSES and terminal_ts is not None:
+        minutes_ago = _minutes_since(terminal_ts)
+    elif dispatch_ts is not None:
+        minutes_ago = _minutes_since(dispatch_ts)
+    else:
+        minutes_ago = _minutes_since(timestamp)
+
     return SignalDetail(
         signal_id=getattr(sig, "signal_id", "") or "",
         symbol=getattr(sig, "symbol", ""),
@@ -399,7 +445,7 @@ def _signal_to_detail(sig: Any) -> SignalDetail:
         quality_tier=getattr(sig, "quality_tier", "B") or "B",
         setup_class=setup_class,
         agent_name=_agent_name_for(setup_class),
-        status=getattr(sig, "status", "ACTIVE") or "ACTIVE",
+        status=status,
         current_price=float(getattr(sig, "current_price", 0.0) or 0.0),
         pnl_pct=float(getattr(sig, "pnl_pct", 0.0) or 0.0),
         pre_tp_hit=bool(getattr(sig, "pre_tp_hit", False)),
@@ -410,7 +456,8 @@ def _signal_to_detail(sig: Any) -> SignalDetail:
             float(getattr(sig, "pre_tp_trigger_price", 0.0) or 0.0) or None
         ),
         timestamp=timestamp,
-        minutes_ago=_minutes_since(timestamp),
+        minutes_ago=minutes_ago,
+        hold_mins=_hold_mins(dispatch_ts, terminal_ts if status in _TERMINAL_STATUSES else None),
     )
 
 
