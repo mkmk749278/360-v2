@@ -27,6 +27,7 @@ from config import (
     CHANNEL_COOLDOWN_SECONDS,
     CHANNEL_TELEGRAM_MAP,
     MAX_CONCURRENT_SIGNALS_PER_CHANNEL,
+    MAX_SAME_DIRECTION_GLOBAL,
     MAX_SIGNAL_HOLD_SECONDS,
     SIGNAL_TYPE_LABELS,
     TELEGRAM_ACTIVE_CHANNEL_ID,
@@ -739,7 +740,7 @@ class SignalRouter:
             )
             return
 
-        # Correlation-aware position limiting
+        # Correlation-aware position limiting (group-based)
         active_positions = {
             sid: (s.symbol, s.direction.value)
             for sid, s in self._active_signals.items()
@@ -753,6 +754,23 @@ class SignalRouter:
             log.info(
                 "Blocked {} {} – {}",
                 signal.symbol, signal.direction.value, corr_reason,
+            )
+            return
+
+        # Global same-direction cap (Correlation Throttle).
+        # Top-75 USDT-M alts are 0.85-0.95 correlated to BTC; when BTC
+        # dumps/pumps all same-direction positions SL simultaneously.
+        # The group-based check above only covers ~25 named pairs; this
+        # catch-all prevents blast-radius on the long tail of alts.
+        same_dir_count = sum(
+            1 for s in self._active_signals.values()
+            if s.direction == signal.direction
+        )
+        if same_dir_count >= MAX_SAME_DIRECTION_GLOBAL:
+            log.info(
+                "correlation_throttle skip {} {} – {}/{} same-direction active",
+                signal.symbol, signal.direction.value,
+                same_dir_count, MAX_SAME_DIRECTION_GLOBAL,
             )
             return
 

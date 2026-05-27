@@ -429,9 +429,14 @@ class TestSignalRouter:
         assert channel_count == cap
 
     @pytest.mark.asyncio
-    async def test_per_channel_cap_does_not_block_other_channels(self, queue, router, sent_messages):
+    async def test_per_channel_cap_does_not_block_other_channels(self, queue, router, sent_messages, monkeypatch):
         """When one channel is full, signals from other channels are still accepted."""
+        import src.signal_router as sr_mod
         from config import MAX_CONCURRENT_SIGNALS_PER_CHANNEL
+
+        # Raise global same-direction cap so this test can focus purely on
+        # per-channel isolation without the global throttle interfering.
+        monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", 10)
 
         scalp_channel = "360_SCALP"
         scalp_cap = MAX_CONCURRENT_SIGNALS_PER_CHANNEL.get(scalp_channel, 5)
@@ -636,6 +641,139 @@ class TestSignalRouter:
         assert isinstance(payload, list)
         assert payload[-1]["signal_id"] == "TEST-DISPATCH-LOG"
         assert payload[-1]["telegram_text"] == sent_messages[-1][1]
+
+
+class TestCorrelationThrottle:
+    """Global same-direction cap (MAX_SAME_DIRECTION_GLOBAL).
+
+    The group-based check_correlation_limit only covers ~25 named pairs.
+    The global cap prevents more than N same-direction active signals
+    regardless of symbol, guarding against BTC-dump simultaneous SL scenario.
+    """
+
+    def _make_router_with_cap(self, cap: int, queue, sent_messages, monkeypatch):
+        import src.signal_router as sr_mod
+        monkeypatch.setattr(sr_mod, "MAX_SAME_DIRECTION_GLOBAL", cap)
+        for ch in ("360_SCALP",):
+            monkeypatch.setitem(sr_mod.CHANNEL_TELEGRAM_MAP, ch, "premium")
+
+        async def mock_send(chat_id: str, text: str):
+            sent_messages.append((chat_id, text))
+            return True
+
+        return SignalRouter(
+            queue=queue,
+            send_telegram=mock_send,
+            format_signal=lambda sig: f"Signal: {sig.channel} {sig.symbol}",
+        )
+
+    @pytest.mark.asyncio
+    async def test_below_cap_allows_signal(self, monkeypatch):
+        """2 LONGs active with cap=3 — a third LONG is allowed."""
+        msgs = []
+        q = asyncio.Queue()
+        router = self._make_router_with_cap(3, q, msgs, monkeypatch)
+
+        # Inject 2 active LONGs directly (bypass queue routing)
+        for sym in ("ETHUSDT", "SOLUSDT"):
+            s = _make_signal(symbol=sym, direction=Direction.LONG, confidence=90)
+            s.signal_id = f"PREFILL-{sym}"
+            router._active_signals[s.signal_id] = s
+            router._position_lock[s.symbol] = s.direction
+
+        # Route a third LONG on a different symbol
+        third = _make_signal(symbol="BNBUSDT", direction=Direction.LONG, confidence=90)
+        third.signal_id = "TEST-THIRD-LONG"
+        await q.put(third)
+        task = asyncio.create_task(router.start())
+        await asyncio.sleep(0.3)
+        await router.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert "TEST-THIRD-LONG" in router.active_signals
+
+    @pytest.mark.asyncio
+    async def test_at_cap_blocks_same_direction(self, monkeypatch):
+        """3 LONGs active with cap=3 — a 4th LONG is blocked."""
+        msgs = []
+        q = asyncio.Queue()
+        router = self._make_router_with_cap(3, q, msgs, monkeypatch)
+
+        for sym in ("ETHUSDT", "SOLUSDT", "ADAUSDT"):
+            s = _make_signal(symbol=sym, direction=Direction.LONG, confidence=90)
+            s.signal_id = f"PREFILL-{sym}"
+            router._active_signals[s.signal_id] = s
+            router._position_lock[s.symbol] = s.direction
+
+        fourth = _make_signal(symbol="BNBUSDT", direction=Direction.LONG, confidence=90)
+        fourth.signal_id = "TEST-FOURTH-LONG"
+        await q.put(fourth)
+        task = asyncio.create_task(router.start())
+        await asyncio.sleep(0.3)
+        await router.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert "TEST-FOURTH-LONG" not in router.active_signals
+
+    @pytest.mark.asyncio
+    async def test_opposite_direction_not_throttled(self, monkeypatch):
+        """3 LONGs active with cap=3 — a SHORT on a new symbol is still allowed."""
+        msgs = []
+        q = asyncio.Queue()
+        router = self._make_router_with_cap(3, q, msgs, monkeypatch)
+
+        for sym in ("ETHUSDT", "SOLUSDT", "ADAUSDT"):
+            s = _make_signal(symbol=sym, direction=Direction.LONG, confidence=90)
+            s.signal_id = f"PREFILL-{sym}"
+            router._active_signals[s.signal_id] = s
+            router._position_lock[s.symbol] = s.direction
+
+        short_sig = _make_signal(symbol="BNBUSDT", direction=Direction.SHORT, confidence=90)
+        short_sig.signal_id = "TEST-SHORT-OK"
+        short_sig.entry = 32000
+        short_sig.stop_loss = 32100
+        short_sig.tp1 = 31870
+        short_sig.tp2 = 31700
+        await q.put(short_sig)
+        task = asyncio.create_task(router.start())
+        await asyncio.sleep(0.3)
+        await router.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert "TEST-SHORT-OK" in router.active_signals
+
+    @pytest.mark.asyncio
+    async def test_cap_zero_blocks_all(self, monkeypatch):
+        """cap=0 means no same-direction signals can ever be routed."""
+        msgs = []
+        q = asyncio.Queue()
+        router = self._make_router_with_cap(0, q, msgs, monkeypatch)
+
+        sig = _make_signal(symbol="ETHUSDT", direction=Direction.LONG, confidence=90)
+        sig.signal_id = "TEST-CAP-ZERO"
+        await q.put(sig)
+        task = asyncio.create_task(router.start())
+        await asyncio.sleep(0.3)
+        await router.stop()
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+        assert "TEST-CAP-ZERO" not in router.active_signals
 
 
 def _make_mock_redis(stored: dict):
