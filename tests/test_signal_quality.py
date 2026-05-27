@@ -33,16 +33,17 @@ def _candles(base: float = 100.0, trend: float = 1.0, n: int = 60) -> dict:
 
 
 def _signal(channel: str = "360_SCALP", direction: Direction = Direction.LONG):
-    # Default stop_loss = 1.5% from entry — fits within the tightest per-setup
-    # SL cap (DIVERGENCE_CONTINUATION = 1.5%) so any reject-policy protected
-    # setup test that uses this fixture without overriding stop_loss won't
-    # hit `protected_structural_sl_cap_exceeded_reject_not_compress`.
+    # Default stop_loss = 1.1% from entry — fits within the tightest per-setup
+    # SL cap (SR_FLIP_RETEST = 1.2%, LIQUIDITY_SWEEP_REVERSAL = 1.2%) so any
+    # reject-policy protected setup test that uses this fixture without
+    # overriding stop_loss won't hit
+    # `protected_structural_sl_cap_exceeded_reject_not_compress`.
     # Direction-aware: for SHORT, SL must be ABOVE entry, TPs BELOW.
     # Tests that need a wider SL override `signal.stop_loss` locally.
     if direction == Direction.LONG:
-        stop_loss, tp1, tp2, tp3 = 98.5, 104.0, 108.0, 112.0
+        stop_loss, tp1, tp2, tp3 = 98.9, 104.0, 108.0, 112.0
     else:
-        stop_loss, tp1, tp2, tp3 = 101.5, 96.0, 92.0, 88.0
+        stop_loss, tp1, tp2, tp3 = 101.1, 96.0, 92.0, 88.0
     return SimpleNamespace(
         channel=channel,
         direction=direction,
@@ -1512,6 +1513,7 @@ class TestFamilyAwareTP:
         (SetupClass.WHALE_MOMENTUM, 0.02),                   # per-setup 2.0% (compress)
         (SetupClass.TREND_PULLBACK_CONTINUATION, 0.03),      # no per-setup cap → channel 3.0%
         (SetupClass.RANGE_REJECTION, 0.015),                 # per-setup 1.5% (compress)
+        (SetupClass.LIQUIDITY_SWEEP_REVERSAL, 0.012),        # per-setup 1.2% (compress, tightened)
     ])
     def test_sl_cap_enforced_for_compress_families(self, setup, expected_cap):
         """Compress-policy setups: SL is clamped to the tighter of channel cap
@@ -1565,6 +1567,7 @@ class TestFamilyAwareTP:
     @pytest.mark.parametrize("setup", [
         SetupClass.LIQUIDATION_REVERSAL,        # per-setup 2.0% reject
         SetupClass.DIVERGENCE_CONTINUATION,     # per-setup 1.5% reject
+        SetupClass.SR_FLIP_RETEST,              # per-setup 1.2% reject (tightened from 2.5%)
     ])
     def test_sl_cap_rejects_for_reject_families(self, setup):
         """Reject-policy setups must REJECT when wide structure produces SL >
