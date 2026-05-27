@@ -1499,6 +1499,22 @@ INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC: int = int(
     os.getenv("INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC", "120")
 )
 
+# Per-setup minimum age for adverse excursion — deliberately SHORTER than
+# the corresponding INVALIDATION_MIN_AGE_SECONDS entry so that fast-moving
+# losing signals (e.g. SR_FLIP hitting SL in < 4 min) are caught before the
+# main patience gate opens.  Regime/EMA/momentum checks still sit behind the
+# full patience window; adverse excursion is purely price-derived and safe to
+# fire earlier.
+#
+# SR_FLIP 90s  — main patience 240s; early window catches 90–240s losers
+# LSR     120s — main patience 300s; early window catches 120–300s losers
+#
+# Env-overridable per B8.
+INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_BY_SETUP: Dict[str, int] = {
+    "360_SCALP::SR_FLIP_RETEST": int(os.getenv("INVALIDATION_ADV_EXC_AGE_SR_FLIP", "90")),
+    "360_SCALP::LIQUIDITY_SWEEP_REVERSAL": int(os.getenv("INVALIDATION_ADV_EXC_AGE_LSR", "120")),
+}
+
 # ---------------------------------------------------------------------------
 # Geo-block for Play Store launch (PLAYSTORE_PLAN.md A6 + E2).
 #
