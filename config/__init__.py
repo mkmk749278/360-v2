@@ -1308,6 +1308,19 @@ MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
     "360_SCALP_ORDERBLOCK": int(os.getenv("MAX_SCALP_ORB_SIGNALS", "3")),
 }
 
+# Global same-direction cap (Correlation Throttle).
+#
+# Top-75 USDT-M futures pairs are 0.85-0.95 correlated to BTC.  When BTC
+# dumps, every LONG alt SL fires simultaneously — 5 concurrent LONGs means
+# 5 simultaneous full-SL losses on a single BTC move.  This cap limits the
+# blast radius to MAX_SAME_DIRECTION_GLOBAL open positions in the same
+# direction at any moment, globally across all channels and symbols.
+#
+# Default 3: empirically one BTC-direction move at 2-5× leverage hits at
+# most ~3 of our pairs before the dump exhausts.  Env-overridable per B8
+# so the operator can widen on low-volatility days without a redeploy.
+MAX_SAME_DIRECTION_GLOBAL: int = int(os.getenv("MAX_SAME_DIRECTION_GLOBAL", "3"))
+
 # ---------------------------------------------------------------------------
 # Anti-noise: minimum signal lifespan before SL/TP checks are applied (secs)
 # ---------------------------------------------------------------------------
