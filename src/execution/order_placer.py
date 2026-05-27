@@ -308,6 +308,43 @@ class OrderPlacer:
             signal_id=signal_id,
         )
 
+    async def place_pretp_limit(
+        self,
+        *,
+        signal_id: str,
+        symbol: str,
+        direction: str,
+        limit_price: float,
+        quantity: float,
+    ) -> OrderPlacementResult:
+        """REDUCE_ONLY GTC LIMIT order for the pre-TP partial close.
+
+        Placed at dispatch time (alongside SL/TP) at the pre-TP threshold
+        price so the fill is passive (maker pricing, zero poll lag).
+
+        Uses the same ``coid_pretp`` client order id as the tick-based
+        MARKET path so ``_apply_pretp_fill`` handles both fill origins
+        identically.  ``pretp_order_id != 0`` on the position is the
+        sentinel that tells ``should_fire_pretp`` not to MARKET-chase.
+        """
+        from src.execution import symbol_filters as _sf
+        rounded = _sf.round_price(symbol, limit_price)
+        params = {
+            "symbol": symbol,
+            "side": _exit_side(direction),
+            "type": "LIMIT",
+            "price": _price_str(rounded),
+            "quantity": _qty_str(quantity),
+            "reduceOnly": "true",
+            "timeInForce": "GTC",
+            "newClientOrderId": _position_state.coid_pretp(signal_id),
+        }
+        return await self._submit_order(
+            params=params,
+            phase="pretp_limit",
+            signal_id=signal_id,
+        )
+
     async def place_market_close(
         self,
         *,

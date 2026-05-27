@@ -554,6 +554,13 @@ def _placer_with_mock_results() -> MagicMock:
             ),
         ]
     )
+    # PR-C: native pre-TP LIMIT placed at dispatch time.
+    placer.place_pretp_limit = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=4001, client_order_id="lumin_sig-1_pretp",
+            status="NEW", avg_price=0.0, binance_body={},
+        )
+    )
     return placer
 
 
@@ -587,6 +594,7 @@ async def test_place_signal_places_entry_then_sl_then_3_tps() -> None:
     placer.place_market_entry.assert_awaited_once()
     placer.place_stop_loss.assert_awaited_once()
     assert placer.place_take_profit.await_count == 3
+    placer.place_pretp_limit.assert_awaited_once()
     # Persisted at least twice: once after entry, once after all
     # placements complete.
     assert len(persisted) >= 2
@@ -597,6 +605,7 @@ async def test_place_signal_places_entry_then_sl_then_3_tps() -> None:
     assert final.tp1_order_id == 3001
     assert final.tp2_order_id == 3002
     assert final.tp3_order_id == 3003
+    assert final.pretp_order_id == 4001
 
 
 @pytest.mark.asyncio
@@ -666,6 +675,111 @@ async def test_place_signal_tolerates_sl_failure() -> None:
     assert result.sl_order_id == 0  # didn't land
     # TPs still attempted.
     assert placer.place_take_profit.await_count == 3
+
+
+# ---------------------------------------------------------------------------
+# PR-C: native pre-TP LIMIT placement at dispatch time
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_place_signal_places_native_pretp_limit() -> None:
+    """step 6: LIMIT placed at pretp_threshold_price for
+    pretp_fraction of total_qty.  pretp_order_id is captured on the
+    returned position."""
+    placer = _placer_with_mock_results()
+    persisted: list = []
+    with patch.object(
+        position_state, "put_position", side_effect=lambda p: persisted.append(p)
+    ):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            pretp_fraction=0.5,
+            order_placer_factory=lambda uid: placer,
+        )
+    placer.place_pretp_limit.assert_awaited_once()
+    kw = placer.place_pretp_limit.call_args.kwargs
+    assert kw["signal_id"] == "sig-1"
+    assert kw["symbol"] == "BTCUSDT"
+    assert kw["direction"] == "LONG"
+    # limit_price is the computed threshold (entry * 1.0032 default)
+    assert kw["limit_price"] > 29000.0
+    # quantity = total_qty * pretp_fraction = 0.5
+    assert abs(kw["quantity"] - 0.5) < 1e-6
+    assert result.pretp_order_id == 4001
+
+
+@pytest.mark.asyncio
+async def test_place_signal_skips_pretp_limit_when_fraction_zero() -> None:
+    """PR-F allowlist suppression: pretp_fraction=0 must skip the
+    native LIMIT entirely.  pretp_order_id stays 0."""
+    placer = _placer_with_mock_results()
+    with patch.object(position_state, "put_position"):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            pretp_fraction=0.0,
+            order_placer_factory=lambda uid: placer,
+        )
+    placer.place_pretp_limit.assert_not_called()
+    assert result.pretp_order_id == 0
+    # Verify clamping fix: pretp_fraction stored as 0.0, not 0.30.
+    assert result.pretp_fraction == 0.0
+
+
+@pytest.mark.asyncio
+async def test_place_signal_tolerates_pretp_limit_failure() -> None:
+    """Best-effort: if the native LIMIT fails, position is still
+    returned with pretp_order_id=0.  The tick-based fallback will
+    fire MARKET when mark price crosses threshold."""
+    placer = _placer_with_mock_results()
+    placer.place_pretp_limit = AsyncMock(
+        side_effect=order_placer.OrderRejectedByBinance("price too far")
+    )
+    with patch.object(position_state, "put_position"):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            pretp_fraction=0.5,
+            order_placer_factory=lambda uid: placer,
+        )
+    # Must not raise; pretp_order_id stays 0 so fallback can fire.
+    assert result.pretp_order_id == 0
+    assert result.entry_order_id == 1001
 
 
 # ---------------------------------------------------------------------------
