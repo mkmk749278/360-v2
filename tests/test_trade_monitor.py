@@ -2530,6 +2530,112 @@ class TestSignalInvalidation:
         reason = monitor._check_invalidation(sig)
         assert reason is None or "adverse excursion" not in reason.lower()
 
+    # ── Early adverse excursion (fires before main patience gate) ──
+
+    def test_sr_flip_adverse_excursion_fires_before_patience_gate(self):
+        """SR_FLIP: adverse excursion fires at 120s (< 240s patience gate).
+
+        The early gate opens at 90s for SR_FLIP.  A signal at 120s that has
+        already moved 1.0% adverse (= 40% of 2.5% SL) should be killed even
+        though the main 240s patience gate is still closed.
+        """
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=120,          # past 90s early gate, before 240s patience gate
+            entry=100.0,
+            stop_loss=97.5,           # 2.5% SL
+        )
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.current_price = 99.0     # 1.0% adverse = exactly 40% of 2.5% SL
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 100.05, "ema21_last": 100.0,
+                "momentum": 0.0, "atr_last": 0.5,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None, (
+            "SR_FLIP at 120s with 1.0% adverse (past 90s early gate) should "
+            "be killed before the 240s patience gate opens"
+        )
+        assert "adverse excursion" in reason.lower()
+
+    def test_sr_flip_too_young_for_early_adverse_excursion(self):
+        """SR_FLIP: no kill when signal is younger than the 90s early gate."""
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=60,           # below 90s early gate
+            entry=100.0,
+            stop_loss=97.5,
+        )
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.current_price = 98.0     # well past threshold, but age gate blocks
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {"momentum": -0.5},
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None, (
+            f"SR_FLIP at 60s should not fire (early gate requires >= 90s), got: {reason!r}"
+        )
+
+    def test_lsr_adverse_excursion_fires_before_patience_gate(self):
+        """LSR: adverse excursion fires at 180s (< 300s patience gate).
+
+        The early gate opens at 120s for LSR.  A signal at 180s that has
+        moved 0.81% adverse (> 40% of 2.0% SL) should be killed.
+        """
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=180,          # past 120s early gate, before 300s patience gate
+            entry=100.0,
+            stop_loss=98.0,           # 2.0% SL
+        )
+        sig.setup_class = "LIQUIDITY_SWEEP_REVERSAL"
+        sig.current_price = 99.19    # 0.81% adverse > 0.8% threshold (fp-safe)
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 100.05, "ema21_last": 100.0,
+                "momentum": 0.0, "atr_last": 0.5,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None, (
+            "LSR at 180s with >0.8% adverse (past 120s early gate) should "
+            "be killed before the 300s patience gate opens"
+        )
+        assert "adverse excursion" in reason.lower()
+
+    def test_early_adverse_excursion_skipped_when_in_profit(self):
+        """Early adverse excursion must not fire when signal is already profitable.
+
+        If the signal has moved > 0.5 × SL_dist in the right direction, the
+        profit-protection gate fires first and returns None — even if the
+        current price then dips within the early-adverse window.
+        """
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=120,
+            entry=100.0,
+            stop_loss=97.5,
+        )
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.current_price = 101.5    # 1.5% profit = 60% of 2.5% SL_dist — in profit zone
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {"momentum": 0.0},
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None, (
+            f"Profit-protection gate should block early adverse excursion, got: {reason!r}"
+        )
+
 
 class TestOnHighlightCallback:
     """TradeMonitor.on_highlight_callback is called for TP2/TP3 but not TP1 or SL."""

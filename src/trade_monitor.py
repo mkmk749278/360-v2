@@ -16,6 +16,7 @@ from config import (
     CHANNEL_TELEGRAM_MAP,
     INVALIDATION_ADVERSE_EXCURSION_FRACTION,
     INVALIDATION_ADVERSE_EXCURSION_FRACTION_BY_SETUP,
+    INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_BY_SETUP,
     INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC,
     INVALIDATION_CONSECUTIVE_THRESHOLD,
     INVALIDATION_MIN_AGE_SECONDS,
@@ -779,19 +780,13 @@ class TradeMonitor:
         """
         is_long = sig.direction == Direction.LONG
 
-        # Age gate — ALL invalidation checks require minimum age to avoid
-        # reacting to 1m candle noise and killing trades too early.
-        # Per-setup override key: "{channel}::{setup_class}" — reversal and
-        # flip-structure setups (LSR=300s, SR_FLIP=240s) need longer patience
-        # than trend-following setups to let the post-entry move establish.
+        # Metadata used by every check below.
         _setup_class = getattr(sig, "setup_class", "") or ""
         _setup_key = f"{sig.channel}::{_setup_class}"
         min_age = INVALIDATION_MIN_AGE_SECONDS.get(
             _setup_key, INVALIDATION_MIN_AGE_SECONDS.get(sig.channel, 120)
         )
         age_secs = (utcnow() - sig.timestamp).total_seconds()
-        if age_secs < min_age:
-            return None  # Too young for any invalidation
 
         # DCA grace period — give the averaged position time to develop before
         # allowing invalidation to close it prematurely.
@@ -828,6 +823,75 @@ class TradeMonitor:
         # (handled outside this function) can close the signal.  No regime,
         # EMA, or momentum kill.
         if mode == "loose":
+            return None
+
+        # ---- EARLY PRICE-BASED GATES (before main patience gate) ----
+        # Profit-protection and adverse excursion only need current price —
+        # no candle indicators required.  They run HERE, before the main
+        # patience gate, so that fast-moving losing signals (SR_FLIP hitting
+        # SL in < 4 min, LSR in < 5 min) are caught even while the regime /
+        # EMA / momentum checks are still in their patience window.
+        _entry_px = sig.entry if sig.entry > 0 else sig.current_price
+        _sl_px = getattr(sig, "stop_loss", 0.0) or 0.0
+        _sl_dist = abs(_entry_px - _sl_px) if (_sl_px > 0 and _entry_px > 0) else 0.0
+
+        # Profit-protection: already > 0.5 × SL_dist in profit → treat any
+        # adverse excursion as intra-trade noise; reset momentum counter.
+        if _sl_dist > 0 and sig.current_price > 0:
+            _favorable = (sig.current_price - _entry_px) if is_long else (_entry_px - sig.current_price)
+            if _favorable > _sl_dist * 0.5:
+                sig.momentum_invalidation_count = 0
+                return None
+
+        # Early adverse excursion — fires at a per-setup min-age that is
+        # shorter than the main patience gate (90s SR_FLIP / 120s LSR vs
+        # 240s / 300s respectively).  Momentum is checked via indicators_fn
+        # when available; treated as non-confirming when absent (conservative).
+        _adv_exc_early_age = INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_BY_SETUP.get(
+            _setup_key, INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
+        )
+        if (
+            _sl_dist > 0
+            and sig.current_price > 0
+            and sig.status not in ("TP1_HIT", "TP2_HIT")
+            and not getattr(sig, "pretp_fired", False)
+            and age_secs >= _adv_exc_early_age
+        ):
+            _adv_exc_fraction = INVALIDATION_ADVERSE_EXCURSION_FRACTION_BY_SETUP.get(
+                _setup_key, INVALIDATION_ADVERSE_EXCURSION_FRACTION
+            )
+            _adverse = (_entry_px - sig.current_price) if is_long else (sig.current_price - _entry_px)
+            if _adverse >= _sl_dist * _adv_exc_fraction:
+                _early_ind: Optional[dict] = None
+                if self._indicators_fn is not None:
+                    try:
+                        _early_ind = self._indicators_fn(sig.symbol)
+                    except Exception:
+                        pass
+                _mom_thr = INVALIDATION_MOMENTUM_THRESHOLD.get(sig.channel, 0.15)
+                _mom_now = _early_ind.get("momentum") if _early_ind else None
+                _mom_ok = (
+                    _mom_now is not None
+                    and (
+                        (is_long and _mom_now > _mom_thr)
+                        or (not is_long and _mom_now < -_mom_thr)
+                    )
+                )
+                if not _mom_ok:
+                    _adv_pct = (_adverse / _entry_px) * 100.0 if _entry_px > 0 else 0.0
+                    _adv_frac = _adverse / _sl_dist
+                    _mom_str = f"{_mom_now:.3f}" if _mom_now is not None else "none"
+                    return (
+                        f"adverse excursion ({_adv_pct:+.2f}% against, "
+                        f"{_adv_frac:.2f}×SL_dist, momentum={_mom_str} "
+                        f"not confirming) – signal thesis invalidated"
+                    )
+
+        # ---- MAIN PATIENCE GATE (regime / EMA / momentum checks) ----
+        # Reversal and flip-structure setups (SR_FLIP=240s, LSR=300s) need
+        # the post-entry reversal to establish before pattern-reading checks
+        # are allowed to fire.  Price-based gates already ran above.
+        if age_secs < min_age:
             return None
 
         # Build an indicators dict for regime detection and EMA/momentum checks.
