@@ -33,11 +33,10 @@ def _candles(base: float = 100.0, trend: float = 1.0, n: int = 60) -> dict:
 
 
 def _signal(channel: str = "360_SCALP", direction: Direction = Direction.LONG):
-    # Default stop_loss = 1.1% from entry — fits within the tightest per-setup
-    # SL cap (SR_FLIP_RETEST = 1.2%, LIQUIDITY_SWEEP_REVERSAL = 1.2%) so any
-    # reject-policy protected setup test that uses this fixture without
-    # overriding stop_loss won't hit
-    # `protected_structural_sl_cap_exceeded_reject_not_compress`.
+    # Default stop_loss = 1.1% from entry — within the tightest per-setup SL
+    # cap (DIVERGENCE_CONTINUATION = 1.5%, SR_FLIP_RETEST = 2.5%) so
+    # reject-policy tests that use this fixture without overriding stop_loss
+    # won't accidentally hit `protected_structural_sl_cap_exceeded_reject_not_compress`.
     # Direction-aware: for SHORT, SL must be ABOVE entry, TPs BELOW.
     # Tests that need a wider SL override `signal.stop_loss` locally.
     if direction == Direction.LONG:
@@ -1349,12 +1348,15 @@ class TestFamilyAwareTP:
         assert risk.tp2 > risk.tp1
         assert risk.tp3 is not None and risk.tp3 > risk.tp2
 
-    def test_breakout_tp1_larger_than_sweep_reversal(self):
-        """BREAKOUT_RETEST tp1 must be further than LIQUIDITY_SWEEP_REVERSAL tp1."""
-        bko = _risk_plan_for(SetupClass.BREAKOUT_RETEST)
+    def test_lsr_tp1_preserved_from_evaluator(self):
+        """LIQUIDITY_SWEEP_REVERSAL is now in STRUCTURAL_SLTP_PROTECTED_SETUPS, so
+        its evaluator-authored TP1 is preserved rather than overridden by generic
+        R-multiple logic.  Fixture has tp1=104.0; verify that's what comes back."""
         sweep = _risk_plan_for(SetupClass.LIQUIDITY_SWEEP_REVERSAL)
-        assert bko.tp1 > sweep.tp1, (
-            "Breakout tp1 should extend further than sweep-reversal tp1"
+        assert sweep.passed, f"LSR plan failed unexpectedly: {sweep.reason}"
+        # Evaluator tp1=104.0 preserved (not recomputed to generic R-multiple)
+        assert sweep.tp1 == pytest.approx(104.0, abs=0.01), (
+            f"LSR evaluator TP1 should be preserved at 104.0, got {sweep.tp1}"
         )
 
     # ── Divergence / swing continuation family ─────────────────────────────
@@ -1513,7 +1515,6 @@ class TestFamilyAwareTP:
         (SetupClass.WHALE_MOMENTUM, 0.02),                   # per-setup 2.0% (compress)
         (SetupClass.TREND_PULLBACK_CONTINUATION, 0.03),      # no per-setup cap → channel 3.0%
         (SetupClass.RANGE_REJECTION, 0.015),                 # per-setup 1.5% (compress)
-        (SetupClass.LIQUIDITY_SWEEP_REVERSAL, 0.012),        # per-setup 1.2% (compress, tightened)
     ])
     def test_sl_cap_enforced_for_compress_families(self, setup, expected_cap):
         """Compress-policy setups: SL is clamped to the tighter of channel cap
@@ -1567,7 +1568,8 @@ class TestFamilyAwareTP:
     @pytest.mark.parametrize("setup", [
         SetupClass.LIQUIDATION_REVERSAL,        # per-setup 2.0% reject
         SetupClass.DIVERGENCE_CONTINUATION,     # per-setup 1.5% reject
-        SetupClass.SR_FLIP_RETEST,              # per-setup 1.2% reject (tightened from 2.5%)
+        SetupClass.SR_FLIP_RETEST,              # per-setup 2.5% reject (reverted from 1.2%)
+        SetupClass.LIQUIDITY_SWEEP_REVERSAL,    # per-setup 2.0% reject (changed from compress)
     ])
     def test_sl_cap_rejects_for_reject_families(self, setup):
         """Reject-policy setups must REJECT when wide structure produces SL >

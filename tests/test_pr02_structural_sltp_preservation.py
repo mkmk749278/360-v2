@@ -282,6 +282,7 @@ class TestProtectedPathsPreserveSLTP:
             SetupClass.TREND_PULLBACK_EMA,
             SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
             SetupClass.SR_FLIP_RETEST,
+            SetupClass.LIQUIDITY_SWEEP_REVERSAL,  # added: sweep-low/high SL is structural; reject>compress
             SetupClass.LIQUIDATION_REVERSAL,
             SetupClass.DIVERGENCE_CONTINUATION,
             SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -521,7 +522,8 @@ class TestNonProtectedPathsUnchanged:
         SetupClass.BREAKOUT_RETEST,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.MOMENTUM_EXPANSION,
-        SetupClass.LIQUIDITY_SWEEP_REVERSAL,
+        # LIQUIDITY_SWEEP_REVERSAL removed: now in STRUCTURAL_SLTP_PROTECTED_SETUPS
+        # (sweep-low/high SL is structural; evaluator TPs are preserved)
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.WHALE_MOMENTUM,
     ])

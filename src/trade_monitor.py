@@ -15,6 +15,7 @@ from config import (
     ALL_CHANNELS,
     CHANNEL_TELEGRAM_MAP,
     INVALIDATION_ADVERSE_EXCURSION_FRACTION,
+    INVALIDATION_ADVERSE_EXCURSION_FRACTION_BY_SETUP,
     INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC,
     INVALIDATION_CONSECUTIVE_THRESHOLD,
     INVALIDATION_MIN_AGE_SECONDS,
@@ -941,7 +942,11 @@ class TradeMonitor:
                 (_entry_px - sig.current_price) if is_long
                 else (sig.current_price - _entry_px)
             )
-            _adverse_threshold = _sl_dist * INVALIDATION_ADVERSE_EXCURSION_FRACTION
+            _adv_exc_key = f"{sig.channel}::{_setup_class}"
+            _adv_exc_fraction = INVALIDATION_ADVERSE_EXCURSION_FRACTION_BY_SETUP.get(
+                _adv_exc_key, INVALIDATION_ADVERSE_EXCURSION_FRACTION
+            )
+            _adverse_threshold = _sl_dist * _adv_exc_fraction
             if _adverse >= _adverse_threshold:
                 _mom_thr_adv = INVALIDATION_MOMENTUM_THRESHOLD.get(sig.channel, 0.15)
                 _momentum_now = indicators.get("momentum") if indicators else None

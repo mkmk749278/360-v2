@@ -1466,6 +1466,28 @@ INVALIDATION_ADVERSE_EXCURSION_FRACTION: float = float(
     os.getenv("INVALIDATION_ADVERSE_EXCURSION_FRACTION", "0.55")
 )
 
+# Per-setup adverse-excursion fraction overrides.
+#
+# SR_FLIP_RETEST (2.5% SL) and LIQUIDITY_SWEEP_REVERSAL (2.0% SL) have wide
+# structural stops by design.  At the global 0.55 fraction the early-exit gate
+# wouldn't fire until 1.375% adverse (2.5% × 0.55) — too late to limit damage.
+#
+# At 0.40 fraction:
+#   SR_FLIP  exits at 2.5% × 0.40 = 1.0% adverse (if momentum not confirming)
+#   LSR      exits at 2.0% × 0.40 = 0.8% adverse (if momentum not confirming)
+#
+# This matches the effective loss cap that PR #513's artificial SL compression
+# was targeting, without placing the stop inside the structural zone.  When
+# momentum IS confirming the signal still runs — the gate is skipped.
+INVALIDATION_ADVERSE_EXCURSION_FRACTION_BY_SETUP: Dict[str, float] = {
+    "360_SCALP::SR_FLIP_RETEST": float(
+        os.getenv("INVALIDATION_ADV_EXC_SR_FLIP", "0.40")
+    ),
+    "360_SCALP::LIQUIDITY_SWEEP_REVERSAL": float(
+        os.getenv("INVALIDATION_ADV_EXC_LSR", "0.40")
+    ),
+}
+
 # Minimum age gate for adverse_excursion.  Defaults to match the
 # 360_SCALP function-level INVALIDATION_MIN_AGE_SECONDS gate (600s)
 # so this rule cannot fire any earlier than the engine's baseline
