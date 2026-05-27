@@ -73,6 +73,14 @@ class SignalDetail(BaseModel):
     )
     timestamp: datetime
     minutes_ago: int
+    hold_mins: Optional[int] = Field(
+        None,
+        description=(
+            "Closed signals: dispatch→terminal duration in minutes (actual hold time). "
+            "Active signals: minutes since dispatch (trade age). "
+            "None when dispatch_timestamp is unavailable."
+        ),
+    )
 
 
 class SignalsResponse(BaseModel):
