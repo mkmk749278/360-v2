@@ -1055,6 +1055,11 @@ class Scanner:
         # Telegram digest and data-driven threshold tuning.
         self.suppression_tracker: SuppressionTracker = SuppressionTracker()
 
+        # Regime Kill Switch: blocks new signals when BTC is in whipsaw.
+        # See src/regime_kill_switch.py for detection algorithm and tuning.
+        from src.regime_kill_switch import BtcRegimeKillSwitch
+        self._regime_kill_switch: BtcRegimeKillSwitch = BtcRegimeKillSwitch()
+
         # --- PR 01-08 new module instances --------------------------------
         # PR 01: High-probability filter (pair probability scoring)
         self.suppression_logger: SuppressionLogger = SuppressionLogger()
@@ -3816,6 +3821,29 @@ class Scanner:
                 return False
         except Exception as exc:
             log.debug("level-in-play check error (fail-open): {}", exc)
+
+        # ── Regime Kill Switch ────────────────────────────────────────────
+        # Block dispatch when BTC is in a whipsaw regime (direction efficiency
+        # < threshold over the last 4h of 15m candles).  Tape-driven setups
+        # (WHALE_MOMENTUM / FUNDING_EXTREME_SIGNAL / LIQUIDATION_REVERSAL)
+        # are exempt — their thesis is to trade the chaos, not avoid it.
+        # Fails-open when BTC data is unavailable (warmup, feed drop).
+        try:
+            _btc_15m = self.data_store.get_candles("BTCUSDT", "15m") or {}
+            _rks_blocked, _rks_reason = self._regime_kill_switch.check(sig, _btc_15m)
+            if _rks_blocked:
+                _sc_rks = getattr(sig, "setup_class", "UNKNOWN")
+                self._suppression_counters[f"regime_kill:{_sc_rks}"] += 1
+                self._suppression_counters["enqueue_stage:regime_kill"] += 1
+                log.info(
+                    "regime_kill skip {} {} — {}",
+                    getattr(sig, "symbol", "?"),
+                    _sc_rks,
+                    _rks_reason,
+                )
+                return False
+        except Exception as exc:
+            log.debug("regime-kill check error (fail-open): {}", exc)
 
         # Stamp pre-TP threshold + trigger price using the ATR observed at
         # dispatch.  Locks the promise shown in the Telegram post; trade-

@@ -4,6 +4,92 @@
 
 ---
 
+## In-session checkpoint 2026-05-27 (session 7) — Signal profitability: 5 PRs (SL orphan fix, direction quality, WHALE rebalance, correlation throttle, regime kill switch)
+
+### Theme
+
+Root-cause analysis of "SLs eating profits." Five PRs shipped addressing the three structural causes: (1) BEATUSDT-style stale-symbol SL orphans, (2) direction quality on reversal/flip setups, (3) over-concentration in one direction during BTC chop. Test suite: 5208 passed, 0 failed.
+
+### PRs shipped this session
+
+| PR | Title | Status |
+|---|---|---|
+| **#514** | fix: mark-price fallback for stale-symbol SL orphans (BEATUSDT −6.52% root cause) | open — pending review |
+| **#515** | feat: direction quality — per-setup invalidation patience + SR_FLIP 4H penalty + DIV_CONT 4H conflict penalty | open — pending review |
+| **#516** | feat: lower WHALE_MOMENTUM thresholds to unsilence the path ($250k→$100k, $500k→$200k) | open — pending review |
+| **#517** | feat: global same-direction Correlation Throttle (cap 3 concurrent LONGs, cap 3 concurrent SHORTs) | open — pending review |
+| **#518** | feat: BTC whipsaw Regime Kill Switch (efficiency < 0.20 over 4h blocks new dispatch) | open — pending review |
+
+### Root causes fixed
+
+**BEATUSDT SHORT at −6.52% ACTIVE with SL blown (PR #514):**
+- `_latest_price()` returns `None` for symbols that fell out of the scan universe after dispatch (surge-promoted or tier-3 pairs not continuously re-scanned)
+- `_process_signal()` exited early → SL/TP/invalidation never evaluated → PnL grinds without bound
+- Fix: fallback to `MarkPriceFeed.get_price(symbol)` which covers ALL Binance USDT-M via `!markPrice@arr@1s`
+
+**Premature invalidation kills — reversal setups (PR #515):**
+- LSR (16/147 PREMATURE) and SR_FLIP (17/175 PREMATURE) were killing correct-direction trades during normal post-entry reversal dynamics that resolve within 2–4 min
+- Fix: `INVALIDATION_MIN_AGE_SECONDS` extended to per-setup keys: LSR=300s, SR_FLIP=240s
+
+**Direction quality — DIV_CONT + SR_FLIP 4H penalties (PR #515):**
+- BEATUSDT SHORT fired on 1H divergence while 4H EMA21 > EMA50 (bullish structure) — direction was structurally wrong
+- DIV_CONT 4H conflict penalty: −6 pts when 4H EMA trend opposes 1H-determined direction
+- SR_FLIP 4H-only penalty: −3.5 pts when only 4H (not 1H) opposes (extends existing both-TF penalty)
+
+**WHALE_MOMENTUM silent (PR #516):**
+- 0 signals from 308,669 attempts even after 2026-05-11 $1M→$250k cut
+- Both gates still calibrated for BTC ticket sizes, not alt universe
+- `WHALE_TRADE_USD_THRESHOLD`: $250k → $100k (80th-percentile alt single trade)
+- `_WHALE_MIN_TICK_VOLUME_USD`: $500k → $200k (achievable on active alts outside peak hours)
+
+**Over-concentration in one direction (PR #517):**
+- Existing `check_correlation_limit` only covers ~25 named pairs in static groups
+- Long tail of alts (BEATUSDT, AZTECUSDT, NILUSDT, PHAUSDT) bypasses it entirely
+- Added global same-direction cap: max `MAX_SAME_DIRECTION_GLOBAL=3` active LONGs / SHORTs simultaneously
+- LONG and SHORT counted independently; env-overridable
+
+**Dispatch during BTC chop (PR #518):**
+- Structural setups have ~50/50 directional probability when BTC efficiency < 0.20 (range mostly wasted on back-and-forth)
+- Detection: `net_move / total_range` over 4h of 15m candles, guard `total_range ≥ 1.5% of price`
+- Exemptions: WHALE_MOMENTUM, FUNDING_EXTREME_SIGNAL, LIQUIDATION_REVERSAL (tape-driven — their thesis is to trade the chaos)
+- Fail-open on missing BTC data; all thresholds env-overridable
+
+### New constants (B8 env-overridable)
+
+| Constant | Default | Module |
+|---|---|---|
+| `MAX_SAME_DIRECTION_GLOBAL` | 3 | `config/__init__.py` |
+| `REGIME_KILL_ENABLED` | true | `src/regime_kill_switch.py` |
+| `REGIME_KILL_LOOKBACK` | 16 | `src/regime_kill_switch.py` |
+| `REGIME_KILL_EFFICIENCY_MIN` | 0.20 | `src/regime_kill_switch.py` |
+| `REGIME_KILL_MIN_RANGE_PCT` | 1.5 | `src/regime_kill_switch.py` |
+| `INVALIDATION_MIN_AGE_SECONDS["360_SCALP::LIQUIDITY_SWEEP_REVERSAL"]` | 300 | `config/__init__.py` |
+| `INVALIDATION_MIN_AGE_SECONDS["360_SCALP::SR_FLIP_RETEST"]` | 240 | `config/__init__.py` |
+| `_SR_FLIP_H4_ONLY_PENALTY` | 3.5 | `src/channels/scalp.py` |
+| `_DIV_CONT_H4_CONFLICT_PENALTY` | 6.0 | `src/channels/scalp.py` |
+| `WHALE_TRADE_USD_THRESHOLD` | 100k | `src/detector.py` |
+| `_WHALE_MIN_TICK_VOLUME_USD` | 200k | `src/channels/scalp.py` |
+
+### New files
+
+| File | Purpose |
+|---|---|
+| `src/regime_kill_switch.py` | `BtcRegimeKillSwitch` + `evaluate_btc_whipsaw()` pure function |
+| `tests/test_regime_kill_switch.py` | 17 tests |
+
+### Owner decision queue
+
+1. **Merge PRs #514–#518** — all independent, no ordering dependency
+2. **Monitor WHALE_MOMENTUM** after merge: expect path to start generating signals; first truth-report window after merge will show `evaluator_no_signal_reason:recent_ticks_insufficient` drop significantly
+3. **Tune Regime Kill Switch if too aggressive**: if signal volume drops >30%, raise `REGIME_KILL_EFFICIENCY_MIN` from 0.20 to 0.15 (env var, no redeploy needed)
+4. **PR-C (pre-TP native LIMIT)** — still awaiting owner sign-off on FSM transition change
+
+### Test suite state
+
+5208 passed, 63 skipped, 48 xfailed, 19 xpassed (baseline was 5195 entering this session)
+
+---
+
 ## In-session checkpoint 2026-05-26 (session 6) — 9-PR roadmap COMPLETE (C pending sign-off)
 
 ### Status
