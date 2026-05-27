@@ -1309,6 +1309,19 @@ MAX_CONCURRENT_SIGNALS_PER_CHANNEL: Dict[str, int] = {
 }
 
 # ---------------------------------------------------------------------------
+# Regime Kill Switch — BTC whipsaw detection
+# ---------------------------------------------------------------------------
+# Detailed documentation in src/regime_kill_switch.py.  These constants are
+# referenced here for documentation/discoverability; the authoritative values
+# live in the module-level env reads in regime_kill_switch.py (B8 compliant).
+#
+# REGIME_KILL_ENABLED            — master on/off (env: REGIME_KILL_ENABLED)
+# REGIME_KILL_LOOKBACK           — 15m candles to examine (env: REGIME_KILL_LOOKBACK, default 16 = 4h)
+# REGIME_KILL_EFFICIENCY_MIN     — efficiency below which BTC is whipsaw (env: REGIME_KILL_EFFICIENCY_MIN, default 0.20)
+# REGIME_KILL_MIN_RANGE_PCT      — min BTC range % for gate to activate (env: REGIME_KILL_MIN_RANGE_PCT, default 1.5%)
+# REGIME_KILL_EXEMPT_SETUPS      — tape-driven setups that bypass the gate (env: REGIME_KILL_EXEMPT_SETUPS)
+
+# ---------------------------------------------------------------------------
 # Anti-noise: minimum signal lifespan before SL/TP checks are applied (secs)
 # ---------------------------------------------------------------------------
 MIN_SIGNAL_LIFESPAN_SECONDS: Dict[str, int] = {
