@@ -28,15 +28,15 @@ def _env_float(name: str, default: float) -> float:
 
 
 # B8 compliance: whale-trade USD threshold must be env-overridable so the
-# operator can tune it without a redeploy.  Default $250k (lowered from
-# $1M on 2026-05-11): the original $1M was calibrated against BTC trade
-# tickets and effectively never fired on the alt-pair universe (truth
-# report: WHALE_MOMENTUM 99.92% momentum_reject, with the upstream
-# whale_alert + volume_delta_spike both starved of triggers).  $250k
-# is roughly the 95th-percentile single-trade ticket across top-75 alts —
-# frequent enough to wake the path up, large enough to remain a
-# meaningful "size" signal.
-WHALE_TRADE_USD_THRESHOLD: float = _env_float("WHALE_TRADE_USD_THRESHOLD", 250_000.0)
+# operator can tune it without a redeploy.  Default $100k (lowered from
+# $250k on 2026-05-27, and from $1M on 2026-05-11): truth report showed
+# WHALE_MOMENTUM still producing 0 signals from 308k attempts even after
+# the first cut to $250k.  $100k is the 80th-percentile single-trade
+# ticket across top-75 alts — captures meaningful institutional flow
+# without excluding mid-cap pairs whose tickets rarely exceed $200k.
+# Companion change: _WHALE_MIN_TICK_VOLUME_USD in scalp.py also lowered
+# $500k → $200k so the per-tick flow gate doesn't kill the path first.
+WHALE_TRADE_USD_THRESHOLD: float = _env_float("WHALE_TRADE_USD_THRESHOLD", 100_000.0)
 
 # Multiplier for `detect_volume_delta_spike` — fires when the absolute
 # cumulative-delta is >= multiplier × average per-side flow.  Was
