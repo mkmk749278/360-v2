@@ -158,6 +158,7 @@ STRUCTURAL_SLTP_PROTECTED_SETUPS: frozenset[SetupClass] = frozenset({
     SetupClass.TREND_PULLBACK_EMA,
     SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
     SetupClass.SR_FLIP_RETEST,
+    SetupClass.LIQUIDITY_SWEEP_REVERSAL,  # Sweep-low/high SL is structural; compress distorts it
     SetupClass.LIQUIDATION_REVERSAL,    # Fibonacci retrace TPs (Type D — Reversion)
     SetupClass.DIVERGENCE_CONTINUATION, # swing-based TPs from divergence detection window
     SetupClass.FUNDING_EXTREME_SIGNAL,  # liquidation-cluster SL + structural FVG/OB TP1
@@ -393,14 +394,14 @@ _MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
     "EXHAUSTION_FADE":                2.0,  # Wick extremes can extend; still compress
     "WHALE_MOMENTUM":                 2.0,  # Swing-based; generous for momentum entries
     "OPENING_RANGE_BREAKOUT":         2.0,  # Range height dependent
-    "LIQUIDITY_SWEEP_REVERSAL":       1.2,  # Sweep SL beyond 1.2% → compress; ≤1.2% = scalp-sized
     # Reject-policy setups (structural SL must be honest or signal is dropped)
+    "LIQUIDITY_SWEEP_REVERSAL":       2.0,  # Sweep-low/high SL — reverted; reject>compress (see PR #513 revert)
     "DIVERGENCE_CONTINUATION":        1.5,  # EMA21 ± 0.5%; fixed geometry — rare to exceed
     "LIQUIDATION_REVERSAL":           2.0,  # Cascade ± 0.3%; typical 0.3-0.5%
     "VOLUME_SURGE_BREAKOUT":          2.0,  # Fixed 0.8% structural SL
     "BREAKDOWN_SHORT":                2.0,  # Mirror of VSB
     "CONTINUATION_LIQUIDITY_SWEEP":   2.0,  # Sweep - 0.3×ATR; typical 0.3-0.75%
-    "SR_FLIP_RETEST":                 1.2,  # Tightened from 2.5% — scalp doctrine cap
+    "SR_FLIP_RETEST":                 2.5,  # Reverted from 1.2%; invalidation handles early exit
     "POST_DISPLACEMENT_CONTINUATION": 2.5,  # Consolidation-based; typical 0.5-0.75%
     "FAILED_AUCTION_RECLAIM":         3.0,  # False-breakdown depth; 1.95% seen live
     "QUIET_COMPRESSION_BREAK":        3.0,  # BB lower + 0.5×ATR; 2.08% seen live

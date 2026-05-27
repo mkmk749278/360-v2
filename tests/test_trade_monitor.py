@@ -2421,6 +2421,115 @@ class TestSignalInvalidation:
         reason = monitor._check_invalidation(sig)
         assert reason is None or "adverse excursion" not in reason.lower()
 
+    # ── Per-setup fraction overrides (PR revert: SR_FLIP 2.5%, LSR 2.0%) ──
+
+    def test_sr_flip_adverse_excursion_uses_0_40_fraction(self):
+        """SR_FLIP_RETEST uses 0.40 fraction so exits at 40% of 2.5% SL = 1.0% adverse.
+
+        Global fraction is 0.55 — without per-setup override, exit would wait
+        until 1.375% adverse (0.55 × 2.5%) which is far too late.
+        SR_FLIP patience is 240s, so signal must be at least 270s old.
+        """
+        channel = "360_SCALP"
+        # SR_FLIP min-age = 240s; use 270s to clear both the function-level gate
+        # and the adverse-excursion per-rule gate.
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=270,
+            entry=100.0,
+            stop_loss=97.5,  # 2.5% SL distance
+        )
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.current_price = 99.0  # 40% of 2.5% = 1.0% adverse
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 100.05, "ema21_last": 100.0,
+                "momentum": 0.0, "atr_last": 0.5,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None
+        assert "adverse excursion" in reason.lower(), (
+            f"SR_FLIP should fire at 40% of 2.5% SL (1.0% adverse), got: {reason!r}"
+        )
+
+    def test_sr_flip_does_not_fire_below_40_pct_threshold(self):
+        """SR_FLIP_RETEST: adverse excursion must NOT fire when price is only
+        30% of SL distance adverse (below the 0.40 threshold)."""
+        channel = "360_SCALP"
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=270,
+            entry=100.0,
+            stop_loss=97.5,  # 2.5% SL; 40% threshold = 1.0% adverse → price 99.0
+        )
+        sig.setup_class = "SR_FLIP_RETEST"
+        sig.current_price = 99.25  # only 0.75% adverse — below 1.0% threshold
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 100.05, "ema21_last": 100.0,
+                "momentum": 0.0, "atr_last": 0.5,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None or "adverse excursion" not in reason.lower()
+
+    def test_lsr_adverse_excursion_uses_0_40_fraction(self):
+        """LIQUIDITY_SWEEP_REVERSAL uses 0.40 fraction: exits at 40% of 2.0% SL = 0.8% adverse.
+        LSR patience = 300s; signal must be at least 330s old.
+        """
+        channel = "360_SCALP"
+        # LSR min-age = 300s; use 330s.
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=330,
+            entry=100.0,
+            stop_loss=98.0,  # 2.0% SL; 40% threshold = 0.8% adverse → price 99.2
+        )
+        sig.setup_class = "LIQUIDITY_SWEEP_REVERSAL"
+        sig.current_price = 99.19  # 0.81% adverse — just above 0.8% threshold (fp-safe)
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 100.05, "ema21_last": 100.0,
+                "momentum": 0.0, "atr_last": 0.5,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is not None
+        assert "adverse excursion" in reason.lower(), (
+            f"LSR should fire at 40% of 2.0% SL (0.8% adverse), got: {reason!r}"
+        )
+
+    def test_generic_setup_still_uses_global_055_fraction(self):
+        """Non-override setups still use the global 0.55 fraction.
+
+        TREND_PULLBACK_EMA with a 1.0% SL: global 0.55 threshold = 0.55% adverse.
+        Below that (0.4% adverse) should not fire.
+        """
+        from config import INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
+        channel = "360_SCALP"
+        # 1.0% SL: entry=100, SL=99.0 → 55% = 0.55% adverse → threshold at 99.45
+        sig = _make_signal(
+            channel=channel,
+            age_seconds=INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC + 30,
+            entry=100.0,
+            stop_loss=99.0,
+        )
+        sig.setup_class = "TREND_PULLBACK_EMA"
+        sig.current_price = 99.6  # 0.4% adverse — below 0.55 threshold, must not fire
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            indicators_fn=lambda sym: {
+                "ema9_last": 100.05, "ema21_last": 100.0,
+                "momentum": 0.0, "atr_last": 0.5,
+            },
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None or "adverse excursion" not in reason.lower()
+
 
 class TestOnHighlightCallback:
     """TradeMonitor.on_highlight_callback is called for TP2/TP3 but not TP1 or SL."""
