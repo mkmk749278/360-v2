@@ -115,8 +115,12 @@ def should_fire_pretp(
         return False
     if position.state != _position_state.PositionState.OPEN:
         return False
+    if position.pretp_fraction <= 0:
+        return False  # pre-TP suppressed by allowlist (PR-F)
     if position.pretp_threshold_price <= 0:
         return False
+    if position.pretp_order_id != 0:
+        return False  # native LIMIT already on book — wait for fill event (PR-C)
     if mark_price <= 0:
         return False
     if position.side == "LONG":

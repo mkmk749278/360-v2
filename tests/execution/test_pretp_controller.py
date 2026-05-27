@@ -162,6 +162,24 @@ def test_should_not_fire_when_mark_price_invalid() -> None:
     assert not pretp_controller.should_fire_pretp(position=pos, mark_price=-1.0)
 
 
+def test_should_not_fire_when_pretp_fraction_zero() -> None:
+    """PR-F allowlist suppression guard: pretp_fraction=0 means pre-TP
+    is entirely disabled for this position — tick-based MARKET must
+    not fire even if mark price has crossed the threshold."""
+    pos = _open_long_position()
+    pos.pretp_fraction = 0.0
+    assert not pretp_controller.should_fire_pretp(position=pos, mark_price=99999.0)
+
+
+def test_should_not_fire_when_native_limit_on_book() -> None:
+    """PR-C guard: if pretp_order_id != 0, the native LIMIT is already
+    resting on Binance's book.  The tick-based MARKET path must not
+    fire to avoid a double close."""
+    pos = _open_long_position()
+    pos.pretp_order_id = 12345  # native LIMIT placed at dispatch time
+    assert not pretp_controller.should_fire_pretp(position=pos, mark_price=99999.0)
+
+
 # ---------------------------------------------------------------------------
 # fire_pretp — actual order placement
 # ---------------------------------------------------------------------------

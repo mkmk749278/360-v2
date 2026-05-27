@@ -545,7 +545,11 @@ async def place_signal(
     from . import pretp_controller as _pretp
 
     # Clamp pretp_fraction to B17 [0.30, 1.0] floor/ceiling.
-    pretp_fraction_clamped = max(0.30, min(1.0, pretp_fraction))
+    # 0.0 (or negative) passes through unchanged — PR-F allowlist uses 0
+    # to suppress pre-TP entirely; clamping 0→0.30 would defeat that.
+    pretp_fraction_clamped = (
+        0.0 if pretp_fraction <= 0 else max(0.30, min(1.0, pretp_fraction))
+    )
     pretp_threshold_price = _pretp.compute_pretp_threshold_price(
         entry_price=entry_price,
         direction=direction,
@@ -680,6 +684,33 @@ async def place_signal(
                 reject_binance_code=b_code,
                 reject_binance_msg=b_msg,
             )
+
+    # Step 6: native pre-TP LIMIT (PR-C).  Placed here at dispatch time
+    # so it rests on Binance's book passively — no tick polling needed.
+    # Best-effort: a failure leaves pretp_order_id=0, which lets the
+    # tick-based MARKET fallback in pretp_controller run instead.
+    if pretp_fraction_clamped > 0 and pretp_threshold_price > 0:
+        from src.execution import symbol_filters as _sf
+        pretp_qty = _sf.round_qty(
+            symbol, total_qty * pretp_fraction_clamped
+        )
+        if pretp_qty > 0:
+            try:
+                pretp_lim_result = await placer.place_pretp_limit(
+                    signal_id=signal_id,
+                    symbol=symbol,
+                    direction=direction,
+                    limit_price=pretp_threshold_price,
+                    quantity=pretp_qty,
+                )
+                position.pretp_order_id = pretp_lim_result.order_id
+            except _order_placer.OrderPlacementError as exc:
+                log.warning(
+                    "place_signal: pre-TP LIMIT placement failed — "
+                    "tick-based MARKET fallback will fire instead "
+                    "uid={} signal_id={} exc={}",
+                    firebase_uid, signal_id, exc,
+                )
 
     # Re-persist with all order ids captured.
     _position_state.put_position(position)
