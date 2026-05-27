@@ -586,6 +586,22 @@ class TradeMonitor:
         async def _process_signal(sig: Signal) -> None:
             price = self._latest_price(sig.symbol)
             if price is None:
+                # Fallback: the mark-price feed covers every Binance USDT-M
+                # futures symbol via !markPrice@arr@1s — including symbols that
+                # fell out of the scan universe after dispatch (surge-promoted
+                # or Tier-3 pairs that aren't continuously re-scanned).  Without
+                # this, a signal on a stale symbol gets `price = None` on every
+                # 5s tick and returns early here forever — SL never fires, PnL
+                # grinds without bound.  BEATUSDT SHORT at -6.52% while SL was
+                # blown through is the canonical example.
+                try:
+                    from src.execution import mark_price_feed as _mpf
+                    _feed = _mpf.get_instance()
+                    if _feed is not None:
+                        price = _feed.get_price(sig.symbol)
+                except Exception:
+                    pass
+            if price is None:
                 return
             sig.current_price = price
             # Auto-execution: attempt to place an order the first time we see
