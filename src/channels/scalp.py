@@ -73,8 +73,19 @@ _DIV_CONT_15M_LOOKBACK_MIN: int = int(os.getenv("DIV_CONT_15M_LOOKBACK_MIN", "6"
 
 # WHALE_MOMENTUM thresholds (absorbed from former TapeChannel).  Env-overridable
 # per B8 so operators can tune for current market conditions without redeploy.
+#
+# WHALE_DELTA_MIN_RATIO stays at 2.0 — this is the direction-conviction gate
+# (buy_vol must be 2× sell_vol or vice versa).  Loosening direction conviction
+# would degrade signal quality.
+#
+# WHALE_MIN_TICK_VOLUME_USD lowered 500k → 200k on 2026-05-27 after truth report
+# showed WHALE_MOMENTUM at 0 signals from 308k attempts.  21% of rejections were
+# at this gate (`recent_ticks_insufficient`).  $500k of cumulative tick volume in
+# the last 100 trades was achievable only on the top 5-10 pairs at peak hours;
+# $200k captures the broader top-75 alt universe while still requiring real
+# continuous flow (avg $2k/tick × 100 ticks).
 _WHALE_DELTA_MIN_RATIO: float = float(os.getenv("WHALE_DELTA_MIN_RATIO", "2.0"))
-_WHALE_MIN_TICK_VOLUME_USD: float = float(os.getenv("WHALE_MIN_TICK_VOLUME_USD", "500000"))
+_WHALE_MIN_TICK_VOLUME_USD: float = float(os.getenv("WHALE_MIN_TICK_VOLUME_USD", "200000"))
 _WHALE_OBI_MIN: float = float(os.getenv("WHALE_OBI_MIN", "1.5"))
 
 # VSB / BREAKDOWN_SHORT breakout-candle volume threshold (was hardcoded 2.0).
