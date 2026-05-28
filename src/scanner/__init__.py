@@ -424,7 +424,10 @@ _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES: frozenset[str] = frozenset({
     "breakout_momentum",
     "continuation",
     "orderflow_momentum",
-    "divergence",
+    # "divergence" removed: DIV_CONT sources direction from 1H EMA21/50 and
+    # detects on 15m CVD — not from 5m momentum.  The evaluator's own
+    # h1_trend_not_aligned hard-reject is the correct gate for this family.
+    # Blocking on low-ADX ranging is redundant and incorrect post-HTF-refactor.
     # Fail closed for unmapped/new setup classes until explicitly classified.
     "other",
 })
