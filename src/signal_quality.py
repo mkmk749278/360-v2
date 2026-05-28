@@ -316,6 +316,11 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         # PR-01: divergence and orderblock are valid at range boundaries
         SetupClass.RSI_MACD_DIVERGENCE,
         SetupClass.SMC_ORDERBLOCK,
+        # DIV_CONT direction comes from 1H EMA21/50 (not 5m regime); 15m CVD is the
+        # detection source.  The evaluator hard-rejects when 1H trend is absent.
+        # Blocking on 5m market state was a leftover from the old 5m-based
+        # implementation; it contradicts the HTF-Structure-LTF-Entry doctrine.
+        SetupClass.DIVERGENCE_CONTINUATION,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -328,6 +333,10 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.FAILED_AUCTION_RECLAIM,
         # PR-01: divergence valid in dirty range (trend exhaustion detection)
         SetupClass.RSI_MACD_DIVERGENCE,
+        # DIV_CONT: same rationale as CLEAN_RANGE above.  The 4H-conflict penalty
+        # (6 pts) and the QUIET regime multiplier (1.8×) apply additional pressure
+        # in noisy conditions, so the scoring tier handles quality filtering.
+        SetupClass.DIVERGENCE_CONTINUATION,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
