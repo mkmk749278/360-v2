@@ -321,6 +321,13 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         # Blocking on 5m market state was a leftover from the old 5m-based
         # implementation; it contradicts the HTF-Structure-LTF-Entry doctrine.
         SetupClass.DIVERGENCE_CONTINUATION,
+        # WHALE_MOMENTUM: evaluator is "internally direction-driven" per OWNER_BRIEF
+        # §3.4 and explicitly not regime-gated — the whale_alert + volume_delta_spike
+        # + OBI thesis gates already guarantee no signal fires without genuine flow.
+        # Not including it here contradicts the documented architecture and silently
+        # drops valid whale-flow signals that arrive before the regime classifier
+        # catches up to a news-driven spike.
+        SetupClass.WHALE_MOMENTUM,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -337,6 +344,8 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         # (6 pts) and the QUIET regime multiplier (1.8×) apply additional pressure
         # in noisy conditions, so the scoring tier handles quality filtering.
         SetupClass.DIVERGENCE_CONTINUATION,
+        # WHALE_MOMENTUM: same rationale as CLEAN_RANGE above.
+        SetupClass.WHALE_MOMENTUM,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
