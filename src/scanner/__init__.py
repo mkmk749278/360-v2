@@ -392,6 +392,54 @@ _SCALP_SETUP_TO_FAMILY: Dict[str, str] = {
     "DIVERGENCE_CONTINUATION": "divergence",
 }
 
+# OWNER_BRIEF §3.4 + §3.2 #4 doctrine alignment — MTF hard-block exempt setups.
+#
+# §3.4 explicitly assigns these setup classes "None" HTF treatment:
+#   - Tape-driven: WHALE / LIQUIDATION_REVERSAL / FUNDING_EXTREME — direction
+#     comes from realtime order flow (tick imbalance / cascade / funding sign),
+#     not from candle-EMA structure.  An EMA-alignment hard veto is
+#     structurally orthogonal to the thesis.
+#   - Breakout: VSB / BDS / ORB — "fires in any HTF context."  The breakout
+#     event is the thesis; whether 1H/4H EMAs happen to align is a separate
+#     statistical property the confidence score already consumes via
+#     `mtf_aligned_count`.
+#
+# Per §3.2 #4 ("soft penalties over hard blocks; reserve hard blocks for
+# structural-impossibility checkpoints"), these paths must not be hard-
+# vetoed by the MTF gate.  Their structural quality is enforced upstream
+# by their own thesis gates inside the evaluator (whale_alert + OBI +
+# delta-imbalance for WHALE; cascade detection for LIQ_REVERSAL; funding
+# extreme for FUNDING; breakout_not_found + volume_spike + ema_alignment
+# for VSB/BDS/ORB) and downstream by confidence scoring + the 65 paid-tier
+# floor.  The MTF score is still computed — it just stops being a veto.
+#
+# Setups NOT exempt:
+#   - LSR / FAR (counter-trend by design): family cap 0.35 already provides
+#     the doctrine-faithful relaxation; their evaluators already apply the
+#     1H+4H-both-oppose soft penalty internally.
+#   - SR_FLIP / QCB (structure with optional counter-trend): same — family
+#     cap + evaluator-side soft penalty already aligned.
+#   - TPE / DIV_CONT / CLS / PDC (trend-aligned): regime gate is the
+#     operative HTF check; an EMA-alignment threshold inside a TRENDING
+#     regime is consistent with their thesis.
+#
+# Set MTF_DOCTRINE_BYPASS_ENABLED=false to restore the legacy hard-block
+# behaviour engine-wide (kill switch for diagnosis / rollback).
+_SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS: frozenset[str] = frozenset({
+    # Tape-driven (§3.4 row 2)
+    "WHALE_MOMENTUM",
+    "LIQUIDATION_REVERSAL",
+    "FUNDING_EXTREME_SIGNAL",
+    # Breakout — fires in any HTF context (§3.4 row 5)
+    "VOLUME_SURGE_BREAKOUT",
+    "BREAKDOWN_SHORT",
+    "OPENING_RANGE_BREAKOUT",
+})
+
+_MTF_DOCTRINE_BYPASS_ENABLED: bool = os.getenv(
+    "MTF_DOCTRINE_BYPASS_ENABLED", "true"
+).lower() not in ("0", "false", "no", "off")
+
 _SCALP_MTF_POLICY_BY_FAMILY: Dict[str, Dict[str, Optional[float]]] = {
     # Explicitly intentional: TREND_PULLBACK_EMA stays on generic regime-driven
     # strictness (no PR-1 cap override for trend-following family).
@@ -4532,14 +4580,46 @@ class Scanner:
                 if chan_name == "360_SCALP":
                     self._suppression_counters[f"mtf_gate_family:360_SCALP:{_setup_family}"] += 1
                     self._suppression_counters[f"mtf_gate_setup:360_SCALP:{_setup_class_name}"] += 1
-                self.suppression_tracker.record(SuppressionEvent(
-                    symbol=symbol,
-                    channel=chan_name,
-                    reason="mtf_gate",
-                    regime=_regime_key,
-                    would_be_confidence=sig.confidence,
-                ))
-                return _reject("gated", None)
+                # OWNER_BRIEF §3.4 + §3.2 #4 doctrine bypass: tape-driven and
+                # breakout setups are explicitly assigned "None" HTF treatment
+                # by §3.4.  Hard-vetoing them here contradicts doctrine and
+                # discards signals the evaluator's own thesis gates and the
+                # confidence floor would correctly classify.  The MTF score
+                # remains in the confidence calc; we just stop using it as a
+                # veto.  Non-exempt setups (counter-trend / structure / trend-
+                # aligned) keep the existing hard-block behaviour.
+                _doctrine_bypass = (
+                    chan_name == "360_SCALP"
+                    and _MTF_DOCTRINE_BYPASS_ENABLED
+                    and _setup_class_name in _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
+                )
+                if _doctrine_bypass:
+                    self._suppression_counters[
+                        f"mtf_doctrine_bypass:360_SCALP:{_setup_class_name}"
+                    ] += 1
+                    self._suppression_counters[
+                        f"mtf_doctrine_bypass_family:360_SCALP:{_setup_family}"
+                    ] += 1
+                    log.debug(
+                        "MTF doctrine-bypass {} {} setup={} ({}): "
+                        "OWNER_BRIEF §3.4 — no HTF gate for this path",
+                        symbol, chan_name, _setup_class_name, mtf_reason,
+                    )
+                    # Fall through to subsequent gates (VWAP / KZ / OI /
+                    # confidence floor / dispatch staleness etc.).  The
+                    # doctrine-faithful position is that MTF *score* is a
+                    # soft input to confidence (already wired) but never a
+                    # hard veto for these setup classes.
+                    mtf_allowed = True
+                else:
+                    self.suppression_tracker.record(SuppressionEvent(
+                        symbol=symbol,
+                        channel=chan_name,
+                        reason="mtf_gate",
+                        regime=_regime_key,
+                        would_be_confidence=sig.confidence,
+                    ))
+                    return _reject("gated", None)
             if chan_name == "360_SCALP" and _mtf_min_score < _generic_mtf_min_score:
                 _generic_allowed, _ = check_mtf_gate(
                     sig.direction.value,
