@@ -1239,11 +1239,10 @@ class Scanner:
 
             close = float(closes_5m[-1])
 
-            indicators: dict = {}
-            for tf in ("1m", "5m", "15m", "1h"):
-                ind = self.data_store.get_indicators(symbol, tf)
-                if ind:
-                    indicators[tf] = ind
+            _candle_dict_for_ind: dict = {
+                tf: candles[tf] for tf in ("1m", "5m", "15m", "1h") if tf in candles
+            }
+            indicators: dict = compute_indicators_for_candle_dict(_candle_dict_for_ind)
 
             ind5 = indicators.get("5m", {})
 
@@ -4812,9 +4811,13 @@ class Scanner:
         # IS fading the tape.  Fail-open on missing BTC data.
         if _gate_profile.get("btc_dir", True) and _BTC_DIRECTION_GATE_ENABLED:
             try:
-                _btc_ind_1h = self.data_store.get_indicators("BTCUSDT", "1h") or {}
-                _btc_ind_4h = self.data_store.get_indicators("BTCUSDT", "4h") or {}
+                _btc_cd_1h = self.data_store.get_candles("BTCUSDT", "1h") or {}
                 _btc_cd_4h = self.data_store.get_candles("BTCUSDT", "4h") or {}
+                _btc_inds_raw = compute_indicators_for_candle_dict(
+                    {k: v for k, v in {"1h": _btc_cd_1h, "4h": _btc_cd_4h}.items() if v}
+                )
+                _btc_ind_1h = _btc_inds_raw.get("1h", {})
+                _btc_ind_4h = _btc_inds_raw.get("4h", {})
                 btc_dir_allowed, btc_dir_reason = check_btc_direction_gate(
                     sig.direction.value,
                     _btc_ind_1h,
