@@ -4,55 +4,76 @@
 
 ---
 
+## State as of 2026-05-29 — Pre-launch audit COMPLETE. All 5 root-cause bugs resolved and merged.
+
+### System status
+
+**All audit-identified bugs are fixed and live on main.**  
+Test suite: **5275 passed, 63 skipped** on main.  
+Both repos (360-v2 + lumin-app) are clean and deploy-ready.
+
+### Audit bug resolution — complete
+
+| Bug (from owner screenshots) | Root Cause | Fix | PR | Status |
+|---|---|---|---|---|
+| Positions opening/closing in seconds, eating principal | Pre-TP master toggle (`enabled`) decorative — engine never read it | F1: `resolve_pretp_enabled_uid()` + dispatch gate + backstop skip | #526 | ✅ merged |
+| Pre-TP OFF but HBARUSDT showed ✓BANKED; FSM stranded | `_apply_pretp_fill` had no full-close terminal branch | F2: full-close (100% grab) → CLOSED + cancel all legs | #526 | ✅ merged |
+| Signals tab ACTIVE, Binance CLOSED | Engine-wide Signal never removed after 100% pre-TP | F3: finalize+remove on full_close in TradeMonitor | #527 | ✅ merged |
+| Per-user invalidation mode (loose/standard/tight) ignored | `_check_invalidation` read only global `INVALIDATION_MODE_DEFAULT` | F4: loose-mode exclusion on invalidation + tight-mode early kill per-user | #528 | ✅ merged |
+| Signals tab misleading (ACTIVE ≠ user open position) | No UI disclaimer; two state objects not explained | Signals AppBar subtitle + empty-state copy update | lumin-app #78 | ✅ merged |
+
+### Key architecture decisions locked in
+
+| Decision | Where |
+|---|---|
+| Per-user `invalidation_mode` enforced: loose survives engine INV kills; tight gets ATR-trailing kill before standard | `trade_monitor._check_per_user_invalidation` + `signal_dispatch.close_fsm_positions_for_signal(excluded_modes=)` |
+| Engine-wide Signal finalized + removed from active book on 100% pre-TP close | `trade_monitor._check_pre_tp_grab` |
+| FSM goes to CLOSED (not PRE_TP_FIRED) when grab_fraction=1.0 fills | `position_fsm._apply_pretp_fill` |
+| Pre-TP master toggle per-user respected: `resolve_pretp_enabled_uid()` zeroes grab fraction in dispatch | `signal_dispatch._one_user` + `user_overrides.resolve_pretp_enabled_uid` |
+
+### What remains open (not blocking launch)
+
+| Item | Status | Notes |
+|---|---|---|
+| **PR-C: pre-TP as native Binance LIMIT** | Awaiting owner sign-off (FSM transition change) | Would eliminate 5s poll lag + MARKET slippage on pre-TP. Not required for launch — current 5s backstop works. |
+| **Empty allowlist = allow-all semantics** | Owner chose not to fix (session 8) | `resolve_pretp_allowlists_uid` returns `None` for empty lists → allow-all. Low risk: most users don't set allowlists. |
+| **`protect_manual_entries` toggle** | Owner chose not to fix (session 8) | No engine read path. Zero user-visible impact until manual entries are common. |
+| **360 CE Ops diagnostic dashboard** | Not started | See `docs/360CE_OPS_PLAN.md`. Separate repo `mkmk749278/360ce-ops`. |
+
+### Owner decision queue
+
+1. **Launch** — all blocking bugs resolved, system is clean.
+2. **PR-C (pre-TP native LIMIT)** — approve FSM transition change when ready for the latency improvement.
+3. **Monitor first wave of multi-user live trading** — watch for per-user invalidation mode edge cases in prod.
+
+---
+
 ## In-session checkpoint 2026-05-29 (session 8) — Full audit resolution: F1+F2+F3 merged; F4 (per-user invalidation) + Signals UI clarity PRs open
-
-### Theme
-
-Completed the full pre-launch audit. Resolved all three root-cause bugs from owner screenshots (positions opening/closing within seconds, Pre-TP toggle silently ignored, Signals tab showing ACTIVE while Binance was flat). PRs #526+#527 (F1/F2/F3) already merged to main. This session implemented F4 (per-user invalidation enforcement) and the Signals vs Trade UI clarification approved by owner.
 
 ### PRs shipped this session
 
 | PR | Repo | Title | Status |
 |---|---|---|---|
-| **#528** | 360-v2 | feat(invalidation): enforce per-user invalidation mode on FSM positions (F4) | open — pending review |
-| **#78** | lumin-app | fix(signals): clarify Signals tab is engine-wide feed, not personal positions | open — pending review |
+| **#528** | 360-v2 | feat(invalidation): enforce per-user invalidation mode on FSM positions (F4) | ✅ merged |
+| **#78** | lumin-app | fix(signals): clarify Signals tab is engine-wide feed, not personal positions | ✅ merged |
 
 ### What F4 implements (PR #528)
 
 `Position.invalidation_mode` ("loose"/"standard"/"tight") stored since PR #509 now has a real enforcement path:
 
-**Loose mode** — users with `invalidation_mode="loose"` are NOT closed when the engine fires an INVALIDATED kill (regime flip, EMA crossover, momentum loss). Their native SL/TP bracket stays live; only SL_HIT, expired, or cancelled closes them. Implemented via `excluded_modes=frozenset({"loose"})` in `_broker_close_full` → `close_fsm_positions_for_signal`.
+**Loose mode** — users with `invalidation_mode="loose"` are NOT closed when the engine fires an INVALIDATED kill. `close_fsm_positions_for_signal` accepts `excluded_modes=frozenset({"loose"})`, passed by `_broker_close_full` when `reason="invalidated"`.
 
-**Tight mode** — users with `invalidation_mode="tight"` get the ATR-trailing kill even when `INVALIDATION_MODE_DEFAULT` is "standard". New `_check_per_user_invalidation` method runs in `_process_signal` before `_evaluate_signal`, closes just that user's FSM position via `close_single_fsm_position`. Engine signal unaffected.
+**Tight mode** — users with `invalidation_mode="tight"` get the ATR-trailing kill even when `INVALIDATION_MODE_DEFAULT` is "standard". `_check_per_user_invalidation` runs in `_process_signal` before `_evaluate_signal`, closes just that user's FSM position via new `close_single_fsm_position` helper.
 
 **Standard mode** — unchanged.
 
-**Also fixed**: 4 pre-existing test regressions from PR #527 (F3 guard `if sig.signal_id not in self._get_signals(): return` fired in tests that call `_evaluate_signal` directly with empty active-book). Guard now uses `_active_book and sig.signal_id not in _active_book`.
+**Also fixed**: 4 pre-existing test regressions from PR #527 (F3 guard fired in tests with empty active-book). Guard now uses `_active_book and sig.signal_id not in _active_book`.
 
-### What lumin-app PR #78 implements
-
-Signals tab AppBar now shows permanent subtitle: "Engine-wide feed  •  Your open positions → Trade tab". Empty-state copy (isLive path) clarified to explain ACTIVE signals ≠ personal open positions.
+New helpers: `get_fsm_positions_for_signal`, `close_single_fsm_position` in `signal_dispatch.py`.
 
 ### Test suite state (360-v2)
 
-5275 passed, 63 skipped, 49 xfailed, 18 xpassed (was 5266 entering session — 9 new F4 tests, 4 pre-existing F3 regressions fixed).
-
-### Root-cause bugs resolved (from owner screenshots — all now fixed or PR open)
-
-| Bug | Root Cause | Fix | Status |
-|---|---|---|---|
-| Positions opening/closing in seconds, eating principal | Pre-TP master toggle (`enabled`) was decorative — engine never read it | F1: `resolve_pretp_enabled_uid()` + dispatch gate | ✅ PR #526 merged |
-| Pre-TP toggle OFF but HBARUSDT showed ✓BANKED (100% grab = CLOSED but FSM stranded in PRE_TP_FIRED) | `_apply_pretp_fill` had no full-close terminal branch | F2: full-close → CLOSED in FSM | ✅ PR #526 merged |
-| Signals tab showed ACTIVE while Binance was CLOSED | Engine-wide Signal never removed from active book after 100% pre-TP | F3: finalize+remove on full_close in TradeMonitor | ✅ PR #527 merged |
-| Per-user invalidation mode ignored | `_check_invalidation` read only global `INVALIDATION_MODE_DEFAULT` | F4: loose-mode exclusion + tight-mode early kill | ⏳ PR #528 open |
-| Signals tab misleading (ACTIVE ≠ user open position) | No UI disclaimer — two separate state objects not explained | Signals page subtitle + empty-state copy | ⏳ lumin-app PR #78 open |
-
-### Owner decision queue
-
-1. **Review and merge PR #528** (F4 per-user invalidation) — 9 new tests, 5275 passing
-2. **Review and merge lumin-app PR #78** (Signals vs Trade UI clarity) — copy-only, no behavior change
-3. **Pre-launch checklist remaining**: all 5 audit bugs now resolved or in PR; system ready for multi-user launch
-4. **PR-C (pre-TP native LIMIT)** — still awaiting owner sign-off on FSM transition change
+5275 passed, 63 skipped, 49 xfailed, 18 xpassed.
 
 ---
 
