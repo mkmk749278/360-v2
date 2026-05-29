@@ -4,6 +4,59 @@
 
 ---
 
+## In-session checkpoint 2026-05-29 (session 10) — P2 performance: async SQLite + SWR persistence
+
+### Theme
+
+Implemented both remaining P2 performance items from the session 9 queue. PRs open, not yet merged.
+
+### PRs shipped this session
+
+| PR | Repo | Title | Status |
+|---|---|---|---|
+| **#532** | 360-v2 | perf(db): non-blocking SQLite via asyncio.to_thread in UserStore/UserOverridesStore | open — pending review |
+| **#80** | lumin-app | perf(swr): persist signals SWR cache to SharedPreferences for instant cold-open | open — pending review |
+
+### What PR #532 implements (360-v2)
+
+**`src/api/users.py`** — Added async `a*` wrapper methods to `UserStore`:
+`aget_by_id`, `aget_by_firebase_uid`, `aget_or_create_by_phone`, `aget_or_create_by_firebase_uid`, `aset_firebase_uid`, `aset_tier`, `aupdate_profile`, `adelete_by_id` — all dispatch to `asyncio.to_thread()`.
+
+**`src/api/user_overrides.py`** — Added async `a*` wrappers to `UserOverridesStore`:
+`aget_pretp`, `aupdate_pretp`, `aget_invalidation`, `aupdate_invalidation`, `aget_auto_trade`, `aupdate_auto_trade`, `aresume_user_auto_trade`.
+
+**`src/api/server.py`** — All ~20 synchronous store call sites replaced with `await store.a*()`. `_compute_needs_onboarding` and three `_build_user_*_view` closures made async.
+
+**`src/api/account_routes.py`** — `user_store.delete_by_id` → `await user_store.adelete_by_id`.
+
+**`tests/api/test_account_routes.py`** — Mocks updated from `MagicMock` to `AsyncMock` for awaited paths.
+
+Test suite: **5282 passed**, 63 skipped, 49 xfailed, 18 xpassed (7 net new passing tests from mock fix + async coverage).
+
+### What PR #80 implements (lumin-app)
+
+**`lib/data/mock_data.dart`** — Added `MockSignal.toMap()` (instance) and `MockSignal.fromMap()` (factory) covering all 19 fields for JSON round-trip serialization.
+
+**`lib/data/swr_cache.dart`** — `SwrCache.watch()` gains four new optional params:
+- `persistKey` — SharedPreferences key
+- `toJson` / `fromJson` — serialization callbacks
+- `maxPersistAge` (default 4 h) — discard stale cold-start data
+
+Persistence wrapper format: `{"v": <json>, "t": <epoch ms>}`. All SharedPreferences failures degrade silently to in-memory-only. Injectable `prefsFactory` for test isolation.
+
+**`lib/data/repository.dart`** — `HttpRepository.watchSignals` wired with `persistKey: 'swr_signals_${status}_$limit'` and serialization callbacks.
+
+### Pending queue
+
+| Item | Effort | Status |
+|---|---|---|
+| PR #532 — async SQLite | — | open, pending merge |
+| PR #80 — SWR persistence | — | open, pending merge |
+| PR-C (pre-TP native Binance LIMIT) | Awaiting FSM sign-off | deferred |
+| Tab stagger in NavShell | — | already implemented (`_visited` pattern) — no action |
+
+---
+
 ## In-session checkpoint 2026-05-29 (session 9) — Performance fixes: background snapshot cache + Cache-Control headers + persistent http.Client
 
 ### Theme
