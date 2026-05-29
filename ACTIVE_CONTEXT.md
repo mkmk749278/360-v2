@@ -8,14 +8,14 @@
 
 ### Theme
 
-Implemented both remaining P2 performance items from the session 9 queue. PRs open, not yet merged.
+Implemented both remaining P2 performance items from the session 9 queue. Both PRs merged.
 
 ### PRs shipped this session
 
 | PR | Repo | Title | Status |
 |---|---|---|---|
-| **#532** | 360-v2 | perf(db): non-blocking SQLite via asyncio.to_thread in UserStore/UserOverridesStore | open — pending review |
-| **#80** | lumin-app | perf(swr): persist signals SWR cache to SharedPreferences for instant cold-open | open — pending review |
+| **#532** | 360-v2 | perf(db): non-blocking SQLite via asyncio.to_thread in UserStore/UserOverridesStore | ✅ merged |
+| **#80** | lumin-app | perf(swr): persist signals SWR cache to SharedPreferences for instant cold-open | ✅ merged |
 
 ### What PR #532 implements (360-v2)
 
