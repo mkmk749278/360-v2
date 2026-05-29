@@ -1328,6 +1328,16 @@ class TradeMonitor:
         # have been a small NET LOSS at 10x leverage into a clean breakeven.
         await self._check_pre_tp_grab(sig, _c_high, _c_low)
 
+        # A full-close (100%) pre-TP finalizes the signal in-handler and removes
+        # it from the Open book — there is no residual left to run SL/TP
+        # against.  Detect that via active-book membership (NOT status, since
+        # TP1_HIT/TP2_HIT are legitimate open states that must keep processing)
+        # and stop here, so we don't fire the SL path against the just-ratcheted
+        # breakeven stop on a flat position (which would double-post a close and
+        # overwrite the banked outcome).
+        if sig.signal_id not in self._get_signals():
+            return
+
         _sl_triggered = (
             (is_long and _c_low > 0 and _c_low <= sig.stop_loss) or
             (not is_long and _c_high > 0 and _c_high >= sig.stop_loss)
@@ -2028,6 +2038,12 @@ class TradeMonitor:
                     sig.symbol, sig.signal_id, exc,
                 )
 
+        # Full-close pre-TP: the engine closed 100% (PRE_TP_GRAB_FRACTION=1.0).
+        # There is NO residual riding to TP1, so the signal must be finalized
+        # below rather than left ACTIVE waiting for a TP1/BE-SL fill that can
+        # never arrive (the orphan that showed signals ACTIVE forever).
+        full_close = partial_executed and grab_fraction >= 1.0 - 1e-9
+
         sig.pre_tp_hit = True
         sig.pre_tp_pct = favourable_pct
         sig.pre_tp_timestamp = utcnow()
@@ -2041,10 +2057,16 @@ class TradeMonitor:
                 getattr(sig, "partial_close_pct", 0.0) or 0.0,
                 grab_fraction,
             )
-            sig.execution_note += (
-                f" | Pre-TP closed {grab_fraction*100:.0f}% at +{favourable_pct:.2f}% raw, "
-                f"residual SL→breakeven"
-            )
+            if full_close:
+                sig.execution_note += (
+                    f" | Pre-TP closed 100% at +{favourable_pct:.2f}% raw — "
+                    f"position fully banked"
+                )
+            else:
+                sig.execution_note += (
+                    f" | Pre-TP closed {grab_fraction*100:.0f}% at +{favourable_pct:.2f}% raw, "
+                    f"residual SL→breakeven"
+                )
         else:
             # Broker-disabled fallback — preserve the pre-2026-05-17 behaviour
             # (SL ratchet only) so signal-only subscribers still get the
@@ -2101,12 +2123,20 @@ class TradeMonitor:
                     pct_closed = int(round(grab_fraction * 100))
                     pct_residual = 100 - pct_closed
                     realised_net = net_pct * grab_fraction
-                    free_msg = (
-                        f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
-                        f"Closed {pct_closed}% at +{favourable_pct:.2f}% raw "
-                        f"\\({realised_net:+.2f}% realised net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
-                        f"_{pct_residual}% rides to TP1 — SL at breakeven._"
-                    )
+                    if full_close:
+                        free_msg = (
+                            f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
+                            f"Closed 100% at +{favourable_pct:.2f}% raw "
+                            f"\\({net_pct:+.2f}% realised net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
+                            f"_Position fully banked._"
+                        )
+                    else:
+                        free_msg = (
+                            f"⚡ *Quick Win — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
+                            f"Closed {pct_closed}% at +{favourable_pct:.2f}% raw "
+                            f"\\({realised_net:+.2f}% realised net @ {PRE_TP_LEVERAGE:.0f}x after fees\\)\n"
+                            f"_{pct_residual}% rides to TP1 — SL at breakeven._"
+                        )
                 else:
                     free_msg = (
                         f"⚡ *Quick Move — {_escape_md(sig.symbol)} {sig.direction.value}*\n\n"
@@ -2138,6 +2168,21 @@ class TradeMonitor:
             partial_executed,
             grab_fraction,
         )
+
+        # Finalize the engine-wide Signal when the pre-TP was a 100% close.
+        # With no residual, no TP1/BE-SL fill will ever arrive, so without
+        # this the Signal would sit ACTIVE forever (orphaned on the Signals
+        # tab).  Mark realized PnL at the banked threshold, apply the terminal
+        # outcome label, and drop it from the Open book.  The pre-TP alert +
+        # free-channel post above are the close notification — we deliberately
+        # do NOT call _post_signal_closed here to avoid a duplicate close post.
+        # The caller (_process_signal) guards on ``sig.status != "ACTIVE"`` so
+        # it won't run the SL/TP path against this now-flat position.
+        if full_close:
+            self._set_realized_pnl(sig, target)
+            self._apply_final_outcome(sig, hit_tp=0, hit_sl=False)
+            self._remove(sig.signal_id)
+
         return True
 
     async def _post_signal_closed(

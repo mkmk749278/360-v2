@@ -816,3 +816,95 @@ async def test_short_atr_adaptive_low_vol_uses_floor(mock_send):
     assert fired is True
     assert sig.pre_tp_pct == pytest.approx(0.20, abs=0.01)
     assert sig.stop_loss == pytest.approx(entry)
+
+
+async def test_full_close_finalizes_and_removes_signal(mock_send):
+    """grab_fraction == 1.00 closes 100% of the position — there is NO residual
+    riding to TP1.  The engine-wide Signal must be finalized (terminal outcome
+    label) and removed from the Open book, not left ACTIVE forever.  This is the
+    orphan that showed signals ACTIVE in the app while the account was flat.
+    """
+    send, sent = mock_send
+    book: dict = {}
+    regime_detector = MagicMock()
+    regime_detector.classify.return_value = MagicMock(
+        regime=MagicMock(value="QUIET")
+    )
+    monitor = TradeMonitor(
+        data_store=MagicMock(),
+        send_telegram=send,
+        get_active_signals=lambda: book,
+        remove_signal=lambda sid: book.pop(sid, None),
+        update_signal=MagicMock(),
+        regime_detector=regime_detector,
+        indicators_fn=lambda sym: {"adx": 18.0, "ema_slope": 0.0},
+    )
+    sig = _make_signal(signal_tier="B")
+    book[sig.signal_id] = sig
+    target_high = 30000.0 * 1.0035
+
+    order_manager = AsyncMock()
+    order_manager.is_enabled = True
+    order_manager.close_partial.return_value = "fill-id-pre-tp"
+    monitor._order_manager = order_manager
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("src.trade_monitor.PRE_TP_GRAB_FRACTION", 1.00), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"), \
+         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    assert fired is True
+    # Finalized + removed from the Open book — no orphan.
+    assert sig.signal_id not in book
+    assert sig.status.upper() != "ACTIVE"
+    # PnL frozen at the banked threshold (100% × pre-TP move).
+    assert sig.pre_tp_pct > 0
+    assert sig.pnl_pct == pytest.approx(sig.pre_tp_pct)
+    # Free-channel wording reflects a full bank, not a riding residual.
+    free_msg = next(t for c, t in sent if c == "FREE-CHAN")
+    assert "Closed 100%" in free_msg
+    assert "fully banked" in free_msg
+    assert "rides to TP1" not in free_msg
+
+
+async def test_partial_close_keeps_signal_active_with_residual(mock_send):
+    """grab_fraction < 1.00 banks a partial and the residual rides to TP1 —
+    the Signal must STAY ACTIVE and remain in the Open book (regression guard
+    for the full-close finalize: it must not finalize a partial)."""
+    send, sent = mock_send
+    book: dict = {}
+    regime_detector = MagicMock()
+    regime_detector.classify.return_value = MagicMock(
+        regime=MagicMock(value="QUIET")
+    )
+    monitor = TradeMonitor(
+        data_store=MagicMock(),
+        send_telegram=send,
+        get_active_signals=lambda: book,
+        remove_signal=lambda sid: book.pop(sid, None),
+        update_signal=MagicMock(),
+        regime_detector=regime_detector,
+        indicators_fn=lambda sym: {"adx": 18.0, "ema_slope": 0.0},
+    )
+    sig = _make_signal(signal_tier="B")
+    book[sig.signal_id] = sig
+    target_high = 30000.0 * 1.0035
+
+    order_manager = AsyncMock()
+    order_manager.is_enabled = True
+    order_manager.close_partial.return_value = "fill-id-pre-tp"
+    monitor._order_manager = order_manager
+
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("src.trade_monitor.PRE_TP_GRAB_FRACTION", 0.50), \
+         patch("config.TELEGRAM_FREE_CHANNEL_ID", "FREE-CHAN"), \
+         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    assert fired is True
+    # Partial — still open, still in the book, residual rides to TP1.
+    assert sig.signal_id in book
+    assert sig.status == "ACTIVE"
+    free_msg = next(t for c, t in sent if c == "FREE-CHAN")
+    assert "rides to TP1" in free_msg
