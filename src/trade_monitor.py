@@ -651,6 +651,12 @@ class TradeMonitor:
                             sig.channel,
                             exc,
                         )
+            # Per-user tight-mode early kill (F4): run BEFORE engine-wide
+            # evaluation so tight-mode users get ATR-trailing closure even
+            # when INVALIDATION_MODE_DEFAULT is "standard".  Loose-mode
+            # users are excluded from the engine invalidation close inside
+            # _broker_close_full; nothing to do for them here.
+            await self._check_per_user_invalidation(sig)
             await self._evaluate_signal(sig)
 
         await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
@@ -752,7 +758,9 @@ class TradeMonitor:
             f"of peak at MFE_R={mfe_r:.2f}) – capital preserved"
         )
 
-    def _check_invalidation(self, sig: Signal) -> Optional[str]:
+    def _check_invalidation(
+        self, sig: Signal, *, mode_override: Optional[str] = None
+    ) -> Optional[str]:
         """Return an invalidation reason string if the signal's thesis is no longer valid.
 
         Mode-gated per OWNER_BRIEF B17 / §3.2a (capital preservation doctrine):
@@ -770,11 +778,10 @@ class TradeMonitor:
                          mode that prevents MFE-positive signals from
                          sliding all the way to full SL.
 
-        Engine-side uses ``INVALIDATION_MODE_DEFAULT`` (default ``standard``).
-        Per-user override from ``user_invalidation_settings.mode`` is consumed
-        by the Lumin app-side OrderExecutor when per-user execution lands
-        (Phase 4).  This engine path is owner-only auto-trade today; one mode
-        for the engine's signal lifecycle.
+        ``mode_override``: when provided, uses this mode instead of
+        ``INVALIDATION_MODE_DEFAULT``.  Used by the per-user tight/loose
+        enforcement path so each user's stored ``invalidation_mode`` is
+        applied rather than the engine-wide default.
 
         Returns ``None`` if the signal is still valid.
         """
@@ -795,9 +802,8 @@ class TradeMonitor:
             if dca_age < _DCA_GRACE_SECONDS:
                 return None
 
-        mode = INVALIDATION_MODE_DEFAULT.strip().lower() if INVALIDATION_MODE_DEFAULT else "standard"
-        if mode not in _VALID_INVALIDATION_MODES:
-            mode = "standard"
+        _raw_mode = (mode_override or INVALIDATION_MODE_DEFAULT or "standard").strip().lower()
+        mode = _raw_mode if _raw_mode in _VALID_INVALIDATION_MODES else "standard"
 
         # MFE protection (OWNER_BRIEF §3.2a, 2026-05-17) — applies to standard
         # and tight modes.  Skip ALL kill checks below when the signal has
@@ -1135,6 +1141,69 @@ class TradeMonitor:
 
         return None
 
+    async def _check_per_user_invalidation(self, sig: Signal) -> None:
+        """Enforce per-user invalidation mode for FSM positions that differ from
+        the engine-wide default.
+
+        Two enforcement paths:
+
+        * **Tight** users (``invalidation_mode="tight"``) get the ATR-trailing
+          kill that standard mode skips.  When the engine default is not
+          "tight", we run ``_check_invalidation`` with ``mode_override="tight"``
+          for each tight-mode user and close just their position if it fires.
+          The engine signal is not touched — other users are unaffected.
+
+        * **Loose** users are NOT closed here.  They are excluded from the
+          engine-wide close in ``_broker_close_full`` via ``excluded_modes``
+          when reason is "invalidated".
+
+        Called from ``_process_signal`` BEFORE the engine's global invalidation
+        check so tight-mode users always get the most protective treatment.
+        """
+        _global_mode = (INVALIDATION_MODE_DEFAULT or "standard").strip().lower()
+        if _global_mode not in _VALID_INVALIDATION_MODES:
+            _global_mode = "standard"
+
+        # Nothing to do for tight users when the engine already runs tight.
+        if _global_mode == "tight":
+            return
+
+        try:
+            from src.execution import signal_dispatch as _sd
+            user_positions = _sd.get_fsm_positions_for_signal(sig.signal_id)
+        except Exception as exc:
+            log.debug(
+                "_check_per_user_invalidation: get_fsm_positions_for_signal "
+                "failed signal_id={} exc={}",
+                sig.signal_id, exc,
+            )
+            return
+
+        for uid, pos in user_positions:
+            if pos.invalidation_mode != "tight":
+                continue
+            tight_reason = self._check_invalidation(sig, mode_override="tight")
+            if not tight_reason:
+                continue
+            log.info(
+                "_check_per_user_invalidation: tight-mode early kill "
+                "uid={} signal_id={} symbol={} reason={}",
+                uid, sig.signal_id, sig.symbol, tight_reason,
+            )
+            try:
+                await _sd.close_single_fsm_position(
+                    uid, sig.signal_id,
+                    symbol=sig.symbol,
+                    direction=sig.direction.value,
+                    reason="inv_tight",
+                )
+            except Exception as exc:
+                log.warning(
+                    "_check_per_user_invalidation: close_single_fsm_position "
+                    "failed uid={} signal_id={} exc={}",
+                    uid, sig.signal_id, exc,
+                )
+
     async def _evaluate_signal(self, sig: Signal) -> None:
         # Terminal-status guard (2026-05-08): if the signal already reached
         # a terminal lifecycle state, return immediately — re-evaluating
@@ -1335,7 +1404,11 @@ class TradeMonitor:
         # and stop here, so we don't fire the SL path against the just-ratcheted
         # breakeven stop on a flat position (which would double-post a close and
         # overwrite the banked outcome).
-        if sig.signal_id not in self._get_signals():
+        # Guard fires only when the book is non-empty AND the signal is absent —
+        # an empty book (e.g. direct test calls to _evaluate_signal) should not
+        # prematurely abort SL/TP evaluation.
+        _active_book = self._get_signals()
+        if _active_book and sig.signal_id not in _active_book:
             return
 
         _sl_triggered = (
@@ -1745,13 +1818,18 @@ class TradeMonitor:
         # ── Path 2: server-side FSM positions (per-user signing svc) ──
         # Cancel native bracket orders + MARKET-close for every user
         # who has a non-terminal FSM position for this signal_id.
+        # Exception: loose-mode users survive engine invalidations — their
+        # native SL/TP bracket is still live and they want to ride it out.
+        # Other close reasons (sl_hit, expired, cancelled) close everyone.
         try:
             from src.execution import signal_dispatch as _sd
+            _excl = frozenset({"loose"}) if reason == "invalidated" else None
             await _sd.close_fsm_positions_for_signal(
                 sig.signal_id,
                 symbol=sig.symbol,
                 direction=sig.direction.value,
                 reason=reason,
+                excluded_modes=_excl,
             )
         except Exception as exc:
             log.warning(
