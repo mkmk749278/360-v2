@@ -401,6 +401,50 @@ async def test_dispatch_skips_user_when_their_notional_too_low() -> None:
         assert called_uids == {"fb-B"}
 
 
+@pytest.mark.asyncio
+async def test_dispatch_zeroes_grab_fraction_when_pretp_disabled() -> None:
+    """Master pre-TP toggle (2026-05-29 fix).  A user who turned the
+    "Pre-TP grab" switch OFF must have grab_fraction zeroed at dispatch
+    so neither the FSM tick path nor the TradeMonitor backstop fires a
+    partial close — even if their stored grab_fraction is still 100%.
+    The position must still OPEN (place_signal is called) with full
+    SL/TP geometry; only pre-TP is suppressed.
+    """
+    from src.execution import position_fsm
+    from src.api import user_overrides
+
+    def _enabled(uid: str, default: bool = True) -> bool:
+        return uid != "fb-off"  # fb-off disabled pre-TP; fb-on left it on
+
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-off", "fb-on"]
+    ), patch.object(
+        user_overrides, "resolve_pretp_enabled_uid", side_effect=_enabled,
+    ), patch.object(
+        user_overrides, "resolve_grab_fraction_uid",
+        side_effect=lambda uid, default: 1.0,  # both stored 100%
+    ), patch.object(
+        position_fsm, "place_signal", new_callable=AsyncMock,
+    ) as mock_place:
+        placed = await signal_dispatch.dispatch_signal_to_active_users(
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+        )
+    assert placed == 2  # both positions still open
+    per_uid_fraction = {
+        call.kwargs["firebase_uid"]: call.kwargs["pretp_fraction"]
+        for call in mock_place.await_args_list
+    }
+    assert per_uid_fraction["fb-off"] == 0.0  # pre-TP suppressed
+    assert per_uid_fraction["fb-on"] == 1.0   # pre-TP honoured at 100%
+
+
 def test_active_uids_cached_within_ttl() -> None:
     """The user-roster cache reduces Firestore load.  Verify the
     underlying ``list_active_uids`` call is amortised across

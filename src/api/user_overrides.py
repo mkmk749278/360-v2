@@ -1049,6 +1049,52 @@ def resolve_grab_fraction_uid(firebase_uid: str, default: float) -> float:
         return default
 
 
+def resolve_pretp_enabled_uid(firebase_uid: str, default: bool = True) -> bool:
+    """Return the per-user pre-TP master enable flag for ``firebase_uid``.
+
+    The Lumin app exposes a master "Pre-TP grab" ON/OFF toggle that writes
+    ``user_pretp_settings.enabled``.  Until 2026-05-29 this column was stored
+    and surfaced but never consulted by the execution path, so a user who
+    switched pre-TP OFF still had it fire on their account (the only thing
+    that suppressed pre-TP was a non-empty exclusionary allowlist).  This
+    resolver closes that gap: dispatch zeroes the grab fraction when this
+    returns ``False`` so neither the FSM tick path nor the TradeMonitor
+    backstop fires a partial close.
+
+    Semantics: honour the stored boolean when the user has set it
+    explicitly (True or False); when unset (no row / NULL column) fall back
+    to ``default`` — ``True`` for the per-user FSM path, matching the app's
+    default-ON master toggle and the §3.2a doctrine that pre-TP is the
+    primary exit.  (This is distinct from the engine-wide ``PRE_TP_ENABLED``
+    config flag, which gates the owner-account TradeMonitor backstop.)
+
+    Soft-fail: any lookup error returns ``default`` so a store blip never
+    blocks dispatch.
+    """
+    if _SINGLETON is None:
+        return default
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return default
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return default
+        row = _SINGLETON.get_pretp(int(user.user_id))
+        v = row.get("enabled")
+        if isinstance(v, bool):
+            return v
+        return default
+    except Exception as exc:
+        log.debug(
+            "resolve_pretp_enabled_uid: lookup failed for firebase_uid={} ({}); "
+            "falling back to default {}",
+            firebase_uid, type(exc).__name__, default,
+        )
+        return default
+
+
 def resolve_pretp_allowlists_uid(
     firebase_uid: str,
 ) -> Tuple[Optional[FrozenSet[str]], Optional[FrozenSet[str]]]:
