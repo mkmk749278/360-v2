@@ -42,10 +42,11 @@ from __future__ import annotations
 import asyncio
 import os
 import time
+from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Union
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, status
+from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -463,10 +464,19 @@ def build_app(
     * ``billing_verifier`` (BillingWebhookVerifier): when ``None`` or
       ``not is_configured()``, ``/internal/billing/grant`` returns 503.
     """
+    from .snapshot_cache import snapshot_cache as _snapshot_cache
+
+    @asynccontextmanager
+    async def _lifespan(_app: FastAPI):
+        await _snapshot_cache.start(engine)
+        yield
+        await _snapshot_cache.stop()
+
     app = FastAPI(
         title="360 Crypto Eye API",
         version=_API_VERSION,
         description="HTTP adapter for the Lumin app.",
+        lifespan=_lifespan,
     )
     app.state.engine = engine
     app.state.boot_monotonic = time.monotonic()
@@ -961,6 +971,7 @@ def build_app(
         dependencies=[Depends(auth)],
     )
     async def pulse(
+        response: Response,
         identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> PulseSnapshot:
         # Per-user paper visibility (PR #503, 2026-05-26) — paper-mode
@@ -980,6 +991,7 @@ def build_app(
         if effective_uo is None:
             from .user_overrides import get_singleton as _get_uo_singleton
             effective_uo = _get_uo_singleton()
+        response.headers["Cache-Control"] = "private, max-age=5, stale-while-revalidate=10"
         return build_pulse(
             engine, user_id=user_id, user_overrides=effective_uo,
         )
@@ -1003,6 +1015,7 @@ def build_app(
         dependencies=[Depends(auth)],
     )
     async def signals(
+        response: Response,
         status: str = Query("all", pattern="^(all|open|closed)$"),
         limit: int = Query(50, ge=1, le=500),
         setup_class: Optional[str] = Query(
@@ -1010,12 +1023,15 @@ def build_app(
             description="Filter to one evaluator's signals (e.g. SR_FLIP_RETEST)",
         ),
     ) -> SignalsResponse:
-        items = build_signals(
-            engine,
-            status=status,
-            limit=limit,
-            setup_class=setup_class,
+        items = _snapshot_cache.filter_signals(
+            status=status, limit=limit, setup_class=setup_class,
         )
+        if items is None:
+            # Cache cold (first 5 s after startup) — fall back to live build.
+            items = build_signals(
+                engine, status=status, limit=limit, setup_class=setup_class,
+            )
+        response.headers["Cache-Control"] = "public, max-age=10, stale-while-revalidate=30"
         return SignalsResponse(items=items, total=len(items))
 
     @app.get(
@@ -1173,6 +1189,7 @@ def build_app(
         dependencies=[Depends(auth)],
     )
     async def activity(
+        response: Response,
         limit: int = Query(50, ge=1, le=500),
         setup_class: Optional[str] = Query(
             None,
@@ -1184,6 +1201,7 @@ def build_app(
         except Exception:
             log.exception("/api/activity failed — returning empty list")
             items = []
+        response.headers["Cache-Control"] = "public, max-age=30, stale-while-revalidate=60"
         return ActivityResponse(items=items, total=len(items))
 
     # ---- Auto-mode ----
