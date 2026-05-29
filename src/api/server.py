@@ -157,7 +157,7 @@ class _RefreshRequest(BaseModel):
     token: str
 
 
-def _compute_needs_onboarding(
+async def _compute_needs_onboarding(
     sub: str, user_store: Optional["UserStore"]
 ) -> bool:
     """Resolve ``needs_onboarding`` for a JWT subject.
@@ -174,7 +174,7 @@ def _compute_needs_onboarding(
         uid = int(sub[len("user-"):])
     except ValueError:
         return True
-    user = user_store.get_by_id(uid)
+    user = await user_store.aget_by_id(uid)
     if user is None:
         return True
     return user.needs_onboarding
@@ -298,7 +298,7 @@ def _make_auth_dep(
                 uid = str(claims.get("uid") or claims.get("user_id") or "")
                 phone = str(claims.get("phone_number") or "")
                 if uid and phone:
-                    user = user_store.get_or_create_by_firebase_uid(uid, phone)
+                    user = await user_store.aget_or_create_by_firebase_uid(uid, phone)
                     if required_tier is not None and user.tier != required_tier:
                         raise HTTPException(
                             status_code=status.HTTP_403_FORBIDDEN,
@@ -382,7 +382,7 @@ def _make_user_claims_dep(
                 uid = str(claims.get("uid") or claims.get("user_id") or "")
                 phone = str(claims.get("phone_number") or "")
                 if uid and phone:
-                    return user_store.get_or_create_by_firebase_uid(uid, phone)
+                    return await user_store.aget_or_create_by_firebase_uid(uid, phone)
         # 3. HS256 JWT — legacy path.
         try:
             return decode_token(presented, secret=jwt_secret)
@@ -559,7 +559,7 @@ def build_app(
             tier=claims.tier,
             sub=claims.sub,
             exp_seconds=int((claims.exp - claims.iat).total_seconds()),
-            needs_onboarding=_compute_needs_onboarding(claims.sub, user_store),
+            needs_onboarding=await _compute_needs_onboarding(claims.sub, user_store),
         )
 
     @app.post(
@@ -586,7 +586,7 @@ def build_app(
             tier=claims.tier,
             sub=claims.sub,
             exp_seconds=int((claims.exp - claims.iat).total_seconds()),
-            needs_onboarding=_compute_needs_onboarding(claims.sub, user_store),
+            needs_onboarding=await _compute_needs_onboarding(claims.sub, user_store),
         )
 
     # ---- Phone OTP auth (Phase 2) ----
@@ -671,7 +671,7 @@ def build_app(
             )
         # Get-or-create.  First-time signin → tier=free; returning user
         # keeps their existing tier (paid, owner, etc.).
-        user = user_store.get_or_create_by_phone(req.phone)
+        user = await user_store.aget_or_create_by_phone(req.phone)
         token = mint_user_token(
             secret=jwt_secret,
             user_id=user.user_id,
@@ -804,7 +804,7 @@ def build_app(
                 detail=result.status.value,
             )
         # OTP validated — get-or-create the user row.
-        user = user_store.get_or_create_by_phone(req.phone_e164)
+        user = await user_store.aget_or_create_by_phone(req.phone_e164)
         if user.firebase_uid is None:
             if not firebase_auth.is_initialised():
                 # Firebase Admin not wired — engine can't mint a custom
@@ -814,10 +814,10 @@ def build_app(
                     detail="firebase_disabled",
                 )
             firebase_uid = firebase_auth.register_user_by_phone(req.phone_e164)
-            user_store.set_firebase_uid(user.user_id, firebase_uid)
+            await user_store.aset_firebase_uid(user.user_id, firebase_uid)
             # Reload the row with the backfilled uid so the response
             # carries the freshly-set value.
-            reloaded = user_store.get_by_id(user.user_id)
+            reloaded = await user_store.aget_by_id(user.user_id)
             assert reloaded is not None
             user = reloaded
         assert user.firebase_uid is not None
@@ -864,7 +864,7 @@ def build_app(
         # Get-or-create the user.  The bot legitimately reaches us
         # before the user has signed in via OTP — pre-paying a tier on
         # behalf of an invited tester is a valid flow.
-        user = user_store.get_or_create_by_phone(payload.phone)
+        user = await user_store.aget_or_create_by_phone(payload.phone)
         paid_until_dt = None
         if payload.paid_until_iso is not None:
             try:
@@ -875,7 +875,7 @@ def build_app(
                     detail=f"paid_until_iso not valid ISO-8601: {exc}",
                 )
         try:
-            updated = user_store.set_tier(
+            updated = await user_store.aset_tier(
                 user.user_id,
                 tier=payload.tier,
                 paid_until=paid_until_dt,
@@ -926,7 +926,7 @@ def build_app(
                 detail="user store not configured",
             )
         uid = _resolve_user_id(identity)
-        user = user_store.get_by_id(uid)
+        user = await user_store.aget_by_id(uid)
         if user is None:
             raise HTTPException(
                 status_code=status.HTTP_404_NOT_FOUND,
@@ -950,7 +950,7 @@ def build_app(
             )
         uid = _resolve_user_id(identity)
         try:
-            updated = user_store.update_profile(
+            updated = await user_store.aupdate_profile(
                 uid,
                 display_name=body.display_name,
                 country_code=body.country_code,
@@ -1333,7 +1333,7 @@ def build_app(
                 detail="per-user overrides not configured",
             )
         user_id = _resolve_user_id(identity)
-        resumed = user_overrides.resume_user_auto_trade(user_id)
+        resumed = await user_overrides.aresume_user_auto_trade(user_id)
         return AutoModeResumeMineResponse(resumed=resumed)
 
     # ---- Paper-trade-visibility endpoints (2026-05-16) ----
@@ -1552,7 +1552,7 @@ def build_app(
 
     # ---- Settings: Per-user Pre-TP overrides (Phase 2) ----
 
-    def _build_user_pretp_view(user_id: int) -> UserPretpSettings:
+    async def _build_user_pretp_view(user_id: int) -> UserPretpSettings:
         """Compose per-user Pre-TP view: user-row override where set,
         engine default (config + engine-wide ``user_settings``) otherwise.
 
@@ -1567,7 +1567,7 @@ def build_app(
                 **defaults.model_dump(),
                 using_defaults=True,
             )
-        overrides = user_overrides.get_pretp(user_id)
+        overrides = await user_overrides.aget_pretp(user_id)
         resolved = defaults.model_dump()
         for key, val in overrides.items():
             resolved[key] = val
@@ -1590,7 +1590,7 @@ def build_app(
                 detail="per-user overrides not configured",
             )
         uid = _resolve_user_id(identity)
-        return _build_user_pretp_view(uid)
+        return await _build_user_pretp_view(uid)
 
     @app.put(
         "/api/settings/user/pretp",
@@ -1612,12 +1612,12 @@ def build_app(
         # without re-sending every other field.
         partial = payload.model_dump(exclude_unset=True)
         if partial:
-            user_overrides.update_pretp(uid, partial)
-        return _build_user_pretp_view(uid)
+            await user_overrides.aupdate_pretp(uid, partial)
+        return await _build_user_pretp_view(uid)
 
     # ---- Settings: Per-user invalidation overrides (OWNER_BRIEF B17, 2026-05-17) ----
 
-    def _build_user_invalidation_view(user_id: int) -> UserInvalidationSettings:
+    async def _build_user_invalidation_view(user_id: int) -> UserInvalidationSettings:
         """Compose per-user Invalidation view: user-row override where set,
         engine default otherwise.
 
@@ -1632,7 +1632,7 @@ def build_app(
                 **defaults.model_dump(),
                 using_defaults=True,
             )
-        overrides = user_overrides.get_invalidation(user_id)
+        overrides = await user_overrides.aget_invalidation(user_id)
         resolved = defaults.model_dump()
         for key, val in overrides.items():
             resolved[key] = val
@@ -1655,7 +1655,7 @@ def build_app(
                 detail="per-user overrides not configured",
             )
         uid = _resolve_user_id(identity)
-        return _build_user_invalidation_view(uid)
+        return await _build_user_invalidation_view(uid)
 
     @app.put(
         "/api/settings/user/invalidation",
@@ -1679,12 +1679,12 @@ def build_app(
         # Pydantic validator already enforces gt=0/le=1 on the bounded floats.
         partial = payload.model_dump(exclude_unset=True)
         if partial:
-            user_overrides.update_invalidation(uid, partial)
-        return _build_user_invalidation_view(uid)
+            await user_overrides.aupdate_invalidation(uid, partial)
+        return await _build_user_invalidation_view(uid)
 
     # ---- Settings: Per-user auto-trade overrides (Phase 2) ----
 
-    def _build_user_auto_trade_view(user_id: int) -> UserAutoTradeSettings:
+    async def _build_user_auto_trade_view(user_id: int) -> UserAutoTradeSettings:
         defaults = _build_auto_trade_view()
         # ``mode`` is per-user opt-in, NOT a field that should inherit
         # the engine-wide default the way ``position_size_pct`` /
@@ -1712,7 +1712,7 @@ def build_app(
                 **defaults_dict,
                 using_defaults=True,
             )
-        overrides = user_overrides.get_auto_trade(user_id)
+        overrides = await user_overrides.aget_auto_trade(user_id)
         resolved = defaults_dict
         for key, val in overrides.items():
             resolved[key] = val
@@ -1735,7 +1735,7 @@ def build_app(
                 detail="per-user overrides not configured",
             )
         uid = _resolve_user_id(identity)
-        return _build_user_auto_trade_view(uid)
+        return await _build_user_auto_trade_view(uid)
 
     @app.put(
         "/api/settings/user/auto-trade",
@@ -1767,10 +1767,10 @@ def build_app(
         # notional in Settings and re-saving mode='live' is the natural
         # recovery path, and it should implicitly resume dispatch.
         if partial.get("mode") in ("live", "both"):
-            user_overrides.resume_user_auto_trade(uid)
+            await user_overrides.aresume_user_auto_trade(uid)
         if partial:
-            user_overrides.update_auto_trade(uid, partial)
-        return _build_user_auto_trade_view(uid)
+            await user_overrides.aupdate_auto_trade(uid, partial)
+        return await _build_user_auto_trade_view(uid)
 
     # ---- Agents ----
 

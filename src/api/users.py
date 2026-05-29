@@ -53,6 +53,8 @@ on first Firebase sign-in by phone-match-and-backfill (see
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import sqlite3
 import threading
 from dataclasses import dataclass
@@ -597,6 +599,64 @@ class UserStore:
                 "UPDATE users SET telegram_chat_id = ?, updated_at = ? WHERE user_id = ?",
                 (chat_id, now, int(user_id)),
             )
+
+    # --- async variants — run sync methods in thread pool so async
+    # FastAPI handlers don't block the event loop on SQLite ops.
+
+    async def aget_by_id(self, user_id: int) -> Optional[User]:
+        return await asyncio.to_thread(self.get_by_id, user_id)
+
+    async def aget_by_firebase_uid(self, firebase_uid: str) -> Optional[User]:
+        return await asyncio.to_thread(self.get_by_firebase_uid, firebase_uid)
+
+    async def aget_or_create_by_phone(self, phone_e164: str) -> User:
+        return await asyncio.to_thread(self.get_or_create_by_phone, phone_e164)
+
+    async def aget_or_create_by_firebase_uid(
+        self, firebase_uid: str, phone_e164: str
+    ) -> User:
+        return await asyncio.to_thread(
+            self.get_or_create_by_firebase_uid, firebase_uid, phone_e164
+        )
+
+    async def aset_firebase_uid(self, user_id: int, firebase_uid: str) -> None:
+        await asyncio.to_thread(self.set_firebase_uid, user_id, firebase_uid)
+
+    async def aset_tier(
+        self,
+        user_id: int,
+        *,
+        tier: str,
+        paid_until: Optional[datetime],
+    ) -> User:
+        return await asyncio.to_thread(
+            functools.partial(self.set_tier, user_id, tier=tier, paid_until=paid_until)
+        )
+
+    async def aupdate_profile(
+        self,
+        user_id: int,
+        *,
+        display_name: Optional[str] = None,
+        country_code: Optional[str] = None,
+        timezone: Optional[str] = None,
+        currency: Optional[str] = None,
+        accept_terms: bool = False,
+    ) -> User:
+        return await asyncio.to_thread(
+            functools.partial(
+                self.update_profile,
+                user_id,
+                display_name=display_name,
+                country_code=country_code,
+                timezone=timezone,
+                currency=currency,
+                accept_terms=accept_terms,
+            )
+        )
+
+    async def adelete_by_id(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self.delete_by_id, user_id)
 
     # ---- lifecycle ------------------------------------------------------
 
