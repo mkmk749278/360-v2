@@ -46,14 +46,16 @@ Persistence wrapper format: `{"v": <json>, "t": <epoch ms>}`. All SharedPreferen
 
 **`lib/data/repository.dart`** — `HttpRepository.watchSignals` wired with `persistKey: 'swr_signals_${status}_$limit'` and serialization callbacks.
 
-### Pending queue
+### Pending queue — ALL CLEAR
 
-| Item | Effort | Status |
-|---|---|---|
-| PR #532 — async SQLite | — | open, pending merge |
-| PR #80 — SWR persistence | — | open, pending merge |
-| PR-C (pre-TP native Binance LIMIT) | Awaiting FSM sign-off | deferred |
-| Tab stagger in NavShell | — | already implemented (`_visited` pattern) — no action |
+All P2 items and the native pre-TP LIMIT (PR-C) are now live on main. No pending queue.
+
+| Item | Status |
+|---|---|
+| PR #532 — async SQLite | ✅ merged |
+| PR #80 — SWR persistence | ✅ merged |
+| PR-C (pre-TP native Binance LIMIT) | ✅ merged — PR #512 (session 6) |
+| Tab stagger in NavShell | ✅ already implemented (`_visited` pattern) |
 
 ---
 
@@ -107,7 +109,7 @@ Fixed in two locations:
 | `aiosqlite` for UserStore | Medium | UserStore currently uses synchronous `sqlite3` with 30 s lock timeout inside async FastAPI handlers — serialises all requests at scale. Low priority while user count is small. |
 | Persist SWR cache to SharedPreferences | Medium | Cold-open stale timestamps. Flutter-side only — app shows cached snapshot from last session on launch instead of empty state. |
 | Stagger tab loading in NavShell | Low-Medium | Load visible tab first, defer background tabs. Flutter-side only. |
-| PR-C (pre-TP native Binance LIMIT) | Awaiting FSM sign-off | Not a performance fix — see prior checkpoint. |
+| PR-C (pre-TP native Binance LIMIT) | ✅ already merged — PR #512 | |
 
 ---
 
@@ -142,7 +144,7 @@ Both repos (360-v2 + lumin-app) are clean and deploy-ready.
 
 | Item | Status | Notes |
 |---|---|---|
-| **PR-C: pre-TP as native Binance LIMIT** | Awaiting owner sign-off (FSM transition change) | Would eliminate 5s poll lag + MARKET slippage on pre-TP. Not required for launch — current 5s backstop works. |
+| **PR-C: pre-TP as native Binance LIMIT** | ✅ merged — PR #512 | Zero poll lag, maker pricing, fallback to MARKET if LIMIT placement fails. |
 | **Empty allowlist = allow-all semantics** | Owner chose not to fix (session 8) | `resolve_pretp_allowlists_uid` returns `None` for empty lists → allow-all. Low risk: most users don't set allowlists. |
 | **`protect_manual_entries` toggle** | Owner chose not to fix (session 8) | No engine read path. Zero user-visible impact until manual entries are common. |
 | **360 CE Ops diagnostic dashboard** | Not started | See `docs/360CE_OPS_PLAN.md`. Separate repo `mkmk749278/360ce-ops`. |
@@ -150,7 +152,7 @@ Both repos (360-v2 + lumin-app) are clean and deploy-ready.
 ### Owner decision queue
 
 1. **Launch** — all blocking bugs resolved, system is clean.
-2. **PR-C (pre-TP native LIMIT)** — approve FSM transition change when ready for the latency improvement.
+2. **PR-C (pre-TP native LIMIT)** — ✅ live (PR #512). Zero poll lag, maker pricing.
 3. **Monitor first wave of multi-user live trading** — watch for per-user invalidation mode edge cases in prod.
 
 ---
