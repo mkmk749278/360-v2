@@ -4,6 +4,60 @@
 
 ---
 
+## In-session checkpoint 2026-05-29 (session 9) — Performance fixes: background snapshot cache + Cache-Control headers + persistent http.Client
+
+### Theme
+
+Owner reported severe cold-open latency (~30 s to first data, stale "1m ago" timestamps on app launch). Two PRs shipped and merged this session addressing the root causes at both engine and app layers.
+
+### PRs shipped this session
+
+| PR | Repo | Title | Status |
+|---|---|---|---|
+| **#530** | 360-v2 | perf(api): background snapshot cache + Cache-Control headers | ✅ merged |
+| **#79** | lumin-app | perf(signals): reuse persistent http.Client for Binance mark-price polls | ✅ merged |
+
+### What PR #530 implements (360-v2)
+
+**`src/api/snapshot_cache.py`** (new file):
+- `SnapshotCache` class — background asyncio task pre-computes `build_signals(status="all", limit=500)` every 5 s
+- Pre-warms synchronously in FastAPI `lifespan` startup handler (first request served from cache immediately)
+- `filter_signals(status, limit, setup_class)` applies per-request filters as a fast in-process list comprehension — no Pydantic serialisation, no engine state reads
+- Cold/stale fallback: returns `None` if cache is > 30 s old; endpoint falls back to live `build_signals` — no request ever fails
+
+**`src/api/server.py`** changes:
+- Wires `snapshot_cache.start(engine)` / `stop()` into a FastAPI `lifespan` context manager (replacing no-lifespan pattern)
+- `/api/signals` — serves from cache; falls back to live build when cold
+- `Cache-Control` headers added to three endpoints:
+  - `/api/signals` → `public, max-age=10, stale-while-revalidate=30` (engine-wide, safe for CDN)
+  - `/api/pulse` → `private, max-age=5, stale-while-revalidate=10` (per-user paper-mode PnL filter — private so CF doesn't cross-contaminate users)
+  - `/api/activity` → `public, max-age=30, stale-while-revalidate=60` (engine-wide lifecycle log, slow-moving)
+
+### What PR #79 implements (lumin-app)
+
+`_fetchMarkPrices` was creating a new `http.Client()` on every 5 s poll tick (12 TCP handshakes/minute per active signal), immediately closing it in a `finally` block.
+
+Fixed in two locations:
+- `_SignalsPageState` — adds `final http.Client _markPriceClient = http.Client()` field; `_doFetchPrices` passes it into `_fetchMarkPrices`; closed in `dispose()`
+- `_SignalDetailSheetState` (detail bottom-sheet) — same fix
+
+`_fetchMarkPrices` signature changed to `_fetchMarkPrices(List<String> symbols, http.Client client)` — required parameter; no more `try/finally { client.close() }` inside the function.
+
+### Test suite state (360-v2)
+
+5275 passed, 63 skipped, 49 xfailed, 18 xpassed — unchanged from pre-session baseline (cache is transparent to test fixtures: cold cache → falls back to live `build_signals`).
+
+### Pending queue (P2 — not blocking launch)
+
+| Item | Effort | Impact |
+|---|---|---|
+| `aiosqlite` for UserStore | Medium | UserStore currently uses synchronous `sqlite3` with 30 s lock timeout inside async FastAPI handlers — serialises all requests at scale. Low priority while user count is small. |
+| Persist SWR cache to SharedPreferences | Medium | Cold-open stale timestamps. Flutter-side only — app shows cached snapshot from last session on launch instead of empty state. |
+| Stagger tab loading in NavShell | Low-Medium | Load visible tab first, defer background tabs. Flutter-side only. |
+| PR-C (pre-TP native Binance LIMIT) | Awaiting FSM sign-off | Not a performance fix — see prior checkpoint. |
+
+---
+
 ## State as of 2026-05-29 — Pre-launch audit COMPLETE. All 5 root-cause bugs resolved and merged.
 
 ### System status
