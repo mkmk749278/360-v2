@@ -436,6 +436,55 @@ async def test_pretp_fill_transitions_open_to_pretp_fired_with_be_shift() -> Non
 
 
 @pytest.mark.asyncio
+async def test_pretp_full_close_transitions_to_closed_no_be_shift() -> None:
+    """Full-close pre-TP (grab_fraction == 1.00, or a MIN_NOTIONAL upgrade
+    to full close): the fill closes 100% of qty so there is NO residual.
+    The position must go straight to CLOSED with close_reason="PRE_TP",
+    cancel ALL legs (SL + TP1 + TP2 + TP3), and must NOT place a break-even
+    SL.  Regression for the orphan bug: previously this stranded the
+    position in non-terminal PRE_TP_FIRED with a BE-SL + live TP1 against
+    zero residual, so the app showed it ACTIVE forever while Binance was
+    already flat.
+    """
+    factory, placer = _stub_placer_factory()
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
+    position = _pending_position()
+    position.state = position_state.PositionState.OPEN
+    position.entry_price_filled = 29000.0
+    position.sl_order_id = 2001
+    position.tp1_order_id = 3001
+    position.tp2_order_id = 3002
+    position.tp3_order_id = 3003
+    captured: list = []
+    with patch.object(position_state, "get_position", return_value=position), patch.object(
+        position_state, "put_position", side_effect=lambda p: captured.append(p)
+    ):
+        await fsm.handle_event(
+            _otu(
+                client_order_id=position_state.coid_pretp("sig-1"),
+                last_filled_qty=1.0,  # == total_qty → full close
+                realized_pnl=40.0,
+            )
+        )
+    assert captured[0].state == position_state.PositionState.CLOSED
+    assert captured[0].close_reason == "PRE_TP"
+    assert captured[0].closed_qty == 1.0
+    assert captured[0].closed_at is not None
+    # All four legs cancelled — nothing left to ride to TP1.
+    assert placer.cancel_order.await_count == 4
+    cancelled_ids = {
+        call.kwargs["order_id"] for call in placer.cancel_order.call_args_list
+    }
+    assert cancelled_ids == {2001, 3001, 3002, 3003}
+    # No break-even SL placed — there is no residual to protect.
+    placer.place_stop_loss.assert_not_called()
+    assert captured[0].sl_order_id == 0
+    assert captured[0].tp1_order_id == 0
+    assert captured[0].tp2_order_id == 0
+    assert captured[0].tp3_order_id == 0
+
+
+@pytest.mark.asyncio
 async def test_pretp_fill_tolerates_sl_cancel_failure() -> None:
     """Race: SL fires at the same moment as pre-TP fills.  The cancel
     returns -2011 "Unknown order sent" — already handled by

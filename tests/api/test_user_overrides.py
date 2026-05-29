@@ -713,6 +713,48 @@ def test_resolve_notional_usd_returns_user_override(
 
 
 # ---------------------------------------------------------------------------
+# resolve_pretp_enabled_uid (2026-05-29: master pre-TP enable toggle)
+# ---------------------------------------------------------------------------
+
+
+def test_resolve_pretp_enabled_falls_back_when_singleton_unset() -> None:
+    from src.api import user_overrides as _uo
+    _uo.clear_singleton()
+    assert _uo.resolve_pretp_enabled_uid("any-uid", default=True) is True
+    assert _uo.resolve_pretp_enabled_uid("any-uid", default=False) is False
+
+
+def test_resolve_pretp_enabled_honours_stored_value(
+    store: UserOverridesStore, tmp_path,
+) -> None:
+    """End-to-end: a user who explicitly disabled pre-TP gets False; a
+    user who enabled it gets True; an unset user falls back to default
+    (True for the per-user FSM path)."""
+    from src.api import user_overrides as _uo
+    from src.api import users as _users
+    _uo.set_singleton(store)
+    user_store = _users.UserStore(tmp_path / "users.sqlite")
+    _users.set_singleton(user_store)
+    try:
+        off = user_store.get_or_create_by_firebase_uid("uid-off", "+15551110001")
+        on = user_store.get_or_create_by_firebase_uid("uid-on", "+15551110002")
+        store.update_pretp(off.user_id, {"enabled": False})
+        store.update_pretp(on.user_id, {"enabled": True})
+
+        # Explicit OFF is honoured even though default is True.
+        assert _uo.resolve_pretp_enabled_uid("uid-off", default=True) is False
+        # Explicit ON.
+        assert _uo.resolve_pretp_enabled_uid("uid-on", default=True) is True
+        # Unset user → default (preserves current pre-TP-on behaviour).
+        user_store.get_or_create_by_firebase_uid("uid-unset", "+15551110003")
+        assert _uo.resolve_pretp_enabled_uid("uid-unset", default=True) is True
+    finally:
+        _uo.clear_singleton()
+        _users.set_singleton(None)
+        user_store.close()
+
+
+# ---------------------------------------------------------------------------
 # Per-user paper subscription windows (2026-05-23 fix for fresh-account bug)
 # ---------------------------------------------------------------------------
 

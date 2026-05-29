@@ -381,6 +381,21 @@ async def dispatch_signal_to_active_users(
         user_grab_fraction = _uo.resolve_grab_fraction_uid(
             uid, float(_DEFAULT_GRAB_FRACTION)
         )
+        # Per-user master pre-TP enable toggle (2026-05-29 fix).  The app's
+        # "Pre-TP grab" ON/OFF switch writes user_pretp_settings.enabled but
+        # was never consulted by the execution path — a user who turned
+        # pre-TP OFF still had it fire.  Honour it here: a disabled user gets
+        # grab_fraction 0 → pretp_controller.should_fire_pretp skips (the FSM
+        # tick path) and close_fsm_partial_for_signal skips (the TradeMonitor
+        # backstop).  The position still OPENS with full SL/TP geometry; only
+        # the pre-TP partial close is suppressed.
+        if not _uo.resolve_pretp_enabled_uid(uid, default=True):
+            log.debug(
+                "signal_dispatch: pre-TP suppressed — user master toggle OFF "
+                "uid={} signal_id={}",
+                uid, signal_id,
+            )
+            user_grab_fraction = 0.0
         # Per-user pre-TP regime + setup allowlist gates (PR-F).
         # If the user has configured an allowlist and the signal's regime
         # or setup is not on it, zero the grab fraction so pretp_controller
@@ -828,6 +843,15 @@ async def close_fsm_partial_for_signal(
             continue
         if pos.pretp_fired:
             continue  # idempotent — don't double-fire
+
+        # pretp_fraction <= 0 means pre-TP is disabled for THIS position
+        # (user master toggle OFF, or suppressed by the per-user regime/
+        # setup allowlist at dispatch).  Treat 0 as "skip" rather than
+        # falling back to the engine-wide ``fraction`` constant — otherwise
+        # the TradeMonitor backstop would re-fire a pre-TP close the user
+        # explicitly opted out of.
+        if pos.pretp_fraction <= 0:
+            continue
 
         base_qty = pos.filled_qty if pos.filled_qty > 0 else pos.total_qty
         remaining = pos.total_qty - pos.closed_qty

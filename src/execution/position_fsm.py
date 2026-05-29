@@ -243,9 +243,58 @@ class PositionFSM:
         """
         position.closed_qty += event.last_filled_qty
         position.realized_pnl_total += event.realized_pnl
-        position.state = _position_state.PositionState.PRE_TP_FIRED
         position.pretp_fired = True
         placer = self._order_placer_factory(self.firebase_uid)
+
+        # Full-close pre-TP: grab_fraction == 1.00, or a small position whose
+        # partial fell below Binance MIN_NOTIONAL and was upgraded to a full
+        # close at dispatch (signal_dispatch.close_fsm_partial_for_signal).
+        # There is NO residual riding to TP1, so this is terminal.  Cancel the
+        # original SL + ALL TP legs and go straight to CLOSED; do NOT place a
+        # break-even SL — there is nothing left to protect.  Without this
+        # branch the position stranded in the non-terminal PRE_TP_FIRED state
+        # with an orphaned BE-SL and a live TP1 against zero residual, so the
+        # FSM (and the app's Trade tab) showed the position ACTIVE forever
+        # while the Binance account was already flat.
+        _eps = max(position.total_qty * 1e-6, 1e-12)
+        if position.closed_qty >= position.total_qty - _eps:
+            for _oid in (
+                position.sl_order_id,
+                position.tp1_order_id,
+                position.tp2_order_id,
+                position.tp3_order_id,
+            ):
+                if _oid:
+                    try:
+                        await placer.cancel_order(
+                            symbol=position.symbol,
+                            order_id=_oid,
+                        )
+                    except _order_placer.OrderPlacementError as exc:
+                        log.warning(
+                            "_apply_pretp_fill: full-close cancel failed uid={} "
+                            "signal_id={} order_id={} exc={}",
+                            self.firebase_uid, position.signal_id, _oid, exc,
+                        )
+            position.sl_order_id = 0
+            position.tp1_order_id = 0
+            position.tp2_order_id = 0
+            position.tp3_order_id = 0
+            position.state = _position_state.PositionState.CLOSED
+            position.closed_at = datetime.now(timezone.utc)
+            if not position.close_reason:
+                position.close_reason = "PRE_TP"
+            self._untrack_symbol(position.symbol)
+            log.info(
+                "_apply_pretp_fill: full close (no residual) → CLOSED uid={} "
+                "signal_id={} closed_qty={:.8f} total_qty={:.8f}",
+                self.firebase_uid, position.signal_id,
+                position.closed_qty, position.total_qty,
+            )
+            return
+
+        # Partial pre-TP — residual rides to TP1 with a BE-shifted SL.
+        position.state = _position_state.PositionState.PRE_TP_FIRED
         # Cancel original SL.  Tolerant of -2011 (order already gone)
         # so a race between SL hit + pre-TP fill doesn't crash here.
         if position.sl_order_id:
