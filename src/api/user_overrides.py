@@ -391,6 +391,10 @@ class UserOverridesStore:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        # busy_timeout — shares lumin.sqlite with UserStore's separate
+        # connection; wait for the file lock rather than fail instantly
+        # on a cross-store write collision under the thread pool.
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA)
         self._migrate_pretp_grab_fraction()

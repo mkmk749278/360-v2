@@ -96,7 +96,9 @@ def test_delete_happy_path_returns_204(
 ) -> None:
     """All three steps succeed → 204; each underlying call fired once."""
     user_store = MagicMock()
-    user_store.get_by_firebase_uid.return_value = SimpleNamespace(user_id=99)
+    user_store.aget_by_firebase_uid = AsyncMock(
+        return_value=SimpleNamespace(user_id=99)
+    )
     user_store.adelete_by_id = AsyncMock(return_value=True)
     mock_get_user_store.return_value = user_store
 
@@ -128,7 +130,7 @@ def test_delete_returns_204_when_user_already_deleted(
     """No SQLite row for the firebase_uid → treat as already-deleted,
     still return 204.  Retrying a successful delete must not 404."""
     user_store = MagicMock()
-    user_store.get_by_firebase_uid.return_value = None  # no row
+    user_store.aget_by_firebase_uid = AsyncMock(return_value=None)  # no row
     mock_get_user_store.return_value = user_store
 
     app = _build_app(identity=_firebase_user())
@@ -190,7 +192,9 @@ def test_delete_503_when_user_row_delete_fails(
     has already been deleted (step 1 succeeded) — orphan blob state
     is acceptable, the operator-side log surfaces it."""
     user_store = MagicMock()
-    user_store.get_by_firebase_uid.return_value = SimpleNamespace(user_id=99)
+    user_store.aget_by_firebase_uid = AsyncMock(
+        return_value=SimpleNamespace(user_id=99)
+    )
     user_store.adelete_by_id = AsyncMock(side_effect=RuntimeError("sqlite locked"))
     mock_get_user_store.return_value = user_store
 
@@ -224,7 +228,9 @@ def test_delete_returns_204_even_when_cache_reset_fails(
     expires naturally within 30s; the user's deletion has already
     succeeded at the data layer."""
     user_store = MagicMock()
-    user_store.get_by_firebase_uid.return_value = SimpleNamespace(user_id=99)
+    user_store.aget_by_firebase_uid = AsyncMock(
+        return_value=SimpleNamespace(user_id=99)
+    )
     user_store.adelete_by_id = AsyncMock(return_value=True)
     mock_get_user_store.return_value = user_store
 
@@ -255,7 +261,9 @@ def test_delete_skips_blob_when_firestore_not_initialised(
     remains callable in environments without Firestore (the
     in-process test harness)."""
     user_store = MagicMock()
-    user_store.get_by_firebase_uid.return_value = SimpleNamespace(user_id=99)
+    user_store.aget_by_firebase_uid = AsyncMock(
+        return_value=SimpleNamespace(user_id=99)
+    )
     user_store.adelete_by_id = AsyncMock(return_value=True)
     mock_get_user_store.return_value = user_store
 

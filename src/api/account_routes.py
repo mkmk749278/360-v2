@@ -37,6 +37,7 @@ failed step.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Response, status
@@ -92,7 +93,11 @@ def register(
         # ---- Step 1: revoke the Binance key blob (highest priority) ----
         if firestore_keystore.is_initialised():
             try:
-                firestore_keystore.delete_key_blob(firebase_uid)
+                # Firestore delete is network I/O — run off the event
+                # loop so it doesn't block other requests.
+                await asyncio.to_thread(
+                    firestore_keystore.delete_key_blob, firebase_uid
+                )
             except Exception:
                 # Loud log — operator must clean up the orphan blob.
                 # We DO NOT abort the deletion here; an orphan blob is
@@ -131,7 +136,7 @@ def register(
             )
 
         try:
-            user = user_store.get_by_firebase_uid(firebase_uid)
+            user = await user_store.aget_by_firebase_uid(firebase_uid)
         except Exception:
             log.exception(
                 "delete_account: user lookup failed for uid={}",

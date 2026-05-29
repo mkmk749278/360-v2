@@ -23,6 +23,7 @@ the messaging without an app release.
 
 from __future__ import annotations
 
+import asyncio
 from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -241,9 +242,9 @@ def register(
             user_store = _users.get_singleton()
             override_store = _uo.get_singleton()
             if user_store is not None and override_store is not None:
-                user = user_store.get_by_firebase_uid(firebase_uid)
+                user = await user_store.aget_by_firebase_uid(firebase_uid)
                 if user is not None:
-                    row = override_store.get_auto_trade(int(user.user_id))
+                    row = await override_store.aget_auto_trade(int(user.user_id))
                     mode = row.get("mode")
                     if isinstance(mode, str) and mode:
                         user_mode = mode.lower()
@@ -262,8 +263,10 @@ def register(
         # user has set no preference).
         allowlist = sorted(_tripwires._load_symbol_allowlist())
         try:
-            effective = _tripwires.effective_allowed_symbols_for_user(
-                firebase_uid
+            # Helper does two synchronous SQLite reads (user row +
+            # auto-trade row) — run off the event loop.
+            effective = await asyncio.to_thread(
+                _tripwires.effective_allowed_symbols_for_user, firebase_uid
             )
         except Exception:
             log.exception(
@@ -345,7 +348,12 @@ def register(
             return {"positions": []}
 
         try:
-            positions = _ps.list_positions_for_user(firebase_uid)
+            # list_positions_for_user does a synchronous Firestore
+            # .stream() — run it off the event loop so a slow Firestore
+            # round-trip doesn't freeze every other request.
+            positions = await asyncio.to_thread(
+                _ps.list_positions_for_user, firebase_uid
+            )
         except _ps.PositionStateNotInitialisedError:
             return {"positions": []}
         except Exception:

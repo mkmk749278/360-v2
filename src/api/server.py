@@ -820,7 +820,12 @@ def build_app(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="firebase_disabled",
                 )
-            firebase_uid = firebase_auth.register_user_by_phone(req.phone_e164)
+            # register_user_by_phone + create_custom_token hit the
+            # Firebase Admin SDK (network) — run off the event loop so a
+            # slow Google round-trip doesn't freeze concurrent requests.
+            firebase_uid = await asyncio.to_thread(
+                firebase_auth.register_user_by_phone, req.phone_e164
+            )
             await user_store.aset_firebase_uid(user.user_id, firebase_uid)
             # Reload the row with the backfilled uid so the response
             # carries the freshly-set value.
@@ -828,7 +833,9 @@ def build_app(
             assert reloaded is not None
             user = reloaded
         assert user.firebase_uid is not None
-        custom_token = firebase_auth.create_custom_token(user.firebase_uid)
+        custom_token = await asyncio.to_thread(
+            firebase_auth.create_custom_token, user.firebase_uid
+        )
         return TelegramOtpVerifyResponse(
             custom_token=custom_token,
             user_id=user.user_id,
