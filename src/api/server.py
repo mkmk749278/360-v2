@@ -290,7 +290,12 @@ def _make_auth_dep(
             and firebase_auth.is_initialised()
         ):
             try:
-                claims = firebase_auth.verify_id_token(presented)
+                # verify_id_token fetches Google JWKS on cache-miss — run
+                # off the event loop so a slow network call doesn't freeze
+                # all concurrent requests.
+                claims = await asyncio.to_thread(
+                    firebase_auth.verify_id_token, presented
+                )
             except AuthError:
                 claims = None
             if claims is not None:
@@ -374,7 +379,9 @@ def _make_user_claims_dep(
             and firebase_auth.is_initialised()
         ):
             try:
-                claims = firebase_auth.verify_id_token(presented)
+                claims = await asyncio.to_thread(
+                    firebase_auth.verify_id_token, presented
+                )
             except AuthError:
                 claims = None
             if claims is not None:
