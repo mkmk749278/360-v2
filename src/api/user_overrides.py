@@ -42,6 +42,7 @@ PR #4 (invalidation per-user modes) wire the engine read paths.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import threading
@@ -939,6 +940,35 @@ class UserOverridesStore:
             )
             row = cur.fetchone()
             return _row_to_partial(row, _AUTO_TRADE_COL_TYPES) if row else {}
+
+    # --- async variants ---
+
+    async def aget_pretp(self, user_id: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.get_pretp, user_id)
+
+    async def aupdate_pretp(
+        self, user_id: int, partial: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.update_pretp, user_id, partial)
+
+    async def aget_invalidation(self, user_id: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.get_invalidation, user_id)
+
+    async def aupdate_invalidation(
+        self, user_id: int, partial: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.update_invalidation, user_id, partial)
+
+    async def aget_auto_trade(self, user_id: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.get_auto_trade, user_id)
+
+    async def aupdate_auto_trade(
+        self, user_id: int, partial: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.update_auto_trade, user_id, partial)
+
+    async def aresume_user_auto_trade(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self.resume_user_auto_trade, user_id)
 
     def close(self) -> None:
         with self._lock:

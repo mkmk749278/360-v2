@@ -153,7 +153,7 @@ def register(
             )
         else:
             try:
-                user_store.delete_by_id(user.user_id)
+                await user_store.adelete_by_id(user.user_id)
             except Exception:
                 log.exception(
                     "delete_account: user row delete failed for "

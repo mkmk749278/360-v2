@@ -26,7 +26,7 @@ at the module boundary, mirroring the test pattern in
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from fastapi import FastAPI
@@ -97,7 +97,7 @@ def test_delete_happy_path_returns_204(
     """All three steps succeed → 204; each underlying call fired once."""
     user_store = MagicMock()
     user_store.get_by_firebase_uid.return_value = SimpleNamespace(user_id=99)
-    user_store.delete_by_id.return_value = True
+    user_store.adelete_by_id = AsyncMock(return_value=True)
     mock_get_user_store.return_value = user_store
 
     app = _build_app(identity=_firebase_user())
@@ -106,7 +106,7 @@ def test_delete_happy_path_returns_204(
 
     assert resp.status_code == 204
     mock_delete_blob.assert_called_once_with("fb-uid-test")
-    user_store.delete_by_id.assert_called_once_with(99)
+    user_store.adelete_by_id.assert_called_once_with(99)
     mock_reset_cache.assert_called_once()
 
 
@@ -191,7 +191,7 @@ def test_delete_503_when_user_row_delete_fails(
     is acceptable, the operator-side log surfaces it."""
     user_store = MagicMock()
     user_store.get_by_firebase_uid.return_value = SimpleNamespace(user_id=99)
-    user_store.delete_by_id.side_effect = RuntimeError("sqlite locked")
+    user_store.adelete_by_id = AsyncMock(side_effect=RuntimeError("sqlite locked"))
     mock_get_user_store.return_value = user_store
 
     app = _build_app(identity=_firebase_user())
@@ -225,6 +225,7 @@ def test_delete_returns_204_even_when_cache_reset_fails(
     succeeded at the data layer."""
     user_store = MagicMock()
     user_store.get_by_firebase_uid.return_value = SimpleNamespace(user_id=99)
+    user_store.adelete_by_id = AsyncMock(return_value=True)
     mock_get_user_store.return_value = user_store
 
     app = _build_app(identity=_firebase_user())
@@ -255,6 +256,7 @@ def test_delete_skips_blob_when_firestore_not_initialised(
     in-process test harness)."""
     user_store = MagicMock()
     user_store.get_by_firebase_uid.return_value = SimpleNamespace(user_id=99)
+    user_store.adelete_by_id = AsyncMock(return_value=True)
     mock_get_user_store.return_value = user_store
 
     app = _build_app(identity=_firebase_user())
@@ -263,7 +265,7 @@ def test_delete_skips_blob_when_firestore_not_initialised(
 
     assert resp.status_code == 204
     mock_delete_blob.assert_not_called()
-    user_store.delete_by_id.assert_called_once()
+    user_store.adelete_by_id.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
