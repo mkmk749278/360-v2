@@ -628,6 +628,7 @@ async def close_fsm_positions_for_signal(
     symbol: str,
     direction: str,
     reason: str,
+    excluded_modes: Optional[frozenset] = None,
 ) -> int:
     """Cancel native SL/TP orders + place a MARKET close for every user
     who has a non-terminal FSM position for ``signal_id``.
@@ -636,6 +637,12 @@ async def close_fsm_positions_for_signal(
     on every non-TP close path (INVALIDATED, SL_HIT detected engine-
     side, EXPIRED, CANCELLED) so the Binance position closes in
     lockstep with engine signal state — the B12 safety guarantee.
+
+    ``excluded_modes``: when provided, positions whose
+    ``invalidation_mode`` is in the set are skipped.  Used by the
+    invalidation path (reason="invalidated") to let loose-mode users
+    ride to their native SL/TP rather than being closed by the
+    engine's regime/EMA/momentum kill.
 
     Returns the count of users whose positions were actually closed
     (i.e. the MARKET close order was accepted OR the position was
@@ -676,6 +683,16 @@ async def close_fsm_positions_for_signal(
             continue
 
         if _ps.is_terminal(pos.state):
+            continue
+
+        # Per-user invalidation mode filter: loose-mode users survive
+        # engine invalidation; their native SL/TP bracket is still live.
+        if excluded_modes and pos.invalidation_mode in excluded_modes:
+            log.info(
+                "close_fsm: skipping uid={} signal_id={} "
+                "invalidation_mode={} excluded by caller (reason={})",
+                uid, signal_id, pos.invalidation_mode, reason,
+            )
             continue
 
         placer = _op.OrderPlacer(uid)
@@ -782,6 +799,160 @@ async def close_fsm_positions_for_signal(
         )
 
     return closed
+
+
+def get_fsm_positions_for_signal(
+    signal_id: str,
+) -> list:
+    """Return ``[(uid, Position), ...]`` for every non-terminal FSM position
+    that is currently open for ``signal_id``.
+
+    Used by the per-user tight-mode invalidation check in TradeMonitor so
+    it can iterate users without importing position_state directly.  Returns
+    an empty list when position_state is not initialised or no positions exist.
+    """
+    from src.execution import position_state as _ps
+
+    if not _ps.is_initialised():
+        return []
+
+    result = []
+    for uid in _active_uids():
+        try:
+            pos = _ps.get_position(uid, signal_id)
+        except _ps.PositionNotFoundError:
+            continue
+        except Exception as exc:
+            log.debug(
+                "get_fsm_positions_for_signal: get_position failed "
+                "uid={} signal_id={} exc={}",
+                uid, signal_id, exc,
+            )
+            continue
+        if not _ps.is_terminal(pos.state):
+            result.append((uid, pos))
+    return result
+
+
+async def close_single_fsm_position(
+    uid: str,
+    signal_id: str,
+    *,
+    symbol: str,
+    direction: str,
+    reason: str,
+) -> bool:
+    """Cancel native bracket orders + place a MARKET close for a single user.
+
+    Returns ``True`` when the close was successfully attempted, ``False`` when
+    the position was not found, already terminal, or position_state is not
+    initialised.  Fail-soft: Binance / Firestore errors are logged but not
+    re-raised — the reconciler is the safety net.
+    """
+    from datetime import datetime, timezone
+
+    from src.execution import order_placer as _op
+    from src.execution import position_state as _ps
+
+    if not _ps.is_initialised():
+        return False
+
+    try:
+        pos = _ps.get_position(uid, signal_id)
+    except _ps.PositionNotFoundError:
+        return False
+    except Exception as exc:
+        log.warning(
+            "close_single_fsm: get_position failed uid={} signal_id={} exc={}",
+            uid, signal_id, exc,
+        )
+        return False
+
+    if _ps.is_terminal(pos.state):
+        return False
+
+    placer = _op.OrderPlacer(uid)
+
+    for order_id in (
+        pos.sl_order_id,
+        pos.sl_be_order_id,
+        pos.tp1_order_id,
+        pos.tp2_order_id,
+        pos.tp3_order_id,
+    ):
+        if not order_id:
+            continue
+        try:
+            await placer.cancel_order(symbol=pos.symbol, order_id=order_id)
+        except _op.OrderPlacementError as exc:
+            log.warning(
+                "close_single_fsm: cancel_order failed uid={} signal_id={} "
+                "order_id={} exc={}",
+                uid, signal_id, order_id, exc,
+            )
+
+    remaining = pos.total_qty - pos.closed_qty
+    if remaining <= 0:
+        remaining = pos.total_qty
+
+    market_close_ok = False
+    try:
+        await placer.place_market_close(
+            signal_id=signal_id,
+            symbol=pos.symbol,
+            direction=pos.side,
+            quantity=remaining,
+        )
+        market_close_ok = True
+    except _op.OrderRejectedByBinance as exc:
+        sig_resp = getattr(exc, "signing_response", None)
+        b_code = None
+        if sig_resp is not None:
+            body = getattr(sig_resp, "binance_body", None)
+            if isinstance(body, dict):
+                try:
+                    b_code = int(body.get("code", 0))
+                except (TypeError, ValueError):
+                    pass
+        if b_code == -2022:
+            log.info(
+                "close_single_fsm: -2022 ReduceOnly rejected — already flat "
+                "uid={} signal_id={}",
+                uid, signal_id,
+            )
+            market_close_ok = True
+        else:
+            log.error(
+                "close_single_fsm: MARKET close rejected uid={} signal_id={} "
+                "reason={} code={} exc={}",
+                uid, signal_id, reason, b_code, exc,
+            )
+    except _op.OrderPlacementError as exc:
+        log.error(
+            "close_single_fsm: MARKET close FAILED uid={} signal_id={} "
+            "reason={} exc={}",
+            uid, signal_id, reason, exc,
+        )
+
+    now = datetime.now(timezone.utc)
+    pos.state = _ps.PositionState.CLOSED
+    pos.close_reason = reason[:20]
+    pos.closed_at = now
+    pos.last_event_at = now
+    try:
+        _ps.put_position(pos)
+    except Exception as exc:
+        log.error(
+            "close_single_fsm: put_position failed uid={} signal_id={} exc={}",
+            uid, signal_id, exc,
+        )
+
+    log.info(
+        "close_single_fsm: closed uid={} signal_id={} symbol={} reason={} "
+        "market_close_ok={}",
+        uid, signal_id, pos.symbol, reason, market_close_ok,
+    )
+    return True
 
 
 async def close_fsm_partial_for_signal(
