@@ -4,6 +4,65 @@
 
 ---
 
+## In-session checkpoint 2026-05-30 (session 11) — Auth cold-start latency: 3-cause root-cause fix (PR #545)
+
+### Theme
+
+Deep investigation of why Pulse/Settings/Profile tabs still timed out even after #535–#544 were merged. User explicitly asked for thorough diagnosis before any code change. Found three independent causes, all fixed in a single PR (#545). PR merged this session.
+
+### Root causes found and fixed
+
+**Cause 1 — Cold JWKS on every engine restart (dominant cause)**
+
+`firebase_admin.auth.verify_id_token()` fetches Google's RSA public-key set (JWKS) from `googleapis.com` on first call after boot — 0.5–3 s from the Contabo VPS. Every PR deploy restarts the engine and resets this cache. With a 4 s app timeout: 2–3 s JWKS + 0.5 s DB = timeout. With 8 s timeout: stacked with causes 2/3 could still exceed budget.
+
+**Fix** (`src/api/firebase_auth.py`): `init_firebase_admin()` now synchronously pre-warms JWKS by calling `verify_id_token()` on a well-formed dummy token (correct `iss`/`aud`, garbage signature) during engine boot — before the server accepts requests. `_build_prewarm_token(project_id)` constructs the token. JWKS is cached for ~1 h; pre-warm adds ~2 s to boot time, paid once.
+
+**Cause 2 — Snapshot-cache background tasks competed for the default thread pool**
+
+`SnapshotCache` dispatched all refresh work via `asyncio.to_thread()`, drawing from the default 8-thread `ThreadPoolExecutor` (`min(32, cpu+4)`). `build_signals(limit=500)` runs every 5 s and can hold a thread for 1–3 s while building 500 Pydantic models. When 5–6 parallel Pulse bundle requests arrive during a refresh window, `verify_id_token` and `aget_or_create_by_firebase_uid` calls queued behind occupied threads — adding 1–3 s wait on top of the JWKS fetch.
+
+**Fix** (`src/api/snapshot_cache.py`): `SnapshotCache.__init__` creates a dedicated `ThreadPoolExecutor(max_workers=2, thread_name_prefix="snapshot-cache")`. All four refresh dispatches (`start()` pre-warm + three background loops) use `loop.run_in_executor(self._executor, ...)` instead of `asyncio.to_thread()`. Default pool reserved exclusively for auth/DB/per-request work. `stop()` shuts the executor down cleanly.
+
+**Cause 3 — Redundant `auth` + `user_claims` deps on 5 endpoints (structural waste)**
+
+Five endpoints had both `dependencies=[Depends(auth)]` AND `identity=Depends(user_claims)` in their definition:
+- `GET /api/pulse`
+- `GET /api/positions`
+- `GET /api/auto-mode`
+- `GET /api/pnl/history`
+- `POST /api/auto-mode/resume-mine`
+
+`user_claims` is a strict superset of `auth` (verifies token, raises 401, returns resolved User). FastAPI resolves deps independently with no shared cache across different dep functions, so each request burned a second `asyncio.to_thread(verify_id_token)` dispatch + a second `aget_or_create_by_firebase_uid` SQLite call for zero benefit.
+
+**Fix** (`src/api/server.py`): Removed `dependencies=[Depends(auth)]` from these five endpoints. The remaining `auth`-only endpoints (e.g. `/api/signals`, `/api/pulse/tickers`, `/api/settings/*`) are unaffected — they correctly use `auth` without `user_claims`.
+
+### Why the investigation took this long (and why prior PRs didn't fix it)
+
+| PR | What it fixed | Why insufficient |
+|---|---|---|
+| #541/542 | `asyncio.sleep(0)` yields in scanner | Yielded between evals but default pool still starved |
+| #543 | Dedicated scanner `ThreadPoolExecutor` | Isolated scanner CPU but didn't isolate snapshot-cache |
+| #544 | Firebase token 60 s in-process cache | Cache miss still 2–3 s; thundering herd on cold cache from 5–6 parallel requests hitting simultaneously before any call completes and stores the result |
+
+None of the prior PRs addressed: (1) cold JWKS latency at boot, (2) snapshot-cache pool contention, or (3) redundant double-verify on the 5 user_claims endpoints.
+
+### PR shipped
+
+| PR | Repo | Title | Status |
+|---|---|---|---|
+| **#545** | 360-v2 | perf(auth): JWKS pre-warm + snapshot-cache pool isolation + drop redundant auth deps | ✅ merged |
+
+### Test suite
+
+5275 passed, 63 skipped (unchanged baseline).
+
+### Pending queue — clear
+
+No open performance-related items. Next action: monitor VPS logs for `"Firebase JWKS pre-warm complete"` after next deploy to confirm pre-warm runs as expected. Look for first-post-restart authenticated request latency dropping to <200 ms (vs 2–3 s previously).
+
+---
+
 ## In-session checkpoint 2026-05-29 (session 10) — P2 performance: async SQLite + SWR persistence
 
 ### Theme
