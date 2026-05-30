@@ -7,9 +7,10 @@ engine state and serialising Pydantic models on every request.  Cold
 cache (first interval after startup) falls back to the live builder call
 so no request ever fails.
 
-All three ``_refresh_*_once`` helpers are synchronous functions called via
-``asyncio.to_thread`` so the Pydantic-model construction work runs on the
-thread pool and never blocks the single shared event loop.
+All three ``_refresh_*_once`` helpers are synchronous functions dispatched
+via a dedicated ``ThreadPoolExecutor`` (``self._executor``) so the heavy
+Pydantic-model construction work never competes with auth/DB calls for the
+default asyncio thread pool.
 
 Singleton ``snapshot_cache`` is imported by server.py; started in the
 FastAPI lifespan handler so it shares the same event loop as the app.
@@ -19,6 +20,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from concurrent.futures import ThreadPoolExecutor as _TPE
 from typing import Any, List, Optional
 
 from src.utils import get_logger
@@ -42,6 +44,11 @@ class SnapshotCache:
         self._task: Optional[asyncio.Task] = None
         self._activity_task: Optional[asyncio.Task] = None
         self._agents_task: Optional[asyncio.Task] = None
+        # Dedicated pool: heavy Pydantic model builds (up to 500 signals every
+        # 5 s) must not compete with auth/DB calls in the default asyncio
+        # executor.  2 workers is enough — the three refresh tasks are
+        # staggered in time and never need more than one thread simultaneously.
+        self._executor = _TPE(max_workers=2, thread_name_prefix="snapshot-cache")
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -49,12 +56,13 @@ class SnapshotCache:
 
     async def start(self, engine: Any) -> None:
         self._engine = engine
+        loop = asyncio.get_event_loop()
         # Signals task
         if self._task is None or self._task.done():
             # Pre-warm off the event loop so the first 500-model build
             # doesn't stall the loop during startup.
             try:
-                await asyncio.to_thread(self._refresh_signals_once)
+                await loop.run_in_executor(self._executor, self._refresh_signals_once)
             except Exception:
                 log.exception("snapshot_cache: signals pre-warm failed — cache is cold")
             self._task = asyncio.create_task(
@@ -90,6 +98,7 @@ class SnapshotCache:
         self._task = None
         self._activity_task = None
         self._agents_task = None
+        self._executor.shutdown(wait=False)
         log.info("snapshot_cache: stopped")
 
     # ------------------------------------------------------------------
@@ -97,32 +106,35 @@ class SnapshotCache:
     # ------------------------------------------------------------------
 
     async def _signals_loop(self) -> None:
+        loop = asyncio.get_event_loop()
         while True:
             await asyncio.sleep(_SIGNALS_INTERVAL_S)
             try:
-                await asyncio.to_thread(self._refresh_signals_once)
+                await loop.run_in_executor(self._executor, self._refresh_signals_once)
             except Exception:
                 log.exception("snapshot_cache: signals refresh failed — keeping stale cache")
 
     async def _activity_loop(self) -> None:
+        loop = asyncio.get_event_loop()
         while True:
             await asyncio.sleep(_ACTIVITY_INTERVAL_S)
             try:
-                await asyncio.to_thread(self._refresh_activity_once)
+                await loop.run_in_executor(self._executor, self._refresh_activity_once)
             except Exception:
                 log.exception("snapshot_cache: activity refresh failed — keeping stale cache")
 
     async def _agents_loop(self) -> None:
+        loop = asyncio.get_event_loop()
         while True:
             await asyncio.sleep(_AGENTS_INTERVAL_S)
             try:
-                await asyncio.to_thread(self._refresh_agents_once)
+                await loop.run_in_executor(self._executor, self._refresh_agents_once)
             except Exception:
                 log.exception("snapshot_cache: agents refresh failed — keeping stale cache")
 
     # ------------------------------------------------------------------
-    # Sync refreshers — called via asyncio.to_thread so Pydantic model
-    # construction runs on the thread pool, not the event loop.
+    # Sync refreshers — dispatched via self._executor so Pydantic model
+    # construction runs on the dedicated pool, not the default event-loop pool.
     # ------------------------------------------------------------------
 
     def _refresh_signals_once(self) -> None:
