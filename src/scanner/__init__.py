@@ -1054,6 +1054,18 @@ class Scanner:
         # Semaphore to limit concurrent symbol scans
         self._scan_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SCANS)
 
+        # Dedicated thread pool for CPU-bound scan work (_compute_indicators).
+        # Isolated from the default asyncio executor so that saturating it with
+        # 20 concurrent indicator computations never starves auth/DB threads
+        # that the HTTP request handlers depend on.
+        import os
+        from concurrent.futures import ThreadPoolExecutor as _TPE
+        _cpu = os.cpu_count() or 4
+        self._scan_executor = _TPE(
+            max_workers=max(_cpu, _MAX_CONCURRENT_SCANS),
+            thread_name_prefix="scanner-compute",
+        )
+
         # Tiered scanning counters
         self._scan_cycle_count: int = 0
         self._last_tier3_scan_time: float = 0.0
@@ -2369,7 +2381,10 @@ class Scanner:
         if _cached is not None and _cached[0] == _fp:
             indicators = _cached[1]
         else:
-            indicators = await asyncio.to_thread(self._compute_indicators, candles)
+            loop = asyncio.get_event_loop()
+            indicators = await loop.run_in_executor(
+                self._scan_executor, self._compute_indicators, candles
+            )
             if _fp is not None:
                 self._indicator_cache[symbol] = (_fp, indicators)
         ticks = self.data_store.ticks.get(symbol, [])
