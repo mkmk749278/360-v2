@@ -542,7 +542,13 @@ def build_app(
         uptime = time.monotonic() - boot if boot else 0.0
         return HealthResponse(uptime_seconds=max(0.0, uptime), version=_API_VERSION)
 
-    # ---- Auth endpoints (no auth required to mint; refresh requires a current valid JWT) ----
+    # ---- Auth endpoints (legacy JWT — replaced by Firebase Phone Auth) ----
+    # POST /api/auth/anonymous and /api/auth/refresh were retired when the
+    # Lumin app migrated to Firebase Phone Auth (Phase 4).  They return
+    # 410 Gone so old app builds surface a clear "update required" path
+    # instead of a confusing auth failure.  The Telegram-OTP → Firebase
+    # bridge (/api/auth/telegram-otp/*) and the HS256 fallback inside
+    # the ``auth`` dependency are preserved for the transition window.
 
     @app.post(
         "/api/auth/anonymous",
@@ -550,23 +556,12 @@ def build_app(
         tags=["auth"],
     )
     async def auth_anonymous() -> _TokenResponse:
-        if not jwt_secret:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="auth not configured: API_JWT_SECRET unset",
-            )
-        # Every anonymous mint gets a fresh device id and the all-access
-        # tier during the testing phase.  Once subscriptions ship, this
-        # path will mint tier=free; tier=paid will come from a separate
-        # subscription-confirmation endpoint.
-        token = mint_token(secret=jwt_secret, tier=ALL_ACCESS_TIER)
-        claims = decode_token(token, secret=jwt_secret)
-        return _TokenResponse(
-            token=token,
-            tier=claims.tier,
-            sub=claims.sub,
-            exp_seconds=int((claims.exp - claims.iat).total_seconds()),
-            needs_onboarding=await _compute_needs_onboarding(claims.sub, user_store),
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail=(
+                "legacy JWT auth has been replaced by Firebase Phone Auth; "
+                "please update to the latest version of the Lumin app"
+            ),
         )
 
     @app.post(
@@ -575,25 +570,12 @@ def build_app(
         tags=["auth"],
     )
     async def auth_refresh(req: _RefreshRequest) -> _TokenResponse:
-        if not jwt_secret:
-            raise HTTPException(
-                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-                detail="auth not configured",
-            )
-        try:
-            new_token = refresh_token(req.token, secret=jwt_secret)
-        except AuthError as exc:
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail=str(exc),
-            )
-        claims = decode_token(new_token, secret=jwt_secret)
-        return _TokenResponse(
-            token=new_token,
-            tier=claims.tier,
-            sub=claims.sub,
-            exp_seconds=int((claims.exp - claims.iat).total_seconds()),
-            needs_onboarding=await _compute_needs_onboarding(claims.sub, user_store),
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail=(
+                "legacy JWT refresh has been replaced by Firebase Phone Auth; "
+                "please update to the latest version of the Lumin app"
+            ),
         )
 
     # ---- Phone OTP auth (Phase 2) ----
@@ -1055,9 +1037,14 @@ def build_app(
         dependencies=[Depends(auth)],
     )
     async def signal_detail(signal_id: str) -> SignalDetail:
-        # Search all known signals — small cost (≤500 history + active).
-        items = build_signals(engine, status="all", limit=1000)
-        for it in items:
+        # Serve from the 5s background cache when warm (avoids building
+        # 1000+ Pydantic models synchronously on every request).  The
+        # cache cap is 500; fall back to a live 1000-item build for very
+        # old signals not yet evicted from the engine's active_signals
+        # + _signal_history.
+        cached = _snapshot_cache.filter_signals(status="all", limit=500)
+        pool = cached if cached is not None else build_signals(engine, status="all", limit=1000)
+        for it in pool:
             if it.signal_id == signal_id:
                 return it
         raise HTTPException(
