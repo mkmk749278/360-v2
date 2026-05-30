@@ -1211,7 +1211,11 @@ def build_app(
         ),
     ) -> ActivityResponse:
         try:
-            items = build_activity(engine, limit=limit, setup_class=setup_class)
+            cached = _snapshot_cache.filter_activity(limit=limit, setup_class=setup_class)
+            if cached is not None:
+                items = cached
+            else:
+                items = build_activity(engine, limit=limit, setup_class=setup_class)
         except Exception:
             log.exception("/api/activity failed — returning empty list")
             items = []
@@ -1795,7 +1799,8 @@ def build_app(
         dependencies=[Depends(auth)],
     )
     async def agents() -> AgentsResponse:
-        items = build_agents(engine)
+        cached = _snapshot_cache.get_agents()
+        items = cached if cached is not None else build_agents(engine)
         return AgentsResponse(items=items, total=len(items))
 
     return app
