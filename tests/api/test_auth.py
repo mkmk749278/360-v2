@@ -91,29 +91,21 @@ def client() -> TestClient:
 
 
 def test_anonymous_endpoint_mints_token(client: TestClient) -> None:
+    # Legacy JWT endpoint retired — returns 410 Gone since Firebase Phone Auth migration
     r = client.post("/api/auth/anonymous")
-    assert r.status_code == 200
-    body = r.json()
-    assert body["tier"] == ALL_ACCESS_TIER
-    assert body["sub"].startswith("device-")
-    assert body["exp_seconds"] > 0
-    # Token validates against the same secret
-    decode_token(body["token"], secret=_SECRET)
+    assert r.status_code == 410
 
 
 def test_refresh_endpoint_issues_new_token(client: TestClient) -> None:
-    minted = client.post("/api/auth/anonymous").json()["token"]
-    time.sleep(1)  # so refresh's iat/exp differ from the original
-    r = client.post("/api/auth/refresh", json={"token": minted})
-    assert r.status_code == 200
-    new = r.json()["token"]
-    assert new != minted  # new exp → different signature
-    decode_token(new, secret=_SECRET)
+    # Legacy JWT refresh endpoint retired — returns 410 Gone
+    r = client.post("/api/auth/refresh", json={"token": "any.token.here"})
+    assert r.status_code == 410
 
 
 def test_refresh_endpoint_rejects_invalid_token(client: TestClient) -> None:
+    # Legacy JWT refresh endpoint retired — returns 410 Gone regardless of token validity
     r = client.post("/api/auth/refresh", json={"token": "not.a.jwt"})
-    assert r.status_code == 401
+    assert r.status_code == 410
 
 
 def test_protected_endpoint_requires_valid_jwt(client: TestClient) -> None:
@@ -125,7 +117,8 @@ def test_protected_endpoint_requires_valid_jwt(client: TestClient) -> None:
 
 
 def test_protected_endpoint_accepts_minted_jwt(client: TestClient) -> None:
-    token = client.post("/api/auth/anonymous").json()["token"]
+    # Anonymous endpoint is retired (410); use a directly minted token instead
+    token = mint_token(secret=_SECRET)
     r = client.get("/api/pulse", headers={"Authorization": f"Bearer {token}"})
     assert r.status_code == 200
 
@@ -166,7 +159,8 @@ def test_health_does_not_require_auth() -> None:
 
 
 def test_anonymous_endpoint_503_when_secret_missing() -> None:
+    # Legacy JWT endpoint is retired — always returns 410 regardless of jwt_secret config
     app = build_app(_StubEngine(), jwt_secret="", allow_static=False)
     c = TestClient(app)
     r = c.post("/api/auth/anonymous")
-    assert r.status_code == 503
+    assert r.status_code == 410
