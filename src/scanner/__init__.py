@@ -2384,6 +2384,9 @@ class Scanner:
             tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
         )
         smc_data = smc_result.as_dict()
+        # Yield after the heaviest sync section so HTTP handlers can run
+        # between the 75 concurrent symbol scan-context builds.
+        await asyncio.sleep(0)
         dependency_source_state: Dict[str, str] = {}
         _recent_ticks = smc_data.get("recent_ticks")
         if _recent_ticks is None:
@@ -2473,6 +2476,7 @@ class Scanner:
         regime_ind = indicators.get("5m", indicators.get("1m", {}))
         regime_candles = candles.get("5m", candles.get("1m"))
         regime_result = self.regime_detector.classify(regime_ind, regime_candles, timeframe=regime_tf)
+        await asyncio.sleep(0)
         log.debug("{} regime: {}", symbol, regime_result.regime.value)
         self._regime_cycle_counts[regime_result.regime.value] += 1
         self._regime_cycle_by_symbol[symbol][regime_result.regime.value] += 1
