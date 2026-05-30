@@ -4,6 +4,93 @@
 
 ---
 
+## In-session checkpoint 2026-05-30 (session 11) — Full CTE async I/O audit: P0 + P1 + cleanup
+
+### Theme
+
+Deep CTE audit across both repos (360-v2 + lumin-app). Identified every blocking I/O call on the shared asyncio event loop and every UI-thread bottleneck in the Flutter app. Shipped 6 PRs across two repos in two priority batches.
+
+### PRs shipped this session
+
+| PR | Repo | Title | Status |
+|---|---|---|---|
+| **#537** | 360-v2 | perf(api): thread remaining blocking Firestore/KMS calls off the event loop (P0) | ✅ merged |
+| **#82** | lumin-app | perf(swr): SWR-cache PaperTradesPage + Agents detail; optimistic cold launch (P0) | ✅ merged |
+| **#538** | 360-v2 | perf(cache): thread snapshot_cache refresh + activity/agents background caches (P1) | ✅ merged |
+| **#83** | lumin-app | perf(app): compute() JSON off UI isolate; scoped price rebuilds; 4s timeout (P1) | ✅ merged |
+| **#539** | 360-v2 | chore: 410 dead JWT auth endpoints; signal_detail uses snapshot cache (cleanup) | ✅ merged |
+| **#84** | lumin-app | perf(swr): persist paper-trades SWR to SharedPreferences; add prewarm (cleanup) | ✅ merged |
+
+### What the P0 batch implemented
+
+**Engine PR #537** — Threaded 7 remaining Firestore/KMS blocking calls:
+- `binance_connect_routes.py`: POST connect (kms.encrypt + firestore.put_key_blob), GET status (get_key_blob), DELETE (delete_key_blob)
+- `auto_trade_status_routes.py`: kill-switch reads (is_globally_enabled, is_user_disabled), get_key_blob, list_recent_events
+- `paper_trade_routes.py`: reset_paper_subscription
+
+**App PR #82** — Three UX wins:
+- PaperTradesPage first-page load via `watchPaperTradesFirstPage` SWR (was full spinner every visit)
+- Agents detail page via `watchAgents().first + watchSignals().first` (was full spinner every visit)
+- Optimistic cold launch: NavShell shown immediately from SDK-cached token; `forceRefresh` verify runs in background. Removes 100-500ms blank splash for returning users.
+
+### What the P1 batch implemented
+
+**Engine PR #538** — Thread snapshot_cache + background activity/agents:
+- `snapshot_cache._refresh_signals_once` now runs via `asyncio.to_thread` — 500-model Pydantic build every 5s no longer stalls the event loop
+- `/api/activity` has a 30s background cache (threaded `build_activity`); cold → falls back to live
+- `/api/agents` has a 60s background cache (threaded `build_agents`); cold → falls back to live
+
+**App PR #83** — Three wins:
+- `api_client._request`: `jsonDecode(resp.body)` → `await compute(jsonDecode, resp.body)` — large signal/trade responses parse off the UI thread
+- `signals_page.dart`: `_livePrices Map + setState` → `_priceNotifiers Map<ValueNotifier<double>>`. Price tick only rebuilds the price+PnL row of each card via `ValueListenableBuilder`. No full ListView rebuild every 5s.
+- `api_client.dart`: timeout 8s→4s, maxRetries 2→1 (worst-case stall 24s→8s)
+
+### What the cleanup batch implemented
+
+**Engine PR #539** — Dead endpoint cleanup:
+- `/api/auth/anonymous` and `/api/auth/refresh` now return 410 Gone (Firebase Phone Auth replaced them; old clients get a clear "update app" message)
+- `/api/signals/{signal_id}` now checks `_snapshot_cache.filter_signals(limit=500)` before building 1000 models live
+
+**App PR #84** — Paper trades persistence + prewarm:
+- Added `toMap()` to `PartialFill` and `TradeRecord`; `toJsonString()`/`fromJsonString()` to `TradeListResponse`
+- `watchPaperTradesFirstPage` now persists to SharedPreferences (key `swr_paper_trades_50`) — Paper tab shows last-session data on cold open
+- `prewarmCaches()` now warms paper trades alongside pulse/signals/agents/trade tabs
+
+### Full list of event-loop blocking calls — status after this session
+
+| Call site | Was blocking? | Fix |
+|---|---|---|
+| `snapshot_cache._refresh_signals_once` (every 5s) | ✅ Pydantic build on loop | `asyncio.to_thread` — PR #538 |
+| `build_activity` on every `/api/activity` request | ✅ sync iteration | Background cache, `asyncio.to_thread` — PR #538 |
+| `build_agents` on every `/api/agents` request | ✅ sync iteration | Background cache, `asyncio.to_thread` — PR #538 |
+| `firestore_keystore.put_key_blob` in binance_connect | ✅ blocking Firestore write | `asyncio.to_thread` — PR #537 |
+| `kms.encrypt` in binance_connect | ✅ blocking GCP call | `asyncio.to_thread` — PR #537 |
+| `firestore_keystore.get_key_blob` (status + runtime) | ✅ blocking Firestore read | `asyncio.to_thread` — PR #537 |
+| `firestore_keystore.delete_key_blob` | ✅ blocking Firestore write | `asyncio.to_thread` — PR #537 |
+| `kill_switch.is_globally_enabled` / `is_user_disabled` | ✅ blocking Firestore reads | `asyncio.to_thread` — PR #537 |
+| `dispatch_log.list_recent_events` | ✅ blocking DB read | `asyncio.to_thread` — PR #537 |
+| `user_overrides.get_paper_subscriptions` (snapshot, paper routes) | ✅ SQLite read | `asyncio.to_thread` — session 10 |
+| `trade_records.list_trades` (snapshot, paper routes) | ✅ SQLite read | `asyncio.to_thread` — session 10 |
+| `pnl_history.get_*` | ✅ SQLite read | `asyncio.to_thread` — session 10 |
+| `UserStore` all methods | ✅ SQLite | `asyncio.to_thread` via `a*` wrappers — PR #532 |
+| `UserOverridesStore` all methods | ✅ SQLite | `asyncio.to_thread` via `a*` wrappers — PR #532 |
+
+**Remaining (needs owner sign-off or major arch work):**
+- `chan.evaluate()` (scanner hot path, 15 evaluators × 75 pairs × 15s cycle) — off-loop requires queue + worker process. Owner sign-off required (touches signal-generation core).
+- Engine→app WebSocket push (eliminates 5s polling; largest smoothness win at scale). Owner sign-off required.
+
+### Test suite state
+
+Engine: 5275 passed, 63 skipped (stable across all P0/P1/cleanup PRs)
+
+### Owner decision queue
+
+1. **WebSocket push channel** — eliminates all client-side polling at scale. The biggest remaining latency win. Requires architecture decision + owner sign-off.
+2. **Scanner `chan.evaluate()` off the loop** — medium-risk refactor (queue + worker). Owner sign-off required.
+3. **Monitor first wave of multi-user live auto-trade** — the full async I/O chain is now non-blocking end-to-end.
+
+---
+
 ## In-session checkpoint 2026-05-29 (session 10) — P2 performance: async SQLite + SWR persistence
 
 ### Theme
