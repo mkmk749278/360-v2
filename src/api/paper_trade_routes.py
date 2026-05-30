@@ -306,7 +306,9 @@ def register(
                     status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                     detail="user overrides store not initialised",
                 )
-            new_started_at = store.reset_paper_subscription(user_id)
+            new_started_at = await asyncio.to_thread(
+                store.reset_paper_subscription, user_id
+            )
             log.info(
                 "paper_reset_mine user_id={} new_started_at={}",
                 user_id, new_started_at,

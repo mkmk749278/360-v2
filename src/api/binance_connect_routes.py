@@ -41,6 +41,7 @@ boundary — see ``OWNER_BRIEF §3.9`` for the full lifecycle.
 
 from __future__ import annotations
 
+import asyncio
 import os
 from typing import Any, Callable, Optional, Union
 
@@ -255,8 +256,13 @@ def register(
                 plaintext_dek, body.api_secret.encode("utf-8")
             )
             kms = kms_client.get_client()
-            wrapped_dek = kms.encrypt(plaintext_dek)
-            firestore_keystore.put_key_blob(
+            # KMS wrap is a blocking network round-trip to Cloud KMS — keep
+            # it off the shared event loop so a slow KMS call doesn't stall
+            # every other user's in-flight request.
+            wrapped_dek = await asyncio.to_thread(kms.encrypt, plaintext_dek)
+            # Firestore write is likewise a blocking network call.
+            await asyncio.to_thread(
+                firestore_keystore.put_key_blob,
                 firebase_uid,
                 encrypted_secret=encrypted_blob.raw,
                 encrypted_dek=wrapped_dek,
@@ -343,7 +349,11 @@ def register(
             )
 
         try:
-            blob = firestore_keystore.get_key_blob(firebase_uid)
+            # Firestore read is a blocking network round-trip — dispatch it
+            # to a worker thread so the status poll doesn't stall the loop.
+            blob = await asyncio.to_thread(
+                firestore_keystore.get_key_blob, firebase_uid
+            )
         except firestore_keystore.KeyBlobNotFoundError:
             return BinanceConnectStatusResponse(connected=False)
         except Exception:
@@ -409,7 +419,11 @@ def register(
             )
 
         try:
-            firestore_keystore.delete_key_blob(firebase_uid)
+            # Firestore delete is a blocking network round-trip — thread it
+            # (mirrors account_routes.py, which already threads this call).
+            await asyncio.to_thread(
+                firestore_keystore.delete_key_blob, firebase_uid
+            )
         except Exception:
             log.exception(
                 "binance_connect_delete: Firestore delete failed for uid={}",

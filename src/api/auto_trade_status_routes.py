@@ -106,8 +106,12 @@ def register(
 
         ks = _kill_switch.get_client()
         try:
-            globally_enabled = ks.is_globally_enabled()
-            user_disabled = ks.is_user_disabled(firebase_uid)
+            # 5s-cached, but a cache-miss is a blocking Firestore read —
+            # thread it off the shared loop on this per-poll path.
+            globally_enabled = await asyncio.to_thread(ks.is_globally_enabled)
+            user_disabled = await asyncio.to_thread(
+                ks.is_user_disabled, firebase_uid
+            )
         except Exception as exc:
             log.exception(
                 "auto_trade_user_status: Firestore read failed uid={}",
@@ -178,8 +182,15 @@ def register(
         if _kill_switch.is_initialised():
             try:
                 ks = _kill_switch.get_client()
-                globally_enabled = bool(ks.is_globally_enabled())
-                user_disabled = bool(ks.is_user_disabled(firebase_uid))
+                # Kill-switch reads are 5s-cached, but a cache-miss does a
+                # blocking Firestore read — thread both so a cold read on
+                # this per-poll path can't stall the shared event loop.
+                globally_enabled = bool(
+                    await asyncio.to_thread(ks.is_globally_enabled)
+                )
+                user_disabled = bool(
+                    await asyncio.to_thread(ks.is_user_disabled, firebase_uid)
+                )
             except Exception:
                 log.exception(
                     "runtime_status: kill switch read failed uid={}",
@@ -194,7 +205,8 @@ def register(
             from src.security import firestore_keystore as _fk
             if _fk.is_initialised():
                 try:
-                    _fk.get_key_blob(firebase_uid)
+                    # Blocking Firestore read — thread it off the loop.
+                    await asyncio.to_thread(_fk.get_key_blob, firebase_uid)
                     binance_key_connected = True
                 except _fk.KeyBlobNotFoundError:
                     binance_key_connected = False
@@ -445,7 +457,11 @@ def register(
                 ),
             )
 
-        events = _dl.list_recent_events(firebase_uid, limit=limit)
+        # list_recent_events does a blocking Firestore query.stream() —
+        # thread it so this per-visit Trade-tab poll can't stall the loop.
+        events = await asyncio.to_thread(
+            _dl.list_recent_events, firebase_uid, limit=limit
+        )
         return {
             "events": [
                 {
