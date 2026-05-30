@@ -1627,25 +1627,18 @@ def test_verify_otp_onboarded_user_needs_onboarding_false(
 
 
 def test_anonymous_token_needs_onboarding_true(engine: _StubEngine, tmp_path) -> None:
-    """device-id tokens have no profile → always need onboarding."""
+    """/api/auth/anonymous is retired (Firebase Phone Auth replaced it) → 410 Gone."""
     client, _store, _delivery = _phase2_app(engine, tmp_path)
     r = client.post("/api/auth/anonymous")
-    assert r.status_code == 200
-    assert r.json()["needs_onboarding"] is True
+    assert r.status_code == 410
 
 
 def test_refresh_carries_onboarding_state(engine: _StubEngine, tmp_path) -> None:
-    """A refresh of a user JWT for an onboarded user should report false."""
+    """/api/auth/refresh is retired (Firebase Phone Auth replaced it) → 410 Gone."""
     client, store, delivery = _phase2_app(engine, tmp_path)
     token = _verify_and_get_token(client, store, delivery, "+15551110003")
-    # Onboard out-of-band.
-    user = store.get_by_phone("+15551110003")
-    assert user is not None
-    store.update_profile(user.user_id, display_name="Frank", accept_terms=True)
-    # Refresh — engine should consult the now-updated user row.
     r = client.post("/api/auth/refresh", json={"token": token})
-    assert r.status_code == 200
-    assert r.json()["needs_onboarding"] is False
+    assert r.status_code == 410
 
 
 # ---- /api/profile GET ------------------------------------------------------
@@ -1676,15 +1669,10 @@ def test_profile_get_requires_auth(engine: _StubEngine, tmp_path) -> None:
 def test_profile_get_rejects_anonymous_device_token(
     engine: _StubEngine, tmp_path,
 ) -> None:
-    """Device-id JWTs have no user row → 404 on profile."""
+    """/api/auth/anonymous is retired → 410 Gone (can't mint device-id token)."""
     client, _store, _delivery = _phase2_app(engine, tmp_path)
     r = client.post("/api/auth/anonymous")
-    anon_token = r.json()["token"]
-    r2 = client.get(
-        "/api/profile",
-        headers={"Authorization": f"Bearer {anon_token}"},
-    )
-    assert r2.status_code == 404
+    assert r.status_code == 410
 
 
 # ---- /api/profile PUT ------------------------------------------------------
@@ -1893,14 +1881,10 @@ def test_user_pretp_requires_auth(engine: _StubEngine, tmp_path) -> None:
 
 
 def test_user_pretp_rejects_anonymous_token(engine: _StubEngine, tmp_path) -> None:
-    """Device-id JWTs aren't users → 404."""
+    """/api/auth/anonymous is retired → 410 Gone (device-id token path removed)."""
     client, _store, _delivery = _phase2_app(engine, tmp_path)
-    anon = client.post("/api/auth/anonymous").json()["token"]
-    r = client.get(
-        "/api/settings/user/pretp",
-        headers={"Authorization": f"Bearer {anon}"},
-    )
-    assert r.status_code == 404
+    r = client.post("/api/auth/anonymous")
+    assert r.status_code == 410
 
 
 # ---- /api/settings/user/auto-trade -----------------------------------------
