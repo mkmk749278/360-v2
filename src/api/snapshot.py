@@ -11,6 +11,7 @@ on a channel resets its counters — we deliberately read the underlying
 
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -126,7 +127,7 @@ def _agent_name_for(setup_class: str) -> str:
 # ---------------------------------------------------------------------------
 
 
-def build_pulse(
+async def build_pulse(
     engine: Any,
     *,
     user_id: Optional[int] = None,
@@ -183,7 +184,9 @@ def build_pulse(
         and user_overrides is not None
     ):
         try:
-            windows = user_overrides.get_paper_subscriptions(int(user_id))
+            windows = await asyncio.to_thread(
+                user_overrides.get_paper_subscriptions, int(user_id)
+            )
         except Exception:
             windows = []
         if windows:
@@ -193,7 +196,8 @@ def build_pulse(
                 signal_visible_within_any_window,
             )
             try:
-                ledger_rows = trade_records.list_trades(
+                ledger_rows = await asyncio.to_thread(
+                    trade_records.list_trades,
                     limit=500, offset=0, include_open=False,
                 )
             except Exception:
@@ -517,7 +521,7 @@ def build_signals(
 # ---------------------------------------------------------------------------
 
 
-def build_positions(
+async def build_positions(
     engine: Any,
     *,
     user_id: Optional[int] = None,
@@ -569,7 +573,9 @@ def build_positions(
         and user_overrides is not None
     ):
         try:
-            user_windows = user_overrides.get_paper_subscriptions(int(user_id))
+            user_windows = await asyncio.to_thread(
+                user_overrides.get_paper_subscriptions, int(user_id)
+            )
         except Exception:
             user_windows = []
 
@@ -929,7 +935,7 @@ def build_activity(
 # ---------------------------------------------------------------------------
 
 
-def build_auto_mode(
+async def build_auto_mode(
     engine: Any,
     *,
     user_id: Optional[int] = None,
@@ -957,8 +963,12 @@ def build_auto_mode(
         from src.auto_trade import pnl_history
         active_mode = info.get("mode", "off")
         if active_mode in ("paper", "live"):
-            info["weekly_pnl_usd"] = pnl_history.get_weekly(active_mode)
-            info["monthly_pnl_usd"] = pnl_history.get_monthly(active_mode)
+            info["weekly_pnl_usd"] = await asyncio.to_thread(
+                pnl_history.get_weekly, active_mode
+            )
+            info["monthly_pnl_usd"] = await asyncio.to_thread(
+                pnl_history.get_monthly, active_mode
+            )
     except Exception:
         # Fail-soft — zeros are the right default.
         pass
@@ -1021,7 +1031,9 @@ def build_auto_mode(
             and user_overrides is not None
         ):
             try:
-                windows = user_overrides.get_paper_subscriptions(int(user_id))
+                windows = await asyncio.to_thread(
+                    user_overrides.get_paper_subscriptions, int(user_id)
+                )
             except Exception:
                 windows = []
             from src.api.paper_user_view import (
@@ -1030,7 +1042,8 @@ def build_auto_mode(
             )
             from src.auto_trade import trade_records
             try:
-                ledger_rows = trade_records.list_trades(
+                ledger_rows = await asyncio.to_thread(
+                    trade_records.list_trades,
                     limit=500, offset=0, include_open=False,
                 )
             except Exception:
@@ -1115,7 +1128,7 @@ def build_auto_mode(
     return AutoModeStatus(**info)
 
 
-def build_pnl_history(
+async def build_pnl_history(
     engine: Any,
     *,
     mode: Optional[str] = None,
@@ -1150,7 +1163,9 @@ def build_pnl_history(
         windows: list = []
         if user_id is not None and user_overrides is not None:
             try:
-                windows = user_overrides.get_paper_subscriptions(int(user_id))
+                windows = await asyncio.to_thread(
+                    user_overrides.get_paper_subscriptions, int(user_id)
+                )
             except Exception:
                 windows = []
         if windows:
@@ -1160,7 +1175,8 @@ def build_pnl_history(
             # the result. The 500-row cap matches list_trades' own
             # built-in upper bound. Date filtering is handled inside
             # pnl_history_for_user via the day-bucket range.
-            ledger_rows = trade_records.list_trades(
+            ledger_rows = await asyncio.to_thread(
+                trade_records.list_trades,
                 limit=500, offset=0, include_open=False,
             )
             series, weekly, monthly = pnl_history_for_user(
@@ -1168,14 +1184,14 @@ def build_pnl_history(
             )
         else:
             from src.auto_trade import pnl_history
-            series = pnl_history.get_history(mode, days=days)
-            weekly = pnl_history.get_weekly(mode)
-            monthly = pnl_history.get_monthly(mode)
+            series = await asyncio.to_thread(pnl_history.get_history, mode, days=days)
+            weekly = await asyncio.to_thread(pnl_history.get_weekly, mode)
+            monthly = await asyncio.to_thread(pnl_history.get_monthly, mode)
     elif mode == "live":
         from src.auto_trade import pnl_history
-        series = pnl_history.get_history(mode, days=days)
-        weekly = pnl_history.get_weekly(mode)
-        monthly = pnl_history.get_monthly(mode)
+        series = await asyncio.to_thread(pnl_history.get_history, mode, days=days)
+        weekly = await asyncio.to_thread(pnl_history.get_weekly, mode)
+        monthly = await asyncio.to_thread(pnl_history.get_monthly, mode)
     else:
         # Off-mode: surface an empty series rather than 404.  Client
         # renders an "auto-trade off — no history" empty state.

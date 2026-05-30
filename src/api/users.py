@@ -227,6 +227,12 @@ class UserStore:
         # WAL — concurrent reads while a write is in flight, no fsync per write.
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA synchronous=NORMAL")
+        # busy_timeout — UserStore and UserOverridesStore each hold their
+        # own connection to the SAME lumin.sqlite file.  Under the thread
+        # pool a write on one connection can collide with a write on the
+        # other; without a busy_timeout the loser gets an instant
+        # SQLITE_BUSY.  Wait up to 5 s for the file lock instead.
+        self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(_SCHEMA_SQL)
         self._migrate_schema()

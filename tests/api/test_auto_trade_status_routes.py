@@ -7,7 +7,7 @@ KillSwitchClient is mocked at the module boundary.
 from __future__ import annotations
 
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import FastAPI
@@ -232,10 +232,16 @@ def test_runtime_status_effective_intersects_user_pref(
     )
     fake_user = MagicMock(user_id=1)
     fake_user_store = MagicMock()
+    fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=fake_user)
+    # effective_allowed_symbols_for_user (run via to_thread) uses the
+    # synchronous accessors, so mock both shapes.
     fake_user_store.get_by_firebase_uid = MagicMock(return_value=fake_user)
     monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
 
     fake_overrides_store = MagicMock()
+    fake_overrides_store.aget_auto_trade = AsyncMock(
+        return_value={"symbol_preference": ["BTCUSDT", "SOLUSDT"]}
+    )
     fake_overrides_store.get_auto_trade = MagicMock(
         return_value={"symbol_preference": ["BTCUSDT", "SOLUSDT"]}
     )
@@ -296,11 +302,11 @@ def test_runtime_status_armed_when_all_gates_green(monkeypatch) -> None:
     # lookup since the endpoint walks user_store → override_store.
     fake_user = MagicMock(user_id=1)
     fake_user_store = MagicMock()
-    fake_user_store.get_by_firebase_uid = MagicMock(return_value=fake_user)
+    fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=fake_user)
     monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
 
     fake_overrides_store = MagicMock()
-    fake_overrides_store.get_auto_trade = MagicMock(return_value={"mode": "live"})
+    fake_overrides_store.aget_auto_trade = AsyncMock(return_value={"mode": "live"})
     monkeypatch.setattr(_uo, "_SINGLETON", fake_overrides_store, raising=False)
 
     monkeypatch.setenv("TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT")
@@ -346,11 +352,11 @@ def test_runtime_status_armed_false_when_user_in_paper(monkeypatch) -> None:
     # mode comes from the calling user's own row.
     fake_user = MagicMock(user_id=2)
     fake_user_store = MagicMock()
-    fake_user_store.get_by_firebase_uid = MagicMock(return_value=fake_user)
+    fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=fake_user)
     monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
 
     fake_overrides_store = MagicMock()
-    fake_overrides_store.get_auto_trade = MagicMock(return_value={"mode": "paper"})
+    fake_overrides_store.aget_auto_trade = AsyncMock(return_value={"mode": "paper"})
     monkeypatch.setattr(_uo, "_SINGLETON", fake_overrides_store, raising=False)
 
     app = _build_app(identity=_firebase_user(uid="fb-paper"))
@@ -380,14 +386,14 @@ def test_runtime_status_no_mode_leak_across_users(monkeypatch) -> None:
     # Two users registered: user_id=1 has mode=paper, user_id=2 has no row.
     user_a = MagicMock(user_id=1)
     fake_user_store = MagicMock()
-    fake_user_store.get_by_firebase_uid = MagicMock(return_value=user_a)
+    fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=user_a)
     monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
 
     fake_overrides_store = MagicMock()
     # Real per-user resolution: user_id=1 → has paper, user_id=2 → empty.
     def _fake_get_auto_trade(user_id: int):
         return {"mode": "paper"} if user_id == 1 else {}
-    fake_overrides_store.get_auto_trade = MagicMock(side_effect=_fake_get_auto_trade)
+    fake_overrides_store.aget_auto_trade = AsyncMock(side_effect=_fake_get_auto_trade)
     monkeypatch.setattr(_uo, "_SINGLETON", fake_overrides_store, raising=False)
 
     # User A request — mode resolves to "paper".
@@ -399,7 +405,7 @@ def test_runtime_status_no_mode_leak_across_users(monkeypatch) -> None:
     # and re-request — must come back as None, NOT carried over from
     # the prior request.
     user_b = MagicMock(user_id=2)
-    fake_user_store.get_by_firebase_uid = MagicMock(return_value=user_b)
+    fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=user_b)
     body = TestClient(app).get("/api/auto-trade/runtime-status").json()
     assert body["user_mode"] is None, (
         "Per-user isolation: user B without a row must NOT inherit "
