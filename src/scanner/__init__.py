@@ -1055,14 +1055,21 @@ class Scanner:
         self._scan_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SCANS)
 
         # Dedicated thread pool for CPU-bound scan work (_compute_indicators).
-        # Isolated from the default asyncio executor so that saturating it with
-        # 20 concurrent indicator computations never starves auth/DB threads
-        # that the HTTP request handlers depend on.
+        # Isolated from the default asyncio executor so that saturating it
+        # never starves auth/DB threads that the HTTP request handlers depend on.
+        #
+        # Thread count: capped at 2× cpu_count. Using _MAX_CONCURRENT_SCANS (20)
+        # threads on a 4-CPU VPS created 20 NumPy-heavy threads competing for
+        # 4 CPUs — 100% CPU utilisation left no headroom for the event loop or
+        # Firebase auth, causing >4 s latency on all authenticated endpoints.
+        # 2× cpu_count keeps the scanner throughput high (indicators complete
+        # well within the 50-80 s scan-cycle wall-clock) while leaving the
+        # event loop and default pool threads enough CPU to run unimpeded.
         import os
         from concurrent.futures import ThreadPoolExecutor as _TPE
         _cpu = os.cpu_count() or 4
         self._scan_executor = _TPE(
-            max_workers=max(_cpu, _MAX_CONCURRENT_SCANS),
+            max_workers=min(_cpu * 2, _MAX_CONCURRENT_SCANS),
             thread_name_prefix="scanner-compute",
         )
 

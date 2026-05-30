@@ -31,7 +31,8 @@ the read-side helpers acquire the lock only briefly to load the flag.
 from __future__ import annotations
 
 import threading
-from typing import Any, Dict, Optional
+import time
+from typing import Any, Dict, Optional, Tuple
 
 from src.utils import get_logger
 
@@ -48,6 +49,35 @@ log = get_logger("api.firebase_auth")
 _lock = threading.RLock()
 _app: Any = None  # firebase_admin.App once initialised
 _project_id: Optional[str] = None
+
+# ---------------------------------------------------------------------------
+# Short-lived token-verification cache.
+#
+# Both the ``auth`` dependency and the ``user_claims`` dependency call
+# ``verify_id_token`` on the same bearer token for each request that uses
+# both (e.g. /api/pulse, /api/settings/user/pretp).  Without a cache that
+# means two sequential JWKS-verified RSA checks per request, and if the
+# JWKS cache in the Firebase Admin SDK is cold (engine restart, ~1-hour
+# expiry) each check can stall 0.5–3 s on a round-trip to googleapis.com.
+# Two stalls back-to-back reliably push past the app's 4-second timeout.
+#
+# Fix: cache the decoded claims dict keyed on the raw token string for
+# _VERIFY_CACHE_TTL seconds.  The second call within that window returns
+# the cached dict without a network round-trip.
+#
+# Security notes:
+# * Firebase ID tokens expire in 1 hour; a 60-second cache is far shorter
+#   than the token lifetime, so an expired token is never accepted from cache.
+# * Token revocation is not supported by the current engine (no call to
+#   ``check_revoked=True``), so caching does not weaken the revocation story.
+# * The cache is bounded at _VERIFY_CACHE_MAX entries; old entries are
+#   pruned lazily when the size threshold is crossed.
+# ---------------------------------------------------------------------------
+
+_VERIFY_CACHE_TTL: float = 60.0       # seconds
+_VERIFY_CACHE_MAX: int = 512          # entries before lazy pruning
+_verify_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+_verify_cache_lock = threading.Lock()
 
 
 # ---------------------------------------------------------------------------
@@ -107,16 +137,28 @@ def verify_id_token(id_token: str) -> Dict[str, Any]:
     :class:`src.api.auth.AuthError` with a human-readable message on
     any failure (invalid signature, expired, wrong audience, network
     issue fetching JWKS, etc.) — callers translate that to HTTP 401.
+
+    Results are cached for ``_VERIFY_CACHE_TTL`` seconds so that the
+    ``auth`` dependency and ``user_claims`` dependency — which both call
+    this function for the same token on every ``/api/pulse``-style
+    request — only pay the JWKS-round-trip cost once per minute.
     """
     if not is_initialised():
         raise AuthError("firebase admin not initialised")
+
+    now = time.monotonic()
+    with _verify_cache_lock:
+        entry = _verify_cache.get(id_token)
+        if entry is not None and now - entry[0] < _VERIFY_CACHE_TTL:
+            return dict(entry[1])  # return a copy so callers can't mutate cache
+
     # Lazy import here too — the module-level path stays cheap for
     # processes that never call ``verify_id_token`` (e.g. the test
     # harness that mocks this function).
     from firebase_admin import auth as fb_auth  # type: ignore[import-not-found]
 
     try:
-        return fb_auth.verify_id_token(id_token)
+        claims = fb_auth.verify_id_token(id_token)
     except Exception as exc:
         # firebase_admin.auth raises a number of distinct exception
         # types (ExpiredIdTokenError, RevokedIdTokenError,
@@ -124,6 +166,16 @@ def verify_id_token(id_token: str) -> Dict[str, Any]:
         # with the underlying message — the caller doesn't care WHY
         # the token failed, only that it did.
         raise AuthError(f"firebase id-token verification failed: {exc}")
+
+    with _verify_cache_lock:
+        _verify_cache[id_token] = (now, claims)
+        if len(_verify_cache) > _VERIFY_CACHE_MAX:
+            cutoff = now - _VERIFY_CACHE_TTL
+            stale = [k for k, (t, _) in _verify_cache.items() if t < cutoff]
+            for k in stale:
+                _verify_cache.pop(k, None)
+
+    return dict(claims)
 
 
 # ---------------------------------------------------------------------------
@@ -217,3 +269,5 @@ def reset_for_test() -> None:
                 pass
         _app = None
         _project_id = None
+    with _verify_cache_lock:
+        _verify_cache.clear()
