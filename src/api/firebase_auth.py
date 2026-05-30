@@ -30,6 +30,8 @@ the read-side helpers acquire the lock only briefly to load the flag.
 
 from __future__ import annotations
 
+import base64
+import json
 import threading
 import time
 from typing import Any, Dict, Optional, Tuple
@@ -85,6 +87,29 @@ _verify_cache_lock = threading.Lock()
 # ---------------------------------------------------------------------------
 
 
+def _build_prewarm_token(project_id: str) -> str:
+    """Build a syntactically valid but cryptographically invalid Firebase JWT.
+
+    The token passes header/claims validation (correct iss, aud, sub, exp) so
+    the SDK proceeds to fetch JWKS from googleapis.com before failing on the
+    garbage signature.  That fetch is all we need — it warms the in-process
+    JWKS cache for the next hour.
+    """
+    def _b64url(data: bytes) -> str:
+        return base64.urlsafe_b64encode(data).rstrip(b"=").decode()
+
+    header = _b64url(json.dumps({"alg": "RS256", "kid": "prewarm"}).encode())
+    now = int(time.time())
+    payload = _b64url(json.dumps({
+        "iss": f"https://securetoken.google.com/{project_id}",
+        "aud": project_id,
+        "sub": "prewarm",
+        "iat": now,
+        "exp": now + 3600,
+    }).encode())
+    return f"{header}.{payload}.AAAA"
+
+
 def init_firebase_admin(service_account_path: str, project_id: str) -> None:
     """Initialise the Firebase Admin SDK against the configured project.
 
@@ -94,6 +119,12 @@ def init_firebase_admin(service_account_path: str, project_id: str) -> None:
     try/except so a missing / bad service-account file doesn't crash
     engine boot (the engine should still be able to serve via the
     legacy HS256 path).
+
+    After SDK init this function synchronously pre-warms the JWKS cache by
+    verifying a dummy token.  The verify call fails (expected — the dummy
+    token has a garbage signature) but forces the 2-3 s googleapis.com round
+    trip to happen at boot time, so the first real user request is never the
+    one that pays the cold-JWKS penalty.
     """
     global _app, _project_id
     with _lock:
@@ -116,6 +147,17 @@ def init_firebase_admin(service_account_path: str, project_id: str) -> None:
             "Firebase Admin initialised: project={}, service_account={}",
             project_id, service_account_path,
         )
+    # Pre-warm JWKS outside the lock so the 2-3 s network call doesn't block
+    # concurrent boot-time readers.  The server isn't accepting requests yet
+    # at this point so racing is not a concern — we just want the cache warm
+    # before the first authenticated HTTP request arrives.
+    log.info("Firebase JWKS pre-warm: fetching googleapis.com certs...")
+    try:
+        from firebase_admin import auth as _fb_auth  # type: ignore[import-not-found]
+        _fb_auth.verify_id_token(_build_prewarm_token(project_id))
+    except Exception:
+        pass  # expected failure — JWKS is now cached for ~1 h
+    log.info("Firebase JWKS pre-warm complete")
 
 
 def is_initialised() -> bool:

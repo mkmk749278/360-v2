@@ -964,7 +964,6 @@ def build_app(
         "/api/pulse",
         response_model=PulseSnapshot,
         tags=["pulse"],
-        dependencies=[Depends(auth)],
     )
     async def pulse(
         response: Response,
@@ -1058,7 +1057,6 @@ def build_app(
         "/api/positions",
         response_model=PositionsResponse,
         tags=["positions"],
-        dependencies=[Depends(auth)],
     )
     async def positions(
         identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
@@ -1215,7 +1213,6 @@ def build_app(
         "/api/auto-mode",
         response_model=AutoModeStatus,
         tags=["auto-mode"],
-        dependencies=[Depends(auth)],
     )
     async def auto_mode_get(
         identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
@@ -1263,7 +1260,6 @@ def build_app(
         "/api/pnl/history",
         response_model=PnlHistoryResponse,
         tags=["pulse"],
-        dependencies=[Depends(auth)],
     )
     async def pnl_history_get(
         days: int = Query(30, ge=1, le=365),
@@ -1327,7 +1323,6 @@ def build_app(
         "/api/auto-mode/resume-mine",
         response_model=AutoModeResumeMineResponse,
         tags=["auto-mode"],
-        dependencies=[Depends(auth)],
     )
     async def auto_mode_resume_mine(
         identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
