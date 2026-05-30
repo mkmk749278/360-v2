@@ -6125,6 +6125,9 @@ class Scanner:
                     volume_24h=volume_24h,
                     allowed_evaluators=_allowed_evals,
                 )
+                # Yield after the CPU-bound evaluate() call so the event loop
+                # can process HTTP requests between symbol evaluations.
+                await asyncio.sleep(0)
                 self._record_scalp_generation_telemetry(chan, chan_name)
                 # Normalise: real ScalpChannel returns list; legacy mocks return Signal|None
                 if isinstance(_raw_result, list):
@@ -6209,6 +6212,7 @@ class Scanner:
                     ctx_for_chan=ctx_for_chan,
                     volume_24h=volume_24h,
                 )
+                await asyncio.sleep(0)
                 if _raw_result is None:
                     self._channel_funnel_counters[f"no_candidate_generated:{chan_name}"] += 1
                     continue
@@ -6275,6 +6279,7 @@ class Scanner:
                     volume_24h_usd=volume_24h,
                     regime=_regime_str,
                 )
+                await asyncio.sleep(0)
                 # ScalpChannel returns List[Signal]; pick the first for radar scoring.
                 if isinstance(_radar_result, list):
                     _radar_sig = _radar_result[0] if _radar_result else None
