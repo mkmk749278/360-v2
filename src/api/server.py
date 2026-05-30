@@ -1006,7 +1006,7 @@ def build_app(
             from .user_overrides import get_singleton as _get_uo_singleton
             effective_uo = _get_uo_singleton()
         response.headers["Cache-Control"] = "private, max-age=5, stale-while-revalidate=10"
-        return build_pulse(
+        return await build_pulse(
             engine, user_id=user_id, user_overrides=effective_uo,
         )
 
@@ -1095,7 +1095,7 @@ def build_app(
             from .user_overrides import get_singleton as _get_uo_singleton
             effective_uo = _get_uo_singleton()
         try:
-            items = build_positions(
+            items = await build_positions(
                 engine, user_id=user_id, user_overrides=effective_uo,
             )
         except Exception:
@@ -1247,7 +1247,7 @@ def build_app(
             from .user_overrides import get_singleton as _get_uo_singleton
             effective_uo = _get_uo_singleton()
         try:
-            return build_auto_mode(
+            return await build_auto_mode(
                 engine, user_id=user_id, user_overrides=effective_uo,
             )
         except Exception:
@@ -1293,7 +1293,7 @@ def build_app(
             user_id = _resolve_user_id(identity)
         except HTTPException:
             user_id = None
-        payload = build_pnl_history(
+        payload = await build_pnl_history(
             engine,
             mode=mode,
             days=days,

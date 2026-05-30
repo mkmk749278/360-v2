@@ -21,6 +21,7 @@ pattern as the rest of the endpoints in this directory.
 
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional, Union
 
@@ -127,7 +128,8 @@ def register(
             # over-fetch matches list_trades' built-in upper cap so we
             # don't lose pages. Single-operator phase keeps engine/user
             # ratio ~1; Phase 3 may need a join-pushed-into-SQL variant.
-            ledger_rows = trade_records.list_trades(
+            ledger_rows = await asyncio.to_thread(
+                trade_records.list_trades,
                 limit=500, offset=0, since_ts=since_ts,
                 symbol=symbol, include_open=include_open,
             )
@@ -144,7 +146,7 @@ def register(
                     # Bootstrap should have wired the store before
                     # registering routes; if it didn't, fail safe.
                     return TradeListResponse(items=[], total=0)
-                windows = store.get_paper_subscriptions(user_id)
+                windows = await asyncio.to_thread(store.get_paper_subscriptions, user_id)
             except HTTPException:
                 # Anonymous device-token holders aren't users — no
                 # subscription, no visibility. Returning the shared
@@ -234,12 +236,12 @@ def register(
                 log.exception("paper reset: risk_manager.reset_daily failed")
         # 3. Wipe daily buckets.
         from src.auto_trade import pnl_history as _pnl_history
-        buckets_cleared = _pnl_history.reset_mode("paper")
+        buckets_cleared = await asyncio.to_thread(_pnl_history.reset_mode, "paper")
         # 4. Archive per-trade rows (preferred over destructive delete —
         # historical data remains queryable for the owner).
         try:
             from src.auto_trade import trade_records as _trade_records
-            trades_archived = _trade_records.archive_all()
+            trades_archived = await asyncio.to_thread(_trade_records.archive_all)
         except Exception:
             log.exception("paper reset: trade_records.archive_all failed")
             trades_archived = 0

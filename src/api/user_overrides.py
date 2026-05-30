@@ -966,6 +966,11 @@ class UserOverridesStore:
     async def aget_auto_trade(self, user_id: int) -> Dict[str, Any]:
         return await asyncio.to_thread(self.get_auto_trade, user_id)
 
+    async def aget_paper_subscriptions(
+        self, user_id: int
+    ) -> List[Tuple[str, Optional[str]]]:
+        return await asyncio.to_thread(self.get_paper_subscriptions, user_id)
+
     async def aupdate_auto_trade(
         self, user_id: int, partial: Dict[str, Any]
     ) -> Dict[str, Any]:
