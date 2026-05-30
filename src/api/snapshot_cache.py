@@ -56,7 +56,7 @@ class SnapshotCache:
 
     async def start(self, engine: Any) -> None:
         self._engine = engine
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         # Signals task
         if self._task is None or self._task.done():
             # Pre-warm off the event loop so the first 500-model build
@@ -106,7 +106,7 @@ class SnapshotCache:
     # ------------------------------------------------------------------
 
     async def _signals_loop(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(_SIGNALS_INTERVAL_S)
             try:
@@ -115,7 +115,7 @@ class SnapshotCache:
                 log.exception("snapshot_cache: signals refresh failed — keeping stale cache")
 
     async def _activity_loop(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(_ACTIVITY_INTERVAL_S)
             try:
@@ -124,7 +124,7 @@ class SnapshotCache:
                 log.exception("snapshot_cache: activity refresh failed — keeping stale cache")
 
     async def _agents_loop(self) -> None:
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         while True:
             await asyncio.sleep(_AGENTS_INTERVAL_S)
             try:

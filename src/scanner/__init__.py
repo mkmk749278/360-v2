@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import dataclasses as _dc
+import functools
 import os
 import re
 import json
@@ -1054,17 +1055,18 @@ class Scanner:
         # Semaphore to limit concurrent symbol scans
         self._scan_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SCANS)
 
-        # Dedicated thread pool for CPU-bound scan work (_compute_indicators).
-        # Isolated from the default asyncio executor so that saturating it
-        # never starves auth/DB threads that the HTTP request handlers depend on.
+        # Dedicated thread pool for all CPU-bound scan work: _compute_indicators,
+        # smc_detector.detect, and chan.evaluate calls.  Isolated from the default
+        # asyncio executor so that saturating it never starves auth/DB threads.
+        # Running these synchronous operations in threads keeps the event loop
+        # free so HTTP request handlers are never blocked by scan work.
         #
         # Thread count: capped at 2× cpu_count. Using _MAX_CONCURRENT_SCANS (20)
         # threads on a 4-CPU VPS created 20 NumPy-heavy threads competing for
         # 4 CPUs — 100% CPU utilisation left no headroom for the event loop or
         # Firebase auth, causing >4 s latency on all authenticated endpoints.
-        # 2× cpu_count keeps the scanner throughput high (indicators complete
-        # well within the 50-80 s scan-cycle wall-clock) while leaving the
-        # event loop and default pool threads enough CPU to run unimpeded.
+        # 2× cpu_count keeps scan throughput high while leaving the event loop
+        # and default pool threads enough CPU to run unimpeded.
         import os
         from concurrent.futures import ThreadPoolExecutor as _TPE
         _cpu = os.cpu_count() or 4
@@ -2385,30 +2387,31 @@ class Scanner:
         except Exception:
             _fp = None
         _cached = self._indicator_cache.get(symbol) if _fp is not None else None
+        loop = asyncio.get_running_loop()
+        ticks = self.data_store.ticks.get(symbol, [])
+        # SMC detect and indicator computation both run off the event loop so
+        # HTTP handlers are never starved by this CPU-bound work.  When the
+        # indicator cache is cold, run both concurrently via asyncio.gather.
+        _smc_fut = loop.run_in_executor(
+            self._scan_executor,
+            functools.partial(
+                self.smc_detector.detect,
+                symbol, candles, ticks, self.order_flow_store,
+                lookback=SMC_SCALP_LOOKBACK,
+                tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
+            ),
+        )
         if _cached is not None and _cached[0] == _fp:
             indicators = _cached[1]
+            smc_result = await _smc_fut
         else:
-            loop = asyncio.get_event_loop()
-            indicators = await loop.run_in_executor(
-                self._scan_executor, self._compute_indicators, candles
+            indicators, smc_result = await asyncio.gather(
+                loop.run_in_executor(self._scan_executor, self._compute_indicators, candles),
+                _smc_fut,
             )
             if _fp is not None:
                 self._indicator_cache[symbol] = (_fp, indicators)
-        ticks = self.data_store.ticks.get(symbol, [])
-        # Use scalp-optimised sweep detection parameters: shorter lookback catches
-        # recent S/R levels; wider tolerance catches institutional sweeps that
-        # reclaim $100-200 past the level.  The full post-channel quality pipeline
-        # (MTF, VWAP, KillZone, OI, CrossAsset, Spoof, VolDiv, Clustering filters
-        # and confidence scoring) still runs on the detected sweeps.
-        smc_result = self.smc_detector.detect(
-            symbol, candles, ticks, self.order_flow_store,
-            lookback=SMC_SCALP_LOOKBACK,
-            tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
-        )
         smc_data = smc_result.as_dict()
-        # Yield after the heaviest sync section so HTTP handlers can run
-        # between the 75 concurrent symbol scan-context builds.
-        await asyncio.sleep(0)
         dependency_source_state: Dict[str, str] = {}
         _recent_ticks = smc_data.get("recent_ticks")
         if _recent_ticks is None:
@@ -5999,6 +6002,7 @@ class Scanner:
             log.debug("level excursion sweep failed for {}: {}", symbol, exc)
 
         ticks = self.data_store.ticks.get(symbol, [])
+        loop = asyncio.get_running_loop()
 
         # Compute rolling BTC correlation for this symbol (once per scan cycle)
         self._update_btc_correlation(symbol)
@@ -6030,11 +6034,15 @@ class Scanner:
                     ctx_for_chan = _dc.replace(ctx, smc_result=_smc_r, smc_data=_new_smc_data)
                 else:
                     try:
-                        _smc_r = self.smc_detector.detect(
-                            symbol, ctx.candles, ticks, self.order_flow_store,
-                            lookback=SMC_SCALP_LOOKBACK,
-                            tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
-                            smc_timeframes=_ch_tfs,
+                        _smc_r = await loop.run_in_executor(
+                            self._scan_executor,
+                            functools.partial(
+                                self.smc_detector.detect,
+                                symbol, ctx.candles, ticks, self.order_flow_store,
+                                lookback=SMC_SCALP_LOOKBACK,
+                                tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
+                                smc_timeframes=_ch_tfs,
+                            ),
                         )
                         _new_smc_data = _smc_r.as_dict()
                         _redetect_orderblocks = _new_smc_data.get("orderblocks")
@@ -6143,17 +6151,18 @@ class Scanner:
                     # always supersedes when both apply (intersection).
                     _allowed_evals = _mover_evaluators
 
-                _raw_result = self._get_channel_candidate(
-                    chan=chan,
-                    chan_name=chan_name,
-                    symbol=symbol,
-                    ctx_for_chan=ctx_for_chan,
-                    volume_24h=volume_24h,
-                    allowed_evaluators=_allowed_evals,
+                _raw_result = await loop.run_in_executor(
+                    self._scan_executor,
+                    functools.partial(
+                        self._get_channel_candidate,
+                        chan=chan,
+                        chan_name=chan_name,
+                        symbol=symbol,
+                        ctx_for_chan=ctx_for_chan,
+                        volume_24h=volume_24h,
+                        allowed_evaluators=_allowed_evals,
+                    ),
                 )
-                # Yield after the CPU-bound evaluate() call so the event loop
-                # can process HTTP requests between symbol evaluations.
-                await asyncio.sleep(0)
                 self._record_scalp_generation_telemetry(chan, chan_name)
                 # Normalise: real ScalpChannel returns list; legacy mocks return Signal|None
                 if isinstance(_raw_result, list):
@@ -6231,14 +6240,17 @@ class Scanner:
                     self._setup_eval_counts[_sc] += 1
                     _pending_signals.append((_best_sig, _best_chan))
             else:
-                _raw_result = self._get_channel_candidate(
-                    chan=chan,
-                    chan_name=chan_name,
-                    symbol=symbol,
-                    ctx_for_chan=ctx_for_chan,
-                    volume_24h=volume_24h,
+                _raw_result = await loop.run_in_executor(
+                    self._scan_executor,
+                    functools.partial(
+                        self._get_channel_candidate,
+                        chan=chan,
+                        chan_name=chan_name,
+                        symbol=symbol,
+                        ctx_for_chan=ctx_for_chan,
+                        volume_24h=volume_24h,
+                    ),
                 )
-                await asyncio.sleep(0)
                 if _raw_result is None:
                     self._channel_funnel_counters[f"no_candidate_generated:{chan_name}"] += 1
                     continue
@@ -6296,16 +6308,19 @@ class Scanner:
             if not self._is_radar_rollout_enabled(chan_name, symbol):
                 continue
             try:
-                _radar_result = chan.evaluate(
-                    symbol=symbol,
-                    candles=ctx.candles,
-                    indicators=ctx.indicators,
-                    smc_data=ctx.smc_data,
-                    spread_pct=ctx.spread_pct,
-                    volume_24h_usd=volume_24h,
-                    regime=_regime_str,
+                _radar_result = await loop.run_in_executor(
+                    self._scan_executor,
+                    functools.partial(
+                        chan.evaluate,
+                        symbol=symbol,
+                        candles=ctx.candles,
+                        indicators=ctx.indicators,
+                        smc_data=ctx.smc_data,
+                        spread_pct=ctx.spread_pct,
+                        volume_24h_usd=volume_24h,
+                        regime=_regime_str,
+                    ),
                 )
-                await asyncio.sleep(0)
                 # ScalpChannel returns List[Signal]; pick the first for radar scoring.
                 if isinstance(_radar_result, list):
                     _radar_sig = _radar_result[0] if _radar_result else None
