@@ -109,6 +109,51 @@ def _classify_btc_4h(
     return "NEUTRAL"
 
 
+def check_symbol_direction_gate(
+    signal_direction: str,
+    sym_indicators_1h: Optional[dict],
+    sym_indicators_4h: Optional[dict] = None,
+    sym_candles_4h: Optional[dict] = None,
+    *,
+    setup_class: Optional[str] = None,
+) -> Tuple[bool, str]:
+    """Per-symbol direction soft-penalty gate.
+
+    Mirrors ``check_btc_direction_gate`` but uses the signal's own symbol's
+    1H / 4H EMA trend instead of BTC's macro trend.  Catches opposite-direction
+    signals on pairs that are in a clear local downtrend or uptrend even when
+    BTC itself is range-bound (QUIET regime).
+
+    Exempt setups — counter-trend by design, should not be penalised for
+    trading against the pair's own recent structure:
+      * LIQUIDITY_SWEEP_REVERSAL — entry IS the sweep reversal against recent structure
+      * FAILED_AUCTION_RECLAIM   — entry IS counter to the failed breakout direction
+      * WHALE_MOMENTUM, FUNDING_EXTREME_SIGNAL, LIQUIDATION_REVERSAL — tape-driven
+
+    Returns ``(False, reason)`` when the pair's 1H AND 4H both oppose the
+    signal direction.  ``(True, "")`` on fail-open (missing data, NEUTRAL, exempt).
+    """
+    _SYM_DIR_EXEMPT: frozenset = frozenset({
+        "LIQUIDITY_SWEEP_REVERSAL",
+        "FAILED_AUCTION_RECLAIM",
+        "WHALE_MOMENTUM",
+        "FUNDING_EXTREME_SIGNAL",
+        "LIQUIDATION_REVERSAL",
+    })
+    if setup_class and setup_class.upper() in _SYM_DIR_EXEMPT:
+        return True, ""
+    trend_1h = _classify_btc_1h(sym_indicators_1h)
+    trend_4h = _classify_btc_4h(sym_indicators_4h, sym_candles_4h)
+    if trend_1h is None or trend_4h is None:
+        return True, ""  # fail-open on missing data
+    direction = signal_direction.upper() if signal_direction else ""
+    if direction == "LONG" and trend_1h == "BEARISH" and trend_4h == "BEARISH":
+        return False, "sym_1h_4h_both_bearish_long"
+    if direction == "SHORT" and trend_1h == "BULLISH" and trend_4h == "BULLISH":
+        return False, "sym_1h_4h_both_bullish_short"
+    return True, ""
+
+
 def check_btc_direction_gate(
     signal_direction: str,
     btc_indicators_1h: Optional[dict],

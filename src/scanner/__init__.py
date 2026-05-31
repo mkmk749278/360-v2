@@ -141,7 +141,7 @@ from src.volume_profile import VolumeProfileStore
 from src.spoof_detect import check_spoof_gate
 from src.tier_manager import TierManager
 from src.utils import get_logger, price_decimal_fmt, utcnow
-from src.btc_direction import check_btc_direction_gate
+from src.btc_direction import check_btc_direction_gate, check_symbol_direction_gate
 from src.volume_divergence import check_volume_divergence_gate
 from src.vwap import check_vwap_extension, compute_vwap
 from src.ai_engine import get_ai_insight
@@ -534,14 +534,14 @@ _CHANNEL_GATE_PROFILE: Dict[str, Dict[str, bool]] = {
 # These override the hard-coded defaults in _prepare_signal().
 # Gates not listed use the original fallback values.
 _CHANNEL_PENALTY_WEIGHTS: Dict[str, Dict[str, float]] = {
-    "360_SCALP":      {"vwap": 15.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0, "btc_dir": 6.0},
-    "360_SCALP_FVG":  {"vwap": 15.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0, "btc_dir": 6.0},
-    "360_SCALP_CVD":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 10.0, "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0},
-    "360_SCALP_VWAP": {"vwap": 18.0, "kill_zone": 8.0,  "oi": 6.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0},
-    "360_SCALP_DIVERGENCE":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 8.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0},
-    "360_SCALP_SUPERTREND":  {"vwap": 12.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0},
-    "360_SCALP_ICHIMOKU":    {"vwap": 10.0, "kill_zone": 8.0,  "oi": 8.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0},
-    "360_SCALP_ORDERBLOCK":  {"vwap": 12.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0, "btc_dir": 6.0},
+    "360_SCALP":      {"vwap": 15.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0, "btc_dir": 6.0, "sym_dir": 6.0},
+    "360_SCALP_FVG":  {"vwap": 15.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0, "btc_dir": 6.0, "sym_dir": 6.0},
+    "360_SCALP_CVD":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 10.0, "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0, "sym_dir": 6.0},
+    "360_SCALP_VWAP": {"vwap": 18.0, "kill_zone": 8.0,  "oi": 6.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0, "sym_dir": 6.0},
+    "360_SCALP_DIVERGENCE":  {"vwap": 12.0, "kill_zone": 8.0,  "oi": 8.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0, "sym_dir": 6.0},
+    "360_SCALP_SUPERTREND":  {"vwap": 12.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0, "sym_dir": 6.0},
+    "360_SCALP_ICHIMOKU":    {"vwap": 10.0, "kill_zone": 8.0,  "oi": 8.0,  "volume_div": 10.0, "cluster": 10.0, "spoof": 10.0, "btc_dir": 6.0, "sym_dir": 6.0},
+    "360_SCALP_ORDERBLOCK":  {"vwap": 12.0, "kill_zone": 10.0, "oi": 8.0,  "volume_div": 12.0, "cluster": 10.0, "spoof": 12.0, "btc_dir": 6.0, "sym_dir": 6.0},
 }
 
 # OWNER_BRIEF §2.1 — BTC direction soft penalty.  Top-75 USDT-M futures
@@ -556,6 +556,17 @@ _BTC_DIRECTION_GATE_ENABLED: bool = os.getenv(
 ).lower() in ("1", "true", "yes", "on")
 _BTC_DIRECTION_PENALTY_BASE: float = float(
     os.getenv("BTC_DIRECTION_PENALTY_BASE", "6.0")
+)
+# Per-symbol direction gate: penalises signals that go against the pair's own
+# 1H + 4H EMA trend.  Catches counter-trend trades on altcoins that are in a
+# clear local downtrend/uptrend while BTC is range-bound (QUIET regime), which
+# the BTC direction gate misses because BTC's own EMAs are flat in those periods.
+# LSR and FAR are exempt — their thesis IS to trade against local structure.
+_SYM_DIRECTION_GATE_ENABLED: bool = os.getenv(
+    "SYM_DIRECTION_GATE_ENABLED", "true"
+).lower() in ("1", "true", "yes", "on")
+_SYM_DIRECTION_PENALTY_BASE: float = float(
+    os.getenv("SYM_DIRECTION_PENALTY_BASE", "6.0")
 )
 
 # PR-7B: Path-aware modulation of soft-penalty base weights.
@@ -4962,6 +4973,52 @@ class Scanner:
                     symbol, chan_name, _btc_dir_exc,
                 )
 
+        # ── Filter 10: Per-symbol 1H/4H direction soft penalty ────────────
+        # BTC direction gate (Filter 9) fires only when BTC's OWN EMAs are
+        # aligned — which is ~30% of the time.  The remaining 70% (QUIET
+        # regime) an altcoin can be in a clear local downtrend while BTC
+        # is flat, and the BTC gate passes the signal through.  This filter
+        # applies the same soft-penalty logic against the signal symbol's
+        # OWN 1H + 4H EMA alignment, catching exactly those cases.
+        # LSR and FAR are exempt — their thesis IS to trade against the
+        # pair's recent local structure.  Fail-open on missing data.
+        if _gate_profile.get("sym_dir", True) and _SYM_DIRECTION_GATE_ENABLED:
+            try:
+                _sym_ind_1h = ctx.indicators.get("1h", {})
+                _sym_ind_4h = ctx.indicators.get("4h", {})
+                _sym_cd_4h = ctx.candles.get("4h", {})
+                sym_dir_allowed, sym_dir_reason = check_symbol_direction_gate(
+                    sig.direction.value,
+                    _sym_ind_1h,
+                    _sym_ind_4h,
+                    _sym_cd_4h,
+                    setup_class=_setup_class_name,
+                )
+                if not sym_dir_allowed:
+                    _base = _penalty_weights.get("sym_dir", _SYM_DIRECTION_PENALTY_BASE)
+                    _base = self._modulate_penalty_base(
+                        base=_base,
+                        penalty_key="sym_dir",
+                        chan_name=chan_name,
+                        setup_family=_setup_family,
+                        setup_class=_setup_class_name,
+                    )
+                    _scaled = round(_base * regime_mult, 1)
+                    soft_penalty += _scaled
+                    _soft_penalty_by_type["sym_dir"] = (
+                        _soft_penalty_by_type.get("sym_dir", 0.0) + _scaled
+                    )
+                    _fired_gates.append("SYM_DIR")
+                    log.debug(
+                        "SOFT_PENALTY {} {} {:+.1f} (base={:.1f} × regime={:.1f}) total={:.1f}: {}",
+                        symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, sym_dir_reason,
+                    )
+            except Exception as _sym_dir_exc:
+                log.debug(
+                    "Symbol direction gate error for {} {} (fail open): {}",
+                    symbol, chan_name, _sym_dir_exc,
+                )
+
         risk = self._evaluate_risk(sig, ctx, setup, chan_name=chan_name)
         if not risk.passed:
             log.debug("Rejected {} {} risk: {}", symbol, chan_name, risk.reason)
@@ -5795,7 +5852,7 @@ class Scanner:
                 "engine(smc={:.1f},regime={:.1f},volume={:.1f},indicators={:.1f},"
                 "patterns={:.1f},mtf={:.1f}) "
                 "soft_penalties(vwap={:.1f},kz={:.1f},oi={:.1f},spoof={:.1f},vol_div={:.1f},cluster={:.1f},"
-                "confluence={:+.1f},struct_align={:+.1f},btc_dir={:.1f}) "
+                "confluence={:+.1f},struct_align={:+.1f},btc_dir={:.1f},sym_dir={:.1f}) "
                 "flags=[{}]",
                 symbol,
                 chan_name,
@@ -5838,6 +5895,8 @@ class Scanner:
                 # by truth-report parser as ``sp_btc_dir`` to surface in the
                 # per-setup soft-penalty table.
                 float(_soft_penalty_by_type.get("btc_dir", 0.0)),
+                # Per-symbol 1H/4H direction soft penalty (Filter 10).
+                float(_soft_penalty_by_type.get("sym_dir", 0.0)),
                 # Full flag string so any new gate name appears in INFO logs
                 # without needing a code change to the format string.
                 getattr(sig, "soft_gate_flags", "") or "",
