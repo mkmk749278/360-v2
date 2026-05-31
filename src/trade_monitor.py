@@ -841,8 +841,11 @@ class TradeMonitor:
         _sl_px = getattr(sig, "stop_loss", 0.0) or 0.0
         _sl_dist = abs(_entry_px - _sl_px) if (_sl_px > 0 and _entry_px > 0) else 0.0
 
-        # Profit-protection: already > 0.5 × SL_dist in profit → treat any
-        # adverse excursion as intra-trade noise; reset momentum counter.
+        # Profit-protection (early gate): already > 0.5×SL_dist in profit.
+        # A dip from this depth is consolidation noise, not thesis failure.
+        # This gate sits BEFORE the patience window so tight-mode trailing
+        # (which runs after the patience gate) is not blocked here — signals
+        # in shallow profit (0–0.5×SL_dist) still flow to the trailing check.
         if _sl_dist > 0 and sig.current_price > 0:
             _favorable = (sig.current_price - _entry_px) if is_long else (_entry_px - sig.current_price)
             if _favorable > _sl_dist * 0.5:
@@ -851,8 +854,9 @@ class TradeMonitor:
 
         # Early adverse excursion — fires at a per-setup min-age that is
         # shorter than the main patience gate (90s SR_FLIP / 120s LSR vs
-        # 240s / 300s respectively).  Momentum is checked via indicators_fn
-        # when available; treated as non-confirming when absent (conservative).
+        # 240s / 300s respectively).  When price is already past the adverse
+        # fraction and we are NOT in positive territory, the signal thesis
+        # is structurally broken — exit unconditionally (no momentum rescue).
         _adv_exc_early_age = INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_BY_SETUP.get(
             _setup_key, INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC
         )
@@ -868,30 +872,12 @@ class TradeMonitor:
             )
             _adverse = (_entry_px - sig.current_price) if is_long else (sig.current_price - _entry_px)
             if _adverse >= _sl_dist * _adv_exc_fraction:
-                _early_ind: Optional[dict] = None
-                if self._indicators_fn is not None:
-                    try:
-                        _early_ind = self._indicators_fn(sig.symbol)
-                    except Exception:
-                        pass
-                _mom_thr = INVALIDATION_MOMENTUM_THRESHOLD.get(sig.channel, 0.15)
-                _mom_now = _early_ind.get("momentum") if _early_ind else None
-                _mom_ok = (
-                    _mom_now is not None
-                    and (
-                        (is_long and _mom_now > _mom_thr)
-                        or (not is_long and _mom_now < -_mom_thr)
-                    )
+                _adv_pct = (_adverse / _entry_px) * 100.0 if _entry_px > 0 else 0.0
+                _adv_frac = _adverse / _sl_dist
+                return (
+                    f"adverse excursion ({_adv_pct:+.2f}% against, "
+                    f"{_adv_frac:.2f}×SL_dist) – early invalidation"
                 )
-                if not _mom_ok:
-                    _adv_pct = (_adverse / _entry_px) * 100.0 if _entry_px > 0 else 0.0
-                    _adv_frac = _adverse / _sl_dist
-                    _mom_str = f"{_mom_now:.3f}" if _mom_now is not None else "none"
-                    return (
-                        f"adverse excursion ({_adv_pct:+.2f}% against, "
-                        f"{_adv_frac:.2f}×SL_dist, momentum={_mom_str} "
-                        f"not confirming) – signal thesis invalidated"
-                    )
 
         # ---- MAIN PATIENCE GATE (regime / EMA / momentum checks) ----
         # Reversal and flip-structure setups (SR_FLIP=240s, LSR=300s) need
@@ -990,17 +976,20 @@ class TradeMonitor:
         _sl_px = getattr(sig, "stop_loss", 0.0) or 0.0
         _sl_dist = abs(_entry_px - _sl_px) if (_sl_px > 0 and _entry_px > 0) else 0.0
 
-        # Profit-protection gate: signal already > 0.5× SL distance in profit
-        # → momentum dip during healthy consolidation; don't kill early.
+        # Profit-protection gate: signal is on the right side of entry → skip
+        # regime / EMA / momentum kills.  In positive territory the thesis is
+        # proved; only tight-mode trailing (above) and the native SL manage exit.
         if _sl_dist > 0:
             _favorable = (sig.current_price - _entry_px) if is_long else (_entry_px - sig.current_price)
-            if _favorable > _sl_dist * 0.5:
+            if _favorable > 0:
                 sig.momentum_invalidation_count = 0
                 return None
 
-        # Adverse-excursion: price grinding past SL without regime/EMA/momentum
-        # change.  Fires even without candle data (momentum treated as
-        # non-confirming when indicators is None — conservative kill).
+        # Adverse-excursion: price grinding toward SL without completing a
+        # structural kill.  Fires unconditionally at the fraction threshold —
+        # no momentum rescue.  If price is in negative territory at this depth,
+        # the thesis is wrong regardless of a 3-candle momentum blip; waiting
+        # for momentum confirmation only delays the inevitable and costs more PnL.
         if (
             _sl_dist > 0
             and sig.current_price > 0
@@ -1018,24 +1007,12 @@ class TradeMonitor:
             )
             _adverse_threshold = _sl_dist * _adv_exc_fraction
             if _adverse >= _adverse_threshold:
-                _mom_thr_adv = INVALIDATION_MOMENTUM_THRESHOLD.get(sig.channel, 0.15)
-                _momentum_now = indicators.get("momentum") if indicators else None
-                _momentum_confirming = (
-                    _momentum_now is not None
-                    and (
-                        (is_long and _momentum_now > _mom_thr_adv)
-                        or (not is_long and _momentum_now < -_mom_thr_adv)
-                    )
+                _adverse_pct = (_adverse / _entry_px) * 100.0 if _entry_px > 0 else 0.0
+                _adverse_frac = _adverse / _sl_dist
+                return (
+                    f"adverse excursion ({_adverse_pct:+.2f}% against, "
+                    f"{_adverse_frac:.2f}×SL_dist) – signal thesis invalidated"
                 )
-                if not _momentum_confirming:
-                    _adverse_pct = (_adverse / _entry_px) * 100.0 if _entry_px > 0 else 0.0
-                    _adverse_frac = _adverse / _sl_dist
-                    _mom_str = f"{_momentum_now:.3f}" if _momentum_now is not None else "none"
-                    return (
-                        f"adverse excursion ({_adverse_pct:+.2f}% against, "
-                        f"{_adverse_frac:.2f}×SL_dist, momentum={_mom_str} "
-                        f"not confirming) – signal thesis invalidated"
-                    )
 
         # No candle data → can't evaluate EMA crossover or momentum-loss.
         # Adverse excursion and profit-protection already ran above.

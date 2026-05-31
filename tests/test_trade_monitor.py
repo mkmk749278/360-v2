@@ -1852,8 +1852,10 @@ class TestSignalInvalidation:
             stop_loss=29850.0,
             tp1=30150.0,
         )
-        # Price slightly above entry so PnL is non-zero and zero-PnL guard passes
-        sig.current_price = 30050.0
+        # Price below entry so signal is in negative territory — profit
+        # protection does not apply and the regime flip can fire.  Not deep
+        # enough to reach the adverse-excursion fraction (0.55 × 150 = 82.5).
+        sig.current_price = 29960.0
 
         regime_detector = MagicMock()
         regime_result = MagicMock()
@@ -1883,8 +1885,9 @@ class TestSignalInvalidation:
             stop_loss=29850.0,
             tp1=30150.0,
         )
-        # Price slightly above entry so PnL is non-zero and zero-PnL guard passes
-        sig.current_price = 30050.0
+        # Price below entry so signal is in negative territory — profit
+        # protection does not apply and the regime flip can fire.
+        sig.current_price = 29960.0
 
         cb = MagicMock()
 
@@ -2347,10 +2350,11 @@ class TestSignalInvalidation:
         reason = monitor._check_invalidation(sig)
         assert reason is None or "adverse excursion" not in reason.lower()
 
-    def test_adverse_excursion_NOT_triggered_when_momentum_confirming(self):
-        """Price at 70% of SL_dist but momentum is strongly POSITIVE
-        (confirming LONG) → engine is hurting but heading our way →
-        let the move play out, no adverse-excursion kill."""
+    def test_adverse_excursion_triggered_regardless_of_momentum(self):
+        """Price at 70% of SL_dist with strongly confirming momentum →
+        adverse excursion fires unconditionally (no momentum rescue).
+        When the trade is in negative territory at the threshold, the thesis
+        is structurally broken; a 3-candle bounce does not change that."""
         from config import (
             INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC,
             INVALIDATION_MOMENTUM_THRESHOLD,
@@ -2363,7 +2367,8 @@ class TestSignalInvalidation:
             stop_loss=29850.0,
         )
         sig.current_price = 29895.0
-        # Momentum well above the threshold → strongly confirming LONG.
+        # Momentum well above threshold (strongly confirming LONG) — previously
+        # this bypassed adverse excursion.  New doctrine: threshold is decisive.
         strong_mom = INVALIDATION_MOMENTUM_THRESHOLD[channel] * 5.0
         monitor, _, _ = self._build_monitor(
             {sig.signal_id: sig},
@@ -2373,7 +2378,7 @@ class TestSignalInvalidation:
             },
         )
         reason = monitor._check_invalidation(sig)
-        assert reason is None or "adverse excursion" not in reason.lower()
+        assert reason is not None and "adverse excursion" in reason.lower()
 
     def test_adverse_excursion_NOT_triggered_after_pretp_fire(self):
         """Once pre-TP has fired, the residual is BE-protected per
