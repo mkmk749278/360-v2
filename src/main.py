@@ -227,6 +227,7 @@ class CryptoSignalEngine:
                 alert_callback=self.telegram.send_admin_alert,
                 auto_close_orphans=RECONCILER_AUTO_CLOSE_ORPHANS,
                 risk_manager=self._risk_manager,
+                close_signal_fn=self._reconciler_close_signal,
             )
             log.info(
                 "PositionReconciler active: interval=%ds auto_close_orphans=%s",
@@ -499,6 +500,50 @@ class CryptoSignalEngine:
 
         # Bootstrap coordinates the boot/shutdown/WS sequence
         self._bootstrap = Bootstrap(self)
+
+    async def _reconciler_close_signal(self, sig: Any, reason: str) -> None:
+        """Called by PositionReconciler when a signal is confirmed missing from
+        the broker for two consecutive drift cycles.
+
+        The broker has ALREADY closed the position — do NOT issue a market
+        order.  Mark the signal terminal, compute approximate P&L from the
+        last-known mark price, send an admin alert, and remove from engine.
+        """
+        sig_id = getattr(sig, "signal_id", None)
+        if sig_id is None:
+            return
+        if sig_id not in self.router.active_signals:
+            return  # already removed by another close path — idempotent
+
+        entry = float(getattr(sig, "entry", 0.0) or 0.0)
+        current_price = float(getattr(sig, "current_price", 0.0) or 0.0)
+        try:
+            from src.smc import Direction
+            if entry > 0 and current_price > 0:
+                if sig.direction == Direction.LONG:
+                    sig.pnl_pct = (current_price - entry) / entry * 100.0
+                else:
+                    sig.pnl_pct = (entry - current_price) / entry * 100.0
+        except Exception:
+            pass
+
+        sig.status = "CANCELLED"
+
+        try:
+            symbol = getattr(sig, "symbol", "?")
+            pnl = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
+            await self.telegram.send_admin_alert(
+                f"🔄 Reconciler closed zombie signal\n"
+                f"*{symbol}* `{sig_id}`\n"
+                f"Broker had no matching position for 2 consecutive reconciler "
+                f"cycles — engine signal was a zombie.\n"
+                f"Approx P&L: `{pnl:+.2f}%` (last-known mark price)\n"
+                f"Engine signal removed."
+            )
+        except Exception as exc:
+            log.warning("reconciler_close_signal alert failed: %s", exc)
+
+        self._remove_and_archive(sig_id)
 
     def _remove_and_archive(self, signal_id: str) -> None:
         """Remove a signal from active tracking and archive it in history."""
