@@ -230,6 +230,7 @@ _CONFIDENCE_COMPONENT_RE = re.compile(
     r"(?:,confluence=(?P<sp_confluence>[+-]?\d+\.\d+),"
     r"struct_align=(?P<sp_struct_align>[+-]?\d+\.\d+))?"
     r"(?:,btc_dir=(?P<sp_btc_dir>[-\d.]+))?"
+    r"(?:,sym_dir=(?P<sp_sym_dir>[-\d.]+))?"
     r"\))?"
     # Optional ``flags=[…]`` trailing block (added 2026-05-06 with /diag).
     # Captures the literal soft_gate_flags string so a single grep can
@@ -476,6 +477,11 @@ def parse_confidence_gate_components_from_logs(
                 _btc_dir_raw = match.group("sp_btc_dir")
                 if _btc_dir_raw is not None:
                     soft_penalty_fields["btc_dir"] = float(_btc_dir_raw)
+                # Filter 10 — per-symbol direction penalty (optional, same
+                # backward-compat rationale as btc_dir above).
+                _sym_dir_raw = match.group("sp_sym_dir")
+                if _sym_dir_raw is not None:
+                    soft_penalty_fields["sym_dir"] = float(_sym_dir_raw)
             except (ValueError, TypeError):
                 soft_penalty_fields = {}
 
@@ -539,6 +545,8 @@ def parse_confidence_gate_components_from_logs(
                     # per-setup table renders consistently across the
                     # cutover.
                     "avg_btc_dir": round(totals.get("sp_btc_dir", 0.0) / sp_n, 2),
+                    # Filter 10 — per-symbol 1H/4H direction penalty.
+                    "avg_sym_dir": round(totals.get("sp_sym_dir", 0.0) / sp_n, 2),
                 }
             by_setup[setup][decision] = entry
     return by_setup
@@ -1610,9 +1618,9 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             "penalty (OWNER_BRIEF §2.1)._"
         )
         lines.append(
-            "| Setup | Decision | Samples | Avg final | VWAP | KZ | OI | Spoof | Vol_Div | Cluster | BTC_Dir | Sum |"
+            "| Setup | Decision | Samples | Avg final | VWAP | KZ | OI | Spoof | Vol_Div | Cluster | BTC_Dir | Sym_Dir | Sum |"
         )
-        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
+        lines.append("|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|")
         for setup in sorted(components.keys()):
             for decision in sorted(components[setup].keys()):
                 m = components[setup][decision]
@@ -1627,11 +1635,12 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
                     + sp.get("avg_vol_div", 0.0)
                     + sp.get("avg_cluster", 0.0)
                     + sp.get("avg_btc_dir", 0.0)
+                    + sp.get("avg_sym_dir", 0.0)
                 )
                 lines.append(
                     "| {setup} | {decision} | {samples} | {final:.2f} | "
                     "{vwap:.2f} | {kz:.2f} | {oi:.2f} | {spoof:.2f} | {vd:.2f} | "
-                    "{cl:.2f} | {bd:.2f} | **{sm:.2f}** |".format(
+                    "{cl:.2f} | {bd:.2f} | {sd:.2f} | **{sm:.2f}** |".format(
                         setup=setup,
                         decision=decision,
                         samples=sp.get("samples", 0),
@@ -1643,6 +1652,7 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
                         vd=sp.get("avg_vol_div", 0.0),
                         cl=sp.get("avg_cluster", 0.0),
                         bd=sp.get("avg_btc_dir", 0.0),
+                        sd=sp.get("avg_sym_dir", 0.0),
                         sm=sp_sum,
                     )
                 )
