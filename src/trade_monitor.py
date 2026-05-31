@@ -1276,12 +1276,20 @@ class TradeMonitor:
                     # position matches the engine's weighted-avg-entry math.
                     # Without this, engine assumes 60/40 weighted entry but
                     # broker has only Entry-1 size — P&L attribution diverges.
+                    #
+                    # Telegram notification is gated on broker execution:
+                    # when live/paper mode is enabled, only notify if the
+                    # broker call returned a non-None order ID.  In off-mode
+                    # (no order manager), notify unconditionally so Telegram
+                    # subscribers still see the DCA signal.
+                    _dca_broker_ok = True  # default True for off-mode
                     if (
                         self._order_manager is not None
                         and self._order_manager.is_enabled
                     ):
+                        _dca_order_id: Optional[str] = None
                         try:
-                            await self._order_manager.add_dca_entry(
+                            _dca_order_id = await self._order_manager.add_dca_entry(
                                 sig, current_price=dca_price
                             )
                         except Exception as exc:
@@ -1289,7 +1297,16 @@ class TradeMonitor:
                                 "add_dca_entry failed for %s: %s",
                                 sig.symbol, exc,
                             )
-                    await self._post_dca_update(sig)
+                        _dca_broker_ok = _dca_order_id is not None
+                    if _dca_broker_ok:
+                        await self._post_dca_update(sig)
+                    else:
+                        log.warning(
+                            "DCA broker execution failed for %s %s — "
+                            "Telegram DCA notification suppressed (no Entry-1 "
+                            "qty tracked; engine ↔ broker position mismatch)",
+                            sig.symbol, sig.signal_id,
+                        )
 
         # SL direction sanity check – catch misconfigured signals
         protective_stop_active = sig.status in ("TP1_HIT", "TP2_HIT")
