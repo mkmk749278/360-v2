@@ -808,6 +808,12 @@ def _build_invalidation_test_monitor(sig, candles_close=None, regime_detector=No
     else:
         data_store.get_candles.return_value = None
 
+    # Ensure current_price is set so the profit-protection gate doesn't
+    # misfire due to a zero current_price looking like a massive favorable
+    # move (entry - 0) for SHORT signals.
+    if getattr(sig, "current_price", 0.0) == 0.0:
+        sig.current_price = sig.entry
+
     return _TradeMonitor(
         data_store=data_store,
         send_telegram=mock_send,
