@@ -271,17 +271,24 @@ class TestCheckDcaEntry:
         result = check_dca_entry(sig, 2290.0)
         assert result is None
 
-    def test_check_dca_entry_no_momentum(self):
-        """Returns None when momentum fades below threshold."""
+    def test_check_dca_entry_strong_adverse_momentum_long(self):
+        """LONG DCA rejected when momentum is strongly negative (adverse)."""
         sig = _make_long_signal(entry=2300.0, stop_loss=2280.0)
-        low_momentum_indicators = {"5m": {"momentum_last": 0.05}}  # below 0.2
-        result = check_dca_entry(sig, 2290.0, indicators=low_momentum_indicators)
+        adverse_indicators = {"5m": {"momentum_last": -0.25}}  # <= -0.2 threshold
+        result = check_dca_entry(sig, 2290.0, indicators=adverse_indicators)
         assert result is None
+
+    def test_check_dca_entry_borderline_adverse_long_allowed(self):
+        """LONG DCA allowed when adverse momentum is within threshold (-0.1 > -0.2)."""
+        sig = _make_long_signal(entry=2300.0, stop_loss=2280.0)
+        mild_indicators = {"5m": {"momentum_last": -0.1}}  # > -0.2, allowed
+        result = check_dca_entry(sig, 2290.0, indicators=mild_indicators)
+        assert result == pytest.approx(2290.0)
 
     def test_check_dca_entry_good_momentum(self):
         """Returns entry price when momentum is above threshold."""
         sig = _make_long_signal(entry=2300.0, stop_loss=2280.0)
-        good_indicators = {"5m": {"momentum_last": 0.5}}  # above 0.2
+        good_indicators = {"5m": {"momentum_last": 0.5}}  # positive — clearly allowed
         result = check_dca_entry(sig, 2290.0, indicators=good_indicators)
         assert result == pytest.approx(2290.0)
 

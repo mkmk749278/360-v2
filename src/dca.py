@@ -260,21 +260,30 @@ def check_dca_entry(
             if channel_config is not None
             else 0.2
         )
-        # Check the most relevant timeframe — use first available with data
-        momentum_ok = False
+        # Direction-aware check: DCA must not fire into strong adverse momentum.
+        # The original abs(mom) check was too permissive — a bearish move of
+        # -0.4% passed abs >= 0.2 for a LONG DCA, doubling into a falling knife.
+        # Rule: allow DCA when momentum is NOT strongly opposing direction.
+        #   LONG:  mom > -threshold  (small pullback OK; strong selling → skip)
+        #   SHORT: mom < +threshold  (small bounce OK; strong buying → skip)
+        # Fail-open when momentum_last is unavailable (warmup / WS gap).
+        _mom_val: Optional[float] = None
         for tf_ind in indicators.values():
-            mom = tf_ind.get("momentum_last")
-            if mom is not None:
-                if abs(mom) >= min_momentum:
-                    momentum_ok = True
-                break
-        if not momentum_ok:
-            log.debug(
-                "DCA rejected for %s %s — momentum faded",
-                sig.symbol,
-                sig.direction.value,
-            )
-            return None
+            _mom_val = tf_ind.get("momentum_last")
+            break
+        if _mom_val is not None:
+            if sig.direction == Direction.LONG and _mom_val <= -min_momentum:
+                log.debug(
+                    "DCA rejected for %s LONG — strong adverse momentum (%.3f ≤ -%.3f)",
+                    sig.symbol, _mom_val, min_momentum,
+                )
+                return None
+            if sig.direction != Direction.LONG and _mom_val >= min_momentum:
+                log.debug(
+                    "DCA rejected for %s SHORT — strong adverse momentum (%.3f ≥ +%.3f)",
+                    sig.symbol, _mom_val, min_momentum,
+                )
+                return None
 
     # Volume delta check — avoid DCAing into heavy, aggressive counter-pressure.
     # A strongly negative delta while we're LONG (or positive while SHORT) means

@@ -1243,10 +1243,24 @@ class TradeMonitor:
                 (c for c in ALL_CHANNELS if c.name == sig.channel), None
             )
             if chan_cfg is not None and chan_cfg.dca_enabled:
+                # Build a minimal indicators dict for DCA validation so the
+                # momentum check in check_dca_entry actually fires.  Volume-delta
+                # check requires order-flow data not in the OHLCV store and stays
+                # None (skipped per check_dca_entry's optional logic).
+                _dca_indicators = None
+                if self._store is not None:
+                    _dca_cd = self._store.get_candles(sig.symbol, "5m")
+                    if not (_dca_cd and len(_dca_cd.get("close", [])) >= 4):
+                        _dca_cd = self._store.get_candles(sig.symbol, "1m")
+                    if _dca_cd and len(_dca_cd.get("close", [])) >= 4:
+                        _dca_closes = np.asarray(_dca_cd["close"], dtype=np.float64)
+                        _dca_mom = _compute_momentum(_dca_closes, 3)
+                        if len(_dca_mom) > 0 and not np.isnan(_dca_mom[-1]):
+                            _dca_indicators = {"5m": {"momentum_last": float(_dca_mom[-1])}}
                 dca_price = check_dca_entry(
                     sig=sig,
                     current_price=price,
-                    indicators=None,
+                    indicators=_dca_indicators,
                     smc_data=None,
                     channel_config=chan_cfg,
                 )
