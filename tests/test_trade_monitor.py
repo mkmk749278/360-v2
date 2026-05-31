@@ -1604,6 +1604,63 @@ class TestSignalInvalidation:
         assert "TRENDING_DOWN" in reason
         assert "LONG" in reason
 
+    def test_regime_flip_does_NOT_kill_long_in_profit(self):
+        """Regression test for PR #549 ordering bug.
+
+        When price is ABOVE entry (signal in profit), a TRENDING_DOWN regime
+        must NOT invalidate the signal.  The profit-protection gate must run
+        BEFORE the regime check.
+
+        Symptom: signals at +0.07–0.21% were being killed by regime flip within
+        1-4 minutes of dispatch because the regime check ran first.
+        """
+        # entry=30000, SL=29850 → SL_dist=150
+        # current_price=30100 → favorable=100 > 0 → should be protected
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.current_price = 30100.0  # 0.33% above entry — thesis proved
+
+        regime_detector = MagicMock()
+        regime_result = MagicMock()
+        regime_result.regime.value = "TRENDING_DOWN"
+        regime_detector.classify.return_value = regime_result
+
+        closes = [30100.0] * 25
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            candles_close=closes,
+            regime_detector=regime_detector,
+        )
+        reason = monitor._check_invalidation(sig)
+        assert reason is None, (
+            f"Profit-protection gate must block regime kill when price > entry, "
+            f"got: {reason!r}"
+        )
+
+    def test_profit_gate_blocks_ema_kill_when_in_profit(self):
+        """EMA bearish crossover must NOT kill a LONG signal that is in profit.
+
+        Regression for same ordering bug — EMA check also ran before the profit
+        gate in the old code.
+        """
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+        sig.current_price = 30050.0  # slightly above entry 30000
+
+        # EMA9 < EMA21 = bearish crossover, but price is above entry
+        closes_high = [30100.0] * 9 + [30050.0] * 15  # drives EMA9 above
+        # Force EMA9 < EMA21 via decreasing close series
+        ema_kill_closes = [30200.0] + [30100.0] * 6 + [29900.0] * 5 + [30050.0] * 13
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            candles_close=ema_kill_closes,
+        )
+        # Override current_price AFTER monitor build (build sets it to entry)
+        sig.current_price = 30050.0
+        reason = monitor._check_invalidation(sig)
+        assert reason is None, (
+            f"Profit-protection gate must block EMA kill when price > entry, "
+            f"got: {reason!r}"
+        )
+
     def test_regime_flip_invalidates_short(self):
         """SHORT signal must be invalidated when regime detector returns TRENDING_UP."""
         sig = _make_signal(

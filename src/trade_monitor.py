@@ -923,62 +923,24 @@ class TradeMonitor:
             if trailing_kill is not None:
                 return trailing_kill
 
-        # INV-1 audit fix: extract the regime captured at signal CREATION from
-        # `sig.market_phase` (formatted as "REGIME | ATR=... | Vol=...").  The
-        # rules below were buggy when applied to counter-trend setups
-        # (SR_FLIP_RETEST, FAILED_AUCTION_RECLAIM, LIQUIDATION_REVERSAL,
-        # FUNDING_EXTREME_SIGNAL) because those signals are intentionally born
-        # with regime opposing direction — the existing checks fired immediately
-        # at the channel min-age gate even though nothing had changed.
-        # Defensive fallback: when market_phase is missing/N-A, preserve the
-        # pre-existing behaviour so older signals in flight don't regress.
-        _created_regime = (sig.market_phase or "").split("|")[0].strip().upper()
-        _has_creation_regime = _created_regime not in ("", "N/A")
-        _counter_trend = (
-            _has_creation_regime
-            and (
-                (is_long and _created_regime == "TRENDING_DOWN")
-                or (not is_long and _created_regime == "TRENDING_UP")
-            )
-        )
-
-        # 1. Market regime flip – use regime_detector.classify() with indicators.
-        # INV-1: only invalidate when the regime has CHANGED from the creation
-        # regime (a true "flip"), not when the current regime simply matches
-        # the killer condition.
-        if self._regime_detector is not None and indicators is not None:
-            try:
-                result = self._regime_detector.classify(indicators)
-                regime_label = result.regime.value if result and result.regime else None
-                if regime_label is not None:
-                    if (
-                        is_long
-                        and regime_label == "TRENDING_DOWN"
-                        and (not _has_creation_regime or _created_regime != "TRENDING_DOWN")
-                    ):
-                        return f"regime shift to {regime_label} – LONG thesis no longer valid"
-                    if (
-                        not is_long
-                        and regime_label == "TRENDING_UP"
-                        and (not _has_creation_regime or _created_regime != "TRENDING_UP")
-                    ):
-                        return f"regime shift to {regime_label} – SHORT thesis no longer valid"
-            except Exception as exc:
-                log.debug("Regime detection failed for %s: %s", sig.symbol, exc)
-
-        # Profit-protection gate + adverse-excursion are evaluated here —
-        # BEFORE the `indicators is None` early-return — because both only
-        # need sig.current_price / sl_price / entry_price, not candle data.
-        # The old placement AFTER the early-return meant that when 1m candle
-        # data was unavailable for a symbol (store miss, new listing, WS gap),
-        # adverse excursion was silently skipped even with price 3–4× past SL.
+        # ---- MAIN PROFIT-PROTECTION + ADVERSE-EXCURSION ----
+        # These MUST run before the regime/EMA/momentum checks below.
+        # Both gates only need price data (no candle indicators).
+        # Placing them here enforces the doctrine exactly:
+        #   positive edge → wait (no indicator-based kill fires at all)
+        #   negative edge → invalidate (adverse excursion or thesis kill)
+        #
+        # Bug fixed (PR #551): the old code placed profit-protection AFTER
+        # the regime check, so signals at +0.07–0.21% were killed by a
+        # TRENDING_DOWN regime flip even though price was above entry.
         _entry_px = sig.entry if sig.entry > 0 else sig.current_price
         _sl_px = getattr(sig, "stop_loss", 0.0) or 0.0
         _sl_dist = abs(_entry_px - _sl_px) if (_sl_px > 0 and _entry_px > 0) else 0.0
 
         # Profit-protection gate: signal is on the right side of entry → skip
-        # regime / EMA / momentum kills.  In positive territory the thesis is
-        # proved; only tight-mode trailing (above) and the native SL manage exit.
+        # ALL regime / EMA / momentum kills.  In positive territory the thesis
+        # is proved; only tight-mode trailing (above) and the native SL manage
+        # exit.
         if _sl_dist > 0:
             _favorable = (sig.current_price - _entry_px) if is_long else (_entry_px - sig.current_price)
             if _favorable > 0:
@@ -1014,10 +976,53 @@ class TradeMonitor:
                     f"{_adverse_frac:.2f}×SL_dist) – signal thesis invalidated"
                 )
 
-        # No candle data → can't evaluate EMA crossover or momentum-loss.
-        # Adverse excursion and profit-protection already ran above.
+        # INV-1 audit fix: extract the regime captured at signal CREATION from
+        # `sig.market_phase` (formatted as "REGIME | ATR=... | Vol=...").  The
+        # rules below were buggy when applied to counter-trend setups
+        # (SR_FLIP_RETEST, FAILED_AUCTION_RECLAIM, LIQUIDATION_REVERSAL,
+        # FUNDING_EXTREME_SIGNAL) because those signals are intentionally born
+        # with regime opposing direction — the existing checks fired immediately
+        # at the channel min-age gate even though nothing had changed.
+        # Defensive fallback: when market_phase is missing/N-A, preserve the
+        # pre-existing behaviour so older signals in flight don't regress.
+        _created_regime = (sig.market_phase or "").split("|")[0].strip().upper()
+        _has_creation_regime = _created_regime not in ("", "N/A")
+        _counter_trend = (
+            _has_creation_regime
+            and (
+                (is_long and _created_regime == "TRENDING_DOWN")
+                or (not is_long and _created_regime == "TRENDING_UP")
+            )
+        )
+
+        # No candle data → can't evaluate regime/EMA crossover or momentum-loss.
+        # Profit-protection and adverse-excursion already ran above.
         if indicators is None:
             return None
+
+        # 1. Market regime flip – use regime_detector.classify() with indicators.
+        # INV-1: only invalidate when the regime has CHANGED from the creation
+        # regime (a true "flip"), not when the current regime simply matches
+        # the killer condition.
+        if self._regime_detector is not None:
+            try:
+                result = self._regime_detector.classify(indicators)
+                regime_label = result.regime.value if result and result.regime else None
+                if regime_label is not None:
+                    if (
+                        is_long
+                        and regime_label == "TRENDING_DOWN"
+                        and (not _has_creation_regime or _created_regime != "TRENDING_DOWN")
+                    ):
+                        return f"regime shift to {regime_label} – LONG thesis no longer valid"
+                    if (
+                        not is_long
+                        and regime_label == "TRENDING_UP"
+                        and (not _has_creation_regime or _created_regime != "TRENDING_UP")
+                    ):
+                        return f"regime shift to {regime_label} – SHORT thesis no longer valid"
+            except Exception as exc:
+                log.debug("Regime detection failed for %s: %s", sig.symbol, exc)
 
         ema9 = indicators.get("ema9_last")
         ema21 = indicators.get("ema21_last")
