@@ -110,6 +110,15 @@ class PositionReconciler:
         Optional :class:`~src.auto_trade.risk_manager.RiskManager`.  When
         wired, recovered positions are registered so per-symbol caps and
         concurrent counts include them.
+    close_signal_fn:
+        Optional async callable ``(signal, reason: str) -> None``.  When
+        wired, the reconciler calls this after *two consecutive periodic
+        cycles* where a signal is missing from the broker.  Two-cycle
+        confirmation avoids false-positives from the ~1-minute lag between
+        a SL fill on the exchange and the engine's own SL-HIT processing.
+        The broker has already closed the position at this point — the
+        callback must NOT re-issue a market order; it should only update
+        engine state and archive.
     """
 
     def __init__(
@@ -120,12 +129,16 @@ class PositionReconciler:
         alert_callback: Optional[Callable[[str], Awaitable[Any]]] = None,
         auto_close_orphans: bool = False,
         risk_manager: Optional[Any] = None,
+        close_signal_fn: Optional[Callable[[Any, str], Awaitable[None]]] = None,
     ) -> None:
         self._client = exchange_client
         self._get_signals = get_active_signals_fn or (lambda: {})
         self._alert = alert_callback
         self._auto_close = bool(auto_close_orphans)
         self._risk_manager = risk_manager
+        self._close_signal_fn = close_signal_fn
+        # signal_id → signal for 2-cycle missing confirmation
+        self._pending_missing: Dict[str, Any] = {}
 
     @property
     def is_active(self) -> bool:
@@ -270,10 +283,18 @@ class PositionReconciler:
     async def periodic_drift_check(self) -> ReconcileResult:
         """Single cycle of mid-flight drift detection.
 
-        Same logic as boot, different context for alerts.  Auto-close is
-        intentionally NOT applied here — periodic drift is more often a
-        false-positive (e.g. SL just hit on the exchange and our state
-        hasn't caught up yet).  Boot is the safer time to auto-close.
+        Same logic as boot, different context for alerts.  Orphan auto-close
+        is intentionally NOT applied here — periodic orphan drift is more
+        often a false-positive (e.g. SL just hit on the exchange and our
+        state hasn't caught up yet).  Boot is the safer time to auto-close.
+
+        Missing signals (engine ACTIVE, broker closed) are handled with a
+        two-cycle confirmation window when ``close_signal_fn`` is wired.
+        Cycle 1: signal added to ``_pending_missing``; cycle 2: confirmed
+        missing → ``close_signal_fn`` called.  Entries are cleared from
+        ``_pending_missing`` if the broker position reappears between cycles
+        (avoids false-positives from transient API errors or the ~1-minute
+        engine lag after a live SL fill).
         """
         if not self.is_active:
             return ReconcileResult()
@@ -288,6 +309,52 @@ class PositionReconciler:
                 len(result.orphan_positions), len(result.missing_signals),
             )
             await self._alert_drift(result, context="periodic drift check")
+
+        # Two-cycle confirmation for missing signals.
+        if self._close_signal_fn is not None:
+            current_missing_ids = {
+                getattr(sig, "signal_id", None)
+                for sig in result.missing_signals
+            } - {None}
+
+            confirmed: List[Any] = []
+            for sig in result.missing_signals:
+                sid = getattr(sig, "signal_id", None)
+                if sid is None:
+                    continue
+                if sid in self._pending_missing:
+                    confirmed.append(sig)
+                else:
+                    self._pending_missing[sid] = sig
+                    log.info(
+                        "reconciler: %s (%s) missing from broker — "
+                        "cycle 1, awaiting confirmation",
+                        sid, getattr(sig, "symbol", "?"),
+                    )
+
+            # Stale entries: broker position reappeared — not a zombie.
+            for sid in list(self._pending_missing):
+                if sid not in current_missing_ids:
+                    log.info(
+                        "reconciler: %s no longer missing — clearing confirmation",
+                        sid,
+                    )
+                    del self._pending_missing[sid]
+
+            for sig in confirmed:
+                sid = getattr(sig, "signal_id", None)
+                self._pending_missing.pop(sid, None)
+                log.warning(
+                    "reconciler: %s (%s) confirmed missing for 2 consecutive "
+                    "cycles — closing engine signal",
+                    sid, getattr(sig, "symbol", "?"),
+                )
+                try:
+                    await self._close_signal_fn(sig, "reconciler_confirmed_close")
+                except Exception as exc:
+                    log.error(
+                        "reconciler close_signal_fn failed for %s: %s", sid, exc
+                    )
 
         return result
 

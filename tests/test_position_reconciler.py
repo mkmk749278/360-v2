@@ -60,6 +60,7 @@ def _make_reconciler(
     positions: List[Dict[str, Any]] = None,
     active_signals: Dict[str, Any] = None,
     auto_close: bool = False,
+    close_signal_fn=None,
 ):
     client = MagicMock()
     client.fetch_positions = AsyncMock(return_value=positions or [])
@@ -70,6 +71,7 @@ def _make_reconciler(
         get_active_signals_fn=lambda: active_signals or {},
         alert_callback=alert,
         auto_close_orphans=auto_close,
+        close_signal_fn=close_signal_fn,
     )
     return rec, client, alert
 
@@ -304,3 +306,128 @@ async def test_alert_callback_failure_does_not_raise():
     # Must not raise even though alert fails
     result = await rec.reconcile_on_boot()
     assert len(result.orphan_positions) == 1
+
+
+# ---------------------------------------------------------------------------
+# Missing-signal two-cycle confirmation + close_signal_fn
+# ---------------------------------------------------------------------------
+
+
+async def test_missing_signal_cycle1_queued_not_closed():
+    """Cycle 1: signal appears missing → queued in _pending_missing, no close yet."""
+    close_fn = AsyncMock()
+    sig = _make_signal(signal_id="A", symbol="ETHUSDT", direction=Direction.LONG)
+    rec, _, _ = _make_reconciler(
+        positions=[],
+        active_signals={"A": sig},
+        close_signal_fn=close_fn,
+    )
+    await rec.periodic_drift_check()
+    close_fn.assert_not_awaited()
+    assert "A" in rec._pending_missing
+
+
+async def test_missing_signal_cycle2_confirmed_close_called():
+    """Cycle 2: signal still missing → close_signal_fn called with correct args."""
+    close_fn = AsyncMock()
+    sig = _make_signal(signal_id="A", symbol="ETHUSDT", direction=Direction.LONG)
+    # Simulate signals dict that always returns the signal
+    active = {"A": sig}
+    client = MagicMock()
+    client.fetch_positions = AsyncMock(return_value=[])
+    rec = PositionReconciler(
+        exchange_client=client,
+        get_active_signals_fn=lambda: active,
+        alert_callback=AsyncMock(),
+        close_signal_fn=close_fn,
+    )
+    # Cycle 1: queued
+    await rec.periodic_drift_check()
+    close_fn.assert_not_awaited()
+    # Cycle 2: confirmed
+    await rec.periodic_drift_check()
+    close_fn.assert_awaited_once()
+    call_sig, call_reason = close_fn.await_args.args
+    assert call_sig is sig
+    assert call_reason == "reconciler_confirmed_close"
+    # Cleared from pending after confirmation
+    assert "A" not in rec._pending_missing
+
+
+async def test_missing_signal_cleared_if_broker_reconnects():
+    """If broker position reappears between cycles, pending entry is discarded."""
+    close_fn = AsyncMock()
+    sig = _make_signal(signal_id="A", symbol="ETHUSDT", direction=Direction.LONG)
+    active = {"A": sig}
+    pos = _ccxt_position(symbol="ETH/USDT", side="long")
+
+    positions_holder = [[]]  # mutable so we can change between cycles
+
+    client = MagicMock()
+    client.fetch_positions = AsyncMock(side_effect=lambda: positions_holder[0][:])
+    rec = PositionReconciler(
+        exchange_client=client,
+        get_active_signals_fn=lambda: active,
+        alert_callback=AsyncMock(),
+        close_signal_fn=close_fn,
+    )
+    # Cycle 1: no broker position → queued
+    await rec.periodic_drift_check()
+    assert "A" in rec._pending_missing
+    # Broker position reappears before cycle 2
+    positions_holder[0] = [pos]
+    # Cycle 2: now tracked (not missing) → pending cleared
+    await rec.periodic_drift_check()
+    assert "A" not in rec._pending_missing
+    close_fn.assert_not_awaited()
+
+
+async def test_missing_signal_no_close_fn_wired_alert_only():
+    """Without close_signal_fn the reconciler only alerts — backward compat."""
+    sig = _make_signal(signal_id="A", symbol="ETHUSDT")
+    rec, _, alert = _make_reconciler(
+        positions=[],
+        active_signals={"A": sig},
+    )
+    # Two cycles — still no close, just alert
+    await rec.periodic_drift_check()
+    await rec.periodic_drift_check()
+    # _pending_missing stays empty when no close_signal_fn
+    assert rec._pending_missing == {}
+    # Alert was called (drift detected)
+    alert.assert_awaited()
+
+
+async def test_close_fn_exception_does_not_propagate():
+    """If close_signal_fn raises, the periodic loop must not crash."""
+    close_fn = AsyncMock(side_effect=RuntimeError("engine gone"))
+    sig = _make_signal(signal_id="A", symbol="ETHUSDT")
+    active = {"A": sig}
+    client = MagicMock()
+    client.fetch_positions = AsyncMock(return_value=[])
+    rec = PositionReconciler(
+        exchange_client=client,
+        get_active_signals_fn=lambda: active,
+        alert_callback=AsyncMock(),
+        close_signal_fn=close_fn,
+    )
+    # Prime cycle 1
+    await rec.periodic_drift_check()
+    # Cycle 2 — close_fn raises; must not propagate
+    result = await rec.periodic_drift_check()
+    assert isinstance(result, ReconcileResult)
+    close_fn.assert_awaited_once()
+
+
+async def test_close_fn_not_called_for_orphan_positions():
+    """close_signal_fn is only for missing signals, never for orphan positions."""
+    close_fn = AsyncMock()
+    pos = _ccxt_position(symbol="BTC/USDT", side="long")
+    rec, _, _ = _make_reconciler(
+        positions=[pos],
+        active_signals={},
+        close_signal_fn=close_fn,
+    )
+    await rec.periodic_drift_check()
+    await rec.periodic_drift_check()
+    close_fn.assert_not_awaited()
