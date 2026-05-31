@@ -3903,3 +3903,121 @@ class TestStaleSymbolMarkPriceFallback:
 
         assert sig.signal_id not in removed
         assert sig.status not in ("SL_HIT",)
+
+
+# ---------------------------------------------------------------------------
+# Fix A (fix/dca-broker-sync) — _post_dca_update gated on broker execution
+# ---------------------------------------------------------------------------
+
+
+class TestDCANotificationGate:
+    """_post_dca_update must only fire when the broker actually executed
+    Entry 2 (add_dca_entry returns a non-None order ID).  Previously it
+    fired unconditionally, sending a Telegram DCA notification even when
+    no order was placed on Binance because _open_quantities was empty
+    after an engine restart.
+
+    Owner symptom: "DCA in Telegram but not on Binance."
+    """
+
+    def _build_monitor(self, active, *, om=None):
+        from unittest.mock import AsyncMock
+
+        removed = {}
+        sent = {}
+
+        async def mock_send(chat_id, text):
+            sent[chat_id] = text
+
+        data_store = MagicMock()
+        data_store.get_candles.side_effect = _make_get_candles_from_active(active)
+        data_store.ticks = {}
+
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=mock_send,
+            get_active_signals=lambda: dict(active),
+            remove_signal=lambda sid: removed.update({sid: True}),
+            update_signal=MagicMock(),
+        )
+        monitor._post_dca_update = AsyncMock()
+        if om is not None:
+            monitor._order_manager = om
+        return monitor, removed, sent
+
+    def _dca_ready_signal(self) -> Signal:
+        """ACTIVE LONG signal with price inside DCA zone (no qty needed)."""
+        entry = 30000.0
+        sl = 29850.0
+        sl_dist = entry - sl  # 150
+
+        sig = Signal(
+            channel="360_SCALP",
+            symbol="BTCUSDT",
+            direction=Direction.LONG,
+            entry=entry,
+            stop_loss=sl,
+            tp1=30150.0,
+            tp2=30300.0,
+            confidence=80.0,
+            timestamp=utcnow() - timedelta(seconds=300),
+        )
+        sig.tp3 = 30450.0
+        sig.status = "ACTIVE"
+        sig.entry_2_filled = False
+        # Price inside DCA zone: entry - 0.50 × sl_dist = 29925
+        sig.current_price = 29925.0
+        sig.dca_zone_lower = entry - 0.70 * sl_dist  # 29895
+        sig.dca_zone_upper = entry - 0.30 * sl_dist  # 29955
+        sig.original_entry = 0.0  # triggers persist in recalculate_after_dca
+        return sig
+
+    @pytest.mark.asyncio
+    async def test_post_dca_update_suppressed_when_broker_returns_none(self):
+        """When add_dca_entry returns None (no tracked qty), _post_dca_update
+        must NOT be called — prevents spurious Telegram DCA notification."""
+        from unittest.mock import AsyncMock
+
+        sig = self._dca_ready_signal()
+        active = {sig.signal_id: sig}
+
+        om = MagicMock()
+        om.is_enabled = True
+        om.add_dca_entry = AsyncMock(return_value=None)
+
+        monitor, _, _ = self._build_monitor(active, om=om)
+
+        await monitor._check_all()
+
+        monitor._post_dca_update.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_post_dca_update_fires_when_broker_succeeds(self):
+        """When add_dca_entry returns an order ID, _post_dca_update fires."""
+        from unittest.mock import AsyncMock
+
+        sig = self._dca_ready_signal()
+        active = {sig.signal_id: sig}
+
+        om = MagicMock()
+        om.is_enabled = True
+        om.add_dca_entry = AsyncMock(return_value="ccxt-dca-99")
+
+        monitor, _, _ = self._build_monitor(active, om=om)
+
+        await monitor._check_all()
+
+        monitor._post_dca_update.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_post_dca_update_fires_in_off_mode(self):
+        """In off-mode (no order manager), _post_dca_update always fires so
+        Telegram-only subscribers receive the DCA notification."""
+        sig = self._dca_ready_signal()
+        active = {sig.signal_id: sig}
+
+        monitor, _, _ = self._build_monitor(active, om=None)
+
+        await monitor._check_all()
+
+        monitor._post_dca_update.assert_called_once()

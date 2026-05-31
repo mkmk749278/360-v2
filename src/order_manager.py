@@ -28,10 +28,13 @@ Design notes
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Set
 
 from config import MAX_POSITION_USD, POSITION_SIZE_PCT
 from src.utils import get_logger
+
+if TYPE_CHECKING:
+    from src.redis_client import RedisClient
 
 log = get_logger("order_manager")
 
@@ -73,6 +76,7 @@ class OrderManager:
         position_size_pct: float = POSITION_SIZE_PCT,
         max_position_usd: float = MAX_POSITION_USD,
         risk_manager: Optional[Any] = None,
+        redis_client: Optional["RedisClient"] = None,
     ) -> None:
         self._enabled = auto_execution_enabled
         self._client = exchange_client
@@ -83,6 +87,10 @@ class OrderManager:
         # behaviour for backwards compatibility.  Production wiring should
         # always pass a configured RiskManager.
         self._risk_manager = risk_manager
+        # Optional RedisClient for persistence of open quantities across
+        # engine restarts.  When None, tracking is in-memory only and DCA
+        # will not fire for signals that were open before the restart.
+        self._redis_client = redis_client
         # Track open position sizes for partial TP execution: signal_id → quantity
         self._open_quantities: Dict[str, float] = {}
         # Track which TP levels have had partial closes executed to prevent
@@ -98,6 +106,102 @@ class OrderManager:
     def is_enabled(self) -> bool:
         """Return ``True`` when auto-execution is active."""
         return self._enabled
+
+    # ------------------------------------------------------------------
+    # Redis persistence helpers for open-quantity tracking
+    # ------------------------------------------------------------------
+
+    async def _redis_persist_qty(self, signal_id: str, qty: float) -> None:
+        """Write ``om:open_qty:{signal_id}`` to Redis if available."""
+        if self._redis_client is None or not self._redis_client.available:
+            return
+        try:
+            await self._redis_client.client.set(
+                f"om:open_qty:{signal_id}", repr(qty)
+            )
+        except Exception as exc:
+            self._redis_client.mark_unavailable("set om:open_qty", exc)
+
+    async def _redis_persist_partial_tps(
+        self, signal_id: str, tps: Set[int]
+    ) -> None:
+        """Write ``om:partial_tps:{signal_id}`` to Redis if available."""
+        if self._redis_client is None or not self._redis_client.available:
+            return
+        try:
+            value = ",".join(str(t) for t in sorted(tps)) if tps else ""
+            await self._redis_client.client.set(
+                f"om:partial_tps:{signal_id}", value
+            )
+        except Exception as exc:
+            self._redis_client.mark_unavailable("set om:partial_tps", exc)
+
+    async def _redis_delete_qty(self, signal_id: str) -> None:
+        """Delete both Redis keys for *signal_id* if available."""
+        if self._redis_client is None or not self._redis_client.available:
+            return
+        try:
+            await self._redis_client.client.delete(
+                f"om:open_qty:{signal_id}",
+                f"om:partial_tps:{signal_id}",
+            )
+        except Exception as exc:
+            self._redis_client.mark_unavailable("delete om:open_qty", exc)
+
+    async def restore_open_quantities_from_redis(self) -> int:
+        """Reload open-quantity tracking from Redis after an engine restart.
+
+        Scans for all ``om:open_qty:*`` keys and repopulates
+        ``_open_quantities`` (and ``_partial_closed_tps``) so that
+        ``add_dca_entry``, ``close_partial``, and ``close_full`` work
+        correctly for signals that were open before the restart.
+
+        Returns the number of entries restored.  Safe to call even when
+        Redis is unavailable — returns 0 and leaves in-memory state empty.
+        """
+        if self._redis_client is None or not self._redis_client.available:
+            return 0
+
+        rc = self._redis_client.client
+        restored = 0
+        try:
+            keys = await rc.keys("om:open_qty:*")
+            for key in keys:
+                signal_id = key[len("om:open_qty:"):]
+                raw_qty = await rc.get(key)
+                if raw_qty is None:
+                    continue
+                try:
+                    qty = float(raw_qty)
+                except ValueError:
+                    log.warning(
+                        "[OrderManager] restore: invalid qty %r for %s — skipping",
+                        raw_qty, signal_id,
+                    )
+                    continue
+                self._open_quantities[signal_id] = qty
+
+                # Restore partial-TP set if present
+                raw_tps = await rc.get(f"om:partial_tps:{signal_id}")
+                if raw_tps:
+                    try:
+                        self._partial_closed_tps[signal_id] = {
+                            int(t) for t in raw_tps.split(",") if t.strip()
+                        }
+                    except ValueError:
+                        pass
+
+                restored += 1
+        except Exception as exc:
+            self._redis_client.mark_unavailable("restore om:open_qty", exc)
+            return 0
+
+        if restored:
+            log.info(
+                "[OrderManager] restored %d open-quantity record(s) from Redis",
+                restored,
+            )
+        return restored
 
     async def _compute_quantity(self, entry_price: float) -> float:
         """Compute order quantity based on available balance and position sizing.
@@ -171,6 +275,7 @@ class OrderManager:
                 )
                 order_id = str(order.get("id", ""))
                 self._open_quantities[signal.signal_id] = quantity
+                await self._redis_persist_qty(signal.signal_id, quantity)
                 if self._risk_manager is not None:
                     self._risk_manager.register_open(signal)
                 log.info(
@@ -305,6 +410,11 @@ class OrderManager:
                     ccxt_symbol, side, close_qty
                 )
                 order_id = str(order.get("id", ""))
+                if tp_level > 0:
+                    await self._redis_persist_partial_tps(
+                        signal.signal_id,
+                        self._partial_closed_tps.get(signal.signal_id, set()),
+                    )
                 log.info(
                     "[OrderManager] partial close TP%d: %s %s %.2f%% of original qty=%.6f id=%s",
                     tp_level, signal.symbol, side, fraction * 100,
@@ -428,7 +538,9 @@ class OrderManager:
                     ccxt_symbol, side, additional_qty
                 )
                 order_id = str(order.get("id", ""))
-                self._open_quantities[signal_id] = existing_qty + additional_qty
+                new_total_qty = existing_qty + additional_qty
+                self._open_quantities[signal_id] = new_total_qty
+                await self._redis_persist_qty(signal_id, new_total_qty)
                 log.info(
                     "[OrderManager] DCA Entry 2: %s %s qty=%.6f "
                     "(weight_2/weight_1=%.3f × existing) id=%s",
@@ -493,6 +605,7 @@ class OrderManager:
             # Nothing left — drop tracking and exit.
             self._open_quantities.pop(signal_id, None)
             self._partial_closed_tps.pop(signal_id, None)
+            await self._redis_delete_qty(signal_id)
             return None
 
         direction = getattr(signal.direction, "value", str(signal.direction))
@@ -513,6 +626,7 @@ class OrderManager:
                 # Drop tracking — subsequent calls are no-ops.
                 self._open_quantities.pop(signal_id, None)
                 self._partial_closed_tps.pop(signal_id, None)
+                await self._redis_delete_qty(signal_id)
                 if self._risk_manager is not None:
                     pnl_estimate = (
                         float(getattr(signal, "pnl_pct", 0.0) or 0.0)

@@ -263,3 +263,141 @@ async def test_add_dca_entry_invalid_weight_1_no_op():
     result = await om.add_dca_entry(sig)
     assert result is None
     client.create_market_order.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Redis persistence — Fix B (fix/dca-broker-sync)
+# ---------------------------------------------------------------------------
+
+
+def _make_redis_client(*, available: bool = True, data: dict | None = None) -> MagicMock:
+    """Build a mock RedisClient that behaves like the real one."""
+    store = dict(data or {})
+    rc = MagicMock()
+    rc.available = available
+
+    async def _set(key, value):
+        store[key] = value
+
+    async def _delete(*keys):
+        for k in keys:
+            store.pop(k, None)
+
+    async def _get(key):
+        return store.get(key)
+
+    async def _keys(pattern):
+        # Naive prefix match: "om:open_qty:*" → all keys starting with "om:open_qty:"
+        prefix = pattern.rstrip("*")
+        return [k for k in store if k.startswith(prefix)]
+
+    inner = MagicMock()
+    inner.set = AsyncMock(side_effect=_set)
+    inner.delete = AsyncMock(side_effect=_delete)
+    inner.get = AsyncMock(side_effect=_get)
+    inner.keys = AsyncMock(side_effect=_keys)
+    rc.client = inner
+    rc.mark_unavailable = MagicMock()
+    return rc, store
+
+
+async def test_place_market_order_writes_qty_to_redis():
+    """Successful place_market_order → qty written to Redis."""
+    client = _ccxt_client()
+    redis_mock, store = _make_redis_client()
+    om = OrderManager(
+        auto_execution_enabled=True,
+        exchange_client=client,
+        redis_client=redis_mock,
+    )
+    sig = _make_signal()
+    await om.place_market_order(sig, quantity=1.5)
+    assert store.get(f"om:open_qty:{sig.signal_id}") == repr(1.5)
+
+
+async def test_add_dca_entry_updates_qty_in_redis():
+    """Successful add_dca_entry → updated total qty written to Redis."""
+    client = _ccxt_client()
+    redis_mock, store = _make_redis_client()
+    om = OrderManager(
+        auto_execution_enabled=True,
+        exchange_client=client,
+        redis_client=redis_mock,
+    )
+    sig = _make_signal(entry_2=2360.0)
+    await om.place_market_order(sig, quantity=1.0)
+    await om.add_dca_entry(sig)
+    expected_total = pytest.approx(1.0 + 1.0 * (0.4 / 0.6), rel=1e-3)
+    stored_qty = float(store[f"om:open_qty:{sig.signal_id}"])
+    assert stored_qty == expected_total
+
+
+async def test_close_full_deletes_qty_from_redis():
+    """Successful close_full → Redis keys are deleted."""
+    client = _ccxt_client()
+    redis_mock, store = _make_redis_client()
+    om = OrderManager(
+        auto_execution_enabled=True,
+        exchange_client=client,
+        redis_client=redis_mock,
+    )
+    sig = _make_signal()
+    await om.place_market_order(sig, quantity=1.0)
+    assert f"om:open_qty:{sig.signal_id}" in store
+    await om.close_full(sig, reason="invalidated")
+    assert f"om:open_qty:{sig.signal_id}" not in store
+
+
+async def test_restore_open_quantities_from_redis():
+    """restore_open_quantities_from_redis loads prior session's open qtys."""
+    _signal_id = "BTCUSDT-restore-001"
+    redis_mock, _ = _make_redis_client(
+        data={
+            f"om:open_qty:{_signal_id}": repr(2.5),
+            f"om:partial_tps:{_signal_id}": "1",
+        }
+    )
+    om = OrderManager(
+        auto_execution_enabled=True,
+        exchange_client=None,
+        redis_client=redis_mock,
+    )
+    restored = await om.restore_open_quantities_from_redis()
+    assert restored == 1
+    assert om._open_quantities[_signal_id] == pytest.approx(2.5)
+    assert om._partial_closed_tps[_signal_id] == {1}
+
+
+async def test_restore_returns_zero_when_redis_unavailable():
+    """No crash and returns 0 when Redis is not available."""
+    redis_mock, _ = _make_redis_client(available=False)
+    om = OrderManager(
+        auto_execution_enabled=True,
+        exchange_client=None,
+        redis_client=redis_mock,
+    )
+    result = await om.restore_open_quantities_from_redis()
+    assert result == 0
+    assert om._open_quantities == {}
+
+
+async def test_add_dca_entry_fires_after_restore():
+    """After restore_open_quantities_from_redis, add_dca_entry can fire
+    for a signal that was open before the engine restart."""
+    _signal_id = "ETHUSDT-restart-001"
+    client = _ccxt_client()
+    redis_mock, _ = _make_redis_client(
+        data={f"om:open_qty:{_signal_id}": repr(1.0)}
+    )
+    om = OrderManager(
+        auto_execution_enabled=True,
+        exchange_client=client,
+        redis_client=redis_mock,
+    )
+    await om.restore_open_quantities_from_redis()
+
+    sig = _make_signal(signal_id=_signal_id, entry_2=2360.0)
+    order_id = await om.add_dca_entry(sig)
+    assert order_id == "ccxt-12345", (
+        "add_dca_entry must succeed when qty was restored from Redis"
+    )

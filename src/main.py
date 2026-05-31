@@ -195,6 +195,7 @@ class CryptoSignalEngine:
                 position_size_pct=POSITION_SIZE_PCT,
                 max_position_usd=MAX_POSITION_USD,
                 risk_manager=self._risk_manager,
+                redis_client=self._redis_client,
             )
             log.info(
                 "Auto-execution mode: LIVE (real orders via %s, sandbox=%s)",
@@ -207,6 +208,7 @@ class CryptoSignalEngine:
                 exchange_client=None,
                 position_size_pct=POSITION_SIZE_PCT,
                 max_position_usd=MAX_POSITION_USD,
+                redis_client=self._redis_client,
             )
             log.info("Auto-execution mode: OFF (signals → Telegram only)")
 
@@ -687,6 +689,7 @@ class CryptoSignalEngine:
                 exchange_client=None,
                 position_size_pct=POSITION_SIZE_PCT,
                 max_position_usd=MAX_POSITION_USD,
+                redis_client=self._redis_client,
             )
         elif new_mode == "paper":
             self._risk_manager = RiskManager(
@@ -726,6 +729,7 @@ class CryptoSignalEngine:
                 position_size_pct=POSITION_SIZE_PCT,
                 max_position_usd=MAX_POSITION_USD,
                 risk_manager=self._risk_manager,
+                redis_client=self._redis_client,
             )
             self._position_reconciler = PositionReconciler(
                 exchange_client=self._exchange_client,

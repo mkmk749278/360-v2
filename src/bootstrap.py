@@ -142,6 +142,19 @@ class Bootstrap:
             except Exception as exc:
                 log.warning("Failed to restore router state: {}", exc)
 
+        # 0f. Restore OrderManager open-quantity tracking from Redis so DCA,
+        # close_partial, and close_full work correctly for signals that were
+        # open before the restart.  Without this, every redeploy wipes
+        # _open_quantities and DCA is silently skipped for pre-existing
+        # positions (owner observed "DCA in Telegram but not on Binance").
+        if hasattr(engine, "_order_manager"):
+            _om = engine._order_manager
+            if hasattr(_om, "restore_open_quantities_from_redis"):
+                try:
+                    await _om.restore_open_quantities_from_redis()
+                except Exception as exc:
+                    log.warning("Failed to restore OrderManager qty state: {}", exc)
+
         # Wire API call tracking
         BinanceClient.on_api_call = engine.telemetry.record_api_call
 
