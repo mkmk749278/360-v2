@@ -57,6 +57,7 @@ Existing infrastructure to consume: `src/level_book.py` (1d/4h/1h pivots + VP zo
 - The connect-time validation (`/api/binance/connect`) **must** reject keys where any of these are not true: `enableWithdrawals=false`, `enableFutures=true`, `ipRestrict=true` AND the engine VPS IP is on the whitelist. No permissive mode, no "warn and continue" mode, no admin override. This is the foundation of the entire blast-radius story.
 - The blast-radius caps (symbol allowlist, per-user rate limit, per-user position cap, global kill switch) are the operative defence if the engine VPS is rooted — without them, the security story collapses. Never disable them, never expand them silently, never let a single user bypass them.
 - The Position FSM is **the** business-value layer. Pre-TP partial close + BE shift (§3.2a) is what turns a doctrinally net-losing path into a net-positive one. Changes to the FSM transitions (entry → SL/TP placement, pre-TP threshold trigger, BE shift on TP1 fill, trail tightening) require owner sign-off; this is the same gating as changes to confidence scoring.
+- **Order-type doctrine (2026-06-01, OWNER_BRIEF §3.10):** profit-taking (pre-TP / TP1 / TP2) is placed as **reduce-only LIMIT** orders that rest on Binance's book — maker fills, **no slippage**. MARKET orders are reserved for entry and for protection / thesis-broken exits (SL, invalidation, expiry). The per-user dials — `threshold_pct` (resolve_pretp_threshold_uid), `grab_fraction` (resolve_grab_fraction_uid), `invalidation_mode` (resolve_invalidation_mode_uid) — select Profile A (full close at threshold) / B (partial + residual) / C (ride native bracket). `grab_fraction = 1.0` skips the residual TP bracket.
 
 **Code module locations (all built and live as of 2026-05-18; wiring gaps closed 2026-05-26):**
 
@@ -261,6 +262,7 @@ If the change date is more than 30 days old and matches when symptoms started, *
 - **Never log a Binance API secret, even at TRACE/DEBUG level. Never write a plaintext secret to disk, even momentarily. Never return a plaintext secret from any function outside the signing service. Never include a secret in an error trace, panic message, exception attribute, or debug dump.**
 - **Never accept a Binance API key at connect time that has withdraw permission enabled.** Auto-reject with a specific error directing the user to disable withdraw on the Binance key page and retry. No permissive mode, no admin override.
 - **Never disable or weaken the blast-radius caps** (symbol allowlist, per-user rate limit, per-user position cap, global kill switch). These are what bound damage if the engine VPS is rooted. Expanding a per-user cap is owner-sign-off; disabling the symbol allowlist is never.
+- **Never let a position sit OPEN without a stop** (naked-position invariant, 2026-06-01). If the SL fails to place at entry, `place_signal` force-closes the entry at market rather than leave it uncovered; the reconciler force-closes any position open past `RECONCILER_MAX_POSITION_AGE_SEC`. Don't revert these to "best-effort / surface and continue" — that was the JTOUSDT 5h09m failure mode.
 
 ---
 
