@@ -750,10 +750,21 @@ async def test_place_signal_force_closes_on_sl_failure() -> None:
     assert placer.place_take_profit.await_count == 0
 
 
+def _rejected_with_code(code: int) -> order_placer.OrderRejectedByBinance:
+    """Build an OrderRejectedByBinance carrying a Binance numeric code so
+    _binance_reject_code can classify it transient vs fatal."""
+    resp = SimpleNamespace(binance_body={"code": code, "msg": "rejected"})
+    return order_placer.OrderRejectedByBinance("rejected", signing_response=resp)
+
+
 @pytest.mark.asyncio
-async def test_place_signal_retries_sl_on_transient_then_succeeds() -> None:
+async def test_place_signal_retries_sl_on_transient_then_succeeds(
+    monkeypatch,
+) -> None:
     """A transient (unreachable) SL failure is retried; once it lands the
     position keeps its TP bracket and is NOT force-closed."""
+    import config
+    monkeypatch.setattr(config, "SL_RETRY_BACKOFF_SEC", 0.0, raising=False)
     placer = _placer_with_mock_results()
     placer.place_stop_loss = AsyncMock(
         side_effect=[
@@ -785,6 +796,106 @@ async def test_place_signal_retries_sl_on_transient_then_succeeds() -> None:
     assert result.sl_order_id == 2001  # landed on attempt 2
     placer.place_market_close.assert_not_awaited()  # not force-closed
     assert placer.place_take_profit.await_count == 3  # bracket intact
+
+
+@pytest.mark.asyncio
+async def test_place_signal_retries_sl_on_2021_then_succeeds(monkeypatch) -> None:
+    """2026-06-01 regression fix: -2021 'would immediately trigger' is a
+    TRANSIENT mark-price wick right after entry, not a fatal reject.  It is
+    retried (after backoff) and once the SL lands the position is NOT
+    force-closed — the IDUSDT/AIAUSDT 4-second-close bug is gone."""
+    import config
+    monkeypatch.setattr(config, "SL_RETRY_BACKOFF_SEC", 0.0, raising=False)
+    placer = _placer_with_mock_results()
+    placer.place_stop_loss = AsyncMock(
+        side_effect=[
+            _rejected_with_code(-2021),  # transient wick on attempt 1
+            order_placer.OrderPlacementResult(
+                order_id=2001, client_order_id="lumin_sig-1_sl",
+                status="NEW", avg_price=0.0, binance_body={},
+            ),
+        ]
+    )
+    with patch.object(position_state, "put_position", new=MagicMock()):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            order_placer_factory=lambda uid: placer,
+        )
+    assert placer.place_stop_loss.await_count == 2  # -2021 retried
+    assert result.sl_order_id == 2001
+    placer.place_market_close.assert_not_awaited()  # NOT force-closed
+    assert result.state != position_state.PositionState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_place_signal_force_closes_on_persistent_2021(monkeypatch) -> None:
+    """If -2021 persists across every attempt (price genuinely sits at the
+    stop), force-close is correct — closing at the stop is the right exit."""
+    import config
+    monkeypatch.setattr(config, "SL_RETRY_BACKOFF_SEC", 0.0, raising=False)
+    placer = _placer_with_mock_results()
+    placer.place_stop_loss = AsyncMock(side_effect=_rejected_with_code(-2021))
+    with patch.object(position_state, "put_position", new=MagicMock()):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            order_placer_factory=lambda uid: placer,
+        )
+    # Exhausted all attempts → force-close (invariant holds).
+    assert placer.place_stop_loss.await_count == 3
+    placer.place_market_close.assert_awaited_once()
+    assert result.state == position_state.PositionState.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_place_signal_force_closes_on_fatal_reject_without_retry() -> None:
+    """A deterministic reject (tick size -4014) is NOT retried — retrying the
+    same request can't fix it — so it force-closes after a single attempt."""
+    placer = _placer_with_mock_results()
+    placer.place_stop_loss = AsyncMock(side_effect=_rejected_with_code(-4014))
+    with patch.object(position_state, "put_position", new=MagicMock()):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            order_placer_factory=lambda uid: placer,
+        )
+    assert placer.place_stop_loss.await_count == 1  # not retried
+    placer.place_market_close.assert_awaited_once()
+    assert result.close_reason == "SL_PLACEMENT_FAILED"
 
 
 # ---------------------------------------------------------------------------
