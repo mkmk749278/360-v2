@@ -86,6 +86,9 @@ class Reconciler:
         positions_for_user: Optional[
             Callable[[str], List[_position_state.Position]]
         ] = None,
+        order_placer_factory: Optional[Callable[[str], Any]] = None,
+        max_position_age_sec: Optional[int] = None,
+        stale_close_enabled: Optional[bool] = None,
     ) -> None:
         self._interval_s = interval_s
         self._signing_client_factory = (
@@ -94,6 +97,29 @@ class Reconciler:
         self._positions_for_user = (
             positions_for_user or _default_positions_for_user
         )
+        # Order placer for the stale-position force-close backstop.  Lazily
+        # constructs a per-user OrderPlacer; injectable for tests.
+        self._order_placer_factory = (
+            order_placer_factory or _default_order_placer_factory
+        )
+        # Stale-position ceiling + enable flag.  Defaults come from config
+        # but are overridable for tests.
+        if max_position_age_sec is None or stale_close_enabled is None:
+            from config import (
+                RECONCILER_MAX_POSITION_AGE_SEC as _CFG_MAX_AGE,
+                RECONCILER_STALE_CLOSE_ENABLED as _CFG_STALE_ON,
+            )
+            self._max_position_age_sec = (
+                _CFG_MAX_AGE if max_position_age_sec is None
+                else max_position_age_sec
+            )
+            self._stale_close_enabled = (
+                _CFG_STALE_ON if stale_close_enabled is None
+                else stale_close_enabled
+            )
+        else:
+            self._max_position_age_sec = max_position_age_sec
+            self._stale_close_enabled = stale_close_enabled
         self._active_uids: Set[str] = set()
         self._lock = asyncio.Lock()
         self._stop_event = asyncio.Event()
@@ -161,7 +187,16 @@ class Reconciler:
             return
         # Diff + apply.
         for fsm_position in positions:
-            self._diff_and_heal(fsm_position, binance_positions)
+            symbol = fsm_position.symbol
+            actual_amt = binance_positions.get(symbol, 0.0)
+            if abs(actual_amt) < 1e-9:
+                # Flat on Binance → manual/external close.  Heal FSM state.
+                self._diff_and_heal(fsm_position, binance_positions)
+            else:
+                # Still open on Binance → check the stale-position ceiling.
+                # This is the last-resort backstop behind the JTOUSDT
+                # 2026-06-01 incident (uncovered position rode 5h09m).
+                await self._maybe_force_close_stale(fsm_position)
 
     def _diff_and_heal(
         self,
@@ -199,6 +234,83 @@ class Reconciler:
                     _pd_inst.untrack(symbol),
                     name=f"pd_untrack_{symbol}",
                 )
+
+    async def _maybe_force_close_stale(
+        self, fsm_position: _position_state.Position
+    ) -> None:
+        """Force-close a position Binance confirms is STILL open but whose
+        FSM record has aged past ``_max_position_age_sec``.
+
+        The engine-wide TradeMonitor expiry (MAX_SCALP_HOLD) only closes
+        signals still in its own book.  An orphaned per-user FSM position —
+        e.g. one whose SL failed to place and whose signal already left the
+        TradeMonitor book — has no other path to closure.  This is that
+        path: a hard age ceiling, well beyond any legitimate scalp hold, so
+        a naked or forgotten position can never ride indefinitely (the
+        JTOUSDT 2026-06-01 5h09m / -2.15% failure mode).
+
+        No-op when the backstop is disabled or the position is within the
+        age ceiling.  Failures are logged but never crash the loop.
+        """
+        if not self._stale_close_enabled:
+            return
+        created = getattr(fsm_position, "created_at", None)
+        if created is None:
+            return
+        # Tolerate naive datetimes defensively (Firestore round-trips are
+        # tz-aware, but a parse edge could yield naive).
+        now = datetime.now(timezone.utc)
+        if created.tzinfo is None:
+            created = created.replace(tzinfo=timezone.utc)
+        age_sec = (now - created).total_seconds()
+        if age_sec < self._max_position_age_sec:
+            return
+
+        log.error(
+            "reconciler: STALE position past age ceiling — force-closing "
+            "uid={} signal_id={} symbol={} state={} age={:.0f}s ceiling={}s",
+            fsm_position.firebase_uid,
+            fsm_position.signal_id,
+            fsm_position.symbol,
+            fsm_position.state.value,
+            age_sec,
+            self._max_position_age_sec,
+        )
+        remaining = fsm_position.total_qty - fsm_position.closed_qty
+        if remaining <= 0:
+            remaining = fsm_position.total_qty
+        try:
+            placer = self._order_placer_factory(fsm_position.firebase_uid)
+            await placer.place_market_close(
+                signal_id=fsm_position.signal_id,
+                symbol=fsm_position.symbol,
+                direction=fsm_position.side,
+                quantity=remaining,
+            )
+        except Exception as exc:
+            log.error(
+                "reconciler: stale force-close FAILED uid={} signal_id={} "
+                "symbol={} exc={} — will retry next cycle",
+                fsm_position.firebase_uid,
+                fsm_position.signal_id,
+                fsm_position.symbol,
+                exc,
+            )
+            return
+        # Close succeeded → mark terminal so we don't re-close next cycle.
+        fsm_position.state = _position_state.PositionState.CLOSED
+        fsm_position.closed_at = datetime.now(timezone.utc)
+        if not fsm_position.close_reason:
+            fsm_position.close_reason = "STALE_EXPIRY"
+        fsm_position.last_event_at = datetime.now(timezone.utc)
+        _position_state.put_position(fsm_position)
+        from src.execution import pretp_dispatcher as _pd
+        _pd_inst = _pd.get_instance()
+        if _pd_inst is not None:
+            asyncio.create_task(
+                _pd_inst.untrack(fsm_position.symbol),
+                name=f"pd_untrack_{fsm_position.symbol}",
+            )
 
     async def _fetch_binance_positions(
         self,
@@ -250,6 +362,14 @@ class Reconciler:
             if sym:
                 out[sym] = amt
         return out
+
+
+def _default_order_placer_factory(firebase_uid: str) -> Any:
+    """Construct a per-user :class:`OrderPlacer` for the stale-position
+    force-close backstop.  Imported lazily to avoid a module-load cycle
+    (order_placer → signing client → … ) at reconciler import time."""
+    from src.execution import order_placer as _op
+    return _op.OrderPlacer(firebase_uid)
 
 
 def _default_positions_for_user(

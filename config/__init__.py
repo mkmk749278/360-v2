@@ -1649,6 +1649,44 @@ RECONCILER_PERIODIC_INTERVAL_SEC: int = _safe_int(
 RECONCILER_AUTO_CLOSE_ORPHANS: bool = _safe_bool(
     "RECONCILER_AUTO_CLOSE_ORPHANS", "false"
 )
+# Last-resort stale-position backstop.  When the reconciler confirms (via
+# positionRisk) that a position is STILL open on Binance but its FSM record
+# is older than this ceiling, it force-closes at market and marks the
+# position CLOSED (reason STALE_EXPIRY).  This is the safety net behind the
+# JTOUSDT 2026-06-01 incident — a position whose SL failed to place rode for
+# 5h09m (-2.15%) because nothing closed it.  The engine-wide TradeMonitor
+# expiry (MAX_SCALP_HOLD = 3600s) only covers signals in its own book; an
+# orphaned per-user FSM position with no live signal needs this independent
+# ceiling.  Default 7200s (2h) — comfortably beyond any legitimate scalp
+# hold (doctrine: 5-60 min) so it never clips a healthy position.
+RECONCILER_MAX_POSITION_AGE_SEC: int = _safe_int(
+    "RECONCILER_MAX_POSITION_AGE_SEC", "7200"
+)
+# When True the reconciler's stale-position backstop is armed (the
+# force-close above).  Default True — an uncovered position past the age
+# ceiling is strictly worse than a market exit.  Flip OFF only to revert to
+# alert-only behaviour during incident triage.
+RECONCILER_STALE_CLOSE_ENABLED: bool = _safe_bool(
+    "RECONCILER_STALE_CLOSE_ENABLED", "true"
+)
+
+# ---------------------------------------------------------------------------
+# Margin-mode enforcement — 2026-06-01 (VTHOUSDT isolated-margin incident)
+# ---------------------------------------------------------------------------
+# Before the first entry on each (user, symbol) the FSM asserts CROSSED
+# margin via POST /fapi/v1/marginType.  A test account placed five VTHOUSDT
+# positions in ISOLATED margin (all losses) because the symbol defaulted to
+# isolated on the account; the engine assumed CROSSED but never enforced it.
+# Default True.  Best-effort: a failed switch is logged + surfaced but does
+# not block the entry (the position still opens, just possibly isolated).
+MARGIN_MODE_ENFORCE_CROSS: bool = _safe_bool("MARGIN_MODE_ENFORCE_CROSS", "true")
+
+# Number of SL placement attempts at entry before the FSM force-closes an
+# otherwise-uncovered position.  A position must never sit OPEN without a
+# stop; if the SL can't be placed after this many tries (transient retries
+# only — deterministic Binance rejections short-circuit), the entry is
+# market-closed immediately rather than left naked.  Default 3.
+SL_PLACEMENT_MAX_ATTEMPTS: int = _safe_int("SL_PLACEMENT_MAX_ATTEMPTS", "3")
 
 # ---------------------------------------------------------------------------
 # Trailing stop – ATR multiplier for adaptive trailing distance

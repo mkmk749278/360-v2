@@ -45,7 +45,13 @@ log = get_logger("execution.order_placer")
 
 
 _FUTURES_ORDER_PATH = "/fapi/v1/order"
+_FUTURES_MARGIN_TYPE_PATH = "/fapi/v1/marginType"
 _FUTURES_BASE = "futures"
+
+# Binance returns -4046 "No need to change margin type." when the symbol
+# is already on the requested margin mode.  We treat it as success — the
+# desired end-state (CROSSED) already holds.
+_ERR_NO_NEED_CHANGE_MARGIN = -4046
 
 
 # ---------------------------------------------------------------------------
@@ -160,6 +166,61 @@ class OrderPlacer:
     ) -> None:
         self.firebase_uid = firebase_uid
         self._client = client or signing_client.SigningClient()
+
+    async def ensure_cross_margin(self, *, symbol: str) -> bool:
+        """Force the symbol onto CROSSED margin before the entry order.
+
+        Owner-reported 2026-06-01: a test account showed five VTHOUSDT
+        positions in ISOLATED margin (all losses) because the symbol
+        defaulted to isolated on the Binance account from a prior manual
+        session.  The engine places every position assuming CROSSED, but
+        never asserted it — Binance silently honoured the account's
+        per-symbol isolated setting.  This method closes that gap by
+        issuing ``POST /fapi/v1/marginType marginType=CROSSED`` before the
+        first entry on each symbol.
+
+        Idempotent on Binance's side: -4046 ("No need to change margin
+        type.") is returned when the symbol is already CROSSED, which we
+        treat as success.  Callers cache the per-(uid, symbol) success so
+        this only hits the wire once per symbol per process.
+
+        Returns ``True`` when the symbol is confirmed CROSSED (either we
+        switched it or it already was), ``False`` on any other failure.
+        Best-effort by contract: a ``False`` return is logged but does not
+        by itself block the entry — the caller decides.  It never raises.
+        """
+        params = {"symbol": symbol, "marginType": "CROSSED"}
+        try:
+            resp = await self._client.binance_signed_post(
+                firebase_uid=self.firebase_uid,
+                base=_FUTURES_BASE,
+                path=_FUTURES_MARGIN_TYPE_PATH,
+                params=params,
+            )
+        except Exception as exc:  # network / signing-service blip
+            log.warning(
+                "ensure_cross_margin: request raised uid={} symbol={} exc={}",
+                self.firebase_uid, symbol, exc,
+            )
+            return False
+        if resp.ok:
+            log.info(
+                "ensure_cross_margin: set CROSSED uid={} symbol={}",
+                self.firebase_uid, symbol,
+            )
+            return True
+        # Already cross → Binance -4046; that's the end-state we wanted.
+        if (
+            resp.error_code == sig_protocol.ERR_BINANCE_HTTP_ERROR
+            and isinstance(resp.binance_body, dict)
+            and resp.binance_body.get("code") == _ERR_NO_NEED_CHANGE_MARGIN
+        ):
+            return True
+        log.warning(
+            "ensure_cross_margin: failed uid={} symbol={} code={} body={}",
+            self.firebase_uid, symbol, resp.error_code, resp.binance_body,
+        )
+        return False
 
     async def place_market_entry(
         self,

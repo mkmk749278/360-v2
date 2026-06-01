@@ -155,6 +155,38 @@ async def test_dispatch_fans_out_to_all_active_users() -> None:
 
 
 @pytest.mark.asyncio
+async def test_dispatch_forwards_per_user_pretp_threshold(monkeypatch) -> None:
+    """The per-user pre-TP threshold resolved from user_overrides must be
+    forwarded to place_signal as ``pretp_threshold_pct`` (the 'close at
+    0.3% vs 0.5%' dial).  Regression for the 2026-06-01 gap where dispatch
+    never passed it, so every user's pre-TP used the engine default."""
+    from src.api import user_overrides as _uo
+    # User picked a 0.50% pre-TP threshold.
+    monkeypatch.setattr(
+        _uo, "resolve_pretp_threshold_uid", lambda uid, default: 0.50
+    )
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-A"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+            )
+        assert mock_place.await_count == 1
+        assert mock_place.await_args.kwargs["pretp_threshold_pct"] == 0.50
+
+
+@pytest.mark.asyncio
 async def test_dispatch_isolates_per_user_failures() -> None:
     """The doctrine canary: one user's tripwire rejection (or
     KMS outage, or Binance key revoked) must NOT block other

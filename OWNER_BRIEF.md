@@ -309,21 +309,29 @@ Deep audit run 2026-05-26 after owner-observed pre-TP miss on ZEREBRO SHORT at +
 
 | App setting | Path | Engine consumes? |
 |---|---|---|
-| Pre-TP grab fraction slider | `user_pretp_settings.grab_fraction` | Partial — FSM path stamps `pos.pretp_fraction` at dispatch; TradeMonitor path uses engine-wide config constant |
-| Pre-TP regime allowlist | `user_pretp_settings.regime_allowlist` | No |
-| Pre-TP setup allowlist | `user_pretp_settings.setup_allowlist` | No |
-| Pre-TP protect_manual_entries toggle | `user_pretp_settings.protect_manual_entries` | No — no read path exists anywhere |
-| Invalidation mode (loose/standard/tight) | `user_invalidation_settings.mode` | No — engine uses `INVALIDATION_MODE_DEFAULT` for all users |
+| Pre-TP grab fraction slider | `user_pretp_settings.grab_fraction` | **Yes** — `resolve_grab_fraction_uid` → `pos.pretp_fraction` at dispatch (FSM path). TradeMonitor owner-backstop still uses engine-wide constant |
+| Pre-TP threshold percent | `user_pretp_settings.threshold_pct` | **Yes — wired 2026-06-01** — `resolve_pretp_threshold_uid` → `place_signal(pretp_threshold_pct=…)` → LIMIT price |
+| Pre-TP regime allowlist | `user_pretp_settings.regime_allowlist` | **Yes** — `resolve_pretp_allowlists_uid` (zeroes grab fraction when off-list) |
+| Pre-TP setup allowlist | `user_pretp_settings.setup_allowlist` | **Yes** — same resolver |
+| Pre-TP master enable toggle | `user_pretp_settings.enabled` | **Yes** — `resolve_pretp_enabled_uid` (2026-05-29) |
+| Pre-TP protect_manual_entries toggle | `user_pretp_settings.protect_manual_entries` | App-side (AutoTradeWatcher) — engine has no read path by design |
+| Invalidation mode (loose/standard/tight) | `user_invalidation_settings.mode` | **Yes** — `resolve_invalidation_mode_uid` → `pos.invalidation_mode`; loose-mode users excluded from engine invalidation closes |
 
-The app's Pre-TP Settings page and Invalidation Settings page are currently UI that saves to database tables the engine never reads. Users believe they are configuring their experience; they are not.
+As of 2026-06-01 the headline per-user dials — **threshold, grab fraction, and invalidation mode** — are all consumed by the engine for connected-key users. The app pages are no longer storage-only.
 
-### Pre-TP architecture: the right approach (owner decision needed)
+### Pre-TP architecture: native LIMIT at dispatch — APPROVED + SHIPPED (2026-06-01)
 
-**Current flow:** 5s poll → detect via 1m candle high/low → place REDUCE_ONLY MARKET order. Problems: up to 5s detection lag; candle data lags mark price; MARKET order on thin books (ZEREBRO, PLAY) has meaningful slippage.
+**Decision (owner sign-off 2026-06-01):** the engine places a REDUCE_ONLY GTC LIMIT order at `pre_tp_trigger_price` at dispatch time, alongside the SL. Binance holds it passively; on fill the User Data Stream → FSM `_apply_pretp_fill()` does the BE-shift. Zero detection lag, maker pricing, no slippage, works if the engine blips. The 5s MARKET poll remains only as a fallback when the LIMIT placement failed at dispatch.
 
-**Better approach:** Place a REDUCE_ONLY LIMIT order at `pre_tp_trigger_price` at signal dispatch time alongside the SL + TP orders. Binance holds it passively on their exchange. When it fills, User Data Stream fires `ORDER_TRADE_UPDATE` → FSM `_apply_pretp_fill()` handler (already coded) handles the transition. Zero detection lag. Maker pricing (lower fees, potentially rebate). Works even if the engine is down briefly. Fully per-user — each user's LIMIT sits on Binance independently.
+**Order-type doctrine (the rule that resolves the slippage problem):**
 
-**Owner decision required** (FSM transition change per §1.3): approve placing a pre-TP LIMIT order at dispatch time alongside SL + TP?
+| Purpose | Order type | Why |
+|---|---|---|
+| Entry | MARKET (or LIMIT in the zone) | Get in; slippage acceptable on entry |
+| Pre-TP / TP1 / TP2 | **REDUCE_ONLY LIMIT** | Profit-taking rests as a maker — **no slippage**, fills at the price or better |
+| SL / invalidation / expiry | MARKET (reduce-only / closePosition) | Protection + thesis-broken exits need a guaranteed fill now |
+
+Profit is only ever taken via resting LIMITs; MARKET is reserved for protection and thesis-broken exits. This is what turns the doctrinally net-losing path net-positive without exposing pre-TP to slippage.
 
 ### 9-PR roadmap to close all gaps
 
@@ -333,6 +341,50 @@ See `ACTIVE_CONTEXT.md § 9-PR roadmap` for the full table with owner-sign-off f
 2. **Pre-TP architecture (PRs C–D):** native LIMIT at dispatch (sign-off required); MarkPriceFeed wiring for paper mode (no sign-off).
 3. **Per-user settings (PRs E–G):** grab fraction, regime/setup allowlist, invalidation mode end-to-end.
 4. **App display (PRs H–I):** per-user live positions in Trade tab; separate Recent Activity.
+
+## 3.11 Execution model completion + two execution-bug fixes (2026-06-01)
+
+Triggered by a live Binance test account: 182 automated positions over ~29h,
+net -0.68 USDT at a 50% win rate with a 0.78× win/loss ratio. Cross-matched
+against the engine signal tracker. Findings + the changes shipped (owner
+sign-off 2026-06-01):
+
+**The negative edge was structural in the execution model, not signal quality.**
+Per-signal edge is ~flat (-0.004%/signal). The account lost because winners gave
+back their MFE — nothing rested on the book to bank profit — while losers ran
+the full SL distance. A stop-loss-only system with reactive market closes
+**cannot** have positive skew. The fix is the order-type doctrine in §3.10
+(reduce-only LIMIT banks profit; MARKET only for protection) + the per-user
+threshold/fraction now reaching the order price.
+
+**Per-user execution profiles (all selectable from the app):**
+
+- **Profile A — "close all at threshold"** (`grab_fraction = 1.0`): MARKET entry
+  + SL + full-qty pre-TP LIMIT. No native TP bracket (would be redundant).
+- **Profile B — "bank partial, ride residual"** (`0 < grab_fraction < 1`): MARKET
+  entry + SL + partial pre-TP LIMIT + residual TP bracket; SL→BE on pre-TP fill
+  (the §3.2a doctrine path).
+- **Profile C — "ride the native bracket"** (`grab_fraction = 0`,
+  `invalidation_mode = loose`): MARKET entry + SL + TP bracket; engine
+  invalidation does not interfere (loose-mode exclusion).
+
+**Two execution bugs fixed (both surfaced in the test account):**
+
+1. **Naked-position invariant (JTOUSDT).** One position rode **5h09m** to -2.15%
+   because its SL failed to place and nothing closed it (= 31% of total drag).
+   `place_signal` now retries SL on transient errors (`SL_PLACEMENT_MAX_ATTEMPTS`)
+   and **force-closes the entry at market** if the SL can't land. A position
+   never sits OPEN without a stop. Backstop: the reconciler force-closes any
+   position confirmed open past `RECONCILER_MAX_POSITION_AGE_SEC` (2h).
+2. **Cross-margin enforcement (VTHOUSDT).** Five positions were placed in
+   ISOLATED margin (all losses) because the symbol defaulted to isolated on the
+   account. `OrderPlacer.ensure_cross_margin()` now asserts CROSSED before the
+   first entry per (uid, symbol). Toggle: `MARGIN_MODE_ENFORCE_CROSS`.
+
+**App-side (lumin-app):** the Pre-TP settings page now exposes the threshold
+slider (raw percent, 0.10–1.00% band) — previously the field was stored and sent
+but had no UI control, and the engine never read it. Grab fraction + invalidation
+mode controls already existed.
 
 ---
 
@@ -356,8 +408,8 @@ See `ACTIVE_CONTEXT.md § 9-PR roadmap` for the full table with owner-sign-off f
 | B14 | Build constraint. All build/deploy paths must work from Android+Termux. Mobile app builds via GitHub Actions only — no local Android Studio / Gradle requirement. |
 | B15 | Brand architecture. Lumin = consumer app brand (Play Store, app icon, marketing). 360 Crypto Eye = engine + signal-source brand (Telegram channel, technical identity, "Powered by" attribution). The Telegram channel never renames. The app's About page always credits 360 Crypto Eye. |
 | B16 | Revenue. Subscriptions are crypto-only via the Telegram bot (Lumin app qualifies for the Reader-app Play Store exception). No Google Play billing, no Stripe fiat, no bank account in v1. App is a control panel; payment is in the bot. |
-| B17 | Pre-TP partial close + invalidation are per-user. **Pre-TP grab fraction** is user-configurable with a hard floor of **30%** (no user can configure 0%, which would collapse to the pre-2026-05-17 broken "SL-to-BE only" behaviour) and a ceiling of 100%. Engine default is 50%. When threshold hits, broker executes a real partial close on the configured fraction; the residual gets SL ratcheted to entry. **Invalidation aggressiveness** is user-selectable (Loose / Standard / Tight); engine default is Standard. Tight adds ATR-trailing kill at MFE ≥ 0.3R (close at 50% retracement of MFE peak). All per-user values stored in `user_pretp_settings` (with new `grab_fraction` column) and `user_invalidation_settings` tables; NULL = use engine default. Per §3.2 + §3.2a doctrine — capital preservation outranks TP chasing, and the user controls the preservation aggressiveness. |
-| B18 | Server-side execution custody (see §3.9 for the full doctrine). **Non-custodial of funds, custodial of trade-authorisation keys only.** Every connected Binance key must validate at connect-time: withdraw permission **disabled** (auto-reject if enabled — no permissive mode, no admin override), Futures permission enabled, IP whitelist set to the engine VPS IP. Plaintext API secret materialises only inside the signing service's process memory for the duration of one request; never logged, never written to disk. Master key in Cloud KMS HSM — engine has Decrypt IAM only, cannot read or export the KEK. Blast-radius caps are non-negotiable: **symbol allowlist** (only Lumin signal-channel symbols), **per-user rate limit (5 orders/min, 30/hour)**, **per-user position cap ($500 default, user-configurable up to $2000)**, **global kill switch** reachable from Telegram (<5s), **global circuit breaker** (engine-wide auto-disable of auto-trade if >10 Binance rejections cluster in 60s — manual Telegram re-enable), **per-user circuit breaker** (single-user auto-disable on >3 rejections in 5 min). US users geoblocked at sign-up (Firebase claims + connect-flow check). Subscribers opt in via click-through ToS that discloses the non-custodial / no-warranty / bounded-blast-radius model. **No staged beta** — owner-explicit decision 2026-05-18 to ship to all users at launch; the strengthened blast-radius defaults above are the operative safety floor in lieu of staged cohort rollout. Any change to the signing service / KMS integration / connect-time validation / blast-radius caps / circuit-breaker thresholds requires owner sign-off per §1.3. **Sensitive-op authentication (2026-05-19 revision):** the original PR-12 doctrine required Firebase TOTP enrollment before reaching the connect form.  In smoke-testing 2026-05-19 this was discovered to be fundamentally incompatible with Lumin's primary sign-in method (phone OTP per B13) — Firebase does NOT support TOTP MFA when the first factor is phone-only (no Firebase tier, paid or otherwise, lifts that constraint).  V1 substitute: Firebase's built-in ``requires-recent-login`` enforcement (a sensitive op requires the user's session to be < 5 min old; otherwise re-auth via a fresh SMS OTP).  This covers the same threat surface (stolen-token attacker needs the user's phone as well) at the cost of slightly higher friction on the user side.  Future hardening to restore the original TOTP doctrine requires either: (a) migrating primary sign-in to email+password (TOTP works on Spark tier), or (b) upgrading Firebase to Identity Platform tier + using Google Sign-In with MFA.  Tracked as a B18 follow-up; not blocking v1. |
+| B17 | Pre-TP partial close + invalidation are per-user. **Pre-TP grab fraction** is user-configurable with a hard floor of **30%** (no user can configure 0%, which would collapse to the pre-2026-05-17 broken "SL-to-BE only" behaviour) and a ceiling of 100%. Engine default is 50%. When threshold hits, broker executes a real partial close on the configured fraction; the residual gets SL ratcheted to entry. **Invalidation aggressiveness** is user-selectable (Loose / Standard / Tight); engine default is Standard. Tight adds ATR-trailing kill at MFE ≥ 0.3R (close at 50% retracement of MFE peak). All per-user values stored in `user_pretp_settings` (with new `grab_fraction` column) and `user_invalidation_settings` tables; NULL = use engine default. Per §3.2 + §3.2a doctrine — capital preservation outranks TP chasing, and the user controls the preservation aggressiveness. **2026-06-01:** the per-user **pre-TP threshold** (`threshold_pct`, the "close at 0.3% vs 0.5%" dial) is now read by execution (`resolve_pretp_threshold_uid` → `place_signal`) and the app exposes a slider for it; `grab_fraction=1.0` selects a full-position close at threshold (no residual TP bracket). |
+| B18 | Server-side execution custody (see §3.9 for the full doctrine). **Non-custodial of funds, custodial of trade-authorisation keys only.** Every connected Binance key must validate at connect-time: withdraw permission **disabled** (auto-reject if enabled — no permissive mode, no admin override), Futures permission enabled, IP whitelist set to the engine VPS IP. Plaintext API secret materialises only inside the signing service's process memory for the duration of one request; never logged, never written to disk. Master key in Cloud KMS HSM — engine has Decrypt IAM only, cannot read or export the KEK. Blast-radius caps are non-negotiable: **symbol allowlist** (only Lumin signal-channel symbols), **per-user rate limit (5 orders/min, 30/hour)**, **per-user position cap ($500 default, user-configurable up to $2000)**, **global kill switch** reachable from Telegram (<5s), **global circuit breaker** (engine-wide auto-disable of auto-trade if >10 Binance rejections cluster in 60s — manual Telegram re-enable), **per-user circuit breaker** (single-user auto-disable on >3 rejections in 5 min). **Naked-position invariant (2026-06-01):** a position must never sit OPEN without a stop. If the SL fails to place at entry (after `SL_PLACEMENT_MAX_ATTEMPTS` transient retries) the FSM force-closes the entry at market; the reconciler force-closes any position confirmed open past `RECONCILER_MAX_POSITION_AGE_SEC` as a last-resort backstop. CROSSED margin is asserted before the first entry per (uid, symbol). US users geoblocked at sign-up (Firebase claims + connect-flow check). Subscribers opt in via click-through ToS that discloses the non-custodial / no-warranty / bounded-blast-radius model. **No staged beta** — owner-explicit decision 2026-05-18 to ship to all users at launch; the strengthened blast-radius defaults above are the operative safety floor in lieu of staged cohort rollout. Any change to the signing service / KMS integration / connect-time validation / blast-radius caps / circuit-breaker thresholds requires owner sign-off per §1.3. **Sensitive-op authentication (2026-05-19 revision):** the original PR-12 doctrine required Firebase TOTP enrollment before reaching the connect form.  In smoke-testing 2026-05-19 this was discovered to be fundamentally incompatible with Lumin's primary sign-in method (phone OTP per B13) — Firebase does NOT support TOTP MFA when the first factor is phone-only (no Firebase tier, paid or otherwise, lifts that constraint).  V1 substitute: Firebase's built-in ``requires-recent-login`` enforcement (a sensitive op requires the user's session to be < 5 min old; otherwise re-auth via a fresh SMS OTP).  This covers the same threat surface (stolen-token attacker needs the user's phone as well) at the cost of slightly higher friction on the user side.  Future hardening to restore the original TOTP doctrine requires either: (a) migrating primary sign-in to email+password (TOTP works on Spark tier), or (b) upgrading Firebase to Identity Platform tier + using Google Sign-In with MFA.  Tracked as a B18 follow-up; not blocking v1. |
 
 ---
 

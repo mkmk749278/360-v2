@@ -39,6 +39,14 @@ from src.utils import get_logger
 log = get_logger("execution.position_fsm")
 
 
+# Per-process cache of (firebase_uid, symbol) pairs already confirmed on
+# CROSSED margin this session.  Binance's POST /fapi/v1/marginType is
+# idempotent but a wire round-trip per signal is wasteful — once a symbol is
+# confirmed cross for a user it stays cross until they change it manually, so
+# we only hit the endpoint on the first entry per symbol per process.
+_cross_margin_confirmed: set[tuple[str, str]] = set()
+
+
 # ---------------------------------------------------------------------------
 # Public API — what the worker (PR-5) wires as the event handler
 # ---------------------------------------------------------------------------
@@ -578,6 +586,23 @@ async def place_signal(
     factory = order_placer_factory or _default_order_placer_factory
     placer = factory(firebase_uid)
 
+    # Step 0: enforce CROSSED margin for this symbol before the entry.
+    # Guards the VTHOUSDT 2026-06-01 incident where a symbol defaulted to
+    # ISOLATED on the account and the engine silently traded it isolated.
+    # Best-effort + cached per (uid, symbol): a switch failure is logged but
+    # does not block the entry (the position still opens).
+    from config import MARGIN_MODE_ENFORCE_CROSS as _ENFORCE_CROSS
+    if _ENFORCE_CROSS and (firebase_uid, symbol) not in _cross_margin_confirmed:
+        try:
+            if await placer.ensure_cross_margin(symbol=symbol):
+                _cross_margin_confirmed.add((firebase_uid, symbol))
+        except Exception as exc:  # ensure_cross_margin never raises, belt+braces
+            log.warning(
+                "place_signal: ensure_cross_margin raised uid={} symbol={} "
+                "exc={} — proceeding with entry",
+                firebase_uid, symbol, exc,
+            )
+
     # Step 1: entry — the only must-succeed step.
     entry_result = await placer.place_market_entry(
         signal_id=signal_id,
@@ -627,31 +652,58 @@ async def place_signal(
     )
     _position_state.put_position(position)
 
-    # Steps 3-5: SL + 3x TP.  Best-effort — failures are logged and
-    # surfaced in the user's Recent Activity (dispatch_log) so they
-    # see "SL placement failed — position uncovered" in the app
-    # rather than complete silence.
+    # Steps 3-5: SL + 3x TP.  SL is NO LONGER best-effort.
+    #
+    # JTOUSDT 2026-06-01 incident: a position whose SL failed to place sat
+    # OPEN with no stop and rode for 5h09m to -2.15% because nothing closed
+    # it.  A position must never sit OPEN without a stop.  So:
+    #   1. Retry SL placement on transient (unreachable) errors up to
+    #      SL_PLACEMENT_MAX_ATTEMPTS.  Deterministic Binance rejections /
+    #      key errors short-circuit — retrying won't change the outcome.
+    #   2. If the SL still didn't land, FORCE-CLOSE the entry at market
+    #      rather than leave it naked.  A re-entry next signal beats an
+    #      uncovered position.
+    #   3. Only if the force-close ALSO fails do we fall back to surfacing
+    #      "uncovered — close manually" in Recent Activity.
     from src.execution import dispatch_log as _dl
+    from config import SL_PLACEMENT_MAX_ATTEMPTS as _SL_MAX_ATTEMPTS
 
-    try:
-        sl_result = await placer.place_stop_loss(
-            signal_id=signal_id,
-            symbol=symbol,
-            direction=direction,
-            stop_price=sl_price,
+    sl_exc: Optional[Exception] = None
+    for _attempt in range(1, max(1, _SL_MAX_ATTEMPTS) + 1):
+        try:
+            sl_result = await placer.place_stop_loss(
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                stop_price=sl_price,
+            )
+            position.sl_order_id = sl_result.order_id
+            sl_exc = None
+            break
+        except _order_placer.OrderPlacementUnreachable as exc:
+            # Transient — signing service / network blip.  Retry.
+            sl_exc = exc
+            log.warning(
+                "place_signal: SL placement attempt {}/{} unreachable "
+                "uid={} signal_id={} exc={}",
+                _attempt, _SL_MAX_ATTEMPTS, firebase_uid, signal_id, exc,
+            )
+            continue
+        except _order_placer.OrderPlacementError as exc:
+            # Deterministic (rejected / key error) — retrying is futile.
+            sl_exc = exc
+            break
+
+    if position.sl_order_id == 0 and sl_exc is not None:
+        # SL did not land after retries → the position is naked.  Close it.
+        log.error(
+            "place_signal: SL placement failed after retries — FORCE-CLOSING "
+            "naked position uid={} signal_id={} exc={}",
+            firebase_uid, signal_id, sl_exc,
         )
-        position.sl_order_id = sl_result.order_id
-    except _order_placer.OrderPlacementError as exc:
-        log.warning(
-            "place_signal: SL placement failed (position remains "
-            "uncovered until manual intervention) uid={} signal_id={} "
-            "exc={}",
-            firebase_uid, signal_id, exc,
-        )
-        # Surface the failure in Recent Activity so the user can act.
         b_code = None
         b_msg = None
-        sig_resp = getattr(exc, "signing_response", None)
+        sig_resp = getattr(sl_exc, "signing_response", None)
         if sig_resp is not None:
             body = getattr(sig_resp, "binance_body", None)
             if isinstance(body, dict):
@@ -662,27 +714,77 @@ async def place_signal(
                 raw_msg = body.get("msg") or body.get("message")
                 if isinstance(raw_msg, str):
                     b_msg = raw_msg
-        _dl.record_rejected(
-            firebase_uid=firebase_uid,
-            signal_id=signal_id,
-            symbol=symbol,
-            direction=direction,
-            entry_price=entry_price,
-            reject_class="SLPlacementFailed",
-            reject_detail=(
-                f"Entry filled but SL order failed for {symbol}: {exc}. "
-                "Position is OPEN WITHOUT stop-loss protection — "
-                "close manually on Binance."
-            ),
-            reject_binance_code=b_code,
-            reject_binance_msg=b_msg,
-        )
 
+        force_closed = False
+        try:
+            await placer.place_market_close(
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                quantity=total_qty,
+            )
+            force_closed = True
+        except _order_placer.OrderPlacementError as close_exc:
+            log.error(
+                "place_signal: FORCE-CLOSE also failed — position is OPEN "
+                "WITHOUT a stop uid={} signal_id={} close_exc={}",
+                firebase_uid, signal_id, close_exc,
+            )
+
+        if force_closed:
+            # Position safely flat — mark terminal so the reconciler / FSM
+            # don't keep treating it as a live open position.
+            position.state = _position_state.PositionState.CLOSED
+            position.close_reason = "SL_PLACEMENT_FAILED"
+            position.closed_at = datetime.now(timezone.utc)
+            position.last_event_at = datetime.now(timezone.utc)
+            _position_state.put_position(position)
+            _dl.record_rejected(
+                firebase_uid=firebase_uid,
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                entry_price=entry_price,
+                reject_class="SLPlacementFailed",
+                reject_detail=(
+                    f"SL order failed for {symbol}: {sl_exc}. Position was "
+                    "force-closed at market to avoid an uncovered exposure."
+                ),
+                reject_binance_code=b_code,
+                reject_binance_msg=b_msg,
+            )
+        else:
+            _dl.record_rejected(
+                firebase_uid=firebase_uid,
+                signal_id=signal_id,
+                symbol=symbol,
+                direction=direction,
+                entry_price=entry_price,
+                reject_class="SLPlacementFailed",
+                reject_detail=(
+                    f"Entry filled but SL order failed for {symbol}: {sl_exc}. "
+                    "Auto force-close ALSO failed — position is OPEN WITHOUT "
+                    "stop-loss protection. Close manually on Binance now."
+                ),
+                reject_binance_code=b_code,
+                reject_binance_msg=b_msg,
+            )
+        # Either way the position is terminal-or-naked; skip TP / pre-TP.
+        return position
+
+    # Native TP bracket rides the residual past the pre-TP.  When pre-TP
+    # grabs the FULL position (grab_fraction >= 1.0 — the "close all at
+    # threshold" profile) there is no residual to ride, so placing TP legs
+    # would just lay reduce-only orders that get cancelled the moment the
+    # pre-TP LIMIT fills.  Skip them.
+    _place_tp_bracket = pretp_fraction_clamped < 1.0
     for tp_phase, tp_price, tp_qty_value in (
         ("tp1", tp1_price, tp1_qty),
         ("tp2", tp2_price, tp2_qty),
         ("tp3", tp3_price, tp3_qty),
     ):
+        if not _place_tp_bracket:
+            break
         if tp_qty_value <= 0:
             continue  # signal didn't specify this TP leg
         try:
