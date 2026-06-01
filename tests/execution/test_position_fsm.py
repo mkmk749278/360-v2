@@ -56,6 +56,13 @@ def _stub_placer_factory():
     by default — override per test if needed."""
     placer = MagicMock()
     placer.cancel_order = AsyncMock(return_value=None)
+    placer.ensure_cross_margin = AsyncMock(return_value=True)
+    placer.place_market_close = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=9001, client_order_id="lumin_sig-1_close",
+            status="FILLED", avg_price=0.0, binance_body={},
+        )
+    )
     placer.place_stop_loss = AsyncMock(
         return_value=order_placer.OrderPlacementResult(
             order_id=4001, client_order_id="lumin_sig-1_sl_be",
@@ -610,6 +617,14 @@ def _placer_with_mock_results() -> MagicMock:
             status="NEW", avg_price=0.0, binance_body={},
         )
     )
+    # 2026-06-01: margin enforcement + force-close backstop.
+    placer.ensure_cross_margin = AsyncMock(return_value=True)
+    placer.place_market_close = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=9001, client_order_id="lumin_sig-1_close",
+            status="FILLED", avg_price=0.0, binance_body={},
+        )
+    )
     return placer
 
 
@@ -690,11 +705,13 @@ async def test_place_signal_propagates_entry_failure() -> None:
 
 
 @pytest.mark.asyncio
-async def test_place_signal_tolerates_sl_failure() -> None:
-    """SL placement failure is best-effort — position remains OPEN
-    with TPs intact.  Operator can manually place an SL via the
-    Lumin app or the position can ride to a TP / get manually closed.
-    Logging captures the issue for follow-up."""
+async def test_place_signal_force_closes_on_sl_failure() -> None:
+    """SL placement failure is NO LONGER tolerated (JTOUSDT 2026-06-01).
+
+    A deterministic Binance rejection of the SL means the position would
+    otherwise sit OPEN with no stop.  The FSM force-closes the entry at
+    market and marks the position CLOSED (reason SL_PLACEMENT_FAILED)
+    rather than leave it naked.  TPs are NOT placed (we exit early)."""
     placer = _placer_with_mock_results()
     placer.place_stop_loss = AsyncMock(
         side_effect=order_placer.OrderRejectedByBinance("stop too close")
@@ -721,9 +738,53 @@ async def test_place_signal_tolerates_sl_failure() -> None:
             order_placer_factory=lambda uid: placer,
         )
     assert result.entry_order_id == 1001
-    assert result.sl_order_id == 0  # didn't land
-    # TPs still attempted.
-    assert placer.place_take_profit.await_count == 3
+    assert result.sl_order_id == 0  # SL didn't land
+    # Force-close fired for the full entry qty.
+    placer.place_market_close.assert_awaited_once()
+    _, close_kwargs = placer.place_market_close.await_args
+    assert close_kwargs["quantity"] == 1.0
+    # Position marked terminal with the diagnostic close reason.
+    assert result.state == position_state.PositionState.CLOSED
+    assert result.close_reason == "SL_PLACEMENT_FAILED"
+    # We exit before the TP bracket — no TP legs attempted.
+    assert placer.place_take_profit.await_count == 0
+
+
+@pytest.mark.asyncio
+async def test_place_signal_retries_sl_on_transient_then_succeeds() -> None:
+    """A transient (unreachable) SL failure is retried; once it lands the
+    position keeps its TP bracket and is NOT force-closed."""
+    placer = _placer_with_mock_results()
+    placer.place_stop_loss = AsyncMock(
+        side_effect=[
+            order_placer.OrderPlacementUnreachable("signing socket blip"),
+            order_placer.OrderPlacementResult(
+                order_id=2001, client_order_id="lumin_sig-1_sl",
+                status="NEW", avg_price=0.0, binance_body={},
+            ),
+        ]
+    )
+    with patch.object(position_state, "put_position", new=MagicMock()):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            order_placer_factory=lambda uid: placer,
+        )
+    assert placer.place_stop_loss.await_count == 2  # retried once
+    assert result.sl_order_id == 2001  # landed on attempt 2
+    placer.place_market_close.assert_not_awaited()  # not force-closed
+    assert placer.place_take_profit.await_count == 3  # bracket intact
 
 
 # ---------------------------------------------------------------------------
@@ -797,6 +858,71 @@ async def test_place_signal_skips_pretp_limit_when_fraction_zero() -> None:
     assert result.pretp_order_id == 0
     # Verify clamping fix: pretp_fraction stored as 0.0, not 0.30.
     assert result.pretp_fraction == 0.0
+
+
+@pytest.mark.asyncio
+async def test_place_signal_profile_a_full_grab_skips_tp_bracket() -> None:
+    """Profile A ('close all at threshold'): grab_fraction=1.0 → pre-TP
+    LIMIT covers the FULL position, so the native TP bracket would just be
+    redundant reduce-only orders cancelled on the pre-TP fill.  The FSM
+    skips them.  The pre-TP LIMIT is still placed for the full qty."""
+    placer = _placer_with_mock_results()
+    with patch.object(position_state, "put_position"):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            pretp_fraction=1.0,
+            order_placer_factory=lambda uid: placer,
+        )
+    # No native TP bracket — pre-TP grabs everything.
+    assert placer.place_take_profit.await_count == 0
+    # SL still placed (protects until the pre-TP LIMIT fills).
+    placer.place_stop_loss.assert_awaited_once()
+    # pre-TP LIMIT placed for the FULL position.
+    placer.place_pretp_limit.assert_awaited_once()
+    assert abs(placer.place_pretp_limit.call_args.kwargs["quantity"] - 1.0) < 1e-6
+    assert result.pretp_fraction == 1.0
+
+
+@pytest.mark.asyncio
+async def test_place_signal_honours_per_user_threshold() -> None:
+    """The per-user pretp_threshold_pct flows into the LIMIT price.  A
+    0.50% threshold rests the LIMIT further from entry than the 0.32%
+    default — this is the 'close at 0.3% vs 0.5%' per-user dial."""
+    placer = _placer_with_mock_results()
+    with patch.object(position_state, "put_position"):
+        await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=1000.0,
+            sl_price=985.0,
+            tp1_price=1010.0,
+            tp2_price=1020.0,
+            tp3_price=1030.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            pretp_threshold_pct=0.50,
+            pretp_fraction=0.5,
+            order_placer_factory=lambda uid: placer,
+        )
+    # 0.50% above a 1000 entry → 1005.0 (vs 1003.2 at the 0.32 default).
+    limit_price = placer.place_pretp_limit.call_args.kwargs["limit_price"]
+    assert abs(limit_price - 1005.0) < 1e-6
 
 
 @pytest.mark.asyncio

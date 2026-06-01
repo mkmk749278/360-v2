@@ -4,6 +4,75 @@
 
 ---
 
+## In-session checkpoint 2026-06-01 (session 12) — Per-user execution model + two auto-trade execution bugs
+
+### Theme
+Diagnosed a live Binance test account (182 automated positions, 2026-05-30→06-01,
+net -0.68 USDT @ 50% win rate, 0.78× win/loss ratio) against the engine signal
+tracker. Root finding: the negative edge is **structural in the execution model**,
+not signal quality — and two concrete execution bugs amplified it. All five
+changes below land on branch `claude/range-fade-mystery-amxmH`.
+
+### What the data showed
+- Signal edge is ~flat (-0.004% avg/signal); the account loses because winners
+  give back their MFE (no profit-banking order rests on the book) while losers
+  run the full SL distance.
+- **JTOUSDT**: one position held **5h09m** to -2.15% — SL never fired. = 31% of
+  total PnL drag. Root cause: SL placement failed at dispatch and nothing closed
+  the naked position.
+- **VTHOUSDT**: 5 positions placed in **ISOLATED** margin (engine assumes CROSS),
+  all losses. Root cause: symbol defaulted to isolated on the account; engine
+  never enforced CROSSED.
+
+### Changes shipped this session (5)
+1. **Per-user pre-TP threshold wiring** — `resolve_pretp_threshold_uid` added
+   (`src/api/user_overrides.py`) + forwarded from `signal_dispatch` into
+   `place_signal` as `pretp_threshold_pct`. The "close at 0.3% vs 0.5%" dial was
+   stored + surfaced in the app but **never read by execution** until now.
+2. **Margin-mode enforcement** — `OrderPlacer.ensure_cross_margin()` (POST
+   /fapi/v1/marginType CROSSED, tolerates -4046) called before each first entry
+   per (uid, symbol), cached per-process. Fixes the VTHOUSDT isolated bug.
+   Config: `MARGIN_MODE_ENFORCE_CROSS` (default true).
+3. **SL placement retry + force-close** — `place_signal` now retries SL on
+   transient errors (`SL_PLACEMENT_MAX_ATTEMPTS`, default 3) and **force-closes
+   the entry at market** if the SL can't land, marking the position CLOSED
+   (reason SL_PLACEMENT_FAILED). A position never sits OPEN without a stop.
+   Fixes the JTOUSDT class of bug at the source.
+4. **Reconciler stale-position backstop** — when positionRisk confirms a position
+   is still open but its FSM record exceeds `RECONCILER_MAX_POSITION_AGE_SEC`
+   (default 7200s / 2h), the reconciler force-closes at market (reason
+   STALE_EXPIRY). Last-resort net for any naked/orphaned position regardless of
+   cause. Toggle: `RECONCILER_STALE_CLOSE_ENABLED` (default true).
+5. **Profile A cleanliness** — when `grab_fraction >= 1.0` ("close all at
+   threshold") the native TP1/TP2/TP3 bracket is skipped; the full-position
+   pre-TP LIMIT + SL is the complete order set.
+
+### Execution profiles now correctly wired (all per-user)
+- **Profile A** (grab=1.0): MARKET entry + SL + full-qty pre-TP LIMIT, no TP bracket.
+- **Profile B** (0<grab<1): MARKET entry + SL + partial pre-TP LIMIT + residual TP
+  bracket; BE-shift on pre-TP fill (existing §3.2a path).
+- **Profile C** (grab=0, invalidation_mode=loose): MARKET entry + SL + native TP
+  bracket; engine invalidation does not interfere (loose-mode exclusion).
+- Order-type rule honoured: profit-taking = reduce-only LIMIT (no slippage);
+  SL / invalidation / expiry = MARKET (guaranteed exit).
+
+### Test suite
++ tests/execution/test_order_placer.py — ensure_cross_margin (4 cases)
++ tests/execution/test_position_fsm.py — SL retry, force-close, Profile A skip-TP,
+  per-user threshold flow-through (rewrote the old "tolerates SL failure" test)
++ tests/execution/test_reconciler.py — stale force-close (4 cases)
++ tests/execution/test_signal_dispatch.py — threshold forwarded to place_signal
++ tests/api/test_resolve_pretp_threshold.py — resolver bounds + isolation (7 cases)
+All green: 392 execution+override tests pass; adjacent suites (reconciler/settings/
+risk) 80 pass.
+
+### Owner sign-off note
+Items 2–5 touch FSM transitions / order shape — owner-gated per CLAUDE.md. Built
+under explicit owner direction this session. App UI surfacing of the per-user
+threshold/fraction/invalidation dials (lumin-app) remains a follow-up.
+
+---
+
 ## In-session checkpoint 2026-05-30 (session 11) — Auth cold-start latency: 3-cause root-cause fix (PR #545)
 
 ### Theme

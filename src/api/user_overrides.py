@@ -81,6 +81,14 @@ _PRETP_KEYS = frozenset({
 _PRETP_GRAB_FRACTION_MIN: float = 0.30
 _PRETP_GRAB_FRACTION_MAX: float = 1.00
 
+# Per-user pre-TP threshold (the raw-percent move at which the pre-TP LIMIT
+# rests).  A user picks e.g. 0.30% ("bank fast") or 0.50% ("let it breathe").
+# Bounds guard against a fat-fingered or stale value: below 0.05% the LIMIT
+# would sit inside the spread and fill on noise; above 5% it stops being a
+# scalp pre-TP.  Out-of-band values fall back to the engine default.
+_PRETP_THRESHOLD_PCT_MIN: float = 0.05
+_PRETP_THRESHOLD_PCT_MAX: float = 5.00
+
 _INVALIDATION_KEYS = frozenset({
     "mode",
     "min_age_sec",
@@ -1083,6 +1091,53 @@ def resolve_grab_fraction_uid(firebase_uid: str, default: float) -> float:
         log.debug(
             "resolve_grab_fraction_uid: lookup failed for firebase_uid={} ({}); "
             "falling back to default {}",
+            firebase_uid, type(exc).__name__, default,
+        )
+        return default
+
+
+def resolve_pretp_threshold_uid(firebase_uid: str, default: float) -> float:
+    """Return the per-user pre-TP threshold percent for ``firebase_uid``,
+    or ``default`` (engine config ``PRE_TP_THRESHOLD_PCT``) when unset.
+
+    This is the move (in raw percent — 0.30 = 0.30%, not 30%) at which the
+    pre-TP reduce-only LIMIT rests on Binance's book.  It realises the
+    per-user "close at 0.3% vs 0.5%" dial: the app writes
+    ``user_pretp_settings.threshold_pct`` and this resolver feeds it into
+    ``place_signal`` so the LIMIT price is computed from the user's choice
+    rather than the engine-wide default.
+
+    Until 2026-06-01 the column was stored and surfaced but never read by
+    the execution path — every user's pre-TP rested at the hard-coded
+    ``place_signal`` default regardless of their setting.  This closes that
+    gap, mirroring :func:`resolve_grab_fraction_uid`.
+
+    Soft-fail: any lookup error returns ``default`` so a store blip never
+    blocks dispatch.  Result is clamped to the sane scalp band
+    [``_PRETP_THRESHOLD_PCT_MIN``, ``_PRETP_THRESHOLD_PCT_MAX``]; a stored
+    value outside that band falls back to ``default``.
+    """
+    if _SINGLETON is None:
+        return default
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return default
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return default
+        row = _SINGLETON.get_pretp(int(user.user_id))
+        v = row.get("threshold_pct")
+        if isinstance(v, (int, float)) and (
+            _PRETP_THRESHOLD_PCT_MIN <= float(v) <= _PRETP_THRESHOLD_PCT_MAX
+        ):
+            return float(v)
+        return default
+    except Exception as exc:
+        log.debug(
+            "resolve_pretp_threshold_uid: lookup failed for firebase_uid={} "
+            "({}); falling back to default {}",
             firebase_uid, type(exc).__name__, default,
         )
         return default

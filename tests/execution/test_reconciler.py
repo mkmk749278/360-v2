@@ -309,3 +309,120 @@ async def test_stop_all_workers_unregisters_users() -> None:
         assert "uid-stop-test" not in r._active_uids
     finally:
         reconciler.set_instance(None)  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Stale-position force-close backstop (2026-06-01 — JTOUSDT incident)
+# ---------------------------------------------------------------------------
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+
+def _make_placer_mock():
+    placer = MagicMock()
+    placer.place_market_close = AsyncMock(return_value=None)
+    return placer
+
+
+@pytest.mark.asyncio
+async def test_stale_open_position_is_force_closed() -> None:
+    """A position Binance confirms STILL open but whose FSM record is
+    older than the age ceiling is force-closed at market and marked
+    CLOSED (reason STALE_EXPIRY).  This is the JTOUSDT 5h09m backstop."""
+    stale = _make_position(symbol="BTCUSDT")
+    stale.created_at = datetime.now(timezone.utc) - timedelta(seconds=10_000)
+    persisted: List = []
+    placer = _make_placer_mock()
+    signing = _signing_client_returning(
+        [{"symbol": "BTCUSDT", "positionAmt": "1.0"}]  # still open
+    )
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [stale],
+        signing_client_factory=lambda: signing,
+        order_placer_factory=lambda uid: placer,
+        max_position_age_sec=7200,
+        stale_close_enabled=True,
+    )
+    with patch.object(
+        position_state, "put_position", side_effect=lambda p: persisted.append(p)
+    ):
+        await r.reconcile_user("fb-x")
+    placer.place_market_close.assert_awaited_once()
+    assert stale.state == position_state.PositionState.CLOSED
+    assert stale.close_reason == "STALE_EXPIRY"
+    assert len(persisted) == 1
+
+
+@pytest.mark.asyncio
+async def test_fresh_open_position_not_force_closed() -> None:
+    """A position within the age ceiling is left alone even though it's
+    open — the backstop only fires past the ceiling."""
+    fresh = _make_position(symbol="BTCUSDT")
+    fresh.created_at = datetime.now(timezone.utc) - timedelta(seconds=60)
+    placer = _make_placer_mock()
+    signing = _signing_client_returning(
+        [{"symbol": "BTCUSDT", "positionAmt": "1.0"}]
+    )
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [fresh],
+        signing_client_factory=lambda: signing,
+        order_placer_factory=lambda uid: placer,
+        max_position_age_sec=7200,
+        stale_close_enabled=True,
+    )
+    with patch.object(position_state, "put_position"):
+        await r.reconcile_user("fb-x")
+    placer.place_market_close.assert_not_awaited()
+    assert fresh.state == position_state.PositionState.OPEN
+
+
+@pytest.mark.asyncio
+async def test_stale_close_disabled_is_noop() -> None:
+    """With the backstop disabled, even a stale open position is left
+    untouched (alert-only / triage mode)."""
+    stale = _make_position(symbol="BTCUSDT")
+    stale.created_at = datetime.now(timezone.utc) - timedelta(seconds=10_000)
+    placer = _make_placer_mock()
+    signing = _signing_client_returning(
+        [{"symbol": "BTCUSDT", "positionAmt": "1.0"}]
+    )
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [stale],
+        signing_client_factory=lambda: signing,
+        order_placer_factory=lambda uid: placer,
+        max_position_age_sec=7200,
+        stale_close_enabled=False,
+    )
+    with patch.object(position_state, "put_position"):
+        await r.reconcile_user("fb-x")
+    placer.place_market_close.assert_not_awaited()
+    assert stale.state == position_state.PositionState.OPEN
+
+
+@pytest.mark.asyncio
+async def test_stale_close_failure_leaves_position_open_for_retry() -> None:
+    """If the force-close order fails, the position stays non-terminal so
+    the next cycle retries — we never mark CLOSED on a failed close."""
+    stale = _make_position(symbol="BTCUSDT")
+    stale.created_at = datetime.now(timezone.utc) - timedelta(seconds=10_000)
+    persisted: List = []
+    placer = MagicMock()
+    placer.place_market_close = AsyncMock(side_effect=RuntimeError("binance 500"))
+    signing = _signing_client_returning(
+        [{"symbol": "BTCUSDT", "positionAmt": "1.0"}]
+    )
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [stale],
+        signing_client_factory=lambda: signing,
+        order_placer_factory=lambda uid: placer,
+        max_position_age_sec=7200,
+        stale_close_enabled=True,
+    )
+    with patch.object(
+        position_state, "put_position", side_effect=lambda p: persisted.append(p)
+    ):
+        await r.reconcile_user("fb-x")
+    placer.place_market_close.assert_awaited_once()
+    # Close failed → NOT marked terminal, NOT persisted.
+    assert stale.state == position_state.PositionState.OPEN
+    assert len(persisted) == 0

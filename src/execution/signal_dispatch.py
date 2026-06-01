@@ -377,9 +377,18 @@ async def dispatch_signal_to_active_users(
         # signal.
         user_notional = _uo.resolve_notional_usd(uid, _DEFAULT_NOTIONAL_USD)
         from config import PRE_TP_GRAB_FRACTION as _DEFAULT_GRAB_FRACTION
+        from config import PRE_TP_THRESHOLD_PCT as _DEFAULT_PRETP_THRESHOLD
         from config import INVALIDATION_MODE_DEFAULT as _DEFAULT_INV_MODE
         user_grab_fraction = _uo.resolve_grab_fraction_uid(
             uid, float(_DEFAULT_GRAB_FRACTION)
+        )
+        # Per-user pre-TP threshold (the "close at 0.3% vs 0.5%" dial).
+        # Until 2026-06-01 this was never read by dispatch — every user's
+        # pre-TP LIMIT rested at the place_signal default regardless of
+        # their setting.  Resolve it here and forward to the FSM so the
+        # LIMIT price reflects the user's choice.
+        user_pretp_threshold = _uo.resolve_pretp_threshold_uid(
+            uid, float(_DEFAULT_PRETP_THRESHOLD)
         )
         # Per-user master pre-TP enable toggle (2026-05-29 fix).  The app's
         # "Pre-TP grab" ON/OFF switch writes user_pretp_settings.enabled but
@@ -498,6 +507,7 @@ async def dispatch_signal_to_active_users(
                 tp1_qty=tp1_qty,
                 tp2_qty=tp2_qty,
                 tp3_qty=tp3_qty,
+                pretp_threshold_pct=user_pretp_threshold,
                 pretp_fraction=user_grab_fraction,
                 invalidation_mode=user_invalidation_mode,
             )

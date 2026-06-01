@@ -341,3 +341,57 @@ async def test_cancel_order_raises_on_other_failures() -> None:
     placer = order_placer.OrderPlacer("fb-x", client=client)
     with pytest.raises(order_placer.OrderRejectedByBinance):
         await placer.cancel_order(symbol="BTCUSDT", order_id=999)
+
+
+# ---------------------------------------------------------------------------
+# ensure_cross_margin (2026-06-01 — VTHOUSDT isolated-margin incident)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_ensure_cross_margin_sends_crossed() -> None:
+    """Posts marginType=CROSSED to /fapi/v1/marginType for the symbol."""
+    client = _mock_client(post_response=_ok_resp({"code": 200, "msg": "success"}))
+    placer = order_placer.OrderPlacer("fb-x", client=client)
+    ok = await placer.ensure_cross_margin(symbol="BTCUSDT")
+    assert ok is True
+    call = client.binance_signed_post.call_args.kwargs
+    assert call["path"] == "/fapi/v1/marginType"
+    assert call["params"] == {"symbol": "BTCUSDT", "marginType": "CROSSED"}
+
+
+@pytest.mark.asyncio
+async def test_ensure_cross_margin_tolerates_already_cross() -> None:
+    """Binance -4046 'No need to change margin type.' is the desired
+    end-state (already CROSSED) → treated as success, not failure."""
+    client = _mock_client(
+        post_response=_err_resp(
+            sig_protocol.ERR_BINANCE_HTTP_ERROR,
+            body={"code": -4046, "msg": "No need to change margin type."},
+        )
+    )
+    placer = order_placer.OrderPlacer("fb-x", client=client)
+    assert await placer.ensure_cross_margin(symbol="BTCUSDT") is True
+
+
+@pytest.mark.asyncio
+async def test_ensure_cross_margin_returns_false_on_other_error() -> None:
+    """Any other Binance error → False (best-effort; caller logs +
+    proceeds, never raises)."""
+    client = _mock_client(
+        post_response=_err_resp(
+            sig_protocol.ERR_BINANCE_HTTP_ERROR,
+            body={"code": -4047, "msg": "Margin type cannot be changed with open position"},
+        )
+    )
+    placer = order_placer.OrderPlacer("fb-x", client=client)
+    assert await placer.ensure_cross_margin(symbol="BTCUSDT") is False
+
+
+@pytest.mark.asyncio
+async def test_ensure_cross_margin_never_raises_on_transport_error() -> None:
+    """A signing-service / network exception is swallowed → False."""
+    client = MagicMock()
+    client.binance_signed_post = AsyncMock(side_effect=RuntimeError("socket gone"))
+    placer = order_placer.OrderPlacer("fb-x", client=client)
+    assert await placer.ensure_cross_margin(symbol="BTCUSDT") is False
