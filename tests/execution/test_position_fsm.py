@@ -845,6 +845,10 @@ async def test_place_signal_force_closes_on_persistent_2021(monkeypatch) -> None
     stop), force-close is correct — closing at the stop is the right exit."""
     import config
     monkeypatch.setattr(config, "SL_RETRY_BACKOFF_SEC", 0.0, raising=False)
+    # Pin the attempt count so this asserts the exhaustion path deterministically
+    # regardless of the SL_PLACEMENT_MAX_ATTEMPTS default (raised to 6 on
+    # 2026-06-01 to widen the transient-wick retry window).
+    monkeypatch.setattr(config, "SL_PLACEMENT_MAX_ATTEMPTS", 3, raising=False)
     placer = _placer_with_mock_results()
     placer.place_stop_loss = AsyncMock(side_effect=_rejected_with_code(-2021))
     with patch.object(position_state, "put_position", new=MagicMock()):

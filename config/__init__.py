@@ -1687,13 +1687,24 @@ MARGIN_MODE_ENFORCE_CROSS: bool = _safe_bool("MARGIN_MODE_ENFORCE_CROSS", "true"
 # market-closed rather than left naked.  Retries cover transient failures —
 # signing/network blips AND transient Binance rejects (chiefly -2021 "would
 # immediately trigger"); deterministic rejects (tick size, precision, price
-# filter, key errors) short-circuit straight to force-close.  Default 3.
-SL_PLACEMENT_MAX_ATTEMPTS: int = _safe_int("SL_PLACEMENT_MAX_ATTEMPTS", "3")
+# filter, key errors) short-circuit straight to force-close.
+#
+# Default 6 (2026-06-01 follow-up): PR #555 retried -2021 but the window was
+# only 3 attempts × 0.5s = 1.5s.  The mark-price wicks on thin alts (IDUSDT,
+# AIAUSDT) right after a MARKET entry persist 2-5s — long enough to exhaust
+# the 1.5s window on every attempt, so the force-close still fired in 4-8s at
+# ~entry price (the regression visibly persisted post-merge).  6 attempts with
+# a 1.0s linear backoff gives a ~15s window (1+2+3+4+5), covering an observed
+# 5s wick 3x over while keeping the uncovered window short.  The position is
+# uncovered only during this window (the TradeMonitor 5s poll + mark-price
+# backstop still guard a catastrophic move); a momentary uncovered window beats
+# force-closing a live signal the engine still considers ACTIVE.
+SL_PLACEMENT_MAX_ATTEMPTS: int = _safe_int("SL_PLACEMENT_MAX_ATTEMPTS", "6")
 # Backoff (seconds) between SL placement attempts, multiplied by the attempt
-# number (0.5, 1.0, 1.5 …).  Gives a transient mark-price wick that caused a
-# -2021 reject time to recede before the retry.  Default 0.5 → a ~1.5s window
-# across 3 attempts, comfortably shorter than any real hold.
-SL_RETRY_BACKOFF_SEC: float = _safe_float("SL_RETRY_BACKOFF_SEC", "0.5")
+# number (1.0, 2.0, 3.0 …).  Gives a transient mark-price wick that caused a
+# -2021 reject time to recede before the retry.  Default 1.0 → a ~15s window
+# across 6 attempts, long enough for thin-alt wicks to recede.
+SL_RETRY_BACKOFF_SEC: float = _safe_float("SL_RETRY_BACKOFF_SEC", "1.0")
 
 # ---------------------------------------------------------------------------
 # Trailing stop – ATR multiplier for adaptive trailing distance

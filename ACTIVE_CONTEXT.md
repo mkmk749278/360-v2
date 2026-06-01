@@ -4,6 +4,38 @@
 
 ---
 
+## In-session checkpoint 2026-06-01 (session 12c) — Widen the SL transient-retry window
+
+### Symptom (post PR #555)
+After PR #555 (retry -2021 instead of force-closing) merged, the owner reported
+the regression **still persisted**: IDUSDT/AIAUSDT SHORTs still closed in 4-8s at
+~entry price while the engine signal showed ACTIVE.
+
+### Root cause
+PR #555 added the retry but the window was only `SL_PLACEMENT_MAX_ATTEMPTS=3 ×
+SL_RETRY_BACKOFF_SEC=0.5` = **1.5s**. The mark-price wicks on thin alts right after
+a MARKET entry persist 2-5s — longer than the 1.5s window — so every retry got
+-2021, the attempts exhausted, and the force-close fired in ~4s at ~entry price.
+The classification was correct; the window was just too narrow.
+
+### Fix (config-only, reversible)
+- `SL_PLACEMENT_MAX_ATTEMPTS` 3 → **6**
+- `SL_RETRY_BACKOFF_SEC` 0.5 → **1.0** (linear: 1+2+3+4+5 = ~15s window)
+- Covers an observed 5s wick 3× over; uncovered window stays short and the
+  TradeMonitor 5s poll + mark-price backstop still guard a catastrophic move.
+- Test `test_place_signal_force_closes_on_persistent_2021` now pins
+  `SL_PLACEMENT_MAX_ATTEMPTS=3` locally so the exhaustion assertion is
+  independent of the default.
+
+### Follow-up flagged for owner (not built — FSM-transition change, needs sign-off)
+If -2021 turns out to be **persistent** (entry slippage on a thin alt fills past
+the signal's SL, so the original sl_price would immediately trigger forever),
+re-anchoring the SL to the *filled* entry price — preserving the signal's SL
+distance — would keep the position alive instead of force-closing. Decide once the
+dispatch-log `reject_binance_code` confirms transient-vs-persistent on the VPS.
+
+---
+
 ## In-session checkpoint 2026-06-01 (session 12) — Per-user execution model + two auto-trade execution bugs
 
 ### Theme
