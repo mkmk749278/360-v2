@@ -47,6 +47,37 @@ log = get_logger("execution.position_fsm")
 _cross_margin_confirmed: set[tuple[str, str]] = set()
 
 
+# Binance reject codes that are TRANSIENT for a STOP_MARKET placed right after
+# a MARKET entry — retrying after a short backoff usually lands the SL:
+#   -2021  "Order would immediately trigger" — a mark-price wick momentarily
+#          sits on the stop's trigger side on a thin alt, then recedes (the
+#          2026-06-01 IDUSDT/AIAUSDT regression cause).
+#   -1008  server busy / -1015 too many orders / -1021 timestamp out of
+#          recvWindow — generic exchange-side transients.
+# Deterministic rejects (tick size -4014, precision -1111, price filter
+# -4131, key errors) are deliberately NOT here: retrying the same request
+# can't fix them, so they go straight to force-close (the naked-position
+# invariant still holds — we just don't burn retries on a hopeless request).
+_SL_RETRYABLE_BINANCE_CODES: frozenset[int] = frozenset({-2021, -1008, -1015, -1021})
+
+
+def _binance_reject_code(exc: Exception) -> Optional[int]:
+    """Extract the Binance numeric error code from an OrderPlacementError's
+    signing response, or None when unavailable (network error, malformed
+    body).  A None code is treated as non-retryable by callers — we don't
+    retry a rejection we can't classify."""
+    sig_resp = getattr(exc, "signing_response", None)
+    if sig_resp is None:
+        return None
+    body = getattr(sig_resp, "binance_body", None)
+    if isinstance(body, dict):
+        try:
+            return int(body.get("code"))
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
 # ---------------------------------------------------------------------------
 # Public API — what the worker (PR-5) wires as the event handler
 # ---------------------------------------------------------------------------
@@ -667,6 +698,7 @@ async def place_signal(
     #      "uncovered — close manually" in Recent Activity.
     from src.execution import dispatch_log as _dl
     from config import SL_PLACEMENT_MAX_ATTEMPTS as _SL_MAX_ATTEMPTS
+    from config import SL_RETRY_BACKOFF_SEC as _SL_BACKOFF
 
     sl_exc: Optional[Exception] = None
     for _attempt in range(1, max(1, _SL_MAX_ATTEMPTS) + 1):
@@ -688,11 +720,35 @@ async def place_signal(
                 "uid={} signal_id={} exc={}",
                 _attempt, _SL_MAX_ATTEMPTS, firebase_uid, signal_id, exc,
             )
-            continue
         except _order_placer.OrderPlacementError as exc:
-            # Deterministic (rejected / key error) — retrying is futile.
             sl_exc = exc
-            break
+            code = _binance_reject_code(exc)
+            # 2026-06-01 regression fix: NOT every Binance rejection is fatal.
+            # The dominant one right after a MARKET entry is -2021 "Order would
+            # immediately trigger" — a mark-price wick momentarily sits on the
+            # stop's trigger side on a thin alt, then recedes within ~1s.  The
+            # original force-close-on-any-reject turned that transient into an
+            # immediate round-trip loss (IDUSDT/AIAUSDT closed in 4-8s at
+            # ~entry).  Retry the transient codes with backoff; only treat
+            # genuinely deterministic rejects (tick size -4014, precision
+            # -1111, price filter -4131, key errors) as fatal → force-close.
+            if code not in _SL_RETRYABLE_BINANCE_CODES:
+                log.error(
+                    "place_signal: SL placement FATAL reject (non-retryable) "
+                    "uid={} signal_id={} code={} exc={}",
+                    firebase_uid, signal_id, code, exc,
+                )
+                break
+            log.warning(
+                "place_signal: SL placement attempt {}/{} transient reject "
+                "code={} uid={} signal_id={} — backing off + retrying",
+                _attempt, _SL_MAX_ATTEMPTS, code, firebase_uid, signal_id,
+            )
+        # Backoff before the next attempt so a transient mark-price spike
+        # (-2021) or signing blip clears.  Skip the sleep after the final
+        # attempt — we're about to force-close anyway.
+        if _attempt < max(1, _SL_MAX_ATTEMPTS) and _SL_BACKOFF > 0:
+            await asyncio.sleep(_SL_BACKOFF * _attempt)
 
     if position.sl_order_id == 0 and sl_exc is not None:
         # SL did not land after retries → the position is naked.  Close it.

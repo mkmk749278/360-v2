@@ -1683,10 +1683,17 @@ MARGIN_MODE_ENFORCE_CROSS: bool = _safe_bool("MARGIN_MODE_ENFORCE_CROSS", "true"
 
 # Number of SL placement attempts at entry before the FSM force-closes an
 # otherwise-uncovered position.  A position must never sit OPEN without a
-# stop; if the SL can't be placed after this many tries (transient retries
-# only — deterministic Binance rejections short-circuit), the entry is
-# market-closed immediately rather than left naked.  Default 3.
+# stop; if the SL can't be placed after this many tries, the entry is
+# market-closed rather than left naked.  Retries cover transient failures —
+# signing/network blips AND transient Binance rejects (chiefly -2021 "would
+# immediately trigger"); deterministic rejects (tick size, precision, price
+# filter, key errors) short-circuit straight to force-close.  Default 3.
 SL_PLACEMENT_MAX_ATTEMPTS: int = _safe_int("SL_PLACEMENT_MAX_ATTEMPTS", "3")
+# Backoff (seconds) between SL placement attempts, multiplied by the attempt
+# number (0.5, 1.0, 1.5 …).  Gives a transient mark-price wick that caused a
+# -2021 reject time to recede before the retry.  Default 0.5 → a ~1.5s window
+# across 3 attempts, comfortably shorter than any real hold.
+SL_RETRY_BACKOFF_SEC: float = _safe_float("SL_RETRY_BACKOFF_SEC", "0.5")
 
 # ---------------------------------------------------------------------------
 # Trailing stop – ATR multiplier for adaptive trailing distance
