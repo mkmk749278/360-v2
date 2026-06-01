@@ -1279,3 +1279,176 @@ async def test_no_track_when_dispatcher_not_set() -> None:
         await asyncio.sleep(0)
     finally:
         _pd.set_instance(original)
+
+
+# ---------------------------------------------------------------------------
+# SL re-anchoring: fill slippage past the signal SL (2026-06-01 regression)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_place_signal_reanchors_sl_for_short_fill_above_sl() -> None:
+    """SHORT fill ABOVE signal SL → Binance -2021 on every attempt → force-close.
+
+    Root cause: signal_entry=2.322, SL=2.340 (+0.78%).  Price pumps to 2.376
+    before the MARKET fires.  SL 2.340 < fill 2.376 for a SHORT means the
+    STOP_MARKET BUY would immediately trigger — -2021 on every retry.
+
+    Fix: re-anchor SL to fill_price * (1 + sl_fraction) so the stop is valid.
+    Verify: SL placed above fill, NO force-close, position stays open-bound."""
+    placer = _placer_with_mock_results()
+    placer.place_market_entry = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=1001, client_order_id="lumin_sig-1_entry",
+            status="FILLED", avg_price=2.376, binance_body={},
+        )
+    )
+    with patch.object(position_state, "put_position"):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="SOLUSDT",
+            direction="SHORT",
+            entry_price=2.322,
+            sl_price=2.340,    # 0.78% above signal entry — correct at generation
+            tp1_price=2.270,
+            tp2_price=2.220,
+            tp3_price=2.170,
+            total_qty=10.0,
+            tp1_qty=3.0,
+            tp2_qty=4.0,
+            tp3_qty=3.0,
+            order_placer_factory=lambda uid: placer,
+        )
+    # SL placed, position NOT force-closed.
+    placer.place_stop_loss.assert_awaited_once()
+    placer.place_market_close.assert_not_awaited()
+    assert result.state != position_state.PositionState.CLOSED
+
+    # Re-anchored SL must sit ABOVE the fill (valid STOP_MARKET BUY for SHORT).
+    sl_kwargs = placer.place_stop_loss.call_args.kwargs
+    assert sl_kwargs["stop_price"] > 2.376
+
+    # Distance fraction is preserved: (2.340−2.322)/2.322 ≈ 0.00775.
+    # Expected new SL ≈ 2.376 × (1 + 0.00775) ≈ 2.394.
+    expected = 2.376 * (2.340 / 2.322)
+    assert abs(sl_kwargs["stop_price"] - expected) < 0.001
+
+
+@pytest.mark.asyncio
+async def test_place_signal_reanchors_sl_for_long_fill_below_sl() -> None:
+    """LONG fill BELOW signal SL → same immediate-trigger problem, mirrored.
+
+    entry_target=1000, SL=992 (0.8% below).  Market drops before execution:
+    fill=990 < SL=992.  STOP_MARKET SELL at 992 when price is 990 fires
+    immediately (-2021).  Re-anchor to fill * (1 − 0.008) = 982.08."""
+    placer = _placer_with_mock_results()
+    placer.place_market_entry = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=1001, client_order_id="lumin_sig-1_entry",
+            status="FILLED", avg_price=990.0, binance_body={},
+        )
+    )
+    with patch.object(position_state, "put_position"):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="SOLUSDT",
+            direction="LONG",
+            entry_price=1000.0,
+            sl_price=992.0,    # 0.8% below signal entry
+            tp1_price=1010.0,
+            tp2_price=1020.0,
+            tp3_price=1030.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            order_placer_factory=lambda uid: placer,
+        )
+    placer.place_stop_loss.assert_awaited_once()
+    placer.place_market_close.assert_not_awaited()
+
+    sl_kwargs = placer.place_stop_loss.call_args.kwargs
+    # Re-anchored SL is BELOW the fill (valid STOP_MARKET SELL for LONG).
+    assert sl_kwargs["stop_price"] < 990.0
+    # Fraction preserved: 990 × (992/1000) = 982.08
+    expected = 990.0 * (992.0 / 1000.0)
+    assert abs(sl_kwargs["stop_price"] - expected) < 0.01
+
+
+@pytest.mark.asyncio
+async def test_place_signal_no_reanchor_when_fill_inside_sl() -> None:
+    """Normal fill (no slippage past SL) must NOT re-anchor the SL.
+
+    LONG: fill=29010, SL=28500 — fill is well above SL.
+    Original signal SL preserved exactly."""
+    placer = _placer_with_mock_results()
+    placer.place_market_entry = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=1001, client_order_id="lumin_sig-1_entry",
+            status="FILLED", avg_price=29010.0, binance_body={},
+        )
+    )
+    with patch.object(position_state, "put_position"):
+        await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            order_placer_factory=lambda uid: placer,
+        )
+    sl_kwargs = placer.place_stop_loss.call_args.kwargs
+    # Original SL preserved — no re-anchoring.
+    assert abs(sl_kwargs["stop_price"] - 28500.0) < 0.001
+
+
+@pytest.mark.asyncio
+async def test_place_signal_pretp_limit_anchored_to_fill_not_signal_entry() -> None:
+    """When fill differs from signal entry, the pre-TP LIMIT must rest at
+    fill_price ± threshold%, not signal_entry ± threshold%.
+
+    A pre-TP LIMIT anchored to a stale signal entry price sits at the wrong
+    level — the user's threshold distance is measured from a price they never
+    traded at.  Fill-anchored LIMIT fires at the right relative move."""
+    placer = _placer_with_mock_results()
+    # LONG fills 1% BELOW signal entry (1000 → 990 fill).
+    placer.place_market_entry = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=1001, client_order_id="lumin_sig-1_entry",
+            status="FILLED", avg_price=990.0, binance_body={},
+        )
+    )
+    with patch.object(position_state, "put_position"):
+        await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="SOLUSDT",
+            direction="LONG",
+            entry_price=1000.0,
+            sl_price=985.0,    # 1.5% below — NOT below fill, no SL re-anchor
+            tp1_price=1010.0,
+            tp2_price=1020.0,
+            tp3_price=1030.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            pretp_threshold_pct=0.32,
+            pretp_fraction=0.5,
+            order_placer_factory=lambda uid: placer,
+        )
+    kw = placer.place_pretp_limit.call_args.kwargs
+    # Pre-TP threshold: fill (990) × 1.0032 = 993.168
+    # NOT signal entry (1000) × 1.0032 = 1003.2
+    assert abs(kw["limit_price"] - 990.0 * 1.0032) < 0.01
+    assert kw["limit_price"] < 1000.0  # definitely NOT signal-entry-anchored
