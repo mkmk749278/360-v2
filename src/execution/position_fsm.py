@@ -642,6 +642,45 @@ async def place_signal(
         quantity=total_qty,
     )
 
+    # Step 1b: Re-anchor SL to actual MARKET fill price.
+    #
+    # Binance Futures MARKET orders fill synchronously and return ``avgPrice``
+    # in the REST response.  When the market moves between signal generation
+    # and dispatch (Telegram delay + engine processing), the fill can differ
+    # from the signal's target entry.  The SL that was valid at generation
+    # time (0.8% from signal entry) may be on the WRONG SIDE of the fill:
+    #
+    #   SHORT example:  signal_entry=2.322, SL=2.340 (+0.8%)
+    #                   MARKET fill=2.376 (price pumped 2.3% before execution)
+    #                   → SL 2.340 < fill 2.376 for a SHORT
+    #                   → STOP_MARKET BUY at 2.340 ALREADY triggered
+    #                   → Binance -2021 on every retry → force-close at entry
+    #
+    # Fix: after the fill, recompute SL preserving the same distance % but
+    # anchored to where we actually entered.  The signal's structural analysis
+    # (direction, TP levels) still holds; only the stop anchor shifts.
+    fill_price: float = (
+        entry_result.avg_price if entry_result.avg_price > 0 else entry_price
+    )
+    _fill_crossed_sl = (
+        (direction == "LONG" and fill_price > 0 and fill_price < sl_price)
+        or (direction == "SHORT" and fill_price > 0 and fill_price > sl_price)
+    )
+    if _fill_crossed_sl:
+        _orig_sl = sl_price
+        # Preserve the signed SL-distance fraction relative to signal entry.
+        # For LONG: sl < entry → fraction is negative (e.g. -0.008)
+        # For SHORT: sl > entry → fraction is positive (e.g. +0.008)
+        _sl_frac = (sl_price - entry_price) / entry_price if entry_price > 0 else (
+            -0.008 if direction == "LONG" else 0.008
+        )
+        sl_price = fill_price * (1.0 + _sl_frac)
+        log.warning(
+            "place_signal: fill {} crossed signal SL {} — re-anchoring SL "
+            "to fill uid={} signal_id={} new_sl={:.6g}",
+            fill_price, _orig_sl, firebase_uid, signal_id, sl_price,
+        )
+
     # Step 2: persist immediately with entry_order_id captured so the
     # FSM can handle the entry-fill event even if subsequent SL/TP
     # placements crash this coroutine.
@@ -655,8 +694,11 @@ async def place_signal(
     pretp_fraction_clamped = (
         0.0 if pretp_fraction <= 0 else max(0.30, min(1.0, pretp_fraction))
     )
+    # Use fill_price (not signal entry_price) as the pre-TP anchor so the
+    # LIMIT order rests at the correct threshold distance from where we
+    # actually entered — not from the signal's stale target.
     pretp_threshold_price = _pretp.compute_pretp_threshold_price(
-        entry_price=entry_price,
+        entry_price=fill_price if fill_price > 0 else entry_price,
         direction=direction,
         threshold_pct=pretp_threshold_pct,
     )
