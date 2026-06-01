@@ -4,9 +4,12 @@ The signing client is mocked at the OrderPlacer constructor.  What
 we pin:
 
 * Each verb (entry / SL / TP / cancel) sends the right Binance
-  parameters: symbol, side, type, quantity, stopPrice, closePosition,
-  reduceOnly, workingType, newClientOrderId.
-* clientOrderId follows the lumin_<signal_id>_<phase> convention so
+  parameters: symbol, side, algoType/type, quantity, stopPrice,
+  closePosition, reduceOnly, workingType, clientAlgoId/newClientOrderId.
+* Entry/close/pretp orders use /fapi/v1/order with newClientOrderId.
+* SL and TP orders use /fapi/v1/algoOrder with algoType=CONDITIONAL
+  and clientAlgoId (Binance mandatory migration, Dec 9 2025).
+* clientAlgoId follows the lumin_<signal_id>_<phase> convention so
   the FSM can map fills back to phases via parse_coid.
 * Direction → side mapping is correct: LONG entry = BUY,
   LONG exit (SL/TP) = SELL.  Inverted for SHORT.
@@ -15,6 +18,7 @@ we pin:
   three exception types.
 * cancel_order swallows -2011 "Unknown order sent" (order already
   filled/cancelled) — that's not a real error from the caller's POV.
+* cancel_algo_order swallows -2011 and -20121 (algo order already gone).
 """
 from __future__ import annotations
 
@@ -45,6 +49,7 @@ def _err_resp(code: str, body: Any = None) -> sig_protocol.SignResponse:
 
 
 def _mock_client(post_response=None, delete_response=None) -> MagicMock:
+    """Mock client returning a regular order response (for MARKET/LIMIT orders)."""
     mock = MagicMock()
     mock.binance_signed_post = AsyncMock(
         return_value=post_response
@@ -54,6 +59,26 @@ def _mock_client(post_response=None, delete_response=None) -> MagicMock:
                 "clientOrderId": "lumin_sig-1_entry",
                 "status": "NEW",
                 "avgPrice": "0",
+            }
+        )
+    )
+    mock.binance_signed_delete = AsyncMock(
+        return_value=delete_response or _ok_resp({})
+    )
+    return mock
+
+
+def _algo_mock_client(post_response=None, delete_response=None) -> MagicMock:
+    """Mock client returning an algoOrder response (for SL / TP orders)."""
+    mock = MagicMock()
+    mock.binance_signed_post = AsyncMock(
+        return_value=post_response
+        or _ok_resp(
+            {
+                "algoId": 7654321,
+                "clientAlgoId": "lumin_sig-1_sl",
+                "success": True,
+                "code": 0,
             }
         )
     )
@@ -138,9 +163,11 @@ async def test_market_entry_returns_parsed_result() -> None:
 
 @pytest.mark.asyncio
 async def test_stop_loss_long_sends_sell_with_close_position() -> None:
-    """LONG SL is a SELL STOP_MARKET with closePosition=true.
-    workingType=MARK_PRICE (less wick-prone than CONTRACT_PRICE)."""
-    client = _mock_client()
+    """LONG SL is a SELL CONDITIONAL algoOrder with closePosition=true.
+    workingType=MARK_PRICE (less wick-prone than CONTRACT_PRICE).
+    Uses /fapi/v1/algoOrder with algoType=CONDITIONAL per the Binance
+    mandatory migration effective Dec 9 2025."""
+    client = _algo_mock_client()
     placer = order_placer.OrderPlacer("fb-x", client=client)
     await placer.place_stop_loss(
         signal_id="sig-1",
@@ -150,17 +177,19 @@ async def test_stop_loss_long_sends_sell_with_close_position() -> None:
     )
     params = client.binance_signed_post.call_args.kwargs["params"]
     assert params["side"] == "SELL"
-    assert params["type"] == "STOP_MARKET"
+    assert params["algoType"] == "CONDITIONAL"
+    assert "type" not in params  # not the old /fapi/v1/order style
     assert params["stopPrice"] == "28500"
     assert params["closePosition"] == "true"
     assert params["workingType"] == "MARK_PRICE"
-    assert params["newClientOrderId"] == position_state.coid_sl("sig-1")
+    assert params["clientAlgoId"] == position_state.coid_sl("sig-1")
+    assert "newClientOrderId" not in params
 
 
 @pytest.mark.asyncio
 async def test_stop_loss_short_sends_buy() -> None:
-    """SHORT SL is a BUY STOP_MARKET."""
-    client = _mock_client()
+    """SHORT SL is a BUY CONDITIONAL algoOrder."""
+    client = _algo_mock_client()
     placer = order_placer.OrderPlacer("fb-x", client=client)
     await placer.place_stop_loss(
         signal_id="sig-1",
@@ -175,12 +204,28 @@ async def test_stop_loss_short_sends_buy() -> None:
 
 
 @pytest.mark.asyncio
+async def test_stop_loss_returns_algo_id_as_order_id() -> None:
+    """algoId from the response is surfaced as order_id so callers
+    can store it and pass to cancel_algo_order."""
+    client = _algo_mock_client(
+        post_response=_ok_resp({"algoId": 99001, "clientAlgoId": "lumin_sig-1_sl"})
+    )
+    placer = order_placer.OrderPlacer("fb-x", client=client)
+    result = await placer.place_stop_loss(
+        signal_id="sig-1",
+        symbol="BTCUSDT",
+        direction="LONG",
+        stop_price=28500.0,
+    )
+    assert result.order_id == 99001
+    assert result.client_order_id == "lumin_sig-1_sl"
+
+
+@pytest.mark.asyncio
 async def test_stop_loss_accepts_coid_override() -> None:
-    """PR-7's BE shift will cancel the original SL + place a new one
-    with a distinct clientOrderId (you can't reuse the original; it's
-    associated with the cancelled order).  Verify the override is
-    plumbed through."""
-    client = _mock_client()
+    """BE shift will cancel the original SL + place a new one
+    with a distinct clientAlgoId.  Verify the override is plumbed through."""
+    client = _algo_mock_client()
     placer = order_placer.OrderPlacer("fb-x", client=client)
     await placer.place_stop_loss(
         signal_id="sig-1",
@@ -190,7 +235,8 @@ async def test_stop_loss_accepts_coid_override() -> None:
         coid_override="lumin_sig-1_sl_be",
     )
     params = client.binance_signed_post.call_args.kwargs["params"]
-    assert params["newClientOrderId"] == "lumin_sig-1_sl_be"
+    assert params["clientAlgoId"] == "lumin_sig-1_sl_be"
+    assert "newClientOrderId" not in params
 
 
 # ---------------------------------------------------------------------------
@@ -200,9 +246,10 @@ async def test_stop_loss_accepts_coid_override() -> None:
 
 @pytest.mark.asyncio
 async def test_take_profit_uses_reduce_only_and_explicit_quantity() -> None:
-    """TPs are partial closes — reduceOnly prevents accidentally
-    opening a reverse position if fill arithmetic is off."""
-    client = _mock_client()
+    """TPs are partial closes — reduceOnly prevents accidentally opening
+    a reverse position if fill arithmetic is off.  Uses algoType=CONDITIONAL
+    on /fapi/v1/algoOrder per the Binance mandatory migration Dec 9 2025."""
+    client = _algo_mock_client()
     placer = order_placer.OrderPlacer("fb-x", client=client)
     await placer.place_take_profit(
         signal_id="sig-1",
@@ -213,16 +260,18 @@ async def test_take_profit_uses_reduce_only_and_explicit_quantity() -> None:
         tp_phase="tp1",
     )
     params = client.binance_signed_post.call_args.kwargs["params"]
-    assert params["type"] == "TAKE_PROFIT_MARKET"
+    assert params["algoType"] == "CONDITIONAL"
+    assert "type" not in params  # not the old /fapi/v1/order style
     assert params["side"] == "SELL"  # LONG exit
     assert params["quantity"] == "0.3"
     assert params["reduceOnly"] == "true"
-    assert params["newClientOrderId"] == position_state.coid_tp1("sig-1")
+    assert params["clientAlgoId"] == position_state.coid_tp1("sig-1")
+    assert "newClientOrderId" not in params
 
 
 @pytest.mark.asyncio
 async def test_take_profit_phase_routes_to_correct_coid() -> None:
-    client = _mock_client()
+    client = _algo_mock_client()
     placer = order_placer.OrderPlacer("fb-x", client=client)
     await placer.place_take_profit(
         signal_id="sig-X",
@@ -233,9 +282,7 @@ async def test_take_profit_phase_routes_to_correct_coid() -> None:
         tp_phase="tp2",
     )
     assert (
-        client.binance_signed_post.call_args.kwargs["params"][
-            "newClientOrderId"
-        ]
+        client.binance_signed_post.call_args.kwargs["params"]["clientAlgoId"]
         == position_state.coid_tp2("sig-X")
     )
 
@@ -341,6 +388,54 @@ async def test_cancel_order_raises_on_other_failures() -> None:
     placer = order_placer.OrderPlacer("fb-x", client=client)
     with pytest.raises(order_placer.OrderRejectedByBinance):
         await placer.cancel_order(symbol="BTCUSDT", order_id=999)
+
+
+# ---------------------------------------------------------------------------
+# cancel_algo_order  (SL / TP orders placed via /fapi/v1/algoOrder)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_cancel_algo_order_swallows_not_found_2011() -> None:
+    """Binance -2011 on algo cancel = order already filled/cancelled.
+    Treat as success — we wanted it gone, it's gone."""
+    client = _algo_mock_client(
+        delete_response=_err_resp(
+            sig_protocol.ERR_BINANCE_HTTP_ERROR,
+            body={"code": -2011, "msg": "Unknown order sent"},
+        )
+    )
+    placer = order_placer.OrderPlacer("fb-x", client=client)
+    # Must not raise.
+    await placer.cancel_algo_order(symbol="BTCUSDT", algo_id=99001)
+
+
+@pytest.mark.asyncio
+async def test_cancel_algo_order_swallows_not_found_20121() -> None:
+    """Binance -20121 'Order does not exist' is the algo-API equivalent
+    of -2011 — treat as success."""
+    client = _algo_mock_client(
+        delete_response=_err_resp(
+            sig_protocol.ERR_BINANCE_HTTP_ERROR,
+            body={"code": -20121, "msg": "Order does not exist"},
+        )
+    )
+    placer = order_placer.OrderPlacer("fb-x", client=client)
+    await placer.cancel_algo_order(symbol="BTCUSDT", algo_id=99001)
+
+
+@pytest.mark.asyncio
+async def test_cancel_algo_order_raises_on_other_failures() -> None:
+    """Non-not-found failures DO raise from cancel_algo_order."""
+    client = _algo_mock_client(
+        delete_response=_err_resp(
+            sig_protocol.ERR_BINANCE_HTTP_ERROR,
+            body={"code": -1021, "msg": "Timestamp out of recvWindow"},
+        )
+    )
+    placer = order_placer.OrderPlacer("fb-x", client=client)
+    with pytest.raises(order_placer.OrderRejectedByBinance):
+        await placer.cancel_algo_order(symbol="BTCUSDT", algo_id=99001)
 
 
 # ---------------------------------------------------------------------------

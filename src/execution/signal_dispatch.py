@@ -707,10 +707,12 @@ async def close_fsm_positions_for_signal(
 
         placer = _op.OrderPlacer(uid)
 
-        # Cancel all open bracket orders — tolerant of -2011 (already
+        # Cancel all open bracket orders — tolerant of -2011/-20121 (already
         # gone, filled, or expired).  Cancel first so the MARKET close
         # below doesn't fight with a pending SL/TP that might otherwise
         # also close the position and over-reduce.
+        # SL and TP orders are algo orders (placed via /fapi/v1/algoOrder);
+        # cancel via cancel_algo_order, not cancel_order.
         for order_id in (
             pos.sl_order_id,
             pos.sl_be_order_id,
@@ -721,11 +723,11 @@ async def close_fsm_positions_for_signal(
             if not order_id:
                 continue
             try:
-                await placer.cancel_order(symbol=pos.symbol, order_id=order_id)
+                await placer.cancel_algo_order(symbol=pos.symbol, algo_id=order_id)
             except _op.OrderPlacementError as exc:
                 log.warning(
-                    "close_fsm: cancel_order failed uid={} signal_id={} "
-                    "order_id={} exc={}",
+                    "close_fsm: cancel_algo_order failed uid={} signal_id={} "
+                    "algo_id={} exc={}",
                     uid, signal_id, order_id, exc,
                 )
 
@@ -893,11 +895,11 @@ async def close_single_fsm_position(
         if not order_id:
             continue
         try:
-            await placer.cancel_order(symbol=pos.symbol, order_id=order_id)
+            await placer.cancel_algo_order(symbol=pos.symbol, algo_id=order_id)
         except _op.OrderPlacementError as exc:
             log.warning(
-                "close_single_fsm: cancel_order failed uid={} signal_id={} "
-                "order_id={} exc={}",
+                "close_single_fsm: cancel_algo_order failed uid={} signal_id={} "
+                "algo_id={} exc={}",
                 uid, signal_id, order_id, exc,
             )
 

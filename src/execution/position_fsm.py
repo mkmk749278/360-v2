@@ -305,14 +305,14 @@ class PositionFSM:
             ):
                 if _oid:
                     try:
-                        await placer.cancel_order(
+                        await placer.cancel_algo_order(
                             symbol=position.symbol,
-                            order_id=_oid,
+                            algo_id=_oid,
                         )
                     except _order_placer.OrderPlacementError as exc:
                         log.warning(
                             "_apply_pretp_fill: full-close cancel failed uid={} "
-                            "signal_id={} order_id={} exc={}",
+                            "signal_id={} algo_id={} exc={}",
                             self.firebase_uid, position.signal_id, _oid, exc,
                         )
             position.sl_order_id = 0
@@ -334,13 +334,13 @@ class PositionFSM:
 
         # Partial pre-TP — residual rides to TP1 with a BE-shifted SL.
         position.state = _position_state.PositionState.PRE_TP_FIRED
-        # Cancel original SL.  Tolerant of -2011 (order already gone)
+        # Cancel original SL.  Tolerant of -2011/-20121 (order already gone)
         # so a race between SL hit + pre-TP fill doesn't crash here.
         if position.sl_order_id:
             try:
-                await placer.cancel_order(
+                await placer.cancel_algo_order(
                     symbol=position.symbol,
-                    order_id=position.sl_order_id,
+                    algo_id=position.sl_order_id,
                 )
             except _order_placer.OrderPlacementError as exc:
                 log.warning(
@@ -352,14 +352,14 @@ class PositionFSM:
         for tp_order_id in (position.tp2_order_id, position.tp3_order_id):
             if tp_order_id:
                 try:
-                    await placer.cancel_order(
+                    await placer.cancel_algo_order(
                         symbol=position.symbol,
-                        order_id=tp_order_id,
+                        algo_id=tp_order_id,
                     )
                 except _order_placer.OrderPlacementError as exc:
                     log.warning(
                         "_apply_pretp_fill: TP cancel failed uid={} "
-                        "signal_id={} order_id={} exc={}",
+                        "signal_id={} algo_id={} exc={}",
                         self.firebase_uid, position.signal_id,
                         tp_order_id, exc,
                     )
@@ -417,9 +417,9 @@ class PositionFSM:
         placer = self._order_placer_factory(self.firebase_uid)
         if position.sl_order_id:
             try:
-                await placer.cancel_order(
+                await placer.cancel_algo_order(
                     symbol=position.symbol,
-                    order_id=position.sl_order_id,
+                    algo_id=position.sl_order_id,
                 )
             except _order_placer.OrderPlacementError as exc:
                 log.warning(

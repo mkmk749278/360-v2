@@ -1102,8 +1102,8 @@ async def test_close_fsm_positions_cancels_orders_and_market_closes() -> None:
                     cancel_calls = []
                     close_calls = []
 
-                    async def _mock_cancel(self_ignored, *, symbol, order_id):
-                        cancel_calls.append(order_id)
+                    async def _mock_cancel_algo(self_ignored, *, symbol, algo_id):
+                        cancel_calls.append(algo_id)
 
                     async def _mock_market_close(self_ignored, **kwargs):
                         close_calls.append(kwargs)
@@ -1113,7 +1113,7 @@ async def test_close_fsm_positions_cancels_orders_and_market_closes() -> None:
                             status="FILLED", avg_price=29000.0, binance_body={},
                         )
 
-                    with patch.object(_op.OrderPlacer, "cancel_order", _mock_cancel):
+                    with patch.object(_op.OrderPlacer, "cancel_algo_order", _mock_cancel_algo):
                         with patch.object(_op.OrderPlacer, "place_market_close", _mock_market_close):
                             result = await signal_dispatch.close_fsm_positions_for_signal(
                                 "sig-close-1",
@@ -1123,7 +1123,7 @@ async def test_close_fsm_positions_cancels_orders_and_market_closes() -> None:
                             )
 
     assert result == 1
-    # SL + TP1 + TP2 + TP3 should have been cancelled
+    # SL + TP1 + TP2 + TP3 should have been cancelled (all are algo orders)
     assert set(cancel_calls) == {1001, 2001, 2002, 2003}
     # Market close should have been placed
     assert len(close_calls) == 1
