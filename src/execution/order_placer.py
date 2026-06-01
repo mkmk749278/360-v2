@@ -45,6 +45,11 @@ log = get_logger("execution.order_placer")
 
 
 _FUTURES_ORDER_PATH = "/fapi/v1/order"
+# Binance mandatory migration (Dec 9 2025, -4120): conditional order types
+# (STOP_MARKET, TAKE_PROFIT_MARKET, TRAILING_STOP_MARKET) no longer accepted
+# at /fapi/v1/order; they must use /fapi/v1/algoOrder with algoType=CONDITIONAL.
+# MARKET and LIMIT order types are unaffected and stay on /fapi/v1/order.
+_FUTURES_ALGO_ORDER_PATH = "/fapi/v1/algoOrder"
 _FUTURES_MARGIN_TYPE_PATH = "/fapi/v1/marginType"
 _FUTURES_BASE = "futures"
 
@@ -115,6 +120,28 @@ def _parse_result(body: Any) -> OrderPlacementResult:
         client_order_id=str(body.get("clientOrderId", "")),
         status=str(body.get("status", "")),
         avg_price=float(body.get("avgPrice", "0") or 0),
+        binance_body=body,
+    )
+
+
+def _parse_algo_result(body: Any) -> OrderPlacementResult:
+    """Map a Binance ``POST /fapi/v1/algoOrder`` response body to typed result.
+
+    Algo orders return ``algoId`` (not ``orderId``) and ``clientAlgoId``
+    (not ``clientOrderId``).  We surface ``algoId`` as ``order_id`` so the
+    FSM can store it and pass it back to ``cancel_algo_order`` without
+    needing a separate field type.  ``status`` is always "NEW" — the algo
+    order is queued on Binance's side; fills arrive via User Data Stream.
+    """
+    if not isinstance(body, dict):
+        raise OrderPlacementError(
+            f"unexpected Binance algo response shape: {type(body).__name__}"
+        )
+    return OrderPlacementResult(
+        order_id=int(body.get("algoId", 0)),
+        client_order_id=str(body.get("clientAlgoId", "")),
+        status="NEW",
+        avg_price=0.0,
         binance_body=body,
     )
 
@@ -258,35 +285,40 @@ class OrderPlacer:
         stop_price: float,
         coid_override: Optional[str] = None,
     ) -> OrderPlacementResult:
-        """STOP_MARKET with ``closePosition=true`` — fires for the
-        full remaining position when ``stop_price`` is touched on
-        the configured ``workingType`` (default MARK_PRICE — less
-        wick-prone than CONTRACT_PRICE).
+        """Conditional stop order with ``closePosition=true``.
 
-        ``coid_override`` lets PR-7's BE-shift re-place an SL with a
-        new clientOrderId (since you can't modify SL price in place;
-        you cancel + replace).  Default uses the standard ``_sl``
-        suffix; PR-7 will use ``_sl_be`` to distinguish the
-        BE-shifted SL from the original.
+        Uses ``/fapi/v1/algoOrder`` with ``algoType=CONDITIONAL`` per the
+        Binance mandatory migration effective Dec 9 2025 (-4120).  The
+        legacy ``type=STOP_MARKET`` on ``/fapi/v1/order`` is rejected by
+        Binance on all accounts since that date.
+
+        Fires for the full remaining position when ``stop_price`` is
+        touched on MARK_PRICE — less wick-prone than CONTRACT_PRICE.
+
+        ``coid_override`` lets the BE-shift re-place an SL with a new
+        ``clientAlgoId`` (since you can't modify SL price in place; you
+        cancel + replace).  Default uses the standard ``_sl`` suffix;
+        BE-shift uses ``_sl_be`` to distinguish the new order from the
+        original on User Data Stream fill events.
+
+        Returns ``OrderPlacementResult`` with ``order_id = algoId`` so
+        callers can store it and pass it to ``cancel_algo_order``.
         """
         from src.execution import symbol_filters as _sf
         coid = coid_override or _position_state.coid_sl(signal_id)
         # Round stop_price to the symbol's tickSize so Binance doesn't
-        # reject with -4014 "Price not increased by tick size".  STOP-
-        # MARKET fires on mark-price cross so the rounding direction
-        # is doctrinally indifferent — floor by default keeps the
-        # behaviour deterministic across calls.
+        # reject with -4014 "Price not increased by tick size".
         rounded = _sf.round_price(symbol, stop_price)
         params = {
             "symbol": symbol,
             "side": _exit_side(direction),
-            "type": "STOP_MARKET",
+            "algoType": "CONDITIONAL",
             "stopPrice": _price_str(rounded),
             "closePosition": "true",
             "workingType": "MARK_PRICE",
-            "newClientOrderId": coid,
+            "clientAlgoId": coid,
         }
-        return await self._submit_order(
+        return await self._submit_algo_order(
             params=params,
             phase="sl",
             signal_id=signal_id,
@@ -302,13 +334,19 @@ class OrderPlacer:
         quantity: float,
         tp_phase: str,  # "tp1" | "tp2" | "tp3"
     ) -> OrderPlacementResult:
-        """TAKE_PROFIT_MARKET with explicit quantity for partial
-        close.  Lumin places TP1 / TP2 / TP3 as separate orders per
-        Binance's native split-target support (up to 4 TP legs per
-        position natively).
+        """Conditional take-profit order with explicit quantity for partial close.
 
-        ``reduceOnly=true`` so a TP can't accidentally open a position
-        on the opposite side if the fill arithmetic is off.
+        Uses ``/fapi/v1/algoOrder`` with ``algoType=CONDITIONAL`` per the
+        Binance mandatory migration effective Dec 9 2025 (-4120).  The
+        legacy ``type=TAKE_PROFIT_MARKET`` on ``/fapi/v1/order`` is rejected
+        by Binance on all accounts since that date.
+
+        Lumin places TP1 / TP2 / TP3 as separate orders per Binance's native
+        split-target support.  ``reduceOnly=true`` so a TP can't accidentally
+        open a counter-position if the fill arithmetic is off.
+
+        Returns ``OrderPlacementResult`` with ``order_id = algoId`` so
+        callers can store it and pass it to ``cancel_algo_order``.
         """
         from src.execution import symbol_filters as _sf
         if tp_phase not in ("tp1", "tp2", "tp3"):
@@ -322,14 +360,14 @@ class OrderPlacer:
         params = {
             "symbol": symbol,
             "side": _exit_side(direction),
-            "type": "TAKE_PROFIT_MARKET",
+            "algoType": "CONDITIONAL",
             "stopPrice": _price_str(rounded_price),
             "quantity": _qty_str(quantity),
             "reduceOnly": "true",
             "workingType": "MARK_PRICE",
-            "newClientOrderId": coid_fn(signal_id),
+            "clientAlgoId": coid_fn(signal_id),
         }
-        return await self._submit_order(
+        return await self._submit_algo_order(
             params=params,
             phase=tp_phase,
             signal_id=signal_id,
@@ -449,8 +487,12 @@ class OrderPlacer:
         symbol: str,
         order_id: int,
     ) -> None:
-        """Cancel an open order by Binance ``orderId``.  Used by PR-7
-        to drop the original SL before placing the BE-shifted one.
+        """Cancel a regular (non-algo) open order by Binance ``orderId``.
+
+        Used for LIMIT and MARKET orders on ``/fapi/v1/order`` — e.g. the
+        pre-TP LIMIT resting on Binance's book.  SL and TP orders placed via
+        ``place_stop_loss`` / ``place_take_profit`` are algo orders and must
+        be cancelled via ``cancel_algo_order`` instead.
 
         Raises :class:`OrderPlacementError` subclasses on failure;
         a "no such order" rejection is logged + swallowed (the order
@@ -466,7 +508,6 @@ class OrderPlacer:
         if resp.ok:
             return
         # -2011 = "Unknown order sent" — order already filled/cancelled.
-        # Treat as success; we wanted it gone, it's gone.
         if (
             resp.error_code == sig_protocol.ERR_BINANCE_HTTP_ERROR
             and isinstance(resp.binance_body, dict)
@@ -480,6 +521,45 @@ class OrderPlacer:
             return
         _raise_for_signing_error(resp, phase="cancel")
 
+    async def cancel_algo_order(
+        self,
+        *,
+        symbol: str,
+        algo_id: int,
+    ) -> None:
+        """Cancel an algo order by Binance ``algoId``.
+
+        Used to cancel SL and TP orders placed via ``place_stop_loss``
+        and ``place_take_profit``, which now use ``/fapi/v1/algoOrder``.
+        ``algo_id`` is the ``algoId`` field from the placement response,
+        surfaced as ``order_id`` in ``OrderPlacementResult``.
+
+        Tolerant of "already gone": Binance returns -2011 or -20121 when
+        the order was already filled / cancelled — both are swallowed since
+        the desired end-state (order gone) is already true.
+        """
+        params = {"symbol": symbol, "algoId": algo_id}
+        resp = await self._client.binance_signed_delete(
+            firebase_uid=self.firebase_uid,
+            base=_FUTURES_BASE,
+            path=_FUTURES_ALGO_ORDER_PATH,
+            params=params,
+        )
+        if resp.ok:
+            return
+        if (
+            resp.error_code == sig_protocol.ERR_BINANCE_HTTP_ERROR
+            and isinstance(resp.binance_body, dict)
+            and resp.binance_body.get("code") in (-2011, -20121)
+        ):
+            log.info(
+                "cancel_algo_order: algo order already gone (uid={} algo_id={})",
+                self.firebase_uid,
+                algo_id,
+            )
+            return
+        _raise_for_signing_error(resp, phase="cancel_algo")
+
     async def _submit_order(
         self,
         *,
@@ -487,7 +567,7 @@ class OrderPlacer:
         phase: str,
         signal_id: str,
     ) -> OrderPlacementResult:
-        """Shared POST + error-mapping helper for the place-order verbs."""
+        """Shared POST + error-mapping helper for MARKET/LIMIT order verbs."""
         resp = await self._client.binance_signed_post(
             firebase_uid=self.firebase_uid,
             base=_FUTURES_BASE,
@@ -504,6 +584,35 @@ class OrderPlacer:
             (resp.binance_body or {}).get("orderId"),
         )
         return _parse_result(resp.binance_body)
+
+    async def _submit_algo_order(
+        self,
+        *,
+        params: dict,
+        phase: str,
+        signal_id: str,
+    ) -> OrderPlacementResult:
+        """POST to ``/fapi/v1/algoOrder`` + error-mapping for conditional orders.
+
+        Returns ``OrderPlacementResult`` with ``order_id = algoId`` from the
+        response, so callers can store and later pass to ``cancel_algo_order``.
+        """
+        resp = await self._client.binance_signed_post(
+            firebase_uid=self.firebase_uid,
+            base=_FUTURES_BASE,
+            path=_FUTURES_ALGO_ORDER_PATH,
+            params=params,
+        )
+        if not resp.ok:
+            _raise_for_signing_error(resp, phase=phase)
+        log.info(
+            "algo order placed: uid={} signal_id={} phase={} algo_id={}",
+            self.firebase_uid,
+            signal_id,
+            phase,
+            (resp.binance_body or {}).get("algoId"),
+        )
+        return _parse_algo_result(resp.binance_body)
 
 
 # ---------------------------------------------------------------------------

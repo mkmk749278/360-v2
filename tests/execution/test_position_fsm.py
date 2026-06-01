@@ -55,7 +55,8 @@ def _stub_placer_factory():
     methods are AsyncMocks that return successful OrderPlacementResults
     by default — override per test if needed."""
     placer = MagicMock()
-    placer.cancel_order = AsyncMock(return_value=None)
+    placer.cancel_order = AsyncMock(return_value=None)  # for LIMIT / non-algo orders
+    placer.cancel_algo_order = AsyncMock(return_value=None)  # for SL / TP algo orders
     placer.ensure_cross_margin = AsyncMock(return_value=True)
     placer.place_market_close = AsyncMock(
         return_value=order_placer.OrderPlacementResult(
@@ -307,8 +308,8 @@ async def test_tp1_fill_transitions_open_to_tp1_hit_and_does_be_shift() -> None:
     assert captured[0].state == position_state.PositionState.TP1_HIT
     assert captured[0].closed_qty == 0.3
     assert captured[0].realized_pnl_total == 15.0
-    # BE shift: original SL cancelled, BE-SL placed at entry price.
-    placer.cancel_order.assert_called_once_with(symbol="BTCUSDT", order_id=2001)
+    # BE shift: original SL (algo order) cancelled, BE-SL placed at entry price.
+    placer.cancel_algo_order.assert_called_once_with(symbol="BTCUSDT", algo_id=2001)
     placer.place_stop_loss.assert_called_once()
     sl_kwargs = placer.place_stop_loss.call_args.kwargs
     assert sl_kwargs["stop_price"] == 29000.0  # entry_price_filled
@@ -342,7 +343,7 @@ async def test_tp1_after_pretp_does_not_redo_be_shift() -> None:
         )
     assert captured[0].state == position_state.PositionState.TP1_HIT
     # No redundant BE shift — the SL was already at BE.
-    placer.cancel_order.assert_not_called()
+    placer.cancel_algo_order.assert_not_called()
     placer.place_stop_loss.assert_not_called()
 
 
@@ -423,10 +424,10 @@ async def test_pretp_fill_transitions_open_to_pretp_fired_with_be_shift() -> Non
     assert captured[0].pretp_fired is True
     assert captured[0].closed_qty == 0.5
     assert captured[0].realized_pnl_total == 25.0
-    # 3 cancels: original SL + TP2 + TP3.  TP1 stays.
-    assert placer.cancel_order.await_count == 3
+    # 3 algo-order cancels: original SL + TP2 + TP3.  TP1 stays.
+    assert placer.cancel_algo_order.await_count == 3
     cancelled_ids = {
-        call.kwargs["order_id"] for call in placer.cancel_order.call_args_list
+        call.kwargs["algo_id"] for call in placer.cancel_algo_order.call_args_list
     }
     assert cancelled_ids == {2001, 3002, 3003}
     # BE-SL placed at entry price.
@@ -477,10 +478,10 @@ async def test_pretp_full_close_transitions_to_closed_no_be_shift() -> None:
     assert captured[0].close_reason == "PRE_TP"
     assert captured[0].closed_qty == 1.0
     assert captured[0].closed_at is not None
-    # All four legs cancelled — nothing left to ride to TP1.
-    assert placer.cancel_order.await_count == 4
+    # All four legs (algo orders) cancelled — nothing left to ride to TP1.
+    assert placer.cancel_algo_order.await_count == 4
     cancelled_ids = {
-        call.kwargs["order_id"] for call in placer.cancel_order.call_args_list
+        call.kwargs["algo_id"] for call in placer.cancel_algo_order.call_args_list
     }
     assert cancelled_ids == {2001, 3001, 3002, 3003}
     # No break-even SL placed — there is no residual to protect.
@@ -499,7 +500,7 @@ async def test_pretp_fill_tolerates_sl_cancel_failure() -> None:
     error fires, the pre-TP transition must still apply (don't leave
     the position in an inconsistent state)."""
     factory, placer = _stub_placer_factory()
-    placer.cancel_order = AsyncMock(
+    placer.cancel_algo_order = AsyncMock(
         side_effect=order_placer.OrderRejectedByBinance("network glitch")
     )
     fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
