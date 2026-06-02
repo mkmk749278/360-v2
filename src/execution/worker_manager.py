@@ -219,7 +219,7 @@ def _tick() -> None:
     for uid in uids:
         try:
             mode = resolve_user_mode_uid(uid)
-            if mode != "live":
+            if mode not in ("live", "both"):
                 continue
         except Exception as exc:
             log.debug("worker_manager: mode lookup failed uid={} exc={}", uid, exc)
