@@ -129,35 +129,12 @@ log = get_logger("api.server")
 
 _API_VERSION = "0.0.2"
 
-
-async def _warm_firebase_jwks() -> None:
-    """Pre-fetch Firebase JWKS so the first real token verify is fast.
-
-    Firebase Admin fetches Google's RS256 cert endpoint once and caches it
-    in-process (typically 5-minute TTL from cache-control).  On a cold
-    start / deploy restart the cache is empty; the first authenticated
-    request then blocks 2-5 s on the JWKS fetch before even reaching the
-    endpoint handler.  This background task fires at server startup to
-    seed that cache before any user request arrives.
-
-    The dummy ``verify_id_token`` call raises ``InvalidIdTokenError`` —
-    that's expected and swallowed.  The side-effect (JWKS is fetched +
-    cached) is what we want.
-    """
-    try:
-        import base64 as _b64
-        import json as _json
-
-        # Construct a well-formed JWT so firebase_admin gets past the
-        # header-decode step and into the key-fetch step before failing.
-        _hdr = _b64.urlsafe_b64encode(
-            _json.dumps({"alg": "RS256", "kid": "lumin-warmup-probe", "typ": "JWT"}).encode()
-        ).rstrip(b"=").decode()
-        _pay = _b64.urlsafe_b64encode(b'{"iss":"warmup"}').rstrip(b"=").decode()
-        _dummy = f"{_hdr}.{_pay}.AAAA"
-        await asyncio.to_thread(firebase_auth.verify_id_token, _dummy)
-    except Exception:
-        pass  # Expected — JWKS is now cached as a side effect
+# Request-latency log thresholds.  A request slower than the INFO bar is
+# worth a line; one slower than the WARNING bar is a subscriber-visible
+# stall on the trust surface and we want it loud.  Tuned for a 1-vCPU VPS
+# where a healthy cached read is sub-100ms.
+_SLOW_REQUEST_INFO_S: float = 0.20
+_SLOW_REQUEST_WARN_S: float = 1.00
 
 
 # ---------------------------------------------------------------------------
@@ -506,14 +483,13 @@ def build_app(
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         await _snapshot_cache.start(engine)
-        # Pre-warm Firebase JWKS so the first real token verify is fast.
-        # firebase_admin fetches Google's cert endpoint on the first call;
-        # without warming this blocks the first request for each user after
-        # a deploy restart (typically 2-5 s on a cold GCP fetch).  We kick
-        # a background task so it doesn't delay the server becoming ready.
-        asyncio.get_running_loop().create_task(
-            _warm_firebase_jwks(), name="jwks_warm"
-        )
+        # NOTE: Firebase JWKS is pre-warmed synchronously at engine boot in
+        # ``firebase_auth.init_firebase_admin`` (called from src.bootstrap)
+        # using a correctly-claimed probe token that reaches the cert fetch.
+        # The previous lifespan task here used a malformed probe that failed
+        # claim validation *before* the fetch — a no-op — so it was removed.
+        # Whether the SDK cert cache later expires under a live request is now
+        # measured by the cold-fetch WARNING in ``firebase_auth.verify_id_token``.
         yield
         await _snapshot_cache.stop()
 
@@ -545,6 +521,49 @@ def build_app(
     # on open, so the engine ships this payload 200-300x/hour per active
     # device — bandwidth + first-paint win compounds.
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    # Request-latency observability.  Registered LAST so it is the OUTERMOST
+    # layer — it measures the full request as the subscriber experiences it
+    # (routing + auth deps + handler + gzip), not just the handler body.
+    #
+    # We have flown blind on per-endpoint latency: every "the app is slow /
+    # blank on open" report has been diagnosed by theory, and at least one
+    # documented "fix" turned out to be a no-op.  This is the instrument that
+    # ends the guessing — structured per-request timing in the existing log
+    # stream, no external collector needed.  Healthy cached reads stay silent;
+    # only requests past the INFO/WARNING bars emit, so the signal-to-noise
+    # stays high on a busy engine.
+    @app.middleware("http")
+    async def _timing_middleware(request: Request, call_next):  # type: ignore[no-untyped-def]
+        start = time.monotonic()
+        try:
+            response = await call_next(request)
+        except Exception:
+            # Time even the failures — a slow 500 is still a slow request the
+            # subscriber waited on.  Re-raise so error handling is unchanged.
+            dur_ms = (time.monotonic() - start) * 1000.0
+            log.warning(
+                "api.request.error: {} {} dur_ms={:.0f}",
+                request.method, request.url.path, dur_ms,
+            )
+            raise
+        dur_s = time.monotonic() - start
+        if dur_s >= _SLOW_REQUEST_WARN_S:
+            log.warning(
+                "api.request.slow: {} {} status={} dur_ms={:.0f}",
+                request.method, request.url.path,
+                response.status_code, dur_s * 1000.0,
+            )
+        elif dur_s >= _SLOW_REQUEST_INFO_S:
+            log.info(
+                "api.request: {} {} status={} dur_ms={:.0f}",
+                request.method, request.url.path,
+                response.status_code, dur_s * 1000.0,
+            )
+        # Surface the server-measured time to the client/CDN for correlation
+        # with Cloudflare logs without needing log access on both sides.
+        response.headers["X-Response-Time-Ms"] = f"{dur_s * 1000.0:.0f}"
+        return response
 
     auth = _make_auth_dep(
         jwt_secret, static_token, allow_static, user_store=user_store,
@@ -1885,13 +1904,32 @@ async def serve_api(
         _cf.ThreadPoolExecutor(max_workers=32, thread_name_prefix="api-io")
     )
 
+    # NOTE on ``loop``: serve_api runs ``await server.serve()`` on the engine's
+    # already-running event loop (main.py: asyncio.run(_run())).  uvicorn only
+    # installs a loop policy when it OWNS the process, so a ``loop=`` setting
+    # here is a no-op — adopting uvloop is an engine-wide change at the
+    # top-level runner (and touches the FSM money-path loop), tracked
+    # separately.  The settings below ARE applied by uvicorn's protocol/server
+    # layer regardless of loop ownership, so they take effect here.
     config = uvicorn.Config(
         app=app,
         host=host,
         port=port,
         log_level="warning",
         access_log=False,
-        loop="asyncio",
+        # Mobile clients idle between tab navigations.  The uvicorn default
+        # (5s) drops the keep-alive connection in that gap, forcing a fresh
+        # TCP+TLS handshake (120-450ms on 4G) on the next request.  65s holds
+        # the connection across normal navigation pauses — one past the 60s
+        # idle most mobile carriers/NATs enforce.
+        timeout_keep_alive=65,
+        # Explicit ceiling so a traffic spike sheds load (503) instead of
+        # exhausting the 1-vCPU VPS and stalling every in-flight request.
+        # Well above realistic concurrent load at current subscriber scale.
+        limit_concurrency=200,
+        # Give in-flight requests a bounded window to drain on the ~45s
+        # deploy restart instead of being cut mid-response.
+        timeout_graceful_shutdown=30,
     )
     server = uvicorn.Server(config)
     log.info("API server listening on http://{}:{}", host, port)
