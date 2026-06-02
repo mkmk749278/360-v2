@@ -49,6 +49,9 @@ class SnapshotCache:
         # executor.  2 workers is enough — the three refresh tasks are
         # staggered in time and never need more than one thread simultaneously.
         self._executor = _TPE(max_workers=2, thread_name_prefix="snapshot-cache")
+        # Redis client — set in start_redis_mode(); when set, all three
+        # background loops read from Redis instead of from the engine object.
+        self._redis: Any = None
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -56,6 +59,7 @@ class SnapshotCache:
 
     async def start(self, engine: Any) -> None:
         self._engine = engine
+        self._redis = None
         loop = asyncio.get_running_loop()
         # Signals task
         if self._task is None or self._task.done():
@@ -87,6 +91,43 @@ class SnapshotCache:
             _AGENTS_INTERVAL_S,
         )
 
+    async def start_redis_mode(self, redis_client: Any) -> None:
+        """Start the cache in Redis-backed mode (isolated API container).
+
+        Instead of building Pydantic models from a live engine, the background
+        loops read pre-serialised JSON from the Redis keys written by
+        ``SnapshotWriter`` in the engine container.  The fallback path in
+        route handlers (``build_signals(engine, ...)`` when cache is cold)
+        still works because ``build_signals`` on a ``RedisEngineFacade`` reads
+        from ``router.active_signals`` which itself is backed by Redis state.
+        """
+        self._redis = redis_client
+        self._engine = None
+        if self._task is None or self._task.done():
+            # Pre-warm from Redis so the first request is served from cache.
+            try:
+                await self._refresh_signals_from_redis()
+            except Exception:
+                log.exception("snapshot_cache: Redis signals pre-warm failed — cache is cold")
+            self._task = asyncio.create_task(
+                self._signals_loop_redis(), name="snapshot_cache_signals_redis"
+            )
+        if self._activity_task is None or self._activity_task.done():
+            self._activity_task = asyncio.create_task(
+                self._activity_loop_redis(), name="snapshot_cache_activity_redis"
+            )
+        if self._agents_task is None or self._agents_task.done():
+            self._agents_task = asyncio.create_task(
+                self._agents_loop_redis(), name="snapshot_cache_agents_redis"
+            )
+        log.info(
+            "snapshot_cache: Redis-backed refresh started "
+            "(signals={}s activity={}s agents={}s)",
+            _SIGNALS_INTERVAL_S,
+            _ACTIVITY_INTERVAL_S,
+            _AGENTS_INTERVAL_S,
+        )
+
     async def stop(self) -> None:
         for task in (self._task, self._activity_task, self._agents_task):
             if task is not None:
@@ -102,7 +143,7 @@ class SnapshotCache:
         log.info("snapshot_cache: stopped")
 
     # ------------------------------------------------------------------
-    # Background loops
+    # Background loops — engine-backed (single-process mode)
     # ------------------------------------------------------------------
 
     async def _signals_loop(self) -> None:
@@ -133,8 +174,8 @@ class SnapshotCache:
                 log.exception("snapshot_cache: agents refresh failed — keeping stale cache")
 
     # ------------------------------------------------------------------
-    # Sync refreshers — dispatched via self._executor so Pydantic model
-    # construction runs on the dedicated pool, not the default event-loop pool.
+    # Sync refreshers (engine-backed) — dispatched via self._executor so
+    # Pydantic model construction runs on the dedicated pool.
     # ------------------------------------------------------------------
 
     def _refresh_signals_once(self) -> None:
@@ -157,6 +198,73 @@ class SnapshotCache:
 
         items = build_agents(self._engine)
         self._agents_all = items
+        self._agents_cached_at = time.monotonic()
+
+    # ------------------------------------------------------------------
+    # Background loops — Redis-backed (isolated API container mode)
+    # ------------------------------------------------------------------
+
+    async def _signals_loop_redis(self) -> None:
+        while True:
+            await asyncio.sleep(_SIGNALS_INTERVAL_S)
+            try:
+                await self._refresh_signals_from_redis()
+            except Exception:
+                log.exception("snapshot_cache: Redis signals refresh failed — keeping stale cache")
+
+    async def _activity_loop_redis(self) -> None:
+        while True:
+            await asyncio.sleep(_ACTIVITY_INTERVAL_S)
+            try:
+                await self._refresh_activity_from_redis()
+            except Exception:
+                log.exception("snapshot_cache: Redis activity refresh failed — keeping stale cache")
+
+    async def _agents_loop_redis(self) -> None:
+        while True:
+            await asyncio.sleep(_AGENTS_INTERVAL_S)
+            try:
+                await self._refresh_agents_from_redis()
+            except Exception:
+                log.exception("snapshot_cache: Redis agents refresh failed — keeping stale cache")
+
+    async def _refresh_signals_from_redis(self) -> None:
+        from .snapshot_store import KEY_SIGNALS_ALL, decode
+        from .schemas import SignalDetail
+
+        if not (self._redis and self._redis.available):
+            return
+        raw = await self._redis.client.get(KEY_SIGNALS_ALL)
+        data = decode(raw)
+        if data is None:
+            return
+        self._signals_all = [SignalDetail(**d) for d in data]
+        self._cached_at = time.monotonic()
+
+    async def _refresh_activity_from_redis(self) -> None:
+        from .snapshot_store import KEY_ACTIVITY_ALL, decode
+        from .schemas import ActivityEvent
+
+        if not (self._redis and self._redis.available):
+            return
+        raw = await self._redis.client.get(KEY_ACTIVITY_ALL)
+        data = decode(raw)
+        if data is None:
+            return
+        self._activity_all = [ActivityEvent(**d) for d in data]
+        self._activity_cached_at = time.monotonic()
+
+    async def _refresh_agents_from_redis(self) -> None:
+        from .snapshot_store import KEY_AGENTS_ALL, decode
+        from .schemas import AgentStat
+
+        if not (self._redis and self._redis.available):
+            return
+        raw = await self._redis.client.get(KEY_AGENTS_ALL)
+        data = decode(raw)
+        if data is None:
+            return
+        self._agents_all = [AgentStat(**d) for d in data]
         self._agents_cached_at = time.monotonic()
 
     # ------------------------------------------------------------------

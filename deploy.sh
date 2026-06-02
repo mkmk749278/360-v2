@@ -99,19 +99,31 @@ fi
 mkdir -p logs
 
 # ---------------------------------------------------------------------------
+# Compose profile selection — start the separate 'api' container only when
+# API_PROCESS_ISOLATED=true in .env.  In that mode the engine publishes
+# state to Redis (SnapshotWriter) and the 'api' service serves HTTP, so the
+# scanner's event loop never blocks API requests.
+# ---------------------------------------------------------------------------
+PROFILE_ARGS=()
+if grep -qE '^API_PROCESS_ISOLATED=(true|1|yes)$' .env 2>/dev/null; then
+    PROFILE_ARGS=(--profile isolated)
+    echo "🔀 API_PROCESS_ISOLATED=true — the separate 'api' container will be started."
+fi
+
+# ---------------------------------------------------------------------------
 # Build and start
 # ---------------------------------------------------------------------------
 echo "🔨 Building Docker image..."
-docker compose build --no-cache
+docker compose "${PROFILE_ARGS[@]}" build --no-cache
 
 echo "🚀 Starting engine..."
-docker compose up -d
+docker compose "${PROFILE_ARGS[@]}" up -d
 
 echo ""
 echo "✅ Deployment complete!"
 echo ""
 echo "📊 Status:"
-docker compose ps
+docker compose "${PROFILE_ARGS[@]}" ps
 echo ""
 echo "📋 Useful commands:"
 echo "  docker compose logs -f engine      # Follow live logs"

@@ -347,6 +347,7 @@ class Bootstrap:
             API_HOST,
             API_JWT_SECRET,
             API_PORT,
+            API_PROCESS_ISOLATED,
             BILLING_WEBHOOK_SECRET,
             LUMIN_DB_PATH,
             OTP_MAX_ATTEMPTS_PER_CODE,
@@ -587,25 +588,42 @@ class Bootstrap:
             engine.user_store = user_store
             engine.user_overrides = user_overrides
 
-            tasks.append(
-                asyncio.create_task(
-                    serve_api(
-                        engine,
-                        host=API_HOST,
-                        port=API_PORT,
-                        jwt_secret=API_JWT_SECRET,
-                        static_token=API_AUTH_TOKEN,
-                        allow_static=API_ALLOW_STATIC_TOKEN,
-                        cors_origins=origins,
-                        user_store=user_store,
-                        user_overrides=user_overrides,
-                        otp_store=otp_store,
-                        otp_delivery=otp_delivery,
-                        billing_verifier=billing_verifier,
-                    ),
-                    name="api_server",
+            if API_PROCESS_ISOLATED:
+                # API runs in its own container (``python -m src.api.main``).
+                # Engine side: launch SnapshotWriter so the API container has
+                # fresh state from Redis every scan cycle.  Do NOT launch
+                # serve_api here — that would put us back in the shared-loop
+                # situation we're trying to escape.
+                from src.api.snapshot_writer import SnapshotWriter
+                _sw = SnapshotWriter(engine, engine._redis_client)
+                tasks.append(
+                    asyncio.create_task(_sw.start(), name="snapshot_writer")
                 )
-            )
+                log.info(
+                    "API_PROCESS_ISOLATED=true — SnapshotWriter started; "
+                    "HTTP API served by the separate 'api' container"
+                )
+            else:
+                # Default: single-process mode — API shares the engine's event loop.
+                tasks.append(
+                    asyncio.create_task(
+                        serve_api(
+                            engine,
+                            host=API_HOST,
+                            port=API_PORT,
+                            jwt_secret=API_JWT_SECRET,
+                            static_token=API_AUTH_TOKEN,
+                            allow_static=API_ALLOW_STATIC_TOKEN,
+                            cors_origins=origins,
+                            user_store=user_store,
+                            user_overrides=user_overrides,
+                            otp_store=otp_store,
+                            otp_delivery=otp_delivery,
+                            billing_verifier=billing_verifier,
+                        ),
+                        name="api_server",
+                    )
+                )
 
         return tasks
 
