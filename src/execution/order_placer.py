@@ -287,10 +287,12 @@ class OrderPlacer:
     ) -> OrderPlacementResult:
         """Conditional stop order with ``closePosition=true``.
 
-        Uses ``/fapi/v1/algoOrder`` with ``algoType=CONDITIONAL`` per the
-        Binance mandatory migration effective Dec 9 2025 (-4120).  The
-        legacy ``type=STOP_MARKET`` on ``/fapi/v1/order`` is rejected by
-        Binance on all accounts since that date.
+        Uses ``/fapi/v1/algoOrder`` with ``algoType=CONDITIONAL`` +
+        ``type=STOP_MARKET`` per the Binance mandatory migration effective
+        Dec 9 2025 (-4120).  The legacy ``type=STOP_MARKET`` on
+        ``/fapi/v1/order`` is rejected on all accounts since that date.
+        The algo endpoint requires BOTH ``algoType`` AND ``type`` — omitting
+        ``type`` returns -1102 "Mandatory parameter 'type' was not sent".
 
         Fires for the full remaining position when ``stop_price`` is
         touched on MARK_PRICE — less wick-prone than CONTRACT_PRICE.
@@ -313,6 +315,7 @@ class OrderPlacer:
             "symbol": symbol,
             "side": _exit_side(direction),
             "algoType": "CONDITIONAL",
+            "type": "STOP_MARKET",
             "stopPrice": _price_str(rounded),
             "closePosition": "true",
             "workingType": "MARK_PRICE",
@@ -336,10 +339,12 @@ class OrderPlacer:
     ) -> OrderPlacementResult:
         """Conditional take-profit order with explicit quantity for partial close.
 
-        Uses ``/fapi/v1/algoOrder`` with ``algoType=CONDITIONAL`` per the
-        Binance mandatory migration effective Dec 9 2025 (-4120).  The
-        legacy ``type=TAKE_PROFIT_MARKET`` on ``/fapi/v1/order`` is rejected
-        by Binance on all accounts since that date.
+        Uses ``/fapi/v1/algoOrder`` with ``algoType=CONDITIONAL`` +
+        ``type=TAKE_PROFIT_MARKET`` per the Binance mandatory migration
+        effective Dec 9 2025 (-4120).  The legacy ``type=TAKE_PROFIT_MARKET``
+        on ``/fapi/v1/order`` is rejected on all accounts since that date.
+        The algo endpoint requires BOTH ``algoType`` AND ``type`` — omitting
+        ``type`` returns -1102 "Mandatory parameter 'type' was not sent".
 
         Lumin places TP1 / TP2 / TP3 as separate orders per Binance's native
         split-target support.  ``reduceOnly=true`` so a TP can't accidentally
@@ -361,6 +366,7 @@ class OrderPlacer:
             "symbol": symbol,
             "side": _exit_side(direction),
             "algoType": "CONDITIONAL",
+            "type": "TAKE_PROFIT_MARKET",
             "stopPrice": _price_str(rounded_price),
             "quantity": _qty_str(quantity),
             "reduceOnly": "true",
