@@ -185,3 +185,104 @@ def test_init_is_idempotent() -> None:
 
 def test_is_initialised_false_before_init() -> None:
     assert firebase_auth.is_initialised() is False
+
+
+# ---------------------------------------------------------------------------
+# JWKS pre-warm — boot-time cert cache seeding + measurement
+# ---------------------------------------------------------------------------
+
+
+def test_build_prewarm_token_carries_valid_claims() -> None:
+    """The probe token must pass firebase_admin's claim gate (correct iss,
+    aud, sub, exp) so the SDK proceeds to the cert fetch before failing on
+    the garbage signature.  A malformed-claims probe (the old server.py bug)
+    fails claim validation FIRST and never fetches — a silent no-op."""
+    import base64
+    import json
+
+    token = firebase_auth._build_prewarm_token("test-project")
+    header_b64, payload_b64, sig = token.split(".")
+
+    def _decode(seg: str) -> dict:
+        seg += "=" * (-len(seg) % 4)  # restore base64url padding
+        return json.loads(base64.urlsafe_b64decode(seg))
+
+    header = _decode(header_b64)
+    payload = _decode(payload_b64)
+    assert header["alg"] == "RS256"
+    assert header["kid"]  # a kid must be present or the SDK rejects pre-fetch
+    # The claims that must be correct for the SDK to reach the cert fetch:
+    assert payload["iss"] == "https://securetoken.google.com/test-project"
+    assert payload["aud"] == "test-project"
+    assert payload["sub"]
+    assert payload["exp"] > payload["iat"]
+    assert sig  # signature segment present (garbage is fine — fetch precedes verify)
+
+
+def test_prewarm_jwks_once_returns_negative_when_not_initialised() -> None:
+    """Nothing to warm when Firebase isn't wired — return the -1.0 sentinel
+    so the caller's log distinguishes 'skipped' from 'warmed in 0ms'."""
+    assert firebase_auth.is_initialised() is False
+    assert firebase_auth.prewarm_jwks_once() == -1.0
+
+
+def test_prewarm_jwks_once_measures_and_swallows_verify_failure() -> None:
+    """When initialised, the warm calls the SDK verify (which fails on the
+    garbage signature — expected) and returns a non-negative measured
+    duration.  The failure must NOT propagate; the cert fetch side effect is
+    the point, not the verification result."""
+    _force_initialised()
+    with patch(
+        "firebase_admin.auth.verify_id_token",
+        side_effect=ValueError("garbage signature — expected"),
+    ) as mock_verify:
+        dur = firebase_auth.prewarm_jwks_once()
+    mock_verify.assert_called_once()
+    assert dur >= 0.0  # measured, not the -1.0 not-initialised sentinel
+
+
+def test_verify_id_token_warns_on_slow_cold_fetch() -> None:
+    """A verify call slower than the cold-fetch bar must emit a WARNING — the
+    instrument that reveals a JWKS cold fetch landing on a live request.
+
+    loguru's pytest bridge is sticky (see test_geoblock), so rather than
+    asserting on captured records we patch the module logger and assert the
+    warning verb fired.  time.monotonic is patched to advance past the
+    threshold deterministically (no real sleep)."""
+    from unittest.mock import MagicMock
+
+    _force_initialised()
+    fake_claims = {"uid": "fb-slow", "phone_number": "+15550000000"}
+
+    # verify_id_token reads time.monotonic three times: cache-check (now),
+    # verify_start, verify_end.  Make (verify_end - verify_start) exceed the
+    # cold-fetch bar so the WARNING branch is taken.
+    over = firebase_auth._COLD_FETCH_WARN_S + 0.05
+    ticks = iter([100.0, 100.0, 100.0 + over])
+    fake_log = MagicMock()
+    with patch("firebase_admin.auth.verify_id_token", return_value=fake_claims), \
+            patch("src.api.firebase_auth.time.monotonic", side_effect=lambda: next(ticks)), \
+            patch("src.api.firebase_auth.log", fake_log):
+        result = firebase_auth.verify_id_token("slow.cold.token")
+
+    assert result == fake_claims  # instrumentation must not alter the result
+    assert fake_log.warning.called, "expected a cold-fetch WARNING when verify is slow"
+    warn_msg = fake_log.warning.call_args[0][0]
+    assert "slow" in warn_msg.lower()
+
+
+def test_verify_id_token_no_warn_on_fast_verify() -> None:
+    """A warm (sub-threshold) verify must stay silent — keeps the cold-fetch
+    WARNING high-signal on a busy engine instead of firing every request."""
+    from unittest.mock import MagicMock
+
+    _force_initialised()
+    fake_claims = {"uid": "fb-fast", "phone_number": "+15551112222"}
+    ticks = iter([100.0, 100.0, 100.0 + 0.001])  # 1ms — well under the bar
+    fake_log = MagicMock()
+    with patch("firebase_admin.auth.verify_id_token", return_value=fake_claims), \
+            patch("src.api.firebase_auth.time.monotonic", side_effect=lambda: next(ticks)), \
+            patch("src.api.firebase_auth.log", fake_log):
+        firebase_auth.verify_id_token("fast.warm.token")
+
+    assert not fake_log.warning.called, "fast verify must not emit the cold-fetch WARNING"

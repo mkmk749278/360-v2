@@ -266,6 +266,34 @@ def test_health_returns_uptime(client: TestClient) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Request-latency observability middleware
+# ---------------------------------------------------------------------------
+
+
+def test_response_carries_server_timing_header(client: TestClient) -> None:
+    """Every response exposes the server-measured duration so it can be
+    correlated with Cloudflare/edge logs without log access on both sides.
+    This is the outermost-middleware contract — it must hold for a plain
+    200 like /api/health."""
+    r = client.get("/api/health")
+    assert r.status_code == 200
+    assert "X-Response-Time-Ms" in r.headers
+    # Header is a non-negative integer-ms string.
+    val = float(r.headers["X-Response-Time-Ms"])
+    assert val >= 0.0
+
+
+def test_timing_header_present_on_error_responses(auth_client: TestClient) -> None:
+    """The timing layer wraps failures too — a 401 still carries the header,
+    proving the middleware is outermost (it sees the response the auth
+    dependency short-circuited)."""
+    # No bearer token → 401 from the auth dependency.
+    r = auth_client.get("/api/pulse")
+    assert r.status_code == 401
+    assert "X-Response-Time-Ms" in r.headers
+
+
+# ---------------------------------------------------------------------------
 # Pulse
 # ---------------------------------------------------------------------------
 

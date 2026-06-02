@@ -79,6 +79,15 @@ _project_id: Optional[str] = None
 _VERIFY_CACHE_TTL: float = 60.0       # seconds
 _VERIFY_CACHE_MAX: int = 512          # entries before lazy pruning
 _verify_cache: Dict[str, Tuple[float, Dict[str, Any]]] = {}
+
+# Above this wall-clock duration, an SDK ``verify_id_token`` call almost
+# certainly paid for a cold JWKS cert fetch (a warm RSA verify is sub-ms).
+# Crossing it means a real user request hit the googleapis.com round-trip —
+# the exact symptom the boot pre-warm is meant to prevent.  We log it at
+# WARNING so production logs reveal whether (and how often) the SDK cert
+# cache expires under us, which is the data that decides if a periodic
+# re-warm is worth building.  Pure instrumentation — no behaviour change.
+_COLD_FETCH_WARN_S: float = 0.25
 _verify_cache_lock = threading.Lock()
 
 
@@ -108,6 +117,43 @@ def _build_prewarm_token(project_id: str) -> str:
         "exp": now + 3600,
     }).encode())
     return f"{header}.{payload}.AAAA"
+
+
+def prewarm_jwks_once() -> float:
+    """Force-fetch Google's Firebase signing certs into the SDK's cert cache.
+
+    Builds a token with valid ``iss``/``aud``/``sub``/``exp`` claims so the SDK
+    proceeds *past* claim validation to the cert fetch (``google.oauth2.
+    id_token.verify_token``) before failing on the garbage signature.  That
+    fetch — and the in-process cache it populates — is the entire point; the
+    signature failure is expected and swallowed.
+
+    Returns the measured wall-clock duration of the warm in seconds, or
+    ``-1.0`` when Firebase is not initialised (nothing to warm).  The caller
+    logs the duration so production logs show, on every boot, *how long* the
+    JWKS fetch actually took — the number that tells us whether the cold-start
+    penalty is real on this VPS and whether it ever lands on a user request.
+
+    Idempotent and safe to call repeatedly.  A second call within the SDK's
+    cert cache-control window returns from cache without a network round-trip;
+    a call after the cache expires re-fetches.  Whether a *periodic* re-warm
+    is needed to defeat the ~1 h cache TTL is an open question pending the
+    cold-fetch instrumentation in :func:`verify_id_token` — we measure the
+    real recurrence in production before building (and tuning) a re-warm loop.
+    """
+    if not is_initialised():
+        return -1.0
+    pid = _project_id or ""
+    start = time.monotonic()
+    try:
+        from firebase_admin import auth as _fb_auth  # type: ignore[import-not-found]
+
+        _fb_auth.verify_id_token(_build_prewarm_token(pid))
+    except Exception:
+        # Expected — the garbage signature fails verification, but the cert
+        # fetch (the side effect we want) already happened before that point.
+        pass
+    return time.monotonic() - start
 
 
 def init_firebase_admin(service_account_path: str, project_id: str) -> None:
@@ -152,12 +198,8 @@ def init_firebase_admin(service_account_path: str, project_id: str) -> None:
     # at this point so racing is not a concern — we just want the cache warm
     # before the first authenticated HTTP request arrives.
     log.info("Firebase JWKS pre-warm: fetching googleapis.com certs...")
-    try:
-        from firebase_admin import auth as _fb_auth  # type: ignore[import-not-found]
-        _fb_auth.verify_id_token(_build_prewarm_token(project_id))
-    except Exception:
-        pass  # expected failure — JWKS is now cached for ~1 h
-    log.info("Firebase JWKS pre-warm complete")
+    warm_s = prewarm_jwks_once()
+    log.info("Firebase JWKS pre-warm complete in {:.0f}ms", warm_s * 1000.0)
 
 
 def is_initialised() -> bool:
@@ -199,6 +241,7 @@ def verify_id_token(id_token: str) -> Dict[str, Any]:
     # harness that mocks this function).
     from firebase_admin import auth as fb_auth  # type: ignore[import-not-found]
 
+    verify_start = time.monotonic()
     try:
         claims = fb_auth.verify_id_token(id_token)
     except Exception as exc:
@@ -208,6 +251,15 @@ def verify_id_token(id_token: str) -> Dict[str, Any]:
         # with the underlying message — the caller doesn't care WHY
         # the token failed, only that it did.
         raise AuthError(f"firebase id-token verification failed: {exc}")
+    verify_s = time.monotonic() - verify_start
+    if verify_s >= _COLD_FETCH_WARN_S:
+        # Probable cold JWKS cert fetch on a live request — the boot warm
+        # either hasn't run or the SDK cert cache has since expired.
+        log.warning(
+            "firebase verify_id_token slow: {:.0f}ms — probable cold JWKS "
+            "cert fetch on a live request (boot warm expired or never ran)",
+            verify_s * 1000.0,
+        )
 
     with _verify_cache_lock:
         _verify_cache[id_token] = (now, claims)

@@ -46,6 +46,24 @@ def _reset_kill_switch():
     kill_switch.reset_for_test()
 
 
+@pytest.fixture(autouse=True)
+def _reset_runtime_cache():
+    """Clear the per-uid runtime-status TTL cache between tests.
+
+    ``auto_trade_status_routes`` memoises each user's runtime-status payload
+    for ``_RUNTIME_CACHE_TTL_S`` (PR #561).  The cache is module-global, so
+    without a reset a payload built by one test leaks into the next when they
+    share a firebase_uid — which made ``test_runtime_status_reads_symbol_
+    allowlist_from_env`` pass alone but fail in-file (order-dependent), and is
+    the same global-state hazard every other test in this module is exposed
+    to.  Reset before and after so each test starts cold.
+    """
+    from src.api import auto_trade_status_routes
+    auto_trade_status_routes._runtime_cache.clear()
+    yield
+    auto_trade_status_routes._runtime_cache.clear()
+
+
 # ---------------------------------------------------------------------------
 # Auth + identity
 # ---------------------------------------------------------------------------
@@ -397,16 +415,21 @@ def test_runtime_status_no_mode_leak_across_users(monkeypatch) -> None:
     monkeypatch.setattr(_uo, "_SINGLETON", fake_overrides_store, raising=False)
 
     # User A request — mode resolves to "paper".
-    app = _build_app(identity=_firebase_user(uid="fb-A"))
-    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    app_a = _build_app(identity=_firebase_user(uid="fb-A"))
+    body = TestClient(app_a).get("/api/auto-trade/runtime-status").json()
     assert body["user_mode"] == "paper"
 
-    # User B has no row.  Re-point the user_store to return user_id=2
-    # and re-request — must come back as None, NOT carried over from
-    # the prior request.
+    # User B is a DISTINCT user — distinct firebase_uid (as every real user
+    # is; firebase_uid is the stable per-user identity) resolving to
+    # user_id=2 with no override row.  Must come back as None, NOT carried
+    # over from user A.  Using a distinct uid is also what keeps the per-uid
+    # runtime cache (PR #561) honest: the leak this pins is per-USER, and two
+    # users never share a uid, so the cache key differs and cannot serve A's
+    # payload to B.
     user_b = MagicMock(user_id=2)
     fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=user_b)
-    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    app_b = _build_app(identity=_firebase_user(uid="fb-B"))
+    body = TestClient(app_b).get("/api/auto-trade/runtime-status").json()
     assert body["user_mode"] is None, (
         "Per-user isolation: user B without a row must NOT inherit "
         "user A's mode (regression pin for the operator-override leak)."
