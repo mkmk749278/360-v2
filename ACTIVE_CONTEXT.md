@@ -4,6 +4,56 @@
 
 ---
 
+## In-session checkpoint 2026-06-02 (session 13) — API/engine process isolation (PR open)
+
+### Confirmed symptom (owner report)
+Settings changes (pre-TP / invalidation / auto-trade toggles) only took effect
+"when the scanner completes and the system is free." During a scan cycle the app
+got 5/8/10s timeouts and the toggle had to be tapped multiple times. Pulse + Trade
+tabs and fresh-signal loads showed stale data and needed multiple retries.
+
+### Root cause
+`serve_api()` ran as an asyncio task **inside the engine process**, sharing one
+event loop with `scan_loop` (15s × 75 pairs), the trade monitor, and the FSM
+workers. While the scanner held the loop, every API request — settings PUTs, tab
+GETs, signal fetches — queued behind it. The app's client timeout fired first,
+hence the retries.
+
+### Fix (owner-approved 2026-06-02): API/engine process isolation
+Behind `API_PROCESS_ISOLATED` (default false — single-process behaviour unchanged):
+
+- **Engine container** runs `SnapshotWriter` (`src/api/snapshot_writer.py`) — every
+  scan cycle it serialises engine state → Redis keys (`snapshot:*`, see
+  `src/api/snapshot_store.py`). It does **not** run the HTTP server.
+- **New `api` container** (`python -m src.api.main`, compose profile `isolated`)
+  serves HTTP on its own event loop, backed by `RedisEngineFacade`
+  (`src/api/redis_engine.py`) which reads the Redis snapshots. The existing
+  `build_app` / route layer is reused unchanged.
+- **Settings/mode writes** from the API container go to shared SQLite directly;
+  auto-mode flips queue a Redis command (`snapshot:cmd:set_mode`) the engine
+  applies on its next scan cycle (≤15s) via `SnapshotWriter._apply_pending_mode_cmd`.
+- `snapshot_cache.start_redis_mode()` feeds the signals/activity/agents caches
+  from Redis instead of building Pydantic models against a live engine.
+
+### Expected outcome
+Settings toggle confirms <500ms (no scanner contention); takes effect within one
+scan cycle. Tab loads + signal fetches hit the dedicated API process — no queue
+behind the scanner.
+
+### Tests
+- `tests/api/test_snapshot_store.py` (9) — encode/decode + TTL invariants
+- `tests/api/test_snapshot_writer.py` (6) — engine-state builder shape + JSON-serialisability
+- `tests/api/test_redis_engine.py` (17) — facade property accessors + mode-queue contract
+- `tests/api/test_isolated_api_smoke.py` (5) — full path: facade → build_app → HTTP, incl. mode-change queues to Redis
+- Full suite green: 5362 passed (+ new 37) / 433 API.
+
+### Rollout
+Ships disabled (`API_PROCESS_ISOLATED=false`). Flip to true in `.env` and redeploy
+(`deploy.sh` auto-adds `--profile isolated`). Money path (FSM, blast-radius caps,
+signing service) untouched. Rollback: flip false, redeploy.
+
+---
+
 ## In-session checkpoint 2026-06-01 (session 12c) — Widen the SL transient-retry window
 
 ### Symptom (post PR #555)

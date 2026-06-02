@@ -482,7 +482,15 @@ def build_app(
 
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
-        await _snapshot_cache.start(engine)
+        # In isolated mode (API_PROCESS_ISOLATED=true) the engine object is a
+        # RedisEngineFacade; start the cache in Redis-backed mode so the
+        # background refresh loops read from snapshot:* keys rather than
+        # calling build_signals(engine) against an in-memory stub.
+        from .redis_engine import RedisEngineFacade as _REF
+        if isinstance(engine, _REF):
+            await _snapshot_cache.start_redis_mode(engine._redis)
+        else:
+            await _snapshot_cache.start(engine)
         # NOTE: Firebase JWKS is pre-warmed synchronously at engine boot in
         # ``firebase_auth.init_firebase_admin`` (called from src.bootstrap)
         # using a correctly-claimed probe token that reaches the cert fetch.

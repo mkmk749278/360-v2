@@ -1999,6 +1999,14 @@ API_AUTH_TOKEN: str = os.getenv("API_AUTH_TOKEN", "")
 API_ALLOW_STATIC_TOKEN: bool = _safe_bool("API_ALLOW_STATIC_TOKEN", "true")
 #: Comma-separated CORS origins.  ``*`` for any (development only).
 API_CORS_ORIGINS: str = os.getenv("API_CORS_ORIGINS", "*")
+#: When true the engine does NOT launch ``serve_api`` as an asyncio task;
+#: instead it runs only ``SnapshotWriter`` which publishes live state to
+#: Redis every scan cycle.  A separate ``api`` Docker service (running
+#: ``python -m src.api.main``) reads those snapshots and serves HTTP.
+#: This eliminates the shared-event-loop bottleneck: scanner cycles can
+#: no longer block API requests and settings changes take effect in <500ms.
+#: Default false → existing single-process behaviour is unchanged.
+API_PROCESS_ISOLATED: bool = _safe_bool("API_PROCESS_ISOLATED", "false")
 
 # ---------------------------------------------------------------------------
 # Multi-user expansion (Phase 2 — phone-OTP auth + billing webhook)
