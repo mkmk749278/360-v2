@@ -24,6 +24,7 @@ the messaging without an app release.
 from __future__ import annotations
 
 import asyncio
+import time
 from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -31,6 +32,28 @@ from fastapi import Depends, FastAPI, HTTPException, status
 from src.utils import get_logger
 
 log = get_logger("api.auto_trade_status_routes")
+
+# ---------------------------------------------------------------------------
+# Per-user TTL cache for the runtime-status endpoint.
+# The endpoint does 4–5 async reads (kill-switch, keystore, user row, mode,
+# allowlist).  A 10 s TTL captures the polling pattern (app refreshes
+# every 5–15 s) while staying fresh enough for armed/disarmed transitions.
+# Invalidated explicitly when the user's mode changes via PUT
+# /api/settings/user/auto-trade so a toggle is reflected on the next poll.
+# ---------------------------------------------------------------------------
+
+_RUNTIME_CACHE_TTL_S: float = 10.0
+_runtime_cache: dict[str, tuple[dict, float]] = {}  # uid → (payload, mono)
+
+
+def invalidate_runtime_cache(firebase_uid: str) -> None:
+    """Drop the cached runtime-status for one user.
+
+    Called from the PUT /api/settings/user/auto-trade handler so a mode
+    toggle is reflected on the app's next runtime-status poll rather than
+    waiting up to ``_RUNTIME_CACHE_TTL_S`` seconds.
+    """
+    _runtime_cache.pop(firebase_uid, None)
 
 
 def register(
@@ -156,10 +179,12 @@ def register(
             }
 
         ``armed`` = ``globally_enabled AND !user_disabled AND
-        binance_key_connected AND user_mode == "live"`` — the four gates
-        the FSM checks before placing an order.  Symbol allowlist is
-        per-signal (not per-user state), so it's surfaced as a list
-        rather than collapsed into ``armed``.
+        binance_key_connected AND user_mode in ("live", "both")`` — the
+        four gates the FSM checks before placing an order.  "both" fires
+        real Binance orders AND runs the paper simulator simultaneously,
+        so it counts as armed.  Symbol allowlist is per-signal (not
+        per-user state), so it's surfaced as a list rather than
+        collapsed into ``armed``.
 
         Lazy-loads kill_switch + firestore_keystore so this route still
         responds (default-safe) when the engine boots without GCP env.
@@ -175,6 +200,13 @@ def register(
                     "Auto-trade runtime status requires Firebase sign-in."
                 ),
             )
+
+        # Fast path: serve cached payload if it's still fresh.
+        _cached = _runtime_cache.get(firebase_uid)
+        if _cached is not None:
+            _payload, _written = _cached
+            if time.monotonic() - _written < _RUNTIME_CACHE_TTL_S:
+                return _payload
 
         # Reuse the per-user-status logic for the two kill-switch flags.
         globally_enabled = False
@@ -291,10 +323,10 @@ def register(
             globally_enabled
             and not user_disabled
             and binance_key_connected
-            and user_mode == "live"
+            and user_mode in ("live", "both")
         )
 
-        return {
+        result = {
             "auto_trade_globally_enabled": globally_enabled,
             "auto_trade_user_disabled": user_disabled,
             "binance_key_connected": binance_key_connected,
@@ -303,6 +335,8 @@ def register(
             "effective_allowed_symbols": effective,
             "armed": armed,
         }
+        _runtime_cache[firebase_uid] = (result, time.monotonic())
+        return result
 
     @app.get(
         "/api/auto-trade/positions",

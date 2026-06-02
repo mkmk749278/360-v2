@@ -1013,16 +1013,36 @@ def _enforce_safety_gates(
       7. Rate limit — LAST so a tripwire-rejection above doesn't
          count against the user's order budget.
 
-    The kill_switch + tripwires modules silently no-op when they're
-    not initialised (e.g. dev path without GCP wired), so this gate
-    chain doesn't crash in test / dev contexts that haven't booted
-    the full server-side execution stack.
+    In dev/test (no FIREBASE_PROJECT_ID env) the kill_switch gate is
+    skipped — the module is never initialised in those contexts and
+    there is no Firestore to query.  In production (FIREBASE_PROJECT_ID
+    set), a missing kill_switch initialisation is treated as a
+    fail-safe: orders are refused until the module is healthy so a
+    bootstrap partial-failure can't silently bypass the global gate.
     """
+    import os as _os
+
     from . import kill_switch as _kill_switch
     from . import tripwires as _tripwires
 
     # 1 + 2 + 3 — Firestore-backed flags (cached 5s).
-    if _kill_switch.is_initialised():
+    if not _kill_switch.is_initialised():
+        if _os.environ.get("FIREBASE_PROJECT_ID"):
+            # Firebase is configured but kill_switch failed to start — fail
+            # closed rather than silently skipping the global-enable gate.
+            # This protects against a bootstrap partial-failure where the
+            # signing service is up but the kill-switch Firestore client is
+            # not, which would otherwise let orders through with no global
+            # oversight.  Check bootstrap logs for the root cause.
+            raise NotGloballyEnabledError(
+                "kill-switch module not initialised — Firebase env is set but "
+                "kill_switch failed to start; check bootstrap logs. "
+                "Refusing order as fail-safe until kill_switch is healthy."
+            )
+        # No FIREBASE_PROJECT_ID → dev/test without the full server-side
+        # execution stack.  Skip global gates; per-user mode + tripwires
+        # still apply.
+    else:
         ks = _kill_switch.get_client()
         if not ks.is_globally_enabled():
             raise NotGloballyEnabledError(

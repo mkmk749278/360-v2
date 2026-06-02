@@ -130,6 +130,36 @@ log = get_logger("api.server")
 _API_VERSION = "0.0.2"
 
 
+async def _warm_firebase_jwks() -> None:
+    """Pre-fetch Firebase JWKS so the first real token verify is fast.
+
+    Firebase Admin fetches Google's RS256 cert endpoint once and caches it
+    in-process (typically 5-minute TTL from cache-control).  On a cold
+    start / deploy restart the cache is empty; the first authenticated
+    request then blocks 2-5 s on the JWKS fetch before even reaching the
+    endpoint handler.  This background task fires at server startup to
+    seed that cache before any user request arrives.
+
+    The dummy ``verify_id_token`` call raises ``InvalidIdTokenError`` —
+    that's expected and swallowed.  The side-effect (JWKS is fetched +
+    cached) is what we want.
+    """
+    try:
+        import base64 as _b64
+        import json as _json
+
+        # Construct a well-formed JWT so firebase_admin gets past the
+        # header-decode step and into the key-fetch step before failing.
+        _hdr = _b64.urlsafe_b64encode(
+            _json.dumps({"alg": "RS256", "kid": "lumin-warmup-probe", "typ": "JWT"}).encode()
+        ).rstrip(b"=").decode()
+        _pay = _b64.urlsafe_b64encode(b'{"iss":"warmup"}').rstrip(b"=").decode()
+        _dummy = f"{_hdr}.{_pay}.AAAA"
+        await asyncio.to_thread(firebase_auth.verify_id_token, _dummy)
+    except Exception:
+        pass  # Expected — JWKS is now cached as a side effect
+
+
 # ---------------------------------------------------------------------------
 # Auth schemas
 # ---------------------------------------------------------------------------
@@ -476,6 +506,14 @@ def build_app(
     @asynccontextmanager
     async def _lifespan(_app: FastAPI):
         await _snapshot_cache.start(engine)
+        # Pre-warm Firebase JWKS so the first real token verify is fast.
+        # firebase_admin fetches Google's cert endpoint on the first call;
+        # without warming this blocks the first request for each user after
+        # a deploy restart (typically 2-5 s on a cold GCP fetch).  We kick
+        # a background task so it doesn't delay the server becoming ready.
+        asyncio.get_running_loop().create_task(
+            _warm_firebase_jwks(), name="jwks_warm"
+        )
         yield
         await _snapshot_cache.stop()
 
@@ -1770,6 +1808,19 @@ def build_app(
             await user_overrides.aresume_user_auto_trade(uid)
         if partial:
             await user_overrides.aupdate_auto_trade(uid, partial)
+        # Invalidate the per-user runtime-status cache so a mode toggle
+        # is reflected on the app's next status poll without waiting for
+        # the 10 s TTL to expire.  Firebase UID needed; map from user_id.
+        try:
+            from .auto_trade_status_routes import invalidate_runtime_cache as _irc
+            from src.api import users as _users_mod
+            _us = _users_mod.get_singleton()
+            if _us is not None:
+                identity_for_uid = identity  # may be User or TokenClaims
+                if isinstance(identity_for_uid, _users_mod.User):
+                    _irc(identity_for_uid.firebase_uid or "")
+        except Exception:
+            pass  # Cache invalidation is best-effort — stale data expires anyway
         return await _build_user_auto_trade_view(uid)
 
     # ---- Agents ----
@@ -1823,6 +1874,17 @@ async def serve_api(
         otp_delivery=otp_delivery,
         billing_verifier=billing_verifier,
     )
+    # Expand the default asyncio thread-pool so concurrent authenticated
+    # requests don't queue behind each other's ``asyncio.to_thread`` calls.
+    # Default = min(32, cpu_count + 4) which is ~6 on a 2-CPU VPS — too
+    # small when each request does 2-4 threaded ops (auth verify + DB reads).
+    # 32 gives headroom for 8+ concurrent users without exhausting the pool.
+    import concurrent.futures as _cf
+    _loop = asyncio.get_running_loop()
+    _loop.set_default_executor(
+        _cf.ThreadPoolExecutor(max_workers=32, thread_name_prefix="api-io")
+    )
+
     config = uvicorn.Config(
         app=app,
         host=host,
