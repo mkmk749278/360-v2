@@ -178,12 +178,16 @@ async def test_stop_loss_long_sends_sell_with_close_position() -> None:
     params = client.binance_signed_post.call_args.kwargs["params"]
     assert params["side"] == "SELL"
     assert params["algoType"] == "CONDITIONAL"
-    assert "type" not in params  # not the old /fapi/v1/order style
+    # The algo endpoint requires BOTH algoType AND type — omitting type
+    # returns -1102 "Mandatory parameter 'type' was not sent".
+    assert params["type"] == "STOP_MARKET"
     assert params["stopPrice"] == "28500"
     assert params["closePosition"] == "true"
     assert params["workingType"] == "MARK_PRICE"
     assert params["clientAlgoId"] == position_state.coid_sl("sig-1")
     assert "newClientOrderId" not in params
+    # Posts to the algo endpoint, not the legacy order endpoint.
+    assert client.binance_signed_post.call_args.kwargs["path"] == "/fapi/v1/algoOrder"
 
 
 @pytest.mark.asyncio
@@ -261,12 +265,14 @@ async def test_take_profit_uses_reduce_only_and_explicit_quantity() -> None:
     )
     params = client.binance_signed_post.call_args.kwargs["params"]
     assert params["algoType"] == "CONDITIONAL"
-    assert "type" not in params  # not the old /fapi/v1/order style
+    # The algo endpoint requires BOTH algoType AND type (-1102 otherwise).
+    assert params["type"] == "TAKE_PROFIT_MARKET"
     assert params["side"] == "SELL"  # LONG exit
     assert params["quantity"] == "0.3"
     assert params["reduceOnly"] == "true"
     assert params["clientAlgoId"] == position_state.coid_tp1("sig-1")
     assert "newClientOrderId" not in params
+    assert client.binance_signed_post.call_args.kwargs["path"] == "/fapi/v1/algoOrder"
 
 
 @pytest.mark.asyncio
