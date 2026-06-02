@@ -4,7 +4,7 @@ The signing client is mocked at the OrderPlacer constructor.  What
 we pin:
 
 * Each verb (entry / SL / TP / cancel) sends the right Binance
-  parameters: symbol, side, algoType/type, quantity, stopPrice,
+  parameters: symbol, side, algoType/type, quantity, triggerPrice,
   closePosition, reduceOnly, workingType, clientAlgoId/newClientOrderId.
 * Entry/close/pretp orders use /fapi/v1/order with newClientOrderId.
 * SL and TP orders use /fapi/v1/algoOrder with algoType=CONDITIONAL
@@ -181,7 +181,11 @@ async def test_stop_loss_long_sends_sell_with_close_position() -> None:
     # The algo endpoint requires BOTH algoType AND type — omitting type
     # returns -1102 "Mandatory parameter 'type' was not sent".
     assert params["type"] == "STOP_MARKET"
-    assert params["stopPrice"] == "28500"
+    # The algo endpoint names the trigger level ``triggerPrice`` — NOT
+    # ``stopPrice`` (the legacy /fapi/v1/order name).  Sending stopPrice
+    # here returns -1102 "Mandatory parameter 'triggerprice' was not sent".
+    assert params["triggerPrice"] == "28500"
+    assert "stopPrice" not in params
     assert params["closePosition"] == "true"
     assert params["workingType"] == "MARK_PRICE"
     assert params["clientAlgoId"] == position_state.coid_sl("sig-1")
@@ -270,6 +274,10 @@ async def test_take_profit_uses_reduce_only_and_explicit_quantity() -> None:
     assert params["side"] == "SELL"  # LONG exit
     assert params["quantity"] == "0.3"
     assert params["reduceOnly"] == "true"
+    # Trigger level is triggerPrice, not stopPrice — see place_stop_loss
+    # test for the -1102 rationale.
+    assert params["triggerPrice"] == "29500"
+    assert "stopPrice" not in params
     assert params["clientAlgoId"] == position_state.coid_tp1("sig-1")
     assert "newClientOrderId" not in params
     assert client.binance_signed_post.call_args.kwargs["path"] == "/fapi/v1/algoOrder"

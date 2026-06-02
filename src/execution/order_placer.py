@@ -293,6 +293,10 @@ class OrderPlacer:
         ``/fapi/v1/order`` is rejected on all accounts since that date.
         The algo endpoint requires BOTH ``algoType`` AND ``type`` — omitting
         ``type`` returns -1102 "Mandatory parameter 'type' was not sent".
+        The trigger level is ``triggerPrice`` on this endpoint (NOT
+        ``stopPrice`` — that's the legacy ``/fapi/v1/order`` name; sending
+        ``stopPrice`` here returns -1102 "Mandatory parameter 'triggerprice'
+        was not sent").
 
         Fires for the full remaining position when ``stop_price`` is
         touched on MARK_PRICE — less wick-prone than CONTRACT_PRICE.
@@ -316,7 +320,7 @@ class OrderPlacer:
             "side": _exit_side(direction),
             "algoType": "CONDITIONAL",
             "type": "STOP_MARKET",
-            "stopPrice": _price_str(rounded),
+            "triggerPrice": _price_str(rounded),
             "closePosition": "true",
             "workingType": "MARK_PRICE",
             "clientAlgoId": coid,
@@ -345,6 +349,10 @@ class OrderPlacer:
         on ``/fapi/v1/order`` is rejected on all accounts since that date.
         The algo endpoint requires BOTH ``algoType`` AND ``type`` — omitting
         ``type`` returns -1102 "Mandatory parameter 'type' was not sent".
+        The trigger level is ``triggerPrice`` on this endpoint (NOT
+        ``stopPrice`` — that's the legacy ``/fapi/v1/order`` name; sending
+        ``stopPrice`` here returns -1102 "Mandatory parameter 'triggerprice'
+        was not sent").
 
         Lumin places TP1 / TP2 / TP3 as separate orders per Binance's native
         split-target support.  ``reduceOnly=true`` so a TP can't accidentally
@@ -367,7 +375,7 @@ class OrderPlacer:
             "side": _exit_side(direction),
             "algoType": "CONDITIONAL",
             "type": "TAKE_PROFIT_MARKET",
-            "stopPrice": _price_str(rounded_price),
+            "triggerPrice": _price_str(rounded_price),
             "quantity": _qty_str(quantity),
             "reduceOnly": "true",
             "workingType": "MARK_PRICE",
