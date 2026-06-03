@@ -4,6 +4,62 @@
 
 ---
 
+## In-session checkpoint 2026-06-03 (session 14) — API process isolation cutover LIVE
+
+### What shipped
+
+| Item | Status |
+|---|---|
+| **PR #565** (`fix/compose-port-mapping`) | ✅ merged → auto-deployed |
+| **API process isolation cutover** | ✅ live on VPS |
+
+### PR #565 — root cause + fix
+
+PR #564 (session 13) removed the `ports:` binding from the `engine` service in `docker-compose.yml` (correct for isolated mode — the `api` service owns it there). But `--profile isolated` is only active when `API_PROCESS_ISOLATED=true`; default single-process deployments never activate that profile, leaving no port published → 502 on every request.
+
+Fix: introduced `docker-compose.singleprocess.yml` (overlay file, one service stanza):
+```yaml
+services:
+  engine:
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:${API_PORT:-8000}"
+```
+`deploy.sh` updated to use `COMPOSE_FILES=(-f docker-compose.yml)` + conditional:
+- Single-process: `COMPOSE_FILES+=(-f docker-compose.singleprocess.yml)` (explicit `-f` suppresses Docker auto-merge of `override.yml`)
+- Isolated: `PROFILE_ARGS=(--profile isolated)`
+
+Post-merge VPS confirmed: `API: 200`.
+
+### Isolation cutover
+
+After local boot validation (health + pulse both 200 against a live `RedisEngineFacade`), the owner ran the cutover on the VPS:
+- `.env`: `API_PROCESS_ISOLATED=true`
+- `docker compose -f docker-compose.yml --profile isolated up -d`
+
+Final container state:
+```
+360scalp-v2-api      Up 10s (health: starting) → healthy  127.0.0.1:8000->8000/tcp
+360scalp-v2-engine   Up 11s (healthy)                      [no port — correct]
+360scalp-v2-redis    Up 12h                                 6379/tcp
+360scalp-v2-signing  Up 20min (unhealthy)                  [pre-existing — see below]
+```
+
+Owner confirmed: `✅ ISOLATION LIVE — api health 200`.
+
+### Signing service unhealthy — pre-existing
+
+`360scalp-v2-signing` was `(unhealthy)` before this session's changes and is not caused by the compose fix or isolation cutover. Needs separate investigation.
+
+### Pending housekeeping
+
+- **Remove VPS `docker-compose.override.yml`** — the hand-dropped emergency file (`~/360-v2/docker-compose.override.yml`) on the VPS is now superseded by the explicit `-f` approach and should be deleted:
+  ```bash
+  rm ~/360-v2/docker-compose.override.yml
+  ```
+- **Investigate `360scalp-v2-signing` unhealthy** — check `docker logs 360scalp-v2-signing` and the healthcheck definition.
+
+---
+
 ## In-session checkpoint 2026-06-02 (session 13) — API/engine process isolation (PR open)
 
 ### Confirmed symptom (owner report)
