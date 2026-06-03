@@ -128,18 +128,59 @@ fi
 
 # ---------------------------------------------------------------------------
 # Build and start
+#
+# Cached build by default (fast — Docker layer cache).  A full no-cache
+# rebuild is only forced under --clean, which is the "nuke and repave" path.
+# Routing CI through this script (deploy.yml) means the default must stay
+# cache-friendly or every push to main pays a multi-minute full rebuild.
 # ---------------------------------------------------------------------------
+BUILD_ARGS=()
+if [ "$DO_CLEAN" = true ]; then
+    BUILD_ARGS=(--no-cache)
+fi
+
 echo "🔨 Building Docker image..."
-docker compose "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]}" build --no-cache
+docker compose "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]}" build "${BUILD_ARGS[@]}"
 
 echo "🚀 Starting engine..."
-docker compose "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]}" up -d
+# --remove-orphans cleans up containers from the *other* mode's profile so a
+# single-process↔isolated switch never leaves a stale 'api' (or port-bound
+# engine) container behind holding API_PORT.
+docker compose "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]}" up -d --remove-orphans
 
 echo ""
 echo "✅ Deployment complete!"
 echo ""
 echo "📊 Status:"
 docker compose "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]}" ps
+
+# ---------------------------------------------------------------------------
+# Post-deploy smoke check — poll the API health endpoint so a container that
+# fails to come up is caught here instead of via a user screenshot.  Loopback
+# only (nginx proxies the same port).  Non-fatal: the engine's healthcheck has
+# a 60s start_period, so we warn rather than fail to avoid false negatives on a
+# slow boot — but the loud banner makes a genuine failure impossible to miss.
+# ---------------------------------------------------------------------------
+_api_port="$(grep -E '^API_PORT=' .env 2>/dev/null | cut -d= -f2)"
+_api_port="${_api_port:-8000}"
+echo ""
+echo "🩺 Health check on 127.0.0.1:${_api_port}/api/health (up to 90s)..."
+_ok=false
+for _i in $(seq 1 18); do
+    if curl -fsS --max-time 5 "http://127.0.0.1:${_api_port}/api/health" >/dev/null 2>&1; then
+        _ok=true
+        break
+    fi
+    sleep 5
+done
+if [ "$_ok" = true ]; then
+    echo "✅ API health 200 — deploy verified."
+else
+    echo "⚠️  API did not return 200 within 90s. Investigate:"
+    echo "    docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]} ps"
+    echo "    docker logs 360scalp-v2-api --tail 50"
+    echo "    docker logs 360scalp-v2-engine --tail 50"
+fi
 echo ""
 echo "📋 Useful commands (single-process mode):"
 echo "  docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml logs -f engine"
