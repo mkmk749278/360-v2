@@ -366,7 +366,9 @@ async def _signed_call(
     own_session = session is None
     if session is None:
         session = aiohttp.ClientSession(
-            timeout=aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_S)
+            timeout=aiohttp.ClientTimeout(total=_REQUEST_TIMEOUT_S),
+            max_line_size=65536,
+            max_field_size=65536,
         )
     try:
         async with session.request(method, url, headers=headers) as resp:
