@@ -4,6 +4,60 @@
 
 ---
 
+## Session 15 checkpoint 2026-06-03 — regime analysis tool + data-first exit strategy
+
+### What shipped this session
+
+**360ce-ops PR #4** — `scripts/analyze_regime_pnl.py` merged to main.
+Standalone CLI: ingests Binance Futures position-history CSV → joins to
+`signal_history.json` by (symbol, direction, open-time proximity) → tags with
+`entry_regime` → outputs per-regime / per-alignment P&L tables.
+58 unit tests, zero external dependencies.
+
+```bash
+# VPS usage (inside or alongside ops container):
+python3 scripts/analyze_regime_pnl.py positions.csv \
+    --signals /engine-data/signal_history.json \
+    --show-unmatched --output report.json
+```
+
+### What confirmed this session (analysis, not code)
+
+Three data sources converge on the same diagnosis:
+
+| Source | Finding |
+|---|---|
+| Truth report (monitor-logs) | TP1/TP2/TP3 hit rate **0.0%** across all setups. All value from pre-TP banking (68 fires, avg +4.35% net @ 10×). |
+| Real account (102 pos, Jun 1-3 PDF) | 44% win rate, net ≈ -0.24 USDT gross. Ultra-short holds (1-15s) = fee bleed. Trend-aligned SHORTs won; counter-trend LONGs lost. |
+| Industry research | No channel does regime-aware exits systematically — documented competitive gap. |
+
+**Regime distribution:** TRENDING_DOWN 38.4%, RANGING 22.5%, TRENDING_UP 20.2%, QUIET 18.9%.
+58% of cycles are trending — but trending is the bucket we capture worst.
+
+### Structural bug confirmed (not fixed — owner sign-off required)
+
+`position_fsm.py:274, 351-352` — when pre-TP fires, FSM cancels TP2/TP3 and caps
+the residual at TP1 even in strongly trending markets. In TRENDING regimes, TP2/TP3
+should survive or trail. This is a Position FSM transition change → owner sign-off
+item. Do not code without it.
+
+### Open items (priority order)
+
+1. **Regime-per-exit spec** — use the analysis tool against a rolling 7-day VPS
+   export to set actual matrix values, then write the spec, get owner sign-off,
+   then FSM code. Key: preserve TP2/TP3 post-pre-TP-fire in TRENDING + ATR trailing
+   runner. **Owner-sign-off item — do not code without spec approval.**
+2. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API
+   analyze → file `auto-detected` Issues → Telegram alert for high severity.
+   Design documented in OWNER_BRIEF.md §5.1. Not started.
+3. **Signing container unhealthy** — `360scalp-v2-signing` pre-existing unhealthy
+   state. Money path unaffected (signing only used on live auto-trade orders).
+   Investigate at next session.
+4. **Funding rate timing** — exit before 8h funding timestamp in TRENDING_UP for
+   LONG positions. Small but free value. `PRE_FUNDING_EXIT_WINDOW_SEC` config flag.
+
+---
+
 ## Session 14 checkpoint 2026-06-03 — isolation cutover LIVE + post-cutover bug sweep
 
 ### State
