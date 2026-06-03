@@ -1329,13 +1329,41 @@ class Scanner:
 
             ind5 = indicators.get("5m", {})
 
-            spread_pct = self.data_store.get_spread(symbol) or 0.0
-            volume_24h = self.data_store.get_volume(symbol) or 0.0
+            # Use the same data sources as the live scan path.  The previous
+            # implementation called data_store.get_spread/get_volume/get_regime/
+            # get_smc — none of which exist on HistoricalDataStore — so the whole
+            # diagnostic returned an AttributeError string instead of gate data.
+            info = self.pair_mgr.pairs.get(symbol)
+            market = info.market if info is not None else "spot"
+            volume_24h = float(getattr(info, "volume_24h_usd", 0.0) or 0.0)
+            spread_pct = await self._get_spread_pct(symbol, market=market) or 0.0
 
-            regime_result = self.data_store.get_regime(symbol)
-            regime = str(getattr(regime_result, "regime", "RANGING")) if regime_result else "RANGING"
+            # Regime via the per-symbol RegimeService.  Prefer the cached result
+            # from the last scan cycle; fall back to a fresh classification so a
+            # pair that has not been scanned this run still reports a real regime.
+            regime_result = None
+            get_regime = getattr(self.regime_detector, "get_regime", None)
+            if get_regime is not None:
+                regime_result = get_regime(symbol)
+            if regime_result is None:
+                _pair_tier = getattr(
+                    classify_pair_tier(symbol, volume_24h_usd=volume_24h), "tier", "MIDCAP"
+                )
+                regime_result = self.regime_detector.classify(
+                    ind5, candles.get("5m"), timeframe="5m",
+                    symbol=symbol, pair_tier=_pair_tier,
+                )
+            _regime_enum = getattr(regime_result, "regime", None)
+            regime = getattr(_regime_enum, "value", "RANGING") if _regime_enum else "RANGING"
 
-            smc_data = self.data_store.get_smc(symbol) or {}
+            # SMC via the detector, mirroring _build_scan_context.
+            ticks = self.data_store.ticks.get(symbol, [])
+            smc_result = self.smc_detector.detect(
+                symbol, candles, ticks, self.order_flow_store,
+                lookback=SMC_SCALP_LOOKBACK,
+                tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
+            )
+            smc_data = smc_result.as_dict() if smc_result is not None else {}
 
             gates = results["gates"]
 
