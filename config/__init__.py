@@ -334,6 +334,40 @@ CORNIX_FORMAT_ENABLED: bool = _safe_bool("CORNIX_FORMAT_ENABLED", "false")
 # Set to "false" to revert to the static signal_params.py behaviour for safety.
 DYNAMIC_SL_TP_ENABLED: bool = _safe_bool("DYNAMIC_SL_TP_ENABLED", "true")
 
+# ATR-percentile → trailing-stop width (Fix B, regime-per-exit precondition).
+# A runner's ATR trail must widen with volatility: a 1.5× ATR trail that is
+# right in normal conditions gets stopped out by noise when ATR is at the top
+# of its range.  The exit FSM selects the multiplier from the signal's
+# atr_percentile_at_entry via trail_atr_multiplier() below.  Defaults match the
+# intraday research consensus (1.5× normal, widening to 2.5× in extreme vol).
+TRAIL_ATR_PCTILE_HIGH: float = _safe_float("TRAIL_ATR_PCTILE_HIGH", "75.0")
+TRAIL_ATR_PCTILE_EXTREME: float = _safe_float("TRAIL_ATR_PCTILE_EXTREME", "90.0")
+TRAIL_ATR_MULT_NORMAL: float = _safe_float("TRAIL_ATR_MULT_NORMAL", "1.5")
+TRAIL_ATR_MULT_HIGH: float = _safe_float("TRAIL_ATR_MULT_HIGH", "2.0")
+TRAIL_ATR_MULT_EXTREME: float = _safe_float("TRAIL_ATR_MULT_EXTREME", "2.5")
+
+
+def trail_atr_multiplier(atr_percentile: float) -> float:
+    """Map an entry-time ATR percentile (0-100) to a trailing-stop ATR multiplier.
+
+    Pure value mapping used by the exit FSM when activating a runner's ATR
+    trail.  Wider trails in higher-volatility regimes prevent noise stop-outs;
+    tighter trails in calm regimes lock gains sooner.
+
+    * percentile >= TRAIL_ATR_PCTILE_EXTREME → TRAIL_ATR_MULT_EXTREME
+    * percentile >= TRAIL_ATR_PCTILE_HIGH    → TRAIL_ATR_MULT_HIGH
+    * otherwise                              → TRAIL_ATR_MULT_NORMAL
+    """
+    try:
+        pct = float(atr_percentile)
+    except (TypeError, ValueError):
+        return TRAIL_ATR_MULT_NORMAL
+    if pct >= TRAIL_ATR_PCTILE_EXTREME:
+        return TRAIL_ATR_MULT_EXTREME
+    if pct >= TRAIL_ATR_PCTILE_HIGH:
+        return TRAIL_ATR_MULT_HIGH
+    return TRAIL_ATR_MULT_NORMAL
+
 # QUIET-regime TP compression multiplier (2026-05-23 doctrine).
 # Per-signal data showed only 1/100 signals hit TP1; 18.9% reached TP1
 # distance MFE but exited via pre-TP grab or invalidation before TP1 could

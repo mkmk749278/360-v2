@@ -248,7 +248,9 @@ class Signal:
     # ---- Signal Lifecycle Monitor state ----
     # Populated after the signal is posted to Telegram so the lifecycle
     # monitor has a baseline for regime/momentum comparisons.
-    entry_regime: str = ""                        # market regime when signal was opened
+    entry_regime: str = ""                        # 5m market regime when signal was opened
+    entry_regime_15m: str = ""                    # 15m (higher-TF) regime at entry — exit-runner gate
+    atr_percentile_at_entry: float = 50.0         # ATR percentile (0-100) at entry — trail-width input
     entry_momentum_slope: float = 0.0             # EMA slope at entry (% diff)
     last_lifecycle_check: Optional[datetime] = None  # UTC timestamp of last check
     lifecycle_alert_level: str = "GREEN"          # GREEN, YELLOW, RED
