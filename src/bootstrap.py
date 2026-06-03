@@ -37,6 +37,47 @@ _BOOT_BUDGET_FUTURES: int = 2_200
 _STEADY_BUDGET_FUTURES: int = 2_200
 
 
+async def _resilient_monitor_loop(monitor) -> None:
+    """Wrap TradeMonitor.start() so an unexpected exit triggers an automatic restart.
+
+    Normal shutdown path: monitor.stop() sets _running=False, start() exits its
+    while-loop normally, this wrapper sees _running=False and exits cleanly.
+
+    Unexpected exit path (e.g. task cancelled during _check_all which is caught
+    internally and breaks the loop, leaving _running=True): wrapper detects
+    _running=True after start() returns, logs at ERROR level, and re-enters start()
+    after a 5-second back-off.  This covers the case where the coroutine exits
+    without an explicit stop() call — the root cause of the monitor_running=NO
+    incident where a restart flow left the monitor dead with no watchdog.
+
+    Task cancellation (explicit t.cancel()): CancelledError from asyncio.sleep
+    inside start() propagates through this wrapper and the task is marked done.
+    That is the correct path for admin-triggered restarts via _restart_tasks.
+    """
+    _BACKOFF_SEC = 5
+    while True:
+        try:
+            await monitor.start()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log.error(
+                "trade_monitor: start() raised unexpectedly: {}; restarting in {}s",
+                exc,
+                _BACKOFF_SEC,
+            )
+            await asyncio.sleep(_BACKOFF_SEC)
+            continue
+        if not monitor._running:
+            break  # explicit stop() — clean shutdown
+        log.error(
+            "trade_monitor: exited while _running=True (unexpected); "
+            "restarting in {}s",
+            _BACKOFF_SEC,
+        )
+        await asyncio.sleep(_BACKOFF_SEC)
+
+
 class Bootstrap:
     """Manages the engine lifecycle: boot, shutdown, and WebSocket setup.
 
@@ -278,7 +319,9 @@ class Bootstrap:
         engine = self._engine
         tasks = [
             asyncio.create_task(engine.router.start()),
-            asyncio.create_task(engine.monitor.start()),
+            asyncio.create_task(
+                _resilient_monitor_loop(engine.monitor), name="trade_monitor"
+            ),
             asyncio.create_task(engine.telemetry.start()),
             asyncio.create_task(engine._pair_refresh_loop()),
             asyncio.create_task(engine._scanner.scan_loop()),

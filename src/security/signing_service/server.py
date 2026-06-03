@@ -134,7 +134,15 @@ async def serve(socket_path: Optional[str] = None) -> asyncio.AbstractServer:
     os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
 
     session = aiohttp.ClientSession(
-        timeout=aiohttp.ClientTimeout(total=8.0)
+        timeout=aiohttp.ClientTimeout(total=8.0),
+        # Binance positionRisk responses can be large when a user has many
+        # open symbols.  The default max_line_size (8 KB) is too small and
+        # produces "Separator is not found, and chunk exceed the limit"
+        # when aiohttp's chunked-transfer parser can't find \r\n within
+        # its read buffer.  64 KB gives enough headroom for any realistic
+        # Binance response without relaxing the limit entirely.
+        max_line_size=65536,
+        max_field_size=65536,
     )
 
     async def connection_handler(reader, writer):
