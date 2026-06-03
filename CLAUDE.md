@@ -100,7 +100,9 @@ Workflow for every change set:
 1. **Cut a fresh topic branch off the current `main` HEAD.** Naming: `docs/<topic>`, `feat/<topic>`, `fix/<topic>`, `chore/<topic>`.
 2. **Land all commits for the change set on that topic branch.** Each commit message should describe the *why* of its slice, not the file list.
 3. **Open a PR targeting `main` with a written design summary in the body** (per the multi-user-expansion process: design first, then code). Include test/verification notes.
-4. **Owner reviews and merges** (or requests changes). CTE responds to review comments by pushing follow-up commits to the same topic branch.
+4. **Subscribe to the PR's activity and drive it to merge** (owner standing authorisation, 2026-06-03). On opening every PR, call `subscribe_pr_activity` so CI results and review comments wake the session. **Auto-merge without waiting for per-PR owner confirmation once *all* of these hold:** CI is green, there are no merge conflicts, the change is **not** in the "What Requires Owner Sign-off Before Coding" list below, and no reviewer has raised an unresolved objection. Respond to review comments by pushing follow-up commits to the same branch.
+
+   **Pause and ask the owner (via `AskUserQuestion`) instead of merging when any of these is true:** CI is red and the fix is non-obvious or out of scope; a merge conflict needs a judgement call; the change touches an owner-sign-off item (signing service / KMS / connect-time validation / blast-radius caps / Position FSM transitions / paid-channel routing / new evaluators or scoring / Business Rules); or a reviewer raises a substantive objection. Auto-merge is for the routine majority — it is **not** a licence to self-approve the gated changes.
 
 Do **not** push to `claude/general-session-*` or similar harness-assigned long-lived branches for new work — they collect drift across sessions and produce conflicted PRs. Even if the harness pre-assigns a session branch, still cut a fresh topic branch off `main` for each change set and open a PR from there.
 

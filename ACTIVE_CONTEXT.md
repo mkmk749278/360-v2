@@ -4,6 +4,59 @@
 
 ---
 
+## Session 14 checkpoint 2026-06-03 — isolation cutover LIVE + post-cutover bug sweep
+
+### State
+`API_PROCESS_ISOLATED=true` is now **live on the VPS**. The engine container runs
+`SnapshotWriter` only (no HTTP server); the separate `api` container serves HTTP on
+its own event loop backed by `RedisEngineFacade`. The scanner-contention symptom
+(settings toggles only applying "when the scanner is free", 5/8/10s app timeouts)
+is resolved. All 5 `snapshot:*` keys confirmed present in Redis; app shows
+"Auto-trade ARMED" with all 4 gates green.
+
+### PRs merged this session (all on `main`)
+- **#565** — restore engine host-port mapping for single-process deployments
+  (`docker-compose.singleprocess.yml`); fixed the 502 the isolation work introduced.
+- **#567** — isolated `api` container: init Firestore keystore + harden
+  `_refresh_signals_from_redis` (per-item try/except so one malformed signal can't
+  poison the whole batch — mirrors `build_activity`'s skip pattern).
+- **#568** — isolated `api` container: also init the **kill switch** (same Firestore
+  client as the keystore, mirrors `bootstrap.py:477-488`) **and** route CI deploy
+  through `bash deploy.sh` instead of bare `docker compose up` (bare command left the
+  `api` container on a stale image because `--profile isolated` was never passed).
+- **#569** — `deploy.sh` hardening: cached build by default (`--no-cache` now behind
+  `--clean` only, so CI pushes don't pay a multi-minute full rebuild), added
+  `--remove-orphans` (cleans the other mode's container on a mode switch), and a
+  90s post-deploy health poll of `/api/health`.
+
+### Root causes (three cascading failures, one missing env + two missing init calls)
+1. **Signals tab empty** — `API_PROCESS_ISOLATED` was absent from VPS `.env`, so the
+   engine never started `SnapshotWriter` → no `snapshot:signals_all` key → cold cache
+   → `[]`. Fixed by adding the var to `.env` and force-recreating the engine; code
+   hardening landed in #567.
+2. **Binance key ❌** — `firestore_keystore.init_keystore()` was never called in the
+   `api` container boot, so `is_initialised()` returned False → `binance_key_connected`
+   always False. Fixed in #567.
+3. **Engine-wide enabled ❌** — same shape: `kill_switch.init_kill_switch()` never
+   called in the `api` container → `is_globally_enabled()` defaulted False. Fixed in #568.
+
+### Housekeeping done
+- Stale VPS `docker-compose.override.yml` confirmed already removed (no longer present).
+- Exposed-secret rotation: owner declined (secrets appeared only in a private
+  `docker exec env` diagnostic, not committed) — **no rotation performed**.
+
+### Open items
+- **`360scalp-v2-signing` container unhealthy** — pre-existing, predates this
+  session's changes, not yet investigated. Money path (FSM) is unaffected because
+  signing is only exercised on a live auto-trade order; flag for next session.
+
+### Policy adopted this session (owner standing authorisation, 2026-06-03)
+On opening any PR, the CTE now **subscribes to PR activity** and **auto-merges once CI
+is green / no conflicts / not an owner-sign-off item** — no waiting for per-PR owner
+confirmation. See the Change-management protocol in `CLAUDE.md` for the exact guardrails.
+
+---
+
 ## In-session checkpoint 2026-06-02 (session 13) — API/engine process isolation (PR open)
 
 ### Confirmed symptom (owner report)
