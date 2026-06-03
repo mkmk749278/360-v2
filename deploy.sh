@@ -99,34 +99,50 @@ fi
 mkdir -p logs
 
 # ---------------------------------------------------------------------------
-# Compose profile selection — start the separate 'api' container only when
-# API_PROCESS_ISOLATED=true in .env.  In that mode the engine publishes
-# state to Redis (SnapshotWriter) and the 'api' service serves HTTP, so the
-# scanner's event loop never blocks API requests.
+# Compose file selection
+#
+# Two modes — selected by API_PROCESS_ISOLATED in .env:
+#
+#   false (default) — single-process: engine serves the API directly on
+#     API_PORT.  We explicitly pass -f flags so Docker does NOT auto-merge
+#     any hand-dropped docker-compose.override.yml on the VPS (explicit -f
+#     disables that).  docker-compose.singleprocess.yml adds the engine's
+#     host-port mapping which must be absent in the base file (otherwise it
+#     would conflict with the 'api' service port in isolated mode).
+#
+#   true — isolated: engine publishes Redis snapshots (SnapshotWriter); the
+#     separate 'api' container owns the host-port mapping and serves HTTP.
+#     --profile isolated activates that service.  The base docker-compose.yml
+#     has no ports on the engine service, so no conflict.
 # ---------------------------------------------------------------------------
+COMPOSE_FILES=(-f docker-compose.yml)
 PROFILE_ARGS=()
+
 if grep -qE '^API_PROCESS_ISOLATED=(true|1|yes)$' .env 2>/dev/null; then
     PROFILE_ARGS=(--profile isolated)
-    echo "🔀 API_PROCESS_ISOLATED=true — the separate 'api' container will be started."
+    echo "🔀 API_PROCESS_ISOLATED=true — isolated mode: 'api' container serves HTTP."
+else
+    COMPOSE_FILES+=(-f docker-compose.singleprocess.yml)
+    echo "⚙️  API_PROCESS_ISOLATED=false — single-process mode: engine serves HTTP."
 fi
 
 # ---------------------------------------------------------------------------
 # Build and start
 # ---------------------------------------------------------------------------
 echo "🔨 Building Docker image..."
-docker compose "${PROFILE_ARGS[@]}" build --no-cache
+docker compose "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]}" build --no-cache
 
 echo "🚀 Starting engine..."
-docker compose "${PROFILE_ARGS[@]}" up -d
+docker compose "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]}" up -d
 
 echo ""
 echo "✅ Deployment complete!"
 echo ""
 echo "📊 Status:"
-docker compose "${PROFILE_ARGS[@]}" ps
+docker compose "${COMPOSE_FILES[@]}" "${PROFILE_ARGS[@]}" ps
 echo ""
-echo "📋 Useful commands:"
-echo "  docker compose logs -f engine      # Follow live logs"
-echo "  docker compose restart engine      # Restart the engine"
-echo "  docker compose down                # Stop the engine"
-echo "  docker compose up -d --build       # Rebuild and restart"
+echo "📋 Useful commands (single-process mode):"
+echo "  docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml logs -f engine"
+echo "  docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml restart engine"
+echo "  docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml down"
+echo "  docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml up -d --build"

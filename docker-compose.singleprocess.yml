@@ -1,0 +1,16 @@
+# Single-process compose override — used by deploy.sh when API_PROCESS_ISOLATED=false.
+#
+# In isolated mode the 'api' service (profiles: [isolated]) owns the host port
+# mapping.  In single-process mode the engine container serves the API directly
+# and must publish the port itself.  This file adds that mapping so the two modes
+# never conflict over the same host port.
+#
+# deploy.sh merges this file with:
+#   docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml ...
+# It does NOT apply docker-compose.override.yml auto-merge (explicit -f disables
+# that), so a hand-dropped override.yml on the VPS is ignored once this file is
+# in use.
+services:
+  engine:
+    ports:
+      - "127.0.0.1:${API_PORT:-8000}:${API_PORT:-8000}"
