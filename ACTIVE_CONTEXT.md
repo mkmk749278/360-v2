@@ -4,6 +4,50 @@
 
 ---
 
+## Session 16 checkpoint 2026-06-03 — monitor watchdog + signing service aiohttp fix
+
+### What shipped this session
+
+**360-v2 PR #573** merged to main (owner-approved, deploying now):
+
+1. **`src/bootstrap.py` — `_resilient_monitor_loop` watchdog**
+   Wraps `TradeMonitor.start()` in a self-healing loop. Any unexpected exit
+   (CancelledError absorbed inside `_check_all` leaving `_running=True`, or
+   unhandled exception) triggers a 5-second back-off and automatic restart.
+   Normal `stop()` shutdown exits cleanly. Task named `"trade_monitor"` for
+   visibility via `asyncio.all_tasks()`.
+   Root cause addressed: restart flow called `stop()` → `_running=False` but
+   no new task was created; monitor stayed dead forever with no watchdog.
+
+2. **`src/security/signing_service/server.py` — aiohttp chunk limit**
+   Raised `max_line_size` / `max_field_size` from 8 KB (aiohttp default) to
+   64 KB. Fixes Reconciler WARNING `"Separator is not found, and chunk exceed
+   the limit"` on Binance `positionRisk` responses for users with many open
+   symbols.
+
+**Immediate action if not done:** `docker restart 360scalp-v2-engine` on VPS
+to restore the monitor right now if auto-deploy hasn't fired yet. Confirm with:
+```bash
+docker logs 360scalp-v2-engine --tail 20 | grep -i monitor
+```
+
+### Open items (priority order)
+
+1. **Signing container unhealthy** — `360scalp-v2-signing` pre-existing unhealthy
+   state. Now more visible since the aiohttp fix is deployed. Investigate next session.
+2. **Regime-per-exit spec** — use `scripts/analyze_regime_pnl.py` against a rolling
+   7-day VPS export to set matrix values, write spec, get owner sign-off, then FSM
+   code. Key: preserve TP2/TP3 post-pre-TP-fire in TRENDING + ATR trailing runner.
+   **Owner-sign-off item — do not code without spec approval.**
+   Structural bug: `position_fsm.py:274,351-352` cancels TP2/TP3 on pre-TP fire.
+3. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API
+   analyze → file `auto-detected` Issues → Telegram alert for high severity.
+   Design documented in OWNER_BRIEF.md §5.1. Not started.
+4. **Funding rate timing** — exit before 8h funding timestamp in TRENDING_UP for
+   LONG positions. Small but free value. `PRE_FUNDING_EXIT_WINDOW_SEC` config flag.
+
+---
+
 ## Session 15 checkpoint 2026-06-03 — regime analysis tool + data-first exit strategy
 
 ### What shipped this session
