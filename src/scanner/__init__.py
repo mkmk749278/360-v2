@@ -2511,7 +2511,14 @@ class Scanner:
         regime_tf = "5m" if "5m" in indicators else "1m"
         regime_ind = indicators.get("5m", indicators.get("1m", {}))
         regime_candles = candles.get("5m", candles.get("1m"))
-        regime_result = self.regime_detector.classify(regime_ind, regime_candles, timeframe=regime_tf)
+        _pair_tier = getattr(smc_data.get("pair_profile"), "tier", "MIDCAP")
+        regime_result = self.regime_detector.classify(
+            regime_ind,
+            regime_candles,
+            timeframe=regime_tf,
+            symbol=symbol,
+            pair_tier=_pair_tier,
+        )
         await asyncio.sleep(0)
         log.debug("{} regime: {}", symbol, regime_result.regime.value)
         self._regime_cycle_counts[regime_result.regime.value] += 1
@@ -2567,6 +2574,7 @@ class Scanner:
                 vwap_val = vwap_result.vwap
         regime_context = self.regime_detector.build_regime_context(
             regime_result, regime_candles, regime_ind, vwap=vwap_val,
+            symbol=symbol, pair_tier=_pair_tier,
         )
         # Attach regime context so channel evaluators can access atr_percentile
         # via smc_data.get("regime_context") without any signature changes.
@@ -5905,7 +5913,9 @@ class Scanner:
         # Regime transition boost (item 15): if regime just changed in the direction
         # of this signal, apply a confidence boost (high-probability entry window).
         try:
-            _trans_boost = self.regime_detector.get_transition_boost(sig.direction.value)
+            _trans_boost = self.regime_detector.get_transition_boost(
+                sig.direction.value, symbol=symbol
+            )
             if _trans_boost > 0.0:
                 _regime_transition_boost = _trans_boost
                 sig.confidence = min(100.0, sig.confidence + _trans_boost)

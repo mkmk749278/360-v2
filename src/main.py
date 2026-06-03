@@ -49,7 +49,7 @@ from src.pair_manager import PairManager
 
 from src.performance_tracker import PerformanceTracker
 from src.predictive_ai import PredictiveEngine
-from src.regime import MarketRegimeDetector
+from src.regime import RegimeService
 from src.scanner import Scanner
 from src.signal_history_backfill import (
     backfill_from_legacy_sources,
@@ -285,9 +285,12 @@ class CryptoSignalEngine:
             ScalpOrderblockChannel(),
         ]
 
-        # SMC detector and market regime classifier
+        # SMC detector and market regime classifier.  RegimeService owns one
+        # per-symbol detector so each pair keeps its own hysteresis/transition
+        # state and its volume-tier thresholds — a single shared detector
+        # cross-contaminated all 75 pairs and never applied tier profiles.
         self._smc_detector = SMCDetector()
-        self._regime_detector = MarketRegimeDetector()
+        self._regime_detector = RegimeService()
 
         # Wire regime detector into trade monitor for signal invalidation checks
         self.monitor._regime_detector = self._regime_detector
