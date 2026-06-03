@@ -87,14 +87,22 @@ async def _run() -> None:
             log.warning(
                 "Firebase Admin init failed (falling back to HS256 path): {}", exc
             )
-        # Firestore keystore — same service account as Firebase Admin.
+        # Firestore keystore + kill switch — same service account, same client.
         # Required so auto_trade_status_routes can check binance_key_connected
-        # via firestore_keystore.get_key_blob() in this process.
+        # (keystore) and engine_wide_enabled (kill switch) in this process.
+        # Mirrors bootstrap.py:477-488 — one Firestore client shared between both.
         try:
             from src.security import firestore_keystore as _fk
+            from src.execution import kill_switch as _ks
             _fk.init_keystore(service_account_path=firebase_sa_path)
+            if _fk._db is not None:
+                _ks.init_kill_switch(_fk._db)
+                log.info("Kill switch client initialised")
         except Exception as exc:
-            log.warning("Firestore keystore init failed (binance_key_connected will show false): {}", exc)
+            log.warning(
+                "Firestore keystore / kill switch init failed "
+                "(binance_key_connected and engine_wide_enabled will show false): {}", exc
+            )
     else:
         log.info("Firebase Admin skipped (env vars not set)")
 

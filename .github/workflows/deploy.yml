@@ -111,8 +111,13 @@ jobs:
               && sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}|" .env \
               || echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env
 
-            # ── Rebuild and restart the engine container ─────────────────────
-            docker compose pull --quiet || true
-            docker compose up -d --build --remove-orphans
+            # ── Rebuild and restart all containers ───────────────────────────
+            # deploy.sh reads API_PROCESS_ISOLATED from .env and selects the
+            # correct compose files / profile automatically (isolated mode adds
+            # --profile isolated so the 'api' container is included; single-process
+            # mode adds -f docker-compose.singleprocess.yml for the engine port
+            # binding).  Running bare 'docker compose up' bypasses that logic and
+            # leaves the 'api' container on a stale image in isolated mode.
+            bash deploy.sh
 
             echo "✅ Deploy complete"
