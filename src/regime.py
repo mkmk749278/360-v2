@@ -715,6 +715,132 @@ class AdaptiveRegimeDetector(MarketRegimeDetector):
 
 
 # ---------------------------------------------------------------------------
+# Per-symbol regime service
+# ---------------------------------------------------------------------------
+
+
+def _tier_for_symbol(pair_tier: Optional[str]) -> str:
+    """Normalise an arbitrary tier hint to a key in ``_TIER_REGIME_PROFILES``."""
+    if not pair_tier:
+        return "MIDCAP"
+    key = str(pair_tier).upper()
+    return key if key in _TIER_REGIME_PROFILES else "MIDCAP"
+
+
+class RegimeService:
+    """Owns one :class:`AdaptiveRegimeDetector` per symbol.
+
+    A single shared :class:`MarketRegimeDetector` cannot classify 75 pairs
+    correctly: its hysteresis dwell counter, transition-history deque, and
+    ``build_regime_context`` transition state are all per-instance, so calling
+    ``classify`` for pair B clobbers the state accumulated for pair A.  This
+    service isolates that state behind a per-symbol detector keyed by symbol,
+    and applies each pair's volume-tier thresholds (MAJOR / MIDCAP / ALTCOIN)
+    instead of one global default.
+
+    It also caches the last :class:`RegimeResult` per symbol so consumers that
+    are not on the scan path — the trade observer (entry-regime tagging), the
+    snapshot writer, and content generation — can read the authoritative
+    regime via :meth:`get_regime` without re-classifying.
+
+    The public surface mirrors the subset of :class:`MarketRegimeDetector`
+    that callers use (``classify``, ``build_regime_context``,
+    ``get_transition_boost``) plus :meth:`get_regime`, so it is a drop-in
+    replacement for the previously-shared detector instance.
+    """
+
+    def __init__(self, hysteresis_candles: int = 3) -> None:
+        self._hysteresis_candles = hysteresis_candles
+        self._detectors: Dict[str, AdaptiveRegimeDetector] = {}
+        self._tiers: Dict[str, str] = {}
+        self._last: Dict[str, RegimeResult] = {}
+
+    def _detector_for(
+        self, symbol: str, pair_tier: Optional[str] = None
+    ) -> AdaptiveRegimeDetector:
+        """Return (creating if needed) the per-symbol detector.
+
+        When an explicit *pair_tier* is supplied and differs from the symbol's
+        current tier (a pair's 24h volume can cross a tier boundary), the
+        detector is rebuilt so the new thresholds take effect; the brief
+        hysteresis reset is acceptable and rare.
+
+        When *pair_tier* is ``None`` (callers off the scan path, e.g. the
+        transition-boost lookup) an existing detector is returned untouched so
+        a missing tier hint can never silently downgrade a MAJOR/ALTCOIN
+        detector to the MIDCAP default and wipe its accumulated state.
+        """
+        existing = self._detectors.get(symbol)
+        if existing is not None and pair_tier is None:
+            return existing
+        tier = _tier_for_symbol(pair_tier)
+        if existing is None or self._tiers.get(symbol) != tier:
+            self._detectors[symbol] = AdaptiveRegimeDetector(
+                pair_tier=tier, hysteresis_candles=self._hysteresis_candles
+            )
+            self._tiers[symbol] = tier
+        return self._detectors[symbol]
+
+    def classify(
+        self,
+        indicators: Dict[str, Any],
+        candles: Optional[Dict[str, Any]] = None,
+        timeframe: str = "5m",
+        volume_delta: Optional[float] = None,
+        *,
+        symbol: str,
+        pair_tier: Optional[str] = None,
+    ) -> RegimeResult:
+        """Classify *symbol*'s regime and cache the result.
+
+        ``symbol`` is keyword-only and required so a missing symbol fails loudly
+        rather than silently sharing one detector across pairs again.
+        """
+        detector = self._detector_for(symbol, pair_tier)
+        result = detector.classify(
+            indicators, candles, timeframe=timeframe, volume_delta=volume_delta
+        )
+        self._last[symbol] = result
+        return result
+
+    def get_regime(self, symbol: str) -> Optional[RegimeResult]:
+        """Return the last classified :class:`RegimeResult` for *symbol*.
+
+        Returns ``None`` if the symbol has not been classified yet (e.g. a pair
+        that has not completed a scan cycle).  Callers must handle ``None``
+        rather than assuming a default regime.
+        """
+        return self._last.get(symbol)
+
+    def build_regime_context(
+        self,
+        result: RegimeResult,
+        candles: Optional[Dict[str, Any]] = None,
+        indicators: Optional[Dict[str, Any]] = None,
+        vwap: float = 0.0,
+        *,
+        symbol: str,
+        pair_tier: Optional[str] = None,
+    ) -> RegimeContext:
+        """Build the rich context using *symbol*'s own transition state."""
+        detector = self._detector_for(symbol, pair_tier)
+        return detector.build_regime_context(
+            result, candles=candles, indicators=indicators, vwap=vwap
+        )
+
+    def get_transition_boost(
+        self, direction: str, *, symbol: str, pair_tier: Optional[str] = None
+    ) -> float:
+        """Return *symbol*'s regime-transition confidence boost."""
+        detector = self._detector_for(symbol, pair_tier)
+        return detector.get_transition_boost(direction)
+
+    def regime_just_changed(self, symbol: str) -> bool:
+        detector = self._detectors.get(symbol)
+        return detector.regime_just_changed() if detector is not None else False
+
+
+# ---------------------------------------------------------------------------
 # Vectorised regime detection for historical array replay
 # ---------------------------------------------------------------------------
 

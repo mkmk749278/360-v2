@@ -859,21 +859,34 @@ class TradeObserver:
         return None
 
     def _get_current_regime(self, symbol: str) -> str:
-        """Return a string description of the current market regime."""
+        """Return the current market-regime label for *symbol*.
+
+        Reads the authoritative per-symbol regime that the scanner classified
+        on this pair's own 5m timeframe via :class:`RegimeService`.  Previously
+        this called a non-existent ``detect()`` method whose ``AttributeError``
+        was swallowed by a bare except — leaving ``entry_regime`` empty on every
+        signal and silently breaking all regime-conditional exit analysis.
+        """
         if self._regime_detector is None:
             return ""
-        try:
-            candles = None
-            if self._data_store is not None:
-                candles = self._data_store.get_candles(symbol, "1h")
-            if candles is None:
-                return ""
-            result = self._regime_detector.detect(candles)
-            if result is None:
-                return ""
-            return str(getattr(result, "regime", result))
-        except Exception:
+        get_regime = getattr(self._regime_detector, "get_regime", None)
+        if get_regime is None:
+            log.warning(
+                "TradeObserver: regime detector has no get_regime(); "
+                "entry_regime will be empty for {}",
+                symbol,
+            )
             return ""
+        try:
+            result = get_regime(symbol)
+        except Exception as exc:
+            log.warning("TradeObserver: get_regime({}) failed: {}", symbol, exc)
+            return ""
+        if result is None:
+            # Pair not yet classified this run (no completed scan cycle).
+            return ""
+        regime = getattr(result, "regime", result)
+        return getattr(regime, "value", str(regime))
 
     # ------------------------------------------------------------------
     # Persistence

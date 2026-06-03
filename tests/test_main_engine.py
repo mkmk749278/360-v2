@@ -56,7 +56,7 @@ class TestCryptoSignalEngineInit:
              patch("src.main.PredictiveEngine"), \
              patch("src.main.ExchangeManager"), \
              patch("src.main.SMCDetector"), \
-             patch("src.main.MarketRegimeDetector"), \
+             patch("src.main.RegimeService"), \
              patch("src.main.load_history", return_value=[]), \
              patch("src.main.backfill_from_legacy_sources", return_value=[]):
             from src.main import CryptoSignalEngine
@@ -124,7 +124,7 @@ class TestCryptoSignalEngineInit:
              patch("src.main.PredictiveEngine"), \
              patch("src.main.ExchangeManager"), \
              patch("src.main.SMCDetector"), \
-             patch("src.main.MarketRegimeDetector"):
+             patch("src.main.RegimeService"):
             from src.main import CryptoSignalEngine
             engine = CryptoSignalEngine()
 
@@ -584,7 +584,7 @@ class TestSignalExpiryHandler:
              patch("src.main.PredictiveEngine"), \
              patch("src.main.ExchangeManager"), \
              patch("src.main.SMCDetector"), \
-             patch("src.main.MarketRegimeDetector"), \
+             patch("src.main.RegimeService"), \
              patch("src.main.load_history", return_value=[]), \
              patch("src.main.backfill_from_legacy_sources", return_value=[]), \
              patch("src.main.save_history") as save_h:

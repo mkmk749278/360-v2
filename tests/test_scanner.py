@@ -3122,3 +3122,88 @@ class TestArch3ScanContextWiring:
         # Keys should be absent when store is not configured
         assert "funding_rate" not in captured_smc[0]
         assert "cvd" not in captured_smc[0]
+
+
+class TestDiagnosePair:
+    """diagnose_pair must read from the live scan-path data sources.
+
+    Regression guard: the previous implementation called
+    data_store.get_spread/get_volume/get_regime/get_smc — none of which exist
+    on HistoricalDataStore — so every diagnosis returned an AttributeError
+    string instead of gate data.
+    """
+
+    def _candles_full(self, n: int = 60) -> dict:
+        base = [100.0 + i * 0.1 for i in range(n)]
+        return {
+            "open": [v - 0.1 for v in base],
+            "high": [v + 0.5 for v in base],
+            "low": [v - 0.5 for v in base],
+            "close": base,
+            "volume": [1000.0 for _ in base],
+        }
+
+    @pytest.mark.asyncio
+    async def test_diagnose_pair_uses_scan_path_sources(self):
+        from src.regime import MarketRegime, RegimeResult
+
+        scanner = _make_scanner()
+
+        # data_store only exposes get_candles + ticks (the real surface).
+        cd = self._candles_full()
+        scanner.data_store.get_candles.side_effect = (
+            lambda sym, tf: cd if tf in ("1m", "5m", "15m", "1h") else None
+        )
+        scanner.data_store.ticks = {}
+
+        # pair_mgr provides market + 24h volume (the real source of truth).
+        scanner.pair_mgr.pairs = {
+            "BTCUSDT": SimpleNamespace(market="futures", volume_24h_usd=900_000_000.0)
+        }
+
+        # spread comes from the async helper, regime from RegimeService.
+        scanner._get_spread_pct = AsyncMock(return_value=0.001)
+        scanner.regime_detector.get_regime = MagicMock(
+            return_value=RegimeResult(regime=MarketRegime.TRENDING_UP, adx=30.0)
+        )
+        # smc_detector.detect returns an object with as_dict().
+        scanner.smc_detector.detect = MagicMock(
+            return_value=SimpleNamespace(as_dict=lambda: {"sweeps": [], "fvg": [], "orderblocks": []})
+        )
+
+        result = await scanner.diagnose_pair("BTCUSDT")
+
+        assert result["error"] is None
+        assert result["gates"]["regime"]["value"] == "TRENDING_UP"
+        assert result["gates"]["spread"]["value"] == 0.001
+        # volume gate read pair_mgr's 24h volume, not a non-existent store method
+        assert result["gates"]["volume"]["value"] == 900_000_000.0
+
+    @pytest.mark.asyncio
+    async def test_diagnose_pair_falls_back_to_classify_when_uncached(self):
+        from src.regime import MarketRegime, RegimeResult
+
+        scanner = _make_scanner()
+        cd = self._candles_full()
+        scanner.data_store.get_candles.side_effect = (
+            lambda sym, tf: cd if tf in ("1m", "5m", "15m", "1h") else None
+        )
+        scanner.data_store.ticks = {}
+        scanner.pair_mgr.pairs = {}
+        scanner._get_spread_pct = AsyncMock(return_value=0.0)
+        # No cached regime → must call classify() with a symbol.
+        scanner.regime_detector.get_regime = MagicMock(return_value=None)
+        scanner.regime_detector.classify = MagicMock(
+            return_value=RegimeResult(regime=MarketRegime.RANGING, adx=12.0)
+        )
+        scanner.smc_detector.detect = MagicMock(
+            return_value=SimpleNamespace(as_dict=lambda: {})
+        )
+
+        result = await scanner.diagnose_pair("ETHUSDT")
+
+        assert result["error"] is None
+        assert result["gates"]["regime"]["value"] == "RANGING"
+        # classify must have been called with the symbol keyword (no shared state).
+        _, kwargs = scanner.regime_detector.classify.call_args
+        assert kwargs.get("symbol") == "ETHUSDT"
