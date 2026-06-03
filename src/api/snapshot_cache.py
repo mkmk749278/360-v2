@@ -238,7 +238,16 @@ class SnapshotCache:
         data = decode(raw)
         if data is None:
             return
-        self._signals_all = [SignalDetail(**d) for d in data]
+        parsed: list = []
+        for d in data:
+            try:
+                parsed.append(SignalDetail(**d))
+            except Exception:
+                log.warning(
+                    "snapshot_cache: skipping malformed signal from Redis sid={}",
+                    d.get("signal_id", "?"),
+                )
+        self._signals_all = parsed
         self._cached_at = time.monotonic()
 
     async def _refresh_activity_from_redis(self) -> None:

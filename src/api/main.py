@@ -87,6 +87,14 @@ async def _run() -> None:
             log.warning(
                 "Firebase Admin init failed (falling back to HS256 path): {}", exc
             )
+        # Firestore keystore — same service account as Firebase Admin.
+        # Required so auto_trade_status_routes can check binance_key_connected
+        # via firestore_keystore.get_key_blob() in this process.
+        try:
+            from src.security import firestore_keystore as _fk
+            _fk.init_keystore(service_account_path=firebase_sa_path)
+        except Exception as exc:
+            log.warning("Firestore keystore init failed (binance_key_connected will show false): {}", exc)
     else:
         log.info("Firebase Admin skipped (env vars not set)")
 
