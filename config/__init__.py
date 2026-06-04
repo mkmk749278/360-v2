@@ -555,6 +555,13 @@ TIER3_VOLUME_SURGE_MULTIPLIER: float = _safe_float("TIER3_VOLUME_SURGE_MULTIPLIE
 # locate the dominant cost when scan latency exceeds the ~15s target. Default
 # on; set false to silence once the bottleneck is identified.
 SCAN_STAGE_TIMING_ENABLED: bool = _safe_bool("SCAN_STAGE_TIMING_ENABLED", "true")
+# Worker-thread count for the scan executor. Default 2× cpu_count, capped at
+# 20. Raise via .env once the SMC/indicator caches reduce baseline CPU load and
+# more thread throughput is needed for cold-start pairs.
+SCAN_EXECUTOR_WORKERS: int = _safe_int(
+    "SCAN_EXECUTOR_WORKERS",
+    str(min((os.cpu_count() or 4) * 2, 20)),
+)
 
 # ---------------------------------------------------------------------------
 # Tiered scanning configuration
