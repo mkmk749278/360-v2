@@ -3223,12 +3223,21 @@ def _make_candles_dict(n1m: int = 60, n5m: int = 24, n15m: int = 16, n1h: int = 
 
 
 class TestScanContextCaching:
-    """Verify indicator and SMC caches reduce executor calls on repeated scans."""
+    """Verify per-timeframe indicator and SMC caches cut redundant compute."""
 
     def _make_scanner_with_executor_tracking(self):
         scanner = _make_scanner()
         scanner.data_store.ticks = {"BTCUSDT": []}
         scanner.order_flow_store = MagicMock()
+        # Track which timeframes the indicator compute is invoked for each call.
+        scanner._compute_calls = []
+
+        def _fake_compute(candle_dict):
+            scanner._compute_calls.append(sorted(candle_dict.keys()))
+            return {tf: {"rsi_last": 50.0} for tf in candle_dict}
+
+        scanner._compute_indicators = _fake_compute
+
         # Track how many times the SMC detector is actually called.
         scanner.smc_detector = MagicMock()
         _smc_obj = SimpleNamespace(
@@ -3241,25 +3250,46 @@ class TestScanContextCaching:
         return scanner
 
     @pytest.mark.asyncio
-    async def test_indicator_cache_hits_on_unchanged_candle_count(self):
-        """Indicator cache must hit when candle *count* is the same across calls."""
+    async def test_both_caches_warm_recompute_nothing(self):
+        """Second scan with identical candle counts recomputes no indicators and no SMC."""
         scanner = self._make_scanner_with_executor_tracking()
         candles = _make_candles_dict()
         scanner.data_store.get_candles.side_effect = lambda sym, tf: candles.get(tf)
 
-        # First call — cold cache, both computed.
+        # First call — cold cache, all timeframes computed, SMC computed.
         ctx1 = await scanner._build_scan_context("BTCUSDT", 1e9)
         assert ctx1 is not None
         assert scanner.smc_detector.detect.call_count == 1
+        assert len(scanner._compute_calls) == 1  # one compute invocation
         assert "BTCUSDT" in scanner._indicator_cache
 
-        # Second call — same candle counts, indicator cache must hit.
-        # SMC cache should also hit (same 5m+ counts).
-        detect_before = scanner.smc_detector.detect.call_count
+        # Second call — nothing changed → no compute invocation, no SMC detect.
         ctx2 = await scanner._build_scan_context("BTCUSDT", 1e9)
         assert ctx2 is not None
-        # SMC detect NOT called again — served from _smc_cache.
-        assert scanner.smc_detector.detect.call_count == detect_before
+        assert scanner.smc_detector.detect.call_count == 1  # SMC served from cache
+        assert len(scanner._compute_calls) == 1  # no second compute call at all
+
+    @pytest.mark.asyncio
+    async def test_only_1m_recomputed_when_only_1m_candle_closes(self):
+        """A new 1m candle must recompute ONLY 1m indicators, not the higher TFs."""
+        scanner = self._make_scanner_with_executor_tracking()
+        candles = _make_candles_dict()
+        scanner.data_store.get_candles.side_effect = lambda sym, tf: candles.get(tf)
+
+        await scanner._build_scan_context("BTCUSDT", 1e9)
+        assert scanner._compute_calls[0] == ["15m", "1h", "1m", "5m"]
+
+        # New 1m candle only.
+        candles["1m"]["close"].append(61.0)
+        candles["1m"]["high"].append(61.1)
+        candles["1m"]["low"].append(60.9)
+        candles["1m"]["volume"].append(100.0)
+
+        await scanner._build_scan_context("BTCUSDT", 1e9)
+        # Second compute call must contain ONLY 1m — higher TFs served from cache.
+        assert scanner._compute_calls[1] == ["1m"]
+        # SMC unaffected by 1m change (5m+ fingerprint unchanged).
+        assert scanner.smc_detector.detect.call_count == 1
 
     @pytest.mark.asyncio
     async def test_smc_cache_misses_when_5m_candle_count_grows(self):
@@ -3280,10 +3310,12 @@ class TestScanContextCaching:
         await scanner._build_scan_context("BTCUSDT", 1e9)
         # SMC must be recomputed because 5m candle count changed.
         assert scanner.smc_detector.detect.call_count == 2
+        # Indicator compute for the second call must include 5m (its count grew).
+        assert "5m" in scanner._compute_calls[1]
 
     @pytest.mark.asyncio
     async def test_smc_cache_persists_across_1m_close_changes(self):
-        """A 1m close price change must NOT invalidate the SMC cache."""
+        """A 1m close-price change (tick) must NOT invalidate the SMC cache."""
         scanner = self._make_scanner_with_executor_tracking()
         candles = _make_candles_dict()
         scanner.data_store.get_candles.side_effect = lambda sym, tf: candles.get(tf)
@@ -3291,27 +3323,26 @@ class TestScanContextCaching:
         await scanner._build_scan_context("BTCUSDT", 1e9)
         assert scanner.smc_detector.detect.call_count == 1
 
-        # Simulate the current 1m candle's close updating (new tick) but no new candle.
+        # Mutate the current 1m candle's close (new tick) but no new candle.
         candles["1m"]["close"][-1] = 999.9
 
         await scanner._build_scan_context("BTCUSDT", 1e9)
         # SMC cache must still hit — 5m+ counts are unchanged.
         assert scanner.smc_detector.detect.call_count == 1
+        # And no indicator recompute either — counts unchanged across all TFs.
+        assert len(scanner._compute_calls) == 1
 
     @pytest.mark.asyncio
-    async def test_indicator_fingerprint_uses_length_not_close_value(self):
-        """Indicator fingerprint must be based on candle count, not last_close."""
+    async def test_indicator_cache_keyed_per_timeframe(self):
+        """Cache structure is symbol → {tf: (len, ind)}; entry per timeframe."""
         scanner = self._make_scanner_with_executor_tracking()
         candles = _make_candles_dict()
         scanner.data_store.get_candles.side_effect = lambda sym, tf: candles.get(tf)
 
         await scanner._build_scan_context("BTCUSDT", 1e9)
-        fp_after_first, _ = scanner._indicator_cache["BTCUSDT"]
-
-        # Mutate current 1m close (tick update) — len unchanged.
-        candles["1m"]["close"][-1] = 77777.0
-        await scanner._build_scan_context("BTCUSDT", 1e9)
-        fp_after_second, _ = scanner._indicator_cache["BTCUSDT"]
-
-        # Fingerprint must be identical — close value change doesn't matter.
-        assert fp_after_first == fp_after_second
+        cache = scanner._indicator_cache["BTCUSDT"]
+        assert set(cache.keys()) == {"1m", "5m", "15m", "1h"}
+        # Each entry is (candle_count, indicator_dict).
+        n_len, ind = cache["5m"]
+        assert n_len == len(candles["5m"]["close"])
+        assert ind == {"rsi_last": 50.0}
