@@ -147,13 +147,23 @@ class SnapshotWriter:
 
     async def _write_engine_state(self) -> None:
         try:
+            # Capture the live asyncio task census HERE, on the engine's event
+            # loop — this is the only place that sees the engine container's
+            # real tasks. (asyncio.all_tasks() inside the executor thread has no
+            # running loop.) The isolated API container reads this back via
+            # RedisEngineFacade to answer /internal/diag/tasks correctly.
+            task_names = sorted(
+                t.get_name() for t in asyncio.all_tasks() if not t.done()
+            )
             loop = asyncio.get_running_loop()
-            state = await loop.run_in_executor(self._executor, self._build_engine_state)
+            state = await loop.run_in_executor(
+                self._executor, self._build_engine_state, task_names
+            )
             await self._set(_store.KEY_ENGINE_STATE, state, _store.TTL_ENGINE_STATE)
         except Exception:
             log.exception("snapshot_writer: failed to write engine_state")
 
-    def _build_engine_state(self) -> dict:
+    def _build_engine_state(self, task_names: list) -> dict:
         engine = self._engine
         rm  = getattr(engine, "_risk_manager", None)
         om  = getattr(engine, "_order_manager", None)
@@ -247,6 +257,7 @@ class SnapshotWriter:
             "broker_positions": broker_positions,
             "active_signal_dispatch": active_signal_dispatch,
             "auto_execution_status": auto_status,
+            "background_tasks": list(task_names),
         }
 
     # ------------------------------------------------------------------

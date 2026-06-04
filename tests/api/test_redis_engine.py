@@ -119,6 +119,23 @@ def test_get_auto_execution_status_returns_dict():
     assert status["open_positions"] == 1
 
 
+def test_get_background_task_census_from_state():
+    tasks = ["trade_monitor", "reconciler", "mark_price_feed",
+             "funding_exit_watcher", "snapshot_writer"]
+    f = _facade_with_state({"background_tasks": tasks})
+    assert f.get_background_task_census() == tasks
+
+
+def test_get_background_task_census_empty_when_absent():
+    f = _facade_with_state({})
+    assert f.get_background_task_census() == []
+
+
+def test_get_background_task_census_ignores_non_list():
+    f = _facade_with_state({"background_tasks": "not-a-list"})
+    assert f.get_background_task_census() == []
+
+
 def test_set_auto_execution_mode_invalid_mode():
     f = _facade_with_state({"current_auto_mode": "paper"})
     ok, msg = f.set_auto_execution_mode("invalid")

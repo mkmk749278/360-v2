@@ -1250,18 +1250,27 @@ def build_app(
         dependencies=[Depends(owner_required)],
     )
     async def diag_tasks() -> Dict[str, Any]:
-        """Owner-tier read-only census of live asyncio tasks.
+        """Owner-tier read-only census of live engine asyncio tasks.
 
         Used by the 360 CE Ops monitoring agent (D2 — BackgroundTaskDetector)
-        to verify that all critical engine loops are still running.  Returns
-        the names from asyncio.all_tasks() so the agent can check for
+        to verify the critical engine loops are still running:
         ``trade_monitor``, ``reconciler``, ``mark_price_feed``,
-        ``funding_exit_watcher``, and ``pretp_dispatcher`` without needing
-        docker exec or log scraping.
+        ``funding_exit_watcher``.
+
+        Mode-agnostic: in single-process mode ``engine`` is the real
+        ``CryptoSignalEngine`` and returns its live ``asyncio.all_tasks()``;
+        in isolated mode ``engine`` is the ``RedisEngineFacade`` and returns
+        the census the engine container published into ``engine_state``. A
+        bare ``asyncio.all_tasks()`` here was wrong under isolation — it saw
+        the API container's own tasks, never the engine's.
         """
-        names = sorted(
-            t.get_name() for t in asyncio.all_tasks() if not t.done()
-        )
+        getter = getattr(engine, "get_background_task_census", None)
+        if callable(getter):
+            names = list(getter())
+        else:  # defensive fallback — neither engine type should hit this
+            names = sorted(
+                t.get_name() for t in asyncio.all_tasks() if not t.done()
+            )
         return {"tasks": names, "count": len(names)}
 
     # ---- Activity ----
