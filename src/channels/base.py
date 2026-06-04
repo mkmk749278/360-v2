@@ -251,6 +251,7 @@ class Signal:
     entry_regime: str = ""                        # 5m market regime when signal was opened
     entry_regime_15m: str = ""                    # 15m (higher-TF) regime at entry — exit-runner gate
     atr_percentile_at_entry: float = 50.0         # ATR percentile (0-100) at entry — trail-width input
+    atr_value_at_entry: float = 0.0               # Absolute ATR(14) value at entry — converts percentile to Binance callbackRate
     entry_momentum_slope: float = 0.0             # EMA slope at entry (% diff)
     last_lifecycle_check: Optional[datetime] = None  # UTC timestamp of last check
     lifecycle_alert_level: str = "GREEN"          # GREEN, YELLOW, RED

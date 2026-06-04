@@ -458,6 +458,59 @@ class OrderPlacer:
             signal_id=signal_id,
         )
 
+    async def place_trailing_stop_market(
+        self,
+        *,
+        signal_id: str,
+        symbol: str,
+        direction: str,  # "LONG" | "SHORT"
+        callback_rate_pct: float,
+        coid_override: Optional[str] = None,
+    ) -> OrderPlacementResult:
+        """Binance TRAILING_STOP_MARKET via algoOrder — ATR-based trail width.
+
+        ``callback_rate_pct`` is the trail callback rate in percent
+        (0.1%–5.0%).  The Binance trailing stop ratchets the trigger price
+        as mark-price moves favorably; it fires when price reverses by
+        exactly ``callbackRate`` percent from the peak (for LONG) or trough
+        (for SHORT).
+
+        Activation is immediate (no ``activationPrice`` sent) so the trail
+        starts tracking from the current mark price the moment the order
+        lands on Binance — which is what we want on pre-TP fire: the
+        partial close just banked profits, and the trail guards the residual
+        from here.
+
+        ``closePosition=true`` covers the ENTIRE remaining position
+        (including any TP2 residual after a partial TP1 fill) without
+        needing an explicit quantity.  This is safe because TP orders have
+        ``reduceOnly=true`` and Binance auto-cancels reduce-only orders
+        when the position is closed by another order.
+
+        Uses ``coid_sl_be`` suffix (same as BE-SL) so the FSM's existing
+        ``_apply_sl_be_fill`` handler transitions the position to CLOSED
+        with ``close_reason="SL_BE"`` when the trail fires — correct for
+        audit purposes (trail exit is the residual-protection mechanism,
+        not a raw stop loss).
+        """
+        coid = coid_override or _position_state.coid_sl_be(signal_id)
+        rate = max(0.1, min(5.0, float(callback_rate_pct)))
+        params = {
+            "symbol": symbol,
+            "side": _exit_side(direction),
+            "algoType": "CONDITIONAL",
+            "type": "TRAILING_STOP_MARKET",
+            "callbackRate": f"{rate:.2f}",
+            "closePosition": "true",
+            "workingType": "MARK_PRICE",
+            "clientAlgoId": coid,
+        }
+        return await self._submit_algo_order(
+            params=params,
+            phase="trail_sl",
+            signal_id=signal_id,
+        )
+
     async def place_market_close(
         self,
         *,

@@ -31,6 +31,8 @@ import asyncio
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Optional
 
+from config import trail_atr_multiplier as _trail_atr_mult
+
 from src.execution import events as _events
 from src.execution import order_placer as _order_placer
 from src.execution import position_state as _position_state
@@ -76,6 +78,58 @@ def _binance_reject_code(exc: Exception) -> Optional[int]:
         except (TypeError, ValueError):
             return None
     return None
+
+
+# ---------------------------------------------------------------------------
+# Regime-per-exit helpers
+# ---------------------------------------------------------------------------
+
+
+def _regime_exit_path(position: _position_state.Position) -> str:
+    """Determine exit path for a partially-closed position based on entry regime.
+
+    Returns one of:
+      "TRAIL"    — 5m TRENDING aligned with trade direction AND 15m confirms.
+                   Keep TP2, replace SL with Binance TRAILING_STOP_MARKET.
+      "VOLATILE" — 5m VOLATILE.
+                   Keep TP2, replace SL with 20%-tightened static stop.
+      "CANCEL"   — RANGING, QUIET, 5m trending counter to trade, or 15m
+                   doesn't confirm trend.  Cancel all TPs + SL, market-close
+                   the residual immediately to bank pre-TP gain.
+
+    Design rationale: the exit path is evaluated ONCE at pre-TP fire time using
+    the regime that was recorded at entry.  We do NOT re-classify here (that
+    would perturb the RegimeService's per-symbol hysteresis state outside the
+    scanner loop).  A signal that entered on TRENDING and now (post-preTP) sees
+    a RANGING regime is handled by the trail stop hitting naturally — we don't
+    need a secondary regime check inside the FSM.
+    """
+    regime = (position.entry_regime or "").upper()
+    regime_15m = (position.entry_regime_15m or "").upper()
+    side = (position.side or "").upper()
+
+    if regime == "VOLATILE":
+        return "VOLATILE"
+
+    is_trending_5m = regime in ("TRENDING_UP", "TRENDING_DOWN")
+    if not is_trending_5m:
+        return "CANCEL"  # RANGING, QUIET, or empty (no regime data)
+
+    # 5m trend: check direction alignment with the trade.
+    trend_up_5m = regime == "TRENDING_UP"
+    trade_long = side == "LONG"
+    if trend_up_5m != trade_long:
+        return "CANCEL"  # 5m counter-trend
+
+    # 15m confirmation: require the 15m regime to be the same trend direction.
+    is_trending_15m = regime_15m in ("TRENDING_UP", "TRENDING_DOWN")
+    if not is_trending_15m:
+        return "CANCEL"  # 15m ranging/quiet — don't run a trail
+    trend_up_15m = regime_15m == "TRENDING_UP"
+    if trend_up_15m != trade_long:
+        return "CANCEL"  # 15m counter to trade direction
+
+    return "TRAIL"
 
 
 # ---------------------------------------------------------------------------
@@ -201,6 +255,8 @@ class PositionFSM:
             self._apply_sl_fill(position, event)
         elif phase == "sl_be":
             self._apply_sl_be_fill(position, event)
+        elif phase == "close":
+            self._apply_close_fill(position, event)
         else:
             # parse_coid only emits known phases, so unreachable
             # in practice.  Defensive log.
@@ -264,21 +320,32 @@ class PositionFSM:
     ) -> None:
         """Pre-TP partial close filled (per §3.2a doctrine).
 
-        State: OPEN → PRE_TP_FIRED.
+        State: OPEN → PRE_TP_FIRED | TRAILING.
 
-        Side effects (the doctrine):
-        1. Record closed qty + realized PnL from the partial.
-        2. **Cancel the original SL** at the signal's SL price.
-        3. **Place a new SL at the entry price** (BE shift) so the
-           residual rides to TP1 with break-even downside protection.
-        4. Cancel TP2 + TP3 — residual is small enough that a single
-           TP at TP1 is sufficient; multi-TP orders for the residual
-           would over-commit qty.  TP1 stays active (it still closes
-           the residual profitably if hit).
+        Two stages:
 
-        BE shift order placement is best-effort: if the new SL fails
-        to place, the position is uncovered until manual operator
-        intervention.  PR-8's tripwires will Telegram-alert on this.
+        1. Full-close pre-TP (grab_fraction == 1.0, or position too small
+           for residual): cancel all orders → CLOSED.
+
+        2. Partial pre-TP: route to one of three exit paths based on the
+           entry-time market regime (stamped on Position at dispatch):
+
+           TRAIL  — TRENDING_UP/DOWN (5m) aligned with trade direction AND
+                    15m confirms: cancel original SL, keep TP2, place Binance
+                    TRAILING_STOP_MARKET at ATR-derived callbackRate → TRAILING.
+
+           VOLATILE — VOLATILE regime: cancel original SL, keep TP2, place
+                    tightened static SL (80% of original SL distance from
+                    entry) → PRE_TP_FIRED.
+
+           CANCEL — RANGING, QUIET, counter-trend, or missing regime data:
+                    cancel SL+TP1+TP2, market-close remaining position →
+                    PRE_TP_FIRED (transitions to CLOSED on the close fill).
+
+        The TRAIL exit is the regime-per-exit doctrine's core: trending markets
+        that persist past pre-TP capture TP2 with a self-adjusting trail, not
+        a fixed BE stop.  Ranging and counter-trend markets bank the pre-TP
+        gain immediately rather than riding into a reversal.
         """
         position.closed_qty += event.last_filled_qty
         position.realized_pnl_total += event.realized_pnl
@@ -332,64 +399,302 @@ class PositionFSM:
             )
             return
 
-        # Partial pre-TP — residual rides to TP1 with a BE-shifted SL.
-        position.state = _position_state.PositionState.PRE_TP_FIRED
-        # Cancel original SL.  Tolerant of -2011/-20121 (order already gone)
-        # so a race between SL hit + pre-TP fill doesn't crash here.
-        if position.sl_order_id:
-            try:
-                await placer.cancel_algo_order(
-                    symbol=position.symbol,
-                    algo_id=position.sl_order_id,
-                )
-            except _order_placer.OrderPlacementError as exc:
-                log.warning(
-                    "_apply_pretp_fill: SL cancel failed uid={} signal_id={} "
-                    "exc={}",
-                    self.firebase_uid, position.signal_id, exc,
-                )
-        # Cancel TP2 + TP3 — residual is too small for multi-leg TP.
-        for tp_order_id in (position.tp2_order_id, position.tp3_order_id):
-            if tp_order_id:
-                try:
-                    await placer.cancel_algo_order(
-                        symbol=position.symbol,
-                        algo_id=tp_order_id,
-                    )
-                except _order_placer.OrderPlacementError as exc:
-                    log.warning(
-                        "_apply_pretp_fill: TP cancel failed uid={} "
-                        "signal_id={} algo_id={} exc={}",
-                        self.firebase_uid, position.signal_id,
-                        tp_order_id, exc,
-                    )
-        position.tp2_order_id = 0
-        position.tp3_order_id = 0
-        # Place the BE-shifted SL at the entry price.  Distinct
-        # clientOrderId suffix so we can tell it apart from the
-        # original on fill events.
-        be_price = (
+        # Partial pre-TP: route to the regime-appropriate exit path.
+        exit_path = _regime_exit_path(position)
+        log.info(
+            "_apply_pretp_fill: partial uid={} signal_id={} exit_path={} "
+            "regime={} regime_15m={} side={}",
+            self.firebase_uid, position.signal_id, exit_path,
+            position.entry_regime, position.entry_regime_15m, position.side,
+        )
+        if exit_path == "TRAIL":
+            await self._pretp_trail_path(position, placer)
+        elif exit_path == "VOLATILE":
+            await self._pretp_volatile_path(position, placer)
+        else:
+            await self._pretp_cancel_path(position, placer)
+
+    async def _pretp_trail_path(
+        self,
+        position: _position_state.Position,
+        placer: _order_placer.OrderPlacer,
+    ) -> None:
+        """TRENDING + aligned exit path: keep TP2 live, place ATR trail stop.
+
+        Binance TRAILING_STOP_MARKET with callbackRate derived from
+        ``trail_atr_multiplier(atr_percentile) × atr_value / fill_price``.
+        Uses the ``sl_be`` clientAlgoId so ``_apply_sl_be_fill`` handles the
+        fill event correctly when the trail fires.
+
+        On trailing-stop placement failure, falls back to a standard BE-SL so
+        the residual is never left uncovered.
+        """
+        position.state = _position_state.PositionState.TRAILING
+        fill_price = (
             position.entry_price_filled
             if position.entry_price_filled > 0
             else position.entry_price_target
         )
+        # Cancel original SL (trail replaces it).
+        if position.sl_order_id:
+            try:
+                await placer.cancel_algo_order(
+                    symbol=position.symbol, algo_id=position.sl_order_id
+                )
+            except _order_placer.OrderPlacementError as exc:
+                log.warning(
+                    "_pretp_trail_path: SL cancel failed uid={} signal_id={} exc={}",
+                    self.firebase_uid, position.signal_id, exc,
+                )
+        position.sl_order_id = 0
+        # Cancel TP3 (already qty=0 in prod, but clean up if somehow set).
+        if position.tp3_order_id:
+            try:
+                await placer.cancel_algo_order(
+                    symbol=position.symbol, algo_id=position.tp3_order_id
+                )
+            except _order_placer.OrderPlacementError as exc:
+                log.warning(
+                    "_pretp_trail_path: TP3 cancel failed uid={} signal_id={} exc={}",
+                    self.firebase_uid, position.signal_id, exc,
+                )
+            position.tp3_order_id = 0
+        # TP2 stays live — regime-aligned trend should capture TP2.
+        # Compute ATR-based callback rate.
+        trail_mult = _trail_atr_mult(position.atr_percentile_at_entry)
+        if position.atr_value_at_entry > 0 and fill_price > 0:
+            callback_rate_pct = trail_mult * position.atr_value_at_entry / fill_price * 100.0
+        else:
+            callback_rate_pct = 1.0  # fallback: 1% when ATR not available
+        try:
+            trail_result = await placer.place_trailing_stop_market(
+                signal_id=position.signal_id,
+                symbol=position.symbol,
+                direction=position.side,
+                callback_rate_pct=callback_rate_pct,
+                coid_override=_position_state.coid_sl_be(position.signal_id),
+            )
+            position.trail_order_id = trail_result.order_id
+            position.sl_price = fill_price  # approximate trail anchor
+            log.info(
+                "_pretp_trail_path: trail stop placed uid={} signal_id={} "
+                "trail_order_id={} callback_rate={:.2f}%",
+                self.firebase_uid, position.signal_id,
+                trail_result.order_id, max(0.1, min(5.0, callback_rate_pct)),
+            )
+        except _order_placer.OrderPlacementError as exc:
+            log.error(
+                "_pretp_trail_path: trail stop failed — falling back to BE-SL "
+                "uid={} signal_id={} exc={}",
+                self.firebase_uid, position.signal_id, exc,
+            )
+            # Fallback: standard BE-SL so the residual is protected.
+            position.state = _position_state.PositionState.PRE_TP_FIRED
+            try:
+                sl_be = await placer.place_stop_loss(
+                    signal_id=position.signal_id,
+                    symbol=position.symbol,
+                    direction=position.side,
+                    stop_price=fill_price,
+                    coid_override=_position_state.coid_sl_be(position.signal_id),
+                )
+                position.sl_be_order_id = sl_be.order_id
+                position.sl_price = fill_price
+            except _order_placer.OrderPlacementError as exc2:
+                log.error(
+                    "_pretp_trail_path: BE-SL fallback also failed — residual "
+                    "uncovered uid={} signal_id={} exc={}",
+                    self.firebase_uid, position.signal_id, exc2,
+                )
+
+    async def _pretp_volatile_path(
+        self,
+        position: _position_state.Position,
+        placer: _order_placer.OrderPlacer,
+    ) -> None:
+        """VOLATILE exit path: keep TP2, tighten SL by 20%.
+
+        Cancels the original SL and replaces it with a static SL at
+        80% of the original SL distance from the fill price.  TP2 stays
+        live.  TP3 (qty=0 in prod) is cancelled if somehow placed.
+
+        Tightening captures the volatile market's tendency to snap back
+        while still leaving room for the residual to reach TP2.
+        """
+        position.state = _position_state.PositionState.PRE_TP_FIRED
+        fill_price = (
+            position.entry_price_filled
+            if position.entry_price_filled > 0
+            else position.entry_price_target
+        )
+        # Compute tightened SL: 80% of original distance (20% tighter).
+        orig_sl_dist = abs(fill_price - position.sl_price)
+        tight_dist = orig_sl_dist * 0.8
+        if position.side == "LONG":
+            new_sl_price = fill_price - tight_dist
+        else:
+            new_sl_price = fill_price + tight_dist
+        # Cancel original SL.
+        if position.sl_order_id:
+            try:
+                await placer.cancel_algo_order(
+                    symbol=position.symbol, algo_id=position.sl_order_id
+                )
+            except _order_placer.OrderPlacementError as exc:
+                log.warning(
+                    "_pretp_volatile_path: SL cancel failed uid={} signal_id={} exc={}",
+                    self.firebase_uid, position.signal_id, exc,
+                )
+        position.sl_order_id = 0
+        # Cancel TP3 if placed.
+        if position.tp3_order_id:
+            try:
+                await placer.cancel_algo_order(
+                    symbol=position.symbol, algo_id=position.tp3_order_id
+                )
+            except _order_placer.OrderPlacementError as exc:
+                log.warning(
+                    "_pretp_volatile_path: TP3 cancel failed uid={} signal_id={} exc={}",
+                    self.firebase_uid, position.signal_id, exc,
+                )
+            position.tp3_order_id = 0
+        # TP2 stays live.
+        # Place tightened SL.
         try:
             sl_be = await placer.place_stop_loss(
                 signal_id=position.signal_id,
                 symbol=position.symbol,
                 direction=position.side,
-                stop_price=be_price,
+                stop_price=new_sl_price,
                 coid_override=_position_state.coid_sl_be(position.signal_id),
             )
             position.sl_be_order_id = sl_be.order_id
-            position.sl_order_id = 0  # original is gone
-            position.sl_price = be_price
+            position.sl_price = new_sl_price
+            log.info(
+                "_pretp_volatile_path: tightened SL placed uid={} signal_id={} "
+                "new_sl={:.6g} (was {:.6g}, dist_pct={:.2f}%)",
+                self.firebase_uid, position.signal_id, new_sl_price,
+                fill_price - tight_dist / 0.8 * (1 if position.side == "LONG" else -1),
+                tight_dist / max(fill_price, 1e-9) * 100,
+            )
         except _order_placer.OrderPlacementError as exc:
             log.error(
-                "_apply_pretp_fill: BE-SL placement failed (residual "
+                "_pretp_volatile_path: tightened SL placement failed (residual "
                 "uncovered) uid={} signal_id={} exc={}",
                 self.firebase_uid, position.signal_id, exc,
             )
+
+    async def _pretp_cancel_path(
+        self,
+        position: _position_state.Position,
+        placer: _order_placer.OrderPlacer,
+    ) -> None:
+        """RANGING/QUIET/counter-trend exit path: bank pre-TP gain, exit residual.
+
+        Cancels all remaining SL + TP orders and places a MARKET close for the
+        residual position.  The market-close fill arrives as a ``close`` phase
+        ORDER_TRADE_UPDATE event which ``_apply_close_fill`` handles → CLOSED.
+
+        If the market close fails, attempts to place a BE-SL at entry as a
+        fallback stop so the residual is never left completely unprotected.
+        """
+        # Cancel all remaining orders.
+        for _oid in (
+            position.sl_order_id,
+            position.tp1_order_id,
+            position.tp2_order_id,
+            position.tp3_order_id,
+        ):
+            if _oid:
+                try:
+                    await placer.cancel_algo_order(
+                        symbol=position.symbol, algo_id=_oid
+                    )
+                except _order_placer.OrderPlacementError as exc:
+                    log.warning(
+                        "_pretp_cancel_path: order cancel failed uid={} "
+                        "signal_id={} algo_id={} exc={}",
+                        self.firebase_uid, position.signal_id, _oid, exc,
+                    )
+        position.sl_order_id = 0
+        position.tp1_order_id = 0
+        position.tp2_order_id = 0
+        position.tp3_order_id = 0
+        # Position stays PRE_TP_FIRED until the close fill arrives.
+        position.state = _position_state.PositionState.PRE_TP_FIRED
+        remaining_qty = max(0.0, position.total_qty - position.closed_qty)
+        if remaining_qty <= 0:
+            # Nothing left — mark closed directly.
+            position.state = _position_state.PositionState.CLOSED
+            position.closed_at = datetime.now(timezone.utc)
+            if not position.close_reason:
+                position.close_reason = "REGIME_EXIT"
+            self._untrack_symbol(position.symbol)
+            return
+        try:
+            await placer.place_market_close(
+                signal_id=position.signal_id,
+                symbol=position.symbol,
+                direction=position.side,
+                quantity=remaining_qty,
+            )
+            log.info(
+                "_pretp_cancel_path: market close placed uid={} signal_id={} "
+                "remaining_qty={:.8f} regime={} regime_15m={}",
+                self.firebase_uid, position.signal_id, remaining_qty,
+                position.entry_regime, position.entry_regime_15m,
+            )
+        except _order_placer.OrderPlacementError as exc:
+            log.error(
+                "_pretp_cancel_path: market close failed — placing BE-SL as "
+                "fallback uid={} signal_id={} exc={}",
+                self.firebase_uid, position.signal_id, exc,
+            )
+            # Fallback: BE-SL so the residual is not completely unprotected.
+            fill_price = (
+                position.entry_price_filled
+                if position.entry_price_filled > 0
+                else position.entry_price_target
+            )
+            try:
+                sl_be = await placer.place_stop_loss(
+                    signal_id=position.signal_id,
+                    symbol=position.symbol,
+                    direction=position.side,
+                    stop_price=fill_price,
+                    coid_override=_position_state.coid_sl_be(position.signal_id),
+                )
+                position.sl_be_order_id = sl_be.order_id
+                position.sl_price = fill_price
+            except _order_placer.OrderPlacementError as exc2:
+                log.error(
+                    "_pretp_cancel_path: BE-SL fallback also failed — residual "
+                    "uncovered uid={} signal_id={} exc={}",
+                    self.firebase_uid, position.signal_id, exc2,
+                )
+
+    def _apply_close_fill(
+        self,
+        position: _position_state.Position,
+        event: _events.OrderTradeUpdate,
+    ) -> None:
+        """Market close fill — PRE_TP_FIRED → CLOSED.
+
+        Handles ORDER_TRADE_UPDATE events for MARKET closes placed by:
+        * ``_pretp_cancel_path`` (regime-exit — RANGING/QUIET/counter-trend)
+        * ``signal_dispatch.close_fsm_positions_for_signal`` (invalidation /
+          expiry / lifecycle monitor market close)
+
+        Both use ``coid_close`` (``_close`` suffix) so this handler fires
+        in both cases and records the correct terminal state.
+        """
+        position.closed_qty = position.total_qty  # market close is full-position
+        position.realized_pnl_total += event.realized_pnl
+        position.state = _position_state.PositionState.CLOSED
+        position.closed_at = datetime.now(timezone.utc)
+        if not position.close_reason:
+            position.close_reason = "REGIME_EXIT"
+        self._untrack_symbol(position.symbol)
 
     async def _apply_tp1_fill(
         self,
@@ -455,10 +760,23 @@ class PositionFSM:
         position: _position_state.Position,
         event: _events.OrderTradeUpdate,
     ) -> None:
-        """TP2 fill — TP1_HIT → TP2_HIT."""
+        """TP2 fill — transitions toward TP2_HIT or CLOSED.
+
+        On the TRAIL path, TP2 may fill directly from TRAILING state (or after
+        TP1_HIT).  When TP3 is disabled (tp3_qty == 0, which is production
+        default) and all qty is closed after this fill, transition directly to
+        CLOSED rather than leaving the position stranded in TP2_HIT forever.
+        """
         position.closed_qty += event.last_filled_qty
         position.realized_pnl_total += event.realized_pnl
         position.state = _position_state.PositionState.TP2_HIT
+        _eps = max(position.total_qty * 1e-6, 1e-12)
+        if position.tp3_qty <= 0 and position.closed_qty >= position.total_qty - _eps:
+            position.state = _position_state.PositionState.CLOSED
+            position.closed_at = datetime.now(timezone.utc)
+            if not position.close_reason:
+                position.close_reason = "TP2"
+            self._untrack_symbol(position.symbol)
 
     def _apply_tp3_fill(
         self,
@@ -566,6 +884,10 @@ async def place_signal(
     pretp_threshold_pct: float = 0.32,  # §3.2a default — raw %
     pretp_fraction: float = 0.5,  # B17 engine default — must be in [0.3, 1.0]
     invalidation_mode: str = "standard",  # B17: "loose" / "standard" / "tight"
+    entry_regime: str = "",        # 5m Hurst-gated regime at entry
+    entry_regime_15m: str = "",    # 15m stateless regime at entry
+    atr_percentile_at_entry: float = 50.0,
+    atr_value_at_entry: float = 0.0,
     order_placer_factory: Optional[
         Callable[[str], _order_placer.OrderPlacer]
     ] = None,
@@ -722,6 +1044,10 @@ async def place_signal(
         pretp_threshold_price=pretp_threshold_price,
         pretp_fraction=pretp_fraction_clamped,
         invalidation_mode=invalidation_mode,
+        entry_regime=entry_regime,
+        entry_regime_15m=entry_regime_15m,
+        atr_percentile_at_entry=atr_percentile_at_entry,
+        atr_value_at_entry=atr_value_at_entry,
     )
     _position_state.put_position(position)
 

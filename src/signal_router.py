@@ -977,6 +977,9 @@ class SignalRouter:
                 tp2_price=float(signal.tp2),
                 tp3_price=float(signal.tp3),
                 regime_label=getattr(signal, "entry_regime", None),
+                regime_label_15m=getattr(signal, "entry_regime_15m", None),
+                atr_percentile=getattr(signal, "atr_percentile_at_entry", 50.0),
+                atr_value=getattr(signal, "atr_value_at_entry", 0.0),
                 setup_class=getattr(signal, "setup_class", None),
             )
         except Exception:
