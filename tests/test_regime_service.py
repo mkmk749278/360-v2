@@ -41,7 +41,12 @@ def _ranging_indicators():
 
 
 def _candles(n=60, base=100.0, trend=0.1):
-    close = np.cumsum(np.ones(n) * trend) + base
+    # Add deterministic noise so a real trend has a realistic (persistent)
+    # Hurst exponent.  A perfectly smooth ramp is a degenerate input for the
+    # Hurst estimator (float-rounding artifacts read as mean-reverting); real
+    # price series are noisy, so the test data must be too.
+    rng = np.random.default_rng(7)
+    close = base + np.cumsum(trend + rng.normal(0.0, abs(trend) * 0.3 + 0.05, n))
     return {
         "open": close - 0.1,
         "high": close + 0.5,

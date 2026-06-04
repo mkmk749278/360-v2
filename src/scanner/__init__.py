@@ -106,7 +106,7 @@ from src.indicators import adx, atr, bollinger_bands, ema, macd, momentum, rsi  
 from src.scanner.data_fetcher import DataFetcher
 from src.scanner.indicator_compute import compute_indicators_for_candle_dict
 from src.onchain import score_onchain
-from src.regime import MarketRegime
+from src.regime import MarketRegime, detect_regime_from_arrays
 from src.signal_quality import (
     ExecutionAssessment,
     MarketState,
@@ -3788,8 +3788,37 @@ class Scanner:
                 sig.regime_context = (
                     f"ADXslope={float(rc.adx_slope):.2f} strengthen={rc.is_regime_strengthening}"
                 )
+                # Stamp the entry-time regime + ATR percentile on the signal so the
+                # exit FSM can gate runner behaviour without re-classifying.  The
+                # 5m label is the Hurst-gated stable regime; ATR percentile drives
+                # the trail width (Fix B).
+                sig.entry_regime = rc.label
+                sig.atr_percentile_at_entry = float(rc.atr_percentile)
             except (TypeError, ValueError):
                 pass  # Keep market_state.value when context is not a real RegimeContext
+
+        # Multi-timeframe regime stamp (Fix C): record the 15m regime at entry so
+        # the exit logic only keeps TP2/TP3 runners when the higher timeframe
+        # agrees with the trade direction — a 5m trend that is a pullback inside a
+        # 15m range should not spawn a runner.  Uses the stateless array detector
+        # so it never perturbs the per-symbol 5m hysteresis state.
+        try:
+            c15 = ctx.candles.get("15m") if ctx.candles else None
+            if c15 and len(c15.get("close", [])) >= 30:
+                closes = np.asarray(c15["close"], dtype=np.float64)
+                highs = np.asarray(c15.get("high", closes), dtype=np.float64)
+                lows = np.asarray(c15.get("low", closes), dtype=np.float64)
+                vols = np.asarray(
+                    c15.get("volume", np.zeros(len(closes))), dtype=np.float64
+                )
+                sig.entry_regime_15m = detect_regime_from_arrays(
+                    closes, highs, lows, vols, idx=len(closes) - 1
+                )
+        except Exception as exc:
+            log.debug(
+                "15m regime stamp failed for {}: {}",
+                getattr(sig, "symbol", "?"), exc,
+            )
         liq_parts = []
         if ctx.smc_result.sweeps:
             sweep = ctx.smc_result.sweeps[0]

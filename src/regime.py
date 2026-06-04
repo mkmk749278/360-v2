@@ -15,7 +15,12 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from src.utils import get_logger
-from src.indicators import adx as _compute_adx, atr as _compute_atr, ema as _compute_ema
+from src.indicators import (
+    adx as _compute_adx,
+    atr as _compute_atr,
+    ema as _compute_ema,
+    hurst_exponent as _compute_hurst,
+)
 
 log = get_logger("regime")
 
@@ -73,6 +78,40 @@ def atr_percentile(atr_series: np.ndarray, lookback: int = 200) -> float:
     return float(np.sum(window <= current) / len(window) * 100)
 
 
+def _hurst_from_candles(candles: Optional[Dict[str, Any]]) -> Optional[float]:
+    """Return the Hurst exponent of *candles* closes, or ``None`` if unavailable.
+
+    ``None`` means "no Hurst opinion" (too few samples or no candle data) and
+    the caller leaves the regime decision untouched.
+    """
+    if candles is None:
+        return None
+    closes = candles.get("close")
+    if closes is None or len(closes) < _HURST_MIN_SAMPLES:
+        return None
+    try:
+        return _compute_hurst(np.asarray(closes, dtype=np.float64))
+    except Exception:
+        return None
+
+
+def _apply_hurst_gate(
+    regime: MarketRegime, hurst: Optional[float]
+) -> MarketRegime:
+    """Demote an ADX-driven TRENDING regime to RANGING when price is mean-reverting.
+
+    Only acts when the Hurst gate is enabled, a Hurst estimate is available, and
+    it is below the mean-reversion threshold.  Non-trending regimes pass through
+    unchanged.
+    """
+    if not _HURST_GATE_ENABLED or hurst is None:
+        return regime
+    if regime in (MarketRegime.TRENDING_UP, MarketRegime.TRENDING_DOWN):
+        if hurst < _HURST_MEAN_REVERT_MAX:
+            return MarketRegime.RANGING
+    return regime
+
+
 def volume_profile_classify(
     volumes: np.ndarray,
     closes: np.ndarray,
@@ -114,6 +153,20 @@ _BB_WIDTH_QUIET_PCT: float = float(os.getenv("BB_WIDTH_QUIET_PCT", "1.2"))
 # Volume-delta override: if |volume_delta_pct| >= this threshold, the regime
 # is forced out of QUIET / RANGING into VOLATILE or TRENDING.
 _VOLUME_DELTA_SPIKE_PCT: float = 60.0  # percent of total volume as net delta
+
+# Hurst-exponent gate on TRENDING classification.  ADX measures trend STRENGTH
+# but rises in choppy markets with large alternating candles, producing false
+# TRENDING labels that would spawn exit-runners into reversals.  The Hurst
+# exponent measures PERSISTENCE: H < 0.45 means mean-reverting, so a TRENDING
+# reading with low Hurst is demoted to RANGING.  Applied uniformly after the
+# decision (including the EMA9 momentum fast-path): in a mean-reverting tape a
+# brief EMA9 burst is noise, and the exit logic must not treat it as a runnable
+# trend.  Requires _HURST_MIN_SAMPLES closes; gate is env-disablable.
+_HURST_GATE_ENABLED: bool = os.getenv("HURST_GATE_ENABLED", "true").lower() != "false"
+_HURST_MEAN_REVERT_MAX: float = float(os.getenv("HURST_MEAN_REVERT_MAX", "0.45"))
+# Minimum closes required before the Hurst estimate is trusted; below this the
+# gate is skipped (estimate too noisy to act on).
+_HURST_MIN_SAMPLES: int = int(os.getenv("HURST_MIN_SAMPLES", "40"))
 
 
 class MarketRegimeDetector:
@@ -243,6 +296,12 @@ class MarketRegimeDetector:
             bb_width_pct = (bb_upper - bb_lower) / bb_mid * 100.0
 
         regime = self._decide(adx_val, ema_slope, bb_width_pct, timeframe=timeframe, ema9_slope_pct=ema9_slope_pct)
+
+        # Hurst gate: demote a TRENDING decision to RANGING when price is
+        # mean-reverting (H < threshold), so choppy markets don't masquerade as
+        # trends.  Applied before hysteresis so the dwell counter accumulates on
+        # the gated regime.
+        regime = _apply_hurst_gate(regime, _hurst_from_candles(candles))
 
         # Apply hysteresis to the indicator-derived regime (prevents flapping near
         # EMA crosses and ADX transition zones).
@@ -649,6 +708,8 @@ class AdaptiveRegimeDetector(MarketRegimeDetector):
             bb_width_pct = (bb_upper - bb_lower) / bb_mid * 100.0
 
         regime = self._decide_adaptive(adx_val, ema_slope, bb_width_pct, timeframe=timeframe)
+        # Hurst gate (see MarketRegimeDetector.classify) — demote false trends.
+        regime = _apply_hurst_gate(regime, _hurst_from_candles(candles))
         stable_regime = self._apply_hysteresis(regime)
 
         volume_delta_pct: Optional[float] = None

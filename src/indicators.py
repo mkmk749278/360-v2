@@ -766,3 +766,77 @@ def mfi(
             ratio = pos_flow / neg_flow
             out[i] = 100.0 - 100.0 / (1.0 + ratio)
     return out
+
+
+# ---------------------------------------------------------------------------
+# Hurst exponent (rescaled-range / R/S analysis)
+# ---------------------------------------------------------------------------
+
+def hurst_exponent(close: NDArray, min_lag: int = 2, max_lag: int = 20) -> float:
+    """Estimate the Hurst exponent of a price series via the lag-variance method.
+
+    The Hurst exponent ``H`` distinguishes *persistence* from *mean reversion*,
+    which ADX cannot: ADX measures trend strength but rises in choppy markets
+    with large alternating candles, so a high-ADX reading can be a reversal in
+    progress rather than a real trend.
+
+    Interpretation:
+
+    * ``H > 0.55`` — persistent / trending (moves tend to continue)
+    * ``0.45 <= H <= 0.55`` — random walk (no edge either way)
+    * ``H < 0.45`` — mean-reverting / ranging (moves tend to reverse)
+
+    Implementation uses the generalised-Hurst lag method: for a set of lags,
+    measure the standard deviation of lagged differences and fit a line in
+    log-log space.  The slope is the Hurst exponent.  This is O(n·k) for ``k``
+    lags and runs in well under a millisecond for the 50-bar windows used on
+    the 15s scan cycle.
+
+    Parameters
+    ----------
+    close:
+        Array of closing prices.  At least ``2 * max_lag`` samples are needed
+        for a stable estimate; fewer returns ``0.5`` (random-walk / no-signal).
+    min_lag, max_lag:
+        Range of lags to regress over.  Defaults (2..20) suit intraday 5m data.
+
+    Returns
+    -------
+    float
+        Estimated Hurst exponent, clamped to ``[0.0, 1.0]``.  Returns ``0.5``
+        when the series is too short or degenerate (flat / NaN), so callers can
+        treat ``0.5`` as "no regime opinion".
+    """
+    arr = np.asarray(close, dtype=np.float64)
+    arr = arr[~np.isnan(arr)]
+    n = len(arr)
+    if n < 2 * max_lag or n < 4:
+        return 0.5
+    # Clamp max_lag so we always have at least a few points per lag.
+    hi = min(max_lag, n // 2)
+    lo = max(2, min_lag)
+    if hi <= lo:
+        return 0.5
+
+    lags = np.arange(lo, hi)
+    tau = []
+    valid_lags = []
+    for lag in lags:
+        diff = arr[lag:] - arr[:-lag]
+        sd = float(np.std(diff))
+        if sd > 0.0:
+            tau.append(sd)
+            valid_lags.append(int(lag))
+    if len(valid_lags) < 2:
+        return 0.5
+
+    log_lags = np.log(np.asarray(valid_lags, dtype=np.float64))
+    log_tau = np.log(np.asarray(tau, dtype=np.float64))
+    # Slope of log(tau) vs log(lag) is the Hurst exponent.
+    try:
+        slope = float(np.polyfit(log_lags, log_tau, 1)[0])
+    except (np.linalg.LinAlgError, ValueError):
+        return 0.5
+    if not np.isfinite(slope):
+        return 0.5
+    return max(0.0, min(1.0, slope))
