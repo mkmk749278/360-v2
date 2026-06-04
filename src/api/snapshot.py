@@ -740,7 +740,23 @@ def build_positions_diag(engine: Any) -> PositionsDiagResponse:
     """
     router = getattr(engine, "router", None)
     monitor = getattr(engine, "monitor", None)
-    monitor_running = bool(getattr(monitor, "_running", False)) if monitor is not None else False
+    if monitor is not None:
+        # Single-process mode: the real engine exposes the live monitor object.
+        monitor_running = bool(getattr(monitor, "_running", False))
+    else:
+        # Isolated mode: ``engine`` is the RedisEngineFacade, which has no
+        # ``.monitor`` object — the TradeMonitor runs in the engine container.
+        # Deriving liveness from the absent attribute always reported NO, a
+        # false negative on the Positions tab since the isolation cutover.
+        # Use the published task census instead: ``trade_monitor`` present in
+        # ``background_tasks`` means the coroutine is alive (same source D2 uses).
+        monitor_running = False
+        _census = getattr(engine, "get_background_task_census", None)
+        if callable(_census):
+            try:
+                monitor_running = any("trade_monitor" in t for t in _census())
+            except Exception:
+                monitor_running = False
     generated_at = datetime.now(timezone.utc)
 
     if router is None:

@@ -777,6 +777,41 @@ def test_positions_diag_handles_missing_monitor_gracefully(
     assert item["sl_breach_distance_pct"] is None
 
 
+def test_positions_diag_monitor_running_from_census_isolated_mode() -> None:
+    """Isolated mode: no .monitor object, so liveness comes from the published
+    task census. trade_monitor present → monitor_running True."""
+    from types import SimpleNamespace
+
+    from src.api.snapshot import build_positions_diag
+
+    facade = SimpleNamespace(
+        router=SimpleNamespace(active_signals={}),
+        get_background_task_census=lambda: [
+            "trade_monitor", "reconciler", "mark_price_feed",
+        ],
+    )
+    # No .monitor attribute on the facade (matches RedisEngineFacade).
+    assert not hasattr(facade, "monitor")
+    resp = build_positions_diag(facade)
+    assert resp.monitor_running is True
+    assert resp.total == 0
+
+
+def test_positions_diag_monitor_running_false_when_census_lacks_monitor() -> None:
+    """Isolated mode: census present but trade_monitor absent → monitor_running
+    False (a genuine dead-monitor signal, not masked by the reporting bug)."""
+    from types import SimpleNamespace
+
+    from src.api.snapshot import build_positions_diag
+
+    facade = SimpleNamespace(
+        router=SimpleNamespace(active_signals={}),
+        get_background_task_census=lambda: ["reconciler", "mark_price_feed"],
+    )
+    resp = build_positions_diag(facade)
+    assert resp.monitor_running is False
+
+
 def test_positions_diag_skips_malformed_signal(
     owner_client: TestClient, engine: _StubEngine,
 ) -> None:
