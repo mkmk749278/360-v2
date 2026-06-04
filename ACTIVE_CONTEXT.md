@@ -4,15 +4,14 @@
 
 ---
 
-## Session 17 checkpoint 2026-06-04 — Hurst gate + ATR trail width + regime-per-exit FSM
+## Session 17 checkpoint 2026-06-04 — Hurst gate + ATR trail width + regime-per-exit FSM (BOTH MERGED)
 
 ### What shipped this session
 
 **PR #577** (Hurst gate + ATR trail width + multi-TF regime stamp) — merged to `main` (owner-approved prior session, merged this session).
 
-**PR #578** — `feat/regime-per-exit` → open, awaiting owner review.
-Branch: `feat/regime-per-exit` | Commit: `e85f4c8`
-10 files changed, 1064 insertions, 68 deletions | 5423 tests passing.
+**PR #578** — regime-per-exit FSM — **MERGED to `main`** (`0af4b8e`, squash, owner-approved 2026-06-04). Auto-deployed to live subscribers.
+11 files changed, 1123 insertions, 68 deletions | 5423 tests passing.
 
 #### Regime-per-exit FSM (PR #578) — full implementation
 
@@ -41,23 +40,19 @@ Owner-approved exit matrix (§3.2b), implemented in full:
 1. `_apply_close_fill` — "close" phase fills from `place_market_close` / signal_dispatch invalidation were silently ignored (no handler in dispatch table). Now transitions to CLOSED/REGIME_EXIT.
 2. `_apply_tp2_fill` auto-close — when `tp3_qty == 0` (production default since 2026-05-26) and all qty is closed, FSM was stranding in TP2_HIT forever. Now transitions directly to CLOSED/TP2.
 
-### PR #578 status
+### PR #578 status — MERGED
 
-**Open — owner-sign-off required (Position FSM transitions).** Do NOT auto-merge.
+Owner approved 2026-06-04; merged (squash `0af4b8e`) and auto-deployed. This was an owner-sign-off item (Position FSM transitions). Live behaviour change: positions now route TRAIL / VOLATILE / CANCEL at pre-TP fire per entry-time regime.
 
-Owner review checklist (from PR body):
-- [ ] Comfortable with Binance native trailing stop (`TRAILING_STOP_MARKET`)?
-- [ ] Comfortable with immediate market-close for RANGING/QUIET?
-- [ ] VOLATILE 20% tightening appropriate?
-- [ ] 15m confirmation required for TRAIL (no 15m = CANCEL)?
-- [ ] Fallback chain: trail failure → BE-SL; close failure → BE-SL at entry?
-
-CI: 0 check runs at session end (may not have triggered yet). No review comments.
+**First-live watch points (verify on VPS next session):**
+- Confirm a TRENDING-aligned position actually places a `TRAILING_STOP_MARKET` on Binance after pre-TP (check engine logs for `place_trailing_stop_market` / `trail_sl` phase).
+- Confirm `entry_regime` / `atr_value_at_entry` are non-empty on dispatched positions (the new stamp pipeline) — if `atr_value_at_entry == 0` the trail falls back to the 1.0% callbackRate default.
+- Confirm RANGING/QUIET residuals market-close cleanly (no stranded PRE_TP_FIRED in Firestore).
 
 ### Open items (priority order)
 
-1. **PR #578 owner review** — Position FSM transitions, owner sign-off required. Link: github.com/mkmk749278/360-v2/pull/578
-2. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API analyze → file `auto-detected` Issues → Telegram alert for high severity. Design in OWNER_BRIEF.md §5.1. Not started.
+1. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API analyze → file `auto-detected` Issues → Telegram alert for high severity. Design in OWNER_BRIEF.md §5.1. Not started.
+2. **Verify regime-per-exit live** — see watch points above; confirm against real VPS positions next session.
 3. **Signing container unhealthy** — `360scalp-v2-signing` pre-existing unhealthy state. Money path unaffected (signing only exercised on live auto-trade orders). Investigate.
 4. **Funding rate timing** — exit before 8h funding timestamp in TRENDING_UP for LONG positions. Small but free value. `PRE_FUNDING_EXIT_WINDOW_SEC` config flag.
 
