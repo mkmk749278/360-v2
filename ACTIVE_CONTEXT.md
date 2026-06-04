@@ -4,59 +4,252 @@
 
 ---
 
-## In-session checkpoint 2026-06-03 (session 14) — API process isolation cutover LIVE
+## Session 17 checkpoint 2026-06-04 — regime-per-exit FSM + signing healthcheck + funding-exit watcher
 
-### What shipped
+### What shipped this session (5 PRs merged to `main`)
 
-| Item | Status |
+| PR | What | Type |
+|---|---|---|
+| #577 | Hurst gate + ATR trail width + multi-TF regime stamp | merged |
+| #578 | Regime-per-exit FSM (TRAIL/VOLATILE/CANCEL) | owner sign-off, merged |
+| #579 | ACTIVE_CONTEXT correction | docs, auto-merged |
+| #580 | Signing service Docker healthcheck fix | ops, auto-merged |
+| #581 | Funding-exit watcher (real funding data) | owner sign-off (delegated), merged |
+
+#### PR #580 — signing container healthcheck (`c7c9081`)
+
+`360scalp-v2-signing` shared the engine image whose Dockerfile HEALTHCHECK checks
+for a `src.main` process + scanner heartbeat — neither exist in the signing
+container, so it reported `unhealthy` after the 180s grace period despite serving
+correctly. Fixed with a `healthcheck:` override in `docker-compose.yml`:
+`test -S /app/sock/signing.sock` (socket created after KMS+Firestore init; stale
+sockets unlinked on startup). **The long-standing "signing unhealthy" open item is
+now resolved** — verify `docker ps` shows healthy after next redeploy.
+
+#### PR #581 — funding-exit watcher (`2e99d7d`)
+
+Exits positions that would PAY material funding within the pre-funding window.
+Research (Binance docs) drove two key design choices away from the naive first cut:
+- **Funding interval is not always 8h** (4h/8h/1h per pair) → read the *real*
+  `nextFundingTime` (`T`) per symbol from the mark-price stream instead of a
+  hardcoded 8h grid.
+- **The mark-price stream already carries `r` (funding rate) + `T`** — `MarkPriceFeed`
+  was discarding them. Now captured via `get_funding_info(symbol)`.
+
+Exit rule: for a position's symbol, `next_funding − now ≤ PRE_FUNDING_EXIT_WINDOW_SEC`
+(120s) AND on the paying side (LONG & rate>0, SHORT & rate<0) AND
+`|rate| ≥ PRE_FUNDING_MIN_RATE` (0.05%, materiality gate so we don't churn taker
+fees dodging baseline funding). TRAILING positions skipped. `close_reason="FUNDING_EXIT"`.
+Disable entirely with `PRE_FUNDING_EXIT_WINDOW_SEC=0`.
+
+**First-live watch point:** confirm the watcher fires near a settlement on an
+elevated-funding pair (grep engine logs for `funding_exit_watcher: exiting`), and
+that `get_funding_info` is populated (mark-price stream carries r/T).
+
+---
+
+### Regime-per-exit FSM (PR #578) detail
+
+**PR #577** (Hurst gate + ATR trail width + multi-TF regime stamp) — merged to `main` (owner-approved prior session, merged this session).
+
+**PR #578** — regime-per-exit FSM — **MERGED to `main`** (`0af4b8e`, squash, owner-approved 2026-06-04). Auto-deployed to live subscribers.
+11 files changed, 1123 insertions, 68 deletions | 5423 tests passing.
+
+#### Regime-per-exit FSM (PR #578) — full implementation
+
+Owner-approved exit matrix (§3.2b), implemented in full:
+
+| Post-pre-TP regime | 15m confirm | Trade aligned? | Exit path |
+|---|---|---|---|
+| TRENDING + trending 15m + aligned | — | yes | **TRAIL** — Binance native TRAILING_STOP_MARKET |
+| TRENDING + any condition mismatched | — | no | **CANCEL** — immediate market close |
+| RANGING / QUIET | — | — | **CANCEL** — immediate market close |
+| VOLATILE | — | — | **VOLATILE** — tighten static SL by 20% |
+
+**New files / sections:**
+- `src/execution/position_state.py` — `TRAILING` PositionState; 5 new Position fields (`entry_regime`, `entry_regime_15m`, `atr_percentile_at_entry`, `atr_value_at_entry`, `trail_order_id`); Firestore serialize/deserialize.
+- `src/execution/position_fsm.py` — `_regime_exit_path()` pure function; `_pretp_trail_path()`, `_pretp_volatile_path()`, `_pretp_cancel_path()`; `_apply_close_fill()` (previously missing — "close" phase fills were silently dropped); auto-close fix in `_apply_tp2_fill` when `tp3_qty == 0`.
+- `src/execution/order_placer.py` — `place_trailing_stop_market()`: `TRAILING_STOP_MARKET`, `callbackRate` in [0.1, 5.0]%, `closePosition=true`, `workingType=MARK_PRICE`, reuses `coid_sl_be` so existing `_apply_sl_be_fill` handles trail-fill → CLOSED.
+- `src/regime.py` — `atr_value: float = 0.0` added to `RegimeContext` (with default, backward-compatible); `build_regime_context` populates it from ATR(14).
+- `src/channels/base.py` — `atr_value_at_entry: float = 0.0` on Signal.
+- `src/scanner/__init__.py` — `sig.atr_value_at_entry = float(rc.atr_value)` threaded from regime context.
+- `src/signal_router.py` — passes `atr_value` to `dispatch_signal_to_active_users`.
+- `src/execution/signal_dispatch.py` — accepts `atr_value`, threads to `place_signal`.
+- `tests/execution/test_position_fsm.py` — CANCEL/TRAIL/VOLATILE path tests; `_apply_close_fill` test.
+- `tests/test_regime_exit_fsm.py` — 23 new tests covering `_regime_exit_path` matrix, callbackRate derivation, fallback chains, TP2 auto-close.
+
+**Bug fixes bundled in PR #578 (pre-existing, silent):**
+1. `_apply_close_fill` — "close" phase fills from `place_market_close` / signal_dispatch invalidation were silently ignored (no handler in dispatch table). Now transitions to CLOSED/REGIME_EXIT.
+2. `_apply_tp2_fill` auto-close — when `tp3_qty == 0` (production default since 2026-05-26) and all qty is closed, FSM was stranding in TP2_HIT forever. Now transitions directly to CLOSED/TP2.
+
+### PR #578 status — MERGED
+
+Owner approved 2026-06-04; merged (squash `0af4b8e`) and auto-deployed. This was an owner-sign-off item (Position FSM transitions). Live behaviour change: positions now route TRAIL / VOLATILE / CANCEL at pre-TP fire per entry-time regime.
+
+**First-live watch points (verify on VPS next session):**
+- Confirm a TRENDING-aligned position actually places a `TRAILING_STOP_MARKET` on Binance after pre-TP (check engine logs for `place_trailing_stop_market` / `trail_sl` phase).
+- Confirm `entry_regime` / `atr_value_at_entry` are non-empty on dispatched positions (the new stamp pipeline) — if `atr_value_at_entry == 0` the trail falls back to the 1.0% callbackRate default.
+- Confirm RANGING/QUIET residuals market-close cleanly (no stranded PRE_TP_FIRED in Firestore).
+
+### Open items (priority order)
+
+1. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API analyze → file `auto-detected` Issues → Telegram alert for high severity. Design in OWNER_BRIEF.md §5.1. Not started. **Now the largest remaining build.**
+2. **Verify regime-per-exit live** (PR #578) — owner is live-observing. Watch points: `place_trailing_stop_market`/`trail_sl` in logs on TRENDING-aligned exits; `entry_regime`/`atr_value_at_entry` non-empty on dispatched positions; clean RANGING/QUIET market-closes.
+3. **Verify funding-exit watcher live** (PR #581) — grep `funding_exit_watcher: exiting`; confirm `get_funding_info` populated.
+4. **Verify signing healthcheck** (PR #580) — `docker ps` should show `360scalp-v2-signing` healthy after next redeploy.
+
+**Closed this session:** signing-unhealthy item (PR #580); funding-rate-timing item (PR #581).
+
+---
+
+## Session 16 checkpoint 2026-06-03 — monitor watchdog + signing service aiohttp fix
+
+### What shipped this session
+
+**360-v2 PR #573** merged to main (owner-approved, deploying now):
+
+1. **`src/bootstrap.py` — `_resilient_monitor_loop` watchdog**
+   Wraps `TradeMonitor.start()` in a self-healing loop. Any unexpected exit
+   (CancelledError absorbed inside `_check_all` leaving `_running=True`, or
+   unhandled exception) triggers a 5-second back-off and automatic restart.
+   Normal `stop()` shutdown exits cleanly. Task named `"trade_monitor"` for
+   visibility via `asyncio.all_tasks()`.
+   Root cause addressed: restart flow called `stop()` → `_running=False` but
+   no new task was created; monitor stayed dead forever with no watchdog.
+
+2. **`src/security/signing_service/server.py` — aiohttp chunk limit**
+   Raised `max_line_size` / `max_field_size` from 8 KB (aiohttp default) to
+   64 KB. Fixes Reconciler WARNING `"Separator is not found, and chunk exceed
+   the limit"` on Binance `positionRisk` responses for users with many open
+   symbols.
+
+**Immediate action if not done:** `docker restart 360scalp-v2-engine` on VPS
+to restore the monitor right now if auto-deploy hasn't fired yet. Confirm with:
+```bash
+docker logs 360scalp-v2-engine --tail 20 | grep -i monitor
+```
+
+### Open items (priority order)
+
+1. **Signing container unhealthy** — `360scalp-v2-signing` pre-existing unhealthy
+   state. Now more visible since the aiohttp fix is deployed. Investigate next session.
+2. **Regime-per-exit spec** — use `scripts/analyze_regime_pnl.py` against a rolling
+   7-day VPS export to set matrix values, write spec, get owner sign-off, then FSM
+   code. Key: preserve TP2/TP3 post-pre-TP-fire in TRENDING + ATR trailing runner.
+   **Owner-sign-off item — do not code without spec approval.**
+   Structural bug: `position_fsm.py:274,351-352` cancels TP2/TP3 on pre-TP fire.
+3. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API
+   analyze → file `auto-detected` Issues → Telegram alert for high severity.
+   Design documented in OWNER_BRIEF.md §5.1. Not started.
+4. **Funding rate timing** — exit before 8h funding timestamp in TRENDING_UP for
+   LONG positions. Small but free value. `PRE_FUNDING_EXIT_WINDOW_SEC` config flag.
+
+---
+
+## Session 15 checkpoint 2026-06-03 — regime analysis tool + data-first exit strategy
+
+### What shipped this session
+
+**360ce-ops PR #4** — `scripts/analyze_regime_pnl.py` merged to main.
+Standalone CLI: ingests Binance Futures position-history CSV → joins to
+`signal_history.json` by (symbol, direction, open-time proximity) → tags with
+`entry_regime` → outputs per-regime / per-alignment P&L tables.
+58 unit tests, zero external dependencies.
+
+```bash
+# VPS usage (inside or alongside ops container):
+python3 scripts/analyze_regime_pnl.py positions.csv \
+    --signals /engine-data/signal_history.json \
+    --show-unmatched --output report.json
+```
+
+### What confirmed this session (analysis, not code)
+
+Three data sources converge on the same diagnosis:
+
+| Source | Finding |
 |---|---|
-| **PR #565** (`fix/compose-port-mapping`) | ✅ merged → auto-deployed |
-| **API process isolation cutover** | ✅ live on VPS |
+| Truth report (monitor-logs) | TP1/TP2/TP3 hit rate **0.0%** across all setups. All value from pre-TP banking (68 fires, avg +4.35% net @ 10×). |
+| Real account (102 pos, Jun 1-3 PDF) | 44% win rate, net ≈ -0.24 USDT gross. Ultra-short holds (1-15s) = fee bleed. Trend-aligned SHORTs won; counter-trend LONGs lost. |
+| Industry research | No channel does regime-aware exits systematically — documented competitive gap. |
 
-### PR #565 — root cause + fix
+**Regime distribution:** TRENDING_DOWN 38.4%, RANGING 22.5%, TRENDING_UP 20.2%, QUIET 18.9%.
+58% of cycles are trending — but trending is the bucket we capture worst.
 
-PR #564 (session 13) removed the `ports:` binding from the `engine` service in `docker-compose.yml` (correct for isolated mode — the `api` service owns it there). But `--profile isolated` is only active when `API_PROCESS_ISOLATED=true`; default single-process deployments never activate that profile, leaving no port published → 502 on every request.
+### Structural bug confirmed (not fixed — owner sign-off required)
 
-Fix: introduced `docker-compose.singleprocess.yml` (overlay file, one service stanza):
-```yaml
-services:
-  engine:
-    ports:
-      - "127.0.0.1:${API_PORT:-8000}:${API_PORT:-8000}"
-```
-`deploy.sh` updated to use `COMPOSE_FILES=(-f docker-compose.yml)` + conditional:
-- Single-process: `COMPOSE_FILES+=(-f docker-compose.singleprocess.yml)` (explicit `-f` suppresses Docker auto-merge of `override.yml`)
-- Isolated: `PROFILE_ARGS=(--profile isolated)`
+`position_fsm.py:274, 351-352` — when pre-TP fires, FSM cancels TP2/TP3 and caps
+the residual at TP1 even in strongly trending markets. In TRENDING regimes, TP2/TP3
+should survive or trail. This is a Position FSM transition change → owner sign-off
+item. Do not code without it.
 
-Post-merge VPS confirmed: `API: 200`.
+### Open items (priority order)
 
-### Isolation cutover
+1. **Regime-per-exit spec** — use the analysis tool against a rolling 7-day VPS
+   export to set actual matrix values, then write the spec, get owner sign-off,
+   then FSM code. Key: preserve TP2/TP3 post-pre-TP-fire in TRENDING + ATR trailing
+   runner. **Owner-sign-off item — do not code without spec approval.**
+2. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API
+   analyze → file `auto-detected` Issues → Telegram alert for high severity.
+   Design documented in OWNER_BRIEF.md §5.1. Not started.
+3. **Signing container unhealthy** — `360scalp-v2-signing` pre-existing unhealthy
+   state. Money path unaffected (signing only used on live auto-trade orders).
+   Investigate at next session.
+4. **Funding rate timing** — exit before 8h funding timestamp in TRENDING_UP for
+   LONG positions. Small but free value. `PRE_FUNDING_EXIT_WINDOW_SEC` config flag.
 
-After local boot validation (health + pulse both 200 against a live `RedisEngineFacade`), the owner ran the cutover on the VPS:
-- `.env`: `API_PROCESS_ISOLATED=true`
-- `docker compose -f docker-compose.yml --profile isolated up -d`
+---
 
-Final container state:
-```
-360scalp-v2-api      Up 10s (health: starting) → healthy  127.0.0.1:8000->8000/tcp
-360scalp-v2-engine   Up 11s (healthy)                      [no port — correct]
-360scalp-v2-redis    Up 12h                                 6379/tcp
-360scalp-v2-signing  Up 20min (unhealthy)                  [pre-existing — see below]
-```
+## Session 14 checkpoint 2026-06-03 — isolation cutover LIVE + post-cutover bug sweep
 
-Owner confirmed: `✅ ISOLATION LIVE — api health 200`.
+### State
+`API_PROCESS_ISOLATED=true` is now **live on the VPS**. The engine container runs
+`SnapshotWriter` only (no HTTP server); the separate `api` container serves HTTP on
+its own event loop backed by `RedisEngineFacade`. The scanner-contention symptom
+(settings toggles only applying "when the scanner is free", 5/8/10s app timeouts)
+is resolved. All 5 `snapshot:*` keys confirmed present in Redis; app shows
+"Auto-trade ARMED" with all 4 gates green.
 
-### Signing service unhealthy — pre-existing
+### PRs merged this session (all on `main`)
+- **#565** — restore engine host-port mapping for single-process deployments
+  (`docker-compose.singleprocess.yml`); fixed the 502 the isolation work introduced.
+- **#567** — isolated `api` container: init Firestore keystore + harden
+  `_refresh_signals_from_redis` (per-item try/except so one malformed signal can't
+  poison the whole batch — mirrors `build_activity`'s skip pattern).
+- **#568** — isolated `api` container: also init the **kill switch** (same Firestore
+  client as the keystore, mirrors `bootstrap.py:477-488`) **and** route CI deploy
+  through `bash deploy.sh` instead of bare `docker compose up` (bare command left the
+  `api` container on a stale image because `--profile isolated` was never passed).
+- **#569** — `deploy.sh` hardening: cached build by default (`--no-cache` now behind
+  `--clean` only, so CI pushes don't pay a multi-minute full rebuild), added
+  `--remove-orphans` (cleans the other mode's container on a mode switch), and a
+  90s post-deploy health poll of `/api/health`.
 
-`360scalp-v2-signing` was `(unhealthy)` before this session's changes and is not caused by the compose fix or isolation cutover. Needs separate investigation.
+### Root causes (three cascading failures, one missing env + two missing init calls)
+1. **Signals tab empty** — `API_PROCESS_ISOLATED` was absent from VPS `.env`, so the
+   engine never started `SnapshotWriter` → no `snapshot:signals_all` key → cold cache
+   → `[]`. Fixed by adding the var to `.env` and force-recreating the engine; code
+   hardening landed in #567.
+2. **Binance key ❌** — `firestore_keystore.init_keystore()` was never called in the
+   `api` container boot, so `is_initialised()` returned False → `binance_key_connected`
+   always False. Fixed in #567.
+3. **Engine-wide enabled ❌** — same shape: `kill_switch.init_kill_switch()` never
+   called in the `api` container → `is_globally_enabled()` defaulted False. Fixed in #568.
 
-### Pending housekeeping
+### Housekeeping done
+- Stale VPS `docker-compose.override.yml` confirmed already removed (no longer present).
+- Exposed-secret rotation: owner declined (secrets appeared only in a private
+  `docker exec env` diagnostic, not committed) — **no rotation performed**.
 
-- **Remove VPS `docker-compose.override.yml`** — the hand-dropped emergency file (`~/360-v2/docker-compose.override.yml`) on the VPS is now superseded by the explicit `-f` approach and should be deleted:
-  ```bash
-  rm ~/360-v2/docker-compose.override.yml
-  ```
-- **Investigate `360scalp-v2-signing` unhealthy** — check `docker logs 360scalp-v2-signing` and the healthcheck definition.
+### Open items
+- **`360scalp-v2-signing` container unhealthy** — pre-existing, predates this
+  session's changes, not yet investigated. Money path (FSM) is unaffected because
+  signing is only exercised on a live auto-trade order; flag for next session.
+
+### Policy adopted this session (owner standing authorisation, 2026-06-03)
+On opening any PR, the CTE now **subscribes to PR activity** and **auto-merges once CI
+is green / no conflicts / not an owner-sign-off item** — no waiting for per-PR owner
+confirmation. See the Change-management protocol in `CLAUDE.md` for the exact guardrails.
 
 ---
 
