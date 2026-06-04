@@ -1746,6 +1746,15 @@ SL_RETRY_BACKOFF_SEC: float = _safe_float("SL_RETRY_BACKOFF_SEC", "1.0")
 TRAILING_ATR_MULTIPLIER: float = _safe_float("TRAILING_ATR_MULTIPLIER", "1.5")
 
 # ---------------------------------------------------------------------------
+# Funding-rate exit
+# ---------------------------------------------------------------------------
+# How many seconds before the next 8-hour Binance funding event to exit
+# TRENDING_UP LONG positions. In trending-up markets the funding rate is
+# almost always positive (longs pay), so exiting just before collection
+# avoids the fee drag. Set to 0 to disable the watcher entirely.
+PRE_FUNDING_EXIT_WINDOW_SEC: int = _safe_int("PRE_FUNDING_EXIT_WINDOW_SEC", "120")
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 _raw_log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()

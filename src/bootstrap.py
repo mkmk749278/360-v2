@@ -603,6 +603,21 @@ class Bootstrap:
                     )
                 )
 
+            # Funding-exit watcher — exits TRENDING_UP LONG positions
+            # within PRE_FUNDING_EXIT_WINDOW_SEC of each 8h funding event
+            # to avoid positive-funding-rate fee drag.  No-ops if the
+            # config flag is 0.  Runs only when the execution stack is
+            # active so it has access to Firestore + active UIDs.
+            if firebase_project_id:
+                from src.execution import funding_exit_watcher as _few
+                _funding_watcher = _few.FundingExitWatcher()
+                tasks.append(
+                    asyncio.create_task(
+                        _funding_watcher.run(),
+                        name="funding_exit_watcher",
+                    )
+                )
+
             # Phase-2 per-user overrides — shares the same SQLite file
             # (WAL mode lets both connections coexist).  Tables are
             # added with CREATE TABLE IF NOT EXISTS, safe against any

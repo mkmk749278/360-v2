@@ -257,6 +257,8 @@ class PositionFSM:
             self._apply_sl_be_fill(position, event)
         elif phase == "close":
             self._apply_close_fill(position, event)
+        elif phase == "funding_close":
+            self._apply_close_fill(position, event, close_reason="FUNDING_EXIT")
         else:
             # parse_coid only emits known phases, so unreachable
             # in practice.  Defensive log.
@@ -677,23 +679,27 @@ class PositionFSM:
         self,
         position: _position_state.Position,
         event: _events.OrderTradeUpdate,
+        *,
+        close_reason: str = "REGIME_EXIT",
     ) -> None:
-        """Market close fill — PRE_TP_FIRED → CLOSED.
+        """Market close fill — any non-terminal state → CLOSED.
 
         Handles ORDER_TRADE_UPDATE events for MARKET closes placed by:
         * ``_pretp_cancel_path`` (regime-exit — RANGING/QUIET/counter-trend)
         * ``signal_dispatch.close_fsm_positions_for_signal`` (invalidation /
           expiry / lifecycle monitor market close)
+        * ``funding_exit_watcher`` (pre-funding-event exit for TRENDING_UP LONGs)
 
-        Both use ``coid_close`` (``_close`` suffix) so this handler fires
-        in both cases and records the correct terminal state.
+        ``close_reason`` defaults to "REGIME_EXIT" for the "close" phase and
+        is passed as "FUNDING_EXIT" for the "funding_close" phase so telemetry
+        distinguishes the two sources.
         """
         position.closed_qty = position.total_qty  # market close is full-position
         position.realized_pnl_total += event.realized_pnl
         position.state = _position_state.PositionState.CLOSED
         position.closed_at = datetime.now(timezone.utc)
         if not position.close_reason:
-            position.close_reason = "REGIME_EXIT"
+            position.close_reason = close_reason
         self._untrack_symbol(position.symbol)
 
     async def _apply_tp1_fill(

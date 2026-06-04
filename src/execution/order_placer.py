@@ -548,6 +548,34 @@ class OrderPlacer:
             signal_id=signal_id,
         )
 
+    async def place_funding_market_close(
+        self,
+        *,
+        signal_id: str,
+        symbol: str,
+        direction: str,  # "LONG" | "SHORT"
+        quantity: float,
+    ) -> OrderPlacementResult:
+        """REDUCE_ONLY MARKET order placed by the funding-exit watcher.
+
+        Identical to :meth:`place_market_close` except it uses
+        ``coid_funding_close`` so the FSM records close_reason="FUNDING_EXIT"
+        rather than "REGIME_EXIT".
+        """
+        params = {
+            "symbol": symbol,
+            "side": _exit_side(direction),
+            "type": "MARKET",
+            "quantity": _qty_str(quantity),
+            "reduceOnly": "true",
+            "newClientOrderId": _position_state.coid_funding_close(signal_id),
+        }
+        return await self._submit_order(
+            params=params,
+            phase="funding_close",
+            signal_id=signal_id,
+        )
+
     async def cancel_order(
         self,
         *,
