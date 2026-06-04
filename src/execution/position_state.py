@@ -202,6 +202,10 @@ _COID_TP3_SUFFIX = "_tp3"
 # _pretp so the FSM doesn't mis-classify invalidation closes as pre-TP
 # fills when the ORDER_TRADE_UPDATE event arrives.
 _COID_CLOSE_SUFFIX = "_close"
+# Market close placed by the funding-exit watcher for TRENDING_UP LONG
+# positions within the pre-funding window.  Separate suffix so the FSM
+# logs FUNDING_EXIT rather than REGIME_EXIT as the close_reason.
+_COID_FUNDING_CLOSE_SUFFIX = "_funding_close"
 
 
 def coid(signal_id: str, phase: str) -> str:
@@ -260,6 +264,15 @@ def coid_close(signal_id: str) -> str:
     return coid(signal_id, _COID_CLOSE_SUFFIX)
 
 
+def coid_funding_close(signal_id: str) -> str:
+    """clientOrderId for a MARKET close placed by the funding-exit watcher.
+
+    Distinct suffix so the FSM records close_reason="FUNDING_EXIT" rather
+    than "REGIME_EXIT", keeping telemetry clean for the two exit sources.
+    """
+    return coid(signal_id, _COID_FUNDING_CLOSE_SUFFIX)
+
+
 def parse_coid(client_order_id: str) -> Optional[tuple[str, str]]:
     """Parse a clientOrderId back into ``(signal_id, phase)``.
 
@@ -269,15 +282,15 @@ def parse_coid(client_order_id: str) -> Optional[tuple[str, str]]:
     SKIP for foreign orders rather than crash.
 
     ``phase`` is one of: "entry" | "sl" | "sl_be" | "pretp" |
-    "close" | "tp1" | "tp2" | "tp3".
+    "close" | "funding_close" | "tp1" | "tp2" | "tp3".
     """
     if not client_order_id.startswith("lumin_"):
         return None
     rest = client_order_id[len("lumin_"):]
     # Order matters: longer suffixes must be checked FIRST so
     # ``..._sl_be`` doesn't get classified as ``..._sl`` (and
-    # ``..._pretp`` doesn't shadow a future ``..._tp`` suffix).
-    for phase in ("sl_be", "pretp", "close", "entry", "sl", "tp1", "tp2", "tp3"):
+    # ``..._funding_close`` doesn't get classified as ``..._close``).
+    for phase in ("sl_be", "funding_close", "pretp", "close", "entry", "sl", "tp1", "tp2", "tp3"):
         suffix = f"_{phase}"
         if rest.endswith(suffix):
             signal_id = rest[: -len(suffix)]

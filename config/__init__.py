@@ -1746,6 +1746,26 @@ SL_RETRY_BACKOFF_SEC: float = _safe_float("SL_RETRY_BACKOFF_SEC", "1.0")
 TRAILING_ATR_MULTIPLIER: float = _safe_float("TRAILING_ATR_MULTIPLIER", "1.5")
 
 # ---------------------------------------------------------------------------
+# Funding-rate exit
+# ---------------------------------------------------------------------------
+# How many seconds before a symbol's next funding settlement to exit a
+# position that would PAY funding. Funding is charged only on positions
+# held at the exact settlement timestamp, so exiting inside this window
+# avoids the fee entirely. The watcher reads each symbol's real
+# next-funding-time from the mark-price stream, so this works regardless
+# of the pair's funding interval (Binance uses 4h / 8h / 1h). A
+# REDUCE_ONLY market close fills in well under a second, so 120s is amply
+# safe with the 30s poll. Set to 0 to disable the watcher entirely.
+PRE_FUNDING_EXIT_WINDOW_SEC: int = _safe_int("PRE_FUNDING_EXIT_WINDOW_SEC", "120")
+
+# Minimum absolute funding rate (fraction, not percent) for the watcher to
+# act. Baseline Binance funding is ~0.0001 (0.01%) per settlement; dodging
+# that is not worth the taker fee to close early. Default 0.0005 (0.05%, 5x
+# baseline) means we only exit when funding is clearly elevated — exactly
+# the crowded-trend conditions where the fee drag is material.
+PRE_FUNDING_MIN_RATE: float = _safe_float("PRE_FUNDING_MIN_RATE", "0.0005")
+
+# ---------------------------------------------------------------------------
 # Logging
 # ---------------------------------------------------------------------------
 _raw_log_level: str = os.getenv("LOG_LEVEL", "INFO").upper()

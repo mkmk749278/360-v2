@@ -94,6 +94,13 @@ class MarkPriceFeed:
         self._ws_factory = ws_factory
         self._stop_event = asyncio.Event()
         self._prices: Dict[str, float] = {}
+        # Per-symbol funding info from the same stream: (funding_rate,
+        # next_funding_time_ms).  The markPrice stream carries ``r``
+        # (funding rate) and ``T`` (next funding time) for every symbol
+        # every second — the funding-exit watcher reads these directly
+        # so it never needs a hardcoded funding interval (Binance uses
+        # 4h / 8h / 1h depending on the pair) or a separate REST poll.
+        self._funding: Dict[str, tuple[float, int]] = {}
         self._subscribers: Dict[str, List[MarkPriceCallback]] = defaultdict(
             list
         )
@@ -131,6 +138,19 @@ class MarkPriceFeed:
         if we haven't received an update for it yet.  Synchronous —
         callers reading occasionally rather than reacting to ticks."""
         return self._prices.get(symbol.upper())
+
+    def get_funding_info(self, symbol: str) -> Optional[tuple[float, int]]:
+        """Return ``(funding_rate, next_funding_time_ms)`` for ``symbol``
+        or None if no update has been seen yet.
+
+        ``funding_rate`` is the current rate that will be applied at the
+        next settlement: positive → longs pay shorts; negative → shorts
+        pay longs.  ``next_funding_time_ms`` is the authoritative next
+        settlement timestamp (Unix ms) for THIS symbol — already correct
+        for whatever funding interval Binance uses for the pair (4h / 8h /
+        1h), so callers must not assume a fixed interval.
+        """
+        return self._funding.get(symbol.upper())
 
     # ---- Lifecycle ----------------------------------------------------
 
@@ -195,8 +215,10 @@ class MarkPriceFeed:
         """One per-symbol update.
 
         Binance's mark-price update shape: ``{ "e": "markPriceUpdate",
-        "E": ..., "s": "BTCUSDT", "p": "29005.5", ... }``.  We only
-        care about ``s`` (symbol) and ``p`` (mark price).
+        "E": ..., "s": "BTCUSDT", "p": "29005.5", "r": "0.0001",
+        "T": 1562306400000, ... }``.  We capture ``s`` (symbol),
+        ``p`` (mark price), and — for the funding-exit watcher — ``r``
+        (funding rate) and ``T`` (next funding time, ms).
         """
         if not isinstance(entry, dict):
             return
@@ -210,6 +232,17 @@ class MarkPriceFeed:
         if mark_price <= 0:
             return
         self._prices[symbol] = mark_price
+        # Capture funding info when present.  ``r``/``T`` are absent on
+        # the legacy single-symbol stream shape used by some tests, so
+        # only update when both parse cleanly — never clobber a good
+        # value with a bad one.
+        try:
+            funding_rate = float(entry["r"])
+            next_funding_ms = int(entry["T"])
+        except (KeyError, TypeError, ValueError):
+            pass
+        else:
+            self._funding[symbol] = (funding_rate, next_funding_ms)
         async with self._lock:
             subscribers = list(self._subscribers.get(symbol, ()))
         if not subscribers:
