@@ -166,6 +166,17 @@ services:
       # shared volume rather than the container's own /var/run/.
       - SIGNING_SERVICE_SOCKET_PATH=/app/sock/signing.sock
     command: python -m src.security.signing_service
+    # Override the Dockerfile's engine healthcheck (which checks for the
+    # scanner heartbeat file and src.main process — neither exist here).
+    # The socket is created AFTER KMS + Firestore init, so its presence is
+    # a reliable "fully ready" probe with no false positives on stale files
+    # (server.py unlinks any stale socket at startup before re-binding).
+    healthcheck:
+      test: ["CMD-SHELL", "test -S /app/sock/signing.sock"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
     mem_limit: 256m
     cpus: "0.5"
     logging:
