@@ -1183,10 +1183,11 @@ class Scanner:
             spot_client=spot_client,
         )
 
-        # Indicator result cache: symbol → (fingerprint, indicator_dict).
-        # Fingerprint: (tf, len(closes)) per timeframe — stable within each
-        # closed-candle period (~75% hit rate at 15s scan / 1m candles).
-        self._indicator_cache: Dict[str, tuple] = {}
+        # Indicator result cache, keyed PER TIMEFRAME: symbol → {tf: (len, ind_dict)}.
+        # Per-timeframe so a new 1m candle (every ~cycle) doesn't invalidate the
+        # higher-timeframe indicators that haven't changed.  Each tf entry hits
+        # until that tf's candle count changes (i.e. its bar closes).
+        self._indicator_cache: Dict[str, Dict[str, tuple]] = {}
         # SMC result cache: symbol → (fingerprint, SMCResult).
         # Fingerprint: closed-candle counts for 5m+ timeframes only.
         # Structural sweeps/FVGs/orderblocks are deterministic on completed
@@ -2455,24 +2456,36 @@ class Scanner:
         candles = self._load_candles(symbol)
         if not candles:
             return None
-        # Indicator fingerprint: (tf, len(closes)) per timeframe.  Stable
-        # within a closed-candle period — hits on every scan except the first
-        # after a new candle is appended.  Previously included last_close which
-        # changed every tick for the in-progress 1m candle, giving near-zero
-        # hit rate and defeating the cache entirely.
-        try:
-            _fp = tuple(
-                (tf, len(cd.get("close", [])))
-                for tf, cd in sorted(candles.items())
-            )
-        except Exception:
-            _fp = None
+        # ------------------------------------------------------------------
+        # Per-timeframe indicator cache.
+        #
+        # The whole-dict fingerprint approach was wrong: a new 1m candle closes
+        # roughly every scan cycle, which changed the combined fingerprint and
+        # invalidated indicators for ALL timeframes every cycle — so 5m/15m/1h/
+        # 4h/1d/1w were recomputed needlessly even though their bars hadn't
+        # closed.  Cache each timeframe independently keyed on that timeframe's
+        # own candle count.  1m recomputes every cycle (scalping needs the live
+        # bar); the higher timeframes hit ~95% of cycles.
+        # ------------------------------------------------------------------
+        loop = asyncio.get_running_loop()
+        ticks = self.data_store.ticks.get(symbol, [])
+
+        _sym_ind_cache = self._indicator_cache.setdefault(symbol, {})
+        _tfs_to_compute: Dict[str, dict] = {}
+        indicators: Dict[str, dict] = {}
+        for _tf, _cd in candles.items():
+            _n = len(_cd.get("close", []))
+            _hit = _sym_ind_cache.get(_tf)
+            if _hit is not None and _hit[0] == _n:
+                indicators[_tf] = _hit[1]
+            else:
+                _tfs_to_compute[_tf] = _cd
 
         # SMC cache: structural sweeps / FVGs / orderblocks are deterministic on
         # completed candles.  Fingerprint on closed 5m+ candle counts only — the
         # in-progress 1m partial candle is excluded because its last_close changes
-        # every tick while the structures are unchanged.  Cache is warm for ~20
-        # consecutive 15s cycles between 5m candle closes (~95% hit rate).
+        # every tick while the structures are unchanged.  Cache stays warm for the
+        # ~5 cycles between 5m candle closes (~80-95% hit rate).
         _smc_fp = tuple(
             len(candles.get(tf, {}).get("close", []))
             for tf in _SMC_CACHE_TFS
@@ -2480,28 +2493,25 @@ class Scanner:
         _cached_smc = self._smc_cache.get(symbol)
         _smc_cache_hit = _cached_smc is not None and _cached_smc[0] == _smc_fp
 
-        _cached = self._indicator_cache.get(symbol) if _fp is not None else None
-        _ind_cache_hit = _cached is not None and _cached[0] == _fp
-
-        _t_compute = time.monotonic()
-        loop = asyncio.get_running_loop()
-        ticks = self.data_store.ticks.get(symbol, [])
-
-        if _smc_cache_hit and _ind_cache_hit:
-            # Both caches warm — zero executor tasks this cycle.
-            smc_result = _cached_smc[1]
-            indicators = _cached[1]
-        elif _smc_cache_hit:
-            # SMC stable; only indicators need recompute.
-            smc_result = _cached_smc[1]
-            indicators = await loop.run_in_executor(
-                self._scan_executor, self._compute_indicators, candles
+        # ── Indicator compute (only timeframes whose candle count changed) ──
+        _t_ind = time.monotonic()
+        if _tfs_to_compute:
+            _fresh = await loop.run_in_executor(
+                self._scan_executor,
+                self._compute_indicators,
+                _tfs_to_compute,
             )
-            if _fp is not None:
-                self._indicator_cache[symbol] = (_fp, indicators)
+            for _tf, _ind in _fresh.items():
+                _sym_ind_cache[_tf] = (len(_tfs_to_compute[_tf].get("close", [])), _ind)
+                indicators[_tf] = _ind
+        self._stage_timing["indicators"] += time.monotonic() - _t_ind
+
+        # ── SMC detect (skipped entirely on cache hit) ──
+        _t_smc = time.monotonic()
+        if _smc_cache_hit:
+            smc_result = _cached_smc[1]
         else:
-            # SMC cache miss — submit SMC and (if cold) indicators concurrently.
-            _smc_fut = loop.run_in_executor(
+            smc_result = await loop.run_in_executor(
                 self._scan_executor,
                 functools.partial(
                     self.smc_detector.detect,
@@ -2510,21 +2520,9 @@ class Scanner:
                     tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
                 ),
             )
-            if _ind_cache_hit:
-                indicators = _cached[1]
-                smc_result = await _smc_fut
-            else:
-                indicators, smc_result = await asyncio.gather(
-                    loop.run_in_executor(
-                        self._scan_executor, self._compute_indicators, candles
-                    ),
-                    _smc_fut,
-                )
-                if _fp is not None:
-                    self._indicator_cache[symbol] = (_fp, indicators)
             self._smc_cache[symbol] = (_smc_fp, smc_result)
+        self._stage_timing["smc"] += time.monotonic() - _t_smc
 
-        self._stage_timing["smc_indicators"] += time.monotonic() - _t_compute
         smc_data = smc_result.as_dict()
         dependency_source_state: Dict[str, str] = {}
         _recent_ticks = smc_data.get("recent_ticks")
