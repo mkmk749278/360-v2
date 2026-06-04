@@ -113,6 +113,63 @@ async def test_signed_get_dispatched_to_handler(running_server) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Large response — positionRisk-with-no-symbol returns every symbol and now
+# exceeds asyncio's default 64 KiB readline limit. The client must read it.
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_large_signed_get_response_over_64kib(running_server) -> None:
+    """Regression: a signed-GET response larger than asyncio's default
+    64 KiB StreamReader limit must round-trip intact.
+
+    Before raising the client read limit this raised
+    ``ValueError: Separator is not found, and chunk exceed the limit`` and
+    the reconciler silently skipped reconciliation. We fake a positionRisk
+    body with enough symbols to push the single JSON response line well past
+    64 KiB and assert the typed client receives it whole.
+    """
+    from src.security.signing_service import handler
+
+    # ~600 position rows; serialised body lands comfortably above 64 KiB.
+    big_body = [
+        {
+            "symbol": f"SYM{i:04d}USDT",
+            "positionAmt": "0.000",
+            "entryPrice": "0.0",
+            "markPrice": "0.0",
+            "unRealizedProfit": "0.0",
+            "liquidationPrice": "0.0",
+            "leverage": "10",
+            "marginType": "cross",
+            "isolatedMargin": "0.00000000",
+            "positionSide": "BOTH",
+            "updateTime": 1717497600000 + i,
+        }
+        for i in range(600)
+    ]
+
+    with patch.object(
+        handler, "handle_request", new_callable=AsyncMock
+    ) as mock_handle:
+        mock_handle.return_value = protocol.SignResponse.ok_reply(
+            "req-big", binance_status=200, binance_body=big_body
+        )
+        cli = client.SigningClient(socket_path=running_server)
+        resp = await cli.binance_signed_get(
+            firebase_uid="fb-big",
+            base="futures",
+            path="/fapi/v2/positionRisk",
+        )
+
+    # Sanity: the encoded response line really did exceed the old 64 KiB cap.
+    assert len(resp.to_json_line()) > 65536
+    assert resp.ok is True
+    assert isinstance(resp.binance_body, list)
+    assert len(resp.binance_body) == 600
+
+
+# ---------------------------------------------------------------------------
 # Malformed request — client can't construct one directly (typed
 # dataclass), but raw bytes on the socket get a typed BAD_REQUEST.
 # ---------------------------------------------------------------------------

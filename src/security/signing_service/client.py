@@ -50,6 +50,18 @@ log = get_logger("security.signing_service.client")
 _DEFAULT_SOCKET_PATH = "/var/run/lumin/signing.sock"
 _DEFAULT_TIMEOUT_S = 12.0
 
+# asyncio's StreamReader defaults to a 64 KiB line limit. Signed-GET
+# responses are returned as a single JSON line, and the largest of them —
+# GET /fapi/v2/positionRisk with no symbol filter — carries EVERY symbol's
+# position. As Binance kept adding perpetual listings that line crossed
+# 64 KiB, so the engine-side ``readline`` raised
+# ``ValueError: Separator is not found, and chunk exceed the limit`` and the
+# reconciler silently skipped reconciliation for affected users every cycle.
+# Raise the read buffer generously. The buffer only grows to the actual line
+# size, so a roomy ceiling costs nothing on normal (small) responses while
+# bounding pathological ones.
+_SOCKET_READ_LIMIT = 16 * 1024 * 1024  # 16 MiB
+
 
 class SigningClient:
     """Thin client for the signing-service Unix socket.
@@ -168,7 +180,7 @@ class _SignClientConn:
 
     async def __aenter__(self) -> "_SignClientConn":
         self._reader, self._writer = await asyncio.open_unix_connection(
-            self.socket_path
+            self.socket_path, limit=_SOCKET_READ_LIMIT
         )
         return self
 
