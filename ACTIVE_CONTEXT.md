@@ -4,6 +4,65 @@
 
 ---
 
+## Session 17 checkpoint 2026-06-04 — Hurst gate + ATR trail width + regime-per-exit FSM
+
+### What shipped this session
+
+**PR #577** (Hurst gate + ATR trail width + multi-TF regime stamp) — merged to `main` (owner-approved prior session, merged this session).
+
+**PR #578** — `feat/regime-per-exit` → open, awaiting owner review.
+Branch: `feat/regime-per-exit` | Commit: `e85f4c8`
+10 files changed, 1064 insertions, 68 deletions | 5423 tests passing.
+
+#### Regime-per-exit FSM (PR #578) — full implementation
+
+Owner-approved exit matrix (§3.2b), implemented in full:
+
+| Post-pre-TP regime | 15m confirm | Trade aligned? | Exit path |
+|---|---|---|---|
+| TRENDING + trending 15m + aligned | — | yes | **TRAIL** — Binance native TRAILING_STOP_MARKET |
+| TRENDING + any condition mismatched | — | no | **CANCEL** — immediate market close |
+| RANGING / QUIET | — | — | **CANCEL** — immediate market close |
+| VOLATILE | — | — | **VOLATILE** — tighten static SL by 20% |
+
+**New files / sections:**
+- `src/execution/position_state.py` — `TRAILING` PositionState; 5 new Position fields (`entry_regime`, `entry_regime_15m`, `atr_percentile_at_entry`, `atr_value_at_entry`, `trail_order_id`); Firestore serialize/deserialize.
+- `src/execution/position_fsm.py` — `_regime_exit_path()` pure function; `_pretp_trail_path()`, `_pretp_volatile_path()`, `_pretp_cancel_path()`; `_apply_close_fill()` (previously missing — "close" phase fills were silently dropped); auto-close fix in `_apply_tp2_fill` when `tp3_qty == 0`.
+- `src/execution/order_placer.py` — `place_trailing_stop_market()`: `TRAILING_STOP_MARKET`, `callbackRate` in [0.1, 5.0]%, `closePosition=true`, `workingType=MARK_PRICE`, reuses `coid_sl_be` so existing `_apply_sl_be_fill` handles trail-fill → CLOSED.
+- `src/regime.py` — `atr_value: float = 0.0` added to `RegimeContext` (with default, backward-compatible); `build_regime_context` populates it from ATR(14).
+- `src/channels/base.py` — `atr_value_at_entry: float = 0.0` on Signal.
+- `src/scanner/__init__.py` — `sig.atr_value_at_entry = float(rc.atr_value)` threaded from regime context.
+- `src/signal_router.py` — passes `atr_value` to `dispatch_signal_to_active_users`.
+- `src/execution/signal_dispatch.py` — accepts `atr_value`, threads to `place_signal`.
+- `tests/execution/test_position_fsm.py` — CANCEL/TRAIL/VOLATILE path tests; `_apply_close_fill` test.
+- `tests/test_regime_exit_fsm.py` — 23 new tests covering `_regime_exit_path` matrix, callbackRate derivation, fallback chains, TP2 auto-close.
+
+**Bug fixes bundled in PR #578 (pre-existing, silent):**
+1. `_apply_close_fill` — "close" phase fills from `place_market_close` / signal_dispatch invalidation were silently ignored (no handler in dispatch table). Now transitions to CLOSED/REGIME_EXIT.
+2. `_apply_tp2_fill` auto-close — when `tp3_qty == 0` (production default since 2026-05-26) and all qty is closed, FSM was stranding in TP2_HIT forever. Now transitions directly to CLOSED/TP2.
+
+### PR #578 status
+
+**Open — owner-sign-off required (Position FSM transitions).** Do NOT auto-merge.
+
+Owner review checklist (from PR body):
+- [ ] Comfortable with Binance native trailing stop (`TRAILING_STOP_MARKET`)?
+- [ ] Comfortable with immediate market-close for RANGING/QUIET?
+- [ ] VOLATILE 20% tightening appropriate?
+- [ ] 15m confirmation required for TRAIL (no 15m = CANCEL)?
+- [ ] Fallback chain: trail failure → BE-SL; close failure → BE-SL at entry?
+
+CI: 0 check runs at session end (may not have triggered yet). No review comments.
+
+### Open items (priority order)
+
+1. **PR #578 owner review** — Position FSM transitions, owner sign-off required. Link: github.com/mkmk749278/360-v2/pull/578
+2. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API analyze → file `auto-detected` Issues → Telegram alert for high severity. Design in OWNER_BRIEF.md §5.1. Not started.
+3. **Signing container unhealthy** — `360scalp-v2-signing` pre-existing unhealthy state. Money path unaffected (signing only exercised on live auto-trade orders). Investigate.
+4. **Funding rate timing** — exit before 8h funding timestamp in TRENDING_UP for LONG positions. Small but free value. `PRE_FUNDING_EXIT_WINDOW_SEC` config flag.
+
+---
+
 ## Session 16 checkpoint 2026-06-03 — monitor watchdog + signing service aiohttp fix
 
 ### What shipped this session
