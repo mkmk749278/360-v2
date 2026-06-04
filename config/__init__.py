@@ -550,6 +550,11 @@ TIER2_SCAN_EVERY_N_CYCLES: int = _safe_int("TIER2_SCAN_EVERY_N_CYCLES", "3")
 TIER3_SCAN_INTERVAL_MINUTES: int = _safe_int("TIER3_SCAN_INTERVAL_MINUTES", "30")
 TIER3_SCAN_EVERY_N_CYCLES: int = _safe_int("TIER3_SCAN_EVERY_N_CYCLES", "6")
 TIER3_VOLUME_SURGE_MULTIPLIER: float = _safe_float("TIER3_VOLUME_SURGE_MULTIPLIER", "3.0")
+# Diagnostic: log per-stage wall-time (onchain, cross-exchange, SMC/indicator
+# compute, predictive) summed across each scan cycle. Read-only telemetry to
+# locate the dominant cost when scan latency exceeds the ~15s target. Default
+# on; set false to silence once the bottleneck is identified.
+SCAN_STAGE_TIMING_ENABLED: bool = _safe_bool("SCAN_STAGE_TIMING_ENABLED", "true")
 
 # ---------------------------------------------------------------------------
 # Tiered scanning configuration
