@@ -3207,3 +3207,111 @@ class TestDiagnosePair:
         # classify must have been called with the symbol keyword (no shared state).
         _, kwargs = scanner.regime_detector.classify.call_args
         assert kwargs.get("symbol") == "ETHUSDT"
+
+
+# ---------------------------------------------------------------------------
+# SMC + indicator cache behaviour
+# ---------------------------------------------------------------------------
+
+
+def _make_candles_dict(n1m: int = 60, n5m: int = 24, n15m: int = 16, n1h: int = 8) -> dict:
+    """Return a minimal candle dict keyed by timeframe with *n* closes each."""
+    def _cd(n):
+        return {"close": [float(i + 1) for i in range(n)], "high": [float(i + 1.1) for i in range(n)],
+                "low": [float(i + 0.9) for i in range(n)], "volume": [100.0 for _ in range(n)]}
+    return {"1m": _cd(n1m), "5m": _cd(n5m), "15m": _cd(n15m), "1h": _cd(n1h)}
+
+
+class TestScanContextCaching:
+    """Verify indicator and SMC caches reduce executor calls on repeated scans."""
+
+    def _make_scanner_with_executor_tracking(self):
+        scanner = _make_scanner()
+        scanner.data_store.ticks = {"BTCUSDT": []}
+        scanner.order_flow_store = MagicMock()
+        # Track how many times the SMC detector is actually called.
+        scanner.smc_detector = MagicMock()
+        _smc_obj = SimpleNamespace(
+            as_dict=lambda: {"sweeps": [], "fvg": [], "orderblocks": [], "recent_ticks": []},
+            sweeps=[], fvg=[], orderblocks=[], recent_ticks=[], whale_alert=None,
+            volume_delta_spike=None, mss=None, oi_invalidated=False,
+            cvd_divergence=False, cvd_divergence_age=None, cvd_divergence_strength=None,
+        )
+        scanner.smc_detector.detect.return_value = _smc_obj
+        return scanner
+
+    @pytest.mark.asyncio
+    async def test_indicator_cache_hits_on_unchanged_candle_count(self):
+        """Indicator cache must hit when candle *count* is the same across calls."""
+        scanner = self._make_scanner_with_executor_tracking()
+        candles = _make_candles_dict()
+        scanner.data_store.get_candles.side_effect = lambda sym, tf: candles.get(tf)
+
+        # First call — cold cache, both computed.
+        ctx1 = await scanner._build_scan_context("BTCUSDT", 1e9)
+        assert ctx1 is not None
+        assert scanner.smc_detector.detect.call_count == 1
+        assert "BTCUSDT" in scanner._indicator_cache
+
+        # Second call — same candle counts, indicator cache must hit.
+        # SMC cache should also hit (same 5m+ counts).
+        detect_before = scanner.smc_detector.detect.call_count
+        ctx2 = await scanner._build_scan_context("BTCUSDT", 1e9)
+        assert ctx2 is not None
+        # SMC detect NOT called again — served from _smc_cache.
+        assert scanner.smc_detector.detect.call_count == detect_before
+
+    @pytest.mark.asyncio
+    async def test_smc_cache_misses_when_5m_candle_count_grows(self):
+        """A new 5m candle must invalidate the SMC cache and trigger a fresh detect."""
+        scanner = self._make_scanner_with_executor_tracking()
+        candles = _make_candles_dict(n5m=24)
+        scanner.data_store.get_candles.side_effect = lambda sym, tf: candles.get(tf)
+
+        await scanner._build_scan_context("BTCUSDT", 1e9)
+        assert scanner.smc_detector.detect.call_count == 1
+
+        # Simulate a new 5m candle closing.
+        candles["5m"]["close"].append(25.0)
+        candles["5m"]["high"].append(25.1)
+        candles["5m"]["low"].append(24.9)
+        candles["5m"]["volume"].append(100.0)
+
+        await scanner._build_scan_context("BTCUSDT", 1e9)
+        # SMC must be recomputed because 5m candle count changed.
+        assert scanner.smc_detector.detect.call_count == 2
+
+    @pytest.mark.asyncio
+    async def test_smc_cache_persists_across_1m_close_changes(self):
+        """A 1m close price change must NOT invalidate the SMC cache."""
+        scanner = self._make_scanner_with_executor_tracking()
+        candles = _make_candles_dict()
+        scanner.data_store.get_candles.side_effect = lambda sym, tf: candles.get(tf)
+
+        await scanner._build_scan_context("BTCUSDT", 1e9)
+        assert scanner.smc_detector.detect.call_count == 1
+
+        # Simulate the current 1m candle's close updating (new tick) but no new candle.
+        candles["1m"]["close"][-1] = 999.9
+
+        await scanner._build_scan_context("BTCUSDT", 1e9)
+        # SMC cache must still hit — 5m+ counts are unchanged.
+        assert scanner.smc_detector.detect.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_indicator_fingerprint_uses_length_not_close_value(self):
+        """Indicator fingerprint must be based on candle count, not last_close."""
+        scanner = self._make_scanner_with_executor_tracking()
+        candles = _make_candles_dict()
+        scanner.data_store.get_candles.side_effect = lambda sym, tf: candles.get(tf)
+
+        await scanner._build_scan_context("BTCUSDT", 1e9)
+        fp_after_first, _ = scanner._indicator_cache["BTCUSDT"]
+
+        # Mutate current 1m close (tick update) — len unchanged.
+        candles["1m"]["close"][-1] = 77777.0
+        await scanner._build_scan_context("BTCUSDT", 1e9)
+        fp_after_second, _ = scanner._indicator_cache["BTCUSDT"]
+
+        # Fingerprint must be identical — close value change doesn't matter.
+        assert fp_after_first == fp_after_second

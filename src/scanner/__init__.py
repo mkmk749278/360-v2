@@ -76,6 +76,7 @@ from config import (
     SURGE_PROMOTION_MAX_PAIRS,
     SURGE_PROMOTION_VOLUME_MULTIPLIER,
     TIER2_SCAN_EVERY_N_CYCLES,
+    SCAN_EXECUTOR_WORKERS,
     SCAN_STAGE_TIMING_ENABLED,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
@@ -247,6 +248,12 @@ _CHANNEL_PRODUCT_ROLES: Dict[str, str] = {
 
 # Maximum number of symbols scanned concurrently
 _MAX_CONCURRENT_SCANS: int = 20
+
+# Higher-TF keys whose closed-candle counts fingerprint the SMC result cache.
+# Excludes 1m: the in-progress partial candle's last_close changes every tick,
+# while structural sweeps/FVGs/orderblocks are determined by completed 5m+
+# candles and remain stable across ~20 consecutive 15s scan cycles.
+_SMC_CACHE_TFS: tuple = ("4h", "1h", "15m", "5m")
 
 # Protective mode thresholds — trigger when market is too volatile to trade
 _PROTECTIVE_MODE_VOLATILE_THRESHOLD: int = 10   # volatile_unsuitable count across all channels
@@ -1080,17 +1087,14 @@ class Scanner:
         # Running these synchronous operations in threads keeps the event loop
         # free so HTTP request handlers are never blocked by scan work.
         #
-        # Thread count: capped at 2× cpu_count. Using _MAX_CONCURRENT_SCANS (20)
-        # threads on a 4-CPU VPS created 20 NumPy-heavy threads competing for
-        # 4 CPUs — 100% CPU utilisation left no headroom for the event loop or
-        # Firebase auth, causing >4 s latency on all authenticated endpoints.
-        # 2× cpu_count keeps scan throughput high while leaving the event loop
-        # and default pool threads enough CPU to run unimpeded.
-        import os
+        # Thread count: governed by SCAN_EXECUTOR_WORKERS (env-overridable,
+        # default 2× cpu_count). Capped at _MAX_CONCURRENT_SCANS.  With the
+        # SMC+indicator caches warm, most cycles submit few executor tasks
+        # (only pairs whose candle counts changed), so the default is sufficient.
+        # Raise via .env if profiling shows sustained executor queue depth.
         from concurrent.futures import ThreadPoolExecutor as _TPE
-        _cpu = os.cpu_count() or 4
         self._scan_executor = _TPE(
-            max_workers=min(_cpu * 2, _MAX_CONCURRENT_SCANS),
+            max_workers=SCAN_EXECUTOR_WORKERS,
             thread_name_prefix="scanner-compute",
         )
 
@@ -1179,10 +1183,15 @@ class Scanner:
             spot_client=spot_client,
         )
 
-        # Indicator result cache: symbol → (fingerprint, indicator_dict)
-        # fingerprint is a tuple of (tf, last_close) pairs — cheap to compute,
-        # invalidates automatically whenever any timeframe gets a new candle.
+        # Indicator result cache: symbol → (fingerprint, indicator_dict).
+        # Fingerprint: (tf, len(closes)) per timeframe — stable within each
+        # closed-candle period (~75% hit rate at 15s scan / 1m candles).
         self._indicator_cache: Dict[str, tuple] = {}
+        # SMC result cache: symbol → (fingerprint, SMCResult).
+        # Fingerprint: closed-candle counts for 5m+ timeframes only.
+        # Structural sweeps/FVGs/orderblocks are deterministic on completed
+        # candles → cache stable for ~20 cycles between 5m candle closes.
+        self._smc_cache: Dict[str, tuple] = {}
 
         # PR8: Dynamic pair promotion — volume baseline tracker and promoted pairs
         # symbol → last known 24h volume (used to detect surge events)
@@ -2446,42 +2455,75 @@ class Scanner:
         candles = self._load_candles(symbol)
         if not candles:
             return None
-        # Build a cheap fingerprint: tuple of (tf, last_close) for all timeframes.
-        # If candles haven't changed since last cycle, reuse cached indicators.
+        # Indicator fingerprint: (tf, len(closes)) per timeframe.  Stable
+        # within a closed-candle period — hits on every scan except the first
+        # after a new candle is appended.  Previously included last_close which
+        # changed every tick for the in-progress 1m candle, giving near-zero
+        # hit rate and defeating the cache entirely.
         try:
-            # BUG FIX 5: include len so same-close different candles get own cache
             _fp = tuple(
-                (tf, float(cd["close"][-1]) if cd.get("close") else 0.0, len(cd.get("close", [])))
+                (tf, len(cd.get("close", [])))
                 for tf, cd in sorted(candles.items())
             )
         except Exception:
             _fp = None
+
+        # SMC cache: structural sweeps / FVGs / orderblocks are deterministic on
+        # completed candles.  Fingerprint on closed 5m+ candle counts only — the
+        # in-progress 1m partial candle is excluded because its last_close changes
+        # every tick while the structures are unchanged.  Cache is warm for ~20
+        # consecutive 15s cycles between 5m candle closes (~95% hit rate).
+        _smc_fp = tuple(
+            len(candles.get(tf, {}).get("close", []))
+            for tf in _SMC_CACHE_TFS
+        )
+        _cached_smc = self._smc_cache.get(symbol)
+        _smc_cache_hit = _cached_smc is not None and _cached_smc[0] == _smc_fp
+
         _cached = self._indicator_cache.get(symbol) if _fp is not None else None
+        _ind_cache_hit = _cached is not None and _cached[0] == _fp
+
         _t_compute = time.monotonic()
         loop = asyncio.get_running_loop()
         ticks = self.data_store.ticks.get(symbol, [])
-        # SMC detect and indicator computation both run off the event loop so
-        # HTTP handlers are never starved by this CPU-bound work.  When the
-        # indicator cache is cold, run both concurrently via asyncio.gather.
-        _smc_fut = loop.run_in_executor(
-            self._scan_executor,
-            functools.partial(
-                self.smc_detector.detect,
-                symbol, candles, ticks, self.order_flow_store,
-                lookback=SMC_SCALP_LOOKBACK,
-                tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
-            ),
-        )
-        if _cached is not None and _cached[0] == _fp:
+
+        if _smc_cache_hit and _ind_cache_hit:
+            # Both caches warm — zero executor tasks this cycle.
+            smc_result = _cached_smc[1]
             indicators = _cached[1]
-            smc_result = await _smc_fut
-        else:
-            indicators, smc_result = await asyncio.gather(
-                loop.run_in_executor(self._scan_executor, self._compute_indicators, candles),
-                _smc_fut,
+        elif _smc_cache_hit:
+            # SMC stable; only indicators need recompute.
+            smc_result = _cached_smc[1]
+            indicators = await loop.run_in_executor(
+                self._scan_executor, self._compute_indicators, candles
             )
             if _fp is not None:
                 self._indicator_cache[symbol] = (_fp, indicators)
+        else:
+            # SMC cache miss — submit SMC and (if cold) indicators concurrently.
+            _smc_fut = loop.run_in_executor(
+                self._scan_executor,
+                functools.partial(
+                    self.smc_detector.detect,
+                    symbol, candles, ticks, self.order_flow_store,
+                    lookback=SMC_SCALP_LOOKBACK,
+                    tolerance_pct=SMC_SCALP_TOLERANCE_PCT,
+                ),
+            )
+            if _ind_cache_hit:
+                indicators = _cached[1]
+                smc_result = await _smc_fut
+            else:
+                indicators, smc_result = await asyncio.gather(
+                    loop.run_in_executor(
+                        self._scan_executor, self._compute_indicators, candles
+                    ),
+                    _smc_fut,
+                )
+                if _fp is not None:
+                    self._indicator_cache[symbol] = (_fp, indicators)
+            self._smc_cache[symbol] = (_smc_fp, smc_result)
+
         self._stage_timing["smc_indicators"] += time.monotonic() - _t_compute
         smc_data = smc_result.as_dict()
         dependency_source_state: Dict[str, str] = {}
