@@ -8,6 +8,11 @@ concerns validated by docker-compose smoke tests on the VPS.
 import pytest
 from unittest.mock import MagicMock, patch
 
+_SAMPLE_TASKS = [
+    "trade_monitor", "reconciler", "mark_price_feed",
+    "funding_exit_watcher", "snapshot_writer",
+]
+
 
 def _make_engine():
     """Minimal engine stub sufficient for _build_engine_state."""
@@ -57,7 +62,7 @@ def test_build_engine_state_shape():
 
     engine = _make_engine()
     sw = SnapshotWriter(engine, redis_client=MagicMock())
-    state = sw._build_engine_state()
+    state = sw._build_engine_state(_SAMPLE_TASKS)
 
     assert state["current_auto_mode"] == "paper"
     assert state["regime_btcusdt"] == "RANGING"
@@ -67,6 +72,21 @@ def test_build_engine_state_shape():
     assert "broker_positions" in state
     assert "active_signal_dispatch" in state
     assert "auto_execution_status" in state
+    assert "background_tasks" in state
+
+
+def test_build_engine_state_background_tasks_published():
+    """The live task census captured on the loop must round-trip into the
+    snapshot so the isolated API can answer /internal/diag/tasks."""
+    from src.api.snapshot_writer import SnapshotWriter
+
+    engine = _make_engine()
+    sw = SnapshotWriter(engine, MagicMock())
+    state = sw._build_engine_state(_SAMPLE_TASKS)
+
+    assert state["background_tasks"] == _SAMPLE_TASKS
+    # Must be a plain list (JSON-serialisable), not a generator/set
+    assert isinstance(state["background_tasks"], list)
 
 
 def test_build_engine_state_risk_manager_fields():
@@ -74,7 +94,7 @@ def test_build_engine_state_risk_manager_fields():
 
     engine = _make_engine()
     sw = SnapshotWriter(engine, MagicMock())
-    state = sw._build_engine_state()
+    state = sw._build_engine_state(_SAMPLE_TASKS)
     rm = state["risk_manager"]
 
     assert rm["open_position_count"] == 2
@@ -88,7 +108,7 @@ def test_build_engine_state_no_risk_manager():
     engine = _make_engine()
     engine._risk_manager = None
     sw = SnapshotWriter(engine, MagicMock())
-    state = sw._build_engine_state()
+    state = sw._build_engine_state(_SAMPLE_TASKS)
 
     rm = state["risk_manager"]
     assert rm["open_position_count"] == 0
@@ -105,7 +125,7 @@ def test_build_engine_state_broker_positions_serialized():
     engine._order_manager._positions = {"sig_xyz": pos}
 
     sw = SnapshotWriter(engine, MagicMock())
-    state = sw._build_engine_state()
+    state = sw._build_engine_state(_SAMPLE_TASKS)
 
     bp = state["broker_positions"]
     assert "sig_xyz" in bp
@@ -125,7 +145,7 @@ def test_build_engine_state_active_signal_dispatch():
     engine.router.active_signals = {"sig_abc": sig}
 
     sw = SnapshotWriter(engine, MagicMock())
-    state = sw._build_engine_state()
+    state = sw._build_engine_state(_SAMPLE_TASKS)
 
     assert "sig_abc" in state["active_signal_dispatch"]
     assert state["active_signal_dispatch"]["sig_abc"] is not None
@@ -138,7 +158,7 @@ def test_build_engine_state_serialisable_via_json():
 
     engine = _make_engine()
     sw = SnapshotWriter(engine, MagicMock())
-    state = sw._build_engine_state()
+    state = sw._build_engine_state(_SAMPLE_TASKS)
     # Should not raise
     encoded = encode(state)
     assert len(encoded) > 0

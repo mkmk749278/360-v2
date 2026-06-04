@@ -678,6 +678,18 @@ class CryptoSignalEngine:
             info["simulated_pnl_usd"] = om.simulated_pnl_total
         return info
 
+    def get_background_task_census(self) -> List[str]:
+        """Live asyncio task names in this process.
+
+        Single-process mode serves ``/internal/diag/tasks`` straight from
+        here. Mirrors :meth:`RedisEngineFacade.get_background_task_census` so
+        the endpoint is mode-agnostic. Must be called from an async context
+        (a running event loop) — the diag endpoint is.
+        """
+        return sorted(
+            t.get_name() for t in asyncio.all_tasks() if not t.done()
+        )
+
     def set_auto_execution_mode(self, new_mode: str) -> Tuple[bool, str]:
         """Switch auto-execution mode at runtime.
 

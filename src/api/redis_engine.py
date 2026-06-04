@@ -212,6 +212,19 @@ class RedisEngineFacade:
     # Methods
     # ------------------------------------------------------------------
 
+    def get_background_task_census(self) -> list:
+        """Live engine task names, read from the snapshot the engine published.
+
+        In isolated mode the API process cannot see the engine container's
+        asyncio tasks, so the engine's SnapshotWriter writes them into
+        ``engine_state`` and we surface them here. Returns the last-known
+        census; if the engine has stopped writing, the snapshot key expires
+        (TTL 60s) and this serves the stale list until then — full engine
+        death is covered separately by snapshot-freshness monitoring.
+        """
+        tasks = self._state.get("background_tasks")
+        return list(tasks) if isinstance(tasks, list) else []
+
     def get_auto_execution_status(self) -> dict:
         return dict(self._state.get("auto_execution_status", {
             "mode": self._current_auto_mode,
