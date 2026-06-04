@@ -76,6 +76,7 @@ from config import (
     SURGE_PROMOTION_MAX_PAIRS,
     SURGE_PROMOTION_VOLUME_MULTIPLIER,
     TIER2_SCAN_EVERY_N_CYCLES,
+    SCAN_STAGE_TIMING_ENABLED,
     TIER3_SCAN_EVERY_N_CYCLES,
     TIER3_SCAN_INTERVAL_MINUTES,
     TOP50_FUTURES_COUNT,
@@ -1066,6 +1067,13 @@ class Scanner:
         # Semaphore to limit concurrent symbol scans
         self._scan_semaphore: asyncio.Semaphore = asyncio.Semaphore(_MAX_CONCURRENT_SCANS)
 
+        # Per-cycle stage-timing accumulator (diagnostic). Summed wall-time per
+        # stage across all concurrent symbol scans in a cycle; cleared at the
+        # start of each cycle and logged at the end when SCAN_STAGE_TIMING_ENABLED.
+        # Mutated only from coroutine steps on the single event loop, so the
+        # plain += needs no lock.
+        self._stage_timing: Dict[str, float] = defaultdict(float)
+
         # Dedicated thread pool for all CPU-bound scan work: _compute_indicators,
         # smc_detector.detect, and chan.evaluate calls.  Isolated from the default
         # asyncio executor so that saturating it never starves auth/DB threads.
@@ -1816,6 +1824,7 @@ class Scanner:
                         )
 
                 sem = self._scan_semaphore
+                self._stage_timing.clear()  # reset per-cycle stage accumulators
                 tasks = [
                     self._scan_symbol_bounded(sem, sym, info.volume_24h_usd)
                     for sym, info in filtered_pairs
@@ -1842,6 +1851,21 @@ class Scanner:
 
             elapsed_ms = (time.monotonic() - t0) * 1000
             self.telemetry.set_scan_latency(elapsed_ms)
+
+            # Per-stage timing diagnostic: sums are wall-time accumulated across
+            # all concurrent symbol scans this cycle, so they can exceed the
+            # cycle wall-time — the RATIO between stages locates the bottleneck.
+            if SCAN_STAGE_TIMING_ENABLED and self._stage_timing:
+                _stages = {
+                    k: round(v, 2)
+                    for k, v in sorted(
+                        self._stage_timing.items(), key=lambda kv: -kv[1]
+                    )
+                }
+                log.info(
+                    "Scan stage timing (summed across concurrent scans, cycle={:.1f}s): {}",
+                    elapsed_ms / 1000.0, _stages,
+                )
 
             self.telemetry.set_pairs_monitored(len(self.pair_mgr.pairs))
             self.telemetry.set_mover_pairs(len(self._mover_promoted_pairs))
@@ -2371,19 +2395,24 @@ class Scanner:
         return 0.01
 
     async def _fetch_onchain_data(self, symbol: str) -> Any:
+        _t0 = time.monotonic()
         try:
             if self.onchain_client is not None:
                 return await asyncio.wait_for(
                     self.onchain_client.get_exchange_flow(symbol),
                     timeout=3,
                 )
+            return None
         except Exception as exc:
             log.debug("On-chain fetch error for {}: {}", symbol, exc)
-        return None
+            return None
+        finally:
+            self._stage_timing["onchain"] += time.monotonic() - _t0
 
     async def _verify_cross_exchange(
         self, symbol: str, direction: str, entry: float
     ) -> Optional[bool]:
+        _t0 = time.monotonic()
         try:
             return await asyncio.wait_for(
                 self.exchange_mgr.verify_signal_cross_exchange(
@@ -2395,6 +2424,8 @@ class Scanner:
             log.debug("Cross-exchange verification timed out for {}", symbol)
         except Exception as exc:
             log.debug("Cross-exchange verification error for {}: {}", symbol, exc)
+        finally:
+            self._stage_timing["cross_exchange"] += time.monotonic() - _t0
         return None
 
     def _build_smc_summary(self, smc_result: Any) -> str:
@@ -2426,6 +2457,7 @@ class Scanner:
         except Exception:
             _fp = None
         _cached = self._indicator_cache.get(symbol) if _fp is not None else None
+        _t_compute = time.monotonic()
         loop = asyncio.get_running_loop()
         ticks = self.data_store.ticks.get(symbol, [])
         # SMC detect and indicator computation both run off the event loop so
@@ -2450,6 +2482,7 @@ class Scanner:
             )
             if _fp is not None:
                 self._indicator_cache[symbol] = (_fp, indicators)
+        self._stage_timing["smc_indicators"] += time.monotonic() - _t_compute
         smc_data = smc_result.as_dict()
         dependency_source_state: Dict[str, str] = {}
         _recent_ticks = smc_data.get("recent_ticks")
@@ -3622,6 +3655,7 @@ class Scanner:
         _setup_family = self._setup_family_for_channel(chan_name, _setup_class_name)
         _pre_geom = self._capture_geometry(sig)
         _baseline_sl_distance = abs(float(getattr(sig, "entry", 0.0) or 0.0) - _pre_geom[0])
+        _t_predict = time.monotonic()
         try:
             prediction = await self.predictive.predict(
                 symbol, ctx.candles, ctx.ind_for_predict
@@ -3630,6 +3664,7 @@ class Scanner:
             self.predictive.update_confidence(sig, prediction)
         except Exception as exc:
             log.debug("Predictive AI error for {}: {}", symbol, exc)
+            self._stage_timing["predictive"] += time.monotonic() - _t_predict
             self._suppression_counters[
                 f"predictive_revalidation_bypassed:{chan_name}:predictive_error"
             ] += 1
@@ -3638,6 +3673,7 @@ class Scanner:
             ] += 1
             self._increment_path_funnel("geometry:final_live:preserved", chan_name, _setup_class_name)
             return
+        self._stage_timing["predictive"] += time.monotonic() - _t_predict
 
         _post_geom = self._capture_geometry(sig)
         if not self._geometry_changed(_pre_geom, _post_geom):
