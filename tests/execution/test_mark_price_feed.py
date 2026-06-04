@@ -240,3 +240,60 @@ def test_set_and_get_instance() -> None:
         assert mark_price_feed.get_instance() is feed
     finally:
         mark_price_feed.set_instance(original)
+
+
+# ---------------------------------------------------------------------------
+# Funding info capture (r / T from the markPrice stream)
+# ---------------------------------------------------------------------------
+
+
+def _funding_payload(entries):
+    """Build an all-symbols payload that includes r (funding rate) and
+    T (next funding time ms). ``entries`` is a list of
+    (symbol, price, rate, next_funding_ms) tuples."""
+    return [
+        {"e": "markPriceUpdate", "E": 0, "s": s, "p": p, "r": r, "T": t}
+        for s, p, r, t in entries
+    ]
+
+
+@pytest.mark.asyncio
+async def test_funding_info_captured() -> None:
+    feed = mark_price_feed.MarkPriceFeed(
+        ws_factory=_factory_returning([
+            _funding_payload([("BTCUSDT", "29000.5", "0.00075", 1562306400000)]),
+        ])
+    )
+    assert feed.get_funding_info("BTCUSDT") is None  # no data yet
+    await feed._consume_once()
+    rate, next_ms = feed.get_funding_info("BTCUSDT")
+    assert rate == pytest.approx(0.00075)
+    assert next_ms == 1562306400000
+    # Case-insensitive lookup.
+    assert feed.get_funding_info("btcusdt") == (pytest.approx(0.00075), 1562306400000)
+
+
+@pytest.mark.asyncio
+async def test_funding_info_absent_when_fields_missing() -> None:
+    """The legacy price-only payload (no r/T) must not crash and must
+    leave funding info as None — price still captured."""
+    feed = mark_price_feed.MarkPriceFeed(
+        ws_factory=_factory_returning([
+            _array_payload([("BTCUSDT", "29000.5")]),
+        ])
+    )
+    await feed._consume_once()
+    assert feed.get_price("BTCUSDT") == 29000.5
+    assert feed.get_funding_info("BTCUSDT") is None
+
+
+@pytest.mark.asyncio
+async def test_funding_info_negative_rate() -> None:
+    feed = mark_price_feed.MarkPriceFeed(
+        ws_factory=_factory_returning([
+            _funding_payload([("ETHUSDT", "1800.0", "-0.0012", 1562306400000)]),
+        ])
+    )
+    await feed._consume_once()
+    rate, _ = feed.get_funding_info("ETHUSDT")
+    assert rate == pytest.approx(-0.0012)

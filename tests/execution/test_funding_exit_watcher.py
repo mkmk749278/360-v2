@@ -1,53 +1,53 @@
-"""Tests for FundingExitWatcher and helpers."""
+"""Tests for FundingExitWatcher and helpers.
+
+The watcher reads real per-symbol funding info (rate + next-funding-time)
+from the MarkPriceFeed and exits positions that would pay material funding
+within the pre-funding window.
+"""
 from __future__ import annotations
 
 import asyncio
 import time
-from dataclasses import dataclass, field
 from typing import List
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.execution.funding_exit_watcher import (
-    FUNDING_PERIOD_SEC,
     FundingExitWatcher,
     _close_for_funding,
-    seconds_until_next_funding,
+    _position_pays_funding,
 )
 
 
 # ---------------------------------------------------------------------------
-# seconds_until_next_funding
+# _position_pays_funding
 # ---------------------------------------------------------------------------
 
 
-class TestSecondsUntilNextFunding:
-    def test_at_boundary_zero(self):
-        # Exactly on a funding timestamp: full period remaining
-        result = seconds_until_next_funding(now=0.0)
-        assert result == float(FUNDING_PERIOD_SEC)
+class TestPositionPaysFunding:
+    def test_long_pays_when_rate_positive(self):
+        assert _position_pays_funding("LONG", 0.0005) is True
 
-    def test_one_second_after_boundary(self):
-        result = seconds_until_next_funding(now=1.0)
-        assert abs(result - (FUNDING_PERIOD_SEC - 1)) < 0.01
+    def test_long_does_not_pay_when_rate_negative(self):
+        assert _position_pays_funding("LONG", -0.0005) is False
 
-    def test_inside_window(self):
-        # 60 s before a funding event
-        ts = FUNDING_PERIOD_SEC - 60.0
-        result = seconds_until_next_funding(now=ts)
-        assert abs(result - 60.0) < 0.01
+    def test_short_pays_when_rate_negative(self):
+        assert _position_pays_funding("SHORT", -0.0005) is True
 
-    def test_half_period(self):
-        result = seconds_until_next_funding(now=float(FUNDING_PERIOD_SEC) / 2)
-        assert abs(result - float(FUNDING_PERIOD_SEC) / 2) < 0.01
+    def test_short_does_not_pay_when_rate_positive(self):
+        assert _position_pays_funding("SHORT", 0.0005) is False
 
-    def test_uses_time_time_when_no_arg(self):
-        now = time.time()
-        result = seconds_until_next_funding()
-        expected = FUNDING_PERIOD_SEC - (now % FUNDING_PERIOD_SEC)
-        # Allow 1 s tolerance for test execution time
-        assert abs(result - expected) < 1.0
+    def test_zero_rate_nobody_pays(self):
+        assert _position_pays_funding("LONG", 0.0) is False
+        assert _position_pays_funding("SHORT", 0.0) is False
+
+    def test_case_insensitive(self):
+        assert _position_pays_funding("long", 0.0005) is True
+        assert _position_pays_funding("short", -0.0005) is True
+
+    def test_unknown_side(self):
+        assert _position_pays_funding("", 0.0005) is False
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,6 @@ def _make_position(
     signal_id: str = "sig1",
     symbol: str = "BTCUSDT",
     side: str = "LONG",
-    entry_regime: str = "TRENDING_UP",
     state_name: str = "OPEN",
     sl_order_id: int = 1001,
     tp1_order_id: int = 2001,
@@ -73,7 +72,6 @@ def _make_position(
     pos.signal_id = signal_id
     pos.symbol = symbol
     pos.side = side
-    pos.entry_regime = entry_regime
     pos.state = getattr(PositionState, state_name)
     pos.sl_order_id = sl_order_id
     pos.sl_be_order_id = 0
@@ -85,256 +83,208 @@ def _make_position(
     return pos
 
 
-class TestFundingExitWatcherCheck:
-    """Unit tests for FundingExitWatcher._check with mocked dependencies."""
+def _make_feed(funding_info):
+    """Return a mock MarkPriceFeed whose get_funding_info returns
+    ``funding_info`` (a (rate, next_ms) tuple) for any symbol, or a dict
+    keyed by symbol."""
+    feed = MagicMock()
+    if isinstance(funding_info, dict):
+        feed.get_funding_info.side_effect = lambda sym: funding_info.get(sym.upper())
+    else:
+        feed.get_funding_info.return_value = funding_info
+    return feed
 
+
+# A next-funding-time 60 s in the future (inside a 120 s window).
+def _next_funding_ms(seconds_ahead: float) -> int:
+    return int((time.time() + seconds_ahead) * 1000.0)
+
+
+class TestFundingExitWatcherCheck:
     def _make_watcher(self) -> FundingExitWatcher:
         return FundingExitWatcher()
 
-    async def test_no_action_when_outside_window(self):
-        watcher = self._make_watcher()
-        with (
-            patch(
-                "src.execution.funding_exit_watcher.seconds_until_next_funding",
-                return_value=300.0,
-            ),
-            patch("config.PRE_FUNDING_EXIT_WINDOW_SEC", 120),
-            patch(
-                "src.execution.funding_exit_watcher._close_for_funding",
-                new_callable=AsyncMock,
-            ) as mock_close,
-        ):
-            await watcher._check()
-            mock_close.assert_not_called()
-
-    async def test_no_action_when_position_state_not_initialised(self):
-        watcher = self._make_watcher()
-        with (
-            patch(
-                "src.execution.funding_exit_watcher.seconds_until_next_funding",
-                return_value=60.0,
-            ),
-            patch("config.PRE_FUNDING_EXIT_WINDOW_SEC", 120),
-            patch(
-                "src.execution.position_state.is_initialised", return_value=False
-            ),
-            patch(
-                "src.execution.funding_exit_watcher._close_for_funding",
-                new_callable=AsyncMock,
-            ) as mock_close,
-        ):
-            await watcher._check()
-            mock_close.assert_not_called()
-
-    async def test_closes_trending_up_long_within_window(self):
-        watcher = self._make_watcher()
-        pos = _make_position(entry_regime="TRENDING_UP", side="LONG", state_name="OPEN")
-
-        mock_placer = MagicMock()
-        with (
-            patch(
-                "src.execution.funding_exit_watcher.seconds_until_next_funding",
-                return_value=90.0,
-            ),
-            patch("config.PRE_FUNDING_EXIT_WINDOW_SEC", 120),
-            patch(
-                "src.execution.position_state.is_initialised", return_value=True
-            ),
-            patch(
-                "src.execution.signal_dispatch._active_uids",
-                return_value=["uid1"],
-            ),
+    def _common_patches(self, *, positions, feed, window=120, min_rate=0.0005):
+        """Return a list of context managers for the common patch set."""
+        return [
+            patch("config.PRE_FUNDING_EXIT_WINDOW_SEC", window),
+            patch("config.PRE_FUNDING_MIN_RATE", min_rate),
+            patch("src.execution.position_state.is_initialised", return_value=True),
+            patch("src.execution.mark_price_feed.get_instance", return_value=feed),
+            patch("src.execution.signal_dispatch._active_uids", return_value=["uid1"]),
             patch(
                 "src.execution.position_state.list_positions_for_user",
-                return_value=[pos],
+                return_value=positions,
             ),
-            patch(
-                "src.execution.position_state.is_terminal", return_value=False
-            ),
-            patch(
-                "src.execution.order_placer.OrderPlacer",
-                return_value=mock_placer,
-            ),
-            patch(
-                "src.execution.funding_exit_watcher._close_for_funding",
-                new_callable=AsyncMock,
-            ) as mock_close,
-        ):
-            await watcher._check()
-            mock_close.assert_awaited_once_with("uid1", pos, mock_placer)
+            patch("src.execution.position_state.is_terminal", return_value=False),
+        ]
 
-    async def test_skips_non_trending_up_positions(self):
+    async def _run_check(self, watcher, ctxs, close_mock):
+        from contextlib import ExitStack
+
+        with ExitStack() as stack:
+            for c in ctxs:
+                stack.enter_context(c)
+            stack.enter_context(
+                patch(
+                    "src.execution.order_placer.OrderPlacer",
+                    return_value=MagicMock(),
+                )
+            )
+            stack.enter_context(
+                patch(
+                    "src.execution.funding_exit_watcher._close_for_funding",
+                    close_mock,
+                )
+            )
+            await watcher._check()
+
+    async def test_no_feed_no_action(self):
         watcher = self._make_watcher()
-        pos_ranging = _make_position(entry_regime="RANGING", side="LONG")
-        pos_quiet = _make_position(entry_regime="QUIET", side="LONG")
-
-        with (
-            patch(
-                "src.execution.funding_exit_watcher.seconds_until_next_funding",
-                return_value=90.0,
-            ),
+        close_mock = AsyncMock()
+        ctxs = [
             patch("config.PRE_FUNDING_EXIT_WINDOW_SEC", 120),
-            patch(
-                "src.execution.position_state.is_initialised", return_value=True
-            ),
-            patch(
-                "src.execution.signal_dispatch._active_uids",
-                return_value=["uid1"],
-            ),
-            patch(
-                "src.execution.position_state.list_positions_for_user",
-                return_value=[pos_ranging, pos_quiet],
-            ),
-            patch(
-                "src.execution.position_state.is_terminal", return_value=False
-            ),
-            patch(
-                "src.execution.funding_exit_watcher._close_for_funding",
-                new_callable=AsyncMock,
-            ) as mock_close,
-        ):
-            await watcher._check()
-            mock_close.assert_not_called()
+            patch("config.PRE_FUNDING_MIN_RATE", 0.0005),
+            patch("src.execution.position_state.is_initialised", return_value=True),
+            patch("src.execution.mark_price_feed.get_instance", return_value=None),
+        ]
+        await self._run_check(watcher, ctxs, close_mock)
+        close_mock.assert_not_called()
 
-    async def test_skips_short_positions(self):
+    async def test_position_state_not_initialised_no_action(self):
         watcher = self._make_watcher()
-        pos = _make_position(entry_regime="TRENDING_UP", side="SHORT")
-
-        with (
-            patch(
-                "src.execution.funding_exit_watcher.seconds_until_next_funding",
-                return_value=90.0,
-            ),
+        close_mock = AsyncMock()
+        ctxs = [
             patch("config.PRE_FUNDING_EXIT_WINDOW_SEC", 120),
-            patch(
-                "src.execution.position_state.is_initialised", return_value=True
-            ),
-            patch(
-                "src.execution.signal_dispatch._active_uids",
-                return_value=["uid1"],
-            ),
-            patch(
-                "src.execution.position_state.list_positions_for_user",
-                return_value=[pos],
-            ),
-            patch(
-                "src.execution.position_state.is_terminal", return_value=False
-            ),
-            patch(
-                "src.execution.funding_exit_watcher._close_for_funding",
-                new_callable=AsyncMock,
-            ) as mock_close,
-        ):
-            await watcher._check()
-            mock_close.assert_not_called()
+            patch("config.PRE_FUNDING_MIN_RATE", 0.0005),
+            patch("src.execution.position_state.is_initialised", return_value=False),
+        ]
+        await self._run_check(watcher, ctxs, close_mock)
+        close_mock.assert_not_called()
+
+    async def test_exits_long_paying_material_funding_in_window(self):
+        watcher = self._make_watcher()
+        pos = _make_position(side="LONG")
+        feed = _make_feed((0.00075, _next_funding_ms(60)))
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed),
+            close_mock,
+        )
+        close_mock.assert_awaited_once()
+        assert close_mock.await_args.args[1] is pos
+
+    async def test_exits_short_paying_material_funding(self):
+        watcher = self._make_watcher()
+        pos = _make_position(side="SHORT")
+        feed = _make_feed((-0.00075, _next_funding_ms(60)))
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed),
+            close_mock,
+        )
+        close_mock.assert_awaited_once()
+
+    async def test_skips_long_when_funding_negative(self):
+        """LONG does not pay when funding is negative — no exit."""
+        watcher = self._make_watcher()
+        pos = _make_position(side="LONG")
+        feed = _make_feed((-0.00075, _next_funding_ms(60)))
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed),
+            close_mock,
+        )
+        close_mock.assert_not_called()
+
+    async def test_skips_short_when_funding_positive(self):
+        watcher = self._make_watcher()
+        pos = _make_position(side="SHORT")
+        feed = _make_feed((0.00075, _next_funding_ms(60)))
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed),
+            close_mock,
+        )
+        close_mock.assert_not_called()
+
+    async def test_skips_immaterial_funding_below_threshold(self):
+        """Funding below PRE_FUNDING_MIN_RATE is not worth the taker fee."""
+        watcher = self._make_watcher()
+        pos = _make_position(side="LONG")
+        feed = _make_feed((0.0001, _next_funding_ms(60)))  # baseline 0.01%
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed, min_rate=0.0005),
+            close_mock,
+        )
+        close_mock.assert_not_called()
+
+    async def test_skips_when_outside_window(self):
+        watcher = self._make_watcher()
+        pos = _make_position(side="LONG")
+        feed = _make_feed((0.00075, _next_funding_ms(300)))  # 5 min away
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed, window=120),
+            close_mock,
+        )
+        close_mock.assert_not_called()
+
+    async def test_skips_when_funding_already_passed(self):
+        """Negative time-to-funding (settlement just passed) — wait for roll."""
+        watcher = self._make_watcher()
+        pos = _make_position(side="LONG")
+        feed = _make_feed((0.00075, _next_funding_ms(-5)))
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed),
+            close_mock,
+        )
+        close_mock.assert_not_called()
 
     async def test_skips_trailing_state(self):
-        """TRAILING positions are managed by Binance native trailing stop — skip."""
         watcher = self._make_watcher()
-        pos = _make_position(
-            entry_regime="TRENDING_UP", side="LONG", state_name="TRAILING"
+        pos = _make_position(side="LONG", state_name="TRAILING")
+        feed = _make_feed((0.00075, _next_funding_ms(60)))
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed),
+            close_mock,
         )
+        close_mock.assert_not_called()
 
-        with (
-            patch(
-                "src.execution.funding_exit_watcher.seconds_until_next_funding",
-                return_value=90.0,
-            ),
-            patch("config.PRE_FUNDING_EXIT_WINDOW_SEC", 120),
-            patch(
-                "src.execution.position_state.is_initialised", return_value=True
-            ),
-            patch(
-                "src.execution.signal_dispatch._active_uids",
-                return_value=["uid1"],
-            ),
-            patch(
-                "src.execution.position_state.list_positions_for_user",
-                return_value=[pos],
-            ),
-            patch(
-                "src.execution.position_state.is_terminal", return_value=False
-            ),
-            patch(
-                "src.execution.funding_exit_watcher._close_for_funding",
-                new_callable=AsyncMock,
-            ) as mock_close,
-        ):
-            await watcher._check()
-            mock_close.assert_not_called()
-
-    async def test_case_insensitive_regime_and_side(self):
+    async def test_skips_when_no_funding_info_for_symbol(self):
         watcher = self._make_watcher()
-        pos = _make_position(entry_regime="trending_up", side="long")
-
-        with (
-            patch(
-                "src.execution.funding_exit_watcher.seconds_until_next_funding",
-                return_value=90.0,
-            ),
-            patch("config.PRE_FUNDING_EXIT_WINDOW_SEC", 120),
-            patch(
-                "src.execution.position_state.is_initialised", return_value=True
-            ),
-            patch(
-                "src.execution.signal_dispatch._active_uids",
-                return_value=["uid1"],
-            ),
-            patch(
-                "src.execution.position_state.list_positions_for_user",
-                return_value=[pos],
-            ),
-            patch(
-                "src.execution.position_state.is_terminal", return_value=False
-            ),
-            patch(
-                "src.execution.order_placer.OrderPlacer", return_value=MagicMock()
-            ),
-            patch(
-                "src.execution.funding_exit_watcher._close_for_funding",
-                new_callable=AsyncMock,
-            ) as mock_close,
-        ):
-            await watcher._check()
-            mock_close.assert_awaited_once()
-
-    async def test_skips_pre_tp_fired_is_still_closed(self):
-        """PRE_TP_FIRED positions (VOLATILE path) should also be exited."""
-        watcher = self._make_watcher()
-        pos = _make_position(
-            entry_regime="TRENDING_UP", side="LONG", state_name="PRE_TP_FIRED"
+        pos = _make_position(side="LONG")
+        feed = _make_feed(None)  # get_funding_info returns None
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed),
+            close_mock,
         )
+        close_mock.assert_not_called()
 
-        with (
-            patch(
-                "src.execution.funding_exit_watcher.seconds_until_next_funding",
-                return_value=90.0,
-            ),
-            patch("config.PRE_FUNDING_EXIT_WINDOW_SEC", 120),
-            patch(
-                "src.execution.position_state.is_initialised", return_value=True
-            ),
-            patch(
-                "src.execution.signal_dispatch._active_uids",
-                return_value=["uid1"],
-            ),
-            patch(
-                "src.execution.position_state.list_positions_for_user",
-                return_value=[pos],
-            ),
-            patch(
-                "src.execution.position_state.is_terminal", return_value=False
-            ),
-            patch(
-                "src.execution.order_placer.OrderPlacer", return_value=MagicMock()
-            ),
-            patch(
-                "src.execution.funding_exit_watcher._close_for_funding",
-                new_callable=AsyncMock,
-            ) as mock_close,
-        ):
-            await watcher._check()
-            mock_close.assert_awaited_once()
+    async def test_pre_tp_fired_position_is_exited(self):
+        watcher = self._make_watcher()
+        pos = _make_position(side="LONG", state_name="PRE_TP_FIRED")
+        feed = _make_feed((0.00075, _next_funding_ms(60)))
+        close_mock = AsyncMock()
+        await self._run_check(
+            watcher,
+            self._common_patches(positions=[pos], feed=feed),
+            close_mock,
+        )
+        close_mock.assert_awaited_once()
 
 
 # ---------------------------------------------------------------------------
@@ -406,7 +356,6 @@ class TestCloseForFunding:
         placer = self._make_placer()
         await _close_for_funding("uid1", pos, placer)
 
-        # Should cancel sl + tp1 + tp2 (sl_be=0, tp3=0 skipped)
         assert placer.cancel_algo_order.await_count == 3
         cancelled_ids = {
             call.kwargs["algo_id"]
@@ -427,7 +376,7 @@ class TestCloseForFunding:
         pos = MagicMock(spec=Position)
         pos.signal_id = "sig2"
         pos.symbol = "ETHUSDT"
-        pos.side = "LONG"
+        pos.side = "SHORT"
         pos.state = PositionState.PRE_TP_FIRED
         pos.sl_order_id = 0
         pos.sl_be_order_id = 5001
@@ -435,7 +384,7 @@ class TestCloseForFunding:
         pos.tp2_order_id = 6001
         pos.tp3_order_id = 0
         pos.total_qty = 0.10
-        pos.closed_qty = 0.05  # half already closed (pre-TP)
+        pos.closed_qty = 0.05
 
         placer = self._make_placer()
         await _close_for_funding("uid1", pos, placer)
@@ -443,7 +392,7 @@ class TestCloseForFunding:
         placer.place_funding_market_close.assert_awaited_once_with(
             signal_id="sig2",
             symbol="ETHUSDT",
-            direction="LONG",
+            direction="SHORT",
             quantity=pytest.approx(0.05),
         )
 
@@ -469,8 +418,7 @@ class TestCloseForFunding:
             side_effect=OrderPlacementError("network error")
         )
 
-        # Must not raise — fail-soft
-        await _close_for_funding("uid1", pos, placer)
+        await _close_for_funding("uid1", pos, placer)  # must not raise
 
 
 # ---------------------------------------------------------------------------
@@ -479,12 +427,7 @@ class TestCloseForFunding:
 
 
 class TestFsmFundingClosePhase:
-    """Verify the FSM dispatch table routes funding_close fills correctly."""
-
     async def test_funding_close_fill_sets_funding_exit_reason(self):
-        import pytest
-        from unittest.mock import MagicMock, AsyncMock, patch
-
         from src.execution import events as events_mod
         from src.execution import order_placer as _op
         from src.execution import position_state
@@ -509,20 +452,14 @@ class TestFsmFundingClosePhase:
             tp1_qty=0.3,
             tp2_qty=0.4,
             tp3_qty=0.3,
-            entry_regime="TRENDING_UP",
         )
 
         placer = MagicMock()
         placer.cancel_order = AsyncMock(return_value=None)
         placer.cancel_algo_order = AsyncMock(return_value=None)
-        placer.place_stop_loss = AsyncMock(
-            return_value=_op.OrderPlacementResult(
-                order_id=4001, client_order_id="x", status="NEW",
-                avg_price=0.0, binance_body={},
-            )
-        )
 
-        placer_factory = lambda uid: placer  # noqa: E731
+        def placer_factory(uid):
+            return placer
 
         event = events_mod.OrderTradeUpdate(
             symbol="BTCUSDT",
@@ -558,7 +495,6 @@ class TestFsmFundingClosePhase:
         )
 
         saved: list = []
-
         with patch.object(
             position_state, "get_position", return_value=pos
         ), patch.object(
