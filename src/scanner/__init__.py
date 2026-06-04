@@ -3794,6 +3794,7 @@ class Scanner:
                 # the trail width (Fix B).
                 sig.entry_regime = rc.label
                 sig.atr_percentile_at_entry = float(rc.atr_percentile)
+                sig.atr_value_at_entry = float(rc.atr_value)
             except (TypeError, ValueError):
                 pass  # Keep market_state.value when context is not a real RegimeContext
 

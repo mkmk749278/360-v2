@@ -92,6 +92,12 @@ class PositionState(str, Enum):
     # TP2 filled (further partial close).
     TP2_HIT = "TP2_HIT"
 
+    # Pre-TP fired and regime check routed to the ATR trail path.
+    # TP2 remains live; original SL is replaced by a Binance
+    # TRAILING_STOP_MARKET at trail_order_id.  Transitions to
+    # TP1_HIT, TP2_HIT, or CLOSED (via SL_BE fill).
+    TRAILING = "TRAILING"
+
     # Terminal state.  Reached when SL fires, all TPs fill, or the
     # user manually closes from the Lumin app.
     CLOSED = "CLOSED"
@@ -158,6 +164,13 @@ class Position:
     # "tight".  Captured at signal-placement time from user_invalidation_settings
     # so enforcement doesn't need to re-query SQLite on every FSM tick.
     invalidation_mode: str = "standard"
+    # Regime-per-exit context stamped at signal-placement time (Fix A+B).
+    # Used by _apply_pretp_fill to choose between TRAIL / VOLATILE / CANCEL.
+    entry_regime: str = ""          # 5m Hurst-gated regime at entry
+    entry_regime_15m: str = ""      # 15m stateless regime at entry
+    atr_percentile_at_entry: float = 50.0  # 0-100; drives trail_atr_multiplier
+    atr_value_at_entry: float = 0.0        # Absolute ATR(14) used to compute callbackRate
+    trail_order_id: int = 0                # Binance algoId of the TRAILING_STOP_MARKET order
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -483,6 +496,11 @@ def _to_firestore_dict(position: Position) -> dict:
         "pretp_fraction": position.pretp_fraction,
         "pretp_fired": position.pretp_fired,
         "invalidation_mode": position.invalidation_mode,
+        "entry_regime": position.entry_regime,
+        "entry_regime_15m": position.entry_regime_15m,
+        "atr_percentile_at_entry": position.atr_percentile_at_entry,
+        "atr_value_at_entry": position.atr_value_at_entry,
+        "trail_order_id": position.trail_order_id,
         "created_at": position.created_at,
         "last_event_at": position.last_event_at,
         "closed_at": position.closed_at,
@@ -529,6 +547,11 @@ def _from_firestore_dict(data: dict) -> Position:
         pretp_fraction=float(data.get("pretp_fraction", 0.5)),
         pretp_fired=bool(data.get("pretp_fired", False)),
         invalidation_mode=str(data.get("invalidation_mode", "standard")),
+        entry_regime=str(data.get("entry_regime", "")),
+        entry_regime_15m=str(data.get("entry_regime_15m", "")),
+        atr_percentile_at_entry=float(data.get("atr_percentile_at_entry", 50.0)),
+        atr_value_at_entry=float(data.get("atr_value_at_entry", 0.0)),
+        trail_order_id=int(data.get("trail_order_id", 0)),
         created_at=data.get(
             "created_at", datetime.now(timezone.utc)
         ),

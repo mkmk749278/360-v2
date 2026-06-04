@@ -296,6 +296,9 @@ async def dispatch_signal_to_active_users(
     tp2_price: float,
     tp3_price: float,
     regime_label: Optional[str] = None,
+    regime_label_15m: Optional[str] = None,
+    atr_percentile: float = 50.0,
+    atr_value: float = 0.0,
     setup_class: Optional[str] = None,
 ) -> int:
     """Fan a signal out to every active user's server-side FSM.
@@ -510,6 +513,10 @@ async def dispatch_signal_to_active_users(
                 pretp_threshold_pct=user_pretp_threshold,
                 pretp_fraction=user_grab_fraction,
                 invalidation_mode=user_invalidation_mode,
+                entry_regime=regime_label or "",
+                entry_regime_15m=regime_label_15m or "",
+                atr_percentile_at_entry=float(atr_percentile),
+                atr_value_at_entry=float(atr_value),
             )
             # Record the successful placement for the user-facing
             # Recent Activity card.  Soft-fail inside the helper.

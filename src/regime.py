@@ -62,6 +62,7 @@ class RegimeContext:
     previous_regime: str = ""       # Previous stable regime label (empty if first call)
     transition_type: str = ""       # e.g. "RANGING→TRENDING_UP"  (empty if no change)
     transition_age_candles: int = 0  # Candles since the last transition (0 = just changed)
+    atr_value: float = 0.0          # Absolute ATR(14) value; 0.0 if insufficient candle data
 
 
 # ---------------------------------------------------------------------------
@@ -466,6 +467,7 @@ class MarketRegimeDetector:
         adx_val = result.adx if result.adx is not None else 0.0
         adx_slope = 0.0
         atr_pct = 50.0
+        atr_val = 0.0
         vol_profile = "NEUTRAL"
 
         if candles is not None:
@@ -495,6 +497,7 @@ class MarketRegimeDetector:
                 valid_atr = atr_arr[~np.isnan(atr_arr)]
                 if len(valid_atr) >= 2:
                     atr_pct = atr_percentile(valid_atr)
+                    atr_val = float(valid_atr[-1])
 
             # Volume profile
             if len(volumes) >= 20 and len(closes) >= 20 and vwap > 0:
@@ -532,6 +535,7 @@ class MarketRegimeDetector:
             adx_value=adx_val,
             adx_slope=adx_slope,
             atr_percentile=atr_pct,
+            atr_value=atr_val,
             volume_profile=vol_profile,
             is_regime_strengthening=(adx_slope > 0 and adx_val > 20),
             previous_regime=prev_label,

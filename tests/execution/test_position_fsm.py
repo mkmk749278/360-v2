@@ -76,6 +76,12 @@ def _stub_placer_factory():
             status="FILLED", avg_price=29100.0, binance_body={},
         )
     )
+    placer.place_trailing_stop_market = AsyncMock(
+        return_value=order_placer.OrderPlacementResult(
+            order_id=7001, client_order_id="lumin_sig-1_sl_be",
+            status="NEW", avg_price=0.0, binance_body={},
+        )
+    )
 
     def _factory(uid):
         return placer
@@ -393,12 +399,13 @@ async def test_tp3_fill_transitions_to_closed_with_reason() -> None:
 
 
 @pytest.mark.asyncio
-async def test_pretp_fill_transitions_open_to_pretp_fired_with_be_shift() -> None:
-    """**The doctrine-critical transition** (§3.2a).  Pre-TP partial
-    close fills → OPEN → PRE_TP_FIRED.  Side effects:
-    1. Cancel original SL.
-    2. Cancel TP2 + TP3 (residual too small for multi-leg TP).
-    3. Place new SL at entry price (BE shift).
+async def test_pretp_fill_cancel_path_no_regime() -> None:
+    """Pre-TP partial fill with no entry_regime → CANCEL path.
+
+    Regime-per-exit exit matrix: empty/unknown regime defaults to CANCEL —
+    cancel all remaining orders and market-close the residual immediately to
+    bank the pre-TP gain.  This is the safe default: no regime data means
+    we can't classify the trend, so we treat it like RANGING.
     """
     factory, placer = _stub_placer_factory()
     fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
@@ -406,9 +413,117 @@ async def test_pretp_fill_transitions_open_to_pretp_fired_with_be_shift() -> Non
     position.state = position_state.PositionState.OPEN
     position.entry_price_filled = 29000.0
     position.sl_order_id = 2001
-    position.tp1_order_id = 3001  # stays
-    position.tp2_order_id = 3002  # cancelled
-    position.tp3_order_id = 3003  # cancelled
+    position.tp1_order_id = 3001
+    position.tp2_order_id = 3002
+    position.tp3_order_id = 3003
+    # No entry_regime set → defaults to ""
+    captured: list = []
+    with patch.object(position_state, "get_position", return_value=position), patch.object(
+        position_state, "put_position", side_effect=lambda p: captured.append(p)
+    ):
+        await fsm.handle_event(
+            _otu(
+                client_order_id=position_state.coid_pretp("sig-1"),
+                last_filled_qty=0.5,
+                realized_pnl=25.0,
+            )
+        )
+    assert captured[0].pretp_fired is True
+    assert captured[0].closed_qty == 0.5
+    assert captured[0].realized_pnl_total == 25.0
+    # CANCEL path: all 4 algo orders cancelled.
+    assert placer.cancel_algo_order.await_count == 4
+    cancelled_ids = {
+        call.kwargs["algo_id"] for call in placer.cancel_algo_order.call_args_list
+    }
+    assert cancelled_ids == {2001, 3001, 3002, 3003}
+    # Market close placed for the residual.
+    placer.place_market_close.assert_awaited_once()
+    close_kwargs = placer.place_market_close.call_args.kwargs
+    assert abs(close_kwargs["quantity"] - 0.5) < 1e-9  # total_qty - closed_qty
+    # No BE-SL: market close handles the residual immediately.
+    placer.place_stop_loss.assert_not_called()
+    # State stays PRE_TP_FIRED until the _apply_close_fill event arrives.
+    assert captured[0].state == position_state.PositionState.PRE_TP_FIRED
+    assert captured[0].sl_order_id == 0
+    assert captured[0].tp1_order_id == 0
+    assert captured[0].tp2_order_id == 0
+    assert captured[0].tp3_order_id == 0
+
+
+@pytest.mark.asyncio
+async def test_pretp_fill_trail_path_trending_aligned() -> None:
+    """Pre-TP partial fill with TRENDING_UP (5m + 15m) LONG → TRAIL path.
+
+    Both timeframes confirm the trend direction; keep TP2 live and replace
+    the original SL with a Binance TRAILING_STOP_MARKET at ATR-derived
+    callbackRate.  State transitions to TRAILING.
+    """
+    factory, placer = _stub_placer_factory()
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
+    position = _pending_position()
+    position.state = position_state.PositionState.OPEN
+    position.entry_price_filled = 29000.0
+    position.sl_order_id = 2001
+    position.tp1_order_id = 3001
+    position.tp2_order_id = 3002
+    position.tp3_order_id = 0
+    # Regime: TRENDING_UP aligned with LONG trade on both timeframes.
+    position.entry_regime = "TRENDING_UP"
+    position.entry_regime_15m = "TRENDING_UP"
+    position.atr_percentile_at_entry = 50.0
+    position.atr_value_at_entry = 290.0  # 1% of 29000
+    captured: list = []
+    with patch.object(position_state, "get_position", return_value=position), patch.object(
+        position_state, "put_position", side_effect=lambda p: captured.append(p)
+    ):
+        await fsm.handle_event(
+            _otu(
+                client_order_id=position_state.coid_pretp("sig-1"),
+                last_filled_qty=0.5,
+                realized_pnl=25.0,
+            )
+        )
+    # State: TRAILING (TP2 still live, Binance trail active).
+    assert captured[0].state == position_state.PositionState.TRAILING
+    # Original SL cancelled, trail order placed.
+    cancelled_ids = {
+        call.kwargs["algo_id"] for call in placer.cancel_algo_order.call_args_list
+    }
+    assert 2001 in cancelled_ids  # original SL cancelled
+    assert 3002 not in cancelled_ids  # TP2 NOT cancelled
+    assert captured[0].tp2_order_id == 3002  # TP2 stays live
+    # Trailing stop placed (using place_trailing_stop_market).
+    placer.place_trailing_stop_market.assert_awaited_once()
+    trail_kwargs = placer.place_trailing_stop_market.call_args.kwargs
+    # callbackRate = trail_atr_mult(50.0) × 290.0 / 29000.0 × 100 = 1.5%
+    assert 0.1 <= trail_kwargs["callback_rate_pct"] <= 5.0
+    assert trail_kwargs["direction"] == "LONG"
+    # No static BE-SL placed on the trail path.
+    placer.place_stop_loss.assert_not_called()
+    placer.place_market_close.assert_not_called()
+    assert captured[0].sl_order_id == 0
+
+
+@pytest.mark.asyncio
+async def test_pretp_fill_volatile_path() -> None:
+    """Pre-TP partial fill with VOLATILE regime → VOLATILE path.
+
+    Keep TP2 live, cancel original SL, place tightened static SL at
+    80% of original SL distance from entry.  State = PRE_TP_FIRED.
+    """
+    factory, placer = _stub_placer_factory()
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
+    position = _pending_position()
+    position.state = position_state.PositionState.OPEN
+    position.entry_price_filled = 29000.0
+    position.sl_price = 28500.0  # 500 pts below entry
+    position.sl_order_id = 2001
+    position.tp1_order_id = 3001
+    position.tp2_order_id = 3002
+    position.tp3_order_id = 0
+    position.entry_regime = "VOLATILE"
+    position.entry_regime_15m = ""
     captured: list = []
     with patch.object(position_state, "get_position", return_value=position), patch.object(
         position_state, "put_position", side_effect=lambda p: captured.append(p)
@@ -421,26 +536,49 @@ async def test_pretp_fill_transitions_open_to_pretp_fired_with_be_shift() -> Non
             )
         )
     assert captured[0].state == position_state.PositionState.PRE_TP_FIRED
-    assert captured[0].pretp_fired is True
-    assert captured[0].closed_qty == 0.5
-    assert captured[0].realized_pnl_total == 25.0
-    # 3 algo-order cancels: original SL + TP2 + TP3.  TP1 stays.
-    assert placer.cancel_algo_order.await_count == 3
+    # Original SL cancelled.
     cancelled_ids = {
         call.kwargs["algo_id"] for call in placer.cancel_algo_order.call_args_list
     }
-    assert cancelled_ids == {2001, 3002, 3003}
-    # BE-SL placed at entry price.
-    placer.place_stop_loss.assert_called_once()
-    assert placer.place_stop_loss.call_args.kwargs["stop_price"] == 29000.0
+    assert 2001 in cancelled_ids
+    assert 3002 not in cancelled_ids  # TP2 stays live
+    assert captured[0].tp2_order_id == 3002
+    # Tightened SL placed: 80% of original distance → 29000 - 400 = 28600.
+    placer.place_stop_loss.assert_awaited_once()
+    sl_kwargs = placer.place_stop_loss.call_args.kwargs
+    expected_sl = 29000.0 - (500.0 * 0.8)  # 28600
+    assert abs(sl_kwargs["stop_price"] - expected_sl) < 1e-6
     assert captured[0].sl_be_order_id == 4001
-    assert captured[0].sl_order_id == 0
-    assert captured[0].tp2_order_id == 0
-    assert captured[0].tp3_order_id == 0
-    # TP1 stays — residual rides toward it.
-    assert captured[0].tp1_order_id == 3001
-    # SL price field updated to BE for app-display.
-    assert captured[0].sl_price == 29000.0
+    placer.place_market_close.assert_not_called()
+    placer.place_trailing_stop_market.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_close_fill_transitions_to_closed() -> None:
+    """Market close fill (``_close`` coid) → PRE_TP_FIRED → CLOSED.
+
+    This is the event generated by the regime-exit CANCEL path's market
+    close order fill, or by signal_dispatch.close_fsm_positions_for_signal.
+    """
+    factory, _placer = _stub_placer_factory()
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
+    position = _pending_position()
+    position.state = position_state.PositionState.PRE_TP_FIRED
+    captured: list = []
+    with patch.object(position_state, "get_position", return_value=position), patch.object(
+        position_state, "put_position", side_effect=lambda p: captured.append(p)
+    ):
+        await fsm.handle_event(
+            _otu(
+                client_order_id=position_state.coid_close("sig-1"),
+                last_filled_qty=0.5,
+                realized_pnl=-1.5,
+            )
+        )
+    assert captured[0].state == position_state.PositionState.CLOSED
+    assert captured[0].close_reason == "REGIME_EXIT"
+    assert captured[0].closed_at is not None
+    assert captured[0].realized_pnl_total == -1.5
 
 
 @pytest.mark.asyncio
