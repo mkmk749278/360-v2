@@ -1244,6 +1244,26 @@ def build_app(
             ),
         }
 
+    @app.get(
+        "/internal/diag/tasks",
+        tags=["internal-diag"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def diag_tasks() -> Dict[str, Any]:
+        """Owner-tier read-only census of live asyncio tasks.
+
+        Used by the 360 CE Ops monitoring agent (D2 — BackgroundTaskDetector)
+        to verify that all critical engine loops are still running.  Returns
+        the names from asyncio.all_tasks() so the agent can check for
+        ``trade_monitor``, ``reconciler``, ``mark_price_feed``,
+        ``funding_exit_watcher``, and ``pretp_dispatcher`` without needing
+        docker exec or log scraping.
+        """
+        names = sorted(
+            t.get_name() for t in asyncio.all_tasks() if not t.done()
+        )
+        return {"tasks": names, "count": len(names)}
+
     # ---- Activity ----
 
     @app.get(
