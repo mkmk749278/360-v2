@@ -4,9 +4,9 @@
 
 ---
 
-## Session 18 checkpoint 2026-06-04 — monitoring agent live + scan latency fix
+## Session 18 checkpoint 2026-06-04 — monitoring agent live + scan latency fixed (64s → ~3s)
 
-### What shipped this session (5 PRs merged to `main`)
+### What shipped this session (6 PRs merged to `main`)
 
 | PR | Repo | What | Type |
 |---|---|---|---|
@@ -14,7 +14,8 @@
 | #584 | 360-v2 | Engine task census published to Redis (D2 re-enable) | feat, auto-merged |
 | #585 | 360-v2 | Signing-client 16 MiB socket read buffer (reconciler overflow fix) | fix, auto-merged |
 | #586 | 360-v2 | Per-stage scan timing instrumentation | feat, auto-merged |
-| #587 | 360-v2 | SMC result cache + indicator fingerprint fix (scan latency) | fix, auto-merged |
+| #587 | 360-v2 | SMC result cache + indicator fingerprint (insufficient — see #588) | fix, auto-merged |
+| #588 | 360-v2 | Per-timeframe indicator caching (the real scan-latency fix) | fix, auto-merged |
 | #6/#7/#9/#10 | 360ce-ops | Monitoring agent deployed (Tier 0 + Tier 2 healthchecks.io) | feat, merged |
 
 ### Monitoring agent (360ce-ops) — fully operational
@@ -52,39 +53,52 @@ Root cause: `asyncio.open_unix_connection` default 64 KiB `readline` limit raise
 Fix: raised `_SOCKET_READ_LIMIT` to 16 MiB. Confirmed working — empty grep for
 `Separator is not found` in VPS logs post-deploy.
 
-### PR #587 — scan latency root cause + fix (just deployed, watch for confirmation)
+### Scan latency — root cause + fix (#587 then #588), CONFIRMED FIXED
 
-**Production timing data that drove the fix:**
+**Production timing that drove the work (`smc_indicators` summed / cycle wall-clock):**
 ```
-{'smc_indicators': 758.51, 'onchain': 0.09, 'predictive': 0.0}  cycle=71.8s
-{'smc_indicators': 866.61, 'predictive': 0.01, 'onchain': 0.01}  cycle=75.3s
+{'smc_indicators': 758.51, ...}  cycle=71.8s
+{'smc_indicators': 866.61, ...}  cycle=75.3s
 ```
 
-**Two independent cache bugs:**
+**Two distinct bugs, fixed across two PRs:**
 
-1. **Indicator fingerprint included `last_close`** — the in-progress 1m candle's close
-   changes every tick, so the cache never hit (near-zero hit rate). Every cycle computed
-   15 indicators × 5 timeframes for all 75 pairs.
+1. **SMC never cached** (#587) — `smc_detector.detect` ran fresh every cycle even though
+   sweeps / FVGs / orderblocks are deterministic on completed candles. Added `_smc_cache`
+   keyed on closed 5m+ candle counts. **This part worked.**
 
-2. **SMC never cached** — `smc_detector.detect` called fresh every 15s even though
-   sweeps / FVGs / orderblocks are deterministic on completed candles and stable for
-   ~20 consecutive cycles between 5m candle closes.
+2. **Indicator cache used one whole-dict fingerprint including 1m** (#587 got this wrong;
+   #588 fixed it). A new 1m candle closes ~every cycle, so the combined fingerprint
+   changed every cycle and invalidated indicators for ALL 7 timeframes — 5m..1w were
+   recomputed needlessly. #587 showed **no improvement in prod** (541-822s) because the
+   single timing bucket lumped SMC + indicators, masking the working SMC cache.
 
-**Fix:** Fingerprint now uses `(tf, len(closes))` only. New `_smc_cache` keyed on
-closed 5m+ candle counts. Full double-cache-hit path submits zero executor tasks.
+**#588 fix (the real win):** indicator cache keyed PER TIMEFRAME — `symbol → {tf: (len, ind)}`.
+Only timeframes whose candle count changed recompute. 1m recomputes every cycle (scalping
+needs the live bar); 5m..1w hit ~95%. Telemetry split into separate `smc` / `indicators`
+buckets to make it self-verifying.
 
-**Expected:** `smc_indicators` summed drops from ~800s to ~25s; cycle wall-clock
-from ~72s to ~15-20s. `SCAN_STAGE_TIMING_ENABLED=true` in `.env` — check logs
-after 2-3 cycles post-deploy to confirm.
+**Confirmed in production (post-#588):**
+```
+cycle=2.5–5.7s   {'indicators': 0.0, 'smc': 0.0}            ← most cycles, fully cached
+cycle=12.4s      {'indicators': 97.1, 'smc': 0.0}           ← 1m candle closed
+cycle=16.0s      {'indicators': 136.4, 'smc': 45.6}         ← 1m + 5m closed
+```
+**Cycle wall-clock 64s → ~3s typical, ~16s worst-case** (at candle boundaries). `smc` is
+0 on every cycle except 5m closes — proving the #587 SMC cache was working all along.
 
-**Once confirmed:** set `SCAN_STAGE_TIMING_ENABLED=false` in VPS `.env` to silence
-the telemetry noise.
+**Telemetry silenced:** `SCAN_STAGE_TIMING_ENABLED=false` written to VPS `/root/360-v2/.env`.
+NOT yet applied (engine env is baked at container creation; deploy is `paths-ignore` for
+`.env`/docs). **Takes effect on the next code deploy** — until then the timing line still
+logs every ~3s. Deferred deliberately to keep the telemetry through high-volatility
+conditions for confidence.
 
 ### Open items (priority order)
 
-1. **Verify scan latency fix** — check engine logs for `Scan stage timing` within
-   2-3 cycles of PR #587 deploying. `smc_indicators` should drop from 800s to ~25s.
-   Once confirmed, set `SCAN_STAGE_TIMING_ENABLED=false` in VPS `.env`.
+1. **Telemetry auto-silences on next code deploy** — `SCAN_STAGE_TIMING_ENABLED=false`
+   already in `/root/360-v2/.env`; the next PR-to-main deploy recreates the engine and
+   applies it. No action needed unless the ~3s log cadence becomes a problem sooner
+   (then `docker compose --profile isolated up -d --no-deps --force-recreate engine`).
 2. **D1 NakedPositionDetector upgrade** — currently geometry-only (`stop_loss≤0`).
    Real naked-position detection (Binance stop order not placed) requires engine to
    publish `sl_order_id` per position in the Redis snapshot. Design needed.
