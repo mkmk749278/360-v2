@@ -168,3 +168,69 @@ def test_channels_is_empty_list():
 def test_state_age_infinite_when_not_refreshed():
     f = RedisEngineFacade(redis_client=MagicMock())
     assert f.state_age_seconds == float("inf")
+
+
+# ---------------------------------------------------------------------------
+# Positions-diag X-ray published by the engine (isolated mode)
+# ---------------------------------------------------------------------------
+
+
+def test_published_positions_diag_none_by_default():
+    f = RedisEngineFacade(redis_client=MagicMock())
+    assert f.published_positions_diag() is None
+
+
+@pytest.mark.asyncio
+async def test_refresh_state_loads_positions_diag():
+    """refresh_state must pull both engine_state and the positions_diag key,
+    surfacing the latter via published_positions_diag()."""
+    import json
+    from unittest.mock import AsyncMock
+    from src.api import snapshot_store as _store
+
+    engine_state = {"current_auto_mode": "live"}
+    diag = {
+        "items": [], "total": 0, "monitor_running": True,
+        "generated_at": "2026-06-04T16:00:00+00:00",
+    }
+
+    async def _get(key):
+        if key == _store.KEY_ENGINE_STATE:
+            return json.dumps(engine_state)
+        if key == _store.KEY_POSITIONS_DIAG:
+            return json.dumps(diag)
+        return None
+
+    redis_client = MagicMock()
+    redis_client.available = True
+    redis_client.client = MagicMock()
+    redis_client.client.get = AsyncMock(side_effect=_get)
+
+    f = RedisEngineFacade(redis_client=redis_client)
+    await f.refresh_state()
+
+    assert f._current_auto_mode == "live"
+    assert f.published_positions_diag() == diag
+
+
+@pytest.mark.asyncio
+async def test_refresh_state_positions_diag_absent_is_none():
+    """When the engine hasn't published a diag (key expired/absent), the
+    facade reports None so the endpoint can fall back gracefully."""
+    from unittest.mock import AsyncMock
+    import json
+    from src.api import snapshot_store as _store
+
+    async def _get(key):
+        if key == _store.KEY_ENGINE_STATE:
+            return json.dumps({"current_auto_mode": "off"})
+        return None  # positions_diag absent
+
+    redis_client = MagicMock()
+    redis_client.available = True
+    redis_client.client = MagicMock()
+    redis_client.client.get = AsyncMock(side_effect=_get)
+
+    f = RedisEngineFacade(redis_client=redis_client)
+    await f.refresh_state()
+    assert f.published_positions_diag() is None

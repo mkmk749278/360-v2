@@ -1173,6 +1173,16 @@ def build_app(
     )
     async def positions_diag() -> PositionsDiagResponse:
         try:
+            # Isolated mode: the engine container computes the full X-ray
+            # (SL-breach / candle wicks need live data_store) and publishes it.
+            # The facade's active_signals are skeletal stubs, so building the
+            # diag against the facade would yield blank rows — consult the
+            # published snapshot first, fall back to a live build otherwise.
+            published = getattr(engine, "published_positions_diag", None)
+            if callable(published):
+                raw = published()
+                if raw is not None:
+                    return PositionsDiagResponse(**raw)
             return build_positions_diag(engine)
         except Exception:
             log.exception(
