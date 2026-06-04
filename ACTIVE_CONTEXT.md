@@ -4,9 +4,51 @@
 
 ---
 
-## Session 17 checkpoint 2026-06-04 — Hurst gate + ATR trail width + regime-per-exit FSM (BOTH MERGED)
+## Session 17 checkpoint 2026-06-04 — regime-per-exit FSM + signing healthcheck + funding-exit watcher
 
-### What shipped this session
+### What shipped this session (5 PRs merged to `main`)
+
+| PR | What | Type |
+|---|---|---|
+| #577 | Hurst gate + ATR trail width + multi-TF regime stamp | merged |
+| #578 | Regime-per-exit FSM (TRAIL/VOLATILE/CANCEL) | owner sign-off, merged |
+| #579 | ACTIVE_CONTEXT correction | docs, auto-merged |
+| #580 | Signing service Docker healthcheck fix | ops, auto-merged |
+| #581 | Funding-exit watcher (real funding data) | owner sign-off (delegated), merged |
+
+#### PR #580 — signing container healthcheck (`c7c9081`)
+
+`360scalp-v2-signing` shared the engine image whose Dockerfile HEALTHCHECK checks
+for a `src.main` process + scanner heartbeat — neither exist in the signing
+container, so it reported `unhealthy` after the 180s grace period despite serving
+correctly. Fixed with a `healthcheck:` override in `docker-compose.yml`:
+`test -S /app/sock/signing.sock` (socket created after KMS+Firestore init; stale
+sockets unlinked on startup). **The long-standing "signing unhealthy" open item is
+now resolved** — verify `docker ps` shows healthy after next redeploy.
+
+#### PR #581 — funding-exit watcher (`2e99d7d`)
+
+Exits positions that would PAY material funding within the pre-funding window.
+Research (Binance docs) drove two key design choices away from the naive first cut:
+- **Funding interval is not always 8h** (4h/8h/1h per pair) → read the *real*
+  `nextFundingTime` (`T`) per symbol from the mark-price stream instead of a
+  hardcoded 8h grid.
+- **The mark-price stream already carries `r` (funding rate) + `T`** — `MarkPriceFeed`
+  was discarding them. Now captured via `get_funding_info(symbol)`.
+
+Exit rule: for a position's symbol, `next_funding − now ≤ PRE_FUNDING_EXIT_WINDOW_SEC`
+(120s) AND on the paying side (LONG & rate>0, SHORT & rate<0) AND
+`|rate| ≥ PRE_FUNDING_MIN_RATE` (0.05%, materiality gate so we don't churn taker
+fees dodging baseline funding). TRAILING positions skipped. `close_reason="FUNDING_EXIT"`.
+Disable entirely with `PRE_FUNDING_EXIT_WINDOW_SEC=0`.
+
+**First-live watch point:** confirm the watcher fires near a settlement on an
+elevated-funding pair (grep engine logs for `funding_exit_watcher: exiting`), and
+that `get_funding_info` is populated (mark-price stream carries r/T).
+
+---
+
+### Regime-per-exit FSM (PR #578) detail
 
 **PR #577** (Hurst gate + ATR trail width + multi-TF regime stamp) — merged to `main` (owner-approved prior session, merged this session).
 
@@ -51,10 +93,12 @@ Owner approved 2026-06-04; merged (squash `0af4b8e`) and auto-deployed. This was
 
 ### Open items (priority order)
 
-1. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API analyze → file `auto-detected` Issues → Telegram alert for high severity. Design in OWNER_BRIEF.md §5.1. Not started.
-2. **Verify regime-per-exit live** — see watch points above; confirm against real VPS positions next session.
-3. **Signing container unhealthy** — `360scalp-v2-signing` pre-existing unhealthy state. Money path unaffected (signing only exercised on live auto-trade orders). Investigate.
-4. **Funding rate timing** — exit before 8h funding timestamp in TRENDING_UP for LONG positions. Small but free value. `PRE_FUNDING_EXIT_WINDOW_SEC` config flag.
+1. **24/7 monitoring agent** — GitHub Actions cron (30min): collect → Claude API analyze → file `auto-detected` Issues → Telegram alert for high severity. Design in OWNER_BRIEF.md §5.1. Not started. **Now the largest remaining build.**
+2. **Verify regime-per-exit live** (PR #578) — owner is live-observing. Watch points: `place_trailing_stop_market`/`trail_sl` in logs on TRENDING-aligned exits; `entry_regime`/`atr_value_at_entry` non-empty on dispatched positions; clean RANGING/QUIET market-closes.
+3. **Verify funding-exit watcher live** (PR #581) — grep `funding_exit_watcher: exiting`; confirm `get_funding_info` populated.
+4. **Verify signing healthcheck** (PR #580) — `docker ps` should show `360scalp-v2-signing` healthy after next redeploy.
+
+**Closed this session:** signing-unhealthy item (PR #580); funding-rate-timing item (PR #581).
 
 ---
 
