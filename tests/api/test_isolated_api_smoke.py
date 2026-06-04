@@ -136,3 +136,44 @@ def test_auto_mode_get_isolated(isolated_client):
     resp = client.get("/api/auto-mode", headers={"Authorization": "Bearer test-token"})
     assert resp.status_code == 200
     assert resp.json()["mode"] == "paper"
+
+
+def test_positions_diag_isolated_serves_published_xray(isolated_client):
+    """In isolated mode the endpoint serves the engine-published X-ray with full
+    symbol/SL/candle data — not a blank diag built from skeletal facade stubs
+    (the bug where MAGMAUSDT rendered as an all-zero, blank-symbol row)."""
+    client, facade, fake_redis = isolated_client
+    import asyncio
+    from datetime import datetime, timezone
+    from src.api.snapshot_store import KEY_POSITIONS_DIAG, encode
+    from src.api.schemas import PositionsDiagResponse, PositionDiagDetail
+
+    detail = PositionDiagDetail(
+        signal_id="SIG-XYZ", symbol="MAGMAUSDT", direction="LONG",
+        status="ACTIVE", setup_class="SR_FLIP_RETEST", channel="The Architect",
+        entry=0.43982, stop_loss=0.43320, tp1=0.44848, tp2=0.46880,
+        current_price=0.43703, pnl_pct=-0.63,
+        max_favorable_excursion_pct=0.0, max_adverse_excursion_pct=-0.63,
+        best_tp_hit=0, pre_tp_hit=False,
+        candle_1m_high=0.4400, candle_1m_low=0.4365, candle_1m_age_sec=12.0,
+        sl_breach_distance_pct=0.88, minutes_open=2,
+    )
+    published = PositionsDiagResponse(
+        items=[detail], total=1, monitor_running=True,
+        generated_at=datetime(2026, 6, 4, 16, 7, 9, tzinfo=timezone.utc),
+    ).model_dump(mode="json")
+    fake_redis._store[KEY_POSITIONS_DIAG] = encode(published)
+    asyncio.get_event_loop().run_until_complete(facade.refresh_state())
+
+    resp = client.get(
+        "/internal/diag/positions",
+        headers={"Authorization": "Bearer test-token"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["monitor_running"] is True
+    assert body["total"] == 1
+    item = body["items"][0]
+    assert item["symbol"] == "MAGMAUSDT"
+    assert abs(item["stop_loss"] - 0.43320) < 1e-9
+    assert item["candle_1m_age_sec"] == 12.0

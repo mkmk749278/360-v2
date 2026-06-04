@@ -82,6 +82,7 @@ class SnapshotWriter:
         await self._write_signals()
         await self._write_tickers()
         await self._write_engine_state()
+        await self._write_positions_diag()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
             await self._write_activity()
             self._last_activity = now
@@ -107,6 +108,26 @@ class SnapshotWriter:
         from src.api.snapshot import build_signals
         return [i.model_dump(mode="json") for i in
                 build_signals(self._engine, status="all", limit=500)]
+
+    async def _write_positions_diag(self) -> None:
+        """Publish the position-state X-ray computed engine-side.
+
+        ``build_positions_diag`` needs live ``router.active_signals`` AND the
+        ``data_store`` candle wicks to populate SL-breach / candle-age columns —
+        state the API container's RedisEngineFacade cannot see in isolated mode.
+        Computing it here (on the real engine) and publishing the rendered rows
+        keeps the dashboard X-ray fully populated under isolation.
+        """
+        try:
+            loop = asyncio.get_running_loop()
+            data = await loop.run_in_executor(self._executor, self._build_positions_diag)
+            await self._set(_store.KEY_POSITIONS_DIAG, data, _store.TTL_POSITIONS_DIAG)
+        except Exception:
+            log.exception("snapshot_writer: failed to write positions_diag")
+
+    def _build_positions_diag(self) -> dict:
+        from src.api.snapshot import build_positions_diag
+        return build_positions_diag(self._engine).model_dump(mode="json")
 
     async def _write_activity(self) -> None:
         try:

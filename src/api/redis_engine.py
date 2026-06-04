@@ -118,6 +118,7 @@ class RedisEngineFacade:
     def __init__(self, redis_client: Any) -> None:
         self._redis = redis_client
         self._state: dict = {}
+        self._positions_diag: Optional[dict] = None
         self._refreshed_at: float = 0.0
 
     # ------------------------------------------------------------------
@@ -140,8 +141,20 @@ class RedisEngineFacade:
             if state is not None:
                 self._state = state
                 self._refreshed_at = time.monotonic()
+            diag_raw = await self._redis.client.get(_store.KEY_POSITIONS_DIAG)
+            self._positions_diag = _store.decode(diag_raw)
         except Exception:
             log.exception("redis_engine: failed to refresh state from Redis")
+
+    def published_positions_diag(self) -> Optional[dict]:
+        """Return the engine-computed positions-diag X-ray published to Redis,
+        or ``None`` if the engine hasn't written one (key absent / expired).
+
+        Present only on the facade — the single-process engine builds the diag
+        live, so the ``/internal/diag/positions`` handler only consults this in
+        isolated mode and falls back to a live build otherwise.
+        """
+        return self._positions_diag
 
     @property
     def state_age_seconds(self) -> float:

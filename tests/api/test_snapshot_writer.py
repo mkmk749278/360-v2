@@ -162,3 +162,22 @@ def test_build_engine_state_serialisable_via_json():
     # Should not raise
     encoded = encode(state)
     assert len(encoded) > 0
+
+
+def test_build_positions_diag_serialisable():
+    """The engine-side positions-diag X-ray must build into a JSON-serialisable
+    dict so the isolated API can publish and re-hydrate it."""
+    from src.api.snapshot_writer import SnapshotWriter
+    from src.api.snapshot_store import encode
+
+    engine = _make_engine()
+    sw = SnapshotWriter(engine, MagicMock())
+    diag = sw._build_positions_diag()
+
+    assert isinstance(diag, dict)
+    assert "items" in diag
+    assert "total" in diag
+    assert "monitor_running" in diag
+    assert "generated_at" in diag
+    # Must not raise — all values JSON-serialisable.
+    assert len(encode(diag)) > 0
