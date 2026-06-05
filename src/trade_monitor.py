@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import asyncio
 import os
+import time
 import numpy as np
-from typing import Any, Callable, Coroutine, Dict, Optional
+from typing import Any, Callable, Coroutine, Dict, Optional, Tuple
 
 from config import (
     ALL_CHANNELS,
@@ -18,6 +19,9 @@ from config import (
     INVALIDATION_ADVERSE_EXCURSION_FRACTION_BY_SETUP,
     INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_BY_SETUP,
     INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_SEC,
+    INVALIDATION_BTC_ADVERSE_FRACTION_MULT,
+    INVALIDATION_BTC_CORRELATION_ENABLED,
+    INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC,
     INVALIDATION_CONSECUTIVE_THRESHOLD,
     INVALIDATION_MIN_AGE_SECONDS,
     INVALIDATION_MOMENTUM_THRESHOLD,
@@ -40,6 +44,7 @@ from config import (
     PRE_TP_THRESHOLD_PCT,
     TRAILING_ATR_MULTIPLIER,
 )
+from src.btc_direction import check_btc_direction_gate
 from src.channels.base import Signal, TrailingStopState
 from src.dca import check_dca_entry, recalculate_after_dca
 from src import user_settings as _user_settings
@@ -276,6 +281,12 @@ class TradeMonitor:
         self._circuit_breaker = circuit_breaker
         self._regime_detector = regime_detector
         self._indicators_fn = indicators_fn
+        # BTC-correlation invalidation overlay cache (session 19).  Holds
+        # (monotonic_deadline, trend_1h, trend_4h) so the per-position
+        # invalidation loop reads BTC's macro direction at most once per
+        # INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC rather than recomputing
+        # BTC indicators for every open position on every tick.
+        self._btc_dir_cache: Optional[tuple] = None
         # Optional OrderManager for direct exchange execution (V3 groundwork).
         # When provided and auto-execution is enabled, confirmed signals are
         # forwarded to the exchange instead of (or alongside) Telegram.
@@ -758,6 +769,84 @@ class TradeMonitor:
             f"of peak at MFE_R={mfe_r:.2f}) – capital preserved"
         )
 
+    def _btc_opposes_direction(self, sig: Signal) -> Tuple[bool, str]:
+        """Return ``(opposes, reason)`` when BTC's 1H+4H macro trend both lean
+        against this signal's direction — i.e. the open position is now
+        fighting BTC.
+
+        Reuses :func:`src.btc_direction.check_btc_direction_gate` — the SAME
+        classifier the scanner applies at signal birth — so entry-time and
+        life-time BTC logic are identical: the exempt-setup set, the
+        both-timeframe confirmation requirement, and fail-open-on-missing-data
+        are all inherited rather than re-implemented.
+
+        BTC 1H/4H indicators are recomputed at most once per
+        ``INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC`` (cached on the monitor) so
+        the per-position invalidation loop stays cheap.  Returns ``(False, "")``
+        on any error or missing data — never invalidate on absent macro data.
+        """
+        if self._store is None:
+            return False, ""
+        try:
+            now = time.monotonic()
+            cache = self._btc_dir_cache
+            if cache is None or now >= cache[0]:
+                from src.scanner.indicator_compute import (
+                    compute_indicators_for_candle_dict,
+                )
+                btc_cd_1h = self._store.get_candles("BTCUSDT", "1h") or {}
+                btc_cd_4h = self._store.get_candles("BTCUSDT", "4h") or {}
+                btc_inds = compute_indicators_for_candle_dict(
+                    {k: v for k, v in {"1h": btc_cd_1h, "4h": btc_cd_4h}.items() if v}
+                )
+                self._btc_dir_cache = (
+                    now + INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC,
+                    btc_inds.get("1h", {}),
+                    btc_inds.get("4h", {}),
+                    btc_cd_4h,
+                )
+            _, _ind_1h, _ind_4h, _cd_4h = self._btc_dir_cache
+            # check_btc_direction_gate returns allowed=False when BTC 1H AND 4H
+            # both oppose the trade direction (and the setup is not exempt).
+            allowed, reason = check_btc_direction_gate(
+                sig.direction.value,
+                _ind_1h,
+                _ind_4h,
+                _cd_4h,
+                setup_class=str(getattr(sig, "setup_class", "") or ""),
+            )
+            return (not allowed), reason
+        except Exception as exc:  # fail-open — macro read must never block exit logic
+            log.debug("BTC-correlation invalidation read failed (fail-open): %s", exc)
+            return False, ""
+
+    def _apply_btc_adverse_tightening(
+        self, sig: Signal, base_fraction: float
+    ) -> Tuple[float, str]:
+        """Tighten the adverse-excursion fraction when BTC opposes the trade.
+
+        Capital-preservation overlay (session 19): when the position is on the
+        losing side of entry and BTC's 1H+4H macro trend leans against the
+        trade, the pair is likely to follow BTC down/up.  Multiplying the
+        adverse fraction by ``INVALIDATION_BTC_ADVERSE_FRACTION_MULT`` (<1.0)
+        lowers the exit threshold so the existing price-derived gate fires a
+        little earlier — it never opens new risk, only books a smaller loss.
+
+        No-op (returns ``base_fraction`` unchanged) when the flag is off, the
+        multiplier is outside (0, 1), or BTC is not opposing.  Returns
+        ``(effective_fraction, btc_reason)`` where ``btc_reason`` is empty
+        unless the tightening actually applied.
+        """
+        if not INVALIDATION_BTC_CORRELATION_ENABLED:
+            return base_fraction, ""
+        mult = INVALIDATION_BTC_ADVERSE_FRACTION_MULT
+        if not (0.0 < mult < 1.0):
+            return base_fraction, ""
+        opposes, reason = self._btc_opposes_direction(sig)
+        if not opposes:
+            return base_fraction, ""
+        return base_fraction * mult, reason
+
     def _check_invalidation(
         self, sig: Signal, *, mode_override: Optional[str] = None
     ) -> Optional[str]:
@@ -870,13 +959,17 @@ class TradeMonitor:
             _adv_exc_fraction = INVALIDATION_ADVERSE_EXCURSION_FRACTION_BY_SETUP.get(
                 _setup_key, INVALIDATION_ADVERSE_EXCURSION_FRACTION
             )
+            _adv_exc_fraction, _btc_reason = self._apply_btc_adverse_tightening(
+                sig, _adv_exc_fraction
+            )
             _adverse = (_entry_px - sig.current_price) if is_long else (sig.current_price - _entry_px)
             if _adverse >= _sl_dist * _adv_exc_fraction:
                 _adv_pct = (_adverse / _entry_px) * 100.0 if _entry_px > 0 else 0.0
                 _adv_frac = _adverse / _sl_dist
+                _btc_tag = f" [BTC-correlated: {_btc_reason}]" if _btc_reason else ""
                 return (
                     f"adverse excursion ({_adv_pct:+.2f}% against, "
-                    f"{_adv_frac:.2f}×SL_dist) – early invalidation"
+                    f"{_adv_frac:.2f}×SL_dist) – early invalidation{_btc_tag}"
                 )
 
         # ---- MAIN PATIENCE GATE (regime / EMA / momentum checks) ----
@@ -967,13 +1060,17 @@ class TradeMonitor:
             _adv_exc_fraction = INVALIDATION_ADVERSE_EXCURSION_FRACTION_BY_SETUP.get(
                 _adv_exc_key, INVALIDATION_ADVERSE_EXCURSION_FRACTION
             )
+            _adv_exc_fraction, _btc_reason = self._apply_btc_adverse_tightening(
+                sig, _adv_exc_fraction
+            )
             _adverse_threshold = _sl_dist * _adv_exc_fraction
             if _adverse >= _adverse_threshold:
                 _adverse_pct = (_adverse / _entry_px) * 100.0 if _entry_px > 0 else 0.0
                 _adverse_frac = _adverse / _sl_dist
+                _btc_tag = f" [BTC-correlated: {_btc_reason}]" if _btc_reason else ""
                 return (
                     f"adverse excursion ({_adverse_pct:+.2f}% against, "
-                    f"{_adverse_frac:.2f}×SL_dist) – signal thesis invalidated"
+                    f"{_adverse_frac:.2f}×SL_dist) – signal thesis invalidated{_btc_tag}"
                 )
 
         # INV-1 audit fix: extract the regime captured at signal CREATION from
