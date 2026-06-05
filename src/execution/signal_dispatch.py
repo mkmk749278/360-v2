@@ -101,6 +101,33 @@ _TP1_FRACTION = 0.30
 _TP2_FRACTION = 0.70
 _TP3_FRACTION = 0.00
 
+# Entry regimes that position_fsm._regime_exit_path routes to the CANCEL exit
+# path (bank pre-TP, market-close the residual immediately).  Used by the
+# session-19 full-grab fee optimisation.  Counter-trend 5m / 15m-not-
+# confirming cases also route to CANCEL but can't be detected at dispatch
+# without re-deriving the full FSM logic; RANGING/QUIET are the dominant
+# CANCEL-bound cases (~76% of cycles) and are unambiguous from regime_label.
+_CANCEL_BOUND_REGIMES: frozenset = frozenset({"RANGING", "QUIET"})
+
+
+def _apply_cancel_fullgrab(grab_fraction: float, regime_label: Optional[str]) -> float:
+    """Return ``1.0`` (full grab) when the CANCEL-path fee optimisation applies
+    to this position, else ``grab_fraction`` unchanged.
+
+    Applies only when the flag is on, a pre-TP would otherwise fire
+    (``grab_fraction > 0``), and the entry regime is one the FSM routes to the
+    CANCEL exit path.  Pure function so the decision is unit-testable without
+    the full dispatch harness.  See ``config.PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED``.
+    """
+    from config import PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED as _flag
+    if (
+        _flag
+        and grab_fraction > 0
+        and (regime_label or "").upper() in _CANCEL_BOUND_REGIMES
+    ):
+        return 1.0
+    return grab_fraction
+
 # User-roster cache TTL.  30s is the published SLA for "newly-
 # connected user starts receiving signals."  Reduces Firestore
 # load while keeping the operator-visible behaviour predictable.
@@ -430,6 +457,20 @@ async def dispatch_signal_to_active_users(
                     uid, setup_class, _allowed_setups,
                 )
                 user_grab_fraction = 0.0
+        # CANCEL-path fee optimisation (session 19, ships dark).  A RANGING/
+        # QUIET entry regime routes the pre-TP to the CANCEL exit path, which
+        # banks a partial via the maker LIMIT and then MARKET-closes the
+        # residual at once (a 3rd fee + taker slippage on every win, with no
+        # ride-to-TP1 benefit).  Closing the FULL position at the LIMIT
+        # instead yields the same exit for 2 maker fees and no slippage.
+        _grab_before_fullgrab = user_grab_fraction
+        user_grab_fraction = _apply_cancel_fullgrab(user_grab_fraction, regime_label)
+        if user_grab_fraction != _grab_before_fullgrab:
+            log.debug(
+                "signal_dispatch: full-grab pre-TP on CANCEL-bound regime "
+                "uid={} signal_id={} regime={} (was grab={:.2f} → 1.00)",
+                uid, signal_id, regime_label, _grab_before_fullgrab,
+            )
         # Per-user invalidation aggressiveness (B17).  Stored on the
         # Position at placement time so the per-user FSM path can
         # enforce the correct mode when per-user soft-invalidation

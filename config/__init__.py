@@ -1602,6 +1602,30 @@ INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC: int = int(
 )
 
 # ---------------------------------------------------------------------------
+# CANCEL-path pre-TP fee optimisation (research session 19, 2026-06-05).
+#
+# When the entry regime routes the pre-TP to the CANCEL exit path (RANGING /
+# QUIET — see ``position_fsm._regime_exit_path``), a *partial* pre-TP banks
+# part of the position via the maker LIMIT and then MARKET-closes the
+# residual immediately.  That residual market close is a 3rd fee event plus
+# taker slippage on EVERY such win — and the CANCEL path does NOT ride the
+# residual to TP1 (it closes it at once), so the partial buys nothing.
+#
+# Closing the FULL position at the pre-TP LIMIT instead (grab = 1.0) removes
+# the residual market close entirely: 2 fees not 3, all maker, no slippage,
+# identical exit price.  The losing side is unchanged — if price never
+# reaches the pre-TP threshold the LIMIT doesn't fill either way, and the
+# native SL still protects the full position until it does.
+#
+# This is a fee-efficiency win, not a profitability flip (it does not change
+# SRFLIP/LSR's win/loss-size asymmetry).  Ships DARK: default OFF so the
+# merge changes no live behaviour.  Flip
+# ``PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED=true`` to A/B the fee saving.
+PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED: bool = _safe_bool(
+    "PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED", "false"
+)
+
+# ---------------------------------------------------------------------------
 # Geo-block for Play Store launch (PLAYSTORE_PLAN.md A6 + E2).
 #
 # ISO 3166-1 alpha-2 country codes that the auto-execution feature
