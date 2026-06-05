@@ -1562,6 +1562,46 @@ INVALIDATION_ADVERSE_EXCURSION_MIN_AGE_BY_SETUP: Dict[str, int] = {
 }
 
 # ---------------------------------------------------------------------------
+# BTC-correlation invalidation overlay (research session 19, 2026-06-05).
+#
+# Doctrine: alts are 0.65–0.90 BTC-correlated.  The existing BTC direction
+# gate (``src.btc_direction.check_btc_direction_gate``) only fires at signal
+# BIRTH — a soft entry penalty.  It does NOT watch BTC during the position's
+# LIFE.  A position that entered while BTC was neutral can later find BTC
+# turning decisively against it; because of the correlation, the pair tends
+# to follow.  That is the adverse move the invalidation system already tries
+# to catch via the price-derived adverse-excursion gate — BTC opposition is
+# simply a LEADING indicator of it.
+#
+# This overlay does NOT add a new standalone kill.  It only TIGHTENS the
+# existing adverse-excursion gate: when a position is already on the losing
+# side of entry AND BTC's 1H+4H both oppose the trade direction, the adverse
+# fraction threshold is multiplied by ``_MULT`` (<1.0) so the capital-
+# preservation exit fires a little earlier.  BTC-aligned or BTC-neutral →
+# no change (fail-open).  Tape-driven setups (WHALE / FUNDING / LIQ_REVERSAL)
+# are exempt via the same exempt set used by the entry gate.
+#
+# Ships DARK: default OFF so a merge to main changes no live behaviour.  Flip
+# ``INVALIDATION_BTC_CORRELATION_ENABLED=true`` to A/B it against the truth
+# report's PROTECTIVE/PREMATURE classifier before adopting.
+INVALIDATION_BTC_CORRELATION_ENABLED: bool = _safe_bool(
+    "INVALIDATION_BTC_CORRELATION_ENABLED", "false"
+)
+# Multiplier applied to the adverse-excursion fraction when BTC opposes.
+# 0.70 → SR_FLIP early exit shifts from 1.0% adverse (2.5%×0.40) to 0.70%
+# (2.5%×0.40×0.70) when BTC is also leaning against the trade.  Range-checked
+# to (0, 1]; a value >= 1.0 disables the tightening even when the flag is on.
+INVALIDATION_BTC_ADVERSE_FRACTION_MULT: float = float(
+    os.getenv("INVALIDATION_BTC_ADVERSE_FRACTION_MULT", "0.70")
+)
+# TTL (seconds) for the engine-wide cached BTC 1H/4H direction read in the
+# TradeMonitor.  1H/4H trends move slowly, so one recompute per minute is
+# ample and keeps the per-position invalidation loop cheap.
+INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC: int = int(
+    os.getenv("INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC", "60")
+)
+
+# ---------------------------------------------------------------------------
 # Geo-block for Play Store launch (PLAYSTORE_PLAN.md A6 + E2).
 #
 # ISO 3166-1 alpha-2 country codes that the auto-execution feature
