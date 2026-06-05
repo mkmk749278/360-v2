@@ -4,9 +4,9 @@
 
 ---
 
-## Session 18 checkpoint 2026-06-04 — monitoring agent live + scan latency fixed (64s → ~3s)
+## Session 18 checkpoint 2026-06-04 — monitoring agent live + scan latency fixed (64s → ~3s) + Positions tab fixes
 
-### What shipped this session (6 PRs merged to `main`)
+### What shipped this session (8 PRs merged to `main`)
 
 | PR | Repo | What | Type |
 |---|---|---|---|
@@ -16,6 +16,8 @@
 | #586 | 360-v2 | Per-stage scan timing instrumentation | feat, auto-merged |
 | #587 | 360-v2 | SMC result cache + indicator fingerprint (insufficient — see #588) | fix, auto-merged |
 | #588 | 360-v2 | Per-timeframe indicator caching (the real scan-latency fix) | fix, auto-merged |
+| #589 | 360-v2 | `monitor_running` from task census in isolated mode (false-negative fix) | fix, auto-merged |
+| #590 | 360-v2 | Positions X-ray populated in isolated mode via engine-published diag | fix, auto-merged |
 | #6/#7/#9/#10 | 360ce-ops | Monitoring agent deployed (Tier 0 + Tier 2 healthchecks.io) | feat, merged |
 
 ### Monitoring agent (360ce-ops) — fully operational
@@ -87,6 +89,33 @@ cycle=16.0s      {'indicators': 136.4, 'smc': 45.6}         ← 1m + 5m closed
 **Cycle wall-clock 64s → ~3s typical, ~16s worst-case** (at candle boundaries). `smc` is
 0 on every cycle except 5m closes — proving the #587 SMC cache was working all along.
 
+### Positions tab — two isolated-mode false-negatives (#589, #590), FIXED
+
+Both surfaced from owner screenshots of the dashboard Positions tab. Root cause in both
+cases: the isolated `api` container serves from `RedisEngineFacade`, which lacks the live
+engine objects the single-process build assumes are present.
+
+1. **`monitor_running: NO` false-negative (#589).** The diag derived liveness from
+   `getattr(engine, "monitor", None)._running`. The facade has no `.monitor` object, so it
+   always read `None` → "NO" — even though the Redis task census showed `trade_monitor
+   ALIVE: True`. Fix: when no `.monitor` object exists, derive `monitor_running` from the
+   published task census (`get_background_task_census()` → any name containing
+   `trade_monitor`). Single-process path unchanged.
+
+2. **Blank/zero Positions X-ray rows (#590).** `build_positions_diag` needs live
+   `router.active_signals` (full signal geometry: SL/TP, entry) AND `data_store` candle
+   wicks to compute the SL-breach / candle-age columns. In isolated mode the facade only
+   carries `_MockSignal` stubs (signal_id + timestamps) and `data_store is None`, so active
+   positions rendered as blank-symbol, all-0.0 rows. Fix: the engine computes the diag
+   itself (it has the real objects) and publishes the rendered rows to a new Redis key
+   `snapshot:positions_diag` (TTL 60s) via `SnapshotWriter._write_positions_diag`; the API
+   handler serves `engine.published_positions_diag()` when present, falling back to a live
+   build in single-process mode. Mirrors the task-census pattern from #584.
+
+   Files: `src/api/snapshot_store.py` (key + TTL), `src/api/snapshot_writer.py` (writer),
+   `src/api/redis_engine.py` (`published_positions_diag()` + refresh), `src/api/server.py`
+   (handler). 444 API tests green.
+
 **Telemetry silenced:** `SCAN_STAGE_TIMING_ENABLED=false` written to VPS `/root/360-v2/.env`.
 NOT yet applied (engine env is baked at container creation; deploy is `paths-ignore` for
 `.env`/docs). **Takes effect on the next code deploy** — until then the timing line still
@@ -99,13 +128,18 @@ conditions for confidence.
    already in `/root/360-v2/.env`; the next PR-to-main deploy recreates the engine and
    applies it. No action needed unless the ~3s log cadence becomes a problem sooner
    (then `docker compose --profile isolated up -d --no-deps --force-recreate engine`).
-2. **D1 NakedPositionDetector upgrade** — currently geometry-only (`stop_loss≤0`).
+2. **Verify Positions X-ray post-#590 deploy** — confirm the Positions tab renders active
+   signals with real symbol / SL / TP / candle-wick columns (not blank-0.0 rows), and
+   `monitor_running: YES`. `snapshot:positions_diag` should be present in
+   `redis-cli KEYS "snapshot:*"`; the same code deploy also applies
+   `SCAN_STAGE_TIMING_ENABLED=false`.
+3. **D1 NakedPositionDetector upgrade** — currently geometry-only (`stop_loss≤0`).
    Real naked-position detection (Binance stop order not placed) requires engine to
    publish `sl_order_id` per position in the Redis snapshot. Design needed.
-3. **Verify regime-per-exit live** (PR #578) — `place_trailing_stop_market`/`trail_sl`
+4. **Verify regime-per-exit live** (PR #578) — `place_trailing_stop_market`/`trail_sl`
    in engine logs on TRENDING-aligned exits; `entry_regime`/`atr_value_at_entry`
    non-empty on dispatched positions; clean RANGING/QUIET market-closes.
-4. **Verify funding-exit watcher live** (PR #581) — grep `funding_exit_watcher: exiting`;
+5. **Verify funding-exit watcher live** (PR #581) — grep `funding_exit_watcher: exiting`;
    confirm `get_funding_info` populated near a settlement cycle.
 
 ---
