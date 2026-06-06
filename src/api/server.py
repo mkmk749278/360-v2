@@ -1719,6 +1719,27 @@ def build_app(
             await user_overrides.aupdate_pretp(uid, partial)
         return await _build_user_pretp_view(uid)
 
+    @app.delete(
+        "/api/settings/user/pretp",
+        response_model=UserPretpSettings,
+        tags=["settings"],
+    )
+    async def user_pretp_delete(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> UserPretpSettings:
+        """Reset the user's pre-TP settings to engine defaults by deleting
+        their override row.  Returns the rebuilt view, which now reports
+        ``using_defaults=True``.  Idempotent — a reset with no prior overrides
+        is a no-op that still returns the defaults view."""
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(identity)
+        await user_overrides.aclear_pretp(uid)
+        return await _build_user_pretp_view(uid)
+
     # ---- Settings: Per-user invalidation overrides (OWNER_BRIEF B17, 2026-05-17) ----
 
     async def _build_user_invalidation_view(user_id: int) -> UserInvalidationSettings:
@@ -1784,6 +1805,26 @@ def build_app(
         partial = payload.model_dump(exclude_unset=True)
         if partial:
             await user_overrides.aupdate_invalidation(uid, partial)
+        return await _build_user_invalidation_view(uid)
+
+    @app.delete(
+        "/api/settings/user/invalidation",
+        response_model=UserInvalidationSettings,
+        tags=["settings"],
+    )
+    async def user_invalidation_delete(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> UserInvalidationSettings:
+        """Reset the user's invalidation settings to engine defaults by
+        deleting their override row.  Returns the rebuilt view, which now
+        reports ``using_defaults=True``.  Idempotent."""
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(identity)
+        await user_overrides.aclear_invalidation(uid)
         return await _build_user_invalidation_view(uid)
 
     # ---- Settings: Per-user auto-trade overrides (Phase 2) ----
