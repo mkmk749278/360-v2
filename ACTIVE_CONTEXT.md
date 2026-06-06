@@ -4,6 +4,50 @@
 
 ---
 
+## Session 20b checkpoint 2026-06-06 — universe cleanup + dark-flag measurability
+
+Continuation of session 20. Two follow-ups from the list below cleared, plus
+the companion lumin-app production-UI pass.
+
+### What shipped this session (3 PRs merged)
+
+| PR | Repo | What | Live effect |
+|---|---|---|---|
+| [#596](https://github.com/mkmk749278/360-v2/pull/596) | 360-v2 | Tokenized-stock blacklist — AVGOUSDT/QQQUSDT/SKHYNIXUSDT/DRAMUSDT added to `SCAN_SYMBOL_BLACKLIST` | **Live on merge.** Those 4 pairs no longer scanned. |
+| [#597](https://github.com/mkmk749278/360-v2/pull/597) | 360-v2 | Shadow telemetry for the 3 dark exit flags — logs `[SHADOW]` lines when a flag *would* fire while off | **Live on merge** (log-only, trade-neutral). `DARK_FLAG_SHADOW_TELEMETRY=true` default. |
+| [#92](https://github.com/mkmk749278/lumin-app/pull/92) | lumin-app | Production UI: paper-first journey, removed engine-internal "75 pairs" copy, wired Telegram subscribe deep link, prominent paper-reset button | Merged. |
+
+**#596 evidence (verified, not assumed):** pulled `origin/monitor-logs`
+`signals_last100.json` + `dispatch_log.json` — all 4 symbols were actively
+firing to the paid channel (AVGO 8×, QQQ 6×, SKHYNIX 3×, DRAM 1× of last
+100), quotes track equity prices ($55–$1366), near-exclusively SHORT. Class-C
+misfit per `docs/SYMBOL_CLASS_RESEARCH_2026_05_23.md`.
+
+**#597 design:** flag-independent predicates shared by the real apply-funcs
+and the shadow path (count can't drift from the gate); BTC shadow eval only on
+the adverse-excursion path, TTL-cached, skipped entirely when master flag off.
+49 tests pass.
+
+### Now measurable from prod logs (before flipping the real flags)
+
+```bash
+# Count how often each dark flag WOULD have fired in recent logs:
+docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] TRENDING_PRETP_SUPPRESSED"
+docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] PRETP_FULLGRAB_ON_CANCEL"
+docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] INVALIDATION_BTC_CORRELATION"
+```
+
+Read these counts before enabling `TRENDING_PRETP_SUPPRESSED` (the first flag
+in the activation sequence below) so the blast radius is known in advance.
+
+### Open follow-up from #596 (owner call)
+
+Research doc also lists older tokenized stocks `CRCL/MU/INTC/CL/EWY` (already
+100% QUIET-blocked). Not added — couldn't re-verify them in the current
+100-signal window. Fold into the blacklist as a complete sweep, or leave them?
+
+---
+
 ## Session 20 checkpoint 2026-06-06 — regime-aware exit (TRENDING runner fix)
 
 ### Research finding (drove the session)
@@ -50,8 +94,8 @@ Pearson r(hold_minutes, PnL) = **+0.379**. The top-4 realized winners (NEAR +$0.
 ### Open follow-ups (carry-forward from session 19)
 
 1. **Scoring-model rebuild** — blocked on data accumulation in the new Ops score-band view
-2. **Tokenized stock exclusion** — AVGO/QQQ/SKHYNIX/DRAM generate signals below LOT_SIZE MIN_NOTIONAL at $5 notional; prune from pair universe via `pair_manager` (clean `SCAN_SYMBOL_BLACKLIST` addition)
-3. **Shadow telemetry for dark flags** — log when `TRENDING_PRETP_SUPPRESSED` / `PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED` / `INVALIDATION_BTC_CORRELATION_ENABLED` would fire so impact is measurable before enabling
+2. ~~**Tokenized stock exclusion**~~ — ✅ **DONE** in PR #596 (session 20b). AVGOUSDT/QQQUSDT/SKHYNIXUSDT/DRAMUSDT added to `SCAN_SYMBOL_BLACKLIST`.
+3. ~~**Shadow telemetry for dark flags**~~ — ✅ **DONE** in PR #597 (session 20b). `DARK_FLAG_SHADOW_TELEMETRY=true` default; `[SHADOW]` lines now in prod logs.
 
 ---
 
