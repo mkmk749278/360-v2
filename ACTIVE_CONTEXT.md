@@ -4,6 +4,57 @@
 
 ---
 
+## Session 20 checkpoint 2026-06-06 — regime-aware exit (TRENDING runner fix)
+
+### Research finding (drove the session)
+
+Binance realized P&L analysis of 107 closed positions proved the profit/loss split is almost entirely explained by HOW LONG a position runs:
+
+| Hold duration | Count | Net P&L | Win rate |
+|---|---|---|---|
+| > 40 minutes | 9 | **+$1.049** | 67% |
+| < 40 minutes | 98 | **-$0.492** | 39% |
+
+Pearson r(hold_minutes, PnL) = **+0.379**. The top-4 realized winners (NEAR +$0.348, NEAR +$0.291, WIF +$0.213, XPLV2 +$0.183) ran 47–68 minutes. The signal book had already PROFIT_LOCKEd those signals at 2–6 min while the Binance bracket kept running.
+
+**Root cause split:**
+- RANGING/QUIET markets: pre-TP + tight trailing-kill work correctly — contain chop losses, bank small wins
+- TRENDING markets: the same mechanisms cut the exact positions that generate all profit. Pre-TP banks 50% at +0.35%; trailing-kill at 50% MFE retrace fires on normal continuation pauses (pullbacks routinely retrace 50-65% of a trend leg without reversing)
+
+### What shipped this session (1 PR, owner sign-off required)
+
+| PR | Repo | What | Flag (default) |
+|---|---|---|---|
+| [#594](https://github.com/mkmk749278/360-v2/pull/594) | 360-v2 | Regime-aware exit: suppress pre-TP + widen trailing-kill in TRENDING | see below |
+
+**PR #594 — owner sign-off required.** Do not auto-merge. Touches position FSM / regime-per-exit doctrine (§3.2b).
+
+### New env flags — activation when ready
+
+| Flag | Default | Effect when `true` |
+|---|---|---|
+| `TRENDING_PRETP_SUPPRESSED` | `false` | Zero grab fraction for TRENDING_UP/DOWN signals → full position rides the trend |
+| `INVALIDATION_TRAILING_RETRACE_REGIME_AWARE` | `false` | TRENDING signals use wider retrace threshold (default 0.70 vs 0.50 baseline) |
+| `INVALIDATION_TRAILING_RETRACE_PCT_TRENDING` | `0.70` | Override the TRENDING retrace threshold (tune after observing) |
+
+**Recommended activation sequence:**
+1. Merge PR #594 (owner sign-off)
+2. Enable `TRENDING_PRETP_SUPPRESSED=true` first — measurable via whether TRENDING signals run longer on Binance
+3. After a week of data, enable `INVALIDATION_TRAILING_RETRACE_REGIME_AWARE=true`
+4. Compare hold-time distribution + net P&L against session 20 baseline
+
+### Also confirmed this session
+
+- `PRE_TP_REGIME_ALLOWLIST = "QUIET,RANGING,VOLATILE"` (config) is enforced by `trade_monitor.py` for the signal book, but the **server-side FSM dispatch path** (`resolve_pretp_allowlists_uid`) returns allow-all by default when no user DB setting exists — TRENDING regime signals WERE getting pre-TP fired via the FSM. PR #594 fixes this at the dispatch level.
+
+### Open follow-ups (carry-forward from session 19)
+
+1. **Scoring-model rebuild** — blocked on data accumulation in the new Ops score-band view
+2. **Tokenized stock exclusion** — AVGO/QQQ/SKHYNIX/DRAM generate signals below LOT_SIZE MIN_NOTIONAL at $5 notional; prune from pair universe via `pair_manager` (clean `SCAN_SYMBOL_BLACKLIST` addition)
+3. **Shadow telemetry for dark flags** — log when `TRENDING_PRETP_SUPPRESSED` / `PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED` / `INVALIDATION_BTC_CORRELATION_ENABLED` would fire so impact is measurable before enabling
+
+---
+
 ## Session 19 checkpoint 2026-06-05 — scoring research + BTC-in-invalidation + CANCEL-path fee fix
 
 ### Research finding (drove the whole session)
