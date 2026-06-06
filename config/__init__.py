@@ -279,6 +279,17 @@ INVALIDATION_TRAILING_MFE_R_DEFAULT: float = float(
 INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT: float = float(
     os.getenv("INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT", "0.50")
 )
+# Regime-differentiated trailing-kill retrace (session 20, ships dark).
+# In TRENDING regimes price routinely pulls back 50-65% of a leg without
+# ending the trend — the 0.50 default kills profitable runners on normal
+# continuation pauses.  When INVALIDATION_TRAILING_RETRACE_REGIME_AWARE
+# is enabled, TRENDING_UP/TRENDING_DOWN signals use this wider threshold.
+INVALIDATION_TRAILING_RETRACE_REGIME_AWARE: bool = _safe_bool(
+    "INVALIDATION_TRAILING_RETRACE_REGIME_AWARE", "false"
+)
+INVALIDATION_TRAILING_RETRACE_PCT_TRENDING: float = float(
+    os.getenv("INVALIDATION_TRAILING_RETRACE_PCT_TRENDING", "0.70")
+)
 PRE_TP_SETUP_BLACKLIST: frozenset = frozenset(
     s.strip() for s in PRE_TP_SETUP_BLACKLIST_RAW.split(",") if s.strip()
 )
@@ -291,6 +302,14 @@ PRE_TP_REGIME_ALLOWLIST_RAW: str = os.getenv(
 PRE_TP_REGIME_ALLOWLIST: frozenset = frozenset(
     s.strip().upper() for s in PRE_TP_REGIME_ALLOWLIST_RAW.split(",") if s.strip()
 )
+# Regime-differentiated pre-TP suppression (session 20, ships dark).
+# When enabled, signals dispatched in TRENDING_UP/TRENDING_DOWN entry
+# regimes bypass pre-TP entirely — the full position rides the trend
+# rather than banking 50% at +0.35% and capping the runner at that gain.
+# Empirical: Binance realized data shows >40min TRENDING holds net
+# +$1.049 (67% win rate) vs <40min holds -$0.492 (39% win rate);
+# hold-time Pearson r = +0.379 — longer holds win more.
+TRENDING_PRETP_SUPPRESSED: bool = _safe_bool("TRENDING_PRETP_SUPPRESSED", "false")
 
 # ---------------------------------------------------------------------------
 # Dynamic Tiering (Market Watchdog) — PR 2
