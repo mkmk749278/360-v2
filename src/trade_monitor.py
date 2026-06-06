@@ -858,11 +858,28 @@ class TradeMonitor:
         multiplier is outside (0, 1), or BTC is not opposing.  Returns
         ``(effective_fraction, btc_reason)`` where ``btc_reason`` is empty
         unless the tightening actually applied.
+
+        Shadow telemetry: when the flag is off but ``DARK_FLAG_SHADOW_TELEMETRY``
+        is on, the opposition check still runs (only on this adverse-excursion
+        path, BTC direction TTL-cached) and a structured ``[SHADOW]`` line is
+        logged so the flag's blast radius is measurable before activation.
+        Behaviour is unchanged either way — log-only, never tightens the exit.
         """
-        if not INVALIDATION_BTC_CORRELATION_ENABLED:
-            return base_fraction, ""
         mult = INVALIDATION_BTC_ADVERSE_FRACTION_MULT
         if not (0.0 < mult < 1.0):
+            return base_fraction, ""
+        if not INVALIDATION_BTC_CORRELATION_ENABLED:
+            from config import DARK_FLAG_SHADOW_TELEMETRY as _shadow
+            if _shadow:
+                opposes, reason = self._btc_opposes_direction(sig)
+                if opposes:
+                    log.info(
+                        "trade_monitor: [SHADOW] INVALIDATION_BTC_CORRELATION_ENABLED "
+                        "would tighten adverse-excursion {:.2f} → {:.2f} — "
+                        "symbol={} dir={} ({}) (flag off, no-op)",
+                        base_fraction, base_fraction * mult,
+                        sig.symbol, getattr(sig.direction, "name", sig.direction), reason,
+                    )
             return base_fraction, ""
         opposes, reason = self._btc_opposes_direction(sig)
         if not opposes:

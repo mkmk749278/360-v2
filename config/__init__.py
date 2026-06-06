@@ -311,6 +311,17 @@ PRE_TP_REGIME_ALLOWLIST: frozenset = frozenset(
 # hold-time Pearson r = +0.379 — longer holds win more.
 TRENDING_PRETP_SUPPRESSED: bool = _safe_bool("TRENDING_PRETP_SUPPRESSED", "false")
 
+# Shadow telemetry for the dark exit flags (session 20 follow-up #3).
+# When enabled (default), the engine logs a structured ``[SHADOW]`` line
+# every time one of the dark exit flags WOULD fire but is currently off —
+# i.e. TRENDING_PRETP_SUPPRESSED, PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED,
+# INVALIDATION_BTC_CORRELATION_ENABLED.  This makes each flag's blast radius
+# measurable from prod logs before it is switched on, so the owner can size
+# the impact instead of flipping blind.  Behaviour-neutral: log-only, never
+# changes an exit.  Set to false to silence if the lines get noisy.  Once a
+# real flag is enabled its shadow path stops (it then actually fires).
+DARK_FLAG_SHADOW_TELEMETRY: bool = _safe_bool("DARK_FLAG_SHADOW_TELEMETRY", "true")
+
 # ---------------------------------------------------------------------------
 # Dynamic Tiering (Market Watchdog) — PR 2
 # ---------------------------------------------------------------------------

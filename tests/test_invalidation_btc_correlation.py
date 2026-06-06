@@ -119,6 +119,96 @@ def test_tightening_noop_when_mult_out_of_range(monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Shadow telemetry — flag off but DARK_FLAG_SHADOW_TELEMETRY on logs what the
+# overlay *would* do without changing the exit (session 20 follow-up #3).
+# ---------------------------------------------------------------------------
+
+def _capture_logs():
+    """Attach a loguru sink that collects INFO+ messages into a list."""
+    from src.utils import get_logger  # noqa: F401  (ensures loguru configured)
+    from loguru import logger
+
+    captured: list[str] = []
+    sink_id = logger.add(lambda m: captured.append(m.record["message"]), level="INFO")
+    return captured, sink_id
+
+
+def test_shadow_logs_when_flag_off_and_btc_opposes(monkeypatch):
+    """Flag off + shadow on + BTC opposes → fraction unchanged (no behaviour
+    change) but a [SHADOW] line records what the overlay would have done."""
+    monkeypatch.setattr("src.trade_monitor.INVALIDATION_BTC_CORRELATION_ENABLED", False)
+    monkeypatch.setattr("src.trade_monitor.INVALIDATION_BTC_ADVERSE_FRACTION_MULT", 0.70)
+    monkeypatch.setattr("config.DARK_FLAG_SHADOW_TELEMETRY", True)
+    monkeypatch.setattr(
+        "src.trade_monitor.check_btc_direction_gate",
+        lambda *a, **k: (False, "btc_1h_4h_both_bearish_long"),
+    )
+    sig = _make_sr_flip()
+    monitor = _build_monitor({sig.signal_id: sig})
+
+    from loguru import logger
+    captured, sink_id = _capture_logs()
+    try:
+        frac, reason = monitor._apply_btc_adverse_tightening(sig, 0.40)
+    finally:
+        logger.remove(sink_id)
+
+    # Behaviour-neutral: no tightening applied.
+    assert frac == 0.40
+    assert reason == ""
+    # But the shadow line was emitted.
+    assert any("[SHADOW]" in m and "INVALIDATION_BTC_CORRELATION_ENABLED" in m for m in captured)
+
+
+def test_no_shadow_log_when_master_off(monkeypatch):
+    """Flag off + shadow off → no log at all (and no opposition lookup cost)."""
+    monkeypatch.setattr("src.trade_monitor.INVALIDATION_BTC_CORRELATION_ENABLED", False)
+    monkeypatch.setattr("src.trade_monitor.INVALIDATION_BTC_ADVERSE_FRACTION_MULT", 0.70)
+    monkeypatch.setattr("config.DARK_FLAG_SHADOW_TELEMETRY", False)
+
+    def _must_not_be_called(*a, **k):
+        raise AssertionError("BTC opposition check ran with shadow telemetry off")
+
+    monkeypatch.setattr("src.trade_monitor.check_btc_direction_gate", _must_not_be_called)
+    sig = _make_sr_flip()
+    monitor = _build_monitor({sig.signal_id: sig})
+
+    from loguru import logger
+    captured, sink_id = _capture_logs()
+    try:
+        frac, reason = monitor._apply_btc_adverse_tightening(sig, 0.40)
+    finally:
+        logger.remove(sink_id)
+
+    assert frac == 0.40
+    assert reason == ""
+    assert not any("[SHADOW]" in m for m in captured)
+
+
+def test_no_shadow_log_when_btc_aligned(monkeypatch):
+    """Flag off + shadow on but BTC aligned → nothing would fire → no line."""
+    monkeypatch.setattr("src.trade_monitor.INVALIDATION_BTC_CORRELATION_ENABLED", False)
+    monkeypatch.setattr("src.trade_monitor.INVALIDATION_BTC_ADVERSE_FRACTION_MULT", 0.70)
+    monkeypatch.setattr("config.DARK_FLAG_SHADOW_TELEMETRY", True)
+    monkeypatch.setattr(
+        "src.trade_monitor.check_btc_direction_gate", lambda *a, **k: (True, "")
+    )
+    sig = _make_sr_flip()
+    monitor = _build_monitor({sig.signal_id: sig})
+
+    from loguru import logger
+    captured, sink_id = _capture_logs()
+    try:
+        frac, reason = monitor._apply_btc_adverse_tightening(sig, 0.40)
+    finally:
+        logger.remove(sink_id)
+
+    assert frac == 0.40
+    assert reason == ""
+    assert not any("[SHADOW]" in m for m in captured)
+
+
+# ---------------------------------------------------------------------------
 # _btc_opposes_direction — fail-open contract
 # ---------------------------------------------------------------------------
 

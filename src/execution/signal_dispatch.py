@@ -116,6 +116,28 @@ _CANCEL_BOUND_REGIMES: frozenset = frozenset({"RANGING", "QUIET"})
 _TRENDING_REGIMES: frozenset = frozenset({"TRENDING_UP", "TRENDING_DOWN"})
 
 
+def _shadow_telemetry_on() -> bool:
+    """Whether dark-flag shadow telemetry is enabled (lazy config read).
+
+    Lazy import keeps the flag monkeypatchable in tests via
+    ``config.DARK_FLAG_SHADOW_TELEMETRY`` and lets an operator flip it at
+    runtime via the env var without reimporting this module.
+    """
+    from config import DARK_FLAG_SHADOW_TELEMETRY as _flag
+    return bool(_flag)
+
+
+def _trending_pretp_would_suppress(grab_fraction: float, regime_label: Optional[str]) -> bool:
+    """Flag-independent predicate: would TRENDING pre-TP suppression apply here?
+
+    Mirrors the gating condition of :func:`_apply_trending_pretp_suppress`
+    minus the ``TRENDING_PRETP_SUPPRESSED`` flag check.  Used both by the
+    apply function and by the shadow-telemetry path, so "would fire" is
+    counted from the exact same predicate that drives the real behaviour.
+    """
+    return grab_fraction > 0 and (regime_label or "").upper() in _TRENDING_REGIMES
+
+
 def _apply_trending_pretp_suppress(grab_fraction: float, regime_label: Optional[str]) -> float:
     """Return ``0.0`` (skip pre-TP) when the TRENDING suppression applies.
 
@@ -130,13 +152,19 @@ def _apply_trending_pretp_suppress(grab_fraction: float, regime_label: Optional[
     harness.  See ``config.TRENDING_PRETP_SUPPRESSED``.
     """
     from config import TRENDING_PRETP_SUPPRESSED as _flag
-    if (
-        _flag
-        and grab_fraction > 0
-        and (regime_label or "").upper() in _TRENDING_REGIMES
-    ):
+    if _flag and _trending_pretp_would_suppress(grab_fraction, regime_label):
         return 0.0
     return grab_fraction
+
+
+def _cancel_fullgrab_would_apply(grab_fraction: float, regime_label: Optional[str]) -> bool:
+    """Flag-independent predicate: would the CANCEL-path full-grab apply here?
+
+    Mirrors the gating condition of :func:`_apply_cancel_fullgrab` minus the
+    ``PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED`` flag check.  Shared by the
+    apply function and the shadow-telemetry path.
+    """
+    return grab_fraction > 0 and (regime_label or "").upper() in _CANCEL_BOUND_REGIMES
 
 
 def _apply_cancel_fullgrab(grab_fraction: float, regime_label: Optional[str]) -> float:
@@ -149,11 +177,7 @@ def _apply_cancel_fullgrab(grab_fraction: float, regime_label: Optional[str]) ->
     the full dispatch harness.  See ``config.PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED``.
     """
     from config import PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED as _flag
-    if (
-        _flag
-        and grab_fraction > 0
-        and (regime_label or "").upper() in _CANCEL_BOUND_REGIMES
-    ):
+    if _flag and _cancel_fullgrab_would_apply(grab_fraction, regime_label):
         return 1.0
     return grab_fraction
 
@@ -500,6 +524,16 @@ async def dispatch_signal_to_active_users(
                 "uid={} signal_id={} regime={} (grab {:.2f} → 0.00)",
                 uid, signal_id, regime_label, _grab_before_trending_suppress,
             )
+        elif _shadow_telemetry_on() and _trending_pretp_would_suppress(
+            _grab_before_trending_suppress, regime_label
+        ):
+            # Flag off but the gate matched — record what TRENDING_PRETP_SUPPRESSED
+            # would have done so its blast radius is measurable before activation.
+            log.info(
+                "signal_dispatch: [SHADOW] TRENDING_PRETP_SUPPRESSED would skip "
+                "pre-TP — uid={} signal_id={} regime={} grab={:.2f} (flag off, no-op)",
+                uid, signal_id, regime_label, _grab_before_trending_suppress,
+            )
         # CANCEL-path fee optimisation (session 19, ships dark).  A RANGING/
         # QUIET entry regime routes the pre-TP to the CANCEL exit path, which
         # banks a partial via the maker LIMIT and then MARKET-closes the
@@ -512,6 +546,17 @@ async def dispatch_signal_to_active_users(
             log.debug(
                 "signal_dispatch: full-grab pre-TP on CANCEL-bound regime "
                 "uid={} signal_id={} regime={} (was grab={:.2f} → 1.00)",
+                uid, signal_id, regime_label, _grab_before_fullgrab,
+            )
+        elif _shadow_telemetry_on() and _cancel_fullgrab_would_apply(
+            _grab_before_fullgrab, regime_label
+        ):
+            # Flag off but the gate matched — record what the CANCEL-path
+            # full-grab would have done so its impact is measurable first.
+            log.info(
+                "signal_dispatch: [SHADOW] PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED "
+                "would full-grab — uid={} signal_id={} regime={} grab={:.2f} "
+                "(flag off, no-op)",
                 uid, signal_id, regime_label, _grab_before_fullgrab,
             )
         # Per-user invalidation aggressiveness (B17).  Stored on the
