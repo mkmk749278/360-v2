@@ -572,3 +572,55 @@ class TestStablecoinBlacklist:
                      "FRAXUSDT", "LUSDUSDT", "SUSDUSDT", "CUSDUSDT"}
         for coin in new_coins:
             assert coin in _STABLECOIN_BLACKLIST, f"{coin} not in blacklist"
+
+
+# ---------------------------------------------------------------------------
+# Tokenized-stock exclusion at SELECTION time (preserves the real pair count)
+# ---------------------------------------------------------------------------
+
+
+class TestTokenizedStockSelectionExclusion:
+    """Tokenized stocks must be excluded when the top-N universe is *selected*,
+    not just at scan time — otherwise they consume top-N slots by volume and
+    the engine scans fewer than TOP50_FUTURES_COUNT real crypto pairs."""
+
+    TOKENIZED = {
+        "QQQUSDT", "AVGOUSDT", "INTCUSDT", "MUUSDT", "SKHYNIXUSDT",
+        "DRAMUSDT", "CRCLUSDT", "CLUSDT", "EWYUSDT",
+    }
+
+    def test_tokenized_stocks_in_non_crypto_blacklist(self):
+        from src.pair_manager import _NON_CRYPTO_BLACKLIST, _PAIR_BLACKLIST
+        for sym in self.TOKENIZED:
+            assert sym in _NON_CRYPTO_BLACKLIST, f"{sym} not in _NON_CRYPTO_BLACKLIST"
+            assert sym in _PAIR_BLACKLIST, f"{sym} not in combined _PAIR_BLACKLIST"
+
+    def test_real_crypto_not_blacklisted(self):
+        from src.pair_manager import _PAIR_BLACKLIST
+        for sym in ("BTCUSDT", "ETHUSDT", "SOLUSDT", "WIFUSDT"):
+            assert sym not in _PAIR_BLACKLIST
+
+    @pytest.mark.asyncio
+    async def test_selection_backfills_with_real_pairs(self):
+        """With a limit of 3 and a high-volume tokenized stock present, the
+        selection must drop the stock and backfill so 3 *real* pairs return."""
+        from src.pair_manager import PairManager
+
+        ticker_data = [
+            {"symbol": "AVGOUSDT", "quoteVolume": "9000000"},  # tokenized, highest vol
+            {"symbol": "BTCUSDT", "quoteVolume": "8000000"},
+            {"symbol": "ETHUSDT", "quoteVolume": "7000000"},
+            {"symbol": "SOLUSDT", "quoteVolume": "6000000"},   # would be #4 without filter
+        ]
+
+        pm = PairManager.__new__(PairManager)
+        pm._futures_client = AsyncMock()
+        pm._futures_client._get = AsyncMock(return_value=ticker_data)
+        pm._spot_client = AsyncMock()
+
+        pairs = await pm.fetch_top_futures_pairs(limit=3)
+        symbols = [p.symbol for p in pairs]
+
+        assert "AVGOUSDT" not in symbols          # tokenized stock excluded
+        assert len(symbols) == 3                  # count preserved, not 2
+        assert symbols == ["BTCUSDT", "ETHUSDT", "SOLUSDT"]  # backfilled with real

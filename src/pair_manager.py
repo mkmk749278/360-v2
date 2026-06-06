@@ -73,6 +73,15 @@ _NON_CRYPTO_BLACKLIST: frozenset = frozenset({
     # Tokenised equity indices / stocks
     "SPXUSDT", "NDXUSDT", "DJIAUSDT", "TSLAUSDT", "AAPLUSDT",
     "GOOGLUSDT", "MSFTUSDT", "AMZNUSDT", "NVDAUSDT", "METAUSDT",
+    # Tokenised stocks / ETFs observed in the live top-75 universe
+    # (monitor-logs, 2026-06). Excluded at SELECTION time — not just at
+    # scan time — so they don't consume top-N slots and leave the engine
+    # scanning fewer than TOP50_FUTURES_COUNT real crypto pairs.  See
+    # docs/SYMBOL_CLASS_RESEARCH_2026_05_23.md (Class C).
+    "QQQUSDT",                              # Nasdaq-100 ETF
+    "AVGOUSDT", "INTCUSDT", "MUUSDT", "SKHYNIXUSDT", "DRAMUSDT",  # semis
+    "CRCLUSDT", "CLUSDT",                   # Circle, Colgate
+    "EWYUSDT",                              # iShares MSCI South Korea ETF
 })
 
 # Combined blacklist used by every fetch path.  Easier to reason about
