@@ -531,10 +531,21 @@ REGIME_MIN_VOLUME_USD: Dict[str, float] = {
     "QUIET":         float(os.getenv("VOL_FLOOR_QUIET",     "1000000")),
     "":              float(os.getenv("VOL_FLOOR_DEFAULT",   "2000000")),  # empty string key handles unknown/unset regime states (intentional fallback)
 }
-# Symbols permanently excluded from scanning (gold-pegged tokens, micro-caps).
+# Symbols permanently excluded from scanning. Two classes of junk:
+#   1. Gold-pegged tokens + micro-caps (XAUT/PAXG/MMT/KOMA/STO).
+#   2. Tokenized stocks (AVGO/QQQ/SKHYNIX/DRAM) — crypto-wrapped equities
+#      whose price discovery happens during US regular trading hours, then
+#      drift through Asian/EU hours. Scalp microstructure does not apply;
+#      they fire near-exclusively SHORT and their quotes track equity prices
+#      ($55-$1366), not crypto. See docs/SYMBOL_CLASS_RESEARCH_2026_05_23.md
+#      (Class C). Verified firing in monitor-logs/signals_last100 before block.
 # Configurable via comma-separated env var; defaults cover the known junk pairs.
 SCAN_SYMBOL_BLACKLIST: set = set(
-    s for s in os.getenv("SCAN_SYMBOL_BLACKLIST", "XAUTUSDT,PAXGUSDT,MMTUSDT,KOMAUSDT,STOUSDT").split(",")
+    s for s in os.getenv(
+        "SCAN_SYMBOL_BLACKLIST",
+        "XAUTUSDT,PAXGUSDT,MMTUSDT,KOMAUSDT,STOUSDT,"
+        "AVGOUSDT,QQQUSDT,SKHYNIXUSDT,DRAMUSDT",
+    ).split(",")
     if s
 )
 
