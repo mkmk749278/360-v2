@@ -112,6 +112,30 @@ def test_pretp_isolated_per_user(store: UserOverridesStore) -> None:
     assert store.get_pretp(2)["threshold_pct"] == 0.50
 
 
+def test_pretp_clear_reverts_to_defaults(store: UserOverridesStore) -> None:
+    """clear_pretp deletes the override row → get_pretp returns {} (the
+    'using engine defaults' signal the API view keys off)."""
+    store.update_pretp(1, {"enabled": False, "threshold_pct": 0.25, "grab_fraction": 0.9})
+    assert store.get_pretp(1) != {}
+    assert store.clear_pretp(1) == {}
+    assert store.get_pretp(1) == {}
+
+
+def test_pretp_clear_idempotent_for_new_user(store: UserOverridesStore) -> None:
+    # Clearing with no prior row is a safe no-op.
+    assert store.clear_pretp(1) == {}
+    assert store.get_pretp(1) == {}
+
+
+def test_pretp_clear_isolated_per_user(store: UserOverridesStore) -> None:
+    store.update_pretp(1, {"threshold_pct": 0.25})
+    store.update_pretp(2, {"threshold_pct": 0.50})
+    store.clear_pretp(1)
+    # User 2's overrides are untouched.
+    assert store.get_pretp(1) == {}
+    assert store.get_pretp(2)["threshold_pct"] == 0.50
+
+
 # ---------------------------------------------------------------------------
 # auto-trade
 # ---------------------------------------------------------------------------
@@ -410,6 +434,20 @@ def test_invalidation_unknown_keys_dropped(store: UserOverridesStore) -> None:
     out = store.update_invalidation(1, {"mode": "tight", "made_up_key": "x"})
     assert "made_up_key" not in out
     assert out["mode"] == "tight"
+
+
+def test_invalidation_clear_reverts_to_defaults(store: UserOverridesStore) -> None:
+    store.update_invalidation(1, {"mode": "tight", "trailing_retrace_pct": 0.55})
+    assert store.get_invalidation(1) != {}
+    assert store.clear_invalidation(1) == {}
+    assert store.get_invalidation(1) == {}
+
+
+def test_invalidation_clear_idempotent_and_isolated(store: UserOverridesStore) -> None:
+    store.update_invalidation(2, {"mode": "loose"})
+    # No row for user 1 → no-op; user 2 untouched.
+    assert store.clear_invalidation(1) == {}
+    assert store.get_invalidation(2)["mode"] == "loose"
 
 
 def test_invalidation_round_trip_across_reopen(db_path) -> None:

@@ -670,6 +670,31 @@ class UserOverridesStore:
             )
             return self.get_invalidation(user_id)
 
+    def clear_pretp(self, user_id: int) -> Dict[str, Any]:
+        """Delete the user's pretp override row, reverting them to engine
+        defaults.  Returns ``{}`` (the same shape ``get_pretp`` returns for a
+        user with no row) so the caller can rebuild a using_defaults view.
+        Idempotent — deleting a non-existent row is a no-op.
+        """
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM user_pretp_settings WHERE user_id = ?",
+                (int(user_id),),
+            )
+        return {}
+
+    def clear_invalidation(self, user_id: int) -> Dict[str, Any]:
+        """Delete the user's invalidation override row, reverting them to
+        engine defaults.  Returns ``{}`` (matching ``get_invalidation`` for a
+        user with no row).  Idempotent.
+        """
+        with self._lock:
+            self._conn.execute(
+                "DELETE FROM user_invalidation_settings WHERE user_id = ?",
+                (int(user_id),),
+            )
+        return {}
+
     # ---- auto-trade ------------------------------------------------------
 
     def get_auto_trade(self, user_id: int) -> Dict[str, Any]:
@@ -963,6 +988,9 @@ class UserOverridesStore:
     ) -> Dict[str, Any]:
         return await asyncio.to_thread(self.update_pretp, user_id, partial)
 
+    async def aclear_pretp(self, user_id: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.clear_pretp, user_id)
+
     async def aget_invalidation(self, user_id: int) -> Dict[str, Any]:
         return await asyncio.to_thread(self.get_invalidation, user_id)
 
@@ -970,6 +998,9 @@ class UserOverridesStore:
         self, user_id: int, partial: Dict[str, Any]
     ) -> Dict[str, Any]:
         return await asyncio.to_thread(self.update_invalidation, user_id, partial)
+
+    async def aclear_invalidation(self, user_id: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.clear_invalidation, user_id)
 
     async def aget_auto_trade(self, user_id: int) -> Dict[str, Any]:
         return await asyncio.to_thread(self.get_auto_trade, user_id)
