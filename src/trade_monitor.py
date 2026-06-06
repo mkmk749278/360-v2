@@ -34,6 +34,8 @@ from config import (
     INVALIDATION_MODE_DEFAULT,
     INVALIDATION_TRAILING_MFE_R_DEFAULT,
     INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT,
+    INVALIDATION_TRAILING_RETRACE_REGIME_AWARE,
+    INVALIDATION_TRAILING_RETRACE_PCT_TRENDING,
     PRE_TP_FEE_PCT_ROUND_TRIP,
     PRE_TP_GRAB_FRACTION,
     PRE_TP_LEVERAGE,
@@ -760,13 +762,33 @@ class TradeMonitor:
         # >= threshold check the same way; SL itself would also fire in
         # that band, but the trailing kill exits first to lock the residual.
         retrace_fraction = (mfe_pct - current_excursion_pct) / mfe_pct
-        if retrace_fraction < INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT:
+
+        # Regime-aware retrace threshold (session 20, ships dark).
+        # TRENDING regimes have normal pullbacks that retrace 50-65% of a leg
+        # without ending the trend — the 0.50 default kills runners on
+        # continuation pauses.  Use the wider TRENDING threshold when:
+        #   1. The feature flag is on, AND
+        #   2. The signal was entered in a TRENDING_UP/DOWN regime.
+        _is_trending = (sig.entry_regime or "").upper() in (
+            "TRENDING_UP", "TRENDING_DOWN"
+        )
+        if INVALIDATION_TRAILING_RETRACE_REGIME_AWARE and _is_trending:
+            _retrace_thresh = INVALIDATION_TRAILING_RETRACE_PCT_TRENDING
+        else:
+            _retrace_thresh = INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT
+
+        if retrace_fraction < _retrace_thresh:
             return None  # Still close enough to peak; not retraced enough
 
+        _thresh_tag = (
+            f" [TRENDING-wide threshold {_retrace_thresh:.0%}]"
+            if _is_trending and INVALIDATION_TRAILING_RETRACE_REGIME_AWARE
+            else ""
+        )
         return (
             f"trailing invalidation (MFE peak +{mfe_pct:.2f}%, current "
             f"+{current_excursion_pct:.2f}%, retraced {retrace_fraction*100:.0f}% "
-            f"of peak at MFE_R={mfe_r:.2f}) – capital preserved"
+            f"of peak at MFE_R={mfe_r:.2f}) – capital preserved{_thresh_tag}"
         )
 
     def _btc_opposes_direction(self, sig: Signal) -> Tuple[bool, str]:

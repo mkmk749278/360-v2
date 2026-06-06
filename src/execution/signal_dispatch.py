@@ -109,6 +109,35 @@ _TP3_FRACTION = 0.00
 # CANCEL-bound cases (~76% of cycles) and are unambiguous from regime_label.
 _CANCEL_BOUND_REGIMES: frozenset = frozenset({"RANGING", "QUIET"})
 
+# Entry regimes where pre-TP is suppressed when TRENDING_PRETP_SUPPRESSED
+# is enabled.  In these regimes the position thesis is to ride the trend —
+# banking 50% at +0.35% caps the runner and leaves 50% exposed to the same
+# underlying risk with no upside.
+_TRENDING_REGIMES: frozenset = frozenset({"TRENDING_UP", "TRENDING_DOWN"})
+
+
+def _apply_trending_pretp_suppress(grab_fraction: float, regime_label: Optional[str]) -> float:
+    """Return ``0.0`` (skip pre-TP) when the TRENDING suppression applies.
+
+    In TRENDING_UP/DOWN entry regimes the position thesis is to ride the
+    trend.  Banking 50% of the position at +0.35% (the pre-TP LIMIT) caps
+    the runner while leaving the residual exposed to the same underlying risk
+    with no upside.  Binance realized data (session 20 analysis) shows >40min
+    TRENDING holds net +$1.049 at 67% win rate vs <40min holds at -$0.492 /
+    39% win — suppressing pre-TP lets those runners develop.
+
+    Pure function so the decision is unit-testable without the full dispatch
+    harness.  See ``config.TRENDING_PRETP_SUPPRESSED``.
+    """
+    from config import TRENDING_PRETP_SUPPRESSED as _flag
+    if (
+        _flag
+        and grab_fraction > 0
+        and (regime_label or "").upper() in _TRENDING_REGIMES
+    ):
+        return 0.0
+    return grab_fraction
+
 
 def _apply_cancel_fullgrab(grab_fraction: float, regime_label: Optional[str]) -> float:
     """Return ``1.0`` (full grab) when the CANCEL-path fee optimisation applies
@@ -457,6 +486,20 @@ async def dispatch_signal_to_active_users(
                     uid, setup_class, _allowed_setups,
                 )
                 user_grab_fraction = 0.0
+        # TRENDING pre-TP suppression (session 20, ships dark).  In a
+        # TRENDING_UP/DOWN entry regime the thesis is to ride the move; the
+        # pre-TP partial close at +0.35% caps the winner while leaving the
+        # residual exposed to the same underlying risk.  Realized Binance data
+        # shows >40min TRENDING holds net +$1.049 (67% win) vs <40min -$0.492
+        # (39% win) — pre-TP was cutting those runners at first profit.
+        _grab_before_trending_suppress = user_grab_fraction
+        user_grab_fraction = _apply_trending_pretp_suppress(user_grab_fraction, regime_label)
+        if user_grab_fraction != _grab_before_trending_suppress:
+            log.debug(
+                "signal_dispatch: pre-TP suppressed — TRENDING entry regime "
+                "uid={} signal_id={} regime={} (grab {:.2f} → 0.00)",
+                uid, signal_id, regime_label, _grab_before_trending_suppress,
+            )
         # CANCEL-path fee optimisation (session 19, ships dark).  A RANGING/
         # QUIET entry regime routes the pre-TP to the CANCEL exit path, which
         # banks a partial via the maker LIMIT and then MARKET-closes the
