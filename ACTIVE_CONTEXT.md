@@ -4,7 +4,169 @@
 
 ---
 
+## Session 22 checkpoint 2026-06-07 — SR_FLIP kill grace + pre-TP R-scaling (dark)
+
+### What shipped this session
+
+| PR | Repo | What | Status |
+|---|---|---|---|
+| [#603](https://github.com/mkmk749278/360-v2/pull/603) | 360-v2 | SR_FLIP momentum-kill grace (A) + pre-TP R-scaling (B) — ships dark | **Merged** |
+
+### Diagnosis driving the session
+
+Truth report + Binance realized-fill audit:
+
+| Metric | SR_FLIP | Baseline |
+|---|---|---|
+| Premature kill rate | **19.8%** (18/91) | 14.5% |
+| Avg pre-TP capture (raw) | 0.503% | — |
+| Avg structural SL width | 1–2.5% (1×ATR min) | — |
+| Pre-TP R-capture on wide SL | **~0.20R** | — |
+
+Binance fills: 15 SR_FLIP positions closed, all 5.4 min avg hold, 27% win rate, no position reached the 40-min profitable zone. Two leaks: momentum kills firing during normal post-entry reversal dynamics; pre-TP banking at 0.20R before the thesis can develop.
+
+### Change A — momentum-kill grace
+
+Extends `INVALIDATION_CONSECUTIVE_THRESHOLD` to support `{channel}::{setup_class}` keys.
+
+- New key: `"360_SCALP::SR_FLIP_RETEST"` (env `SR_FLIP_CONSECUTIVE_REQUIRED`, default `2` = unchanged)
+- Setting to `3` on VPS requires **45s** of sustained bad momentum before kill (vs 30s) — one extra 15s cycle
+- Also patched the lookup in `trade_monitor._check_invalidation` to check per-setup before falling back to channel default
+- Shadow: `[SHADOW] SR_FLIP_GRACE_WOULD_DELAY` logs when an extra reading would have delayed the kill
+
+### Change B — pre-TP R-scaling
+
+When `SR_FLIP_PRETP_R_SCALING_ENABLED=true`, the pre-TP threshold for SR_FLIP signals is floored at `SL_dist_pct × SR_FLIP_PRETP_R_FACTOR` (default `0.35`).
+
+| SL width | Before | After (factor=0.35) |
+|---|---|---|
+| 0.8% (tight) | 0.503% | 0.503% (no change) |
+| 1.5% | 0.503% | 0.525% |
+| 2.5% (wide) | 0.503% | **0.875%** |
+
+- Shadow: `[SHADOW] SR_FLIP_RSCALE_WOULD_RAISE` logs when scaling would bind
+
+### Activation sequence (post-merge + deploy)
+
+**Read shadow counts first:**
+```bash
+docker logs 360scalp-v2-engine --since 48h 2>&1 | grep -c "\[SHADOW\] SR_FLIP_GRACE_WOULD_DELAY"
+docker logs 360scalp-v2-engine --since 48h 2>&1 | grep -c "\[SHADOW\] SR_FLIP_RSCALE_WOULD_RAISE"
+```
+
+**Then activate in order (separate weeks):**
+```bash
+SR_FLIP_CONSECUTIVE_REQUIRED=3        # Change A (activate first)
+SR_FLIP_PRETP_R_SCALING_ENABLED=true  # Change B (one week later, verify A first)
+SR_FLIP_PRETP_R_FACTOR=0.35           # default; tune after shadow data
+```
+
+### Open items (priority order)
+
+1. **SR_FLIP shadow telemetry** — let `[SHADOW]` counts accumulate (48h+), then activate A first
+2. **PR #594 (regime-aware exit)** — owner sign-off still required; not auto-merged
+3. **Dark-flag shadow telemetry for session 19/20 flags** — read before enabling:
+   ```bash
+   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] TRENDING_PRETP_SUPPRESSED"
+   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] PRETP_FULLGRAB_ON_CANCEL"
+   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] INVALIDATION_BTC_CORRELATION"
+   ```
+4. **Google Play approval** — awaiting email (submitted 2026-06-06). Complete store listing / data-safety while waiting.
+5. **Scoring-model rebuild** — blocked on data accumulation in the Ops score-band view.
+
+---
+
 ## Session 21 checkpoint 2026-06-06 — Play Store submitted + universe/reset-defaults complete
+
+### What shipped this session
+
+| PR | Repo | What | Status |
+|---|---|---|---|
+| [#599](https://github.com/mkmk749278/360-v2/pull/599) | 360-v2 | Scan blacklist sweep: CRCL/MU/INTC/CL/EWY added to `SCAN_SYMBOL_BLACKLIST` | Merged |
+| [#600](https://github.com/mkmk749278/360-v2/pull/600) | 360-v2 | All 9 tokenized stocks added to `_NON_CRYPTO_BLACKLIST` (selection-time) — guarantees 75 real crypto pairs | Merged |
+| [#601](https://github.com/mkmk749278/360-v2/pull/601) | 360-v2 | `DELETE /api/settings/user/pretp` + `DELETE /api/settings/user/invalidation` — reset per-user settings to engine defaults | Merged |
+| [#93](https://github.com/mkmk749278/lumin-app/pull/93) | lumin-app | Reset-to-engine-defaults button on Pre-TP and Invalidation settings pages; Pre-TP page redesign (headline controls + collapsed Advanced) | Merged |
+| [#94](https://github.com/mkmk749278/lumin-app/pull/94) | lumin-app | `LUMIN_DISTRIBUTION` compile-time flag + `kSelfUpdateEnabled` const — gates Play AAB off the self-updater | Merged |
+| [#95](https://github.com/mkmk749278/lumin-app/pull/95) | lumin-app | `build-apk.yml` AAB step adds `--dart-define=LUMIN_DISTRIBUTION=play` — defense in depth | Merged |
+| [#96](https://github.com/mkmk749278/lumin-app/pull/96) | lumin-app | `docs/PLAYSTORE_SUBMISSION.md` — paste-ready Play Console answers, data-safety table | Merged |
+
+### Google Play production application — SUBMITTED
+
+Applied 2026-06-06 at 18:06. Google will email within 7 days.
+
+**Remaining Play Console steps:**
+1. Data safety form — use table in `docs/PLAYSTORE_SUBMISSION.md`
+2. Store listing — name, short/full description, screenshots, feature graphic
+3. Content rating — IARC questionnaire
+4. Upload Play AAB — trigger tag push or `flutter build appbundle --release --dart-define=LUMIN_DISTRIBUTION=play`
+5. Pricing & distribution — set regions matching the in-app region gate
+
+---
+
+## Session 20b checkpoint 2026-06-06 — universe cleanup + dark-flag measurability
+
+| PR | Repo | What | Live effect |
+|---|---|---|---|
+| [#596](https://github.com/mkmk749278/360-v2/pull/596) | 360-v2 | Tokenized-stock blacklist — AVGOUSDT/QQQUSDT/SKHYNIXUSDT/DRAMUSDT added to `SCAN_SYMBOL_BLACKLIST` | Live on merge. |
+| [#597](https://github.com/mkmk749278/360-v2/pull/597) | 360-v2 | Shadow telemetry for the 3 dark exit flags — logs `[SHADOW]` lines when a flag *would* fire while off | Live on merge (log-only, trade-neutral). |
+| [#92](https://github.com/mkmk749278/lumin-app/pull/92) | lumin-app | Production UI: paper-first journey, removed engine-internal "75 pairs" copy, wired Telegram subscribe deep link, prominent paper-reset button | Merged. |
+
+---
+
+## Session 20 checkpoint 2026-06-06 — regime-aware exit (TRENDING runner fix)
+
+### Research finding
+
+Binance realized P&L analysis of 107 closed positions: hold duration explains almost all profit/loss.
+
+| Hold duration | Count | Net P&L | Win rate |
+|---|---|---|---|
+| > 40 minutes | 9 | **+$1.049** | 67% |
+| < 40 minutes | 98 | **-$0.492** | 39% |
+
+Pearson r(hold_minutes, PnL) = **+0.379**. Pre-TP + trailing-kill were cutting runners in TRENDING regimes at first profit.
+
+| PR | What | Flag (default) |
+|---|---|---|
+| [#594](https://github.com/mkmk749278/360-v2/pull/594) | Regime-aware exit: suppress pre-TP + widen trailing-kill in TRENDING | `TRENDING_PRETP_SUPPRESSED` / `INVALIDATION_TRAILING_RETRACE_REGIME_AWARE` (both false) |
+
+**PR #594 — owner sign-off required.** Do not auto-merge.
+
+---
+
+## Session 19 checkpoint 2026-06-05 — scoring research + BTC-in-invalidation + CANCEL-path fee fix
+
+Key finding: **Pearson r(confidence, PnL) = −0.027** — confidence score has no predictive power. Real discriminators are setup identity + exit geometry.
+
+| PR | What | Flag (default) |
+|---|---|---|
+| #591 | BTC correlation in invalidation — tightens adverse-excursion when BTC opposes position | `INVALIDATION_BTC_CORRELATION_ENABLED` (false) |
+| #592 | Full-grab pre-TP on CANCEL-bound regimes — 2 maker fees not 3 | `PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED` (false) |
+| #11 | Ops: score-band table + live Pearson r | — (read-only) |
+
+---
+
+## Session 18 checkpoint 2026-06-04 — monitoring agent live + scan latency fixed (64s → ~3s)
+
+Monitoring agent deployed (360ce-ops). Scan cycle 64s → ~3s typical via per-timeframe indicator cache (#588). Positions tab isolated-mode fixes (#589, #590).
+
+---
+
+## Session 17 checkpoint 2026-06-04 — regime-per-exit FSM + signing healthcheck + funding-exit watcher
+
+PR #578 (regime-per-exit FSM), #580 (signing healthcheck), #581 (funding-exit watcher) — all merged.
+
+---
+
+## Session 16 checkpoint 2026-06-03 — monitor watchdog + signing service aiohttp fix
+
+PR #573 merged: `_resilient_monitor_loop` watchdog + aiohttp 64 KB chunk limit fix.
+
+---
+
+## Session 14 checkpoint 2026-06-03 — isolation cutover LIVE
+
+`API_PROCESS_ISOLATED=true` live. PRs #565/#567/#568/#569 merged. CTE auto-merge policy adopted.
 
 ### What shipped this session
 
