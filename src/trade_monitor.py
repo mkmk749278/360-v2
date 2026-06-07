@@ -33,6 +33,9 @@ from config import (
     PRE_TP_ENABLED,
     PRE_TP_FEE_FLOOR_PCT,
     INVALIDATION_MODE_DEFAULT,
+    INVALIDATION_TRAILING_ARM_RSCALE_ENABLED,
+    INVALIDATION_TRAILING_ARM_R_MAX,
+    INVALIDATION_TRAILING_ARM_R_PER_SL_PCT,
     INVALIDATION_TRAILING_MFE_R_DEFAULT,
     INVALIDATION_TRAILING_RETRACE_PCT_DEFAULT,
     INVALIDATION_TRAILING_RETRACE_REGIME_AWARE,
@@ -747,7 +750,25 @@ class TradeMonitor:
             return None
 
         mfe_r = mfe_pct / sl_dist_pct
-        if mfe_r < INVALIDATION_TRAILING_MFE_R_DEFAULT:
+
+        # R-scaled arm threshold (session 22, ships dark).  A flat 0.30R arm
+        # engages the trailing kill at trivial absolute profit on wide-SL
+        # setups (SR_FLIP 1.6–2.5%), where a normal reversal pullback then
+        # fires it near breakeven — the dominant SR_FLIP premature killer (44%
+        # in the 2026-06-07 audit).  Scaling the arm proportional to SL width
+        # makes wide-SL signals bank a more meaningful R-multiple before
+        # trailing engages, while tight-SL setups are barely affected.
+        _scaled_arm = min(
+            INVALIDATION_TRAILING_ARM_R_MAX,
+            INVALIDATION_TRAILING_MFE_R_DEFAULT
+            + INVALIDATION_TRAILING_ARM_R_PER_SL_PCT * sl_dist_pct,
+        )
+        _arm_r = (
+            _scaled_arm
+            if INVALIDATION_TRAILING_ARM_RSCALE_ENABLED
+            else INVALIDATION_TRAILING_MFE_R_DEFAULT
+        )
+        if mfe_r < _arm_r:
             return None  # Not armed yet — MFE hasn't reached the trigger band
 
         # Current excursion in the favourable direction (negative if reversed
@@ -780,6 +801,27 @@ class TradeMonitor:
 
         if retrace_fraction < _retrace_thresh:
             return None  # Still close enough to peak; not retraced enough
+
+        # Shadow telemetry (session 22): flag off but this confirmed kill fired
+        # below the scaled arm — i.e. the R-scaled arm WOULD have suppressed it.
+        # Counts the suppression set so its blast radius is measurable (cross-
+        # reference against the audit PROTECTIVE/PREMATURE split) before
+        # activating INVALIDATION_TRAILING_ARM_RSCALE_ENABLED.
+        if not INVALIDATION_TRAILING_ARM_RSCALE_ENABLED and mfe_r < _scaled_arm:
+            from config import DARK_FLAG_SHADOW_TELEMETRY as _shadow_on
+            if _shadow_on:
+                log.info(
+                    "[SHADOW] TRAILING_RSCALE_WOULD_SUPPRESS: symbol={} setup={} "
+                    "mfe_r={:.2f} current_arm={:.2f} scaled_arm={:.2f} "
+                    "sl_dist={:.2f}% — trailing kill would not have armed under "
+                    "the R-scaled arm",
+                    sig.symbol,
+                    getattr(sig, "setup_class", "") or "",
+                    mfe_r,
+                    INVALIDATION_TRAILING_MFE_R_DEFAULT,
+                    _scaled_arm,
+                    sl_dist_pct,
+                )
 
         _thresh_tag = (
             f" [TRENDING-wide threshold {_retrace_thresh:.0%}]"
