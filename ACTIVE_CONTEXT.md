@@ -4,6 +4,53 @@
 
 ---
 
+## Session 21 checkpoint 2026-06-06 — Play Store submitted + universe/reset-defaults complete
+
+### What shipped this session
+
+| PR | Repo | What | Status |
+|---|---|---|---|
+| [#599](https://github.com/mkmk749278/360-v2/pull/599) | 360-v2 | Scan blacklist sweep: CRCL/MU/INTC/CL/EWY added to `SCAN_SYMBOL_BLACKLIST` | Merged |
+| [#600](https://github.com/mkmk749278/360-v2/pull/600) | 360-v2 | All 9 tokenized stocks added to `_NON_CRYPTO_BLACKLIST` (selection-time) — guarantees 75 real crypto pairs | Merged |
+| [#601](https://github.com/mkmk749278/360-v2/pull/601) | 360-v2 | `DELETE /api/settings/user/pretp` + `DELETE /api/settings/user/invalidation` — reset per-user settings to engine defaults | Merged |
+| [#93](https://github.com/mkmk749278/lumin-app/pull/93) | lumin-app | Reset-to-engine-defaults button on Pre-TP and Invalidation settings pages; Pre-TP page redesign (headline controls + collapsed Advanced) | Merged |
+| [#94](https://github.com/mkmk749278/lumin-app/pull/94) | lumin-app | `LUMIN_DISTRIBUTION` compile-time flag + `kSelfUpdateEnabled` const — gates Play AAB off the self-updater | Merged |
+| [#95](https://github.com/mkmk749278/lumin-app/pull/95) | lumin-app | `build-apk.yml` AAB step adds `--dart-define=LUMIN_DISTRIBUTION=play` — defense in depth | Merged |
+| [#96](https://github.com/mkmk749278/lumin-app/pull/96) | lumin-app | `docs/PLAYSTORE_SUBMISSION.md` — paste-ready Play Console answers, data-safety table | Merged |
+
+### Google Play production application — SUBMITTED
+
+Applied today 2026-06-06 at 18:06. Confirmation screen: "We have your application for production access." Google will email within 7 days.
+
+**Remaining Play Console steps (complete while waiting for approval):**
+1. Data safety form — use table in `docs/PLAYSTORE_SUBMISSION.md`
+2. Store listing — name, short/full description, screenshots, feature graphic
+3. Content rating — IARC questionnaire (answer truthfully; paper trading is not gambling)
+4. Upload Play AAB — trigger tag push or `flutter build appbundle --release --dart-define=LUMIN_DISTRIBUTION=play`
+5. Pricing & distribution — set regions matching the in-app region gate
+
+### Universe fix — confirmed complete
+
+Two-layer blacklist now in place:
+- **Scan-time** (`SCAN_SYMBOL_BLACKLIST`): 9 tokenized stocks excluded before scanning
+- **Selection-time** (`_NON_CRYPTO_BLACKLIST`): same 9 excluded before the `[:75]` slice
+
+Result: the 75-pair slot always fills with real crypto. No tokenized stocks reach subscribers.
+
+### Open items (priority order)
+
+1. **Google Play approval** — awaiting email (≤7 days). Complete store listing / data-safety while waiting.
+2. **Scoring-model rebuild** — still blocked on data accumulation in the Ops score-band view.
+3. **PR #594 (regime-aware exit)** — owner sign-off required. Do not auto-merge. Touches position FSM / regime-per-exit doctrine (§3.2b).
+4. **Dark-flag shadow telemetry** — read `[SHADOW]` counts before enabling TRENDING_PRETP_SUPPRESSED:
+   ```bash
+   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] TRENDING_PRETP_SUPPRESSED"
+   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] PRETP_FULLGRAB_ON_CANCEL"
+   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] INVALIDATION_BTC_CORRELATION"
+   ```
+
+---
+
 ## Session 20b checkpoint 2026-06-06 — universe cleanup + dark-flag measurability
 
 Continuation of session 20. Two follow-ups from the list below cleared, plus
