@@ -4,6 +4,90 @@
 
 ---
 
+## Session 22 checkpoint 2026-06-07 — SR_FLIP premature-kill audit + trailing R-scale arm
+
+### Root cause finding (drove the session)
+
+Owner ran `invalidation_records.json` audit on VPS. Among 16 PREMATURE SR_FLIP kills:
+
+| Kill family | Count | Premature % |
+|---|---|---|
+| trailing_invalidation | 7 | **44%** |
+| momentum_loss | 4 | 16% |
+| other | 5 | — |
+
+Root cause of `trailing_invalidation` dominance: the trailing kill **arms at a flat 0.30R** regardless of SL width. SR_FLIP structural SLs are 1.6–2.5% wide. At 0.30R × 1.6% SL ≈ 0.48% absolute, normal reversal pullbacks (>50% retrace) fire the kill near breakeven before the position has established real profit. EDGEUSDT was the canonical proof: entry 0.6472 SHORT, SL 1.63%, MFE 0.56% (+0.36% R) → killed at 0.06% by a retrace.
+
+### What shipped this session (2 PRs merged)
+
+| PR | What | Flag (default) | Shadow telemetry |
+|---|---|---|---|
+| [#603](https://github.com/mkmk749278/360-v2/pull/603) | **Change A**: SR_FLIP momentum-kill grace — per-setup `INVALIDATION_CONSECUTIVE_THRESHOLD` key (`360_SCALP::SR_FLIP_RETEST`) requires 3 vs 2 consecutive bad-momentum readings | `SR_FLIP_MOMENTUM_GRACE_ENABLED` (false) | `[SHADOW] SR_FLIP_GRACE_WOULD_SUPPRESS` |
+| [#603](https://github.com/mkmk749278/360-v2/pull/603) | **Change B**: SR_FLIP pre-TP R-scaling — floors pre-TP threshold at `SL_dist_pct × 0.35R` so wide-SL signals don't bank at 0.20R | `SR_FLIP_PRETP_R_SCALING_ENABLED` (false) | `[SHADOW] SR_FLIP_RSCALE_WOULD_RAISE` |
+| [#604](https://github.com/mkmk749278/360-v2/pull/604) | **R-scaled trailing-kill arm** — arm threshold becomes `min(0.80, 0.30 + 0.15 × sl_dist_pct)` globally for all setups; fixes the EDGEUSDT premature kill class | `INVALIDATION_TRAILING_ARM_RSCALE_ENABLED` (false) | `[SHADOW] TRAILING_RSCALE_WOULD_SUPPRESS` |
+
+Both PRs ship **completely dark** — no live behavior change on merge. 5566 tests pass, 0 failures.
+
+### Change A activation (owner task — do now)
+
+Owner decided to activate Change A immediately (momentum-kill grace for SR_FLIP, `SR_FLIP_CONSECUTIVE_REQUIRED=3`). Commands on VPS:
+
+```bash
+cd /root/360-v2
+grep -q '^SR_FLIP_CONSECUTIVE_REQUIRED=' .env \
+  && sed -i 's/^SR_FLIP_CONSECUTIVE_REQUIRED=.*/SR_FLIP_CONSECUTIVE_REQUIRED=3/' .env \
+  || echo 'SR_FLIP_CONSECUTIVE_REQUIRED=3' >> .env
+docker compose -f docker-compose.yml --profile isolated up -d --no-deps --force-recreate engine
+# Verify:
+docker exec 360scalp-v2-engine python -c \
+  "from config import INVALIDATION_CONSECUTIVE_THRESHOLD as c; print(c.get('360_SCALP::SR_FLIP_RETEST'))"
+# → should print 3
+```
+
+### Activation sequence for #604 (read shadow data first)
+
+After 48h with the new engine image deployed, check shadow counts:
+
+```bash
+docker logs 360scalp-v2-engine --since 48h 2>&1 | grep -c "\[SHADOW\] TRAILING_RSCALE_WOULD_SUPPRESS"
+docker logs 360scalp-v2-engine --since 48h 2>&1 | grep -c "\[SHADOW\] SR_FLIP_GRACE_WOULD_SUPPRESS"
+docker logs 360scalp-v2-engine --since 48h 2>&1 | grep -c "\[SHADOW\] SR_FLIP_RSCALE_WOULD_RAISE"
+```
+
+When confident in shadow count, activate #604:
+```bash
+echo 'INVALIDATION_TRAILING_ARM_RSCALE_ENABLED=true' >> /root/360-v2/.env
+docker compose -f docker-compose.yml --profile isolated up -d --no-deps --force-recreate engine
+```
+
+### New config constants (all in `config/__init__.py`)
+
+```
+SR_FLIP_CONSECUTIVE_REQUIRED          = 2       (3 when activated)
+SR_FLIP_MOMENTUM_GRACE_ENABLED        = false
+SR_FLIP_PRETP_R_SCALING_ENABLED       = false
+SR_FLIP_PRETP_R_FACTOR                = 0.35
+INVALIDATION_TRAILING_ARM_RSCALE_ENABLED  = false
+INVALIDATION_TRAILING_ARM_R_PER_SL_PCT    = 0.15
+INVALIDATION_TRAILING_ARM_R_MAX           = 0.80
+```
+
+### Open items (priority order)
+
+1. **Change A activation on VPS** — owner task, commands above. Verify 3 is live before enabling #604.
+2. **#604 shadow telemetry** — read `TRAILING_RSCALE_WOULD_SUPPRESS` count after 48h, then activate `INVALIDATION_TRAILING_ARM_RSCALE_ENABLED=true`.
+3. **Google Play approval** — awaiting email (≤7 days from 2026-06-06). Complete store listing / data-safety form while waiting.
+4. **Scoring-model rebuild** — still blocked on data accumulation in the Ops score-band view.
+5. **PR #594 (regime-aware exit)** — owner sign-off required. Do not auto-merge. Touches position FSM / regime-per-exit doctrine (§3.2b).
+6. **Dark-flag shadow telemetry (session-19/20 flags)** — read counts before enabling `TRENDING_PRETP_SUPPRESSED`, `PRETP_FULLGRAB_ON_CANCEL_REGIME_ENABLED`, `INVALIDATION_BTC_CORRELATION_ENABLED`:
+   ```bash
+   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] TRENDING_PRETP_SUPPRESSED"
+   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] PRETP_FULLGRAB_ON_CANCEL"
+   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "\[SHADOW\] INVALIDATION_BTC_CORRELATION"
+   ```
+
+---
+
 ## Session 21 checkpoint 2026-06-06 — Play Store submitted + universe/reset-defaults complete
 
 ### What shipped this session
