@@ -290,6 +290,43 @@ INVALIDATION_TRAILING_RETRACE_REGIME_AWARE: bool = _safe_bool(
 INVALIDATION_TRAILING_RETRACE_PCT_TRENDING: float = float(
     os.getenv("INVALIDATION_TRAILING_RETRACE_PCT_TRENDING", "0.70")
 )
+
+# R-scaled trailing-kill ARM threshold (session 22, ships dark).
+#
+# The trailing kill arms at a flat ``INVALIDATION_TRAILING_MFE_R_DEFAULT``
+# (0.30R) regardless of SL width.  Audit (invalidation_records.json,
+# 2026-06-07) shows trailing_invalidation is the dominant SR_FLIP premature
+# killer at 44% (7/16) — far above momentum_loss (16%) and adverse_excursion
+# (18%).  Root cause: SR_FLIP carries wide structural SLs (1.6–2.5%), so 0.30R
+# is only ~0.5–0.75% absolute profit; the kill arms at trivial profit and a
+# normal reversal pullback (SR_FLIP routinely retraces >50% before continuing)
+# then fires it near breakeven.  Confirmed case EDGEUSDT: armed at MFE_R=0.34,
+# killed at +0.06% after a +0.56% peak, price then ran ~2.4% further in favour.
+#
+# Fix: scale the arm threshold proportional to SL width so wide-SL signals must
+# bank a more meaningful R-multiple before trailing engages, while tight-SL
+# setups are barely affected.  Applies to ALL setups (owner decision
+# 2026-06-07 — global, not a SR_FLIP special-case).
+#
+#   arm_R = min(ARM_R_MAX, MFE_R_DEFAULT + ARM_R_PER_SL_PCT × sl_dist_pct)
+#
+# With defaults (base 0.30, +0.15R per 1% SL, cap 0.80):
+#   0.8% SL → 0.42R   1.6% SL → 0.54R   2.5% SL → 0.675R
+# The EDGE case (1.63% SL, armed 0.34R) would no longer arm → no premature kill.
+#
+# Ships false.  Shadow telemetry ([SHADOW] TRAILING_RSCALE_WOULD_SUPPRESS) logs
+# every trailing kill that fires below the scaled arm so the suppression set is
+# measurable (cross-reference against the audit's PROTECTIVE/PREMATURE split)
+# before activation.
+INVALIDATION_TRAILING_ARM_RSCALE_ENABLED: bool = _safe_bool(
+    "INVALIDATION_TRAILING_ARM_RSCALE_ENABLED", "false"
+)
+INVALIDATION_TRAILING_ARM_R_PER_SL_PCT: float = _safe_float(
+    "INVALIDATION_TRAILING_ARM_R_PER_SL_PCT", "0.15"
+)
+INVALIDATION_TRAILING_ARM_R_MAX: float = _safe_float(
+    "INVALIDATION_TRAILING_ARM_R_MAX", "0.80"
+)
 PRE_TP_SETUP_BLACKLIST: frozenset = frozenset(
     s.strip() for s in PRE_TP_SETUP_BLACKLIST_RAW.split(",") if s.strip()
 )
