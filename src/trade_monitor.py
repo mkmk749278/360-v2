@@ -25,6 +25,7 @@ from config import (
     INVALIDATION_CONSECUTIVE_THRESHOLD,
     INVALIDATION_MIN_AGE_SECONDS,
     INVALIDATION_MOMENTUM_THRESHOLD,
+    SR_FLIP_MOMENTUM_GRACE_ENABLED,
     MAX_SIGNAL_HOLD_SECONDS,
     MIN_SIGNAL_LIFESPAN_SECONDS,
     MONITOR_POLL_INTERVAL,
@@ -1241,7 +1242,31 @@ class TradeMonitor:
         )
         if _momentum_against_thesis:
             sig.momentum_invalidation_count += 1
-            consecutive_required = INVALIDATION_CONSECUTIVE_THRESHOLD.get(sig.channel, 1)
+            # Per-setup consecutive threshold (key: "{channel}::{setup_class}") takes
+            # priority over the per-channel default.  SR_FLIP grace uses this to require
+            # one extra reading when SR_FLIP_CONSECUTIVE_REQUIRED=3 is set on the VPS.
+            _consec_key = f"{sig.channel}::{_setup_class}" if _setup_class else sig.channel
+            consecutive_required = INVALIDATION_CONSECUTIVE_THRESHOLD.get(
+                _consec_key,
+                INVALIDATION_CONSECUTIVE_THRESHOLD.get(sig.channel, 1),
+            )
+            _channel_default = INVALIDATION_CONSECUTIVE_THRESHOLD.get(sig.channel, 1)
+            # Shadow telemetry (change A): when SR_FLIP grace is OFF but the kill
+            # would be delayed by the extra reading if it were ON, log [SHADOW].
+            if (
+                not SR_FLIP_MOMENTUM_GRACE_ENABLED
+                and _setup_class == "SR_FLIP_RETEST"
+                and sig.momentum_invalidation_count >= _channel_default
+                and consecutive_required <= _channel_default
+            ):
+                log.info(
+                    "[SHADOW] SR_FLIP_GRACE_WOULD_DELAY: symbol={} count={} "
+                    "channel_threshold={} — an extra consecutive reading would be "
+                    "required if SR_FLIP_CONSECUTIVE_REQUIRED=3 were active",
+                    sig.symbol,
+                    sig.momentum_invalidation_count,
+                    _channel_default,
+                )
             if sig.momentum_invalidation_count >= consecutive_required:
                 _direction_label = "LONG" if is_long else "SHORT"
                 _direction_test = (

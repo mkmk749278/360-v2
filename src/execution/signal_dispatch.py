@@ -559,6 +559,38 @@ async def dispatch_signal_to_active_users(
                 "(flag off, no-op)",
                 uid, signal_id, regime_label, _grab_before_fullgrab,
             )
+        # SR_FLIP pre-TP R-scaling (change B — ships dark).
+        # Truth-report: SR_FLIP's SL averages 1–2.5% wide (1×ATR minimum) but
+        # the ATR-adaptive pre-TP threshold averages only 0.503% raw.  On a
+        # 2.5% SL that is 0.20R — the banked half captures minimal reward
+        # relative to the structural risk.  When enabled, the threshold is
+        # floored at SL_dist_pct × SR_FLIP_PRETP_R_FACTOR (default 0.35R) so
+        # wide-SL signals bank at a meaningful R-multiple.  Tight-SL signals
+        # (SL < threshold/factor) are unaffected.
+        if setup_class and setup_class.upper() == "SR_FLIP_RETEST" and user_grab_fraction > 0:
+            from config import SR_FLIP_PRETP_R_FACTOR as _SR_FLIP_R_FACTOR
+            from config import SR_FLIP_PRETP_R_SCALING_ENABLED as _SR_FLIP_RSCALE
+            if sl_price > 0 and entry_price > 0:
+                _sl_dist_pct = abs(entry_price - sl_price) / entry_price * 100.0
+                _r_scaled_threshold = _sl_dist_pct * _SR_FLIP_R_FACTOR
+                _scaling_binds = _r_scaled_threshold > user_pretp_threshold
+                if _SR_FLIP_RSCALE and _scaling_binds:
+                    log.debug(
+                        "signal_dispatch: SR_FLIP pre-TP R-scaling raised threshold "
+                        "uid={} signal_id={} sl_dist={:.3f}% old={:.3f}% new={:.3f}%",
+                        uid, signal_id, _sl_dist_pct,
+                        user_pretp_threshold, _r_scaled_threshold,
+                    )
+                    user_pretp_threshold = _r_scaled_threshold
+                elif not _SR_FLIP_RSCALE and _scaling_binds and _shadow_telemetry_on():
+                    log.info(
+                        "signal_dispatch: [SHADOW] SR_FLIP_RSCALE_WOULD_RAISE "
+                        "uid={} signal_id={} sl_dist={:.3f}% current={:.3f}% "
+                        "would_raise_to={:.3f}% (flag off, no-op)",
+                        uid, signal_id, _sl_dist_pct,
+                        user_pretp_threshold, _r_scaled_threshold,
+                    )
+
         # Per-user invalidation aggressiveness (B17).  Stored on the
         # Position at placement time so the per-user FSM path can
         # enforce the correct mode when per-user soft-invalidation
