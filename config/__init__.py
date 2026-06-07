@@ -1535,7 +1535,38 @@ INVALIDATION_MOMENTUM_THRESHOLD: Dict[str, float] = {
 # readings reduces false kills while still catching genuine exhaustion.
 INVALIDATION_CONSECUTIVE_THRESHOLD: Dict[str, int] = {
     "360_SCALP": int(os.getenv("INVALIDATION_CONSECUTIVE_THRESHOLD_SCALP", "2")),
+    # SR_FLIP grace (A — ships dark).  Truth-report: 18/91 SR_FLIP kills were
+    # PREMATURE (19.8%) vs 14.5% baseline.  Requiring one extra consecutive
+    # bad-momentum reading (3 instead of 2 = +15s at 15s scan cycle) before
+    # killing a SR_FLIP signal cuts the premature rate toward baseline without
+    # touching the 68 PROTECTIVE saves.  Default 2 = unchanged; set to 3 when
+    # SR_FLIP_MOMENTUM_GRACE_ENABLED is flipped on the VPS.
+    "360_SCALP::SR_FLIP_RETEST": int(os.getenv("SR_FLIP_CONSECUTIVE_REQUIRED", "2")),
 }
+
+# Dark flag — activates the SR_FLIP momentum grace (change A).
+# Ships false.  Read shadow telemetry counts via:
+#   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "[SHADOW] SR_FLIP_GRACE_WOULD_DELAY"
+# Enable by setting SR_FLIP_CONSECUTIVE_REQUIRED=3 on the VPS (no separate flag needed
+# — shadow fires whenever the per-setup count > channel default, even before activation).
+SR_FLIP_MOMENTUM_GRACE_ENABLED: bool = _safe_bool("SR_FLIP_MOMENTUM_GRACE_ENABLED", "false")
+
+# ---------------------------------------------------------------------------
+# SR_FLIP pre-TP R-scaling (change B — ships dark).
+#
+# Problem: SR_FLIP's structural SL can be 1–2.5% wide (1×ATR minimum).
+# The ATR-adaptive pre-TP threshold averages 0.503% raw (truth-report).
+# On a 2.5% SL that's only 0.20R — the banked half captures minimal reward
+# relative to the risk.  R-scaling floors the threshold at
+# SL_dist_pct × SR_FLIP_PRETP_R_FACTOR so wide-SL signals don't bank at 0.2R.
+#
+# Example: SL=2.5%, factor=0.35 → threshold = max(0.503%, 0.875%) = 0.875%
+# Example: SL=0.8%, factor=0.35 → threshold = max(0.503%, 0.28%) = 0.503% (unchanged)
+#
+# Shadow telemetry fires when scaling is binding but flag is OFF:
+#   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "[SHADOW] SR_FLIP_RSCALE_WOULD_RAISE"
+SR_FLIP_PRETP_R_SCALING_ENABLED: bool = _safe_bool("SR_FLIP_PRETP_R_SCALING_ENABLED", "false")
+SR_FLIP_PRETP_R_FACTOR: float = _safe_float("SR_FLIP_PRETP_R_FACTOR", "0.35")
 
 # Adverse-excursion invalidation (2026-05-20 — truth-report follow-up).
 # Catches the full-SL pattern that momentum_loss / regime_shift /
