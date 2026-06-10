@@ -4,6 +4,59 @@
 
 ---
 
+## Session 23 checkpoint 2026-06-10 — entry_regime empty bug found and fixed (PR #606)
+
+### Root cause finding (drove the session)
+
+`TRENDING_PRETP_SUPPRESSED` shadow telemetry (`DARK_FLAG_SHADOW_TELEMETRY=true`) returned
+**0 hits after 48h** despite signals dispatching normally. Diagnosis: `sig.entry_regime`
+was always `""` at dispatch time for every signal.
+
+Bug in `_populate_signal_context` (`src/scanner/__init__.py`): `sig.entry_regime = rc.label`
+was inside a `try` block that ran `float(rc.atr_percentile)` and `float(rc.adx_slope)` in
+f-strings **above** it. When either `float()` raised `TypeError` or `ValueError`, the
+`except` clause silently dropped the entire block — `entry_regime` was never written,
+leaving the `Signal` default of `""`.
+
+### Impact (two features were dead letters in production)
+
+| Feature | PR | Effect |
+|---|---|---|
+| `TRENDING_PRETP_SUPPRESSED` shadow + real flag | #594 | `regime_label=""` → suppress condition always False; 0 shadow hits since deploy |
+| Regime-per-exit FSM gating | #578 | `entry_regime=""` → all FSM regime checks silently bypassed on every dispatched position |
+
+### Fix — PR #606 (merged 2026-06-10)
+
+`sig.entry_regime = rc.label` hoisted above the `try` block. Pure string assignment,
+cannot raise. The `float()` calls that may fail remain inside `try/except` as before.
+
+### Action required on VPS after merge
+
+```bash
+# Rebuild engine image with the fix:
+cd /root/360-v2
+docker compose -f docker-compose.yml --profile isolated up -d --no-deps --force-recreate engine
+
+# Confirm shadow telemetry now fires (within hours of next TRENDING signal dispatch):
+docker logs 360scalp-v2-engine -f | grep "\[SHADOW\] TRENDING_PRETP_SUPPRESSED"
+
+# Confirm entry_regime is now populated on dispatched positions:
+docker exec 360scalp-v2-redis redis-cli hgetall snapshot:<uid> 2>/dev/null | grep entry_regime
+```
+
+### Open items (priority order)
+
+1. **Deploy PR #606 on VPS** — `docker compose ... up -d --no-deps --force-recreate engine` after merge.
+2. **Confirm shadow telemetry fires** — grep `[SHADOW] TRENDING_PRETP_SUPPRESSED` post-deploy; expect counts within hours.
+3. **Re-verify regime-per-exit live (PR #578)** — with `entry_regime` now populated, confirm it is non-empty in Redis snapshot and FSM trail/cancel paths are actually being reached.
+4. **TRENDING_PRETP_SUPPRESSED activation** — blocked on 7 days of shadow data post-#606 deploy. Do not activate blind.
+5. **Change A activation on VPS** — `SR_FLIP_CONSECUTIVE_REQUIRED=3`; commands in Session 22 section below.
+6. **#604 shadow telemetry → activation** — read `TRAILING_RSCALE_WOULD_SUPPRESS` count after 48h, then activate `INVALIDATION_TRAILING_ARM_RSCALE_ENABLED=true`.
+7. **Google Play approval** — awaiting email (submitted 2026-06-06, ≤7 days). Complete store listing + data-safety form while waiting.
+8. **Scoring-model rebuild** — blocked on data accumulation in Ops score-band view.
+
+---
+
 ## Session 22 checkpoint 2026-06-07 — SR_FLIP premature-kill audit + trailing R-scale arm
 
 ### Root cause finding (drove the session)
