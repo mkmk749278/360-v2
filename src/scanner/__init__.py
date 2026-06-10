@@ -3856,6 +3856,7 @@ class Scanner:
         sig.market_phase = ctx.market_state.value
         if ctx.regime_context is not None:
             rc = ctx.regime_context
+            sig.entry_regime = rc.label  # string assignment, cannot raise — set before float() calls
             try:
                 sig.market_phase = (
                     f"{rc.label} | ATR%ile={float(rc.atr_percentile):.0f} | "
@@ -3864,11 +3865,6 @@ class Scanner:
                 sig.regime_context = (
                     f"ADXslope={float(rc.adx_slope):.2f} strengthen={rc.is_regime_strengthening}"
                 )
-                # Stamp the entry-time regime + ATR percentile on the signal so the
-                # exit FSM can gate runner behaviour without re-classifying.  The
-                # 5m label is the Hurst-gated stable regime; ATR percentile drives
-                # the trail width (Fix B).
-                sig.entry_regime = rc.label
                 sig.atr_percentile_at_entry = float(rc.atr_percentile)
                 sig.atr_value_at_entry = float(rc.atr_value)
             except (TypeError, ValueError):
