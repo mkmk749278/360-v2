@@ -1658,6 +1658,31 @@ SR_FLIP_MOMENTUM_GRACE_ENABLED: bool = _safe_bool("SR_FLIP_MOMENTUM_GRACE_ENABLE
 SR_FLIP_PRETP_R_SCALING_ENABLED: bool = _safe_bool("SR_FLIP_PRETP_R_SCALING_ENABLED", "false")
 SR_FLIP_PRETP_R_FACTOR: float = _safe_float("SR_FLIP_PRETP_R_FACTOR", "0.35")
 
+# ---------------------------------------------------------------------------
+# LIQUIDITY_SWEEP_REVERSAL geometry rebuild (2026-06-15 — ships dark).
+#
+# Live last-100: LSR is the worst R:R — avg win +0.47 vs avg loss −0.73
+# (−3.77% over 20 sigs).  Two independent, separately-flagged levers:
+#
+# (1) Win-side — pre-TP R-scaling (mirror of SR_FLIP change B).  Floors the
+#     pre-TP threshold at SL_dist_pct × LSR_PRETP_R_FACTOR so surviving LSR
+#     wins bank a real R-multiple instead of a +0.47 nibble.  Does NOT touch
+#     the stop.  Shadow: [SHADOW] LSR_RSCALE_WOULD_RAISE.
+#
+# (2) Loss-side — tighten the max-SL cap.  LSR is in
+#     STRUCTURAL_SLTP_PROTECTED_SETUPS (reject-not-compress), so lowering the
+#     cap does NOT move the stop into the post-sweep wick zone — it DROPS the
+#     LSRs whose structural sweep-stop is wider than the cap, trimming the
+#     wide-stop tail that produces the −0.73 losses.  Shadow:
+#     [SHADOW] LSR_SL_TIGHTEN_WOULD_DROP.
+#
+# Both ship dark.  Geometry / Position-FSM change — owner sign-off required to
+# enable either flag.  Tunable per B8.
+LSR_PRETP_R_SCALING_ENABLED: bool = _safe_bool("LSR_PRETP_R_SCALING_ENABLED", "false")
+LSR_PRETP_R_FACTOR: float = _safe_float("LSR_PRETP_R_FACTOR", "0.35")
+LSR_SL_TIGHTEN_ENABLED: bool = _safe_bool("LSR_SL_TIGHTEN_ENABLED", "false")
+LSR_MAX_SL_PCT_TIGHT: float = _safe_float("LSR_MAX_SL_PCT_TIGHT", "1.5")
+
 # Adverse-excursion invalidation (2026-05-20 — truth-report follow-up).
 # Catches the full-SL pattern that momentum_loss / regime_shift /
 # ema_crossover all miss: price grinding against the position from
