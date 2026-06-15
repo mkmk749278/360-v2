@@ -287,3 +287,87 @@ class TestSrFlipPretpRScaling:
             flag_enabled=True,
         )
         assert abs(result - 0.503) < 0.001
+
+
+# ---------------------------------------------------------------------------
+# Micro-cap momentum-threshold multiplier (2026-06-15 fix)
+#
+# Sub-$0.001 coins previously had their momentum kill threshold multiplied by
+# 0.1 (10× tighter), over-killing them on noise.  `momentum` is a scale-
+# invariant percentage, so the tightening had no basis.  Default mult is now
+# 1.0 (no tightening); 0.1 restores legacy behaviour.  These tests lock that.
+# ---------------------------------------------------------------------------
+
+class TestMicroCapMomentumMultiplier:
+    """INVALIDATION_MOMENTUM_MICROCAP_MULT controls sub-$0.001 kill tightness."""
+
+    def _microcap_sig(self):
+        # entry < 0.001 → micro-cap branch; SHORT so positive momentum is "bad".
+        return _Sig(
+            symbol="1000PEPEUSDT",
+            direction_val="SHORT",
+            entry=0.0005,
+            stop_loss=0.0005 * 1.015,
+            current_price=0.0005,
+            setup_class="SR_FLIP_RETEST",
+        )
+
+    def _noise_momentum(self):
+        # No atr_last → falls back to patched channel threshold (0.05).
+        # momentum 0.03: BELOW the normal 0.05 threshold but ABOVE the legacy
+        # 10×-tighter 0.005 threshold — the exact noise band the bug killed on.
+        # ema9 < ema21 keeps the EMA-crossover rule from firing on this SHORT.
+        return {"ema9_last": 0.00049, "ema21_last": 0.0005, "momentum": 0.03}
+
+    def test_default_mult_spares_microcap_noise(self, monkeypatch):
+        """mult=1.0: a 0.03 momentum reading on a micro-cap is below the normal
+        0.05 threshold → NOT counted as against-thesis → position spared."""
+        monkeypatch.setattr(
+            "src.trade_monitor.INVALIDATION_MOMENTUM_MICROCAP_MULT", 1.0
+        )
+        sig = self._microcap_sig()
+        result = _run_check(sig, self._noise_momentum(), monkeypatch)
+        assert result is None
+        assert sig.momentum_invalidation_count == 0
+
+    def test_legacy_mult_still_kills_microcap_noise(self, monkeypatch):
+        """mult=0.1 (legacy): the 10×-tighter 0.005 threshold flags the same
+        0.03 reading as against-thesis and kills on the 2nd consecutive read."""
+        monkeypatch.setattr(
+            "src.trade_monitor.INVALIDATION_MOMENTUM_MICROCAP_MULT", 0.1
+        )
+        sig = self._microcap_sig()
+        indicators = self._noise_momentum()
+        first = _run_check(sig, indicators, monkeypatch)
+        assert first is None
+        assert sig.momentum_invalidation_count == 1
+        second = _run_check(sig, indicators, monkeypatch)
+        assert second is not None
+        assert "momentum" in second
+
+    def test_strong_reversal_still_kills_under_default(self, monkeypatch):
+        """mult=1.0 does NOT make micro-caps unkillable: a genuine 0.20 reading
+        (well above the 0.05 threshold) still invalidates as before."""
+        monkeypatch.setattr(
+            "src.trade_monitor.INVALIDATION_MOMENTUM_MICROCAP_MULT", 1.0
+        )
+        sig = self._microcap_sig()
+        strong = {"ema9_last": 0.00049, "ema21_last": 0.0005, "momentum": 0.20}
+        _run_check(sig, strong, monkeypatch)
+        result = _run_check(sig, strong, monkeypatch)
+        assert result is not None
+        assert "momentum" in result
+
+    def test_normal_priced_pair_unaffected(self, monkeypatch):
+        """A pair priced >= 0.001 never enters the micro-cap branch, so the
+        multiplier is irrelevant to it."""
+        monkeypatch.setattr(
+            "src.trade_monitor.INVALIDATION_MOMENTUM_MICROCAP_MULT", 0.1
+        )
+        sig = _Sig(symbol="ETHUSDT", direction_val="SHORT", entry=1.0,
+                   stop_loss=1.015, current_price=1.0, setup_class="SR_FLIP_RETEST")
+        # momentum 0.03 < normal 0.05 threshold → spared regardless of mult,
+        # because entry >= 0.001 skips the micro-cap tightening entirely.
+        result = _run_check(sig, self._noise_momentum(), monkeypatch)
+        assert result is None
+        assert sig.momentum_invalidation_count == 0

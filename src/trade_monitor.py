@@ -24,6 +24,7 @@ from config import (
     INVALIDATION_BTC_DIRECTION_CACHE_TTL_SEC,
     INVALIDATION_CONSECUTIVE_THRESHOLD,
     INVALIDATION_MIN_AGE_SECONDS,
+    INVALIDATION_MOMENTUM_MICROCAP_MULT,
     INVALIDATION_MOMENTUM_THRESHOLD,
     SR_FLIP_MOMENTUM_GRACE_ENABLED,
     MAX_SIGNAL_HOLD_SECONDS,
@@ -1271,7 +1272,30 @@ class TradeMonitor:
         # Prefer entry price; fall back to current_price only if entry is unset (0).
         # The current_price check guards against a zero fallback.
         if 0 < entry_price < 0.001:
-            mom_threshold *= 0.1
+            # Micro-cap multiplier — default 1.0 (no tightening).  `momentum` is a
+            # scale-invariant percentage, so a small nominal price is not a reason
+            # to tighten; the legacy 10× tightening (mult=0.1) over-killed micro-caps
+            # on noise.  Shadow-log when the legacy 0.1 threshold WOULD have killed
+            # but the current (looser) multiplier spares the position.
+            _legacy_threshold = mom_threshold * 0.1
+            mom_threshold *= INVALIDATION_MOMENTUM_MICROCAP_MULT
+            if (
+                INVALIDATION_MOMENTUM_MICROCAP_MULT > 0.1
+                and momentum is not None
+                and (
+                    (is_long and -mom_threshold <= momentum < -_legacy_threshold)
+                    or (not is_long and _legacy_threshold < momentum <= mom_threshold)
+                )
+            ):
+                log.info(
+                    "[SHADOW] MICROCAP_MOMENTUM_SPARED: symbol={} momentum={:.3f} "
+                    "legacy_thresh={:.3f} current_thresh={:.3f} — legacy 10×-tighter "
+                    "kill avoided",
+                    sig.symbol,
+                    momentum,
+                    _legacy_threshold,
+                    mom_threshold,
+                )
         # Direction-aware: positive momentum = price rising, negative = falling.
         # LONG signals only invalidate when momentum is strongly negative;
         # SHORT signals only when momentum is strongly positive.

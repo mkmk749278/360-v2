@@ -1566,6 +1566,25 @@ INVALIDATION_MOMENTUM_THRESHOLD: Dict[str, float] = {
     "360_SCALP": float(os.getenv("INVALIDATION_MOMENTUM_THRESHOLD_SCALP", "0.10")),
 }
 
+# Micro-cap (entry < $0.001) momentum-threshold multiplier.
+#
+# History: sub-$0.001 coins (1000PEPE, CHIP, JCT, PLAY, HMSTR …) had their
+# momentum kill threshold multiplied by 0.1 — a 10× *tighter* threshold — on
+# the theory that cheap coins are noisier.  But `momentum` here is
+# `_compute_momentum(closes, 3)`, a scale-invariant *percentage* rate of
+# change: a 0.84 reading is an 84% move whether the coin trades at 0.0005 or
+# 50.0.  The 10× tightening had no sound basis and made micro-caps far too
+# easy to kill on noise (e.g. `momentum=0.101 > 0.010` killed a signal that
+# would have cleanly passed the normal 0.10 threshold).  Invalidations audit
+# (2026-06-15): micro-cap pairs dominated the PREMATURE momentum kills.
+#
+# Default 1.0 = micro-caps use the same threshold as every other pair (bug
+# removed).  Set to 0.1 to restore the legacy 10×-tighter behaviour.  Env-
+# overridable per B8; reversible without a code change.
+INVALIDATION_MOMENTUM_MICROCAP_MULT: float = float(
+    os.getenv("INVALIDATION_MOMENTUM_MICROCAP_MULT", "1.0")
+)
+
 # Number of *consecutive* below-threshold momentum readings required before a
 # signal is invalidated for momentum loss.  A single weak reading is common on
 # 1m/5m candles (price pauses before continuation) — requiring two consecutive
