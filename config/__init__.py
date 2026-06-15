@@ -1566,6 +1566,59 @@ INVALIDATION_MOMENTUM_THRESHOLD: Dict[str, float] = {
     "360_SCALP": float(os.getenv("INVALIDATION_MOMENTUM_THRESHOLD_SCALP", "0.10")),
 }
 
+# Micro-cap (entry < $0.001) momentum-threshold multiplier.
+#
+# History: sub-$0.001 coins (1000PEPE, CHIP, JCT, PLAY, HMSTR …) had their
+# momentum kill threshold multiplied by 0.1 — a 10× *tighter* threshold — on
+# the theory that cheap coins are noisier.  But `momentum` here is
+# `_compute_momentum(closes, 3)`, a scale-invariant *percentage* rate of
+# change: a 0.84 reading is an 84% move whether the coin trades at 0.0005 or
+# 50.0.  The 10× tightening had no sound basis and made micro-caps far too
+# easy to kill on noise (e.g. `momentum=0.101 > 0.010` killed a signal that
+# would have cleanly passed the normal 0.10 threshold).  Invalidations audit
+# (2026-06-15): micro-cap pairs dominated the PREMATURE momentum kills.
+#
+# Default 1.0 = micro-caps use the same threshold as every other pair (bug
+# removed).  Set to 0.1 to restore the legacy 10×-tighter behaviour.  Env-
+# overridable per B8; reversible without a code change.
+INVALIDATION_MOMENTUM_MICROCAP_MULT: float = float(
+    os.getenv("INVALIDATION_MOMENTUM_MICROCAP_MULT", "1.0")
+)
+
+# ---------------------------------------------------------------------------
+# RANGING low-ATR loser-setup suppression (2026-06-15 — ships dark).
+#
+# Live last-100 audit (RANGING = 67% of volume, −7.22% of the −8.7% total):
+#   SR_FLIP_RETEST            45 sigs  −4.36%  (avg win +0.25 vs avg loss −0.38)
+#   LIQUIDITY_SWEEP_REVERSAL  20 sigs  −3.77%  (avg win +0.47 vs avg loss −0.73)
+#   FAILED_AUCTION_RECLAIM    24 sigs  +0.71%  (67% win)   ← leave alone
+#   DIVERGENCE_CONTINUATION    5 sigs  +0.42%  (60% win)   ← leave alone
+#
+# SR_FLIP (Structure) and LSR (Reversal) families are deliberately ALLOWED in
+# low-ADX ranging today (they are not in _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES),
+# so they fire repeatedly into dead chop at ~1:2 win:loss.  This gate suppresses
+# ONLY those two setups, and only when the range is also low-ATR (the deadest
+# chop where mean-reversion scalping has no edge net of fees).
+#
+# Ships dark (flag false) with [SHADOW] telemetry so the suppressed volume and
+# its would-be PnL are measurable before activation.  Paid-channel routing
+# change — owner sign-off required to set
+# RANGING_LOW_ATR_LOSER_SUPPRESS_ENABLED=true on the VPS.
+RANGING_LOW_ATR_LOSER_SUPPRESS_ENABLED: bool = _safe_bool(
+    "RANGING_LOW_ATR_LOSER_SUPPRESS_ENABLED", "false"
+)
+RANGING_LOW_ATR_SUPPRESS_PCTILE: float = _safe_float(
+    "RANGING_LOW_ATR_SUPPRESS_PCTILE", "25.0"
+)
+RANGING_LOW_ATR_SUPPRESS_SETUPS: frozenset = frozenset(
+    s.strip()
+    for s in os.getenv(
+        "RANGING_LOW_ATR_SUPPRESS_SETUPS",
+        "SR_FLIP_RETEST,LIQUIDITY_SWEEP_REVERSAL",
+    ).split(",")
+    if s.strip()
+)
+
 # Number of *consecutive* below-threshold momentum readings required before a
 # signal is invalidated for momentum loss.  A single weak reading is common on
 # 1m/5m candles (price pauses before continuation) — requiring two consecutive
@@ -1604,6 +1657,31 @@ SR_FLIP_MOMENTUM_GRACE_ENABLED: bool = _safe_bool("SR_FLIP_MOMENTUM_GRACE_ENABLE
 #   docker logs 360scalp-v2-engine --since 24h 2>&1 | grep -c "[SHADOW] SR_FLIP_RSCALE_WOULD_RAISE"
 SR_FLIP_PRETP_R_SCALING_ENABLED: bool = _safe_bool("SR_FLIP_PRETP_R_SCALING_ENABLED", "false")
 SR_FLIP_PRETP_R_FACTOR: float = _safe_float("SR_FLIP_PRETP_R_FACTOR", "0.35")
+
+# ---------------------------------------------------------------------------
+# LIQUIDITY_SWEEP_REVERSAL geometry rebuild (2026-06-15 — ships dark).
+#
+# Live last-100: LSR is the worst R:R — avg win +0.47 vs avg loss −0.73
+# (−3.77% over 20 sigs).  Two independent, separately-flagged levers:
+#
+# (1) Win-side — pre-TP R-scaling (mirror of SR_FLIP change B).  Floors the
+#     pre-TP threshold at SL_dist_pct × LSR_PRETP_R_FACTOR so surviving LSR
+#     wins bank a real R-multiple instead of a +0.47 nibble.  Does NOT touch
+#     the stop.  Shadow: [SHADOW] LSR_RSCALE_WOULD_RAISE.
+#
+# (2) Loss-side — tighten the max-SL cap.  LSR is in
+#     STRUCTURAL_SLTP_PROTECTED_SETUPS (reject-not-compress), so lowering the
+#     cap does NOT move the stop into the post-sweep wick zone — it DROPS the
+#     LSRs whose structural sweep-stop is wider than the cap, trimming the
+#     wide-stop tail that produces the −0.73 losses.  Shadow:
+#     [SHADOW] LSR_SL_TIGHTEN_WOULD_DROP.
+#
+# Both ship dark.  Geometry / Position-FSM change — owner sign-off required to
+# enable either flag.  Tunable per B8.
+LSR_PRETP_R_SCALING_ENABLED: bool = _safe_bool("LSR_PRETP_R_SCALING_ENABLED", "false")
+LSR_PRETP_R_FACTOR: float = _safe_float("LSR_PRETP_R_FACTOR", "0.35")
+LSR_SL_TIGHTEN_ENABLED: bool = _safe_bool("LSR_SL_TIGHTEN_ENABLED", "false")
+LSR_MAX_SL_PCT_TIGHT: float = _safe_float("LSR_MAX_SL_PCT_TIGHT", "1.5")
 
 # Adverse-excursion invalidation (2026-05-20 — truth-report follow-up).
 # Catches the full-SL pattern that momentum_loss / regime_shift /

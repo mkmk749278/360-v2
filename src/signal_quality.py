@@ -439,6 +439,16 @@ _MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
     "MA_CROSS_TREND_SHIFT":           3.0,  # Structural SL beyond opposite-side swing
 }
 
+# LSR loss-side tighten (geometry rebuild — ships dark; mirrors config flags
+# LSR_SL_TIGHTEN_ENABLED / LSR_MAX_SL_PCT_TIGHT).  Read from env directly to keep
+# this low-level module config-import-free.  LSR is reject-not-compress, so a
+# tighter cap DROPS wide-stop LSRs (trimming the −0.73 loss tail) rather than
+# compressing the structural sweep-stop into the post-sweep wick.
+LSR_SL_TIGHTEN_ENABLED: bool = os.getenv(
+    "LSR_SL_TIGHTEN_ENABLED", "false"
+).strip().lower() in ("1", "true", "yes", "on")
+LSR_MAX_SL_PCT_TIGHT: float = float(os.getenv("LSR_MAX_SL_PCT_TIGHT", "1.5"))
+
 # Family-aware minimum R:R thresholds used in build_risk_plan().
 # Quick-exit families accept a lower first target because their trade thesis
 # resolves faster; trend / breakout families require a larger reward cushion.
@@ -517,6 +527,13 @@ def _max_sl_pct_for_policy(channel: str, setup: SetupClass) -> tuple[float, str,
     family = _geometry_family_for_setup(setup)
     channel_cap = _channel_max_sl_pct(channel)
     setup_cap_pct = _MAX_SL_PCT_BY_SETUP.get(setup.value)
+    # LSR loss-side tighten (geometry rebuild — ships dark).  LSR is
+    # reject-not-compress, so lowering its cap drops the wide-stop tail rather
+    # than moving the stop into the post-sweep wick.  Only narrows, never widens.
+    if setup == SetupClass.LIQUIDITY_SWEEP_REVERSAL and LSR_SL_TIGHTEN_ENABLED:
+        _tight = LSR_MAX_SL_PCT_TIGHT
+        if setup_cap_pct is None or _tight < setup_cap_pct:
+            setup_cap_pct = _tight
     if setup_cap_pct is not None:
         setup_cap = setup_cap_pct / 100.0
         if setup_cap <= channel_cap:
@@ -1247,6 +1264,23 @@ def build_risk_plan(
     _max_sl_pct, _sl_cap_policy_scope, _sl_cap_family = _max_sl_pct_for_policy(_chan, setup)
     if signal.entry > 0:
         _sl_dist_pct = abs(signal.entry - stop_loss) / signal.entry
+        # LSR loss-side tighten — shadow telemetry.  When the flag is OFF, log
+        # the LSRs that WOULD be dropped if the tighter cap were active (stop
+        # currently within the 2.0% cap but wider than the tight cap), so the
+        # selection impact on the −0.73 loss tail is measurable before flipping.
+        if (
+            setup == SetupClass.LIQUIDITY_SWEEP_REVERSAL
+            and not LSR_SL_TIGHTEN_ENABLED
+            and _sl_dist_pct <= _max_sl_pct
+            and _sl_dist_pct > (LSR_MAX_SL_PCT_TIGHT / 100.0)
+        ):
+            log.info(
+                "[SHADOW] LSR_SL_TIGHTEN_WOULD_DROP: %s sl_dist=%.3f%% tight_cap=%.2f%% "
+                "(flag off, no-op)",
+                getattr(signal, "symbol", "?"),
+                _sl_dist_pct * 100,
+                LSR_MAX_SL_PCT_TIGHT,
+            )
         if _sl_dist_pct > _max_sl_pct:
             if _reject_not_compress_protected_setup(setup):
                 log.warning(

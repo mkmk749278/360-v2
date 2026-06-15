@@ -4,6 +4,75 @@
 
 ---
 
+## Session 24 checkpoint 2026-06-15 — signals-quality audit: the bleed is RANGING SR_FLIP/LSR, not the trending exits
+
+### Owner trigger
+Owner reported sustained losses (paper P&L 7d −$34.74) and asked for a full
+audit "per path / per regime / per market / per pair" — why the auto engine
+lags a manual trader.
+
+### Root-cause findings (live data, last-100 signals Jun 13–15)
+- **The bleed is RANGING, not trending.** RANGING = 67% of volume and −7.22%
+  of the −8.7% aggregate. TRENDING_DOWN ≈ flat (−0.12%). The two exit flags
+  that ARE on (`TRENDING_PRETP_SUPPRESSED=True`, `RETRACE_REGIME_AWARE=True`)
+  only touch the ~26% trending slice — they cannot fix a RANGING bleed. That
+  is why flipping them never moved P&L.
+- **Concentrated in two setups:** SR_FLIP_RETEST −4.36% (45 sigs, +0.25/−0.38)
+  and LIQUIDITY_SWEEP_REVERSAL −3.77% (20 sigs, +0.47/−0.73). Both ~1:2
+  win:loss. FAILED_AUCTION_RECLAIM (+0.71, 67% win) and DIVERGENCE_CONTINUATION
+  (+0.42, 60% win) are profitable — leave alone.
+- **0 TP hits / 45 full SL / 55 pre-TP-or-invalidation** across 100. Wins are
+  capped small while losers run to wide structural stops → upside-down R:R.
+- **`entry_regime` is EMPTY on the monitor's signals_last100.json** even with
+  #606 in the tree. signals_last100.json is monitor-augmented (carries
+  non-dataclass fields), so this is NOT authoritative for live FSM state —
+  but it is suspicious. AUTHORITATIVE CHECK PENDING (see open items): read
+  `data/signal_history.json` (raw vars(sig) dump) on the VPS. If empty there,
+  the Session-23 bug is back / engine image predates #606 → rebuild engine.
+- Tokenized-stock blacklist confirmed working (none in last 100).
+
+### Shipped this session (branch `claude/signals-quality-audit-yn1a1f`, NOT yet PR'd to main)
+| Change | File(s) | Default | Reversible |
+|---|---|---|---|
+| Micro-cap momentum-kill bug fix — sub-$0.001 coins no longer get a 10×-tighter kill threshold (momentum is scale-invariant); `INVALIDATION_MOMENTUM_MICROCAP_MULT` default 1.0 | `config`, `trade_monitor.py` | **LIVE (1.0)** | env → 0.1 |
+| `entry_regime`/`entry_regime_15m` stamped into `dispatch_log.json` | `signal_router.py` | live (telemetry) | n/a |
+| RANGING low-ATR loser-suppression gate (SR_FLIP/LSR only, ATR%ile ≤ 25) | `config`, `scanner` | **DARK** + `[SHADOW]` | flag |
+
+All tests green (913 passed in the scanner/quality/invalidation sweep; 4 + 8
+new cases). No PR to main opened yet (owner batching the full package).
+
+### Geometry rebuild (C) — DONE on branch (dark), owner sign-off to activate
+- **SR_FLIP:** already built (#603 pre-TP R-scaling, #604 trailing-arm R-scale)
+  — activation only.
+- **LSR (this session):** win-side `LSR_PRETP_R_SCALING_ENABLED` (pre-TP
+  R-scaling, mirror of #603) + loss-side `LSR_SL_TIGHTEN_ENABLED`
+  (`LSR_MAX_SL_PCT_TIGHT` 1.5%). LSR is reject-not-compress, so the tighten
+  DROPS wide-stop LSRs (no wick-out risk). Both dark + shadow.
+
+### Remaining work (owner)
+1. **Run the authoritative `entry_regime` check** (signal_history.json) + rebuild
+   engine if empty — settles whether the trending exit-flags are actually live.
+2. **Activation sequence (A)** — see runbook below, after merge + 48h shadow.
+
+### Activation runbook (owner — after the entry_regime check + engine rebuild)
+```bash
+cd /root/360-v2
+# AUTHORITATIVE entry_regime check (settles whether the trending flags are live):
+docker exec 360scalp-v2-engine python -c "import json; d=json.load(open('data/signal_history.json')); r=sorted(d,key=lambda x:x.get('timestamp',0))[-6:]; [print(x.get('symbol'),repr(x.get('entry_regime'))) for x in r]"
+# If empty -> rebuild so #606 is actually running:
+docker compose -f docker-compose.yml --profile isolated up -d --no-deps --force-recreate engine
+```
+Then, once this branch is merged to main + deployed, read 48h of shadow counts
+before flipping each flag:
+```bash
+docker logs 360scalp-v2-engine --since 48h 2>&1 | grep -c "\[SHADOW\] RANGING_LOW_ATR_LOSER_SUPPRESS"
+docker logs 360scalp-v2-engine --since 48h 2>&1 | grep -c "\[SHADOW\] MICROCAP_MOMENTUM_SPARED"
+```
+Activation order (one at a time, measure between): SR_FLIP R-scaling (#603) →
+trailing-arm R-scale (#604) → RANGING low-ATR suppression → revisit LSR geometry.
+
+---
+
 ## Session 23 checkpoint 2026-06-10 — entry_regime empty bug found and fixed (PR #606)
 
 ### Root cause finding (drove the session)

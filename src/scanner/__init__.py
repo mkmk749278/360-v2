@@ -60,6 +60,9 @@ from config import (
     MTF_MIN_SCORE_TRENDING_SHORT,
     QUIET_SCALP_MIN_CONFIDENCE,
     RADAR_ALERT_MIN_CONFIDENCE,
+    RANGING_LOW_ATR_LOSER_SUPPRESS_ENABLED,
+    RANGING_LOW_ATR_SUPPRESS_PCTILE,
+    RANGING_LOW_ATR_SUPPRESS_SETUPS,
     REGIME_MIN_VOLUME_USD,
     SCAN_MIN_VOLUME_USD,
     SCAN_SYMBOL_BLACKLIST,
@@ -2990,6 +2993,27 @@ class Scanner:
         return setup_family in _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES
 
     @staticmethod
+    def _should_block_ranging_low_atr_loser(
+        setup_class_name: str,
+        is_ranging: bool,
+        atr_pctile: Optional[float],
+    ) -> bool:
+        """Pure predicate for the RANGING low-ATR loser-setup gate.
+
+        True when a configured loser setup (SR_FLIP_RETEST / LSR) fires into a
+        low-ATR range — the dead chop where mean-reversion scalping bleeds net
+        of fees.  Kept side-effect-free so it is directly unit-testable; the
+        ENABLED-vs-shadow decision stays at the call site.
+        """
+        if not is_ranging:
+            return False
+        if setup_class_name not in RANGING_LOW_ATR_SUPPRESS_SETUPS:
+            return False
+        if atr_pctile is None:
+            return False
+        return atr_pctile <= RANGING_LOW_ATR_SUPPRESS_PCTILE
+
+    @staticmethod
     def _regime_name_from_ctx(ctx: ScanContext, default: str = "RANGING") -> str:
         regime_obj = getattr(getattr(ctx, "regime_result", None), "regime", None)
         if regime_obj is not None and hasattr(regime_obj, "value"):
@@ -4648,6 +4672,60 @@ class Scanner:
             self._suppression_counters[
                 f"ranging_low_adx:family_allowed:{chan_name}:{_setup_family}"
             ] += 1
+
+        # RANGING low-ATR loser-setup suppression (surgical, setup-specific).
+        # SR_FLIP_RETEST and LIQUIDITY_SWEEP_REVERSAL bleed in dead-range chop
+        # (live last-100: −4.36% / −3.77%); they are allowed by the family gate
+        # above, so suppress just those two when RANGING *and* ATR percentile is
+        # very low.  Ships dark with [SHADOW] telemetry until owner activates
+        # RANGING_LOW_ATR_LOSER_SUPPRESS_ENABLED (paid-channel routing change).
+        if (
+            chan_name == "360_SCALP"
+            and ctx.is_ranging
+            and _setup_class_name in RANGING_LOW_ATR_SUPPRESS_SETUPS
+            and ctx.regime_context is not None
+        ):
+            try:
+                _atr_pctile = float(ctx.regime_context.atr_percentile)
+            except (TypeError, ValueError):
+                _atr_pctile = None
+            if self._should_block_ranging_low_atr_loser(
+                _setup_class_name, ctx.is_ranging, _atr_pctile
+            ):
+                if RANGING_LOW_ATR_LOSER_SUPPRESS_ENABLED:
+                    self._suppression_counters[
+                        f"ranging_low_atr:setup_block:{chan_name}:{_setup_class_name}"
+                    ] += 1
+                    self.suppression_tracker.record(SuppressionEvent(
+                        symbol=symbol,
+                        channel=chan_name,
+                        reason="ranging_low_atr_loser_block",
+                        regime=self._regime_name_from_ctx(ctx, default="RANGING"),
+                        would_be_confidence=getattr(sig, "confidence", None),
+                    ))
+                    log.debug(
+                        "Rejected {} {} setup={} (RANGING low ATR%ile {:.0f} <= {:.0f})",
+                        symbol,
+                        chan_name,
+                        _setup_class_name,
+                        _atr_pctile,
+                        RANGING_LOW_ATR_SUPPRESS_PCTILE,
+                    )
+                    return _reject("gated", None)
+                # Dark: count + log what we WOULD suppress so the volume and
+                # would-be PnL impact is measurable before the flag is flipped.
+                self._suppression_counters[
+                    f"shadow:ranging_low_atr:{chan_name}:{_setup_class_name}"
+                ] += 1
+                log.info(
+                    "[SHADOW] RANGING_LOW_ATR_LOSER_SUPPRESS: symbol={} setup={} "
+                    "atr_pctile={:.0f} conf={} — would suppress if enabled",
+                    symbol,
+                    _setup_class_name,
+                    _atr_pctile,
+                    getattr(sig, "confidence", None),
+                )
+
         if not setup.channel_compatible or not setup.regime_compatible:
             if (
                 not setup.regime_compatible

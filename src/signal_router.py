@@ -673,6 +673,8 @@ class SignalRouter:
             "tp2": getattr(signal, "tp2", None),
             "tp3": getattr(signal, "tp3", None),
             "market_phase": getattr(signal, "market_phase", None),
+            "entry_regime": getattr(signal, "entry_regime", None) or None,
+            "entry_regime_15m": getattr(signal, "entry_regime_15m", None) or None,
             "telegram_text": text,
         }
         try:

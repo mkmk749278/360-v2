@@ -591,6 +591,39 @@ async def dispatch_signal_to_active_users(
                         user_pretp_threshold, _r_scaled_threshold,
                     )
 
+        # LSR pre-TP R-scaling (LSR geometry rebuild, win-side — ships dark).
+        # Mirror of the SR_FLIP block above: LSR's structural sweep-stop is wide
+        # while the ATR-adaptive pre-TP banks a tiny +0.47 nibble.  Floor the
+        # threshold at SL_dist_pct × LSR_PRETP_R_FACTOR so surviving wins bank a
+        # real R-multiple.  Does not touch the stop.
+        if (
+            setup_class
+            and setup_class.upper() == "LIQUIDITY_SWEEP_REVERSAL"
+            and user_grab_fraction > 0
+        ):
+            from config import LSR_PRETP_R_FACTOR as _LSR_R_FACTOR
+            from config import LSR_PRETP_R_SCALING_ENABLED as _LSR_RSCALE
+            if sl_price > 0 and entry_price > 0:
+                _lsr_sl_dist_pct = abs(entry_price - sl_price) / entry_price * 100.0
+                _lsr_r_threshold = _lsr_sl_dist_pct * _LSR_R_FACTOR
+                _lsr_binds = _lsr_r_threshold > user_pretp_threshold
+                if _LSR_RSCALE and _lsr_binds:
+                    log.debug(
+                        "signal_dispatch: LSR pre-TP R-scaling raised threshold "
+                        "uid={} signal_id={} sl_dist={:.3f}% old={:.3f}% new={:.3f}%",
+                        uid, signal_id, _lsr_sl_dist_pct,
+                        user_pretp_threshold, _lsr_r_threshold,
+                    )
+                    user_pretp_threshold = _lsr_r_threshold
+                elif not _LSR_RSCALE and _lsr_binds and _shadow_telemetry_on():
+                    log.info(
+                        "signal_dispatch: [SHADOW] LSR_RSCALE_WOULD_RAISE "
+                        "uid={} signal_id={} sl_dist={:.3f}% current={:.3f}% "
+                        "would_raise_to={:.3f}% (flag off, no-op)",
+                        uid, signal_id, _lsr_sl_dist_pct,
+                        user_pretp_threshold, _lsr_r_threshold,
+                    )
+
         # Per-user invalidation aggressiveness (B17).  Stored on the
         # Position at placement time so the per-user FSM path can
         # enforce the correct mode when per-user soft-invalidation
