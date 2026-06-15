@@ -41,12 +41,18 @@ lags a manual trader.
 All tests green (913 passed in the scanner/quality/invalidation sweep; 4 + 8
 new cases). No PR to main opened yet (owner batching the full package).
 
-### Remaining work (owner sign-off — Position FSM / routing / scoring)
-1. **Geometry rebuild (C) — SR_FLIP + LSR R:R.** SR_FLIP piece is already built
-   and dark (#603 pre-TP R-scaling, #604 trailing-arm R-scale) — activation only.
-   LSR has no equivalent; its stop sits beyond swept liquidity so it must NOT be
-   naively tightened. Design pending owner sign-off on specific numbers.
-2. **Activation sequence (A)** for the built dark flags — see runbook below.
+### Geometry rebuild (C) — DONE on branch (dark), owner sign-off to activate
+- **SR_FLIP:** already built (#603 pre-TP R-scaling, #604 trailing-arm R-scale)
+  — activation only.
+- **LSR (this session):** win-side `LSR_PRETP_R_SCALING_ENABLED` (pre-TP
+  R-scaling, mirror of #603) + loss-side `LSR_SL_TIGHTEN_ENABLED`
+  (`LSR_MAX_SL_PCT_TIGHT` 1.5%). LSR is reject-not-compress, so the tighten
+  DROPS wide-stop LSRs (no wick-out risk). Both dark + shadow.
+
+### Remaining work (owner)
+1. **Run the authoritative `entry_regime` check** (signal_history.json) + rebuild
+   engine if empty — settles whether the trending exit-flags are actually live.
+2. **Activation sequence (A)** — see runbook below, after merge + 48h shadow.
 
 ### Activation runbook (owner — after the entry_regime check + engine rebuild)
 ```bash
