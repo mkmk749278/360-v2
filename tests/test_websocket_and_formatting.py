@@ -1437,15 +1437,18 @@ class TestHealthCheckLoopForceClose:
         fake = _FakeClosableWS()
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
 
-        now = time.monotonic()
-        # Make this test hermetic. It passed locally but failed only in CI,
-        # which means the force-close decision was reading a different value
-        # for one of these inputs there. Pin every input the decision depends
-        # on:
-        #   * the module clock, so the loop's internal time.monotonic()
-        #     (websocket_manager.py:1204) equals `now` exactly;
-        #   * the three thresholds, so an env override or any cross-test global
-        #     mutation in the full-suite run can't perturb them.
+        # Use a LARGE fixed monotonic value, not the real clock. A freshly
+        # booted CI runner's time.monotonic() can be only a few hundred
+        # seconds, so `now - 300.0` for connected_ts went NEGATIVE there. The
+        # loop guards `conn_age = now - connected_ts if connected_ts > 0 else
+        # 0.0` (websocket_manager.py:1223), so a negative connected_ts
+        # collapsed conn_age to 0 → under-age → force-close skipped. Locally
+        # the host's monotonic is huge so it never reproduced. A large fixed
+        # value keeps every hand-set timestamp positive; freezing the module
+        # clock to it makes the loop read the same value. (Production
+        # connected_ts is always a real positive timestamp, so the guard and
+        # the loop logic are correct — this was only a test artifact.)
+        now = 1_000_000.0
         monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
         monkeypatch.setattr("src.websocket_manager.WS_MIN_MESSAGE_RATE", 1.0)
         monkeypatch.setattr(
@@ -1500,9 +1503,9 @@ class TestHealthCheckLoopForceClose:
         fake = _FakeClosableWS()
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
 
-        now = time.monotonic()
-        # Freeze the clock + pin thresholds — see
-        # test_force_close_after_threshold_window.
+        # Large fixed monotonic value + frozen clock + pinned thresholds —
+        # see test_force_close_after_threshold_window for why.
+        now = 1_000_000.0
         monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
         monkeypatch.setattr("src.websocket_manager.WS_MIN_MESSAGE_RATE", 1.0)
         monkeypatch.setattr(
@@ -1541,9 +1544,9 @@ class TestHealthCheckLoopForceClose:
         fake = _FakeClosableWS()
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
 
-        now = time.monotonic()
-        # Freeze the clock + pin thresholds — see
-        # test_force_close_after_threshold_window.
+        # Large fixed monotonic value + frozen clock + pinned thresholds —
+        # see test_force_close_after_threshold_window for why.
+        now = 1_000_000.0
         monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
         monkeypatch.setattr("src.websocket_manager.WS_MIN_MESSAGE_RATE", 1.0)
         monkeypatch.setattr(
