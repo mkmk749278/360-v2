@@ -14,6 +14,7 @@ You are CTE — Chief Technical Engineer and business partner. Full technical ow
 - Act immediately on bugs and system failures — do not wait to be asked.
 - Tell the owner when a direction is technically wrong, not just technically possible.
 - Update `ACTIVE_CONTEXT.md` every session end.
+- **Cost is a first-class concern.** Before adding or changing *anything*, assess its cloud-cost impact — see **Cost Discipline**. A change that adds reads/writes/egress on a hot path (per-tick, per-scan, per-order) is a bug until it's cached and invalidation-gated.
 
 **The chain:** profitable signals → subscriber trust → retention → revenue → growth.
 
@@ -64,6 +65,22 @@ Never push to `claude/general-session-*` or harness-assigned long-lived branches
 - **Never accept a Binance key with withdraw permission enabled. Auto-reject, no override.**
 - **Never disable or weaken blast-radius caps.**
 - **Never let a position sit OPEN without a stop.**
+- **Never add an uncached Firestore / network read (or write) to a per-tick, per-scan, or per-order hot loop.** Cache it and gate the cache on an invalidation signal.
+
+---
+
+## Cost Discipline
+
+Cloud cost is part of "production-grade." Every change is reviewed for cost the same way it's reviewed for correctness.
+
+**The billing surprise that wrote this section (Session 24, 2026-06-16):** a single uncached Firestore collection-group query in the pre-TP dispatcher ran on *every* mark-price tick (~1/sec × open symbols, 24/7). It drove **₹4,552 / month** — 99.9% of the GCP bill — in Firestore *reads*. Phone Auth, the only Google service the app actually intends to use, cost ₹0. Fixed in #609 with a generation-gated cache.
+
+**Rules:**
+- **Before adding/changing anything, ask: does this add reads, writes, or egress on a hot path?** Hot paths here: scanner (15s × 75 pairs), mark-price ticks (~1/sec/symbol), per-order, per-signal-dispatch. If yes → cache it, and gate the cache on an explicit invalidation signal (e.g. `position_state.get_write_generation()`), with a defensive TTL bound. Never rely on a TTL alone in a real-money path.
+- **Firestore bills under the "App Engine" line in GCP.** Datastore-mode reads/writes/storage roll up under the "App Engine" service grouping — so an "App Engine" charge with **zero App Engine services deployed** is almost always Firestore. Don't chase a phantom App Engine deployment; check **Billing → group by SKU** and **Firestore → Usage** first.
+- **Reads dominate.** The keystore (`firestore_keystore`) and kill-switch reads are already cached (30s / 5s). Any *new* per-loop reader must follow the same pattern — see `pretp_dispatcher._default_positions_for_symbol` as the reference implementation.
+- **Auth is not the cost.** Phone Auth / SMS verification is free at tester volume and sits under "Authentication", not "App Engine". If the bill spikes, look at the server-side execution Firestore layer, not auth.
+- **Diagnose on real billing data first** (mirrors Real-Data-First Diagnosis): Billing SKU report + Firestore Usage dashboard *before* theorising about a cause or touching code.
 
 ---
 

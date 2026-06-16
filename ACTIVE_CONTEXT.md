@@ -4,6 +4,56 @@
 
 ---
 
+## Session 25 checkpoint 2026-06-16 — GCP cost spike was Firestore reads, not auth (PR #609, MERGED)
+
+### Owner trigger
+Owner shared the `lumin-app` GCP/Firebase billing screens: ₹4,558/mo with a
+climbing forecast, asking why "phone-number authentication only" was costing
+so much. The "App Engine" line dominated despite **no App Engine services
+deployed**.
+
+### Root cause (confirmed on live billing data)
+- **99.9% of the bill is Cloud Firestore — ₹4,552 — and specifically READS.**
+  Writes/deletes sat inside the free tier; the read free-tier quota was
+  exceeded daily. **Phone Auth / SMS = ₹0 (0% of quota).** Auth was never the
+  cost — it was a red herring.
+- **Why "App Engine" with no App Engine services:** Firestore-in-Datastore-mode
+  bills under the "App Engine" SKU grouping in GCP. Confirmed via Billing →
+  SKU breakdown (Cloud Firestore ₹4,552.25, non-Firebase ₹5.88) + the Firebase
+  Usage tab ("Reads: limit exceeded").
+- **The leak:** `pretp_dispatcher._on_tick` ran a Firestore collection-group
+  query on *every* mark-price tick (~1/sec × open symbols, 24/7) to find OPEN
+  positions. The module header already flagged it as `O(N) per tick` debt.
+
+### Shipped (branch `claude/google-services-cost-analysis-w61lnc`, PR #609 — MERGED to main)
+| Change | File(s) | Notes |
+|---|---|---|
+| `_write_generation` counter, bumped on `put_position`/`delete_position`; `get_write_generation()` | `position_state.py` | the freshness signal |
+| Per-symbol OPEN-positions cache gated on that generation (+ defensive 10s TTL) | `pretp_dispatcher.py` | removes Firestore from the per-tick hot path |
+| Cache tests (generation invalidation, TTL expiry, per-symbol, put/delete bump) | `tests/test_pretp_dispatcher_cache.py` | 5 new; 325 in the exec suite pass; ruff clean |
+
+Correctness: the cache cannot serve a stale `pretp_fired`/`state` and double-fire
+— every mutation funnels through `put_position`/`delete_position`, both of which
+bump the generation and invalidate. No change to pre-TP threshold/firing logic.
+
+### Process changes (this session)
+- **`CLAUDE.md` gained a "Cost Discipline" section** + a Hard Limit ("never add
+  an uncached Firestore/network read to a hot loop") + an operating-standard
+  bullet ("cost is a first-class concern"). Every future change is reviewed for
+  cost the way it's reviewed for correctness.
+
+### Follow-up (not done)
+- **Full in-memory open-positions index** would eliminate even the cold-path
+  query (zero reads). The generation-gated cache is the lower-risk first step;
+  the index is the next optimisation if reads still register.
+- **No PR-level CI exists** in this repo (only `deploy.yml` on push-to-main +
+  manual `vps-monitor`). Local test/lint runs are the only pre-merge gate today
+  — worth adding a PR test workflow.
+- Confirm the bill drops after the engine redeploys with #609 (reads keep
+  accruing until the new image is live).
+
+---
+
 ## Session 24 checkpoint 2026-06-15 — signals-quality audit: the bleed is RANGING SR_FLIP/LSR, not the trending exits
 
 ### Owner trigger
