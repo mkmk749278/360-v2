@@ -12,7 +12,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime, timezone
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Tuple
+from typing import Any, Callable, Coroutine, Dict, List, Tuple
 
 from config import (
     CONTENT_ENGINE_ENABLED,

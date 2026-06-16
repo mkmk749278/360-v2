@@ -617,8 +617,6 @@ def parse_pre_tp_fires_from_logs(log_text: str) -> Dict[str, Any]:
     threshold_total = 0.0
     net_total = 0.0
     age_total = 0.0
-    atr_pct_total = 0.0
-    atr_pct_samples = 0
     fires = 0
 
     for line in log_text.splitlines():

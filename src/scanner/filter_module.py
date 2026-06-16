@@ -10,7 +10,7 @@ PR 01 Implementation.
 from __future__ import annotations
 
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict
 
 from src.pair_metrics import PairMetrics, compute_pair_score
 from src.utils import get_logger

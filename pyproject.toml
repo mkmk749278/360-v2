@@ -30,3 +30,10 @@ target-version = "py311"
 [tool.ruff.lint]
 select = ["E", "W", "F"]
 ignore = ["E501", "E741"]
+
+[tool.ruff.lint.per-file-ignores]
+# Package __init__ modules are re-export hubs — e.g. src/scanner_core.py does
+# `from src.scanner import *`, so names imported in src/scanner/__init__.py are
+# part of the public surface even when unused inside the file itself. F401
+# (unused-import) is conventionally ignored for __init__.py for this reason.
+"__init__.py" = ["F401", "E402"]

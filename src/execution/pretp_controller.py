@@ -44,7 +44,6 @@ mark price and we do the rest.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Callable, Optional
 
 from src.utils import get_logger
 

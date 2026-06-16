@@ -10,7 +10,7 @@ PR 02 Implementation.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional, Tuple
+from typing import Tuple
 
 import numpy as np
 

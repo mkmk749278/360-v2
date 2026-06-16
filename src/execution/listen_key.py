@@ -26,7 +26,6 @@ from dataclasses import dataclass
 from typing import Optional
 
 from src.security.signing_service import client as signing_client
-from src.security.signing_service.protocol import SignResponse
 from src.utils import get_logger
 
 log = get_logger("execution.listen_key")

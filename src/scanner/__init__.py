@@ -1341,8 +1341,6 @@ class Scanner:
                 results["error"] = f"No 5m candle data for {symbol}"
                 return results
 
-            close = float(closes_5m[-1])
-
             _candle_dict_for_ind: dict = {
                 tf: candles[tf] for tf in ("1m", "5m", "15m", "1h") if tf in candles
             }
@@ -1797,9 +1795,9 @@ class Scanner:
                 if self._ws_any_degraded_this_cycle and len(filtered_pairs) > WS_DEGRADED_MAX_PAIRS:
                     filtered_pairs = filtered_pairs[:WS_DEGRADED_MAX_PAIRS]
                     log.warning(
-                        "WS partially degraded (spot_ratio={:.0%}, futures_ratio={:.0%}) "
+                        "WS partially degraded (futures_ratio={:.0%}) "
                         "— limiting scan to top {} pairs to protect REST rate limit",
-                        ws_spot_ratio, ws_futures_ratio, WS_DEGRADED_MAX_PAIRS,
+                        ws_futures_ratio, WS_DEGRADED_MAX_PAIRS,
                     )
 
                 # PR 3 — Tier-aware REST fallback: issue a single weight-
@@ -5921,7 +5919,7 @@ class Scanner:
                     sig.confidence = max(0.0, sig.confidence - _pa_penalty)
                     _existing_flags = sig.soft_gate_flags or ""
                     sig.soft_gate_flags = (
-                        _existing_flags + f",pair_analysis:weak_penalty"
+                        _existing_flags + ",pair_analysis:weak_penalty"
                     ).lstrip(",")
                     self._suppression_counters[f"pair_analysis:weak_penalty:{chan_name}"] += 1
                     log.debug(

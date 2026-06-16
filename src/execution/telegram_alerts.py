@@ -35,7 +35,7 @@ record via journalctl / Telegram-deliverable log file.
 from __future__ import annotations
 
 import threading
-from typing import Any, Optional
+from typing import Any
 
 from src.utils import get_logger
 

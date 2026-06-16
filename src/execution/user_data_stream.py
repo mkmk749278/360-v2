@@ -22,9 +22,8 @@ user → trivial CPU load.
 
 from __future__ import annotations
 
-import asyncio
 import json
-from typing import Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 from src.utils import get_logger
 

@@ -18,6 +18,7 @@ import collections
 import os
 import signal
 import time
+from datetime import datetime
 from typing import Any, Dict, Deque, List, Optional, Set, Tuple, Union
 
 from config import (
@@ -83,7 +84,6 @@ from config import (
     CHANNEL_TELEGRAM_MAP,
     ONCHAIN_API_KEY,
     PERFORMANCE_TRACKER_PATH,
-    AUTO_EXECUTION_ENABLED,
     AUTO_EXECUTION_MODE,
     EXCHANGE_ID,
     EXCHANGE_API_KEY,

@@ -15,7 +15,6 @@ from src.pair_analyzer import (
     PairRecommendation,
     PairSignalQuality,
     PairSnapshot,
-    build_pair_snapshot,
     compute_pair_signal_quality,
     generate_pair_recommendations,
 )
