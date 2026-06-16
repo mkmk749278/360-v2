@@ -1438,13 +1438,23 @@ class TestHealthCheckLoopForceClose:
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
 
         now = time.monotonic()
-        # Freeze the module clock so the loop's internal time.monotonic()
-        # (websocket_manager.py:1204) reads exactly `now`. The force-close
-        # decision then depends only on the hand-set timestamps below, not on
-        # real-clock drift between this line and the loop body — the source of
-        # an intermittent CI flake.
+        # Make this test hermetic. It passed locally but failed only in CI,
+        # which means the force-close decision was reading a different value
+        # for one of these inputs there. Pin every input the decision depends
+        # on:
+        #   * the module clock, so the loop's internal time.monotonic()
+        #     (websocket_manager.py:1204) equals `now` exactly;
+        #   * the three thresholds, so an env override or any cross-test global
+        #     mutation in the full-suite run can't perturb them.
         monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
-        # Connection is well past min-conn-age (default 120s)
+        monkeypatch.setattr("src.websocket_manager.WS_MIN_MESSAGE_RATE", 1.0)
+        monkeypatch.setattr(
+            "src.websocket_manager.WS_LOW_MSGRATE_FORCE_CLOSE_AFTER_SEC", 90
+        )
+        monkeypatch.setattr(
+            "src.websocket_manager.WS_HEALTH_CHECK_MIN_CONN_AGE_SEC", 120
+        )
+        # Connection is well past min-conn-age (120s)
         conn.connected_ts = now - 300.0
         # Last health check was 60s ago, with 0 TEXT msgs in the window
         conn.health_check_ts = now - 60.0
@@ -1463,7 +1473,15 @@ class TestHealthCheckLoopForceClose:
 
         await ws._health_check_loop()
 
-        assert fake.close_calls == 1, "force-close should fire when rate stays low past threshold"
+        # Rich failure message: if this still fails in CI, the computed rate +
+        # the post-loop timer state pinpoint which branch was taken without a
+        # second round-trip.
+        assert fake.close_calls == 1, (
+            "force-close should fire when rate stays low past threshold; "
+            f"computed_rates={ws._connection_message_rates} "
+            f"low_msgrate_since_after={conn.low_msgrate_since} "
+            f"closed={fake.closed} alerts={alerts_seen}"
+        )
         assert fake.closed is True
         assert any("data-silent" in a for a in alerts_seen), "admin alert should fire on force-close"
 
@@ -1483,8 +1501,16 @@ class TestHealthCheckLoopForceClose:
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
 
         now = time.monotonic()
-        # Freeze the module clock — see test_force_close_after_threshold_window.
+        # Freeze the clock + pin thresholds — see
+        # test_force_close_after_threshold_window.
         monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
+        monkeypatch.setattr("src.websocket_manager.WS_MIN_MESSAGE_RATE", 1.0)
+        monkeypatch.setattr(
+            "src.websocket_manager.WS_LOW_MSGRATE_FORCE_CLOSE_AFTER_SEC", 90
+        )
+        monkeypatch.setattr(
+            "src.websocket_manager.WS_HEALTH_CHECK_MIN_CONN_AGE_SEC", 120
+        )
         # Connection is FRESH — only 10s old, well under 120s min-conn-age
         conn.connected_ts = now - 10.0
         conn.health_check_ts = now - 60.0
@@ -1516,8 +1542,16 @@ class TestHealthCheckLoopForceClose:
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
 
         now = time.monotonic()
-        # Freeze the module clock — see test_force_close_after_threshold_window.
+        # Freeze the clock + pin thresholds — see
+        # test_force_close_after_threshold_window.
         monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
+        monkeypatch.setattr("src.websocket_manager.WS_MIN_MESSAGE_RATE", 1.0)
+        monkeypatch.setattr(
+            "src.websocket_manager.WS_LOW_MSGRATE_FORCE_CLOSE_AFTER_SEC", 90
+        )
+        monkeypatch.setattr(
+            "src.websocket_manager.WS_HEALTH_CHECK_MIN_CONN_AGE_SEC", 120
+        )
         conn.connected_ts = now - 300.0
         conn.health_check_ts = now - 60.0
         # 60 msgs in 60s = 60 msgs/min = healthy
