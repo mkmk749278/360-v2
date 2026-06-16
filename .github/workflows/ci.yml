@@ -33,12 +33,9 @@ jobs:
           pip install -r requirements.txt
           pip install ruff
 
-      # Informational only for now: the tree carries ~115 pre-existing
-      # ruff findings. Surfaced on every PR so the debt is visible and
-      # new code can be kept clean, but not yet blocking. Flip
-      # continue-on-error to false once src/ + config/ are clean.
-      - name: Lint (ruff, non-blocking)
-        continue-on-error: true
+      # Blocking gate: src/ + config/ are ruff-clean as of this PR, so lint
+      # failures now fail CI. Keep new code clean to keep this green.
+      - name: Lint (ruff)
         run: ruff check src/ config/
 
       # Blocking gate. Mirrors the local command in CLAUDE.md.

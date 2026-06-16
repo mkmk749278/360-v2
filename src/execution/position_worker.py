@@ -23,7 +23,7 @@ tripwires — all live in PR-6+ on top of this scaffold.
 from __future__ import annotations
 
 import asyncio
-from typing import Awaitable, Callable, Optional
+from typing import Callable, Optional
 
 from src.security.signing_service import client as signing_client
 from src.utils import get_logger

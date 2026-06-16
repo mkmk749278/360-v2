@@ -54,8 +54,7 @@ import os
 import threading
 import time
 from collections import defaultdict, deque
-from dataclasses import dataclass
-from typing import Deque, Dict, Optional, Set
+from typing import Any, Deque, Dict, Optional, Set
 
 from src.utils import get_logger
 

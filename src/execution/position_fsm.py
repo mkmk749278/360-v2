@@ -29,7 +29,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import datetime, timezone
-from typing import Any, Awaitable, Callable, Optional
+from typing import Callable, Optional
 
 from config import trail_atr_multiplier as _trail_atr_mult
 

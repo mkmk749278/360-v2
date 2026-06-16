@@ -17,13 +17,13 @@ from src.smc import Direction
 _DEFAULT_RSI_OB: float = 75.0
 _DEFAULT_RSI_OS: float = 25.0
 _DEFAULT_BB_TOUCH_PCT: float = 0.002
-from src.structural_levels import (
+from src.structural_levels import (  # noqa: E402
     find_round_numbers,
     find_structural_sl,
     find_structural_tp,
     find_swing_levels,
 )
-from src.utils import utcnow
+from src.utils import utcnow  # noqa: E402
 
 # ---------------------------------------------------------------------------
 # Volatility-adaptive TP ratio constants
@@ -550,7 +550,6 @@ def build_channel_signal(
             )
             if structural_sl != sl:
                 sl = structural_sl
-                sig_sl = round(sl, 8)
 
             # Adjust TP1 to nearest structural level
             structural_tp1 = find_structural_tp(

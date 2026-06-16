@@ -72,7 +72,7 @@ _WEEKEND_KILL_ZONE_SUN_END = 21    # Sunday hour (UTC) when weekend dead zone en
 # ---------------------------------------------------------------------------
 # Per-pair session multipliers (item 18)
 # ---------------------------------------------------------------------------
-import os as _os
+import os as _os  # noqa: E402
 
 #: Meme/low-correlation coins hard-blocked during Asian session (no institutional flow).
 #: Configurable via comma-separated env var MEME_COIN_BLOCK_ASIAN_SESSION_SYMBOLS.

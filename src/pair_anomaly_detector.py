@@ -9,7 +9,7 @@ automatic signal suppression.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 
 from src.performance_metrics import is_breakeven_pnl
 from src.utils import get_logger

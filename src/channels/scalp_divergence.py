@@ -114,7 +114,6 @@ class ScalpDivergenceChannel(BaseChannel):
             if len(hist_raw) >= _DIV_LOOKBACK:
                 macd_hist = [float(v) if not np.isnan(v) else 0.0 for v in hist_raw[-_DIV_LOOKBACK:]]
 
-        price_window = [float(c) for c in closes[-_DIV_LOOKBACK:]]
         low_window = [float(l) for l in lows[-_DIV_LOOKBACK:]]
         high_window = [float(h) for h in highs[-_DIV_LOOKBACK:]]
 

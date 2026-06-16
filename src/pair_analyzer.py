@@ -454,8 +454,8 @@ def generate_pair_recommendations(
             priority="HIGH",
             title=f"Declining performance for {symbol}",
             description=(
-                f"Performance trend is DEGRADING over the analysis period. "
-                f"Consistency trend shows weakening signal quality."
+                "Performance trend is DEGRADING over the analysis period. "
+                "Consistency trend shows weakening signal quality."
             ),
             expected_impact="Early warning of pair deterioration",
         ))

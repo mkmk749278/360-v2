@@ -41,7 +41,6 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from src.security.signing_service import client as signing_client
-from src.security.signing_service import protocol as sig_protocol
 from src.utils import get_logger
 
 from . import position_state as _position_state

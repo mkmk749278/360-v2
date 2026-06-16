@@ -33,8 +33,8 @@ or removing a field is a breaking change for downstream consumers
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Union
+from dataclasses import dataclass
+from typing import Any, Dict, List, Union
 
 
 # ---------------------------------------------------------------------------

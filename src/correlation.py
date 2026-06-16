@@ -9,7 +9,7 @@ Also provides rolling Pearson correlation vs BTC and lead/lag detection.
 from __future__ import annotations
 
 import os
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Dict, List, Set, Tuple
 
 import numpy as np
 

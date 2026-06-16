@@ -48,7 +48,7 @@ WHALE_TRADE_USD_THRESHOLD: float = _env_float("WHALE_TRADE_USD_THRESHOLD", 100_0
 VOLUME_DELTA_SPIKE_MULTIPLIER: float = _env_float(
     "VOLUME_DELTA_SPIKE_MULTIPLIER", 1.3,
 )
-from src.utils import get_logger
+from src.utils import get_logger  # noqa: E402
 
 log = get_logger("detector")
 

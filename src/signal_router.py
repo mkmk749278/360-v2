@@ -40,7 +40,7 @@ from src.risk import RiskManager
 from src.smc import Direction
 from src.utils import get_logger
 from src.ai_engine.predictor import SignalPredictor, PredictionFeatures
-from src.ai_engine.scorer import AIConfidenceScorer, AIScoreResult
+from src.ai_engine.scorer import AIConfidenceScorer
 from src.cornix_formatter import format_cornix_signal
 
 log = get_logger("signal_router")

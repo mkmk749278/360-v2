@@ -142,16 +142,21 @@ class TestReconnectDurationInstrumentation:
         assert conn.degraded is True
         assert conn.degraded_since > 0
 
-    def test_restore_records_duration_and_clears_degraded_since(self):
+    def test_restore_records_duration_and_clears_degraded_since(self, monkeypatch):
         """Drop → restored cycle stamps last_reconnect_ms and clears
         degraded_since (so the next degradation starts fresh)."""
         async def handler(data): pass
         ws = WebSocketManager(handler, market="futures")
         conn = WSConnection(streams=["btcusdt@kline_1m"])
         ws._connections = [conn]
+        # Freeze the module clock at a large fixed value so the hand-set
+        # degraded_since stays positive regardless of runner uptime (a fresh
+        # CI runner's real monotonic can be below the offset, going negative).
+        now = 1_000_000.0
+        monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
         ws._set_connection_degraded(conn, True)
         # Simulate elapsed time by hand-rolling degraded_since.
-        conn.degraded_since = time.monotonic() - 25.0
+        conn.degraded_since = now - 25.0
         ws._set_connection_degraded(conn, False)
         assert conn.degraded is False
         assert conn.degraded_since == 0.0
@@ -188,10 +193,13 @@ class TestReconnectDurationInstrumentation:
         # Still exactly 1 recovery counted.
         assert ws.ws_reconnection_count == 1
 
-    def test_get_connection_states_emits_per_connection_snapshot(self):
+    def test_get_connection_states_emits_per_connection_snapshot(self, monkeypatch):
         async def handler(data): pass
         ws = WebSocketManager(handler, market="futures")
-        now = time.monotonic()
+        # Large fixed clock so degraded_since stays positive on a low-uptime
+        # runner (see test_restore_records_duration_and_clears_degraded_since).
+        now = 1_000_000.0
+        monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
         mock_open = mock.MagicMock()
         mock_open.closed = False
         conn1 = WSConnection(

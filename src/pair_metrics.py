@@ -8,7 +8,6 @@ signal probability scores.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Optional
 
 from src.utils import get_logger
 

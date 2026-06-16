@@ -102,7 +102,6 @@ def format_signal(ctx: Dict[str, Any], variant: Optional[int] = None) -> str:
     if variant is None:
         variant = _select_signal_variant(conf, signals_last_hour, is_first_signal)
 
-    tp3_line = f"TP3     {tp3:.4f}  · {_pct(entry, tp3)}" if tp3 else ""
     rr = _rr_str(entry, tp2 if tp2 else tp1, sl)
     setup_emoji = SETUP_EMOJIS.get(setup_name, "⚡")
 

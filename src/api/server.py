@@ -56,14 +56,11 @@ from src.utils import get_logger
 
 from . import firebase_auth
 from .auth import (
-    ALL_ACCESS_TIER,
     OWNER_TIER,
     AuthError,
     TokenClaims,
     decode_token,
-    mint_token,
     mint_user_token,
-    refresh_token,
 )
 from .billing_callback import SIGNATURE_HEADER, BillingWebhookVerifier
 from .otp import IssueStatus, OtpStore, VerifyStatus
@@ -88,7 +85,6 @@ from .schemas import (
     OtpRequest,
     OtpRequestResponse,
     OtpVerify,
-    PaperResetResponse,
     PnlHistoryResponse,
     PositionsDiagResponse,
     PositionsResponse,
@@ -104,8 +100,6 @@ from .schemas import (
     TelegramOtpVerifyRequest,
     TelegramOtpVerifyResponse,
     TickersResponse,
-    TradeListResponse,
-    TradeRecord,
     UserAutoTradeSettings,
     UserInvalidationSettings,
     UserPretpSettings,
@@ -1515,7 +1509,6 @@ def build_app(
             PRE_TP_GRAB_FRACTION,
             PRE_TP_MAX_AGE_SEC,
             PRE_TP_MIN_AGE_SEC,
-            PRE_TP_SETUP_BLACKLIST,
             PRE_TP_THRESHOLD_PCT,
         )
         stored = _user_settings.get_pretp()

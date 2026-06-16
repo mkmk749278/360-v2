@@ -17,7 +17,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
-from config import CHANNEL_SCALP, SURGE_VOLUME_MULTIPLIER, FUNDING_RATE_EXTREME_THRESHOLD, SCALP_ORB_ENABLED
+from config import CHANNEL_SCALP, FUNDING_RATE_EXTREME_THRESHOLD, SCALP_ORB_ENABLED
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import (
     check_adx,
@@ -471,7 +471,7 @@ def _enforce_tp_ladder_monotonicity(
 # See: audit 2026-04-24, Item #7 design spec.
 # ═══════════════════════════════════════════════════════════════════════════
 
-from dataclasses import dataclass as _dataclass
+from dataclasses import dataclass as _dataclass  # noqa: E402
 
 
 @_dataclass(frozen=True)
@@ -1747,11 +1747,9 @@ class ScalpChannel(BaseChannel):
         _cascade_threshold = max(1.5, min(3.5, _atr_raw / close_now * 100.0 * 3.0))
 
         if cascade_pct <= -_cascade_threshold:
-            cascade_direction = Direction.SHORT  # Price fell — potential LONG reversal
-            reversal_direction = Direction.LONG
+            reversal_direction = Direction.LONG   # Price fell — potential LONG reversal
         elif cascade_pct >= _cascade_threshold:
-            cascade_direction = Direction.LONG   # Price rose — potential SHORT reversal
-            reversal_direction = Direction.SHORT
+            reversal_direction = Direction.SHORT  # Price rose — potential SHORT reversal
         else:
             return self._reject("cascade_threshold_not_met")
 
@@ -2012,8 +2010,10 @@ class ScalpChannel(BaseChannel):
         # direction.
         #
         # Three-tier behaviour:
-        #   1. order_book is None (circuit breaker open): skip OBI entirely;
-        #      flag obi_confirmed=False so a +10 soft penalty is applied.
+        #   1. order_book is None (circuit breaker open): skip OBI entirely.
+        #      NOTE: no penalty is applied in this case today — obi_penalty stays
+        #      0.0 when order_book is None. The prior `obi_confirmed=False -> +10`
+        #      design was never wired up; flagged for signal-quality review.
         #   2. order_book source=book_ticker (top-of-book only): treat as
         #      partial/degraded evidence, never as full depth confirmation.
         #   3. order_book present, ratio ≥ _WHALE_OBI_MIN (1.5×): full
@@ -2027,7 +2027,6 @@ class ScalpChannel(BaseChannel):
         #      ratio < _WHALE_OBI_SOFT_MIN in any regime: hard reject — the order
         #      book actively contradicts the assumed whale direction.
         order_book = smc_data.get("order_book")
-        obi_confirmed = False
         obi_penalty = 0.0
         if order_book is not None:
             ob_source = str(order_book.get("source") or "").strip().lower() if isinstance(order_book, dict) else ""
@@ -2049,7 +2048,7 @@ class ScalpChannel(BaseChannel):
                     bid_depth / ask_depth if direction == Direction.LONG else ask_depth / bid_depth
                 )
                 if imbalance_ratio >= _WHALE_OBI_MIN:
-                    obi_confirmed = True
+                    pass  # strong OBI (ratio >= _WHALE_OBI_MIN) — full confirmation, no penalty
                 elif regime_upper in _WHALE_FAST_REGIMES and imbalance_ratio >= _WHALE_OBI_SOFT_MIN:
                     # Marginal OBI in a fast regime: soft penalty, not hard reject
                     obi_penalty = 8.0
@@ -2921,8 +2920,6 @@ class ScalpChannel(BaseChannel):
         #          highs[-50:-9]   highs[-9:-1]              highs[-1]
         # The 8-candle closed search window (up from 5) accommodates retests that
         # arrive 6–7 bars after the structural break.
-        prior_highs = [float(h) for h in highs[-50:-9]]
-        prior_lows = [float(l) for l in lows[-50:-9]]
         # Breakout confirmation is evaluated on the closed-candle window before the
         # immediate prior candle. The immediate prior candle is reserved for hold/reclaim
         # evidence in the retest sequence.
@@ -3429,7 +3426,6 @@ class ScalpChannel(BaseChannel):
         regime: str = "",
     ) -> Optional[Signal]:
         """FUNDING_EXTREME_SIGNAL: contrarian signal when funding rate is extreme."""
-        regime_upper = regime.upper() if regime else ""
         # QUIET block removed: extreme funding is the quality gate, not regime.
         # Market spends ~78% of time in QUIET, which was starving this path.
 
