@@ -1619,6 +1619,28 @@ RANGING_LOW_ATR_SUPPRESS_SETUPS: frozenset = frozenset(
     if s.strip()
 )
 
+# Full SR_FLIP_RETEST suppression — the setup-level kill switch.
+#
+# Counterfactual on the 7-day book (n=106, ops dashboard export 2026-06-16):
+# WITH SR_FLIP_RETEST the book is +6.46% (avg +0.061/signal); WITHOUT it,
+# +12.78% over 63 signals (avg +0.203/signal — 3.3x better per signal).
+# SR_FLIP is also ~40% of all signal volume, so it is the dominant drag.
+#
+# No slice of SR_FLIP is salvageable: LONG (-0.16) ~= SHORT (-0.16), and
+# confidence INVERTS — conf<70 is ~flat (+0.01) while conf>=75 is the WORST
+# (-0.46, 0/3 wins).  So a higher score threshold makes it worse, not better;
+# the only effective lever is to stop it emitting.  Unlike the narrow
+# RANGING_LOW_ATR gate above, SR_FLIP bleeds across every regime/side/score
+# slice, hence an unconditional kill.  LIQUIDITY_SWEEP_REVERSAL is explicitly
+# NOT included — it has since turned net-positive (+0.171 over 14).
+#
+# Ships dark (flag false) with [SHADOW] telemetry so the suppressed volume is
+# measurable before activation.  Paid-channel routing change — owner sign-off
+# required to set SR_FLIP_RETEST_SUPPRESS_ENABLED=true on the VPS.
+SR_FLIP_RETEST_SUPPRESS_ENABLED: bool = _safe_bool(
+    "SR_FLIP_RETEST_SUPPRESS_ENABLED", "false"
+)
+
 # Number of *consecutive* below-threshold momentum readings required before a
 # signal is invalidated for momentum loss.  A single weak reading is common on
 # 1m/5m candles (price pauses before continuation) — requiring two consecutive

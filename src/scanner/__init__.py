@@ -64,6 +64,7 @@ from config import (
     RANGING_LOW_ATR_SUPPRESS_PCTILE,
     RANGING_LOW_ATR_SUPPRESS_SETUPS,
     REGIME_MIN_VOLUME_USD,
+    SR_FLIP_RETEST_SUPPRESS_ENABLED,
     SCAN_MIN_VOLUME_USD,
     SCAN_SYMBOL_BLACKLIST,
     SEED_TIMEFRAMES,
@@ -3012,6 +3013,21 @@ class Scanner:
         return atr_pctile <= RANGING_LOW_ATR_SUPPRESS_PCTILE
 
     @staticmethod
+    def _should_suppress_sr_flip_retest(setup_class_name: str) -> bool:
+        """Pure predicate for the SR_FLIP_RETEST setup-level kill switch.
+
+        True when SR_FLIP_RETEST emission should be dropped — gated by
+        ``config.SR_FLIP_RETEST_SUPPRESS_ENABLED``.  Side-effect-free so it is
+        directly unit-testable; the shadow-vs-block telemetry stays at the call
+        site.  See config for the supporting counterfactual (net-negative across
+        every regime/side/confidence slice; ~40% of signal volume).
+        """
+        return (
+            SR_FLIP_RETEST_SUPPRESS_ENABLED
+            and setup_class_name == "SR_FLIP_RETEST"
+        )
+
+    @staticmethod
     def _regime_name_from_ctx(ctx: ScanContext, default: str = "RANGING") -> str:
         regime_obj = getattr(getattr(ctx, "regime_result", None), "regime", None)
         if regime_obj is not None and hasattr(regime_obj, "value"):
@@ -4723,6 +4739,38 @@ class Scanner:
                     _atr_pctile,
                     getattr(sig, "confidence", None),
                 )
+
+        # SR_FLIP_RETEST setup-level kill switch.  Unlike the narrow RANGING
+        # low-ATR gate above, SR_FLIP bleeds across every regime/side/confidence
+        # slice and is ~40% of signal volume — see
+        # config.SR_FLIP_RETEST_SUPPRESS_ENABLED for the counterfactual.  When
+        # enabled, drop it before it can emit; otherwise shadow-count so the
+        # would-be-suppressed volume stays measurable until the owner flips it.
+        if chan_name == "360_SCALP" and _setup_class_name == "SR_FLIP_RETEST":
+            if self._should_suppress_sr_flip_retest(_setup_class_name):
+                self._suppression_counters[
+                    f"sr_flip_suppress:setup_block:{chan_name}"
+                ] += 1
+                self.suppression_tracker.record(SuppressionEvent(
+                    symbol=symbol,
+                    channel=chan_name,
+                    reason="sr_flip_retest_suppressed",
+                    regime=self._regime_name_from_ctx(ctx, default=""),
+                    would_be_confidence=getattr(sig, "confidence", None),
+                ))
+                log.debug(
+                    "Rejected {} {} setup=SR_FLIP_RETEST (suppressed — net-negative setup)",
+                    symbol,
+                    chan_name,
+                )
+                return _reject("gated", None)
+            self._suppression_counters[f"shadow:sr_flip_suppress:{chan_name}"] += 1
+            log.info(
+                "[SHADOW] SR_FLIP_RETEST_SUPPRESS: symbol={} conf={} "
+                "— would suppress if enabled",
+                symbol,
+                getattr(sig, "confidence", None),
+            )
 
         if not setup.channel_compatible or not setup.regime_compatible:
             if (
