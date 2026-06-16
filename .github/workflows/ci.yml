@@ -1,0 +1,46 @@
+name: CI
+
+# Pre-merge gate for pull requests. The repo's only other workflow,
+# deploy.yml, runs on push to main and ships to live subscribers in ~45s —
+# so the test/lint gate has to live on the PR, before the merge, not after.
+on:
+  pull_request:
+    branches: [main]
+  # Allow manual runs for debugging the workflow itself.
+  workflow_dispatch:
+
+# Cancel superseded runs on the same PR so a force-push doesn't pile up jobs.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install ruff
+
+      # Informational only for now: the tree carries ~115 pre-existing
+      # ruff findings. Surfaced on every PR so the debt is visible and
+      # new code can be kept clean, but not yet blocking. Flip
+      # continue-on-error to false once src/ + config/ are clean.
+      - name: Lint (ruff, non-blocking)
+        continue-on-error: true
+        run: ruff check src/ config/
+
+      # Blocking gate. Mirrors the local command in CLAUDE.md.
+      - name: Tests (pytest)
+        run: python -m pytest tests/ -x --ignore=tests/test_deployment.py -q
