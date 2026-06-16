@@ -1438,6 +1438,12 @@ class TestHealthCheckLoopForceClose:
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
 
         now = time.monotonic()
+        # Freeze the module clock so the loop's internal time.monotonic()
+        # (websocket_manager.py:1204) reads exactly `now`. The force-close
+        # decision then depends only on the hand-set timestamps below, not on
+        # real-clock drift between this line and the loop body — the source of
+        # an intermittent CI flake.
+        monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
         # Connection is well past min-conn-age (default 120s)
         conn.connected_ts = now - 300.0
         # Last health check was 60s ago, with 0 TEXT msgs in the window
@@ -1477,6 +1483,8 @@ class TestHealthCheckLoopForceClose:
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
 
         now = time.monotonic()
+        # Freeze the module clock — see test_force_close_after_threshold_window.
+        monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
         # Connection is FRESH — only 10s old, well under 120s min-conn-age
         conn.connected_ts = now - 10.0
         conn.health_check_ts = now - 60.0
@@ -1508,6 +1516,8 @@ class TestHealthCheckLoopForceClose:
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
 
         now = time.monotonic()
+        # Freeze the module clock — see test_force_close_after_threshold_window.
+        monkeypatch.setattr("src.websocket_manager.time.monotonic", lambda: now)
         conn.connected_ts = now - 300.0
         conn.health_check_ts = now - 60.0
         # 60 msgs in 60s = 60 msgs/min = healthy
