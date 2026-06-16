@@ -1600,7 +1600,9 @@ class TestPerSymbolStaleness:
 
         fake0 = _FakeClosableWS()
         fake1 = _FakeClosableWS()
-        now = time.monotonic()
+        # Large fixed base so `now - 300` stays positive on a low-uptime CI
+        # runner — see TestHealthCheckLoopForceClose for the full rationale.
+        now = 1_000_000.0
         # Both connections past min-conn-age
         conn0 = WSConnection(
             streams=["btcusdt@kline_1m", "ethusdt@kline_1m"], ws=fake0,  # type: ignore[arg-type]
@@ -1636,7 +1638,7 @@ class TestPerSymbolStaleness:
         )
 
         fake = _FakeClosableWS()
-        now = time.monotonic()
+        now = 1_000_000.0  # large fixed base — see TestHealthCheckLoopForceClose
         conn = WSConnection(
             streams=["btcusdt@kline_1m", "ethusdt@kline_1m", "solusdt@kline_1m", "avaxusdt@kline_1m"],
             ws=fake,  # type: ignore[arg-type]
@@ -1668,7 +1670,7 @@ class TestPerSymbolStaleness:
         )
 
         fake = _FakeClosableWS()
-        now = time.monotonic()
+        now = 1_000_000.0  # large fixed base — see TestHealthCheckLoopForceClose
         conn = WSConnection(
             streams=["btcusdt@kline_1m", "ethusdt@kline_1m"],
             ws=fake,  # type: ignore[arg-type]
@@ -1693,7 +1695,7 @@ class TestPerSymbolStaleness:
             data_store=None,
         )
         fake = _FakeClosableWS()
-        now = time.monotonic()
+        now = 1_000_000.0  # large fixed base — see TestHealthCheckLoopForceClose
         conn = WSConnection(streams=["btcusdt@kline_1m"], ws=fake)  # type: ignore[arg-type]
         conn.connected_ts = now - 300.0
         ws._connections = [conn]
