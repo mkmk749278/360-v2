@@ -319,6 +319,30 @@ class PositionNotFoundError(PositionStateError):
 _lock = threading.RLock()
 _db: Any = None  # google.cloud.firestore.Client once initialised
 
+# Monotonic counter bumped on every position-document write
+# (``put_position`` / ``delete_position``).  Read-side caches that want
+# to avoid re-querying Firestore on a hot loop (e.g. the per-tick pre-TP
+# dispatcher) can compare this generation: while it is unchanged, the set
+# of stored positions — and every field on them — is byte-for-byte
+# unchanged, because every mutation funnels through one of those two
+# writers.  This is the freshness guarantee that makes caching the
+# OPEN-positions query safe in a real-money path.
+_write_generation: int = 0
+
+
+def get_write_generation() -> int:
+    """Return the current position-write generation (see
+    :data:`_write_generation`).  Increments on every ``put_position`` /
+    ``delete_position``; never decreases for the life of the process."""
+    with _lock:
+        return _write_generation
+
+
+def _bump_write_generation() -> None:
+    global _write_generation
+    with _lock:
+        _write_generation += 1
+
 
 def init_position_state(service_account_path: Optional[str] = None) -> None:
     """Initialise the Firestore Admin SDK client for the position
@@ -390,6 +414,7 @@ def put_position(position: Position) -> None:
     _doc_ref(position.firebase_uid, position.signal_id).set(
         _to_firestore_dict(position)
     )
+    _bump_write_generation()
 
 
 def get_position(firebase_uid: str, signal_id: str) -> Position:
@@ -412,6 +437,7 @@ def delete_position(firebase_uid: str, signal_id: str) -> None:
     retention-policy implementation.
     """
     _doc_ref(firebase_uid, signal_id).delete()
+    _bump_write_generation()
 
 
 def list_positions_for_user(
@@ -462,9 +488,10 @@ def list_positions_for_user(
 
 def reset_for_test() -> None:
     """Test-only: drop the singleton."""
-    global _db
+    global _db, _write_generation
     with _lock:
         _db = None
+        _write_generation = 0
 
 
 # ---------------------------------------------------------------------------

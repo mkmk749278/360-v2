@@ -29,7 +29,10 @@ volume grows.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Callable, Dict, List, Optional, Set
+import threading
+import time
+from dataclasses import dataclass
+from typing import Callable, Dict, List, Optional, Set
 
 from src.utils import get_logger
 
@@ -149,13 +152,59 @@ class PretpDispatcher:
                 )
 
 
-def _default_positions_for_symbol(symbol: str) -> List[_position_state.Position]:
-    """Query Firestore for open positions on ``symbol`` across all
-    users.  Production wiring; tests inject a different impl.
+# --- Per-symbol OPEN-positions cache -----------------------------------
+#
+# Mark prices tick ~1/sec/symbol, 24/7.  The original implementation ran
+# a Firestore collection-group query on EVERY tick, which made Firestore
+# reads — billed under the "App Engine" line — the project's dominant
+# cloud cost while writes/deletes stayed inside the free tier.
+#
+# This cache removes Firestore from the hot path.  Correctness in a
+# real-money path hinges on freshness: ``should_fire_pretp`` reads live
+# fields (``state``, ``pretp_fired``, ``pretp_order_id``) off the
+# position object, so a stale cache could double-fire a partial close.
+# We gate the cache on :func:`position_state.get_write_generation` — a
+# counter bumped on every ``put_position`` / ``delete_position``.  While
+# the generation is unchanged, no position document has changed, so the
+# cached query result (and the objects in it) are exactly what a fresh
+# query would return.  Any FSM transition, pre-TP fire, or close bumps
+# the generation and forces a re-query on the next tick.
+#
+# ``_QUERY_CACHE_MAX_TTL_S`` is a defensive upper bound on staleness in
+# case some future code path writes a position document outside the two
+# tracked writers; generation invalidation is the primary mechanism.
+#
+# A future optimisation (noted in this module's header) is a full
+# in-memory open-positions index that avoids even the cold-path query;
+# the generation-gated cache is the lower-risk first step.
 
-    Uses a collection-group query so we don't need to iterate users
-    individually.  Filters to ``state == OPEN`` (pre-TP only fires
-    from OPEN; PRE_TP_FIRED + later states don't need ticks).
+_QUERY_CACHE_MAX_TTL_S = 10.0
+
+# Injectable clock so tests can exercise TTL expiry deterministically.
+_clock: Callable[[], float] = time.monotonic
+
+
+@dataclass
+class _SymbolPositionsCache:
+    generation: int
+    positions: List[_position_state.Position]
+    fetched_at: float
+
+
+_positions_cache: Dict[str, _SymbolPositionsCache] = {}
+_positions_cache_lock = threading.Lock()
+
+
+def reset_positions_cache_for_test() -> None:
+    """Test-only: drop the per-symbol OPEN-positions cache."""
+    with _positions_cache_lock:
+        _positions_cache.clear()
+
+
+def _query_open_positions(symbol: str) -> List[_position_state.Position]:
+    """Raw Firestore collection-group query for OPEN positions on
+    ``symbol`` across all users.  Filters to ``state == OPEN`` (pre-TP
+    only fires from OPEN; PRE_TP_FIRED + later states don't need ticks).
     """
     from src.security.firestore_keystore import _db  # shared client
 
@@ -176,6 +225,33 @@ def _default_positions_for_symbol(symbol: str) -> List[_position_state.Position]
                 "pretp_dispatcher: failed to parse position doc"
             )
     return out
+
+
+def _default_positions_for_symbol(symbol: str) -> List[_position_state.Position]:
+    """Return OPEN positions on ``symbol``, served from a
+    generation-gated cache to keep Firestore off the per-tick hot path.
+
+    Cache hit requires BOTH the position-write generation to be unchanged
+    (correctness) AND the entry to be within :data:`_QUERY_CACHE_MAX_TTL_S`
+    (defensive freshness bound).  Otherwise re-queries Firestore.
+    """
+    generation = _position_state.get_write_generation()
+    now = _clock()
+    with _positions_cache_lock:
+        cached = _positions_cache.get(symbol)
+        if (
+            cached is not None
+            and cached.generation == generation
+            and (now - cached.fetched_at) < _QUERY_CACHE_MAX_TTL_S
+        ):
+            return cached.positions
+    # Cold path — generation moved, TTL expired, or first call for symbol.
+    positions = _query_open_positions(symbol)
+    with _positions_cache_lock:
+        _positions_cache[symbol] = _SymbolPositionsCache(
+            generation=generation, positions=positions, fetched_at=now
+        )
+    return positions
 
 
 def _default_order_placer_factory(
