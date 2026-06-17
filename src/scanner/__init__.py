@@ -4913,7 +4913,8 @@ class Scanner:
         # Drop a LONG when the 15m (higher-timeframe) regime is trending DOWN:
         # the trade is fighting the larger tide.  Independent of the MTF
         # confluence gate above (that scores EMA alignment; this reads the
-        # unified regime label).  Shorts are intentionally exempt.
+        # unified regime label).  Shorts are intentionally exempt, as are the
+        # §3.4 doctrine-bypass setups (breakout / tape-driven) handled below.
         if _MTF_LONGS_REGIME_GATE_ENABLED and sig.direction.value == "LONG":
             _c15 = ctx.candles.get("15m") if ctx.candles else None
             _c15_closes = _c15.get("close", []) if _c15 else []
@@ -4934,7 +4935,28 @@ class Scanner:
                     idx=len(_closes15) - 1, pair_tier=_tier15,
                 )
                 if _regime15 == MarketRegime.TRENDING_DOWN.value:
-                    if _MTF_LONGS_REGIME_GATE_DARK:
+                    # OWNER_BRIEF §3.4 doctrine bypass: tape-driven and breakout
+                    # setups fire "in any HTF context" — a breakout or post-
+                    # liquidation reversal long IS the regime change igniting,
+                    # not a counter-trend mistake.  Mirror the MTF confluence
+                    # gate's exemption so we don't HTF-veto the very setups
+                    # doctrine says must not be HTF-gated.
+                    _doctrine_exempt = (
+                        chan_name == "360_SCALP"
+                        and _MTF_DOCTRINE_BYPASS_ENABLED
+                        and _setup_class_name in _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
+                    )
+                    if _doctrine_exempt:
+                        self._suppression_counters[
+                            f"mtf_longs_regime_doctrine_bypass:360_SCALP:{_setup_class_name}"
+                        ] += 1
+                        log.debug(
+                            "Longs HTF-regime gate doctrine-bypass {} {} setup={}: "
+                            "OWNER_BRIEF §3.4 — no HTF veto (15m={})",
+                            symbol, chan_name, _setup_class_name, _regime15,
+                        )
+                        # Fall through: the long is allowed despite a down 15m.
+                    elif _MTF_LONGS_REGIME_GATE_DARK:
                         # Measure-only: count what we WOULD block, don't reject.
                         self._suppression_counters[
                             f"mtf_longs_regime_would_block:{chan_name}"

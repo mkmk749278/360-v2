@@ -3423,3 +3423,22 @@ class TestLongsRegimeGateInScanner:
         signal_queue.put.assert_awaited_once()
         assert scanner._suppression_counters["mtf_longs_regime_would_block:360_SCALP"] == 1
         assert scanner._suppression_counters.get("mtf_longs_regime_block:360_SCALP", 0) == 0
+
+    @pytest.mark.asyncio
+    async def test_doctrine_exempt_long_not_blocked_into_down_15m(self):
+        """A §3.4 doctrine-bypass setup (breakout/tape) long fires even when the
+        15m regime is TRENDING_DOWN — the breakout IS the regime change."""
+        scanner, signal_queue = self._scanner_and_queue()
+        with _common_gate_patches(scanner, [
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+            patch.object(scanner, "_evaluate_setup",
+                         return_value=_setup_pass(SetupClass.VOLUME_SURGE_BREAKOUT)),
+            patch("src.scanner.detect_regime_from_arrays",
+                  return_value=MarketRegime.TRENDING_DOWN.value),
+        ]):
+            await scanner._scan_symbol("BTCUSDT", 10_000_000)
+        signal_queue.put.assert_awaited_once()
+        assert scanner._suppression_counters.get("mtf_longs_regime_block:360_SCALP", 0) == 0
+        assert scanner._suppression_counters[
+            "mtf_longs_regime_doctrine_bypass:360_SCALP:VOLUME_SURGE_BREAKOUT"
+        ] == 1
