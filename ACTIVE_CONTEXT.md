@@ -4,6 +4,48 @@
 
 ---
 
+## Session 28 checkpoint 2026-06-17 — TREND_PULLBACK + MA_CROSS scoring deficits (scoring-only fix, owner-approved)
+
+### Owner trigger
+Owner: "trend pull back and ma cross trend shift — concentrate on them." Same
+data-first deep dive as VSB/BDS, off the live truth report.
+
+### Root cause (per-path)
+- **MA_CROSS_TREND_SHIFT** (15 generated, 0 emitted): generation is **inherently
+  sparse and correct** — a golden/death cross is a once-in-days event
+  (`no_ma_cross` 69%); the 24h cooldown is right. The fixable bug: MA_CROSS was
+  **absent from every `_REGIME_SETUP_AFFINITY` list and the neutral set** →
+  `_score_regime` returned a flat **8.0** in all regimes. A cross fires AT the
+  regime turn (5m label still RANGING) → penalised for doing its job.
+- **TREND_PULLBACK_EMA** (571 generated, 0 emitted): two layers.
+  (1) Volume dimension scored the quiet pullback entry candle 3/15 — a healthy
+  pullback is low-volume BY DESIGN. (2) The "entry-quality tightening" block
+  (scalp.py ~1580-1609) demands a near-unicorn candle that both deep-wicks to
+  tag EMA21 (`ema21_not_tagged`) AND closes above the prior high
+  (`no_prev_high_break`) — crushing generation. (2) was added to fix an 82.6%
+  SL rate, so it's money-risky to loosen.
+
+### Owner decision: "scoring fixes only"
+Shipped the two safe scoring corrections; **left the TPE entry gates untouched**
+(TPE stays low-generation by choice — relaxing those gates re-imports the
+82.6%-SL risk and would need shadow measurement first).
+
+### Shipped (branch `feat/trendpullback-macross-scoring`)
+| Change | File |
+|---|---|
+| `MA_CROSS_TREND_SHIFT` added to `_REGIME_NEUTRAL_SETUPS` → regime 8→14 (fires at the transition, like a counter-trend setup) | `signal_quality.py` |
+| `_score_volume` floors the `_FAMILY_TREND_PULLBACK` family at neutral 7.5 — quiet pullback volume no longer scored 3/15; high-volume reclaims still earn more | `signal_quality.py` |
+| 5 tests (`TestTrendPullbackAndMaCrossScoring`) | `tests/test_signal_quality.py` |
+
+CPU-only scorer change; no hot-path reads/writes. Full suite 5,613 pass.
+
+### Deferred (owner-gated, NOT done)
+- **TPE entry-gate de-contradiction** (the `no_prev_high_break` + `ema21_not_tagged`
+  double-bind). Highest lever for TPE *generation*, but money-risky — do it
+  shadow-first if/when the owner wants the volume back.
+
+---
+
 ## Session 27 checkpoint 2026-06-17 — top-mover breakout/breakdown paths were dying in the SCORER, not the gates (VSB/BDS)
 
 ### Owner trigger
