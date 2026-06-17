@@ -287,6 +287,21 @@ _SR_FLIP_HTF_MISMATCH_PENALTY: float = float(os.getenv("SR_FLIP_HTF_MISMATCH_PEN
 # Truth-report: 17/175 SR_FLIP invalidation kills were PREMATURE but 129/175
 # were PROTECTIVE — adding a 4H-weight haircut reduces directional noise.
 _SR_FLIP_H4_ONLY_PENALTY: float = float(os.getenv("SR_FLIP_H4_ONLY_PENALTY", "3.5"))
+# RANGING quality re-tighten (2026-06-16).  SR_FLIP bleeds specifically in
+# RANGING (live: -3.97 over 32 sigs, all ATR buckets) while it is flat-to-
+# positive in trends (+0.21 TRENDING_DOWN) — so the fix is to GENERATE only
+# the cleanest retests in range, not to disable the setup.  When enabled, two
+# loosened gates revert to hard *only in RANGING*: (1) the extended retest zone
+# (premium-zone retest required), and (2) the 70-79 / 21-30 RSI soft band
+# (no chasing overbought/oversold retests).  Trending + premium-zone signals
+# are untouched.  Ships dark with [SHADOW] telemetry so the would-be-rejected
+# volume and its outcomes are measurable before activation.  Evaluator-path /
+# paid-channel routing change — owner sign-off to set
+# SR_FLIP_RANGING_STRICT_ENABLED=true on the VPS.
+_SR_FLIP_RANGING_STRICT_ENABLED: bool = (
+    os.getenv("SR_FLIP_RANGING_STRICT_ENABLED", "false").strip().lower()
+    in ("1", "true", "yes", "on")
+)
 # DIVERGENCE_CONTINUATION 4H conflict penalty.
 # When the 4H EMA21/50 trend opposes the 1H-determined direction, CVD
 # divergence is fighting two-TF structure — the setup is weaker.
@@ -2839,6 +2854,23 @@ class ScalpChannel(BaseChannel):
     # Prior swing high/low flipped; price retests with rejection candle.
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _sr_flip_ranging_shadow(reason: str, symbol: str, value: float) -> None:
+        """Dark-mode telemetry for the RANGING SR_FLIP quality re-tighten.
+
+        Logs what ``_SR_FLIP_RANGING_STRICT_ENABLED`` *would* additionally
+        reject (and on which symbol/value) so the suppressed volume and its
+        realized outcomes are measurable before the flag is flipped.  No-op on
+        signal behaviour — it only emits a log line.
+        """
+        log.info(
+            "[SHADOW] SR_FLIP_RANGING_STRICT: symbol={} reason={} value={:.4f} "
+            "— would reject if enabled",
+            symbol,
+            reason,
+            value,
+        )
+
     def _evaluate_sr_flip_retest(
         self,
         symbol: str,
@@ -3139,6 +3171,15 @@ class ScalpChannel(BaseChannel):
         retest_in_premium_zone = dist_from_level_pct <= _proximity_premium
         proximity_penalty = 0.0 if retest_in_premium_zone else 3.0
 
+        # RANGING quality re-tighten: in dead-range chop an extended-zone retest
+        # (price hasn't returned cleanly to the level) is the low-probability
+        # variant driving the RANGING bleed.  Require a premium-zone retest in
+        # RANGING; trending signals keep the wider zone.  Dark + [SHADOW].
+        if regime_upper == "RANGING" and not retest_in_premium_zone:
+            if _SR_FLIP_RANGING_STRICT_ENABLED:
+                return self._reject("ranging_strict_extended_zone")
+            self._sr_flip_ranging_shadow("extended_zone", symbol, dist_from_level_pct)
+
         # Rejection candle check — layered soft/hard gate replacing the original hard-50% rule.
         # A clear rejection wick (≥50% of candle body) is the ideal structural signal.
         # Borderline wicks (20%–50%) are weaker but still pass with a +4.0 soft penalty.
@@ -3210,11 +3251,22 @@ class ScalpChannel(BaseChannel):
                 if rsi_val >= 80.0:
                     return self._reject("rsi_reject")
                 if rsi_val >= 70.0:
+                    # RANGING quality re-tighten: don't chase an overbought
+                    # retest in chop — revert the 70-79 soft band to a hard
+                    # gate in RANGING only.  Dark + [SHADOW].
+                    if regime_upper == "RANGING":
+                        if _SR_FLIP_RANGING_STRICT_ENABLED:
+                            return self._reject("ranging_strict_rsi")
+                        self._sr_flip_ranging_shadow("rsi_band", symbol, rsi_val)
                     rsi_penalty = 5.0
             else:
                 if rsi_val <= 20.0:
                     return self._reject("rsi_reject")
                 if rsi_val <= 30.0:
+                    if regime_upper == "RANGING":
+                        if _SR_FLIP_RANGING_STRICT_ENABLED:
+                            return self._reject("ranging_strict_rsi")
+                        self._sr_flip_ranging_shadow("rsi_band", symbol, rsi_val)
                     rsi_penalty = 5.0
 
         # FVG / orderblock — soft penalty contributor in fast structural regimes where
