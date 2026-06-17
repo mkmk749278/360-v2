@@ -4,6 +4,46 @@
 
 ---
 
+## Session 26 checkpoint 2026-06-17 — MTF trend definition unified + longs HTF-regime gate (PRs #614, #615 MERGED)
+
+### Owner trigger
+Continuing the signals-quality work: the 496-signal audit's losing bucket was
+LONGs fired while the higher timeframe was rolling over. Owner approved the
+"Option 2" fix (unify the trend definition, then gate longs on it).
+
+### Root cause
+Two contradictory definitions of "trend":
+- **5m (`AdaptiveRegimeDetector._decide_adaptive`)** stamped TRENDING in the weak
+  ADX zone (between the tier's ranging/trending floors) on EMA separation alone
+  — even with ADX *decaying* — manufacturing trends from fading moves.
+- **15m (`detect_regime_from_arrays`)** used a flat ADX≥25 floor, no weak zone,
+  no tier profile — so a midcap at ADX 22 read TRENDING on 5m and RANGING on 15m
+  *by construction*, making any MTF comparison meaningless.
+
+### Shipped (branch `claude/google-services-cost-analysis-w61lnc`)
+| PR | Change | File(s) |
+|---|---|---|
+| **#614 MERGED** | Weak-zone trends now require ADX **rising** (`adx_slope>0`); unknown slope → RANGING. `detect_regime_from_arrays` made **tier-aware** + same weak-zone rule, so 5m and 15m mean the same thing by "trend". | `regime.py`, `scanner/__init__.py`, `tests/test_regime_mtf_unification.py` (9 tests) |
+| **#615 MERGED** | **Filter 1b** in `_prepare_signal`: drop a LONG when the unified 15m regime is TRENDING_DOWN. Env toggles `MTF_LONGS_REGIME_GATE_ENABLED` (default on) + `MTF_LONGS_REGIME_GATE_DARK` (measure-only). Telemetry: `mtf_longs_regime_eval/block/would_block`. | `scanner/__init__.py`, `tests/test_scanner.py` (`TestLongsRegimeGateInScanner`) |
+| **follow-up (this session, in PR)** | **§3.4 doctrine bypass for Filter 1b**: breakout/tape/liquidation-reversal longs (`_SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS`) are NOT HTF-vetoed — a breakout into a down 15m IS the regime change. Owner chose "exempt them". Telemetry: `mtf_longs_regime_doctrine_bypass:360_SCALP:<setup>`. | `scanner/__init__.py`, `tests/test_scanner.py` |
+
+Per the owner's audit, removing the losing longs bucket flipped the audited
+book from **−14.1 to +3.0** (owner-supplied figure, not re-measured here).
+
+### Watch next session
+- **`/suppressed` → `mtf_longs_regime_block` vs `mtf_longs_regime_doctrine_bypass`**:
+  confirm the live block volume tracks the audit, and see how many longs the
+  §3.4 exemption preserves. Flip `MTF_LONGS_REGIME_GATE_DARK=true` to pull back
+  to measure-only without a code redeploy.
+- Shorts are intentionally ungated; only 15m is used (not 1h/4h) — both deliberate.
+
+### Follow-up (not done)
+- **Pre-existing API test red** (FastAPI `204` + `response_model` at app
+  construction) is failing on `main` in CI's container — unrelated to these PRs,
+  but a possible live `api`-container risk. Worth confirming the live FastAPI pin.
+
+---
+
 ## Session 25 checkpoint 2026-06-16 — GCP cost spike was Firestore reads, not auth (PR #609, MERGED)
 
 ### Owner trigger
