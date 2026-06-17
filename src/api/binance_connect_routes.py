@@ -377,6 +377,12 @@ def register(
     @app.delete(
         "/api/binance/connect",
         status_code=status.HTTP_204_NO_CONTENT,
+        # Explicit no-body: a 204 must not declare a response model.  Without
+        # this, FastAPI infers the model from the ``-> None`` return annotation
+        # (as NoneType), which trips its "204 must not have a response body"
+        # assertion at app-construction time on some versions.  Being explicit
+        # keeps the route correct across FastAPI versions.
+        response_model=None,
         tags=["binance"],
         dependencies=[Depends(auth)],
     )
