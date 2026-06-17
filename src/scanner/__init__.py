@@ -452,6 +452,20 @@ _MTF_DOCTRINE_BYPASS_ENABLED: bool = os.getenv(
     "MTF_DOCTRINE_BYPASS_ENABLED", "true"
 ).lower() not in ("0", "false", "no", "off")
 
+# Longs higher-timeframe regime gate.  A LONG fired while the 15m regime is
+# trending DOWN fights the larger tide — the losing bucket in the 496-signal
+# audit (removing it flipped the realised book from -14.1 to +3.0).  Gated on
+# the unified, tier-aware 15m regime label (see regime.detect_regime_from_arrays)
+# so "trend" means the same thing as the 5m entry regime.  Shorts are not gated.
+_MTF_LONGS_REGIME_GATE_ENABLED: bool = os.getenv(
+    "MTF_LONGS_REGIME_GATE_ENABLED", "true"
+).lower() not in ("0", "false", "no", "off")
+# Dark mode: evaluate and count what WOULD be blocked without rejecting, so the
+# suppressed volume can be measured before the gate is trusted to hard-block.
+_MTF_LONGS_REGIME_GATE_DARK: bool = os.getenv(
+    "MTF_LONGS_REGIME_GATE_DARK", "false"
+).lower() not in ("0", "false", "no", "off")
+
 _SCALP_MTF_POLICY_BY_FAMILY: Dict[str, Dict[str, Optional[float]]] = {
     # Explicitly intentional: TREND_PULLBACK_EMA stays on generic regime-driven
     # strictness (no PR-1 cap override for trend-following family).
@@ -4894,6 +4908,53 @@ class Scanner:
                     # preserved by family-aware PR-1 threshold policy versus
                     # generic MTF threshold. It is not quality proof by itself.
                     self._suppression_counters[f"mtf_policy_saved:360_SCALP:{_setup_family}"] += 1
+
+        # ── Filter 1b: Longs higher-timeframe regime gate ──────────────────
+        # Drop a LONG when the 15m (higher-timeframe) regime is trending DOWN:
+        # the trade is fighting the larger tide.  Independent of the MTF
+        # confluence gate above (that scores EMA alignment; this reads the
+        # unified regime label).  Shorts are intentionally exempt.
+        if _MTF_LONGS_REGIME_GATE_ENABLED and sig.direction.value == "LONG":
+            _c15 = ctx.candles.get("15m") if ctx.candles else None
+            _c15_closes = _c15.get("close", []) if _c15 else []
+            if len(_c15_closes) >= 30:
+                self._suppression_counters[f"mtf_longs_regime_eval:{chan_name}"] += 1
+                _closes15 = np.asarray(_c15_closes, dtype=np.float64)
+                _highs15 = np.asarray(_c15.get("high", _c15_closes), dtype=np.float64)
+                _lows15 = np.asarray(_c15.get("low", _c15_closes), dtype=np.float64)
+                _vols15 = np.asarray(
+                    _c15.get("volume", np.zeros(len(_closes15))), dtype=np.float64
+                )
+                _tier15 = getattr(
+                    classify_pair_tier(symbol, volume_24h_usd=volume_24h),
+                    "tier", "MIDCAP",
+                )
+                _regime15 = detect_regime_from_arrays(
+                    _closes15, _highs15, _lows15, _vols15,
+                    idx=len(_closes15) - 1, pair_tier=_tier15,
+                )
+                if _regime15 == MarketRegime.TRENDING_DOWN.value:
+                    if _MTF_LONGS_REGIME_GATE_DARK:
+                        # Measure-only: count what we WOULD block, don't reject.
+                        self._suppression_counters[
+                            f"mtf_longs_regime_would_block:{chan_name}"
+                        ] += 1
+                    else:
+                        self._suppression_counters[
+                            f"mtf_longs_regime_block:{chan_name}"
+                        ] += 1
+                        self.suppression_tracker.record(SuppressionEvent(
+                            symbol=symbol,
+                            channel=chan_name,
+                            reason="mtf_longs_regime_down",
+                            regime=_regime15,
+                            would_be_confidence=sig.confidence,
+                        ))
+                        log.debug(
+                            "Longs HTF-regime gate blocked {} {}: 15m={}",
+                            symbol, chan_name, _regime15,
+                        )
+                        return _reject("gated", None)
 
         # Resolve regime penalty multiplier for all soft gates below.
         # Scalp channels in QUIET regime use a higher multiplier to ensure
