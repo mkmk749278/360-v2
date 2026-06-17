@@ -4,6 +4,44 @@
 
 ---
 
+## Session 28 checkpoint 2026-06-17 — MA_CROSS: filter is the edge, not the period (research-backed, owner-approved)
+
+### Owner trigger
+Owner: "understand crypto market and which ema works… go through research and
+actually what works implement that."
+
+### Research finding (web, multi-source — quant-signals, QuantifiedStrategies, hyrotrader, et al.)
+**The EMA *periods* are second-order; the FILTER is the edge.** Consistent across
+sources: raw MA crosses LOSE money in crypto (~60% of time ranging → whipsaws;
+lag eats the move). 50/200 is the most robust *structural* pair (~40% win rate,
+trend-following payoff — beat BTC buy-and-hold 2017-25 on 4h/6h); 9/21 etc. are
+faster but whipsaw more. **Adding a higher-timeframe trend filter improves results
+far more than tuning periods.** → Our existing periods (4h 50/200, 1h 21/50) are
+already the research-favoured choices; the gap was the *filter*.
+
+### Owner decision: HTF-alignment gate (periods unchanged)
+Did NOT touch periods (research says don't). Added the filter that actually drives
+the edge.
+
+### Shipped (branch `feat/ma-cross-htf-alignment`)
+| Change | File |
+|---|---|
+| 1h 21/50 cross now fires only when it agrees with the **4h structural trend** (ema50_4h vs ema200_4h); fails closed (`ma_cross_htf_unconfirmed`) if 4h unavailable, rejects (`ma_cross_htf_misaligned`) if counter-HTF | `channels/scalp.py` |
+| 4h 50/200 cross gets a light **price-vs-EMA200 confirmation** (rejects failing/reverted crosses; fail-open if EMA200 missing) | `channels/scalp.py` |
+| 5 tests (`TestHtfAlignmentGate`) | `tests/test_ma_cross_trend_shift.py` |
+
+CPU-only; reuses 4h indicators already in scope — no new reads/writes/hot-path
+cost. Reduces generation (filters do) in exchange for higher win quality — the
+right trade for a paid A+/B-only channel. Full suite 5,618 pass.
+Synergy with #619: the regime-neutral 14 + HTF gate together mean a 1h cross is
+no longer regime-penalised AND is confirmed by the 4h trend.
+
+### Declined (told owner, per "tell me when a direction is wrong")
+Adding a faster 9/21 tier for more signals — research does not support it
+(faster pairs whipsaw more). Quality over quantity.
+
+---
+
 ## Session 28 checkpoint 2026-06-17 — TREND_PULLBACK + MA_CROSS scoring deficits (scoring-only fix, owner-approved)
 
 ### Owner trigger

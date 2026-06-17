@@ -5559,6 +5559,27 @@ class ScalpChannel(BaseChannel):
 
         direction, cross_label = result
 
+        # --- Higher-timeframe trend-alignment gate -------------------------
+        # Research consensus across crypto MA-cross backtests: the EMA
+        # *periods* are second-order — the FILTER is the edge.  A raw cross
+        # whipsaws because crypto ranges ~60% of the time, so an unfiltered
+        # crossover loses money; gating on higher-timeframe trend agreement is
+        # what turns it positive.  The 4h 50/200 cross IS the structural trend
+        # (confirmed by price below), so only the lower-conviction 1h 21/50
+        # cross needs the 4h to vouch for it.
+        ema50_4h = ind_4h.get("ema50_last")
+        ema200_4h = ind_4h.get("ema200_last")
+        if cross_tf == "1h":
+            if (
+                ema50_4h is None or ema200_4h is None
+                or float(ema50_4h) <= 0 or float(ema200_4h) <= 0
+            ):
+                # No 4h trend reference → can't confirm a 1h cross → fail closed.
+                return self._reject("ma_cross_htf_unconfirmed")
+            htf_bull = float(ema50_4h) > float(ema200_4h)
+            if (direction == Direction.LONG) != htf_bull:
+                return self._reject("ma_cross_htf_misaligned")
+
         # Cooldown — at most one signal per (symbol, direction) per 24h.
         cd_key = (symbol, direction.value)
         last_fire = self._ma_cross_last_fire_ts.get(cd_key)
@@ -5572,6 +5593,16 @@ class ScalpChannel(BaseChannel):
         close = float(m1["close"][-1])
         if close <= 0:
             return self._reject("invalid_price")
+
+        # 4h structural cross: light price-vs-EMA200 confirmation.  Only act
+        # when current price sits on the cross's side of the 4h slow line —
+        # filters failing / already-reverted crosses where price has snapped
+        # back through EMA200.  Fail-open if the 4h EMA200 is unavailable.
+        if cross_tf == "4h" and ema200_4h is not None and float(ema200_4h) > 0:
+            if direction == Direction.LONG and close < float(ema200_4h):
+                return self._reject("ma_cross_4h_price_below_ema200")
+            if direction == Direction.SHORT and close > float(ema200_4h):
+                return self._reject("ma_cross_4h_price_above_ema200")
 
         # Structural SL: most recent opposite-side swing on 1h within lookback.
         h1 = candles.get("1h", {})
