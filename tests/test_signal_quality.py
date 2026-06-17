@@ -2616,3 +2616,47 @@ class TestBreakoutSurgeScoring:
             breakout_volume_ratio=3.0,
         )
         assert engine.score(inp)["volume"] == 3.0
+
+
+class TestTrendPullbackAndMaCrossScoring:
+    """Scoring corrections for the TREND_PULLBACK_EMA and MA_CROSS_TREND_SHIFT paths.
+
+    - MA_CROSS_TREND_SHIFT fires AT the regime transition and was absent from
+      every affinity list → permanent regime 8.0.  It now gets the neutral 14.0.
+    - TREND_PULLBACK_EMA's entry is a low-volume pullback BY DESIGN; the volume
+      dimension is floored at neutral so it isn't penalized to 3/15.
+    """
+
+    def test_ma_cross_regime_neutral_in_ranging(self, engine):
+        inp = ScoringInput(regime="RANGING", setup_class="MA_CROSS_TREND_SHIFT")
+        assert engine.score(inp)["regime"] == 14.0  # was 8.0 (not in any affinity list)
+
+    def test_ma_cross_regime_neutral_in_trending(self, engine):
+        # Still 14 (neutral) in a trend regime — not in the affinity list, so it
+        # does not get the 18 affinity bonus, but no longer the 8 penalty either.
+        inp = ScoringInput(regime="TRENDING_UP", setup_class="MA_CROSS_TREND_SHIFT")
+        assert engine.score(inp)["regime"] == 14.0
+
+    def test_tpe_volume_floored_on_low_pullback_volume(self, engine):
+        # Quiet pullback entry (ratio 0.5) → floored at neutral 7.5, not 3.0.
+        inp = ScoringInput(
+            setup_class="TREND_PULLBACK_EMA",
+            volume_last_usd=500_000, volume_avg_usd=1_000_000,
+        )
+        assert engine.score(inp)["volume"] == 7.5
+
+    def test_tpe_volume_high_reclaim_unchanged(self, engine):
+        # A high-volume reclaim still earns its higher ratio-based score.
+        inp = ScoringInput(
+            setup_class="TREND_PULLBACK_EMA",
+            volume_last_usd=2_000_000, volume_avg_usd=1_000_000,  # ratio 2.0
+        )
+        assert engine.score(inp)["volume"] == 12.0
+
+    def test_volume_floor_does_not_leak_to_other_setups(self, engine):
+        # A non-pullback setup with low volume still scores 3.0.
+        inp = ScoringInput(
+            setup_class="SR_FLIP_RETEST",
+            volume_last_usd=500_000, volume_avg_usd=1_000_000,
+        )
+        assert engine.score(inp)["volume"] == 3.0

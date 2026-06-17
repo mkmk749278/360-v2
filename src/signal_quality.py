@@ -1733,9 +1733,17 @@ class SignalScoringEngine:
     # in non-affinity regimes preserves the affinity bonus (still 18
     # in matching regimes) while letting structurally strong counter-
     # trend setups reach paid B-tier (65+).
+    #
+    # MA_CROSS_TREND_SHIFT joins this set for the same reason from the opposite
+    # side: a golden/death cross FIRES AT the regime transition (the cross is
+    # what *starts* the trend), so the 5m regime label usually still reads
+    # RANGING/QUIET at entry.  Absent from every affinity list it scored a flat
+    # 8.0 in all known regimes — penalised precisely for firing at the turn.
+    # Neutral 14.0 removes that structural deficit without over-rewarding it.
     _REGIME_NEUTRAL_SETUPS: frozenset = frozenset({
         "LIQUIDITY_SWEEP_REVERSAL",
         "FAILED_AUCTION_RECLAIM",
+        "MA_CROSS_TREND_SHIFT",
     })
 
     # ── Family classification sets ─────────────────────────────────────────
@@ -1911,14 +1919,22 @@ class SignalScoringEngine:
         else:
             ratio = inp.volume_last_usd / inp.volume_avg_usd
         if ratio >= 3.0:
-            return 15.0
-        if ratio >= 2.0:
-            return 12.0
-        if ratio >= 1.5:
-            return 9.0
-        if ratio >= 1.0:
-            return 6.0
-        return 3.0   # Below-average volume
+            score = 15.0
+        elif ratio >= 2.0:
+            score = 12.0
+        elif ratio >= 1.5:
+            score = 9.0
+        elif ratio >= 1.0:
+            score = 6.0
+        else:
+            score = 3.0   # Below-average volume
+        # Trend pullbacks are low-volume BY DESIGN — a healthy pullback into the
+        # EMA has no selling pressure, so the quiet entry candle scoring 3/15
+        # punishes the very trait that validates the setup.  Floor at neutral;
+        # a high-volume reclaim still earns its higher ratio-based score.
+        if inp.setup_class in self._FAMILY_TREND_PULLBACK and score < 7.5:
+            score = 7.5
+        return score
 
     # ------------------------------------------------------------------
     def _score_indicators(self, inp: ScoringInput) -> float:
