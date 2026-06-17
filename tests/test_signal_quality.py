@@ -2660,3 +2660,54 @@ class TestTrendPullbackAndMaCrossScoring:
             volume_last_usd=500_000, volume_avg_usd=1_000_000,
         )
         assert engine.score(inp)["volume"] == 3.0
+
+
+class TestTrendPullbackHtfRegimeScore:
+    """HTF-aware regime score for TREND_PULLBACK_EMA.
+
+    The TPE evaluator identifies the trend on the 1H (EMA21/50 alignment+slope)
+    and times entry on the 5m — so the 5m regime label reads RANGING/QUIET
+    during the pullback BY DESIGN.  When the evaluator confirmed the HTF trend
+    (``htf_trend_aligned``), the scorer credits full regime affinity (18)
+    regardless of the noisy 5m label.  Without HTF confirmation the normal
+    label-based score stands.
+    """
+
+    def test_htf_aligned_tpe_gets_full_affinity_in_ranging(self, engine):
+        inp = ScoringInput(
+            regime="RANGING", setup_class="TREND_PULLBACK_EMA",
+            htf_trend_aligned=True,
+        )
+        assert engine.score(inp)["regime"] == 18.0  # was 8.0 on the 5m label
+
+    def test_htf_aligned_tpe_gets_full_affinity_in_quiet(self, engine):
+        inp = ScoringInput(
+            regime="QUIET", setup_class="TREND_PULLBACK_EMA",
+            htf_trend_aligned=True,
+        )
+        assert engine.score(inp)["regime"] == 18.0
+
+    def test_unconfirmed_tpe_keeps_label_score(self, engine):
+        # Legacy 5m-fallback path (no HTF confirmation) → 5m label stands.
+        inp = ScoringInput(
+            regime="RANGING", setup_class="TREND_PULLBACK_EMA",
+            htf_trend_aligned=False,
+        )
+        assert engine.score(inp)["regime"] == 8.0
+
+    def test_tpe_in_trending_unchanged(self, engine):
+        # Already an affinity match → 18 with or without the flag.
+        inp = ScoringInput(
+            regime="TRENDING_UP", setup_class="TREND_PULLBACK_EMA",
+            htf_trend_aligned=True,
+        )
+        assert engine.score(inp)["regime"] == 18.0
+
+    def test_flag_does_not_leak_to_other_setups(self, engine):
+        # A non-pullback setup carrying the flag is unaffected (still 8 in a
+        # non-affinity regime) — the award is scoped to the pullback family.
+        inp = ScoringInput(
+            regime="RANGING", setup_class="WHALE_MOMENTUM",
+            htf_trend_aligned=True,
+        )
+        assert engine.score(inp)["regime"] == 8.0

@@ -1656,6 +1656,7 @@ class ScoringInput:
     volume_last_usd: float = 0.0            # Last candle USD volume
     volume_avg_usd: float = 0.0             # 20-period average USD volume
     breakout_volume_ratio: float = 0.0      # Surge setups: validated breakout-candle vol ÷ rolling avg
+    htf_trend_aligned: bool = False         # Trend-pullback: trend confirmed on the HTF (1H), entry on LTF
     # Indicators
     macd_histogram_last: Optional[float] = None
     macd_histogram_prev: Optional[float] = None
@@ -1895,6 +1896,21 @@ class SignalScoringEngine:
         # mover isn't quality-rejected just for not being in a trend regime.
         if inp.setup_class in self._BREAKOUT_SURGE_SETUPS and base < 14.0:
             base = 14.0
+        # Trend-pullback family: the trend is identified on the HTF (1H) and the
+        # entry is timed on the LTF (5m), so the 5m regime label reads
+        # RANGING/QUIET during the pullback by design — the textbook
+        # multi-timeframe error is to judge the trend on the entry timeframe.
+        # When the evaluator confirmed the HTF trend (``htf_trend_aligned``),
+        # credit full regime affinity regardless of the noisy LTF label; the
+        # signal's existence already proves the higher-timeframe trend.  Without
+        # HTF confirmation (legacy 5m-fallback path) the normal label-based
+        # score stands.
+        if (
+            inp.setup_class in self._FAMILY_TREND_PULLBACK
+            and inp.htf_trend_aligned
+            and base < 18.0
+        ):
+            base = 18.0
         # Bonus for high ATR percentile in VOLATILE regime (energy behind the move)
         if regime_upper == "VOLATILE" and inp.atr_percentile >= 75:
             base = min(20.0, base + 2.0)
