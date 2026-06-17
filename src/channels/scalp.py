@@ -2392,6 +2392,11 @@ class ScalpChannel(BaseChannel):
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
 
+        # Stamp the validated breakout-candle surge ratio so the scoring engine
+        # scores the volume dimension off the surge, not the low-volume pullback
+        # entry candle.  rolling_avg > 0 is guaranteed by the volume gate above.
+        sig.breakout_volume_ratio = breakout_vol / rolling_avg if rolling_avg > 0 else 0.0
+
         # Pre-score confidence annotation (established pattern for all evaluators).
         # All evaluators in this family add a path-specific base boost to sig.confidence
         # before returning.  The scanner's _prepare_signal() pipeline overwrites this
@@ -2646,6 +2651,11 @@ class ScalpChannel(BaseChannel):
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
+
+        # Stamp the validated breakdown-candle surge ratio so the scoring engine
+        # scores the volume dimension off the surge, not the low-volume dead-cat
+        # bounce entry candle.  rolling_avg > 0 is guaranteed by the gate above.
+        sig.breakout_volume_ratio = breakdown_vol / rolling_avg if rolling_avg > 0 else 0.0
 
         # Pre-score confidence annotation (established pattern for all evaluators).
         # All evaluators in this family add a path-specific base boost to sig.confidence

@@ -1655,6 +1655,7 @@ class ScoringInput:
     # Volume
     volume_last_usd: float = 0.0            # Last candle USD volume
     volume_avg_usd: float = 0.0             # 20-period average USD volume
+    breakout_volume_ratio: float = 0.0      # Surge setups: validated breakout-candle vol ÷ rolling avg
     # Indicators
     macd_histogram_last: Optional[float] = None
     macd_histogram_prev: Optional[float] = None
@@ -1787,6 +1788,18 @@ class SignalScoringEngine:
         "POST_DISPLACEMENT_CONTINUATION",
     })
 
+    # Top-mover surge breakout / breakdown setups.  Per OWNER_BRIEF §3.4 these
+    # "fire in any HTF context" (so the regime dimension must not penalize them
+    # in RANGING/QUIET — floor at neutral), and their ENTRY candle is a
+    # low-volume pullback/dead-cat bounce (so the volume dimension must score
+    # off the validated breakout-candle ratio, not the quiet entry candle).
+    # Both corrections key off this set.
+    _BREAKOUT_SURGE_SETUPS: frozenset = frozenset({
+        "VOLUME_SURGE_BREAKOUT",
+        "BREAKDOWN_SHORT",
+        "OPENING_RANGE_BREAKOUT",
+    })
+
     # Families not listed above remain on shared base scoring only.
 
     # Liquidation cap used for scaling liq-volume bonus (in USD)
@@ -1866,6 +1879,14 @@ class SignalScoringEngine:
             base = 8.0    # Regime known but setup not optimal
         else:
             base = 10.0   # Unknown regime
+        # §3.4: breakout-surge setups (VSB/BDS/ORB) "fire in any HTF context".
+        # In RANGING/QUIET they fall into the non-affinity 8-pt branch above and
+        # are scored under the confidence floor purely for their regime label —
+        # defeating the doctrine the evaluator's regime GATE already honours.
+        # Floor them at the neutral score so a structurally-valid breakout on a
+        # mover isn't quality-rejected just for not being in a trend regime.
+        if inp.setup_class in self._BREAKOUT_SURGE_SETUPS and base < 14.0:
+            base = 14.0
         # Bonus for high ATR percentile in VOLATILE regime (energy behind the move)
         if regime_upper == "VOLATILE" and inp.atr_percentile >= 75:
             base = min(20.0, base + 2.0)
@@ -1874,9 +1895,21 @@ class SignalScoringEngine:
     # ------------------------------------------------------------------
     def _score_volume(self, inp: ScoringInput) -> float:
         """Volume confirmation score, max 15 pts."""
-        if inp.volume_avg_usd <= 0 or inp.volume_last_usd <= 0:
+        # Breakout-surge setups (VSB/BDS): the ENTRY candle is a pullback /
+        # dead-cat bounce with low volume BY DESIGN — the surge already fired on
+        # the breakout candle, which the evaluator validated at ≥ mult× rolling
+        # avg and stamped as ``breakout_volume_ratio``.  Score off that ratio,
+        # not the quiet entry candle, or these setups are structurally
+        # penalized for the very pattern that defines them.
+        if (
+            inp.setup_class in self._BREAKOUT_SURGE_SETUPS
+            and inp.breakout_volume_ratio > 0.0
+        ):
+            ratio = inp.breakout_volume_ratio
+        elif inp.volume_avg_usd <= 0 or inp.volume_last_usd <= 0:
             return 7.5    # Neutral
-        ratio = inp.volume_last_usd / inp.volume_avg_usd
+        else:
+            ratio = inp.volume_last_usd / inp.volume_avg_usd
         if ratio >= 3.0:
             return 15.0
         if ratio >= 2.0:

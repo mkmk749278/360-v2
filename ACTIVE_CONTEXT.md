@@ -4,6 +4,54 @@
 
 ---
 
+## Session 27 checkpoint 2026-06-17 — top-mover breakout/breakdown paths were dying in the SCORER, not the gates (VSB/BDS)
+
+### Owner trigger
+Owner: "why are the remaining paths not producing signals" → "we have two special
+paths for shorts and longs top movers, separate from the regular 75 — VSB and BDS
+— go deep on them." Diagnosis driven off the live truth report (monitor-logs).
+
+### Architecture recap
+Movers (24h %-change ≥ `MOVER_PROMOTION_MIN_PCT`, vol ≥ `MOVER_PROMOTION_MIN_VOLUME`)
+are promoted into the scan for `MOVER_PROMOTION_CYCLES` (5) with a **restricted
+evaluator set: VSB (long, top gainers) + BDS (short, top losers) only**.
+
+### Root cause (truth report, path-funnel + scoring-dimension tables)
+Both evaluators correctly **removed their regime gate** (§3.4 "fire in any HTF
+context") and the broken current-candle volume gate — but those fixes were
+**never applied at the SCORING layer**, so the composite scorer kept punishing
+them for the exact things that define them:
+- **VSB dies on the Regime dimension (8 vs 18 kept).** `_score_regime` gives 8
+  when the regime is known but the setup isn't in its affinity list. VSB/BDS are
+  in TRENDING/VOLATILE affinity but NOT RANGING/QUIET — and a top gainer
+  mid-pullback often reads RANGING/QUIET on 5m (market is 64% RANGING+QUIET). 10-pt
+  deficit → lands ~61 vs the 65 floor. (My #614 unification increased the RANGING
+  share, slightly worsening this.)
+- **BDS dies on the Volume dimension (3 vs 12 kept).** `_score_volume` scores the
+  current candle, but the BDS entry is a dead-cat bounce (low volume by design);
+  the surge already fired on the breakdown candle, which the scorer never saw.
+
+### Shipped (branch `feat/mover-breakout-scoring`, owner approved "both fixes, neutral floor")
+| Change | File(s) |
+|---|---|
+| `_score_regime`: floor breakout-surge setups (`_BREAKOUT_SURGE_SETUPS` = VSB/BDS/ORB) at neutral 14 in non-affinity regimes instead of 8 | `signal_quality.py` |
+| `_score_volume`: for those setups, score off the validated breakout-candle ratio (`breakout_volume_ratio`) instead of the low-volume entry candle; falls back to the entry ratio when unset | `signal_quality.py` |
+| Evaluators stamp `sig.breakout_volume_ratio = breakout(/down)_vol / rolling_avg` | `channels/scalp.py` |
+| New `Signal.breakout_volume_ratio` + `ScoringInput.breakout_volume_ratio` fields; scanner passes it through | `channels/base.py`, `signal_quality.py`, `scanner/__init__.py` |
+| 8 scoring tests (`TestBreakoutSurgeScoring`) | `tests/test_signal_quality.py` |
+
+Expected: VSB recovers ~10 regime pts, BDS ~9 volume pts → both clear 65 when
+otherwise structurally sound, without touching any hard gate. No new hot-path
+reads/writes (CPU-only scorer change). Owner-sign-off item (scoring model).
+
+### Watch next session
+- Truth report: VSB/BDS `Emitted` column should rise from ~0–3; confirm the
+  `Regime`/`Volume` filtered-vs-kept gaps close for these two setups.
+- The current truth report predates #614–#617 + this change — next report is the
+  first to reflect all of them.
+
+---
+
 ## Session 26 checkpoint 2026-06-17 — MTF trend definition unified + longs HTF-regime gate (PRs #614, #615 MERGED)
 
 ### Owner trigger

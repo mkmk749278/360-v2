@@ -190,6 +190,12 @@ class Signal:
     regime_penalty_multiplier: float = 1.0    # Regime multiplier applied to base penalties
     soft_gate_flags: str = ""                 # Comma-separated list of soft gates that fired
 
+    # Validated breakout/breakdown-candle volume ÷ rolling avg, stamped by the
+    # surge evaluators (VSB/BDS).  The scoring engine scores the volume
+    # dimension off THIS for surge setups — the entry candle is a low-volume
+    # pullback/bounce, so the live surge lives on the prior breakout candle.
+    breakout_volume_ratio: float = 0.0
+
     # ---- Multi-TF Level Book confluence (PR-6) ----
     # Number of distinct multi-TF S/R levels (incl. round numbers) within
     # CONFLUENCE_QUERY_TOLERANCE_PCT of entry.  ≥2 earns a soft-penalty bonus.
