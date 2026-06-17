@@ -2550,3 +2550,69 @@ class TestPortfolioRoles:
         assert PortfolioRole.CORE.value == "core"
         assert PortfolioRole.SUPPORT.value == "support"
         assert PortfolioRole.SPECIALIST.value == "specialist"
+
+
+class TestBreakoutSurgeScoring:
+    """Regime + volume scoring corrections for top-mover surge setups (VSB/BDS).
+
+    §3.4: these "fire in any HTF context" (regime must not penalize RANGING/QUIET),
+    and their entry candle is a low-volume pullback/bounce (volume must score off
+    the validated breakout-candle ratio, not the quiet entry candle).
+    """
+
+    # --- Regime: neutral floor in non-affinity regimes ---
+
+    def test_vsb_regime_floored_in_ranging(self, engine):
+        inp = ScoringInput(regime="RANGING", setup_class="VOLUME_SURGE_BREAKOUT")
+        assert engine.score(inp)["regime"] == 14.0  # was 8.0 before the floor
+
+    def test_bds_regime_floored_in_quiet(self, engine):
+        inp = ScoringInput(regime="QUIET", setup_class="BREAKDOWN_SHORT")
+        assert engine.score(inp)["regime"] == 14.0
+
+    def test_vsb_regime_affinity_unchanged_in_trending_up(self, engine):
+        inp = ScoringInput(regime="TRENDING_UP", setup_class="VOLUME_SURGE_BREAKOUT")
+        assert engine.score(inp)["regime"] == 18.0  # affinity match, untouched
+
+    def test_floor_does_not_leak_to_non_breakout_setups(self, engine):
+        # A non-breakout setup not in the RANGING affinity list still scores 8.
+        inp = ScoringInput(regime="RANGING", setup_class="LIQUIDATION_REVERSAL")
+        assert engine.score(inp)["regime"] == 8.0
+
+    # --- Volume: score off the validated breakout-candle ratio ---
+
+    def test_bds_volume_uses_breakout_ratio_over_low_entry(self, engine):
+        # Entry candle volume is far below average (dead-cat bounce), but the
+        # validated breakdown candle surged 3x → volume must score 15, not 3.
+        inp = ScoringInput(
+            setup_class="BREAKDOWN_SHORT",
+            volume_last_usd=100_000, volume_avg_usd=1_000_000,  # entry ratio 0.1
+            breakout_volume_ratio=3.0,
+        )
+        assert engine.score(inp)["volume"] == 15.0
+
+    def test_vsb_volume_breakout_ratio_2x(self, engine):
+        inp = ScoringInput(
+            setup_class="VOLUME_SURGE_BREAKOUT",
+            volume_last_usd=100_000, volume_avg_usd=1_000_000,
+            breakout_volume_ratio=2.0,
+        )
+        assert engine.score(inp)["volume"] == 12.0
+
+    def test_breakout_volume_falls_back_to_entry_when_ratio_absent(self, engine):
+        # No stamped ratio → fall back to the entry-candle ratio (legacy path).
+        inp = ScoringInput(
+            setup_class="BREAKDOWN_SHORT",
+            volume_last_usd=3_000_000, volume_avg_usd=1_000_000,  # entry ratio 3.0
+            breakout_volume_ratio=0.0,
+        )
+        assert engine.score(inp)["volume"] == 15.0
+
+    def test_breakout_ratio_ignored_for_non_breakout_setups(self, engine):
+        # A stray ratio on a non-surge setup must not affect its volume score.
+        inp = ScoringInput(
+            setup_class="SR_FLIP_RETEST",
+            volume_last_usd=500_000, volume_avg_usd=1_000_000,  # entry ratio 0.5
+            breakout_volume_ratio=3.0,
+        )
+        assert engine.score(inp)["volume"] == 3.0

@@ -5840,6 +5840,7 @@ class Scanner:
                 atr_percentile=_atr_pct,
                 volume_last_usd=_volume_last_usd,
                 volume_avg_usd=_volume_avg_usd,
+                breakout_volume_ratio=getattr(sig, "breakout_volume_ratio", 0.0) or 0.0,
                 macd_histogram_last=_primary_ind.get("macd_histogram_last"),
                 macd_histogram_prev=_primary_ind.get("macd_histogram_prev"),
                 rsi_last=_primary_ind.get("rsi_last"),
