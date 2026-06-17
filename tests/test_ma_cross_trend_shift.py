@@ -526,3 +526,88 @@ class TestScalarPrevApiPath:
             regime="TRENDING_UP",
         )
         assert sig is None
+
+
+# ---------------------------------------------------------------------------
+# Higher-timeframe trend-alignment gate
+#
+# Research consensus on crypto MA crosses: the FILTER, not the period choice,
+# is the edge — a raw cross whipsaws because crypto ranges ~60% of the time.
+# The lower-conviction 1h 21/50 cross must agree with the 4h structural trend;
+# the 4h 50/200 cross is confirmed by price vs the 4h EMA200.
+# ---------------------------------------------------------------------------
+
+
+def _make_1h_golden_cross_with_4h(ema50_4h: float, ema200_4h: float) -> dict:
+    """1h golden cross (21>50), with caller-controlled 4h EMA50/200 stack."""
+    return {
+        "1m": {"rsi_last": 60.0, "ema9_last": 100.5, "ema21_last": 100.0, "atr_last": 0.5},
+        "1h": {
+            "rsi_last": 60.0, "atr_last": 0.5,
+            "ema21": [99.0, 100.5], "ema50": [99.5, 100.0],
+            "ema21_last": 100.5, "ema50_last": 100.0,
+        },
+        "4h": {"ema50_last": ema50_4h, "ema200_last": ema200_4h},
+    }
+
+
+class TestHtfAlignmentGate:
+    def test_1h_long_fires_when_4h_bullish(self):
+        ch = ScalpChannel()
+        candles = {"1m": _candles_1m(), "1h": _candles_1h()}
+        # 4h bullish: ema50 > ema200 → confirms the 1h golden cross LONG.
+        sig = ch._evaluate_ma_cross_trend_shift(
+            "BTCUSDT", candles, _make_1h_golden_cross_with_4h(101.0, 99.0),
+            _smc(), 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is not None
+        assert sig.direction == Direction.LONG
+        assert "1h" in (sig.execution_note or "")
+
+    def test_1h_long_rejected_when_4h_bearish(self):
+        ch = ScalpChannel()
+        candles = {"1m": _candles_1m(), "1h": _candles_1h()}
+        # 4h bearish: ema50 < ema200 → 1h golden cross is counter-HTF → reject.
+        sig = ch._evaluate_ma_cross_trend_shift(
+            "BTCUSDT", candles, _make_1h_golden_cross_with_4h(99.0, 101.0),
+            _smc(), 0.01, 10_000_000, regime="RANGING",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "ma_cross_htf_misaligned"
+
+    def test_1h_cross_rejected_when_4h_trend_unavailable(self):
+        ch = ScalpChannel()
+        candles = {"1m": _candles_1m(), "1h": _candles_1h()}
+        ind = _make_1h_golden_cross_with_4h(101.0, 99.0)
+        ind["4h"] = {}  # no 4h EMAs → cannot confirm → fail closed
+        sig = ch._evaluate_ma_cross_trend_shift(
+            "BTCUSDT", candles, ind, _smc(), 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "ma_cross_htf_unconfirmed"
+
+    def test_4h_long_rejected_when_price_below_ema200(self):
+        ch = ScalpChannel()
+        # Price (1m close=100) below the 4h EMA200 → failing golden cross.
+        candles = {"1m": _candles_1m(base=100.0), "1h": _candles_1h()}
+        ind = _make_indicators_with_4h_golden_cross()
+        # EMA200 between price (100) and EMA50 (100.5): cross stays valid
+        # (ema50 > ema200) but price sits below EMA200 → failing cross.
+        ind["4h"]["ema200"] = [99.5, 100.3]
+        ind["4h"]["ema200_last"] = 100.3
+        sig = ch._evaluate_ma_cross_trend_shift(
+            "BTCUSDT", candles, ind, _smc(), 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "ma_cross_4h_price_below_ema200"
+
+    def test_4h_long_fires_when_price_above_ema200(self):
+        ch = ScalpChannel()
+        candles = {"1m": _candles_1m(base=100.0), "1h": _candles_1h()}
+        ind = _make_indicators_with_4h_golden_cross()
+        ind["4h"]["ema200_last"] = 98.0  # price 100 > 98 → confirmed
+        sig = ch._evaluate_ma_cross_trend_shift(
+            "BTCUSDT", candles, ind, _smc(), 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is not None
+        assert sig.direction == Direction.LONG
