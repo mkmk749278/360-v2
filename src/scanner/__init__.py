@@ -3906,8 +3906,16 @@ class Scanner:
                 vols = np.asarray(
                     c15.get("volume", np.zeros(len(closes))), dtype=np.float64
                 )
+                _tier_15m = getattr(
+                    classify_pair_tier(
+                        getattr(sig, "symbol", ""), volume_24h_usd=volume_24h
+                    ),
+                    "tier",
+                    "MIDCAP",
+                )
                 sig.entry_regime_15m = detect_regime_from_arrays(
-                    closes, highs, lows, vols, idx=len(closes) - 1
+                    closes, highs, lows, vols, idx=len(closes) - 1,
+                    pair_tier=_tier_15m,
                 )
         except Exception as exc:
             log.debug(

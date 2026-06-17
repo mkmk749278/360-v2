@@ -711,7 +711,25 @@ class AdaptiveRegimeDetector(MarketRegimeDetector):
         if bb_upper is not None and bb_lower is not None and bb_mid and bb_mid != 0.0:
             bb_width_pct = (bb_upper - bb_lower) / bb_mid * 100.0
 
-        regime = self._decide_adaptive(adx_val, ema_slope, bb_width_pct, timeframe=timeframe)
+        # ADX slope (adx[t] - adx[t-1]) — confirms whether a *weak-zone* trend
+        # (ADX between the tier's ranging and trending floors) is actually
+        # building or merely fading.  Without it the weak zone stamped TRENDING
+        # on decaying moves (live data: "TRENDING" labels carrying a negative
+        # ADX slope), which drove signals into already-exhausted trends.
+        adx_slope: Optional[float] = None
+        if candles is not None and len(candles.get("close", [])) >= 30:
+            from src.indicators import adx as _compute_adx_ind  # noqa: PLC0415
+            _h = np.asarray(candles.get("high", []), dtype=np.float64)
+            _lo = np.asarray(candles.get("low", []), dtype=np.float64)
+            _c = np.asarray(candles.get("close", []), dtype=np.float64)
+            _adx_arr = _compute_adx_ind(_h, _lo, _c, 14)
+            _valid = _adx_arr[~np.isnan(_adx_arr)]
+            if len(_valid) >= 2:
+                adx_slope = float(_valid[-1] - _valid[-2])
+
+        regime = self._decide_adaptive(
+            adx_val, ema_slope, bb_width_pct, timeframe=timeframe, adx_slope=adx_slope
+        )
         # Hurst gate (see MarketRegimeDetector.classify) — demote false trends.
         regime = _apply_hurst_gate(regime, _hurst_from_candles(candles))
         stable_regime = self._apply_hysteresis(regime)
@@ -747,6 +765,7 @@ class AdaptiveRegimeDetector(MarketRegimeDetector):
         ema_slope: Optional[float],
         bb_width_pct: Optional[float],
         timeframe: str = "5m",
+        adx_slope: Optional[float] = None,
     ) -> MarketRegime:
         """Like :meth:`_decide` but uses instance-level tier thresholds."""
         ema_slope_threshold = 0.15 if timeframe == "1m" else 0.05
@@ -762,7 +781,14 @@ class AdaptiveRegimeDetector(MarketRegimeDetector):
             if bb_width_pct <= self._bb_width_quiet:
                 return MarketRegime.QUIET
         if adx is not None and self._adx_ranging_max < adx < self._adx_trending_min:
-            if ema_slope is not None and abs(ema_slope) > ema_slope_threshold:
+            # Weak/forming-trend zone: only call it a trend when the move is
+            # actually building — ADX rising — not merely separated EMAs on a
+            # fading move.  When ADX slope is unknown (warm-up) stay RANGING:
+            # an unconfirmed weak trend should not drive a directional signal.
+            if (
+                ema_slope is not None and abs(ema_slope) > ema_slope_threshold
+                and adx_slope is not None and adx_slope > 0
+            ):
                 return MarketRegime.TRENDING_UP if ema_slope > 0 else MarketRegime.TRENDING_DOWN
             return MarketRegime.RANGING
         if adx is not None and adx >= self._adx_trending_min:
@@ -917,6 +943,7 @@ def detect_regime_from_arrays(
     volumes: "np.ndarray",
     idx: int,
     lookback: int = 14,
+    pair_tier: Optional[str] = None,
 ) -> str:
     """Detect market regime at a specific bar index in a historical array.
 
@@ -928,6 +955,15 @@ def detect_regime_from_arrays(
         Bar index for which to detect the regime.
     lookback:
         ATR/ADX computation lookback.
+    pair_tier:
+        Volume tier (``"MAJOR"`` / ``"MIDCAP"`` / ``"ALTCOIN"``).  When given,
+        the ADX trending/ranging floors and the weak-zone confirmation rule
+        match :meth:`AdaptiveRegimeDetector._decide_adaptive` exactly, so a
+        higher-timeframe regime stamp means the *same thing* as the per-symbol
+        5m regime.  Without this the 15m stamp used a flat ADX>=25 floor with
+        no weak zone, so a midcap at ADX 22 read "TRENDING" on 5m but
+        "RANGING" on 15m purely by construction — making any multi-timeframe
+        comparison meaningless.  Defaults to the MIDCAP profile.
 
     Returns
     -------
@@ -954,14 +990,36 @@ def detect_regime_from_arrays(
     price = float(c[-1])
     atr_pct = (atr_val / price * 100) if price > 0 else 0.5
 
-    if adx_val >= _ADX_TRENDING_MIN:
-        ema9_last = float(ema9[-1]) if not np.isnan(ema9[-1]) else float(c[-1])
-        ema21_last = float(ema21[-1]) if not np.isnan(ema21[-1]) else float(c[-1])
-        return (
-            MarketRegime.TRENDING_UP.value
-            if ema9_last > ema21_last
-            else MarketRegime.TRENDING_DOWN.value
-        )
+    # ADX slope confirms a weak-zone trend is building rather than fading.
+    _adx_valid = adx_series[~np.isnan(adx_series)]
+    adx_slope = float(_adx_valid[-1] - _adx_valid[-2]) if len(_adx_valid) >= 2 else None
+
+    # Tier-aware thresholds — identical source to the 5m adaptive detector.
+    profile = _TIER_REGIME_PROFILES[_tier_for_symbol(pair_tier)]
+    trending_min = profile["adx_trending_min"]
+    ranging_max = profile["adx_ranging_max"]
+
+    ema9_last = float(ema9[-1]) if not np.isnan(ema9[-1]) else float(c[-1])
+    ema21_last = float(ema21[-1]) if not np.isnan(ema21[-1]) else float(c[-1])
+    ema_sep_pct = (
+        (ema9_last - ema21_last) / ema21_last * 100.0 if ema21_last != 0.0 else 0.0
+    )
+    _trending_label = (
+        MarketRegime.TRENDING_UP.value
+        if ema9_last > ema21_last
+        else MarketRegime.TRENDING_DOWN.value
+    )
+
+    # Confirmed trend.
+    if adx_val >= trending_min:
+        return _trending_label
+    # Weak/forming-trend zone — require ADX rising AND meaningful EMA separation,
+    # mirroring _decide_adaptive so the two timeframes agree on what a trend is.
+    if ranging_max < adx_val < trending_min:
+        if abs(ema_sep_pct) > 0.05 and adx_slope is not None and adx_slope > 0:
+            return _trending_label
+        return MarketRegime.RANGING.value
+    # Volatility / quiet only when there is no trend signal.
     if atr_pct >= 1.5:
         return MarketRegime.VOLATILE.value
     if atr_pct <= 0.3:
