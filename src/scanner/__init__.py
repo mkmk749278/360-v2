@@ -5837,6 +5837,7 @@ class Scanner:
                 fvg_zones=ctx.smc_result.fvg,
                 regime=_regime_key,
                 setup_class=sig.setup_class,
+                htf_trend_aligned=getattr(sig, "htf_trend_aligned", False),
                 atr_percentile=_atr_pct,
                 volume_last_usd=_volume_last_usd,
                 volume_avg_usd=_volume_avg_usd,

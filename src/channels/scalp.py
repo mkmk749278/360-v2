@@ -1708,6 +1708,11 @@ class ScalpChannel(BaseChannel):
         if sig is None:
             return self._reject("build_signal_failed")
 
+        # Trend was sourced from the 1H (EMA21/50 alignment + slope + pullback
+        # structure) on the HTF path — record it so the scorer credits the
+        # higher-timeframe trend instead of penalising the 5m pullback label.
+        sig.htf_trend_aligned = bool(_uses_1h_trend)
+
         # Override with structure-based TP targets
         sig.tp1 = round(tp1, 8)
         sig.tp2 = round(tp2, 8)

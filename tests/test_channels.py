@@ -6084,3 +6084,36 @@ class TestDivContHtfGate:
             )
         else:
             assert sig.setup_class == "DIVERGENCE_CONTINUATION"
+
+
+class TestTrendPullbackHtfFlag:
+    """TREND_PULLBACK_EMA stamps ``htf_trend_aligned`` when the trend was
+    sourced from the 1H (HTF path), and leaves it False on the legacy
+    5m-regime fallback path.  The scorer uses this to credit the
+    higher-timeframe trend instead of the noisy 5m pullback label."""
+
+    def test_fallback_path_leaves_flag_false(self):
+        ch = ScalpChannel()
+        candles = {"5m": _make_trend_pullback_candles_long()}
+        sig = ch._evaluate_trend_pullback(
+            "BTCUSDT", candles, _trend_pullback_indicators_long(),
+            {"fvg": [{"level": 100.0}]}, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is not None
+        assert sig.htf_trend_aligned is False
+
+    def test_htf_path_stamps_flag_and_fires_under_ranging_label(self):
+        ch = ScalpChannel()
+        candles = {"5m": _make_trend_pullback_candles_long()}
+        ind = _trend_pullback_indicators_long()
+        # Bullish 1H stack (ema21 > ema50, no prev → slope accepted) routes the
+        # evaluator onto the HTF path.  No 1H candles/ATR → pullback check is
+        # skipped (fail-open).  5m label is RANGING — the HTF path must not care.
+        ind["1h"] = {"ema21_last": 100.5, "ema50_last": 100.0}
+        sig = ch._evaluate_trend_pullback(
+            "BTCUSDT", candles, ind, {"fvg": [{"level": 100.0}]},
+            0.01, 10_000_000, regime="RANGING",
+        )
+        assert sig is not None
+        assert sig.direction == Direction.LONG
+        assert sig.htf_trend_aligned is True

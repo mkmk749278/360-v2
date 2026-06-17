@@ -196,6 +196,14 @@ class Signal:
     # pullback/bounce, so the live surge lives on the prior breakout candle.
     breakout_volume_ratio: float = 0.0
 
+    # Set by trend-continuation evaluators (TREND_PULLBACK_EMA) when the trend
+    # was identified on the higher timeframe (1H EMA21/50 alignment+slope) and
+    # the entry is timed on the LTF.  Multi-timeframe doctrine: trend is
+    # HTF-defined, entry is LTF — so the 5m regime label (which reads
+    # RANGING/QUIET during the pullback) is the wrong thing to score regime on.
+    # The scorer awards full regime affinity when this is set.
+    htf_trend_aligned: bool = False
+
     # ---- Multi-TF Level Book confluence (PR-6) ----
     # Number of distinct multi-TF S/R levels (incl. round numbers) within
     # CONFLUENCE_QUERY_TOLERANCE_PCT of entry.  ≥2 earns a soft-penalty bonus.

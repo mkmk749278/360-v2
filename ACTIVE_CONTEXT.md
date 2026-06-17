@@ -4,6 +4,47 @@
 
 ---
 
+## Session 28 checkpoint 2026-06-17 — TPE regime scored on the wrong timeframe (HTF-aware fix, research-backed, owner-approved)
+
+### Owner trigger
+Owner asked about the regime score for the TREND_PULLBACK_EMA path, then: "go
+through deep research on crypto trend-pullback conditions / which timeframes
+give best, then we decide."
+
+### Research finding (web, multi-source)
+Pullbacks are a **trending-market** setup ("step aside" in ranges). Canonical
+multi-timeframe doctrine: **trend is defined on the HIGHER timeframe; entry is
+timed on the LOWER** (HTF=trend → MTF=structure → LTF=entry). Rule repeated
+everywhere: *"never trade against the HTF trend; always time entry on the LTF."*
+EMA21 = canonical pullback-retest level, EMA50 = trend filter — our 1H EMA21/50
+usage matches. This validates the evaluator's post-2026-05-17 redesign (trend on
+1H, entry on 5m; the old 5m-trend version scored 78% MFE=0).
+
+### Diagnosis
+`_score_regime` judges TPE on `ctx.regime_result.regime` — the **5m label**, the
+*entry* TF. During the pullback the 5m label reads RANGING/QUIET, so TPE dropped
+to **8** even though it only fires when the **1H is trending** (evaluator
+precondition). Scoring the trend on the entry timeframe is the exact multi-TF
+error the research warns against.
+
+### Owner decision: HTF-aware regime score (the doctrinally-ideal option, not the quick 14-floor)
+### Shipped (branch `feat/tpe-htf-regime-score`)
+| Change | File |
+|---|---|
+| New `Signal.htf_trend_aligned` flag | `channels/base.py` |
+| TPE stamps `sig.htf_trend_aligned = bool(_uses_1h_trend)` (True only on the 1H-trend path) | `channels/scalp.py` |
+| New `ScoringInput.htf_trend_aligned` | `signal_quality.py` |
+| `_score_regime`: trend-pullback family with `htf_trend_aligned` → full affinity **18** in any regime (scoped to `_FAMILY_TREND_PULLBACK`; legacy 5m-fallback path keeps the label score) | `signal_quality.py` |
+| Scanner passes `sig.htf_trend_aligned` into `ScoringInput` | `scanner/__init__.py` |
+| 5 scorer tests (`TestTrendPullbackHtfRegimeScore`) + 2 evaluator tests (`TestTrendPullbackHtfFlag`, incl. fires-under-RANGING-label) | `tests/test_signal_quality.py`, `tests/test_channels.py` |
+
+CPU-only; no new reads/writes/hot-path cost. Full suite passes.
+Still secondary to TPE's real generation bottleneck — the over-tight entry-quality
+gate (82.6%-SL guard, `no_prev_high_break` + `ema21_not_tagged`) deferred in #619;
+that's the next lever if we want TPE *generation* up (shadow-first).
+
+---
+
 ## Session 28 checkpoint 2026-06-17 — MA_CROSS: filter is the edge, not the period (research-backed, owner-approved)
 
 ### Owner trigger
