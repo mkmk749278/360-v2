@@ -356,6 +356,184 @@ def _bump_write_generation() -> None:
         _write_generation += 1
 
 
+# ---------------------------------------------------------------------------
+# In-memory live-position index (engine process only)
+# ---------------------------------------------------------------------------
+#
+# The engine is the SOLE writer of position state — every mutation funnels
+# through ``put_position`` / ``delete_position`` (the same invariant that
+# makes the write-generation counter valid).  This index mirrors the set of
+# LIVE (non-terminal) positions in process memory, maintained write-through
+# by those two writers.  Once active, engine-side readers (pre-TP dispatcher,
+# reconciler, funding-exit watcher, the app-positions endpoint in
+# single-process mode) are served from memory instead of re-reading the
+# engine's own state from a per-read-billed remote DB on 24/7 hot loops.
+#
+# This is the architecturally-correct end state of the cost work: #609 cached
+# the per-tick path and #623 filtered the per-60s path, but both still hit
+# Firestore on cache-miss / generation-bump.  With the index active those
+# reads are served from memory; Firestore is touched only for the durable
+# write-through, a one-time boot hydration, and a low-frequency defensive
+# resync.
+#
+# Process scope: ONLY the engine calls :func:`enable_position_index`.  A
+# read-only process (the isolated ``api`` container) never enables it, so
+# ``_index_active`` stays False there and every reader falls back to the
+# Firestore path — which in that container is itself guarded off (it never
+# initialises ``position_state``).  Only LIVE positions are held; a position
+# is evicted the moment it is written in a terminal state, bounding memory
+# and matching exactly what every live-position reader wants.
+_index: dict[str, dict[str, "Position"]] = {}  # uid -> signal_id -> Position
+_index_active: bool = False
+
+
+def _index_put_locked(position: "Position") -> None:
+    """Insert / update / evict one position in the live index.  Caller MUST
+    hold :data:`_lock`.  A terminal-state write evicts the entry (the index
+    tracks live positions only)."""
+    uid = position.firebase_uid
+    sid = position.signal_id
+    if is_terminal(position.state):
+        bucket = _index.get(uid)
+        if bucket is not None:
+            bucket.pop(sid, None)
+            if not bucket:
+                _index.pop(uid, None)
+    else:
+        _index.setdefault(uid, {})[sid] = position
+
+
+def _index_delete_locked(firebase_uid: str, signal_id: str) -> None:
+    """Drop one position from the live index.  Caller MUST hold :data:`_lock`."""
+    bucket = _index.get(firebase_uid)
+    if bucket is not None:
+        bucket.pop(signal_id, None)
+        if not bucket:
+            _index.pop(firebase_uid, None)
+
+
+def index_active() -> bool:
+    """True if the in-memory live-position index is hydrated and serving."""
+    with _lock:
+        return _index_active
+
+
+def enable_position_index() -> None:
+    """Engine-only: hydrate the live-position index from Firestore (ONE
+    collection-group read of all non-terminal positions) and serve every
+    subsequent live-position read from memory.
+
+    Idempotent.  No-op if ``position_state`` isn't initialised.  On hydration
+    failure the index is left INACTIVE so readers keep using the safe
+    Firestore path — we never activate a half-built index in a real-money
+    path.  Must be called by the engine bootstrap AFTER
+    :func:`init_position_state`; the isolated API process must NOT call it.
+    """
+    global _index_active
+    with _lock:
+        if _db is None:
+            log.warning(
+                "enable_position_index: position_state not initialised — "
+                "index stays OFF (readers use Firestore)"
+            )
+            return
+        if _index_active:
+            return
+        db = _db
+    try:
+        query = db.collection_group("positions").where(
+            "state", "in", list(_NON_TERMINAL_STATE_VALUES)
+        )
+        fresh: dict[str, dict[str, "Position"]] = {}
+        hydrated = 0
+        for snap in query.stream():
+            data = snap.to_dict() or {}
+            try:
+                pos = _from_firestore_dict(data)
+            except Exception:
+                log.exception(
+                    "enable_position_index: skipping malformed position doc"
+                )
+                continue
+            if is_terminal(pos.state):
+                continue
+            fresh.setdefault(pos.firebase_uid, {})[pos.signal_id] = pos
+            hydrated += 1
+    except Exception:
+        log.exception(
+            "enable_position_index: hydration query failed — index NOT "
+            "activated; readers continue on the Firestore path"
+        )
+        return
+    with _lock:
+        # Merge any writes that landed during the (lock-free) hydration scan
+        # on top of the freshly-read set, then activate.  Live writes win.
+        for uid, bucket in _index.items():
+            fresh.setdefault(uid, {}).update(bucket)
+        _index.clear()
+        _index.update(fresh)
+        _index_active = True
+    log.info(
+        "position index ACTIVE: hydrated {} live positions across {} users",
+        hydrated, len(_index),
+    )
+
+
+def resync_index() -> None:
+    """Defensive re-hydration: rebuild the live index from Firestore in case
+    a write ever bypassed ``put_position`` / ``delete_position`` (out-of-band
+    tooling, future code path).  ONE collection-group read; safe to call on a
+    low-frequency timer.  No-op while the index is inactive.
+
+    Mirrors the defensive TTL the #609 generation cache carries — generation
+    write-through is the primary mechanism; this bounds drift from anything
+    that escapes it.
+    """
+    with _lock:
+        if not _index_active or _db is None:
+            return
+        db = _db
+    try:
+        query = db.collection_group("positions").where(
+            "state", "in", list(_NON_TERMINAL_STATE_VALUES)
+        )
+        fresh: dict[str, dict[str, "Position"]] = {}
+        for snap in query.stream():
+            data = snap.to_dict() or {}
+            try:
+                pos = _from_firestore_dict(data)
+            except Exception:
+                continue
+            if is_terminal(pos.state):
+                continue
+            fresh.setdefault(pos.firebase_uid, {})[pos.signal_id] = pos
+    except Exception:
+        log.exception("resync_index: rebuild query failed — keeping current index")
+        return
+    with _lock:
+        _index.clear()
+        _index.update(fresh)
+
+
+def index_open_positions_for_symbol(symbol: str) -> Optional[list["Position"]]:
+    """Return OPEN positions on ``symbol`` across all users from the live
+    index, or ``None`` when the index is inactive (caller should fall back to
+    the Firestore query).  An empty list means "active, none open on this
+    symbol" — distinct from ``None``.
+
+    Matches the pre-TP dispatcher's query: state == OPEN only (PRE_TP_FIRED
+    and later states don't consume mark-price ticks)."""
+    with _lock:
+        if not _index_active:
+            return None
+        out: list["Position"] = []
+        for bucket in _index.values():
+            for pos in bucket.values():
+                if pos.state == PositionState.OPEN and pos.symbol == symbol:
+                    out.append(pos)
+        return out
+
+
 def init_position_state(service_account_path: Optional[str] = None) -> None:
     """Initialise the Firestore Admin SDK client for the position
     state collection.
@@ -426,13 +604,29 @@ def put_position(position: Position) -> None:
     _doc_ref(position.firebase_uid, position.signal_id).set(
         _to_firestore_dict(position)
     )
-    _bump_write_generation()
+    with _lock:
+        # Write-through to the in-memory live index (terminal writes evict).
+        # Maintained unconditionally — cheap, and ensures no write is missed
+        # between boot hydration and activation; serving is gated separately
+        # on _index_active.
+        _index_put_locked(position)
+        _bump_write_generation()
 
 
 def get_position(firebase_uid: str, signal_id: str) -> Position:
     """Load a position document.  Raises :class:`PositionNotFoundError`
     when the doc doesn't exist.
+
+    Served from the in-memory live index when active and the position is
+    non-terminal (returning the same object the FSM mutates in place — the
+    engine is single-event-loop, so there is no mid-mutation read race).
+    Terminal / never-seen positions fall through to a Firestore read.
     """
+    with _lock:
+        if _index_active:
+            bucket = _index.get(firebase_uid)
+            if bucket is not None and signal_id in bucket:
+                return bucket[signal_id]
     snap = _doc_ref(firebase_uid, signal_id).get()
     if not snap.exists:
         raise PositionNotFoundError(
@@ -449,7 +643,9 @@ def delete_position(firebase_uid: str, signal_id: str) -> None:
     retention-policy implementation.
     """
     _doc_ref(firebase_uid, signal_id).delete()
-    _bump_write_generation()
+    with _lock:
+        _index_delete_locked(firebase_uid, signal_id)
+        _bump_write_generation()
 
 
 def list_positions_for_user(
@@ -473,6 +669,12 @@ def list_positions_for_user(
     below is kept as defence-in-depth (a CLOSED doc can never slip
     through both layers).
 
+    When the in-memory live index is active and ``include_closed`` is False,
+    this is served entirely from memory (zero Firestore reads) — the index
+    holds exactly the user's live positions.  ``include_closed=True`` (the
+    rare historical view) always streams Firestore since the index never
+    holds terminal docs.
+
     Returns empty list when the collection doesn't exist yet (a fresh
     user who has never had a position).  Raises
     :class:`PositionStateNotInitialisedError` if the keystore wasn't
@@ -483,6 +685,9 @@ def list_positions_for_user(
             raise PositionStateNotInitialisedError(
                 "position_state not initialised — call init_position_state at boot"
             )
+        if _index_active and not include_closed:
+            bucket = _index.get(firebase_uid)
+            return list(bucket.values()) if bucket else []
         coll = (
             _db.collection("users")
             .document(firebase_uid)
@@ -514,11 +719,13 @@ def list_positions_for_user(
 
 
 def reset_for_test() -> None:
-    """Test-only: drop the singleton."""
-    global _db, _write_generation
+    """Test-only: drop the singleton + live index."""
+    global _db, _write_generation, _index_active
     with _lock:
         _db = None
         _write_generation = 0
+        _index.clear()
+        _index_active = False
 
 
 # ---------------------------------------------------------------------------

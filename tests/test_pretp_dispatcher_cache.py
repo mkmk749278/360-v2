@@ -127,3 +127,27 @@ def _make_open_position() -> _ps.Position:
         tp2_qty=0.3,
         tp3_qty=0.4,
     )
+
+
+def test_index_active_bypasses_firestore_query(_counting_query, monkeypatch):
+    """When the in-memory live-position index is active it is authoritative —
+    the dispatcher serves from it and never touches the Firestore query or
+    its generation cache."""
+    open_pos = [object()]
+    monkeypatch.setattr(
+        _ps, "index_open_positions_for_symbol", lambda sym: open_pos
+    )
+    out1 = _pd._default_positions_for_symbol("BTCUSDT")
+    out2 = _pd._default_positions_for_symbol("BTCUSDT")
+    assert out1 is open_pos and out2 is open_pos
+    assert "BTCUSDT" not in _counting_query
+
+
+def test_index_inactive_falls_back_to_generation_cache(_counting_query, monkeypatch):
+    """index returns None (inactive) → existing generation-gated Firestore
+    cache path is used, unchanged."""
+    monkeypatch.setattr(_ps, "index_open_positions_for_symbol", lambda sym: None)
+    monkeypatch.setattr(_ps, "get_write_generation", lambda: 1)
+    _pd._default_positions_for_symbol("ADAUSDT")
+    _pd._default_positions_for_symbol("ADAUSDT")
+    assert _counting_query["ADAUSDT"] == 1

@@ -397,6 +397,7 @@ class Bootstrap:
             OTP_MAX_ISSUES_PER_HOUR,
             OTP_TTL_SECONDS,
             OWNER_PHONE_E164,
+            POSITION_INDEX_RESYNC_SEC,
         )
         if API_ENABLED:
             from datetime import timedelta
@@ -535,6 +536,14 @@ class Bootstrap:
                         service_account_path=firebase_sa_path or None,
                     )
                     log.info("Position-state Firestore client initialised")
+                    # Hydrate the in-memory live-position index so the
+                    # engine serves its own position reads from memory
+                    # instead of re-reading them from Firestore on every
+                    # hot loop (the architecturally-correct end state of
+                    # #609 / #623).  Engine process ONLY — the isolated
+                    # api container never calls this.  On failure the
+                    # index stays off and readers use the Firestore path.
+                    _position_state.enable_position_index()
                     # Dispatch-event log — per-user history of every
                     # order-placement attempt (placed + rejected).
                     # Shares the same Firestore client as the keystore
@@ -584,6 +593,32 @@ class Bootstrap:
                         name="reconciler",
                     )
                 )
+
+                # Defensive periodic resync of the in-memory position
+                # index — bounds staleness from any write that ever
+                # bypasses put_position / delete_position.  ONE collection-
+                # group read per interval (negligible), off the event loop
+                # so a slow Firestore round-trip can't stall the engine.
+                # No-op while the index is inactive.
+                if POSITION_INDEX_RESYNC_SEC > 0:
+                    from src.execution import position_state as _ps_idx
+
+                    async def _position_index_resync_loop() -> None:
+                        while True:
+                            await asyncio.sleep(POSITION_INDEX_RESYNC_SEC)
+                            try:
+                                await asyncio.to_thread(_ps_idx.resync_index)
+                            except Exception:
+                                log.exception(
+                                    "position_index_resync: rebuild failed"
+                                )
+
+                    tasks.append(
+                        asyncio.create_task(
+                            _position_index_resync_loop(),
+                            name="position_index_resync",
+                        )
+                    )
 
             # Mark-price feed + pre-TP dispatcher — always started when
             # the execution stack is active (firebase_project_id set).
