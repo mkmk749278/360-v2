@@ -1972,6 +1972,14 @@ RECONCILER_STALE_CLOSE_ENABLED: bool = _safe_bool(
     "RECONCILER_STALE_CLOSE_ENABLED", "true"
 )
 
+# Defensive resync interval (seconds) for the engine's in-memory live-
+# position index.  The index is maintained write-through by put_position /
+# delete_position (the same sole-writer invariant behind the write-generation
+# counter), so this only guards against a write that bypasses those two
+# paths.  ONE collection-group read per interval — negligible.  Default 300s
+# (5 min).  Set 0 to disable the resync loop entirely (write-through only).
+POSITION_INDEX_RESYNC_SEC: int = _safe_int("POSITION_INDEX_RESYNC_SEC", "300")
+
 # ---------------------------------------------------------------------------
 # Margin-mode enforcement — 2026-06-01 (VTHOUSDT isolated-margin incident)
 # ---------------------------------------------------------------------------

@@ -234,7 +234,15 @@ def _default_positions_for_symbol(symbol: str) -> List[_position_state.Position]
     Cache hit requires BOTH the position-write generation to be unchanged
     (correctness) AND the entry to be within :data:`_QUERY_CACHE_MAX_TTL_S`
     (defensive freshness bound).  Otherwise re-queries Firestore.
+
+    When the in-memory live-position index is active (engine process), it is
+    the authoritative source and is served directly — zero Firestore reads,
+    no generation/TTL cache needed.  The generation-gated Firestore cache
+    below is the fallback for any process/context where the index is off.
     """
+    indexed = _position_state.index_open_positions_for_symbol(symbol)
+    if indexed is not None:
+        return indexed
     generation = _position_state.get_write_generation()
     now = _clock()
     with _positions_cache_lock:
