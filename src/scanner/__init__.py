@@ -778,6 +778,10 @@ _YOUNG_PAIR_EVALUATORS: frozenset[str] = frozenset({
     "_evaluate_whale_momentum",
     "_evaluate_liquidation_reversal",
     "_evaluate_funding_extreme",
+    # Mover continuation — price-driven (MA stack), no aged structure needed.
+    # Real movers (BTW/ESPORTS) arrive as young/universe pairs, so the path
+    # MUST be young-pair-safe to reach them.
+    "_evaluate_mover_trend_pullback",
 })
 
 # PR-7C: runtime validation focus paths for concise operator summaries.
@@ -6485,12 +6489,6 @@ class Scanner:
                     "_evaluate_mover_trend_pullback",
                 })
                 _is_mover = symbol in self._mover_promoted_pairs
-                # Stamp mover context so _evaluate_mover_trend_pullback — which also
-                # runs in the unrestricted (non-mover) scan via the main evaluator
-                # loop — can self-gate to movers only (rejects 'not_mover_context'
-                # everywhere else).
-                if isinstance(ctx_for_chan.smc_data, dict):
-                    ctx_for_chan.smc_data["is_mover_promoted"] = _is_mover
                 if _is_mover and ctx_for_chan.spread_pct > 0.005:
                     self._suppression_counters[f"mover_spread_rejected:{chan_name}"] += 1
                     log.debug(

@@ -31,10 +31,11 @@ def _trend_candles(*, up: bool, n: int = 115, base: float = 100.0, step: float =
     }
 
 
-def _inputs(*, up: bool, is_mover: bool = True):
-    candles = _trend_candles(up=up)
+def _inputs(*, up: bool, step: float = 0.1):
+    # default step → ~4% MA7↔MA99 separation, clears the mover gate (>= 3%).
+    candles = _trend_candles(up=up, step=step)
     indicators = {"15m": {"atr_last": 0.3}}
-    smc_data = {"is_mover_promoted": is_mover, "pair_profile": None, "regime_context": None}
+    smc_data = {"pair_profile": None, "regime_context": None}
     return candles, indicators, smc_data
 
 
@@ -79,14 +80,15 @@ class TestMoverTrendPullback:
         assert sig.direction == Direction.SHORT
         assert sig.stop_loss > sig.entry, "SHORT stop must sit above entry"
 
-    def test_rejects_non_mover(self, monkeypatch):
-        """Even with the flag on, a non-mover (flag absent) never fires."""
+    def test_rejects_weak_run(self, monkeypatch):
+        """A gently-trending pair (small MA7↔MA99 separation) is NOT a mover —
+        that's TPE's domain, this path must reject it."""
         monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
-        candles, indicators, smc_data = _inputs(up=True, is_mover=False)
+        candles, indicators, smc_data = _inputs(up=True, step=0.02)  # ~0.9% sep < 3%
         sig = ScalpChannel()._evaluate_mover_trend_pullback(
             "ETHUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
         )
-        assert sig is None, "path is mover-only — must reject when not a promoted mover"
+        assert sig is None, "weak run must reject (mover_run_too_small)"
 
     def test_rejects_without_ma_stack(self, monkeypatch):
         """A flat/choppy mover (no clean MA stack) does not fire."""

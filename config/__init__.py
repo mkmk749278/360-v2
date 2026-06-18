@@ -591,6 +591,13 @@ MOVER_TP_MA_SLOW: int = _safe_int("MOVER_TP_MA_SLOW", "99")
 MOVER_TP_PULLBACK_BAND_PCT: float = _safe_float("MOVER_TP_PULLBACK_BAND_PCT", "0.35")
 #: ATR buffer beyond the SL anchor (mid MA / pullback extreme) for the stop.
 MOVER_TP_SL_BUFFER_ATR: float = _safe_float("MOVER_TP_SL_BUFFER_ATR", "0.5")
+#: Minimum fast-MA↔slow-MA separation (%) for a pair to count as a "mover".
+#: This is what makes the path mover-specific WITHOUT depending on the
+#: mover-promotion bookkeeping — real movers (BTW, ESPORTS) enter the scan as
+#: universe/young pairs, not via promotion, so gating on `is_mover_promoted`
+#: locked the path out of its own targets.  A strong run puts MA7 far above
+#: MA99 (or below, for shorts); a gently-trending blue chip won't clear this.
+MOVER_TP_MIN_STACK_SEP_PCT: float = _safe_float("MOVER_TP_MIN_STACK_SEP_PCT", "3.0")
 
 # Regime-aware volume floors (USD 24h volume).
 # TRENDING/VOLATILE need depth for follow-through; RANGING/QUIET mean-reversion
