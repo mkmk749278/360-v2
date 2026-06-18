@@ -53,6 +53,9 @@ _AGENT_DISPLAY_NAMES: Dict[str, str] = {
     # PR #318 (15th evaluator) — discrete EMA50/200 (4h) or EMA21/50 (1h)
     # crossover trigger.  Low-frequency, high-conviction.
     "MA_CROSS_TREND_SHIFT": "The Trend Shifter",
+    # Session 29 (16th evaluator) — rides a confirmed mover, buys each pullback
+    # to the MA stack (long gainers, short losers).
+    "MOVER_TREND_PULLBACK": "The Momentum Rider",
 }
 
 # Mapping: telemetry path token  →  setup_class string (path tokens come
@@ -77,6 +80,8 @@ _PATH_TO_SETUP: Dict[str, str] = {
     # _generation_path_token strips "_evaluate_" and uppercases the rest.
     # _evaluate_ma_cross_trend_shift → MA_CROSS_TREND_SHIFT.
     "MA_CROSS_TREND_SHIFT": "MA_CROSS_TREND_SHIFT",
+    # _evaluate_mover_trend_pullback → MOVER_TREND_PULLBACK.
+    "MOVER_TREND_PULLBACK": "MOVER_TREND_PULLBACK",
 }
 
 
