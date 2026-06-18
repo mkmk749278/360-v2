@@ -90,6 +90,29 @@ class TestMoverTrendPullback:
         )
         assert sig is None, "weak run must reject (mover_run_too_small)"
 
+    def test_registered_in_all_canonical_setup_maps(self):
+        """MOVER_TREND_PULLBACK must be registered everywhere the other setups
+        are, or classify_setup re-labels it and it never scores/dispatches as
+        itself (the 0-emit bug). Locks the stringly-coupled registration."""
+        from src.signal_quality import SetupClass, ACTIVE_PATH_PORTFOLIO_ROLES
+        from src.scanner import _SCALP_SETUP_TO_FAMILY
+
+        assert SetupClass("MOVER_TREND_PULLBACK") is SetupClass.MOVER_TREND_PULLBACK
+        assert SetupClass.MOVER_TREND_PULLBACK in ACTIVE_PATH_PORTFOLIO_ROLES
+        assert _SCALP_SETUP_TO_FAMILY.get("MOVER_TREND_PULLBACK") == "trend_following"
+
+    def test_setup_class_preserved_through_classify(self):
+        """A stamped MOVER signal keeps its identity through classify_setup
+        (it is in _SELF_CLASSIFYING), rather than being re-labelled by heuristic."""
+        from src.signal_quality import classify_setup, SetupClass, MarketState
+        from types import SimpleNamespace
+        sig = SimpleNamespace(setup_class="MOVER_TREND_PULLBACK", direction=Direction.LONG)
+        assessment = classify_setup(
+            channel_name="360_SCALP", signal=sig, indicators={}, smc_data={},
+            market_state=MarketState.STRONG_TREND,
+        )
+        assert assessment.setup_class == SetupClass.MOVER_TREND_PULLBACK
+
     def test_rejects_without_ma_stack(self, monkeypatch):
         """A flat/choppy mover (no clean MA stack) does not fire."""
         monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)

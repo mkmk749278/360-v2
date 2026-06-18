@@ -389,6 +389,7 @@ _MTF_REGIME_CONFIG: Dict[str, Dict[str, float]] = {
 # not a full family-specific MTF semantic rewrite yet.
 _SCALP_SETUP_TO_FAMILY: Dict[str, str] = {
     "TREND_PULLBACK_EMA": "trend_following",
+    "MOVER_TREND_PULLBACK": "trend_following",
     "VOLUME_SURGE_BREAKOUT": "breakout_momentum",
     "BREAKDOWN_SHORT": "breakout_momentum",
     "OPENING_RANGE_BREAKOUT": "breakout_momentum",
