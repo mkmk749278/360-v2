@@ -71,10 +71,10 @@ movers (mover allowlist = VSB+BDS only) and gated on a 1H structure young movers
   ATR-buffered. R-multiple TP ladder (1.0/1.6/2.5R). `htf_trend_aligned=True` (the stack
   IS the higher-context trend) → full regime affinity + volume-floor via
   `_FAMILY_TREND_PULLBACK` (§3.6a).
-- **Ships DARK** behind `MOVER_TREND_PULLBACK_ENABLED=false`; emits
-  `[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE` when it would fire. CPU-only, no new
-  reads/writes. Added to `_mover_evaluators` so it runs alongside VSB/BDS → the
-  head-to-head the owner asked for (ignition vs continuation).
+- **Ships LIVE** (`MOVER_TREND_PULLBACK_ENABLED=true` default — testing phase, no
+  subscribers; see CLAUDE.md § Project Phase). Set the flag false for shadow-only
+  fallback. CPU-only, no new reads/writes. Added to `_mover_evaluators` so it runs
+  alongside VSB/BDS → the head-to-head the owner asked for (ignition vs continuation).
 - 5 new tests; full local suite green (5,329 pass; 42 pre-existing env/dep failures
   confirmed on the stashed tree, none mine). Files: `config/__init__.py`,
   `channels/scalp.py`, `scanner/__init__.py`, `signal_quality.py`,

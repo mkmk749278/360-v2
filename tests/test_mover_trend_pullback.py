@@ -39,14 +39,23 @@ def _inputs(*, up: bool, is_mover: bool = True):
 
 
 class TestMoverTrendPullback:
-    def test_dark_by_default_returns_no_signal(self):
-        """Flag off (default): a valid setup emits NO live signal (shadow only)."""
-        assert scalp_mod.MOVER_TREND_PULLBACK_ENABLED is False
+    def test_live_by_default_in_testing_phase(self):
+        """Default-on (no subscribers yet — we ship live): a valid setup fires."""
+        assert scalp_mod.MOVER_TREND_PULLBACK_ENABLED is True
         candles, indicators, smc_data = _inputs(up=True)
         sig = ScalpChannel()._evaluate_mover_trend_pullback(
             "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
         )
-        assert sig is None, "ships dark — must not emit until the flag is activated"
+        assert sig is not None, "live by default — a valid mover pullback must emit"
+
+    def test_disabled_falls_back_to_shadow(self, monkeypatch):
+        """Explicitly disabled: emits NO live signal (shadow-only fallback)."""
+        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", False)
+        candles, indicators, smc_data = _inputs(up=True)
+        sig = ScalpChannel()._evaluate_mover_trend_pullback(
+            "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None, "disabled flag must suppress the live signal"
 
     def test_fires_long_when_enabled(self, monkeypatch):
         monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)

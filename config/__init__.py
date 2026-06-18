@@ -577,10 +577,11 @@ MOVER_PROMOTION_CYCLES: int = _safe_int("MOVER_PROMOTION_CYCLES", "5")
 # the MA stack itself, so no aged HTF structure is needed (which is exactly why
 # TPE, gated on a 1H structure a young mover lacks, cannot serve movers).
 #
-# Ships DARK: the evaluator runs on promoted movers and emits a
-# ``[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE`` log line so we can size the
-# opportunity, but returns NO live signal until this flag is flipped true.
-MOVER_TREND_PULLBACK_ENABLED: bool = _safe_bool("MOVER_TREND_PULLBACK_ENABLED", "false")
+# Ships LIVE (testing phase — no subscribers yet, we ship changes live for fast
+# iteration rather than behind dark flags; see CLAUDE.md § Project Phase).  Set
+# MOVER_TREND_PULLBACK_ENABLED=false to fall back to shadow-only
+# (``[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE`` log, no live signal).
+MOVER_TREND_PULLBACK_ENABLED: bool = _safe_bool("MOVER_TREND_PULLBACK_ENABLED", "true")
 #: MA periods (SMA on 15m closes) defining the mover trend stack — match the
 #: MA(7)/MA(25)/MA(99) the owner reads on the Binance 15m chart.
 MOVER_TP_MA_FAST: int = _safe_int("MOVER_TP_MA_FAST", "7")

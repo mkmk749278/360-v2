@@ -2719,10 +2719,9 @@ class ScalpChannel(BaseChannel):
         required — which is exactly why TPE (1H-structure gated) cannot serve movers.
 
         Mover-only: rejects immediately unless the scanner stamped
-        ``smc_data['is_mover_promoted']``.  Ships DARK behind
-        ``MOVER_TREND_PULLBACK_ENABLED`` — it runs and emits a
-        ``[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE`` line when it would fire, but
-        returns no live signal until the owner activates the flag.
+        ``smc_data['is_mover_promoted']``.  Live by default in the testing phase
+        (``MOVER_TREND_PULLBACK_ENABLED=true``); set the flag false to fall back to
+        shadow-only (``[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE`` log, no signal).
         """
         if not smc_data.get("is_mover_promoted"):
             return self._reject("not_mover_context")
@@ -2803,8 +2802,8 @@ class ScalpChannel(BaseChannel):
         if sl_dist <= 0:
             return self._reject("invalid_sl_geometry")
 
-        # DARK: ships behind MOVER_TREND_PULLBACK_ENABLED.  When off, log a [SHADOW]
-        # line so the opportunity can be sized before activation, then emit nothing.
+        # Live by default in the testing phase.  When explicitly disabled, log a
+        # [SHADOW] line to size the opportunity instead of emitting a live signal.
         if not MOVER_TREND_PULLBACK_ENABLED:
             log.info(
                 "[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE: symbol={} dir={} "
