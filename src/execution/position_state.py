@@ -106,6 +106,18 @@ class PositionState(str, Enum):
 # Terminal states — FSM rejects further transitions once here.
 _TERMINAL_STATES = frozenset({PositionState.CLOSED})
 
+# Non-terminal state string values, in enum order.  Used as a server-side
+# Firestore ``state in (...)`` filter so live-position listings read ONLY
+# the handful of active positions — never the unbounded CLOSED history.
+# The positions collection is never pruned (``delete_position`` is unused;
+# closed docs are retained for the historical-PnL view), so an unfiltered
+# collection stream bills one Firestore read per closed position on EVERY
+# reconciler / funding-watcher / app-poll cycle.  Keeping this filter
+# server-side is the cost-discipline invariant for this collection.
+_NON_TERMINAL_STATE_VALUES = tuple(
+    s.value for s in PositionState if s not in _TERMINAL_STATES
+)
+
 
 def is_terminal(state: PositionState) -> bool:
     """True if the state cannot transition further.  FSM uses this to
@@ -446,10 +458,20 @@ def list_positions_for_user(
     """Return every position document under ``users/{uid}/positions/``.
 
     Used by the Lumin app's Live-tab "your open positions" card
-    (``GET /api/auto-trade/positions``).  ``include_closed=False``
-    filters out terminal states so the dashboard doesn't show
-    yesterday's closed trades — pair with the trade-records history
-    view for the historical surface.
+    (``GET /api/auto-trade/positions``), the reconciler, and the
+    funding-exit watcher.  ``include_closed=False`` filters out terminal
+    states so the dashboard doesn't show yesterday's closed trades —
+    pair with the trade-records history view for the historical surface.
+
+    Cost discipline: when ``include_closed`` is False the state filter is
+    pushed into Firestore (``state in <non-terminal>``) so we read only
+    live positions, NOT every CLOSED doc in the user's history.  This
+    collection is never pruned, so an unfiltered stream on the per-60s
+    reconciler / funding-watcher loops billed one read per historical
+    position every cycle — the dominant Firestore cost after #609 fixed
+    the per-tick pre-TP path.  The Python-side ``is_terminal`` guard
+    below is kept as defence-in-depth (a CLOSED doc can never slip
+    through both layers).
 
     Returns empty list when the collection doesn't exist yet (a fresh
     user who has never had a position).  Raises
@@ -466,7 +488,12 @@ def list_positions_for_user(
             .document(firebase_uid)
             .collection("positions")
         )
-    docs = coll.stream()
+    if include_closed:
+        docs = coll.stream()
+    else:
+        docs = coll.where(
+            "state", "in", list(_NON_TERMINAL_STATE_VALUES)
+        ).stream()
     out: list[Position] = []
     for doc in docs:
         data = doc.to_dict()

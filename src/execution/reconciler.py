@@ -374,26 +374,20 @@ def _default_order_placer_factory(firebase_uid: str) -> Any:
 def _default_positions_for_user(
     firebase_uid: str,
 ) -> List[_position_state.Position]:
-    """Query Firestore for all positions for one user.  Production
-    wiring; tests inject a fake."""
-    from src.security.firestore_keystore import _db as fs_db
+    """Query Firestore for one user's NON-TERMINAL positions.
 
-    if fs_db is None:
+    Routes through :func:`position_state.list_positions_for_user`
+    (``include_closed=False``) so the read is server-side filtered to
+    live positions only.  The reconciler runs every 60s per active user;
+    an unfiltered collection stream here billed one Firestore read per
+    CLOSED position in the user's entire (never-pruned) history on EVERY
+    cycle — the dominant remaining Firestore cost after #609 fixed the
+    per-tick pre-TP path.  Terminal positions are exactly what
+    :meth:`Reconciler.reconcile_user` filters out anyway, so scoping the
+    query to non-terminal is both cheaper and semantically identical.
+
+    Production wiring; tests inject a fake via ``positions_for_user``.
+    """
+    if not _position_state.is_initialised():
         return []
-    docs = (
-        fs_db.collection("users")
-        .document(firebase_uid)
-        .collection("positions")
-        .stream()
-    )
-    out: List[_position_state.Position] = []
-    for snap in docs:
-        data = snap.to_dict() or {}
-        try:
-            out.append(_position_state._from_firestore_dict(data))
-        except Exception:
-            log.exception(
-                "reconciler: failed to parse position doc uid={}",
-                firebase_uid,
-            )
-    return out
+    return _position_state.list_positions_for_user(firebase_uid)

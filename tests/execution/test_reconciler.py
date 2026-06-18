@@ -426,3 +426,34 @@ async def test_stale_close_failure_leaves_position_open_for_retry() -> None:
     # Close failed → NOT marked terminal, NOT persisted.
     assert stale.state == position_state.PositionState.OPEN
     assert len(persisted) == 0
+
+
+# ---------------------------------------------------------------------------
+# _default_positions_for_user — cost discipline: server-side state filter
+# ---------------------------------------------------------------------------
+
+
+def test_default_positions_for_user_delegates_to_non_terminal_listing() -> None:
+    """The production per-60s position fetch must route through
+    ``list_positions_for_user(include_closed=False)`` so the read is
+    server-side filtered to live positions — never an unfiltered stream
+    of the user's entire (never-pruned) CLOSED history."""
+    live = _make_position(symbol="BTCUSDT")
+    with patch.object(position_state, "is_initialised", return_value=True), \
+         patch.object(
+             position_state, "list_positions_for_user", return_value=[live]
+         ) as listing:
+        out = reconciler._default_positions_for_user("fb-x")
+    listing.assert_called_once_with("fb-x")
+    # Default include_closed is False → non-terminal only.
+    assert listing.call_args.kwargs == {}
+    assert out == [live]
+
+
+def test_default_positions_for_user_empty_when_uninitialised() -> None:
+    """No Firestore read attempted when position_state isn't booted."""
+    with patch.object(position_state, "is_initialised", return_value=False), \
+         patch.object(position_state, "list_positions_for_user") as listing:
+        out = reconciler._default_positions_for_user("fb-x")
+    assert out == []
+    listing.assert_not_called()
