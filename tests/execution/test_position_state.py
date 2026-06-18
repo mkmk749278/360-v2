@@ -245,6 +245,9 @@ def _make_doc_snap(state_value: str, signal_id: str):
 def _install_fake_db_for_listing(stream_returns: list) -> MagicMock:
     fake_collection = MagicMock()
     fake_collection.stream.return_value = iter(stream_returns)
+    # ``.where(...)`` returns the same collection so the server-side
+    # state filter chains into ``.stream()`` exactly like a real query.
+    fake_collection.where.return_value = fake_collection
     fake_user_doc = MagicMock()
     fake_user_doc.collection.return_value = fake_collection
     fake_users = MagicMock()
@@ -253,6 +256,35 @@ def _install_fake_db_for_listing(stream_returns: list) -> MagicMock:
     fake_db.collection.return_value = fake_users
     position_state._db = fake_db
     return fake_collection
+
+
+def test_list_positions_pushes_state_filter_to_firestore() -> None:
+    """Cost discipline: a live-positions listing must filter by state
+    IN Firestore — NOT stream the whole (never-pruned) collection and
+    drop CLOSED docs client-side.  An unfiltered stream billed one read
+    per historical position on every reconciler / poll cycle."""
+    coll = _install_fake_db_for_listing([_make_doc_snap("OPEN", "sig-open")])
+    position_state.list_positions_for_user("fb-x")
+    coll.where.assert_called_once_with(
+        "state", "in", list(position_state._NON_TERMINAL_STATE_VALUES)
+    )
+    # The filter must exclude the terminal state and cover every live one.
+    _, _, values = coll.where.call_args.args
+    assert "CLOSED" not in values
+    assert set(values) == {
+        s.value
+        for s in position_state.PositionState
+        if not position_state.is_terminal(s)
+    }
+
+
+def test_list_positions_include_closed_skips_state_filter() -> None:
+    """The historical view explicitly wants everything — it streams the
+    full collection (no state filter)."""
+    coll = _install_fake_db_for_listing([_make_doc_snap("CLOSED", "sig-c")])
+    position_state.list_positions_for_user("fb-x", include_closed=True)
+    coll.where.assert_not_called()
+    coll.stream.assert_called_once()
 
 
 def test_list_positions_filters_terminal_states_by_default() -> None:
