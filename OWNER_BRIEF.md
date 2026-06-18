@@ -197,6 +197,18 @@ Each evaluator lives in `src/channels/scalp.py` as `_evaluate_<name>` and owns i
 | B | 65–79 | Paid channel |
 | FILTERED | < 65 | Dropped silently |
 
+### 3.6a Scoring Doctrine — "Score a setup on the evidence that defines it"
+
+The composite scorer's per-dimension scores (regime, volume, …) must reflect what makes *that* setup valid — not a one-size-fits-all default that punishes a setup for its own defining trait. A setup penalised on the wrong evidence never clears the 65 floor, so it generates but never emits, and looks "dead" when it is in fact mis-scored.
+
+Recurring failure mode (Session 27–28, PRs #618–#621): an evaluator's entry/gate doctrine was corrected, but the matching change at the **scoring layer** was missed, so the scorer kept docking the setup for the very pattern that defines it. Three concrete instances, all fixed by aligning the score with the setup's thesis:
+
+- **Volume on surge/pullback setups** (VSB/BDS, TREND_PULLBACK_EMA): the *entry* candle is low-volume **by design** (dead-cat bounce / quiet pullback). Don't score volume off the entry candle — score it off the validated breakout candle (`breakout_volume_ratio`), or floor it at neutral. (#618, #619)
+- **Regime on transition/continuation setups** (MA_CROSS_TREND_SHIFT, VSB/BDS): a setup that fires *at* a regime turn reads RANGING/QUIET on the entry-TF label at entry. Floor it at neutral (14) instead of the non-affinity 8 — don't penalise it for firing at the turn. (#618, #619)
+- **Regime must be judged on the trend's timeframe, not the entry's** (TREND_PULLBACK_EMA): trend is HTF-defined, entry is LTF-timed (§3.3). When an evaluator confirms the trend on the HTF (e.g. 1H EMA21/50), the scorer credits full regime affinity via the `htf_trend_aligned` flag rather than scoring the noisy 5m pullback label. (#621)
+
+**Corollary — filters beat parameter-tuning** (#620, MA-cross research): for crossover/trend setups, a higher-timeframe trend-alignment *filter* improves real-money results far more than tuning the EMA periods. Crypto ranges ~60% of the time, so an unfiltered cross whipsaws regardless of which periods you pick. Don't chase "the best EMA pair"; gate the cross on HTF agreement.
+
 ## 3.7 Architecture — Signal Flow
 
 ```
