@@ -56,6 +56,35 @@ Three flags flipped live + engine `--force-recreate` (verified True×3):
 Shadow-confirm the drop volume:
 `docker logs 360scalp-v2-engine --since 48h 2>&1 | grep -c "RANGING_LOW_ATR_LOSER_SUPPRESS"`
 
+### Built this session (shadow-first): MOVER_TREND_PULLBACK — the mover continuation path
+Owner studied live mover charts (AGT +108%, BTW −28%) and identified a real gap:
+VSB/BDS are **one-shot ignition** detectors (swing-break + single retest; #1 reject
+`breakout_not_found` 89k) — they catch the breakout candle and go silent for the rest
+of the move. The recurring edge on a strong mover is the **continuation**: ride the MA
+stack and re-enter every pullback to the MA. TPE is that logic but is locked out of
+movers (mover allowlist = VSB+BDS only) and gated on a 1H structure young movers lack.
+
+**New evaluator `_evaluate_mover_trend_pullback` (16th path), owner-approved:**
+- Mover-only (self-gates on `smc_data['is_mover_promoted']`, stamped by scanner).
+- 15m MA stack (SMA 7/25/99 — the owner's chart) decides direction; LONG gainers,
+  SHORT losers. Entry = pullback tags fast-MA band + reclaim candle. SL beyond mid-MA,
+  ATR-buffered. R-multiple TP ladder (1.0/1.6/2.5R). `htf_trend_aligned=True` (the stack
+  IS the higher-context trend) → full regime affinity + volume-floor via
+  `_FAMILY_TREND_PULLBACK` (§3.6a).
+- **Ships DARK** behind `MOVER_TREND_PULLBACK_ENABLED=false`; emits
+  `[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE` when it would fire. CPU-only, no new
+  reads/writes. Added to `_mover_evaluators` so it runs alongside VSB/BDS → the
+  head-to-head the owner asked for (ignition vs continuation).
+- 5 new tests; full local suite green (5,329 pass; 42 pre-existing env/dep failures
+  confirmed on the stashed tree, none mine). Files: `config/__init__.py`,
+  `channels/scalp.py`, `scanner/__init__.py`, `signal_quality.py`,
+  `tests/test_mover_trend_pullback.py`, `tests/test_scanner.py` (count 15→16).
+
+**Activation (after shadow window):** read `[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE`
+counts on the VPS to size opportunity, then `MOVER_TREND_PULLBACK_ENABLED=true` +
+engine recreate. Compare VSB/BDS vs MOVER_TREND_PULLBACK on the truth report; keep the
+winner(s).
+
 ### Still open after this (next levers, in order)
 1. **LONG bleed** — −2.50, worst losers are LONG in RANGING/UP/VOLATILE; #615 only
    gates TRENDING_DOWN. Investigate extending the longs regime gate (shadow-first).

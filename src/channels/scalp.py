@@ -17,7 +17,17 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
-from config import CHANNEL_SCALP, FUNDING_RATE_EXTREME_THRESHOLD, SCALP_ORB_ENABLED
+from config import (
+    CHANNEL_SCALP,
+    FUNDING_RATE_EXTREME_THRESHOLD,
+    SCALP_ORB_ENABLED,
+    MOVER_TREND_PULLBACK_ENABLED,
+    MOVER_TP_MA_FAST,
+    MOVER_TP_MA_MID,
+    MOVER_TP_MA_SLOW,
+    MOVER_TP_PULLBACK_BAND_PCT,
+    MOVER_TP_SL_BUFFER_ATR,
+)
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import (
     check_adx,
@@ -963,6 +973,7 @@ class ScalpChannel(BaseChannel):
             ("_evaluate_whale_momentum", self._evaluate_whale_momentum),
             ("_evaluate_volume_surge_breakout", self._evaluate_volume_surge_breakout),
             ("_evaluate_breakdown_short", self._evaluate_breakdown_short),
+            ("_evaluate_mover_trend_pullback", self._evaluate_mover_trend_pullback),
             ("_evaluate_opening_range_breakout", self._evaluate_opening_range_breakout),
             ("_evaluate_sr_flip_retest", self._evaluate_sr_flip_retest),
             ("_evaluate_funding_extreme", self._evaluate_funding_extreme),
@@ -2681,6 +2692,169 @@ class ScalpChannel(BaseChannel):
         if total_penalty > 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + total_penalty
 
+        return sig
+
+    # ------------------------------------------------------------------
+    # MOVER_TREND_PULLBACK path
+    # ------------------------------------------------------------------
+    def _evaluate_mover_trend_pullback(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """MOVER_TREND_PULLBACK: on a confirmed top-mover, enter each pullback that
+        tags the fast MA and reclaims in the trend direction.
+
+        Rationale (Session 29, owner-driven from live mover charts): VSB/BDS catch
+        only the *ignition* breakout+retest and go silent once a mover is trending,
+        but the recurring edge on a strong mover is the *continuation* — price rides
+        the MA stack (MA7>MA25>MA99 up, inverse down) and offers repeated
+        pullback-to-MA re-entries.  This path catches those.  Direction comes from
+        the MA stack itself (the move decides direction), so no aged HTF structure is
+        required — which is exactly why TPE (1H-structure gated) cannot serve movers.
+
+        Mover-only: rejects immediately unless the scanner stamped
+        ``smc_data['is_mover_promoted']``.  Ships DARK behind
+        ``MOVER_TREND_PULLBACK_ENABLED`` — it runs and emits a
+        ``[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE`` line when it would fire, but
+        returns no live signal until the owner activates the flag.
+        """
+        if not smc_data.get("is_mover_promoted"):
+            return self._reject("not_mover_context")
+
+        tf = candles.get("15m")
+        need = MOVER_TP_MA_SLOW + 2
+        if tf is None or len(tf.get("close", [])) < need:
+            return self._reject("insufficient_candles")
+        closes = [float(c) for c in tf.get("close", [])]
+        highs = [float(h) for h in tf.get("high", [])]
+        lows = [float(low) for low in tf.get("low", [])]
+        if len(closes) < need or len(highs) < need or len(lows) < need:
+            return self._reject("insufficient_candles")
+
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+            return self._reject("basic_filters_failed")
+
+        def _sma(vals: list, n: int) -> float:
+            return sum(vals[-n:]) / n
+
+        ma_fast = _sma(closes, MOVER_TP_MA_FAST)
+        ma_mid = _sma(closes, MOVER_TP_MA_MID)
+        ma_slow = _sma(closes, MOVER_TP_MA_SLOW)
+        close = closes[-1]
+        if min(close, ma_fast, ma_mid, ma_slow) <= 0:
+            return self._reject("insufficient_candles")
+
+        # Trend from the MA stack — the move decides direction.
+        if ma_fast > ma_mid > ma_slow:
+            direction = Direction.LONG
+        elif ma_fast < ma_mid < ma_slow:
+            direction = Direction.SHORT
+        else:
+            return self._reject("no_ma_stack")
+
+        # Pullback + reclaim: the last CLOSED candle must have tagged the fast-MA
+        # band, and the current candle must reclaim in the trend direction (not a
+        # falling-knife touch that's still going).
+        band = MOVER_TP_PULLBACK_BAND_PCT / 100.0
+        prev_high = highs[-2]
+        prev_low = lows[-2]
+        atr_val = (
+            indicators.get("15m", {}).get("atr_last")
+            or indicators.get("5m", {}).get("atr_last")
+            or close * 0.004
+        )
+
+        if direction == Direction.LONG:
+            tagged = prev_low <= ma_fast * (1.0 + band)
+            reclaimed = close > ma_fast and close > closes[-2]
+            if not tagged:
+                return self._reject("no_pullback_tag")
+            if not reclaimed:
+                return self._reject("no_reclaim")
+            # SL just below the mid MA / pullback low — the stack is the thesis.
+            sl = min(ma_mid, prev_low) - atr_val * MOVER_TP_SL_BUFFER_ATR
+            if sl >= close:
+                return self._reject("invalid_sl_geometry")
+            sl_dist = close - sl
+            tp1 = close + sl_dist * 1.0
+            tp2 = close + sl_dist * 1.6
+            tp3 = close + sl_dist * 2.5
+        else:
+            tagged = prev_high >= ma_fast * (1.0 - band)
+            reclaimed = close < ma_fast and close < closes[-2]
+            if not tagged:
+                return self._reject("no_pullback_tag")
+            if not reclaimed:
+                return self._reject("no_reclaim")
+            sl = max(ma_mid, prev_high) + atr_val * MOVER_TP_SL_BUFFER_ATR
+            if sl <= close:
+                return self._reject("invalid_sl_geometry")
+            sl_dist = sl - close
+            tp1 = close - sl_dist * 1.0
+            tp2 = close - sl_dist * 1.6
+            tp3 = close - sl_dist * 2.5
+
+        if sl_dist <= 0:
+            return self._reject("invalid_sl_geometry")
+
+        # DARK: ships behind MOVER_TREND_PULLBACK_ENABLED.  When off, log a [SHADOW]
+        # line so the opportunity can be sized before activation, then emit nothing.
+        if not MOVER_TREND_PULLBACK_ENABLED:
+            log.info(
+                "[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE: symbol={} dir={} "
+                "close={:.6f} ma_fast={:.6f} ma_mid={:.6f} ma_slow={:.6f} "
+                "sl={:.6f} sl_dist_pct={:.3f}",
+                symbol,
+                "LONG" if direction == Direction.LONG else "SHORT",
+                close, ma_fast, ma_mid, ma_slow, sl, sl_dist / close * 100.0,
+            )
+            return self._reject("shadow_mode")
+
+        profile = smc_data.get("pair_profile")
+        _regime_ctx = smc_data.get("regime_context")
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=direction,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="MVRTP",
+            atr_val=atr_val,
+            setup_class="MOVER_TREND_PULLBACK",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return self._reject("build_signal_failed")
+
+        # Method-specific structural SL + R-multiple TP ladder.
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+        # The mover MA-stack IS the higher-context trend, so credit full regime
+        # affinity via the trend-pullback family scoring path (§3.6a); the volume
+        # dimension floors at neutral (a pullback entry is low-volume by design).
+        sig.htf_trend_aligned = True
+        sig.confidence = min(100.0, sig.confidence + 8.0)
         return sig
 
     # ------------------------------------------------------------------

@@ -6479,8 +6479,18 @@ class Scanner:
                 _mover_evaluators = frozenset({
                     "_evaluate_volume_surge_breakout",
                     "_evaluate_breakdown_short",
+                    # Continuation pullback on a confirmed mover (Session 29).
+                    # VSB/BDS catch the ignition; this catches the repeated
+                    # MA-pullback re-entries that follow.  Ships dark.
+                    "_evaluate_mover_trend_pullback",
                 })
                 _is_mover = symbol in self._mover_promoted_pairs
+                # Stamp mover context so _evaluate_mover_trend_pullback — which also
+                # runs in the unrestricted (non-mover) scan via the main evaluator
+                # loop — can self-gate to movers only (rejects 'not_mover_context'
+                # everywhere else).
+                if isinstance(ctx_for_chan.smc_data, dict):
+                    ctx_for_chan.smc_data["is_mover_promoted"] = _is_mover
                 if _is_mover and ctx_for_chan.spread_pct > 0.005:
                     self._suppression_counters[f"mover_spread_rejected:{chan_name}"] += 1
                     log.debug(
