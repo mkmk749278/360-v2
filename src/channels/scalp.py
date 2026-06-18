@@ -27,6 +27,7 @@ from config import (
     MOVER_TP_MA_SLOW,
     MOVER_TP_PULLBACK_BAND_PCT,
     MOVER_TP_SL_BUFFER_ATR,
+    MOVER_TP_MIN_STACK_SEP_PCT,
 )
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import (
@@ -2718,14 +2719,16 @@ class ScalpChannel(BaseChannel):
         the MA stack itself (the move decides direction), so no aged HTF structure is
         required — which is exactly why TPE (1H-structure gated) cannot serve movers.
 
-        Mover-only: rejects immediately unless the scanner stamped
-        ``smc_data['is_mover_promoted']``.  Live by default in the testing phase
+        "Mover" is defined by the MA-stack *separation* (MA7 vs MA99 >=
+        ``MOVER_TP_MIN_STACK_SEP_PCT``), NOT by the mover-promotion bookkeeping:
+        real movers (BTW, ESPORTS) enter the scan as universe/young pairs rather
+        than via promotion, so the old ``is_mover_promoted`` gate locked the path
+        out of its own targets.  The separation gate captures a genuine strong run
+        wherever the pair sits, while rejecting gently-trending blue chips (TPE's
+        domain).  Live by default in the testing phase
         (``MOVER_TREND_PULLBACK_ENABLED=true``); set the flag false to fall back to
         shadow-only (``[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE`` log, no signal).
         """
-        if not smc_data.get("is_mover_promoted"):
-            return self._reject("not_mover_context")
-
         tf = candles.get("15m")
         need = MOVER_TP_MA_SLOW + 2
         if tf is None or len(tf.get("close", [])) < need:
@@ -2756,6 +2759,14 @@ class ScalpChannel(BaseChannel):
             direction = Direction.SHORT
         else:
             return self._reject("no_ma_stack")
+
+        # Mover gate: require a strong run (wide MA7↔MA99 separation).  This is what
+        # makes the path mover-specific without depending on the promotion
+        # bookkeeping (which misses universe/young movers like BTW/ESPORTS); a
+        # gently-trending major won't clear it and stays TPE's domain.
+        stack_sep_pct = abs(ma_fast - ma_slow) / ma_slow * 100.0
+        if stack_sep_pct < MOVER_TP_MIN_STACK_SEP_PCT:
+            return self._reject("mover_run_too_small")
 
         # Pullback + reclaim: the last CLOSED candle must have tagged the fast-MA
         # band, and the current candle must reclaim in the trend direction (not a

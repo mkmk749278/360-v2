@@ -465,6 +465,8 @@ class TestStructureReadinessGate:
             "_evaluate_whale_momentum",
             "_evaluate_liquidation_reversal",
             "_evaluate_funding_extreme",
+            # Mover continuation — price-driven (MA stack), young-pair-safe.
+            "_evaluate_mover_trend_pullback",
         }
         assert _YOUNG_PAIR_EVALUATORS == expected
         # Structure-based paths must NOT be in the allowlist.

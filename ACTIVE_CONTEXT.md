@@ -85,6 +85,18 @@ counts on the VPS to size opportunity, then `MOVER_TREND_PULLBACK_ENABLED=true` 
 engine recreate. Compare VSB/BDS vs MOVER_TREND_PULLBACK on the truth report; keep the
 winner(s).
 
+### Session 29 follow-up — mover gate was too narrow (fixed)
+First live check (VPS logs) showed the path live + registered but **0 emissions** —
+root cause: the real movers (BTW −28%, ESPORTS +109%) enter the scan as
+**universe/young pairs**, not via mover-promotion, so the `is_mover_promoted` gate
+locked the path out of its own targets (BTW was logged as `young_pair_restriction`,
+ESPORTS in the critical-pairs set; zero `MOVER PROMOT` lines in 3h). Fix: define
+"mover" by **MA7↔MA99 stack separation ≥ `MOVER_TP_MIN_STACK_SEP_PCT` (3%)** instead
+of promotion bookkeeping, and add the path to `_YOUNG_PAIR_EVALUATORS` so young
+movers can run it. Now fires on a strong run wherever the pair sits; gently-trending
+majors stay TPE's domain. Removed the now-dead `is_mover_promoted` scanner stamp.
+Confirm live: `docker logs 360scalp-v2-engine --since 1h | grep -c MOVER_TREND_PULLBACK`.
+
 ### Still open after this (next levers, in order)
 1. **LONG bleed** — −2.50, worst losers are LONG in RANGING/UP/VOLATILE; #615 only
    gates TRENDING_DOWN. Investigate extending the longs regime gate (shadow-first).
