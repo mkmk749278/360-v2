@@ -164,6 +164,10 @@ Binance REST API
   git fetch origin monitor-logs
   git show origin/monitor-logs:monitor/report/truth_report.md
   ```
+  **Counters are cumulative over a long window** — right after a scoring/gate
+  change merges, the report still reflects *pre-change* behaviour. Don't judge a
+  just-shipped change (or re-diagnose the path) until a fresh data window has
+  accumulated. Wait for data, then read.
 - **Invalidation audit** — `data/invalidation_records.json` on VPS. Classifies kills as PROTECTIVE / PREMATURE / NEUTRAL.
 - **360 CE Ops** — `ops.luminapp.org` (live, owner-only). Engine API + data volume + monitor-logs + diag scripts in browser.
 - **Auto-detected issues** — GitHub Issues tagged `auto-detected` from the 24/7 monitoring agent. Check at every session start.
