@@ -4,6 +4,96 @@
 
 ---
 
+## 🟢 SESSION 29 2026-06-18 — SR_FLIP/RANGING bleed remedies ACTIVATED on VPS (3 dark flags flipped live)
+
+**Owner trigger:** "analyse signals quality after yesterday's PRs — where are we lagging."
+Pulled a **fresh** truth report (monitor-logs, 2026-06-18 07:34 UTC — post-Session-28)
++ the attached `signal_performance` (277 closed sigs, Jun 15–18), `signal_history`
+(500), `invalidation_records` (118).
+
+### Finding: yesterday's work didn't touch the bleed
+Session 27–28 (#614–#621) was all **scoring/generation on the dead paths**
+(VSB/BDS/MA_CROSS/TPE) — correct work, but those paths are a volume rounding error
+(VSB n=2, BDS n=7, TPE n=4 in the 277). The actual P&L drag is **unchanged since
+Session 24**:
+- **SR_FLIP_RETEST −4.80 (n=108 = 39% of all signals).** Upside-down R:R: avg win
+  +0.33 vs avg loss −0.42, 63 SL hits. Concentrated in **RANGING −5.50 (60 sigs,
+  36 SL)**.
+- **RANGING regime −2.22** (47% of volume) — the one losing regime besides tiny VOLATILE.
+- **LONGs −2.50 (n=142)** vs SHORTs +7.43; 7 of 8 worst losers are LONG in
+  RANGING/UP/VOLATILE — the slice #615's TRENDING_DOWN gate does NOT catch.
+- Book gross +4.94% raw (~thin); 24 full-SL events (−25.6 raw) wipe most of the
+  +49.4 pre-TP banking. Net ≈ breakeven-to-negative after fees.
+- Profitable engine (leave alone): DIVERGENCE_CONTINUATION +6.94, FAILED_AUCTION_RECLAIM +4.37.
+- Invalidation audit healthy (76% PROTECTIVE, momentum_loss +0.36R/kill) — the
+  KILLS aren't the problem; RANGING SR_FLIP entry quality + exit geometry is.
+
+**The disconnect:** the remedies for this bleed (#603/#604/#608/#613) were merged
+and shipped **dark up to 11 days ago and never activated**. We'd been adding
+scoring polish to paths that barely fire while the fix for 39% of our volume sat
+switched off.
+
+### Owner decision: activate the dark flags (one-shot, owner ran on VPS)
+Three flags flipped live + engine `--force-recreate` (verified True×3):
+| Flag | Effect |
+|---|---|
+| `RANGING_LOW_ATR_LOSER_SUPPRESS_ENABLED=true` | drops low-ATR RANGING SR_FLIP/LSR entries (pctile ≤25) — cuts the −5.50 slice at the gate |
+| `SR_FLIP_PRETP_R_SCALING_ENABLED=true` | floors pre-TP at SL_dist×0.35R so wide-SL SR_FLIPs stop banking at 0.2R |
+| `INVALIDATION_TRAILING_ARM_RSCALE_ENABLED=true` | trailing kill arms at min(0.80, 0.30+0.15×SL%) not flat 0.30R (global) |
+
+`.env` backed up to `.env.bak.<ts>` before the change; one-line revert documented.
+**No code shipped this session** — env-only activation. Expect signal VOLUME to drop
+(RANGING SR_FLIP was 39% of flow) — intended trade, not a fault.
+
+### NEXT SESSION — judge at +48h on a FRESH truth report (don't judge early):
+| Metric | Baseline (this session) | Target |
+|---|---|---|
+| SR_FLIP `Avg PnL%` | −0.044 | → toward/above 0 |
+| RANGING SR_FLIP slice | −5.50 (60 sigs) | → shrinking, fewer sigs |
+| `trailing_invalidation` EV/kill | +0.09R (TUNE) | → above +0.10R (KEEP) |
+| DIV + FAR | +6.94 / +4.37 | → unchanged (regression = back out) |
+
+Shadow-confirm the drop volume:
+`docker logs 360scalp-v2-engine --since 48h 2>&1 | grep -c "RANGING_LOW_ATR_LOSER_SUPPRESS"`
+
+### Built this session (shadow-first): MOVER_TREND_PULLBACK — the mover continuation path
+Owner studied live mover charts (AGT +108%, BTW −28%) and identified a real gap:
+VSB/BDS are **one-shot ignition** detectors (swing-break + single retest; #1 reject
+`breakout_not_found` 89k) — they catch the breakout candle and go silent for the rest
+of the move. The recurring edge on a strong mover is the **continuation**: ride the MA
+stack and re-enter every pullback to the MA. TPE is that logic but is locked out of
+movers (mover allowlist = VSB+BDS only) and gated on a 1H structure young movers lack.
+
+**New evaluator `_evaluate_mover_trend_pullback` (16th path), owner-approved:**
+- Mover-only (self-gates on `smc_data['is_mover_promoted']`, stamped by scanner).
+- 15m MA stack (SMA 7/25/99 — the owner's chart) decides direction; LONG gainers,
+  SHORT losers. Entry = pullback tags fast-MA band + reclaim candle. SL beyond mid-MA,
+  ATR-buffered. R-multiple TP ladder (1.0/1.6/2.5R). `htf_trend_aligned=True` (the stack
+  IS the higher-context trend) → full regime affinity + volume-floor via
+  `_FAMILY_TREND_PULLBACK` (§3.6a).
+- **Ships LIVE** (`MOVER_TREND_PULLBACK_ENABLED=true` default — testing phase, no
+  subscribers; see CLAUDE.md § Project Phase). Set the flag false for shadow-only
+  fallback. CPU-only, no new reads/writes. Added to `_mover_evaluators` so it runs
+  alongside VSB/BDS → the head-to-head the owner asked for (ignition vs continuation).
+- 5 new tests; full local suite green (5,329 pass; 42 pre-existing env/dep failures
+  confirmed on the stashed tree, none mine). Files: `config/__init__.py`,
+  `channels/scalp.py`, `scanner/__init__.py`, `signal_quality.py`,
+  `tests/test_mover_trend_pullback.py`, `tests/test_scanner.py` (count 15→16).
+
+**Activation (after shadow window):** read `[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE`
+counts on the VPS to size opportunity, then `MOVER_TREND_PULLBACK_ENABLED=true` +
+engine recreate. Compare VSB/BDS vs MOVER_TREND_PULLBACK on the truth report; keep the
+winner(s).
+
+### Still open after this (next levers, in order)
+1. **LONG bleed** — −2.50, worst losers are LONG in RANGING/UP/VOLATILE; #615 only
+   gates TRENDING_DOWN. Investigate extending the longs regime gate (shadow-first).
+2. **SR_FLIP entry-quality re-tighten** (#612 kill-switch never merged; #613 dark
+   re-tighten) — only if the 3 flags above don't pull RANGING SR_FLIP to ~breakeven.
+3. **TPE generation gate** (82.6%-SL guard) — still deferred, shadow-first.
+
+---
+
 ## ⏳ SESSION 28 CLOSE 2026-06-17 — scoring corrections shipped, NOW WAITING FOR DATA
 
 **Do not re-diagnose VSB / BDS / TREND_PULLBACK_EMA / MA_CROSS_TREND_SHIFT off the

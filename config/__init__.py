@@ -568,6 +568,30 @@ MOVER_PROMOTION_MIN_VOLUME_USD: float = _safe_float("MOVER_PROMOTION_MIN_VOLUME"
 #: How many scan cycles a movers-promoted pair stays in the scan universe.
 MOVER_PROMOTION_CYCLES: int = _safe_int("MOVER_PROMOTION_CYCLES", "5")
 
+# ── MOVER_TREND_PULLBACK path (Session 29, owner-approved) ────────────────────
+# A continuation path for promoted movers: once a mover is MA-stacked, enter each
+# pullback that tags the fast MA and reclaims in the trend direction.  VSB/BDS
+# catch only the *ignition* breakout+retest and go silent once a mover trends;
+# this path catches the recurring *continuation* pullbacks the owner trades by
+# hand (MA cross → ride the stack → buy each dip to the MA).  Direction comes from
+# the MA stack itself, so no aged HTF structure is needed (which is exactly why
+# TPE, gated on a 1H structure a young mover lacks, cannot serve movers).
+#
+# Ships LIVE (testing phase — no subscribers yet, we ship changes live for fast
+# iteration rather than behind dark flags; see CLAUDE.md § Project Phase).  Set
+# MOVER_TREND_PULLBACK_ENABLED=false to fall back to shadow-only
+# (``[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE`` log, no live signal).
+MOVER_TREND_PULLBACK_ENABLED: bool = _safe_bool("MOVER_TREND_PULLBACK_ENABLED", "true")
+#: MA periods (SMA on 15m closes) defining the mover trend stack — match the
+#: MA(7)/MA(25)/MA(99) the owner reads on the Binance 15m chart.
+MOVER_TP_MA_FAST: int = _safe_int("MOVER_TP_MA_FAST", "7")
+MOVER_TP_MA_MID: int = _safe_int("MOVER_TP_MA_MID", "25")
+MOVER_TP_MA_SLOW: int = _safe_int("MOVER_TP_MA_SLOW", "99")
+#: Band (%) around the fast MA within which a pullback wick counts as a "tag".
+MOVER_TP_PULLBACK_BAND_PCT: float = _safe_float("MOVER_TP_PULLBACK_BAND_PCT", "0.35")
+#: ATR buffer beyond the SL anchor (mid MA / pullback extreme) for the stop.
+MOVER_TP_SL_BUFFER_ATR: float = _safe_float("MOVER_TP_SL_BUFFER_ATR", "0.5")
+
 # Regime-aware volume floors (USD 24h volume).
 # TRENDING/VOLATILE need depth for follow-through; RANGING/QUIET mean-reversion
 # setups work fine with less liquidity.
@@ -1224,6 +1248,7 @@ SIGNAL_TYPE_LABELS: Dict[str, str] = {
     "MULTI_STRATEGY_CONFLUENCE":     "🌟 MULTI-STRATEGY",
     "VOLUME_SURGE_BREAKOUT":         "🚀 SURGE BREAKOUT",
     "BREAKDOWN_SHORT":               "📉 BREAKDOWN SHORT",
+    "MOVER_TREND_PULLBACK":          "🚀 MOVER PULLBACK",
     "OPENING_RANGE_BREAKOUT":        "🕯️ OPENING RANGE BREAKOUT",
     "SR_FLIP_RETEST":                "🔄 S/R FLIP RETEST",
     "FUNDING_EXTREME_SIGNAL":        "💰 FUNDING EXTREME",

@@ -435,6 +435,7 @@ _MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
     "FAILED_AUCTION_RECLAIM":         3.0,  # False-breakdown depth; 1.95% seen live
     "QUIET_COMPRESSION_BREAK":        3.0,  # BB lower + 0.5×ATR; 2.08% seen live
     "TREND_PULLBACK_EMA":             3.0,  # ATR×1.0 minimum; high-ATR pairs reach 3%
+    "MOVER_TREND_PULLBACK":           3.0,  # Mover continuation; SL beyond mid-MA, ATR-buffered
     "FUNDING_EXTREME_SIGNAL":         3.0,  # Liq-cluster SL; can be 2-3% away
     "MA_CROSS_TREND_SHIFT":           3.0,  # Structural SL beyond opposite-side swing
 }
@@ -1706,11 +1707,13 @@ class SignalScoringEngine:
         "TRENDING_UP": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
                         "THREE_WHITE_SOLDIERS", "WHALE_MOMENTUM", "VOLUME_SURGE_BREAKOUT",
                         "CONTINUATION_LIQUIDITY_SWEEP", "TREND_PULLBACK_EMA",
+                        "MOVER_TREND_PULLBACK",
                         "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION",
                         "DIVERGENCE_CONTINUATION"],
         "TRENDING_DOWN": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
                           "THREE_BLACK_CROWS", "WHALE_MOMENTUM", "BREAKDOWN_SHORT",
                           "CONTINUATION_LIQUIDITY_SWEEP", "TREND_PULLBACK_EMA",
+                          "MOVER_TREND_PULLBACK",
                           "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION",
                           "DIVERGENCE_CONTINUATION"],
         "RANGING": ["SWING_STANDARD", "SR_FLIP_RETEST", "FAILED_AUCTION_RECLAIM"],
@@ -1788,6 +1791,11 @@ class SignalScoringEngine:
     # generic indicator alignment.
     _FAMILY_TREND_PULLBACK: frozenset = frozenset({
         "TREND_PULLBACK_EMA",
+        # Mover continuation pullback: same family thesis (low-volume pullback into
+        # a confirmed trend, entry timed on the dip).  The mover MA-stack IS the
+        # higher-context trend, so the evaluator stamps htf_trend_aligned=True and
+        # earns full regime affinity here regardless of the noisy entry-TF label.
+        "MOVER_TREND_PULLBACK",
     })
 
     # Breakout / displacement continuation paths need bounded thesis credit for

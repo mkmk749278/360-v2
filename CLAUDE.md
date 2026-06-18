@@ -30,6 +30,31 @@ Ask before every code change: **"How does this make signals more profitable for 
 
 ---
 
+## Project Phase — Testing (no subscribers yet)
+
+**We are alone testing. There are no paid subscribers on the channel yet.** This
+changes the shipping calculus:
+
+- **Ship changes LIVE — do not gate new work behind dark flags + shadow telemetry.**
+  The dark-flag-first / measure-in-shadow pattern from Sessions 19–28 existed to
+  protect *live subscribers* from an unproven change. With no subscribers, that
+  protection buys nothing and only slows iteration. New paths / scoring / exit
+  changes go live by default so we learn from real engine behaviour fast.
+- A reversible **env off-switch** (default ON) is still fine — that is an
+  operational kill switch, not a "dark flag." What we drop is *default-OFF + wait-
+  for-shadow-data-before-activating*.
+- **Safety limits are NOT relaxed by this.** Blast-radius caps, naked-position
+  invariant, secret handling, withdraw-key rejection (Hard Limits below, B12/B18)
+  stay fully enforced — they protect *our own* test capital, not just subscribers.
+- **Revisit at subscriber launch.** When the first paid subscriber joins, restore
+  dark-flag-first discipline for anything touching the money path.
+
+This supersedes the "ships dark / 48h shadow window" cadence in older
+`ACTIVE_CONTEXT.md` checkpoints for *new* changes; already-shipped dark flags can be
+flipped live as the owner directs.
+
+---
+
 ## Change-management Protocol
 
 **Every change ships via PR.** Doc-only edits, code, tooling — all of them. Never push directly to `main`.
@@ -49,7 +74,7 @@ Ask before every code change: **"How does this make signals more profitable for 
 - Paid-channel routing changes
 - Regime-per-exit design decisions (§3.2b — data research in progress)
 
-Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships to live subscribers in ~45s.
+Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in ~45s. **Testing phase: no subscribers yet** — a `main` deploy reaches only our own test setup, so new changes ship live (not dark) per § Project Phase.
 
 ---
 
