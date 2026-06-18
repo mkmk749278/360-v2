@@ -71,6 +71,9 @@ class SetupClass(str, Enum):
     # crosses, rather than just confirming an existing trend via stack
     # alignment.  Low-frequency / high-conviction; cooldown 24h per pair.
     MA_CROSS_TREND_SHIFT = "MA_CROSS_TREND_SHIFT"
+    # Session 29: mover continuation pullback — enter each pullback to the MA
+    # stack on a confirmed strong mover (long gainers, short losers).
+    MOVER_TREND_PULLBACK = "MOVER_TREND_PULLBACK"
     # PR-01: auxiliary-channel evaluator identities — preserved as distinct setup classes
     # so that downstream scoring and suppression diagnostics reflect true channel intent.
     FVG_RETEST = "FVG_RETEST"
@@ -124,6 +127,7 @@ ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
     SetupClass.DIVERGENCE_CONTINUATION: PortfolioRole.SUPPORT,
     SetupClass.OPENING_RANGE_BREAKOUT: PortfolioRole.SUPPORT,  # disabled by default (PR-06); role preserved pending proper rebuild
     SetupClass.FAILED_AUCTION_RECLAIM: PortfolioRole.SUPPORT,
+    SetupClass.MOVER_TREND_PULLBACK: PortfolioRole.SUPPORT,  # fires on strong movers — situational but recurring
     # ── specialist ────────────────────────────────────────────────────────
     # Low-frequency, narrow-context, high-selectivity paths.  Valid only
     # under precise market conditions and expected to fire rarely.
@@ -993,6 +997,10 @@ def classify_setup(
         "POST_DISPLACEMENT_CONTINUATION",
         # Roadmap step 7: failed auction / failed acceptance reversal
         "FAILED_AUCTION_RECLAIM",
+        # Session 29: mover continuation — must keep its identity through scoring
+        # (without this, classify_setup re-labels it by heuristic and it never
+        # scores/dispatches as itself — the bug that left it 0-emitting).
+        "MOVER_TREND_PULLBACK",
         # PR-01: active auxiliary channel evaluator identities — these channels
         # self-classify their output; downstream must not reclassify to a generic class.
         "FVG_RETEST",
