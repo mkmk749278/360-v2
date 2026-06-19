@@ -4,6 +4,66 @@
 
 ---
 
+## 🟢 SESSION 30 2026-06-19 — Raw-Edge diagnostic tab + 60-min invalidation window; MOVER_TREND_PULLBACK gate root-caused
+
+**Owner trigger:** "performance still negative — suspect pre-TP and invalidation;
+add an ops view of how signals do WITHOUT them; widen the invalidation window;
+and what about that new path (MOVER_TREND_PULLBACK) still firing nothing."
+Worked off the attached `signal_performance` (365 closed, Jun 15–19),
+`signal_history` (500), `invalidation_records` (154), and a fresh truth report.
+
+### Shipped + MERGED this session
+| PR | Repo | What |
+|---|---|---|
+| [#16](https://github.com/mkmk749278/360ce-ops/pull/16) | 360ce-ops | **Raw Edge** tab — signal edge *without* pre-TP & invalidation: MFE reach, exit attribution (true SL vs pre-TP vs invalidation vs expiry), capture (realized÷MFE), give-back, + invalidation PREMATURE/missed-R per family. Read-only. |
+| [#628](https://github.com/mkmk749278/360-v2/pull/628) | 360-v2 | Invalidation-audit observation window **30→60 min** (`INVALIDATION_AUDIT_WINDOW_SEC` 1800→3600). Our scalps run 5–60 min, so 30 min judged kills before the hold elapsed. Observation-only; no FSM change. |
+
+### Diagnosis from the Raw Edge data (the honest answer to the owner's suspicion)
+- **Pre-TP IS capping winners.** Book-level *capture* = **6%** (avg MFE 0.53% vs
+  avg realized 0.033%); avg give-back **0.51%/signal**. 175 pre-TP signals banked
+  +0.39% avg vs +0.85% true peak; 30% reached MFE ≥ 1% and banked a sliver — the
+  residual "runner" (§3.2) is dying at break-even instead of running.
+- **The 80+ band is the worst** — capture **−7%** (only negative band). High-conviction
+  signals reach the biggest MFE (one SR_FLIP +2.11% MFE banked 1.05; a DIV_CONT
+  +1.61% MFE realized 0.65) and pre-TP+BE caps them hardest, while the few losers
+  take full adverse. Asymmetry inverted exactly where conviction is highest.
+- **Invalidation is mostly PROTECTIVE — NOT the main drag.** 113 PROTECTIVE vs 22
+  PREMATURE; `momentum_loss` +0.33R/kill (68 prot vs 10 prem). PREMATURE give-back
+  (37.8R total) concentrates in `trailing_invalidation` (27% premature rate) and
+  `adverse_excursion` — tunable, but gutting invalidation loses money. Told owner
+  the invalidation half of the suspicion is largely **not** supported by data.
+- **Book context:** raw +12.2% / 365 = +0.033%/sig → net-negative after ~0.07%
+  raw round-trip fee. BUT RANGING bleed is gone (+0.029 avg) and SR_FLIP is now
+  ~breakeven (−0.012, was −4.80) — Session-29's 3 flags worked. FAR (+0.096) /
+  DIV (+0.111) / BDS (+0.277) are the profitable engine — leave alone.
+
+**Next lever (owner-sign-off, FSM):** regime-per-exit (§3.2b) — pre-TP HIGH/OFF for
+trend-aligned + the 80+ band, let the residual run. Slice the Raw Edge tab by
+`entry_regime` first, bring owner a design before any FSM code.
+
+### MOVER_TREND_PULLBACK (16th path) — root-caused: 0 emissions = a GATE block, not the evaluator
+Truth report: ~58k generated, **99.9% gated, 0 emitted**, never reaches the
+confidence gate. The evaluator is sound and returns real signals; candidates die
+inside `_prepare_signal`'s gate chain.
+- **Root cause:** the path is mapped to family **`trend_following`** (PR #627), and
+  `trend_following` is in `_SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES`
+  (`scanner/__init__.py:4667-4694`) — any 360_SCALP signal is hard-rejected when
+  the entry-TF context is RANGING with ADX < 15. A trend-pullback fires *at* the
+  pullback, which reads RANGING/low-ADX on the 5m entry TF **by design**, so the
+  gate kills it before scoring. Same failure-mode as the §3.6a scoring bugs, but
+  at the **gate** layer (the scoring side was already fixed in #621 via
+  `htf_trend_aligned`). **TPE corroborates** — also `trend_following`, 7,742
+  generated → 4 emitted.
+- **Proposed fix (owner-sign-off — gate + new path; NOT shipped):** exempt
+  trend-pullback setups carrying `htf_trend_aligned=True` (MOVER_TREND_PULLBACK's
+  MA stack IS its HTF trend; TPE sets it on the 1H-trend path) from the
+  RANGING-low-ADX family block — mirrors the #621 doctrine. Narrower option: a
+  MOVER_TREND_PULLBACK-only carve-out. Also consider adding it to
+  `_SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS` (§3.4: mover continuation fires in any HTF
+  context). **Awaiting owner decision before shipping.**
+
+---
+
 ## 🟢 SESSION 29 2026-06-18 — SR_FLIP/RANGING bleed remedies ACTIVATED on VPS (3 dark flags flipped live)
 
 **Owner trigger:** "analyse signals quality after yesterday's PRs — where are we lagging."
