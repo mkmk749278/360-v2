@@ -6,7 +6,7 @@ fires on every closed signal that didn't hit TP or SL.  Without ground truth on
 decision is opinion-driven.
 
 This module writes a record per kill to ``data/invalidation_records.json``, then
-periodically classifies each record by examining price 30 minutes after the kill:
+periodically classifies each record by examining price 60 minutes after the kill:
 
 * PROTECTIVE  – price moved further against the position by more than 0.3 × SL
                 distance.  The kill saved real money.
@@ -34,7 +34,12 @@ log = get_logger("invalidation_audit")
 
 
 # Window after kill within which we evaluate "would TP1 have been hit?"
-_POST_KILL_WINDOW_SEC: float = float(os.getenv("INVALIDATION_AUDIT_WINDOW_SEC", "1800"))
+# 60 min (was 30): a 30-min window judged a kill PROTECTIVE/PREMATURE too early —
+# our scalps routinely run 5–60 min (OWNER_BRIEF §3.2 "hold 5–60 min"), so a
+# position that recovered to TP1 at minute 45 was being mislabelled NEUTRAL/
+# PROTECTIVE at minute 30. The longer window captures the full intended hold so
+# the PREMATURE rate (and the per-rule ablation EV) reflects real give-back.
+_POST_KILL_WINDOW_SEC: float = float(os.getenv("INVALIDATION_AUDIT_WINDOW_SEC", "3600"))
 
 # Distance beyond entry (in fractions of SL distance) that defines PROTECTIVE.
 # 0.3 means: if price moved 0.3 × SL_distance further against position, kill was

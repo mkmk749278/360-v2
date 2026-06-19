@@ -189,10 +189,10 @@ def test_classify_pending_records_skips_records_inside_window(tmp_path):
 
 
 def test_classify_pending_records_classifies_premature_long(tmp_path):
-    """A kill 30+ min old where post-kill high reached TP1 → PREMATURE."""
+    """A kill 60+ min old where post-kill high reached TP1 → PREMATURE."""
     storage = tmp_path / "audit.json"
     now = 1_000_000.0
-    _seed_pending_record(storage, kill_ts=now - 2000)  # >30 min ago
+    _seed_pending_record(storage, kill_ts=now - 4000)  # >60 min ago
 
     counters = classify_pending_records(
         fetch_ohlc_since=lambda sym, ts: {"high": [101.5], "low": [99.8], "close": [101.2]},
@@ -210,7 +210,7 @@ def test_classify_pending_records_marks_insufficient_data_when_ohlc_unavailable(
     """Symbol with no candle data yet → INSUFFICIENT_DATA, will never be retried."""
     storage = tmp_path / "audit.json"
     now = 1_000_000.0
-    _seed_pending_record(storage, kill_ts=now - 2000)
+    _seed_pending_record(storage, kill_ts=now - 4000)
     counters = classify_pending_records(
         fetch_ohlc_since=lambda sym, ts: None,
         now_ts=now,
