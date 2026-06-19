@@ -63,6 +63,7 @@ def _make_signal(
     channel: str = "360_SCALP",
     signal_id: str = "SIG-001",
     confidence: float = 10.0,
+    htf_trend_aligned: bool = False,
 ) -> Signal:
     return Signal(
         channel=channel,
@@ -75,6 +76,7 @@ def _make_signal(
         confidence=confidence,
         signal_id=signal_id,
         timestamp=utcnow(),
+        htf_trend_aligned=htf_trend_aligned,
     )
 
 
@@ -1759,22 +1761,27 @@ class TestMTFGateInScanner:
             ] == 0
         )
 
-    def test_ranging_low_adx_helper_exempts_mover_trend_pullback(self):
-        """MOVER_TREND_PULLBACK is family trend_following (a blocked family) but
-        is setup-exempt: the move's MA-stack separation is its own regime filter
-        (§3.4).  TPE — same family — stays blocked.  Family-only callers (no
-        setup_class) keep the legacy behaviour."""
+    def test_ranging_low_adx_helper_exemption_logic(self):
+        """The RANGING-low-ADX block is exempt for the HTF-aligned trend-pullback
+        family — covering BOTH the 75-universe path (TREND_PULLBACK_EMA) and the
+        mover path (MOVER_TREND_PULLBACK) — plus a setup-set backstop.  A non-blocked
+        family is never gated; a blocked family without HTF alignment stays blocked."""
         scanner, _signal_queue = self._scanner_and_queue()
+        block = scanner._is_scalp_family_blocked_in_ranging_low_adx
         # Family-only call (legacy signature) — trend_following stays blocked.
-        assert scanner._is_scalp_family_blocked_in_ranging_low_adx("trend_following") is True
-        # TPE is trend_following and NOT exempt → still blocked.
-        assert scanner._is_scalp_family_blocked_in_ranging_low_adx(
-            "trend_following", "TREND_PULLBACK_EMA"
-        ) is True
-        # MOVER_TREND_PULLBACK is exempt → not blocked despite the blocked family.
-        assert scanner._is_scalp_family_blocked_in_ranging_low_adx(
-            "trend_following", "MOVER_TREND_PULLBACK"
-        ) is False
+        assert block("trend_following") is True
+        # Non-blocked family is never gated here.
+        assert block("reclaim_retest") is False
+        assert block("divergence") is False
+        # TPE without HTF alignment (5m-fallback path) → still blocked.
+        assert block("trend_following", "TREND_PULLBACK_EMA", False) is True
+        # TPE WITH HTF alignment (1H-trend path) → exempt.  This is the 75-universe
+        # EMA-riding continuation the owner pointed at — same fix as the mover path.
+        assert block("trend_following", "TREND_PULLBACK_EMA", True) is False
+        # MOVER via the htf_trend_aligned flag (the path always stamps it True).
+        assert block("trend_following", "MOVER_TREND_PULLBACK", True) is False
+        # MOVER via the setup-set backstop even if the flag is absent.
+        assert block("trend_following", "MOVER_TREND_PULLBACK", False) is False
 
     def test_mover_trend_pullback_in_mtf_hard_block_exempt(self):
         """§3.4: mover continuation fires in any HTF context — exempt from the
@@ -1821,10 +1828,10 @@ class TestMTFGateInScanner:
 
         assert sig is not None
         assert funnel_meta.get("reject_stage") is None
-        # Distinct exemption counter fired (family WOULD block, setup is exempt).
+        # Exempt via the setup-set backstop (the test signal carries no flag).
         assert (
             scanner._suppression_counters[
-                "ranging_low_adx:setup_exempt:360_SCALP:MOVER_TREND_PULLBACK"
+                "ranging_low_adx:exempt:360_SCALP:MOVER_TREND_PULLBACK:setup"
             ] == 1
         )
         # Not blocked.
@@ -1832,6 +1839,100 @@ class TestMTFGateInScanner:
             scanner._suppression_counters[
                 "ranging_low_adx:setup_block:360_SCALP:MOVER_TREND_PULLBACK"
             ] == 0
+        )
+
+    @pytest.mark.asyncio
+    async def test_ranging_low_adx_allows_htf_aligned_trend_pullback_ema_in_prepare(self):
+        """The 75-universe twin: a HTF-aligned TREND_PULLBACK_EMA (htf_trend_aligned
+        =True, its 1H-trend path) survives the RANGING-low-ADX gate that blocks its
+        trend_following family — same fix as the mover path, via the flag."""
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal(
+            channel="360_SCALP", htf_trend_aligned=True
+        )
+        scanner, _signal_queue = self._scanner_and_queue()
+        ctx = SimpleNamespace(
+            candles={"5m": _candles()},
+            indicators={"5m": {"ema9_last": 101.0, "ema21_last": 100.0, "close": 100.5}},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            smc_result=SimpleNamespace(sweeps=[], fvg=[]),
+            spread_pct=0.001,
+            regime_result=SimpleNamespace(regime=SimpleNamespace(value="RANGING")),
+            market_state=MarketState.CLEAN_RANGE,
+            pair_quality=SimpleNamespace(passed=True, reason="", label="GOOD", score=80.0),
+            regime_context=None,
+            is_ranging=True,
+            adx_val=_RANGING_ADX_SUPPRESS_THRESHOLD - 1.0,
+        )
+        funnel_meta = {}
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.TREND_PULLBACK_EMA)),
+            patch.object(scanner, "_compute_base_confidence", return_value=70.0),
+            patch.object(scanner, "_apply_predictive_adjustments", new=AsyncMock(return_value=None)),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            sig, _ = await scanner._prepare_signal(
+                symbol="BTCUSDT",
+                volume_24h=10_000_000.0,
+                chan=channel,
+                ctx=ctx,
+                _funnel_meta=funnel_meta,
+            )
+
+        assert sig is not None
+        assert funnel_meta.get("reject_stage") is None
+        assert (
+            scanner._suppression_counters[
+                "ranging_low_adx:exempt:360_SCALP:TREND_PULLBACK_EMA:htf_aligned"
+            ] == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_ranging_low_adx_blocks_non_htf_aligned_trend_pullback_ema(self):
+        """A TREND_PULLBACK_EMA on its 5m-fallback path (htf_trend_aligned=False) has
+        no HTF confirmation, so it STAYS blocked in dead low-ADX chop — the exemption
+        is scoped to the aligned paths only, not the whole family."""
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal(
+            channel="360_SCALP", htf_trend_aligned=False
+        )
+        scanner, _signal_queue = self._scanner_and_queue()
+        ctx = SimpleNamespace(
+            candles={"5m": _candles()},
+            indicators={"5m": {"ema9_last": 101.0, "ema21_last": 100.0, "close": 100.5}},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            smc_result=SimpleNamespace(sweeps=[], fvg=[]),
+            spread_pct=0.001,
+            regime_result=SimpleNamespace(regime=SimpleNamespace(value="RANGING")),
+            market_state=MarketState.CLEAN_RANGE,
+            pair_quality=SimpleNamespace(passed=True, reason="", label="GOOD", score=80.0),
+            regime_context=None,
+            is_ranging=True,
+            adx_val=_RANGING_ADX_SUPPRESS_THRESHOLD - 1.0,
+        )
+        funnel_meta = {}
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.TREND_PULLBACK_EMA)),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            sig, _ = await scanner._prepare_signal(
+                symbol="BTCUSDT",
+                volume_24h=10_000_000.0,
+                chan=channel,
+                ctx=ctx,
+                _funnel_meta=funnel_meta,
+            )
+
+        assert sig is None
+        assert funnel_meta.get("reject_stage") == "gated"
+        assert (
+            scanner._suppression_counters[
+                "ranging_low_adx:setup_block:360_SCALP:TREND_PULLBACK_EMA"
+            ] == 1
         )
 
     @pytest.mark.asyncio
