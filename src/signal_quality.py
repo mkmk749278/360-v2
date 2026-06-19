@@ -197,6 +197,7 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
+        SetupClass.MOVER_TREND_PULLBACK,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -269,6 +270,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
+        SetupClass.MOVER_TREND_PULLBACK,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -291,6 +293,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
+        SetupClass.MOVER_TREND_PULLBACK,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -341,6 +344,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         # ORB is intentionally excluded: its evaluator still hard-blocks QUIET/RANGING.
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
+        SetupClass.MOVER_TREND_PULLBACK,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -361,6 +365,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.WHALE_MOMENTUM,
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
+        SetupClass.MOVER_TREND_PULLBACK,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
@@ -372,6 +377,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
+        SetupClass.MOVER_TREND_PULLBACK,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.LIQUIDATION_REVERSAL,
@@ -394,6 +400,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         # Volume surge breakout/breakdown are designed for volatile conditions
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
+        SetupClass.MOVER_TREND_PULLBACK,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.FUNDING_EXTREME_SIGNAL,
         # PR-ARCH-7B: liquidation-reversal setups are specifically designed for

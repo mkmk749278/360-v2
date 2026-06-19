@@ -101,6 +101,25 @@ class TestMoverTrendPullback:
         assert SetupClass.MOVER_TREND_PULLBACK in ACTIVE_PATH_PORTFOLIO_ROLES
         assert _SCALP_SETUP_TO_FAMILY.get("MOVER_TREND_PULLBACK") == "trend_following"
 
+    def test_registered_in_channel_and_regime_compatibility_maps(self):
+        """classify_setup sets channel_compatible / regime_compatible from these two
+        maps; _prepare_signal hard-rejects a setup absent from EITHER (the real
+        cause of 0 emissions). MOVER must sit wherever its VSB/BDS mover peers do:
+        the 360_SCALP channel set + every market state."""
+        from src.signal_quality import (
+            CHANNEL_SETUP_COMPATIBILITY,
+            REGIME_SETUP_COMPATIBILITY,
+            SetupClass,
+        )
+
+        assert SetupClass.MOVER_TREND_PULLBACK in CHANNEL_SETUP_COMPATIBILITY["360_SCALP"]
+        # Present in every regime the compat map defines — like VOLUME_SURGE_BREAKOUT.
+        for state, setups in REGIME_SETUP_COMPATIBILITY.items():
+            assert SetupClass.MOVER_TREND_PULLBACK in setups, (
+                f"MOVER_TREND_PULLBACK missing from REGIME_SETUP_COMPATIBILITY[{state}] "
+                "→ regime_compatible=False → hard-rejected before scoring"
+            )
+
     def test_setup_class_preserved_through_classify(self):
         """A stamped MOVER signal keeps its identity through classify_setup
         (it is in _SELF_CLASSIFYING), rather than being re-labelled by heuristic."""
