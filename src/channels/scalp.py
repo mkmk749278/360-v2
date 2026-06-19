@@ -2698,6 +2698,38 @@ class ScalpChannel(BaseChannel):
     # ------------------------------------------------------------------
     # MOVER_TREND_PULLBACK path
     # ------------------------------------------------------------------
+    @staticmethod
+    def _mover_htf_aligned_fan_pct(
+        indicators_1h: Optional[dict], direction: "Direction"
+    ) -> float:
+        """1H EMA21/50 fan width (%) when it AGREES with ``direction``, else 0.0.
+
+        A multi-day mover's strength shows on the higher timeframe (15m×99 ≈ 24h
+        is too short).  The fan is only credited when the 1H trend points the same
+        way as the entry — a bearish 1H fan must not count as "strength" for a
+        LONG.  Returns 0.0 on missing/invalid data so the caller falls back to the
+        15m separation alone (fail-safe: never inflates strength)."""
+        if not indicators_1h:
+            return 0.0
+        ema21 = indicators_1h.get("ema21_last")
+        ema50 = indicators_1h.get("ema50_last")
+        if ema21 is None or ema50 is None:
+            return 0.0
+        try:
+            e21 = float(ema21)
+            e50 = float(ema50)
+        except (TypeError, ValueError):
+            return 0.0
+        if e50 <= 0:
+            return 0.0
+        aligned = (
+            (direction == Direction.LONG and e21 > e50)
+            or (direction == Direction.SHORT and e21 < e50)
+        )
+        if not aligned:
+            return 0.0
+        return abs(e21 - e50) / e50 * 100.0
+
     def _evaluate_mover_trend_pullback(
         self,
         symbol: str,
@@ -2752,19 +2784,31 @@ class ScalpChannel(BaseChannel):
         if min(close, ma_fast, ma_mid, ma_slow) <= 0:
             return self._reject("insufficient_candles")
 
-        # Trend from the MA stack — the move decides direction.
-        if ma_fast > ma_mid > ma_slow:
+        # Trend from the MID/SLOW MAs (MA25 vs MA99) — NOT the full three-MA stack.
+        # This path enters on a pullback that, by design, tags the FAST MA — and a
+        # pullback routinely dips MA7 toward/below MA25, so demanding a clean
+        # ma_fast>ma_mid>ma_slow stack on the pullback bar contradicted the buy-the-
+        # dip thesis and was the path's #1 generation reject (no_ma_stack ~45%).
+        # The mid/slow pair holds the established trend through a fast-MA pullback
+        # (§3.3: trend on the slower context, entry timing on the fast MA below).
+        if ma_mid > ma_slow:
             direction = Direction.LONG
-        elif ma_fast < ma_mid < ma_slow:
+        elif ma_mid < ma_slow:
             direction = Direction.SHORT
         else:
             return self._reject("no_ma_stack")
 
-        # Mover gate: require a strong run (wide MA7↔MA99 separation).  This is what
-        # makes the path mover-specific without depending on the promotion
-        # bookkeeping (which misses universe/young movers like BTW/ESPORTS); a
-        # gently-trending major won't clear it and stays TPE's domain.
-        stack_sep_pct = abs(ma_fast - ma_slow) / ma_slow * 100.0
+        # Mover gate: require a strong run.  Measure strength on the WIDER of the
+        # 15m MA7↔MA99 separation and the direction-aligned 1H EMA21/50 fan.  A
+        # multi-day mover (SYNUSDT: +300%/7d) compresses its 15m stack on a pullback
+        # (MA7↔MA99 ~1.5%) while the 1H/4H fan stays wide — reading strength off the
+        # 15m alone tripped mover_run_too_small and locked the path out of exactly
+        # the movers it targets.  15m×99 ≈ 24h is too short to size a multi-day run;
+        # the 1H fan captures it (§3.3).  Still self-contained — no promotion
+        # bookkeeping — so it catches universe/young movers (BTW/ESPORTS).
+        sep_15m_pct = abs(ma_fast - ma_slow) / ma_slow * 100.0
+        htf_fan_pct = self._mover_htf_aligned_fan_pct(indicators.get("1h"), direction)
+        stack_sep_pct = max(sep_15m_pct, htf_fan_pct)
         if stack_sep_pct < MOVER_TP_MIN_STACK_SEP_PCT:
             return self._reject("mover_run_too_small")
 
