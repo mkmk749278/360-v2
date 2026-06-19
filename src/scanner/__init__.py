@@ -513,15 +513,15 @@ _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES: frozenset[str] = frozenset({
     "other",
 })
 
-# Setup classes exempt from the RANGING-low-ADX family block above even though
-# their family is in the blocked set.  A mover-continuation path self-gates on
-# the *strength of the move* (MA7↔MA99 stack separation ≥ MOVER_TP_MIN_STACK_SEP_
-# PCT) and re-enters on a pullback that, by design, reads RANGING/low-ADX on the
-# 5m entry TF — the very condition this gate blocks.  The block exists to keep
-# structure/trend setups (TPE) out of dead chop; applied to a confirmed top mover
-# it throws the whole run away on a momentary pullback reading (zero emissions
-# observed live).  Family stays trend_following for SCORING affinity (htf_trend_
-# aligned, #621); only the gate is exempt — exactly the §3.6a split, at the gate.
+# Backstop exempt set for the RANGING-low-ADX family block.  The PRIMARY
+# exemption is the htf_trend_aligned flag (see _is_scalp_family_blocked_in_ranging
+# _low_adx) — it covers the whole trend-pullback family (TREND_PULLBACK_EMA on its
+# 1H-trend path + MOVER_TREND_PULLBACK on the MA stack), which fires AT a pullback
+# that reads RANGING/low-ADX on the entry TF by design while a higher timeframe IS
+# trending.  This explicit set is a belt-and-suspenders backstop for a path that
+# self-proves the move (the mover's MA7↔MA99 stack-separation gate) even if its
+# htf_trend_aligned stamp is ever dropped in a refactor.  Family stays trend_
+# following for SCORING affinity (#621); only the gate is exempt — §3.6a split.
 _SCALP_RANGING_LOW_ADX_EXEMPT_SETUPS: frozenset[str] = frozenset({
     "MOVER_TREND_PULLBACK",
 })
@@ -3026,16 +3026,28 @@ class Scanner:
 
     @staticmethod
     def _is_scalp_family_blocked_in_ranging_low_adx(
-        setup_family: str, setup_class: str = ""
+        setup_family: str, setup_class: str = "", htf_trend_aligned: bool = False
     ) -> bool:
-        # Setup-level exemption wins over the family rule: a mover-momentum path
-        # proves its own regime via the MA-stack separation gate and fires in any
-        # HTF context (§3.4), so it must not be range-blocked for a pullback that
-        # reads RANGING/low-ADX by design.  setup_class defaults to "" so existing
-        # family-only callers are unchanged.
+        # Only families in the blocked set are ever gated here.
+        if setup_family not in _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES:
+            return False
+        # Exemption — the whole trend-pullback family, scoped by htf_trend_aligned:
+        # a HTF-aligned pullback fires AT a dip that reads RANGING/low-ADX on the
+        # entry TF BY DESIGN, but a higher timeframe IS trending — the exact
+        # opposite of the dead chop this gate targets.  The flag is stamped only by
+        # the trend-pullback family (TREND_PULLBACK_EMA on its 1H-trend path;
+        # MOVER_TREND_PULLBACK on the MA stack), so it scopes the exemption to
+        # exactly the EMA-riding continuation paths and leaves TPE's 5m-fallback
+        # path (no HTF confirmation) blocked.  The explicit setup set is a belt-and-
+        # suspenders backstop for a path that self-proves the move even if the flag
+        # is ever dropped.  Family stays in the blocked set for SCORING; only the
+        # gate is exempt — the §3.6a split, at the gate.  setup_class/htf default so
+        # existing family-only callers are unchanged.
+        if htf_trend_aligned:
+            return False
         if setup_class and setup_class in _SCALP_RANGING_LOW_ADX_EXEMPT_SETUPS:
             return False
-        return setup_family in _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES
+        return True
 
     @staticmethod
     def _should_block_ranging_low_atr_loser(
@@ -4698,8 +4710,9 @@ class Scanner:
             and ctx.adx_val < _RANGING_ADX_SUPPRESS_THRESHOLD
         ):
             _regime_name = self._regime_name_from_ctx(ctx, default="RANGING")
+            _htf_aligned = bool(getattr(sig, "htf_trend_aligned", False))
             if self._is_scalp_family_blocked_in_ranging_low_adx(
-                _setup_family, _setup_class_name
+                _setup_family, _setup_class_name, _htf_aligned
             ):
                 self._suppression_counters[f"ranging_low_adx:{chan_name}"] += 1
                 self._suppression_counters[
@@ -4724,16 +4737,19 @@ class Scanner:
                     ctx.adx_val,
                 )
                 return _reject("gated", None)
-            # Not blocked.  When the family WOULD block but the setup is exempt,
-            # record it distinctly so the exemption's live volume is measurable
-            # via /suppressed (separate from genuinely-allowed families).
-            if (
-                _setup_family in _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES
-                and _setup_class_name in _SCALP_RANGING_LOW_ADX_EXEMPT_SETUPS
-            ):
-                self._suppression_counters[
-                    f"ranging_low_adx:setup_exempt:{chan_name}:{_setup_class_name}"
-                ] += 1
+            # Not blocked.  When the family WOULD block but the signal was exempted,
+            # record it distinctly (with the reason) so the exemption's live volume
+            # is measurable via /suppressed, separate from genuinely-allowed families.
+            if _setup_family in _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES:
+                _exempt_reason = (
+                    "htf_aligned" if _htf_aligned
+                    else "setup" if _setup_class_name in _SCALP_RANGING_LOW_ADX_EXEMPT_SETUPS
+                    else None
+                )
+                if _exempt_reason is not None:
+                    self._suppression_counters[
+                        f"ranging_low_adx:exempt:{chan_name}:{_setup_class_name}:{_exempt_reason}"
+                    ] += 1
             self._suppression_counters[
                 f"ranging_low_adx:family_allowed:{chan_name}:{_setup_family}"
             ] += 1
