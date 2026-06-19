@@ -113,6 +113,73 @@ class TestMoverTrendPullback:
         )
         assert assessment.setup_class == SetupClass.MOVER_TREND_PULLBACK
 
+    def test_htf_fan_rescues_compressed_15m_mover(self, monkeypatch):
+        """A multi-day mover whose 15m stack has compressed (<3% sep) still fires
+        when the 1H EMA fan confirms the run — the SYNUSDT case (15m ~1.5%, 1H wide).
+        Same weak-15m inputs that reject in test_rejects_weak_run, now rescued by 1H."""
+        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
+        candles, indicators, smc_data = _inputs(up=True, step=0.02)  # ~0.9% 15m sep
+        indicators["1h"] = {"ema21_last": 110.0, "ema50_last": 100.0}  # 10% bullish fan
+        sig = ScalpChannel()._evaluate_mover_trend_pullback(
+            "SYNUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is not None, "wide aligned 1H fan must rescue a compressed 15m mover"
+        assert sig.direction == Direction.LONG
+
+    def test_htf_fan_not_credited_when_misaligned(self, monkeypatch):
+        """A bearish 1H fan must NOT count as strength for a LONG — the path falls
+        back to the (weak) 15m separation and rejects."""
+        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
+        candles, indicators, smc_data = _inputs(up=True, step=0.02)
+        indicators["1h"] = {"ema21_last": 100.0, "ema50_last": 110.0}  # bearish — opposes LONG
+        sig = ScalpChannel()._evaluate_mover_trend_pullback(
+            "SYNUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None, "misaligned 1H fan must not rescue a weak 15m run"
+
+    def test_htf_aligned_fan_pct_helper(self):
+        """Unit: the 1H fan is credited only when it agrees with the entry side."""
+        f = ScalpChannel._mover_htf_aligned_fan_pct
+        assert f({"ema21_last": 110.0, "ema50_last": 100.0}, Direction.LONG) == 10.0
+        assert f({"ema21_last": 90.0, "ema50_last": 100.0}, Direction.SHORT) == 10.0
+        # Misaligned → 0.0
+        assert f({"ema21_last": 110.0, "ema50_last": 100.0}, Direction.SHORT) == 0.0
+        assert f({"ema21_last": 90.0, "ema50_last": 100.0}, Direction.LONG) == 0.0
+        # Missing / invalid → 0.0 (fail-safe, never inflates strength)
+        assert f(None, Direction.LONG) == 0.0
+        assert f({"ema21_last": 110.0}, Direction.LONG) == 0.0
+        assert f({"ema21_last": 110.0, "ema50_last": 0.0}, Direction.LONG) == 0.0
+
+    def test_fires_on_pullback_that_compresses_fast_ma(self, monkeypatch):
+        """The core fix: an uptrend whose recent pullback has dipped MA7 BELOW MA25
+        (so the old strict ma_fast>ma_mid>ma_slow stack failed → no_ma_stack) still
+        fires, because trend is now read on the mid/slow pair which holds."""
+        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
+        n = 115
+        # Strong rise for 100 bars, then a 14-bar pullback, then a reclaim bar.
+        closes = [100.0 + 0.4 * i for i in range(n - 15)]          # 100 → ~139.6
+        peak = closes[-1]
+        closes += [peak - 0.6 * (j + 1) for j in range(14)]        # pull back ~8.4
+        closes.append(peak - 4.0)                                  # strong reclaim back above MA7
+        ma_fast = sum(closes[-7:]) / 7
+        ma_mid = sum(closes[-25:]) / 25
+        ma_slow = sum(closes[-99:]) / 99
+        # Precondition the test asserts the fix for: MA7 dipped below MA25, but the
+        # mid/slow pair still holds the uptrend (and MA7↔MA99 sep is still wide).
+        assert ma_fast < ma_mid, "pullback must have compressed MA7 below MA25"
+        assert ma_mid > ma_slow, "mid/slow must still hold the uptrend"
+        highs = [c + 0.5 for c in closes]
+        lows = [c - 0.5 for c in closes]
+        candles = {"15m": {"open": list(closes), "high": highs, "low": lows,
+                           "close": closes, "volume": [1000.0] * n}}
+        indicators = {"15m": {"atr_last": 0.3}}
+        smc_data = {"pair_profile": None, "regime_context": None}
+        sig = ScalpChannel()._evaluate_mover_trend_pullback(
+            "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is not None, "compressed-fast-MA pullback must fire under the fix"
+        assert sig.direction == Direction.LONG
+
     def test_rejects_without_ma_stack(self, monkeypatch):
         """A flat/choppy mover (no clean MA stack) does not fire."""
         monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
