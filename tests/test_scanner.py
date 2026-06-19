@@ -1759,6 +1759,81 @@ class TestMTFGateInScanner:
             ] == 0
         )
 
+    def test_ranging_low_adx_helper_exempts_mover_trend_pullback(self):
+        """MOVER_TREND_PULLBACK is family trend_following (a blocked family) but
+        is setup-exempt: the move's MA-stack separation is its own regime filter
+        (§3.4).  TPE — same family — stays blocked.  Family-only callers (no
+        setup_class) keep the legacy behaviour."""
+        scanner, _signal_queue = self._scanner_and_queue()
+        # Family-only call (legacy signature) — trend_following stays blocked.
+        assert scanner._is_scalp_family_blocked_in_ranging_low_adx("trend_following") is True
+        # TPE is trend_following and NOT exempt → still blocked.
+        assert scanner._is_scalp_family_blocked_in_ranging_low_adx(
+            "trend_following", "TREND_PULLBACK_EMA"
+        ) is True
+        # MOVER_TREND_PULLBACK is exempt → not blocked despite the blocked family.
+        assert scanner._is_scalp_family_blocked_in_ranging_low_adx(
+            "trend_following", "MOVER_TREND_PULLBACK"
+        ) is False
+
+    def test_mover_trend_pullback_in_mtf_hard_block_exempt(self):
+        """§3.4: mover continuation fires in any HTF context — exempt from the
+        MTF confluence + longs-regime hard blocks, like the breakout family."""
+        from src.scanner import _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
+        assert "MOVER_TREND_PULLBACK" in _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
+
+    @pytest.mark.asyncio
+    async def test_ranging_low_adx_allows_mover_trend_pullback_in_prepare(self):
+        """End-to-end: a MOVER_TREND_PULLBACK candidate survives the RANGING-low-ADX
+        gate (which blocks its trend_following family) and is counted as exempt."""
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal(channel="360_SCALP")
+        scanner, _signal_queue = self._scanner_and_queue()
+        ctx = SimpleNamespace(
+            candles={"5m": _candles()},
+            indicators={"5m": {"ema9_last": 101.0, "ema21_last": 100.0, "close": 100.5}},
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            smc_result=SimpleNamespace(sweeps=[], fvg=[]),
+            spread_pct=0.001,
+            regime_result=SimpleNamespace(regime=SimpleNamespace(value="RANGING")),
+            market_state=MarketState.CLEAN_RANGE,
+            pair_quality=SimpleNamespace(passed=True, reason="", label="GOOD", score=80.0),
+            regime_context=None,
+            is_ranging=True,
+            adx_val=_RANGING_ADX_SUPPRESS_THRESHOLD - 1.0,
+        )
+        funnel_meta = {}
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.MOVER_TREND_PULLBACK)),
+            patch.object(scanner, "_compute_base_confidence", return_value=70.0),
+            patch.object(scanner, "_apply_predictive_adjustments", new=AsyncMock(return_value=None)),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            sig, _ = await scanner._prepare_signal(
+                symbol="BTCUSDT",
+                volume_24h=10_000_000.0,
+                chan=channel,
+                ctx=ctx,
+                _funnel_meta=funnel_meta,
+            )
+
+        assert sig is not None
+        assert funnel_meta.get("reject_stage") is None
+        # Distinct exemption counter fired (family WOULD block, setup is exempt).
+        assert (
+            scanner._suppression_counters[
+                "ranging_low_adx:setup_exempt:360_SCALP:MOVER_TREND_PULLBACK"
+            ] == 1
+        )
+        # Not blocked.
+        assert (
+            scanner._suppression_counters[
+                "ranging_low_adx:setup_block:360_SCALP:MOVER_TREND_PULLBACK"
+            ] == 0
+        )
+
     @pytest.mark.asyncio
     async def test_mtf_semantic_path_saves_reclaim_family_when_generic_fails(self):
         scanner, signal_queue = self._scanner_and_queue()

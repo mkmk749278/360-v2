@@ -98,12 +98,17 @@ class TestDoctrineExemptSetClassesDoctrine:
         assert "MA_CROSS_TREND_SHIFT" not in _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
 
     def test_exempt_set_size_matches_doctrine_categories(self):
-        """The exempt set covers exactly six setups: 3 tape-driven + 3 breakout
-        per §3.4.  If this number changes, the doctrine commentary must be
-        revisited (e.g., is a new evaluator a tape-driven / breakout path?)."""
+        """The exempt set covers exactly seven setups: 3 tape-driven + 3 breakout
+        + 1 mover-continuation, all §3.4 "fires in any HTF context".  The 7th is
+        MOVER_TREND_PULLBACK: a confirmed top mover (MA7↔MA99 stack separation gate)
+        defines its own regime, so the HTF confluence / longs-regime gates must not
+        veto it — same treatment as the breakout family.  If this number changes,
+        the doctrine commentary must be revisited (is a new evaluator tape-driven /
+        breakout / mover-context, or genuinely HTF-gated?)."""
         from src.scanner import _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
 
-        assert len(_SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS) == 6
+        assert len(_SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS) == 7
+        assert "MOVER_TREND_PULLBACK" in _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
 
     def test_every_exempt_setup_is_a_known_scalp_setup(self):
         """Drift guard: every exempt setup must exist in _SCALP_SETUP_TO_FAMILY

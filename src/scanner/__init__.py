@@ -447,6 +447,12 @@ _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS: frozenset[str] = frozenset({
     "VOLUME_SURGE_BREAKOUT",
     "BREAKDOWN_SHORT",
     "OPENING_RANGE_BREAKOUT",
+    # Mover continuation — like the breakout family, it fires in any HTF context
+    # (§3.4 row 5): the move itself (MA7↔MA99 stack separation ≥ MOVER_TP_MIN_
+    # STACK_SEP_PCT) defines direction and regime, so the HTF confluence / longs-
+    # regime gates must not veto it.  Its own mover-separation + reclaim gates are
+    # the filter.  Family stays trend_following for SCORING affinity only (#621).
+    "MOVER_TREND_PULLBACK",
 })
 
 _MTF_DOCTRINE_BYPASS_ENABLED: bool = os.getenv(
@@ -505,6 +511,19 @@ _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES: frozenset[str] = frozenset({
     # Blocking on low-ADX ranging is redundant and incorrect post-HTF-refactor.
     # Fail closed for unmapped/new setup classes until explicitly classified.
     "other",
+})
+
+# Setup classes exempt from the RANGING-low-ADX family block above even though
+# their family is in the blocked set.  A mover-continuation path self-gates on
+# the *strength of the move* (MA7↔MA99 stack separation ≥ MOVER_TP_MIN_STACK_SEP_
+# PCT) and re-enters on a pullback that, by design, reads RANGING/low-ADX on the
+# 5m entry TF — the very condition this gate blocks.  The block exists to keep
+# structure/trend setups (TPE) out of dead chop; applied to a confirmed top mover
+# it throws the whole run away on a momentary pullback reading (zero emissions
+# observed live).  Family stays trend_following for SCORING affinity (htf_trend_
+# aligned, #621); only the gate is exempt — exactly the §3.6a split, at the gate.
+_SCALP_RANGING_LOW_ADX_EXEMPT_SETUPS: frozenset[str] = frozenset({
+    "MOVER_TREND_PULLBACK",
 })
 
 # Per-channel SMC timeframe preference order.
@@ -3006,7 +3025,16 @@ class Scanner:
         return "other"
 
     @staticmethod
-    def _is_scalp_family_blocked_in_ranging_low_adx(setup_family: str) -> bool:
+    def _is_scalp_family_blocked_in_ranging_low_adx(
+        setup_family: str, setup_class: str = ""
+    ) -> bool:
+        # Setup-level exemption wins over the family rule: a mover-momentum path
+        # proves its own regime via the MA-stack separation gate and fires in any
+        # HTF context (§3.4), so it must not be range-blocked for a pullback that
+        # reads RANGING/low-ADX by design.  setup_class defaults to "" so existing
+        # family-only callers are unchanged.
+        if setup_class and setup_class in _SCALP_RANGING_LOW_ADX_EXEMPT_SETUPS:
+            return False
         return setup_family in _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES
 
     @staticmethod
@@ -4670,7 +4698,9 @@ class Scanner:
             and ctx.adx_val < _RANGING_ADX_SUPPRESS_THRESHOLD
         ):
             _regime_name = self._regime_name_from_ctx(ctx, default="RANGING")
-            if self._is_scalp_family_blocked_in_ranging_low_adx(_setup_family):
+            if self._is_scalp_family_blocked_in_ranging_low_adx(
+                _setup_family, _setup_class_name
+            ):
                 self._suppression_counters[f"ranging_low_adx:{chan_name}"] += 1
                 self._suppression_counters[
                     f"ranging_low_adx:family_block:{chan_name}:{_setup_family}"
@@ -4694,6 +4724,16 @@ class Scanner:
                     ctx.adx_val,
                 )
                 return _reject("gated", None)
+            # Not blocked.  When the family WOULD block but the setup is exempt,
+            # record it distinctly so the exemption's live volume is measurable
+            # via /suppressed (separate from genuinely-allowed families).
+            if (
+                _setup_family in _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES
+                and _setup_class_name in _SCALP_RANGING_LOW_ADX_EXEMPT_SETUPS
+            ):
+                self._suppression_counters[
+                    f"ranging_low_adx:setup_exempt:{chan_name}:{_setup_class_name}"
+                ] += 1
             self._suppression_counters[
                 f"ranging_low_adx:family_allowed:{chan_name}:{_setup_family}"
             ] += 1
