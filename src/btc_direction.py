@@ -202,3 +202,82 @@ def check_btc_direction_gate(
     if direction == "SHORT" and trend_1h == "BULLISH" and trend_4h == "BULLISH":
         return False, "btc_1h_4h_both_bullish_short"
     return True, ""
+
+
+def _ema_fan_pct(indicators: Optional[dict]) -> Optional[float]:
+    """EMA21/50 fan width as a percent of EMA50 — a trend-strength proxy.
+
+    A strong/parabolic mover fans the EMAs wide apart (SYNUSDT-class: >5%); a
+    gently-trending pair keeps them within ~1-2%.  Returns ``None`` on missing or
+    invalid data so callers fail-open.
+    """
+    if not indicators:
+        return None
+    ema21 = indicators.get("ema21_last")
+    ema50 = indicators.get("ema50_last")
+    if ema21 is None or ema50 is None:
+        return None
+    try:
+        e21 = float(ema21)
+        e50 = float(ema50)
+    except (TypeError, ValueError):
+        return None
+    if e50 <= 0:
+        return None
+    return abs(e21 - e50) / e50 * 100.0
+
+
+def check_countertrend_mover_block(
+    signal_direction: str,
+    sym_indicators_1h: Optional[dict],
+    sym_indicators_4h: Optional[dict],
+    sym_candles_4h: Optional[dict],
+    *,
+    setup_class: Optional[str],
+    blocked_setups: frozenset,
+    min_fan_pct: float,
+) -> Tuple[bool, str]:
+    """HARD-block a counter-trend reversal that fades a CONFIRMED STRONG mover.
+
+    The per-symbol direction gate (``check_symbol_direction_gate``) is a SOFT
+    penalty AND exempts LSR/FAR by design — so a reversal fading a parabolic
+    mover receives no penalty at all (SYNUSDT: +300%/7d, 4h+1h both stacked up,
+    repeatedly SHORTED by LIQUIDITY_SWEEP_REVERSAL → full SL).  Fading a confirmed
+    strong mover is structural impossibility, the one case §3.2 #5 reserves a hard
+    block for.
+
+    Returns ``(False, reason)`` — block — only when ALL hold:
+      * ``setup_class`` is in ``blocked_setups`` (the counter-trend reversal/
+        structure paths that fade trend), AND
+      * the signal direction opposes BOTH the pair's 1H and 4H EMA trend, AND
+      * the move is mover-grade — the wider of the 1H / 4H EMA21/50 fan
+        ``>= min_fan_pct``.
+
+    Otherwise ``(True, "")`` — fail-open on missing data, not-in-set, NEUTRAL/
+    aligned trend, or a narrow fan (gently-trending pair → keep the soft penalty).
+    """
+    if not setup_class or setup_class.upper() not in blocked_setups:
+        return True, ""
+    direction = (signal_direction or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return True, ""
+    trend_1h = _classify_btc_1h(sym_indicators_1h)
+    trend_4h = _classify_btc_4h(sym_indicators_4h, sym_candles_4h)
+    if trend_1h is None or trend_4h is None:
+        return True, ""  # fail-open on missing data
+    # The entry must oppose BOTH higher timeframes.
+    if direction == "SHORT" and not (trend_1h == "BULLISH" and trend_4h == "BULLISH"):
+        return True, ""
+    if direction == "LONG" and not (trend_1h == "BEARISH" and trend_4h == "BEARISH"):
+        return True, ""
+    # Mover-grade strength: a wide EMA fan on either higher timeframe.  Narrow
+    # fan = ordinary trend → leave it to the soft penalty, don't hard-block.
+    fans = [f for f in (_ema_fan_pct(sym_indicators_1h), _ema_fan_pct(sym_indicators_4h)) if f is not None]
+    if not fans:
+        return True, ""
+    strongest = max(fans)
+    if strongest < min_fan_pct:
+        return True, ""
+    side = "bullish" if direction == "SHORT" else "bearish"
+    return False, f"countertrend_mover_block_{side}_fan{strongest:.1f}pct"
+

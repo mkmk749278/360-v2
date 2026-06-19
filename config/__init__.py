@@ -599,6 +599,24 @@ MOVER_TP_SL_BUFFER_ATR: float = _safe_float("MOVER_TP_SL_BUFFER_ATR", "0.5")
 #: MA99 (or below, for shorts); a gently-trending blue chip won't clear this.
 MOVER_TP_MIN_STACK_SEP_PCT: float = _safe_float("MOVER_TP_MIN_STACK_SEP_PCT", "3.0")
 
+# ── Counter-trend hard-block on confirmed strong movers (Session 30, owner-approved) ─
+# §3.2 #5 reserves HARD blocks for structural impossibility.  Fading a CONFIRMED
+# strong mover with a reversal IS that case: SYNUSDT (+300%/7d, 4h+1h both stacked
+# up) was repeatedly SHORTED by LIQUIDITY_SWEEP_REVERSAL → full SL (-3.36%).  The
+# per-symbol direction gate only SOFT-penalises and EXEMPTS LSR/FAR, so a reversal
+# fading a rocket got no penalty at all.  This gate HARD-rejects a counter-trend
+# reversal/structure entry that opposes BOTH the pair's 1H and 4H EMA trend WHEN
+# the move is mover-grade (1H or 4H EMA21/50 fan width >= the threshold below).  A
+# gently-trending pair (narrow fan) keeps the soft penalty; only the parabolic case
+# is hard-blocked.  Reversible env off-switch (default ON — testing phase).
+COUNTERTREND_MOVER_HARD_BLOCK_ENABLED: bool = _safe_bool(
+    "COUNTERTREND_MOVER_HARD_BLOCK_ENABLED", "true"
+)
+#: HTF EMA21/50 fan width (%) above which the aligned 1H+4H trend is "mover-grade".
+#: ~3% mirrors MOVER_TP_MIN_STACK_SEP_PCT: a strong run fans the EMAs wide, an
+#: ordinary trend keeps them within ~1-2%.
+COUNTERTREND_MOVER_MIN_FAN_PCT: float = _safe_float("COUNTERTREND_MOVER_MIN_FAN_PCT", "3.0")
+
 # Regime-aware volume floors (USD 24h volume).
 # TRENDING/VOLATILE need depth for follow-through; RANGING/QUIET mean-reversion
 # setups work fine with less liquidity.

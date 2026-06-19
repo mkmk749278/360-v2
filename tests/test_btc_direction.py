@@ -20,7 +20,9 @@ from __future__ import annotations
 
 from src.btc_direction import (
     _BTC_DIR_EXEMPT_SETUPS,
+    _ema_fan_pct,
     check_btc_direction_gate,
+    check_countertrend_mover_block,
 )
 
 
@@ -339,3 +341,101 @@ def test_exempt_setups_contains_tape_driven_paths():
     assert "TREND_PULLBACK_EMA" not in _BTC_DIR_EXEMPT_SETUPS
     assert "DIVERGENCE_CONTINUATION" not in _BTC_DIR_EXEMPT_SETUPS
     assert "LIQUIDITY_SWEEP_REVERSAL" not in _BTC_DIR_EXEMPT_SETUPS
+
+
+# ---------------------------------------------------------------------------
+# Counter-trend mover HARD block (Session 30) — check_countertrend_mover_block
+# ---------------------------------------------------------------------------
+
+_CT_BLOCKED = frozenset({"LIQUIDITY_SWEEP_REVERSAL", "SR_FLIP_RETEST"})
+
+
+def _wide_bullish(ema21=110.0, ema50=100.0, ema21_prev=109.0):
+    """Mover-grade bullish: 10% EMA fan, slope up."""
+    return {"ema21_last": ema21, "ema50_last": ema50, "ema21_prev": ema21_prev}
+
+
+def _wide_bearish(ema21=90.0, ema50=100.0, ema21_prev=91.0):
+    """Mover-grade bearish: 10% EMA fan, slope down."""
+    return {"ema21_last": ema21, "ema50_last": ema50, "ema21_prev": ema21_prev}
+
+
+def _wide_bull_4h_candles():
+    return {"close": [115.0] * 5}  # above ema21=110 → 4h BULLISH confirmed
+
+
+def _wide_bear_4h_candles():
+    return {"close": [85.0] * 5}   # below ema21=90 → 4h BEARISH confirmed
+
+
+class TestCountertrendMoverBlock:
+    """Hard-block a reversal that fades a confirmed strong mover (the SYNUSDT case)."""
+
+    def test_ema_fan_pct(self):
+        assert _ema_fan_pct({"ema21_last": 110.0, "ema50_last": 100.0}) == 10.0
+        assert _ema_fan_pct({"ema21_last": 90.0, "ema50_last": 100.0}) == 10.0
+        assert _ema_fan_pct(None) is None
+        assert _ema_fan_pct({"ema21_last": 100.0}) is None          # missing ema50
+        assert _ema_fan_pct({"ema21_last": 100.0, "ema50_last": 0.0}) is None  # div-guard
+
+    def test_short_fading_strong_bullish_mover_is_blocked(self):
+        # The SYNUSDT case: LSR SHORT into a +parabolic, 1h+4h stacked-up mover.
+        allowed, reason = check_countertrend_mover_block(
+            "SHORT", _wide_bullish(), _wide_bullish(), _wide_bull_4h_candles(),
+            setup_class="LIQUIDITY_SWEEP_REVERSAL",
+            blocked_setups=_CT_BLOCKED, min_fan_pct=3.0,
+        )
+        assert allowed is False
+        assert "bullish" in reason
+
+    def test_long_fading_strong_bearish_mover_is_blocked(self):
+        allowed, reason = check_countertrend_mover_block(
+            "LONG", _wide_bearish(), _wide_bearish(), _wide_bear_4h_candles(),
+            setup_class="SR_FLIP_RETEST",
+            blocked_setups=_CT_BLOCKED, min_fan_pct=3.0,
+        )
+        assert allowed is False
+        assert "bearish" in reason
+
+    def test_trend_aligned_short_into_bearish_mover_passes(self):
+        # A trend-ALIGNED reversal (SHORT into a down mover) must NOT be blocked.
+        allowed, _ = check_countertrend_mover_block(
+            "SHORT", _wide_bearish(), _wide_bearish(), _wide_bear_4h_candles(),
+            setup_class="SR_FLIP_RETEST",
+            blocked_setups=_CT_BLOCKED, min_fan_pct=3.0,
+        )
+        assert allowed is True
+
+    def test_narrow_fan_not_blocked_left_to_soft_penalty(self):
+        # ema21=100, ema50=98 → 2.04% fan < 3% → ordinary trend, keep soft penalty.
+        allowed, _ = check_countertrend_mover_block(
+            "SHORT", _ind_bullish(), _ind_bullish(), _candles_close_above(101.0),
+            setup_class="LIQUIDITY_SWEEP_REVERSAL",
+            blocked_setups=_CT_BLOCKED, min_fan_pct=3.0,
+        )
+        assert allowed is True
+
+    def test_only_one_htf_opposing_not_blocked(self):
+        # 1h bullish-wide, 4h neutral → not BOTH oppose → fail-open.
+        allowed, _ = check_countertrend_mover_block(
+            "SHORT", _wide_bullish(), _ind_neutral(), {},
+            setup_class="LIQUIDITY_SWEEP_REVERSAL",
+            blocked_setups=_CT_BLOCKED, min_fan_pct=3.0,
+        )
+        assert allowed is True
+
+    def test_setup_not_in_blocked_set_passes(self):
+        allowed, _ = check_countertrend_mover_block(
+            "SHORT", _wide_bullish(), _wide_bullish(), _wide_bull_4h_candles(),
+            setup_class="FAILED_AUCTION_RECLAIM",
+            blocked_setups=_CT_BLOCKED, min_fan_pct=3.0,
+        )
+        assert allowed is True
+
+    def test_missing_data_fail_open(self):
+        allowed, _ = check_countertrend_mover_block(
+            "SHORT", None, None, None,
+            setup_class="LIQUIDITY_SWEEP_REVERSAL",
+            blocked_setups=_CT_BLOCKED, min_fan_pct=3.0,
+        )
+        assert allowed is True
