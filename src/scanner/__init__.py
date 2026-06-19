@@ -76,6 +76,8 @@ from config import (
     MOVER_PROMOTION_CYCLES,
     MOVER_PROMOTION_MIN_PCT,
     MOVER_PROMOTION_MIN_VOLUME_USD,
+    COUNTERTREND_MOVER_HARD_BLOCK_ENABLED,
+    COUNTERTREND_MOVER_MIN_FAN_PCT,
     SURGE_PROMOTION_MAX_PAIRS,
     SURGE_PROMOTION_VOLUME_MULTIPLIER,
     TIER2_SCAN_EVERY_N_CYCLES,
@@ -146,7 +148,11 @@ from src.volume_profile import VolumeProfileStore
 from src.spoof_detect import check_spoof_gate
 from src.tier_manager import TierManager
 from src.utils import get_logger, price_decimal_fmt, utcnow
-from src.btc_direction import check_btc_direction_gate, check_symbol_direction_gate
+from src.btc_direction import (
+    check_btc_direction_gate,
+    check_countertrend_mover_block,
+    check_symbol_direction_gate,
+)
 from src.volume_divergence import check_volume_divergence_gate
 from src.vwap import check_vwap_extension, compute_vwap
 from src.ai_engine import get_ai_insight
@@ -613,6 +619,18 @@ _SYM_DIRECTION_GATE_ENABLED: bool = os.getenv(
 _SYM_DIRECTION_PENALTY_BASE: float = float(
     os.getenv("SYM_DIRECTION_PENALTY_BASE", "6.0")
 )
+
+# Counter-trend reversal / structure setups that fade trend — the paths that
+# short a parabolic mover (SYNUSDT: LIQUIDITY_SWEEP_REVERSAL shorted +300%, full
+# SL).  Only an instance whose DIRECTION opposes both the pair's 1H and 4H trend
+# AND on a mover-grade move (wide EMA fan) is hard-blocked (Filter 1c); a trend-
+# ALIGNED SR_FLIP/LSR, or a gently-trending pair, is untouched.  FAILED_AUCTION_
+# RECLAIM is intentionally excluded — it is profitable in aggregate and rarely
+# fires on a parabolic move; add it only if data shows it fading movers.
+_COUNTERTREND_MOVER_BLOCKED_SETUPS: frozenset[str] = frozenset({
+    "LIQUIDITY_SWEEP_REVERSAL",
+    "SR_FLIP_RETEST",
+})
 
 # PR-7B: Path-aware modulation of soft-penalty base weights.
 # Doctrine guardrails:
@@ -5038,6 +5056,52 @@ class Scanner:
                             symbol, chan_name, _regime15,
                         )
                         return _reject("gated", None)
+
+        # ── Filter 1c: Counter-trend reversal HARD-block on a confirmed mover ──
+        # The per-symbol direction gate (Filter 10) only SOFT-penalises and EXEMPTS
+        # LSR/FAR, so a reversal fading a parabolic mover got no penalty at all
+        # (SYNUSDT: LSR shorted +300%/7d, 4h+1h stacked up → full SL).  Fading a
+        # confirmed strong mover is structural impossibility — the one case §3.2 #5
+        # reserves a hard block for.  Hard-reject a blocked-set reversal/structure
+        # entry that opposes BOTH the pair's 1H and 4H EMA trend on a mover-grade
+        # move (wide EMA fan).  Trend-aligned instances and gently-trending pairs
+        # are untouched.  Fail-open on any error.  Reversible env off-switch.
+        if (
+            chan_name == "360_SCALP"
+            and COUNTERTREND_MOVER_HARD_BLOCK_ENABLED
+            and _setup_class_name in _COUNTERTREND_MOVER_BLOCKED_SETUPS
+        ):
+            try:
+                _ct_allowed, _ct_reason = check_countertrend_mover_block(
+                    sig.direction.value,
+                    ctx.indicators.get("1h", {}),
+                    ctx.indicators.get("4h", {}),
+                    ctx.candles.get("4h", {}),
+                    setup_class=_setup_class_name,
+                    blocked_setups=_COUNTERTREND_MOVER_BLOCKED_SETUPS,
+                    min_fan_pct=COUNTERTREND_MOVER_MIN_FAN_PCT,
+                )
+                if not _ct_allowed:
+                    self._suppression_counters[
+                        f"countertrend_mover_block:{chan_name}:{_setup_class_name}"
+                    ] += 1
+                    self.suppression_tracker.record(SuppressionEvent(
+                        symbol=symbol,
+                        channel=chan_name,
+                        reason="countertrend_mover_block",
+                        regime=_regime_key,
+                        would_be_confidence=getattr(sig, "confidence", None),
+                    ))
+                    log.debug(
+                        "Counter-trend mover hard-block {} {} {} {}: {}",
+                        symbol, chan_name, _setup_class_name, sig.direction.value, _ct_reason,
+                    )
+                    return _reject("gated", None)
+            except Exception as _ct_exc:
+                log.debug(
+                    "Counter-trend mover block error for {} {} (fail open): {}",
+                    symbol, chan_name, _ct_exc,
+                )
 
         # Resolve regime penalty multiplier for all soft gates below.
         # Scalp channels in QUIET regime use a higher multiplier to ensure

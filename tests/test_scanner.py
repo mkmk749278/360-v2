@@ -64,11 +64,12 @@ def _make_signal(
     signal_id: str = "SIG-001",
     confidence: float = 10.0,
     htf_trend_aligned: bool = False,
+    direction: Direction = Direction.LONG,
 ) -> Signal:
     return Signal(
         channel=channel,
         symbol="BTCUSDT",
-        direction=Direction.LONG,
+        direction=direction,
         entry=100.0,
         stop_loss=95.0,
         tp1=105.0,
@@ -1933,6 +1934,101 @@ class TestMTFGateInScanner:
             scanner._suppression_counters[
                 "ranging_low_adx:setup_block:360_SCALP:TREND_PULLBACK_EMA"
             ] == 1
+        )
+
+    def _countertrend_ctx(self, *, ema21_1h, ema50_1h, ema21_4h, ema50_4h, close_4h):
+        """ctx for the Filter 1c counter-trend mover block: not RANGING-low-ADX
+        (so that earlier gate is skipped), with 1H/4H EMA trend set by the args."""
+        return SimpleNamespace(
+            candles={"5m": _candles(), "4h": {"close": [close_4h] * 5}},
+            indicators={
+                "5m": {"ema9_last": 101.0, "ema21_last": 100.0, "close": 100.5},
+                "1h": {"ema21_last": ema21_1h, "ema50_last": ema50_1h, "ema21_prev": ema21_1h - 1.0},
+                "4h": {"ema21_last": ema21_4h, "ema50_last": ema50_4h, "ema21_prev": ema21_4h - 1.0},
+            },
+            smc_data={"sweeps": [], "mss": None, "fvg": []},
+            smc_result=SimpleNamespace(sweeps=[], fvg=[]),
+            spread_pct=0.001,
+            regime_result=SimpleNamespace(regime=SimpleNamespace(value="TRENDING_UP")),
+            market_state=MarketState.CLEAN_RANGE,
+            pair_quality=SimpleNamespace(passed=True, reason="", label="GOOD", score=80.0),
+            regime_context=None,
+            is_ranging=False,
+            adx_val=30.0,
+        )
+
+    @pytest.mark.asyncio
+    async def test_countertrend_mover_block_rejects_lsr_short_into_strong_uptrend(self):
+        """The SYNUSDT case: a LIQUIDITY_SWEEP_REVERSAL SHORT into a confirmed
+        strong mover (1h+4h stacked up, wide EMA fan) is HARD-blocked at Filter 1c."""
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal(
+            channel="360_SCALP", direction=Direction.SHORT
+        )
+        scanner, _signal_queue = self._scanner_and_queue()
+        # Wide bullish fan: 1h ema 110/100 (10%), 4h ema 110/100 with close above.
+        ctx = self._countertrend_ctx(
+            ema21_1h=110.0, ema50_1h=100.0, ema21_4h=110.0, ema50_4h=100.0, close_4h=115.0,
+        )
+        funnel_meta = {}
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.LIQUIDITY_SWEEP_REVERSAL)),
+            patch.object(scanner, "_compute_base_confidence", return_value=70.0),
+            patch.object(scanner, "_apply_predictive_adjustments", new=AsyncMock(return_value=None)),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            sig, _ = await scanner._prepare_signal(
+                symbol="SYNUSDT",
+                volume_24h=10_000_000.0,
+                chan=channel,
+                ctx=ctx,
+                _funnel_meta=funnel_meta,
+            )
+
+        assert sig is None
+        assert funnel_meta.get("reject_stage") == "gated"
+        assert (
+            scanner._suppression_counters[
+                "countertrend_mover_block:360_SCALP:LIQUIDITY_SWEEP_REVERSAL"
+            ] == 1
+        )
+
+    @pytest.mark.asyncio
+    async def test_countertrend_mover_block_passes_narrow_fan(self):
+        """A gently-trending pair (narrow EMA fan, <3%) is NOT hard-blocked — it
+        keeps the existing soft penalty.  Confirms the gate doesn't over-fire."""
+        channel = MagicMock()
+        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
+        channel.evaluate.return_value = _make_signal(
+            channel="360_SCALP", direction=Direction.SHORT
+        )
+        scanner, _signal_queue = self._scanner_and_queue()
+        # Narrow bullish fan: 1h/4h ema 100/99 (~1%) — ordinary trend, not a mover.
+        ctx = self._countertrend_ctx(
+            ema21_1h=100.0, ema50_1h=99.0, ema21_4h=100.0, ema50_4h=99.0, close_4h=101.0,
+        )
+        funnel_meta = {}
+
+        with _common_gate_patches(scanner, [
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.LIQUIDITY_SWEEP_REVERSAL)),
+            patch.object(scanner, "_compute_base_confidence", return_value=70.0),
+            patch.object(scanner, "_apply_predictive_adjustments", new=AsyncMock(return_value=None)),
+            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
+        ]):
+            sig, _ = await scanner._prepare_signal(
+                symbol="SYNUSDT",
+                volume_24h=10_000_000.0,
+                chan=channel,
+                ctx=ctx,
+                _funnel_meta=funnel_meta,
+            )
+
+        assert (
+            scanner._suppression_counters[
+                "countertrend_mover_block:360_SCALP:LIQUIDITY_SWEEP_REVERSAL"
+            ] == 0
         )
 
     @pytest.mark.asyncio
