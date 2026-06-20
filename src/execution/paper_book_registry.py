@@ -85,6 +85,15 @@ class PaperBookRegistry:
     def _pnl_path_for(self, user_id: int) -> Path:
         return self._books_dir / f"paper_pnl_user_{int(user_id)}.json"
 
+    def _trades_db_path_for(self, user_id: int) -> Path:
+        return self._books_dir / f"paper_trades_user_{int(user_id)}.sqlite"
+
+    @staticmethod
+    def pnl_history_mode_for(user_id: int) -> str:
+        """The daily-bucket key for a user's paper history (``paper:<uid>``).
+        Engine-wide paper = aggregate of every ``paper:*`` bucket."""
+        return f"paper:{int(user_id)}"
+
     def get(self, user_id: int) -> PaperOrderManager:
         uid = int(user_id)
         book = self._books.get(uid)
@@ -95,6 +104,8 @@ class PaperBookRegistry:
                 book = PaperOrderManager(
                     starting_equity_usd=self._starting_equity,
                     pnl_path=self._pnl_path_for(uid),
+                    trades_db_path=self._trades_db_path_for(uid),
+                    pnl_history_mode=self.pnl_history_mode_for(uid),
                 )
             self._books[uid] = book
         return book

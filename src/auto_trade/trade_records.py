@@ -32,9 +32,17 @@ Design
   and ``pnl_history.json`` write paths are NOT touched.  This module is
   the new structured ledger that runs alongside them.
 
+Per-user ledgers (2026-06-20)
+-----------------------------
+Each public helper takes an optional ``db_path`` so a per-user paper book
+(``PaperBookRegistry``) writes to its own isolated SQLite file
+(``data/paper_books/paper_trades_user_<id>.sqlite``).  ``db_path=None`` keeps
+the legacy shared ``paper_trades.sqlite`` path.  The engine-wide "one source"
+view is the SUM across per-user books via ``list_trades_all_users`` /
+``count_trades_all_users``.
+
 Out of scope
 ------------
-* Per-user trade ledgers (Phase 2 — currently single-user owner)
 * Live-mode trade records (reconcile-via-exchange is a separate concern)
 * Backfill from existing ``pnl_history.json`` (those entries lack the
   per-trade fields by design)
@@ -113,15 +121,20 @@ _conn_lock = threading.RLock()
 _conn_cache: Dict[str, sqlite3.Connection] = {}
 
 
-def _get_conn() -> sqlite3.Connection:
-    """Return the cached connection for the current resolved path.
+def _get_conn(db_path: Optional[Any] = None) -> sqlite3.Connection:
+    """Return the cached connection for ``db_path`` (or the resolved default).
 
     The cache key is the absolute path string — when the env var changes
     between tests, the per-test ``tmp_path`` produces a different key
     and we open a fresh connection.  Same threading discipline as
     ``UserStore``: ``check_same_thread=False`` + an RLock.
+
+    Per-user paper books (2026-06-20) pass their own ``db_path`` so each
+    user's paper trade ledger is an isolated SQLite file; the per-path
+    connection cache already supports any number of them.
     """
-    path = str(_resolve_db_path().resolve())
+    resolved = Path(db_path) if db_path is not None else _resolve_db_path()
+    path = str(resolved.resolve())
     with _conn_lock:
         conn = _conn_cache.get(path)
         if conn is not None:
@@ -207,6 +220,7 @@ def open_trade(
     qty: float,
     leverage: float,
     position_size_pct: float,
+    db_path: Optional[Any] = None,
 ) -> Optional[int]:
     """Insert a new row at signal open and return its primary key.
 
@@ -232,7 +246,7 @@ def open_trade(
     notional = entry * qty
     margin = notional / leverage if leverage > 0 else notional
     created_at = _now_iso()
-    conn = _get_conn()
+    conn = _get_conn(db_path)
     with _conn_lock:
         existing = conn.execute(
             "SELECT id FROM paper_trades WHERE signal_id = ?", (signal_id,),
@@ -271,6 +285,7 @@ def record_partial_fill(
     fill_price: float,
     pnl_usd: float,
     fee_usd: float,
+    db_path: Optional[Any] = None,
 ) -> None:
     """Append a partial-fill event to the row's ``partial_fills`` JSON array.
 
@@ -293,7 +308,7 @@ def record_partial_fill(
         "fee_usd": float(fee_usd),
         "ts": _now_iso(),
     }
-    conn = _get_conn()
+    conn = _get_conn(db_path)
     with _conn_lock:
         row = conn.execute(
             "SELECT partial_fills FROM paper_trades WHERE signal_id = ?",
@@ -327,6 +342,7 @@ def close_trade(
     gross_pnl_usd: float,
     fees_usd: float,
     net_pnl_usd: float,
+    db_path: Optional[Any] = None,
 ) -> Optional[Dict[str, Any]]:
     """Stamp the row as closed and compute ROI% on margin.
 
@@ -346,7 +362,7 @@ def close_trade(
     if not signal_id:
         return None
     closed_at = _now_iso()
-    conn = _get_conn()
+    conn = _get_conn(db_path)
     with _conn_lock:
         row = conn.execute(
             "SELECT * FROM paper_trades WHERE signal_id = ?", (signal_id,),
@@ -391,11 +407,13 @@ def close_trade(
         return _row_to_dict(updated) if updated is not None else None
 
 
-def get_trade(signal_id: str) -> Optional[Dict[str, Any]]:
+def get_trade(
+    signal_id: str, *, db_path: Optional[Any] = None
+) -> Optional[Dict[str, Any]]:
     """Fetch one row by signal_id.  Returns None when missing."""
     if not signal_id:
         return None
-    conn = _get_conn()
+    conn = _get_conn(db_path)
     with _conn_lock:
         row = conn.execute(
             "SELECT * FROM paper_trades WHERE signal_id = ?", (signal_id,),
@@ -410,6 +428,7 @@ def list_trades(
     since_ts: Optional[str] = None,
     symbol: Optional[str] = None,
     include_open: bool = False,
+    db_path: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Return paginated rows, newest closed-first.
 
@@ -447,7 +466,7 @@ def list_trades(
         " ORDER BY (closed_at IS NULL), closed_at DESC, created_at DESC"
         " LIMIT ? OFFSET ?"
     )
-    conn = _get_conn()
+    conn = _get_conn(db_path)
     with _conn_lock:
         rows = conn.execute(sql, params).fetchall()
         return [_row_to_dict(r) for r in rows]
@@ -458,6 +477,7 @@ def count_trades(
     since_ts: Optional[str] = None,
     symbol: Optional[str] = None,
     include_open: bool = False,
+    db_path: Optional[Any] = None,
 ) -> int:
     """Return total matching rows — for ``TradeListResponse.total``.
 
@@ -474,7 +494,7 @@ def count_trades(
         where.append("symbol = ?")
         params.append(symbol)
     where_sql = (" WHERE " + " AND ".join(where)) if where else ""
-    conn = _get_conn()
+    conn = _get_conn(db_path)
     with _conn_lock:
         cur = conn.execute(
             f"SELECT COUNT(*) AS n FROM paper_trades{where_sql}", params,
@@ -483,11 +503,102 @@ def count_trades(
 
 
 # ---------------------------------------------------------------------------
+# Per-user aggregate readers (2026-06-20) — "one source" for the engine-wide
+# paper view is the SUM across every per-user book.  The app reads a single
+# user's db via the ``db_path`` params above; the truth report + ops
+# dashboard read the aggregate here.
+# ---------------------------------------------------------------------------
+
+
+_BOOKS_DIR_DEFAULT: str = "data/paper_books"
+
+
+def _resolve_books_dir(books_dir: Optional[Any] = None) -> Path:
+    if books_dir is not None:
+        return Path(books_dir)
+    return Path(os.getenv("PAPER_BOOKS_DIR", _BOOKS_DIR_DEFAULT))
+
+
+def iter_user_db_paths(books_dir: Optional[Any] = None) -> List[Path]:
+    """Discover every per-user paper-trade SQLite file in the books dir."""
+    d = _resolve_books_dir(books_dir)
+    if not d.exists():
+        return []
+    return sorted(d.glob("paper_trades_user_*.sqlite"))
+
+
+def _sort_trades_newest_first(rows: List[Dict[str, Any]]) -> None:
+    """In-place sort matching the SQL ORDER BY: open trades (closed_at NULL)
+    last, then closed_at DESC, then created_at DESC.  Composed stable sorts,
+    least-significant key first."""
+    rows.sort(key=lambda r: (r.get("created_at") or ""), reverse=True)
+    rows.sort(key=lambda r: (r.get("closed_at") or ""), reverse=True)
+    rows.sort(key=lambda r: r.get("closed_at") is None)  # NULLs last (stable)
+
+
+def list_trades_all_users(
+    *,
+    limit: int = 50,
+    offset: int = 0,
+    since_ts: Optional[str] = None,
+    symbol: Optional[str] = None,
+    include_open: bool = False,
+    books_dir: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """Merge ``list_trades`` across every per-user book, newest-first.
+
+    Each returned row carries a ``user_id`` parsed from its source db file so
+    diagnostic consumers can attribute the trade.  Pagination is applied to
+    the merged stream.
+    """
+    limit = max(1, min(int(limit), 500))
+    offset = max(0, int(offset))
+    merged: List[Dict[str, Any]] = []
+    for p in iter_user_db_paths(books_dir):
+        uid = _user_id_from_db_path(p)
+        rows = list_trades(
+            limit=500, offset=0, since_ts=since_ts, symbol=symbol,
+            include_open=include_open, db_path=p,
+        )
+        for r in rows:
+            r["user_id"] = uid
+        merged.extend(rows)
+    _sort_trades_newest_first(merged)
+    return merged[offset:offset + limit]
+
+
+def count_trades_all_users(
+    *,
+    since_ts: Optional[str] = None,
+    symbol: Optional[str] = None,
+    include_open: bool = False,
+    books_dir: Optional[Any] = None,
+) -> int:
+    """Total matching rows summed across every per-user book."""
+    return sum(
+        count_trades(
+            since_ts=since_ts, symbol=symbol, include_open=include_open,
+            db_path=p,
+        )
+        for p in iter_user_db_paths(books_dir)
+    )
+
+
+def _user_id_from_db_path(path: Path) -> Optional[int]:
+    """``paper_trades_user_42.sqlite`` → 42 (None if unparseable)."""
+    stem = path.stem  # paper_trades_user_42
+    try:
+        return int(stem.rsplit("_", 1)[1])
+    except (IndexError, ValueError):
+        return None
+
+
+# ---------------------------------------------------------------------------
 # Reset / archive support (for the /api/auto-mode/paper/reset endpoint)
 # ---------------------------------------------------------------------------
 
 
-def archive_all() -> int:
+def archive_all(db_path: Optional[Any] = None) -> int:
     """Rename the live ``paper_trades`` table to a timestamped archive and
     re-create an empty live table.
 
@@ -504,7 +615,7 @@ def archive_all() -> int:
     """
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     archive_name = f"paper_trades_archive_{stamp}"
-    conn = _get_conn()
+    conn = _get_conn(db_path)
     with _conn_lock:
         count = int(
             conn.execute("SELECT COUNT(*) AS n FROM paper_trades")
