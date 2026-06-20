@@ -78,6 +78,8 @@ from .schemas import (
     AutoModeChangeResponse,
     AutoModeResumeMineResponse,
     AutoModeStatus,
+    AutoTradeGlobalSetRequest,
+    AutoTradeGlobalState,
     AutoTradeSettings,
     BillingGrantRequest,
     BillingGrantResponse,
@@ -1499,6 +1501,68 @@ def build_app(
                 detail=f"kill switch flip failed: {exc}",
             )
         return _kill_switch_state()
+
+    # ---- Global auto-trade enable flag (OWNER_BRIEF §3.9 / B18) ----
+    #
+    # The `/auto_trade_global` Telegram command flipped
+    # ``auto_trade_globally_enabled`` on the kill-switch Firestore doc —
+    # distinct from the kill-switch ``engaged`` flag: disabling halts NEW
+    # order placement engine-wide (existing positions untouched). Same
+    # in-process Firestore-backed client as the kill switch, so no facade
+    # bridge. Owner-gated flip; GET reports initialised=false when unbooted.
+
+    def _auto_trade_global_state() -> AutoTradeGlobalState:
+        from src.execution import kill_switch as _ks
+        if not _ks.is_initialised():
+            return AutoTradeGlobalState(enabled=False, initialised=False)
+        try:
+            return AutoTradeGlobalState(
+                enabled=bool(_ks.get_client().is_globally_enabled()),
+                initialised=True,
+            )
+        except Exception:
+            log.exception("/api/auto-trade-global state read failed")
+            return AutoTradeGlobalState(enabled=False, initialised=False)
+
+    @app.get(
+        "/api/auto-trade-global",
+        response_model=AutoTradeGlobalState,
+        tags=["auto-mode"],
+    )
+    async def auto_trade_global_get(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> AutoTradeGlobalState:
+        return _auto_trade_global_state()
+
+    @app.post(
+        "/api/auto-trade-global",
+        response_model=AutoTradeGlobalState,
+        tags=["auto-mode"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def auto_trade_global_set(
+        req: AutoTradeGlobalSetRequest,
+    ) -> AutoTradeGlobalState:
+        from src.execution import kill_switch as _ks
+        if not _ks.is_initialised():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="kill switch not initialised (no Firestore/GCP creds)",
+            )
+        client = _ks.get_client()
+        try:
+            if req.enabled:
+                client.enable_global_auto_trade()
+            else:
+                client.disable_global_auto_trade()
+        except Exception as exc:
+            log.exception(
+                "/api/auto-trade-global flip failed enabled=%s", req.enabled)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"global auto-trade flip failed: {exc}",
+            )
+        return _auto_trade_global_state()
 
     # ---- Paper-trade-visibility endpoints (2026-05-16) ----
     # Registered via register() in paper_trade_routes.py so the
