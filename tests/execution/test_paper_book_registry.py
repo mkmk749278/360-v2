@@ -244,3 +244,31 @@ async def test_per_user_failure_isolation(fanout, registry, monkeypatch):
 async def test_close_full_unknown_signal_is_noop(fanout):
     assert await fanout.close_full(_signal(sid="nope"), reason="sl_hit") is None
     assert await fanout.close_partial(_signal(sid="nope"), 0.5) is None
+
+
+def test_registry_threads_sizing_and_per_user_risk_manager():
+    from src.execution.paper_book_registry import PaperBookRegistry
+
+    made = {}
+
+    def rm_factory(uid):
+        rm = object()
+        made[uid] = rm
+        return rm
+
+    reg = PaperBookRegistry(
+        books_dir="/tmp/pbr_test_books",
+        starting_equity_usd=2500.0,
+        position_size_pct=3.5,
+        max_position_usd=250.0,
+        risk_manager_factory=rm_factory,
+    )
+    b1 = reg.get(1)
+    b2 = reg.get(2)
+    assert b1._position_size_pct == 3.5
+    assert b1._max_position_usd == 250.0
+    # Each user got its OWN risk manager.
+    assert b1._risk_manager is made[1]
+    assert b2._risk_manager is made[2]
+    assert made[1] is not made[2]
+    assert b1._pnl_history_mode == "paper:1"

@@ -33,6 +33,37 @@ from .schemas import (
 log = get_logger("api.snapshot")
 
 
+def _per_user_book(engine: Any, user_id: Optional[int]) -> Optional[Any]:
+    """When ``PAPER_PER_USER_BOOKS`` is on and the engine runs a
+    :class:`PaperBookFanout`, return the caller's per-user book accessor
+    surface (the fanout itself, which exposes ``positions_for_user`` and
+    ``pnl_history_mode_for``).  Otherwise None — callers then fall back to
+    the shared-ledger + subscription-window read path.
+
+    Gated on the config flag AND duck-typed on the fanout so a stale flag
+    against a single shared book can never mis-route reads."""
+    if user_id is None:
+        return None
+    try:
+        from config import PAPER_PER_USER_BOOKS
+    except Exception:
+        return None
+    if not PAPER_PER_USER_BOOKS:
+        return None
+    broker = getattr(engine, "_order_manager", None)
+    if broker is not None and hasattr(broker, "positions_for_user"):
+        return broker
+    return None
+
+
+def _residual_qty(pos: Any) -> float:
+    return max(
+        float(getattr(pos, "quantity", 0.0) or 0.0)
+        - float(getattr(pos, "closed_quantity", 0.0) or 0.0),
+        0.0,
+    )
+
+
 # Mapping: setup_class on Signal  →  display name shown in the app.
 # Kept in sync with ``lib/features/agents/agent_data.dart``.
 _AGENT_DISPLAY_NAMES: Dict[str, str] = {
@@ -183,7 +214,22 @@ async def build_pulse(
     # off-mode keep the engine-wide reads (no per-user paper book exists
     # for live, and off-mode has nothing to show anyway).
     active_mode = getattr(engine, "_current_auto_mode", "off")
-    if (
+    _pu_book = _per_user_book(engine, user_id) if active_mode == "paper" else None
+    if _pu_book is not None:
+        # Per-user books ON: open count + today's PnL come straight from the
+        # caller's own book + ``paper:<uid>`` bucket — no window filtering.
+        from src.auto_trade import pnl_history
+        mode_key = _pu_book.pnl_history_mode_for(int(user_id))
+        today_pnl_usd = await asyncio.to_thread(pnl_history.get_daily, mode_key)
+        today_pnl_pct = (
+            100.0 * today_pnl_usd / starting_equity
+            if starting_equity > 0 else 0.0
+        )
+        user_positions = _pu_book.positions_for_user(int(user_id))
+        open_positions = sum(
+            1 for _p in user_positions.values() if _residual_qty(_p) > 1e-9
+        )
+    elif (
         active_mode == "paper"
         and user_id is not None
         and user_overrides is not None
@@ -572,7 +618,8 @@ async def build_positions(
     # live execution lives on Phase 3's per-user FSM workers).
     active_mode = getattr(engine, "_current_auto_mode", "off")
     user_windows: list = []
-    if (
+    _pu_book = _per_user_book(engine, user_id) if active_mode == "paper" else None
+    if _pu_book is None and (
         active_mode == "paper"
         and user_id is not None
         and user_overrides is not None
@@ -588,9 +635,14 @@ async def build_positions(
     # ``_positions`` dict as the source of truth for "is there an
     # active position for this signal_id?" — even when ``sig.qty``
     # is zero (because nothing ever sets it on the Signal class).
+    #
+    # Per-user books ON: the caller's own book IS the visibility boundary —
+    # only signals it holds render, so no subscription-window filter is used.
     broker = getattr(engine, "_order_manager", None)
     broker_positions: Optional[dict] = None
-    if broker is not None:
+    if _pu_book is not None:
+        broker_positions = _pu_book.positions_for_user(int(user_id))
+    elif broker is not None:
         _bp = getattr(broker, "_positions", None)
         if isinstance(_bp, dict):
             broker_positions = _bp
@@ -982,8 +1034,20 @@ async def build_auto_mode(
     # no aggregates until they switch to paper or live).
     try:
         from src.auto_trade import pnl_history
+        try:
+            from config import PAPER_PER_USER_BOOKS as _PPUB
+        except Exception:
+            _PPUB = False
         active_mode = info.get("mode", "off")
-        if active_mode in ("paper", "live"):
+        if active_mode == "paper" and _PPUB:
+            # Engine-wide paper = SUM across every per-user ``paper:<uid>``.
+            info["weekly_pnl_usd"] = await asyncio.to_thread(
+                pnl_history.get_weekly_aggregate, "paper"
+            )
+            info["monthly_pnl_usd"] = await asyncio.to_thread(
+                pnl_history.get_monthly_aggregate, "paper"
+            )
+        elif active_mode in ("paper", "live"):
             info["weekly_pnl_usd"] = await asyncio.to_thread(
                 pnl_history.get_weekly, active_mode
             )
@@ -1046,6 +1110,43 @@ async def build_auto_mode(
     # + the signing service); this filter is paper-only.
     try:
         active_mode = info.get("mode", "off")
+        _pu_book = (
+            _per_user_book(engine, user_id) if active_mode == "paper" else None
+        )
+        if _pu_book is not None:
+            # Per-user books ON: the Trade-tab header reads the caller's own
+            # book + ``paper:<uid>`` bucket directly — no window filtering.
+            from src.auto_trade import pnl_history
+            mode_key = _pu_book.pnl_history_mode_for(int(user_id))
+            book = _pu_book.book_for_user(int(user_id))
+            if starting_equity_usd is not None:
+                _baseline = float(starting_equity_usd)
+            elif book is not None and hasattr(book, "_starting_equity"):
+                _baseline = float(getattr(book, "_starting_equity", 1000.0))
+            else:
+                _baseline = 1000.0
+            daily = await asyncio.to_thread(pnl_history.get_daily, mode_key)
+            weekly = await asyncio.to_thread(pnl_history.get_weekly, mode_key)
+            monthly = await asyncio.to_thread(pnl_history.get_monthly, mode_key)
+            user_positions = _pu_book.positions_for_user(int(user_id))
+            user_open = sum(
+                1 for _p in user_positions.values() if _residual_qty(_p) > 1e-9
+            )
+            info["daily_pnl_usd"] = daily
+            info["weekly_pnl_usd"] = weekly
+            info["monthly_pnl_usd"] = monthly
+            if book is not None and hasattr(book, "current_equity_usd"):
+                info["current_equity_usd"] = float(book.current_equity_usd)
+                info["simulated_pnl_usd"] = round(
+                    float(book.current_equity_usd) - _baseline, 4
+                )
+            else:
+                info["current_equity_usd"] = round(_baseline + daily, 4)
+            info["open_positions"] = user_open
+            info["daily_loss_pct"] = (
+                round(100.0 * daily / _baseline, 4) if _baseline > 0 else 0.0
+            )
+            return AutoModeStatus(**info)
         if (
             active_mode == "paper"
             and user_id is not None
@@ -1181,6 +1282,23 @@ async def build_pnl_history(
         mode = getattr(engine, "_current_auto_mode", "off")
     days = max(1, min(int(days), 365))
     if mode == "paper":
+        _pu_book = _per_user_book(engine, user_id)
+        if _pu_book is not None:
+            # Per-user books ON: read the caller's own ``paper:<uid>`` series.
+            from src.auto_trade import pnl_history
+            mode_key = _pu_book.pnl_history_mode_for(int(user_id))
+            series = await asyncio.to_thread(
+                pnl_history.get_history, mode_key, days=days
+            )
+            weekly = await asyncio.to_thread(pnl_history.get_weekly, mode_key)
+            monthly = await asyncio.to_thread(pnl_history.get_monthly, mode_key)
+            return {
+                "mode": mode,
+                "days": days,
+                "items": [{"date": d, "pnl_usd": v} for d, v in series],
+                "weekly_pnl_usd": weekly,
+                "monthly_pnl_usd": monthly,
+            }
         windows: list = []
         if user_id is not None and user_overrides is not None:
             try:

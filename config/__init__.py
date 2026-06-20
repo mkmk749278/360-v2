@@ -1936,6 +1936,21 @@ AUTO_EXECUTION_MODE: str = _safe_choice(
 # Backwards-compat alias — true for paper or live, false for off.
 AUTO_EXECUTION_ENABLED: bool = AUTO_EXECUTION_MODE != "off"
 
+# Per-user paper books (2026-06-20).  Operational kill switch selecting
+# between two fully-wired paper implementations — NOT a dark flag:
+#   off (default) → single shared PaperOrderManager + shared pnl_history
+#                   "paper" bucket + subscription-window-filtered reads
+#                   (the pre-2026-06-20 behaviour, untouched).
+#   on            → PaperBookFanout: one PaperOrderManager per user_id, each
+#                   writing its own ``paper:<uid>`` pnl bucket + per-user
+#                   trades DB; reads repoint to those per-user books.  Both
+#                   write and read sides flip together — no half-wired state.
+# Default OFF until validated on the VPS with live engine data; flip ON there,
+# confirm per-user snapshots populate, then promote ON to the default.
+PAPER_PER_USER_BOOKS: bool = _safe_bool("PAPER_PER_USER_BOOKS", "false")
+# Directory for per-user paper book artifacts (pnl + trades DB per user).
+PAPER_BOOKS_DIR: str = os.getenv("PAPER_BOOKS_DIR", "data/paper_books")
+
 # ---------------------------------------------------------------------------
 # Exchange / CCXT execution config (feature 3)
 # ---------------------------------------------------------------------------

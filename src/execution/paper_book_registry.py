@@ -31,6 +31,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any, Dict, Optional, Set
 
+from config import MAX_POSITION_USD, POSITION_SIZE_PCT
 from src.paper_order_manager import PaperOrderManager
 from src.utils import get_logger
 
@@ -74,10 +75,21 @@ class PaperBookRegistry:
         *,
         books_dir: Path | str = Path("data") / "paper_books",
         starting_equity_usd: float = 1000.0,
+        position_size_pct: float = POSITION_SIZE_PCT,
+        max_position_usd: float = MAX_POSITION_USD,
+        risk_manager_factory: Optional[Any] = None,
         factory: Optional[Any] = None,
     ) -> None:
         self._books_dir = Path(books_dir)
         self._starting_equity = starting_equity_usd
+        self._position_size_pct = position_size_pct
+        self._max_position_usd = max_position_usd
+        # ``risk_manager_factory(user_id) -> RiskManager`` gives each user
+        # book its OWN risk manager so one user's daily-loss breaker / open
+        # concurrency never trips another's.  None → books run without a risk
+        # manager (paper sandbox, no per-user limits) — same as the shared
+        # book did before its risk_manager was wired.
+        self._risk_manager_factory = risk_manager_factory
         # Injectable for tests: factory(user_id, pnl_path) -> manager-like.
         self._factory = factory
         self._books: Dict[int, PaperOrderManager] = {}
@@ -101,8 +113,16 @@ class PaperBookRegistry:
             if self._factory is not None:
                 book = self._factory(uid, self._pnl_path_for(uid))
             else:
+                rm = (
+                    self._risk_manager_factory(uid)
+                    if self._risk_manager_factory is not None
+                    else None
+                )
                 book = PaperOrderManager(
+                    position_size_pct=self._position_size_pct,
+                    max_position_usd=self._max_position_usd,
                     starting_equity_usd=self._starting_equity,
+                    risk_manager=rm,
                     pnl_path=self._pnl_path_for(uid),
                     trades_db_path=self._trades_db_path_for(uid),
                     pnl_history_mode=self.pnl_history_mode_for(uid),
@@ -379,6 +399,15 @@ class PaperBookFanout:
 
     def book_for_user(self, user_id: int) -> Optional[PaperOrderManager]:
         return self._registry.get_if_exists(user_id)
+
+    def pnl_history_mode_for(self, user_id: int) -> str:
+        """``paper:<uid>`` — the pnl_history bucket key for a user's book."""
+        return self._registry.pnl_history_mode_for(user_id)
+
+    def trades_db_path_for(self, user_id: int):
+        """Filesystem path to a user's own paper-trades SQLite DB — the
+        read API lists ``/api/trades`` straight from here when books are on."""
+        return self._registry._trades_db_path_for(user_id)
 
     def holders_for_signal(self, signal_id: str) -> Set[int]:
         return set(self._holders.get(str(signal_id), {}).keys())
