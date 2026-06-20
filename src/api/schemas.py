@@ -254,6 +254,35 @@ class AutoModeResumeMineResponse(BaseModel):
     resumed: bool
 
 
+class KillSwitchState(BaseModel):
+    """Global kill-switch state (OWNER_BRIEF B18 emergency halt).
+
+    ``engaged`` True = ALL auto-trade is halted engine-wide until
+    manually disengaged.  ``initialised`` False means the kill-switch
+    client never booted (no Firestore / GCP creds) — the control plane
+    renders an "unavailable" state rather than a misleading "off".
+    """
+
+    engaged: bool
+    reason: Optional[str] = None
+    initialised: bool = True
+
+
+class KillSwitchSetRequest(BaseModel):
+    """Owner request to flip the global kill switch.
+
+    ``engaged`` True engages (halts everything); False disengages
+    (resumes).  ``reason`` is recorded on engage for operator
+    visibility (shown in the ops control plane + status reads)."""
+
+    engaged: bool
+    reason: Optional[str] = Field(
+        default=None,
+        max_length=280,
+        description="Operator note recorded on engage (why we halted).",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
