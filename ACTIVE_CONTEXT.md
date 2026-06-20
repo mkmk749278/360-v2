@@ -41,12 +41,40 @@ Scope note: path/regime + per-symbol management are the **LIVE** filters today
 (live dispatcher is per-user). Paper selectors + per-symbol management on paper
 land with Increment 2.
 
-### NEXT (designed in `docs/PER_USER_TRADE_ELIGIBILITY_2026_06_20.md`, owner-sign-off)
-1. **Per-user paper engine** — turn the single shared `PaperOrderManager` into a
-   per-user simulation + per-user paper dispatch path, then add `paper_*`
-   preference columns + Paper selectors + per-symbol management on paper.
-   (Money-path-adjacent; bring registry-vs-namespaced + per-mode schema decision
-   to owner first.) **This is the remaining piece of "individual paper + live".**
+### Per-user paper engine — Phase 3 (PR #636, owner-sign-off, NOT merged)
+Owner decisions this session: **isolated paper registry** (not in-FSM); **namespace
+per user, one source** (no duplication; engine-wide paper = aggregate of per-user
+books); **per-user only** (paper fires only for paper/both opt-in — operator opts in
+like any user; no always-on operator book).
+
+**Built + unit-tested (inert — every change additive/defaulted; existing suites pass
+unchanged; 46 tests green):**
+- `paper_symbol/path/regime_preference` columns + migration + coerce +
+  `resolve_paper_preferences_uid` (independent of the live triple).
+- `PaperOrderManager` per-user `pnl_path` / `trades_db_path` / `pnl_history_mode`
+  (default = legacy shared paths → inert).
+- `trade_records`: every helper takes optional `db_path` (per-user SQLite files);
+  `iter_user_db_paths` + `list_trades_all_users` / `count_trades_all_users` aggregate.
+- `src/execution/paper_book_registry.py` — `PaperBookRegistry` (one book/user) +
+  `PaperBookFanout` (drop-in for the single `PaperOrderManager`; fans lifecycle out
+  to eligible users; entry-only skips pre-TP/TP, survives invalidation, closes on SL).
+
+**REMAINING (gating — must ship together; needs a running-engine + app build to
+validate, so NOT shipped blind):**
+1. Swap `PaperBookFanout` into `main.py` paper mode (+ `set_auto_execution_mode`).
+2. **Read-layer repoint (inseparable from #1 — without it the dashboard reads the now-
+   empty shared stores and goes blank):** `snapshot.py` paper paths (/api/trades,
+   /api/positions, /api/pulse, /api/auto-mode), `paper_user_view.py` (Phase-2.5 window
+   filter → read the user's own book), `paper_trade_routes` reset/archive, truth report
+   → `list_trades_all_users` + `pnl_history` `paper:*` aggregate. Fanout needs a merged
+   open-positions view for the snapshot.
+3. App **paper** eligibility selectors + per-symbol management on paper (lumin-app).
+4. 360ce-ops engine-wide paper reads → aggregate.
+
+Why staged here: the `main.py` swap + read repoint break the live paper dashboard if
+shipped incomplete, and the read rewrite (deep in `snapshot.py`, cross-repo) can't be
+validated in the web container. "Ship live" doctrine relaxes dark-flags, not
+correctness/review — so this lands as a focused, validated unit next, not blind.
 
 ---
 
