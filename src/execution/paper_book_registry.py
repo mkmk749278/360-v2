@@ -382,3 +382,25 @@ class PaperBookFanout:
 
     def holders_for_signal(self, signal_id: str) -> Set[int]:
         return set(self._holders.get(str(signal_id), {}).keys())
+
+    def positions_for_user(self, user_id: int) -> Dict[str, Any]:
+        """The ``signal_id -> _PaperPosition`` dict for one user's book (or
+        empty).  The snapshot open-positions builder uses this as the
+        per-user 'is this signal open for me?' filter — the per-user book IS
+        the visibility boundary (replacing subscription-window filtering)."""
+        book = self._registry.get_if_exists(user_id)
+        pos = getattr(book, "_positions", None) if book is not None else None
+        return pos if isinstance(pos, dict) else {}
+
+    @property
+    def _positions(self) -> Dict[str, Any]:
+        """Engine-wide merged open-positions view across every per-user book —
+        keeps legacy/engine-wide callers (phantom-row filter) working.  On a
+        signal_id collision across users, last book wins; that's acceptable
+        for the boolean 'is this signal open anywhere?' use."""
+        merged: Dict[str, Any] = {}
+        for book in self._registry.all_books().values():
+            bp = getattr(book, "_positions", None)
+            if isinstance(bp, dict):
+                merged.update(bp)
+        return merged

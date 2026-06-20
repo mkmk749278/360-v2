@@ -214,6 +214,85 @@ def get_history(
     return series
 
 
+# ---------------------------------------------------------------------------
+# Per-user aggregate readers (2026-06-20) — engine-wide paper view is the SUM
+# across every per-user bucket (``paper:<uid>``).  The app reads a single
+# user's bucket via the single-mode readers above with mode=``paper:<uid>``;
+# the truth report + ops + engine snapshot read the aggregate here.
+# ---------------------------------------------------------------------------
+
+
+def _modes_matching(prefix: str) -> "List[str]":
+    state = _load_history()
+    return [m for m in state if m == prefix or m.startswith(prefix + ":")]
+
+
+def _aggregate_buckets(prefix: str) -> Dict[str, float]:
+    """Merge every ``<prefix>`` / ``<prefix>:<uid>`` mode into one date→PnL
+    bucket dict (engine-wide view of a per-user-namespaced mode)."""
+    state = _load_history()
+    merged: Dict[str, float] = {}
+    for mode, buckets in state.items():
+        if mode == prefix or mode.startswith(prefix + ":"):
+            for d, v in buckets.items():
+                merged[d] = round(merged.get(d, 0.0) + float(v), 4)
+    return merged
+
+
+def get_daily_aggregate(prefix: str, *, on_date: Optional[date] = None) -> float:
+    bucket_date = (on_date or datetime.now(timezone.utc).date()).strftime("%Y-%m-%d")
+    return float(_aggregate_buckets(prefix).get(bucket_date, 0.0))
+
+
+def get_rolling_window_aggregate(prefix: str, *, days: int) -> float:
+    if days <= 0:
+        return 0.0
+    merged = _aggregate_buckets(prefix)
+    today = datetime.now(timezone.utc).date()
+    total = 0.0
+    for offset in range(days):
+        d = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+        total += float(merged.get(d, 0.0))
+    return round(total, 4)
+
+
+def get_weekly_aggregate(prefix: str) -> float:
+    return get_rolling_window_aggregate(prefix, days=7)
+
+
+def get_monthly_aggregate(prefix: str) -> float:
+    return get_rolling_window_aggregate(prefix, days=30)
+
+
+def get_history_aggregate(
+    prefix: str, *, days: int = 30
+) -> List[Tuple[str, float]]:
+    if days <= 0:
+        return []
+    merged = _aggregate_buckets(prefix)
+    today = datetime.now(timezone.utc).date()
+    series: List[Tuple[str, float]] = []
+    for offset in range(days - 1, -1, -1):
+        key = (today - timedelta(days=offset)).strftime("%Y-%m-%d")
+        series.append((key, float(merged.get(key, 0.0))))
+    return series
+
+
+def reset_aggregate(prefix: str) -> int:
+    """Wipe every per-user bucket for ``prefix`` (``paper`` + ``paper:*``)."""
+    state = _load_history()
+    cleared = 0
+    for mode in [m for m in state if m == prefix or m.startswith(prefix + ":")]:
+        cleared += len(state.get(mode) or {})
+        state[mode] = {}
+    _persist_history(state)
+    log.info(
+        "pnl_history.reset_aggregate: cleared {} buckets across prefix={}",
+        cleared, prefix,
+    )
+    return cleared
+
+
 def reset_mode(mode: str) -> int:
     """Wipe every daily bucket for ``mode`` and persist atomically.
 
