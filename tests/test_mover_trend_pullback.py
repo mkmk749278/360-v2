@@ -199,6 +199,135 @@ class TestMoverTrendPullback:
         assert sig is not None, "compressed-fast-MA pullback must fire under the fix"
         assert sig.direction == Direction.LONG
 
+    # ── Multi-trigger continuation entries (Session 31) ──────────────────────
+
+    def test_fast_pullback_stamps_trigger(self, monkeypatch):
+        """The original shallow-pullback shape stamps entry_trigger=fast_pullback."""
+        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
+        candles, indicators, smc_data = _inputs(up=True)
+        sig = ScalpChannel()._evaluate_mover_trend_pullback(
+            "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is not None
+        assert sig.entry_trigger == "fast_pullback"
+
+    def _deep_candles(self):
+        """Strong ramp, then a sharp 1-bar drop to ~the mid MA, then a reclaim bar
+        that closes ABOVE the mid MA but still BELOW the (lagging-high) fast MA —
+        the deep-dip shape the shallow trigger misses (close < fast MA)."""
+        n = 115
+        closes = [100.0 + 0.4 * i for i in range(n - 2)]
+        peak = closes[-1]
+        closes.append(peak - 5.0)   # sharp drop toward the mid MA
+        closes.append(peak - 2.4)   # reclaim: above mid, below fast
+        highs = [c + 0.1 for c in closes]
+        lows = [c - 0.1 for c in closes]
+        candles = {"15m": {"open": list(closes), "high": highs, "low": lows,
+                           "close": closes, "volume": [1000.0] * n}}
+        return candles, {"15m": {"atr_last": 0.3}}, {"pair_profile": None, "regime_context": None}
+
+    def test_deep_pullback_fires_and_stamps(self, monkeypatch):
+        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
+        candles, indicators, smc_data = self._deep_candles()
+        closes = candles["15m"]["close"]
+        ma_fast = sum(closes[-7:]) / 7
+        ma_mid = sum(closes[-25:]) / 25
+        assert closes[-1] < ma_fast, "reclaim must stay below the fast MA (else it's a fast_pullback)"
+        assert closes[-1] > ma_mid, "reclaim must close above the mid MA"
+        sig = ScalpChannel()._evaluate_mover_trend_pullback(
+            "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is not None
+        assert sig.entry_trigger == "deep_pullback"
+        assert sig.stop_loss < sig.entry
+
+    def test_deep_pullback_off_switch(self, monkeypatch):
+        """With the deep trigger disabled, the same deep-dip shape no longer fires
+        as deep (the shallow trigger can't claim it — close is below the fast MA)."""
+        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
+        monkeypatch.setattr(scalp_mod, "MOVER_TP_TRIGGER_DEEP_ENABLED", False)
+        monkeypatch.setattr(scalp_mod, "MOVER_TP_TRIGGER_CONSOL_ENABLED", False)
+        candles, indicators, smc_data = self._deep_candles()
+        sig = ScalpChannel()._evaluate_mover_trend_pullback(
+            "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None
+
+    def _consol_candles(self, *, up=True, atr=1.5, breakout_vol=2000.0):
+        """A hard ramp that never dips to the MA (prev bar low stays clear of the
+        fast-MA band) → only the guarded consolidation-break trigger can fire."""
+        n = 115
+        s = 0.4 if up else -0.4
+        closes = [100.0 + s * i for i in range(n)]
+        highs = [c + 0.1 for c in closes]
+        lows = [c - 0.1 for c in closes]
+        vols = [1000.0] * n
+        vols[-1] = breakout_vol
+        candles = {"15m": {"open": list(closes), "high": highs, "low": lows,
+                           "close": closes, "volume": vols}}
+        return candles, {"15m": {"atr_last": atr}}, {"pair_profile": None, "regime_context": None}
+
+    def test_consol_break_fires_and_stamps(self, monkeypatch):
+        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
+        candles, indicators, smc_data = self._consol_candles(up=True)
+        sig = ScalpChannel()._evaluate_mover_trend_pullback(
+            "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is not None, "a hard ramp with volume must fire the consolidation-break trigger"
+        assert sig.entry_trigger == "consol_break"
+        assert sig.direction == Direction.LONG
+        assert sig.stop_loss < sig.entry
+
+    def test_consol_break_off_switch(self, monkeypatch):
+        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)
+        monkeypatch.setattr(scalp_mod, "MOVER_TP_TRIGGER_CONSOL_ENABLED", False)
+        candles, indicators, smc_data = self._consol_candles(up=True)
+        sig = ScalpChannel()._evaluate_mover_trend_pullback(
+            "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+        )
+        assert sig is None, "disabling the consol trigger removes the only shape this ramp matches"
+
+    # ── consolidation-break guards (helper-level, isolated) ──────────────────
+
+    def _consol_helper_arrays(self):
+        # 6-bar window (indices -7..-2) is tight; index -1 is the breakout slot.
+        highs = [10.10, 10.08, 10.11, 10.09, 10.10, 10.07, 99.0]
+        lows = [9.90, 9.92, 9.91, 9.93, 9.90, 9.94, 0.0]
+        vols = [1000.0] * 6 + [2000.0]
+        closes = [10.0] * 7
+        return closes, highs, lows, vols
+
+    def test_consol_helper_fires_when_clean(self):
+        closes, highs, lows, vols = self._consol_helper_arrays()
+        anchor = ScalpChannel._mover_consol_break(
+            Direction.LONG, 10.2, closes, highs, lows, vols, ma_fast=10.0, atr_val=1.0,
+        )
+        assert anchor == min(lows[-7:-1]), "clean break returns the consolidation low as SL anchor"
+
+    def test_consol_helper_rejects_overextension(self):
+        closes, highs, lows, vols = self._consol_helper_arrays()
+        # Tight range + volume still pass, but close sits 1.5 > 1.0×ATR beyond the fast MA.
+        anchor = ScalpChannel._mover_consol_break(
+            Direction.LONG, 11.5, closes, highs, lows, vols, ma_fast=10.0, atr_val=1.0,
+        )
+        assert anchor is None, "over-extended breakout must be rejected (anti-chase guard)"
+
+    def test_consol_helper_rejects_low_volume(self):
+        closes, highs, lows, vols = self._consol_helper_arrays()
+        vols[-1] = 1000.0  # equal to window avg → below the 1.5× confirmation
+        anchor = ScalpChannel._mover_consol_break(
+            Direction.LONG, 10.2, closes, highs, lows, vols, ma_fast=10.0, atr_val=1.0,
+        )
+        assert anchor is None, "a break without volume confirmation must be rejected"
+
+    def test_consol_helper_rejects_wide_range(self):
+        closes, highs, lows, vols = self._consol_helper_arrays()
+        highs[2] = 13.0  # blow out the window range past 1.5×ATR
+        anchor = ScalpChannel._mover_consol_break(
+            Direction.LONG, 13.5, closes, highs, lows, vols, ma_fast=10.0, atr_val=1.0,
+        )
+        assert anchor is None, "a wide window is the move itself, not a base — reject"
+
     def test_rejects_without_ma_stack(self, monkeypatch):
         """A flat/choppy mover (no clean MA stack) does not fire."""
         monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)

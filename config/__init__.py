@@ -599,6 +599,37 @@ MOVER_TP_SL_BUFFER_ATR: float = _safe_float("MOVER_TP_SL_BUFFER_ATR", "0.5")
 #: MA99 (or below, for shorts); a gently-trending blue chip won't clear this.
 MOVER_TP_MIN_STACK_SEP_PCT: float = _safe_float("MOVER_TP_MIN_STACK_SEP_PCT", "3.0")
 
+# ── Additional continuation triggers (Session 31, owner+research-approved) ────
+# The path originally fired on ONE shape only: a shallow pullback that tags the
+# FAST MA (SMA7) and reclaims.  Research (hyrotrader crypto-MA guide, pyramiding
+# literature) says a strong mover offers several distinct continuation re-entries;
+# catching only the shallowest one leaves most of the move's re-entries on the
+# table.  Two further triggers, each gated, each stamped with its own
+# `entry_trigger` tag so per-trigger win-rate is measurable and the weak one can
+# be killed independently (same head-to-head discipline as VSB/BDS vs MOVER).
+#
+# Trigger DEEP — pullback to the MID MA (SMA25), the canonical "scale into the
+# deeper dip" entry: higher-probability, better R, lower chase risk.  Reversible
+# env off-switch (default ON — testing phase).
+MOVER_TP_TRIGGER_DEEP_ENABLED: bool = _safe_bool("MOVER_TP_TRIGGER_DEEP_ENABLED", "true")
+# Trigger CONSOL — a guarded consolidation break for movers that DON'T pull back
+# (they grind).  Research is explicit that a naive "chase the breakout" entry is
+# the classic mistake, so this fires ONLY when it is NOT extended: price holds
+# above the fast MA, a tight K-bar micro-range breaks, AND volume confirms.
+MOVER_TP_TRIGGER_CONSOL_ENABLED: bool = _safe_bool("MOVER_TP_TRIGGER_CONSOL_ENABLED", "true")
+#: Bars in the consolidation window scanned for the micro-range break.
+MOVER_TP_CONSOL_LOOKBACK: int = _safe_int("MOVER_TP_CONSOL_LOOKBACK", "6")
+#: Max consolidation height (× ATR) for the range to count as "tight" — a wide
+#: range is not a flag, it is the move itself; don't treat it as a base.
+MOVER_TP_CONSOL_RANGE_ATR: float = _safe_float("MOVER_TP_CONSOL_RANGE_ATR", "1.5")
+#: Anti-extension guard: max distance (× ATR) the breakout close may sit beyond
+#: the fast MA.  1.0 is the strict reading of the "stop > 1.5× ATR = too sloppy"
+#: rule from the continuation-pattern literature — keeps us off parabolic chases.
+MOVER_TP_BREAKOUT_EXT_ATR: float = _safe_float("MOVER_TP_BREAKOUT_EXT_ATR", "1.0")
+#: Volume confirmation on the breakout bar (× the consolidation-window average).
+#: Research: a break without >=1.5× volume "is almost certainly a fake-out".
+MOVER_TP_BREAKOUT_VOL_MULT: float = _safe_float("MOVER_TP_BREAKOUT_VOL_MULT", "1.5")
+
 # ── Counter-trend hard-block on confirmed strong movers (Session 30, owner-approved) ─
 # §3.2 #5 reserves HARD blocks for structural impossibility.  Fading a CONFIRMED
 # strong mover with a reversal IS that case: SYNUSDT (+300%/7d, 4h+1h both stacked

@@ -28,6 +28,12 @@ from config import (
     MOVER_TP_PULLBACK_BAND_PCT,
     MOVER_TP_SL_BUFFER_ATR,
     MOVER_TP_MIN_STACK_SEP_PCT,
+    MOVER_TP_TRIGGER_DEEP_ENABLED,
+    MOVER_TP_TRIGGER_CONSOL_ENABLED,
+    MOVER_TP_CONSOL_LOOKBACK,
+    MOVER_TP_CONSOL_RANGE_ATR,
+    MOVER_TP_BREAKOUT_EXT_ATR,
+    MOVER_TP_BREAKOUT_VOL_MULT,
 )
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import (
@@ -2812,9 +2818,15 @@ class ScalpChannel(BaseChannel):
         if stack_sep_pct < MOVER_TP_MIN_STACK_SEP_PCT:
             return self._reject("mover_run_too_small")
 
-        # Pullback + reclaim: the last CLOSED candle must have tagged the fast-MA
-        # band, and the current candle must reclaim in the trend direction (not a
-        # falling-knife touch that's still going).
+        # ── Entry triggers ──────────────────────────────────────────────────
+        # A strong mover offers several continuation re-entries; fire on the first
+        # that matches in priority order (cleanest / best-R shape first) and stamp
+        # which one fired (`entry_trigger`) so per-trigger win-rate is measurable.
+        #   1) fast_pullback — shallow dip tags SMA7, this bar reclaims it.
+        #   2) deep_pullback — deeper dip tags SMA25, this bar reclaims the mid MA
+        #      (better price; SL drops below the slow MA, the trend anchor).
+        #   3) consol_break  — no pullback: a tight micro-range breaks in-trend,
+        #      guarded against chasing (holds fast MA, not over-extended, volume).
         band = MOVER_TP_PULLBACK_BAND_PCT / 100.0
         prev_high = highs[-2]
         prev_low = lows[-2]
@@ -2823,16 +2835,34 @@ class ScalpChannel(BaseChannel):
             or indicators.get("5m", {}).get("atr_last")
             or close * 0.004
         )
+        buf = atr_val * MOVER_TP_SL_BUFFER_ATR
+        vols = [float(v) for v in tf.get("volume", [])]
 
+        trigger = ""
+        sl = 0.0
         if direction == Direction.LONG:
-            tagged = prev_low <= ma_fast * (1.0 + band)
-            reclaimed = close > ma_fast and close > closes[-2]
-            if not tagged:
-                return self._reject("no_pullback_tag")
-            if not reclaimed:
+            if prev_low <= ma_fast * (1.0 + band) and close > ma_fast and close > closes[-2]:
+                trigger = "fast_pullback"
+                sl = min(ma_mid, prev_low) - buf
+            elif (
+                MOVER_TP_TRIGGER_DEEP_ENABLED
+                and prev_low <= ma_mid * (1.0 + band)
+                and close > ma_mid
+                and close > closes[-2]
+            ):
+                trigger = "deep_pullback"
+                sl = min(ma_slow, prev_low) - buf
+            elif MOVER_TP_TRIGGER_CONSOL_ENABLED:
+                cb = self._mover_consol_break(
+                    Direction.LONG, close, closes, highs, lows, vols, ma_fast, atr_val
+                )
+                if cb is not None:
+                    trigger = "consol_break"
+                    sl = cb - buf
+            if not trigger:
+                if prev_low > ma_fast * (1.0 + band) and prev_low > ma_mid * (1.0 + band):
+                    return self._reject("no_pullback_tag")
                 return self._reject("no_reclaim")
-            # SL just below the mid MA / pullback low — the stack is the thesis.
-            sl = min(ma_mid, prev_low) - atr_val * MOVER_TP_SL_BUFFER_ATR
             if sl >= close:
                 return self._reject("invalid_sl_geometry")
             sl_dist = close - sl
@@ -2840,13 +2870,28 @@ class ScalpChannel(BaseChannel):
             tp2 = close + sl_dist * 1.6
             tp3 = close + sl_dist * 2.5
         else:
-            tagged = prev_high >= ma_fast * (1.0 - band)
-            reclaimed = close < ma_fast and close < closes[-2]
-            if not tagged:
-                return self._reject("no_pullback_tag")
-            if not reclaimed:
+            if prev_high >= ma_fast * (1.0 - band) and close < ma_fast and close < closes[-2]:
+                trigger = "fast_pullback"
+                sl = max(ma_mid, prev_high) + buf
+            elif (
+                MOVER_TP_TRIGGER_DEEP_ENABLED
+                and prev_high >= ma_mid * (1.0 - band)
+                and close < ma_mid
+                and close < closes[-2]
+            ):
+                trigger = "deep_pullback"
+                sl = max(ma_slow, prev_high) + buf
+            elif MOVER_TP_TRIGGER_CONSOL_ENABLED:
+                cb = self._mover_consol_break(
+                    Direction.SHORT, close, closes, highs, lows, vols, ma_fast, atr_val
+                )
+                if cb is not None:
+                    trigger = "consol_break"
+                    sl = cb + buf
+            if not trigger:
+                if prev_high < ma_fast * (1.0 - band) and prev_high < ma_mid * (1.0 - band):
+                    return self._reject("no_pullback_tag")
                 return self._reject("no_reclaim")
-            sl = max(ma_mid, prev_high) + atr_val * MOVER_TP_SL_BUFFER_ATR
             if sl <= close:
                 return self._reject("invalid_sl_geometry")
             sl_dist = sl - close
@@ -2862,11 +2907,11 @@ class ScalpChannel(BaseChannel):
         if not MOVER_TREND_PULLBACK_ENABLED:
             log.info(
                 "[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE: symbol={} dir={} "
-                "close={:.6f} ma_fast={:.6f} ma_mid={:.6f} ma_slow={:.6f} "
+                "trigger={} close={:.6f} ma_fast={:.6f} ma_mid={:.6f} ma_slow={:.6f} "
                 "sl={:.6f} sl_dist_pct={:.3f}",
                 symbol,
                 "LONG" if direction == Direction.LONG else "SHORT",
-                close, ma_fast, ma_mid, ma_slow, sl, sl_dist / close * 100.0,
+                trigger, close, ma_fast, ma_mid, ma_slow, sl, sl_dist / close * 100.0,
             )
             return self._reject("shadow_mode")
 
@@ -2908,8 +2953,76 @@ class ScalpChannel(BaseChannel):
         # affinity via the trend-pullback family scoring path (§3.6a); the volume
         # dimension floors at neutral (a pullback entry is low-volume by design).
         sig.htf_trend_aligned = True
+        sig.entry_trigger = trigger
         sig.confidence = min(100.0, sig.confidence + 8.0)
+        log.info(
+            "MOVER_TP_FIRED: symbol={} dir={} trigger={} close={:.6f} "
+            "sl_dist_pct={:.3f} conf={:.1f}",
+            symbol,
+            "LONG" if direction == Direction.LONG else "SHORT",
+            trigger, close, sl_dist / close * 100.0, sig.confidence,
+        )
         return sig
+
+    @staticmethod
+    def _mover_consol_break(
+        direction: "Direction",
+        close: float,
+        closes: list,
+        highs: list,
+        lows: list,
+        vols: list,
+        ma_fast: float,
+        atr_val: float,
+    ) -> Optional[float]:
+        """Guarded consolidation-break trigger for a mover that grinds without
+        pulling back to the MA.  Returns the structural SL anchor (consolidation
+        low for LONG / high for SHORT) when ALL guards pass, else None.
+
+        The continuation-pattern literature is explicit that a naive "chase the
+        breakout" entry is the classic mistake; this fires only when it is NOT
+        extended.  Guards:
+          • tight K-bar micro-range (height <= MOVER_TP_CONSOL_RANGE_ATR × ATR) —
+            a wide range is the move itself, not a base;
+          • this bar breaks the range extreme in the trend direction;
+          • price holds the fast MA and is not over-extended beyond it
+            (<= MOVER_TP_BREAKOUT_EXT_ATR × ATR) — keeps us off parabolic chases;
+          • breakout-bar volume >= MOVER_TP_BREAKOUT_VOL_MULT × the window average
+            (a break on weak volume "is almost certainly a fake-out").
+        """
+        k = MOVER_TP_CONSOL_LOOKBACK
+        if atr_val <= 0 or k < 2 or len(closes) < k + 1:
+            return None
+        win_highs = highs[-(k + 1):-1]
+        win_lows = lows[-(k + 1):-1]
+        if not win_highs or not win_lows:
+            return None
+        consol_high = max(win_highs)
+        consol_low = min(win_lows)
+        if (consol_high - consol_low) > MOVER_TP_CONSOL_RANGE_ATR * atr_val:
+            return None  # range too wide to be a flag/base
+        # Volume confirmation on the breakout bar vs the consolidation-window avg.
+        if len(vols) >= k + 1:
+            win_vols = vols[-(k + 1):-1]
+            avg_vol = sum(win_vols) / len(win_vols) if win_vols else 0.0
+            if avg_vol > 0 and vols[-1] < MOVER_TP_BREAKOUT_VOL_MULT * avg_vol:
+                return None
+        ext = MOVER_TP_BREAKOUT_EXT_ATR * atr_val
+        if direction == Direction.LONG:
+            if close <= consol_high:        # must break the range up
+                return None
+            if close < ma_fast:             # must hold the fast MA (continuation)
+                return None
+            if (close - ma_fast) > ext:     # anti-extension: not a parabolic chase
+                return None
+            return consol_low
+        if close >= consol_low:             # SHORT: must break the range down
+            return None
+        if close > ma_fast:
+            return None
+        if (ma_fast - close) > ext:
+            return None
+        return consol_high
 
     # ------------------------------------------------------------------
     # OPENING_RANGE_BREAKOUT path
