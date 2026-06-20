@@ -2082,6 +2082,57 @@ def test_user_auto_trade_isolated_per_user(engine: _StubEngine, tmp_path) -> Non
     assert body["position_size_pct"] != 5.0
 
 
+def test_user_auto_trade_paper_preferences_round_trip(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    """The PAPER eligibility triple must survive the HTTP boundary.
+
+    Regression guard: the ``paper_symbol/path/regime_preference`` columns
+    and their per-user-paper-book consumer (``PaperBookFanout._eligible``)
+    shipped in #636, but the ``AutoTradeSettings`` Pydantic schema did not
+    declare the fields — so a PUT carrying them was silently dropped by
+    Pydantic (extra-ignore) and the app had nothing to write to.  This
+    pins that the keys now PUT, persist, and GET back, independently of
+    the LIVE triple (a user paper-tests one set while live-trading
+    another)."""
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330050")
+    r = client.put(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "path_preference": ["MOMENTUM_BREAKOUT"],
+            "paper_symbol_preference": ["BTCUSDT", "ETHUSDT"],
+            "paper_path_preference": ["DIVERGENCE_CONTINUATION"],
+            "paper_regime_preference": ["TRENDING"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Paper triple persisted and is returned by the same view.
+    assert body["paper_symbol_preference"] == ["BTCUSDT", "ETHUSDT"]
+    assert body["paper_path_preference"] == ["DIVERGENCE_CONTINUATION"]
+    # Regime gets the same UI-token→backend-label normalisation as the
+    # live triple (TRENDING → TRENDING_UP / TRENDING_DOWN).
+    assert set(body["paper_regime_preference"]) == {
+        "TRENDING_UP",
+        "TRENDING_DOWN",
+    }
+    # Independent of the LIVE triple set in the same payload.
+    assert body["path_preference"] == ["MOMENTUM_BREAKOUT"]
+    # Survives a fresh GET (not just the PUT echo).
+    got = client.get(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+    assert got["paper_symbol_preference"] == ["BTCUSDT", "ETHUSDT"]
+    assert got["paper_path_preference"] == ["DIVERGENCE_CONTINUATION"]
+    assert set(got["paper_regime_preference"]) == {
+        "TRENDING_UP",
+        "TRENDING_DOWN",
+    }
+
+
 # ============================================================================
 # Build-positions broker-state filter (fix/positions-skip-broker-rejected)
 # ============================================================================

@@ -560,6 +560,39 @@ class AutoTradeSettings(BaseModel):
             "auto-trade for me'.  Empty list = block all."
         ),
     )
+    paper_symbol_preference: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "PAPER counterpart of ``symbol_preference`` — the user-chosen "
+            "subset of symbols eligible to auto-trade in PAPER simulation. "
+            "Independent of the live triple, so a user can paper-test one "
+            "symbol set while live-trading another.  ``None`` = all symbols "
+            "(default); non-empty list = only these; ``[]`` = block all. "
+            "Consumed by the per-user paper book fan-out "
+            "(``PaperBookFanout._eligible``) when ``PAPER_PER_USER_BOOKS`` "
+            "is enabled."
+        ),
+    )
+    paper_path_preference: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "PAPER counterpart of ``path_preference`` — evaluator paths "
+            "(setup classes) eligible to auto-trade in PAPER.  ``None`` = "
+            "all paths; non-empty = only these; ``[]`` = block all.  "
+            "Independent of the live ``path_preference``."
+        ),
+    )
+    paper_regime_preference: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "PAPER counterpart of ``regime_preference`` — entry regimes "
+            "eligible to auto-trade in PAPER.  Accepts the UI tokens "
+            "TRENDING / RANGING / CHOPPY (server normalises onto backend "
+            "regime labels).  ``None`` = all regimes; non-empty = only "
+            "these; ``[]`` = block all.  Independent of the live "
+            "``regime_preference``."
+        ),
+    )
     notional_usd: Optional[float] = Field(
         default=None,
         ge=5.0,
