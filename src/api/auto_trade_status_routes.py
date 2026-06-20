@@ -29,6 +29,10 @@ from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
 
+from src.utils import get_logger
+
+log = get_logger("api.auto_trade_status_routes")
+
 
 def _active_path_names() -> list[str]:
     """Canonical, sorted list of user-selectable evaluator paths (setup
@@ -38,8 +42,8 @@ def _active_path_names() -> list[str]:
     can never drift from the engine's actual emitting paths (CLAUDE.md
     flags the SetupClass values as stringly-coupled — single source of
     truth).  Auxiliary sub-evaluators intentionally excluded (they have
-    no standalone portfolio role).  Resolved lazily + cached so a missing
-    import at boot never hard-fails the status endpoint.
+    no standalone portfolio role).  Resolved lazily so a missing import
+    at boot never hard-fails the status endpoint.
     """
     try:
         from src.signal_quality import ACTIVE_PATH_PORTFOLIO_ROLES
@@ -53,9 +57,6 @@ def _active_path_names() -> list[str]:
 # beside the path helper so both eligibility dimensions ship together.
 _REGIME_OPTIONS: list[str] = ["TRENDING", "RANGING", "CHOPPY"]
 
-from src.utils import get_logger
-
-log = get_logger("api.auto_trade_status_routes")
 
 # ---------------------------------------------------------------------------
 # Per-user TTL cache for the runtime-status endpoint.
