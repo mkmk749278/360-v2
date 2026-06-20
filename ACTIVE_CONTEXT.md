@@ -59,22 +59,36 @@ unchanged; 46 tests green):**
   `PaperBookFanout` (drop-in for the single `PaperOrderManager`; fans lifecycle out
   to eligible users; entry-only skips pre-TP/TP, survives invalidation, closes on SL).
 
-**REMAINING (gating — must ship together; needs a running-engine + app build to
-validate, so NOT shipped blind):**
-1. Swap `PaperBookFanout` into `main.py` paper mode (+ `set_auto_execution_mode`).
-2. **Read-layer repoint (inseparable from #1 — without it the dashboard reads the now-
-   empty shared stores and goes blank):** `snapshot.py` paper paths (/api/trades,
-   /api/positions, /api/pulse, /api/auto-mode), `paper_user_view.py` (Phase-2.5 window
-   filter → read the user's own book), `paper_trade_routes` reset/archive, truth report
-   → `list_trades_all_users` + `pnl_history` `paper:*` aggregate. Fanout needs a merged
-   open-positions view for the snapshot.
-3. App **paper** eligibility selectors + per-symbol management on paper (lumin-app).
-4. 360ce-ops engine-wide paper reads → aggregate.
+**ACTIVATION LANDED — gated behind `PAPER_PER_USER_BOOKS` (default OFF), atomic
+write+read flip, both flag states fully wired (owner approved "gated, default OFF"
+2026-06-20). Engine #1/#2 below DONE; app + ops (#3/#4) still pending.**
+- `config.PAPER_PER_USER_BOOKS` (default `false`) + `PAPER_BOOKS_DIR` — kill switch,
+  not a dark flag. OFF = legacy shared-book path untouched; ON = per-user fanout.
+- `main.py._build_paper_order_manager()` builds the fanout at BOTH construction sites
+  (boot + `set_auto_execution_mode`); `PaperBookRegistry` now threads position sizing +
+  a **per-user RiskManager factory** (each book gets its own daily-loss/concurrency
+  limits — no shared global paper cap).
+- `pnl_history` aggregate readers (`get_*_aggregate("paper")` / `reset_aggregate`) sum
+  `paper:*`; fanout gains `positions_for_user` / merged `_positions` / `pnl_history_mode_for`
+  / `trades_db_path_for`.
+- Read repoint (gated; OFF → unchanged window path): `build_pulse`, `build_positions`,
+  `build_auto_mode` header + engine-wide aggregate, `build_pnl_history` read per-user;
+  `/api/trades` lists the user's own DB via `list_trades(db_path=…)`; paper reset wipes
+  every `paper:<uid>` bucket.
+- **First unit coverage for the (previously untested) snapshot builders** — per-user
+  isolation (no cross-user PnL leak) + OFF-path fallback. 61 tests green.
 
-Why staged here: the `main.py` swap + read repoint break the live paper dashboard if
-shipped incomplete, and the read rewrite (deep in `snapshot.py`, cross-repo) can't be
-validated in the web container. "Ship live" doctrine relaxes dark-flags, not
-correctness/review — so this lands as a focused, validated unit next, not blind.
+**VALIDATION GATE (before promoting ON to default):** merge to `main` (deploys OFF, no
+behavior change) → set `PAPER_PER_USER_BOOKS=true` + restart paper engine on the VPS →
+confirm per-user snapshots populate + `data/paper_books/paper_*_user_<uid>.*` files
+appear → then flip ON as the default.
+
+**REMAINING:**
+3. App **paper** eligibility selectors + per-symbol management on paper (lumin-app).
+4. 360ce-ops engine-wide paper reads → `paper:*` aggregate.
+
+Sign-off flags raised to owner: (a) per-user RiskManagers = no global paper risk cap;
+(b) operator paper-reset wipes all users' buckets. Both deemed correct defaults.
 
 ---
 
