@@ -254,6 +254,35 @@ class AutoModeResumeMineResponse(BaseModel):
     resumed: bool
 
 
+class KillSwitchState(BaseModel):
+    """Global kill-switch state (OWNER_BRIEF B18 emergency halt).
+
+    ``engaged`` True = ALL auto-trade is halted engine-wide until
+    manually disengaged.  ``initialised`` False means the kill-switch
+    client never booted (no Firestore / GCP creds) — the control plane
+    renders an "unavailable" state rather than a misleading "off".
+    """
+
+    engaged: bool
+    reason: Optional[str] = None
+    initialised: bool = True
+
+
+class KillSwitchSetRequest(BaseModel):
+    """Owner request to flip the global kill switch.
+
+    ``engaged`` True engages (halts everything); False disengages
+    (resumes).  ``reason`` is recorded on engage for operator
+    visibility (shown in the ops control plane + status reads)."""
+
+    engaged: bool
+    reason: Optional[str] = Field(
+        default=None,
+        max_length=280,
+        description="Operator note recorded on engage (why we halted).",
+    )
+
+
 # ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
@@ -558,6 +587,39 @@ class AutoTradeSettings(BaseModel):
             "(TRENDING_UP/DOWN, RANGING, VOLATILE, QUIET).  ``None`` = all "
             "regimes (default).  Non-empty list = 'only these regimes may "
             "auto-trade for me'.  Empty list = block all."
+        ),
+    )
+    paper_symbol_preference: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "PAPER counterpart of ``symbol_preference`` — the user-chosen "
+            "subset of symbols eligible to auto-trade in PAPER simulation. "
+            "Independent of the live triple, so a user can paper-test one "
+            "symbol set while live-trading another.  ``None`` = all symbols "
+            "(default); non-empty list = only these; ``[]`` = block all. "
+            "Consumed by the per-user paper book fan-out "
+            "(``PaperBookFanout._eligible``) when ``PAPER_PER_USER_BOOKS`` "
+            "is enabled."
+        ),
+    )
+    paper_path_preference: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "PAPER counterpart of ``path_preference`` — evaluator paths "
+            "(setup classes) eligible to auto-trade in PAPER.  ``None`` = "
+            "all paths; non-empty = only these; ``[]`` = block all.  "
+            "Independent of the live ``path_preference``."
+        ),
+    )
+    paper_regime_preference: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "PAPER counterpart of ``regime_preference`` — entry regimes "
+            "eligible to auto-trade in PAPER.  Accepts the UI tokens "
+            "TRENDING / RANGING / CHOPPY (server normalises onto backend "
+            "regime labels).  ``None`` = all regimes; non-empty = only "
+            "these; ``[]`` = block all.  Independent of the live "
+            "``regime_preference``."
         ),
     )
     notional_usd: Optional[float] = Field(

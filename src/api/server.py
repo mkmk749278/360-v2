@@ -82,6 +82,8 @@ from .schemas import (
     BillingGrantRequest,
     BillingGrantResponse,
     HealthResponse,
+    KillSwitchSetRequest,
+    KillSwitchState,
     OtpRequest,
     OtpRequestResponse,
     OtpVerify,
@@ -1434,6 +1436,69 @@ def build_app(
         user_id = _resolve_user_id(identity)
         resumed = await user_overrides.aresume_user_auto_trade(user_id)
         return AutoModeResumeMineResponse(resumed=resumed)
+
+    # ---- Global kill switch (OWNER_BRIEF B18 emergency halt) ----
+    #
+    # Telegram was the only manual control for the global kill switch.
+    # With Telegram unavailable (banned in-region, 2026-06-20), the ops
+    # control plane needs an HTTP surface.  The kill-switch client is
+    # initialised in THIS process (api/main.py:99 isolated, bootstrap.py
+    # single-process) and is Firestore-backed with 5s-TTL write-through,
+    # so a flip here is visible to every engine reader within ~5s — no
+    # facade bridge needed (mirrors how auto_trade_status_routes already
+    # READS the switch in-process).
+
+    def _kill_switch_state() -> KillSwitchState:
+        from src.execution import kill_switch as _ks
+        if not _ks.is_initialised():
+            return KillSwitchState(engaged=False, reason=None, initialised=False)
+        try:
+            client = _ks.get_client()
+            engaged = bool(client.is_global_engaged())
+            reason = client.global_reason() if hasattr(
+                client, "global_reason") else None
+            return KillSwitchState(
+                engaged=engaged, reason=reason, initialised=True)
+        except Exception:
+            log.exception("/api/kill-switch state read failed")
+            return KillSwitchState(engaged=False, reason=None, initialised=False)
+
+    @app.get(
+        "/api/kill-switch",
+        response_model=KillSwitchState,
+        tags=["auto-mode"],
+    )
+    async def kill_switch_get(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> KillSwitchState:
+        return _kill_switch_state()
+
+    @app.post(
+        "/api/kill-switch",
+        response_model=KillSwitchState,
+        tags=["auto-mode"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def kill_switch_set(req: KillSwitchSetRequest) -> KillSwitchState:
+        from src.execution import kill_switch as _ks
+        if not _ks.is_initialised():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="kill switch not initialised (no Firestore/GCP creds)",
+            )
+        client = _ks.get_client()
+        try:
+            if req.engaged:
+                client.engage_global(reason=req.reason or "ops control plane")
+            else:
+                client.disengage_global()
+        except Exception as exc:
+            log.exception("/api/kill-switch flip failed engaged=%s", req.engaged)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"kill switch flip failed: {exc}",
+            )
+        return _kill_switch_state()
 
     # ---- Paper-trade-visibility endpoints (2026-05-16) ----
     # Registered via register() in paper_trade_routes.py so the

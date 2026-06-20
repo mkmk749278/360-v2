@@ -973,6 +973,83 @@ def test_auto_mode_post_invalid_payload_returns_422(
 
 
 # ---------------------------------------------------------------------------
+# Global kill switch — ops control plane HTTP surface (2026-06-20)
+# ---------------------------------------------------------------------------
+
+
+def test_kill_switch_get_uninitialised_reports_unavailable(
+    client: TestClient,
+) -> None:
+    """With no Firestore/GCP creds (the test env), the kill switch never
+    boots — GET must report ``initialised=false`` rather than a misleading
+    ``engaged=false`` that looks like a live, safe state."""
+    r = client.get("/api/kill-switch")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["initialised"] is False
+    assert body["engaged"] is False
+
+
+def test_kill_switch_post_uninitialised_returns_503(
+    owner_client: TestClient,
+) -> None:
+    r = owner_client.post("/api/kill-switch", json={"engaged": True})
+    assert r.status_code == 503
+
+
+def test_kill_switch_post_requires_owner(client: TestClient) -> None:
+    """Non-owner callers cannot flip the global halt."""
+    r = client.post("/api/kill-switch", json={"engaged": True})
+    assert r.status_code in (401, 403)
+
+
+def test_kill_switch_engage_disengage_happy_path(
+    owner_client: TestClient, monkeypatch,
+) -> None:
+    """Engage/disengage round-trip against a fake in-memory kill-switch
+    client (the real one needs Firestore).  Pins that the endpoint calls
+    engage_global with the reason and reflects the new state back."""
+    from src.execution import kill_switch as ks
+
+    class _FakeKS:
+        def __init__(self) -> None:
+            self.engaged = False
+            self.reason: str | None = None
+
+        def is_global_engaged(self) -> bool:
+            return self.engaged
+
+        def global_reason(self) -> str | None:
+            return self.reason
+
+        def engage_global(self, reason: str = "") -> None:
+            self.engaged = True
+            self.reason = reason
+
+        def disengage_global(self) -> None:
+            self.engaged = False
+            self.reason = None
+
+    fake = _FakeKS()
+    monkeypatch.setattr(ks, "is_initialised", lambda: True)
+    monkeypatch.setattr(ks, "get_client", lambda: fake)
+
+    r = owner_client.post(
+        "/api/kill-switch", json={"engaged": True, "reason": "manual halt"})
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["engaged"] is True
+    assert body["initialised"] is True
+    assert body["reason"] == "manual halt"
+    assert fake.engaged is True
+
+    r2 = owner_client.post("/api/kill-switch", json={"engaged": False})
+    assert r2.status_code == 200
+    assert r2.json()["engaged"] is False
+    assert fake.engaged is False
+
+
+# ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
 
@@ -2080,6 +2157,57 @@ def test_user_auto_trade_isolated_per_user(engine: _StubEngine, tmp_path) -> Non
     ).json()
     assert body["using_defaults"] is True
     assert body["position_size_pct"] != 5.0
+
+
+def test_user_auto_trade_paper_preferences_round_trip(
+    engine: _StubEngine, tmp_path,
+) -> None:
+    """The PAPER eligibility triple must survive the HTTP boundary.
+
+    Regression guard: the ``paper_symbol/path/regime_preference`` columns
+    and their per-user-paper-book consumer (``PaperBookFanout._eligible``)
+    shipped in #636, but the ``AutoTradeSettings`` Pydantic schema did not
+    declare the fields — so a PUT carrying them was silently dropped by
+    Pydantic (extra-ignore) and the app had nothing to write to.  This
+    pins that the keys now PUT, persist, and GET back, independently of
+    the LIVE triple (a user paper-tests one set while live-trading
+    another)."""
+    client, store, delivery = _phase2_app(engine, tmp_path)
+    token = _verify_and_get_token(client, store, delivery, "+15553330050")
+    r = client.put(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+        json={
+            "path_preference": ["MOMENTUM_BREAKOUT"],
+            "paper_symbol_preference": ["BTCUSDT", "ETHUSDT"],
+            "paper_path_preference": ["DIVERGENCE_CONTINUATION"],
+            "paper_regime_preference": ["TRENDING"],
+        },
+    )
+    assert r.status_code == 200, r.text
+    body = r.json()
+    # Paper triple persisted and is returned by the same view.
+    assert body["paper_symbol_preference"] == ["BTCUSDT", "ETHUSDT"]
+    assert body["paper_path_preference"] == ["DIVERGENCE_CONTINUATION"]
+    # Regime gets the same UI-token→backend-label normalisation as the
+    # live triple (TRENDING → TRENDING_UP / TRENDING_DOWN).
+    assert set(body["paper_regime_preference"]) == {
+        "TRENDING_UP",
+        "TRENDING_DOWN",
+    }
+    # Independent of the LIVE triple set in the same payload.
+    assert body["path_preference"] == ["MOMENTUM_BREAKOUT"]
+    # Survives a fresh GET (not just the PUT echo).
+    got = client.get(
+        "/api/settings/user/auto-trade",
+        headers={"Authorization": f"Bearer {token}"},
+    ).json()
+    assert got["paper_symbol_preference"] == ["BTCUSDT", "ETHUSDT"]
+    assert got["paper_path_preference"] == ["DIVERGENCE_CONTINUATION"]
+    assert set(got["paper_regime_preference"]) == {
+        "TRENDING_UP",
+        "TRENDING_DOWN",
+    }
 
 
 # ============================================================================
