@@ -33,16 +33,20 @@ grade only. No dark flags (we're testing, no users)."
 | App | Pre-TP + Invalidation **Reset-to-default** now always visible (was hidden via `if (!_usingDefaults …)` → looked missing on a default page). |
 | Tests | +11 engine tests (store 8, dispatch 3); affected suites green: 197 pass (user_overrides 91, signal_dispatch 50, status_routes 20, tripwires + others). |
 
-Scope note: path/regime selection is the **LIVE** eligibility filter today (live
-dispatcher is per-user). Paper selectors land with Increment 2.
+| Engine | **Per-symbol Full / Entry-only** (Signals-tab tap): `user_symbol_management` table + `resolve_symbol_management_uid`; entry-only reuses tested levers at dispatch (`grab_fraction=0` + `invalidation_mode='loose'` + `management_mode='entry'`) and `place_signal` lays NO TP ladder. **Entry + protective SL still placed** — never naked (B12/B18). `GET/PUT /api/settings/user/symbol-management`. |
+| App | Signals-tab detail sheet: "AUTO-TRADE {SYMBOL}" section, two highlightable tiles (Take full / Entry only), persisted per symbol; repo `fetchSymbolManagement`/`setSymbolManagement`. |
+| Tests | +9 more (store/resolver 6, dispatch 2, FSM bracket-skip 1) → 329 pass across affected suites incl. API smoke. |
+
+Scope note: path/regime + per-symbol management are the **LIVE** filters today
+(live dispatcher is per-user). Paper selectors + per-symbol management on paper
+land with Increment 2.
 
 ### NEXT (designed in `docs/PER_USER_TRADE_ELIGIBILITY_2026_06_20.md`, owner-sign-off)
 1. **Per-user paper engine** — turn the single shared `PaperOrderManager` into a
    per-user simulation + per-user paper dispatch path, then add `paper_*`
-   preference columns + Paper selectors. (Money-path-adjacent; bring registry-vs-
-   namespaced + per-mode schema decision to owner first.)
-2. **Per-symbol Full / Entry-only FSM** — entry+SL, skip bracket + invalidation;
-   per-(user,symbol) storage; Signals-tab tap sheet. (FSM transition — owner sign-off.)
+   preference columns + Paper selectors + per-symbol management on paper.
+   (Money-path-adjacent; bring registry-vs-namespaced + per-mode schema decision
+   to owner first.) **This is the remaining piece of "individual paper + live".**
 
 ---
 

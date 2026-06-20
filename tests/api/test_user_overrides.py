@@ -351,6 +351,67 @@ def test_resolve_auto_trade_preferences_uid_semantics(
 
 
 # ---------------------------------------------------------------------------
+# Per-symbol management mode (Signals-tab full vs entry — 2026-06-20)
+# ---------------------------------------------------------------------------
+
+
+def test_symbol_management_empty_for_new_user(store: UserOverridesStore) -> None:
+    assert store.get_symbol_management_map(1) == {}
+
+
+def test_symbol_management_set_entry_persists(store: UserOverridesStore) -> None:
+    out = store.set_symbol_management(1, "btcusdt", "entry")
+    assert out == {"BTCUSDT": "entry"}
+    assert store.get_symbol_management_map(1) == {"BTCUSDT": "entry"}
+
+
+def test_symbol_management_full_clears_row(store: UserOverridesStore) -> None:
+    """`full` is the default — storing it just deletes the override so we
+    never persist rows that restate the default."""
+    store.set_symbol_management(1, "BTCUSDT", "entry")
+    out = store.set_symbol_management(1, "BTCUSDT", "full")
+    assert out == {}
+    assert store.get_symbol_management_map(1) == {}
+
+
+def test_symbol_management_rejects_invalid_mode(store: UserOverridesStore) -> None:
+    out = store.set_symbol_management(1, "BTCUSDT", "yolo")
+    assert out == {}
+
+
+def test_symbol_management_isolated_per_user(store: UserOverridesStore) -> None:
+    store.set_symbol_management(1, "BTCUSDT", "entry")
+    store.set_symbol_management(2, "ETHUSDT", "entry")
+    assert store.get_symbol_management_map(1) == {"BTCUSDT": "entry"}
+    assert store.get_symbol_management_map(2) == {"ETHUSDT": "entry"}
+
+
+def test_resolve_symbol_management_uid_default_full_then_entry(
+    store: UserOverridesStore, monkeypatch,
+) -> None:
+    import src.api.user_overrides as uo
+
+    class _User:
+        user_id = 1
+
+    class _UserStore:
+        def get_by_firebase_uid(self, _uid):
+            return _User()
+
+    monkeypatch.setattr(uo, "_SINGLETON", store, raising=False)
+    import src.api.users as _users
+    monkeypatch.setattr(_users, "get_singleton", lambda: _UserStore())
+
+    # Unset → full (the protective default).
+    assert uo.resolve_symbol_management_uid("uid", "BTCUSDT") == "full"
+    # Set entry → entry; case-insensitive symbol match.
+    store.set_symbol_management(1, "BTCUSDT", "entry")
+    assert uo.resolve_symbol_management_uid("uid", "btcusdt") == "entry"
+    # A different symbol is still full.
+    assert uo.resolve_symbol_management_uid("uid", "ETHUSDT") == "full"
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 

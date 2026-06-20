@@ -97,6 +97,7 @@ from .schemas import (
     SignalsResponse,
     TelegramOtpIssueRequest,
     TelegramOtpIssueResponse,
+    SymbolManagementUpdate,
     TelegramOtpVerifyRequest,
     TelegramOtpVerifyResponse,
     TickersResponse,
@@ -1922,6 +1923,50 @@ def build_app(
         except Exception:
             pass  # Cache invalidation is best-effort — stale data expires anyway
         return await _build_user_auto_trade_view(uid)
+
+    # ---- Settings: Per-symbol management mode (Signals-tab full/entry) ----
+
+    @app.get(
+        "/api/settings/user/symbol-management",
+        response_model=Dict[str, str],
+        tags=["settings"],
+    )
+    async def user_symbol_management_get(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> Dict[str, str]:
+        """Return ``{SYMBOL: mode}`` for symbols the user has set to a
+        non-default mode.  Absent symbols are full-managed by default, so an
+        empty object means 'everything full' — the Signals tab renders any
+        symbol not in this map as Full."""
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(identity)
+        return await user_overrides.aget_symbol_management_map(uid)
+
+    @app.put(
+        "/api/settings/user/symbol-management",
+        response_model=Dict[str, str],
+        tags=["settings"],
+    )
+    async def user_symbol_management_put(
+        payload: SymbolManagementUpdate,
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> Dict[str, str]:
+        """Set one symbol's management mode.  ``full`` clears the override
+        (absence == full).  Returns the rebuilt map.  Takes effect on the
+        user's next signal dispatch for that symbol (fresh read at dispatch)."""
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(identity)
+        return await user_overrides.aset_symbol_management(
+            uid, payload.symbol, payload.mode,
+        )
 
     # ---- Agents ----
 

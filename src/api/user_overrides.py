@@ -218,6 +218,27 @@ CREATE INDEX IF NOT EXISTS idx_user_paper_subs_user_started
 ON user_paper_subscriptions(user_id, started_at DESC);
 """
 
+# 2026-06-20 — per-(user, symbol) management mode for the Signals-tab
+# "take full vs entry-only" choice.  ``full`` (default; absence of a row)
+# = engine manages entry + SL + pre-TP + TP ladder + invalidation.
+# ``entry`` = engine places entry + protective SL only, then hands the
+# position to the user (no pre-TP, no TP ladder, engine invalidation
+# does not force-close — honoured at dispatch via grab_fraction=0 +
+# invalidation_mode='loose' + skip-TP-bracket).  The protective SL is
+# always placed, so the naked-position invariant (B12/B18) holds.
+_SYMBOL_MGMT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS user_symbol_management (
+    user_id    INTEGER NOT NULL,
+    symbol     TEXT    NOT NULL,
+    mode       TEXT    NOT NULL,   -- 'full' | 'entry'
+    updated_at TEXT    NOT NULL,
+    PRIMARY KEY (user_id, symbol),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+"""
+
+_VALID_MANAGEMENT_MODES: FrozenSet[str] = frozenset({"full", "entry"})
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -431,7 +452,10 @@ class UserOverridesStore:
         # on a cross-store write collision under the thread pool.
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.executescript(_PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA)
+        self._conn.executescript(
+            _PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA
+            + _SYMBOL_MGMT_SCHEMA
+        )
         self._migrate_pretp_grab_fraction()
         self._migrate_pretp_protect_manual_entries()
         self._migrate_auto_trade_symbol_preference()
@@ -828,6 +852,52 @@ class UserOverridesStore:
                     self._close_paper_subscription_locked(int(user_id), now)
             return self.get_auto_trade(user_id)
 
+    # ---- per-symbol management mode (Signals-tab full vs entry) ---------
+
+    def get_symbol_management_map(self, user_id: int) -> Dict[str, str]:
+        """Return ``{SYMBOL: mode}`` for every symbol the user has set to a
+        non-default mode.  Absent symbols default to ``full`` — the caller
+        treats a missing key as full management."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT symbol, mode FROM user_symbol_management "
+                "WHERE user_id = ?",
+                (int(user_id),),
+            )
+            return {row["symbol"]: row["mode"] for row in cur.fetchall()}
+
+    def set_symbol_management(
+        self, user_id: int, symbol: str, mode: str,
+    ) -> Dict[str, str]:
+        """Upsert the management mode for one (user, symbol).  Setting
+        ``full`` (the default) DELETES the row — absence == full, so we
+        never store rows that just restate the default.  Invalid symbols
+        / modes are dropped.  Returns the rebuilt map."""
+        sym = (symbol or "").strip().upper()
+        m = (mode or "").strip().lower()
+        if not sym or m not in _VALID_MANAGEMENT_MODES:
+            return self.get_symbol_management_map(user_id)
+        with self._lock:
+            if m == "full":
+                self._conn.execute(
+                    "DELETE FROM user_symbol_management "
+                    "WHERE user_id = ? AND symbol = ?",
+                    (int(user_id), sym),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO user_symbol_management
+                        (user_id, symbol, mode, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id, symbol) DO UPDATE SET
+                        mode = excluded.mode,
+                        updated_at = excluded.updated_at
+                    """,
+                    (int(user_id), sym, m, _now_iso()),
+                )
+            return self.get_symbol_management_map(user_id)
+
     # ---- paper subscription windows -------------------------------------
 
     def _open_paper_subscription_locked(self, user_id: int, now: str) -> str:
@@ -1079,6 +1149,16 @@ class UserOverridesStore:
 
     async def aresume_user_auto_trade(self, user_id: int) -> bool:
         return await asyncio.to_thread(self.resume_user_auto_trade, user_id)
+
+    async def aget_symbol_management_map(self, user_id: int) -> Dict[str, str]:
+        return await asyncio.to_thread(self.get_symbol_management_map, user_id)
+
+    async def aset_symbol_management(
+        self, user_id: int, symbol: str, mode: str,
+    ) -> Dict[str, str]:
+        return await asyncio.to_thread(
+            self.set_symbol_management, user_id, symbol, mode
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -1453,6 +1533,39 @@ def resolve_auto_trade_preferences_uid(
             firebase_uid, type(exc).__name__,
         )
         return None, None
+
+
+def resolve_symbol_management_uid(firebase_uid: str, symbol: str) -> str:
+    """Return the per-(user, symbol) management mode — ``'full'`` (engine
+    manages entry+SL+pre-TP+TP+invalidation) or ``'entry'`` (engine places
+    entry + protective SL only, user manages the rest).
+
+    Default ``'full'`` whenever the user hasn't set the symbol, the store
+    is offline, or any lookup error occurs — the soft-fail direction is
+    toward FULL engine management (the protective, capital-preserving
+    default), never silently toward hands-off.
+    """
+    if _SINGLETON is None:
+        return "full"
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return "full"
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return "full"
+        mode = _SINGLETON.get_symbol_management_map(
+            int(user.user_id)
+        ).get((symbol or "").upper())
+        return mode if mode in _VALID_MANAGEMENT_MODES else "full"
+    except Exception as exc:
+        log.debug(
+            "resolve_symbol_management_uid: lookup failed uid={} symbol={} "
+            "({}); defaulting to full",
+            firebase_uid, symbol, type(exc).__name__,
+        )
+        return "full"
 
 
 def is_user_auto_paused_uid(firebase_uid: str) -> bool:

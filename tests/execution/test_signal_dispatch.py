@@ -357,6 +357,78 @@ async def test_dispatch_allows_user_when_setup_and_regime_match_preference(
 
 
 # ---------------------------------------------------------------------------
+# Per-symbol management mode (full vs entry-only — 2026-06-20)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_entry_only_forwards_levers(monkeypatch) -> None:
+    """Entry-only for the symbol → grab_fraction 0, invalidation 'loose',
+    and management_mode='entry' forwarded to place_signal so the FSM lays
+    entry + SL only (no pre-TP, no TP ladder, engine doesn't invalidate)."""
+    from src.api import user_overrides as _uo
+    monkeypatch.setattr(
+        _uo, "resolve_symbol_management_uid", lambda uid, symbol: "entry"
+    )
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-A"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+                regime_label="RANGING",
+                setup_class="SR_FLIP_RETEST",
+            )
+        assert placed == 1
+        kwargs = mock_place.await_args.kwargs
+        assert kwargs["management_mode"] == "entry"
+        assert kwargs["pretp_fraction"] == 0.0
+        assert kwargs["invalidation_mode"] == "loose"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_full_management_is_default(monkeypatch) -> None:
+    """Default (full) leaves the levers untouched — management_mode='full'
+    forwarded, pre-TP fraction non-zero."""
+    from src.api import user_overrides as _uo
+    monkeypatch.setattr(
+        _uo, "resolve_symbol_management_uid", lambda uid, symbol: "full"
+    )
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-A"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+                regime_label="RANGING",
+                setup_class="SR_FLIP_RETEST",
+            )
+        kwargs = mock_place.await_args.kwargs
+        assert kwargs["management_mode"] == "full"
+        assert kwargs["pretp_fraction"] != 0.0
+
+
+# ---------------------------------------------------------------------------
 # Cache TTL
 # ---------------------------------------------------------------------------
 

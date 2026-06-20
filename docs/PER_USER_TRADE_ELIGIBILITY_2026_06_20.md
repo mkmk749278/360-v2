@@ -88,8 +88,30 @@ so a per-user paper picker today would be a scaffold.
 bring the registry-vs-namespaced decision + the per-mode schema split to the
 owner before coding.
 
-## Increment 3 — Per-symbol Full / Entry-only management mode (NEXT)
+## Increment 3 — Per-symbol Full / Entry-only management mode — ✅ SHIPPED (this session)
 
+Implemented by **reusing tested levers** rather than threading a new flag
+through invalidation + reconciler (lower risk):
+- Storage: `user_symbol_management(user_id, symbol, mode)` table; absence ==
+  `full`. `set_symbol_management` (full clears the row), `get_symbol_management_map`,
+  `resolve_symbol_management_uid` (soft-fails to `full` — toward engine management).
+- LIVE dispatch (`dispatch_signal_to_active_users`): when the per-symbol mode is
+  `entry`, set `grab_fraction=0` (no pre-TP), `invalidation_mode='loose'` (engine
+  doesn't invalidate-close — `trade_monitor.py ~2057`), and pass
+  `management_mode='entry'`.
+- FSM (`place_signal`): `management_mode='entry'` → lay NO TP ladder; entry +
+  **protective SL still placed** (never naked — B12/B18 holds).
+- API: `GET`/`PUT /api/settings/user/symbol-management` (`{symbol, mode}`).
+- App: Signals-tab detail sheet now has an "AUTO-TRADE {SYMBOL}" section with two
+  highlightable tiles (Take full / Entry only), persisted per symbol; repo
+  `fetchSymbolManagement` / `setSymbolManagement`.
+- Tests: +6 store/resolver, +2 dispatch (entry-only levers / full default), +1
+  FSM (entry+SL, no bracket).
+
+**Note for the paper increment:** when paper goes per-user, apply the same
+per-symbol management mode on the paper dispatch path too.
+
+### Original behaviour spec (owner-decided)
 **Behaviour (owner-decided):**
 - **Full** (default): current behaviour — engine manages entry, SL, pre-TP, TP
   ladder, invalidation.

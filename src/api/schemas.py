@@ -599,6 +599,21 @@ class UserPretpSettings(PretpSettings):
     )
 
 
+class SymbolManagementUpdate(BaseModel):
+    """Per-(user, symbol) management mode set from the Signals tab.
+
+    ``full`` = engine manages entry + SL + pre-TP + TP ladder +
+    invalidation (default).  ``entry`` = engine places entry + protective
+    SL only, then hands the position to the user (no pre-TP, no TP ladder,
+    engine invalidation does not force-close).  Setting ``full`` clears any
+    stored override (absence == full)."""
+
+    symbol: str = Field(..., description="USDT-M futures symbol, e.g. BTCUSDT.")
+    mode: Literal["full", "entry"] = Field(
+        ..., description="'full' (engine-managed) or 'entry' (entry+SL only)."
+    )
+
+
 class UserAutoTradeSettings(AutoTradeSettings):
     """Per-user auto-trade overrides — same shape as
     :class:`AutoTradeSettings` plus ``using_defaults`` and auto-pause
