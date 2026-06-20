@@ -204,6 +204,12 @@ class Signal:
     # The scorer awards full regime affinity when this is set.
     htf_trend_aligned: bool = False
 
+    # Sub-trigger tag for evaluators that fire on more than one entry shape
+    # (MOVER_TREND_PULLBACK: fast_pullback / deep_pullback / consol_break).
+    # Carried into dispatch_log / signal_history so per-trigger win-rate is
+    # measurable and an underperforming trigger can be disabled independently.
+    entry_trigger: str = ""
+
     # ---- Multi-TF Level Book confluence (PR-6) ----
     # Number of distinct multi-TF S/R levels (incl. round numbers) within
     # CONFLUENCE_QUERY_TOLERANCE_PCT of entry.  ≥2 earns a soft-penalty bonus.
