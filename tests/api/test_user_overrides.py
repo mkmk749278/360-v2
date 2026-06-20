@@ -244,6 +244,174 @@ def test_symbol_preference_round_trips_via_get(
 
 
 # ---------------------------------------------------------------------------
+# path_preference / regime_preference (per-user path + regime picker —
+# 2026-06-20).  LIVE trade-eligibility filters consumed at dispatch.
+# ---------------------------------------------------------------------------
+
+
+def test_path_preference_persists_as_canonical_uppercase(
+    store: UserOverridesStore,
+) -> None:
+    out = store.update_auto_trade(
+        1, {"path_preference": ["sr_flip_retest", "DIVERGENCE_CONTINUATION",
+                                "sr_flip_retest"]}
+    )
+    assert out["path_preference"] == ["DIVERGENCE_CONTINUATION", "SR_FLIP_RETEST"]
+
+
+def test_path_preference_empty_list_persists_as_block_all(
+    store: UserOverridesStore,
+) -> None:
+    """Empty list ≠ None — mirrors symbol_preference block-all semantics."""
+    out = store.update_auto_trade(1, {"path_preference": []})
+    assert out["path_preference"] == []
+
+
+def test_path_preference_none_clears(store: UserOverridesStore) -> None:
+    store.update_auto_trade(1, {"path_preference": ["SR_FLIP_RETEST"]})
+    out = store.update_auto_trade(1, {"path_preference": None})
+    assert "path_preference" not in out
+
+
+def test_regime_preference_normalises_ui_tokens_to_backend(
+    store: UserOverridesStore,
+) -> None:
+    """App sends UI tokens (TRENDING/RANGING/CHOPPY); stored as backend
+    regime labels so the dispatcher can compare ``regime_label`` directly."""
+    out = store.update_auto_trade(1, {"regime_preference": ["trending", "RANGING"]})
+    assert out["regime_preference"] == ["RANGING", "TRENDING_DOWN", "TRENDING_UP"]
+
+
+def test_regime_preference_none_clears(store: UserOverridesStore) -> None:
+    store.update_auto_trade(1, {"regime_preference": ["RANGING"]})
+    out = store.update_auto_trade(1, {"regime_preference": None})
+    assert "regime_preference" not in out
+
+
+def test_path_and_regime_survive_other_field_updates(
+    store: UserOverridesStore,
+) -> None:
+    store.update_auto_trade(
+        1,
+        {"path_preference": ["BREAKDOWN_SHORT"], "regime_preference": ["RANGING"]},
+    )
+    out = store.update_auto_trade(1, {"notional_usd": 250.0})
+    assert out["path_preference"] == ["BREAKDOWN_SHORT"]
+    assert out["regime_preference"] == ["RANGING"]
+    assert out["notional_usd"] == 250.0
+
+
+def test_path_regime_round_trip_via_get(store: UserOverridesStore) -> None:
+    store.update_auto_trade(
+        1,
+        {"path_preference": ["FAILED_AUCTION_RECLAIM"],
+         "regime_preference": ["CHOPPY"]},
+    )
+    out = store.get_auto_trade(1)
+    assert out["path_preference"] == ["FAILED_AUCTION_RECLAIM"]
+    # CHOPPY → VOLATILE + QUIET
+    assert out["regime_preference"] == ["QUIET", "VOLATILE"]
+
+
+def test_resolve_auto_trade_preferences_uid_semantics(
+    store: UserOverridesStore, monkeypatch,
+) -> None:
+    """None (unset) → None (allow-all); empty list → empty frozenset
+    (block-all); populated list → frozenset of allowed tokens."""
+    import src.api.user_overrides as uo
+
+    class _User:
+        user_id = 1
+
+    class _UserStore:
+        def get_by_firebase_uid(self, _uid):
+            return _User()
+
+    monkeypatch.setattr(uo, "_SINGLETON", store, raising=False)
+    import src.api.users as _users
+    monkeypatch.setattr(_users, "get_singleton", lambda: _UserStore())
+
+    # Unset → allow-all.
+    path_fs, regime_fs = uo.resolve_auto_trade_preferences_uid("uid")
+    assert path_fs is None and regime_fs is None
+
+    # Populated → frozensets.
+    store.update_auto_trade(
+        1, {"path_preference": ["SR_FLIP_RETEST"], "regime_preference": ["RANGING"]}
+    )
+    path_fs, regime_fs = uo.resolve_auto_trade_preferences_uid("uid")
+    assert path_fs == frozenset({"SR_FLIP_RETEST"})
+    assert regime_fs == frozenset({"RANGING"})
+
+    # Explicit empty → block-all (empty frozenset, NOT None).
+    store.update_auto_trade(1, {"path_preference": []})
+    path_fs, _ = uo.resolve_auto_trade_preferences_uid("uid")
+    assert path_fs == frozenset()
+    assert path_fs is not None
+
+
+# ---------------------------------------------------------------------------
+# Per-symbol management mode (Signals-tab full vs entry — 2026-06-20)
+# ---------------------------------------------------------------------------
+
+
+def test_symbol_management_empty_for_new_user(store: UserOverridesStore) -> None:
+    assert store.get_symbol_management_map(1) == {}
+
+
+def test_symbol_management_set_entry_persists(store: UserOverridesStore) -> None:
+    out = store.set_symbol_management(1, "btcusdt", "entry")
+    assert out == {"BTCUSDT": "entry"}
+    assert store.get_symbol_management_map(1) == {"BTCUSDT": "entry"}
+
+
+def test_symbol_management_full_clears_row(store: UserOverridesStore) -> None:
+    """`full` is the default — storing it just deletes the override so we
+    never persist rows that restate the default."""
+    store.set_symbol_management(1, "BTCUSDT", "entry")
+    out = store.set_symbol_management(1, "BTCUSDT", "full")
+    assert out == {}
+    assert store.get_symbol_management_map(1) == {}
+
+
+def test_symbol_management_rejects_invalid_mode(store: UserOverridesStore) -> None:
+    out = store.set_symbol_management(1, "BTCUSDT", "yolo")
+    assert out == {}
+
+
+def test_symbol_management_isolated_per_user(store: UserOverridesStore) -> None:
+    store.set_symbol_management(1, "BTCUSDT", "entry")
+    store.set_symbol_management(2, "ETHUSDT", "entry")
+    assert store.get_symbol_management_map(1) == {"BTCUSDT": "entry"}
+    assert store.get_symbol_management_map(2) == {"ETHUSDT": "entry"}
+
+
+def test_resolve_symbol_management_uid_default_full_then_entry(
+    store: UserOverridesStore, monkeypatch,
+) -> None:
+    import src.api.user_overrides as uo
+
+    class _User:
+        user_id = 1
+
+    class _UserStore:
+        def get_by_firebase_uid(self, _uid):
+            return _User()
+
+    monkeypatch.setattr(uo, "_SINGLETON", store, raising=False)
+    import src.api.users as _users
+    monkeypatch.setattr(_users, "get_singleton", lambda: _UserStore())
+
+    # Unset → full (the protective default).
+    assert uo.resolve_symbol_management_uid("uid", "BTCUSDT") == "full"
+    # Set entry → entry; case-insensitive symbol match.
+    store.set_symbol_management(1, "BTCUSDT", "entry")
+    assert uo.resolve_symbol_management_uid("uid", "btcusdt") == "entry"
+    # A different symbol is still full.
+    assert uo.resolve_symbol_management_uid("uid", "ETHUSDT") == "full"
+
+
+# ---------------------------------------------------------------------------
 # Persistence
 # ---------------------------------------------------------------------------
 

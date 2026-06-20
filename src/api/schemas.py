@@ -537,6 +537,29 @@ class AutoTradeSettings(BaseModel):
             "only narrow, never widen, per OWNER_BRIEF B18."
         ),
     )
+    path_preference: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "User-chosen subset of evaluator paths (setup classes) eligible "
+            "to auto-trade LIVE for this user — the path analogue of "
+            "``symbol_preference``.  ``None`` = all paths (default, no "
+            "narrowing).  Non-empty list = 'only these paths may auto-trade "
+            "for me'.  Empty list = block all.  Consumed at live dispatch "
+            "(``dispatch_signal_to_active_users``); the signal is still "
+            "delivered to Telegram / Pulse regardless."
+        ),
+    )
+    regime_preference: Optional[list[str]] = Field(
+        default=None,
+        description=(
+            "User-chosen subset of entry regimes eligible to auto-trade "
+            "LIVE.  Accepts the UI tokens TRENDING / RANGING / CHOPPY, which "
+            "the server normalises onto backend regime labels "
+            "(TRENDING_UP/DOWN, RANGING, VOLATILE, QUIET).  ``None`` = all "
+            "regimes (default).  Non-empty list = 'only these regimes may "
+            "auto-trade for me'.  Empty list = block all."
+        ),
+    )
     notional_usd: Optional[float] = Field(
         default=None,
         ge=5.0,
@@ -573,6 +596,21 @@ class UserPretpSettings(PretpSettings):
         description="True when the user has no override row — every "
         "value above is the engine default.  False when at least one "
         "field has been overridden.",
+    )
+
+
+class SymbolManagementUpdate(BaseModel):
+    """Per-(user, symbol) management mode set from the Signals tab.
+
+    ``full`` = engine manages entry + SL + pre-TP + TP ladder +
+    invalidation (default).  ``entry`` = engine places entry + protective
+    SL only, then hands the position to the user (no pre-TP, no TP ladder,
+    engine invalidation does not force-close).  Setting ``full`` clears any
+    stored override (absence == full)."""
+
+    symbol: str = Field(..., description="USDT-M futures symbol, e.g. BTCUSDT.")
+    mode: Literal["full", "entry"] = Field(
+        ..., description="'full' (engine-managed) or 'entry' (entry+SL only)."
     )
 
 

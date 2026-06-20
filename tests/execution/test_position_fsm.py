@@ -812,6 +812,45 @@ async def test_place_signal_places_entry_then_sl_then_3_tps() -> None:
 
 
 @pytest.mark.asyncio
+async def test_place_signal_entry_only_places_entry_and_sl_no_bracket() -> None:
+    """management_mode='entry' → engine places the MARKET entry + the
+    protective SL (never naked) but lays NO TP ladder and NO pre-TP LIMIT.
+    The user owns the exit from there.  Caller pairs this with
+    pretp_fraction=0, so the pre-TP block is also skipped."""
+    placer = _placer_with_mock_results()
+    persisted: list = []
+    with patch.object(
+        position_state, "put_position", side_effect=lambda p: persisted.append(p)
+    ):
+        result = await position_fsm.place_signal(
+            firebase_uid="fb-x",
+            signal_id="sig-1",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+            total_qty=1.0,
+            tp1_qty=0.3,
+            tp2_qty=0.4,
+            tp3_qty=0.3,
+            pretp_fraction=0.0,        # caller suppresses pre-TP for entry-only
+            invalidation_mode="loose",  # caller sets loose so engine won't kill
+            management_mode="entry",
+            order_placer_factory=lambda uid: placer,
+        )
+    # Entry + protective SL still placed — never naked.
+    placer.place_market_entry.assert_awaited_once()
+    placer.place_stop_loss.assert_awaited_once()
+    assert result.sl_order_id == 2001
+    # No TP ladder, no pre-TP LIMIT — the user manages the exit.
+    assert placer.place_take_profit.await_count == 0
+    placer.place_pretp_limit.assert_not_called()
+
+
+@pytest.mark.asyncio
 async def test_place_signal_propagates_entry_failure() -> None:
     """Entry placement failure must raise — caller (orchestrator)
     decides retry / mark-user-disabled / Telegram-alert.  The

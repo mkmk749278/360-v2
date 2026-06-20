@@ -117,6 +117,8 @@ _AUTO_TRADE_KEYS = frozenset({
     "leverage_cap",
     "max_concurrent_positions",
     "symbol_preference",
+    "path_preference",
+    "regime_preference",
     "notional_usd",
 })
 
@@ -188,6 +190,8 @@ CREATE TABLE IF NOT EXISTS user_auto_trade_settings (
     leverage_cap             REAL,
     max_concurrent_positions INTEGER,
     symbol_preference        TEXT,     -- JSON list[str] or NULL = all
+    path_preference          TEXT,     -- JSON list[setup_class] or NULL = all paths; [] = block all
+    regime_preference        TEXT,     -- JSON list[backend regime] or NULL = all regimes; [] = block all
     notional_usd             REAL,     -- per-user notional cap; NULL = engine default ($500)
     updated_at               TEXT    NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
@@ -213,6 +217,27 @@ CREATE TABLE IF NOT EXISTS user_paper_subscriptions (
 CREATE INDEX IF NOT EXISTS idx_user_paper_subs_user_started
 ON user_paper_subscriptions(user_id, started_at DESC);
 """
+
+# 2026-06-20 — per-(user, symbol) management mode for the Signals-tab
+# "take full vs entry-only" choice.  ``full`` (default; absence of a row)
+# = engine manages entry + SL + pre-TP + TP ladder + invalidation.
+# ``entry`` = engine places entry + protective SL only, then hands the
+# position to the user (no pre-TP, no TP ladder, engine invalidation
+# does not force-close — honoured at dispatch via grab_fraction=0 +
+# invalidation_mode='loose' + skip-TP-bracket).  The protective SL is
+# always placed, so the naked-position invariant (B12/B18) holds.
+_SYMBOL_MGMT_SCHEMA = """
+CREATE TABLE IF NOT EXISTS user_symbol_management (
+    user_id    INTEGER NOT NULL,
+    symbol     TEXT    NOT NULL,
+    mode       TEXT    NOT NULL,   -- 'full' | 'entry'
+    updated_at TEXT    NOT NULL,
+    PRIMARY KEY (user_id, symbol),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+"""
+
+_VALID_MANAGEMENT_MODES: FrozenSet[str] = frozenset({"full", "entry"})
 
 
 def _now_iso() -> str:
@@ -360,6 +385,29 @@ def _coerce_auto_trade(raw: Dict[str, Any]) -> Dict[str, Any]:
                         if tok and tok.endswith("USDT") and tok.isalnum():
                             cleaned.append(tok)
                 out[key] = sorted(set(cleaned))  # canonical form
+        elif key == "path_preference":
+            # User-chosen subset of signal evaluator paths (setup classes)
+            # eligible to auto-trade live for this user.  Mirrors
+            # ``symbol_preference`` semantics exactly: ``None`` (handled
+            # above) = no preference → all paths; a list (incl. empty) =
+            # "only these paths may auto-trade for me" (empty = block all).
+            # Stored uppercase + canonical-sorted; the dispatch gate
+            # compares against ``setup_class.upper()``.  Permissive on the
+            # token set (a value the engine never emits simply never
+            # matches → no trades for it), matching ``setup_allowlist``.
+            if isinstance(value, list):
+                out[key] = sorted({
+                    s.strip().upper() for s in value
+                    if isinstance(s, str) and s.strip()
+                })
+        elif key == "regime_preference":
+            # User-chosen subset of entry regimes eligible to auto-trade
+            # live.  ``_normalise_regime_input`` maps the app's UI tokens
+            # (TRENDING / RANGING / CHOPPY) onto the backend regime labels
+            # (TRENDING_UP/DOWN, RANGING, VOLATILE, QUIET) the dispatcher
+            # compares ``regime_label`` against.  A non-None list that
+            # normalises to ``[]`` means "block all" (mirrors symbol []).
+            out[key] = _normalise_regime_input(value)
         elif key == "notional_usd":
             # Per-user notional cap.  Clamp into the [_NOTIONAL_USD_MIN,
             # _NOTIONAL_USD_MAX] band — silently fixing rather than
@@ -404,13 +452,38 @@ class UserOverridesStore:
         # on a cross-store write collision under the thread pool.
         self._conn.execute("PRAGMA busy_timeout=5000")
         self._conn.execute("PRAGMA foreign_keys=ON")
-        self._conn.executescript(_PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA)
+        self._conn.executescript(
+            _PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA
+            + _SYMBOL_MGMT_SCHEMA
+        )
         self._migrate_pretp_grab_fraction()
         self._migrate_pretp_protect_manual_entries()
         self._migrate_auto_trade_symbol_preference()
+        self._migrate_auto_trade_path_regime_preference()
         self._migrate_auto_trade_notional_usd()
         self._migrate_auto_trade_pause_columns()
         log.info("UserOverridesStore opened at {}", self._path)
+
+    def _migrate_auto_trade_path_regime_preference(self) -> None:
+        """Idempotent ALTER for the ``path_preference`` / ``regime_preference``
+        columns (2026-06-20 per-user path + regime picker).
+
+        Mirrors ``symbol_preference``: NULL on existing rows means "no
+        preference — all paths / all regimes eligible" (default-all UX).
+        Stored as TEXT (JSON list of strings).  Consumed at LIVE dispatch
+        as trade-eligibility filters (``dispatch_signal_to_active_users``).
+        """
+        cur = self._conn.execute("PRAGMA table_info(user_auto_trade_settings)")
+        cols = {row["name"] for row in cur.fetchall()}
+        for col in ("path_preference", "regime_preference"):
+            if col not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE user_auto_trade_settings ADD COLUMN {col} TEXT"
+                )
+                log.info(
+                    "UserOverridesStore: added user_auto_trade_settings.{} "
+                    "column (2026-06-20 per-user path/regime picker)", col,
+                )
 
     def _migrate_auto_trade_notional_usd(self) -> None:
         """Idempotent ALTER for the ``notional_usd`` column.
@@ -721,19 +794,30 @@ class UserOverridesStore:
             sym_pref_json = (
                 json.dumps(sym_pref) if isinstance(sym_pref, list) else None
             )
+            path_pref = merged.get("path_preference")
+            path_pref_json = (
+                json.dumps(path_pref) if isinstance(path_pref, list) else None
+            )
+            regime_pref = merged.get("regime_preference")
+            regime_pref_json = (
+                json.dumps(regime_pref) if isinstance(regime_pref, list) else None
+            )
             self._conn.execute(
                 """
                 INSERT INTO user_auto_trade_settings (
                     user_id, mode, position_size_pct, leverage_cap,
                     max_concurrent_positions, symbol_preference,
+                    path_preference, regime_preference,
                     notional_usd, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     mode = excluded.mode,
                     position_size_pct = excluded.position_size_pct,
                     leverage_cap = excluded.leverage_cap,
                     max_concurrent_positions = excluded.max_concurrent_positions,
                     symbol_preference = excluded.symbol_preference,
+                    path_preference = excluded.path_preference,
+                    regime_preference = excluded.regime_preference,
                     notional_usd = excluded.notional_usd,
                     updated_at = excluded.updated_at
                 """,
@@ -744,6 +828,8 @@ class UserOverridesStore:
                     merged.get("leverage_cap"),
                     merged.get("max_concurrent_positions"),
                     sym_pref_json,
+                    path_pref_json,
+                    regime_pref_json,
                     merged.get("notional_usd"),
                     now,
                 ),
@@ -765,6 +851,52 @@ class UserOverridesStore:
                 elif prior_mode == "paper":
                     self._close_paper_subscription_locked(int(user_id), now)
             return self.get_auto_trade(user_id)
+
+    # ---- per-symbol management mode (Signals-tab full vs entry) ---------
+
+    def get_symbol_management_map(self, user_id: int) -> Dict[str, str]:
+        """Return ``{SYMBOL: mode}`` for every symbol the user has set to a
+        non-default mode.  Absent symbols default to ``full`` — the caller
+        treats a missing key as full management."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT symbol, mode FROM user_symbol_management "
+                "WHERE user_id = ?",
+                (int(user_id),),
+            )
+            return {row["symbol"]: row["mode"] for row in cur.fetchall()}
+
+    def set_symbol_management(
+        self, user_id: int, symbol: str, mode: str,
+    ) -> Dict[str, str]:
+        """Upsert the management mode for one (user, symbol).  Setting
+        ``full`` (the default) DELETES the row — absence == full, so we
+        never store rows that just restate the default.  Invalid symbols
+        / modes are dropped.  Returns the rebuilt map."""
+        sym = (symbol or "").strip().upper()
+        m = (mode or "").strip().lower()
+        if not sym or m not in _VALID_MANAGEMENT_MODES:
+            return self.get_symbol_management_map(user_id)
+        with self._lock:
+            if m == "full":
+                self._conn.execute(
+                    "DELETE FROM user_symbol_management "
+                    "WHERE user_id = ? AND symbol = ?",
+                    (int(user_id), sym),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO user_symbol_management
+                        (user_id, symbol, mode, updated_at)
+                    VALUES (?, ?, ?, ?)
+                    ON CONFLICT(user_id, symbol) DO UPDATE SET
+                        mode = excluded.mode,
+                        updated_at = excluded.updated_at
+                    """,
+                    (int(user_id), sym, m, _now_iso()),
+                )
+            return self.get_symbol_management_map(user_id)
 
     # ---- paper subscription windows -------------------------------------
 
@@ -1017,6 +1149,16 @@ class UserOverridesStore:
 
     async def aresume_user_auto_trade(self, user_id: int) -> bool:
         return await asyncio.to_thread(self.resume_user_auto_trade, user_id)
+
+    async def aget_symbol_management_map(self, user_id: int) -> Dict[str, str]:
+        return await asyncio.to_thread(self.get_symbol_management_map, user_id)
+
+    async def aset_symbol_management(
+        self, user_id: int, symbol: str, mode: str,
+    ) -> Dict[str, str]:
+        return await asyncio.to_thread(
+            self.set_symbol_management, user_id, symbol, mode
+        )
 
     def close(self) -> None:
         with self._lock:
@@ -1341,6 +1483,91 @@ def resolve_user_mode_uid(firebase_uid: str) -> Optional[str]:
         return None
 
 
+def resolve_auto_trade_preferences_uid(
+    firebase_uid: str,
+) -> Tuple[Optional[FrozenSet[str]], Optional[FrozenSet[str]]]:
+    """Return ``(path_preference, regime_preference)`` for the user as
+    LIVE trade-eligibility filters.
+
+    Each element is either ``None`` ("no preference set — every path /
+    regime is eligible", the default-all path) or a frozenset of the
+    allowed values.  An **empty** frozenset is meaningful and distinct
+    from ``None``: it means the user explicitly chose nothing, so *no*
+    signal matches → block-all (mirrors ``symbol_preference == []``).
+
+    Soft-fail pattern matches the other ``*_uid`` resolvers: any lookup
+    error returns ``(None, None)`` so a store blip never silently blocks
+    a user's live dispatch.  ``regime`` values are stored already
+    normalised to backend labels (``TRENDING_UP`` …) by
+    ``_normalise_regime_input`` at write time, so the dispatcher can
+    compare ``regime_label.upper()`` directly.
+    """
+    if _SINGLETON is None:
+        return None, None
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return None, None
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return None, None
+        row = _SINGLETON.get_auto_trade(int(user.user_id))
+        path_raw = row.get("path_preference")
+        regime_raw = row.get("regime_preference")
+        path_fs = (
+            frozenset(str(s).upper() for s in path_raw)
+            if isinstance(path_raw, list)
+            else None
+        )
+        regime_fs = (
+            frozenset(str(r).upper() for r in regime_raw)
+            if isinstance(regime_raw, list)
+            else None
+        )
+        return path_fs, regime_fs
+    except Exception as exc:
+        log.debug(
+            "resolve_auto_trade_preferences_uid: lookup failed uid={} ({}); "
+            "defaulting to allow-all",
+            firebase_uid, type(exc).__name__,
+        )
+        return None, None
+
+
+def resolve_symbol_management_uid(firebase_uid: str, symbol: str) -> str:
+    """Return the per-(user, symbol) management mode — ``'full'`` (engine
+    manages entry+SL+pre-TP+TP+invalidation) or ``'entry'`` (engine places
+    entry + protective SL only, user manages the rest).
+
+    Default ``'full'`` whenever the user hasn't set the symbol, the store
+    is offline, or any lookup error occurs — the soft-fail direction is
+    toward FULL engine management (the protective, capital-preserving
+    default), never silently toward hands-off.
+    """
+    if _SINGLETON is None:
+        return "full"
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return "full"
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return "full"
+        mode = _SINGLETON.get_symbol_management_map(
+            int(user.user_id)
+        ).get((symbol or "").upper())
+        return mode if mode in _VALID_MANAGEMENT_MODES else "full"
+    except Exception as exc:
+        log.debug(
+            "resolve_symbol_management_uid: lookup failed uid={} symbol={} "
+            "({}); defaulting to full",
+            firebase_uid, symbol, type(exc).__name__,
+        )
+        return "full"
+
+
 def is_user_auto_paused_uid(firebase_uid: str) -> bool:
     """Firebase-UID-keyed wrapper around :meth:`UserOverridesStore.
     is_user_auto_paused`. Mirrors :func:`resolve_notional_usd` — same
@@ -1446,6 +1673,8 @@ _AUTO_TRADE_COL_TYPES: Dict[str, str] = {
     "leverage_cap": "float",
     "max_concurrent_positions": "int",
     "symbol_preference": "json_list",
+    "path_preference": "json_list",
+    "regime_preference": "json_list",
     "notional_usd": "float",
     "paused_reason": "str",
     "paused_at": "str",

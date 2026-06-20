@@ -890,6 +890,7 @@ async def place_signal(
     pretp_threshold_pct: float = 0.32,  # §3.2a default — raw %
     pretp_fraction: float = 0.5,  # B17 engine default — must be in [0.3, 1.0]
     invalidation_mode: str = "standard",  # B17: "loose" / "standard" / "tight"
+    management_mode: str = "full",  # "full" | "entry" (per-symbol, 2026-06-20)
     entry_regime: str = "",        # 5m Hurst-gated regime at entry
     entry_regime_15m: str = "",    # 15m stateless regime at entry
     atr_percentile_at_entry: float = 50.0,
@@ -1207,7 +1208,14 @@ async def place_signal(
     # threshold" profile) there is no residual to ride, so placing TP legs
     # would just lay reduce-only orders that get cancelled the moment the
     # pre-TP LIMIT fills.  Skip them.
-    _place_tp_bracket = pretp_fraction_clamped < 1.0
+    #
+    # Entry-only management (2026-06-20): the user owns the exit, so the
+    # engine lays NO TP ladder (and the caller already sets pretp_fraction=0
+    # + invalidation_mode='loose').  The protective SL above is still placed
+    # — entry-only is never naked — so the B12/B18 invariant holds.
+    _place_tp_bracket = (
+        pretp_fraction_clamped < 1.0 and management_mode != "entry"
+    )
     for tp_phase, tp_price, tp_qty_value in (
         ("tp1", tp1_price, tp1_qty),
         ("tp2", tp2_price, tp2_qty),

@@ -451,6 +451,38 @@ async def dispatch_signal_to_active_users(
             )
             return False
 
+        # Per-user path + regime trade-eligibility gate (2026-06-20).
+        # The user picks which evaluator paths (setup classes) and which
+        # entry regimes are allowed to auto-trade live for them — the
+        # path/regime analogue of ``symbol_preference``.  ``None`` = no
+        # preference (every path / regime eligible).  A configured set
+        # (incl. the explicit empty set = block-all) means "only these
+        # auto-trade for me".  Skip silently here — before the signing
+        # service, sizing, or any dispatch_log row — exactly like the
+        # mode gate above, so an unwanted path/regime never fires an
+        # order.  This is the LIVE eligibility filter; the engine-wide
+        # symbol allowlist + per-user symbol gate (position_fsm) still
+        # apply on top.
+        _path_pref, _regime_pref = _uo.resolve_auto_trade_preferences_uid(uid)
+        if _path_pref is not None:
+            _setup_tok = (setup_class or "").upper()
+            if _setup_tok not in _path_pref:
+                log.info(
+                    "signal_dispatch: skipping user uid={} signal_id={} — "
+                    "setup {} not in user path preference (size={})",
+                    uid, signal_id, _setup_tok or "<none>", len(_path_pref),
+                )
+                return False
+        if _regime_pref is not None:
+            _regime_tok = (regime_label or "").upper()
+            if _regime_tok not in _regime_pref:
+                log.info(
+                    "signal_dispatch: skipping user uid={} signal_id={} — "
+                    "regime {} not in user regime preference (size={})",
+                    uid, signal_id, _regime_tok or "<none>", len(_regime_pref),
+                )
+                return False
+
         # Per-user notional override (2026-05-20).  Each user can
         # set their own ``notional_usd`` via the auto-trade settings
         # page; falls back to ``_DEFAULT_NOTIONAL_USD`` ($500) when
@@ -633,6 +665,24 @@ async def dispatch_signal_to_active_users(
         user_invalidation_mode = _uo.resolve_invalidation_mode_uid(
             uid, str(_DEFAULT_INV_MODE or "standard")
         )
+        # Per-symbol management mode (Signals-tab full vs entry, 2026-06-20).
+        # "entry" = engine places entry + protective SL only, then hands the
+        # position to the user.  Implemented by reusing tested levers:
+        #   • grab_fraction → 0   → no pre-TP LIMIT / no tick-based pre-TP
+        #   • invalidation  → loose → engine invalidation does not force-close
+        #                            (loose-mode FSM positions survive engine
+        #                            invalidations — trade_monitor.py ~2057)
+        #   • management_mode='entry' → place_signal lays NO TP ladder
+        # The SL is still placed, so the naked-position invariant holds.
+        management_mode = _uo.resolve_symbol_management_uid(uid, symbol)
+        if management_mode == "entry":
+            user_grab_fraction = 0.0
+            user_invalidation_mode = "loose"
+            log.info(
+                "signal_dispatch: ENTRY-ONLY management uid={} symbol={} "
+                "signal_id={} — entry + SL only, user manages the rest",
+                uid, symbol, signal_id,
+            )
         total_qty, tp1_qty, tp2_qty, tp3_qty = _compute_qty_split(
             symbol, entry_price, notional_usd=user_notional,
         )
@@ -707,6 +757,7 @@ async def dispatch_signal_to_active_users(
                 pretp_threshold_pct=user_pretp_threshold,
                 pretp_fraction=user_grab_fraction,
                 invalidation_mode=user_invalidation_mode,
+                management_mode=management_mode,
                 entry_regime=regime_label or "",
                 entry_regime_15m=regime_label_15m or "",
                 atr_percentile_at_entry=float(atr_percentile),
