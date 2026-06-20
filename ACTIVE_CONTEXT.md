@@ -41,12 +41,54 @@ Scope note: path/regime + per-symbol management are the **LIVE** filters today
 (live dispatcher is per-user). Paper selectors + per-symbol management on paper
 land with Increment 2.
 
-### NEXT (designed in `docs/PER_USER_TRADE_ELIGIBILITY_2026_06_20.md`, owner-sign-off)
-1. **Per-user paper engine** — turn the single shared `PaperOrderManager` into a
-   per-user simulation + per-user paper dispatch path, then add `paper_*`
-   preference columns + Paper selectors + per-symbol management on paper.
-   (Money-path-adjacent; bring registry-vs-namespaced + per-mode schema decision
-   to owner first.) **This is the remaining piece of "individual paper + live".**
+### Per-user paper engine — Phase 3 (PR #636, owner-sign-off, NOT merged)
+Owner decisions this session: **isolated paper registry** (not in-FSM); **namespace
+per user, one source** (no duplication; engine-wide paper = aggregate of per-user
+books); **per-user only** (paper fires only for paper/both opt-in — operator opts in
+like any user; no always-on operator book).
+
+**Built + unit-tested (inert — every change additive/defaulted; existing suites pass
+unchanged; 46 tests green):**
+- `paper_symbol/path/regime_preference` columns + migration + coerce +
+  `resolve_paper_preferences_uid` (independent of the live triple).
+- `PaperOrderManager` per-user `pnl_path` / `trades_db_path` / `pnl_history_mode`
+  (default = legacy shared paths → inert).
+- `trade_records`: every helper takes optional `db_path` (per-user SQLite files);
+  `iter_user_db_paths` + `list_trades_all_users` / `count_trades_all_users` aggregate.
+- `src/execution/paper_book_registry.py` — `PaperBookRegistry` (one book/user) +
+  `PaperBookFanout` (drop-in for the single `PaperOrderManager`; fans lifecycle out
+  to eligible users; entry-only skips pre-TP/TP, survives invalidation, closes on SL).
+
+**ACTIVATION LANDED — gated behind `PAPER_PER_USER_BOOKS` (default OFF), atomic
+write+read flip, both flag states fully wired (owner approved "gated, default OFF"
+2026-06-20). Engine #1/#2 below DONE; app + ops (#3/#4) still pending.**
+- `config.PAPER_PER_USER_BOOKS` (default `false`) + `PAPER_BOOKS_DIR` — kill switch,
+  not a dark flag. OFF = legacy shared-book path untouched; ON = per-user fanout.
+- `main.py._build_paper_order_manager()` builds the fanout at BOTH construction sites
+  (boot + `set_auto_execution_mode`); `PaperBookRegistry` now threads position sizing +
+  a **per-user RiskManager factory** (each book gets its own daily-loss/concurrency
+  limits — no shared global paper cap).
+- `pnl_history` aggregate readers (`get_*_aggregate("paper")` / `reset_aggregate`) sum
+  `paper:*`; fanout gains `positions_for_user` / merged `_positions` / `pnl_history_mode_for`
+  / `trades_db_path_for`.
+- Read repoint (gated; OFF → unchanged window path): `build_pulse`, `build_positions`,
+  `build_auto_mode` header + engine-wide aggregate, `build_pnl_history` read per-user;
+  `/api/trades` lists the user's own DB via `list_trades(db_path=…)`; paper reset wipes
+  every `paper:<uid>` bucket.
+- **First unit coverage for the (previously untested) snapshot builders** — per-user
+  isolation (no cross-user PnL leak) + OFF-path fallback. 61 tests green.
+
+**VALIDATION GATE (before promoting ON to default):** merge to `main` (deploys OFF, no
+behavior change) → set `PAPER_PER_USER_BOOKS=true` + restart paper engine on the VPS →
+confirm per-user snapshots populate + `data/paper_books/paper_*_user_<uid>.*` files
+appear → then flip ON as the default.
+
+**REMAINING:**
+3. App **paper** eligibility selectors + per-symbol management on paper (lumin-app).
+4. 360ce-ops engine-wide paper reads → `paper:*` aggregate.
+
+Sign-off flags raised to owner: (a) per-user RiskManagers = no global paper risk cap;
+(b) operator paper-reset wipes all users' buckets. Both deemed correct defaults.
 
 ---
 

@@ -236,17 +236,32 @@ class PaperOrderManager:
         max_position_usd: float = MAX_POSITION_USD,
         starting_equity_usd: float = 1000.0,
         risk_manager: Optional[Any] = None,
+        pnl_path: Optional[Path] = None,
+        trades_db_path: Optional[Path] = None,
+        pnl_history_mode: str = "paper",
     ) -> None:
         self._position_size_pct = position_size_pct
         self._max_position_usd = max_position_usd
         self._starting_equity = starting_equity_usd
+        # Per-user paper book persistence (2026-06-20): when a ``pnl_path``
+        # is supplied (by ``PaperBookRegistry``), this book loads/persists
+        # its own ledger so each user's paper PnL is isolated.  ``None`` =
+        # the legacy single shared ledger path (``_resolve_paper_pnl_path``).
+        self._pnl_path = pnl_path
+        # Per-user structured trade ledger + daily-bucket history namespace.
+        # ``trades_db_path`` → an isolated SQLite file per user (``None`` =
+        # the shared ``paper_trades.sqlite``).  ``pnl_history_mode`` → the
+        # daily-bucket key (``"paper"`` shared, ``"paper:<uid>"`` per user)
+        # so each user's "today's P&L" chart is their own.
+        self._trades_db_path = trades_db_path
+        self._pnl_history_mode = pnl_history_mode
         # Persistence (2026-05-08) — load any prior cumulative paper-PnL
         # so the dashboard "Paper total since boot" survives engine
         # restarts and paper↔live mode toggles.  Available equity is
         # reseeded from starting + persisted PnL so position sizing
         # reflects the paper account's true balance on resume.  Open
         # positions stay ephemeral (signal-history layer owns lifecycle).
-        _persisted = _load_paper_pnl_state()
+        _persisted = _load_paper_pnl_state(self._pnl_path)
         self._available_equity = starting_equity_usd + _persisted
         self._positions: Dict[str, _PaperPosition] = {}
         # Cumulative realised PnL — seeded from disk (see comment above).
@@ -313,7 +328,7 @@ class PaperOrderManager:
         """
         self._realised_pnl_total = 0.0
         self._available_equity = self._starting_equity
-        reset_paper_pnl_state()
+        reset_paper_pnl_state(self._pnl_path)
         log.info(
             "PaperOrderManager.reset_state: equity → ${:.2f}, cumulative PnL → $0.00",
             self._starting_equity,
@@ -533,6 +548,7 @@ class PaperOrderManager:
                 qty=quantity,
                 leverage=leverage_at_open,
                 position_size_pct=pos_pct_at_open,
+                db_path=self._trades_db_path,
             )
         except Exception:
             # The per-trade ledger is a visibility feature — failures here
@@ -632,10 +648,10 @@ class PaperOrderManager:
         self._available_equity += position.entry * close_qty + pnl
         # Persist cumulative PnL so the dashboard "Paper total since boot"
         # survives engine restarts and paper↔live mode toggles.
-        _persist_paper_pnl_state(self._realised_pnl_total)
+        _persist_paper_pnl_state(self._realised_pnl_total, self._pnl_path)
         # Append to the daily-bucketed history ledger powering the
         # weekly / monthly aggregates and the dashboard PnL chart.
-        pnl_history.record_close("paper", pnl)
+        pnl_history.record_close(self._pnl_history_mode, pnl)
         # Per-trade SQLite store — append a fill event so the dashboard's
         # trade-detail view can show the TP-by-TP breakdown.
         try:
@@ -646,6 +662,7 @@ class PaperOrderManager:
                 fill_price=fill_price,
                 pnl_usd=pnl,
                 fee_usd=total_fee_this_fill,
+                db_path=self._trades_db_path,
             )
         except Exception:
             log.exception(
@@ -682,6 +699,7 @@ class PaperOrderManager:
                     gross_pnl_usd=position.total_gross_pnl_usd,
                     fees_usd=position.total_fees_usd,
                     net_pnl_usd=position.realised_pnl_usd,
+                    db_path=self._trades_db_path,
                 )
             except Exception:
                 log.exception(
@@ -894,10 +912,10 @@ class PaperOrderManager:
         self._available_equity += position.entry * remaining_qty + pnl
         # Persist cumulative PnL so the dashboard "Paper total since boot"
         # survives engine restarts and paper↔live mode toggles.
-        _persist_paper_pnl_state(self._realised_pnl_total)
+        _persist_paper_pnl_state(self._realised_pnl_total, self._pnl_path)
         # Append to the daily-bucketed history ledger powering the
         # weekly / monthly aggregates and the dashboard PnL chart.
-        pnl_history.record_close("paper", pnl)
+        pnl_history.record_close(self._pnl_history_mode, pnl)
         # Per-trade row close — see open_trade comment for why we wrap
         # in try/except: a SQLite IO failure here must never break the
         # broker's lifecycle.
@@ -909,6 +927,7 @@ class PaperOrderManager:
                 gross_pnl_usd=position.total_gross_pnl_usd,
                 fees_usd=position.total_fees_usd,
                 net_pnl_usd=position.realised_pnl_usd,
+                db_path=self._trades_db_path,
             )
         except Exception:
             log.exception(

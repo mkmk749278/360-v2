@@ -48,7 +48,7 @@ import sqlite3
 import threading
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Dict, FrozenSet, List, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
 from src.utils import get_logger
 
@@ -119,8 +119,24 @@ _AUTO_TRADE_KEYS = frozenset({
     "symbol_preference",
     "path_preference",
     "regime_preference",
+    "paper_symbol_preference",
+    "paper_path_preference",
+    "paper_regime_preference",
     "notional_usd",
 })
+
+# The three live eligibility columns and their PAPER counterparts.  Live
+# is consumed by ``dispatch_signal_to_active_users`` (real orders); paper
+# by the per-user paper book fan-out (simulated).  "individual paper +
+# live selection" (owner, 2026-06-20) = these two independent triples.
+_ELIGIBILITY_KEYS_BY_SCOPE: Dict[str, Tuple[str, str, str]] = {
+    "live": ("symbol_preference", "path_preference", "regime_preference"),
+    "paper": (
+        "paper_symbol_preference",
+        "paper_path_preference",
+        "paper_regime_preference",
+    ),
+}
 
 _LEVERAGE_HARD_CAP: float = 30.0  # B12
 
@@ -189,9 +205,12 @@ CREATE TABLE IF NOT EXISTS user_auto_trade_settings (
     position_size_pct        REAL,
     leverage_cap             REAL,
     max_concurrent_positions INTEGER,
-    symbol_preference        TEXT,     -- JSON list[str] or NULL = all
-    path_preference          TEXT,     -- JSON list[setup_class] or NULL = all paths; [] = block all
-    regime_preference        TEXT,     -- JSON list[backend regime] or NULL = all regimes; [] = block all
+    symbol_preference        TEXT,     -- JSON list[str] or NULL = all (LIVE)
+    path_preference          TEXT,     -- JSON list[setup_class] or NULL = all paths; [] = block all (LIVE)
+    regime_preference        TEXT,     -- JSON list[backend regime] or NULL = all regimes; [] = block all (LIVE)
+    paper_symbol_preference  TEXT,     -- PAPER counterpart of symbol_preference
+    paper_path_preference    TEXT,     -- PAPER counterpart of path_preference
+    paper_regime_preference  TEXT,     -- PAPER counterpart of regime_preference
     notional_usd             REAL,     -- per-user notional cap; NULL = engine default ($500)
     updated_at               TEXT    NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
@@ -368,12 +387,13 @@ def _coerce_auto_trade(raw: Dict[str, Any]) -> Dict[str, Any]:
         elif key == "max_concurrent_positions":
             if isinstance(value, int) and value >= 1:
                 out[key] = int(value)
-        elif key == "symbol_preference":
+        elif key in ("symbol_preference", "paper_symbol_preference"):
             # Accept list[str] only.  Empty list → store as ``[]`` to
             # mean "explicitly chose nothing" (which the FSM treats as
             # "block ALL orders for this user").  This is the doctrine-
             # strict opt-out path — distinct from ``None`` which means
             # "no preference set, fall through to engine-wide allowlist".
+            # Paper counterpart coerces identically (independent column).
             if isinstance(value, list):
                 cleaned = []
                 for sym in value:
@@ -385,7 +405,7 @@ def _coerce_auto_trade(raw: Dict[str, Any]) -> Dict[str, Any]:
                         if tok and tok.endswith("USDT") and tok.isalnum():
                             cleaned.append(tok)
                 out[key] = sorted(set(cleaned))  # canonical form
-        elif key == "path_preference":
+        elif key in ("path_preference", "paper_path_preference"):
             # User-chosen subset of signal evaluator paths (setup classes)
             # eligible to auto-trade live for this user.  Mirrors
             # ``symbol_preference`` semantics exactly: ``None`` (handled
@@ -400,7 +420,7 @@ def _coerce_auto_trade(raw: Dict[str, Any]) -> Dict[str, Any]:
                     s.strip().upper() for s in value
                     if isinstance(s, str) and s.strip()
                 })
-        elif key == "regime_preference":
+        elif key in ("regime_preference", "paper_regime_preference"):
             # User-chosen subset of entry regimes eligible to auto-trade
             # live.  ``_normalise_regime_input`` maps the app's UI tokens
             # (TRENDING / RANGING / CHOPPY) onto the backend regime labels
@@ -475,14 +495,20 @@ class UserOverridesStore:
         """
         cur = self._conn.execute("PRAGMA table_info(user_auto_trade_settings)")
         cols = {row["name"] for row in cur.fetchall()}
-        for col in ("path_preference", "regime_preference"):
+        for col in (
+            "path_preference",
+            "regime_preference",
+            "paper_symbol_preference",
+            "paper_path_preference",
+            "paper_regime_preference",
+        ):
             if col not in cols:
                 self._conn.execute(
                     f"ALTER TABLE user_auto_trade_settings ADD COLUMN {col} TEXT"
                 )
                 log.info(
                     "UserOverridesStore: added user_auto_trade_settings.{} "
-                    "column (2026-06-20 per-user path/regime picker)", col,
+                    "column (2026-06-20 per-user path/regime + paper picker)", col,
                 )
 
     def _migrate_auto_trade_notional_usd(self) -> None:
@@ -770,6 +796,23 @@ class UserOverridesStore:
 
     # ---- auto-trade ------------------------------------------------------
 
+    def list_user_ids_with_mode(self, modes: Iterable[str]) -> List[int]:
+        """Return the user_ids whose auto-trade ``mode`` is in ``modes``
+        (case-insensitive).  Used by the per-user paper book fan-out to
+        enumerate the paper/both cohort for a signal.  Empty ``modes`` →
+        empty list."""
+        modes_l = [str(m).lower() for m in modes if str(m).strip()]
+        if not modes_l:
+            return []
+        placeholders = ",".join("?" for _ in modes_l)
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT user_id FROM user_auto_trade_settings "
+                f"WHERE LOWER(mode) IN ({placeholders})",
+                tuple(modes_l),
+            )
+            return [int(r["user_id"]) for r in cur.fetchall()]
+
     def get_auto_trade(self, user_id: int) -> Dict[str, Any]:
         with self._lock:
             cur = self._conn.execute(
@@ -790,26 +833,21 @@ class UserOverridesStore:
                 else:
                     merged[k] = v
             now = _now_iso()
-            sym_pref = merged.get("symbol_preference")
-            sym_pref_json = (
-                json.dumps(sym_pref) if isinstance(sym_pref, list) else None
-            )
-            path_pref = merged.get("path_preference")
-            path_pref_json = (
-                json.dumps(path_pref) if isinstance(path_pref, list) else None
-            )
-            regime_pref = merged.get("regime_preference")
-            regime_pref_json = (
-                json.dumps(regime_pref) if isinstance(regime_pref, list) else None
-            )
+
+            def _json_list(key: str) -> Optional[str]:
+                v = merged.get(key)
+                return json.dumps(v) if isinstance(v, list) else None
+
             self._conn.execute(
                 """
                 INSERT INTO user_auto_trade_settings (
                     user_id, mode, position_size_pct, leverage_cap,
                     max_concurrent_positions, symbol_preference,
                     path_preference, regime_preference,
+                    paper_symbol_preference, paper_path_preference,
+                    paper_regime_preference,
                     notional_usd, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     mode = excluded.mode,
                     position_size_pct = excluded.position_size_pct,
@@ -818,6 +856,9 @@ class UserOverridesStore:
                     symbol_preference = excluded.symbol_preference,
                     path_preference = excluded.path_preference,
                     regime_preference = excluded.regime_preference,
+                    paper_symbol_preference = excluded.paper_symbol_preference,
+                    paper_path_preference = excluded.paper_path_preference,
+                    paper_regime_preference = excluded.paper_regime_preference,
                     notional_usd = excluded.notional_usd,
                     updated_at = excluded.updated_at
                 """,
@@ -827,9 +868,12 @@ class UserOverridesStore:
                     merged.get("position_size_pct"),
                     merged.get("leverage_cap"),
                     merged.get("max_concurrent_positions"),
-                    sym_pref_json,
-                    path_pref_json,
-                    regime_pref_json,
+                    _json_list("symbol_preference"),
+                    _json_list("path_preference"),
+                    _json_list("regime_preference"),
+                    _json_list("paper_symbol_preference"),
+                    _json_list("paper_path_preference"),
+                    _json_list("paper_regime_preference"),
                     merged.get("notional_usd"),
                     now,
                 ),
@@ -1535,6 +1579,55 @@ def resolve_auto_trade_preferences_uid(
         return None, None
 
 
+def resolve_paper_preferences_uid(
+    firebase_uid: str,
+) -> Tuple[
+    Optional[FrozenSet[str]], Optional[FrozenSet[str]], Optional[FrozenSet[str]]
+]:
+    """Return ``(symbol, path, regime)`` PAPER eligibility filters for the
+    user — the per-user-paper analogue of the live filters, consumed by the
+    per-user paper book fan-out.
+
+    Each element is ``None`` (no preference — all eligible) or a frozenset
+    of allowed values (an **empty** frozenset = block-all, distinct from
+    ``None``).  Same soft-fail contract as the live resolver: any lookup
+    error returns ``(None, None, None)`` so a store blip never silently
+    blocks a user's paper simulation.
+    """
+    if _SINGLETON is None:
+        return None, None, None
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return None, None, None
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return None, None, None
+        row = _SINGLETON.get_auto_trade(int(user.user_id))
+
+        def _fs(key: str) -> Optional[FrozenSet[str]]:
+            raw = row.get(key)
+            return (
+                frozenset(str(x).upper() for x in raw)
+                if isinstance(raw, list)
+                else None
+            )
+
+        return (
+            _fs("paper_symbol_preference"),
+            _fs("paper_path_preference"),
+            _fs("paper_regime_preference"),
+        )
+    except Exception as exc:
+        log.debug(
+            "resolve_paper_preferences_uid: lookup failed uid={} ({}); "
+            "defaulting to allow-all",
+            firebase_uid, type(exc).__name__,
+        )
+        return None, None, None
+
+
 def resolve_symbol_management_uid(firebase_uid: str, symbol: str) -> str:
     """Return the per-(user, symbol) management mode — ``'full'`` (engine
     manages entry+SL+pre-TP+TP+invalidation) or ``'entry'`` (engine places
@@ -1675,6 +1768,9 @@ _AUTO_TRADE_COL_TYPES: Dict[str, str] = {
     "symbol_preference": "json_list",
     "path_preference": "json_list",
     "regime_preference": "json_list",
+    "paper_symbol_preference": "json_list",
+    "paper_path_preference": "json_list",
+    "paper_regime_preference": "json_list",
     "notional_usd": "float",
     "paused_reason": "str",
     "paused_at": "str",

@@ -66,7 +66,9 @@ from src.trade_observer import TradeObserver
 from src.exchange_client import CCXTClient
 from src.order_manager import OrderManager
 from src.paper_order_manager import PaperOrderManager
+from src.execution.paper_book_registry import PaperBookFanout, PaperBookRegistry
 from src.auto_trade.risk_manager import RiskManager
+from config import PAPER_BOOKS_DIR, PAPER_PER_USER_BOOKS
 from src.auto_trade.position_reconciler import PositionReconciler
 from src.utils import get_logger
 from src.websocket_manager import WebSocketManager
@@ -147,6 +149,9 @@ class CryptoSignalEngine:
         # execution.  Constructed eagerly so paper mode also obeys the same
         # gate chain; off-mode skips construction entirely (no auto-trade).
         self._risk_manager: Optional[RiskManager] = None
+        # Set when PAPER_PER_USER_BOOKS is on — the read layer reads per-user
+        # books through this registry (via the fanout on _order_manager).
+        self._paper_book_registry: Optional[PaperBookRegistry] = None
         if AUTO_EXECUTION_MODE != "off":
             self._risk_manager = RiskManager(
                 starting_equity_usd=RISK_STARTING_EQUITY_USD,
@@ -173,12 +178,7 @@ class CryptoSignalEngine:
         # AUTO_EXECUTION_ENABLED is a derived bool kept for backwards compat.
         _exchange_client: Optional[CCXTClient] = None
         if AUTO_EXECUTION_MODE == "paper":
-            self._order_manager = PaperOrderManager(
-                position_size_pct=POSITION_SIZE_PCT,
-                max_position_usd=MAX_POSITION_USD,
-                starting_equity_usd=RISK_STARTING_EQUITY_USD,
-                risk_manager=self._risk_manager,
-            )
+            self._order_manager = self._build_paper_order_manager()
             log.info(
                 "Auto-execution mode: PAPER (simulated fills, zero real-money risk)"
             )
@@ -690,6 +690,57 @@ class CryptoSignalEngine:
             t.get_name() for t in asyncio.all_tasks() if not t.done()
         )
 
+    def _build_paper_order_manager(self):
+        """Construct the paper-mode order manager.
+
+        Two fully-wired implementations selected by ``PAPER_PER_USER_BOOKS``
+        (an operational kill switch, not a dark flag):
+
+        * OFF (default) → one shared :class:`PaperOrderManager` writing the
+          engine-wide ``paper`` pnl bucket — the pre-2026-06-20 behaviour.
+        * ON → :class:`PaperBookFanout` over a per-user
+          :class:`PaperBookRegistry`: one book per ``user_id``, each with its
+          own equity, ``paper:<uid>`` pnl bucket, trades DB, and its OWN
+          RiskManager so one user's daily-loss breaker never trips another's.
+
+        Both share ``self._risk_manager`` semantics: the shared book uses the
+        engine-level manager; per-user books get a fresh manager each so the
+        read API can attribute risk per user.
+        """
+        if not PAPER_PER_USER_BOOKS:
+            return PaperOrderManager(
+                position_size_pct=POSITION_SIZE_PCT,
+                max_position_usd=MAX_POSITION_USD,
+                starting_equity_usd=RISK_STARTING_EQUITY_USD,
+                risk_manager=self._risk_manager,
+            )
+
+        def _risk_manager_factory(_uid: int) -> RiskManager:
+            return RiskManager(
+                starting_equity_usd=RISK_STARTING_EQUITY_USD,
+                daily_loss_limit_pct=RISK_DAILY_LOSS_LIMIT_PCT,
+                max_concurrent=RISK_MAX_CONCURRENT,
+                max_leverage=RISK_MAX_LEVERAGE,
+                min_equity_usd=RISK_MIN_EQUITY_USD,
+                setup_blacklist=set(RISK_SETUP_BLACKLIST),
+                mode="paper",
+            )
+
+        registry = PaperBookRegistry(
+            books_dir=PAPER_BOOKS_DIR,
+            starting_equity_usd=RISK_STARTING_EQUITY_USD,
+            position_size_pct=POSITION_SIZE_PCT,
+            max_position_usd=MAX_POSITION_USD,
+            risk_manager_factory=_risk_manager_factory,
+        )
+        self._paper_book_registry = registry
+        log.info(
+            "Auto-execution mode: PAPER (per-user books ON — fanout over "
+            "PaperBookRegistry, books_dir=%s)",
+            PAPER_BOOKS_DIR,
+        )
+        return PaperBookFanout(registry)
+
     def set_auto_execution_mode(self, new_mode: str) -> Tuple[bool, str]:
         """Switch auto-execution mode at runtime.
 
@@ -761,12 +812,7 @@ class CryptoSignalEngine:
                 setup_blacklist=set(RISK_SETUP_BLACKLIST),
                 mode="paper",
             )
-            self._order_manager = PaperOrderManager(
-                position_size_pct=POSITION_SIZE_PCT,
-                max_position_usd=MAX_POSITION_USD,
-                starting_equity_usd=RISK_STARTING_EQUITY_USD,
-                risk_manager=self._risk_manager,
-            )
+            self._order_manager = self._build_paper_order_manager()
         else:  # new_mode == "live"
             self._exchange_client = CCXTClient(
                 exchange_id=EXCHANGE_ID,

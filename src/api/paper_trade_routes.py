@@ -121,6 +121,39 @@ def register(
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="only paper mode supported in v1 — live trade records ship in a follow-up",
             )
+
+        # Per-user books ON: the caller reads their OWN trades DB directly —
+        # no shared ledger, no subscription-window filter (the per-user book
+        # is the isolation boundary).
+        om = getattr(engine, "_order_manager", None)
+        if _per_user_enabled and om is not None and hasattr(om, "trades_db_path_for"):
+            try:
+                user_id = resolve_user_id(identity)  # type: ignore[misc]
+            except HTTPException:
+                return TradeListResponse(items=[], total=0)
+            except Exception:
+                log.exception("/api/trades: user resolve failed")
+                return TradeListResponse(items=[], total=0)
+            try:
+                from src.auto_trade import trade_records
+                rows = await asyncio.to_thread(
+                    trade_records.list_trades,
+                    limit=limit, offset=offset, since_ts=since_ts,
+                    symbol=symbol, include_open=include_open,
+                    db_path=om.trades_db_path_for(user_id),
+                )
+                total_rows = await asyncio.to_thread(
+                    trade_records.list_trades,
+                    limit=500, offset=0, since_ts=since_ts,
+                    symbol=symbol, include_open=include_open,
+                    db_path=om.trades_db_path_for(user_id),
+                )
+            except Exception:
+                log.exception("/api/trades (per-user book) failed — empty page")
+                return TradeListResponse(items=[], total=0)
+            items = [TradeRecord(**row) for row in rows]
+            return TradeListResponse(items=items, total=len(total_rows))
+
         try:
             from src.auto_trade import trade_records
             # Pull a generous slice from the engine ledger; filter to the
@@ -234,9 +267,18 @@ def register(
                 rm.reset_daily()
             except Exception:
                 log.exception("paper reset: risk_manager.reset_daily failed")
-        # 3. Wipe daily buckets.
+        # 3. Wipe daily buckets.  Per-user books on → clear every
+        # ``paper:<uid>`` bucket via the aggregate reset; otherwise the
+        # single shared ``paper`` bucket.
         from src.auto_trade import pnl_history as _pnl_history
-        buckets_cleared = await asyncio.to_thread(_pnl_history.reset_mode, "paper")
+        if hasattr(om, "positions_for_user"):
+            buckets_cleared = await asyncio.to_thread(
+                _pnl_history.reset_aggregate, "paper"
+            )
+        else:
+            buckets_cleared = await asyncio.to_thread(
+                _pnl_history.reset_mode, "paper"
+            )
         # 4. Archive per-trade rows (preferred over destructive delete —
         # historical data remains queryable for the owner).
         try:
