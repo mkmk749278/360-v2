@@ -4,6 +4,48 @@
 
 ---
 
+## 🟢 SESSION 31 2026-06-20 — Per-user PATH + REGIME live eligibility (shipped); paper-per-user + Full/Entry sequenced
+
+**Owner trigger:** "We give per-user symbol choice but not which paths / which
+regime — make those flexible too, neatly in auto-trade settings, paper + live
+each individual, with reset to default. Reset-to-default also missing on
+Invalidation + Pre-TP. Signals tab: tapping a symbol → take signals **full**
+(entry+exit+pre-TP+invalidation) vs **entry-only** (engine places entry, user
+manages). Add to CLAUDE.md: no shortcuts / scaffolds / fast-tracks, production-
+grade only. No dark flags (we're testing, no users)."
+
+### Doctrine + decisions
+- **CLAUDE.md** operating-standard strengthened: no scaffolds / no fast-tracks /
+  no stub-now-wire-later — a setting the engine *stores but doesn't consume* is a
+  banned scaffold; money-path features ship storage + dispatch/FSM consumption +
+  UI together. (No-dark-flags was already doctrine in § Project Phase.)
+- Owner decisions (via AskUserQuestion): **entry-only on LIVE = entry + protective
+  SL (never naked) then skip pre-TP/TP/invalidation**; **Full/Entry saved per
+  symbol**; **make paper per-user** (so paper selectors are real, not a scaffold).
+
+### Shipped this session (fully wired + tested)
+| Area | What |
+|---|---|
+| Engine | `user_auto_trade_settings.path_preference` + `.regime_preference` (JSON; NULL=all, []=block-all) — schema, idempotent migration, coerce (path uppercase; regime via `_normalise_regime_input`), persistence, `resolve_auto_trade_preferences_uid` resolver. |
+| Engine | LIVE gate in `dispatch_signal_to_active_users` — skips user silently (pre-signing) when `setup_class` ∉ path pref or `regime_label` ∉ regime pref. Symbol gate (position_fsm) unchanged. |
+| Engine | `GET /api/auto-trade/runtime-status` now returns `allowed_paths` (from `ACTIVE_PATH_PORTFOLIO_ROLES` — single source of truth, no app drift) + `regime_options`. |
+| App | `AutoTradeSettings` model + `AutoTradeRuntimeStatus` carry path/regime; new `eligibility_preference_page.dart` (shared Path + Regime picker, preset all/custom/block); "What auto-trades for me" card in Auto-trade settings (Symbols/Paths/Regimes rows + one **Reset to default**). |
+| App | Pre-TP + Invalidation **Reset-to-default** now always visible (was hidden via `if (!_usingDefaults …)` → looked missing on a default page). |
+| Tests | +11 engine tests (store 8, dispatch 3); affected suites green: 197 pass (user_overrides 91, signal_dispatch 50, status_routes 20, tripwires + others). |
+
+Scope note: path/regime selection is the **LIVE** eligibility filter today (live
+dispatcher is per-user). Paper selectors land with Increment 2.
+
+### NEXT (designed in `docs/PER_USER_TRADE_ELIGIBILITY_2026_06_20.md`, owner-sign-off)
+1. **Per-user paper engine** — turn the single shared `PaperOrderManager` into a
+   per-user simulation + per-user paper dispatch path, then add `paper_*`
+   preference columns + Paper selectors. (Money-path-adjacent; bring registry-vs-
+   namespaced + per-mode schema decision to owner first.)
+2. **Per-symbol Full / Entry-only FSM** — entry+SL, skip bracket + invalidation;
+   per-(user,symbol) storage; Signals-tab tap sheet. (FSM transition — owner sign-off.)
+
+---
+
 ## 🟢 SESSION 30 2026-06-19 — Raw-Edge diagnostic tab + 60-min invalidation window; MOVER_TREND_PULLBACK gate root-caused
 
 **Owner trigger:** "performance still negative — suspect pre-TP and invalidation;

@@ -117,6 +117,8 @@ _AUTO_TRADE_KEYS = frozenset({
     "leverage_cap",
     "max_concurrent_positions",
     "symbol_preference",
+    "path_preference",
+    "regime_preference",
     "notional_usd",
 })
 
@@ -188,6 +190,8 @@ CREATE TABLE IF NOT EXISTS user_auto_trade_settings (
     leverage_cap             REAL,
     max_concurrent_positions INTEGER,
     symbol_preference        TEXT,     -- JSON list[str] or NULL = all
+    path_preference          TEXT,     -- JSON list[setup_class] or NULL = all paths; [] = block all
+    regime_preference        TEXT,     -- JSON list[backend regime] or NULL = all regimes; [] = block all
     notional_usd             REAL,     -- per-user notional cap; NULL = engine default ($500)
     updated_at               TEXT    NOT NULL,
     FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
@@ -360,6 +364,29 @@ def _coerce_auto_trade(raw: Dict[str, Any]) -> Dict[str, Any]:
                         if tok and tok.endswith("USDT") and tok.isalnum():
                             cleaned.append(tok)
                 out[key] = sorted(set(cleaned))  # canonical form
+        elif key == "path_preference":
+            # User-chosen subset of signal evaluator paths (setup classes)
+            # eligible to auto-trade live for this user.  Mirrors
+            # ``symbol_preference`` semantics exactly: ``None`` (handled
+            # above) = no preference → all paths; a list (incl. empty) =
+            # "only these paths may auto-trade for me" (empty = block all).
+            # Stored uppercase + canonical-sorted; the dispatch gate
+            # compares against ``setup_class.upper()``.  Permissive on the
+            # token set (a value the engine never emits simply never
+            # matches → no trades for it), matching ``setup_allowlist``.
+            if isinstance(value, list):
+                out[key] = sorted({
+                    s.strip().upper() for s in value
+                    if isinstance(s, str) and s.strip()
+                })
+        elif key == "regime_preference":
+            # User-chosen subset of entry regimes eligible to auto-trade
+            # live.  ``_normalise_regime_input`` maps the app's UI tokens
+            # (TRENDING / RANGING / CHOPPY) onto the backend regime labels
+            # (TRENDING_UP/DOWN, RANGING, VOLATILE, QUIET) the dispatcher
+            # compares ``regime_label`` against.  A non-None list that
+            # normalises to ``[]`` means "block all" (mirrors symbol []).
+            out[key] = _normalise_regime_input(value)
         elif key == "notional_usd":
             # Per-user notional cap.  Clamp into the [_NOTIONAL_USD_MIN,
             # _NOTIONAL_USD_MAX] band — silently fixing rather than
@@ -408,9 +435,31 @@ class UserOverridesStore:
         self._migrate_pretp_grab_fraction()
         self._migrate_pretp_protect_manual_entries()
         self._migrate_auto_trade_symbol_preference()
+        self._migrate_auto_trade_path_regime_preference()
         self._migrate_auto_trade_notional_usd()
         self._migrate_auto_trade_pause_columns()
         log.info("UserOverridesStore opened at {}", self._path)
+
+    def _migrate_auto_trade_path_regime_preference(self) -> None:
+        """Idempotent ALTER for the ``path_preference`` / ``regime_preference``
+        columns (2026-06-20 per-user path + regime picker).
+
+        Mirrors ``symbol_preference``: NULL on existing rows means "no
+        preference — all paths / all regimes eligible" (default-all UX).
+        Stored as TEXT (JSON list of strings).  Consumed at LIVE dispatch
+        as trade-eligibility filters (``dispatch_signal_to_active_users``).
+        """
+        cur = self._conn.execute("PRAGMA table_info(user_auto_trade_settings)")
+        cols = {row["name"] for row in cur.fetchall()}
+        for col in ("path_preference", "regime_preference"):
+            if col not in cols:
+                self._conn.execute(
+                    f"ALTER TABLE user_auto_trade_settings ADD COLUMN {col} TEXT"
+                )
+                log.info(
+                    "UserOverridesStore: added user_auto_trade_settings.{} "
+                    "column (2026-06-20 per-user path/regime picker)", col,
+                )
 
     def _migrate_auto_trade_notional_usd(self) -> None:
         """Idempotent ALTER for the ``notional_usd`` column.
@@ -721,19 +770,30 @@ class UserOverridesStore:
             sym_pref_json = (
                 json.dumps(sym_pref) if isinstance(sym_pref, list) else None
             )
+            path_pref = merged.get("path_preference")
+            path_pref_json = (
+                json.dumps(path_pref) if isinstance(path_pref, list) else None
+            )
+            regime_pref = merged.get("regime_preference")
+            regime_pref_json = (
+                json.dumps(regime_pref) if isinstance(regime_pref, list) else None
+            )
             self._conn.execute(
                 """
                 INSERT INTO user_auto_trade_settings (
                     user_id, mode, position_size_pct, leverage_cap,
                     max_concurrent_positions, symbol_preference,
+                    path_preference, regime_preference,
                     notional_usd, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(user_id) DO UPDATE SET
                     mode = excluded.mode,
                     position_size_pct = excluded.position_size_pct,
                     leverage_cap = excluded.leverage_cap,
                     max_concurrent_positions = excluded.max_concurrent_positions,
                     symbol_preference = excluded.symbol_preference,
+                    path_preference = excluded.path_preference,
+                    regime_preference = excluded.regime_preference,
                     notional_usd = excluded.notional_usd,
                     updated_at = excluded.updated_at
                 """,
@@ -744,6 +804,8 @@ class UserOverridesStore:
                     merged.get("leverage_cap"),
                     merged.get("max_concurrent_positions"),
                     sym_pref_json,
+                    path_pref_json,
+                    regime_pref_json,
                     merged.get("notional_usd"),
                     now,
                 ),
@@ -1341,6 +1403,58 @@ def resolve_user_mode_uid(firebase_uid: str) -> Optional[str]:
         return None
 
 
+def resolve_auto_trade_preferences_uid(
+    firebase_uid: str,
+) -> Tuple[Optional[FrozenSet[str]], Optional[FrozenSet[str]]]:
+    """Return ``(path_preference, regime_preference)`` for the user as
+    LIVE trade-eligibility filters.
+
+    Each element is either ``None`` ("no preference set — every path /
+    regime is eligible", the default-all path) or a frozenset of the
+    allowed values.  An **empty** frozenset is meaningful and distinct
+    from ``None``: it means the user explicitly chose nothing, so *no*
+    signal matches → block-all (mirrors ``symbol_preference == []``).
+
+    Soft-fail pattern matches the other ``*_uid`` resolvers: any lookup
+    error returns ``(None, None)`` so a store blip never silently blocks
+    a user's live dispatch.  ``regime`` values are stored already
+    normalised to backend labels (``TRENDING_UP`` …) by
+    ``_normalise_regime_input`` at write time, so the dispatcher can
+    compare ``regime_label.upper()`` directly.
+    """
+    if _SINGLETON is None:
+        return None, None
+    try:
+        from src.api import users as _users
+        user_store = _users.get_singleton()
+        if user_store is None:
+            return None, None
+        user = user_store.get_by_firebase_uid(firebase_uid)
+        if user is None:
+            return None, None
+        row = _SINGLETON.get_auto_trade(int(user.user_id))
+        path_raw = row.get("path_preference")
+        regime_raw = row.get("regime_preference")
+        path_fs = (
+            frozenset(str(s).upper() for s in path_raw)
+            if isinstance(path_raw, list)
+            else None
+        )
+        regime_fs = (
+            frozenset(str(r).upper() for r in regime_raw)
+            if isinstance(regime_raw, list)
+            else None
+        )
+        return path_fs, regime_fs
+    except Exception as exc:
+        log.debug(
+            "resolve_auto_trade_preferences_uid: lookup failed uid={} ({}); "
+            "defaulting to allow-all",
+            firebase_uid, type(exc).__name__,
+        )
+        return None, None
+
+
 def is_user_auto_paused_uid(firebase_uid: str) -> bool:
     """Firebase-UID-keyed wrapper around :meth:`UserOverridesStore.
     is_user_auto_paused`. Mirrors :func:`resolve_notional_usd` — same
@@ -1446,6 +1560,8 @@ _AUTO_TRADE_COL_TYPES: Dict[str, str] = {
     "leverage_cap": "float",
     "max_concurrent_positions": "int",
     "symbol_preference": "json_list",
+    "path_preference": "json_list",
+    "regime_preference": "json_list",
     "notional_usd": "float",
     "paused_reason": "str",
     "paused_at": "str",

@@ -29,6 +29,30 @@ from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, status
 
+
+def _active_path_names() -> list[str]:
+    """Canonical, sorted list of user-selectable evaluator paths (setup
+    classes) — the path analogue of the symbol allowlist.
+
+    Sourced from ``ACTIVE_PATH_PORTFOLIO_ROLES`` so the app's path picker
+    can never drift from the engine's actual emitting paths (CLAUDE.md
+    flags the SetupClass values as stringly-coupled — single source of
+    truth).  Auxiliary sub-evaluators intentionally excluded (they have
+    no standalone portfolio role).  Resolved lazily + cached so a missing
+    import at boot never hard-fails the status endpoint.
+    """
+    try:
+        from src.signal_quality import ACTIVE_PATH_PORTFOLIO_ROLES
+        return sorted(sc.value for sc in ACTIVE_PATH_PORTFOLIO_ROLES)
+    except Exception:
+        return []
+
+
+# The three regime buckets the app offers (mapped to backend regime
+# labels server-side by ``_normalise_regime_input``).  Static — kept
+# beside the path helper so both eligibility dimensions ship together.
+_REGIME_OPTIONS: list[str] = ["TRENDING", "RANGING", "CHOPPY"]
+
 from src.utils import get_logger
 
 log = get_logger("api.auto_trade_status_routes")
@@ -333,6 +357,8 @@ def register(
             "user_mode": user_mode,
             "allowed_symbols": allowlist,
             "effective_allowed_symbols": effective,
+            "allowed_paths": _active_path_names(),
+            "regime_options": _REGIME_OPTIONS,
             "armed": armed,
         }
         _runtime_cache[firebase_uid] = (result, time.monotonic())

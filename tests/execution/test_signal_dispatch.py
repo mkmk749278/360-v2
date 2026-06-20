@@ -244,6 +244,119 @@ async def test_dispatch_skips_zero_qty_signal() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Per-user path / regime trade-eligibility gate (2026-06-20)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_user_when_setup_not_in_path_preference(
+    monkeypatch,
+) -> None:
+    """A user who restricted their path preference to a set that excludes
+    this signal's setup_class gets NO live order — skipped before signing,
+    like the mode gate.  The signal still reaches Telegram/Pulse (that path
+    is upstream of this dispatcher)."""
+    from src.api import user_overrides as _uo
+    # User allows only DIVERGENCE_CONTINUATION; this signal is SR_FLIP_RETEST.
+    monkeypatch.setattr(
+        _uo,
+        "resolve_auto_trade_preferences_uid",
+        lambda uid: (frozenset({"DIVERGENCE_CONTINUATION"}), None),
+    )
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-A"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+                regime_label="RANGING",
+                setup_class="SR_FLIP_RETEST",
+            )
+        assert placed == 0
+        mock_place.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_skips_user_when_regime_not_in_regime_preference(
+    monkeypatch,
+) -> None:
+    """Regime filter mirror of the path filter — a TRENDING-only user does
+    not get a RANGING signal traded live."""
+    from src.api import user_overrides as _uo
+    monkeypatch.setattr(
+        _uo,
+        "resolve_auto_trade_preferences_uid",
+        lambda uid: (None, frozenset({"TRENDING_UP", "TRENDING_DOWN"})),
+    )
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-A"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+                regime_label="RANGING",
+                setup_class="SR_FLIP_RETEST",
+            )
+        assert placed == 0
+        mock_place.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_dispatch_allows_user_when_setup_and_regime_match_preference(
+    monkeypatch,
+) -> None:
+    """The positive case: a configured preference that DOES include the
+    signal's setup + regime still dispatches normally."""
+    from src.api import user_overrides as _uo
+    monkeypatch.setattr(
+        _uo,
+        "resolve_auto_trade_preferences_uid",
+        lambda uid: (frozenset({"SR_FLIP_RETEST"}), frozenset({"RANGING"})),
+    )
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-A"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            placed = await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+                regime_label="RANGING",
+                setup_class="SR_FLIP_RETEST",
+            )
+        assert placed == 1
+        mock_place.assert_awaited_once()
+
+
+# ---------------------------------------------------------------------------
 # Cache TTL
 # ---------------------------------------------------------------------------
 
