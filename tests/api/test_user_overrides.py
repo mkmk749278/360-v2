@@ -350,6 +350,61 @@ def test_resolve_auto_trade_preferences_uid_semantics(
     assert path_fs is not None
 
 
+def test_paper_preferences_are_independent_of_live(
+    store: UserOverridesStore, monkeypatch,
+) -> None:
+    """Paper eligibility is stored in its own columns and resolves
+    independently from the live triple (owner: 'individual paper + live')."""
+    import src.api.user_overrides as uo
+
+    class _User:
+        user_id = 1
+
+    class _UserStore:
+        def get_by_firebase_uid(self, _uid):
+            return _User()
+
+    monkeypatch.setattr(uo, "_SINGLETON", store, raising=False)
+    import src.api.users as _users
+    monkeypatch.setattr(_users, "get_singleton", lambda: _UserStore())
+
+    # Live = SR_FLIP only; paper = DIV only + RANGING; paper symbols BTC.
+    store.update_auto_trade(1, {
+        "path_preference": ["SR_FLIP_RETEST"],
+        "paper_path_preference": ["DIVERGENCE_CONTINUATION"],
+        "paper_regime_preference": ["RANGING"],
+        "paper_symbol_preference": ["btcusdt"],
+    })
+    # Live resolver unaffected by paper columns.
+    live_path, live_regime = uo.resolve_auto_trade_preferences_uid("uid")
+    assert live_path == frozenset({"SR_FLIP_RETEST"})
+    assert live_regime is None
+    # Paper resolver reads the paper triple.
+    p_sym, p_path, p_regime = uo.resolve_paper_preferences_uid("uid")
+    assert p_sym == frozenset({"BTCUSDT"})
+    assert p_path == frozenset({"DIVERGENCE_CONTINUATION"})
+    assert p_regime == frozenset({"RANGING"})
+
+
+def test_paper_preferences_default_allow_all(
+    store: UserOverridesStore, monkeypatch,
+) -> None:
+    import src.api.user_overrides as uo
+
+    class _User:
+        user_id = 1
+
+    class _UserStore:
+        def get_by_firebase_uid(self, _uid):
+            return _User()
+
+    monkeypatch.setattr(uo, "_SINGLETON", store, raising=False)
+    import src.api.users as _users
+    monkeypatch.setattr(_users, "get_singleton", lambda: _UserStore())
+
+    assert uo.resolve_paper_preferences_uid("uid") == (None, None, None)
+
+
 # ---------------------------------------------------------------------------
 # Per-symbol management mode (Signals-tab full vs entry — 2026-06-20)
 # ---------------------------------------------------------------------------

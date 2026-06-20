@@ -236,17 +236,23 @@ class PaperOrderManager:
         max_position_usd: float = MAX_POSITION_USD,
         starting_equity_usd: float = 1000.0,
         risk_manager: Optional[Any] = None,
+        pnl_path: Optional[Path] = None,
     ) -> None:
         self._position_size_pct = position_size_pct
         self._max_position_usd = max_position_usd
         self._starting_equity = starting_equity_usd
+        # Per-user paper book persistence (2026-06-20): when a ``pnl_path``
+        # is supplied (by ``PaperBookRegistry``), this book loads/persists
+        # its own ledger so each user's paper PnL is isolated.  ``None`` =
+        # the legacy single shared ledger path (``_resolve_paper_pnl_path``).
+        self._pnl_path = pnl_path
         # Persistence (2026-05-08) — load any prior cumulative paper-PnL
         # so the dashboard "Paper total since boot" survives engine
         # restarts and paper↔live mode toggles.  Available equity is
         # reseeded from starting + persisted PnL so position sizing
         # reflects the paper account's true balance on resume.  Open
         # positions stay ephemeral (signal-history layer owns lifecycle).
-        _persisted = _load_paper_pnl_state()
+        _persisted = _load_paper_pnl_state(self._pnl_path)
         self._available_equity = starting_equity_usd + _persisted
         self._positions: Dict[str, _PaperPosition] = {}
         # Cumulative realised PnL — seeded from disk (see comment above).
@@ -313,7 +319,7 @@ class PaperOrderManager:
         """
         self._realised_pnl_total = 0.0
         self._available_equity = self._starting_equity
-        reset_paper_pnl_state()
+        reset_paper_pnl_state(self._pnl_path)
         log.info(
             "PaperOrderManager.reset_state: equity → ${:.2f}, cumulative PnL → $0.00",
             self._starting_equity,
@@ -632,7 +638,7 @@ class PaperOrderManager:
         self._available_equity += position.entry * close_qty + pnl
         # Persist cumulative PnL so the dashboard "Paper total since boot"
         # survives engine restarts and paper↔live mode toggles.
-        _persist_paper_pnl_state(self._realised_pnl_total)
+        _persist_paper_pnl_state(self._realised_pnl_total, self._pnl_path)
         # Append to the daily-bucketed history ledger powering the
         # weekly / monthly aggregates and the dashboard PnL chart.
         pnl_history.record_close("paper", pnl)
@@ -894,7 +900,7 @@ class PaperOrderManager:
         self._available_equity += position.entry * remaining_qty + pnl
         # Persist cumulative PnL so the dashboard "Paper total since boot"
         # survives engine restarts and paper↔live mode toggles.
-        _persist_paper_pnl_state(self._realised_pnl_total)
+        _persist_paper_pnl_state(self._realised_pnl_total, self._pnl_path)
         # Append to the daily-bucketed history ledger powering the
         # weekly / monthly aggregates and the dashboard PnL chart.
         pnl_history.record_close("paper", pnl)
