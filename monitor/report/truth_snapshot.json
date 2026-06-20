@@ -363,38 +363,38 @@
     },
     "MOVER_TREND_PULLBACK": {
       "filtered": {
-        "avg_composite": 75.77,
-        "avg_final": 53.2,
-        "avg_gap_to_threshold": 11.8,
-        "avg_raw": 77.83,
+        "avg_composite": 75.73,
+        "avg_final": 53.23,
+        "avg_gap_to_threshold": 11.77,
+        "avg_raw": 77.88,
         "avg_threshold": 65.0,
-        "avg_total_penalty": 22.38,
+        "avg_total_penalty": 22.04,
         "components": {
-          "avg_execution": 18.19,
-          "avg_market": 19.61,
+          "avg_execution": 18.22,
+          "avg_market": 19.63,
           "avg_risk": 15.8,
-          "avg_thesis_adj": 4.36
+          "avg_thesis_adj": 4.39
         },
         "engine_components": {
-          "avg_indicators": 12.84,
-          "avg_mtf": 8.7,
-          "avg_patterns": 5.35,
-          "avg_regime": 18.18,
-          "avg_smc": 18.4,
-          "avg_volume": 7.95,
-          "samples": 603
+          "avg_indicators": 12.86,
+          "avg_mtf": 8.56,
+          "avg_patterns": 5.34,
+          "avg_regime": 18.17,
+          "avg_smc": 18.48,
+          "avg_volume": 7.94,
+          "samples": 614
         },
-        "samples": 603,
+        "samples": 614,
         "soft_penalty_breakdown": {
           "avg_btc_dir": 0.0,
           "avg_cluster": 0.0,
           "avg_kz": 0.0,
-          "avg_oi": 8.32,
+          "avg_oi": 8.17,
           "avg_spoof": 0.0,
-          "avg_sym_dir": 0.05,
-          "avg_vol_div": 0.58,
+          "avg_sym_dir": 0.11,
+          "avg_vol_div": 0.57,
           "avg_vwap": 0.0,
-          "samples": 603
+          "samples": 614
         }
       },
       "kept": {
@@ -507,12 +507,12 @@
     },
     "SR_FLIP_RETEST": {
       "filtered": {
-        "avg_composite": 69.82,
-        "avg_final": 55.4,
-        "avg_gap_to_threshold": 9.6,
+        "avg_composite": 69.81,
+        "avg_final": 55.38,
+        "avg_gap_to_threshold": 9.62,
         "avg_raw": 80.99,
         "avg_threshold": 65.0,
-        "avg_total_penalty": 6.54,
+        "avg_total_penalty": 6.55,
         "components": {
           "avg_execution": 19.89,
           "avg_market": 21.22,
@@ -525,10 +525,10 @@
           "avg_patterns": 6.18,
           "avg_regime": 17.28,
           "avg_smc": 19.34,
-          "avg_volume": 4.94,
-          "samples": 5110
+          "avg_volume": 4.95,
+          "samples": 5116
         },
-        "samples": 5110,
+        "samples": 5116,
         "soft_penalty_breakdown": {
           "avg_btc_dir": 0.0,
           "avg_cluster": 0.01,
@@ -538,7 +538,7 @@
           "avg_sym_dir": 0.48,
           "avg_vol_div": 1.15,
           "avg_vwap": 0.0,
-          "samples": 5110
+          "samples": 5116
         }
       },
       "kept": {
@@ -771,7 +771,7 @@
     },
     "MOVER_TREND_PULLBACK": {
       "filtered": {
-        "min_confidence": 603
+        "min_confidence": 614
       },
       "kept": {
         "min_confidence_pass": 559
@@ -787,8 +787,8 @@
     },
     "SR_FLIP_RETEST": {
       "filtered": {
-        "min_confidence": 4741,
-        "quiet_scalp_min_confidence": 369
+        "min_confidence": 4746,
+        "quiet_scalp_min_confidence": 370
       },
       "kept": {
         "min_confidence_pass": 2964
@@ -972,7 +972,7 @@
     },
     "total": 105
   },
-  "generated_at": 1781971972,
+  "generated_at": 1781972062,
   "invalidation_audit": {
     "ablation": {
       "by_family": {
@@ -1135,14 +1135,14 @@
     }
   },
   "log_parse_diagnostics": {
-    "confidence_gate": 17151,
+    "confidence_gate": 17168,
     "free_channel_post": 105,
     "path_funnel": 154,
     "per_symbol_regime_distribution": 154,
     "pre_tp_fire": 49,
-    "quiet_scalp_block": 904,
+    "quiet_scalp_block": 905,
     "regime_distribution": 154,
-    "total_lines": 4871910
+    "total_lines": 4872250
   },
   "lookback_hours": 24,
   "path_funnel_truth": {
@@ -2443,7 +2443,7 @@
     }
   },
   "quiet_scalp_block": {
-    "average_gap_to_min": 13.05,
+    "average_gap_to_min": 13.07,
     "by_symbol": {
       "1000PEPEUSDT": 32,
       "ADAUSDT": 8,
@@ -2461,13 +2461,13 @@
       "NEARUSDT": 32,
       "ONDOUSDT": 30,
       "SUIUSDT": 7,
-      "TRXUSDT": 155,
+      "TRXUSDT": 156,
       "UNIUSDT": 25,
       "XLMUSDT": 9,
       "XPLUSDT": 10
     },
-    "samples": 904,
-    "total": 904
+    "samples": 905,
+    "total": 905
   },
   "raw_extracts": {
     "current_channel_funnel_counters": {
@@ -3909,9 +3909,9 @@
   },
   "runtime_health": {
     "health": "healthy",
-    "heartbeat_age_sec": 2,
+    "heartbeat_age_sec": 1,
     "heartbeat_warning": false,
-    "latest_record_age_sec": 709,
+    "latest_record_age_sec": 799,
     "overall": "healthy",
     "records_fresh": true,
     "running": true,

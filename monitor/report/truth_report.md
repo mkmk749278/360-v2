@@ -8,8 +8,8 @@
 
 ## Runtime health
 - Engine running: `True` (status=running, health=healthy)
-- Heartbeat age: `2` sec (warning=False)
-- Latest performance record age: `709` sec
+- Heartbeat age: `1` sec (warning=False)
+- Latest performance record age: `799` sec
 
 ## Path funnel truth
 | Path/Setup | Attempts | No-signal | Generated | Scanner prep | Gated | Emitted | Classification |
@@ -74,9 +74,9 @@
 | VOLATILE | 81348 | 7.5% |
 
 ## QUIET_SCALP_BLOCK gate
-- Total blocks in window: **904**
-- Average confidence gap to threshold: **13.05** (samples=904) — small gap means candidates are *close* to clearing the gate.
-- Top blocked symbols: BTCUSDT=159, TRXUSDT=155, ETHUSDT=140, ASTERUSDT=78, MRVLUSDT=51, LTCUSDT=45, LINKUSDT=33, NEARUSDT=32, 1000PEPEUSDT=32, ONDOUSDT=30
+- Total blocks in window: **905**
+- Average confidence gap to threshold: **13.07** (samples=905) — small gap means candidates are *close* to clearing the gate.
+- Top blocked symbols: BTCUSDT=159, TRXUSDT=156, ETHUSDT=140, ASTERUSDT=78, MRVLUSDT=51, LTCUSDT=45, LINKUSDT=33, NEARUSDT=32, 1000PEPEUSDT=32, ONDOUSDT=30
 
 ## Confidence gate decisions
 | Setup | Decision | Reason | Count |
@@ -95,12 +95,12 @@
 | LIQUIDITY_SWEEP_REVERSAL | filtered | min_confidence | 1129 |
 | LIQUIDITY_SWEEP_REVERSAL | filtered | quiet_scalp_min_confidence | 133 |
 | LIQUIDITY_SWEEP_REVERSAL | kept | min_confidence_pass | 941 |
-| MOVER_TREND_PULLBACK | filtered | min_confidence | 603 |
+| MOVER_TREND_PULLBACK | filtered | min_confidence | 614 |
 | MOVER_TREND_PULLBACK | kept | min_confidence_pass | 559 |
 | QUIET_COMPRESSION_BREAK | filtered | quiet_scalp_min_confidence | 193 |
 | QUIET_COMPRESSION_BREAK | kept | min_confidence_pass | 787 |
-| SR_FLIP_RETEST | filtered | min_confidence | 4741 |
-| SR_FLIP_RETEST | filtered | quiet_scalp_min_confidence | 369 |
+| SR_FLIP_RETEST | filtered | min_confidence | 4746 |
+| SR_FLIP_RETEST | filtered | quiet_scalp_min_confidence | 370 |
 | SR_FLIP_RETEST | kept | min_confidence_pass | 2964 |
 | TREND_PULLBACK_CONTINUATION | filtered | min_confidence | 1 |
 | TREND_PULLBACK_EMA | kept | min_confidence_pass | 46 |
@@ -121,11 +121,11 @@
 | FUNDING_EXTREME_SIGNAL | kept | 5 | 69.56 | 65.00 | -4.56 | 19.88 | 19.98 | 17.00 | 1.60 | 0.00 |
 | LIQUIDITY_SWEEP_REVERSAL | filtered | 1262 | 54.86 | 65.00 | 10.14 | 20.44 | 19.75 | 18.34 | 1.89 | 8.49 |
 | LIQUIDITY_SWEEP_REVERSAL | kept | 941 | 69.35 | 65.00 | -4.35 | 20.77 | 19.65 | 18.36 | 1.33 | 0.98 |
-| MOVER_TREND_PULLBACK | filtered | 603 | 53.20 | 65.00 | 11.80 | 19.61 | 18.19 | 15.80 | 4.36 | 22.38 |
+| MOVER_TREND_PULLBACK | filtered | 614 | 53.23 | 65.00 | 11.77 | 19.63 | 18.22 | 15.80 | 4.39 | 22.04 |
 | MOVER_TREND_PULLBACK | kept | 559 | 72.45 | 65.00 | -7.45 | 20.53 | 18.09 | 15.80 | 4.98 | 5.24 |
 | QUIET_COMPRESSION_BREAK | filtered | 193 | 54.28 | 65.00 | 10.72 | 22.57 | 19.29 | 20.00 | 0.00 | 4.34 |
 | QUIET_COMPRESSION_BREAK | kept | 787 | 77.90 | 65.00 | -12.90 | 20.03 | 19.45 | 20.00 | 0.00 | 1.75 |
-| SR_FLIP_RETEST | filtered | 5110 | 55.40 | 65.00 | 9.60 | 21.22 | 19.89 | 15.81 | 1.57 | 6.54 |
+| SR_FLIP_RETEST | filtered | 5116 | 55.38 | 65.00 | 9.62 | 21.22 | 19.89 | 15.81 | 1.57 | 6.55 |
 | SR_FLIP_RETEST | kept | 2964 | 70.50 | 65.00 | -5.50 | 20.72 | 19.95 | 15.59 | 2.14 | 1.24 |
 | TREND_PULLBACK_CONTINUATION | filtered | 1 | 54.00 | 65.00 | 11.00 | 24.00 | 18.60 | 16.40 | 0.00 | 0.00 |
 | TREND_PULLBACK_EMA | kept | 46 | 78.72 | 65.00 | -13.72 | 19.99 | 19.96 | 19.00 | 5.51 | -2.66 |
@@ -146,11 +146,11 @@ _These are the actual ``SignalScoringEngine`` dimensions whose sum reconstructs 
 | FUNDING_EXTREME_SIGNAL | kept | 5 | 69.56 | 25.00 | 10.00 | 3.00 | 14.60 | 5.70 | 9.66 | 1.60 |
 | LIQUIDITY_SWEEP_REVERSAL | filtered | 1262 | 54.86 | 21.31 | 15.13 | 7.40 | 13.02 | 5.13 | 6.24 | 1.89 |
 | LIQUIDITY_SWEEP_REVERSAL | kept | 941 | 69.35 | 22.81 | 14.20 | 6.02 | 14.01 | 5.58 | 6.40 | 1.33 |
-| MOVER_TREND_PULLBACK | filtered | 603 | 53.20 | 18.40 | 18.18 | 7.95 | 12.84 | 5.35 | 8.70 | 4.36 |
+| MOVER_TREND_PULLBACK | filtered | 614 | 53.23 | 18.48 | 18.17 | 7.94 | 12.86 | 5.34 | 8.56 | 4.39 |
 | MOVER_TREND_PULLBACK | kept | 559 | 72.45 | 18.31 | 18.00 | 8.03 | 13.66 | 5.53 | 9.18 | 4.98 |
 | QUIET_COMPRESSION_BREAK | filtered | 193 | 54.28 | 18.08 | 18.00 | 6.75 | 16.77 | 5.70 | 5.64 | 0.00 |
 | QUIET_COMPRESSION_BREAK | kept | 787 | 77.90 | 20.15 | 18.00 | 10.68 | 16.62 | 6.54 | 8.44 | 0.00 |
-| SR_FLIP_RETEST | filtered | 5110 | 55.40 | 19.34 | 17.28 | 4.94 | 13.02 | 6.18 | 7.49 | 1.57 |
+| SR_FLIP_RETEST | filtered | 5116 | 55.38 | 19.34 | 17.28 | 4.95 | 13.02 | 6.18 | 7.49 | 1.57 |
 | SR_FLIP_RETEST | kept | 2964 | 70.50 | 22.34 | 15.16 | 5.01 | 13.93 | 5.87 | 8.19 | 2.14 |
 | TREND_PULLBACK_CONTINUATION | filtered | 1 | 54.00 | 17.00 | 8.00 | 15.00 | 14.00 | 5.00 | 10.00 | 0.00 |
 | TREND_PULLBACK_EMA | kept | 46 | 78.72 | 18.74 | 18.00 | 7.50 | 14.00 | 5.25 | 9.86 | 5.51 |
@@ -171,11 +171,11 @@ _Average per-type contribution to the aggregate ``gate`` penalty.  When one colu
 | FUNDING_EXTREME_SIGNAL | kept | 5 | 69.56 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
 | LIQUIDITY_SWEEP_REVERSAL | filtered | 1262 | 54.86 | 0.00 | 0.00 | 1.62 | 0.00 | 4.48 | 0.00 | 0.00 | 0.00 | **6.10** |
 | LIQUIDITY_SWEEP_REVERSAL | kept | 941 | 69.35 | 0.00 | 0.00 | 0.07 | 0.00 | 0.48 | 0.00 | 0.00 | 0.00 | **0.55** |
-| MOVER_TREND_PULLBACK | filtered | 603 | 53.20 | 0.00 | 0.00 | 8.32 | 0.00 | 0.58 | 0.00 | 0.00 | 0.05 | **8.95** |
+| MOVER_TREND_PULLBACK | filtered | 614 | 53.23 | 0.00 | 0.00 | 8.17 | 0.00 | 0.57 | 0.00 | 0.00 | 0.11 | **8.85** |
 | MOVER_TREND_PULLBACK | kept | 559 | 72.45 | 0.00 | 0.00 | 4.72 | 0.00 | 0.37 | 0.00 | 0.00 | 0.00 | **5.09** |
 | QUIET_COMPRESSION_BREAK | filtered | 193 | 54.28 | 0.00 | 0.00 | 0.00 | 0.00 | 0.47 | 0.00 | 0.00 | 2.91 | **3.38** |
 | QUIET_COMPRESSION_BREAK | kept | 787 | 77.90 | 0.00 | 0.00 | 0.00 | 0.00 | 2.90 | 0.00 | 0.00 | 1.26 | **4.16** |
-| SR_FLIP_RETEST | filtered | 5110 | 55.40 | 0.00 | 0.00 | 0.49 | 0.00 | 1.15 | 0.01 | 0.00 | 0.48 | **2.13** |
+| SR_FLIP_RETEST | filtered | 5116 | 55.38 | 0.00 | 0.00 | 0.49 | 0.00 | 1.15 | 0.01 | 0.00 | 0.48 | **2.13** |
 | SR_FLIP_RETEST | kept | 2964 | 70.50 | 0.00 | 0.00 | 0.25 | 0.00 | 0.23 | 0.00 | 0.00 | 0.00 | **0.48** |
 | TREND_PULLBACK_CONTINUATION | filtered | 1 | 54.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
 | TREND_PULLBACK_EMA | kept | 46 | 78.72 | 0.00 | 0.00 | 0.21 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.21** |
@@ -216,11 +216,11 @@ _DROP candidate: avg EV < -0.20R/kill across >= 20 kills. KEEP: avg EV > +0.10R/
 
 ## Log parse diagnostics
 _If a section above is empty but the matching diagnostic count is also 0, the engine isn't emitting that log line in the window (cadence/retention) rather than the parser being broken._
-- Total log lines in window: `4871910`
+- Total log lines in window: `4872250`
 - `Path funnel` emissions: `154`
 - `Regime distribution` emissions: `154`
-- `QUIET_SCALP_BLOCK` events: `904`
-- `confidence_gate` events: `17151`
+- `QUIET_SCALP_BLOCK` events: `905`
+- `confidence_gate` events: `17168`
 - `free_channel_post` events: `105`
 - `pre_tp_fire` events: `49`
 

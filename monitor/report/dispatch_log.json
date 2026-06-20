@@ -1,24 +1,5 @@
 [
   {
-    "dispatched_at": 1781923809.1492772,
-    "signal_id": "FAR-C6388431",
-    "channel": "360_SCALP",
-    "symbol": "BELUSDT",
-    "direction": "LONG",
-    "setup_class": "FAILED_AUCTION_RECLAIM",
-    "confidence": 70.5,
-    "signal_tier": "B",
-    "entry": 0.11434,
-    "sl": 0.11212691,
-    "tp1": 0.11876618,
-    "tp2": 0.11987272,
-    "tp3": 0.12208581,
-    "market_phase": "RANGING | ATR%ile=11 | Vol=ACCUMULATION",
-    "entry_regime": "RANGING",
-    "entry_regime_15m": "TRENDING_UP",
-    "telegram_text": "*⚡ FAILED AUCTION RECLAIM* │ *BELUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `0.114010` – `0.114481` \\(limit order\\)\n   Mid: `0.114340`\n🛑 SL: `0.112127` (-1.94%)\n🎯 TP1: `0.118766` (+3.87%)\n🎯 TP2: `0.119873` (+4.84%)\n⚡ Pre-TP @ `0.114928` \\(+0.51% raw, ≥+4.4% net @ 10x\\) → SL → breakeven \\(auto\\)\n\n📊 Setup: FAILED AUCTION RECLAIM | Confidence: *70.5* (A)\n⏱ Hold: ~1-2h | R:R 1:2.0\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep LONG at 0.112190 | FVG 0.115080-0.114640 + Back below reclaimed level 0.113390 and through failed-auction wick/buffer 0.112127\n\n🏷 Risk: *Low* | Quality: *A*"
-  },
-  {
     "dispatched_at": 1781927468.4712405,
     "signal_id": "SRFLIP-E4AF6ADD",
     "channel": "360_SCALP",
@@ -948,5 +929,24 @@
     "entry_regime": "TRENDING_UP",
     "entry_regime_15m": "TRENDING_DOWN",
     "telegram_text": "*⚡ FAILED AUCTION RECLAIM* │ *RIFUSDT* │ *SHORT*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `0.089416` – `0.089830` \\(limit order\\)\n   Mid: `0.089540`\n🛑 SL: `0.091250` (+1.91%)\n🎯 TP1: `0.086119` (-3.82%)\n🎯 TP2: `0.085264` (-4.78%)\n⚡ Pre-TP @ `0.089023` \\(+0.58% raw, ≥+5.1% net @ 10x\\) → SL → breakeven \\(auto\\)\n\n📊 Setup: FAILED AUCTION RECLAIM | Confidence: *76.3* (A)\n⏱ Hold: ~1-2h | R:R 1:2.0\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep LONG at 0.089390 | FVG 0.090660-0.090340 + Back above reclaimed level 0.090140 and through failed-auction wick/buffer 0.091250\n\n🏷 Risk: *Low* | Quality: *A*"
+  },
+  {
+    "dispatched_at": 1781971687.2097394,
+    "signal_id": "DIVCON-B1AEB0E3",
+    "channel": "360_SCALP",
+    "symbol": "METUSDT",
+    "direction": "LONG",
+    "setup_class": "DIVERGENCE_CONTINUATION",
+    "confidence": 68.0,
+    "signal_tier": "B",
+    "entry": 0.1511,
+    "sl": 0.14976559,
+    "tp1": 0.1528,
+    "tp2": 0.15443604,
+    "tp3": 0.162,
+    "market_phase": "RANGING | ATR%ile=0 | Vol=ACCUMULATION",
+    "entry_regime": "RANGING",
+    "entry_regime_15m": "TRENDING_UP",
+    "telegram_text": "*📊 DIVERGENCE CONTINUATION* │ *METUSDT* │ *LONG*\n━━━━━━━━━━━━━━━━━━━━━━━━\n\n📍 Entry Zone: `0.150803` – `0.151227` \\(limit order\\)\n   Mid: `0.151100`\n🛑 SL: `0.149766` (-0.88%)\n🎯 TP1: `0.152800` (+1.13%)\n🎯 TP2: `0.154436` (+2.21%)\n⚡ Pre-TP @ `0.151630` \\(+0.35% raw, ≥+2.8% net @ 10x\\) → SL → breakeven \\(auto\\)\n\n📊 Setup: DIVERGENCE CONTINUATION | Confidence: *68.0* (B)\n⏱ Hold: ~1-2h | R:R 1:1.3\n⏰ Valid for: \\~15 min | Execution: LIMIT ORDER\n💡 Sweep SHORT at 0.151200 | FVG 0.150800-0.150700 + Below 0.150100 structure + volatility buffer\n\n🏷 Risk: *Low* | Quality: *B*"
   }
 ]
