@@ -157,6 +157,64 @@ def _apply_trending_pretp_suppress(grab_fraction: float, regime_label: Optional[
     return grab_fraction
 
 
+def _would_fsm_trail(
+    regime_5m: Optional[str], regime_15m: Optional[str], direction: str
+) -> bool:
+    """Mirror of ``position_fsm._select_exit_path`` returning True iff a pre-TP
+    fill would route to the TRAILING runner path (keep TP2 live + ATR trail).
+
+    Kept in lock-step with the FSM predicate so dispatch only applies the
+    trend-runner profile (bank small + later) when the FSM will actually run a
+    trail — otherwise we'd bank a 30% partial and then CANCEL-close the residual,
+    which is strictly worse than the default.  A unit test asserts the two stay
+    aligned.  VOLATILE routes to its own (tighten) path, not the trail.
+    """
+    r5 = (regime_5m or "").upper()
+    r15 = (regime_15m or "").upper()
+    side = (direction or "").upper()
+    if r5 not in ("TRENDING_UP", "TRENDING_DOWN"):
+        return False
+    trade_long = side == "LONG"
+    if (r5 == "TRENDING_UP") != trade_long:
+        return False  # 5m counter-trend
+    if r15 not in ("TRENDING_UP", "TRENDING_DOWN"):
+        return False  # 15m not trending — FSM declines the trail
+    if (r15 == "TRENDING_UP") != trade_long:
+        return False  # 15m counter to trade direction
+    return True
+
+
+def _apply_regime_trend_runner(
+    grab_fraction: float,
+    pretp_threshold: float,
+    sl_dist_pct: float,
+    regime_5m: Optional[str],
+    regime_15m: Optional[str],
+    direction: str,
+) -> tuple[float, float, bool]:
+    """Regime-per-exit runner profile for trend-aligned signals (§3.2b).
+
+    When enabled and the FSM would trail this position, bank a SMALL partial
+    (``REGIME_TREND_GRAB_FRACTION``, 30%) at a RAISED pre-TP threshold floored at
+    ``sl_dist_pct × REGIME_TREND_PRETP_R_FACTOR`` (1.0R), then let the residual
+    ride the trail.  Returns ``(grab, threshold, applied)``.  No-op (returns the
+    inputs unchanged, applied=False) when disabled, when pre-TP is already
+    suppressed (``grab_fraction <= 0`` — respects entry-only / user-OFF /
+    allowlist), or when the FSM would not trail.  Pure → unit-testable.
+    """
+    from config import REGIME_PER_EXIT_ENABLED as _enabled
+    from config import REGIME_TREND_PRETP_R_FACTOR as _r_factor
+    from config import REGIME_TREND_GRAB_FRACTION as _grab
+    if not _enabled or grab_fraction <= 0:
+        return grab_fraction, pretp_threshold, False
+    if not _would_fsm_trail(regime_5m, regime_15m, direction):
+        return grab_fraction, pretp_threshold, False
+    raised = pretp_threshold
+    if sl_dist_pct > 0:
+        raised = max(pretp_threshold, sl_dist_pct * _r_factor)
+    return float(_grab), float(raised), True
+
+
 def _cancel_fullgrab_would_apply(grab_fraction: float, regime_label: Optional[str]) -> bool:
     """Flag-independent predicate: would the CANCEL-path full-grab apply here?
 
@@ -542,30 +600,64 @@ async def dispatch_signal_to_active_users(
                     uid, setup_class, _allowed_setups,
                 )
                 user_grab_fraction = 0.0
-        # TRENDING pre-TP suppression (session 20, ships dark).  In a
-        # TRENDING_UP/DOWN entry regime the thesis is to ride the move; the
-        # pre-TP partial close at +0.35% caps the winner while leaving the
-        # residual exposed to the same underlying risk.  Realized Binance data
-        # shows >40min TRENDING holds net +$1.049 (67% win) vs <40min -$0.492
-        # (39% win) — pre-TP was cutting those runners at first profit.
-        _grab_before_trending_suppress = user_grab_fraction
-        user_grab_fraction = _apply_trending_pretp_suppress(user_grab_fraction, regime_label)
-        if user_grab_fraction != _grab_before_trending_suppress:
-            log.debug(
-                "signal_dispatch: pre-TP suppressed — TRENDING entry regime "
-                "uid={} signal_id={} regime={} (grab {:.2f} → 0.00)",
-                uid, signal_id, regime_label, _grab_before_trending_suppress,
+        # Regime-per-exit: trend-aligned runner profile (§3.2b, owner-signed-off
+        # 2026-06-21).  Supersedes the legacy TRENDING_PRETP_SUPPRESSED grab→0 for
+        # trend-aligned entries.  Instead of skipping pre-TP entirely (full ride,
+        # no BE) OR banking 50% at the flat +0.35% (caps the runner — TRENDING_UP
+        # capture −10% in the all-time Raw Edge), bank a SMALL partial (30%) LATER
+        # (pre-TP floored at 1.0R of the stop) and let the FSM trail the residual
+        # past TP2.  Applied only when the FSM would actually trail (5m+15m trend
+        # aligned with the trade) so we never bank-then-CANCEL.  When the flag is
+        # OFF, fall back to the legacy suppress/shadow behaviour unchanged.
+        _sl_dist_pct_for_regime = (
+            abs(entry_price - sl_price) / entry_price * 100.0
+            if (entry_price > 0 and sl_price > 0)
+            else 0.0
+        )
+        from config import REGIME_PER_EXIT_ENABLED as _regime_per_exit_on
+        if _regime_per_exit_on:
+            _grab_before_runner = user_grab_fraction
+            _thr_before_runner = user_pretp_threshold
+            user_grab_fraction, user_pretp_threshold, _runner_applied = (
+                _apply_regime_trend_runner(
+                    user_grab_fraction,
+                    user_pretp_threshold,
+                    _sl_dist_pct_for_regime,
+                    regime_label,
+                    regime_label_15m,
+                    direction,
+                )
             )
-        elif _shadow_telemetry_on() and _trending_pretp_would_suppress(
-            _grab_before_trending_suppress, regime_label
-        ):
-            # Flag off but the gate matched — record what TRENDING_PRETP_SUPPRESSED
-            # would have done so its blast radius is measurable before activation.
-            log.info(
-                "signal_dispatch: [SHADOW] TRENDING_PRETP_SUPPRESSED would skip "
-                "pre-TP — uid={} signal_id={} regime={} grab={:.2f} (flag off, no-op)",
-                uid, signal_id, regime_label, _grab_before_trending_suppress,
-            )
+            if _runner_applied:
+                log.debug(
+                    "signal_dispatch: regime-per-exit trend runner — uid={} "
+                    "signal_id={} regime={}/{} grab {:.2f}→{:.2f} thr {:.3f}%→{:.3f}% "
+                    "(bank small + later, trail the residual)",
+                    uid, signal_id, regime_label, regime_label_15m,
+                    _grab_before_runner, user_grab_fraction,
+                    _thr_before_runner, user_pretp_threshold,
+                )
+        else:
+            # Legacy TRENDING pre-TP suppression (session 20).  grab→0 in a
+            # TRENDING entry regime — full ride, no pre-TP.
+            _grab_before_trending_suppress = user_grab_fraction
+            user_grab_fraction = _apply_trending_pretp_suppress(user_grab_fraction, regime_label)
+            if user_grab_fraction != _grab_before_trending_suppress:
+                log.debug(
+                    "signal_dispatch: pre-TP suppressed — TRENDING entry regime "
+                    "uid={} signal_id={} regime={} (grab {:.2f} → 0.00)",
+                    uid, signal_id, regime_label, _grab_before_trending_suppress,
+                )
+            elif _shadow_telemetry_on() and _trending_pretp_would_suppress(
+                _grab_before_trending_suppress, regime_label
+            ):
+                # Flag off but the gate matched — record what TRENDING_PRETP_SUPPRESSED
+                # would have done so its blast radius is measurable before activation.
+                log.info(
+                    "signal_dispatch: [SHADOW] TRENDING_PRETP_SUPPRESSED would skip "
+                    "pre-TP — uid={} signal_id={} regime={} grab={:.2f} (flag off, no-op)",
+                    uid, signal_id, regime_label, _grab_before_trending_suppress,
+                )
         # CANCEL-path fee optimisation (session 19, ships dark).  A RANGING/
         # QUIET entry regime routes the pre-TP to the CANCEL exit path, which
         # banks a partial via the maker LIMIT and then MARKET-closes the
