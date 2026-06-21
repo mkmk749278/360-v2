@@ -348,6 +348,26 @@ PRE_TP_REGIME_ALLOWLIST: frozenset = frozenset(
 # hold-time Pearson r = +0.379 — longer holds win more.
 TRENDING_PRETP_SUPPRESSED: bool = _safe_bool("TRENDING_PRETP_SUPPRESSED", "false")
 
+# ── Regime-per-exit: trend-aligned runner profile (§3.2b, Session 31) ─────────
+# Raw Edge (all-time, 474 closed): book capture 5% with avg MFE 0.535% — the
+# exit machinery banks ~1/20th of the move it reaches.  TRENDING_UP capture is
+# the worst (−10%, 21% runners): trend signals bank 50% at the flat +0.35%
+# pre-TP and trail only the residual, capping the runner exactly where it should
+# ride.  The FSM already routes a trend-aligned pre-TP fill to the trailing path
+# (_pretp_trail_path: keep TP2 live + ATR trail); this profile feeds it better —
+# bank a SMALL partial, LATER (at an R-multiple of the stop), then let the trail
+# run.  Owner-signed-off 2026-06-21 ("raised threshold + trailing").  Reversible
+# env off-switch (default ON — testing phase); OFF restores the prior behaviour.
+REGIME_PER_EXIT_ENABLED: bool = _safe_bool("REGIME_PER_EXIT_ENABLED", "true")
+#: Pre-TP threshold floor for trend-aligned signals, as a multiple of the stop
+#: distance.  1.0R = bank only once the move equals the risk taken — the residual
+#: then trails for the rest of the run instead of being capped at +0.35%.
+REGIME_TREND_PRETP_R_FACTOR: float = _safe_float("REGIME_TREND_PRETP_R_FACTOR", "1.0")
+#: Grab fraction for trend-aligned signals — bank a small partial (30%) and let
+#: the 70% residual ride the ATR trail past TP2 (vs the flat 50% default).
+REGIME_TREND_GRAB_FRACTION: float = _safe_float("REGIME_TREND_GRAB_FRACTION", "0.30")
+
+
 # Shadow telemetry for the dark exit flags (session 20 follow-up #3).
 # When enabled (default), the engine logs a structured ``[SHADOW]`` line
 # every time one of the dark exit flags WOULD fire but is currently off —
