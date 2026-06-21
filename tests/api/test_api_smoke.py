@@ -1049,6 +1049,52 @@ def test_kill_switch_engage_disengage_happy_path(
     assert fake.engaged is False
 
 
+def test_auto_trade_global_get_uninitialised(client: TestClient) -> None:
+    r = client.get("/api/auto-trade-global")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["initialised"] is False
+    assert body["enabled"] is False
+
+
+def test_auto_trade_global_post_requires_owner(client: TestClient) -> None:
+    r = client.post("/api/auto-trade-global", json={"enabled": True})
+    assert r.status_code in (401, 403)
+
+
+def test_auto_trade_global_enable_disable_happy_path(
+    owner_client: TestClient, monkeypatch,
+) -> None:
+    from src.execution import kill_switch as ks
+
+    class _FakeKS:
+        def __init__(self) -> None:
+            self.enabled = False
+
+        def is_globally_enabled(self) -> bool:
+            return self.enabled
+
+        def enable_global_auto_trade(self) -> None:
+            self.enabled = True
+
+        def disable_global_auto_trade(self) -> None:
+            self.enabled = False
+
+    fake = _FakeKS()
+    monkeypatch.setattr(ks, "is_initialised", lambda: True)
+    monkeypatch.setattr(ks, "get_client", lambda: fake)
+
+    r = owner_client.post("/api/auto-trade-global", json={"enabled": True})
+    assert r.status_code == 200, r.text
+    assert r.json()["enabled"] is True
+    assert fake.enabled is True
+
+    r2 = owner_client.post("/api/auto-trade-global", json={"enabled": False})
+    assert r2.status_code == 200
+    assert r2.json()["enabled"] is False
+    assert fake.enabled is False
+
+
 # ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------

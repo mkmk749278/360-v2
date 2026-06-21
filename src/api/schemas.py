@@ -283,6 +283,25 @@ class KillSwitchSetRequest(BaseModel):
     )
 
 
+class AutoTradeGlobalState(BaseModel):
+    """Global ``auto_trade_globally_enabled`` flag (OWNER_BRIEF §3.9 / B18).
+
+    Distinct from the kill switch: ``enabled`` False halts *new* order
+    placement engine-wide (existing Binance positions are untouched —
+    that's the kill switch's job).  Default ships False (#431 blast-radius
+    cap).  ``initialised`` False = the flag's Firestore client never booted.
+    """
+
+    enabled: bool
+    initialised: bool = True
+
+
+class AutoTradeGlobalSetRequest(BaseModel):
+    """Owner request to flip the global auto-trade-enabled flag."""
+
+    enabled: bool
+
+
 # ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------
