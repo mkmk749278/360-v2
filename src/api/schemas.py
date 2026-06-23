@@ -62,6 +62,23 @@ class SignalDetail(BaseModel):
     status: str
     current_price: float
     pnl_pct: float
+    max_favorable_excursion_pct: float = Field(
+        0.0,
+        description=(
+            "Peak unrealised profit %, measured from entry, that this signal "
+            "reached at any point in its life (max favorable excursion). For "
+            "closed signals this is the best the trade ever showed before its "
+            "terminal exit; for active signals it tracks the running peak."
+        ),
+    )
+    max_adverse_excursion_pct: float = Field(
+        0.0,
+        description=(
+            "Worst unrealised drawdown %, measured from entry, the signal "
+            "reached (max adverse excursion). Reported as a signed value "
+            "matching pnl_pct's sign convention (negative = against the trade)."
+        ),
+    )
     pre_tp_hit: bool = False
     pre_tp_threshold_pct: float = Field(
         0.0,

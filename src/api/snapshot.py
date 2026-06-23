@@ -503,6 +503,12 @@ def _signal_to_detail(sig: Any) -> SignalDetail:
         status=status,
         current_price=float(getattr(sig, "current_price", 0.0) or 0.0),
         pnl_pct=float(getattr(sig, "pnl_pct", 0.0) or 0.0),
+        max_favorable_excursion_pct=float(
+            getattr(sig, "max_favorable_excursion_pct", 0.0) or 0.0
+        ),
+        max_adverse_excursion_pct=float(
+            getattr(sig, "max_adverse_excursion_pct", 0.0) or 0.0
+        ),
         pre_tp_hit=bool(getattr(sig, "pre_tp_hit", False)),
         pre_tp_threshold_pct=float(
             getattr(sig, "pre_tp_threshold_pct", 0.0) or 0.0

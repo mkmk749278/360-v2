@@ -54,6 +54,8 @@ def _make_sig(
     sig.quality_tier = "A"
     sig.current_price = 50100.0
     sig.pnl_pct = 0.20
+    sig.max_favorable_excursion_pct = 0.40
+    sig.max_adverse_excursion_pct = -0.10
     sig.pre_tp_hit = False
     sig.pre_tp_threshold_pct = 0.0
     sig.pre_tp_trigger_price = None
