@@ -227,3 +227,56 @@ class TestSignalToDetailHoldMins:
         assert 7 <= detail.hold_mins <= 9, (
             f"hold_mins={detail.hold_mins} should be ~8 (dispatch→terminal), not ~58"
         )
+
+
+# ---------------------------------------------------------------------------
+# original_stop_loss — the pre-BE/trailing protective stop (PR: held-to-stop)
+# ---------------------------------------------------------------------------
+
+class _Sig:
+    """Minimal explicit signal stand-in (avoids MagicMock's __float__=1.0)."""
+
+    def __init__(self, **kw):
+        self.signal_id = "S1"
+        self.symbol = "BTCUSDT"
+        self.setup_class = "SR_FLIP_RETEST"
+        self.timestamp = datetime.now(timezone.utc)
+        self.dispatch_timestamp = None
+        self.terminal_outcome_timestamp = None
+        self.status = "ACTIVE"
+        self.tp1 = self.tp2 = 0.0
+        self.tp3 = None
+        self.confidence = 70.0
+        self.quality_tier = "A"
+        self.current_price = 0.0
+        self.pnl_pct = 0.0
+        self.max_favorable_excursion_pct = 0.0
+        self.max_adverse_excursion_pct = 0.0
+        self.__dict__.update(kw)
+
+
+class TestOriginalStopLoss:
+    def test_long_reconstructs_original_below_entry_after_be_shift(self):
+        # TP1/BE shifted the live stop up to entry; original was 2.0 below.
+        sig = _Sig(direction="LONG", entry=100.0, stop_loss=100.0,
+                   original_sl_distance=2.0, status="PROFIT_LOCKED")
+        d = _signal_to_detail(sig)
+        assert d.stop_loss == 100.0            # live (shifted) stop unchanged
+        assert d.original_stop_loss == 98.0    # original protective stop
+
+    def test_short_reconstructs_original_above_entry(self):
+        sig = _Sig(direction="SHORT", entry=100.0, stop_loss=100.0,
+                   original_sl_distance=1.5, status="PROFIT_LOCKED")
+        assert _signal_to_detail(sig).original_stop_loss == 101.5
+
+    def test_falls_back_to_current_stop_when_distance_unrecorded(self):
+        sig = _Sig(direction="LONG", entry=50.0, stop_loss=49.5,
+                   original_sl_distance=0.0)
+        assert _signal_to_detail(sig).original_stop_loss == 49.5
+
+    def test_untouched_stop_round_trips(self):
+        # Active signal never shifted: original == live stop.
+        sig = _Sig(direction="LONG", entry=100.0, stop_loss=98.0,
+                   original_sl_distance=2.0)
+        d = _signal_to_detail(sig)
+        assert d.stop_loss == d.original_stop_loss == 98.0
