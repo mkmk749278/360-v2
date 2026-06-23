@@ -895,6 +895,70 @@ class BillingGrantResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Google Play Billing (B16 — in-app subscription purchase path)
+# ---------------------------------------------------------------------------
+
+
+class PlayVerifyRequest(BaseModel):
+    """Body of ``POST /api/billing/play/verify``.
+
+    Sent by the app immediately after a Play Billing purchase completes.
+    The request is authenticated with the user's JWT (so the server knows
+    the ``user_id``); the body carries only what the Play Developer API
+    needs to look the purchase up.  Nothing here is trusted — entitlement
+    is re-derived server-side from Google.
+    """
+
+    product_id: str = Field(
+        ..., min_length=1, max_length=128,
+        description="Play subscription product id, e.g. lumin_pro_monthly.",
+    )
+    purchase_token: str = Field(
+        ..., min_length=1, max_length=4096,
+        description="Opaque purchaseToken returned by Play Billing.",
+    )
+
+
+class PlayVerifyResponse(BaseModel):
+    """Result of verifying a Play purchase.
+
+    ``tier`` + ``paid_until`` reflect the entitlement the server just
+    persisted, so the app can update its UI without a second round-trip.
+    """
+
+    ok: bool
+    tier: str
+    paid_until: Optional[str] = Field(
+        default=None, description="ISO-8601 UTC subscription expiry, or null."
+    )
+    subscription_state: str = Field(
+        ..., description="Raw Play subscriptionState (for diagnostics)."
+    )
+    token: Optional[str] = Field(
+        default=None,
+        description=(
+            "Freshly-minted Lumin JWT carrying the new tier + paid_until so "
+            "the app unlocks immediately without re-exchanging its token."
+        ),
+    )
+    exp_seconds: Optional[int] = Field(
+        default=None, description="TTL of the returned token in seconds."
+    )
+
+
+class PlayRtdnResponse(BaseModel):
+    """Acknowledgement returned to Google Pub/Sub for an RTDN push.
+
+    Always 200 with ``ok: true`` once we've accepted the message — even
+    for no-op events — so Pub/Sub stops redelivering.  Hard failures that
+    SHOULD be retried surface as a non-2xx status instead of this body.
+    """
+
+    ok: bool
+    handled: str = Field(..., description="What we did, e.g. 'RENEWED' / 'ignored'.")
+
+
+# ---------------------------------------------------------------------------
 # Telegram-OTP → Firebase custom-token bridge (Phase 4)
 # ---------------------------------------------------------------------------
 

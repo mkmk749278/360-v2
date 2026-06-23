@@ -66,7 +66,7 @@ The top-level crypto signals company in every aspect. Not a side project. Not a 
 
 ## 2.2 The Product
 
-**Only paid-channel signals carry business value.** A+ and B tier (65+ confidence) routed to TELEGRAM_ACTIVE_CHANNEL_ID. Sub-65 → FILTERED → dropped silently.
+**Only paid-tier signals carry business value.** A+ and B tier (65+ confidence) are delivered to the **in-app Lumin Signals feed** (paid-tier-gated) and mirrored to TELEGRAM_ACTIVE_CHANNEL_ID for any reachable subscriber. Sub-65 → FILTERED → dropped silently. The in-app feed is the primary surface (B1) because Telegram is banned in-region; the paywall that unlocks entry/SL/TP is Google Play Billing (B16).
 
 The free channel is fed only by storytelling mirrors (signal-result posts as social proof) and content-engine outputs. Never by sub-paid-tier engine signals.
 
@@ -298,7 +298,7 @@ Soft-penalty bonus magnitudes bounded: confluence ≤9 pts, structure-align 3 pt
 
 | # | Rule |
 |---|---|
-| B1 | All live paid signals go to ONE channel only (TELEGRAM_ACTIVE_CHANNEL_ID) |
+| B1 | **Paid signals are delivered in-app first.** The Lumin **Signals** feed (paid-tier-gated: free users see that a signal fired + direction/setup/confidence/outcome, paid users see entry/SL/TP) is the primary delivery channel, because Telegram is banned in-region and reaches no one there. The Telegram paid channel (TELEGRAM_ACTIVE_CHANNEL_ID) remains a single optional mirror for any reachable subscriber — never more than one paid channel, no duplicate routing. The free Telegram channel carries storytelling mirrors only. |
 | B2 | Zero manual effort at runtime — everything self-manages |
 | B3 | SL hits posted honestly — same visual weight as TP wins |
 | B4 | No duplicate signals on same symbol within cooldown window |
@@ -313,7 +313,7 @@ Soft-penalty bonus magnitudes bounded: confluence ≤9 pts, structure-align 3 pt
 | B13 | **Identity.** Firebase Phone Auth (primary, universal). Google Sign-In on Android. Telegram OTP as opt-in upgrade for DM features. No email, no password. |
 | B14 | Build constraint. All build/deploy paths work via VPS + GitHub Actions. No local Android Studio required. |
 | B15 | **Brand.** Lumin = consumer app brand. 360 Crypto Eye = engine + signal-source brand. Telegram channel never renames. App About page always credits 360 Crypto Eye. |
-| B16 | **Revenue.** Crypto-only subscriptions via Telegram bot (Play Store Reader-app exception). No Google Play billing, no fiat in v1. App is a control panel; payment lives in the bot. |
+| B16 | **Revenue — Google Play Billing (v1 purchase path).** In-app subscriptions are sold through **Google Play Billing**; the Telegram-bot payment path is **retired** (Telegram is banned in-region — a bot paywall reaches no one). The subscription is positioned as **education / market-analytics content**, never "trading signals" / investment consulting — Google Play's Payments policy bars investment-consulting services from Play billing, so the framing (store listing, in-app copy, Financial features declaration) is load-bearing, not cosmetic. **Entitlement is server-side and is the source of truth:** the app sends the Play `purchaseToken` to the engine, which verifies it against the Google Play Developer API (`purchases.subscriptionsv2`), acknowledges it, and sets `UserStore.tier='paid'` + `paid_until`; **Real-Time Developer Notifications (RTDN)** keep renewals/cancellations/holds/expiries live. The existing JWT `tier` claim + the app's free-tier gate already enforce the entitlement end-to-end — no client-trusted purchase state ever. Service-account key consumed via env only (never logged, never committed — Hard Limits). India alternative-billing (−4% fee) is an optional later add. No fiat-outside-Play in v1. |
 | B17 | **Per-user exit controls.** Pre-TP grab fraction: 30%–100% (engine default 50%). Pre-TP threshold: 0.10–1.00% raw. Invalidation mode: loose / standard / tight (engine default: tight). All stored in `user_pretp_settings` + `user_invalidation_settings`; NULL = engine default. `grab_fraction=1.0` = full close at threshold, no residual bracket. Regime-per-exit extension in design (§3.2b). |
 | B18 | **Server-side execution custody.** Non-custodial of funds; custodial of trade-authorisation keys only. Connect-time validation: withdraw permission disabled (auto-reject if enabled — no permissive mode), Futures enabled, IP whitelist set to engine VPS IP. Plaintext API secret materialises only in signing service process memory for one request — never logged, never written to disk. Master key in Cloud KMS HSM; engine has Decrypt IAM only. Blast-radius caps (non-negotiable): symbol allowlist (auto-tracks PairManager universe), per-user rate limit (10 orders/min, 50/hr), per-user position cap ($500 default), global kill switch (<5s from Telegram), global circuit breaker (>10 rejections/60s → auto-disable), per-user circuit breaker (>3 rejections/5min → auto-disable user). Any change to signing service / KMS / connect-time validation / blast-radius caps / circuit-breaker thresholds requires owner sign-off. |
 

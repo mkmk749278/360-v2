@@ -2518,3 +2518,68 @@ AWS_SNS_SENDER_ID: str = os.getenv("AWS_SNS_SENDER_ID", "")
 #: 503 — failing closed rather than accepting all callers.  Set this in
 #: lockstep with the bot's signing config.
 BILLING_WEBHOOK_SECRET: str = os.getenv("BILLING_WEBHOOK_SECRET", "")
+
+# ---------------------------------------------------------------------------
+# Google Play Billing (B16 — v1 in-app subscription purchase path)
+# ---------------------------------------------------------------------------
+#
+# The app sells the subscription via Google Play Billing; the engine verifies
+# the resulting ``purchaseToken`` server-side against the Google Play Developer
+# API (``purchases.subscriptionsv2``) and is the entitlement source of truth.
+# Nothing here is client-trusted.  See ``src/api/billing_play.py``.
+#
+# All values are env-overridable.  When ``GOOGLE_PLAY_BILLING_ENABLED`` is
+# false OR the package / service-account is unset, the Play billing endpoints
+# fail closed (503) — exactly like the HMAC billing webhook above.
+
+#: Master switch.  Off by default until the owner has created the Play
+#: subscription products + linked a service account (see ACTIVE_CONTEXT
+#: "OWNER ACTIONS").  This is an operational kill switch, NOT a dark flag:
+#: there is nothing to "measure in shadow" — it is either wired to a real
+#: Play Console project or it is not.
+GOOGLE_PLAY_BILLING_ENABLED: bool = _safe_bool("GOOGLE_PLAY_BILLING_ENABLED", "false")
+
+#: Android application id of the Lumin app, e.g. ``org.luminapp.lumin``.
+#: Must match the ``packageName`` Google signs RTDN notifications with and
+#: the package the purchase was made under.
+GOOGLE_PLAY_PACKAGE_NAME: str = os.getenv("GOOGLE_PLAY_PACKAGE_NAME", "")
+
+#: Filesystem path to the Google Cloud **service-account JSON** that holds
+#: Android Publisher API access (granted in Play Console → Users & permissions
+#: / API access).  The key never leaves the engine, is never logged, and is
+#: never written anywhere else (Hard Limits).  Falls back to the Firebase
+#: service-account path when unset *and* that account has been granted
+#: Android Publisher access — but an explicit, separate key is preferred so
+#: the two trust scopes stay independent.
+GOOGLE_PLAY_SERVICE_ACCOUNT_PATH: str = os.getenv(
+    "GOOGLE_PLAY_SERVICE_ACCOUNT_PATH",
+    os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", ""),
+)
+
+#: Comma-separated allowlist of subscription product IDs the engine will
+#: honour (e.g. ``lumin_pro_monthly,lumin_pro_quarterly``).  A purchase for
+#: any other product is rejected — defence against a tampered client sending
+#: a product id we never sold.  Empty = accept any product the Play API
+#: confirms (convenient for first wiring; set it before launch).
+GOOGLE_PLAY_PRODUCT_IDS: frozenset[str] = frozenset(
+    p.strip() for p in os.getenv("GOOGLE_PLAY_PRODUCT_IDS", "").split(",") if p.strip()
+)
+
+#: Tier granted to a user holding a valid Play subscription.  Matches
+#: ``auth.PAID_TIER``; overridable only for tests / migrations.
+GOOGLE_PLAY_PAID_TIER: str = os.getenv("GOOGLE_PLAY_PAID_TIER", "paid")
+
+#: Expected OIDC audience on Google Pub/Sub **push** requests carrying RTDN
+#: (Real-Time Developer Notifications).  Pub/Sub signs each push with a Google
+#: OIDC token; the engine verifies the token's ``aud`` matches this value so a
+#: third party can't POST forged subscription events.  Set to the engine's
+#: RTDN endpoint URL (the audience configured on the push subscription).
+#: Empty = audience check skipped (only acceptable behind a private network /
+#: secret-path URL; set it for the public endpoint).
+GOOGLE_PLAY_RTDN_AUDIENCE: str = os.getenv("GOOGLE_PLAY_RTDN_AUDIENCE", "")
+
+#: Optional shared-secret path component appended to the RTDN endpoint as a
+#: cheap unguessable-URL defence in addition to (not instead of) the OIDC
+#: audience check.  When set, ``POST /api/billing/play/rtdn/<token>`` must
+#: match.  Empty = no path secret.
+GOOGLE_PLAY_RTDN_PATH_SECRET: str = os.getenv("GOOGLE_PLAY_RTDN_PATH_SECRET", "")

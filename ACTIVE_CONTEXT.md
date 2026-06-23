@@ -4,6 +4,55 @@
 
 ---
 
+## 🟢 SESSION 32 2026-06-23 — Monetization pivot: Google Play Billing (Telegram payment retired); engine entitlement core shipped
+
+**Owner trigger:** Play Console granted **production access** (screenshot). Owner: "we
+need to proceed with Google Play billing, because Telegram is presently banned in
+India." Approved the full plan + "update owner brief."
+
+### Doctrine decision (owner-approved — Business Rule change, owner-sign-off)
+- **B16 rewritten:** Google Play Billing is the v1 purchase path; **Telegram-bot
+  payment retired** (a bot paywall reaches no one in a Telegram-banned region).
+  Subscription positioned as **education / market-analytics content**, never
+  "trading signals" — Google Play Payments policy bars *investment-consulting*
+  services from Play billing, so the framing is load-bearing.
+- **B1 reconciled:** paid signals deliver **in-app first** (Lumin Signals feed,
+  paid-tier-gated). Telegram paid channel = optional single mirror only.
+- Policy basis (verified against Google's own pages): Payments policy
+  ("stock trades, investment consulting … should not use Google Play's billing
+  system") + Financial Services declaration + India alternative-billing (−4%).
+
+### Key finding — the entitlement plumbing already existed
+Delivery is **already in-app** (`signals_page.dart`, free-tier gate locks
+entry/SL/TP). The engine already had `UserStore(tier, paid_until)` +
+`aset_tier()` + `mint_user_token(tier, paid_until)` + JWT tier-claim enforcement.
+The ONLY missing link was: **Play purchase → server-side verify → set_tier**.
+Grep confirmed zero pre-existing Play/billing code.
+
+### Shipped this session (engine — fully wired, no scaffold)
+| Area | What |
+|---|---|
+| Config | `GOOGLE_PLAY_*` env (package name, service-account JSON, allowed product IDs, RTDN audience, feature flag) — all env-overridable, SA key never logged. |
+| `src/api/billing_play.py` | `PlayBillingVerifier` — service-account OAuth2 token (RS256 via google-auth, cached) → Google Play Developer API `purchases.subscriptionsv2.get`; derives entitlement (ACTIVE/GRACE/CANCELED→paid until expiry; ON_HOLD/PAUSED/EXPIRED/REVOKED→free); acknowledges pending purchases; parses RTDN Pub/Sub envelopes. |
+| `src/api/play_purchases.py` | `PlayPurchaseStore` — maps `purchase_token → user_id` (so RTDN, which has no JWT, resolves the user); tracks product/expiry/state; handles `linkedPurchaseToken` on upgrade/resignup. |
+| `src/api/server.py` | `POST /api/billing/play/verify` (user-JWT authed) + `POST /api/billing/play/rtdn` (Pub/Sub push, audience-verified). Refresh path consults UserStore so an expired sub downgrades to free on next JWT refresh. |
+| `main.py` + `bootstrap.py` | construct + thread `PlayBillingVerifier` + `PlayPurchaseStore` (both isolated + single-process boot sites). |
+| Tests | verifier entitlement mapping, acknowledge, RTDN parse + re-fetch, token→user resolution, endpoint auth, refresh downgrade. |
+
+### REMAINING (next increments)
+1. **lumin-app:** `in_app_purchase` plugin; replace `subscription_page.dart`
+   Telegram CTA with Play purchase + restore-purchases; education/analytics copy;
+   drop reader-app language; verify→JWT-refresh.
+2. **lumin-legal:** auto-renew / billing terms + data-safety alignment.
+
+### OWNER ACTIONS (Play Console / GCP — only owner can do; blocks app increment)
+- Create subscription products (IDs → into `GOOGLE_PLAY_PRODUCT_IDS`); base plans + pricing.
+- File **Financial features declaration**; reframe listing + data-safety as education/analytics.
+- GCP **service account** w/ Android Publisher access, linked to Play Console → env `GOOGLE_PLAY_SA_JSON`.
+- **RTDN**: Pub/Sub topic + push subscription → engine `/api/billing/play/rtdn`.
+
+---
+
 ## 🟢 SESSION 31 2026-06-20 — Per-user PATH + REGIME live eligibility (shipped); paper-per-user + Full/Entry sequenced
 
 **Owner trigger:** "We give per-user symbol choice but not which paths / which
