@@ -52,6 +52,17 @@ class SignalDetail(BaseModel):
     direction: Literal["LONG", "SHORT"]
     entry: float
     stop_loss: float
+    original_stop_loss: float = Field(
+        0.0,
+        description=(
+            "The protective stop the signal was issued with, before any "
+            "break-even / trailing shift. ``stop_loss`` is mutated in place as "
+            "the trade progresses (→ entry on TP1/BE, → tp1 later), so consumers "
+            "that need the *original* risk geometry — e.g. a held-to-stop "
+            "replay — must use this. Falls back to the current stop_loss when "
+            "the original distance was never recorded (0.0)."
+        ),
+    )
     tp1: float
     tp2: float
     tp3: Optional[float] = None

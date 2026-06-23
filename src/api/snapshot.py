@@ -464,6 +464,22 @@ def _hold_mins(dispatch_ts: Optional[Any], terminal_ts: Optional[Any]) -> Option
     return max(0, int((end_ts - dispatch_ts).total_seconds() // 60))
 
 
+def _original_stop_loss(sig: Any, direction_str: str) -> float:
+    """The protective stop the signal was issued with, before BE/trailing shift.
+
+    TradeMonitor mutates ``sig.stop_loss`` in place as a trade progresses (→ entry
+    on TP1/break-even, → tp1 later), so the live ``stop_loss`` is *not* the
+    original risk geometry. The evaluators stamp ``original_sl_distance`` (entry→SL
+    distance) at emit; reconstruct the absolute original stop from it. Fall back to
+    the current ``stop_loss`` when the distance was never recorded.
+    """
+    entry = float(getattr(sig, "entry", 0.0) or 0.0)
+    osd = float(getattr(sig, "original_sl_distance", 0.0) or 0.0)
+    if osd > 0.0 and entry > 0.0:
+        return entry - osd if direction_str == "LONG" else entry + osd
+    return float(getattr(sig, "stop_loss", 0.0) or 0.0)
+
+
 def _signal_to_detail(sig: Any) -> SignalDetail:
     direction = getattr(sig, "direction", None)
     direction_str = (
@@ -493,6 +509,7 @@ def _signal_to_detail(sig: Any) -> SignalDetail:
         direction=direction_str,  # type: ignore[arg-type]
         entry=float(getattr(sig, "entry", 0.0) or 0.0),
         stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+        original_stop_loss=_original_stop_loss(sig, direction_str),
         tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
         tp2=float(getattr(sig, "tp2", 0.0) or 0.0),
         tp3=getattr(sig, "tp3", None),
