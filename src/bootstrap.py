@@ -392,6 +392,13 @@ class Bootstrap:
             API_PORT,
             API_PROCESS_ISOLATED,
             BILLING_WEBHOOK_SECRET,
+            GOOGLE_PLAY_BILLING_ENABLED,
+            GOOGLE_PLAY_PACKAGE_NAME,
+            GOOGLE_PLAY_PAID_TIER,
+            GOOGLE_PLAY_PRODUCT_IDS,
+            GOOGLE_PLAY_RTDN_AUDIENCE,
+            GOOGLE_PLAY_RTDN_PATH_SECRET,
+            GOOGLE_PLAY_SERVICE_ACCOUNT_PATH,
             LUMIN_DB_PATH,
             OTP_MAX_ATTEMPTS_PER_CODE,
             OTP_MAX_ISSUES_PER_HOUR,
@@ -676,6 +683,31 @@ class Bootstrap:
             )
             billing_verifier = BillingWebhookVerifier(BILLING_WEBHOOK_SECRET)
 
+            # Google Play Billing (B16) — only constructed in single-process
+            # mode (isolated mode serves HTTP from the api container, wired in
+            # src/api/main.py).  Disabled cleanly when env unset.
+            play_verifier = None
+            play_purchases = None
+            if GOOGLE_PLAY_BILLING_ENABLED and GOOGLE_PLAY_PACKAGE_NAME:
+                from src.api.billing_play import (
+                    PlayBillingVerifier,
+                    load_service_account_info,
+                )
+                from src.api.play_purchases import PlayPurchaseStore
+                play_verifier = PlayBillingVerifier(
+                    package_name=GOOGLE_PLAY_PACKAGE_NAME,
+                    service_account_info=load_service_account_info(
+                        GOOGLE_PLAY_SERVICE_ACCOUNT_PATH
+                    ),
+                    allowed_product_ids=GOOGLE_PLAY_PRODUCT_IDS,
+                    paid_tier=GOOGLE_PLAY_PAID_TIER,
+                )
+                play_purchases = PlayPurchaseStore(LUMIN_DB_PATH)
+                log.info(
+                    "Play billing enabled: package={} configured={}",
+                    GOOGLE_PLAY_PACKAGE_NAME, play_verifier.is_configured(),
+                )
+
             # Stash on the engine so other subsystems (e.g. Phase-3
             # per-user paper P&L) can resolve the same singletons.
             engine.user_store = user_store
@@ -713,6 +745,10 @@ class Bootstrap:
                             otp_store=otp_store,
                             otp_delivery=otp_delivery,
                             billing_verifier=billing_verifier,
+                            play_verifier=play_verifier,
+                            play_purchases=play_purchases,
+                            play_rtdn_audience=GOOGLE_PLAY_RTDN_AUDIENCE,
+                            play_rtdn_path_secret=GOOGLE_PLAY_RTDN_PATH_SECRET,
                         ),
                         name="api_server",
                     )

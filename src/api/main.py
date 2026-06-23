@@ -33,6 +33,13 @@ async def _run() -> None:
         API_JWT_SECRET,
         API_PORT,
         BILLING_WEBHOOK_SECRET,
+        GOOGLE_PLAY_BILLING_ENABLED,
+        GOOGLE_PLAY_PACKAGE_NAME,
+        GOOGLE_PLAY_PAID_TIER,
+        GOOGLE_PLAY_PRODUCT_IDS,
+        GOOGLE_PLAY_RTDN_AUDIENCE,
+        GOOGLE_PLAY_RTDN_PATH_SECRET,
+        GOOGLE_PLAY_SERVICE_ACCOUNT_PATH,
         LUMIN_DB_PATH,
         OTP_MAX_ATTEMPTS_PER_CODE,
         OTP_MAX_ISSUES_PER_HOUR,
@@ -46,6 +53,8 @@ async def _run() -> None:
     from src.api.redis_engine import RedisEngineFacade
     from src.api import firebase_auth
     from src.api.billing_callback import BillingWebhookVerifier
+    from src.api.billing_play import PlayBillingVerifier, load_service_account_info
+    from src.api.play_purchases import PlayPurchaseStore
     from src.api.otp import OtpStore
     from src.api.otp_delivery import LogOnlyOtpProvider
     from src.api import user_overrides as user_overrides_module
@@ -123,6 +132,25 @@ async def _run() -> None:
 
     billing_verifier = BillingWebhookVerifier(BILLING_WEBHOOK_SECRET)
 
+    # ── Google Play Billing (B16) ─────────────────────────────────────
+    play_verifier = None
+    play_purchases = None
+    if GOOGLE_PLAY_BILLING_ENABLED and GOOGLE_PLAY_PACKAGE_NAME:
+        sa_info = load_service_account_info(GOOGLE_PLAY_SERVICE_ACCOUNT_PATH)
+        play_verifier = PlayBillingVerifier(
+            package_name=GOOGLE_PLAY_PACKAGE_NAME,
+            service_account_info=sa_info,
+            allowed_product_ids=GOOGLE_PLAY_PRODUCT_IDS,
+            paid_tier=GOOGLE_PLAY_PAID_TIER,
+        )
+        play_purchases = PlayPurchaseStore(LUMIN_DB_PATH)
+        log.info(
+            "Play billing enabled: package={} configured={}",
+            GOOGLE_PLAY_PACKAGE_NAME, play_verifier.is_configured(),
+        )
+    else:
+        log.info("Play billing disabled (GOOGLE_PLAY_BILLING_ENABLED/package unset)")
+
     origins = [o.strip() for o in API_CORS_ORIGINS.split(",") if o.strip()]
 
     # ── FastAPI app ───────────────────────────────────────────────────
@@ -137,6 +165,10 @@ async def _run() -> None:
         otp_store=otp_store,
         otp_delivery=otp_delivery,
         billing_verifier=billing_verifier,
+        play_verifier=play_verifier,
+        play_purchases=play_purchases,
+        play_rtdn_audience=GOOGLE_PLAY_RTDN_AUDIENCE,
+        play_rtdn_path_secret=GOOGLE_PLAY_RTDN_PATH_SECRET,
     )
 
     # ── Engine-state background refresh ──────────────────────────────

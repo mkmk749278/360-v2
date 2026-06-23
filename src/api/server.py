@@ -43,7 +43,7 @@ import asyncio
 import os
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Union
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response, status
@@ -57,12 +57,15 @@ from src.utils import get_logger
 from . import firebase_auth
 from .auth import (
     OWNER_TIER,
+    PAID_TIER,
     AuthError,
     TokenClaims,
     decode_token,
     mint_user_token,
 )
 from .billing_callback import SIGNATURE_HEADER, BillingWebhookVerifier
+from .billing_play import PlayBillingError, PlayBillingVerifier
+from .play_purchases import PlayPurchaseStore
 from .otp import IssueStatus, OtpStore, VerifyStatus
 from .otp_delivery import (
     ChainedOtpProvider,
@@ -84,6 +87,9 @@ from .schemas import (
     BillingGrantRequest,
     BillingGrantResponse,
     HealthResponse,
+    PlayRtdnResponse,
+    PlayVerifyRequest,
+    PlayVerifyResponse,
     KillSwitchSetRequest,
     KillSwitchState,
     OtpRequest,
@@ -445,6 +451,36 @@ def _resolve_user_id(
         )
 
 
+async def _verify_pubsub_oidc(token: str, audience: str) -> bool:
+    """Verify a Google Pub/Sub push OIDC token against ``audience``.
+
+    Google signs each RTDN push with a short-lived OIDC token whose
+    ``aud`` is the push-subscription's configured audience (the engine's
+    RTDN URL).  Verifying it proves the request really came from Google
+    Pub/Sub and not a third party who guessed the endpoint.  The
+    signature/JWKS check runs in ``google-auth`` (sync) off the event
+    loop.  Any failure → ``False`` (caller returns 401).
+    """
+    def _verify() -> bool:
+        try:
+            from google.auth.transport import requests as _greq
+            from google.oauth2 import id_token as _id_token
+        except ImportError:
+            return False
+        try:
+            claims = _id_token.verify_oauth2_token(
+                token, _greq.Request(), audience
+            )
+        except Exception:
+            return False
+        return claims.get("iss") in (
+            "accounts.google.com",
+            "https://accounts.google.com",
+        )
+
+    return await asyncio.to_thread(_verify)
+
+
 # ---------------------------------------------------------------------------
 # App factory
 # ---------------------------------------------------------------------------
@@ -462,6 +498,10 @@ def build_app(
     otp_store: Optional[OtpStore] = None,
     otp_delivery: Optional[OtpDeliveryProvider] = None,
     billing_verifier: Optional[BillingWebhookVerifier] = None,
+    play_verifier: Optional[PlayBillingVerifier] = None,
+    play_purchases: Optional[PlayPurchaseStore] = None,
+    play_rtdn_audience: str = "",
+    play_rtdn_path_secret: str = "",
 ) -> FastAPI:
     """Build the FastAPI app bound to a live engine instance.
 
@@ -948,7 +988,240 @@ def build_app(
             tier=updated.tier,
         )
 
+    # ---- Google Play Billing (B16 — in-app subscription path) ----
+
+    def _play_ready() -> bool:
+        return (
+            play_verifier is not None
+            and play_verifier.is_configured()
+            and play_purchases is not None
+            and user_store is not None
+        )
+
+    async def _apply_play_entitlement(user_id: int, state) -> tuple:  # type: ignore[no-untyped-def]
+        """Persist entitlement from a verified subscription state.
+
+        Single source of the verify + RTDN write path: derive (tier,
+        paid_until), update the user row (the entitlement source of
+        truth), record the token→user mapping, and acknowledge the
+        purchase when entitled-but-unacknowledged.  Returns
+        ``(tier, paid_until)``.
+        """
+        assert play_verifier is not None and play_purchases is not None
+        assert user_store is not None
+        # An upgrade / re-signup supersedes a prior token — carry the
+        # binding forward so a later RTDN on the new token resolves.
+        if state.linked_purchase_token:
+            await play_purchases.arelink(
+                old_token=state.linked_purchase_token,
+                new_token=state.purchase_token,
+            )
+        tier, paid_until = play_verifier.entitlement_for(state)
+        await user_store.aset_tier(user_id, tier=tier, paid_until=paid_until)
+        await play_purchases.aupsert(
+            purchase_token=state.purchase_token,
+            user_id=user_id,
+            product_id=state.product_id or "",
+            state=state.raw_state,
+            expiry=state.expiry,
+        )
+        if state.is_entitled and not state.acknowledged:
+            await play_verifier.acknowledge(
+                product_id=state.product_id or "",
+                purchase_token=state.purchase_token,
+            )
+        return tier, paid_until
+
+    @app.post(
+        "/api/billing/play/verify",
+        response_model=PlayVerifyResponse,
+        tags=["billing"],
+    )
+    async def play_verify(
+        req: PlayVerifyRequest,
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> PlayVerifyResponse:
+        if not _play_ready():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="play billing not configured",
+            )
+        assert play_verifier is not None and user_store is not None
+        uid = _resolve_user_id(identity)
+
+        # Reject a product we never sold before spending a Google call.
+        allowed = play_verifier.allowed_product_ids
+        if allowed and req.product_id not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"unknown product_id: {req.product_id!r}",
+            )
+
+        try:
+            state = await play_verifier.get_subscription(
+                product_id=req.product_id,
+                purchase_token=req.purchase_token,
+            )
+        except PlayBillingError as exc:
+            # Retryable (Google/our-config) → 503; definitive (bad token) → 400.
+            code = (
+                status.HTTP_503_SERVICE_UNAVAILABLE
+                if exc.retryable
+                else status.HTTP_400_BAD_REQUEST
+            )
+            raise HTTPException(status_code=code, detail=exc.detail)
+
+        # If Google reports a product we don't sell, refuse — defends
+        # against a token for some other app/product slipping through.
+        if allowed and state.product_id and state.product_id not in allowed:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"product not recognised: {state.product_id!r}",
+            )
+
+        tier, paid_until = await _apply_play_entitlement(uid, state)
+
+        # Hand back a fresh JWT so the app unlocks immediately.
+        token = None
+        exp_seconds = None
+        if jwt_secret:
+            token = mint_user_token(
+                secret=jwt_secret,
+                user_id=uid,
+                tier=tier,
+                paid_until=paid_until,
+            )
+            claims = decode_token(token, secret=jwt_secret)
+            exp_seconds = int((claims.exp - claims.iat).total_seconds())
+
+        log.info(
+            "Play verify: user_id={} product={} state={} → tier={}",
+            uid, req.product_id, state.raw_state, tier,
+        )
+        return PlayVerifyResponse(
+            ok=True,
+            tier=tier,
+            paid_until=paid_until.isoformat() if paid_until else None,
+            subscription_state=state.raw_state,
+            token=token,
+            exp_seconds=exp_seconds,
+        )
+
+    async def _handle_rtdn(request: Request, secret: Optional[str]) -> PlayRtdnResponse:
+        if not _play_ready():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="play billing not configured",
+            )
+        assert play_verifier is not None and play_purchases is not None
+
+        # Cheap unguessable-path defence (in addition to the OIDC check).
+        if play_rtdn_path_secret and secret != play_rtdn_path_secret:
+            raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="not found")
+
+        # Verify Google's Pub/Sub OIDC push token when an audience is set.
+        if play_rtdn_audience:
+            authz = request.headers.get("Authorization", "")
+            bearer = authz[7:] if authz.lower().startswith("bearer ") else ""
+            if not bearer or not await _verify_pubsub_oidc(bearer, play_rtdn_audience):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="pubsub oidc verification failed",
+                )
+
+        try:
+            envelope = await request.json()
+        except Exception:
+            # Malformed body — ACK so Pub/Sub stops redelivering garbage.
+            return PlayRtdnResponse(ok=True, handled="ignored:unparseable")
+
+        note = PlayBillingVerifier.parse_rtdn(envelope)
+        if note is None or note.is_test:
+            return PlayRtdnResponse(
+                ok=True, handled="test" if (note and note.is_test) else "ignored",
+            )
+        # Ignore notifications for a different app.
+        cfg_pkg = getattr(play_verifier, "_package", "")
+        if cfg_pkg and note.package_name and note.package_name != cfg_pkg:
+            return PlayRtdnResponse(ok=True, handled="ignored:other-package")
+        if not note.purchase_token:
+            return PlayRtdnResponse(ok=True, handled="ignored:no-token")
+
+        mapping = await play_purchases.aget(note.purchase_token)
+        if mapping is None:
+            # We never verified this token, so we can't attribute it to a
+            # user.  The app's verify call is the system of record; ACK and
+            # move on rather than have Pub/Sub redeliver indefinitely.
+            return PlayRtdnResponse(ok=True, handled="ignored:unknown-token")
+
+        product_id = note.subscription_id or mapping.product_id
+        try:
+            state = await play_verifier.get_subscription(
+                product_id=product_id,
+                purchase_token=note.purchase_token,
+            )
+        except PlayBillingError as exc:
+            if exc.retryable:
+                # Transient — return 500 so Pub/Sub retries with backoff.
+                raise HTTPException(
+                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                    detail=exc.detail,
+                )
+            # Definitive (token gone / expired from Google's view) → revoke.
+            await user_store.aset_tier(mapping.user_id, tier="free", paid_until=None)
+            log.info(
+                "Play RTDN {}: user_id={} token gone → downgraded to free",
+                note.notification_label, mapping.user_id,
+            )
+            return PlayRtdnResponse(ok=True, handled=f"{note.notification_label}:revoked")
+
+        tier, _ = await _apply_play_entitlement(mapping.user_id, state)
+        log.info(
+            "Play RTDN {}: user_id={} state={} → tier={}",
+            note.notification_label, mapping.user_id, state.raw_state, tier,
+        )
+        return PlayRtdnResponse(ok=True, handled=note.notification_label)
+
+    @app.post(
+        "/api/billing/play/rtdn",
+        response_model=PlayRtdnResponse,
+        tags=["billing"],
+    )
+    async def play_rtdn(request: Request) -> PlayRtdnResponse:
+        return await _handle_rtdn(request, secret=None)
+
+    @app.post(
+        "/api/billing/play/rtdn/{secret}",
+        response_model=PlayRtdnResponse,
+        tags=["billing"],
+    )
+    async def play_rtdn_secret(request: Request, secret: str) -> PlayRtdnResponse:
+        return await _handle_rtdn(request, secret=secret)
+
     # ---- Profile (Phase 3 — per-user expansion) ----
+
+    async def _maybe_downgrade_expired(user):  # type: ignore[no-untyped-def]
+        """Defensive expiry enforcement for Play-granted ``paid`` users.
+
+        RTDN (EXPIRED / REVOKED) is the PRIMARY downgrade path; this is
+        belt-and-suspenders for a missed/late notification.  Only the
+        subscription-bound ``paid`` tier is affected — ``owner`` and
+        ``all-access`` are never time-boxed.  The write fires once, only
+        on the actual expiry transition (not a hot path), so it costs a
+        single UPDATE the first time an expired user is seen.
+        """
+        if (
+            user_store is None
+            or user.tier != PAID_TIER
+            or user.paid_until is None
+            or user.paid_until > datetime.now(timezone.utc)
+        ):
+            return user
+        log.info(
+            "Play entitlement expired for user_id={} (paid_until={}) → free",
+            user.user_id, user.paid_until.isoformat(),
+        )
+        return await user_store.aset_tier(user.user_id, tier="free", paid_until=None)
 
     def _profile_response(user) -> ProfileResponse:  # type: ignore[no-untyped-def]
         return ProfileResponse(
@@ -992,6 +1265,7 @@ def build_app(
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail=f"user_id={uid} not found",
             )
+        user = await _maybe_downgrade_expired(user)
         return _profile_response(user)
 
     @app.put(
@@ -2132,6 +2406,10 @@ async def serve_api(
     otp_store: Optional[OtpStore] = None,
     otp_delivery: Optional[OtpDeliveryProvider] = None,
     billing_verifier: Optional[BillingWebhookVerifier] = None,
+    play_verifier: Optional[PlayBillingVerifier] = None,
+    play_purchases: Optional[PlayPurchaseStore] = None,
+    play_rtdn_audience: str = "",
+    play_rtdn_path_secret: str = "",
 ) -> None:
     """Run the API server forever.  Cancellation stops it cleanly."""
     import uvicorn  # imported lazily so optional dep stays optional
@@ -2147,6 +2425,10 @@ async def serve_api(
         otp_store=otp_store,
         otp_delivery=otp_delivery,
         billing_verifier=billing_verifier,
+        play_verifier=play_verifier,
+        play_purchases=play_purchases,
+        play_rtdn_audience=play_rtdn_audience,
+        play_rtdn_path_secret=play_rtdn_path_secret,
     )
     # Expand the default asyncio thread-pool so concurrent authenticated
     # requests don't queue behind each other's ``asyncio.to_thread`` calls.
