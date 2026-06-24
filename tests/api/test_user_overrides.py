@@ -509,12 +509,15 @@ def test_grab_fraction_clamped_at_ceiling(store: UserOverridesStore) -> None:
     assert out["grab_fraction"] == 1.00
 
 
-def test_grab_fraction_zero_clamped_to_floor(store: UserOverridesStore) -> None:
-    """Zero is the most-dangerous input — it would re-create the broken
-    pre-2026-05-17 behaviour where nothing is closed and only the SL moves
-    to BE.  B17 floor catches this."""
+def test_grab_fraction_zero_preserved_as_disabled(store: UserOverridesStore) -> None:
+    """Session 34: 0.0 is now a valid value meaning pre-TP DISABLED (the engine
+    default exit is TP1-full + fixed SL).  It is preserved as 0.0, not clamped
+    up to the B17 floor.  Positive opt-ins still clamp into [0.30, 1.00]."""
     out = store.update_pretp(1, {"grab_fraction": 0.0})
-    assert out["grab_fraction"] == 0.30
+    assert out["grab_fraction"] == 0.0
+    # A positive sub-floor value still clamps up to the 30% opt-in floor.
+    out2 = store.update_pretp(1, {"grab_fraction": 0.15})
+    assert out2["grab_fraction"] == 0.30
 
 
 def test_grab_fraction_non_numeric_dropped(store: UserOverridesStore) -> None:

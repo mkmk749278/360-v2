@@ -720,11 +720,40 @@ class PositionFSM:
         """
         position.closed_qty += event.last_filled_qty
         position.realized_pnl_total += event.realized_pnl
+        _eps = max(position.total_qty * 1e-6, 1e-12)
+        if position.closed_qty >= position.total_qty - _eps:
+            # TP1-FULL exit (Session 34 engine default — tp1_qty == total_qty):
+            # the whole position closed at TP1, so there is NO residual to ride
+            # and NO breakeven SL to place.  Placing a BE-SL here would orphan a
+            # reduce-only stop against a zero position and strand the FSM in
+            # TP1_HIT forever (only the 2h reconciler would clear it).  Cancel
+            # the resting protective SL and go terminal — mirrors the full-close
+            # handling in _apply_tp2_fill.
+            placer = self._order_placer_factory(self.firebase_uid)
+            if position.sl_order_id:
+                try:
+                    await placer.cancel_algo_order(
+                        symbol=position.symbol,
+                        algo_id=position.sl_order_id,
+                    )
+                except _order_placer.OrderPlacementError as exc:
+                    log.warning(
+                        "_apply_tp1_fill: SL cancel on full close failed uid={} "
+                        "signal_id={} exc={}",
+                        self.firebase_uid, position.signal_id, exc,
+                    )
+                position.sl_order_id = 0
+            position.state = _position_state.PositionState.CLOSED
+            position.closed_at = datetime.now(timezone.utc)
+            if not position.close_reason:
+                position.close_reason = "TP1"
+            self._untrack_symbol(position.symbol)
+            return
         from_open = position.state == _position_state.PositionState.OPEN
         position.state = _position_state.PositionState.TP1_HIT
         if not from_open:
             return  # already PRE_TP_FIRED → TP1_HIT: SL already at BE
-        # OPEN → TP1_HIT directly: do the BE shift now.
+        # OPEN → TP1_HIT directly (partial TP1, residual rides): BE shift now.
         placer = self._order_placer_factory(self.firebase_uid)
         if position.sl_order_id:
             try:

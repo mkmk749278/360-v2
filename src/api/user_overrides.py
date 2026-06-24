@@ -302,15 +302,19 @@ def _coerce_pretp(raw: Dict[str, Any]) -> Dict[str, Any]:
             if isinstance(value, int) and value >= 0:
                 out[key] = int(value)
         elif key == "grab_fraction":
-            # B17 — clamp into [0.30, 1.00].  Reject non-numeric silently to
-            # match the existing drop-unknown behaviour; the API layer can
-            # surface a 422 if it wants stricter feedback.
+            # Session 34 — 0 (or any non-positive) means pre-TP DISABLED (the
+            # engine default exit is TP1-full + fixed SL); preserve it as 0.0.
+            # Any positive value clamps into the B17 [0.30, 1.00] opt-in band so
+            # no user lands in the dead 0<x<0.30 zone.  Mirrors the FSM/monitor
+            # clamp.  Reject non-numeric silently to match drop-unknown.
             if isinstance(value, (int, float)):
-                clamped = max(
-                    _PRETP_GRAB_FRACTION_MIN,
-                    min(_PRETP_GRAB_FRACTION_MAX, float(value)),
-                )
-                out[key] = clamped
+                if float(value) <= 0.0:
+                    out[key] = 0.0
+                else:
+                    out[key] = max(
+                        _PRETP_GRAB_FRACTION_MIN,
+                        min(_PRETP_GRAB_FRACTION_MAX, float(value)),
+                    )
         elif key == "protect_manual_entries":
             # B17 (2026-05-17) — when ON, the app-side AutoTradeWatcher
             # keeps polling for pre-TP partials on manual entries even

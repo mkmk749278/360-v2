@@ -261,15 +261,35 @@ PRE_TP_SETUP_BLACKLIST_RAW: str = os.getenv(
     "VOLUME_SURGE_BREAKOUT,BREAKDOWN_SHORT,OPENING_RANGE_BREAKOUT",
 )
 # OWNER_BRIEF B17 — pre-TP fires a REAL partial close (not just SL→BE).
-# Engine default 50%: the residual rides toward TP1, the closed half banks
-# real profit.  Hard 30% floor / 100% ceiling enforced in the API layer
-# (`src/api/user_overrides.py:_coerce_pretp`).
-PRE_TP_GRAB_FRACTION: float = float(os.getenv("PRE_TP_GRAB_FRACTION", "0.50"))
-# OWNER_BRIEF B17 — invalidation aggressiveness mode.  Engine default
-# ``standard`` (current behaviour + MFE-protection on momentum kills).
-# ``loose`` = thesis-conservative (only kill on hard structural break);
+# *** Session 34 (2026-06-24) owner directive — engine default is now NO pre-TP. ***
+# Profit-Lab on 494 live signals (ops.luminapp.org/profit) proved the engine's
+# real pre-TP + invalidation exits NET −25.79% while a plain TP1-full exit nets
+# −6.65% on the same signals (+19.14% edge).  The exit machinery, not the
+# entries, was giving back the edge, so the default exit is now TP1-full against
+# a fixed SL: grab_fraction default 0.0 = no pre-TP partial / no SL→BE ratchet.
+# A user may still re-enable banking via the per-user dial (30% floor / 100%
+# ceiling enforced in `src/api/user_overrides.py:_coerce_pretp`); NULL/unset =
+# this engine default.
+PRE_TP_GRAB_FRACTION: float = float(os.getenv("PRE_TP_GRAB_FRACTION", "0.0"))
+# OWNER_BRIEF B17 — invalidation aggressiveness mode.
+# *** Session 34 owner directive — engine default is now ``loose``. ***
+# Same Profit-Lab finding: invalidation kills are part of the exit machinery the
+# data says to stop.  ``loose`` = thesis-conservative, only the protective SL
+# closes the trade (no momentum / trailing / adverse-excursion kills) → the
+# position rides to TP1 or SL exactly as the winning lab method assumes.
+# A user may still opt into ``standard``/``tight`` via the per-user dial.
+# ``standard`` = current behaviour + MFE-protection on momentum kills;
 # ``tight`` = capital-preservation (adds ATR-trailing kill at MFE ≥ 0.3R).
-INVALIDATION_MODE_DEFAULT: str = os.getenv("INVALIDATION_MODE_DEFAULT", "tight")
+INVALIDATION_MODE_DEFAULT: str = os.getenv("INVALIDATION_MODE_DEFAULT", "loose")
+# Session 34 — TP-ladder split for the engine-default exit.  Fractions of the
+# filled qty closed at each take-profit leg; they sum to 1.0 and the last active
+# leg absorbs the rounding residual (see signal_dispatch._compute_quantities).
+# Default = TP1-full (100% @ TP1, no TP2/TP3) per the owner directive above.
+# Env-overridable (B8): set e.g. TP1_CLOSE_FRACTION=0.5 / TP2_CLOSE_FRACTION=0.5
+# to restore a two-leg ladder without a code change.
+TP1_CLOSE_FRACTION: float = _safe_float("TP1_CLOSE_FRACTION", "1.0")
+TP2_CLOSE_FRACTION: float = _safe_float("TP2_CLOSE_FRACTION", "0.0")
+TP3_CLOSE_FRACTION: float = _safe_float("TP3_CLOSE_FRACTION", "0.0")
 # Trailing-kill tunables (active in ``tight`` mode by default).  MFE
 # threshold expressed in multiples of SL distance; retrace fraction of
 # the MFE peak at which the kill fires.

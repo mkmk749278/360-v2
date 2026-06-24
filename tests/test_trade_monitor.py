@@ -1531,6 +1531,18 @@ class TestSignalInvalidation:
     """Tests for TradeMonitor._check_invalidation() and its integration with
     _evaluate_signal()."""
 
+    @pytest.fixture(autouse=True)
+    def _restore_active_invalidation_mode(self):
+        """Session 34: the engine default ``INVALIDATION_MODE_DEFAULT`` is now
+        ``loose`` (no momentum / trailing / adverse-excursion kills — the
+        default exit is TP1-full + fixed SL).  This class tests the invalidation
+        *mechanics*, which still run when a user opts into ``tight``, so restore
+        the pre-change ``tight`` default for every test here.  The dedicated
+        ``test_loose_default_suppresses_invalidation`` patches it to ``loose``
+        to assert the new engine default."""
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "tight"):
+            yield
+
     def _build_monitor(
         self,
         active: Dict[str, Signal],
@@ -2216,6 +2228,31 @@ class TestSignalInvalidation:
         reason = monitor._check_invalidation(sig)
         assert reason is not None, "Invalidation must fire after DCA grace period expires"
         assert "TRENDING_DOWN" in reason
+
+    def test_loose_default_suppresses_invalidation(self):
+        """Session 34 engine default ``INVALIDATION_MODE_DEFAULT='loose'``: a
+        signal that WOULD be killed under tight (LONG into TRENDING_DOWN, past
+        the patience window) is NOT invalidated under loose — only the SL/TP can
+        close it.  Asserts the new default; overrides the class autouse fixture
+        that pins the mechanics tests to 'tight'."""
+        sig = _make_signal(direction=Direction.LONG, age_seconds=700.0)
+
+        regime_detector = MagicMock()
+        regime_result = MagicMock()
+        regime_result.regime.value = "TRENDING_DOWN"
+        regime_detector.classify.return_value = regime_result
+
+        closes = [30000.0] * 25
+        monitor, _, _ = self._build_monitor(
+            {sig.signal_id: sig},
+            candles_close=closes,
+            regime_detector=regime_detector,
+        )
+        # Sanity: under tight this signal IS killed (proves the setup is live).
+        assert monitor._check_invalidation(sig, mode_override="tight") is not None
+        # Under the loose engine default it must NOT be killed.
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "loose"):
+            assert monitor._check_invalidation(sig) is None
 
     def test_microcap_momentum_threshold_scaled_down(self):
         """Micro-cap tokens (entry < 0.001) use a 10× smaller momentum threshold.

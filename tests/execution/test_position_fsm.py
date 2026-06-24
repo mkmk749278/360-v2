@@ -354,6 +354,44 @@ async def test_tp1_after_pretp_does_not_redo_be_shift() -> None:
 
 
 @pytest.mark.asyncio
+async def test_tp1_full_close_finalizes_and_cancels_sl_no_be_shift() -> None:
+    """Session 34 default exit (TP1-full, tp1_qty == total_qty): the TP1 fill
+    closes 100% of the position, so the FSM must go terminal CLOSED, cancel the
+    resting protective SL, and place NO breakeven SL.  Regression guard for the
+    orphan bug: placing a BE-SL against a zero residual would strand the
+    position in TP1_HIT forever (only the 2h reconciler clearing it).
+    """
+    factory, placer = _stub_placer_factory()
+    fsm = position_fsm.PositionFSM("fb-x", order_placer_factory=factory)
+    position = _pending_position()
+    position.state = position_state.PositionState.OPEN
+    position.entry_price_filled = 29000.0
+    position.sl_order_id = 2001  # resting protective SL to cancel
+    position.tp1_qty = 1.0  # TP1-full: the whole position closes at TP1
+    position.tp2_qty = 0.0
+    position.tp3_qty = 0.0
+    captured: list = []
+    with patch.object(position_state, "get_position", return_value=position), patch.object(
+        position_state, "put_position", side_effect=lambda p: captured.append(p)
+    ):
+        await fsm.handle_event(
+            _otu(
+                client_order_id=position_state.coid_tp1("sig-1"),
+                last_filled_qty=1.0,  # == total_qty → full close
+                realized_pnl=42.0,
+            )
+        )
+    assert captured[0].state == position_state.PositionState.CLOSED
+    assert captured[0].closed_qty == 1.0
+    assert captured[0].realized_pnl_total == 42.0
+    assert captured[0].close_reason == "TP1"
+    # Protective SL cancelled; NO breakeven SL placed (no residual to protect).
+    placer.cancel_algo_order.assert_called_once_with(symbol="BTCUSDT", algo_id=2001)
+    placer.place_stop_loss.assert_not_called()
+    assert captured[0].sl_order_id == 0
+
+
+@pytest.mark.asyncio
 async def test_tp2_fill_transitions_tp1_hit_to_tp2_hit() -> None:
     fsm = position_fsm.PositionFSM("fb-x")
     position = _pending_position()

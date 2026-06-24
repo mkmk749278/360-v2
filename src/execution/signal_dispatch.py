@@ -92,14 +92,14 @@ _BINANCE_INSUFFICIENT_MARGIN_CODE = -2019
 # is the correct conservative default.
 _consec_insufficient_margin: Dict[str, int] = defaultdict(int)
 
-# TP qty split — sums to 100%.  Two legs only (TP3 removed per owner
-# directive 2026-05-26): TP1 takes the first 30%, TP2 closes the
-# remainder.  When pre-TP fires first (the typical path), TP2 is
-# cancelled and the residual rides toward TP1 with SL at BE.
-# FSM skips placement for any leg with qty <= 0.
-_TP1_FRACTION = 0.30
-_TP2_FRACTION = 0.70
-_TP3_FRACTION = 0.00
+# TP qty split — sums to 100%.  Sourced from config (Session 34, 2026-06-24):
+# the engine default is TP1-full (TP1=1.0, TP2=TP3=0.0) so the whole position
+# closes at TP1 against a fixed SL — no pre-TP banking, no invalidation — which
+# the Profit-Lab on 494 live signals showed beats the engine's real exits by
+# +19.14%.  Env-overridable via TP{1,2,3}_CLOSE_FRACTION to restore a ladder.
+# Read lazily in ``_compute_quantities`` so tests can monkeypatch config.
+# FSM skips placement for any leg with qty <= 0; the last active leg absorbs
+# the rounding residual.
 
 # Entry regimes that position_fsm._regime_exit_path routes to the CANCEL exit
 # path (bank pre-TP, market-close the residual immediately).  Used by the
@@ -414,12 +414,18 @@ def _compute_qty_split(
             )
             return (0.0, 0.0, 0.0, 0.0)
 
+    from config import TP1_CLOSE_FRACTION as _TP1_FRACTION
+    from config import TP2_CLOSE_FRACTION as _TP2_FRACTION
+    from config import TP3_CLOSE_FRACTION as _TP3_FRACTION
+
     tp1 = _sf.round_qty(symbol, total_qty * _TP1_FRACTION)
     tp2 = _sf.round_qty(symbol, total_qty * _TP2_FRACTION)
     # Rounding residual: the last active TP leg absorbs the dust so
     # tp1+tp2+tp3 == total_qty exactly (Binance rejects non-reconciling
-    # order sets).  With _TP3_FRACTION=0.00 (TP3 removed), the residual
-    # goes to TP2; otherwise tp3 gets it and FSM skips tp3 when qty=0.
+    # order sets).  Engine default TP1=1.0/TP2=0.0/TP3=0.0 → tp1≈total,
+    # tp2 absorbs the (near-zero) residual and stays 0, tp3=0.  When TP3 is
+    # disabled the residual goes to TP2; otherwise tp3 gets it and the FSM
+    # skips any leg whose qty rounds to 0.
     _residual = _sf.round_qty(symbol, total_qty - tp1 - tp2)
     if _TP3_FRACTION <= 0.0:
         tp2 = tp2 + _residual

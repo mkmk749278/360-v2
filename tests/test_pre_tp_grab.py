@@ -26,6 +26,20 @@ from src.trade_monitor import TradeMonitor
 from src.utils import utcnow
 
 
+@pytest.fixture(autouse=True)
+def _enable_pretp_grab():
+    """Session 34: the engine default ``PRE_TP_GRAB_FRACTION`` is now 0.0
+    (pre-TP disabled — default exit is TP1-full + fixed SL).  This module tests
+    the pre-TP *mechanics*, which presuppose a user has opted back into banking,
+    so patch the grab to the legacy 50% for every test here.  Tests that need a
+    different grab (e.g. 100% full-close) patch it themselves, overriding this;
+    the dedicated ``test_default_grab_zero_disables_pre_tp`` patches it to 0.0
+    to assert the new default.
+    """
+    with patch("src.trade_monitor.PRE_TP_GRAB_FRACTION", 0.50):
+        yield
+
+
 def _make_signal(
     *,
     channel: str = "360_SCALP",
@@ -866,6 +880,35 @@ async def test_full_close_finalizes_and_removes_signal(mock_send):
     assert "Closed 100%" in free_msg
     assert "fully banked" in free_msg
     assert "rides to TP1" not in free_msg
+
+
+async def test_default_grab_zero_disables_pre_tp(mock_send):
+    """Session 34 default exit = TP1-full + fixed SL.  With the engine default
+    ``PRE_TP_GRAB_FRACTION == 0.0`` pre-TP must NOT fire even when every other
+    gate (threshold, regime, age, setup) passes: no partial close, no SL→BE
+    ratchet, signal stays ACTIVE so it rides to TP1 or the original SL.
+    """
+    send, sent = mock_send
+    monitor = _build_monitor(send, regime_label="QUIET")
+    sig = _make_signal(signal_tier="B")
+    original_sl = sig.stop_loss
+    target_high = 30000.0 * 1.0035  # would clear the 0.35% threshold
+
+    order_manager = AsyncMock()
+    order_manager.is_enabled = True
+    monitor._order_manager = order_manager
+
+    # Note: overrides the autouse fixture's 0.50 to assert the real default.
+    with patch("src.trade_monitor.PRE_TP_ENABLED", True), \
+         patch("src.trade_monitor.PRE_TP_GRAB_FRACTION", 0.0), \
+         patch("src.trade_monitor.CHANNEL_TELEGRAM_MAP", {"360_SCALP": "ACTIVE-CHAN"}):
+        fired = await monitor._check_pre_tp_grab(sig, c_high=target_high, c_low=29990.0)
+
+    assert fired is False
+    order_manager.close_partial.assert_not_called()
+    assert sig.status == "ACTIVE"
+    assert sig.stop_loss == pytest.approx(original_sl)  # SL not ratcheted to BE
+    assert getattr(sig, "partial_close_pct", 0.0) in (0.0, None)
 
 
 async def test_partial_close_keeps_signal_active_with_residual(mock_send):
