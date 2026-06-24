@@ -859,6 +859,14 @@ class TestInvalidationFlipAware:
     regime actually FLIPS during the trade.
     """
 
+    @pytest.fixture(autouse=True)
+    def _restore_active_invalidation_mode(self, monkeypatch):
+        """Session 34: the engine default ``INVALIDATION_MODE_DEFAULT`` is now
+        ``loose`` (no thesis kill — default exit is TP1-full + fixed SL).  This
+        class tests the regime-flip / EMA-crossover invalidation mechanics that
+        run only under an opt-in non-loose mode, so pin ``standard``."""
+        monkeypatch.setattr("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "standard")
+
     # ── Counter-trend signals must NOT be invalidated when regime is unchanged ──
 
     def test_long_counter_trend_no_invalidation_when_regime_unchanged(self):

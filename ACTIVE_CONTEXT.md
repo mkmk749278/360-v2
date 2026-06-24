@@ -4,6 +4,68 @@
 
 ---
 
+## 🟢 SESSION 34 2026-06-24 — Default exit reversed to TP1-full + fixed SL (pre-TP & invalidation now opt-in)
+
+**Owner trigger (Profit-Lab screenshots, `ops.luminapp.org/profit`):** "pre-TP and
+invalidations aren't working and are making more losses; taking full profit at TP1
+makes more sense. No pre-TP, no invalidations — pure signals with TPs and SL, and
+Max profit reached before hitting SL." Plus an app redesign brief (see lumin-app).
+
+**Data basis (the Profit-Lab, 494 closed live signals, net of 0.07% fee):**
+| Exit method (TP/SL only) | Total P/L | Edge over engine real exits |
+|---|---|---|
+| **TP1-full (100% @ TP1)** | **−6.65%** | **+19.14%** |
+| 50% @ +1% · 50% TP1 | −14.09% | +11.70% |
+| 50% TP1 · 50% TP2 | −16.44% | +9.35% |
+| TP1/TP2/TP3 thirds | −19.70% | +6.09% |
+| Flat +1% (100%) | −21.53% | +4.26% |
+| **Engine real exits (pre-TP + invalidation)** | **−25.79%** | baseline |
+
+Every simple exit beat the engine's machinery; **TP1-full beat it most**. The exit
+logic, not the entries, was giving back the edge. *Honest caveat told to owner:
+TP1-full is still slightly net-negative (−6.65%) — it stops most of the bleed but
+the residual gap is entry quality + fees, the next lever. UI must not imply green.*
+
+**Owner decisions (AskUserQuestion):** exit shape = **TP1-full @ 100%**; backstop =
+**TP-or-SL only + 2h reconciler** (no timed exit; naked-SL invariant + caps stay);
+per-user pre-TP/invalidation dials **remain usable**, engine **default** = TP1+SL.
+
+### Shipped — PR 1 (360-v2, engine, owner-sign-off: FSM + B-rules)
+Three env-overridable default flips + the FSM fix that makes them safe:
+| Change | File | Why |
+|---|---|---|
+| `PRE_TP_GRAB_FRACTION` 0.50 → **0.0** (pre-TP disabled by default) | `config/__init__.py` | no banking on the default path |
+| `INVALIDATION_MODE_DEFAULT` `tight` → **`loose`** (loose short-circuits to SL/TP-only) | `config/__init__.py`, `trade_monitor.py` | the "TP/SL only" lab method |
+| New `TP{1,2,3}_CLOSE_FRACTION` (default **1.0/0.0/0.0** = TP1-full); dispatch reads them lazily | `config/__init__.py`, `signal_dispatch.py` | TP1 closes 100%; ladder restorable via env (B8) |
+| **`_apply_tp1_fill` terminal-close fix** — on a full TP1 close go CLOSED + cancel SL, place NO breakeven-SL | `position_fsm.py` | without this, TP1=100% stranded the position in TP1_HIT with an orphaned BE-SL on zero qty (only the 2h reconciler clearing it) |
+| Monitor `_check_pre_tp_grab`: grab ≤ 0 → return False (no engine-book banking) | `trade_monitor.py` | grab=0 must truly disable, not clamp up to 0.30 |
+| `PretpSettings.grab_fraction` `ge=0.30` → **`ge=0.0`**; `_coerce_pretp` preserves 0 (disabled), clamps positives into [0.30,1.0] | `api/schemas.py`, `api/user_overrides.py` | the resolved view for a fresh user is now 0.0 — was a 422 (real end-to-end bug, not a test issue) |
+
+Per-user opt-in still fully wired: a user who sets `grab_fraction>0` /
+`invalidation_mode∈{standard,tight}` gets it forwarded at dispatch (tests prove it).
+
+**Tests:** +6 new (TP1-full terminal close; default-grab-disables-pre-TP;
+loose-default-suppresses-invalidation; env-override-restores-ladder; full-mgmt
+default-no-pretp + user-opt-in). Updated the mechanics suites (pre-TP, dispatch,
+trade-monitor invalidation, audit, btc-overlay) to pin their opt-in mode rather
+than assume the old default. Full suite green. ruff clean on `src/`+`config/`.
+Doctrine: OWNER_BRIEF §2.3/§3.2/§3.9/B17 rewritten; profile **D (TP1-full)** is
+the new default.
+
+### REMAINING
+1. **lumin-app (PR 2):** outcome-summary card redesign per owner's reference mockup
+   — highlight positive result + **"Max profit reached before SL"**, faded-but-visible
+   closed-signal bars, active-signal trade button; copy aligned to the new model
+   (drop "Pre-TP banked / SL→BE" as the default framing). **In progress.**
+2. **360ce-ops:** Profit-Lab already exposes the exit-method comparison; once the
+   new default has a fresh data window, re-read to confirm the live book tracks the
+   −6.65% sim (don't judge early — counters are cumulative).
+3. **VPS:** new default ships live on `main` deploy. If `.env` pins the old values
+   (`PRE_TP_GRAB_FRACTION`, `INVALIDATION_MODE_DEFAULT`, `PRE_TP_ENABLED`), clear
+   them so the code defaults take effect.
+
+---
+
 ## 🟢 SESSION 33 2026-06-24 — Monetization corrected to two-tier auto-trade model (signals free)
 
 **Owner correction mid-rollout:** the product is NOT "pay to see signals." Signals +

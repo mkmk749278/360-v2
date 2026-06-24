@@ -83,11 +83,11 @@ At 10× leverage on Binance USDT-M futures, round-trip fees ≈ **0.7% of margin
 
 **Fee-aware design is non-negotiable (B11).** Every threshold, gate, scoring band, and exit parameter must account for this. A signal that "nearly worked" is a net loss.
 
-**How we solve it:**
-- Pre-TP partial close: bank real profit before the position can revert to entry
-- Reduce-only LIMIT orders on all profit-taking: no slippage, maker fills
-- Invalidation: prefer a controlled partial loss over a fee-eaten breakeven
-- SL geometry: sized so the reward/risk ratio after fees remains positive
+**How we solve it (Session 34 — exit machinery removed from the default path):**
+- TP1-full exit: close 100% at TP1 via a reduce-only LIMIT (maker fill, zero slippage), against a fixed SL. The Profit-Lab proved this beats the pre-TP+invalidation machinery by +19.14% on 494 live signals.
+- Reduce-only LIMIT order on profit-taking: no slippage, maker fill (unchanged doctrine — the *profit* leg is always a resting LIMIT).
+- SL geometry: sized so the reward/risk ratio after fees remains positive (B7). This is now the *primary* fee defence — the old pre-TP-bank / invalidation overlay is opt-in only (B17), because the data showed it gave back more than it saved.
+- ⚠️ Even with TP1-full the book is still slightly net-negative (−6.65%) — the remaining gap is entry quality + fees, the next lever.
 
 ---
 
@@ -108,8 +108,8 @@ At 10× leverage on Binance USDT-M futures, round-trip fees ≈ **0.7% of margin
 ## 3.2 Scalping Doctrine
 
 1. **Direction-agnostic.** LONG and SHORT are equally valid products. Trend-aligned-only filtering forces directional bias — that is trend-following, not scalping.
-2. **Pre-TP is the primary exit. TP1 is the runner.** Bank a real partial close at the threshold, shift SL to breakeven, let the residual ride. Hold 5–60 min. Do not hold through reversals.
-3. **Capital preservation outranks TP chasing.** Full SL hit ≈ 7.9% on margin at 10×. Banked partial + BE exit ≈ −0.5% worst case. The asymmetry is decisive over hundreds of signals.
+2. **TP1-full is the default exit (Session 34, 2026-06-24). TP1 or SL — nothing in between.** Close 100% of the position at TP1 against a *fixed* SL; no pre-TP partial, no SL→BE ratchet, no invalidation kill. *Why this reversed the old "pre-TP is the primary exit" doctrine:* the live Profit-Lab on 494 signals (`ops.luminapp.org/profit`) showed the engine's real pre-TP + invalidation exits NET **−25.79%** while a plain TP1-full exit nets **−6.65%** on the *same* signals — a **+19.14%** edge. Every simulated simple exit beat the machinery; TP1-full beat it most. The exit logic, not the entries, was giving back the edge. Pre-TP banking and invalidation modes survive as **per-user opt-ins** (B17), but the engine default is now TP1-full.
+3. **Capital preservation = the fixed SL, sized for positive R:R after fees.** Full SL hit ≈ 7.9% on margin at 10×; the defence against it is *entry quality + SL geometry* (B7), not a mid-trade exit overlay that the data showed bleeds the winners. Honest caveat: TP1-full is still slightly net-negative (−6.65%) — it stops most of the bleed but the residual gap is entry quality + fees, not the exit.
 4. **Quantity matters.** Subscribers churn from silence. 1–10 paid signals/day is the target.
 5. **Soft penalties over hard blocks.** Hard blocks discard signals the scoring tier could correctly classify. Reserve hard blocks for structural impossibility only.
 
@@ -261,13 +261,14 @@ Binance REST API
 
 **Server-side, non-custodial of funds, custodial of trade-authorisation keys.**
 
-**Three execution profiles (per-user, selectable from app):**
+**Execution profiles (per-user, selectable from app). Engine default = D (Session 34):**
 
 | Profile | `grab_fraction` | Behaviour |
 |---|---|---|
-| A — close all at threshold | 1.0 | Full-qty pre-TP LIMIT at entry. No TP bracket. |
-| B — bank partial, ride residual | 0.30–0.99 | Partial pre-TP LIMIT + TP ladder. SL→BE on pre-TP fill. |
-| C — ride native bracket | 0 / `invalidation_mode=loose` | Full TP ladder. Engine invalidation does not interfere. |
+| **D — TP1-full (DEFAULT)** | **0** + `invalidation_mode=loose` + `TP1_CLOSE_FRACTION=1.0` | **Close 100% at TP1 against a fixed SL. No pre-TP, no SL→BE, no invalidation. The default exit.** |
+| A — close all at threshold | 1.0 | Full-qty pre-TP LIMIT at entry. No TP bracket. (Opt-in.) |
+| B — bank partial, ride residual | 0.30–0.99 | Partial pre-TP LIMIT + TP ladder. SL→BE on pre-TP fill. (Opt-in.) |
+| C — ride native bracket | 0 / `invalidation_mode=loose` + a ladder split | Multi-leg TP ladder. Engine invalidation does not interfere. (Opt-in — restore a ladder via `TP{1,2}_CLOSE_FRACTION`.) |
 
 **Per-user dials (all consumed at dispatch, fresh read per signal):**
 - `threshold_pct` — pre-TP trigger (0.10–1.00% raw from entry)
@@ -314,7 +315,7 @@ Soft-penalty bonus magnitudes bounded: confluence ≤9 pts, structure-align 3 pt
 | B14 | Build constraint. All build/deploy paths work via VPS + GitHub Actions. No local Android Studio required. |
 | B15 | **Brand.** Lumin = consumer app brand. 360 Crypto Eye = engine + signal-source brand. Telegram channel never renames. App About page always credits 360 Crypto Eye. |
 | B16 | **Revenue — Google Play Billing, two-tier auto-trade model.** Signals + **entry/SL/TP levels + analysis are FREE.** The paywall is on **trade automation**, sold as two monthly Play subscriptions: **Assist (`lumin_assist_monthly`, ₹1000/mo)** — one-tap "take trade" (the app places the order client-side on the user's own Binance keys); **Auto (`lumin_auto_monthly`, ₹2000/mo)** — hands-off server-side auto-execution. Tier hierarchy `free < assist < auto`. The Telegram-bot payment path is **retired** (Telegram banned in-region). Because the paid feature is *automation software functionality* (executed on the user's own keys — Lumin never custodies funds), it is presented as an app feature, NOT "investment advice"; the **Financial features declaration** applies and the framing is load-bearing. **Entitlement is server-side and is the source of truth:** the app sends the Play `purchaseToken` → engine verifies against the Google Play Developer API (`purchases.subscriptionsv2`), acknowledges, and sets `UserStore.tier` (`assist`/`auto`) + `paid_until`; **RTDN** keeps renewals/cancellations/holds/expiries live. **The money-path gate lives in `signal_dispatch`: hands-off execution runs only for `auto` users** (`AUTO_TRADE_TIER_GATE_ENABLED`, default ON, fail-closed). Assist is gated client-side (one-tap UI). SA key via env only (never logged/committed). ⚠️ Charging for automated crypto execution carries Play financial-services scrutiny + possible Indian regulatory exposure — owner to keep legal sanity-check current. |
-| B17 | **Per-user exit controls.** Pre-TP grab fraction: 30%–100% (engine default 50%). Pre-TP threshold: 0.10–1.00% raw. Invalidation mode: loose / standard / tight (engine default: tight). All stored in `user_pretp_settings` + `user_invalidation_settings`; NULL = engine default. `grab_fraction=1.0` = full close at threshold, no residual bracket. Regime-per-exit extension in design (§3.2b). |
+| B17 | **Per-user exit controls.** *Session-34 default flip: the engine default is now TP1-full + fixed SL — pre-TP and invalidation are OFF by default and survive only as per-user opt-ins.* Pre-TP grab fraction: 0% (engine default — disabled) or 30%–100% if a user opts in. Pre-TP threshold: 0.10–1.00% raw. Invalidation mode: loose (engine default — TP/SL only, no thesis kill) / standard / tight. TP-ladder split env-overridable via `TP{1,2,3}_CLOSE_FRACTION` (default 1.0/0.0/0.0 = TP1-full). All stored in `user_pretp_settings` + `user_invalidation_settings`; NULL = engine default (now no-pre-TP / loose). `grab_fraction=1.0` = full close at the pre-TP threshold; `grab_fraction=0` = no pre-TP (default). Regime-per-exit extension in design (§3.2b). |
 | B18 | **Server-side execution custody.** Non-custodial of funds; custodial of trade-authorisation keys only. Connect-time validation: withdraw permission disabled (auto-reject if enabled — no permissive mode), Futures enabled, IP whitelist set to engine VPS IP. Plaintext API secret materialises only in signing service process memory for one request — never logged, never written to disk. Master key in Cloud KMS HSM; engine has Decrypt IAM only. Blast-radius caps (non-negotiable): symbol allowlist (auto-tracks PairManager universe), per-user rate limit (10 orders/min, 50/hr), per-user position cap ($500 default), global kill switch (<5s from Telegram), global circuit breaker (>10 rejections/60s → auto-disable), per-user circuit breaker (>3 rejections/5min → auto-disable user). Any change to signing service / KMS / connect-time validation / blast-radius caps / circuit-breaker thresholds requires owner sign-off. |
 
 ---

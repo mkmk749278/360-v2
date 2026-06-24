@@ -240,6 +240,10 @@ def test_invalidation_does_not_fire_at_base_fraction(monkeypatch):
 def test_invalidation_fires_with_btc_overlay(monkeypatch):
     """Same adverse 0.30×SL_dist now crosses the tightened 0.28 threshold when
     BTC opposes and the overlay is on → early invalidation with BTC tag."""
+    # Session 34: engine default invalidation mode is now 'loose' (no kills).
+    # This test exercises the adverse-excursion mechanics that run under an
+    # opt-in non-loose mode, so pin 'standard'.
+    monkeypatch.setattr("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "standard")
     monkeypatch.setattr("src.trade_monitor.INVALIDATION_BTC_CORRELATION_ENABLED", True)
     monkeypatch.setattr("src.trade_monitor.INVALIDATION_BTC_ADVERSE_FRACTION_MULT", 0.70)
     monkeypatch.setattr(

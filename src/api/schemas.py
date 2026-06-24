@@ -462,14 +462,15 @@ class PretpSettings(BaseModel):
     )
     grab_fraction: Optional[float] = Field(
         default=None,
-        ge=0.30,
+        ge=0.0,
         le=1.00,
         description=(
             "OWNER_BRIEF B17 — fraction of the position to close at market when "
-            "Pre-TP threshold hits.  Hard floor 30% (no user can collapse to the "
-            "pre-2026-05-17 SL-to-BE-only behaviour); 100% ceiling (fully bank "
-            "the partial, leave nothing riding).  Engine default 50%.  The "
-            "residual position has SL ratcheted to entry."
+            "Pre-TP threshold hits.  Session 34: 0.0 = pre-TP DISABLED (the "
+            "engine default — exit is TP1-full + fixed SL).  Any positive opt-in "
+            "is clamped server-side into the B17 [0.30, 1.00] band (no user "
+            "sits in the dead 0<x<0.30 zone).  100% = fully bank, nothing "
+            "riding.  A non-zero residual has its SL ratcheted to entry."
         ),
     )
     protect_manual_entries: Optional[bool] = Field(

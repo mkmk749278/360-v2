@@ -72,19 +72,28 @@ def test_qty_split_sums_to_total_no_dust() -> None:
 
 def test_qty_split_at_typical_btc_price() -> None:
     """$500 notional / $29000 entry ≈ 0.01724 BTC, then floored to
-    BTCUSDT's stepSize=0.001 → 0.017 BTC.  The TP split is also
-    floored to stepSize so each leg lands on a Binance-valid qty.
-    TP3 removed (owner directive 2026-05-26): 30/70/0 split; TP3 qty
-    should be zero so FSM placement guard skips it."""
+    BTCUSDT's stepSize=0.001 → 0.017 BTC.  Session 34 default is TP1-full
+    (TP1=1.0 / TP2=0.0 / TP3=0.0): the whole position closes at TP1, so
+    tp1 == total and tp2/tp3 are zero (FSM placement guard skips them)."""
     total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split("BTCUSDT", 29000.0)
-    # 0.5 step-units of slack on the total — actual value depends
-    # on stepSize floor behaviour.
     assert abs(total - 0.017) < 0.001
-    # TP fractions in the right ballpark, allowing for stepSize floor.
+    assert tp1 == pytest.approx(total)  # TP1-full closes 100%
+    assert tp2 == 0.0
+    assert tp3 == 0.0
+
+
+def test_qty_split_env_override_restores_ladder(monkeypatch) -> None:
+    """The TP split is env-overridable (B8): setting TP1/TP2 fractions back to
+    a 30/70 ladder must split the qty accordingly without a code change —
+    proves the knob is wired, not a scaffold."""
+    monkeypatch.setattr("config.TP1_CLOSE_FRACTION", 0.30, raising=False)
+    monkeypatch.setattr("config.TP2_CLOSE_FRACTION", 0.70, raising=False)
+    monkeypatch.setattr("config.TP3_CLOSE_FRACTION", 0.0, raising=False)
+    total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split("BTCUSDT", 29000.0)
     assert abs(tp1 / total - 0.30) < 0.05
     assert abs(tp2 / total - 0.70) < 0.10  # LOT_SIZE floor on coarse pairs
-    assert tp3 == 0.0  # TP3 removed — FSM guard skips zero-qty legs
-    # Sums-to-total is the doctrine guarantee covered separately.
+    assert tp3 == 0.0
+    assert tp1 + tp2 + tp3 == pytest.approx(total)  # reconciles to total
 
 
 @pytest.mark.parametrize("bad_price", [0.0, -1.0, -29000.0])
@@ -403,9 +412,14 @@ async def test_dispatch_entry_only_forwards_levers(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_full_management_is_default(monkeypatch) -> None:
-    """Default (full) leaves the levers untouched — management_mode='full'
-    forwarded, pre-TP fraction non-zero."""
+async def test_dispatch_full_management_respects_user_pretp_optin(monkeypatch) -> None:
+    """A user who opts back into pre-TP banking (grab_fraction > 0) still gets it
+    forwarded on full management — proves the opt-in path is live after the
+    Session-34 default flip to no-pre-TP."""
+    from src.api import user_overrides as _uo_optin
+    monkeypatch.setattr(
+        _uo_optin, "resolve_grab_fraction_uid", lambda uid, default: 0.50
+    )
     from src.api import user_overrides as _uo
     monkeypatch.setattr(
         _uo, "resolve_symbol_management_uid", lambda uid, symbol: "full"
@@ -431,7 +445,41 @@ async def test_dispatch_full_management_is_default(monkeypatch) -> None:
             )
         kwargs = mock_place.await_args.kwargs
         assert kwargs["management_mode"] == "full"
-        assert kwargs["pretp_fraction"] != 0.0
+        assert kwargs["pretp_fraction"] == pytest.approx(0.50)
+
+
+@pytest.mark.asyncio
+async def test_dispatch_full_management_default_no_pretp(monkeypatch) -> None:
+    """Session 34 default exit: on full management with no per-user pre-TP
+    opt-in, the engine default grab_fraction (0.0) is forwarded — pre-TP off,
+    invalidation loose — so the position rides to TP1-full or the fixed SL."""
+    from src.api import user_overrides as _uo
+    monkeypatch.setattr(
+        _uo, "resolve_symbol_management_uid", lambda uid, symbol: "full"
+    )
+    with patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-A"]
+    ):
+        from src.execution import position_fsm
+        with patch.object(
+            position_fsm, "place_signal", new_callable=AsyncMock
+        ) as mock_place:
+            await signal_dispatch.dispatch_signal_to_active_users(
+                signal_id="sig-1",
+                symbol="BTCUSDT",
+                direction="LONG",
+                entry_price=29000.0,
+                sl_price=28500.0,
+                tp1_price=29500.0,
+                tp2_price=30000.0,
+                tp3_price=30500.0,
+                regime_label="RANGING",
+                setup_class="SR_FLIP_RETEST",
+            )
+        kwargs = mock_place.await_args.kwargs
+        assert kwargs["management_mode"] == "full"
+        assert kwargs["pretp_fraction"] == 0.0
+        assert kwargs["invalidation_mode"] == "loose"
 
 
 # ---------------------------------------------------------------------------
@@ -1207,18 +1255,15 @@ def test_tp_min_notional_consolidation_when_only_tp2_too_small() -> None:
 
 
 def test_tp_min_notional_no_consolidation_for_large_positions() -> None:
-    """Large positions ($500 notional) have TP legs well above MIN_NOTIONAL:
-    tp1 = 30% × $500 = $150 >> $5 → no consolidation; normal 30/70/0 split."""
+    """Large positions ($500 notional) have TP legs well above MIN_NOTIONAL,
+    so no consolidation fires.  Session 34 default is TP1-full: tp1 == total
+    ($500 >> $5 MIN_NOTIONAL), tp2/tp3 zero, and the legs reconcile to total."""
     total, tp1, tp2, tp3 = signal_dispatch._compute_qty_split("BTCUSDT", 29000.0)
-    # At $500 notional / $29000, tp1 ~ $150 >> $5 MIN_NOTIONAL.
-    # Consolidation must NOT fire; TP legs should follow the ratio.
     assert total > 0
-    # Total qty = all active tp legs (tp3 is zero; tp1+tp2 == total).
-    assert tp1 + tp2 + tp3 == total
-    # 30/70 split with TP3 removed (owner directive 2026-05-26).
-    assert tp2 > 0
+    assert tp1 + tp2 + tp3 == total  # legs reconcile (Binance requirement)
+    assert tp1 == pytest.approx(total)  # TP1-full closes 100%
+    assert tp2 == 0.0
     assert tp3 == 0.0
-    assert abs(tp2 / total - 0.70) < 0.10  # tolerance for LOT_SIZE floor
 
 
 # ---------------------------------------------------------------------------
@@ -1554,8 +1599,10 @@ async def test_empty_allowlists_allow_all(
     _mode_state_stub,
 ) -> None:
     """None allowlists (user has no restriction configured) must NOT
-    suppress pre-TP — the grab fraction stays at the user's configured
-    value."""
+    suppress pre-TP — the grab fraction stays at the user's configured value.
+    Session 34: the engine default grab is now 0.0, so to exercise "not
+    suppressed" this user has explicitly opted into a 0.50 grab; the None
+    allowlist must leave it untouched (0.50 forwarded, not zeroed)."""
     from unittest.mock import patch as _patch
     from src.execution import position_fsm
     from src.api import user_overrides as _uo
@@ -1565,6 +1612,8 @@ async def test_empty_allowlists_allow_all(
 
     with _patch.object(signal_dispatch, "_active_uids", return_value=["fb-allowall"]):
         with _patch.object(
+            _uo, "resolve_grab_fraction_uid", lambda uid, default: 0.50
+        ), _patch.object(
             _uo, "resolve_pretp_allowlists_uid",
             return_value=(None, None),
         ):
@@ -1586,7 +1635,7 @@ async def test_empty_allowlists_allow_all(
 
     assert placed == 1
     mock_place.assert_called_once()
-    assert mock_place.call_args.kwargs["pretp_fraction"] > 0.0
+    assert mock_place.call_args.kwargs["pretp_fraction"] == pytest.approx(0.50)
 
 
 # ---------------------------------------------------------------------------

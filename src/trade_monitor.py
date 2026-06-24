@@ -933,9 +933,12 @@ class TradeMonitor:
 
         Mode-gated per OWNER_BRIEF B17 / §3.2a (capital preservation doctrine):
 
-        * ``loose``    — only hard structural break (skip momentum / EMA /
-                         regime checks).  For users who want signals to
-                         develop fully before any non-SL exit fires.
+        * ``loose``    — NO thesis kill at all (skip momentum / EMA / regime /
+                         adverse-excursion checks).  Only the protective SL (or
+                         a TP) closes the position — the "TP/SL only" exit the
+                         Session-34 Profit-Lab showed beats the engine's real
+                         exits by +19.14%.  This is the engine default
+                         (``INVALIDATION_MODE_DEFAULT``) as of Session 34.
         * ``standard`` — engine baseline.  Regime-flip, EMA crossover, and
                          momentum-loss checks all active, plus MFE
                          protection on pre-TP'd signals (default).
@@ -2283,6 +2286,13 @@ class TradeMonitor:
         # with user's own Binance keys) reads ``user_pretp_settings.grab_fraction``
         # directly — that wiring sits in the Lumin OrderExecutor, not here.
         grab_fraction = float(PRE_TP_GRAB_FRACTION)
+        # Session 34 (2026-06-24) owner directive: grab_fraction <= 0 means
+        # pre-TP is DISABLED — the engine default is now TP1-full + fixed SL, so
+        # the signal book must NOT bank a partial.  Mirrors the FSM clamp in
+        # position_fsm.place_signal (0 disables; otherwise floor at the B17 30%).
+        # A user who opts back into banking (grab_fraction > 0) still gets it.
+        if grab_fraction <= 0:
+            return False
         # Clamp into the B17 bounds defensively even though config validation
         # should already guarantee this.
         grab_fraction = max(0.30, min(1.00, grab_fraction))
