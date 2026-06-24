@@ -46,6 +46,12 @@ def _reset_cache(monkeypatch):
     # own _mode_state_stub fixture.
     from src.api import user_overrides as _uo
     monkeypatch.setattr(_uo, "resolve_user_mode_uid", lambda uid: "live")
+    # 2026-06-24: dispatch now gates hands-off execution on the AUTO tier
+    # (B16 two-tier model).  These tests exercise dispatch *mechanics*
+    # (notional, mode, pause, allowlists), not entitlement, so make the
+    # tier gate transparent by treating every test user as ``auto``.  The
+    # gate itself is covered in tests/test_two_tier_entitlement.py.
+    monkeypatch.setattr(signal_dispatch, "_resolve_user_tier", lambda uid: "auto")
     yield
     signal_dispatch.reset_cache_for_test()
     symbol_filters.reset_for_test()
@@ -1684,3 +1690,41 @@ async def test_default_invalidation_mode_when_resolver_returns_standard(
 
     assert placed == 1
     assert mock_place.call_args.kwargs["invalidation_mode"] == "standard"
+
+
+@pytest.mark.asyncio
+async def test_dispatch_tier_gate_skips_non_auto_users() -> None:
+    """B16 money-path gate: only AUTO-tier users get hands-off execution.
+
+    Two connected users — fb-free (tier free) and fb-auto (tier auto).
+    With AUTO_TRADE_TIER_GATE_ENABLED on (default), the dispatcher must
+    place an order for fb-auto only.  Overrides the autouse fixture's
+    blanket 'auto' patch with a per-uid resolver.
+    """
+    from unittest.mock import patch as _patch
+    from src.execution import position_fsm
+
+    def _tier(uid: str) -> str:
+        return "auto" if uid == "fb-auto" else "free"
+
+    with _patch.object(
+        signal_dispatch, "_active_uids", return_value=["fb-free", "fb-auto"]
+    ), _patch.object(
+        signal_dispatch, "_resolve_user_tier", side_effect=_tier
+    ), _patch.object(
+        position_fsm, "place_signal", new_callable=AsyncMock
+    ) as mock_place:
+        placed = await signal_dispatch.dispatch_signal_to_active_users(
+            signal_id="sig-tier",
+            symbol="BTCUSDT",
+            direction="LONG",
+            entry_price=29000.0,
+            sl_price=28500.0,
+            tp1_price=29500.0,
+            tp2_price=30000.0,
+            tp3_price=30500.0,
+        )
+
+    assert placed == 1  # only fb-auto
+    called_uids = {c.kwargs["firebase_uid"] for c in mock_place.await_args_list}
+    assert called_uids == {"fb-auto"}

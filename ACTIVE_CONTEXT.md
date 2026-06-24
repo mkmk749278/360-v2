@@ -4,6 +4,46 @@
 
 ---
 
+## 🟢 SESSION 33 2026-06-24 — Monetization corrected to two-tier auto-trade model (signals free)
+
+**Owner correction mid-rollout:** the product is NOT "pay to see signals." Signals +
+entry/SL/TP + analysis are **FREE**. The paywall is **trade automation**, two monthly
+Play subscriptions:
+- **Assist** `lumin_assist_monthly` **₹1000/mo** — one-tap "take trade" (app places
+  the order client-side on the user's own Binance keys).
+- **Auto** `lumin_auto_monthly` **₹2000/mo** — hands-off server-side auto-execution.
+
+Tier hierarchy `free < assist < auto`. This reworks the Session-32 Play Billing landing
+(which wrongly locked levels behind a single `paid` tier).
+
+### Shipped (engine — two-tier rework, owner-sign-off PR)
+- `auth.py`: `ASSIST_TIER`/`AUTO_TIER` + `tier_rank`/`can_assist`/`can_auto` hierarchy.
+- **`signal_dispatch` money-path gate**: hands-off execution runs ONLY for `auto`
+  users (`_resolve_user_tier`, 30s cache, expiry-aware, **fails closed**). Reversible
+  via `AUTO_TRADE_TIER_GATE_ENABLED` (default ON). End-to-end test proves a free user
+  is skipped, an auto user dispatched.
+- `billing_play`: product→tier map (`GOOGLE_PLAY_PRODUCT_TIERS`); `entitlement_for`
+  returns assist/auto by product. `server.py` expiry-downgrade covers both tiers.
+- Tests: 53 dispatch + 40 billing/tier green; ruff clean.
+- Doctrine: B16 rewritten (two-tier automation paywall), B1/§2.2 — signals free.
+
+### Owner / business status (2026-06-24)
+- Engine billing armed on VPS (`configured=True`); Firebase SA granted Android
+  Publisher access.
+- **Payments KYC submitted via BillDesk** (individual a/c, Finance category — accurate
+  for crypto auto-trade; NOT "Education"). Awaiting Google/BillDesk payout approval
+  (days). Min ₹1000 / max ₹3000 ticket; income ₹750k.
+
+### REMAINING
+1. **lumin-app**: stop locking levels (free); gate one-tap take-trade by ≥assist; gate
+   live auto-trade by =auto; subscription page → two plans (₹1000/₹2000).
+2. **Play Console**: create `lumin_assist_monthly` + `lumin_auto_monthly`; Internal
+   testing release; license tester; Financial features declaration.
+3. ⚠️ **Legal**: charging for automated crypto execution — keep a legal sanity-check
+   current (Play financial-services + Indian regulatory exposure).
+
+---
+
 ## 🟢 SESSION 32 2026-06-23 — Monetization pivot: Google Play Billing (Telegram payment retired); engine entitlement core shipped
 
 **Owner trigger:** Play Console granted **production access** (screenshot). Owner: "we

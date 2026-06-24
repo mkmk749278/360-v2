@@ -881,7 +881,7 @@ class BillingGrantRequest(BaseModel):
     """
 
     phone: str = Field(..., min_length=8, max_length=18)
-    tier: Literal["free", "paid", "owner"]
+    tier: Literal["free", "assist", "auto", "paid", "owner"]
     paid_until_iso: Optional[str] = Field(
         default=None,
         description="ISO-8601 UTC; null when revoking (downgrade to free).",

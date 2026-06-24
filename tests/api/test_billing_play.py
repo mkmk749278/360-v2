@@ -89,11 +89,13 @@ class _FakeHttp:
         return self._post
 
 
-def _verifier(http: _FakeHttp, *, allowed: frozenset[str] = frozenset()) -> PlayBillingVerifier:
+_PRODUCT_TIERS = {"lumin_assist_monthly": "assist", "lumin_auto_monthly": "auto"}
+
+
+def _verifier(http: _FakeHttp, *, product_tiers: dict | None = None) -> PlayBillingVerifier:
     return PlayBillingVerifier(
         package_name="org.luminapp.lumin",
-        allowed_product_ids=allowed,
-        paid_tier="paid",
+        product_tiers=_PRODUCT_TIERS if product_tiers is None else product_tiers,
         token_provider=lambda: _const_token(),
         http_send=http,
     )
@@ -103,7 +105,7 @@ async def _const_token() -> str:
     return "fake-access-token"
 
 
-def _sub_body(state: str, *, product="lumin_pro_monthly", expiry=None, ack="ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED", linked=None):
+def _sub_body(state: str, *, product="lumin_auto_monthly", expiry=None, ack="ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED", linked=None):
     body = {
         "subscriptionState": state,
         "acknowledgementState": ack,
@@ -153,13 +155,20 @@ def test_is_entitled_state_machine(state, expiry, expected):
     assert s.is_entitled is expected
 
 
-def test_entitlement_for_maps_to_tier():
+def test_entitlement_for_maps_product_to_tier():
     v = _verifier(_FakeHttp())
-    active = PlaySubscriptionState("t", "p", "SUBSCRIPTION_STATE_ACTIVE", _future(), True, None)
-    tier, paid_until = v.entitlement_for(active)
-    assert tier == "paid" and paid_until is not None
+    auto = PlaySubscriptionState(
+        "t", "lumin_auto_monthly", "SUBSCRIPTION_STATE_ACTIVE", _future(), True, None)
+    tier, paid_until = v.entitlement_for(auto)
+    assert tier == "auto" and paid_until is not None
 
-    held = PlaySubscriptionState("t", "p", "SUBSCRIPTION_STATE_ON_HOLD", _future(), True, None)
+    assist = PlaySubscriptionState(
+        "t", "lumin_assist_monthly", "SUBSCRIPTION_STATE_ACTIVE", _future(), True, None)
+    tier, _ = v.entitlement_for(assist)
+    assert tier == "assist"
+
+    held = PlaySubscriptionState(
+        "t", "lumin_auto_monthly", "SUBSCRIPTION_STATE_ON_HOLD", _future(), True, None)
     tier, paid_until = v.entitlement_for(held)
     assert tier == "free" and paid_until is None
 
@@ -173,9 +182,9 @@ async def test_get_subscription_parses_active():
     http = _FakeHttp()
     http.queue_get(_resp(200, _sub_body("SUBSCRIPTION_STATE_ACTIVE")))
     v = _verifier(http)
-    state = await v.get_subscription(product_id="lumin_pro_monthly", purchase_token="tok")
+    state = await v.get_subscription(product_id="lumin_auto_monthly", purchase_token="tok")
     assert state.raw_state == "SUBSCRIPTION_STATE_ACTIVE"
-    assert state.product_id == "lumin_pro_monthly"
+    assert state.product_id == "lumin_auto_monthly"
     assert state.is_entitled is True
 
 
@@ -305,7 +314,7 @@ def billing_setup(tmp_path):
     user = user_store.get_or_create_by_phone("+15551234567")  # free tier
     purchases = PlayPurchaseStore(db)
     http = _FakeHttp()
-    verifier = _verifier(http, allowed=frozenset({"lumin_pro_monthly"}))
+    verifier = _verifier(http)  # product_tiers = assist/auto monthly
     app = build_app(
         engine,
         jwt_secret=_TEST_SECRET,
@@ -323,17 +332,28 @@ def test_verify_grants_paid_and_returns_token(billing_setup):
     client, http, user_store, purchases, uid = billing_setup
     http.queue_get(_resp(200, _sub_body("SUBSCRIPTION_STATE_ACTIVE", ack="ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED")))
     r = client.post("/api/billing/play/verify", json={
-        "product_id": "lumin_pro_monthly", "purchase_token": "tok-123",
+        "product_id": "lumin_auto_monthly", "purchase_token": "tok-123",
     })
     assert r.status_code == 200, r.text
     body = r.json()
-    assert body["ok"] is True and body["tier"] == "paid"
+    assert body["ok"] is True and body["tier"] == "auto"
     assert body["paid_until"] is not None
     assert body["token"]  # fresh JWT handed back
     # Source of truth updated.
-    assert user_store.get_by_id(uid).tier == "paid"
+    assert user_store.get_by_id(uid).tier == "auto"
     # Token mapped to the user for future RTDN.
     assert purchases.get("tok-123").user_id == uid
+
+
+def test_verify_assist_product_grants_assist(billing_setup):
+    client, http, user_store, purchases, uid = billing_setup
+    http.queue_get(_resp(200, _sub_body("SUBSCRIPTION_STATE_ACTIVE", product="lumin_assist_monthly")))
+    r = client.post("/api/billing/play/verify", json={
+        "product_id": "lumin_assist_monthly", "purchase_token": "tok-a",
+    })
+    assert r.status_code == 200, r.text
+    assert r.json()["tier"] == "assist"
+    assert user_store.get_by_id(uid).tier == "assist"
 
 
 def test_verify_unknown_product_rejected(billing_setup):
@@ -349,7 +369,7 @@ def test_verify_acknowledges_when_pending(billing_setup):
     http.queue_get(_resp(200, _sub_body("SUBSCRIPTION_STATE_ACTIVE", ack="ACKNOWLEDGEMENT_STATE_PENDING")))
     http.queue_post(_resp(200))
     r = client.post("/api/billing/play/verify", json={
-        "product_id": "lumin_pro_monthly", "purchase_token": "tok-9",
+        "product_id": "lumin_auto_monthly", "purchase_token": "tok-9",
     })
     assert r.status_code == 200
     assert any(m == "POST" and ":acknowledge" in u for m, u in http.calls)
@@ -369,28 +389,28 @@ def test_verify_503_when_not_configured(tmp_path):
 def test_rtdn_renewal_updates_entitlement(billing_setup):
     client, http, user_store, purchases, uid = billing_setup
     # Pre-existing mapping (as if the user verified earlier).
-    purchases.upsert(purchase_token="tok-r", user_id=uid, product_id="lumin_pro_monthly",
+    purchases.upsert(purchase_token="tok-r", user_id=uid, product_id="lumin_auto_monthly",
                      state="SUBSCRIPTION_STATE_ACTIVE", expiry=_future(1))
-    user_store.set_tier(uid, tier="paid", paid_until=_future(1))
+    user_store.set_tier(uid, tier="auto", paid_until=_future(1))
     # RTDN RENEWED → engine re-fetches and sees a later expiry.
     http.queue_get(_resp(200, _sub_body("SUBSCRIPTION_STATE_ACTIVE", expiry=_future(31))))
     r = client.post("/api/billing/play/rtdn", json=_envelope({
         "packageName": "org.luminapp.lumin",
         "subscriptionNotification": {
             "notificationType": 2, "purchaseToken": "tok-r",
-            "subscriptionId": "lumin_pro_monthly",
+            "subscriptionId": "lumin_auto_monthly",
         },
     }))
     assert r.status_code == 200, r.text
     assert r.json()["handled"] == "RENEWED"
-    assert user_store.get_by_id(uid).tier == "paid"
+    assert user_store.get_by_id(uid).tier == "auto"
 
 
 def test_rtdn_expired_token_downgrades(billing_setup):
     client, http, user_store, purchases, uid = billing_setup
-    purchases.upsert(purchase_token="tok-x", user_id=uid, product_id="lumin_pro_monthly",
+    purchases.upsert(purchase_token="tok-x", user_id=uid, product_id="lumin_auto_monthly",
                      state="SUBSCRIPTION_STATE_ACTIVE", expiry=_future(1))
-    user_store.set_tier(uid, tier="paid", paid_until=_future(1))
+    user_store.set_tier(uid, tier="auto", paid_until=_future(1))
     # Google reports the token as gone (410) → definitive revoke.
     http.queue_get(_resp(410))
     r = client.post("/api/billing/play/rtdn", json=_envelope({
@@ -429,7 +449,7 @@ def test_rtdn_test_notification_acked(billing_setup):
 def test_profile_downgrades_expired_paid_user(billing_setup):
     client, http, user_store, purchases, uid = billing_setup
     # Paid but already past expiry, and no RTDN arrived (the belt-and-braces case).
-    user_store.set_tier(uid, tier="paid", paid_until=_past(1))
+    user_store.set_tier(uid, tier="auto", paid_until=_past(1))
     r = client.get("/api/profile")
     assert r.status_code == 200, r.text
     assert r.json()["tier"] == "free"

@@ -279,6 +279,60 @@ def reset_cache_for_test() -> None:
     """Test-only — drop the active-uids cache."""
     global _cache
     _cache = None
+    _TIER_CACHE.clear()
+
+
+# ---------------------------------------------------------------------------
+# Entitlement (B16 two-tier model) — hands-off auto-execution is AUTO-only
+# ---------------------------------------------------------------------------
+
+# uid → (effective_tier, expiry_monotonic).  Small in-process TTL cache so the
+# per-signal dispatch gate doesn't hit SQLite for every user on every signal
+# (Cost Discipline — mirror the keystore/kill-switch cache pattern).  Tier
+# changes are rare (subscription events), so 30s staleness is acceptable: a
+# just-subscribed user waits <=30s for their first auto-trade; a just-lapsed
+# one keeps it <=30s (RTDN + the read-time expiry check below are the
+# authoritative downgrade).
+_TIER_CACHE: Dict[str, Tuple[str, float]] = {}
+_TIER_CACHE_TTL_S: float = 30.0
+
+
+def _resolve_user_tier(uid: str) -> str:
+    """Resolve a firebase uid → effective subscription tier (expiry-aware).
+
+    Returns ``"free"`` when the user is unknown, their paid window has
+    lapsed, or the lookup fails — i.e. **fails closed**: we never run
+    hands-off auto-execution for an account we can't confirm is entitled.
+    """
+    now = time.monotonic()
+    cached = _TIER_CACHE.get(uid)
+    if cached is not None and cached[1] > now:
+        return cached[0]
+    tier = "free"
+    try:
+        from datetime import datetime, timezone
+
+        from src.api import users as _users
+        from src.api.auth import can_assist
+
+        store = _users.get_singleton()
+        if store is not None:
+            user = store.get_by_firebase_uid(uid)
+            if user is not None:
+                tier = (user.tier or "free").lower()
+                # A lapsed paid window downgrades to free at read time
+                # (defence-in-depth alongside RTDN expiry events).
+                if (
+                    can_assist(tier)
+                    and user.paid_until is not None
+                    and user.paid_until <= datetime.now(timezone.utc)
+                ):
+                    tier = "free"
+    except Exception as exc:  # fail closed — no unpaid auto-execution
+        log.warning("signal_dispatch: tier resolve failed uid={}: {}", uid, exc)
+        tier = "free"
+    _TIER_CACHE[uid] = (tier, now + _TIER_CACHE_TTL_S)
+    return tier
 
 
 def _compute_qty_split(
@@ -489,6 +543,25 @@ async def dispatch_signal_to_active_users(
                 uid, user_mode, signal_id,
             )
             return False
+
+        # Entitlement gate (B16 two-tier model, 2026-06-24).  Hands-off
+        # server-side auto-execution is the AUTO tier (₹2000/mo).  Free and
+        # assist (one-tap) users never get an unattended order placed for
+        # them here — assist places orders client-side from the app, free
+        # places none.  Reversible via AUTO_TRADE_TIER_GATE_ENABLED.  Fails
+        # closed: an unconfirmed tier resolves to free and is skipped.
+        from config import AUTO_TRADE_TIER_GATE_ENABLED as _tier_gate
+        if _tier_gate:
+            from src.api.auth import can_auto as _can_auto
+            _user_tier = _resolve_user_tier(uid)
+            if not _can_auto(_user_tier):
+                log.info(
+                    "signal_dispatch: skipping non-auto user uid={} tier={} "
+                    "signal_id={} — hands-off auto-execution requires the "
+                    "auto tier",
+                    uid, _user_tier, signal_id,
+                )
+                return False
 
         # Auto-pause gate (2026-05-24). After
         # ``_INSUFFICIENT_MARGIN_PAUSE_THRESHOLD`` consecutive ``-2019``

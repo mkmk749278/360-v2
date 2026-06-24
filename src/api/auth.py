@@ -50,6 +50,15 @@ DEFAULT_TOKEN_TTL = timedelta(days=7)
 ALL_ACCESS_TIER = "all-access"
 PAID_TIER = "paid"
 FREE_TIER = "free"
+# Subscription tiers (B16 two-tier auto-trade model, 2026-06-24).  Signals +
+# levels are FREE; the paywall is on trade automation:
+#   * ASSIST_TIER ("assist", ₹1000/mo) — one-tap "take trade" (client-side
+#     order placement on the user's own keys).
+#   * AUTO_TIER ("auto", ₹2000/mo) — hands-off server-side auto-execution.
+# Hierarchy: free < assist < auto.  Legacy "paid" maps to auto-equivalent
+# (it historically unlocked everything); all-access/owner sit above auto.
+ASSIST_TIER = "assist"
+AUTO_TIER = "auto"
 # OWNER_TIER gates write endpoints (settings PUT, auto-mode POST).  Anon /
 # all-access / paid / free clients can READ everything but only owner-tier
 # JWTs (or the static admin token bypass) can mutate engine state.  Added
@@ -57,6 +66,33 @@ FREE_TIER = "free"
 # every client shares the same global settings; without this gate any
 # tester could flip the engine into Live mode or change position size.
 OWNER_TIER = "owner"
+
+# Capability ranking for the subscription tiers.  Used by the dispatch
+# money-path gate (only ``auto`` runs hands-off) and the app feature gates.
+_TIER_RANK = {
+    FREE_TIER: 0,
+    ASSIST_TIER: 1,
+    AUTO_TIER: 2,
+    PAID_TIER: 2,          # legacy single paid tier == full automation
+    ALL_ACCESS_TIER: 3,    # testing-phase god mode
+    OWNER_TIER: 3,
+}
+
+
+def tier_rank(tier: Optional[str]) -> int:
+    """Capability rank of a tier string (unknown → 0 / free)."""
+    return _TIER_RANK.get((tier or "").lower(), 0)
+
+
+def can_assist(tier: Optional[str]) -> bool:
+    """True when the tier may place one-tap (assisted) live trades."""
+    return tier_rank(tier) >= _TIER_RANK[ASSIST_TIER]
+
+
+def can_auto(tier: Optional[str]) -> bool:
+    """True when the tier may run hands-off server-side auto-execution."""
+    return tier_rank(tier) >= _TIER_RANK[AUTO_TIER]
+
 
 
 # ---------------------------------------------------------------------------
@@ -83,7 +119,8 @@ class TokenClaims:
 
     @property
     def is_paid(self) -> bool:
-        return self.tier in (ALL_ACCESS_TIER, PAID_TIER)
+        # Any paid entitlement (assist, auto, legacy paid, all-access).
+        return can_assist(self.tier)
 
 
 class AuthError(Exception):

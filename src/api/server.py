@@ -56,6 +56,8 @@ from src.utils import get_logger
 
 from . import firebase_auth
 from .auth import (
+    ASSIST_TIER,
+    AUTO_TIER,
     OWNER_TIER,
     PAID_TIER,
     AuthError,
@@ -1205,14 +1207,15 @@ def build_app(
 
         RTDN (EXPIRED / REVOKED) is the PRIMARY downgrade path; this is
         belt-and-suspenders for a missed/late notification.  Only the
-        subscription-bound ``paid`` tier is affected — ``owner`` and
-        ``all-access`` are never time-boxed.  The write fires once, only
-        on the actual expiry transition (not a hot path), so it costs a
-        single UPDATE the first time an expired user is seen.
+        subscription-bound tiers (``assist`` / ``auto`` / legacy ``paid``)
+        are affected — ``owner`` and ``all-access`` are never time-boxed.
+        The write fires once, only on the actual expiry transition (not a
+        hot path), so it costs a single UPDATE the first time an expired
+        user is seen.
         """
         if (
             user_store is None
-            or user.tier != PAID_TIER
+            or user.tier not in (ASSIST_TIER, AUTO_TIER, PAID_TIER)
             or user.paid_until is None
             or user.paid_until > datetime.now(timezone.utc)
         ):
