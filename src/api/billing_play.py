@@ -146,11 +146,14 @@ class PlayBillingVerifier:
         Android application id, e.g. ``org.luminapp.lumin``.
     service_account_info:
         Parsed service-account JSON dict, or ``None`` when unconfigured.
-    allowed_product_ids:
-        Optional allowlist of subscription product ids.  Empty = accept any
-        product the API confirms.
-    paid_tier:
-        Tier string to grant on a valid subscription (``"paid"``).
+    product_tiers:
+        Map of ``product_id → tier`` (e.g. ``{"lumin_auto_monthly": "auto",
+        "lumin_assist_monthly": "assist"}``).  A purchase for a product not
+        in this map is rejected.  Empty = accept any product the API
+        confirms and grant ``default_tier`` (convenient for first wiring).
+    default_tier:
+        Tier granted when ``product_tiers`` is empty or doesn't list the
+        product (kept for the empty-map convenience case).
     token_provider / http_send:
         Test seams — when provided, replace the real OAuth2 token mint and
         the real HTTP transport respectively.
@@ -161,15 +164,16 @@ class PlayBillingVerifier:
         *,
         package_name: str,
         service_account_info: Optional[dict] = None,
-        allowed_product_ids: frozenset[str] = frozenset(),
-        paid_tier: str = "paid",
+        product_tiers: Optional[dict[str, str]] = None,
+        default_tier: str = "auto",
         token_provider: Optional[TokenProvider] = None,
         http_send: Optional[HttpSend] = None,
     ) -> None:
         self._package = package_name
         self._sa_info = service_account_info
-        self._allowed = allowed_product_ids
-        self._paid_tier = paid_tier
+        self._product_tiers = dict(product_tiers or {})
+        self._allowed = frozenset(self._product_tiers)
+        self._default_tier = default_tier
         self._token_provider = token_provider
         self._http_send = http_send
         self._client: Optional[httpx.AsyncClient] = None
@@ -198,17 +202,21 @@ class PlayBillingVerifier:
     def allowed_product_ids(self) -> frozenset[str]:
         return self._allowed
 
+    def tier_for_product(self, product_id: str) -> str:
+        """Tier a given product grants (assist / auto)."""
+        return self._product_tiers.get(product_id, self._default_tier)
+
     def entitlement_for(
         self, state: PlaySubscriptionState
     ) -> tuple[str, Optional[datetime]]:
         """Map a subscription state to ``(tier, paid_until)`` for UserStore.
 
-        Entitled → paid tier, ``paid_until = expiry``.  Otherwise → free,
-        ``paid_until = None``.  This is the single place that decision is
-        made, used by both the verify endpoint and the RTDN handler.
+        Entitled → the product's tier (``assist`` / ``auto``), ``paid_until
+        = expiry``.  Otherwise → free, ``paid_until = None``.  Single place
+        the decision is made, used by both the verify endpoint and RTDN.
         """
         if state.is_entitled:
-            return self._paid_tier, state.expiry
+            return self.tier_for_product(state.product_id), state.expiry
         return "free", None
 
     # ------------------------------------------------------------------

@@ -2539,6 +2539,14 @@ BILLING_WEBHOOK_SECRET: str = os.getenv("BILLING_WEBHOOK_SECRET", "")
 #: Play Console project or it is not.
 GOOGLE_PLAY_BILLING_ENABLED: bool = _safe_bool("GOOGLE_PLAY_BILLING_ENABLED", "false")
 
+#: Money-path entitlement gate (B16 two-tier model).  When true (default),
+#: hands-off server-side auto-execution in ``signal_dispatch`` runs ONLY for
+#: users whose tier is ``auto`` (or higher: all-access / owner).  Reversible
+#: operational kill switch — flip to false to fall back to the pre-B16
+#: behaviour (mode/connection-gated only) if the tier gate ever misbehaves
+#: for our own test accounts.  This is NOT a dark flag: it ships ON.
+AUTO_TRADE_TIER_GATE_ENABLED: bool = _safe_bool("AUTO_TRADE_TIER_GATE_ENABLED", "true")
+
 #: Android application id of the Lumin app, e.g. ``org.luminapp.lumin``.
 #: Must match the ``packageName`` Google signs RTDN notifications with and
 #: the package the purchase was made under.
@@ -2556,18 +2564,30 @@ GOOGLE_PLAY_SERVICE_ACCOUNT_PATH: str = os.getenv(
     os.getenv("FIREBASE_SERVICE_ACCOUNT_PATH", ""),
 )
 
-#: Comma-separated allowlist of subscription product IDs the engine will
-#: honour (e.g. ``lumin_pro_monthly,lumin_pro_quarterly``).  A purchase for
-#: any other product is rejected — defence against a tampered client sending
-#: a product id we never sold.  Empty = accept any product the Play API
-#: confirms (convenient for first wiring; set it before launch).
-GOOGLE_PLAY_PRODUCT_IDS: frozenset[str] = frozenset(
-    p.strip() for p in os.getenv("GOOGLE_PLAY_PRODUCT_IDS", "").split(",") if p.strip()
+#: Product IDs for the two paid tiers (B16 two-tier auto-trade model).
+#: A verified purchase of an ASSIST product grants tier ``assist`` (one-tap
+#: live trades, ₹1000/mo); an AUTO product grants tier ``auto`` (hands-off
+#: server-side execution, ₹2000/mo).  Signals + levels are free.  Comma-
+#: separated; must match the Play Console product IDs exactly.  A purchase
+#: for any product not in either set is rejected (defence against a tampered
+#: client sending a product we never sold).
+GOOGLE_PLAY_ASSIST_PRODUCT_IDS: frozenset[str] = frozenset(
+    p.strip()
+    for p in os.getenv("GOOGLE_PLAY_ASSIST_PRODUCT_IDS", "lumin_assist_monthly").split(",")
+    if p.strip()
+)
+GOOGLE_PLAY_AUTO_PRODUCT_IDS: frozenset[str] = frozenset(
+    p.strip()
+    for p in os.getenv("GOOGLE_PLAY_AUTO_PRODUCT_IDS", "lumin_auto_monthly").split(",")
+    if p.strip()
 )
 
-#: Tier granted to a user holding a valid Play subscription.  Matches
-#: ``auth.PAID_TIER``; overridable only for tests / migrations.
-GOOGLE_PLAY_PAID_TIER: str = os.getenv("GOOGLE_PLAY_PAID_TIER", "paid")
+#: product_id → tier map consumed by the billing verifier.  Built from the
+#: two sets above so the verifier has a single source of truth.
+GOOGLE_PLAY_PRODUCT_TIERS: dict[str, str] = {
+    **{pid: "auto" for pid in GOOGLE_PLAY_AUTO_PRODUCT_IDS},
+    **{pid: "assist" for pid in GOOGLE_PLAY_ASSIST_PRODUCT_IDS},
+}
 
 #: Expected OIDC audience on Google Pub/Sub **push** requests carrying RTDN
 #: (Real-Time Developer Notifications).  Pub/Sub signs each push with a Google

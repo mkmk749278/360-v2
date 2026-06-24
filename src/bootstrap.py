@@ -394,8 +394,7 @@ class Bootstrap:
             BILLING_WEBHOOK_SECRET,
             GOOGLE_PLAY_BILLING_ENABLED,
             GOOGLE_PLAY_PACKAGE_NAME,
-            GOOGLE_PLAY_PAID_TIER,
-            GOOGLE_PLAY_PRODUCT_IDS,
+            GOOGLE_PLAY_PRODUCT_TIERS,
             GOOGLE_PLAY_RTDN_AUDIENCE,
             GOOGLE_PLAY_RTDN_PATH_SECRET,
             GOOGLE_PLAY_SERVICE_ACCOUNT_PATH,
@@ -699,8 +698,7 @@ class Bootstrap:
                     service_account_info=load_service_account_info(
                         GOOGLE_PLAY_SERVICE_ACCOUNT_PATH
                     ),
-                    allowed_product_ids=GOOGLE_PLAY_PRODUCT_IDS,
-                    paid_tier=GOOGLE_PLAY_PAID_TIER,
+                    product_tiers=GOOGLE_PLAY_PRODUCT_TIERS,
                 )
                 play_purchases = PlayPurchaseStore(LUMIN_DB_PATH)
                 log.info(
