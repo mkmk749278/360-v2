@@ -526,6 +526,7 @@ def _signal_to_detail(sig: Any) -> SignalDetail:
         max_adverse_excursion_pct=float(
             getattr(sig, "max_adverse_excursion_pct", 0.0) or 0.0
         ),
+        best_tp_pnl_pct=float(getattr(sig, "best_tp_pnl_pct", 0.0) or 0.0),
         pre_tp_hit=bool(getattr(sig, "pre_tp_hit", False)),
         pre_tp_threshold_pct=float(
             getattr(sig, "pre_tp_threshold_pct", 0.0) or 0.0
