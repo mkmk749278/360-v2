@@ -4,6 +4,57 @@
 
 ---
 
+## 🟢 SESSION 35 2026-06-25 — Mark-price-triggered BE SL shift at +1% MFE (engine, merged PR #646)
+
+**Owner trigger:** simulation in `ops.luminapp.org/profit` showed that signals often move 1%+ in our favour then reverse to the stop, giving back the unrealised gain. With the new TP1/SL-only default (Session 34 PR #645), there is no pre-TP to bank profit early — the loss is taken in full when SL hits.
+
+**Simulation evidence (499 closed signals, live window, `exit_sim.py`):**
+| Strategy | Total PnL | Edge vs engine real exits |
+|---|---|---|
+| Engine real exits (mixed legacy) | −29.28% | — |
+| TP1-only (current default) | −11.51% | +17.77% |
+| **BE at +1.0% → TP1** | **−10.62%** | **+18.67% (+0.89% vs TP1-only)** |
+| BE at +0.5% → TP1 | −6.53% | +22.75% |
+
+Owner signed off: **"keep at 1%"** (1.0% chosen over 0.5% to avoid scratching signals that dip briefly then continue to TP1; avg TP1 distance is 2.29%).
+
+Also shipped in this session (360ce-ops):
+- **PR #37** (`feat/be-stop-tp1-diagnostic`): BE simulation strategy + TP1-miss diagnostic banner on the profit tab — merged.
+- **PR #38** (`fix/be-tp1-namefix`): hotfix `NameError` in `_build_rows` — merged.
+
+### Shipped — PR #646 (360-v2, engine, owner-sign-off: BE shift + FSM)
+
+| Change | File | Why |
+|---|---|---|
+| `BE_SHIFT_TRIGGER_PCT = 1.0` (env-overridable) | `config/__init__.py` | Single-source trigger threshold |
+| `be_shift_fired: bool = False` on `Position` + Firestore serde | `src/execution/position_state.py` | Prevents double-fire across ticks + survives restart |
+| `maybe_fire_be_shift()` async function | `src/execution/pretp_dispatcher.py` | Cancel original SL, place STOP_MARKET at entry via `coid_sl_be`; wired into `_on_tick()` after `maybe_fire_pretp` |
+| 8 unit tests | `tests/test_be_shift.py` | LONG/SHORT fire, below-threshold no-fire, double-fire guard, sl_order_id==0 guard, pretp_fired guard, placement-failure retry |
+
+**Cost:** zero additional Firestore reads per tick — reuses the existing in-memory live-position index. One `put_position` write per position when the shift fires (one-time per signal life).
+
+**FSM integration (existing infrastructure):**
+- When BE-SL fires, the FSM routes via `coid_sl_be` → `_apply_sl_be_fill()` → `close_reason="SL_BE"` → CLOSED ✓
+- When TP1 fires (full close): `sl_order_id == 0` (already zeroed at BE-shift time) → skip cancel; Binance auto-cancels the resting BE-SL (`closePosition=true`) when position reaches zero ✓
+- Pre-TP users unaffected: `pretp_fired=True` guard + PRE_TP_FIRED state excluded from OPEN-position query ✓
+
+### VPS action required
+
+On next `main` deploy (auto ~45s after merge), the engine image will include the BE-shift logic. No env vars required — `BE_SHIFT_TRIGGER_PCT=1.0` is the default.
+
+To verify it is live after the first position crosses +1% MFE:
+```bash
+docker logs 360scalp-v2-engine --since 1h | grep "be_shift: triggering"
+docker logs 360scalp-v2-engine --since 1h | grep "be_shift: placed BE-SL"
+```
+
+### REMAINING (from Session 34)
+1. **lumin-app (PR 2):** outcome-summary card redesign per owner's reference mockup — highlight positive result + "Max profit reached before SL", faded-but-visible closed-signal bars, active-signal trade button; copy aligned to the new model. **In progress.**
+2. **360ce-ops:** Profit-Lab data window still maturing after Session-34 default flip. Wait for fresh window before judging the TP1-only + BE-shift real-book edge.
+3. **VPS:** verify `.env` does not pin old pre-TP / invalidation defaults (`PRE_TP_GRAB_FRACTION`, `INVALIDATION_MODE_DEFAULT`, `PRE_TP_ENABLED`) — clear them if so.
+
+---
+
 ## 🟢 SESSION 34 2026-06-24 — Default exit reversed to TP1-full + fixed SL (pre-TP & invalidation now opt-in)
 
 **Owner trigger (Profit-Lab screenshots, `ops.luminapp.org/profit`):** "pre-TP and
