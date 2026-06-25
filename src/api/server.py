@@ -1856,6 +1856,14 @@ def build_app(
         resolve_user_id=_resolve_user_id,
     )
 
+    # ---- Admin full-signal reset (owner-only) ----
+    from . import reset_signals_route as _reset_signals_route
+    _reset_signals_route.register(
+        app,
+        engine=engine,
+        owner_required=owner_required,
+    )
+
     # ---- Binance connect flow (server-side execution, B18 + §3.9) ----
     # Registers POST /api/binance/connect.  Validates the user's
     # Binance key against B18 rules (withdraw=off, futures=on,

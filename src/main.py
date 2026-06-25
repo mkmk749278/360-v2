@@ -852,6 +852,66 @@ class CryptoSignalEngine:
         self._current_auto_mode = new_mode
         return True, f"auto-execution mode changed: {previous.upper()} → {new_mode.upper()}"
 
+    def full_signal_reset(self) -> dict:
+        """Clear all signal state engine-side: active signals, history, stats, invalidation records.
+
+        Called directly in single-process mode; called by SnapshotWriter when a
+        KEY_CMD_RESET_SIGNALS Redis command arrives in isolated mode.
+
+        Does NOT touch broker positions — paper close-all is handled by the API
+        container (which owns the PaperOrderManager in both modes).
+        """
+        import json as _json
+        from pathlib import Path as _Path
+        from src.signal_history_store import save_history as _save_history
+
+        result: dict = {
+            "cleared_active_signals": 0,
+            "cleared_history": 0,
+            "cleared_perf_stats": 0,
+            "cleared_invalidation_records": 0,
+        }
+
+        # 1. Active signals — clear the router's in-flight map.
+        router = getattr(self, "router", None)
+        if router is not None and hasattr(router, "active_signals"):
+            try:
+                result["cleared_active_signals"] = len(router.active_signals)
+                router.active_signals.clear()
+            except Exception:
+                pass
+
+        # 2. Signal history — clear in-memory + flush empty list to disk.
+        try:
+            result["cleared_history"] = len(self._signal_history)
+            self._signal_history.clear()
+            _save_history(self._signal_history)
+        except Exception:
+            pass
+
+        # 3. Performance stats.
+        pt = getattr(self, "_performance_tracker", None)
+        if pt is not None and hasattr(pt, "reset_stats"):
+            try:
+                result["cleared_perf_stats"] = pt.reset_stats(channel=None)
+            except Exception:
+                pass
+
+        # 4. Invalidation records — overwrite with empty array.
+        inv_path = _Path("data/invalidation_records.json")
+        if inv_path.exists():
+            try:
+                existing = _json.loads(inv_path.read_text(encoding="utf-8"))
+                result["cleared_invalidation_records"] = len(existing) if isinstance(existing, list) else 0
+            except Exception:
+                pass
+            try:
+                inv_path.write_text("[]", encoding="utf-8")
+            except Exception:
+                pass
+
+        return result
+
     def _get_engine_context(self) -> dict:
         """Return a snapshot of current engine state for content generation."""
         regime = "RANGING"
