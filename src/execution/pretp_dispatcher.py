@@ -34,6 +34,7 @@ import time
 from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set
 
+from config import BE_SHIFT_TRIGGER_PCT as _BE_SHIFT_TRIGGER_PCT
 from src.utils import get_logger
 
 from . import mark_price_feed as _mark_price_feed
@@ -147,6 +148,14 @@ class PretpDispatcher:
             except Exception:
                 log.exception(
                     "pretp_dispatcher: maybe_fire_pretp raised "
+                    "uid={} signal_id={}",
+                    position.firebase_uid, position.signal_id,
+                )
+            try:
+                await maybe_fire_be_shift(position, mark_price=mark_price, placer=placer)
+            except Exception:
+                log.exception(
+                    "pretp_dispatcher: maybe_fire_be_shift raised "
                     "uid={} signal_id={}",
                     position.firebase_uid, position.signal_id,
                 )
@@ -266,3 +275,100 @@ def _default_order_placer_factory(
     firebase_uid: str,
 ) -> _order_placer.OrderPlacer:
     return _order_placer.OrderPlacer(firebase_uid)
+
+
+# ---------------------------------------------------------------------------
+# Mark-price-triggered break-even SL shift
+# ---------------------------------------------------------------------------
+
+
+async def maybe_fire_be_shift(
+    position: _position_state.Position,
+    *,
+    mark_price: float,
+    placer: _order_placer.OrderPlacer,
+) -> None:
+    """If mark price has moved BE_SHIFT_TRIGGER_PCT% in our favour, cancel
+    the original SL and place a new STOP_MARKET at the entry price.
+
+    Guards:
+    - ``be_shift_fired`` — already shifted on a prior tick.
+    - ``sl_order_id == 0`` — original SL already gone (pre-TP fired, or
+      manually canceled); nothing to shift.
+    - ``pretp_fired`` — pre-TP owns the BE shift for that path; don't
+      double-shift.  (Belt-and-suspenders: PRE_TP_FIRED positions are also
+      filtered out of the OPEN-state query.)
+
+    After firing:
+    - ``sl_order_id`` is zeroed.
+    - ``sl_be_order_id`` and ``sl_price`` reflect the new BE stop.
+    - ``be_shift_fired = True`` prevents re-entry on subsequent ticks.
+    - ``put_position`` bumps the write-generation, which invalidates the
+      symbol-positions cache so the updated object is used next tick.
+    """
+    if position.be_shift_fired:
+        return
+    if position.pretp_fired:
+        return
+    if position.sl_order_id == 0:
+        return
+
+    entry = position.entry_price_filled if position.entry_price_filled > 0 else position.entry_price_target
+    if entry <= 0:
+        return
+
+    if position.side == "LONG":
+        move_pct = (mark_price - entry) / entry * 100.0
+    else:
+        move_pct = (entry - mark_price) / entry * 100.0
+
+    if move_pct < _BE_SHIFT_TRIGGER_PCT:
+        return
+
+    # Mark price crossed the trigger threshold — shift the stop to entry.
+    log.info(
+        "be_shift: triggering uid={} signal_id={} symbol={} side={} "
+        "entry={} mark={} move_pct={:.3f}",
+        position.firebase_uid, position.signal_id, position.symbol,
+        position.side, entry, mark_price, move_pct,
+    )
+    try:
+        await placer.cancel_algo_order(
+            symbol=position.symbol,
+            algo_id=position.sl_order_id,
+        )
+    except _order_placer.OrderPlacementError as exc:
+        log.warning(
+            "be_shift: original SL cancel failed uid={} signal_id={} exc={}",
+            position.firebase_uid, position.signal_id, exc,
+        )
+    old_sl_order_id = position.sl_order_id
+    position.sl_order_id = 0
+
+    try:
+        sl_be = await placer.place_stop_loss(
+            signal_id=position.signal_id,
+            symbol=position.symbol,
+            direction=position.side,
+            stop_price=entry,
+            coid_override=_position_state.coid_sl_be(position.signal_id),
+        )
+        position.sl_be_order_id = sl_be.order_id
+        position.sl_price = entry
+        position.be_shift_fired = True
+        _position_state.put_position(position)
+        log.info(
+            "be_shift: placed BE-SL uid={} signal_id={} be_order_id={} "
+            "canceled_sl_order_id={}",
+            position.firebase_uid, position.signal_id,
+            sl_be.order_id, old_sl_order_id,
+        )
+    except _order_placer.OrderPlacementError as exc:
+        log.error(
+            "be_shift: BE-SL placement FAILED uid={} signal_id={} exc={} — "
+            "position has no stop; FSM reconciler will detect and force-close",
+            position.firebase_uid, position.signal_id, exc,
+        )
+        # Do NOT set be_shift_fired — let next tick retry the placement.
+        # The original SL was already canceled; if the retry also fails the
+        # reconciler will catch the naked position and close it.
