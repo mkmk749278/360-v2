@@ -90,6 +90,16 @@ class SignalDetail(BaseModel):
             "matching pnl_pct's sign convention (negative = against the trade)."
         ),
     )
+    best_tp_pnl_pct: float = Field(
+        0.0,
+        description=(
+            "Locked profit % at the highest TP level hit so far, calculated at "
+            "the exact TP price (not the current price). After TP1 this holds the "
+            "TP1 result; after TP2 it holds the TP2 result. 0.0 when no TP has "
+            "been hit yet. Use this to display the 'banked' result for TP-hit "
+            "signals while max_favorable_excursion_pct tracks the continuing peak."
+        ),
+    )
     pre_tp_hit: bool = False
     pre_tp_threshold_pct: float = Field(
         0.0,
