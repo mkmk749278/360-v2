@@ -183,6 +183,9 @@ class Position:
     atr_percentile_at_entry: float = 50.0  # 0-100; drives trail_atr_multiplier
     atr_value_at_entry: float = 0.0        # Absolute ATR(14) used to compute callbackRate
     trail_order_id: int = 0                # Binance algoId of the TRAILING_STOP_MARKET order
+    # Set True the moment the mark-price-triggered BE shift fires (pretp_dispatcher).
+    # Prevents the dispatcher from re-cancelling an already-shifted SL on subsequent ticks.
+    be_shift_fired: bool = False
     created_at: datetime = field(
         default_factory=lambda: datetime.now(timezone.utc)
     )
@@ -775,6 +778,7 @@ def _to_firestore_dict(position: Position) -> dict:
         "atr_percentile_at_entry": position.atr_percentile_at_entry,
         "atr_value_at_entry": position.atr_value_at_entry,
         "trail_order_id": position.trail_order_id,
+        "be_shift_fired": position.be_shift_fired,
         "created_at": position.created_at,
         "last_event_at": position.last_event_at,
         "closed_at": position.closed_at,
@@ -826,6 +830,7 @@ def _from_firestore_dict(data: dict) -> Position:
         atr_percentile_at_entry=float(data.get("atr_percentile_at_entry", 50.0)),
         atr_value_at_entry=float(data.get("atr_value_at_entry", 0.0)),
         trail_order_id=int(data.get("trail_order_id", 0)),
+        be_shift_fired=bool(data.get("be_shift_fired", False)),
         created_at=data.get(
             "created_at", datetime.now(timezone.utc)
         ),

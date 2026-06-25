@@ -2158,6 +2158,17 @@ SL_RETRY_BACKOFF_SEC: float = _safe_float("SL_RETRY_BACKOFF_SEC", "1.0")
 TRAILING_ATR_MULTIPLIER: float = _safe_float("TRAILING_ATR_MULTIPLIER", "1.5")
 
 # ---------------------------------------------------------------------------
+# Break-even SL shift — mark-price-triggered
+# ---------------------------------------------------------------------------
+# Once mark price has moved BE_SHIFT_TRIGGER_PCT% in our favour from the
+# filled entry price, the pretp_dispatcher cancels the original SL and
+# places a new STOP_MARKET at entry (break-even).  If price then reverses
+# to entry the position exits at 0% gross (−fees) instead of the full SL
+# loss.  Owner-confirmed value: 1.0% (Session 34 simulation showed +0.89%
+# total PnL edge vs TP1-only across 499 closed signals).
+BE_SHIFT_TRIGGER_PCT: float = _safe_float("BE_SHIFT_TRIGGER_PCT", "1.0")
+
+# ---------------------------------------------------------------------------
 # Funding-rate exit
 # ---------------------------------------------------------------------------
 # How many seconds before a symbol's next funding settlement to exit a
