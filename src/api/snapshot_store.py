@@ -29,6 +29,8 @@ KEY_TICKERS        = "snapshot:tickers"        # List[TickerItem dict]    — wr
 KEY_ENGINE_STATE   = "snapshot:engine_state"   # engine state dict        — written every ~15 s
 KEY_POSITIONS_DIAG = "snapshot:positions_diag"  # PositionsDiagResponse    — written every ~15 s
 KEY_CMD_SET_MODE   = "snapshot:cmd:set_mode"   # str "off|paper|live"     — consumed once
+KEY_CMD_RESET_SIGNALS = "snapshot:cmd:reset_signals"  # set to "1" by API; consumed once by engine
+TTL_CMD_RESET = 120  # 2-min TTL — engine consumes before this; if engine is down, client must retry
 
 # ── TTLs (seconds) — 2× the write interval ────────────────────────────────
 TTL_SIGNALS      = 60

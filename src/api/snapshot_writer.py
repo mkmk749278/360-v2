@@ -91,6 +91,8 @@ class SnapshotWriter:
             self._last_agents = now
         # Check for a pending mode-change command from the API container.
         await self._apply_pending_mode_cmd()
+        # Check for a pending full-signal-reset command from the API container.
+        await self._apply_pending_reset_cmd()
 
     # ------------------------------------------------------------------
     # Individual writers
@@ -304,6 +306,25 @@ class SnapshotWriter:
             log.info("snapshot_writer: mode command result: {}", msg)
         except Exception:
             log.exception("snapshot_writer: failed to apply mode command")
+
+    # ------------------------------------------------------------------
+    # Full-signal-reset command
+    # ------------------------------------------------------------------
+
+    async def _apply_pending_reset_cmd(self) -> None:
+        """Pick up a pending full-signal-reset queued by the API container."""
+        if not self._redis.available:
+            return
+        try:
+            raw = await self._redis.client.get(_store.KEY_CMD_RESET_SIGNALS)
+            if raw is None:
+                return
+            await self._redis.client.delete(_store.KEY_CMD_RESET_SIGNALS)
+            log.info("snapshot_writer: applying full signal reset command from API")
+            result = self._engine.full_signal_reset()
+            log.info("snapshot_writer: full signal reset complete: {}", result)
+        except Exception:
+            log.exception("snapshot_writer: failed to apply reset_signals command")
 
     # ------------------------------------------------------------------
     # Internal helper

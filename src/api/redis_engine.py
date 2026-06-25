@@ -286,3 +286,39 @@ class RedisEngineFacade:
     @property
     def auto_execution_mode(self) -> str:
         return self._current_auto_mode
+
+    def full_signal_reset(self) -> dict:
+        """Direct-call stub — NOT used in isolated mode.
+
+        In isolated mode the API container calls ``request_full_signal_reset()``
+        (which queues the Redis command), not this method. The stub exists only so
+        single-process paths that call ``engine.full_signal_reset()`` work on both
+        engine types without isinstance checks.
+        """
+        return {
+            "cleared_active_signals": 0,
+            "cleared_history": 0,
+            "cleared_perf_stats": 0,
+            "cleared_invalidation_records": 0,
+            "note": "facade stub — command queued via request_full_signal_reset() in isolated mode",
+        }
+
+    def request_full_signal_reset(self) -> tuple:
+        """Queue a full-signal-reset command to Redis for the engine container.
+
+        Returns (True, message) always — the engine container processes it
+        asynchronously on the next SnapshotWriter cycle (≤15s). The API endpoint
+        should treat 'queued' as success and return a 202-style response.
+        """
+        loop = asyncio.get_running_loop()
+
+        async def _write_cmd() -> None:
+            if self._redis.available:
+                await self._redis.client.set(
+                    _store.KEY_CMD_RESET_SIGNALS, "1", ex=_store.TTL_CMD_RESET
+                )
+            else:
+                log.warning("redis_engine.request_full_signal_reset: Redis unavailable — command lost")
+
+        loop.create_task(_write_cmd())
+        return True, "full signal reset queued (takes effect on next engine cycle, ≤15s)"

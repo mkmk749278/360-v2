@@ -1338,3 +1338,36 @@ class BinanceConnectStatusResponse(BaseModel):
             "enabled AND engine VPS on the list, proven via signed call"
         ),
     )
+
+
+# ---------------------------------------------------------------------------
+# Admin full-signal reset (owner-only) — 2026-06-25
+# ---------------------------------------------------------------------------
+
+
+class SignalResetResponse(BaseModel):
+    """Response shape for ``POST /api/admin/reset-signals``.
+
+    All ``cleared_*`` and ``paper_*`` counts are 0 in isolated mode for
+    the signal-state portion (the engine processes the Redis command
+    asynchronously); ``engine_reset_queued=True`` confirms the command
+    was queued.  Paper-broker counts reflect what the API container
+    processed synchronously.
+    """
+
+    reset_at: str = Field(..., description="ISO-8601 UTC of the reset request")
+    cleared_active_signals: int = Field(0)
+    cleared_history: int = Field(0)
+    cleared_perf_stats: int = Field(0)
+    cleared_invalidation_records: int = Field(0)
+    paper_positions_closed: int = Field(0)
+    paper_pnl_buckets_cleared: int = Field(0)
+    paper_trades_archived: int = Field(0)
+    engine_reset_queued: bool = Field(
+        False,
+        description=(
+            "True in isolated mode — the engine container processes the "
+            "signal-state clear asynchronously (≤15s). False in single-process "
+            "mode where the clear happens synchronously."
+        ),
+    )
