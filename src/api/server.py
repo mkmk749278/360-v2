@@ -106,6 +106,8 @@ from .schemas import (
     ProfileUpdate,
     PulseSnapshot,
     SignalDetail,
+    SignalExpirySetRequest,
+    SignalExpiryState,
     SignalsResponse,
     TelegramOtpIssueRequest,
     TelegramOtpIssueResponse,
@@ -1840,6 +1842,64 @@ def build_app(
                 detail=f"global auto-trade flip failed: {exc}",
             )
         return _auto_trade_global_state()
+
+    # ---- Signal-expiry backstop toggle (ops control plane, 2026-06-26) ----
+    # When disabled (default), signals run to TP/SL only — the max-hold
+    # force-close never fires. Lives on the same kill-switch Firestore doc;
+    # owner-gated flip, GET reports initialised=false when the flag's client
+    # is unbooted (engine then runs on the SIGNAL_EXPIRY_ENABLED env default).
+    def _signal_expiry_state() -> SignalExpiryState:
+        from src.execution import kill_switch as _ks
+        from config import SIGNAL_EXPIRY_ENABLED as _expiry_default
+        if not _ks.is_initialised():
+            # Not booted → reflect the env boot default the monitor is using.
+            return SignalExpiryState(enabled=_expiry_default, initialised=False)
+        try:
+            return SignalExpiryState(
+                enabled=bool(
+                    _ks.get_client().is_signal_expiry_enabled(_expiry_default)
+                ),
+                initialised=True,
+            )
+        except Exception:
+            log.exception("/api/signal-expiry state read failed")
+            return SignalExpiryState(enabled=_expiry_default, initialised=False)
+
+    @app.get(
+        "/api/signal-expiry",
+        response_model=SignalExpiryState,
+        tags=["auto-mode"],
+    )
+    async def signal_expiry_get(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> SignalExpiryState:
+        return _signal_expiry_state()
+
+    @app.post(
+        "/api/signal-expiry",
+        response_model=SignalExpiryState,
+        tags=["auto-mode"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def signal_expiry_set(
+        req: SignalExpirySetRequest,
+    ) -> SignalExpiryState:
+        from src.execution import kill_switch as _ks
+        if not _ks.is_initialised():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="kill switch not initialised (no Firestore/GCP creds)",
+            )
+        try:
+            _ks.get_client().set_signal_expiry_enabled(req.enabled)
+        except Exception as exc:
+            log.exception(
+                "/api/signal-expiry flip failed enabled=%s", req.enabled)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"signal-expiry flip failed: {exc}",
+            )
+        return _signal_expiry_state()
 
     # ---- Paper-trade-visibility endpoints (2026-05-16) ----
     # Registered via register() in paper_trade_routes.py so the

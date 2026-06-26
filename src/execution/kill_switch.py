@@ -51,6 +51,13 @@ _USER_DISABLED_FIELD = "auto_trade_disabled"
 # Firestore doc.  This is the operative blast-radius cap per #431.
 _GLOBAL_ENABLED_FIELD = "auto_trade_globally_enabled"
 
+# Time-based signal-expiry backstop toggle, on the same doc so the ops
+# control plane can flip it live (owner decision 2026-06-26). Absent field →
+# fall back to the SIGNAL_EXPIRY_ENABLED env default. Independent cache slot
+# (NOT folded into the kill-switch combined read) so the safety-critical
+# engaged/enabled read path is untouched.
+_SIGNAL_EXPIRY_FIELD = "signal_expiry_enabled"
+
 # Cache TTL for reads.  5s gives us the B18 "<5s SLA on kill switch
 # flip taking effect" property while keeping Firestore reads minimal.
 _CACHE_TTL_S = 5.0
@@ -106,6 +113,7 @@ class KillSwitchClient:
         self._lock = threading.RLock()
         self._global_cache: Optional[_CachedFlag] = None
         self._user_cache: dict[str, _CachedFlag] = {}
+        self._expiry_cache: Optional[_CachedFlag] = None
         # ``time.monotonic`` injectable for tests so cache-expiry
         # behaviour is testable without ``time.sleep``.
         self._clock = time.monotonic
@@ -267,6 +275,68 @@ class KillSwitchClient:
             merge=True,
         )
 
+    # ---- Signal-expiry backstop toggle (ops control, 2026-06-26) ------
+
+    def is_signal_expiry_enabled(self, default: bool) -> bool:
+        """True if the time-based max-hold signal-expiry backstop is ON.
+
+        When the field is absent from the doc (ops never set it) returns
+        ``default`` — the SIGNAL_EXPIRY_ENABLED env boot default. Cached 5s:
+        this is read on every monitor poll, so it must never hit Firestore
+        per-signal (Cost Discipline). Its own cache slot keeps the
+        safety-critical kill-switch combined read untouched."""
+        with self._lock:
+            cached = self._expiry_cache
+            now = self._clock()
+            if (
+                cached is not None
+                and (now - cached.read_at_monotonic) < _CACHE_TTL_S
+                and cached.enabled_value is not None
+            ):
+                return cached.enabled_value
+            value = self._read_signal_expiry(default)
+            self._expiry_cache = _CachedFlag(
+                value=value, read_at_monotonic=now, enabled_value=value
+            )
+            return value
+
+    def set_signal_expiry_enabled(self, enabled: bool) -> None:
+        """Operator action — flip the signal-expiry backstop. Write-through +
+        cache invalidate so the next monitor poll sees it within one TTL.
+        Survives engine restart."""
+        from datetime import datetime, timezone
+
+        self._db.collection(_GLOBAL_KILL_DOC[0]).document(
+            _GLOBAL_KILL_DOC[1]
+        ).set(
+            {
+                _SIGNAL_EXPIRY_FIELD: enabled,
+                "signal_expiry_enabled_at": datetime.now(timezone.utc),
+            },
+            merge=True,
+        )
+        with self._lock:
+            self._expiry_cache = None
+        log.info(
+            "kill_switch: SIGNAL EXPIRY backstop {}",
+            "ENABLED" if enabled else "DISABLED",
+        )
+
+    def _read_signal_expiry(self, default: bool) -> bool:
+        """One Firestore read for the expiry field. Missing doc / missing
+        field → ``default`` (env boot value)."""
+        doc = (
+            self._db.collection(_GLOBAL_KILL_DOC[0])
+            .document(_GLOBAL_KILL_DOC[1])
+            .get()
+        )
+        if not doc.exists:
+            return default
+        data = doc.to_dict() or {}
+        if _SIGNAL_EXPIRY_FIELD not in data:
+            return default
+        return bool(data.get(_SIGNAL_EXPIRY_FIELD, default))
+
     # ---- Per-user disable ---------------------------------------------
 
     def is_user_disabled(self, firebase_uid: str) -> bool:
@@ -384,6 +454,22 @@ def get_client() -> KillSwitchClient:
                 "kill switch not initialised — call init_kill_switch at boot"
             )
         return _client
+
+
+def signal_expiry_enabled(default: bool) -> bool:
+    """Safe accessor for the trade-monitor hot path. Returns ``default``
+    when the kill switch isn't initialised (single-process mode / tests /
+    no GCP creds), else the cached doc value. Never raises — the monitor
+    must not crash on a missing Firestore client."""
+    with _lock:
+        client = _client
+    if client is None:
+        return default
+    try:
+        return client.is_signal_expiry_enabled(default)
+    except Exception:  # pragma: no cover — defensive: never break the monitor
+        log.exception("signal_expiry_enabled read failed — using default")
+        return default
 
 
 def reset_for_test() -> None:

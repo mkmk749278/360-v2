@@ -1659,6 +1659,17 @@ MAX_SIGNAL_HOLD_SECONDS: Dict[str, int] = {
     "360_SCALP": int(os.getenv("MAX_SCALP_HOLD", "3600")),       # 1 hour
 }
 
+# Time-based signal-expiry backstop. When False (default — owner decision
+# 2026-06-26), the MAX_SIGNAL_HOLD_SECONDS max-hold force-close is DISABLED:
+# signals run to TP or SL only, never expiring mid-move (the data showed
+# signals expiring at small +MFE, surrendering the move). This env is the
+# BOOT DEFAULT / fallback — the live value is toggled from the ops control
+# plane and persisted on the kill-switch doc (signal_expiry_enabled field),
+# read with a 5s cache so the monitor poll never hits Firestore per-signal.
+# NB: the 2h auto-trade reconciler stale-close safety net is unaffected —
+# that backstop stays regardless of this flag.
+SIGNAL_EXPIRY_ENABLED: bool = _safe_bool("SIGNAL_EXPIRY_ENABLED", "false")
+
 # ---------------------------------------------------------------------------
 # Concurrency cap – DEPRECATED: replaced by per-channel cap above.
 # Kept for backwards-compatibility with any external tooling that imports it.
