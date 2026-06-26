@@ -4301,6 +4301,13 @@ class ScalpChannel(BaseChannel):
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
+        # Stamp the validated closed-bar breakout volume ratio so the scorer
+        # scores volume off the squeeze-break candle, not the quiet entry
+        # candle (QUIET-regime entry volume is low by design). Pairs with
+        # QUIET_COMPRESSION_BREAK's membership in _BREAKOUT_SURGE_SETUPS.
+        sig.breakout_volume_ratio = (
+            prior_closed_volume / avg_vol if avg_vol > 0 else 0.0
+        )
         sig.confidence = min(100.0, sig.confidence + 4.0)
         if qcb_htf_penalty > 0.0:
             sig.soft_penalty_total = getattr(sig, "soft_penalty_total", 0.0) + qcb_htf_penalty
@@ -5350,6 +5357,12 @@ class ScalpChannel(BaseChannel):
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
+        # Stamp the validated displacement volume ratio so the scorer scores
+        # volume off the institutional displacement leg (the defining 2.5×
+        # surge), not the modest-volume re-acceleration entry candle. Pairs
+        # with POST_DISPLACEMENT_CONTINUATION's membership in
+        # _BREAKOUT_SURGE_SETUPS.
+        sig.breakout_volume_ratio = disp_vol / avg_vol if avg_vol > 0 else 0.0
 
         # Store the consolidation breakout level so that execution_quality_check()
         # can use it as the structural anchor (rather than falling back to EMA21,
