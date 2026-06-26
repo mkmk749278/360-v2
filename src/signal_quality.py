@@ -1817,6 +1817,9 @@ class SignalScoringEngine:
     # expansion and re-acceleration evidence.
     _FAMILY_BREAKOUT_DISPLACEMENT: frozenset = frozenset({
         "VOLUME_SURGE_BREAKOUT",
+        "BREAKDOWN_SHORT",  # mirror of VSB — was omitted, costing the short
+                            # side up to +6 composite pts vs its long twin
+                            # (the bonus branch is direction-agnostic).
         "POST_DISPLACEMENT_CONTINUATION",
     })
 
@@ -1830,6 +1833,14 @@ class SignalScoringEngine:
         "VOLUME_SURGE_BREAKOUT",
         "BREAKDOWN_SHORT",
         "OPENING_RANGE_BREAKOUT",
+        # PDC + QCB validate a breakout-candle volume surge but were never
+        # enrolled here, so the §3.6a corrections (breakout-candle volume +
+        # neutral regime floor) silently skipped them. Each now stamps
+        # ``breakout_volume_ratio`` in its evaluator so the volume path below
+        # actually receives data (set membership alone is inert without it —
+        # the ORB half-fix trap).
+        "POST_DISPLACEMENT_CONTINUATION",
+        "QUIET_COMPRESSION_BREAK",
     })
 
     # Families not listed above remain on shared base scoring only.
@@ -2262,8 +2273,16 @@ class SignalScoringEngine:
 
         if setup in self._FAMILY_BREAKOUT_DISPLACEMENT:
             breakout_bonus = 0.0
-            if inp.volume_avg_usd > 0 and inp.volume_last_usd > 0:
+            # Prefer the validated breakout-candle ratio (same evidence
+            # _score_volume uses); fall back to the entry candle only when the
+            # evaluator didn't stamp it. Scoring the quiet entry candle here
+            # would dock the bonus on the very pattern the setup is built on.
+            ratio = 0.0
+            if inp.breakout_volume_ratio > 0.0:
+                ratio = inp.breakout_volume_ratio
+            elif inp.volume_avg_usd > 0 and inp.volume_last_usd > 0:
                 ratio = inp.volume_last_usd / inp.volume_avg_usd
+            if ratio > 0.0:
                 if ratio >= 2.0:
                     breakout_bonus += 3.0
                 elif ratio >= 1.5:
