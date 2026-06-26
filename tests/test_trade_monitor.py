@@ -728,13 +728,15 @@ class TestOutcomeRecording:
         assert call_kwargs["hit_sl"] is False
 
     @pytest.mark.asyncio
-    async def test_expired_close_records_outcome_label_as_expired(self):
+    async def test_expired_close_records_outcome_label_as_expired(self, monkeypatch):
         """Companion regression — the expiry path also sets ``sig.status``
         explicitly, so the perf record must round-trip ``EXPIRED``.
         Uses ``age_seconds`` well past any plausible MAX_SIGNAL_HOLD so
         the test isn't fragile to other tests' monkeypatches of that
-        config dict.
+        config dict. Expiry is now opt-in (default OFF — owner 2026-06-26),
+        so force the backstop ON to exercise the expiry path.
         """
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", True)
         sig = _make_signal(
             channel="360_SCALP",
             direction=Direction.LONG,
@@ -946,6 +948,14 @@ class TestTrailingStopAfterTP2:
 class TestSignalExpiry:
     """Auto-expiry: signals older than MAX_SIGNAL_HOLD_SECONDS are closed at market."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_signal_expiry(self, monkeypatch):
+        # The time-based max-hold expiry is now opt-in (default OFF — owner
+        # 2026-06-26: signals run to TP/SL). These tests exercise the expiry
+        # PATH, so force the backstop ON. The kill switch isn't initialised in
+        # unit tests, so the module helper returns this env-default value.
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", True)
+
     def _build_monitor(self, active: Dict[str, Signal]):
         removed = []
         sent = []
@@ -1005,6 +1015,31 @@ class TestSignalExpiry:
             age_seconds=3599.0,  # just under 1 hour
         )
         sig.current_price = 30050.0  # price in range (no TP/SL triggered)
+
+        active = {sig.signal_id: sig}
+        monitor, removed, sent = self._build_monitor(active)
+
+        await monitor._evaluate_signal(sig)
+
+        assert sig.signal_id not in removed
+        assert sig.status != "EXPIRED"
+
+    @pytest.mark.asyncio
+    async def test_aged_signal_not_expired_when_backstop_disabled(self, monkeypatch):
+        """New default (owner 2026-06-26): with the expiry backstop OFF, an
+        aged signal must NOT expire — it runs until TP or SL. Overrides the
+        class autouse fixture that enables expiry for the other cases."""
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", False)
+        sig = _make_signal(
+            channel="360_SCALP",
+            direction=Direction.LONG,
+            entry=30000.0,
+            stop_loss=29850.0,
+            tp1=30150.0,
+            tp2=30300.0,
+            age_seconds=100_000.0,  # ~28h, far past the 3600s hold cap
+        )
+        sig.current_price = 30050.0  # in range — no TP/SL trigger
 
         active = {sig.signal_id: sig}
         monitor, removed, sent = self._build_monitor(active)
@@ -1420,8 +1455,10 @@ class TestSignalQualityPnL:
         assert sig.best_tp_pnl_pct == pytest.approx(1.0)  # (30300 - 30000) / 30000 * 100
 
     @pytest.mark.asyncio
-    async def test_tp1_expiry_signal_quality_uses_tp1_pnl(self):
-        """TP1 hit then signal expires: signal quality uses TP1 PnL, actual uses market price."""
+    async def test_tp1_expiry_signal_quality_uses_tp1_pnl(self, monkeypatch):
+        """TP1 hit then signal expires: signal quality uses TP1 PnL, actual uses market price.
+        Expiry is opt-in (default OFF — owner 2026-06-26), so enable it here."""
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", True)
         sig = _make_signal(
             channel="360_SCALP",
             direction=Direction.LONG,

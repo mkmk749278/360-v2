@@ -362,6 +362,27 @@ class AutoTradeGlobalSetRequest(BaseModel):
     enabled: bool
 
 
+class SignalExpiryState(BaseModel):
+    """Time-based signal-expiry backstop toggle (owner decision 2026-06-26).
+
+    When ``enabled`` is False (default), signals run to TP or SL only — the
+    MAX_SIGNAL_HOLD_SECONDS max-hold force-close is disabled, so a signal
+    never expires mid-move. The 2h auto-trade reconciler stale-close safety
+    net is independent and unaffected. ``initialised`` False = the
+    kill-switch Firestore client (which stores the flag) never booted, so
+    the engine is running on the env boot default.
+    """
+
+    enabled: bool
+    initialised: bool = True
+
+
+class SignalExpirySetRequest(BaseModel):
+    """Owner request to flip the signal-expiry backstop."""
+
+    enabled: bool
+
+
 # ---------------------------------------------------------------------------
 # Agents
 # ---------------------------------------------------------------------------

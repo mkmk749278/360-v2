@@ -30,6 +30,7 @@ from config import (
     MAX_SIGNAL_HOLD_SECONDS,
     MIN_SIGNAL_LIFESPAN_SECONDS,
     MONITOR_POLL_INTERVAL,
+    SIGNAL_EXPIRY_ENABLED,
     PRE_TP_ENABLED,
     INVALIDATION_MODE_DEFAULT,
     INVALIDATION_TRAILING_ARM_RSCALE_ENABLED,
@@ -1450,9 +1451,15 @@ class TradeMonitor:
             )
             return
 
-        # Max hold duration guard – auto-expire signals that have been open too long
+        # Max hold duration guard – auto-expire signals open too long.
+        # Gated by the ops-toggleable signal-expiry backstop (default OFF —
+        # owner decision 2026-06-26): when disabled, signals run to TP/SL only
+        # and never expire mid-move. Read via the kill-switch doc (5s cache),
+        # so no per-signal Firestore hit. The 2h auto-trade reconciler
+        # stale-close safety net is independent and unaffected by this flag.
+        from src.execution import kill_switch as _ks
         max_hold = MAX_SIGNAL_HOLD_SECONDS.get(sig.channel, 86400)
-        if age_secs >= max_hold:
+        if _ks.signal_expiry_enabled(SIGNAL_EXPIRY_ENABLED) and age_secs >= max_hold:
             self._set_realized_pnl(sig, price)
             sig.status = "EXPIRED"
             await self._post_update(sig, "⏰ EXPIRED (max hold time reached)")
