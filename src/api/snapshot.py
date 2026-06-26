@@ -537,6 +537,12 @@ def _signal_to_detail(sig: Any) -> SignalDetail:
         timestamp=timestamp,
         minutes_ago=minutes_ago,
         hold_mins=_hold_mins(dispatch_ts, terminal_ts if status in _TERMINAL_STATUSES else None),
+        # Regime stamps (scanner._populate_signal_context). Surfaced so the
+        # Ops Profit-Lab / combo analyzer can slice by the same entry_regime
+        # the FSM uses to route exits (§3.2b). Empty string when unavailable.
+        entry_regime=str(getattr(sig, "entry_regime", "") or ""),
+        entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
+        market_phase=str(getattr(sig, "market_phase", "") or ""),
     )
 
 
