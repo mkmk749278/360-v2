@@ -119,6 +119,28 @@ class SignalDetail(BaseModel):
             "None when dispatch_timestamp is unavailable."
         ),
     )
+    entry_regime: str = Field(
+        "",
+        description=(
+            "5m regime label stamped on the signal at entry (TRENDING_UP / "
+            "TRENDING_DOWN / RANGING / VOLATILE / QUIET). Empty when the regime "
+            "context was unavailable. Surfaced so analytics (Profit-Lab regime "
+            "breakdown + the combo analyzer, §3.2b regime-per-exit research) can "
+            "slice performance by the same regime the FSM uses to route exits."
+        ),
+    )
+    entry_regime_15m: str = Field(
+        "",
+        description="15m stateless regime label at entry (HTF confirmation for runners).",
+    )
+    market_phase: str = Field(
+        "",
+        description=(
+            "Human-readable regime context at entry "
+            "(e.g. 'TRENDING_UP | ATR%ile=72 | Vol=expanding'). "
+            "Leading token is the regime label."
+        ),
+    )
 
 
 class SignalsResponse(BaseModel):
