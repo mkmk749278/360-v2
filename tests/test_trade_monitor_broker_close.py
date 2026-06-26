@@ -184,10 +184,12 @@ async def test_sl_hit_close_calls_broker_close_full():
     assert kw["current_price"] == pytest.approx(2351.0)
 
 
-async def test_expired_close_calls_broker_close_full():
+async def test_expired_close_calls_broker_close_full(monkeypatch):
     """Max-hold expiry must close the broker position.  Uses an
     age >> any plausible MAX_SIGNAL_HOLD_SECONDS so the test isn't
-    fragile to other tests' monkeypatches of that config dict."""
+    fragile to other tests' monkeypatches of that config dict.
+    Expiry is opt-in (default OFF — owner 2026-06-26), so enable it here."""
+    monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", True)
     om = _enabled_order_manager()
     ds = _data_store_with_candle(high=2370.0, low=2370.0)
     monitor = _build_monitor(order_manager=om, data_store=ds)
