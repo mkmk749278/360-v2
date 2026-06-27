@@ -1214,6 +1214,15 @@ def _surge_smc(with_fvg=True):
 class TestVolumeSurgeBreakoutRefinements:
     """Tests for the refined VOLUME_SURGE_BREAKOUT path."""
 
+    @pytest.fixture(autouse=True)
+    def _disable_mover_freshness(self, monkeypatch):
+        # These fixtures model a breakout in isolation (flat synthetic candles
+        # with no recent impulse leg), so the freshness gate (added 2026-06-26)
+        # would reject them on move_not_fresh. The gate has its own coverage in
+        # test_mover_freshness.py; disable it here so these test the SL/RSI/
+        # volume/telemetry behaviour they were written for.
+        monkeypatch.setattr("src.channels.scalp._MOVER_FRESHNESS_ENABLED", False)
+
     def _call(self, candles, indicators, smc_data, regime="TRENDING_UP"):
         ch = ScalpChannel()
         return ch._evaluate_volume_surge_breakout(
@@ -1636,6 +1645,14 @@ def _breakdown_smc(with_fvg=True):
 
 class TestBreakdownShortRefinements:
     """Tests for the refined BREAKDOWN_SHORT path."""
+
+    @pytest.fixture(autouse=True)
+    def _disable_mover_freshness(self, monkeypatch):
+        # See TestVolumeSurgeBreakoutRefinements: these fixtures model a
+        # breakdown in isolation with no recent impulse, which the freshness
+        # gate (2026-06-26) would reject. Gate is covered in
+        # test_mover_freshness.py; disable here to test the path's own logic.
+        monkeypatch.setattr("src.channels.scalp._MOVER_FRESHNESS_ENABLED", False)
 
     def _call(self, candles, indicators, smc_data, regime="TRENDING_DOWN"):
         ch = ScalpChannel()

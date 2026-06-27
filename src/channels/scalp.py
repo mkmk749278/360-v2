@@ -14,7 +14,7 @@ import os
 import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 
 from config import (
@@ -140,6 +140,34 @@ _BDS_BREAKOUT_SEARCH_WINDOW: int = int(os.getenv("BDS_BREAKOUT_SEARCH_WINDOW", "
 _BDS_SWING_LOOKBACK_START: int = int(os.getenv("BDS_SWING_LOOKBACK_START", "-50"))
 _BDS_SWING_LOOKBACK_END: int = int(os.getenv("BDS_SWING_LOOKBACK_END", "-15"))
 _BDS_PULLBACK_MAX_PCT: float = float(os.getenv("BDS_PULLBACK_MAX_PCT", "1.5"))
+
+# ── Mover-freshness gate (VSB / BDS) ──────────────────────────────────────
+# The mover universe is promoted off a LAGGING 24h |%change|
+# (pair_manager.volatility_24h = abs(priceChangePercent)), so by the time
+# VSB/BDS evaluate, the move is often already mature — the "promote after the
+# move, then fight the exhaustion" failure mode. This gate, applied once the
+# breakout/breakdown candle is found, requires:
+#   (1) RECENCY — the breakout candle is within MAX_BREAKOUT_AGE candles
+#       (default 4 = 20 min on 5m), not a stale ~60-min-old break.
+#   (2) IMPULSE BAND — the recent move INTO the broken level (over LOOKBACK
+#       candles) sits in [MIN_PCT, MAX_PCT]:
+#         • below MIN  → no live momentum: the 24h move is old/stale.
+#         • above MAX  → blow-off / exhausted: entering late into the
+#                        mean-reversion (the BDS oversold-bounce trap; the
+#                        ceiling is the symmetric exhaustion guard for shorts).
+# Applies to VSB/BDS on every pair — a stale or exhausted continuation
+# breakout is a poor entry regardless of how the pair was scanned. Reversible
+# via MOVER_FRESHNESS_ENABLED; reject reasons surface in suppression telemetry.
+# Env-overridable per B8.
+_MOVER_FRESHNESS_ENABLED: bool = os.getenv(
+    "MOVER_FRESHNESS_ENABLED", "true"
+).lower() in ("1", "true", "yes")
+_MOVER_FRESHNESS_LOOKBACK: int = int(os.getenv("MOVER_FRESHNESS_LOOKBACK", "12"))
+_MOVER_FRESHNESS_MIN_PCT: float = float(os.getenv("MOVER_FRESHNESS_MIN_PCT", "1.5"))
+_MOVER_FRESHNESS_MAX_PCT: float = float(os.getenv("MOVER_FRESHNESS_MAX_PCT", "10.0"))
+_MOVER_FRESHNESS_MAX_BREAKOUT_AGE: int = int(
+    os.getenv("MOVER_FRESHNESS_MAX_BREAKOUT_AGE", "4")
+)
 # In fast/volatile regimes the order book can be temporarily thin or skewed by
 # market-maker spread widening.  When the OBI ratio is marginal — present but
 # below the full confirmation threshold — apply a soft penalty rather than
@@ -2181,6 +2209,52 @@ class ScalpChannel(BaseChannel):
         sig.soft_penalty_total = _penalty
         return sig
 
+    def _check_mover_freshness(
+        self,
+        *,
+        closes: Any,
+        swing_level: float,
+        breakout_idx: int,
+        is_long: bool,
+    ) -> Tuple[bool, str]:
+        """Reject stale or exhausted continuation breakouts (VSB/BDS).
+
+        The mover universe is promoted off a lagging 24h |%change|, so these
+        continuation paths often fire on a move that has already played out.
+        This gate keeps entries fresh:
+
+          * breakout recency — the broken-level candle must be within
+            ``_MOVER_FRESHNESS_MAX_BREAKOUT_AGE`` candles, not a ~60-min-old break.
+          * impulse band — the recent move INTO the broken level (over
+            ``_MOVER_FRESHNESS_LOOKBACK`` candles) must sit in
+            [``MIN_PCT``, ``MAX_PCT``]: below MIN = no live momentum (stale
+            24h mover); above MAX = blow-off/exhausted (late entry into the
+            reversal — the short-side oversold-bounce trap).
+
+        Returns ``(ok, reason)``. Fail-open (``True, ""``) when the gate is
+        disabled or there isn't enough history to judge — never blocks on
+        missing data. ``reason`` is a suppression-telemetry tag on rejection.
+        """
+        if not _MOVER_FRESHNESS_ENABLED:
+            return True, ""
+        if abs(int(breakout_idx)) > _MOVER_FRESHNESS_MAX_BREAKOUT_AGE:
+            return False, "breakout_stale"
+        lookback = _MOVER_FRESHNESS_LOOKBACK
+        if closes is None or len(closes) < lookback + 1 or swing_level <= 0:
+            return True, ""  # insufficient history → fail-open
+        past_close = float(closes[-(lookback + 1)])
+        if past_close <= 0:
+            return True, ""
+        if is_long:
+            impulse_pct = (swing_level - past_close) / past_close * 100.0
+        else:
+            impulse_pct = (past_close - swing_level) / past_close * 100.0
+        if impulse_pct < _MOVER_FRESHNESS_MIN_PCT:
+            return False, "move_not_fresh"
+        if impulse_pct > _MOVER_FRESHNESS_MAX_PCT:
+            return False, "move_exhausted"
+        return True, ""
+
     # ------------------------------------------------------------------
     # VOLUME_SURGE_BREAKOUT path
     # Volume surge + pullback to breakout level — fires in volatile/trending markets.
@@ -2293,6 +2367,18 @@ class ScalpChannel(BaseChannel):
 
         if breakout_candle_idx is None:
             return self._reject("breakout_not_found")
+
+        # Freshness gate — reject stale or exhausted breakouts (movers are
+        # promoted off a lagging 24h move, so the breakout we're catching may
+        # already be old or blown-off). See _check_mover_freshness.
+        _fresh_ok, _fresh_reason = self._check_mover_freshness(
+            closes=closes,
+            swing_level=swing_high_level,
+            breakout_idx=breakout_candle_idx,
+            is_long=True,
+        )
+        if not _fresh_ok:
+            return self._reject(_fresh_reason)
 
         # Pullback zone: current close is below the swing high (breakout retest).
         # Lower bound 0.1% ensures a genuine pullback below the broken level.
@@ -2546,6 +2632,18 @@ class ScalpChannel(BaseChannel):
 
         if breakdown_candle_idx is None:
             return self._reject("breakout_not_found")
+
+        # Freshness gate — reject stale or exhausted breakdowns. The MAX-impulse
+        # ceiling is the symmetric oversold-exhaustion guard: don't short a
+        # dump that has already fallen too far (the dead-cat-bounce trap).
+        _fresh_ok, _fresh_reason = self._check_mover_freshness(
+            closes=closes,
+            swing_level=swing_low_level,
+            breakout_idx=breakdown_candle_idx,
+            is_long=False,
+        )
+        if not _fresh_ok:
+            return self._reject(_fresh_reason)
 
         # Dead-cat bounce zone: current close is above the swing low (bounce from breakdown).
         # Lower bound: 0.1% ensures a genuine micro-bounce has occurred above the broken
