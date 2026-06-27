@@ -187,6 +187,7 @@ class SnapshotWriter:
             log.exception("snapshot_writer: failed to write engine_state")
 
     def _build_engine_state(self, task_names: list) -> dict:
+        from src.api.snapshot import collect_pairs_live as _collect_pairs_live
         engine = self._engine
         rm  = getattr(engine, "_risk_manager", None)
         om  = getattr(engine, "_order_manager", None)
@@ -281,6 +282,10 @@ class SnapshotWriter:
             "active_signal_dispatch": active_signal_dispatch,
             "auto_execution_status": auto_status,
             "background_tasks": list(task_names),
+            # Pairs X-ray (regular universe + live mover-promoted) so the ops
+            # Pairs page reflects the engine container's in-memory scanner
+            # state even from the isolated API container.
+            "pairs": _collect_pairs_live(engine),
         }
 
     # ------------------------------------------------------------------
