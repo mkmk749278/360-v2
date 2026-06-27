@@ -615,6 +615,9 @@ class UserStore:
     async def aget_by_firebase_uid(self, firebase_uid: str) -> Optional[User]:
         return await asyncio.to_thread(self.get_by_firebase_uid, firebase_uid)
 
+    async def aget_by_phone(self, phone_e164: str) -> Optional[User]:
+        return await asyncio.to_thread(self.get_by_phone, phone_e164)
+
     async def aget_or_create_by_phone(self, phone_e164: str) -> User:
         return await asyncio.to_thread(self.get_or_create_by_phone, phone_e164)
 
