@@ -17,6 +17,7 @@ from config import (
     TELEGRAM_BOT_TOKEN,
     TELEGRAM_ACTIVE_CHANNEL_ID,
     TOP50_FUTURES_ONLY,
+    MOVER_IGNITION_ENABLED,
 )
 from src.ai_engine import close_shared_session
 from src.binance import BinanceClient
@@ -795,6 +796,8 @@ class Bootstrap:
             await engine._ws_futures.stop()
         if getattr(engine, "_ws_futures_liq", None):
             await engine._ws_futures_liq.stop()
+        if getattr(engine, "_ws_futures_mover", None):
+            await engine._ws_futures_mover.stop()
         try:
             await engine.data_store.save_snapshot()
         except Exception as exc:
@@ -901,6 +904,24 @@ class Bootstrap:
             await engine._ws_futures.start(futures_kline_streams)
         if futures_liq_streams:
             await engine._ws_futures_liq.start(futures_liq_streams)
+
+        # Real-time mover-ignition feed: the single all-market ticker array
+        # stream `!ticker@arr` (every changed symbol, 1/sec) on its own
+        # connection pool so its frame size can't stall klines. Drives the
+        # ignition detector that promotes movers at minute-zero, replacing the
+        # lagging 24h-%change trigger. One stream, no REST, no Firestore.
+        if MOVER_IGNITION_ENABLED:
+            engine._ws_futures_mover = WebSocketManager(
+                engine._on_ws_message,
+                market="futures",
+                admin_alert_callback=None,
+                data_store=engine.data_store,
+                label="futures_mover",
+            )
+            await engine._ws_futures_mover.start(["!ticker@arr"])
+            # Share the pending-ignition dict by reference: the WS handler fills
+            # engine._mover_ignition_pending; the scanner drains it via this alias.
+            engine._scanner.mover_ignition_pending = engine._mover_ignition_pending
 
         # Set critical pairs for REST fallback during WS outages
         top_futures = tier1_futures[:10]
