@@ -4,6 +4,22 @@
 
 ---
 
+## 🟢 SESSION 36 2026-06-27 — Referral/invite-a-friend + manual tier-grant control (merged: 360-v2 #654/#655, lumin-app #106, 360ce-ops #43)
+
+**Two features shipped end-to-end this session, both across multiple repos:**
+
+1. **Referral / invite-a-friend (Phase 1).** Engine-side code generation, claim, and stats API (360-v2 PR #654) + app-side share sheet, repository methods, and onboarding capture (lumin-app PR #106). Both merged.
+
+2. **Manual tier-grant (owner comp for testers/influencers).** Built per owner instruction *after* the referral PRs merged, with a default expiry (no permanent comp via this path):
+   - **360-v2 PR #655** (engine): `GET /api/admin/users/lookup` + `POST /api/admin/grant-tier`, owner-gated (`owner_required` dependency, same as kill-switch/reset-signals). Reuses the existing `UserStore.aset_tier()` write path — the same one the Play Billing verify flow and the `/internal/billing/grant` webhook use, so this is a third caller onto one source of truth, not a parallel entitlement system. `tier` accepts `free` / `assist` / `auto` (the current two-tier automation paywall, B16) — **not** a single legacy "pro" tier; this was caught mid-implementation after pulling 45 commits of upstream drift and correctly rescoped before writing code. `duration_days` defaults to 30, range 1–365; `tier=free` revokes immediately and ignores duration. 11 new tests, full suite 5828 passed.
+   - **360ce-ops PR #43** (ops UI): `EngineApiClient.user_lookup()` / `.grant_tier()`, a new `/control/users` route + template (lookup form → current tier display → grant form with tier/duration/reason), wired into nav next to Control. Same control doctrine as every other write surface here: owner-gated via the static Bearer token, audited via `app/audit.py` (best-effort, non-blocking), PRG + JS confirm before the grant POST. 9 new tests, full suite 232 passed.
+
+**Both judged not owner-sign-off items** (no Position FSM / signing-service / scoring / paid-channel-routing touch) — auto-merged once CI was green and review threads were empty, per the Change-management Protocol.
+
+**Environment note (360ce-ops):** the sandbox this session ran in had a stale dependency set (`itsdangerous` and `python-multipart` missing, wrong `jinja2`/`starlette` versions resolved). Reinstalling from the repo's own `requirements.txt` fixed it — not a code issue, just a reminder that `pip install -r requirements.txt` should be step zero in a fresh container before trusting a red test run.
+
+---
+
 ## 🟢 SESSION 35 2026-06-25 — Mark-price-triggered BE SL shift at +1% MFE (engine, merged PR #646)
 
 **Owner trigger:** simulation in `ops.luminapp.org/profit` showed that signals often move 1%+ in our favour then reverse to the stop, giving back the unrealised gain. With the new TP1/SL-only default (Session 34 PR #645), there is no pre-TP to bank profit early — the loss is taken in full when SL hits.
