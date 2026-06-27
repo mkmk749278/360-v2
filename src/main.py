@@ -637,6 +637,31 @@ class CryptoSignalEngine:
         sig.status = "EXPIRED"
         sig.terminal_outcome_timestamp = now
 
+        # Invalidation-Quality Audit for the EXPIRY path: record the close so
+        # the periodic classifier can later mark it PROTECTIVE / PREMATURE /
+        # NEUTRAL from the post-expiry price action — i.e. *after* expiry, did
+        # price go on to the would-be SL (expiry saved us) or the would-be TP
+        # (expiry surrendered the move). Until now only the thesis-INVALIDATED
+        # path was audited, so we had no ground truth on whether the 60-min
+        # max-hold expiry nets help or hurt. Best-effort: never break the close.
+        try:
+            from src.invalidation_audit import record_invalidation
+            record_invalidation(
+                signal_id=sig.signal_id,
+                symbol=sig.symbol,
+                channel=sig.channel,
+                setup_class=sig.setup_class or "",
+                direction=sig.direction.value,
+                entry=entry,
+                stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
+                kill_price=current_price,
+                kill_reason="expired",
+                pnl_pct_at_kill=float(getattr(sig, "pnl_pct", 0.0) or 0.0),
+            )
+        except Exception as exc:  # noqa: BLE001 — audit must never break the close
+            log.debug("invalidation_audit.record_invalidation failed (expiry) for {}: {}", sig.symbol, exc)
+
         # Archive into _signal_history + persist.  Mirrors the work
         # _remove_and_archive does for trade-monitor-driven closes.
         self._signal_history.append(sig)
