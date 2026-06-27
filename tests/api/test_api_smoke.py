@@ -2574,3 +2574,71 @@ def test_pnl_history_live_mode_stays_engine_wide(
     r = client.get("/api/pnl/history?mode=live&days=7")
     assert r.status_code == 200
     assert r.json()["weekly_pnl_usd"] == 3.30
+
+
+# ---------------------------------------------------------------------------
+# /api/referral (Phase 1: free invite/share tracking, no reward — 2026-06-27)
+# ---------------------------------------------------------------------------
+
+
+def test_referral_me_returns_503_when_unconfigured(engine: _StubEngine) -> None:
+    app = build_app(engine, jwt_secret=_TEST_SECRET, allow_static=False)
+    client = TestClient(app)
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    r = client.get("/api/referral/me")
+    assert r.status_code == 503
+
+
+def test_referral_me_generates_code_and_starts_at_zero(
+    engine, tmp_path,
+) -> None:
+    client, user_store, _store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    r = client.get("/api/referral/me")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body["code"]) == 7
+    assert body["referred_count"] == 0
+    # Stable across repeated calls.
+    r2 = client.get("/api/referral/me")
+    assert r2.json()["code"] == body["code"]
+
+
+def test_referral_claim_success_via_endpoint(engine, tmp_path) -> None:
+    client, user_store, _store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")  # uid=1, referrer
+    user_store.get_or_create_by_phone("+15550000002")  # uid=2, referee
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    code = client.get("/api/referral/me").json()["code"]
+
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(2)}"
+    r = client.post("/api/referral/claim", json={"code": code})
+    assert r.status_code == 200
+    assert r.json() == {"ok": True, "reason": None}
+
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    assert client.get("/api/referral/me").json()["referred_count"] == 1
+
+
+def test_referral_claim_self_referral_rejected_via_endpoint(
+    engine, tmp_path,
+) -> None:
+    client, user_store, _store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    code = client.get("/api/referral/me").json()["code"]
+    r = client.post("/api/referral/claim", json={"code": code})
+    assert r.status_code == 200
+    assert r.json() == {"ok": False, "reason": "self_referral"}
+
+
+def test_referral_claim_unknown_code_rejected_via_endpoint(
+    engine, tmp_path,
+) -> None:
+    client, user_store, _store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    r = client.post("/api/referral/claim", json={"code": "NOSUCH1"})
+    assert r.status_code == 200
+    assert r.json() == {"ok": False, "reason": "invalid_code"}

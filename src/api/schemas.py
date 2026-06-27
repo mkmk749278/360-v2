@@ -777,6 +777,34 @@ class SymbolManagementUpdate(BaseModel):
     )
 
 
+class ReferralStatsResponse(BaseModel):
+    """A user's stable referral code plus how many friends have joined
+    via it. Phase 1: tracking + attribution only, no reward grant."""
+
+    code: str = Field(..., description="This user's stable referral code.")
+    referred_count: int = Field(
+        ..., description="Number of accounts that have redeemed this code."
+    )
+
+
+class ReferralClaimRequest(BaseModel):
+    """A new user redeeming someone else's referral code, typically
+    captured once during onboarding."""
+
+    code: str = Field(..., description="The referral code being redeemed.")
+
+
+class ReferralClaimResponse(BaseModel):
+    """Result of a referral-code redemption attempt."""
+
+    ok: bool = Field(..., description="True if the code was accepted.")
+    reason: Optional[str] = Field(
+        default=None,
+        description="Set when ok=False: 'invalid_code' | 'self_referral' "
+        "| 'already_redeemed'.",
+    )
+
+
 class UserAutoTradeSettings(AutoTradeSettings):
     """Per-user auto-trade overrides — same shape as
     :class:`AutoTradeSettings` plus ``using_defaults`` and auto-pause

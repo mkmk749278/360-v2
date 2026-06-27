@@ -44,6 +44,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import secrets
 import sqlite3
 import threading
 from datetime import datetime, timezone
@@ -257,6 +258,45 @@ CREATE TABLE IF NOT EXISTS user_symbol_management (
 """
 
 _VALID_MANAGEMENT_MODES: FrozenSet[str] = frozenset({"full", "entry"})
+
+# 2026-06-27 — referral tracking (Phase 1: free invite/share + attribution
+# only, no reward grant yet — Phase 2's "1 week free Auto for both" grant
+# is deferred until Play Billing is live and wires off the same
+# ``user_referral_redemptions`` row, see ACTIVE_CONTEXT.md Session 34).
+# One stable code per user, generated lazily on first read. A referee can
+# redeem at most once ever — ``referee_id`` as the PK makes that a DB-level
+# invariant, not just an application check.
+_REFERRAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS user_referral_codes (
+    user_id    INTEGER PRIMARY KEY,
+    code       TEXT    NOT NULL UNIQUE,
+    created_at TEXT    NOT NULL,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS user_referral_redemptions (
+    referee_id  INTEGER PRIMARY KEY,
+    referrer_id INTEGER NOT NULL,
+    code        TEXT    NOT NULL,
+    redeemed_at TEXT    NOT NULL,
+    FOREIGN KEY (referee_id) REFERENCES users(user_id) ON DELETE CASCADE,
+    FOREIGN KEY (referrer_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_referral_redemptions_referrer
+ON user_referral_redemptions(referrer_id);
+"""
+
+# Unambiguous alphabet — excludes 0/O and 1/I so a code read aloud or typed
+# by hand from a share-sheet message doesn't bounce on lookalike characters.
+_REFERRAL_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
+_REFERRAL_CODE_LENGTH = 7
+_REFERRAL_CODE_MAX_ATTEMPTS = 10
+
+
+def _generate_referral_code() -> str:
+    return "".join(
+        secrets.choice(_REFERRAL_CODE_ALPHABET)
+        for _ in range(_REFERRAL_CODE_LENGTH)
+    )
 
 
 def _now_iso() -> str:
@@ -478,7 +518,7 @@ class UserOverridesStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(
             _PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA
-            + _SYMBOL_MGMT_SCHEMA
+            + _SYMBOL_MGMT_SCHEMA + _REFERRAL_SCHEMA
         )
         self._migrate_pretp_grab_fraction()
         self._migrate_pretp_protect_manual_entries()
@@ -946,6 +986,108 @@ class UserOverridesStore:
                 )
             return self.get_symbol_management_map(user_id)
 
+    # ---- referrals (Phase 1: free invite/share tracking, no reward) -----
+
+    def get_or_create_referral_code(self, user_id: int) -> str:
+        """Return the user's stable referral code, generating one on first
+        call. Codes are immutable once issued — re-calling for the same
+        user always returns the same code."""
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT code FROM user_referral_codes WHERE user_id = ?",
+                (int(user_id),),
+            )
+            row = cur.fetchone()
+            if row is not None:
+                return row["code"]
+            now = _now_iso()
+            for _ in range(_REFERRAL_CODE_MAX_ATTEMPTS):
+                code = _generate_referral_code()
+                try:
+                    self._conn.execute(
+                        "INSERT INTO user_referral_codes "
+                        "(user_id, code, created_at) VALUES (?, ?, ?)",
+                        (int(user_id), code, now),
+                    )
+                    return code
+                except sqlite3.IntegrityError:
+                    # Either the 7-char/33-symbol code collided (rare) or a
+                    # concurrent call for this same user_id raced us — check
+                    # for the latter before retrying with a fresh code.
+                    cur = self._conn.execute(
+                        "SELECT code FROM user_referral_codes WHERE user_id = ?",
+                        (int(user_id),),
+                    )
+                    row = cur.fetchone()
+                    if row is not None:
+                        return row["code"]
+                    continue
+            raise RuntimeError(
+                "failed to generate a unique referral code after "
+                f"{_REFERRAL_CODE_MAX_ATTEMPTS} attempts"
+            )
+
+    def get_referral_stats(self, user_id: int) -> Dict[str, Any]:
+        """Return this user's code plus how many friends have joined via it.
+        Generates the code lazily if the user has never opened the invite
+        screen before, so this is always safe to call."""
+        code = self.get_or_create_referral_code(user_id)
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM user_referral_redemptions "
+                "WHERE referrer_id = ?",
+                (int(user_id),),
+            )
+            count = int(cur.fetchone()["n"])
+        return {"code": code, "referred_count": count}
+
+    def redeem_referral_code(self, user_id: int, code: str) -> Dict[str, Any]:
+        """Record that ``user_id`` joined via ``code``. Phase 1 grants no
+        reward — this only feeds the referrer's "X friends joined" counter
+        (Phase 2 wires the 1-week-free-Auto grant on top of this same
+        redemption record once Play Billing is live).
+
+        Rejects an unknown code, a self-referral, and a referee who has
+        already redeemed any code (first redemption is final — enforced
+        at the DB layer by ``referee_id`` being the table's PK).
+        """
+        token = (code or "").strip().upper()
+        if not token:
+            return {"ok": False, "reason": "invalid_code"}
+        with self._lock:
+            cur = self._conn.execute(
+                "SELECT user_id FROM user_referral_codes WHERE code = ?",
+                (token,),
+            )
+            row = cur.fetchone()
+            if row is None:
+                return {"ok": False, "reason": "invalid_code"}
+            referrer_id = int(row["user_id"])
+            if referrer_id == int(user_id):
+                return {"ok": False, "reason": "self_referral"}
+            cur = self._conn.execute(
+                "SELECT referrer_id FROM user_referral_redemptions "
+                "WHERE referee_id = ?",
+                (int(user_id),),
+            )
+            if cur.fetchone() is not None:
+                return {"ok": False, "reason": "already_redeemed"}
+            now = _now_iso()
+            try:
+                self._conn.execute(
+                    "INSERT INTO user_referral_redemptions "
+                    "(referee_id, referrer_id, code, redeemed_at) "
+                    "VALUES (?, ?, ?, ?)",
+                    (int(user_id), referrer_id, token, now),
+                )
+            except sqlite3.IntegrityError:
+                return {"ok": False, "reason": "already_redeemed"}
+            log.info(
+                "user_overrides.redeem_referral_code referee_id={} "
+                "referrer_id={} code={}", user_id, referrer_id, token,
+            )
+            return {"ok": True, "referrer_id": referrer_id}
+
     # ---- paper subscription windows -------------------------------------
 
     def _open_paper_subscription_locked(self, user_id: int, now: str) -> str:
@@ -1207,6 +1349,14 @@ class UserOverridesStore:
         return await asyncio.to_thread(
             self.set_symbol_management, user_id, symbol, mode
         )
+
+    async def aget_referral_stats(self, user_id: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.get_referral_stats, user_id)
+
+    async def aredeem_referral_code(
+        self, user_id: int, code: str
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.redeem_referral_code, user_id, code)
 
     def close(self) -> None:
         with self._lock:
