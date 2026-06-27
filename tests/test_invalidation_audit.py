@@ -48,6 +48,44 @@ def test_categorise_kill_reason_falls_through_to_other():
     assert categorise_kill_reason(None) == "other"  # type: ignore[arg-type]
 
 
+def test_categorise_kill_reason_recognises_expiry():
+    # The 60-min max-hold expiry must be its own family so the EV ablation can
+    # answer "does expiry net help?" separately from thesis kills.
+    assert categorise_kill_reason("expired") == "expired"
+    assert categorise_kill_reason("EXPIRED (max hold time reached)") == "expired"
+
+
+def test_record_invalidation_buckets_expiry_and_stays_classifiable(tmp_path):
+    """An expiry close lands in the audit as the `expired` family and remains
+    pending classification — so the periodic classifier can later judge whether,
+    after expiry, price went to the would-be SL (protective) or TP (premature)."""
+    storage = tmp_path / "audit.json"
+    rec = record_invalidation(
+        signal_id="SIG-EXP",
+        symbol="BTCUSDT",
+        channel="360_SCALP",
+        setup_class="SR_FLIP_RETEST",
+        direction="LONG",
+        entry=100.0,
+        stop_loss=99.0,
+        tp1=101.0,
+        kill_price=100.2,
+        kill_reason="expired",
+        pnl_pct_at_kill=0.2,
+        storage_path=str(storage),
+    )
+    assert isinstance(rec, InvalidationRecord)
+    assert rec.kill_reason_family == "expired"
+    # Post-expiry the price would have reached TP1 → expiry was PREMATURE
+    # (it surrendered a winner). This is the exact "did expiry help?" verdict.
+    label = classify_record(
+        {"direction": "LONG", "entry": 100.0, "stop_loss": 99.0, "tp1": 101.0,
+         "sl_distance": 1.0},
+        post_kill_high=101.4, post_kill_low=99.9, post_kill_close=101.1,
+    )
+    assert label == "PREMATURE"
+
+
 # ────────────────────────────────────────────────────────────────────────
 # classify_record — pure function, the heart of the audit.
 # ────────────────────────────────────────────────────────────────────────

@@ -115,6 +115,10 @@ def categorise_kill_reason(reason: str) -> str:
         return "regime_shift"
     if "ema" in text and "crossover" in text:
         return "ema_crossover"
+    # Time-based max-hold expiry — its own family so the EV ablation answers
+    # "does the 60-min expiry net help?" separately from thesis kills.
+    if "expired" in text:
+        return "expired"
     return "other"
 
 
