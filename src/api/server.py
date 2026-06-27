@@ -1927,6 +1927,14 @@ def build_app(
         owner_required=owner_required,
     )
 
+    # ---- Admin manual tier grant (owner-only comp, ops control plane) ----
+    from . import admin_grant_route as _admin_grant_route
+    _admin_grant_route.register(
+        app,
+        user_store=user_store,
+        owner_required=owner_required,
+    )
+
     # ---- Binance connect flow (server-side execution, B18 + §3.9) ----
     # Registers POST /api/binance/connect.  Validates the user's
     # Binance key against B18 rules (withdraw=off, futures=on,

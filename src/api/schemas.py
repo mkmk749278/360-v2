@@ -977,6 +977,50 @@ class BillingGrantResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Admin manual tier grant (owner-only comp, ops dashboard control plane)
+# ---------------------------------------------------------------------------
+
+
+class AdminUserLookupResponse(BaseModel):
+    """Response of ``GET /api/admin/users/lookup`` — what the ops UI shows
+    before the owner decides whether/what to grant."""
+
+    user_id: int
+    phone: str
+    tier: str
+    paid_until: Optional[str] = None
+    display_name: Optional[str] = None
+    onboarded: bool
+
+
+class AdminGrantTierRequest(BaseModel):
+    """Body of ``POST /api/admin/grant-tier``.
+
+    Owner-only manual comp (tester, influencer, goodwill gesture) — not a
+    Play Billing purchase.  Every grant carries an expiry: there is no
+    permanent comp via this endpoint, only a renewable one (call again
+    before expiry to extend).  ``tier=free`` revokes any active grant
+    immediately and ``duration_days`` is ignored in that case.
+    """
+
+    phone: str = Field(..., min_length=8, max_length=18)
+    tier: Literal["free", "assist", "auto"]
+    duration_days: int = Field(
+        default=30, ge=1, le=365,
+        description="Grant expires this many days from now. Ignored when tier=free.",
+    )
+    reason: Optional[str] = Field(default=None, max_length=200)
+
+
+class AdminGrantTierResponse(BaseModel):
+    ok: bool
+    user_id: int
+    phone: str
+    tier: str
+    paid_until: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
 # Google Play Billing (B16 — in-app subscription purchase path)
 # ---------------------------------------------------------------------------
 
