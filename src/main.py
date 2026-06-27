@@ -52,6 +52,7 @@ from src.performance_tracker import PerformanceTracker
 from src.predictive_ai import PredictiveEngine
 from src.regime import RegimeService
 from src.scanner import Scanner
+from src.mover_ignition import MoverIgnitionDetector
 from src.signal_history_backfill import (
     backfill_from_legacy_sources,
     reconcile_invalidation_status,
@@ -78,6 +79,15 @@ from src.state_cache import StateCache
 from src.scheduler import ContentScheduler
 from src.free_watch_service import FreeWatchService
 from config import (
+    MOVER_IGNITION_ENABLED,
+    MOVER_IGNITION_WINDOW_SEC,
+    MOVER_IGNITION_MOVE_FLOOR_PCT,
+    MOVER_IGNITION_BURST_MULT,
+    MOVER_IGNITION_MIN_NOTIONAL_USD,
+    MOVER_IGNITION_COOLDOWN_SEC,
+    MOVER_IGNITION_BASELINE_ALPHA,
+    MOVER_IGNITION_MIN_BASELINE_SAMPLES,
+    MOVER_IGNITION_MAX_GAP_SEC,
     CIRCUIT_BREAKER_MAX_CONSECUTIVE_SL,
     CIRCUIT_BREAKER_MAX_HOURLY_SL,
     CIRCUIT_BREAKER_MAX_DAILY_DRAWDOWN_PCT,
@@ -349,6 +359,29 @@ class CryptoSignalEngine:
         # their own connection pool so that liquidation floods during Extreme
         # Fear events cannot stall the kline WebSocket connections.
         self._ws_futures_liq: Optional[WebSocketManager] = None
+        # Dedicated all-market ticker WebSocket manager — the high-throughput
+        # `!ticker@arr` stream (every changed symbol, 1/sec) runs in its own
+        # connection pool so its frame size cannot stall the kline connections,
+        # mirroring the liquidation-pool separation above.
+        self._ws_futures_mover: Optional[WebSocketManager] = None
+        # Real-time mover-ignition detector — folds `!ticker@arr` frames and
+        # surfaces pairs igniting *now*; drained by the scanner each cycle to
+        # promote them (replaces the lagging 24h-%change trigger). Pure in-memory.
+        self._mover_ignition = MoverIgnitionDetector(
+            enabled=MOVER_IGNITION_ENABLED,
+            window_sec=MOVER_IGNITION_WINDOW_SEC,
+            move_floor_pct=MOVER_IGNITION_MOVE_FLOOR_PCT,
+            burst_mult=MOVER_IGNITION_BURST_MULT,
+            min_window_notional_usd=MOVER_IGNITION_MIN_NOTIONAL_USD,
+            cooldown_sec=MOVER_IGNITION_COOLDOWN_SEC,
+            baseline_alpha=MOVER_IGNITION_BASELINE_ALPHA,
+            min_baseline_samples=MOVER_IGNITION_MIN_BASELINE_SAMPLES,
+            max_gap_sec=MOVER_IGNITION_MAX_GAP_SEC,
+        )
+        # Ignited (symbol → direction) awaiting promotion; the scanner drains
+        # this at the top of each scan cycle. Shared by reference with the
+        # scanner so the WS handler stays a cheap producer.
+        self._mover_ignition_pending: Dict[str, str] = {}
         # Buffer for incoming forceOrder events — drained at the top of each
         # scan cycle so that processing is never inline on the WS message loop.
         self._pending_liquidations: Deque[LiquidationEvent] = collections.deque()
@@ -1100,6 +1133,17 @@ class CryptoSignalEngine:
         present, ``data["data"]`` is the raw payload; otherwise ``data``
         IS the raw payload.
         """
+        # All-market ticker array (`!ticker@arr`) — the only stream whose
+        # combined-wrapper ``data`` is a *list*, not a dict. Fold it into the
+        # mover-ignition detector and enqueue any newly-ignited pairs for the
+        # scanner to promote. Kept deliberately cheap (pure arithmetic, no I/O)
+        # since it fires once per second across the whole universe.
+        if isinstance(data, dict) and isinstance(data.get("data"), list) and "stream" in data:
+            ignited = self._mover_ignition.ingest(data["data"])
+            for sym, direction in ignited:
+                self._mover_ignition_pending[sym] = direction
+            return
+
         # Combined-stream wrapper unwrap.  ``data.get("data")`` is a dict
         # for genuine wrapped events; we sanity-check both keys to avoid
         # mistaking a kline payload (which has no top-level ``stream``)

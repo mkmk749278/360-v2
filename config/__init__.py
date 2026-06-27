@@ -608,6 +608,34 @@ MOVER_PROMOTION_MIN_VOLUME_USD: float = _safe_float("MOVER_PROMOTION_MIN_VOLUME"
 #: How many scan cycles a movers-promoted pair stays in the scan universe.
 MOVER_PROMOTION_CYCLES: int = _safe_int("MOVER_PROMOTION_CYCLES", "5")
 
+# ── Real-time mover IGNITION detector (catch movers at minute-zero) ───────────
+# Replaces the lagging 24h-%change promotion trigger with a real-time signal off
+# the `!ticker@arr` all-market futures stream: a short-window price move + a
+# trade-rate burst vs the pair's own baseline + a min traded notional. When
+# enabled, `_update_movers_promotion` promotes ignited pairs INSTEAD of the
+# `MOVER_PROMOTION_MIN_PCT` 24h candidates; flip off to fall back to the 24h
+# path. Pure in-memory arithmetic over a stream we already receive — no REST,
+# no Firestore (Cost Discipline). See `src/mover_ignition.py`.
+MOVER_IGNITION_ENABLED: bool = _safe_bool("MOVER_IGNITION_ENABLED", "true")
+#: Trailing window (seconds) over which the price move and trade-rate are measured.
+#: A burst is the window-averaged rate ÷ baseline, so it requires a *sustained*
+#: surge (not a single-frame spike) — shorter window ⇒ earlier, noisier catch.
+MOVER_IGNITION_WINDOW_SEC: float = _safe_float("MOVER_IGNITION_WINDOW_SEC", "30")
+#: Minimum |price move| % within the window to count as a live move.
+MOVER_IGNITION_MOVE_FLOOR_PCT: float = _safe_float("MOVER_IGNITION_MOVE_FLOOR_PCT", "1.0")
+#: Trade-rate burst (window rate ÷ EWMA baseline) required — real-time RVOL.
+MOVER_IGNITION_BURST_MULT: float = _safe_float("MOVER_IGNITION_BURST_MULT", "3.0")
+#: Minimum traded quote notional (USD) within the window — filters micro-caps.
+MOVER_IGNITION_MIN_NOTIONAL_USD: float = _safe_float("MOVER_IGNITION_MIN_NOTIONAL_USD", "100000")
+#: Seconds a pair will not re-ignite after firing (avoids re-promote thrash).
+MOVER_IGNITION_COOLDOWN_SEC: float = _safe_float("MOVER_IGNITION_COOLDOWN_SEC", "1800")
+#: EWMA smoothing for the trade-rate baseline (small = slow/stable baseline).
+MOVER_IGNITION_BASELINE_ALPHA: float = _safe_float("MOVER_IGNITION_BASELINE_ALPHA", "0.02")
+#: Samples folded into the baseline before a burst is trusted (warmup gate).
+MOVER_IGNITION_MIN_BASELINE_SAMPLES: int = _safe_int("MOVER_IGNITION_MIN_BASELINE_SAMPLES", "30")
+#: Inter-frame gap (seconds) beyond which per-symbol state is reset, not measured.
+MOVER_IGNITION_MAX_GAP_SEC: float = _safe_float("MOVER_IGNITION_MAX_GAP_SEC", "30")
+
 # ── MOVER_TREND_PULLBACK path (Session 29, owner-approved) ────────────────────
 # A continuation path for promoted movers: once a mover is MA-stacked, enter each
 # pullback that tags the fast MA and reclaims in the trend direction.  VSB/BDS

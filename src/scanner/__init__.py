@@ -1077,6 +1077,12 @@ class Scanner:
         # 2026-05-14: ws_spot removed — engine is futures-only per CLAUDE.md.
         self.ws_futures: Optional[Any] = None
 
+        # Real-time mover-ignition queue (set after boot) — a shared
+        # ``{symbol: direction}`` dict the WS handler fills and
+        # ``_update_movers_promotion`` drains each cycle. ``None`` ⇒ the
+        # ignition path is not wired (falls back to the 24h-%change trigger).
+        self.mover_ignition_pending: Optional[Dict[str, str]] = None
+
         # Optional circuit breaker (set after construction)
         self.circuit_breaker: Optional[Any] = None
 
@@ -1643,11 +1649,16 @@ class Scanner:
         return True
 
     async def _update_movers_promotion(self, sorted_pairs_set: set) -> List[str]:
-        """Promote non-scanned pairs with extreme 24h % change into the scan universe.
+        """Promote non-scanned pairs that are *igniting now* into the scan universe.
 
-        Only VSB (_evaluate_volume_surge_breakout) and BREAKDOWN_SHORT
-        (_evaluate_breakdown_short) run on mover-promoted pairs — all other
-        evaluators are skipped via allowed_evaluators in _get_channel_candidate.
+        Primary path (``mover_ignition_pending`` wired ⇒ ``MOVER_IGNITION_ENABLED``):
+        candidates are drained from the real-time ignition queue the WS handler
+        fills off ``!ticker@arr`` — a pair is promoted at minute-zero of its
+        move, so VSB/BDS/MOVER_TREND_PULLBACK enter while the move is fresh
+        rather than fighting an already-spent 24h leaderboard mover.
+
+        Fallback path (ignition off): the legacy lagging 24h-%change trigger
+        (``volatility_24h >= MOVER_PROMOTION_MIN_PCT``).
 
         Newly-promoted symbols are REST-seeded (candles + CVD) before being
         added to the active set; pairs that fail to seed are skipped so we
@@ -1656,18 +1667,45 @@ class Scanner:
         Returns the list of currently mover-promoted symbols.
         """
         candidates: List[tuple[str, Any]] = []
-        for symbol, info in list(self.pair_mgr.pairs.items()):
-            if symbol in sorted_pairs_set:
-                # Already in main scan — all 14 evaluators run normally; no restriction.
+        ignition_dirs: Dict[str, str] = {}
+        pending = self.mover_ignition_pending
+        if pending is not None:
+            # Real-time ignition path — promote pairs accelerating *now*.
+            drained = dict(pending)
+            pending.clear()
+            for symbol, direction in drained.items():
+                if symbol in sorted_pairs_set:
+                    # Already in the main scan — all evaluators run; nothing to do.
+                    if symbol in self._mover_promoted_pairs:
+                        del self._mover_promoted_pairs[symbol]
+                    continue
                 if symbol in self._mover_promoted_pairs:
-                    del self._mover_promoted_pairs[symbol]
-                continue
-            if (
-                info.volatility_24h >= MOVER_PROMOTION_MIN_PCT
-                and info.volume_24h_usd >= MOVER_PROMOTION_MIN_VOLUME_USD
-                and symbol not in self._mover_promoted_pairs
-            ):
+                    continue
+                info = self.pair_mgr.pairs.get(symbol)
+                # Liquidity floor still applies — the detector's notional gate is
+                # per-window; this rejects pairs whose 24h book is too thin.
+                if info is None or info.volume_24h_usd < MOVER_PROMOTION_MIN_VOLUME_USD:
+                    continue
+                ignition_dirs[symbol] = direction
                 candidates.append((symbol, info))
+            # Evict promotions that have since entered the main scan.
+            for symbol in list(self._mover_promoted_pairs.keys()):
+                if symbol in sorted_pairs_set:
+                    del self._mover_promoted_pairs[symbol]
+        else:
+            # Fallback — legacy 24h-%change leaderboard trigger.
+            for symbol, info in list(self.pair_mgr.pairs.items()):
+                if symbol in sorted_pairs_set:
+                    # Already in main scan — all evaluators run normally; no restriction.
+                    if symbol in self._mover_promoted_pairs:
+                        del self._mover_promoted_pairs[symbol]
+                    continue
+                if (
+                    info.volatility_24h >= MOVER_PROMOTION_MIN_PCT
+                    and info.volume_24h_usd >= MOVER_PROMOTION_MIN_VOLUME_USD
+                    and symbol not in self._mover_promoted_pairs
+                ):
+                    candidates.append((symbol, info))
 
         if candidates:
             seed_results = await asyncio.gather(
@@ -1677,10 +1715,16 @@ class Scanner:
             for (symbol, info), seeded in zip(candidates, seed_results):
                 if not seeded:
                     continue
-                log.info(
-                    "📈 MOVER PROMOTION: {} {:.1f}% vol={:.0f} — VSB/BREAKDOWN scan for {} cycles",
-                    symbol, info.volatility_24h, info.volume_24h_usd, MOVER_PROMOTION_CYCLES,
-                )
+                if symbol in ignition_dirs:
+                    log.info(
+                        "🔥 MOVER IGNITION: {} {} vol={:.0f} — VSB/BREAKDOWN scan for {} cycles",
+                        symbol, ignition_dirs[symbol], info.volume_24h_usd, MOVER_PROMOTION_CYCLES,
+                    )
+                else:
+                    log.info(
+                        "📈 MOVER PROMOTION: {} {:.1f}% vol={:.0f} — VSB/BREAKDOWN scan for {} cycles",
+                        symbol, info.volatility_24h, info.volume_24h_usd, MOVER_PROMOTION_CYCLES,
+                    )
                 self._mover_promoted_pairs[symbol] = MOVER_PROMOTION_CYCLES
 
         # Decrement cycle counters; evict expired promotions
