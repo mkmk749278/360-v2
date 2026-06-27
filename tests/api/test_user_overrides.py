@@ -1299,3 +1299,97 @@ def test_resolve_invalidation_mode_uid_tight_via_shared_db(
         _uo.clear_singleton()
         _users.set_singleton(None)
         user_store.close()
+
+
+# ---------------------------------------------------------------------------
+# Referrals (Phase 1: free invite/share tracking, no reward — 2026-06-27)
+# ---------------------------------------------------------------------------
+
+
+def test_referral_code_generated_lazily_and_stable(
+    store: UserOverridesStore,
+) -> None:
+    code1 = store.get_or_create_referral_code(1)
+    assert len(code1) == 7
+    code2 = store.get_or_create_referral_code(1)
+    assert code1 == code2
+
+
+def test_referral_code_distinct_per_user(store: UserOverridesStore) -> None:
+    code1 = store.get_or_create_referral_code(1)
+    code2 = store.get_or_create_referral_code(2)
+    assert code1 != code2
+
+
+def test_referral_stats_zero_for_fresh_code(store: UserOverridesStore) -> None:
+    stats = store.get_referral_stats(1)
+    assert stats["referred_count"] == 0
+    assert len(stats["code"]) == 7
+
+
+def test_referral_claim_success_increments_referrer_count(
+    store: UserOverridesStore,
+) -> None:
+    code = store.get_or_create_referral_code(1)
+    result = store.redeem_referral_code(2, code)
+    assert result == {"ok": True, "referrer_id": 1}
+    assert store.get_referral_stats(1)["referred_count"] == 1
+
+
+def test_referral_claim_unknown_code_rejected(store: UserOverridesStore) -> None:
+    result = store.redeem_referral_code(2, "NOSUCH1")
+    assert result == {"ok": False, "reason": "invalid_code"}
+
+
+def test_referral_claim_self_referral_rejected(store: UserOverridesStore) -> None:
+    code = store.get_or_create_referral_code(1)
+    result = store.redeem_referral_code(1, code)
+    assert result == {"ok": False, "reason": "self_referral"}
+
+
+def test_referral_claim_double_redemption_rejected(
+    store: UserOverridesStore, db_path,
+) -> None:
+    """First redemption wins — a referee can never redeem a second code,
+    even a different one, even from a different referrer."""
+    from src.api.users import UserStore
+
+    extra = UserStore(db_path)
+    user3 = extra.get_or_create_by_phone("+15550000003")  # user_id=3
+    extra.close()
+
+    code1 = store.get_or_create_referral_code(1)
+    code2 = store.get_or_create_referral_code(2)
+    assert store.redeem_referral_code(user3.user_id, code1) == {
+        "ok": True, "referrer_id": 1,
+    }
+    assert store.redeem_referral_code(user3.user_id, code2) == {
+        "ok": False, "reason": "already_redeemed",
+    }
+    # Re-claiming the SAME code again is also rejected, not double-counted.
+    assert store.redeem_referral_code(user3.user_id, code1) == {
+        "ok": False, "reason": "already_redeemed",
+    }
+    assert store.get_referral_stats(1)["referred_count"] == 1
+
+
+def test_referral_claim_lowercase_and_whitespace_normalised(
+    store: UserOverridesStore,
+) -> None:
+    code = store.get_or_create_referral_code(1)
+    result = store.redeem_referral_code(2, f"  {code.lower()}  ")
+    assert result == {"ok": True, "referrer_id": 1}
+
+
+def test_referral_code_round_trip_across_reopen(db_path) -> None:
+    s1 = UserOverridesStore(db_path)
+    code = s1.get_or_create_referral_code(1)
+    s1.redeem_referral_code(2, code)
+    s1.close()
+
+    s2 = UserOverridesStore(db_path)
+    try:
+        assert s2.get_or_create_referral_code(1) == code
+        assert s2.get_referral_stats(1)["referred_count"] == 1
+    finally:
+        s2.close()

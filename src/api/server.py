@@ -105,6 +105,9 @@ from .schemas import (
     ProfileResponse,
     ProfileUpdate,
     PulseSnapshot,
+    ReferralClaimRequest,
+    ReferralClaimResponse,
+    ReferralStatsResponse,
     SignalDetail,
     SignalExpirySetRequest,
     SignalExpiryState,
@@ -2440,6 +2443,51 @@ def build_app(
         uid = _resolve_user_id(identity)
         return await user_overrides.aset_symbol_management(
             uid, payload.symbol, payload.mode,
+        )
+
+    # ---- Referrals (Phase 1: free invite/share tracking, no reward) ----
+
+    @app.get(
+        "/api/referral/me",
+        response_model=ReferralStatsResponse,
+        tags=["referral"],
+    )
+    async def referral_me(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> ReferralStatsResponse:
+        """Return this user's stable referral code plus how many friends
+        have joined via it. Generates the code on first call."""
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(identity)
+        stats = await user_overrides.aget_referral_stats(uid)
+        return ReferralStatsResponse(**stats)
+
+    @app.post(
+        "/api/referral/claim",
+        response_model=ReferralClaimResponse,
+        tags=["referral"],
+    )
+    async def referral_claim(
+        payload: ReferralClaimRequest,
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> ReferralClaimResponse:
+        """Redeem someone else's referral code. Phase 1 grants no reward —
+        this only attributes the join to the referrer's counter. Rejects
+        an unknown code, self-referral, and a referee who has already
+        redeemed any code (first redemption is final)."""
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        uid = _resolve_user_id(identity)
+        result = await user_overrides.aredeem_referral_code(uid, payload.code)
+        return ReferralClaimResponse(
+            ok=result["ok"], reason=result.get("reason"),
         )
 
     # ---- Agents ----
