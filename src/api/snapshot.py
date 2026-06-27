@@ -1490,3 +1490,74 @@ def build_agents(engine: Any) -> List[AgentStat]:
             )
         )
     return items
+
+
+# ---------------------------------------------------------------------------
+# Pairs view — regular (scanned universe) + promoting (live mover-promoted).
+# Diagnostic for "are the promoting pairs actually updating?" — surfaced on the
+# ops Pairs page. Built live from pair_mgr + scanner in single-process; in
+# isolated mode the engine writes the same payload into engine_state and the
+# facade replays it (see RedisEngineFacade.published_pairs).
+# ---------------------------------------------------------------------------
+
+
+def collect_pairs_live(engine: Any) -> Dict[str, Any]:
+    """Build the pairs payload directly from the live engine objects.
+
+    ``regular`` = the scanned universe (pair_mgr.pairs) with tier + 24h volume
+    and 24h % change. ``promoting`` = the scanner's currently mover-promoted
+    pairs with cycles-remaining, enriched with the same volume/change. Both are
+    plain dicts so the payload round-trips through Redis unchanged.
+    """
+    regular: List[Dict[str, Any]] = []
+    promoting: List[Dict[str, Any]] = []
+
+    pair_mgr = getattr(engine, "pair_mgr", None)
+    pairs = getattr(pair_mgr, "pairs", None) if pair_mgr is not None else None
+    if isinstance(pairs, dict):
+        for sym, info in pairs.items():
+            tier = getattr(info, "tier", None)
+            regular.append({
+                "symbol": sym,
+                "tier": getattr(tier, "value", str(tier)) if tier is not None else "?",
+                "volume_24h_usd": float(getattr(info, "volume_24h_usd", 0.0) or 0.0),
+                "change_24h_pct": float(getattr(info, "volatility_24h", 0.0) or 0.0),
+            })
+        regular.sort(key=lambda r: (r["tier"], -r["volume_24h_usd"]))
+
+    scanner = getattr(engine, "_scanner", None)
+    promoted = getattr(scanner, "_mover_promoted_pairs", None) if scanner is not None else None
+    if isinstance(promoted, dict):
+        lookup = {r["symbol"]: r for r in regular}
+        for sym, cycles in promoted.items():
+            base = lookup.get(sym, {})
+            promoting.append({
+                "symbol": sym,
+                "cycles_left": int(cycles or 0),
+                "volume_24h_usd": float(base.get("volume_24h_usd", 0.0) or 0.0),
+                "change_24h_pct": float(base.get("change_24h_pct", 0.0) or 0.0),
+            })
+        promoting.sort(key=lambda r: -r["cycles_left"])
+
+    return {
+        "regular": regular,
+        "promoting": promoting,
+        "regular_count": len(regular),
+        "promoting_count": len(promoting),
+        "updated_at": datetime.now(timezone.utc).isoformat(),
+    }
+
+
+def build_pairs(engine: Any) -> Dict[str, Any]:
+    """Pairs payload for ``/api/pairs`` — works in both process modes.
+
+    Single-process: builds live from the real engine. Isolated: the API's
+    facade exposes ``published_pairs`` (replayed from engine_state); use it so
+    the promoting list reflects the engine container's in-memory scanner state.
+    """
+    published = getattr(engine, "published_pairs", None)
+    if callable(published):
+        payload = published()
+        if payload:
+            return payload
+    return collect_pairs_live(engine)

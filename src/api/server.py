@@ -129,6 +129,7 @@ from .snapshot import (
     build_agents,
     build_pnl_history,
     build_auto_mode,
+    build_pairs,
     build_positions,
     build_positions_diag,
     build_pulse,
@@ -1346,6 +1347,21 @@ def build_app(
     async def pulse_tickers() -> TickersResponse:
         items = build_tickers(engine)
         return TickersResponse(items=items, total=len(items))
+
+    @app.get(
+        "/api/pairs",
+        tags=["pulse"],
+        dependencies=[Depends(auth)],
+    )
+    async def pairs(response: Response) -> Dict[str, Any]:
+        """Regular (scanned universe) + promoting (live mover-promoted) pairs.
+
+        Diagnostic for the ops Pairs page — lets the operator confirm the
+        mover-ignition promotions are actually updating. ``updated_at`` in the
+        payload reflects when the engine last rebuilt it.
+        """
+        response.headers["Cache-Control"] = "private, max-age=5, stale-while-revalidate=10"
+        return build_pairs(engine)
 
     # ---- Signals ----
 

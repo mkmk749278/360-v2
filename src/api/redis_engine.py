@@ -156,6 +156,16 @@ class RedisEngineFacade:
         """
         return self._positions_diag
 
+    def published_pairs(self) -> Optional[dict]:
+        """Return the pairs X-ray (regular + promoting) the engine published to
+        ``engine_state``, or ``None`` if absent. ``build_pairs`` uses this in
+        isolated mode so the promoting list reflects the engine container's live
+        in-memory scanner state rather than this facade's empty mock pair_mgr.
+        """
+        if isinstance(self._state, dict):
+            return self._state.get("pairs")
+        return None
+
     @property
     def state_age_seconds(self) -> float:
         if self._refreshed_at == 0.0:
