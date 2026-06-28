@@ -77,6 +77,7 @@ from config import (
     MOVER_PROMOTION_TTL_SEC,
     MOVER_PROMOTION_MIN_PCT,
     MOVER_PROMOTION_MIN_VOLUME_USD,
+    MOVER_MAX_SPREAD_PCT,
     COUNTERTREND_MOVER_HARD_BLOCK_ENABLED,
     COUNTERTREND_MOVER_MIN_FAN_PCT,
     SURGE_PROMOTION_MAX_PAIRS,
@@ -6752,12 +6753,15 @@ class Scanner:
                     "_evaluate_mover_avwap_scalp",
                 })
                 _is_mover = symbol in self._mover_promoted_pairs
-                if _is_mover and ctx_for_chan.spread_pct > 0.005:
+                # spread_pct is a PERCENT of mid (0.5 == 0.5%), same unit as the
+                # config threshold. The prior gate compared against 0.005 — i.e.
+                # 0.005% — which rejected every promoted mover before evaluation.
+                if _is_mover and ctx_for_chan.spread_pct > MOVER_MAX_SPREAD_PCT:
                     self._suppression_counters[f"mover_spread_rejected:{chan_name}"] += 1
                     _note_mover_skip(chan, "spread_too_wide")
                     log.debug(
-                        "mover spread gate {} {}: spread={:.3f}% > 0.5% — skip",
-                        symbol, chan_name, ctx_for_chan.spread_pct * 100,
+                        "mover spread gate {} {}: spread={:.3f}% > {:.3f}% — skip",
+                        symbol, chan_name, ctx_for_chan.spread_pct, MOVER_MAX_SPREAD_PCT,
                     )
                     continue
 
