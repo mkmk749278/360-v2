@@ -6632,14 +6632,28 @@ class Scanner:
         # Key: tuple of timeframes. Value: (SMCResult, smc_data_dict)
         _smc_cache: Dict[tuple, tuple] = {}
 
+        # A promoted mover skipped *before* ScalpChannel.evaluate() runs (rollout
+        # gate, channel skip, spread gate) never reaches the in-evaluator reason
+        # capture — surface the scanner-side skip so the ops Pairs page shows the
+        # real wall instead of a blank "—".
+        _promoted_mover = symbol in self._mover_promoted_pairs
+
+        def _note_mover_skip(_chan: Any, _reason: str) -> None:
+            if _promoted_mover and _chan.config.name == "360_SCALP":
+                _noter = getattr(_chan, "note_mover_skip", None)
+                if _noter is not None:
+                    _noter(symbol, _reason)
+
         for chan in self.channels:
             chan_name = chan.config.name
             # Controlled rollout gating (PR-5): explicit per-channel state
             # decides live eligibility with fail-closed semantics.
             if not self._is_live_rollout_enabled_for_symbol(chan_name, symbol):
                 self._record_rollout_live_exclusion(chan_name, symbol)
+                _note_mover_skip(chan, "rollout_excluded")
                 continue
             if self._should_skip_channel(symbol, chan_name, ctx):
+                _note_mover_skip(chan, "channel_skipped")
                 continue
             # Re-detect SMC with channel-specific timeframe preference when available.
             # This ensures scalp channels see low-TF sweeps first while swing/spot
@@ -6740,6 +6754,7 @@ class Scanner:
                 _is_mover = symbol in self._mover_promoted_pairs
                 if _is_mover and ctx_for_chan.spread_pct > 0.005:
                     self._suppression_counters[f"mover_spread_rejected:{chan_name}"] += 1
+                    _note_mover_skip(chan, "spread_too_wide")
                     log.debug(
                         "mover spread gate {} {}: spread={:.3f}% > 0.5% — skip",
                         symbol, chan_name, ctx_for_chan.spread_pct * 100,

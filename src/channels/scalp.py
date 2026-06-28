@@ -841,22 +841,8 @@ class ScalpChannel(BaseChannel):
         self._active_no_signal_reason = self._no_signal_reason_token(reason)
         return None
 
-    def _record_mover_reason(self, symbol: str, path: str, reason: str) -> None:
-        """Capture this cycle's outcome for one mover path on *symbol*.
-
-        Stores per symbol the latest reason from each mover path plus a single
-        monotonic timestamp. Read back by :meth:`mover_last_reasons` for the ops
-        Pairs page. Pruned opportunistically so the dict tracks only recently
-        scanned pairs (bounded by the live scan universe).
-        """
-        now = time.monotonic()
-        rec = self._mover_last_reason.get(symbol)
-        if rec is None:
-            rec = {}
-            self._mover_last_reason[symbol] = rec
-        rec[path] = reason
-        rec["ts"] = now
-        # Opportunistic prune — cheap, runs on the per-symbol scan cadence.
+    def _prune_mover_reasons(self, now: float) -> None:
+        """Drop stale per-symbol mover-reason entries (cheap, bounded)."""
         if len(self._mover_last_reason) > 256:
             stale = [
                 s for s, r in self._mover_last_reason.items()
@@ -865,13 +851,51 @@ class ScalpChannel(BaseChannel):
             for s in stale:
                 self._mover_last_reason.pop(s, None)
 
+    def _record_mover_reason(self, symbol: str, path: str, reason: str) -> None:
+        """Capture this cycle's outcome for one mover path on *symbol*.
+
+        Records the reason an evaluator (MOVER_TREND_PULLBACK / MOVER_AVWAP_SCALP)
+        gave — ``fired`` or a reject token. Marks this cycle as ``eval`` so the
+        summary prefers it over any earlier scanner-side skip. Read back by
+        :meth:`mover_last_reasons` for the ops Pairs page.
+        """
+        now = time.monotonic()
+        rec = self._mover_last_reason.get(symbol)
+        if rec is None:
+            rec = {}
+            self._mover_last_reason[symbol] = rec
+        rec[path] = reason
+        rec["ts"] = now
+        rec["last_kind"] = "eval"
+        self._prune_mover_reasons(now)
+
+    def note_mover_skip(self, symbol: str, reason: str) -> None:
+        """Record a scanner-side pre-evaluation skip for a promoted mover.
+
+        A mover dropped before :meth:`evaluate` runs (spread gate, rollout
+        exclusion, channel skip) never reaches :meth:`_record_mover_reason`, so
+        without this the ops Pairs page would show a blank ``—`` and hide the
+        real wall. Marks the cycle as ``skip`` so the summary surfaces this
+        reason when it's the latest outcome.
+        """
+        now = time.monotonic()
+        rec = self._mover_last_reason.get(symbol)
+        if rec is None:
+            rec = {}
+            self._mover_last_reason[symbol] = rec
+        rec["scan_skip"] = self._no_signal_reason_token(reason)
+        rec["ts"] = now
+        rec["last_kind"] = "skip"
+        self._prune_mover_reasons(now)
+
     def mover_last_reasons(self) -> Dict[str, Dict[str, Any]]:
-        """Per-symbol last mover-path outcome for the ops Pairs page.
+        """Per-symbol last mover outcome for the ops Pairs page.
 
         Returns ``{symbol: {"reason": str, "path": str, "age_sec": float}}``.
-        ``reason`` is the single most useful line per symbol: ``fired`` if either
-        mover path produced a signal last cycle, otherwise the MOVER_TREND_PULLBACK
-        reject (the primary continuation path), falling back to the AVWAP reject.
+        When the latest cycle was a scanner-side skip (spread gate / rollout),
+        the skip reason wins — the pair was never evaluated. Otherwise ``reason``
+        is ``fired`` if either mover path produced a signal, else the
+        MOVER_TREND_PULLBACK reject (primary path), falling back to AVWAP.
         Entries older than the TTL are dropped.
         """
         now = time.monotonic()
@@ -880,18 +904,24 @@ class ScalpChannel(BaseChannel):
             ts = float(rec.get("ts", 0.0))
             if now - ts > _MOVER_REASON_TTL_SEC:
                 continue
-            mtp = rec.get("MOVER_TREND_PULLBACK")
-            avwap = rec.get("MOVER_AVWAP_SCALP")
-            if mtp == "fired" or avwap == "fired":
-                reason, path = "fired", (
-                    "MOVER_TREND_PULLBACK" if mtp == "fired" else "MOVER_AVWAP_SCALP"
-                )
-            elif mtp is not None:
-                reason, path = mtp, "MOVER_TREND_PULLBACK"
-            elif avwap is not None:
-                reason, path = avwap, "MOVER_AVWAP_SCALP"
+            if rec.get("last_kind") == "skip":
+                reason = rec.get("scan_skip")
+                if reason is None:
+                    continue
+                path = "SCAN_SKIP"
             else:
-                continue
+                mtp = rec.get("MOVER_TREND_PULLBACK")
+                avwap = rec.get("MOVER_AVWAP_SCALP")
+                if mtp == "fired" or avwap == "fired":
+                    reason, path = "fired", (
+                        "MOVER_TREND_PULLBACK" if mtp == "fired" else "MOVER_AVWAP_SCALP"
+                    )
+                elif mtp is not None:
+                    reason, path = mtp, "MOVER_TREND_PULLBACK"
+                elif avwap is not None:
+                    reason, path = avwap, "MOVER_AVWAP_SCALP"
+                else:
+                    continue
             out[sym] = {"reason": reason, "path": path, "age_sec": round(now - ts, 1)}
         return out
 
