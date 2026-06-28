@@ -1319,7 +1319,14 @@ class WebSocketManager:
         for conn in self._connections:
             for stream in conn.streams:
                 head = stream.split("@", 1)[0]
-                if head:
+                # All-market array streams (``!ticker@arr``, ``!miniTicker@arr``,
+                # ``!markPrice@arr`` …) are NOT per-symbol kline streams: there is
+                # no candle to age-check, so ``age_fn("!ticker", "1m")`` returns
+                # None and the stream is counted permanently stale → the watchdog
+                # force-closes the connection every cycle (the mover-ignition
+                # ``!ticker@arr`` reconnect loop). Their liveness is the
+                # connection-level data-staleness watchdog's job, not this one.
+                if head and not head.startswith("!"):
                     symbols.add(head.upper())
         if not symbols:
             return
