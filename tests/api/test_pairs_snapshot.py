@@ -66,6 +66,32 @@ def test_promoting_pairs_carry_cycles_and_enriched_volume():
     assert "updated_at" in out
 
 
+def test_ignition_health_block_surfaced():
+    from src.mover_ignition import MoverIgnitionDetector
+
+    det = MoverIgnitionDetector(
+        enabled=True, window_sec=30.0, move_floor_pct=1.0, burst_mult=3.0,
+        min_window_notional_usd=1000.0, cooldown_sec=60.0, baseline_alpha=0.02,
+        min_baseline_samples=5, max_gap_sec=30.0,
+    )
+    det.ingest([{"s": "ABCUSDT", "c": 1.0, "n": 10, "q": 1000.0, "E": 1}])
+
+    class _WS:
+        is_healthy = True
+        stream_count = 1
+
+    eng = _engine()
+    eng._mover_ignition = det
+    eng._ws_futures_mover = _WS()
+    out = collect_pairs_live(eng)
+    ig = out["ignition"]
+    assert ig["enabled"] is True
+    assert ig["frames_ingested"] == 1
+    assert ig["ignitions_total"] == 0          # one frame can't ignite (warmup)
+    assert ig["ws_connected"] is True
+    assert ig["ws_streams"] == 1
+
+
 def test_empty_engine_is_safe():
     class _Empty:
         pair_mgr = None

@@ -1539,11 +1539,27 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
             })
         promoting.sort(key=lambda r: -r["cycles_left"])
 
+    # Ignition-feed health so an empty promoting list is self-explanatory:
+    # frames flowing + symbols tracked but no recent ignition ⇒ genuinely quiet;
+    # zero frames / not connected ⇒ stalled feed.
+    ignition: Dict[str, Any] = {}
+    detector = getattr(engine, "_mover_ignition", None)
+    if detector is not None and hasattr(detector, "stats"):
+        try:
+            ignition = dict(detector.stats())
+        except Exception:
+            ignition = {}
+    ws_mover = getattr(engine, "_ws_futures_mover", None)
+    if ws_mover is not None:
+        ignition["ws_connected"] = bool(getattr(ws_mover, "is_healthy", False))
+        ignition["ws_streams"] = int(getattr(ws_mover, "stream_count", 0) or 0)
+
     return {
         "regular": regular,
         "promoting": promoting,
         "regular_count": len(regular),
         "promoting_count": len(promoting),
+        "ignition": ignition,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
 
