@@ -1529,15 +1529,19 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
     promoted = getattr(scanner, "_mover_promoted_pairs", None) if scanner is not None else None
     if isinstance(promoted, dict):
         lookup = {r["symbol"]: r for r in regular}
-        for sym, cycles in promoted.items():
+        # The promoted dict value is the monotonic EXPIRY time (scanner runs in
+        # this same process, so time.monotonic() is comparable). Surface the
+        # remaining hold as minutes so the ops Pairs page reads "expires in N min".
+        _mono = time.monotonic()
+        for sym, expiry in promoted.items():
             base = lookup.get(sym, {})
             promoting.append({
                 "symbol": sym,
-                "cycles_left": int(cycles or 0),
+                "minutes_left": round(max(0.0, (float(expiry or 0.0) - _mono) / 60.0), 1),
                 "volume_24h_usd": float(base.get("volume_24h_usd", 0.0) or 0.0),
                 "change_24h_pct": float(base.get("change_24h_pct", 0.0) or 0.0),
             })
-        promoting.sort(key=lambda r: -r["cycles_left"])
+        promoting.sort(key=lambda r: -r["minutes_left"])
 
     # Ignition-feed health so an empty promoting list is self-explanatory:
     # frames flowing + symbols tracked but no recent ignition ⇒ genuinely quiet;

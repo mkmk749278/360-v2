@@ -73,7 +73,8 @@ from config import (
     SMC_SCALP_LOOKBACK,
     SMC_SCALP_TOLERANCE_PCT,
     SMC_SCORE_MIN_TRENDING_SHORT,
-    MOVER_PROMOTION_CYCLES,
+    MOVER_PROMOTION_MAX_PAIRS,
+    MOVER_PROMOTION_TTL_SEC,
     MOVER_PROMOTION_MIN_PCT,
     MOVER_PROMOTION_MIN_VOLUME_USD,
     COUNTERTREND_MOVER_HARD_BLOCK_ENABLED,
@@ -1666,6 +1667,7 @@ class Scanner:
 
         Returns the list of currently mover-promoted symbols.
         """
+        now_mono = time.monotonic()
         candidates: List[tuple[str, Any]] = []
         ignition_dirs: Dict[str, str] = {}
         pending = self.mover_ignition_pending
@@ -1712,34 +1714,41 @@ class Scanner:
                 *[self._seed_mover_pair(sym, info) for sym, info in candidates],
                 return_exceptions=False,
             )
+            _hold_h = MOVER_PROMOTION_TTL_SEC / 3600.0
             for (symbol, info), seeded in zip(candidates, seed_results):
                 if not seeded:
                     continue
                 if symbol in ignition_dirs:
                     log.info(
-                        "🔥 MOVER IGNITION: {} {} vol={:.0f} — VSB/BREAKDOWN scan for {} cycles",
-                        symbol, ignition_dirs[symbol], info.volume_24h_usd, MOVER_PROMOTION_CYCLES,
+                        "🔥 MOVER IGNITION: {} {} vol={:.0f} — VSB/BREAKDOWN scan for {:.1f}h",
+                        symbol, ignition_dirs[symbol], info.volume_24h_usd, _hold_h,
                     )
                 else:
                     log.info(
-                        "📈 MOVER PROMOTION: {} {:.1f}% vol={:.0f} — VSB/BREAKDOWN scan for {} cycles",
-                        symbol, info.volatility_24h, info.volume_24h_usd, MOVER_PROMOTION_CYCLES,
+                        "📈 MOVER PROMOTION: {} {:.1f}% vol={:.0f} — VSB/BREAKDOWN scan for {:.1f}h",
+                        symbol, info.volatility_24h, info.volume_24h_usd, _hold_h,
                     )
-                self._mover_promoted_pairs[symbol] = MOVER_PROMOTION_CYCLES
+                # Store the monotonic EXPIRY time (now + TTL). The pair stays in
+                # the scan universe until this elapses (default 6 h) so the mover
+                # evaluators get repeated chances to find an entry as the move
+                # develops — not a ~25 s cycle-count window. Re-igniting an
+                # already-promoted pair refreshes its expiry (handled by the
+                # ``symbol in self._mover_promoted_pairs`` skip above keeping the
+                # original; a fresh ignition after expiry restamps it).
+                self._mover_promoted_pairs[symbol] = now_mono + MOVER_PROMOTION_TTL_SEC
 
-        # Decrement cycle counters; evict expired promotions
+        # Evict pairs that entered the main scan, or whose promotion TTL elapsed.
         for sym in list(self._mover_promoted_pairs.keys()):
-            if sym in sorted_pairs_set:
+            if sym in sorted_pairs_set or now_mono >= self._mover_promoted_pairs[sym]:
                 del self._mover_promoted_pairs[sym]
-            else:
-                remaining = self._mover_promoted_pairs[sym] - 1
-                if remaining <= 0:
-                    del self._mover_promoted_pairs[sym]
-                else:
-                    self._mover_promoted_pairs[sym] = remaining
 
-        active = [s for s in self._mover_promoted_pairs if s not in sorted_pairs_set]
-        return active[:SURGE_PROMOTION_MAX_PAIRS]
+        # Cap concurrently-scanned movers, freshest first (largest expiry =
+        # most-recently promoted) so new ignitions are never starved by stale holds.
+        active = sorted(
+            (s for s in self._mover_promoted_pairs if s not in sorted_pairs_set),
+            key=lambda s: self._mover_promoted_pairs[s], reverse=True,
+        )
+        return active[:MOVER_PROMOTION_MAX_PAIRS]
 
     async def scan_loop(self) -> None:
         """Periodic scan over all pairs / channels."""
