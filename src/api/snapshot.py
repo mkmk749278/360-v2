@@ -1541,17 +1541,36 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
         # Enrich from pair_mgr directly (promoted pairs are now excluded from the
         # `regular` list, so we can't read volume/%change off those rows).
         info_pairs = pairs if isinstance(pairs, dict) else {}
+        # Per-symbol "why isn't this mover firing" — the last outcome of the two
+        # mover continuation paths (fired / no_reclaim / mover_run_too_small / …),
+        # captured live on the ScalpChannel. Lets the ops Pairs page answer the
+        # question directly instead of inferring it from cumulative truth-report
+        # counters. Empty dict if the channel isn't reachable (isolated facade).
+        mover_reasons: Dict[str, Any] = {}
+        channels = getattr(engine, "_channels", []) or []
+        scalp = next(
+            (c for c in channels if c.__class__.__name__ == "ScalpChannel"), None
+        )
+        if scalp is not None and hasattr(scalp, "mover_last_reasons"):
+            try:
+                mover_reasons = scalp.mover_last_reasons() or {}
+            except Exception:
+                mover_reasons = {}
         # The promoted dict value is the monotonic EXPIRY time (scanner runs in
         # this same process, so time.monotonic() is comparable). Surface the
         # remaining hold as minutes so the ops Pairs page reads "expires in N min".
         _mono = time.monotonic()
         for sym, expiry in promoted.items():
             info = info_pairs.get(sym)
+            rj = mover_reasons.get(sym) or {}
             promoting.append({
                 "symbol": sym,
                 "minutes_left": round(max(0.0, (float(expiry or 0.0) - _mono) / 60.0), 1),
                 "volume_24h_usd": float(getattr(info, "volume_24h_usd", 0.0) or 0.0),
                 "change_24h_pct": float(getattr(info, "volatility_24h", 0.0) or 0.0),
+                "reject_reason": rj.get("reason"),
+                "reject_path": rj.get("path"),
+                "reject_age_sec": rj.get("age_sec"),
             })
         promoting.sort(key=lambda r: -r["minutes_left"])
 

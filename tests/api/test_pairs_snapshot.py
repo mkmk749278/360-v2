@@ -28,13 +28,29 @@ class _Scanner:
         self._mover_promoted_pairs = promoted
 
 
+class _Scalp:
+    """Stand-in for ScalpChannel exposing per-symbol mover reasons."""
+
+    def __init__(self, reasons):
+        self._reasons = reasons
+
+    def mover_last_reasons(self):
+        return self._reasons
+
+
+# collect_pairs_live picks the channel by class name.
+_Scalp.__name__ = "ScalpChannel"
+
+
 class _Engine:
-    def __init__(self, pairs, promoted):
+    def __init__(self, pairs, promoted, mover_reasons=None):
         self.pair_mgr = _PairMgr(pairs)
         self._scanner = _Scanner(promoted)
+        if mover_reasons is not None:
+            self._channels = [_Scalp(mover_reasons)]
 
 
-def _engine():
+def _engine(mover_reasons=None):
     pairs = {
         "BTCUSDT": _Info(_Tier("TIER1"), 5_000_000_000.0, 1.2),
         "ARXUSDT": _Info(_Tier("TIER3"), 8_000_000.0, 22.0),
@@ -43,7 +59,7 @@ def _engine():
     # Values are monotonic EXPIRY times: ARX has ~5h left, GLW ~2h.
     now = time.monotonic()
     promoted = {"ARXUSDT": now + 5 * 3600, "GLWUSDT": now + 2 * 3600}
-    return _Engine(pairs, promoted)
+    return _Engine(pairs, promoted, mover_reasons=mover_reasons)
 
 
 def test_collect_regular_pairs_excludes_promoted():
@@ -68,6 +84,20 @@ def test_promoting_pairs_carry_minutes_left_and_enriched_volume():
     assert arx["change_24h_pct"] == 22.0          # enriched from pair_mgr directly
     assert arx["volume_24h_usd"] == 8_000_000.0
     assert "updated_at" in out
+    # No ScalpChannel wired → reject fields present but null (graceful).
+    assert arx["reject_reason"] is None
+
+
+def test_promoting_pairs_carry_mover_reject_reason():
+    eng = _engine(mover_reasons={
+        "ARXUSDT": {"reason": "no_reclaim", "path": "MOVER_TREND_PULLBACK", "age_sec": 4.0},
+        "GLWUSDT": {"reason": "fired", "path": "MOVER_AVWAP_SCALP", "age_sec": 1.0},
+    })
+    out = collect_pairs_live(eng)
+    by = {p["symbol"]: p for p in out["promoting"]}
+    assert by["ARXUSDT"]["reject_reason"] == "no_reclaim"
+    assert by["ARXUSDT"]["reject_path"] == "MOVER_TREND_PULLBACK"
+    assert by["GLWUSDT"]["reject_reason"] == "fired"
 
 
 def test_ignition_health_block_surfaced():
