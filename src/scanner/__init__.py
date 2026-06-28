@@ -1650,64 +1650,67 @@ class Scanner:
         return True
 
     async def _update_movers_promotion(self, sorted_pairs_set: set) -> List[str]:
-        """Promote non-scanned pairs that are *igniting now* into the scan universe.
+        """Promote non-scanned movers into the scan universe — TWO sources.
 
-        Primary path (``mover_ignition_pending`` wired ⇒ ``MOVER_IGNITION_ENABLED``):
-        candidates are drained from the real-time ignition queue the WS handler
-        fills off ``!ticker@arr`` — a pair is promoted at minute-zero of its
-        move, so VSB/BDS/MOVER_TREND_PULLBACK enter while the move is fresh
-        rather than fighting an already-spent 24h leaderboard mover.
+        Mover capture has two complementary triggers, both feeding the same 6 h
+        hold so VSB/BDS/MOVER_TREND_PULLBACK get repeated chances to scalp:
 
-        Fallback path (ignition off): the legacy lagging 24h-%change trigger
-        (``volatility_24h >= MOVER_PROMOTION_MIN_PCT``).
+        1. **Ignition** (``mover_ignition_pending`` wired ⇒ ``MOVER_IGNITION_ENABLED``)
+           — real-time bursts off ``!ticker@arr``: a pair accelerating *now*,
+           caught at minute-zero of a sudden move.
+        2. **Top 24h movers** (``volatility_24h >= MOVER_PROMOTION_MIN_PCT``) —
+           sustained directional trends (e.g. a pair −40 % on the day, grinding
+           down its MA stack) that have no single 30 s burst but are clearly
+           movers. The detector alone misses these; the three paths exist to
+           scalp exactly this kind of trend.
 
-        Newly-promoted symbols are REST-seeded (candles + CVD) before being
-        added to the active set; pairs that fail to seed are skipped so we
-        don't burn 5 cycles on insufficient_candles rejections.
+        Promotion is deliberately *inclusive* — the evaluators' own gates
+        (freshness ceiling, MA-stack alignment, exhaustion guard) decide entry
+        quality, so an exhausted mover gets promoted but never traded. Newly-
+        promoted symbols are REST-seeded (candles + CVD) before being added.
 
         Returns the list of currently mover-promoted symbols.
         """
         now_mono = time.monotonic()
         candidates: List[tuple[str, Any]] = []
         ignition_dirs: Dict[str, str] = {}
+        seen: set = set()
+
+        # Source 1 — real-time ignition (sudden bursts), if wired.
         pending = self.mover_ignition_pending
         if pending is not None:
-            # Real-time ignition path — promote pairs accelerating *now*.
             drained = dict(pending)
             pending.clear()
             for symbol, direction in drained.items():
                 if symbol in sorted_pairs_set:
-                    # Already in the main scan — all evaluators run; nothing to do.
-                    if symbol in self._mover_promoted_pairs:
-                        del self._mover_promoted_pairs[symbol]
+                    self._mover_promoted_pairs.pop(symbol, None)
                     continue
                 if symbol in self._mover_promoted_pairs:
                     continue
                 info = self.pair_mgr.pairs.get(symbol)
-                # Liquidity floor still applies — the detector's notional gate is
-                # per-window; this rejects pairs whose 24h book is too thin.
+                # Liquidity floor — the detector's notional gate is per-window;
+                # this rejects pairs whose 24h book is too thin.
                 if info is None or info.volume_24h_usd < MOVER_PROMOTION_MIN_VOLUME_USD:
                     continue
                 ignition_dirs[symbol] = direction
                 candidates.append((symbol, info))
-            # Evict promotions that have since entered the main scan.
-            for symbol in list(self._mover_promoted_pairs.keys()):
-                if symbol in sorted_pairs_set:
-                    del self._mover_promoted_pairs[symbol]
-        else:
-            # Fallback — legacy 24h-%change leaderboard trigger.
-            for symbol, info in list(self.pair_mgr.pairs.items()):
-                if symbol in sorted_pairs_set:
-                    # Already in main scan — all evaluators run normally; no restriction.
-                    if symbol in self._mover_promoted_pairs:
-                        del self._mover_promoted_pairs[symbol]
-                    continue
-                if (
-                    info.volatility_24h >= MOVER_PROMOTION_MIN_PCT
-                    and info.volume_24h_usd >= MOVER_PROMOTION_MIN_VOLUME_USD
-                    and symbol not in self._mover_promoted_pairs
-                ):
-                    candidates.append((symbol, info))
+                seen.add(symbol)
+
+        # Source 2 — top 24h movers (sustained trends). Always on, so a pair
+        # that is clearly trending but not bursting *right now* still gets in.
+        for symbol, info in list(self.pair_mgr.pairs.items()):
+            if symbol in sorted_pairs_set:
+                # Already in main scan — all evaluators run normally; no restriction.
+                self._mover_promoted_pairs.pop(symbol, None)
+                continue
+            if symbol in self._mover_promoted_pairs or symbol in seen:
+                continue
+            if (
+                info.volatility_24h >= MOVER_PROMOTION_MIN_PCT
+                and info.volume_24h_usd >= MOVER_PROMOTION_MIN_VOLUME_USD
+            ):
+                candidates.append((symbol, info))
+                seen.add(symbol)
 
         if candidates:
             seed_results = await asyncio.gather(
