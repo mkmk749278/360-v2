@@ -46,12 +46,12 @@ def _engine():
     return _Engine(pairs, promoted)
 
 
-def test_collect_regular_pairs_sorted_with_tier_and_volume():
+def test_collect_regular_pairs_excludes_promoted():
     out = collect_pairs_live(_engine())
-    assert out["regular_count"] == 3
+    # ARX/GLW are promoted → shown only under Promoting, not Regular. BTC stays.
     syms = [r["symbol"] for r in out["regular"]]
-    # TIER1 first (sort by tier string), then TIER2, then TIER3.
-    assert syms[0] == "BTCUSDT"
+    assert syms == ["BTCUSDT"]
+    assert out["regular_count"] == 1
     btc = out["regular"][0]
     assert btc["tier"] == "TIER1"
     assert btc["volume_24h_usd"] == 5_000_000_000.0
@@ -65,7 +65,7 @@ def test_promoting_pairs_carry_minutes_left_and_enriched_volume():
     assert [p["symbol"] for p in out["promoting"]] == ["ARXUSDT", "GLWUSDT"]
     arx = out["promoting"][0]
     assert 295 <= arx["minutes_left"] <= 300       # ~5h, minus test runtime
-    assert arx["change_24h_pct"] == 22.0          # enriched from the regular row
+    assert arx["change_24h_pct"] == 22.0          # enriched from pair_mgr directly
     assert arx["volume_24h_usd"] == 8_000_000.0
     assert "updated_at" in out
 

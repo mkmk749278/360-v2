@@ -32,6 +32,61 @@ def _make_scanner(pairs):
     return sc
 
 
+class _FakeDetector:
+    """Stand-in for MoverIgnitionDetector's universe view."""
+
+    def __init__(self, movers, meta):
+        self._movers = movers   # list[(symbol, change_pct, quote_vol)]
+        self._meta = meta       # {symbol: (change_pct, quote_vol)}
+
+    def universe_movers(self, min_pct, min_vol):
+        return [m for m in self._movers if abs(m[1]) >= min_pct and m[2] >= min_vol]
+
+    def meta(self, sym):
+        return self._meta.get(sym.upper())
+
+
+async def test_outside_universe_mover_is_admitted_and_promoted():
+    # pair_mgr only tracks BTC (the top-75 world). The real mover (GUAUSDT −40%)
+    # is NOT in pair_mgr — it exists only in the detector's full-universe feed.
+    sc = _make_scanner({"BTCUSDT": _info(5e9, 1.0)})
+    sc.mover_ignition_pending = {}
+    sc.mover_ignition_detector = _FakeDetector(
+        movers=[("GUAUSDT", -40.0, 18_000_000.0)],
+        meta={"GUAUSDT": (-40.0, 18_000_000.0)},
+    )
+    await sc._update_movers_promotion(set())
+    assert "GUAUSDT" in sc.pair_mgr.pairs                  # admitted so it can be scanned
+    assert sc.pair_mgr.pairs["GUAUSDT"].tier.value == "TIER3"
+    assert "GUAUSDT" in sc._mover_promoted_pairs           # and promoted
+    assert "GUAUSDT" in sc._synthetic_mover_pairs
+
+
+async def test_ignition_admits_outside_pair_via_detector_meta():
+    sc = _make_scanner({})
+    sc.mover_ignition_pending = {"NEWUSDT": "short"}
+    sc.mover_ignition_detector = _FakeDetector(
+        movers=[], meta={"NEWUSDT": (-12.0, 9_000_000.0)})
+    await sc._update_movers_promotion(set())
+    assert "NEWUSDT" in sc.pair_mgr.pairs                  # admitted from ignition meta
+    assert "NEWUSDT" in sc._mover_promoted_pairs
+
+
+async def test_synthetic_mover_removed_from_pair_mgr_on_expiry():
+    sc = _make_scanner({})
+    sc.mover_ignition_pending = {}
+    sc.mover_ignition_detector = _FakeDetector(
+        movers=[("GUAUSDT", -40.0, 18_000_000.0)], meta={"GUAUSDT": (-40.0, 18e6)})
+    await sc._update_movers_promotion(set())
+    assert "GUAUSDT" in sc.pair_mgr.pairs
+    # Force its promotion to have already expired; a quiet detector won't re-add it.
+    sc._mover_promoted_pairs["GUAUSDT"] = 0.0
+    sc.mover_ignition_detector = _FakeDetector(movers=[], meta={})
+    await sc._update_movers_promotion(set())
+    assert "GUAUSDT" not in sc.pair_mgr.pairs              # synthetic entry cleaned up
+    assert "GUAUSDT" not in sc._mover_promoted_pairs
+
+
 async def test_both_ignition_and_top_24h_movers_are_promoted():
     pairs = {
         "IGNUSDT": _info(10_000_000, 2.0),    # low 24h move, but igniting now
