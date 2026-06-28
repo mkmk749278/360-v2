@@ -34,7 +34,8 @@ from __future__ import annotations
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Deque, Dict, List, Optional, Tuple
+from datetime import datetime, timezone
+from typing import Any, Deque, Dict, List, Optional, Tuple
 
 from src.utils import get_logger
 
@@ -94,6 +95,12 @@ class MoverIgnitionDetector:
         self.max_gap_sec = max_gap_sec
         self.quote_suffix = quote_suffix
         self._state: Dict[str, _SymbolState] = {}
+        # Liveness counters — surfaced via stats() so the ops Pairs page can
+        # tell "genuinely quiet" (frames flowing, no ignitions) from "stalled
+        # feed" (no frames) when the promoting list is empty.
+        self._frames = 0
+        self._ignitions_total = 0
+        self._last_ignition_at: Optional[str] = None
 
     # -- public API ---------------------------------------------------------
 
@@ -109,17 +116,31 @@ class MoverIgnitionDetector:
         """
         if not self.enabled or not tickers:
             return []
+        self._frames += 1
         mono = time.monotonic() if now is None else now
         ignited: List[Tuple[str, str]] = []
         for t in tickers:
             hit = self._ingest_one(t, mono)
             if hit is not None:
                 ignited.append(hit)
+        if ignited:
+            self._ignitions_total += len(ignited)
+            self._last_ignition_at = datetime.now(timezone.utc).isoformat()
         return ignited
 
     def tracked_symbols(self) -> int:
         """Number of symbols with live state — for telemetry."""
         return len(self._state)
+
+    def stats(self) -> Dict[str, Any]:
+        """Liveness snapshot for the ops Pairs page."""
+        return {
+            "enabled": self.enabled,
+            "tracked_symbols": len(self._state),
+            "frames_ingested": self._frames,
+            "ignitions_total": self._ignitions_total,
+            "last_ignition_at": self._last_ignition_at,
+        }
 
     # -- internals ----------------------------------------------------------
 
