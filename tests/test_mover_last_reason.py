@@ -42,6 +42,34 @@ def test_avwap_used_when_no_primary_path_reason():
     assert out["ZROUSDT"]["path"] == "MOVER_AVWAP_SCALP"
 
 
+def test_scanner_skip_is_surfaced():
+    ch = ScalpChannel()
+    ch.note_mover_skip("GUAUSDT", "spread_too_wide")
+    out = ch.mover_last_reasons()
+    assert out["GUAUSDT"]["reason"] == "spread_too_wide"
+    assert out["GUAUSDT"]["path"] == "SCAN_SKIP"
+
+
+def test_latest_outcome_wins_skip_then_eval():
+    ch = ScalpChannel()
+    # Cycle 1: skipped by the spread gate (never evaluated).
+    ch.note_mover_skip("GUAUSDT", "spread_too_wide")
+    # Cycle 2: spread tightened, the pair was evaluated and rejected for structure.
+    ch._record_mover_reason("GUAUSDT", "MOVER_TREND_PULLBACK", "no_reclaim")
+    out = ch.mover_last_reasons()
+    assert out["GUAUSDT"]["reason"] == "no_reclaim"        # eval is newer → wins
+    assert out["GUAUSDT"]["path"] == "MOVER_TREND_PULLBACK"
+
+
+def test_latest_outcome_wins_eval_then_skip():
+    ch = ScalpChannel()
+    ch._record_mover_reason("GUAUSDT", "MOVER_TREND_PULLBACK", "no_reclaim")
+    # Next cycle the spread blew out → skipped before evaluation.
+    ch.note_mover_skip("GUAUSDT", "spread_too_wide")
+    out = ch.mover_last_reasons()
+    assert out["GUAUSDT"]["reason"] == "spread_too_wide"   # skip is newer → wins
+
+
 def test_stale_entries_are_dropped(monkeypatch):
     ch = ScalpChannel()
     ch._record_mover_reason("OLDUSDT", "MOVER_TREND_PULLBACK", "no_ma_stack")
