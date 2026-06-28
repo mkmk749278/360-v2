@@ -107,8 +107,10 @@ class TestDoctrineExemptSetClassesDoctrine:
         breakout / mover-context, or genuinely HTF-gated?)."""
         from src.scanner import _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
 
-        assert len(_SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS) == 7
+        assert len(_SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS) == 8
         assert "MOVER_TREND_PULLBACK" in _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
+        # 8th: MOVER_AVWAP_SCALP — the AVWAP slope defines its own regime/direction.
+        assert "MOVER_AVWAP_SCALP" in _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS
 
     def test_every_exempt_setup_is_a_known_scalp_setup(self):
         """Drift guard: every exempt setup must exist in _SCALP_SETUP_TO_FAMILY

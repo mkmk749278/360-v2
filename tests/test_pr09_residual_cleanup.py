@@ -204,8 +204,8 @@ class TestCorePathRolesUnchanged:
         )
 
     def test_total_portfolio_path_count(self):
-        """Exactly 16 paths have explicit portfolio roles (Session 29 added MOVER_TREND_PULLBACK)."""
-        assert len(ACTIVE_PATH_PORTFOLIO_ROLES) == 16, (
-            f"Expected 16 portfolio-role entries, got {len(ACTIVE_PATH_PORTFOLIO_ROLES)}. "
+        """Exactly 17 paths have explicit portfolio roles (2026-06-28 added MOVER_AVWAP_SCALP)."""
+        assert len(ACTIVE_PATH_PORTFOLIO_ROLES) == 17, (
+            f"Expected 17 portfolio-role entries, got {len(ACTIVE_PATH_PORTFOLIO_ROLES)}. "
             f"Add new evaluators to both ScalpChannel.evaluate() and ACTIVE_PATH_PORTFOLIO_ROLES."
         )

@@ -467,6 +467,8 @@ class TestStructureReadinessGate:
             "_evaluate_funding_extreme",
             # Mover continuation — price-driven (MA stack), young-pair-safe.
             "_evaluate_mover_trend_pullback",
+            # Anchored-VWAP mover scalp — same, young-pair-safe.
+            "_evaluate_mover_avwap_scalp",
         }
         assert _YOUNG_PAIR_EVALUATORS == expected
         # Structure-based paths must NOT be in the allowlist.

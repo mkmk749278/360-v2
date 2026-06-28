@@ -397,6 +397,7 @@ _MTF_REGIME_CONFIG: Dict[str, Dict[str, float]] = {
 _SCALP_SETUP_TO_FAMILY: Dict[str, str] = {
     "TREND_PULLBACK_EMA": "trend_following",
     "MOVER_TREND_PULLBACK": "trend_following",
+    "MOVER_AVWAP_SCALP": "trend_following",
     "VOLUME_SURGE_BREAKOUT": "breakout_momentum",
     "BREAKDOWN_SHORT": "breakout_momentum",
     "OPENING_RANGE_BREAKOUT": "breakout_momentum",
@@ -460,6 +461,9 @@ _SCALP_MTF_HARD_BLOCK_EXEMPT_SETUPS: frozenset[str] = frozenset({
     # regime gates must not veto it.  Its own mover-separation + reclaim gates are
     # the filter.  Family stays trend_following for SCORING affinity only (#621).
     "MOVER_TREND_PULLBACK",
+    # AVWAP mover scalp — same: the AVWAP slope defines direction/regime, so the
+    # HTF confluence / longs-regime gates must not veto it.
+    "MOVER_AVWAP_SCALP",
 })
 
 _MTF_DOCTRINE_BYPASS_ENABLED: bool = os.getenv(
@@ -531,6 +535,7 @@ _SCALP_RANGING_LOW_ADX_BLOCKED_FAMILIES: frozenset[str] = frozenset({
 # following for SCORING affinity (#621); only the gate is exempt — §3.6a split.
 _SCALP_RANGING_LOW_ADX_EXEMPT_SETUPS: frozenset[str] = frozenset({
     "MOVER_TREND_PULLBACK",
+    "MOVER_AVWAP_SCALP",
 })
 
 # Per-channel SMC timeframe preference order.
@@ -821,6 +826,8 @@ _YOUNG_PAIR_EVALUATORS: frozenset[str] = frozenset({
     # Real movers (BTW/ESPORTS) arrive as young/universe pairs, so the path
     # MUST be young-pair-safe to reach them.
     "_evaluate_mover_trend_pullback",
+    # AVWAP mover scalp — same: anchored-VWAP reference, no aged HTF structure.
+    "_evaluate_mover_avwap_scalp",
 })
 
 # PR-7C: runtime validation focus paths for concise operator summaries.
@@ -6661,6 +6668,9 @@ class Scanner:
                     # VSB/BDS catch the ignition; this catches the repeated
                     # MA-pullback re-entries that follow.  Ships dark.
                     "_evaluate_mover_trend_pullback",
+                    # Anchored-VWAP mover scalp — the participant-cost reload, the
+                    # primary continuation entry for a confirmed mover (2026-06-28).
+                    "_evaluate_mover_avwap_scalp",
                 })
                 _is_mover = symbol in self._mover_promoted_pairs
                 if _is_mover and ctx_for_chan.spread_pct > 0.005:

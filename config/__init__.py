@@ -709,6 +709,34 @@ MOVER_TP_BREAKOUT_EXT_ATR: float = _safe_float("MOVER_TP_BREAKOUT_EXT_ATR", "1.0
 #: Research: a break without >=1.5× volume "is almost certainly a fake-out".
 MOVER_TP_BREAKOUT_VOL_MULT: float = _safe_float("MOVER_TP_BREAKOUT_VOL_MULT", "1.5")
 
+# ── MOVER_AVWAP_SCALP path (2026-06-28, owner+research-approved) ───────────────
+# Anchored-VWAP continuation scalp for movers. Research (snappchart/TrendSpider/
+# trademomentum VWAP-momentum playbooks) is unanimous: the professional way to
+# scalp a confirmed mover is the VWAP anchored at the move's ORIGIN, traded WITH
+# the AVWAP slope on pullbacks to it — the participant-cost reference, far more
+# robust than an MA stack. Anchor = the swing extreme over a lookback (the start
+# of the current leg); reuses compute_vwap over candles[anchor:]. Live by default
+# (testing phase); MOVER_AVWAP_SCALP_ENABLED=false → shadow-only log, no signal.
+MOVER_AVWAP_SCALP_ENABLED: bool = _safe_bool("MOVER_AVWAP_SCALP_ENABLED", "true")
+#: Entry timeframe (matches the 15m the owner reads on the Binance chart).
+MOVER_AVWAP_TF: str = os.getenv("MOVER_AVWAP_TF", "15m")
+#: Candles scanned back for the swing anchor (start of the current leg).
+MOVER_AVWAP_ANCHOR_LOOKBACK: int = _safe_int("MOVER_AVWAP_ANCHOR_LOOKBACK", "50")
+#: Minimum net move (%) from the anchor to "now" to qualify as a real mover leg.
+MOVER_AVWAP_MIN_MOVE_PCT: float = _safe_float("MOVER_AVWAP_MIN_MOVE_PCT", "3.0")
+#: Min |AVWAP slope| over the last few bars (% of price) to confirm trend
+#: direction — the "rising VWAP = long only / falling = short only" filter.
+MOVER_AVWAP_SLOPE_MIN_PCT: float = _safe_float("MOVER_AVWAP_SLOPE_MIN_PCT", "0.02")
+#: Bars back used to measure the AVWAP slope.
+MOVER_AVWAP_SLOPE_LOOKBACK: int = _safe_int("MOVER_AVWAP_SLOPE_LOOKBACK", "3")
+#: Band (%) around the AVWAP within which a pullback wick counts as a "tag".
+MOVER_AVWAP_PULLBACK_BAND_PCT: float = _safe_float("MOVER_AVWAP_PULLBACK_BAND_PCT", "0.30")
+#: Volume confirmation on the reclaim/bounce bar (× recent-bar average). Research:
+#: "a reclaim without a volume spike is not a reclaim, it's a drift."
+MOVER_AVWAP_VOL_MULT: float = _safe_float("MOVER_AVWAP_VOL_MULT", "1.5")
+#: ATR buffer beyond the AVWAP/swing for the stop.
+MOVER_AVWAP_SL_BUFFER_ATR: float = _safe_float("MOVER_AVWAP_SL_BUFFER_ATR", "0.5")
+
 # ── Counter-trend hard-block on confirmed strong movers (Session 30, owner-approved) ─
 # §3.2 #5 reserves HARD blocks for structural impossibility.  Fading a CONFIRMED
 # strong mover with a reversal IS that case: SYNUSDT (+300%/7d, 4h+1h both stacked

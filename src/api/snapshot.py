@@ -87,6 +87,8 @@ _AGENT_DISPLAY_NAMES: Dict[str, str] = {
     # Session 29 (16th evaluator) — rides a confirmed mover, buys each pullback
     # to the MA stack (long gainers, short losers).
     "MOVER_TREND_PULLBACK": "The Momentum Rider",
+    # Anchored-VWAP mover scalp — pullback to the move's VWAP, with the slope.
+    "MOVER_AVWAP_SCALP": "The VWAP Rider",
 }
 
 # Mapping: telemetry path token  →  setup_class string (path tokens come
@@ -113,6 +115,8 @@ _PATH_TO_SETUP: Dict[str, str] = {
     "MA_CROSS_TREND_SHIFT": "MA_CROSS_TREND_SHIFT",
     # _evaluate_mover_trend_pullback → MOVER_TREND_PULLBACK.
     "MOVER_TREND_PULLBACK": "MOVER_TREND_PULLBACK",
+    # _evaluate_mover_avwap_scalp → MOVER_AVWAP_SCALP.
+    "MOVER_AVWAP_SCALP": "MOVER_AVWAP_SCALP",
 }
 
 
