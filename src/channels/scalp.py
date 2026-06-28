@@ -11,6 +11,7 @@ Risk    : SL 0.05–0.1 %, TP1 0.5–1R, TP2 1–1.5R, TP3 optional 20 %, Traili
 from __future__ import annotations
 
 import os
+import time
 import traceback
 from collections import defaultdict
 from datetime import datetime, timezone
@@ -775,6 +776,15 @@ def _sr_detect_levels(
     }
 
 
+# Generation-path tokens for the two mover continuation paths. Used to capture
+# a per-symbol "why didn't this mover fire" reason for the ops Pairs page.
+_MOVER_PATH_TOKENS: frozenset = frozenset({"MOVER_TREND_PULLBACK", "MOVER_AVWAP_SCALP"})
+# Drop a symbol's captured mover reason once it's older than this — keeps the
+# dict bounded to pairs the scanner has touched recently (a synthetic mover that
+# expires out of the universe stops being evaluated and ages out).
+_MOVER_REASON_TTL_SEC: float = 1800.0
+
+
 class ScalpChannel(BaseChannel):
     def __init__(self) -> None:
         super().__init__(CHANNEL_SCALP)
@@ -786,6 +796,13 @@ class ScalpChannel(BaseChannel):
         }
         self._active_generation_path: Optional[str] = None
         self._active_no_signal_reason: Optional[str] = None
+        # Per-symbol last outcome of the two mover paths (MOVER_TREND_PULLBACK,
+        # MOVER_AVWAP_SCALP), keyed by symbol → {path_token: reason, "ts": mono}.
+        # Surfaced on the ops Pairs page so a promoted mover that isn't firing
+        # shows *why* this cycle (e.g. ``no_reclaim``, ``mover_run_too_small``)
+        # instead of leaving us to infer it from cumulative truth-report counters.
+        # Bounded to the live scan universe and pruned on write.
+        self._mover_last_reason: Dict[str, Dict[str, Any]] = {}
         # PR-8: per-(symbol, direction) cooldown for MA_CROSS_TREND_SHIFT.
         # MA crossovers are infrequent — once per pair per direction every
         # ~24h is the realistic cadence.  Without a cooldown, EMA50/EMA200
@@ -823,6 +840,60 @@ class ScalpChannel(BaseChannel):
     def _reject(self, reason: str) -> Optional[Signal]:
         self._active_no_signal_reason = self._no_signal_reason_token(reason)
         return None
+
+    def _record_mover_reason(self, symbol: str, path: str, reason: str) -> None:
+        """Capture this cycle's outcome for one mover path on *symbol*.
+
+        Stores per symbol the latest reason from each mover path plus a single
+        monotonic timestamp. Read back by :meth:`mover_last_reasons` for the ops
+        Pairs page. Pruned opportunistically so the dict tracks only recently
+        scanned pairs (bounded by the live scan universe).
+        """
+        now = time.monotonic()
+        rec = self._mover_last_reason.get(symbol)
+        if rec is None:
+            rec = {}
+            self._mover_last_reason[symbol] = rec
+        rec[path] = reason
+        rec["ts"] = now
+        # Opportunistic prune — cheap, runs on the per-symbol scan cadence.
+        if len(self._mover_last_reason) > 256:
+            stale = [
+                s for s, r in self._mover_last_reason.items()
+                if now - float(r.get("ts", 0.0)) > _MOVER_REASON_TTL_SEC
+            ]
+            for s in stale:
+                self._mover_last_reason.pop(s, None)
+
+    def mover_last_reasons(self) -> Dict[str, Dict[str, Any]]:
+        """Per-symbol last mover-path outcome for the ops Pairs page.
+
+        Returns ``{symbol: {"reason": str, "path": str, "age_sec": float}}``.
+        ``reason`` is the single most useful line per symbol: ``fired`` if either
+        mover path produced a signal last cycle, otherwise the MOVER_TREND_PULLBACK
+        reject (the primary continuation path), falling back to the AVWAP reject.
+        Entries older than the TTL are dropped.
+        """
+        now = time.monotonic()
+        out: Dict[str, Dict[str, Any]] = {}
+        for sym, rec in self._mover_last_reason.items():
+            ts = float(rec.get("ts", 0.0))
+            if now - ts > _MOVER_REASON_TTL_SEC:
+                continue
+            mtp = rec.get("MOVER_TREND_PULLBACK")
+            avwap = rec.get("MOVER_AVWAP_SCALP")
+            if mtp == "fired" or avwap == "fired":
+                reason, path = "fired", (
+                    "MOVER_TREND_PULLBACK" if mtp == "fired" else "MOVER_AVWAP_SCALP"
+                )
+            elif mtp is not None:
+                reason, path = mtp, "MOVER_TREND_PULLBACK"
+            elif avwap is not None:
+                reason, path = avwap, "MOVER_AVWAP_SCALP"
+            else:
+                continue
+            out[sym] = {"reason": reason, "path": path, "age_sec": round(now - ts, 1)}
+        return out
 
     # ------------------------------------------------------------------
     # MA-cross cooldown persistence (chartist-eye seeding fix, 2026-05-06)
@@ -1052,6 +1123,8 @@ class ScalpChannel(BaseChannel):
                     continue
                 if sig is not None:
                     self._generation_telemetry["generated"][_path] += 1
+                    if _path in _MOVER_PATH_TOKENS:
+                        self._record_mover_reason(symbol, _path, "fired")
                     # Apply kill zone check and mark reduced-conviction signals
                     sig_with_kz = self._apply_kill_zone_note(sig, profile=profile)
                     results.append(sig_with_kz)
@@ -1059,6 +1132,8 @@ class ScalpChannel(BaseChannel):
                     self._generation_telemetry["no_signal"][_path] += 1
                     _reason = self._active_no_signal_reason or "none"
                     self._generation_telemetry["no_signal_reason"][f"{_path}:{_reason}"] += 1
+                    if _path in _MOVER_PATH_TOKENS:
+                        self._record_mover_reason(symbol, _path, _reason)
             finally:
                 self._active_generation_path = None
                 self._active_no_signal_reason = None
