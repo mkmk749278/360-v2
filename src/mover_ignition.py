@@ -95,6 +95,11 @@ class MoverIgnitionDetector:
         self.max_gap_sec = max_gap_sec
         self.quote_suffix = quote_suffix
         self._state: Dict[str, _SymbolState] = {}
+        # Latest 24h (change_pct, quote_vol) per symbol from every !ticker@arr
+        # frame — the FULL futures universe (~600 pairs), far beyond the engine's
+        # top-75 scan set. This is the only place we see universe-wide movers, so
+        # promotion sources both ignition AND the top-24h leaderboard from here.
+        self._meta: Dict[str, Tuple[float, float]] = {}
         # Liveness counters — surfaced via stats() so the ops Pairs page can
         # tell "genuinely quiet" (frames flowing, no ignitions) from "stalled
         # feed" (no frames) when the promoting list is empty.
@@ -142,6 +147,26 @@ class MoverIgnitionDetector:
             "last_ignition_at": self._last_ignition_at,
         }
 
+    def meta(self, symbol: str) -> Optional[Tuple[float, float]]:
+        """Latest ``(change_pct, quote_vol)`` for a symbol, or ``None`` if the
+        stream hasn't carried it yet. Lets the scanner admit an igniting pair
+        that isn't in the engine's top-75 ``pair_mgr`` universe."""
+        return self._meta.get(symbol.upper())
+
+    def universe_movers(
+        self, min_abs_pct: float, min_quote_vol: float,
+    ) -> List[Tuple[str, float, float]]:
+        """Full-universe top movers: ``(symbol, change_pct, quote_vol)`` for every
+        streamed pair whose ``|24h %change| >= min_abs_pct`` and
+        ``quote_vol >= min_quote_vol``. The sustained-trend promotion source —
+        sees the whole ~600-pair futures board, not just the scanned top-75."""
+        out: List[Tuple[str, float, float]] = []
+        for sym, (pct, vol) in self._meta.items():
+            if abs(pct) >= min_abs_pct and vol >= min_quote_vol:
+                out.append((sym, pct, vol))
+        out.sort(key=lambda r: -abs(r[1]))
+        return out
+
     # -- internals ----------------------------------------------------------
 
     def _ingest_one(self, t: dict, mono: float) -> Optional[Tuple[str, str]]:
@@ -157,6 +182,13 @@ class MoverIgnitionDetector:
             return None
         if price <= 0:
             return None
+
+        # Universe meta — the 24h %change (``P``) + quote volume for EVERY symbol
+        # the stream carries, so promotion can reach movers outside the top-75.
+        try:
+            self._meta[symbol] = (float(t.get("P", 0.0)), quote_vol)
+        except (TypeError, ValueError):
+            pass
 
         st = self._state.get(symbol)
         if st is None:

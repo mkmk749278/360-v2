@@ -1516,10 +1516,18 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
     regular: List[Dict[str, Any]] = []
     promoting: List[Dict[str, Any]] = []
 
+    scanner = getattr(engine, "_scanner", None)
+    promoted = getattr(scanner, "_mover_promoted_pairs", None) if scanner is not None else None
+    _promoted_keys = set(promoted) if isinstance(promoted, dict) else set()
+
     pair_mgr = getattr(engine, "pair_mgr", None)
     pairs = getattr(pair_mgr, "pairs", None) if pair_mgr is not None else None
     if isinstance(pairs, dict):
         for sym, info in pairs.items():
+            # A synthetically-admitted mover lives in pair_mgr AND the promoted
+            # set — show it only under Promoting, not Regular.
+            if sym in _promoted_keys:
+                continue
             tier = getattr(info, "tier", None)
             regular.append({
                 "symbol": sym,
@@ -1529,21 +1537,21 @@ def collect_pairs_live(engine: Any) -> Dict[str, Any]:
             })
         regular.sort(key=lambda r: (r["tier"], -r["volume_24h_usd"]))
 
-    scanner = getattr(engine, "_scanner", None)
-    promoted = getattr(scanner, "_mover_promoted_pairs", None) if scanner is not None else None
     if isinstance(promoted, dict):
-        lookup = {r["symbol"]: r for r in regular}
+        # Enrich from pair_mgr directly (promoted pairs are now excluded from the
+        # `regular` list, so we can't read volume/%change off those rows).
+        info_pairs = pairs if isinstance(pairs, dict) else {}
         # The promoted dict value is the monotonic EXPIRY time (scanner runs in
         # this same process, so time.monotonic() is comparable). Surface the
         # remaining hold as minutes so the ops Pairs page reads "expires in N min".
         _mono = time.monotonic()
         for sym, expiry in promoted.items():
-            base = lookup.get(sym, {})
+            info = info_pairs.get(sym)
             promoting.append({
                 "symbol": sym,
                 "minutes_left": round(max(0.0, (float(expiry or 0.0) - _mono) / 60.0), 1),
-                "volume_24h_usd": float(base.get("volume_24h_usd", 0.0) or 0.0),
-                "change_24h_pct": float(base.get("change_24h_pct", 0.0) or 0.0),
+                "volume_24h_usd": float(getattr(info, "volume_24h_usd", 0.0) or 0.0),
+                "change_24h_pct": float(getattr(info, "volatility_24h", 0.0) or 0.0),
             })
         promoting.sort(key=lambda r: -r["minutes_left"])
 

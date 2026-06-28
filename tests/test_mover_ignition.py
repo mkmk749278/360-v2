@@ -175,6 +175,22 @@ def test_duplicate_event_time_is_ignored():
     assert out1 == [] and out2 == []
 
 
+def test_meta_and_universe_movers_capture_full_board():
+    det = _make_detector()
+    # One frame carrying three symbols with 24h %change (P) + quote vol (q).
+    det.ingest([
+        {"s": "GUAUSDT", "c": 0.2, "n": 10, "q": 18_000_000.0, "E": 1, "P": -40.0},
+        {"s": "BTCUSDT", "c": 60000.0, "n": 99, "q": 9e9, "E": 1, "P": 1.0},
+        {"s": "TINYUSDT", "c": 0.01, "n": 5, "q": 100_000.0, "E": 1, "P": 55.0},
+    ])
+    assert det.meta("GUAUSDT") == (-40.0, 18_000_000.0)
+    # Universe movers: |%| >= 20 and vol >= 5M → GUAUSDT only (TINY too illiquid,
+    # BTC not a mover). Returned sorted by |%| desc.
+    movers = det.universe_movers(min_abs_pct=20.0, min_quote_vol=5_000_000.0)
+    assert [m[0] for m in movers] == ["GUAUSDT"]
+    assert det.meta("NOPE") is None
+
+
 def test_empty_and_malformed_frames_are_safe():
     det = _make_detector()
     assert det.ingest([], now=1.0) == []

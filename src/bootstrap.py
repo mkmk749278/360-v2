@@ -922,6 +922,10 @@ class Bootstrap:
             # Share the pending-ignition dict by reference: the WS handler fills
             # engine._mover_ignition_pending; the scanner drains it via this alias.
             engine._scanner.mover_ignition_pending = engine._mover_ignition_pending
+            # The detector itself — its !ticker@arr meta is the only full-universe
+            # (~600 pairs) mover source, so the scanner reads it to admit movers
+            # outside the top-75 pair_mgr scan set.
+            engine._scanner.mover_ignition_detector = engine._mover_ignition
 
         # Set critical pairs for REST fallback during WS outages
         top_futures = tier1_futures[:10]

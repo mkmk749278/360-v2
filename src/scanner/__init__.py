@@ -141,7 +141,7 @@ from src.feedback_loop import FeedbackLoop
 from src.kill_zone import check_kill_zone_gate
 from src.mtf import check_mtf_gate, compute_mtf_confluence, _TF_WEIGHTS as _MTF_TF_WEIGHTS
 from src.oi_filter import analyse_oi, check_oi_gate
-from src.pair_manager import PairTier, classify_pair_tier
+from src.pair_manager import PairInfo, PairTier, classify_pair_tier
 from src.confluence_detector import ConfluenceDetector
 from src.level_book import LevelBook
 from src.structure_state import LEG_DOMINANCE_THRESHOLD, StructureTracker
@@ -1090,6 +1090,14 @@ class Scanner:
         # ``_update_movers_promotion`` drains each cycle. ``None`` ⇒ the
         # ignition path is not wired (falls back to the 24h-%change trigger).
         self.mover_ignition_pending: Optional[Dict[str, str]] = None
+        # The ignition detector itself (set after boot) — its !ticker@arr feed is
+        # the ONLY source that sees the full ~600-pair futures universe, so both
+        # promotion sources (ignition + top-24h movers) read it to reach pairs
+        # outside the engine's top-75 pair_mgr scan set.
+        self.mover_ignition_detector: Optional[Any] = None
+        # Symbols we synthetically admitted into pair_mgr.pairs to scan a mover
+        # from outside the top-75 universe; removed when their promotion expires.
+        self._synthetic_mover_pairs: set = set()
 
         # Optional circuit breaker (set after construction)
         self.circuit_breaker: Optional[Any] = None
@@ -1656,6 +1664,39 @@ class Scanner:
 
         return True
 
+    def _ensure_mover_pair(
+        self, symbol: str, change_pct: Optional[float] = None, vol: Optional[float] = None,
+    ) -> Optional["PairInfo"]:
+        """Return the ``pair_mgr`` entry for *symbol*, admitting it if absent.
+
+        Movers worth scalping (a −40% alt) usually sit OUTSIDE the engine's
+        top-75 ``pair_mgr`` universe (``TOP50_FUTURES_ONLY``), so the old
+        ``pair_mgr.pairs.get`` gate silently dropped every one. The detector's
+        ``!ticker@arr`` meta carries the 24h %change + volume for the whole
+        universe; use it to synthesise a TIER3 ``PairInfo`` so the pair can be
+        seeded + scanned. Removed again when its promotion expires.
+        """
+        info = self.pair_mgr.pairs.get(symbol)
+        if info is not None:
+            return info
+        if (change_pct is None or vol is None) and self.mover_ignition_detector is not None:
+            m = self.mover_ignition_detector.meta(symbol)
+            if m is not None:
+                change_pct = m[0] if change_pct is None else change_pct
+                vol = m[1] if vol is None else vol
+        if change_pct is None or vol is None or vol <= 0:
+            return None
+        info = PairInfo(
+            symbol=symbol,
+            market="futures",
+            volume_24h_usd=float(vol),
+            tier=PairTier.TIER3,
+            volatility_24h=abs(float(change_pct)),
+        )
+        self.pair_mgr.pairs[symbol] = info
+        self._synthetic_mover_pairs.add(symbol)
+        return info
+
     async def _update_movers_promotion(self, sorted_pairs_set: set) -> List[str]:
         """Promote non-scanned movers into the scan universe — TWO sources.
 
@@ -1682,6 +1723,11 @@ class Scanner:
         candidates: List[tuple[str, Any]] = []
         ignition_dirs: Dict[str, str] = {}
         seen: set = set()
+        det = self.mover_ignition_detector
+        # Bound seeding cost: stop collecting candidates once promoted+pending
+        # would exceed the concurrent-mover cap (each new candidate costs one
+        # REST seed). universe_movers is sorted |%| desc, so we take the biggest.
+        _budget = max(0, MOVER_PROMOTION_MAX_PAIRS - len(self._mover_promoted_pairs))
 
         # Source 1 — real-time ignition (sudden bursts), if wired.
         pending = self.mover_ignition_pending
@@ -1694,30 +1740,41 @@ class Scanner:
                     continue
                 if symbol in self._mover_promoted_pairs:
                     continue
-                info = self.pair_mgr.pairs.get(symbol)
-                # Liquidity floor — the detector's notional gate is per-window;
-                # this rejects pairs whose 24h book is too thin.
+                # Admit the pair even if it's outside the top-75 pair_mgr set —
+                # an igniting mover is exactly the pair we don't already scan.
+                info = self._ensure_mover_pair(symbol)
                 if info is None or info.volume_24h_usd < MOVER_PROMOTION_MIN_VOLUME_USD:
                     continue
                 ignition_dirs[symbol] = direction
                 candidates.append((symbol, info))
                 seen.add(symbol)
 
-        # Source 2 — top 24h movers (sustained trends). Always on, so a pair
-        # that is clearly trending but not bursting *right now* still gets in.
-        for symbol, info in list(self.pair_mgr.pairs.items()):
+        # Source 2 — top 24h movers across the FULL universe. The detector's
+        # !ticker@arr feed sees ~600 pairs; pair_mgr only tracks the top 75, so
+        # reading from pair_mgr alone (the old behaviour) could never reach a
+        # low-volume / high-%move pair like a −40% alt — the whole point.
+        if det is not None:
+            movers = det.universe_movers(MOVER_PROMOTION_MIN_PCT, MOVER_PROMOTION_MIN_VOLUME_USD)
+        else:
+            movers = [
+                (s, i.volatility_24h, i.volume_24h_usd)
+                for s, i in self.pair_mgr.pairs.items()
+                if i.volatility_24h >= MOVER_PROMOTION_MIN_PCT
+                and i.volume_24h_usd >= MOVER_PROMOTION_MIN_VOLUME_USD
+            ]
+        for symbol, change_pct, vol in movers:
+            if len(candidates) >= _budget:
+                break
             if symbol in sorted_pairs_set:
-                # Already in main scan — all evaluators run normally; no restriction.
                 self._mover_promoted_pairs.pop(symbol, None)
                 continue
             if symbol in self._mover_promoted_pairs or symbol in seen:
                 continue
-            if (
-                info.volatility_24h >= MOVER_PROMOTION_MIN_PCT
-                and info.volume_24h_usd >= MOVER_PROMOTION_MIN_VOLUME_USD
-            ):
-                candidates.append((symbol, info))
-                seen.add(symbol)
+            info = self._ensure_mover_pair(symbol, change_pct, vol)
+            if info is None or info.volume_24h_usd < MOVER_PROMOTION_MIN_VOLUME_USD:
+                continue
+            candidates.append((symbol, info))
+            seen.add(symbol)
 
         if candidates:
             seed_results = await asyncio.gather(
@@ -1748,9 +1805,14 @@ class Scanner:
                 self._mover_promoted_pairs[symbol] = now_mono + MOVER_PROMOTION_TTL_SEC
 
         # Evict pairs that entered the main scan, or whose promotion TTL elapsed.
+        # A synthetically-admitted pair (one we added to pair_mgr to scan it) is
+        # also removed from pair_mgr so the tracked universe doesn't grow unbounded.
         for sym in list(self._mover_promoted_pairs.keys()):
             if sym in sorted_pairs_set or now_mono >= self._mover_promoted_pairs[sym]:
                 del self._mover_promoted_pairs[sym]
+                if sym in self._synthetic_mover_pairs:
+                    self.pair_mgr.pairs.pop(sym, None)
+                    self._synthetic_mover_pairs.discard(sym)
 
         # Cap concurrently-scanned movers, freshest first (largest expiry =
         # most-recently promoted) so new ignitions are never starved by stale holds.
