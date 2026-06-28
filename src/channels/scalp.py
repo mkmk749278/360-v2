@@ -22,6 +22,15 @@ from config import (
     FUNDING_RATE_EXTREME_THRESHOLD,
     SCALP_ORB_ENABLED,
     MOVER_TREND_PULLBACK_ENABLED,
+    MOVER_AVWAP_SCALP_ENABLED,
+    MOVER_AVWAP_TF,
+    MOVER_AVWAP_ANCHOR_LOOKBACK,
+    MOVER_AVWAP_MIN_MOVE_PCT,
+    MOVER_AVWAP_SLOPE_MIN_PCT,
+    MOVER_AVWAP_SLOPE_LOOKBACK,
+    MOVER_AVWAP_PULLBACK_BAND_PCT,
+    MOVER_AVWAP_VOL_MULT,
+    MOVER_AVWAP_SL_BUFFER_ATR,
     MOVER_TP_MA_FAST,
     MOVER_TP_MA_MID,
     MOVER_TP_MA_SLOW,
@@ -46,6 +55,7 @@ from src.filters import (
 )
 from src.mtf import mtf_gate_scalp_standard
 from src.smc import Direction
+from src.vwap import compute_vwap
 from src.utils import get_logger
 
 log = get_logger("scalp")
@@ -1009,6 +1019,7 @@ class ScalpChannel(BaseChannel):
             ("_evaluate_volume_surge_breakout", self._evaluate_volume_surge_breakout),
             ("_evaluate_breakdown_short", self._evaluate_breakdown_short),
             ("_evaluate_mover_trend_pullback", self._evaluate_mover_trend_pullback),
+            ("_evaluate_mover_avwap_scalp", self._evaluate_mover_avwap_scalp),
             ("_evaluate_opening_range_breakout", self._evaluate_opening_range_breakout),
             ("_evaluate_sr_flip_retest", self._evaluate_sr_flip_retest),
             ("_evaluate_funding_extreme", self._evaluate_funding_extreme),
@@ -3059,6 +3070,195 @@ class ScalpChannel(BaseChannel):
             symbol,
             "LONG" if direction == Direction.LONG else "SHORT",
             trigger, close, sl_dist / close * 100.0, sig.confidence,
+        )
+        return sig
+
+    # ────────────────────────────────────────────────────────────────────────
+    # MOVER_AVWAP_SCALP — anchored-VWAP continuation scalp (2026-06-28)
+    # ────────────────────────────────────────────────────────────────────────
+    def _evaluate_mover_avwap_scalp(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """MOVER_AVWAP_SCALP: scalp a confirmed mover via the VWAP anchored at the
+        move's origin, entered WITH the AVWAP slope on a pullback to it.
+
+        The professional mover-scalp standard (snappchart / TrendSpider /
+        trademomentum VWAP-momentum playbooks): the anchored VWAP is the average
+        price every participant in the move paid, so a pullback to it is where the
+        trend reloads. Direction is set by the AVWAP slope ("rising VWAP = long
+        only, falling = short only" — don't fight the tape) and a close decisively
+        through the AVWAP against the trend ends the thesis. Anchor = the swing
+        extreme over ``MOVER_AVWAP_ANCHOR_LOOKBACK`` bars (the leg's origin); the
+        AVWAP is ``compute_vwap`` over ``candles[anchor:]``. Live by default;
+        ``MOVER_AVWAP_SCALP_ENABLED=false`` → shadow-only log.
+        """
+        tf = candles.get(MOVER_AVWAP_TF)
+        lookback = MOVER_AVWAP_ANCHOR_LOOKBACK
+        need = lookback + 2
+        if tf is None or len(tf.get("close", [])) < need:
+            return self._reject("insufficient_candles")
+        closes = [float(c) for c in tf.get("close", [])]
+        highs = [float(h) for h in tf.get("high", [])]
+        lows = [float(low) for low in tf.get("low", [])]
+        vols = [float(v) for v in tf.get("volume", [])]
+        if min(len(closes), len(highs), len(lows), len(vols)) < need:
+            return self._reject("insufficient_candles")
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+            return self._reject("basic_filters_failed")
+        close = closes[-1]
+        if close <= 0:
+            return self._reject("insufficient_candles")
+
+        # ── Direction from the recent leg; anchor at its origin swing ──────────
+        win_h = highs[-lookback:]
+        win_l = lows[-lookback:]
+        anchor_high_off = max(range(lookback), key=lambda i: win_h[i])
+        anchor_low_off = min(range(lookback), key=lambda i: win_l[i])
+        swing_high = win_h[anchor_high_off]
+        swing_low = win_l[anchor_low_off]
+        if swing_low <= 0 or swing_high <= 0:
+            return self._reject("insufficient_candles")
+        # Down-leg: a swing high earlier, price far below it now → SHORT, anchor at
+        # the high. Up-leg: a swing low earlier, price far above it now → LONG.
+        down_move = (swing_high - close) / swing_high * 100.0
+        up_move = (close - swing_low) / swing_low * 100.0
+        if (down_move >= up_move and down_move >= MOVER_AVWAP_MIN_MOVE_PCT
+                and anchor_high_off < anchor_low_off):
+            direction = Direction.SHORT
+            anchor_off = anchor_high_off
+        elif (up_move > down_move and up_move >= MOVER_AVWAP_MIN_MOVE_PCT
+                and anchor_low_off < anchor_high_off):
+            direction = Direction.LONG
+            anchor_off = anchor_low_off
+        else:
+            return self._reject("no_mover_leg")
+
+        anchor_idx = len(closes) - lookback + anchor_off
+        seg_h, seg_l, seg_c, seg_v = (
+            highs[anchor_idx:], lows[anchor_idx:], closes[anchor_idx:], vols[anchor_idx:],
+        )
+        k = MOVER_AVWAP_SLOPE_LOOKBACK
+        if len(seg_c) < k + 2:
+            return self._reject("anchor_too_recent")
+
+        avwap_res = compute_vwap(seg_h, seg_l, seg_c, seg_v)
+        avwap_prev_res = compute_vwap(seg_h[:-k], seg_l[:-k], seg_c[:-k], seg_v[:-k])
+        if avwap_res is None or avwap_prev_res is None:
+            return self._reject("avwap_unavailable")
+        avwap = avwap_res.vwap
+        slope_pct = (avwap - avwap_prev_res.vwap) / close * 100.0
+
+        # ── Slope filter: trade WITH the AVWAP slope only ──────────────────────
+        if direction == Direction.LONG and slope_pct < MOVER_AVWAP_SLOPE_MIN_PCT:
+            return self._reject("avwap_slope_against")
+        if direction == Direction.SHORT and slope_pct > -MOVER_AVWAP_SLOPE_MIN_PCT:
+            return self._reject("avwap_slope_against")
+
+        # ── Pullback-to-AVWAP entry (continuation), volume-confirmed ───────────
+        band = MOVER_AVWAP_PULLBACK_BAND_PCT / 100.0
+        prev_high = highs[-2]
+        prev_low = lows[-2]
+        atr_val = (
+            indicators.get(MOVER_AVWAP_TF, {}).get("atr_last")
+            or indicators.get("5m", {}).get("atr_last")
+            or close * 0.004
+        )
+        buf = atr_val * MOVER_AVWAP_SL_BUFFER_ATR
+        recent_vols = seg_v[-20:] if len(seg_v) >= 20 else seg_v
+        avg_vol = (sum(recent_vols[:-1]) / (len(recent_vols) - 1)) if len(recent_vols) > 1 else 0.0
+        vol_ok = avg_vol <= 0 or vols[-1] >= avg_vol * MOVER_AVWAP_VOL_MULT
+
+        trigger = ""
+        sl = 0.0
+        if direction == Direction.LONG:
+            if prev_low <= avwap * (1.0 + band) and close > avwap and close > closes[-2]:
+                if not vol_ok:
+                    return self._reject("avwap_reclaim_no_volume")
+                trigger = "avwap_reclaim"
+                sl = min(avwap, prev_low) - buf
+            if not trigger:
+                if prev_low > avwap * (1.0 + band):
+                    return self._reject("no_avwap_tag")
+                return self._reject("no_avwap_reclaim")
+            if sl >= close:
+                return self._reject("invalid_sl_geometry")
+            sl_dist = close - sl
+            tp1, tp2, tp3 = close + sl_dist, close + sl_dist * 1.6, close + sl_dist * 2.5
+        else:
+            if prev_high >= avwap * (1.0 - band) and close < avwap and close < closes[-2]:
+                if not vol_ok:
+                    return self._reject("avwap_reclaim_no_volume")
+                trigger = "avwap_reclaim"
+                sl = max(avwap, prev_high) + buf
+            if not trigger:
+                if prev_high < avwap * (1.0 - band):
+                    return self._reject("no_avwap_tag")
+                return self._reject("no_avwap_reclaim")
+            if sl <= close:
+                return self._reject("invalid_sl_geometry")
+            sl_dist = sl - close
+            tp1, tp2, tp3 = close - sl_dist, close - sl_dist * 1.6, close - sl_dist * 2.5
+
+        if sl_dist <= 0:
+            return self._reject("invalid_sl_geometry")
+
+        if not MOVER_AVWAP_SCALP_ENABLED:
+            log.info(
+                "[SHADOW] MOVER_AVWAP_SCALP_WOULD_FIRE: symbol={} dir={} close={:.6f} "
+                "avwap={:.6f} slope_pct={:.3f} sl={:.6f} sl_dist_pct={:.3f}",
+                symbol, "LONG" if direction == Direction.LONG else "SHORT",
+                close, avwap, slope_pct, sl, sl_dist / close * 100.0,
+            )
+            return self._reject("shadow_mode")
+
+        profile = smc_data.get("pair_profile")
+        _regime_ctx = smc_data.get("regime_context")
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=direction,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="MVAVW",
+            atr_val=atr_val,
+            setup_class="MOVER_AVWAP_SCALP",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return self._reject("signal_build_failed")
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+        # The AVWAP slope IS the higher-context trend confirmation.
+        sig.htf_trend_aligned = True
+        sig.entry_trigger = trigger
+        sig.confidence = min(100.0, sig.confidence + 8.0)
+        log.info(
+            "MOVER_AVWAP_FIRED: symbol={} dir={} close={:.6f} avwap={:.6f} "
+            "slope_pct={:.3f} sl_dist_pct={:.3f} conf={:.1f}",
+            symbol, "LONG" if direction == Direction.LONG else "SHORT",
+            close, avwap, slope_pct, sl_dist / close * 100.0, sig.confidence,
         )
         return sig
 

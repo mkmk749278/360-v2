@@ -74,6 +74,10 @@ class SetupClass(str, Enum):
     # Session 29: mover continuation pullback — enter each pullback to the MA
     # stack on a confirmed strong mover (long gainers, short losers).
     MOVER_TREND_PULLBACK = "MOVER_TREND_PULLBACK"
+    # 2026-06-28: anchored-VWAP mover continuation scalp — pullback to the VWAP
+    # anchored at the move's origin, entered with the AVWAP slope (the
+    # participant-cost reference; the professional mover-scalp standard).
+    MOVER_AVWAP_SCALP = "MOVER_AVWAP_SCALP"
     # PR-01: auxiliary-channel evaluator identities — preserved as distinct setup classes
     # so that downstream scoring and suppression diagnostics reflect true channel intent.
     FVG_RETEST = "FVG_RETEST"
@@ -128,6 +132,7 @@ ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
     SetupClass.OPENING_RANGE_BREAKOUT: PortfolioRole.SUPPORT,  # disabled by default (PR-06); role preserved pending proper rebuild
     SetupClass.FAILED_AUCTION_RECLAIM: PortfolioRole.SUPPORT,
     SetupClass.MOVER_TREND_PULLBACK: PortfolioRole.SUPPORT,  # fires on strong movers — situational but recurring
+    SetupClass.MOVER_AVWAP_SCALP: PortfolioRole.SUPPORT,  # anchored-VWAP mover continuation — same family
     # ── specialist ────────────────────────────────────────────────────────
     # Low-frequency, narrow-context, high-selectivity paths.  Valid only
     # under precise market conditions and expected to fire rarely.
@@ -198,6 +203,7 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
+        SetupClass.MOVER_AVWAP_SCALP,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -271,6 +277,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
+        SetupClass.MOVER_AVWAP_SCALP,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -294,6 +301,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
+        SetupClass.MOVER_AVWAP_SCALP,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -345,6 +353,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
+        SetupClass.MOVER_AVWAP_SCALP,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -366,6 +375,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
+        SetupClass.MOVER_AVWAP_SCALP,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
@@ -378,6 +388,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
+        SetupClass.MOVER_AVWAP_SCALP,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.FUNDING_EXTREME_SIGNAL,
         SetupClass.LIQUIDATION_REVERSAL,
@@ -401,6 +412,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.VOLUME_SURGE_BREAKOUT,
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
+        SetupClass.MOVER_AVWAP_SCALP,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.FUNDING_EXTREME_SIGNAL,
         # PR-ARCH-7B: liquidation-reversal setups are specifically designed for
@@ -447,6 +459,7 @@ _MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
     "QUIET_COMPRESSION_BREAK":        3.0,  # BB lower + 0.5×ATR; 2.08% seen live
     "TREND_PULLBACK_EMA":             3.0,  # ATR×1.0 minimum; high-ATR pairs reach 3%
     "MOVER_TREND_PULLBACK":           3.0,  # Mover continuation; SL beyond mid-MA, ATR-buffered
+    "MOVER_AVWAP_SCALP":              3.0,  # Mover continuation; SL beyond anchored VWAP, ATR-buffered
     "FUNDING_EXTREME_SIGNAL":         3.0,  # Liq-cluster SL; can be 2-3% away
     "MA_CROSS_TREND_SHIFT":           3.0,  # Structural SL beyond opposite-side swing
 }
@@ -1008,6 +1021,8 @@ def classify_setup(
         # (without this, classify_setup re-labels it by heuristic and it never
         # scores/dispatches as itself — the bug that left it 0-emitting).
         "MOVER_TREND_PULLBACK",
+        # 2026-06-28: anchored-VWAP mover scalp — same identity-preservation need.
+        "MOVER_AVWAP_SCALP",
         # PR-01: active auxiliary channel evaluator identities — these channels
         # self-classify their output; downstream must not reclassify to a generic class.
         "FVG_RETEST",
@@ -1722,13 +1737,13 @@ class SignalScoringEngine:
         "TRENDING_UP": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
                         "THREE_WHITE_SOLDIERS", "WHALE_MOMENTUM", "VOLUME_SURGE_BREAKOUT",
                         "CONTINUATION_LIQUIDITY_SWEEP", "TREND_PULLBACK_EMA",
-                        "MOVER_TREND_PULLBACK",
+                        "MOVER_TREND_PULLBACK", "MOVER_AVWAP_SCALP",
                         "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION",
                         "DIVERGENCE_CONTINUATION"],
         "TRENDING_DOWN": ["LIQUIDITY_SWEEP_REVERSAL", "BREAKOUT_INITIAL", "BREAKOUT_RETEST",
                           "THREE_BLACK_CROWS", "WHALE_MOMENTUM", "BREAKDOWN_SHORT",
                           "CONTINUATION_LIQUIDITY_SWEEP", "TREND_PULLBACK_EMA",
-                          "MOVER_TREND_PULLBACK",
+                          "MOVER_TREND_PULLBACK", "MOVER_AVWAP_SCALP",
                           "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION",
                           "DIVERGENCE_CONTINUATION"],
         "RANGING": ["SWING_STANDARD", "SR_FLIP_RETEST", "FAILED_AUCTION_RECLAIM"],
@@ -1811,6 +1826,9 @@ class SignalScoringEngine:
         # higher-context trend, so the evaluator stamps htf_trend_aligned=True and
         # earns full regime affinity here regardless of the noisy entry-TF label.
         "MOVER_TREND_PULLBACK",
+        # Anchored-VWAP mover scalp: same family thesis (pullback into a confirmed
+        # trend, entry timed at the anchored-VWAP reload), same affinity.
+        "MOVER_AVWAP_SCALP",
     })
 
     # Breakout / displacement continuation paths need bounded thesis credit for
