@@ -606,7 +606,18 @@ MOVER_PROMOTION_MIN_PCT: float = _safe_float("MOVER_PROMOTION_MIN_PCT", "15.0")
 #: Minimum 24h USD volume for movers-promoted pairs (lower than vol-surge gate).
 MOVER_PROMOTION_MIN_VOLUME_USD: float = _safe_float("MOVER_PROMOTION_MIN_VOLUME", "5000000")
 #: How many scan cycles a movers-promoted pair stays in the scan universe.
+#: DEPRECATED for the ignition path — superseded by the time-based
+#: MOVER_PROMOTION_TTL_SEC below. Retained for any external tooling.
 MOVER_PROMOTION_CYCLES: int = _safe_int("MOVER_PROMOTION_CYCLES", "5")
+#: How long (seconds) a mover stays in the scan universe after promotion. Once a
+#: pair ignites we hold it long enough for VSB/BDS/MOVER_TREND_PULLBACK to find a
+#: real entry as the move develops on 5m/15m structure — a ~25 s cycle-count hold
+#: dropped pairs before any setup could form. Default 6 h (owner, 2026-06-28).
+MOVER_PROMOTION_TTL_SEC: float = _safe_float("MOVER_PROMOTION_TTL_SEC", "21600")
+#: Max concurrently-scanned mover-promoted pairs. Separate from the volume-surge
+#: SURGE_PROMOTION_MAX_PAIRS — with a 6 h hold the old shared cap of 5 would fill
+#: and starve fresh ignitions, so movers get their own (larger) budget.
+MOVER_PROMOTION_MAX_PAIRS: int = _safe_int("MOVER_PROMOTION_MAX_PAIRS", "30")
 
 # ── Real-time mover IGNITION detector (catch movers at minute-zero) ───────────
 # Replaces the lagging 24h-%change promotion trigger with a real-time signal off

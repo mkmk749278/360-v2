@@ -1,6 +1,8 @@
 """Tests for the pairs X-ray builder (regular universe + promoting movers)."""
 from __future__ import annotations
 
+import time
+
 from src.api.snapshot import build_pairs, collect_pairs_live
 
 
@@ -38,7 +40,9 @@ def _engine():
         "ARXUSDT": _Info(_Tier("TIER3"), 8_000_000.0, 22.0),
         "GLWUSDT": _Info(_Tier("TIER2"), 60_000_000.0, 5.0),
     }
-    promoted = {"ARXUSDT": 5, "GLWUSDT": 2}
+    # Values are monotonic EXPIRY times: ARX has ~5h left, GLW ~2h.
+    now = time.monotonic()
+    promoted = {"ARXUSDT": now + 5 * 3600, "GLWUSDT": now + 2 * 3600}
     return _Engine(pairs, promoted)
 
 
@@ -54,13 +58,13 @@ def test_collect_regular_pairs_sorted_with_tier_and_volume():
     assert btc["change_24h_pct"] == 1.2
 
 
-def test_promoting_pairs_carry_cycles_and_enriched_volume():
+def test_promoting_pairs_carry_minutes_left_and_enriched_volume():
     out = collect_pairs_live(_engine())
     assert out["promoting_count"] == 2
-    # Sorted by cycles_left desc → ARXUSDT (5) before GLWUSDT (2).
+    # Sorted by minutes_left desc → ARXUSDT (~5h) before GLWUSDT (~2h).
     assert [p["symbol"] for p in out["promoting"]] == ["ARXUSDT", "GLWUSDT"]
     arx = out["promoting"][0]
-    assert arx["cycles_left"] == 5
+    assert 295 <= arx["minutes_left"] <= 300       # ~5h, minus test runtime
     assert arx["change_24h_pct"] == 22.0          # enriched from the regular row
     assert arx["volume_24h_usd"] == 8_000_000.0
     assert "updated_at" in out
