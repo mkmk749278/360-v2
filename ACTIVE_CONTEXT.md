@@ -4,6 +4,31 @@
 
 ---
 
+## 🟢 SESSION 37 2026-06-29 — Mover pipeline made to actually fire + exit-model default fix + SR_FLIP shorts-only (merged: 360-v2 #666–#672, 360ce-ops #48/#49/#50)
+
+One long arc: get the promoted movers to actually trade, then fix the exit logic that was bleeding the whole book, then cut the worst-bleeding direction. Built the diagnostic that found each wall, fixed each in turn.
+
+**Mover pipeline — from "Promoting (0)" to signals firing:**
+- **#666** — admit outside-top-75 movers into the promotion universe. With `TOP50_FUTURES_ONLY=true`, `pair_mgr.pairs` is capped at the top ~75 by volume and both promotion sources keyed off `pair_mgr.pairs.get(symbol)` → real movers (GUAUSDT −23%, SKYAIUSDT −44%) resolved to `None` and were silently dropped. The `!ticker@arr` detector sees the whole board; now it captures `(24h %change, quote_vol)` per symbol and the scanner admits outside movers as synthetic TIER3 pairs (`_ensure_mover_pair`), evicted on promotion expiry.
+- **#667 / #668 / #670** (engine) + **ops #48 / #49 / #50** — per-pair "Why not firing" column on the ops Pairs page. Built incrementally: in-evaluator reason capture (#667) → scanner-side pre-eval skip capture (#668, the all-`—` was telling us movers were skipped *before* evaluation) → specific skip reasons instead of generic `channel_skipped` (#670). This diagnostic is what surfaced every subsequent root cause.
+- **#669 — THE mover bug.** The mover spread gate compared `ctx_for_chan.spread_pct` (a **percent**, 0.5 == 0.5%) against the literal `0.005` — i.e. 0.005%, ~100× too tight — so it skipped **every** promoted mover before evaluation. Its own log said "> 0.5% — skip", so 0.5% was always the intent; written as a fraction by mistake. Fixed via env-tunable **`MOVER_MAX_SPREAD_PCT`** (default 0.5). After this, movers reached the evaluators and MOVER_TREND_PULLBACK started firing (TURBO, RIF, US, BEL, PENDLE all `✓ fired`).
+- Note for next session: **MOVER_AVWAP_SCALP has not fired yet** — every mover signal so far is MOVER_TREND_PULLBACK. Watch whether the AVWAP rider's anchor+slope+pullback gate is too strict.
+
+**Exit model — the −18% leak (#671, owner-sign-off, owner-directed):**
+- Profit-Lab (233 closed signals, ops Profit page): engine real exits net **−18.13%** while "SL→entry once +1% in profit, then close 100% at TP1" nets **−0.23%** (+17.89% edge). Avg MFE +1.55% — signals go green then give it back. **The leak is the exit logic, not the entries.**
+- Root cause: the Session-34 model (BE@+1%, TP1-full, pre-TP off, loose invalidation) was wired into the **execution FSM** only. **`trade_monitor`** — the signal tracker that drives the Profit page + what a signal-follower experiences — still ran the OLD model: 40% partial at TP1 + TP2/TP3 runner, BE only on TP1 hit, structural/trailing invalidation kills. That mismatch was the −18%.
+- Fixed: `trade_monitor` engine-default exit now = BE→entry at +1% MFE (ratchet-only, pre-TP1) + full close at TP1 (`_close_full_at_tp1`) + no engine-wide invalidation. Gated by **`BE_THEN_TP1_DEFAULT_ENABLED`** (default on, env-reversible). **Per-user opt-in for pre-TP / invalidation preserved** (handled by `_check_per_user_invalidation` + FSM) — this flag governs only the engine's default book. Tradeoff: TP1-full forgoes the occasional TP2/TP3 runner; backtest still nets +17.89%.
+
+**SR_FLIP shorts-only (#672, owner-sign-off, owner-directed stopgap):**
+- SR_FLIP_RETEST is the biggest single drag (−16.6% / 85 signals) — but one-sided: SHORT +5.11% (52% win), **LONG −21.75% (19% win)**, losing in every regime (9% win even in TRENDING_UP). Win rate is exit-independent → an entry-quality problem the #671 exit fix only half-addresses (SR_FLIP → ~−8.8% under the new exit).
+- Gated longs off by default via **`SR_FLIP_LONG_ENABLED`** (env-reversible); shorts unaffected. **Explicitly a tourniquet, not a cure** — owner's words. Follow-up tracked as a GitHub issue: investigate *why* SR_FLIP long flips fail and fix-or-drop the long thesis (do it on a fresh post-#671 data window, not stale numbers).
+
+**New env tunables this session:** `MOVER_MAX_SPREAD_PCT` (0.5), `BE_THEN_TP1_DEFAULT_ENABLED` (true), `SR_FLIP_LONG_ENABLED` (false).
+
+**Watch next (fresh data window — counters are cumulative, old closed signals reflect old exits):** Profit page "engine real exits" should converge from −18% toward the simulator's −0.23%; mover givebacks (POWRUSDT-type +5% MFE → invalidated) should convert to BE/TP1; SR_FLIP drag should drop with longs gone.
+
+---
+
 ## 🟢 SESSION 36 2026-06-27 — Referral/invite-a-friend + manual tier-grant control (merged: 360-v2 #654/#655, lumin-app #106, 360ce-ops #43)
 
 **Two features shipped end-to-end this session, both across multiple repos:**
