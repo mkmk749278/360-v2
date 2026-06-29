@@ -32,6 +32,8 @@ from config import (
     MONITOR_POLL_INTERVAL,
     SIGNAL_EXPIRY_ENABLED,
     PRE_TP_ENABLED,
+    BE_SHIFT_TRIGGER_PCT,
+    BE_THEN_TP1_DEFAULT_ENABLED,
     INVALIDATION_MODE_DEFAULT,
     INVALIDATION_TRAILING_ARM_RSCALE_ENABLED,
     INVALIDATION_TRAILING_ARM_R_MAX,
@@ -1413,6 +1415,28 @@ class TradeMonitor:
                     uid, sig.signal_id, exc,
                 )
 
+    async def _close_full_at_tp1(self, sig: Signal) -> None:
+        """Engine-default exit: close 100% of the signal at TP1, terminal.
+
+        No partial, no TP2/TP3 runner — the whole move is banked at TP1 the
+        moment it is reached (owner directive 2026-06-29, BE_THEN_TP1). Mirrors
+        the TP3 full-close finalisation but fills at TP1: broker close →
+        realized PnL @ TP1 → final outcome → notify → record → remove.
+        """
+        if sig.first_tp_touch_timestamp is None:
+            sig.first_tp_touch_timestamp = utcnow()
+        sig.best_tp_hit = max(sig.best_tp_hit, 1)
+        sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
+            entry_price=sig.entry, exit_price=sig.tp1, direction=sig.direction.value
+        )
+        await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp1)
+        self._set_realized_pnl(sig, sig.tp1)
+        self._apply_final_outcome(sig, hit_tp=1, hit_sl=False)
+        await self._post_update(sig, "🎯 TP1 HIT ✅ — full close (100%)")
+        self._record_outcome(sig, hit_tp=1, hit_sl=False)
+        await self._post_signal_closed(sig, is_tp=True, tp_label="TP1", close_price=sig.tp1)
+        self._remove(sig.signal_id)
+
     async def _evaluate_signal(self, sig: Signal) -> None:
         # Terminal-status guard (2026-05-08): if the signal already reached
         # a terminal lifecycle state, return immediately — re-evaluating
@@ -1579,6 +1603,24 @@ class TradeMonitor:
         sig.max_favorable_excursion_pct = max(sig.max_favorable_excursion_pct, sig.pnl_pct)
         sig.max_adverse_excursion_pct = min(sig.max_adverse_excursion_pct, sig.pnl_pct)
 
+        # Engine-default BE-to-entry (owner directive 2026-06-29): once the trade
+        # has been ≥ BE_SHIFT_TRIGGER_PCT (1%) in profit at any point, ratchet the
+        # stop to entry (break-even). A subsequent reversal then exits at ~0%
+        # instead of giving the move back to a loss — the dominant Profit-Lab
+        # leak. Ratchet-only (never widens the stop) and pre-TP1 only; once TP1 is
+        # hit the TP-handler owns the stop. Per-user opted-in exit models are
+        # unaffected — this governs the engine's own signal book.
+        if (
+            BE_THEN_TP1_DEFAULT_ENABLED
+            and sig.status == "ACTIVE"
+            and sig.entry > 0
+            and sig.max_favorable_excursion_pct >= BE_SHIFT_TRIGGER_PCT
+        ):
+            if is_long and sig.stop_loss < sig.entry:
+                sig.stop_loss = sig.entry
+            elif not is_long and sig.stop_loss > sig.entry:
+                sig.stop_loss = sig.entry
+
         # Zero-PnL guard – don't trigger SL when price hasn't moved from entry
         # This prevents false stops from stale prices or floating-point noise
         if abs(sig.pnl_pct) < _ZERO_PNL_THRESHOLD_PCT:
@@ -1698,7 +1740,13 @@ class TradeMonitor:
         # longer holds (regime flip, momentum loss, EMA crossover).  Checked
         # AFTER the SL check so that a price gap through the SL is always
         # caught at the SL level, not at the (potentially worse) current price.
-        invalidation_reason = self._check_invalidation(sig)
+        # Engine-default exit disables structural/trailing invalidation kills
+        # (owner directive 2026-06-29): they were a primary Profit-Lab leak,
+        # closing winners back below break-even. Users who opt into invalidation
+        # are served by _check_per_user_invalidation (run earlier, unaffected).
+        invalidation_reason = (
+            None if BE_THEN_TP1_DEFAULT_ENABLED else self._check_invalidation(sig)
+        )
         if invalidation_reason:
             # Cap the exit price — invalidation must never produce a worse exit
             # than the SL would have given.  For a LONG that gapped down, the
@@ -1791,6 +1839,9 @@ class TradeMonitor:
                     except Exception as _exc:
                         log.warning("Partial TP2 close failed for {}: {}", sig.symbol, _exc)
             if _c_high > 0 and _c_high >= sig.tp1 and sig.status not in ("TP1_HIT", "TP2_HIT", "TP3_HIT"):
+                if BE_THEN_TP1_DEFAULT_ENABLED:
+                    await self._close_full_at_tp1(sig)
+                    return
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP1_HIT"
@@ -1861,6 +1912,9 @@ class TradeMonitor:
                     except Exception as _exc:
                         log.warning("Partial TP2 close failed for {}: {}", sig.symbol, _exc)
             if _c_low > 0 and _c_low <= sig.tp1 and sig.status not in ("TP1_HIT", "TP2_HIT", "TP3_HIT"):
+                if BE_THEN_TP1_DEFAULT_ENABLED:
+                    await self._close_full_at_tp1(sig)
+                    return
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP1_HIT"
