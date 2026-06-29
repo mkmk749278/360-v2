@@ -618,6 +618,13 @@ MOVER_PROMOTION_TTL_SEC: float = _safe_float("MOVER_PROMOTION_TTL_SEC", "21600")
 #: SURGE_PROMOTION_MAX_PAIRS — with a 6 h hold the old shared cap of 5 would fill
 #: and starve fresh ignitions, so movers get their own (larger) budget.
 MOVER_PROMOTION_MAX_PAIRS: int = _safe_int("MOVER_PROMOTION_MAX_PAIRS", "30")
+#: Max bid/ask spread (as a PERCENT of mid — same unit as ScanContext.spread_pct,
+#: i.e. 0.5 == 0.5%) a mover-promoted pair may have to be scanned by the scalp
+#: channel. Movers are lower-cap and run wider than blue chips, so this is looser
+#: than the regular adaptive spread gate. NB: the old hard-coded gate used 0.005
+#: against a percent-unit value — that meant 0.005%, ~100× too tight, and silently
+#: skipped EVERY promoted mover before evaluation (the "nothing fires" root cause).
+MOVER_MAX_SPREAD_PCT: float = _safe_float("MOVER_MAX_SPREAD_PCT", "0.5")
 
 # ── Real-time mover IGNITION detector (catch movers at minute-zero) ───────────
 # Replaces the lagging 24h-%change promotion trigger with a real-time signal off
