@@ -22,6 +22,7 @@ from config import (
     CHANNEL_SCALP,
     FUNDING_RATE_EXTREME_THRESHOLD,
     SCALP_ORB_ENABLED,
+    SR_FLIP_LONG_ENABLED,
     MOVER_TREND_PULLBACK_ENABLED,
     MOVER_AVWAP_SCALP_ENABLED,
     MOVER_AVWAP_TF,
@@ -3849,6 +3850,15 @@ class ScalpChannel(BaseChannel):
             level = prior_swing_low
         else:
             return self._reject("flip_close_not_confirmed")
+
+        # SR_FLIP long-side disable (owner directive 2026-06-29, stopgap). Profit-Lab
+        # (85 closed signals): SR_FLIP SHORT nets +5.1% at 52% win, but SR_FLIP LONG
+        # nets −21.8% at 19% win — the long side is the entire path's drag and loses
+        # in every regime (9% win even in TRENDING_UP). Disable longs by default until
+        # the long-entry thesis is repaired; env-reversible. NOTE: a tourniquet, not a
+        # fix — the real work is understanding why long flips fail (tracked separately).
+        if direction == Direction.LONG and not SR_FLIP_LONG_ENABLED:
+            return self._reject("long_disabled")
 
         # 1H break confirmation (OWNER_BRIEF §3.4a — "HTF Structure, LTF
         # Entry").  Only enforced when the level came from LevelBook (HTF

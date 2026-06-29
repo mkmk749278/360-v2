@@ -26,6 +26,13 @@ from src.channels.scalp import ScalpChannel, _CLS_DISABLED_2026_05_17
 from src.smc import Direction, LiquiditySweep
 
 
+@pytest.fixture(autouse=True)
+def _enable_srflip_long(monkeypatch):
+    # SR_FLIP longs are disabled by default (owner stopgap 2026-06-29); the SR_FLIP
+    # 4h-branch TP tests here exercise the long-side geometry, valid as an opt-in.
+    monkeypatch.setattr(scalp_module, "SR_FLIP_LONG_ENABLED", True)
+
+
 # ---------------------------------------------------------------------------
 # Helpers (kept local; mirrors the patterns used in tests/test_channels.py).
 # ---------------------------------------------------------------------------

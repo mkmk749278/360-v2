@@ -7,6 +7,14 @@ from src.channels.scalp import ScalpChannel, _CLS_DISABLED_2026_05_17
 from src.smc import Direction, LiquiditySweep, MSSSignal
 
 
+@pytest.fixture(autouse=True)
+def _enable_srflip_long(monkeypatch):
+    # SR_FLIP longs are disabled by default (owner stopgap 2026-06-29); these
+    # tests verify long-side mechanics that remain valid as an opt-in. Enabling
+    # the long side only affects SR_FLIP LONG generation — harmless to the rest.
+    monkeypatch.setattr("src.channels.scalp.SR_FLIP_LONG_ENABLED", True)
+
+
 def _make_candles(n=60, base=100.0, trend=0.1):
     """Create synthetic OHLCV data."""
     close = np.cumsum(np.ones(n) * trend) + base
