@@ -1847,6 +1847,13 @@ INVALIDATION_CONSECUTIVE_THRESHOLD: Dict[str, int] = {
 # — shadow fires whenever the per-setup count > channel default, even before activation).
 SR_FLIP_MOMENTUM_GRACE_ENABLED: bool = _safe_bool("SR_FLIP_MOMENTUM_GRACE_ENABLED", "false")
 
+# SR_FLIP long-side enable (owner directive 2026-06-29, stopgap). Profit-Lab on
+# 85 closed SR_FLIP signals: SHORT nets +5.1% (52% win) but LONG nets −21.8%
+# (19% win) — the long side is the path's entire drag and loses in every regime
+# (9% win even in TRENDING_UP). Disabled by default until the long-entry thesis
+# is repaired; flip true to re-enable. This is a tourniquet, not a fix.
+SR_FLIP_LONG_ENABLED: bool = _safe_bool("SR_FLIP_LONG_ENABLED", "false")
+
 # ---------------------------------------------------------------------------
 # SR_FLIP pre-TP R-scaling (change B — ships dark).
 #
