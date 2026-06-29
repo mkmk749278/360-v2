@@ -2943,14 +2943,17 @@ class Scanner:
             regime_context=regime_context,
         )
 
-    def _should_skip_channel(self, symbol: str, chan_name: str, ctx: ScanContext) -> bool:
+    def _should_skip_channel(self, symbol: str, chan_name: str, ctx: ScanContext) -> Optional[str]:
+        """Return a short skip-reason token if *chan_name* should not scan *symbol*
+        this cycle, else ``None``. The token feeds the mover "why not firing"
+        diagnostic (and is truthy, so existing ``if`` call sites keep working)."""
         # Tier-based channel gating: Tier 2 pairs skip SCALP (REST-only, no
         # order book depth for tight scalp execution).
         pair_info = self.pair_mgr.pairs.get(symbol)
         if pair_info is not None and pair_info.tier == PairTier.TIER2 and chan_name == "360_SCALP":
             log.debug("Skipping {} {} – Tier 2 pair excluded from SCALP", symbol, chan_name)
             self._suppression_counters[f"tier2_scalp_excluded:{chan_name}"] += 1
-            return True
+            return "tier2_scalp_excluded"
         # Per-channel pair quality gate: the generic ctx.pair_quality uses a
         # universal 5% spread limit.  When it fails, we re-evaluate with
         # channel-specific thresholds — this allows wider-spread pairs on
@@ -2990,7 +2993,10 @@ class Scanner:
                         reason=_supp_reason,
                         regime=ctx.regime_result.regime.value,
                     ))
-                    return True
+                    return (
+                        "pair_quality_spread" if "spread" in chan_quality.reason
+                        else "pair_quality_volume"
+                    )
                 # Channel-specific re-check passed — allow through despite generic failure
                 log.debug(
                     "{} {} passed channel-specific quality gate (generic failed)",
@@ -3004,7 +3010,7 @@ class Scanner:
                     ctx.pair_quality.reason,
                 )
                 self._suppression_counters[f"pair_quality:{ctx.pair_quality.reason}"] += 1
-                return True
+                return "pair_quality_no_volume"
         if ctx.market_state == MarketState.VOLATILE_UNSUITABLE:
             if chan_name in CHANNEL_VOLATILE_FAMILY_GOVERNED:
                 # PR-3 contradiction-cleanup scope: only selected channels bypass
@@ -3019,14 +3025,14 @@ class Scanner:
                     chan_name,
                 )
                 self._suppression_counters[f"volatile_unsuitable:{chan_name}"] += 1
-                return True
+                return "volatile_unsuitable"
         if chan_name in self.paused_channels:
             self._suppression_counters[f"paused_channel:{chan_name}"] += 1
-            return True
+            return "channel_paused"
         if self._is_in_cooldown(symbol, chan_name):
             log.debug("Cooldown active: skipping {} {}", symbol, chan_name)
             self._suppression_counters[f"cooldown:{chan_name}"] += 1
-            return True
+            return "cooldown"
         # Per-symbol circuit breaker: suppress the symbol across all channels
         # when it has accumulated too many consecutive SL hits.
         if self.circuit_breaker is not None and self.circuit_breaker.is_symbol_tripped(symbol):
@@ -3034,14 +3040,14 @@ class Scanner:
                 "Per-symbol circuit breaker active: skipping {} {}", symbol, chan_name
             )
             self._suppression_counters[f"circuit_breaker:{chan_name}"] += 1
-            return True
+            return "circuit_breaker"
         if any(
             s.symbol == symbol and s.channel == chan_name
             for s in self.router.active_signals.values()
         ):
             log.debug("Skipping {} {} – active signal already exists", symbol, chan_name)
             self._suppression_counters[f"active_signal:{chan_name}"] += 1
-            return True
+            return "active_signal_exists"
         if (
             chan_name == "360_SCALP"
             and ctx.is_ranging
@@ -3069,8 +3075,8 @@ class Scanner:
                 reason=REASON_QUIET_REGIME,
                 regime=current_regime,
             ))
-            return True
-        return False
+            return f"regime_{current_regime}".lower()
+        return None
 
     def _evaluate_setup(
         self,
@@ -6653,8 +6659,9 @@ class Scanner:
                 self._record_rollout_live_exclusion(chan_name, symbol)
                 _note_mover_skip(chan, "rollout_excluded")
                 continue
-            if self._should_skip_channel(symbol, chan_name, ctx):
-                _note_mover_skip(chan, "channel_skipped")
+            _skip_reason = self._should_skip_channel(symbol, chan_name, ctx)
+            if _skip_reason:
+                _note_mover_skip(chan, _skip_reason)
                 continue
             # Re-detect SMC with channel-specific timeframe preference when available.
             # This ensures scalp channels see low-TF sweeps first while swing/spot

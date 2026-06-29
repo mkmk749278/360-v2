@@ -1181,7 +1181,7 @@ class TestRegimeStabilityTracker:
         ctx.is_ranging = False
         ctx.adx_val = 25.0
         result = scanner._should_skip_channel("ETHUSDT", "360_SCALP", ctx)
-        assert result is False
+        assert not result
 
     def test_should_skip_scalp_vwap_when_regime_quiet(self):
         """_should_skip_channel returns True for 360_SCALP_VWAP when regime is QUIET.
@@ -1200,7 +1200,7 @@ class TestRegimeStabilityTracker:
         ctx.is_ranging = False
         ctx.adx_val = 25.0
         result = scanner._should_skip_channel("ETHUSDT", "360_SCALP_VWAP", ctx)
-        assert result is True
+        assert result
 
     def test_should_not_skip_swing_when_regime_quiet(self):
         """QUIET regime is incompatible with SCALP_VWAP only, not SWING."""
@@ -1216,7 +1216,7 @@ class TestRegimeStabilityTracker:
         ctx.adx_val = 25.0
         # SWING should not be blocked by QUIET regime
         result = scanner._should_skip_channel("ETHUSDT", "360_SWING", ctx)
-        assert result is False
+        assert not result
 
     def test_should_not_preskip_scalp_when_ranging_low_adx(self):
         """RANGING+low ADX must bypass channel preskip and defer to family doctrine."""
@@ -1232,7 +1232,7 @@ class TestRegimeStabilityTracker:
 
         result = scanner._should_skip_channel("ETHUSDT", "360_SCALP", ctx)
 
-        assert result is False
+        assert not result
         assert (
             scanner._suppression_counters[
                 "ranging_low_adx:channel_preskip_bypassed:360_SCALP"
@@ -1407,7 +1407,7 @@ class TestPR3GovernanceRuntimeRoles:
         ctx.is_ranging = False
         ctx.adx_val = 25.0
         result = scanner._should_skip_channel("ETHUSDT", "360_SCALP_DIVERGENCE", ctx)
-        assert result is False
+        assert not result
         assert (
             scanner._suppression_counters[
                 "volatile_unsuitable:channel_preskip_bypassed:360_SCALP_DIVERGENCE"
@@ -1427,7 +1427,7 @@ class TestPR3GovernanceRuntimeRoles:
         ctx.is_ranging = False
         ctx.adx_val = 25.0
         result = scanner._should_skip_channel("ETHUSDT", "360_SCALP_CVD", ctx)
-        assert result is True
+        assert result
         assert scanner._suppression_counters["volatile_unsuitable:360_SCALP_CVD"] == 1
         assert (
             scanner._suppression_counters[

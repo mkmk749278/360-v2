@@ -449,21 +449,21 @@ class TestScannerTier2SkipsScalp:
         ctx = scanner._ctx
 
         result = scanner._should_skip_channel("TIER2USDT", "360_SCALP", ctx)
-        assert result is True, "Tier 2 pair must be skipped for SCALP channel"
+        assert result == "tier2_scalp_excluded", "Tier 2 pair must be skipped for SCALP channel"
 
     def test_tier2_allowed_on_swing_channel(self):
         """_should_skip_channel returns False for a Tier 2 pair on SWING."""
         scanner = self._make_scanner()
         ctx = scanner._ctx
         result = scanner._should_skip_channel("TIER2USDT", "360_SWING", ctx)
-        assert result is False, "Tier 2 pair must NOT be skipped for SWING channel"
+        assert not result, "Tier 2 pair must NOT be skipped for SWING channel"
 
     def test_tier1_not_skipped_on_scalp(self):
         """_should_skip_channel returns False for a Tier 1 pair on SCALP."""
         scanner = self._make_scanner()
         ctx = scanner._ctx
         result = scanner._should_skip_channel("TIER1USDT", "360_SCALP", ctx)
-        assert result is False, "Tier 1 pair must NOT be skipped for SCALP channel"
+        assert not result, "Tier 1 pair must NOT be skipped for SCALP channel"
 
 
 # ---------------------------------------------------------------------------
