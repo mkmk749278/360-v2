@@ -192,6 +192,13 @@ class TestMinimumLifespan:
 class TestOutcomeRecording:
     """TradeMonitor must call performance_tracker and circuit_breaker on final outcomes."""
 
+    @pytest.fixture(autouse=True)
+    def _legacy_laddered_exit(self, monkeypatch):
+        # These cases assert the legacy laddered/invalidation exit (TP1 partial +
+        # runner, invalidation kills). That path is now opt-in; the engine default
+        # is BE@1% + full-close-at-TP1. Pin the legacy mode for these cases.
+        monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", False)
+
     def _build_monitor_with_mocks(self, active: Dict[str, Signal]):
         """Build a TradeMonitor wired with mock performance_tracker and circuit_breaker."""
         removed = []
@@ -1577,7 +1584,10 @@ class TestSignalInvalidation:
         the pre-change ``tight`` default for every test here.  The dedicated
         ``test_loose_default_suppresses_invalidation`` patches it to ``loose``
         to assert the new engine default."""
-        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "tight"):
+        # The engine default (BE_THEN_TP1) now skips engine-wide invalidation
+        # entirely; these mechanics tests run in the legacy/opt-in path.
+        with patch("src.trade_monitor.INVALIDATION_MODE_DEFAULT", "tight"), \
+                patch("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", False):
             yield
 
     def _build_monitor(

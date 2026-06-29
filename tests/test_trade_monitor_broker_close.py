@@ -153,6 +153,8 @@ async def test_invalidated_close_calls_broker_close_full(monkeypatch):
     om = _enabled_order_manager()
     ds = _data_store_with_candle(high=2362.0, low=2358.0)
     monitor = _build_monitor(order_manager=om, data_store=ds)
+    # Invalidation is opt-in legacy now; the engine default skips it.
+    monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", False)
     monkeypatch.setattr(
         TradeMonitor, "_check_invalidation",
         lambda self, s: "momentum_loss test",
@@ -236,9 +238,11 @@ async def test_disabled_order_manager_does_not_break_sl_path():
     assert sig.status == "SL_HIT"
 
 
-async def test_tp_close_does_not_call_broker_close_full():
+async def test_tp_close_does_not_call_broker_close_full(monkeypatch):
     """TP-hit path uses close_partial, not close_full.  Verify the wiring
     doesn't accidentally double-close."""
+    # Legacy laddered TP1 (partial); the engine default now full-closes at TP1.
+    monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", False)
     om = _enabled_order_manager()
     om.close_partial = AsyncMock(return_value="ccxt-tp1-id")
     # Candle high reaches TP1 (2392) but not TP2 → only TP1 partial fires.
@@ -252,3 +256,80 @@ async def test_tp_close_does_not_call_broker_close_full():
     om.close_full.assert_not_called()
     # close_partial called for TP1.
     om.close_partial.assert_awaited()
+
+
+# ---------------------------------------------------------------------------
+# Engine-default exit: BE-to-entry at +1% → full close at TP1 (2026-06-29)
+# ---------------------------------------------------------------------------
+
+
+async def test_default_tp1_full_close(monkeypatch):
+    """Engine default: reaching TP1 closes 100% (close_full), not a partial."""
+    monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", True)
+    om = _enabled_order_manager()
+    om.close_partial = AsyncMock(return_value="ccxt-part-id")
+    # Candle high reaches TP1 (2392).
+    ds = _data_store_with_candle(high=2393.0, low=2360.0)
+    monitor = _build_monitor(order_manager=om, data_store=ds)
+
+    sig = _make_signal(direction=Direction.LONG, entry=2370.0, stop_loss=2351.0,
+                       tp1=2392.0, current_price=2392.5)
+    await monitor._evaluate_signal(sig)
+
+    om.close_full.assert_awaited()                 # full close at TP1
+    assert om.close_full.await_args.kwargs.get("reason") == "full_tp_hit"
+    om.close_partial.assert_not_called()           # no laddered partial
+
+
+async def test_default_be_arms_at_one_pct(monkeypatch):
+    """Once MFE ≥ 1%, the engine-default stop ratchets to entry (break-even)."""
+    monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", True)
+    om = _enabled_order_manager()
+    # Price +1.01% in favour, well short of a distant TP1 → BE arms, no TP.
+    ds = _data_store_with_candle(high=2394.0, low=2392.0)
+    monitor = _build_monitor(order_manager=om, data_store=ds)
+
+    sig = _make_signal(direction=Direction.LONG, entry=2370.0, stop_loss=2351.0,
+                       tp1=2450.0, current_price=2394.0)
+    await monitor._evaluate_signal(sig)
+
+    assert sig.stop_loss == 2370.0                 # SL moved up to entry (BE)
+    om.close_full.assert_not_called()              # still open, not closed
+
+
+async def test_default_reversal_after_be_exits_flat_not_loss(monkeypatch):
+    """BE armed (MFE≥1%); a reversal back to entry exits at ~0%, not the SL loss."""
+    monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", True)
+    om = _enabled_order_manager()
+    # Candle dips to entry; with BE armed the stop sits AT entry (2370).
+    ds = _data_store_with_candle(high=2371.0, low=2366.0)
+    monitor = _build_monitor(order_manager=om, data_store=ds)
+
+    sig = _make_signal(direction=Direction.LONG, entry=2370.0, stop_loss=2351.0,
+                       tp1=2450.0, current_price=2367.0)
+    sig.max_favorable_excursion_pct = 1.5          # already ran +1.5% earlier
+    await monitor._evaluate_signal(sig)
+
+    # Stop sat at entry → SL fill at 2370 (break-even), not the −0.8% original SL.
+    om.close_full.assert_awaited()
+    assert om.close_full.await_args.kwargs.get("reason") == "sl_hit"
+    assert abs(sig.pnl_pct) < 0.05                 # ~flat, not a loss
+
+
+async def test_default_skips_engine_invalidation(monkeypatch):
+    """Engine default does not run structural invalidation kills."""
+    monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", True)
+    om = _enabled_order_manager()
+    ds = _data_store_with_candle(high=2375.0, low=2368.0)
+    monitor = _build_monitor(order_manager=om, data_store=ds)
+    # Even if invalidation WOULD fire, the default must ignore it.
+    monkeypatch.setattr(
+        TradeMonitor, "_check_invalidation", lambda self, s: "momentum_loss test",
+    )
+
+    sig = _make_signal(direction=Direction.LONG, entry=2370.0, stop_loss=2351.0,
+                       tp1=2450.0, current_price=2372.0)
+    await monitor._evaluate_signal(sig)
+
+    assert sig.status != "INVALIDATED"
+    om.close_full.assert_not_called()

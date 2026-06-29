@@ -2253,6 +2253,22 @@ TRAILING_ATR_MULTIPLIER: float = _safe_float("TRAILING_ATR_MULTIPLIER", "1.5")
 # total PnL edge vs TP1-only across 499 closed signals).
 BE_SHIFT_TRIGGER_PCT: float = _safe_float("BE_SHIFT_TRIGGER_PCT", "1.0")
 
+# Engine-default signal-exit model (owner directive, 2026-06-29). Profit-Lab on
+# 233 closed signals: the engine's real tracked exits net −18.13% while a simple
+# "move SL→entry once +1% in profit, then close 100% at TP1" exit nets −0.23%
+# (+17.89% edge). The leak is the exit logic (40%-at-TP1 partial + TP2/TP3
+# runner + invalidation kills giving back MFE), NOT the entries. When enabled
+# (engine default), trade_monitor — the signal tracker that drives subscriber
+# outcomes + the Profit page — manages the engine's signal book as:
+#   * BE-to-entry once max-favorable-excursion ≥ BE_SHIFT_TRIGGER_PCT (1%), and
+#   * full close (100%) at TP1 — no partial, no TP2/TP3 runner, and
+#   * no engine-wide structural/trailing invalidation kills.
+# Pre-TP and invalidation remain available to users who opt in via their
+# per-user invalidation_mode (handled separately in _check_per_user_invalidation
+# + the FSM); this flag only governs the engine's own default book. Reversible
+# env off-switch — set false to restore the laddered exit.
+BE_THEN_TP1_DEFAULT_ENABLED: bool = _safe_bool("BE_THEN_TP1_DEFAULT_ENABLED", "true")
+
 # ---------------------------------------------------------------------------
 # Funding-rate exit
 # ---------------------------------------------------------------------------
