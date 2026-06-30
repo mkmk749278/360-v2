@@ -93,7 +93,10 @@ def fetch_klines_range(
         try:
             rows = _http_get_json(url)
         except Exception as exc:  # noqa: BLE001 - diagnostic, surface and skip pair
-            print(f"  ! kline fetch failed {symbol} {interval} @ {cur}: {exc}", file=sys.stderr)
+            # ASCII-safe: some exported symbols carry non-ASCII names (junk rows),
+            # and an ascii-encoded stderr would otherwise crash the whole run on print.
+            msg = f"  ! kline fetch failed {symbol} {interval} @ {cur}: {exc}"
+            print(msg.encode("ascii", "replace").decode("ascii"), file=sys.stderr)
             break
         if not rows:
             break
@@ -602,10 +605,90 @@ def _report(rows: List[Dict[str, Any]], min_n: int) -> None:
         g2.setdefault(r["wband"], []).append(r)
     fmt("COUNTER-TREND LONGS (BTC short-favourable) by pair coupling band", g2)
 
+    _counterfactual(rows)
+
     print("\n--- ACCEPTANCE TEST ---")
     print("Thesis validated iff: (1) LONG win-rate falls monotonically 1_strong_long→5_strong_short,")
     print("(2) the collapse is in BTC_LED longs while DECOUPLED longs survive, (3) SHORTs don't collapse.")
     print("Read the tables above against those three conditions before approving the wiring.")
+    print("The P&L COUNTERFACTUAL below is the decision number: does the coupling-led rule make the")
+    print("book green WHILE keeping more decoupled winners than the blunt cohort cut?")
+
+
+# Counter-trend reversal/continuation LONG setups that carry the bleed (S37/S38).
+_CT_LONG_SETUPS = frozenset({"SR_FLIP_RETEST", "LIQUIDITY_SWEEP_REVERSAL", "MOVER_TREND_PULLBACK"})
+
+
+def _is_ct_long(r: Dict[str, Any]) -> bool:
+    return r["side"] == "LONG" and r["setup_class"] in _CT_LONG_SETUPS
+
+
+def _wnum(r: Dict[str, Any]) -> Optional[float]:
+    w = r.get("w_pair")
+    return w if isinstance(w, (int, float)) else None
+
+
+def _book(rows: List[Dict[str, Any]], cut) -> Tuple[float, int]:
+    """Book total real_pnl under a suppression policy (`cut(r)`=True ⇒ contributes 0).
+
+    Only rows with a recorded real_pnl count toward the total.  Returns
+    ``(total_pnl, n_cut)``.
+    """
+    total, n_cut = 0.0, 0
+    for r in rows:
+        p = r["real_pnl"]
+        if p is None:
+            continue
+        if cut(r):
+            n_cut += 1
+            continue
+        total += float(p)
+    return total, n_cut
+
+
+def _counterfactual(rows: List[Dict[str, Any]], coupling_thresh: float = 0.5, b_thresh: float = 0.0) -> None:
+    """The decision number: book P&L under each candidate suppression policy.
+
+    Compares doing nothing (engine real), the BLUNT cohort cut (drop ALL counter-trend
+    reversal longs — the reversible patch), and the COUPLING-LED cut (drop them only on
+    BTC-led pairs, keeping the decoupled winners).  Also reports how many winning
+    decoupled longs the coupling-led rule KEEPS that the blunt cut would have killed —
+    the whole point of building the graded version instead of flipping a switch.
+    """
+    cov = [r for r in rows if r["real_pnl"] is not None]
+    base, _ = _book(rows, lambda r: False)
+    blunt, n_blunt = _book(rows, _is_ct_long)
+    cpl, n_cpl = _book(
+        rows, lambda r: _is_ct_long(r) and (_wnum(r) is not None and _wnum(r) >= coupling_thresh)
+    )
+    cpl_b, n_cplb = _book(
+        rows,
+        lambda r: _is_ct_long(r)
+        and (_wnum(r) is not None and _wnum(r) >= coupling_thresh)
+        and r["btc_state"] <= b_thresh,
+    )
+    # Winning longs the coupling-led rule KEEPS but the blunt cut would drop (decoupled wins).
+    kept_winners = [
+        r for r in cov
+        if _is_ct_long(r) and r["is_win"] and not (_wnum(r) is not None and _wnum(r) >= coupling_thresh)
+    ]
+    kept_pnl = sum(float(r["real_pnl"]) for r in kept_winners)
+    # Losing longs the coupling-led rule cuts (coupled losers removed).
+    cut_losers = [
+        r for r in cov
+        if _is_ct_long(r) and (_wnum(r) is not None and _wnum(r) >= coupling_thresh) and not r["is_win"]
+    ]
+
+    print(f"\n=== P&L COUNTERFACTUAL  (sum real_pnl over {len(cov)} signals with outcomes; "
+          f"coupling≥{coupling_thresh}, b≤{b_thresh}) ===")
+    print(f"{'policy':44} {'book_pnl':>10} {'longs_cut':>10}")
+    print(f"{'engine real (cut nothing)':44} {base:>+10.2f} {0:>10}")
+    print(f"{'BLUNT: drop ALL counter-trend longs (patch)':44} {blunt:>+10.2f} {n_blunt:>10}")
+    print(f"{'COUPLING-LED: drop only BTC-led ones':44} {cpl:>+10.2f} {n_cpl:>10}")
+    print(f"{'COUPLING-LED + BTC-state gate':44} {cpl_b:>+10.2f} {n_cplb:>10}")
+    print(f"\nCoupling-led KEEPS {len(kept_winners)} decoupled-long winners "
+          f"(+{kept_pnl:.2f} book) that the blunt cut would kill; "
+          f"CUTS {len(cut_losers)} BTC-led-long losers.")
 
 
 if __name__ == "__main__":
