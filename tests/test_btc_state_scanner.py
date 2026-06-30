@@ -164,8 +164,16 @@ class TestCtLongMacroSuppressed:
     def test_gated_long_suppressed_when_coin_declines_even_if_btc_ok(self):
         # BTC fine, but the coin's own trend is down → "needs both to permit it".
         s = self._scanner_with([100.0 + i for i in range(80)], [300.0 - i for i in range(80)])
-        sup, why = s._ct_long_macro_suppressed("ALTUSDT", "MOVER_TREND_PULLBACK", "LONG")
+        sup, why = s._ct_long_macro_suppressed("ALTUSDT", "LIQUIDITY_SWEEP_REVERSAL", "LONG")
         assert sup is True and why.startswith("coin_")
+
+    def test_mover_trend_pullback_never_gated_trend_following(self):
+        # MOVER is trend-continuation (rides the coin's own move) — must NOT be
+        # suppressed even in a full BTC + coin decline.  Owner's live feed showed
+        # MOVER longs winning (+4–6%) while BTC was macro-bear.
+        s = self._scanner_with([300.0 - i for i in range(80)], [300.0 - i for i in range(80)])
+        sup, _ = s._ct_long_macro_suppressed("ALTUSDT", "MOVER_TREND_PULLBACK", "LONG")
+        assert sup is False
 
     def test_gated_long_allowed_when_both_up(self):
         s = self._scanner_with([100.0 + i for i in range(80)], [100.0 + i for i in range(80)])

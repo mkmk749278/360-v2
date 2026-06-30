@@ -436,19 +436,25 @@ BTC_STATE_COUPLING_LOOKBACK: int = _safe_int("BTC_STATE_COUPLING_LOOKBACK", "200
 # ---------------------------------------------------------------------------
 # Counter-trend-LONG macro-direction suppression (S39 — the validated scalp filter)
 # ---------------------------------------------------------------------------
-# SCALP-FIRST (owner directive): this is a thin context filter on a few proven-
-# bleeding counter-trend reversal LONG *scalp* setups — NOT a macro/position trade.
-# Exits stay pure scalp; SHORTs and every other setup fire normally; it simply
-# declines to take these specific long scalps while the big trend (BTC and/or the
-# coin's own) is heading DOWN, via src/btc_state.py::macro_direction (slope + price-
-# vs-fast-MA + higher-low structure), and AUTO-RESTORES them when it turns up.
-# Backfill: cutting these in the current BTC decline nets the book −13.88 → +28.95.
-# SR_FLIP-long stays statically off (its own flag) — it loses in every regime.
+# SCALP-FIRST (owner directive): this is a thin context filter on genuine counter-
+# trend REVERSAL long scalps — NOT a macro/position trade, and NOT trend-following
+# longs.  Only setups whose thesis is to fade the trend are in scope:
+#   * LIQUIDITY_SWEEP_REVERSAL — a reversal long fighting recent structure.
+#   * (SR_FLIP_RETEST is already statically off via its own flag — loses in every regime.)
+# Deliberately EXCLUDED: MOVER_TREND_PULLBACK.  Despite the −12.78% backfill aggregate,
+# it is a trend-CONTINUATION setup — it longs a coin that is already ripping (riding
+# its own momentum, by construction trend-ALIGNED with the coin).  Live evidence (the
+# owner's feed: ALAB +4.15%, RIF +6.16% as MOVER longs while BTC was macro-bear) shows
+# blocking it on BTC weakness kills working trend-following scalps.  The macro filter
+# suppresses longs that fight the trend, never longs that ride it.
+# Exits stay pure scalp; SHORTs and every non-reversal setup fire normally.  Suppresses
+# only while the big trend (BTC and/or the coin's own) is heading DOWN, via
+# src/btc_state.py::macro_direction, and AUTO-RESTORES when it turns up.
 CT_LONG_MACRO_GATE_ENABLED: bool = _safe_bool("CT_LONG_MACRO_GATE_ENABLED", "true")
 CT_LONG_MACRO_GATE_SETUPS: frozenset = frozenset(
     s.strip().upper()
     for s in os.getenv(
-        "CT_LONG_MACRO_GATE_SETUPS", "LIQUIDITY_SWEEP_REVERSAL,MOVER_TREND_PULLBACK"
+        "CT_LONG_MACRO_GATE_SETUPS", "LIQUIDITY_SWEEP_REVERSAL"
     ).split(",")
     if s.strip()
 )

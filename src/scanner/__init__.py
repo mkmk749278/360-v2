@@ -5705,14 +5705,15 @@ class Scanner:
                 )
 
         # ── Counter-trend-LONG macro-direction suppression (S39, scalp filter) ──
-        # SCALP-FIRST: a thin context filter on a few proven-bleeding counter-trend
-        # reversal LONG scalp setups (LSR / MOVER) — NOT a macro/position trade.
-        # SHORTs and every other setup are untouched; exits stay pure scalp.  We
-        # decline these specific long scalps while the big trend is heading DOWN —
-        # BTC's macro leg AND/OR the coin's own (a long needs BOTH to permit it) —
-        # and AUTO-RESTORE when it turns up (macro_direction recomputed every cycle).
-        # Backfill-validated (book −13.88 → +28.95).  Hard reject before scoring;
-        # env-reversible; fail-open (no suppression) on missing data.
+        # SCALP-FIRST: a thin context filter on genuine counter-trend REVERSAL long
+        # scalps (LIQUIDITY_SWEEP_REVERSAL; SR_FLIP-long already off) — NOT a macro
+        # trade, and NOT trend-following longs.  MOVER_TREND_PULLBACK is deliberately
+        # excluded: it rides the coin's own momentum (trend-aligned by construction),
+        # and blocking it on BTC weakness kills working scalps (owner's live feed).
+        # SHORTs and every non-reversal setup are untouched; exits stay pure scalp.
+        # Suppress these reversal longs only while the big trend is heading DOWN —
+        # BTC's macro leg AND/OR the coin's own — and AUTO-RESTORE when it turns up.
+        # Hard reject before scoring; env-reversible; fail-open on missing data.
         _ct_sup, _ct_why = self._ct_long_macro_suppressed(
             symbol, _setup_class_name, sig.direction.value,
         )
