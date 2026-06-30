@@ -37,6 +37,18 @@ from config import (
     CHANNEL_SCALP_ORDERBLOCK_ENABLED,
     CHANNEL_SCALP_SUPERTREND_ENABLED,
     CHANNEL_SCALP_VWAP_ENABLED,
+    BTC_STATE_ENABLED,
+    BTC_STATE_HAIRCUT_ENABLED,
+    BTC_STATE_K,
+    BTC_STATE_FLOOR,
+    BTC_STATE_CT_LONG_MULT,
+    BTC_STATE_CT_SHORT_MULT,
+    BTC_STATE_SEVERE_SETUP_WEIGHT,
+    BTC_STATE_MILD_SETUP_WEIGHT,
+    BTC_STATE_CACHE_TTL_SEC,
+    BTC_STATE_COUPLING_TF,
+    BTC_STATE_COUPLING_LOOKBACK,
+    DARK_FLAG_SHADOW_TELEMETRY,
     FEEDBACK_LOOP_ENABLED,
     NARRATIVE_PAIR_BONUS,
     NARRATIVE_PAIR_LIST,
@@ -154,6 +166,12 @@ from src.btc_direction import (
     check_btc_direction_gate,
     check_countertrend_mover_block,
     check_symbol_direction_gate,
+)
+from src.btc_state import (
+    DEFAULT_TF_WEIGHTS as _BTC_STATE_TF_WEIGHTS,
+    compute_btc_state,
+    compute_downside_coupling,
+    compute_haircut_factor,
 )
 from src.volume_divergence import check_volume_divergence_gate
 from src.vwap import check_vwap_extension, compute_vwap
@@ -3773,6 +3791,32 @@ class Scanner:
         """Return the best available candle dict for *primary_tf*, falling back to 5m/1m."""
         return candles.get(primary_tf) or candles.get("5m") or candles.get("1m") or {}
 
+    def _get_btc_state_cached(self) -> Dict[str, object]:
+        """Composite BTC-State (pair-independent), cached per cycle.
+
+        The multi-TF EMA/RSI/ATR compute is identical for every signal in a scan
+        cycle, so it runs at most once per ``BTC_STATE_CACHE_TTL_SEC`` and is reused
+        across all pairs — keeping it off the per-signal hot path (Cost Discipline:
+        no new network/Firestore read; ``get_candles`` is an in-memory lookup).
+        Fails toward the neutral b=0 read on any error.
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_btc_state_cache", None)
+        if cached is not None and (now - cached[0]) < BTC_STATE_CACHE_TTL_SEC:
+            return cached[1]
+        try:
+            btc_by_tf: Dict[str, Dict[str, Any]] = {}
+            for _tf in _BTC_STATE_TF_WEIGHTS:
+                _cd = self.data_store.get_candles("BTCUSDT", _tf)
+                if _cd:
+                    btc_by_tf[_tf] = _cd
+            state = compute_btc_state(btc_by_tf)
+        except Exception as _bs_exc:
+            log.debug("BTC-State compute error (fail open, b=0): {}", _bs_exc)
+            state = {"b": 0.0, "per_tf": {}, "status": "error"}
+        self._btc_state_cache = (now, state)
+        return state
+
     @staticmethod
     def _classify_macro_trend(closes: list) -> tuple[str, float]:
         """Classify the macro trend from a close price series.
@@ -6524,6 +6568,73 @@ class Scanner:
                         symbol, chan_name, _new_count, _CONF_FAIL_COOLDOWN_S,
                     )
                 return _reject("filtered", cross_verified)
+        # ── Graded BTC-State soft-confirmation (src/btc_state.py) ──────────
+        # Counter-trend-long fix (ACTIVE_CONTEXT S38): alts couple to BTC harder
+        # on the downside, so a LONG fighting a BTC downtrend on a BTC-led pair
+        # bleeds.  Stamp the BTC-State b, the per-pair downside coupling w_pair,
+        # and the would-be confidence multiplier on EVERY signal.  Recomputed each
+        # scan ⇒ auto-restores longs the moment BTC turns up.
+        #
+        # DARK-FIRST (CLAUDE.md § Project Phase): the haircut is APPLIED only when
+        # BTC_STATE_HAIRCUT_ENABLED (default OFF) — otherwise this is stamp +
+        # shadow-log only and changes no live output.  Placed as the LAST
+        # confidence adjustment so the floor gate below re-evaluates after it:
+        # activation is a pure flag flip, no further code change (no scaffold).
+        if BTC_STATE_ENABLED:
+            try:
+                _bstate = self._get_btc_state_cached()
+                _b = float(_bstate.get("b", 0.0))
+                _pair_cd = self._resolve_candles(ctx.candles, BTC_STATE_COUPLING_TF)
+                _pair_closes = _pair_cd.get("close", []) if _pair_cd else []
+                _btc_cpl_cd = self.data_store.get_candles("BTCUSDT", BTC_STATE_COUPLING_TF) or {}
+                _cpl = compute_downside_coupling(
+                    _pair_closes,
+                    _btc_cpl_cd.get("close", []),
+                    lookback=BTC_STATE_COUPLING_LOOKBACK,
+                )
+                _w_pair = float(_cpl.get("w_pair", 0.0))
+                _hc = compute_haircut_factor(
+                    _b, _w_pair, sig.direction.value,
+                    str(getattr(sig, "setup_class", "") or ""),
+                    k=BTC_STATE_K, floor=BTC_STATE_FLOOR,
+                    ct_long_mult=BTC_STATE_CT_LONG_MULT,
+                    ct_short_mult=BTC_STATE_CT_SHORT_MULT,
+                    severe_setup_weight=BTC_STATE_SEVERE_SETUP_WEIGHT,
+                    mild_setup_weight=BTC_STATE_MILD_SETUP_WEIGHT,
+                )
+                _factor = float(_hc.get("factor", 1.0))
+                sig.btc_state = _b
+                sig.btc_downside_coupling = _w_pair
+                sig.btc_state_factor = _factor
+                if _hc.get("applied") and _factor < 1.0:
+                    _would_be = sig.confidence * _factor
+                    if BTC_STATE_HAIRCUT_ENABLED:
+                        _before = sig.confidence
+                        sig.confidence = self._clamp_confidence(_would_be)
+                        sig.soft_gate_flags = (
+                            (sig.soft_gate_flags or "") + ",btc_state_haircut"
+                        ).lstrip(",")
+                        log.debug(
+                            "BTC_STATE haircut {} {} {}: conf {:.1f}→{:.1f} "
+                            "(×{:.2f} b={:+.2f} w={:.2f})",
+                            symbol, chan_name, sig.direction.value,
+                            _before, sig.confidence, _factor, _b, _w_pair,
+                        )
+                    elif DARK_FLAG_SHADOW_TELEMETRY:
+                        log.info(
+                            "[BTC_STATE_SHADOW] {} {} {} [{}]: would ×{:.2f} → "
+                            "conf {:.1f}→{:.1f} (b={:+.2f} w={:.2f} {})",
+                            symbol, chan_name, sig.direction.value,
+                            getattr(sig, "setup_class", ""), _factor,
+                            sig.confidence, _would_be, _b, _w_pair,
+                            _hc.get("reason", ""),
+                        )
+            except Exception as _bs_exc:
+                log.debug(
+                    "BTC-State stamp error for {} {} (fail open): {}",
+                    symbol, chan_name, _bs_exc,
+                )
+
         # Reclassify after all post-score confidence adjustments (stat filter, pair-analysis
         # penalties, transition boost) so paid-tier decisions use current confidence.
         sig.signal_tier = classify_signal_tier(sig.confidence)

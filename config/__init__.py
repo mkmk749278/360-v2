@@ -400,6 +400,40 @@ REGIME_TREND_GRAB_FRACTION: float = _safe_float("REGIME_TREND_GRAB_FRACTION", "0
 DARK_FLAG_SHADOW_TELEMETRY: bool = _safe_bool("DARK_FLAG_SHADOW_TELEMETRY", "true")
 
 # ---------------------------------------------------------------------------
+# Graded BTC-State soft-confirmation (counter-trend-long fix — src/btc_state.py)
+# ---------------------------------------------------------------------------
+# Replaces the binary check_btc_direction_gate + direction-blind correlation
+# penalty with a graded confidence haircut on signals that fight BTC's macro
+# direction, scaled by per-pair downside coupling, asymmetric (counter-trend
+# LONG ~2× the SHORT), and AUTO-RESTORING as BTC turns (recomputed per dispatch).
+#
+# Production phase (CLAUDE.md § Project Phase): ships DARK-FIRST.
+#   * BTC_STATE_ENABLED (default ON) — compute + STAMP b/w_pair/factor on every
+#     signal and shadow-log the would-be effect.  Changes NO live output on its
+#     own; it is the observe-only measurement layer.
+#   * BTC_STATE_HAIRCUT_ENABLED (default OFF) — actually MULTIPLY confidence by
+#     factor.  Owner-sign-off to flip ON after the shadow window + backfill
+#     confirm.  Until then the haircut is computed but never applied.
+# The numeric knobs are PRE-CALIBRATION defaults — the shadow stamps + the
+# btc_state backfill (scripts/btc_state_backfill.py) size them before activation.
+BTC_STATE_ENABLED: bool = _safe_bool("BTC_STATE_ENABLED", "true")
+BTC_STATE_HAIRCUT_ENABLED: bool = _safe_bool("BTC_STATE_HAIRCUT_ENABLED", "false")
+BTC_STATE_K: float = _safe_float("BTC_STATE_K", "0.40")
+BTC_STATE_FLOOR: float = _safe_float("BTC_STATE_FLOOR", "0.55")
+BTC_STATE_CT_LONG_MULT: float = _safe_float("BTC_STATE_CT_LONG_MULT", "1.0")
+BTC_STATE_CT_SHORT_MULT: float = _safe_float("BTC_STATE_CT_SHORT_MULT", "0.5")
+BTC_STATE_SEVERE_SETUP_WEIGHT: float = _safe_float("BTC_STATE_SEVERE_SETUP_WEIGHT", "1.0")
+BTC_STATE_MILD_SETUP_WEIGHT: float = _safe_float("BTC_STATE_MILD_SETUP_WEIGHT", "0.5")
+# Per-cycle cache TTL for the (pair-independent) BTC-State read — keeps the
+# multi-TF EMA/RSI/ATR compute off the per-signal hot path (Cost Discipline).
+BTC_STATE_CACHE_TTL_SEC: float = _safe_float("BTC_STATE_CACHE_TTL_SEC", "10.0")
+# Coupling timeframe (15m returns per ACTIVE_CONTEXT S38 design) + window.
+BTC_STATE_COUPLING_TF: str = _safe_choice(
+    "BTC_STATE_COUPLING_TF", "15m", frozenset({"5m", "15m", "1h"}),
+)
+BTC_STATE_COUPLING_LOOKBACK: int = _safe_int("BTC_STATE_COUPLING_LOOKBACK", "200")
+
+# ---------------------------------------------------------------------------
 # Dynamic Tiering (Market Watchdog) — PR 2
 # ---------------------------------------------------------------------------
 # Enable/disable the background TierManager that periodically polls Binance
