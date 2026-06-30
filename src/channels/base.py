@@ -215,6 +215,17 @@ class Signal:
     # CONFLUENCE_QUERY_TOLERANCE_PCT of entry.  ≥2 earns a soft-penalty bonus.
     confluence_count: int = 0
 
+    # ---- Graded BTC-State soft-confirmation (src/btc_state.py) ----
+    # Stamped by the scanner at scoring time (BTC_STATE_ENABLED).  `btc_state` b is
+    # how hostile BTC is now (−1 falling … +1 rising); `btc_downside_coupling` w_pair
+    # is how hard THIS pair follows BTC down (0 decoupled … 1 fully BTC-led);
+    # `btc_state_factor` is the would-be confidence multiplier (1.0 = no haircut).
+    # Applied to confidence only when BTC_STATE_HAIRCUT_ENABLED; otherwise stamp +
+    # shadow-log only (dark-first).  Defaults are the inert no-op (0/0/1.0).
+    btc_state: float = 0.0
+    btc_downside_coupling: float = 0.0
+    btc_state_factor: float = 1.0
+
     # ---- Signal tier (set by scanner after confidence scoring) ----
     signal_tier: str = "B"  # "A+" (80-100), "B" (65-79), "FILTERED" (<65)
 
