@@ -4,6 +4,39 @@
 
 ---
 
+## 🟢 SESSION 38 2026-06-30 — The long bleed is the BTC macro downtrend, not broken longs → BTC-State soft-confirmation design + validation harness (360-v2 #675 merged, #676 open; 360ce-ops #51 open)
+
+**Owner trigger:** "we've been negative for over a month, even a blind trader profits sometimes — why?" Analysed the live Profit export (305 signals, ~1mo) + the ops Profit PDF.
+
+**Diagnosis — the story CHANGED from S34–37 (exit work is DONE; it's entries/selection now):**
+- The what-if simulator's **perfect exit (TP1-full, no machinery) still nets −35.65%** (engine real −42.83%, ~7% apart, down from the ~19–25% gap of S34). **The exit fix landed — more exit tuning won't move the book.** The remaining loss is entry/selection edge.
+- **Math:** win rate **42%**, avg win +1.14% ≈ avg loss −1.00% (**~1:1 realized R:R**), expectancy **−0.10%/signal**, breakeven needs **47%**. We're structurally ~5 pts of win-rate underwater. BE@+1% + expiries cut winners to ~1:1 while losses run full SL.
+- **Scorer band inversion:** win-rate FALLS as confidence rises — 65-70→42%, 70-75→39%, **75-80→30% (−23.6%, worst)**, 80+→41% (only positive band). The score can't rank our own signals; the 75-80s are our worst.
+
+**Owner's correction (the real root cause, backed by his BTC weekly chart):** longs aren't broken — they're **fighting a BTC macro downtrend** (BTC broke its **200-week MA in June 2026**, mirroring June 2022). Alts couple to BTC **harder on the downside than the upside**, so counter-trend longs get steamrolled while shorts work.
+- **Confirmed in our data:** LONG **−25.1%** (34% win) vs SHORT **+9.65%** (46% win). The three counter-trend reversal-LONG cohorts — **SR_FLIP_RETEST long −21.75% (19% win), MOVER_TREND_PULLBACK long −12.78% (24%), LIQUIDITY_SWEEP_REVERSAL long −10.19% (26%)** — carry −44.7% over just **63 signals (21% of book)**. **Cutting only those flips the book −15.45% → +29.27%** on the same window. LONGs lose in EVERY regime; every SHORT cohort is flat-to-positive. The SAME paths on the SHORT side are fine. Keep-engine: VOLUME_SURGE_BREAKOUT long +10.8%/67% win, FAILED_AUCTION_RECLAIM both sides, DIVERGENCE long.
+
+**Research (3 parallel agents, owner asked for "2-3 parallel different thinkings") — CONVERGED on one design:** a **graded BTC-State soft-confirmation**, NOT a 200MA on/off gate (owner rejected the slow "6mo shorts/6mo longs" binary):
+- **Layer 1 — BTC-State score b∈[−1,+1]:** 5m/15m/1h EMA(8/21/55) stack + ATR-normalised slope + RSI (v1 price-only), vol-shrunk in chop; BTC.D dominance (rising-BTC.D + falling-BTC = max long penalty) + structure/VWAP deferred to v2.
+- **Layer 2 — per-pair downside coupling w_pair∈[0,1]:** downside-beta × downside-corr on 15m returns; decoupled pairs (memecoins/own-catalyst) ≈0 auto-exempt, exemption REVOKED the instant BTC dumps.
+- **Layer 3 — wiring:** `factor = 1 − k·|b|·w_pair·A_side` haircut at EMIT (not a gate); floor (never zero) + recompute-every-dispatch ⇒ **auto-restores longs when BTC flips** (owner's "if BTC moves up longs brighten"); counter-trend LONG penalised ~2× counter-trend SHORT (the downside asymmetry).
+- **Code reality found:** engine ALREADY has `src/btc_direction.py::check_btc_direction_gate` — but it's binary AND only fires when BTC **1H AND 4H both** oppose, so it's silent during relief bounces / TRENDING_UP (where our longs bled). Plus `src/correlation.py` (corr-magnitude only, direction-blind). New design SUBSUMES both. **This wiring is OWNER-SIGN-OFF (scoring model + routing) — bring design after backfill confirms.**
+
+**Shipped this session:**
+- **360-v2 #675 (MERGED):** `scripts/btc_state_backfill.py` — read-only point-in-time validator (no look-ahead). Reconstructs BTC-State + per-pair downside coupling per historical signal, stratifies outcomes by side × BTC_STATE × coupling band. 14 unit tests (synthetic, no network). Acceptance test: long win-rate collapses as BTC turns hostile, concentrated in BTC-LED pairs while DECOUPLED longs survive, shorts don't collapse.
+- **360-v2 #676 (OPEN, CI running):** fix — backfill must read `dispatch_timestamp` (emit), NOT the perf record's generic `timestamp` (close time) which would corrupt the reconstruction. Also passes through signal_id/confidence/mfe so output joins into ops. +1 test (15 total).
+- **360ce-ops #51 (OPEN, CI running):** Profit-page **Direction what-if dropdown** (All / Shorts only / Longs only / Exclude counter-trend longs) — orthogonal to exit-strategy, makes the −15%→+29% counterfactual a 2-click knob. No BTC/Binance dep (keys on recorded side+setup). 6 tests.
+
+**NEXT SESSION — do in order:**
+1. **Run the backfill on the VPS** (after #676 merges + ~45s deploy): `docker exec 360scalp-v2-engine python scripts/btc_state_backfill.py --signals /app/data/signal_performance.json --out /app/data/btc_state_backfill.csv`. Read the verdict table against the acceptance test.
+2. **If thesis confirms:** bring owner the graded soft-confirmation **wiring design** (owner-sign-off) — replace the coarse binary `check_btc_direction_gate` with the graded `factor` in `confidence.py`/scoring, env off-switch default ON, stamp `btc_state` on every signal. If it doesn't confirm, retune the design first.
+3. **Layer-2 ops:** add **BTC-State-conditioned** filter options to the Profit Direction dropdown (drop counter-trend longs only when BTC hostile AND pair BTC-led), reading `btc_state_backfill.csv` from the data volume — ready once step 1 generates the CSV. (Owner asked whether to pre-wire this; left pending his call.)
+4. **Scorer calibration** (separate lever): the 75-80 band inversion — likely dissolves once the counter-trend longs are cut; confirm band×side on fresh data before touching the scorer.
+
+**Open PRs to check at session start:** 360-v2 #676, 360ce-ops #51 (both were in CI at session end; self-checks armed). 360-v2 #675 already merged. Pre-existing unrelated: 360ce-ops `tests/test_alerts.py` + `app/agent/*` ruff debt fail on clean main (redis/env), not ours.
+
+---
+
 ## 🟢 SESSION 37 2026-06-29 — Mover pipeline made to actually fire + exit-model default fix + SR_FLIP shorts-only (merged: 360-v2 #666–#672, 360ce-ops #48/#49/#50)
 
 One long arc: get the promoted movers to actually trade, then fix the exit logic that was bleeding the whole book, then cut the worst-bleeding direction. Built the diagnostic that found each wall, fixed each in turn.
