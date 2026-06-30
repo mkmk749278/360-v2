@@ -215,6 +215,18 @@ class TestMacroDirection:
         assert res["longs_suppressed"] is False
         assert res["regime"] in ("RECOVERY", "BULL") and res["direction"] == "up"
 
+    def test_recovery_restores_early_while_still_below_the_slow_line(self):
+        # Steep decline then a modest reclaim: price gets back above the faster
+        # (25w) line + makes a higher low, but is STILL BELOW the 50w line.  The
+        # tuned gate restores here — the "bottom → MA" recovery caught early,
+        # instead of waiting for the slow line (which tied the 200-line last time).
+        series = [240.0 - 3.0 * i for i in range(55)] + [78.0 + 2.0 * j for j in range(1, 16)]
+        res = macro_direction(series, fast_period=50, recover_period=25)
+        assert res["price"] < res["fast_ma"]       # 50w line not yet reclaimed
+        assert res["price"] > res["recover_ma"]    # but the faster line is
+        assert res["higher_low"] is True
+        assert res["regime"] == "RECOVERY" and res["longs_suppressed"] is False
+
     def test_insufficient_data_fails_open_not_suppressed(self):
         res = macro_direction([100.0, 101.0, 102.0], fast_period=50)
         assert res["longs_suppressed"] is False and res["status"] == "insufficient_data"
