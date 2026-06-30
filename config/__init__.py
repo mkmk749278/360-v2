@@ -434,6 +434,41 @@ BTC_STATE_COUPLING_TF: str = _safe_choice(
 BTC_STATE_COUPLING_LOOKBACK: int = _safe_int("BTC_STATE_COUPLING_LOOKBACK", "200")
 
 # ---------------------------------------------------------------------------
+# Counter-trend-LONG macro-direction suppression (S39 — the validated scalp filter)
+# ---------------------------------------------------------------------------
+# SCALP-FIRST (owner directive): this is a thin context filter on a few proven-
+# bleeding counter-trend reversal LONG *scalp* setups — NOT a macro/position trade.
+# Exits stay pure scalp; SHORTs and every other setup fire normally; it simply
+# declines to take these specific long scalps while the big trend (BTC and/or the
+# coin's own) is heading DOWN, via src/btc_state.py::macro_direction (slope + price-
+# vs-fast-MA + higher-low structure), and AUTO-RESTORES them when it turns up.
+# Backfill: cutting these in the current BTC decline nets the book −13.88 → +28.95.
+# SR_FLIP-long stays statically off (its own flag) — it loses in every regime.
+CT_LONG_MACRO_GATE_ENABLED: bool = _safe_bool("CT_LONG_MACRO_GATE_ENABLED", "true")
+CT_LONG_MACRO_GATE_SETUPS: frozenset = frozenset(
+    s.strip().upper()
+    for s in os.getenv(
+        "CT_LONG_MACRO_GATE_SETUPS", "LIQUIDITY_SWEEP_REVERSAL,MOVER_TREND_PULLBACK"
+    ).split(",")
+    if s.strip()
+)
+# "A long needs BOTH to permit it" — suppress if EITHER layer reads DOWN.
+CT_LONG_MACRO_USE_BTC: bool = _safe_bool("CT_LONG_MACRO_USE_BTC", "true")
+CT_LONG_MACRO_USE_PER_COIN: bool = _safe_bool("CT_LONG_MACRO_USE_PER_COIN", "true")
+# BTC macro layer — weekly (the cycle backdrop; the owner's 200-week thesis).
+BTC_MACRO_TF: str = _safe_choice("BTC_MACRO_TF", "1w", frozenset({"1d", "1w"}))
+BTC_MACRO_FAST_PERIOD: int = _safe_int("BTC_MACRO_FAST_PERIOD", "50")
+BTC_MACRO_RECOVER_PERIOD: int = _safe_int("BTC_MACRO_RECOVER_PERIOD", "25")
+BTC_MACRO_SLOW_PERIOD: int = _safe_int("BTC_MACRO_SLOW_PERIOD", "200")
+BTC_MACRO_CACHE_TTL_SEC: float = _safe_float("BTC_MACRO_CACHE_TTL_SEC", "300.0")
+# Per-coin layer — the coin's OWN higher-TF trend (daily: responsive, not weekly-slow).
+COIN_MACRO_TF: str = _safe_choice("COIN_MACRO_TF", "1d", frozenset({"4h", "1d", "1w"}))
+COIN_MACRO_FAST_PERIOD: int = _safe_int("COIN_MACRO_FAST_PERIOD", "50")
+COIN_MACRO_RECOVER_PERIOD: int = _safe_int("COIN_MACRO_RECOVER_PERIOD", "25")
+COIN_MACRO_SLOW_PERIOD: int = _safe_int("COIN_MACRO_SLOW_PERIOD", "200")
+COIN_MACRO_CACHE_TTL_SEC: float = _safe_float("COIN_MACRO_CACHE_TTL_SEC", "300.0")
+
+# ---------------------------------------------------------------------------
 # Dynamic Tiering (Market Watchdog) — PR 2
 # ---------------------------------------------------------------------------
 # Enable/disable the background TierManager that periodically polls Binance

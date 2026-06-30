@@ -48,6 +48,19 @@ from config import (
     BTC_STATE_CACHE_TTL_SEC,
     BTC_STATE_COUPLING_TF,
     BTC_STATE_COUPLING_LOOKBACK,
+    CT_LONG_MACRO_GATE_ENABLED,
+    CT_LONG_MACRO_GATE_SETUPS,
+    CT_LONG_MACRO_USE_BTC,
+    CT_LONG_MACRO_USE_PER_COIN,
+    BTC_MACRO_TF,
+    BTC_MACRO_FAST_PERIOD,
+    BTC_MACRO_RECOVER_PERIOD,
+    BTC_MACRO_SLOW_PERIOD,
+    BTC_MACRO_CACHE_TTL_SEC,
+    COIN_MACRO_TF,
+    COIN_MACRO_FAST_PERIOD,
+    COIN_MACRO_RECOVER_PERIOD,
+    COIN_MACRO_SLOW_PERIOD,
     DARK_FLAG_SHADOW_TELEMETRY,
     FEEDBACK_LOOP_ENABLED,
     NARRATIVE_PAIR_BONUS,
@@ -172,6 +185,7 @@ from src.btc_state import (
     compute_btc_state,
     compute_downside_coupling,
     compute_haircut_factor,
+    macro_direction,
 )
 from src.volume_divergence import check_volume_divergence_gate
 from src.vwap import check_vwap_extension, compute_vwap
@@ -3817,6 +3831,71 @@ class Scanner:
         self._btc_state_cache = (now, state)
         return state
 
+    def _get_btc_macro_dir_cached(self) -> Dict[str, object]:
+        """BTC macro DIRECTION (weekly slope + price-vs-fast-MA + structure), cached.
+
+        The pair-independent cycle backdrop for the counter-trend-long scalp filter.
+        Slow-moving, so it runs at most once per ``BTC_MACRO_CACHE_TTL_SEC`` and is
+        reused across all pairs (Cost Discipline: ``get_candles`` is an in-memory
+        lookup, no new I/O).  Fails to NEUTRAL / not-suppressed on any error — a
+        suppression gate never fires on missing data.
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_btc_macro_dir_cache", None)
+        if cached is not None and (now - cached[0]) < BTC_MACRO_CACHE_TTL_SEC:
+            return cached[1]
+        try:
+            _cd = self.data_store.get_candles("BTCUSDT", BTC_MACRO_TF) or {}
+            state = macro_direction(
+                _cd.get("close", []),
+                fast_period=BTC_MACRO_FAST_PERIOD,
+                recover_period=BTC_MACRO_RECOVER_PERIOD,
+                slow_period=BTC_MACRO_SLOW_PERIOD,
+            )
+        except Exception as _bm_exc:
+            log.debug("BTC-macro-direction compute error (fail open): {}", _bm_exc)
+            state = {"regime": "NEUTRAL", "longs_suppressed": False, "status": "error"}
+        self._btc_macro_dir_cache = (now, state)
+        return state
+
+    def _ct_long_macro_suppressed(
+        self, symbol: str, setup_class_name: str, direction: str,
+    ) -> Tuple[bool, str]:
+        """Should this counter-trend LONG scalp be suppressed by macro direction?
+
+        Scalp-first guardrails: only LONG + a gated reversal setup is ever in scope;
+        everything else returns ``(False, "")`` immediately.  Suppress if EITHER the
+        BTC macro leg OR the coin's own trend reads DOWN ("a long needs both to
+        permit it").  Auto-restores when either turns up.  Fails open (no
+        suppression) on any error or missing data.
+        """
+        if not (
+            CT_LONG_MACRO_GATE_ENABLED
+            and (direction or "").upper() == "LONG"
+            and (setup_class_name or "").upper() in CT_LONG_MACRO_GATE_SETUPS
+        ):
+            return False, ""
+        try:
+            if CT_LONG_MACRO_USE_BTC:
+                _btc = self._get_btc_macro_dir_cached()
+                if _btc.get("longs_suppressed"):
+                    return True, f"btc_{_btc.get('regime')}"
+            if CT_LONG_MACRO_USE_PER_COIN:
+                _cd = self.data_store.get_candles(symbol, COIN_MACRO_TF) or {}
+                _coin = macro_direction(
+                    _cd.get("close", []),
+                    fast_period=COIN_MACRO_FAST_PERIOD,
+                    recover_period=COIN_MACRO_RECOVER_PERIOD,
+                    slow_period=COIN_MACRO_SLOW_PERIOD,
+                )
+                if _coin.get("longs_suppressed"):
+                    return True, f"coin_{_coin.get('regime')}"
+        except Exception as _ctm_exc:
+            log.debug(
+                "CT-long macro gate error for {} (fail open): {}", symbol, _ctm_exc,
+            )
+        return False, ""
+
     @staticmethod
     def _classify_macro_trend(closes: list) -> tuple[str, float]:
         """Classify the macro trend from a close price series.
@@ -5624,6 +5703,28 @@ class Scanner:
                     "Symbol direction gate error for {} {} (fail open): {}",
                     symbol, chan_name, _sym_dir_exc,
                 )
+
+        # ── Counter-trend-LONG macro-direction suppression (S39, scalp filter) ──
+        # SCALP-FIRST: a thin context filter on a few proven-bleeding counter-trend
+        # reversal LONG scalp setups (LSR / MOVER) — NOT a macro/position trade.
+        # SHORTs and every other setup are untouched; exits stay pure scalp.  We
+        # decline these specific long scalps while the big trend is heading DOWN —
+        # BTC's macro leg AND/OR the coin's own (a long needs BOTH to permit it) —
+        # and AUTO-RESTORE when it turns up (macro_direction recomputed every cycle).
+        # Backfill-validated (book −13.88 → +28.95).  Hard reject before scoring;
+        # env-reversible; fail-open (no suppression) on missing data.
+        _ct_sup, _ct_why = self._ct_long_macro_suppressed(
+            symbol, _setup_class_name, sig.direction.value,
+        )
+        if _ct_sup:
+            self._suppression_counters[
+                f"ct_long_macro_suppress:{chan_name}:{_setup_class_name}"
+            ] += 1
+            log.info(
+                "CT_LONG_MACRO_SUPPRESS {} {} LONG [{}] ({})",
+                symbol, chan_name, _setup_class_name, _ct_why,
+            )
+            return _reject("gated", None)
 
         risk = self._evaluate_risk(sig, ctx, setup, chan_name=chan_name)
         if not risk.passed:
