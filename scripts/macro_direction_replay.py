@@ -74,8 +74,9 @@ def _ymd(ms: int) -> str:
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--symbol", default="BTCUSDT")
-    ap.add_argument("--fast", type=int, default=50, help="fast MA period (weeks)")
-    ap.add_argument("--slow", type=int, default=200, help="slow MA period (weeks)")
+    ap.add_argument("--fast", type=int, default=50, help="fast MA period (weeks) — the de-risk line")
+    ap.add_argument("--recover", type=int, default=25, help="faster MA period (weeks) — the early re-risk line")
+    ap.add_argument("--slow", type=int, default=200, help="slow MA period (weeks) — context / the old fence")
     ap.add_argument("--start", default="2018-01-01", help="history start (YYYY-MM-DD)")
     args = ap.parse_args()
 
@@ -91,7 +92,9 @@ def main() -> int:
     rows = []  # (date, regime, suppressed, price_vs_slow)
     for i in range(len(closes)):
         window = closes[: i + 1]
-        res = macro_direction(window, fast_period=args.fast, slow_period=args.slow)
+        res = macro_direction(
+            window, fast_period=args.fast, recover_period=args.recover, slow_period=args.slow
+        )
         slow = _sma(window, args.slow)
         if slow is None:
             pvs = "—"

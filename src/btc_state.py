@@ -365,6 +365,7 @@ def macro_direction(
     *,
     fast_period: int = 50,
     slow_period: int = 200,
+    recover_period: int = 25,
     slope_lookback: int = 8,
     swing: int = 10,
     buffer_pct: float = 0.01,
@@ -375,34 +376,37 @@ def macro_direction(
     (recent swing-low vs the prior swing-low), on a single close series.  Used on
     BTC weekly (macro) and, separately, on a pair's own higher-TF series.
 
-    Regimes
-    -------
-    * ``DECLINE``  — price has lost the fast MA on the way down (or it is falling /
-      making lower lows).  Counter-trend LONGs suppressed.  Catches the "fall from
-      the top to the MA" leg the static line missed.
-    * ``RECOVERY`` — price has reclaimed the fast MA AND a higher low has formed,
-      while the fast MA may still be turning.  Longs restored *early* — before the
-      slow line is reclaimed.
-    * ``BULL``     — price above a rising fast MA (and ≥ slow MA when known).
-    * ``NEUTRAL``  — price hugging the fast MA inside the buffer; no suppression.
+    Asymmetric by design — quick to de-risk, patient-but-early to re-risk:
 
-    ``buffer_pct`` is a deadband around the fast MA so chop around it doesn't
+    * **De-risk (DECLINE)** on losing the **fast** (50-week) MA on the way down.
+      This catches the "fall from the top to the MA" leg the static line missed —
+      validated ~6 months ahead of the 200-week break on BTC's 2021→22 fall.
+    * **Re-risk (RECOVERY)** on reclaiming a **faster `recover` (≈25-week) MA AND a
+      confirmed higher low** — *before* the 50-week (let alone the 200-week) is back,
+      so the recovery is caught early instead of tying the slow line.
+    * **BULL** once price is above a rising fast MA (and ≥ slow MA when known).
+    * **NEUTRAL** when price sits between the lines with no confirmed up-turn.
+
+    Two MAs on purpose: the slow line confirms the *fall* (stable, already early),
+    the faster line + structure confirms the *turn* (early, but a higher low guards
+    against bare dead-cat bounces).  ``buffer_pct`` is a deadband so chop doesn't
     flicker the regime.  Fails to ``NEUTRAL`` / not-suppressed on missing data.
 
-    Returns ``{regime, longs_suppressed, direction, price, fast_ma, slow_ma,
-    fast_rising, higher_low, lower_low, status}``.
+    Returns ``{regime, longs_suppressed, direction, price, fast_ma, recover_ma,
+    slow_ma, fast_rising, higher_low, lower_low, status}``.
     """
     c = _as_close_list(closes)
     need = max(fast_period, swing * 2) + 1
     if len(c) < need:
         return {
             "regime": "NEUTRAL", "longs_suppressed": False, "direction": "flat",
-            "price": (c[-1] if c else None), "fast_ma": None, "slow_ma": None,
-            "fast_rising": None, "higher_low": None, "lower_low": None,
-            "status": "insufficient_data",
+            "price": (c[-1] if c else None), "fast_ma": None, "recover_ma": None,
+            "slow_ma": None, "fast_rising": None, "higher_low": None,
+            "lower_low": None, "status": "insufficient_data",
         }
     price = c[-1]
     fast = _sma(c, fast_period)
+    recover = _sma(c, recover_period) or fast  # faster turn line; fall back to fast
     slow = _sma(c, slow_period)  # may be None when history < slow_period (context only)
 
     # Fast-MA slope over the lookback (vs the MA `slope_lookback` bars ago).
@@ -415,17 +419,17 @@ def macro_direction(
     higher_low = recent_low > prior_low
     lower_low = recent_low < prior_low
 
-    above_fast = price > fast * (1.0 + buffer_pct)
     below_fast = price < fast * (1.0 - buffer_pct)
+    # Re-risk: reclaim the faster line + a confirmed higher low (the early turn).
+    up_confirmed = (price > recover * (1.0 + buffer_pct)) and higher_low
 
-    # Decision — check the confirmed up-turn first so a real recovery overrides.
-    if above_fast and (higher_low or fast_rising):
-        bull = fast_rising and (slow is None or fast >= slow)
+    # Decision — confirmed up-turn first so a real recovery overrides the down leg.
+    if up_confirmed:
+        bull = (price > fast) and fast_rising and (slow is None or fast >= slow)
         regime = "BULL" if bull else "RECOVERY"
         suppressed, direction = False, "up"
     elif below_fast:
-        # Lost the fast MA → down leg (deep bear, or the early fall from the top
-        # while the fast MA is still rolling over).  De-risk quickly.
+        # Lost the fast MA → down leg (deep bear, or the early fall from the top).
         regime = "DECLINE"
         suppressed, direction = True, "down"
     else:
@@ -437,6 +441,7 @@ def macro_direction(
         "direction": direction,
         "price": price,
         "fast_ma": fast,
+        "recover_ma": recover,
         "slow_ma": slow,
         "fast_rising": fast_rising,
         "higher_low": higher_low,
