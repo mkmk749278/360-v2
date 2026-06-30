@@ -14,6 +14,7 @@ from src.btc_state import (
     compute_btc_state,
     compute_downside_coupling,
     compute_haircut_factor,
+    macro_direction,
 )
 
 
@@ -178,6 +179,56 @@ class TestComputeHaircutFactor:
         assert {"SR_FLIP_RETEST", "LIQUIDITY_SWEEP_REVERSAL", "MOVER_TREND_PULLBACK"} == set(
             DEFAULT_SEVERE_SETUPS
         )
+
+
+# ---------------------------------------------------------------------------
+# macro_direction — the S39 directional gate ("direction, not a fence")
+# ---------------------------------------------------------------------------
+
+class TestMacroDirection:
+    def test_clean_uptrend_allows_longs(self):
+        rising = [100.0 + i for i in range(70)]
+        res = macro_direction(rising, fast_period=50)
+        assert res["longs_suppressed"] is False
+        assert res["regime"] in ("BULL", "RECOVERY") and res["direction"] == "up"
+
+    def test_clean_downtrend_suppresses_longs(self):
+        falling = [200.0 - i for i in range(70)]
+        res = macro_direction(falling, fast_period=50)
+        assert res["longs_suppressed"] is True and res["regime"] == "DECLINE"
+
+    def test_fall_from_top_suppresses_on_losing_the_fast_ma(self):
+        # 60 rising weeks then a sharp drop that loses the fast MA — the owner's
+        # "falling from top to MA" case.  The static 200-line would still read the
+        # price as above it (no suppression); the directional gate de-risks here.
+        series = [100.0 + i for i in range(60)] + [159.0 - 11.0 * j for j in range(1, 9)]
+        res = macro_direction(series, fast_period=50)
+        assert res["price"] < res["fast_ma"]          # price lost the fast MA
+        assert res["longs_suppressed"] is True        # …so we de-risk on the way down
+        assert res["regime"] == "DECLINE"
+
+    def test_v_recovery_restores_longs_with_higher_low(self):
+        # Deep decline then a strong reclaim with a higher low — longs come back.
+        series = [200.0 - 3.0 * i for i in range(40)] + [80.0 + 4.0 * j for j in range(1, 25)]
+        res = macro_direction(series, fast_period=50)
+        assert res["higher_low"] is True
+        assert res["longs_suppressed"] is False
+        assert res["regime"] in ("RECOVERY", "BULL") and res["direction"] == "up"
+
+    def test_insufficient_data_fails_open_not_suppressed(self):
+        res = macro_direction([100.0, 101.0, 102.0], fast_period=50)
+        assert res["longs_suppressed"] is False and res["status"] == "insufficient_data"
+
+    def test_accepts_numpy_array(self):
+        falling = np.asarray([200.0 - i for i in range(70)], dtype=np.float64)
+        res = macro_direction(falling, fast_period=50)
+        assert res["longs_suppressed"] is True  # no ambiguous-truth crash on np input
+
+    def test_buffer_deadband_holds_neutral_at_the_line(self):
+        # Price sitting basically on a flat fast MA → no suppression (neutral).
+        flat = [100.0 + (0.1 if i % 2 else -0.1) for i in range(70)]
+        res = macro_direction(flat, fast_period=50, buffer_pct=0.02)
+        assert res["longs_suppressed"] is False
 
 
 # ---------------------------------------------------------------------------
