@@ -321,3 +321,53 @@ def compute_haircut_factor(
         "setup_weight": setup_weight,
         "reason": f"counter_{s.lower()}_b{b:+.2f}_w{w_pair:.2f}",
     }
+
+
+def _sma(values: Sequence[float], period: int) -> Optional[float]:
+    """Simple moving average of the last ``period`` values. None if too short."""
+    if period < 1 or len(values) < period:
+        return None
+    return sum(values[-period:]) / float(period)
+
+
+def btc_macro_state(
+    weekly_closes: Sequence[float],
+    daily_closes: Sequence[float],
+    *,
+    weekly_period: int = 200,
+    daily_period: int = 200,
+    buffer_pct: float = 0.0,
+) -> Dict[str, object]:
+    """BTC macro direction — the owner's "200-week MA" bear thesis (S38).
+
+    ``macro_bear`` is True when BTC's **weekly close is below its weekly SMA** — the
+    canonical macro bull/bear line, and exactly the signal the owner named (BTC broke
+    its 200-week MA in June 2026).  Falls back to the **daily** SMA when weekly history
+    is too short, and fails toward **NOT-bear** (no suppression) when neither is
+    available — a suppression gate must never fire on missing data.
+
+    ``buffer_pct`` adds a one-sided deadband: the close must sit at least that far
+    *below* the MA to count as bear, so a price hugging the line doesn't flip the
+    macro regime week to week.  This recomputes every scan, so when BTC reclaims the
+    MA the gate lifts on its own (auto-restore).
+
+    Returns ``{"macro_bear", "basis", "close", "ma", "status"}``.
+    """
+    for basis, closes, period in (
+        ("weekly", weekly_closes, weekly_period),
+        ("daily", daily_closes, daily_period),
+    ):
+        # NB: do not use ``closes or []`` — a numpy array raises "ambiguous truth
+        # value", which would silently skip the real (np-array) candle series.
+        seq = closes if closes is not None else []
+        try:
+            c = [float(x) for x in seq if x is not None]
+        except (TypeError, ValueError):
+            continue
+        ma = _sma(c, period)
+        if ma is None or ma <= 0.0:
+            continue
+        close = c[-1]
+        macro_bear = close < ma * (1.0 - buffer_pct)
+        return {"macro_bear": macro_bear, "basis": basis, "close": close, "ma": ma, "status": "ok"}
+    return {"macro_bear": False, "basis": "none", "close": None, "ma": None, "status": "insufficient_data"}

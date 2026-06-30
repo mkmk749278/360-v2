@@ -94,3 +94,47 @@ class TestGetBtcStateCached:
         )
         res = scanner._get_btc_state_cached()
         assert res["b"] == 0.0
+
+
+def _weekly(closes):
+    import numpy as np
+    c = np.asarray(closes, dtype=np.float64)
+    return {"close": c, "high": c, "low": c, "open": c, "volume": np.ones_like(c)}
+
+
+class TestGetBtcMacroCached:
+    def test_weekly_below_ma_reads_bear(self):
+        scanner = _make_scanner()
+        wk = _weekly([100.0] * 199 + [60.0])
+        scanner.data_store.get_candles = MagicMock(
+            side_effect=lambda sym, tf: wk if (sym == "BTCUSDT" and tf == "1w") else None
+        )
+        res = scanner._get_btc_macro_cached()
+        assert res["macro_bear"] is True and res["basis"] == "weekly"
+
+    def test_weekly_above_ma_not_bear(self):
+        scanner = _make_scanner()
+        wk = _weekly([100.0] * 199 + [150.0])
+        scanner.data_store.get_candles = MagicMock(
+            side_effect=lambda sym, tf: wk if (sym == "BTCUSDT" and tf == "1w") else None
+        )
+        assert scanner._get_btc_macro_cached()["macro_bear"] is False
+
+    def test_cache_reused_within_ttl(self):
+        scanner = _make_scanner()
+        wk = _weekly([100.0] * 199 + [60.0])
+        gc = MagicMock(side_effect=lambda sym, tf: wk if (sym == "BTCUSDT" and tf == "1w") else None)
+        scanner.data_store.get_candles = gc
+        first = scanner._get_btc_macro_cached()
+        n = gc.call_count
+        second = scanner._get_btc_macro_cached()
+        assert gc.call_count == n and second is first
+
+    def test_fail_open_not_bear_when_store_raises(self):
+        scanner = _make_scanner()
+
+        def _raise(sym, tf):
+            raise RuntimeError("store down")
+
+        scanner.data_store.get_candles = MagicMock(side_effect=_raise)
+        assert scanner._get_btc_macro_cached()["macro_bear"] is False

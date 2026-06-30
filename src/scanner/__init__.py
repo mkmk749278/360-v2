@@ -48,6 +48,12 @@ from config import (
     BTC_STATE_CACHE_TTL_SEC,
     BTC_STATE_COUPLING_TF,
     BTC_STATE_COUPLING_LOOKBACK,
+    CT_LONG_MACRO_GATE_ENABLED,
+    CT_LONG_MACRO_GATE_SETUPS,
+    BTC_MACRO_WEEKLY_MA_PERIOD,
+    BTC_MACRO_DAILY_MA_PERIOD,
+    BTC_MACRO_BUFFER_PCT,
+    BTC_MACRO_CACHE_TTL_SEC,
     DARK_FLAG_SHADOW_TELEMETRY,
     FEEDBACK_LOOP_ENABLED,
     NARRATIVE_PAIR_BONUS,
@@ -169,6 +175,7 @@ from src.btc_direction import (
 )
 from src.btc_state import (
     DEFAULT_TF_WEIGHTS as _BTC_STATE_TF_WEIGHTS,
+    btc_macro_state,
     compute_btc_state,
     compute_downside_coupling,
     compute_haircut_factor,
@@ -3817,6 +3824,35 @@ class Scanner:
         self._btc_state_cache = (now, state)
         return state
 
+    def _get_btc_macro_cached(self) -> Dict[str, object]:
+        """BTC macro direction (weekly 200-MA, daily fallback), cached per cycle.
+
+        Pair-independent and slow-moving, so it runs at most once per
+        ``BTC_MACRO_CACHE_TTL_SEC`` and is reused across all pairs (Cost Discipline:
+        no new network read; ``get_candles`` is an in-memory lookup).  Fails toward
+        NOT-bear (no suppression) on any error — a suppression gate never fires on
+        missing data.
+        """
+        now = time.monotonic()
+        cached = getattr(self, "_btc_macro_cache", None)
+        if cached is not None and (now - cached[0]) < BTC_MACRO_CACHE_TTL_SEC:
+            return cached[1]
+        try:
+            _wk = self.data_store.get_candles("BTCUSDT", "1w") or {}
+            _dy = self.data_store.get_candles("BTCUSDT", "1d") or {}
+            state = btc_macro_state(
+                _wk.get("close", []),
+                _dy.get("close", []),
+                weekly_period=BTC_MACRO_WEEKLY_MA_PERIOD,
+                daily_period=BTC_MACRO_DAILY_MA_PERIOD,
+                buffer_pct=BTC_MACRO_BUFFER_PCT,
+            )
+        except Exception as _bm_exc:
+            log.debug("BTC-macro compute error (fail open, not bear): {}", _bm_exc)
+            state = {"macro_bear": False, "basis": "none", "close": None, "ma": None, "status": "error"}
+        self._btc_macro_cache = (now, state)
+        return state
+
     @staticmethod
     def _classify_macro_trend(closes: list) -> tuple[str, float]:
         """Classify the macro trend from a close price series.
@@ -5623,6 +5659,40 @@ class Scanner:
                 log.debug(
                     "Symbol direction gate error for {} {} (fail open): {}",
                     symbol, chan_name, _sym_dir_exc,
+                )
+
+        # ── Counter-trend-LONG BTC-macro suppression (S39, backfill-validated) ──
+        # The backfill P&L counterfactual (315 signals) showed dropping the
+        # counter-trend reversal LONGs while BTC is in its macro (200-week MA)
+        # downtrend is the best policy by far (book −13.88 → +28.95); the
+        # coupling/|b| refinements gave the edge back by keeping losers.  So we
+        # suppress LSR/MOVER longs while BTC is macro-bear and AUTO-RESTORE them
+        # when BTC reclaims the MA (recomputed every scan).  SR_FLIP-long stays
+        # statically off via its own flag — it loses in every regime, not just the
+        # bear.  Hard reject before scoring (saves the compute).  Env-reversible;
+        # fail-open (no suppression) on missing weekly/daily data.
+        if (
+            CT_LONG_MACRO_GATE_ENABLED
+            and sig.direction.value.upper() == "LONG"
+            and (_setup_class_name or "").upper() in CT_LONG_MACRO_GATE_SETUPS
+        ):
+            try:
+                _macro = self._get_btc_macro_cached()
+                if _macro.get("macro_bear"):
+                    self._suppression_counters[
+                        f"ct_long_macro_bear:{chan_name}:{_setup_class_name}"
+                    ] += 1
+                    log.info(
+                        "CT_LONG_MACRO_BEAR suppress {} {} LONG [{}] "
+                        "(BTC {} close={} < ma={})",
+                        symbol, chan_name, _setup_class_name,
+                        _macro.get("basis"), _macro.get("close"), _macro.get("ma"),
+                    )
+                    return _reject("gated", None)
+            except Exception as _macro_exc:
+                log.debug(
+                    "CT-long macro gate error for {} {} (fail open): {}",
+                    symbol, chan_name, _macro_exc,
                 )
 
         risk = self._evaluate_risk(sig, ctx, setup, chan_name=chan_name)

@@ -434,6 +434,35 @@ BTC_STATE_COUPLING_TF: str = _safe_choice(
 BTC_STATE_COUPLING_LOOKBACK: int = _safe_int("BTC_STATE_COUPLING_LOOKBACK", "200")
 
 # ---------------------------------------------------------------------------
+# Counter-trend-LONG BTC-macro suppression (the validated fix — S39)
+# ---------------------------------------------------------------------------
+# The backfill P&L counterfactual (315 signals) showed the BLUNT cohort cut — drop
+# the counter-trend reversal LONGs while BTC is in its macro downtrend — is the best
+# policy by far (book −13.88 → +28.95), and that the coupling/|b| refinements throw
+# the edge away by keeping losers. So the fix is: suppress these LONG setups WHILE BTC
+# is below its macro (200-week) MA, and AUTO-RESTORE them when BTC reclaims it — the
+# only thing a static on/off switch can't do. SR_FLIP_LONG stays statically off
+# (entry-quality problem, loses in every regime); LSR + MOVER longs are macro-gated.
+#
+# Recomputed every scan ⇒ self-restoring; env-reversible kill switch.
+CT_LONG_MACRO_GATE_ENABLED: bool = _safe_bool("CT_LONG_MACRO_GATE_ENABLED", "true")
+# Counter-trend LONG setups suppressed while BTC is macro-bear (comma-separated).
+CT_LONG_MACRO_GATE_SETUPS: frozenset = frozenset(
+    s.strip().upper()
+    for s in os.getenv(
+        "CT_LONG_MACRO_GATE_SETUPS",
+        "LIQUIDITY_SWEEP_REVERSAL,MOVER_TREND_PULLBACK",
+    ).split(",")
+    if s.strip()
+)
+# Macro MA basis: BTC weekly close vs its 200-week SMA (owner's thesis), daily
+# fallback. buffer% = one-sided deadband so a price hugging the MA doesn't flicker.
+BTC_MACRO_WEEKLY_MA_PERIOD: int = _safe_int("BTC_MACRO_WEEKLY_MA_PERIOD", "200")
+BTC_MACRO_DAILY_MA_PERIOD: int = _safe_int("BTC_MACRO_DAILY_MA_PERIOD", "200")
+BTC_MACRO_BUFFER_PCT: float = _safe_float("BTC_MACRO_BUFFER_PCT", "0.0")
+BTC_MACRO_CACHE_TTL_SEC: float = _safe_float("BTC_MACRO_CACHE_TTL_SEC", "60.0")
+
+# ---------------------------------------------------------------------------
 # Dynamic Tiering (Market Watchdog) — PR 2
 # ---------------------------------------------------------------------------
 # Enable/disable the background TierManager that periodically polls Binance

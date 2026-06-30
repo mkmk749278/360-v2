@@ -11,6 +11,7 @@ import numpy as np
 
 from src.btc_state import (
     DEFAULT_SEVERE_SETUPS,
+    btc_macro_state,
     compute_btc_state,
     compute_downside_coupling,
     compute_haircut_factor,
@@ -178,6 +179,48 @@ class TestComputeHaircutFactor:
         assert {"SR_FLIP_RETEST", "LIQUIDITY_SWEEP_REVERSAL", "MOVER_TREND_PULLBACK"} == set(
             DEFAULT_SEVERE_SETUPS
         )
+
+
+# ---------------------------------------------------------------------------
+# btc_macro_state — the validated S39 gate basis (200-week MA bear)
+# ---------------------------------------------------------------------------
+
+class TestBtcMacroState:
+    def test_weekly_below_ma_is_macro_bear(self):
+        weekly = [100.0] * 199 + [60.0]  # last close well below the SMA
+        res = btc_macro_state(weekly, [], weekly_period=200)
+        assert res["status"] == "ok" and res["basis"] == "weekly"
+        assert res["macro_bear"] is True
+
+    def test_weekly_above_ma_is_not_bear(self):
+        weekly = [100.0] * 199 + [140.0]
+        res = btc_macro_state(weekly, [], weekly_period=200)
+        assert res["macro_bear"] is False and res["basis"] == "weekly"
+
+    def test_falls_back_to_daily_when_weekly_short(self):
+        daily = [100.0] * 199 + [60.0]
+        res = btc_macro_state([10.0, 20.0], daily, weekly_period=200, daily_period=200)
+        assert res["basis"] == "daily" and res["macro_bear"] is True
+
+    def test_insufficient_data_fails_open_not_bear(self):
+        res = btc_macro_state([1.0, 2.0], [1.0, 2.0], weekly_period=200, daily_period=200)
+        assert res["macro_bear"] is False and res["status"] == "insufficient_data"
+
+    def test_buffer_deadband_holds_off_near_the_line(self):
+        # Close 1% below MA (~100), but a 2% buffer requires it to be ≥2% below.
+        weekly = [100.0] * 199 + [99.0]
+        res = btc_macro_state(weekly, [], weekly_period=200, buffer_pct=0.02)
+        assert res["macro_bear"] is False
+        # Drop it 3% below → now bear.
+        weekly2 = [100.0] * 199 + [97.0]
+        assert btc_macro_state(weekly2, [], weekly_period=200, buffer_pct=0.02)["macro_bear"] is True
+
+    def test_auto_restore_when_btc_reclaims(self):
+        # Same series, price reclaims above the MA → gate lifts (not bear).
+        below = [100.0] * 199 + [80.0]
+        above = [100.0] * 199 + [120.0]
+        assert btc_macro_state(below, [], weekly_period=200)["macro_bear"] is True
+        assert btc_macro_state(above, [], weekly_period=200)["macro_bear"] is False
 
 
 # ---------------------------------------------------------------------------
