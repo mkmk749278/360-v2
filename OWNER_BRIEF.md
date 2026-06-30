@@ -2,6 +2,15 @@
 
 **Read this first every session. Then read `ACTIVE_CONTEXT.md`.**
 
+> **⚠️ PHASE: PRODUCTION (LIVE).** The Lumin app is live on the Google Play
+> **production** track (release 266, public in the launch region, real installs —
+> 14 at 2026-06-30). Closed testing is over. Real users see signals and can run
+> auto-trade on their own capital. **Money-path changes** (scoring, evaluator paths,
+> exit/FSM, dispatch, paid-channel routing) now ship **dark-flag-first**: default-OFF,
+> shadow-measured on a real window, **activated only after owner sign-off**. This
+> supersedes the testing-phase "ship live, no dark flags" cadence. Safety limits
+> (§1.4, B12, B18) were always enforced and stay so. See `CLAUDE.md § Project Phase`.
+
 ---
 
 # PART I — ROLES AND OPERATING CONTRACT
@@ -331,7 +340,7 @@ Soft-penalty bonus magnitudes bounded: confluence ≤9 pts, structure-align 3 pt
 | Monitor | GitHub Actions "VPS Runtime Audit / Truth Report" → `monitor-logs` branch |
 | 24/7 Agent | Autonomous monitoring agent (in design — §5.1). Watches engine health, detects anomalies, files GitHub Issues for CTE review. |
 | Signal delivery | Telegram paid channel + free channel (storytelling mirrors) |
-| Lumin app | Play Store Closed Testing — package `org.luminapp.lumin`. AAB built by CI on every `main` push. API via Cloudflare (`api.luminapp.org`, SSL, Mumbai edge). |
+| Lumin app | **Play Store PRODUCTION track — LIVE** (release 266, public in launch region; 14 installs at 2026-06-30) — package `org.luminapp.lumin`. AAB built by CI on every `main` push. API via Cloudflare (`api.luminapp.org`, SSL, Mumbai edge). |
 | Ops dashboard | `github.com/mkmk749278/360ce-ops` → `ops.luminapp.org`. Live. Owner-only auth. Read-only consumer of engine artifacts (API, data volume, monitor-logs, diag scripts). |
 | Legal | `github.com/mkmk749278/lumin-legal` → GitHub Pages. Source-of-truth for Play Console + in-app legal links. |
 

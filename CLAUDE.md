@@ -30,28 +30,36 @@ Ask before every code change: **"How does this make signals more profitable for 
 
 ---
 
-## Project Phase — Testing (no subscribers yet)
+## Project Phase — Production (LIVE on the Play Store)
 
-**We are alone testing. There are no paid subscribers on the channel yet.** This
-changes the shipping calculus:
+**The Lumin app is LIVE on the Google Play production track** (release 266, public in
+our launch region, real installs on real devices — 14 at 2026-06-30). Closed testing
+is over. Real users see every signal and can run auto-trade on their own capital.
+This **restores the dark-flag-first discipline** the testing phase had relaxed — the
+trigger the old "ship live" section itself named ("revisit at subscriber launch") has
+now fired:
 
-- **Ship changes LIVE — do not gate new work behind dark flags + shadow telemetry.**
-  The dark-flag-first / measure-in-shadow pattern from Sessions 19–28 existed to
-  protect *live subscribers* from an unproven change. With no subscribers, that
-  protection buys nothing and only slows iteration. New paths / scoring / exit
-  changes go live by default so we learn from real engine behaviour fast.
-- A reversible **env off-switch** (default ON) is still fine — that is an
-  operational kill switch, not a "dark flag." What we drop is *default-OFF + wait-
-  for-shadow-data-before-activating*.
-- **Safety limits are NOT relaxed by this.** Blast-radius caps, naked-position
-  invariant, secret handling, withdraw-key rejection (Hard Limits below, B12/B18)
-  stay fully enforced — they protect *our own* test capital, not just subscribers.
-- **Revisit at subscriber launch.** When the first paid subscriber joins, restore
-  dark-flag-first discipline for anything touching the money path.
+- **Money-path changes ship DARK-FLAG-FIRST.** Anything touching scoring, evaluator
+  paths, exit / FSM behaviour, dispatch, or paid-channel routing ships **default-OFF**,
+  is **shadow-measured on a real data window**, and is **activated only after owner
+  sign-off** on the shadow result. We no longer learn-by-shipping-live on the money
+  path — there are users behind it now.
+- **Stamp-and-shadow before you act.** A change that alters which signals emit or how
+  they score must first run observe-only: stamp the *would-be* effect on every signal
+  without applying it, so we confirm it touches the right signals before it changes
+  live output.
+- **Off-money-path work still ships normally** via PR: docs, ops/diagnostic views,
+  telemetry, infra. These never gated on a shadow window and still don't.
+- **A reversible env off-switch (default ON) is NOT a substitute for dark-first** on a
+  production money-path change — the kill switch protects against a live failure;
+  dark-first prevents shipping that failure to users at all.
+- **Safety limits remain fully enforced** (always were): blast-radius caps,
+  naked-position invariant, secret handling, withdraw-key rejection (Hard Limits below,
+  B12/B18). Production raises the stakes on these, never lowers them.
 
-This supersedes the "ships dark / 48h shadow window" cadence in older
-`ACTIVE_CONTEXT.md` checkpoints for *new* changes; already-shipped dark flags can be
-flipped live as the owner directs.
+This **reverses** the Sessions-29–38 "ship live, no dark flags" testing-phase cadence
+for money-path work. Already-shipped live flags stay as the owner directs; *new*
+money-path changes follow dark-first from here.
 
 ---
 
@@ -74,7 +82,7 @@ flipped live as the owner directs.
 - Paid-channel routing changes
 - Regime-per-exit design decisions (§3.2b — data research in progress)
 
-Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in ~45s. **Testing phase: no subscribers yet** — a `main` deploy reaches only our own test setup, so new changes ship live (not dark) per § Project Phase.
+Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in ~45s. **Production phase: the app is LIVE on the Play Store** — a `main` deploy reaches real users, so money-path changes ship **dark (default-OFF) + shadow-measured + owner sign-off to activate** per § Project Phase; off-money-path work ships normally.
 
 ---
 
