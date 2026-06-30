@@ -321,3 +321,125 @@ def compute_haircut_factor(
         "setup_weight": setup_weight,
         "reason": f"counter_{s.lower()}_b{b:+.2f}_w{w_pair:.2f}",
     }
+
+
+# ===========================================================================
+# Directional macro-regime (S39 fix) — "direction, not a fence"
+# ===========================================================================
+# The binary "below the 200-week MA" gate got both macro turns backwards (it
+# missed the fall from the cycle top while price was still above the line, and
+# kept longs off through the whole recovery while price was still below it).
+# Research (multi-source) + the owner's weekly charts both say the same thing:
+# trend is read from SLOPE + price-vs-the-FAST-MA + higher-low/lower-low
+# STRUCTURE, not a static line.  This classifier is **quick to de-risk** (suppress
+# the moment price loses the fast MA on the way down) and **patient to re-risk**
+# (restore only once price reclaims the fast MA AND a higher low has formed) — the
+# asymmetry the sources prescribe for counter-trend longs.  Recomputed every scan,
+# so it auto-restores as the trend turns — earlier than the slow line on both ends.
+
+
+def _sma(values: Sequence[float], period: int) -> Optional[float]:
+    """Simple moving average of the last ``period`` values. None if too short."""
+    if period < 1 or len(values) < period:
+        return None
+    return sum(values[-period:]) / float(period)
+
+
+def _as_close_list(closes) -> list:
+    """Coerce a close series (list or numpy array) to a clean list of floats.
+
+    Avoids ``arr or []`` (ambiguous truth value on numpy arrays).
+    """
+    seq = closes if closes is not None else []
+    out = []
+    for x in seq:
+        try:
+            out.append(float(x))
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def macro_direction(
+    closes,
+    *,
+    fast_period: int = 50,
+    slow_period: int = 200,
+    slope_lookback: int = 8,
+    swing: int = 10,
+    buffer_pct: float = 0.01,
+) -> Dict[str, object]:
+    """Directional macro regime: ``regime`` + ``longs_suppressed`` (the S39 gate).
+
+    Reads SLOPE (fast-MA direction) + POSITION (price vs the fast MA) + STRUCTURE
+    (recent swing-low vs the prior swing-low), on a single close series.  Used on
+    BTC weekly (macro) and, separately, on a pair's own higher-TF series.
+
+    Regimes
+    -------
+    * ``DECLINE``  — price has lost the fast MA on the way down (or it is falling /
+      making lower lows).  Counter-trend LONGs suppressed.  Catches the "fall from
+      the top to the MA" leg the static line missed.
+    * ``RECOVERY`` — price has reclaimed the fast MA AND a higher low has formed,
+      while the fast MA may still be turning.  Longs restored *early* — before the
+      slow line is reclaimed.
+    * ``BULL``     — price above a rising fast MA (and ≥ slow MA when known).
+    * ``NEUTRAL``  — price hugging the fast MA inside the buffer; no suppression.
+
+    ``buffer_pct`` is a deadband around the fast MA so chop around it doesn't
+    flicker the regime.  Fails to ``NEUTRAL`` / not-suppressed on missing data.
+
+    Returns ``{regime, longs_suppressed, direction, price, fast_ma, slow_ma,
+    fast_rising, higher_low, lower_low, status}``.
+    """
+    c = _as_close_list(closes)
+    need = max(fast_period, swing * 2) + 1
+    if len(c) < need:
+        return {
+            "regime": "NEUTRAL", "longs_suppressed": False, "direction": "flat",
+            "price": (c[-1] if c else None), "fast_ma": None, "slow_ma": None,
+            "fast_rising": None, "higher_low": None, "lower_low": None,
+            "status": "insufficient_data",
+        }
+    price = c[-1]
+    fast = _sma(c, fast_period)
+    slow = _sma(c, slow_period)  # may be None when history < slow_period (context only)
+
+    # Fast-MA slope over the lookback (vs the MA `slope_lookback` bars ago).
+    fast_prev = _sma(c[: len(c) - slope_lookback], fast_period)
+    fast_rising = True if fast_prev is None else (fast > fast_prev)
+
+    # Structure: most-recent swing low vs the prior one.
+    recent_low = min(c[-swing:])
+    prior_low = min(c[-2 * swing : -swing])
+    higher_low = recent_low > prior_low
+    lower_low = recent_low < prior_low
+
+    above_fast = price > fast * (1.0 + buffer_pct)
+    below_fast = price < fast * (1.0 - buffer_pct)
+
+    # Decision — check the confirmed up-turn first so a real recovery overrides.
+    if above_fast and (higher_low or fast_rising):
+        bull = fast_rising and (slow is None or fast >= slow)
+        regime = "BULL" if bull else "RECOVERY"
+        suppressed, direction = False, "up"
+    elif below_fast:
+        # Lost the fast MA → down leg (deep bear, or the early fall from the top
+        # while the fast MA is still rolling over).  De-risk quickly.
+        regime = "DECLINE"
+        suppressed, direction = True, "down"
+    else:
+        regime, suppressed, direction = "NEUTRAL", False, "flat"
+
+    return {
+        "regime": regime,
+        "longs_suppressed": suppressed,
+        "direction": direction,
+        "price": price,
+        "fast_ma": fast,
+        "slow_ma": slow,
+        "fast_rising": fast_rising,
+        "higher_low": higher_low,
+        "lower_low": lower_low,
+        "status": "ok",
+    }
