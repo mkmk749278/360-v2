@@ -167,3 +167,31 @@ def test_load_signals_requires_timestamp(tmp_path):
     p = tmp_path / "s.csv"
     p.write_text("symbol,side,real_pnl_pct\nBTCUSDT,LONG,1.2\n")  # no ts column
     assert bsb._load_signals(str(p)) == []
+
+
+def test_load_signals_prefers_dispatch_over_terminal_timestamp(tmp_path):
+    # signal_performance.json shape: dispatch_timestamp = emit, timestamp = close.
+    # The harness must reconstruct at dispatch, never the terminal record time.
+    rec = {
+        "signal_id": "SIG1",
+        "symbol": "ethusdt",
+        "direction": "SHORT",
+        "setup_class": "SR_FLIP_RETEST",
+        "dispatch_timestamp": 1_700_000_000,
+        "timestamp": 1_700_009_999,  # terminal/close — must be ignored
+        "pnl_pct": -0.8,
+        "confidence": 72.5,
+        "max_favorable_excursion_pct": 1.4,
+    }
+    p = tmp_path / "perf.json"
+    import json as _json
+
+    p.write_text(_json.dumps([rec]))
+    sigs = bsb._load_signals(str(p))
+    assert len(sigs) == 1
+    s = sigs[0]
+    assert s.ts_ms == 1_700_000_000_000  # dispatch, in ms — NOT the terminal time
+    assert s.symbol == "ETHUSDT" and s.side == "SHORT"
+    assert s.signal_id == "SIG1"
+    assert s.confidence == 72.5 and s.mfe == 1.4
+    assert s.is_win is False  # pnl < 0
