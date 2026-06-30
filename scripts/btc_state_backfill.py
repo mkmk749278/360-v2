@@ -344,13 +344,26 @@ class Sig:
     ts_ms: int
     real_pnl: Optional[float]
     is_win: Optional[bool]
+    signal_id: str = ""
+    confidence: Optional[float] = None
+    mfe: Optional[float] = None
 
 
-_TS_KEYS = ["emitted_at", "created_at", "signal_ts", "timestamp", "ts", "entry_ts", "open_time", "time"]
+# Emission-time keys, most-authoritative first. dispatch_timestamp / create_timestamp
+# are the engine's signal_performance.json emission fields; the generic "timestamp"
+# there is the record-WRITE (close) time, so it is the last-resort fallback only —
+# reconstructing BTC-State at close instead of emit would corrupt the validation.
+_TS_KEYS = [
+    "dispatch_timestamp", "create_timestamp", "emitted_at", "created_at",
+    "signal_ts", "entry_ts", "open_time", "time", "timestamp", "ts",
+]
 _SYM_KEYS = ["symbol", "pair"]
 _SIDE_KEYS = ["side", "direction"]
 _SETUP_KEYS = ["setup_class", "setup", "channel", "path"]
-_PNL_KEYS = ["real_pnl_pct", "real_pnl", "pnl_pct", "result_pct", "strategy_pct"]
+_PNL_KEYS = ["real_pnl_pct", "real_pnl", "pnl_pct", "result_pct", "signal_quality_pnl_pct", "strategy_pct"]
+_ID_KEYS = ["signal_id", "id"]
+_CONF_KEYS = ["confidence", "post_ai_confidence", "pre_ai_confidence", "score"]
+_MFE_KEYS = ["mfe_pct", "max_favorable_excursion_pct", "max_profit_pct"]
 
 
 def _first(d: Dict[str, Any], keys: Sequence[str]) -> Optional[Any]:
@@ -418,6 +431,16 @@ def _load_signals(path: str) -> List[Sig]:
             win = str(d["is_win"]).lower() in ("1", "true", "yes")
         elif pnl is not None:
             win = pnl > 0
+        conf_raw = _first(d, _CONF_KEYS)
+        mfe_raw = _first(d, _MFE_KEYS)
+        try:
+            conf = float(conf_raw) if conf_raw is not None else None
+        except (TypeError, ValueError):
+            conf = None
+        try:
+            mfe = float(mfe_raw) if mfe_raw is not None else None
+        except (TypeError, ValueError):
+            mfe = None
         out.append(
             Sig(
                 symbol=str(sym).upper(),
@@ -426,6 +449,9 @@ def _load_signals(path: str) -> List[Sig]:
                 ts_ms=ts,
                 real_pnl=pnl,
                 is_win=win,
+                signal_id=str(_first(d, _ID_KEYS) or ""),
+                confidence=conf,
+                mfe=mfe,
             )
         )
     if skipped_ts:
@@ -523,10 +549,13 @@ def main() -> int:
         align = (1.0 if s.side == "LONG" else -1.0) * b  # >0 with BTC, <0 against
         enriched.append(
             {
+                "signal_id": s.signal_id,
                 "symbol": s.symbol,
                 "side": s.side,
                 "setup_class": s.setup_class,
                 "ts_ms": s.ts_ms,
+                "confidence": s.confidence if s.confidence is not None else "",
+                "mfe_pct": s.mfe if s.mfe is not None else "",
                 "btc_state": round(b, 4),
                 "w_pair": round(w, 4) if w is not None else "",
                 "alignment": round(align, 4),
