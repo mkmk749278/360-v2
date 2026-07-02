@@ -4,6 +4,44 @@
 
 ---
 
+## 🟢 SESSION 39 2026-07-02 — Market Charts audit + Phase 2 shipped (lumin-app #112)
+
+**Owner trigger:** "look at Charts implementation in app side … audit and what we can
+add more features and wire everything, implement everything."
+
+**Audit of the v1 Charts feature (lumin-app #108–#111) found four real gaps; all
+fixed + Phase 2 shipped in one PR — lumin-app #112** (display-only, no money-path
+surface, ships normally):
+
+- **Fix: price-axis precision** — Lightweight Charts defaults to 2 decimals; every
+  sub-dollar perp rendered in ~9% axis steps and overlay labels collapsed. Precision
+  now derived from price magnitude (`chartPrecisionFor`, ~5 sig figs, clamp [2,8]).
+- **Fix: design §10 never wired** — Charts tab now badges live-signal pairs
+  (LONG/SHORT pill), floats them to top, and opens their chart WITH the overlay.
+  Reads the SWR-cached open-signals stream (same key as Signals tab → no new engine
+  load).
+- **Fix: poll didn't pause on background** — 2s kline poll stops on pause, resumes
+  with catch-up tick (`WidgetsBindingObserver`).
+- **Fix: static overlay** — signal re-read every 30s (SWR list); BE-shift moves the
+  stop line to entry live, status changes propagate; redraw only on payload change.
+  Also TF-switch race-guarded (load generation + poll cancel).
+- **Phase 2:** EMA 21/50 + SMA 7/25/99 (the owner's mover MA stack) + RSI 14
+  (bottom band, swaps with volume — vendored LWC 4.2.3 has no panes); indicator
+  math Dart-side + unit-tested; toggles/TF persisted. Older-history pagination
+  (endTime paging, ≤3000 bars, viewport preserved). Crosshair OHLC legend.
+  Direction-coloured volume.
+- **Deferred with reasons:** Signals-list sparklines (changes the owner-approved
+  signal-card layout — owner design call; plus per-row Binance fetches want a
+  caching design). `setTheme` bridge dormant (app is dark-only).
+- **Verification:** `flutter analyze` clean on touched files; full app suite green
+  (156, incl. 22 new). `pubspec.lock` untouched.
+
+**Open at session end:** lumin-app #112 (CI running, self-check armed). No engine
+changes this session. Session-38 queue (BTC-State backfill run on VPS → wiring
+design) still pending — untouched here.
+
+---
+
 ## 🟢 SESSION 38 2026-06-30 — The long bleed is the BTC macro downtrend, not broken longs → BTC-State soft-confirmation design + validation harness (360-v2 #675 merged, #676 open; 360ce-ops #51 open)
 
 **Owner trigger:** "we've been negative for over a month, even a blind trader profits sometimes — why?" Analysed the live Profit export (305 signals, ~1mo) + the ops Profit PDF.
