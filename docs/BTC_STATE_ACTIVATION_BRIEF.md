@@ -23,19 +23,20 @@ acceptance test FAILED:**
   `macro_direction`, and the book without them is +0.42%.
 
 **Actions taken:** `BTC_STATE_HAIRCUT_ENABLED` stays **OFF** (keep stamping).
-A **counter-trend SHORT macro mirror** of the live #683 long gate shipped
-**dark** (`CT_SHORT_MACRO_GATE_ENABLED=false`, scope: LSR / FAR /
-BREAKDOWN_SHORT — the 0–20%-win bleeders; QUIET_COMPRESSION and SR_FLIP shorts
-excluded as the working cohorts) with `[SHADOW] CT_SHORT_MACRO_SUPPRESSED`
-telemetry. One weekly regime state is one data point — activate only after the
-shadow window spans a regime change or ≥1 week of counts:
+A **counter-trend SHORT macro mirror** of the live #683 long gate shipped dark
+in #687 (scope: LSR / FAR / BREAKDOWN_SHORT — the 0–20%-win bleeders;
+QUIET_COMPRESSION and SR_FLIP shorts excluded as the working cohorts) with
+`[SHADOW] CT_SHORT_MACRO_SUPPRESSED` telemetry.
 
-```bash
-docker logs 360scalp-v2-engine --since 168h 2>&1 | grep -c "\[SHADOW\] CT_SHORT_MACRO_SUPPRESSED"
-# then, on owner sign-off:
-echo 'CT_SHORT_MACRO_GATE_ENABLED=true' >> /root/360-v2/.env
-docker compose -f docker-compose.yml --profile isolated up -d --no-deps --force-recreate engine
-```
+**ACTIVATED 2026-07-03, same day, by explicit owner sign-off** ("Activate now",
+AskUserQuestion) — `CT_SHORT_MACRO_GATE_ENABLED` default flipped to `true`,
+accepting the single-regime-window caveat. Safety properties relied on: the
+gate auto-restores shorts the moment the weekly macro turns down; the flag is
+env-reversible on the VPS (`CT_SHORT_MACRO_GATE_ENABLED=false` + engine
+recreate); scope excludes the profitable short cohorts. **Watch after
+activation** (daily loop check-in): suppression counts via
+`grep -c "CT_SHORT_MACRO_SUPPRESS" ` on engine logs, and whether short-side
+P&L improves without starving short volume when the macro is genuinely down.
 
 The original haircut brief below stands as reference — re-evaluate it on a
 longer window (its per-pair coupling layer may still add value once the macro
