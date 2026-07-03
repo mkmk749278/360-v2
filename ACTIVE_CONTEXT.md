@@ -119,6 +119,22 @@ divergence, (c) hybrid: MARKET only when dispatch price is inside the zone.
 Recommend (a) — one truth for every consumer of a signal. Not changed in code;
 FSM entry shape is an owner-sign-off item.
 
+### Research: regime classifier forward-validated — only QUIET is real
+
+2,052 point-in-time checkpoints (12 symbols x 4 days, archive candles, engine's
+own detector): **QUIET genuinely identifies dead markets** (half the forward
+|drift|/range of every other label). But **TRENDING_DOWN's forward drift is
+POSITIVE**, RANGING is statistically indistinguishable from TRENDING_UP, and
+after the market-beta control NO label predicts forward direction at the 30-min
+horizon (all |t| <= 1.05). The 5m regime label is a rear-view instrument; the
+macro_direction classifier is the validated forward tool. Full study +
+implications: `docs/REGIME_VALIDATION_2026_07_03.md`. Direct consequence for
+the cohort-ranker key: regime_family collapses to {QUIET, ACTIVE}; BTC-macro
+carries the directional context. Also explains the scorer's regime dimension
+(8-vs-18 pts on a distinction with no forward validity). Gate-chain ordering
+review (wiring pass 3): clean; one CPU-only note (cooldowns checked at enqueue,
+after scoring).
+
 ### NEXT (the standing mandate, in order)
 
 1. **BUILD: FSM LIMIT-at-zone + TTL entries** — owner chose "LIMIT at zone +
