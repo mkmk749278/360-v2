@@ -2088,12 +2088,18 @@ def _make_srflip_candles_long(n=60, flip_offset=3, level=100.0):
     highs[-1]  = level * 1.002
     lows[-1]   = level * 0.999   # lower wick = open - low > 0.5 * body → no penalty
 
+    # Long V2 (S40): the breakout candle must print real volume (>= 1.5x the
+    # prior-20 mean) — give the flip candle a 2x spike so long fixtures pass
+    # the trap-discriminating evidence gate and keep exercising the full path.
+    volumes = np.ones(n) * 1000.0
+    volumes[flip_idx] = 2000.0
+
     return {
         "open":   opens,
         "high":   highs,
         "low":    lows,
         "close":  closes,
-        "volume": np.ones(n) * 1000.0,
+        "volume": volumes,
     }
 
 

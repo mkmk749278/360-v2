@@ -212,6 +212,10 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         SetupClass.CONTINUATION_LIQUIDITY_SWEEP,
         SetupClass.POST_DISPLACEMENT_CONTINUATION,
         SetupClass.FAILED_AUCTION_RECLAIM,
+        # S41 wiring audit: was missing from every channel set (see the
+        # REGIME_SETUP_COMPATIBILITY note) — registered so the path's
+        # signals stop dying at the compatibility hard gate pre-scoring.
+        SetupClass.MA_CROSS_TREND_SHIFT,
     },
     "360_SCALP_FVG": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -278,6 +282,13 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
         SetupClass.MOVER_AVWAP_SCALP,
+        # S41 wiring audit: MA_CROSS_TREND_SHIFT existed in the enum but was
+        # registered in NO channel/regime set and wasn't self-classifying —
+        # hard-rejected before scoring in every regime since it shipped
+        # (the #634 bug class).  A trend-shift entry belongs in trending +
+        # expansion states; ranges whipsaw MA crosses, so it stays out of
+        # CLEAN/DIRTY_RANGE and VOLATILE_UNSUITABLE.
+        SetupClass.MA_CROSS_TREND_SHIFT,
         SetupClass.OPENING_RANGE_BREAKOUT,
         SetupClass.SR_FLIP_RETEST,
         SetupClass.FUNDING_EXTREME_SIGNAL,
@@ -295,6 +306,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.TREND_PULLBACK_EMA,
         SetupClass.BREAKOUT_RETEST,
+        SetupClass.MA_CROSS_TREND_SHIFT,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
         SetupClass.WHALE_MOMENTUM,
         SetupClass.MULTI_STRATEGY_CONFLUENCE,
@@ -380,6 +392,7 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
         SetupClass.MOMENTUM_EXPANSION,
+        SetupClass.MA_CROSS_TREND_SHIFT,
         SetupClass.TREND_PULLBACK_CONTINUATION,
         SetupClass.TREND_PULLBACK_EMA,
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -1017,6 +1030,10 @@ def classify_setup(
         "POST_DISPLACEMENT_CONTINUATION",
         # Roadmap step 7: failed auction / failed acceptance reversal
         "FAILED_AUCTION_RECLAIM",
+        # S41 wiring audit: keep MA-cross identity through scoring — without
+        # this, classify_setup re-labels it by heuristic (wrong SL caps,
+        # wrong telemetry, wrong per-setup exits).
+        "MA_CROSS_TREND_SHIFT",
         # Session 29: mover continuation — must keep its identity through scoring
         # (without this, classify_setup re-labels it by heuristic and it never
         # scores/dispatches as itself — the bug that left it 0-emitting).
