@@ -135,6 +135,18 @@ carries the directional context. Also explains the scorer's regime dimension
 review (wiring pass 3): clean; one CPU-only note (cooldowns checked at enqueue,
 after scoring).
 
+### Research: LevelBook levels fail the placebo test
+
+10 symbols x 4 days, book rebuilt point-in-time every 6h (engine's own
+refresh): qualifying CLUSTERED/VP levels rejected 62.9% of touches — the SAME
+level set offset +1.85% (structurally meaningless) rejected 65.4%. Price
+"respects" any line at this horizon (mean-reversion base rate); the structural
+selection added nothing measurable. `docs/LEVELBOOK_VALIDATION_2026_07_03.md`
+(incl. the three-study pattern table: SMC half-blind, regime rear-view,
+LevelBook ~placebo, while setup x side x macro cohorts separated outcomes
+twice). Caveats recorded — longer-span + break-and-retest-specific re-run
+before acting on structure-dependent paths.
+
 ### NEXT (the standing mandate, in order)
 
 1. **BUILD: FSM LIMIT-at-zone + TTL entries** — owner chose "LIMIT at zone +
