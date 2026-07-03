@@ -31,6 +31,7 @@ from config import (
     MIN_SIGNAL_LIFESPAN_SECONDS,
     MONITOR_POLL_INTERVAL,
     SIGNAL_EXPIRY_ENABLED,
+    ENTRY_FILL_WINDOW_ENFORCED,
     PRE_TP_ENABLED,
     BE_SHIFT_TRIGGER_PCT,
     BE_THEN_TP1_DEFAULT_ENABLED,
@@ -1711,8 +1712,33 @@ class TradeMonitor:
                 else:
                     # Limit order hasn't filled yet.  Don't run SL/TP checks
                     # — they would fire against the un-filled mid as if real.
-                    # Expiry handling lives in `cleanup_expired` and will
-                    # mark this as EXPIRED if validity elapses.
+                    #
+                    # Fill-window enforcement (S41 wiring audit): the signal
+                    # card tells subscribers "valid for N minutes", but until
+                    # now NOTHING enforced it — the only backstop was the 1h
+                    # max-hold sweep, so the engine/paper book could "fill" a
+                    # stale setup at minute 55 that subscribers were told to
+                    # abandon at minute 15.  Once the advertised validity
+                    # lapses without a fill, finalise as a no-fill expiry
+                    # (zero P&L, EXPIRED_NO_FILL label) so the book only ever
+                    # takes fills a rule-following subscriber could take.
+                    if ENTRY_FILL_WINDOW_ENFORCED:
+                        _valid_min = int(getattr(sig, "valid_for_minutes", 0) or 0)
+                        if _valid_min > 0 and age_secs > _valid_min * 60:
+                            sig.pnl_pct = 0.0
+                            sig.status = "EXPIRED"
+                            await self._post_update(
+                                sig,
+                                "⏰ EXPIRED (entry never filled within the "
+                                f"{_valid_min}-minute validity window)",
+                            )
+                            self._record_outcome(
+                                sig, hit_tp=0, hit_sl=False, expired=True
+                            )
+                            await self._broker_close_full(
+                                sig, reason="expired", fill_price=price
+                            )
+                            self._remove(sig.signal_id)
                     return
 
         # Pre-TP grab (Phase A) — fire BEFORE the SL check so that if the same
