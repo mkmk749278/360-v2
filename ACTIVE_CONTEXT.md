@@ -121,8 +121,11 @@ FSM entry shape is an owner-sign-off item.
 
 ### NEXT (the standing mandate, in order)
 
-1. **Owner call: FSM entry shape** (see pass-2 finding above) — LIMIT-with-TTL
-   vs MARKET-at-dispatch for auto-trade entries.
+1. **BUILD: FSM LIMIT-at-zone + TTL entries** — owner chose "LIMIT at zone +
+   TTL" (AskUserQuestion, 2026-07-03). Full implementation spec in
+   `docs/FSM_LIMIT_ENTRY_DESIGN.md` (dark flag, PENDING_ENTRY state,
+   SL-first fill handling, TTL sweep, reconciler awareness, shadow line,
+   test matrix). Ships dark; activation = owner sign-off on shadow.
 1b. **Wiring pass 3** — gate-chain order in the scanner; pre-TP/FSM allowlist
    resolution vs config defaults.
 2. **Scoring STEP 1 (observe-only)** — extend the outcome store key to
