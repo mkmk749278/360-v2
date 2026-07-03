@@ -62,6 +62,22 @@ Fix: `_ensure_mover_pair` now honours `pair_manager._PAIR_BLACKLIST` +
 rot remains a known weakness — Binance keeps listing new xStocks; consider an
 exchangeInfo `underlyingType`-based structural filter as the durable fix.
 
+### Root-cause find #3 — "paper skips trades when app unopened" (owner report, FIXED)
+
+The paper book is server-side (single shared PaperOrderManager; the app's
+client-side AutoTradeWatcher was removed 2026-05-19), so app-open can't gate it
+directly — but the skip was real: `_process_signal` opened the engine-book
+position **at dispatch, before the entry-fill gate**. A no-fill signal's paper
+position could then NEVER close (SL/TP checks are fill-gated; expiry was
+default-off for stretches) → stuck positions accumulated in the risk manager's
+**max_concurrent=5** slots → later signals rejected (`risk-gate concurrent-cap`).
+Left unattended longer = more stuck slots = more skips; the owner's close-all /
+resets on app-open freed slots, creating the "app not open → skips" correlation.
+Fix: engine-book auto-execution now waits for `entry_zone_filled` (market-order
+signals unaffected); the no-fill expiry path keeps a defensive `close_full` to
+drain any pre-fix stranded positions. Same root family as find #1 — dispatch-time
+fill fabrication.
+
 ### Docs gap closed — the missing macro-direction session (2026-06-30, #677–#683)
 
 Between S38's doc and S39, one undocumented arc shipped: **#677** production-phase

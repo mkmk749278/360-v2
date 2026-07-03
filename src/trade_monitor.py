@@ -642,11 +642,22 @@ class TradeMonitor:
             # placed only on a non-None order_id, and add a per-signal
             # cooldown so failed retries don't hammer the broker on
             # every 5s monitor tick.
+            # Entry-fill gate (2026-07-03): don't open the engine-book
+            # position until price has actually visited the entry zone.
+            # Opening at dispatch simulated a fill nobody could get — a
+            # no-fill signal's position then sat in the book with SL/TP
+            # checks fill-gated (nothing could ever close it), eating one
+            # of the risk manager's max_concurrent slots and starving
+            # later signals ("paper skips trades" owner report). The flag
+            # flips in _evaluate_signal the first time a 1m candle range
+            # overlaps the zone; market-order signals (no zone) are never
+            # entry_never_filled and open on first tick as before.
             if (
                 self._order_manager is not None
                 and self._order_manager.is_enabled
                 and sig.status == "ACTIVE"
                 and sig.signal_id not in self._order_placed_ids
+                and not getattr(sig, "entry_never_filled", False)
             ):
                 _last = self._last_open_attempt_at.get(sig.signal_id)
                 _now = utcnow()
@@ -1492,7 +1503,11 @@ class TradeMonitor:
             # Entry never filled → no position exists to realise P&L on.
             # Realising mark-vs-entry here would fabricate the outcome of
             # a trade nobody took (Hard Limit: never fabricate performance
-            # numbers).  Zero P&L, honest label, no broker close needed.
+            # numbers).  Zero P&L, honest label.  The broker close still
+            # runs defensively: books written before the entry-fill open
+            # gate (2026-07-03) may hold a position opened at dispatch for
+            # this never-filled signal — leaving it would strand a
+            # max_concurrent slot forever.  No-op when nothing is open.
             if getattr(sig, "entry_never_filled", False):
                 sig.pnl_pct = 0.0
                 sig.status = "EXPIRED"
@@ -1500,6 +1515,7 @@ class TradeMonitor:
                     sig, "⏰ EXPIRED (entry never filled — no position taken)"
                 )
                 self._record_outcome(sig, hit_tp=0, hit_sl=False, expired=True)
+                await self._broker_close_full(sig, reason="expired", fill_price=price)
                 self._remove(sig.signal_id)
                 return
             self._set_realized_pnl(sig, price)

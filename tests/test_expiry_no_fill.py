@@ -116,8 +116,10 @@ class TestMonitorExpiryNoFill:
         kwargs = tracker.record_outcome.call_args.kwargs
         assert kwargs["outcome_label"] == "EXPIRED_NO_FILL"
         assert kwargs["pnl_pct"] == 0.0
-        # No position ever existed — nothing to close broker-side.
-        monitor._broker_close_full.assert_not_awaited()
+        # Defensive close still runs — books written before the
+        # entry-fill open gate may hold a dispatch-time position for
+        # this never-filled signal (no-op when nothing is open).
+        monitor._broker_close_full.assert_awaited_once()
 
     async def test_no_fill_expiry_message_says_never_filled(self, monkeypatch):
         monkeypatch.setitem(
@@ -257,3 +259,66 @@ class TestEngineExpiryHandlerNoFill:
 
         kwargs = engine._performance_tracker.record_outcome.call_args.kwargs
         assert kwargs["dispatch_timestamp"] == pytest.approx(dispatched.timestamp())
+
+
+# ---------------------------------------------------------------------------
+# Entry-fill gate on engine-book auto-execution (paper skip fix, 2026-07-03)
+# ---------------------------------------------------------------------------
+
+
+class TestAutoExecutionEntryFillGate:
+    """The engine-book order (paper on the VPS) must not open until the
+    entry zone has actually been visited.  Opening at dispatch created
+    positions nobody could have filled; with SL/TP checks fill-gated they
+    could never close, eating max_concurrent slots and starving later
+    signals — the owner-reported "paper skips trades" symptom."""
+
+    def _build(self, sig, order_manager):
+        data_store = MagicMock()
+        data_store.get_candles.return_value = {}
+        data_store.ticks = {}
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=AsyncMock(),
+            get_active_signals=lambda: {sig.signal_id: sig},
+            remove_signal=MagicMock(),
+            update_signal=MagicMock(),
+            order_manager=order_manager,
+        )
+        monitor._latest_price = MagicMock(return_value=sig.entry)
+        monitor._evaluate_signal = AsyncMock()
+        monitor._check_per_user_invalidation = AsyncMock()
+        return monitor
+
+    async def test_unfilled_zone_signal_does_not_open_position(self):
+        om = MagicMock()
+        om.is_enabled = True
+        om.execute_signal = AsyncMock(return_value="oid-1")
+        sig = _make_signal(zone=True, filled=False, age_seconds=30.0)
+        monitor = self._build(sig, om)
+
+        await monitor._check_all()
+
+        om.execute_signal.assert_not_awaited()
+
+    async def test_filled_zone_signal_opens_position(self):
+        om = MagicMock()
+        om.is_enabled = True
+        om.execute_signal = AsyncMock(return_value="oid-1")
+        sig = _make_signal(zone=True, filled=True, age_seconds=30.0)
+        monitor = self._build(sig, om)
+
+        await monitor._check_all()
+
+        om.execute_signal.assert_awaited_once()
+
+    async def test_market_order_signal_opens_immediately(self):
+        om = MagicMock()
+        om.is_enabled = True
+        om.execute_signal = AsyncMock(return_value="oid-1")
+        sig = _make_signal(zone=False, filled=False, age_seconds=30.0)
+        monitor = self._build(sig, om)
+
+        await monitor._check_all()
+
+        om.execute_signal.assert_awaited_once()
