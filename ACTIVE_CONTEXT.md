@@ -4,6 +4,90 @@
 
 ---
 
+## 🟢 SESSION 40 2026-07-03 — Fresh-window validation + phantom-trade accounting bug + tokenized stocks back via movers
+
+**Owner trigger:** "look for signal quality, where things get bad and what's wrong now"
+→ "monitor truth data is ready, analyse + PR history" → "look at MOVER paths not
+closing at TPs or SLs".
+
+### Fresh 72h truth window (Jul 1–3, 100 closed signals) — June fixes VALIDATED
+
+- **Long bleed is dead:** LONG 40 signals **−0.71% (flat)** vs −25.1%/month pre-fix.
+  `long_disabled` = 17,380 SR_FLIP evaluator rejections in 72h — #672 holding.
+- **SR_FLIP shorts-only working:** 26 shorts, 50% win, −0.44% ≈ breakeven (was the
+  −16.6% biggest single drag).
+- **BE@+1% visible:** 12 BREAKEVEN_EXITs that used to round-trip to SL (RIF LONG
+  +4.35% MFE → closed 0.00). Real TP hits back: 13 TP1 + 2 FULL_TP.
+- **MOVER_TREND_PULLBACK now the top P&L contributor** (+2.05% / 18 longs) —
+  excluding it from the macro gate was right. (Truth report's "most suspicious
+  degradation: MOVER_TREND_PULLBACK" headline is a heuristic artifact — it keys
+  off win-rate/emit ratios, not P&L. Ignore.)
+- **THE BLEED SWITCHED SIDES:** SHORT 60 signals **−8.53%**. Regime flipped
+  (TRENDING_UP 45.4% of cycles, was 20.9%); counter-trend SHORTs (LSR SHORT −3.75%,
+  BREAKDOWN −3.18%, FAR SHORT −2.33%) now mirror the June long bleed. The live
+  #683 gate is longs-only by design → activation path is the graded haircut, below.
+- Scorer still non-monotonic mid-band (70–75 worst: 25% win, −0.33%/signal; 80+
+  only positive band). Rebuild still deferred — n=100 and (see next) data was dirty.
+
+### Root-cause find #1 — phantom no-fill trades (FIXED this session)
+
+All 36 EXPIRED closes in the window had **hold=0s, MFE=MAE=0, no dispatch ts** —
+limit signals whose entry zone was NEVER visited. `trade_monitor` skips them each
+tick (fill gate), then `router.cleanup_expired` → `main._handle_signal_expiry`
+stamped a perf record with **mark-vs-entry P&L for a position that never existed**
+(AGLD "−1.25%", WHALE "−0.79%" — fabrications) and fed them into the invalidation
+audit as `expired` kills. **36% of the book was phantom.** Consequences: the audit's
+"21 PREMATURE expiry kills" verdict is unreliable → the planned expiry tune is
+DEFERRED until clean data accumulates; scorer band tables + ops Profit page were
+polluted the same way; MOVER_AVWAP_SCALP has in fact **never filled once** — all
+its "trades" were phantoms (its entry geometry needs review on clean data).
+
+**Fix (this session's PR):** no-fill expiries now record `EXPIRED_NO_FILL` with
+zero P&L on BOTH expiry paths, are excluded from the invalidation audit, skip the
+broker close, and the router-path record finally carries create/dispatch/terminal
+timestamps (tolerating restart-restored ISO-string `dispatch_timestamp`, which
+`_signal_from_dict` never converts back — that string-vs-datetime quirk is still
+unfixed, only tolerated). New `Signal.entry_never_filled` property is the single
+predicate.
+
+### Root-cause find #2 — tokenized stocks re-entered via mover promotion (FIXED)
+
+#666 admits movers straight off `!ticker@arr` (whole board) and
+`_ensure_mover_pair` checked **no blacklist** → SAMSUNG/HOOD/COIN/QCOM/PLTR/SNDK/
+RKLB/LITE/ASTS/AXTI equity perps were promoted, scanned, **emitted to the paid
+channel** (6× SAMSUNGUSDT in the window), and dominated the phantom EXPIRED sweep.
+Fix: `_ensure_mover_pair` now honours `pair_manager._PAIR_BLACKLIST` +
+`SCAN_SYMBOL_BLACKLIST`; both blacklists extended with the 13 observed symbols
+(incl. ARMUSDT/MRVLUSDT seen in QUIET blocks, XPTUSDT = platinum). Static-list
+rot remains a known weakness — Binance keeps listing new xStocks; consider an
+exchangeInfo `underlyingType`-based structural filter as the durable fix.
+
+### Docs gap closed — the missing macro-direction session (2026-06-30, #677–#683)
+
+Between S38's doc and S39, one undocumented arc shipped: **#677** production-phase
+doctrine (dark-flag-first restored) · **#678** graded BTC-State haircut
+(`compute_haircut_factor`, stamps `btc_state_factor` on every signal since
+2026-06-30, `BTC_STATE_HAIRCUT_ENABLED=false` dark) · **#679** coupling P&L
+counterfactual · **#681/#682** directional weekly macro classifier (slope +
+structure, quick to de-risk / patient to re-risk, replay-proven on 2021–24) ·
+**#683** `CT_LONG_MACRO_GATE_ENABLED=true` LIVE — suppresses counter-trend LONGs
+(scope: LSR; MOVER excluded as trend-continuation; SR_FLIP longs already off).
+
+### NEXT (priority order)
+
+1. **Owner: read `docs/BTC_STATE_ACTIVATION_BRIEF.md`** — activating the graded
+   haircut (one env flip) is the lever for the −8.53% counter-trend-SHORT bleed.
+   Evidence command + acceptance criteria in the brief. Scoring change → sign-off.
+2. **Expiry tune** — re-audit `expired` kills after ≥5 days of post-fix (no-phantom)
+   data; FAR was the premature-kill hotspot but the numbers were contaminated.
+3. **MOVER_AVWAP_SCALP entry geometry** — zero real fills ever; on clean data
+   decide: widen entry zone / market-entry variant / drop.
+4. **Scorer rebuild** — still blocked on clean data volume (band×side, post-fix).
+5. Truth-report heuristic: "most suspicious degradation" should weight avg P&L,
+   not just win-rate deltas (it flagged the best performer). Low priority.
+
+---
+
 ## 🟢 SESSION 39 2026-07-02 — Market Charts audit + Phase 2 shipped (lumin-app #112)
 
 **Owner trigger:** "look at Charts implementation in app side … audit and what we can

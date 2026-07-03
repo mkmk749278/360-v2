@@ -866,7 +866,12 @@ SCAN_SYMBOL_BLACKLIST: set = set(
         "SCAN_SYMBOL_BLACKLIST",
         "XAUTUSDT,PAXGUSDT,MMTUSDT,KOMAUSDT,STOUSDT,"
         "AVGOUSDT,QQQUSDT,SKHYNIXUSDT,DRAMUSDT,"
-        "CRCLUSDT,MUUSDT,INTCUSDT,CLUSDT,EWYUSDT",
+        "CRCLUSDT,MUUSDT,INTCUSDT,CLUSDT,EWYUSDT,"
+        # Tokenised stocks / metals that re-entered via mover promotion
+        # (2026-07-03 signal-book sweep) — scan-time mirror of the
+        # selection-time _NON_CRYPTO_BLACKLIST additions in pair_manager.
+        "SAMSUNGUSDT,HOODUSDT,COINUSDT,QCOMUSDT,PLTRUSDT,SNDKUSDT,"
+        "RKLBUSDT,ASTSUSDT,AXTIUSDT,LITEUSDT,ARMUSDT,MRVLUSDT,XPTUSDT",
     ).split(",")
     if s
 )

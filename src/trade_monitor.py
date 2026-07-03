@@ -416,6 +416,11 @@ class TradeMonitor:
         sig_status = (getattr(sig, "status", "") or "").upper()
         if sig_status in {"INVALIDATED", "EXPIRED"}:
             outcome_label = sig_status
+            # Distinguish expiries where the entry limit never filled —
+            # there was no position, so stats consumers must be able to
+            # separate them from real held-position expiries.
+            if sig_status == "EXPIRED" and getattr(sig, "entry_never_filled", False):
+                outcome_label = "EXPIRED_NO_FILL"
         else:
             outcome_label = classify_trade_outcome(
                 pnl_pct=actual_pnl,
@@ -1484,6 +1489,19 @@ class TradeMonitor:
         from src.execution import kill_switch as _ks
         max_hold = MAX_SIGNAL_HOLD_SECONDS.get(sig.channel, 86400)
         if _ks.signal_expiry_enabled(SIGNAL_EXPIRY_ENABLED) and age_secs >= max_hold:
+            # Entry never filled → no position exists to realise P&L on.
+            # Realising mark-vs-entry here would fabricate the outcome of
+            # a trade nobody took (Hard Limit: never fabricate performance
+            # numbers).  Zero P&L, honest label, no broker close needed.
+            if getattr(sig, "entry_never_filled", False):
+                sig.pnl_pct = 0.0
+                sig.status = "EXPIRED"
+                await self._post_update(
+                    sig, "⏰ EXPIRED (entry never filled — no position taken)"
+                )
+                self._record_outcome(sig, hit_tp=0, hit_sl=False, expired=True)
+                self._remove(sig.signal_id)
+                return
             self._set_realized_pnl(sig, price)
             sig.status = "EXPIRED"
             await self._post_update(sig, "⏰ EXPIRED (max hold time reached)")

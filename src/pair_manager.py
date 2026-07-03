@@ -82,6 +82,22 @@ _NON_CRYPTO_BLACKLIST: frozenset = frozenset({
     "AVGOUSDT", "INTCUSDT", "MUUSDT", "SKHYNIXUSDT", "DRAMUSDT",  # semis
     "CRCLUSDT", "CLUSDT",                   # Circle, Colgate
     "EWYUSDT",                              # iShares MSCI South Korea ETF
+    # Tokenised stocks observed entering via MOVER PROMOTION (#666 admits
+    # from the whole !ticker@arr board) in the 2026-07-01..03 signal book —
+    # emitted to the paid channel and dominating the EXPIRED_NO_FILL sweep.
+    "SAMSUNGUSDT",                          # Samsung Electronics
+    "HOODUSDT",                             # Robinhood
+    "COINUSDT",                             # Coinbase
+    "QCOMUSDT",                             # Qualcomm
+    "PLTRUSDT",                             # Palantir
+    "SNDKUSDT",                             # SanDisk
+    "RKLBUSDT",                             # Rocket Lab
+    "ASTSUSDT",                             # AST SpaceMobile
+    "AXTIUSDT",                             # AXT Inc
+    "LITEUSDT",                             # Lumentum (NYSE: LITE)
+    "ARMUSDT",                              # Arm Holdings
+    "MRVLUSDT",                             # Marvell
+    "XPTUSDT",                              # tokenised platinum (metal)
 })
 
 # Combined blacklist used by every fetch path.  Easier to reason about

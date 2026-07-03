@@ -618,13 +618,24 @@ class CryptoSignalEngine:
             # don't double-archive.
             return
 
+        # No-fill guard: a limit-zone signal whose entry band was never
+        # visited has no position — neither the engine book nor any
+        # subscriber following the signal filled.  Marking mark-vs-entry
+        # P&L on it fabricates a trade that never happened; 36 of the
+        # last 100 perf records were such phantoms (2026-07-03 audit),
+        # polluting win rates, the scorer band tables, the ops Profit
+        # page, and the invalidation audit's PREMATURE counts.
+        never_filled = bool(getattr(sig, "entry_never_filled", False))
+
         # Compute realised P&L from the last-known mark price.  Auto-trade
         # users need an honest close price even when the trade-monitor
         # didn't get to fire its own expiry path (e.g. WebSocket lost
         # the symbol or scanner cleanup_expired won the race).
         entry = float(getattr(sig, "entry", 0.0) or 0.0)
         current_price = float(getattr(sig, "current_price", 0.0) or 0.0)
-        if entry > 0 and current_price > 0:
+        if never_filled:
+            sig.pnl_pct = 0.0
+        elif entry > 0 and current_price > 0:
             try:
                 from src.smc import Direction
                 if sig.direction == Direction.LONG:
@@ -644,23 +655,32 @@ class CryptoSignalEngine:
         # (expiry surrendered the move). Until now only the thesis-INVALIDATED
         # path was audited, so we had no ground truth on whether the 60-min
         # max-hold expiry nets help or hurt. Best-effort: never break the close.
-        try:
-            from src.invalidation_audit import record_invalidation
-            record_invalidation(
-                signal_id=sig.signal_id,
-                symbol=sig.symbol,
-                channel=sig.channel,
-                setup_class=sig.setup_class or "",
-                direction=sig.direction.value,
-                entry=entry,
-                stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
-                tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
-                kill_price=current_price,
-                kill_reason="expired",
-                pnl_pct_at_kill=float(getattr(sig, "pnl_pct", 0.0) or 0.0),
+        # No-fill signals are excluded — PROTECTIVE/PREMATURE semantics assume
+        # a position was open to save or kill; a never-filled signal is neither.
+        if never_filled:
+            log.info(
+                "Signal {} {} expired without fill — recorded as "
+                "EXPIRED_NO_FILL with zero P&L (no position ever existed)",
+                sig.signal_id, sig.symbol,
             )
-        except Exception as exc:  # noqa: BLE001 — audit must never break the close
-            log.debug("invalidation_audit.record_invalidation failed (expiry) for {}: {}", sig.symbol, exc)
+        else:
+            try:
+                from src.invalidation_audit import record_invalidation
+                record_invalidation(
+                    signal_id=sig.signal_id,
+                    symbol=sig.symbol,
+                    channel=sig.channel,
+                    setup_class=sig.setup_class or "",
+                    direction=sig.direction.value,
+                    entry=entry,
+                    stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                    tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
+                    kill_price=current_price,
+                    kill_reason="expired",
+                    pnl_pct_at_kill=float(getattr(sig, "pnl_pct", 0.0) or 0.0),
+                )
+            except Exception as exc:  # noqa: BLE001 — audit must never break the close
+                log.debug("invalidation_audit.record_invalidation failed (expiry) for {}: {}", sig.symbol, exc)
 
         # Archive into _signal_history + persist.  Mirrors the work
         # _remove_and_archive does for trade-monitor-driven closes.
@@ -673,9 +693,28 @@ class CryptoSignalEngine:
 
         # Stamp a perf-tracker record so the win-rate / aggregate stats
         # include this expiry.  outcome_label="EXPIRED" matches what
-        # trade_monitor's expiry path produces post-PR-#305.
+        # trade_monitor's expiry path produces post-PR-#305; no-fill
+        # signals get "EXPIRED_NO_FILL" with zero P&L so stats consumers
+        # can separate real held-position expiries from non-trades.
+        # Lifecycle timestamps are passed through (tolerating the ISO-string
+        # form a restart-restored Signal may carry) — their absence on
+        # router-swept expiries is what made the phantom records so hard
+        # to attribute in the truth report.
+        def _epoch(val: Any) -> Optional[float]:
+            if isinstance(val, datetime):
+                return val.timestamp()
+            if isinstance(val, str):
+                try:
+                    return datetime.fromisoformat(val).timestamp()
+                except ValueError:
+                    return None
+            return None
+
         try:
             if self._performance_tracker is not None:
+                _create_ts = _epoch(getattr(sig, "timestamp", None))
+                _dispatch_ts = _epoch(getattr(sig, "dispatch_timestamp", None))
+                _terminal_ts = _epoch(now)
                 self._performance_tracker.record_outcome(
                     signal_id=sig.signal_id,
                     channel=sig.channel,
@@ -685,11 +724,25 @@ class CryptoSignalEngine:
                     hit_tp=0,
                     hit_sl=False,
                     pnl_pct=getattr(sig, "pnl_pct", 0.0) or 0.0,
-                    outcome_label="EXPIRED",
+                    outcome_label="EXPIRED_NO_FILL" if never_filled else "EXPIRED",
                     confidence=getattr(sig, "confidence", 0.0) or 0.0,
                     setup_class=getattr(sig, "setup_class", "") or "",
                     quality_tier=getattr(sig, "quality_tier", "B") or "B",
                     stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                    create_timestamp=_create_ts,
+                    dispatch_timestamp=_dispatch_ts,
+                    terminal_outcome_timestamp=_terminal_ts,
+                    create_to_terminal_sec=(
+                        max(_terminal_ts - _create_ts, 0.0)
+                        if _create_ts is not None and _terminal_ts is not None
+                        else None
+                    ),
+                    max_favorable_excursion_pct=float(
+                        getattr(sig, "max_favorable_excursion_pct", 0.0) or 0.0
+                    ),
+                    max_adverse_excursion_pct=float(
+                        getattr(sig, "max_adverse_excursion_pct", 0.0) or 0.0
+                    ),
                 )
         except Exception as exc:
             log.warning(f"perf_tracker record_outcome failed (expiry): {exc}")

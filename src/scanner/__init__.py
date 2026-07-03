@@ -167,7 +167,12 @@ from src.feedback_loop import FeedbackLoop
 from src.kill_zone import check_kill_zone_gate
 from src.mtf import check_mtf_gate, compute_mtf_confluence, _TF_WEIGHTS as _MTF_TF_WEIGHTS
 from src.oi_filter import analyse_oi, check_oi_gate
-from src.pair_manager import PairInfo, PairTier, classify_pair_tier
+from src.pair_manager import (
+    PairInfo,
+    PairTier,
+    _PAIR_BLACKLIST,
+    classify_pair_tier,
+)
 from src.confluence_detector import ConfluenceDetector
 from src.level_book import LevelBook
 from src.structure_state import LEG_DOMINANCE_THRESHOLD, StructureTracker
@@ -257,6 +262,13 @@ _SCALP_CHANNELS: frozenset = frozenset({
 # Symbols permanently excluded from scanning — loaded from config to allow
 # runtime override via the SCAN_SYMBOL_BLACKLIST env var.
 _SYMBOL_BLACKLIST: frozenset = frozenset(SCAN_SYMBOL_BLACKLIST)
+
+# Universe-hygiene blacklist shared with pair_manager (stablecoins +
+# tokenized stocks / commodities / FX).  The mover-admission path
+# (`_ensure_mover_pair`) synthesises pairs straight off the `!ticker@arr`
+# board and must honour the same exclusions as every pair_manager fetch
+# path — otherwise Class-C non-crypto perps re-enter through promotion.
+_MOVER_UNIVERSE_BLACKLIST: frozenset = _PAIR_BLACKLIST
 
 # Channel enable/disable map — sourced from config flags so operators can
 # soft-disable noisy channels via env vars without touching code.
@@ -1712,6 +1724,16 @@ class Scanner:
         info = self.pair_mgr.pairs.get(symbol)
         if info is not None:
             return info
+        # Blacklist gate — the ``!ticker@arr`` feed covers the WHOLE board,
+        # including tokenized stocks / commodities / stablecoins that
+        # pair_manager's fetch paths exclude by design (Class-C misfits,
+        # docs/SYMBOL_CLASS_RESEARCH_2026_05_23.md).  Without this check the
+        # mover path re-admits them around every filter: SAMSUNG/HOOD/COIN/
+        # QCOM/PLTR-style equity perps were promoted, scanned, and emitted
+        # to the paid channel in the 2026-07-01..03 window.
+        if symbol in _SYMBOL_BLACKLIST or symbol in _MOVER_UNIVERSE_BLACKLIST:
+            log.debug("mover admission blocked (blacklist): {}", symbol)
+            return None
         if (change_pct is None or vol is None) and self.mover_ignition_detector is not None:
             m = self.mover_ignition_detector.meta(symbol)
             if m is not None:
