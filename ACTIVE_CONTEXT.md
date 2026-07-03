@@ -107,12 +107,21 @@ were against `macro_direction` weekly-BULL; the book without them is **+0.42%**
 excluded), flag-independent predicate + `[SHADOW] CT_SHORT_MACRO_SUPPRESSED`
 telemetry (#597 pattern).
 
+### CT_SHORT gate ACTIVATED (2026-07-03, explicit owner sign-off)
+
+Owner answered "Activate now" (AskUserQuestion, after "proceed with fix") —
+`CT_SHORT_MACRO_GATE_ENABLED` default flipped to `true` the same day #687
+shipped it dark, accepting the single-regime-window caveat. Env-reversible;
+auto-restores shorts when the weekly macro turns down; profitable short
+cohorts (QUIET_COMPRESSION, SR_FLIP) out of scope. Daily loop check-in now
+watches `CT_SHORT_MACRO_SUPPRESS` counts + short-side P&L on the clean window.
+
 ### NEXT (priority order)
 
-1. **Read CT_SHORT shadow counts after ≥1 week** (or a regime change):
-   `docker logs 360scalp-v2-engine --since 168h | grep -c "[SHADOW] CT_SHORT_MACRO_SUPPRESSED"`
-   → owner sign-off → `CT_SHORT_MACRO_GATE_ENABLED=true`. Full verdict + commands
-   in `docs/BTC_STATE_ACTIVATION_BRIEF.md` (updated with the NO-GO on the haircut).
+1. **Watch the activated CT_SHORT gate** — daily: suppression counts
+   (`grep -c "CT_SHORT_MACRO_SUPPRESS"`), short-side P&L trend, and that short
+   volume returns when the macro genuinely turns down. Roll back via env if
+   live data disagrees with the window evidence.
 2. **Expiry tune** — re-audit `expired` kills after ≥5 days of post-fix (no-phantom)
    data; FAR was the premature-kill hotspot but the numbers were contaminated.
 3. **MOVER_AVWAP_SCALP entry geometry** — zero real fills ever; on clean data

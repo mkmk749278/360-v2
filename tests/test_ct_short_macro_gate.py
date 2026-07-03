@@ -116,7 +116,10 @@ class TestCtShortMacroWouldSuppress:
         )
         assert sup is False
 
-    def test_gate_is_dark_by_default(self):
+    def test_gate_is_active_by_default(self):
+        # Activated by explicit owner sign-off 2026-07-03 (AskUserQuestion:
+        # "Activate now") after the S40 window put the entire short bleed in
+        # counter-macro shorts.  Env-reversible.
         from config import CT_SHORT_MACRO_GATE_ENABLED
 
-        assert CT_SHORT_MACRO_GATE_ENABLED is False
+        assert CT_SHORT_MACRO_GATE_ENABLED is True
