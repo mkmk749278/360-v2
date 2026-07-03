@@ -322,3 +322,50 @@ class TestAutoExecutionEntryFillGate:
         await monitor._check_all()
 
         om.execute_signal.assert_awaited_once()
+
+
+class TestStatFilterExclusion:
+    async def test_no_fill_expiry_not_recorded_as_stat_outcome(self, monkeypatch):
+        # A non-trade must not enter the rolling win-rate store as a loss —
+        # it would drag cohort win rates down and trigger unearned
+        # stat-filter suppression of the cohort.
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", True)
+        stat = MagicMock()
+        sig = _make_signal(zone=True, filled=False)
+        data_store = MagicMock()
+        data_store.get_candles.return_value = {}
+        data_store.ticks = {}
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=AsyncMock(),
+            get_active_signals=lambda: {sig.signal_id: sig},
+            remove_signal=MagicMock(),
+            update_signal=MagicMock(),
+            stat_filter=stat,
+        )
+        monitor._broker_close_full = AsyncMock()
+
+        await monitor._evaluate_signal(sig)
+
+        stat.record.assert_not_called()
+
+    async def test_filled_expiry_still_recorded(self, monkeypatch):
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", True)
+        stat = MagicMock()
+        sig = _make_signal(zone=True, filled=True)
+        data_store = MagicMock()
+        data_store.get_candles.return_value = {}
+        data_store.ticks = {}
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=AsyncMock(),
+            get_active_signals=lambda: {sig.signal_id: sig},
+            remove_signal=MagicMock(),
+            update_signal=MagicMock(),
+            stat_filter=stat,
+        )
+        monitor._broker_close_full = AsyncMock()
+
+        await monitor._evaluate_signal(sig)
+
+        stat.record.assert_called_once()
