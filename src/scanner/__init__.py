@@ -52,6 +52,10 @@ from config import (
     CT_LONG_MACRO_GATE_SETUPS,
     CT_LONG_MACRO_USE_BTC,
     CT_LONG_MACRO_USE_PER_COIN,
+    CT_SHORT_MACRO_GATE_ENABLED,
+    CT_SHORT_MACRO_GATE_SETUPS,
+    CT_SHORT_MACRO_USE_BTC,
+    CT_SHORT_MACRO_USE_PER_COIN,
     BTC_MACRO_TF,
     BTC_MACRO_FAST_PERIOD,
     BTC_MACRO_RECOVER_PERIOD,
@@ -3918,6 +3922,46 @@ class Scanner:
             )
         return False, ""
 
+    def _ct_short_macro_would_suppress(
+        self, symbol: str, setup_class_name: str, direction: str,
+    ) -> Tuple[bool, str]:
+        """Would the counter-trend-SHORT macro mirror suppress this scalp?
+
+        Flag-INDEPENDENT predicate (the #597 shadow pattern): the gate and the
+        [SHADOW] telemetry share this exact decision, so the shadow count can't
+        drift from what activation would do.  Mirror of the CT-long gate:
+        only SHORT + a gated reversal setup is in scope; suppress while EITHER
+        the BTC macro leg OR the coin's own higher-TF trend reads UP ("a short
+        needs both to permit it").  Auto-restores when the trend turns down.
+        Fails open (no suppression) on any error or missing data.
+        """
+        if not (
+            (direction or "").upper() == "SHORT"
+            and (setup_class_name or "").upper() in CT_SHORT_MACRO_GATE_SETUPS
+        ):
+            return False, ""
+        try:
+            if CT_SHORT_MACRO_USE_BTC:
+                _btc = self._get_btc_macro_dir_cached()
+                if str(_btc.get("direction")) == "up":
+                    return True, f"btc_{_btc.get('regime')}"
+            if CT_SHORT_MACRO_USE_PER_COIN:
+                _cd = self.data_store.get_candles(symbol, COIN_MACRO_TF) or {}
+                _coin = macro_direction(
+                    _cd.get("close", []),
+                    fast_period=COIN_MACRO_FAST_PERIOD,
+                    recover_period=COIN_MACRO_RECOVER_PERIOD,
+                    slow_period=COIN_MACRO_SLOW_PERIOD,
+                )
+                if str(_coin.get("direction")) == "up":
+                    return True, f"coin_{_coin.get('regime')}"
+        except Exception as _cts_exc:
+            log.debug(
+                "CT-short macro predicate error for {} (fail open): {}",
+                symbol, _cts_exc,
+            )
+        return False, ""
+
     @staticmethod
     def _classify_macro_trend(closes: list) -> tuple[str, float]:
         """Classify the macro trend from a close price series.
@@ -5748,6 +5792,32 @@ class Scanner:
                 symbol, chan_name, _setup_class_name, _ct_why,
             )
             return _reject("gated", None)
+
+        # ── Counter-trend-SHORT macro mirror (S40, DARK — default OFF) ──
+        # The 2026-07-01..03 clean window put the whole short bleed in
+        # reversal shorts fading a weekly-BULL BTC.  One regime state is not
+        # a validated gate, so while CT_SHORT_MACRO_GATE_ENABLED is false the
+        # shared predicate only [SHADOW]-logs what it WOULD have suppressed;
+        # activation is an owner decision on a shadow window spanning more
+        # than one regime.  Same fail-open, same auto-restore as the long gate.
+        _cts_sup, _cts_why = self._ct_short_macro_would_suppress(
+            symbol, _setup_class_name, sig.direction.value,
+        )
+        if _cts_sup:
+            if CT_SHORT_MACRO_GATE_ENABLED:
+                self._suppression_counters[
+                    f"ct_short_macro_suppress:{chan_name}:{_setup_class_name}"
+                ] += 1
+                log.info(
+                    "CT_SHORT_MACRO_SUPPRESS {} {} SHORT [{}] ({})",
+                    symbol, chan_name, _setup_class_name, _cts_why,
+                )
+                return _reject("gated", None)
+            if DARK_FLAG_SHADOW_TELEMETRY:
+                log.info(
+                    "[SHADOW] CT_SHORT_MACRO_SUPPRESSED {} {} SHORT [{}] ({})",
+                    symbol, chan_name, _setup_class_name, _cts_why,
+                )
 
         risk = self._evaluate_risk(sig, ctx, setup, chan_name=chan_name)
         if not risk.passed:

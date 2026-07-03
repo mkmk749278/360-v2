@@ -474,6 +474,32 @@ COIN_MACRO_RECOVER_PERIOD: int = _safe_int("COIN_MACRO_RECOVER_PERIOD", "25")
 COIN_MACRO_SLOW_PERIOD: int = _safe_int("COIN_MACRO_SLOW_PERIOD", "200")
 COIN_MACRO_CACHE_TTL_SEC: float = _safe_float("COIN_MACRO_CACHE_TTL_SEC", "300.0")
 
+# Counter-trend SHORT macro mirror (S40, DARK-FIRST — default OFF).
+# The 2026-07-01..03 clean window (64 real trades) put the ENTIRE short-side
+# bleed in shorts fired against a weekly-BULL BTC macro (36 shorts, 25% win,
+# −8.08% total; the book without them: +0.42%), while the intraday BTC-State
+# haircut FAILED its acceptance test on the same window (the bleeding shorts
+# were BTC-*aligned* at the 5m/15m/1h horizon — intraday dips inside the
+# macro recovery).  Exactly one weekly regime state was observed, so this
+# ships DARK: the predicate is stamped + [SHADOW]-logged on every in-scope
+# short while the flag is off; activation is an owner decision on a shadow
+# window that spans more than one regime.  Mirror of CT_LONG_MACRO_GATE:
+# suppress a counter-trend reversal SHORT while the big trend reads UP
+# (BTC macro and/or the coin's own), auto-restoring when it turns down.
+# Scope defaults to the window's 0–20%-win short bleeders; QUIET_COMPRESSION
+# (67% win in the same regime) and SR_FLIP shorts (breakeven) stay out.
+CT_SHORT_MACRO_GATE_ENABLED: bool = _safe_bool("CT_SHORT_MACRO_GATE_ENABLED", "false")
+CT_SHORT_MACRO_GATE_SETUPS: frozenset = frozenset(
+    s.strip().upper()
+    for s in os.getenv(
+        "CT_SHORT_MACRO_GATE_SETUPS",
+        "LIQUIDITY_SWEEP_REVERSAL,FAILED_AUCTION_RECLAIM,BREAKDOWN_SHORT",
+    ).split(",")
+    if s.strip()
+)
+CT_SHORT_MACRO_USE_BTC: bool = _safe_bool("CT_SHORT_MACRO_USE_BTC", "true")
+CT_SHORT_MACRO_USE_PER_COIN: bool = _safe_bool("CT_SHORT_MACRO_USE_PER_COIN", "true")
+
 # ---------------------------------------------------------------------------
 # Dynamic Tiering (Market Watchdog) — PR 2
 # ---------------------------------------------------------------------------

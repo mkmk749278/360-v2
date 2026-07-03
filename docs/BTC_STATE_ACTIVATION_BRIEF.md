@@ -5,6 +5,44 @@ activation = one env flip. Scoring-model change → owner sign-off required.*
 
 ---
 
+## ⚠️ VERDICT UPDATE (2026-07-03, same day): NO-GO on current evidence
+
+The #675 validator was run against the fresh window (64 real trades, phantoms
+excluded, point-in-time candles from the Binance public archive). **The
+acceptance test FAILED:**
+
+- The bleeding shorts were BTC-**ALIGNED** at the intraday (5m/15m/1h) horizon:
+  22 shorts in the `4_short` bucket ran 14% win / −0.396 avg — essentially the
+  whole short bleed — while **counter-trend** shorts (the cohort the haircut
+  would tax) ran fine (50–60% win, flat-to-positive).
+- Every counterfactual cut made the book worse (−7.66 → −11.4).
+- Interpretation: shorts are firing into **intraday BTC dips inside the macro
+  recovery** — the intraday state reads "short-favourable" at dispatch, then the
+  weekly uptrend resumes and stops them out. The intraday haircut cannot see
+  this; the **macro layer** can: 36/36 bled shorts fired against a weekly-BULL
+  `macro_direction`, and the book without them is +0.42%.
+
+**Actions taken:** `BTC_STATE_HAIRCUT_ENABLED` stays **OFF** (keep stamping).
+A **counter-trend SHORT macro mirror** of the live #683 long gate shipped
+**dark** (`CT_SHORT_MACRO_GATE_ENABLED=false`, scope: LSR / FAR /
+BREAKDOWN_SHORT — the 0–20%-win bleeders; QUIET_COMPRESSION and SR_FLIP shorts
+excluded as the working cohorts) with `[SHADOW] CT_SHORT_MACRO_SUPPRESSED`
+telemetry. One weekly regime state is one data point — activate only after the
+shadow window spans a regime change or ≥1 week of counts:
+
+```bash
+docker logs 360scalp-v2-engine --since 168h 2>&1 | grep -c "\[SHADOW\] CT_SHORT_MACRO_SUPPRESSED"
+# then, on owner sign-off:
+echo 'CT_SHORT_MACRO_GATE_ENABLED=true' >> /root/360-v2/.env
+docker compose -f docker-compose.yml --profile isolated up -d --no-deps --force-recreate engine
+```
+
+The original haircut brief below stands as reference — re-evaluate it on a
+longer window (its per-pair coupling layer may still add value once the macro
+mirror handles the side selection).
+
+---
+
 ## Why now — the bleed switched sides
 
 Fresh 72h truth window (2026-07-01 → 07-03, 100 closed signals, post-#671/#672/#683):
