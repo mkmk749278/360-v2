@@ -23,6 +23,8 @@ from config import (
     FUNDING_RATE_EXTREME_THRESHOLD,
     SCALP_ORB_ENABLED,
     SR_FLIP_LONG_ENABLED,
+    SR_FLIP_LONG_BREAK_VOL_MULT,
+    SR_FLIP_LONG_MIN_HOLD_CLOSES,
     MOVER_TREND_PULLBACK_ENABLED,
     MOVER_AVWAP_SCALP_ENABLED,
     MOVER_AVWAP_TF,
@@ -3818,17 +3820,20 @@ class ScalpChannel(BaseChannel):
             )
 
         # Bullish flip: require breakout-close acceptance above prior swing high.
-        long_breakout_close_confirmed = any(
-            h > prior_swing_high
-            and c > prior_swing_high
-            and (o <= prior_swing_high or prev_c <= prior_swing_high)
-            for h, c, o, prev_c in zip(
-                recent_highs,
-                recent_closes,
-                recent_opens,
-                recent_prev_closes,
-            )
-        )
+        # The FIRST qualifying candle in the closed window is the break candle —
+        # its index feeds the V2 volume/acceptance evidence checks below.
+        _long_break_rel: Optional[int] = None
+        for _bi, (h, c, o, prev_c) in enumerate(
+            zip(recent_highs, recent_closes, recent_opens, recent_prev_closes)
+        ):
+            if (
+                h > prior_swing_high
+                and c > prior_swing_high
+                and (o <= prior_swing_high or prev_c <= prior_swing_high)
+            ):
+                _long_break_rel = _bi
+                break
+        long_breakout_close_confirmed = _long_break_rel is not None
         # Bearish flip: require breakout-close acceptance below prior swing low.
         short_breakout_close_confirmed = any(
             l < prior_swing_low
@@ -3842,6 +3847,13 @@ class ScalpChannel(BaseChannel):
             )
         )
 
+        # Whipsaw guard (long V2, S40): both directions confirming inside the
+        # same 8-candle window means price whipped through BOTH structural
+        # levels — that's chop around structure, not a flip.  V1 silently
+        # resolved these LONG (the if-priority), feeding the bull-trap bleed.
+        if long_breakout_close_confirmed and short_breakout_close_confirmed:
+            return self._reject("whipsaw_flip")
+
         if long_breakout_close_confirmed:
             direction = Direction.LONG
             level = prior_swing_high
@@ -3851,14 +3863,49 @@ class ScalpChannel(BaseChannel):
         else:
             return self._reject("flip_close_not_confirmed")
 
-        # SR_FLIP long-side disable (owner directive 2026-06-29, stopgap). Profit-Lab
-        # (85 closed signals): SR_FLIP SHORT nets +5.1% at 52% win, but SR_FLIP LONG
-        # nets −21.8% at 19% win — the long side is the entire path's drag and loses
-        # in every regime (9% win even in TRENDING_UP). Disable longs by default until
-        # the long-entry thesis is repaired; env-reversible. NOTE: a tourniquet, not a
-        # fix — the real work is understanding why long flips fail (tracked separately).
-        if direction == Direction.LONG and not SR_FLIP_LONG_ENABLED:
-            return self._reject("long_disabled")
+        # ── SR_FLIP long V2 (S40, issue #674) — trap-discriminating evidence ──
+        # The long/short code is symmetric; the LONG side bled (19% win, every
+        # regime) because a break above resistance in leveraged crypto is
+        # disproportionately a bull trap, and V1 confirmed flips on pure price.
+        # V2 demands what a trap can't fake: real volume on the break and real
+        # acceptance above the level.  Both evidence checks run regardless of
+        # the enable flag so the [SHADOW] line measures exactly the candidates
+        # a re-enable would emit (stamp-and-shadow doctrine).
+        if direction == Direction.LONG:
+            # 1. Volume-backed break: breakout candle vs prior-20 mean.
+            #    Fail-open when volume data is unavailable (warmup) — the
+            #    acceptance-hold check below still applies.
+            _break_abs = len(closes) - 9 + int(_long_break_rel or 0)
+            _vols = m5.get("volume", [])
+            _v2_vol_ok: Optional[bool] = None
+            if len(_vols) > _break_abs and _break_abs >= 20:
+                _base = [float(v) for v in _vols[_break_abs - 20 : _break_abs]]
+                _base_mean = sum(_base) / len(_base) if _base else 0.0
+                if _base_mean > 0:
+                    _v2_vol_ok = (
+                        float(_vols[_break_abs])
+                        >= SR_FLIP_LONG_BREAK_VOL_MULT * _base_mean
+                    )
+            if _v2_vol_ok is False:
+                return self._reject("long_break_volume_thin")
+            # 2. Acceptance hold: closed candles above the level from the
+            #    break through the last closed candle (break close counts).
+            #    One poke above the level is not a flip.
+            _closes_above = sum(
+                1 for _c in closes[_break_abs:-1] if float(_c) > prior_swing_high
+            )
+            if _closes_above < SR_FLIP_LONG_MIN_HOLD_CLOSES:
+                return self._reject("long_acceptance_not_held")
+            # 3. Enable gate — while off, V2-passing candidates are shadow-
+            #    logged so the re-enable decision is made on measured volume
+            #    and (via the backfill validator) measured outcomes.
+            if not SR_FLIP_LONG_ENABLED:
+                log.info(
+                    "[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE symbol={} level={:.6g} "
+                    "vol_ok={} closes_above={} — long side disabled",
+                    symbol, level, _v2_vol_ok, _closes_above,
+                )
+                return self._reject("long_disabled")
 
         # 1H break confirmation (OWNER_BRIEF §3.4a — "HTF Structure, LTF
         # Entry").  Only enforced when the level came from LevelBook (HTF

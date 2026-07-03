@@ -440,7 +440,9 @@ BTC_STATE_COUPLING_LOOKBACK: int = _safe_int("BTC_STATE_COUPLING_LOOKBACK", "200
 # trend REVERSAL long scalps — NOT a macro/position trade, and NOT trend-following
 # longs.  Only setups whose thesis is to fade the trend are in scope:
 #   * LIQUIDITY_SWEEP_REVERSAL — a reversal long fighting recent structure.
-#   * (SR_FLIP_RETEST is already statically off via its own flag — loses in every regime.)
+#   * SR_FLIP_RETEST — in scope since the V2 long repair (S40): while the side
+#     is statically off this is inert; the day SR_FLIP_LONG_ENABLED flips, the
+#     macro layer protects the re-enabled longs from the steamroll case.
 # Deliberately EXCLUDED: MOVER_TREND_PULLBACK.  Despite the −12.78% backfill aggregate,
 # it is a trend-CONTINUATION setup — it longs a coin that is already ripping (riding
 # its own momentum, by construction trend-ALIGNED with the coin).  Live evidence (the
@@ -454,7 +456,7 @@ CT_LONG_MACRO_GATE_ENABLED: bool = _safe_bool("CT_LONG_MACRO_GATE_ENABLED", "tru
 CT_LONG_MACRO_GATE_SETUPS: frozenset = frozenset(
     s.strip().upper()
     for s in os.getenv(
-        "CT_LONG_MACRO_GATE_SETUPS", "LIQUIDITY_SWEEP_REVERSAL"
+        "CT_LONG_MACRO_GATE_SETUPS", "LIQUIDITY_SWEEP_REVERSAL,SR_FLIP_RETEST"
     ).split(",")
     if s.strip()
 )
@@ -1531,6 +1533,14 @@ SIGNAL_TYPE_LABELS: Dict[str, str] = {
     "QUIET_COMPRESSION_BREAK":       "🔋 COMPRESSION BREAK",
     "DIVERGENCE_CONTINUATION":       "📊 DIVERGENCE CONTINUATION",
     "CONTINUATION_LIQUIDITY_SWEEP":  "🔁 CONTINUATION SWEEP",
+    # S41 wiring audit: six emitted setups had no display label and fell back
+    # to their raw enum names in subscriber-facing messages.
+    "FAILED_AUCTION_RECLAIM":        "🔃 FAILED AUCTION RECLAIM",
+    "LIQUIDATION_REVERSAL":          "💥 LIQUIDATION REVERSAL",
+    "MA_CROSS_TREND_SHIFT":          "✂️ MA CROSS TREND SHIFT",
+    "MOVER_AVWAP_SCALP":             "⚓ MOVER AVWAP SCALP",
+    "POST_DISPLACEMENT_CONTINUATION": "➡️ DISPLACEMENT CONTINUATION",
+    "TREND_PULLBACK_EMA":            "📈 TREND PULLBACK EMA",
 }
 
 CHANNEL_EMOJIS: Dict[str, str] = {
@@ -1959,6 +1969,30 @@ SR_FLIP_MOMENTUM_GRACE_ENABLED: bool = _safe_bool("SR_FLIP_MOMENTUM_GRACE_ENABLE
 # (9% win even in TRENDING_UP). Disabled by default until the long-entry thesis
 # is repaired; flip true to re-enable. This is a tourniquet, not a fix.
 SR_FLIP_LONG_ENABLED: bool = _safe_bool("SR_FLIP_LONG_ENABLED", "false")
+
+# SR_FLIP long V2 — the thesis repair (S40, issue #674).  Diagnosis: the code
+# is long/short symmetric; the LONG side loses because a break ABOVE
+# resistance in crypto is disproportionately a BULL TRAP — breakout-chasing
+# longs get flushed exactly at the retest the setup buys.  V1 confirmed a
+# flip on pure price (one break-and-close), which cannot tell acceptance
+# from a trap.  V2 demands trap-discriminating evidence before any LONG:
+#   1. Volume-backed break — the breakout candle's volume must be at least
+#      SR_FLIP_LONG_BREAK_VOL_MULT × the mean of the prior 20 candles.
+#      Genuine acceptance prints real volume; traps break thin.
+#   2. Acceptance hold — at least SR_FLIP_LONG_MIN_HOLD_CLOSES closed 5m
+#      candles above the level between break and retest (the break close
+#      counts).  A single poke above the level is not a flip.
+#   3. Whipsaw guard — if BOTH a long and a short flip confirm inside the
+#      same 8-candle window the structure is chop, not a flip: reject
+#      (V1 silently resolved these LONG — long had if-priority).
+#   4. Macro protection — SR_FLIP_RETEST joins CT_LONG_MACRO_GATE_SETUPS,
+#      so re-enabled longs are suppressed while BTC weekly / coin daily
+#      reads DOWN (the steamroll case), auto-restoring on the turn.
+# While SR_FLIP_LONG_ENABLED stays false, V2-passing longs emit
+# "[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE" so the candidate rate and quality
+# are measurable before re-enable (owner sign-off on the shadow window).
+SR_FLIP_LONG_BREAK_VOL_MULT: float = _safe_float("SR_FLIP_LONG_BREAK_VOL_MULT", "1.5")
+SR_FLIP_LONG_MIN_HOLD_CLOSES: int = _safe_int("SR_FLIP_LONG_MIN_HOLD_CLOSES", "2")
 
 # ---------------------------------------------------------------------------
 # SR_FLIP pre-TP R-scaling (change B — ships dark).

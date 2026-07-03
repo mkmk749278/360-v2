@@ -4,6 +4,89 @@
 
 ---
 
+## 🟢 SESSION 41 2026-07-03 — SR_FLIP long V2: the thesis repair, shipped dark (issue #674)
+
+**Owner mandate (loop):** "enable SR_FLIP longs in correct manner + deep research on
+strategies/paths/gates/regimes/wiring + scoring system — profitable signals first,
+then volume." This session delivered part 1; parts 2–3 continue next iterations.
+
+### Diagnosis (deep code read of `_evaluate_sr_flip_retest`)
+
+The long/short code is **symmetric** — retest zones, wick/RSI/EMA gates, SL/TP
+geometry all mirror. The LONG side bled (19% win, losing in EVERY regime incl.
+9% in TRENDING_UP) for thesis-level reasons the code couldn't see:
+
+1. **Flip confirmation was pure price** — one break-and-close above resistance.
+   In leveraged crypto an upside break is disproportionately a **bull trap**
+   (breakout-chasing longs provide the exit liquidity; their flush IS the
+   retest V1 bought). Downside breaks are cascade-driven — that's why the
+   mirror-image SHORT side is +5.1% at 52% win on identical code.
+2. **No acceptance requirement** — a single poke above the level counted.
+3. **LONG had if-priority on whipsaws** — a window where price broke BOTH
+   levels (chop) silently resolved LONG.
+4. **No macro protection** — SR_FLIP wasn't in the CT_LONG gate scope
+   (it was "already off").
+
+### V2 (shipped DARK — merge is behavior-neutral, longs stay off)
+
+- **Volume-backed break**: breakout candle ≥ `SR_FLIP_LONG_BREAK_VOL_MULT`
+  (1.5) × prior-20 mean volume. Traps break thin; acceptance prints volume.
+- **Acceptance hold**: ≥ `SR_FLIP_LONG_MIN_HOLD_CLOSES` (2) closed 5m candles
+  above the level between break and retest.
+- **Whipsaw guard**: both-direction confirmation in one window → reject
+  `whipsaw_flip` (behavior-neutral today; protective on re-enable).
+- **Macro scope**: `SR_FLIP_RETEST` added to `CT_LONG_MACRO_GATE_SETUPS` —
+  inert while the side is off; protects re-enabled longs from the steamroll.
+- **Shadow**: V2-passing longs log `[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE`
+  (symbol, level, vol evidence, hold count) then reject `long_disabled`.
+- New reject reasons: `long_break_volume_thin`, `long_acceptance_not_held`,
+  `whipsaw_flip`. SHORT side deliberately untouched (no volume gate — it's
+  the profitable side and cascade breaks are legitimately thin sometimes).
+
+### Re-enable criteria (owner sign-off when met)
+
+Read `[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE` counts after ≥1 week; join outcomes
+via the backfill validator on the shadow candidates. Re-enable
+(`SR_FLIP_LONG_ENABLED=true`) only if the V2 candidate set clears ~45%+
+implied win on the counterfactual — the point of V2 is fewer, better longs.
+
+### Wiring audit — pass 1 (setup-registration maps): one dead path found + invariant locked
+
+Systematic diff of every emitted `setup_class` against every setup-keyed map:
+
+- **`MA_CROSS_TREND_SHIFT` was silently dead since it shipped** — in the enum
+  but registered in NO channel set, NO regime set, and not `_SELF_CLASSIFYING`
+  (the exact #634 bug class): hard-rejected at `_prepare_signal` before scoring
+  in every regime, while its evaluator burned ~190k attempts/window. Fixed:
+  registered in `360_SCALP` + STRONG_TREND/WEAK_TREND/BREAKOUT_EXPANSION (a
+  trend-shift entry; ranges whipsaw MA crosses) + self-classifying. First real
+  emissions will be watched by the daily loop.
+- **6 emitted setups had no `SIGNAL_TYPE_LABELS` entry** (FAR, LIQUIDATION_REVERSAL,
+  MA_CROSS, MOVER_AVWAP, POST_DISPLACEMENT, TREND_PULLBACK_EMA) — subscriber
+  messages fell back to raw enum names. Labels added.
+- **Invariant test added** (`test_setup_registration_audit.py`): every emitted
+  setup must be in ≥1 channel set, ≥1 regime set, and have a display label —
+  the whole bug class is now unreintroducible.
+- Verified clean: `_MAX_SL_PCT_BY_SETUP` (19 keys), `ACTIVE_PATH_PORTFOLIO_ROLES`
+  (17), the `INVALIDATION_*_BY_SETUP` maps (sparse by design — per-setup
+  overrides over channel defaults).
+
+### NEXT (the standing mandate, in order)
+
+1. **Wiring audit pass 2** — dispatch consumption of stamped fields
+   (entry_regime-class bug pattern), gate-chain order, pre-TP/FSM allowlist
+   resolution vs config defaults.
+2. **Scoring system** — the score can't rank signals (band inversion persists,
+   r≈0). Known input defect: `orderblocks` source `not_implemented` (100%
+   absent) while SMC is the largest dimension. Direction: per-component
+   calibration on clean outcome data; sorting/finalising signals by measured
+   edge (setup×side×regime), not by additive score alone. Owner: "not actually
+   based on score we can't say good signals."
+3. Daily check-in items (CT_SHORT gate watch, expiry tune, MOVER_AVWAP, scorer
+   data accumulation) continue.
+
+---
+
 ## 🟢 SESSION 40 2026-07-03 — Fresh-window validation + phantom-trade accounting bug + tokenized stocks back via movers
 
 **Owner trigger:** "look for signal quality, where things get bad and what's wrong now"
