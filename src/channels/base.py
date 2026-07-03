@@ -258,6 +258,24 @@ class Signal:
     # back to True when entry_zone_low/high aren't populated (market-order
     # signals that always count as filled at dispatch).
     entry_zone_filled: bool = False
+
+    @property
+    def entry_never_filled(self) -> bool:
+        """True when this limit-zone signal's entry was never visited.
+
+        A signal in this state has no position — neither the engine book
+        nor a subscriber following the signal ever filled.  Terminal
+        accounting (expiry sweeps, perf records, the invalidation audit)
+        must treat it as a non-trade: recording mark-vs-entry P&L for it
+        fabricates the outcome of a position that never existed.  Always
+        False for market-order signals (no entry zone populated).
+        """
+        return (
+            self.entry_zone_low is not None
+            and self.entry_zone_high is not None
+            and not self.entry_zone_filled
+        )
+
     # How long (minutes) the setup remains actionable.  After this window
     # the signal should no longer be entered even if price is still in zone.
     # 0 means "not yet set by an evaluator" — the scanner will apply the
