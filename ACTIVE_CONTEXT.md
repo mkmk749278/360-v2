@@ -96,10 +96,34 @@ STEP 0 (this PR) `EXPIRED_NO_FILL` excluded from the stat store; STEP 1
 observe-only cohort stamps + [SHADOW] COHORT_EDGE; STEP 2 activation on
 sign-off after ≥2 weeks clean shadow.
 
+### Wiring audit — pass 2 (stamped-field consumption): validity window was display-only
+
+Traced every field stamped on a Signal to its consumers. `entry_regime_15m`,
+`atr_value_at_entry` (FSM trail rate), `market_phase`, `btc_state_factor` — all
+consumed correctly. **`valid_for_minutes` was consumed by NOTHING but the
+Telegram card**: subscribers are told "valid 15 minutes" while the engine's
+fill gate kept waiting up to the 1h max-hold — the engine/paper book could
+"fill" a stale setup at minute 55 that rule-following subscribers abandoned at
+minute 15 (book-vs-experience divergence + stale-thesis entries). **Fixed:**
+`ENTRY_FILL_WINDOW_ENFORCED` (default ON, env-reversible) — an unfilled limit
+signal finalises as `EXPIRED_NO_FILL` the moment its advertised validity
+lapses.
+
+**Open design question for owner (FSM, sign-off): auto-trade entries are
+MARKET-at-dispatch** while the signal book + manual subscribers use the limit
+entry zone — AUTO-tier users are IN trades the book correctly counts as
+never-filled (~1/3 of signals in the last clean window). Options: (a) FSM
+places LIMIT at entry zone with validity-window TTL (matches the book exactly,
+users miss nothing the book doesn't), (b) keep MARKET entries and accept the
+divergence, (c) hybrid: MARKET only when dispatch price is inside the zone.
+Recommend (a) — one truth for every consumer of a signal. Not changed in code;
+FSM entry shape is an owner-sign-off item.
+
 ### NEXT (the standing mandate, in order)
 
-1. **Wiring audit pass 2** — dispatch consumption of stamped fields
-   (entry_regime-class bug pattern), gate-chain order, pre-TP/FSM allowlist
+1. **Owner call: FSM entry shape** (see pass-2 finding above) — LIMIT-with-TTL
+   vs MARKET-at-dispatch for auto-trade entries.
+1b. **Wiring pass 3** — gate-chain order in the scanner; pre-TP/FSM allowlist
    resolution vs config defaults.
 2. **Scoring STEP 1 (observe-only)** — extend the outcome store key to
    (setup, side, regime_family, macro); stamp cohort edge + checklist

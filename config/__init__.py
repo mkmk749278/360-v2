@@ -1860,6 +1860,15 @@ MAX_SIGNAL_HOLD_SECONDS: Dict[str, int] = {
 # that backstop stays regardless of this flag.
 SIGNAL_EXPIRY_ENABLED: bool = _safe_bool("SIGNAL_EXPIRY_ENABLED", "false")
 
+# Fill-window enforcement (S41 wiring audit).  The signal card advertises
+# "valid for N minutes" (SIGNAL_VALID_FOR_MINUTES / sig.valid_for_minutes) but
+# nothing enforced it — the engine/paper book could accept a limit fill up to
+# the 1h max-hold on a setup subscribers were told to abandon at minute 15,
+# diverging the book from the subscriber experience AND entering on a stale
+# thesis.  When ON (default), an unfilled limit signal finalises as
+# EXPIRED_NO_FILL the moment its advertised validity lapses.
+ENTRY_FILL_WINDOW_ENFORCED: bool = _safe_bool("ENTRY_FILL_WINDOW_ENFORCED", "true")
+
 # ---------------------------------------------------------------------------
 # Concurrency cap – DEPRECATED: replaced by per-channel cap above.
 # Kept for backwards-compatibility with any external tooling that imports it.

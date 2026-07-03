@@ -369,3 +369,83 @@ class TestStatFilterExclusion:
         await monitor._evaluate_signal(sig)
 
         stat.record.assert_called_once()
+
+
+class TestFillWindowEnforcement:
+    """S41: the advertised validity window is now the fill window — the book
+    must not accept a limit fill subscribers were told to abandon."""
+
+    def _monitor(self, sig, tracker=None):
+        data_store = MagicMock()
+        # Candle that does NOT overlap the entry zone (price far above).
+        data_store.get_candles.return_value = {
+            "close": [sig.entry * 1.05], "high": [sig.entry * 1.06],
+            "low": [sig.entry * 1.04], "open": [sig.entry * 1.05],
+        }
+        data_store.ticks = {}
+        monitor = TradeMonitor(
+            data_store=data_store,
+            send_telegram=AsyncMock(),
+            get_active_signals=lambda: {sig.signal_id: sig},
+            remove_signal=MagicMock(),
+            update_signal=MagicMock(),
+            performance_tracker=tracker,
+        )
+        monitor._broker_close_full = AsyncMock()
+        monitor._remove = MagicMock()
+        return monitor
+
+    async def test_unfilled_past_validity_finalises_no_fill(self, monkeypatch):
+        monkeypatch.setattr("src.trade_monitor.ENTRY_FILL_WINDOW_ENFORCED", True)
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", False)
+        tracker = MagicMock()
+        sig = _make_signal(zone=True, filled=False, age_seconds=16 * 60)
+        sig.valid_for_minutes = 15
+        monitor = self._monitor(sig, tracker)
+
+        await monitor._evaluate_signal(sig)
+
+        monitor._remove.assert_called_once_with(sig.signal_id)
+        kwargs = tracker.record_outcome.call_args.kwargs
+        assert kwargs["outcome_label"] == "EXPIRED_NO_FILL"
+        assert kwargs["pnl_pct"] == 0.0
+
+    async def test_unfilled_within_validity_keeps_waiting(self, monkeypatch):
+        monkeypatch.setattr("src.trade_monitor.ENTRY_FILL_WINDOW_ENFORCED", True)
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", False)
+        tracker = MagicMock()
+        sig = _make_signal(zone=True, filled=False, age_seconds=10 * 60)
+        sig.valid_for_minutes = 15
+        monitor = self._monitor(sig, tracker)
+
+        await monitor._evaluate_signal(sig)
+
+        monitor._remove.assert_not_called()
+        tracker.record_outcome.assert_not_called()
+
+    async def test_flag_off_preserves_old_wait_behaviour(self, monkeypatch):
+        monkeypatch.setattr("src.trade_monitor.ENTRY_FILL_WINDOW_ENFORCED", False)
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", False)
+        tracker = MagicMock()
+        sig = _make_signal(zone=True, filled=False, age_seconds=30 * 60)
+        sig.valid_for_minutes = 15
+        monitor = self._monitor(sig, tracker)
+
+        await monitor._evaluate_signal(sig)
+
+        monitor._remove.assert_not_called()
+        tracker.record_outcome.assert_not_called()
+
+    async def test_zero_validity_never_enforced(self, monkeypatch):
+        # valid_for_minutes == 0 means "not set by an evaluator" — the window
+        # must not fire on it (fail-open).
+        monkeypatch.setattr("src.trade_monitor.ENTRY_FILL_WINDOW_ENFORCED", True)
+        monkeypatch.setattr("src.trade_monitor.SIGNAL_EXPIRY_ENABLED", False)
+        tracker = MagicMock()
+        sig = _make_signal(zone=True, filled=False, age_seconds=30 * 60)
+        sig.valid_for_minutes = 0
+        monitor = self._monitor(sig, tracker)
+
+        await monitor._evaluate_signal(sig)
+
+        monitor._remove.assert_not_called()
