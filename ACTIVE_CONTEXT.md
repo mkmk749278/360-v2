@@ -89,11 +89,30 @@ structure, quick to de-risk / patient to re-risk, replay-proven on 2021–24) ·
 **#683** `CT_LONG_MACRO_GATE_ENABLED=true` LIVE — suppresses counter-trend LONGs
 (scope: LSR; MOVER excluded as trend-continuation; SR_FLIP longs already off).
 
+### Root-cause find #4 — the short bleed is MACRO-counter, not intraday-counter (haircut NO-GO; mirror gate shipped dark)
+
+Ran the #675 validator on the clean window (64 real trades; klines from
+data.binance.vision — fapi is geo-blocked from the session sandbox, the public
+archive isn't). **The intraday BTC-State haircut FAILED its acceptance test:**
+the bleeding shorts were BTC-*aligned* at 5m/15m/1h (bucket `4_short`: 22
+shorts, 14% win, −0.396 avg = the whole bleed) while counter-trend shorts were
+fine; every counterfactual cut made the book worse. The real pattern: shorts
+fire into intraday BTC dips inside the weekly-BULL recovery — 36/36 bled shorts
+were against `macro_direction` weekly-BULL; the book without them is **+0.42%**
+(vs −7.66%). One weekly regime state ≠ a validated gate, so per dark-first:
+**`BTC_STATE_HAIRCUT_ENABLED` stays OFF** (verdict recorded in the brief), and a
+**CT_SHORT macro mirror** of #683 shipped **DARK** — `CT_SHORT_MACRO_GATE_ENABLED`
+(false), scope `LIQUIDITY_SWEEP_REVERSAL,FAILED_AUCTION_RECLAIM,BREAKDOWN_SHORT`
+(the 0–20%-win bleeders; QUIET_COMPRESSION 67%-win and SR_FLIP-breakeven shorts
+excluded), flag-independent predicate + `[SHADOW] CT_SHORT_MACRO_SUPPRESSED`
+telemetry (#597 pattern).
+
 ### NEXT (priority order)
 
-1. **Owner: read `docs/BTC_STATE_ACTIVATION_BRIEF.md`** — activating the graded
-   haircut (one env flip) is the lever for the −8.53% counter-trend-SHORT bleed.
-   Evidence command + acceptance criteria in the brief. Scoring change → sign-off.
+1. **Read CT_SHORT shadow counts after ≥1 week** (or a regime change):
+   `docker logs 360scalp-v2-engine --since 168h | grep -c "[SHADOW] CT_SHORT_MACRO_SUPPRESSED"`
+   → owner sign-off → `CT_SHORT_MACRO_GATE_ENABLED=true`. Full verdict + commands
+   in `docs/BTC_STATE_ACTIVATION_BRIEF.md` (updated with the NO-GO on the haircut).
 2. **Expiry tune** — re-audit `expired` kills after ≥5 days of post-fix (no-phantom)
    data; FAR was the premature-kill hotspot but the numbers were contaminated.
 3. **MOVER_AVWAP_SCALP entry geometry** — zero real fills ever; on clean data
