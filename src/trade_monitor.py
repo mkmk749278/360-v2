@@ -510,8 +510,10 @@ class TradeMonitor:
 
         # Statistical filter outcome recording — updates rolling win-rate store
         # so the filter can penalise or suppress future signals from poor
-        # (channel, pair, regime) combinations.
-        if self._stat_filter is not None:
+        # (channel, pair, regime) combinations.  A never-filled signal is not
+        # a trade: recording it as won=False would drag cohort win rates down
+        # with non-trades (the #685 fabrication class, stat-store edition).
+        if self._stat_filter is not None and outcome_label != "EXPIRED_NO_FILL":
             try:
                 won = signal_quality_hit_tp >= 1
                 _sf_outcome = SignalOutcome(

@@ -71,17 +71,40 @@ Systematic diff of every emitted `setup_class` against every setup-keyed map:
   (17), the `INVALIDATION_*_BY_SETUP` maps (sparse by design — per-setup
   overrides over channel defaults).
 
+### Scoring audit (mandate part 3) — verdict + redesign design written
+
+**Verdict: the confidence score cannot rank signals BY DESIGN** — it is an
+uncalibrated presence-checklist (any sweep=10, MSS=8, FVG=2…), distributions
+compress post-evaluator-gates so penalties do the real separating, and its
+largest dimension (SMC) runs half-blind (`orderblocks` source `not_implemented`,
+order book top-of-book only, spoof penalty has never fired). r≈0 and the band
+inversion are the expected output, not a tuning problem.
+
+**Key discovery: the measured-edge machinery already exists** —
+`StatisticalFilter` (Wilson-bound rolling win rates, wired at emit) — but is
+neutered by (1) the wrong key `(channel, pair, regime)`: channel is constant,
+per-pair samples never clear min_samples, and `setup_class`/side are discarded;
+(2) contaminated pre-#685 data; (3) veto-only (can't rank).
+
+**Redesign (owner sign-off): `docs/SCORING_AUDIT_2026_07_03.md`** — two-layer
+finalisation: checklist becomes a pass/fail sanity floor; ranking/finalising by
+**measured cohort edge** (Wilson-bounded expectancy per setup × side ×
+regime_family × BTC-macro), emit-if-positive-edge / probation-cap-if-unknown /
+suppress-if-negative. Generalises the SR_FLIP-long disable, CT_SHORT gate, and
+S19 setup-identity finding into a self-updating table. Rollout dark-first:
+STEP 0 (this PR) `EXPIRED_NO_FILL` excluded from the stat store; STEP 1
+observe-only cohort stamps + [SHADOW] COHORT_EDGE; STEP 2 activation on
+sign-off after ≥2 weeks clean shadow.
+
 ### NEXT (the standing mandate, in order)
 
 1. **Wiring audit pass 2** — dispatch consumption of stamped fields
    (entry_regime-class bug pattern), gate-chain order, pre-TP/FSM allowlist
    resolution vs config defaults.
-2. **Scoring system** — the score can't rank signals (band inversion persists,
-   r≈0). Known input defect: `orderblocks` source `not_implemented` (100%
-   absent) while SMC is the largest dimension. Direction: per-component
-   calibration on clean outcome data; sorting/finalising signals by measured
-   edge (setup×side×regime), not by additive score alone. Owner: "not actually
-   based on score we can't say good signals."
+2. **Scoring STEP 1 (observe-only)** — extend the outcome store key to
+   (setup, side, regime_family, macro); stamp cohort edge + checklist
+   components into perf records; [SHADOW] COHORT_EDGE decisions. Ships
+   normally (observe-only). STEP 2 activation = owner sign-off per the doc."
 3. Daily check-in items (CT_SHORT gate watch, expiry tune, MOVER_AVWAP, scorer
    data accumulation) continue.
 
