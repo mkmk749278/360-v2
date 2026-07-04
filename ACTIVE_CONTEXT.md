@@ -4,6 +4,112 @@
 
 ---
 
+## 🟢 SESSION 42 2026-07-04 — Paper trades execute again + Scoring STEP 1 (PR #696)
+
+**Owner mandate (loop continued):** profitable signals first → volume second; scoring
+redesign STEP 1; SR_FLIP long re-enable pending ≥1 week shadow data.
+
+### Critical bug fixed: paper trading never executing active signals
+
+**Root cause:** `build_channel_signal()` in `src/channels/base.py` always populates
+`entry_zone_low/high` (display band) but never set `entry_zone_filled = True`.
+`entry_never_filled` returns `True` any time the zone is set but unfilled.
+The auto-execute gate in `trade_monitor.py` skips execution when `entry_never_filled`.
+
+The zone fill check in `_evaluate_signal` races with favorable price movement: once
+price moves above `zone_high`, all subsequent 1m candle lows are above it →
+`_c_low <= zone_high` never passes → `entry_zone_filled` stays `False` forever.
+Both HMSTRUSDT (MOVER_TREND_PULLBACK LONG) and 1000BONKUSDT (DIVERGENCE_CONTINUATION
+LONG) visible in the Signals tab were silently blocked for 14+ hours.
+
+**Fix:** `sig.entry_zone_filled = True` immediately after zone computation in
+`build_channel_signal()`. All evaluators pass `close=current_price` so
+`zone_center ≈ close` and entry is inside the zone by construction. Evaluators
+needing true limit-order semantics (entry at a future level) must reset to `False`
+explicitly after calling this function.
+
+### Wiring bug fixed: StatisticalFilter outcomes were never recorded
+
+`TradeMonitor` was constructed without `stat_filter=` in `main.py`, so
+`self._stat_filter = None` and the recording block in `_record_outcome` was
+always a no-op. The rolling win-rate store was permanently empty → always
+fail-open → the stat_filter had zero effect in production.
+
+**Fix:** `main.py` now passes `stat_filter=_scanner_stat_filter` and
+`cohort_edge_store=_scanner_cohort_edge_store` to `TradeMonitor.__init__()`.
+Both share the same singleton instances created at scanner module load time.
+
+### Scoring STEP 1 shipped (observe-only, ships normally per STEP 1 doctrine)
+
+Per `docs/SCORING_AUDIT_2026_07_03.md` rollout:
+
+1. **`CohortEdgeStore`** (`src/stat_filter.py`) — new rolling outcome store keyed
+   by `(setup_class, side, regime_family, macro_dir)`:
+   - `regime_family`: "QUIET" if local regime ∈ {QUIET/CHOPPY/LOW_VOL/RANGING_LOW_ADX},
+     else "ACTIVE" — collapses the 5m rear-view labels into the validated binary
+   - `macro_dir`: BTC weekly macro at signal emit (BULL/RECOVERY/NEUTRAL/DECLINE)
+   - Expectancy formula: `WilsonLowerBound(WR) × avg_win + (1−WR) × avg_loss` —
+     small samples penalised rather than trusted
+   - Zero new I/O; pure in-memory dict (same pattern as `RollingWinRateStore`)
+
+2. **`SignalOutcome` extended** with `side` and `macro_dir` fields (defaults
+   `""` / `"NEUTRAL"` preserve backward compatibility with existing test callers).
+
+3. **Signal gets cohort edge fields** (`src/channels/base.py`):
+   - `cohort_edge_key`: `"SETUP/SIDE/REGIME_FAMILY/MACRO"` stamped at emit
+   - `cohort_edge_expectancy`: Wilson-bounded expectancy at emit time (None = no history)
+   - `cohort_edge_samples`: sample count in cohort at emit time
+   Carried through lifecycle so the truth report and perf records can show the
+   cohort context without additional lookups at resolution time.
+
+4. **Scanner shadow-logs `[SHADOW] COHORT_EDGE`** after the existing
+   `_stat_filter.check()` block — logs `would-emit/would-suppress:edge=X%:n=N`
+   per-signal in debug. No confidence change, no suppression — telemetry only.
+
+5. **`TradeMonitor._record_outcome`** now records outcomes to BOTH stores when a
+   signal resolves (excluding `EXPIRED_NO_FILL` non-trades, per existing rule).
+   The `macro_dir` at resolution is taken from the emit-time `cohort_edge_key`
+   so the store records the market context at entry, not at exit.
+
+6. **12 new `CohortEdgeStore` tests** in `tests/test_stat_filter.py`: fail-open,
+   positive/negative expectancy, regime_family bucketing, shadow verdicts,
+   sample count, all_stats, window caps, backward-compat defaults.
+
+**All 6001 tests pass.** PR #696 updated to cover both commits.
+
+### What STEP 1 enables
+
+Starting from the next signal resolution, every outcome is recorded with the
+correct cohort key. After ≥2 weeks of clean data, read the shadow verdicts
+in debug logs:
+```bash
+docker logs 360scalp-v2-engine --since 2w 2>&1 | grep '\[SHADOW\] COHORT_EDGE'
+```
+Group by verdict and join against realised P&L. If the would-suppress cohorts
+have negative measured expectancy → proceed to STEP 2 activation (owner sign-off).
+
+### NEXT (standing mandate, in order)
+
+1. **PR #696 review** — owner-sign-off item (position_state.py FSM touch). CI green.
+2. **SR_FLIP long re-enable** — read `[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE` counts
+   after ≥1 week (armed since Session 41). Re-enable only if V2 candidates show
+   ~45%+ implied win rate. Owner sign-off required.
+3. **Scoring STEP 2** — after ≥2 weeks shadow data, review COHORT_EDGE verdicts
+   against realised P&L. Activate `COHORT_EDGE_RANKER_ENABLED=true` on owner
+   sign-off. Owner-sign-off item (new scoring model).
+4. **FSM LIMIT entry machinery** (`position_state.py` done; rest pending):
+   `order_placer.py` → `place_limit_entry()` GTC LIMIT; `position_fsm.py` →
+   PENDING_ENTRY→SL-first→OPEN path; `reconciler.py` → skip PENDING_ENTRY from
+   market-close detection + TTL sweep. Owner sign-off (Position FSM transition).
+5. **CT_SHORT gate monitoring** — daily: `grep -c "CT_SHORT_MACRO_SUPPRESS"` in logs,
+   short-side P&L trend, confirm shorts return when weekly macro turns down.
+6. **Expiry tune** — re-audit after ≥5 days of clean (post-phantom-fix) data.
+   FAR was the premature-kill hotspot but #685 data was contaminated.
+7. **MOVER_AVWAP_SCALP entry geometry** — zero real fills ever (all phantoms pre-#685).
+   On clean data: widen entry zone / market-entry variant / drop.
+
+---
+
 ## 🟢 SESSION 41 2026-07-03 — SR_FLIP long V2: the thesis repair, shipped dark (issue #674)
 
 **Owner mandate (loop):** "enable SR_FLIP longs in correct manner + deep research on

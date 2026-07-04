@@ -51,7 +51,7 @@ from src.pair_manager import PairManager
 from src.performance_tracker import PerformanceTracker
 from src.predictive_ai import PredictiveEngine
 from src.regime import RegimeService
-from src.scanner import Scanner
+from src.scanner import Scanner, _cohort_edge_store as _scanner_cohort_edge_store, _stat_filter as _scanner_stat_filter
 from src.mover_ignition import MoverIgnitionDetector
 from src.signal_history_backfill import (
     backfill_from_legacy_sources,
@@ -281,6 +281,8 @@ class CryptoSignalEngine:
             performance_tracker=self._performance_tracker,
             circuit_breaker=self._circuit_breaker,
             order_manager=self._order_manager,
+            stat_filter=_scanner_stat_filter,
+            cohort_edge_store=_scanner_cohort_edge_store,
         )
 
         # Channel strategies

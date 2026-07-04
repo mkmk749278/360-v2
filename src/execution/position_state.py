@@ -67,6 +67,13 @@ class PositionState(str, Enum):
     Allowed transitions are pinned in :mod:`src.execution.position_fsm`.
     """
 
+    # Resting LIMIT entry order placed, waiting for fill.  Only used
+    # when FSM_LIMIT_ENTRY_ENABLED=true.  Binance has a resting GTC
+    # LIMIT on the book; the position has no size yet.  SL/TP are NOT
+    # placed until the fill event arrives (PENDING_ENTRY → OPEN via
+    # _apply_entry_fill which places SL first).
+    PENDING_ENTRY = "PENDING_ENTRY"
+
     # Entry order placed, no fills yet.  Brief — entry is MARKET so it
     # typically fills within 1 second of placement.
     PENDING = "PENDING"
@@ -102,9 +109,14 @@ class PositionState(str, Enum):
     # user manually closes from the Lumin app.
     CLOSED = "CLOSED"
 
+    # Terminal state.  PENDING_ENTRY TTL elapsed: the reconciler
+    # cancelled the resting LIMIT order before it filled.  Zero P&L —
+    # never entered.  Mirrors the signal-book's EXPIRED_NO_FILL.
+    CANCELLED_NO_FILL = "CANCELLED_NO_FILL"
+
 
 # Terminal states — FSM rejects further transitions once here.
-_TERMINAL_STATES = frozenset({PositionState.CLOSED})
+_TERMINAL_STATES = frozenset({PositionState.CLOSED, PositionState.CANCELLED_NO_FILL})
 
 # Non-terminal state string values, in enum order.  Used as a server-side
 # Firestore ``state in (...)`` filter so live-position listings read ONLY
@@ -193,6 +205,9 @@ class Position:
         default_factory=lambda: datetime.now(timezone.utc)
     )
     closed_at: Optional[datetime] = None
+    # PENDING_ENTRY only: when the resting LIMIT must be filled by.
+    # None for MARKET-entry (PENDING) positions.
+    entry_expires_at: Optional[datetime] = None
     close_reason: str = ""
     realized_pnl_total: float = 0.0
 
@@ -782,6 +797,7 @@ def _to_firestore_dict(position: Position) -> dict:
         "created_at": position.created_at,
         "last_event_at": position.last_event_at,
         "closed_at": position.closed_at,
+        "entry_expires_at": position.entry_expires_at,
         "close_reason": position.close_reason,
         "realized_pnl_total": position.realized_pnl_total,
     }
@@ -838,6 +854,7 @@ def _from_firestore_dict(data: dict) -> Position:
             "last_event_at", datetime.now(timezone.utc)
         ),
         closed_at=data.get("closed_at"),
+        entry_expires_at=data.get("entry_expires_at"),
         close_reason=str(data.get("close_reason", "")),
         realized_pnl_total=float(data.get("realized_pnl_total", 0.0)),
     )

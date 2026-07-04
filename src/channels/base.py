@@ -284,6 +284,15 @@ class Signal:
     # Tells the user what order type to use (e.g. "LIMIT_ZONE", "MARKET")
     execution_type: str = "LIMIT_ZONE"
 
+    # ---- Cohort edge observability (STEP 1 shadow — observe only, no live decisions) ----
+    # Stamped by the scanner at emit. The cohort ranker reads this window for STEP 2.
+    # cohort_edge_key: "SETUP_CLASS/SIDE/REGIME_FAMILY/MACRO_DIR" composite key.
+    # cohort_edge_expectancy: Wilson-lower-bounded expectancy (% per trade); None = no history.
+    # cohort_edge_samples: count of resolved outcomes in this cohort at emit time.
+    cohort_edge_key: str = ""
+    cohort_edge_expectancy: Optional[float] = None
+    cohort_edge_samples: int = 0
+
     # ---- Delivery retry tracking (router-internal, not shown to users) ----
     _delivery_retries: int = 0
 
@@ -666,6 +675,15 @@ def build_channel_signal(
     else:
         sig.entry_zone_low = round(zone_center - zone_width * (1.0 - bias), 8)
         sig.entry_zone_high = round(zone_center + zone_width * bias, 8)
+
+    # All evaluators pass close=current_price, so zone_center ≈ close and the
+    # entry price is inside [zone_low, zone_high] by construction.  Mark as
+    # filled immediately so auto-execute and SL/TP monitoring start from
+    # dispatch rather than waiting for a candle-overlap check that races with
+    # intrabar price movement.  Evaluators that genuinely need "wait for zone
+    # fill" semantics (limit-order entry at a future level, entry != close)
+    # must set entry_zone_filled = False explicitly after this call.
+    sig.entry_zone_filled = True
 
     # Set confidence_decay_rate based on regime (item 19)
     regime_upper = regime.upper() if regime else ""
