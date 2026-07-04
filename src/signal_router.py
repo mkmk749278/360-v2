@@ -983,6 +983,10 @@ class SignalRouter:
                 atr_percentile=getattr(signal, "atr_percentile_at_entry", 50.0),
                 atr_value=getattr(signal, "atr_value_at_entry", 0.0),
                 setup_class=getattr(signal, "setup_class", None),
+                entry_zone_low=getattr(signal, "entry_zone_low", None),
+                entry_zone_high=getattr(signal, "entry_zone_high", None),
+                valid_for_minutes=int(getattr(signal, "valid_for_minutes", 0) or 0),
+                current_price=float(getattr(signal, "current_price", 0.0) or 0.0),
             )
         except Exception:
             log.exception(

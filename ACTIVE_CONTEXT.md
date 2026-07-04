@@ -154,6 +154,10 @@ before acting on structure-dependent paths.
    `docs/FSM_LIMIT_ENTRY_DESIGN.md` (dark flag, PENDING_ENTRY state,
    SL-first fill handling, TTL sweep, reconciler awareness, shadow line,
    test matrix). Ships dark; activation = owner sign-off on shadow.
+1a. **FSM LIMIT entry: shadow phase SHIPPED** — flags + zone/TTL field
+   forwarding through dispatch + per-dispatch `[SHADOW] FSM_LIMIT_ENTRY`
+   (in_zone / would_rest / market_semantics). Next: the PENDING_ENTRY
+   machinery per the spec, then owner activation on shadow data.
 1b. **Wiring pass 3** — gate-chain order in the scanner; pre-TP/FSM allowlist
    resolution vs config defaults.
 2. **Scoring STEP 1 (observe-only)** — extend the outcome store key to
