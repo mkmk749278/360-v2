@@ -498,6 +498,10 @@ async def dispatch_signal_to_active_users(
     atr_percentile: float = 50.0,
     atr_value: float = 0.0,
     setup_class: Optional[str] = None,
+    entry_zone_low: Optional[float] = None,
+    entry_zone_high: Optional[float] = None,
+    valid_for_minutes: int = 0,
+    current_price: float = 0.0,
 ) -> int:
     """Fan a signal out to every active user's server-side FSM.
 
@@ -519,6 +523,36 @@ async def dispatch_signal_to_active_users(
     # Lazy import to avoid circular dep: position_fsm imports the
     # signing-service client which imports the engine bootstrap.
     from src.execution import position_fsm as _fsm
+
+    # ── FSM LIMIT-entry shadow (S41, docs/FSM_LIMIT_ENTRY_DESIGN.md) ──
+    # Stamp-and-shadow phase of the owner-approved LIMIT-at-zone + TTL
+    # entry: while FSM_LIMIT_ENTRY_ENABLED is off, log per real dispatch
+    # whether the LIMIT would have filled instantly (dispatch price already
+    # inside the zone), rested, or had no zone (market-order semantics).
+    # Read this before activation — the expected picture is in_zone for the
+    # large majority, with the resting tail matching the signal book's
+    # EXPIRED_NO_FILL rate.  Zero behaviour change while dark.
+    try:
+        from config import (
+            FSM_LIMIT_ENTRY_ENABLED as _limit_on,
+            FSM_ENTRY_TTL_FALLBACK_MIN as _ttl_fallback,
+        )
+        if not _limit_on and _shadow_telemetry_on():
+            if entry_zone_low is not None and entry_zone_high is not None:
+                _px = current_price if current_price > 0 else entry_price
+                _in_zone = entry_zone_low <= _px <= entry_zone_high
+                _mode = "in_zone" if _in_zone else "would_rest"
+            else:
+                _mode = "market_semantics"
+            log.info(
+                "[SHADOW] FSM_LIMIT_ENTRY {} {} {} mode={} zone=[{},{}] "
+                "ttl_min={} — MARKET entry placed (flag off)",
+                signal_id, symbol, direction, _mode,
+                entry_zone_low, entry_zone_high,
+                valid_for_minutes or _ttl_fallback,
+            )
+    except Exception as _sh_exc:  # noqa: BLE001 — shadow must never block dispatch
+        log.debug("FSM_LIMIT_ENTRY shadow error (non-blocking): {}", _sh_exc)
 
     uids = _active_uids()
     if not uids:

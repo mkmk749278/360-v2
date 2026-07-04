@@ -1869,6 +1869,16 @@ SIGNAL_EXPIRY_ENABLED: bool = _safe_bool("SIGNAL_EXPIRY_ENABLED", "false")
 # EXPIRED_NO_FILL the moment its advertised validity lapses.
 ENTRY_FILL_WINDOW_ENFORCED: bool = _safe_bool("ENTRY_FILL_WINDOW_ENFORCED", "true")
 
+# FSM LIMIT-at-zone + TTL entry (S41, docs/FSM_LIMIT_ENTRY_DESIGN.md).
+# Owner-approved direction 2026-07-03 ("LIMIT at zone + TTL"); ships DARK.
+# While false, every real dispatch logs "[SHADOW] FSM_LIMIT_ENTRY" with the
+# would-be order mode (in_zone / would_rest / market_semantics) so activation
+# is decided on measured dispatch data.  The full PENDING_ENTRY machinery
+# (limit placement, SL-first fill handling, TTL sweep) activates with this
+# flag; until then entries remain MARKET-at-dispatch.
+FSM_LIMIT_ENTRY_ENABLED: bool = _safe_bool("FSM_LIMIT_ENTRY_ENABLED", "false")
+FSM_ENTRY_TTL_FALLBACK_MIN: int = _safe_int("FSM_ENTRY_TTL_FALLBACK_MIN", "15")
+
 # ---------------------------------------------------------------------------
 # Concurrency cap – DEPRECATED: replaced by per-channel cap above.
 # Kept for backwards-compatibility with any external tooling that imports it.
