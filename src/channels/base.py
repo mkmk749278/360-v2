@@ -284,6 +284,15 @@ class Signal:
     # Tells the user what order type to use (e.g. "LIMIT_ZONE", "MARKET")
     execution_type: str = "LIMIT_ZONE"
 
+    # ---- Cohort edge observability (STEP 1 shadow — observe only, no live decisions) ----
+    # Stamped by the scanner at emit. The cohort ranker reads this window for STEP 2.
+    # cohort_edge_key: "SETUP_CLASS/SIDE/REGIME_FAMILY/MACRO_DIR" composite key.
+    # cohort_edge_expectancy: Wilson-lower-bounded expectancy (% per trade); None = no history.
+    # cohort_edge_samples: count of resolved outcomes in this cohort at emit time.
+    cohort_edge_key: str = ""
+    cohort_edge_expectancy: Optional[float] = None
+    cohort_edge_samples: int = 0
+
     # ---- Delivery retry tracking (router-internal, not shown to users) ----
     _delivery_retries: int = 0
 

@@ -200,7 +200,7 @@ from src.volume_divergence import check_volume_divergence_gate
 from src.vwap import check_vwap_extension, compute_vwap
 from src.ai_engine import get_ai_insight
 from src.chart_patterns import detect_patterns, pattern_confidence_bonus, detect_all_patterns
-from src.stat_filter import StatisticalFilter
+from src.stat_filter import CohortEdgeStore, StatisticalFilter
 from src.pair_analyzer import compute_pair_signal_quality
 from src.suppression_telemetry import (
     SuppressionTracker,
@@ -234,6 +234,11 @@ _scoring_engine = SignalScoringEngine()
 # Statistical filter — tracks rolling win rates per (channel, pair, regime)
 # and suppresses or penalises signals from historically poor combinations.
 _stat_filter = StatisticalFilter()
+
+# Cohort edge store — STEP 1 observe-only data collection layer.
+# Tracks outcomes keyed by (setup_class, side, regime_family, btc_macro_dir).
+# Shadow-logs would-emit / would-suppress verdicts; no live decisions yet.
+_cohort_edge_store = CohortEdgeStore()
 
 # Order book spread cache TTL
 _SPREAD_CACHE_TTL: float = 30.0
@@ -6474,6 +6479,36 @@ class Scanner:
                 sig.soft_gate_flags = (_existing_flags + f",{_sf_reason}").lstrip(",")
         except Exception as _sf_exc:
             log.debug("stat_filter error for {} {} (fail open): {}", symbol, chan_name, _sf_exc)
+
+        # ── [SHADOW] COHORT_EDGE — STEP 1 observe-only, no behaviour change ──
+        # Compute cohort key (setup × side × regime_family × BTC-macro-dir),
+        # stamp it on the signal for perf attribution, and log the shadow verdict.
+        # No suppression or confidence change happens here — this data window is
+        # validated against realised P&L before STEP 2 activation.
+        try:
+            _btc_macro = self._get_btc_macro_dir_cached()
+            _macro_dir_str = str(_btc_macro.get("regime", "NEUTRAL"))
+            _c_verdict = _cohort_edge_store.shadow_verdict(
+                sig.setup_class, sig.direction.value, _regime_key, _macro_dir_str,
+            )
+            _c_key_tuple = _cohort_edge_store.cohort_key(
+                sig.setup_class, sig.direction.value, _regime_key, _macro_dir_str,
+            )
+            sig.cohort_edge_key = "/".join(_c_key_tuple)
+            sig.cohort_edge_samples = _cohort_edge_store.sample_count(
+                sig.setup_class, sig.direction.value, _regime_key, _macro_dir_str,
+            )
+            _c_exp = _cohort_edge_store.expectancy(
+                sig.setup_class, sig.direction.value, _regime_key, _macro_dir_str,
+            )
+            if _c_exp is not None:
+                sig.cohort_edge_expectancy = _c_exp
+            log.debug(
+                "[SHADOW] COHORT_EDGE {}/{}: {}",
+                symbol, chan_name, _c_verdict,
+            )
+        except Exception as _ce_exc:
+            log.debug("cohort_edge shadow error for {} {} (fail open): {}", symbol, chan_name, _ce_exc)
 
         # ── Pair Analysis Quality Gate ─────────────────────────────────────
         # Suppress signals from pairs with CRITICAL quality label (hit rate

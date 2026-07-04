@@ -15,6 +15,7 @@ from __future__ import annotations
 import pytest
 
 from src.stat_filter import (
+    CohortEdgeStore,
     RollingWinRateStore,
     SignalOutcome,
     StatisticalFilter,
@@ -289,3 +290,170 @@ def test_format_statstats_with_data():
     msg = sf.format_statstats()
     assert "BTCUSDT" in msg
     assert "360_SCALP" in msg
+
+
+# ===========================================================================
+# 9. CohortEdgeStore (STEP 1 — new correct-key outcome store)
+# ===========================================================================
+
+
+def _make_cohort_outcome(
+    setup_class: str = "SR_FLIP_RETEST",
+    side: str = "LONG",
+    regime: str = "TRENDING_UP",
+    macro_dir: str = "BULL",
+    won: bool = True,
+    pnl_pct: float = 1.5,
+) -> SignalOutcome:
+    return SignalOutcome(
+        signal_id="coh1",
+        channel="360_SCALP",
+        pair="BTCUSDT",
+        regime=regime,
+        setup_class=setup_class,
+        won=won,
+        pnl_pct=pnl_pct,
+        side=side,
+        macro_dir=macro_dir,
+    )
+
+
+def _fill_cohort(
+    store: CohortEdgeStore,
+    setup_class: str,
+    side: str,
+    regime: str,
+    macro_dir: str,
+    wins: int,
+    losses: int,
+) -> None:
+    for i in range(wins):
+        store.record(_make_cohort_outcome(
+            setup_class=setup_class, side=side, regime=regime,
+            macro_dir=macro_dir, won=True, pnl_pct=1.5,
+        ))
+    for i in range(losses):
+        store.record(_make_cohort_outcome(
+            setup_class=setup_class, side=side, regime=regime,
+            macro_dir=macro_dir, won=False, pnl_pct=-1.0,
+        ))
+
+
+def test_cohort_edge_store_fail_open_no_history():
+    """expectancy() must return None when below min_samples (fail-open)."""
+    store = CohortEdgeStore(window=30, min_samples=10)
+    # Record fewer than min_samples outcomes
+    _fill_cohort(store, "SR_FLIP_RETEST", "LONG", "TRENDING_UP", "BULL", wins=3, losses=3)
+    result = store.expectancy("SR_FLIP_RETEST", "LONG", "TRENDING_UP", "BULL")
+    assert result is None
+
+
+def test_cohort_edge_store_positive_expectancy():
+    """expectancy() must be positive for a high-win-rate cohort."""
+    store = CohortEdgeStore(window=30, min_samples=10)
+    _fill_cohort(store, "MOVER_TREND_PULLBACK", "LONG", "TRENDING_UP", "BULL", wins=12, losses=3)
+    exp = store.expectancy("MOVER_TREND_PULLBACK", "LONG", "TRENDING_UP", "BULL")
+    assert exp is not None
+    assert exp > 0.0
+
+
+def test_cohort_edge_store_negative_expectancy():
+    """expectancy() must be negative for a low-win-rate losing cohort."""
+    store = CohortEdgeStore(window=30, min_samples=10)
+    _fill_cohort(store, "SR_FLIP_RETEST", "LONG", "DECLINE", "DECLINE", wins=2, losses=13)
+    exp = store.expectancy("SR_FLIP_RETEST", "LONG", "DECLINE", "DECLINE")
+    assert exp is not None
+    assert exp < 0.0
+
+
+def test_cohort_edge_store_regime_family_quiet():
+    """QUIET, CHOPPY, LOW_VOL regimes must map to 'QUIET' family."""
+    store = CohortEdgeStore(window=30, min_samples=5)
+    _fill_cohort(store, "BREAKOUT_RETEST", "SHORT", "QUIET", "NEUTRAL", wins=4, losses=2)
+    # All three quiet-family regime labels should hit the same bucket
+    _fill_cohort(store, "BREAKOUT_RETEST", "SHORT", "CHOPPY", "NEUTRAL", wins=2, losses=1)
+    # Both should be in QUIET family — same key
+    n_quiet = store.sample_count("BREAKOUT_RETEST", "SHORT", "QUIET", "NEUTRAL")
+    n_choppy = store.sample_count("BREAKOUT_RETEST", "SHORT", "CHOPPY", "NEUTRAL")
+    assert n_quiet == n_choppy  # same bucket
+
+
+def test_cohort_edge_store_regime_family_active():
+    """Non-quiet regimes must map to 'ACTIVE' family, not conflate with QUIET."""
+    store = CohortEdgeStore(window=30, min_samples=5)
+    _fill_cohort(store, "BREAKOUT_RETEST", "LONG", "TRENDING_UP", "BULL", wins=5, losses=0)
+    _fill_cohort(store, "BREAKOUT_RETEST", "LONG", "QUIET", "BULL", wins=5, losses=0)
+    # The two regime families must be separate buckets
+    n_active = store.sample_count("BREAKOUT_RETEST", "LONG", "TRENDING_UP", "BULL")
+    n_quiet = store.sample_count("BREAKOUT_RETEST", "LONG", "QUIET", "BULL")
+    assert n_active == 5
+    assert n_quiet == 5
+
+
+def test_cohort_edge_store_shadow_verdict_no_history():
+    """shadow_verdict() must include 'no_history' when below min_samples."""
+    store = CohortEdgeStore(window=30, min_samples=10)
+    verdict = store.shadow_verdict("SR_FLIP_RETEST", "LONG", "TRENDING_UP", "BULL")
+    assert "no_history" in verdict
+    assert "would-emit" in verdict
+
+
+def test_cohort_edge_store_shadow_verdict_positive():
+    """shadow_verdict() must say 'would-emit' with edge for winning cohorts."""
+    store = CohortEdgeStore(window=30, min_samples=10)
+    _fill_cohort(store, "SR_FLIP_RETEST", "SHORT", "TRENDING_DOWN", "DECLINE", wins=12, losses=3)
+    verdict = store.shadow_verdict("SR_FLIP_RETEST", "SHORT", "TRENDING_DOWN", "DECLINE")
+    assert "would-emit" in verdict
+    assert "edge=" in verdict
+
+
+def test_cohort_edge_store_shadow_verdict_suppress():
+    """shadow_verdict() must say 'would-suppress' for negative-expectancy cohorts."""
+    store = CohortEdgeStore(window=30, min_samples=10)
+    _fill_cohort(store, "SR_FLIP_RETEST", "LONG", "DECLINE", "DECLINE", wins=1, losses=14)
+    verdict = store.shadow_verdict("SR_FLIP_RETEST", "LONG", "DECLINE", "DECLINE")
+    assert "would-suppress" in verdict
+
+
+def test_cohort_edge_store_sample_count():
+    """sample_count() must return correct count per cohort."""
+    store = CohortEdgeStore(window=30, min_samples=5)
+    _fill_cohort(store, "MOMENTUM_EXPANSION", "LONG", "TRENDING_UP", "BULL", wins=7, losses=3)
+    assert store.sample_count("MOMENTUM_EXPANSION", "LONG", "TRENDING_UP", "BULL") == 10
+    # Different side — separate cohort
+    assert store.sample_count("MOMENTUM_EXPANSION", "SHORT", "TRENDING_UP", "BULL") == 0
+
+
+def test_cohort_edge_store_all_stats():
+    """all_stats() must return data for all recorded cohorts."""
+    store = CohortEdgeStore(window=30, min_samples=5)
+    _fill_cohort(store, "MOVER_TREND_PULLBACK", "LONG", "TRENDING_UP", "BULL", wins=8, losses=2)
+    _fill_cohort(store, "SR_FLIP_RETEST", "SHORT", "DECLINE", "DECLINE", wins=2, losses=8)
+    stats = store.all_stats()
+    assert len(stats) == 2
+    keys = list(stats.keys())
+    assert any("MOVER_TREND_PULLBACK" in k for k in keys)
+    assert any("SR_FLIP_RETEST" in k for k in keys)
+
+
+def test_cohort_edge_store_window_caps():
+    """Rolling window must cap records at the configured window size."""
+    store = CohortEdgeStore(window=10, min_samples=5)
+    for i in range(20):
+        store.record(_make_cohort_outcome(won=(i % 2 == 0), pnl_pct=1.0 if i % 2 == 0 else -1.0))
+    assert store.sample_count("SR_FLIP_RETEST", "LONG", "TRENDING_UP", "BULL") == 10
+
+
+def test_signal_outcome_backward_compat_defaults():
+    """Legacy callers omitting side/macro_dir must still construct SignalOutcome."""
+    outcome = SignalOutcome(
+        signal_id="legacy",
+        channel="360_SCALP",
+        pair="ETHUSDT",
+        regime="QUIET",
+        setup_class="LIQUIDITY_SWEEP_REVERSAL",
+        won=True,
+        pnl_pct=1.2,
+    )
+    assert outcome.side == ""
+    assert outcome.macro_dir == "NEUTRAL"
