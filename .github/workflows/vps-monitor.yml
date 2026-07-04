@@ -1,6 +1,10 @@
 name: 🔍 VPS Runtime Audit / Truth Report
 
 on:
+  schedule:
+    # 00:30 UTC = 06:00 IST — daily runtime truth report ahead of the
+    # morning review, so fresh data is ready without a manual dispatch.
+    - cron: "30 0 * * *"
   workflow_dispatch:
     inputs:
       lookback_hours:
@@ -47,6 +51,19 @@ jobs:
     name: Build runtime truth report
     runs-on: ubuntu-latest
     timeout-minutes: 15
+
+    # Normalise parameters so scheduled runs — which carry no dispatch
+    # inputs — fall back to the same defaults an operator gets on a manual
+    # run.  Booleans are guarded on ``event_name == 'schedule'`` rather than
+    # ``||`` so an explicit ``false`` from a manual dispatch is still honoured.
+    env:
+      LOOKBACK_HOURS: ${{ inputs.lookback_hours || '24' }}
+      COMPARE_PREVIOUS_WINDOW: ${{ github.event_name == 'schedule' && 'true' || inputs.compare_previous_window }}
+      CHANNEL: ${{ inputs.channel || '360_SCALP' }}
+      SYMBOL_FILTER: ${{ inputs.symbol_filter }}
+      SETUP_FILTER: ${{ inputs.setup_filter }}
+      INCLUDE_RAW_JSON: ${{ github.event_name == 'schedule' && 'true' || inputs.include_raw_json }}
+      INCLUDE_RECENT_LOGS: ${{ github.event_name == 'schedule' && 'false' || inputs.include_recent_logs }}
 
     steps:
       - name: Mask secrets
@@ -104,10 +121,6 @@ jobs:
               "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/360-monitor-scripts/"
 
       - name: Collect structured runtime inputs from VPS
-        env:
-          LOOKBACK_HOURS: ${{ inputs.lookback_hours }}
-          COMPARE_PREVIOUS_WINDOW: ${{ inputs.compare_previous_window }}
-          INCLUDE_RECENT_LOGS: ${{ inputs.include_recent_logs }}
         run: |
           set -euo pipefail
           mkdir -p monitor/raw monitor/report
@@ -196,13 +209,6 @@ jobs:
           echo "[engine_previous.log] Lines collected: $(wc -l < monitor/raw/engine_previous.log)" >&2
 
       - name: Build truth report artifacts
-        env:
-          LOOKBACK_HOURS: ${{ inputs.lookback_hours }}
-          COMPARE_PREVIOUS_WINDOW: ${{ inputs.compare_previous_window }}
-          CHANNEL: ${{ inputs.channel }}
-          SYMBOL_FILTER: ${{ inputs.symbol_filter }}
-          SETUP_FILTER: ${{ inputs.setup_filter }}
-          INCLUDE_RAW_JSON: ${{ inputs.include_raw_json }}
         run: |
           set -euo pipefail
           ARGS=(
@@ -260,7 +266,7 @@ jobs:
           path: monitor/report
 
       - name: Upload raw extracts
-        if: ${{ inputs.include_raw_json }}
+        if: ${{ env.INCLUDE_RAW_JSON == 'true' }}
         uses: actions/upload-artifact@v4
         with:
           name: runtime-truth-raw-${{ github.run_id }}
