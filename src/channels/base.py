@@ -667,6 +667,15 @@ def build_channel_signal(
         sig.entry_zone_low = round(zone_center - zone_width * (1.0 - bias), 8)
         sig.entry_zone_high = round(zone_center + zone_width * bias, 8)
 
+    # All evaluators pass close=current_price, so zone_center ≈ close and the
+    # entry price is inside [zone_low, zone_high] by construction.  Mark as
+    # filled immediately so auto-execute and SL/TP monitoring start from
+    # dispatch rather than waiting for a candle-overlap check that races with
+    # intrabar price movement.  Evaluators that genuinely need "wait for zone
+    # fill" semantics (limit-order entry at a future level, entry != close)
+    # must set entry_zone_filled = False explicitly after this call.
+    sig.entry_zone_filled = True
+
     # Set confidence_decay_rate based on regime (item 19)
     regime_upper = regime.upper() if regime else ""
     if regime_upper == "VOLATILE":
