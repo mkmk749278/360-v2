@@ -205,9 +205,13 @@ class TelemetryCollector:
     async def _check_no_signal_watchdog(self) -> None:
         """Fire an admin alert when no new signals have been seen for too long.
 
-        The alert only fires when *both* conditions hold:
-        1. No signal has been recorded for ``NO_SIGNAL_ALERT_THRESHOLD_SECONDS``.
-        2. The WebSocket is currently unhealthy (``ws_healthy=False``).
+        The alert fires when a drought exceeds ``NO_SIGNAL_ALERT_THRESHOLD_SECONDS``,
+        **regardless of WebSocket health**. The previous ``ws_healthy=False``
+        gate was a blind spot: the most dangerous droughts — a circuit-breaker
+        halt or a wedged scan loop — occur while the WebSocket is perfectly
+        healthy, so gating on WS health silently suppressed exactly the alerts
+        that mattered (2026-07-06: a 6h zero-signal halt fired no alert). WS
+        health is now reported in the message rather than used to gate it.
 
         A cooldown of ``NO_SIGNAL_ALERT_COOLDOWN_SECONDS`` prevents repeated
         alerts for the same incident.  Runs inside the telemetry loop so it
@@ -220,16 +224,18 @@ class TelemetryCollector:
             drought_s = now - self._last_new_signal_time
             if drought_s < NO_SIGNAL_ALERT_THRESHOLD_SECONDS:
                 return
-            if self._ws_healthy:
-                return
             if now - self._last_no_signal_alert_time < NO_SIGNAL_ALERT_COOLDOWN_SECONDS:
                 return
             self._last_no_signal_alert_time = now
             minutes = int(drought_s / 60)
-            msg = (
-                f"⚠️ No new signals for {minutes} minutes. "
-                "WebSocket unhealthy. Consider /restart."
-            )
+            if self._ws_healthy:
+                cause = (
+                    "WebSocket healthy — likely a circuit-breaker halt or a "
+                    "wedged scan loop. Check breaker status / scan loop."
+                )
+            else:
+                cause = "WebSocket unhealthy. Consider /restart."
+            msg = f"⚠️ No new signals for {minutes} minutes. {cause}"
             log.warning("No-signal watchdog: %s", msg)
             await self._admin_alert(msg)
         except Exception as exc:

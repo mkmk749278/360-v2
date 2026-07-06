@@ -205,6 +205,101 @@ class TestCircuitBreakerAutoRecovery:
         assert cb._daily_drawdown_pct() == pytest.approx(2.2, abs=0.01)
 
 
+class TestCircuitBreakerBoundedRecovery:
+    """CIRCUIT_BREAKER_RESUME_AFTER_COOLDOWN — resume on cooldown expiry with a
+    fresh monitoring window, instead of holding in recovery_pending until the
+    rolling drawdown ages out (2026-07-06 incident fix)."""
+
+    def test_drawdown_trip_holds_for_hours_when_flag_off(self, monkeypatch):
+        # Default behaviour: a drawdown trip stays paused well past cooldown.
+        now = 40_000.0
+        monkeypatch.setattr("src.circuit_breaker.time.monotonic", lambda: now)
+        cb = CircuitBreaker(
+            max_consecutive_sl=100,
+            max_hourly_sl=100,
+            max_daily_drawdown_pct=5.0,
+            cooldown_seconds=900,
+            resume_after_cooldown=False,
+        )
+        cb.record_outcome("a", hit_sl=True, pnl_pct=-3.0)
+        now += 1.0
+        cb.record_outcome("b", hit_sl=True, pnl_pct=-3.0)
+        assert cb.is_tripped() is True
+
+        # 1 hour later — cooldown long gone, but drawdown still in the 24h
+        # window, so the breaker is still halted.
+        now += 3600.0
+        assert cb.is_tripped() is True
+        assert "AUTO-RESUME PENDING" in cb.status_text()
+
+    def test_drawdown_trip_resumes_after_cooldown_when_flag_on(self, monkeypatch):
+        now = 50_000.0
+        monkeypatch.setattr("src.circuit_breaker.time.monotonic", lambda: now)
+        cb = CircuitBreaker(
+            max_consecutive_sl=100,
+            max_hourly_sl=100,
+            max_daily_drawdown_pct=5.0,
+            cooldown_seconds=900,
+            resume_after_cooldown=True,
+        )
+        cb.record_outcome("a", hit_sl=True, pnl_pct=-3.0)
+        now += 1.0
+        cb.record_outcome("b", hit_sl=True, pnl_pct=-3.0)
+        assert cb.is_tripped() is True
+
+        # Still within cooldown → still halted.
+        now += 899.0
+        assert cb.is_tripped() is True
+
+        # Cooldown elapsed → resumes with a fresh window despite the drawdown
+        # that would otherwise hold it for up to 24h.
+        now += 2.0
+        assert cb.is_tripped() is False
+        assert "RESUMED" in cb.status_text()
+
+    def test_resumed_breaker_retrips_if_losses_continue(self, monkeypatch):
+        # Bounded recovery must not be a free pass: fresh losses re-trip it.
+        now = 60_000.0
+        monkeypatch.setattr("src.circuit_breaker.time.monotonic", lambda: now)
+        cb = CircuitBreaker(
+            max_consecutive_sl=2,
+            max_hourly_sl=100,
+            max_daily_drawdown_pct=100.0,
+            cooldown_seconds=900,
+            resume_after_cooldown=True,
+        )
+        cb.record_outcome("a", hit_sl=True, pnl_pct=-1.0)
+        cb.record_outcome("b", hit_sl=True, pnl_pct=-1.0)
+        assert cb.is_tripped() is True
+
+        now += 901.0
+        assert cb.is_tripped() is False  # resumed on cooldown expiry
+
+        # Two fresh consecutive losses after resume → trips again.
+        cb.record_outcome("c", hit_sl=True, pnl_pct=-1.0)
+        cb.record_outcome("d", hit_sl=True, pnl_pct=-1.0)
+        assert cb.is_tripped() is True
+
+
+class TestCircuitBreakerStatusSnapshot:
+    def test_snapshot_healthy_shape(self):
+        cb = CircuitBreaker()
+        snap = cb.status_snapshot()
+        assert snap["tripped"] is False
+        assert snap["max_daily_drawdown_pct"] == cb.max_daily_drawdown_pct
+        assert "cooldown_remaining_s" in snap
+        assert snap["resume_after_cooldown"] is False
+
+    def test_snapshot_reports_trip_reason(self):
+        cb = CircuitBreaker(max_consecutive_sl=2)
+        cb.record_outcome("a", hit_sl=True, pnl_pct=-0.5)
+        cb.record_outcome("b", hit_sl=True, pnl_pct=-0.5)
+        snap = cb.status_snapshot()
+        assert snap["tripped"] is True
+        assert snap["trip_reason"] != ""
+        assert snap["cooldown_remaining_s"] > 0
+
+
 class TestCircuitBreakerEdgeCases:
     def test_no_outcomes_not_tripped(self):
         cb = CircuitBreaker()

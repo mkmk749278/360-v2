@@ -1913,6 +1913,14 @@ class Scanner:
             # Skip scanning when circuit breaker is tripped
             if self.circuit_breaker and self.circuit_breaker.is_tripped():
                 log.warning("Circuit breaker tripped — skipping scan cycle")
+                # The loop IS alive during a protective halt — keep the
+                # heartbeat fresh so a stale heartbeat unambiguously means a
+                # real hang, and publish the breaker state so the external
+                # monitor can report "halted by breaker" instead of "unhealthy".
+                # (2026-07-06: a 6h halt read as a crash because the skip
+                # bypassed the end-of-cycle heartbeat touch.)
+                self._touch_heartbeat()
+                self._write_breaker_status()
                 await asyncio.sleep(5)
                 continue
 
@@ -2330,6 +2338,7 @@ class Scanner:
             # Touch heartbeat file so healthcheck knows the scanner is alive
             # (FINDING-024).
             self._touch_heartbeat()
+            self._write_breaker_status()
 
             if not self.force_scan:
                 await asyncio.sleep(1)
@@ -2343,6 +2352,11 @@ class Scanner:
         os.path.dirname(os.path.dirname(os.path.dirname(__file__))), "data", "scanner_heartbeat"
     )
 
+    _BREAKER_STATUS_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(__file__))),
+        "data", "circuit_breaker_status.json",
+    )
+
     def _touch_heartbeat(self) -> None:
         """Update the heartbeat file timestamp so the healthcheck can verify
         that the scanner loop is actively running (FINDING-024)."""
@@ -2351,6 +2365,26 @@ class Scanner:
             with open(self._HEARTBEAT_PATH, "w") as fh:
                 fh.write(str(time.time()))
         except OSError:
+            pass  # Best-effort; don't crash the scan loop
+
+    def _write_breaker_status(self) -> None:
+        """Publish a small circuit-breaker snapshot to the data volume so the
+        external monitor can distinguish a *protective halt* from a *hung loop*.
+
+        Local file write only — no network — so it is safe on the scan hot path
+        (cost-discipline compliant). Best-effort; never blocks or crashes the
+        loop. Added after the 2026-07-06 incident where a 6h breaker halt was
+        indistinguishable from a crash to the monitor.
+        """
+        if not self.circuit_breaker:
+            return
+        try:
+            snap = self.circuit_breaker.status_snapshot()
+            snap["updated_at"] = time.time()
+            os.makedirs(os.path.dirname(self._BREAKER_STATUS_PATH), exist_ok=True)
+            with open(self._BREAKER_STATUS_PATH, "w") as fh:
+                json.dump(snap, fh)
+        except (OSError, TypeError, ValueError):
             pass  # Best-effort; don't crash the scan loop
 
     def _is_in_global_cooldown(self, symbol: str, direction: str) -> bool:
