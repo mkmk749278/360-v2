@@ -93,6 +93,7 @@ from config import (
     CIRCUIT_BREAKER_MAX_DAILY_DRAWDOWN_PCT,
     CIRCUIT_BREAKER_COOLDOWN_SECONDS,
     CIRCUIT_BREAKER_STARTUP_GRACE_SECONDS,
+    CIRCUIT_BREAKER_RESUME_AFTER_COOLDOWN,
     CHANNEL_TELEGRAM_MAP,
     ONCHAIN_API_KEY,
     PERFORMANCE_TRACKER_PATH,
@@ -257,6 +258,7 @@ class CryptoSignalEngine:
             max_daily_drawdown_pct=CIRCUIT_BREAKER_MAX_DAILY_DRAWDOWN_PCT,
             cooldown_seconds=CIRCUIT_BREAKER_COOLDOWN_SECONDS,
             startup_grace_seconds=CIRCUIT_BREAKER_STARTUP_GRACE_SECONDS,
+            resume_after_cooldown=CIRCUIT_BREAKER_RESUME_AFTER_COOLDOWN,
             alert_callback=self.telegram.send_admin_alert,
         )
 

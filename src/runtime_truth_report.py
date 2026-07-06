@@ -1008,6 +1008,23 @@ def summarize_runtime_health(
         heartbeat_age_sec = int(match.group(1))
         heartbeat_warning = heartbeat_age_sec > 120
 
+    # Circuit-breaker state (published by the scanner every cycle, even while
+    # halted). A tripped breaker is a *deliberate protective pause*, not a
+    # crash — surface it distinctly so a stale heartbeat during a halt is never
+    # again misread as an outage (2026-07-06 incident).
+    breaker_tripped = False
+    breaker_reason = ""
+    breaker_cooldown_remaining: Optional[float] = None
+    cb_match = re.search(
+        r"Circuit breaker:\s*TRIPPED.*?reason=\"([^\"]*)\".*?"
+        r"cooldown_remaining=([\d.]+)s",
+        heartbeat_text or "",
+    )
+    if cb_match:
+        breaker_tripped = True
+        breaker_reason = cb_match.group(1)
+        breaker_cooldown_remaining = float(cb_match.group(2))
+
     latest_record_ts = max(
         [float(r.get("timestamp")) for r in records if isinstance(r.get("timestamp"), (int, float))],
         default=None,
@@ -1019,7 +1036,12 @@ def summarize_runtime_health(
     health_status = str(runtime_health.get("health", "unknown"))
 
     overall = "healthy"
-    if not running or health_status == "unhealthy":
+    if breaker_tripped:
+        # Deliberate protective halt — distinct from a crash. Ranks above the
+        # generic unhealthy/stale buckets because it fully explains the
+        # stale heartbeat and zero-signal window.
+        overall = "halted_by_breaker"
+    elif not running or health_status == "unhealthy":
         overall = "unhealthy"
     elif heartbeat_warning or not fresh_records:
         overall = "stale"
@@ -1033,6 +1055,9 @@ def summarize_runtime_health(
         "heartbeat_warning": heartbeat_warning,
         "latest_record_age_sec": latest_record_age_sec,
         "records_fresh": fresh_records,
+        "breaker_tripped": breaker_tripped,
+        "breaker_trip_reason": breaker_reason,
+        "breaker_cooldown_remaining_s": breaker_cooldown_remaining,
     }
 
 
@@ -1406,6 +1431,15 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         f"- Engine running: `{runtime.get('running')}` (status={runtime.get('status')}, health={runtime.get('health')})",
         f"- Heartbeat age: `{runtime.get('heartbeat_age_sec')}` sec (warning={runtime.get('heartbeat_warning')})",
         f"- Latest performance record age: `{runtime.get('latest_record_age_sec')}` sec",
+        (
+            "- ⛔ **HALTED BY LOSS CIRCUIT BREAKER** — "
+            f"reason: {runtime.get('breaker_trip_reason') or 'unknown'}; "
+            f"cooldown remaining: {runtime.get('breaker_cooldown_remaining_s')}s. "
+            "This is a deliberate protective pause (not a crash); the stale "
+            "heartbeat and zero-signal window are expected while halted."
+            if runtime.get("breaker_tripped")
+            else "- Circuit breaker: healthy (not halted)"
+        ),
         "",
         "## Path funnel truth",
         "| Path/Setup | Attempts | No-signal | Generated | Scanner prep | Gated | Emitted | Classification |",

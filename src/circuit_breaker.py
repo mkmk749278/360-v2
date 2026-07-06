@@ -65,6 +65,7 @@ class CircuitBreaker:
         per_symbol_daily_drawdown_pct: float = _DEFAULT_PER_SYMBOL_DAILY_DRAWDOWN_PCT,
         alert_callback: Optional[Callable[..., Any]] = None,
         startup_grace_seconds: int = 0,
+        resume_after_cooldown: bool = False,
     ) -> None:
         self.max_consecutive_sl = max_consecutive_sl
         self.max_hourly_sl = max_hourly_sl
@@ -74,6 +75,12 @@ class CircuitBreaker:
         self.per_symbol_cooldown_seconds = per_symbol_cooldown_seconds
         self.per_symbol_daily_drawdown_pct = per_symbol_daily_drawdown_pct
         self._alert_callback = alert_callback
+        # Bounded-recovery mode (opt-in). When True, the breaker resumes on
+        # cooldown expiry with a fresh monitoring window instead of holding in
+        # ``recovery_pending`` until the rolling losses age out. See
+        # CIRCUIT_BREAKER_RESUME_AFTER_COOLDOWN. Default False preserves the
+        # conservative "wait until losses normalize" behaviour.
+        self._resume_after_cooldown = resume_after_cooldown
 
         # Rolling outcome history (keep last 1000 entries)
         self._outcomes: Deque[OutcomeRecord] = deque(maxlen=1000)
@@ -229,6 +236,30 @@ class CircuitBreaker:
         self._per_symbol_consecutive_sl[symbol] = 0
         return False
 
+    def status_snapshot(self) -> Dict[str, Any]:
+        """Return a small, JSON-safe snapshot of live breaker state.
+
+        Written to the data volume by the scanner each loop so an external
+        monitor can distinguish a *protective halt* from a *hung loop* — the
+        two were indistinguishable in the 2026-07-06 silent-halt incident.
+        Cheap and side-effect-light (only advances cooldown/recovery, same as
+        ``is_tripped``); safe to call on the scan hot path.
+        """
+        self._refresh_state()
+        return {
+            "tripped": self._tripped,
+            "status_mode": self._status_mode,
+            "trip_reason": self._trip_reason,
+            "cooldown_remaining_s": round(self._cooldown_remaining(), 1),
+            "consecutive_sl": self._consecutive_sl,
+            "max_consecutive_sl": self.max_consecutive_sl,
+            "hourly_sl": self._hourly_sl_count(),
+            "max_hourly_sl": self.max_hourly_sl,
+            "daily_drawdown_pct": round(self._daily_drawdown_pct(), 2),
+            "max_daily_drawdown_pct": self.max_daily_drawdown_pct,
+            "resume_after_cooldown": self._resume_after_cooldown,
+        }
+
     def reset(self) -> None:
         """Manually reset the circuit breaker and clear all rolling state."""
         resumed_at = time.monotonic()
@@ -359,6 +390,22 @@ class CircuitBreaker:
             return
 
         self._consecutive_sl = 0
+
+        # Bounded-recovery mode: resume on cooldown expiry with a fresh
+        # monitoring window. Without this, a drawdown/hourly trip stays in
+        # ``recovery_pending`` until the pre-trip losses age out of their
+        # rolling window — but the halt itself blocks any new (offsetting)
+        # outcomes, so recovery is starved and the pause can run for hours.
+        # ``_resume`` resets ``_monitoring_started_at`` to now, so the rolling
+        # hourly/drawdown windows restart clean and re-trip immediately if
+        # losses genuinely continue.
+        if self._resume_after_cooldown:
+            self._resume(
+                "Cooldown elapsed; resumed with a fresh monitoring window "
+                "(bounded-recovery mode)."
+            )
+            return
+
         if self._loss_conditions_active():
             self._status_mode = "recovery_pending"
             return

@@ -1688,6 +1688,19 @@ CIRCUIT_BREAKER_STARTUP_GRACE_SECONDS: int = int(
     os.getenv("CIRCUIT_BREAKER_STARTUP_GRACE_SECONDS", "180")
 )
 
+# Bounded-recovery mode (DARK-FLAG, default OFF — owner activates after sign-off).
+# When a trip is driven by the rolling daily-drawdown (or hourly-SL) gate, the
+# breaker otherwise stays in ``recovery_pending`` until those losses age out of
+# their rolling window (up to 24h). Because a halt stops all new outcomes, it
+# starves its own recovery — a "900s cooldown" can become a multi-hour hold
+# (2026-07-06 incident: 6h silent halt). When this is enabled, the breaker
+# resumes on cooldown expiry with a fresh monitoring window, so the halt is a
+# predictable cooldown-length pause. Tradeoff: it "forgets" the drawdown sooner
+# (less conservative) — hence default OFF and owner-gated activation.
+CIRCUIT_BREAKER_RESUME_AFTER_COOLDOWN: bool = _safe_bool(
+    "CIRCUIT_BREAKER_RESUME_AFTER_COOLDOWN", "false"
+)
+
 # ---------------------------------------------------------------------------
 # Thesis-based cooldown: after an SL hit, suppress the same (symbol, channel,
 # direction, setup_class) tuple for a much longer period.
