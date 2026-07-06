@@ -1,0 +1,161 @@
+name: 🫀 VPS Liveness Watch
+
+# Lightweight hourly probe that catches an engine that has stopped producing
+# signals — whether from a crash, a wedged scan loop, or a *protective loss
+# circuit-breaker halt* — and pages the owner in-region by filing an
+# ``auto-detected`` GitHub issue. Telegram alerts are dead in-region, so this
+# is the in-region alert path (2026-07-06 incident: a 6h breaker halt went
+# unnoticed until the next morning). Deliberately minimal: two short remote
+# calls, no log pull, no truth report — that heavy audit stays on its own
+# daily schedule in vps-monitor.yml.
+
+on:
+  schedule:
+    - cron: "0 * * * *"   # hourly, on the hour (UTC)
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: vps-liveness
+  cancel-in-progress: false
+
+jobs:
+  liveness:
+    name: Probe engine liveness + breaker state
+    runs-on: ubuntu-latest
+    # Generous over the summed per-command timeouts below; those guards are the
+    # real protection (a hung docker exec can't sink the run — see #698).
+    timeout-minutes: 8
+    steps:
+      - name: Mask secrets
+        run: |
+          echo "::add-mask::${{ secrets.VPS_HOST }}"
+          echo "::add-mask::${{ secrets.VPS_USER }}"
+          echo "::add-mask::${{ secrets.VPS_SSH_KEY }}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Write SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/vps_key
+          chmod 600 ~/.ssh/vps_key
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Stage heartbeat probe on VPS
+        run: |
+          timeout -k 10 45 ssh -i ~/.ssh/vps_key \
+              -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+              'mkdir -p /tmp/360-liveness'
+          timeout -k 10 45 scp -i ~/.ssh/vps_key \
+              -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+              scripts/monitor_heartbeat.py \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/360-liveness/"
+
+      - name: Probe engine
+        run: |
+          mkdir -p probe
+          # Container state (running / status / health). A hung docker exec is
+          # bounded by the timeout guard and falls back to an unreachable marker.
+          timeout -k 10 45 ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "docker inspect 360scalp-v2-engine --format='{\"running\":{{.State.Running}},\"status\":\"{{.State.Status}}\",\"health\":\"{{if .State.Health}}{{.State.Health.Status}}{{else}}unknown{{end}}\"}'" \
+            > probe/runtime_health.json \
+            || echo '{"running":false,"status":"unreachable","health":"unknown"}' > probe/runtime_health.json
+
+          # Scanner heartbeat age + circuit-breaker state. monitor_heartbeat.py
+          # prints the breaker line only on engine builds that publish it
+          # (post-observability); the parser below treats its absence as
+          # "unknown" and still catches a stale heartbeat.
+          timeout -k 10 45 ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+            "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "cat /tmp/360-liveness/monitor_heartbeat.py | docker exec -i 360scalp-v2-engine python3" \
+            > probe/heartbeat.txt \
+            || echo 'Heartbeat unavailable' > probe/heartbeat.txt
+
+          echo "----- runtime_health.json -----"; cat probe/runtime_health.json
+          echo "----- heartbeat.txt -----"; cat probe/heartbeat.txt
+
+      - name: Evaluate and page owner on problems
+        uses: actions/github-script@v7
+        env:
+          # Alert if the scanner heartbeat is older than this. Normal cadence is
+          # ~15s; 600s means the scan loop has completed nothing for 10 min —
+          # a genuine hang or (on pre-observability builds) a breaker halt.
+          STALE_HEARTBEAT_SEC: "600"
+        with:
+          script: |
+            const fs = require('fs');
+            const { owner, repo } = context.repo;
+            const MARKER = '<!-- vps-liveness-watch -->';
+            const TITLE = '[auto-detected] Engine liveness alert';
+            const staleLimit = parseInt(process.env.STALE_HEARTBEAT_SEC, 10);
+
+            const hb = fs.readFileSync('probe/heartbeat.txt', 'utf8');
+            let rh;
+            try { rh = JSON.parse(fs.readFileSync('probe/runtime_health.json', 'utf8')); }
+            catch { rh = { running: false, status: 'unparseable', health: 'unknown' }; }
+
+            const ageMatch = hb.match(/Heartbeat age:\s*(\d+)s/);
+            const age = ageMatch ? parseInt(ageMatch[1], 10) : null;
+            const cbMatch = hb.match(/Circuit breaker:\s*TRIPPED[^\n]*reason="([^"]*)"[^\n]*cooldown_remaining=([\d.]+)s/);
+
+            const problems = [];
+            if (!rh.running) problems.push(`engine container not running (status=${rh.status})`);
+            if (cbMatch) problems.push(`loss circuit breaker TRIPPED — ${cbMatch[1]} (cooldown ${cbMatch[2]}s)`);
+            if (age === null && rh.running) problems.push('scanner heartbeat unreadable');
+            else if (age !== null && age > staleLimit) problems.push(`scanner heartbeat stale (${age}s > ${staleLimit}s) — scan loop halted or hung`);
+
+            const now = new Date().toISOString();
+            const existing = (await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'auto-detected', per_page: 100,
+            })).data.find(i => (i.body || '').includes(MARKER));
+
+            if (problems.length > 0) {
+              const body = [
+                MARKER,
+                `**Engine liveness alert** — hourly watch, ${now}`,
+                '',
+                ...problems.map(p => `- ⛔ ${p}`),
+                '',
+                '<details><summary>probe output</summary>',
+                '',
+                '```',
+                `runtime: ${JSON.stringify(rh)}`,
+                hb.trim(),
+                '```',
+                '</details>',
+                '',
+                'If this is a loss-breaker halt: `docker exec 360scalp-v2-redis redis-cli GET circuit_breaker:state` to read the reason; if spurious, `DEL circuit_breaker:state` + `docker restart 360scalp-v2-engine`. Background: #699.',
+              ].join('\n');
+              if (existing) {
+                await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+                core.setFailed(`Liveness alert (updated #${existing.number}): ${problems.join('; ')}`);
+              } else {
+                const created = await github.rest.issues.create({ owner, repo, title: TITLE, labels: ['auto-detected'], body });
+                core.setFailed(`Liveness alert (opened #${created.data.number}): ${problems.join('; ')}`);
+              }
+            } else if (existing) {
+              // Self-heal: engine is healthy again → close the open alert.
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `${MARKER}\n✅ Recovered at ${now} — engine running, heartbeat fresh, breaker healthy. Auto-closing.`,
+              });
+              await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+              core.info(`Recovered — closed #${existing.number}`);
+            } else {
+              core.info('Engine healthy — no liveness problems detected.');
+            }
+
+      - name: Clean up
+        if: always()
+        run: |
+          timeout -k 5 20 ssh -i ~/.ssh/vps_key -o ConnectTimeout=10 -o StrictHostKeyChecking=no \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+              'rm -rf /tmp/360-liveness' 2>/dev/null || true
+          rm -f ~/.ssh/vps_key
