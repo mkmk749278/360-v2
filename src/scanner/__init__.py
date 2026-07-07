@@ -214,6 +214,7 @@ from src.suppression_telemetry import (
     REASON_LIFESPAN,
     REASON_CONFIDENCE,
     REASON_PAIR_ANALYSIS,
+    REASON_COHORT_EDGE,
 )
 
 # --- PR 01-08 new module imports ------------------------------------------
@@ -4313,6 +4314,23 @@ class Scanner:
 
     def _populate_signal_context(self, sig: Any, volume_24h: float, ctx: ScanContext) -> None:
         sig.market_phase = ctx.market_state.value
+        if ctx.regime_context is None:
+            # No regime context = the classifier had nothing to classify with.
+            # Previously this left entry_regime/market_phase EMPTY, which the
+            # ops Profit page rendered as "UNKNOWN" — hiding our single most
+            # profitable cohort (7d study: empty-regime signals +26.3% vs
+            # −26.1% for stamped ones). Almost always this is a fresh listing
+            # / newly-promoted pair whose candle history is too short, so name
+            # it: NEW_LISTING when the 1h history is thin, UNCLASSIFIED for
+            # the rare established pair the classifier skipped.
+            try:
+                _c1h = ctx.candles.get("1h") if ctx.candles else None
+                _hist_1h = len((_c1h or {}).get("close", []) or [])
+                _label = "NEW_LISTING" if _hist_1h < 30 else "UNCLASSIFIED"
+            except (TypeError, AttributeError):
+                _label = "UNCLASSIFIED"
+            sig.entry_regime = _label
+            sig.market_phase = _label
         if ctx.regime_context is not None:
             rc = ctx.regime_context
             sig.entry_regime = rc.label  # string assignment, cannot raise — set before float() calls
@@ -6514,35 +6532,53 @@ class Scanner:
         except Exception as _sf_exc:
             log.debug("stat_filter error for {} {} (fail open): {}", symbol, chan_name, _sf_exc)
 
-        # ── [SHADOW] COHORT_EDGE — STEP 1 observe-only, no behaviour change ──
-        # Compute cohort key (setup × side × regime_family × BTC-macro-dir),
-        # stamp it on the signal for perf attribution, and log the shadow verdict.
-        # No suppression or confidence change happens here — this data window is
-        # validated against realised P&L before STEP 2 activation.
+        # ── COHORT_EDGE gate — STEP 2 ACTIVE (owner-approved 2026-07-07) ──
+        # Compute the cohort key (setup × side × regime_family × BTC-macro-dir),
+        # stamp it for perf attribution, then SUPPRESS when the cohort's
+        # measured live expectancy is negative with enough samples.  This is
+        # the fix for the score-band inversion (75+ confidence band ran
+        # −0.107%/trade vs +0.088% for 65–70 in the 7d study): the composite
+        # score measures pattern conformity; this gate measures whether the
+        # cohort has actually been making money.  Fail-open on no history and
+        # on any error.  Thresholds are ops-panel runtime tunables.
         try:
+            from src import runtime_tunables as _rt
             _btc_macro = self._get_btc_macro_dir_cached()
             _macro_dir_str = str(_btc_macro.get("regime", "NEUTRAL"))
-            _c_verdict = _cohort_edge_store.shadow_verdict(
-                sig.setup_class, sig.direction.value, _regime_key, _macro_dir_str,
-            )
             _c_key_tuple = _cohort_edge_store.cohort_key(
                 sig.setup_class, sig.direction.value, _regime_key, _macro_dir_str,
             )
             sig.cohort_edge_key = "/".join(_c_key_tuple)
-            sig.cohort_edge_samples = _cohort_edge_store.sample_count(
+            _c_samples = _cohort_edge_store.sample_count(
                 sig.setup_class, sig.direction.value, _regime_key, _macro_dir_str,
             )
+            sig.cohort_edge_samples = _c_samples
             _c_exp = _cohort_edge_store.expectancy(
                 sig.setup_class, sig.direction.value, _regime_key, _macro_dir_str,
             )
             if _c_exp is not None:
                 sig.cohort_edge_expectancy = _c_exp
-            log.debug(
-                "[SHADOW] COHORT_EDGE {}/{}: {}",
-                symbol, chan_name, _c_verdict,
-            )
+            if (
+                _rt.get("cohort_edge_gate_enabled")
+                and _c_exp is not None
+                and _c_samples >= int(_rt.get("cohort_edge_gate_min_n"))
+                and _c_exp <= float(_rt.get("cohort_edge_suppress_below"))
+            ):
+                log.info(
+                    "COHORT_EDGE suppressed {}/{}: edge={:.3f}%/trade n={} "
+                    "key={} (measured negative expectancy)",
+                    symbol, chan_name, _c_exp, _c_samples, sig.cohort_edge_key,
+                )
+                self.suppression_tracker.record(SuppressionEvent(
+                    symbol=symbol,
+                    channel=chan_name,
+                    reason=REASON_COHORT_EDGE,
+                    regime=_regime_key,
+                    would_be_confidence=sig.confidence,
+                ))
+                return _reject("filtered", cross_verified)
         except Exception as _ce_exc:
-            log.debug("cohort_edge shadow error for {} {} (fail open): {}", symbol, chan_name, _ce_exc)
+            log.debug("cohort_edge gate error for {} {} (fail open): {}", symbol, chan_name, _ce_exc)
 
         # ── Pair Analysis Quality Gate ─────────────────────────────────────
         # Suppress signals from pairs with CRITICAL quality label (hit rate
@@ -6947,7 +6983,109 @@ class Scanner:
             threshold=float(min_conf),
         )
         self._populate_signal_context(sig, volume_24h, ctx)
+        self._apply_noise_floor_stop(sig, ctx)
         return sig, cross_verified
+
+    # ------------------------------------------------------------------
+    # Noise-floor stops (owner-approved ACTIVE, 2026-07-07)
+    # ------------------------------------------------------------------
+    # 7d study vs real 1m klines: 52% of SL hits crossed back through entry
+    # within 1h (75% within 3h) with a 1.80% average post-SL favourable move
+    # against a 1.00% median stop — stops sat inside the pairs' hourly noise.
+    # Fix: the shipped stop must clear ≥ noise_floor_atr_mult × ATR(1h)% of
+    # entry.  Widen-only (never tightens evaluator geometry), capped at
+    # noise_floor_max_sl_pct, TPs untouched.  Dispatch scales the auto-trade
+    # notional down by the widen factor so per-trade capital risk is constant
+    # (see signal_dispatch._compute_qty_split callers).  Runtime-tunable from
+    # the ops panel — no env changes needed.
+
+    @staticmethod
+    def _atr_pct_from_candles(cd: Optional[dict], entry: float, period: int = 14) -> float:
+        """Simple ATR over the last ``period`` closed candles, as % of entry.
+        Returns 0.0 when the data is insufficient or malformed."""
+        try:
+            if not cd or entry <= 0:
+                return 0.0
+            highs = cd.get("high") or []
+            lows = cd.get("low") or []
+            closes = cd.get("close") or []
+            n = min(len(highs), len(lows), len(closes))
+            if n < period + 1:
+                return 0.0
+            trs = []
+            for i in range(n - period, n):
+                h, l_, pc = float(highs[i]), float(lows[i]), float(closes[i - 1])
+                trs.append(max(h - l_, abs(h - pc), abs(l_ - pc)))
+            atr = sum(trs) / len(trs)
+            return (atr / entry) * 100.0 if atr > 0 else 0.0
+        except (TypeError, ValueError, IndexError):
+            return 0.0
+
+    def _measure_noise_floor_pct(self, sig: Any, ctx: ScanContext) -> float:
+        """The pair's 1h noise band as % of entry: ATR(1h) preferred, with
+        timescale-adjusted fallbacks so fresh pairs (short history — the
+        NEW_LISTING cohort) still get a floor from whatever candles exist."""
+        entry = float(getattr(sig, "entry", 0) or 0)
+        candles = ctx.candles or {}
+        pct = self._atr_pct_from_candles(candles.get("1h"), entry)
+        if pct > 0:
+            return pct
+        # 15m ATR ×2 ≈ 1h-equivalent (sqrt(4) diffusion scaling)
+        pct = self._atr_pct_from_candles(candles.get("15m"), entry)
+        if pct > 0:
+            return pct * 2.0
+        # 5m ATR ×3.46 ≈ 1h-equivalent (sqrt(12))
+        pct = self._atr_pct_from_candles(candles.get("5m"), entry)
+        if pct > 0:
+            return pct * 3.46
+        atr_5m = float(getattr(sig, "atr_value_at_entry", 0) or 0)
+        if atr_5m > 0 and entry > 0:
+            return (atr_5m / entry) * 100.0 * 3.46
+        return 0.0
+
+    def _apply_noise_floor_stop(self, sig: Any, ctx: ScanContext) -> None:
+        """Widen ``sig.stop_loss`` to the pair's noise floor.  Fail-open:
+        any error leaves the evaluator's geometry untouched."""
+        try:
+            from src import runtime_tunables as _rt
+
+            entry = float(getattr(sig, "entry", 0) or 0)
+            sl = float(getattr(sig, "stop_loss", 0) or 0)
+            if entry <= 0 or sl <= 0:
+                return
+            structural_dist_pct = abs(sl - entry) / entry * 100.0
+            sig.sl_distance_pct_at_entry = structural_dist_pct
+            noise_pct = self._measure_noise_floor_pct(sig, ctx)
+            sig.noise_floor_pct = noise_pct
+            if not _rt.get("noise_floor_stops_enabled") or noise_pct <= 0:
+                return
+            floor_pct = min(
+                noise_pct * float(_rt.get("noise_floor_atr_mult")),
+                float(_rt.get("noise_floor_max_sl_pct")),
+            )
+            if floor_pct <= structural_dist_pct or structural_dist_pct <= 0:
+                return  # evaluator geometry already clears the floor
+            is_long = sig.direction == Direction.LONG
+            new_sl = (
+                entry * (1.0 - floor_pct / 100.0)
+                if is_long
+                else entry * (1.0 + floor_pct / 100.0)
+            )
+            sig.stop_loss = round(new_sl, 8)
+            sig.noise_floor_widen_factor = floor_pct / structural_dist_pct
+            sig.sl_distance_pct_at_entry = floor_pct
+            log.info(
+                "NOISE_FLOOR widened {} {} {} stop {:.3f}%→{:.3f}% "
+                "(1h-noise={:.3f}%, size ÷{:.2f} keeps risk constant)",
+                sig.symbol, getattr(sig, "setup_class", ""), sig.direction.value,
+                structural_dist_pct, floor_pct, noise_pct,
+                sig.noise_floor_widen_factor,
+            )
+        except Exception as _nf_exc:  # fail-open — never block emission
+            log.debug(
+                "noise_floor error for {} (fail open): {}",
+                getattr(sig, "symbol", "?"), _nf_exc,
+            )
 
     def _get_channel_candidate(
         self,

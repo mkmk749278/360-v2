@@ -10,7 +10,7 @@ documented inline.
 from __future__ import annotations
 
 from datetime import datetime
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field
 
@@ -381,6 +381,38 @@ class SignalExpirySetRequest(BaseModel):
     """Owner request to flip the signal-expiry backstop."""
 
     enabled: bool
+
+
+class TunableEntry(BaseModel):
+    """One runtime tunable: registry metadata + current effective value."""
+
+    key: str
+    label: str
+    description: str
+    type: str
+    default: Any
+    value: Any
+    min: Optional[float] = None
+    max: Optional[float] = None
+    unit: str = ""
+    category: str
+
+
+class TunablesState(BaseModel):
+    """Runtime-tunables snapshot for the ops panel.
+
+    ``initialised`` False = Firestore isn't wired in this process, so the
+    engine is running on env boot defaults and writes are unavailable.
+    """
+
+    initialised: bool
+    tunables: List[TunableEntry]
+
+
+class TunablesSetRequest(BaseModel):
+    """Owner request to update one or more runtime tunables."""
+
+    values: Dict[str, Any]
 
 
 # ---------------------------------------------------------------------------

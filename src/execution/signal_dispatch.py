@@ -502,6 +502,7 @@ async def dispatch_signal_to_active_users(
     entry_zone_high: Optional[float] = None,
     valid_for_minutes: int = 0,
     current_price: float = 0.0,
+    risk_scale: float = 1.0,
 ) -> int:
     """Fan a signal out to every active user's server-side FSM.
 
@@ -662,6 +663,14 @@ async def dispatch_signal_to_active_users(
         # doesn't shrink the position for everyone else on the same
         # signal.
         user_notional = _uo.resolve_notional_usd(uid, _DEFAULT_NOTIONAL_USD)
+        # Risk-constant sizing for noise-floor-widened stops (2026-07-07):
+        # when the scanner widened the stop by factor F (risk_scale = 1/F),
+        # shrink the notional by the same factor so capital-at-risk per trade
+        # is IDENTICAL to the un-widened trade. Never scales UP (cap at 1.0)
+        # and never below MIN_NOTIONAL floors — _compute_qty_split's existing
+        # min-notional snap/reject handles the tiny-position edge.
+        if 0.0 < risk_scale < 1.0:
+            user_notional = user_notional * risk_scale
         from config import PRE_TP_GRAB_FRACTION as _DEFAULT_GRAB_FRACTION
         from config import PRE_TP_THRESHOLD_PCT as _DEFAULT_PRETP_THRESHOLD
         from config import INVALIDATION_MODE_DEFAULT as _DEFAULT_INV_MODE

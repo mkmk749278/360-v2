@@ -33,7 +33,6 @@ from config import (
     SIGNAL_EXPIRY_ENABLED,
     ENTRY_FILL_WINDOW_ENFORCED,
     PRE_TP_ENABLED,
-    BE_SHIFT_TRIGGER_PCT,
     BE_THEN_TP1_DEFAULT_ENABLED,
     INVALIDATION_MODE_DEFAULT,
     INVALIDATION_TRAILING_ARM_RSCALE_ENABLED,
@@ -54,6 +53,7 @@ from config import (
 from src.btc_direction import check_btc_direction_gate
 from src.channels.base import Signal, TrailingStopState
 from src.dca import check_dca_entry, recalculate_after_dca
+from src.execution import be_policy as _be_policy
 from src import user_settings as _user_settings
 from src.historical_data import HistoricalDataStore
 from src.indicators import atr as _compute_atr
@@ -454,7 +454,14 @@ class TradeMonitor:
                 pre_ai_confidence=sig.pre_ai_confidence,
                 post_ai_confidence=sig.post_ai_confidence,
                 setup_class=sig.setup_class,
-                market_phase=sig.market_phase,
+                # Never record an empty phase — an unlabeled regime rendered
+                # as "UNKNOWN" on the ops Profit page and hid the new-listing
+                # cohort (the 7d window's single most profitable slice).
+                market_phase=(
+                    sig.market_phase
+                    if (sig.market_phase or "").strip() not in ("", "N/A")
+                    else (getattr(sig, "entry_regime", "") or "UNCLASSIFIED")
+                ),
                 quality_tier=sig.quality_tier,
                 spread_pct=sig.spread_pct,
                 volume_24h_usd=sig.volume_24h_usd,
@@ -1662,23 +1669,40 @@ class TradeMonitor:
         sig.max_favorable_excursion_pct = max(sig.max_favorable_excursion_pct, sig.pnl_pct)
         sig.max_adverse_excursion_pct = min(sig.max_adverse_excursion_pct, sig.pnl_pct)
 
-        # Engine-default BE-to-entry (owner directive 2026-06-29): once the trade
-        # has been ≥ BE_SHIFT_TRIGGER_PCT (1%) in profit at any point, ratchet the
-        # stop to entry (break-even). A subsequent reversal then exits at ~0%
-        # instead of giving the move back to a loss — the dominant Profit-Lab
-        # leak. Ratchet-only (never widens the stop) and pre-TP1 only; once TP1 is
-        # hit the TP-handler owns the stop. Per-user opted-in exit models are
-        # unaffected — this governs the engine's own signal book.
+        # Engine-default BE ratchet (owner directive 2026-06-29; noise-aware
+        # re-tune ACTIVE 2026-07-07). Once the trade's MFE clears the arm
+        # threshold, ratchet the stop to protect the position. The arm is the
+        # LARGEST of the legacy flat 1%, 1R of the trade's own stop distance,
+        # and a multiple of the pair's 1h-ATR noise floor — the 7d study showed
+        # 84% of flat-1% BE scratches were winners that resumed within 3h. The
+        # armed stop parks a small tolerance on the LOSS side of entry so an
+        # exact-entry wick no longer scratches. Ratchet-only (never widens) and
+        # pre-TP1 only; once TP1 is hit the TP-handler owns the stop. Per-user
+        # opted-in exit models are unaffected — this governs the engine's own
+        # signal book. All knobs are ops-panel runtime tunables (be_policy).
         if (
-            BE_THEN_TP1_DEFAULT_ENABLED
+            _be_policy.be_enabled(BE_THEN_TP1_DEFAULT_ENABLED)
             and sig.status == "ACTIVE"
             and sig.entry > 0
-            and sig.max_favorable_excursion_pct >= BE_SHIFT_TRIGGER_PCT
         ):
-            if is_long and sig.stop_loss < sig.entry:
-                sig.stop_loss = sig.entry
-            elif not is_long and sig.stop_loss > sig.entry:
-                sig.stop_loss = sig.entry
+            _sl_dist_pct = float(
+                getattr(sig, "sl_distance_pct_at_entry", 0.0) or 0.0
+            )
+            if _sl_dist_pct <= 0:
+                # Pre-2026-07-07 signals: reconstruct from evaluator geometry.
+                _orig_dist = float(getattr(sig, "original_sl_distance", 0.0) or 0.0)
+                if _orig_dist > 0:
+                    _sl_dist_pct = _orig_dist / sig.entry * 100.0
+            _arm_pct = _be_policy.arm_threshold_pct(
+                _sl_dist_pct,
+                float(getattr(sig, "noise_floor_pct", 0.0) or 0.0),
+            )
+            if sig.max_favorable_excursion_pct >= _arm_pct:
+                _park = _be_policy.park_price(sig.entry, is_long)
+                if is_long and sig.stop_loss < _park:
+                    sig.stop_loss = _park
+                elif not is_long and sig.stop_loss > _park:
+                    sig.stop_loss = _park
 
         # Zero-PnL guard – don't trigger SL when price hasn't moved from entry
         # This prevents false stops from stale prices or floating-point noise

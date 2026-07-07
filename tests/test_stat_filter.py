@@ -341,7 +341,7 @@ def _fill_cohort(
 
 def test_cohort_edge_store_fail_open_no_history():
     """expectancy() must return None when below min_samples (fail-open)."""
-    store = CohortEdgeStore(window=30, min_samples=10)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=10)
     # Record fewer than min_samples outcomes
     _fill_cohort(store, "SR_FLIP_RETEST", "LONG", "TRENDING_UP", "BULL", wins=3, losses=3)
     result = store.expectancy("SR_FLIP_RETEST", "LONG", "TRENDING_UP", "BULL")
@@ -350,7 +350,7 @@ def test_cohort_edge_store_fail_open_no_history():
 
 def test_cohort_edge_store_positive_expectancy():
     """expectancy() must be positive for a high-win-rate cohort."""
-    store = CohortEdgeStore(window=30, min_samples=10)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=10)
     _fill_cohort(store, "MOVER_TREND_PULLBACK", "LONG", "TRENDING_UP", "BULL", wins=12, losses=3)
     exp = store.expectancy("MOVER_TREND_PULLBACK", "LONG", "TRENDING_UP", "BULL")
     assert exp is not None
@@ -359,7 +359,7 @@ def test_cohort_edge_store_positive_expectancy():
 
 def test_cohort_edge_store_negative_expectancy():
     """expectancy() must be negative for a low-win-rate losing cohort."""
-    store = CohortEdgeStore(window=30, min_samples=10)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=10)
     _fill_cohort(store, "SR_FLIP_RETEST", "LONG", "DECLINE", "DECLINE", wins=2, losses=13)
     exp = store.expectancy("SR_FLIP_RETEST", "LONG", "DECLINE", "DECLINE")
     assert exp is not None
@@ -368,7 +368,7 @@ def test_cohort_edge_store_negative_expectancy():
 
 def test_cohort_edge_store_regime_family_quiet():
     """QUIET, CHOPPY, LOW_VOL regimes must map to 'QUIET' family."""
-    store = CohortEdgeStore(window=30, min_samples=5)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=5)
     _fill_cohort(store, "BREAKOUT_RETEST", "SHORT", "QUIET", "NEUTRAL", wins=4, losses=2)
     # All three quiet-family regime labels should hit the same bucket
     _fill_cohort(store, "BREAKOUT_RETEST", "SHORT", "CHOPPY", "NEUTRAL", wins=2, losses=1)
@@ -380,7 +380,7 @@ def test_cohort_edge_store_regime_family_quiet():
 
 def test_cohort_edge_store_regime_family_active():
     """Non-quiet regimes must map to 'ACTIVE' family, not conflate with QUIET."""
-    store = CohortEdgeStore(window=30, min_samples=5)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=5)
     _fill_cohort(store, "BREAKOUT_RETEST", "LONG", "TRENDING_UP", "BULL", wins=5, losses=0)
     _fill_cohort(store, "BREAKOUT_RETEST", "LONG", "QUIET", "BULL", wins=5, losses=0)
     # The two regime families must be separate buckets
@@ -392,7 +392,7 @@ def test_cohort_edge_store_regime_family_active():
 
 def test_cohort_edge_store_shadow_verdict_no_history():
     """shadow_verdict() must include 'no_history' when below min_samples."""
-    store = CohortEdgeStore(window=30, min_samples=10)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=10)
     verdict = store.shadow_verdict("SR_FLIP_RETEST", "LONG", "TRENDING_UP", "BULL")
     assert "no_history" in verdict
     assert "would-emit" in verdict
@@ -400,7 +400,7 @@ def test_cohort_edge_store_shadow_verdict_no_history():
 
 def test_cohort_edge_store_shadow_verdict_positive():
     """shadow_verdict() must say 'would-emit' with edge for winning cohorts."""
-    store = CohortEdgeStore(window=30, min_samples=10)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=10)
     _fill_cohort(store, "SR_FLIP_RETEST", "SHORT", "TRENDING_DOWN", "DECLINE", wins=12, losses=3)
     verdict = store.shadow_verdict("SR_FLIP_RETEST", "SHORT", "TRENDING_DOWN", "DECLINE")
     assert "would-emit" in verdict
@@ -409,7 +409,7 @@ def test_cohort_edge_store_shadow_verdict_positive():
 
 def test_cohort_edge_store_shadow_verdict_suppress():
     """shadow_verdict() must say 'would-suppress' for negative-expectancy cohorts."""
-    store = CohortEdgeStore(window=30, min_samples=10)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=10)
     _fill_cohort(store, "SR_FLIP_RETEST", "LONG", "DECLINE", "DECLINE", wins=1, losses=14)
     verdict = store.shadow_verdict("SR_FLIP_RETEST", "LONG", "DECLINE", "DECLINE")
     assert "would-suppress" in verdict
@@ -417,7 +417,7 @@ def test_cohort_edge_store_shadow_verdict_suppress():
 
 def test_cohort_edge_store_sample_count():
     """sample_count() must return correct count per cohort."""
-    store = CohortEdgeStore(window=30, min_samples=5)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=5)
     _fill_cohort(store, "MOMENTUM_EXPANSION", "LONG", "TRENDING_UP", "BULL", wins=7, losses=3)
     assert store.sample_count("MOMENTUM_EXPANSION", "LONG", "TRENDING_UP", "BULL") == 10
     # Different side — separate cohort
@@ -426,7 +426,7 @@ def test_cohort_edge_store_sample_count():
 
 def test_cohort_edge_store_all_stats():
     """all_stats() must return data for all recorded cohorts."""
-    store = CohortEdgeStore(window=30, min_samples=5)
+    store = CohortEdgeStore(persist_path="", window=30, min_samples=5)
     _fill_cohort(store, "MOVER_TREND_PULLBACK", "LONG", "TRENDING_UP", "BULL", wins=8, losses=2)
     _fill_cohort(store, "SR_FLIP_RETEST", "SHORT", "DECLINE", "DECLINE", wins=2, losses=8)
     stats = store.all_stats()
@@ -438,7 +438,7 @@ def test_cohort_edge_store_all_stats():
 
 def test_cohort_edge_store_window_caps():
     """Rolling window must cap records at the configured window size."""
-    store = CohortEdgeStore(window=10, min_samples=5)
+    store = CohortEdgeStore(persist_path="", window=10, min_samples=5)
     for i in range(20):
         store.record(_make_cohort_outcome(won=(i % 2 == 0), pnl_pct=1.0 if i % 2 == 0 else -1.0))
     assert store.sample_count("SR_FLIP_RETEST", "LONG", "TRENDING_UP", "BULL") == 10

@@ -206,6 +206,7 @@ class CohortEdgeStore:
         self,
         window: Optional[int] = None,
         min_samples: Optional[int] = None,
+        persist_path: Optional[str] = None,
     ) -> None:
         self._window: int = window if window is not None else _env_int("COHORT_EDGE_WINDOW", 30)
         self._min_samples: int = (
@@ -216,6 +217,19 @@ class CohortEdgeStore:
         self._records: Dict[Tuple[str, str, str, str], Deque[_OutcomeRecord]] = defaultdict(
             lambda: deque(maxlen=self._window)
         )
+        # Persistence (STEP 2 activation, 2026-07-07): the gate suppresses on
+        # MEASURED edge, so the measurements must survive engine restarts —
+        # in-memory-only meant every deploy reset the store and the gate never
+        # armed. JSON on the data volume (same pattern as invalidation_audit);
+        # writes happen only on outcome resolution (~dozens/day), never on the
+        # scan hot path. Empty persist_path disables (tests).
+        self._persist_path: str = (
+            persist_path
+            if persist_path is not None
+            else os.environ.get("COHORT_EDGE_PERSIST_PATH", "data/cohort_edge_store.json")
+        )
+        if self._persist_path:
+            self._load()
 
     @classmethod
     def regime_family(cls, regime: str) -> str:
@@ -242,6 +256,71 @@ class CohortEdgeStore:
         )
         with self._lock:
             self._records[key].append(rec)
+        self._save()
+
+    # ---- persistence -------------------------------------------------------
+
+    def _load(self) -> None:
+        """Hydrate the store from disk. Missing / corrupt file → empty store
+        (fail-open: the gate just needs fresh samples again)."""
+        import json
+
+        try:
+            if not os.path.exists(self._persist_path):
+                return
+            with open(self._persist_path, "r", encoding="utf-8") as fh:
+                raw = json.load(fh)
+            with self._lock:
+                for key_str, recs in raw.items():
+                    parts = tuple(key_str.split("|"))
+                    if len(parts) != 4:
+                        continue
+                    dq = self._records[parts]  # defaultdict creates the deque
+                    for r in recs[-self._window:]:
+                        dq.append(
+                            _OutcomeRecord(
+                                won=bool(r.get("won")),
+                                pnl_pct=float(r.get("pnl_pct", 0.0)),
+                                timestamp=datetime.fromisoformat(r["ts"])
+                                if r.get("ts")
+                                else datetime.now(timezone.utc),
+                            )
+                        )
+        except Exception:
+            # Never block boot on a bad store file.
+            pass
+
+    def _save(self) -> None:
+        """Atomic write of the full store. Called per outcome resolution —
+        dozens of writes/day, off the scan hot path."""
+        import json
+
+        if not self._persist_path:
+            return
+        try:
+            with self._lock:
+                payload = {
+                    "|".join(key): [
+                        {
+                            "won": r.won,
+                            "pnl_pct": r.pnl_pct,
+                            "ts": r.timestamp.isoformat(),
+                        }
+                        for r in records
+                    ]
+                    for key, records in self._records.items()
+                    if records
+                }
+            dirname = os.path.dirname(self._persist_path)
+            if dirname:
+                os.makedirs(dirname, exist_ok=True)
+            tmp = self._persist_path + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp, self._persist_path)
+        except Exception:
+            # Persistence is best-effort; the in-memory store stays correct.
+            pass
 
     def expectancy(
         self,

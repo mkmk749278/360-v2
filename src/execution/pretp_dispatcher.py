@@ -35,6 +35,8 @@ from dataclasses import dataclass
 from typing import Callable, Dict, List, Optional, Set
 
 from config import BE_SHIFT_TRIGGER_PCT as _BE_SHIFT_TRIGGER_PCT
+
+from src.execution import be_policy as _be_policy
 from src.utils import get_logger
 
 from . import mark_price_feed as _mark_price_feed
@@ -322,7 +324,17 @@ async def maybe_fire_be_shift(
     else:
         move_pct = (entry - mark_price) / entry * 100.0
 
-    if move_pct < _BE_SHIFT_TRIGGER_PCT:
+    # Noise-aware arm (ACTIVE 2026-07-07, shared be_policy): the placed stop
+    # already carries any noise-floor widening, so 1R of the position's own
+    # stop distance IS the noise-aware threshold. Falls back to the legacy
+    # flat trigger when the stop distance is unknown.
+    _sl_dist_pct = 0.0
+    if position.sl_price and position.sl_price > 0:
+        _sl_dist_pct = abs(position.sl_price - entry) / entry * 100.0
+    _arm_pct = _be_policy.arm_threshold_pct(_sl_dist_pct)
+    if not _be_policy.be_enabled(True) or move_pct < max(
+        _arm_pct, _BE_SHIFT_TRIGGER_PCT
+    ):
         return
 
     # Mark price crossed the trigger threshold — shift the stop to entry.
@@ -345,16 +357,19 @@ async def maybe_fire_be_shift(
     old_sl_order_id = position.sl_order_id
     position.sl_order_id = 0
 
+    # Park the armed stop a tolerance on the LOSS side of entry (shared
+    # be_policy) — an exact-entry wick no longer scratches the position.
+    _park_price = _be_policy.park_price(entry, position.side == "LONG")
     try:
         sl_be = await placer.place_stop_loss(
             signal_id=position.signal_id,
             symbol=position.symbol,
             direction=position.side,
-            stop_price=entry,
+            stop_price=_park_price,
             coid_override=_position_state.coid_sl_be(position.signal_id),
         )
         position.sl_be_order_id = sl_be.order_id
-        position.sl_price = entry
+        position.sl_price = _park_price
         position.be_shift_fired = True
         _position_state.put_position(position)
         log.info(
