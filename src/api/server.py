@@ -118,6 +118,9 @@ from .schemas import (
     TelegramOtpVerifyRequest,
     TelegramOtpVerifyResponse,
     TickersResponse,
+    TunableEntry,
+    TunablesSetRequest,
+    TunablesState,
     UserAutoTradeSettings,
     UserInvalidationSettings,
     UserPretpSettings,
@@ -1919,6 +1922,63 @@ def build_app(
                 detail=f"signal-expiry flip failed: {exc}",
             )
         return _signal_expiry_state()
+
+    # ---- Runtime tunables (ops control plane, 2026-07-07) ----
+    # Owner-controlled engine parameters — noise-floor stops, BE ratchet
+    # arm/park, cohort-edge gate.  Values live on the control/runtime_tunables
+    # Firestore doc (5s-cached engine-side); GET reports env boot defaults
+    # with initialised=false when Firestore isn't wired.
+    def _tunables_state() -> TunablesState:
+        from src import runtime_tunables as _rt
+        try:
+            entries = [TunableEntry(**e) for e in _rt.snapshot()]
+        except Exception:
+            log.exception("/api/tunables snapshot failed")
+            entries = []
+        return TunablesState(
+            initialised=_rt.is_initialised(),
+            tunables=entries,
+        )
+
+    @app.get(
+        "/api/tunables",
+        response_model=TunablesState,
+        tags=["auto-mode"],
+    )
+    async def tunables_get(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> TunablesState:
+        return _tunables_state()
+
+    @app.post(
+        "/api/tunables",
+        response_model=TunablesState,
+        tags=["auto-mode"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def tunables_set(
+        req: TunablesSetRequest,
+    ) -> TunablesState:
+        from src import runtime_tunables as _rt
+        if not _rt.is_initialised():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="runtime tunables not initialised (no Firestore/GCP creds)",
+            )
+        try:
+            _rt.set_values(req.values)
+        except ValueError as exc:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail=str(exc),
+            )
+        except Exception as exc:
+            log.exception("/api/tunables update failed values=%s", req.values)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"tunables update failed: {exc}",
+            )
+        return _tunables_state()
 
     # ---- Paper-trade-visibility endpoints (2026-05-16) ----
     # Registered via register() in paper_trade_routes.py so the

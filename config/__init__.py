@@ -2449,6 +2449,43 @@ BE_SHIFT_TRIGGER_PCT: float = _safe_float("BE_SHIFT_TRIGGER_PCT", "1.0")
 BE_THEN_TP1_DEFAULT_ENABLED: bool = _safe_bool("BE_THEN_TP1_DEFAULT_ENABLED", "true")
 
 # ---------------------------------------------------------------------------
+# Noise-aware exits + cohort-edge gate (owner-approved ACTIVE, 2026-07-07)
+# ---------------------------------------------------------------------------
+# Root cause (7d study, 200 shorts + 300 tracked signals vs real 1m klines):
+#   * 52% of SL hits crossed back through entry within 1h of stopping out
+#     (75% within 3h) — median stop distance 1.00% vs 1.80% average post-SL
+#     favourable move: stops sat INSIDE the pairs' hourly noise band.
+#   * 84% of BREAKEVEN_EXIT scratches reached ≥1% profit within 3h — the 1%
+#     flat BE arm + exact-entry park systematically scratched winners.
+# These are ENV BOOT DEFAULTS ONLY — the live values are runtime tunables on
+# the ``control/runtime_tunables`` Firestore doc, owner-controlled from the
+# 360 CE Ops panel (src/runtime_tunables.py), read via a 5s-cached accessor.
+# No manual .env changes are needed on the VPS to adjust any of them.
+
+# Widen every stop to ≥ NOISE_FLOOR_ATR_MULT × ATR(1h)% of entry (capped at
+# NOISE_FLOOR_MAX_SL_PCT). Auto-trade notional is scaled down by the same
+# widening factor so per-trade capital at risk is unchanged (risk-constant).
+NOISE_FLOOR_STOPS_ENABLED: bool = _safe_bool("NOISE_FLOOR_STOPS_ENABLED", "true")
+NOISE_FLOOR_ATR_MULT: float = _safe_float("NOISE_FLOOR_ATR_MULT", "1.0")
+NOISE_FLOOR_MAX_SL_PCT: float = _safe_float("NOISE_FLOOR_MAX_SL_PCT", "3.0")
+
+# BE ratchet arms at the LARGEST of: BE_SHIFT_TRIGGER_PCT (legacy flat %),
+# BE_ARM_R_MULT × the signal's own stop distance, and BE_ARM_NOISE_MULT × the
+# pair's noise floor. The armed stop parks BE_PARK_TOLERANCE_PCT on the loss
+# side of entry so an exact-entry wick no longer scratches the trade.
+BE_ARM_R_MULT: float = _safe_float("BE_ARM_R_MULT", "1.0")
+BE_ARM_NOISE_MULT: float = _safe_float("BE_ARM_NOISE_MULT", "0.75")
+BE_PARK_TOLERANCE_PCT: float = _safe_float("BE_PARK_TOLERANCE_PCT", "0.15")
+
+# Cohort-edge STEP 2 (activates the #696 STEP 1 store): suppress emission when
+# the signal's cohort (setup × side × regime family × BTC macro) has at least
+# COHORT_EDGE_GATE_MIN_N resolved outcomes and Wilson-lower-bounded expectancy
+# ≤ COHORT_EDGE_SUPPRESS_BELOW %/trade. Fail-open below min samples.
+COHORT_EDGE_GATE_ENABLED: bool = _safe_bool("COHORT_EDGE_GATE_ENABLED", "true")
+COHORT_EDGE_GATE_MIN_N: int = _safe_int("COHORT_EDGE_GATE_MIN_N", "10")
+COHORT_EDGE_SUPPRESS_BELOW: float = _safe_float("COHORT_EDGE_SUPPRESS_BELOW", "-0.05")
+
+# ---------------------------------------------------------------------------
 # Funding-rate exit
 # ---------------------------------------------------------------------------
 # How many seconds before a symbol's next funding settlement to exit a

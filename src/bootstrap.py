@@ -537,6 +537,11 @@ class Bootstrap:
                     if fs_db is not None:
                         _kill_switch.init_kill_switch(fs_db)
                         log.info("Kill switch client initialised")
+                        # Runtime tunables share the same client — the ops
+                        # panel writes the doc, scan/monitor read it via the
+                        # 5s-cached accessor (Cost Discipline).
+                        from src import runtime_tunables as _runtime_tunables
+                        _runtime_tunables.init_runtime_tunables(fs_db)
                     # position_state has its own init that re-uses
                     # the same SDK; share credentials via the SA path.
                     _position_state.init_position_state(

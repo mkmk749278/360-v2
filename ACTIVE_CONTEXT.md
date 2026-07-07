@@ -4,6 +4,59 @@
 
 ---
 
+## 🟢 SESSION 43 2026-07-07 — Noise-aware exits + cohort gate ACTIVE (owner-approved), ops runtime tunables
+
+**Owner sign-off in-session:** "approved everything, activate everything while
+shipping itself, no manual env changes" — the four fixes from the 7-day signal
+study ship ACTIVE with every knob runtime-controlled from the ops panel.
+
+### The study that drove this (200 shorts CSV + 300 tracked signals vs real 1m klines)
+
+- **52% of SL hits crossed back through entry within 1h** of stopping out (75%
+  within 3h); avg post-SL favourable move 1.80% vs 1.00% median stop → stops sat
+  inside hourly noise. 62% of SLs hit within 30min of creation.
+- **84% of BREAKEVEN_EXIT scratches reached ≥1% profit within 3h** — flat 1% BE
+  arm + exact-entry park scratched winners systematically (38 scratches/wk).
+- **Score-band inversion:** conf 75+ ran −0.107%/trade vs +0.088% for 65–70.
+  Cause: mover paths stamp `htf_trend_aligned=True` + surge-volume scoring →
+  near-max scores by construction. MVRTP: 74 signals, conf 76.2, −19.9% total.
+- **"UNKNOWN" regime = empty market_phase** (regime_context None at scan; fresh
+  listings). That cohort was **+26.3% vs −26.1%** for stamped signals.
+- LONGs −18.1% vs SHORTs +18.4% on the window.
+
+### Shipped (branch `claude/signal-analysis-lag-ej2pyr`)
+
+1. **Runtime tunables control plane** — `src/runtime_tunables.py`, Firestore doc
+   `control/runtime_tunables`, 5s-cached reads, env boot defaults, owner-gated
+   `GET/POST /api/tunables`. Ops panel renders the registry; changing engine
+   behaviour no longer requires .env edits or redeploys.
+2. **Noise-floor stops (ACTIVE)** — scanner widens every stop to ≥1.0×ATR(1h)%
+   (cap 3%), widen-only, TPs untouched; `signal_router` passes `risk_scale` so
+   `signal_dispatch` shrinks notional by the widen factor (risk-constant).
+   Stamps: `noise_floor_pct`, `noise_floor_widen_factor`, `sl_distance_pct_at_entry`.
+3. **BE ratchet re-tune (ACTIVE)** — shared `src/execution/be_policy.py`; arm =
+   max(flat 1%, 1R of own stop, 0.75×noise floor); armed stop parks 0.15% on the
+   loss side of entry (wick-immune). Wired in BOTH trade_monitor (signal book)
+   and pretp_dispatcher (real positions).
+4. **Cohort-edge STEP 2 (ACTIVE)** — scanner suppresses when cohort n≥10 and
+   WLB expectancy ≤ −0.05%/trade (`REASON_COHORT_EDGE` telemetry). Store now
+   persists to `data/cohort_edge_store.json` so deploys don't wipe measurements.
+5. **NEW_LISTING regime stamp** — regime_context None now stamps NEW_LISTING
+   (thin 1h history) / UNCLASSIFIED; `_record_outcome` backfills empty phases.
+   The best-performing cohort is now visible instead of "UNKNOWN".
+
+### Verify on live data (next session)
+
+- Suppression telemetry: `cohort_edge` rejections appearing once cohorts arm.
+- NOISE_FLOOR log lines: widen factors sane (1–3×), not pinned at cap.
+- BE scratch rate falling in Profit page; SL-hit shakeout share falling.
+- One open question: app showed `EXPIRED held 59m` cards ~7h before the ops
+  screenshot with expiry DISABLED — confirm no new EXPIRED (non-NO_FILL) at
+  ≈60m post-disable; if they appear, the toggle write isn't reaching the
+  monitor.
+
+---
+
 ## 🟢 SESSION 42 2026-07-04 — Paper trades execute again + Scoring STEP 1 (PR #696)
 
 **Owner mandate (loop continued):** profitable signals first → volume second; scoring

@@ -987,6 +987,12 @@ class SignalRouter:
                 entry_zone_high=getattr(signal, "entry_zone_high", None),
                 valid_for_minutes=int(getattr(signal, "valid_for_minutes", 0) or 0),
                 current_price=float(getattr(signal, "current_price", 0.0) or 0.0),
+                # Noise-floor risk-constant sizing: stop widened ×F → size ÷F.
+                risk_scale=(
+                    1.0 / float(getattr(signal, "noise_floor_widen_factor", 1.0) or 1.0)
+                    if float(getattr(signal, "noise_floor_widen_factor", 1.0) or 1.0) > 1.0
+                    else 1.0
+                ),
             )
         except Exception:
             log.exception(

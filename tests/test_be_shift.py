@@ -73,7 +73,10 @@ def _make_placer(be_order_id: int = 99) -> MagicMock:
 
 @pytest.mark.asyncio
 async def test_long_fires_at_trigger_threshold():
-    pos = _make_position(side="LONG", entry=100.0, sl_price=95.0, sl_order_id=42)
+    # Noise-aware arm (2026-07-07): the arm is max(flat 1%, 1R of the stop
+    # distance), so a 1%-stop position arms at the legacy 1% and the armed
+    # stop parks 0.15% below entry (loss-side tolerance), not exactly at it.
+    pos = _make_position(side="LONG", entry=100.0, sl_price=99.0, sl_order_id=42)
     placer = _make_placer(be_order_id=99)
 
     with patch("src.execution.pretp_dispatcher._BE_SHIFT_TRIGGER_PCT", 1.0), \
@@ -83,18 +86,33 @@ async def test_long_fires_at_trigger_threshold():
     placer.cancel_algo_order.assert_awaited_once_with(symbol="BTCUSDT", algo_id=42)
     placer.place_stop_loss.assert_awaited_once()
     call_kwargs = placer.place_stop_loss.call_args.kwargs
-    assert call_kwargs["stop_price"] == 100.0
+    assert call_kwargs["stop_price"] == pytest.approx(100.0 * (1 - 0.0015))
     assert call_kwargs["direction"] == "LONG"
     assert pos.be_shift_fired is True
     assert pos.sl_order_id == 0
     assert pos.sl_be_order_id == 99
-    assert pos.sl_price == 100.0
+    assert pos.sl_price == pytest.approx(100.0 * (1 - 0.0015))
+
+
+@pytest.mark.asyncio
+async def test_wide_stop_does_not_arm_at_flat_trigger():
+    # R-multiple arm regression (7d study: 84% of flat-1% BE scratches were
+    # winners): a 5%-stop position must NOT arm at a 1% move — its arm is 1R.
+    pos = _make_position(side="LONG", entry=100.0, sl_price=95.0, sl_order_id=42)
+    placer = _make_placer()
+
+    with patch("src.execution.pretp_dispatcher._BE_SHIFT_TRIGGER_PCT", 1.0):
+        await _pd.maybe_fire_be_shift(pos, mark_price=101.0, placer=placer)
+
+    placer.cancel_algo_order.assert_not_called()
+    placer.place_stop_loss.assert_not_called()
+    assert pos.be_shift_fired is False
 
 
 @pytest.mark.asyncio
 async def test_short_fires_at_trigger_threshold():
     # SHORT: entry=100, mark drops to 98.9 → move = (100-98.9)/100 = 1.1% > 1.0%
-    pos = _make_position(side="SHORT", entry=100.0, sl_price=105.0, sl_order_id=43)
+    pos = _make_position(side="SHORT", entry=100.0, sl_price=101.0, sl_order_id=43)
     placer = _make_placer(be_order_id=88)
 
     with patch("src.execution.pretp_dispatcher._BE_SHIFT_TRIGGER_PCT", 1.0), \
@@ -104,10 +122,10 @@ async def test_short_fires_at_trigger_threshold():
     placer.cancel_algo_order.assert_awaited_once()
     placer.place_stop_loss.assert_awaited_once()
     call_kwargs = placer.place_stop_loss.call_args.kwargs
-    assert call_kwargs["stop_price"] == 100.0
+    assert call_kwargs["stop_price"] == pytest.approx(100.0 * (1 + 0.0015))
     assert call_kwargs["direction"] == "SHORT"
     assert pos.be_shift_fired is True
-    assert pos.sl_price == 100.0
+    assert pos.sl_price == pytest.approx(100.0 * (1 + 0.0015))
 
 
 @pytest.mark.asyncio
@@ -163,7 +181,7 @@ async def test_does_not_fire_when_pretp_fired():
 @pytest.mark.asyncio
 async def test_be_sl_placement_failure_leaves_retry_open():
     """If BE-SL placement fails, be_shift_fired stays False so next tick retries."""
-    pos = _make_position(side="LONG", entry=100.0, sl_order_id=42)
+    pos = _make_position(side="LONG", entry=100.0, sl_price=99.0, sl_order_id=42)
     placer = _make_placer()
     placer.place_stop_loss = AsyncMock(
         side_effect=OrderPlacementError("binance rejected", signing_response=None)
@@ -183,7 +201,7 @@ async def test_be_sl_placement_failure_leaves_retry_open():
 @pytest.mark.asyncio
 async def test_exactly_at_threshold_fires():
     # move_pct == 1.0 exactly (with floating-point tolerance).
-    pos = _make_position(side="LONG", entry=100.0, sl_order_id=42)
+    pos = _make_position(side="LONG", entry=100.0, sl_price=99.0, sl_order_id=42)
     placer = _make_placer()
 
     with patch("src.execution.pretp_dispatcher._BE_SHIFT_TRIGGER_PCT", 1.0), \

@@ -293,7 +293,9 @@ async def test_default_be_arms_at_one_pct(monkeypatch):
                        tp1=2450.0, current_price=2394.0)
     await monitor._evaluate_signal(sig)
 
-    assert sig.stop_loss == 2370.0                 # SL moved up to entry (BE)
+    # Noise-aware BE (2026-07-07): the armed stop parks 0.15% below entry so
+    # an exact-entry wick no longer scratches the trade.
+    assert sig.stop_loss == pytest.approx(2370.0 * (1 - 0.0015))
     om.close_full.assert_not_called()              # still open, not closed
 
 
@@ -313,7 +315,9 @@ async def test_default_reversal_after_be_exits_flat_not_loss(monkeypatch):
     # Stop sat at entry → SL fill at 2370 (break-even), not the −0.8% original SL.
     om.close_full.assert_awaited()
     assert om.close_full.await_args.kwargs.get("reason") == "sl_hit"
-    assert abs(sig.pnl_pct) < 0.05                 # ~flat, not a loss
+    # Park tolerance (0.15%) means the scratch exits at ~-0.15%, not the
+    # original -0.8% SL loss — still capital-protective, wick-immune.
+    assert abs(sig.pnl_pct) < 0.2                  # ~flat, not a loss
 
 
 async def test_default_skips_engine_invalidation(monkeypatch):

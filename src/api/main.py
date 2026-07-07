@@ -106,6 +106,10 @@ async def _run() -> None:
             if _fk._db is not None:
                 _ks.init_kill_switch(_fk._db)
                 log.info("Kill switch client initialised")
+                # Runtime tunables — the ops panel writes through this
+                # process's /api/tunables endpoint; same shared client.
+                from src import runtime_tunables as _runtime_tunables
+                _runtime_tunables.init_runtime_tunables(_fk._db)
         except Exception as exc:
             log.warning(
                 "Firestore keystore / kill switch init failed "

@@ -293,6 +293,19 @@ class Signal:
     cohort_edge_expectancy: Optional[float] = None
     cohort_edge_samples: int = 0
 
+    # ---- Noise-floor stop stamps (owner-approved ACTIVE, 2026-07-07) ----
+    # noise_floor_pct: the pair's 1h-ATR noise band as % of entry at emit
+    #   (0 = could not be measured; noise floor not applied).
+    # noise_floor_widen_factor: effective_sl_dist / structural_sl_dist. 1.0 =
+    #   evaluator geometry already cleared the floor. Dispatch divides the
+    #   auto-trade notional by this factor so capital-at-risk per trade is
+    #   IDENTICAL to the un-widened trade (risk-constant sizing).
+    # sl_distance_pct_at_entry: the shipped stop distance (% of entry) after
+    #   any widening — the trade's true initial R unit for BE-arm math.
+    noise_floor_pct: float = 0.0
+    noise_floor_widen_factor: float = 1.0
+    sl_distance_pct_at_entry: float = 0.0
+
     # ---- Delivery retry tracking (router-internal, not shown to users) ----
     _delivery_retries: int = 0
 
