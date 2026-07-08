@@ -2,120 +2,124 @@
 
 ## Executive summary
 - Overall health/freshness: **healthy**
-- Top anomalies/concerns: LIQUIDITY_SWEEP_REVERSAL, SR_FLIP_RETEST, FAILED_AUCTION_RECLAIM
+- Top anomalies/concerns: MOVER_TREND_PULLBACK, FAILED_AUCTION_RECLAIM, DIVERGENCE_CONTINUATION
 - Top promising signals/paths: none
-- Recommended next investigation target: **LIQUIDITY_SWEEP_REVERSAL**
+- Recommended next investigation target: **MOVER_TREND_PULLBACK**
 
 ## Runtime health
 - Engine running: `True` (status=running, health=healthy)
-- Heartbeat age: `4` sec (warning=False)
-- Latest performance record age: `648` sec
+- Heartbeat age: `1` sec (warning=False)
+- Latest performance record age: `1548` sec
 - Circuit breaker: healthy (not halted)
 
 ## Path funnel truth
 | Path/Setup | Attempts | No-signal | Generated | Scanner prep | Gated | Emitted | Classification |
 |---|---:|---:|---:|---:|---:|---:|---|
-| BREAKDOWN_SHORT | 0 | 0 | 2 | 2 | 0 | 2 | active-low-quality (none) |
-| DIVERGENCE_CONTINUATION | 0 | 0 | 9737 | 9737 | 9408 | 1 | low-sample (none) |
-| EVAL::BREAKDOWN_SHORT | 61227 | 61228 | 2 | 0 | 0 | 0 | low-sample (breakout_not_found) |
-| EVAL::CONTINUATION_LIQUIDITY_SWEEP | 50325 | 50328 | 0 | 0 | 0 | 0 | non-generating (cls_disabled_merged_into_lsr) |
-| EVAL::DIVERGENCE_CONTINUATION | 50225 | 47092 | 3234 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
-| EVAL::FAILED_AUCTION_RECLAIM | 50332 | 47695 | 2688 | 0 | 0 | 0 | low-sample (auction_not_detected) |
-| EVAL::FUNDING_EXTREME | 57000 | 56919 | 89 | 0 | 0 | 0 | low-sample (funding_not_extreme) |
-| EVAL::LIQUIDATION_REVERSAL | 46411 | 46411 | 4 | 0 | 0 | 0 | low-sample (cascade_threshold_not_met) |
-| EVAL::MA_CROSS_TREND_SHIFT | 50381 | 50383 | 3 | 0 | 0 | 0 | low-sample (no_ma_cross) |
-| EVAL::MOVER_AVWAP_SCALP | 68997 | 68669 | 3631 | 0 | 0 | 0 | low-sample (no_avwap_tag) |
-| EVAL::MOVER_TREND_PULLBACK | 61232 | 47940 | 21046 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
-| EVAL::OPENING_RANGE_BREAKOUT | 56508 | 56511 | 0 | 0 | 0 | 0 | non-generating (feature_disabled) |
-| EVAL::POST_DISPLACEMENT_CONTINUATION | 50329 | 50331 | 0 | 0 | 0 | 0 | non-generating (regime_blocked) |
-| EVAL::QUIET_COMPRESSION_BREAK | 50222 | 50196 | 29 | 0 | 0 | 0 | low-sample (compression_not_detected) |
-| EVAL::SR_FLIP_RETEST | 49722 | 47128 | 3085 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
-| EVAL::STANDARD | 40012 | 36698 | 3452 | 0 | 0 | 0 | low-sample (momentum_reject) |
-| EVAL::TREND_PULLBACK | 40151 | 40017 | 140 | 0 | 0 | 0 | low-sample (h1_trend_not_aligned) |
-| EVAL::VOLUME_SURGE_BREAKOUT | 61221 | 61220 | 5 | 0 | 0 | 0 | low-sample (breakout_not_found) |
-| EVAL::WHALE_MOMENTUM | 46415 | 46417 | 0 | 0 | 0 | 0 | non-generating (momentum_reject) |
-| FAILED_AUCTION_RECLAIM | 0 | 0 | 8350 | 8350 | 7449 | 8 | active-low-quality (none) |
-| FUNDING_EXTREME_SIGNAL | 0 | 0 | 403 | 403 | 311 | 0 | low-sample (none) |
+| BREAKDOWN_SHORT | 0 | 0 | 8 | 8 | 6 | 2 | low-sample (none) |
+| DIVERGENCE_CONTINUATION | 0 | 0 | 4692 | 4692 | 4327 | 11 | active-low-quality (none) |
+| EVAL::BREAKDOWN_SHORT | 41221 | 41222 | 2 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
+| EVAL::CONTINUATION_LIQUIDITY_SWEEP | 34951 | 34953 | 0 | 0 | 0 | 0 | non-generating (cls_disabled_merged_into_lsr) |
+| EVAL::DIVERGENCE_CONTINUATION | 34918 | 33442 | 1505 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
+| EVAL::FAILED_AUCTION_RECLAIM | 34953 | 33222 | 1766 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
+| EVAL::FUNDING_EXTREME | 38993 | 38974 | 21 | 0 | 0 | 0 | low-sample (funding_not_extreme) |
+| EVAL::LIQUIDATION_REVERSAL | 31765 | 31764 | 4 | 0 | 0 | 0 | low-sample (cascade_threshold_not_met) |
+| EVAL::MA_CROSS_TREND_SHIFT | 34988 | 34989 | 1 | 0 | 0 | 0 | low-sample (no_ma_cross) |
+| EVAL::MOVER_AVWAP_SCALP | 46257 | 45489 | 3439 | 0 | 0 | 0 | low-sample (no_avwap_tag) |
+| EVAL::MOVER_TREND_PULLBACK | 41224 | 34111 | 12134 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
+| EVAL::OPENING_RANGE_BREAKOUT | 38598 | 38598 | 0 | 0 | 0 | 0 | non-generating (feature_disabled) |
+| EVAL::POST_DISPLACEMENT_CONTINUATION | 34952 | 34950 | 3 | 0 | 0 | 0 | low-sample (regime_blocked) |
+| EVAL::QUIET_COMPRESSION_BREAK | 34913 | 34829 | 88 | 0 | 0 | 0 | low-sample (compression_not_detected) |
+| EVAL::SR_FLIP_RETEST | 34516 | 34163 | 748 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
+| EVAL::STANDARD | 27986 | 25619 | 2451 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
+| EVAL::TREND_PULLBACK | 28071 | 28065 | 11 | 0 | 0 | 0 | low-sample (h1_pullback_not_confirmed) |
+| EVAL::VOLUME_SURGE_BREAKOUT | 41216 | 41214 | 5 | 0 | 0 | 0 | low-sample (basic_filters_failed) |
+| EVAL::WHALE_MOMENTUM | 31768 | 31771 | 0 | 0 | 0 | 0 | non-generating (momentum_reject) |
+| FAILED_AUCTION_RECLAIM | 0 | 0 | 6353 | 6353 | 5818 | 5 | active-low-quality (none) |
+| FUNDING_EXTREME_SIGNAL | 0 | 0 | 117 | 117 | 115 | 0 | low-sample (none) |
 | LIQUIDATION_REVERSAL | 0 | 0 | 17 | 17 | 17 | 0 | low-sample (none) |
-| LIQUIDITY_SWEEP_REVERSAL | 0 | 0 | 14572 | 14572 | 14313 | 7 | active-low-quality (none) |
-| MA_CROSS_TREND_SHIFT | 0 | 0 | 4 | 4 | 4 | 0 | low-sample (none) |
-| MOVER_AVWAP_SCALP | 0 | 0 | 7928 | 7928 | 7600 | 0 | low-sample (none) |
-| MOVER_TREND_PULLBACK | 0 | 0 | 54717 | 54717 | 53919 | 1 | low-sample (none) |
-| QUIET_COMPRESSION_BREAK | 0 | 0 | 87 | 87 | 0 | 0 | low-sample (none) |
-| SR_FLIP_RETEST | 0 | 0 | 9247 | 9247 | 8639 | 5 | active-low-quality (none) |
-| TREND_PULLBACK_EMA | 0 | 0 | 643 | 643 | 643 | 0 | low-sample (none) |
+| LIQUIDITY_SWEEP_REVERSAL | 0 | 0 | 10941 | 10941 | 10400 | 15 | low-sample (none) |
+| MA_CROSS_TREND_SHIFT | 0 | 0 | 2 | 2 | 2 | 0 | low-sample (none) |
+| MOVER_AVWAP_SCALP | 0 | 0 | 8137 | 8137 | 6762 | 0 | low-sample (none) |
+| MOVER_TREND_PULLBACK | 0 | 0 | 34635 | 34635 | 33237 | 2 | active-low-quality (none) |
+| POST_DISPLACEMENT_CONTINUATION | 0 | 0 | 13 | 13 | 13 | 0 | low-sample (none) |
+| QUIET_COMPRESSION_BREAK | 0 | 0 | 275 | 275 | 226 | 0 | low-sample (none) |
+| SR_FLIP_RETEST | 0 | 0 | 3709 | 3709 | 2274 | 11 | active-low-quality (none) |
+| TREND_PULLBACK_EMA | 0 | 0 | 78 | 78 | 27 | 0 | low-sample (none) |
 | VOLUME_SURGE_BREAKOUT | 0 | 0 | 47 | 47 | 28 | 0 | low-sample (none) |
 
 ## Evaluator no-signal reasons
-- **EVAL::BREAKDOWN_SHORT** (total=61228): breakout_not_found=26220, basic_filters_failed=23166, move_not_fresh=8475, breakout_stale=2768, retest_proximity_failed=430, volume_spike_missing=123, insufficient_candles=37, missing_fvg_or_orderblock=9
-- **EVAL::CONTINUATION_LIQUIDITY_SWEEP** (total=50328): cls_disabled_merged_into_lsr=50328
-- **EVAL::DIVERGENCE_CONTINUATION** (total=47092): basic_filters_failed=16216, cvd_divergence_failed=14710, h1_trend_not_aligned=12335, ema_alignment_reject=2942, retest_proximity_failed=523, missing_fvg_or_orderblock=366
-- **EVAL::FAILED_AUCTION_RECLAIM** (total=47695): auction_not_detected=19091, basic_filters_failed=15399, tail_too_small=5760, reclaim_hold_failed=5477, regime_blocked=1957, rsi_reject=11
-- **EVAL::FUNDING_EXTREME** (total=56919): funding_not_extreme=36794, basic_filters_failed=18337, missing_funding_rate=717, ema_alignment_reject=535, rsi_reject=355, momentum_reject=89, cvd_divergence_failed=78, insufficient_candles=10, missing_fvg_or_orderblock=4
-- **EVAL::LIQUIDATION_REVERSAL** (total=46411): cascade_threshold_not_met=27004, basic_filters_failed=18792, cvd_divergence_failed=370, rsi_reject=166, insufficient_candles=37, missing_fvg_or_orderblock=23, volume_spike_missing=19
-- **EVAL::MA_CROSS_TREND_SHIFT** (total=50383): no_ma_cross=33533, basic_filters_failed=16221, ma_cross_cooldown=617, ma_cross_htf_misaligned=12
-- **EVAL::MOVER_AVWAP_SCALP** (total=68669): no_avwap_tag=35403, basic_filters_failed=23203, no_mover_leg=8812, no_avwap_reclaim=448, avwap_reclaim_no_volume=389, avwap_slope_against=283, anchor_too_recent=94, insufficient_candles=37
-- **EVAL::MOVER_TREND_PULLBACK** (total=47940): basic_filters_failed=23180, mover_run_too_small=15807, no_reclaim=7703, no_pullback_tag=1213, insufficient_candles=37
-- **EVAL::OPENING_RANGE_BREAKOUT** (total=56511): feature_disabled=56511
-- **EVAL::POST_DISPLACEMENT_CONTINUATION** (total=50331): regime_blocked=32884, breakout_not_found=10756, basic_filters_failed=5622, adx_reject=1065, ema_alignment_reject=4
-- **EVAL::QUIET_COMPRESSION_BREAK** (total=50196): compression_not_detected=20387, regime_blocked=19354, basic_filters_failed=9772, breakout_not_detected=664, volume_confirmation_failed=18, missing_fvg_or_orderblock=1
-- **EVAL::SR_FLIP_RETEST** (total=47128): basic_filters_failed=15391, flip_close_not_confirmed=9536, reclaim_hold_failed=5582, whipsaw_flip=4687, retest_out_of_zone=4082, long_break_volume_thin=3969, regime_blocked=1955, long_disabled=1026, wick_quality_failed=751, long_acceptance_not_held=89, missing_fvg_or_orderblock=49, ema_alignment_reject=11
-- **EVAL::STANDARD** (total=36698): momentum_reject=9742, basic_filters_failed=9714, adx_reject=6169, sweeps_not_detected=4669, macd_reject=3665, ema_alignment_reject=1913, rsi_reject=765, invalid_sl_geometry=61
-- **EVAL::TREND_PULLBACK** (total=40017): h1_trend_not_aligned=13704, h1_pullback_not_confirmed=12648, basic_filters_failed=4316, ema_alignment_reject=2675, ema_not_tested_prev=2443, no_ema_reclaim_close=2108, rsi_reject=950, body_conviction_fail=677, prev_already_below_emas=195, no_prev_low_break=186, prev_already_above_emas=47, missing_fvg_or_orderblock=18, momentum_reject=18, no_prev_high_break=11, ema21_not_tagged=11, momentum_flat=10
-- **EVAL::VOLUME_SURGE_BREAKOUT** (total=61220): breakout_not_found=35365, basic_filters_failed=23166, move_not_fresh=1486, breakout_stale=779, retest_proximity_failed=353, insufficient_candles=37, volume_spike_missing=28, rsi_reject=6
-- **EVAL::WHALE_MOMENTUM** (total=46417): momentum_reject=37143, recent_ticks_insufficient=5976, basic_filters_failed=3298
+- **EVAL::BREAKDOWN_SHORT** (total=41222): basic_filters_failed=17920, breakout_not_found=16148, move_not_fresh=4673, breakout_stale=1254, retest_proximity_failed=804, insufficient_candles=362, ema_alignment_reject=47, volume_spike_missing=12, move_exhausted=2
+- **EVAL::CONTINUATION_LIQUIDITY_SWEEP** (total=34954): cls_disabled_merged_into_lsr=34954
+- **EVAL::DIVERGENCE_CONTINUATION** (total=33443): basic_filters_failed=13316, cvd_divergence_failed=8793, h1_trend_not_aligned=7896, ema_alignment_reject=1946, retest_proximity_failed=1296, missing_fvg_or_orderblock=196
+- **EVAL::FAILED_AUCTION_RECLAIM** (total=33223): basic_filters_failed=12894, auction_not_detected=10841, reclaim_hold_failed=4146, tail_too_small=3792, regime_blocked=1539, rsi_reject=11
+- **EVAL::FUNDING_EXTREME** (total=38975): funding_not_extreme=23467, basic_filters_failed=14557, ema_alignment_reject=655, rsi_reject=172, missing_funding_rate=79, cvd_divergence_failed=25, insufficient_candles=10, momentum_reject=8, missing_fvg_or_orderblock=2
+- **EVAL::LIQUIDATION_REVERSAL** (total=31764): cascade_threshold_not_met=16443, basic_filters_failed=14433, cvd_divergence_failed=371, rsi_reject=265, insufficient_candles=208, missing_fvg_or_orderblock=25, volume_spike_missing=19
+- **EVAL::MA_CROSS_TREND_SHIFT** (total=34990): no_ma_cross=21437, basic_filters_failed=13321, ma_cross_htf_misaligned=128, ma_cross_cooldown=104
+- **EVAL::MOVER_AVWAP_SCALP** (total=45490): no_avwap_tag=22579, basic_filters_failed=17947, no_mover_leg=3503, avwap_slope_against=491, insufficient_candles=420, no_avwap_reclaim=381, avwap_reclaim_no_volume=132, anchor_too_recent=37
+- **EVAL::MOVER_TREND_PULLBACK** (total=34111): basic_filters_failed=17934, mover_run_too_small=9859, no_reclaim=5331, no_pullback_tag=567, insufficient_candles=420
+- **EVAL::OPENING_RANGE_BREAKOUT** (total=38599): feature_disabled=38599
+- **EVAL::POST_DISPLACEMENT_CONTINUATION** (total=34951): regime_blocked=23845, basic_filters_failed=6330, breakout_not_found=4288, adx_reject=487, ema_alignment_reject=1
+- **EVAL::QUIET_COMPRESSION_BREAK** (total=34830): compression_not_detected=14921, regime_blocked=12631, basic_filters_failed=6562, breakout_not_detected=428, volume_confirmation_failed=288
+- **EVAL::SR_FLIP_RETEST** (total=34164): basic_filters_failed=12890, flip_close_not_confirmed=4582, retest_out_of_zone=3569, whipsaw_flip=3522, long_break_volume_thin=3316, reclaim_hold_failed=2256, regime_blocked=1538, long_disabled=1205, ema_alignment_reject=636, wick_quality_failed=561, long_acceptance_not_held=58, missing_fvg_or_orderblock=31
+- **EVAL::STANDARD** (total=25619): basic_filters_failed=7669, momentum_reject=6057, adx_reject=5178, sweeps_not_detected=3267, macd_reject=2247, ema_alignment_reject=961, rsi_reject=170, invalid_sl_geometry=69, mtf_reject=1
+- **EVAL::TREND_PULLBACK** (total=28065): h1_pullback_not_confirmed=11883, h1_trend_not_aligned=8206, basic_filters_failed=3251, ema_alignment_reject=1895, ema_not_tested_prev=1528, no_ema_reclaim_close=559, rsi_reject=254, body_conviction_fail=248, prev_already_below_emas=102, ema21_not_tagged=43, prev_already_above_emas=39, no_prev_low_break=28, no_prev_high_break=23, momentum_flat=3, momentum_reject=3
+- **EVAL::VOLUME_SURGE_BREAKOUT** (total=41214): basic_filters_failed=17919, breakout_not_found=17830, breakout_stale=2893, move_not_fresh=1744, insufficient_candles=362, retest_proximity_failed=357, volume_spike_missing=93, ema_alignment_reject=14, move_exhausted=2
+- **EVAL::WHALE_MOMENTUM** (total=31771): momentum_reject=26436, recent_ticks_insufficient=3070, basic_filters_failed=2265
 
 ## Regime distribution
 | Regime | Count | % of cycles |
 |---|---:|---:|
-| RANGING | 111714 | 37.4% |
-| TRENDING_DOWN | 90437 | 30.2% |
-| QUIET | 58848 | 19.7% |
-| TRENDING_UP | 21395 | 7.2% |
-| VOLATILE | 16706 | 5.6% |
+| RANGING | 72240 | 33.5% |
+| QUIET | 57433 | 26.7% |
+| TRENDING_DOWN | 36303 | 16.9% |
+| TRENDING_UP | 35806 | 16.6% |
+| VOLATILE | 13603 | 6.3% |
 
 ## QUIET_SCALP_BLOCK gate
-- Total blocks in window: **71**
-- Average confidence gap to threshold: **12.79** (samples=71) — small gap means candidates are *close* to clearing the gate.
-- Top blocked symbols: TRXUSDT=38, BTCUSDT=16, ETHUSDT=9, AAVEUSDT=5, 1000BONKUSDT=3
+- Total blocks in window: **138**
+- Average confidence gap to threshold: **10.79** (samples=138) — small gap means candidates are *close* to clearing the gate.
+- Top blocked symbols: XLMUSDT=50, TRXUSDT=38, LTCUSDT=12, BZUSDT=9, XRPUSDT=7, ETHUSDT=6, BTCUSDT=5, 1000BONKUSDT=4, DOGEUSDT=4, SOLUSDT=3
 
 ## Confidence gate decisions
 | Setup | Decision | Reason | Count |
 |---|---|---|---:|
 | BREAKDOWN_SHORT | kept | min_confidence_pass | 2 |
-| DIVERGENCE_CONTINUATION | filtered | quiet_scalp_min_confidence | 38 |
-| DIVERGENCE_CONTINUATION | filtered | min_confidence | 3 |
-| DIVERGENCE_CONTINUATION | kept | min_confidence_pass | 22 |
-| FAILED_AUCTION_RECLAIM | filtered | min_confidence | 312 |
-| FAILED_AUCTION_RECLAIM | filtered | quiet_scalp_min_confidence | 13 |
-| FAILED_AUCTION_RECLAIM | kept | min_confidence_pass | 74 |
-| FUNDING_EXTREME_SIGNAL | filtered | min_confidence | 21 |
-| LIQUIDITY_SWEEP_REVERSAL | filtered | min_confidence | 169 |
-| LIQUIDITY_SWEEP_REVERSAL | kept | min_confidence_pass | 12 |
-| MOVER_AVWAP_SCALP | kept | min_confidence_pass | 289 |
-| MOVER_TREND_PULLBACK | kept | min_confidence_pass | 724 |
-| QUIET_COMPRESSION_BREAK | kept | min_confidence_pass | 87 |
-| SR_FLIP_RETEST | filtered | min_confidence | 77 |
-| SR_FLIP_RETEST | filtered | quiet_scalp_min_confidence | 20 |
-| SR_FLIP_RETEST | kept | min_confidence_pass | 4 |
+| DIVERGENCE_CONTINUATION | filtered | min_confidence | 143 |
+| DIVERGENCE_CONTINUATION | filtered | quiet_scalp_min_confidence | 42 |
+| DIVERGENCE_CONTINUATION | kept | min_confidence_pass | 59 |
+| FAILED_AUCTION_RECLAIM | filtered | min_confidence | 171 |
+| FAILED_AUCTION_RECLAIM | kept | min_confidence_pass | 5 |
+| LIQUIDITY_SWEEP_REVERSAL | filtered | min_confidence | 87 |
+| LIQUIDITY_SWEEP_REVERSAL | kept | min_confidence_pass | 25 |
+| MOVER_AVWAP_SCALP | kept | min_confidence_pass | 704 |
+| MOVER_TREND_PULLBACK | filtered | quiet_scalp_min_confidence | 28 |
+| MOVER_TREND_PULLBACK | kept | min_confidence_pass | 1044 |
+| QUIET_COMPRESSION_BREAK | kept | min_confidence_pass | 49 |
+| SR_FLIP_RETEST | filtered | min_confidence | 111 |
+| SR_FLIP_RETEST | filtered | quiet_scalp_min_confidence | 68 |
+| SR_FLIP_RETEST | kept | min_confidence_pass | 129 |
+| TREND_PULLBACK_EMA | filtered | min_confidence | 13 |
+| TREND_PULLBACK_EMA | kept | min_confidence_pass | 38 |
 | VOLUME_SURGE_BREAKOUT | filtered | min_confidence | 19 |
 
 ## Confidence component breakdown
 | Setup | Decision | Samples | Avg final | Avg threshold | Gap | Market | Execution | Risk | Thesis adj | Avg penalty |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | BREAKDOWN_SHORT | kept | 2 | 71.50 | 65.00 | -6.50 | 20.75 | 19.90 | 20.00 | 4.50 | 6.00 |
-| DIVERGENCE_CONTINUATION | filtered | 41 | 50.83 | 65.00 | 14.17 | 19.64 | 19.99 | 17.06 | 1.34 | 18.04 |
-| DIVERGENCE_CONTINUATION | kept | 22 | 67.07 | 65.00 | -2.07 | 19.92 | 20.00 | 15.48 | 0.36 | 0.22 |
-| FAILED_AUCTION_RECLAIM | filtered | 325 | 53.75 | 65.00 | 11.25 | 20.85 | 19.22 | 20.00 | 4.10 | 4.21 |
-| FAILED_AUCTION_RECLAIM | kept | 74 | 75.98 | 65.00 | -10.98 | 23.19 | 18.99 | 20.00 | 4.79 | 0.00 |
-| FUNDING_EXTREME_SIGNAL | filtered | 21 | 47.11 | 65.00 | 17.89 | 20.25 | 20.00 | 17.00 | 1.05 | 5.00 |
-| LIQUIDITY_SWEEP_REVERSAL | filtered | 169 | 50.94 | 65.00 | 14.06 | 18.14 | 18.92 | 18.88 | 3.53 | 20.00 |
-| LIQUIDITY_SWEEP_REVERSAL | kept | 12 | 68.96 | 65.00 | -3.96 | 19.17 | 19.20 | 17.33 | 1.42 | 1.53 |
-| MOVER_AVWAP_SCALP | kept | 289 | 72.06 | 65.00 | -7.06 | 19.39 | 19.58 | 15.80 | 2.86 | 0.85 |
-| MOVER_TREND_PULLBACK | kept | 724 | 81.75 | 65.00 | -16.75 | 20.60 | 17.60 | 15.80 | 4.12 | 0.00 |
-| QUIET_COMPRESSION_BREAK | kept | 87 | 77.34 | 65.00 | -12.34 | 19.63 | 20.00 | 20.00 | 0.00 | -0.58 |
-| SR_FLIP_RETEST | filtered | 97 | 58.79 | 65.00 | 6.21 | 22.18 | 19.96 | 15.54 | 1.56 | 10.56 |
-| SR_FLIP_RETEST | kept | 4 | 67.92 | 65.00 | -2.92 | 21.85 | 19.85 | 16.65 | 2.50 | 6.83 |
+| DIVERGENCE_CONTINUATION | filtered | 185 | 53.54 | 65.00 | 11.46 | 20.36 | 19.82 | 17.32 | 0.89 | 12.26 |
+| DIVERGENCE_CONTINUATION | kept | 59 | 69.24 | 65.00 | -4.24 | 20.46 | 19.70 | 17.85 | 0.34 | -1.82 |
+| FAILED_AUCTION_RECLAIM | filtered | 171 | 51.01 | 65.00 | 13.99 | 20.67 | 18.57 | 20.00 | 3.46 | 9.55 |
+| FAILED_AUCTION_RECLAIM | kept | 5 | 69.08 | 65.00 | -4.08 | 22.26 | 19.44 | 20.00 | 4.90 | 0.00 |
+| LIQUIDITY_SWEEP_REVERSAL | filtered | 87 | 57.80 | 65.00 | 7.20 | 19.75 | 20.00 | 16.76 | 2.32 | 10.88 |
+| LIQUIDITY_SWEEP_REVERSAL | kept | 25 | 69.05 | 65.00 | -4.05 | 19.87 | 19.62 | 16.75 | 1.72 | 0.98 |
+| MOVER_AVWAP_SCALP | kept | 704 | 74.51 | 65.00 | -9.51 | 17.97 | 18.53 | 15.80 | 3.42 | 0.35 |
+| MOVER_TREND_PULLBACK | filtered | 28 | 60.54 | 65.00 | 4.46 | 22.58 | 16.60 | 15.80 | 3.61 | 21.60 |
+| MOVER_TREND_PULLBACK | kept | 1044 | 79.73 | 65.00 | -14.73 | 20.47 | 17.13 | 15.80 | 3.70 | 0.00 |
+| QUIET_COMPRESSION_BREAK | kept | 49 | 73.33 | 65.00 | -8.33 | 19.57 | 20.00 | 20.00 | 0.00 | 1.30 |
+| SR_FLIP_RETEST | filtered | 179 | 56.61 | 65.00 | 8.39 | 20.97 | 19.92 | 15.73 | 1.79 | 13.16 |
+| SR_FLIP_RETEST | kept | 129 | 67.87 | 65.00 | -2.87 | 21.44 | 19.94 | 17.27 | 2.63 | 3.51 |
+| TREND_PULLBACK_EMA | filtered | 13 | 42.92 | 65.00 | 22.08 | 20.37 | 18.90 | 15.70 | 4.00 | 17.20 |
+| TREND_PULLBACK_EMA | kept | 38 | 81.00 | 65.00 | -16.00 | 20.05 | 20.00 | 17.00 | 5.50 | 0.00 |
 | VOLUME_SURGE_BREAKOUT | filtered | 19 | 59.55 | 65.00 | 5.45 | 21.12 | 18.03 | 20.00 | 4.76 | 6.60 |
 
 ## Scoring engine breakdown (per-dimension contribution)
@@ -123,18 +127,20 @@ _These are the actual ``SignalScoringEngine`` dimensions whose sum reconstructs 
 | Setup | Decision | Samples | Avg final | SMC | Regime | Volume | Indicators | Patterns | MTF | Thesis adj |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | BREAKDOWN_SHORT | kept | 2 | 71.50 | 25.00 | 14.00 | 12.00 | 14.00 | 5.00 | 3.00 | 4.50 |
-| DIVERGENCE_CONTINUATION | filtered | 41 | 50.83 | 19.54 | 8.00 | 11.34 | 13.71 | 5.29 | 9.66 | 1.34 |
-| DIVERGENCE_CONTINUATION | kept | 22 | 67.07 | 23.55 | 8.45 | 6.68 | 13.82 | 5.00 | 9.43 | 0.36 |
-| FAILED_AUCTION_RECLAIM | filtered | 325 | 53.75 | 21.50 | 17.22 | 5.66 | 12.59 | 6.38 | 4.51 | 4.10 |
-| FAILED_AUCTION_RECLAIM | kept | 74 | 75.98 | 22.51 | 17.78 | 5.80 | 11.88 | 6.49 | 7.13 | 4.79 |
-| FUNDING_EXTREME_SIGNAL | filtered | 21 | 47.11 | 25.00 | 8.00 | 3.00 | 16.29 | 10.00 | 3.78 | 1.05 |
-| LIQUIDITY_SWEEP_REVERSAL | filtered | 169 | 50.94 | 22.87 | 14.00 | 6.37 | 12.00 | 5.47 | 6.70 | 3.53 |
-| LIQUIDITY_SWEEP_REVERSAL | kept | 12 | 68.96 | 21.00 | 16.00 | 5.50 | 13.08 | 5.50 | 7.98 | 1.42 |
-| MOVER_AVWAP_SCALP | kept | 289 | 72.06 | 20.43 | 18.00 | 7.50 | 11.93 | 5.49 | 6.70 | 2.86 |
-| MOVER_TREND_PULLBACK | kept | 724 | 81.75 | 17.01 | 18.00 | 13.48 | 12.46 | 6.97 | 9.72 | 4.12 |
-| QUIET_COMPRESSION_BREAK | kept | 87 | 77.34 | 17.92 | 18.00 | 11.62 | 14.00 | 6.53 | 10.00 | 0.00 |
-| SR_FLIP_RETEST | filtered | 97 | 58.79 | 19.97 | 15.94 | 5.81 | 12.86 | 5.79 | 7.42 | 1.56 |
-| SR_FLIP_RETEST | kept | 4 | 67.92 | 25.00 | 18.00 | 6.00 | 12.25 | 5.00 | 6.00 | 2.50 |
+| DIVERGENCE_CONTINUATION | filtered | 185 | 53.54 | 22.66 | 14.00 | 6.41 | 11.81 | 4.82 | 8.10 | 0.89 |
+| DIVERGENCE_CONTINUATION | kept | 59 | 69.24 | 19.17 | 16.64 | 6.56 | 12.29 | 5.49 | 9.16 | 0.34 |
+| FAILED_AUCTION_RECLAIM | filtered | 171 | 51.01 | 19.71 | 17.98 | 6.58 | 14.26 | 5.04 | 4.68 | 3.46 |
+| FAILED_AUCTION_RECLAIM | kept | 5 | 69.08 | 23.40 | 15.60 | 4.80 | 10.80 | 7.50 | 5.08 | 4.90 |
+| LIQUIDITY_SWEEP_REVERSAL | filtered | 87 | 57.80 | 24.98 | 14.00 | 3.00 | 11.05 | 5.00 | 8.34 | 2.32 |
+| LIQUIDITY_SWEEP_REVERSAL | kept | 25 | 69.05 | 22.36 | 14.96 | 4.32 | 12.48 | 6.04 | 8.15 | 1.72 |
+| MOVER_AVWAP_SCALP | kept | 704 | 74.51 | 18.77 | 18.00 | 7.50 | 12.33 | 7.02 | 7.82 | 3.42 |
+| MOVER_TREND_PULLBACK | filtered | 28 | 60.54 | 18.14 | 18.00 | 12.27 | 14.00 | 6.12 | 10.00 | 3.61 |
+| MOVER_TREND_PULLBACK | kept | 1044 | 79.73 | 19.44 | 18.02 | 7.95 | 13.87 | 6.81 | 9.94 | 3.70 |
+| QUIET_COMPRESSION_BREAK | kept | 49 | 73.33 | 18.63 | 18.00 | 9.00 | 14.00 | 5.00 | 10.00 | 0.00 |
+| SR_FLIP_RETEST | filtered | 179 | 56.61 | 20.05 | 14.20 | 4.89 | 13.46 | 7.51 | 7.86 | 1.79 |
+| SR_FLIP_RETEST | kept | 129 | 67.87 | 22.27 | 14.36 | 4.70 | 14.14 | 5.56 | 7.75 | 2.63 |
+| TREND_PULLBACK_EMA | filtered | 13 | 42.92 | 17.62 | 18.00 | 7.50 | 14.00 | 5.00 | 9.00 | 4.00 |
+| TREND_PULLBACK_EMA | kept | 38 | 81.00 | 25.00 | 18.00 | 7.50 | 14.00 | 5.00 | 6.00 | 5.50 |
 | VOLUME_SURGE_BREAKOUT | filtered | 19 | 59.55 | 23.74 | 18.00 | 12.00 | 14.00 | 3.95 | 4.70 | 4.76 |
 
 ## Soft-penalty per-type breakdown
@@ -142,38 +148,40 @@ _Average per-type contribution to the aggregate ``gate`` penalty.  When one colu
 | Setup | Decision | Samples | Avg final | VWAP | KZ | OI | Spoof | Vol_Div | Cluster | BTC_Dir | Sym_Dir | Sum |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | BREAKDOWN_SHORT | kept | 2 | 71.50 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 3.00 | **3.00** |
-| DIVERGENCE_CONTINUATION | filtered | 41 | 50.83 | 0.00 | 0.00 | 0.00 | 0.00 | 20.02 | 0.00 | 0.00 | 0.00 | **20.02** |
-| DIVERGENCE_CONTINUATION | kept | 22 | 67.07 | 0.00 | 0.00 | 0.22 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.22** |
-| FAILED_AUCTION_RECLAIM | filtered | 325 | 53.75 | 0.00 | 0.00 | 0.34 | 0.00 | 0.96 | 0.00 | 0.00 | 0.00 | **1.30** |
-| FAILED_AUCTION_RECLAIM | kept | 74 | 75.98 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
-| FUNDING_EXTREME_SIGNAL | filtered | 21 | 47.11 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
-| LIQUIDITY_SWEEP_REVERSAL | filtered | 169 | 50.94 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
-| LIQUIDITY_SWEEP_REVERSAL | kept | 12 | 68.96 | 0.00 | 0.00 | 0.67 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.67** |
-| MOVER_AVWAP_SCALP | kept | 289 | 72.06 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.85 | **0.85** |
-| MOVER_TREND_PULLBACK | kept | 724 | 81.75 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
-| QUIET_COMPRESSION_BREAK | kept | 87 | 77.34 | 0.00 | 0.00 | 0.00 | 0.00 | 2.42 | 0.00 | 0.00 | 0.00 | **2.42** |
-| SR_FLIP_RETEST | filtered | 97 | 58.79 | 0.00 | 0.00 | 0.00 | 0.00 | 2.45 | 0.00 | 0.00 | 0.00 | **2.45** |
-| SR_FLIP_RETEST | kept | 4 | 67.92 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
+| DIVERGENCE_CONTINUATION | filtered | 185 | 53.54 | 0.00 | 0.00 | 1.82 | 0.00 | 4.90 | 0.00 | 0.00 | 0.00 | **6.72** |
+| DIVERGENCE_CONTINUATION | kept | 59 | 69.24 | 0.00 | 0.00 | 0.16 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.16** |
+| FAILED_AUCTION_RECLAIM | filtered | 171 | 51.01 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
+| FAILED_AUCTION_RECLAIM | kept | 5 | 69.08 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
+| LIQUIDITY_SWEEP_REVERSAL | filtered | 87 | 57.80 | 0.00 | 0.00 | 3.95 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **3.95** |
+| LIQUIDITY_SWEEP_REVERSAL | kept | 25 | 69.05 | 0.00 | 0.00 | 0.32 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.32** |
+| MOVER_AVWAP_SCALP | kept | 704 | 74.51 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.35 | **0.35** |
+| MOVER_TREND_PULLBACK | filtered | 28 | 60.54 | 0.00 | 0.00 | 0.00 | 0.00 | 21.60 | 0.00 | 0.00 | 0.00 | **21.60** |
+| MOVER_TREND_PULLBACK | kept | 1044 | 79.73 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
+| QUIET_COMPRESSION_BREAK | kept | 49 | 73.33 | 0.00 | 0.00 | 0.00 | 0.00 | 4.30 | 0.00 | 0.00 | 0.00 | **4.30** |
+| SR_FLIP_RETEST | filtered | 179 | 56.61 | 2.26 | 0.00 | 0.00 | 0.00 | 4.22 | 0.00 | 0.00 | 0.00 | **6.48** |
+| SR_FLIP_RETEST | kept | 129 | 67.87 | 0.04 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.04** |
+| TREND_PULLBACK_EMA | filtered | 13 | 42.92 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
+| TREND_PULLBACK_EMA | kept | 38 | 81.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | **0.00** |
 | VOLUME_SURGE_BREAKOUT | filtered | 19 | 59.55 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 0.00 | 3.60 | **3.60** |
 
 ## Invalidation Quality Audit
 _Each trade-monitor kill is classified after a 30-min window: **PROTECTIVE** (price moved further against position by >0.3R — kill saved money), **PREMATURE** (price would have hit TP1 — kill destroyed value), **NEUTRAL** (price stayed within ±0.3R), **INSUFFICIENT_DATA** (no usable post-kill OHLC).  This is the only honest answer to 'is invalidation net-helping or net-hurting?'_
-- Totals: PROTECTIVE=81 (67.5%) | PREMATURE=17 (14.2%) | NEUTRAL=22 | INSUFFICIENT_DATA=0 | stale (awaiting classification)=0
-- **Net-helping** — invalidation saved on 64 more signals than it killed prematurely.  Tightening would lose that protection.
+- Totals: PROTECTIVE=77 (66.4%) | PREMATURE=18 (15.5%) | NEUTRAL=21 | INSUFFICIENT_DATA=0 | stale (awaiting classification)=1
+- **Net-helping** — invalidation saved on 59 more signals than it killed prematurely.  Tightening would lose that protection.
 
 | Kill reason | PROTECTIVE | PREMATURE | NEUTRAL | INSUFFICIENT |
 |---|---:|---:|---:|---:|
-| expired | 81 | 17 | 22 | 0 |
+| expired | 77 | 18 | 21 | 0 |
 
 | Setup | PROTECTIVE | PREMATURE | NEUTRAL | INSUFFICIENT |
 |---|---:|---:|---:|---:|
-| DIVERGENCE_CONTINUATION | 4 | 2 | 1 | 0 |
+| DIVERGENCE_CONTINUATION | 4 | 3 | 1 | 0 |
 | FAILED_AUCTION_RECLAIM | 16 | 5 | 7 | 0 |
 | LIQUIDITY_SWEEP_REVERSAL | 3 | 2 | 2 | 0 |
-| MOVER_AVWAP_SCALP | 14 | 0 | 1 | 0 |
-| MOVER_TREND_PULLBACK | 28 | 2 | 1 | 0 |
+| MOVER_AVWAP_SCALP | 13 | 0 | 1 | 0 |
+| MOVER_TREND_PULLBACK | 27 | 2 | 1 | 0 |
 | QUIET_COMPRESSION_BREAK | 0 | 0 | 1 | 0 |
-| SR_FLIP_RETEST | 15 | 6 | 9 | 0 |
+| SR_FLIP_RETEST | 13 | 6 | 8 | 0 |
 | WHALE_MOMENTUM | 1 | 0 | 0 | 0 |
 
 ### Per-rule ablation (R-units per kill)
@@ -181,15 +189,15 @@ _DROP candidate: avg EV < -0.20R/kill across >= 20 kills. KEEP: avg EV > +0.10R/
 
 | Rule | PROT | PREM | NEUT | Saved R | Missed R | EV/kill (R) | Verdict |
 |---|---:|---:|---:|---:|---:|---:|---|
-| expired | 81 | 17 | 22 | 60.2 | 27.1 | +0.28 | **KEEP** — net-helping: avg +0.28R/kill across 120 kills (saved 60.2R vs missed 27.1R) |
+| expired | 77 | 18 | 21 | 57.7 | 28.7 | +0.25 | **KEEP** — net-helping: avg +0.25R/kill across 116 kills (saved 57.7R vs missed 28.7R) |
 
 ## Log parse diagnostics
 _If a section above is empty but the matching diagnostic count is also 0, the engine isn't emitting that log line in the window (cadence/retention) rather than the parser being broken._
-- Total log lines in window: `81903`
-- `Path funnel` emissions: `34`
-- `Regime distribution` emissions: `34`
-- `QUIET_SCALP_BLOCK` events: `71`
-- `confidence_gate` events: `1886`
+- Total log lines in window: `63555`
+- `Path funnel` emissions: `24`
+- `Regime distribution` emissions: `24`
+- `QUIET_SCALP_BLOCK` events: `138`
+- `confidence_gate` events: `2737`
 - `free_channel_post` events: `3`
 - `pre_tp_fire` events: `0`
 
@@ -199,12 +207,8 @@ _Each row is a pre-TP fire — signal moved favourably by the resolved threshold
 
 ## WebSocket outage stats
 _Drop → restored durations and REST-fallback activations parsed from engine logs.  Each reconnect emits a `ws_reconnect_duration_ms` marker; each REST-fallback start emits `ws_rest_fallback_activated`. The 180s grace column shows how many reconnects exceeded ``WS_REST_FALLBACK_ALERT_GRACE_SEC`` (i.e. fired an admin alert) — if `exceeds_grace` >> 0 we should bump the grace, shard further, or both._
-- Total reconnects in window: **1**
+- Total reconnects in window: **0**
 - Total REST-fallback activations: **0**
-
-| Label | Reconnects | p50 (ms) | p95 (ms) | Max (ms) | Exceeds 180s grace |
-|---|---:|---:|---:|---:|---:|
-| futures_liq | 1 | 3640 | 3640 | 3640 | 0 |
 
 ## Free-channel post attribution
 _Counts every successful post to the free subscriber channel by source.  Verifies the Phase-5 close-storytelling, Phase-2a BTC big-move, Phase-2b regime-shift, and Phase-1 macro-alert pipelines are firing in production.  Zero counts on a freshly-shipped instrumentation rollout are the expected baseline._
@@ -218,52 +222,50 @@ _Counts every successful post to the free subscriber channel by source.  Verifie
 - By severity: HIGH=3
 
 ## Dependency readiness
-- cvd: presence[present=231257] state[populated=231257] buckets[few=3, many=231219, some=35] sources[none] quality[none]
-- funding_rate: presence[absent=31930, present=199327] state[empty=31930, populated=199327] buckets[few=199327, none=31930] sources[none] quality[none]
-- liquidation_clusters: presence[absent=146022, present=85235] state[empty=146022, populated=85235] buckets[few=71450, none=146022, some=13785] sources[none] quality[none]
-- oi_snapshot: presence[absent=31929, present=199328] state[empty=31929, populated=199328] buckets[few=286, many=197464, none=31929, some=1578] sources[none] quality[none]
-- order_book: presence[absent=62796, present=168461] state[populated=168461, unavailable=62796] buckets[few=168461, none=62796] sources[book_ticker=168461, unavailable=62796] quality[none=62796, top_of_book_only=168461]
-- orderblocks: presence[absent=231257] state[empty=231257] buckets[none=231257] sources[not_implemented=231257] quality[none]
-- recent_ticks: presence[present=231257] state[populated=231257] buckets[many=231257] sources[none] quality[none]
+- cvd: presence[present=156510] state[populated=156510] buckets[few=3, many=156472, some=35] sources[none] quality[none]
+- funding_rate: presence[absent=20170, present=136340] state[empty=20170, populated=136340] buckets[few=136340, none=20170] sources[none] quality[none]
+- liquidation_clusters: presence[absent=79099, present=77411] state[empty=79099, populated=77411] buckets[few=59517, none=79099, some=17894] sources[none] quality[none]
+- oi_snapshot: presence[absent=20169, present=136341] state[empty=20169, populated=136341] buckets[few=286, many=134477, none=20169, some=1578] sources[none] quality[none]
+- order_book: presence[absent=41557, present=114953] state[populated=114953, unavailable=41557] buckets[few=114953, none=41557] sources[book_ticker=114953, unavailable=41557] quality[none=41557, top_of_book_only=114953]
+- orderblocks: presence[absent=156510] state[empty=156510] buckets[none=156510] sources[not_implemented=156510] quality[none]
+- recent_ticks: presence[present=156510] state[populated=156510] buckets[many=156510] sources[none] quality[none]
 
 ## Lifecycle truth summary
-- Median create→dispatch: `4.234135031700134` sec
-- Median create→first breach: `1002.3900294303894` sec
-- Median create→terminal: `2237.078251004219` sec
-- Median first breach→terminal: `1.9496474266052246` sec
-- Fast-failure buckets: `{"under_120s": {"count": 1, "pct": 1.3}, "under_180s": {"count": 3, "pct": 3.9}, "under_30s": {"count": 0, "pct": 0.0}, "under_60s": {"count": 1, "pct": 1.3}}`
-- ~3 minute terminal-close behavior: `{"count": 4, "pct": 3.1}`
+- Median create→dispatch: `2.885936975479126` sec
+- Median create→first breach: `885.2688648700714` sec
+- Median create→terminal: `1907.8463099002838` sec
+- Median first breach→terminal: `1.586216926574707` sec
+- Fast-failure buckets: `{"under_120s": {"count": 1, "pct": 6.7}, "under_180s": {"count": 1, "pct": 6.7}, "under_30s": {"count": 0, "pct": 0.0}, "under_60s": {"count": 1, "pct": 6.7}}`
+- ~3 minute terminal-close behavior: `{"count": 1, "pct": 4.2}`
 
 ## Quality-by-path/setup summary
 _``Win rate`` / ``TP rate`` count only TP1/TP2/TP3 hits — they MISS the pre-TP partial-close fires that bank real subscriber value per OWNER_BRIEF §3.2a.  ``Pre-TP win%`` is the rate at which signals hit their pre-TP threshold (typically ~+0.32% raw → ~+2.5% net @ 10×) before terminal close.  The composite truth: a setup with Win=0 + Pre-TP=60% is doctrinally healthy (banking + BE residual), while Win=0 + Pre-TP=0 is the actual quality problem._
 | Path/Setup | Emitted | Closed | Win rate | SL rate | TP rate | Pre-TP win% | Avg PnL% | Median first breach (s) | Median terminal (s) |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| BREAKDOWN_SHORT | 6 | 6 | 16.7 | 50.0 | 16.7 | 0.0 | 0.2839 | 579.3527920246124 | 1336.687539935112 |
-| DIVERGENCE_CONTINUATION | 19 | 19 | 21.1 | 47.4 | 21.1 | 0.0 | 0.0384 | 1181.8171454668045 | 1362.483321905136 |
-| FAILED_AUCTION_RECLAIM | 32 | 32 | 6.2 | 18.8 | 6.2 | 0.0 | 0.3312 | 1457.7069475650787 | 3600.5548290014267 |
-| LIQUIDITY_SWEEP_REVERSAL | 5 | 5 | 20.0 | 40.0 | 20.0 | 0.0 | -0.0789 | 484.9011824131012 | 686.1017279624939 |
-| MOVER_AVWAP_SCALP | 8 | 8 | 0.0 | 0.0 | 0.0 | 0.0 | -0.0567 | None | 3603.2359920740128 |
-| MOVER_TREND_PULLBACK | 30 | 30 | 3.3 | 30.0 | 3.3 | 0.0 | -0.5188 | 522.8061990737915 | 2553.1079790592194 |
-| SR_FLIP_RETEST | 25 | 25 | 40.0 | 24.0 | 40.0 | 0.0 | 0.4436 | 1310.9793899059296 | 1916.3324840068817 |
-| TREND_PULLBACK_EMA | 2 | 2 | 0.0 | 0.0 | 0.0 | 0.0 | 0.0 | 1476.9315971136093 | 1478.3650945425034 |
-| VOLUME_SURGE_BREAKOUT | 3 | 3 | 0.0 | 66.7 | 0.0 | 0.0 | -0.5469 | 1964.0596549510956 | 1964.6024980545044 |
+| BREAKDOWN_SHORT | 1 | 1 | 0.0 | 100.0 | 0.0 | 0.0 | -3.0 | 402.69567012786865 | 404.5148289203644 |
+| DIVERGENCE_CONTINUATION | 3 | 3 | 0.0 | 33.3 | 0.0 | 0.0 | 0.4856 | 219.80720686912537 | 3604.1055607795715 |
+| FAILED_AUCTION_RECLAIM | 6 | 6 | 33.3 | 16.7 | 33.3 | 0.0 | 1.3063 | 2027.094804406166 | 2185.6771174669266 |
+| LIQUIDITY_SWEEP_REVERSAL | 1 | 1 | 100.0 | 0.0 | 100.0 | 0.0 | 1.4295 | 685.4990639686584 | 686.1017279624939 |
+| MOVER_AVWAP_SCALP | 1 | 1 | 0.0 | 0.0 | 0.0 | 0.0 | -0.3423 | None | 3603.41846203804 |
+| MOVER_TREND_PULLBACK | 5 | 5 | 0.0 | 40.0 | 0.0 | 0.0 | -0.5106 | 706.1916620731354 | 823.3716139793396 |
+| SR_FLIP_RETEST | 7 | 7 | 14.3 | 57.1 | 14.3 | 0.0 | -0.2421 | 953.9457581043243 | 1271.6504340171814 |
 
 ## Post-correction focus (target setups)
 | Setup | Attempts | Generated | Emitted | Gated | Win rate | SL rate | Median first breach (s) | Median terminal (s) | Geometry preserved | Geometry changed | Geometry rejected |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| SR_FLIP_RETEST | 0 | 9247 | 5 | 8639 | 40.0 | 24.0 | 1310.9793899059296 | 1916.3324840068817 | 608 | 0 | 0 |
-| TREND_PULLBACK_EMA | 0 | 643 | 0 | 643 | 0.0 | 0.0 | 1476.9315971136093 | 1478.3650945425034 | 0 | 0 | 0 |
+| SR_FLIP_RETEST | 0 | 3709 | 11 | 2274 | 14.3 | 57.1 | 953.9457581043243 | 1271.6504340171814 | 1435 | 0 | 0 |
+| TREND_PULLBACK_EMA | 0 | 78 | 0 | 27 | 0.0 | 0.0 | None | None | 51 | 0 | 0 |
 
 ## Window-over-window comparison
-- Path emissions Δ: `24`
-- Gating Δ: `102331`
-- No-generation Δ: `865183`
-- Fast failures Δ: `-1`
-- Quality changes: `{"BREAKDOWN_SHORT": {"avg_pnl_delta": 0.785, "current_avg_pnl": 0.2839, "current_win_rate": 16.7, "previous_avg_pnl": -0.5011, "previous_win_rate": 0.0, "win_rate_delta": 16.7}, "DIVERGENCE_CONTINUATION": {"avg_pnl_delta": 0.3122, "current_avg_pnl": 0.0384, "current_win_rate": 21.1, "previous_avg_pnl": -0.2738, "previous_win_rate": 15.8, "win_rate_delta": 5.3}, "FAILED_AUCTION_RECLAIM": {"avg_pnl_delta": -0.1512, "current_avg_pnl": 0.3312, "current_win_rate": 6.2, "previous_avg_pnl": 0.4824, "previous_win_rate": 17.1, "win_rate_delta": -10.9}, "LIQUIDITY_SWEEP_REVERSAL": {"avg_pnl_delta": 0.2998, "current_avg_pnl": -0.0789, "current_win_rate": 20.0, "previous_avg_pnl": -0.3787, "previous_win_rate": 0.0, "win_rate_delta": 20.0}, "MOVER_AVWAP_SCALP": {"avg_pnl_delta": -0.0042, "current_avg_pnl": -0.0567, "current_win_rate": 0.0, "previous_avg_pnl": -0.0525, "previous_win_rate": 0.0, "win_rate_delta": 0.0}, "MOVER_TREND_PULLBACK": {"avg_pnl_delta": -0.3414, "current_avg_pnl": -0.5188, "current_win_rate": 3.3, "previous_avg_pnl": -0.1774, "previous_win_rate": 2.6, "win_rate_delta": 0.7}, "SR_FLIP_RETEST": {"avg_pnl_delta": 0.4443, "current_avg_pnl": 0.4436, "current_win_rate": 40.0, "previous_avg_pnl": -0.0007, "previous_win_rate": 9.1, "win_rate_delta": 30.9}, "TREND_PULLBACK_EMA": {"avg_pnl_delta": 0.7219, "current_avg_pnl": 0.0, "current_win_rate": 0.0, "previous_avg_pnl": -0.7219, "previous_win_rate": 0.0, "win_rate_delta": 0.0}, "VOLUME_SURGE_BREAKOUT": {"avg_pnl_delta": -0.1138, "current_avg_pnl": -0.5469, "current_win_rate": 0.0, "previous_avg_pnl": -0.4331, "previous_win_rate": 0.0, "win_rate_delta": 0.0}}`
-- Post-correction setup deltas: `{"SR_FLIP_RETEST": {"emitted_delta": 5, "geometry_changed_delta": 0, "geometry_preserved_delta": 608, "geometry_rejected_delta": 0, "median_first_breach_delta_sec": 82.26, "median_terminal_delta_sec": -355.82, "sl_rate_delta": -12.4, "win_rate_delta": 30.9}, "TREND_PULLBACK_EMA": {"emitted_delta": 0, "geometry_changed_delta": 0, "geometry_preserved_delta": 0, "geometry_rejected_delta": 0, "median_first_breach_delta_sec": 926.32, "median_terminal_delta_sec": 921.6, "sl_rate_delta": -33.3, "win_rate_delta": 0.0}}`
+- Path emissions Δ: `46`
+- Gating Δ: `63252`
+- No-generation Δ: `597375`
+- Fast failures Δ: `1`
+- Quality changes: `{"BREAKDOWN_SHORT": {"avg_pnl_delta": -4.5917, "current_avg_pnl": -3.0, "current_win_rate": 0.0, "previous_avg_pnl": 1.5917, "previous_win_rate": 0.0, "win_rate_delta": 0.0}, "DIVERGENCE_CONTINUATION": {"avg_pnl_delta": -0.0015, "current_avg_pnl": 0.4856, "current_win_rate": 0.0, "previous_avg_pnl": 0.4871, "previous_win_rate": 28.6, "win_rate_delta": -28.6}, "FAILED_AUCTION_RECLAIM": {"avg_pnl_delta": 1.1547, "current_avg_pnl": 1.3063, "current_win_rate": 33.3, "previous_avg_pnl": 0.1516, "previous_win_rate": 0.0, "win_rate_delta": 33.3}, "MOVER_AVWAP_SCALP": {"avg_pnl_delta": -0.2962, "current_avg_pnl": -0.3423, "current_win_rate": 0.0, "previous_avg_pnl": -0.0461, "previous_win_rate": 0.0, "win_rate_delta": 0.0}, "MOVER_TREND_PULLBACK": {"avg_pnl_delta": -0.0641, "current_avg_pnl": -0.5106, "current_win_rate": 0.0, "previous_avg_pnl": -0.4465, "previous_win_rate": 7.7, "win_rate_delta": -7.7}, "SR_FLIP_RETEST": {"avg_pnl_delta": -1.0312, "current_avg_pnl": -0.2421, "current_win_rate": 14.3, "previous_avg_pnl": 0.7891, "previous_win_rate": 50.0, "win_rate_delta": -35.7}}`
+- Post-correction setup deltas: `{"SR_FLIP_RETEST": {"emitted_delta": 11, "geometry_changed_delta": 0, "geometry_preserved_delta": 1435, "geometry_rejected_delta": 0, "median_first_breach_delta_sec": -468.23, "median_terminal_delta_sec": -554.98, "sl_rate_delta": 48.8, "win_rate_delta": -35.7}, "TREND_PULLBACK_EMA": {"emitted_delta": 0, "geometry_changed_delta": 0, "geometry_preserved_delta": 51, "geometry_rejected_delta": 0, "median_first_breach_delta_sec": 0.0, "median_terminal_delta_sec": 0.0, "sl_rate_delta": 0.0, "win_rate_delta": 0.0}}`
 
 ## Recommended operator focus
-- Most suspicious degradation: **LIQUIDITY_SWEEP_REVERSAL**
+- Most suspicious degradation: **MOVER_TREND_PULLBACK**
 - Most promising healthy path: **none**
 - Most likely bottleneck: **MOVER_AVWAP_SCALP**
-- Suggested next investigation target: **LIQUIDITY_SWEEP_REVERSAL**
+- Suggested next investigation target: **MOVER_TREND_PULLBACK**
