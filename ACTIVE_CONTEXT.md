@@ -4,6 +4,52 @@
 
 ---
 
+## 🟢 SESSION 44 2026-07-08 — Stale-candle price freeze on dropped-universe movers (peak stuck, SL/TP backstop blind)
+
+**Owner-reported symptom:** CAPUSDT SHORT on the app showed **Live PnL +1.42%**
+next to **Peak so far +0.05%** — impossible, a peak can't sit below the live gain.
+Ops Profit tab had it right: candle-replay **Max profit +3.24%** (max price
+0.019710) vs the engine's stored `max_favorable_excursion_pct` of **+0.05%**.
+
+### Root cause (branch `claude/performance-metrics-analysis-h7cjxk`)
+
+`_latest_price` returns the last 1m candle close from the scan store. When a
+surge-promoted MOVER (or intermittently re-scanned Tier-3 pair) drops out of the
+active scan universe, the store keeps serving a **stale, non-None** close near
+entry. The pre-existing mark-feed fallback only fired on `None`, so it never
+engaged — pinning `sig.current_price`, and with it `pnl_pct`, the running MFE
+(peak) and the **SL/TP/invalidation backstop** (`_candle_extremes` reads the same
+frozen high/low), all on an hours-old price. Same class as the BEATUSDT −6.52%
+blown-stop; that fix only covered the None case, not stale-but-present.
+
+### Fixed
+
+- **Engine (360-v2):** `_latest_price` + `_candle_extremes` now check the store's
+  1m kline age (`last_kline_age_seconds`, the same signal the scanner's dispatch
+  gate uses). Older than the bound → price the signal off the all-symbols mark
+  feed (1s cadence). `age is None` (seed-loaded / pre-first-WS-frame) counts as
+  fresh, mirroring the scanner, so nothing diverts post-boot. Behaviour unchanged
+  when the candle is fresh or the feed lacks the symbol. Wired through the #702
+  runtime-tunables control plane: `mark_feed_staleness_enabled` (default ON) +
+  `mark_feed_staleness_max_age_sec` (default 120s, range 30–600), ops-panel
+  adjustable, reversible without redeploy. Tests: `test_trade_monitor_stale_price.py`
+  (7 cases). Touches SL/TP evaluation → **owner-sign-off item, held from auto-merge.**
+- **Lumin app** (branch same name): detail-sheet "Peak so far" can no longer render
+  below the app's own live PnL — clamps the peak up to at least the current gain
+  (live signals); closed signals keep the engine's recorded historical max. This
+  removes the visible contradiction but can't reconstruct the true 3.24% on its own;
+  the engine fix above is what restores the accurate peak end-to-end.
+
+### Verify on live data (next session)
+
+- Confirm a dropped-universe MOVER's snapshot `pnl_pct` / MFE now track the mark
+  feed (not frozen near entry); Peak so far on the app matches ops Max profit.
+- Watch for any signal whose SL/TP now fires off the mark-price point estimate
+  (high=low=mark) when its candle is stale — expected, but confirm no premature
+  stops on healthy pairs (the age bound should keep in-universe pairs on candles).
+
+---
+
 ## 🟢 SESSION 43 2026-07-07 — Noise-aware exits + cohort gate ACTIVE (owner-approved), ops runtime tunables
 
 **Owner sign-off in-session:** "approved everything, activate everything while
