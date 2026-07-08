@@ -64,6 +64,8 @@ def _build_registry() -> Dict[str, Tunable]:
         COHORT_EDGE_GATE_ENABLED,
         COHORT_EDGE_GATE_MIN_N,
         COHORT_EDGE_SUPPRESS_BELOW,
+        MARK_FEED_STALENESS_ENABLED,
+        MARK_FEED_STALENESS_MAX_AGE_SEC,
         NOISE_FLOOR_ATR_MULT,
         NOISE_FLOOR_MAX_SL_PCT,
         NOISE_FLOOR_STOPS_ENABLED,
@@ -218,6 +220,41 @@ def _build_registry() -> Dict[str, Tunable]:
             category="Signal gating",
             min_value=5,
             max_value=100,
+        ),
+        Tunable(
+            key="mark_feed_staleness_enabled",
+            label="Mark-feed freshness guard",
+            description=(
+                "When a live signal's symbol drops out of the scan universe "
+                "(surge-promoted movers, intermittently re-scanned pairs), its "
+                "1m candle in the store freezes — pinning the monitored price "
+                "near entry and silently freezing PnL, peak (MFE) and the "
+                "SL/TP backstop on a stale price. With this on, once the last "
+                "1m kline is older than the bound below, the monitor prices the "
+                "signal off the all-symbols mark feed (1s, every USDT-M pair) "
+                "instead of the frozen candle."
+            ),
+            type="bool",
+            default=MARK_FEED_STALENESS_ENABLED,
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="mark_feed_staleness_max_age_sec",
+            label="Mark-feed freshness bound",
+            description=(
+                "How old the store's last 1m kline may be before the monitor "
+                "switches that signal to the mark feed. Comfortably above the "
+                "60s 1m-candle cadence so healthy pairs are never diverted; "
+                "low enough to catch a dropped-universe mover within minutes. "
+                "A never-stamped kline (fresh boot, seed-loaded) counts as "
+                "fresh, mirroring the scanner's dispatch staleness gate."
+            ),
+            type="float",
+            default=MARK_FEED_STALENESS_MAX_AGE_SEC,
+            category="Stops & exits",
+            min_value=30.0,
+            max_value=600.0,
+            unit="s",
         ),
         Tunable(
             key="cohort_edge_suppress_below",
