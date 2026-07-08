@@ -1240,6 +1240,10 @@ class TestStartLoopCallsCleanup:
         router._queue_has_timeout = False  # force the asyncio.wait_for code path
         monkeypatch = pytest.MonkeyPatch()
         monkeypatch.setattr(asyncio, "wait_for", fast_wait_for)
+        # cleanup_expired now honours the signal-expiry toggle (2026-07-08 fix).
+        # This test asserts the loop drives cleanup to remove the seeded over-age
+        # signal, so it must exercise the expiry-ON path.
+        monkeypatch.setattr("src.signal_router.SIGNAL_EXPIRY_ENABLED", True)
 
         try:
             await router.start()
