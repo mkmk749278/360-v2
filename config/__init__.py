@@ -2485,6 +2485,20 @@ COHORT_EDGE_GATE_ENABLED: bool = _safe_bool("COHORT_EDGE_GATE_ENABLED", "true")
 COHORT_EDGE_GATE_MIN_N: int = _safe_int("COHORT_EDGE_GATE_MIN_N", "10")
 COHORT_EDGE_SUPPRESS_BELOW: float = _safe_float("COHORT_EDGE_SUPPRESS_BELOW", "-0.05")
 
+# Mark-feed freshness guard for the trade monitor. ``_latest_price`` /
+# ``_candle_extremes`` read the last 1m candle from the scan store, which keeps
+# serving a STALE non-None value once a signal's symbol drops out of the active
+# scan universe (surge-promoted MOVER / intermittently re-scanned Tier-3 pairs).
+# That froze sig.current_price near entry and, with it, pnl_pct, MFE and the
+# SL/TP backstop (CAPUSDT SHORT sat 3h at a stored +0.05% MFE while the pair had
+# actually run +3.24% favourable). When the store's last 1m kline is older than
+# MARK_FEED_STALENESS_MAX_AGE_SEC, prefer the all-symbols mark-price feed (1s
+# cadence, every USDT-M pair) — the same feed the None-path already trusted.
+# ``age is None`` is treated as fresh, mirroring the scanner's dispatch gate
+# (seed-loaded candles don't stamp a timestamp until the first WS frame).
+MARK_FEED_STALENESS_ENABLED: bool = _safe_bool("MARK_FEED_STALENESS_ENABLED", "true")
+MARK_FEED_STALENESS_MAX_AGE_SEC: float = _safe_float("MARK_FEED_STALENESS_MAX_AGE_SEC", "120.0")
+
 # ---------------------------------------------------------------------------
 # Funding-rate exit
 # ---------------------------------------------------------------------------

@@ -32,6 +32,8 @@ from config import (
     MONITOR_POLL_INTERVAL,
     SIGNAL_EXPIRY_ENABLED,
     ENTRY_FILL_WINDOW_ENFORCED,
+    MARK_FEED_STALENESS_ENABLED,
+    MARK_FEED_STALENESS_MAX_AGE_SEC,
     PRE_TP_ENABLED,
     BE_THEN_TP1_DEFAULT_ENABLED,
     INVALIDATION_MODE_DEFAULT,
@@ -726,11 +728,71 @@ class TradeMonitor:
 
         await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
 
+    def _mark_feed_price(self, symbol: str) -> Optional[float]:
+        """Latest mark price from the all-symbols 1s feed, or None if the
+        feed isn't running / hasn't seen this symbol yet."""
+        try:
+            from src.execution import mark_price_feed as _mpf
+            feed = _mpf.get_instance()
+            if feed is not None:
+                return feed.get_price(symbol)
+        except Exception:
+            pass
+        return None
+
+    def _candle_stale(self, symbol: str) -> bool:
+        """True when the store's last 1m kline for ``symbol`` is older than the
+        ops-tunable freshness bound — the signal's symbol has dropped out of the
+        live scan universe and its candle is frozen.
+
+        ``age is None`` (no kline stamped yet — fresh boot, seed-loaded candles)
+        counts as FRESH, mirroring the scanner's dispatch staleness gate: only
+        ``update_candle`` from a live WS frame stamps the timestamp, so blocking
+        on the un-stamped case would false-positive every symbol post-boot.
+        """
+        try:
+            from src import runtime_tunables as _rt
+            try:
+                enabled = bool(_rt.get("mark_feed_staleness_enabled"))
+                max_age = float(_rt.get("mark_feed_staleness_max_age_sec"))
+            except Exception:
+                enabled = MARK_FEED_STALENESS_ENABLED
+                max_age = MARK_FEED_STALENESS_MAX_AGE_SEC
+            if not enabled:
+                return False
+            age = self._store.last_kline_age_seconds(symbol, "1m")
+            if age is None:
+                return False
+            return age > max_age
+        except Exception:
+            return False
+
     def _latest_price(self, symbol: str) -> Optional[float]:
-        """Return last 1m candle close — used for PnL and general price display."""
+        """Return the freshest available price — used for PnL and general
+        price display.
+
+        Normally the last 1m candle close from the scan store. But that close
+        keeps serving a STALE non-None value once the symbol drops out of the
+        active scan universe (surge-promoted MOVER / intermittently re-scanned
+        Tier-3 pairs), which silently froze sig.current_price near entry and
+        with it pnl_pct, MFE and the SL/TP backstop (CAPUSDT SHORT: stored MFE
+        +0.05% while the pair had actually run +3.24%). When the store's last
+        1m kline is stale, prefer the all-symbols mark-price feed (1s cadence,
+        every USDT-M pair) — the same feed the None-path already trusted.
+        """
         candles = self._store.get_candles(symbol, "1m")
+        candle_close: Optional[float] = None
         if candles and len(candles.get("close", [])) > 0:
-            return float(candles["close"][-1])
+            candle_close = float(candles["close"][-1])
+        # Divert to the mark feed only when the candle is genuinely stale AND
+        # the feed actually has a fresh price — otherwise behaviour is
+        # unchanged, so a healthy pair is never repriced off a second source.
+        if self._candle_stale(symbol):
+            mark = self._mark_feed_price(symbol)
+            if mark is not None:
+                return mark
+        if candle_close is not None:
+            return candle_close
         ticks = self._store.ticks.get(symbol)
         if ticks:
             tick_price = ticks[-1].get("price")
@@ -751,10 +813,16 @@ class TradeMonitor:
         single-order spikes (1-2 contracts) that move last trade price
         but do not represent real sustained price discovery.
         """
-        candles = self._store.get_candles(symbol, "1m")
-        if candles and len(candles.get("high", [])) > 0 and len(candles.get("low", [])) > 0:
-            return float(candles["high"][-1]), float(candles["low"][-1])
-        # Fallback: treat close as both high and low
+        # Skip the stored high/low when the 1m kline is stale — they're frozen,
+        # so a real wick through SL/TP on a dropped-universe mover would never
+        # be seen. Fall through to the fresh mark price as a point estimate
+        # (high=low=mark), matching the absent-candle degraded path below so
+        # the SL/TP backstop stays live. See _latest_price / _candle_stale.
+        if not self._candle_stale(symbol):
+            candles = self._store.get_candles(symbol, "1m")
+            if candles and len(candles.get("high", [])) > 0 and len(candles.get("low", [])) > 0:
+                return float(candles["high"][-1]), float(candles["low"][-1])
+        # Fallback: treat close (mark price when stale) as both high and low
         close = self._latest_price(symbol)
         if close:
             return close, close
