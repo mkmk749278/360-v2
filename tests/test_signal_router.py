@@ -991,6 +991,27 @@ class TestRedisPersistence:
 class TestCleanupExpired:
     """cleanup_expired() must remove stale signals and their position locks."""
 
+    @pytest.fixture(autouse=True)
+    def _enable_expiry(self, monkeypatch):
+        # cleanup_expired now honours the signal-expiry toggle (2026-07-08 fix:
+        # it previously force-closed at the 1h max-hold regardless of the
+        # owner's OFF setting). These behaviour tests exercise the ON path.
+        monkeypatch.setattr("src.signal_router.SIGNAL_EXPIRY_ENABLED", True)
+
+    def test_cleanup_noop_when_expiry_disabled(self, router, monkeypatch):
+        """With signal-expiry OFF, an over-age signal must NOT be force-closed —
+        it runs to TP/SL. Regression lock for the 2026-07-08 bug where this
+        sweep ignored the toggle."""
+        monkeypatch.setattr("src.signal_router.SIGNAL_EXPIRY_ENABLED", False)
+        sig = _make_signal(channel="360_SCALP", symbol="XRPUSDT")
+        sig.timestamp = datetime.now(timezone.utc) - timedelta(hours=3)
+        router._active_signals[sig.signal_id] = sig
+        router._position_lock["XRPUSDT"] = sig.direction
+
+        removed = router.cleanup_expired()
+        assert removed == 0
+        assert sig.signal_id in router._active_signals
+
     def test_cleanup_removes_expired_signal(self, router):
         """A signal older than its channel max hold must be removed."""
         sig = _make_signal(channel="360_SCALP")

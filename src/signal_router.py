@@ -29,6 +29,7 @@ from config import (
     MAX_CONCURRENT_SIGNALS_PER_CHANNEL,
     MAX_SAME_DIRECTION_GLOBAL,
     MAX_SIGNAL_HOLD_SECONDS,
+    SIGNAL_EXPIRY_ENABLED,
     SIGNAL_TYPE_LABELS,
     TELEGRAM_ACTIVE_CHANNEL_ID,
     TELEGRAM_FREE_CHANNEL_ID,
@@ -1433,6 +1434,20 @@ class SignalRouter:
 
         Returns the number of signals that were expired and removed.
         """
+        # Honour the signal-expiry toggle — the same gate ``trade_monitor``
+        # uses (trade_monitor.py:1533). Without this, THIS path force-closed
+        # every signal at the 1h max-hold regardless of the owner's OFF
+        # setting: the switch gated trade_monitor's expiry but not this
+        # safety-net sweep (which the scanner runs every ~15s), so signals
+        # kept expiring at 60m — surrendering +MFE the owner disabled expiry
+        # to keep (2026-07-08 diagnosis). When expiry is OFF, signals run to
+        # TP/SL only; position-lock cleanup for resolved signals still happens
+        # in ``remove_signal`` on every normal close, so nothing leaks.
+        from src.execution import kill_switch as _ks
+
+        if not _ks.signal_expiry_enabled(SIGNAL_EXPIRY_ENABLED):
+            return 0
+
         now = datetime.now(timezone.utc)
         expired_ids = []
         for signal_id, sig in list(self._active_signals.items()):
