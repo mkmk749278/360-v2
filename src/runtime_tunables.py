@@ -56,6 +56,7 @@ def _build_registry() -> Dict[str, Tunable]:
     # Imported lazily so config env parsing happens once at first use and
     # test overrides of config values are honoured.
     from config import (
+        ACTIVE_DUP_GUARD_ENABLED,
         BE_ARM_NOISE_MULT,
         BE_ARM_R_MULT,
         BE_PARK_TOLERANCE_PCT,
@@ -64,8 +65,13 @@ def _build_registry() -> Dict[str, Tunable]:
         COHORT_EDGE_GATE_ENABLED,
         COHORT_EDGE_GATE_MIN_N,
         COHORT_EDGE_SUPPRESS_BELOW,
+        LOSS_STREAK_CAP_HOURS,
+        LOSS_STREAK_ESCALATION_ENABLED,
         MARK_FEED_STALENESS_ENABLED,
         MARK_FEED_STALENESS_MAX_AGE_SEC,
+        MOVER_AVWAP_SCALP_ENABLED,
+        MOVER_RUNNER_EXIT_ENABLED,
+        MOVER_TREND_PULLBACK_ENABLED,
         NOISE_FLOOR_ATR_MULT,
         NOISE_FLOOR_MAX_SL_PCT,
         NOISE_FLOOR_STOPS_ENABLED,
@@ -255,6 +261,103 @@ def _build_registry() -> Dict[str, Tunable]:
             min_value=30.0,
             max_value=600.0,
             unit="s",
+        ),
+        Tunable(
+            key="mover_runner_exit_enabled",
+            label="Mover runner exit",
+            description=(
+                "For the two mover continuation paths (MOVER_TREND_PULLBACK, "
+                "MOVER_AVWAP_SCALP) only: instead of closing 100% at TP1, bank "
+                "40% at TP1, 30% more at TP2 (stop lifts to TP1), and let the "
+                "last 30% ride an ATR trail with NO fixed cap — crossing TP3 "
+                "is stamped but does not close; the trail is the only exit "
+                "for the final slice. A momentum path's edge "
+                "is the tail — 42% of mover signals reached ≥1% profit but "
+                "realised ≤0 under the 1R full-close (HMSTR ran +31%, banked "
+                "0). ACTIVE (owner sign-off 2026-07-09). While off, every "
+                "mover TP1 close logs what the runner would have held, and "
+                "the Profit page's give-back column measures what it would "
+                "have kept."
+            ),
+            type="bool",
+            default=MOVER_RUNNER_EXIT_ENABLED,
+            category="Stops & exits",
+        ),
+        Tunable(
+            key="mover_trend_pullback_live",
+            label="MOVER_TREND_PULLBACK live",
+            description=(
+                "Emit MOVER_TREND_PULLBACK signals live. Off = shadow-only: "
+                "the evaluator still runs and logs every would-be signal "
+                "([SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE) so the path keeps "
+                "measuring while emitting nothing. Jun-01→Jul-05: 97 signals, "
+                "−13.5% total, 28% win rate; 3d post-#702: 18 signals, −8.4%."
+            ),
+            type="bool",
+            default=MOVER_TREND_PULLBACK_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="mover_avwap_scalp_live",
+            label="MOVER_AVWAP_SCALP live",
+            description=(
+                "Emit MOVER_AVWAP_SCALP signals live. Off = shadow-only "
+                "([SHADOW] MOVER_AVWAP_SCALP_WOULD_FIRE log, no signal). "
+                "Across Jun-01→Jul-09 this path emitted 20 signals with zero "
+                "TP hits and zero SL hits — every one expired; pure fee drag "
+                "as currently shaped."
+            ),
+            type="bool",
+            default=MOVER_AVWAP_SCALP_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="loss_streak_escalation_enabled",
+            label="Loss-streak cooldown escalation",
+            description=(
+                "Double the post-loss dispatch cooldown per consecutive "
+                "losing outcome on the same symbol × setup × direction (SL "
+                "1h → 2h → 4h …, capped below), so the scanner stops "
+                "re-entering the same failing setup every time the flat "
+                "cooldown lapses (MONUSDT pullback longs: 6 dispatches, "
+                "−3.7% in 3 days). A profitable outcome resets the streak; "
+                "breakeven scratches leave it unchanged. ACTIVE (owner "
+                "sign-off 2026-07-09); while off, would-be extensions are "
+                "shadow-logged."
+            ),
+            type="bool",
+            default=LOSS_STREAK_ESCALATION_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="loss_streak_cap_hours",
+            label="Loss-streak cooldown cap",
+            description=(
+                "Upper bound on the escalated cooldown so a long losing "
+                "streak can never lock a setup out for days — conditions "
+                "change and the cohort-edge gate owns permanent suppression."
+            ),
+            type="float",
+            default=LOSS_STREAK_CAP_HOURS,
+            category="Signal gating",
+            min_value=1.0,
+            max_value=48.0,
+            unit="h",
+        ),
+        Tunable(
+            key="active_dup_guard_enabled",
+            label="Active-duplicate guard",
+            description=(
+                "Block a dispatch when the live signal book already holds an "
+                "open signal with the same symbol × setup × direction. The "
+                "30-min dispatch cooldown intends this but doesn't survive "
+                "every restart path (SPCXUSDT mover short emitted twice, 7 "
+                "min apart, identical entry/SL). ACTIVE (owner sign-off "
+                "2026-07-09); while off, would-be blocks are shadow-logged."
+            ),
+            type="bool",
+            default=ACTIVE_DUP_GUARD_ENABLED,
+            category="Signal gating",
         ),
         Tunable(
             key="cohort_edge_suppress_below",

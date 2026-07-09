@@ -49,14 +49,24 @@ class TestMoverTrendPullback:
         )
         assert sig is not None, "live by default — a valid mover pullback must emit"
 
-    def test_disabled_falls_back_to_shadow(self, monkeypatch):
-        """Explicitly disabled: emits NO live signal (shadow-only fallback)."""
-        monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", False)
-        candles, indicators, smc_data = _inputs(up=True)
-        sig = ScalpChannel()._evaluate_mover_trend_pullback(
-            "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
-        )
-        assert sig is None, "disabled flag must suppress the live signal"
+    def test_disabled_falls_back_to_shadow(self):
+        """Shadowed via the ops runtime tunable (2026-07-09 — the live/shadow
+        switch is ops-controlled; the env flag is only the boot default):
+        emits NO live signal (shadow-only fallback)."""
+        from src import runtime_tunables as rt
+        from tests.test_mover_runner_exit import _FakeFirestore
+
+        rt.reset_for_test()
+        try:
+            rt.init_runtime_tunables(_FakeFirestore())
+            rt.set_values({"mover_trend_pullback_live": False})
+            candles, indicators, smc_data = _inputs(up=True)
+            sig = ScalpChannel()._evaluate_mover_trend_pullback(
+                "AGTUSDT", candles, indicators, smc_data, 0.01, 10_000_000, regime="TRENDING_UP",
+            )
+            assert sig is None, "shadowed path must suppress the live signal"
+        finally:
+            rt.reset_for_test()
 
     def test_fires_long_when_enabled(self, monkeypatch):
         monkeypatch.setattr(scalp_mod, "MOVER_TREND_PULLBACK_ENABLED", True)

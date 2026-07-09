@@ -83,6 +83,8 @@ from config import (
     LIFECYCLE_COOLDOWN_EXPIRED_SEC,
     LIFECYCLE_COOLDOWN_INVALIDATION_SEC,
     LIFECYCLE_COOLDOWN_SL_SEC,
+    LOSS_STREAK_LOSS_PCT,
+    LOSS_STREAK_RESET_PCT,
     MAX_CORRELATED_SCALP_SIGNALS,
     MAX_KLINE_STALENESS_SEC,
     MTF_HARD_BLOCK,
@@ -840,6 +842,10 @@ _STRUCTURE_MISALIGN_PATHS: frozenset = frozenset({
 DISPATCH_COOLDOWN_SEC: float = float(os.getenv("DISPATCH_COOLDOWN_SEC", "1800"))
 DISPATCH_COOLDOWN_PATH: str = "data/signal_dispatch_cooldown.json"
 
+# Consecutive-loss streak registry (2026-07-09, dark-flagged escalation).
+# Mirrors DISPATCH_COOLDOWN_PATH's atomic-write persistence pattern.
+LOSS_STREAK_PATH: str = "data/loss_streaks.json"
+
 # Level-rearm state-machine persistence path.  See LEVEL_REARM_* knobs in
 # config/__init__.py.  Mirrors DISPATCH_COOLDOWN_PATH atomic-write pattern.
 LEVEL_IN_PLAY_PATH: str = "data/level_in_play.json"
@@ -1096,6 +1102,17 @@ class Scanner:
         # within the cooldown window doesn't let duplicates through.
         self._dispatch_cooldown: Dict[tuple, float] = {}
         self._load_dispatch_cooldown()
+
+        # Per-(symbol, setup_class, direction) consecutive-loss streaks
+        # (2026-07-09, dark-flagged).  Fed by on_signal_lifecycle_outcome;
+        # when the loss_streak_escalation_enabled tunable is ON, the
+        # lifecycle cooldown extension doubles per consecutive losing
+        # outcome (capped) so the scanner stops re-entering the same
+        # failing setup every time the flat cooldown lapses (MONUSDT
+        # MVRTP LONG: 6 dispatches / −3.7% in 3 days).  Persisted next to
+        # the dispatch cooldown so restarts don't reset streaks.
+        self._loss_streaks: Dict[tuple, int] = {}
+        self._load_loss_streaks()
 
         # Per-(symbol, direction, level_bucket) "level in play" registry —
         # see _check_and_record_level_in_play.  Blocks stuck-level repeat-
@@ -3841,12 +3858,53 @@ class Scanner:
         ] += 1
 
         extension_sec = self._LIFECYCLE_COOLDOWN_BY_OUTCOME.get(outcome_label)
+        try:
+            streak = self._update_loss_streak(sig, outcome_label)
+        except Exception as exc:
+            log.debug("loss-streak update failed (non-fatal): {}", exc)
+            streak = 0
         if extension_sec is None or extension_sec <= 0:
             return
         try:
             cd_key = self._cooldown_key_for(sig)
             if cd_key is None:
                 return
+            # Loss-streak escalation (2026-07-09, dark-flagged): double the
+            # extension per consecutive losing outcome on this key, capped,
+            # so the flat 1h/2h cooldown stops metronoming re-entries into
+            # a setup that keeps failing.  Shadow-logged while the tunable
+            # is OFF so activation is decided on measured would-block data.
+            if streak >= 2:
+                try:
+                    from src import runtime_tunables as _rt
+                    _cap_sec = float(_rt.get("loss_streak_cap_hours")) * 3600.0
+                    _escalated = min(
+                        extension_sec * (2 ** (streak - 1)), _cap_sec
+                    )
+                    if bool(_rt.get("loss_streak_escalation_enabled")):
+                        self._path_funnel_counters[
+                            f"loss_streak_escalated:{cd_key[1]}"
+                        ] += 1
+                        log.info(
+                            "loss_streak escalate {} {} {} (streak={} → "
+                            "cooldown {}s instead of {}s)",
+                            cd_key[0], cd_key[1], cd_key[2],
+                            streak, int(_escalated), extension_sec,
+                        )
+                        extension_sec = _escalated
+                    else:
+                        self._path_funnel_counters[
+                            f"loss_streak_shadow:{cd_key[1]}"
+                        ] += 1
+                        log.info(
+                            "[SHADOW] LOSS_STREAK_WOULD_EXTEND: {} {} {} "
+                            "(streak={} — would set {}s cooldown instead "
+                            "of {}s)",
+                            cd_key[0], cd_key[1], cd_key[2],
+                            streak, int(_escalated), extension_sec,
+                        )
+                except Exception as exc:
+                    log.debug("loss-streak escalation failed (fail-open): {}", exc)
             new_expiry = time.time() + extension_sec
             existing = self._dispatch_cooldown.get(cd_key, 0.0)
             # Ratchet only — never shorten an already-longer cooldown.
@@ -3860,6 +3918,34 @@ class Scanner:
                 )
         except Exception as exc:
             log.debug("lifecycle cooldown extension failed (non-fatal): {}", exc)
+
+    def _update_loss_streak(self, sig: Any, outcome_label: str) -> int:
+        """Maintain the consecutive-loss streak for this signal's
+        (symbol, setup_class, direction) key and return the current streak.
+
+        A losing outcome (realised PnL at or below LOSS_STREAK_LOSS_PCT on a
+        stop / expiry / invalidation / plain close) increments the streak; a
+        profitable one (PnL at or above LOSS_STREAK_RESET_PCT, or any TP /
+        PROFIT_LOCKED completion) resets it.  Breakeven-ish scratches in
+        between leave the streak unchanged — a BE park is not evidence the
+        thesis failed, nor that it worked.
+        """
+        cd_key = self._cooldown_key_for(sig)
+        if cd_key is None:
+            return 0
+        pnl = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
+        winning_labels = ("TP1_HIT", "TP2_HIT", "TP3_HIT", "FULL_TP_HIT", "PROFIT_LOCKED")
+        losing_labels = ("SL_HIT", "EXPIRED", "INVALIDATED", "CLOSED")
+        if outcome_label in winning_labels or pnl >= LOSS_STREAK_RESET_PCT:
+            if self._loss_streaks.pop(cd_key, None) is not None:
+                self._persist_loss_streaks()
+            return 0
+        if outcome_label in losing_labels and pnl <= LOSS_STREAK_LOSS_PCT:
+            streak = self._loss_streaks.get(cd_key, 0) + 1
+            self._loss_streaks[cd_key] = streak
+            self._persist_loss_streaks()
+            return streak
+        return self._loss_streaks.get(cd_key, 0)
 
     @staticmethod
     def _get_primary_timeframe(chan_name: str) -> str:
@@ -4438,6 +4524,53 @@ class Scanner:
         except Exception:
             pass
 
+        # ── Active-duplicate guard (2026-07-09, dark-flagged) ────────────
+        # The dispatch cooldown below intends "never two live copies of the
+        # same setup", but it does not survive every restart path — SPCXUSDT
+        # MOVER_TREND_PULLBACK SHORT emitted twice 7 minutes apart at an
+        # identical entry/SL on 2026-07-08 while the first copy was still
+        # open.  Checking the live signal book is restart-proof: if an open
+        # signal with the same (symbol, setup_class, direction) exists,
+        # block (or shadow-log, while the tunable is OFF) this dispatch.
+        # O(active book) per dispatch attempt — dispatches are rare and the
+        # book is small; no reads, no I/O.
+        try:
+            dup_key = self._cooldown_key_for(sig)
+            if dup_key is not None:
+                _dup = next(
+                    (
+                        s for s in self.router.active_signals.values()
+                        if self._cooldown_key_for(s) == dup_key
+                    ),
+                    None,
+                )
+                if _dup is not None:
+                    from src import runtime_tunables as _rt
+                    if bool(_rt.get("active_dup_guard_enabled")):
+                        self._suppression_counters[
+                            f"active_dup:{dup_key[1]}"
+                        ] += 1
+                        self._suppression_counters[
+                            f"enqueue_stage:active_dup:{dup_key[1]}"
+                        ] += 1
+                        log.info(
+                            "active_dup skip {} {} {} (open signal_id={})",
+                            dup_key[0], dup_key[1], dup_key[2],
+                            getattr(_dup, "signal_id", "?"),
+                        )
+                        return False
+                    self._suppression_counters[
+                        f"active_dup_shadow:{dup_key[1]}"
+                    ] += 1
+                    log.info(
+                        "[SHADOW] ACTIVE_DUP_WOULD_BLOCK: {} {} {} "
+                        "(open signal_id={})",
+                        dup_key[0], dup_key[1], dup_key[2],
+                        getattr(_dup, "signal_id", "?"),
+                    )
+        except Exception as exc:
+            log.debug("active-dup guard error (fail-open): {}", exc)
+
         # ── Per-(symbol, setup, direction) dispatch cooldown ─────────────
         # Prevents the same setup from re-firing within DISPATCH_COOLDOWN_SEC
         # after a successful dispatch.  Without this, the same FAILED_AUCTION
@@ -4770,6 +4903,46 @@ class Scanner:
             tmp.replace(path)
         except OSError as exc:
             log.debug("dispatch cooldown persist failed: %s", exc)
+
+    def _load_loss_streaks(self) -> None:
+        """Load the consecutive-loss streak registry from disk.  Best-effort."""
+        from pathlib import Path
+        path = Path(LOSS_STREAK_PATH)
+        if not path.exists():
+            return
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(data, dict):
+            return
+        for key, streak in data.items():
+            if not isinstance(key, str) or "|" not in key:
+                continue
+            parts = key.split("|", 2)
+            if len(parts) != 3:
+                continue
+            try:
+                self._loss_streaks[(parts[0], parts[1], parts[2])] = int(streak)
+            except (ValueError, TypeError):
+                continue
+
+    def _persist_loss_streaks(self) -> None:
+        """Atomically write the loss-streak registry to disk.  Writes happen
+        only on outcome resolution (~dozens/day) — never on the scan path."""
+        from pathlib import Path
+        path = Path(LOSS_STREAK_PATH)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                f"{symbol}|{setup}|{direction}": streak
+                for (symbol, setup, direction), streak in self._loss_streaks.items()
+            }
+            tmp = path.with_suffix(".tmp")
+            tmp.write_text(json.dumps(payload), encoding="utf-8")
+            tmp.replace(path)
+        except OSError as exc:
+            log.debug("loss streak persist failed: %s", exc)
 
     # ------------------------------------------------------------------
     # Level-rearm state machine — see LevelInPlayState dataclass and the

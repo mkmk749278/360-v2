@@ -168,6 +168,17 @@ class Signal:
     pre_tp_hit: bool = False
     # Raw favourable price move % at the time pre-TP fired.
     pre_tp_pct: float = 0.0
+
+    # ---- Mover runner exit (dark flag, 2026-07-09) ----
+    # Fraction of the ORIGINAL position banked at TP levels under the mover
+    # runner exit (see src/execution/runner_policy.py), and the size-weighted
+    # PnL contribution of those banked slices (sum of fraction × move%, in %
+    # of full-position terms).  Both stay 0.0 for every non-runner signal so
+    # ``TradeMonitor._set_realized_pnl`` computes exactly as before.  Kept
+    # separate from ``partial_close_pct``/``pre_tp_pct`` (pre-TP grab
+    # bookkeeping) so the two partial mechanisms compose without aliasing.
+    runner_banked_fraction: float = 0.0
+    runner_banked_pnl_pct: float = 0.0
     # Wall-clock timestamp at which pre-TP fired (used for telemetry).
     pre_tp_timestamp: Optional[datetime] = None
     # Resolved pre-TP threshold stamped at dispatch time (B11 fee-aware).

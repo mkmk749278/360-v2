@@ -56,6 +56,7 @@ from src.btc_direction import check_btc_direction_gate
 from src.channels.base import Signal, TrailingStopState
 from src.dca import check_dca_entry, recalculate_after_dca
 from src.execution import be_policy as _be_policy
+from src.execution import runner_policy as _runner_policy
 from src import user_settings as _user_settings
 from src.historical_data import HistoricalDataStore
 from src.indicators import atr as _compute_atr
@@ -584,10 +585,18 @@ class TradeMonitor:
         realised return, and the classifier naturally re-labels signals
         to PROFIT_LOCKED because pnl_pct is now > 0.01.
 
+        Mover runner exit (2026-07-09): signals that banked TP partials under
+        the runner exit carry ``runner_banked_fraction`` /
+        ``runner_banked_pnl_pct`` (see ``runner_policy``); those slices are
+        credited first and the pre-TP blend applies only to the remainder, so
+        a runner that banks 40% at TP1 and trails out at entry honestly
+        reports ~0.4 × TP1 instead of 0%.
+
         Backward-compat: signals without a partial fill
-        (``partial_close_pct == 0`` OR ``pre_tp_pct == 0``) compute exactly
-        as before — entry → exit_price only — so SL_HIT / EXPIRED / TP1+
-        paths and pre-PR #411 signals are unchanged.
+        (``partial_close_pct == 0`` OR ``pre_tp_pct == 0``) and without
+        runner banks compute exactly as before — entry → exit_price only —
+        so SL_HIT / EXPIRED / TP1+ paths and pre-PR #411 signals are
+        unchanged.
         """
         sig.current_price = exit_price
         residual_pnl = calculate_trade_pnl_pct(
@@ -595,21 +604,61 @@ class TradeMonitor:
             exit_price=exit_price,
             direction=sig.direction.value,
         )
+        banked_fraction = min(
+            float(getattr(sig, "runner_banked_fraction", 0.0) or 0.0), 1.0
+        )
+        banked_pnl = float(getattr(sig, "runner_banked_pnl_pct", 0.0) or 0.0)
         partial_pct = float(getattr(sig, "partial_close_pct", 0.0) or 0.0)
         pre_tp_pct = float(getattr(sig, "pre_tp_pct", 0.0) or 0.0)
-        if partial_pct > 0 and pre_tp_pct > 0:
-            # Cap the partial fraction at 1.0 defensively (TP1/TP2 partials
-            # can compound partial_close_pct beyond grab_fraction via the
-            # 0.4 / 0.7 stages — when that happens, pre-TP no longer owns
-            # the whole closed slice, so we cap the blend at 1.0 to avoid
-            # > 100% allocation).
-            partial_pct = min(partial_pct, 1.0)
-            residual_fraction = 1.0 - partial_pct
+        # Cap the pre-TP fraction defensively (TP1/TP2 partials can compound
+        # partial_close_pct beyond grab_fraction via the 0.4 / 0.7 stages —
+        # when that happens, pre-TP no longer owns the whole closed slice, so
+        # cap the blend to avoid > 100% allocation).  Runner banks own their
+        # slice first; pre-TP owns at most the rest.
+        pre_tp_fraction = (
+            min(partial_pct, 1.0 - banked_fraction)
+            if (partial_pct > 0 and pre_tp_pct > 0)
+            else 0.0
+        )
+        if banked_fraction > 0 or pre_tp_fraction > 0:
+            residual_fraction = max(0.0, 1.0 - banked_fraction - pre_tp_fraction)
             sig.pnl_pct = (
-                partial_pct * pre_tp_pct + residual_fraction * residual_pnl
+                banked_pnl
+                + pre_tp_fraction * pre_tp_pct
+                + residual_fraction * residual_pnl
             )
         else:
             sig.pnl_pct = residual_pnl
+
+    @staticmethod
+    def _runner_bank(sig: Signal, fraction: float, fill_price: float) -> float:
+        """Book a runner partial: *fraction* of the ORIGINAL position banked
+        at *fill_price*.  Returns the fraction actually booked (clamped so
+        cumulative banks never exceed 1.0).  Bookkeeping only — the broker
+        partial (order_manager) is fired by the caller with the same
+        fraction, mirroring the legacy laddered path.
+        """
+        already = float(getattr(sig, "runner_banked_fraction", 0.0) or 0.0)
+        fraction = max(0.0, min(float(fraction), 1.0 - already))
+        if fraction <= 0:
+            return 0.0
+        move_pct = calculate_trade_pnl_pct(
+            entry_price=sig.entry,
+            exit_price=fill_price,
+            direction=sig.direction.value,
+        )
+        sig.runner_banked_fraction = already + fraction
+        sig.runner_banked_pnl_pct = (
+            float(getattr(sig, "runner_banked_pnl_pct", 0.0) or 0.0)
+            + fraction * move_pct
+        )
+        log.info(
+            "RUNNER_BANK: symbol={} signal_id={} fraction={:.2f} "
+            "fill={:.8f} move_pct={:.3f} banked_total={:.2f}",
+            sig.symbol, sig.signal_id, fraction, fill_price, move_pct,
+            sig.runner_banked_fraction,
+        )
+        return fraction
 
     @staticmethod
     def _apply_final_outcome(sig: Signal, hit_tp: int, hit_sl: bool) -> str:
@@ -1969,59 +2018,124 @@ class TradeMonitor:
 
         if is_long:
             if sig.tp3 and _c_high > 0 and _c_high >= sig.tp3 and sig.status != "TP3_HIT":
-                if sig.first_tp_touch_timestamp is None:
-                    sig.first_tp_touch_timestamp = utcnow()
-                tp3_pnl = calculate_trade_pnl_pct(
-                    entry_price=sig.entry, exit_price=sig.tp3, direction=sig.direction.value
-                )
-                if self.on_highlight_callback is not None:
-                    self.on_highlight_callback(sig, 3, tp3_pnl)
-                # Partial TP3 execution: close 34% of original position size
-                if self._order_manager is not None and self._order_manager.is_enabled:
-                    try:
-                        await self._order_manager.close_partial(sig, 0.34, tp_level=3)
-                    except Exception as _exc:
-                        log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
-                # FSM positions: close any remaining qty at market.  Native TP3 orders
-                # on Binance already filled → -2022 ReduceOnly rejected → treated as
-                # success.  Positions opened without native TP orders (pre-#488 bug)
-                # still have open qty → MARKET close fires here instead.
-                await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
-                self._set_realized_pnl(sig, sig.tp3)
-                self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
-                await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
-                self._record_outcome(sig, hit_tp=3, hit_sl=False)
-                await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
-                self._remove(sig.signal_id)
-                return
+                # Mover runner: NO fixed TP3 cap (owner directive 2026-07-09).
+                # The fat tail is the mover thesis — TAIKO/NBIS/WDC ran 4-5%
+                # and HMSTR +31% while the ladder's 2.5R cap would have cut
+                # them.  The remainder keeps riding the phase-tightened ATR
+                # trail (0.35× after TP2, floored at TP1); the trail IS the
+                # exit for the final slice.  Stamp TP3-cleared once (best_tp
+                # snapshot + post) and fall through to the TP2/trail handling.
+                if _runner_policy.runner_exit_active(
+                    getattr(sig, "setup_class", "") or ""
+                ):
+                    if sig.best_tp_hit < 3:
+                        if sig.first_tp_touch_timestamp is None:
+                            sig.first_tp_touch_timestamp = utcnow()
+                        sig.best_tp_hit = 3
+                        sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
+                            entry_price=sig.entry, exit_price=sig.tp3,
+                            direction=sig.direction.value,
+                        )
+                        await self._post_update(
+                            sig,
+                            "🎯🎯🎯 TP3 CLEARED — runner riding, trail owns the exit",
+                        )
+                else:
+                    if sig.first_tp_touch_timestamp is None:
+                        sig.first_tp_touch_timestamp = utcnow()
+                    tp3_pnl = calculate_trade_pnl_pct(
+                        entry_price=sig.entry, exit_price=sig.tp3, direction=sig.direction.value
+                    )
+                    if self.on_highlight_callback is not None:
+                        self.on_highlight_callback(sig, 3, tp3_pnl)
+                    # Partial TP3 execution: close 34% of original position size
+                    if self._order_manager is not None and self._order_manager.is_enabled:
+                        try:
+                            await self._order_manager.close_partial(sig, 0.34, tp_level=3)
+                        except Exception as _exc:
+                            log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
+                    # FSM positions: close any remaining qty at market.  Native TP3 orders
+                    # on Binance already filled → -2022 ReduceOnly rejected → treated as
+                    # success.  Positions opened without native TP orders (pre-#488 bug)
+                    # still have open qty → MARKET close fires here instead.
+                    await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
+                    self._set_realized_pnl(sig, sig.tp3)
+                    self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
+                    await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
+                    self._record_outcome(sig, hit_tp=3, hit_sl=False)
+                    await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
+                    self._remove(sig.signal_id)
+                    return
             if _c_high > 0 and _c_high >= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP2_HIT"
                 await self._post_update(sig, "🎯🎯 TP2 HIT")
-                # Snapshot best-TP PnL for signal quality stats
-                sig.best_tp_hit = 2
-                sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
-                    entry_price=sig.entry, exit_price=sig.tp2, direction=sig.direction.value
-                )
+                # Snapshot best-TP PnL for signal quality stats (never
+                # downgrade a runner's TP3-cleared stamp).
+                if sig.best_tp_hit < 2:
+                    sig.best_tp_hit = 2
+                    sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
+                        entry_price=sig.entry, exit_price=sig.tp2, direction=sig.direction.value
+                    )
                 if self.on_highlight_callback is not None:
                     self.on_highlight_callback(sig, 2, sig.best_tp_pnl_pct)
                 # Trailing: move SL to TP1 price to protect banked profit while giving TP3 room
                 sig.stop_loss = sig.tp1
                 # Partial TP2 execution: close 33% of original position size
-                if self._order_manager is not None and self._order_manager.is_enabled:
+                # (runner: bank up to the cumulative 70% target — covers the
+                # jump case where a single candle crosses TP2 before TP1 was
+                # ever registered).
+                _tp2_frac = 0.33
+                if _runner_policy.runner_exit_active(getattr(sig, "setup_class", "") or ""):
+                    _tp2_frac = self._runner_bank(
+                        sig,
+                        _runner_policy.RUNNER_TP2_CUM_FRACTION
+                        - float(getattr(sig, "runner_banked_fraction", 0.0) or 0.0),
+                        sig.tp2,
+                    )
+                if self._order_manager is not None and self._order_manager.is_enabled and _tp2_frac > 0:
                     try:
-                        await self._order_manager.close_partial(sig, 0.33, tp_level=2)
+                        await self._order_manager.close_partial(sig, _tp2_frac, tp_level=2)
                     except Exception as _exc:
                         log.warning("Partial TP2 close failed for {}: {}", sig.symbol, _exc)
             if _c_high > 0 and _c_high >= sig.tp1 and sig.status not in ("TP1_HIT", "TP2_HIT", "TP3_HIT"):
-                if BE_THEN_TP1_DEFAULT_ENABLED:
+                _runner_active = _runner_policy.runner_exit_active(
+                    getattr(sig, "setup_class", "") or ""
+                )
+                if BE_THEN_TP1_DEFAULT_ENABLED and not _runner_active:
+                    # Mover runner exit is DARK: stamp the would-be fork so
+                    # activation is decided on measured data (the Profit
+                    # page's MFE/give-back columns are the counterfactual).
+                    if _runner_policy.runner_exit_shadow(
+                        getattr(sig, "setup_class", "") or ""
+                    ):
+                        log.info(
+                            "[SHADOW] MOVER_RUNNER_WOULD_HOLD: symbol={} "
+                            "signal_id={} setup={} tp1={:.8f} mfe_pct={:.3f} "
+                            "— full-closing at TP1; runner would bank 40% "
+                            "and trail the rest",
+                            sig.symbol, sig.signal_id, sig.setup_class,
+                            sig.tp1, sig.max_favorable_excursion_pct,
+                        )
+                        sig.execution_note += " | runner-shadow@TP1"
                     await self._close_full_at_tp1(sig)
                     return
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP1_HIT"
-                await self._post_update(sig, "🎯 TP1 HIT ✅")
+                _tp1_frac = 0.33
+                if _runner_active:
+                    _tp1_frac = self._runner_bank(
+                        sig, _runner_policy.RUNNER_TP1_BANK_FRACTION, sig.tp1
+                    )
+                    await self._post_update(
+                        sig,
+                        "🎯 TP1 HIT ✅ — banked "
+                        f"{_tp1_frac * 100:.0f}%, runner riding (trail active)",
+                    )
+                else:
+                    await self._post_update(sig, "🎯 TP1 HIT ✅")
                 # Snapshot best-TP PnL for signal quality stats (only if TP2 not already hit)
                 if sig.best_tp_hit < 1:
                     sig.best_tp_hit = 1
@@ -2035,66 +2149,125 @@ class TradeMonitor:
                 be_buffer = tp1_dist * 0.15
                 new_be_sl = sig.entry + be_buffer
                 sig.stop_loss = max(sig.stop_loss, new_be_sl)
-                # Partial TP1 execution: close 33% of original position size
-                if self._order_manager is not None and self._order_manager.is_enabled:
+                # Partial TP1 execution: close 33% (runner: 40%) of original position size
+                if self._order_manager is not None and self._order_manager.is_enabled and _tp1_frac > 0:
                     try:
-                        await self._order_manager.close_partial(sig, 0.33, tp_level=1)
+                        await self._order_manager.close_partial(sig, _tp1_frac, tp_level=1)
                     except Exception as _exc:
                         log.warning("Partial TP1 close failed for {}: {}", sig.symbol, _exc)
         else:
             if sig.tp3 and _c_low > 0 and _c_low <= sig.tp3 and sig.status != "TP3_HIT":
-                if sig.first_tp_touch_timestamp is None:
-                    sig.first_tp_touch_timestamp = utcnow()
-                tp3_pnl = calculate_trade_pnl_pct(
-                    entry_price=sig.entry, exit_price=sig.tp3, direction=sig.direction.value
-                )
-                if self.on_highlight_callback is not None:
-                    self.on_highlight_callback(sig, 3, tp3_pnl)
-                # Partial TP3 execution: close 34% of original position size
-                if self._order_manager is not None and self._order_manager.is_enabled:
-                    try:
-                        await self._order_manager.close_partial(sig, 0.34, tp_level=3)
-                    except Exception as _exc:
-                        log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
-                # FSM positions: close any remaining qty at market.  Native TP3 orders
-                # on Binance already filled → -2022 ReduceOnly rejected → treated as
-                # success.  Positions opened without native TP orders (pre-#488 bug)
-                # still have open qty → MARKET close fires here instead.
-                await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
-                self._set_realized_pnl(sig, sig.tp3)
-                self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
-                await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
-                self._record_outcome(sig, hit_tp=3, hit_sl=False)
-                await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
-                self._remove(sig.signal_id)
-                return
+                # Mover runner: NO fixed TP3 cap — see the LONG branch note.
+                if _runner_policy.runner_exit_active(
+                    getattr(sig, "setup_class", "") or ""
+                ):
+                    if sig.best_tp_hit < 3:
+                        if sig.first_tp_touch_timestamp is None:
+                            sig.first_tp_touch_timestamp = utcnow()
+                        sig.best_tp_hit = 3
+                        sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
+                            entry_price=sig.entry, exit_price=sig.tp3,
+                            direction=sig.direction.value,
+                        )
+                        await self._post_update(
+                            sig,
+                            "🎯🎯🎯 TP3 CLEARED — runner riding, trail owns the exit",
+                        )
+                else:
+                    if sig.first_tp_touch_timestamp is None:
+                        sig.first_tp_touch_timestamp = utcnow()
+                    tp3_pnl = calculate_trade_pnl_pct(
+                        entry_price=sig.entry, exit_price=sig.tp3, direction=sig.direction.value
+                    )
+                    if self.on_highlight_callback is not None:
+                        self.on_highlight_callback(sig, 3, tp3_pnl)
+                    # Partial TP3 execution: close 34% of original position size
+                    if self._order_manager is not None and self._order_manager.is_enabled:
+                        try:
+                            await self._order_manager.close_partial(sig, 0.34, tp_level=3)
+                        except Exception as _exc:
+                            log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
+                    # FSM positions: close any remaining qty at market.  Native TP3 orders
+                    # on Binance already filled → -2022 ReduceOnly rejected → treated as
+                    # success.  Positions opened without native TP orders (pre-#488 bug)
+                    # still have open qty → MARKET close fires here instead.
+                    await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
+                    self._set_realized_pnl(sig, sig.tp3)
+                    self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
+                    await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
+                    self._record_outcome(sig, hit_tp=3, hit_sl=False)
+                    await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
+                    self._remove(sig.signal_id)
+                    return
             if _c_low > 0 and _c_low <= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP2_HIT"
                 await self._post_update(sig, "🎯🎯 TP2 HIT")
-                # Snapshot best-TP PnL for signal quality stats
-                sig.best_tp_hit = 2
-                sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
-                    entry_price=sig.entry, exit_price=sig.tp2, direction=sig.direction.value
-                )
+                # Snapshot best-TP PnL for signal quality stats (never
+                # downgrade a runner's TP3-cleared stamp).
+                if sig.best_tp_hit < 2:
+                    sig.best_tp_hit = 2
+                    sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
+                        entry_price=sig.entry, exit_price=sig.tp2, direction=sig.direction.value
+                    )
                 if self.on_highlight_callback is not None:
                     self.on_highlight_callback(sig, 2, sig.best_tp_pnl_pct)
                 sig.stop_loss = sig.tp1
                 # Partial TP2 execution: close 33% of original position size
-                if self._order_manager is not None and self._order_manager.is_enabled:
+                # (runner: bank up to the cumulative 70% target — covers the
+                # jump case where a single candle crosses TP2 before TP1 was
+                # ever registered).
+                _tp2_frac = 0.33
+                if _runner_policy.runner_exit_active(getattr(sig, "setup_class", "") or ""):
+                    _tp2_frac = self._runner_bank(
+                        sig,
+                        _runner_policy.RUNNER_TP2_CUM_FRACTION
+                        - float(getattr(sig, "runner_banked_fraction", 0.0) or 0.0),
+                        sig.tp2,
+                    )
+                if self._order_manager is not None and self._order_manager.is_enabled and _tp2_frac > 0:
                     try:
-                        await self._order_manager.close_partial(sig, 0.33, tp_level=2)
+                        await self._order_manager.close_partial(sig, _tp2_frac, tp_level=2)
                     except Exception as _exc:
                         log.warning("Partial TP2 close failed for {}: {}", sig.symbol, _exc)
             if _c_low > 0 and _c_low <= sig.tp1 and sig.status not in ("TP1_HIT", "TP2_HIT", "TP3_HIT"):
-                if BE_THEN_TP1_DEFAULT_ENABLED:
+                _runner_active = _runner_policy.runner_exit_active(
+                    getattr(sig, "setup_class", "") or ""
+                )
+                if BE_THEN_TP1_DEFAULT_ENABLED and not _runner_active:
+                    # Mover runner exit is DARK: stamp the would-be fork so
+                    # activation is decided on measured data (the Profit
+                    # page's MFE/give-back columns are the counterfactual).
+                    if _runner_policy.runner_exit_shadow(
+                        getattr(sig, "setup_class", "") or ""
+                    ):
+                        log.info(
+                            "[SHADOW] MOVER_RUNNER_WOULD_HOLD: symbol={} "
+                            "signal_id={} setup={} tp1={:.8f} mfe_pct={:.3f} "
+                            "— full-closing at TP1; runner would bank 40% "
+                            "and trail the rest",
+                            sig.symbol, sig.signal_id, sig.setup_class,
+                            sig.tp1, sig.max_favorable_excursion_pct,
+                        )
+                        sig.execution_note += " | runner-shadow@TP1"
                     await self._close_full_at_tp1(sig)
                     return
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP1_HIT"
-                await self._post_update(sig, "🎯 TP1 HIT ✅")
+                _tp1_frac = 0.33
+                if _runner_active:
+                    _tp1_frac = self._runner_bank(
+                        sig, _runner_policy.RUNNER_TP1_BANK_FRACTION, sig.tp1
+                    )
+                    await self._post_update(
+                        sig,
+                        "🎯 TP1 HIT ✅ — banked "
+                        f"{_tp1_frac * 100:.0f}%, runner riding (trail active)",
+                    )
+                else:
+                    await self._post_update(sig, "🎯 TP1 HIT ✅")
                 # Snapshot best-TP PnL for signal quality stats (only if TP2 not already hit)
                 if sig.best_tp_hit < 1:
                     sig.best_tp_hit = 1
@@ -2108,10 +2281,10 @@ class TradeMonitor:
                 be_buffer = tp1_dist * 0.15
                 new_be_sl = sig.entry - be_buffer
                 sig.stop_loss = min(sig.stop_loss, new_be_sl)
-                # Partial TP1 execution: close 33% of original position size
-                if self._order_manager is not None and self._order_manager.is_enabled:
+                # Partial TP1 execution: close 33% (runner: 40%) of original position size
+                if self._order_manager is not None and self._order_manager.is_enabled and _tp1_frac > 0:
                     try:
-                        await self._order_manager.close_partial(sig, 0.33, tp_level=1)
+                        await self._order_manager.close_partial(sig, _tp1_frac, tp_level=1)
                     except Exception as _exc:
                         log.warning("Partial TP1 close failed for {}: {}", sig.symbol, _exc)
 

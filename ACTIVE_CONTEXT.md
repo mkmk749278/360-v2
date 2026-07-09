@@ -4,6 +4,81 @@
 
 ---
 
+## 🟢 SESSION 45 2026-07-09 — PR #702 verdict + mover-path profitability package (owner-approved ACTIVE)
+
+**Owner asked:** analyse PR #702's live effect (3d Profit CSV + PDF vs the
+Jun-01→Jul-05 range CSV), deep-dive the mover paths, then implement fixes.
+
+### Verdict on #702 (85 signals, small window — caveats below)
+
+- Book flipped: **−0.39%/day gross (35d before) → +6.0%/day gross / +12.1% net
+  (3d after)**. Win rate flat (41→42%) — the gain is exits, exactly what #702
+  targeted: TP-hit rate 9%→21%, SL rate 34%→27%, MFE capture −3%→+10%.
+- **Exit leak collapsed:** the BE@1%→TP1 simulator beat engine real exits by
+  +36.5% total before; after, +2.74% — and ALL of it from 2 VSB signals. Every
+  other path's real exits now match the ideal-BE sim.
+- Caveats: 3d window straddles the merge (~1.3d pre), n=85, one KORU +5.5%
+  outlier; NEW_LISTING stamps not visible in the export yet (36/85 UNKNOWN).
+
+### Movers are the remaining drag (deep dive)
+
+- MVRTP: −0.14%/trade (n=97, before) → **−0.46%/trade (n=18, after)**; volume
+  doubled to 6/day. MVAVW: 20 signals across both windows, **zero TP hits,
+  zero SL hits, 100% expired** — pure fee drag as shaped.
+- 42% of after-window movers reached ≥1% MFE but realised ≤0 (68% MFE
+  forfeited in 3d): HMSTR +31.3% MFE→0, TRIA +12.3%→0. Part of this is the
+  Session-44 stale-candle bug (#706 fixed, needs a data window); the rest is
+  exit shape — the 1R full-close inverts a momentum path's payoff.
+- Cohort gate cold-start: store persists only since #702, no cohort has 10
+  fresh samples → known-toxic cohorts (MVRTP LONG/RANGING) still dispatch.
+- MONUSDT MVRTP LONG: 6 dispatches/−3.7% in 3d (cooldown metronome);
+  SPCXUSDT MVRTP SHORT emitted twice 7min apart, identical entry/SL (dup
+  guard gap across restarts).
+
+### Shipped (branch `claude/pr-702-signal-analysis-c9zbsb`, PR #707) — ACTIVE
+
+**Owner sign-off in-session: "make it live, no dark flags"** — the Profit
+tracker's measured MFE/give-back over both windows is the counterfactual
+evidence (mirrors the #702 activation). Every flag stays ops-reversible; the
+OFF state shadow-logs so a rollback keeps measuring.
+
+1. **Mover runner exit** (`mover_runner_exit_enabled`, **ON**) —
+   `src/execution/runner_policy.py` + trade_monitor: movers bank 40% at TP1,
+   30% at TP2 (stop→TP1), and the last 30% rides the phase-tightened ATR
+   trail with **NO fixed TP3 cap** (owner directive, from the 4-5%-MFE
+   screenshot rows: crossing TP3 stamps+posts but does not close — the trail
+   is the only exit for the final slice). Banked slices credited honestly in
+   `_set_realized_pnl`. Engine signal book only — the FSM/user-position
+   runner is a separate owner-sign-off change.
+2. **Ops live/shadow switches per mover path** (`mover_trend_pullback_live` /
+   `mover_avwap_scalp_live`, default = env = ON) — flip a path to shadow-only
+   from ops, no redeploy. Candidate: MVAVW → shadow on its 0-conversion record
+   (owner call, not flipped).
+3. **Loss-streak cooldown escalation** (`loss_streak_escalation_enabled`,
+   **ON**; cap `loss_streak_cap_hours` 12h) — consecutive losses on the same
+   symbol×setup×direction double the lifecycle cooldown extension (1h→2h→4h…).
+   Streaks persist to `data/loss_streaks.json`.
+4. **Active-duplicate dispatch guard** (`active_dup_guard_enabled`, **ON**) —
+   blocks dispatch when the live book already holds the same
+   symbol×setup×direction; restart-proof.
+
+Tests: `tests/test_mover_runner_exit.py` (25); mover shadow tests updated to
+the tunable-based switch. Full suite 6,064 passed, ruff/mypy clean.
+
+### Verify on live data (next session)
+
+- Mover exits: TP1 posts should read "banked 40%, runner riding"; watch
+  PROFIT_LOCKED / TP2+/TP3 outcomes appearing on MVRTP; mover give-back and
+  capture on the Profit page vs this window's −14% capture baseline.
+- `loss_streak escalate` + `active_dup skip` log lines / suppression counters
+  behaving (MONUSDT-style churn dropping, no duplicate live signals).
+- Ops action needing NO code: `cohort_edge_gate_min_n` 10→5 to arm the cohort
+  gate sooner while the persisted store fills.
+- Verify #706 restored mover TP detection (no more 4-5% MFE movers expiring
+  at 0 on stale candles) and NEW_LISTING stamps appearing in exports.
+
+---
+
 ## 🟢 SESSION 44 2026-07-08 — Stale-candle price freeze on dropped-universe movers (peak stuck, SL/TP backstop blind)
 
 **Owner-reported symptom:** CAPUSDT SHORT on the app showed **Live PnL +1.42%**
