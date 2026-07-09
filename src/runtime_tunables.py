@@ -272,9 +272,10 @@ def _build_registry() -> Dict[str, Tunable]:
                 "last 30% ride an ATR trail toward TP3. A momentum path's edge "
                 "is the tail — 42% of mover signals reached ≥1% profit but "
                 "realised ≤0 under the 1R full-close (HMSTR ran +31%, banked "
-                "0). Ships DARK: while off, every mover TP1 close logs what "
-                "the runner would have held, and the Profit page's give-back "
-                "column measures what it would have kept."
+                "0). ACTIVE (owner sign-off 2026-07-09). While off, every "
+                "mover TP1 close logs what the runner would have held, and "
+                "the Profit page's give-back column measures what it would "
+                "have kept."
             ),
             type="bool",
             default=MOVER_RUNNER_EXIT_ENABLED,
@@ -318,8 +319,9 @@ def _build_registry() -> Dict[str, Tunable]:
                 "re-entering the same failing setup every time the flat "
                 "cooldown lapses (MONUSDT pullback longs: 6 dispatches, "
                 "−3.7% in 3 days). A profitable outcome resets the streak; "
-                "breakeven scratches leave it unchanged. Ships DARK: while "
-                "off, would-be extensions are shadow-logged."
+                "breakeven scratches leave it unchanged. ACTIVE (owner "
+                "sign-off 2026-07-09); while off, would-be extensions are "
+                "shadow-logged."
             ),
             type="bool",
             default=LOSS_STREAK_ESCALATION_ENABLED,
@@ -348,8 +350,8 @@ def _build_registry() -> Dict[str, Tunable]:
                 "open signal with the same symbol × setup × direction. The "
                 "30-min dispatch cooldown intends this but doesn't survive "
                 "every restart path (SPCXUSDT mover short emitted twice, 7 "
-                "min apart, identical entry/SL). Ships DARK: while off, "
-                "would-be blocks are shadow-logged."
+                "min apart, identical entry/SL). ACTIVE (owner sign-off "
+                "2026-07-09); while off, would-be blocks are shadow-logged."
             ),
             type="bool",
             default=ACTIVE_DUP_GUARD_ENABLED,

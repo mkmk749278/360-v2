@@ -2500,7 +2500,7 @@ MARK_FEED_STALENESS_ENABLED: bool = _safe_bool("MARK_FEED_STALENESS_ENABLED", "t
 MARK_FEED_STALENESS_MAX_AGE_SEC: float = _safe_float("MARK_FEED_STALENESS_MAX_AGE_SEC", "120.0")
 
 # ---------------------------------------------------------------------------
-# Mover-path profitability package (dark-flag-first, 2026-07-09)
+# Mover-path profitability package (owner-approved ACTIVE, 2026-07-09)
 # ---------------------------------------------------------------------------
 # Root cause (3d post-#702 window vs the Jun-01→Jul-05 range, ops Profit CSVs):
 # the non-mover book runs +0.37%/trade net while the mover paths run −0.44%/
@@ -2509,21 +2509,21 @@ MARK_FEED_STALENESS_MAX_AGE_SEC: float = _safe_float("MARK_FEED_STALENESS_MAX_AG
 # runs that reach +12% / +31% MFE — 42% of mover signals reached ≥1% MFE yet
 # realised ≤0, forfeiting 68% MFE in 3 days.  A momentum-continuation path
 # needs a runner exit, not a 1R full-close.
-# These are ENV BOOT DEFAULTS ONLY — live values are runtime tunables on the
-# ops panel (src/runtime_tunables.py).  All four ship DARK / behaviour-neutral
-# per CLAUDE.md § Project Phase: flags default OFF (or to the current env
-# behaviour) and shadow-stamp what they WOULD have done until the owner
-# activates them on measured data.
+# Owner sign-off in-session (2026-07-09): "make it live, no dark flags" — the
+# measured counterfactual (the Profit tracker's MFE / give-back columns over
+# both windows) IS the shadow evidence, mirroring the #702 activation.  These
+# are ENV BOOT DEFAULTS ONLY — live values are runtime tunables on the ops
+# panel (src/runtime_tunables.py); each remains reversible from ops with one
+# click, no redeploy.  When a flag is turned OFF, its shadow logging
+# ("[SHADOW] …_WOULD_…") resumes so the off-state keeps measuring.
 
 # Runner exit for mover setup classes (MOVER_TREND_PULLBACK /
 # MOVER_AVWAP_SCALP) on the engine's own signal book: instead of the
 # BE_THEN_TP1 full close at TP1, bank a partial at TP1, a further partial at
 # TP2 (stop→TP1), and let the remainder ride the existing phase-tightened ATR
 # trail to TP3 / trail-out.  Realised PnL blends the banked slices honestly
-# (see TradeMonitor._set_realized_pnl).  While OFF, every mover TP1 full-close
-# logs "[SHADOW] MOVER_RUNNER_WOULD_HOLD"; the Profit page's MFE / give-back
-# columns are the shadow measurement of what the runner would have kept.
-MOVER_RUNNER_EXIT_ENABLED: bool = _safe_bool("MOVER_RUNNER_EXIT_ENABLED", "false")
+# (see TradeMonitor._set_realized_pnl).
+MOVER_RUNNER_EXIT_ENABLED: bool = _safe_bool("MOVER_RUNNER_EXIT_ENABLED", "true")
 
 # Loss-streak cooldown escalation: consecutive losing outcomes on the same
 # (symbol, setup_class, direction) double the lifecycle cooldown extension per
@@ -2531,9 +2531,8 @@ MOVER_RUNNER_EXIT_ENABLED: bool = _safe_bool("MOVER_RUNNER_EXIT_ENABLED", "false
 # stops re-entering the same failing setup every cooldown lapse (MONUSDT
 # MVRTP LONG: 6 dispatches / −3.7% in 3 days).  A streak counts outcomes at or
 # below LOSS_STREAK_LOSS_PCT and resets at or above LOSS_STREAK_RESET_PCT
-# (BE-park scratches in between leave it unchanged).  While OFF, would-be
-# escalations log "[SHADOW] LOSS_STREAK_WOULD_EXTEND".
-LOSS_STREAK_ESCALATION_ENABLED: bool = _safe_bool("LOSS_STREAK_ESCALATION_ENABLED", "false")
+# (BE-park scratches in between leave it unchanged).
+LOSS_STREAK_ESCALATION_ENABLED: bool = _safe_bool("LOSS_STREAK_ESCALATION_ENABLED", "true")
 LOSS_STREAK_CAP_HOURS: float = _safe_float("LOSS_STREAK_CAP_HOURS", "12.0")
 LOSS_STREAK_LOSS_PCT: float = _safe_float("LOSS_STREAK_LOSS_PCT", "-0.5")
 LOSS_STREAK_RESET_PCT: float = _safe_float("LOSS_STREAK_RESET_PCT", "0.5")
@@ -2543,8 +2542,7 @@ LOSS_STREAK_RESET_PCT: float = _safe_float("LOSS_STREAK_RESET_PCT", "0.5")
 # direction).  The 30-min dispatch cooldown intends this but does not survive
 # every restart path (SPCXUSDT MVRTP SHORT emitted twice 7 min apart at an
 # identical entry/SL on 2026-07-08); checking the live book is restart-proof.
-# While OFF, would-be blocks log "[SHADOW] ACTIVE_DUP_WOULD_BLOCK".
-ACTIVE_DUP_GUARD_ENABLED: bool = _safe_bool("ACTIVE_DUP_GUARD_ENABLED", "false")
+ACTIVE_DUP_GUARD_ENABLED: bool = _safe_bool("ACTIVE_DUP_GUARD_ENABLED", "true")
 
 # ---------------------------------------------------------------------------
 # Funding-rate exit

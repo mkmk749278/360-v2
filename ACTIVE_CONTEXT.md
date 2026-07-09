@@ -4,7 +4,7 @@
 
 ---
 
-## 🟢 SESSION 45 2026-07-09 — PR #702 verdict + mover-path profitability package (all DARK)
+## 🟢 SESSION 45 2026-07-09 — PR #702 verdict + mover-path profitability package (owner-approved ACTIVE)
 
 **Owner asked:** analyse PR #702's live effect (3d Profit CSV + PDF vs the
 Jun-01→Jul-05 range CSV), deep-dive the mover paths, then implement fixes.
@@ -35,36 +35,43 @@ Jun-01→Jul-05 range CSV), deep-dive the mover paths, then implement fixes.
   SPCXUSDT MVRTP SHORT emitted twice 7min apart, identical entry/SL (dup
   guard gap across restarts).
 
-### Shipped (branch `claude/pr-702-signal-analysis-c9zbsb`) — ALL DARK
+### Shipped (branch `claude/pr-702-signal-analysis-c9zbsb`, PR #707) — ACTIVE
 
-1. **Mover runner exit** (`mover_runner_exit_enabled`, OFF) —
+**Owner sign-off in-session: "make it live, no dark flags"** — the Profit
+tracker's measured MFE/give-back over both windows is the counterfactual
+evidence (mirrors the #702 activation). Every flag stays ops-reversible; the
+OFF state shadow-logs so a rollback keeps measuring.
+
+1. **Mover runner exit** (`mover_runner_exit_enabled`, **ON**) —
    `src/execution/runner_policy.py` + trade_monitor: movers bank 40% at TP1,
    30% at TP2 (stop→TP1), remainder rides the existing phase-tightened ATR
-   trail; banked slices credited honestly in `_set_realized_pnl`. While OFF:
-   `[SHADOW] MOVER_RUNNER_WOULD_HOLD` at every mover TP1 close; Profit-page
-   give-back is the counterfactual measurement. Engine signal book only —
-   the FSM/user-position runner is a separate owner-sign-off change.
+   trail; banked slices credited honestly in `_set_realized_pnl`. Engine
+   signal book only — the FSM/user-position runner is a separate
+   owner-sign-off change.
 2. **Ops live/shadow switches per mover path** (`mover_trend_pullback_live` /
    `mover_avwap_scalp_live`, default = env = ON) — flip a path to shadow-only
-   from ops, no redeploy. Candidate: MVAVW → shadow on its 0-conversion record.
-3. **Loss-streak cooldown escalation** (`loss_streak_escalation_enabled`, OFF;
-   cap `loss_streak_cap_hours` 12h) — consecutive losses on the same
+   from ops, no redeploy. Candidate: MVAVW → shadow on its 0-conversion record
+   (owner call, not flipped).
+3. **Loss-streak cooldown escalation** (`loss_streak_escalation_enabled`,
+   **ON**; cap `loss_streak_cap_hours` 12h) — consecutive losses on the same
    symbol×setup×direction double the lifecycle cooldown extension (1h→2h→4h…).
-   Streaks persist to `data/loss_streaks.json`. Shadow-logs while OFF.
-4. **Active-duplicate dispatch guard** (`active_dup_guard_enabled`, OFF) —
+   Streaks persist to `data/loss_streaks.json`.
+4. **Active-duplicate dispatch guard** (`active_dup_guard_enabled`, **ON**) —
    blocks dispatch when the live book already holds the same
-   symbol×setup×direction; restart-proof, shadow-logs while OFF.
+   symbol×setup×direction; restart-proof.
 
-Tests: `tests/test_mover_runner_exit.py` (24); mover shadow tests updated to
-the tunable-based switch. Full suite 6,063 passed, ruff/mypy clean.
+Tests: `tests/test_mover_runner_exit.py` (25); mover shadow tests updated to
+the tunable-based switch. Full suite 6,064 passed, ruff/mypy clean.
 
-### Next session / owner actions
+### Verify on live data (next session)
 
-- Watch `[SHADOW] MOVER_RUNNER_WOULD_HOLD`, `LOSS_STREAK_WOULD_EXTEND`,
-  `ACTIVE_DUP_WOULD_BLOCK` lines + Profit-page mover give-back over a fresh
-  window; activate from ops per shadow evidence (owner sign-off).
-- Consider ops changes needing NO code: `cohort_edge_gate_min_n` 10→5 to arm
-  the cohort gate sooner while the persisted store fills.
+- Mover exits: TP1 posts should read "banked 40%, runner riding"; watch
+  PROFIT_LOCKED / TP2+/TP3 outcomes appearing on MVRTP; mover give-back and
+  capture on the Profit page vs this window's −14% capture baseline.
+- `loss_streak escalate` + `active_dup skip` log lines / suppression counters
+  behaving (MONUSDT-style churn dropping, no duplicate live signals).
+- Ops action needing NO code: `cohort_edge_gate_min_n` 10→5 to arm the cohort
+  gate sooner while the persisted store fills.
 - Verify #706 restored mover TP detection (no more 4-5% MFE movers expiring
   at 0 on stale candles) and NEW_LISTING stamps appearing in exports.
 

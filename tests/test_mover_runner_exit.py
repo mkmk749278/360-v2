@@ -1,13 +1,14 @@
-"""Tests for the 2026-07-09 mover-path profitability package (all DARK).
+"""Tests for the 2026-07-09 mover-path profitability package.
 
-Covers the four dark-flagged changes:
-1. runtime_tunables — new registry keys + dark defaults.
+Ships ACTIVE (owner sign-off in-session 2026-07-09); every flag remains an
+ops-reversible runtime tunable whose OFF state shadow-logs. Covers:
+1. runtime_tunables — new registry keys + active defaults.
 2. runner_policy + TradeMonitor — mover runner exit fork, banked-slice
    PnL accounting, shadow stamp while the flag is off.
 3. Scanner loss-streak escalation — streak bookkeeping, doubling + cap,
    shadow while off, reset on wins.
 4. Scanner active-duplicate guard — blocks when enabled, shadow-logs when
-   dark.
+   off.
 """
 from __future__ import annotations
 
@@ -70,10 +71,11 @@ def _tunables(**values):
 # runtime_tunables — new keys ship with dark / behaviour-neutral defaults
 # ---------------------------------------------------------------------------
 
-def test_new_tunables_dark_defaults():
-    assert rt.get("mover_runner_exit_enabled") is False        # DARK
-    assert rt.get("loss_streak_escalation_enabled") is False   # DARK
-    assert rt.get("active_dup_guard_enabled") is False         # DARK
+def test_new_tunables_active_defaults():
+    # Owner sign-off 2026-07-09: ships ACTIVE, reversible from ops.
+    assert rt.get("mover_runner_exit_enabled") is True
+    assert rt.get("loss_streak_escalation_enabled") is True
+    assert rt.get("active_dup_guard_enabled") is True
     # Live-flags default to the current env behaviour (ON) — neutral.
     assert rt.get("mover_trend_pullback_live") is True
     assert rt.get("mover_avwap_scalp_live") is True
@@ -104,12 +106,18 @@ def test_runner_policy_scope():
     assert not runner_policy.is_mover_setup("")
 
 
-def test_runner_policy_dark_by_default():
-    assert runner_policy.runner_exit_active("MOVER_TREND_PULLBACK") is False
-    assert runner_policy.runner_exit_shadow("MOVER_TREND_PULLBACK") is True
+def test_runner_policy_active_by_default():
+    assert runner_policy.runner_exit_active("MOVER_TREND_PULLBACK") is True
+    assert runner_policy.runner_exit_shadow("MOVER_TREND_PULLBACK") is False
     # Non-movers never shadow (nothing to stamp) and never activate.
     assert runner_policy.runner_exit_shadow("SR_FLIP_RETEST") is False
     assert runner_policy.runner_exit_active("SR_FLIP_RETEST") is False
+
+
+def test_runner_policy_shadows_when_flag_off():
+    _tunables(mover_runner_exit_enabled=False)
+    assert runner_policy.runner_exit_active("MOVER_TREND_PULLBACK") is False
+    assert runner_policy.runner_exit_shadow("MOVER_TREND_PULLBACK") is True
 
 
 def test_runner_policy_activates_via_tunable():
@@ -197,9 +205,10 @@ def _enabled_order_manager():
 
 
 async def test_mover_tp1_full_closes_while_dark_with_shadow_stamp(monkeypatch):
-    """Flag OFF (default): behaviour unchanged — mover full-closes at TP1 —
-    and the fork moment is stamped for the shadow window."""
+    """Flag turned OFF from ops: mover full-closes at TP1 (BE_THEN_TP1
+    behaviour) and the fork moment is stamped for the shadow window."""
     monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", True)
+    _tunables(mover_runner_exit_enabled=False)
     om = _enabled_order_manager()
     ds = _data_store_with_candle(high=102.5, low=99.9)
     monitor = _build_monitor(order_manager=om, data_store=ds)
@@ -392,8 +401,9 @@ def test_loss_streak_persists_and_reloads(tmp_path, monkeypatch):
 
 
 def test_loss_streak_shadow_does_not_extend_cooldown(tmp_path, monkeypatch):
-    """Dark default: streak ≥2 shadow-logs, cooldown stays the flat base."""
+    """Flag turned OFF from ops: streak ≥2 shadow-logs, cooldown stays flat."""
     import time as _time
+    _tunables(loss_streak_escalation_enabled=False)
     sc = _stub_scanner(tmp_path, monkeypatch)
     sc.on_signal_lifecycle_outcome(_outcome_sig(-1.0), "SL_HIT")
     sc.on_signal_lifecycle_outcome(_outcome_sig(-1.0), "SL_HIT")
@@ -444,7 +454,9 @@ async def test_active_dup_guard_blocks_when_enabled(tmp_path, monkeypatch):
 
 
 async def test_active_dup_guard_shadow_lets_signal_through(tmp_path, monkeypatch):
-    """Dark default: the duplicate is shadow-counted but still dispatches."""
+    """Flag turned OFF from ops: the duplicate is shadow-counted but still
+    dispatches."""
+    _tunables(active_dup_guard_enabled=False)
     sc = _stub_scanner(tmp_path, monkeypatch)
     open_dup = _make_signal()
     sc.router.active_signals = {open_dup.signal_id: open_dup}

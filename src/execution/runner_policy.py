@@ -1,4 +1,4 @@
-"""Mover runner-exit policy — DARK-flagged (default OFF, 2026-07-09).
+"""Mover runner-exit policy — ACTIVE (owner sign-off in-session, 2026-07-09).
 
 Single source of truth for WHICH setup classes get the runner exit and the
 partial-bank ladder it uses, consumed by ``trade_monitor`` (the engine's
@@ -26,10 +26,11 @@ classes only — every other path keeps the BE_THEN_TP1 full close untouched):
   TP1 classifies as PROFIT_LOCKED with the banked slices credited honestly
   (``TradeMonitor._set_realized_pnl``).
 
-While the tunable is OFF (dark), the monitor logs
-``[SHADOW] MOVER_RUNNER_WOULD_HOLD`` at every mover TP1 full-close so the
-fork moment is stamped; the Profit page's MFE / give-back columns are the
-counterfactual measurement of what the runner would have kept.
+The tunable ships ON (owner directive 2026-07-09: "make it live, no dark
+flags" — the Profit tracker's measured MFE / give-back columns over the
+3d/35d windows are the counterfactual evidence).  If turned OFF from ops,
+the monitor resumes logging ``[SHADOW] MOVER_RUNNER_WOULD_HOLD`` at every
+mover TP1 full-close so the off-state keeps measuring the fork.
 
 All reads go through the 5s-cached runtime-tunables accessor — no Firestore
 reads per monitor tick beyond the shared doc cache (Cost Discipline).
