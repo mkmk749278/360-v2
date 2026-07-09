@@ -2018,41 +2018,66 @@ class TradeMonitor:
 
         if is_long:
             if sig.tp3 and _c_high > 0 and _c_high >= sig.tp3 and sig.status != "TP3_HIT":
-                if sig.first_tp_touch_timestamp is None:
-                    sig.first_tp_touch_timestamp = utcnow()
-                tp3_pnl = calculate_trade_pnl_pct(
-                    entry_price=sig.entry, exit_price=sig.tp3, direction=sig.direction.value
-                )
-                if self.on_highlight_callback is not None:
-                    self.on_highlight_callback(sig, 3, tp3_pnl)
-                # Partial TP3 execution: close 34% of original position size
-                if self._order_manager is not None and self._order_manager.is_enabled:
-                    try:
-                        await self._order_manager.close_partial(sig, 0.34, tp_level=3)
-                    except Exception as _exc:
-                        log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
-                # FSM positions: close any remaining qty at market.  Native TP3 orders
-                # on Binance already filled → -2022 ReduceOnly rejected → treated as
-                # success.  Positions opened without native TP orders (pre-#488 bug)
-                # still have open qty → MARKET close fires here instead.
-                await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
-                self._set_realized_pnl(sig, sig.tp3)
-                self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
-                await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
-                self._record_outcome(sig, hit_tp=3, hit_sl=False)
-                await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
-                self._remove(sig.signal_id)
-                return
+                # Mover runner: NO fixed TP3 cap (owner directive 2026-07-09).
+                # The fat tail is the mover thesis — TAIKO/NBIS/WDC ran 4-5%
+                # and HMSTR +31% while the ladder's 2.5R cap would have cut
+                # them.  The remainder keeps riding the phase-tightened ATR
+                # trail (0.35× after TP2, floored at TP1); the trail IS the
+                # exit for the final slice.  Stamp TP3-cleared once (best_tp
+                # snapshot + post) and fall through to the TP2/trail handling.
+                if _runner_policy.runner_exit_active(
+                    getattr(sig, "setup_class", "") or ""
+                ):
+                    if sig.best_tp_hit < 3:
+                        if sig.first_tp_touch_timestamp is None:
+                            sig.first_tp_touch_timestamp = utcnow()
+                        sig.best_tp_hit = 3
+                        sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
+                            entry_price=sig.entry, exit_price=sig.tp3,
+                            direction=sig.direction.value,
+                        )
+                        await self._post_update(
+                            sig,
+                            "🎯🎯🎯 TP3 CLEARED — runner riding, trail owns the exit",
+                        )
+                else:
+                    if sig.first_tp_touch_timestamp is None:
+                        sig.first_tp_touch_timestamp = utcnow()
+                    tp3_pnl = calculate_trade_pnl_pct(
+                        entry_price=sig.entry, exit_price=sig.tp3, direction=sig.direction.value
+                    )
+                    if self.on_highlight_callback is not None:
+                        self.on_highlight_callback(sig, 3, tp3_pnl)
+                    # Partial TP3 execution: close 34% of original position size
+                    if self._order_manager is not None and self._order_manager.is_enabled:
+                        try:
+                            await self._order_manager.close_partial(sig, 0.34, tp_level=3)
+                        except Exception as _exc:
+                            log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
+                    # FSM positions: close any remaining qty at market.  Native TP3 orders
+                    # on Binance already filled → -2022 ReduceOnly rejected → treated as
+                    # success.  Positions opened without native TP orders (pre-#488 bug)
+                    # still have open qty → MARKET close fires here instead.
+                    await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
+                    self._set_realized_pnl(sig, sig.tp3)
+                    self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
+                    await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
+                    self._record_outcome(sig, hit_tp=3, hit_sl=False)
+                    await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
+                    self._remove(sig.signal_id)
+                    return
             if _c_high > 0 and _c_high >= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP2_HIT"
                 await self._post_update(sig, "🎯🎯 TP2 HIT")
-                # Snapshot best-TP PnL for signal quality stats
-                sig.best_tp_hit = 2
-                sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
-                    entry_price=sig.entry, exit_price=sig.tp2, direction=sig.direction.value
-                )
+                # Snapshot best-TP PnL for signal quality stats (never
+                # downgrade a runner's TP3-cleared stamp).
+                if sig.best_tp_hit < 2:
+                    sig.best_tp_hit = 2
+                    sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
+                        entry_price=sig.entry, exit_price=sig.tp2, direction=sig.direction.value
+                    )
                 if self.on_highlight_callback is not None:
                     self.on_highlight_callback(sig, 2, sig.best_tp_pnl_pct)
                 # Trailing: move SL to TP1 price to protect banked profit while giving TP3 room
@@ -2132,41 +2157,60 @@ class TradeMonitor:
                         log.warning("Partial TP1 close failed for {}: {}", sig.symbol, _exc)
         else:
             if sig.tp3 and _c_low > 0 and _c_low <= sig.tp3 and sig.status != "TP3_HIT":
-                if sig.first_tp_touch_timestamp is None:
-                    sig.first_tp_touch_timestamp = utcnow()
-                tp3_pnl = calculate_trade_pnl_pct(
-                    entry_price=sig.entry, exit_price=sig.tp3, direction=sig.direction.value
-                )
-                if self.on_highlight_callback is not None:
-                    self.on_highlight_callback(sig, 3, tp3_pnl)
-                # Partial TP3 execution: close 34% of original position size
-                if self._order_manager is not None and self._order_manager.is_enabled:
-                    try:
-                        await self._order_manager.close_partial(sig, 0.34, tp_level=3)
-                    except Exception as _exc:
-                        log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
-                # FSM positions: close any remaining qty at market.  Native TP3 orders
-                # on Binance already filled → -2022 ReduceOnly rejected → treated as
-                # success.  Positions opened without native TP orders (pre-#488 bug)
-                # still have open qty → MARKET close fires here instead.
-                await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
-                self._set_realized_pnl(sig, sig.tp3)
-                self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
-                await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
-                self._record_outcome(sig, hit_tp=3, hit_sl=False)
-                await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
-                self._remove(sig.signal_id)
-                return
+                # Mover runner: NO fixed TP3 cap — see the LONG branch note.
+                if _runner_policy.runner_exit_active(
+                    getattr(sig, "setup_class", "") or ""
+                ):
+                    if sig.best_tp_hit < 3:
+                        if sig.first_tp_touch_timestamp is None:
+                            sig.first_tp_touch_timestamp = utcnow()
+                        sig.best_tp_hit = 3
+                        sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
+                            entry_price=sig.entry, exit_price=sig.tp3,
+                            direction=sig.direction.value,
+                        )
+                        await self._post_update(
+                            sig,
+                            "🎯🎯🎯 TP3 CLEARED — runner riding, trail owns the exit",
+                        )
+                else:
+                    if sig.first_tp_touch_timestamp is None:
+                        sig.first_tp_touch_timestamp = utcnow()
+                    tp3_pnl = calculate_trade_pnl_pct(
+                        entry_price=sig.entry, exit_price=sig.tp3, direction=sig.direction.value
+                    )
+                    if self.on_highlight_callback is not None:
+                        self.on_highlight_callback(sig, 3, tp3_pnl)
+                    # Partial TP3 execution: close 34% of original position size
+                    if self._order_manager is not None and self._order_manager.is_enabled:
+                        try:
+                            await self._order_manager.close_partial(sig, 0.34, tp_level=3)
+                        except Exception as _exc:
+                            log.warning("Partial TP3 close failed for {}: {}", sig.symbol, _exc)
+                    # FSM positions: close any remaining qty at market.  Native TP3 orders
+                    # on Binance already filled → -2022 ReduceOnly rejected → treated as
+                    # success.  Positions opened without native TP orders (pre-#488 bug)
+                    # still have open qty → MARKET close fires here instead.
+                    await self._broker_close_full(sig, reason="full_tp_hit", fill_price=sig.tp3)
+                    self._set_realized_pnl(sig, sig.tp3)
+                    self._apply_final_outcome(sig, hit_tp=3, hit_sl=False)
+                    await self._post_update(sig, "🎯🎯🎯 FULL TP HIT")
+                    self._record_outcome(sig, hit_tp=3, hit_sl=False)
+                    await self._post_signal_closed(sig, is_tp=True, tp_label="TP3", close_price=sig.tp3)
+                    self._remove(sig.signal_id)
+                    return
             if _c_low > 0 and _c_low <= sig.tp2 and sig.status not in ("TP2_HIT", "TP3_HIT"):
                 if sig.first_tp_touch_timestamp is None:
                     sig.first_tp_touch_timestamp = utcnow()
                 sig.status = "TP2_HIT"
                 await self._post_update(sig, "🎯🎯 TP2 HIT")
-                # Snapshot best-TP PnL for signal quality stats
-                sig.best_tp_hit = 2
-                sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
-                    entry_price=sig.entry, exit_price=sig.tp2, direction=sig.direction.value
-                )
+                # Snapshot best-TP PnL for signal quality stats (never
+                # downgrade a runner's TP3-cleared stamp).
+                if sig.best_tp_hit < 2:
+                    sig.best_tp_hit = 2
+                    sig.best_tp_pnl_pct = calculate_trade_pnl_pct(
+                        entry_price=sig.entry, exit_price=sig.tp2, direction=sig.direction.value
+                    )
                 if self.on_highlight_callback is not None:
                     self.on_highlight_callback(sig, 2, sig.best_tp_pnl_pct)
                 sig.stop_loss = sig.tp1

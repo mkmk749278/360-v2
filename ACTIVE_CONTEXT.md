@@ -44,10 +44,12 @@ OFF state shadow-logs so a rollback keeps measuring.
 
 1. **Mover runner exit** (`mover_runner_exit_enabled`, **ON**) —
    `src/execution/runner_policy.py` + trade_monitor: movers bank 40% at TP1,
-   30% at TP2 (stop→TP1), remainder rides the existing phase-tightened ATR
-   trail; banked slices credited honestly in `_set_realized_pnl`. Engine
-   signal book only — the FSM/user-position runner is a separate
-   owner-sign-off change.
+   30% at TP2 (stop→TP1), and the last 30% rides the phase-tightened ATR
+   trail with **NO fixed TP3 cap** (owner directive, from the 4-5%-MFE
+   screenshot rows: crossing TP3 stamps+posts but does not close — the trail
+   is the only exit for the final slice). Banked slices credited honestly in
+   `_set_realized_pnl`. Engine signal book only — the FSM/user-position
+   runner is a separate owner-sign-off change.
 2. **Ops live/shadow switches per mover path** (`mover_trend_pullback_live` /
    `mover_avwap_scalp_live`, default = env = ON) — flip a path to shadow-only
    from ops, no redeploy. Candidate: MVAVW → shadow on its 0-conversion record

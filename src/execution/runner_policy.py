@@ -20,11 +20,13 @@ classes only — every other path keeps the BE_THEN_TP1 full close untouched):
   stop to the small profit-side buffer (existing TP1 handling), keep running.
 - **TP2** — bank up to a cumulative ``RUNNER_TP2_CUM_FRACTION`` (70%), stop
   lifts to TP1 (existing TP2 handling — 1R now locked on the remainder).
-- **TP3** — the remainder closes via the existing FULL_TP path.
-- Between TPs the existing phase-tightened ATR trail
-  (``TradeMonitor._adjust_trailing``) manages the stop; a trail-out after
-  TP1 classifies as PROFIT_LOCKED with the banked slices credited honestly
-  (``TradeMonitor._set_realized_pnl``).
+- **NO fixed TP3 cap** (owner directive 2026-07-09: the 4-5% movers in the
+  screenshots — TAIKO/NBIS/WDC, HMSTR +31% — are the thesis; a 2.5R cap
+  cuts exactly them).  Crossing TP3 stamps best_tp_hit=3 and posts, but the
+  last slice stays open: the phase-tightened ATR trail (0.35× after TP2,
+  floored at TP1) IS the exit for the remainder.
+- A trail-out after TP1 classifies as PROFIT_LOCKED with the banked slices
+  credited honestly (``TradeMonitor._set_realized_pnl``).
 
 The tunable ships ON (owner directive 2026-07-09: "make it live, no dark
 flags" — the Profit tracker's measured MFE / give-back columns over the

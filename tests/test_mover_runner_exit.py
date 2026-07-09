@@ -293,6 +293,51 @@ async def test_non_mover_still_full_closes_when_runner_active(monkeypatch):
     assert sig.runner_banked_fraction == 0.0
 
 
+async def test_mover_tp3_does_not_close_runner_rides(monkeypatch):
+    """NO fixed TP3 cap for movers: crossing TP3 stamps best_tp=3 and banks
+    the cumulative 70% via the TP2 leg, but the last slice stays open on the
+    trail — no full close."""
+    monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", True)
+    om = _enabled_order_manager()
+    # Single mega-candle clears TP3 (105) without dipping to the stop.
+    ds = _data_store_with_candle(high=106.0, low=101.5)
+    monitor = _build_monitor(order_manager=om, data_store=ds)
+
+    sig = _make_signal(current_price=105.8)
+    sig.max_favorable_excursion_pct = 5.8
+    await monitor._evaluate_signal(sig)
+
+    om.close_full.assert_not_called()           # remainder still riding
+    assert sig.status == "TP2_HIT"              # trail phase (0.35× mult)
+    assert sig.best_tp_hit == 3                 # TP3-cleared stamped, not downgraded
+    assert sig.runner_banked_fraction == pytest.approx(0.70)
+    assert sig.stop_loss >= sig.tp1             # floor locked at TP1
+
+
+async def test_non_mover_tp3_still_full_closes(monkeypatch):
+    monkeypatch.setattr("src.trade_monitor.BE_THEN_TP1_DEFAULT_ENABLED", False)
+    om = _enabled_order_manager()
+    ds = _data_store_with_candle(high=106.0, low=101.5)
+    monitor = _build_monitor(order_manager=om, data_store=ds)
+
+    sig = _make_signal(setup_class="SR_FLIP_RETEST", current_price=105.8)
+    await monitor._evaluate_signal(sig)
+
+    om.close_full.assert_awaited()
+    assert om.close_full.await_args.kwargs.get("reason") == "full_tp_hit"
+
+
+def test_realized_pnl_runner_trail_out_beyond_tp3():
+    """HMSTR-shaped run: 40% @ TP1 (+2%), 30% @ TP2 (+3.2%), remainder
+    trails out at +25% — honest blend, no 2.5R cap."""
+    sig = _make_signal()
+    TradeMonitor._runner_bank(sig, 0.40, 102.0)
+    TradeMonitor._runner_bank(sig, 0.30, 103.2)
+    TradeMonitor._set_realized_pnl(sig, 125.0)
+    expected = 0.4 * 2.0 + 0.3 * 3.2 + 0.3 * 25.0
+    assert sig.pnl_pct == pytest.approx(expected)
+
+
 # ---------------------------------------------------------------------------
 # Banked-slice PnL accounting
 # ---------------------------------------------------------------------------
