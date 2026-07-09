@@ -844,6 +844,23 @@ class ScalpChannel(BaseChannel):
         self._active_no_signal_reason = self._no_signal_reason_token(reason)
         return None
 
+    @staticmethod
+    def _mover_path_live(tunable_key: str, boot_default: bool) -> bool:
+        """Live/shadow switch for a mover path, read from the ops-controlled
+        runtime tunables (2026-07-09).  The env flags
+        (MOVER_TREND_PULLBACK_ENABLED / MOVER_AVWAP_SCALP_ENABLED) required a
+        VPS .env edit + redeploy to flip a path into shadow; per the #702
+        owner directive every such knob lives on the ops panel.  The tunable's
+        default IS the env flag, so behaviour is unchanged until the owner
+        flips it.  Read via the 5s-cached whole-doc accessor — no per-scan
+        Firestore reads (Cost Discipline).
+        """
+        try:
+            from src import runtime_tunables as _rt
+            return bool(_rt.get(tunable_key))
+        except Exception:
+            return boot_default
+
     def _prune_mover_reasons(self, now: float) -> None:
         """Drop stale per-symbol mover-reason entries (cheap, bounded)."""
         if len(self._mover_last_reason) > 256:
@@ -3119,9 +3136,12 @@ class ScalpChannel(BaseChannel):
         if sl_dist <= 0:
             return self._reject("invalid_sl_geometry")
 
-        # Live by default in the testing phase.  When explicitly disabled, log a
-        # [SHADOW] line to size the opportunity instead of emitting a live signal.
-        if not MOVER_TREND_PULLBACK_ENABLED:
+        # Live/shadow is ops-controlled (runtime tunable; boot default = the
+        # env flag).  When shadowed, log a [SHADOW] line to size the
+        # opportunity instead of emitting a live signal.
+        if not self._mover_path_live(
+            "mover_trend_pullback_live", MOVER_TREND_PULLBACK_ENABLED
+        ):
             log.info(
                 "[SHADOW] MOVER_TREND_PULLBACK_WOULD_FIRE: symbol={} dir={} "
                 "trigger={} close={:.6f} ma_fast={:.6f} ma_mid={:.6f} ma_slow={:.6f} "
@@ -3317,7 +3337,11 @@ class ScalpChannel(BaseChannel):
         if sl_dist <= 0:
             return self._reject("invalid_sl_geometry")
 
-        if not MOVER_AVWAP_SCALP_ENABLED:
+        # Live/shadow is ops-controlled (runtime tunable; boot default = the
+        # env flag).
+        if not self._mover_path_live(
+            "mover_avwap_scalp_live", MOVER_AVWAP_SCALP_ENABLED
+        ):
             log.info(
                 "[SHADOW] MOVER_AVWAP_SCALP_WOULD_FIRE: symbol={} dir={} close={:.6f} "
                 "avwap={:.6f} slope_pct={:.3f} sl={:.6f} sl_dist_pct={:.3f}",

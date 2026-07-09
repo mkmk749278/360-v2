@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import numpy as np
 
-import src.channels.scalp as scalp
 from src.channels.scalp import ScalpChannel
 from src.smc import Direction
 
@@ -73,15 +72,25 @@ def test_flat_market_rejects_no_mover_leg():
     assert ch._active_no_signal_reason == "no_mover_leg"
 
 
-def test_shadow_mode_suppresses_when_disabled(monkeypatch):
-    monkeypatch.setattr(scalp, "MOVER_AVWAP_SCALP_ENABLED", False)
-    ch = ScalpChannel()
-    sig = ch._evaluate_mover_avwap_scalp(
-        "ABCUSDT", _short_mover_candles(), _IND, _SMC, 0.001, 50_000_000,
-        regime="TRENDING_DOWN",
-    )
-    assert sig is None
-    assert ch._active_no_signal_reason == "shadow_mode"
+def test_shadow_mode_suppresses_when_disabled():
+    """Shadowed via the ops runtime tunable (2026-07-09 — the live/shadow
+    switch is ops-controlled; the env flag is only the boot default)."""
+    from src import runtime_tunables as rt
+    from tests.test_mover_runner_exit import _FakeFirestore
+
+    rt.reset_for_test()
+    try:
+        rt.init_runtime_tunables(_FakeFirestore())
+        rt.set_values({"mover_avwap_scalp_live": False})
+        ch = ScalpChannel()
+        sig = ch._evaluate_mover_avwap_scalp(
+            "ABCUSDT", _short_mover_candles(), _IND, _SMC, 0.001, 50_000_000,
+            regime="TRENDING_DOWN",
+        )
+        assert sig is None
+        assert ch._active_no_signal_reason == "shadow_mode"
+    finally:
+        rt.reset_for_test()
 
 
 def test_evaluator_method_exists():
