@@ -34,6 +34,7 @@ def _make_position(
     sl_order_id: int = 42,
     pretp_fired: bool = False,
     be_shift_fired: bool = False,
+    tp1_mult: float = 1.02,
 ) -> _ps.Position:
     return _ps.Position(
         signal_id="be-test-sig",
@@ -44,7 +45,7 @@ def _make_position(
         entry_price_target=entry,
         entry_price_filled=entry,
         sl_price=sl_price,
-        tp1_price=entry * 1.02,
+        tp1_price=entry * tp1_mult,
         tp2_price=entry * 1.04,
         tp3_price=entry * 1.06,
         total_qty=1.0,
@@ -98,7 +99,11 @@ async def test_long_fires_at_trigger_threshold():
 async def test_wide_stop_does_not_arm_at_flat_trigger():
     # R-multiple arm regression (7d study: 84% of flat-1% BE scratches were
     # winners): a 5%-stop position must NOT arm at a 1% move — its arm is 1R.
-    pos = _make_position(side="LONG", entry=100.0, sl_price=95.0, sl_order_id=42)
+    # TP1 sits at 12% so the 2026-07-10 TP1 cap (0.5 × 12% = 6% > 1R) does
+    # not bite; the R-multiple protection is what this test pins.
+    pos = _make_position(
+        side="LONG", entry=100.0, sl_price=95.0, sl_order_id=42, tp1_mult=1.12
+    )
     placer = _make_placer()
 
     with patch("src.execution.pretp_dispatcher._BE_SHIFT_TRIGGER_PCT", 1.0):
@@ -107,6 +112,26 @@ async def test_wide_stop_does_not_arm_at_flat_trigger():
     placer.cancel_algo_order.assert_not_called()
     placer.place_stop_loss.assert_not_called()
     assert pos.be_shift_fired is False
+
+
+@pytest.mark.asyncio
+async def test_wide_stop_with_near_tp1_arms_at_capped_threshold():
+    # TP1 cap (2026-07-10): stop 5% wide but TP1 only 2% away — pre-cap the
+    # arm was 1R = 5%, UNREACHABLE below the TP1 full close (the owner's
+    # "+2% → full SL, no BE" trades). Capped arm = max(0.5 × 2%, flat 1%)
+    # = 1% → a 1.1% move must now shift the stop to the BE park.
+    pos = _make_position(
+        side="LONG", entry=100.0, sl_price=95.0, sl_order_id=42, tp1_mult=1.02
+    )
+    placer = _make_placer(be_order_id=77)
+
+    with patch("src.execution.pretp_dispatcher._BE_SHIFT_TRIGGER_PCT", 1.0), \
+         patch("src.execution.position_state.put_position"):
+        await _pd.maybe_fire_be_shift(pos, mark_price=101.1, placer=placer)
+
+    placer.cancel_algo_order.assert_awaited_once()
+    placer.place_stop_loss.assert_awaited_once()
+    assert pos.be_shift_fired is True
 
 
 @pytest.mark.asyncio

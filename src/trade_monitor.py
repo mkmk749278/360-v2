@@ -286,6 +286,9 @@ class TradeMonitor:
         self._store = data_store
         self._send = send_telegram
         self._get_signals = get_active_signals
+        # Monitor start wall-clock (monotonic) — the post-boot grace anchor
+        # for the never-WS-stamped staleness case in ``_candle_stale``.
+        self._started_at_monotonic: float = time.monotonic()
         self._remove = remove_signal
         self._update = update_signal
         self._performance_tracker = performance_tracker
@@ -794,10 +797,17 @@ class TradeMonitor:
         ops-tunable freshness bound — the signal's symbol has dropped out of the
         live scan universe and its candle is frozen.
 
-        ``age is None`` (no kline stamped yet — fresh boot, seed-loaded candles)
-        counts as FRESH, mirroring the scanner's dispatch staleness gate: only
-        ``update_candle`` from a live WS frame stamps the timestamp, so blocking
-        on the un-stamped case would false-positive every symbol post-boot.
+        ``age is None`` (no kline stamped yet) counts as FRESH only during the
+        post-boot grace window (``max_age`` seconds of monitor uptime).  After
+        that, a symbol with candles but no stamp is receiving neither WS
+        frames nor REST seeds — the frozen-close class (#706's target) that
+        the old unconditional ``age is None → fresh`` rule let through
+        forever: a restart-restored or evicted MOVER pair froze its close at
+        the last seeded candle and priced its open signal off it for hours
+        (MVLLUSDT, 2026-07-10).  REST seeds now stamp the timestamp too
+        (``historical_data.seed_symbol``), so in-universe pairs and freshly
+        seeded movers always carry a real age and never hit the None branch
+        past boot.
         """
         try:
             from src import runtime_tunables as _rt
@@ -811,7 +821,11 @@ class TradeMonitor:
                 return False
             age = self._store.last_kline_age_seconds(symbol, "1m")
             if age is None:
-                return False
+                # Post-boot grace: WS subscriptions can take a minute to
+                # deliver the first frame after a restart; don't divert
+                # every symbol to the mark feed in that window.
+                uptime = time.monotonic() - self._started_at_monotonic
+                return uptime > max_age
             return age > max_age
         except Exception:
             return False
@@ -1810,9 +1824,16 @@ class TradeMonitor:
                 _orig_dist = float(getattr(sig, "original_sl_distance", 0.0) or 0.0)
                 if _orig_dist > 0:
                     _sl_dist_pct = _orig_dist / sig.entry * 100.0
+            # TP1 cap (2026-07-10): under the TP1-full-close default an arm
+            # at/above TP1 is unreachable — the trade either closes at TP1 or
+            # round-trips its full stop with the ratchet never engaging.
+            _tp1_dist_pct = 0.0
+            if sig.tp1 and sig.tp1 > 0:
+                _tp1_dist_pct = abs(sig.tp1 - sig.entry) / sig.entry * 100.0
             _arm_pct = _be_policy.arm_threshold_pct(
                 _sl_dist_pct,
                 float(getattr(sig, "noise_floor_pct", 0.0) or 0.0),
+                _tp1_dist_pct,
             )
             if sig.max_favorable_excursion_pct >= _arm_pct:
                 _park = _be_policy.park_price(sig.entry, is_long)

@@ -1114,6 +1114,11 @@ class Scanner:
         self._loss_streaks: Dict[tuple, int] = {}
         self._load_loss_streaks()
 
+        # Per-symbol throttle for the promoted-mover candle re-seed
+        # (``_refresh_stale_mover_candles``, 2026-07-10) — monotonic ts of
+        # the last refresh ATTEMPT per symbol.
+        self._mover_last_reseed: Dict[str, float] = {}
+
         # Per-(symbol, direction, level_bucket) "level in play" registry —
         # see _check_and_record_level_in_play.  Blocks stuck-level repeat-
         # fires from level-anchored evaluators (SR_FLIP_RETEST / VSB /
@@ -1902,7 +1907,82 @@ class Scanner:
             (s for s in self._mover_promoted_pairs if s not in sorted_pairs_set),
             key=lambda s: self._mover_promoted_pairs[s], reverse=True,
         )
-        return active[:MOVER_PROMOTION_MAX_PAIRS]
+        active = active[:MOVER_PROMOTION_MAX_PAIRS]
+
+        # Keep the scanned movers' candles LIVE for the rest of their hold
+        # (2026-07-10).  Promoted pairs have no WS kline subscription — the
+        # one-time promotion seed was the only candle write, so minutes into
+        # the 6 h TTL every evaluator read frozen data, entries were computed
+        # off stale closes, and once REST seeds started stamping freshness the
+        # dispatch staleness gate would (rightly) block them.  Re-seed any
+        # active mover whose 1m candle age exceeds MOVER_CANDLE_REFRESH_SEC,
+        # throttled per symbol and bounded per cycle (REST weight budget).
+        await self._refresh_stale_mover_candles(active)
+
+        return active
+
+    async def _refresh_stale_mover_candles(self, active: List[str]) -> None:
+        """Re-seed candles for actively-scanned promoted movers whose 1m data
+        has gone stale (no WS subscription → REST seed is their only source).
+
+        Bounded work: at most ``MOVER_CANDLE_REFRESH_MAX_PER_CYCLE`` re-seeds
+        per scan cycle, each throttled to one attempt per
+        ``MOVER_CANDLE_REFRESH_SEC`` per symbol regardless of outcome, so a
+        dead symbol can't burn the budget every cycle.  Fail-soft — a refresh
+        error leaves the stale data in place (the dispatch staleness gate and
+        trade_monitor's mark-feed fallback own the protection downstream).
+        """
+        from config import (
+            MOVER_CANDLE_REFRESH_MAX_PER_CYCLE,
+            MOVER_CANDLE_REFRESH_SEC,
+        )
+        if MOVER_CANDLE_REFRESH_SEC <= 0 or not active:
+            return
+        data_store = getattr(self, "data_store", None)
+        if data_store is None or not hasattr(data_store, "last_kline_age_seconds"):
+            return
+        now_mono = time.monotonic()
+        to_refresh: List[str] = []
+        for sym in active:
+            try:
+                age = data_store.last_kline_age_seconds(sym, "1m")
+                age = None if age is None else float(age)
+            except (TypeError, ValueError):
+                # Non-numeric store stub (tests) / unexpected shape — skip:
+                # the downstream staleness protections own the safety net.
+                continue
+            # ``age is None`` = pre-stamp data (restored snapshot / legacy
+            # seed) — refresh it too so the pair gets a real freshness stamp.
+            if age is not None and age <= MOVER_CANDLE_REFRESH_SEC:
+                continue
+            last_attempt = self._mover_last_reseed.get(sym, 0.0)
+            if now_mono - last_attempt < MOVER_CANDLE_REFRESH_SEC:
+                continue
+            to_refresh.append(sym)
+            if len(to_refresh) >= MOVER_CANDLE_REFRESH_MAX_PER_CYCLE:
+                break
+        if not to_refresh:
+            return
+        for sym in to_refresh:
+            self._mover_last_reseed[sym] = now_mono
+        # Drop throttle entries for symbols no longer scanned (bounded map).
+        if len(self._mover_last_reseed) > 128:
+            keep = set(active)
+            self._mover_last_reseed = {
+                s: t for s, t in self._mover_last_reseed.items() if s in keep
+            }
+
+        async def _reseed(sym: str) -> None:
+            info = self.pair_mgr.pairs.get(sym)
+            if info is None:
+                return
+            try:
+                await self.data_store.seed_symbol(sym, info.market)
+                log.debug("mover candle refresh: re-seeded {}", sym)
+            except Exception as exc:
+                log.warning("mover candle refresh failed for {}: {}", sym, exc)
+
+        await asyncio.gather(*[_reseed(s) for s in to_refresh])
 
     async def scan_loop(self) -> None:
         """Periodic scan over all pairs / channels."""

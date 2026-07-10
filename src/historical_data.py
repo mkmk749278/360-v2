@@ -181,6 +181,15 @@ class HistoricalDataStore:
                 if len(data.get("close", [])) > _MAX_CANDLES_PER_BUCKET:
                     data = {k: v[-_MAX_CANDLES_PER_BUCKET:] for k, v in data.items()}
                 self.candles[symbol][tf.interval] = data
+                # Stamp freshness on REST writes too (2026-07-10).  Pre-fix only
+                # live WS ``update_candle`` frames stamped ``_last_kline_update_ts``,
+                # so a promoted MOVER pair — seeded here, never WS-subscribed —
+                # reported ``last_kline_age_seconds() is None`` for its whole
+                # life.  Both staleness protections (the scanner's dispatch
+                # gate and trade_monitor's mark-feed fallback, #706) fail-open
+                # on None, which is how MVLLUSDT's price froze at its last
+                # seeded close for 11+ hours while SL/TP/trail ran blind.
+                self._last_kline_update_ts.setdefault(symbol, {})[tf.interval] = time.time()
                 log.debug("Seeded %s %s: %d candles", symbol, tf.interval, len(data["close"]))
 
         async def _fetch_ticks() -> None:
@@ -516,6 +525,8 @@ class HistoricalDataStore:
         if new_data:
             existing = self.candles.get(symbol, {}).get(interval, {})
             self.candles.setdefault(symbol, {})[interval] = self._merge_candles(existing, new_data, limit)
+            # REST writes count as freshness — see seed_symbol for rationale.
+            self._last_kline_update_ts.setdefault(symbol, {})[interval] = time.time()
             log.debug(
                 "Gap-filled %s %s: fetched %d, total %d",
                 symbol, interval, len(new_data["close"]),

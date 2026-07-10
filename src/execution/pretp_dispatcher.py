@@ -331,7 +331,14 @@ async def maybe_fire_be_shift(
     _sl_dist_pct = 0.0
     if position.sl_price and position.sl_price > 0:
         _sl_dist_pct = abs(position.sl_price - entry) / entry * 100.0
-    _arm_pct = _be_policy.arm_threshold_pct(_sl_dist_pct)
+    # TP1 cap (2026-07-10, mirrors trade_monitor): the arm must stay
+    # reachable below the position's own first target — 1R of a noise-
+    # widened stop could sit at/above TP1, making the BE shift dead code.
+    _tp1_dist_pct = 0.0
+    _tp1 = float(getattr(position, "tp1_price", 0.0) or 0.0)
+    if _tp1 > 0:
+        _tp1_dist_pct = abs(_tp1 - entry) / entry * 100.0
+    _arm_pct = _be_policy.arm_threshold_pct(_sl_dist_pct, 0.0, _tp1_dist_pct)
     if not _be_policy.be_enabled(True) or move_pct < max(
         _arm_pct, _BE_SHIFT_TRIGGER_PCT
     ):

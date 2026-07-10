@@ -721,6 +721,17 @@ MOVER_PROMOTION_TTL_SEC: float = _safe_float("MOVER_PROMOTION_TTL_SEC", "21600")
 #: SURGE_PROMOTION_MAX_PAIRS — with a 6 h hold the old shared cap of 5 would fill
 #: and starve fresh ignitions, so movers get their own (larger) budget.
 MOVER_PROMOTION_MAX_PAIRS: int = _safe_int("MOVER_PROMOTION_MAX_PAIRS", "30")
+#: Re-seed a promoted mover's candles when its 1m data is older than this many
+#: seconds (2026-07-10).  Promoted movers sit outside the WS kline subscription
+#: set — their candles came ONLY from the one-time promotion seed, so minutes
+#: into a 6 h hold every evaluator was reading frozen data and (now that REST
+#: seeds stamp freshness) the dispatch staleness gate would block them.  Keep
+#: this below MAX_KLINE_STALENESS_SEC (180) so an actively-scanned mover never
+#: trips that gate.  0 disables the refresh.
+MOVER_CANDLE_REFRESH_SEC: float = _safe_float("MOVER_CANDLE_REFRESH_SEC", "120")
+#: Max mover re-seeds per scan cycle — bounds the REST weight burst when many
+#: promoted movers go stale in the same cycle (each re-seed is ~6 kline calls).
+MOVER_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int("MOVER_CANDLE_REFRESH_MAX_PER_CYCLE", "8")
 #: Max bid/ask spread (as a PERCENT of mid — same unit as ScanContext.spread_pct,
 #: i.e. 0.5 == 0.5%) a mover-promoted pair may have to be scanned by the scalp
 #: channel. Movers are lower-cap and run wider than blue chips, so this is looser
@@ -2476,6 +2487,16 @@ NOISE_FLOOR_MAX_SL_PCT: float = _safe_float("NOISE_FLOOR_MAX_SL_PCT", "3.0")
 BE_ARM_R_MULT: float = _safe_float("BE_ARM_R_MULT", "1.0")
 BE_ARM_NOISE_MULT: float = _safe_float("BE_ARM_NOISE_MULT", "0.75")
 BE_PARK_TOLERANCE_PCT: float = _safe_float("BE_PARK_TOLERANCE_PCT", "0.15")
+# Cap the BE arm threshold at this fraction of the trade's own TP1 distance
+# (2026-07-10).  The noise-aware arm (max of flat / 1R / 0.75×noise) double-
+# counted the #702 noise-floor stop WIDENING: 1R of an already-noise-widened
+# 2.4-2.7% stop put the arm at ≈ the stop distance — at or ABOVE TP1 for the
+# tighter setups, i.e. unreachable under the TP1-full-close default.  Owner-
+# reported symptom (2026-07-10): signals ran +2% and round-tripped to the full
+# −2.4-2.7% SL with no BE shift, a ~5% swing.  With the cap, a trade that has
+# covered this fraction of the way to TP1 always arms, whatever the stop
+# width.  Never caps below the flat trigger (BE_SHIFT_TRIGGER_PCT).  0 = off.
+BE_ARM_TP1_CAP_FRACTION: float = _safe_float("BE_ARM_TP1_CAP_FRACTION", "0.5")
 
 # Cohort-edge STEP 2 (activates the #696 STEP 1 store): suppress emission when
 # the signal's cohort (setup × side × regime family × BTC macro) has at least

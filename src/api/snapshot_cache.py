@@ -304,10 +304,26 @@ class SnapshotCache:
         cached = self._signals_all
         assert cached is not None  # guaranteed by is_warm check
 
+        # ``is_open`` is authoritative (2026-07-10): a runner mover rides open
+        # at status TP1_HIT/TP2_HIT while a BE-then-TP1 non-mover CLOSES at
+        # TP1_HIT — the status string alone can't split the views.  Old
+        # snapshots (Redis mode across a deploy) may lack the field; fall
+        # back to the legacy status heuristic for those items only.
+        def _is_open(s: Any) -> bool:
+            fields_set = getattr(s, "model_fields_set", None)
+            if fields_set is not None and "is_open" not in fields_set:
+                # Pydantic item whose payload predates the field (stale Redis
+                # snapshot across the deploy) — legacy heuristic.
+                return s.status == "ACTIVE"
+            v = getattr(s, "is_open", None)
+            if v is None:
+                return s.status == "ACTIVE"
+            return bool(v)
+
         if status == "open":
-            items: List[Any] = [s for s in cached if s.status == "ACTIVE"]
+            items: List[Any] = [s for s in cached if _is_open(s)]
         elif status == "closed":
-            items = [s for s in cached if s.status != "ACTIVE"]
+            items = [s for s in cached if not _is_open(s)]
         else:
             items = list(cached)
 

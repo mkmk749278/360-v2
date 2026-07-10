@@ -484,7 +484,7 @@ def _original_stop_loss(sig: Any, direction_str: str) -> float:
     return float(getattr(sig, "stop_loss", 0.0) or 0.0)
 
 
-def _signal_to_detail(sig: Any) -> SignalDetail:
+def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
     direction = getattr(sig, "direction", None)
     direction_str = (
         direction.value
@@ -522,6 +522,7 @@ def _signal_to_detail(sig: Any) -> SignalDetail:
         setup_class=setup_class,
         agent_name=_agent_name_for(setup_class),
         status=status,
+        is_open=is_open,
         current_price=float(getattr(sig, "current_price", 0.0) or 0.0),
         pnl_pct=float(getattr(sig, "pnl_pct", 0.0) or 0.0),
         max_favorable_excursion_pct=float(
@@ -561,27 +562,32 @@ def build_signals(
     history = list(getattr(engine, "_signal_history", []) or [])
     active = list(router.active_signals.values()) if router is not None else []
 
-    # Defensive filter — ``router.active_signals`` can briefly hold signals
-    # that hit a terminal status (INVALIDATED / SL_HIT / TP_HIT / EXPIRED /
-    # CANCELLED) before TradeMonitor pops them, AND the persistent
-    # active-router-state JSON loader (PR #337) restores any signal that
-    # was in the map at shutdown — including ones that closed mid-shutdown.
-    # Owner reported INVALIDATED + SL_HIT signals showing in the app's
-    # "Open" tab; this filter guarantees the API contract matches the
-    # subscriber's mental model: "Open" = currently in-flight only.
+    # Open/closed truth (2026-07-10): membership in the active book minus
+    # terminal statuses IS the discriminator — the status string alone can't
+    # be.  Under BE-then-TP1 a non-mover CLOSES with status TP1_HIT (popped
+    # from the book), while under the mover runner exit (2026-07-09) a mover
+    # with TP1_HIT/TP2_HIT is still OPEN, trail riding the remainder.  The
+    # pre-fix ``status == "ACTIVE"`` open filter made open runner movers
+    # vanish from the app's Open tab mid-trade.
+    #
+    # The terminal-status exclusion stays defensive: ``router.active_signals``
+    # can briefly hold signals that hit a terminal status before TradeMonitor
+    # pops them, AND the persistent active-router-state JSON loader (PR #337)
+    # restores any signal that was in the map at shutdown — including ones
+    # that closed mid-shutdown.
+    def _sig_is_open(s: Any) -> bool:
+        return str(getattr(s, "status", "")).upper() not in _TERMINAL_STATUSES
+
+    open_ids = {
+        id(s) for s in active if _sig_is_open(s)
+    }
     if status == "open":
-        signals = [
-            s for s in active
-            if str(getattr(s, "status", "")).upper() == "ACTIVE"
-        ]
+        signals = [s for s in active if _sig_is_open(s)]
     elif status == "closed":
         # Symmetric — anything in active_signals that has a terminal
         # status belongs in the closed bucket too, not orphaned between
         # the two views.
-        terminal_active = [
-            s for s in active
-            if str(getattr(s, "status", "")).upper() != "ACTIVE"
-        ]
+        terminal_active = [s for s in active if not _sig_is_open(s)]
         signals = history + terminal_active
     else:
         signals = active + history
@@ -598,7 +604,10 @@ def build_signals(
         key=lambda s: getattr(s, "timestamp", None) or _now(),
         reverse=True,
     )
-    return [_signal_to_detail(s) for s in signals[:limit]]
+    return [
+        _signal_to_detail(s, is_open=id(s) in open_ids)
+        for s in signals[:limit]
+    ]
 
 
 # ---------------------------------------------------------------------------
