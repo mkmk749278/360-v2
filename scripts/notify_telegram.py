@@ -19,7 +19,10 @@ Contract (mirrors src/execution/telegram_alerts.py):
 
 Env:
 
-* ``TELEGRAM_BOT_TOKEN``      — the engine's existing bot.
+* ``ALERT_TELEGRAM_BOT_TOKEN`` — dedicated alert bot (optional; recommended:
+  keeps paging off the signal bot's rate-limit budget, and a leaked alert
+  token can't post to the paid signal channels).
+* ``TELEGRAM_BOT_TOKEN``      — fallback: the engine's existing bot.
 * ``ALERT_TELEGRAM_CHAT_ID``  — dedicated alert chat (optional).
 * ``TELEGRAM_ADMIN_CHAT_ID``  — fallback chat (the engine admin chat).
 
@@ -50,8 +53,16 @@ def _alert_chat_id() -> str:
     )
 
 
+def _bot_token() -> str:
+    """Dedicated alert bot if configured, else the engine's signal bot."""
+    return (
+        os.environ.get("ALERT_TELEGRAM_BOT_TOKEN", "").strip()
+        or os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    )
+
+
 def is_configured() -> bool:
-    return bool(os.environ.get("TELEGRAM_BOT_TOKEN", "").strip() and _alert_chat_id())
+    return bool(_bot_token() and _alert_chat_id())
 
 
 def build_payload(text: str, chat_id: str) -> bytes:
@@ -69,7 +80,7 @@ def send_telegram(text: str, *, timeout: float = _DEFAULT_TIMEOUT_SEC) -> bool:
     Never raises; never surfaces the token (it is embedded in the URL, so
     failures are reported by exception class only).
     """
-    token = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+    token = _bot_token()
     chat_id = _alert_chat_id()
     if not token or not chat_id:
         print("notify_telegram: not configured (missing token or chat id); skipped")

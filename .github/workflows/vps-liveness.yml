@@ -172,10 +172,17 @@ jobs:
       - name: Page owner on Telegram
         if: always()
         env:
+          # A dedicated alert bot/chat wins when configured; otherwise the
+          # engine's signal bot + admin chat (same fallback order as
+          # scripts/notify_telegram.py).
+          ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ALERT_TELEGRAM_CHAT_ID: ${{ secrets.ALERT_TELEGRAM_CHAT_ID }}
           TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
         run: |
-          [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_ADMIN_CHAT_ID" ] || { echo "Telegram secrets not configured; skipping page"; exit 0; }
+          TOKEN="${ALERT_TELEGRAM_BOT_TOKEN:-$TELEGRAM_BOT_TOKEN}"
+          CHAT="${ALERT_TELEGRAM_CHAT_ID:-$TELEGRAM_ADMIN_CHAT_ID}"
+          [ -n "$TOKEN" ] && [ -n "$CHAT" ] || { echo "Telegram secrets not configured; skipping page"; exit 0; }
           if [ -s probe/problems.txt ]; then
             MSG="🚨 ENGINE LIVENESS ALERT (hourly watch)"$'\n'"$(sed 's/^/⛔ /' probe/problems.txt)"$'\n'"Details: auto-detected issue in mkmk749278/360-v2"
           elif [ -f probe/recovered.txt ]; then
@@ -183,8 +190,8 @@ jobs:
           else
             exit 0
           fi
-          curl -sS -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
-            --data-urlencode chat_id="${TELEGRAM_ADMIN_CHAT_ID}" \
+          curl -sS -m 15 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${CHAT}" \
             --data-urlencode text="$MSG" \
             --data-urlencode disable_web_page_preview=true \
             -o /dev/null -w 'telegram page: HTTP %{http_code}\n' || echo "telegram page failed (non-blocking)"

@@ -40,6 +40,24 @@ class TestConfiguration:
         monkeypatch.setenv("TELEGRAM_ADMIN_CHAT_ID", "123")
         assert notify_telegram._alert_chat_id() == "999"
 
+    def test_dedicated_alert_bot_wins(self, monkeypatch):
+        # A separate alert bot keeps paging off the signal bot's rate-limit
+        # budget and out of the paid channels — when set, it must win.
+        monkeypatch.setenv("ALERT_TELEGRAM_BOT_TOKEN", "alert-bot")
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "signal-bot")
+        assert notify_telegram._bot_token() == "alert-bot"
+
+    def test_signal_bot_is_token_fallback(self, monkeypatch):
+        monkeypatch.delenv("ALERT_TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "signal-bot")
+        assert notify_telegram._bot_token() == "signal-bot"
+
+    def test_alert_bot_alone_is_configured(self, monkeypatch):
+        monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+        monkeypatch.setenv("ALERT_TELEGRAM_BOT_TOKEN", "alert-bot")
+        monkeypatch.setenv("ALERT_TELEGRAM_CHAT_ID", "999")
+        assert notify_telegram.is_configured()
+
 
 class TestPayload:
     def test_payload_shape(self):
@@ -90,7 +108,11 @@ class TestSendContract:
 
 class TestCli:
     def _run(self, *args: str, stdin: str = "") -> subprocess.CompletedProcess:
-        env = {k: v for k, v in os.environ.items() if not k.startswith("TELEGRAM")}
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if not k.startswith(("TELEGRAM", "ALERT_TELEGRAM"))
+        }
         return subprocess.run(
             [sys.executable, str(_SCRIPTS / "notify_telegram.py"), *args],
             input=stdin,

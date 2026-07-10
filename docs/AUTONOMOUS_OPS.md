@@ -99,6 +99,7 @@ WATCHDOG_RESTART_ENABLED=true          # engine auto-restart on confirmed wedge
 WATCHDOG_MAX_ENGINE_RESTARTS_PER_HOUR=3
 WATCHDOG_KILLSWITCH_ENABLED=true       # engage-only escalation
 HEALTHCHECKS_PING_URL=                 # layer-5 dead-man (unset = skip)
+ALERT_TELEGRAM_BOT_TOKEN=              # falls back to TELEGRAM_BOT_TOKEN
 ALERT_TELEGRAM_CHAT_ID=                # falls back to TELEGRAM_ADMIN_CHAT_ID
 ```
 
@@ -113,9 +114,19 @@ Telegram is operational in-region again (owner confirmation 2026-07-10), so
 it is the paging channel everywhere:
 
 * **In-engine events** (tripwires, breaker, kill switch): already paged via
-  `src/execution/telegram_alerts.py` — unchanged.
+  `src/execution/telegram_alerts.py` — unchanged (these ride the engine's
+  signal bot by design; they share its rate-limit budget deliberately).
 * **Watchdog + workflows**: `scripts/notify_telegram.py` (stdlib-only,
   never raises, never leaks the token). CLI-callable for ad-hoc host use.
+* **Dedicated alert bot (recommended):** set `ALERT_TELEGRAM_BOT_TOKEN` +
+  `ALERT_TELEGRAM_CHAT_ID` to use a *separate* bot for watchdog/workflow
+  pages. Wins over the fallbacks (`TELEGRAM_BOT_TOKEN` /
+  `TELEGRAM_ADMIN_CHAT_ID`) when set. Why separate: paging never competes
+  with signal delivery for the bot's rate budget, a leaked alert token
+  can't post into the paid signal channels, and alerts land in their own
+  chat with their own notification sound. Setup: @BotFather → new bot →
+  token; send the bot one message (bots can't DM first); get your chat id
+  from `https://api.telegram.org/bot<token>/getUpdates`.
 * **GitHub workflows**: `vps-liveness.yml` (problems AND recovery) and
   `vps-backup.yml` (failure) page in addition to filing the auto-detected
   issue. The issue remains the durable morning-review record; the page is
@@ -149,11 +160,13 @@ dead-man cron. Covers audit S-7 (hardening as code).
 ## Rollout checklist (owner)
 
 1. **GitHub secrets** (repo → Settings → Secrets → Actions): add
-   `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ADMIN_CHAT_ID` (same values as `.env`)
-   so the workflows can page. Without them the workflows behave exactly as
-   before (issues only).
-2. **VPS `.env`**: optionally add `ALERT_TELEGRAM_CHAT_ID` (dedicated alert
-   chat; otherwise pages go to the admin chat).
+   `ALERT_TELEGRAM_BOT_TOKEN` + `ALERT_TELEGRAM_CHAT_ID` (dedicated alert
+   bot, recommended) — or `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ADMIN_CHAT_ID`
+   to reuse the engine's bot. Without either pair the workflows behave
+   exactly as before (issues only).
+2. **VPS `.env`**: same choice — add `ALERT_TELEGRAM_BOT_TOKEN` +
+   `ALERT_TELEGRAM_CHAT_ID` for the dedicated bot, or leave unset to page
+   via the engine bot + admin chat.
 3. **healthchecks.io**: create two checks (free) — "watchdog loop"
    (period 5 min / grace 5 min) and "host cron" (period 5 min) — put the
    first URL in `.env` as `HEALTHCHECKS_PING_URL`, pass the second to

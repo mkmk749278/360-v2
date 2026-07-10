@@ -43,8 +43,12 @@ dead-man's switch → host self-maintenance. Full design + rollout in
 - **Layer 4:** `scripts/notify_telegram.py` (stdlib, never raises, never
   leaks token; `ALERT_TELEGRAM_CHAT_ID` else `TELEGRAM_ADMIN_CHAT_ID`);
   `vps-liveness.yml` + `vps-backup.yml` now page Telegram (problems AND
-  recovery) alongside the auto-detected issue. **Needs new repo secrets
-  `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ADMIN_CHAT_ID`.**
+  recovery) alongside the auto-detected issue. **Owner chose a dedicated
+  alert bot** → set `ALERT_TELEGRAM_BOT_TOKEN` + `ALERT_TELEGRAM_CHAT_ID`
+  (repo secrets AND `.env`); falls back to `TELEGRAM_BOT_TOKEN` /
+  `TELEGRAM_ADMIN_CHAT_ID` when unset. In-engine alerts
+  (tripwires/breaker/kill-switch via telegram_alerts.py) stay on the
+  engine bot by design.
 - **Layer 5:** healthchecks.io dead-man pings from the watchdog loop
   (`HEALTHCHECKS_PING_URL`) + a host cron — external phone page when the
   whole box dies (~5 min). Also fixes audit F-20 (GitHub-only alerting).
@@ -61,7 +65,9 @@ first cooldown window) — fixed before ship.
 
 ### NEXT (owner, ~20 min total — the paging is inert until 1+2 are done)
 
-1. Add repo secrets `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ADMIN_CHAT_ID`.
+1. Create the alert bot (@BotFather), DM it once, get the chat id from
+   `getUpdates`; add `ALERT_TELEGRAM_BOT_TOKEN` + `ALERT_TELEGRAM_CHAT_ID`
+   as repo secrets AND in the VPS `.env`.
 2. healthchecks.io: two free checks → `HEALTHCHECKS_PING_URL` in `.env` +
    URL for setup_host.sh; install their app (or Telegram integration).
 3. `bash deploy.sh` (brings up autoheal + watchdog), then
