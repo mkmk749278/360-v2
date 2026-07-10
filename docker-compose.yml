@@ -31,6 +31,17 @@ services:
     volumes:
       - 360scalp-v2-redis:/data
     command: redis-server --maxmemory 128mb --maxmemory-policy allkeys-lru
+    # Self-healing layer 1 (docs/AUTONOMOUS_OPS.md): a health status so the
+    # autoheal sidecar can restart a wedged-but-running redis. restart:always
+    # only covers crashes; unhealthy containers otherwise just sit there.
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    labels:
+      - autoheal=true
 
   engine:
     build: .
@@ -80,6 +91,14 @@ services:
       # Longer than V1 — V2 needs time to seed 50 pairs × 5 timeframes
       start_period: 60s
       retries: 3
+    # The engine healthcheck tests WORK (scanner heartbeat freshness), not
+    # just process-up — a wedged scan loop flips the container unhealthy and
+    # the autoheal sidecar restarts it. Safe by design: the engine boots
+    # fail-closed (auto-trade disabled until the Firestore flag says
+    # otherwise) and every open position's SL/TP rests on Binance, so a
+    # restart is always risk-reducing (docs/AUTONOMOUS_OPS.md).
+    labels:
+      - autoheal=true
 
   # ── Isolated API container ─────────────────────────────────────────────
   # Active when API_PROCESS_ISOLATED=true.  Reads pre-computed snapshots
@@ -119,6 +138,20 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    # Deep healthcheck: an actual HTTP round-trip against /api/health (rate-
+    # limit exempt), not a process probe — catches a hung event loop, which
+    # is exactly the failure the isolated-API split exists to contain. The
+    # Dockerfile's default HEALTHCHECK tests the SCANNER heartbeat, which
+    # never exists in this container — without this override the api would
+    # sit permanently unhealthy and autoheal would restart-loop it.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request,os; urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('API_PORT','8000')+'/api/health', timeout=5)"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+    labels:
+      - autoheal=true
     profiles:
       # Only started when docker compose --profile isolated up is used,
       # or when API_PROCESS_ISOLATED=true is set and compose profiles are
@@ -177,8 +210,81 @@ services:
       timeout: 5s
       retries: 3
       start_period: 30s
+    labels:
+      - autoheal=true
     mem_limit: 256m
     cpus: "0.5"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # ── Self-healing layer 2: autoheal (docs/AUTONOMOUS_OPS.md) ────────────
+  # Docker deliberately does NOT restart unhealthy containers —
+  # restart:always only covers exits. This sidecar watches health status
+  # and restarts any container labeled autoheal=true, turning the deep
+  # healthchecks above into automatic recovery from wedges, not just
+  # crashes. Standard tool (willfarrell/docker-autoheal), version-pinned.
+  # network_mode:none — it only ever talks to the local Docker socket.
+  autoheal:
+    image: willfarrell/autoheal:1.2.0
+    container_name: 360scalp-v2-autoheal
+    restart: always
+    network_mode: none
+    environment:
+      - AUTOHEAL_CONTAINER_LABEL=autoheal
+      - AUTOHEAL_INTERVAL=15
+      # Matches the watchdog's restart grace — the engine flushes state
+      # files + closes WS cleanly within 30s.
+      - AUTOHEAL_DEFAULT_STOP_TIMEOUT=30
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    mem_limit: 64m
+    cpus: "0.1"
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"
+
+  # ── Self-healing layer 3: watchdog (docs/AUTONOMOUS_OPS.md) ────────────
+  # Minutes-level supervisor for the invariants a container healthcheck
+  # can't express: blind open positions (audit F-07), wedged monitor loop,
+  # breaker trips, disk/memory pressure. Pages the owner on Telegram,
+  # restarts the engine on confirmed wedges (bounded budget), engages the
+  # kill switch when the engine is unrecoverable, pings the external
+  # dead-man's switch. Risk-reducing actions ONLY — it has no code path
+  # that re-enables trading.
+  #
+  # Root + docker.sock: required to inspect/restart sibling containers —
+  # same standing as autoheal above and the ops diag runner (owner-only
+  # box). NOT autoheal-labeled and no self-restart path: one supervisor
+  # must stay outside the blast radius of the machinery it supervises;
+  # restart:always covers its crashes.
+  watchdog:
+    build: .
+    container_name: 360scalp-v2-watchdog
+    command: python scripts/watchdog.py
+    env_file: .env
+    restart: always
+    user: "0:0"
+    networks:
+      - 360scalp-v2-net
+    volumes:
+      - 360scalp-v2-data:/app/data
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - API_PORT=${API_PORT:-8000}
+      - API_PROCESS_ISOLATED=${API_PROCESS_ISOLATED:-false}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import os,time,sys; p='/tmp/watchdog_heartbeat'; sys.exit(0 if os.path.exists(p) and time.time()-os.path.getmtime(p)<300 else 1)"]
+      interval: 60s
+      timeout: 10s
+      retries: 3
+      start_period: 120s
+    mem_limit: 128m
+    cpus: "0.2"
     logging:
       driver: json-file
       options:

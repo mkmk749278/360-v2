@@ -32,6 +32,12 @@ ENGINE_ACTIVITY_WINDOW_SEC = int(
     os.environ.get("ENGINE_ACTIVITY_WINDOW_SEC", str(6 * 3600))
 )
 
+# Stale-pricing invariant tuning (audit F-07, seconds). The freshness file is
+# published every ~30s by the trade monitor; treat it as expired well past
+# that so a wedged monitor loop is caught here instead of silently passing a
+# frozen snapshot.
+PRICING_FILE_MAX_AGE_SEC = int(os.environ.get("PRICING_FILE_MAX_AGE_SEC", "600"))
+
 
 def check_heartbeat() -> None:
     p = os.path.join(DATA_DIR, "scanner_heartbeat")
@@ -125,6 +131,58 @@ def check_paper_silence() -> None:
         print(f"Paper books: check unreadable ({exc})")
 
 
+def check_pricing_freshness() -> None:
+    """Page when an OPEN position's every pricing source has gone stale.
+
+    Audit F-07 / the Session 44-45-46 incident class (MVLLUSDT: 11h of
+    frozen close on an open runner — SL/TP backstop blind, discovered by
+    owner screenshot). The trade monitor publishes per-open-signal source
+    freshness to ``pricing_freshness.json`` (~30s cadence); an entry with
+    ``blind: true`` means the 1m candle is stale AND the mark-price feed has
+    nothing — the fallback chain shipped in #706/Session 46 is exhausted and
+    the position is unprotected. That is a page, not a log line.
+
+    File missing → pre-rollout build or the engine hasn't opened a monitor
+    cycle yet; stay quiet. File present but old → the publisher itself froze;
+    that is also a page (a freshness monitor that can silently stop measuring
+    is F-09 all over again).
+    """
+    fp = os.path.join(DATA_DIR, "pricing_freshness.json")
+    if not os.path.exists(fp):
+        print("Pricing freshness: file not found (pre-rollout build); check skipped")
+        return
+    try:
+        with open(fp) as fh:
+            snap = json.load(fh)
+        age = int(time.time() - float(snap.get("updated_at", 0)))
+        positions = snap.get("positions", [])
+        blind = [p for p in positions if p.get("blind")]
+        print(
+            f"Pricing freshness: {len(positions)} open signal(s), "
+            f"{len(blind)} blind, snapshot age {age}s"
+        )
+        if age > PRICING_FILE_MAX_AGE_SEC:
+            print(
+                "INVARIANT_WARN: pricing-freshness snapshot itself is stale "
+                f"({age}s > {PRICING_FILE_MAX_AGE_SEC}s) — the trade monitor "
+                "stopped publishing; its SL/TP backstop loop may be wedged."
+            )
+            return
+        for p in blind:
+            print(
+                "INVARIANT_WARN: open position on "
+                f"{p.get('symbol')} ({p.get('status')}, {p.get('signal_id')}) "
+                "is priced off a fully stale source "
+                f"(1m kline age {p.get('kline_age_sec')}s, mark feed has no price) — "
+                "SL/TP/trailing protection is BLIND (F-07 / MVLLUSDT class)."
+            )
+        if not blind:
+            print("OK: every open position has a fresh pricing source")
+    except Exception as exc:  # noqa: BLE001 — diagnostic script, report and move on
+        print(f"Pricing freshness: check unreadable ({exc})")
+
+
 check_heartbeat()
 check_circuit_breaker()
 check_paper_silence()
+check_pricing_freshness()

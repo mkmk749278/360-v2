@@ -119,6 +119,28 @@ jobs:
               });
             }
 
+      # Phone-level page on failure — a missed backup shortens the DR
+      # recovery point every day it stays broken. Skips silently when the
+      # Telegram secrets aren't configured.
+      - name: Page owner on Telegram on failure
+        if: failure()
+        env:
+          # Dedicated alert bot/chat wins when configured (same fallback
+          # order as scripts/notify_telegram.py).
+          ALERT_TELEGRAM_BOT_TOKEN: ${{ secrets.ALERT_TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          ALERT_TELEGRAM_CHAT_ID: ${{ secrets.ALERT_TELEGRAM_CHAT_ID }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+        run: |
+          TOKEN="${ALERT_TELEGRAM_BOT_TOKEN:-$TELEGRAM_BOT_TOKEN}"
+          CHAT="${ALERT_TELEGRAM_CHAT_ID:-$TELEGRAM_ADMIN_CHAT_ID}"
+          [ -n "$TOKEN" ] && [ -n "$CHAT" ] || { echo "Telegram secrets not configured; skipping page"; exit 0; }
+          curl -sS -m 15 -X POST "https://api.telegram.org/bot${TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${CHAT}" \
+            --data-urlencode text="🚨 NIGHTLY BACKUP FAILED — no fresh off-site copy of the data volume. See the auto-detected issue in mkmk749278/360-v2 + docs/DR_RUNBOOK.md." \
+            --data-urlencode disable_web_page_preview=true \
+            -o /dev/null -w 'telegram page: HTTP %{http_code}\n' || echo "telegram page failed (non-blocking)"
+
       - name: Close backup-failure issue on success
         if: success()
         uses: actions/github-script@v7
