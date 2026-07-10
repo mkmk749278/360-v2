@@ -55,6 +55,7 @@ from pydantic import BaseModel
 from src.utils import get_logger
 
 from . import firebase_auth
+from .rate_limit import install_rate_limiting
 from .auth import (
     ASSIST_TIER,
     AUTO_TIER,
@@ -579,6 +580,13 @@ def build_app(
     # on open, so the engine ships this payload 200-300x/hour per active
     # device — bandwidth + first-paint win compounds.
     app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+    # Application-layer rate limiting (audit F-14) — per-client sliding
+    # window, in-memory, health endpoints exempt.  Registered BEFORE the
+    # timing middleware below so timing stays outermost and 429s are
+    # measured like any other response.  Knobs: API_RATE_LIMIT_ENABLED /
+    # API_RATE_LIMIT_PER_MIN / API_RATE_LIMIT_MAX_CLIENTS.
+    install_rate_limiting(app)
 
     # Request-latency observability.  Registered LAST so it is the OUTERMOST
     # layer — it measures the full request as the subscriber experiences it

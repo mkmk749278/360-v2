@@ -149,22 +149,40 @@ async def serve(socket_path: Optional[str] = None) -> asyncio.AbstractServer:
         await _handle_connection(reader, writer, session=session)
 
     server = await asyncio.start_unix_server(connection_handler, path=path)
-    # 0666 = rw for everyone (within this container only).  The B18
-    # security boundary is the CONTAINER, not the Linux user — see
-    # OWNER_BRIEF §3.9 + docker-compose.yml's signing_service comment.
-    # In the deployment topology, only two processes can ever reach
-    # this socket: the engine main process (via the shared volume
-    # mount) and the signing service itself (the listener).  Both
-    # run inside Lumin's deployment.  Granting 0666 lets the engine
-    # connect regardless of which Linux user it runs as (the
-    # Dockerfile sets that to ``appuser``; this signing container
-    # runs as root by compose override).  A future hardening with
-    # matched UIDs across containers can tighten to 0660 + group
-    # ownership.
+    # Socket permissions (audit F-11, 2026-07-10): 0660 + group ownership,
+    # not world-writable.  Both containers are built from the same image, so
+    # the engine's ``appuser`` group (``appgroup``, see Dockerfile) exists in
+    # this container too; this service runs as root (compose override for
+    # the named-volume bind), chgrps the socket to that group and grants rw
+    # to group only.  The engine's appuser is a member → connects fine; no
+    # other identity that ever lands in either container can.  Group name is
+    # env-overridable for non-Docker deployments (the ``lumin-engine``
+    # systemd topology in the module docstring).
+    #
+    # Fallback: dev/test environments (pytest tempdir sockets, arbitrary
+    # local users) have no ``appgroup`` and may not be allowed to chown —
+    # there we keep the previous world-rw mode so tests and local runs are
+    # unaffected, and log loudly.  Production always has the group (baked
+    # into the image), so the fallback never fires on the VPS.
+    group_name = os.environ.get("SIGNING_SERVICE_SOCKET_GROUP", "appgroup")
     try:
-        os.chmod(path, 0o666)
-    except OSError as exc:
-        log.warning("could not chmod socket {}: {}", path, exc)
+        import grp
+
+        gid = grp.getgrnam(group_name).gr_gid
+        os.chown(path, -1, gid)
+        os.chmod(path, 0o660)
+        log.info("socket {} secured: group={} mode=0660", path, group_name)
+    except (KeyError, PermissionError, OSError) as exc:
+        try:
+            os.chmod(path, 0o666)
+        except OSError as chmod_exc:
+            log.warning("could not chmod socket {}: {}", path, chmod_exc)
+        log.warning(
+            "socket group hardening unavailable (group={!r}: {}) — "
+            "falling back to mode 0666; expected only in dev/test",
+            group_name,
+            exc,
+        )
     log.info("signing service listening on {}", path)
     # Stash session on the server so callers can close it on shutdown.
     setattr(server, "_lumin_session", session)

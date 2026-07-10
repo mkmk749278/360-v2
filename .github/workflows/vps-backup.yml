@@ -1,0 +1,140 @@
+name: 💾 VPS Nightly Backup
+
+# Nightly encrypted backup of the engine data volume (F-02, audit 2026-07-10).
+# Runs scripts/backup_data.sh on the VPS over SSH, then pulls the encrypted
+# artifact off-box and stores it as a GitHub artifact — the off-site copy
+# that survives the VPS disk dying.  The artifact is AES-256 encrypted with
+# BACKUP_PASSPHRASE (repo secret; the SAME value must live in the owner's
+# password manager or the off-site copies are unreadable).
+#
+# On any failure this files an `auto-detected` issue, same alert path as
+# vps-liveness.yml — a backup job that fails silently is worse than none.
+#
+# Required secrets: VPS_HOST, VPS_USER, VPS_SSH_KEY (already used by deploy/
+# liveness) + BACKUP_PASSPHRASE (new).
+
+on:
+  schedule:
+    - cron: "45 21 * * *"   # 21:45 UTC = 03:15 IST, off-peak
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+concurrency:
+  group: vps-backup
+  cancel-in-progress: false
+
+jobs:
+  backup:
+    name: Encrypted data-volume backup
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Mask secrets
+        run: |
+          echo "::add-mask::${{ secrets.VPS_HOST }}"
+          echo "::add-mask::${{ secrets.VPS_USER }}"
+
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Write SSH key
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.VPS_SSH_KEY }}" > ~/.ssh/vps_key
+          chmod 600 ~/.ssh/vps_key
+          ssh-keyscan -H "${{ secrets.VPS_HOST }}" >> ~/.ssh/known_hosts 2>/dev/null || true
+
+      - name: Check BACKUP_PASSPHRASE is configured
+        run: |
+          if [ -z "${{ secrets.BACKUP_PASSPHRASE }}" ]; then
+            echo "::error::BACKUP_PASSPHRASE repo secret is not set — backups cannot run." \
+                 " Add it (Settings → Secrets → Actions) and store the same value in the" \
+                 " owner's password manager."
+            exit 1
+          fi
+
+      - name: Run backup on VPS
+        id: run_backup
+        run: |
+          timeout -k 15 300 scp -i ~/.ssh/vps_key \
+              -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+              scripts/backup_data.sh \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:/tmp/backup_data.sh"
+          timeout -k 15 480 ssh -i ~/.ssh/vps_key \
+              -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+              "BACKUP_PASSPHRASE='${{ secrets.BACKUP_PASSPHRASE }}' bash /tmp/backup_data.sh; rm -f /tmp/backup_data.sh" \
+              | tee backup_output.txt
+          grep -q '^BACKUP_OK ' backup_output.txt
+          BACKUP_FILE=$(grep '^BACKUP_OK ' backup_output.txt | sed -n 's/.*file=\([^ ]*\).*/\1/p')
+          echo "backup_file=$BACKUP_FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Pull encrypted backup off-box
+        run: |
+          mkdir -p offsite
+          timeout -k 15 300 scp -i ~/.ssh/vps_key \
+              -o ConnectTimeout=30 -o StrictHostKeyChecking=no \
+              "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}:${{ steps.run_backup.outputs.backup_file }}" \
+              offsite/
+          ls -la offsite/
+
+      - name: Store off-site copy (GitHub artifact, encrypted)
+        uses: actions/upload-artifact@v4
+        with:
+          name: vps-backup-${{ github.run_number }}
+          path: offsite/*.tar.gz.enc
+          retention-days: 30
+          if-no-files-found: error
+
+      - name: File auto-detected issue on failure
+        if: failure()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const MARKER = '<!-- vps-backup-watch -->';
+            const TITLE = '[auto-detected] Nightly backup FAILED';
+            const existing = (await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'auto-detected', per_page: 100,
+            })).data.find(i => (i.body || '').includes(MARKER));
+            const body = [
+              MARKER,
+              `The nightly encrypted backup failed on ${new Date().toISOString()}.`,
+              '',
+              `Run: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`,
+              '',
+              'Until this is fixed there is NO fresh off-site copy of the data volume',
+              '(SQLite user DB + JSON money-path state). Treat as high severity —',
+              'see docs/DR_RUNBOOK.md.',
+            ].join('\n');
+            if (existing) {
+              await github.rest.issues.createComment({ owner, repo, issue_number: existing.number, body });
+            } else {
+              await github.rest.issues.create({
+                owner, repo, title: TITLE, body,
+                labels: ['auto-detected', 'severity:high'],
+              });
+            }
+
+      - name: Close backup-failure issue on success
+        if: success()
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const { owner, repo } = context.repo;
+            const MARKER = '<!-- vps-backup-watch -->';
+            const existing = (await github.rest.issues.listForRepo({
+              owner, repo, state: 'open', labels: 'auto-detected', per_page: 100,
+            })).data.find(i => (i.body || '').includes(MARKER));
+            if (existing) {
+              await github.rest.issues.createComment({
+                owner, repo, issue_number: existing.number,
+                body: `Backup succeeded on ${new Date().toISOString()} — closing.`,
+              });
+              await github.rest.issues.update({
+                owner, repo, issue_number: existing.number, state: 'closed',
+              });
+            }
