@@ -4,6 +4,92 @@
 
 ---
 
+## 🟢 SESSION 46 2026-07-10 — Day-after-#707 production incident sweep (frozen mover price, dead BE arm, open/closed display truth, frozen paper book)
+
+**Owner reported 7 symptoms** (screenshots + ops PDFs): paper trading frozen
+~24h; actives should sort first; MVLLUSDT "reached >TP3 but shows closed at
+TP1"; volume down to ~12/24h; Signals(12) vs Profit(7) mismatch; "TPs/SLs hit
+but nothing happens"; "+2% runs going back to full −2.5% SL, no BE, no trail".
+Branch (all three repos): `claude/paper-trade-frozen-signals-pamcw8`.
+
+### Root causes found (code-verified)
+
+1. **MVLLUSDT frozen price / blind SL-TP-trail** — promoted movers have NO WS
+   kline subscription; their only candle writes are REST seeds, and seeds
+   never stamped `_last_kline_update_ts`. `last_kline_age_seconds()` = None
+   forever → BOTH staleness protections (scanner dispatch gate #359 +
+   trade_monitor mark-feed fallback #706) fail-open on None. MVLL's close
+   froze at 38.1800 for 11+ h with an open TP1_HIT runner: PnL/MFE pinned at
+   +4.63%, TP2/TP3 detection blind, trail immobile, SL backstop dead. This is
+   ALSO the "TPs/SLs hit but nothing happens" complaint, and it means mover
+   evaluators were reading up-to-6h-frozen candles for their whole hold.
+   **FIXED:** REST seeds/gap-fills stamp freshness; `_candle_stale` treats
+   age-None as stale after a post-boot grace; scanner re-seeds active movers
+   when 1m age > `MOVER_CANDLE_REFRESH_SEC` (120s, bounded/throttled).
+2. **BE never armed on wide-stop signals** — #702's arm = max(flat 1%, 1R of
+   own stop, 0.75×noise) double-counts the #702 noise-floor stop WIDENING: 1R
+   of a widened 2.4-2.7% stop ≈ at/above TP1 → unreachable under the TP1
+   full close. Exactly the owner's "+2% → full SL" trades (EPIC/CLO/POWER/
+   TIA). **FIXED:** arm capped at `be_arm_tp1_cap_fraction` (0.5, runtime
+   tunable) × the trade's own TP1 distance, floored at the flat trigger;
+   wired in BOTH trade_monitor and pretp_dispatcher. **BE-shift = owner-
+   sign-off item — merge of this branch is the sign-off.**
+3. **TP1_HIT is ambiguous since #707** — a non-mover CLOSES at TP1_HIT
+   (BE_THEN_TP1) while a runner mover at TP1_HIT/TP2_HIT is still OPEN.
+   EIGENUSDT (closed) showed "open 8h"; MVLLUSDT (open runner) read "closed
+   at TP1" (app shows the locked bestTp result for TP-hit statuses); the
+   API's `status=="ACTIVE"` open filter dropped open runners from the Open
+   tab. **FIXED:** `is_open` (active-book membership minus terminal
+   statuses) on `/api/signals` + snapshot cache; lumin-app maps it to
+   `MockSignal.effectiveIsOpen` and every widget uses it (labels, fade,
+   live-PnL vs banked result, price polling); All feed sorts open-first
+   (stable partition).
+4. **Signals(12) vs Profit(7)** — NOT a bug: the ops Profit 24h window reads
+   `signal_performance.json` = closed signals only (7 closed; EPIC/DELL/APT/
+   MVLL still open); actives are live-window only. The "0 active · 7
+   stopped" header is just misleading copy.
+5. **Volume drop (~48/day Jul-06 → 9 Jul-08 → ~12/24h)** — began BEFORE
+   #707: it is the intended compounding of owner-approved gates — #702 cohort
+   edge gate + CT_LONG/CT_SHORT macro gates + #705 expiry-OFF (signals now
+   occupy the book for hours: DELL open 13h) + #707 dup guard blocking
+   re-entry while a same-key signal sits open + loss-streak escalation.
+   Mover emissions also collapsed (truth report: MVRTP 35388 generated → 2
+   emitted). No code change — knobs are on the ops panel if volume is the
+   priority; the stale-candle fix may itself restore some mover volume
+   (fresh data instead of frozen).
+6. **Paper book frozen at the #707 deploy (~Jul 9 12:02 IST)** — engine book
+   kept dispatching/closing signals with ZERO paper counterparts after the
+   restart (BABAUSDT 09:22 IST was the last paper close; OP/CLO/EIGEN/TIA/
+   POWER all closed with no paper rows). NOT root-caused statically: the
+   open path has many silent-skip exits (empty paper cohort, per-user PAPER
+   eligibility, risk gate, qty/notional floors, fan-out exceptions).
+   **SHIPPED the decisive diagnostic:** `scripts/diag_paper_health.py`
+   (+ ops Diag page button) — joins boot config, paper cohort modes/prefs,
+   per-user book ledgers, and recent signals into per-signal × per-user
+   verdicts. **NEXT SESSION: run it on the VPS**, plus:
+   `docker logs 360scalp-v2-engine --since 30h 2>&1 | grep -E "paper_trade_skip|paper fanout|Auto-execution|risk_gate"`
+
+### Shipped (this branch, owner to merge)
+
+- 360-v2: staleness fix (seed stamping + boot-grace + mover re-seed, 20 new
+  tests), BE arm TP1 cap (7 tests, sign-off item), `/api/signals is_open`
+  (4 tests), `diag_paper_health.py`. Full suite green, ruff clean.
+- 360ce-ops: Diag page "paper book health" tool (allowlist + route + 3 tests).
+- lumin-app: `isOpen`/`effectiveIsOpen` everywhere, open-first All feed,
+  "runner riding" label, live-PnL for open runners (1 new test file).
+
+### Verify on live data (next session)
+
+- MVLL-class: evicted-mover signals reprice off the mark feed (log
+  `SL backstop via mark price` / trail moving); no more 11h-frozen closes.
+- Mover re-seed logs (`mover candle refresh: re-seeded`) and that mover
+  emissions are not blocked by the now-armed dispatch staleness gate.
+- BE arm: `be_shift` triggers appearing on wide-stop signals around ~50% of
+  the way to TP1; "+2% → full SL" round-trips should disappear.
+- Paper: run the new diag; identify and fix the actual gate.
+
+---
+
 ## 🟢 SESSION 45 2026-07-09 — PR #702 verdict + mover-path profitability package (owner-approved ACTIVE)
 
 **Owner asked:** analyse PR #702's live effect (3d Profit CSV + PDF vs the
