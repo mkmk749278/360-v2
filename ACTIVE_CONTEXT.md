@@ -4,6 +4,91 @@
 
 ---
 
+## 🟢 SESSION 47 2026-07-10 — Institutional audit + production-grade remediation sweep (branch `claude/crypto-audit-institutional-tic0ix`, all 3 code repos)
+
+**Owner asked:** full institutional-grade audit of the whole stack, then "fix
+everything actually what you can like production grade."
+
+### Delivered part 1 — the audit
+
+`docs/INSTITUTIONAL_AUDIT_2026_07_10.md` — 16-section audit across all four
+repos (architecture, security, trading engine, signal quality, exchange
+integration, auto-trade, mobile, infra, compliance, continuity, competitive
+benchmark, findings table F-01..F-20, priority roadmap, scores). Verdict:
+**Early Production**; risk HIGH; the three blockers to Production Ready are
+(1) unproven net edge, (2) no backups/DR + bus factor 1, (3) no legal
+entity/counsel. All figures sourced from our own telemetry.
+
+### Delivered part 2 — remediations shipped on this branch
+
+**360-v2** (all off-money-path: docs, infra, telemetry, API perimeter):
+- **F-02 backups/DR:** `scripts/backup_data.sh` (WAL-safe SQLite snapshot via
+  stdlib backup API → tar → AES-256-CBC pbkdf2 encrypt → verify → rotate 14)
+  + `scripts/restore_data.sh` (refuses under a running engine; preserves
+  prior state in `.pre_restore_<stamp>`) + nightly `vps-backup.yml` (SSH,
+  pulls encrypted artifact off-box 30d, files `severity:high` auto-detected
+  issue on failure, self-closes on success). **Needs new repo secret
+  `BACKUP_PASSPHRASE`** (same value into the password manager).
+- **F-02/F-04 docs:** `docs/DR_RUNBOOK.md` (RTO 2h/RPO 24h, scenarios A–D,
+  drill log), `docs/SAFE_HALT_RUNBOOK.md` (non-engineer kill-switch
+  procedure), `docs/CONTINUITY_PACK_TEMPLATE.md` (vault checklist),
+  `docs/STATISTICAL_CHANGE_POLICY.md` (n≥200/21d bar, frozen control,
+  proof-window discipline — binds future sessions).
+- **F-14 API rate limiting:** `src/api/rate_limit.py` + wired in
+  `server.py` — per-client (Bearer-hash else first-hop XFF IP) sliding
+  window, 240/min default, health paths exempt, bounded memory, 429 +
+  Retry-After. Env: `API_RATE_LIMIT_ENABLED/_PER_MIN/_MAX_CLIENTS`.
+  18 new tests; full api suite green.
+- **F-11 signing socket:** 0666 → **0660 + chgrp appgroup** (both containers
+  share the image so the group exists; env `SIGNING_SERVICE_SOCKET_GROUP`);
+  dev/test fallback to 0666 with loud warning. ⚠️ **Owner-sign-off item
+  (signing service) — merge of this branch is the sign-off; verify engine
+  connects after deploy** (`test -S` + a signed request in logs).
+- **F-09 paper-silence paging:** `monitor_heartbeat.py` rewritten (env
+  `ENGINE_DATA_DIR`, testable) + new check — engine perf file fresh (<6h)
+  while ALL paper ledgers frozen (>24h) → `INVARIANT_WARN` line;
+  `vps-liveness.yml` now pages on ANY `INVARIANT_WARN:` (future checks
+  need no workflow change). 10 new tests.
+
+**360ce-ops** (same branch): **F-08 TOTP 2FA** — stdlib RFC 6238
+(`app/totp.py`, RFC test vectors), ±1-step drift, replay-protected,
+enabled via `OPS_TOTP_SECRET` (enroll: `python scripts/generate_totp_secret.py`),
+wired into BOTH login paths (web form field appears when enabled;
+`/api/v1/auth/login` takes `totp`); failures return the same generic
+message on either factor. Unset env = password-only (safe rollout).
+Full ops suite green (311).
+
+**lumin-app** (same branch): **F-12 obfuscation** — `--obfuscate
+--split-debug-info` on BOTH the APK and AAB builds in `build-apk.yml`;
+symbol maps uploaded as 90-day artifact (`flutter symbolize` for crash
+traces). ⚠️ First obfuscated release: smoke-test Phone Auth + Play Billing
+on a real device before promoting (reflection-adjacent plugins).
+
+### Deliberately NOT done here (and why)
+
+- **F-05 FSM LIMIT-at-zone / F-06 portfolio cap** — money-path FSM/dispatch
+  design work, owner-sign-off items with their own spec docs; not
+  shove-in-able alongside a hardening sweep.
+- **F-13 remove in-app updater** — the GitHub-release APK path may still be
+  a real distribution channel for pre-Play installs; removal is a
+  distribution decision for the owner (audit recommends retiring it).
+- **F-15 JSON→transactional store, F-10 owner-key split** — need design;
+  JWT crypto itself verified sound (constant-time, alg-pinned, exp-checked).
+- Legal entity / counsel / second operator — not code.
+
+### NEXT
+
+1. Owner: add `BACKUP_PASSPHRASE` secret → run backup workflow once → do the
+   first restore drill (DR_RUNBOOK) + fill the continuity vault.
+2. Owner: enroll TOTP (`generate_totp_secret.py` → env → redeploy ops).
+3. Verify after deploy: signing socket 0660 connect OK; rate limiter logs
+   sane; first liveness run shows the paper-books line.
+4. S46 open item unchanged: run `diag_paper_health.py` on the VPS to
+   root-cause the paper freeze (the new invariant only *detects* it).
+5. Then the S46 verify-on-live-data list (mover re-seed, BE arm, is_open).
+
+---
+
 ## 🟢 SESSION 46 2026-07-10 — Day-after-#707 production incident sweep (frozen mover price, dead BE arm, open/closed display truth, frozen paper book)
 
 **Owner reported 7 symptoms** (screenshots + ops PDFs): paper trading frozen

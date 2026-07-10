@@ -111,6 +111,14 @@ jobs:
             if (age === null && rh.running) problems.push('scanner heartbeat unreadable');
             else if (age !== null && age > staleLimit) problems.push(`scanner heartbeat stale (${age}s > ${staleLimit}s) — scan loop halted or hung`);
 
+            // Structured invariant lines from monitor_heartbeat.py (audit
+            // F-09 and successors) — any INVARIANT_WARN pages, so new checks
+            // added to the probe script need no workflow change.
+            for (const line of hb.split('\n')) {
+              const m = line.match(/^INVARIANT_WARN:\s*(.+)$/);
+              if (m) problems.push(m[1]);
+            }
+
             const now = new Date().toISOString();
             const existing = (await github.rest.issues.listForRepo({
               owner, repo, state: 'open', labels: 'auto-detected', per_page: 100,
