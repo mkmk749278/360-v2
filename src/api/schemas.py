@@ -71,6 +71,19 @@ class SignalDetail(BaseModel):
     setup_class: str
     agent_name: str = Field(..., description="Display name of the evaluator")
     status: str
+    is_open: bool = Field(
+        False,
+        description=(
+            "True while the signal is genuinely in-flight (still in the "
+            "engine's active book with a non-terminal status). The status "
+            "string alone can no longer distinguish open from closed: under "
+            "the BE-then-TP1 default a non-mover CLOSES with status TP1_HIT, "
+            "while under the mover runner exit (2026-07-09) a mover with "
+            "status TP1_HIT/TP2_HIT is still OPEN with the trail riding the "
+            "remainder. Clients must use this field for open/closed "
+            "rendering, sorting, and 'held vs open' labels."
+        ),
+    )
     current_price: float
     pnl_pct: float
     max_favorable_excursion_pct: float = Field(
