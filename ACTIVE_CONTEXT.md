@@ -4,6 +4,74 @@
 
 ---
 
+## 🔴 SESSION 49 2026-07-10 — P1: TAIKO SL overshoot root-caused — Binance decommissioned our legacy WS URLs (branch `claude/taiko-sl-overshoot-6lds39`)
+
+**Owner report (screenshot):** TAIKOUSDT LONG (MVRTP-8ABCA1F2, entry 0.09074,
+SL 0.09060) still ACTIVE at 0.08721 — **3.7% past the stop, never closed**.
+Same state on APEUSDT + POWERUSDT (issue #712; the new S48 F-07 pager fired
+correctly on both GitHub and the alert Telegram bot — the detection layer works).
+
+### Root cause (real-data-first: probe → vendor changelog → ecosystem confirmation)
+
+Binance's **2026-03-06 USDⓈ-M Futures WebSocket System Upgrade** split WS
+traffic into routed base paths (`/public`, `/market`, `/private`) and
+**decommissioned legacy unrouted URLs after 2026-04-23**. Legacy connections
+still complete the TCP+WS handshake but *market/private-category streams never
+push a single frame* — silent death, no exception, so reconnect/backoff never
+fires. Enforcement evidently reached our long-lived connections recently.
+
+- `websocket_manager` / `BINANCE_FUTURES_WS_BASE` were **already migrated**
+  (2026-05-14 incident) → scanner klines healthy, which masked the rest.
+- `src/execution/mark_price_feed.py` was **missed**: still
+  `wss://fstream.binance.com/ws/!markPrice@arr@1s` → feed "connected" with an
+  **empty price map**. Everything downstream starved silently: the #706
+  stale-candle→mark-price SL/TP fallback (blind on out-of-universe symbols —
+  TAIKO's kline age was None after the day's deploy restarts), **pre-TP
+  dispatch, trailing, funding-exit watcher** (`missing_funding_rate=264` in the
+  truth report is the same outage).
+- `src/execution/user_data_stream.py` was **also missed**: legacy
+  `/ws/<listenKey>` → **FSM order-fill events (real money) not delivered**;
+  only the REST Reconciler was compensating.
+- The Lumin app polls `fapi/v1/premiumIndex` REST directly — that's why the
+  owner's phone showed the real price while the engine was blind.
+
+### Shipped on this branch
+
+1. `mark_price_feed`: routed URL (`/market/ws/!markPrice@arr@1s`,
+   env `MARK_PRICE_FEED_WS_URL`) + legacy-override auto-correct (same defence
+   websocket_manager has) + **silence watchdog** — the @1s stream ticking
+   nothing for `MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC` (30s) now ERROR-logs and
+   force-reconnects: silence can never look like health on the SL/TP path again.
+2. `user_data_stream`: routed private URL
+   `/private/ws?listenKey=<key>&events=<all legacy event types>` — the
+   `events` param is REQUIRED in production (omitting it delivers nothing;
+   field-confirmed by unicorn-binance-websocket-api). Default list mirrors
+   legacy implicit-all, so parser behaviour is unchanged.
+3. Regression pins: routed-URL contracts for both modules, legacy-path
+   normalisation, silence-watchdog raise + healthy-path no-raise. Full suite
+   green; ruff/mypy clean.
+
+### On deploy (expected behaviour — tell the owner)
+
+Engine restart → feed connects routed → mark prices flow → the blind ACTIVE
+signals (TAIKO/APE/POWER) get repriced via the #706 fallback and **close
+immediately at the real mark price**, recording the true overshot loss (TAIKO
+≈ −3.9%, not the −0.15% SL). That is honest telemetry, not a bug. Verify in
+logs: `mark_price_feed: receiving (N symbols in first frame)` and
+`user_data_stream: connecting to wss://fstream.binance.com/private/ws?...`.
+
+### Open follow-ups
+
+1. **Verify user-data stream live after deploy** — watch for ORDER_TRADE_UPDATE
+   events on the next real fill (Reconciler covers the gap meanwhile).
+2. **REST `premiumIndex` fallback as third pricing tier** for the monitor when
+   both kline + mark feed are dead (the app already proves it works) — new
+   money-path pricing source, so dark-first + owner sign-off; not shoved in here.
+3. Owner NEXT items from S48 unchanged (alert-bot secrets done per screenshot;
+   healthchecks.io + host setup + drill still pending).
+
+---
+
 ## 🟢 SESSION 48 2026-07-10 — Autonomous self-healing ops stack (branch `claude/audit-report-implementation-knx1h1`)
 
 **Owner directive:** "we need an autonomous system — I'm only the one handling

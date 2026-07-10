@@ -39,6 +39,10 @@ import json
 from collections import defaultdict
 from typing import Any, Awaitable, Callable, Dict, List, Optional, Set
 
+from config import (
+    MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC,
+    MARK_PRICE_FEED_WS_URL,
+)
 from src.utils import get_logger
 
 log = get_logger("execution.mark_price_feed")
@@ -62,15 +66,47 @@ def get_instance() -> Optional["MarkPriceFeed"]:
     return _instance
 
 
-_WS_URL = "wss://fstream.binance.com/ws/!markPrice@arr@1s"
 _MIN_BACKOFF_S = 1.0
 _MAX_BACKOFF_S = 60.0
+
+# Legacy (pre-2026-04-23) unrouted prefix.  Mark-price streams belong to the
+# ``/market`` category; on an unrouted ``/ws/...`` connection the handshake
+# still succeeds but Binance never pushes a frame — the feed sat "connected"
+# with an empty price map while the SL/TP backstop went blind on every
+# out-of-universe symbol (TAIKOUSDT/APEUSDT/POWERUSDT, 2026-07-10, F-07).
+_LEGACY_PREFIX = "wss://fstream.binance.com/ws/"
+_ROUTED_PREFIX = "wss://fstream.binance.com/market/ws/"
+
+
+def _normalized_ws_url() -> str:
+    """Return the configured feed URL, auto-correcting a legacy unrouted
+    override so an old ``.env`` value can't silently re-break the feed —
+    the same defence ``websocket_manager._build_combined_stream_url``
+    applies to ``BINANCE_FUTURES_WS_BASE`` (2026-05-14 env-override trap).
+    """
+    url = MARK_PRICE_FEED_WS_URL
+    if url.startswith(_LEGACY_PREFIX):
+        corrected = _ROUTED_PREFIX + url[len(_LEGACY_PREFIX):]
+        log.warning(
+            "mark_price_feed: MARK_PRICE_FEED_WS_URL ({}) uses the "
+            "pre-2026-04-23 legacy unrouted path — auto-correcting to {} "
+            "(market-category streams never push data on unrouted "
+            "connections).  Update .env to silence this warning.",
+            url, corrected,
+        )
+        return corrected
+    return url
 
 
 # Subscriber callback signature.  ``symbol`` is uppercase (Binance
 # convention); ``mark_price`` is the float parsed from Binance's
 # string-encoded number.
 MarkPriceCallback = Callable[[str, float], Awaitable[None]]
+
+
+class FeedSilentError(Exception):
+    """Connection open but no frame within the silence timeout —
+    treat as a failed connection so the reconnect loop cycles it."""
 
 
 class MarkPriceFeed:
@@ -173,6 +209,10 @@ class MarkPriceFeed:
                 backoff_s = _MIN_BACKOFF_S
             except asyncio.CancelledError:
                 raise
+            except FeedSilentError:
+                # Already logged at ERROR in _consume_once — just cycle
+                # the connection through the backoff below.
+                pass
             except Exception:
                 log.exception("mark_price_feed: error in main loop")
             if self._stop_event.is_set():
@@ -188,15 +228,50 @@ class MarkPriceFeed:
         log.info("mark_price_feed: stopped")
 
     async def _consume_once(self) -> None:
-        """One WS connection lifetime — open, consume until close."""
+        """One WS connection lifetime — open, consume until close.
+
+        A healthy ``!markPrice@arr@1s`` connection ticks every second, so
+        a connection that stays silent for
+        ``MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC`` is dead-but-open (the
+        legacy-URL decommission presented exactly this way: clean
+        handshake, zero frames, forever).  Raise so :meth:`run`
+        reconnects with backoff instead of trusting it indefinitely —
+        silence must never look like health on the SL/TP price path.
+        """
         factory = self._ws_factory or _default_ws_factory
-        async with factory(_WS_URL) as ws:
-            async for raw in ws:
+        first_frame_logged = False
+        async with factory(_normalized_ws_url()) as ws:
+            messages = ws.__aiter__()
+            while True:
+                try:
+                    raw = await asyncio.wait_for(
+                        messages.__anext__(),
+                        timeout=MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC,
+                    )
+                except StopAsyncIteration:
+                    break
+                except asyncio.TimeoutError:
+                    log.error(
+                        "mark_price_feed: connected but received no frame "
+                        "for {}s — dead-but-open connection (wrong/legacy "
+                        "URL or upstream outage); reconnecting",
+                        MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC,
+                    )
+                    raise FeedSilentError(
+                        f"no frame in {MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC}s"
+                    )
                 try:
                     payload = json.loads(raw)
                 except (TypeError, ValueError) as exc:
                     log.warning("mark_price_feed: malformed JSON: {}", exc)
                     continue
+                if not first_frame_logged:
+                    first_frame_logged = True
+                    log.info(
+                        "mark_price_feed: receiving ({} symbols in first "
+                        "frame)",
+                        len(payload) if isinstance(payload, list) else 1,
+                    )
                 # The ``!markPrice@arr@1s`` stream sends a JSON array
                 # of per-symbol updates per tick.  Earlier "single
                 # symbol" streams send a dict; handle both shapes.

@@ -297,3 +297,79 @@ async def test_funding_info_negative_rate() -> None:
     await feed._consume_once()
     rate, _ = feed.get_funding_info("ETHUSDT")
     assert rate == pytest.approx(-0.0012)
+
+
+# ---------------------------------------------------------------------------
+# 2026-04-23 WebSocket migration (F-07: TAIKOUSDT/APEUSDT/POWERUSDT blind)
+# ---------------------------------------------------------------------------
+
+
+def test_ws_url_uses_routed_market_path() -> None:
+    """Pin the routed ``/market/ws/`` form.  The legacy unrouted
+    ``/ws/!markPrice@arr@1s`` completes the handshake but never pushes a
+    frame post-decommission — the feed sat "connected" with an empty
+    price map while the SL/TP backstop went blind (2026-07-10)."""
+    url = mark_price_feed._normalized_ws_url()
+    assert url.startswith("wss://fstream.binance.com/market/ws/")
+    assert url.endswith("!markPrice@arr@1s")
+
+
+def test_legacy_env_override_is_normalized(monkeypatch) -> None:
+    """An old ``.env`` value must not silently re-break the feed — same
+    defence websocket_manager applies to BINANCE_FUTURES_WS_BASE."""
+    monkeypatch.setattr(
+        mark_price_feed,
+        "MARK_PRICE_FEED_WS_URL",
+        "wss://fstream.binance.com/ws/!markPrice@arr@1s",
+    )
+    assert (
+        mark_price_feed._normalized_ws_url()
+        == "wss://fstream.binance.com/market/ws/!markPrice@arr@1s"
+    )
+
+
+@pytest.mark.asyncio
+async def test_silent_connection_raises_feed_silent_error(monkeypatch) -> None:
+    """A connection that delivers no frame within the silence timeout is
+    dead-but-open (the legacy-URL failure shape).  _consume_once must
+    raise so run() cycles the connection instead of trusting it forever."""
+    monkeypatch.setattr(
+        mark_price_feed, "MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC", 0.05
+    )
+
+    class _SilentWs:
+        def __aiter__(self):
+            return self
+
+        async def __anext__(self):
+            await asyncio.sleep(3600)  # never yields
+            raise StopAsyncIteration
+
+    class _SilentCtx:
+        async def __aenter__(self):
+            return _SilentWs()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return None
+
+    feed = mark_price_feed.MarkPriceFeed(ws_factory=lambda url: _SilentCtx())
+    with pytest.raises(mark_price_feed.FeedSilentError):
+        await feed._consume_once()
+
+
+@pytest.mark.asyncio
+async def test_frames_within_timeout_do_not_trip_silence_watchdog(
+    monkeypatch,
+) -> None:
+    """A healthy connection (frames flowing) must consume to a clean
+    close exactly as before the watchdog existed."""
+    monkeypatch.setattr(
+        mark_price_feed, "MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC", 5.0
+    )
+    feed = mark_price_feed.MarkPriceFeed(
+        ws_factory=_factory_returning(
+            [_array_payload([("BTCUSDT", "29000.5")])]
+        )
+    )
+    await feed._consume_once()  # must not raise
+    assert feed.get_price("BTCUSDT") == 29000.5

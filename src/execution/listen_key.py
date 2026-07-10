@@ -4,7 +4,8 @@ Binance gates User Data Stream access behind a per-user listenKey:
 
 1. POST ``/fapi/v1/listenKey`` (signed) → returns ``{"listenKey": "..."}``
    valid for 60 minutes.
-2. Connect WebSocket to ``wss://fstream.binance.com/ws/<listenKey>``.
+2. Connect WebSocket to
+   ``wss://fstream.binance.com/private/ws?listenKey=<listenKey>&events=...``.
 3. PUT ``/fapi/v1/listenKey`` every <60 minutes to extend.  Default
    keepalive cadence is 30 minutes to leave headroom for network
    hiccups + retries.

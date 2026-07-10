@@ -10,7 +10,7 @@ depends on.  Components:
   (create + 30-min keepalive + close).  Talks to Binance via the
   signing service from PR-4.
 * :mod:`src.execution.user_data_stream` — WebSocket consumer that
-  subscribes to ``wss://fstream.binance.com/ws/<listenKey>``,
+  subscribes to ``wss://fstream.binance.com/private/ws?listenKey=...``,
   parses each message into the typed events from
   :mod:`src.execution.events`, and dispatches to a caller-supplied
   handler.  Includes automatic reconnect on disconnect.
