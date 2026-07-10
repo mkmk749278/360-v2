@@ -721,6 +721,17 @@ MOVER_PROMOTION_TTL_SEC: float = _safe_float("MOVER_PROMOTION_TTL_SEC", "21600")
 #: SURGE_PROMOTION_MAX_PAIRS — with a 6 h hold the old shared cap of 5 would fill
 #: and starve fresh ignitions, so movers get their own (larger) budget.
 MOVER_PROMOTION_MAX_PAIRS: int = _safe_int("MOVER_PROMOTION_MAX_PAIRS", "30")
+#: Re-seed a promoted mover's candles when its 1m data is older than this many
+#: seconds (2026-07-10).  Promoted movers sit outside the WS kline subscription
+#: set — their candles came ONLY from the one-time promotion seed, so minutes
+#: into a 6 h hold every evaluator was reading frozen data and (now that REST
+#: seeds stamp freshness) the dispatch staleness gate would block them.  Keep
+#: this below MAX_KLINE_STALENESS_SEC (180) so an actively-scanned mover never
+#: trips that gate.  0 disables the refresh.
+MOVER_CANDLE_REFRESH_SEC: float = _safe_float("MOVER_CANDLE_REFRESH_SEC", "120")
+#: Max mover re-seeds per scan cycle — bounds the REST weight burst when many
+#: promoted movers go stale in the same cycle (each re-seed is ~6 kline calls).
+MOVER_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int("MOVER_CANDLE_REFRESH_MAX_PER_CYCLE", "8")
 #: Max bid/ask spread (as a PERCENT of mid — same unit as ScanContext.spread_pct,
 #: i.e. 0.5 == 0.5%) a mover-promoted pair may have to be scanned by the scalp
 #: channel. Movers are lower-cap and run wider than blue chips, so this is looser
