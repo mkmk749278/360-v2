@@ -1824,9 +1824,16 @@ class TradeMonitor:
                 _orig_dist = float(getattr(sig, "original_sl_distance", 0.0) or 0.0)
                 if _orig_dist > 0:
                     _sl_dist_pct = _orig_dist / sig.entry * 100.0
+            # TP1 cap (2026-07-10): under the TP1-full-close default an arm
+            # at/above TP1 is unreachable — the trade either closes at TP1 or
+            # round-trips its full stop with the ratchet never engaging.
+            _tp1_dist_pct = 0.0
+            if sig.tp1 and sig.tp1 > 0:
+                _tp1_dist_pct = abs(sig.tp1 - sig.entry) / sig.entry * 100.0
             _arm_pct = _be_policy.arm_threshold_pct(
                 _sl_dist_pct,
                 float(getattr(sig, "noise_floor_pct", 0.0) or 0.0),
+                _tp1_dist_pct,
             )
             if sig.max_favorable_excursion_pct >= _arm_pct:
                 _park = _be_policy.park_price(sig.entry, is_long)

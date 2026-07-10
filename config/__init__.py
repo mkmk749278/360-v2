@@ -2487,6 +2487,16 @@ NOISE_FLOOR_MAX_SL_PCT: float = _safe_float("NOISE_FLOOR_MAX_SL_PCT", "3.0")
 BE_ARM_R_MULT: float = _safe_float("BE_ARM_R_MULT", "1.0")
 BE_ARM_NOISE_MULT: float = _safe_float("BE_ARM_NOISE_MULT", "0.75")
 BE_PARK_TOLERANCE_PCT: float = _safe_float("BE_PARK_TOLERANCE_PCT", "0.15")
+# Cap the BE arm threshold at this fraction of the trade's own TP1 distance
+# (2026-07-10).  The noise-aware arm (max of flat / 1R / 0.75×noise) double-
+# counted the #702 noise-floor stop WIDENING: 1R of an already-noise-widened
+# 2.4-2.7% stop put the arm at ≈ the stop distance — at or ABOVE TP1 for the
+# tighter setups, i.e. unreachable under the TP1-full-close default.  Owner-
+# reported symptom (2026-07-10): signals ran +2% and round-tripped to the full
+# −2.4-2.7% SL with no BE shift, a ~5% swing.  With the cap, a trade that has
+# covered this fraction of the way to TP1 always arms, whatever the stop
+# width.  Never caps below the flat trigger (BE_SHIFT_TRIGGER_PCT).  0 = off.
+BE_ARM_TP1_CAP_FRACTION: float = _safe_float("BE_ARM_TP1_CAP_FRACTION", "0.5")
 
 # Cohort-edge STEP 2 (activates the #696 STEP 1 store): suppress emission when
 # the signal's cohort (setup × side × regime family × BTC macro) has at least

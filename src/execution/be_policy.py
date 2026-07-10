@@ -37,8 +37,24 @@ def be_enabled(default: bool) -> bool:
         return default
 
 
-def arm_threshold_pct(sl_distance_pct: float, noise_floor_pct: float = 0.0) -> float:
-    """Return the MFE % (of entry) required before the BE ratchet arms."""
+def arm_threshold_pct(
+    sl_distance_pct: float,
+    noise_floor_pct: float = 0.0,
+    tp1_distance_pct: float = 0.0,
+) -> float:
+    """Return the MFE % (of entry) required before the BE ratchet arms.
+
+    TP1 cap (2026-07-10): the noise-aware arm double-counted the #702
+    noise-floor stop widening — 1R of an already-widened 2.4-2.7% stop put
+    the arm at ≈ the stop distance, at or ABOVE TP1 for tighter setups.
+    Under the TP1-full-close default that arm is unreachable: the trade
+    either closes at TP1 or round-trips its full stop with the ratchet
+    never engaging (owner-reported +2% → −2.5% full-SL swings).  When the
+    caller supplies the trade's TP1 distance, the arm is capped at
+    ``be_arm_tp1_cap_fraction`` of it — a trade that has covered that
+    fraction of the way to its own target always arms — floored at the
+    flat trigger so the cap can never make the arm hair-trigger.
+    """
     try:
         arm = float(_rt.get("be_arm_trigger_pct"))
         r_mult = float(_rt.get("be_arm_r_mult"))
@@ -47,10 +63,20 @@ def arm_threshold_pct(sl_distance_pct: float, noise_floor_pct: float = 0.0) -> f
         # Registry unavailable (partial boot) — legacy flat behaviour.
         from config import BE_SHIFT_TRIGGER_PCT
         return float(BE_SHIFT_TRIGGER_PCT)
+    flat_trigger = arm
     if sl_distance_pct and sl_distance_pct > 0:
         arm = max(arm, r_mult * float(sl_distance_pct))
     if noise_floor_pct and noise_floor_pct > 0:
         arm = max(arm, noise_mult * float(noise_floor_pct))
+    if tp1_distance_pct and tp1_distance_pct > 0:
+        try:
+            cap_fraction = float(_rt.get("be_arm_tp1_cap_fraction"))
+        except Exception:
+            from config import BE_ARM_TP1_CAP_FRACTION
+            cap_fraction = BE_ARM_TP1_CAP_FRACTION
+        if cap_fraction > 0:
+            cap = max(cap_fraction * float(tp1_distance_pct), flat_trigger)
+            arm = min(arm, cap)
     return arm
 
 

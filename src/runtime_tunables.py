@@ -59,6 +59,7 @@ def _build_registry() -> Dict[str, Tunable]:
         ACTIVE_DUP_GUARD_ENABLED,
         BE_ARM_NOISE_MULT,
         BE_ARM_R_MULT,
+        BE_ARM_TP1_CAP_FRACTION,
         BE_PARK_TOLERANCE_PCT,
         BE_SHIFT_TRIGGER_PCT,
         BE_THEN_TP1_DEFAULT_ENABLED,
@@ -182,6 +183,25 @@ def _build_registry() -> Dict[str, Tunable]:
             min_value=0.0,
             max_value=3.0,
             unit="× noise",
+        ),
+        Tunable(
+            key="be_arm_tp1_cap_fraction",
+            label="BE arm: TP1 cap",
+            description=(
+                "Cap the BE arm threshold at this fraction of the trade's own "
+                "TP1 distance, so the ratchet always arms before the TP1 "
+                "full-close can beat it there. Without the cap, 1R of a "
+                "noise-widened 2.4-2.7% stop put the arm at or above TP1 — "
+                "unreachable — and +2% runs round-tripped to the full SL with "
+                "no BE shift (owner-reported 2026-07-10). Never caps below "
+                "the flat trigger. 0 = cap off (pre-fix behaviour)."
+            ),
+            type="float",
+            default=BE_ARM_TP1_CAP_FRACTION,
+            category="Stops & exits",
+            min_value=0.0,
+            max_value=1.0,
+            unit="× TP1 dist",
         ),
         Tunable(
             key="be_park_tolerance_pct",
