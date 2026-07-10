@@ -1,0 +1,23 @@
+# Installed by deploy/host/setup_host.sh (which substitutes __REPO_DIR__).
+# Brings the whole compose stack up after a host reboot, even if Docker's
+# own restart policies were cleared by an engine upgrade or manual `down`.
+# `docker compose up -d` is idempotent — if restart:always already brought
+# the containers up, this is a no-op.
+[Unit]
+Description=360scalp-v2 trading stack (docker compose)
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=__REPO_DIR__
+# deploy.sh reads API_PROCESS_ISOLATED from .env and picks the profile —
+# the same entry point the operator uses, so boot and deploy can't drift.
+ExecStart=/usr/bin/env bash deploy.sh
+ExecStop=/usr/bin/docker compose -f docker-compose.yml --profile isolated down
+TimeoutStartSec=600
+
+[Install]
+WantedBy=multi-user.target

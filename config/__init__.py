@@ -2520,6 +2520,13 @@ COHORT_EDGE_SUPPRESS_BELOW: float = _safe_float("COHORT_EDGE_SUPPRESS_BELOW", "-
 MARK_FEED_STALENESS_ENABLED: bool = _safe_bool("MARK_FEED_STALENESS_ENABLED", "true")
 MARK_FEED_STALENESS_MAX_AGE_SEC: float = _safe_float("MARK_FEED_STALENESS_MAX_AGE_SEC", "120.0")
 
+# How often the trade monitor publishes data/pricing_freshness.json — the
+# per-open-position pricing-source freshness snapshot the watchdog and the
+# liveness probe consume (audit F-07: an open position priced off a frozen
+# source must PAGE, not just fall back).  Local disk write, off the per-tick
+# hot path (throttled inside _check_all); 0 disables publishing.
+PRICING_FRESHNESS_PUBLISH_SEC: float = _safe_float("PRICING_FRESHNESS_PUBLISH_SEC", "30.0")
+
 # ---------------------------------------------------------------------------
 # Mover-path profitability package (owner-approved ACTIVE, 2026-07-09)
 # ---------------------------------------------------------------------------

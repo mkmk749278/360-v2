@@ -59,3 +59,8 @@ data/pnl_history.json
 data/circuit_breaker_status.json
 data/loss_streaks.json
 data/signal_dispatch_cooldown.json
+data/circuit_breaker_status.json
+data/pricing_freshness.json
+data/pricing_freshness.json.tmp
+data/watchdog_state.json
+data/watchdog_audit.jsonl

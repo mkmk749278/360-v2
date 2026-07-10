@@ -124,6 +124,10 @@ jobs:
               owner, repo, state: 'open', labels: 'auto-detected', per_page: 100,
             })).data.find(i => (i.body || '').includes(MARKER));
 
+            // Hand the problem list to the Telegram page step (phone-level
+            // alert; the issue below stays as the durable record).
+            fs.writeFileSync('probe/problems.txt', problems.join('\n'));
+
             if (problems.length > 0) {
               const body = [
                 MARKER,
@@ -155,10 +159,35 @@ jobs:
                 body: `${MARKER}\n✅ Recovered at ${now} — engine running, heartbeat fresh, breaker healthy. Auto-closing.`,
               });
               await github.rest.issues.update({ owner, repo, issue_number: existing.number, state: 'closed' });
+              fs.writeFileSync('probe/recovered.txt', `closed #${existing.number}`);
               core.info(`Recovered — closed #${existing.number}`);
             } else {
               core.info('Engine healthy — no liveness problems detected.');
             }
+
+      # Phone-level page (audit §9.3-2). Telegram is operational in-region
+      # again (2026-07-10) — page the owner's phone in the same run that
+      # files the issue. Skips silently when the secrets aren't configured,
+      # so the workflow never fails on the paging path itself.
+      - name: Page owner on Telegram
+        if: always()
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_ADMIN_CHAT_ID: ${{ secrets.TELEGRAM_ADMIN_CHAT_ID }}
+        run: |
+          [ -n "$TELEGRAM_BOT_TOKEN" ] && [ -n "$TELEGRAM_ADMIN_CHAT_ID" ] || { echo "Telegram secrets not configured; skipping page"; exit 0; }
+          if [ -s probe/problems.txt ]; then
+            MSG="🚨 ENGINE LIVENESS ALERT (hourly watch)"$'\n'"$(sed 's/^/⛔ /' probe/problems.txt)"$'\n'"Details: auto-detected issue in mkmk749278/360-v2"
+          elif [ -f probe/recovered.txt ]; then
+            MSG="✅ Engine liveness recovered — $(cat probe/recovered.txt) auto-closed."
+          else
+            exit 0
+          fi
+          curl -sS -m 15 -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/sendMessage" \
+            --data-urlencode chat_id="${TELEGRAM_ADMIN_CHAT_ID}" \
+            --data-urlencode text="$MSG" \
+            --data-urlencode disable_web_page_preview=true \
+            -o /dev/null -w 'telegram page: HTTP %{http_code}\n' || echo "telegram page failed (non-blocking)"
 
       - name: Clean up
         if: always()

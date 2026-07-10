@@ -7,6 +7,7 @@ updating status, PnL, trailing stop, and posting updates to Telegram.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import time
 import numpy as np
@@ -34,6 +35,7 @@ from config import (
     ENTRY_FILL_WINDOW_ENFORCED,
     MARK_FEED_STALENESS_ENABLED,
     MARK_FEED_STALENESS_MAX_AGE_SEC,
+    PRICING_FRESHNESS_PUBLISH_SEC,
     PRE_TP_ENABLED,
     BE_THEN_TP1_DEFAULT_ENABLED,
     INVALIDATION_MODE_DEFAULT,
@@ -289,6 +291,9 @@ class TradeMonitor:
         # Monitor start wall-clock (monotonic) — the post-boot grace anchor
         # for the never-WS-stamped staleness case in ``_candle_stale``.
         self._started_at_monotonic: float = time.monotonic()
+        # Last pricing-freshness publish (monotonic) — throttles the F-07
+        # status-file write to PRICING_FRESHNESS_PUBLISH_SEC.
+        self._pricing_freshness_last_write: float = 0.0
         self._remove = remove_signal
         self._update = update_signal
         self._performance_tracker = performance_tracker
@@ -779,6 +784,73 @@ class TradeMonitor:
             await self._evaluate_signal(sig)
 
         await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
+        self._publish_pricing_freshness(signals)
+
+    # Written next to the other data-volume status files (scanner heartbeat,
+    # circuit_breaker_status.json) so the watchdog + liveness probe can read
+    # it without touching the engine process.
+    _PRICING_FRESHNESS_PATH = os.path.join(
+        os.path.dirname(os.path.dirname(__file__)), "data", "pricing_freshness.json"
+    )
+
+    def _publish_pricing_freshness(self, signals: Dict[str, Signal]) -> None:
+        """Publish per-open-signal pricing-source freshness (audit F-07).
+
+        The Session 44/45/46 incident class: a symbol drops out of the scan
+        universe, its candle freezes, and SL/TP/trailing protection silently
+        prices off a dead source for hours.  The *fallbacks* for that shipped
+        in #706 + Session 46; this publishes the state they act on, so an
+        open position whose every price source has gone stale becomes a page
+        (watchdog, ~60s) instead of a screenshot from the owner.
+
+        A signal is ``blind`` when its 1m candle is stale AND the mark-price
+        feed has nothing for the symbol — i.e. the fallback chain is
+        exhausted, exactly the state that pinned MVLLUSDT's PnL for 11h.
+
+        Best-effort and throttled: one small local-disk write per
+        PRICING_FRESHNESS_PUBLISH_SEC, no network, never raises into the
+        monitor loop.
+        """
+        if PRICING_FRESHNESS_PUBLISH_SEC <= 0:
+            return
+        now = time.monotonic()
+        if now - self._pricing_freshness_last_write < PRICING_FRESHNESS_PUBLISH_SEC:
+            return
+        self._pricing_freshness_last_write = now
+        try:
+            entries = []
+            for sig in signals.values():
+                if getattr(sig, "entry_never_filled", False):
+                    # Not an open position yet — no capital priced off this
+                    # symbol, so a stale source is not an invariant breach.
+                    continue
+                try:
+                    age = self._store.last_kline_age_seconds(sig.symbol, "1m")
+                except Exception:
+                    age = None
+                stale = self._candle_stale(sig.symbol)
+                mark_available = self._mark_feed_price(sig.symbol) is not None
+                entries.append(
+                    {
+                        "signal_id": sig.signal_id,
+                        "symbol": sig.symbol,
+                        "status": getattr(sig, "status", None),
+                        "kline_age_sec": age,
+                        "candle_stale": stale,
+                        "mark_price_available": mark_available,
+                        "blind": bool(stale and not mark_available),
+                    }
+                )
+            payload = {"updated_at": time.time(), "positions": entries}
+            os.makedirs(os.path.dirname(self._PRICING_FRESHNESS_PATH), exist_ok=True)
+            tmp_path = self._PRICING_FRESHNESS_PATH + ".tmp"
+            with open(tmp_path, "w") as fh:
+                json.dump(payload, fh)
+            os.replace(tmp_path, self._PRICING_FRESHNESS_PATH)
+        except Exception:
+            # Best-effort telemetry — a publish failure must never disturb
+            # the SL/TP backstop loop it reports on.
+            log.debug("pricing-freshness publish failed (non-fatal)")
 
     def _mark_feed_price(self, symbol: str) -> Optional[float]:
         """Latest mark price from the all-symbols 1s feed, or None if the

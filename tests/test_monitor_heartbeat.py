@@ -105,3 +105,73 @@ class TestPaperSilence:
         _touch(tmp_path / "paper_pnl_state.json", age_sec=60)
         out = _run(tmp_path)
         assert "OK: paper books consistent" in out
+
+
+class TestPricingFreshness:
+    """Audit F-07 — the stale-pricing invariant (MVLLUSDT class)."""
+
+    @staticmethod
+    def _write_snapshot(data_dir, positions, updated_age_sec=10.0):
+        import json
+
+        fp = data_dir / "pricing_freshness.json"
+        fp.write_text(
+            json.dumps(
+                {"updated_at": time.time() - updated_age_sec, "positions": positions}
+            )
+        )
+
+    def test_missing_file_is_skipped_quietly(self, tmp_path):
+        out = _run(tmp_path)
+        assert "Pricing freshness: file not found" in out
+        assert "INVARIANT_WARN" not in out
+
+    def test_fresh_sources_ok(self, tmp_path):
+        self._write_snapshot(
+            tmp_path,
+            [
+                {
+                    "signal_id": "sig1",
+                    "symbol": "BTCUSDT",
+                    "status": "ACTIVE",
+                    "kline_age_sec": 12,
+                    "candle_stale": False,
+                    "mark_price_available": True,
+                    "blind": False,
+                }
+            ],
+        )
+        out = _run(tmp_path)
+        assert "OK: every open position has a fresh pricing source" in out
+        assert "INVARIANT_WARN" not in out
+
+    def test_blind_position_pages(self, tmp_path):
+        self._write_snapshot(
+            tmp_path,
+            [
+                {
+                    "signal_id": "sig-mvll",
+                    "symbol": "MVLLUSDT",
+                    "status": "TP1_HIT",
+                    "kline_age_sec": 40000,
+                    "candle_stale": True,
+                    "mark_price_available": False,
+                    "blind": True,
+                }
+            ],
+        )
+        out = _run(tmp_path)
+        assert "INVARIANT_WARN: open position on MVLLUSDT" in out
+        assert "BLIND" in out
+
+    def test_stale_snapshot_itself_pages(self, tmp_path):
+        # The publisher freezing is the F-09 failure mode applied to F-07 —
+        # a monitor that silently stops measuring must page, not pass.
+        self._write_snapshot(tmp_path, [], updated_age_sec=3600)
+        out = _run(tmp_path)
+        assert "INVARIANT_WARN: pricing-freshness snapshot itself is stale" in out
+
+    def test_stale_bound_env_overridable(self, tmp_path):
+        self._write_snapshot(tmp_path, [], updated_age_sec=120)
+        out = _run(tmp_path, PRICING_FILE_MAX_AGE_SEC="60")
+        assert "INVARIANT_WARN: pricing-freshness snapshot itself is stale" in out

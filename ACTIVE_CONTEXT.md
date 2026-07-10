@@ -4,6 +4,75 @@
 
 ---
 
+## 🟢 SESSION 48 2026-07-10 — Autonomous self-healing ops stack (branch `claude/audit-report-implementation-knx1h1`)
+
+**Owner directive:** "we need an autonomous system — I'm only the one handling
+all this, one can't observe all: self checks, self heal-up, self restart,
+freezing issues, VPS issues. First go through the web to find what we can do."
+Plus: **Telegram is fully operational in India again** → Telegram is the
+paging channel (not ntfy/FCM).
+
+**Researched first** (web): the standard single-node self-healing pyramid —
+deep healthchecks → autoheal → custom supervisor → phone paging → external
+dead-man's switch → host self-maintenance. Full design + rollout in
+**`docs/AUTONOMOUS_OPS.md`** (the doc to read before touching any of this).
+
+### Shipped (all off the money path — scoring/dispatch/FSM untouched)
+
+- **Authority doctrine:** the autonomous machinery takes *risk-reducing
+  actions only* — page / restart / prune / ENGAGE kill switch. It can never
+  disengage, reset a breaker, or re-enable trading (source-level test pins
+  the no-disengage property).
+- **Layer 1:** redis + api containers got real healthchecks (ping /
+  `/api/health` HTTP round-trip); engine already probed heartbeat freshness.
+- **Layer 2:** `autoheal` sidecar (pinned 1.2.0) restarts any
+  `autoheal=true` container that goes unhealthy — the "alive but frozen"
+  class (S44/45/46) now self-recovers. Watchdog deliberately not labeled.
+- **Layer 3:** new `watchdog` container (`scripts/watchdog.py`, stdlib-only,
+  60s loop, docker.sock + data volume): container states, wedged scan loop
+  (→ budgeted engine restart, 3/h), **audit F-07 blind-open-position pager**
+  (stale 1m kline AND no mark price → page; persisting → engine restart,
+  which re-seeds candles = the manual MVLLUSDT fix automated), breaker-trip
+  paging (never resets), disk 85%/92% (page/auto-prune), memory pressure,
+  budget-exhausted → **kill-switch engage** via API owner token + CRITICAL
+  page. Dedupe 30min/key + ✅ recovery notices; audit JSONL + persisted state.
+- **Engine feed for F-07:** trade monitor publishes
+  `data/pricing_freshness.json` every 30s (`PRICING_FRESHNESS_PUBLISH_SEC`,
+  local disk, hot-path clean); `monitor_heartbeat.py` gained
+  `check_pricing_freshness()` → INVARIANT_WARN (hourly path pages too).
+- **Layer 4:** `scripts/notify_telegram.py` (stdlib, never raises, never
+  leaks token; `ALERT_TELEGRAM_CHAT_ID` else `TELEGRAM_ADMIN_CHAT_ID`);
+  `vps-liveness.yml` + `vps-backup.yml` now page Telegram (problems AND
+  recovery) alongside the auto-detected issue. **Needs new repo secrets
+  `TELEGRAM_BOT_TOKEN` / `TELEGRAM_ADMIN_CHAT_ID`.**
+- **Layer 5:** healthchecks.io dead-man pings from the watchdog loop
+  (`HEALTHCHECKS_PING_URL`) + a host cron — external phone page when the
+  whole box dies (~5 min). Also fixes audit F-20 (GitHub-only alerting).
+- **Layer 0:** `deploy/host/setup_host.sh` (idempotent, as-code — audit
+  S-7): swap, earlyoom, unattended-upgrades, fail2ban, ufw,
+  `360scalp.service` (stack up after reboot via deploy.sh), nightly prune,
+  dead-man cron.
+
+**Tests:** 6168 passed (was 6120) — new: watchdog decision ladder,
+notifier contract, F-07 publisher contract, heartbeat pricing checks.
+Ruff clean, mypy delta zero, compose config validates (both profiles).
+The dedupe test caught a real bug (fresh findings suppressed inside the
+first cooldown window) — fixed before ship.
+
+### NEXT (owner, ~20 min total — the paging is inert until 1+2 are done)
+
+1. Add repo secrets `TELEGRAM_BOT_TOKEN` + `TELEGRAM_ADMIN_CHAT_ID`.
+2. healthchecks.io: two free checks → `HEALTHCHECKS_PING_URL` in `.env` +
+   URL for setup_host.sh; install their app (or Telegram integration).
+3. `bash deploy.sh` (brings up autoheal + watchdog), then
+   `sudo REPO_DIR=$(pwd) bash deploy/host/setup_host.sh`.
+4. **Drill it**: `docker pause 360scalp-v2-engine` → expect unhealthy →
+   autoheal restart → phone page within ~2 min. An untested pager is a hope.
+5. Session-46/47 open items unchanged (diag_paper_health root-cause on VPS;
+   BACKUP_PASSPHRASE secret + first restore drill; ops TOTP enroll).
+
+---
+
 ## 🟢 SESSION 47 2026-07-10 — Institutional audit + production-grade remediation sweep (branch `claude/crypto-audit-institutional-tic0ix`, all 3 code repos)
 
 **Owner asked:** full institutional-grade audit of the whole stack, then "fix
