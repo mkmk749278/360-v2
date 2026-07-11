@@ -297,6 +297,7 @@ async def test_cooldown_expires(tmp_path):
     await service.sweep()
     horizon = max(_cooldown_seconds(t.value, "4h") for t in AlertType) + 1
     service._last_fired = {k: v - horizon for k, v in service._last_fired.items()}
+    service._symbol_fires.clear()  # the per-symbol window also ages out
     service._last_eval_ts.clear()
     assert await service.sweep()
 
@@ -329,7 +330,11 @@ async def test_persistence_roundtrip(tmp_path):
     assert restored.recent(limit=10)
     assert restored._last_fired  # cooldowns survive a restart → no re-push
     restored._last_eval_ts.clear()
-    assert await restored.sweep() == []
+    fired = await restored.sweep()
+    # The 4h/1h alerts were delivered pre-restart — their persisted
+    # cooldowns block a refire.  The 15m alert was budget-dropped (never
+    # delivered), so it may legitimately fire now.
+    assert all(a.timeframe == "15m" for a in fired)
 
 
 async def test_recent_filters(tmp_path):
@@ -350,6 +355,111 @@ async def test_sweep_survives_broken_symbol_getter(tmp_path):
         persist_path=str(tmp_path / "alerts.json"),
     )
     assert await service.sweep() == []
+
+
+# ---------------------------------------------------------------------------
+# Spam controls — quality floor, coalescing, symbol budget, push curation
+# ---------------------------------------------------------------------------
+
+
+def test_near_level_touch_floor_blocks_junk_levels():
+    """A once-touched 'level' is a visited price, not a level (the '1
+    touches' cards were the worst of the feed spam)."""
+    candles = _candles([100.0] * 10)
+    alert = detectors.detect_near_level(
+        "BTCUSDT", "1h", candles, _FakeBook(_level(100.2, "resistance", touches=1))
+    )
+    assert alert is None
+
+
+def test_divergence_metrics_carry_pivot_geometry(monkeypatch):
+    """The app draws the divergence line from these fields — they are a
+    wire contract, not decoration."""
+    closes = [100.0] * 80
+    highs = list(closes)
+    highs[70] = 110.0  # pivot A
+    highs[77] = 112.0  # pivot B (higher high, near right edge)
+    fake_rsi = np.full(80, 50.0)
+    fake_rsi[70] = 75.0
+    fake_rsi[77] = 65.0  # lower RSI high → bearish divergence
+    monkeypatch.setattr(detectors, "_rsi", lambda closes_, period: fake_rsi)
+    alert = detectors.detect_rsi_divergence(
+        "BTCUSDT", "1h", _candles(closes, highs=highs)
+    )
+    assert alert is not None
+    assert alert.alert_type == AlertType.RSI_BEARISH_DIVERGENCE.value
+    m = alert.metrics
+    lookback = len(closes)
+    assert m["pivot_a_price"] == 110.0 and m["pivot_b_price"] == 112.0
+    assert m["pivot_a_bars_ago"] == lookback - 1 - 70
+    assert m["pivot_b_bars_ago"] == lookback - 1 - 77
+
+
+async def test_same_candle_volume_and_volatility_coalesce(tmp_path):
+    service = _service(tmp_path)
+    found = [
+        make_alert(AlertType.ABNORMAL_VOLATILITY, "RAVEUSDT", "15m", 1.0, "vol"),
+        make_alert(AlertType.VOLUME_SPIKE, "RAVEUSDT", "15m", 1.0, "spike"),
+    ]
+    out = service._coalesce_same_candle(found)
+    assert [a.alert_type for a in out] == [AlertType.VOLUME_SPIKE.value]
+    # Different timeframe pairs never coalesce.
+    found2 = [
+        make_alert(AlertType.ABNORMAL_VOLATILITY, "RAVEUSDT", "1h", 1.0, "vol"),
+        make_alert(AlertType.VOLUME_SPIKE, "RAVEUSDT", "15m", 1.0, "spike"),
+    ]
+    assert len(service._coalesce_same_candle(found2)) == 2
+
+
+async def test_symbol_budget_caps_burst_and_keeps_priority(tmp_path):
+    """The rally store trips RSI-overbought on 15m/1h/4h at once; the
+    default budget (2/window) must keep the higher timeframes and drop
+    the 15m echo."""
+    service = _service(tmp_path)
+    fired = await service.sweep()
+    assert len(fired) == 2
+    assert {a.timeframe for a in fired} == {"4h", "1h"}
+
+
+async def test_budget_rejection_does_not_consume_cooldown(tmp_path):
+    service = _service(tmp_path)
+    await service.sweep()  # consumes the 2-alert budget (4h + 1h)
+    # The 15m alert was budget-dropped: its cooldown must NOT be stamped,
+    # so once the window clears it fires on the next closed candle.
+    assert not any("|15m" in k for k in service._last_fired)
+    service._symbol_fires.clear()
+    service._last_eval_ts.clear()
+    fired = await service.sweep()
+    assert [a.timeframe for a in fired] == ["15m"]
+
+
+async def test_push_gated_to_configured_timeframes(tmp_path):
+    received: List[Alert] = []
+    service = _service(tmp_path, on_alert=received.append)
+    fired = await service.sweep()  # 4h + 1h under the default budget
+    assert {a.timeframe for a in fired} == {"4h", "1h"}
+    assert {a.timeframe for a in received} == {"4h", "1h"}
+    # A 15m publish lands in the feed but never pushes.
+    received.clear()
+    service._publish(
+        make_alert(AlertType.VOLUME_SPIKE, "ETHUSDT", "15m", 1.0, "x")
+    )
+    assert received == []
+    assert service.recent(limit=1)[0]["symbol"] == "ETHUSDT"
+
+
+async def test_push_hourly_budget(tmp_path, monkeypatch):
+    monkeypatch.setattr(
+        "src.alerts.service.ALERTS_PUSH_MAX_PER_HOUR", 2
+    )
+    received: List[Alert] = []
+    service = _service(tmp_path, on_alert=received.append)
+    for i in range(4):
+        service._publish(
+            make_alert(AlertType.RSI_OVERSOLD, f"S{i}USDT", "1h", 1.0, "y")
+        )
+    assert len(received) == 2  # pushes capped
+    assert len(service.recent(limit=10)) == 4  # feed keeps everything
 
 
 # ---------------------------------------------------------------------------

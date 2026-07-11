@@ -4,6 +4,66 @@
 
 ---
 
+## 🟢 SESSION 51 2026-07-11 — Alert spam cut + alert→chart setup sync + entry-only Take Trade (branch `claude/alerts-spam-chat-sync-pqemei`, 360-v2 + lumin-app)
+
+**Owner directive (with screenshots):** the day-one Alerts feed spams (same
+symbol firing volume+volatility+RSI at once, "1 touches" junk levels, every
+15m wiggle buzzing the phone); tapping an alert must open the chart on the
+ALERT's timeframe with the alert's indicators and the exact setup drawn, no
+manual effort; and an alert-detail "Take trade" that places ENTRY ONLY (owner
+explicit: no SL, no TP).
+
+### Engine (all off the money path — scoring/dispatch/FSM/paid-routing untouched)
+
+- **Quality floor:** `ALERTS_NEAR_LEVEL_MIN_TOUCHES` (default 3) — near-S/R
+  alerts on 1-2-touch "levels" no longer fire (the worst spam class in the
+  owner's screenshots).
+- **Same-event coalescing:** volume spike + abnormal volatility from the same
+  (symbol, TF) sweep = one market event → keep the volume card (it carries the
+  move %), drop the volatility echo.
+- **Per-symbol cross-type budget:** `ALERTS_SYMBOL_MAX_PER_WINDOW` (2) per
+  `ALERTS_SYMBOL_WINDOW_SEC` (3600) — one violent candle can't stack cards for
+  the same coin. Priority when the budget binds: divergence > near-level >
+  RSI extreme > volume > volatility, and 4h > 1h > 15m. Budget rejections do
+  NOT consume the type cooldown (the alert can still fire later).
+- **Push curation (the real "spam" fix):** feed keeps everything (pull-based,
+  filterable in-app, mirrors 100eyes); the PHONE only gets
+  `ALERTS_PUSH_TIMEFRAMES` (default `1h,4h`) capped at
+  `ALERTS_PUSH_MAX_PER_HOUR` (12). 15m alerts are feed-only now.
+- **Divergence pivot geometry on the wire:** `pivot_a/b_bars_ago` +
+  `pivot_a/b_price` in divergence metrics so the app draws the actual
+  divergence line. Additive metrics — older apps unaffected.
+- Tests: `tests/test_market_alerts.py` grown to 39 (floor, coalescing, budget
+  priority, cooldown-not-consumed, push TF gate, push hourly budget).
+
+### Lumin app (same branch)
+
+- **Alert→chart sync:** `ChartPage(alert:)` opens on the alert's timeframe,
+  auto-enables RSI for RSI-class alerts (session-only, saved prefs untouched),
+  and draws the setup via the new `setAlertOverlay` JS bridge: solid S/R level
+  line titled "Support · 43×" + alert-price reference, divergence pivot
+  segment, alert-candle marker. `AlertChartOverlay`
+  (`lib/features/charts/models/alert_overlay.dart`) owns the math (bars-ago →
+  bar times). Alert context bar under the chart shows what fired + Take trade.
+- **Feed filters (100eyes UX):** chip row on the Alerts tab — family
+  (RSI / Divergence / S/R / Volume) + timeframe, client-side, session-only.
+- **Take trade (entry-only):** `TakeAlertTradeSheet` →
+  `OrderExecutor.placeAlertEntry` — market entry ONLY on the user's own
+  device-key custody (same class as Take Signal manual trades; engine never
+  manages the position). Sizing = Auto-trade settings (pct × leverage on live
+  equity). Side pre-seeded from alert bias; NEUTRAL alerts force a pick.
+  Idempotent on alert_id (log + broker clientOrderId). Unmissable no-SL/no-TP
+  warning in the sheet; confirm button itself says "no SL / no TP".
+  **CTE note for owner:** this is deliberately outside the engine's
+  naked-position invariant (that guards ENGINE-managed positions); an
+  alert-take is a user-initiated manual trade the user must close themselves.
+  The engine-side pre-TP `protect_manual_entries` passive watcher still
+  applies where auto-trade is connected. If we see users leaving these naked
+  overnight, next step is an optional default-ON emergency stop % in the
+  sheet.
+
+---
+
 ## 🟢 SESSION 50 2026-07-11 — Market Alerts (Pulse → Alerts tab) + full FCM push (branch `claude/alerts-app-new-tab-ojlkps`, 360-v2 + lumin-app)
 
 **Owner directive:** Pulse gets two top tabs — Dashboard (existing) + **Alerts**,
