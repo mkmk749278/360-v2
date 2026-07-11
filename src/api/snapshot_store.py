@@ -28,6 +28,7 @@ KEY_AGENTS_ALL     = "snapshot:agents_all"     # List[AgentStat dict]     — wr
 KEY_TICKERS        = "snapshot:tickers"        # List[TickerItem dict]    — written every ~15 s
 KEY_ENGINE_STATE   = "snapshot:engine_state"   # engine state dict        — written every ~15 s
 KEY_POSITIONS_DIAG = "snapshot:positions_diag"  # PositionsDiagResponse    — written every ~15 s
+KEY_ALERTS         = "snapshot:alerts"         # List[Alert dict]         — written every ~30 s
 KEY_CMD_SET_MODE   = "snapshot:cmd:set_mode"   # str "off|paper|live"     — consumed once
 KEY_CMD_RESET_SIGNALS = "snapshot:cmd:reset_signals"  # set to "1" by API; consumed once by engine
 TTL_CMD_RESET = 120  # 2-min TTL — engine consumes before this; if engine is down, client must retry
@@ -39,6 +40,7 @@ TTL_AGENTS       = 180
 TTL_TICKERS      = 60
 TTL_ENGINE_STATE = 60
 TTL_POSITIONS_DIAG = 60
+TTL_ALERTS       = 120
 TTL_CMD          = 60  # command expires if engine is down; client must retry
 
 

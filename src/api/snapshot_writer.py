@@ -85,6 +85,7 @@ class SnapshotWriter:
         await self._write_positions_diag()
         if now - self._last_activity >= _ACTIVITY_INTERVAL_S:
             await self._write_activity()
+            await self._write_alerts()
             self._last_activity = now
         if now - self._last_agents >= _AGENTS_INTERVAL_S:
             await self._write_agents()
@@ -143,6 +144,18 @@ class SnapshotWriter:
         from src.api.snapshot import build_activity
         return [i.model_dump(mode="json") for i in
                 build_activity(self._engine, limit=500)]
+
+    async def _write_alerts(self) -> None:
+        """Publish the market-alerts feed so the isolated API can serve
+        ``/api/alerts``.  Tiny payload (≤ buffer size dicts) — no executor
+        round-trip needed."""
+        try:
+            service = getattr(self._engine, "_alert_service", None)
+            if service is None:
+                return
+            await self._set(_store.KEY_ALERTS, service.recent(limit=500), _store.TTL_ALERTS)
+        except Exception:
+            log.exception("snapshot_writer: failed to write alerts")
 
     async def _write_agents(self) -> None:
         try:

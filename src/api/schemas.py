@@ -162,6 +162,39 @@ class SignalsResponse(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Market Alerts (Pulse → Alerts feed)
+# ---------------------------------------------------------------------------
+
+
+class AlertItem(BaseModel):
+    """One informational detector event — mirrors Dart ``MarketAlert``."""
+
+    alert_id: str
+    alert_type: str = Field(
+        ...,
+        description=(
+            "Detector taxonomy value (RSI_OVERBOUGHT / RSI_OVERSOLD / "
+            "RSI_BULLISH_DIVERGENCE / RSI_BEARISH_DIVERGENCE / "
+            "ABNORMAL_VOLATILITY / VOLUME_SPIKE / NEAR_SUPPORT / "
+            "NEAR_RESISTANCE). The app maps these to icons/colours."
+        ),
+    )
+    symbol: str
+    timeframe: str = Field(..., description="Natural detector timeframe (15m / 1h / 4h).")
+    price: float = Field(..., description="Close price when the alert fired.")
+    title: str
+    message: str
+    bias: str = Field("NEUTRAL", description="Directional lean: BULLISH / BEARISH / NEUTRAL.")
+    metrics: dict = Field(default_factory=dict)
+    created_at: str
+
+
+class AlertsResponse(BaseModel):
+    items: List[AlertItem]
+    total: int
+
+
+# ---------------------------------------------------------------------------
 # Positions
 # ---------------------------------------------------------------------------
 

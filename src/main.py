@@ -471,6 +471,18 @@ class CryptoSignalEngine:
         self._scanner.confidence_overrides = self._confidence_overrides
         self._scanner.circuit_breaker = self._circuit_breaker
 
+        # Market Alerts (Pulse → Alerts feed + FCM `alerts` topic).  Reads
+        # only in-memory candles + the scanner's LevelBook — zero network
+        # I/O per sweep.  Launched in bootstrap when ALERTS_ENABLED.
+        from src.alerts import AlertService
+        from src.push_notifications import push_alert
+        self._alert_service = AlertService(
+            data_store=self.data_store,
+            level_book_getter=lambda: self._scanner.level_book,
+            symbols_getter=lambda: list(self.pair_mgr.symbols),
+            on_alert=push_alert,
+        )
+
         # Wire the free-channel highlight callback so the monitor posts winning
         # trades (TP2+) to the free channel in real-time.
         self.monitor.on_highlight_callback = lambda sig, tp, pnl: asyncio.ensure_future(
