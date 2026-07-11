@@ -345,6 +345,14 @@ class Bootstrap:
         if hasattr(engine, "_free_watch_service"):
             tasks.append(asyncio.create_task(engine._free_watch_service.start()))
 
+        # Market Alerts sweep (Pulse → Alerts feed + FCM) — own task so it
+        # can never slow the scanner loop.
+        from config import ALERTS_ENABLED
+        if ALERTS_ENABLED and getattr(engine, "_alert_service", None) is not None:
+            tasks.append(
+                asyncio.create_task(engine._alert_service.start(), name="alert_service")
+            )
+
         # OI poller – background REST polling for Binance Futures Open Interest
         if getattr(engine, "_oi_poller", None) is not None:
             tasks.append(asyncio.create_task(engine._oi_poller.start()))

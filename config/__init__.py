@@ -3073,3 +3073,85 @@ GOOGLE_PLAY_RTDN_AUDIENCE: str = os.getenv("GOOGLE_PLAY_RTDN_AUDIENCE", "")
 #: audience check.  When set, ``POST /api/billing/play/rtdn/<token>`` must
 #: match.  Empty = no path secret.
 GOOGLE_PLAY_RTDN_PATH_SECRET: str = os.getenv("GOOGLE_PLAY_RTDN_PATH_SECRET", "")
+
+# ---------------------------------------------------------------------------
+# Market Alerts (Lumin app Pulse → Alerts feed) + FCM push
+# ---------------------------------------------------------------------------
+# 100eyes-class informational alerts: single-condition, non-directional
+# detector events (RSI extremes, RSI divergence, abnormal volatility,
+# near horizontal S/R, volume anomaly) surfaced in the app's Pulse →
+# Alerts tab and pushed via FCM.  Entirely OFF the money path — no
+# scoring, dispatch, FSM, or paid-channel routing reads any of this.
+# Each detector runs on its NATURAL timeframe (mirrors 100eyes: some
+# fire on 4h, some 1h, some 15m) over candles already in memory —
+# zero new network reads.
+
+#: Master switch for the alert evaluation loop.
+ALERTS_ENABLED: bool = _safe_bool("ALERTS_ENABLED", "true")
+
+#: How often the alert loop sweeps the pair universe (seconds).  Detectors
+#: only look at CLOSED candles, so sub-minute sweeps buy nothing.
+ALERTS_EVAL_INTERVAL_SEC: int = _safe_int("ALERTS_EVAL_INTERVAL_SEC", "60")
+
+#: In-memory feed ring buffer size (also the max the API returns).
+ALERTS_BUFFER_MAX: int = _safe_int("ALERTS_BUFFER_MAX", "300")
+
+#: RSI thresholds for the "Extremely Overbought / Oversold" alerts.
+ALERTS_RSI_PERIOD: int = _safe_int("ALERTS_RSI_PERIOD", "14")
+ALERTS_RSI_OVERBOUGHT: float = _safe_float("ALERTS_RSI_OVERBOUGHT", "80.0")
+ALERTS_RSI_OVERSOLD: float = _safe_float("ALERTS_RSI_OVERSOLD", "20.0")
+
+#: RSI divergence detection: pivot fractal half-width and lookback window
+#: (closed candles), plus the RSI zone gates that cut low-signal noise
+#: (bearish divergence only counts when the first RSI pivot was ≥ the
+#: zone-high; bullish when ≤ zone-low).
+ALERTS_DIVERGENCE_LOOKBACK: int = _safe_int("ALERTS_DIVERGENCE_LOOKBACK", "40")
+ALERTS_DIVERGENCE_PIVOT_K: int = _safe_int("ALERTS_DIVERGENCE_PIVOT_K", "2")
+ALERTS_DIVERGENCE_ZONE_HIGH: float = _safe_float("ALERTS_DIVERGENCE_ZONE_HIGH", "60.0")
+ALERTS_DIVERGENCE_ZONE_LOW: float = _safe_float("ALERTS_DIVERGENCE_ZONE_LOW", "40.0")
+
+#: Abnormal volatility: last closed candle's true range must exceed
+#: this multiple of the prior ATR(14) on the same timeframe.
+ALERTS_VOLATILITY_TR_MULT: float = _safe_float("ALERTS_VOLATILITY_TR_MULT", "3.0")
+
+#: Volume anomaly: last closed candle's volume must exceed this multiple
+#: of the prior 20-candle mean volume.
+ALERTS_VOLUME_SPIKE_MULT: float = _safe_float("ALERTS_VOLUME_SPIKE_MULT", "5.0")
+
+#: Near horizontal S/R: fire when price is within this % of a LevelBook
+#: level (and the level has at least the touch count the book scored it with).
+ALERTS_NEAR_LEVEL_PCT: float = _safe_float("ALERTS_NEAR_LEVEL_PCT", "0.3")
+
+#: Per-type refire cooldowns.  Timeframe-relative types use a multiple of
+#: the timeframe duration (an RSI-extreme 1h alert may refire after
+#: 2 × 1h); wall-clock types use fixed seconds.
+ALERTS_COOLDOWN_TF_MULT: float = _safe_float("ALERTS_COOLDOWN_TF_MULT", "2.0")
+ALERTS_NEAR_LEVEL_COOLDOWN_SEC: int = _safe_int("ALERTS_NEAR_LEVEL_COOLDOWN_SEC", "14400")
+ALERTS_VOLATILITY_COOLDOWN_SEC: int = _safe_int("ALERTS_VOLATILITY_COOLDOWN_SEC", "3600")
+ALERTS_VOLUME_COOLDOWN_SEC: int = _safe_int("ALERTS_VOLUME_COOLDOWN_SEC", "3600")
+
+#: Persistence file so a deploy/restart neither loses the recent feed nor
+#: refires every currently-true condition (the cooldown map is persisted
+#: alongside the alerts).
+ALERTS_PERSIST_PATH: str = os.getenv("ALERTS_PERSIST_PATH", "data/alerts.json")
+
+# ── FCM push (topic-based; app subscribes client-side) ─────────────────────
+#: Master switch for FCM pushes.  Requires Firebase Admin to be initialised
+#: (FIREBASE_SERVICE_ACCOUNT_PATH / FIREBASE_PROJECT_ID); the sender
+#: degrades to a silent no-op when it isn't, so this can stay ON everywhere.
+FCM_PUSH_ENABLED: bool = _safe_bool("FCM_PUSH_ENABLED", "true")
+
+#: Topic names the app subscribes to.  Keep in sync with the Lumin app's
+#: NotificationService topic constants.
+FCM_ALERTS_TOPIC: str = os.getenv("FCM_ALERTS_TOPIC", "alerts")
+FCM_SIGNALS_TOPIC: str = os.getenv("FCM_SIGNALS_TOPIC", "signals")
+
+#: Push classes — each independently gated so ops can silence one class
+#: without touching the others.
+FCM_PUSH_ALERTS_ENABLED: bool = _safe_bool("FCM_PUSH_ALERTS_ENABLED", "true")
+FCM_PUSH_SIGNALS_ENABLED: bool = _safe_bool("FCM_PUSH_SIGNALS_ENABLED", "true")
+FCM_PUSH_OUTCOMES_ENABLED: bool = _safe_bool("FCM_PUSH_OUTCOMES_ENABLED", "true")
+
+#: Global send-rate guard (per minute, across all push classes).  FCM is
+#: free but a pathological loop must never be able to spam phones.
+FCM_MAX_SENDS_PER_MIN: int = _safe_int("FCM_MAX_SENDS_PER_MIN", "60")

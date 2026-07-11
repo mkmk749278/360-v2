@@ -80,6 +80,8 @@ from .otp_delivery import (
 from .schemas import (
     ActivityResponse,
     AgentsResponse,
+    AlertItem,
+    AlertsResponse,
     AutoModeChangeRequest,
     AutoModeChangeResponse,
     AutoModeResumeMineResponse,
@@ -1423,6 +1425,49 @@ def build_app(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"signal {signal_id!r} not found",
         )
+
+    # ---- Market Alerts (Pulse → Alerts feed) ----
+
+    @app.get(
+        "/api/alerts",
+        response_model=AlertsResponse,
+        tags=["alerts"],
+        dependencies=[Depends(auth)],
+    )
+    async def alerts(
+        response: Response,
+        limit: int = Query(100, ge=1, le=300),
+        alert_type: Optional[str] = Query(
+            None, description="Filter to one detector type (e.g. RSI_OVERBOUGHT)"
+        ),
+        symbol: Optional[str] = Query(None, description="Filter to one symbol"),
+    ) -> AlertsResponse:
+        """Informational market alerts (RSI extremes, divergence, abnormal
+        volatility, near S/R) — newest first.  Isolated mode serves the
+        feed the engine published to Redis; single-process mode reads the
+        live AlertService buffer."""
+        raw: Optional[list] = None
+        published = getattr(engine, "published_alerts", None)
+        if callable(published):
+            raw = published()
+        if raw is None:
+            service = getattr(engine, "_alert_service", None)
+            if service is not None:
+                raw = service.recent(limit=300)
+        items: list[AlertItem] = []
+        for entry in raw or []:
+            if alert_type and entry.get("alert_type") != alert_type:
+                continue
+            if symbol and entry.get("symbol") != symbol.upper():
+                continue
+            try:
+                items.append(AlertItem(**entry))
+            except Exception:
+                continue  # tolerate shape drift from an older engine snapshot
+            if len(items) >= limit:
+                break
+        response.headers["Cache-Control"] = "public, max-age=15, stale-while-revalidate=30"
+        return AlertsResponse(items=items, total=len(items))
 
     # ---- Positions ----
 

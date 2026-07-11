@@ -36,6 +36,7 @@ from config import (
 )
 from src.channels.base import Signal
 from src.correlation import check_correlation_limit
+from src.push_notifications import push_signal_published
 from src.redis_client import RedisClient
 from src.risk import RiskManager
 from src.smc import Direction
@@ -1022,6 +1023,10 @@ class SignalRouter:
         self._active_signals[signal.signal_id] = signal
         self._position_lock[signal.symbol] = signal.direction
         self._schedule_persist()
+
+        # FCM push to the app's `signals` topic — fire-and-forget, off the
+        # dispatch path (push_notifications never blocks and never raises).
+        push_signal_published(signal)
 
         # Track for daily free-channel picks
         self._daily_best.append(signal)

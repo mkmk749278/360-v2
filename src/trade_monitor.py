@@ -65,6 +65,7 @@ from src.indicators import atr as _compute_atr
 from src.indicators import ema as _compute_ema
 from src.indicators import momentum as _compute_momentum
 from src.performance_metrics import calculate_trade_pnl_pct, classify_trade_outcome
+from src.push_notifications import push_signal_outcome
 from src.smc import Direction
 from src.stat_filter import CohortEdgeStore, SignalOutcome
 from src.utils import fmt_price, fmt_ts, get_logger, utcnow
@@ -450,6 +451,10 @@ class TradeMonitor:
                 self.on_lifecycle_outcome_callback(sig, outcome_label)
             except Exception as exc:
                 log.debug("on_lifecycle_outcome_callback failed (non-critical): {}", exc)
+        # FCM push — subscriber-facing terminal outcomes only.  Phantom
+        # no-fill expiries were never a trade, so nothing to report.
+        if outcome_label != "EXPIRED_NO_FILL":
+            push_signal_outcome(sig, outcome_label)
         if self._performance_tracker is not None:
             self._performance_tracker.record_outcome(
                 signal_id=sig.signal_id,

@@ -4,6 +4,79 @@
 
 ---
 
+## 🟢 SESSION 50 2026-07-11 — Market Alerts (Pulse → Alerts tab) + full FCM push (branch `claude/alerts-app-new-tab-ojlkps`, 360-v2 + lumin-app)
+
+**Owner directive:** Pulse gets two top tabs — Dashboard (existing) + **Alerts**,
+a 100eyes-Crypto-Scanner-class informational feed; detectors fire on their
+NATURAL timeframe (some 4h, some 1h, some 15m, per the owner's screenshots);
+and **full production FCM for all alerts and signals**.
+
+### Engine (all off the money path — scoring/dispatch/FSM/paid-routing untouched)
+
+- **`src/alerts/`** — detector pack + service:
+  - Detectors (`detectors.py`, pure numpy on in-memory candles — **zero
+    network I/O per sweep**): RSI Extremely Overbought/Oversold (15m/1h/4h,
+    80/20), RSI Bullish/Bearish Divergence (1h/4h; strict fractal pivots +
+    RSI zone gates + recency gate), Abnormal Volatility (15m, TR ≥ 3×prior
+    ATR(14)), Abnormal Volume (15m, ≥5× 20-candle mean), Near Horizontal
+    Support/Resistance (1h, LevelBook `nearest_level` ≤0.3%).
+  - `AlertService` (`service.py`): own asyncio task (60s sweep, launched in
+    bootstrap — can never slow the scanner), per-(symbol,type,TF) cooldowns
+    (TF-relative for RSI types, wall-clock for hover-prone types), stale-feed
+    guard (never alerts on frozen candles — S44/S49 class), closed-candle
+    dedupe, ring buffer 300, persistence to `data/alerts.json` (feed AND
+    cooldowns survive deploys — no re-push storm on restart).
+  - All thresholds env-tunable (`ALERTS_*` block in config).
+- **`/api/alerts`** — auth-gated, filters (type/symbol/limit), Cache-Control.
+  Isolated mode fully wired: SnapshotWriter publishes `snapshot:alerts` every
+  ~30s → RedisEngineFacade `published_alerts()` → route prefers the snapshot
+  (mirrors positions_diag pattern).
+- **`src/push_notifications.py`** — FCM via firebase-admin (already a dep;
+  same service account as Phone Auth). **Topic-based** (`alerts`, `signals`)
+  so there is NO device-token registry server-side. Contract: never blocks
+  (send on worker thread), never raises, global rate cap
+  (`FCM_MAX_SENDS_PER_MIN` 60), silent no-op when Firebase isn't initialised.
+  Hooks: SignalRouter post-delivery (new signal), TradeMonitor
+  `_record_outcome` (terminal outcomes, EXPIRED_NO_FILL excluded). Per-class
+  gates: `FCM_PUSH_ALERTS/SIGNALS/OUTCOMES_ENABLED`.
+- **Tests:** 40 new (detectors incl. divergence geometry + zone/recency
+  gates, service cooldown/staleness/persistence, push contract, route +
+  snapshot plumbing). Full suite **6215 passed**, ruff clean, mypy delta 0.
+
+### Lumin app (same branch)
+
+- **Pulse → two top tabs**: Dashboard (existing content, untouched) +
+  **Alerts** — card feed (bias-coloured icon, symbol, TF chip, relative age),
+  SWR-cached `/api/alerts` (30s TTL + disk persist), pull-to-refresh,
+  keep-alive, empty/error states; tap a card → the symbol's Chart page.
+  Mock mode has fixture alerts.
+- **FCM end-to-end** (`lib/data/notification_service.dart`): topic
+  subscribe on boot from persisted prefs (default both ON), Android 13
+  permission request, foreground pushes → SnackBar with VIEW action
+  (background/killed display is automatic via notification payload),
+  tap routing — `signals` → Signals tab, `pulse_alerts` → Pulse → Alerts
+  top tab (cold-start taps included). **Menu → Notifications** page with
+  per-class toggles (off = unsubscribe: delivery stops at FCM).
+- **CI:** `build-apk.yml` injects `POST_NOTIFICATIONS` into the manifest
+  (same pattern as INTERNET). `firebase_messaging ^15.1.0` added.
+- Analyzer 0 errors; **169 app tests pass** (9 new MarketAlert tests).
+
+### Ship notes / owner verify after deploy
+
+1. Engine logs: `AlertService started`, first `ALERT <SYM> ...` lines;
+   `redis-cli GET snapshot:alerts` non-empty; app Pulse → Alerts populates.
+2. FCM: needs `FIREBASE_SERVICE_ACCOUNT_PATH`/`FIREBASE_PROJECT_ID` set (they
+   already are for Phone Auth). Watch for `push: Firebase Admin not
+   initialised` warnings — that means pushes are off.
+3. First **release build** must include the google-services secret as usual;
+   verify a real device receives a signal push + an alert push, and that the
+   Menu → Notifications toggles stop delivery.
+4. Alert volume: watch a day of `ALERT` lines; if noisy, raise cooldowns via
+   env (`ALERTS_*_COOLDOWN_*`, `ALERTS_RSI_OVERBOUGHT/OVERSOLD`, multipliers)
+   — no redeploy of code needed beyond env.
+
+---
+
 ## 🔴 SESSION 49 2026-07-10 — P1: TAIKO SL overshoot root-caused — Binance decommissioned our legacy WS URLs (branch `claude/taiko-sl-overshoot-6lds39`)
 
 **Owner report (screenshot):** TAIKOUSDT LONG (MVRTP-8ABCA1F2, entry 0.09074,

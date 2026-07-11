@@ -119,6 +119,7 @@ class RedisEngineFacade:
         self._redis = redis_client
         self._state: dict = {}
         self._positions_diag: Optional[dict] = None
+        self._alerts: Optional[list] = None
         self._refreshed_at: float = 0.0
 
     # ------------------------------------------------------------------
@@ -143,6 +144,8 @@ class RedisEngineFacade:
                 self._refreshed_at = time.monotonic()
             diag_raw = await self._redis.client.get(_store.KEY_POSITIONS_DIAG)
             self._positions_diag = _store.decode(diag_raw)
+            alerts_raw = await self._redis.client.get(_store.KEY_ALERTS)
+            self._alerts = _store.decode(alerts_raw)
         except Exception:
             log.exception("redis_engine: failed to refresh state from Redis")
 
@@ -155,6 +158,13 @@ class RedisEngineFacade:
         isolated mode and falls back to a live build otherwise.
         """
         return self._positions_diag
+
+    def published_alerts(self) -> Optional[list]:
+        """Return the market-alerts feed the engine published to Redis, or
+        ``None`` when absent (engine down / key expired).  Present only on
+        the facade — the single-process engine serves alerts straight from
+        ``engine._alert_service``."""
+        return self._alerts
 
     def published_pairs(self) -> Optional[dict]:
         """Return the pairs X-ray (regular + promoting) the engine published to
