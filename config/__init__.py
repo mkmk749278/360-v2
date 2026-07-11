@@ -139,6 +139,41 @@ BINANCE_WS_BASE: str = os.getenv("BINANCE_WS_BASE", "wss://stream.binance.com:94
 BINANCE_FUTURES_REST_BASE: str = os.getenv("BINANCE_FUTURES_REST_BASE", "https://fapi.binance.com")
 BINANCE_FUTURES_WS_BASE: str = os.getenv("BINANCE_FUTURES_WS_BASE", "wss://fstream.binance.com/market/stream")
 
+# Mark-price all-symbols feed (src/execution/mark_price_feed.py).  Mark-price
+# streams belong to the ``/market`` category, so the raw-stream form must use
+# the routed ``/market/ws/<stream>`` path.  The pre-2026-04-23 legacy
+# ``/ws/<stream>`` form still completes the TCP+WS handshake but never pushes
+# a single frame — the silent-death mode that left the SL/TP backstop BLIND
+# on every out-of-universe symbol (TAIKOUSDT/APEUSDT/POWERUSDT, 2026-07-10,
+# F-07).  ``mark_price_feed`` defensively normalises a legacy override.
+MARK_PRICE_FEED_WS_URL: str = os.getenv(
+    "MARK_PRICE_FEED_WS_URL",
+    "wss://fstream.binance.com/market/ws/!markPrice@arr@1s",
+)
+# The @1s all-symbols stream ticks every second when healthy.  A connection
+# that stays silent this long is dead-but-open (the exact legacy-URL failure
+# shape) — force a reconnect and log loudly instead of trusting it forever.
+MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC: float = _safe_float(
+    "MARK_PRICE_FEED_SILENCE_TIMEOUT_SEC", "30"
+)
+
+# User Data Stream (src/execution/user_data_stream.py).  Private streams
+# moved to ``/private/ws?listenKey=<key>&events=<e1>/<e2>/...`` in the same
+# 2026-04-23 migration; the legacy ``/ws/<listenKey>`` form connects but
+# delivers no payloads, and on the new endpoint omitting ``events`` ALSO
+# delivers no payloads (confirmed in the field by unicorn-binance-websocket-api).
+# The default event list mirrors everything the legacy URL streamed
+# implicitly, so parser behaviour is unchanged (unknown types are skipped).
+USER_DATA_STREAM_WS_BASE: str = os.getenv(
+    "USER_DATA_STREAM_WS_BASE", "wss://fstream.binance.com/private/ws"
+)
+USER_DATA_STREAM_EVENTS: str = os.getenv(
+    "USER_DATA_STREAM_EVENTS",
+    "ORDER_TRADE_UPDATE/ACCOUNT_UPDATE/MARGIN_CALL/TRADE_LITE/"
+    "ACCOUNT_CONFIG_UPDATE/STRATEGY_UPDATE/GRID_UPDATE/"
+    "CONDITIONAL_ORDER_TRIGGER_REJECT/ALGO_ORDER_UPDATE/listenKeyExpired",
+)
+
 # ---------------------------------------------------------------------------
 # Telegram
 # ---------------------------------------------------------------------------

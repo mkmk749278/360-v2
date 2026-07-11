@@ -192,8 +192,16 @@ async def test_handler_exception_does_not_tear_down_stream() -> None:
 
 
 @pytest.mark.asyncio
-async def test_consume_url_includes_listen_key() -> None:
-    """Verify the consumer hits ``wss://fstream.binance.com/ws/<listenKey>``."""
+async def test_consume_url_uses_routed_private_endpoint() -> None:
+    """Pin the routed ``/private/ws?listenKey=...&events=...`` form from
+    Binance's 2026-04-23 WebSocket migration.
+
+    The legacy ``/ws/<listenKey>`` path connects cleanly but never
+    delivers a payload post-decommission, and on the new endpoint the
+    ``events`` parameter is required in production — both are silent
+    failures, so the exact URL shape is a regression-pinned contract
+    (F-07 class, TAIKOUSDT/APEUSDT/POWERUSDT 2026-07-10).
+    """
     seen_url: List[str] = []
 
     def _factory(url: str):
@@ -206,4 +214,21 @@ async def test_consume_url_includes_listen_key() -> None:
     await user_data_stream.consume(
         "my-listen-key-123", handler, ws_factory=_factory
     )
-    assert seen_url == ["wss://fstream.binance.com/ws/my-listen-key-123"]
+    assert len(seen_url) == 1
+    url = seen_url[0]
+    assert url.startswith(
+        "wss://fstream.binance.com/private/ws?listenKey=my-listen-key-123"
+    )
+    # events= must be present and cover every type the FSM parses, plus
+    # the expiry control event — omitting events delivers NOTHING.
+    assert "&events=" in url
+    events_part = url.split("&events=", 1)[1]
+    for required in (
+        "ORDER_TRADE_UPDATE",
+        "ACCOUNT_UPDATE",
+        "MARGIN_CALL",
+        "listenKeyExpired",
+    ):
+        assert required in events_part.split("/")
+    # The unrouted legacy path must never come back.
+    assert not url.startswith("wss://fstream.binance.com/ws/")

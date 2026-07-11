@@ -1,9 +1,18 @@
 """WebSocket consumer for Binance Futures User Data Stream.
 
-Subscribes to ``wss://fstream.binance.com/ws/<listenKey>``, parses each
-incoming JSON message into a typed event from
+Subscribes to
+``wss://fstream.binance.com/private/ws?listenKey=<key>&events=...``
+(the routed *private* endpoint from Binance's 2026-04-23 WebSocket
+migration), parses each incoming JSON message into a typed event from
 :mod:`src.execution.events`, and dispatches to a caller-supplied
 async handler.
+
+The legacy ``/ws/<listenKey>`` form still completes the handshake but
+never delivers a payload — the same silent-death shape that blinded the
+mark-price feed (F-07, 2026-07-10).  On the new endpoint the ``events``
+query parameter is required in production (omitting it also delivers
+nothing); the default list mirrors every event type the legacy URL
+streamed implicitly, so downstream parsing is unchanged.
 
 Connection lifecycle: one WebSocket per listenKey per user.  On any
 disconnect (network, server-side close, ``listenKeyExpired`` event),
@@ -25,6 +34,7 @@ from __future__ import annotations
 import json
 from typing import Any, Awaitable, Callable, Optional
 
+from config import USER_DATA_STREAM_EVENTS, USER_DATA_STREAM_WS_BASE
 from src.utils import get_logger
 
 from . import events as _events
@@ -32,7 +42,13 @@ from . import events as _events
 log = get_logger("execution.user_data_stream")
 
 
-_WS_BASE = "wss://fstream.binance.com/ws"
+def _build_url(listen_key: str) -> str:
+    """Routed private-endpoint URL:
+    ``<base>?listenKey=<key>&events=<e1>/<e2>/...``."""
+    return (
+        f"{USER_DATA_STREAM_WS_BASE}?listenKey={listen_key}"
+        f"&events={USER_DATA_STREAM_EVENTS}"
+    )
 
 
 # Event handler: an async callable that receives one typed event.  The
@@ -64,7 +80,7 @@ async def consume(
     logged but don't tear down the stream — the FSM (PR-6) handles
     its own per-event errors.
     """
-    url = f"{_WS_BASE}/{listen_key}"
+    url = _build_url(listen_key)
     if ws_factory is None:
         ws_factory = _default_ws_factory
     log.info("user_data_stream: connecting to {}", url.replace(listen_key, "<listenKey>"))
