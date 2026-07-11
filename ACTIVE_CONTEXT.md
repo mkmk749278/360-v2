@@ -4,6 +4,61 @@
 
 ---
 
+## 🟢 SESSION 52 2026-07-11 — 100eyes-parity Alerts v3: universe gate, honest touch counts, zone charts, card thumbnails (branch `claude/eye-scanner-alerts-charts-8xddta`, 360-v2 + lumin-app)
+
+**Owner report (screenshots, 12:25 IST — one hour after S51 merged):** feed still
+too busy ("look at exactly 100eyes"), small caps alerting (SKYAI/NAORIS/GRASS/GUN),
+"(523 touches)" junk levels, alert-tap "still opens a normal chart", "still no auto
+trade entry from chart".  Two causes: (a) S51 curated PUSH but left the FEED open to
+all 75 pairs and the LevelBook's chop-inflated touch counts; (b) the owner's phone
+runs a build predating S51's app PR #117 — the overlay + Take-trade button exist but
+were never installed (in-app update banner is manual; told owner to update).
+
+**Owner decisions (AskUserQuestion):** universe = majors+midcaps (≥$50M/day 24h vol,
+tunable); NO global feed cap — fix junk quality floors instead; Take Trade stays
+entry-only as S51 built it; alert cards get native mini-chart thumbnails.
+
+### Engine (360-v2 PR #718 — off the money path, LevelBook untouched)
+
+- **Universe gate:** `ALERTS_MIN_VOLUME_24H_USD` (50M default, ≤0 disables) —
+  AlertService takes `volume_24h_getter` (PairManager dict lookup, no I/O);
+  fail-closed on unknown volume.
+- **Near-level honesty:** `_distinct_touch_events` state machine — consecutive
+  in-band bars = ONE touch; re-arm needs `ALERTS_NEAR_LEVEL_MIN_SEPARATION_BARS` (3)
+  out-of-band bars AND a close ≥ `ALERTS_NEAR_LEVEL_MIN_LEAVE_PCT` (0.5%) away.
+  Chop rejection: > `ALERTS_NEAR_LEVEL_MAX_IN_BAND_FRAC` (25%) of lookback in-band →
+  it's a range, no alert.  Enumerates `get_levels()` (not score-biased
+  `nearest_level`) so junk can't shadow a clean level.
+- **Zone geometry on the wire:** `zone_low/zone_high/touch_count/
+  first_touch_bars_ago/last_touch_bars_ago` in metrics; back-compat keys kept,
+  `touches` now honest (fixes "523×" titles on old app builds too).
+- **Feed hygiene:** `_load` drops pre-v3 NEAR_* junk; first sweep lazily purges
+  restored sub-gate symbols (can't purge in `_load` — PairManager volumes only
+  exist after boot `refresh_pairs()`).
+- Tests 57 (14 new); full suite 6240 passed.
+
+### Lumin app (same branch, second PR)
+
+- **100eyes chart from an alert:** shaded zone RECTANGLE via lightweight-charts
+  ISeriesPrimitive (`attachPrimitive` verified in the bundled v4.2.3 standalone);
+  divergence trend line mirrored on the RSI band (`priceScaleId: "rsi"`, values
+  from `rsi_first/rsi_second`); `focus` visible-range zoom to the setup window
+  (no more fitContent's 500 bars).  `AlertChartOverlay.fromAlert(chartTf:)` only
+  emits time-anchored geometry on the alert's own TF (fixes latent wrong-TF draw).
+- **Card thumbnails:** `AlertThumbnail` CustomPainter (no webview) — candles +
+  zone box + divergence line + fired marker; `KlinesThumbnailService` (Binance
+  public REST direct from phone, zero engine/GCP cost) with memory TTL cache,
+  in-flight dedup, 3-fetch concurrency gate, SharedPreferences LRU disk layer;
+  per-alert-id memo so scroll-back never refetches.  Alerts feed converted to
+  `ListView.builder` (was eager ListView — 100 thumbnail cards must be lazy).
+
+### Owner action required
+
+**Install the app update** (in-app update banner / latest GitHub release APK) —
+the S51 + S52 app features are invisible on the pre-#117 build on the phone.
+
+---
+
 ## 🟢 SESSION 51 2026-07-11 — Alert spam cut + alert→chart setup sync + entry-only Take Trade (branch `claude/alerts-spam-chat-sync-pqemei`, 360-v2 + lumin-app)
 
 **Owner directive (with screenshots):** the day-one Alerts feed spams (same
