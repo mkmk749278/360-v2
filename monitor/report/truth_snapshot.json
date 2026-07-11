@@ -1,30 +1,30 @@
 {
   "channel": "360_SCALP",
   "confidence_gate_components": {
-    "DIVERGENCE_CONTINUATION": {
+    "BREAKDOWN_SHORT": {
       "filtered": {
-        "avg_composite": 67.43,
-        "avg_final": 60.7,
-        "avg_gap_to_threshold": 4.3,
-        "avg_raw": 84.2,
+        "avg_composite": 83.0,
+        "avg_final": 63.0,
+        "avg_gap_to_threshold": 2.0,
+        "avg_raw": 77.7,
         "avg_threshold": 65.0,
-        "avg_total_penalty": 6.73,
+        "avg_total_penalty": 20.0,
         "components": {
-          "avg_execution": 20.0,
-          "avg_market": 21.2,
-          "avg_risk": 18.97,
-          "avg_thesis_adj": 3.33
+          "avg_execution": 16.3,
+          "avg_market": 17.08,
+          "avg_risk": 20.0,
+          "avg_thesis_adj": 6.0
         },
         "engine_components": {
-          "avg_indicators": 11.33,
-          "avg_mtf": 8.43,
-          "avg_patterns": 6.67,
-          "avg_regime": 14.67,
-          "avg_smc": 17.0,
-          "avg_volume": 6.0,
-          "samples": 3
+          "avg_indicators": 11.0,
+          "avg_mtf": 6.0,
+          "avg_patterns": 5.0,
+          "avg_regime": 18.0,
+          "avg_smc": 25.0,
+          "avg_volume": 12.0,
+          "samples": 19
         },
-        "samples": 3,
+        "samples": 19,
         "soft_penalty_breakdown": {
           "avg_btc_dir": 0.0,
           "avg_cluster": 0.0,
@@ -34,32 +34,69 @@
           "avg_sym_dir": 0.0,
           "avg_vol_div": 0.0,
           "avg_vwap": 0.0,
-          "samples": 3
+          "samples": 19
+        }
+      }
+    },
+    "DIVERGENCE_CONTINUATION": {
+      "filtered": {
+        "avg_composite": 66.55,
+        "avg_final": 55.29,
+        "avg_gap_to_threshold": 9.71,
+        "avg_raw": 83.56,
+        "avg_threshold": 65.0,
+        "avg_total_penalty": 11.27,
+        "components": {
+          "avg_execution": 20.0,
+          "avg_market": 21.33,
+          "avg_risk": 18.22,
+          "avg_thesis_adj": 1.0
+        },
+        "engine_components": {
+          "avg_indicators": 14.33,
+          "avg_mtf": 9.72,
+          "avg_patterns": 7.7,
+          "avg_regime": 12.0,
+          "avg_smc": 17.0,
+          "avg_volume": 4.8,
+          "samples": 15
+        },
+        "samples": 15,
+        "soft_penalty_breakdown": {
+          "avg_btc_dir": 0.0,
+          "avg_cluster": 0.0,
+          "avg_kz": 0.0,
+          "avg_oi": 0.0,
+          "avg_spoof": 0.0,
+          "avg_sym_dir": 0.0,
+          "avg_vol_div": 0.0,
+          "avg_vwap": 0.0,
+          "samples": 15
         }
       },
       "kept": {
-        "avg_composite": 73.05,
-        "avg_final": 67.95,
-        "avg_gap_to_threshold": -2.95,
-        "avg_raw": 81.8,
+        "avg_composite": 69.9,
+        "avg_final": 69.62,
+        "avg_gap_to_threshold": -4.62,
+        "avg_raw": 85.47,
         "avg_threshold": 65.0,
-        "avg_total_penalty": 3.6,
+        "avg_total_penalty": -1.34,
         "components": {
-          "avg_execution": 20.0,
-          "avg_market": 20.7,
-          "avg_risk": 17.05,
-          "avg_thesis_adj": 0.0
+          "avg_execution": 19.98,
+          "avg_market": 22.25,
+          "avg_risk": 19.24,
+          "avg_thesis_adj": 3.62
         },
         "engine_components": {
-          "avg_indicators": 14.0,
-          "avg_mtf": 9.3,
-          "avg_patterns": 9.25,
-          "avg_regime": 8.0,
-          "avg_smc": 25.0,
-          "avg_volume": 7.5,
-          "samples": 2
+          "avg_indicators": 11.65,
+          "avg_mtf": 9.19,
+          "avg_patterns": 5.1,
+          "avg_regime": 11.85,
+          "avg_smc": 22.85,
+          "avg_volume": 5.65,
+          "samples": 26
         },
-        "samples": 2,
+        "samples": 26,
         "soft_penalty_breakdown": {
           "avg_btc_dir": 0.0,
           "avg_cluster": 0.0,
@@ -67,36 +104,36 @@
           "avg_oi": 0.0,
           "avg_spoof": 0.0,
           "avg_sym_dir": 0.0,
-          "avg_vol_div": 0.0,
+          "avg_vol_div": 0.28,
           "avg_vwap": 0.0,
-          "samples": 2
+          "samples": 26
         }
       }
     },
     "FAILED_AUCTION_RECLAIM": {
       "filtered": {
-        "avg_composite": 66.51,
-        "avg_final": 61.51,
-        "avg_gap_to_threshold": 3.49,
-        "avg_raw": 86.81,
+        "avg_composite": 71.07,
+        "avg_final": 56.98,
+        "avg_gap_to_threshold": 8.02,
+        "avg_raw": 84.63,
         "avg_threshold": 65.0,
-        "avg_total_penalty": 5.0,
+        "avg_total_penalty": 14.1,
         "components": {
-          "avg_execution": 20.0,
-          "avg_market": 22.81,
+          "avg_execution": 19.9,
+          "avg_market": 20.73,
           "avg_risk": 20.0,
-          "avg_thesis_adj": 4.81
+          "avg_thesis_adj": 4.72
         },
         "engine_components": {
-          "avg_indicators": 13.12,
-          "avg_mtf": 4.7,
-          "avg_patterns": 6.88,
-          "avg_regime": 14.0,
-          "avg_smc": 20.0,
-          "avg_volume": 3.0,
-          "samples": 8
+          "avg_indicators": 10.79,
+          "avg_mtf": 3.96,
+          "avg_patterns": 6.06,
+          "avg_regime": 16.3,
+          "avg_smc": 23.9,
+          "avg_volume": 5.34,
+          "samples": 87
         },
-        "samples": 8,
+        "samples": 87,
         "soft_penalty_breakdown": {
           "avg_btc_dir": 0.0,
           "avg_cluster": 0.0,
@@ -104,34 +141,34 @@
           "avg_oi": 0.0,
           "avg_spoof": 0.0,
           "avg_sym_dir": 0.0,
-          "avg_vol_div": 0.0,
+          "avg_vol_div": 5.46,
           "avg_vwap": 0.0,
-          "samples": 8
+          "samples": 87
         }
       },
       "kept": {
-        "avg_composite": 69.27,
-        "avg_final": 69.27,
-        "avg_gap_to_threshold": -4.27,
-        "avg_raw": 83.41,
+        "avg_composite": 68.73,
+        "avg_final": 68.58,
+        "avg_gap_to_threshold": -3.58,
+        "avg_raw": 84.52,
         "avg_threshold": 65.0,
-        "avg_total_penalty": 0.0,
+        "avg_total_penalty": 0.16,
         "components": {
-          "avg_execution": 18.59,
-          "avg_market": 20.89,
+          "avg_execution": 19.96,
+          "avg_market": 20.57,
           "avg_risk": 20.0,
-          "avg_thesis_adj": 5.09
+          "avg_thesis_adj": 3.89
         },
         "engine_components": {
-          "avg_indicators": 10.27,
-          "avg_mtf": 7.18,
-          "avg_patterns": 5.45,
-          "avg_regime": 14.0,
-          "avg_smc": 24.27,
-          "avg_volume": 3.0,
-          "samples": 11
+          "avg_indicators": 12.56,
+          "avg_mtf": 5.96,
+          "avg_patterns": 6.35,
+          "avg_regime": 14.54,
+          "avg_smc": 21.97,
+          "avg_volume": 3.48,
+          "samples": 238
         },
-        "samples": 11,
+        "samples": 238,
         "soft_penalty_breakdown": {
           "avg_btc_dir": 0.0,
           "avg_cluster": 0.0,
@@ -141,34 +178,69 @@
           "avg_sym_dir": 0.0,
           "avg_vol_div": 0.0,
           "avg_vwap": 0.0,
-          "samples": 11
+          "samples": 238
         }
       }
     },
     "LIQUIDITY_SWEEP_REVERSAL": {
+      "filtered": {
+        "avg_composite": 72.13,
+        "avg_final": 59.71,
+        "avg_gap_to_threshold": 5.29,
+        "avg_raw": 83.09,
+        "avg_threshold": 65.0,
+        "avg_total_penalty": 12.42,
+        "components": {
+          "avg_execution": 17.42,
+          "avg_market": 18.64,
+          "avg_risk": 17.0,
+          "avg_thesis_adj": 0.35
+        },
+        "engine_components": {
+          "avg_indicators": 14.0,
+          "avg_mtf": 5.13,
+          "avg_patterns": 5.0,
+          "avg_regime": 14.0,
+          "avg_smc": 24.65,
+          "avg_volume": 9.0,
+          "samples": 23
+        },
+        "samples": 23,
+        "soft_penalty_breakdown": {
+          "avg_btc_dir": 0.0,
+          "avg_cluster": 0.0,
+          "avg_kz": 0.0,
+          "avg_oi": 0.0,
+          "avg_spoof": 0.0,
+          "avg_sym_dir": 0.0,
+          "avg_vol_div": 12.42,
+          "avg_vwap": 0.0,
+          "samples": 23
+        }
+      },
       "kept": {
-        "avg_composite": 67.2,
-        "avg_final": 67.2,
-        "avg_gap_to_threshold": -2.2,
-        "avg_raw": 88.3,
+        "avg_composite": 67.35,
+        "avg_final": 67.35,
+        "avg_gap_to_threshold": -2.35,
+        "avg_raw": 87.45,
         "avg_threshold": 65.0,
         "avg_total_penalty": 0.0,
         "components": {
-          "avg_execution": 19.45,
-          "avg_market": 21.9,
-          "avg_risk": 17.0,
-          "avg_thesis_adj": 4.0
+          "avg_execution": 20.0,
+          "avg_market": 20.22,
+          "avg_risk": 17.23,
+          "avg_thesis_adj": 2.77
         },
         "engine_components": {
-          "avg_indicators": 12.0,
-          "avg_mtf": 3.7,
-          "avg_patterns": 5.5,
+          "avg_indicators": 11.92,
+          "avg_mtf": 2.38,
+          "avg_patterns": 5.27,
           "avg_regime": 14.0,
           "avg_smc": 25.0,
-          "avg_volume": 3.0,
-          "samples": 2
+          "avg_volume": 6.0,
+          "samples": 13
         },
-        "samples": 2,
+        "samples": 13,
         "soft_penalty_breakdown": {
           "avg_btc_dir": 0.0,
           "avg_cluster": 0.0,
@@ -178,34 +250,34 @@
           "avg_sym_dir": 0.0,
           "avg_vol_div": 0.0,
           "avg_vwap": 0.0,
-          "samples": 2
+          "samples": 13
         }
       }
     },
     "MOVER_AVWAP_SCALP": {
-      "kept": {
-        "avg_composite": 75.23,
-        "avg_final": 75.23,
-        "avg_gap_to_threshold": -10.23,
-        "avg_raw": 78.79,
+      "filtered": {
+        "avg_composite": 69.2,
+        "avg_final": 54.2,
+        "avg_gap_to_threshold": 10.8,
+        "avg_raw": 77.1,
         "avg_threshold": 65.0,
         "avg_total_penalty": 0.0,
         "components": {
-          "avg_execution": 19.94,
-          "avg_market": 19.04,
+          "avg_execution": 17.8,
+          "avg_market": 19.6,
           "avg_risk": 15.8,
-          "avg_thesis_adj": 4.58
+          "avg_thesis_adj": 3.0
         },
         "engine_components": {
           "avg_indicators": 14.0,
-          "avg_mtf": 3.36,
-          "avg_patterns": 6.62,
+          "avg_mtf": 4.7,
+          "avg_patterns": 5.0,
           "avg_regime": 18.0,
-          "avg_smc": 17.98,
-          "avg_volume": 10.68,
-          "samples": 65
+          "avg_smc": 17.0,
+          "avg_volume": 7.5,
+          "samples": 4
         },
-        "samples": 65,
+        "samples": 4,
         "soft_penalty_breakdown": {
           "avg_btc_dir": 0.0,
           "avg_cluster": 0.0,
@@ -215,34 +287,34 @@
           "avg_sym_dir": 0.0,
           "avg_vol_div": 0.0,
           "avg_vwap": 0.0,
-          "samples": 65
+          "samples": 4
         }
       }
     },
     "MOVER_TREND_PULLBACK": {
       "kept": {
-        "avg_composite": 85.7,
-        "avg_final": 78.9,
-        "avg_gap_to_threshold": -13.9,
-        "avg_raw": 78.67,
+        "avg_composite": 76.99,
+        "avg_final": 76.86,
+        "avg_gap_to_threshold": -11.86,
+        "avg_raw": 79.05,
         "avg_threshold": 65.0,
-        "avg_total_penalty": 6.8,
+        "avg_total_penalty": 0.12,
         "components": {
-          "avg_execution": 19.0,
-          "avg_market": 19.73,
+          "avg_execution": 19.25,
+          "avg_market": 19.83,
           "avg_risk": 15.8,
-          "avg_thesis_adj": 5.5
+          "avg_thesis_adj": 4.51
         },
         "engine_components": {
-          "avg_indicators": 13.0,
-          "avg_mtf": 9.53,
-          "avg_patterns": 9.5,
+          "avg_indicators": 12.63,
+          "avg_mtf": 8.89,
+          "avg_patterns": 5.59,
           "avg_regime": 18.0,
-          "avg_smc": 19.67,
-          "avg_volume": 10.5,
-          "samples": 3
+          "avg_smc": 19.59,
+          "avg_volume": 7.77,
+          "samples": 164
         },
-        "samples": 3,
+        "samples": 164,
         "soft_penalty_breakdown": {
           "avg_btc_dir": 0.0,
           "avg_cluster": 0.0,
@@ -252,156 +324,292 @@
           "avg_sym_dir": 0.0,
           "avg_vol_div": 0.0,
           "avg_vwap": 0.0,
-          "samples": 3
+          "samples": 164
+        }
+      }
+    },
+    "SR_FLIP_RETEST": {
+      "filtered": {
+        "avg_composite": 73.24,
+        "avg_final": 58.54,
+        "avg_gap_to_threshold": 6.46,
+        "avg_raw": 80.1,
+        "avg_threshold": 65.0,
+        "avg_total_penalty": 14.7,
+        "components": {
+          "avg_execution": 20.0,
+          "avg_market": 20.18,
+          "avg_risk": 15.68,
+          "avg_thesis_adj": 2.04
+        },
+        "engine_components": {
+          "avg_indicators": 11.97,
+          "avg_mtf": 5.81,
+          "avg_patterns": 7.63,
+          "avg_regime": 17.42,
+          "avg_smc": 21.56,
+          "avg_volume": 6.82,
+          "samples": 121
+        },
+        "samples": 121,
+        "soft_penalty_breakdown": {
+          "avg_btc_dir": 0.0,
+          "avg_cluster": 0.0,
+          "avg_kz": 0.0,
+          "avg_oi": 0.0,
+          "avg_spoof": 0.0,
+          "avg_sym_dir": 0.1,
+          "avg_vol_div": 2.98,
+          "avg_vwap": 0.0,
+          "samples": 121
+        }
+      },
+      "kept": {
+        "avg_composite": 77.44,
+        "avg_final": 76.58,
+        "avg_gap_to_threshold": -11.58,
+        "avg_raw": 80.62,
+        "avg_threshold": 65.0,
+        "avg_total_penalty": -1.54,
+        "components": {
+          "avg_execution": 20.0,
+          "avg_market": 21.15,
+          "avg_risk": 15.39,
+          "avg_thesis_adj": 2.56
+        },
+        "engine_components": {
+          "avg_indicators": 14.24,
+          "avg_mtf": 7.08,
+          "avg_patterns": 5.84,
+          "avg_regime": 16.8,
+          "avg_smc": 22.76,
+          "avg_volume": 8.16,
+          "samples": 25
+        },
+        "samples": 25,
+        "soft_penalty_breakdown": {
+          "avg_btc_dir": 0.0,
+          "avg_cluster": 0.0,
+          "avg_kz": 0.0,
+          "avg_oi": 0.0,
+          "avg_spoof": 0.0,
+          "avg_sym_dir": 0.48,
+          "avg_vol_div": 0.0,
+          "avg_vwap": 0.0,
+          "samples": 25
+        }
+      }
+    },
+    "VOLUME_SURGE_BREAKOUT": {
+      "kept": {
+        "avg_composite": 80.19,
+        "avg_final": 77.61,
+        "avg_gap_to_threshold": -12.61,
+        "avg_raw": 83.34,
+        "avg_threshold": 65.0,
+        "avg_total_penalty": 2.57,
+        "components": {
+          "avg_execution": 18.66,
+          "avg_market": 20.6,
+          "avg_risk": 20.0,
+          "avg_thesis_adj": 4.0
+        },
+        "engine_components": {
+          "avg_indicators": 16.14,
+          "avg_mtf": 9.9,
+          "avg_patterns": 5.0,
+          "avg_regime": 14.0,
+          "avg_smc": 17.0,
+          "avg_volume": 14.14,
+          "samples": 7
+        },
+        "samples": 7,
+        "soft_penalty_breakdown": {
+          "avg_btc_dir": 0.0,
+          "avg_cluster": 0.0,
+          "avg_kz": 0.0,
+          "avg_oi": 0.0,
+          "avg_spoof": 0.0,
+          "avg_sym_dir": 0.0,
+          "avg_vol_div": 0.0,
+          "avg_vwap": 0.0,
+          "samples": 7
         }
       }
     }
   },
   "confidence_gate_decisions": {
+    "BREAKDOWN_SHORT": {
+      "filtered": {
+        "min_confidence": 19
+      }
+    },
     "DIVERGENCE_CONTINUATION": {
       "filtered": {
-        "min_confidence": 3
+        "min_confidence": 12,
+        "quiet_scalp_min_confidence": 3
       },
       "kept": {
-        "min_confidence_pass": 2
+        "min_confidence_pass": 26
       }
     },
     "FAILED_AUCTION_RECLAIM": {
       "filtered": {
-        "quiet_scalp_min_confidence": 8
+        "min_confidence": 50,
+        "quiet_scalp_min_confidence": 37
       },
       "kept": {
-        "min_confidence_pass": 11
+        "min_confidence_pass": 238
       }
     },
     "LIQUIDITY_SWEEP_REVERSAL": {
+      "filtered": {
+        "min_confidence": 22,
+        "quiet_scalp_min_confidence": 1
+      },
       "kept": {
-        "min_confidence_pass": 2
+        "min_confidence_pass": 13
       }
     },
     "MOVER_AVWAP_SCALP": {
-      "kept": {
-        "min_confidence_pass": 65
+      "filtered": {
+        "min_confidence": 4
       }
     },
     "MOVER_TREND_PULLBACK": {
       "kept": {
-        "min_confidence_pass": 3
+        "min_confidence_pass": 164
+      }
+    },
+    "SR_FLIP_RETEST": {
+      "filtered": {
+        "min_confidence": 114,
+        "quiet_scalp_min_confidence": 7
+      },
+      "kept": {
+        "min_confidence_pass": 25
+      }
+    },
+    "VOLUME_SURGE_BREAKOUT": {
+      "kept": {
+        "min_confidence_pass": 7
       }
     }
   },
   "dependency_readiness": {
     "cvd": {
       "buckets": {
-        "many": 6236,
-        "some": 48
+        "many": 51874
       },
       "presence": {
-        "present": 6284
+        "present": 51874
       },
       "quality": {},
       "sources": {},
       "states": {
-        "populated": 6284
+        "populated": 51874
       }
     },
     "funding_rate": {
       "buckets": {
-        "few": 5363,
-        "none": 921
+        "few": 48028,
+        "none": 3846
       },
       "presence": {
-        "absent": 921,
-        "present": 5363
+        "absent": 3846,
+        "present": 48028
       },
       "quality": {},
       "sources": {},
       "states": {
-        "empty": 921,
-        "populated": 5363
+        "empty": 3846,
+        "populated": 48028
       }
     },
     "liquidation_clusters": {
       "buckets": {
-        "few": 936,
-        "none": 5282,
-        "some": 66
+        "few": 12316,
+        "none": 35965,
+        "some": 3593
       },
       "presence": {
-        "absent": 5282,
-        "present": 1002
+        "absent": 35965,
+        "present": 15909
       },
       "quality": {},
       "sources": {},
       "states": {
-        "empty": 5282,
-        "populated": 1002
+        "empty": 35965,
+        "populated": 15909
       }
     },
     "oi_snapshot": {
       "buckets": {
-        "many": 5959,
-        "none": 325
+        "many": 48569,
+        "none": 3305
       },
       "presence": {
-        "absent": 325,
-        "present": 5959
+        "absent": 3305,
+        "present": 48569
       },
       "quality": {},
       "sources": {},
       "states": {
-        "empty": 325,
-        "populated": 5959
+        "empty": 3305,
+        "populated": 48569
       }
     },
     "order_book": {
       "buckets": {
-        "few": 5217,
-        "none": 1067
+        "few": 38342,
+        "none": 13532
       },
       "presence": {
-        "absent": 1067,
-        "present": 5217
+        "absent": 13532,
+        "present": 38342
       },
       "quality": {
-        "none": 1067,
-        "top_of_book_only": 5217
+        "none": 13532,
+        "top_of_book_only": 38342
       },
       "sources": {
-        "book_ticker": 5217,
-        "unavailable": 1067
+        "book_ticker": 38342,
+        "unavailable": 13532
       },
       "states": {
-        "populated": 5217,
-        "unavailable": 1067
+        "populated": 38342,
+        "unavailable": 13532
       }
     },
     "orderblocks": {
       "buckets": {
-        "none": 6284
+        "none": 51874
       },
       "presence": {
-        "absent": 6284
+        "absent": 51874
       },
       "quality": {},
       "sources": {
-        "not_implemented": 6284
+        "not_implemented": 51874
       },
       "states": {
-        "empty": 6284
+        "empty": 51874
       }
     },
     "recent_ticks": {
       "buckets": {
-        "many": 6284
+        "many": 51112,
+        "none": 762
       },
       "presence": {
-        "present": 6284
+        "absent": 762,
+        "present": 51112
       },
       "quality": {},
       "sources": {},
       "states": {
-        "populated": 6284
+        "empty": 762,
+        "populated": 51112
       }
     }
   },
@@ -410,8 +618,8 @@
     "recommended_next_investigation_target": "FAILED_AUCTION_RECLAIM",
     "top_anomalies": [
       "FAILED_AUCTION_RECLAIM",
-      "EVAL::TREND_PULLBACK",
-      "EVAL::LIQUIDATION_REVERSAL"
+      "EVAL::LIQUIDATION_REVERSAL",
+      "EVAL::VOLUME_SURGE_BREAKOUT"
     ],
     "top_promising_paths": []
   },
@@ -420,26 +628,34 @@
     "symbol_filter": ""
   },
   "free_channel_posts": {
-    "by_severity": {},
-    "by_source": {},
-    "by_source_severity": {},
-    "total": 0
+    "by_severity": {
+      "HIGH": 2
+    },
+    "by_source": {
+      "regime_shift": 2
+    },
+    "by_source_severity": {
+      "regime_shift": {
+        "HIGH": 2
+      }
+    },
+    "total": 2
   },
-  "generated_at": 1783658435,
+  "generated_at": 1783742133,
   "invalidation_audit": {
     "ablation": {
       "by_family": {
         "expired": {
-          "ev_per_kill_R": 0.363,
-          "ev_total_R": 29.07,
-          "missed_R_total": 13.208684296450775,
-          "neutral_n": 14,
-          "premature_n": 11,
-          "protective_n": 55,
+          "ev_per_kill_R": 0.364,
+          "ev_total_R": 21.485,
+          "missed_R_total": 11.216221984892982,
+          "neutral_n": 8,
+          "premature_n": 10,
+          "protective_n": 41,
           "recommendation": "KEEP",
-          "saved_R_total": 42.278480267503646,
-          "total": 80,
-          "verdict": "net-helping: avg +0.36R/kill across 80 kills (saved 42.3R vs missed 13.2R)"
+          "saved_R_total": 32.70084656749346,
+          "total": 59,
+          "verdict": "net-helping: avg +0.36R/kill across 59 kills (saved 32.7R vs missed 11.2R)"
         }
       },
       "drop_candidates": [],
@@ -448,9 +664,9 @@
     "by_reason": {
       "expired": {
         "INSUFFICIENT_DATA": 0,
-        "NEUTRAL": 14,
-        "PREMATURE": 11,
-        "PROTECTIVE": 55
+        "NEUTRAL": 8,
+        "PREMATURE": 10,
+        "PROTECTIVE": 41
       }
     },
     "by_setup": {
@@ -458,45 +674,45 @@
         "INSUFFICIENT_DATA": 0,
         "NEUTRAL": 1,
         "PREMATURE": 3,
-        "PROTECTIVE": 2
+        "PROTECTIVE": 1
       },
       "FAILED_AUCTION_RECLAIM": {
         "INSUFFICIENT_DATA": 0,
-        "NEUTRAL": 7,
+        "NEUTRAL": 6,
         "PREMATURE": 4,
-        "PROTECTIVE": 12
+        "PROTECTIVE": 9
       },
       "LIQUIDITY_SWEEP_REVERSAL": {
         "INSUFFICIENT_DATA": 0,
-        "NEUTRAL": 1,
+        "NEUTRAL": 0,
         "PREMATURE": 1,
-        "PROTECTIVE": 1
+        "PROTECTIVE": 0
       },
       "MOVER_AVWAP_SCALP": {
         "INSUFFICIENT_DATA": 0,
         "NEUTRAL": 0,
         "PREMATURE": 0,
-        "PROTECTIVE": 11
+        "PROTECTIVE": 9
       },
       "MOVER_TREND_PULLBACK": {
         "INSUFFICIENT_DATA": 0,
-        "NEUTRAL": 1,
-        "PREMATURE": 1,
-        "PROTECTIVE": 22
+        "NEUTRAL": 0,
+        "PREMATURE": 0,
+        "PROTECTIVE": 16
       },
       "SR_FLIP_RETEST": {
         "INSUFFICIENT_DATA": 0,
-        "NEUTRAL": 4,
+        "NEUTRAL": 1,
         "PREMATURE": 2,
-        "PROTECTIVE": 7
+        "PROTECTIVE": 6
       }
     },
     "stale": 0,
     "totals": {
       "INSUFFICIENT_DATA": 0,
-      "NEUTRAL": 14,
-      "PREMATURE": 11,
-      "PROTECTIVE": 55
+      "NEUTRAL": 8,
+      "PREMATURE": 10,
+      "PROTECTIVE": 41
     }
   },
   "lifecycle_truth": {
@@ -518,407 +734,61 @@
         "pct": 0.0
       }
     },
-    "median_create_to_dispatch_sec": 3.3606069087982178,
-    "median_create_to_first_breach_sec": 9337.02173936367,
-    "median_create_to_terminal_sec": 9339.30735194683,
-    "median_first_breach_to_terminal_sec": 2.567630887031555,
+    "median_create_to_dispatch_sec": 3.3880789279937744,
+    "median_create_to_first_breach_sec": 2257.5094151496887,
+    "median_create_to_terminal_sec": 2259.2421910762787,
+    "median_first_breach_to_terminal_sec": 2.946665048599243,
     "terminal_close_around_3m": {
       "count": 0,
       "pct": 0.0
     }
   },
   "log_parse_diagnostics": {
-    "confidence_gate": 94,
-    "free_channel_post": 0,
-    "path_funnel": 1,
-    "per_symbol_regime_distribution": 1,
+    "confidence_gate": 742,
+    "free_channel_post": 2,
+    "path_funnel": 8,
+    "per_symbol_regime_distribution": 8,
     "pre_tp_fire": 0,
-    "quiet_scalp_block": 8,
-    "regime_distribution": 1,
-    "total_lines": 4012
+    "quiet_scalp_block": 48,
+    "regime_distribution": 8,
+    "total_lines": 18406
   },
   "lookback_hours": 24,
   "path_funnel_truth": {
+    "BREAKDOWN_SHORT": {
+      "attempts": 0,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 7,
+      "generated": 31,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 24,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 0,
+      "no_signal_reasons": {},
+      "scanner_preparation": 31
+    },
     "DIVERGENCE_CONTINUATION": {
       "attempts": 0,
       "classification": "low-sample",
       "dependency_missing_reasons": {},
       "dependency_missing_total": 0,
-      "emitted": 1,
-      "gated": 220,
-      "generated": 270,
+      "emitted": 5,
+      "gated": 2682,
+      "generated": 2824,
       "geometry_final_changed": 0,
-      "geometry_final_preserved": 50,
+      "geometry_final_preserved": 142,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "no_signal": 0,
       "no_signal_reasons": {},
-      "scanner_preparation": 270
+      "scanner_preparation": 2824
     },
     "EVAL::BREAKDOWN_SHORT": {
-      "attempts": 1680,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1680,
-      "no_signal_reasons": {
-        "basic_filters_failed": 640,
-        "breakout_not_found": 987,
-        "breakout_stale": 34,
-        "move_not_fresh": 17,
-        "volume_spike_missing": 2
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::CONTINUATION_LIQUIDITY_SWEEP": {
-      "attempts": 1752,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1752,
-      "no_signal_reasons": {
-        "cls_disabled_merged_into_lsr": 1752
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::DIVERGENCE_CONTINUATION": {
-      "attempts": 1748,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 105,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1647,
-      "no_signal_reasons": {
-        "basic_filters_failed": 529,
-        "cvd_divergence_failed": 499,
-        "ema_alignment_reject": 71,
-        "h1_trend_not_aligned": 524,
-        "missing_fvg_or_orderblock": 9,
-        "regime_blocked": 4,
-        "retest_proximity_failed": 11
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::FAILED_AUCTION_RECLAIM": {
-      "attempts": 1752,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 68,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1684,
-      "no_signal_reasons": {
-        "auction_not_detected": 673,
-        "basic_filters_failed": 510,
-        "reclaim_hold_failed": 147,
-        "regime_blocked": 72,
-        "tail_too_small": 282
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::FUNDING_EXTREME": {
-      "attempts": 1938,
-      "classification": "dependency-missing",
-      "dependency_missing_reasons": {
-        "missing_funding_rate": 264
-      },
-      "dependency_missing_total": 264,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1938,
-      "no_signal_reasons": {
-        "basic_filters_failed": 509,
-        "ema_alignment_reject": 60,
-        "funding_not_extreme": 1096,
-        "missing_funding_rate": 264,
-        "rsi_reject": 9
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::LIQUIDATION_REVERSAL": {
-      "attempts": 1546,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1546,
-      "no_signal_reasons": {
-        "basic_filters_failed": 593,
-        "cascade_threshold_not_met": 920,
-        "cvd_divergence_failed": 14,
-        "missing_fvg_or_orderblock": 3,
-        "rsi_reject": 16
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::MA_CROSS_TREND_SHIFT": {
-      "attempts": 1752,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 1,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1751,
-      "no_signal_reasons": {
-        "basic_filters_failed": 529,
-        "ma_cross_cooldown": 57,
-        "no_ma_cross": 1165
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::MOVER_AVWAP_SCALP": {
-      "attempts": 1909,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 149,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1906,
-      "no_signal_reasons": {
-        "avwap_reclaim_no_volume": 3,
-        "avwap_slope_against": 54,
-        "basic_filters_failed": 640,
-        "no_avwap_tag": 968,
-        "no_mover_leg": 241
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::MOVER_TREND_PULLBACK": {
-      "attempts": 1680,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 492,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1416,
-      "no_signal_reasons": {
-        "basic_filters_failed": 640,
-        "mover_run_too_small": 477,
-        "no_pullback_tag": 39,
-        "no_reclaim": 260
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::OPENING_RANGE_BREAKOUT": {
-      "attempts": 1908,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1908,
-      "no_signal_reasons": {
-        "feature_disabled": 1908
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::POST_DISPLACEMENT_CONTINUATION": {
-      "attempts": 1752,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1752,
-      "no_signal_reasons": {
-        "adx_reject": 50,
-        "basic_filters_failed": 129,
-        "breakout_not_found": 192,
-        "regime_blocked": 1381
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::QUIET_COMPRESSION_BREAK": {
-      "attempts": 1748,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1748,
-      "no_signal_reasons": {
-        "basic_filters_failed": 381,
-        "breakout_not_detected": 82,
-        "compression_not_detected": 842,
-        "regime_blocked": 443
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::SR_FLIP_RETEST": {
-      "attempts": 1718,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 33,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1715,
-      "no_signal_reasons": {
-        "basic_filters_failed": 510,
-        "ema_alignment_reject": 2,
-        "flip_close_not_confirmed": 447,
-        "long_acceptance_not_held": 3,
-        "long_break_volume_thin": 346,
-        "long_disabled": 103,
-        "missing_fvg_or_orderblock": 1,
-        "reclaim_hold_failed": 15,
-        "regime_blocked": 72,
-        "retest_out_of_zone": 36,
-        "whipsaw_flip": 172,
-        "wick_quality_failed": 8
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::STANDARD": {
-      "attempts": 1386,
-      "classification": "low-sample",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 36,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1351,
-      "no_signal_reasons": {
-        "adx_reject": 279,
-        "basic_filters_failed": 291,
-        "ema_alignment_reject": 48,
-        "invalid_sl_geometry": 10,
-        "macd_reject": 259,
-        "momentum_reject": 326,
-        "rsi_reject": 3,
-        "sweeps_not_detected": 135
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::TREND_PULLBACK": {
-      "attempts": 1387,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1388,
-      "no_signal_reasons": {
-        "basic_filters_failed": 276,
-        "body_conviction_fail": 34,
-        "ema_alignment_reject": 133,
-        "ema_not_tested_prev": 13,
-        "h1_pullback_not_confirmed": 223,
-        "h1_trend_not_aligned": 470,
-        "momentum_flat": 10,
-        "momentum_reject": 2,
-        "no_ema_reclaim_close": 187,
-        "no_prev_high_break": 3,
-        "prev_already_above_emas": 2,
-        "regime_blocked": 28,
-        "rsi_reject": 7
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::VOLUME_SURGE_BREAKOUT": {
-      "attempts": 1680,
-      "classification": "non-generating",
-      "dependency_missing_reasons": {},
-      "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 0,
-      "generated": 0,
-      "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
-      "geometry_final_rejected": 0,
-      "geometry_rejected_reasons": {},
-      "no_signal": 1680,
-      "no_signal_reasons": {
-        "basic_filters_failed": 640,
-        "breakout_not_found": 859,
-        "breakout_stale": 55,
-        "move_not_fresh": 115,
-        "retest_proximity_failed": 4,
-        "volume_spike_missing": 7
-      },
-      "scanner_preparation": 0
-    },
-    "EVAL::WHALE_MOMENTUM": {
-      "attempts": 1546,
+      "attempts": 12104,
       "classification": "low-sample",
       "dependency_missing_reasons": {},
       "dependency_missing_total": 0,
@@ -929,11 +799,388 @@
       "geometry_final_preserved": 0,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
-      "no_signal": 1544,
+      "no_signal": 12104,
       "no_signal_reasons": {
-        "basic_filters_failed": 199,
-        "momentum_reject": 958,
-        "recent_ticks_insufficient": 387
+        "basic_filters_failed": 3238,
+        "breakout_not_found": 6351,
+        "breakout_stale": 655,
+        "missing_fvg_or_orderblock": 4,
+        "move_not_fresh": 1546,
+        "retest_proximity_failed": 298,
+        "volume_spike_missing": 12
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::CONTINUATION_LIQUIDITY_SWEEP": {
+      "attempts": 10868,
+      "classification": "non-generating",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 10869,
+      "no_signal_reasons": {
+        "cls_disabled_merged_into_lsr": 10869
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::DIVERGENCE_CONTINUATION": {
+      "attempts": 10849,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 686,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 10182,
+      "no_signal_reasons": {
+        "basic_filters_failed": 2535,
+        "cvd_divergence_failed": 3885,
+        "ema_alignment_reject": 1476,
+        "h1_trend_not_aligned": 2122,
+        "missing_fvg_or_orderblock": 61,
+        "regime_blocked": 39,
+        "retest_proximity_failed": 64
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::FAILED_AUCTION_RECLAIM": {
+      "attempts": 10870,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 398,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 10485,
+      "no_signal_reasons": {
+        "auction_not_detected": 4423,
+        "basic_filters_failed": 2519,
+        "reclaim_hold_failed": 1750,
+        "regime_blocked": 278,
+        "tail_too_small": 1515
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::FUNDING_EXTREME": {
+      "attempts": 12522,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {
+        "missing_funding_rate": 194
+      },
+      "dependency_missing_total": 194,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 32,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 12492,
+      "no_signal_reasons": {
+        "basic_filters_failed": 2836,
+        "cvd_divergence_failed": 15,
+        "ema_alignment_reject": 103,
+        "funding_not_extreme": 9314,
+        "missing_funding_rate": 194,
+        "momentum_reject": 3,
+        "rsi_reject": 27
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::LIQUIDATION_REVERSAL": {
+      "attempts": 10499,
+      "classification": "non-generating",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 10500,
+      "no_signal_reasons": {
+        "basic_filters_failed": 2891,
+        "cascade_threshold_not_met": 7567,
+        "cvd_divergence_failed": 32,
+        "rsi_reject": 10
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::MA_CROSS_TREND_SHIFT": {
+      "attempts": 10883,
+      "classification": "non-generating",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 10884,
+      "no_signal_reasons": {
+        "basic_filters_failed": 2535,
+        "ma_cross_cooldown": 256,
+        "ma_cross_htf_misaligned": 17,
+        "no_ma_cross": 8076
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::MOVER_AVWAP_SCALP": {
+      "attempts": 13024,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 118,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 13963,
+      "no_signal_reasons": {
+        "anchor_too_recent": 18,
+        "avwap_reclaim_no_volume": 68,
+        "avwap_slope_against": 1179,
+        "basic_filters_failed": 3172,
+        "insufficient_candles": 736,
+        "no_avwap_reclaim": 19,
+        "no_avwap_tag": 7161,
+        "no_mover_leg": 1610
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::MOVER_TREND_PULLBACK": {
+      "attempts": 12109,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 1774,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 11250,
+      "no_signal_reasons": {
+        "basic_filters_failed": 3170,
+        "insufficient_candles": 736,
+        "mover_run_too_small": 2219,
+        "no_pullback_tag": 1498,
+        "no_reclaim": 3627
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::OPENING_RANGE_BREAKOUT": {
+      "attempts": 12380,
+      "classification": "non-generating",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 12380,
+      "no_signal_reasons": {
+        "feature_disabled": 12380
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::POST_DISPLACEMENT_CONTINUATION": {
+      "attempts": 10869,
+      "classification": "non-generating",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 10869,
+      "no_signal_reasons": {
+        "adx_reject": 208,
+        "basic_filters_failed": 761,
+        "breakout_not_found": 1176,
+        "ema_alignment_reject": 3,
+        "regime_blocked": 8721
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::QUIET_COMPRESSION_BREAK": {
+      "attempts": 10849,
+      "classification": "non-generating",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 10849,
+      "no_signal_reasons": {
+        "basic_filters_failed": 1758,
+        "breakout_not_detected": 174,
+        "compression_not_detected": 6489,
+        "regime_blocked": 2423,
+        "volume_confirmation_failed": 5
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::SR_FLIP_RETEST": {
+      "attempts": 10704,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 354,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 10492,
+      "no_signal_reasons": {
+        "basic_filters_failed": 2518,
+        "ema_alignment_reject": 19,
+        "flip_close_not_confirmed": 2010,
+        "long_acceptance_not_held": 30,
+        "long_break_volume_thin": 1696,
+        "long_disabled": 520,
+        "missing_fvg_or_orderblock": 25,
+        "reclaim_hold_failed": 1310,
+        "regime_blocked": 277,
+        "retest_out_of_zone": 499,
+        "rsi_reject": 24,
+        "whipsaw_flip": 1431,
+        "wick_quality_failed": 133
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::STANDARD": {
+      "attempts": 8889,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 581,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 8347,
+      "no_signal_reasons": {
+        "adx_reject": 2428,
+        "basic_filters_failed": 916,
+        "ema_alignment_reject": 290,
+        "invalid_sl_geometry": 67,
+        "macd_reject": 923,
+        "momentum_reject": 2821,
+        "rsi_reject": 4,
+        "sweeps_not_detected": 898
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::TREND_PULLBACK": {
+      "attempts": 8928,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 65,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 8867,
+      "no_signal_reasons": {
+        "basic_filters_failed": 1492,
+        "body_conviction_fail": 472,
+        "ema_alignment_reject": 1403,
+        "ema_not_tested_prev": 411,
+        "h1_pullback_not_confirmed": 1718,
+        "h1_trend_not_aligned": 2173,
+        "missing_fvg_or_orderblock": 2,
+        "momentum_flat": 17,
+        "momentum_reject": 12,
+        "no_ema_reclaim_close": 445,
+        "no_prev_high_break": 71,
+        "no_prev_low_break": 26,
+        "prev_already_above_emas": 235,
+        "prev_already_below_emas": 55,
+        "regime_blocked": 83,
+        "rsi_reject": 252
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::VOLUME_SURGE_BREAKOUT": {
+      "attempts": 12101,
+      "classification": "non-generating",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 0,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 12104,
+      "no_signal_reasons": {
+        "basic_filters_failed": 3238,
+        "breakout_not_found": 7422,
+        "breakout_stale": 590,
+        "missing_fvg_or_orderblock": 10,
+        "move_not_fresh": 797,
+        "retest_proximity_failed": 40,
+        "volume_spike_missing": 7
+      },
+      "scanner_preparation": 0
+    },
+    "EVAL::WHALE_MOMENTUM": {
+      "attempts": 10500,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 0,
+      "generated": 31,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 10473,
+      "no_signal_reasons": {
+        "basic_filters_failed": 766,
+        "momentum_reject": 7856,
+        "recent_ticks_insufficient": 1851
       },
       "scanner_preparation": 0
     },
@@ -942,34 +1189,34 @@
       "classification": "active-low-quality",
       "dependency_missing_reasons": {},
       "dependency_missing_total": 0,
-      "emitted": 3,
-      "gated": 77,
-      "generated": 200,
+      "emitted": 13,
+      "gated": 1165,
+      "generated": 1870,
       "geometry_final_changed": 0,
-      "geometry_final_preserved": 123,
+      "geometry_final_preserved": 705,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "no_signal": 0,
       "no_signal_reasons": {},
-      "scanner_preparation": 200
+      "scanner_preparation": 1870
     },
-    "LIQUIDITY_SWEEP_REVERSAL": {
+    "FUNDING_EXTREME_SIGNAL": {
       "attempts": 0,
       "classification": "low-sample",
       "dependency_missing_reasons": {},
       "dependency_missing_total": 0,
-      "emitted": 2,
-      "gated": 192,
-      "generated": 200,
-      "geometry_final_changed": 8,
+      "emitted": 0,
+      "gated": 62,
+      "generated": 62,
+      "geometry_final_changed": 0,
       "geometry_final_preserved": 0,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "no_signal": 0,
       "no_signal_reasons": {},
-      "scanner_preparation": 200
+      "scanner_preparation": 62
     },
-    "MA_CROSS_TREND_SHIFT": {
+    "LIQUIDATION_REVERSAL": {
       "attempts": 0,
       "classification": "low-sample",
       "dependency_missing_reasons": {},
@@ -985,53 +1232,101 @@
       "no_signal_reasons": {},
       "scanner_preparation": 1
     },
-    "MOVER_AVWAP_SCALP": {
+    "LIQUIDITY_SWEEP_REVERSAL": {
       "attempts": 0,
       "classification": "low-sample",
       "dependency_missing_reasons": {},
       "dependency_missing_total": 0,
-      "emitted": 1,
-      "gated": 197,
-      "generated": 263,
-      "geometry_final_changed": 66,
+      "emitted": 0,
+      "gated": 3210,
+      "generated": 3305,
+      "geometry_final_changed": 95,
       "geometry_final_preserved": 0,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "no_signal": 0,
       "no_signal_reasons": {},
-      "scanner_preparation": 263
+      "scanner_preparation": 3305
+    },
+    "MOVER_AVWAP_SCALP": {
+      "attempts": 0,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 246,
+      "generated": 250,
+      "geometry_final_changed": 4,
+      "geometry_final_preserved": 0,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 0,
+      "no_signal_reasons": {},
+      "scanner_preparation": 250
     },
     "MOVER_TREND_PULLBACK": {
       "attempts": 0,
       "classification": "low-sample",
       "dependency_missing_reasons": {},
       "dependency_missing_total": 0,
-      "emitted": 1,
-      "gated": 1100,
-      "generated": 1106,
-      "geometry_final_changed": 6,
+      "emitted": 3,
+      "gated": 3201,
+      "generated": 3365,
+      "geometry_final_changed": 164,
       "geometry_final_preserved": 0,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "no_signal": 0,
       "no_signal_reasons": {},
-      "scanner_preparation": 1106
+      "scanner_preparation": 3365
     },
     "SR_FLIP_RETEST": {
       "attempts": 0,
       "classification": "low-sample",
       "dependency_missing_reasons": {},
       "dependency_missing_total": 0,
-      "emitted": 0,
-      "gated": 52,
-      "generated": 66,
+      "emitted": 2,
+      "gated": 710,
+      "generated": 1632,
       "geometry_final_changed": 0,
-      "geometry_final_preserved": 14,
+      "geometry_final_preserved": 922,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "no_signal": 0,
       "no_signal_reasons": {},
-      "scanner_preparation": 66
+      "scanner_preparation": 1632
+    },
+    "TREND_PULLBACK_EMA": {
+      "attempts": 0,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 0,
+      "gated": 413,
+      "generated": 431,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 18,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 0,
+      "no_signal_reasons": {},
+      "scanner_preparation": 431
+    },
+    "VOLUME_SURGE_BREAKOUT": {
+      "attempts": 0,
+      "classification": "low-sample",
+      "dependency_missing_reasons": {},
+      "dependency_missing_total": 0,
+      "emitted": 2,
+      "gated": 0,
+      "generated": 7,
+      "geometry_final_changed": 0,
+      "geometry_final_preserved": 7,
+      "geometry_final_rejected": 0,
+      "geometry_rejected_reasons": {},
+      "no_signal": 0,
+      "no_signal_reasons": {},
+      "scanner_preparation": 7
     },
     "WHALE_MOMENTUM": {
       "attempts": 0,
@@ -1039,276 +1334,327 @@
       "dependency_missing_reasons": {},
       "dependency_missing_total": 0,
       "emitted": 0,
-      "gated": 99,
-      "generated": 99,
+      "gated": 744,
+      "generated": 744,
       "geometry_final_changed": 0,
       "geometry_final_preserved": 0,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "no_signal": 0,
       "no_signal_reasons": {},
-      "scanner_preparation": 99
+      "scanner_preparation": 744
     }
   },
   "per_symbol_regime_distribution": {
+    "1000BONKUSDT": {
+      "QUIET": 98,
+      "RANGING": 701
+    },
     "1000PEPEUSDT": {
-      "QUIET": 99
+      "QUIET": 376,
+      "RANGING": 423
     },
     "AAVEUSDT": {
-      "TRENDING_UP": 99
+      "QUIET": 702,
+      "TRENDING_DOWN": 97
     },
     "ADAUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "AINUSDT": {
-      "TRENDING_DOWN": 99
+      "RANGING": 323,
+      "TRENDING_DOWN": 219
+    },
+    "AIOUSDT": {
+      "RANGING": 799
     },
     "ALLOUSDT": {
-      "TRENDING_DOWN": 99
+      "TRENDING_DOWN": 138,
+      "TRENDING_UP": 661
     },
     "AMDUSDT": {
-      "QUIET": 99
-    },
-    "APEUSDT": {
-      "RANGING": 99
+      "QUIET": 799
     },
     "ARBUSDT": {
-      "TRENDING_UP": 99
+      "RANGING": 799
     },
     "ARXUSDT": {
-      "RANGING": 99
+      "RANGING": 799
     },
     "AVAXUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "BASEDUSDT": {
-      "TRENDING_UP": 8,
-      "VOLATILE": 91
+      "TRENDING_DOWN": 743,
+      "TRENDING_UP": 56
     },
     "BCHUSDT": {
-      "QUIET": 99
+      "QUIET": 799
+    },
+    "BEATUSDT": {
+      "RANGING": 799
     },
     "BNBUSDT": {
-      "QUIET": 99
-    },
-    "BSBUSDT": {
-      "RANGING": 77
+      "QUIET": 799
     },
     "BTCUSDT": {
-      "QUIET": 99
+      "QUIET": 799
+    },
+    "BUSDT": {
+      "RANGING": 395,
+      "TRENDING_UP": 203,
+      "VOLATILE": 201
     },
     "BZUSDT": {
-      "QUIET": 99
+      "QUIET": 799
+    },
+    "CAPUSDT": {
+      "RANGING": 483
     },
     "CBRSUSDT": {
-      "RANGING": 50,
-      "TRENDING_DOWN": 49
+      "QUIET": 395,
+      "RANGING": 404
     },
     "DEXEUSDT": {
-      "RANGING": 99
+      "QUIET": 70,
+      "TRENDING_UP": 729
     },
     "DOGEUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "DOTUSDT": {
-      "QUIET": 91,
-      "TRENDING_UP": 8
+      "QUIET": 799
     },
     "EDGEUSDT": {
-      "RANGING": 91,
-      "VOLATILE": 8
-    },
-    "EGLDUSDT": {
-      "QUIET": 50,
-      "RANGING": 49
-    },
-    "EIGENUSDT": {
-      "TRENDING_UP": 99
+      "RANGING": 799
     },
     "ENAUSDT": {
-      "QUIET": 49,
-      "TRENDING_UP": 50
-    },
-    "EPICUSDT": {
-      "TRENDING_UP": 51
+      "QUIET": 121,
+      "RANGING": 678
     },
     "ESPORTSUSDT": {
-      "RANGING": 99
+      "RANGING": 799
     },
     "ETHUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "EVAAUSDT": {
-      "VOLATILE": 99
+      "RANGING": 601,
+      "VOLATILE": 198
     },
     "FILUSDT": {
-      "QUIET": 99
+      "QUIET": 540,
+      "RANGING": 259
     },
-    "GLWUSDT": {
-      "QUIET": 12,
-      "RANGING": 37,
-      "TRENDING_UP": 50
+    "GRAMUSDT": {
+      "QUIET": 60,
+      "RANGING": 739
+    },
+    "GWEIUSDT": {
+      "RANGING": 798
     },
     "HYPEUSDT": {
-      "QUIET": 99
-    },
-    "ICPUSDT": {
-      "TRENDING_DOWN": 99
+      "QUIET": 402,
+      "RANGING": 397
     },
     "INJUSDT": {
-      "RANGING": 87,
-      "TRENDING_DOWN": 12
+      "QUIET": 69,
+      "RANGING": 730
     },
-    "KAITOUSDT": {
-      "RANGING": 49,
-      "TRENDING_DOWN": 50
+    "IOTAUSDT": {
+      "RANGING": 429,
+      "TRENDING_DOWN": 114
+    },
+    "JUPUSDT": {
+      "TRENDING_UP": 412
+    },
+    "KATUSDT": {
+      "RANGING": 236,
+      "TRENDING_DOWN": 532,
+      "TRENDING_UP": 31
     },
     "KORUUSDT": {
-      "VOLATILE": 99
+      "QUIET": 209,
+      "RANGING": 590
     },
     "LABUSDT": {
-      "VOLATILE": 99
-    },
-    "LDOUSDT": {
-      "TRENDING_UP": 99
+      "RANGING": 31,
+      "VOLATILE": 768
     },
     "LINKUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "LITUSDT": {
-      "RANGING": 99
+      "RANGING": 598,
+      "TRENDING_DOWN": 201
     },
     "LTCUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
-    "MAGMAUSDT": {
-      "RANGING": 99
+    "MONUSDT": {
+      "TRENDING_UP": 626
+    },
+    "MORPHOUSDT": {
+      "TRENDING_DOWN": 580
     },
     "MSTRUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "NATGASUSDT": {
-      "QUIET": 99
+      "QUIET": 294,
+      "TRENDING_DOWN": 505
     },
     "NBISUSDT": {
-      "QUIET": 49,
-      "TRENDING_UP": 50
+      "QUIET": 632,
+      "TRENDING_UP": 167
     },
     "NEARUSDT": {
-      "QUIET": 99
+      "QUIET": 734,
+      "TRENDING_UP": 65
     },
     "ONDOUSDT": {
-      "QUIET": 99
+      "QUIET": 66,
+      "RANGING": 733
     },
-    "OPUSDT": {
-      "RANGING": 99
+    "OPNUSDT": {
+      "RANGING": 694,
+      "VOLATILE": 105
     },
     "ORCLUSDT": {
-      "QUIET": 99
+      "QUIET": 702,
+      "TRENDING_UP": 97
     },
     "OUSDT": {
-      "QUIET": 99
+      "QUIET": 598,
+      "RANGING": 201
     },
-    "PLAYUSDT": {
-      "RANGING": 58
+    "PARTIUSDT": {
+      "TRENDING_UP": 799
     },
-    "POWERUSDT": {
-      "RANGING": 99
-    },
-    "REUSDT": {
-      "RANGING": 99
+    "PUMPUSDT": {
+      "RANGING": 799
     },
     "SENTUSDT": {
-      "RANGING": 99
+      "RANGING": 799
+    },
+    "SKHYUSDT": {
+      "QUIET": 799
     },
     "SKLUSDT": {
-      "RANGING": 99
-    },
-    "SKYAIUSDT": {
-      "TRENDING_DOWN": 87,
-      "TRENDING_UP": 12
+      "RANGING": 365,
+      "VOLATILE": 434
     },
     "SLXUSDT": {
-      "RANGING": 99
+      "RANGING": 531,
+      "TRENDING_DOWN": 97,
+      "TRENDING_UP": 171
     },
     "SOLUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "SOXLUSDT": {
-      "RANGING": 99
+      "QUIET": 236,
+      "RANGING": 563
     },
     "SPCXUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "SPYUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "SUIUSDT": {
-      "QUIET": 99
+      "QUIET": 734,
+      "RANGING": 65
     },
     "SYNUSDT": {
-      "RANGING": 99
+      "RANGING": 124,
+      "TRENDING_DOWN": 474,
+      "TRENDING_UP": 201
     },
     "SYRUPUSDT": {
-      "TRENDING_UP": 87
+      "RANGING": 254,
+      "TRENDING_DOWN": 57,
+      "TRENDING_UP": 488
     },
     "TACUSDT": {
-      "VOLATILE": 99
+      "RANGING": 176,
+      "TRENDING_DOWN": 623
     },
     "TAGUSDT": {
-      "RANGING": 8,
-      "TRENDING_UP": 91
+      "RANGING": 136,
+      "TRENDING_DOWN": 341,
+      "TRENDING_UP": 259,
+      "VOLATILE": 63
     },
     "TAOUSDT": {
-      "QUIET": 99
-    },
-    "THEUSDT": {
-      "RANGING": 99
+      "QUIET": 799
     },
     "TIAUSDT": {
-      "RANGING": 99
+      "RANGING": 799
     },
     "TLMUSDT": {
-      "RANGING": 91,
-      "TRENDING_DOWN": 8
+      "RANGING": 799
     },
     "TRIAUSDT": {
-      "TRENDING_DOWN": 99
+      "TRENDING_DOWN": 799
+    },
+    "TRUMPUSDT": {
+      "QUIET": 402,
+      "RANGING": 397
     },
     "TRXUSDT": {
-      "QUIET": 99
-    },
-    "UAIUSDT": {
-      "TRENDING_UP": 99
+      "QUIET": 799
     },
     "UNIUSDT": {
-      "QUIET": 99
+      "QUIET": 288,
+      "TRENDING_DOWN": 511
     },
     "USUSDT": {
-      "RANGING": 99
+      "RANGING": 762,
+      "TRENDING_DOWN": 5,
+      "TRENDING_UP": 32
     },
     "VANRYUSDT": {
-      "RANGING": 99
+      "RANGING": 760,
+      "VOLATILE": 39
     },
     "VELVETUSDT": {
-      "RANGING": 50,
-      "VOLATILE": 49
+      "TRENDING_DOWN": 799
+    },
+    "VIRTUALUSDT": {
+      "RANGING": 267,
+      "TRENDING_DOWN": 102,
+      "TRENDING_UP": 430
     },
     "WLDUSDT": {
-      "RANGING": 57,
-      "TRENDING_UP": 42
+      "QUIET": 336,
+      "RANGING": 463
     },
     "XLMUSDT": {
-      "TRENDING_UP": 99
+      "QUIET": 799
+    },
+    "XMRUSDT": {
+      "QUIET": 360,
+      "TRENDING_DOWN": 439
+    },
+    "XPINUSDT": {
+      "RANGING": 424,
+      "VOLATILE": 375
     },
     "XPLUSDT": {
-      "RANGING": 99
+      "RANGING": 799
     },
     "XRPUSDT": {
-      "QUIET": 99
+      "QUIET": 799
     },
     "ZECUSDT": {
-      "QUIET": 99
+      "RANGING": 799
+    },
+    "ZROUSDT": {
+      "TRENDING_UP": 434
+    },
+    "\u9f99\u867eUSDT": {
+      "RANGING": 19
     }
   },
   "post_correction_focus": {
@@ -1316,11 +1662,11 @@
       "attempts": 0,
       "average_pnl_pct": null,
       "classification": "low-sample",
-      "emitted": 0,
-      "gated": 52,
-      "generated": 66,
+      "emitted": 2,
+      "gated": 710,
+      "generated": 1632,
       "geometry_final_changed": 0,
-      "geometry_final_preserved": 14,
+      "geometry_final_preserved": 922,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "median_first_breach_sec": null,
@@ -1334,10 +1680,10 @@
       "average_pnl_pct": null,
       "classification": "low-sample",
       "emitted": 0,
-      "gated": 0,
-      "generated": 0,
+      "gated": 413,
+      "generated": 431,
       "geometry_final_changed": 0,
-      "geometry_final_preserved": 0,
+      "geometry_final_preserved": 18,
       "geometry_final_rejected": 0,
       "geometry_rejected_reasons": {},
       "median_first_breach_sec": null,
@@ -1357,393 +1703,535 @@
   },
   "quality_by_setup": {
     "FAILED_AUCTION_RECLAIM": {
-      "average_pnl_pct": -0.9448,
-      "closed": 5,
-      "emitted": 5,
-      "median_first_breach_sec": 10001.968668937683,
-      "median_terminal_duration_sec": 10003.613761901855,
-      "sl_rate": 80.0,
-      "tp_rate": 20.0,
-      "win_rate": 20.0
+      "average_pnl_pct": -0.5752,
+      "closed": 4,
+      "emitted": 4,
+      "median_first_breach_sec": 3131.808941960335,
+      "median_terminal_duration_sec": 3136.2042734622955,
+      "sl_rate": 75.0,
+      "tp_rate": 25.0,
+      "win_rate": 25.0
     },
     "MOVER_TREND_PULLBACK": {
-      "average_pnl_pct": -1.7871,
-      "closed": 1,
-      "emitted": 1,
-      "median_first_breach_sec": 8672.074809789658,
-      "median_terminal_duration_sec": 8675.000941991806,
-      "sl_rate": 100.0,
+      "average_pnl_pct": 0.4182,
+      "closed": 2,
+      "emitted": 2,
+      "median_first_breach_sec": 6911.479415655136,
+      "median_terminal_duration_sec": 6917.781600594521,
+      "sl_rate": 50.0,
       "tp_rate": 0.0,
       "win_rate": 0.0
+    },
+    "VOLUME_SURGE_BREAKOUT": {
+      "average_pnl_pct": 2.9017,
+      "closed": 1,
+      "emitted": 1,
+      "median_first_breach_sec": 854.0935089588165,
+      "median_terminal_duration_sec": 856.3273849487305,
+      "sl_rate": 0.0,
+      "tp_rate": 100.0,
+      "win_rate": 100.0
     }
   },
   "quiet_scalp_block": {
-    "average_gap_to_min": 3.49,
+    "average_gap_to_min": 12.49,
     "by_symbol": {
-      "DOGEUSDT": 3,
-      "HYPEUSDT": 5
+      "ADAUSDT": 2,
+      "AMDUSDT": 6,
+      "AVAXUSDT": 4,
+      "BCHUSDT": 6,
+      "BTCUSDT": 5,
+      "DOGEUSDT": 11,
+      "ETHUSDT": 3,
+      "NBISUSDT": 8,
+      "SUIUSDT": 3
     },
-    "samples": 8,
-    "total": 8
+    "samples": 48,
+    "total": 48
   },
   "raw_extracts": {
     "current_channel_funnel_counters": {
-      "dependency_bucket:360_SCALP:cvd:many": 6236,
-      "dependency_bucket:360_SCALP:cvd:some": 48,
-      "dependency_bucket:360_SCALP:funding_rate:few": 5363,
-      "dependency_bucket:360_SCALP:funding_rate:none": 921,
-      "dependency_bucket:360_SCALP:liquidation_clusters:few": 936,
-      "dependency_bucket:360_SCALP:liquidation_clusters:none": 5282,
-      "dependency_bucket:360_SCALP:liquidation_clusters:some": 66,
-      "dependency_bucket:360_SCALP:oi_snapshot:many": 5959,
-      "dependency_bucket:360_SCALP:oi_snapshot:none": 325,
-      "dependency_bucket:360_SCALP:order_book:few": 5217,
-      "dependency_bucket:360_SCALP:order_book:none": 1067,
-      "dependency_bucket:360_SCALP:orderblocks:none": 6284,
-      "dependency_bucket:360_SCALP:recent_ticks:many": 6284,
-      "dependency_presence:360_SCALP:cvd:present": 6284,
-      "dependency_presence:360_SCALP:funding_rate:absent": 921,
-      "dependency_presence:360_SCALP:funding_rate:present": 5363,
-      "dependency_presence:360_SCALP:liquidation_clusters:absent": 5282,
-      "dependency_presence:360_SCALP:liquidation_clusters:present": 1002,
-      "dependency_presence:360_SCALP:oi_snapshot:absent": 325,
-      "dependency_presence:360_SCALP:oi_snapshot:present": 5959,
-      "dependency_presence:360_SCALP:order_book:absent": 1067,
-      "dependency_presence:360_SCALP:order_book:present": 5217,
-      "dependency_presence:360_SCALP:orderblocks:absent": 6284,
-      "dependency_presence:360_SCALP:recent_ticks:present": 6284,
-      "dependency_quality:360_SCALP:order_book:none": 1067,
-      "dependency_quality:360_SCALP:order_book:top_of_book_only": 5217,
-      "dependency_source:360_SCALP:order_book:book_ticker": 5217,
-      "dependency_source:360_SCALP:order_book:unavailable": 1067,
-      "dependency_source:360_SCALP:orderblocks:not_implemented": 6284,
-      "dependency_state:360_SCALP:cvd:populated": 6284,
-      "dependency_state:360_SCALP:funding_rate:empty": 921,
-      "dependency_state:360_SCALP:funding_rate:populated": 5363,
-      "dependency_state:360_SCALP:liquidation_clusters:empty": 5282,
-      "dependency_state:360_SCALP:liquidation_clusters:populated": 1002,
-      "dependency_state:360_SCALP:oi_snapshot:empty": 325,
-      "dependency_state:360_SCALP:oi_snapshot:populated": 5959,
-      "dependency_state:360_SCALP:order_book:populated": 5217,
-      "dependency_state:360_SCALP:order_book:unavailable": 1067,
-      "dependency_state:360_SCALP:orderblocks:empty": 6284,
-      "dependency_state:360_SCALP:recent_ticks:populated": 6284,
-      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:basic_filters_failed": 640,
-      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:breakout_not_found": 987,
-      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:breakout_stale": 34,
-      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:move_not_fresh": 17,
-      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:volume_spike_missing": 2,
-      "evaluator_no_signal_reason:360_SCALP:CONTINUATION_LIQUIDITY_SWEEP:cls_disabled_merged_into_lsr": 1752,
-      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:basic_filters_failed": 529,
-      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:cvd_divergence_failed": 499,
-      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:ema_alignment_reject": 71,
-      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:h1_trend_not_aligned": 524,
-      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:missing_fvg_or_orderblock": 9,
-      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:regime_blocked": 4,
-      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:retest_proximity_failed": 11,
-      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:auction_not_detected": 673,
-      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:basic_filters_failed": 510,
-      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:reclaim_hold_failed": 147,
-      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:regime_blocked": 72,
-      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:tail_too_small": 282,
-      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:basic_filters_failed": 509,
-      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:ema_alignment_reject": 60,
-      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:funding_not_extreme": 1096,
-      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:missing_funding_rate": 264,
-      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:rsi_reject": 9,
-      "evaluator_no_signal_reason:360_SCALP:LIQUIDATION_REVERSAL:basic_filters_failed": 593,
-      "evaluator_no_signal_reason:360_SCALP:LIQUIDATION_REVERSAL:cascade_threshold_not_met": 920,
-      "evaluator_no_signal_reason:360_SCALP:LIQUIDATION_REVERSAL:cvd_divergence_failed": 14,
-      "evaluator_no_signal_reason:360_SCALP:LIQUIDATION_REVERSAL:missing_fvg_or_orderblock": 3,
-      "evaluator_no_signal_reason:360_SCALP:LIQUIDATION_REVERSAL:rsi_reject": 16,
-      "evaluator_no_signal_reason:360_SCALP:MA_CROSS_TREND_SHIFT:basic_filters_failed": 529,
-      "evaluator_no_signal_reason:360_SCALP:MA_CROSS_TREND_SHIFT:ma_cross_cooldown": 57,
-      "evaluator_no_signal_reason:360_SCALP:MA_CROSS_TREND_SHIFT:no_ma_cross": 1165,
-      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:avwap_reclaim_no_volume": 3,
-      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:avwap_slope_against": 54,
-      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:basic_filters_failed": 640,
-      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:no_avwap_tag": 968,
-      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:no_mover_leg": 241,
-      "evaluator_no_signal_reason:360_SCALP:MOVER_TREND_PULLBACK:basic_filters_failed": 640,
-      "evaluator_no_signal_reason:360_SCALP:MOVER_TREND_PULLBACK:mover_run_too_small": 477,
-      "evaluator_no_signal_reason:360_SCALP:MOVER_TREND_PULLBACK:no_pullback_tag": 39,
-      "evaluator_no_signal_reason:360_SCALP:MOVER_TREND_PULLBACK:no_reclaim": 260,
-      "evaluator_no_signal_reason:360_SCALP:OPENING_RANGE_BREAKOUT:feature_disabled": 1908,
-      "evaluator_no_signal_reason:360_SCALP:POST_DISPLACEMENT_CONTINUATION:adx_reject": 50,
-      "evaluator_no_signal_reason:360_SCALP:POST_DISPLACEMENT_CONTINUATION:basic_filters_failed": 129,
-      "evaluator_no_signal_reason:360_SCALP:POST_DISPLACEMENT_CONTINUATION:breakout_not_found": 192,
-      "evaluator_no_signal_reason:360_SCALP:POST_DISPLACEMENT_CONTINUATION:regime_blocked": 1381,
-      "evaluator_no_signal_reason:360_SCALP:QUIET_COMPRESSION_BREAK:basic_filters_failed": 381,
-      "evaluator_no_signal_reason:360_SCALP:QUIET_COMPRESSION_BREAK:breakout_not_detected": 82,
-      "evaluator_no_signal_reason:360_SCALP:QUIET_COMPRESSION_BREAK:compression_not_detected": 842,
-      "evaluator_no_signal_reason:360_SCALP:QUIET_COMPRESSION_BREAK:regime_blocked": 443,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:basic_filters_failed": 510,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:ema_alignment_reject": 2,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:flip_close_not_confirmed": 447,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:long_acceptance_not_held": 3,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:long_break_volume_thin": 346,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:long_disabled": 103,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:missing_fvg_or_orderblock": 1,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:reclaim_hold_failed": 15,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:regime_blocked": 72,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:retest_out_of_zone": 36,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:whipsaw_flip": 172,
-      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:wick_quality_failed": 8,
-      "evaluator_no_signal_reason:360_SCALP:STANDARD:adx_reject": 279,
-      "evaluator_no_signal_reason:360_SCALP:STANDARD:basic_filters_failed": 291,
-      "evaluator_no_signal_reason:360_SCALP:STANDARD:ema_alignment_reject": 48,
-      "evaluator_no_signal_reason:360_SCALP:STANDARD:invalid_sl_geometry": 10,
-      "evaluator_no_signal_reason:360_SCALP:STANDARD:macd_reject": 259,
-      "evaluator_no_signal_reason:360_SCALP:STANDARD:momentum_reject": 326,
-      "evaluator_no_signal_reason:360_SCALP:STANDARD:rsi_reject": 3,
-      "evaluator_no_signal_reason:360_SCALP:STANDARD:sweeps_not_detected": 135,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:basic_filters_failed": 276,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:body_conviction_fail": 34,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:ema_alignment_reject": 133,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:ema_not_tested_prev": 13,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:h1_pullback_not_confirmed": 223,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:h1_trend_not_aligned": 470,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:momentum_flat": 10,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:momentum_reject": 2,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:no_ema_reclaim_close": 187,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:no_prev_high_break": 3,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:prev_already_above_emas": 2,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:regime_blocked": 28,
-      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:rsi_reject": 7,
-      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:basic_filters_failed": 640,
-      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:breakout_not_found": 859,
-      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:breakout_stale": 55,
-      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:move_not_fresh": 115,
-      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:retest_proximity_failed": 4,
+      "dependency_bucket:360_SCALP:cvd:many": 51874,
+      "dependency_bucket:360_SCALP:funding_rate:few": 48028,
+      "dependency_bucket:360_SCALP:funding_rate:none": 3846,
+      "dependency_bucket:360_SCALP:liquidation_clusters:few": 12316,
+      "dependency_bucket:360_SCALP:liquidation_clusters:none": 35965,
+      "dependency_bucket:360_SCALP:liquidation_clusters:some": 3593,
+      "dependency_bucket:360_SCALP:oi_snapshot:many": 48569,
+      "dependency_bucket:360_SCALP:oi_snapshot:none": 3305,
+      "dependency_bucket:360_SCALP:order_book:few": 38342,
+      "dependency_bucket:360_SCALP:order_book:none": 13532,
+      "dependency_bucket:360_SCALP:orderblocks:none": 51874,
+      "dependency_bucket:360_SCALP:recent_ticks:many": 51112,
+      "dependency_bucket:360_SCALP:recent_ticks:none": 762,
+      "dependency_presence:360_SCALP:cvd:present": 51874,
+      "dependency_presence:360_SCALP:funding_rate:absent": 3846,
+      "dependency_presence:360_SCALP:funding_rate:present": 48028,
+      "dependency_presence:360_SCALP:liquidation_clusters:absent": 35965,
+      "dependency_presence:360_SCALP:liquidation_clusters:present": 15909,
+      "dependency_presence:360_SCALP:oi_snapshot:absent": 3305,
+      "dependency_presence:360_SCALP:oi_snapshot:present": 48569,
+      "dependency_presence:360_SCALP:order_book:absent": 13532,
+      "dependency_presence:360_SCALP:order_book:present": 38342,
+      "dependency_presence:360_SCALP:orderblocks:absent": 51874,
+      "dependency_presence:360_SCALP:recent_ticks:absent": 762,
+      "dependency_presence:360_SCALP:recent_ticks:present": 51112,
+      "dependency_quality:360_SCALP:order_book:none": 13532,
+      "dependency_quality:360_SCALP:order_book:top_of_book_only": 38342,
+      "dependency_source:360_SCALP:order_book:book_ticker": 38342,
+      "dependency_source:360_SCALP:order_book:unavailable": 13532,
+      "dependency_source:360_SCALP:orderblocks:not_implemented": 51874,
+      "dependency_state:360_SCALP:cvd:populated": 51874,
+      "dependency_state:360_SCALP:funding_rate:empty": 3846,
+      "dependency_state:360_SCALP:funding_rate:populated": 48028,
+      "dependency_state:360_SCALP:liquidation_clusters:empty": 35965,
+      "dependency_state:360_SCALP:liquidation_clusters:populated": 15909,
+      "dependency_state:360_SCALP:oi_snapshot:empty": 3305,
+      "dependency_state:360_SCALP:oi_snapshot:populated": 48569,
+      "dependency_state:360_SCALP:order_book:populated": 38342,
+      "dependency_state:360_SCALP:order_book:unavailable": 13532,
+      "dependency_state:360_SCALP:orderblocks:empty": 51874,
+      "dependency_state:360_SCALP:recent_ticks:empty": 762,
+      "dependency_state:360_SCALP:recent_ticks:populated": 51112,
+      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:basic_filters_failed": 3238,
+      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:breakout_not_found": 6351,
+      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:breakout_stale": 655,
+      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:missing_fvg_or_orderblock": 4,
+      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:move_not_fresh": 1546,
+      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:retest_proximity_failed": 298,
+      "evaluator_no_signal_reason:360_SCALP:BREAKDOWN_SHORT:volume_spike_missing": 12,
+      "evaluator_no_signal_reason:360_SCALP:CONTINUATION_LIQUIDITY_SWEEP:cls_disabled_merged_into_lsr": 10869,
+      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:basic_filters_failed": 2535,
+      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:cvd_divergence_failed": 3885,
+      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:ema_alignment_reject": 1476,
+      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:h1_trend_not_aligned": 2122,
+      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:missing_fvg_or_orderblock": 61,
+      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:regime_blocked": 39,
+      "evaluator_no_signal_reason:360_SCALP:DIVERGENCE_CONTINUATION:retest_proximity_failed": 64,
+      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:auction_not_detected": 4423,
+      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:basic_filters_failed": 2519,
+      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:reclaim_hold_failed": 1750,
+      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:regime_blocked": 278,
+      "evaluator_no_signal_reason:360_SCALP:FAILED_AUCTION_RECLAIM:tail_too_small": 1515,
+      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:basic_filters_failed": 2836,
+      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:cvd_divergence_failed": 15,
+      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:ema_alignment_reject": 103,
+      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:funding_not_extreme": 9314,
+      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:missing_funding_rate": 194,
+      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:momentum_reject": 3,
+      "evaluator_no_signal_reason:360_SCALP:FUNDING_EXTREME:rsi_reject": 27,
+      "evaluator_no_signal_reason:360_SCALP:LIQUIDATION_REVERSAL:basic_filters_failed": 2891,
+      "evaluator_no_signal_reason:360_SCALP:LIQUIDATION_REVERSAL:cascade_threshold_not_met": 7567,
+      "evaluator_no_signal_reason:360_SCALP:LIQUIDATION_REVERSAL:cvd_divergence_failed": 32,
+      "evaluator_no_signal_reason:360_SCALP:LIQUIDATION_REVERSAL:rsi_reject": 10,
+      "evaluator_no_signal_reason:360_SCALP:MA_CROSS_TREND_SHIFT:basic_filters_failed": 2535,
+      "evaluator_no_signal_reason:360_SCALP:MA_CROSS_TREND_SHIFT:ma_cross_cooldown": 256,
+      "evaluator_no_signal_reason:360_SCALP:MA_CROSS_TREND_SHIFT:ma_cross_htf_misaligned": 17,
+      "evaluator_no_signal_reason:360_SCALP:MA_CROSS_TREND_SHIFT:no_ma_cross": 8076,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:anchor_too_recent": 18,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:avwap_reclaim_no_volume": 68,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:avwap_slope_against": 1179,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:basic_filters_failed": 3172,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:insufficient_candles": 736,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:no_avwap_reclaim": 19,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:no_avwap_tag": 7161,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_AVWAP_SCALP:no_mover_leg": 1610,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_TREND_PULLBACK:basic_filters_failed": 3170,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_TREND_PULLBACK:insufficient_candles": 736,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_TREND_PULLBACK:mover_run_too_small": 2219,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_TREND_PULLBACK:no_pullback_tag": 1498,
+      "evaluator_no_signal_reason:360_SCALP:MOVER_TREND_PULLBACK:no_reclaim": 3627,
+      "evaluator_no_signal_reason:360_SCALP:OPENING_RANGE_BREAKOUT:feature_disabled": 12380,
+      "evaluator_no_signal_reason:360_SCALP:POST_DISPLACEMENT_CONTINUATION:adx_reject": 208,
+      "evaluator_no_signal_reason:360_SCALP:POST_DISPLACEMENT_CONTINUATION:basic_filters_failed": 761,
+      "evaluator_no_signal_reason:360_SCALP:POST_DISPLACEMENT_CONTINUATION:breakout_not_found": 1176,
+      "evaluator_no_signal_reason:360_SCALP:POST_DISPLACEMENT_CONTINUATION:ema_alignment_reject": 3,
+      "evaluator_no_signal_reason:360_SCALP:POST_DISPLACEMENT_CONTINUATION:regime_blocked": 8721,
+      "evaluator_no_signal_reason:360_SCALP:QUIET_COMPRESSION_BREAK:basic_filters_failed": 1758,
+      "evaluator_no_signal_reason:360_SCALP:QUIET_COMPRESSION_BREAK:breakout_not_detected": 174,
+      "evaluator_no_signal_reason:360_SCALP:QUIET_COMPRESSION_BREAK:compression_not_detected": 6489,
+      "evaluator_no_signal_reason:360_SCALP:QUIET_COMPRESSION_BREAK:regime_blocked": 2423,
+      "evaluator_no_signal_reason:360_SCALP:QUIET_COMPRESSION_BREAK:volume_confirmation_failed": 5,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:basic_filters_failed": 2518,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:ema_alignment_reject": 19,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:flip_close_not_confirmed": 2010,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:long_acceptance_not_held": 30,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:long_break_volume_thin": 1696,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:long_disabled": 520,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:missing_fvg_or_orderblock": 25,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:reclaim_hold_failed": 1310,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:regime_blocked": 277,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:retest_out_of_zone": 499,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:rsi_reject": 24,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:whipsaw_flip": 1431,
+      "evaluator_no_signal_reason:360_SCALP:SR_FLIP_RETEST:wick_quality_failed": 133,
+      "evaluator_no_signal_reason:360_SCALP:STANDARD:adx_reject": 2428,
+      "evaluator_no_signal_reason:360_SCALP:STANDARD:basic_filters_failed": 916,
+      "evaluator_no_signal_reason:360_SCALP:STANDARD:ema_alignment_reject": 290,
+      "evaluator_no_signal_reason:360_SCALP:STANDARD:invalid_sl_geometry": 67,
+      "evaluator_no_signal_reason:360_SCALP:STANDARD:macd_reject": 923,
+      "evaluator_no_signal_reason:360_SCALP:STANDARD:momentum_reject": 2821,
+      "evaluator_no_signal_reason:360_SCALP:STANDARD:rsi_reject": 4,
+      "evaluator_no_signal_reason:360_SCALP:STANDARD:sweeps_not_detected": 898,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:basic_filters_failed": 1492,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:body_conviction_fail": 472,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:ema_alignment_reject": 1403,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:ema_not_tested_prev": 411,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:h1_pullback_not_confirmed": 1718,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:h1_trend_not_aligned": 2173,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:missing_fvg_or_orderblock": 2,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:momentum_flat": 17,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:momentum_reject": 12,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:no_ema_reclaim_close": 445,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:no_prev_high_break": 71,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:no_prev_low_break": 26,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:prev_already_above_emas": 235,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:prev_already_below_emas": 55,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:regime_blocked": 83,
+      "evaluator_no_signal_reason:360_SCALP:TREND_PULLBACK:rsi_reject": 252,
+      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:basic_filters_failed": 3238,
+      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:breakout_not_found": 7422,
+      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:breakout_stale": 590,
+      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:missing_fvg_or_orderblock": 10,
+      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:move_not_fresh": 797,
+      "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:retest_proximity_failed": 40,
       "evaluator_no_signal_reason:360_SCALP:VOLUME_SURGE_BREAKOUT:volume_spike_missing": 7,
-      "evaluator_no_signal_reason:360_SCALP:WHALE_MOMENTUM:basic_filters_failed": 199,
-      "evaluator_no_signal_reason:360_SCALP:WHALE_MOMENTUM:momentum_reject": 958,
-      "evaluator_no_signal_reason:360_SCALP:WHALE_MOMENTUM:recent_ticks_insufficient": 387
+      "evaluator_no_signal_reason:360_SCALP:WHALE_MOMENTUM:basic_filters_failed": 766,
+      "evaluator_no_signal_reason:360_SCALP:WHALE_MOMENTUM:momentum_reject": 7856,
+      "evaluator_no_signal_reason:360_SCALP:WHALE_MOMENTUM:recent_ticks_insufficient": 1851
     },
     "current_path_funnel_counters": {
-      "dependency_missing:missing_funding_rate:360_SCALP:other:EVAL::FUNDING_EXTREME": 264,
-      "emitted:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 1,
-      "emitted:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 3,
-      "emitted:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 2,
-      "emitted:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 1,
-      "emitted:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 1,
-      "evaluator_attempted:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 1680,
-      "evaluator_attempted:360_SCALP:other:EVAL::CONTINUATION_LIQUIDITY_SWEEP": 1752,
-      "evaluator_attempted:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 1748,
-      "evaluator_attempted:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 1752,
-      "evaluator_attempted:360_SCALP:other:EVAL::FUNDING_EXTREME": 1938,
-      "evaluator_attempted:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 1546,
-      "evaluator_attempted:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 1752,
-      "evaluator_attempted:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 1909,
-      "evaluator_attempted:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 1680,
-      "evaluator_attempted:360_SCALP:other:EVAL::OPENING_RANGE_BREAKOUT": 1908,
-      "evaluator_attempted:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 1752,
-      "evaluator_attempted:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 1748,
-      "evaluator_attempted:360_SCALP:other:EVAL::SR_FLIP_RETEST": 1718,
-      "evaluator_attempted:360_SCALP:other:EVAL::STANDARD": 1386,
-      "evaluator_attempted:360_SCALP:other:EVAL::TREND_PULLBACK": 1387,
-      "evaluator_attempted:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 1680,
-      "evaluator_attempted:360_SCALP:other:EVAL::WHALE_MOMENTUM": 1546,
-      "evaluator_generated:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 105,
-      "evaluator_generated:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 68,
-      "evaluator_generated:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 1,
-      "evaluator_generated:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 149,
-      "evaluator_generated:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 492,
-      "evaluator_generated:360_SCALP:other:EVAL::SR_FLIP_RETEST": 33,
-      "evaluator_generated:360_SCALP:other:EVAL::STANDARD": 36,
-      "evaluator_generated:360_SCALP:other:EVAL::WHALE_MOMENTUM": 3,
-      "evaluator_no_signal:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 1680,
-      "evaluator_no_signal:360_SCALP:other:EVAL::CONTINUATION_LIQUIDITY_SWEEP": 1752,
-      "evaluator_no_signal:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 1647,
-      "evaluator_no_signal:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 1684,
-      "evaluator_no_signal:360_SCALP:other:EVAL::FUNDING_EXTREME": 1938,
-      "evaluator_no_signal:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 1546,
-      "evaluator_no_signal:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 1751,
-      "evaluator_no_signal:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 1906,
-      "evaluator_no_signal:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 1416,
-      "evaluator_no_signal:360_SCALP:other:EVAL::OPENING_RANGE_BREAKOUT": 1908,
-      "evaluator_no_signal:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 1752,
-      "evaluator_no_signal:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 1748,
-      "evaluator_no_signal:360_SCALP:other:EVAL::SR_FLIP_RETEST": 1715,
-      "evaluator_no_signal:360_SCALP:other:EVAL::STANDARD": 1351,
-      "evaluator_no_signal:360_SCALP:other:EVAL::TREND_PULLBACK": 1388,
-      "evaluator_no_signal:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 1680,
-      "evaluator_no_signal:360_SCALP:other:EVAL::WHALE_MOMENTUM": 1544,
-      "evaluator_no_signal_reason:adx_reject:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 50,
-      "evaluator_no_signal_reason:adx_reject:360_SCALP:other:EVAL::STANDARD": 279,
-      "evaluator_no_signal_reason:auction_not_detected:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 673,
-      "evaluator_no_signal_reason:avwap_reclaim_no_volume:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 3,
-      "evaluator_no_signal_reason:avwap_slope_against:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 54,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 640,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 529,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 510,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::FUNDING_EXTREME": 509,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 593,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 529,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 640,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 640,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 129,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 381,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::SR_FLIP_RETEST": 510,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::STANDARD": 291,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::TREND_PULLBACK": 276,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 640,
-      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::WHALE_MOMENTUM": 199,
-      "evaluator_no_signal_reason:body_conviction_fail:360_SCALP:other:EVAL::TREND_PULLBACK": 34,
-      "evaluator_no_signal_reason:breakout_not_detected:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 82,
-      "evaluator_no_signal_reason:breakout_not_found:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 987,
-      "evaluator_no_signal_reason:breakout_not_found:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 192,
-      "evaluator_no_signal_reason:breakout_not_found:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 859,
-      "evaluator_no_signal_reason:breakout_stale:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 34,
-      "evaluator_no_signal_reason:breakout_stale:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 55,
-      "evaluator_no_signal_reason:cascade_threshold_not_met:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 920,
-      "evaluator_no_signal_reason:cls_disabled_merged_into_lsr:360_SCALP:other:EVAL::CONTINUATION_LIQUIDITY_SWEEP": 1752,
-      "evaluator_no_signal_reason:compression_not_detected:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 842,
-      "evaluator_no_signal_reason:cvd_divergence_failed:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 499,
-      "evaluator_no_signal_reason:cvd_divergence_failed:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 14,
-      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 71,
-      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::FUNDING_EXTREME": 60,
-      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::SR_FLIP_RETEST": 2,
-      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::STANDARD": 48,
-      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::TREND_PULLBACK": 133,
-      "evaluator_no_signal_reason:ema_not_tested_prev:360_SCALP:other:EVAL::TREND_PULLBACK": 13,
-      "evaluator_no_signal_reason:feature_disabled:360_SCALP:other:EVAL::OPENING_RANGE_BREAKOUT": 1908,
-      "evaluator_no_signal_reason:flip_close_not_confirmed:360_SCALP:other:EVAL::SR_FLIP_RETEST": 447,
-      "evaluator_no_signal_reason:funding_not_extreme:360_SCALP:other:EVAL::FUNDING_EXTREME": 1096,
-      "evaluator_no_signal_reason:h1_pullback_not_confirmed:360_SCALP:other:EVAL::TREND_PULLBACK": 223,
-      "evaluator_no_signal_reason:h1_trend_not_aligned:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 524,
-      "evaluator_no_signal_reason:h1_trend_not_aligned:360_SCALP:other:EVAL::TREND_PULLBACK": 470,
-      "evaluator_no_signal_reason:invalid_sl_geometry:360_SCALP:other:EVAL::STANDARD": 10,
-      "evaluator_no_signal_reason:long_acceptance_not_held:360_SCALP:other:EVAL::SR_FLIP_RETEST": 3,
-      "evaluator_no_signal_reason:long_break_volume_thin:360_SCALP:other:EVAL::SR_FLIP_RETEST": 346,
-      "evaluator_no_signal_reason:long_disabled:360_SCALP:other:EVAL::SR_FLIP_RETEST": 103,
-      "evaluator_no_signal_reason:ma_cross_cooldown:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 57,
-      "evaluator_no_signal_reason:macd_reject:360_SCALP:other:EVAL::STANDARD": 259,
-      "evaluator_no_signal_reason:missing_funding_rate:360_SCALP:other:EVAL::FUNDING_EXTREME": 264,
-      "evaluator_no_signal_reason:missing_fvg_or_orderblock:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 9,
-      "evaluator_no_signal_reason:missing_fvg_or_orderblock:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 3,
-      "evaluator_no_signal_reason:missing_fvg_or_orderblock:360_SCALP:other:EVAL::SR_FLIP_RETEST": 1,
-      "evaluator_no_signal_reason:momentum_flat:360_SCALP:other:EVAL::TREND_PULLBACK": 10,
-      "evaluator_no_signal_reason:momentum_reject:360_SCALP:other:EVAL::STANDARD": 326,
-      "evaluator_no_signal_reason:momentum_reject:360_SCALP:other:EVAL::TREND_PULLBACK": 2,
-      "evaluator_no_signal_reason:momentum_reject:360_SCALP:other:EVAL::WHALE_MOMENTUM": 958,
-      "evaluator_no_signal_reason:move_not_fresh:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 17,
-      "evaluator_no_signal_reason:move_not_fresh:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 115,
-      "evaluator_no_signal_reason:mover_run_too_small:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 477,
-      "evaluator_no_signal_reason:no_avwap_tag:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 968,
-      "evaluator_no_signal_reason:no_ema_reclaim_close:360_SCALP:other:EVAL::TREND_PULLBACK": 187,
-      "evaluator_no_signal_reason:no_ma_cross:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 1165,
-      "evaluator_no_signal_reason:no_mover_leg:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 241,
-      "evaluator_no_signal_reason:no_prev_high_break:360_SCALP:other:EVAL::TREND_PULLBACK": 3,
-      "evaluator_no_signal_reason:no_pullback_tag:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 39,
-      "evaluator_no_signal_reason:no_reclaim:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 260,
-      "evaluator_no_signal_reason:prev_already_above_emas:360_SCALP:other:EVAL::TREND_PULLBACK": 2,
-      "evaluator_no_signal_reason:recent_ticks_insufficient:360_SCALP:other:EVAL::WHALE_MOMENTUM": 387,
-      "evaluator_no_signal_reason:reclaim_hold_failed:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 147,
-      "evaluator_no_signal_reason:reclaim_hold_failed:360_SCALP:other:EVAL::SR_FLIP_RETEST": 15,
-      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 4,
-      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 72,
-      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 1381,
-      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 443,
-      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::SR_FLIP_RETEST": 72,
-      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::TREND_PULLBACK": 28,
-      "evaluator_no_signal_reason:retest_out_of_zone:360_SCALP:other:EVAL::SR_FLIP_RETEST": 36,
-      "evaluator_no_signal_reason:retest_proximity_failed:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 11,
-      "evaluator_no_signal_reason:retest_proximity_failed:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 4,
-      "evaluator_no_signal_reason:rsi_reject:360_SCALP:other:EVAL::FUNDING_EXTREME": 9,
-      "evaluator_no_signal_reason:rsi_reject:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 16,
-      "evaluator_no_signal_reason:rsi_reject:360_SCALP:other:EVAL::STANDARD": 3,
-      "evaluator_no_signal_reason:rsi_reject:360_SCALP:other:EVAL::TREND_PULLBACK": 7,
-      "evaluator_no_signal_reason:sweeps_not_detected:360_SCALP:other:EVAL::STANDARD": 135,
-      "evaluator_no_signal_reason:tail_too_small:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 282,
-      "evaluator_no_signal_reason:volume_spike_missing:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 2,
+      "dependency_missing:missing_funding_rate:360_SCALP:other:EVAL::FUNDING_EXTREME": 194,
+      "emitted:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT": 2,
+      "emitted:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 5,
+      "emitted:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 13,
+      "emitted:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 2,
+      "emitted:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 3,
+      "evaluator_attempted:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 12104,
+      "evaluator_attempted:360_SCALP:other:EVAL::CONTINUATION_LIQUIDITY_SWEEP": 10868,
+      "evaluator_attempted:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 10849,
+      "evaluator_attempted:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 10870,
+      "evaluator_attempted:360_SCALP:other:EVAL::FUNDING_EXTREME": 12522,
+      "evaluator_attempted:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 10499,
+      "evaluator_attempted:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 10883,
+      "evaluator_attempted:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 13024,
+      "evaluator_attempted:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 12109,
+      "evaluator_attempted:360_SCALP:other:EVAL::OPENING_RANGE_BREAKOUT": 12380,
+      "evaluator_attempted:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 10869,
+      "evaluator_attempted:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 10849,
+      "evaluator_attempted:360_SCALP:other:EVAL::SR_FLIP_RETEST": 10704,
+      "evaluator_attempted:360_SCALP:other:EVAL::STANDARD": 8889,
+      "evaluator_attempted:360_SCALP:other:EVAL::TREND_PULLBACK": 8928,
+      "evaluator_attempted:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 12101,
+      "evaluator_attempted:360_SCALP:other:EVAL::WHALE_MOMENTUM": 10500,
+      "evaluator_generated:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 3,
+      "evaluator_generated:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 686,
+      "evaluator_generated:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 398,
+      "evaluator_generated:360_SCALP:other:EVAL::FUNDING_EXTREME": 32,
+      "evaluator_generated:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 118,
+      "evaluator_generated:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 1774,
+      "evaluator_generated:360_SCALP:other:EVAL::SR_FLIP_RETEST": 354,
+      "evaluator_generated:360_SCALP:other:EVAL::STANDARD": 581,
+      "evaluator_generated:360_SCALP:other:EVAL::TREND_PULLBACK": 65,
+      "evaluator_generated:360_SCALP:other:EVAL::WHALE_MOMENTUM": 31,
+      "evaluator_no_signal:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 12104,
+      "evaluator_no_signal:360_SCALP:other:EVAL::CONTINUATION_LIQUIDITY_SWEEP": 10869,
+      "evaluator_no_signal:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 10182,
+      "evaluator_no_signal:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 10485,
+      "evaluator_no_signal:360_SCALP:other:EVAL::FUNDING_EXTREME": 12492,
+      "evaluator_no_signal:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 10500,
+      "evaluator_no_signal:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 10884,
+      "evaluator_no_signal:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 13963,
+      "evaluator_no_signal:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 11250,
+      "evaluator_no_signal:360_SCALP:other:EVAL::OPENING_RANGE_BREAKOUT": 12380,
+      "evaluator_no_signal:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 10869,
+      "evaluator_no_signal:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 10849,
+      "evaluator_no_signal:360_SCALP:other:EVAL::SR_FLIP_RETEST": 10492,
+      "evaluator_no_signal:360_SCALP:other:EVAL::STANDARD": 8347,
+      "evaluator_no_signal:360_SCALP:other:EVAL::TREND_PULLBACK": 8867,
+      "evaluator_no_signal:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 12104,
+      "evaluator_no_signal:360_SCALP:other:EVAL::WHALE_MOMENTUM": 10473,
+      "evaluator_no_signal_reason:adx_reject:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 208,
+      "evaluator_no_signal_reason:adx_reject:360_SCALP:other:EVAL::STANDARD": 2428,
+      "evaluator_no_signal_reason:anchor_too_recent:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 18,
+      "evaluator_no_signal_reason:auction_not_detected:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 4423,
+      "evaluator_no_signal_reason:avwap_reclaim_no_volume:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 68,
+      "evaluator_no_signal_reason:avwap_slope_against:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 1179,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 3238,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 2535,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 2519,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::FUNDING_EXTREME": 2836,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 2891,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 2535,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 3172,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 3170,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 761,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 1758,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::SR_FLIP_RETEST": 2518,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::STANDARD": 916,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::TREND_PULLBACK": 1492,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 3238,
+      "evaluator_no_signal_reason:basic_filters_failed:360_SCALP:other:EVAL::WHALE_MOMENTUM": 766,
+      "evaluator_no_signal_reason:body_conviction_fail:360_SCALP:other:EVAL::TREND_PULLBACK": 472,
+      "evaluator_no_signal_reason:breakout_not_detected:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 174,
+      "evaluator_no_signal_reason:breakout_not_found:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 6351,
+      "evaluator_no_signal_reason:breakout_not_found:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 1176,
+      "evaluator_no_signal_reason:breakout_not_found:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 7422,
+      "evaluator_no_signal_reason:breakout_stale:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 655,
+      "evaluator_no_signal_reason:breakout_stale:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 590,
+      "evaluator_no_signal_reason:cascade_threshold_not_met:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 7567,
+      "evaluator_no_signal_reason:cls_disabled_merged_into_lsr:360_SCALP:other:EVAL::CONTINUATION_LIQUIDITY_SWEEP": 10869,
+      "evaluator_no_signal_reason:compression_not_detected:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 6489,
+      "evaluator_no_signal_reason:cvd_divergence_failed:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 3885,
+      "evaluator_no_signal_reason:cvd_divergence_failed:360_SCALP:other:EVAL::FUNDING_EXTREME": 15,
+      "evaluator_no_signal_reason:cvd_divergence_failed:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 32,
+      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 1476,
+      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::FUNDING_EXTREME": 103,
+      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 3,
+      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::SR_FLIP_RETEST": 19,
+      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::STANDARD": 290,
+      "evaluator_no_signal_reason:ema_alignment_reject:360_SCALP:other:EVAL::TREND_PULLBACK": 1403,
+      "evaluator_no_signal_reason:ema_not_tested_prev:360_SCALP:other:EVAL::TREND_PULLBACK": 411,
+      "evaluator_no_signal_reason:feature_disabled:360_SCALP:other:EVAL::OPENING_RANGE_BREAKOUT": 12380,
+      "evaluator_no_signal_reason:flip_close_not_confirmed:360_SCALP:other:EVAL::SR_FLIP_RETEST": 2010,
+      "evaluator_no_signal_reason:funding_not_extreme:360_SCALP:other:EVAL::FUNDING_EXTREME": 9314,
+      "evaluator_no_signal_reason:h1_pullback_not_confirmed:360_SCALP:other:EVAL::TREND_PULLBACK": 1718,
+      "evaluator_no_signal_reason:h1_trend_not_aligned:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 2122,
+      "evaluator_no_signal_reason:h1_trend_not_aligned:360_SCALP:other:EVAL::TREND_PULLBACK": 2173,
+      "evaluator_no_signal_reason:insufficient_candles:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 736,
+      "evaluator_no_signal_reason:insufficient_candles:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 736,
+      "evaluator_no_signal_reason:invalid_sl_geometry:360_SCALP:other:EVAL::STANDARD": 67,
+      "evaluator_no_signal_reason:long_acceptance_not_held:360_SCALP:other:EVAL::SR_FLIP_RETEST": 30,
+      "evaluator_no_signal_reason:long_break_volume_thin:360_SCALP:other:EVAL::SR_FLIP_RETEST": 1696,
+      "evaluator_no_signal_reason:long_disabled:360_SCALP:other:EVAL::SR_FLIP_RETEST": 520,
+      "evaluator_no_signal_reason:ma_cross_cooldown:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 256,
+      "evaluator_no_signal_reason:ma_cross_htf_misaligned:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 17,
+      "evaluator_no_signal_reason:macd_reject:360_SCALP:other:EVAL::STANDARD": 923,
+      "evaluator_no_signal_reason:missing_funding_rate:360_SCALP:other:EVAL::FUNDING_EXTREME": 194,
+      "evaluator_no_signal_reason:missing_fvg_or_orderblock:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 4,
+      "evaluator_no_signal_reason:missing_fvg_or_orderblock:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 61,
+      "evaluator_no_signal_reason:missing_fvg_or_orderblock:360_SCALP:other:EVAL::SR_FLIP_RETEST": 25,
+      "evaluator_no_signal_reason:missing_fvg_or_orderblock:360_SCALP:other:EVAL::TREND_PULLBACK": 2,
+      "evaluator_no_signal_reason:missing_fvg_or_orderblock:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 10,
+      "evaluator_no_signal_reason:momentum_flat:360_SCALP:other:EVAL::TREND_PULLBACK": 17,
+      "evaluator_no_signal_reason:momentum_reject:360_SCALP:other:EVAL::FUNDING_EXTREME": 3,
+      "evaluator_no_signal_reason:momentum_reject:360_SCALP:other:EVAL::STANDARD": 2821,
+      "evaluator_no_signal_reason:momentum_reject:360_SCALP:other:EVAL::TREND_PULLBACK": 12,
+      "evaluator_no_signal_reason:momentum_reject:360_SCALP:other:EVAL::WHALE_MOMENTUM": 7856,
+      "evaluator_no_signal_reason:move_not_fresh:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 1546,
+      "evaluator_no_signal_reason:move_not_fresh:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 797,
+      "evaluator_no_signal_reason:mover_run_too_small:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 2219,
+      "evaluator_no_signal_reason:no_avwap_reclaim:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 19,
+      "evaluator_no_signal_reason:no_avwap_tag:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 7161,
+      "evaluator_no_signal_reason:no_ema_reclaim_close:360_SCALP:other:EVAL::TREND_PULLBACK": 445,
+      "evaluator_no_signal_reason:no_ma_cross:360_SCALP:other:EVAL::MA_CROSS_TREND_SHIFT": 8076,
+      "evaluator_no_signal_reason:no_mover_leg:360_SCALP:other:EVAL::MOVER_AVWAP_SCALP": 1610,
+      "evaluator_no_signal_reason:no_prev_high_break:360_SCALP:other:EVAL::TREND_PULLBACK": 71,
+      "evaluator_no_signal_reason:no_prev_low_break:360_SCALP:other:EVAL::TREND_PULLBACK": 26,
+      "evaluator_no_signal_reason:no_pullback_tag:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 1498,
+      "evaluator_no_signal_reason:no_reclaim:360_SCALP:other:EVAL::MOVER_TREND_PULLBACK": 3627,
+      "evaluator_no_signal_reason:prev_already_above_emas:360_SCALP:other:EVAL::TREND_PULLBACK": 235,
+      "evaluator_no_signal_reason:prev_already_below_emas:360_SCALP:other:EVAL::TREND_PULLBACK": 55,
+      "evaluator_no_signal_reason:recent_ticks_insufficient:360_SCALP:other:EVAL::WHALE_MOMENTUM": 1851,
+      "evaluator_no_signal_reason:reclaim_hold_failed:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 1750,
+      "evaluator_no_signal_reason:reclaim_hold_failed:360_SCALP:other:EVAL::SR_FLIP_RETEST": 1310,
+      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 39,
+      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 278,
+      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::POST_DISPLACEMENT_CONTINUATION": 8721,
+      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 2423,
+      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::SR_FLIP_RETEST": 277,
+      "evaluator_no_signal_reason:regime_blocked:360_SCALP:other:EVAL::TREND_PULLBACK": 83,
+      "evaluator_no_signal_reason:retest_out_of_zone:360_SCALP:other:EVAL::SR_FLIP_RETEST": 499,
+      "evaluator_no_signal_reason:retest_proximity_failed:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 298,
+      "evaluator_no_signal_reason:retest_proximity_failed:360_SCALP:other:EVAL::DIVERGENCE_CONTINUATION": 64,
+      "evaluator_no_signal_reason:retest_proximity_failed:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 40,
+      "evaluator_no_signal_reason:rsi_reject:360_SCALP:other:EVAL::FUNDING_EXTREME": 27,
+      "evaluator_no_signal_reason:rsi_reject:360_SCALP:other:EVAL::LIQUIDATION_REVERSAL": 10,
+      "evaluator_no_signal_reason:rsi_reject:360_SCALP:other:EVAL::SR_FLIP_RETEST": 24,
+      "evaluator_no_signal_reason:rsi_reject:360_SCALP:other:EVAL::STANDARD": 4,
+      "evaluator_no_signal_reason:rsi_reject:360_SCALP:other:EVAL::TREND_PULLBACK": 252,
+      "evaluator_no_signal_reason:sweeps_not_detected:360_SCALP:other:EVAL::STANDARD": 898,
+      "evaluator_no_signal_reason:tail_too_small:360_SCALP:other:EVAL::FAILED_AUCTION_RECLAIM": 1515,
+      "evaluator_no_signal_reason:volume_confirmation_failed:360_SCALP:other:EVAL::QUIET_COMPRESSION_BREAK": 5,
+      "evaluator_no_signal_reason:volume_spike_missing:360_SCALP:other:EVAL::BREAKDOWN_SHORT": 12,
       "evaluator_no_signal_reason:volume_spike_missing:360_SCALP:other:EVAL::VOLUME_SURGE_BREAKOUT": 7,
-      "evaluator_no_signal_reason:whipsaw_flip:360_SCALP:other:EVAL::SR_FLIP_RETEST": 172,
-      "evaluator_no_signal_reason:wick_quality_failed:360_SCALP:other:EVAL::SR_FLIP_RETEST": 8,
-      "filtered:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 48,
-      "filtered:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 120,
-      "filtered:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 14,
-      "filtered:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 6,
-      "filtered:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 14,
-      "filtered:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 3,
-      "gated:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 220,
-      "gated:360_SCALP:orderflow_momentum:WHALE_MOMENTUM": 99,
-      "gated:360_SCALP:other:MA_CROSS_TREND_SHIFT": 1,
-      "gated:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 77,
-      "gated:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 52,
-      "gated:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 192,
-      "gated:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 197,
-      "gated:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 1100,
-      "generated:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 270,
-      "generated:360_SCALP:orderflow_momentum:WHALE_MOMENTUM": 99,
-      "generated:360_SCALP:other:MA_CROSS_TREND_SHIFT": 1,
-      "generated:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 200,
-      "generated:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 66,
-      "generated:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 200,
-      "generated:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 263,
-      "generated:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 1106,
-      "geometry:final_live:changed:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 8,
-      "geometry:final_live:changed:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 66,
-      "geometry:final_live:changed:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 6,
-      "geometry:final_live:preserved:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 50,
-      "geometry:final_live:preserved:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 123,
-      "geometry:final_live:preserved:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 14,
-      "geometry:risk_plan:changed:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 66,
-      "geometry:risk_plan:changed:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 6,
-      "geometry:risk_plan:preserved:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 50,
-      "geometry:risk_plan:preserved:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 123,
-      "geometry:risk_plan:preserved:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 14,
-      "geometry:risk_plan:preserved:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 8,
-      "geometry:risk_plan:rejected:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 48,
-      "geometry:risk_plan:rejected:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 61,
-      "geometry:risk_plan:rejected_policy:setup:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 18,
-      "geometry:risk_plan:rejected_reason:protected_structural_sl_cap_exceeded_reject_not_compress:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 18,
-      "geometry:risk_plan:rejected_reason:risk_distance_too_tight:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 19,
-      "geometry:risk_plan:rejected_reason:rr_0_06_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 24,
-      "geometry:risk_plan:rejected_reason:rr_0_15_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 6,
-      "geometry:risk_plan:rejected_reason:rr_0_84_below_1_20:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 42,
-      "scanner_preparation:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 270,
-      "scanner_preparation:360_SCALP:orderflow_momentum:WHALE_MOMENTUM": 99,
-      "scanner_preparation:360_SCALP:other:MA_CROSS_TREND_SHIFT": 1,
-      "scanner_preparation:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 200,
-      "scanner_preparation:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 66,
-      "scanner_preparation:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 200,
-      "scanner_preparation:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 263,
-      "scanner_preparation:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 1106,
-      "scored:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 50,
-      "scored:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 123,
-      "scored:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 14,
-      "scored:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 8,
-      "scored:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 66,
-      "scored:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 6
+      "evaluator_no_signal_reason:whipsaw_flip:360_SCALP:other:EVAL::SR_FLIP_RETEST": 1431,
+      "evaluator_no_signal_reason:wick_quality_failed:360_SCALP:other:EVAL::SR_FLIP_RETEST": 133,
+      "filtered:360_SCALP:breakout_momentum:BREAKDOWN_SHORT": 24,
+      "filtered:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 131,
+      "filtered:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 468,
+      "filtered:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 897,
+      "filtered:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 82,
+      "filtered:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 4,
+      "filtered:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 60,
+      "filtered:360_SCALP:trend_following:TREND_PULLBACK_EMA": 18,
+      "gated:360_SCALP:breakout_momentum:BREAKDOWN_SHORT": 7,
+      "gated:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 2682,
+      "gated:360_SCALP:mean_reversion:FUNDING_EXTREME_SIGNAL": 62,
+      "gated:360_SCALP:orderflow_momentum:WHALE_MOMENTUM": 744,
+      "gated:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 1165,
+      "gated:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 710,
+      "gated:360_SCALP:reversal:LIQUIDATION_REVERSAL": 1,
+      "gated:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 3210,
+      "gated:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 246,
+      "gated:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 3201,
+      "gated:360_SCALP:trend_following:TREND_PULLBACK_EMA": 413,
+      "generated:360_SCALP:breakout_momentum:BREAKDOWN_SHORT": 31,
+      "generated:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT": 7,
+      "generated:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 2824,
+      "generated:360_SCALP:mean_reversion:FUNDING_EXTREME_SIGNAL": 62,
+      "generated:360_SCALP:orderflow_momentum:WHALE_MOMENTUM": 744,
+      "generated:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 1870,
+      "generated:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 1632,
+      "generated:360_SCALP:reversal:LIQUIDATION_REVERSAL": 1,
+      "generated:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 3305,
+      "generated:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 250,
+      "generated:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 3365,
+      "generated:360_SCALP:trend_following:TREND_PULLBACK_EMA": 431,
+      "geometry:final_live:changed:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 95,
+      "geometry:final_live:changed:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 4,
+      "geometry:final_live:changed:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 164,
+      "geometry:final_live:preserved:360_SCALP:breakout_momentum:BREAKDOWN_SHORT": 24,
+      "geometry:final_live:preserved:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT": 7,
+      "geometry:final_live:preserved:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 142,
+      "geometry:final_live:preserved:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 705,
+      "geometry:final_live:preserved:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 922,
+      "geometry:final_live:preserved:360_SCALP:trend_following:TREND_PULLBACK_EMA": 18,
+      "geometry:risk_plan:capped:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 85,
+      "geometry:risk_plan:changed:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 4,
+      "geometry:risk_plan:changed:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 173,
+      "geometry:risk_plan:preserved:360_SCALP:breakout_momentum:BREAKDOWN_SHORT": 24,
+      "geometry:risk_plan:preserved:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT": 7,
+      "geometry:risk_plan:preserved:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 142,
+      "geometry:risk_plan:preserved:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 707,
+      "geometry:risk_plan:preserved:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 922,
+      "geometry:risk_plan:preserved:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 95,
+      "geometry:risk_plan:preserved:360_SCALP:trend_following:TREND_PULLBACK_EMA": 18,
+      "geometry:risk_plan:rejected:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 1603,
+      "geometry:risk_plan:rejected:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 11,
+      "geometry:risk_plan:rejected:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 114,
+      "geometry:risk_plan:rejected:360_SCALP:trend_following:TREND_PULLBACK_EMA": 9,
+      "geometry:risk_plan:rejected_policy:setup:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 156,
+      "geometry:risk_plan:rejected_policy:setup:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 11,
+      "geometry:risk_plan:rejected_reason:protected_structural_sl_cap_exceeded_reject_not_compress:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 156,
+      "geometry:risk_plan:rejected_reason:protected_structural_sl_cap_exceeded_reject_not_compress:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 11,
+      "geometry:risk_plan:rejected_reason:risk_distance_too_tight:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 62,
+      "geometry:risk_plan:rejected_reason:rr_0_01_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 7,
+      "geometry:risk_plan:rejected_reason:rr_0_02_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 46,
+      "geometry:risk_plan:rejected_reason:rr_0_03_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 33,
+      "geometry:risk_plan:rejected_reason:rr_0_04_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 2,
+      "geometry:risk_plan:rejected_reason:rr_0_05_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 26,
+      "geometry:risk_plan:rejected_reason:rr_0_06_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 31,
+      "geometry:risk_plan:rejected_reason:rr_0_07_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 32,
+      "geometry:risk_plan:rejected_reason:rr_0_08_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 137,
+      "geometry:risk_plan:rejected_reason:rr_0_09_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 34,
+      "geometry:risk_plan:rejected_reason:rr_0_09_below_1_20:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 4,
+      "geometry:risk_plan:rejected_reason:rr_0_10_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 35,
+      "geometry:risk_plan:rejected_reason:rr_0_11_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 48,
+      "geometry:risk_plan:rejected_reason:rr_0_12_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 37,
+      "geometry:risk_plan:rejected_reason:rr_0_13_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 45,
+      "geometry:risk_plan:rejected_reason:rr_0_14_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 47,
+      "geometry:risk_plan:rejected_reason:rr_0_16_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 35,
+      "geometry:risk_plan:rejected_reason:rr_0_17_below_1_20:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 17,
+      "geometry:risk_plan:rejected_reason:rr_0_18_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 19,
+      "geometry:risk_plan:rejected_reason:rr_0_19_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 5,
+      "geometry:risk_plan:rejected_reason:rr_0_20_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 1,
+      "geometry:risk_plan:rejected_reason:rr_0_21_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 17,
+      "geometry:risk_plan:rejected_reason:rr_0_21_below_1_20:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 13,
+      "geometry:risk_plan:rejected_reason:rr_0_22_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 10,
+      "geometry:risk_plan:rejected_reason:rr_0_23_below_1_20:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 6,
+      "geometry:risk_plan:rejected_reason:rr_0_24_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 28,
+      "geometry:risk_plan:rejected_reason:rr_0_26_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 24,
+      "geometry:risk_plan:rejected_reason:rr_0_27_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 55,
+      "geometry:risk_plan:rejected_reason:rr_0_27_below_1_20:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 1,
+      "geometry:risk_plan:rejected_reason:rr_0_29_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 39,
+      "geometry:risk_plan:rejected_reason:rr_0_30_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 38,
+      "geometry:risk_plan:rejected_reason:rr_0_31_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 61,
+      "geometry:risk_plan:rejected_reason:rr_0_32_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 53,
+      "geometry:risk_plan:rejected_reason:rr_0_34_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 54,
+      "geometry:risk_plan:rejected_reason:rr_0_36_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 17,
+      "geometry:risk_plan:rejected_reason:rr_0_37_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 6,
+      "geometry:risk_plan:rejected_reason:rr_0_39_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 3,
+      "geometry:risk_plan:rejected_reason:rr_0_40_below_1_20:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 11,
+      "geometry:risk_plan:rejected_reason:rr_0_41_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 23,
+      "geometry:risk_plan:rejected_reason:rr_0_42_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 40,
+      "geometry:risk_plan:rejected_reason:rr_0_43_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 10,
+      "geometry:risk_plan:rejected_reason:rr_0_45_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 4,
+      "geometry:risk_plan:rejected_reason:rr_0_48_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 23,
+      "geometry:risk_plan:rejected_reason:rr_0_52_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 2,
+      "geometry:risk_plan:rejected_reason:rr_0_53_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 25,
+      "geometry:risk_plan:rejected_reason:rr_0_55_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 7,
+      "geometry:risk_plan:rejected_reason:rr_0_57_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 1,
+      "geometry:risk_plan:rejected_reason:rr_0_58_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 8,
+      "geometry:risk_plan:rejected_reason:rr_0_60_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 12,
+      "geometry:risk_plan:rejected_reason:rr_0_64_below_1_20:360_SCALP:trend_following:TREND_PULLBACK_EMA": 6,
+      "geometry:risk_plan:rejected_reason:rr_0_65_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 59,
+      "geometry:risk_plan:rejected_reason:rr_0_72_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 24,
+      "geometry:risk_plan:rejected_reason:rr_0_77_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 23,
+      "geometry:risk_plan:rejected_reason:rr_0_77_below_1_20:360_SCALP:trend_following:TREND_PULLBACK_EMA": 2,
+      "geometry:risk_plan:rejected_reason:rr_0_79_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 2,
+      "geometry:risk_plan:rejected_reason:rr_0_82_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 3,
+      "geometry:risk_plan:rejected_reason:rr_0_83_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 7,
+      "geometry:risk_plan:rejected_reason:rr_0_86_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 35,
+      "geometry:risk_plan:rejected_reason:rr_0_87_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 15,
+      "geometry:risk_plan:rejected_reason:rr_0_91_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 25,
+      "geometry:risk_plan:rejected_reason:rr_0_93_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 6,
+      "geometry:risk_plan:rejected_reason:rr_0_96_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 3,
+      "geometry:risk_plan:rejected_reason:rr_0_98_below_1_20:360_SCALP:trend_following:TREND_PULLBACK_EMA": 1,
+      "geometry:risk_plan:rejected_reason:rr_1_00_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 23,
+      "geometry:risk_plan:rejected_reason:rr_1_04_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 17,
+      "geometry:risk_plan:rejected_reason:rr_1_10_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 13,
+      "geometry:risk_plan:rejected_reason:rr_1_13_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 7,
+      "geometry:risk_plan:rejected_reason:rr_1_16_below_1_20:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 5,
+      "scanner_preparation:360_SCALP:breakout_momentum:BREAKDOWN_SHORT": 31,
+      "scanner_preparation:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT": 7,
+      "scanner_preparation:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 2824,
+      "scanner_preparation:360_SCALP:mean_reversion:FUNDING_EXTREME_SIGNAL": 62,
+      "scanner_preparation:360_SCALP:orderflow_momentum:WHALE_MOMENTUM": 744,
+      "scanner_preparation:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 1870,
+      "scanner_preparation:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 1632,
+      "scanner_preparation:360_SCALP:reversal:LIQUIDATION_REVERSAL": 1,
+      "scanner_preparation:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 3305,
+      "scanner_preparation:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 250,
+      "scanner_preparation:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 3365,
+      "scanner_preparation:360_SCALP:trend_following:TREND_PULLBACK_EMA": 431,
+      "scored:360_SCALP:breakout_momentum:BREAKDOWN_SHORT": 24,
+      "scored:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT": 7,
+      "scored:360_SCALP:divergence:DIVERGENCE_CONTINUATION": 142,
+      "scored:360_SCALP:reclaim_retest:FAILED_AUCTION_RECLAIM": 705,
+      "scored:360_SCALP:reclaim_retest:SR_FLIP_RETEST": 922,
+      "scored:360_SCALP:reversal:LIQUIDITY_SWEEP_REVERSAL": 95,
+      "scored:360_SCALP:trend_following:MOVER_AVWAP_SCALP": 4,
+      "scored:360_SCALP:trend_following:MOVER_TREND_PULLBACK": 164,
+      "scored:360_SCALP:trend_following:TREND_PULLBACK_EMA": 18
     },
     "previous_channel_funnel_counters": {},
     "previous_path_funnel_counters": {},
-    "record_count_current_window": 6,
-    "record_count_previous_window": 8,
-    "record_count_scoped": 725
+    "record_count_current_window": 7,
+    "record_count_previous_window": 6,
+    "record_count_scoped": 732
   },
   "recommended_operator_focus": {
-    "most_likely_bottleneck": "WHALE_MOMENTUM",
+    "most_likely_bottleneck": "LIQUIDITY_SWEEP_REVERSAL",
     "most_promising_healthy_path": null,
     "most_suspicious_degradation": "FAILED_AUCTION_RECLAIM",
     "suggested_next_investigation_target": "FAILED_AUCTION_RECLAIM"
   },
   "regime_distribution": {
-    "QUIET": 3122,
-    "RANGING": 2585,
-    "TRENDING_DOWN": 602,
-    "TRENDING_UP": 1043,
-    "VOLATILE": 544
+    "QUIET": 25203,
+    "RANGING": 25337,
+    "TRENDING_DOWN": 7376,
+    "TRENDING_UP": 5861,
+    "VOLATILE": 2183
   },
   "runtime_health": {
     "breaker_cooldown_remaining_s": null,
     "breaker_trip_reason": "",
     "breaker_tripped": false,
-    "health": "healthy",
-    "heartbeat_age_sec": 9,
-    "heartbeat_warning": false,
-    "latest_record_age_sec": 11124,
+    "health": "starting",
+    "heartbeat_age_sec": 900,
+    "heartbeat_warning": true,
+    "latest_record_age_sec": 48806,
     "overall": "stale",
     "records_fresh": false,
     "running": true,
