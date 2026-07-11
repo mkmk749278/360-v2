@@ -23,6 +23,7 @@ from config import (
     ALERTS_BUFFER_MAX,
     ALERTS_COOLDOWN_TF_MULT,
     ALERTS_EVAL_INTERVAL_SEC,
+    ALERTS_MIN_VOLUME_24H_USD,
     ALERTS_NEAR_LEVEL_COOLDOWN_SEC,
     ALERTS_PERSIST_PATH,
     ALERTS_PUSH_MAX_PER_HOUR,
@@ -95,11 +96,17 @@ class AlertService:
         symbols_getter: Callable[[], List[str]],
         on_alert: Optional[Callable[[Alert], Any]] = None,
         persist_path: str = ALERTS_PERSIST_PATH,
+        volume_24h_getter: Optional[Callable[[str], Optional[float]]] = None,
     ) -> None:
         self._data_store = data_store
         self._level_book_getter = level_book_getter
         self._symbols_getter = symbols_getter
         self._on_alert = on_alert
+        self._volume_24h_getter = volume_24h_getter
+        # The restored feed may hold alerts for symbols the universe gate
+        # now excludes.  Volume data isn't available until the boot
+        # refresh_pairs(), so the purge runs lazily on the first sweep.
+        self._restored_feed_purged = False
         self._persist_path = Path(persist_path)
         self._alerts: Deque[Alert] = deque(maxlen=ALERTS_BUFFER_MAX)
         # (symbol, alert_type, timeframe) -> wall-clock ts of last fire
@@ -137,6 +144,7 @@ class AlertService:
 
     async def sweep(self) -> List[Alert]:
         """One pass over the universe.  Returns the alerts fired this pass."""
+        self._purge_restored_feed_once()
         try:
             symbols = list(self._symbols_getter() or [])
         except Exception:
@@ -144,6 +152,8 @@ class AlertService:
             return []
         fired: List[Alert] = []
         for i, symbol in enumerate(symbols):
+            if not self._universe_ok(symbol):
+                continue
             try:
                 fired.extend(self._evaluate_symbol(symbol))
             except Exception:
@@ -155,6 +165,42 @@ class AlertService:
         if fired or self._dirty:
             await self._persist_maybe()
         return fired
+
+    def _universe_ok(self, symbol: str) -> bool:
+        """Universe gate: alerts only for liquid pairs (majors + midcaps).
+
+        Fail-closed on unknown volume — volume is only missing before the
+        boot ``refresh_pairs()`` (fatal on failure), and sweeps start after
+        it; the cost of a wrong skip is one missed informational card."""
+        if self._volume_24h_getter is None or ALERTS_MIN_VOLUME_24H_USD <= 0:
+            return True
+        try:
+            vol = self._volume_24h_getter(symbol)
+        except Exception:
+            return False
+        return vol is not None and vol >= ALERTS_MIN_VOLUME_24H_USD
+
+    def _purge_restored_feed_once(self) -> None:
+        """Drop restored-feed alerts for symbols the universe gate now
+        excludes.  Runs on the first sweep (not in ``_load``) because the
+        PairManager has no volume data until the boot refresh."""
+        if self._restored_feed_purged:
+            return
+        self._restored_feed_purged = True
+        if self._volume_24h_getter is None or ALERTS_MIN_VOLUME_24H_USD <= 0:
+            return
+        kept = [a for a in self._alerts if self._universe_ok(a.symbol)]
+        dropped = len(self._alerts) - len(kept)
+        if dropped:
+            # deque iterates newest-first; rebuilding from the kept list
+            # preserves that order (index 0 stays the newest alert).
+            self._alerts = deque(kept, maxlen=ALERTS_BUFFER_MAX)
+            self._dirty = True
+            log.info(
+                "alerts: purged {} restored alerts below the "
+                "{:.0f} USD 24h-volume universe gate",
+                dropped, ALERTS_MIN_VOLUME_24H_USD,
+            )
 
     # ------------------------------------------------------------------
     # Evaluation
@@ -346,10 +392,28 @@ class AlertService:
             if not self._persist_path.exists():
                 return
             data = json.loads(self._persist_path.read_text())
+            near_types = {AlertType.NEAR_SUPPORT.value, AlertType.NEAR_RESISTANCE.value}
+            dropped_junk = 0
             for raw in reversed(data.get("alerts", [])):
                 alert = Alert.from_dict(raw)
-                if alert is not None:
-                    self._alerts.appendleft(alert)
+                if alert is None:
+                    continue
+                # Pre-v3 near-level alerts (no distinct-touch geometry) are
+                # the "523 touches" junk cohort — drop them so the feed
+                # cleans on the first post-deploy restart.
+                if (
+                    alert.alert_type in near_types
+                    and "touch_count" not in (alert.metrics or {})
+                ):
+                    dropped_junk += 1
+                    continue
+                self._alerts.appendleft(alert)
+            if dropped_junk:
+                self._dirty = True  # rewrite the file without the junk
+                log.info(
+                    "alerts: dropped {} pre-v3 near-level alerts from the "
+                    "restored feed (no distinct-touch geometry)", dropped_junk,
+                )
             fired = data.get("last_fired", {})
             if isinstance(fired, dict):
                 self._last_fired = {

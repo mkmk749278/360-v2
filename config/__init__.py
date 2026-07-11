@@ -3128,6 +3128,39 @@ ALERTS_NEAR_LEVEL_PCT: float = _safe_float("ALERTS_NEAR_LEVEL_PCT", "0.3")
 #: reason — the floor keeps the feed to levels a trader would draw.
 ALERTS_NEAR_LEVEL_MIN_TOUCHES: int = _safe_int("ALERTS_NEAR_LEVEL_MIN_TOUCHES", "3")
 
+#: Universe gate: only symbols whose 24h quote volume is at or above this
+#: many USD are swept for alerts (majors + midcaps — the coins 100eyes
+#: covers).  The scanner still trades the full universe; this only curates
+#: the informational feed.  Set <= 0 to disable the gate.
+ALERTS_MIN_VOLUME_24H_USD: float = _safe_float("ALERTS_MIN_VOLUME_24H_USD", "50000000")
+
+#: Near-level touch quality (alert-side re-count; the LevelBook's own
+#: scoring is money-path shared and stays untouched).  The book counts
+#: every candle that straddles a level, so a chop range reads as a
+#: "523-touch level" — the alert detector instead counts DISTINCT touch
+#: events and rejects ranges.
+#: Band half-width (%) around the level that counts as touching it.
+ALERTS_NEAR_LEVEL_TOUCH_TOLERANCE_PCT: float = _safe_float(
+    "ALERTS_NEAR_LEVEL_TOUCH_TOLERANCE_PCT", "0.15"
+)
+#: Closed 1h bars examined when re-counting touches (~5 days).
+ALERTS_NEAR_LEVEL_LOOKBACK: int = _safe_int("ALERTS_NEAR_LEVEL_LOOKBACK", "120")
+#: A new touch only counts after price has stayed OUT of the band for at
+#: least this many consecutive bars ...
+ALERTS_NEAR_LEVEL_MIN_SEPARATION_BARS: int = _safe_int(
+    "ALERTS_NEAR_LEVEL_MIN_SEPARATION_BARS", "3"
+)
+#: ... AND some close in between sat at least this % away from the level
+#: (prominence — hovering at a level is one touch, not many).
+ALERTS_NEAR_LEVEL_MIN_LEAVE_PCT: float = _safe_float(
+    "ALERTS_NEAR_LEVEL_MIN_LEAVE_PCT", "0.5"
+)
+#: Chop rejection: if more than this fraction of the lookback bars sit
+#: inside the band, the "level" is a trading range, not S/R — no alert.
+ALERTS_NEAR_LEVEL_MAX_IN_BAND_FRAC: float = _safe_float(
+    "ALERTS_NEAR_LEVEL_MAX_IN_BAND_FRAC", "0.25"
+)
+
 #: Per-type refire cooldowns.  Timeframe-relative types use a multiple of
 #: the timeframe duration (an RSI-extreme 1h alert may refire after
 #: 2 × 1h); wall-clock types use fixed seconds.
