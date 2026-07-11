@@ -481,6 +481,10 @@ class CryptoSignalEngine:
             level_book_getter=lambda: self._scanner.level_book,
             symbols_getter=lambda: list(self.pair_mgr.symbols),
             on_alert=push_alert,
+            volume_24h_getter=lambda s: (
+                self.pair_mgr.pairs[s].volume_24h_usd
+                if s in self.pair_mgr.pairs else None
+            ),
         )
 
         # Wire the free-channel highlight callback so the monitor posts winning
