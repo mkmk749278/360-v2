@@ -25,6 +25,10 @@ from config import (
     ALERTS_EVAL_INTERVAL_SEC,
     ALERTS_NEAR_LEVEL_COOLDOWN_SEC,
     ALERTS_PERSIST_PATH,
+    ALERTS_PUSH_MAX_PER_HOUR,
+    ALERTS_PUSH_TIMEFRAMES,
+    ALERTS_SYMBOL_MAX_PER_WINDOW,
+    ALERTS_SYMBOL_WINDOW_SEC,
     ALERTS_VOLATILITY_COOLDOWN_SEC,
     ALERTS_VOLUME_COOLDOWN_SEC,
 )
@@ -43,6 +47,24 @@ _STALE_TF_PERIODS = 3.0
 #: Persist at most this often (seconds) — the feed is a convenience, not
 #: a ledger; losing a few seconds of it on a crash is acceptable.
 _PERSIST_MIN_INTERVAL_S = 10.0
+
+#: Information-value order used when a symbol's per-window budget binds:
+#: structural observations (divergence, S/R) beat state observations
+#: (RSI extreme) beat single-candle event echoes (volume, volatility).
+_TYPE_PRIORITY: Dict[str, int] = {
+    AlertType.RSI_BULLISH_DIVERGENCE.value: 0,
+    AlertType.RSI_BEARISH_DIVERGENCE.value: 0,
+    AlertType.NEAR_SUPPORT.value: 1,
+    AlertType.NEAR_RESISTANCE.value: 1,
+    AlertType.RSI_OVERBOUGHT.value: 2,
+    AlertType.RSI_OVERSOLD.value: 2,
+    AlertType.VOLUME_SPIKE.value: 3,
+    AlertType.ABNORMAL_VOLATILITY.value: 4,
+}
+
+#: Timeframe rank so a 4h observation outranks the same type on 15m when
+#: the symbol budget binds.
+_TF_RANK: Dict[str, int] = {"4h": 0, "1h": 1, "15m": 2}
 
 
 def _cooldown_seconds(alert_type: str, timeframe: str) -> float:
@@ -82,6 +104,12 @@ class AlertService:
         self._alerts: Deque[Alert] = deque(maxlen=ALERTS_BUFFER_MAX)
         # (symbol, alert_type, timeframe) -> wall-clock ts of last fire
         self._last_fired: Dict[str, float] = {}
+        # symbol -> recent fire timestamps (per-symbol cross-type budget).
+        # In-memory only: the window is short-lived, so a restart resetting
+        # it costs at most one extra alert per symbol.
+        self._symbol_fires: Dict[str, Deque[float]] = {}
+        # Push-side sliding window (wall-clock ts of alerts we pushed).
+        self._push_times: Deque[float] = deque()
         # (symbol, timeframe) -> last kline-update ts already evaluated,
         # so each closed candle is judged exactly once.
         self._last_eval_ts: Dict[str, float] = {}
@@ -139,7 +167,43 @@ class AlertService:
             if candles is None:
                 continue
             out.extend(self._run_tf_detectors(symbol, tf, candles))
-        return [a for a in out if self._passes_cooldown(a)]
+        out = self._coalesce_same_candle(out)
+        # Priority order BEFORE cooldown + budget, so when the symbol's
+        # window budget binds it's the low-information types that drop.
+        out.sort(
+            key=lambda a: (
+                _TYPE_PRIORITY.get(a.alert_type, 9),
+                _TF_RANK.get(a.timeframe, 9),
+            )
+        )
+        kept: List[Alert] = []
+        for a in out:
+            # Both gates are checked BEFORE either is stamped, so a
+            # budget rejection can't consume the type cooldown (which
+            # would silently mute the alert for the whole cooldown).
+            if not self._cooldown_ok(a) or not self._symbol_budget_ok(a):
+                continue
+            self._stamp_fire(a)
+            kept.append(a)
+        return kept
+
+    @staticmethod
+    def _coalesce_same_candle(found: List[Alert]) -> List[Alert]:
+        """A volume spike and an abnormal-volatility alert fired by the
+        same candle are one market event, not two — the volume card
+        already carries the move %.  Keep volume, drop volatility."""
+        has_volume = {
+            (a.symbol, a.timeframe)
+            for a in found
+            if a.alert_type == AlertType.VOLUME_SPIKE.value
+        }
+        return [
+            a for a in found
+            if not (
+                a.alert_type == AlertType.ABNORMAL_VOLATILITY.value
+                and (a.symbol, a.timeframe) in has_volume
+            )
+        ]
 
     def _run_tf_detectors(self, symbol: str, tf: str, candles: dict) -> List[Alert]:
         found: List[Alert] = []
@@ -190,15 +254,31 @@ class AlertService:
             self._last_eval_ts[key] = update_ts
         return candles
 
-    def _passes_cooldown(self, alert: Alert) -> bool:
+    def _cooldown_ok(self, alert: Alert) -> bool:
         key = f"{alert.symbol}|{alert.alert_type}|{alert.timeframe}"
-        now = time.time()
         last = self._last_fired.get(key, 0.0)
-        if now - last < _cooldown_seconds(alert.alert_type, alert.timeframe):
-            return False
-        self._last_fired[key] = now
+        return time.time() - last >= _cooldown_seconds(
+            alert.alert_type, alert.timeframe
+        )
+
+    def _symbol_budget_ok(self, alert: Alert) -> bool:
+        """Cross-type per-symbol budget: at most
+        ``ALERTS_SYMBOL_MAX_PER_WINDOW`` alerts per symbol per rolling
+        ``ALERTS_SYMBOL_WINDOW_SEC`` — one violent candle must not turn
+        into a card stack for the same coin."""
+        now = time.time()
+        fires = self._symbol_fires.setdefault(alert.symbol, deque())
+        while fires and now - fires[0] > ALERTS_SYMBOL_WINDOW_SEC:
+            fires.popleft()
+        return len(fires) < ALERTS_SYMBOL_MAX_PER_WINDOW
+
+    def _stamp_fire(self, alert: Alert) -> None:
+        now = time.time()
+        self._last_fired[
+            f"{alert.symbol}|{alert.alert_type}|{alert.timeframe}"
+        ] = now
+        self._symbol_fires.setdefault(alert.symbol, deque()).append(now)
         self._dirty = True
-        return True
 
     # ------------------------------------------------------------------
     # Publish + read side
@@ -211,11 +291,33 @@ class AlertService:
             "ALERT {} {} ({}) — {}",
             alert.symbol, alert.alert_type, alert.timeframe, alert.message,
         )
-        if self._on_alert is not None:
+        if self._on_alert is not None and self._should_push(alert):
             try:
                 self._on_alert(alert)
             except Exception:
                 log.exception("alerts: on_alert callback failed (non-fatal)")
+
+    def _should_push(self, alert: Alert) -> bool:
+        """Push curation: the feed takes every published alert, the phone
+        only buzzes for higher-timeframe observations, inside an hourly
+        budget.  A dropped push is invisible spam-prevention, not a lost
+        alert — the card is still in the feed."""
+        allowed = {
+            tf.strip() for tf in ALERTS_PUSH_TIMEFRAMES.split(",") if tf.strip()
+        }
+        if allowed and alert.timeframe not in allowed:
+            return False
+        now = time.time()
+        while self._push_times and now - self._push_times[0] > 3600.0:
+            self._push_times.popleft()
+        if len(self._push_times) >= ALERTS_PUSH_MAX_PER_HOUR:
+            log.debug(
+                "alerts: push budget ({}h⁻¹) exhausted — feed-only for {}",
+                ALERTS_PUSH_MAX_PER_HOUR, alert.symbol,
+            )
+            return False
+        self._push_times.append(now)
+        return True
 
     def recent(
         self,

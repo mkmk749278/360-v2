@@ -3122,6 +3122,12 @@ ALERTS_VOLUME_SPIKE_MULT: float = _safe_float("ALERTS_VOLUME_SPIKE_MULT", "5.0")
 #: level (and the level has at least the touch count the book scored it with).
 ALERTS_NEAR_LEVEL_PCT: float = _safe_float("ALERTS_NEAR_LEVEL_PCT", "0.3")
 
+#: Quality floor for near-level alerts: a "level" the market has only
+#: touched once or twice is not a level, it's a price the market visited.
+#: 100eyes-class S/R cards lead with the touch count for exactly this
+#: reason — the floor keeps the feed to levels a trader would draw.
+ALERTS_NEAR_LEVEL_MIN_TOUCHES: int = _safe_int("ALERTS_NEAR_LEVEL_MIN_TOUCHES", "3")
+
 #: Per-type refire cooldowns.  Timeframe-relative types use a multiple of
 #: the timeframe duration (an RSI-extreme 1h alert may refire after
 #: 2 × 1h); wall-clock types use fixed seconds.
@@ -3129,6 +3135,22 @@ ALERTS_COOLDOWN_TF_MULT: float = _safe_float("ALERTS_COOLDOWN_TF_MULT", "2.0")
 ALERTS_NEAR_LEVEL_COOLDOWN_SEC: int = _safe_int("ALERTS_NEAR_LEVEL_COOLDOWN_SEC", "14400")
 ALERTS_VOLATILITY_COOLDOWN_SEC: int = _safe_int("ALERTS_VOLATILITY_COOLDOWN_SEC", "3600")
 ALERTS_VOLUME_COOLDOWN_SEC: int = _safe_int("ALERTS_VOLUME_COOLDOWN_SEC", "3600")
+
+#: Per-symbol feed budget across ALL alert types.  One violent candle
+#: trips volume + volatility + RSI at once and a hovering price re-trips
+#: level alerts — without a cross-type budget a single symbol floods the
+#: feed (the "spam" failure mode).  At most this many alerts per symbol
+#: per rolling window; higher-priority types win the budget (divergence >
+#: near-level > RSI extreme > volume > volatility).
+ALERTS_SYMBOL_MAX_PER_WINDOW: int = _safe_int("ALERTS_SYMBOL_MAX_PER_WINDOW", "2")
+ALERTS_SYMBOL_WINDOW_SEC: int = _safe_int("ALERTS_SYMBOL_WINDOW_SEC", "3600")
+
+#: Push curation — the FEED can be rich (it's pull-based, filterable in
+#: the app); the PHONE must not buzz for every 15m wiggle.  Only alerts
+#: on these timeframes push, and pushes are additionally capped per hour
+#: across the alerts topic.  Everything still lands in the feed.
+ALERTS_PUSH_TIMEFRAMES: str = os.getenv("ALERTS_PUSH_TIMEFRAMES", "1h,4h")
+ALERTS_PUSH_MAX_PER_HOUR: int = _safe_int("ALERTS_PUSH_MAX_PER_HOUR", "12")
 
 #: Persistence file so a deploy/restart neither loses the recent feed nor
 #: refires every currently-true condition (the cooldown map is persisted

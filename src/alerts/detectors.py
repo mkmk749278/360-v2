@@ -20,6 +20,7 @@ from config import (
     ALERTS_DIVERGENCE_PIVOT_K,
     ALERTS_DIVERGENCE_ZONE_HIGH,
     ALERTS_DIVERGENCE_ZONE_LOW,
+    ALERTS_NEAR_LEVEL_MIN_TOUCHES,
     ALERTS_NEAR_LEVEL_PCT,
     ALERTS_RSI_OVERBOUGHT,
     ALERTS_RSI_OVERSOLD,
@@ -138,6 +139,13 @@ def detect_rsi_divergence(symbol: str, timeframe: str, candles: dict) -> Optiona
                 {
                     "rsi_first": round(float(rsi_full[a]), 2),
                     "rsi_second": round(float(rsi_full[b]), 2),
+                    # Pivot geometry so the app can draw the divergence
+                    # line on its chart: bars back from the latest
+                    # closed candle + the pivot prices.
+                    "pivot_a_bars_ago": int(n - 1 - a),
+                    "pivot_b_bars_ago": int(n - 1 - b),
+                    "pivot_a_price": float(high[a]),
+                    "pivot_b_price": float(high[b]),
                 },
             )
 
@@ -163,6 +171,10 @@ def detect_rsi_divergence(symbol: str, timeframe: str, candles: dict) -> Optiona
                 {
                     "rsi_first": round(float(rsi_full[a]), 2),
                     "rsi_second": round(float(rsi_full[b]), 2),
+                    "pivot_a_bars_ago": int(n - 1 - a),
+                    "pivot_b_bars_ago": int(n - 1 - b),
+                    "pivot_a_price": float(low[a]),
+                    "pivot_b_price": float(low[b]),
                 },
             )
     return None
@@ -239,6 +251,8 @@ def detect_near_level(
         return None
     if level is None:
         return None
+    if level.touches < ALERTS_NEAR_LEVEL_MIN_TOUCHES:
+        return None  # one or two touches is a visited price, not a level
     is_resistance = level.price >= price
     if (level.type == "resistance") != is_resistance:
         return None
