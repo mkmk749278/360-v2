@@ -204,6 +204,20 @@ Ruff clean, mypy delta zero, compose config validates (both profiles).
 The dedupe test caught a real bug (fresh findings suppressed inside the
 first cooldown window) — fixed before ship.
 
+### Ops dashboard upgrade (same session, 360ce-ops branch `claude/audit-report-implementation-knx1h1`)
+
+- **/audit** — audit-findings board: F-01..F-20 + S48 extras with colour-badged
+  done/partial/open/owner status, needs-attention-first sort, summary-counter
+  filters. Backed by `app/audit_findings.py` — **update it at session end**
+  whenever a finding's status changes (same discipline as this file).
+- **/data** — full read-only file browser of `/engine-data` (size + colour-coded
+  write recency as a liveness readout) + raw downloads via `/data/raw/{path}`
+  (resolve-then-contain traversal guard, tested).
+- **Coloured badges** (signal lifecycle, severity, audit status) + **sortable
+  tables site-wide** (`static/sort.js`, numeric-aware) + Signals lists open
+  positions first (engine `is_open` stamp, heuristic fallback).
+- Ops suite 327 passed (was 311).
+
 ### NEXT (owner, ~20 min total — the paging is inert until 1+2 are done)
 
 1. Create the alert bot (@BotFather), DM it once, get the chat id from
