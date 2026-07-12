@@ -38,6 +38,7 @@ from config import (
     CHANNEL_SCALP_SUPERTREND_ENABLED,
     CHANNEL_SCALP_VWAP_ENABLED,
     BTC_STATE_ENABLED,
+    MARKET_CONTEXT_ENABLED,
     BTC_STATE_HAIRCUT_ENABLED,
     BTC_STATE_K,
     BTC_STATE_FLOOR,
@@ -198,6 +199,7 @@ from src.btc_state import (
     compute_haircut_factor,
     macro_direction,
 )
+from src.market_context import build_market_context
 from src.volume_divergence import check_volume_divergence_gate
 from src.vwap import check_vwap_extension, compute_vwap
 from src.ai_engine import get_ai_insight
@@ -7185,6 +7187,29 @@ class Scanner:
                 log.debug(
                     "BTC-State stamp error for {} {} (fail open): {}",
                     symbol, chan_name, _bs_exc,
+                )
+
+        # ── Market-Context vector (Layer A) — observe-only stamp ─────────────
+        # Compute + stamp the "what regime is it now" vector on every signal.
+        # All inputs are already warm here (entry_regime, ATR percentile,
+        # btc_state, funding_rate), so this adds no new reads (Cost Discipline).
+        # Off the money path: nothing consumes these fields to change live
+        # output in Phase 1 — they feed the ops edge matrix + the allocator.
+        if MARKET_CONTEXT_ENABLED:
+            try:
+                _mc = build_market_context(
+                    regime_label=getattr(sig, "entry_regime", "") or None,
+                    htf_trend_prior=getattr(sig, "entry_regime_15m", "") or None,
+                    atr_percentile=getattr(sig, "atr_percentile_at_entry", None),
+                    funding_rate=_funding_rate,
+                    btc_state=float(getattr(sig, "btc_state", 0.0) or 0.0),
+                )
+                for _k, _v in _mc.as_signal_fields().items():
+                    setattr(sig, _k, _v)
+            except Exception as _mc_exc:
+                log.debug(
+                    "Market-context stamp error for {} {} (fail open): {}",
+                    symbol, chan_name, _mc_exc,
                 )
 
         # Reclassify after all post-score confidence adjustments (stat filter, pair-analysis

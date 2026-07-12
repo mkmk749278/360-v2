@@ -469,6 +469,16 @@ BTC_STATE_COUPLING_TF: str = _safe_choice(
 BTC_STATE_COUPLING_LOOKBACK: int = _safe_int("BTC_STATE_COUPLING_LOOKBACK", "200")
 
 # ---------------------------------------------------------------------------
+# Market-Context Engine (src/market_context.py, Layer A) — Autonomous Portfolio
+# ---------------------------------------------------------------------------
+# Off the money path: when ON (default), the scanner computes + STAMPS the
+# per-scan market-context vector (session / Wyckoff phase / volatility / funding
+# / BTC-rotation) on every signal.  Nothing consumes it to change live output in
+# Phase 1 — it is the key the Strategy×Context edge matrix and the autonomous
+# allocator route on.  Pure/cheap: no hot-path network or Firestore reads.
+MARKET_CONTEXT_ENABLED: bool = _safe_bool("MARKET_CONTEXT_ENABLED", "true")
+
+# ---------------------------------------------------------------------------
 # Counter-trend-LONG macro-direction suppression (S39 — the validated scalp filter)
 # ---------------------------------------------------------------------------
 # SCALP-FIRST (owner directive): this is a thin context filter on genuine counter-

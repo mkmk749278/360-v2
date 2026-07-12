@@ -338,6 +338,22 @@ class Signal:
     last_lifecycle_check: Optional[datetime] = None  # UTC timestamp of last check
     lifecycle_alert_level: str = "GREEN"          # GREEN, YELLOW, RED
 
+    # ---- Market-Context vector (src/market_context.py, Layer A) ----
+    # Stamped by the scanner on every signal (observe-only in Phase 1): the
+    # "what regime is it now" vector the Strategy×Context edge matrix and the
+    # autonomous allocator route on.  Off the money path — nothing consumes
+    # these to change live output yet.  Stringly-typed for clean serialisation.
+    mc_session: str = ""                          # OVERLAP/NY/LONDON/ASIA/OFF_HOURS
+    mc_is_weekend: bool = False
+    mc_session_quality: float = 0.0               # 0-1 liquidity/edge proxy
+    mc_phase: str = ""                            # Wyckoff: MARKUP/MARKDOWN/ACCUMULATION/...
+    mc_volatility: str = ""                       # COMPRESSED/NORMAL/EXPANDED/CASCADE
+    mc_funding: str = ""                          # NEUTRAL/CROWDED_*/EXTREME_*
+    mc_rotation: str = ""                         # BTC_RISING/BTC_FALLING/BTC_NEUTRAL
+    mc_btc_led: bool = False
+    mc_cascade_active: bool = False
+    mc_context_key: str = ""                      # composite key for the edge matrix
+
     # ---- MTF confluence score (0-1, populated by scanner) ----
     mtf_score: float = 0.0
 
