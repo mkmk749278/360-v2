@@ -57,6 +57,7 @@ def _build_registry() -> Dict[str, Tunable]:
     # test overrides of config values are honoured.
     from config import (
         ACTIVE_DUP_GUARD_ENABLED,
+        ALLOCATOR_RECOMMEND_ENABLED,
         BE_ARM_NOISE_MULT,
         BE_ARM_R_MULT,
         BE_ARM_TP1_CAP_FRACTION,
@@ -68,6 +69,7 @@ def _build_registry() -> Dict[str, Tunable]:
         COHORT_EDGE_SUPPRESS_BELOW,
         LOSS_STREAK_CAP_HOURS,
         LOSS_STREAK_ESCALATION_ENABLED,
+        MARKET_CONTEXT_ENABLED,
         MARK_FEED_STALENESS_ENABLED,
         MARK_FEED_STALENESS_MAX_AGE_SEC,
         MOVER_AVWAP_SCALP_ENABLED,
@@ -76,6 +78,8 @@ def _build_registry() -> Dict[str, Tunable]:
         NOISE_FLOOR_ATR_MULT,
         NOISE_FLOOR_MAX_SL_PCT,
         NOISE_FLOOR_STOPS_ENABLED,
+        SHADOW_STRATEGIES_ENABLED,
+        SUPPRESSION_AUDIT_ENABLED,
     )
 
     items = [
@@ -393,6 +397,64 @@ def _build_registry() -> Dict[str, Tunable]:
             min_value=-2.0,
             max_value=0.0,
             unit="%/trade",
+        ),
+        # -- Measurement (all observe-only; none change live signal output) --
+        Tunable(
+            key="market_context_enabled",
+            label="Market-context stamping",
+            description=(
+                "Compute and stamp the market-context vector (session / "
+                "Wyckoff phase / volatility / funding / BTC rotation) on "
+                "every signal, and publish the current global vector for "
+                "ops. Observe-only: nothing consumes it to change live "
+                "output — it is the key the Strategy×Context edge matrix "
+                "and the allocator route on."
+            ),
+            type="bool",
+            default=MARKET_CONTEXT_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="suppression_audit_enabled",
+            label="Suppression quality audit",
+            description=(
+                "Record every post-scoring gate-suppressed candidate and "
+                "forward-measure on real candles whether it WOULD have won "
+                "— per-gate KEEP/TUNE/DROP verdicts plus the shadow feed "
+                "of the Strategy×Context edge matrix. Observe-only; O(1) "
+                "in-memory stamps, no hot-path I/O."
+            ),
+            type="bool",
+            default=SUPPRESSION_AUDIT_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="shadow_strategies_enabled",
+            label="Shadow strategy units",
+            description=(
+                "Run the shadow-only strategy units (range-fade, "
+                "mean-revert, funding-fade, cascade-reversal) whose "
+                "would-be trades enter the shadow ledger and edge matrix. "
+                "They have no path to the signal queue — pure measurement "
+                "of candidate strategies against live ones."
+            ),
+            type="bool",
+            default=SHADOW_STRATEGIES_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="allocator_recommend_enabled",
+            label="Allocator (recommendation mode)",
+            description=(
+                "Every audit cycle, compute which strategies the allocator "
+                "WOULD activate and how it would weight them in the "
+                "current market context, from the measured edge matrix — "
+                "persisted for ops only. Nothing consumes the "
+                "recommendation; live promotion stays owner-armed."
+            ),
+            type="bool",
+            default=ALLOCATOR_RECOMMEND_ENABLED,
+            category="Measurement",
         ),
     ]
     return {t.key: t for t in items}

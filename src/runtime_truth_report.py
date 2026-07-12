@@ -890,6 +890,115 @@ def summarize_invalidation_audit(records: List[Dict[str, Any]]) -> Dict[str, Any
     }
 
 
+def summarize_suppression_audit(records: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Aggregate suppressed_candidates.json into per-gate ablation metrics.
+
+    The mirror question to the invalidation audit: "is each *suppression gate*
+    net-helping or net-hurting?", answered by forward-measuring every stamped
+    candidate (WOULD_WIN / WOULD_LOSE / WOULD_EXPIRE against real candles) and
+    weighting by R-units per suppression → per-gate KEEP/TUNE/DROP.
+    """
+    totals: Dict[str, int] = {
+        "WOULD_WIN": 0,
+        "WOULD_LOSE": 0,
+        "WOULD_EXPIRE": 0,
+        "INSUFFICIENT_DATA": 0,
+    }
+    pending = 0
+    by_setup: Dict[str, Dict[str, int]] = {}
+    clean: List[Dict[str, Any]] = []
+    for r in records or []:
+        if not isinstance(r, dict):
+            continue
+        clean.append(r)
+        label = r.get("classification")
+        if not label:
+            pending += 1
+            continue
+        totals[label] = totals.get(label, 0) + 1
+        setup = str(r.get("setup_class") or "UNKNOWN")
+        inner = by_setup.setdefault(setup, {
+            "WOULD_WIN": 0,
+            "WOULD_LOSE": 0,
+            "WOULD_EXPIRE": 0,
+            "INSUFFICIENT_DATA": 0,
+        })
+        inner[label] = inner.get(label, 0) + 1
+
+    from src.suppression_audit import compute_gate_suppression_metrics
+
+    return {
+        "totals": totals,
+        "pending": pending,
+        "by_setup": by_setup,
+        "by_gate": compute_gate_suppression_metrics(clean),
+    }
+
+
+def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
+    """Roll the Strategy×Context edge matrix up for the truth report.
+
+    Per-strategy aggregate (sample-weighted win rate / avg R, provenance
+    split, best & worst context cell) plus the notable cells overall — the
+    honest 'which strategy earns in which context' view on real data.
+    """
+    per_strategy: Dict[str, Dict[str, Any]] = {}
+    scored_cells: List[Dict[str, Any]] = []
+    total_outcomes = 0
+    for cell in (matrix or {}).values():
+        if not isinstance(cell, dict):
+            continue
+        strategy = str(cell.get("strategy") or "UNKNOWN")
+        n = int(cell.get("n", 0) or 0)
+        total_outcomes += n
+        agg = per_strategy.setdefault(strategy, {
+            "n": 0,
+            "n_emitted": 0,
+            "n_suppressed": 0,
+            "n_shadow": 0,
+            "cells": 0,
+            "_win_weight": 0.0,
+            "_r_weight": 0.0,
+            "best_cell": None,
+            "worst_cell": None,
+        })
+        agg["n"] += n
+        agg["n_emitted"] += int(cell.get("n_emitted", 0) or 0)
+        agg["n_suppressed"] += int(cell.get("n_suppressed", 0) or 0)
+        agg["n_shadow"] += int(cell.get("n_shadow", 0) or 0)
+        agg["cells"] += 1
+        agg["_win_weight"] += float(cell.get("win_rate", 0.0) or 0.0) * n
+        agg["_r_weight"] += float(cell.get("avg_r", 0.0) or 0.0) * n
+        edge = cell.get("edge_r")
+        if edge is not None:
+            slim = {
+                "strategy": strategy,
+                "context_key": str(cell.get("context_key") or ""),
+                "edge_r": float(edge),
+                "n": n,
+                "verdict": str(cell.get("verdict") or ""),
+            }
+            scored_cells.append(slim)
+            if agg["best_cell"] is None or slim["edge_r"] > agg["best_cell"]["edge_r"]:
+                agg["best_cell"] = slim
+            if agg["worst_cell"] is None or slim["edge_r"] < agg["worst_cell"]["edge_r"]:
+                agg["worst_cell"] = slim
+
+    for agg in per_strategy.values():
+        n = agg["n"]
+        agg["win_rate"] = (agg.pop("_win_weight") / n) if n else 0.0
+        agg["avg_r"] = (agg.pop("_r_weight") / n) if n else 0.0
+
+    scored_cells.sort(key=lambda c: c["edge_r"], reverse=True)
+    return {
+        "per_strategy": per_strategy,
+        "top_cells": scored_cells[:5],
+        "bottom_cells": scored_cells[-5:][::-1] if scored_cells else [],
+        "total_outcomes": total_outcomes,
+        "scored_cells": len(scored_cells),
+    }
+
+
 def stage_totals_by_setup(funnel_counters: Dict[str, int], channel: str) -> Dict[str, Dict[str, int]]:
     by_setup: Dict[str, Dict[str, int]] = {}
     for key, value in funnel_counters.items():
@@ -1165,6 +1274,8 @@ def build_snapshot(
     confidence_gate_decisions: Optional[Dict[str, Any]] = None,
     confidence_gate_components: Optional[Dict[str, Any]] = None,
     invalidation_audit: Optional[Dict[str, Any]] = None,
+    suppression_audit: Optional[Dict[str, Any]] = None,
+    strategy_edge: Optional[Dict[str, Any]] = None,
     log_parse_diagnostics: Optional[Dict[str, int]] = None,
     free_channel_posts: Optional[Dict[str, Any]] = None,
     pre_tp_fires: Optional[Dict[str, Any]] = None,
@@ -1364,6 +1475,8 @@ def build_snapshot(
         "confidence_gate_decisions": confidence_gate_decisions or {},
         "confidence_gate_components": confidence_gate_components or {},
         "invalidation_audit": invalidation_audit or {},
+        "suppression_audit": suppression_audit or {},
+        "strategy_edge": strategy_edge or {},
         "log_parse_diagnostics": log_parse_diagnostics or {},
         "free_channel_posts": free_channel_posts or {},
         "pre_tp_fires": pre_tp_fires or {},
@@ -1803,6 +1916,122 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         lines.append(
             "- _no classified invalidation records yet — engine needs to run for ~30 min "
             "after a kill before the classifier can label it_"
+        )
+
+    # ── Suppression Quality Audit (shadow ledger, Layer C) ────────────
+    sup = snapshot.get("suppression_audit", {}) or {}
+    lines.extend(["", "## Suppression Quality Audit"])
+    lines.append(
+        "_Every post-scoring gate-suppressed candidate is stamped with its full "
+        "geometry and forward-measured on real candles: **WOULD_WIN** (TP1 before "
+        "SL — the gate cost us a winner), **WOULD_LOSE** (SL first — the gate "
+        "saved us), **WOULD_EXPIRE** (neither in the window).  EV in R per "
+        "suppression → per-gate **KEEP / TUNE / DROP**.  This is how a gate earns "
+        "its place: measured, not assumed._"
+    )
+    sup_totals = sup.get("totals") or {}
+    sup_classified = sum(
+        sup_totals.get(k, 0) for k in ("WOULD_WIN", "WOULD_LOSE", "WOULD_EXPIRE")
+    )
+    if sup_classified:
+        win = sup_totals.get("WOULD_WIN", 0)
+        lose = sup_totals.get("WOULD_LOSE", 0)
+        exp = sup_totals.get("WOULD_EXPIRE", 0)
+        lines.append(
+            f"- Totals: WOULD_WIN={win} ({win / sup_classified * 100.0:.1f}%) | "
+            f"WOULD_LOSE={lose} | WOULD_EXPIRE={exp} | "
+            f"pending (awaiting window)={sup.get('pending', 0)}"
+        )
+        by_gate = sup.get("by_gate") or {}
+        if by_gate:
+            lines.append("")
+            lines.append(
+                "| Gate | n | WOULD_WIN% | Saved R | Missed R | EV/suppression (R) | Verdict |"
+            )
+            lines.append("|---|---:|---:|---:|---:|---:|---|")
+            for gate in sorted(by_gate.keys()):
+                row = by_gate[gate]
+                lines.append(
+                    f"| {gate} | {row.get('n', 0)} | "
+                    f"{row.get('would_win_pct', 0.0):.1f}% | "
+                    f"{row.get('saved_r', 0.0):.1f} | "
+                    f"{row.get('missed_r', 0.0):.1f} | "
+                    f"{row.get('ev_per_suppression_r', 0.0):+.2f} | "
+                    f"**{row.get('verdict', '?')}** |"
+                )
+    else:
+        lines.append(
+            "- _no classified suppressed candidates yet — candidates classify "
+            "after their validity window (~1h) of real candles has accumulated_"
+        )
+
+    # ── Strategy × Context Edge Matrix (Layers A×C) ───────────────────
+    edge = snapshot.get("strategy_edge", {}) or {}
+    lines.extend(["", "## Strategy × Context Edge Matrix"])
+    lines.append(
+        "_Every strategy — live evaluators AND shadow-only units — measured per "
+        "market context (session/phase/volatility/rotation) on real data.  "
+        "Sources: **emitted** = realised trades, **suppressed** = gate-blocked "
+        "counterfactuals, **shadow** = shadow-only units.  Edge is Wilson-lower-"
+        "bounded expectancy in R — thin cells cannot fake a positive edge.  "
+        "This matrix is what the allocator routes on._"
+    )
+    per_strategy = edge.get("per_strategy") or {}
+    if per_strategy:
+        lines.append(
+            f"- Outcomes recorded: {edge.get('total_outcomes', 0)} across "
+            f"{len(per_strategy)} strategies; {edge.get('scored_cells', 0)} cells "
+            "past the sample floor"
+        )
+        lines.append("")
+        lines.append(
+            "| Strategy | n | emit/supp/shadow | Win% | Avg R | Best context (edge) | Worst context (edge) |"
+        )
+        lines.append("|---|---:|---|---:|---:|---|---|")
+        for name in sorted(
+            per_strategy.keys(),
+            key=lambda s: per_strategy[s].get("n", 0),
+            reverse=True,
+        ):
+            row = per_strategy[name]
+            best = row.get("best_cell")
+            worst = row.get("worst_cell")
+            best_txt = (
+                f"{best['context_key']} ({best['edge_r']:+.2f}R)" if best else "—"
+            )
+            worst_txt = (
+                f"{worst['context_key']} ({worst['edge_r']:+.2f}R)" if worst else "—"
+            )
+            lines.append(
+                f"| {name} | {row.get('n', 0)} | "
+                f"{row.get('n_emitted', 0)}/{row.get('n_suppressed', 0)}/{row.get('n_shadow', 0)} | "
+                f"{row.get('win_rate', 0.0) * 100.0:.0f}% | "
+                f"{row.get('avg_r', 0.0):+.2f} | {best_txt} | {worst_txt} |"
+            )
+        top_cells = edge.get("top_cells") or []
+        if top_cells:
+            lines.append("")
+            lines.append(
+                "- **Strongest cells**: "
+                + "; ".join(
+                    f"`{c['strategy']} @ {c['context_key']}` {c['edge_r']:+.2f}R (n={c['n']}, {c['verdict']})"
+                    for c in top_cells[:3]
+                )
+            )
+        bottom_cells = edge.get("bottom_cells") or []
+        if bottom_cells:
+            lines.append(
+                "- **Weakest cells**: "
+                + "; ".join(
+                    f"`{c['strategy']} @ {c['context_key']}` {c['edge_r']:+.2f}R (n={c['n']}, {c['verdict']})"
+                    for c in bottom_cells[:3]
+                )
+            )
+    else:
+        lines.append(
+            "- _matrix is cold — it fills as suppressed/shadow candidates classify "
+            "(~1h windows) and emitted signals resolve; judge only after a real "
+            "data window has accumulated_"
         )
 
     # ── Log parse diagnostics (Tier-1 monitor upgrade) ────────────────

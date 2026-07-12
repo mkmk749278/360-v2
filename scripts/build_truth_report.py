@@ -29,6 +29,8 @@ from src.runtime_truth_report import (
     parse_quiet_scalp_block_from_logs,
     parse_regime_distribution_from_logs,
     summarize_invalidation_audit,
+    summarize_strategy_edge,
+    summarize_suppression_audit,
 )
 
 
@@ -52,6 +54,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--signals-last100-json", default="")
     parser.add_argument("--dispatch-log-out-json", default="")
     parser.add_argument("--invalidation-records-json", default="")
+    parser.add_argument("--suppressed-candidates-json", default="")
+    parser.add_argument("--strategy-edge-json", default="")
     return parser.parse_args()
 
 
@@ -125,6 +129,26 @@ def main() -> int:
             invalidation_records = loaded_records
     invalidation_audit = summarize_invalidation_audit(invalidation_records)
 
+    suppressed_candidates: list = []
+    if args.suppressed_candidates_json:
+        loaded_suppressed = load_json_file(Path(args.suppressed_candidates_json), default=[])
+        if isinstance(loaded_suppressed, list):
+            suppressed_candidates = loaded_suppressed
+    suppression_audit = summarize_suppression_audit(suppressed_candidates)
+
+    # strategy_edge_store.json persists raw per-cell records; rebuild the
+    # matrix through the store itself so the report's Wilson edges/verdicts
+    # are computed by the exact same code the allocator reads.
+    strategy_edge: dict = {}
+    if args.strategy_edge_json and Path(args.strategy_edge_json).exists():
+        try:
+            from src.strategy_edge import StrategyEdgeStore
+
+            _edge_store = StrategyEdgeStore(persist_path=args.strategy_edge_json)
+            strategy_edge = summarize_strategy_edge(_edge_store.matrix())
+        except Exception:
+            strategy_edge = {}
+
     snapshot, comparison = build_snapshot(
         channel=args.channel,
         lookback_hours=args.lookback_hours,
@@ -145,6 +169,8 @@ def main() -> int:
         confidence_gate_decisions=confidence_gate_decisions,
         confidence_gate_components=confidence_gate_components,
         invalidation_audit=invalidation_audit,
+        suppression_audit=suppression_audit,
+        strategy_edge=strategy_edge,
         log_parse_diagnostics=log_parse_diagnostics,
         free_channel_posts=free_channel_posts,
         pre_tp_fires=pre_tp_fires,
