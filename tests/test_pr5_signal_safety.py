@@ -328,19 +328,29 @@ class TestFailedDetectionCooldown:
             "Cooldown check must be BEFORE chan.evaluate() to save compute time"
         )
 
-    def test_tracker_reset_code_present_before_populate_signal(self):
-        """The tracker reset must appear before the final _populate_signal_context call."""
+    def test_tracker_reset_code_present_on_success_path(self):
+        """The tracker reset must sit on the success path of _prepare_signal.
+
+        (Originally pinned as "before the final _populate_signal_context call",
+        but the populate call moved ABOVE the confidence gate with the
+        shadow-ledger wiring — suppressed candidates need regime/context fields
+        stamped before they're recorded.  The real invariant is unchanged: a
+        candidate that PASSES the confidence gate resets the failed-detection
+        counter before the signal is returned.)
+        """
         src_path = pathlib.Path(__file__).parent.parent / "src" / "scanner" / "__init__.py"
         content = src_path.read_text()
 
         reset_pos = content.find("Reset failed-detection counter")
-        # Use the LAST occurrence of _populate_signal_context (the one at the very end of the method)
-        populate_pos = content.rfind("self._populate_signal_context(sig, volume_24h, ctx)")
+        gate_reject_pos = content.find('self._stamp_suppressed(sig, _reason)')
+        return_pos = content.find("return sig, cross_verified")
 
         assert reset_pos != -1, "Tracker reset comment not found"
-        assert populate_pos != -1, "_populate_signal_context call not found"
-        assert reset_pos < populate_pos, (
-            "Tracker reset must be BEFORE the final _populate_signal_context call"
+        assert gate_reject_pos != -1, "Confidence-gate reject not found"
+        assert return_pos != -1, "Success return not found"
+        assert gate_reject_pos < reset_pos < return_pos, (
+            "Tracker reset must run after the confidence gate passes and "
+            "before the signal is returned"
         )
 
     def test_periodic_cleanup_uses_300_cycle_modulo(self):

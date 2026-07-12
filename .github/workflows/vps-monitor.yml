@@ -159,6 +159,14 @@ jobs:
             "docker exec 360scalp-v2-engine sh -c 'cat /app/data/invalidation_records.json 2>/dev/null || echo []'" \
             > monitor/raw/invalidation_records.json || echo '[]' > monitor/raw/invalidation_records.json
 
+          timeout -k 10 45 ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "docker exec 360scalp-v2-engine sh -c 'cat /app/data/suppressed_candidates.json 2>/dev/null || echo []'" \
+            > monitor/raw/suppressed_candidates.json || echo '[]' > monitor/raw/suppressed_candidates.json
+
+          timeout -k 10 45 ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "docker exec 360scalp-v2-engine sh -c 'cat /app/data/strategy_edge_store.json 2>/dev/null || echo {}'" \
+            > monitor/raw/strategy_edge_store.json || echo '{}' > monitor/raw/strategy_edge_store.json
+
           # Read engine logs from the persistent loguru file sink at
           # /app/logs/engine_*.log (30 days × 50MB rotation) instead of
           # docker compose logs.  Docker's json-file driver caps at 30MB total
@@ -242,6 +250,8 @@ jobs:
             --signals-last100-json monitor/report/signals_last100.json
             --dispatch-log-out-json monitor/report/dispatch_log.json
             --invalidation-records-json monitor/raw/invalidation_records.json
+            --suppressed-candidates-json monitor/raw/suppressed_candidates.json
+            --strategy-edge-json monitor/raw/strategy_edge_store.json
           )
 
           if [ "${COMPARE_PREVIOUS_WINDOW}" = "true" ]; then

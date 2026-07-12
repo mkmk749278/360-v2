@@ -52,6 +52,7 @@ from src.performance_tracker import PerformanceTracker
 from src.predictive_ai import PredictiveEngine
 from src.regime import RegimeService
 from src.scanner import Scanner, _cohort_edge_store as _scanner_cohort_edge_store, _stat_filter as _scanner_stat_filter
+from src.strategy_edge import get_strategy_edge_store as _strategy_edge_store
 from src.mover_ignition import MoverIgnitionDetector
 from src.signal_history_backfill import (
     backfill_from_legacy_sources,
@@ -285,6 +286,7 @@ class CryptoSignalEngine:
             order_manager=self._order_manager,
             stat_filter=_scanner_stat_filter,
             cohort_edge_store=_scanner_cohort_edge_store,
+            strategy_edge_store=_strategy_edge_store(),
         )
 
         # Channel strategies
@@ -1532,6 +1534,182 @@ class CryptoSignalEngine:
                 break
             except Exception as exc:
                 log.warning("Invalidation audit loop error: %s", exc)
+                continue
+
+            # ── Layer C: shadow-ledger classify + edge-matrix feed ─────────
+            # Forward-measures every gate-suppressed candidate (and shadow
+            # strategy unit) against the same in-memory 1m candles, then feeds
+            # resolved outcomes into the Strategy×Context edge matrix.
+            # Observe-only; all errors fail open so the audit loop survives.
+            try:
+                from src import runtime_tunables as _rt
+                if bool(_rt.get("suppression_audit_enabled")):
+                    from src import suppression_audit as _sa
+                    from src.strategy_edge import (
+                        SOURCE_SHADOW,
+                        SOURCE_SUPPRESSED,
+                        StrategyOutcome,
+                        get_strategy_edge_store,
+                    )
+
+                    def _feed_edge(rec: dict) -> None:
+                        outcome = _sa.candidate_outcome(rec)
+                        if not outcome:
+                            return
+                        _is_shadow_unit = str(
+                            rec.get("gate_name", "")
+                        ).startswith("shadow_unit")
+                        get_strategy_edge_store().record(
+                            StrategyOutcome(
+                                strategy=str(rec.get("setup_class", "")),
+                                context_key=str(rec.get("context_key", "")),
+                                side=str(rec.get("side", "")),
+                                won=bool(outcome.get("won")),
+                                pnl_pct=float(outcome.get("pnl_pct", 0.0)),
+                                r_multiple=float(outcome.get("r_multiple", 0.0)),
+                                mfe_pct=float(outcome.get("mfe_pct", 0.0)),
+                                source=SOURCE_SHADOW
+                                if _is_shadow_unit
+                                else SOURCE_SUPPRESSED,
+                            )
+                        )
+
+                    sa_counters = _sa.get_store().classify_pending(
+                        fetch_ohlc_since=fetch_ohlc_since,
+                        on_classified=_feed_edge,
+                    )
+                    if sa_counters:
+                        log.info("Suppression audit classified: {}", sa_counters)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Suppression audit classify error (fail-open): {}", exc)
+
+            # ── Layer A: publish the current global context for ops ────────
+            self._publish_market_context()
+            # ── Layer D: allocator recommendation (observe-only) ───────────
+            self._write_allocator_recommendation()
+
+    # ------------------------------------------------------------------
+    # Autonomous-portfolio observe-only publishers (Layers A + D)
+    # ------------------------------------------------------------------
+
+    def _build_global_market_context(self):
+        """Current global (BTC-anchored) MarketContext.  Every input is
+        fail-neutral, so a cold feed yields a coarser vector, never an error.
+        All reads are in-memory (data store / cached BTC-State) — this runs on
+        the 5-min audit loop, not any hot path.
+        """
+        from src.market_context import build_market_context
+
+        regime_label = None
+        try:
+            r = self._regime_detector.get_regime("BTCUSDT")
+            regime_label = r.regime.value if r else None
+        except Exception:
+            pass
+        htf_prior = None
+        atr_pctile = None
+        try:
+            import numpy as _np
+
+            from src.indicators import atr as _atr
+            from src.regime import atr_percentile as _atr_pctile
+            from src.regime import detect_regime_from_arrays
+
+            c15 = self.data_store.get_candles("BTCUSDT", "15m") or {}
+            closes = _np.asarray(c15.get("close", []) or [], dtype=_np.float64)
+            if len(closes) >= 30:
+                highs = _np.asarray(c15.get("high", closes), dtype=_np.float64)
+                lows = _np.asarray(c15.get("low", closes), dtype=_np.float64)
+                atr_series = _atr(highs, lows, closes)
+                valid = atr_series[~_np.isnan(atr_series)]
+                if len(valid) > 0:
+                    atr_pctile = _atr_pctile(valid)
+            c1h = self.data_store.get_candles("BTCUSDT", "1h") or {}
+            h_closes = _np.asarray(c1h.get("close", []) or [], dtype=_np.float64)
+            if len(h_closes) >= 30:
+                h_highs = _np.asarray(c1h.get("high", h_closes), dtype=_np.float64)
+                h_lows = _np.asarray(c1h.get("low", h_closes), dtype=_np.float64)
+                h_vols = _np.asarray(
+                    c1h.get("volume", _np.zeros(len(h_closes))), dtype=_np.float64
+                )
+                htf_prior = detect_regime_from_arrays(
+                    h_closes, h_highs, h_lows, h_vols, idx=len(h_closes) - 1
+                )
+        except Exception:
+            pass
+        funding = None
+        try:
+            funding = self._order_flow_store.get_funding_rate("BTCUSDT")
+        except Exception:
+            pass
+        btc_b = None
+        try:
+            btc_b = float(self._scanner._get_btc_state_cached().get("b", 0.0))
+        except Exception:
+            pass
+        return build_market_context(
+            regime_label=regime_label,
+            htf_trend_prior=htf_prior,
+            atr_percentile=atr_pctile,
+            funding_rate=funding,
+            btc_state=btc_b,
+        )
+
+    @staticmethod
+    def _atomic_write_json(path: str, payload: dict) -> None:
+        import json
+
+        dirname = os.path.dirname(path)
+        if dirname:
+            os.makedirs(dirname, exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        os.replace(tmp, path)
+
+    def _publish_market_context(self) -> None:
+        """Write ``data/market_context.json`` — the ops Strategy Lab's context
+        card + the strategy-affinity registry (single source of truth).
+        One small file write per 5-min cycle; fail-open.
+        """
+        try:
+            from src import runtime_tunables as _rt
+            if not bool(_rt.get("market_context_enabled")):
+                return
+            from src.strategy_portfolio import build_context_payload
+
+            payload = build_context_payload(self._build_global_market_context())
+            path = os.environ.get("MARKET_CONTEXT_PATH", "data/market_context.json")
+            self._atomic_write_json(path, payload)
+        except Exception as exc:
+            log.debug("market-context publish error (fail-open): {}", exc)
+
+    def _write_allocator_recommendation(self) -> None:
+        """Layer D in recommendation mode: persist what the allocator WOULD
+        activate/weight in the current context, from the measured edge matrix.
+        Nothing consumes this — it exists so the owner can watch the
+        allocator's judgement on real data in ops before ever arming it.
+        """
+        try:
+            from src import runtime_tunables as _rt
+            if not bool(_rt.get("allocator_recommend_enabled")):
+                return
+            from src.strategy_allocator import build_recommendation_payload
+            from src.strategy_edge import get_strategy_edge_store
+
+            mc = self._build_global_market_context()
+            payload = build_recommendation_payload(
+                context_key=mc.context_key(),
+                matrix=get_strategy_edge_store().matrix(),
+            )
+            path = os.environ.get(
+                "STRATEGY_ALLOCATIONS_PATH", "data/strategy_allocations.json"
+            )
+            self._atomic_write_json(path, payload)
+        except Exception as exc:
+            log.debug("allocator recommendation error (fail-open): {}", exc)
 
     # ------------------------------------------------------------------
     # Admin command handler (delegated to CommandHandler)

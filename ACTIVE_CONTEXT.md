@@ -4,6 +4,95 @@
 
 ---
 
+## 🟢 SESSION 53 2026-07-12 — Autonomous Portfolio Phases 1–3 wired end-to-end: shadow ledger live, 4 shadow strategy units, allocator (recommendation mode), ops Strategy Lab (branch `claude/realtime-strategy-testing-ops-r318yu`, 360-v2 + 360ce-ops)
+
+**Owner directive:** "use the time — try different strategies with real data in real
+time with ops."  Foundation PR #720 (market_context / strategy_edge /
+suppression_audit modules) was open-unmerged with nothing wired; merged it first
+(CI green, observe-only), then wired the whole measurement pipeline.  **Everything
+this session is observe-only / off the money path — zero change to which signals
+emit or how they score.**  Scope selections (owner): core + allocator observe-only +
+new strategy families.
+
+### Engine (360-v2) — the measurement pipeline
+
+- **Shadow ledger wired end-to-end:** `Scanner._stamp_suppressed` (fail-open,
+  tunable-gated) stamps full geometry at all 8 post-scoring suppression gates
+  (quiet_scalp_block, min_confidence/component floors, active_dup real branch only,
+  dispatch_cooldown, data_stale, dispatch_staleness, level_still_in_play,
+  regime_kill).  The 5-min `_invalidation_audit_loop` piggybacks
+  `classify_pending()` (same in-memory `fetch_ohlc_since`) and feeds resolved
+  outcomes into `StrategyEdgeStore` (`source="suppressed"`).
+- **Latent bug fixed while relocating the mc stamp:** the #720 market-context stamp
+  ran BEFORE `_populate_signal_context`, so `entry_regime` was always empty →
+  Wyckoff phase always AMBIGUOUS.  Populate + mc stamp now both run above the QUIET
+  gate; every suppressed candidate carries real regime + context key.
+- **Real emitted outcomes feed the same matrix:** `trade_monitor._record_outcome`
+  records into `StrategyEdgeStore` (`source="emitted"`, R from
+  `original_sl_distance` — un-ratcheted risk), skipping EXPIRED_NO_FILL.
+  `StrategyOutcome` gained provenance (`emitted|suppressed|shadow`); matrix rows
+  expose `n_emitted/n_suppressed/n_shadow` so counterfactual vs realised edge is
+  never conflated.
+- **4 shadow-only strategy units** (`src/shadow_strategies.py`): SHADOW_RANGE_FADE,
+  SHADOW_MEAN_REVERT, SHADOW_FUNDING_FADE, SHADOW_CASCADE_REVERSAL — pure functions,
+  ATR-sized stops beyond the trigger extreme (doctrine §4), NO path to the signal
+  queue; stamped as `gate_name="shadow_unit:*"` → classified → matrix
+  (`source="shadow"`).  Per-(unit,symbol) 30-min stamp cooldown (monotonic,
+  None-sentinel — a 0.0 sentinel silently swallowed all stamps for the first 30 min
+  after boot; caught by test).
+- **Strategy registry** (`src/strategy_portfolio.py`): context-affinity tags
+  (phases/sessions) for all 27 SetupClass values + 4 shadow units;
+  `is_context_aligned()`; single source of truth persisted to ops.
+- **Allocator, RECOMMENDATION MODE** (`src/strategy_allocator.py`): every audit
+  cycle reads current context × matrix verdicts → would-activate list (weights
+  proportional to edge, alignment bonus ×1.2/×0.8) bounded by the safety envelope
+  IN the math (`ALLOCATOR_MAX_CONCURRENT_STRATEGIES`=6,
+  `ALLOCATOR_MAX_STRATEGY_WEIGHT`=0.35; capped surplus stays unallocated) + a
+  would-demote list (NEGATIVE cells).  Persisted to
+  `data/strategy_allocations.json`; **consumed by nothing** — Phase 4 master-arm is
+  a later owner decision.
+- **Publishers (5-min loop):** `data/market_context.json` (global BTC-anchored
+  vector + affinity map) and `data/strategy_allocations.json`, atomic writes.
+- **Truth report:** new `## Suppression Quality Audit` (per-gate WOULD_WIN% / EV-R /
+  KEEP-TUNE-DROP) and `## Strategy × Context Edge Matrix` sections;
+  `vps-monitor.yml` fetches `suppressed_candidates.json` + `strategy_edge_store.json`.
+- **Tunables ("Measurement" category):** `market_context_enabled`,
+  `suppression_audit_enabled`, `shadow_strategies_enabled`,
+  `allocator_recommend_enabled` — all observe-only, live-flippable from ops.
+- Tests: 6361 passed full suite; ruff clean; mypy at/below baseline.  New suites:
+  portfolio registry, shadow units, allocator caps/floors, suppression wiring
+  (incl. classify→edge end-to-end), trade-monitor edge feed, truth-report sections.
+
+### Ops (360ce-ops) — Strategy Lab page
+
+- New `/strategy-lab` (+ 60s HTMX partial): current context vector card (with
+  staleness badge), Strategy×Context edge matrix (Wilson edge + verdict badges +
+  emitted/suppressed/shadow split + in/out-of-design-context fit badges),
+  per-strategy rollup, suppression-gate KEEP/TUNE/DROP table, and the allocator's
+  "what it would do now" panel (mode RECOMMENDATION_ONLY, caps shown).  Data from
+  the read-only volume (4 new accessors); engine math ported (~40 pure lines,
+  thresholds displayed in footer); affinity comes from the engine-persisted map —
+  zero hardcoding.
+
+### Cost discipline
+
+Stamps are O(1) in-memory appends; shadow units are pure list scans on already-warm
+candles with per-symbol cooldowns; classification + all file writes batched on the
+existing 5-min loop; tunables reads are the existing 5s-TTL cache.  No new network
+or Firestore reads anywhere.
+
+### Follow-ups (out of scope this session)
+
+- Telegram→app-push decouple in `signal_router.py` — **owner sign-off (routing)**.
+- Making QUIET-penalty / cooldown / min-confidence live tunables — money-path
+  consumption change, dark-first.
+- Phase 4 master-arm — owner flips only after the allocator's recommendations prove
+  out in Strategy Lab on a real data window.
+- Matrix/report verdicts need a fresh data window before they mean anything —
+  don't judge the shadow units or gate verdicts until cells pass sample floors.
+
+---
+
 ## 🟢 SESSION 52 2026-07-11 — 100eyes-parity Alerts v3: universe gate, honest touch counts, zone charts, card thumbnails (branch `claude/eye-scanner-alerts-charts-8xddta`, 360-v2 + lumin-app)
 
 **Owner report (screenshots, 12:25 IST — one hour after S51 merged):** feed still

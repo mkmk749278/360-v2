@@ -38,7 +38,6 @@ from config import (
     CHANNEL_SCALP_SUPERTREND_ENABLED,
     CHANNEL_SCALP_VWAP_ENABLED,
     BTC_STATE_ENABLED,
-    MARKET_CONTEXT_ENABLED,
     BTC_STATE_HAIRCUT_ENABLED,
     BTC_STATE_K,
     BTC_STATE_FLOOR,
@@ -99,6 +98,7 @@ from config import (
     SCAN_MIN_VOLUME_USD,
     SCAN_SYMBOL_BLACKLIST,
     SEED_TIMEFRAMES,
+    SHADOW_STRATEGY_COOLDOWN_SEC,
     SIGNAL_SCAN_COOLDOWN_SECONDS,
     SIGNAL_VALID_FOR_MINUTES,
     SMC_HARD_GATE_MIN,
@@ -1295,6 +1295,11 @@ class Scanner:
         # Suppression telemetry: counters per suppression reason, accumulated
         # over each scan cycle and logged as a summary at cycle end.
         self._suppression_counters: Dict[str, int] = defaultdict(int)
+
+        # Shadow-strategy stamp cooldown: last stamp (monotonic) per
+        # (unit, symbol) so a persisting condition (e.g. price parked at a
+        # range edge) yields one ledger entry per window, not one per 15s scan.
+        self._shadow_last_stamp: Dict[Tuple[str, str], float] = {}
 
         # Failed-detection cooldown: tracks consecutive confidence-gate failures
         # per (symbol, channel_name) to suppress re-evaluation for a short period.
@@ -4582,6 +4587,126 @@ class Scanner:
                 return False
         return True
 
+    def _evaluate_shadow_strategies(self, symbol: str, ctx: ScanContext) -> None:
+        """Run the shadow-only strategy units for one scanned symbol.
+
+        Observe-only (Phase 3): each unit's would-be trade is stamped into the
+        suppression-audit shadow ledger (``gate_name="shadow_unit:<name>"``)
+        with the symbol's market-context key, then forward-measured by the
+        5-min audit loop into the edge matrix (``source="shadow"``).  There is
+        deliberately NO code path from here to the signal queue.
+
+        Cost: pure list scans over in-memory 15m arrays + the cached funding
+        read; a per-(unit, symbol) cooldown bounds ledger growth.  Fail-open.
+        """
+        try:
+            from src import runtime_tunables as _rt
+            if not bool(_rt.get("shadow_strategies_enabled")):
+                return
+            from src import shadow_strategies as _ss
+            c15 = self._resolve_candles(ctx.candles, "15m") or {}
+            highs = c15.get("high") or []
+            lows = c15.get("low") or []
+            closes = c15.get("close") or []
+            if len(closes) < 60:
+                return
+            _funding = None
+            if self.order_flow_store is not None:
+                try:
+                    _funding = self.order_flow_store.get_funding_rate(symbol)
+                except Exception:
+                    _funding = None
+            candidates = _ss.evaluate_all(highs, lows, closes, funding_rate=_funding)
+            if not candidates:
+                return
+            # One context build per symbol with a triggering unit (rare).
+            _context_key = ""
+            _regime_label = ""
+            try:
+                _regime_name = getattr(ctx.regime_result, "regime", None)
+                _regime_label = str(
+                    getattr(_regime_name, "value", _regime_name or "") or ""
+                )
+                _btc_b: Optional[float] = None
+                if BTC_STATE_ENABLED:
+                    _b_raw: Any = self._get_btc_state_cached().get("b", 0.0)
+                    _btc_b = float(_b_raw or 0.0)
+                _mc = build_market_context(
+                    regime_label=_regime_label or None,
+                    atr_percentile=getattr(ctx.regime_context, "atr_percentile", None),
+                    funding_rate=_funding,
+                    btc_state=_btc_b,
+                )
+                _context_key = _mc.context_key()
+            except Exception:
+                pass
+            from src import suppression_audit as _sa
+            now_mono = time.monotonic()
+            for cand in candidates:
+                cd_key = (cand.strategy, symbol)
+                # None = never stamped.  A 0.0 sentinel would silently swallow
+                # every stamp for the first COOLDOWN seconds after boot,
+                # because monotonic() starts near zero on a fresh host.
+                last = self._shadow_last_stamp.get(cd_key)
+                if last is not None and now_mono - last < SHADOW_STRATEGY_COOLDOWN_SEC:
+                    continue
+                self._shadow_last_stamp[cd_key] = now_mono
+                _sa.stamp_candidate(
+                    gate_name=f"shadow_unit:{cand.strategy}",
+                    symbol=symbol,
+                    channel="SHADOW",
+                    setup_class=cand.strategy,
+                    side=cand.side,
+                    entry=cand.entry,
+                    stop_loss=cand.stop_loss,
+                    tp1=cand.tp1,
+                    confidence=0.0,
+                    context_key=_context_key,
+                    regime=_regime_label,
+                    valid_for_minutes=cand.valid_for_minutes,
+                )
+                log.debug(
+                    "[SHADOW_UNIT] {} {} {} entry={:.6g} sl={:.6g} tp1={:.6g} — {}",
+                    cand.strategy, symbol, cand.side,
+                    cand.entry, cand.stop_loss, cand.tp1, cand.reason,
+                )
+        except Exception as exc:
+            log.debug("shadow-strategy evaluate error (fail-open): {}", exc)
+
+    def _stamp_suppressed(self, sig: Any, gate_name: str) -> None:
+        """Shadow-ledger stamp for a post-scoring suppressed candidate.
+
+        Observe-only + fail-open (Layer C): records the candidate's tradeable
+        geometry into the in-memory suppression audit (O(1) deque append, no
+        I/O) so the 5-min audit loop can forward-measure on real candles
+        whether this gate saved or cost us.  Never alters the suppression
+        decision itself — callers stamp immediately before their existing
+        suppress return, which stays byte-identical.
+        """
+        try:
+            from src import runtime_tunables as _rt
+            if not bool(_rt.get("suppression_audit_enabled")):
+                return
+            from src import suppression_audit as _sa
+            _direction = getattr(sig, "direction", None)
+            _side = getattr(_direction, "value", None) or str(_direction or "")
+            _sa.stamp_candidate(
+                gate_name=gate_name,
+                symbol=str(getattr(sig, "symbol", "") or ""),
+                channel=str(getattr(sig, "channel", "") or ""),
+                setup_class=str(getattr(sig, "setup_class", "") or ""),
+                side=_side,
+                entry=float(getattr(sig, "entry", 0.0) or 0.0),
+                stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
+                confidence=float(getattr(sig, "confidence", 0.0) or 0.0),
+                context_key=str(getattr(sig, "mc_context_key", "") or ""),
+                regime=str(getattr(sig, "entry_regime", "") or ""),
+                valid_for_minutes=float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
+            )
+        except Exception as exc:
+            log.debug("suppression-audit stamp error (fail-open): {}", exc)
+
     async def _enqueue_signal(self, sig: Any) -> bool:
         self._stamp_origin_setup_identity(sig, getattr(sig, "channel", "") or "UNKNOWN")
         try:
@@ -4640,6 +4765,9 @@ class Scanner:
                             dup_key[0], dup_key[1], dup_key[2],
                             getattr(_dup, "signal_id", "?"),
                         )
+                        # Real-suppress branch only — the shadow branch below
+                        # falls through to emission and is measured as emitted.
+                        self._stamp_suppressed(sig, "active_dup")
                         return False
                     self._suppression_counters[
                         f"active_dup_shadow:{dup_key[1]}"
@@ -4673,6 +4801,7 @@ class Scanner:
                     "dispatch_cooldown skip {} {} {} ({:.0f}s remaining)",
                     cd_key[0], cd_key[1], cd_key[2], max(0.0, remaining_s),
                 )
+                self._stamp_suppressed(sig, "dispatch_cooldown")
                 return False
         except Exception as exc:
             log.debug("dispatch cooldown check error (fail-open): {}", exc)
@@ -4700,6 +4829,7 @@ class Scanner:
                     _sc,
                     float(getattr(sig, "entry", 0.0) or 0.0),
                 )
+                self._stamp_suppressed(sig, "data_stale")
                 return False
         except Exception as exc:
             log.debug("data-staleness check error (fail-open): {}", exc)
@@ -4721,6 +4851,7 @@ class Scanner:
                     _sc,
                     float(getattr(sig, "entry", 0.0) or 0.0),
                 )
+                self._stamp_suppressed(sig, "dispatch_staleness")
                 return False
         except Exception as exc:
             log.debug("staleness check error (fail-open): {}", exc)
@@ -4746,6 +4877,7 @@ class Scanner:
                     _sc,
                     float(getattr(sig, "entry", 0.0) or 0.0),
                 )
+                self._stamp_suppressed(sig, "level_still_in_play")
                 return False
         except Exception as exc:
             log.debug("level-in-play check error (fail-open): {}", exc)
@@ -4769,6 +4901,7 @@ class Scanner:
                     _sc_rks,
                     _rks_reason,
                 )
+                self._stamp_suppressed(sig, "regime_kill")
                 return False
         except Exception as exc:
             log.debug("regime-kill check error (fail-open): {}", exc)
@@ -7083,6 +7216,43 @@ class Scanner:
         except Exception:
             pass  # Fail-safe
 
+        # Populate regime/context display fields BEFORE the remaining gates so
+        # (a) the market-context stamp below reads the real entry regime — it
+        # previously ran with these fields still empty, so the Wyckoff phase
+        # always classified AMBIGUOUS — and (b) suppressed candidates carry
+        # their regime into the shadow ledger.  Pure stamping, no gating.
+        self._populate_signal_context(sig, volume_24h, ctx)
+
+        # ── Market-Context vector (Layer A) — observe-only stamp ─────────────
+        # Compute + stamp the "what regime is it now" vector on every signal.
+        # All inputs are already warm here (entry_regime, ATR percentile,
+        # cached BTC-State, funding_rate), so this adds no new reads (Cost
+        # Discipline).  Placed ABOVE the QUIET gate so every post-scoring
+        # suppression records the candidate's context into the shadow ledger.
+        # Off the money path: nothing consumes these fields to change live
+        # output — they feed the ops edge matrix + the allocator.
+        try:
+            from src import runtime_tunables as _rt
+            if bool(_rt.get("market_context_enabled")):
+                _mc_btc_b: Optional[float] = None
+                if BTC_STATE_ENABLED:
+                    _mc_b_raw: Any = self._get_btc_state_cached().get("b", 0.0)
+                    _mc_btc_b = float(_mc_b_raw or 0.0)
+                _mc = build_market_context(
+                    regime_label=getattr(sig, "entry_regime", "") or None,
+                    htf_trend_prior=getattr(sig, "entry_regime_15m", "") or None,
+                    atr_percentile=getattr(sig, "atr_percentile_at_entry", None),
+                    funding_rate=_funding_rate,
+                    btc_state=_mc_btc_b,
+                )
+                for _k, _v in _mc.as_signal_fields().items():
+                    setattr(sig, _k, _v)
+        except Exception as _mc_exc:
+            log.debug(
+                "Market-context stamp error for {} {} (fail open): {}",
+                symbol, chan_name, _mc_exc,
+            )
+
         # QUIET regime safety net for scalp channels: signals must clear the
         # global 65.0 confidence floor (the paid B-tier minimum) when market
         # is compressed.  Per OWNER_BRIEF §2.1a "only the final paid signal
@@ -7121,6 +7291,7 @@ class Scanner:
                         "Failed-detection cooldown triggered for {} {} ({}x consecutive) — suppressing for {:.0f}s",
                         symbol, chan_name, _new_count, _CONF_FAIL_COOLDOWN_S,
                     )
+                self._stamp_suppressed(sig, "quiet_scalp_block")
                 return _reject("filtered", cross_verified)
         # ── Graded BTC-State soft-confirmation (src/btc_state.py) ──────────
         # Counter-trend-long fix (ACTIVE_CONTEXT S38): alts couple to BTC harder
@@ -7189,29 +7360,6 @@ class Scanner:
                     symbol, chan_name, _bs_exc,
                 )
 
-        # ── Market-Context vector (Layer A) — observe-only stamp ─────────────
-        # Compute + stamp the "what regime is it now" vector on every signal.
-        # All inputs are already warm here (entry_regime, ATR percentile,
-        # btc_state, funding_rate), so this adds no new reads (Cost Discipline).
-        # Off the money path: nothing consumes these fields to change live
-        # output in Phase 1 — they feed the ops edge matrix + the allocator.
-        if MARKET_CONTEXT_ENABLED:
-            try:
-                _mc = build_market_context(
-                    regime_label=getattr(sig, "entry_regime", "") or None,
-                    htf_trend_prior=getattr(sig, "entry_regime_15m", "") or None,
-                    atr_percentile=getattr(sig, "atr_percentile_at_entry", None),
-                    funding_rate=_funding_rate,
-                    btc_state=float(getattr(sig, "btc_state", 0.0) or 0.0),
-                )
-                for _k, _v in _mc.as_signal_fields().items():
-                    setattr(sig, _k, _v)
-            except Exception as _mc_exc:
-                log.debug(
-                    "Market-context stamp error for {} {} (fail open): {}",
-                    symbol, chan_name, _mc_exc,
-                )
-
         # Reclassify after all post-score confidence adjustments (stat filter, pair-analysis
         # penalties, transition boost) so paid-tier decisions use current confidence.
         sig.signal_tier = classify_signal_tier(sig.confidence)
@@ -7252,6 +7400,7 @@ class Scanner:
                 regime=_regime_key,
                 would_be_confidence=sig.confidence,
             ))
+            self._stamp_suppressed(sig, _reason)
             return _reject("filtered", cross_verified)
         # Reset failed-detection counter — this symbol+channel produced a valid signal
         self._conf_fail_tracker.pop((symbol, chan_name), None)
@@ -7260,7 +7409,7 @@ class Scanner:
             reason="min_confidence_pass",
             threshold=float(min_conf),
         )
-        self._populate_signal_context(sig, volume_24h, ctx)
+        # (_populate_signal_context now runs before the QUIET gate above.)
         self._apply_noise_floor_stop(sig, ctx)
         return sig, cross_verified
 
@@ -7421,6 +7570,13 @@ class Scanner:
 
         # Compute rolling BTC correlation for this symbol (once per scan cycle)
         self._update_btc_correlation(symbol)
+
+        # Shadow-only strategy units (Phase 3, observe-only): would-be trades
+        # go straight into the shadow ledger, never the signal queue.
+        try:
+            self._evaluate_shadow_strategies(symbol, ctx)
+        except Exception as exc:
+            log.debug("shadow-strategy pass failed for {} (fail-open): {}", symbol, exc)
 
         # Collect all signals before deciding what to emit (confluence check)
         _pending_signals: list = []

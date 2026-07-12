@@ -91,3 +91,46 @@ def test_empty_persist_path_disables_io():
     store = StrategyEdgeStore(min_samples=5, persist_path="")
     store.record(_win())
     assert store.sample_count("S1", CTX) == 1
+
+
+def test_source_provenance_counts_in_matrix():
+    from src.strategy_edge import SOURCE_SHADOW, SOURCE_SUPPRESSED
+
+    store = StrategyEdgeStore(min_samples=1, persist_path="")
+    store.record(_win())  # default source = emitted
+    o = _win()
+    o.source = SOURCE_SUPPRESSED
+    store.record(o)
+    o2 = _win()
+    o2.source = SOURCE_SHADOW
+    store.record(o2)
+    cell = store.matrix()[f"S1|{CTX}"]
+    assert cell["n"] == 3
+    assert cell["n_emitted"] == 1
+    assert cell["n_suppressed"] == 1
+    assert cell["n_shadow"] == 1
+
+
+def test_source_survives_persistence_round_trip(tmp_path):
+    path = str(tmp_path / "edge.json")
+    s1 = StrategyEdgeStore(min_samples=1, persist_path=path)
+    o = _win()
+    o.source = "shadow"
+    s1.record(o)
+    s2 = StrategyEdgeStore(min_samples=1, persist_path=path)
+    assert s2.matrix()[f"S1|{CTX}"]["n_shadow"] == 1
+
+
+def test_legacy_store_file_loads_as_emitted(tmp_path):
+    import json
+
+    path = tmp_path / "edge.json"
+    path.write_text(json.dumps({
+        f"S1|{CTX}": [
+            {"won": True, "pnl_pct": 1.0, "r": 1.0, "mfe": 1.0,
+             "ts": "2026-07-01T00:00:00+00:00"},
+        ]
+    }))
+    store = StrategyEdgeStore(min_samples=1, persist_path=str(path))
+    cell = store.matrix()[f"S1|{CTX}"]
+    assert cell["n_emitted"] == 1 and cell["n_shadow"] == 0

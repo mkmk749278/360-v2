@@ -479,6 +479,36 @@ BTC_STATE_COUPLING_LOOKBACK: int = _safe_int("BTC_STATE_COUPLING_LOOKBACK", "200
 MARKET_CONTEXT_ENABLED: bool = _safe_bool("MARKET_CONTEXT_ENABLED", "true")
 
 # ---------------------------------------------------------------------------
+# Shadow ledger / strategy portfolio measurement (Layer C) — Autonomous Portfolio
+# ---------------------------------------------------------------------------
+# ALL observe-only, off the money path: none of these change which signals emit
+# or how they score.  They only measure, on real data, what WOULD have happened.
+#
+# Suppression Quality Audit: stamp every post-scoring gate-suppressed candidate
+# (O(1) in-memory, no I/O) and forward-measure TP1-before-SL on real candles in
+# the existing 5-min audit loop → per-gate KEEP/TUNE/DROP + edge-matrix feed.
+SUPPRESSION_AUDIT_ENABLED: bool = _safe_bool("SUPPRESSION_AUDIT_ENABLED", "true")
+# Shadow-only strategy units (src/shadow_strategies.py): range-fade, mean-revert,
+# funding-fade, cascade-reversal.  They have NO path to the signal queue — their
+# would-be trades enter the shadow ledger only, so the edge matrix can compare
+# them against live evaluators per market context.
+SHADOW_STRATEGIES_ENABLED: bool = _safe_bool("SHADOW_STRATEGIES_ENABLED", "true")
+# Min seconds between two ledger stamps of the same (shadow unit, symbol) so a
+# persisting condition yields one measurable entry per window, not one per scan.
+SHADOW_STRATEGY_COOLDOWN_SEC: float = _safe_float("SHADOW_STRATEGY_COOLDOWN_SEC", "1800")
+# Allocator recommendation mode (src/strategy_allocator.py, Layer D): every audit
+# cycle, compute which strategies it WOULD activate/weight in the current context
+# from the measured edge matrix, and persist the recommendation for ops.  Nothing
+# consumes the recommendation — arming live promotion is a later owner decision.
+ALLOCATOR_RECOMMEND_ENABLED: bool = _safe_bool("ALLOCATOR_RECOMMEND_ENABLED", "true")
+# Safety-envelope bounds baked into the recommendation math (Layer E): the
+# allocator can never recommend more concurrent strategies than this, nor weight
+# a single strategy above this cap.  These bound RECOMMENDATIONS today; the same
+# limits bind live promotion when the owner arms Phase 4.
+ALLOCATOR_MAX_CONCURRENT_STRATEGIES: int = _safe_int("ALLOCATOR_MAX_CONCURRENT_STRATEGIES", "6")
+ALLOCATOR_MAX_STRATEGY_WEIGHT: float = _safe_float("ALLOCATOR_MAX_STRATEGY_WEIGHT", "0.35")
+
+# ---------------------------------------------------------------------------
 # Counter-trend-LONG macro-direction suppression (S39 — the validated scalp filter)
 # ---------------------------------------------------------------------------
 # SCALP-FIRST (owner directive): this is a thin context filter on genuine counter-

@@ -52,6 +52,13 @@ VERDICT_FLAT = "FLAT"
 VERDICT_NEGATIVE = "NEGATIVE"
 VERDICT_INSUFFICIENT = "INSUFFICIENT_DATA"
 
+# Outcome provenance — a matrix cell must be honest about how much of its edge is
+# realised (emitted trades) vs counterfactual (gate-suppressed candidates) vs
+# hypothetical (shadow-only strategy units that can never emit).
+SOURCE_EMITTED = "emitted"
+SOURCE_SUPPRESSED = "suppressed"
+SOURCE_SHADOW = "shadow"
+
 
 @dataclass
 class StrategyOutcome:
@@ -64,6 +71,7 @@ class StrategyOutcome:
     pnl_pct: float            # realised PnL %, net of fees
     r_multiple: float         # realised PnL ÷ initial risk (R)
     mfe_pct: float = 0.0      # max favourable excursion %, for capture analysis
+    source: str = SOURCE_EMITTED  # emitted | suppressed | shadow
 
 
 @dataclass
@@ -73,6 +81,7 @@ class _Record:
     r_multiple: float
     mfe_pct: float
     timestamp: datetime
+    source: str = SOURCE_EMITTED
 
 
 class StrategyEdgeStore:
@@ -115,6 +124,7 @@ class StrategyEdgeStore:
             r_multiple=float(outcome.r_multiple),
             mfe_pct=float(outcome.mfe_pct),
             timestamp=datetime.now(timezone.utc),
+            source=(outcome.source or SOURCE_EMITTED).lower(),
         )
         with self._lock:
             self._records[key].append(rec)
@@ -184,6 +194,9 @@ class StrategyEdgeStore:
                 "strategy": strategy,
                 "context_key": ctx,
                 "n": n,
+                "n_emitted": sum(1 for r in records if r.source == SOURCE_EMITTED),
+                "n_suppressed": sum(1 for r in records if r.source == SOURCE_SUPPRESSED),
+                "n_shadow": sum(1 for r in records if r.source == SOURCE_SHADOW),
                 "win_rate": wins / n,
                 "avg_pnl_pct": avg_pnl,
                 "avg_r": avg_r,
@@ -218,6 +231,8 @@ class StrategyEdgeStore:
                                 timestamp=datetime.fromisoformat(r["ts"])
                                 if r.get("ts")
                                 else datetime.now(timezone.utc),
+                                # Pre-provenance store files load as emitted.
+                                source=str(r.get("src", SOURCE_EMITTED)),
                             )
                         )
         except Exception:
@@ -237,6 +252,7 @@ class StrategyEdgeStore:
                             "r": r.r_multiple,
                             "mfe": r.mfe_pct,
                             "ts": r.timestamp.isoformat(),
+                            "src": r.source,
                         }
                         for r in records
                     ]
