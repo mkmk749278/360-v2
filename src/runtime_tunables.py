@@ -35,6 +35,9 @@ log = get_logger("runtime_tunables")
 
 _DOC_PATH = ("control", "runtime_tunables")
 _CACHE_TTL_S = 5.0
+# Warn (throttled to its own interval) once the served cache is this stale —
+# it means the background Firestore refresh keeps failing.
+_STALE_WARN_S = 60.0
 
 
 @dataclass(frozen=True)
@@ -479,7 +482,16 @@ def _build_registry() -> Dict[str, Tunable]:
 
 
 class RuntimeTunables:
-    """Cached Firestore-backed tunable store.  Thread-safe."""
+    """Cached Firestore-backed tunable store.  Thread-safe.
+
+    Read-path contract (2026-07-13 incident): callers run on the engine's
+    single asyncio event loop, so a read here must NEVER wait on the network.
+    On TTL expiry the caller gets the *stale* cache back immediately and a
+    single-flight daemon thread refreshes Firestore in the background — the
+    Firestore client's internal retry deadline (minutes, on a network stall)
+    can therefore never wedge the scan/monitor loops.  Only the very first
+    cold read (boot path, before any loop starts) fetches inline.
+    """
 
     def __init__(self, firestore_client: Any, clock: Callable[[], float] = time.monotonic) -> None:
         self._db = firestore_client
@@ -487,28 +499,67 @@ class RuntimeTunables:
         self._lock = threading.Lock()
         self._cache: Optional[Dict[str, Any]] = None
         self._cache_read_at: float = 0.0
+        self._refresh_in_flight: bool = False
+        self._stale_warned_at: float = 0.0
 
-    # ---- read path (hot, cached) ----------------------------------------
+    # ---- read path (hot, cached, never blocks on the network) ------------
 
     def _doc_values(self) -> Dict[str, Any]:
         with self._lock:
             now = self._clock()
-            if self._cache is not None and (now - self._cache_read_at) < _CACHE_TTL_S:
+            if self._cache is not None:
+                age = now - self._cache_read_at
+                if age < _CACHE_TTL_S:
+                    return self._cache
+                if not self._refresh_in_flight:
+                    self._refresh_in_flight = True
+                    self._spawn_refresh()
+                if age >= _STALE_WARN_S and now - self._stale_warned_at >= _STALE_WARN_S:
+                    self._stale_warned_at = now
+                    log.warning(
+                        "runtime_tunables cache is {:.0f}s stale — Firestore "
+                        "slow/unreachable; serving last-known values",
+                        age,
+                    )
                 return self._cache
-        values: Dict[str, Any] = {}
+            # Cold cache: first read ever (boot, before the loops start).
+            self._refresh_in_flight = True
+        return self._refresh()
+
+    def _spawn_refresh(self) -> None:
+        """Kick the background refresh (separate method so tests can run it
+        synchronously)."""
+        threading.Thread(
+            target=self._refresh, daemon=True, name="runtime-tunables-refresh"
+        ).start()
+
+    def _refresh(self) -> Dict[str, Any]:
+        """Blocking Firestore read + cache update.  Never raises.
+
+        A failed refresh keeps the last-known values (an ops flag the owner
+        set must survive a Firestore blip) — except on a failed COLD read,
+        where an empty cache is stored so callers fall to env defaults
+        without ever inline-fetching again.
+        """
+        values: Optional[Dict[str, Any]] = None
         try:
             doc = (
                 self._db.collection(_DOC_PATH[0]).document(_DOC_PATH[1]).get()
             )
-            if getattr(doc, "exists", False):
-                values = dict(doc.to_dict() or {})
+            values = dict(doc.to_dict() or {}) if getattr(doc, "exists", False) else {}
         except Exception:
-            log.exception("runtime_tunables doc read failed — using env defaults")
-            values = {}
+            log.exception(
+                "runtime_tunables doc read failed — serving last-known/env values"
+            )
         with self._lock:
-            self._cache = values
-            self._cache_read_at = self._clock()
-        return values
+            self._refresh_in_flight = False
+            if values is not None:
+                self._cache = values
+                self._cache_read_at = self._clock()
+            elif self._cache is None:
+                self._cache = {}
+                self._cache_read_at = 0.0  # ancient → next read retries in background
+            return self._cache
 
     def get(self, key: str) -> Any:
         reg = registry()
@@ -553,8 +604,12 @@ class RuntimeTunables:
         self._db.collection(_DOC_PATH[0]).document(_DOC_PATH[1]).set(
             payload, merge=True
         )
+        # Merge into the live cache instead of dropping it — dropping would
+        # force the next reader into a cold INLINE fetch, which blocks the
+        # event loop in single-process mode (2026-07-13 incident class).
         with self._lock:
-            self._cache = None
+            self._cache = {**(self._cache or {}), **coerced}
+            self._cache_read_at = self._clock()
         log.info("runtime_tunables updated: {}", coerced)
         return coerced
 

@@ -116,7 +116,12 @@ class StrategyEdgeStore:
 
     # ---- write (off the hot path — outcome resolution only) ----------------
 
-    def record(self, outcome: StrategyOutcome) -> None:
+    def record(self, outcome: StrategyOutcome, persist: bool = True) -> None:
+        """Append one outcome.  ``persist=False`` defers the disk write —
+        batch feeders (the 5-min classify cycle can resolve hundreds of
+        records at once) MUST use it and call :meth:`save` once at the end,
+        or every record costs a full-store JSON dump on the caller's thread
+        (2026-07-13 event-loop wedge contributor)."""
         key = self._key(outcome.strategy, outcome.context_key)
         rec = _Record(
             won=bool(outcome.won),
@@ -128,6 +133,12 @@ class StrategyEdgeStore:
         )
         with self._lock:
             self._records[key].append(rec)
+        if persist:
+            self._save()
+
+    def save(self) -> None:
+        """Persist the store once — the batch counterpart of ``record(...,
+        persist=False)``."""
         self._save()
 
     # ---- read (O(1), what the allocator uses) ------------------------------

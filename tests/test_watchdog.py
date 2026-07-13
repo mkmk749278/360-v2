@@ -275,3 +275,149 @@ class TestKillSwitchActuator:
         assert '"engaged": True' in src
         assert '"engaged": False' not in src
         assert "'engaged': False" not in src
+
+
+class TestBootGrace:
+    """2026-07-13 restart storm: status-file mtimes persist across restarts,
+    so staleness must be floored at the engine's StartedAt and the restart
+    action disabled during warmup — otherwise the watchdog kills every boot
+    it triggered and burns the budget straight into the kill switch."""
+
+    def test_stale_heartbeat_floored_at_started_at(self, tmp_path):
+        import os
+
+        p = tmp_path / "scanner_heartbeat"
+        p.write_text("x")
+        old = time.time() - 2000  # pre-restart mtime
+        os.utime(p, (old, old))
+        # Engine (re)started 60s ago → effective age is 60s, not 2000s.
+        assert (
+            watchdog.check_scanner_heartbeat(
+                data_dir=str(tmp_path), stale_sec=900, min_ts=time.time() - 60
+            )
+            == []
+        )
+
+    def test_pricing_age_floored_at_started_at(self, tmp_path):
+        (tmp_path / "pricing_freshness.json").write_text(
+            json.dumps({"updated_at": time.time() - 2000, "positions": []})
+        )
+        assert (
+            watchdog.check_pricing_freshness(
+                data_dir=str(tmp_path), min_ts=time.time() - 60
+            )
+            == []
+        )
+
+    def _arm_run_once(self, monkeypatch, tmp_path, started_ago: float, hb_age: float):
+        import os
+
+        _redirect_state_files(monkeypatch, tmp_path)
+        monkeypatch.setattr(watchdog, "DATA_DIR", str(tmp_path))
+        now = time.time()
+        p = tmp_path / "scanner_heartbeat"
+        p.write_text("x")
+        os.utime(p, (now - hb_age, now - hb_age))
+        restarts: list[str] = []
+        monkeypatch.setattr(watchdog.notify_telegram, "send_telegram", lambda t: True)
+        monkeypatch.setattr(watchdog, "restart_container", lambda name: restarts.append(name) or True)
+        monkeypatch.setattr(watchdog, "HEALTHCHECKS_PING_URL", "")
+        monkeypatch.setattr(watchdog, "check_disk", lambda *a, **k: [])
+        monkeypatch.setattr(watchdog, "check_memory", lambda *a, **k: [])
+        monkeypatch.setattr(
+            watchdog,
+            "container_state",
+            lambda name: {
+                "running": True,
+                "status": "running",
+                "health": "healthy",
+                "restart_count": 0,
+                "started_at": now - started_ago,
+            },
+        )
+        return restarts, now
+
+    def test_run_once_no_restart_during_boot_grace(self, monkeypatch, tmp_path):
+        # Heartbeat mtime predates the restart; engine up only 120s.
+        restarts, now = self._arm_run_once(monkeypatch, tmp_path, started_ago=120, hb_age=2000)
+        state = watchdog.WatchdogState()
+        findings = watchdog.run_once(state, now=now)
+        assert restarts == []
+        assert state.engine_restarts == []  # budget untouched
+        assert not any(f.key == "scanner_heartbeat_stale" for f in findings)
+
+    def test_run_once_restarts_after_grace(self, monkeypatch, tmp_path):
+        # Engine up 2000s, heartbeat last touched 1000s ago → genuinely wedged.
+        restarts, now = self._arm_run_once(monkeypatch, tmp_path, started_ago=2000, hb_age=1000)
+        state = watchdog.WatchdogState()
+        findings = watchdog.run_once(state, now=now)
+        assert restarts == [watchdog.ENGINE_CONTAINER]
+        assert any(f.key == "scanner_heartbeat_stale" for f in findings)
+
+
+class TestBudgetPageDedupe:
+    """The budget-exhausted CRITICAL paged once per 60s loop for 20+ minutes
+    on 2026-07-13 — it must page once per cooldown, go quiet once the kill
+    switch is engaged, and keep RETRYING the engage until it lands."""
+
+    def _arm(self, monkeypatch, tmp_path, engage_ok=True):
+        _redirect_state_files(monkeypatch, tmp_path)
+        pages: list[str] = []
+        engages: list[str] = []
+        monkeypatch.setattr(watchdog.notify_telegram, "send_telegram", lambda t: pages.append(t) or True)
+        monkeypatch.setattr(watchdog, "restart_container", lambda name: True)
+        monkeypatch.setattr(watchdog, "engage_kill_switch", lambda reason: engages.append(reason) or engage_ok)
+        monkeypatch.setattr(watchdog, "RESTART_ENABLED", True)
+        monkeypatch.setattr(watchdog, "KILLSWITCH_ENABLED", True)
+        return pages, engages
+
+    def test_pages_once_then_silent_while_engaged(self, monkeypatch, tmp_path):
+        pages, engages = self._arm(monkeypatch, tmp_path)
+        state = watchdog.WatchdogState(engine_restarts=[1000.0, 1100.0, 1200.0])
+        watchdog.restart_engine(state, "still wedged", now=1300.0)
+        critical_pages = [p for p in pages if "restart budget exhausted" in p]
+        assert len(critical_pages) == 1
+        assert state.kill_switch_engaged_by_watchdog
+        # Loops 2..20 while still broken: no further pages at all.
+        before = len(pages)
+        for i in range(1, 20):
+            watchdog.restart_engine(state, "still wedged", now=1300.0 + 60 * i)
+        assert len(pages) == before
+        assert len(engages) == 1  # engaged once, not re-engaged
+
+    def test_engage_retries_but_pages_throttle(self, monkeypatch, tmp_path):
+        pages, engages = self._arm(monkeypatch, tmp_path, engage_ok=False)
+        state = watchdog.WatchdogState(engine_restarts=[1000.0, 1100.0, 1200.0])
+        for i in range(5):
+            watchdog.restart_engine(state, "still wedged", now=1300.0 + 60 * i)
+        # Engage attempted every loop until it lands...
+        assert len(engages) == 5
+        # ...but the pages fired only on the first (cooldown-gated) loop.
+        assert len([p for p in pages if "restart budget exhausted" in p]) == 1
+        assert len([p for p in pages if "engage FAILED" in p]) == 1
+
+    def test_recovery_rearms_escalation_page(self, monkeypatch, tmp_path):
+        _redirect_state_files(monkeypatch, tmp_path)
+        monkeypatch.setattr(watchdog, "DATA_DIR", str(tmp_path))
+        monkeypatch.setattr(watchdog.notify_telegram, "send_telegram", lambda t: True)
+        monkeypatch.setattr(watchdog, "HEALTHCHECKS_PING_URL", "")
+        monkeypatch.setattr(watchdog, "check_disk", lambda *a, **k: [])
+        monkeypatch.setattr(watchdog, "check_memory", lambda *a, **k: [])
+        monkeypatch.setattr(
+            watchdog,
+            "container_state",
+            lambda name: {
+                "running": True,
+                "status": "running",
+                "health": "healthy",
+                "restart_count": 0,
+                "started_at": time.time() - 5000,
+            },
+        )
+        state = watchdog.WatchdogState(
+            kill_switch_engaged_by_watchdog=True,
+            last_paged_at={"engine_restart_budget_exhausted": 1300.0},
+        )
+        watchdog.run_once(state, now=time.time())
+        assert not state.kill_switch_engaged_by_watchdog
+        assert "engine_restart_budget_exhausted" not in state.last_paged_at
