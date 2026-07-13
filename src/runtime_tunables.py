@@ -67,6 +67,7 @@ def _build_registry() -> Dict[str, Tunable]:
         COHORT_EDGE_GATE_ENABLED,
         COHORT_EDGE_GATE_MIN_N,
         COHORT_EDGE_SUPPRESS_BELOW,
+        GEOMETRY_AB_ENABLED,
         LOSS_STREAK_CAP_HOURS,
         LOSS_STREAK_ESCALATION_ENABLED,
         MARKET_CONTEXT_ENABLED,
@@ -440,6 +441,23 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=SHADOW_STRATEGIES_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="geometry_ab_enabled",
+            label="Stop-geometry A/B",
+            description=(
+                "Stamp every post-scoring candidate (emitted and "
+                "gate-suppressed) as a counterfactual pair — its live "
+                "fixed-% stop vs an ATR/structure stop beyond the "
+                "liquidity pool — and forward-measure both identically, "
+                "so the edge matrix shows which geometry wins per "
+                "strategy and context. Observe-only: live stops are "
+                "untouched; applying a winner is a separate dark-first, "
+                "owner-signed change."
+            ),
+            type="bool",
+            default=GEOMETRY_AB_ENABLED,
             category="Measurement",
         ),
         Tunable(

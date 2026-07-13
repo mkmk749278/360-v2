@@ -4,6 +4,68 @@
 
 ---
 
+## 🟢 SESSION 54 2026-07-13 — Plan-vs-shipped audit + Stop-Geometry A/B wired (branch `claude/pr-crypto-audit-review-a303z5`, 360-v2 + 360ce-ops)
+
+**Owner ask:** audit yesterday's PRs (#720/#721 + ops #62) against
+`PLAN_AUTONOMOUS_PORTFOLIO.md`, the Crypto Market Doctrine, and the Strategy Lab
+PDF (2026-07-13 05:03 UTC), and attend to the data.
+
+### Audit verdict (verified in code, not PR bodies)
+
+- Layers A–D + F, the 4 shadow units, tunables and truth-report sections: **all
+  shipped and wired** as claimed.  Acknowledged deferrals stand: Telegram→app
+  decouple (owner sign-off), volume knobs as live tunables (dark-first), Phase 4
+  master-arm (owner).
+- **One real gap found: Phase 3 item 8** — the fixed-% vs ATR/structure stop A/B
+  for the *existing* evaluators (the plan's "single biggest edge lever") had only
+  shipped for the 4 shadow units.  → closed this session (below).
+
+### Strategy Lab first read (~12h window — directional only, sample floors rule)
+
+- `dispatch_staleness` = **DROP** (n=717, **75.6% would-win**, 393R missed vs 66R
+  saved, −0.46R/suppression) — the standout; acting on it is money-path →
+  dark-first + owner sign-off, after a fuller window.
+- `min_confidence` = TUNE (n=2202, ~neutral EV); `quiet_scalp_block` +
+  `level_still_in_play` = KEEP (validated).
+- SHADOW_RANGE_FADE 77%/+1.14R (31) — doctrine's range thesis leading;
+  SHADOW_FUNDING_FADE 16%/−0.72R; FAILED_AUCTION_RECLAIM (live) −0.36R over ~438
+  counterfactuals.  Allocator honestly cold in ASIA/QUIET/NORMAL/BTC_FALLING.
+
+### Stop-Geometry A/B shipped (observe-only, Phase 3 item 8 measurement half)
+
+- **`src/geometry_ab.py`**: pure ATR/structure stop math (`max(ATR14×1.5,
+  pool_dist+buffer)` beyond the 20-bar swing extreme, 5% sanity clamp) +
+  `stamp_geometry_pair` — every post-scoring candidate (emitted AND suppressed)
+  stamps `X@FIXED` (live stop) + `X@ATR` pairs into a **dedicated ledger**
+  (`data/geometry_ab_candidates.json`, own bound — can't evict gate records),
+  per-(symbol,setup,side) 10-min pair cooldown, fail-open.
+- Scanner: `_stamp_geometry_ab` hooks in `_stamp_suppressed` (own tunable — runs
+  even with the suppression audit off) and on successful enqueue; the would-be
+  stop is stamped on the signal (`Signal.geo_atr_stop`, consumed by nothing).
+- 5-min audit loop classifies the pair ledger with the same TP1-before-SL
+  classifier → edge matrix rows (`source="shadow"`).  **Allocator excludes
+  `@FIXED`/`@ATR` rows** — measurement arms are never activatable.
+- Truth report: `## Stop-Geometry A/B` (per-strategy pooled arms, ΔR, leader —
+  leader named only when BOTH arms ≥15 samples); strategy rollups exclude
+  variants (no double-counting).  Tunable `geometry_ab_enabled` ("Measurement").
+- Ops `/strategy-lab`: new **Stop-geometry A/B card** (`reduce_geometry_ab`,
+  engine-parity port; per-strategy rollup also excludes variants now).
+- Tests: engine **6383 passed** (+22, incl. the doctrine scenario: wick to 98.7
+  clips the 99.0 fixed stop, the 98.5 ATR stop survives to TP), ruff clean, mypy
+  103 (< 113 baseline); ops **345 passed** (+3).  Fixture-ran
+  `scripts/build_truth_report.py` — section renders with a real leader row.
+
+### Follow-ups
+
+- **Geometry application half** (owner sign-off, dark-first): wire the measured
+  winner into live SL placement + `risk_scale` sizing once a real window names
+  leaders per strategy/context.
+- `dispatch_staleness` gate action after a fuller window (money-path, owner).
+- Unchanged from S53: Telegram→app decouple; volume knobs as live tunables;
+  Phase 4 master-arm.
+
+---
+
 ## 🟢 SESSION 53 2026-07-12 — Autonomous Portfolio Phases 1–3 wired end-to-end: shadow ledger live, 4 shadow strategy units, allocator (recommendation mode), ops Strategy Lab (branch `claude/realtime-strategy-testing-ops-r318yu`, 360-v2 + 360ce-ops)
 
 **Owner directive:** "use the time — try different strategies with real data in real

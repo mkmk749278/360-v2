@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
+from src.geometry_ab import is_geometry_variant
 from src.strategy_edge import (
     VERDICT_NEGATIVE,
     VERDICT_POSITIVE,
@@ -84,6 +85,10 @@ def recommend(
             continue
         verdict = cell.get("verdict")
         strategy = str(cell.get("strategy", ""))
+        # X@FIXED / X@ATR rows are stop-geometry measurement arms, not
+        # activatable strategies — the A/B informs geometry, never allocation.
+        if is_geometry_variant(strategy):
+            continue
         edge_r = cell.get("edge_r")
         row = {
             "strategy": strategy,

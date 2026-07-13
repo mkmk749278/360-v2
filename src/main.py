@@ -1585,6 +1585,49 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Suppression audit classify error (fail-open): {}", exc)
 
+            # ── Stop-geometry A/B: classify the FIXED/ATR pair ledger ──────
+            # Same forward measure, dedicated store; both arms land in the
+            # edge matrix as X@FIXED / X@ATR shadow rows so ops + the truth
+            # report show which geometry wins per (strategy, context).
+            try:
+                from src import runtime_tunables as _rt
+                if bool(_rt.get("geometry_ab_enabled")):
+                    from src import geometry_ab as _gab
+                    from src import suppression_audit as _sa
+                    from src.strategy_edge import (
+                        SOURCE_SHADOW,
+                        StrategyOutcome,
+                        get_strategy_edge_store,
+                    )
+
+                    def _feed_geometry_edge(rec: dict) -> None:
+                        outcome = _sa.candidate_outcome(rec)
+                        if not outcome:
+                            return
+                        get_strategy_edge_store().record(
+                            StrategyOutcome(
+                                strategy=str(rec.get("setup_class", "")),
+                                context_key=str(rec.get("context_key", "")),
+                                side=str(rec.get("side", "")),
+                                won=bool(outcome.get("won")),
+                                pnl_pct=float(outcome.get("pnl_pct", 0.0)),
+                                r_multiple=float(outcome.get("r_multiple", 0.0)),
+                                mfe_pct=float(outcome.get("mfe_pct", 0.0)),
+                                source=SOURCE_SHADOW,
+                            )
+                        )
+
+                    gab_counters = _gab.get_geometry_store().classify_pending(
+                        fetch_ohlc_since=fetch_ohlc_since,
+                        on_classified=_feed_geometry_edge,
+                    )
+                    if gab_counters:
+                        log.info("Geometry A/B classified: {}", gab_counters)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("Geometry A/B classify error (fail-open): {}", exc)
+
             # ── Layer A: publish the current global context for ops ────────
             self._publish_market_context()
             # ── Layer D: allocator recommendation (observe-only) ───────────

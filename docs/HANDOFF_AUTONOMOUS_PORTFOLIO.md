@@ -128,14 +128,21 @@ envelope math (per-strategy live cap, max concurrent, single owner master-arm). 
 in ops before arming.
 
 ### 6. Phase 3 — new strategies + ATR/structure stop geometry (dark)
-- New strategy units (enter shadow immediately, appear in the matrix): **range-fade
-  (VAH/VAL)**, **funding/basis**, **mean-reversion**, **cascade-reversal**.
-- **ATR/structure stop geometry** as a selectable geometry policy (stop beyond the
-  liquidity pool = `max(structure level, ATR×mult)`, size scaled to hold dollar-risk
-  constant via the existing `risk_scale` hook in `signal_dispatch`). A/B vs fixed-% per
-  strategy in shadow. **Owner-sign-off (SL/TP shape).** Stamp the would-be stop on every
-  signal first. — *This is the single biggest edge lever (see the Crypto Market Doctrine:
-  our 0.8% stop sits inside a mid-cap's 15m noise band).*
+- ✅ **DONE (S53)** — New strategy units (in shadow, in the matrix): **range-fade
+  (VAH/VAL)**, **funding/basis**, **mean-reversion**, **cascade-reversal**
+  (`src/shadow_strategies.py`).
+- ✅ **DONE (S54) — measurement half.** `src/geometry_ab.py`: every post-scoring
+  candidate (emitted AND suppressed) stamps a counterfactual **fixed-% vs
+  ATR/structure** stop pair (`X@FIXED` / `X@ATR` matrix rows, dedicated ledger
+  `data/geometry_ab_candidates.json`, `geometry_ab_enabled` tunable); truth report
+  `## Stop-Geometry A/B` + ops Strategy Lab card show the per-strategy leader.
+  R-units make constant-dollar-risk sizing inherent to the comparison; the
+  would-be stop is also stamped on every emitted signal (`geo_atr_stop`).
+  **Remaining: the application half** — once the A/B names a leader on a real
+  window, wiring the winning geometry into live SL placement (size scaled via
+  the existing `risk_scale` hook in `signal_dispatch`) is **owner-sign-off
+  (SL/TP shape), dark-first**. — *This is the single biggest edge lever (see the
+  Crypto Market Doctrine: our 0.8% stop sits inside a mid-cap's 15m noise band).*
 
 ### 7. Phase 4 — arm autonomy
 Owner flips master-arm; allocator promotes/weights/demotes strategies live **within the
