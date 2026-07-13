@@ -73,11 +73,40 @@ PYEOF
 # ── 2. Tar the data dir out of the container, encrypt on the host ───────────
 # -h not needed; exclude WAL/SHM hot files (the staged .backup copies are the
 # consistent versions of those DBs).
+#
+# The engine writes money-path JSON state (edge/cohort stores, invalidation
+# records, signal_performance, …) to /app/data CONTINUOUSLY, so tar will very
+# often see a file mtime/size change mid-read and return exit code 1
+# ("file changed as we read it").  That is a WARNING, not corruption — the
+# archive is valid and the SQLite DBs are already consistently snapshotted in
+# step 1.  Only tar exit >=2 is a real error.  We must therefore NOT let
+# `set -o pipefail` + `set -e` abort on tar's exit 1, and we check PIPESTATUS
+# for both pipe stages explicitly (the verify step below is the real integrity
+# gate for a genuinely truncated archive).
+set +e
 docker exec "$ENGINE_CONTAINER" tar -czf - \
+    --warning=no-file-changed \
     --exclude='*.db-wal' --exclude='*.db-shm' \
     -C /app data \
   | openssl enc -aes-256-cbc -pbkdf2 -iter 200000 -salt \
       -pass env:BACKUP_PASSPHRASE -out "$OUT_FILE"
+# Capture BOTH stages in one statement — any command (incl. a plain
+# assignment) resets PIPESTATUS, so reading [0] then [1] separately would
+# lose the second (and trip `set -u`).
+pipe_rc=("${PIPESTATUS[@]}")
+set -e
+tar_rc=${pipe_rc[0]}
+enc_rc=${pipe_rc[1]}
+if [ "$tar_rc" -gt 1 ]; then
+  echo "BACKUP_FAIL reason=tar_error rc=$tar_rc file=$OUT_FILE" >&2
+  rm -f "$OUT_FILE"
+  exit 1
+fi
+if [ "$enc_rc" -ne 0 ]; then
+  echo "BACKUP_FAIL reason=openssl_error rc=$enc_rc file=$OUT_FILE" >&2
+  rm -f "$OUT_FILE"
+  exit 1
+fi
 chmod 600 "$OUT_FILE"
 
 # ── 3. Verify the artifact decrypts and lists as a sane tar ─────────────────
