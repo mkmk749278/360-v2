@@ -1526,10 +1526,12 @@ class CryptoSignalEngine:
         while True:
             await asyncio.sleep(300)  # 5 min cadence
             try:
-                counters = classify_pending_records(fetch_ohlc_since=fetch_ohlc_since)
+                counters = await asyncio.to_thread(
+                    classify_pending_records, fetch_ohlc_since=fetch_ohlc_since
+                )
                 if counters:
                     log.info("Invalidation audit classified: {}", counters)
-                prune_old_records(retention_sec=7 * 24 * 3600)
+                await asyncio.to_thread(prune_old_records, retention_sec=7 * 24 * 3600)
             except asyncio.CancelledError:
                 break
             except Exception as exc:
@@ -1559,6 +1561,9 @@ class CryptoSignalEngine:
                         _is_shadow_unit = str(
                             rec.get("gate_name", "")
                         ).startswith("shadow_unit")
+                        # persist=False: hundreds of records can resolve in
+                        # one cycle — one batched save() below, not one full
+                        # JSON dump per record (2026-07-13 wedge contributor).
                         get_strategy_edge_store().record(
                             StrategyOutcome(
                                 strategy=str(rec.get("setup_class", "")),
@@ -1571,13 +1576,23 @@ class CryptoSignalEngine:
                                 source=SOURCE_SHADOW
                                 if _is_shadow_unit
                                 else SOURCE_SUPPRESSED,
-                            )
+                            ),
+                            persist=False,
                         )
 
-                    sa_counters = _sa.get_store().classify_pending(
-                        fetch_ohlc_since=fetch_ohlc_since,
-                        on_classified=_feed_edge,
-                    )
+                    def _classify_suppressed_batch() -> dict:
+                        counters = _sa.get_store().classify_pending(
+                            fetch_ohlc_since=fetch_ohlc_since,
+                            on_classified=_feed_edge,
+                        )
+                        get_strategy_edge_store().save()
+                        return counters
+
+                    # Off the event loop: classification copies candle lists
+                    # per record and both stores do sync file writes — a big
+                    # backlog on the loop thread starves the scanner + trade
+                    # monitor heartbeats (the 2026-07-13 incident class).
+                    sa_counters = await asyncio.to_thread(_classify_suppressed_batch)
                     if sa_counters:
                         log.info("Suppression audit classified: {}", sa_counters)
             except asyncio.CancelledError:
@@ -1614,13 +1629,19 @@ class CryptoSignalEngine:
                                 r_multiple=float(outcome.get("r_multiple", 0.0)),
                                 mfe_pct=float(outcome.get("mfe_pct", 0.0)),
                                 source=SOURCE_SHADOW,
-                            )
+                            ),
+                            persist=False,
                         )
 
-                    gab_counters = _gab.get_geometry_store().classify_pending(
-                        fetch_ohlc_since=fetch_ohlc_since,
-                        on_classified=_feed_geometry_edge,
-                    )
+                    def _classify_geometry_batch() -> dict:
+                        counters = _gab.get_geometry_store().classify_pending(
+                            fetch_ohlc_since=fetch_ohlc_since,
+                            on_classified=_feed_geometry_edge,
+                        )
+                        get_strategy_edge_store().save()
+                        return counters
+
+                    gab_counters = await asyncio.to_thread(_classify_geometry_batch)
                     if gab_counters:
                         log.info("Geometry A/B classified: {}", gab_counters)
             except asyncio.CancelledError:

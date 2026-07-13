@@ -10,8 +10,11 @@ from typing import Optional
 _HEARTBEAT_MAX_AGE_SECONDS = 120.0
 _HEARTBEAT_PATH = os.path.join(os.path.dirname(__file__), "data", "scanner_heartbeat")
 # Grace period: give the engine time to complete its first scan cycle before
-# treating a missing heartbeat file as a failure.
-_HEARTBEAT_GRACE_PERIOD_SECONDS = 180
+# treating a missing OR pre-restart heartbeat as a failure.  Boot re-seeds
+# 75 pairs x multiple timeframes over REST — on a loaded box that takes
+# several minutes, and 180s had autoheal killing warmups mid-boot during the
+# 2026-07-13 restart storm.
+_HEARTBEAT_GRACE_PERIOD_SECONDS = 480
 # Index of the starttime field in /proc/pid/stat after stripping "pid (comm) ".
 # Corresponds to field 22 in the kernel ABI (1-based).  We need at least this
 # many fields to be present before indexing.
@@ -131,9 +134,22 @@ def _scanner_heartbeat_fresh(engine_pid: Optional[int]) -> bool:
     try:
         age = time.time() - os.path.getmtime(_HEARTBEAT_PATH)
         if age >= _HEARTBEAT_MAX_AGE_SECONDS:
+            # The heartbeat file lives on the data volume, so its mtime
+            # survives a container restart.  A "stale" heartbeat that
+            # predates the engine process itself is a WARMING-UP engine,
+            # not a wedged one — failing here made autoheal kill every
+            # boot mid-warmup (2026-07-13).  After the grace period a
+            # still-untouched heartbeat is a real failure.
+            uptime = (
+                _engine_uptime_seconds(engine_pid)
+                if engine_pid is not None
+                else _UNKNOWN_UPTIME_SECONDS
+            )
+            if age > uptime and uptime < _HEARTBEAT_GRACE_PERIOD_SECONDS:
+                return True  # pre-restart mtime; engine still warming up
             print(
-                f"Heartbeat is stale: age={age:.1f}s > max={_HEARTBEAT_MAX_AGE_SECONDS:.0f}s. "
-                f"Path: {_HEARTBEAT_PATH}",
+                f"Heartbeat is stale: age={age:.1f}s > max={_HEARTBEAT_MAX_AGE_SECONDS:.0f}s "
+                f"(engine uptime ~{uptime:.0f}s). Path: {_HEARTBEAT_PATH}",
                 file=sys.stderr,
             )
             return False
@@ -142,20 +158,25 @@ def _scanner_heartbeat_fresh(engine_pid: Optional[int]) -> bool:
         return True  # Cannot stat — treat as fresh to avoid false negatives
 
 
-engine_pid = _find_engine_pid()
-if engine_pid is None:
-    print("Engine process (src.main) not found.", file=sys.stderr)
-    sys.exit(1)
+def main() -> int:
+    engine_pid = _find_engine_pid()
+    if engine_pid is None:
+        print("Engine process (src.main) not found.", file=sys.stderr)
+        return 1
 
-if not _config_importable():
-    print("Config module could not be imported — dependency issue.", file=sys.stderr)
-    sys.exit(1)
+    if not _config_importable():
+        print("Config module could not be imported — dependency issue.", file=sys.stderr)
+        return 1
 
-if not _logs_dir_exists():
-    print("logs/ directory does not exist.", file=sys.stderr)
-    sys.exit(1)
+    if not _logs_dir_exists():
+        print("logs/ directory does not exist.", file=sys.stderr)
+        return 1
 
-if not _scanner_heartbeat_fresh(engine_pid):
-    sys.exit(1)
+    if not _scanner_heartbeat_fresh(engine_pid):
+        return 1
 
-sys.exit(0)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

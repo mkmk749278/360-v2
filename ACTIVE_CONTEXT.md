@@ -4,6 +4,72 @@
 
 ---
 
+## 🔴 SESSION 55 2026-07-13 — Engine-wedge → watchdog restart-storm → kill-switch incident fixed (branch `claude/pr-crypto-audit-review-a303z5`, 360-v2)
+
+**Owner reported** (6 WATCHDOG Telegram screenshots, ~07:51–08:22 IST): repeating
+`UNHEALTHY`, `scanner heartbeat 934s old`, `pricing-freshness 642s old`, then
+`engine restart budget exhausted (3/h) … Escalating to kill switch — auto-trade
+HALTS` firing every ~60s for 20+ minutes. **The kill switch is STILL engaged —
+trading is halted until the owner re-enables it (owner-only by doctrine).** Engine
+itself recovered 08:22; monitor-logs 04:15 UTC + Strategy Lab PDF 05:03 UTC confirm
+healthy since.
+
+### What actually happened (code-verified root cause)
+
+1. **Primary — blocking Firestore read on the single asyncio event loop.**
+   `RuntimeTunables._doc_values()` did a **synchronous** `.get()` on 5s-TTL expiry.
+   Since #721 the scan loop calls `_rt.get(...)` per cycle, so a Firestore/network
+   stall (client retry deadline = minutes) froze the **whole loop** — scanner
+   heartbeat AND trade-monitor pricing publisher stopped **together**, exactly the
+   observed twin-stall signature.
+2. **Watchdog restart storm** — no boot grace; the `scanner_heartbeat` mtime
+   **persists on the data volume across restarts**, so after its own restart the
+   watchdog re-read the *pre-restart* age and re-killed the booting engine every 60s
+   until the 3/h budget burned → kill switch.
+3. **Page spam** — the budget-exhausted CRITICAL called `_page()` directly, bypassing
+   the `dispatch_pages` cooldown → one identical page per loop.
+4. **Contributor** — `StrategyEdgeStore.record()` did a full-store JSON dump *per
+   record*; the 5-min classify batch (hundreds of records post #721/#722) ran
+   hundreds of sync dumps + candle-copies on the loop thread.
+5. **Healthcheck** — 180s grace vs a multi-minute REST re-seed of 75 pairs → UNHEALTHY
+   flapping mid-boot → autoheal pile-on.
+
+### Fixes shipped (all off the money path; kill-switch ENGAGE logic untouched)
+
+- **`src/runtime_tunables.py`** — TTL expiry now **serves the stale cache instantly**
+  and refreshes in a **single-flight daemon thread**; only the cold boot read fetches
+  inline; failed refresh keeps last-known values; `set_values` merges into cache
+  (no cold-fetch drop). Warns once/60s when the served cache is >60s stale.
+- **`scripts/watchdog.py`** — `container_state()` returns `started_at` (parsed
+  `State.StartedAt`); heartbeat/pricing ages **floored at engine StartedAt**; new
+  `WATCHDOG_BOOT_GRACE_SEC` (600) disables the heartbeat-restart + blind-restart
+  actions during warmup; budget-exhausted page is **cooldown-gated + silent while
+  the kill switch is engaged** (engage still retried every loop until it lands);
+  recovery re-arms the escalation page.
+- **`src/strategy_edge.py` + `src/main.py`** — `record(..., persist=False)` + public
+  `save()`; all three classify batches (invalidation, suppression, geometry) run via
+  `await asyncio.to_thread(...)` with **one save per cycle** — the 5-min loop can
+  never block the event loop again.
+- **`healthcheck.py`** — grace 180→480s; a heartbeat mtime **older than the engine
+  process** is treated as *warming up*, not stale (a genuine in-flight wedge — age ≤
+  uptime — still fails). Made `main()` importable for tests.
+- Tests: `tests/test_incident_2026_07_13.py` (new) + 11 new `test_watchdog.py`
+  cases. Full suite green; ruff clean.
+
+### ⚠️ OWNER ACTION REQUIRED
+After this deploys and the engine shows healthy in ops, **re-enable auto-trade from
+the ops Control page** (kill switch is owner-only to disengage — the watchdog has no
+disengage path by design). Resting SL/TP on Binance protected open positions
+throughout.
+
+### Still open
+- Issue **#714** — nightly encrypted backup failing since 2026-07-10 (no fresh
+  off-site copy of the data volume). Separate item, high severity, untouched here.
+- The exact 02:12-UTC first-trigger (what stalled Firestore) needs VPS logs, but the
+  loop-blocking defect is real and fixed regardless of the trigger.
+
+---
+
 ## 🟢 SESSION 54 2026-07-13 — Plan-vs-shipped audit + Stop-Geometry A/B wired (branch `claude/pr-crypto-audit-review-a303z5`, 360-v2 + 360ce-ops)
 
 **Owner ask:** audit yesterday's PRs (#720/#721 + ops #62) against

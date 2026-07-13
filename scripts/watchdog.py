@@ -115,6 +115,13 @@ MEM_WARN_PCT = _env_float("WATCHDOG_MEM_WARN_PCT", 10.0)
 RESTART_ENABLED = _env_bool("WATCHDOG_RESTART_ENABLED", True)
 MAX_ENGINE_RESTARTS_PER_HOUR = _env_int("WATCHDOG_MAX_ENGINE_RESTARTS_PER_HOUR", 3)
 KILLSWITCH_ENABLED = _env_bool("WATCHDOG_KILLSWITCH_ENABLED", True)
+# Post-(re)start warmup window: the heartbeat/pricing files keep their OLD
+# mtime on the data volume across restarts, and a boot (REST-seeding 75 pairs)
+# takes minutes.  Judging staleness during this window is what turned one
+# wedge into a 3-restarts-in-3-minutes budget burn + kill switch on
+# 2026-07-13.  While engine uptime < grace, staleness ages are floored at the
+# container start and the heartbeat-restart action is disabled.
+BOOT_GRACE_SEC = _env_int("WATCHDOG_BOOT_GRACE_SEC", 600)
 
 HEALTHCHECKS_PING_URL = os.environ.get("HEALTHCHECKS_PING_URL", "").strip()
 
@@ -251,11 +258,47 @@ def docker_request(
             pass
 
 
+def _parse_docker_time(value: Any) -> float:
+    """Docker RFC3339 timestamp (nanosecond precision) → epoch seconds.
+
+    Returns 0.0 for missing/zero ("0001-01-01...") /unparseable values so
+    callers can treat 0.0 as "unknown — apply no floor".
+    """
+    try:
+        s = str(value or "").strip()
+        if not s or s.startswith("0001-"):
+            return 0.0
+        if s.endswith("Z"):
+            s = s[:-1] + "+00:00"
+        if "." in s:
+            head, rest = s.split(".", 1)
+            frac = ""
+            tz = ""
+            for i, ch in enumerate(rest):
+                if ch.isdigit():
+                    frac += ch
+                else:
+                    tz = rest[i:]
+                    break
+            s = head + "." + (frac[:6] or "0") + (tz or "+00:00")
+        from datetime import datetime
+
+        return datetime.fromisoformat(s).timestamp()
+    except Exception:
+        return 0.0
+
+
 def container_state(name: str) -> Dict[str, Any]:
-    """{'running': bool, 'status': str, 'health': str, 'restart_count': int}"""
+    """{'running', 'status', 'health', 'restart_count', 'started_at'}"""
     info = docker_request("GET", f"/containers/{name}/json")
     if not info:
-        return {"running": False, "status": "unreachable", "health": "unknown", "restart_count": 0}
+        return {
+            "running": False,
+            "status": "unreachable",
+            "health": "unknown",
+            "restart_count": 0,
+            "started_at": 0.0,
+        }
     state = info.get("State", {})
     health = (state.get("Health") or {}).get("Status", "none")
     return {
@@ -263,6 +306,7 @@ def container_state(name: str) -> Dict[str, Any]:
         "status": state.get("Status", "unknown"),
         "health": health,
         "restart_count": int(info.get("RestartCount", 0)),
+        "started_at": _parse_docker_time(state.get("StartedAt")),
     }
 
 
@@ -319,18 +363,23 @@ def check_scanner_heartbeat(
     data_dir: str = DATA_DIR,
     stale_sec: int = HEARTBEAT_STALE_SEC,
     now: Optional[float] = None,
+    min_ts: float = 0.0,
 ) -> List[Finding]:
     """Wedge the container healthcheck missed: heartbeat old but container up.
 
     The scanner publishes its heartbeat every cycle *including breaker
     halts*, so a protective halt never trips this (that disambiguation is
     check_circuit_breaker's job).
+
+    ``min_ts`` (the engine container's StartedAt) floors the age: the file's
+    mtime persists on the data volume across restarts, and an engine cannot
+    have been wedged for longer than it has been alive.
     """
     now = now or time.time()
     p = os.path.join(data_dir, "scanner_heartbeat")
     if not os.path.exists(p):
         return []  # pre-first-cycle; the container healthcheck owns this window
-    age = int(now - os.path.getmtime(p))
+    age = int(now - max(os.path.getmtime(p), min_ts))
     if age > stale_sec:
         return [
             Finding(
@@ -349,8 +398,13 @@ def check_pricing_freshness(
     data_dir: str = DATA_DIR,
     file_max_age_sec: int = PRICING_FILE_MAX_AGE_SEC,
     now: Optional[float] = None,
+    min_ts: float = 0.0,
 ) -> List[Finding]:
-    """Audit F-07 at minutes cadence — see monitor_heartbeat.py for the class."""
+    """Audit F-07 at minutes cadence — see monitor_heartbeat.py for the class.
+
+    ``min_ts`` floors the snapshot age at the engine's StartedAt (same
+    persisted-mtime-across-restart honesty as the heartbeat check).
+    """
     now = now or time.time()
     fp = os.path.join(data_dir, "pricing_freshness.json")
     if not os.path.exists(fp):
@@ -367,7 +421,7 @@ def check_pricing_freshness(
             )
         ]
     findings: List[Finding] = []
-    age = int(now - float(snap.get("updated_at", 0)))
+    age = int(now - max(float(snap.get("updated_at", 0)), min_ts))
     if age > file_max_age_sec:
         findings.append(
             Finding(
@@ -537,19 +591,34 @@ def restart_engine(state: WatchdogState, why: str, now: Optional[float] = None) 
         _page(f"⛔ engine needs a restart ({why}) but WATCHDOG_RESTART_ENABLED=false — manual action required.")
         return False
     if _restart_budget_left(state, now) <= 0:
-        _page(
-            f"🆘 CRITICAL: engine restart budget exhausted "
-            f"({MAX_ENGINE_RESTARTS_PER_HOUR}/h) and still broken ({why}). "
-            "Escalating to kill switch — auto-trade HALTS; resting SL/TP on "
-            "Binance keep protecting open positions. Re-enable is owner-only."
-        )
+        # Cooldown-gated page: this branch runs on EVERY loop while the
+        # engine stays broken — unthrottled it paged the owner once per
+        # minute for 20+ minutes on 2026-07-13.  Once the watchdog has
+        # engaged the kill switch the episode is already escalated; stay
+        # quiet until it clears or the cooldown re-arms.
+        key = "engine_restart_budget_exhausted"
+        last = state.last_paged_at.get(key)
+        page_due = last is None or now - last >= PAGE_COOLDOWN_SEC
+        if page_due and not state.kill_switch_engaged_by_watchdog:
+            _page(
+                f"🆘 CRITICAL: engine restart budget exhausted "
+                f"({MAX_ENGINE_RESTARTS_PER_HOUR}/h) and still broken ({why}). "
+                "Escalating to kill switch — auto-trade HALTS; resting SL/TP on "
+                "Binance keep protecting open positions. Re-enable is owner-only."
+            )
+            state.last_paged_at[key] = now
         if KILLSWITCH_ENABLED and not state.kill_switch_engaged_by_watchdog:
+            # Retry the engage every loop until it lands — the attempt is
+            # cheap and idempotent; only the paging is throttled.
             ok = engage_kill_switch(f"engine unrecoverable: {why}")
             state.kill_switch_engaged_by_watchdog = ok
-            _page(
-                "kill switch ENGAGED by watchdog." if ok
-                else "🆘 kill-switch engage FAILED — engine AND control surface degraded; intervene NOW."
-            )
+            if ok:
+                _page("kill switch ENGAGED by watchdog.")
+            elif page_due:
+                _page(
+                    "🆘 kill-switch engage FAILED — engine AND control "
+                    "surface degraded; intervene NOW."
+                )
         return False
     state.engine_restarts.append(now)
     ok = restart_container(ENGINE_CONTAINER)
@@ -605,20 +674,36 @@ def run_once(state: WatchdogState, now: Optional[float] = None) -> List[Finding]
     now = now or time.time()
     states = {name: container_state(name) for name in WATCHED_CONTAINERS}
 
+    # Staleness ages are floored at the engine's StartedAt — the status
+    # files' mtimes persist on the data volume across restarts, so without
+    # the floor every restart re-reads the PRE-restart age and a booting
+    # engine looks permanently wedged (2026-07-13 restart storm).
+    engine_started_at = float(states.get(ENGINE_CONTAINER, {}).get("started_at", 0.0))
+
     findings: List[Finding] = []
     findings += check_containers(states)
-    findings += check_scanner_heartbeat(now=now)
-    findings += check_pricing_freshness(now=now)
-    findings += check_circuit_breaker(now=now)
+    # data_dir passed explicitly: module attribute resolved at call time
+    # (defaults bind at def time, which pins the pre-monkeypatch path).
+    findings += check_scanner_heartbeat(data_dir=DATA_DIR, now=now, min_ts=engine_started_at)
+    findings += check_pricing_freshness(data_dir=DATA_DIR, now=now, min_ts=engine_started_at)
+    findings += check_circuit_breaker(data_dir=DATA_DIR, now=now)
     findings += check_disk()
     findings += check_memory()
 
     # --- Graduated remediation -------------------------------------------
     engine_running = states.get(ENGINE_CONTAINER, {}).get("running", False)
+    engine_uptime = (now - engine_started_at) if engine_started_at > 0 else None
+    in_boot_grace = engine_uptime is not None and engine_uptime < BOOT_GRACE_SEC
 
     # Wedged scan loop with a running container → the restart Docker's own
-    # healthcheck + autoheal should have done but didn't.
-    if engine_running and any(f.key == "scanner_heartbeat_stale" for f in findings):
+    # healthcheck + autoheal should have done but didn't.  Never inside the
+    # boot grace: a restart here kills the warmup the previous restart
+    # started and burns the budget straight into the kill switch.
+    if (
+        engine_running
+        and not in_boot_grace
+        and any(f.key == "scanner_heartbeat_stale" for f in findings)
+    ):
         restart_engine(state, "scanner heartbeat stale beyond watchdog bound", now=now)
 
     # Blind-position escalation: page immediately (dispatch_pages), restart
@@ -630,7 +715,7 @@ def run_once(state: WatchdogState, now: Optional[float] = None) -> List[Finding]
         if key not in blind_now:
             del state.blind_since[key]
     persistent = [k for k, since in state.blind_since.items() if now - since >= BLIND_ESCALATION_SEC]
-    if persistent and engine_running:
+    if persistent and engine_running and not in_boot_grace:
         restart_engine(
             state,
             f"open position blind for >{BLIND_ESCALATION_SEC}s ({', '.join(persistent)})",
@@ -654,6 +739,9 @@ def run_once(state: WatchdogState, now: Optional[float] = None) -> List[Finding]
     # engaged until the owner disengages it — this only resets our memory.)
     if state.kill_switch_engaged_by_watchdog and engine_running and not findings:
         state.kill_switch_engaged_by_watchdog = False
+        # Re-arm the escalation page too, so the next episode pages
+        # immediately instead of waiting out a stale cooldown stamp.
+        state.last_paged_at.pop("engine_restart_budget_exhausted", None)
 
     dispatch_pages(findings, state, now=now)
     state.save()
