@@ -942,6 +942,8 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
     split, best & worst context cell) plus the notable cells overall — the
     honest 'which strategy earns in which context' view on real data.
     """
+    from src.geometry_ab import is_geometry_variant, summarize_geometry_ab
+
     per_strategy: Dict[str, Dict[str, Any]] = {}
     scored_cells: List[Dict[str, Any]] = []
     total_outcomes = 0
@@ -949,6 +951,10 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         if not isinstance(cell, dict):
             continue
         strategy = str(cell.get("strategy") or "UNKNOWN")
+        # X@FIXED / X@ATR stop-geometry arms get their own A/B rollup below —
+        # mixing them into the strategy rollup would double-count candidates.
+        if is_geometry_variant(strategy):
+            continue
         n = int(cell.get("n", 0) or 0)
         total_outcomes += n
         agg = per_strategy.setdefault(strategy, {
@@ -996,6 +1002,7 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         "bottom_cells": scored_cells[-5:][::-1] if scored_cells else [],
         "total_outcomes": total_outcomes,
         "scored_cells": len(scored_cells),
+        "geometry_ab": summarize_geometry_ab(matrix),
     }
 
 
@@ -2032,6 +2039,42 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             "- _matrix is cold — it fills as suppressed/shadow candidates classify "
             "(~1h windows) and emitted signals resolve; judge only after a real "
             "data window has accumulated_"
+        )
+
+    # ── Stop-Geometry A/B (doctrine §4 — the biggest edge lever) ──────
+    geometry_rows = edge.get("geometry_ab") or []
+    lines.extend(["", "## Stop-Geometry A/B (fixed-% vs ATR/structure stops)"])
+    lines.append(
+        "_Every post-scoring candidate (emitted AND suppressed) is stamped as a "
+        "counterfactual pair — its live fixed-% stop vs an ATR/structure stop "
+        "beyond the liquidity pool — and both arms are forward-measured "
+        "identically.  R-units normalise per-arm risk, so constant-dollar-risk "
+        "sizing is inherent.  Observe-only: a leader here changes nothing live "
+        "until the geometry ships dark-first with owner sign-off._"
+    )
+    if geometry_rows:
+        lines.append("")
+        lines.append(
+            "| Strategy | n fixed | Win%/R fixed | n ATR | Win%/R ATR | ΔR (ATR−fixed) | Leader |"
+        )
+        lines.append("|---|---:|---|---:|---|---:|---|")
+        for row in geometry_rows:
+            fixed = row.get("fixed") or {}
+            atr = row.get("atr") or {}
+            delta = row.get("delta_r")
+            delta_txt = f"{delta:+.2f}" if delta is not None else "—"
+            lines.append(
+                f"| {row.get('strategy', '?')} | {fixed.get('n', 0)} | "
+                f"{fixed.get('win_rate', 0.0) * 100.0:.0f}% / {fixed.get('avg_r', 0.0):+.2f}R | "
+                f"{atr.get('n', 0)} | "
+                f"{atr.get('win_rate', 0.0) * 100.0:.0f}% / {atr.get('avg_r', 0.0):+.2f}R | "
+                f"{delta_txt} | **{row.get('leader', '?')}** |"
+            )
+    else:
+        lines.append(
+            "- _no geometry pairs classified yet — pairs stamp at every "
+            "post-scoring emission/suppression and classify after ~1h of real "
+            "candles_"
         )
 
     # ── Log parse diagnostics (Tier-1 monitor upgrade) ────────────────

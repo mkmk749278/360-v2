@@ -507,6 +507,28 @@ ALLOCATOR_RECOMMEND_ENABLED: bool = _safe_bool("ALLOCATOR_RECOMMEND_ENABLED", "t
 # limits bind live promotion when the owner arms Phase 4.
 ALLOCATOR_MAX_CONCURRENT_STRATEGIES: int = _safe_int("ALLOCATOR_MAX_CONCURRENT_STRATEGIES", "6")
 ALLOCATOR_MAX_STRATEGY_WEIGHT: float = _safe_float("ALLOCATOR_MAX_STRATEGY_WEIGHT", "0.35")
+# Stop-geometry A/B (src/geometry_ab.py, Phase 3 item 8 — the doctrine's biggest
+# edge lever): for every post-scoring candidate (emitted AND suppressed), stamp a
+# counterfactual pair — the evaluator's fixed-% stop vs an ATR/structure stop
+# placed beyond the liquidity pool — into a separate shadow ledger, so the edge
+# matrix shows which geometry wins per (strategy, context).  Observe-only: live
+# geometry is untouched (B7); applying a winner later is dark-first + owner
+# sign-off.  R-units normalise per-arm risk, so "size scaled to hold dollar risk
+# constant" is inherent in the measurement.
+GEOMETRY_AB_ENABLED: bool = _safe_bool("GEOMETRY_AB_ENABLED", "true")
+# Stop distance = max(ATR14(15m) × mult, distance to the structure pool).
+GEOMETRY_AB_ATR_MULT: float = _safe_float("GEOMETRY_AB_ATR_MULT", "1.5")
+# The "liquidity pool" proxy: the N-bar 15m swing extreme the stop must clear.
+GEOMETRY_AB_STRUCTURE_LOOKBACK_BARS: int = _safe_int("GEOMETRY_AB_STRUCTURE_LOOKBACK_BARS", "20")
+# Extra clearance beyond the pool, in % of price (stop-hunts overshoot the level).
+GEOMETRY_AB_STRUCTURE_BUFFER_PCT: float = _safe_float("GEOMETRY_AB_STRUCTURE_BUFFER_PCT", "0.05")
+# Sanity clamp: skip the pair when the alt stop lands further than this % from
+# entry — a scalp thesis is dead long before a 5% drawdown; wider means bad data.
+GEOMETRY_AB_MAX_STOP_PCT: float = _safe_float("GEOMETRY_AB_MAX_STOP_PCT", "5.0")
+# Min seconds between two A/B pairs for the same (symbol, setup, side) — the same
+# persisting candidate re-detects every 15s scan; one pair per window is a fair
+# sample, thousands of near-duplicates are not.
+GEOMETRY_AB_STAMP_COOLDOWN_SEC: float = _safe_float("GEOMETRY_AB_STAMP_COOLDOWN_SEC", "600")
 
 # ---------------------------------------------------------------------------
 # Counter-trend-LONG macro-direction suppression (S39 — the validated scalp filter)

@@ -4673,6 +4673,51 @@ class Scanner:
         except Exception as exc:
             log.debug("shadow-strategy evaluate error (fail-open): {}", exc)
 
+    def _stamp_geometry_ab(self, sig: Any) -> None:
+        """Stop-geometry A/B pair stamp for a post-scoring candidate.
+
+        Observe-only + fail-open (Phase 3 item 8): stamps this candidate's
+        fixed-% stop and its would-be ATR/structure stop as a counterfactual
+        pair into the dedicated geometry ledger (own store — can't evict gate
+        records), so the edge matrix measures which geometry wins per
+        (strategy, context).  Candles are the already-warm in-memory 15m
+        arrays; runs only on suppression/emission events, never per scanned
+        symbol.  Never alters live geometry (B7).
+        """
+        try:
+            from src import runtime_tunables as _rt
+            if not bool(_rt.get("geometry_ab_enabled")):
+                return
+            from src import geometry_ab as _gab
+            symbol = str(getattr(sig, "symbol", "") or "")
+            if not symbol:
+                return
+            c15 = self.data_store.get_candles(symbol, "15m") or {}
+            _direction = getattr(sig, "direction", None)
+            _side = getattr(_direction, "value", None) or str(_direction or "")
+            alt_stop = _gab.stamp_geometry_pair(
+                symbol=symbol,
+                channel=str(getattr(sig, "channel", "") or ""),
+                setup_class=str(getattr(sig, "setup_class", "") or ""),
+                side=_side,
+                entry=float(getattr(sig, "entry", 0.0) or 0.0),
+                stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
+                highs=c15.get("high") or [],
+                lows=c15.get("low") or [],
+                closes=c15.get("close") or [],
+                confidence=float(getattr(sig, "confidence", 0.0) or 0.0),
+                context_key=str(getattr(sig, "mc_context_key", "") or ""),
+                regime=str(getattr(sig, "entry_regime", "") or ""),
+                valid_for_minutes=float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
+            )
+            if alt_stop is not None:
+                # Stamp the would-be effect on the signal itself
+                # (stamp-and-shadow doctrine) — consumed by nothing.
+                sig.geo_atr_stop = float(alt_stop)
+        except Exception as exc:
+            log.debug("geometry A/B stamp error (fail-open): {}", exc)
+
     def _stamp_suppressed(self, sig: Any, gate_name: str) -> None:
         """Shadow-ledger stamp for a post-scoring suppressed candidate.
 
@@ -4683,6 +4728,13 @@ class Scanner:
         decision itself — callers stamp immediately before their existing
         suppress return, which stays byte-identical.
         """
+        # Suppressed candidates are half the geometry A/B's sample — stamp the
+        # pair regardless of whether the suppression audit itself is enabled
+        # (each measurement has its own tunable).
+        try:
+            self._stamp_geometry_ab(sig)
+        except Exception:
+            pass
         try:
             from src import runtime_tunables as _rt
             if not bool(_rt.get("suppression_audit_enabled")):
@@ -4921,6 +4973,9 @@ class Scanner:
         _sc_final = getattr(sig, "setup_class", "UNKNOWN")
         if ok:
             self._suppression_counters[f"enqueue_stage:emitted:{_sc_final}"] += 1
+            # Emitted candidates are the other half of the stop-geometry A/B
+            # sample (observe-only; stamps the pair + sig.geo_atr_stop).
+            self._stamp_geometry_ab(sig)
             try:
                 cd_key = self._cooldown_key_for(sig)
                 if cd_key is not None:

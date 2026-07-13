@@ -354,6 +354,12 @@ class Signal:
     mc_cascade_active: bool = False
     mc_context_key: str = ""                      # composite key for the edge matrix
 
+    # ---- Stop-geometry A/B stamp (src/geometry_ab.py, observe-only) ----
+    # The would-be ATR/structure stop for this candidate — stamped so the
+    # doctrine's geometry fix is measured on every signal before it is ever
+    # applied.  Nothing consumes this to change the live stop (B7).
+    geo_atr_stop: float = 0.0
+
     # ---- MTF confluence score (0-1, populated by scanner) ----
     mtf_score: float = 0.0
 
