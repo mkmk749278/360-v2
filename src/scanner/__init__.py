@@ -4501,7 +4501,8 @@ class Scanner:
             # the rare established pair the classifier skipped.
             try:
                 _c1h = ctx.candles.get("1h") if ctx.candles else None
-                _hist_1h = len((_c1h or {}).get("close", []) or [])
+                _closes_1h = (_c1h or {}).get("close")
+                _hist_1h = len(_closes_1h) if _closes_1h is not None else 0
                 _label = "NEW_LISTING" if _hist_1h < 30 else "UNCLASSIFIED"
             except (TypeError, AttributeError):
                 _label = "UNCLASSIFIED"
@@ -4674,7 +4675,8 @@ class Scanner:
                     cand.entry, cand.stop_loss, cand.tp1, cand.reason,
                 )
         except Exception as exc:
-            log.debug("shadow-strategy evaluate error (fail-open): {}", exc)
+            from src import fail_open
+            fail_open.record("scanner.shadow_strategies", exc)
 
     def _stamp_geometry_ab(self, sig: Any) -> None:
         """Stop-geometry A/B pair stamp for a post-scoring candidate.
@@ -4727,7 +4729,8 @@ class Scanner:
                 # (stamp-and-shadow doctrine) — consumed by nothing.
                 sig.geo_atr_stop = float(alt_stop)
         except Exception as exc:
-            log.debug("geometry A/B stamp error (fail-open): {}", exc)
+            from src import fail_open
+            fail_open.record("scanner.stamp_geometry_ab", exc)
 
     def _stamp_suppressed(self, sig: Any, gate_name: str) -> None:
         """Shadow-ledger stamp for a post-scoring suppressed candidate.
@@ -4768,7 +4771,8 @@ class Scanner:
                 valid_for_minutes=float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
             )
         except Exception as exc:
-            log.debug("suppression-audit stamp error (fail-open): {}", exc)
+            from src import fail_open
+            fail_open.record("scanner.stamp_suppressed", exc)
 
     async def _enqueue_signal(self, sig: Any) -> bool:
         self._stamp_origin_setup_identity(sig, getattr(sig, "channel", "") or "UNKNOWN")
@@ -6246,10 +6250,8 @@ class Scanner:
                             symbol, chan_name, _scaled, _base, regime_mult, btc_dir_reason,
                         )
             except Exception as _btc_dir_exc:
-                log.debug(
-                    "BTC direction gate error for {} {} (fail open): {}",
-                    symbol, chan_name, _btc_dir_exc,
-                )
+                from src import fail_open
+                fail_open.record("scanner.btc_direction_gate", _btc_dir_exc)
 
         # ── Filter 10: Per-symbol 1H/4H direction soft penalty ────────────
         # BTC direction gate (Filter 9) fires only when BTC's OWN EMAs are

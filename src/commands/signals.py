@@ -81,8 +81,9 @@ async def handle_market(args: List[str], ctx: CommandContext) -> None:
                 change_pct = (curr - prev) / prev * 100
                 btc_price = f"${curr:,.0f}"
                 btc_change = f" ({change_pct:+.2f}%)"
-        except Exception:
-            pass
+        except Exception as exc:
+            from src import fail_open
+            fail_open.record("commands.market_btc_price", exc)
 
     active_count = len(ctx.router.active_signals)
     pairs_count = len(ctx.pair_mgr.pairs)

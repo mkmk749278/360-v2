@@ -159,7 +159,7 @@ def evaluate_funding_fade(
         f = float(funding_rate)
     except (TypeError, ValueError):
         return None
-    if abs(f) < _FUNDING_EXTREME_ABS or not closes:
+    if abs(f) < _FUNDING_EXTREME_ABS or closes is None or len(closes) == 0:
         return None
     atr = _simple_atr(highs, lows, closes)
     price = float(closes[-1])

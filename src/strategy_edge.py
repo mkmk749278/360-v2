@@ -101,6 +101,7 @@ class StrategyEdgeStore:
         self._records: Dict[Tuple[str, str], Deque[_Record]] = defaultdict(
             lambda: deque(maxlen=self._window)
         )
+        self.recorded_total: int = 0
         # Empty persist_path disables disk I/O entirely (tests).
         self._persist_path: str = (
             persist_path
@@ -133,6 +134,9 @@ class StrategyEdgeStore:
         )
         with self._lock:
             self._records[key].append(rec)
+            # Monotonic since-boot counter for the feature-liveness probes
+            # (per-cell deques evict, so a raw record count can go backwards).
+            self.recorded_total += 1
         if persist:
             self._save()
 

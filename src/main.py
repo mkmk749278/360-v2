@@ -1656,10 +1656,145 @@ class CryptoSignalEngine:
             self._publish_market_context()
             # ── Layer D: allocator recommendation (observe-only) ───────────
             self._write_allocator_recommendation()
+            # ── Feature liveness: output-vs-upstream watchdog (2026-07-14) ─
+            try:
+                from src import runtime_tunables as _rt
+                if bool(_rt.get("feature_liveness_enabled")):
+                    if getattr(self, "_feature_liveness", None) is None:
+                        self._feature_liveness = self._build_feature_liveness()
+                    await asyncio.to_thread(self._feature_liveness.run_cycle)
+            except Exception as _fl_exc:
+                from src import fail_open
+                fail_open.record("main.feature_liveness_cycle", _fl_exc)
 
     # ------------------------------------------------------------------
     # Autonomous-portfolio observe-only publishers (Layers A + D)
     # ------------------------------------------------------------------
+
+    def _build_feature_liveness(self):
+        """Wire the feature-liveness probes (2026-07-14 incident response).
+
+        Every probe reads in-memory counters/state only — no network, no
+        Firestore, no per-scan cost; the whole registry runs once per 5-min
+        audit cycle on a worker thread.  Probes whose feature is disabled by
+        its tunable report ``unknown`` (counter → None) so a deliberately-off
+        feature never pages.
+        """
+        import time as _time
+
+        from src import geometry_ab as _gab
+        from src import runtime_tunables as _rt
+        from src import suppression_audit as _sa
+        from src.feature_liveness import (
+            FeatureLiveness,
+            PredicateProbe,
+            RateProbe,
+        )
+        from src.strategy_edge import get_strategy_edge_store
+
+        fl = FeatureLiveness()
+
+        def _supp_total_raw() -> float:
+            return float(_sa.get_store().stamped_total)
+
+        def _geom_total():
+            if not bool(_rt.get("geometry_ab_enabled")):
+                return None
+            return float(_gab.get_geometry_store().stamped_total)
+
+        def _supp_total():
+            if not bool(_rt.get("suppression_audit_enabled")):
+                return None
+            return float(_sa.get_store().stamped_total)
+
+        # THE incident probe: suppression events flow (the same event stream
+        # geometry pairs stamp from) while zero pairs land → broken stamping.
+        fl.add_rate(RateProbe(
+            name="geometry_ab",
+            counter=_geom_total,
+            upstream=_supp_total_raw,
+            min_upstream_delta=10.0,
+            min_streak=6,          # 30 min sustained
+        ))
+        # Suppression stamps themselves vs scanner activity.  Suppressions can
+        # be legitimately sparse in a dead market, so the streak is long: six
+        # hours of active scanning with zero stamps is the anomaly bar.
+        fl.add_rate(RateProbe(
+            name="suppression_audit",
+            counter=_supp_total,
+            upstream=lambda: float(getattr(self._scanner, "_scan_cycle_count", 0)),
+            min_upstream_delta=15.0,
+            min_streak=72,         # ~6 h
+        ))
+        # Edge-matrix feed: outcomes lag stamps by the ~1h forward window, so
+        # the streak covers 3 h of flowing stamps with zero recorded outcomes.
+        fl.add_rate(RateProbe(
+            name="strategy_edge",
+            counter=lambda: float(get_strategy_edge_store().recorded_total),
+            upstream=_supp_total_raw,
+            min_upstream_delta=10.0,
+            min_streak=36,         # ~3 h
+        ))
+
+        def _mc_health():
+            if not bool(_rt.get("market_context_enabled")):
+                return True, "disabled by tunable"
+            ts = getattr(self, "_last_market_context_publish_ts", 0.0)
+            age = _time.time() - ts
+            if age > 900:
+                return False, f"context publish stale {age:.0f}s"
+            if getattr(self, "_last_atr_percentile", None) is None:
+                # Victim #2's exact signature: publishing, but the volatility
+                # input silently degraded to the fail-neutral default.
+                return False, "atr_percentile None in latest build"
+            return True, "publishing with ATR percentile"
+
+        fl.add_predicate(PredicateProbe(name="market_context", fn=_mc_health, min_streak=6))
+
+        _shadow_t0 = _time.monotonic()
+
+        def _shadow_health():
+            if not bool(_rt.get("shadow_strategies_enabled")):
+                return True, "disabled by tunable"
+            stamps = getattr(self._scanner, "_shadow_last_stamp", {}) or {}
+            now_m = _time.monotonic()
+            if not stamps:
+                if now_m - _shadow_t0 < 86400:
+                    return True, "no stamps yet (uptime < 24h)"
+                return False, "zero shadow stamps in 24h of uptime"
+            age = now_m - max(stamps.values())
+            if age > 86400:
+                return False, f"last shadow stamp {age / 3600:.1f}h ago"
+            return True, f"last shadow stamp {age / 60:.0f}m ago"
+
+        fl.add_predicate(PredicateProbe(name="shadow_units", fn=_shadow_health, min_streak=6))
+
+        def _coverage():
+            pairs = getattr(self.pair_mgr, "pairs", {}) or {}
+            syms = list(pairs.keys())
+            if not syms:
+                return False, "no universe symbols"
+            ok_n = 0
+            for s in syms:
+                cd = self.data_store.get_candles(s, "15m") or {}
+                closes = cd.get("close")
+                if closes is not None and len(closes) >= 20:
+                    ok_n += 1
+            frac = ok_n / len(syms)
+            return frac >= 0.7, f"{ok_n}/{len(syms)} symbols with ≥20 15m candles"
+
+        fl.add_predicate(PredicateProbe(name="candle_coverage", fn=_coverage, min_streak=6))
+
+        def _btc_ref():
+            cd = self.data_store.get_candles("BTCUSDT", "5m") or {}
+            closes = cd.get("close")
+            if closes is None or len(closes) == 0:
+                return False, "BTCUSDT 5m closes missing"
+            px = float(closes[-1])
+            return px > 0, f"BTC ref {px:.2f}"
+
+        fl.add_predicate(PredicateProbe(name="btc_reference", fn=_btc_ref, min_streak=6))
+        return fl
 
     def _build_global_market_context(self):
         """Current global (BTC-anchored) MarketContext.  Every input is
@@ -1707,8 +1842,12 @@ class CryptoSignalEngine:
                 htf_prior = detect_regime_from_arrays(
                     h_closes, h_highs, h_lows, h_vols, idx=len(h_closes) - 1
                 )
-        except Exception:
-            pass
+        except Exception as _mc_exc:
+            from src import fail_open
+            fail_open.record("main.global_market_context_inputs", _mc_exc)
+        # Stash the raw percentile for the liveness probe + published payload —
+        # a None here for 30+ min with warm candles is exactly victim #2.
+        self._last_atr_percentile = atr_pctile
         funding = None
         try:
             funding = self._order_flow_store.get_funding_rate("BTCUSDT")
@@ -1751,10 +1890,16 @@ class CryptoSignalEngine:
             from src.strategy_portfolio import build_context_payload
 
             payload = build_context_payload(self._build_global_market_context())
+            # Raw ATR percentile rides along so the liveness probe (and ops)
+            # can tell "volatility=NORMAL because calm" from "NORMAL because
+            # the input silently died" — victim #2's blind spot (2026-07-14).
+            payload["atr_percentile_raw"] = self._last_atr_percentile
             path = os.environ.get("MARKET_CONTEXT_PATH", "data/market_context.json")
             self._atomic_write_json(path, payload)
+            self._last_market_context_publish_ts = time.time()
         except Exception as exc:
-            log.debug("market-context publish error (fail-open): {}", exc)
+            from src import fail_open
+            fail_open.record("main.publish_market_context", exc)
 
     def _write_allocator_recommendation(self) -> None:
         """Layer D in recommendation mode: persist what the allocator WOULD
@@ -1779,7 +1924,8 @@ class CryptoSignalEngine:
             )
             self._atomic_write_json(path, payload)
         except Exception as exc:
-            log.debug("allocator recommendation error (fail-open): {}", exc)
+            from src import fail_open
+            fail_open.record("main.allocator_recommendation", exc)
 
     # ------------------------------------------------------------------
     # Admin command handler (delegated to CommandHandler)

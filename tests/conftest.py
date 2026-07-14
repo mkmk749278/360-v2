@@ -148,3 +148,44 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
         pass
 
     yield
+
+
+@pytest.fixture()
+def numpy_seeded_store():
+    """A real ``HistoricalDataStore`` filled through ``update_candle``.
+
+    THE canonical candle fixture shape (2026-07-14 incident, PRs #726/#727):
+    the production store holds ``Dict[str, np.ndarray]``, and eight features
+    died silently because list-based fixtures never exercised numpy
+    truthiness.  New tests that feed candles into store-consuming code MUST
+    use this fixture (or seed their own store via ``update_candle``) instead
+    of hand-built list dicts.
+
+    Returns a factory: ``store = numpy_seeded_store(symbol, intervals, n)``.
+    """
+    from src.historical_data import HistoricalDataStore
+
+    def _make(
+        symbol: str = "BTCUSDT",
+        intervals: tuple = ("5m", "15m"),
+        n: int = 120,
+        close: float = 100.0,
+        spread: float = 0.5,
+    ) -> HistoricalDataStore:
+        store = HistoricalDataStore()
+        for interval in intervals:
+            for _ in range(n):
+                store.update_candle(
+                    symbol,
+                    interval,
+                    {
+                        "open": close,
+                        "high": close + spread,
+                        "low": close - spread,
+                        "close": close,
+                        "volume": 1.0,
+                    },
+                )
+        return store
+
+    return _make

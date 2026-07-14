@@ -176,7 +176,11 @@ class AlertService:
             return True
         try:
             vol = self._volume_24h_getter(symbol)
-        except Exception:
+        except Exception as exc:
+            # Fail-closed silently killing EVERY alert is the 2026-07-14
+            # failure class — count it so the liveness watchdog can see it.
+            from src import fail_open
+            fail_open.record("alerts.volume_gate", exc)
             return False
         return vol is not None and vol >= ALERTS_MIN_VOLUME_24H_USD
 

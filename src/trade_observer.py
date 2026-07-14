@@ -858,8 +858,9 @@ class TradeObserver:
             closes = candles.get("close")
             if closes is not None and len(closes) > 0:
                 return float(closes[-1])
-        except Exception:
-            pass
+        except Exception as exc:
+            from src import fail_open
+            fail_open.record("trade_observer.reference_price", exc)
         return None
 
     def _get_current_regime(self, symbol: str) -> str:

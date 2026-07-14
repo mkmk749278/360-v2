@@ -4,6 +4,58 @@
 
 ---
 
+## 🟢 SESSION 57 2026-07-14 — Feature-liveness alerting: silently-dead features now PAGE (branch `claude/pr-history-analysis-l3o9on`, 360-v2 + 360ce-ops)
+
+**Owner directive after #726/#727:** *"this time you found — what if next time we
+don't find? We need a proper solution: alerts on this, and data sufficient or
+missing data."* The root failure of the incident wasn't numpy — it was that all
+8 dead features failed SILENTLY (fail-open handlers at DEBUG, nothing comparing
+output rates to upstream). Four layers shipped, built on the existing S47/S48
+alert plumbing:
+
+1. **`src/fail_open.py`** — every fail-open `except` in data/measurement paths
+   now calls `fail_open.record(site, exc)`: thread-safe counters, WARNING logs
+   rate-limited 10 min/site (never DEBUG again), snapshot into the manifest.
+   Behaviour unchanged — still fail open, no longer invisible. Converted sites:
+   geometry stamp, suppression stamp, shadow units, BTC gates (scanner +
+   trade_monitor), market-context builder/publisher, allocator publisher,
+   /market command, trade-observer price, alerts volume gate.
+2. **`src/feature_liveness.py`** — probe registry on the existing 5-min audit
+   loop; RateProbes compare output counters vs upstream drivers (monotonic
+   `stamped_total`/`recorded_total` added to the stores), PredicateProbes check
+   value health. Violations need upstream evidence (quiet market never pages),
+   sustained streaks (≥6 cycles = 30 min), and a 30-min boot grace (S55).
+   Probes: geometry_ab (THE incident probe: suppressions flow + zero pairs),
+   suppression_audit, strategy_edge, market_context (staleness + raw
+   `atr_percentile` — victim #2's blind spot, now also stamped into the
+   published payload), shadow_units, candle_coverage, btc_reference, plus
+   fail-open burst/drip alerting. Writes `data/feature_liveness.json` (~2 KB,
+   atomic, local). Tunable `feature_liveness_enabled` (Measurement, ON).
+3. **Alert wiring — zero new channels:** `monitor_heartbeat.check_feature_liveness()`
+   turns manifest alerts into `INVARIANT_WARN:` lines → the existing hourly
+   `vps-liveness.yml` pages Telegram + files the auto-detected issue (F-09).
+   Manifest-itself-stale while engine fresh also pages (the watchdog can't die
+   silently either). Truth report gains `## Feature Liveness & Fail-Open
+   Telemetry` (builder flag + vps-monitor fetch wired; fixture-run verified).
+4. **Prevention:** `xfail_strict = true` (an xpass now FAILS CI — the rot class
+   from S56 is structurally impossible); CI guard test
+   `tests/test_no_numpy_truthiness_regression.py` bans boolean-context OHLCV
+   patterns in src/ (immediately caught 2 unaudited sites — fixed);
+   `numpy_seeded_store` conftest fixture is the canonical candle-fixture shape;
+   CLAUDE.md hard limits + conventions updated.
+
+**Incident replay test proves the loop end-to-end**: pre-#726 production state
+(suppressions flowing, geometry stamping raising numpy-truthiness) → geometry
+flat-line alert + fail-open burst alert after the streak window → both become
+INVARIANT_WARN lines from the monitor. This exact incident would have paged
+within ~35 minutes instead of being found by a human 25 hours later.
+
+### Owner drill after deploy (untested pager = a hope, S48)
+Flip `geometry_ab_enabled` OFF in ops → wait ~40 min → expect a Telegram page
++ auto-detected issue for `feature_liveness geometry_ab` → flip back ON.
+
+---
+
 ## 🔴 SESSION 56 2026-07-14 — Numpy-truthiness fail-open class: geometry A/B was DEAD, global context degraded, §2.1 BTC_DIR penalty never fired (branch `claude/pr-history-analysis-l3o9on`, 360-v2)
 
 **Owner ask:** read briefs, review 4-day PR history, analyse the Strategy Lab PDF

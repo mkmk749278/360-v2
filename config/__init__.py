@@ -488,6 +488,17 @@ MARKET_CONTEXT_ENABLED: bool = _safe_bool("MARKET_CONTEXT_ENABLED", "true")
 # (O(1) in-memory, no I/O) and forward-measure TP1-before-SL on real candles in
 # the existing 5-min audit loop → per-gate KEEP/TUNE/DROP + edge-matrix feed.
 SUPPRESSION_AUDIT_ENABLED: bool = _safe_bool("SUPPRESSION_AUDIT_ENABLED", "true")
+# Feature-liveness watchdog (2026-07-14 incident — 8 features dead silently).
+# Every 5-min audit cycle, compare each measurement pipeline's OUTPUT counter
+# against its UPSTREAM driver and publish data/feature_liveness.json; sustained
+# violations + growing fail-open counters become INVARIANT_WARN lines in
+# monitor_heartbeat → Telegram page + auto-detected issue (F-09 wiring).
+# Observe-only: cannot alter scanning, scoring, dispatch, or exits.
+FEATURE_LIVENESS_ENABLED: bool = _safe_bool("FEATURE_LIVENESS_ENABLED", "true")
+# No violation accounting during engine warmup (S55: restart storms must not page).
+FEATURE_LIVENESS_BOOT_GRACE_SEC: float = _safe_float(
+    "FEATURE_LIVENESS_BOOT_GRACE_SEC", "1800"
+)
 # BTC-direction soft penalty APPLICATION (dark-first restore, 2026-07-14).  The
 # OWNER_BRIEF §2.1 penalty never actually fired in production: the gate raised
 # on numpy candle truthiness and the scanner's fail-open handler ate it on every
