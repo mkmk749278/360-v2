@@ -15,6 +15,11 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
 python_functions = ["test_*"]
+# Strict xfail (2026-07-14): non-strict markers let 5 rotted tests hide for
+# weeks under blanket "expected to fail" labels while 28 healthy tests gave
+# no signal.  An xfail that passes is now a FAILURE — markers must be
+# removed the moment their premise dies.
+xfail_strict = true
 
 [tool.mypy]
 python_version = "3.11"

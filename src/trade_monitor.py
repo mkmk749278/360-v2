@@ -1194,7 +1194,8 @@ class TradeMonitor:
             )
             return (not allowed), reason
         except Exception as exc:  # fail-open — macro read must never block exit logic
-            log.debug("BTC-correlation invalidation read failed (fail-open): %s", exc)
+            from src import fail_open
+            fail_open.record("trade_monitor.btc_opposes_read", exc)
             return False, ""
 
     def _apply_btc_adverse_tightening(

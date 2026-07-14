@@ -246,6 +246,9 @@ class SuppressedCandidateStore:
     def __init__(self, persist_path: Optional[str] = None, maxlen: Optional[int] = None) -> None:
         self._lock = threading.Lock()
         self._buffer: Deque[dict] = deque(maxlen=maxlen if maxlen is not None else _MAX_RECORDS)
+        # Monotonic since-boot stamp counter — the ring buffer evicts, so the
+        # feature-liveness probes need a counter that can't go backwards.
+        self.stamped_total: int = 0
         self._persist_path: str = _DEFAULT_PATH if persist_path is None else persist_path
         if self._persist_path:
             self._load()
@@ -254,6 +257,7 @@ class SuppressedCandidateStore:
     def stamp(self, record: SuppressedCandidateRecord) -> None:
         with self._lock:
             self._buffer.append(asdict(record))
+            self.stamped_total += 1
 
     def records(self) -> List[dict]:
         with self._lock:
@@ -429,5 +433,6 @@ def stamp_candidate(
         (store or get_store()).stamp(rec)
         return rec
     except Exception as exc:
-        log.debug("suppression stamp failed (fail-open): {}", exc)
+        from src import fail_open
+        fail_open.record("suppression_audit.stamp_candidate", exc)
         return None

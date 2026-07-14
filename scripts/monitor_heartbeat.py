@@ -38,6 +38,12 @@ ENGINE_ACTIVITY_WINDOW_SEC = int(
 # frozen snapshot.
 PRICING_FILE_MAX_AGE_SEC = int(os.environ.get("PRICING_FILE_MAX_AGE_SEC", "600"))
 
+# Feature-liveness manifest is published every ~5 min by the audit loop;
+# treat it as dead well past that (2026-07-14 incident class).
+FEATURE_LIVENESS_MAX_AGE_SEC = int(
+    os.environ.get("FEATURE_LIVENESS_MAX_AGE_SEC", "1800")
+)
+
 
 def check_heartbeat() -> None:
     p = os.path.join(DATA_DIR, "scanner_heartbeat")
@@ -182,7 +188,67 @@ def check_pricing_freshness() -> None:
         print(f"Pricing freshness: check unreadable ({exc})")
 
 
+def check_feature_liveness() -> None:
+    """Page when a measurement feature has silently flat-lined (2026-07-14).
+
+    The engine's feature-liveness watchdog compares every measurement
+    pipeline's output counter against its upstream driver each 5-min audit
+    cycle and publishes ``feature_liveness.json``; entries in ``alerts``
+    have already cleared their sustained-streak thresholds engine-side, so
+    this check stays dumb: one INVARIANT_WARN per alert.  The 8-features-
+    dead-silently incident (PRs #726/#727) is the class this pages on —
+    e.g. suppression events flowing while stop-geometry pairs stamp zero,
+    or a fail-open exception counter growing every cycle.
+
+    File missing → pre-rollout build; stay quiet.  File present but old
+    while the engine heartbeat is fresh → the liveness system itself died,
+    which is exactly the recursion F-09 warns about — page.
+    """
+    fp = os.path.join(DATA_DIR, "feature_liveness.json")
+    if not os.path.exists(fp):
+        print("Feature liveness: file not found (pre-rollout build); check skipped")
+        return
+    try:
+        with open(fp) as fh:
+            snap = json.load(fh)
+        age = int(time.time() - float(snap.get("generated_at", 0)))
+        features = snap.get("features", {})
+        alerts = snap.get("alerts", [])
+        print(
+            f"Feature liveness: {len(features)} feature(s) probed, "
+            f"{len(alerts)} alerting, manifest age {age}s"
+        )
+        if age > FEATURE_LIVENESS_MAX_AGE_SEC:
+            hb = os.path.join(DATA_DIR, "scanner_heartbeat")
+            hb_fresh = os.path.exists(hb) and (time.time() - os.path.getmtime(hb)) < 300
+            if hb_fresh:
+                print(
+                    "INVARIANT_WARN: feature-liveness manifest is stale "
+                    f"({age}s > {FEATURE_LIVENESS_MAX_AGE_SEC}s) while the engine "
+                    "heartbeat is fresh — the liveness watchdog itself stopped "
+                    "publishing (a monitor that can die silently is the incident "
+                    "class it exists to catch)."
+                )
+            else:
+                print(
+                    f"Feature liveness: manifest stale ({age}s) alongside a stale "
+                    "engine heartbeat — engine-down is the primary finding, skipping"
+                )
+            return
+        for a in alerts:
+            print(
+                "INVARIANT_WARN: feature_liveness "
+                f"{a.get('feature')} — {a.get('detail')} "
+                f"(sustained {a.get('streak')} audit cycles)"
+            )
+        if not alerts:
+            print("OK: every probed feature is producing data at its expected rate")
+    except Exception as exc:  # noqa: BLE001 — diagnostic script, report and move on
+        print(f"Feature liveness: check unreadable ({exc})")
+
+
 check_heartbeat()
 check_circuit_breaker()
 check_paper_silence()
 check_pricing_freshness()
+check_feature_liveness()

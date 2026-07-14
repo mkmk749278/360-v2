@@ -1283,6 +1283,7 @@ def build_snapshot(
     invalidation_audit: Optional[Dict[str, Any]] = None,
     suppression_audit: Optional[Dict[str, Any]] = None,
     strategy_edge: Optional[Dict[str, Any]] = None,
+    feature_liveness: Optional[Dict[str, Any]] = None,
     log_parse_diagnostics: Optional[Dict[str, int]] = None,
     free_channel_posts: Optional[Dict[str, Any]] = None,
     pre_tp_fires: Optional[Dict[str, Any]] = None,
@@ -1484,6 +1485,7 @@ def build_snapshot(
         "invalidation_audit": invalidation_audit or {},
         "suppression_audit": suppression_audit or {},
         "strategy_edge": strategy_edge or {},
+        "feature_liveness": feature_liveness or {},
         "log_parse_diagnostics": log_parse_diagnostics or {},
         "free_channel_posts": free_channel_posts or {},
         "pre_tp_fires": pre_tp_fires or {},
@@ -2075,6 +2077,56 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             "- _no geometry pairs classified yet — pairs stamp at every "
             "post-scoring emission/suppression and classify after ~1h of real "
             "candles_"
+        )
+
+    # ── Feature liveness & fail-open telemetry (2026-07-14 incident) ──
+    fl = snapshot.get("feature_liveness", {}) or {}
+    lines.extend(["", "## Feature Liveness & Fail-Open Telemetry"])
+    lines.append(
+        "_Every measurement pipeline's output rate is compared against its "
+        "upstream driver each 5-min audit cycle (the systemic answer to the "
+        "2026-07-14 eight-features-dead-silently incident).  Sustained "
+        "violations and growing fail-open exception counters page via the "
+        "monitor's INVARIANT_WARN path — this section is the same manifest, "
+        "rendered for the session-start read._"
+    )
+    fl_features = fl.get("features", {}) or {}
+    fl_alerts = fl.get("alerts", []) or []
+    fl_fail_open = fl.get("fail_open", {}) or {}
+    if fl_features:
+        lines.append(
+            f"- Probes: {len(fl_features)} · alerting: **{len(fl_alerts)}** · "
+            f"boot grace active: {bool(fl.get('boot_grace_active'))}"
+        )
+        for a in fl_alerts:
+            lines.append(
+                f"- **ALERT** `{a.get('feature')}` — {a.get('detail')} "
+                f"(sustained {a.get('streak')} cycles)"
+            )
+        lines.append("")
+        lines.append("| Feature | Status | Detail | Streak |")
+        lines.append("|---|---|---|---:|")
+        for name in sorted(fl_features):
+            f = fl_features[name] or {}
+            lines.append(
+                f"| {name} | {f.get('status', '?')} | {f.get('detail', '')} | "
+                f"{f.get('streak', 0)} |"
+            )
+        if fl_fail_open:
+            lines.append("")
+            lines.append("Fail-open exception counters (nonzero sites):")
+            for site in sorted(fl_fail_open):
+                entry = fl_fail_open[site] or {}
+                lines.append(
+                    f"- `{site}`: {entry.get('count', 0)} — last: "
+                    f"{entry.get('last_error', '')}"
+                )
+        else:
+            lines.append("- Fail-open exception counters: none recorded 🎉")
+    else:
+        lines.append(
+            "- _no liveness manifest in this window (pre-rollout build or "
+            "feature_liveness_enabled off)_"
         )
 
     # ── Log parse diagnostics (Tier-1 monitor upgrade) ────────────────

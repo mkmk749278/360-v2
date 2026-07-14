@@ -254,7 +254,8 @@ def stamp_geometry_pair(
         _last_pair_stamp[cd_key] = mono
         return alt_stop
     except Exception as exc:
-        log.debug("geometry A/B stamp failed (fail-open): {}", exc)
+        from src import fail_open
+        fail_open.record("geometry_ab.stamp_pair", exc)
         return None
 
 

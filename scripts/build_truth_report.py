@@ -55,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--dispatch-log-out-json", default="")
     parser.add_argument("--invalidation-records-json", default="")
     parser.add_argument("--suppressed-candidates-json", default="")
+    parser.add_argument("--feature-liveness-json", default="")
     parser.add_argument("--strategy-edge-json", default="")
     return parser.parse_args()
 
@@ -136,6 +137,12 @@ def main() -> int:
             suppressed_candidates = loaded_suppressed
     suppression_audit = summarize_suppression_audit(suppressed_candidates)
 
+    feature_liveness: dict = {}
+    if args.feature_liveness_json:
+        loaded_liveness = load_json_file(Path(args.feature_liveness_json), default={})
+        if isinstance(loaded_liveness, dict):
+            feature_liveness = loaded_liveness
+
     # strategy_edge_store.json persists raw per-cell records; rebuild the
     # matrix through the store itself so the report's Wilson edges/verdicts
     # are computed by the exact same code the allocator reads.
@@ -171,6 +178,7 @@ def main() -> int:
         invalidation_audit=invalidation_audit,
         suppression_audit=suppression_audit,
         strategy_edge=strategy_edge,
+        feature_liveness=feature_liveness,
         log_parse_diagnostics=log_parse_diagnostics,
         free_channel_posts=free_channel_posts,
         pre_tp_fires=pre_tp_fires,

@@ -99,6 +99,8 @@ Never push to `claude/general-session-*` or harness-assigned long-lived branches
 - **Never disable or weaken blast-radius caps.**
 - **Never let a position sit OPEN without a stop.**
 - **Never add an uncached Firestore / network read (or write) to a per-tick, per-scan, or per-order hot loop.** Cache it and gate the cache on an invalidation signal.
+- **Never boolean-test candle/series arrays** (`arr or []`, `if not arr`) — the data store holds numpy arrays and truthiness raises; use `is None` / `len()` checks. Enforced by `tests/test_no_numpy_truthiness_regression.py` (2026-07-14: 8 features died silently to this).
+- **Never swallow an exception silently in a data/measurement path.** Every fail-open `except` calls `fail_open.record(site, exc)` — behavior stays fail-open, but the failure counts, WARNs, and pages via the feature-liveness watchdog.
 
 ---
 
@@ -269,3 +271,6 @@ python -m src.main
 - **Redis is optional** — RedisClient + SignalQueue fall back to in-memory
 - **Each evaluator owns its SL/TP geometry** (B7) — no shared universal formulas
 - **The 15 `SetupClass` enum values** are stringly-coupled to `_MAX_SL_PCT_BY_SETUP` keys and telemetry event names — rename in all three places simultaneously
+- **Candle fixtures in tests use the production shape** — the `numpy_seeded_store` conftest fixture (real `HistoricalDataStore` via `update_candle`), never hand-built list dicts, for any code that consumes the data store
+- **New measurement pipelines register a liveness probe** (`src/feature_liveness.py`, wired in `main._build_feature_liveness`) — a feature whose output can silently flat-line without paging is unfinished
+- **`xfail` is strict** — a passing xfail fails CI; remove the marker the moment its premise dies (5 tests rotted invisibly under non-strict markers, 2026-07-14)

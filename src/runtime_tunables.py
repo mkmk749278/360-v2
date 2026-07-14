@@ -69,6 +69,7 @@ def _build_registry() -> Dict[str, Tunable]:
         BE_THEN_TP1_DEFAULT_ENABLED,
         BTC_DIR_PENALTY_APPLY,
         COHORT_EDGE_GATE_ENABLED,
+        FEATURE_LIVENESS_ENABLED,
         COHORT_EDGE_GATE_MIN_N,
         COHORT_EDGE_SUPPRESS_BELOW,
         GEOMETRY_AB_ENABLED,
@@ -461,6 +462,21 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=SHADOW_STRATEGIES_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="feature_liveness_enabled",
+            label="Feature-liveness watchdog",
+            description=(
+                "Compare every measurement pipeline's output rate against "
+                "its upstream driver each audit cycle and publish "
+                "data/feature_liveness.json; sustained flat-lines and "
+                "growing fail-open exception counters page via the "
+                "monitor's INVARIANT_WARN path. The systemic answer to the "
+                "2026-07-14 silently-dead-features incident. Observe-only."
+            ),
+            type="bool",
+            default=FEATURE_LIVENESS_ENABLED,
             category="Measurement",
         ),
         Tunable(
