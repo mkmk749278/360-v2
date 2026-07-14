@@ -4693,6 +4693,14 @@ class Scanner:
             if not symbol:
                 return
             c15 = self.data_store.get_candles(symbol, "15m") or {}
+            # The data store holds numpy arrays — `arr or []` raises ValueError
+            # on multi-element arrays, and the fail-open except below would
+            # swallow every stamp (the 2026-07-13→14 zero-pairs incident).
+            highs = c15.get("high")
+            lows = c15.get("low")
+            closes = c15.get("close")
+            if highs is None or lows is None or closes is None:
+                return
             _direction = getattr(sig, "direction", None)
             _side = getattr(_direction, "value", None) or str(_direction or "")
             alt_stop = _gab.stamp_geometry_pair(
@@ -4703,9 +4711,9 @@ class Scanner:
                 entry=float(getattr(sig, "entry", 0.0) or 0.0),
                 stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
                 tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
-                highs=c15.get("high") or [],
-                lows=c15.get("low") or [],
-                closes=c15.get("close") or [],
+                highs=highs,
+                lows=lows,
+                closes=closes,
                 confidence=float(getattr(sig, "confidence", 0.0) or 0.0),
                 context_key=str(getattr(sig, "mc_context_key", "") or ""),
                 regime=str(getattr(sig, "entry_regime", "") or ""),
@@ -6209,15 +6217,31 @@ class Scanner:
                         setup_class=_setup_class_name,
                     )
                     _scaled = round(_base * regime_mult, 1)
-                    soft_penalty += _scaled
-                    _soft_penalty_by_type["btc_dir"] = (
-                        _soft_penalty_by_type.get("btc_dir", 0.0) + _scaled
-                    )
-                    _fired_gates.append("BTC_DIR")
-                    log.debug(
-                        "SOFT_PENALTY {} {} {:+.1f} (base={:.1f} × regime={:.1f}) total={:.1f}: {}",
-                        symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, btc_dir_reason,
-                    )
+                    # Dark-first restore (2026-07-14): the gate never actually
+                    # fired in production (numpy truthiness ate every call in
+                    # this except handler), so re-arming it changes live
+                    # scoring.  Apply only when the owner flips the tunable;
+                    # while OFF, shadow-log every would-fire so a real window
+                    # shows exactly which signals it touches.
+                    from src import runtime_tunables as _rt
+                    if bool(_rt.get("btc_dir_penalty_apply")):
+                        soft_penalty += _scaled
+                        _soft_penalty_by_type["btc_dir"] = (
+                            _soft_penalty_by_type.get("btc_dir", 0.0) + _scaled
+                        )
+                        _fired_gates.append("BTC_DIR")
+                        log.debug(
+                            "SOFT_PENALTY {} {} {:+.1f} (base={:.1f} × regime={:.1f}) total={:.1f}: {}",
+                            symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, btc_dir_reason,
+                        )
+                    else:
+                        self._suppression_counters[
+                            f"btc_dir_shadow:{chan_name}:{_setup_class_name}"
+                        ] += 1
+                        log.info(
+                            "BTC_DIR_SHADOW would-penalise {} {} {:+.1f} (base={:.1f} × regime={:.1f}): {}",
+                            symbol, chan_name, _scaled, _base, regime_mult, btc_dir_reason,
+                        )
             except Exception as _btc_dir_exc:
                 log.debug(
                     "BTC direction gate error for {} {} (fail open): {}",

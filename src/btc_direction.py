@@ -89,9 +89,13 @@ def _classify_btc_4h(
         ema50_f = float(ema50)
     except (TypeError, ValueError):
         return None
+    # The engine data store holds numpy arrays — `arr or []` / `if not arr`
+    # raise ValueError on multi-element arrays, and the scanner's fail-open
+    # handler silently ate that on EVERY call, so this gate never fired in
+    # production (truth-report BTC_Dir column all-zero, 2026-07-14).
     cd = btc_candles_4h or {}
-    closes = cd.get("close") or []
-    if not closes:
+    closes = cd.get("close")
+    if closes is None or len(closes) == 0:
         # Alignment-only fallback when candle data missing.
         if ema21_f > ema50_f:
             return "BULLISH"

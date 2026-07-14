@@ -1681,8 +1681,11 @@ class CryptoSignalEngine:
             from src.regime import atr_percentile as _atr_pctile
             from src.regime import detect_regime_from_arrays
 
+            # The data store holds numpy arrays — `arr or []` raises ValueError
+            # on multi-element arrays and silently zeroed atr_pctile/htf_prior
+            # since #721 (same defect class as the geometry-A/B stamp bug).
             c15 = self.data_store.get_candles("BTCUSDT", "15m") or {}
-            closes = _np.asarray(c15.get("close", []) or [], dtype=_np.float64)
+            closes = _np.asarray(c15.get("close", []), dtype=_np.float64)
             if len(closes) >= 30:
                 highs = _np.asarray(c15.get("high", closes), dtype=_np.float64)
                 lows = _np.asarray(c15.get("low", closes), dtype=_np.float64)
@@ -1691,7 +1694,7 @@ class CryptoSignalEngine:
                 if len(valid) > 0:
                     atr_pctile = _atr_pctile(valid)
             c1h = self.data_store.get_candles("BTCUSDT", "1h") or {}
-            h_closes = _np.asarray(c1h.get("close", []) or [], dtype=_np.float64)
+            h_closes = _np.asarray(c1h.get("close", []), dtype=_np.float64)
             if len(h_closes) >= 30:
                 h_highs = _np.asarray(c1h.get("high", h_closes), dtype=_np.float64)
                 h_lows = _np.asarray(c1h.get("low", h_closes), dtype=_np.float64)

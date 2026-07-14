@@ -4,6 +4,81 @@
 
 ---
 
+## 🔴 SESSION 56 2026-07-14 — Numpy-truthiness fail-open class: geometry A/B was DEAD, global context degraded, §2.1 BTC_DIR penalty never fired (branch `claude/pr-history-analysis-l3o9on`, 360-v2)
+
+**Owner ask:** read briefs, review 4-day PR history, analyse the Strategy Lab PDF
+(2026-07-14 07:00 UTC). Analysis found one production bug class with three victims.
+
+### The bug class (code-verified + repro'd)
+
+`HistoricalDataStore.get_candles()` returns `Dict[str, np.ndarray]`; `arr or []` /
+`if not arr` on a multi-element numpy array raises `ValueError`. Three call sites
+read the data store directly — bypassing the scanner's `_normalize_candle_dict`
+list boundary (which exists because this class bit us before) — and swallowed the
+raise in fail-open `except` handlers at DEBUG. Result: each feature silently did
+nothing in production while all list-fixture tests stayed green:
+
+1. **`Scanner._stamp_geometry_ab` (#722) — stop-geometry A/B stamped ZERO pairs
+   in its first ~25h live.** Strategy Lab card + truth report both "no pairs yet"
+   while the suppression audit classified hundreds through the same 5-min loop
+   (that asymmetry was the tell). Fixed: None-checks, arrays passed through.
+2. **`CryptoSignalEngine._build_global_market_context` (#721)** — ATR-percentile
+   + HTF-prior inputs of the *published global* context silently None every cycle
+   (per-signal contexts were fine — different, list-fed path). Allocator was
+   routing on a coarser vector than the matrix cells it matches. Fixed.
+3. **`check_btc_direction_gate` (OWNER_BRIEF §2.1 soft penalty) — never fired in
+   production.** `_classify_btc_4h` raised on the numpy `close`; truth-report
+   BTC_Dir column all-zero across ~2.8k scored samples while the structurally
+   identical list-fed Sym_Dir gate fires. Repro: identical bearish inputs —
+   list-fed returns the penalty, numpy-fed raises.
+
+### Shipped
+
+- `src/btc_direction.py` — `_classify_btc_4h` numpy-safe at the source (hardens
+  sym-dir + countertrend-mover callers too).
+- `src/scanner/__init__.py` — geometry stamp extracts arrays with None-checks;
+  **BTC_DIR application ships DARK (owner decision, AskUserQuestion)**: new
+  runtime tunable `btc_dir_penalty_apply` (Signal gating, default **OFF**) — while
+  OFF every would-fire is shadow-logged (`btc_dir_shadow:*` suppression counter +
+  `BTC_DIR_SHADOW` INFO line with the would-be points); ON applies as designed.
+  Re-arming changes live scoring → owner flips after reviewing a real window.
+- `src/main.py` — global-context candle reads numpy-safe.
+- `config/__init__.py` + `src/runtime_tunables.py` — `BTC_DIR_PENALTY_APPLY`.
+- `tests/test_incident_2026_07_14_numpy_truthiness.py` — 7 regressions driving
+  the REAL production shape (real `HistoricalDataStore` seeded via
+  `update_candle`); 4 of them fail on pre-fix code. Dark default pinned.
+
+### Strategy Lab analysis verdicts (2026-07-14 07:00 UTC window)
+
+- **`dispatch_staleness`: S54's DROP verdict is dead** — regressed to TUNE
+  (n=961, 38% would-win, −0.06R EV). Do NOT loosen; the 75.6% read was an
+  early-window artifact. Sample-floor discipline validated.
+- **`min_confidence` KEEP** (+0.12R EV, n=1977; saved 881R vs missed 638R);
+  `quiet_scalp_block` KEEP (+0.17R).
+- **Shadow leader flipped:** SHADOW_MEAN_REVERT +0.44R avg, 54% win, n=290;
+  S54's RANGE_FADE lead reversed (−0.07R, n=62). FUNDING_FADE confirmed bad.
+- **Counterfactual sinks contained by gates:** MOVER_AVWAP_SCALP 0%/−0.95R
+  (n=88), VOLUME_SURGE_BREAKOUT 2%/−0.64R (n=53), MOVER_TREND_PULLBACK −0.25R
+  (n=2685, 4 emitted). Pruning evidence, not an emergency.
+- **Emission drought persists:** ~10 emitted vs ~9,000 measured candidates;
+  only QCB (+0.17R) and FUNDING_EXTREME (+0.57R) positive live. Volume-knob
+  decision (S53 deferral) is becoming due.
+
+### NEXT
+
+1. Owner: **verify kill switch re-enabled** from ops Control (S55 action;
+   truth report shows last performance record ~3.7h old).
+2. After a real window: review `BTC_DIR_SHADOW` would-fires (grep VPS logs /
+   `btc_dir_shadow:*` counters) → flip `btc_dir_penalty_apply` from ops if the
+   touched set looks right.
+3. Geometry A/B now measuring for real — give it days before reading leaders
+   (both arms ≥15 samples per strategy).
+4. Unchanged: Telegram→app decouple (owner), volume knobs as live tunables
+   (dark-first), Phase 4 master-arm (owner), `dispatch_staleness` action only
+   if a fuller window re-sours.
+
+---
+
 ## 🔴 SESSION 55 2026-07-13 — Engine-wedge → watchdog restart-storm → kill-switch incident fixed (branch `claude/pr-crypto-audit-review-a303z5`, 360-v2)
 
 **Owner reported** (6 WATCHDOG Telegram screenshots, ~07:51–08:22 IST): repeating
