@@ -1499,7 +1499,10 @@ class Scanner:
 
             m5 = candles.get("5m", {})
             closes_5m = m5.get("close", [])
-            if not closes_5m:
+            # len() not truthiness — these are numpy arrays, and `not arr`
+            # raised on every symbol WITH data (numpy-truthiness class,
+            # 2026-07-14), breaking pair diagnosis entirely.
+            if len(closes_5m) == 0:
                 results["error"] = f"No 5m candle data for {symbol}"
                 return results
 

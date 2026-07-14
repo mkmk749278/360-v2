@@ -528,16 +528,16 @@ class TestAnalystReasonPreservation:
     overwrite a richer evaluator-authored reason.
     """
 
-    @pytest.mark.xfail(reason=(
-        "PR-01 analyst-reason preservation contract changed when scanner "
-        "started writing a structured invalidation summary.  Test asserts the "
-        "evaluator's analyst_reason survives end-to-end but the scanner now "
-        "appends a deterministic summary.  Refactor to assert that the "
-        "evaluator's text is a substring of the final reason."
-    ))
     @pytest.mark.asyncio
     async def test_evaluator_analyst_reason_not_overwritten(self):
-        """Rich evaluator-authored analyst_reason must survive _prepare_signal."""
+        """Rich evaluator-authored analyst_reason must survive _prepare_signal.
+
+        Re-authored 2026-07-14 (was xfail'd): the scanner may append its
+        structured invalidation summary, so the contract is that the
+        evaluator's text SURVIVES (substring), not that it is byte-identical.
+        Also needs the PR-04 rollout state patched live — radar_only channels
+        never reach the queue.
+        """
         import src.scanner as scanner_mod
 
         rich_reason = "FVG retest at 65000.00 with HTF confluence (4h FVG overhead)"
@@ -568,6 +568,10 @@ class TestAnalystReasonPreservation:
         # here so we can test identity preservation through the pipeline.
         with _common_patches(scanner, extra=[
             patch.dict("src.scanner._CHANNEL_ENABLED_FLAGS", {"360_SCALP_FVG": True}),
+            patch.dict(
+                "src.scanner.CHANNEL_ROLLOUT_STATE_DEFAULTS",
+                {"360_SCALP_FVG": "full_live"},
+            ),
             patch.object(scanner, "_evaluate_setup", return_value=fvg_setup),
             patch.object(scanner_mod._scoring_engine, "score", return_value=pr09_score),
         ]):
@@ -575,9 +579,9 @@ class TestAnalystReasonPreservation:
 
         sig = captured.get("sig")
         assert sig is not None, "Signal must be enqueued"
-        assert sig.analyst_reason == rich_reason, (
+        assert rich_reason in sig.analyst_reason, (
             f"Evaluator analyst_reason was overwritten by generic thesis. "
-            f"Expected: {rich_reason!r}\nGot: {sig.analyst_reason!r}"
+            f"Expected to contain: {rich_reason!r}\nGot: {sig.analyst_reason!r}"
         )
 
     @pytest.mark.asyncio
@@ -669,15 +673,16 @@ class TestSetupClassIdentityConsistency:
     see the correct identity, not a generic reclassification.
     """
 
-    @pytest.mark.xfail(reason=(
-        "FVG_RETEST identity contract: end-to-end signal flow now goes through "
-        "additional setup_class normalisation in the dispatcher which can "
-        "rewrite the identity.  Test asserts strict equality across the entire "
-        "pipeline.  Investigate whether the rewrite is correct or a regression."
-    ))
     @pytest.mark.asyncio
     async def test_fvg_retest_identity_preserved_end_to_end(self):
-        """FVG_RETEST setup_class must survive from evaluator to final dispatched signal."""
+        """FVG_RETEST setup_class must survive from evaluator to final dispatched signal.
+
+        Investigated 2026-07-14 (was xfail'd suspecting a dispatcher identity
+        rewrite): NO rewrite exists — the signal was never enqueued because
+        360_SCALP_FVG's PR-04 rollout state is `radar_only`, which routes away
+        from the signal queue by governance design.  With the rollout state
+        test-patched live, identity survives the whole pipeline.
+        """
         import src.scanner as scanner_mod
 
         channel = MagicMock()
@@ -706,6 +711,10 @@ class TestSetupClassIdentityConsistency:
         # here so we can test identity preservation through the pipeline.
         with _common_patches(scanner, extra=[
             patch.dict("src.scanner._CHANNEL_ENABLED_FLAGS", {"360_SCALP_FVG": True}),
+            patch.dict(
+                "src.scanner.CHANNEL_ROLLOUT_STATE_DEFAULTS",
+                {"360_SCALP_FVG": "full_live"},
+            ),
             patch.object(scanner, "_evaluate_setup", return_value=fvg_setup),
             patch.object(scanner_mod._scoring_engine, "score", return_value=pr09_score),
         ]):
@@ -718,14 +727,13 @@ class TestSetupClassIdentityConsistency:
             f"Got: {sig.setup_class!r}"
         )
 
-    @pytest.mark.xfail(reason=(
-        "Same root cause as test_fvg_retest_identity_preserved_end_to_end: "
-        "setup_class identity is being rewritten somewhere in the dispatch "
-        "path.  Investigate whether the rewrite is correct."
-    ))
     @pytest.mark.asyncio
     async def test_orderblock_identity_preserved_end_to_end(self):
-        """SMC_ORDERBLOCK setup_class must survive from evaluator to final dispatched signal."""
+        """SMC_ORDERBLOCK setup_class must survive from evaluator to final dispatched signal.
+
+        Same resolution as the FVG test above (2026-07-14): no dispatcher
+        rewrite — radar_only rollout state kept the signal out of the queue.
+        """
         import src.scanner as scanner_mod
 
         channel = MagicMock()
@@ -754,6 +762,10 @@ class TestSetupClassIdentityConsistency:
         # here so we can test identity preservation through the pipeline.
         with _common_patches(scanner, extra=[
             patch.dict("src.scanner._CHANNEL_ENABLED_FLAGS", {"360_SCALP_ORDERBLOCK": True}),
+            patch.dict(
+                "src.scanner.CHANNEL_ROLLOUT_STATE_DEFAULTS",
+                {"360_SCALP_ORDERBLOCK": "full_live"},
+            ),
             patch.object(scanner, "_evaluate_setup", return_value=ob_setup),
             patch.object(scanner_mod._scoring_engine, "score", return_value=pr09_score),
         ]):

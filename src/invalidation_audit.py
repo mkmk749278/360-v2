@@ -285,16 +285,27 @@ def classify_pending_records(
             dirty = True
             continue
         ohlc = fetch_ohlc_since(symbol, kill_ts)
-        if not ohlc or not ohlc.get("high") or not ohlc.get("low"):
+        if not ohlc:
             record["classification"] = "INSUFFICIENT_DATA"
             record["classified_at"] = now_ts
             counters["INSUFFICIENT_DATA"] = counters.get("INSUFFICIENT_DATA", 0) + 1
             dirty = True
             continue
-        high = max(ohlc["high"])
-        low = min(ohlc["low"])
-        close = ohlc.get("close", [])
-        final = float(close[-1]) if close else 0.0
+        # None/len checks, not truthiness — a fetcher returning numpy arrays
+        # would raise here and kill the whole classify batch
+        # (numpy-truthiness class, 2026-07-14).
+        _highs = ohlc.get("high")
+        _lows = ohlc.get("low")
+        if _highs is None or _lows is None or len(_highs) == 0 or len(_lows) == 0:
+            record["classification"] = "INSUFFICIENT_DATA"
+            record["classified_at"] = now_ts
+            counters["INSUFFICIENT_DATA"] = counters.get("INSUFFICIENT_DATA", 0) + 1
+            dirty = True
+            continue
+        high = max(_highs)
+        low = min(_lows)
+        close = ohlc.get("close")
+        final = float(close[-1]) if close is not None and len(close) > 0 else 0.0
         label = classify_record(record, high, low, final)
         record["classification"] = label
         record["classified_at"] = now_ts

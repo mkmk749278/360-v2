@@ -507,19 +507,6 @@ class TestScoreSentiment:
         assert score_sentiment(5.0) == pytest.approx(10.0)
         assert score_sentiment(-5.0) == pytest.approx(0.0)
 
-    @pytest.mark.xfail(reason=(
-        "360_SPOT no longer wired in TOP50_FUTURES_ONLY config.  Sentiment "
-        "weighting for SPOT was removed; compute_confidence returns equal "
-        "totals for unknown channels.  Re-author when SPOT returns."
-    ))
-    def test_sentiment_in_compute_confidence_spot(self):
-        """Sentiment contributes to confidence for SPOT channel."""
-        inp_bull = ConfidenceInput(smc_score=20, trend_score=15, sentiment_score=1.0)
-        inp_bear = ConfidenceInput(smc_score=20, trend_score=15, sentiment_score=-1.0)
-        r_bull = compute_confidence(inp_bull, channel="360_SPOT")
-        r_bear = compute_confidence(inp_bear, channel="360_SPOT")
-        assert r_bull.total > r_bear.total
-
     def test_sentiment_no_effect_on_scalp(self):
         """Sentiment has no effect on SCALP channel (weight=0)."""
         inp_bull = ConfidenceInput(smc_score=20, trend_score=15, sentiment_score=1.0)

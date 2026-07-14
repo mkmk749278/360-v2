@@ -810,24 +810,21 @@ class TestReclaimRetestGeometryPolicy:
         assert risk.reason == ""
         assert risk.stop_loss == 99.96
 
-    @pytest.mark.xfail(
-        reason=(
-            "Premise no longer applies: pre-fix this asserted that BREAKOUT_RETEST "
-            "with high-ATR fixture + tight signal.stop_loss=99.90 would surface the "
-            "'risk distance too tight' rejection. After PR #240 raised the 360_SCALP "
-            "channel cap from 1.5% to 3.0%, the structural SL gets clamped to ~3.0% "
-            "(well above the 0.03%/$0.03 'too tight' floor) so the rejection no "
-            "longer fires. The check itself is still meaningful for setups whose "
-            "computed SL legitimately drops below 0.03% — but no fixture in this "
-            "file currently produces that. Refactor candidate: build a fixture "
-            "that produces a sub-floor structural SL (very narrow swing range AND "
-            "low ATR AND short-channel context) to re-exercise the guard.",
-        )
-    )
     def test_non_reclaim_setup_keeps_generic_risk_tight_guard(self):
+        """The generic 'risk distance too tight' guard still fires for
+        non-reclaim setups.
+
+        Re-authored 2026-07-14 (was xfail'd): BREAKOUT_RETEST can no longer
+        reach the guard — its SL is re-anchored to structure with an
+        ATR-floored buffer, so the computed distance always clears the floor.
+        The reachable path is a STRUCTURAL_SLTP_PROTECTED setup (LSR), whose
+        evaluator-owned SL is preserved verbatim: a 0.10% stop against the
+        buffer-scaled floor (buffer×0.5 ≥ 0.175% with the 1%-of-entry ATR
+        floor) must be rejected as too tight for structural invalidation.
+        """
         signal = _signal(channel="360_SCALP", direction=Direction.LONG)
         signal.entry = 100.0
-        signal.stop_loss = 99.90  # same 0.10% distance as FAR test
+        signal.stop_loss = 99.90  # 0.10% — preserved verbatim for LSR
         signal.tp1 = 100.20
         signal.tp2 = 100.40
         signal.tp3 = 100.80
@@ -837,7 +834,7 @@ class TestReclaimRetestGeometryPolicy:
             indicators=self._build_high_atr_indicators(),
             candles={"5m": _candles(base=100.0, trend=0.0)},
             smc_data={"sweeps": [], "mss": None, "fvg": []},
-            setup=SetupClass.BREAKOUT_RETEST,
+            setup=SetupClass.LIQUIDITY_SWEEP_REVERSAL,
             spread_pct=0.01,
             channel="360_SCALP",
         )

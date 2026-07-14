@@ -610,15 +610,14 @@ class TestScalpChannel:
         if sig is None:
             assert ch._active_no_signal_reason != "htf_poi_unanchored"
 
-    @pytest.mark.xfail(reason=(
-        "FUNDING_EXTREME no longer hard-blocks the QUIET regime — Audit-3 "
-        "removed the QUIET-regime gate (extreme funding is the quality gate, "
-        "not regime).  Path now reaches a downstream gate (`ema_alignment_reject`) "
-        "instead of `regime_blocked`.  Refactor the test to assert the new "
-        "rejection chain or remove if the historical regime block isn't "
-        "coming back."
-    ))
-    def test_funding_extreme_quiet_regime_blocked_reason(self):
+    def test_funding_extreme_quiet_regime_not_blocked(self):
+        """QUIET no longer hard-blocks FUNDING_EXTREME (Audit-3 doctrine).
+
+        Re-authored 2026-07-14 (was xfail'd asserting the removed
+        `regime_blocked`): extreme funding IS the quality gate, so the QUIET
+        candidate proceeds to the downstream chain and rejects there
+        (`ema_alignment_reject` with this fixture) — never on regime.
+        """
         ch = ScalpChannel()
         sig = ch._evaluate_funding_extreme(
             "BTCUSDT",
@@ -630,7 +629,10 @@ class TestScalpChannel:
             regime="QUIET",
         )
         assert sig is None
-        assert ch._active_no_signal_reason == "regime_blocked"
+        assert ch._active_no_signal_reason != "regime_blocked", (
+            "QUIET must not regime-block FUNDING_EXTREME (Audit-3)"
+        )
+        assert ch._active_no_signal_reason == "ema_alignment_reject"
 
     def test_qcb_telemetry_regime_blocked_reason(self):
         ch = ScalpChannel()
@@ -2506,27 +2508,37 @@ class TestSrFlipRetestRefinements:
 
     # ── Retest proximity zone ─────────────────────────────────────────────
 
-    @pytest.mark.xfail(reason=(
-        "SR_FLIP_RETEST now applies a baseline soft penalty (RSI / wick / "
-        "proximity composition changed) so `soft_penalty_total == 0.0` no "
-        "longer holds even in the premium zone with FVG present.  The test "
-        "asserted absolute zero penalty which was true at one point but is "
-        "no longer the structural invariant.  Refactor to assert that the "
-        "premium-zone penalty is LESS THAN the extended-zone penalty."
-    ))
-    def test_premium_zone_has_no_proximity_penalty(self):
-        """Retest at 0.2% from level (premium zone ≤0.3%) carries zero proximity penalty.
+    def test_premium_zone_penalty_below_extended_zone(self):
+        """Premium-zone retest carries a smaller penalty than extended zone.
 
-        Quality differentiation is expressed via soft_penalty_total (deducted post-PR09),
-        not via evaluator-level confidence mutations.
+        Re-authored 2026-07-14 (was xfail'd asserting absolute zero): the
+        evaluator now composes a baseline penalty (RSI / wick / proximity),
+        so the structural invariant is RELATIVE — the premium zone must be
+        at least the +3.0 proximity penalty cheaper than the extended zone.
         """
         m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
         m5["close"][-1] = 100.2   # 0.2% above level — premium zone
-        candles = {"5m": m5}
-        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
-        assert sig is not None
-        # Premium zone + FVG present: no proximity penalty, no FVG penalty
-        assert sig.soft_penalty_total == 0.0
+        premium = self._call_long(
+            {"5m": m5}, _srflip_indicators_long(), _srflip_smc(direction="LONG")
+        )
+        assert premium is not None
+
+        m5x = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        m5x["close"][-1] = 100.45  # 0.45% above level — extended zone
+        m5x["open"][-1] = 100.50   # keep rejection wick valid
+        m5x["high"][-1] = 100.60
+        m5x["low"][-1] = 100.25
+        extended = self._call_long(
+            {"5m": m5x}, _srflip_indicators_long(), _srflip_smc(direction="LONG")
+        )
+        assert extended is not None
+
+        assert (
+            extended.soft_penalty_total - premium.soft_penalty_total >= 3.0
+        ), (
+            f"extended zone must carry the +3.0 proximity penalty over premium "
+            f"(premium={premium.soft_penalty_total}, extended={extended.soft_penalty_total})"
+        )
 
     def test_extended_zone_accepted_with_proximity_penalty(self):
         """Retest at 0.45% from level (extended zone 0.3%–0.6%) accepted with soft penalty.
@@ -2553,20 +2565,36 @@ class TestSrFlipRetestRefinements:
 
     # ── Rejection candle (layered soft/hard gate) ─────────────────────────
 
-    @pytest.mark.xfail(reason=(
-        "Same root cause as test_premium_zone_has_no_proximity_penalty above: "
-        "SR_FLIP_RETEST baseline soft_penalty_total is no longer zero even on "
-        "a clearly-rejected wick.  Refactor to assert relative not absolute."
-    ))
-    def test_clear_rejection_wick_no_penalty(self):
-        """Lower wick ≥ 50% of candle body (clear rejection) carries no wick penalty."""
+    def test_clear_wick_penalty_below_borderline_wick(self):
+        """A clear rejection wick is penalised less than a borderline one.
+
+        Re-authored 2026-07-14 (was xfail'd asserting absolute zero): the
+        baseline penalty composition changed, so the invariant is RELATIVE —
+        the clear-wick candle must be at least the +4.0 wick penalty cheaper
+        than the borderline-wick candle.
+        """
         m5 = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
-        # Default candle already has large wick; verify baseline
-        candles = {"5m": m5}
-        sig = self._call_long(candles, _srflip_indicators_long(), _srflip_smc(direction="LONG"))
-        assert sig is not None
-        # FVG present, premium zone, clear wick: zero soft penalty
-        assert sig.soft_penalty_total == 0.0
+        clear = self._call_long(
+            {"5m": m5}, _srflip_indicators_long(), _srflip_smc(direction="LONG")
+        )
+        assert clear is not None
+
+        m5b = _make_srflip_candles_long(n=60, flip_offset=3, level=100.0)
+        m5b["close"][-1] = 100.1
+        m5b["open"][-1] = 100.5   # body 0.4
+        m5b["low"][-1] = 100.4    # lower wick 0.1 (25% of body → borderline)
+        m5b["high"][-1] = 100.6
+        borderline = self._call_long(
+            {"5m": m5b}, _srflip_indicators_long(), _srflip_smc(direction="LONG")
+        )
+        assert borderline is not None
+
+        assert (
+            borderline.soft_penalty_total - clear.soft_penalty_total >= 4.0
+        ), (
+            f"borderline wick must carry the +4.0 wick penalty over a clear one "
+            f"(clear={clear.soft_penalty_total}, borderline={borderline.soft_penalty_total})"
+        )
 
     def test_borderline_wick_accepted_with_penalty(self):
         """Lower wick 20%–50% of body (borderline rejection) accepted with +4.0 penalty."""

@@ -269,14 +269,6 @@ class TestPathAwarePenaltyModulation:
 # 2. Regime-scaled VWAP penalty
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(reason=(
-    "Cross-test contamination — same root cause as TestMultipleSoftGatesAccumulate "
-    "below.  These tests pass cleanly in isolation but fail when run after "
-    "test_pr04_portfolio_governance / test_pr06_orb_disable which "
-    "`importlib.reload(config)`.  Modules that imported `from config import …` "
-    "keep stale references.  Tracked as the same follow-up tech debt — fix "
-    "is to remove the config reload from those tests (use monkeypatch instead)."
-), strict=False)
 class TestRegimeScaledVWAPPenalty:
     """Test that VWAP soft-penalty scales correctly by regime."""
 
@@ -409,14 +401,6 @@ class TestRegimeScaledVWAPPenalty:
 # 3. Multiple soft gates accumulate
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(reason=(
-    "Cross-test contamination: tests in this class pass cleanly in isolation "
-    "but fail when run after test_pr04_portfolio_governance / test_pr06_orb_disable "
-    "which `importlib.reload(config)`.  Modules that imported `from config "
-    "import …` keep stale references.  Fix at root requires removing the "
-    "config reload from those tests (use monkeypatch instead) — tracked as "
-    "follow-up tech debt."
-), strict=False)
 class TestMultipleSoftGatesAccumulate:
     """Multiple failing soft gates accumulate their penalties."""
 
@@ -494,11 +478,12 @@ class TestMultipleSoftGatesAccumulate:
 
         sig = captured.get("sig")
         assert sig is not None
-        # KZ stays unmodulated for this path (10.0) while VOL_DIV is modulated:
-        # 12.0 × 0.65 = 7.8. Total = 17.8 (ranging multiplier=1.0).
-        assert sig.soft_penalty_total == pytest.approx(17.8, abs=0.1)
+        # kill_zone is disabled in the gate profile (crypto trades 24/7), so
+        # only the modulated VOL_DIV penalty applies: 12.0 × 0.65 = 7.8
+        # (ranging multiplier = 1.0).
+        assert sig.soft_penalty_total == pytest.approx(7.8, abs=0.1)
         flags = sig.soft_gate_flags.split(",")
-        assert "KZ" in flags
+        assert "KZ" not in flags
         assert "VOL_DIV" in flags
 
 
@@ -509,7 +494,6 @@ class TestMultipleSoftGatesAccumulate:
 class TestHardGatesStillBlock:
     """MTF, Kill Zone, and Cross-Asset gates remain hard-blocking."""
 
-    @pytest.mark.xfail(reason="Cross-test contamination — see TestMultipleSoftGatesAccumulate", strict=False)
     @pytest.mark.asyncio
     async def test_mtf_gate_still_hard_blocks(self):
         """MTF gate still returns None, None regardless of regime."""
@@ -555,13 +539,6 @@ class TestHardGatesStillBlock:
         sq.put.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason=(
-        "Cross-asset gate moved from hard-block to soft-penalty for the "
-        "current regime-soft-penalty doctrine.  Test asserts hard-block "
-        "behaviour which is now opt-in via stricter regime configuration.  "
-        "Re-author against the soft-penalty contract or guard with a feature "
-        "flag if hard-block is re-enabled."
-    ))
     async def test_cross_asset_gate_still_hard_blocks(self):
         """Cross-asset gate still returns None, None for altcoins regardless of regime."""
         channel = MagicMock()
@@ -585,8 +562,12 @@ class TestHardGatesStillBlock:
             channel=channel, signal_queue=sq, regime=MarketRegime.TRENDING_UP
         )
 
+        # Current contract is a 3-tuple: (allowed, reason, confidence_adj).
+        # A stale 2-tuple patch raises on unpacking and the gate's fail-open
+        # handler skips it entirely — which is how this test rotted under its
+        # blanket xfail marker.
         with _common_patches(scanner, extra=[
-            patch("src.scanner.check_cross_asset_gate", return_value=(False, "BTC: DUMPING")),
+            patch("src.scanner.check_cross_asset_gate", return_value=(False, "BTC: DUMPING", 0.0)),
         ]):
             await scanner._scan_symbol("SOLUSDT", 5_000_000)
 
@@ -624,7 +605,6 @@ class TestSignalSurvivesSingleSoftGate:
 # 6. Signal killed by accumulated soft penalties
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(reason="Cross-test contamination — see TestMultipleSoftGatesAccumulate", strict=False)
 class TestSignalKilledByAccumulatedSoftPenalties:
     """Enough accumulated penalties drop signal below min_confidence threshold."""
 
@@ -670,7 +650,6 @@ class TestSignalKilledByAccumulatedSoftPenalties:
 # 7. Soft gate flags tracked
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(reason="Cross-test contamination — see TestMultipleSoftGatesAccumulate", strict=False)
 class TestSoftGateFlagsTracked:
     """Verify sig.soft_gate_flags records which gates fired."""
 
@@ -766,47 +745,6 @@ class TestRegimeMultiplierStoredOnSignal:
         assert sig.regime_penalty_multiplier == pytest.approx(1.5)
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason=(
-        "Uses `360_SWING` channel which is no longer wired in TOP50_FUTURES_ONLY "
-        "configuration.  Re-author against an active 360_SCALP* channel."
-    ))
-    async def test_regime_multiplier_stored_quiet(self):
-        """In QUIET regime, 360_SWING uses the standard QUIET penalty (0.8)."""
-        channel = MagicMock()
-        channel.config = SimpleNamespace(name="360_SWING", min_confidence=10.0)
-        channel.evaluate.return_value = Signal(
-            channel="360_SWING",
-            symbol="BTCUSDT",
-            direction=Direction.LONG,
-            entry=100.0,
-            stop_loss=95.0,
-            tp1=105.0,
-            tp2=110.0,
-            confidence=10.0,
-            signal_id="SIG-001",
-            timestamp=utcnow(),
-        )
-        sq = MagicMock()
-
-        captured = {}
-
-        async def _capture(sig):
-            captured["sig"] = sig
-            return True
-
-        sq.put = AsyncMock(side_effect=_capture)
-        scanner = _make_scan_ready_scanner(
-            channel=channel, signal_queue=sq, regime=MarketRegime.QUIET
-        )
-
-        with _common_patches(scanner):
-            await scanner._scan_symbol("BTCUSDT", 10_000_000)
-
-        sig = captured.get("sig")
-        assert sig is not None
-        assert sig.regime_penalty_multiplier == pytest.approx(0.8)
-
-    @pytest.mark.asyncio
     async def test_regime_multiplier_scalp_quiet_uses_higher_penalty(self):
         """In QUIET regime, 360_SCALP uses the higher 1.8× penalty multiplier."""
         channel = MagicMock()
@@ -850,7 +788,6 @@ class TestRegimeMultiplierStoredOnSignal:
 # 9. Soft penalties survive PR09 final scoring (ARCH-8 regression)
 # ---------------------------------------------------------------------------
 
-@pytest.mark.xfail(reason="Cross-test contamination — see TestMultipleSoftGatesAccumulate", strict=False)
 class TestSoftPenaltiesSurvivePR09:
     """Regression tests: soft-gate penalties must reduce confidence after PR09.
 
@@ -943,9 +880,10 @@ class TestSoftPenaltiesSurvivePR09:
             return sig.confidence if sig is not None else 0.0
 
         conf_clean = await _run([])
+        # kill_zone is disabled in every channel's gate profile (crypto trades
+        # 24/7) — only the VWAP penalty applies here.
         conf_penalised = await _run([
             patch("src.scanner.check_vwap_extension", return_value=(False, "VWAP: overextended")),
-            patch("src.scanner.check_kill_zone_gate", return_value=(False, "Kill zone: WEEKEND")),
         ])
 
         assert conf_clean == pytest.approx(70.0, abs=0.2), (
@@ -954,8 +892,9 @@ class TestSoftPenaltiesSurvivePR09:
         assert conf_penalised < conf_clean, (
             "Penalised signal must have strictly lower final confidence than clean signal"
         )
-        assert conf_clean - conf_penalised >= 25.0, (
-            "Penalty reduction must be at least 25 pts (VWAP 15 + KZ 10, regime mult=1.0)"
+        assert conf_clean - conf_penalised >= 15.0, (
+            "Penalty reduction must be at least 15 pts (VWAP 15, regime mult=1.0; "
+            "kill_zone is disabled by gate profile)"
         )
 
     @pytest.mark.asyncio

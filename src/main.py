@@ -1080,9 +1080,12 @@ class CryptoSignalEngine:
         btc_change_pct: float = 0.0
         btc_1h_change_pct: float = 0.0
         try:
-            btc_cd = self.data_store.get_candles("BTCUSDT", "5m")
-            if btc_cd and btc_cd.get("close"):
-                closes = btc_cd["close"]
+            btc_cd = self.data_store.get_candles("BTCUSDT", "5m") or {}
+            # numpy-truthiness class (2026-07-14): `dict.get("close")` is an
+            # ndarray — bool context raises, and the except below blanked the
+            # BTC price in this payload forever.
+            closes = btc_cd.get("close")
+            if closes is not None and len(closes) > 0:
                 btc_price = round(float(closes[-1]), 2)
                 if len(closes) >= 12:
                     btc_1h_change_pct = round(

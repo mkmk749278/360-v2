@@ -1,6 +1,5 @@
 """Tests for src.scanner.regime_manager — regime-adaptive scheduling."""
 
-import pytest
 
 from src.scanner.regime_manager import RegimeManager, RegimeSchedule
 
@@ -8,18 +7,6 @@ from src.scanner.regime_manager import RegimeManager, RegimeSchedule
 class _FakeChannel:
     def __init__(self, name: str):
         self.config = type("Config", (), {"name": name})()
-
-
-@pytest.mark.xfail(reason=(
-    "Asserts `360_SWING` in allowed_channels but SWING is no longer in the "
-    "regime schedule under TOP50_FUTURES_ONLY config.  Re-author when SWING "
-    "returns to the active set."
-))
-def test_regime_schedule_trending():
-    rm = RegimeManager()
-    sched = rm.get_schedule("TRENDING_UP")
-    assert "360_SCALP" in sched.allowed_channels
-    assert "360_SWING" in sched.allowed_channels
 
 
 def test_regime_schedule_volatile():
@@ -38,21 +25,6 @@ def test_is_channel_priority():
     rm = RegimeManager()
     assert rm.is_channel_priority("360_SCALP", "TRENDING_UP")
     assert not rm.is_channel_priority("360_SPOT", "TRENDING_UP")
-
-
-@pytest.mark.xfail(reason=(
-    "Asserts SWING is in the filter result, but SWING is no longer wired "
-    "under TOP50_FUTURES_ONLY config — filter rejects it.  Re-author when "
-    "SWING returns."
-))
-def test_filter_channels_trending():
-    rm = RegimeManager()
-    channels = [_FakeChannel("360_SCALP"), _FakeChannel("360_SWING"), _FakeChannel("360_SPOT")]
-    allowed, skipped = rm.filter_channels(channels, "TRENDING_UP")
-    names = [c.config.name for c in allowed]
-    assert "360_SCALP" in names
-    assert "360_SWING" in names
-    assert len(skipped) == 0
 
 
 def test_filter_channels_volatile_skips_swing():

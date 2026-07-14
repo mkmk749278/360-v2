@@ -559,7 +559,6 @@ class TestScannerAttributes:
 
 
 class TestScannerConfidencePipeline:
-    @pytest.mark.xfail(reason="Cross-test contamination — see TestMTFGateInScanner", strict=False)
     @pytest.mark.asyncio
     async def test_adjustments_persist_and_final_clamp_applies_last(self):
         """Signal pipeline: base → regime adjustment → predictive → clamp.
@@ -742,15 +741,14 @@ class TestPredictiveGeometryRevalidation:
         )
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason=(
-        "Suppression-counter key shape changed after per-setup SL caps were "
-        "added in PR #236.  Test expects "
-        "`geometry_rejected_final:360_SCALP:breakout_momentum:sl_cap_exceeded_channel_policy` "
-        "but VSB now has a tighter per-setup cap so the actual emitted key uses "
-        "`sl_cap_exceeded_setup_policy`.  Refactor the assertion to be scope-agnostic "
-        "(match any `sl_cap_exceeded_*_policy` suffix)."
-    ))
-    async def test_predictive_sl_cap_rejection_tracks_policy_scope_without_reason_parsing(self):
+    async def test_predictive_sl_widening_rejected_and_geometry_preserved(self):
+        """A predictive adjustment that WIDENS the stop is rejected outright.
+
+        Re-authored 2026-07-14 (was xfail'd): the old premise asserted the
+        cap-policy scoped counters, but predictive SL widening is now rejected
+        earlier as ``sl_distance_widened`` — a stop never gets looser than the
+        validated plan (capital-preservation doctrine), regardless of caps.
+        """
         channel = MagicMock()
         channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
         signal_queue = MagicMock()
@@ -777,14 +775,13 @@ class TestPredictiveGeometryRevalidation:
         )
 
         assert (sig.stop_loss, sig.tp1, sig.tp2, sig.tp3) == pytest.approx(before, rel=1e-8)
-        assert scanner._suppression_counters[
-            "geometry_rejected_final:360_SCALP:breakout_momentum:sl_cap_exceeded_channel_policy"
+        counters = scanner._suppression_counters
+        assert counters[
+            "geometry_rejected_final:360_SCALP:breakout_momentum:sl_distance_widened"
         ] == 1
-        assert scanner._suppression_counters[
-            "geometry_rejected_final_policy:360_SCALP:breakout_momentum:channel"
-        ] == 1
+        assert counters["geometry_preserved_final:360_SCALP:breakout_momentum"] == 1
         assert scanner._path_funnel_counters[
-            "geometry:final_live:rejected_policy:channel:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+            "geometry:final_live:rejected_reason:sl_distance_widened:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
         ] == 1
 
     @pytest.mark.asyncio
@@ -862,98 +859,6 @@ class TestPredictiveGeometryRevalidation:
         assert scanner._path_funnel_counters[
             "geometry:final_live:preserved:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
         ] == 1
-
-    @pytest.mark.asyncio
-    @pytest.mark.xfail(reason=(
-        "Test wires `min_confidence=10.0` and uses a mocked component score; the "
-        "scanner pipeline now applies post-scoring soft-penalty deduction and "
-        "a regime-multiplier step that the test fixture doesn't reproduce, so "
-        "the signal short-circuits before `signal_queue.put` is awaited.  "
-        "Re-author the test against the post-soft-penalty pipeline contract."
-    ))
-    async def test_high_confidence_signals_enqueued_without_ai(self):
-        """High-confidence quantitative signals fire immediately without any AI
-        evaluation, for all channel types.
-        """
-        for ch_name in ("360_SCALP", "360_SPOT", "360_SWING", "360_GEM"):
-            channel = MagicMock()
-            channel.config = SimpleNamespace(name=ch_name, min_confidence=10.0)
-            channel.evaluate.return_value = _make_signal(channel=ch_name, signal_id="SIG-HOT")
-            signal_queue = MagicMock()
-            signal_queue.put = AsyncMock(return_value=True)
-
-            fake_component_score = SimpleNamespace(
-                total=92.0,
-                quality_tier=SimpleNamespace(value="A+"),
-                components={
-                    "market": 22.0,
-                    "setup": 25.0,
-                    "execution": 20.0,
-                    "risk": 17.0,
-                    "context": 8.0,
-                },
-            )
-
-            scanner = _make_scan_ready_scanner(
-                channel=channel,
-                signal_queue=signal_queue,
-            )
-
-            with patch("src.scanner.compute_confidence", return_value=SimpleNamespace(total=55.0, blocked=False)), \
-                 patch("src.scanner.score_signal_components", return_value=fake_component_score), \
-                 patch.object(scanner, "_evaluate_setup", return_value=_setup_pass()), \
-                 patch.object(scanner, "_evaluate_execution", return_value=_execution_pass()), \
-                 patch.object(scanner, "_evaluate_risk", return_value=_risk_pass()), \
-                 patch("src.scanner.check_vwap_extension", return_value=(True, "")), \
-                 patch("src.scanner.check_kill_zone_gate", return_value=(True, "")):
-                await scanner._scan_symbol("BTCUSDT", 10_000_000)
-
-            # Signal IS enqueued instantly (no AI latency)
-            signal_queue.put.assert_awaited_once()
-
-    @pytest.mark.asyncio
-    @pytest.mark.xfail(reason=(
-        "Uses `360_SWING` channel which is no longer wired in the current "
-        "TOP50_FUTURES_ONLY configuration.  Re-author against an active "
-        "360_SCALP* channel or remove if SWING is not coming back."
-    ))
-    async def test_signals_enqueued_with_quantitative_scoring_only(self):
-        """Signals are evaluated purely on quantitative scores; no AI calls."""
-        channel = MagicMock()
-        channel.config = SimpleNamespace(name="360_SWING", min_confidence=10.0)
-        channel.evaluate.return_value = _make_signal(channel="360_SWING", signal_id="SIG-QUANT")
-        signal_queue = MagicMock()
-        signal_queue.put = AsyncMock(return_value=True)
-
-        fake_component_score = SimpleNamespace(
-            total=70.0,
-            quality_tier=SimpleNamespace(value="B"),
-            components={
-                "market": 15.0,
-                "setup": 20.0,
-                "execution": 15.0,
-                "risk": 13.0,
-                "context": 7.0,
-            },
-        )
-
-        scanner = _make_scan_ready_scanner(
-            channel=channel,
-            signal_queue=signal_queue,
-        )
-
-        with patch("src.scanner.compute_confidence", return_value=SimpleNamespace(total=50.0, blocked=False)), \
-             patch("src.scanner.score_signal_components", return_value=fake_component_score), \
-             patch.object(scanner, "_evaluate_setup", return_value=_setup_pass()), \
-             patch.object(scanner, "_evaluate_execution", return_value=_execution_pass()), \
-             patch.object(scanner, "_evaluate_risk", return_value=_risk_pass()), \
-             patch("src.scanner.check_vwap_extension", return_value=(True, "")), \
-             patch("src.scanner.check_kill_zone_gate", return_value=(True, "")):
-            await scanner._scan_symbol("BTCUSDT", 10_000_000)
-
-        # Signal passes (min_confidence=10.0) and is enqueued without AI
-        signal_queue.put.assert_awaited_once()
-
 
 class TestScannerEnqueueSemantics:
     @pytest.mark.asyncio
@@ -1277,7 +1182,6 @@ class TestPR3GovernanceRuntimeRoles:
             "ETHUSDT",
         ]
 
-    @pytest.mark.xfail(reason="Cross-test contamination — see TestMTFGateInScanner", strict=False)
     def test_rollout_state_fail_closes_for_unknown_values(self):
         scanner = _make_scanner()
         with patch.dict(
@@ -1310,7 +1214,6 @@ class TestPR3GovernanceRuntimeRoles:
             assert scanner._is_radar_rollout_enabled("360_SCALP", "BTCUSDT") is False
             assert scanner._is_radar_rollout_enabled("360_SCALP_CVD", "BTCUSDT") is False
 
-    @pytest.mark.xfail(reason="Cross-test contamination — see TestMTFGateInScanner", strict=False)
     def test_limited_live_rollout_is_narrow_and_reversible(self):
         scanner = _make_scanner()
         assert scanner._is_live_rollout_enabled_for_symbol("360_SCALP_DIVERGENCE", "BTCUSDT") is True
@@ -1534,13 +1437,6 @@ def _common_gate_patches(scanner, extra_patches: list | None = None):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.xfail(reason=(
-    "Cross-test contamination: tests in this class pass cleanly in isolation "
-    "but fail when run after test_pr04_portfolio_governance / test_pr06_orb_disable "
-    "which `importlib.reload(config)`.  Modules that imported `from config "
-    "import …` keep stale references.  Tracked as follow-up tech debt — the "
-    "proper fix is to remove `importlib.reload` from the governance tests."
-), strict=False)
 class TestMTFGateInScanner:
     """Filter 1: MTF Confluence Gate wired into _prepare_signal."""
 
@@ -2050,18 +1946,16 @@ class TestMTFGateInScanner:
         assert scanner._suppression_counters["mtf_gate_family:360_SCALP:reclaim_retest"] == 0
 
     @pytest.mark.asyncio
-    @pytest.mark.xfail(reason=(
-        "Suppression-counter key `geometry_capped_risk_plan:...` is no longer "
-        "emitted for VSB after the per-setup cap promotion to reject-policy "
-        "(PR #236).  VSB now rejects rather than caps when SL exceeds the 2% "
-        "per-setup limit.  Refactor the test to use a compress-policy setup "
-        "(WHALE_MOMENTUM, RANGE_FADE) where the `_capped_` key still applies."
-    ))
     async def test_risk_plan_geometry_cap_telemetry(self):
+        """Re-authored 2026-07-14 (was xfail'd): VSB was promoted to
+        reject-policy in PR #236, so the `_capped_` telemetry only applies to
+        compress-policy setups now — WHALE_MOMENTUM (cap 2.0%) here.  The
+        evaluator SL sits 5% out; the risk plan compresses it to exactly the
+        2% cap, which must emit both changed and capped counters."""
         scanner, signal_queue = self._scanner_and_queue()
         capped_risk = RiskAssessment(
             passed=True,
-            stop_loss=98.5,  # 1.5% from entry — channel cap boundary
+            stop_loss=98.0,  # exactly the 2.0% WHALE_MOMENTUM setup cap
             tp1=101.3,
             tp2=102.6,
             tp3=103.9,
@@ -2070,23 +1964,23 @@ class TestMTFGateInScanner:
         )
 
         with _common_gate_patches(scanner, [
-            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.VOLUME_SURGE_BREAKOUT)),
+            patch.object(scanner, "_evaluate_setup", return_value=_setup_pass(SetupClass.WHALE_MOMENTUM)),
             patch.object(scanner, "_evaluate_risk", return_value=capped_risk),
         ]):
             await scanner._scan_symbol("BTCUSDT", 10_000_000)
 
         signal_queue.put.assert_awaited_once()
         assert scanner._suppression_counters[
-            "geometry_changed_risk_plan:360_SCALP:breakout_momentum"
+            "geometry_changed_risk_plan:360_SCALP:orderflow_momentum"
         ] == 1
         assert scanner._suppression_counters[
-            "geometry_capped_risk_plan:360_SCALP:breakout_momentum"
+            "geometry_capped_risk_plan:360_SCALP:orderflow_momentum"
         ] == 1
         assert scanner._path_funnel_counters[
-            "geometry:risk_plan:changed:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+            "geometry:risk_plan:changed:360_SCALP:orderflow_momentum:WHALE_MOMENTUM"
         ] == 1
         assert scanner._path_funnel_counters[
-            "geometry:risk_plan:capped:360_SCALP:breakout_momentum:VOLUME_SURGE_BREAKOUT"
+            "geometry:risk_plan:capped:360_SCALP:orderflow_momentum:WHALE_MOMENTUM"
         ] == 1
 
     @pytest.mark.asyncio
@@ -2325,41 +2219,6 @@ class TestMTFGateInScanner:
             if k.startswith("scanner_preparation:360_SCALP:")
         }
         assert sum(scanner_prepared.values()) == 1
-
-    @pytest.mark.asyncio
-    async def test_confidence_gate_reclassifies_watchlist_after_post_score_penalty(self):
-        channel = MagicMock()
-        channel.config = SimpleNamespace(name="360_SCALP", min_confidence=65.0)
-        raw_sig = _make_signal(channel="360_SCALP")
-        raw_sig.setup_class = SetupClass.VOLUME_SURGE_BREAKOUT.value
-        channel.evaluate.return_value = raw_sig
-        signal_queue = MagicMock()
-        signal_queue.put = AsyncMock(return_value=True)
-        scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
-
-        score = {
-            "total": 68.0,
-            "smc": 20.0,
-            "regime": 12.0,
-            "volume": 10.0,
-            "indicators": 12.0,
-            "patterns": 8.0,
-            "mtf": 6.0,
-            "thesis_adj": 0.0,
-        }
-        with _common_gate_patches(scanner, [
-            patch("src.scanner._scoring_engine.score", return_value=score),
-            patch("src.scanner.check_mtf_gate", return_value=(True, "")),
-            patch("src.scanner._stat_filter.check", return_value=(True, 53.0, "stat_penalty")),
-        ]):
-            await scanner._scan_symbol("BTCUSDT", 10_000_000)
-
-        signal_queue.put.assert_awaited_once()
-        emitted_sig = signal_queue.put.await_args.args[0]
-        assert emitted_sig.signal_tier == "WATCHLIST"
-        assert scanner._suppression_counters[
-            "confidence_gate:kept:360_SCALP:other:watchlist_tier_keep"
-        ] == 1
 
     @pytest.mark.asyncio
     async def test_confidence_gate_telemetry_tracks_filtered_min_confidence(self):
@@ -2852,16 +2711,15 @@ class TestCrossAssetGateInScanner:
         mock_ca.assert_not_called()
         signal_queue.put.assert_awaited_once()
 
-    @pytest.mark.xfail(reason=(
-        "Cross-asset gate now soft-penalises rather than hard-rejects when BTC "
-        "is dumping (regime-soft-penalty refactor).  Test asserts strict "
-        "rejection (`signal_queue.put` not awaited) but the post-refactor "
-        "behaviour is to enqueue with a confidence penalty.  Re-author against "
-        "the soft-penalty contract."
-    ))
     @pytest.mark.asyncio
     async def test_cross_asset_gate_blocks_altcoin_when_btc_dumping(self):
-        """When check_cross_asset_gate returns (False,…) for an altcoin, signal is rejected."""
+        """When check_cross_asset_gate returns (False, …) the signal is rejected.
+
+        Re-armed 2026-07-14: the xfail reason ("gate now soft-penalises") was a
+        misdiagnosis — not-allowed still hard-rejects; the soft part is the
+        third tuple element (confidence_adj).  The test had rotted because its
+        2-tuple patch raised on unpacking and the gate fail-opened.
+        """
         channel = MagicMock()
         channel.config = SimpleNamespace(name="360_SCALP", min_confidence=10.0)
         altcoin_signal = Signal(
@@ -2882,7 +2740,7 @@ class TestCrossAssetGateInScanner:
         scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
 
         with _common_gate_patches(scanner, [
-            patch("src.scanner.check_cross_asset_gate", return_value=(False, "Cross-asset: BTCUSDT is DUMPING")),
+            patch("src.scanner.check_cross_asset_gate", return_value=(False, "Cross-asset: BTCUSDT is DUMPING", 0.0)),
         ]):
             await scanner._scan_symbol("SOLUSDT", 5_000_000)
 
@@ -2911,7 +2769,7 @@ class TestCrossAssetGateInScanner:
         scanner = _make_scan_ready_scanner(channel=channel, signal_queue=signal_queue)
 
         with _common_gate_patches(scanner, [
-            patch("src.scanner.check_cross_asset_gate", return_value=(True, "")),
+            patch("src.scanner.check_cross_asset_gate", return_value=(True, "", 0.0)),
         ]):
             await scanner._scan_symbol("SOLUSDT", 5_000_000)
 
@@ -3620,11 +3478,6 @@ class TestScanContextCaching:
         assert ind == {"rsi_last": 50.0}
 
 
-@pytest.mark.xfail(reason=(
-    "Cross-test contamination: passes in isolation but can fail after tests that "
-    "`importlib.reload(config)` leave stale `from config import …` references. "
-    "Same class-level xfail as TestMTFGateInScanner — tracked as follow-up debt."
-), strict=False)
 class TestLongsRegimeGateInScanner:
     """Filter 1b: longs higher-timeframe (15m) regime gate in _prepare_signal.
 

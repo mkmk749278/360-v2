@@ -214,22 +214,27 @@ class TestDivergenceContinuationTPLongSwingBased:
         sig, _ = _run_long()
         assert sig is not None, "Expected LONG DIVERGENCE_CONTINUATION signal to fire"
 
-    @pytest.mark.xfail(reason=(
-        "DIV_CONT TP geometry now uses dual 10+20 candle CVD window (Audit-3) "
-        "and returns the broader-window swing.  Test asserts the narrower "
-        "10-candle window value.  Refactor against the post-Audit-3 contract."
-    ))
     def test_tp1_equals_divergence_window_swing_high(self):
-        """tp1 must equal the highest high in the divergence detection window."""
+        """tp1 = 10-candle swing high, 1.5R fallback, capped at 2.5R.
+
+        Re-authored 2026-07-14 (was xfail'd asserting the 20-candle window):
+        TP1 uses the nearer 10-candle swing so it can't collapse onto TP2,
+        falls back to close + 1.5R when the swing sits at/below close, and is
+        capped by the ATR-percentile ladder (default percentile 50 → 2.5R).
+        """
         close = 100.0
         candles = _make_candles_long(close=close)
         sig, _ = _run_long(close=close, candles=candles)
         if sig is None:
             pytest.skip("Signal did not fire")
         highs_5m = [float(h) for h in candles["5m"]["high"]]
-        expected_tp1 = max(highs_5m[-20:])
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        struct = max(highs_5m[-10:])
+        if struct <= sig.entry:
+            struct = sig.entry + sl_dist * 1.5
+        expected_tp1 = min(struct, sig.entry + sl_dist * 2.5)
         assert sig.tp1 == pytest.approx(expected_tp1, rel=1e-6), (
-            f"tp1 ({sig.tp1}) should equal max of divergence-window highs "
+            f"tp1 ({sig.tp1}) should be the capped 10-candle swing high "
             f"({expected_tp1})"
         )
 
@@ -298,44 +303,50 @@ class TestDivergenceContinuationTPShortSwingBased:
         sig, _ = _run_short()
         assert sig is not None, "Expected SHORT DIVERGENCE_CONTINUATION signal to fire"
 
-    @pytest.mark.xfail(reason=(
-        "Same root cause as test_tp1_equals_divergence_window_swing_high: "
-        "DIV_CONT TP geometry uses post-Audit-3 dual 10+20 window.  Refactor."
-    ))
     def test_tp1_equals_divergence_window_swing_low(self):
-        """tp1 must equal the lowest low in the divergence detection window."""
+        """tp1 = 10-candle swing low, 1.5R fallback, capped at 2.5R (SHORT mirror).
+
+        Re-authored 2026-07-14 — see the LONG twin for the contract.
+        """
         close = 100.0
         candles = _make_candles_short(close=close)
         sig, _ = _run_short(close=close, candles=candles)
         if sig is None:
             pytest.skip("Signal did not fire")
         lows_5m = [float(l) for l in candles["5m"]["low"]]
-        expected_tp1 = min(lows_5m[-20:])
+        sl_dist = abs(sig.entry - sig.stop_loss)
+        struct = min(lows_5m[-10:])
+        if struct >= sig.entry:
+            struct = sig.entry - sl_dist * 1.5
+        expected_tp1 = max(struct, sig.entry - sl_dist * 2.5)
         assert sig.tp1 == pytest.approx(expected_tp1, rel=1e-6), (
-            f"tp1 ({sig.tp1}) should equal min of divergence-window lows "
+            f"tp1 ({sig.tp1}) should be the capped 10-candle swing low "
             f"({expected_tp1})"
         )
 
-    @pytest.mark.xfail(reason=(
-        "DIV_CONT TP2 geometry refactored — falls back to a different value "
-        "than the test asserts.  Refactor against current behaviour."
-    ))
-    def test_tp2_equals_20candle_swing_low_or_fallback(self):
-        """tp2 must equal the 20-candle 5m swing low or a fallback R-multiple."""
+    def test_tp2_widest_of_swing_rmult_and_monotonicity(self):
+        """tp2 = min(20-candle swing low, entry − 2.5R, tp1 − 1R) for SHORT.
+
+        Re-authored 2026-07-14 (was xfail'd on the old swing-only premise):
+        TP2 is the WIDEST of the structural swing, the 2.5R multiple, and the
+        TP1 + 1R monotonicity floor — mirrors the LONG-side test above.
+        """
         close = 100.0
         candles = _make_candles_short(close=close)
         sig, _ = _run_short(close=close, candles=candles)
         if sig is None:
             pytest.skip("Signal did not fire")
         lows_5m = [float(l) for l in candles["5m"]["low"]]
+        sl_dist = abs(sig.entry - sig.stop_loss)
         swing_low = min(lows_5m[-20:])
-        if swing_low < close:
-            assert sig.tp2 == pytest.approx(swing_low, rel=1e-6), (
-                f"tp2 ({sig.tp2}) should equal the 20-candle swing low ({swing_low})"
-            )
-        else:
-            # Fallback should be below entry
-            assert sig.tp2 < sig.entry, "Fallback tp2 must be below entry for SHORT"
+        expected_tp2 = min(
+            swing_low, sig.entry - sl_dist * 2.5, sig.tp1 - sl_dist * 1.0
+        )
+        assert sig.tp2 == pytest.approx(expected_tp2, rel=1e-6), (
+            f"tp2 ({sig.tp2}) should be the widest of swing/2.5R/tp1-1R "
+            f"({expected_tp2})"
+        )
+        assert sig.tp2 < sig.entry, "tp2 must be below entry for SHORT"
 
     def test_all_tps_below_entry(self):
         sig, _ = _run_short()
