@@ -67,6 +67,7 @@ def _build_registry() -> Dict[str, Tunable]:
         BE_PARK_TOLERANCE_PCT,
         BE_SHIFT_TRIGGER_PCT,
         BE_THEN_TP1_DEFAULT_ENABLED,
+        BTC_DIR_PENALTY_APPLY,
         COHORT_EDGE_GATE_ENABLED,
         COHORT_EDGE_GATE_MIN_N,
         COHORT_EDGE_SUPPRESS_BELOW,
@@ -385,6 +386,22 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=ACTIVE_DUP_GUARD_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="btc_dir_penalty_apply",
+            label="BTC-direction penalty (apply)",
+            description=(
+                "Apply the OWNER_BRIEF §2.1 soft penalty when BTC's 1H AND "
+                "4H trend both oppose the signal. The gate was silently "
+                "broken in production (numpy truthiness, fixed 2026-07-14), "
+                "so re-arming it changes live scoring — it ships dark. "
+                "While OFF, every would-fire is shadow-logged "
+                "(btc_dir_shadow counter + BTC_DIR_SHADOW log line); flip "
+                "ON after reviewing a real would-fire window."
+            ),
+            type="bool",
+            default=BTC_DIR_PENALTY_APPLY,
             category="Signal gating",
         ),
         Tunable(

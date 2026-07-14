@@ -488,6 +488,14 @@ MARKET_CONTEXT_ENABLED: bool = _safe_bool("MARKET_CONTEXT_ENABLED", "true")
 # (O(1) in-memory, no I/O) and forward-measure TP1-before-SL on real candles in
 # the existing 5-min audit loop → per-gate KEEP/TUNE/DROP + edge-matrix feed.
 SUPPRESSION_AUDIT_ENABLED: bool = _safe_bool("SUPPRESSION_AUDIT_ENABLED", "true")
+# BTC-direction soft penalty APPLICATION (dark-first restore, 2026-07-14).  The
+# OWNER_BRIEF §2.1 penalty never actually fired in production: the gate raised
+# on numpy candle truthiness and the scanner's fail-open handler ate it on every
+# call.  The data path is fixed, but because applying the penalty changes live
+# scoring, it ships dark: OFF = shadow-log every would-fire (counter + log line),
+# ON = apply the penalty as originally designed.  Owner flips after reviewing a
+# real would-fire window.
+BTC_DIR_PENALTY_APPLY: bool = _safe_bool("BTC_DIR_PENALTY_APPLY", "false")
 # Shadow-only strategy units (src/shadow_strategies.py): range-fade, mean-revert,
 # funding-fade, cascade-reversal.  They have NO path to the signal queue — their
 # would-be trades enter the shadow ledger only, so the edge matrix can compare
