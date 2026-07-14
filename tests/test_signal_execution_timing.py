@@ -78,29 +78,29 @@ class TestConfigChanges:
         assert r2 >= 2.5, f"TP2 ratio too tight: {r2}"
         assert r3 >= 4.0, f"TP3 ratio too tight: {r3}"
 
-    @pytest.mark.xfail(reason=(
-        "MIN_SIGNAL_LIFESPAN_SECONDS for 360_SCALP was reduced 180s → 30s "
-        "(verified-live in OWNER_BRIEF Part IV).  Test pre-dates that change. "
-        "Update the asserted threshold or refocus on a property the new value "
-        "should satisfy (e.g., > 0)."
-    ))
-    def test_min_signal_lifespan_scalp_increased(self):
-        """SCALP min lifespan must be at least 180 seconds (was 30s)."""
-        assert MIN_SIGNAL_LIFESPAN_SECONDS["360_SCALP"] >= 180
+    def test_min_signal_lifespan_scalp_anti_noise_floor(self):
+        """SCALP min lifespan is 30s (verified-live, OWNER_BRIEF Part IV).
+
+        Re-authored 2026-07-14 (was xfail'd asserting the pre-change 180s):
+        the anti-noise floor must exist (> 0) and stay at the verified-live
+        30s default unless deliberately re-tuned.
+        """
+        assert MIN_SIGNAL_LIFESPAN_SECONDS["360_SCALP"] == 30
 
     def test_signal_valid_for_minutes_scalp(self):
         """SCALP signals should be valid for 15 minutes."""
         assert SIGNAL_VALID_FOR_MINUTES.get("360_SCALP") == 15
 
-    @pytest.mark.xfail(reason=(
-        "Test references `360_SCALP_OBI` which was removed during channel-"
-        "family consolidation.  Update the channel list to the current set."
-    ))
     def test_signal_valid_for_minutes_all_scalp_subtypes(self):
-        """All SCALP sub-channel types must have a valid_for_minutes entry."""
+        """All SCALP sub-channel types must have a valid_for_minutes entry.
+
+        Channel list updated 2026-07-14 (was xfail'd referencing the retired
+        360_SCALP_OBI) to the current consolidated family.
+        """
         scalp_channels = [
-            "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD",
-            "360_SCALP_VWAP", "360_SCALP_OBI",
+            "360_SCALP", "360_SCALP_FVG", "360_SCALP_CVD", "360_SCALP_VWAP",
+            "360_SCALP_DIVERGENCE", "360_SCALP_SUPERTREND",
+            "360_SCALP_ICHIMOKU", "360_SCALP_ORDERBLOCK",
         ]
         for ch in scalp_channels:
             assert ch in SIGNAL_VALID_FOR_MINUTES, f"{ch} missing from SIGNAL_VALID_FOR_MINUTES"
@@ -395,15 +395,17 @@ class TestTradeMonitorLifespanValues:
         assert sig.signal_id not in removed
         assert sig.status == "ACTIVE"
 
-    @pytest.mark.xfail(reason=(
-        "Test premise (180s min lifespan) no longer applies — was reduced to "
-        "30s in OWNER_BRIEF verified-live fixes.  Refactor to use the current "
-        "min lifespan from MIN_SIGNAL_LIFESPAN_SECONDS rather than hardcoding."
-    ))
     @pytest.mark.asyncio
-    async def test_scalp_signal_above_180s_triggered(self):
-        """A SCALP signal at age=200s (> 180s min) MUST trigger SL."""
-        sig = self._make_signal_with_age("360_SCALP", age_seconds=200.0)
+    async def test_scalp_signal_past_min_lifespan_triggered(self):
+        """A SCALP signal older than the configured min lifespan MUST trigger SL.
+
+        Re-authored 2026-07-14 (was xfail'd on the stale 180s premise): the
+        age is derived from the live MIN_SIGNAL_LIFESPAN_SECONDS map.
+        """
+        from config import MIN_SIGNAL_LIFESPAN_SECONDS as _lifespans
+        sig = self._make_signal_with_age(
+            "360_SCALP", age_seconds=float(_lifespans["360_SCALP"] + 20)
+        )
         sig.current_price = 29800.0  # below SL
 
         active = {sig.signal_id: sig}

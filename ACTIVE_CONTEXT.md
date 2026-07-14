@@ -64,6 +64,56 @@ nothing in production while all list-fixture tests stayed green:
   only QCB (+0.17R) and FUNDING_EXTREME (+0.57R) positive live. Volume-knob
   decision (S53 deferral) is becoming due.
 
+### Follow-up sweep (same session, owner directive: "find ALL the bugs and test errors")
+
+**Full audit of every `HistoricalDataStore.get_candles` consumer + every
+boolean-context OHLCV array pattern in src/.** Four more numpy-truthiness
+victims found and fixed (PR #727):
+
+4. `trade_monitor._btc_opposes_direction` — BTC-correlation invalidation read
+   fail-opened on every call (the env-gated adverse-tightening overlay AND its
+   shadow logging were dead even where enabled). Data path repaired by #726's
+   btc_direction fix; regression-pinned with a real numpy store. NOTE: the
+   overlay stays dark (`INVALIDATION_BTC_CORRELATION_ENABLED` default false,
+   has its own shadow branch) — no live behaviour change.
+5. `trade_observer._get_reference_price` — returned None on every call.
+6. `/market` Telegram command — BOTH primary and fallback branch broken; BTC
+   price permanently "—". Fixed both.
+7. `main._get_engine_context` — content-engine BTC price/1h/24h-change blanked
+   forever. Fixed.
+8. `scanner.diagnose_pair` — raised for any symbol WITH data (diagnosis broken
+   exactly when there was something to diagnose). Fixed.
+   Library hardening (same class, defense in depth): suppression_audit +
+   invalidation_audit classify guards, volume_divergence inputs.
+   Verified-safe (list-fed or len-guarded): all scalp.py evaluator sites,
+   snapshot.py, alerts, kill switch, btc_state, cross-asset, macro gates.
+
+**Test-suite debt cleared — the non-strict-xfail rot class.** 44 xfail markers
+audited; every one was either contamination-blaming, stale-premised, or hiding
+real rot:
+- **Reload contamination fixed at the root**: test_pr04/test_pr06 rewrote
+  reload-free (they deleted/re-imported config AND src.scanner mid-suite;
+  their "default" assertions were circular — set the env then asserted it).
+  All 28 cross-test-contamination xfails removed; suites green in CI order.
+- **5 rotted tests found hiding under the blanket markers** (failing even in
+  isolation, invisible because xfail): stale KZ-penalty expectations (kill_zone
+  is profile-disabled), a 2-tuple patch of the 3-tuple cross-asset gate
+  (which STILL hard-blocks — the xfail's "now soft-penalises" was a
+  misdiagnosis), retired WATCHLIST tier, retired 360_SWING premise. Fixed or
+  deleted with rationale.
+- **pr01 "identity rewrite in dispatch" investigated: NO BUG** — FVG/ORDERBLOCK
+  are `radar_only` by PR-04 governance so they never reach the queue; identity
+  survives verbatim when rollout state is test-patched live. Tests fixed.
+- Re-authored to current contracts: predictive SL-widening rejection
+  (`sl_distance_widened` — new coverage), WHALE_MOMENTUM compress-cap
+  telemetry, DIV_CONT TP1/TP2 dual-window geometry, SR_FLIP relative-penalty
+  invariants, FUNDING_EXTREME QUIET non-block, min-SL floors via
+  `_min_sl_distance_pct_for_setup`, lifespan/valid-for tables, "risk distance
+  too tight" guard re-anchored to the reachable LSR protected-SL path.
+- Deleted (premise retired, coverage exists elsewhere): SPOT/SWING channel
+  tests (5), WATCHLIST reclassify, 360_SWING QUIET multiplier, two vacuous
+  "no AI in pipeline" tests.
+
 ### NEXT
 
 1. Owner: **verify kill switch re-enabled** from ops Control (S55 action;

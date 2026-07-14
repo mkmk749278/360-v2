@@ -60,26 +60,27 @@ async def handle_market(args: List[str], ctx: CommandContext) -> None:
     btc_price = "—"
     btc_change = ""
     try:
-        btc_candles = ctx.data_store.get_candles("BTCUSDT", "5m")
-        if btc_candles and btc_candles.get("close"):
-            closes = btc_candles["close"]
-            if len(closes) >= 2:
+        # numpy-truthiness class (2026-07-14): the store's arrays raise in
+        # bool context; BOTH the primary and fallback branch used the same
+        # pattern, so /market showed "—" for BTC forever.
+        btc_candles = ctx.data_store.get_candles("BTCUSDT", "5m") or {}
+        closes = btc_candles.get("close")
+        if closes is not None and len(closes) >= 2:
+            curr = float(closes[-1])
+            prev = float(closes[-2])
+            change_pct = (curr - prev) / prev * 100
+            btc_price = f"${curr:,.0f}"
+            btc_change = f" ({change_pct:+.2f}%)"
+    except Exception:
+        try:
+            btc_candles = ctx.data_store.candles.get("BTCUSDT", {}).get("5m", {})
+            closes = btc_candles.get("close")
+            if closes is not None and len(closes) >= 2:
                 curr = float(closes[-1])
                 prev = float(closes[-2])
                 change_pct = (curr - prev) / prev * 100
                 btc_price = f"${curr:,.0f}"
                 btc_change = f" ({change_pct:+.2f}%)"
-    except Exception:
-        try:
-            btc_candles = ctx.data_store.candles.get("BTCUSDT", {}).get("5m", {})
-            if btc_candles and btc_candles.get("close"):
-                closes = btc_candles["close"]
-                if len(closes) >= 2:
-                    curr = float(closes[-1])
-                    prev = float(closes[-2])
-                    change_pct = (curr - prev) / prev * 100
-                    btc_price = f"${curr:,.0f}"
-                    btc_change = f" ({change_pct:+.2f}%)"
         except Exception:
             pass
 

@@ -164,11 +164,14 @@ def check_volume_divergence_gate(
     primary_cd = candles.get(primary_tf) or {}
     higher_cd = candles.get(higher_tf) or {}
 
-    primary_vol = primary_cd.get("volume") or []
-    higher_vol = higher_cd.get("volume") or []
+    # None checks, not truthiness — callers may pass numpy candle dicts, and
+    # `arr or []` raises on multi-element arrays (numpy-truthiness class,
+    # 2026-07-14).  ctx.candles is list-based today, but this is a library.
+    primary_vol = primary_cd.get("volume")
+    higher_vol = higher_cd.get("volume")
 
-    p_ratio = _volume_ratio(list(primary_vol))
-    h_ratio = _volume_ratio(list(higher_vol))
+    p_ratio = _volume_ratio(list(primary_vol) if primary_vol is not None else [])
+    h_ratio = _volume_ratio(list(higher_vol) if higher_vol is not None else [])
 
     if p_ratio is None or h_ratio is None:
         # Insufficient data — fail open

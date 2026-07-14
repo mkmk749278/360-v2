@@ -851,9 +851,13 @@ class TradeObserver:
         if self._data_store is None:
             return None
         try:
-            candles = self._data_store.get_candles(symbol, "1m")
-            if candles and "close" in candles and candles["close"]:
-                return float(candles["close"][-1])
+            # numpy-truthiness class (2026-07-14): `candles["close"]` in bool
+            # context raises on the store's arrays; the except below made this
+            # helper return None on every call.
+            candles = self._data_store.get_candles(symbol, "1m") or {}
+            closes = candles.get("close")
+            if closes is not None and len(closes) > 0:
+                return float(closes[-1])
         except Exception:
             pass
         return None

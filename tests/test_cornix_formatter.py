@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
 
 from src.channels.base import Signal
 from src.smc import Direction
@@ -80,17 +79,6 @@ class TestFormatCornixSignal:
         result = format_cornix_signal(sig)
         assert "Stop Targets:" in result
         assert "63500" in result
-
-    @pytest.mark.xfail(reason=(
-        "360_SPOT channel no longer wired in TOP50_FUTURES_ONLY config.  The "
-        "leverage map for SPOT (1x) was removed; format_cornix_signal returns "
-        "the default leverage for unknown channels.  Re-author when SPOT "
-        "returns to the active set."
-    ))
-    def test_contains_leverage_spot(self):
-        sig = _make_signal(channel="360_SPOT")
-        result = format_cornix_signal(sig)
-        assert "1x" in result
 
     def test_contains_leverage_scalp(self):
         sig = _make_signal(channel="360_SCALP")

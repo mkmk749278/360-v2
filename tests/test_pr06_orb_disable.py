@@ -18,42 +18,19 @@ Test coverage:
 
 from __future__ import annotations
 
-import importlib
-import os
-import sys
 from unittest.mock import patch
 
 
 # ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
-
-def _reload_config_with_env(env: dict[str, str]):
-    """Re-import config with a specific set of env vars in effect."""
-    original_env = {k: os.environ.get(k) for k in env}
-    try:
-        for k, v in env.items():
-            os.environ[k] = v
-        for mod_name in list(sys.modules.keys()):
-            if mod_name == "config" or mod_name.startswith("config."):
-                del sys.modules[mod_name]
-        cfg = importlib.import_module("config")
-        return cfg
-    finally:
-        for k, original_v in original_env.items():
-            if original_v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = original_v
-        for mod_name in list(sys.modules.keys()):
-            if mod_name == "config" or mod_name.startswith("config."):
-                del sys.modules[mod_name]
-        importlib.import_module("config")
-        # Reload modules whose constants come from `from config import …` —
-        # otherwise stale references contaminate downstream tests.
-        for dependent in ("src.scanner", "src.signal_quality"):
-            if dependent in sys.modules:
-                importlib.reload(sys.modules[dependent])
+# Deliberately reload-free (2026-07-14): the old `_reload_config_with_env`
+# helper deleted/re-imported config and reloaded src.scanner /
+# src.signal_quality mid-suite, orphaning previously-imported references and
+# contaminating downstream tests (the class-level-xfail incident).  Default
+# assertions read the LIVE config module; env-overridability drives
+# `config._safe_bool` — the parser the flag is defined with — under
+# monkeypatch.setenv.
 
 
 def _make_candles(n: int = 30, base: float = 100.0) -> dict:
@@ -99,7 +76,7 @@ class TestORBDisabledByDefault:
 
     def test_scalp_orb_enabled_defaults_to_false(self):
         """SCALP_ORB_ENABLED must be False out of the box (no env override)."""
-        cfg = _reload_config_with_env({"SCALP_ORB_ENABLED": "false"})
+        import config as cfg
         assert cfg.SCALP_ORB_ENABLED is False, (
             "SCALP_ORB_ENABLED must default to False — OPENING_RANGE_BREAKOUT "
             "uses a last-8-bar proxy, not true session-anchored range logic, "
@@ -364,10 +341,11 @@ class TestCoreTrustedPathsUnaffected:
 class TestORBReenableViaEnvVar:
     """ORB must be re-enable-able via SCALP_ORB_ENABLED=true without code changes."""
 
-    def test_orb_flag_can_be_set_true_via_env(self):
+    def test_orb_flag_can_be_set_true_via_env(self, monkeypatch):
         """Setting SCALP_ORB_ENABLED=true must flip the config flag to True."""
-        cfg = _reload_config_with_env({"SCALP_ORB_ENABLED": "true"})
-        assert cfg.SCALP_ORB_ENABLED is True, (
+        from config import _safe_bool
+        monkeypatch.setenv("SCALP_ORB_ENABLED", "true")
+        assert _safe_bool("SCALP_ORB_ENABLED", "false") is True, (
             "SCALP_ORB_ENABLED must be True when the env var is set to 'true' — "
             "re-enable must work without any code change."
         )

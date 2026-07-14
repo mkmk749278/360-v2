@@ -158,20 +158,21 @@ class TestNearZeroSLRejection:
             f"cap={cap_pos}, guard={guard_pos}, directional={directional_pos}"
         )
 
-    @pytest.mark.xfail(reason=(
-        "Asserts a specific source-text pattern `_MIN_SL_DISTANCE_PCT = 0.0005` "
-        "but the constant was renamed/specialised in PR #236 to "
-        "`_MIN_SL_DISTANCE_PCT_DEFAULT` and `_MIN_SL_DISTANCE_PCT_RECLAIM_RETEST`. "
-        "Refactor to assert against the runtime values from "
-        "`_min_sl_distance_pct_for_setup()` rather than source-text matching."
-    ))
     def test_near_zero_guard_threshold_is_correct(self):
-        """The guard threshold must be 0.05% (0.0005)."""
-        src_path = pathlib.Path(__file__).parent.parent / "src" / "signal_quality.py"
-        content = src_path.read_text()
-        assert "_MIN_SL_DISTANCE_PCT = 0.0005" in content, (
-            "Near-zero SL guard threshold must be 0.0005 (0.05%)"
-        )
+        """The guard threshold must be 0.05% default, 0.03% for reclaim/retest.
+
+        Re-authored 2026-07-14 (was xfail'd source-text matching): asserts the
+        runtime values via `_min_sl_distance_pct_for_setup()` after PR #236
+        specialised the constant per setup family.
+        """
+        from src.signal_quality import SetupClass, _min_sl_distance_pct_for_setup
+
+        assert _min_sl_distance_pct_for_setup(
+            SetupClass.TREND_PULLBACK_CONTINUATION
+        ) == pytest.approx(0.0005), "default near-zero SL guard must be 0.05%"
+        assert _min_sl_distance_pct_for_setup(
+            SetupClass.SR_FLIP_RETEST
+        ) == pytest.approx(0.0003), "reclaim/retest structural floor must be 0.03%"
 
     def test_near_zero_guard_invalidation_summary_includes_distances(self, monkeypatch):
         """The invalidation_summary must contain both actual and minimum distances."""

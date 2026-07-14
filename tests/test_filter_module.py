@@ -1,6 +1,5 @@
 """Tests for src.scanner.filter_module — high-probability filter."""
 
-import pytest
 
 from src.scanner.filter_module import (
     check_pair_probability,
@@ -12,16 +11,6 @@ from src.scanner.filter_module import (
 def test_get_threshold_default():
     t = get_threshold_for_channel("360_SCALP")
     assert t == 70.0
-
-
-@pytest.mark.xfail(reason=(
-    "Asserts SWING channel threshold = 60.0 but the function now returns the "
-    "default for unknown channels.  SWING is no longer first-class under "
-    "TOP50_FUTURES_ONLY.  Re-author when SWING returns to the active set."
-))
-def test_get_threshold_swing():
-    t = get_threshold_for_channel("360_SWING")
-    assert t == 60.0
 
 
 def test_get_threshold_regime_adjustment_trending():

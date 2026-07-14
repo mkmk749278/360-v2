@@ -180,6 +180,128 @@ class TestBtcDirectionGateOnNumpy:
         assert (allowed, reason) == (False, "btc_1h_4h_both_bearish_long")
 
 
+def _downtrend_store(intervals: tuple = ("1h", "4h"), n: int = 250) -> HistoricalDataStore:
+    """Real store with a steady downtrend — EMA21 < EMA50, close < EMA21."""
+    store = HistoricalDataStore()
+    for interval in intervals:
+        for i in range(n):
+            px = 200.0 - i * 0.4
+            store.update_candle(
+                "BTCUSDT",
+                interval,
+                {
+                    "open": px + 0.1,
+                    "high": px + 0.3,
+                    "low": px - 0.3,
+                    "close": px,
+                    "volume": 1.0,
+                },
+            )
+    return store
+
+
+class TestFullSweepVictims:
+    """Sweep victims #4–#8 (owner directive: find them ALL), each driven with
+    the real numpy store shape that broke it in production."""
+
+    def test_trade_monitor_btc_opposes_reads_numpy_store(self):
+        # Victim #4: the BTC-correlation invalidation read fail-opened on
+        # every call, so the (env-gated) adverse-tightening overlay AND its
+        # shadow logging were dead even where enabled.
+        from types import SimpleNamespace
+
+        from src.trade_monitor import TradeMonitor
+
+        stub = SimpleNamespace(_store=_downtrend_store(), _btc_dir_cache=None)
+        sig = SimpleNamespace(
+            direction=SimpleNamespace(value="LONG"), setup_class="SR_FLIP_RETEST"
+        )
+        opposes, reason = TradeMonitor._btc_opposes_direction(stub, sig)
+        assert opposes is True
+        assert reason == "btc_1h_4h_both_bearish_long"
+
+    def test_trade_observer_reference_price_from_numpy_store(self):
+        # Victim #5: `candles["close"]` in bool context → helper returned
+        # None on every call.
+        from types import SimpleNamespace
+
+        from src.trade_observer import TradeObserver
+
+        stub = SimpleNamespace(_data_store=_seeded_store("ETHUSDT", ("1m",)))
+        price = TradeObserver._get_reference_price(stub, "ETHUSDT")
+        assert price == pytest.approx(100.0)
+
+    async def test_market_command_shows_btc_price(self):
+        # Victim #6: BOTH the primary and fallback branch of /market used the
+        # numpy-truthiness pattern, so the BTC line was permanently "—".
+        from types import SimpleNamespace
+
+        from src.commands.signals import handle_market
+
+        replies: list = []
+
+        async def _reply(text: str) -> None:
+            replies.append(text)
+
+        ctx = SimpleNamespace(
+            data_store=_seeded_store("BTCUSDT", ("5m",)),
+            router=SimpleNamespace(active_signals=[]),
+            pair_mgr=SimpleNamespace(pairs={}),
+            telemetry=SimpleNamespace(_scan_latency_ms=100),
+            scanner=SimpleNamespace(suppression_tracker=None),
+            reply=_reply,
+        )
+        await handle_market([], ctx)
+        assert replies, "handle_market must reply"
+        assert "$100" in replies[0], f"BTC price missing from /market: {replies[0]!r}"
+        assert "—" not in replies[0].split("\n")[1]
+
+    def test_engine_context_btc_price_from_numpy_store(self):
+        # Victim #7: the content-generation engine context blanked
+        # btc_price / change pcts forever.
+        from types import SimpleNamespace
+
+        from src.main import CryptoSignalEngine
+
+        stub = SimpleNamespace(
+            pair_mgr=SimpleNamespace(symbols=["BTCUSDT"]),
+            _signal_history=[],
+            data_store=_seeded_store("BTCUSDT", ("5m",), n=300),
+        )
+        ctx = CryptoSignalEngine._get_engine_context(stub)
+        assert ctx["btc_price"] == pytest.approx(100.0)
+
+    async def test_diagnose_pair_numpy_store_does_not_error(self, monkeypatch):
+        # Victim #8: `if not closes_5m` raised for any symbol WITH data —
+        # pair diagnosis was broken exactly when there was something to
+        # diagnose.  Full-surface variant lives in test_scanner.py
+        # (TestDiagnosePair); this pins the numpy entry gate.
+        import numpy as np
+        from types import SimpleNamespace
+
+        from src.scanner import Scanner
+
+        cd = {
+            k: np.full(60, 100.0)
+            for k in ("open", "high", "low", "close", "volume")
+        }
+        stub = SimpleNamespace(
+            data_store=SimpleNamespace(
+                get_candles=lambda sym, tf: None if tf != "5m" else cd,
+                ticks={},
+            ),
+        )
+        # The method must get PAST the closes gate — pre-fix, `not closes_5m`
+        # raised the truthiness ValueError, which diagnose_pair's outer
+        # handler stringified into results["error"] on EVERY diagnosis of a
+        # symbol with data.  Downstream steps may still error on this minimal
+        # stub, but never with that ValueError.
+        result = await Scanner.diagnose_pair(stub, "ETHUSDT")
+        err = str(result.get("error") or "")
+        assert "truth value" not in err, f"numpy truthiness in diagnose_pair: {err}"
+        assert err != "No 5m candle data for ETHUSDT"
+
+
 class TestBtcDirPenaltyShipsDark:
     def test_registry_default_is_off(self):
         from src.runtime_tunables import _build_registry
