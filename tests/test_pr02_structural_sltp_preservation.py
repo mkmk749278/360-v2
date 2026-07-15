@@ -273,6 +273,11 @@ class TestProtectedPathsPreserveSLTP:
         - Its TP1 is the nearest FVG/OB structural level in the direction of travel.
         - Downstream build_risk_plan generic R-multiples would overwrite these
           structural targets, defeating the evaluator's thesis.
+
+        MEAN_REVERT is included because (2026-07-15 graduation):
+        - Its ±1.5·ATR stop and mean-target TP1 are EXACTLY the geometry the
+          shadow ledger forward-measured at +0.67R over n=550 — recomputing
+          them downstream would invalidate the evidence the path went live on.
         """
         expected = {
             SetupClass.POST_DISPLACEMENT_CONTINUATION,
@@ -286,6 +291,7 @@ class TestProtectedPathsPreserveSLTP:
             SetupClass.LIQUIDATION_REVERSAL,
             SetupClass.DIVERGENCE_CONTINUATION,
             SetupClass.FUNDING_EXTREME_SIGNAL,
+            SetupClass.MEAN_REVERT,
         }
         assert STRUCTURAL_SLTP_PROTECTED_SETUPS == expected, (
             "STRUCTURAL_SLTP_PROTECTED_SETUPS diverged from the PR-02/PR-14 specification. "

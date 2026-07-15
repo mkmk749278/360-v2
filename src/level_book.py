@@ -57,6 +57,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from src import fail_open
 from src.chart_patterns import _find_swing_highs, _find_swing_lows
 from src.utils import get_logger
 
@@ -288,7 +289,8 @@ def _candle_ts(candles: dict, idx: int) -> Optional[float]:
         return None
     try:
         v = float(ts_arr[idx])
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError, IndexError) as exc:
+        fail_open.record("level_book.candle_ts", exc)
         return None
     # Heuristic: ms epoch if > 1e12 (year ≈2001+).
     if v > 1e12:
@@ -382,7 +384,8 @@ class LevelBook:
                 try:
                     ref_close = float(np.asarray(closes).ravel()[-1])
                     break
-                except (TypeError, ValueError):
+                except (TypeError, ValueError) as exc:
+                    fail_open.record("level_book.ref_close", exc)
                     continue
         if ref_close is not None:
             primary_cd = candles_by_tf.get("1h") or candles_by_tf.get("4h") or {}
@@ -459,6 +462,7 @@ class LevelBook:
                             last_test_ts=last_ts,
                         ))
             except Exception as exc:
+                fail_open.record("level_book.vp_injection", exc)
                 log.debug("LevelBook VP injection error for {}: {}", symbol, exc)
 
         # 4. Cluster nearby levels into zones.

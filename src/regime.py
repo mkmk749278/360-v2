@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src import fail_open
 from src.utils import get_logger
 from src.indicators import (
     adx as _compute_adx,
@@ -92,7 +93,8 @@ def _hurst_from_candles(candles: Optional[Dict[str, Any]]) -> Optional[float]:
         return None
     try:
         return _compute_hurst(np.asarray(closes, dtype=np.float64))
-    except Exception:
+    except Exception as exc:
+        fail_open.record("regime.hurst", exc)
         return None
 
 
@@ -288,8 +290,8 @@ class MarketRegimeDetector:
                 _e9_now = float(_ema9_series[-1])
                 _e9_3ago = float(_ema9_series[-4])
                 ema9_slope_pct = (_e9_now - _e9_3ago) / close * 100.0
-            except Exception:
-                pass
+            except Exception as exc:
+                fail_open.record("regime.ema9_slope", exc)
 
         # Bollinger Band width as % of mid price
         bb_width_pct: Optional[float] = None

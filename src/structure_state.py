@@ -80,6 +80,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src import fail_open
 from src.chart_patterns import _find_swing_highs, _find_swing_lows
 from src.utils import get_logger
 
@@ -160,7 +161,8 @@ def _candle_ts(candles: dict, idx: int) -> Optional[float]:
         return None
     try:
         v = float(ts_arr[idx])
-    except (TypeError, ValueError, IndexError):
+    except (TypeError, ValueError, IndexError) as exc:
+        fail_open.record("structure_state.candle_ts", exc)
         return None
     if v > 1e12:
         v /= 1000.0
@@ -275,7 +277,8 @@ class StructureTracker:
         try:
             highs = np.asarray(highs_arr, dtype=np.float64).ravel()
             lows = np.asarray(lows_arr, dtype=np.float64).ravel()
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            fail_open.record("structure_state.refresh_arrays", exc)
             return None
         if len(highs) < min_n or len(lows) < min_n:
             return None

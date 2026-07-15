@@ -2453,6 +2453,9 @@ class TestPortfolioRoles:
         SetupClass.MOVER_TREND_PULLBACK,
         # 2026-06-28: anchored-VWAP mover scalp (17th path).
         SetupClass.MOVER_AVWAP_SCALP,
+        # 2026-07-15: statistical mean-reversion (18th path), graduated live
+        # from SHADOW_MEAN_REVERT.
+        SetupClass.MEAN_REVERT,
     })
 
     def test_every_active_path_has_a_role(self):
@@ -2534,6 +2537,7 @@ class TestPortfolioRoles:
             SetupClass.FAILED_AUCTION_RECLAIM,
             SetupClass.MOVER_TREND_PULLBACK,
             SetupClass.MOVER_AVWAP_SCALP,
+            SetupClass.MEAN_REVERT,
         }
         actual_support = {
             sc for sc, role in ACTIVE_PATH_PORTFOLIO_ROLES.items()

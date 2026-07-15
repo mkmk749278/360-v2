@@ -126,7 +126,7 @@ Binance WS/REST
       ↓
 HistoricalDataStore + OrderFlowStore
       ↓
-Scanner (15s × 75 pairs) → 15 evaluators → gate chain → scoring
+Scanner (15s × 75 pairs) → 18 evaluators → gate chain → scoring
       ↓
 SignalRouter → Telegram (paid A+/B only)
       ↓
@@ -158,7 +158,7 @@ Binance REST API
 |---|---|
 | Boot, WS/REST init | `src/bootstrap.py`, `src/main.py` |
 | Scanner + gate chain | `src/scanner/__init__.py` |
-| 15 evaluators | `src/channels/scalp.py` |
+| 18 evaluators | `src/channels/scalp.py` |
 | Confidence scoring | `src/signal_quality.py`, `src/confidence.py` |
 | Regime classification | `src/regime.py` |
 | MTF policy | `src/mtf.py` |
@@ -270,7 +270,7 @@ python -m src.main
 - **All async** — no blocking calls in scanner / router / monitor loops
 - **Redis is optional** — RedisClient + SignalQueue fall back to in-memory
 - **Each evaluator owns its SL/TP geometry** (B7) — no shared universal formulas
-- **The 15 `SetupClass` enum values** are stringly-coupled to `_MAX_SL_PCT_BY_SETUP` keys and telemetry event names — rename in all three places simultaneously
+- **The `SetupClass` enum values** are stringly-coupled to `_MAX_SL_PCT_BY_SETUP` keys and telemetry event names — rename in all three places simultaneously
 - **Candle fixtures in tests use the production shape** — the `numpy_seeded_store` conftest fixture (real `HistoricalDataStore` via `update_candle`), never hand-built list dicts, for any code that consumes the data store
 - **New measurement pipelines register a liveness probe** (`src/feature_liveness.py`, wired in `main._build_feature_liveness`) — a feature whose output can silently flat-line without paging is unfinished
 - **`xfail` is strict** — a passing xfail fails CI; remove the marker the moment its premise dies (5 tests rotted invisibly under non-strict markers, 2026-07-14)

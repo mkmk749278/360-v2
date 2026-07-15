@@ -1794,6 +1794,34 @@ class CryptoSignalEngine:
             return px > 0, f"BTC ref {px:.2f}"
 
         fl.add_predicate(PredicateProbe(name="btc_reference", fn=_btc_ref, min_streak=6))
+
+        # MEAN_REVERT live path (2026-07-15): the evaluator shares its
+        # detection function with the SHADOW_MEAN_REVERT shadow unit, so
+        # shadow stamps flowing while the evaluator detects zero = dead live
+        # wiring (allowed_evaluators regression, dispatch-list drop, import
+        # failure), not a quiet market.  ~6 h streak: the z-trigger fires far
+        # less often than raw suppressions, so the bar is deliberately long.
+        def _mean_revert_detections():
+            if not bool(_rt.get("mean_revert_live")):
+                return None
+            total = 0.0
+            for ch in getattr(self._scanner, "channels", []) or []:
+                total += float(getattr(ch, "_mean_revert_detections", 0) or 0)
+            return total
+
+        def _shadow_stamp_total() -> float:
+            stamps = getattr(self._scanner, "_shadow_stamp_total", None)
+            if stamps is not None:
+                return float(stamps)
+            return float(_sa.get_store().stamped_total)
+
+        fl.add_rate(RateProbe(
+            name="mean_revert_path",
+            counter=_mean_revert_detections,
+            upstream=_shadow_stamp_total,
+            min_upstream_delta=30.0,
+            min_streak=72,         # ~6 h
+        ))
         return fl
 
     def _build_global_market_context(self):

@@ -89,6 +89,9 @@ _AGENT_DISPLAY_NAMES: Dict[str, str] = {
     "MOVER_TREND_PULLBACK": "The Momentum Rider",
     # Anchored-VWAP mover scalp — pullback to the move's VWAP, with the slope.
     "MOVER_AVWAP_SCALP": "The VWAP Rider",
+    # 2026-07-15 (18th evaluator) — statistical mean-reversion, graduated live
+    # from the SHADOW_MEAN_REVERT shadow unit (+0.67R / 59% win / n=550).
+    "MEAN_REVERT": "The Rubber Band",
 }
 
 # Mapping: telemetry path token  →  setup_class string (path tokens come
@@ -117,6 +120,8 @@ _PATH_TO_SETUP: Dict[str, str] = {
     "MOVER_TREND_PULLBACK": "MOVER_TREND_PULLBACK",
     # _evaluate_mover_avwap_scalp → MOVER_AVWAP_SCALP.
     "MOVER_AVWAP_SCALP": "MOVER_AVWAP_SCALP",
+    # _evaluate_mean_revert → MEAN_REVERT.
+    "MEAN_REVERT": "MEAN_REVERT",
 }
 
 

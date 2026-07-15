@@ -141,16 +141,20 @@ class TestFundingExtremeInStructuralProtection:
             "by build_risk_plan's generic R-multiples (PR-14 audit finding)."
         )
 
-    def test_structural_set_size_is_11(self):
-        """STRUCTURAL_SLTP_PROTECTED_SETUPS must contain exactly 11 paths.
+    def test_structural_set_size_is_12(self):
+        """STRUCTURAL_SLTP_PROTECTED_SETUPS must contain exactly 12 paths.
 
         PR-14 added FUNDING_EXTREME_SIGNAL (10th).
         PR #520 added LIQUIDITY_SWEEP_REVERSAL (11th): sweep-low/high SL is
         structural — compress policy was placing the stop inside the zone,
         causing normal post-sweep consolidation to hit the artificial SL.
+        2026-07-15 added MEAN_REVERT (12th): its ±1.5·ATR stop / mean-target
+        TP1 are exactly the geometry the shadow ledger measured at +0.67R over
+        n=550 — recomputing them downstream would invalidate the evidence the
+        path went live on.
         """
-        assert len(STRUCTURAL_SLTP_PROTECTED_SETUPS) == 11, (
-            f"Expected 11 protected setup classes, got {len(STRUCTURAL_SLTP_PROTECTED_SETUPS)}: "
+        assert len(STRUCTURAL_SLTP_PROTECTED_SETUPS) == 12, (
+            f"Expected 12 protected setup classes, got {len(STRUCTURAL_SLTP_PROTECTED_SETUPS)}: "
             f"{STRUCTURAL_SLTP_PROTECTED_SETUPS}. "
             "If a new path was added, update this assertion and add a rationale."
         )

@@ -47,7 +47,9 @@ from config import (
     MOVER_TP_CONSOL_RANGE_ATR,
     MOVER_TP_BREAKOUT_EXT_ATR,
     MOVER_TP_BREAKOUT_VOL_MULT,
+    MEAN_REVERT_LIVE,
 )
+from src import fail_open
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import (
     check_adx,
@@ -58,6 +60,11 @@ from src.filters import (
     check_volume,
 )
 from src.mtf import mtf_gate_scalp_standard
+from src.shadow_strategies import (
+    _ATR_PERIOD as _MEANREV_ATR_PERIOD,
+    _MEANREV_LOOKBACK,
+    evaluate_mean_revert as shadow_mean_revert,
+)
 from src.smc import Direction
 from src.vwap import compute_vwap
 from src.utils import get_logger
@@ -819,6 +826,10 @@ class ScalpChannel(BaseChannel):
         # successful signal via ``_persist_ma_cross_cooldown``.
         self._ma_cross_last_fire_ts: Dict[tuple, float] = {}
         self._load_ma_cross_cooldown()
+        # MEAN_REVERT liveness: monotonic count of shared-detection hits
+        # (incremented pre-gate, so it moves whether live or shadowed).
+        # Compared against the shadow unit's stamp rate by the liveness probe.
+        self._mean_revert_detections: int = 0
 
     def _reset_generation_telemetry(self) -> None:
         self._generation_telemetry = {
@@ -858,7 +869,10 @@ class ScalpChannel(BaseChannel):
         try:
             from src import runtime_tunables as _rt
             return bool(_rt.get(tunable_key))
-        except Exception:
+        except Exception as exc:
+            # A typo'd/unregistered tunable key raises KeyError and would
+            # silently pin the path to its boot default forever — count it.
+            fail_open.record("scalp.path_live_tunable", exc)
             return boot_default
 
     def _prune_mover_reasons(self, now: float) -> None:
@@ -1150,6 +1164,7 @@ class ScalpChannel(BaseChannel):
             ("_evaluate_post_displacement_continuation", self._evaluate_post_displacement_continuation),
             ("_evaluate_failed_auction_reclaim", self._evaluate_failed_auction_reclaim),
             ("_evaluate_ma_cross_trend_shift", self._evaluate_ma_cross_trend_shift),
+            ("_evaluate_mean_revert", self._evaluate_mean_revert),
         ):
             if allowed_evaluators is not None and evaluator_name not in allowed_evaluators:
                 continue  # restricted scan context — skip evaluators not in allowlist
@@ -6540,4 +6555,141 @@ class ScalpChannel(BaseChannel):
         # this, a redeploy within 24h could let the same cross double-fire).
         self._ma_cross_last_fire_ts[cd_key] = _time.time()
         self._persist_ma_cross_cooldown()
+        return sig
+
+    # ────────────────────────────────────────────────────────────────────────
+    # MEAN_REVERT — statistical mean-reversion (2026-07-15)
+    # ────────────────────────────────────────────────────────────────────────
+    def _evaluate_mean_revert(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """MEAN_REVERT: fade a 2.5σ over-extension on 15m closes back to the
+        20-bar rolling mean, stop ±1.5·ATR beyond entry.
+
+        Graduated from the shadow unit SHADOW_MEAN_REVERT (Autonomous
+        Portfolio Phase 3) after the suppression-audit ledger forward-measured
+        **+0.67R avg / 59% win over n=550** candidates across two data windows
+        — the strongest strategy in the Strategy×Context edge matrix, in
+        exactly the ~70% ranging/quiet tape where the trend evaluators idle.
+
+        Detection and geometry are ``shadow_strategies.evaluate_mean_revert``
+        — the SAME pure function the shadow unit stamps with, so the live path
+        and its shadow control arm can never drift.  Entry/SL/TP1 are the
+        measured geometry verbatim; TP2/TP3 are R-multiple extensions past the
+        mean (default exit is TP1-full, matching the shadow forward-measure).
+        The shadow unit keeps stamping unconditionally as the ungated control.
+
+        Live per owner directive 2026-07-15; ``mean_revert_live`` runtime
+        tunable is the instant ops off-switch (OFF → ``[SHADOW]
+        MEAN_REVERT_WOULD_FIRE`` log, no signal).
+        """
+        tf = candles.get("15m")
+        if tf is None:
+            return self._reject("insufficient_candles")
+        closes = tf.get("close")
+        highs = tf.get("high")
+        lows = tf.get("low")
+        need = _MEANREV_LOOKBACK + _MEANREV_ATR_PERIOD
+        if (
+            closes is None or highs is None or lows is None
+            or len(closes) < need or len(highs) < need or len(lows) < need
+        ):
+            return self._reject("insufficient_candles")
+
+        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+            return self._reject("basic_filters_failed")
+
+        cand = shadow_mean_revert(highs, lows, closes)
+        if cand is None:
+            return self._reject("no_extension")
+        # Detection counter for the feature-liveness probe: shadow stamps
+        # flowing while this stays flat = dead live wiring.
+        self._mean_revert_detections += 1
+
+        direction = Direction.LONG if cand.side == "LONG" else Direction.SHORT
+        close = float(cand.entry)
+        sl = float(cand.stop_loss)
+        tp1 = float(cand.tp1)
+        sl_dist = abs(close - sl)
+        if sl_dist <= 0 or close <= 0:
+            return self._reject("invalid_sl_geometry")
+        # By construction tp1 (the mean) sits on the profit side of a ±2.5σ
+        # extension; guard anyway so degenerate inputs can't invert the ladder.
+        if (direction == Direction.LONG and tp1 <= close) or (
+            direction == Direction.SHORT and tp1 >= close
+        ):
+            return self._reject("invalid_sl_geometry")
+        # TP2/TP3: R-multiple extensions past the mean.  Exit policy is
+        # TP1-full, so these only shape the residual runner if policy changes.
+        if direction == Direction.LONG:
+            tp2 = tp1 + sl_dist * 0.5
+            tp3 = tp1 + sl_dist * 1.0
+        else:
+            tp2 = tp1 - sl_dist * 0.5
+            tp3 = tp1 - sl_dist * 1.0
+
+        atr_val = float(indicators.get("15m", {}).get("atr_last", 0.0) or 0.0)
+
+        # Live/ops off-switch (runtime tunable; boot default = MEAN_REVERT_LIVE).
+        if not self._mover_path_live("mean_revert_live", MEAN_REVERT_LIVE):
+            log.info(
+                "[SHADOW] MEAN_REVERT_WOULD_FIRE: symbol={} dir={} close={:.6f} "
+                "sl={:.6f} tp1={:.6f} sl_dist_pct={:.3f} ({})",
+                symbol, cand.side, close, sl, tp1,
+                sl_dist / close * 100.0, cand.reason,
+            )
+            return self._reject("shadow_mode")
+
+        profile = smc_data.get("pair_profile")
+        _regime_ctx = smc_data.get("regime_context")
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=direction,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="MNRVT",
+            atr_val=atr_val,
+            setup_class="MEAN_REVERT",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return self._reject("build_signal_failed")
+
+        # The measured geometry IS the edge (STRUCTURAL_SLTP_PROTECTED) —
+        # re-stamp it verbatim over anything generic construction adjusted.
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+        # The shadow unit measured 180-minute validity; sentinel-0 would
+        # collapse it to the 15-minute channel default at dispatch.
+        sig.valid_for_minutes = 180
+        sig.entry_trigger = "mean_revert_z"
+        log.info(
+            "MEAN_REVERT_FIRED: symbol={} dir={} close={:.6f} sl_dist_pct={:.3f} "
+            "conf={:.1f} ({})",
+            symbol, cand.side, close, sl_dist / close * 100.0,
+            sig.confidence, cand.reason,
+        )
         return sig

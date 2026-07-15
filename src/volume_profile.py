@@ -67,6 +67,7 @@ from typing import Dict, List, Optional
 
 import numpy as np
 
+from src import fail_open
 from src.utils import get_logger
 
 log = get_logger(__name__)
@@ -285,7 +286,8 @@ def compute_volume_profile(
         highs = np.asarray(highs_arr, dtype=np.float64).ravel()
         lows = np.asarray(lows_arr, dtype=np.float64).ravel()
         volumes = np.asarray(vols_arr, dtype=np.float64).ravel()
-    except (TypeError, ValueError):
+    except (TypeError, ValueError) as exc:
+        fail_open.record("volume_profile.compute_arrays", exc)
         return None
 
     n = min(len(highs), len(lows), len(volumes))

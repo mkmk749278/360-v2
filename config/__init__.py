@@ -974,6 +974,19 @@ MOVER_AVWAP_VOL_MULT: float = _safe_float("MOVER_AVWAP_VOL_MULT", "1.5")
 #: ATR buffer beyond the AVWAP/swing for the stop.
 MOVER_AVWAP_SL_BUFFER_ATR: float = _safe_float("MOVER_AVWAP_SL_BUFFER_ATR", "0.5")
 
+# ── MEAN_REVERT path (2026-07-15, owner-approved live) ─────────────────────────
+# Statistical mean-reversion: fade a 2.5σ over-extension on 15m closes back to
+# the 20-bar mean, stop ±1.5·ATR beyond entry.  Graduated from the shadow unit
+# SHADOW_MEAN_REVERT after the suppression-audit ledger forward-measured
+# +0.67R avg / 59% win over n=550 candidates across two windows — the shadow
+# window the dark-first doctrine requires.  Owner directive 2026-07-15: ship
+# LIVE ("no dark on 18th path, make it live"); the `mean_revert_live` runtime
+# tunable remains the instant ops off-switch, and the shadow unit keeps
+# stamping as the ungated control arm.  Detection thresholds are the shadow
+# unit's own (SHADOW_MEANREV_* envs in src/shadow_strategies.py) — shared
+# function, so live and shadow can never drift.
+MEAN_REVERT_LIVE: bool = _safe_bool("MEAN_REVERT_LIVE", "true")
+
 # ── Counter-trend hard-block on confirmed strong movers (Session 30, owner-approved) ─
 # §3.2 #5 reserves HARD blocks for structural impossibility.  Fading a CONFIRMED
 # strong mover with a reversal IS that case: SYNUSDT (+300%/7d, 4h+1h both stacked
@@ -1668,6 +1681,7 @@ SIGNAL_TYPE_LABELS: Dict[str, str] = {
     "MOVER_AVWAP_SCALP":             "⚓ MOVER AVWAP SCALP",
     "POST_DISPLACEMENT_CONTINUATION": "➡️ DISPLACEMENT CONTINUATION",
     "TREND_PULLBACK_EMA":            "📈 TREND PULLBACK EMA",
+    "MEAN_REVERT":                   "🎯 MEAN REVERT",
 }
 
 CHANNEL_EMOJIS: Dict[str, str] = {

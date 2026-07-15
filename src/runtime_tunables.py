@@ -78,6 +78,7 @@ def _build_registry() -> Dict[str, Tunable]:
         MARKET_CONTEXT_ENABLED,
         MARK_FEED_STALENESS_ENABLED,
         MARK_FEED_STALENESS_MAX_AGE_SEC,
+        MEAN_REVERT_LIVE,
         MOVER_AVWAP_SCALP_ENABLED,
         MOVER_RUNNER_EXIT_ENABLED,
         MOVER_TREND_PULLBACK_ENABLED,
@@ -339,6 +340,23 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=MOVER_AVWAP_SCALP_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="mean_revert_live",
+            label="MEAN_REVERT live",
+            description=(
+                "Emit MEAN_REVERT signals live (fade a 2.5σ 15m extension "
+                "back to the 20-bar mean, ±1.5·ATR stop). Graduated from "
+                "SHADOW_MEAN_REVERT: +0.67R avg / 59% win over n=550 "
+                "forward-measured candidates across two windows — the "
+                "shadow-window evidence dark-first requires; owner directed "
+                "live activation 2026-07-15. Off = shadow-only ([SHADOW] "
+                "MEAN_REVERT_WOULD_FIRE log, no signal); the shadow unit "
+                "keeps stamping as the ungated control arm either way."
+            ),
+            type="bool",
+            default=MEAN_REVERT_LIVE,
             category="Signal gating",
         ),
         Tunable(

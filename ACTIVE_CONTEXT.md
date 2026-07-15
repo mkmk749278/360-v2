@@ -4,6 +4,87 @@
 
 ---
 
+## 🟢 SESSION 58 2026-07-15 — Strategy Lab data read → MEAN_REVERT goes LIVE (18th evaluator) + fail-open sweep closes the #727 blind spot (branch `claude/strategy-lab-signals-analysis-zi8tck`, 360-v2)
+
+**Owner ask:** understand the ops Strategy Lab, analyse signals/profit/strategy
+data, check for numpy-class failures on regular pairs (like #726/#727), propose
+the next move. Mid-session owner directive: **"no dark on 18th path, make it
+live."**
+
+### Data read (truth report + last-100 signals + dispatch log + edge matrix)
+
+- **Emission concentration confirmed**: MOVER_TREND_PULLBACK = 28 of the last
+  50 dispatches (56%); mover-family = 68%. Regular pairs: only
+  FAILED_AUCTION_RECLAIM emits at volume (32/100). Cause is structural, not a
+  bug: mover-promoted pairs restrict to 4 evaluators; 64% QUIET/RANGING tape;
+  min_confidence gate measured KEEP (+0.52R/suppression — it's correct).
+- **The problem is inverted**: MVTP passes the confidence gate at 87% (regime
+  dim pins 18.0 for movers) while its measured edge is **−0.29R (n=3,293)**.
+  MOVER_AVWAP_SCALP (12% win, −0.78R, n=141; live 1/8) and
+  VOLUME_SURGE_BREAKOUT (1% win, −0.78R, n=85) are measured losers.
+  **SHADOW_MEAN_REVERT is the best strategy in the matrix: +0.67R, 59% win,
+  n=550, consistent across two windows** — and had no emission path.
+- **Numpy check**: regular-pair evaluators are CLEAN on the truthiness class
+  (allowlisted sites are list-fed; fail-open counters zero; liveness 7/7 OK;
+  zero-generators reject with real reasons — strict thresholds, not death).
+  BUT the *silent-swallow* half survived in the files #727 skipped.
+- dispatch_staleness regressed S54's DROP → now KEEP (+0.11R) — sample-floor
+  discipline vindicated again. Geometry A/B: ATR leads 4/5, ΔR still thin.
+
+### Shipped (both on this branch, one PR)
+
+1. **Fail-open sweep** (off money path): ~18 silent `except` handlers in
+   regime / chart_patterns / level_book / structure_state / volume_profile /
+   signal_quality / mtf / scalp / scanner now call `fail_open.record` —
+   behaviour unchanged, failures count + page via the #728 burst pager.
+   `_safe_float`/`_last` skipped with reason (coercion contract). MTF KeyError
+   stays silent (normal young-pair warmup); only TypeError/ValueError record.
+   New `tests/test_fail_open_sweep.py` (10 tests).
+2. **MEAN_REVERT — 18th evaluator, LIVE** (owner sign-off in-session; the
+   S53-S56 shadow window IS the dark-first evidence):
+   - `_evaluate_mean_revert` in scalp.py calls the SAME pure function as the
+     shadow unit (`shadow_strategies.evaluate_mean_revert`) — zero drift
+     possible; entry/SL/TP1 = measured geometry verbatim (±1.5·ATR stop, TP1 =
+     20-bar mean, 180-min validity); TP2/3 = R-extensions (exit is TP1-full).
+   - Full wiring: SetupClass enum + portfolio role (SUPPORT) + structural-SLTP
+     protected + channel/regime compat (CLEAN/DIRTY_RANGE) + SL cap 3.0% +
+     min-RR 0.9 (mean-reversion branch — 1.2 default would reject the measured
+     geometry) + self-classifying + regime affinity RANGING/QUIET + regime-
+     neutral set + scanner family `mean_reversion` (unmapped = blocked in its
+     home regime!) + portfolio AFFINITY + labels + agent name "The Rubber
+     Band" + snapshot path map.
+   - Deliberately EXCLUDED from young-pair and mover-restricted evaluator sets
+     (fresh listings have no stable mean; mover promotion is the anti-thesis).
+   - **`mean_revert_live` runtime tunable (Signal gating, default ON)** — the
+     instant ops off-switch; OFF = shadow-only WOULD_FIRE logging.
+   - Liveness probe `mean_revert_path`: shadow stamps flowing while the
+     evaluator detects zero = dead wiring, pages in ~6h.
+   - The shadow unit keeps stamping unconditionally — it is the ungated
+     control arm; edge matrix shows two rows by design (SHADOW_MEAN_REVERT/
+     shadow vs MEAN_REVERT/emitted).
+   - Tests: 7 new evaluator tests (incl. shadow-parity + tunable contract);
+     count pins 17→18 updated in 4 suites. Full suite green, ruff clean, mypy
+     102 (≤103 baseline).
+
+### Owner deferred (evidence exists, act later)
+
+- Prune MOVER_AVWAP_SCALP + VOLUME_SURGE_BREAKOUT (both −0.78R measured).
+- MVTP concentration handling (per-setup floor / context gate — shadow first).
+
+### NEXT
+
+1. Watch `MEAN_REVERT_FIRED` lines + the app/ops after deploy; first real
+   emissions should cluster in RANGING/QUIET. Flip `mean_revert_live` OFF from
+   ops if live behaviour diverges from the shadow measurement.
+2. Compare MEAN_REVERT (emitted) vs SHADOW_MEAN_REVERT (control) rows in the
+   Strategy Lab matrix once samples accumulate — the gate chain's cost/benefit
+   on this strategy is directly measurable.
+3. Unchanged: BTC_DIR shadow review → flip `btc_dir_penalty_apply` (S56);
+   geometry A/B needs more days; Telegram→app decouple (owner); Phase 4
+   master-arm (owner).
+
+---
+
 ## 🟢 SESSION 57 2026-07-14 — Feature-liveness alerting: silently-dead features now PAGE (branch `claude/pr-history-analysis-l3o9on`, 360-v2 + 360ce-ops)
 
 **Owner directive after #726/#727:** *"this time you found — what if next time we
