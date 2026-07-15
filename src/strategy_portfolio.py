@@ -116,6 +116,10 @@ AFFINITY: Dict[str, StrategyAffinity] = {
         frozenset({PHASE_DISTRIBUTION, PHASE_VOLATILE, PHASE_RANGE}), _ANY
     ),
     "FAILED_AUCTION_RECLAIM": StrategyAffinity(_RANGE_PHASES, _ANY),
+    # 2026-07-15: live graduation of SHADOW_MEAN_REVERT (same detection
+    # function, same affinity); the shadow entry below stays — distinct names,
+    # the shadow arm remains the ungated control in the edge matrix.
+    "MEAN_REVERT": StrategyAffinity(_RANGE_PHASES | {PHASE_QUIET}, _ANY),
     "SR_FLIP_RETEST": StrategyAffinity(_TREND_PHASES | {PHASE_RANGE}, _ANY),
     "RSI_MACD_DIVERGENCE": StrategyAffinity(_RANGE_PHASES, _ANY),
     # -- event-driven: trade positioning/flow, not the chart phase --

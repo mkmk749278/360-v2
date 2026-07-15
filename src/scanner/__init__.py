@@ -468,6 +468,10 @@ _SCALP_SETUP_TO_FAMILY: Dict[str, str] = {
     "SR_FLIP_RETEST": "reclaim_retest",
     "FAILED_AUCTION_RECLAIM": "reclaim_retest",
     "FUNDING_EXTREME_SIGNAL": "mean_reversion",
+    # 2026-07-15: MEAN_REVERT must map to mean_reversion — an unmapped setup
+    # falls into family "other", which is BLOCKED in RANGING-low-ADX, i.e.
+    # exactly this path's home regime (fail-closed comment below).
+    "MEAN_REVERT": "mean_reversion",
     "QUIET_COMPRESSION_BREAK": "compression",
     "DIVERGENCE_CONTINUATION": "divergence",
 }
@@ -891,6 +895,9 @@ _YOUNG_PAIR_EVALUATORS: frozenset[str] = frozenset({
     "_evaluate_mover_trend_pullback",
     # AVWAP mover scalp — same: anchored-VWAP reference, no aged HTF structure.
     "_evaluate_mover_avwap_scalp",
+    # _evaluate_mean_revert is DELIBERATELY absent: the z-score needs a stable
+    # 20-bar statistical mean, and a fresh listing's distribution is a
+    # one-sided ramp — the "extension" would just be the listing move itself.
 })
 
 # PR-7C: runtime validation focus paths for concise operator summaries.
@@ -7791,6 +7798,9 @@ class Scanner:
                     # Anchored-VWAP mover scalp — the participant-cost reload, the
                     # primary continuation entry for a confirmed mover (2026-06-28).
                     "_evaluate_mover_avwap_scalp",
+                    # _evaluate_mean_revert is DELIBERATELY absent: a mover
+                    # promotion is a trending/ignition context — the anti-thesis
+                    # of fading an extension back to the mean.
                 })
                 _is_mover = symbol in self._mover_promoted_pairs
                 # spread_pct is a PERCENT of mid (0.5 == 0.5%), same unit as the

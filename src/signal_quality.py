@@ -79,6 +79,13 @@ class SetupClass(str, Enum):
     # anchored at the move's origin, entered with the AVWAP slope (the
     # participant-cost reference; the professional mover-scalp standard).
     MOVER_AVWAP_SCALP = "MOVER_AVWAP_SCALP"
+    # 2026-07-15: statistical mean-reversion — fade a 2.5σ over-extension back
+    # to the 20-bar mean.  Graduated from SHADOW_MEAN_REVERT after the shadow
+    # ledger measured +0.67R avg / 59% win over n=550 forward-classified
+    # candidates (the best cell block in the Strategy×Context edge matrix).
+    # Shares its detection function with the shadow unit so the two can never
+    # drift; the shadow unit keeps running as the ungated control arm.
+    MEAN_REVERT = "MEAN_REVERT"
     # PR-01: auxiliary-channel evaluator identities — preserved as distinct setup classes
     # so that downstream scoring and suppression diagnostics reflect true channel intent.
     FVG_RETEST = "FVG_RETEST"
@@ -134,6 +141,7 @@ ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
     SetupClass.FAILED_AUCTION_RECLAIM: PortfolioRole.SUPPORT,
     SetupClass.MOVER_TREND_PULLBACK: PortfolioRole.SUPPORT,  # fires on strong movers — situational but recurring
     SetupClass.MOVER_AVWAP_SCALP: PortfolioRole.SUPPORT,  # anchored-VWAP mover continuation — same family
+    SetupClass.MEAN_REVERT: PortfolioRole.SUPPORT,  # range/quiet is ~70% of tape — situational but frequent
     # ── specialist ────────────────────────────────────────────────────────
     # Low-frequency, narrow-context, high-selectivity paths.  Valid only
     # under precise market conditions and expected to fire rarely.
@@ -172,6 +180,7 @@ STRUCTURAL_SLTP_PROTECTED_SETUPS: frozenset[SetupClass] = frozenset({
     SetupClass.LIQUIDATION_REVERSAL,    # Fibonacci retrace TPs (Type D — Reversion)
     SetupClass.DIVERGENCE_CONTINUATION, # swing-based TPs from divergence detection window
     SetupClass.FUNDING_EXTREME_SIGNAL,  # liquidation-cluster SL + structural FVG/OB TP1
+    SetupClass.MEAN_REVERT,             # ±1.5·ATR stop / mean-target geometry IS the measured edge — never recompute
 })
 
 
@@ -217,6 +226,7 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         # REGIME_SETUP_COMPATIBILITY note) — registered so the path's
         # signals stop dying at the compatibility hard gate pre-scoring.
         SetupClass.MA_CROSS_TREND_SHIFT,
+        SetupClass.MEAN_REVERT,
     },
     "360_SCALP_FVG": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -367,6 +377,9 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
         SetupClass.MOVER_AVWAP_SCALP,
+        # MEAN_REVERT: prime regime — fading a statistical over-extension back to
+        # the mean IS the range trade (shadow edge measured here).
+        SetupClass.MEAN_REVERT,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -389,6 +402,9 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.BREAKDOWN_SHORT,
         SetupClass.MOVER_TREND_PULLBACK,
         SetupClass.MOVER_AVWAP_SCALP,
+        # MEAN_REVERT: valid in dirty range — the z-trigger already demands a
+        # genuine statistical extreme; noise widens sd and raises the bar.
+        SetupClass.MEAN_REVERT,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
@@ -476,6 +492,7 @@ _MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
     "MOVER_AVWAP_SCALP":              3.0,  # Mover continuation; SL beyond anchored VWAP, ATR-buffered
     "FUNDING_EXTREME_SIGNAL":         3.0,  # Liq-cluster SL; can be 2-3% away
     "MA_CROSS_TREND_SHIFT":           3.0,  # Structural SL beyond opposite-side swing
+    "MEAN_REVERT":                    3.0,  # ±1.5·ATR stop; high-ATR pairs reach ~3%
 }
 
 # LSR loss-side tighten (geometry rebuild — ships dark; mirrors config flags
@@ -525,7 +542,10 @@ def _min_rr_for_setup(setup: SetupClass) -> float:
     if setup == SetupClass.RANGE_REJECTION:
         return _MIN_RR_RANGE
     if setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL,
-                 SetupClass.EXHAUSTION_FADE):
+                 SetupClass.EXHAUSTION_FADE, SetupClass.MEAN_REVERT):
+        # MEAN_REVERT: TP1 = the rolling mean vs a 1.5·ATR stop frequently
+        # lands between 0.9 and 1.2 R:R — the default 1.2 would reject the
+        # exact geometry the shadow ledger measured at +0.67R.
         return _MIN_RR_MEAN_REVERSION
     if setup in (SetupClass.SR_FLIP_RETEST, SetupClass.FAILED_AUCTION_RECLAIM):
         return _MIN_RR_STRUCTURED
@@ -1042,6 +1062,8 @@ def classify_setup(
         "MOVER_TREND_PULLBACK",
         # 2026-06-28: anchored-VWAP mover scalp — same identity-preservation need.
         "MOVER_AVWAP_SCALP",
+        # 2026-07-15: statistical mean-reversion — same identity-preservation need.
+        "MEAN_REVERT",
         # PR-01: active auxiliary channel evaluator identities — these channels
         # self-classify their output; downstream must not reclassify to a generic class.
         "FVG_RETEST",
@@ -1765,8 +1787,9 @@ class SignalScoringEngine:
                           "MOVER_TREND_PULLBACK", "MOVER_AVWAP_SCALP",
                           "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION",
                           "DIVERGENCE_CONTINUATION"],
-        "RANGING": ["SWING_STANDARD", "SR_FLIP_RETEST", "FAILED_AUCTION_RECLAIM"],
-        "QUIET": ["QUIET_COMPRESSION_BREAK"],
+        "RANGING": ["SWING_STANDARD", "SR_FLIP_RETEST", "FAILED_AUCTION_RECLAIM",
+                    "MEAN_REVERT"],
+        "QUIET": ["QUIET_COMPRESSION_BREAK", "MEAN_REVERT"],
         "VOLATILE": ["WHALE_MOMENTUM", "LIQUIDITY_SWEEP_REVERSAL",
                      "VOLUME_SURGE_BREAKOUT", "BREAKDOWN_SHORT",
                      "CONTINUATION_LIQUIDITY_SWEEP", "POST_DISPLACEMENT_CONTINUATION",
@@ -1797,6 +1820,9 @@ class SignalScoringEngine:
         "LIQUIDITY_SWEEP_REVERSAL",
         "FAILED_AUCTION_RECLAIM",
         "MA_CROSS_TREND_SHIFT",
+        # MEAN_REVERT fades the move by design — same double-penalty argument
+        # as LSR above; the z-trigger is its own quality gate.
+        "MEAN_REVERT",
     })
 
     # ── Family classification sets ─────────────────────────────────────────
