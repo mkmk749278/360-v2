@@ -32,6 +32,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
+from src import fail_open
 from src.utils import get_logger
 
 log = get_logger("mtf")
@@ -148,7 +149,13 @@ def compute_mtf_confluence(
             ema_fast = float(data["ema_fast"])
             ema_slow = float(data["ema_slow"])
             close = float(data["close"])
-        except (KeyError, TypeError, ValueError) as exc:
+        except KeyError as exc:
+            # Missing keys are normal warmup on young/just-promoted pairs —
+            # skip silently; only present-but-corrupt data is a failure.
+            log.debug("MTF: skipping timeframe {} – missing key: {}", tf_label, exc)
+            continue
+        except (TypeError, ValueError) as exc:
+            fail_open.record("mtf.confluence_tf_parse", exc)
             log.debug("MTF: skipping timeframe {} – bad data: {}", tf_label, exc)
             continue
 
@@ -268,7 +275,12 @@ def compute_mtf_confluence_with_decay(
             ema_fast = float(data["ema_fast"])
             ema_slow = float(data["ema_slow"])
             close = float(data["close"])
-        except (KeyError, TypeError, ValueError) as exc:
+        except KeyError as exc:
+            # Missing keys are normal warmup on young/just-promoted pairs.
+            log.debug("MTF-decay: skipping timeframe {} – missing key: {}", tf_label, exc)
+            continue
+        except (TypeError, ValueError) as exc:
+            fail_open.record("mtf.confluence_tf_parse", exc)
             log.debug("MTF-decay: skipping timeframe {} – bad data: {}", tf_label, exc)
             continue
 
@@ -686,7 +698,8 @@ def compute_cross_tf_volume_delta(candles_by_tf: Dict[str, dict]) -> dict:
             continue
         try:
             deltas[tf] = float(buy_vol) - float(sell_vol)
-        except (TypeError, ValueError):
+        except (TypeError, ValueError) as exc:
+            fail_open.record("mtf.cvd_delta_parse", exc)
             continue
 
     if not deltas:

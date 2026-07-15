@@ -48,6 +48,7 @@ from config import (
     MOVER_TP_BREAKOUT_EXT_ATR,
     MOVER_TP_BREAKOUT_VOL_MULT,
 )
+from src import fail_open
 from src.channels.base import BaseChannel, Signal, build_channel_signal
 from src.filters import (
     check_adx,
@@ -858,7 +859,10 @@ class ScalpChannel(BaseChannel):
         try:
             from src import runtime_tunables as _rt
             return bool(_rt.get(tunable_key))
-        except Exception:
+        except Exception as exc:
+            # A typo'd/unregistered tunable key raises KeyError and would
+            # silently pin the path to its boot default forever — count it.
+            fail_open.record("scalp.path_live_tunable", exc)
             return boot_default
 
     def _prune_mover_reasons(self, now: float) -> None:

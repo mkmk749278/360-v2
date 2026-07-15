@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 
+from src import fail_open
 from src.regime import MarketRegime
 from src.smc import Direction
 from src.utils import get_logger, price_decimal_fmt
@@ -796,7 +797,8 @@ def classify_market_state(
     if isinstance(regime, str):
         try:
             regime = MarketRegime(regime)
-        except ValueError:
+        except ValueError as exc:
+            fail_open.record("signal_quality.regime_parse", exc)
             regime = MarketRegime.RANGING
 
     if spread_pct >= 0.03 or wickiness >= 3.0 or atr_pct >= 4.5:
@@ -1051,10 +1053,10 @@ def classify_setup(
     if _sig_setup_class in _SELF_CLASSIFYING:
         try:
             setup = SetupClass(_sig_setup_class)
-        except ValueError:
-            import logging as _logging
-            _logging.warning(
-                "classify_setup: unrecognised self-classifying setup_class %r "
+        except ValueError as exc:
+            fail_open.record("signal_quality.self_classify_setup", exc)
+            log.warning(
+                "classify_setup: unrecognised self-classifying setup_class {!r} "
                 "— falling back to TREND_PULLBACK_CONTINUATION",
                 _sig_setup_class,
             )

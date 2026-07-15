@@ -4747,8 +4747,11 @@ class Scanner:
         # (each measurement has its own tunable).
         try:
             self._stamp_geometry_ab(sig)
-        except Exception:
-            pass
+        except Exception as exc:
+            # _stamp_geometry_ab records its own failures internally; this
+            # outer guard is effectively unreachable, counted for completeness.
+            from src import fail_open
+            fail_open.record("scanner.stamp_suppressed_geo", exc)
         try:
             from src import runtime_tunables as _rt
             if not bool(_rt.get("suppression_audit_enabled")):

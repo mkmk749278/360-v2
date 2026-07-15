@@ -45,6 +45,7 @@ from typing import Dict, List, Optional
 import numpy as np
 from numpy.typing import NDArray
 
+from src import fail_open
 from src.indicators import bollinger_bands
 from src.utils import get_logger
 
@@ -559,8 +560,10 @@ def detect_patterns(candles: Dict) -> List[Dict]:
                 if result is not None:
                     results.append(result)
             except Exception as exc:
+                fail_open.record(f"chart_patterns.{detector.__name__}", exc)
                 log.debug("Pattern detector error: {}", exc)
     except Exception as exc:
+        fail_open.record("chart_patterns.detect_patterns", exc)
         log.debug("detect_patterns failed: {}", exc)
     return results
 
@@ -817,12 +820,15 @@ def detect_all_patterns(
             try:
                 results.extend(fn(opens, highs, lows, closes))
             except Exception as exc:
+                fail_open.record(f"chart_patterns.{fn.__name__}", exc)
                 log.debug("Candlestick detector {} error: {}", fn.__name__, exc)
         try:
             results.extend(detect_three_soldiers_crows(opens, closes))
         except Exception as exc:
+            fail_open.record("chart_patterns.detect_three_soldiers_crows", exc)
             log.debug("Candlestick detector detect_three_soldiers_crows error: {}", exc)
     except Exception as exc:
+        fail_open.record("chart_patterns.detect_all_patterns", exc)
         log.debug("detect_all_patterns failed: {}", exc)
     return results
 
