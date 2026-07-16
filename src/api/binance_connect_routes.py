@@ -50,6 +50,7 @@ from fastapi import Depends, FastAPI, HTTPException, Request, status
 from src.utils import get_logger
 
 from .schemas import (
+    BinanceConnectInfoResponse,
     BinanceConnectRequest,
     BinanceConnectResponse,
     BinanceConnectStatusResponse,
@@ -373,6 +374,36 @@ def register(
             withdraw_disabled_ok=blob.withdraw_disabled_ok,
             ip_whitelist_ok=blob.ip_whitelist_ok,
         )
+
+    @app.get(
+        "/api/binance/connect/info",
+        response_model=BinanceConnectInfoResponse,
+        tags=["binance"],
+        dependencies=[Depends(auth)],
+    )
+    async def binance_connect_info() -> BinanceConnectInfoResponse:
+        """Return the non-secret onboarding info the connect screen needs.
+
+        Right now that is just the engine's public VPS IP — the address
+        the user must add to their Binance API-key IP whitelist.  The app
+        surfaces it *up front* (with one-tap copy) so the user can
+        whitelist it BEFORE attempting to connect, breaking the
+        chicken-and-egg where a connect can only succeed once the IP is
+        already whitelisted.
+
+        Deliberately depends on **neither KMS nor Firestore** — the IP is
+        a plain env var (``ENGINE_VPS_PUBLIC_IP``).  This is the whole
+        point: when KMS/Firestore are misconfigured (the connect flow
+        502/500s), the user can still retrieve the whitelist IP here and
+        prepare their Binance key.  Returns ``engine_vps_ip=null`` (HTTP
+        200, not 500) when the operator hasn't set the env var, so the app
+        degrades gracefully rather than showing an error.
+
+        The IP is not a secret — it is *meant* to be shared for
+        whitelisting — but the route stays behind the auth gate so only
+        signed-in app users can read it, never the open internet.
+        """
+        return BinanceConnectInfoResponse(engine_vps_ip=_engine_vps_ip())
 
     @app.delete(
         "/api/binance/connect",
