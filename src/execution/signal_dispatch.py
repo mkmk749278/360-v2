@@ -1047,6 +1047,24 @@ async def dispatch_signal_to_active_users(
                 reject_binance_code=b_code,
                 reject_binance_msg=b_msg,
             )
+            # Feed the blast-radius circuit breakers (B18 tripwires
+            # #4/#5).  Only real placement failures count — the helper
+            # ignores gate rejections by type and -2019 by code, so a
+            # kill-switch refusal or empty wallet can never trip a
+            # breaker.  On trip it persists the disable / engages the
+            # global kill switch itself.  Must never raise: this is a
+            # failure handler and other users' dispatches are in
+            # flight.
+            try:
+                _tw.record_order_placement_failure(
+                    firebase_uid=uid, exc=exc, binance_code=b_code,
+                )
+            except Exception:
+                log.exception(
+                    "signal_dispatch: circuit-breaker feed failed uid={} "
+                    "signal_id={}",
+                    uid, signal_id,
+                )
             # Consecutive-insufficient-margin tracker → auto-pause.
             # Owner-reported 2026-05-23: every signal was creating a
             # fresh "Insufficient margin" entry in the user's Recent
