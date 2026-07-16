@@ -355,15 +355,35 @@ class PaperBookFanout:
                 )
         return f"paper-fanout-{signal_id}" if any_added else None
 
-    async def close_all_open_positions(self) -> int:
-        total = 0
+    async def close_all_open_positions(
+        self, reason: str = "user_close_all"
+    ) -> Dict[str, Any]:
+        """Flatten every user's paper book.
+
+        Mirrors :meth:`PaperOrderManager.close_all_open_positions`'s
+        contract exactly — same ``reason`` parameter, same
+        ``{"closed_count", "realised_pnl_total"}`` return shape — because
+        the API close-all route calls whichever of the two is installed
+        as the engine's order manager.  (2026-07-16 audit: the old
+        signature took no reason — TypeError from the route — and did
+        ``int += dict`` on the book result, so the fanout close-all had
+        never actually closed anything.)
+        """
+        closed_count = 0
+        realised_pnl_total = 0.0
         for book in self._registry.all_books().values():
             try:
-                total += await book.close_all_open_positions()
+                res = await book.close_all_open_positions(reason)
+                if isinstance(res, dict):
+                    closed_count += int(res.get("closed_count", 0))
+                    realised_pnl_total += float(res.get("realised_pnl_total", 0.0))
             except Exception as exc:
                 log.warning("paper fanout: close_all_open_positions failed: %s", exc)
         self._holders.clear()
-        return total
+        return {
+            "closed_count": closed_count,
+            "realised_pnl_total": realised_pnl_total,
+        }
 
     def reset_state(self) -> None:
         for book in self._registry.all_books().values():

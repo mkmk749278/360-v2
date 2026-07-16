@@ -450,6 +450,7 @@ def _compute_qty_split(
     )
     if tp1 > 0 and tp1 * entry_price < min_notional:
         # All legs too small — tp1 takes the full position.
+        _tp1_leg_notional = tp1 * entry_price
         tp1 = total_qty
         tp2 = 0.0
         tp3 = 0.0
@@ -457,7 +458,7 @@ def _compute_qty_split(
             "signal_dispatch: symbol={} tp legs below MIN_NOTIONAL "
             "(tp1 notional=${:.2f} < ${:.2f}) — consolidating into "
             "single tp1=full-position",
-            symbol, tp1 * entry_price / total_qty * tp1, min_notional,
+            symbol, _tp1_leg_notional, min_notional,
         )
     elif tp2 > 0 and tp2 * entry_price < min_notional:
         # tp2/tp3 too small — roll everything into tp1.
@@ -1220,7 +1221,6 @@ async def close_fsm_positions_for_signal(
         # the position (e.g. native SL fired milliseconds before we got
         # here), this will fail with -2022 "ReduceOnly Order is rejected"
         # which we absorb below rather than crashing.
-        remaining = max(pos.total_qty - pos.closed_qty, pos.total_qty)
         # Defensively: if closed_qty somehow exceeds total_qty (shouldn't
         # happen but Firestore partial writes are possible), fall back to
         # total_qty so we don't send a zero-qty order.

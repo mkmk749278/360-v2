@@ -16,17 +16,24 @@ Why this exists per OWNER_BRIEF §3.9:
 
 Strategy: per-user every 60s,
   1. Fetch open positions from Binance (``GET /fapi/v2/positionRisk``).
-  2. Fetch open orders from Binance (``GET /fapi/v1/openOrders``).
-  3. Pull all Firestore positions for this user in non-terminal state.
-  4. Diff:
+  2. Pull all Firestore positions for this user in non-terminal state.
+  3. Diff positions:
      - Position in FSM but missing/zero qty in Binance → manually
        closed.  Transition FSM to CLOSED, reason=MANUAL.
-     - Order in FSM (e.g. ``sl_order_id``) but not in Binance's
-       open list → cancelled externally; clear the order id.
+     - Position still open past the stale-age ceiling → force-close.
+  4. Diff orders (2026-07-16 audit — this half was documented for a
+     year but never implemented): for each still-open position, fetch
+     the symbol's open ALGO orders (``GET /fapi/v1/algoOpenOrders`` —
+     SL/TP/trail live there since the Dec 2025 ``-4120`` conditional-
+     order migration, NOT on ``/fapi/v1/openOrders``).  A recorded
+     order id absent from the open list was cancelled externally →
+     clear it; if that leaves the position with NO protective stop,
+     re-place one at the recorded SL price (page if even that fails).
+     Skipped for positions with an event in the last 3 minutes so an
+     in-flight FSM transition (pre-TP cancel→replace) is never raced.
   5. Persist FSM state changes.
 
-Conservative: this PR ships the manual-close detection.  More
-sophisticated diffs (qty mismatches, modified SL/TP prices) are
+Conservative: qty mismatches and modified SL/TP prices remain
 deferred — they'd require deciding "is this a divergence to fix or
 a divergence to alert about?" which is a policy call.
 
@@ -60,8 +67,19 @@ def set_instance(r: "Reconciler") -> None:
 
 def get_instance() -> Optional["Reconciler"]:
     return _instance
-_FUTURES_OPEN_ORDERS_PATH = "/fapi/v1/openOrders"
+
+
+# Conditional (algo) open orders — SL / TP / trailing stops.  These moved
+# off /fapi/v1/openOrders in Binance's Dec 2025 -4120 migration.
+_FUTURES_ALGO_OPEN_ORDERS_PATH = "/fapi/v1/algoOpenOrders"
 _DEFAULT_INTERVAL_S = 60.0
+
+# Order healing skips positions with FSM activity in this window so a
+# reconcile cycle can never race an in-flight cancel→replace transition
+# (the pre-TP paths zero an order id and place its replacement within
+# seconds; a fetch landing between the two would look like an external
+# cancel and trigger a spurious re-protect).
+_ORDER_HEAL_MIN_QUIET_S = 180.0
 
 
 class Reconciler:
@@ -184,7 +202,9 @@ class Reconciler:
         )
         if binance_positions is None:
             return
-        # Diff + apply.
+        # Diff + apply.  Per-cycle cache of open algo-order ids so two
+        # positions on the same symbol cost one fetch.
+        algo_open_cache: Dict[str, Optional[Set[int]]] = {}
         for fsm_position in positions:
             symbol = fsm_position.symbol
             actual_amt = binance_positions.get(symbol, 0.0)
@@ -196,6 +216,19 @@ class Reconciler:
                 # This is the last-resort backstop behind the JTOUSDT
                 # 2026-06-01 incident (uncovered position rode 5h09m).
                 await self._maybe_force_close_stale(fsm_position)
+                if _position_state.is_terminal(fsm_position.state):
+                    continue  # stale close just went terminal
+                # Order-side diff: detect externally-cancelled SL/TP
+                # algo orders and heal (audit F4).
+                if symbol not in algo_open_cache:
+                    algo_open_cache[symbol] = await self._fetch_open_algo_ids(
+                        firebase_uid, client, symbol
+                    )
+                open_ids = algo_open_cache[symbol]
+                if open_ids is not None:
+                    await self._heal_external_order_cancels(
+                        fsm_position, open_ids
+                    )
 
     def _diff_and_heal(
         self,
@@ -300,6 +333,189 @@ class Reconciler:
         _position_state.put_position(fsm_position)
         from src.execution import pretp_dispatcher as _pd
         _pd.spawn_untrack(fsm_position.symbol)
+
+    async def _fetch_open_algo_ids(
+        self,
+        firebase_uid: str,
+        client: signing_client.SigningClient,
+        symbol: str,
+    ) -> Optional[Set[int]]:
+        """Return the set of open algo-order ids for ``symbol``, or
+        ``None`` on any fetch error (callers skip healing this cycle —
+        an empty set must only ever mean "Binance confirmed nothing is
+        open", never "the request failed")."""
+        try:
+            resp = await client.binance_signed_get(
+                firebase_uid=firebase_uid,
+                base="futures",
+                path=_FUTURES_ALGO_OPEN_ORDERS_PATH,
+                params={"symbol": symbol},
+            )
+        except Exception as exc:
+            log.warning(
+                "reconciler: algoOpenOrders request raised uid={} symbol={} "
+                "exc={}",
+                firebase_uid, symbol, exc,
+            )
+            return None
+        if not resp.ok:
+            log.warning(
+                "reconciler: algoOpenOrders fetch failed uid={} symbol={} "
+                "code={}",
+                firebase_uid, symbol, resp.error_code,
+            )
+            return None
+        body = resp.binance_body
+        # Tolerate both a bare list and an {"orders": [...]}-style wrapper.
+        entries = body if isinstance(body, list) else (
+            body.get("orders") if isinstance(body, dict) else None
+        )
+        if not isinstance(entries, list):
+            log.warning(
+                "reconciler: algoOpenOrders returned unexpected body shape "
+                "uid={} symbol={}",
+                firebase_uid, symbol,
+            )
+            return None
+        out: Set[int] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            try:
+                algo_id = int(entry.get("algoId", 0))
+            except (TypeError, ValueError):
+                continue
+            if algo_id:
+                out.add(algo_id)
+        return out
+
+    async def _heal_external_order_cancels(
+        self,
+        fsm_position: _position_state.Position,
+        open_algo_ids: Set[int],
+    ) -> None:
+        """Clear FSM order ids whose algo orders are no longer open on
+        Binance, and re-protect if the position lost its stop.
+
+        This is the order-side diff the module docstring promised from
+        day one (audit F4).  Without it, an SL cancelled from the
+        Binance UI left the FSM trusting a dead order id as live
+        protection indefinitely — the reconciler's stale-age ceiling
+        (hours) was the only backstop.
+
+        Freshness guard: positions with FSM activity in the last
+        ``_ORDER_HEAL_MIN_QUIET_S`` are skipped so we never race an
+        in-flight cancel→replace transition.
+        """
+        last_event = getattr(fsm_position, "last_event_at", None)
+        if last_event is not None:
+            if last_event.tzinfo is None:
+                last_event = last_event.replace(tzinfo=timezone.utc)
+            quiet_s = (
+                datetime.now(timezone.utc) - last_event
+            ).total_seconds()
+            if quiet_s < _ORDER_HEAL_MIN_QUIET_S:
+                return
+
+        protection_fields = ("trail_order_id", "sl_be_order_id", "sl_order_id")
+        tp_fields = ("tp1_order_id", "tp2_order_id", "tp3_order_id")
+        changed = False
+        lost_protection = False
+        for field in protection_fields + tp_fields:
+            oid = int(getattr(fsm_position, field, 0) or 0)
+            if oid and oid not in open_algo_ids:
+                log.warning(
+                    "reconciler: {} {} cancelled externally uid={} "
+                    "signal_id={} symbol={} — clearing stale id",
+                    field, oid,
+                    fsm_position.firebase_uid,
+                    fsm_position.signal_id,
+                    fsm_position.symbol,
+                )
+                setattr(fsm_position, field, 0)
+                changed = True
+                if field in protection_fields:
+                    lost_protection = True
+        if not changed:
+            return
+
+        still_protected = any(
+            int(getattr(fsm_position, f, 0) or 0) for f in protection_fields
+        )
+        if lost_protection and not still_protected:
+            await self._replace_lost_stop(fsm_position)
+        _position_state.put_position(fsm_position)
+
+    async def _replace_lost_stop(
+        self, fsm_position: _position_state.Position
+    ) -> None:
+        """The position's protective stop was cancelled externally and no
+        other stop remains — re-place one at the recorded SL price.
+        Never raises; a total failure pages via the naked-residual alert
+        (the stale-age force-close stays the last automatic resort)."""
+        log.error(
+            "reconciler: position lost its protective stop (external "
+            "cancel) — re-placing uid={} signal_id={} symbol={} sl_price={}",
+            fsm_position.firebase_uid,
+            fsm_position.signal_id,
+            fsm_position.symbol,
+            fsm_position.sl_price,
+        )
+        if fsm_position.sl_price and fsm_position.sl_price > 0:
+            try:
+                placer = self._order_placer_factory(fsm_position.firebase_uid)
+                result = await placer.place_stop_loss(
+                    signal_id=fsm_position.signal_id,
+                    symbol=fsm_position.symbol,
+                    direction=fsm_position.side,
+                    stop_price=fsm_position.sl_price,
+                    coid_override=_position_state.coid_sl_be(
+                        fsm_position.signal_id
+                    ),
+                )
+                fsm_position.sl_be_order_id = result.order_id
+                log.warning(
+                    "reconciler: protective stop re-placed uid={} "
+                    "signal_id={} order_id={}",
+                    fsm_position.firebase_uid,
+                    fsm_position.signal_id,
+                    result.order_id,
+                )
+                return
+            except Exception as exc:
+                log.critical(
+                    "reconciler: stop re-placement FAILED uid={} signal_id={} "
+                    "symbol={} exc={} — position is UNPROTECTED until the "
+                    "stale-age ceiling; operator paged",
+                    fsm_position.firebase_uid,
+                    fsm_position.signal_id,
+                    fsm_position.symbol,
+                    exc,
+                )
+        else:
+            log.critical(
+                "reconciler: cannot re-place stop (no recorded sl_price) "
+                "uid={} signal_id={} symbol={} — operator paged",
+                fsm_position.firebase_uid,
+                fsm_position.signal_id,
+                fsm_position.symbol,
+            )
+        try:
+            from . import telegram_alerts as _ta
+            await _ta.alert_naked_residual(
+                firebase_uid=fsm_position.firebase_uid,
+                signal_id=fsm_position.signal_id,
+                symbol=fsm_position.symbol,
+                remaining_qty=max(
+                    0.0, fsm_position.total_qty - fsm_position.closed_qty
+                ),
+            )
+        except Exception:
+            log.exception(
+                "reconciler: naked-residual page failed uid={} signal_id={}",
+                fsm_position.firebase_uid,
+                fsm_position.signal_id,
+            )
 
     async def _fetch_binance_positions(
         self,

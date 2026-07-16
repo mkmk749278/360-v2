@@ -6603,7 +6603,10 @@ class ScalpChannel(BaseChannel):
         ):
             return self._reject("insufficient_candles")
 
-        if not self._pass_basic_filters(spread_pct, volume_24h_usd, regime=regime):
+        profile = smc_data.get("pair_profile")
+        if not self._pass_basic_filters(
+            spread_pct, volume_24h_usd, regime=regime, profile=profile
+        ):
             return self._reject("basic_filters_failed")
 
         cand = shadow_mean_revert(highs, lows, closes)

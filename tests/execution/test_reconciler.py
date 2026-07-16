@@ -457,3 +457,157 @@ def test_default_positions_for_user_empty_when_uninitialised() -> None:
         out = reconciler._default_positions_for_user("fb-x")
     assert out == []
     listing.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Order-side healing (2026-07-16 audit F4 — the diff the docstring promised)
+# ---------------------------------------------------------------------------
+
+
+from datetime import datetime, timedelta, timezone
+
+
+def _pos_with_orders(**kw) -> position_state.Position:
+    pos = _make_position(**kw)
+    pos.sl_order_id = 111
+    pos.tp1_order_id = 222
+    pos.tp2_order_id = 333
+    # Old enough to clear the freshness guard.
+    pos.last_event_at = datetime.now(timezone.utc) - timedelta(minutes=10)
+    return pos
+
+
+def _client_with_orders(open_algo_ids):
+    """positionRisk shows the position open; algoOpenOrders returns the
+    given ids."""
+    async def _get(*, firebase_uid, base, path, params=None):
+        if "positionRisk" in path:
+            body = [{"symbol": "BTCUSDT", "positionAmt": "1.0"}]
+        else:
+            assert path == reconciler._FUTURES_ALGO_OPEN_ORDERS_PATH
+            assert params == {"symbol": "BTCUSDT"}
+            body = [{"algoId": i} for i in open_algo_ids]
+        return sig_protocol.SignResponse.ok_reply(
+            "req-x", binance_status=200, binance_body=body,
+        )
+
+    mock = MagicMock()
+    mock.binance_signed_get = AsyncMock(side_effect=_get)
+    return mock
+
+
+@pytest.mark.asyncio
+async def test_externally_cancelled_tp_id_is_cleared() -> None:
+    """TP2 cancelled on Binance → id cleared, SL untouched, no re-protect."""
+    pos = _pos_with_orders()
+    placer = MagicMock()
+    placer.place_stop_loss = AsyncMock()
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [pos],
+        signing_client_factory=lambda: _client_with_orders([111, 222]),
+        order_placer_factory=lambda uid: placer,
+        max_position_age_sec=10**9, stale_close_enabled=False,
+    )
+    persisted: list = []
+    with patch.object(
+        position_state, "put_position", side_effect=lambda p: persisted.append(p)
+    ):
+        await r.reconcile_user("fb-x")
+    assert pos.tp2_order_id == 0
+    assert pos.sl_order_id == 111  # still open on Binance — untouched
+    placer.place_stop_loss.assert_not_awaited()
+    assert persisted  # cleared id persisted
+
+
+@pytest.mark.asyncio
+async def test_externally_cancelled_sl_triggers_re_protect() -> None:
+    """SL gone from Binance's open list and no other stop remains →
+    a replacement stop is placed at the recorded sl_price."""
+    pos = _pos_with_orders()
+    placer = MagicMock()
+    placer.place_stop_loss = AsyncMock(
+        return_value=MagicMock(order_id=999)
+    )
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [pos],
+        signing_client_factory=lambda: _client_with_orders([222, 333]),
+        order_placer_factory=lambda uid: placer,
+        max_position_age_sec=10**9, stale_close_enabled=False,
+    )
+    with patch.object(position_state, "put_position"):
+        await r.reconcile_user("fb-x")
+    assert pos.sl_order_id == 0
+    placer.place_stop_loss.assert_awaited_once()
+    assert placer.place_stop_loss.await_args.kwargs["stop_price"] == 28500.0
+    assert pos.sl_be_order_id == 999
+
+
+@pytest.mark.asyncio
+async def test_re_protect_failure_pages_naked_residual() -> None:
+    from src.execution.order_placer import OrderPlacementError
+
+    pos = _pos_with_orders()
+    placer = MagicMock()
+    placer.place_stop_loss = AsyncMock(
+        side_effect=OrderPlacementError("rejected")
+    )
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [pos],
+        signing_client_factory=lambda: _client_with_orders([]),
+        order_placer_factory=lambda uid: placer,
+        max_position_age_sec=10**9, stale_close_enabled=False,
+    )
+    with patch.object(position_state, "put_position"), patch(
+        "src.execution.telegram_alerts.alert_naked_residual",
+        new_callable=AsyncMock,
+    ) as page:
+        await r.reconcile_user("fb-x")
+    page.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_recent_fsm_activity_skips_order_healing() -> None:
+    """Freshness guard: a position with an event 10s ago must not be
+    healed — an in-flight cancel→replace would look like an external
+    cancel and trigger a spurious re-protect."""
+    pos = _pos_with_orders()
+    pos.last_event_at = datetime.now(timezone.utc) - timedelta(seconds=10)
+    placer = MagicMock()
+    placer.place_stop_loss = AsyncMock()
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [pos],
+        signing_client_factory=lambda: _client_with_orders([]),
+        order_placer_factory=lambda uid: placer,
+        max_position_age_sec=10**9, stale_close_enabled=False,
+    )
+    with patch.object(position_state, "put_position") as put:
+        await r.reconcile_user("fb-x")
+    assert pos.sl_order_id == 111  # untouched
+    placer.place_stop_loss.assert_not_awaited()
+    put.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_algo_open_orders_fetch_failure_skips_healing() -> None:
+    """A failed algoOpenOrders fetch must never read as 'nothing open'."""
+    async def _get(*, firebase_uid, base, path, params=None):
+        if "positionRisk" in path:
+            return sig_protocol.SignResponse.ok_reply(
+                "req-x", binance_status=200,
+                binance_body=[{"symbol": "BTCUSDT", "positionAmt": "1.0"}],
+            )
+        raise RuntimeError("network down")
+
+    client = MagicMock()
+    client.binance_signed_get = AsyncMock(side_effect=_get)
+    pos = _pos_with_orders()
+    r = reconciler.Reconciler(
+        positions_for_user=lambda uid: [pos],
+        signing_client_factory=lambda: client,
+        order_placer_factory=lambda uid: MagicMock(),
+        max_position_age_sec=10**9, stale_close_enabled=False,
+    )
+    with patch.object(position_state, "put_position") as put:
+        await r.reconcile_user("fb-x")
+    assert pos.sl_order_id == 111
+    put.assert_not_called()

@@ -36,6 +36,14 @@ log = get_logger("execution.worker_manager")
 # Registry: firebase_uid → (worker, task).  Checked before double-starting.
 _workers: Dict[str, Tuple[PositionWorker, asyncio.Task]] = {}
 
+# In-flight reconcile+start tasks per uid (2026-07-16 audit).  A slow
+# startup reconcile (Binance positionRisk) can outlive the 60s tick;
+# without this guard the next tick scheduled a SECOND _reconcile_and_start
+# for the same uid → two PositionWorkers / two user-data streams.  Also
+# provides the strong reference that keeps the boot task from being
+# garbage-collected mid-flight.
+_boot_tasks: Dict[str, asyncio.Task] = {}
+
 
 # ---------------------------------------------------------------------------
 # Startup reconciliation
@@ -229,10 +237,19 @@ def _tick() -> None:
         if existing is not None and not existing[1].done():
             continue  # running fine
 
+        boot = _boot_tasks.get(uid)
+        if boot is not None and not boot.done():
+            continue  # reconcile+start already in flight — don't double-boot
+
         # New user or crashed worker — schedule reconcile + start.
-        asyncio.get_running_loop().create_task(
+        task = asyncio.get_running_loop().create_task(
             _reconcile_and_start(uid),
             name=f"wm_boot_{uid[:12]}",
+        )
+        _boot_tasks[uid] = task
+        task.add_done_callback(
+            lambda t, _uid=uid: _boot_tasks.pop(_uid, None)
+            if _boot_tasks.get(_uid) is t else None
         )
 
 

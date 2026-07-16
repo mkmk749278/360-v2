@@ -50,10 +50,12 @@ class FakeBook:
     async def add_dca_entry(self, signal, *, current_price=None):
         return f"d-{self.uid}"
 
-    async def close_all_open_positions(self):
+    async def close_all_open_positions(self, reason="user_close_all"):
+        # Mirrors PaperOrderManager's contract: takes the close reason,
+        # returns the {closed_count, realised_pnl_total} dict.
         n = self._open
         self._open = 0
-        return n
+        return {"closed_count": n, "realised_pnl_total": 1.5 * n}
 
     def reset_state(self):
         self._pnl = 0.0
@@ -272,3 +274,37 @@ def test_registry_threads_sizing_and_per_user_risk_manager():
     assert b2._risk_manager is made[2]
     assert made[1] is not made[2]
     assert b1._pnl_history_mode == "paper:1"
+
+
+# ---------------------------------------------------------------------------
+# close_all_open_positions — 2026-07-16 audit F5
+# ---------------------------------------------------------------------------
+
+
+async def test_close_all_fans_out_and_aggregates(fanout, registry, monkeypatch):
+    """Pre-fix, the fanout did ``int += dict`` on the book result — every
+    book raised TypeError into the swallow-log and close-all closed
+    NOTHING.  Pin the real contract: reason forwarded, dict aggregated."""
+    _patch_resolvers(monkeypatch, prefs={}, mgmt={})
+    sig = _signal()
+    await fanout.execute_signal(sig)  # opens a position in each of 3 books
+    result = await fanout.close_all_open_positions("admin_reset_all")
+    assert result == {"closed_count": 3, "realised_pnl_total": 4.5}
+    # Idempotent on flat books.
+    result2 = await fanout.close_all_open_positions()
+    assert result2["closed_count"] == 0
+
+
+async def test_close_all_per_book_failure_is_isolated(fanout, registry, monkeypatch):
+    _patch_resolvers(monkeypatch, prefs={}, mgmt={})
+    sig = _signal()
+    await fanout.execute_signal(sig)
+    books = list(registry.all_books().values())
+    assert len(books) == 3
+
+    async def _boom(reason="user_close_all"):
+        raise RuntimeError("book down")
+
+    books[0].close_all_open_positions = _boom
+    result = await fanout.close_all_open_positions()
+    assert result["closed_count"] == 2  # surviving books still closed
