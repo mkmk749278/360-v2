@@ -699,9 +699,13 @@ class Bootstrap:
             # Google Play Billing (B16) — only constructed in single-process
             # mode (isolated mode serves HTTP from the api container, wired in
             # src/api/main.py).  Disabled cleanly when env unset.
+            # Construct whenever a package is configured — the live on/off
+            # decision is the runtime ops toggle (boot default
+            # GOOGLE_PLAY_BILLING_ENABLED), checked per request in the
+            # endpoints, so ops can flip billing without a redeploy.
             play_verifier = None
             play_purchases = None
-            if GOOGLE_PLAY_BILLING_ENABLED and GOOGLE_PLAY_PACKAGE_NAME:
+            if GOOGLE_PLAY_PACKAGE_NAME:
                 from src.api.billing_play import (
                     PlayBillingVerifier,
                     load_service_account_info,
@@ -716,8 +720,10 @@ class Bootstrap:
                 )
                 play_purchases = PlayPurchaseStore(LUMIN_DB_PATH)
                 log.info(
-                    "Play billing enabled: package={} configured={}",
-                    GOOGLE_PLAY_PACKAGE_NAME, play_verifier.is_configured(),
+                    "Play billing wired: package={} configured={} default_enabled={}",
+                    GOOGLE_PLAY_PACKAGE_NAME,
+                    play_verifier.is_configured(),
+                    GOOGLE_PLAY_BILLING_ENABLED,
                 )
 
             # Stash on the engine so other subsystems (e.g. Phase-3

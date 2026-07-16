@@ -92,6 +92,8 @@ from .schemas import (
     BillingGrantRequest,
     BillingGrantResponse,
     HealthResponse,
+    PlayBillingEnabledSetRequest,
+    PlayBillingEnabledState,
     PlayRtdnResponse,
     PlayVerifyRequest,
     PlayVerifyResponse,
@@ -1019,6 +1021,30 @@ def build_app(
             and user_store is not None
         )
 
+    def _billing_runtime_enabled() -> bool:
+        """Live on/off for the Play paywall — the ops toggle on the kill-switch
+        Firestore doc, falling back to the GOOGLE_PLAY_BILLING_ENABLED env
+        default when the kill switch isn't booted (single-process / tests)."""
+        from config import GOOGLE_PLAY_BILLING_ENABLED as _default
+        from src.execution import kill_switch as _ks
+        if not _ks.is_initialised():
+            return bool(_default)
+        try:
+            return bool(_ks.get_client().is_billing_enabled(bool(_default)))
+        except Exception:
+            log.exception("/api/billing/play/enabled state read failed")
+            return bool(_default)
+
+    def _billing_enabled_state() -> PlayBillingEnabledState:
+        from src.execution import kill_switch as _ks
+        return PlayBillingEnabledState(
+            enabled=_billing_runtime_enabled(),
+            configured=bool(
+                play_verifier is not None and play_verifier.is_configured()
+            ),
+            initialised=_ks.is_initialised(),
+        )
+
     async def _apply_play_entitlement(user_id: int, state) -> tuple:  # type: ignore[no-untyped-def]
         """Persist entitlement from a verified subscription state.
 
@@ -1066,6 +1092,11 @@ def build_app(
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="play billing not configured",
+            )
+        if not _billing_runtime_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="play billing disabled",
             )
         assert play_verifier is not None and user_store is not None
         uid = _resolve_user_id(identity)
@@ -1133,6 +1164,11 @@ def build_app(
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="play billing not configured",
+            )
+        if not _billing_runtime_enabled():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="play billing disabled",
             )
         assert play_verifier is not None and play_purchases is not None
 
@@ -1218,6 +1254,50 @@ def build_app(
     )
     async def play_rtdn_secret(request: Request, secret: str) -> PlayRtdnResponse:
         return await _handle_rtdn(request, secret=secret)
+
+    # ---- Play billing master switch (ops control plane, 2026-07-16) ----
+    # Live on/off for the subscription paywall, on the same kill-switch
+    # Firestore doc so ops can flip it without a redeploy. Disabled → verify
+    # and RTDN both 503 ("play billing disabled"); existing tiers in UserStore
+    # are untouched (they still expire naturally at paid_until). GET reports
+    # initialised=false when Firestore isn't wired (engine runs on the
+    # GOOGLE_PLAY_BILLING_ENABLED env default).
+
+    @app.get(
+        "/api/billing/play/enabled",
+        response_model=PlayBillingEnabledState,
+        tags=["billing"],
+    )
+    async def play_billing_enabled_get(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> PlayBillingEnabledState:
+        return _billing_enabled_state()
+
+    @app.post(
+        "/api/billing/play/enabled",
+        response_model=PlayBillingEnabledState,
+        tags=["billing"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def play_billing_enabled_set(
+        req: PlayBillingEnabledSetRequest,
+    ) -> PlayBillingEnabledState:
+        from src.execution import kill_switch as _ks
+        if not _ks.is_initialised():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="kill switch not initialised (no Firestore/GCP creds)",
+            )
+        try:
+            _ks.get_client().set_billing_enabled(req.enabled)
+        except Exception as exc:
+            log.exception(
+                "/api/billing/play/enabled flip failed enabled=%s", req.enabled)
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"play billing flip failed: {exc}",
+            )
+        return _billing_enabled_state()
 
     # ---- Profile (Phase 3 — per-user expansion) ----
 

@@ -149,13 +149,25 @@ GOOGLE_PLAY_RTDN_PATH_SECRET=<same-secret-as-in-the-URL>
 Redeploy: `bash deploy.sh`. Confirm the boot log line:
 
 ```
-Play billing enabled: package=org.luminapp.lumin configured=True
+Play billing wired: package=org.luminapp.lumin configured=True default_enabled=True
 ```
 
-`configured=False` means the service account did not load — fix before proceeding.
+`configured=False` means the service account did not load — fix before proceeding. The
+verifier is now constructed whenever `GOOGLE_PLAY_PACKAGE_NAME` is set (decoupled from the
+enabled flag) so the live on/off decision is the ops toggle below, not a redeploy.
 
 > The tier-gate on the money path is separate and already live: server-side auto-execution
 > requires `AUTO_TRADE_TIER_GATE_ENABLED=true` (default on) — leave it on.
+
+### Live on/off is an ops control (no redeploy)
+
+`GOOGLE_PLAY_BILLING_ENABLED` is only the **boot default** (now `true`). The live master
+switch is in **360 CE Ops → Control → "Play billing"**, backed by the kill-switch Firestore
+doc (`play_billing_enabled`) and the owner-gated `GET/POST /api/billing/play/enabled`
+endpoints. Disabling it makes `verify` + RTDN 503 immediately (existing subscribers keep
+their tier until it expires naturally at `paid_until`). Use it to pause sales without a
+deploy; it is not a substitute for deactivating the products in Play Console when winding
+down for real.
 
 ---
 
