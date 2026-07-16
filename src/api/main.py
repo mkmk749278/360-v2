@@ -136,9 +136,14 @@ async def _run() -> None:
     billing_verifier = BillingWebhookVerifier(BILLING_WEBHOOK_SECRET)
 
     # ── Google Play Billing (B16) ─────────────────────────────────────
+    # Construct the verifier whenever a package is configured — the live
+    # on/off decision is the runtime ops toggle (kill-switch Firestore doc,
+    # boot default GOOGLE_PLAY_BILLING_ENABLED), checked per request in the
+    # endpoints.  This lets ops flip billing without a redeploy; is_configured()
+    # (needs the service account) still fails closed for real Google calls.
     play_verifier = None
     play_purchases = None
-    if GOOGLE_PLAY_BILLING_ENABLED and GOOGLE_PLAY_PACKAGE_NAME:
+    if GOOGLE_PLAY_PACKAGE_NAME:
         sa_info = load_service_account_info(GOOGLE_PLAY_SERVICE_ACCOUNT_PATH)
         play_verifier = PlayBillingVerifier(
             package_name=GOOGLE_PLAY_PACKAGE_NAME,
@@ -147,11 +152,13 @@ async def _run() -> None:
         )
         play_purchases = PlayPurchaseStore(LUMIN_DB_PATH)
         log.info(
-            "Play billing enabled: package={} configured={}",
-            GOOGLE_PLAY_PACKAGE_NAME, play_verifier.is_configured(),
+            "Play billing wired: package={} configured={} default_enabled={}",
+            GOOGLE_PLAY_PACKAGE_NAME,
+            play_verifier.is_configured(),
+            GOOGLE_PLAY_BILLING_ENABLED,
         )
     else:
-        log.info("Play billing disabled (GOOGLE_PLAY_BILLING_ENABLED/package unset)")
+        log.info("Play billing not wired (GOOGLE_PLAY_PACKAGE_NAME unset)")
 
     origins = [o.strip() for o in API_CORS_ORIGINS.split(",") if o.strip()]
 

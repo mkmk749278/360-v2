@@ -3097,12 +3097,16 @@ BILLING_WEBHOOK_SECRET: str = os.getenv("BILLING_WEBHOOK_SECRET", "")
 # false OR the package / service-account is unset, the Play billing endpoints
 # fail closed (503) — exactly like the HMAC billing webhook above.
 
-#: Master switch.  Off by default until the owner has created the Play
-#: subscription products + linked a service account (see ACTIVE_CONTEXT
-#: "OWNER ACTIONS").  This is an operational kill switch, NOT a dark flag:
-#: there is nothing to "measure in shadow" — it is either wired to a real
-#: Play Console project or it is not.
-GOOGLE_PLAY_BILLING_ENABLED: bool = _safe_bool("GOOGLE_PLAY_BILLING_ENABLED", "false")
+#: Master switch — the **boot default** for the runtime ops toggle (owner
+#: request 2026-07-16: on by default).  This is an operational kill switch,
+#: NOT a dark flag: there is nothing to "measure in shadow" — billing is
+#: either wired to a real Play Console project or it is not.  It fails closed
+#: regardless: with no package / service-account the verifier reports
+#: ``is_configured() == False`` and every billing endpoint 503s even when
+#: this is true.  The live on/off state lives on the kill-switch Firestore
+#: doc (``play_billing_enabled``) and is flipped from 360 CE Ops → Control;
+#: this env value is only the default when that flag is unset / unbooted.
+GOOGLE_PLAY_BILLING_ENABLED: bool = _safe_bool("GOOGLE_PLAY_BILLING_ENABLED", "true")
 
 #: Money-path entitlement gate (B16 two-tier model).  When true (default),
 #: hands-off server-side auto-execution in ``signal_dispatch`` runs ONLY for

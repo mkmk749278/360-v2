@@ -31,7 +31,7 @@ from src.api.billing_play import (  # noqa: E402
 from src.api.play_purchases import PlayPurchaseStore  # noqa: E402
 from src.api.server import build_app  # noqa: E402
 from src.api.users import UserStore  # noqa: E402
-from src.api.auth import mint_user_token  # noqa: E402
+from src.api.auth import OWNER_TIER, mint_token, mint_user_token  # noqa: E402
 
 # A bare engine stub — the billing endpoints never touch the engine, and
 # (unlike ``tests.api.test_api_smoke._StubEngine``) this avoids dragging in
@@ -454,3 +454,96 @@ def test_profile_downgrades_expired_paid_user(billing_setup):
     assert r.status_code == 200, r.text
     assert r.json()["tier"] == "free"
     assert user_store.get_by_id(uid).tier == "free"  # persisted
+
+
+# ---------------------------------------------------------------------------
+# Play billing master switch (ops control toggle, 2026-07-16)
+# ---------------------------------------------------------------------------
+
+
+class _FakeKs:
+    """Stand-in for the kill-switch client — records billing flips."""
+
+    def __init__(self, enabled: bool = True) -> None:
+        self.flips: list[bool] = []
+        self._enabled = enabled
+
+    def set_billing_enabled(self, enabled: bool) -> None:
+        self.flips.append(enabled)
+        self._enabled = enabled
+
+    def is_billing_enabled(self, default: bool) -> bool:
+        return self._enabled
+
+
+def test_billing_enabled_get_reports_default_on(billing_setup):
+    # No Firestore in tests → falls back to the env default (now True), with
+    # the verifier wired so configured=True.
+    client, *_ = billing_setup
+    r = client.get("/api/billing/play/enabled")
+    assert r.status_code == 200, r.text
+    body = r.json()
+    assert body["enabled"] is True
+    assert body["configured"] is True
+    assert body["initialised"] is False
+
+
+def test_verify_503_when_billing_default_disabled(billing_setup, monkeypatch):
+    # Env boot default flipped off + no Firestore → paywall disabled.
+    client, http, *_ = billing_setup
+    import config
+    monkeypatch.setattr(config, "GOOGLE_PLAY_BILLING_ENABLED", False)
+    r = client.post("/api/billing/play/verify", json={
+        "product_id": "lumin_auto_monthly", "purchase_token": "tok",
+    })
+    assert r.status_code == 503
+    assert "disabled" in r.json()["detail"]
+
+
+def test_verify_503_when_ops_toggle_disabled(billing_setup, monkeypatch):
+    # Ops flipped the Firestore flag off — verify (and RTDN) fail closed.
+    client, http, *_ = billing_setup
+    from src.execution import kill_switch as ks
+    monkeypatch.setattr(ks, "is_initialised", lambda: True)
+    monkeypatch.setattr(ks, "get_client", lambda: _FakeKs(enabled=False))
+    r = client.post("/api/billing/play/verify", json={
+        "product_id": "lumin_auto_monthly", "purchase_token": "tok",
+    })
+    assert r.status_code == 503
+    assert "disabled" in r.json()["detail"]
+
+
+def test_billing_enabled_set_requires_owner(billing_setup):
+    # The fixture client carries a free-tier token → 403 on the owner route.
+    client, *_ = billing_setup
+    r = client.post("/api/billing/play/enabled", json={"enabled": False})
+    assert r.status_code == 403
+
+
+def test_billing_enabled_set_503_without_killswitch(billing_setup):
+    # Owner-authed but no Firestore → nothing to write the flag to.
+    client, *_ = billing_setup
+    owner = mint_token(secret=_TEST_SECRET, tier=OWNER_TIER)
+    r = client.post(
+        "/api/billing/play/enabled",
+        json={"enabled": False},
+        headers={"Authorization": f"Bearer {owner}"},
+    )
+    assert r.status_code == 503
+
+
+def test_billing_enabled_set_flips_via_killswitch(billing_setup, monkeypatch):
+    client, *_ = billing_setup
+    from src.execution import kill_switch as ks
+    fake = _FakeKs(enabled=True)
+    monkeypatch.setattr(ks, "is_initialised", lambda: True)
+    monkeypatch.setattr(ks, "get_client", lambda: fake)
+    owner = mint_token(secret=_TEST_SECRET, tier=OWNER_TIER)
+    r = client.post(
+        "/api/billing/play/enabled",
+        json={"enabled": False},
+        headers={"Authorization": f"Bearer {owner}"},
+    )
+    assert r.status_code == 200, r.text
+    assert r.json()["enabled"] is False
+    assert fake.flips == [False]

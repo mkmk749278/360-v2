@@ -429,6 +429,28 @@ class SignalExpirySetRequest(BaseModel):
     enabled: bool
 
 
+class PlayBillingEnabledState(BaseModel):
+    """Google Play subscription paywall master switch (ops control, 2026-07-16).
+
+    ``enabled`` False → the verify + RTDN endpoints 503 ("play billing
+    disabled"); existing tiers in UserStore are untouched (they expire
+    naturally at ``paid_until``). ``configured`` False → no package /
+    service account, so billing 503s regardless of ``enabled``.
+    ``initialised`` False = the flag's Firestore client never booted, so the
+    engine runs on the GOOGLE_PLAY_BILLING_ENABLED env default.
+    """
+
+    enabled: bool
+    configured: bool = False
+    initialised: bool = True
+
+
+class PlayBillingEnabledSetRequest(BaseModel):
+    """Owner request to turn the Play billing paywall on/off engine-wide."""
+
+    enabled: bool
+
+
 class TunableEntry(BaseModel):
     """One runtime tunable: registry metadata + current effective value."""
 

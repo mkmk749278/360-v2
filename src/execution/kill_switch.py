@@ -58,6 +58,13 @@ _GLOBAL_ENABLED_FIELD = "auto_trade_globally_enabled"
 # engaged/enabled read path is untouched.
 _SIGNAL_EXPIRY_FIELD = "signal_expiry_enabled"
 
+# Google Play billing master switch, on the same doc so the ops control plane
+# can turn the subscription paywall on/off live (owner request 2026-07-16).
+# Absent field → fall back to the GOOGLE_PLAY_BILLING_ENABLED env default. Read
+# only on the low-frequency verify / RTDN paths (never a hot loop), so it is
+# read straight through with no cache slot — write-through is immediately live.
+_BILLING_ENABLED_FIELD = "play_billing_enabled"
+
 # Cache TTL for reads.  5s gives us the B18 "<5s SLA on kill switch
 # flip taking effect" property while keeping Firestore reads minimal.
 _CACHE_TTL_S = 5.0
@@ -336,6 +343,46 @@ class KillSwitchClient:
         if _SIGNAL_EXPIRY_FIELD not in data:
             return default
         return bool(data.get(_SIGNAL_EXPIRY_FIELD, default))
+
+    # ---- Google Play billing master switch (ops control, 2026-07-16) ---
+
+    def is_billing_enabled(self, default: bool) -> bool:
+        """True if the Google Play subscription paywall is ON engine-wide.
+
+        Missing doc / missing field → ``default`` (the GOOGLE_PLAY_BILLING_
+        ENABLED env boot value). Read straight through (verify / RTDN are
+        low-frequency, never a hot loop) so a flip is live immediately."""
+        doc = (
+            self._db.collection(_GLOBAL_KILL_DOC[0])
+            .document(_GLOBAL_KILL_DOC[1])
+            .get()
+        )
+        if not doc.exists:
+            return default
+        data = doc.to_dict() or {}
+        if _BILLING_ENABLED_FIELD not in data:
+            return default
+        return bool(data.get(_BILLING_ENABLED_FIELD, default))
+
+    def set_billing_enabled(self, enabled: bool) -> None:
+        """Operator action — turn the Play billing paywall on/off engine-wide.
+        Write-through (``merge=True`` so the kill-switch / auto-trade flags on
+        the same doc are untouched). Survives engine restart."""
+        from datetime import datetime, timezone
+
+        self._db.collection(_GLOBAL_KILL_DOC[0]).document(
+            _GLOBAL_KILL_DOC[1]
+        ).set(
+            {
+                _BILLING_ENABLED_FIELD: enabled,
+                "play_billing_enabled_at": datetime.now(timezone.utc),
+            },
+            merge=True,
+        )
+        log.info(
+            "kill_switch: PLAY BILLING {}",
+            "ENABLED" if enabled else "DISABLED",
+        )
 
     # ---- Per-user disable ---------------------------------------------
 
