@@ -354,3 +354,51 @@ def test_ip_failures_include_engine_vps_ip_in_response_for_app_display() -> None
     assert r.status_code == 400
     assert r.headers.get("X-Engine-VPS-IP") == "203.0.113.42"
     assert "203.0.113.42" in r.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# GET /api/binance/connect/info — surface the whitelist IP up front
+# ---------------------------------------------------------------------------
+
+
+def test_connect_info_returns_engine_ip_without_kms_or_firestore() -> None:
+    """The info endpoint exists precisely so the app can show the
+    whitelist IP BEFORE a connect attempt — and it must keep working
+    while KMS / Firestore are down (the state that 500s the connect
+    flow).  The autouse fixture leaves both uninitialised via
+    ``reset_for_test``; assert the IP still comes back so a broken KMS
+    config never hides the whitelist IP from the user."""
+    from src.security import firestore_keystore, kms_client
+
+    # Belt-and-braces: prove the decoupling rather than assume it.
+    assert not kms_client.is_initialised()
+    assert not firestore_keystore.is_initialised()
+
+    app = _build_app(identity=_firebase_user())
+    client = TestClient(app)
+    r = client.get("/api/binance/connect/info")
+    assert r.status_code == 200, r.text
+    assert r.json()["engine_vps_ip"] == "203.0.113.42"
+
+
+def test_connect_info_returns_null_ip_when_unset(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """When the operator hasn't set ENGINE_VPS_PUBLIC_IP the endpoint
+    returns 200 with a null IP (not a 500), so the app degrades to
+    generic whitelist wording rather than showing an error card."""
+    monkeypatch.delenv("ENGINE_VPS_PUBLIC_IP", raising=False)
+    app = _build_app(identity=_firebase_user())
+    client = TestClient(app)
+    r = client.get("/api/binance/connect/info")
+    assert r.status_code == 200, r.text
+    assert r.json()["engine_vps_ip"] is None
+
+
+def test_connect_info_requires_auth() -> None:
+    """The IP is non-secret but still auth-gated — only signed-in app
+    users can read it, never the open internet."""
+    app = _build_app(allow_auth=False)
+    client = TestClient(app)
+    r = client.get("/api/binance/connect/info")
+    assert r.status_code == 401

@@ -1555,6 +1555,27 @@ class BinanceConnectStatusResponse(BaseModel):
     )
 
 
+class BinanceConnectInfoResponse(BaseModel):
+    """Response body for ``GET /api/binance/connect/info``.
+
+    Non-secret onboarding metadata the Server-side execution page shows
+    *before* a connect attempt.  Today that is just the engine VPS IP the
+    user must whitelist on their Binance key.  Served independently of
+    KMS / Firestore so the IP stays retrievable even when the connect
+    flow itself is 500ing on a KMS/Firestore misconfiguration.
+    """
+
+    engine_vps_ip: Optional[str] = Field(
+        None,
+        description=(
+            "The public IP the user must add to their Binance API-key IP "
+            "whitelist.  Null when the operator has not set "
+            "ENGINE_VPS_PUBLIC_IP — the app then falls back to generic "
+            "whitelist wording rather than showing an error."
+        ),
+    )
+
+
 # ---------------------------------------------------------------------------
 # Admin full-signal reset (owner-only) — 2026-06-25
 # ---------------------------------------------------------------------------
