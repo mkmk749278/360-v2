@@ -65,8 +65,19 @@ class FundingExitWatcher:
     # How often (seconds) to re-check in normal operation.
     _POLL_INTERVAL_S: float = 30.0
 
+    # How long (seconds) a successfully-fired close suppresses re-firing
+    # for the same signal.  The position normally goes CLOSED within
+    # seconds via the funding_close fill event; if that WS event drops,
+    # the position stays non-terminal and — without this guard — every
+    # 30s poll inside the funding window would re-issue cancel + close
+    # (-2022 spam) until the reconciler heals it.  15 min comfortably
+    # covers several reconciler cycles.
+    _FIRED_SUPPRESS_S: float = 15 * 60.0
+
     def __init__(self) -> None:
         self._stop_event = asyncio.Event()
+        # signal_id → monotonic time the close was successfully placed.
+        self._fired_at: dict[str, float] = {}
 
     async def stop(self) -> None:
         """Request graceful shutdown.  Safe to call concurrently with run."""
@@ -153,6 +164,15 @@ class FundingExitWatcher:
                 if abs(funding_rate) < PRE_FUNDING_MIN_RATE:
                     continue
 
+                # Already fired for this signal and the close order landed?
+                # Don't re-issue while we wait for the fill event (or the
+                # reconciler) to move the position terminal.
+                fired = self._fired_at.get(pos.signal_id)
+                if fired is not None:
+                    if time.monotonic() - fired < self._FIRED_SUPPRESS_S:
+                        continue
+                    self._fired_at.pop(pos.signal_id, None)
+
                 log.info(
                     "funding_exit_watcher: exiting uid={} signal_id={} symbol={} "
                     "side={} state={} funding_rate={:.5f} seconds_to_funding={:.0f}s",
@@ -164,15 +184,21 @@ class FundingExitWatcher:
                     funding_rate,
                     (next_funding_ms - now_ms) / 1000.0,
                 )
-                await _close_for_funding(uid, pos, _op.OrderPlacer(uid))
+                if await _close_for_funding(uid, pos, _op.OrderPlacer(uid)):
+                    self._fired_at[pos.signal_id] = time.monotonic()
 
 
-async def _close_for_funding(uid: str, pos: "object", placer: "object") -> None:
+async def _close_for_funding(uid: str, pos: "object", placer: "object") -> bool:
     """Cancel bracket orders then market-close for funding exit.
 
     Mirrors the pattern in ``signal_dispatch.close_fsm_positions_for_signal``:
     cancel first (to avoid fighting an active SL/TP), then place MARKET close.
     Uses ``place_funding_market_close`` so the FSM records close_reason=FUNDING_EXIT.
+
+    Returns True when the close order was successfully placed (or there
+    was nothing left to close) — the watcher uses this to suppress
+    re-firing while the fill event is in flight.  False = placement
+    failed; the next poll may retry.
     """
     from src.execution import order_placer as _op
     from src.execution import position_state as _ps
@@ -200,8 +226,19 @@ async def _close_for_funding(uid: str, pos: "object", placer: "object") -> None:
                 uid, pos.signal_id, order_id, exc,
             )
 
-    # Place REDUCE_ONLY MARKET close for remaining quantity.
-    remaining = max(pos.total_qty - pos.closed_qty, 0.0) or pos.total_qty
+    # Place REDUCE_ONLY MARKET close for remaining quantity.  A zero
+    # residual means the position is already fully closed and only the
+    # state transition is lagging — nothing to send (the old
+    # ``or pos.total_qty`` fallback here re-sent the FULL quantity in
+    # that case, relying on reduceOnly to save it).
+    remaining = max(pos.total_qty - pos.closed_qty, 0.0)
+    if remaining <= 0:
+        log.info(
+            "funding_exit_watcher: zero residual — nothing to close uid={} "
+            "signal_id={}",
+            uid, pos.signal_id,
+        )
+        return True
     try:
         await placer.place_funding_market_close(
             signal_id=pos.signal_id,
@@ -209,6 +246,7 @@ async def _close_for_funding(uid: str, pos: "object", placer: "object") -> None:
             direction=pos.side,
             quantity=remaining,
         )
+        return True
     except _op.OrderPlacementError as exc:
         # Fail-soft: log and continue. The Trade Monitor's 5s backstop
         # and TradeMonitor._check_all will catch stale open positions.
@@ -217,3 +255,4 @@ async def _close_for_funding(uid: str, pos: "object", placer: "object") -> None:
             "signal_id={} exc={}",
             uid, pos.signal_id, exc,
         )
+        return False

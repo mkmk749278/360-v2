@@ -169,6 +169,25 @@ async def alert_symbol_not_allowed(
     await _send(text)
 
 
+async def alert_naked_residual(
+    *, firebase_uid: str, signal_id: str, symbol: str, remaining_qty: float
+) -> None:
+    """Every rung of a pre-TP exit ladder failed — replacement stop,
+    BE-SL fallback AND the force-close all rejected.  The residual is
+    sitting on Binance with NO protective order; the only automatic
+    backstop left is the reconciler's stale-age close (hours away).
+    This violates the naked-position invariant and needs operator
+    eyes NOW: close the residual manually on Binance or via ops."""
+    text = (
+        "🚨 *NAKED RESIDUAL — manual action required*\n"
+        f"uid: `{firebase_uid}` signal_id: `{signal_id}`\n"
+        f"symbol: `{symbol}` remaining_qty: {remaining_qty:.8f}\n"
+        f"stop replacement, BE-SL fallback and force-close ALL failed\n"
+        f"position is OPEN with no stop — close manually"
+    )
+    await _send(text)
+
+
 async def alert_binance_rejection(
     *, firebase_uid: str, signal_id: str, code: str, message: str
 ) -> None:
