@@ -153,6 +153,11 @@ class Signal:
     # FAILED_AUCTION_RECLAIM: the struct level (prior swing high/low) that was
     # broken-then-recovered; used as the structural anchor by execution quality checks.
     far_reclaim_level: Optional[float] = None
+    # MEAN_REVERT: the 20-bar rolling mean the fade targets (== TP1 at
+    # creation); used as the structural anchor by execution quality checks —
+    # a counter-trend fade cannot be judged against the generic EMA
+    # trend-alignment anchor.
+    mean_revert_mean: Optional[float] = None
     # Best TP level reached during this signal's lifetime (0 = none, 1 = TP1, 2 = TP2)
     best_tp_hit: int = 0
     # PnL % frozen at the moment the highest TP was hit (used for signal quality stats)

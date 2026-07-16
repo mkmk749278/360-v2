@@ -16,7 +16,7 @@ import json
 import random
 import time
 from dataclasses import dataclass, field
-from typing import Any, Callable, Coroutine, Dict, List, Optional, Set
+from typing import Any, Callable, Coroutine, Dict, List, Optional, Set, Tuple
 
 import aiohttp
 
@@ -89,6 +89,13 @@ class WSConnection:
     # health-check loop force-closes the connection.  Pattern matches
     # ``degraded_since`` so it composes cleanly with /diag reporting.
     low_msgrate_since: float = 0.0
+    # Monotonic timestamp at which this connection FIRST dropped in the
+    # current outage (0.0 = healthy / never dropped).  Set once on the first
+    # failure after a healthy period, cleared when the post-reconnect candle
+    # gap-refill has been scheduled.  Quick reconnects (including Binance's
+    # 24h forced disconnect) never activate the REST fallback, so without
+    # this the candles that closed during the gap were permanently missed.
+    disconnected_ts: float = 0.0
     # Per-stream "last data arrived" timestamps (monotonic).  Populated from
     # ``_listen`` when a combined-stream wrapper arrives ({"stream":..., "data":...}).
     # The trace summary loop reads this to report ``active/silent`` counts per
@@ -170,6 +177,9 @@ class WebSocketManager:
         # data-staleness paths don't compete with the REST-fallback path
         # over a single ``_last_alert_time`` slot.
         self._alert_keyed_ts: Dict[str, float] = {}
+        # Strong refs for post-reconnect gap-refill tasks — a bare
+        # create_task can be GC'd mid-flight (the loop holds only a weak ref).
+        self._gap_refill_tasks: Set[asyncio.Task] = set()
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -534,6 +544,68 @@ class WebSocketManager:
         self._sync_rest_fallback_state()
 
     # ------------------------------------------------------------------
+    # Post-reconnect candle gap-refill (2026-07-16 audit)
+    # ------------------------------------------------------------------
+
+    _KLINE_INTERVAL_SEC: Dict[str, int] = {
+        "1m": 60, "3m": 180, "5m": 300, "15m": 900, "30m": 1800,
+        "1h": 3600, "2h": 7200, "4h": 14400, "6h": 21600, "8h": 28800,
+        "12h": 43200, "1d": 86400, "3d": 259200, "1w": 604800,
+    }
+
+    def _schedule_gap_refill(self, conn: WSConnection) -> None:
+        """After a reconnect, REST-backfill the closed candles the outage ate.
+
+        The sustained-outage path (``_rest_fallback_loop``) bulk-seeds only
+        once the fallback ACTIVATES — quick reconnects (normal jitter and
+        Binance's 24h forced disconnect) stayed inside the grace window, so
+        every candle that closed during the gap was permanently missing from
+        the store.  Bounded and rare: runs once per reconnect, only for this
+        connection's kline streams, only for timeframes whose interval fits
+        inside the gap, throttled to ~5 req/s like the bulk seeder.
+        """
+        started_at = conn.disconnected_ts
+        conn.disconnected_ts = 0.0
+        if started_at <= 0.0 or self._data_store is None:
+            return
+        gap_sec = max(0.0, time.monotonic() - started_at)
+        targets: List[Tuple[str, str, int]] = []
+        for stream in conn.streams:
+            if "@kline_" not in stream:
+                continue
+            sym, _, interval = stream.partition("@kline_")
+            isec = self._KLINE_INTERVAL_SEC.get(interval)
+            if not isec or gap_sec < isec:
+                continue  # no candle of this TF closed during the gap
+            missed = int(gap_sec // isec)
+            limit = min(missed + 2, WS_FALLBACK_BULK_LIMIT)
+            targets.append((sym.upper(), interval, limit))
+        if not targets:
+            return
+        log.info(
+            "gap_refill: backfilling {} stream(s) after {:.0f}s outage ({})",
+            len(targets), gap_sec, self._label,
+        )
+        task = asyncio.get_running_loop().create_task(self._gap_refill(targets))
+        self._gap_refill_tasks.add(task)
+        task.add_done_callback(self._gap_refill_tasks.discard)
+
+    async def _gap_refill(self, targets: List[Tuple[str, str, int]]) -> None:
+        for symbol, interval, limit in targets:
+            try:
+                await self._data_store.fetch_and_store_fallback(
+                    symbol, interval=interval, limit=limit, market=self._market
+                )
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                # Fail-open: a missed backfill degrades one indicator window,
+                # never the connection — but it must be visible (hard limit).
+                from src import fail_open
+                fail_open.record("websocket_manager.gap_refill", exc)
+            await asyncio.sleep(0.2)  # ~5 req/s, same budget as the bulk seeder
+
+    # ------------------------------------------------------------------
     # Connection loop
     # ------------------------------------------------------------------
 
@@ -542,12 +614,15 @@ class WebSocketManager:
             try:
                 await self._connect(conn)
                 self._set_connection_degraded(conn, False)
+                self._schedule_gap_refill(conn)
                 await self._listen(conn)
             except asyncio.CancelledError:
                 return
             except Exception as exc:
                 log.warning("WS connection error: {}", exc)
             if self._running:
+                if conn.disconnected_ts == 0.0:
+                    conn.disconnected_ts = time.monotonic()
                 self._set_connection_degraded(conn, True)
                 self._total_drops += 1
                 # Only alert after multiple consecutive failures on the same

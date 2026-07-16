@@ -21,7 +21,12 @@ from __future__ import annotations
 import pathlib
 import re
 
-_SRC = pathlib.Path(__file__).resolve().parent.parent / "src"
+_ROOT = pathlib.Path(__file__).resolve().parent.parent
+_SRC = _ROOT / "src"
+# 2026-07-16 audit: the guard only scanned src/ — scripts/, tools/ and
+# config/ consume the same stores (diag scripts read candles directly) and
+# were unguarded against regression.  All three are clean today; this pins them.
+_SCAN_DIRS = [_SRC, _ROOT / "scripts", _ROOT / "tools", _ROOT / "config"]
 
 _OHLCV = r"(?:open|high|low|close|volume)"
 
@@ -44,6 +49,17 @@ _PATTERNS = [
     re.compile(rf"(?:if|and|or)\s+\w+\.get\(\s*[\"']{_OHLCV}[\"'][^)]*\)\s*(?::|and\b|or\b|\)|$)"),
     # if mom_arr: (bare truthy _arr/_array-suffixed series)
     re.compile(r"(?:if|and|or)\s+(?:\w+_arr|\w+_array)\s*(?::|and\b|or\b|$)"),
+    # arr or [] / series or [] / closes or [] — the bare-name fallback form
+    # (2026-07-16 audit: the original .get()-bound regex missed it entirely).
+    # `candles` is deliberately absent: by codebase convention that name holds
+    # the per-symbol DICT (get_candles output), whose truthiness is safe.
+    re.compile(
+        r"\b(?:arr|series|closes|highs|lows|opens|volumes|ohlc\w*|\w+_arr|\w+_array)"
+        r"\s+or\s+\[",
+    ),
+    # if not arr: / if not series: / if not ohlcv: (bare series names — the
+    # docstring always claimed this coverage; the regex never had it).
+    re.compile(r"(?:if|and|or)\s+not\s+(?:arr|series|ohlc\w*)\s*(?::|and\b|or\b|\)|$)"),
 ]
 
 # Verified list-fed or len-guarded sites (file suffix, line substring).
@@ -75,6 +91,14 @@ _ALLOWLIST = [
     # never a candle series — scalar `or`-chaining is the intended fallback.
     ("channels/scalp.py", "or zone.get(\"high\")"),
     ("channels/scalp.py", "or zone.get(\"low\")"),
+    # Documentation text inside a docstring (describes the banned pattern);
+    # the scanner strips `#` comments but not docstrings.
+    ("btc_state.py", "Avoids ``arr or []`` (ambiguous truth value on numpy arrays)."),
+    # `ohlc` here is fetch_ohlc_since's return: a DICT of lists per its
+    # documented contract (invalidation_audit.py:251) — `if not ohlc:` is
+    # dict-emptiness; the inner values get None/len checks two lines below.
+    ("invalidation_audit.py", "if not ohlc:"),
+    ("suppression_audit.py", "if not ohlc:"),
 ]
 
 
@@ -85,8 +109,12 @@ def _allowed(rel: str, line: str) -> bool:
 
 def test_no_new_numpy_truthiness_patterns_in_src():
     violations = []
-    for path in sorted(_SRC.rglob("*.py")):
-        rel = str(path.relative_to(_SRC.parent))
+    paths = []
+    for base in _SCAN_DIRS:
+        if base.is_dir():
+            paths.extend(sorted(base.rglob("*.py")))
+    for path in paths:
+        rel = str(path.relative_to(_ROOT))
         for lineno, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
             code = line.split("#", 1)[0]
             if not code.strip():

@@ -1209,6 +1209,21 @@ def execution_quality_check(
         note = (
             "Enter only after breakout close acceptance and retest hold beyond the flipped S/R level."
         )
+    elif setup == SetupClass.MEAN_REVERT:
+        # Counter-trend fade: the anchor is the 20-bar rolling mean the trade
+        # targets (stamped by the evaluator as mean_revert_mean == TP1).  The
+        # trigger is confirmed when the entry sits on the STRETCHED side of
+        # the mean in the fade direction.  The generic else-branch below is a
+        # trend-continuation trigger (short EMA aligned WITH the trade) and is
+        # structurally false for a fade — before this branch existed it
+        # rejected 300/300 MEAN_REVERT candidates ("entry trigger not
+        # confirmed") and the 18th path never emitted (2026-07-16).
+        anchor = _safe_float(getattr(signal, "mean_revert_mean", None), bb_mid or signal.entry)
+        trigger_confirmed = (
+            signal.entry < anchor if signal.direction == Direction.LONG
+            else signal.entry > anchor
+        )
+        note = "Fade the over-extension back to the rolling mean; invalidation is continued extension beyond the stop."
     else:
         anchor = ema_anchor
         trigger_confirmed = (
@@ -1238,6 +1253,12 @@ def execution_quality_check(
         # more room than PDC because the reclaim move itself creates separation from
         # the anchor; cap at 1.2 ATR to reject stale entries chasing the reversal.
         SetupClass.FAILED_AUCTION_RECLAIM: 1.2,
+        # MEAN_REVERT: the entry IS a ≥2.5σ stretch away from its mean anchor
+        # — distance from the anchor is the setup, not a staleness signal.
+        # Without this key the 1.5-ATR default rejected every candidate that
+        # survived the (previously broken) trigger.  5.0 ATR still rejects
+        # catastrophic dislocations (news candles) where fading is suicide.
+        SetupClass.MEAN_REVERT: 5.0,
     }.get(setup, 1.5)
     passed = trigger_confirmed and extension_ratio <= max_extension
     zone_low = min(anchor, signal.entry)

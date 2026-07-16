@@ -6682,6 +6682,10 @@ class ScalpChannel(BaseChannel):
         sig.original_tp2 = sig.tp2
         sig.original_tp3 = sig.tp3
         sig.original_sl_distance = sl_dist
+        # Structural anchor for execution_quality_check's MEAN_REVERT branch:
+        # the fade is judged against the mean it targets, not the generic
+        # 5m-EMA trend anchor (which is structurally opposed for a fade).
+        sig.mean_revert_mean = sig.tp1
         sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
         sig.trailing_stage = 0
         sig.partial_close_pct = 0.0
