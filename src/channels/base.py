@@ -661,8 +661,13 @@ def build_channel_signal(
             )
             if structural_tp1 != tp1:
                 tp1 = structural_tp1
-        except Exception:
-            pass  # Fail open - use ATR-based levels
+        except Exception as _struct_exc:
+            # Fail open — use ATR-based levels.  This snap is shared by
+            # EVERY evaluator that passes candle arrays: a regression in
+            # find_swing_levels here would silently revert all signals
+            # to raw ATR geometry, so the failure must count and page.
+            from src import fail_open
+            fail_open.record("channels.structural_sltp_snap", _struct_exc)
 
     sig = Signal(
         channel=config.name,

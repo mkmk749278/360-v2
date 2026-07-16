@@ -235,6 +235,12 @@ def evaluate_all(
             cand = fn()
             if cand is not None and cand.entry > 0 and cand.stop_loss > 0 and cand.tp1 > 0:
                 out.append(cand)
-        except Exception:
+        except Exception as _unit_exc:
+            # Still fail-neutral, but counted: the MEAN_REVERT shadow
+            # unit is the ungated CONTROL ARM for the live evaluator —
+            # if it silently stops stamping, the live-vs-shadow drift
+            # check the S58 launch relies on is blind.
+            from src import fail_open
+            fail_open.record("shadow_strategies.unit_eval", _unit_exc)
             continue
     return out

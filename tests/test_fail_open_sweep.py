@@ -133,3 +133,82 @@ def test_numpy_arrays_do_not_false_positive():
         "LONG", {"1h": {"ema_fast": 2.0, "ema_slow": 1.0, "close": 2.1}}
     )
     assert fail_open.snapshot() == {}
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-16 audit sweep — the gate-chain half #727/S58 skipped
+# ---------------------------------------------------------------------------
+
+
+def test_structural_sltp_snap_records_and_falls_back_to_atr_levels():
+    """channels/base.py structural snap is shared by EVERY evaluator that
+    passes candle arrays — a find_swing_levels regression would silently
+    revert all signals to raw ATR geometry.  Pin: fail open + counted."""
+    from src.channels.base import ChannelConfig, build_channel_signal
+    from src.smc import Direction
+
+    cfg = ChannelConfig(
+        name="360_SCALP", emoji="s", timeframes=["5m"], sl_pct_range=(0.5, 3.0),
+        tp_ratios=[1.0, 2.0, 3.0], trailing_atr_mult=1.0, adx_min=0.0,
+        adx_max=100.0, spread_max=0.1, min_confidence=0.0,
+    )
+    sig = build_channel_signal(
+        cfg, "BTCUSDT", Direction.LONG,
+        close=100.0, sl=99.0, tp1=101.0, tp2=102.0, tp3=103.0,
+        sl_dist=1.0, id_prefix="t",
+        candle_highs={"bad": 1}, candle_lows={"bad": 1}, candle_closes={"bad": 1},
+    )
+    assert sig is not None  # fail open — ATR-based levels survive
+    assert sig.stop_loss == pytest.approx(99.0)
+    assert _count("channels.structural_sltp_snap") == 1
+
+
+def test_shadow_unit_errors_are_counted_not_swallowed():
+    """The MEAN_REVERT shadow unit is the ungated control arm for the live
+    evaluator — if it silently stops stamping, the live-vs-shadow drift
+    check is blind.  Pin: unit errors count while staying fail-neutral."""
+    from src import shadow_strategies as ss
+
+    out = ss.evaluate_all(
+        highs=["x"] * 400, lows=["x"] * 400, closes=["x"] * 400,
+        funding_rate=0.001,
+    )
+    assert out == []  # fail-neutral: no candidates, no raise
+    assert _count("shadow_strategies.unit_eval") >= 1
+
+
+def test_scanner_gate_chain_has_no_silent_exception_pass():
+    """AST pin: no NEW bare ``except Exception: pass`` in the scanner.
+
+    The 2026-07-16 audit converted every data/measurement swallow in the
+    gate chain to fail_open.record.  The survivors are messaging/heartbeat
+    best-effort sends and warmup-normal attribute fallbacks — allowlisted
+    by count.  If this fails after your change: call
+    ``fail_open.record("scanner.<site>", exc)`` instead of ``pass``
+    (data/measurement path), or update the count WITH justification here
+    (genuinely-benign best-effort side channel)."""
+    import ast as _ast
+    import pathlib
+
+    src = (
+        pathlib.Path(__file__).resolve().parent.parent
+        / "src" / "scanner" / "__init__.py"
+    ).read_text(encoding="utf-8")
+    bare = []
+    for node in _ast.walk(_ast.parse(src)):
+        if not isinstance(node, _ast.ExceptHandler):
+            continue
+        if len(node.body) == 1 and isinstance(node.body[0], _ast.Pass):
+            # Only Exception-typed (or untyped) handlers count — typed
+            # narrow handlers (OSError, TypeError/ValueError coercion
+            # contract) are deliberate.
+            t = node.type
+            if t is None or (isinstance(t, _ast.Name) and t.id == "Exception"):
+                bare.append(node.lineno)
+    # 8 allowlisted survivors (2026-07-16): 6 admin-alert/free-channel
+    # message best-effort sends, 1 protective-mode broadcast wrapper,
+    # 1 radar-pass regime-string warmup fallback.
+    assert len(bare) <= 8, (
+        f"new silent 'except Exception: pass' in scanner at lines {bare} — "
+        "data/measurement paths must call fail_open.record"
+    )

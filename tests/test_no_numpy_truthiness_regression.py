@@ -34,9 +34,16 @@ _PATTERNS = [
     # if candles["close"]:   /   and candles["close"]
     re.compile(rf"(?:if|and|or)\s+\w+\[\s*[\"']{_OHLCV}[\"']\s*\]\s*(?::|and\b|or\b|\)|$)"),
     # float(x[-1]) if closes else ...
-    re.compile(r"if\s+(?:closes|highs|lows|opens|volumes)\s+else\b"),
-    # if not closes: (bare named series)
-    re.compile(r"(?:if|and|or)\s+not\s+(?:closes|highs|lows|opens|volumes)\s*(?::|and\b|or\b|\)|$)"),
+    re.compile(r"if\s+(?:closes|highs|lows|opens|volumes|\w+_arr|\w+_array)\s+else\b"),
+    # if not closes: (bare named series; _arr/_array suffixes added 2026-07-16
+    # — the original OHLCV-name-bound regex missed `if not mom_arr:` shapes)
+    re.compile(r"(?:if|and|or)\s+not\s+(?:closes|highs|lows|opens|volumes|\w+_arr|\w+_array)\s*(?::|and\b|or\b|\)|$)"),
+    # if cd.get("close"):  (truthy .get — the 2026-07-16 audit found the
+    # original patterns only caught `not …get()` and `…get() or`, not the
+    # plain truthy test).  A trailing `is`/comparison does NOT match.
+    re.compile(rf"(?:if|and|or)\s+\w+\.get\(\s*[\"']{_OHLCV}[\"'][^)]*\)\s*(?::|and\b|or\b|\)|$)"),
+    # if mom_arr: (bare truthy _arr/_array-suffixed series)
+    re.compile(r"(?:if|and|or)\s+(?:\w+_arr|\w+_array)\s*(?::|and\b|or\b|$)"),
 ]
 
 # Verified list-fed or len-guarded sites (file suffix, line substring).
@@ -64,6 +71,10 @@ _ALLOWLIST = [
     ("order_flow.py", "if not closes or not buy_volumes or not sell_volumes:"),
     # bin_volumes is `.tolist()` output two lines above — always a list.
     ("volume_profile.py", "if not bin_volumes or all(v == 0 for v in bin_volumes):"),
+    # `zone` is an FVG/OB zone DICT of scalar floats (gap_high/top/level/…),
+    # never a candle series — scalar `or`-chaining is the intended fallback.
+    ("channels/scalp.py", "or zone.get(\"high\")"),
+    ("channels/scalp.py", "or zone.get(\"low\")"),
 ]
 
 
