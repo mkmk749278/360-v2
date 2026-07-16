@@ -550,6 +550,29 @@ GEOMETRY_AB_MAX_STOP_PCT: float = _safe_float("GEOMETRY_AB_MAX_STOP_PCT", "5.0")
 GEOMETRY_AB_STAMP_COOLDOWN_SEC: float = _safe_float("GEOMETRY_AB_STAMP_COOLDOWN_SEC", "600")
 
 # ---------------------------------------------------------------------------
+# Tuned-variant shadow arms (2026-07-16 — owner: "tune, don't disable")
+# ---------------------------------------------------------------------------
+# MOVER_AVWAP_SCALP and VOLUME_SURGE_BREAKOUT are three-windows-confirmed
+# measured losers (−0.78R n=141 / −0.74R n=95; profit-tab capture −17% / −4%).
+# Instead of pruning, every live candidate from these paths also stamps a
+# SETUP@TUNED counterfactual arm (src/tuned_variants.py) whose recipe attacks
+# the path's measured failure mode.  Observe-only: rows land in the edge
+# matrix as shadow variants; applying a winner is a later dark-first change.
+TUNED_VARIANTS_ENABLED: bool = _safe_bool("TUNED_VARIANTS_ENABLED", "true")
+# TP1 distance (% of entry) per tuned setup — the measured median MFE these
+# paths reach and then give back (profit tab 2026-07-16: MAS med 2.09%,
+# VSB 3.70% on a thin sample → 3.0% conservative).
+TUNED_MAS_TP1_PCT: float = _safe_float("TUNED_MAS_TP1_PCT", "2.1")
+TUNED_VSB_TP1_PCT: float = _safe_float("TUNED_VSB_TP1_PCT", "3.0")
+# VSB entry-quality tightening: the tuned arm skips candidates whose entry is
+# further than this many ATR14(15m) from the 20-bar mean — the live path's
+# late-chase entries are exactly the ones that round-trip to −1R.
+TUNED_VSB_MAX_EXTENSION_ATR: float = _safe_float("TUNED_VSB_MAX_EXTENSION_ATR", "1.0")
+# One tuned stamp per (symbol, setup, side) per window (same rationale as the
+# geometry A/B cooldown — a persisting candidate re-detects every scan).
+TUNED_VARIANT_STAMP_COOLDOWN_SEC: float = _safe_float("TUNED_VARIANT_STAMP_COOLDOWN_SEC", "600")
+
+# ---------------------------------------------------------------------------
 # Counter-trend-LONG macro-direction suppression (S39 — the validated scalp filter)
 # ---------------------------------------------------------------------------
 # SCALP-FIRST (owner directive): this is a thin context filter on genuine counter-

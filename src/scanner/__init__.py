@@ -1277,6 +1277,10 @@ class Scanner:
         # End-to-end path observability counters (rolling 100-scan window).
         self._path_funnel_counters: Dict[str, int] = defaultdict(int)
         self._channel_funnel_counters: Dict[str, int] = defaultdict(int)
+        # Monotonic (never cleared) MEAN_REVERT emission counter feeding the
+        # mean_revert_emission liveness probe — the rolling funnel counters
+        # above are flushed periodically so they can't drive a probe.
+        self._mean_revert_emitted_total: int = 0
 
         # Scoring tier telemetry: accumulates candidate counts per setup_class
         # and score tier across cycles; logged every 100 scan cycles to diagnose
@@ -3453,6 +3457,8 @@ class Scanner:
 
     def _increment_path_funnel(self, stage: str, chan_name: str, setup_class_name: Any) -> None:
         self._path_funnel_counters[self._path_funnel_key(stage, chan_name, setup_class_name)] += 1
+        if stage == "emitted" and self._normalize_setup_class(setup_class_name) == "MEAN_REVERT":
+            self._mean_revert_emitted_total += 1
 
     @staticmethod
     def _dependency_count_bucket(value: int) -> str:
@@ -4698,8 +4704,6 @@ class Scanner:
         """
         try:
             from src import runtime_tunables as _rt
-            if not bool(_rt.get("geometry_ab_enabled")):
-                return
             from src import geometry_ab as _gab
             symbol = str(getattr(sig, "symbol", "") or "")
             if not symbol:
@@ -4715,6 +4719,33 @@ class Scanner:
                 return
             _direction = getattr(sig, "direction", None)
             _side = getattr(_direction, "value", None) or str(_direction or "")
+            # Tuned-recipe arm for the measured-loser paths (own tunable —
+            # keeps measuring even if the stop A/B is toggled off; owner
+            # 2026-07-16: "tune, don't disable").  Fail-open in its own site.
+            try:
+                from src import tuned_variants as _tv
+                if (
+                    str(getattr(sig, "setup_class", "") or "").upper() in _tv.tuned_setups()
+                    and bool(_rt.get("tuned_variants_enabled"))
+                ):
+                    _tv.stamp_tuned_variant(
+                        symbol=symbol,
+                        channel=str(getattr(sig, "channel", "") or ""),
+                        setup_class=str(getattr(sig, "setup_class", "") or ""),
+                        side=_side,
+                        entry=float(getattr(sig, "entry", 0.0) or 0.0),
+                        highs=highs,
+                        lows=lows,
+                        closes=closes,
+                        confidence=float(getattr(sig, "confidence", 0.0) or 0.0),
+                        context_key=str(getattr(sig, "mc_context_key", "") or ""),
+                        regime=str(getattr(sig, "entry_regime", "") or ""),
+                        valid_for_minutes=float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
+                    )
+            except Exception as _tv_exc:
+                fail_open.record("scanner.stamp_tuned_variant", _tv_exc)
+            if not bool(_rt.get("geometry_ab_enabled")):
+                return
             alt_stop = _gab.stamp_geometry_pair(
                 symbol=symbol,
                 channel=str(getattr(sig, "channel", "") or ""),

@@ -144,6 +144,12 @@ class CryptoSignalEngine:
         self.telegram = TelegramBot()
         self.telemetry = TelemetryCollector()
 
+        # Strong refs for money-path fire-and-forget tasks (expiry broker
+        # close): the event loop holds only a weak ref, so an unreferenced
+        # task can be GC'd before the close lands (2026-07-16 audit; same
+        # pattern as mark_price_feed._background_tasks).
+        self._expiry_close_tasks: Set[asyncio.Task] = set()
+
         self._redis_client = RedisClient()
         self._signal_queue = SignalQueue(
             self._redis_client,
@@ -790,11 +796,15 @@ class CryptoSignalEngine:
         ):
             try:
                 import asyncio as _asyncio
-                _asyncio.get_running_loop().create_task(
+                _task = _asyncio.get_running_loop().create_task(
                     self._order_manager.close_full(
                         sig, reason="expired", current_price=current_price or None
                     )
                 )
+                # Money path: hold a strong ref so GC can't cancel the close
+                # mid-flight (the loop's WeakSet is not ownership).
+                self._expiry_close_tasks.add(_task)
+                _task.add_done_callback(self._expiry_close_tasks.discard)
             except RuntimeError:
                 # No running loop (test path or sync caller) — skip the
                 # async broker close.  The reconciler will catch the orphan.
@@ -1844,6 +1854,64 @@ class CryptoSignalEngine:
             upstream=_shadow_stamp_total,
             min_upstream_delta=30.0,
             min_streak=72,         # ~6 h
+        ))
+
+        # MEAN_REVERT emissions vs detections (2026-07-16): the detection
+        # probe above stayed green while execution_quality_check rejected
+        # 300/300 candidates — a generated-but-fully-gated path is invisible
+        # to it.  This probe tracks the detection backlog since the LAST
+        # emission; once ≥60 detections accrue with zero emissions the probe
+        # violates and pages after the streak window.  A page here means:
+        # read the gate rejection reasons, not the evaluator.  (RateProbe is
+        # unsuitable: MEAN_REVERT detections are sparse per 5-min cycle and
+        # any quiet cycle would reset its streak.)
+        _mr_emit_state: Dict[str, Optional[float]] = {"emit": None, "det": None}
+
+        def _mean_revert_emission_health():
+            if not bool(_rt.get("mean_revert_live")):
+                return True, "disabled by tunable"
+            det = _mean_revert_detections() or 0.0
+            emit = float(getattr(self._scanner, "_mean_revert_emitted_total", 0) or 0)
+            if _mr_emit_state["emit"] is None or emit != _mr_emit_state["emit"]:
+                _mr_emit_state["emit"] = emit
+                _mr_emit_state["det"] = det
+                return True, f"emitted_total={emit:g}"
+            backlog = det - (_mr_emit_state["det"] or 0.0)
+            if backlog >= 60:
+                return False, (
+                    f"{backlog:g} detections since last emission "
+                    f"(emitted_total={emit:g}) — check gate rejections"
+                )
+            return True, f"backlog {backlog:g} detections since last emission"
+
+        fl.add_predicate(PredicateProbe(
+            name="mean_revert_emission",
+            fn=_mean_revert_emission_health,
+            min_streak=6,
+        ))
+
+        # Tuned-variant pipeline (2026-07-16, tune-don't-disable): the residue
+        # seen − stamped − skipped grows only on silent pipeline failures
+        # (uncomputable ATR arms, store rejects) — by-design skips (cooldown,
+        # VSB extension filter) are excluded.  MAS/VSB candidates are rare, so
+        # the bar is low but the streak requirement still filters blips.
+        def _tuned_variants_health():
+            if not bool(_rt.get("tuned_variants_enabled")):
+                return True, "disabled by tunable"
+            from src import tuned_variants as _tv
+            c = _tv.counters()
+            residue = c["seen"] - c["stamped"] - c["skipped"]
+            detail = (
+                f"seen={c['seen']} stamped={c['stamped']} skipped={c['skipped']}"
+            )
+            if residue >= 10:
+                return False, f"{residue} unexplained non-stamps ({detail})"
+            return True, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="tuned_variants",
+            fn=_tuned_variants_health,
+            min_streak=6,
         ))
         return fl
 

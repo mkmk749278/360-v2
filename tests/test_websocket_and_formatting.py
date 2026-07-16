@@ -2485,3 +2485,77 @@ def test_trace_sink_survives_logger_module_reconfigure(tmp_path, monkeypatch):
         f"Trace sink was wiped by src/logger.py reconfigure — hotfix regressed. "
         f"File contents: {contents!r}"
     )
+
+
+# ---------------------------------------------------------------------------
+# 2026-07-16 audit: post-reconnect candle gap-refill.  Quick reconnects
+# (normal jitter + Binance's 24h forced disconnect) never activate the REST
+# fallback, so the candles that closed during the gap were permanently
+# missing from the store.
+# ---------------------------------------------------------------------------
+
+
+class _FakeStore:
+    def __init__(self):
+        self.calls = []
+
+    async def fetch_and_store_fallback(self, symbol, interval, limit, market):
+        self.calls.append((symbol, interval, limit, market))
+
+
+class TestGapRefill:
+    def _mgr(self):
+        from src.websocket_manager import WebSocketManager
+        mgr = WebSocketManager(on_message=lambda m: None, market="futures",
+                               data_store=_FakeStore())
+        return mgr
+
+    @pytest.mark.asyncio
+    async def test_reconnect_backfills_missed_closed_candles(self, monkeypatch):
+        import time as _time
+
+        from src.websocket_manager import WSConnection
+        mgr = self._mgr()
+        conn = WSConnection(streams=["btcusdt@kline_1m", "btcusdt@kline_15m",
+                                     "btcusdt@markPrice"])
+        # 130s outage: two 1m candles closed, no 15m candle did.
+        conn.disconnected_ts = _time.monotonic() - 130.0
+        mgr._schedule_gap_refill(conn)
+        assert conn.disconnected_ts == 0.0, "refill must clear the outage mark"
+        assert mgr._gap_refill_tasks, "refill task must be scheduled + strong-ref'd"
+        await asyncio.gather(*mgr._gap_refill_tasks)
+        calls = mgr._data_store.calls
+        assert ("BTCUSDT", "1m", 4, "futures") in calls  # 2 missed + 2 margin
+        assert not any(c[1] == "15m" for c in calls), "15m had no closed candle in the gap"
+        assert not any("markPrice" in c[1] for c in calls)
+
+    @pytest.mark.asyncio
+    async def test_first_connect_and_instant_reconnect_do_nothing(self):
+        from src.websocket_manager import WSConnection
+        mgr = self._mgr()
+        conn = WSConnection(streams=["btcusdt@kline_1m"])
+        mgr._schedule_gap_refill(conn)          # first connect: never dropped
+        assert not mgr._gap_refill_tasks
+        import time as _time
+        conn.disconnected_ts = _time.monotonic() - 5.0   # 5s blip < 1m candle
+        mgr._schedule_gap_refill(conn)
+        assert not mgr._gap_refill_tasks
+        assert conn.disconnected_ts == 0.0
+
+    @pytest.mark.asyncio
+    async def test_limit_capped_at_bulk_limit(self, monkeypatch):
+        from config import WS_FALLBACK_BULK_LIMIT
+        from src import websocket_manager as wm
+        from src.websocket_manager import WSConnection
+        mgr = self._mgr()
+        conn = WSConnection(streams=["ethusdt@kline_1m"])
+        # A 2h outage can exceed container uptime, so pin the module's clock
+        # reference (never the global time module — asyncio's loop clock is
+        # time.monotonic and freezing it hangs every sleep).
+        from types import SimpleNamespace
+        monkeypatch.setattr(wm, "time", SimpleNamespace(monotonic=lambda: 7201.0))
+        conn.disconnected_ts = 1.0
+        mgr._schedule_gap_refill(conn)
+        await asyncio.gather(*mgr._gap_refill_tasks)
+        (symbol, interval, limit, market) = mgr._data_store.calls[0]
+        assert limit == WS_FALLBACK_BULK_LIMIT

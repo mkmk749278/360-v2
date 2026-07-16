@@ -4,6 +4,106 @@
 
 ---
 
+## 🟢 SESSION 60 2026-07-16 — 18th path was DEAD at the execution gate (fixed live), tuned shadow arms for the measured losers, WS gap-refill, Play Console fixes + AAB releases (branch `claude/system-audit-play-release-zsaa6d`, 360-v2 + lumin-app)
+
+**Owner ask:** deep audit (numpy class, data sufficiency, WS management, limits);
+why has yesterday's 18th path produced no signal; analyse attached Strategy Lab +
+Profit-tab PDFs; resolve the two Play Console recommendations; AAB into the
+Releases section + click-to-copy Play release notes.
+
+### The 18th-path incident (root cause CONFIRMED, fixed)
+
+Truth report showed `MEAN_REVERT | 300 generated | 300 gated | 0 emitted` —
+**`execution_quality_check` had no MEAN_REVERT branch**, so the fade fell into
+the generic ELSE whose trigger requires 5m EMA9 aligned WITH the trade
+(structurally false for a counter-trend fade) AND the 1.5-ATR default
+`max_extension` (always exceeded by a 2.5σ entry). Double-deterministic 100%
+rejection; NOT display, NOT market conditions, NOT the z-trigger (107
+detections). The `mean_revert_path` liveness probe compares detections vs
+shadow stamps and was structurally blind to generated-but-fully-gated.
+
+**Fix (live per the standing S58 owner directive; `mean_revert_live` stays the
+off-switch):** evaluator stamps `mean_revert_mean` (== TP1) on the signal;
+`execution_quality_check` gained a MEAN_REVERT fade branch (trigger = entry on
+the stretched side of the mean) + `max_extension: 5.0`; new
+`mean_revert_emission` liveness probe pages when ≥60 detections accrue with
+zero emissions (~backlog predicate — RateProbe streaks reset on sparse flows).
+Expect first emissions to cluster in RANGING/QUIET; confidence floor is 70 in
+RANGING so a quiet tape can still legitimately go hours without one.
+
+### Data read (owner-attached Strategy Lab + Profit PDFs, 2026-07-16)
+
+- Entries healthy: last-3d 25 closed, +41.27% real, 56% win; TP1-full sim
+  +43.04% — exits leak a modest +1.77%. QUIET-regime capture is **2%**.
+- SHADOW_MEAN_REVERT rollup n=886 / 52% / +0.43R, gate-audit KEEP — the edge
+  the dead live path was leaving on the table.
+- `dispatch_staleness` back at **DROP** (n=589, 78.9% would-win, 440R missed,
+  −0.70 EV) — biggest measured leak, but verdict has flip-flopped
+  (DROP S54 → KEEP S56/S58 → DROP). **Owner decision: keep measuring, no
+  action this session; re-read next window.**
+- MOVER_AVWAP_SCALP capture **−17% on 100% runners**; VSB −4% — third
+  consecutive losing window. **Owner decision: "disabling paths is never a
+  good idea, need to tune it" → shipped observe-only `@TUNED` shadow arms**
+  (`src/tuned_variants.py`): MAS arm banks TP1 at measured median MFE (2.1%)
+  behind an ATR/structure stop; VSB arm adds a ≤1-ATR-from-20-bar-mean entry
+  filter + 3.0% TP1. Rows land in the edge matrix as shadow variants
+  (excluded from allocator + rollups; `@TUNED` added to geometry variant
+  suffixes; stop-A/B rollup now suffix-explicit). Tunable
+  `tuned_variants_enabled` (Measurement, ON) + `tuned_variants` liveness
+  probe. Applying a winning recipe stays dark-first + owner-signed.
+- Stop-geometry A/B: ATR leads 5/6 decided strategies — application half
+  approaching actionable; give it ~a week more sample.
+
+### Audit verdict + fixes
+
+- **CLEAN (verified):** live numpy-truthiness, WS reconnect/backoff/listenKey
+  lifecycle, REST weight/429 handling, ledger bounds, blast-radius caps, no
+  bare excepts. REPORT-ONLY: `dispatch_log` Firestore subcollection grows
+  unbounded (~500KB/user/day, free-tier today — retention policy pending).
+- **Fixed — WS candle gap-refill:** quick reconnects (incl. Binance's 24h
+  forced disconnect) never activate the REST fallback, so candles that closed
+  during the gap were permanently missing. `_schedule_gap_refill` now
+  REST-backfills each kline stream's missed closed candles after every
+  reconnect (bounded, ~5 req/s, strong-ref'd task).
+- **Fixed — numpy CI guard widened:** now scans `scripts/`+`tools/`+`config/`
+  too, and catches bare `arr or []` / `if not arr|series|ohlc*` forms (3 new
+  allowlist entries with proofs; all trees clean).
+- **Fixed — money-path fire-and-forget:** expiry `close_full` task now
+  strong-ref'd (`_expiry_close_tasks`) — loop's WeakSet could GC it mid-close.
+- Housekeeping: dead `@skip` TestOBIChannel block deleted.
+- Tests: full suite **6604 passed** (+~30 new), ruff clean, mypy 102 (=baseline).
+
+### Lumin app (same branch, second PR)
+
+- **R8 full optimisation** (Play recommendation: 46% rates): workflow patches
+  the generated `build.gradle.kts` release block with `isMinifyEnabled` +
+  `isShrinkResources` + `proguard-android-optimize.txt` + a minimal
+  `proguard-rules.pro` (Flutter JNI + Play Core keeps). PR builds compile
+  with R8 full, so breakage fails CI pre-merge.
+- **Edge-to-edge** (Play recommendation, Android 15/SDK 35):
+  `SystemUiMode.edgeToEdge` + transparent bars in `main()`, and
+  `AppBarTheme.systemOverlayStyle` so per-page AppBars can't override it.
+  NavigationBar/AppBar handle their own insets; no page changes needed.
+- **AAB → Releases section:** both `action-gh-release` steps now attach the
+  `.aab` next to the APK — Play upload is a one-click download from the
+  release page. `docs/PLAY_RELEASE_NOTES.md` holds the `<en-US>` notes block.
+
+### NEXT
+
+1. Watch `MEAN_REVERT_FIRED` + first emissions in app/ops after deploy; the
+   `mean_revert_emission` probe pages if detections accrue with zero emissions.
+2. `@TUNED` rows appear in the Strategy Lab matrix once samples classify —
+   compare vs the live MAS/VSB rows after a real window; tuning application
+   is dark-first + owner sign-off.
+3. Re-read `dispatch_staleness` next window (owner: keep measuring).
+4. After next Play upload: confirm the two Play Console recommendations clear
+   on the new release's dashboard (may take a few days of install data).
+5. Unchanged: BTC_DIR shadow review → flip `btc_dir_penalty_apply`; geometry
+   A/B application design (~1 week more data); Telegram→app decouple (owner);
+   Phase 4 master-arm (owner); dispatch_log retention policy.
+
+---
+
 ## 🟢 SESSION 59 2026-07-16 — Full system audit → 4-tier fix batch: inert circuit breakers wired, pre-TP naked-residual ladders, gate-chain fail-open sweep, 6 bug fixes (branch `claude/system-audit-signals-qshnvq`, 360-v2)
 
 **Owner ask:** full audit on system for bugs, errors, dead code — especially

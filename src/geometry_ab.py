@@ -46,11 +46,15 @@ from src.utils import get_logger
 
 log = get_logger("geometry_ab")
 
-# Strategy-name suffixes for the two measurement arms.  The edge matrix keys on
-# the suffixed name, so both arms appear as their own rows per context cell.
+# Strategy-name suffixes for the measurement arms.  The edge matrix keys on
+# the suffixed name, so each arm appears as its own row per context cell.
+# @TUNED (src/tuned_variants.py, 2026-07-16) rides the same variant plumbing:
+# excluded from the allocator and from per-strategy rollups exactly like the
+# stop-geometry arms — measurement rows are never activatable strategies.
 FIXED_SUFFIX = "@FIXED"
 ATR_SUFFIX = "@ATR"
-_VARIANT_SUFFIXES: Tuple[str, ...] = (FIXED_SUFFIX, ATR_SUFFIX)
+TUNED_SUFFIX = "@TUNED"
+_VARIANT_SUFFIXES: Tuple[str, ...] = (FIXED_SUFFIX, ATR_SUFFIX, TUNED_SUFFIX)
 
 GATE_FIXED = "geometry_ab:fixed"
 GATE_ATR = "geometry_ab:atr"
@@ -272,7 +276,10 @@ def summarize_geometry_ab(
     pooled: Dict[str, Dict[str, Dict[str, float]]] = {}
     for cell in (matrix or {}).values():
         strategy = str(cell.get("strategy", ""))
-        if not is_geometry_variant(strategy):
+        # Explicit suffix check — @TUNED is a variant too but belongs to the
+        # tuned-recipe measurement, not this stop A/B; pooling it into the
+        # "fixed" arm would corrupt the rollup.
+        if not (strategy.endswith(ATR_SUFFIX) or strategy.endswith(FIXED_SUFFIX)):
             continue
         arm = "atr" if strategy.endswith(ATR_SUFFIX) else "fixed"
         base = base_strategy(strategy)

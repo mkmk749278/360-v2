@@ -73,6 +73,7 @@ def _build_registry() -> Dict[str, Tunable]:
         COHORT_EDGE_GATE_MIN_N,
         COHORT_EDGE_SUPPRESS_BELOW,
         GEOMETRY_AB_ENABLED,
+        TUNED_VARIANTS_ENABLED,
         LOSS_STREAK_CAP_HOURS,
         LOSS_STREAK_ESCALATION_ENABLED,
         MARKET_CONTEXT_ENABLED,
@@ -512,6 +513,24 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=GEOMETRY_AB_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="tuned_variants_enabled",
+            label="Tuned-variant shadow arms",
+            description=(
+                "Stamp a SETUP@TUNED counterfactual arm for every "
+                "MOVER_AVWAP_SCALP / VOLUME_SURGE_BREAKOUT candidate — the "
+                "owner-directed tune-don't-disable recipe (TP1 at the "
+                "measured median MFE behind an ATR/structure stop; VSB also "
+                "skips entries stretched >1 ATR from the 20-bar mean) — and "
+                "forward-measure it against the live arm in the edge "
+                "matrix. Observe-only: live output untouched; applying a "
+                "winning recipe is a separate dark-first, owner-signed "
+                "change."
+            ),
+            type="bool",
+            default=TUNED_VARIANTS_ENABLED,
             category="Measurement",
         ),
         Tunable(
