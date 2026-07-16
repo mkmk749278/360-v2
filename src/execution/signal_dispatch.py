@@ -450,6 +450,7 @@ def _compute_qty_split(
     )
     if tp1 > 0 and tp1 * entry_price < min_notional:
         # All legs too small — tp1 takes the full position.
+        _tp1_leg_notional = tp1 * entry_price
         tp1 = total_qty
         tp2 = 0.0
         tp3 = 0.0
@@ -457,7 +458,7 @@ def _compute_qty_split(
             "signal_dispatch: symbol={} tp legs below MIN_NOTIONAL "
             "(tp1 notional=${:.2f} < ${:.2f}) — consolidating into "
             "single tp1=full-position",
-            symbol, tp1 * entry_price / total_qty * tp1, min_notional,
+            symbol, _tp1_leg_notional, min_notional,
         )
     elif tp2 > 0 and tp2 * entry_price < min_notional:
         # tp2/tp3 too small — roll everything into tp1.
@@ -1047,6 +1048,24 @@ async def dispatch_signal_to_active_users(
                 reject_binance_code=b_code,
                 reject_binance_msg=b_msg,
             )
+            # Feed the blast-radius circuit breakers (B18 tripwires
+            # #4/#5).  Only real placement failures count — the helper
+            # ignores gate rejections by type and -2019 by code, so a
+            # kill-switch refusal or empty wallet can never trip a
+            # breaker.  On trip it persists the disable / engages the
+            # global kill switch itself.  Must never raise: this is a
+            # failure handler and other users' dispatches are in
+            # flight.
+            try:
+                _tw.record_order_placement_failure(
+                    firebase_uid=uid, exc=exc, binance_code=b_code,
+                )
+            except Exception:
+                log.exception(
+                    "signal_dispatch: circuit-breaker feed failed uid={} "
+                    "signal_id={}",
+                    uid, signal_id,
+                )
             # Consecutive-insufficient-margin tracker → auto-pause.
             # Owner-reported 2026-05-23: every signal was creating a
             # fresh "Insufficient margin" entry in the user's Recent
@@ -1202,7 +1221,6 @@ async def close_fsm_positions_for_signal(
         # the position (e.g. native SL fired milliseconds before we got
         # here), this will fail with -2022 "ReduceOnly Order is rejected"
         # which we absorb below rather than crashing.
-        remaining = max(pos.total_qty - pos.closed_qty, pos.total_qty)
         # Defensively: if closed_qty somehow exceeds total_qty (shouldn't
         # happen but Firestore partial writes are possible), fall back to
         # total_qty so we don't send a zero-qty order.

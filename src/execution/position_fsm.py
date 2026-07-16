@@ -308,12 +308,7 @@ class PositionFSM:
         if event.order_status == "FILLED" or position.filled_qty >= position.total_qty:
             position.state = _position_state.PositionState.OPEN
             from src.execution import pretp_dispatcher as _pd
-            _pd_inst = _pd.get_instance()
-            if _pd_inst is not None:
-                asyncio.create_task(
-                    _pd_inst.track(position.symbol),
-                    name=f"pd_track_{position.symbol}",
-                )
+            _pd.spawn_track(position.symbol)
 
     async def _apply_pretp_fill(
         self,
@@ -416,6 +411,103 @@ class PositionFSM:
         else:
             await self._pretp_cancel_path(position, placer)
 
+    async def _protect_residual_final(
+        self,
+        position: _position_state.Position,
+        placer: _order_placer.OrderPlacer,
+        *,
+        site: str,
+    ) -> None:
+        """Final rung of every pre-TP exit ladder (audit fix 2026-07-16).
+
+        Called when a path's primary replacement protection (trail /
+        tightened SL / market close) failed.  Before this rung existed,
+        the failure ladders ended with an ERROR log and a residual
+        sitting on Binance with no stop until the reconciler's
+        stale-age close — hours of naked exposure, violating the
+        "never OPEN without a stop" invariant.
+
+        Ladder here mirrors the entry-side discipline:
+
+        1. BE-SL at fill price — cheapest way to restore protection.
+        2. Force-close the residual (REDUCE_ONLY MARKET) — if we can't
+           protect it, we don't hold it.
+        3. Both failed → CRITICAL log + Telegram page.  The reconciler
+           remains the last automatic resort, but the operator now
+           knows immediately instead of never.
+
+        Never raises — callers are themselves failure handlers.
+        """
+        fill_price = (
+            position.entry_price_filled
+            if position.entry_price_filled > 0
+            else position.entry_price_target
+        )
+        try:
+            sl_be = await placer.place_stop_loss(
+                signal_id=position.signal_id,
+                symbol=position.symbol,
+                direction=position.side,
+                stop_price=fill_price,
+                coid_override=_position_state.coid_sl_be(position.signal_id),
+            )
+            position.sl_be_order_id = sl_be.order_id
+            position.sl_price = fill_price
+            log.warning(
+                "{}: residual re-covered by BE-SL fallback uid={} signal_id={}",
+                site, self.firebase_uid, position.signal_id,
+            )
+            return
+        except _order_placer.OrderPlacementError as exc:
+            log.error(
+                "{}: BE-SL fallback failed — force-closing residual uid={} "
+                "signal_id={} exc={}",
+                site, self.firebase_uid, position.signal_id, exc,
+            )
+        remaining_qty = max(0.0, position.total_qty - position.closed_qty)
+        if remaining_qty <= 0:
+            return
+        try:
+            # Stamp the reason BEFORE placing so the close-fill handler
+            # (which only fills in a reason when none is set) records
+            # why this position was flattened early.
+            if not position.close_reason:
+                position.close_reason = "PROTECTION_FAILSAFE"
+            await placer.place_market_close(
+                signal_id=position.signal_id,
+                symbol=position.symbol,
+                direction=position.side,
+                quantity=remaining_qty,
+            )
+            log.warning(
+                "{}: residual force-closed (could not re-protect) uid={} "
+                "signal_id={} remaining_qty={:.8f}",
+                site, self.firebase_uid, position.signal_id, remaining_qty,
+            )
+            return
+        except _order_placer.OrderPlacementError as exc:
+            log.critical(
+                "{}: NAKED RESIDUAL — BE-SL and force-close both failed "
+                "uid={} signal_id={} symbol={} remaining_qty={:.8f} exc={} — "
+                "reconciler stale-age close is the only automatic backstop "
+                "left; operator paged",
+                site, self.firebase_uid, position.signal_id, position.symbol,
+                remaining_qty, exc,
+            )
+            try:
+                from . import telegram_alerts as _ta
+                await _ta.alert_naked_residual(
+                    firebase_uid=self.firebase_uid,
+                    signal_id=position.signal_id,
+                    symbol=position.symbol,
+                    remaining_qty=remaining_qty,
+                )
+            except Exception:
+                log.exception(
+                    "{}: naked-residual Telegram page failed uid={} signal_id={}",
+                    site, self.firebase_uid, position.signal_id,
+                )
+
     async def _pretp_trail_path(
         self,
         position: _position_state.Position,
@@ -490,24 +582,12 @@ class PositionFSM:
                 "uid={} signal_id={} exc={}",
                 self.firebase_uid, position.signal_id, exc,
             )
-            # Fallback: standard BE-SL so the residual is protected.
+            # Fallback ladder: BE-SL → force-close → page.  The residual
+            # is never left uncovered for the reconciler to find.
             position.state = _position_state.PositionState.PRE_TP_FIRED
-            try:
-                sl_be = await placer.place_stop_loss(
-                    signal_id=position.signal_id,
-                    symbol=position.symbol,
-                    direction=position.side,
-                    stop_price=fill_price,
-                    coid_override=_position_state.coid_sl_be(position.signal_id),
-                )
-                position.sl_be_order_id = sl_be.order_id
-                position.sl_price = fill_price
-            except _order_placer.OrderPlacementError as exc2:
-                log.error(
-                    "_pretp_trail_path: BE-SL fallback also failed — residual "
-                    "uncovered uid={} signal_id={} exc={}",
-                    self.firebase_uid, position.signal_id, exc2,
-                )
+            await self._protect_residual_final(
+                position, placer, site="_pretp_trail_path"
+            )
 
     async def _pretp_volatile_path(
         self,
@@ -581,9 +661,12 @@ class PositionFSM:
             )
         except _order_placer.OrderPlacementError as exc:
             log.error(
-                "_pretp_volatile_path: tightened SL placement failed (residual "
-                "uncovered) uid={} signal_id={} exc={}",
+                "_pretp_volatile_path: tightened SL placement failed — "
+                "engaging fallback ladder uid={} signal_id={} exc={}",
                 self.firebase_uid, position.signal_id, exc,
+            )
+            await self._protect_residual_final(
+                position, placer, site="_pretp_volatile_path"
             )
 
     async def _pretp_cancel_path(
@@ -648,32 +731,14 @@ class PositionFSM:
             )
         except _order_placer.OrderPlacementError as exc:
             log.error(
-                "_pretp_cancel_path: market close failed — placing BE-SL as "
-                "fallback uid={} signal_id={} exc={}",
+                "_pretp_cancel_path: market close failed — engaging fallback "
+                "ladder uid={} signal_id={} exc={}",
                 self.firebase_uid, position.signal_id, exc,
             )
-            # Fallback: BE-SL so the residual is not completely unprotected.
-            fill_price = (
-                position.entry_price_filled
-                if position.entry_price_filled > 0
-                else position.entry_price_target
+            # Fallback ladder: BE-SL → force-close retry → page.
+            await self._protect_residual_final(
+                position, placer, site="_pretp_cancel_path"
             )
-            try:
-                sl_be = await placer.place_stop_loss(
-                    signal_id=position.signal_id,
-                    symbol=position.symbol,
-                    direction=position.side,
-                    stop_price=fill_price,
-                    coid_override=_position_state.coid_sl_be(position.signal_id),
-                )
-                position.sl_be_order_id = sl_be.order_id
-                position.sl_price = fill_price
-            except _order_placer.OrderPlacementError as exc2:
-                log.error(
-                    "_pretp_cancel_path: BE-SL fallback also failed — residual "
-                    "uncovered uid={} signal_id={} exc={}",
-                    self.firebase_uid, position.signal_id, exc2,
-                )
 
     def _apply_close_fill(
         self,
@@ -888,12 +953,7 @@ class PositionFSM:
         the PretpDispatcher singleton isn't set.
         """
         from src.execution import pretp_dispatcher as _pd
-        _pd_inst = _pd.get_instance()
-        if _pd_inst is not None:
-            asyncio.create_task(
-                _pd_inst.untrack(symbol),
-                name=f"pd_untrack_{symbol}",
-            )
+        _pd.spawn_untrack(symbol)
 
 
 # ---------------------------------------------------------------------------

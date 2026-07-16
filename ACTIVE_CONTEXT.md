@@ -4,6 +4,107 @@
 
 ---
 
+## 🟢 SESSION 59 2026-07-16 — Full system audit → 4-tier fix batch: inert circuit breakers wired, pre-TP naked-residual ladders, gate-chain fail-open sweep, 6 bug fixes (branch `claude/system-audit-signals-qshnvq`, 360-v2)
+
+**Owner ask:** full audit on system for bugs, errors, dead code — especially
+signal generation. Three parallel deep sweeps (signal path, execution path,
+dead-code reachability) over all 4 repos; owner decided in-session: breakers
+live NOW, FSM hardening IN, dead code REPORT-ONLY, MEAN_REVERT profile direct
+fix.
+
+### Audit verdict
+
+- **CLEAN**: numpy-truthiness class (#726/#727) confirmed closed in live code;
+  no long/short asymmetry in any of the 18 evaluators; enum/family coupling
+  complete incl. MEAN_REVERT; hot-path caching (₹4,552 class) clear; secret
+  handling clear; kill-switch coverage of order placement fails closed; ops
+  repo 350 tests green.
+- **The big one (F1)**: BOTH blast-radius circuit breakers (B18 #4/#5) were
+  inert — `record_rejection` had ZERO production callers since PR-8. Checked
+  on every order, fed by nothing, could never trip.
+
+### Shipped (4 commits, one PR, all tiers owner-signed-off in-session)
+
+1. **Tier 1 — breakers wired live**: dispatch failure handler feeds
+   `tripwires.record_order_placement_failure`. Only OrderPlacementError
+   counts (gate rejections excluded by type — a disabled user's own refusals
+   can't walk the global breaker); -2019 stays with the consec-margin pause;
+   Unreachable counts global-only (users aren't disabled for our signing
+   outage). Per-user trip → kill_switch.disable_user (persists); global trip
+   → engage_global. 10 new tests incl. end-to-end dispatch trip.
+2. **Tier 2 — FSM exit-side hardening**: all three pre-TP paths now share
+   `_protect_residual_final` (BE-SL → force-close REDUCE_ONLY → CRITICAL +
+   new naked-residual Telegram page). Pre-fix: replacement-stop failure left
+   the residual stopless for hours (volatile path had NO fallback at all);
+   `close_reason=PROTECTION_FAILSAFE` marks these flattens. Also: pretp
+   track/untrack tasks strong-ref'd (spawn_track/spawn_untrack — GC could
+   silently kill per-tick management for a symbol); funding watcher re-fire
+   suppression (15min after successful close; dropped fill event used to
+   cause 30s cancel+close spam) + zero-residual no longer sends full qty.
+3. **Tier 3 — gate-chain fail-open sweep** (the half S58 skipped): scanner
+   had 27 fail-open handlers, 5 recorded. Converted 15 DEBUG-only gate
+   handlers + 5 silent `except:pass` (incl. the min-distance block that
+   mutates sig.stop_loss mid-loop) + base.py structural SL/TP snap (shared
+   by EVERY evaluator) + shadow unit errors (MEAN_REVERT control arm).
+   Gotcha fixed: the old LOCAL `from src import fail_open` imports shadowed
+   the new top-level one → UnboundLocalError; hoisted. Truthiness regex
+   widened (truthy `.get()`, `*_arr` names) — immediately caught 2 scanner
+   sites (converted to len()) + 2 scalar false positives (allowlisted with
+   proof). New AST pin: no new silent except-pass in scanner.
+4. **Tier 4 — bug batch**: paper close-all NEVER worked (`int += dict`,
+   TypeError swallowed per book, plus signature mismatch with the API
+   route); MEAN_REVERT now passes `profile=` to basic filters (was the only
+   evaluator of 18 skipping pair multipliers — owner-approved direct fix);
+   reconciler order-side healing implemented (docstring promised it from day
+   one; SL/TP live on `/fapi/v1/algoOpenOrders` post Dec-2025 -4120
+   migration — the never-used openOrders constant would have missed them;
+   re-places a lost protective stop, 3-min freshness guard against racing
+   pre-TP transitions); ccxt boot/mode-switch guard (live mode used to
+   NotImplementedError on the FIRST order); worker-manager boot dedup (slow
+   reconcile could spawn two PositionWorkers per user).
+
+### Dead-code register (owner decision: REPORT ONLY, no deletions)
+
+Zero live importers, verified by reachability from main/bootstrap/api:
+- `src/scanner_core.py` (compat shim; pyproject ruff comment still names it)
+- `src/cvd.py` (re-export shim of order_flow)
+- `src/macro_blackout.py` (+ its tests)
+- `src/pair_analysis_report.py` + `src/pair_anomaly_detector.py` (dead pair)
+- `src/simulation/` (+ tests/test_simulator.py)
+- Config: `OPENAI_MIN_CONFIDENCE_THRESHOLD`, `OPENAI_HOT_PATH_BYPASS_CHANNELS`
+- Zombie radar wiring: `main.py` assigns `scanner.on_radar_candidate =
+  _handle_radar_candidate` but the scanner call site was disabled ("too
+  spammy") — handler + FreeWatchService radar-watch path are unreachable.
+- Zombie-by-flag (KEEP — one env flip from live): cornix_formatter
+  (CORNIX_FORMAT_ENABLED=false), feedback_loop (FEEDBACK_LOOP_ENABLED=false).
+- Informational: scalp_cvd/vwap/supertrend/ichimoku channels are `disabled`
+  by default, fvg/orderblock `radar_only`, divergence pilot-only — under
+  default config scalp.py is the ONLY paid-signal generator. ORB / CLS /
+  SR-flip-LONG evaluators are flag-disabled. RANGE_REJECTION /
+  EXHAUSTION_FADE enum values reserved, unemitted.
+
+### Deferred / follow-ups
+
+- Trade-monitor telemetry fail-opens still DEBUG-only (same class as Tier 3,
+  lower stakes) — sweep in a future session.
+- Reconciler qty-mismatch / modified-SL-price diffs remain a policy call.
+- Owner-deferred from S58 unchanged: prune MOVER_AVWAP_SCALP +
+  VOLUME_SURGE_BREAKOUT (both −0.78R); MVTP concentration handling.
+
+### NEXT
+
+1. Watch the fail-open counters after deploy — Tier 3 makes previously
+   invisible failures visible; new WARNs = something was already dying.
+2. Watch for breaker trips (per-user first); `/reset_global_breaker` and
+   `/enable_user` are the operator verbs if a trip needs review.
+3. Confirm MEAN_REVERT emissions unchanged post-F6 via shadow-stamp
+   comparison in the Strategy Lab matrix.
+4. Unchanged from S58: BTC_DIR shadow review → flip btc_dir_penalty_apply;
+   geometry A/B window; Telegram→app decouple (owner); Phase 4 master-arm
+   (owner).
+
+---
+
 ## 🟢 SESSION 58 2026-07-15 — Strategy Lab data read → MEAN_REVERT goes LIVE (18th evaluator) + fail-open sweep closes the #727 blind spot (branch `claude/strategy-lab-signals-analysis-zi8tck`, 360-v2)
 
 **Owner ask:** understand the ops Strategy Lab, analyse signals/profit/strategy

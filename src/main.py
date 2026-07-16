@@ -195,6 +195,19 @@ class CryptoSignalEngine:
                 "Auto-execution mode: PAPER (simulated fills, zero real-money risk)"
             )
         elif AUTO_EXECUTION_MODE == "live":
+            # ccxt is deliberately NOT in requirements.txt (the production
+            # money path is the server-side FSM via the signing service,
+            # not this legacy CCXT client).  Without this guard, live mode
+            # boots fine and then raises NotImplementedError on the FIRST
+            # ORDER — fail at boot instead, where the operator is looking.
+            from src import exchange_client as _ec_mod
+            if not _ec_mod._CCXT_AVAILABLE:
+                raise RuntimeError(
+                    "AUTO_EXECUTION_MODE=live requires the ccxt package, "
+                    "which is not installed (commented out in "
+                    "requirements.txt). Install ccxt or use the server-side "
+                    "auto-trade stack instead."
+                )
             _exchange_client = CCXTClient(
                 exchange_id=EXCHANGE_ID,
                 api_key=EXCHANGE_API_KEY,
@@ -947,6 +960,16 @@ class CryptoSignalEngine:
             )
             self._order_manager = self._build_paper_order_manager()
         else:  # new_mode == "live"
+            # Same guard as the boot path: refuse the switch loudly when
+            # ccxt is absent instead of NotImplementedError on first order.
+            from src import exchange_client as _ec_mod
+            if not _ec_mod._CCXT_AVAILABLE:
+                raise RuntimeError(
+                    "auto-mode switch to 'live' requires the ccxt package, "
+                    "which is not installed (commented out in "
+                    "requirements.txt). Install ccxt or use the server-side "
+                    "auto-trade stack instead."
+                )
             self._exchange_client = CCXTClient(
                 exchange_id=EXCHANGE_ID,
                 api_key=EXCHANGE_API_KEY,

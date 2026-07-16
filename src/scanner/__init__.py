@@ -169,6 +169,7 @@ from src.signal_quality import (
 from src.cluster_suppression import ClusterSuppressor
 from src.confidence_decay import apply_confidence_decay
 from src.cross_asset import AssetState, check_cross_asset_gate
+from src import fail_open
 from src import pair_penalty as _pair_penalty
 from src.feedback_loop import FeedbackLoop
 from src.kill_zone import check_kill_zone_gate
@@ -4243,8 +4244,8 @@ class Scanner:
                 _cont_sweep = detect_continuation_sweep(_cont_candles, "SHORT", lookback=10)
                 if _cont_sweep is not None:
                     has_sweep = True  # Count continuation sweep as sweep evidence
-            except Exception:
-                pass  # Fail open
+            except Exception as _cs_exc:
+                fail_open.record("scanner.continuation_sweep_evidence", _cs_exc)
 
         ema_aligned = (
             ctx.ind_for_predict.get("ema9_last") is not None
@@ -4649,8 +4650,8 @@ class Scanner:
                     btc_state=_btc_b,
                 )
                 _context_key = _mc.context_key()
-            except Exception:
-                pass
+            except Exception as _mc_exc:
+                fail_open.record("scanner.market_context_key", _mc_exc)
             from src import suppression_audit as _sa
             now_mono = time.monotonic()
             for cand in candidates:
@@ -4682,7 +4683,6 @@ class Scanner:
                     cand.entry, cand.stop_loss, cand.tp1, cand.reason,
                 )
         except Exception as exc:
-            from src import fail_open
             fail_open.record("scanner.shadow_strategies", exc)
 
     def _stamp_geometry_ab(self, sig: Any) -> None:
@@ -4736,7 +4736,6 @@ class Scanner:
                 # (stamp-and-shadow doctrine) — consumed by nothing.
                 sig.geo_atr_stop = float(alt_stop)
         except Exception as exc:
-            from src import fail_open
             fail_open.record("scanner.stamp_geometry_ab", exc)
 
     def _stamp_suppressed(self, sig: Any, gate_name: str) -> None:
@@ -4757,7 +4756,6 @@ class Scanner:
         except Exception as exc:
             # _stamp_geometry_ab records its own failures internally; this
             # outer guard is effectively unreachable, counted for completeness.
-            from src import fail_open
             fail_open.record("scanner.stamp_suppressed_geo", exc)
         try:
             from src import runtime_tunables as _rt
@@ -4781,7 +4779,6 @@ class Scanner:
                 valid_for_minutes=float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
             )
         except Exception as exc:
-            from src import fail_open
             fail_open.record("scanner.stamp_suppressed", exc)
 
     async def _enqueue_signal(self, sig: Any) -> bool:
@@ -4805,8 +4802,11 @@ class Scanner:
                         if tp_val > 0:
                             new_tp = entry + abs(entry - tp_val) * ratio if is_long else entry - abs(entry - tp_val) * ratio
                             setattr(sig, tp_attr, round(new_tp, 8))
-        except Exception:
-            pass
+        except Exception as _mind_exc:
+            # This block MUTATES sig.stop_loss then rescales the TPs — an
+            # exception mid-loop leaves half-rescaled geometry, which is
+            # exactly the kind of failure that must page, not vanish.
+            fail_open.record("scanner.min_distance_geometry", _mind_exc)
 
         # ── Active-duplicate guard (2026-07-09, dark-flagged) ────────────
         # The dispatch cooldown below intends "never two live copies of the
@@ -5989,7 +5989,7 @@ class Scanner:
                         symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, vwap_reason,
                     )
             except Exception as _vwap_exc:
-                log.debug("VWAP gate error for {} {} (fail open): {}", symbol, chan_name, _vwap_exc)
+                fail_open.record("scanner.vwap_gate", _vwap_exc)
 
         # ── Filter 3: Kill Zone / Session Filter ────────────────────────────
         if _gate_profile.get("kill_zone", True):
@@ -6040,7 +6040,7 @@ class Scanner:
                             symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, oi_reason,
                         )
             except Exception as _oi_exc:
-                log.debug("OI gate error for {} {} (fail open): {}", symbol, chan_name, _oi_exc)
+                fail_open.record("scanner.oi_gate", _oi_exc)
 
         # ── Funding Rate Gate ────────────────────────────────────────────────
         # Soft penalty/boost only — never hard blocks a signal alone.
@@ -6084,7 +6084,7 @@ class Scanner:
                         symbol, chan_name, _fr, _fr_adj,
                     )
             except Exception as _fr_exc:
-                log.debug("Funding rate gate error for {} {} (fail open): {}", symbol, chan_name, _fr_exc)
+                fail_open.record("scanner.funding_gate", _fr_exc)
 
 
         if _gate_profile.get("cross_asset", True) and symbol not in ("BTCUSDT", "ETHUSDT"):
@@ -6123,9 +6123,7 @@ class Scanner:
                             symbol, chan_name, ca_conf_adj, ca_reason,
                         )
             except Exception as _ca_exc:
-                log.debug(
-                    "Cross-asset gate error for {} {} (fail open): {}", symbol, chan_name, _ca_exc
-                )
+                fail_open.record("scanner.cross_asset_gate", _ca_exc)
 
         # ── Filter 6: Spoofing / Layering Detection ───────────────────────
         if _gate_profile.get("spoof", True):
@@ -6144,9 +6142,7 @@ class Scanner:
                         symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, spoof_reason,
                     )
             except Exception as _spoof_exc:
-                log.debug(
-                    "Spoof gate error for {} {} (fail open): {}", symbol, chan_name, _spoof_exc
-                )
+                fail_open.record("scanner.spoof_gate", _spoof_exc)
 
         # ── Filter 7: Cross-Timeframe Volume Divergence ───────────────────
         if _gate_profile.get("volume_div", True):
@@ -6177,10 +6173,7 @@ class Scanner:
                         symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, vol_div_reason,
                     )
             except Exception as _vol_div_exc:
-                log.debug(
-                    "Volume divergence gate error for {} {} (fail open): {}",
-                    symbol, chan_name, _vol_div_exc,
-                )
+                fail_open.record("scanner.volume_div_gate", _vol_div_exc)
 
         # ── Filter 8: Signal Clustering Suppression ───────────────────────
         if _gate_profile.get("cluster", True):
@@ -6260,7 +6253,6 @@ class Scanner:
                             symbol, chan_name, _scaled, _base, regime_mult, btc_dir_reason,
                         )
             except Exception as _btc_dir_exc:
-                from src import fail_open
                 fail_open.record("scanner.btc_direction_gate", _btc_dir_exc)
 
         # ── Filter 10: Per-symbol 1H/4H direction soft penalty ────────────
@@ -6304,10 +6296,7 @@ class Scanner:
                         symbol, chan_name, _scaled, _base, regime_mult, soft_penalty, sym_dir_reason,
                     )
             except Exception as _sym_dir_exc:
-                log.debug(
-                    "Symbol direction gate error for {} {} (fail open): {}",
-                    symbol, chan_name, _sym_dir_exc,
-                )
+                fail_open.record("scanner.sym_direction_gate", _sym_dir_exc)
 
         # ── Counter-trend-LONG macro-direction suppression (S39, scalp filter) ──
         # SCALP-FIRST: a thin context filter on genuine counter-trend REVERSAL long
@@ -6553,7 +6542,7 @@ class Scanner:
                 if confirming_names:
                     sig.chart_pattern_names = ",".join(confirming_names)
             except Exception as _exc:
-                log.debug("Chart pattern detection error for {}: {}", symbol, _exc)
+                fail_open.record("scanner.chart_patterns", _exc)
 
             # PR_05: candlestick pattern engine — confidence modifier (not hard gate)
             try:
@@ -6568,7 +6557,7 @@ class Scanner:
                         np.asarray(_high_arr),
                         np.asarray(_low_arr),
                         np.asarray(_close_arr),
-                        np.asarray(_vol_arr) if _vol_arr else None,
+                        np.asarray(_vol_arr) if len(_vol_arr) else None,
                     )
                     # Store in smc_data for downstream consumers
                     ctx.smc_data["chart_patterns"] = _cp_results
@@ -6591,7 +6580,7 @@ class Scanner:
                             symbol, chan_name, _cp_bonus, _cp_names,
                         )
             except Exception as _exc:
-                log.debug("Candlestick pattern detection error for {}: {}", symbol, _exc)
+                fail_open.record("scanner.candlestick_patterns", _exc)
 
         # This augments the hard MTF gate above with a continuous confidence signal.
         try:
@@ -6631,7 +6620,7 @@ class Scanner:
                             symbol, chan_name, _mtf_result.score,
                         )
         except Exception as _mtf_exc:
-            log.debug("MTF confidence modifier error for {} {} (fail open): {}", symbol, chan_name, _mtf_exc)
+            fail_open.record("scanner.mtf_conf_modifier", _mtf_exc)
 
         # Hard MTF block: signal was vetoed — return immediately.
         if sig is None:
@@ -6686,10 +6675,7 @@ class Scanner:
             # even if it didn't earn a bonus (count<2).
             sig.confluence_count = _confluence_n
         except Exception as _conf_exc:
-            log.debug(
-                "Confluence-bonus query error for {} {} (fail open): {}",
-                symbol, chan_name, _conf_exc,
-            )
+            fail_open.record("scanner.levelbook_confluence", _conf_exc)
 
         # ── PR-Wire: Structure-alignment bonus ───────────────────────────
         # When a trend-following path (TPE / DIV_CONT / CLS / PDC) fires
@@ -6720,10 +6706,7 @@ class Scanner:
                         _state_label, soft_penalty,
                     )
         except Exception as _sa_exc:
-            log.debug(
-                "Structure-align bonus query error for {} {} (fail open): {}",
-                symbol, chan_name, _sa_exc,
-            )
+            fail_open.record("scanner.structure_align_bonus", _sa_exc)
 
         # ── Structure-MISALIGN penalty (DIV_CONT only at first) ────────
         # Symmetric counterpart to the align-bonus block above.  See
@@ -6779,10 +6762,7 @@ class Scanner:
                             soft_penalty,
                         )
         except Exception as _sm_exc:
-            log.debug(
-                "Structure-misalign penalty query error for {} {} (fail open): {}",
-                symbol, chan_name, _sm_exc,
-            )
+            fail_open.record("scanner.structure_misalign_penalty", _sm_exc)
 
         # ── Per-pair rolling-window soft penalty ─────────────────────────
         # Doctrine-aligned replacement for the closed-without-merge hard
@@ -6807,6 +6787,7 @@ class Scanner:
             # Fail-open: a bug in the penalty lookup must never block
             # signal scoring.  Worst case we miss the deduction for one
             # signal; the next scan tick catches it.
+            fail_open.record("scanner.pair_penalty_lookup", _pp_exc)
             log.debug(
                 "pair_penalty lookup error for {} {} (fail open): {}",
                 symbol, chan_name, _pp_exc,
@@ -6843,7 +6824,7 @@ class Scanner:
             _primary_cd = self._resolve_candles(ctx.candles, _primary_tf)
             _closes_arr = _primary_cd.get("close", [])
             _vol_arr = _primary_cd.get("volume", [])
-            if _closes_arr and _vol_arr:
+            if len(_closes_arr) and len(_vol_arr):
                 _usd_vols = [c * v for c, v in zip(_closes_arr[-20:], _vol_arr[-20:])]
                 _volume_last_usd = float(_usd_vols[-1]) if _usd_vols else 0.0
                 _volume_avg_usd = float(np.mean(_usd_vols)) if _usd_vols else 0.0
@@ -6863,8 +6844,8 @@ class Scanner:
                 try:
                     _oi_trend = self.order_flow_store.get_oi_trend(symbol).value
                     _liq_vol = self.order_flow_store.get_recent_liq_volume_usd(symbol)
-                except Exception:
-                    pass
+                except Exception as _of_exc:
+                    fail_open.record("scanner.orderflow_thesis_inputs", _of_exc)
             _scoring_inp = ScoringInput(
                 sweeps=ctx.smc_result.sweeps,
                 mss=ctx.smc_result.mss,
@@ -6948,7 +6929,7 @@ class Scanner:
                 _score_result["thesis_adj"],
             )
         except Exception as _score_exc:
-            log.debug("scoring engine error for {} {} (fail open): {}", symbol, chan_name, _score_exc)
+            fail_open.record("scanner.composite_scoring", _score_exc)
 
         # PR-15: Apply the full accumulated soft-penalty (evaluator-authored + scanner-gate)
         # after composite score assignment so that the penalties are not overwritten by the
@@ -7307,8 +7288,8 @@ class Scanner:
                     "Regime transition boost {} {}: +{:.1f} → {:.1f}",
                     symbol, chan_name, _trans_boost, sig.confidence,
                 )
-        except Exception:
-            pass  # Fail-safe
+        except Exception as _trans_exc:
+            fail_open.record("scanner.regime_transition_boost", _trans_exc)
 
         # Populate regime/context display fields BEFORE the remaining gates so
         # (a) the market-context stamp below reads the real entry regime — it

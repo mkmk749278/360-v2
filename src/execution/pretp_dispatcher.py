@@ -60,6 +60,36 @@ def get_instance() -> Optional["PretpDispatcher"]:
     return _instance
 
 
+# Strong-reference set for fire-and-forget track/untrack tasks.  asyncio
+# keeps tasks in a WeakSet; without an external strong reference a task
+# can be garbage-collected before it completes (see the identical guard
+# in mark_price_feed).  A GC'd track() means a symbol silently never
+# subscribes and the per-tick pre-TP / BE-shift path never runs for it.
+_background_tasks: Set[asyncio.Task] = set()
+
+
+def _spawn(coro, name: str) -> None:
+    task = asyncio.create_task(coro, name=name)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+
+
+def spawn_track(symbol: str) -> None:
+    """Schedule ``track(symbol)`` on the running loop, strongly
+    referenced.  No-op when the singleton isn't set (dev/test)."""
+    inst = get_instance()
+    if inst is not None:
+        _spawn(inst.track(symbol), name=f"pd_track_{symbol}")
+
+
+def spawn_untrack(symbol: str) -> None:
+    """Schedule ``untrack(symbol)`` on the running loop, strongly
+    referenced.  No-op when the singleton isn't set (dev/test)."""
+    inst = get_instance()
+    if inst is not None:
+        _spawn(inst.untrack(symbol), name=f"pd_untrack_{symbol}")
+
+
 class PretpDispatcher:
     """Per-engine dispatcher that bridges mark prices to pre-TP firing.
 

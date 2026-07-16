@@ -1777,3 +1777,76 @@ async def test_dispatch_tier_gate_skips_non_auto_users() -> None:
     assert placed == 1  # only fb-auto
     called_uids = {c.kwargs["firebase_uid"] for c in mock_place.await_args_list}
     assert called_uids == {"fb-auto"}
+
+
+# ---------------------------------------------------------------------------
+# Circuit-breaker feed — dispatch failure handler → tripwires (2026-07-16
+# audit fix: record_rejection previously had no production caller, so the
+# B18 #4/#5 breakers could never trip)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture()
+def _fresh_breakers():
+    from src.execution import tripwires
+
+    tripwires.reset_singletons_for_test()
+    yield
+    tripwires.reset_singletons_for_test()
+
+
+@pytest.mark.asyncio
+async def test_binance_rejections_feed_per_user_breaker(_fresh_breakers) -> None:
+    """End-to-end: place_signal failing with a real Binance rejection
+    counts toward the per-user breaker, and the threshold trips it."""
+    from src.execution import order_placer, position_fsm, tripwires
+
+    with patch.object(signal_dispatch, "_active_uids", return_value=["fb-X"]):
+        with patch.object(
+            position_fsm,
+            "place_signal",
+            side_effect=order_placer.OrderRejectedByBinance(
+                "code=-2015 status=400 message=Invalid API-key"
+            ),
+        ):
+            for i in range(tripwires.DEFAULT_PER_USER_REJECTION_THRESHOLD):
+                await signal_dispatch.dispatch_signal_to_active_users(
+                    signal_id=f"sig-{i}",
+                    symbol="BTCUSDT",
+                    direction="LONG",
+                    entry_price=29000.0,
+                    sl_price=28500.0,
+                    tp1_price=29500.0,
+                    tp2_price=30000.0,
+                    tp3_price=30500.0,
+                )
+    with pytest.raises(tripwires.UserAutoDisabled):
+        tripwires.per_user_breaker().check("fb-X")
+
+
+@pytest.mark.asyncio
+async def test_gate_rejections_do_not_feed_breakers(_fresh_breakers) -> None:
+    """A safety-gate refusal (here: the user's own tripped breaker
+    raising UserAutoDisabled) must not count as a fresh rejection —
+    otherwise one disabled user's retries would walk the GLOBAL
+    breaker toward a fleet-wide kill."""
+    from src.execution import position_fsm, tripwires
+
+    with patch.object(signal_dispatch, "_active_uids", return_value=["fb-Y"]):
+        with patch.object(
+            position_fsm,
+            "place_signal",
+            side_effect=tripwires.UserAutoDisabled("fb-Y is auto-disabled"),
+        ):
+            for i in range(tripwires.DEFAULT_GLOBAL_REJECTION_THRESHOLD + 2):
+                await signal_dispatch.dispatch_signal_to_active_users(
+                    signal_id=f"sig-{i}",
+                    symbol="BTCUSDT",
+                    direction="LONG",
+                    entry_price=29000.0,
+                    sl_price=28500.0,
+                    tp1_price=29500.0,
+                    tp2_price=30000.0,
+                    tp3_price=30500.0,
+                )
+    tripwires.global_breaker().check()  # must not raise

@@ -400,15 +400,18 @@ def assert_position_cap(
 class PerUserCircuitBreaker:
     """Sliding-window rejection counter per user.
 
-    Tracks Binance rejections — the FSM calls ``record_rejection`` on
-    every order placement failure.  When a user accumulates >N
-    rejections in W seconds, the breaker trips: subsequent
-    ``check`` calls raise until the breaker is manually reset.
+    Tracks Binance rejections — the dispatch failure handler feeds
+    every order-placement failure through
+    :func:`record_order_placement_failure`, which calls
+    ``record_rejection`` for user-attributable failures.  When a user
+    accumulates >N rejections in W seconds, the breaker trips:
+    subsequent ``check`` calls raise until the breaker is manually
+    reset.
 
     Trip side-effect: writes ``users/{uid}/auto_trade_disabled = true``
-    to Firestore via the injected :class:`KillSwitchClient` so the
-    disable survives engine restart.  This module just tracks counts +
-    decides when to trip; persistence is the kill_switch module.
+    to Firestore via the kill_switch module so the disable survives
+    engine restart.  This class just tracks counts + decides when to
+    trip; persistence is :func:`_persist_user_trip`.
     """
 
     def __init__(
@@ -500,6 +503,10 @@ class GlobalCircuitBreaker:
     * FSM bug firing wrong-permission orders.
     * Symbol-allowlist drift (engine + allowlist out of sync after
       a deploy).
+
+    Fed by :func:`record_order_placement_failure` from the dispatch
+    failure handler.  On trip, the global kill switch is engaged via
+    :func:`_persist_global_trip`.
 
     The Telegram-bot operator command ``/reset_global_breaker`` (PR-11
     or a follow-up) re-enables.  Until then, ``check`` raises on
@@ -611,6 +618,119 @@ def reset_singletons_for_test() -> None:
     _rate_limiter = None
     _per_user_breaker = None
     _global_breaker = None
+
+
+# ---------------------------------------------------------------------------
+# Production feed — order-placement failures → circuit breakers
+# ---------------------------------------------------------------------------
+
+
+# Binance -2019 "Margin is insufficient" has its own dedicated handling in
+# signal_dispatch (consecutive-count auto-PAUSE, self-service resume via
+# ``POST /api/auto-mode/resume-mine``).  Feeding it to the breakers would
+# replace that soft pause with a hard operator-reset disable for what is a
+# user wallet-balance state, not a fault — so it is excluded here.
+_BINANCE_INSUFFICIENT_MARGIN_CODE = -2019
+
+
+def record_order_placement_failure(
+    *,
+    firebase_uid: str,
+    exc: Exception,
+    binance_code: Optional[int] = None,
+) -> None:
+    """Feed one order-placement failure into the circuit breakers.
+
+    The single production entry point for tripwires #4 and #5 — called
+    from the dispatch failure handler, which every server-side order
+    placement flows through.  Classification:
+
+    * Only :class:`~src.execution.order_placer.OrderPlacementError`
+      counts.  Gate rejections (kill switch, tier, symbol prefs,
+      position cap, rate limit, the breakers' own ``check`` raises)
+      are expected refusals, not Binance failures — counting them
+      would let one disabled user trip the global breaker.
+    * ``-2019`` insufficient-margin never counts (see constant above).
+    * Per-user breaker counts only user-attributable failures
+      (:class:`OrderRejectedByBinance`, :class:`OrderPlacementKeyError`
+      — revoked/blocked key, permission change, bad params for this
+      account).  :class:`OrderPlacementUnreachable` is an infra-side
+      failure; auto-disabling individual users for our own signing /
+      network outage would punish the wrong party.
+    * Global breaker counts every placement failure including
+      ``Unreachable`` — a KMS / signing outage clustering rejections
+      across users is exactly the scenario it exists for.
+
+    Trip side-effects (this module tracks counts; persistence is the
+    kill_switch module):
+
+    * Per-user trip → ``kill_switch.disable_user`` so the disable
+      survives engine restart.
+    * Global trip → ``kill_switch.engage_global`` so orders are
+      refused across processes, not just this one.
+
+    Persistence failures are logged, never raised: the in-memory
+    ``_tripped`` state already refuses orders in this process, and the
+    caller is a failure handler that must not throw.
+    """
+    from src.execution import order_placer as _op
+
+    if not isinstance(exc, _op.OrderPlacementError):
+        return
+    if binance_code == _BINANCE_INSUFFICIENT_MARGIN_CODE:
+        return
+
+    user_attributable = isinstance(
+        exc, (_op.OrderRejectedByBinance, _op.OrderPlacementKeyError)
+    )
+
+    if user_attributable and per_user_breaker().record_rejection(firebase_uid):
+        _persist_user_trip(firebase_uid)
+
+    if global_breaker().record_rejection():
+        _persist_global_trip()
+
+
+def _persist_user_trip(firebase_uid: str) -> None:
+    from src.execution import kill_switch as _kill_switch
+
+    if not _kill_switch.is_initialised():
+        return
+    try:
+        _kill_switch.get_client().disable_user(
+            firebase_uid,
+            reason=(
+                f"per-user circuit breaker: >{DEFAULT_PER_USER_REJECTION_THRESHOLD - 1} "
+                f"order rejections in "
+                f"{DEFAULT_PER_USER_REJECTION_WINDOW_S:.0f}s"
+            ),
+        )
+    except Exception:
+        log.exception(
+            "tripwires: failed to persist per-user breaker trip uid={} — "
+            "in-memory breaker still refuses orders this process",
+            firebase_uid,
+        )
+
+
+def _persist_global_trip() -> None:
+    from src.execution import kill_switch as _kill_switch
+
+    if not _kill_switch.is_initialised():
+        return
+    try:
+        _kill_switch.get_client().engage_global(
+            reason=(
+                f"global circuit breaker: >="
+                f"{DEFAULT_GLOBAL_REJECTION_THRESHOLD} order rejections in "
+                f"{DEFAULT_GLOBAL_REJECTION_WINDOW_S:.0f}s across users"
+            ),
+        )
+    except Exception:
+        log.exception(
+            "tripwires: failed to engage global kill switch on breaker trip — "
+            "in-memory breaker still refuses orders this process",
+        )
 
 
 # ---------------------------------------------------------------------------

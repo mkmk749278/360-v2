@@ -508,3 +508,85 @@ class TestFsmFundingClosePhase:
 
         assert pos.state == position_state.PositionState.CLOSED
         assert pos.close_reason == "FUNDING_EXIT"
+
+
+# ---------------------------------------------------------------------------
+# Re-fire suppression (2026-07-16 audit fix)
+# ---------------------------------------------------------------------------
+
+
+class TestFiredSuppression(TestFundingExitWatcherCheck):
+    """A successfully-placed funding close must not be re-issued on
+    every 30s poll while the (possibly dropped) fill event is pending —
+    pre-fix this produced -2022 cancel/close spam until the reconciler
+    healed the position."""
+
+    def _in_window_setup(self):
+        pos = _make_position(side="LONG")
+        feed = _make_feed((0.001, _next_funding_ms(60)))
+        return pos, feed
+
+    async def test_successful_close_not_refired_next_poll(self):
+        watcher = self._make_watcher()
+        pos, feed = self._in_window_setup()
+        close_mock = AsyncMock(return_value=True)
+        ctxs = self._common_patches(positions=[pos], feed=feed)
+        await self._run_check(watcher, ctxs, close_mock)
+        # Second poll, same still-non-terminal position in the window.
+        ctxs = self._common_patches(positions=[pos], feed=feed)
+        await self._run_check(watcher, ctxs, close_mock)
+        assert close_mock.await_count == 1
+
+    async def test_failed_close_is_retried_next_poll(self):
+        watcher = self._make_watcher()
+        pos, feed = self._in_window_setup()
+        close_mock = AsyncMock(return_value=False)
+        ctxs = self._common_patches(positions=[pos], feed=feed)
+        await self._run_check(watcher, ctxs, close_mock)
+        ctxs = self._common_patches(positions=[pos], feed=feed)
+        await self._run_check(watcher, ctxs, close_mock)
+        assert close_mock.await_count == 2
+
+    async def test_suppression_expires_after_ttl(self):
+        watcher = self._make_watcher()
+        pos, feed = self._in_window_setup()
+        close_mock = AsyncMock(return_value=True)
+        ctxs = self._common_patches(positions=[pos], feed=feed)
+        await self._run_check(watcher, ctxs, close_mock)
+        # Simulate the TTL elapsing.
+        watcher._fired_at[pos.signal_id] -= (
+            FundingExitWatcher._FIRED_SUPPRESS_S + 1.0
+        )
+        ctxs = self._common_patches(positions=[pos], feed=feed)
+        await self._run_check(watcher, ctxs, close_mock)
+        assert close_mock.await_count == 2
+
+
+class TestCloseForFundingResidual:
+    async def test_zero_residual_sends_nothing_and_reports_success(self):
+        """Pre-fix the ``or pos.total_qty`` fallback re-sent the FULL
+        quantity when the residual was exactly zero, relying on
+        reduceOnly to save it."""
+        from src.execution.order_placer import OrderPlacer, OrderPlacementResult
+        from src.execution.position_state import Position, PositionState
+
+        pos = MagicMock(spec=Position)
+        pos.signal_id = "sig-z"
+        pos.symbol = "BTCUSDT"
+        pos.side = "LONG"
+        pos.state = PositionState.PRE_TP_FIRED
+        pos.sl_order_id = 0
+        pos.sl_be_order_id = 0
+        pos.tp1_order_id = 0
+        pos.tp2_order_id = 0
+        pos.tp3_order_id = 0
+        pos.total_qty = 0.01
+        pos.closed_qty = 0.01  # fully closed, state transition lagging
+
+        placer = MagicMock(spec=OrderPlacer)
+        placer.cancel_algo_order = AsyncMock()
+        placer.place_funding_market_close = AsyncMock(
+            return_value=MagicMock(spec=OrderPlacementResult)
+        )
+        assert await _close_for_funding("uid1", pos, placer) is True
+        placer.place_funding_market_close.assert_not_awaited()

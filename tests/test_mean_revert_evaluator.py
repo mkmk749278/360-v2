@@ -143,3 +143,31 @@ def test_evaluator_runs_in_dispatch_loop(monkeypatch):
     )
     telemetry = ch.consume_generation_telemetry()
     assert telemetry["attempts"]["MEAN_REVERT"] == 1
+
+
+def test_pair_profile_reaches_basic_filters(monkeypatch):
+    """2026-07-16 audit F6: MEAN_REVERT was the only evaluator of 18 that
+    called _pass_basic_filters without profile= — ignoring the pair's
+    spread/volume multipliers.  Pin the pass-through."""
+    _force_live(monkeypatch, True)
+    ch = ScalpChannel()
+    seen = {}
+    real = ch._pass_basic_filters
+
+    def _spy(spread_pct, volume_24h_usd, regime="", profile=None):
+        seen["profile"] = profile
+        return real(spread_pct, volume_24h_usd, regime=regime, profile=profile)
+
+    monkeypatch.setattr(ch, "_pass_basic_filters", _spy)
+    from types import SimpleNamespace
+    sentinel = SimpleNamespace(
+        spread_max_mult=1.0, volume_min_mult=1.0, adx_min_mult=1.0,
+        rsi_ob_level=70.0, rsi_os_level=30.0, bb_touch_pct=0.0, tier="MIDCAP",
+    )
+    smc = dict(_SMC)
+    smc["pair_profile"] = sentinel
+    ch._evaluate_mean_revert(
+        "ABCUSDT", _overextended_candles("SHORT"), _IND, smc,
+        0.001, 50_000_000, regime="RANGING",
+    )
+    assert seen["profile"] is sentinel

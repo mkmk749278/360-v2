@@ -526,3 +526,175 @@ def test_reset_singletons_drops_state() -> None:
     tripwires.reset_singletons_for_test()
     rl_b = tripwires.rate_limiter()
     assert rl_a is not rl_b
+
+
+# ---------------------------------------------------------------------------
+# record_order_placement_failure — the production breaker feed
+# ---------------------------------------------------------------------------
+#
+# The wiring these tests pin was the gap found in the 2026-07-16 system
+# audit: both breakers existed and were check()ed on every order, but
+# nothing ever called record_rejection — two owner-signed-off blast-radius
+# controls were inert.  The matrix below is the contract of the feed:
+# what counts, what never counts, and what happens on trip.
+
+
+class _FakeKillSwitchClient:
+    def __init__(self) -> None:
+        self.disabled_users: list[tuple[str, str]] = []
+        self.global_engaged_reasons: list[str] = []
+
+    def disable_user(self, firebase_uid: str, reason: str = "") -> None:
+        self.disabled_users.append((firebase_uid, reason))
+
+    def engage_global(self, reason: str = "") -> None:
+        self.global_engaged_reasons.append(reason)
+
+
+@pytest.fixture()
+def fake_kill_switch(monkeypatch: pytest.MonkeyPatch) -> _FakeKillSwitchClient:
+    from src.execution import kill_switch
+
+    fake = _FakeKillSwitchClient()
+    monkeypatch.setattr(kill_switch, "is_initialised", lambda: True)
+    monkeypatch.setattr(kill_switch, "get_client", lambda: fake)
+    return fake
+
+
+def _binance_reject() -> Exception:
+    from src.execution import order_placer
+
+    return order_placer.OrderRejectedByBinance(
+        "code=-2015 status=400 message=Invalid API-key"
+    )
+
+
+def _feed(uid: str, exc: Exception, code: int | None = None) -> None:
+    tripwires.record_order_placement_failure(
+        firebase_uid=uid, exc=exc, binance_code=code,
+    )
+
+
+def test_binance_rejection_burst_trips_per_user_breaker(
+    fake_kill_switch: _FakeKillSwitchClient,
+) -> None:
+    for _ in range(tripwires.DEFAULT_PER_USER_REJECTION_THRESHOLD):
+        _feed("uid-a", _binance_reject())
+    with pytest.raises(tripwires.UserAutoDisabled):
+        tripwires.per_user_breaker().check("uid-a")
+    # Trip persisted through the kill switch so it survives restart.
+    assert [u for u, _ in fake_kill_switch.disabled_users] == ["uid-a"]
+
+
+def test_key_error_counts_toward_per_user_breaker(
+    fake_kill_switch: _FakeKillSwitchClient,
+) -> None:
+    from src.execution import order_placer
+
+    for _ in range(tripwires.DEFAULT_PER_USER_REJECTION_THRESHOLD):
+        _feed("uid-k", order_placer.OrderPlacementKeyError("KEY_BLOB_NOT_FOUND"))
+    with pytest.raises(tripwires.UserAutoDisabled):
+        tripwires.per_user_breaker().check("uid-k")
+
+
+def test_unreachable_never_counts_per_user_but_counts_global(
+    fake_kill_switch: _FakeKillSwitchClient,
+) -> None:
+    from src.execution import order_placer
+
+    # Infra outage: signing service down for everyone.  Individual
+    # users must NOT be disabled for our outage…
+    for _ in range(tripwires.DEFAULT_GLOBAL_REJECTION_THRESHOLD):
+        _feed("uid-x", order_placer.OrderPlacementUnreachable("signing down"))
+    tripwires.per_user_breaker().check("uid-x")  # must not raise
+    assert fake_kill_switch.disabled_users == []
+    # …but the global breaker exists exactly for this cluster.
+    with pytest.raises(tripwires.GlobalKillSwitchEngaged):
+        tripwires.global_breaker().check()
+    assert len(fake_kill_switch.global_engaged_reasons) == 1
+
+
+def test_gate_rejections_never_count(
+    fake_kill_switch: _FakeKillSwitchClient,
+) -> None:
+    # Expected refusals from the safety-gate chain: feeding these back
+    # into the breakers would let one disabled user trip the global
+    # breaker via its own UserAutoDisabled raises.
+    gate_excs = [
+        tripwires.UserAutoDisabled("disabled"),
+        tripwires.GlobalKillSwitchEngaged("engaged"),
+        tripwires.PositionCapExceeded("cap"),
+        tripwires.RateLimitExceeded("rate"),
+        tripwires.SymbolNotAllowed("symbol"),
+        tripwires.SymbolNotInUserPreference("pref"),
+        RuntimeError("arbitrary non-placement bug"),
+    ]
+    for _ in range(5):
+        for exc in gate_excs:
+            _feed("uid-g", exc)
+    tripwires.per_user_breaker().check("uid-g")
+    tripwires.global_breaker().check()
+    assert fake_kill_switch.disabled_users == []
+    assert fake_kill_switch.global_engaged_reasons == []
+
+
+def test_insufficient_margin_2019_never_counts(
+    fake_kill_switch: _FakeKillSwitchClient,
+) -> None:
+    # -2019 is owned by the consec-margin auto-PAUSE (self-service
+    # resume); the breaker's hard disable must not replace it.
+    for _ in range(tripwires.DEFAULT_GLOBAL_REJECTION_THRESHOLD + 5):
+        _feed("uid-m", _binance_reject(), code=-2019)
+    tripwires.per_user_breaker().check("uid-m")
+    tripwires.global_breaker().check()
+    assert fake_kill_switch.disabled_users == []
+
+
+def test_global_breaker_trips_on_cross_user_cluster(
+    fake_kill_switch: _FakeKillSwitchClient,
+) -> None:
+    # 10 rejections in the window spread across users — no single user
+    # reaches their own threshold twice over, but the fleet cluster
+    # engages the global kill switch.
+    for i in range(tripwires.DEFAULT_GLOBAL_REJECTION_THRESHOLD):
+        _feed(f"uid-{i}", _binance_reject())
+    with pytest.raises(tripwires.GlobalKillSwitchEngaged):
+        tripwires.global_breaker().check()
+    assert len(fake_kill_switch.global_engaged_reasons) == 1
+
+
+def test_trip_without_kill_switch_still_refuses_in_memory(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.execution import kill_switch
+
+    monkeypatch.setattr(kill_switch, "is_initialised", lambda: False)
+    for _ in range(tripwires.DEFAULT_PER_USER_REJECTION_THRESHOLD):
+        _feed("uid-n", _binance_reject())
+    # No Firestore in dev/test — the in-memory breaker is still the gate.
+    with pytest.raises(tripwires.UserAutoDisabled):
+        tripwires.per_user_breaker().check("uid-n")
+
+
+def test_persistence_failure_is_swallowed_and_breaker_holds(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from src.execution import kill_switch
+
+    class _ExplodingClient:
+        def disable_user(self, *a: object, **kw: object) -> None:
+            raise RuntimeError("firestore down")
+
+        def engage_global(self, *a: object, **kw: object) -> None:
+            raise RuntimeError("firestore down")
+
+    monkeypatch.setattr(kill_switch, "is_initialised", lambda: True)
+    monkeypatch.setattr(kill_switch, "get_client", lambda: _ExplodingClient())
+    for _ in range(tripwires.DEFAULT_GLOBAL_REJECTION_THRESHOLD):
+        _feed("uid-p", _binance_reject())
+    # Persistence blew up but the caller never sees it, and the
+    # in-memory state still refuses orders.
+    with pytest.raises(tripwires.UserAutoDisabled):
+        tripwires.per_user_breaker().check("uid-p")
+    with pytest.raises(tripwires.GlobalKillSwitchEngaged):
+        tripwires.global_breaker().check()
