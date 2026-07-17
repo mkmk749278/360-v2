@@ -4,6 +4,55 @@
 
 ---
 
+## 🟢 SESSION 62 2026-07-17 — test-coverage sweep across all three repos + /api/activity filter bug found by it (branch `claude/test-coverage-analysis-9ykleq`, 360-v2 + lumin-app + 360ce-ops)
+
+**Owner ask:** analyze test coverage across the codebase, then implement all
+the proposed improvements.
+
+### Real bug found and fixed while writing tests (360-v2)
+
+`snapshot_cache.filter_activity` filtered on `e.setup_class` — a field
+`ActivityEvent` **does not have**. On a warm cache,
+`/api/activity?setup_class=X` raised AttributeError into the route's
+catch-all and the app got an **empty activity list** instead of a filtered
+one (live-build fallback never ran — the except wraps both paths). Fix: a
+setup_class query now returns `None` from the cache so the route falls back
+to `build_activity`, which filters correctly at the signal level. Off money
+path (display-only), shipped with regression pin in the same commit.
+
+### New coverage (all suites green before push)
+
+- **360-v2** (+71 tests, 6732 total pass): first direct `snapshot_cache`
+  suite (warm/stale, authoritative `is_open` split incl. mover-runner at
+  TP1_HIT, legacy-payload heuristic, Redis refresher fault tolerance,
+  lifecycle); `performance_tracker_honest` bucket math (was only ever
+  mocked out — hard-limit adjacent); `/auto_trade_global` command (admin
+  guard, exact client-method mapping, failure surfacing) and `/deploy` /
+  `/rollback` (ref validation ahead of subprocess).
+- **lumin-app** (+100 tests, 294 total pass): second-wave money-path
+  coverage — BinanceKeysService per-user isolation + corrupt-blob wipe;
+  UpdateService tag parsing / silent-failure contract / cache;
+  PlayBillingService (engine-verdict-only entitlement, completePurchase
+  always); AppConfig live-by-default fail-safe; and the
+  LuminApiClient/HttpRepository scaffolding (401 single-force-refresh, 5xx
+  retry, tolerant older-engine defaults, verify defaults to NOT entitled,
+  region soft-fail-open).
+- **360ce-ops** (+45 mobile / +27 web tests, 378 web + 45 mobile pass):
+  agent notifier delivery leg (Telegram + FCM fan-out + prune + heartbeat
+  — detectors were pinned, the paging leg wasn't); `/signals/{id}`
+  drill-down; mobile app pinned from 1 test → api_client wire contract,
+  AuthService credential/biometric seams, humanize, and widget-level
+  confirm gates on kill-switch/LIVE (control doctrine).
+- **CI in all three repos** now writes a per-module coverage table to the
+  job summary — measured and reported, never gated.
+
+**Open item for owner/next session:** the three branches
+(`claude/test-coverage-analysis-9ykleq` in each repo) are pushed but PRs
+were not opened (not requested). The 360-v2 branch carries the
+`/api/activity` fix — worth PRing promptly.
+
+---
+
 ## 🟢 SESSION 61 2026-07-17 — Binance connect 500 (KMS never inited in api container) + armed card lying over silent dispatch skips (branch `claude/binance-api-trading-issues-s9858w`, 360-v2 + lumin-app)
 
 **Owner ask (with screenshots):** (1) a NEW paying subscriber cannot connect
