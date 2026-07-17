@@ -23,7 +23,18 @@ from datetime import datetime, timedelta, timezone
 from src.api.snapshot import _minutes_since
 
 
-_NOW = datetime.now(timezone.utc)
+def _now() -> datetime:
+    """Fresh per-assertion 'now'.
+
+    Was a module-level ``_NOW`` captured at import — but pytest imports
+    every test module during collection, so on a slow run (full suite
+    under coverage) more than a minute elapsed between import and
+    execution and the exact-equality assertions drifted by one
+    (CI flake 2026-07-17: ``assert 8 == 7``).  ``_minutes_since``
+    floors, so an offset computed microseconds before the call is
+    always exact.
+    """
+    return datetime.now(timezone.utc)
 
 
 def test_none_returns_zero() -> None:
@@ -31,34 +42,34 @@ def test_none_returns_zero() -> None:
 
 
 def test_datetime_tz_aware_returns_correct_minutes() -> None:
-    ts = _NOW - timedelta(minutes=7)
+    ts = _now() - timedelta(minutes=7)
     assert _minutes_since(ts) == 7
 
 
 def test_datetime_naive_treated_as_utc() -> None:
-    ts = (_NOW - timedelta(minutes=12)).replace(tzinfo=None)
+    ts = (_now() - timedelta(minutes=12)).replace(tzinfo=None)
     assert _minutes_since(ts) == 12
 
 
 def test_future_timestamp_clamps_to_zero() -> None:
     """A clock-skew situation (record ts is slightly in the future)
     shouldn't yield negative minutes — clamped to 0."""
-    ts = _NOW + timedelta(minutes=3)
+    ts = _now() + timedelta(minutes=3)
     assert _minutes_since(ts) == 0
 
 
 def test_iso_string_z_suffix() -> None:
-    ts = (_NOW - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    ts = (_now() - timedelta(minutes=5)).strftime("%Y-%m-%dT%H:%M:%SZ")
     assert _minutes_since(ts) == 5
 
 
 def test_iso_string_offset_suffix() -> None:
-    ts = (_NOW - timedelta(minutes=9)).isoformat()
+    ts = (_now() - timedelta(minutes=9)).isoformat()
     assert _minutes_since(ts) == 9
 
 
 def test_iso_string_naive_treated_as_utc() -> None:
-    naive = (_NOW - timedelta(minutes=15)).replace(tzinfo=None)
+    naive = (_now() - timedelta(minutes=15)).replace(tzinfo=None)
     assert _minutes_since(naive.isoformat()) == 15
 
 
