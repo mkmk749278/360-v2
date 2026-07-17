@@ -32,8 +32,8 @@ Ask before every code change: **"How does this make signals more profitable for 
 
 ## Project Phase — Production (LIVE on the Play Store)
 
-**The Lumin app is LIVE on the Google Play production track** (release 266, public in
-our launch region, real installs on real devices — 14 at 2026-06-30). Closed testing
+**The Lumin app is LIVE on the Google Play production track** (release 282+ as of
+2026-07-16, public in our launch region, real installs on real devices). Closed testing
 is over. Real users see every signal and can run auto-trade on their own capital.
 This **restores the dark-flag-first discipline** the testing phase had relaxed — the
 trigger the old "ship live" section itself named ("revisit at subscriber launch") has
@@ -128,12 +128,13 @@ HistoricalDataStore + OrderFlowStore
       ↓
 Scanner (15s × 75 pairs) → 18 evaluators → gate chain → scoring
       ↓
-SignalRouter → Telegram (paid A+/B only)
+SignalRouter → Telegram (paid A+/B only) · FCM push topics → Lumin app
       ↓
 ┌─────────────────────────────────────────────────────┐
 │ ENGINE CONTAINER                                    │
 │ TradeMonitor · signal_dispatch · Position FSM       │
 │ PositionWorker · Reconciler · MarkPriceFeed         │
+│ ManualTakeConsumer (server-side take, via Redis)    │
 │ SnapshotWriter ──→ Redis ──→ API CONTAINER          │
 │                              RedisEngineFacade      │
 │                              HTTP on own event loop │
@@ -180,14 +181,27 @@ Binance REST API
 | Reconciler | `src/execution/reconciler.py` |
 | Mark price feed | `src/execution/mark_price_feed.py` |
 | Pre-TP dispatcher | `src/execution/pretp_dispatcher.py` |
+| Manual take consumer (server-side take) | `src/execution/manual_take.py` |
 | API server | `src/api/server.py` |
 | API isolated entry point | `src/api/main.py` |
 | Redis engine facade | `src/api/redis_engine.py` |
 | Snapshot writer | `src/api/snapshot_writer.py` |
 | Snapshot cache | `src/api/snapshot_cache.py` |
 | Per-user settings | `src/api/user_overrides.py` |
+| Binance connect (key intake) | `src/api/binance_connect_routes.py`, `src/security/binance_connect_validator.py` |
+| Play Billing verify (B16, entitlement truth) | `src/api/billing_play.py` |
+| FCM push (topics `alerts`/`signals`) | `src/push_notifications.py` |
 | Truth report | `src/runtime_truth_report.py` |
 | Invalidation audit | `src/invalidation_audit.py` |
+| Fail-open exception telemetry | `src/fail_open.py` |
+| Feature-liveness watchdog | `src/feature_liveness.py` |
+| Market-context engine (portfolio Layer A) | `src/market_context.py` |
+| Strategy registry (Layer B) | `src/strategy_portfolio.py` |
+| Strategy×Context edge matrix (Layer C) | `src/strategy_edge.py` |
+| Suppression audit + shadow ledger | `src/suppression_audit.py` |
+| Shadow-only strategy units | `src/shadow_strategies.py` |
+| Stop-geometry A/B (shadow) | `src/geometry_ab.py` |
+| Tuned shadow variants (`@TUNED`) | `src/tuned_variants.py` |
 
 ---
 
@@ -204,6 +218,7 @@ Binance REST API
   just-shipped change (or re-diagnose the path) until a fresh data window has
   accumulated. Wait for data, then read.
 - **Invalidation audit** — `data/invalidation_records.json` on VPS. Classifies kills as PROTECTIVE / PREMATURE / NEUTRAL.
+- **Edge matrix / shadow ledger** — every strategy (live evaluators + shadow units + `@TUNED` variants + stop-geometry A/B arms) is forward-measured per market context on real data. Read via the ops Strategy Lab; strategy tuning/allocation decisions come from these numbers, never opinion, and applying a winning recipe is still dark-first + owner sign-off.
 - **360 CE Ops** — `ops.luminapp.org` (live, owner-only). Engine API + data volume + monitor-logs + diag scripts in browser.
 - **Auto-detected issues** — GitHub Issues tagged `auto-detected` from the 24/7 monitoring agent. Check at every session start.
 
@@ -232,7 +247,7 @@ python -m pytest tests/test_signal_quality.py -v
 
 # Lint / type-check
 ruff check src/ config/
-mypy src/ config/
+mypy src/ config/          # has an accepted error baseline (~102) — don't add new ones
 
 # Syntax check before commit
 python3 -c "import ast; ast.parse(open('src/<file>.py').read()); print('OK')"
