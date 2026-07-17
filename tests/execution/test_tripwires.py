@@ -650,6 +650,36 @@ def test_insufficient_margin_2019_never_counts(
     assert fake_kill_switch.disabled_users == []
 
 
+def test_futures_agreement_4411_never_counts(
+    fake_kill_switch: _FakeKillSwitchClient,
+) -> None:
+    # -4411 "Please sign TradFi-Perps agreement" is a user-setup state
+    # only the user can fix on Binance's side.  Pre-2026-07-17 it fed
+    # the breakers: a real subscriber was hard-disabled behind an
+    # operator-only reset, and one retrying user could walk the GLOBAL
+    # breaker toward killing trading for everyone.
+    for _ in range(tripwires.DEFAULT_GLOBAL_REJECTION_THRESHOLD + 5):
+        _feed("uid-t", _binance_reject(), code=-4411)
+    tripwires.per_user_breaker().check("uid-t")
+    tripwires.global_breaker().check()
+    assert fake_kill_switch.disabled_users == []
+    assert fake_kill_switch.global_engaged_reasons == []
+
+
+def test_mixed_4411_and_real_errors_counts_only_the_real_ones(
+    fake_kill_switch: _FakeKillSwitchClient,
+) -> None:
+    # A stream interleaving -4411 with genuine rejections must count
+    # ONLY the genuine ones toward the per-user window.
+    for _ in range(tripwires.DEFAULT_PER_USER_REJECTION_THRESHOLD - 1):
+        _feed("uid-mix", _binance_reject())
+        _feed("uid-mix", _binance_reject(), code=-4411)
+    tripwires.per_user_breaker().check("uid-mix")  # threshold-1: still ok
+    _feed("uid-mix", _binance_reject())
+    with pytest.raises(tripwires.UserAutoDisabled):
+        tripwires.per_user_breaker().check("uid-mix")
+
+
 def test_global_breaker_trips_on_cross_user_cluster(
     fake_kill_switch: _FakeKillSwitchClient,
 ) -> None:
