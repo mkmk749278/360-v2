@@ -746,6 +746,27 @@ class Bootstrap:
                     "API_PROCESS_ISOLATED=true — SnapshotWriter started; "
                     "HTTP API served by the separate 'api' container"
                 )
+                # Manual-take consumer (owner-approved 2026-07-17) —
+                # drains POST /api/auto-trade/take requests queued by the
+                # api container.  Flag-gated so the disabled state is
+                # fully inert (no Redis connection blocked on the queue);
+                # the api route 503s when the flag is off, so nothing
+                # accumulates either.
+                from config import AUTO_TRADE_MANUAL_TAKE_ENABLED
+                if AUTO_TRADE_MANUAL_TAKE_ENABLED:
+                    from src.execution.manual_take import ManualTakeConsumer
+                    _mtc = ManualTakeConsumer(engine, engine._redis_client)
+                    tasks.append(
+                        asyncio.create_task(
+                            _mtc.start(), name="manual_take_consumer",
+                        )
+                    )
+                    log.info("Manual-take consumer started (flag ON)")
+                else:
+                    log.info(
+                        "Manual-take consumer NOT started "
+                        "(AUTO_TRADE_MANUAL_TAKE_ENABLED=false)"
+                    )
             else:
                 # Default: single-process mode — API shares the engine's event loop.
                 tasks.append(

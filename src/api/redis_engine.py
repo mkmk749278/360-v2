@@ -14,6 +14,7 @@ to pick up on its next ``SnapshotWriter._apply_pending_mode_cmd`` check.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 from datetime import datetime
 from typing import Any, Dict, Optional
@@ -119,6 +120,7 @@ class RedisEngineFacade:
         self._redis = redis_client
         self._state: dict = {}
         self._positions_diag: Optional[dict] = None
+        self._signals_all_cache: Optional[list] = None
         self._alerts: Optional[list] = None
         self._refreshed_at: float = 0.0
 
@@ -342,3 +344,80 @@ class RedisEngineFacade:
 
         loop.create_task(_write_cmd())
         return True, "full signal reset queued (takes effect on next engine cycle, ≤15s)"
+
+    # ------------------------------------------------------------------
+    # Manual take (owner-approved 2026-07-17)
+    # ------------------------------------------------------------------
+
+    async def enqueue_manual_take(
+        self, *, request_id: str, uid: str, signal_id: str
+    ) -> bool:
+        """LPUSH a manual-take envelope for the engine's ManualTakeConsumer.
+
+        Unlike the fire-and-forget mode/reset commands, the take flow is
+        request/response: the caller polls :meth:`read_manual_take_result`
+        with the same ``request_id``.  Returns False when Redis is down so
+        the route can 503 instead of pretending the tap was accepted.
+        """
+        if not self._redis.available:
+            log.warning(
+                "redis_engine.enqueue_manual_take: Redis unavailable — "
+                "refusing take uid={} signal_id={}", uid, signal_id,
+            )
+            return False
+        envelope = json.dumps({
+            "request_id": request_id,
+            "uid": uid,
+            "signal_id": signal_id,
+            "ts": time.time(),
+        })
+        await self._redis.client.lpush(_store.KEY_CMD_TAKE, envelope)
+        return True
+
+    async def read_manual_take_result(self, request_id: str) -> Optional[dict]:
+        """Return the engine's take outcome for ``request_id``, or ``None``
+        while it hasn't been written yet (the route polls this)."""
+        if not self._redis.available:
+            return None
+        raw = await self._redis.client.get(
+            _store.KEY_TAKE_RESULT_PREFIX + request_id
+        )
+        if raw is None:
+            return None
+        try:
+            parsed = json.loads(raw)
+        except (TypeError, ValueError):
+            log.warning(
+                "redis_engine.read_manual_take_result: malformed result "
+                "request_id={} raw={!r}", request_id, raw,
+            )
+            return None
+        return parsed if isinstance(parsed, dict) else None
+
+    def published_signal(self, signal_id: str) -> Optional[dict]:
+        """Best-effort lookup of one signal dict from ``snapshot:signals_all``
+        for pre-validation (existence / is_open) before enqueueing a take.
+
+        Up to ~60 s stale — the engine consumer re-validates against the
+        live book, which stays the source of truth.  Returns ``None`` when
+        the snapshot is unavailable (caller should enqueue anyway and let
+        the engine decide, rather than blocking a take on a cold cache).
+        """
+        signals = self._signals_all_cache
+        if not isinstance(signals, list):
+            return None
+        for item in signals:
+            if isinstance(item, dict) and item.get("signal_id") == signal_id:
+                return item
+        return None
+
+    async def refresh_signals_all(self) -> None:
+        """Pull ``snapshot:signals_all`` into the local cache (cheap single
+        GET; called by the take route before pre-validation)."""
+        if not self._redis.available:
+            return
+        try:
+            raw = await self._redis.client.get(_store.KEY_SIGNALS_ALL)
+            self._signals_all_cache = _store.decode(raw)
+        except Exception:
+            log.exception("redis_engine: failed to refresh signals_all")

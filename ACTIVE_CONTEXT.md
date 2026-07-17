@@ -52,10 +52,42 @@ old builds degrade to honest-but-under-explained). `resume-mine` now
 invalidates the runtime cache. lumin-app renders the new gates: tier row,
 server-pause fold-in, block-all row, restrictive-prefs footnote.
 
+### Server-side manual take (owner-approved in-session, same day)
+
+After the KMS fix landed, the owner hit the NEXT wall: one-tap "Take trade"
+(signals + alerts) is client-side — it demands device-stored keys (Settings
+→ API keys), a different store from the server-side connect, and the
+server-connected key is IP-whitelisted to the VPS so phone-placed orders
+would be Binance-rejected anyway. Owner picked **server-side take**:
+`POST /api/auto-trade/take {signal_id}` → (isolated mode) LPUSH
+`snapshot:cmd:take` → engine `ManualTakeConsumer` (BRPOP, sub-second, zero
+idle reads) → `engine.take_signal_for_user` → re-validate against the live
+book → `dispatch_signal_to_uid_manual` — the SAME sizing / tripwire /
+FSM-safety-gate / dispatch_log path as auto, with three tap-justified
+differences: mode + auto-pause + path/regime pref gates skipped, tier gate
+at `can_assist` (one-tap is the assist product surface), and a NEW
+`(uid, signal_id)` dup guard (audit found `place_signal` never checked for
+an existing position — a double-tap would have fired a second real MARKET
+entry; guard fails CLOSED on store errors). Result key
+`snapshot:take_result:<request_id>` polled by the route ≤8s → synchronous
+placed/rejected answer; engine-down envelopes >60s old are refused as
+stale (no minutes-late market orders). dispatch_log rows now carry
+`source: auto|manual_take`. **Dark-flag-first honoured:
+`AUTO_TRADE_MANUAL_TAKE_ENABLED` default-OFF** — owner activates with one
+`.env` line + redeploy. **Scope: signals only** — alerts carry no SL/TP
+geometry and "never OPEN without a stop" forbids a stop-less server entry;
+engine-side alert-take needs a designed geometry-synthesis layer first
+(B7 owner-sign-off follow-up, flagged to owner).
+
 ### Open
 
 - Owner to run the VPS runbook (final report) to confirm which silent gate
   holds the primary account, then fix the row via the admin grant flow.
+- Owner to activate `AUTO_TRADE_MANUAL_TAKE_ENABLED=true` after merging the
+  take PR (one line in VPS `.env` + `bash deploy.sh`).
+- Alert-take server-side: needs SL/TP synthesis design (B7). Until then the
+  alert sheet stays client-side; its copy now explains the second-key
+  requirement honestly.
 - Optional follow-ups noted in PR: dedupe bootstrap/api KMS init; migrate
   `signal_dispatch._resolve_user_tier` onto `auth.effective_tier` (pure
   refactor, dark-first rules apply); owner/all-access exemption from the

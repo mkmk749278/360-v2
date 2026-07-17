@@ -3139,6 +3139,19 @@ GOOGLE_PLAY_BILLING_ENABLED: bool = _safe_bool("GOOGLE_PLAY_BILLING_ENABLED", "t
 #: for our own test accounts.  This is NOT a dark flag: it ships ON.
 AUTO_TRADE_TIER_GATE_ENABLED: bool = _safe_bool("AUTO_TRADE_TIER_GATE_ENABLED", "true")
 
+#: Server-side manual take (owner-approved 2026-07-17).  When true, the
+#: ``POST /api/auto-trade/take`` endpoint lets an assist-or-higher user
+#: manually take a specific ACTIVE signal: the engine places the order on
+#: their server-connected key through the exact same per-user dispatch path
+#: as auto-trade (sizing, tripwires, FSM safety gates, dispatch_log), with
+#: the mode / auto-pause / path-regime preference gates skipped — the tap IS
+#: the user's explicit consent.  Dark-flag-first (production doctrine): ships
+#: **default-OFF**; the owner activates by setting
+#: ``AUTO_TRADE_MANUAL_TAKE_ENABLED=true`` in the VPS ``.env`` + redeploy.
+AUTO_TRADE_MANUAL_TAKE_ENABLED: bool = _safe_bool(
+    "AUTO_TRADE_MANUAL_TAKE_ENABLED", "false"
+)
+
 #: Android application id of the Lumin app, e.g. ``org.luminapp.lumin``.
 #: Must match the ``packageName`` Google signs RTDN notifications with and
 #: the package the purchase was made under.

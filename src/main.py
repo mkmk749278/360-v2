@@ -897,6 +897,73 @@ class CryptoSignalEngine:
         )
         return PaperBookFanout(registry)
 
+    async def take_signal_for_user(
+        self, firebase_uid: str, signal_id: str
+    ) -> Dict[str, Any]:
+        """Manual take (owner-approved 2026-07-17): place ONE active signal
+        for ONE user who explicitly tapped "Take trade" in the app.
+
+        Resolves the live ``Signal`` from the router's active book (the
+        engine is the source of truth — API-side snapshot pre-validation
+        can be up to 60 s stale) and hands the geometry to
+        :func:`signal_dispatch.dispatch_signal_to_uid_manual`, which runs
+        the same sizing / tripwire / FSM safety-gate / dispatch-log path
+        as the auto fan-out.  Returns the result dict the API relays to
+        the app.  Called directly in single-process mode; via the
+        ManualTakeConsumer (Redis queue) in isolated mode.
+        """
+        from config import AUTO_TRADE_MANUAL_TAKE_ENABLED as _take_on
+        if not _take_on:
+            return {
+                "outcome": "rejected",
+                "reject_class": "ManualTakeDisabled",
+                "reject_detail": (
+                    "Server-side take is disabled on this engine "
+                    "(AUTO_TRADE_MANUAL_TAKE_ENABLED=false)."
+                ),
+                "signal_id": signal_id,
+            }
+        signal = self.router.active_signals.get(signal_id)
+        if signal is None:
+            return {
+                "outcome": "rejected",
+                "reject_class": "SignalNotFound",
+                "reject_detail": (
+                    "This signal is no longer in the active book — it "
+                    "closed or expired."
+                ),
+                "signal_id": signal_id,
+            }
+        from src.api.snapshot import _TERMINAL_STATUSES
+        if getattr(signal, "status", "ACTIVE") in _TERMINAL_STATUSES:
+            return {
+                "outcome": "rejected",
+                "reject_class": "SignalClosed",
+                "reject_detail": (
+                    f"This signal already closed "
+                    f"({getattr(signal, 'status', '?')}) — taking it now "
+                    f"would enter without the setup."
+                ),
+                "signal_id": signal_id,
+            }
+        from src.execution import signal_dispatch as _sd
+        return await _sd.dispatch_signal_to_uid_manual(
+            uid=firebase_uid,
+            signal_id=signal.signal_id,
+            symbol=signal.symbol,
+            direction=signal.direction.value,
+            entry_price=float(signal.entry),
+            sl_price=float(signal.stop_loss),
+            tp1_price=float(signal.tp1),
+            tp2_price=float(signal.tp2),
+            tp3_price=float(signal.tp3),
+            regime_label=getattr(signal, "entry_regime", None),
+            regime_label_15m=getattr(signal, "entry_regime_15m", None),
+            atr_percentile=getattr(signal, "atr_percentile_at_entry", 50.0),
+            atr_value=getattr(signal, "atr_value_at_entry", 0.0),
+            setup_class=getattr(signal, "setup_class", None),
+        )
+
     def set_auto_execution_mode(self, new_mode: str) -> Tuple[bool, str]:
         """Switch auto-execution mode at runtime.
 

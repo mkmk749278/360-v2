@@ -2173,6 +2173,19 @@ def build_app(
         identity_dep=user_claims,
     )
 
+    # ---- Server-side manual take (owner-approved 2026-07-17) ----
+    # POST /api/auto-trade/take — assist+ user takes one ACTIVE signal;
+    # the engine places it on their server-connected key via the same
+    # dispatch path as auto-trade.  Dark-flag-gated: the route 503s until
+    # AUTO_TRADE_MANUAL_TAKE_ENABLED=true is set on the VPS.
+    from . import take_signal_route as _take_signal_route
+    _take_signal_route.register(
+        app,
+        engine=engine,
+        auth=auth,
+        identity_dep=user_claims,
+    )
+
     # ---- Auto-trade status (server-side execution stack, PR-14 follow-up 3/3) ----
     # Lightweight GET endpoint that surfaces the user's auto-trade
     # enablement state.  Powers the Lumin app's "your auto-trade is
