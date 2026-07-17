@@ -12,6 +12,13 @@ Responsibility split
 
 All per-user filtering (paper P&L windows, auto-trade settings) runs here
 against the shared SQLite file — no engine object required.
+
+This process also owns the Binance-key **connect flow** (``POST
+/api/binance/connect``): the user's API secret is envelope-encrypted with
+Cloud KMS *in this process* before the blob is written to Firestore, so
+the KMS client must be initialised here at boot — see
+:func:`_maybe_init_kms`.  (Order *signing* stays in the dedicated
+signing-service container; this container never decrypts.)
 """
 from __future__ import annotations
 
@@ -22,6 +29,55 @@ from datetime import timedelta
 from src.utils import get_logger
 
 log = get_logger("api.main")
+
+
+def _maybe_init_kms(firebase_sa_path: str) -> bool:
+    """Initialise the Cloud KMS client when the GCP_KMS_* env group is set.
+
+    Mirror of the engine's boot path (``bootstrap.py`` KMS block): all four
+    ``GCP_KMS_*`` vars must be non-empty, credentials reuse the Firebase
+    service account (fall back to ADC when the path is empty), and failure
+    is non-fatal — the api container must still boot for read-only users
+    when KMS is unconfigured.
+
+    Session-14's isolation sweep (#565–#569) wired ``init_keystore()`` and
+    ``init_kill_switch()`` into this entry point but left KMS out, so every
+    isolated-mode ``POST /api/binance/connect`` died at the KMS preflight
+    with "Server misconfiguration — KMS not initialised" while
+    single-process mode worked.  Returns True iff the client initialised.
+    """
+    gcp_kms_project_id = os.environ.get("GCP_KMS_PROJECT_ID", "")
+    gcp_kms_location = os.environ.get("GCP_KMS_LOCATION", "")
+    gcp_kms_keyring = os.environ.get("GCP_KMS_KEYRING", "")
+    gcp_kms_key_name = os.environ.get("GCP_KMS_KEY_NAME", "")
+    if not (
+        gcp_kms_project_id
+        and gcp_kms_location
+        and gcp_kms_keyring
+        and gcp_kms_key_name
+    ):
+        log.info(
+            "KMS client skipped (GCP_KMS_* env vars not set) — "
+            "POST /api/binance/connect will refuse with 500"
+        )
+        return False
+    try:
+        from src.security import kms_client as _kms_client
+
+        _kms_client.init_kms_client(
+            project_id=gcp_kms_project_id,
+            location=gcp_kms_location,
+            keyring=gcp_kms_keyring,
+            key_name=gcp_kms_key_name,
+            service_account_path=firebase_sa_path or None,
+        )
+        return True
+    except Exception as exc:
+        log.warning(
+            "KMS client init failed (binance key connect will refuse): {}",
+            exc,
+        )
+        return False
 
 
 async def _run() -> None:
@@ -117,6 +173,12 @@ async def _run() -> None:
             )
     else:
         log.info("Firebase Admin skipped (env vars not set)")
+
+    # ── Cloud KMS (B18 connect flow) ──────────────────────────────────
+    # Independent of the Firebase-Admin conditional above (exactly like
+    # bootstrap.py) — KMS init is gated on GCP_KMS_* alone, with the
+    # service-account path reused when present, ADC otherwise.
+    _maybe_init_kms(firebase_sa_path)
 
     # ── Per-user overrides ────────────────────────────────────────────
     user_overrides = UserOverridesStore(LUMIN_DB_PATH)
