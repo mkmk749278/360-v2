@@ -625,11 +625,26 @@ def reset_singletons_for_test() -> None:
 # ---------------------------------------------------------------------------
 
 
-# Binance -2019 "Margin is insufficient" has its own dedicated handling in
-# signal_dispatch (consecutive-count auto-PAUSE, self-service resume via
-# ``POST /api/auto-mode/resume-mine``).  Feeding it to the breakers would
-# replace that soft pause with a hard operator-reset disable for what is a
-# user wallet-balance state, not a fault — so it is excluded here.
+# Binance codes that are USER-SETUP states, not order faults — excluded
+# from both breakers (owner-approved 2026-07-17; B18 sign-off given in
+# session):
+#
+# * ``-2019`` "Margin is insufficient" has its own dedicated handling in
+#   signal_dispatch (consecutive-count auto-PAUSE, self-service resume via
+#   ``POST /api/auto-mode/resume-mine``).  Feeding it to the breakers would
+#   replace that soft pause with a hard operator-reset disable for what is
+#   a user wallet-balance state, not a fault.
+# * ``-4411`` "Please sign TradFi-Perps agreement contract" — the user's
+#   Binance account has never accepted the Futures trading agreement, so
+#   EVERY order is refused until they act on Binance's side.  A real
+#   subscriber racked up -4411 rejections, tripped the per-user breaker,
+#   and was hard-disabled behind an operator-only reset for something only
+#   they could fix (2026-07-17 owner screenshots); one user retrying could
+#   likewise walk the GLOBAL breaker toward engaging the kill switch for
+#   everyone.  The rejection still logs to dispatch_log and reaches the
+#   app, which renders "accept the Futures agreement on Binance" guidance.
+_BINANCE_USER_SETUP_CODES = frozenset({-2019, -4411})
+# Retained name for any external readers/tests of the original constant.
 _BINANCE_INSUFFICIENT_MARGIN_CODE = -2019
 
 
@@ -650,7 +665,9 @@ def record_order_placement_failure(
       position cap, rate limit, the breakers' own ``check`` raises)
       are expected refusals, not Binance failures — counting them
       would let one disabled user trip the global breaker.
-    * ``-2019`` insufficient-margin never counts (see constant above).
+    * User-setup Binance codes never count (``-2019`` insufficient
+      margin, ``-4411`` Futures agreement not accepted — see
+      ``_BINANCE_USER_SETUP_CODES`` above).
     * Per-user breaker counts only user-attributable failures
       (:class:`OrderRejectedByBinance`, :class:`OrderPlacementKeyError`
       — revoked/blocked key, permission change, bad params for this
@@ -677,7 +694,7 @@ def record_order_placement_failure(
 
     if not isinstance(exc, _op.OrderPlacementError):
         return
-    if binance_code == _BINANCE_INSUFFICIENT_MARGIN_CODE:
+    if binance_code in _BINANCE_USER_SETUP_CODES:
         return
 
     user_attributable = isinstance(
