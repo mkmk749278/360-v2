@@ -85,6 +85,9 @@ class DispatchEvent:
     reject_detail: Optional[str] = None  # str(exc) — full diagnostic
     reject_binance_code: Optional[int] = None  # extracted from binance_body
     reject_binance_msg: Optional[str] = None  # extracted from binance_body
+    # Dispatch source: "auto" (signal fan-out) | "manual_take" (user tapped
+    # Take trade in the app — owner-approved server-side take, 2026-07-17).
+    source: str = "auto"
 
 
 # ---------------------------------------------------------------------------
@@ -148,6 +151,7 @@ def record_placed(
     direction: str,
     entry_price: float,
     total_qty: float,
+    source: str = "auto",
 ) -> None:
     """Record a successful dispatch attempt.
 
@@ -169,6 +173,7 @@ def record_placed(
             "timestamp": datetime.now(timezone.utc),
             "entry_price": float(entry_price),
             "total_qty": float(total_qty),
+            "source": source,
         }
         _events_collection(firebase_uid).document(event_id).set(doc)
     except Exception:
@@ -189,6 +194,7 @@ def record_rejected(
     reject_detail: str,
     reject_binance_code: Optional[int] = None,
     reject_binance_msg: Optional[str] = None,
+    source: str = "auto",
 ) -> None:
     """Record a rejected dispatch attempt.
 
@@ -224,6 +230,7 @@ def record_rejected(
                 else None
             ),
             "reject_binance_msg": reject_binance_msg,
+            "source": source,
         }
         _events_collection(firebase_uid).document(event_id).set(doc)
     except Exception:
@@ -326,4 +333,5 @@ def _from_firestore_dict(data: dict) -> DispatchEvent:
             else None
         ),
         reject_binance_msg=data.get("reject_binance_msg"),
+        source=str(data.get("source") or "auto"),
     )

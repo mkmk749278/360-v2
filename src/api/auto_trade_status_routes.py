@@ -631,6 +631,7 @@ def register(
                     "reject_detail": e.reject_detail,
                     "reject_binance_code": e.reject_binance_code,
                     "reject_binance_msg": e.reject_binance_msg,
+                    "source": e.source,
                 }
                 for e in events
             ],

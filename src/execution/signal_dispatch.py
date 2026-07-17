@@ -51,7 +51,7 @@ import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass
-from typing import Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from src.utils import get_logger
 
@@ -504,6 +504,9 @@ async def dispatch_signal_to_active_users(
     valid_for_minutes: int = 0,
     current_price: float = 0.0,
     risk_scale: float = 1.0,
+    _only_uid: Optional[str] = None,
+    _manual: bool = False,
+    _manual_result: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Fan a signal out to every active user's server-side FSM.
 
@@ -521,6 +524,18 @@ async def dispatch_signal_to_active_users(
     When no users have connected a key (cold-deploy or all users
     using the legacy client-side path), this function returns 0
     without touching anything.
+
+    Manual take (owner-approved 2026-07-17): ``_only_uid`` + ``_manual``
+    are the internal plumbing for :func:`dispatch_signal_to_uid_manual`
+    — a single explicit user instead of the roster, with the mode /
+    auto-pause / path-regime preference gates skipped (the user's tap IS
+    the consent those gates encode) and the tier gate applied at
+    ``can_assist`` instead of ``can_auto``.  Everything downstream —
+    per-user sizing, tripwires, ``place_signal``'s safety-gate chain,
+    dispatch_log — is byte-identical to the auto path.  ``_manual_result``
+    (a caller-owned dict) is filled with the terminal outcome so the API
+    can answer the user's request synchronously.  External callers use
+    the public wrapper, never these parameters.
     """
     # Lazy import to avoid circular dep: position_fsm imports the
     # signing-service client which imports the engine bootstrap.
@@ -556,9 +571,17 @@ async def dispatch_signal_to_active_users(
     except Exception as _sh_exc:  # noqa: BLE001 — shadow must never block dispatch
         log.debug("FSM_LIMIT_ENTRY shadow error (non-blocking): {}", _sh_exc)
 
-    uids = _active_uids()
+    uids = [_only_uid] if _only_uid else _active_uids()
     if not uids:
         return 0
+
+    _dispatch_source = "manual_take" if _manual else "auto"
+
+    def _capture(**fields: Any) -> None:
+        """Write the terminal outcome into the caller's result dict
+        (manual take only — the auto fan-out passes no sink)."""
+        if _manual_result is not None:
+            _manual_result.update(fields)
 
     async def _one_user(uid: str) -> bool:
         # Per-user mode gate (2026-05-24). The pre-2026-05-24 dispatcher
@@ -578,7 +601,7 @@ async def dispatch_signal_to_active_users(
         # rather than a status display divorced from behaviour.
         from src.api import user_overrides as _uo
         user_mode = _uo.resolve_user_mode_uid(uid)
-        if user_mode not in ("live", "both"):
+        if not _manual and user_mode not in ("live", "both"):
             log.info(
                 "signal_dispatch: skipping non-live user uid={} mode={} "
                 "signal_id={}",
@@ -594,14 +617,28 @@ async def dispatch_signal_to_active_users(
         # closed: an unconfirmed tier resolves to free and is skipped.
         from config import AUTO_TRADE_TIER_GATE_ENABLED as _tier_gate
         if _tier_gate:
+            # Manual take is the assist-tier product surface (one-tap
+            # order on the user's own key), so the manual path gates at
+            # can_assist; the unattended fan-out stays at can_auto.
+            from src.api.auth import can_assist as _can_assist
             from src.api.auth import can_auto as _can_auto
+            _tier_ok = _can_assist if _manual else _can_auto
             _user_tier = _resolve_user_tier(uid)
-            if not _can_auto(_user_tier):
+            if not _tier_ok(_user_tier):
                 log.info(
-                    "signal_dispatch: skipping non-auto user uid={} tier={} "
-                    "signal_id={} — hands-off auto-execution requires the "
-                    "auto tier",
-                    uid, _user_tier, signal_id,
+                    "signal_dispatch: skipping user uid={} tier={} "
+                    "signal_id={} manual={} — {} requires the {} tier",
+                    uid, _user_tier, signal_id, _manual,
+                    "one-tap take" if _manual else "hands-off auto-execution",
+                    "assist" if _manual else "auto",
+                )
+                _capture(
+                    outcome="rejected",
+                    reject_class="TierNotEntitled",
+                    reject_detail=(
+                        f"One-tap take requires the assist tier or higher "
+                        f"(your effective tier: {_user_tier})."
+                    ),
                 )
                 return False
 
@@ -615,7 +652,7 @@ async def dispatch_signal_to_active_users(
         # resume-mine`` to resume.  Recovery: go to Trade → Live and
         # tap "Resume", or save mode='live' in Auto-trade Settings
         # (which auto-resumes as of 2026-05-25).
-        if _uo.is_user_auto_paused_uid(uid):
+        if not _manual and _uo.is_user_auto_paused_uid(uid):
             log.warning(
                 "signal_dispatch: skipping AUTO-PAUSED user uid={} "
                 "signal_id={} — user must resume via Trade tab or "
@@ -636,7 +673,10 @@ async def dispatch_signal_to_active_users(
         # order.  This is the LIVE eligibility filter; the engine-wide
         # symbol allowlist + per-user symbol gate (position_fsm) still
         # apply on top.
-        _path_pref, _regime_pref = _uo.resolve_auto_trade_preferences_uid(uid)
+        _path_pref, _regime_pref = (
+            (None, None) if _manual
+            else _uo.resolve_auto_trade_preferences_uid(uid)
+        )
         if _path_pref is not None:
             _setup_tok = (setup_class or "").upper()
             if _setup_tok not in _path_pref:
@@ -653,6 +693,53 @@ async def dispatch_signal_to_active_users(
                     "signal_dispatch: skipping user uid={} signal_id={} — "
                     "regime {} not in user regime preference (size={})",
                     uid, signal_id, _regime_tok or "<none>", len(_regime_pref),
+                )
+                return False
+
+        # Manual-take dup guard (2026-07-17).  The auto fan-out fires at
+        # most once per signal (signal_router calls it exactly once at
+        # publish), but a manual take can race a prior auto placement or
+        # a double-tap — and ``place_signal`` does NOT check for an
+        # existing position before firing the MARKET entry
+        # (position_state.put_position is a blind upsert keyed on
+        # (uid, signal_id)).  Without this guard a second take would
+        # place a second real entry and overwrite the position doc.
+        if _manual:
+            from src.execution import position_state as _ps
+            try:
+                _existing = _ps.get_position(uid, signal_id)
+            except _ps.PositionNotFoundError:
+                _existing = None
+            except Exception as _dup_exc:
+                # Fail CLOSED on a store error: refuse the take rather
+                # than risk a double entry on real money.
+                log.warning(
+                    "signal_dispatch: manual take dup-guard read failed "
+                    "uid={} signal_id={}: {} — refusing take",
+                    uid, signal_id, _dup_exc,
+                )
+                _capture(
+                    outcome="rejected",
+                    reject_class="DupGuardUnavailable",
+                    reject_detail=(
+                        "Could not confirm you don't already hold this "
+                        "position — try again in a moment."
+                    ),
+                )
+                return False
+            if _existing is not None and not _ps.is_terminal(_existing.state):
+                log.info(
+                    "signal_dispatch: manual take refused uid={} "
+                    "signal_id={} — position already active (state={})",
+                    uid, signal_id, _existing.state,
+                )
+                _capture(
+                    outcome="rejected",
+                    reject_class="AlreadyActive",
+                    reject_detail=(
+                        "You already hold a position on this signal "
+                        f"(state: {getattr(_existing.state, 'value', _existing.state)})."
+                    ),
                 )
                 return False
 
@@ -927,6 +1014,12 @@ async def dispatch_signal_to_active_users(
                 entry_price=entry_price,
                 reject_class="PositionCapExceeded",
                 reject_detail=str(exc),
+                source=_dispatch_source,
+            )
+            _capture(
+                outcome="rejected",
+                reject_class="PositionCapExceeded",
+                reject_detail=str(exc),
             )
             return False
         if total_qty <= 0:
@@ -951,6 +1044,15 @@ async def dispatch_signal_to_active_users(
                     f"place a {symbol} order at ${entry_price:.4f}. "
                     f"Increase your notional in Settings → Server-side "
                     f"auto-trade (minimum ~$10 recommended)."
+                ),
+                source=_dispatch_source,
+            )
+            _capture(
+                outcome="rejected",
+                reject_class="NotionalTooSmall",
+                reject_detail=(
+                    f"Position size ${user_notional:.0f} is too small for "
+                    f"{symbol} — increase your notional in Settings."
                 ),
             )
             return False
@@ -988,6 +1090,14 @@ async def dispatch_signal_to_active_users(
                 direction=direction,
                 entry_price=entry_price,
                 total_qty=total_qty,
+                source=_dispatch_source,
+            )
+            _capture(
+                outcome="placed",
+                symbol=symbol,
+                direction=direction,
+                entry_price=float(entry_price),
+                total_qty=float(total_qty),
             )
             # Successful placement resets the consecutive -2019 counter.
             # If the user previously had a string of insufficient-margin
@@ -1043,6 +1153,14 @@ async def dispatch_signal_to_active_users(
                 symbol=symbol,
                 direction=direction,
                 entry_price=entry_price,
+                reject_class=type(exc).__name__,
+                reject_detail=str(exc),
+                reject_binance_code=b_code,
+                reject_binance_msg=b_msg,
+                source=_dispatch_source,
+            )
+            _capture(
+                outcome="rejected",
                 reject_class=type(exc).__name__,
                 reject_detail=str(exc),
                 reject_binance_code=b_code,
@@ -1111,10 +1229,77 @@ async def dispatch_signal_to_active_users(
     placed = sum(1 for r in results if r)
     log.info(
         "signal_dispatch: signal_id={} symbol={} direction={} "
-        "active_users={} placed={} rejected={}",
+        "active_users={} placed={} rejected={} source={}",
         signal_id, symbol, direction, len(uids), placed, len(uids) - placed,
+        _dispatch_source,
     )
     return placed
+
+
+async def dispatch_signal_to_uid_manual(
+    *,
+    uid: str,
+    signal_id: str,
+    symbol: str,
+    direction: str,
+    entry_price: float,
+    sl_price: float,
+    tp1_price: float,
+    tp2_price: float,
+    tp3_price: float,
+    regime_label: Optional[str] = None,
+    regime_label_15m: Optional[str] = None,
+    atr_percentile: float = 50.0,
+    atr_value: float = 0.0,
+    setup_class: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Manual take (owner-approved 2026-07-17): place ONE signal for ONE
+    user who explicitly tapped "Take trade" in the app.
+
+    Same money path as the auto fan-out — per-user sizing, position-cap
+    tripwire, ``place_signal``'s full safety-gate chain, dispatch_log —
+    with three deliberate differences the user's tap justifies:
+
+    * mode / auto-pause / path-regime preference gates are skipped
+      (those encode *unattended* consent; the tap is explicit consent);
+    * the tier gate applies at ``can_assist`` (one-tap is the assist-tier
+      product surface) instead of ``can_auto``;
+    * a ``(uid, signal_id)`` dup guard refuses a take when a non-terminal
+      position already exists (double-tap / raced auto-dispatch).
+
+    Returns a result dict: ``{"outcome": "placed", symbol, direction,
+    entry_price, total_qty}`` or ``{"outcome": "rejected", reject_class,
+    reject_detail[, reject_binance_code, reject_binance_msg]}``.
+    """
+    result: Dict[str, Any] = {}
+    await dispatch_signal_to_active_users(
+        signal_id=signal_id,
+        symbol=symbol,
+        direction=direction,
+        entry_price=entry_price,
+        sl_price=sl_price,
+        tp1_price=tp1_price,
+        tp2_price=tp2_price,
+        tp3_price=tp3_price,
+        regime_label=regime_label,
+        regime_label_15m=regime_label_15m,
+        atr_percentile=atr_percentile,
+        atr_value=atr_value,
+        setup_class=setup_class,
+        _only_uid=uid,
+        _manual=True,
+        _manual_result=result,
+    )
+    if not result:
+        # Terminal outcome that produced no capture (defensive — every
+        # path above writes one; a crash inside gather would raise).
+        result = {
+            "outcome": "rejected",
+            "reject_class": "UnknownDispatchOutcome",
+            "reject_detail": "Take did not complete — check Recent Activity.",
+        }
+    result.setdefault("signal_id", signal_id)
+    return result
 
 
 async def close_fsm_positions_for_signal(

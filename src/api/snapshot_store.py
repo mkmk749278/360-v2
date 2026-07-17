@@ -33,6 +33,21 @@ KEY_CMD_SET_MODE   = "snapshot:cmd:set_mode"   # str "off|paper|live"     — co
 KEY_CMD_RESET_SIGNALS = "snapshot:cmd:reset_signals"  # set to "1" by API; consumed once by engine
 TTL_CMD_RESET = 120  # 2-min TTL — engine consumes before this; if engine is down, client must retry
 
+# ── Manual-take command channel (owner-approved 2026-07-17) ────────────────
+# Unlike the two single-value command keys above, a manual take carries a
+# per-user payload and multiple users can take concurrently — so this one is
+# a Redis LIST used as a queue: the API container LPUSHes a JSON envelope
+# {request_id, uid, signal_id, ts}; the engine's ManualTakeConsumer drains it
+# with BRPOP (FIFO) and writes the outcome to KEY_TAKE_RESULT_PREFIX +
+# request_id, which the API polls to answer the user's request synchronously.
+# The queue itself carries no TTL (BRPOP consumes near-instantly; a dead
+# engine leaves entries that the consumer drains on restart and rejects as
+# stale via the envelope ``ts``), the result keys expire on their own.
+KEY_CMD_TAKE = "snapshot:cmd:take"                # Redis LIST of JSON envelopes
+KEY_TAKE_RESULT_PREFIX = "snapshot:take_result:"  # + request_id → JSON outcome
+TTL_TAKE_RESULT = 120   # result outlives the API's ~8s poll window comfortably
+TAKE_CMD_STALE_S = 60   # engine rejects queue entries older than this
+
 # ── TTLs (seconds) — 2× the write interval ────────────────────────────────
 TTL_SIGNALS      = 60
 TTL_ACTIVITY     = 120
