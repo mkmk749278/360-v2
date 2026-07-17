@@ -94,6 +94,34 @@ def can_auto(tier: Optional[str]) -> bool:
     return tier_rank(tier) >= _TIER_RANK[AUTO_TIER]
 
 
+def effective_tier(
+    tier: Optional[str],
+    paid_until: Optional[datetime],
+    *,
+    now: Optional[datetime] = None,
+) -> str:
+    """Effective subscription tier after the read-time expiry downgrade.
+
+    Pure function over a user row's ``tier`` + ``paid_until``: normalises
+    the tier string and downgrades any assist-or-higher tier to ``free``
+    when its paid window has lapsed (defence-in-depth alongside RTDN
+    expiry events — the DB row may lag the store's reality).
+
+    MUST stay in lockstep with the dispatch money-path gate
+    ``signal_dispatch._resolve_user_tier`` (the expiry-downgrade branch
+    there) — this helper exists so the ``/api/auto-trade/runtime-status``
+    armed card renders the *same* verdict dispatch will apply, instead of
+    a green badge over a silent skip.  ``now`` is injectable for tests.
+    """
+    t = (tier or "free").lower()
+    if (
+        can_assist(t)
+        and paid_until is not None
+        and paid_until <= (now or datetime.now(timezone.utc))
+    ):
+        return FREE_TIER
+    return t
+
 
 # ---------------------------------------------------------------------------
 # Types

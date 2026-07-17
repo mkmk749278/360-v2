@@ -4,6 +4,66 @@
 
 ---
 
+## 🟢 SESSION 61 2026-07-17 — Binance connect 500 (KMS never inited in api container) + armed card lying over silent dispatch skips (branch `claude/binance-api-trading-issues-s9858w`, 360-v2 + lumin-app)
+
+**Owner ask (with screenshots):** (1) a NEW paying subscriber cannot connect
+their Binance key — "Connection failed — Server misconfiguration — KMS not
+initialised"; (2) owner's primary account shows Auto-trade ARMED, all four
+gates green, key connected since 2026-05-19 and previously auto-traded — but
+zero orders and zero "Recent activity on your account" rows while the
+engine-wide signal feed keeps scrolling.
+
+### Root cause 1 — isolated api container never initialised KMS (fixed)
+
+`POST /api/binance/connect` runs in the **api** container
+(`API_PROCESS_ISOLATED=true` live on VPS); `src/api/main.py` inited Firebase
+Admin, keystore, kill switch, tunables — **but never `init_kms_client`**
+(only `bootstrap.py` + the signing service do). The connect route's KMS
+preflight (`binance_connect_routes.py`) therefore 500s on every isolated-mode
+connect, while single-process mode works. Same bug class as the Session-14
+isolation sweep (#565–#569) that added `init_keystore`/`init_kill_switch`
+here — KMS was left out. #734 documented the env vars but didn't touch the
+entry point. **Fix:** `_maybe_init_kms()` in `src/api/main.py` mirroring
+bootstrap's guarded block (all four `GCP_KMS_*` → init, SA path or ADC,
+warn-not-raise) + `tests/api/test_api_main_kms_init.py`. Owner-sign-off item
+(KMS) — PR held for explicit approval, no auto-merge. Owner also confirmed
+the business rule: **every tier (free/assist/auto) may connect a key** —
+connect is never tier-gated; only execution differs.
+
+### Root cause 2 — armed card evaluated 4 gates, dispatch skips silently on 7
+
+`signal_dispatch._one_user` skips BEFORE any dispatch_log row on: mode, tier
+entitlement (B16 gate, 2026-06-24, fails closed; read-time `paid_until`
+downgrade), auto-pause, path pref, regime pref. The runtime-status `armed`
+only ANDed globally_enabled/user_disabled/key_connected/mode — so a
+tier-lapsed (or pref-blocked) user renders ALL GREEN + zero activity forever.
+Prime suspect for the owner's primary account: the tier gate postdates the
+key connect (2026-05-19) and Play Billing flipped on 2026-07-16 — verify the
+row on the VPS (`users.tier`, `users.paid_until`,
+`user_auto_trade_settings.paused_reason/path_preference/regime_preference`).
+**Fix (status surface only, dispatch untouched, zero new reads — reuses the
+route's existing user+row fetches under the 10s cache):** new pure
+`auth.effective_tier(tier, paid_until)` (lockstep twin of
+`signal_dispatch._resolve_user_tier`); runtime-status now returns
+`user_tier`, `tier_gate_enabled`, `tier_allows_auto`, `auto_paused`,
+`path_preference`, `regime_preference`, `preferences_block_all`; `armed` is
+the FULL user-state conjunction (tightened in place — strictly green→yellow,
+old builds degrade to honest-but-under-explained). `resume-mine` now
+invalidates the runtime cache. lumin-app renders the new gates: tier row,
+server-pause fold-in, block-all row, restrictive-prefs footnote.
+
+### Open
+
+- Owner to run the VPS runbook (final report) to confirm which silent gate
+  holds the primary account, then fix the row via the admin grant flow.
+- Optional follow-ups noted in PR: dedupe bootstrap/api KMS init; migrate
+  `signal_dispatch._resolve_user_tier` onto `auth.effective_tier` (pure
+  refactor, dark-first rules apply); owner/all-access exemption from the
+  expiry downgrade was raised and NOT taken (owner described the three-tier
+  model instead — no business-rule change shipped).
+
+---
+
 ## 🟢 SESSION 60 2026-07-16 — 18th path was DEAD at the execution gate (fixed live), tuned shadow arms for the measured losers, WS gap-refill, Play Console fixes + AAB releases (branch `claude/system-audit-play-release-zsaa6d`, 360-v2 + lumin-app)
 
 **Owner ask:** deep audit (numpy class, data sufficiency, WS management, limits);

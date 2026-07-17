@@ -191,7 +191,7 @@ def register(
         identity: Any = Depends(identity_dep),
     ) -> dict:
         """Composite runtime status for the Live tab's "Auto-trade armed"
-        card.  Superset of ``/api/auto-trade/user-status`` plus three
+        card.  Superset of ``/api/auto-trade/user-status`` plus the
         fields the app needs to render a per-gate green/yellow/red:
 
             {
@@ -199,17 +199,29 @@ def register(
               "auto_trade_user_disabled": bool,
               "binance_key_connected": bool,
               "user_mode": "live" | "paper" | "off" | null,
+              "user_tier": "free|assist|auto|paid|all-access|owner",
+              "tier_gate_enabled": bool,
+              "tier_allows_auto": bool,
+              "auto_paused": bool,       # dispatcher pause (paused_reason set)
+              "path_preference": list[str] | null,    # null=all, []=block-all
+              "regime_preference": list[str] | null,
+              "preferences_block_all": bool,
               "allowed_symbols": list[str],
-              "armed": bool,            # all gates green
+              "armed": bool,            # all user-state gates green
             }
 
         ``armed`` = ``globally_enabled AND !user_disabled AND
-        binance_key_connected AND user_mode in ("live", "both")`` — the
-        four gates the FSM checks before placing an order.  "both" fires
-        real Binance orders AND runs the paper simulator simultaneously,
-        so it counts as armed.  Symbol allowlist is per-signal (not
-        per-user state), so it's surfaced as a list rather than
-        collapsed into ``armed``.
+        binance_key_connected AND user_mode in ("live", "both") AND
+        tier_allows_auto AND !auto_paused AND !preferences_block_all``
+        — every USER-STATE gate the dispatcher checks before placing an
+        order, including the three that skip silently with no
+        dispatch-activity row (tier, auto-pause, block-all prefs; added
+        2026-07-17 after the card showed all-green over a silent tier
+        skip).  "both" fires real Binance orders AND runs the paper
+        simulator simultaneously, so it counts as armed.  The symbol
+        allowlist and a restrictive-but-non-empty path/regime preference
+        are per-signal filters (orders remain possible), so they're
+        surfaced as data rather than collapsed into ``armed``.
 
         Lazy-loads kill_switch + firestore_keystore so this route still
         responds (default-safe) when the engine boots without GCP env.
@@ -303,25 +315,83 @@ def register(
         # false`` → Pulse renders the not-enabled CTA.  No fallback
         # to operator / engine-global state — both of those are
         # operator config, never user state.
+        #
+        # The same two reads (user row + auto-trade row) also carry
+        # every field the dispatcher's SILENT skip gates consume —
+        # tier/paid_until (entitlement gate), paused_reason
+        # (auto-pause gate), path/regime preference (eligibility
+        # gates).  Computing their verdicts here costs zero extra
+        # reads and stops the armed card lying: pre-2026-07-17 the
+        # card showed all-green while dispatch silently skipped a
+        # lapsed/free-tier user before any dispatch-activity row
+        # (owner-reported: "connected and ARMED but trading not
+        # happening", zero recent activity).
         user_mode: Optional[str] = None
+        user_tier: str = "free"  # fail closed, same direction as dispatch
+        auto_paused: bool = False
+        path_preference: Optional[list[str]] = None
+        regime_preference: Optional[list[str]] = None
         try:
             from src.api import user_overrides as _uo
             from src.api import users as _users
+            from src.api.auth import effective_tier as _effective_tier
 
             user_store = _users.get_singleton()
             override_store = _uo.get_singleton()
             if user_store is not None and override_store is not None:
                 user = await user_store.aget_by_firebase_uid(firebase_uid)
                 if user is not None:
+                    user_tier = _effective_tier(
+                        getattr(user, "tier", None),
+                        getattr(user, "paid_until", None),
+                    )
                     row = await override_store.aget_auto_trade(int(user.user_id))
                     mode = row.get("mode")
                     if isinstance(mode, str) and mode:
                         user_mode = mode.lower()
+                    # Same predicate as is_user_auto_paused: any
+                    # non-null paused_reason means the dispatcher
+                    # skips this user until they resume.
+                    auto_paused = bool(row.get("paused_reason"))
+                    # None = no preference (all eligible); [] is a
+                    # meaningful explicit block-all — mirror the
+                    # dispatcher's resolve_auto_trade_preferences_uid
+                    # semantics exactly (uppercase compare tokens).
+                    _path_raw = row.get("path_preference")
+                    if isinstance(_path_raw, list):
+                        path_preference = sorted(
+                            str(s).upper() for s in _path_raw
+                        )
+                    _regime_raw = row.get("regime_preference")
+                    if isinstance(_regime_raw, list):
+                        regime_preference = sorted(
+                            str(r).upper() for r in _regime_raw
+                        )
         except Exception:
             log.exception(
                 "runtime_status: per-user mode read failed uid={}",
                 firebase_uid,
             )
+
+        # Tier gate verdict — definitionally the same rule the dispatch
+        # money path applies (auth.effective_tier ↔ signal_dispatch.
+        # _resolve_user_tier stay in lockstep).  Read the flag inside
+        # the handler so ops env flips and tests take effect without a
+        # process restart of this module's import-time state.
+        import config as _config
+
+        tier_gate_enabled = bool(
+            getattr(_config, "AUTO_TRADE_TIER_GATE_ENABLED", True)
+        )
+        from src.api.auth import can_auto as _can_auto
+
+        tier_allows_auto = (not tier_gate_enabled) or _can_auto(user_tier)
+        # An explicit empty preference set blocks every signal — the
+        # only preference state that guarantees zero orders, so it
+        # unarms.  A restrictive-but-non-empty set stays armed (it's a
+        # per-signal filter, surfaced for the app to render as a
+        # warning, mirroring how allowed_symbols is presented).
+        preferences_block_all = path_preference == [] or regime_preference == []
 
         # Symbol allowlist — re-read at request time so an operator
         # env-var change doesn't require an app refetch + the value
@@ -344,11 +414,23 @@ def register(
             )
             effective = allowlist
 
+        # Full conjunction of every USER-STATE gate the dispatcher
+        # checks before an order — tightened 2026-07-17 to include the
+        # three gates that previously skipped silently (tier,
+        # auto-pause, block-all preferences).  Deliberately tightened
+        # in place rather than versioned: the change is strictly
+        # green→yellow (it can only remove a false positive), and old
+        # app builds already render armed=false with green legacy rows
+        # (their client-side pause AND), so they degrade to an honest
+        # badge that under-explains, never a lying one.
         armed = (
             globally_enabled
             and not user_disabled
             and binance_key_connected
             and user_mode in ("live", "both")
+            and tier_allows_auto
+            and not auto_paused
+            and not preferences_block_all
         )
 
         result = {
@@ -356,6 +438,13 @@ def register(
             "auto_trade_user_disabled": user_disabled,
             "binance_key_connected": binance_key_connected,
             "user_mode": user_mode,
+            "user_tier": user_tier,
+            "tier_gate_enabled": tier_gate_enabled,
+            "tier_allows_auto": tier_allows_auto,
+            "auto_paused": auto_paused,
+            "path_preference": path_preference,
+            "regime_preference": regime_preference,
+            "preferences_block_all": preferences_block_all,
             "allowed_symbols": allowlist,
             "effective_allowed_symbols": effective,
             "allowed_paths": _active_path_names(),
