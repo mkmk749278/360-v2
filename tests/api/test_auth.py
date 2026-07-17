@@ -164,3 +164,74 @@ def test_anonymous_endpoint_503_when_secret_missing() -> None:
     c = TestClient(app)
     r = c.post("/api/auth/anonymous")
     assert r.status_code == 410
+
+
+# ---------------------------------------------------------------------------
+# effective_tier — read-time expiry downgrade (shared with dispatch)
+# ---------------------------------------------------------------------------
+#
+# Pure-function twin of the dispatch money-path rule in
+# ``signal_dispatch._resolve_user_tier`` (the two must stay in lockstep);
+# consumed by /api/auto-trade/runtime-status so the armed card renders the
+# same tier verdict dispatch will apply.
+
+
+def test_effective_tier_active_paid_window_keeps_tier() -> None:
+    from datetime import datetime, timezone
+
+    from src.api.auth import effective_tier
+
+    future = datetime.now(timezone.utc) + timedelta(days=30)
+    assert effective_tier("auto", future) == "auto"
+    assert effective_tier("assist", future) == "assist"
+
+
+def test_effective_tier_lapsed_paid_window_downgrades_to_free() -> None:
+    from datetime import datetime, timezone
+
+    from src.api.auth import effective_tier
+
+    past = datetime.now(timezone.utc) - timedelta(seconds=1)
+    assert effective_tier("auto", past) == "free"
+    assert effective_tier("assist", past) == "free"
+
+
+def test_effective_tier_none_paid_until_never_downgrades() -> None:
+    from src.api.auth import effective_tier
+
+    assert effective_tier("auto", None) == "auto"
+    assert effective_tier("owner", None) == "owner"
+
+
+def test_effective_tier_free_tier_ignores_paid_until() -> None:
+    """The downgrade only applies to assist-or-higher — a free row with
+    a stale paid_until stays free (no can_assist match, no-op)."""
+    from datetime import datetime, timezone
+
+    from src.api.auth import effective_tier
+
+    past = datetime.now(timezone.utc) - timedelta(days=9)
+    assert effective_tier("free", past) == "free"
+
+
+def test_effective_tier_missing_tier_is_free_and_unknown_ranks_free() -> None:
+    from src.api.auth import can_auto, effective_tier
+
+    assert effective_tier(None, None) == "free"
+    assert effective_tier("", None) == "free"
+    # Unknown strings pass through normalised (lowercase) but rank 0,
+    # so every capability check downstream treats them as free.
+    assert effective_tier("GARBAGE", None) == "garbage"
+    assert can_auto(effective_tier("GARBAGE", None)) is False
+
+
+def test_effective_tier_injectable_now_is_deterministic() -> None:
+    from datetime import datetime, timezone
+
+    from src.api.auth import effective_tier
+
+    paid_until = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    before = datetime(2026, 6, 30, tzinfo=timezone.utc)
+    after = datetime(2026, 7, 2, tzinfo=timezone.utc)
+    assert effective_tier("auto", paid_until, now=before) == "auto"
+    assert effective_tier("auto", paid_until, now=after) == "free"

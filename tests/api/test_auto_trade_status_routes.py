@@ -38,6 +38,17 @@ def _firebase_user(uid: str = "fb-uid-test") -> object:
     return SimpleNamespace(firebase_uid=uid, user_id=99)
 
 
+def _user_row(user_id: int = 1, tier: str = "auto", paid_until=None):
+    """A UserStore ``User``-shaped row for the runtime-status mocks.
+
+    The endpoint reads ``.tier`` and ``.paid_until`` for the tier-gate
+    verdict (2026-07-17), so the fakes must carry real values — a bare
+    ``MagicMock(user_id=1)`` would leak a truthy MagicMock ``tier`` into
+    the JSON payload.  Defaults model the fully-entitled AUTO user.
+    """
+    return MagicMock(user_id=user_id, tier=tier, paid_until=paid_until)
+
+
 @pytest.fixture(autouse=True)
 def _reset_kill_switch():
     from src.execution import kill_switch
@@ -248,7 +259,7 @@ def test_runtime_status_effective_intersects_user_pref(
     monkeypatch.setenv(
         "TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT,ETHUSDT,SOLUSDT,XRPUSDT,BNBUSDT",
     )
-    fake_user = MagicMock(user_id=1)
+    fake_user = _user_row(user_id=1)
     fake_user_store = MagicMock()
     fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=fake_user)
     # effective_allowed_symbols_for_user (run via to_thread) uses the
@@ -318,7 +329,7 @@ def test_runtime_status_armed_when_all_gates_green(monkeypatch) -> None:
     # ``user_auto_trade_settings`` keyed by the calling user's
     # firebase_uid → user_id.  Both stores must mock the chained
     # lookup since the endpoint walks user_store → override_store.
-    fake_user = MagicMock(user_id=1)
+    fake_user = _user_row(user_id=1)
     fake_user_store = MagicMock()
     fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=fake_user)
     monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
@@ -368,7 +379,7 @@ def test_runtime_status_armed_false_when_user_in_paper(monkeypatch) -> None:
 
     # Same per-user resolution chain as the armed-live test above —
     # mode comes from the calling user's own row.
-    fake_user = MagicMock(user_id=2)
+    fake_user = _user_row(user_id=2)
     fake_user_store = MagicMock()
     fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=fake_user)
     monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
@@ -402,7 +413,7 @@ def test_runtime_status_no_mode_leak_across_users(monkeypatch) -> None:
     from src.api import users as _users_module
 
     # Two users registered: user_id=1 has mode=paper, user_id=2 has no row.
-    user_a = MagicMock(user_id=1)
+    user_a = _user_row(user_id=1)
     fake_user_store = MagicMock()
     fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=user_a)
     monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
@@ -426,7 +437,7 @@ def test_runtime_status_no_mode_leak_across_users(monkeypatch) -> None:
     # runtime cache (PR #561) honest: the leak this pins is per-USER, and two
     # users never share a uid, so the cache key differs and cannot serve A's
     # payload to B.
-    user_b = MagicMock(user_id=2)
+    user_b = _user_row(user_id=2)
     fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=user_b)
     app_b = _build_app(identity=_firebase_user(uid="fb-B"))
     body = TestClient(app_b).get("/api/auto-trade/runtime-status").json()
@@ -434,6 +445,209 @@ def test_runtime_status_no_mode_leak_across_users(monkeypatch) -> None:
         "Per-user isolation: user B without a row must NOT inherit "
         "user A's mode (regression pin for the operator-override leak)."
     )
+
+
+# ---------------------------------------------------------------------------
+# runtime-status — the silent dispatch gates (tier / auto-pause / prefs)
+#
+# Regression pins for the 2026-07-17 owner report: "connected and ARMED
+# but trading not happening", zero recent-activity rows.  Dispatch skips
+# silently BEFORE any dispatch_log write on tier, auto-pause, and
+# path/regime preferences — the armed card must evaluate the same gates
+# or it lies green over a silent skip.
+# ---------------------------------------------------------------------------
+
+
+def _install_green_gates(monkeypatch, *, user, auto_trade_row) -> None:
+    """All pre-2026-07-17 gates green: kill switch enabled + user not
+    disabled, key blob present, per-user stores returning the given
+    user row + auto-trade row.  Tests then vary tier/pause/prefs."""
+    from datetime import datetime, timezone
+
+    from src.api import user_overrides as _uo
+    from src.api import users as _users_module
+    from src.execution import kill_switch
+    from src.security import firestore_keystore as _fk
+    from src.security.firestore_keystore import UserKeyBlob
+
+    ks = MagicMock()
+    ks.is_globally_enabled = MagicMock(return_value=True)
+    ks.is_user_disabled = MagicMock(return_value=False)
+    kill_switch._client = ks
+
+    _fk._db = MagicMock()
+
+    def _fake_get_key_blob(uid: str) -> UserKeyBlob:
+        return UserKeyBlob(
+            uid=uid, encrypted_secret=b"\x00", encrypted_dek=b"\x00",
+            api_key_full="ABCDEFGH...", key_public_id_first8="ABCDEFGH",
+            ip_whitelist_ok=True, withdraw_disabled_ok=True,
+            connected_at=datetime.now(timezone.utc),
+            last_validated_at=datetime.now(timezone.utc),
+        )
+
+    monkeypatch.setattr(_fk, "get_key_blob", _fake_get_key_blob)
+
+    fake_user_store = MagicMock()
+    fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=user)
+    monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
+
+    fake_overrides_store = MagicMock()
+    fake_overrides_store.aget_auto_trade = AsyncMock(return_value=auto_trade_row)
+    monkeypatch.setattr(_uo, "_SINGLETON", fake_overrides_store, raising=False)
+
+    monkeypatch.setenv("TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT")
+
+
+def test_runtime_status_not_armed_when_tier_free(monkeypatch) -> None:
+    """THE bug this section pins: a free-tier user with every legacy
+    gate green must NOT show armed — dispatch skips them silently at
+    the entitlement gate with no activity row, so the card is the only
+    place the user can learn why."""
+    _install_green_gates(
+        monkeypatch,
+        user=_user_row(user_id=1, tier="free"),
+        auto_trade_row={"mode": "live"},
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-free"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["user_tier"] == "free"
+    assert body["tier_allows_auto"] is False
+    assert body["armed"] is False
+    # The four legacy gates stay green — proving the card can explain
+    # exactly which gate is the blocker instead of a mystery yellow.
+    assert body["auto_trade_globally_enabled"] is True
+    assert body["auto_trade_user_disabled"] is False
+    assert body["binance_key_connected"] is True
+    assert body["user_mode"] == "live"
+
+
+def test_runtime_status_expired_paid_window_downgrades_tier(monkeypatch) -> None:
+    """tier='auto' with a lapsed paid_until is downgraded to free at
+    read time — the same defence-in-depth rule dispatch applies
+    (signal_dispatch._resolve_user_tier), so the card matches what
+    dispatch will actually do."""
+    from datetime import datetime, timedelta, timezone
+
+    _install_green_gates(
+        monkeypatch,
+        user=_user_row(
+            user_id=1,
+            tier="auto",
+            paid_until=datetime.now(timezone.utc) - timedelta(days=3),
+        ),
+        auto_trade_row={"mode": "live"},
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-lapsed"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["user_tier"] == "free"
+    assert body["tier_allows_auto"] is False
+    assert body["armed"] is False
+
+
+def test_runtime_status_tier_gate_disabled_bypasses_tier(monkeypatch) -> None:
+    """AUTO_TRADE_TIER_GATE_ENABLED=False (the reversible flag) means
+    dispatch never checks tier — the card must mirror that too."""
+    import config as _config
+
+    monkeypatch.setattr(_config, "AUTO_TRADE_TIER_GATE_ENABLED", False)
+    _install_green_gates(
+        monkeypatch,
+        user=_user_row(user_id=1, tier="free"),
+        auto_trade_row={"mode": "live"},
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-gate-off"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["tier_gate_enabled"] is False
+    assert body["tier_allows_auto"] is True
+    assert body["armed"] is True
+
+
+def test_runtime_status_not_armed_when_auto_paused(monkeypatch) -> None:
+    """A dispatcher auto-pause (paused_reason set after 3× -2019) skips
+    every signal silently — the card must go yellow server-side, not
+    rely on the client-side settings AND."""
+    _install_green_gates(
+        monkeypatch,
+        user=_user_row(user_id=1, tier="auto"),
+        auto_trade_row={"mode": "live", "paused_reason": "insufficient_margin"},
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-paused"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["auto_paused"] is True
+    assert body["armed"] is False
+
+
+def test_runtime_status_block_all_path_pref_unarms(monkeypatch) -> None:
+    """An explicit empty path_preference means NO signal ever matches
+    (block-all) — guaranteed zero orders, so it unarms."""
+    _install_green_gates(
+        monkeypatch,
+        user=_user_row(user_id=1, tier="auto"),
+        auto_trade_row={"mode": "live", "path_preference": []},
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-blockall"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["path_preference"] == []
+    assert body["preferences_block_all"] is True
+    assert body["armed"] is False
+
+
+def test_runtime_status_restrictive_pref_stays_armed(monkeypatch) -> None:
+    """A restrictive-but-non-empty preference is a per-signal filter —
+    orders remain possible, so it must NOT unarm; the list is surfaced
+    for the app to render as a footnote warning."""
+    _install_green_gates(
+        monkeypatch,
+        user=_user_row(user_id=1, tier="auto"),
+        auto_trade_row={
+            "mode": "live",
+            "path_preference": ["sr_flip_retest"],
+            "regime_preference": ["TRENDING_UP", "TRENDING_DOWN"],
+        },
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-filtered"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["path_preference"] == ["SR_FLIP_RETEST"]  # uppercased tokens
+    assert body["regime_preference"] == ["TRENDING_DOWN", "TRENDING_UP"]
+    assert body["preferences_block_all"] is False
+    assert body["armed"] is True
+
+
+def test_runtime_status_unknown_user_fails_closed_on_tier(monkeypatch) -> None:
+    """No user row resolvable → tier fails closed to free (never render
+    a green tier gate for an account dispatch can't confirm)."""
+    from src.api import users as _users_module
+
+    fake_user_store = MagicMock()
+    fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=None)
+    monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
+
+    app = _build_app(identity=_firebase_user(uid="fb-unknown"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["user_tier"] == "free"
+    assert body["tier_allows_auto"] is False
+    assert body["armed"] is False
+
+
+def test_runtime_status_armed_green_includes_new_fields(monkeypatch) -> None:
+    """The fully-armed payload carries the new fields with their
+    happy-path values — the app's gate rows read these directly."""
+    _install_green_gates(
+        monkeypatch,
+        user=_user_row(user_id=1, tier="auto"),
+        auto_trade_row={"mode": "live"},
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-green"))
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["armed"] is True
+    assert body["user_tier"] == "auto"
+    assert body["tier_gate_enabled"] is True
+    assert body["tier_allows_auto"] is True
+    assert body["auto_paused"] is False
+    assert body["path_preference"] is None
+    assert body["regime_preference"] is None
+    assert body["preferences_block_all"] is False
 
 
 # ---------------------------------------------------------------------------

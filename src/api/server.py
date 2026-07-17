@@ -1871,6 +1871,20 @@ def build_app(
             )
         user_id = _resolve_user_id(identity)
         resumed = await user_overrides.aresume_user_auto_trade(user_id)
+        # auto_paused now feeds the runtime-status ``armed`` conjunction —
+        # drop this user's cached payload so the Resume tap flips the
+        # armed card on the next poll instead of after the 10 s TTL.
+        # Best-effort, mirrors the PUT /api/settings/user/auto-trade
+        # invalidation below.
+        if resumed:
+            try:
+                from .auto_trade_status_routes import (
+                    invalidate_runtime_cache as _irc,
+                )
+                if isinstance(identity, User):
+                    _irc(identity.firebase_uid or "")
+            except Exception:
+                pass  # stale cache expires on its own
         return AutoModeResumeMineResponse(resumed=resumed)
 
     # ---- Global kill switch (OWNER_BRIEF B18 emergency halt) ----
