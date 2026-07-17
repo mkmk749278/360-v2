@@ -4,6 +4,77 @@
 
 ---
 
+## 🟢 SESSION 62 2026-07-17 — Paying subscriber's broken experience: entitlement lost on restart, raw engine errors on screen, -4411 breaker lockout (branch `claude/subscription-status-display-rvnzg2`, lumin-app + 360-v2)
+
+**Owner ask (17 screenshots from a real Auto subscriber):** subscribed user sees
+no subscription status anywhere; app leaks engine internals ("user <uid> is
+auto-disabled", "global kill switch engaged", "B12 caps leverage", "This IP is
+safe to share", Telegram-as-support); improve Charts; Trade→Live looks like an
+ops console. Follow-up screenshots after an app restart exposed the root bug.
+
+### Root causes found
+
+1. **Entitlement was memory-only** (lumin-app): tier/user_id cached in
+   `AuthService` only at OTP sign-in or purchase — every cold start rendered a
+   paying user as signed-out free (upsell sheet, "Sign in with phone first").
+2. **Take sheet rendered engine 4xx `detail` verbatim** — including Firebase
+   UIDs; the good `DispatchEventTranslation` humanizer was only wired into
+   Recent Activity rows.
+3. **This subscriber's account was auto-disabled by the per-user circuit
+   breaker fed by Binance -4411** ("Please sign TradFi-Perps agreement") — a
+   user-setup state (never accepted the Futures agreement in Binance) counted
+   as engine faults. Not excluded like -2019 was.
+
+### Shipped (lumin-app, one PR)
+
+- **WS0 restart fix:** `EngineMetadataStore` (per-Firebase-UID SharedPreferences
+  display cache) + AuthGate hydration + background `GET /api/profile` refresh;
+  engine stays entitlement truth.
+- **WS1 subscription status:** Subscription page CURRENT PLAN card (renewal
+  date + Play manage deep link; owned tile marked, re-buys routed to Play
+  manage to avoid duplicate subscriptions), Profile subscription card
+  (replaces the unlabeled AUTO pill), live Menu subtitle.
+- **WS2 error/jargon sweep:** `take_error_mapper` +
+  `DispatchEventTranslation.forReject` share one copy source; **-4411 maps to
+  "accept the Futures agreement on Binance" guidance**; `sanitizeEngineDetail`
+  guarantees UIDs/engine vocabulary can't reach widgets; full consumer-voice
+  sweep (B12, whitelist→IP access list, evaluators→analysts, Telegram-support
+  → published support email, About links wired).
+- **WS3 Trade Live redesign (owner decision):** single `LiveStatusCard`
+  (pure `resolveLiveStatus`, armed verdict byte-identical to old card) with
+  one reason + one action + Details expander; Live feed is per-user only —
+  engine-wide activity removed; dispatch rows tagged Auto/One-tap (new
+  `source` field parse); phone-placed takes (signal + alert) merged from the
+  existing `OrderLogService`; merged "No trades yet" empty state.
+- **WS4 Charts:** TF row/indicator row split (chip overflow fixed), 1D
+  timeframe, live price + true 24h % header (new `symbolTicker24h`, 60s),
+  Levels overlay toggle. 277 tests green.
+
+### Shipped (360-v2, separate PR — owner-signed B18 item)
+
+- `tripwires.record_order_placement_failure`: **-4411 excluded from both
+  breakers** exactly like -2019 (`_BINANCE_USER_SETUP_CODES`); rejection still
+  logs to dispatch_log + reaches the app. Owner approved in-session via
+  AskUserQuestion. 445 execution tests green. **No auto-merge — owner merges.**
+
+### ⚠️ Ops runbook for THIS subscriber (owner action)
+
+1. He must open **Binance → Futures and accept the TradFi-Perps agreement**
+   (source of every -4411 rejection).
+2. Then re-enable his account (operator-only): breaker reset +
+   `kill_switch.enable_user(<uid from his error screenshot>)`.
+3. Follow-up candidate: ops-dashboard per-user re-enable surface (today it's
+   Telegram-bot only, and Telegram is banned in-region).
+
+### Open
+
+- Owner to merge both PRs (engine PR is a B18 sign-off item).
+- Assist↔Auto in-app plan *switching* deliberately routes to Play manage;
+  proper `ChangeSubscriptionParam` proration is a follow-up.
+- Auth-page `$e` renders (Firebase copy) left as-is — outside trading surfaces.
+
+---
+
 ## 🟢 SESSION 61 2026-07-17 — Binance connect 500 (KMS never inited in api container) + armed card lying over silent dispatch skips (branch `claude/binance-api-trading-issues-s9858w`, 360-v2 + lumin-app)
 
 **Owner ask (with screenshots):** (1) a NEW paying subscriber cannot connect
