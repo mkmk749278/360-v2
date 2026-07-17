@@ -343,18 +343,24 @@ class SnapshotCache:
 
         Returns ``None`` when cold/stale so callers fall back to the live
         ``build_activity`` path.
+
+        A ``setup_class`` query also returns ``None``: ``ActivityEvent``
+        carries no setup_class field, so the cached (unfiltered) event set
+        cannot answer a per-evaluator filter — before 2026-07-17 this path
+        raised ``AttributeError`` into the route's catch-all and the app got
+        an EMPTY activity list whenever the cache was warm.  Falling back to
+        ``build_activity`` filters correctly at the signal level; the query
+        is a rare user-driven filter, not a hot path, so the extra live
+        build is acceptable.
         """
+        if setup_class:
+            return None
         if not self._is_warm(self._activity_cached_at, max_age=60.0):
             return None
         cached = self._activity_all
         assert cached is not None
 
-        items: List[Any] = list(cached)
-        if setup_class:
-            target = setup_class.strip().upper()
-            items = [e for e in items if e.setup_class.upper() == target]
-
-        return items[:limit]
+        return list(cached)[:limit]
 
     def get_agents(self) -> Optional[List[Any]]:
         """Return cached agents list (max-age 90 s).

@@ -31,7 +31,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt
-          pip install ruff
+          pip install ruff pytest-cov
 
       # Blocking gate: src/ + config/ are ruff-clean as of this PR, so lint
       # failures now fail CI. Keep new code clean to keep this green.
@@ -39,5 +39,20 @@ jobs:
         run: ruff check src/ config/
 
       # Blocking gate. Mirrors the local command in CLAUDE.md.
+      # Coverage is measured and REPORTED, not gated (2026-07-17): the
+      # per-module table in the job summary makes untested modules visible
+      # at review time without turning a coverage dip into a red build.
       - name: Tests (pytest)
-        run: python -m pytest tests/ -x --ignore=tests/test_deployment.py -q
+        run: >
+          python -m pytest tests/ -x --ignore=tests/test_deployment.py -q
+          --cov=src --cov=config --cov-report=term
+
+      - name: Coverage summary
+        if: always()
+        run: |
+          if [ -f .coverage ]; then
+            echo '## Test coverage' >> "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            python -m coverage report --sort=cover --skip-covered >> "$GITHUB_STEP_SUMMARY" || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+          fi
