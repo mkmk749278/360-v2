@@ -73,8 +73,8 @@ def register(
         req: ManualTradeRequest,
         identity: Any = Depends(identity_dep),
     ) -> dict:
-        from config import MANUAL_TRADE_BUILDER_ENABLED
-        if not MANUAL_TRADE_BUILDER_ENABLED:
+        from src import runtime_tunables as _rt
+        if not bool(_rt.get("manual_trade_builder_enabled")):
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="The manual trade builder is not enabled on this engine yet.",

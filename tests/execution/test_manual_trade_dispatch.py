@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import config as _config
+from src import runtime_tunables as _rt
 from src.api import user_overrides
 from src.execution import dispatch_log
 from src.execution import position_fsm
@@ -28,7 +29,9 @@ def env(monkeypatch):
 
     Returns the place_signal AsyncMock so tests can set its return state.
     """
-    monkeypatch.setattr(_config, "MANUAL_TRADE_BUILDER_ENABLED", True)
+    # The flag is now read via runtime_tunables.get() (ops-controllable), not
+    # config directly — patch the tunable read to enabled.
+    monkeypatch.setattr(_rt, "get", lambda key: True)
     monkeypatch.setattr(_config, "AUTO_TRADE_TIER_GATE_ENABLED", True)
     monkeypatch.setattr(signal_dispatch, "_resolve_user_tier", lambda uid: "assist")
 
@@ -64,7 +67,7 @@ def _call(**over):
 
 @pytest.mark.asyncio
 async def test_disabled_flag_rejects(monkeypatch):
-    monkeypatch.setattr(_config, "MANUAL_TRADE_BUILDER_ENABLED", False)
+    monkeypatch.setattr(_rt, "get", lambda key: False)
     r = await _call()
     assert r["outcome"] == "rejected"
     assert r["reject_class"] == "ManualTradeBuilderDisabled"

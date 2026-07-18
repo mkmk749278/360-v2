@@ -77,6 +77,7 @@ def _build_registry() -> Dict[str, Tunable]:
         LOSS_STREAK_CAP_HOURS,
         LOSS_STREAK_ESCALATION_ENABLED,
         MARKET_CONTEXT_ENABLED,
+        MANUAL_TRADE_BUILDER_ENABLED,
         MARK_FEED_STALENESS_ENABLED,
         MARK_FEED_STALENESS_MAX_AGE_SEC,
         MEAN_REVERT_LIVE,
@@ -546,6 +547,22 @@ def _build_registry() -> Dict[str, Tunable]:
             type="bool",
             default=ALLOCATOR_RECOMMEND_ENABLED,
             category="Measurement",
+        ),
+        Tunable(
+            key="manual_trade_builder_enabled",
+            label="Manual trade builder",
+            description=(
+                "Master switch for the server-side manual trade builder "
+                "(POST /api/manual-trade/take): lets an Assist-or-higher user "
+                "place a trade they built on the chart — MARKET or a resting "
+                "LIMIT at a slid entry, with optional SL/TP — on their "
+                "server-connected key. Ships DARK; flip ON here to activate "
+                "after shadow + sign-off. OFF → the endpoint returns 503 and "
+                "the app renders it as unavailable (no client-side fallback)."
+            ),
+            type="bool",
+            default=MANUAL_TRADE_BUILDER_ENABLED,
+            category="Execution",
         ),
     ]
     return {t.key: t for t in items}

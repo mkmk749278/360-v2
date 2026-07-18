@@ -1510,8 +1510,10 @@ async def dispatch_manual_trade(
             "reject_detail": detail, "ref_id": ref_id, **extra,
         }
 
-    from config import MANUAL_TRADE_BUILDER_ENABLED as _enabled
-    if not _enabled:
+    # Ops-controllable live switch (runtime tunable, falls back to the config
+    # env default when Firestore isn't wired — get() never raises on read).
+    from src import runtime_tunables as _rt
+    if not bool(_rt.get("manual_trade_builder_enabled")):
         return _reject(
             "ManualTradeBuilderDisabled",
             "The manual trade builder is not enabled on this engine yet.",
