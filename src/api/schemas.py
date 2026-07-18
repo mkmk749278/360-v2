@@ -1093,6 +1093,46 @@ class AdminUserLookupResponse(BaseModel):
     onboarded: bool
 
 
+class AdminAutoTradeEnableRequest(BaseModel):
+    """Body of ``POST /api/admin/users/auto-trade-enable``.
+
+    Owner-only operator verb for the per-user kill-switch flag
+    (``users/{uid}.auto_trade_disabled`` in Firestore).  The per-user
+    circuit breaker (B18 #5) auto-DISABLES a user on repeated order
+    failures; until 2026-07-18 there was **no re-enable surface
+    anywhere** — the S59/S62 runbooks named ``/enable_user`` but no
+    Telegram command or endpoint ever existed, so a breaker-tripped
+    paying subscriber stayed disabled forever.  This endpoint is that
+    missing verb.  ``enabled=false`` is the symmetric manual operator
+    disable (same write the breaker performs, with an audit reason).
+
+    Identify the user by ``phone`` (ops-friendly) or ``firebase_uid``
+    (as shown in breaker logs / error screenshots) — exactly one.
+    """
+
+    phone: Optional[str] = Field(default=None, min_length=8, max_length=18)
+    firebase_uid: Optional[str] = Field(
+        default=None, min_length=8, max_length=128
+    )
+    enabled: bool = Field(
+        ..., description="true = re-enable auto-trade; false = disable"
+    )
+    reason: str = Field(
+        default="", max_length=200,
+        description="Audit note; stored as the disable reason when disabling.",
+    )
+
+
+class AdminAutoTradeEnableResponse(BaseModel):
+    """Read-back state after the write — the engine (Firestore flag) is
+    the source of truth, so the response re-reads rather than echoes."""
+
+    ok: bool
+    firebase_uid: str
+    phone: Optional[str] = None
+    auto_trade_disabled: bool
+
+
 class AdminGrantTierRequest(BaseModel):
     """Body of ``POST /api/admin/grant-tier``.
 

@@ -23,14 +23,17 @@ caching/invalidation-gating is needed per Cost Discipline.
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable
+from typing import Any, Callable, Optional
 
 from fastapi import Depends, FastAPI, HTTPException, Query, status
 
 from src.utils import get_logger
 
 from .schemas import (
+    AdminAutoTradeEnableRequest,
+    AdminAutoTradeEnableResponse,
     AdminGrantTierRequest,
     AdminGrantTierResponse,
     AdminUserLookupResponse,
@@ -123,4 +126,96 @@ def register(
             phone=updated.phone_e164,
             tier=updated.tier,
             paid_until=updated.paid_until.isoformat() if updated.paid_until else None,
+        )
+
+    @app.post(
+        "/api/admin/users/auto-trade-enable",
+        response_model=AdminAutoTradeEnableResponse,
+        tags=["admin"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def admin_auto_trade_enable(
+        req: AdminAutoTradeEnableRequest,
+    ) -> AdminAutoTradeEnableResponse:
+        """Operator re-enable (or manual disable) of a user's auto-trade.
+
+        The per-user circuit breaker persists its disable in Firestore
+        (``kill_switch.disable_user``), which survives restarts by design
+        — but the documented recovery verb (``/enable_user``) was never
+        implemented on any surface, so a tripped user (e.g. the -4411
+        Futures-agreement storm pre-#740) stayed disabled with the app
+        showing "Paused by a safety check — email support" and support
+        having no switch to flip.  This is that switch: same
+        ``kill_switch`` write path the breaker uses, owner-gated,
+        audited via the engine log, response read back from Firestore.
+
+        The breaker's in-memory rejection window (5 min) is engine-local
+        and self-expires, so no engine-side reset is needed — a
+        re-enabled user only re-trips on NEW qualifying failures.
+        """
+        from src.execution import kill_switch as _kill_switch
+
+        if (req.phone is None) == (req.firebase_uid is None):
+            raise HTTPException(
+                status_code=422,
+                detail="provide exactly one of 'phone' or 'firebase_uid'",
+            )
+        if not _kill_switch.is_initialised():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="kill switch not initialised (no Firestore in this "
+                "process — check GCP env)",
+            )
+
+        phone: Optional[str] = None
+        firebase_uid = req.firebase_uid
+        if req.phone is not None:
+            if user_store is None:
+                raise HTTPException(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                    detail="user store not configured",
+                )
+            user = await user_store.aget_by_phone(req.phone)
+            if user is None:
+                raise HTTPException(
+                    status_code=404, detail=f"no user with phone {req.phone}"
+                )
+            phone = user.phone_e164
+            firebase_uid = getattr(user, "firebase_uid", None)
+            if not firebase_uid:
+                raise HTTPException(
+                    status_code=409,
+                    detail=(
+                        f"user {req.phone} has no firebase_uid yet (pre-"
+                        "migration row) — pass firebase_uid directly"
+                    ),
+                )
+
+        ks = _kill_switch.get_client()
+        if firebase_uid is None:  # unreachable: XOR check + 409 above
+            raise HTTPException(
+                status_code=422, detail="firebase_uid could not be resolved"
+            )
+        if req.enabled:
+            await asyncio.to_thread(ks.enable_user, firebase_uid)
+        else:
+            await asyncio.to_thread(
+                ks.disable_user, firebase_uid,
+                req.reason or "manual operator disable",
+            )
+        # Engine-truth doctrine: read the flag back rather than echoing
+        # the request (also proves the Firestore write landed).
+        disabled_now = bool(
+            await asyncio.to_thread(ks.is_user_disabled, firebase_uid)
+        )
+        log.warning(
+            "admin_auto_trade_enable: uid={} phone={} enabled={} reason={!r} "
+            "read_back_disabled={}",
+            firebase_uid, phone, req.enabled, req.reason, disabled_now,
+        )
+        return AdminAutoTradeEnableResponse(
+            ok=(disabled_now is (not req.enabled)),
+            firebase_uid=firebase_uid,
+            phone=phone,
+            auto_trade_disabled=disabled_now,
         )

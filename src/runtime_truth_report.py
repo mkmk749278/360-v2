@@ -1339,6 +1339,11 @@ def build_snapshot(
             for stage, count in metrics.items()
             if stage.startswith("evaluator_no_signal_reason:")
         }
+        gate_reject_reasons = {
+            stage.replace("gate_reject:", ""): int(count or 0)
+            for stage, count in metrics.items()
+            if stage.startswith("gate_reject:")
+        }
         dependency_missing_reasons = {
             stage.replace("dependency_missing:", ""): int(count or 0)
             for stage, count in metrics.items()
@@ -1362,6 +1367,7 @@ def build_snapshot(
             "geometry_final_rejected": int(metrics.get("geometry:final_live:rejected", 0)),
             "geometry_rejected_reasons": rejected_reasons,
             "no_signal_reasons": no_signal_reasons,
+            "gate_reject_reasons": gate_reject_reasons,
             "dependency_missing_reasons": dependency_missing_reasons,
             "dependency_missing_total": dependency_missing_total,
             "classification": classification,
@@ -1603,6 +1609,32 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
         lines.append(f"- **{setup}** (total={total}): {breakdown}")
     if not any_reasons_rendered:
         lines.append("- _no reject-reason data parsed from logs in this window — see Log parse diagnostics below_")
+
+    # Pre-scoring gate rejects (2026-07-18, audit F2).  The setup-compat and
+    # execution-quality hard gates sit between "Generated" and the confidence
+    # scorer; until this section they rejected without a reason, so a path
+    # 100%-killed there was indistinguishable from one dying at any other
+    # gate (#739).  ``setup_compat:regime_<STATE>`` names the MarketState the
+    # candidate was rejected under — a path whose rejects concentrate in
+    # states missing from its REGIME_SETUP_COMPATIBILITY rows is compat-map
+    # starved, not low-quality.
+    lines.extend(["", "## Pre-scoring gate rejects (setup-compat / execution-quality)"])
+    any_gate_rejects_rendered = False
+    for setup, metrics in sorted(path_truth.items()):
+        g_reasons = metrics.get("gate_reject_reasons", {}) or {}
+        g_positive = {k: int(v or 0) for k, v in g_reasons.items() if int(v or 0) > 0}
+        if not g_positive:
+            continue
+        any_gate_rejects_rendered = True
+        g_sorted = sorted(g_positive.items(), key=lambda item: item[1], reverse=True)
+        g_total = sum(g_positive.values())
+        g_breakdown = ", ".join(f"{k}={v}" for k, v in g_sorted)
+        lines.append(f"- **{setup}** (total={g_total}): {g_breakdown}")
+    if not any_gate_rejects_rendered:
+        lines.append(
+            "- _no pre-scoring gate rejects recorded in this window (counters "
+            "ship 2026-07-18 — a fresh window must accumulate first)_"
+        )
 
     # ── Regime distribution (Tier-1 monitor upgrade) ──────────────────
     regime_dist = snapshot.get("regime_distribution", {}) or {}

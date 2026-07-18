@@ -261,6 +261,8 @@ def assert_symbol_in_user_preference(
 
 def effective_allowed_symbols_for_user(
     firebase_uid: str,
+    *,
+    allowlist: Optional[Set[str]] = None,
 ) -> list[str]:
     """Return the sorted intersection of the engine-wide allowlist and
     the user's symbol preference.
@@ -270,10 +272,19 @@ def effective_allowed_symbols_for_user(
     just the engine cap.  Default = engine-wide list when the user has
     no preference set.
 
+    ``allowlist`` lets the caller inject an engine-wide list resolved
+    elsewhere — the isolated api container has no PairManager
+    singleton, so its in-process resolution is the block-all empty set
+    and the runtime-status route substitutes the engine-published
+    pairs snapshot instead (2026-07-18).  ``None`` keeps the previous
+    in-process behaviour.
+
     Soft-failure semantics match ``assert_symbol_in_user_preference``
     — if the override store isn't wired, return the engine-wide list.
     """
-    engine_allowlist = _load_symbol_allowlist()
+    engine_allowlist = (
+        allowlist if allowlist is not None else _load_symbol_allowlist()
+    )
 
     try:
         from src.api import user_overrides as _uo

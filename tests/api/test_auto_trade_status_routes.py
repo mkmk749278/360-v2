@@ -14,7 +14,12 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 
-def _build_app(*, identity: object = None, allow_auth: bool = True) -> FastAPI:
+def _build_app(
+    *,
+    identity: object = None,
+    allow_auth: bool = True,
+    get_engine=None,
+) -> FastAPI:
     from src.api import auto_trade_status_routes
 
     app = FastAPI()
@@ -29,7 +34,7 @@ def _build_app(*, identity: object = None, allow_auth: bool = True) -> FastAPI:
         return identity
 
     auto_trade_status_routes.register(
-        app, auth=_auth_stub, identity_dep=_identity_stub
+        app, auth=_auth_stub, identity_dep=_identity_stub, get_engine=get_engine
     )
     return app
 
@@ -285,6 +290,116 @@ def test_runtime_status_effective_intersects_user_pref(
         "BNBUSDT", "BTCUSDT", "ETHUSDT", "SOLUSDT", "XRPUSDT",
     ]
     assert body["effective_allowed_symbols"] == ["BTCUSDT", "SOLUSDT"]
+
+
+def _facade_stub(pairs: object):
+    """RedisEngineFacade-shaped stub exposing ``published_pairs()``."""
+    stub = MagicMock()
+    stub.published_pairs = MagicMock(return_value=pairs)
+    return stub
+
+
+@pytest.fixture()
+def _no_pair_manager(monkeypatch):
+    """Model the isolated api container: no PairManager singleton in-process.
+
+    Other test modules may leave a live singleton behind; the fallback tests
+    must see the empty in-process resolution the api container really gets.
+    """
+    monkeypatch.setattr("src.pair_manager.get_singleton", lambda: None)
+
+
+def test_runtime_status_allowlist_falls_back_to_pairs_snapshot(
+    monkeypatch, _no_pair_manager,
+) -> None:
+    """Isolated api container (2026-07-18, same class as the KMS bug #736):
+    no PairManager singleton lives in this process, so the in-process
+    allowlist resolves to the block-all empty set and every user rendered
+    "Watching 0 symbols" while the engine traded a full universe.  With
+    the env unset, the route must substitute the engine-published pairs
+    snapshot (regular + mover-promoted)."""
+    monkeypatch.delenv("TRIPWIRE_SYMBOL_ALLOWLIST", raising=False)
+    facade = _facade_stub({
+        "regular": [
+            {"symbol": "BTCUSDT", "tier": "T1"},
+            {"symbol": "ETHUSDT", "tier": "T1"},
+        ],
+        "promoting": [{"symbol": "MOVERUSDT", "cycles_remaining": 3}],
+    })
+    app = _build_app(
+        identity=_firebase_user(uid="fb-iso"), get_engine=lambda: facade
+    )
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["allowed_symbols"] == ["BTCUSDT", "ETHUSDT", "MOVERUSDT"]
+    # No per-user preference in this test → effective == engine list.
+    assert body["effective_allowed_symbols"] == body["allowed_symbols"]
+
+
+def test_runtime_status_snapshot_fallback_intersects_user_pref(
+    monkeypatch, _no_pair_manager,
+) -> None:
+    """The per-user symbol_preference intersection must apply to the
+    snapshot-sourced allowlist exactly as it does to the env-sourced one."""
+    from src.api import user_overrides as _uo
+    from src.api import users as _users_module
+
+    monkeypatch.delenv("TRIPWIRE_SYMBOL_ALLOWLIST", raising=False)
+    fake_user = _user_row(user_id=1)
+    fake_user_store = MagicMock()
+    fake_user_store.aget_by_firebase_uid = AsyncMock(return_value=fake_user)
+    fake_user_store.get_by_firebase_uid = MagicMock(return_value=fake_user)
+    monkeypatch.setattr(_users_module, "_store", fake_user_store, raising=False)
+
+    fake_overrides_store = MagicMock()
+    fake_overrides_store.aget_auto_trade = AsyncMock(
+        return_value={"symbol_preference": ["ETHUSDT"]}
+    )
+    fake_overrides_store.get_auto_trade = MagicMock(
+        return_value={"symbol_preference": ["ETHUSDT"]}
+    )
+    monkeypatch.setattr(_uo, "_SINGLETON", fake_overrides_store, raising=False)
+
+    facade = _facade_stub({
+        "regular": [{"symbol": "BTCUSDT"}, {"symbol": "ETHUSDT"}],
+        "promoting": [],
+    })
+    app = _build_app(
+        identity=_firebase_user(uid="fb-iso-pref"), get_engine=lambda: facade
+    )
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["allowed_symbols"] == ["BTCUSDT", "ETHUSDT"]
+    assert body["effective_allowed_symbols"] == ["ETHUSDT"]
+
+
+def test_runtime_status_env_allowlist_wins_over_snapshot(monkeypatch) -> None:
+    """The operator hard-narrow env stays authoritative — the snapshot
+    fallback fires only when the in-process resolution is empty."""
+    monkeypatch.setenv("TRIPWIRE_SYMBOL_ALLOWLIST", "BTCUSDT")
+    facade = _facade_stub({
+        "regular": [{"symbol": "ETHUSDT"}], "promoting": [],
+    })
+    app = _build_app(
+        identity=_firebase_user(uid="fb-envwin"), get_engine=lambda: facade
+    )
+    body = TestClient(app).get("/api/auto-trade/runtime-status").json()
+    assert body["allowed_symbols"] == ["BTCUSDT"]
+    facade.published_pairs.assert_not_called()
+
+
+def test_runtime_status_snapshot_fallback_survives_facade_error(
+    monkeypatch, _no_pair_manager,
+) -> None:
+    """A facade read failure must degrade to the previous behaviour
+    (empty list), never 500 the status endpoint."""
+    monkeypatch.delenv("TRIPWIRE_SYMBOL_ALLOWLIST", raising=False)
+    facade = MagicMock()
+    facade.published_pairs = MagicMock(side_effect=RuntimeError("redis down"))
+    app = _build_app(
+        identity=_firebase_user(uid="fb-iso-err"), get_engine=lambda: facade
+    )
+    r = TestClient(app).get("/api/auto-trade/runtime-status")
+    assert r.status_code == 200
+    assert r.json()["allowed_symbols"] == []
 
 
 def test_runtime_status_armed_when_all_gates_green(monkeypatch) -> None:

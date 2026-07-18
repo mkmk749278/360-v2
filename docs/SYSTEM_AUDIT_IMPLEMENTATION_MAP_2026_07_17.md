@@ -343,12 +343,41 @@ Evidence chain (all code/data-verified today):
    rollup) remains the measuring stick for what the gate chain is costing.
 
 ### F2 — MEDIUM (telemetry gap): `gated`-stage rejects are reasonless
+**[IMPLEMENTED 2026-07-18, same branch]**
 
 The exact gap that delayed F1's diagnosis: setup-compat and execution-quality
 rejections log at DEBUG and increment a reasonless funnel counter. Every other
 rejection layer (evaluator no-signal reasons, MTF, confidence, soft penalties,
 suppression audit) is reason-tagged. Closing this is the step-1 fix in F1 and
 benefits all 18 paths permanently.
+*Shipped:* both kill sites now record `gate_reject:setup_compat:{channel|
+regime_<MarketState>}` / `gate_reject:execution:{trigger_not_confirmed|
+overextended}` funnel stages; the truth report gained a "Pre-scoring gate
+rejects" section naming the MarketState each candidate was rejected under —
+one real window after deploy answers F1's compat-map question directly.
+
+### F4 — HIGH (found 2026-07-18, owner screenshots): the documented
+`/enable_user` operator verb never existed **[IMPLEMENTED, same branch]**
+
+`kill_switch.enable_user()` had **zero operator-facing callers** — no Telegram
+command, no endpoint, no ops surface — despite the S59/S62 runbooks naming
+`/enable_user` as the recovery verb. A breaker-tripped paying subscriber
+stayed disabled forever ("Paused by a safety check — email support", with
+support having no switch). *Shipped:* owner-gated
+`POST /api/admin/users/auto-trade-enable` (phone or firebase_uid, enable or
+audited manual disable, Firestore read-back), beside `grant-tier`. Ops-UI
+button in 360ce-ops is the follow-up.
+
+### F5 — MEDIUM (found 2026-07-18, owner screenshots): "Watching 0 symbols"
+— isolated-api allowlist display bug **[IMPLEMENTED, same branch]**
+
+Same container class as the KMS bug (#736): `_load_symbol_allowlist()` in the
+api container has no PairManager singleton and the env default is unset, so
+`/api/auto-trade/runtime-status` reported an empty allowlist and every armed
+user rendered "Watching 0 symbols". Display-only (real gating runs
+engine-side). *Shipped:* the route now falls back to the engine-published
+pairs snapshot (regular + mover-promoted) with the per-user preference
+intersection applied on top; env hard-narrow still wins.
 
 ### F3 — LOW (verify on VPS): `SIGNAL_EXPIRY_ENABLED` defaults `false` in code
 

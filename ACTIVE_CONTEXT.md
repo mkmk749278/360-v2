@@ -42,18 +42,55 @@ contracts, CI/CD, health snapshot, findings, outstanding owner actions.
   (#714 closed via #725); breakers wired with -2019/-4411 exclusions; only
   auto-detected issue open is #739.
 
-**No code changed** — audit was report-only; F1's fix path is money-path and
-stays owner-gated.
+### Second half of session (owner screenshots + "implement what's important"):
+three fixes shipped on the same branch, all off the money path, full suite
+**6742 passed** locally, ruff clean, mypy 112 = baseline
+
+- **F4 (HIGH, new): the documented `/enable_user` operator verb NEVER
+  existed.** `kill_switch.enable_user()` had zero operator-facing callers on
+  any surface — the paying customer's "Paused by a safety check — email
+  support" state (owner screenshot, per-user breaker trip, -4411 storm
+  pre-#740) was permanently un-fixable. Shipped: owner-gated
+  `POST /api/admin/users/auto-trade-enable` (phone OR firebase_uid; enable, or
+  audited manual disable; Firestore read-back = engine truth; breaker's 5-min
+  in-memory window self-expires so no engine-side reset needed). Kill-switch
+  adjacent → owner merges the PR. Ops-UI button = follow-up in 360ce-ops.
+- **F5 (MED, new): "Watching 0 symbols" on an armed account** — isolated-api
+  display bug, same container class as #736: no PairManager singleton in the
+  api process + env unset ⇒ runtime-status reported an empty allowlist for
+  every user. Display-only. Shipped: pairs-snapshot fallback
+  (`published_pairs()`, regular+promoting) with user-pref intersection; env
+  hard-narrow still wins.
+- **F2 (from the morning audit) implemented:** the two reasonless pre-scoring
+  kill sites now record `gate_reject:setup_compat:{channel|regime_<STATE>}` /
+  `gate_reject:execution:{trigger_not_confirmed|overextended}` funnel stages;
+  truth report gained "## Pre-scoring gate rejects". One real window after
+  deploy names MEAN_REVERT's killing gate + MarketState (#739/F1 step 1).
+
+**Paper-freeze question (owner screenshot: last paper trade 2d ago, toggle
+ON):** not resolved from here — needs the VPS reads. Facts established:
+per-user paper books fill ONLY while engine-wide `AUTO_EXECUTION_MODE` is
+`paper` (fan-out is TradeMonitor's order manager); the probe shows ONE
+per-user ledger on disk with closes yesterday afternoon, so engine paper mode
+was active — divergence between that ledger and the app's 2d-old history
+points at per-user paper eligibility (`resolve_paper_preferences_uid`) or a
+mode-row change ~07-16. Runbook given to owner (engine auto-mode read, user
+mode row + paper prefs SELECT, ledger mtimes).
 
 ### NEXT
 
-1. Owner: read the map's §9/F1 and approve the telemetry step (reason-tagged
-   gated rejects) so the compat-map hypothesis can be confirmed on a real window.
-2. Unchanged owner queue: VPS runbook for the primary account's silent gate;
-   -4411 subscriber re-enable; `AUTO_TRADE_MANUAL_TAKE_ENABLED` activation;
-   alert-take geometry design; proration follow-up; data reads
-   (dispatch_staleness, geometry A/B, @TUNED arms, BTC_DIR shadow);
-   dispatch_log retention.
+1. Owner: merge the session PR (admin enable verb = kill-switch adjacent),
+   deploy, then: (a) re-enable the paid customer via the new endpoint (after
+   they accept the Binance Futures agreement), (b) set
+   `AUTO_TRADE_MANUAL_TAKE_ENABLED=true` in VPS `.env` + `bash deploy.sh`,
+   (c) run the paper-freeze + test-account runbook commands from the session
+   reply.
+2. After a real window: read "## Pre-scoring gate rejects" for MEAN_REVERT →
+   confirm the compat-map hypothesis → compat-map change is dark-first +
+   owner sign-off (F1 step 3).
+3. Unchanged owner queue: alert-take geometry design; proration follow-up;
+   data reads (dispatch_staleness, geometry A/B, @TUNED arms, BTC_DIR
+   shadow); dispatch_log retention; ops-UI per-user enable button.
 
 ---
 
