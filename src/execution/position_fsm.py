@@ -981,6 +981,8 @@ async def place_signal(
     invalidation_mode: str = "standard",  # B17: "loose" / "standard" / "tight"
     management_mode: str = "full",  # "full" | "entry" (per-symbol, 2026-06-20)
     protection_mode: str = "managed",  # "managed" | "user_owned" (2026-07-18)
+    entry_type: str = "market",    # "market" | "limit" (manual builder / FSM_LIMIT_ENTRY)
+    valid_for_minutes: int = 0,    # limit-entry TTL in minutes; 0 = GTC rests, no expiry
     entry_regime: str = "",        # 5m Hurst-gated regime at entry
     entry_regime_15m: str = "",    # 15m stateless regime at entry
     atr_percentile_at_entry: float = 50.0,
@@ -1052,6 +1054,75 @@ async def place_signal(
                 "exc={} — proceeding with entry",
                 firebase_uid, symbol, exc,
             )
+
+    # ── LIMIT entry path (manual trade builder / FSM_LIMIT_ENTRY) ──────────
+    # entry_type == "limit": rest a GTC LIMIT at entry_price instead of a
+    # synchronous MARKET fill. The position sits in PENDING_ENTRY with NO
+    # SL/TP placed yet (you can't place reduce-only protection before there's
+    # a filled position). The geometry (sl/tp prices + qtys, pre-TP params) is
+    # persisted so position_worker._apply_entry_fill can lay it the moment the
+    # entry fill event arrives; an unfilled rest is cancelled on TTL by the
+    # reconciler (→ CANCELLED_NO_FILL). Returns early — the whole MARKET flow
+    # below (synchronous fill → SL → TP) does not apply to a resting order.
+    if entry_type == "limit":
+        from . import pretp_controller as _pretp_limit
+        from datetime import timedelta as _timedelta
+        limit_result = await placer.place_limit_entry(
+            signal_id=signal_id,
+            symbol=symbol,
+            direction=direction,
+            quantity=total_qty,
+            price=entry_price,
+        )
+        _pretp_fraction_clamped = (
+            0.0 if pretp_fraction <= 0 else max(0.30, min(1.0, pretp_fraction))
+        )
+        _pretp_threshold_price = _pretp_limit.compute_pretp_threshold_price(
+            entry_price=entry_price,
+            direction=direction,
+            threshold_pct=pretp_threshold_pct,
+        )
+        _expires_at = (
+            datetime.now(timezone.utc) + _timedelta(minutes=valid_for_minutes)
+            if valid_for_minutes and valid_for_minutes > 0
+            else None
+        )
+        position = _position_state.Position(
+            signal_id=signal_id,
+            firebase_uid=firebase_uid,
+            symbol=symbol,
+            side=direction,
+            state=_position_state.PositionState.PENDING_ENTRY,
+            entry_price_target=entry_price,
+            entry_price_filled=0.0,
+            sl_price=sl_price,
+            tp1_price=tp1_price,
+            tp2_price=tp2_price,
+            tp3_price=tp3_price,
+            total_qty=total_qty,
+            tp1_qty=tp1_qty,
+            tp2_qty=tp2_qty,
+            tp3_qty=tp3_qty,
+            entry_order_id=limit_result.order_id,
+            pretp_threshold_price=_pretp_threshold_price,
+            pretp_fraction=_pretp_fraction_clamped,
+            invalidation_mode=invalidation_mode,
+            entry_regime=entry_regime,
+            entry_regime_15m=entry_regime_15m,
+            atr_percentile_at_entry=atr_percentile_at_entry,
+            atr_value_at_entry=atr_value_at_entry,
+            protection_mode=protection_mode,
+            entry_expires_at=_expires_at,
+        )
+        _position_state.put_position(position)
+        log.info(
+            "place_signal: LIMIT entry rested uid={} signal_id={} symbol={} "
+            "price={} qty={} ttl_min={} protection={} — PENDING_ENTRY, SL/TP "
+            "placed on fill",
+            firebase_uid, signal_id, symbol, entry_price, total_qty,
+            valid_for_minutes, protection_mode,
+        )
+        return position
 
     # Step 1: entry — the only must-succeed step.
     entry_result = await placer.place_market_entry(
