@@ -92,6 +92,13 @@ class ManualTakeConsumer:
                 "ManualTakeConsumer: dropping malformed envelope {!r}", raw,
             )
             return
+        # Envelope kind routes the command. "take" (default, back-compat) is
+        # the signal take; "manual_trade" is the manual trade builder. Both
+        # share this queue + the take_result key so one consumer + one bridge
+        # serve both.
+        if str(envelope.get("kind") or "take") == "manual_trade":
+            await self._process_manual_trade(envelope, raw)
+            return
         request_id = str(envelope.get("request_id") or "")
         uid = str(envelope.get("uid") or "")
         signal_id = str(envelope.get("signal_id") or "")
@@ -156,4 +163,76 @@ class ManualTakeConsumer:
                 "ManualTakeConsumer: result write failed request_id={} "
                 "(order outcome itself is recorded in dispatch_log)",
                 request_id,
+            )
+
+    async def _process_manual_trade(
+        self, envelope: Dict[str, Any], raw: str
+    ) -> None:
+        """Handle a manual trade builder envelope (kind="manual_trade").
+
+        Same staleness + always-write-a-result contract as the take path, but
+        the payload is the user's chart geometry and the engine call is
+        ``build_manual_trade_for_user``.
+        """
+        request_id = str(envelope.get("request_id") or "")
+        uid = str(envelope.get("uid") or "")
+        payload = envelope.get("payload")
+        ts = envelope.get("ts")
+        if not (request_id and uid and isinstance(payload, dict)):
+            log.warning(
+                "ManualTakeConsumer: dropping incomplete manual_trade "
+                "envelope {!r}", raw,
+            )
+            return
+        ref_id = str(payload.get("ref_id") or "")
+        try:
+            age_s = time.time() - float(ts)
+        except (TypeError, ValueError):
+            age_s = 0.0
+        if age_s > _store.TAKE_CMD_STALE_S:
+            # Engine was down/wedged when the user hit Confirm — refusing beats
+            # firing a market/limit order minutes after their intent.
+            result: Dict[str, Any] = {
+                "outcome": "rejected",
+                "reject_class": "TradeRequestStale",
+                "reject_detail": (
+                    f"Trade request was {age_s:.0f}s old when the engine "
+                    "picked it up — refused for your safety. Try again."
+                ),
+                "ref_id": ref_id,
+            }
+            log.warning(
+                "ManualTakeConsumer: stale manual_trade envelope uid={} "
+                "ref_id={} age={:.0f}s — rejected", uid, ref_id, age_s,
+            )
+        else:
+            log.info(
+                "ManualTakeConsumer: manual_trade uid={} ref_id={} "
+                "(age={:.1f}s)", uid, ref_id, age_s,
+            )
+            try:
+                result = await self._engine.build_manual_trade_for_user(
+                    uid, payload
+                )
+            except Exception as exc:
+                log.exception(
+                    "ManualTakeConsumer: manual_trade crashed uid={} "
+                    "ref_id={}", uid, ref_id,
+                )
+                result = {
+                    "outcome": "rejected",
+                    "reject_class": type(exc).__name__,
+                    "reject_detail": str(exc),
+                    "ref_id": ref_id,
+                }
+        try:
+            await self._redis.client.set(
+                _store.KEY_TAKE_RESULT_PREFIX + request_id,
+                json.dumps(result, default=str),
+                ex=_store.TTL_TAKE_RESULT,
+            )
+        except Exception:
+            log.exception(
+                "ManualTakeConsumer: manual_trade result write failed "
+                "request_id={} (outcome recorded in dispatch_log)", request_id,
             )

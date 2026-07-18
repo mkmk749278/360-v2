@@ -242,7 +242,7 @@ class PositionFSM:
         # Pre-TP and SL-BE may trigger additional async order
         # placements (BE shift on pre-TP fill) so they're awaited.
         if phase == "entry":
-            self._apply_entry_fill(position, event)
+            await self._apply_entry_fill(position, event)
         elif phase == "pretp":
             await self._apply_pretp_fill(position, event)
         elif phase == "tp1":
@@ -291,17 +291,27 @@ class PositionFSM:
     # Per-phase transition logic — pure mutation of the Position dataclass
     # ------------------------------------------------------------------
 
-    def _apply_entry_fill(
+    async def _apply_entry_fill(
         self,
         position: _position_state.Position,
         event: _events.OrderTradeUpdate,
     ) -> None:
-        """Entry fill — PENDING → OPEN (or stays PENDING if partial).
+        """Entry fill — PENDING/PENDING_ENTRY → OPEN (or stays if partial).
 
         Records the cumulative filled qty + the average filled price.
-        Once cumulative_filled_qty equals (or exceeds, defensively)
-        the position's total_qty, transition to OPEN.
+        Once cumulative_filled_qty equals (or exceeds, defensively) the
+        position's total_qty, transition to OPEN.
+
+        MARKET entries (PENDING) already had SL/TP placed synchronously in
+        ``place_signal``, so nothing to lay here.  LIMIT entries
+        (PENDING_ENTRY) deferred SL/TP to fill time — you can't place
+        reduce-only protection before there's a filled position — so on the
+        transition to OPEN we lay them now via
+        :meth:`place_protection_on_limit_fill`.
         """
+        was_pending_entry = (
+            position.state == _position_state.PositionState.PENDING_ENTRY
+        )
         position.filled_qty = event.cumulative_filled_qty
         if event.average_price > 0:
             position.entry_price_filled = event.average_price
@@ -309,6 +319,131 @@ class PositionFSM:
             position.state = _position_state.PositionState.OPEN
             from src.execution import pretp_dispatcher as _pd
             _pd.spawn_track(position.symbol)
+            if was_pending_entry:
+                await self.place_protection_on_limit_fill(position)
+
+    async def place_protection_on_limit_fill(
+        self,
+        position: _position_state.Position,
+    ) -> None:
+        """Lay SL + TP for a LIMIT entry that just filled (PENDING_ENTRY → OPEN).
+
+        Mirrors ``place_signal``'s market-path protection, but post-fill:
+
+        * SL is placed only when ``sl_price > 0`` — a ``user_owned`` manual
+          take may be entry-only (owner decision 2026-07-18).
+        * ``managed`` positions whose SL fails to land are FORCE-CLOSED
+          (the naked-position invariant); ``user_owned`` positions are left
+          OPEN — the user owns the exit.
+        * TP legs are placed for each ``tp*_qty > 0`` unless pre-TP grabs the
+          whole position (``pretp_fraction >= 1.0`` → no residual to ride).
+
+        Best-effort per leg like the market path: a TP reject is logged and
+        tolerated; only a ``managed`` SL failure escalates to force-close.
+        """
+        from src.execution import dispatch_log as _dl
+        placer = self._order_placer_factory(self.firebase_uid)
+        signal_id = position.signal_id
+        symbol = position.symbol
+        direction = position.side
+        _sl_compulsory = position.protection_mode != "user_owned"
+        close_qty = position.filled_qty if position.filled_qty > 0 else position.total_qty
+
+        # ---- SL ----
+        if position.sl_price > 0:
+            try:
+                sl_result = await placer.place_stop_loss(
+                    signal_id=signal_id,
+                    symbol=symbol,
+                    direction=direction,
+                    stop_price=position.sl_price,
+                )
+                position.sl_order_id = sl_result.order_id
+            except Exception as sl_exc:  # noqa: BLE001 — escalation decided by mode
+                log.error(
+                    "position_fsm: LIMIT-fill SL placement failed uid={} "
+                    "signal_id={} protection={} exc={}",
+                    self.firebase_uid, signal_id, position.protection_mode, sl_exc,
+                )
+                if _sl_compulsory:
+                    # managed: never leave OPEN without a stop — force-close.
+                    try:
+                        await placer.place_market_close(
+                            signal_id=signal_id,
+                            symbol=symbol,
+                            direction=direction,
+                            quantity=close_qty,
+                        )
+                        position.state = _position_state.PositionState.CLOSED
+                        position.close_reason = "SL_PLACEMENT_FAILED"
+                        position.closed_at = datetime.now(timezone.utc)
+                        _dl.record_rejected(
+                            firebase_uid=self.firebase_uid,
+                            signal_id=signal_id,
+                            symbol=symbol,
+                            direction=direction,
+                            entry_price=position.entry_price_filled,
+                            reject_class="SLPlacementFailed",
+                            reject_detail=(
+                                f"SL failed for {symbol} after LIMIT entry fill: "
+                                f"{sl_exc}. Position force-closed to avoid an "
+                                "uncovered exposure."
+                            ),
+                        )
+                    except Exception as close_exc:  # noqa: BLE001
+                        log.error(
+                            "position_fsm: LIMIT-fill FORCE-CLOSE also failed — "
+                            "position OPEN WITHOUT stop uid={} signal_id={} "
+                            "close_exc={}",
+                            self.firebase_uid, signal_id, close_exc,
+                        )
+                        _dl.record_rejected(
+                            firebase_uid=self.firebase_uid,
+                            signal_id=signal_id,
+                            symbol=symbol,
+                            direction=direction,
+                            entry_price=position.entry_price_filled,
+                            reject_class="SLPlacementFailed",
+                            reject_detail=(
+                                f"SL failed for {symbol} and auto-close ALSO "
+                                "failed — position is OPEN without protection. "
+                                "Close manually on Binance now."
+                            ),
+                        )
+                    return  # managed + SL failed → terminal-or-naked; no TPs
+                # user_owned: they own the exit — leave OPEN, surface the miss.
+                log.warning(
+                    "position_fsm: user_owned LIMIT-fill SL did not land uid={} "
+                    "signal_id={} — leaving OPEN (user owns exit), no force-close",
+                    self.firebase_uid, signal_id,
+                )
+
+        # ---- TP ladder (skipped when pre-TP grabs the full position) ----
+        if position.pretp_fraction >= 1.0:
+            return
+        for tp_phase, tp_price, tp_qty in (
+            ("tp1", position.tp1_price, position.tp1_qty),
+            ("tp2", position.tp2_price, position.tp2_qty),
+            ("tp3", position.tp3_price, position.tp3_qty),
+        ):
+            if tp_qty <= 0 or tp_price <= 0:
+                continue
+            try:
+                tp_result = await placer.place_take_profit(
+                    signal_id=signal_id,
+                    symbol=symbol,
+                    direction=direction,
+                    stop_price=tp_price,
+                    quantity=tp_qty,
+                    tp_phase=tp_phase,
+                )
+                setattr(position, f"{tp_phase}_order_id", tp_result.order_id)
+            except Exception as tp_exc:  # noqa: BLE001 — TP is best-effort
+                log.warning(
+                    "position_fsm: LIMIT-fill TP {} placement failed uid={} "
+                    "signal_id={} exc={} — continuing (SL still protects)",
+                    tp_phase, self.firebase_uid, signal_id, tp_exc,
+                )
 
     async def _apply_pretp_fill(
         self,
@@ -980,6 +1115,9 @@ async def place_signal(
     pretp_fraction: float = 0.5,  # B17 engine default — must be in [0.3, 1.0]
     invalidation_mode: str = "standard",  # B17: "loose" / "standard" / "tight"
     management_mode: str = "full",  # "full" | "entry" (per-symbol, 2026-06-20)
+    protection_mode: str = "managed",  # "managed" | "user_owned" (2026-07-18)
+    entry_type: str = "market",    # "market" | "limit" (manual builder / FSM_LIMIT_ENTRY)
+    valid_for_minutes: int = 0,    # limit-entry TTL in minutes; 0 = GTC rests, no expiry
     entry_regime: str = "",        # 5m Hurst-gated regime at entry
     entry_regime_15m: str = "",    # 15m stateless regime at entry
     atr_percentile_at_entry: float = 50.0,
@@ -1051,6 +1189,75 @@ async def place_signal(
                 "exc={} — proceeding with entry",
                 firebase_uid, symbol, exc,
             )
+
+    # ── LIMIT entry path (manual trade builder / FSM_LIMIT_ENTRY) ──────────
+    # entry_type == "limit": rest a GTC LIMIT at entry_price instead of a
+    # synchronous MARKET fill. The position sits in PENDING_ENTRY with NO
+    # SL/TP placed yet (you can't place reduce-only protection before there's
+    # a filled position). The geometry (sl/tp prices + qtys, pre-TP params) is
+    # persisted so position_worker._apply_entry_fill can lay it the moment the
+    # entry fill event arrives; an unfilled rest is cancelled on TTL by the
+    # reconciler (→ CANCELLED_NO_FILL). Returns early — the whole MARKET flow
+    # below (synchronous fill → SL → TP) does not apply to a resting order.
+    if entry_type == "limit":
+        from . import pretp_controller as _pretp_limit
+        from datetime import timedelta as _timedelta
+        limit_result = await placer.place_limit_entry(
+            signal_id=signal_id,
+            symbol=symbol,
+            direction=direction,
+            quantity=total_qty,
+            price=entry_price,
+        )
+        _pretp_fraction_clamped = (
+            0.0 if pretp_fraction <= 0 else max(0.30, min(1.0, pretp_fraction))
+        )
+        _pretp_threshold_price = _pretp_limit.compute_pretp_threshold_price(
+            entry_price=entry_price,
+            direction=direction,
+            threshold_pct=pretp_threshold_pct,
+        )
+        _expires_at = (
+            datetime.now(timezone.utc) + _timedelta(minutes=valid_for_minutes)
+            if valid_for_minutes and valid_for_minutes > 0
+            else None
+        )
+        position = _position_state.Position(
+            signal_id=signal_id,
+            firebase_uid=firebase_uid,
+            symbol=symbol,
+            side=direction,
+            state=_position_state.PositionState.PENDING_ENTRY,
+            entry_price_target=entry_price,
+            entry_price_filled=0.0,
+            sl_price=sl_price,
+            tp1_price=tp1_price,
+            tp2_price=tp2_price,
+            tp3_price=tp3_price,
+            total_qty=total_qty,
+            tp1_qty=tp1_qty,
+            tp2_qty=tp2_qty,
+            tp3_qty=tp3_qty,
+            entry_order_id=limit_result.order_id,
+            pretp_threshold_price=_pretp_threshold_price,
+            pretp_fraction=_pretp_fraction_clamped,
+            invalidation_mode=invalidation_mode,
+            entry_regime=entry_regime,
+            entry_regime_15m=entry_regime_15m,
+            atr_percentile_at_entry=atr_percentile_at_entry,
+            atr_value_at_entry=atr_value_at_entry,
+            protection_mode=protection_mode,
+            entry_expires_at=_expires_at,
+        )
+        _position_state.put_position(position)
+        log.info(
+            "place_signal: LIMIT entry rested uid={} signal_id={} symbol={} "
+            "price={} qty={} ttl_min={} protection={} — PENDING_ENTRY, SL/TP "
+            "placed on fill",
+            firebase_uid, signal_id, symbol, entry_price, total_qty,
+            valid_for_minutes, protection_mode,
+        )
+        return position
 
     # Step 1: entry — the only must-succeed step.
     entry_result = await placer.place_market_entry(
@@ -1144,6 +1351,7 @@ async def place_signal(
         entry_regime_15m=entry_regime_15m,
         atr_percentile_at_entry=atr_percentile_at_entry,
         atr_value_at_entry=atr_value_at_entry,
+        protection_mode=protection_mode,
     )
     _position_state.put_position(position)
 
@@ -1164,8 +1372,20 @@ async def place_signal(
     from config import SL_PLACEMENT_MAX_ATTEMPTS as _SL_MAX_ATTEMPTS
     from config import SL_RETRY_BACKOFF_SEC as _SL_BACKOFF
 
+    # Manual trade builder (2026-07-18): protection_mode governs whether a
+    # stop is compulsory here. A "user_owned" manual take may be entry-only,
+    # so an SL is placed only when one was actually supplied (sl_price > 0);
+    # "managed" auto positions always supply one. When no SL is requested the
+    # loop below doesn't run, sl_order_id stays 0, and the naked-position
+    # force-close backstop is skipped (a legitimately stop-less user_owned
+    # position — exempt from the invariant, the ops detector, and the
+    # reconciler backstop).
+    _sl_compulsory = position.protection_mode != "user_owned"
     sl_exc: Optional[Exception] = None
-    for _attempt in range(1, max(1, _SL_MAX_ATTEMPTS) + 1):
+    _sl_attempts = (
+        range(1, max(1, _SL_MAX_ATTEMPTS) + 1) if sl_price > 0 else range(0)
+    )
+    for _attempt in _sl_attempts:
         try:
             sl_result = await placer.place_stop_loss(
                 signal_id=signal_id,
@@ -1214,7 +1434,17 @@ async def place_signal(
         if _attempt < max(1, _SL_MAX_ATTEMPTS) and _SL_BACKOFF > 0:
             await asyncio.sleep(_SL_BACKOFF * _attempt)
 
-    if position.sl_order_id == 0 and sl_exc is not None:
+    if position.sl_order_id == 0 and sl_exc is not None and not _sl_compulsory:
+        # user_owned manual take: the user requested this SL but it didn't
+        # land. They own the exit (owner decision 2026-07-18) — do NOT
+        # force-close; leave the position OPEN and surface the miss so they
+        # can set/adjust a stop from the chart. Fall through to TP placement.
+        log.warning(
+            "place_signal: user_owned SL did not land uid={} signal_id={} "
+            "exc={} — leaving position OPEN (user owns exit), no force-close",
+            firebase_uid, signal_id, sl_exc,
+        )
+    elif position.sl_order_id == 0 and sl_exc is not None:
         # SL did not land after retries → the position is naked.  Close it.
         log.error(
             "place_signal: SL placement failed after retries — FORCE-CLOSING "

@@ -374,6 +374,33 @@ class RedisEngineFacade:
         await self._redis.client.lpush(_store.KEY_CMD_TAKE, envelope)
         return True
 
+    async def enqueue_manual_trade(
+        self, *, request_id: str, uid: str, payload: dict
+    ) -> bool:
+        """LPUSH a manual-trade-builder envelope for the ManualTakeConsumer.
+
+        Shares the take command queue + result key (the consumer routes on the
+        ``kind`` field); the caller polls :meth:`read_manual_take_result` with
+        the same ``request_id``. Returns False when Redis is down so the route
+        can 503 rather than pretend the trade was accepted.
+        """
+        if not self._redis.available:
+            log.warning(
+                "redis_engine.enqueue_manual_trade: Redis unavailable — "
+                "refusing trade uid={} ref_id={}",
+                uid, payload.get("ref_id"),
+            )
+            return False
+        envelope = json.dumps({
+            "kind": "manual_trade",
+            "request_id": request_id,
+            "uid": uid,
+            "payload": payload,
+            "ts": time.time(),
+        })
+        await self._redis.client.lpush(_store.KEY_CMD_TAKE, envelope)
+        return True
+
     async def read_manual_take_result(self, request_id: str) -> Optional[dict]:
         """Return the engine's take outcome for ``request_id``, or ``None``
         while it hasn't been written yet (the route polls this)."""

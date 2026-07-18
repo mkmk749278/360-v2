@@ -2186,6 +2186,16 @@ def build_app(
         identity_dep=user_claims,
     )
 
+    # ---- Manual trade builder (server-side, chart-set entry/SL/TP) ----
+    # POST /api/manual-trade/take — dark behind MANUAL_TRADE_BUILDER_ENABLED.
+    from . import manual_trade_route as _manual_trade_route
+    _manual_trade_route.register(
+        app,
+        engine=engine,
+        auth=auth,
+        identity_dep=user_claims,
+    )
+
     # ---- Auto-trade status (server-side execution stack, PR-14 follow-up 3/3) ----
     # Lightweight GET endpoint that surfaces the user's auto-trade
     # enablement state.  Powers the Lumin app's "your auto-trade is

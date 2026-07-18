@@ -210,6 +210,18 @@ class Position:
     entry_expires_at: Optional[datetime] = None
     close_reason: str = ""
     realized_pnl_total: float = 0.0
+    # Protection responsibility for this position (manual trade builder,
+    # 2026-07-18, docs/MANUAL_TRADE_BUILDER_DESIGN.md):
+    #   * "managed"    — auto-dispatched from one of our signals. The engine
+    #                    owns the exit: SL is compulsory, the naked-position
+    #                    invariant + backstop + ops Tier-0 detector all apply.
+    #   * "user_owned" — a user-directed manual take (signal or alert). SL is
+    #                    OPTIONAL (owner decision 2026-07-18); the invariant,
+    #                    the reconciler backstop, and the naked-position
+    #                    detector EXEMPT it. The user owns the exit.
+    # Default "managed" so any un-stamped / pre-upgrade row fails toward MORE
+    # protection, never less.
+    protection_mode: str = "managed"
 
 
 # ---------------------------------------------------------------------------
@@ -800,6 +812,7 @@ def _to_firestore_dict(position: Position) -> dict:
         "entry_expires_at": position.entry_expires_at,
         "close_reason": position.close_reason,
         "realized_pnl_total": position.realized_pnl_total,
+        "protection_mode": position.protection_mode,
     }
 
 
@@ -857,4 +870,7 @@ def _from_firestore_dict(data: dict) -> Position:
         entry_expires_at=data.get("entry_expires_at"),
         close_reason=str(data.get("close_reason", "")),
         realized_pnl_total=float(data.get("realized_pnl_total", 0.0)),
+        # Default "managed": an un-stamped / pre-manual-builder row is an auto
+        # position and must keep full protection (fail toward MORE safety).
+        protection_mode=str(data.get("protection_mode", "managed")),
     )
