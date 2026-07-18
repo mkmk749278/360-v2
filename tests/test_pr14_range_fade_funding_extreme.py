@@ -141,8 +141,8 @@ class TestFundingExtremeInStructuralProtection:
             "by build_risk_plan's generic R-multiples (PR-14 audit finding)."
         )
 
-    def test_structural_set_size_is_12(self):
-        """STRUCTURAL_SLTP_PROTECTED_SETUPS must contain exactly 12 paths.
+    def test_structural_set_size_is_13(self):
+        """STRUCTURAL_SLTP_PROTECTED_SETUPS must contain exactly 13 paths.
 
         PR-14 added FUNDING_EXTREME_SIGNAL (10th).
         PR #520 added LIQUIDITY_SWEEP_REVERSAL (11th): sweep-low/high SL is
@@ -152,9 +152,12 @@ class TestFundingExtremeInStructuralProtection:
         TP1 are exactly the geometry the shadow ledger measured at +0.67R over
         n=550 — recomputing them downstream would invalidate the evidence the
         path went live on.
+        2026-07-18 added RANGE_FADE (13th): same argument — its edge+1·ATR
+        stop / range-mid TP1 are the geometry its shadow control arm measures,
+        and the context-edge gate's verdicts are only valid for that geometry.
         """
-        assert len(STRUCTURAL_SLTP_PROTECTED_SETUPS) == 12, (
-            f"Expected 12 protected setup classes, got {len(STRUCTURAL_SLTP_PROTECTED_SETUPS)}: "
+        assert len(STRUCTURAL_SLTP_PROTECTED_SETUPS) == 13, (
+            f"Expected 13 protected setup classes, got {len(STRUCTURAL_SLTP_PROTECTED_SETUPS)}: "
             f"{STRUCTURAL_SLTP_PROTECTED_SETUPS}. "
             "If a new path was added, update this assertion and add a rationale."
         )

@@ -48,6 +48,7 @@ from config import (
     MOVER_TP_BREAKOUT_EXT_ATR,
     MOVER_TP_BREAKOUT_VOL_MULT,
     MEAN_REVERT_LIVE,
+    RANGE_FADE_LIVE,
 )
 from src import fail_open
 from src.channels.base import BaseChannel, Signal, build_channel_signal
@@ -63,7 +64,9 @@ from src.mtf import mtf_gate_scalp_standard
 from src.shadow_strategies import (
     _ATR_PERIOD as _MEANREV_ATR_PERIOD,
     _MEANREV_LOOKBACK,
+    _RANGE_LOOKBACK,
     evaluate_mean_revert as shadow_mean_revert,
+    evaluate_range_fade as shadow_range_fade,
 )
 from src.smc import Direction
 from src.vwap import compute_vwap
@@ -830,6 +833,11 @@ class ScalpChannel(BaseChannel):
         # (incremented pre-gate, so it moves whether live or shadowed).
         # Compared against the shadow unit's stamp rate by the liveness probe.
         self._mean_revert_detections: int = 0
+        # RANGE_FADE liveness: same contract as _mean_revert_detections —
+        # incremented pre-gate (moves whether live, shadowed, or
+        # context-blocked downstream), compared against the shadow unit's
+        # stamp rate by the range_fade_path liveness probe.
+        self._range_fade_detections: int = 0
 
     def _reset_generation_telemetry(self) -> None:
         self._generation_telemetry = {
@@ -1165,6 +1173,7 @@ class ScalpChannel(BaseChannel):
             ("_evaluate_failed_auction_reclaim", self._evaluate_failed_auction_reclaim),
             ("_evaluate_ma_cross_trend_shift", self._evaluate_ma_cross_trend_shift),
             ("_evaluate_mean_revert", self._evaluate_mean_revert),
+            ("_evaluate_range_fade", self._evaluate_range_fade),
         ):
             if allowed_evaluators is not None and evaluator_name not in allowed_evaluators:
                 continue  # restricted scan context — skip evaluators not in allowlist
@@ -6695,6 +6704,156 @@ class ScalpChannel(BaseChannel):
         sig.entry_trigger = "mean_revert_z"
         log.info(
             "MEAN_REVERT_FIRED: symbol={} dir={} close={:.6f} sl_dist_pct={:.3f} "
+            "conf={:.1f} ({})",
+            symbol, cand.side, close, sl_dist / close * 100.0,
+            sig.confidence, cand.reason,
+        )
+        return sig
+
+    # ────────────────────────────────────────────────────────────────────────
+    # RANGE_FADE — range-edge fade to mid (2026-07-18, dark + context-gated)
+    # ────────────────────────────────────────────────────────────────────────
+    def _evaluate_range_fade(
+        self,
+        symbol: str,
+        candles: Dict[str, dict],
+        indicators: Dict[str, dict],
+        smc_data: dict,
+        spread_pct: float,
+        volume_24h_usd: float,
+        regime: str = "",
+    ) -> Optional[Signal]:
+        """RANGE_FADE: fade a tested range edge back to the mid.  Range = 48
+        closed 15m bars, width ≥ 4·ATR, ≥ 2 distinct touches per edge; stop =
+        1·ATR beyond the faded edge, TP1 = the range mid, 240-min validity.
+
+        Graduated from the shadow unit SHADOW_RANGE_FADE (Autonomous Portfolio
+        Phase 3).  Strategy Lab 2026-07-18: the allocator's TOP recommendation
+        in the live context (+0.841R over n=24 in ASIA/QUIET/NORMAL), with
+        STRONG cells across the range/quiet contexts — but the gate audit
+        measures BLANKET activation net-negative (+0.20R saved per suppressed
+        candidate, n=223: NEGATIVE-cell losses outweigh STRONG-cell wins), so
+        the scanner's context-edge gate additionally restricts emission to
+        contexts whose SHADOW_RANGE_FADE cell carries a measured
+        POSITIVE/STRONG verdict.
+
+        Detection and geometry are ``shadow_strategies.evaluate_range_fade``
+        — the SAME pure function the shadow unit stamps with, so the live path
+        and its shadow control arm can never drift.  Entry/SL/TP1 are the
+        measured geometry verbatim; TP2/TP3 are R-multiple extensions past the
+        mid (default exit is TP1-full, matching the shadow forward-measure).
+        The shadow unit keeps stamping unconditionally as the ungated control.
+
+        DARK per production doctrine (default OFF); ``range_fade_live`` is the
+        ops activation switch (OFF → ``[SHADOW] RANGE_FADE_WOULD_FIRE`` log,
+        no signal).
+        """
+        tf = candles.get("15m")
+        if tf is None:
+            return self._reject("insufficient_candles")
+        closes = tf.get("close")
+        highs = tf.get("high")
+        lows = tf.get("low")
+        need = _RANGE_LOOKBACK + _MEANREV_ATR_PERIOD
+        if (
+            closes is None or highs is None or lows is None
+            or len(closes) < need or len(highs) < need or len(lows) < need
+        ):
+            return self._reject("insufficient_candles")
+
+        profile = smc_data.get("pair_profile")
+        if not self._pass_basic_filters(
+            spread_pct, volume_24h_usd, regime=regime, profile=profile
+        ):
+            return self._reject("basic_filters_failed")
+
+        cand = shadow_range_fade(highs, lows, closes)
+        if cand is None:
+            return self._reject("no_range_edge")
+        # Detection counter for the feature-liveness probe: shadow stamps
+        # flowing while this stays flat = dead live wiring.
+        self._range_fade_detections += 1
+
+        direction = Direction.LONG if cand.side == "LONG" else Direction.SHORT
+        close = float(cand.entry)
+        sl = float(cand.stop_loss)
+        tp1 = float(cand.tp1)
+        sl_dist = abs(close - sl)
+        if sl_dist <= 0 or close <= 0:
+            return self._reject("invalid_sl_geometry")
+        # By construction the mid sits on the profit side of an edge entry;
+        # guard anyway so degenerate inputs can't invert the ladder.
+        if (direction == Direction.LONG and tp1 <= close) or (
+            direction == Direction.SHORT and tp1 >= close
+        ):
+            return self._reject("invalid_sl_geometry")
+        # TP2/TP3: R-multiple extensions past the mid, toward the far edge.
+        # Exit policy is TP1-full, so these only shape a residual runner if
+        # policy ever changes.
+        if direction == Direction.LONG:
+            tp2 = tp1 + sl_dist * 0.5
+            tp3 = tp1 + sl_dist * 1.0
+        else:
+            tp2 = tp1 - sl_dist * 0.5
+            tp3 = tp1 - sl_dist * 1.0
+
+        atr_val = float(indicators.get("15m", {}).get("atr_last", 0.0) or 0.0)
+
+        # Live/ops activation switch (runtime tunable; boot default =
+        # RANGE_FADE_LIVE, which ships false — dark-first).
+        if not self._mover_path_live("range_fade_live", RANGE_FADE_LIVE):
+            log.info(
+                "[SHADOW] RANGE_FADE_WOULD_FIRE: symbol={} dir={} close={:.6f} "
+                "sl={:.6f} tp1={:.6f} sl_dist_pct={:.3f} ({})",
+                symbol, cand.side, close, sl, tp1,
+                sl_dist / close * 100.0, cand.reason,
+            )
+            return self._reject("shadow_mode")
+
+        _regime_ctx = smc_data.get("regime_context")
+        sig = build_channel_signal(
+            config=self.config,
+            symbol=symbol,
+            direction=direction,
+            close=close,
+            sl=sl,
+            tp1=tp1,
+            tp2=tp2,
+            tp3=tp3,
+            sl_dist=sl_dist,
+            id_prefix="RNGFD",
+            atr_val=atr_val,
+            setup_class="RANGE_FADE",
+            regime=regime,
+            atr_percentile=_regime_ctx.atr_percentile if _regime_ctx else 50.0,
+            pair_tier=profile.tier if profile else "MIDCAP",
+        )
+        if sig is None:
+            return self._reject("build_signal_failed")
+
+        # The measured geometry IS the edge (STRUCTURAL_SLTP_PROTECTED) —
+        # re-stamp it verbatim over anything generic construction adjusted.
+        sig.stop_loss = round(sl, 8)
+        sig.tp1 = round(tp1, 8)
+        sig.tp2 = round(tp2, 8)
+        sig.tp3 = round(tp3, 8)
+        sig.original_tp1 = sig.tp1
+        sig.original_tp2 = sig.tp2
+        sig.original_tp3 = sig.tp3
+        sig.original_sl_distance = sl_dist
+        # Structural anchor for execution_quality_check's RANGE_FADE branch:
+        # the fade is judged against the mid it targets, not the generic
+        # 5m-EMA trend anchor (which is structurally opposed for a fade).
+        sig.range_fade_mid = sig.tp1
+        sig.trailing_atr_mult_effective = self.config.trailing_atr_mult
+        sig.trailing_stage = 0
+        sig.partial_close_pct = 0.0
+        # The shadow unit measured 240-minute validity; sentinel-0 would
+        # collapse it to the 15-minute channel default at dispatch.
+        sig.valid_for_minutes = 240
+        sig.entry_trigger = "range_fade_edge"
+        log.info(
+            "RANGE_FADE_FIRED: symbol={} dir={} close={:.6f} sl_dist_pct={:.3f} "
             "conf={:.1f} ({})",
             symbol, cand.side, close, sl_dist / close * 100.0,
             sig.confidence, cand.reason,

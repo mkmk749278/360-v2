@@ -120,6 +120,11 @@ AFFINITY: Dict[str, StrategyAffinity] = {
     # function, same affinity); the shadow entry below stays — distinct names,
     # the shadow arm remains the ungated control in the edge matrix.
     "MEAN_REVERT": StrategyAffinity(_RANGE_PHASES | {PHASE_QUIET}, _ANY),
+    # 2026-07-18: live graduation of SHADOW_RANGE_FADE (same detection
+    # function, same affinity); the shadow entry below stays — distinct names,
+    # the shadow arm remains the ungated control in the edge matrix AND the
+    # verdict source for the live path's context-edge gate.
+    "RANGE_FADE": StrategyAffinity(_RANGE_PHASES | {PHASE_QUIET}, _ANY),
     "SR_FLIP_RETEST": StrategyAffinity(_TREND_PHASES | {PHASE_RANGE}, _ANY),
     "RSI_MACD_DIVERGENCE": StrategyAffinity(_RANGE_PHASES, _ANY),
     # -- event-driven: trade positioning/flow, not the chart phase --

@@ -4,6 +4,102 @@
 
 ---
 
+## 🟢 SESSION 67 2026-07-18 — RANGE_FADE goes in as the 19th evaluator: DARK + context-gated on the edge matrix, activation is an ops toggle (branch `claude/path-analysis-deployment-uy30js`, 360-v2 only)
+
+**Owner ask (2 PDFs: Profit tab + Strategy Lab, 2026-07-18):** analyse the data,
+build the next Path, make it live, give control in ops.
+
+### Data read (the evidence the path ships on)
+
+- **Profit 7d window (59 closed):** engine real +20.62% vs TP1-full sim +22.40%
+  — exits leak a modest +1.78%; entries fine. VOLATILE remains the loss hole
+  (-14.97%, 0% win, n=4). RANGING give-back is the biggest pile (+132.74%
+  total, 9% capture) — the tape is range-heavy and the trend book milks it
+  poorly. Best cohort unchanged: 75-80 × MOVER_TREND_PULLBACK × TRENDING_UP
+  (+16.30%, 5/5).
+- **Strategy Lab:** the allocator's TOP recommendation in the live context is
+  **SHADOW_RANGE_FADE at the 0.35 weight cap** (+0.841R n=24
+  ASIA/QUIET/NORMAL, in design ctx). Its STRONG cells: OVERLAP/RANGE/NORMAL
+  +0.885R n=15 · NY/MARKDOWN/EXPANDED +0.799R n=16 · LONDON/QUIET/COMPRESSED
+  +0.650R n=28 · ASIA/MARKUP/NORMAL +0.510R n=18 · ASIA/RANGE/NORMAL +0.393R
+  n=37 · LONDON/RANGE/NORMAL +0.291R n=40. **BUT the gate audit prices
+  blanket activation NEGATIVE**: `shadow_unit:SHADOW_RANGE_FADE` EV/suppression
+  **+0.20R over n=223** (saved 157R vs missed 112.6R) — the NEGATIVE cells
+  (NY/RANGE/NORMAL -0.237 n=50, NY/QUIET/COMPRESSED -0.314 n=50, …) outweigh
+  the STRONG ones on net. Conclusion: the edge is REAL but CONTEXT-LOCAL —
+  promote per-context, not blanket. (Also noted, no action: dispatch_staleness
+  back at DROP -0.42 n=1263, 556.7R missed — owner's standing "keep measuring"
+  from S60 applies; SHADOW_MEAN_REVERT gate row now +0.84 KEEP — the live
+  MEAN_REVERT vs shadow control comparison matters next window.)
+
+### Shipped — RANGE_FADE, 19th evaluator (one PR)
+
+- **Evaluator** `_evaluate_range_fade` (scalp.py): SAME pure function as the
+  shadow unit (`shadow_strategies.evaluate_range_fade`) — zero drift; geometry
+  verbatim (stop = edge ± 1·ATR, TP1 = range mid, 240-min validity, id prefix
+  `RNGFD`); TP2/3 R-extensions; `range_fade_mid` stamped for the execution
+  gate. Excluded from young-pair AND mover-restricted sets (a listing ramp /
+  igniting mover is not a tested range).
+- **Full 13-site wiring** (the #739 silent-death checklist): SetupClass enum ·
+  SUPPORT role · STRUCTURAL_SLTP_PROTECTED · 360_SCALP channel compat ·
+  CLEAN/DIRTY_RANGE regime compat · SL cap 3.0 · min-RR = range family 0.8 ·
+  identity preservation · scanner family `mean_reversion` · regime affinity
+  RANGING/QUIET + regime-neutral set · execution_quality_check RANGE_FADE fade
+  branch (anchor = mid, max_extension 8 ATR) · display label "↔️ RANGE FADE" ·
+  agent "The Range Keeper" + snapshot path map · portfolio AFFINITY.
+- **Context-edge gate (new, the data-mandated part):** post-scoring scanner
+  gate — RANGE_FADE emits ONLY when the current `mc_context_key` cell for
+  SHADOW_RANGE_FADE (the ungated control arm) has a **STRONG** Wilson verdict
+  in the live edge matrix (env-relaxable to POSITIVE via
+  `RANGE_FADE_CONTEXT_MIN_VERDICT`; master `RANGE_FADE_CONTEXT_GATE_ENABLED`).
+  This is the allocator's own eligibility rule, consumed live for the first
+  time — Layer C finally has a consumer. Fail-CLOSED on cold/thin/NEGATIVE
+  cells and on store errors (recorded via `fail_open`). Every block is tagged:
+  funnel `gate_reject:context_edge`, suppression tracker, and a shadow-ledger
+  stamp under **`context_edge:RANGE_FADE`** — so the gate audit will price
+  THIS gate's save/miss balance on real data. Pure in-memory lookups, no I/O.
+- **DARK (production doctrine, unlike S58's testing-phase MEAN_REVERT):**
+  `RANGE_FADE_LIVE` default **false**; `range_fade_live` runtime tunable
+  (Signal gating) is the activation switch — it renders automatically on the
+  ops Control page tunables card (applied ≤5s, no redeploy). OFF = shadow-only
+  `[SHADOW] RANGE_FADE_WOULD_FIRE` logging; the shadow unit keeps stamping as
+  the control arm either way.
+- **Liveness:** `range_fade_path` (detections vs shadow stamps, ~6h) +
+  `range_fade_emission` (backlog probe; a context-block counts as path-alive —
+  a healthy gate can legitimately block for hours, monotonic counters
+  `_range_fade_emitted_total` / `_range_fade_context_blocked_total`).
+- **Tests:** new `tests/test_range_fade_evaluator.py` (28 — shadow parity,
+  dark default, tunable contract, context-gate truth table, counter hooks,
+  13-site wiring pins); count pins 18→19 / 12→13 updated in 5 suites. Full
+  suite **6829 passed**, ruff clean, mypy 105 = baseline (verified vs HEAD).
+
+### Activation runbook (owner)
+
+1. Merge the PR (new evaluator path = owner-sign-off item; it ships DARK so
+   the merge itself changes no live output).
+2. Let the deploy settle, then flip **Control → Engine tunables → Signal
+   gating → "RANGE_FADE live (context-gated)"** ON at ops.luminapp.org.
+3. Watch: `RANGE_FADE_FIRED` / `CONTEXT_EDGE suppressed` log lines, the
+   Strategy Lab matrix growing a `RANGE_FADE` (emitted) row next to
+   `SHADOW_RANGE_FADE` (control), and the `context_edge:RANGE_FADE` row in
+   the gate audit. First emissions should cluster in ASIA/OVERLAP range/quiet
+   sessions — the STRONG cells.
+4. If live diverges from shadow: flip the tunable OFF (instant, no deploy).
+
+### NEXT
+
+1. Owner: merge + activate per runbook above.
+2. After a real window: compare RANGE_FADE (emitted) vs SHADOW_RANGE_FADE
+   (control) rows + the `context_edge:RANGE_FADE` gate-audit verdict; if the
+   gate reads DROP (blocking winners), relax `RANGE_FADE_CONTEXT_MIN_VERDICT`
+   to "positive" — dark-first rules apply to that relaxation.
+3. Unchanged owner queue from S64-S66: merge #746/#130 pair; re-enable
+   affected subscribers; MEAN_REVERT #739 step-2 data read; paper-freeze VPS
+   runbook; dispatch_log retention; ops-UI per-user enable button;
+   dispatch_staleness re-read (still DROP this window).
+
+---
+
 ## 🟢 SESSION 66 2026-07-18 — #745 verified CORRECT against the Binance wire; "auto trade not happening to anyone" root-caused to observability, fan-out blackout now pages (branch `claude/auto-trade-not-working-lu5ixz`, 360-v2 + lumin-app)
 
 **Owner ask (6 screenshots):** is the last auto-trade PR (#745, merged 11:38 IST)
