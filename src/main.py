@@ -964,6 +964,43 @@ class CryptoSignalEngine:
             setup_class=getattr(signal, "setup_class", None),
         )
 
+    async def build_manual_trade_for_user(
+        self, firebase_uid: str, payload: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Manual trade builder — place ONE user-directed trade the user built
+        on the chart (entry_type + slid entry + optional SL/TP) on their
+        server-connected key.
+
+        Hands the geometry to ``signal_dispatch.dispatch_manual_trade``, which
+        runs the same sizing / tripwire / place_signal safety-gate / dispatch_log
+        path as auto-trade, with ``protection_mode="user_owned"`` (SL optional).
+        Called directly in single-process mode; via the ManualTakeConsumer
+        (Redis queue) in isolated mode. Returns the result dict the API relays.
+        """
+        from config import MANUAL_TRADE_BUILDER_ENABLED as _enabled
+        if not _enabled:
+            return {
+                "outcome": "rejected",
+                "reject_class": "ManualTradeBuilderDisabled",
+                "reject_detail": (
+                    "The manual trade builder is disabled on this engine "
+                    "(MANUAL_TRADE_BUILDER_ENABLED=false)."
+                ),
+                "ref_id": payload.get("ref_id"),
+            }
+        from src.execution import signal_dispatch as _sd
+        return await _sd.dispatch_manual_trade(
+            uid=firebase_uid,
+            ref_id=str(payload.get("ref_id") or ""),
+            symbol=str(payload.get("symbol") or ""),
+            direction=str(payload.get("direction") or ""),
+            entry_type=str(payload.get("entry_type") or "market"),
+            entry_price=float(payload.get("entry_price") or 0.0),
+            sl_price=float(payload.get("sl_price") or 0.0),
+            tp_prices=[float(p) for p in (payload.get("tp_prices") or [])],
+            valid_for_minutes=int(payload.get("valid_for_minutes") or 0),
+        )
+
     def set_auto_execution_mode(self, new_mode: str) -> Tuple[bool, str]:
         """Switch auto-execution mode at runtime.
 
