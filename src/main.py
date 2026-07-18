@@ -977,8 +977,8 @@ class CryptoSignalEngine:
         Called directly in single-process mode; via the ManualTakeConsumer
         (Redis queue) in isolated mode. Returns the result dict the API relays.
         """
-        from config import MANUAL_TRADE_BUILDER_ENABLED as _enabled
-        if not _enabled:
+        from src import runtime_tunables as _rt
+        if not bool(_rt.get("manual_trade_builder_enabled")):
             return {
                 "outcome": "rejected",
                 "reject_class": "ManualTradeBuilderDisabled",
