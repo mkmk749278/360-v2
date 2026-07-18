@@ -1980,6 +1980,27 @@ class CryptoSignalEngine:
             fn=_tuned_variants_health,
             min_streak=6,
         ))
+
+        # Auto-dispatch fan-out (2026-07-18, "auto trade not happening to
+        # anyone"): every per-user gate skip in signal_dispatch is silent by
+        # design, so a fleet-wide skip blackout (tier lapse for all, mode
+        # resolution breakage) — or an empty keyed-user roster (keystore
+        # offline) — produced zero orders AND zero telemetry.  The pure
+        # predicate lives next to the counters it reads
+        # (signal_dispatch.auto_dispatch_health_check); gap is measured in
+        # fan-outs, not cycles, so sparse signals never page and a blackout
+        # can't hide between cycles.  min_streak=3: the gap condition itself
+        # already encodes "sustained".
+        from src.execution import signal_dispatch as _sd_liveness
+        _auto_dispatch_state: Dict[str, Optional[float]] = {}
+
+        fl.add_predicate(PredicateProbe(
+            name="auto_dispatch",
+            fn=lambda: _sd_liveness.auto_dispatch_health_check(
+                _auto_dispatch_state
+            ),
+            min_streak=3,
+        ))
         return fl
 
     def _build_global_market_context(self):

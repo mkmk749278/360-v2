@@ -4,6 +4,105 @@
 
 ---
 
+## 🟢 SESSION 66 2026-07-18 — #745 verified CORRECT against the Binance wire; "auto trade not happening to anyone" root-caused to observability, fan-out blackout now pages (branch `claude/auto-trade-not-working-lu5ixz`, 360-v2 + lumin-app)
+
+**Owner ask (6 screenshots):** is the last auto-trade PR (#745, merged 11:38 IST)
+correct? Auto-trade "not happening to anyone" — own previously-tested account
+all-green, NO TRADES YET; two different take-sheet errors on WDCUSDT ("Futures
+agreement needed" at 11:04, "not on the tripwire allowlist (allowlist size: 76)"
+at 11:41); check Binance documentation too.
+
+### Verdict on #745: CORRECT, verified against real Binance data
+
+- **Wire-verified** (mainnet geo-blocks this container; futures **testnet**
+  served it): `contractType == "TRADIFI_PERPETUAL"` is Binance's exact enum
+  (sic), 36 TradFi perps listed (AMZN/NVDA/SPY/QQQ/MSTR/COIN/COPPER/…), and
+  `-4411` = "Please sign TradFi-Perps agreement contract" with its own sign
+  endpoint `POST /fapi/v1/stock/contract`. Structural filter > name list is
+  right: the router dispatch log shows **IBMUSDT, TSMUSDT and SOXSUSDT** (a
+  leveraged ETF) also got signals on 07-17 — none were on the static blacklist.
+- **The 11:41 "tripwire allowlist (size 76)" rejection IS #745 working**:
+  deploy landed ~11:39 IST, the 2h-old WDCUSDT signal outlived the universe
+  update, allowlist auto-tracked 92→76 (16 TradFi perps removed). The app's
+  "92 symbols enabled" screenshot was from 11:04, pre-deploy. Not a bug.
+- Fail-safe direction confirmed: empty exchangeInfo cache → `is_tradfi_perp`
+  False with the static blacklist as floor; boot race closed by
+  `_ensure_symbol_metadata`; exits unaffected (tripwire fires pre-entry only).
+
+### "Not happening to anyone" — what the remote data actually shows
+
+- Telegram delivery + fan-out invocation **work** (router dispatch_log rows
+  through 07-18; fan-out runs post-delivery). Manual take at 11:04 went all
+  the way to **Binance** (-4411 back) → keystore, signing service, KMS, kill
+  switch (green), global breaker (not tripped) all live. The execution stack
+  is healthy end-to-end.
+- The signal mix since ~07-16 was contaminated with stock perps (WDC, IBM,
+  TSM, SOXS) — every auto dispatch on those -4411'd for every user, and
+  pre-#740 those storms breaker-disabled real subscribers. #745 removes the
+  contamination class at the source.
+- **The structural gap this session closed:** every per-user dispatch gate
+  (mode / tier / auto-pause / path+regime prefs) skips silently with no
+  counter, no honest summary, and no probe — and an empty keyed-user roster
+  (keystore soft-fails to `[]`) is indistinguishable from "no customers". A
+  fleet-wide silent-skip blackout was invisible by construction; the old
+  per-signal log line even reported skips as "rejected".
+
+### Shipped (360-v2, this branch)
+
+- `signal_dispatch`: per-fan-out outcome tally → honest summary log
+  (`fan-out summary … placed= rejected= skipped= outcomes={…}`), monotonic
+  `_FANOUT_TOTALS` (auto path only; manual takes excluded), empty-roster
+  fan-outs counted separately; `dispatch_totals()` accessor.
+- `auto_dispatch_health_check` — **pure** predicate (ops-detector style):
+  pages when ≥5 fan-outs reach keyed users with ZERO order attempts fleet-wide
+  (silent-skip blackout, detail names the top skip reasons), or ≥5 consecutive
+  fan-outs see an EMPTY roster (keystore outage). Gap measured in fan-outs,
+  not cycles — sparse signals can't page, blackouts can't hide. Wired as
+  `auto_dispatch` PredicateProbe in `main._build_feature_liveness`
+  (min_streak=3; env knob `AUTO_DISPATCH_GAP_THRESHOLD`).
+- Tests: `tests/execution/test_dispatch_fanout_telemetry.py` (12 — totals,
+  skip-vs-attempt split, manual exclusion, predicate baseline/violation/
+  restart/interleave). Execution suite 461+12 green, feature-liveness 22
+  green, ruff clean. Telemetry-only: zero dispatch-decision changes, zero
+  new Firestore reads/writes (dict increments + one log line).
+
+### Shipped (lumin-app, this branch)
+
+- Cherry-picked S65's `-4411` copy rewrite (was stranded unmerged on
+  `claude/auto-trade-binance-issue-cgtbdh`): "Not a crypto pair — {symbol}
+  is a Binance stock (TradFi) perpetual… your account is fine", transient.
+- **New `SymbolNotAllowed` mapping** — the 11:41 screenshot showed the raw
+  engine string reaching the take sheet ("…tripwire allowlist (allowlist
+  size: 76)"): now "Pair not tradeable through Lumin… list was updated after
+  this signal appeared… No action needed", transient. `sanitizeEngineDetail`
+  gained `tripwire|allowlist` vocabulary so no other path can leak it.
+- Tests added to `dispatch_event_test.dart` (mapping + sanitizer backstop);
+  Flutter suite runs in CI (no Flutter in-container).
+
+### Owner notes (from the screenshots, not code)
+
+- Own account: Futures wallet ≈ **$3.35 (₹289.52)** with **$5 notional** —
+  razor-thin against Binance min-notionals (5 USDT for most alts AFTER
+  lot-size floor-rounding; ETH 20, BTC ~50-100). Recommend ≥$25 notional +
+  a funded wallet before judging the next crypto dispatch; -4164/-2019
+  rejects WILL now at least show in Recent Activity + the fan-out summary.
+- After the next paid **crypto** signal: `docker logs 360scalp-v2-engine |
+  grep "fan-out summary"` answers exactly who placed/rejected/skipped and why.
+
+### NEXT
+
+1. Owner: merge this PR pair (360-v2 #746 + lumin-app #130). The S65
+   lumin-app `-4411` copy fix merged separately as lumin-app #129
+   (owner, 06:43Z); #130 was rebased on top so it carries only the
+   SymbolNotAllowed/sanitizer increment.
+2. Watch the new `auto_dispatch` probe after deploy: a page within hours
+   means the blackout is real and the detail line names the gate.
+3. Unchanged owner queue from S64/S65: re-enable affected subscribers via
+   the new endpoints; MEAN_REVERT #739 step-2 data read; paper-freeze VPS
+   runbook; dispatch_log retention; ops-UI per-user enable button.
+
+---
+
 ## 🟠 SESSION 65 2026-07-18 — TradFi-Perps (stock perps) leaked into the universe → paid user's auto-trade rejected -4411 (branch `claude/auto-trade-binance-issue-cgtbdh`, 360-v2 + lumin-app)
 
 **Owner report (5 screenshots):** own Binance account, auto-trade active/all-green
