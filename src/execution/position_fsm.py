@@ -980,6 +980,7 @@ async def place_signal(
     pretp_fraction: float = 0.5,  # B17 engine default — must be in [0.3, 1.0]
     invalidation_mode: str = "standard",  # B17: "loose" / "standard" / "tight"
     management_mode: str = "full",  # "full" | "entry" (per-symbol, 2026-06-20)
+    protection_mode: str = "managed",  # "managed" | "user_owned" (2026-07-18)
     entry_regime: str = "",        # 5m Hurst-gated regime at entry
     entry_regime_15m: str = "",    # 15m stateless regime at entry
     atr_percentile_at_entry: float = 50.0,
@@ -1144,6 +1145,7 @@ async def place_signal(
         entry_regime_15m=entry_regime_15m,
         atr_percentile_at_entry=atr_percentile_at_entry,
         atr_value_at_entry=atr_value_at_entry,
+        protection_mode=protection_mode,
     )
     _position_state.put_position(position)
 
@@ -1164,8 +1166,20 @@ async def place_signal(
     from config import SL_PLACEMENT_MAX_ATTEMPTS as _SL_MAX_ATTEMPTS
     from config import SL_RETRY_BACKOFF_SEC as _SL_BACKOFF
 
+    # Manual trade builder (2026-07-18): protection_mode governs whether a
+    # stop is compulsory here. A "user_owned" manual take may be entry-only,
+    # so an SL is placed only when one was actually supplied (sl_price > 0);
+    # "managed" auto positions always supply one. When no SL is requested the
+    # loop below doesn't run, sl_order_id stays 0, and the naked-position
+    # force-close backstop is skipped (a legitimately stop-less user_owned
+    # position — exempt from the invariant, the ops detector, and the
+    # reconciler backstop).
+    _sl_compulsory = position.protection_mode != "user_owned"
     sl_exc: Optional[Exception] = None
-    for _attempt in range(1, max(1, _SL_MAX_ATTEMPTS) + 1):
+    _sl_attempts = (
+        range(1, max(1, _SL_MAX_ATTEMPTS) + 1) if sl_price > 0 else range(0)
+    )
+    for _attempt in _sl_attempts:
         try:
             sl_result = await placer.place_stop_loss(
                 signal_id=signal_id,
@@ -1214,7 +1228,17 @@ async def place_signal(
         if _attempt < max(1, _SL_MAX_ATTEMPTS) and _SL_BACKOFF > 0:
             await asyncio.sleep(_SL_BACKOFF * _attempt)
 
-    if position.sl_order_id == 0 and sl_exc is not None:
+    if position.sl_order_id == 0 and sl_exc is not None and not _sl_compulsory:
+        # user_owned manual take: the user requested this SL but it didn't
+        # land. They own the exit (owner decision 2026-07-18) — do NOT
+        # force-close; leave the position OPEN and surface the miss so they
+        # can set/adjust a stop from the chart. Fall through to TP placement.
+        log.warning(
+            "place_signal: user_owned SL did not land uid={} signal_id={} "
+            "exc={} — leaving position OPEN (user owns exit), no force-close",
+            firebase_uid, signal_id, sl_exc,
+        )
+    elif position.sl_order_id == 0 and sl_exc is not None:
         # SL did not land after retries → the position is naked.  Close it.
         log.error(
             "place_signal: SL placement failed after retries — FORCE-CLOSING "

@@ -3152,6 +3152,24 @@ AUTO_TRADE_MANUAL_TAKE_ENABLED: bool = _safe_bool(
     "AUTO_TRADE_MANUAL_TAKE_ENABLED", "false"
 )
 
+#: Server-side manual trade builder (owner-approved 2026-07-18,
+#: docs/MANUAL_TRADE_BUILDER_DESIGN.md).  When true, the
+#: ``POST /api/manual-trade/take`` endpoint lets an assist-or-higher user
+#: place a **user-directed** trade on their server-connected key with
+#: geometry they set on the chart — entry at market or a slid LIMIT price,
+#: and OPTIONAL SL / TP (owner rule: compulsory SL applies only to unattended
+#: auto-dispatch of our signals; manual takes may be entry-only).  Positions
+#: are stamped ``protection_mode="user_owned"`` so the naked-position
+#: invariant, the ops Tier-0 detector, and the reconciler exempt them.  Sizes
+#: at the user's fixed notional; gates at ``can_assist``.  This is the
+#: server-side replacement for the client-side (device-key, IP-locked) alert
+#: take that is unusable on mobile networks.  Dark-flag-first: ships
+#: **default-OFF**; the owner activates from the Ops control plane (which
+#: writes this flag) after shadow + sign-off.
+MANUAL_TRADE_BUILDER_ENABLED: bool = _safe_bool(
+    "MANUAL_TRADE_BUILDER_ENABLED", "false"
+)
+
 #: Self-serve breaker recovery cooldown (owner-approved 2026-07-18).  When
 #: the per-user circuit breaker (B18 #5) disables a user, the app's paused
 #: card offers "Re-enable auto-trade" → ``POST /api/auto-trade/
