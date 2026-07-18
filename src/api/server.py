@@ -2210,6 +2210,19 @@ def build_app(
         get_engine=lambda: engine,
     )
 
+    # ---- Web-push topic proxy (web/PWA channel, 2026-07-18) ----
+    # POST /api/push/{subscribe,unsubscribe} — web FCM cannot subscribe to
+    # topics client-side, so the browser hands its registration token to
+    # the engine for the one Admin-SDK topic call.  Stateless (no token
+    # registry — doctrine preserved), allow-listed to alerts/signals,
+    # per-identity rate-limited.  The send path is untouched.
+    from . import push_topic_routes as _push_topic_routes
+    _push_topic_routes.register(
+        app,
+        auth=auth,
+        identity_dep=user_claims,
+    )
+
     # ``GET /api/region`` (Play Store A6 / E2, 2026-05-20) — client
     # region detection for the Play Store launch.  Public endpoint
     # (no auth) so the client can call it before sign-in.  Reads
