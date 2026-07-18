@@ -276,6 +276,52 @@ class OrderPlacer:
             signal_id=signal_id,
         )
 
+    async def place_limit_entry(
+        self,
+        *,
+        signal_id: str,
+        symbol: str,
+        direction: str,  # "LONG" | "SHORT"
+        quantity: float,
+        price: float,
+    ) -> OrderPlacementResult:
+        """GTC LIMIT order to enter at a chosen ``price`` (rests on the book).
+
+        The manual trade builder's "slide the entry line" gesture and the
+        FSM_LIMIT_ENTRY zone entry both use this: the order rests until price
+        trades through ``price``, then fills.  Fill is asynchronous — the
+        position sits in ``PENDING_ENTRY`` until the User Data Stream reports
+        the entry fill (``position_worker`` → ``_apply_entry_fill`` places
+        SL/TP then); an unfilled rest is cancelled on TTL by the reconciler.
+
+        Same ``newClientOrderId = lumin_<signal_id>_entry`` as the MARKET
+        entry so the fill handler + reconciler identify it by the ``entry``
+        phase.  ``positionSide=BOTH`` (one-way mode).
+
+        Immediately-marketable case (price already through the market — e.g.
+        a BUY priced at/above the ask): GTC (not GTX/postOnly) means Binance
+        fills it as a taker right away rather than rejecting.  That's the
+        honest "dispatch price already in zone" outcome; the same entry-fill
+        event fires, just sooner.  Price is rounded to the symbol's tickSize
+        so Binance doesn't reject with -4014.
+        """
+        from src.execution import symbol_filters as _sf
+        rounded_price = _sf.round_price(symbol, price)
+        params = {
+            "symbol": symbol,
+            "side": _entry_side(direction),
+            "type": "LIMIT",
+            "timeInForce": "GTC",
+            "quantity": _qty_str(quantity),
+            "price": _price_str(rounded_price),
+            "newClientOrderId": _position_state.coid_entry(signal_id),
+        }
+        return await self._submit_order(
+            params=params,
+            phase="entry",
+            signal_id=signal_id,
+        )
+
     async def place_stop_loss(
         self,
         *,
