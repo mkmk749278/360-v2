@@ -307,7 +307,7 @@ class PositionFSM:
         (PENDING_ENTRY) deferred SL/TP to fill time — you can't place
         reduce-only protection before there's a filled position — so on the
         transition to OPEN we lay them now via
-        :meth:`_place_protection_on_limit_fill`.
+        :meth:`place_protection_on_limit_fill`.
         """
         was_pending_entry = (
             position.state == _position_state.PositionState.PENDING_ENTRY
@@ -320,9 +320,9 @@ class PositionFSM:
             from src.execution import pretp_dispatcher as _pd
             _pd.spawn_track(position.symbol)
             if was_pending_entry:
-                await self._place_protection_on_limit_fill(position)
+                await self.place_protection_on_limit_fill(position)
 
-    async def _place_protection_on_limit_fill(
+    async def place_protection_on_limit_fill(
         self,
         position: _position_state.Position,
     ) -> None:

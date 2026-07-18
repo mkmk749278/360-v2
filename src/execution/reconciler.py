@@ -208,6 +208,13 @@ class Reconciler:
         for fsm_position in positions:
             symbol = fsm_position.symbol
             actual_amt = binance_positions.get(symbol, 0.0)
+            if fsm_position.state == _position_state.PositionState.PENDING_ENTRY:
+                # A resting LIMIT entry is flat on Binance by definition — the
+                # normal flat-diff would misread that as a manual close. Handle
+                # it separately: TTL-cancel an expired unfilled rest, else leave
+                # it resting.  (Never falls through to _diff_and_heal.)
+                await self._reconcile_pending_entry(fsm_position, actual_amt)
+                continue
             if abs(actual_amt) < 1e-9:
                 # Flat on Binance → manual/external close.  Heal FSM state.
                 self._diff_and_heal(fsm_position, binance_positions)
@@ -262,6 +269,96 @@ class Reconciler:
             from src.execution import pretp_dispatcher as _pd
             _pd.spawn_untrack(symbol)
 
+    async def _reconcile_pending_entry(
+        self,
+        fsm_position: _position_state.Position,
+        actual_amt: float,
+    ) -> None:
+        """Reconcile a resting LIMIT entry (PENDING_ENTRY).
+
+        Two real states diverge from "still resting":
+
+        * **Filled but FSM not advanced** (Binance shows a position while the
+          FSM is still PENDING_ENTRY — a missed ORDER_TRADE_UPDATE on a WS
+          gap): the position is OPEN on Binance with NO SL/TP yet. Heal by
+          advancing to OPEN and laying protection via the same path the fill
+          event would have used (``place_protection_on_limit_fill``), so a
+          managed position is never left naked.
+        * **Unfilled and past TTL** (flat on Binance, ``entry_expires_at``
+          elapsed): cancel the resting LIMIT and mark ``CANCELLED_NO_FILL``
+          (mirrors the signal book's EXPIRED_NO_FILL). No TTL → GTC, rest on.
+
+        Never raises; a cancel/heal failure is logged and retried next cycle.
+        """
+        # Filled-but-unadvanced → heal to OPEN + place protection.
+        if abs(actual_amt) >= 1e-9:
+            log.warning(
+                "reconciler: PENDING_ENTRY filled on Binance but FSM not "
+                "advanced (missed fill event) uid={} signal_id={} amt={} — "
+                "healing to OPEN + placing protection",
+                fsm_position.firebase_uid, fsm_position.signal_id, actual_amt,
+            )
+            fsm_position.filled_qty = abs(actual_amt)
+            if fsm_position.entry_price_filled <= 0:
+                fsm_position.entry_price_filled = fsm_position.entry_price_target
+            fsm_position.state = _position_state.PositionState.OPEN
+            fsm_position.last_event_at = datetime.now(timezone.utc)
+            _position_state.put_position(fsm_position)
+            from src.execution import position_fsm as _pfsm
+            from src.execution import pretp_dispatcher as _pd
+            _pd.spawn_track(fsm_position.symbol)
+            try:
+                healer = _pfsm.PositionFSM(
+                    fsm_position.firebase_uid,
+                    order_placer_factory=self._order_placer_factory,
+                )
+                await healer.place_protection_on_limit_fill(fsm_position)
+            except Exception as exc:
+                log.error(
+                    "reconciler: PENDING_ENTRY heal protection failed uid={} "
+                    "signal_id={} exc={} — retry next cycle",
+                    fsm_position.firebase_uid, fsm_position.signal_id, exc,
+                )
+            fsm_position.last_event_at = datetime.now(timezone.utc)
+            _position_state.put_position(fsm_position)
+            return
+
+        # Unfilled — TTL check.
+        expires = getattr(fsm_position, "entry_expires_at", None)
+        if expires is None:
+            return  # GTC rest, no expiry
+        now = datetime.now(timezone.utc)
+        if expires.tzinfo is None:
+            expires = expires.replace(tzinfo=timezone.utc)
+        if now < expires:
+            return  # still inside the fill window — leave it resting
+
+        # TTL elapsed → cancel the resting LIMIT, mark CANCELLED_NO_FILL.
+        try:
+            placer = self._order_placer_factory(fsm_position.firebase_uid)
+            await placer.cancel_order(
+                symbol=fsm_position.symbol,
+                order_id=int(fsm_position.entry_order_id or 0),
+            )
+        except Exception as exc:
+            log.warning(
+                "reconciler: PENDING_ENTRY TTL cancel failed uid={} signal_id={} "
+                "exc={} — retry next cycle",
+                fsm_position.firebase_uid, fsm_position.signal_id, exc,
+            )
+            return  # don't mark terminal until the cancel is confirmed
+        fsm_position.state = _position_state.PositionState.CANCELLED_NO_FILL
+        fsm_position.closed_at = now
+        if not fsm_position.close_reason:
+            fsm_position.close_reason = "EXPIRED_NO_FILL"
+        fsm_position.last_event_at = now
+        _position_state.put_position(fsm_position)
+        log.info(
+            "reconciler: PENDING_ENTRY expired unfilled — cancelled + "
+            "CANCELLED_NO_FILL uid={} signal_id={} symbol={}",
+            fsm_position.firebase_uid, fsm_position.signal_id, fsm_position.symbol,
+        )
+
     async def _maybe_force_close_stale(
         self, fsm_position: _position_state.Position
     ) -> None:
@@ -280,6 +377,13 @@ class Reconciler:
         age ceiling.  Failures are logged but never crash the loop.
         """
         if not self._stale_close_enabled:
+            return
+        # user_owned manual takes: the user owns the exit (owner decision
+        # 2026-07-18). The stale-age ceiling is an engine backstop for
+        # forgotten *engine-managed* positions; it must not force-close a
+        # user's discretionary trade out from under them. Blast-radius caps
+        # still bound the size.
+        if getattr(fsm_position, "protection_mode", "managed") == "user_owned":
             return
         created = getattr(fsm_position, "created_at", None)
         if created is None:
@@ -453,6 +557,18 @@ class Reconciler:
         other stop remains — re-place one at the recorded SL price.
         Never raises; a total failure pages via the naked-residual alert
         (the stale-age force-close stays the last automatic resort)."""
+        # user_owned manual takes: the user owns the exit (owner decision
+        # 2026-07-18). An externally-cancelled SL on a user_owned position is
+        # the user cancelling their own stop — do NOT re-place it, and do NOT
+        # page it as naked. (managed positions keep the full re-protect +
+        # naked-residual escalation below.)
+        if getattr(fsm_position, "protection_mode", "managed") == "user_owned":
+            log.info(
+                "reconciler: user_owned position lost its stop (user cancel) "
+                "uid={} signal_id={} — leaving as user manages it, no re-place",
+                fsm_position.firebase_uid, fsm_position.signal_id,
+            )
+            return
         log.error(
             "reconciler: position lost its protective stop (external "
             "cancel) — re-placing uid={} signal_id={} symbol={} sl_price={}",
