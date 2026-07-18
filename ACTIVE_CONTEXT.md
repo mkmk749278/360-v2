@@ -4,6 +4,68 @@
 
 ---
 
+## 🟢 SESSION 68 2026-07-18 — Web (PWA) channel Phases 1+2 built: the iPhone path ships as an installable web app (branch `claude/loop-continuation-scheduled-resets-9ouhm5`, paired PRs in lumin-app + 360-v2)
+
+**Owner ask:** execute the approved iPhone PWA plan
+(IOS_PWA_STRATEGY_AND_HANDOFF.md) to full implementation. Session runs on
+scheduled 3AM/8AM IST wake-ups until done.
+
+### Shipped — engine side (this repo)
+
+- **`POST /api/push/{subscribe,unsubscribe}`** (`src/api/push_topic_routes.py`):
+  stateless web-push topic proxy. Web FCM can't topic-subscribe client-side,
+  so the authed client hands its registration token over for the one
+  Admin-SDK call. Doctrine preserved: NO token registry (used once,
+  discarded, first-8-chars-only logging), topics allow-listed to
+  `alerts`/`signals`, per-identity rate limit
+  (`FCM_TOPIC_PROXY_MAX_PER_MIN`, default 12/min), send path untouched.
+  Registered via the standard `register(app, auth=..., identity_dep=...)`
+  convention. 12 new tests (`tests/api/test_push_topic_routes.py`); full
+  tests/api/ green (647), ruff clean, mypy no new errors.
+- **`tools/setup-vps-webapp.sh`**: idempotent nginx + certbot provisioning
+  for the `app.luminapp.org` static docroot (mirrors setup-vps-api.sh).
+  Deploy-entry documents no-cache (web deploys ARE the channel's update
+  mechanism); hashed bundles cache 1h.
+
+### Shipped — app side (lumin-app, same branch)
+
+- Phase 1: checked-in `web/` scaffold (Lumin manifest/branding), `web`
+  distribution token (self-updater inert — the unknown-token→sideload
+  fail-safe would otherwise enable it), reCAPTCHA phone-OTP path
+  (`signInWithPhoneNumber`), chart host split (`chart_bridge.dart` payload
+  contract + WebView/iframe hosts via conditional export, postMessage shim
+  in the chart asset), device-key execution excluded on web (server-side
+  only), boot guards, CI `build-web` job (Firebase web config from
+  `FIREBASE_WEB_CONFIG` secret, CanvasKit bundled via
+  `--no-web-resources-cdn`, artifact upload + atomic VPS docroot deploy).
+- Phase 2: web push through the new engine proxy (getToken + VAPID
+  dart-define, arms post-auth via NavShell→attachRepository→syncWebPush;
+  re-arms every shell mount = token-rotation convergence),
+  `firebase-messaging-sw.js` (CI-injected config), iOS `InstallBanner`
+  (Add-to-Home-Screen walkthrough — iOS only grants web push installed;
+  permission prompt behind user tap), notification-settings recovery card.
+- Headless end-to-end verification: boot → welcome slides → consent page
+  render + persist in Chromium (Firebase JS SDK + fonts served locally —
+  the sandbox blocks gstatic; found and fixed the CanvasKit-CDN boot
+  dependency this way). Full suite green (368). Owner go-live checklist:
+  `docs/WEB_PWA_CHANNEL.md` in lumin-app (Firebase web app + 3 secrets +
+  DNS + one script run).
+
+### NOT done / gated
+
+- **Phase 3 (web billing)** — money-path, owner-sign-off, and blocked on
+  the Razorpay-vs-Stripe provider choice (region-dependent owner call).
+  Server-side auto-trade UI already works on web via Phase 1 (take-sheet
+  is server-side-only there). Engine `POST /api/billing/web/verify` +
+  webhook → `aset_tier` is the planned shape, dark-first.
+- Owner go-live steps (checklist above) — Firebase web app registration,
+  `FIREBASE_WEB_CONFIG` / `FCM_VAPID_KEY` / VPS secrets in lumin-app,
+  Cloudflare DNS for `app.luminapp.org`, run `setup-vps-webapp.sh`.
+- Real-iPhone verification (Add to Home Screen → push arrives app-closed)
+  per the handoff's Part 4 — needs the owner's device once live.
+
+---
+
 ## 🟢 SESSION 67 2026-07-18 — RANGE_FADE goes in as the 19th evaluator: DARK + context-gated on the edge matrix, activation is an ops toggle (branch `claude/path-analysis-deployment-uy30js`, 360-v2 only)
 
 **Owner ask (2 PDFs: Profit tab + Strategy Lab, 2026-07-18):** analyse the data,

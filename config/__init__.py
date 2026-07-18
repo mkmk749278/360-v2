@@ -3407,3 +3407,10 @@ FCM_PUSH_OUTCOMES_ENABLED: bool = _safe_bool("FCM_PUSH_OUTCOMES_ENABLED", "true"
 #: Global send-rate guard (per minute, across all push classes).  FCM is
 #: free but a pathological loop must never be able to spam phones.
 FCM_MAX_SENDS_PER_MIN: int = _safe_int("FCM_MAX_SENDS_PER_MIN", "60")
+
+#: Web (PWA) channel topic proxy (2026-07-18) — per-user request cap on
+#: POST /api/push/{subscribe,unsubscribe}.  Web FCM cannot subscribe to
+#: topics client-side, so the browser hands its token to these endpoints;
+#: normal traffic is ≤2 calls per topic per boot/rotation, so a small cap
+#: shuts down token-spraying without ever touching a real client.
+FCM_TOPIC_PROXY_MAX_PER_MIN: int = _safe_int("FCM_TOPIC_PROXY_MAX_PER_MIN", "12")
