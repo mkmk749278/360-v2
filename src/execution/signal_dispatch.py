@@ -49,7 +49,7 @@ from __future__ import annotations
 import asyncio
 import os
 import time
-from collections import defaultdict
+from collections import Counter, defaultdict
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -280,6 +280,132 @@ def reset_cache_for_test() -> None:
     global _cache
     _cache = None
     _TIER_CACHE.clear()
+    _FANOUT_TOTALS.clear()
+
+
+# ---------------------------------------------------------------------------
+# Fan-out outcome telemetry (2026-07-18)
+# ---------------------------------------------------------------------------
+# Why this exists: every per-user gate in ``_one_user`` that skips BEFORE a
+# dispatch_log row (mode, tier, auto-pause, path/regime preference) is
+# deliberately silent per-user — but that made a *fleet-wide* silent-skip
+# blackout invisible: signals kept emitting, the fan-out kept running, and
+# zero users ever reached an order attempt, with nothing counting it and
+# nothing paging (2026-07-18 owner report: "auto trade not happening to
+# anyone", undiagnosable without VPS log access).  These monotonic
+# per-process counters cost nothing on the hot path (dict increments), feed
+# ONE summary log line per fan-out, and drive the ``auto_dispatch``
+# feature-liveness probe via :func:`auto_dispatch_health_check`.
+
+_FANOUT_TOTALS: Dict[str, float] = defaultdict(float)
+
+# Fan-outs (to a non-empty roster) tolerated with zero order attempts across
+# ALL users before the liveness probe flags a blackout.  ~15 paid signals/day
+# means 5 ≈ several hours of paid signals nobody's account even attempted.
+_AUTO_DISPATCH_GAP_THRESHOLD: int = max(
+    1, int(os.getenv("AUTO_DISPATCH_GAP_THRESHOLD", "5"))
+)
+
+
+def dispatch_totals() -> Dict[str, float]:
+    """Snapshot of the monotonic fan-out counters (auto path only).
+
+    Keys: ``fanouts_total`` (auto fan-outs invoked),
+    ``fanouts_with_users_total`` (… that saw a non-empty keyed roster),
+    ``attempts_total`` (per-user dispatches that reached the order path —
+    placed + rejected, i.e. everything that writes a dispatch_log row),
+    ``placed_total``, ``skipped_total``, plus per-reason ``skip:*`` /
+    ``rejected:*`` breakdowns.
+    """
+    return dict(_FANOUT_TOTALS)
+
+
+def auto_dispatch_health_check(
+    state: Dict[str, Optional[float]],
+    totals: Optional[Dict[str, float]] = None,
+    *,
+    gap_threshold: Optional[int] = None,
+) -> Tuple[bool, str]:
+    """Pure predicate for the ``auto_dispatch`` feature-liveness probe.
+
+    Violates when ≥ ``gap_threshold`` auto fan-outs have reached a
+    non-empty keyed-user roster since the last order *attempt* anywhere in
+    the fleet — the signature of every user being silently skipped (fleet-
+    wide tier lapse, mode-resolution breakage, preference wipe…).  Signals
+    being sparse is fine: the gap is measured in fan-outs, not cycles, so a
+    quiet tape can never page and a blackout can't hide between cycles.
+
+    ``state`` is caller-owned mutable memory across probe cycles (keys:
+    ``attempts``, ``fan_at_last_attempt``).  Pure in the ops-detector sense:
+    all inputs are parameters, no hidden I/O, so tests drive it with plain
+    dicts.
+    """
+    t = totals if totals is not None else dispatch_totals()
+    threshold = (
+        _AUTO_DISPATCH_GAP_THRESHOLD if gap_threshold is None else gap_threshold
+    )
+    fan = float(t.get("fanouts_with_users_total", 0.0))
+    fan_empty = float(t.get("fanouts_empty_roster_total", 0.0))
+    attempts = float(t.get("attempts_total", 0.0))
+
+    # Watermark resets: first cycle, or a process restart zeroed the
+    # monotonic counters below a stored watermark.
+    restarted = (
+        attempts < float(state.get("attempts") or 0.0)
+        or fan < float(state.get("fan_at_last_attempt") or 0.0)
+        or fan_empty < float(state.get("empty_at_last_roster") or 0.0)
+    )
+    if state.get("attempts") is None or restarted:
+        state["attempts"] = attempts
+        state["fan_at_last_attempt"] = fan
+        state["empty_at_last_roster"] = fan_empty
+        return True, "baseline captured"
+
+    # Empty-roster blackout: fan-outs keep resolving ZERO keyed users.
+    # ``list_active_uids`` fails soft to [] — a dead keystore otherwise
+    # looks identical to "no customers".  Watermark advances whenever a
+    # fan-out sees a non-empty roster.
+    if fan > float(state["fan_at_last_attempt"] or 0.0) or attempts > float(
+        state["attempts"] or 0.0
+    ):
+        state["empty_at_last_roster"] = fan_empty
+    empty_gap = fan_empty - float(state["empty_at_last_roster"] or 0.0)
+
+    # Silent-skip blackout: fan-outs reach keyed users but no user's
+    # dispatch ever reaches the order path.  Watermark advances on every
+    # order attempt (placed OR rejected).
+    if attempts > float(state["attempts"] or 0.0):
+        state["fan_at_last_attempt"] = fan
+    state["attempts"] = attempts
+    skip_gap = fan - float(state["fan_at_last_attempt"] or 0.0)
+
+    if empty_gap >= threshold:
+        return False, (
+            f"{empty_gap:.0f} consecutive signals fanned out to an EMPTY "
+            f"keyed-user roster — keystore offline or list_active_uids "
+            f"failing (check engine WARN logs)"
+        )
+    if skip_gap >= threshold:
+        skips = {
+            k.removeprefix("skip:"): v
+            for k, v in t.items()
+            if k.startswith("skip:") and v > 0
+        }
+        top = ", ".join(
+            f"{k}={v:.0f}"
+            for k, v in sorted(skips.items(), key=lambda kv: -kv[1])[:4]
+        ) or "none recorded"
+        return False, (
+            f"{skip_gap:.0f} signals fanned out to keyed users with ZERO "
+            f"order attempts for anyone — every user is being silently "
+            f"skipped; check the fan-out summary log (cumulative skips: "
+            f"{top})"
+        )
+    return True, (
+        f"attempts={attempts:.0f} fanouts={fan:.0f} "
+        f"(gaps: skip {skip_gap:.0f}, empty-roster {empty_gap:.0f}; "
+        f"threshold {threshold})"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -573,9 +699,26 @@ async def dispatch_signal_to_active_users(
 
     uids = [_only_uid] if _only_uid else _active_uids()
     if not uids:
+        # Cold deploy / keystore offline / roster query failing.  Count it:
+        # signals flowing while the roster is CONSISTENTLY empty is its own
+        # blackout signature (list_active_uids fails soft to [] — without
+        # this line a dead keystore looks identical to "no customers").
+        _FANOUT_TOTALS["fanouts_total"] += 1
+        _FANOUT_TOTALS["fanouts_empty_roster_total"] += 1
         return 0
 
     _dispatch_source = "manual_take" if _manual else "auto"
+
+    # Per-fan-out outcome tally (fan-out telemetry, 2026-07-18).  One
+    # Counter per signal; folded into the module-level monotonic totals
+    # after the gather so the summary log + liveness probe can tell
+    # "orders attempted and rejected" apart from "everyone silently
+    # skipped".  ``skip:*`` = gate skips before any dispatch_log row;
+    # ``rejected:*`` / ``placed`` = the order path was reached.
+    outcomes: Counter = Counter()
+
+    def _note(reason: str) -> None:
+        outcomes[reason] += 1
 
     def _capture(**fields: Any) -> None:
         """Write the terminal outcome into the caller's result dict
@@ -607,6 +750,7 @@ async def dispatch_signal_to_active_users(
                 "signal_id={}",
                 uid, user_mode, signal_id,
             )
+            _note("skip:mode")
             return False
 
         # Entitlement gate (B16 two-tier model, 2026-06-24).  Hands-off
@@ -640,6 +784,7 @@ async def dispatch_signal_to_active_users(
                         f"(your effective tier: {_user_tier})."
                     ),
                 )
+                _note("skip:tier")
                 return False
 
         # Auto-pause gate (2026-05-24). After
@@ -659,6 +804,7 @@ async def dispatch_signal_to_active_users(
                 "re-save mode='live' in Settings",
                 uid, signal_id,
             )
+            _note("skip:auto_paused")
             return False
 
         # Per-user path + regime trade-eligibility gate (2026-06-20).
@@ -685,6 +831,7 @@ async def dispatch_signal_to_active_users(
                     "setup {} not in user path preference (size={})",
                     uid, signal_id, _setup_tok or "<none>", len(_path_pref),
                 )
+                _note("skip:path_pref")
                 return False
         if _regime_pref is not None:
             _regime_tok = (regime_label or "").upper()
@@ -694,6 +841,7 @@ async def dispatch_signal_to_active_users(
                     "regime {} not in user regime preference (size={})",
                     uid, signal_id, _regime_tok or "<none>", len(_regime_pref),
                 )
+                _note("skip:regime_pref")
                 return False
 
         # Manual-take dup guard (2026-07-17).  The auto fan-out fires at
@@ -726,6 +874,7 @@ async def dispatch_signal_to_active_users(
                         "position — try again in a moment."
                     ),
                 )
+                _note("skip:dup_guard_unavailable")
                 return False
             if _existing is not None and not _ps.is_terminal(_existing.state):
                 log.info(
@@ -741,6 +890,7 @@ async def dispatch_signal_to_active_users(
                         f"(state: {getattr(_existing.state, 'value', _existing.state)})."
                     ),
                 )
+                _note("skip:already_active")
                 return False
 
         # Per-user notional override (2026-05-20).  Each user can
@@ -1021,6 +1171,7 @@ async def dispatch_signal_to_active_users(
                 reject_class="PositionCapExceeded",
                 reject_detail=str(exc),
             )
+            _note("rejected:PositionCapExceeded")
             return False
         if total_qty <= 0:
             log.info(
@@ -1055,6 +1206,7 @@ async def dispatch_signal_to_active_users(
                     f"{symbol} — increase your notional in Settings."
                 ),
             )
+            _note("rejected:NotionalTooSmall")
             return False
         try:
             await _fsm.place_signal(
@@ -1099,6 +1251,7 @@ async def dispatch_signal_to_active_users(
                 entry_price=float(entry_price),
                 total_qty=float(total_qty),
             )
+            _note("placed")
             # Successful placement resets the consecutive -2019 counter.
             # If the user previously had a string of insufficient-margin
             # rejects but topped up + resumed, the next place succeeds
@@ -1166,6 +1319,7 @@ async def dispatch_signal_to_active_users(
                 reject_binance_code=b_code,
                 reject_binance_msg=b_msg,
             )
+            _note(f"rejected:{type(exc).__name__}")
             # Feed the blast-radius circuit breakers (B18 tripwires
             # #4/#5).  Only real placement failures count — the helper
             # ignores gate rejections by type and -2019 by code, so a
@@ -1227,12 +1381,34 @@ async def dispatch_signal_to_active_users(
         return_exceptions=False,
     )
     placed = sum(1 for r in results if r)
+    # Honest outcome split: "rejected" = the order path was reached and a
+    # dispatch_log row exists; "skipped" = a silent per-user gate (mode /
+    # tier / pause / prefs) — the pre-2026-07-18 line lumped both into
+    # "rejected", which hid a fleet-wide silent-skip blackout in plain
+    # sight.  One line per fan-out; grep target when "no trades" is
+    # reported.
+    rejected = sum(v for k, v in outcomes.items() if k.startswith("rejected:"))
+    skipped = sum(v for k, v in outcomes.items() if k.startswith("skip:"))
     log.info(
-        "signal_dispatch: signal_id={} symbol={} direction={} "
-        "active_users={} placed={} rejected={} source={}",
-        signal_id, symbol, direction, len(uids), placed, len(uids) - placed,
-        _dispatch_source,
+        "signal_dispatch: fan-out summary signal_id={} symbol={} "
+        "direction={} active_users={} placed={} rejected={} skipped={} "
+        "outcomes={} source={}",
+        signal_id, symbol, direction, len(uids), placed, rejected, skipped,
+        dict(outcomes), _dispatch_source,
     )
+    # Fold into the monotonic totals feeding the auto_dispatch liveness
+    # probe — auto fan-outs only, so a manual take can neither mask nor
+    # trigger a fleet-wide blackout alert.
+    if not _manual:
+        _FANOUT_TOTALS["fanouts_total"] += 1
+        if uids:
+            _FANOUT_TOTALS["fanouts_with_users_total"] += 1
+        _FANOUT_TOTALS["attempts_total"] += placed + rejected
+        _FANOUT_TOTALS["placed_total"] += placed
+        _FANOUT_TOTALS["skipped_total"] += skipped
+        for k, v in outcomes.items():
+            if k != "placed":
+                _FANOUT_TOTALS[k] += v
     return placed
 
 
