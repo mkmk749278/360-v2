@@ -63,6 +63,30 @@ log = get_logger("execution.symbol_filters")
 _REFRESH_INTERVAL_S: int = 6 * 60 * 60
 
 
+# Binance's contractType marker for tokenised-stock / TradFi
+# perpetuals — equity, ETF and commodity perps (TSLA, AAPL, WDC =
+# Western Digital, …) that share the USDT-M venue but carry
+# traditional-market microstructure (RTH price discovery, "Off-Hours"
+# gaps, weekend closes).  Binance's own enum spells it
+# "TRADIFI_PERPETUAL" (sic — not a typo on our side).
+#
+# Two reasons they must never enter the scanning / dispatch universe:
+#   1. Every chartist-eye component assumes 24/7 crypto microstructure
+#      and systematically mis-scores them.
+#   2. They require a SEPARATE Binance agreement; an order on one is
+#      rejected with -4411 "sign TradFi-Perps agreement" for any
+#      account that hasn't signed it — even accounts that trade crypto
+#      futures fine.  (2026-07-18: WDCUSDT slipped past the static
+#      name-blacklist in pair_manager, a signal fired on it, and a paid
+#      user's auto-trade order was rejected with -4411.)
+#
+# Captured here because this module already owns the one authoritative
+# exchangeInfo pull; ``pair_manager`` reads :func:`is_tradfi_perp` to
+# structurally exclude the whole class — current and future listings —
+# instead of chasing individual tickers by hand.
+_TRADFI_CONTRACT_TYPE = "TRADIFI_PERPETUAL"
+
+
 @dataclass(frozen=True)
 class SymbolFilters:
     """Binance filter values needed for order construction.
@@ -79,6 +103,9 @@ class SymbolFilters:
 
 
 _FILTERS: Dict[str, SymbolFilters] = {}
+# Symbols whose contractType is TRADIFI_PERPETUAL — the tokenised-stock
+# / TradFi-perp deny-set, rebuilt on every exchangeInfo refresh.
+_TRADFI_PERPS: frozenset = frozenset()
 _filters_lock = asyncio.Lock()
 
 
@@ -190,6 +217,23 @@ def all_cached_symbols() -> list[str]:
     return sorted(_FILTERS.keys())
 
 
+def is_tradfi_perp(symbol: str) -> bool:
+    """True iff ``symbol`` is a Binance tokenised-stock / TradFi
+    perpetual (contractType ``TRADIFI_PERPETUAL``).
+
+    ``pair_manager`` calls this to keep the whole class out of the
+    scanning / dispatch universe.  Returns ``False`` on an unpopulated
+    cache — the caller's static ``_NON_CRYPTO_BLACKLIST`` remains the
+    floor, so a boot-time race can never *admit* a known stock perp."""
+    return symbol.upper() in _TRADFI_PERPS
+
+
+def tradfi_perp_symbols() -> list[str]:
+    """Sorted snapshot of the known TradFi-Perps deny-set (diagnostics
+    + the runtime-status endpoint)."""
+    return sorted(_TRADFI_PERPS)
+
+
 # ---------------------------------------------------------------------------
 # Refresh + bootstrap
 # ---------------------------------------------------------------------------
@@ -270,18 +314,28 @@ async def refresh_filters(
         return 0
 
     new_cache: Dict[str, SymbolFilters] = {}
+    tradfi: set[str] = set()
     for entry in info.get("symbols", []) or []:
+        sym = (entry.get("symbol") or "").upper()
+        # Classify TradFi-Perps independently of filter parsing — these
+        # symbols DO carry valid LOT_SIZE/PRICE_FILTER (they're tradeable),
+        # so they'd otherwise land in the filter cache and the universe.
+        if sym and entry.get("contractType") == _TRADFI_CONTRACT_TYPE:
+            tradfi.add(sym)
         parsed = _parse_filters(entry)
         if parsed is None:
             continue
         new_cache[parsed.symbol] = parsed
 
     async with _filters_lock:
-        global _FILTERS
+        global _FILTERS, _TRADFI_PERPS
         _FILTERS = new_cache
+        _TRADFI_PERPS = frozenset(tradfi)
 
     log.info(
-        "symbol_filters: refreshed cache with {} symbols", len(new_cache),
+        "symbol_filters: refreshed cache with {} symbols "
+        "({} TradFi-Perps flagged for universe exclusion)",
+        len(new_cache), len(tradfi),
     )
     return len(new_cache)
 
@@ -304,11 +358,18 @@ async def run_periodic_refresh() -> None:
 
 def reset_for_test() -> None:
     """Test-only: drop the cache.  Used by per-test fixtures."""
-    global _FILTERS
+    global _FILTERS, _TRADFI_PERPS
     _FILTERS = {}
+    _TRADFI_PERPS = frozenset()
 
 
 def _set_cache_for_test(filters: Dict[str, SymbolFilters]) -> None:
     """Test-only: pre-populate the cache without an HTTP call."""
     global _FILTERS
     _FILTERS = dict(filters)
+
+
+def _set_tradfi_perps_for_test(symbols: set[str]) -> None:
+    """Test-only: pre-populate the TradFi-Perps deny-set."""
+    global _TRADFI_PERPS
+    _TRADFI_PERPS = frozenset(s.upper() for s in symbols)

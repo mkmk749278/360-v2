@@ -40,6 +40,7 @@ from config import (
     TOP50_UPDATE_INTERVAL_SECONDS,
 )
 from src.binance import BinanceClient
+from src.execution.symbol_filters import is_tradfi_perp
 from src.utils import get_logger
 
 log = get_logger("pair_manager")
@@ -98,11 +99,30 @@ _NON_CRYPTO_BLACKLIST: frozenset = frozenset({
     "ARMUSDT",                              # Arm Holdings
     "MRVLUSDT",                             # Marvell
     "XPTUSDT",                              # tokenised platinum (metal)
+    # 2026-07-18: Western Digital stock perp reached a paid user's
+    # auto-trade (Binance -4411 "sign TradFi-Perps agreement").  Kept
+    # here as an immediate floor; the structural TRADIFI_PERPETUAL
+    # filter (see is_tradfi_perp below) is what stops the next new
+    # stock perp without a human editing this list.
+    "WDCUSDT",                              # Western Digital
 })
 
 # Combined blacklist used by every fetch path.  Easier to reason about
 # one set than to remember to extend two filters at every call site.
 _PAIR_BLACKLIST: frozenset = _STABLECOIN_BLACKLIST | _NON_CRYPTO_BLACKLIST
+
+# The static blacklist above is a name-by-name floor; it silently admits
+# any NEW stock perp Binance lists until a human adds the ticker.  The
+# durable filter is structural: ``symbol_filters.is_tradfi_perp`` reads
+# Binance's own ``contractType == TRADIFI_PERPETUAL`` marker, captured on
+# the exchangeInfo refresh that module already runs.  That refresh is
+# kicked off at boot by the bootstrap, but a pair fetch can race ahead of
+# it — so when the metadata cache is still empty we populate it once here
+# (reusing our own futures client; the result is process-global and shared
+# with the order path, so it's the same single exchangeInfo pull, not a
+# per-cycle duplicate).  Retries are guarded to this cadence so an empty /
+# failing exchangeInfo never re-fetches on every 90s top-50 cycle.
+_SYMBOL_META_RETRY_S: int = 6 * 3600
 
 
 def classify_pair_tier(symbol: str, volume_24h_usd: float = 0.0) -> PairProfile:
@@ -173,6 +193,10 @@ class PairManager:
         # Top-50 futures cache (PR1): cached list + last refresh timestamp.
         self._top50_futures_cache: List[str] = []
         self._top50_last_refresh: float = 0.0
+        # Last time we self-populated exchangeInfo metadata (TradFi-Perps
+        # deny-set + per-symbol filters) because the bootstrap refresh
+        # hadn't run yet.  Guards the retry cadence (see _SYMBOL_META_RETRY_S).
+        self._symbol_meta_last_attempt: float = 0.0
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -242,9 +266,40 @@ class PairManager:
     # Fetch from Binance
     # ------------------------------------------------------------------
 
+    async def _ensure_symbol_metadata(self) -> None:
+        """Guarantee exchangeInfo-derived symbol metadata is loaded before
+        we build the universe.
+
+        The ``/fapi/v1/ticker/24hr`` payload every fetch path uses carries
+        no ``contractType``, so the TradFi-Perps deny-set comes from
+        ``symbol_filters`` (which pulls ``/fapi/v1/exchangeInfo``).  The
+        bootstrap kicks that off at boot, but a pair fetch can race ahead
+        of it; when the cache is still empty we populate it once here using
+        our own futures client.  Cheap and cached — a real fetch happens at
+        most once per ``_SYMBOL_META_RETRY_S`` from this path, and normally
+        never, because the bootstrap task wins the race.  Never raises."""
+        from src.execution import symbol_filters
+        if symbol_filters.all_cached_symbols():
+            return
+        # Only self-drive an exchangeInfo fetch behind a real client.  Unit
+        # tests inject a MagicMock and pre-seed symbol_filters directly, so
+        # there's nothing to fetch and a mock ``fetch_exchange_info`` isn't
+        # awaitable.
+        if not isinstance(self._futures_client, BinanceClient):
+            return
+        now = time.monotonic()
+        if (now - getattr(self, "_symbol_meta_last_attempt", 0.0)) < _SYMBOL_META_RETRY_S:
+            return
+        self._symbol_meta_last_attempt = now
+        try:
+            await symbol_filters.refresh_filters(self._futures_client)
+        except Exception as exc:
+            log.warning("pair_manager: exchangeInfo metadata refresh failed: %s", exc)
+
     async def fetch_top_spot_pairs(self, limit: int = TOP_PAIRS_COUNT) -> List[PairInfo]:
         """Fetch top *limit* USDT spot pairs by 24h volume."""
         pairs: List[PairInfo] = []
+        await self._ensure_symbol_metadata()
         try:
             data = await self._spot_client._get("/api/v3/ticker/24hr", weight=40)
             if data is None:
@@ -255,6 +310,7 @@ class PairManager:
                 t for t in data
                 if t.get("symbol", "").endswith("USDT")
                 and t.get("symbol", "") not in _PAIR_BLACKLIST
+                and not is_tradfi_perp(t.get("symbol", ""))
                 and float(t.get("quoteVolume", 0)) > 0
             ]
             usdt_pairs.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
@@ -275,6 +331,7 @@ class PairManager:
     async def fetch_top_futures_pairs(self, limit: int = TOP_PAIRS_COUNT) -> List[PairInfo]:
         """Fetch top *limit* USDT-M futures pairs by 24h volume."""
         pairs: List[PairInfo] = []
+        await self._ensure_symbol_metadata()
         try:
             data = await self._futures_client._get("/fapi/v1/ticker/24hr", weight=40)
             if data is None:
@@ -285,6 +342,7 @@ class PairManager:
                 t for t in data
                 if t.get("symbol", "").endswith("USDT")
                 and t.get("symbol", "") not in _PAIR_BLACKLIST
+                and not is_tradfi_perp(t.get("symbol", ""))
                 and float(t.get("quoteVolume", 0)) > 0
             ]
             usdt_pairs.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
@@ -311,6 +369,7 @@ class PairManager:
         volume rank.  It is used exclusively by :meth:`refresh_pairs`.
         """
         pairs: List[PairInfo] = []
+        await self._ensure_symbol_metadata()
         try:
             data = await self._spot_client._get("/api/v3/ticker/24hr", weight=40)
             if data is None:
@@ -321,6 +380,7 @@ class PairManager:
                 t for t in data
                 if t.get("symbol", "").endswith("USDT")
                 and t.get("symbol", "") not in _PAIR_BLACKLIST
+                and not is_tradfi_perp(t.get("symbol", ""))
                 and float(t.get("quoteVolume", 0)) > 0
             ]
             usdt_pairs.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)
@@ -345,6 +405,7 @@ class PairManager:
         :meth:`refresh_pairs` can classify the full universe into tiers.
         """
         pairs: List[PairInfo] = []
+        await self._ensure_symbol_metadata()
         try:
             data = await self._futures_client._get("/fapi/v1/ticker/24hr", weight=40)
             if data is None:
@@ -355,6 +416,7 @@ class PairManager:
                 t for t in data
                 if t.get("symbol", "").endswith("USDT")
                 and t.get("symbol", "") not in _PAIR_BLACKLIST
+                and not is_tradfi_perp(t.get("symbol", ""))
                 and float(t.get("quoteVolume", 0)) > 0
             ]
             usdt_pairs.sort(key=lambda t: float(t["quoteVolume"]), reverse=True)

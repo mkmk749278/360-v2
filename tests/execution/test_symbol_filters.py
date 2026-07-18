@@ -305,3 +305,87 @@ async def test_refresh_filters_atomic_swap_no_partial_cache() -> None:
     # OLDUSDT no longer in cache; the new dict replaced the old.
     assert symbol_filters.get_filters("OLDUSDT") is None
     assert symbol_filters.get_filters("BTCUSDT") is not None
+
+
+# ---------------------------------------------------------------------------
+# TradFi-Perps classification (2026-07-18)
+#
+# Binance tokenised-stock / equity perps carry contractType
+# "TRADIFI_PERPETUAL" (Binance's spelling).  They must be flagged for
+# universe exclusion — an order on one is rejected with -4411 "sign
+# TradFi-Perps agreement" for any account that hasn't signed the
+# separate agreement, and the crypto scalp stack mis-scores them.
+# ---------------------------------------------------------------------------
+
+
+# WDCUSDT (Western Digital stock perp) carries valid filters — it is a
+# fully tradeable contract, which is exactly why the *filter cache*
+# alone can't exclude it; only contractType distinguishes it.
+_FAKE_EXCHANGE_INFO_WITH_TRADFI: Dict[str, Any] = {
+    "symbols": [
+        {
+            "symbol": "BTCUSDT",
+            "contractType": "PERPETUAL",
+            "filters": [
+                {"filterType": "PRICE_FILTER", "tickSize": "0.10"},
+                {"filterType": "LOT_SIZE", "stepSize": "0.001", "minQty": "0.001"},
+                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+            ],
+        },
+        {
+            "symbol": "WDCUSDT",
+            "contractType": "TRADIFI_PERPETUAL",  # Western Digital stock perp
+            "filters": [
+                {"filterType": "PRICE_FILTER", "tickSize": "0.01"},
+                {"filterType": "LOT_SIZE", "stepSize": "0.1", "minQty": "0.1"},
+                {"filterType": "MIN_NOTIONAL", "notional": "5"},
+            ],
+        },
+    ],
+}
+
+
+async def test_refresh_flags_tradfi_perps() -> None:
+    """A TRADIFI_PERPETUAL contract is added to the deny-set while a
+    normal PERPETUAL is not."""
+    fake_client = MagicMock()
+    fake_client.fetch_exchange_info = AsyncMock(
+        return_value=_FAKE_EXCHANGE_INFO_WITH_TRADFI,
+    )
+    await symbol_filters.refresh_filters(binance_client=fake_client)
+
+    assert symbol_filters.is_tradfi_perp("WDCUSDT") is True
+    assert symbol_filters.is_tradfi_perp("BTCUSDT") is False
+    assert symbol_filters.tradfi_perp_symbols() == ["WDCUSDT"]
+
+
+async def test_tradfi_perp_stays_tradeable_in_filter_cache() -> None:
+    """The stock perp still parses into the filter cache (it has valid
+    LOT_SIZE/PRICE_FILTER) — proving contractType, not filter absence,
+    is what excludes it.  A filter-cache-only exclusion would miss it."""
+    fake_client = MagicMock()
+    fake_client.fetch_exchange_info = AsyncMock(
+        return_value=_FAKE_EXCHANGE_INFO_WITH_TRADFI,
+    )
+    await symbol_filters.refresh_filters(binance_client=fake_client)
+    assert symbol_filters.get_filters("WDCUSDT") is not None
+
+
+def test_is_tradfi_perp_case_insensitive_and_fail_open() -> None:
+    """Lookup is case-insensitive; an unpopulated cache returns False
+    (fail-open to pair_manager's static blacklist floor)."""
+    symbol_filters.reset_for_test()
+    assert symbol_filters.is_tradfi_perp("WDCUSDT") is False  # empty cache
+    symbol_filters._set_tradfi_perps_for_test({"WDCUSDT"})
+    assert symbol_filters.is_tradfi_perp("wdcusdt") is True
+
+
+async def test_refresh_replaces_tradfi_set_atomically() -> None:
+    """A later refresh whose payload has no TradFi perps clears the
+    deny-set — a delisted stock perp drops out without a restart."""
+    symbol_filters._set_tradfi_perps_for_test({"STALEUSDT"})
+    fake_client = MagicMock()
+    fake_client.fetch_exchange_info = AsyncMock(return_value=_FAKE_EXCHANGE_INFO)
+    await symbol_filters.refresh_filters(binance_client=fake_client)
+    assert symbol_filters.tradfi_perp_symbols() == []
+    assert symbol_filters.is_tradfi_perp("STALEUSDT") is False

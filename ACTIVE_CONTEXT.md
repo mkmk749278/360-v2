@@ -4,6 +4,56 @@
 
 ---
 
+## 🟠 SESSION 65 2026-07-18 — TradFi-Perps (stock perps) leaked into the universe → paid user's auto-trade rejected -4411 (branch `claude/auto-trade-binance-issue-cgtbdh`, 360-v2 + lumin-app)
+
+**Owner report (5 screenshots):** own Binance account, auto-trade active/all-green
+but "NO TRADES YET"; take sheet on **WDCUSDT** shows "Binance Futures agreement
+needed"; account has real crypto USDⓈ-M perp trades from 2026-06-28; Binance order
+ticket for WDCUSDT shows **"Off-Hours"** + "regular trading hours" warning.
+
+### Root cause (verified against Binance, not assumed)
+
+**WDCUSDT is a Western Digital *stock* perpetual** — one of Binance's TradFi-Perps
+(tokenised equity/ETF/commodity perps). Binance `-4411 "sign TradFi-Perps
+agreement"` is **symbol-specific** to that product, NOT an account-wide state
+(WorldCoin is WLD, not WDC; the ticket's "Off-Hours" tag = stock perp). The
+engine's `_NON_CRYPTO_BLACKLIST` is a **hand-maintained name list**; WDCUSDT
+wasn't on it, so it entered the top-N futures universe, fired a signal
+(reached the paid channel), and auto-trade's order was rejected `-4411`. The
+account was never the problem.
+
+### Shipped (engine, 360-v2)
+
+- **Structural filter** — `symbol_filters.py` now captures Binance's own
+  `contractType == "TRADIFI_PERPETUAL"` marker on the exchangeInfo refresh it
+  already runs, exposing `is_tradfi_perp()`. `pair_manager` excludes the whole
+  class at **all four** fetch paths (`_ensure_symbol_metadata` closes the boot
+  race with the bootstrap refresh; zero extra network cost — same cached
+  exchangeInfo pull). Self-maintaining: every current AND future stock perp is
+  excluded without editing a list.
+- **Static floor** — WDCUSDT added to `_NON_CRYPTO_BLACKLIST` so it's caught
+  even before the first exchangeInfo refresh.
+- Tests: +8 (symbol_filters TradFi classification/atomic-swap/fail-open;
+  pair_manager fetch-site exclusion incl. an *unlisted* stock perp). 536
+  pair/scanner/execution tests green, ruff clean.
+
+### Shipped (app, lumin-app)
+
+- `-4411` copy rewritten: was "your account hasn't accepted the Futures
+  agreement… Binance refuses every order" (false, alarming) → **"Not a crypto
+  pair — {symbol} is a Binance stock (TradFi) perpetual… your account is fine"**,
+  severity `transient`. Tests updated (take_error_mapper + dispatch_event).
+
+### NOTE — owner-sign-off item (paid-channel routing + dispatch universe)
+
+Pushed to the branch, **not merged**. Shipped unflagged (consistent with the
+existing unflagged `_NON_CRYPTO_BLACKLIST` precedent — this is safety exclusion
+of non-crypto contamination, not a crypto-scoring change needing a shadow
+window). CI runs the Flutter tests (no Flutter in-container). No PRs opened
+(none requested).
+
+---
+
 ## 🟢 SESSION 64 2026-07-18 — Full-system audit + implementation map; MEAN_REVERT zero-emission root-caused past the S60 fix (branch `claude/system-audit-implementation-map-gqxnjz`, 360-v2, doc-only)
 
 **Owner ask:** fully audit the system, every corner; deliver an MD file with the
