@@ -1478,6 +1478,211 @@ async def dispatch_signal_to_uid_manual(
     return result
 
 
+async def dispatch_manual_trade(
+    *,
+    uid: str,
+    ref_id: str,               # alert_id | signal_id — dedup key + coid seed
+    symbol: str,
+    direction: str,            # "LONG" | "SHORT"
+    entry_type: str,           # "market" | "limit"
+    entry_price: float,        # LIMIT price (entry_type=limit) / sizing anchor
+    sl_price: float = 0.0,     # optional (user_owned may be entry-only)
+    tp_prices: Optional[List[float]] = None,  # 0..3 legs, optional
+    valid_for_minutes: int = 0,  # LIMIT-entry TTL
+) -> Dict[str, Any]:
+    """Server-side user-directed manual trade (manual trade builder).
+
+    Places a trade the user built on the chart — MARKET entry or a resting
+    LIMIT at ``entry_price``, with OPTIONAL user-set SL/TP — on their
+    server-connected key.  Sizes at the user's fixed notional, gates at
+    ``can_assist``, stamps ``protection_mode="user_owned"`` (SL optional; the
+    naked-position invariant, ops detector, and reconciler backstop exempt
+    it), and is idempotent on ``(uid, ref_id)``.  Runs the SAME
+    ``place_signal`` safety-gate chain (global enable, kill switch, symbol
+    allowlist, position cap, rate limit) + dispatch_log as auto/take.
+
+    Gated by ``MANUAL_TRADE_BUILDER_ENABLED``; the endpoint pre-checks it too.
+    Returns the ``TakeSignalResult``-shaped dict the app already parses.
+    """
+    def _reject(reject_class: str, detail: str, **extra: Any) -> Dict[str, Any]:
+        return {
+            "outcome": "rejected", "reject_class": reject_class,
+            "reject_detail": detail, "ref_id": ref_id, **extra,
+        }
+
+    from config import MANUAL_TRADE_BUILDER_ENABLED as _enabled
+    if not _enabled:
+        return _reject(
+            "ManualTradeBuilderDisabled",
+            "The manual trade builder is not enabled on this engine yet.",
+        )
+
+    direction = (direction or "").upper()
+    if direction not in ("LONG", "SHORT"):
+        return _reject("BadRequest", f"direction must be LONG or SHORT, got {direction!r}.")
+    entry_type = (entry_type or "").lower()
+    if entry_type not in ("market", "limit"):
+        return _reject("BadRequest", f"entry_type must be market or limit, got {entry_type!r}.")
+    if entry_price <= 0:
+        return _reject("BadRequest", "A positive entry/mark price is required to size the trade.")
+    if entry_type == "limit" and entry_price <= 0:
+        return _reject("BadRequest", "A limit entry needs a positive entry price.")
+
+    # Tier gate — can_assist (manual placement is the assist-tier surface),
+    # same rule the endpoint pre-checks and dispatch applies elsewhere.
+    from config import AUTO_TRADE_TIER_GATE_ENABLED as _tier_gate
+    if _tier_gate:
+        from src.api.auth import can_assist as _can_assist
+        _tier = _resolve_user_tier(uid)
+        if not _can_assist(_tier):
+            return _reject(
+                "TierNotEntitled",
+                f"Building a trade requires the Assist plan or higher "
+                f"(your effective tier: {_tier}).",
+            )
+
+    # Dup-guard on (uid, ref_id): place_signal is a blind upsert keyed on
+    # (uid, signal_id), so without this a double-tap / retry would fire a
+    # second real entry. Fail CLOSED on a store error — refuse rather than
+    # risk a double entry on real money.
+    from src.execution import position_state as _ps
+    try:
+        _existing = _ps.get_position(uid, ref_id)
+    except _ps.PositionNotFoundError:
+        _existing = None
+    except Exception as _dup_exc:
+        log.warning(
+            "dispatch_manual_trade: dup-guard read failed uid={} ref_id={}: {} "
+            "— refusing", uid, ref_id, _dup_exc,
+        )
+        return _reject(
+            "DupGuardUnavailable",
+            "Could not confirm you don't already hold this position — try again.",
+        )
+    if _existing is not None and not _ps.is_terminal(_existing.state):
+        return _reject(
+            "AlreadyActive",
+            "You already hold a position on this "
+            f"({getattr(_existing.state, 'value', _existing.state)}).",
+        )
+
+    # Sizing — user notional → total qty (MIN_NOTIONAL / stepSize handled by
+    # _compute_qty_split), then split across the user's provided TP legs.
+    from src.api import user_overrides as _uo
+    from src.execution import symbol_filters as _sf
+    _notional = _uo.resolve_notional_usd(uid, _DEFAULT_NOTIONAL_USD)
+    total_qty, _t1, _t2, _t3 = _compute_qty_split(symbol, entry_price, notional_usd=_notional)
+    if total_qty <= 0:
+        from src.execution import dispatch_log as _dl
+        _dl.record_rejected(
+            firebase_uid=uid, signal_id=ref_id, symbol=symbol, direction=direction,
+            entry_price=entry_price, reject_class="NotionalTooSmall",
+            reject_detail=(
+                f"Position size ${_notional:.0f} is too small to place a {symbol} "
+                f"order at ${entry_price:.6g}. Increase your notional in Settings."
+            ),
+            source="manual_trade",
+        )
+        return _reject(
+            "NotionalTooSmall",
+            f"Position size ${_notional:.0f} is too small for {symbol} — "
+            "increase your notional in Settings.",
+        )
+
+    _legs = [float(p) for p in (tp_prices or []) if p and float(p) > 0][:3]
+    tp1_price = tp2_price = tp3_price = 0.0
+    tp1_qty = tp2_qty = tp3_qty = 0.0
+    if _legs:
+        # Even split of total_qty across the provided TP legs; the last leg
+        # absorbs the stepSize rounding residual so the legs sum to total_qty.
+        _n = len(_legs)
+        _per = _sf.round_qty(symbol, total_qty / _n)
+        _qtys = [_per] * _n
+        _qtys[-1] = _sf.round_qty(symbol, total_qty - _per * (_n - 1))
+        _prices = [tp1_price, tp2_price, tp3_price]
+        _qcols = [tp1_qty, tp2_qty, tp3_qty]
+        for _i in range(_n):
+            _prices[_i] = _legs[_i]
+            _qcols[_i] = _qtys[_i]
+        tp1_price, tp2_price, tp3_price = _prices
+        tp1_qty, tp2_qty, tp3_qty = _qcols
+
+    # Blast-radius position cap (B18) — defensive parity with the auto path.
+    from src.execution import tripwires as _tw
+    try:
+        _tw.assert_position_cap(
+            notional_usd=_notional, cap_usd=_notional,
+            max_cap_usd=_tw.DEFAULT_POSITION_CAP_MAX_USD,
+        )
+    except _tw.PositionCapExceeded as _cap_exc:
+        return _reject("PositionCapExceeded", str(_cap_exc))
+
+    from src.execution import position_fsm as _fsm
+    from src.execution import dispatch_log as _dl
+    try:
+        pos = await _fsm.place_signal(
+            uid,
+            signal_id=ref_id,
+            symbol=symbol,
+            direction=direction,
+            entry_price=entry_price,
+            sl_price=sl_price if (sl_price and sl_price > 0) else 0.0,
+            tp1_price=tp1_price, tp2_price=tp2_price, tp3_price=tp3_price,
+            total_qty=total_qty, tp1_qty=tp1_qty, tp2_qty=tp2_qty, tp3_qty=tp3_qty,
+            pretp_fraction=0.0,            # user manages exits — no engine pre-TP
+            invalidation_mode="loose",     # engine invalidation never force-closes
+            management_mode="full",
+            protection_mode="user_owned",
+            entry_type=entry_type,
+            valid_for_minutes=valid_for_minutes,
+        )
+    except Exception as exc:  # noqa: BLE001 — turn any placement failure into a reject
+        b_code = None
+        b_msg = None
+        sig_resp = getattr(exc, "signing_response", None)
+        if sig_resp is not None:
+            body = getattr(sig_resp, "binance_body", None)
+            if isinstance(body, dict):
+                try:
+                    b_code = int(body.get("code")) if body.get("code") is not None else None
+                except (TypeError, ValueError):
+                    b_code = None
+                _raw = body.get("msg") or body.get("message")
+                b_msg = _raw if isinstance(_raw, str) else None
+        log.info(
+            "dispatch_manual_trade: rejected uid={} ref_id={} symbol={} "
+            "reason={} detail={!r}",
+            uid, ref_id, symbol, type(exc).__name__, str(exc),
+        )
+        _dl.record_rejected(
+            firebase_uid=uid, signal_id=ref_id, symbol=symbol, direction=direction,
+            entry_price=entry_price, reject_class=type(exc).__name__,
+            reject_detail=str(exc), reject_binance_code=b_code,
+            reject_binance_msg=b_msg, source="manual_trade",
+        )
+        return _reject(
+            type(exc).__name__, str(exc),
+            reject_binance_code=b_code, reject_binance_msg=b_msg,
+        )
+
+    _dl.record_placed(
+        firebase_uid=uid, signal_id=ref_id, symbol=symbol, direction=direction,
+        entry_price=entry_price, total_qty=total_qty, source="manual_trade",
+    )
+    _resting = pos.state == _ps.PositionState.PENDING_ENTRY
+    return {
+        "outcome": "placed",
+        "ref_id": ref_id,
+        "symbol": symbol,
+        "direction": direction,
+        "entry_price": float(entry_price),
+        "total_qty": float(total_qty),
+        "entry_type": entry_type,
+        "resting": _resting,   # True → LIMIT rests until filled/expired
+        "state": getattr(pos.state, "value", str(pos.state)),
+    }
+
+
 async def close_fsm_positions_for_signal(
     signal_id: str,
     *,
