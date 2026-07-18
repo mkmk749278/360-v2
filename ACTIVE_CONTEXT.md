@@ -91,9 +91,10 @@ at 11:41); check Binance documentation too.
 
 ### NEXT
 
-1. Owner: merge this PR pair; the stranded S65 lumin-app branch
-   (`claude/auto-trade-binance-issue-cgtbdh`) is superseded on the app side
-   by this branch (same commit cherry-picked) — close it after merge.
+1. Owner: merge this PR pair (360-v2 #746 + lumin-app #130). The S65
+   lumin-app `-4411` copy fix merged separately as lumin-app #129
+   (owner, 06:43Z); #130 was rebased on top so it carries only the
+   SymbolNotAllowed/sanitizer increment.
 2. Watch the new `auto_dispatch` probe after deploy: a page within hours
    means the blackout is real and the detail line names the gate.
 3. Unchanged owner queue from S64/S65: re-enable affected subscribers via
