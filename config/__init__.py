@@ -3152,6 +3152,19 @@ AUTO_TRADE_MANUAL_TAKE_ENABLED: bool = _safe_bool(
     "AUTO_TRADE_MANUAL_TAKE_ENABLED", "false"
 )
 
+#: Self-serve breaker recovery cooldown (owner-approved 2026-07-18).  When
+#: the per-user circuit breaker (B18 #5) disables a user, the app's paused
+#: card offers "Re-enable auto-trade" → ``POST /api/auto-trade/
+#: resume-disabled-mine``.  The user may self-re-enable at most once per
+#: this many hours — a genuinely failing account can't flap through a
+#: failure storm (it re-trips on the next qualifying failures anyway, and
+#: user-setup rejections like -2019/-4411 never feed the breaker).  The
+#: owner endpoint ``/api/admin/users/auto-trade-enable`` bypasses the
+#: cooldown for support cases.
+AUTO_TRADE_SELF_REENABLE_COOLDOWN_HOURS: float = _safe_float(
+    "AUTO_TRADE_SELF_REENABLE_COOLDOWN_HOURS", "6"
+)
+
 #: Android application id of the Lumin app, e.g. ``org.luminapp.lumin``.
 #: Must match the ``packageName`` Google signs RTDN notifications with and
 #: the package the purchase was made under.
