@@ -166,10 +166,26 @@ async def _run() -> None:
                 # process's /api/tunables endpoint; same shared client.
                 from src import runtime_tunables as _runtime_tunables
                 _runtime_tunables.init_runtime_tunables(_fk._db)
+                # Dispatch-event log — the Trade-tab Recent Activity feed
+                # (GET /api/auto-trade/recent-events) reads per-user
+                # dispatch history DIRECTLY from Firestore in THIS process
+                # (dispatch_log.list_recent_events), not via the Redis
+                # facade. Without this init the isolated api container's
+                # dispatch_log._db stays None → list_recent_events short-
+                # circuits to [] and the Live tab shows "NO TRADES YET"
+                # even while the ENGINE container is writing placed/
+                # rejected rows to the same Firestore collection (owner-
+                # reported 2026-07-18: auto-trades executing on Binance,
+                # zero history in the app). Share the keystore's client,
+                # exactly like the engine boot path (bootstrap.py:573).
+                from src.execution import dispatch_log as _dispatch_log
+                _dispatch_log.init_dispatch_log(_fk._db)
+                log.info("Dispatch-event log client initialised")
         except Exception as exc:
             log.warning(
                 "Firestore keystore / kill switch init failed "
-                "(binance_key_connected and engine_wide_enabled will show false): {}", exc
+                "(binance_key_connected and engine_wide_enabled will show "
+                "false, and Recent Activity will be empty): {}", exc
             )
     else:
         log.info("Firebase Admin skipped (env vars not set)")
