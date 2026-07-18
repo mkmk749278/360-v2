@@ -4,6 +4,96 @@
 
 ---
 
+## 🟢 SESSION 64 2026-07-18 — Full-system audit + implementation map; MEAN_REVERT zero-emission root-caused past the S60 fix (branch `claude/system-audit-implementation-map-gqxnjz`, 360-v2, doc-only)
+
+**Owner ask:** fully audit the system, every corner; deliver an MD file with the
+full implementation map.
+
+**Shipped:** `docs/SYSTEM_AUDIT_IMPLEMENTATION_MAP_2026_07_17.md` — code-verified
+map of all four repos at `main` HEAD (engine `8a3d1af`, app `2b12a84`, ops
+`22dbf6c`, legal `5cb85ef`): topology, the full 11-stage signal path with the
+18-evaluator live-status table, execution stack + invariants, 57-route API
+inventory, measurement/self-defence layer, flag register (dark vs live,
+defaults from `config/`), S59 dead-code register, app/ops/legal maps, cross-repo
+contracts, CI/CD, health snapshot, findings, outstanding owner actions.
+
+### Audit findings
+
+- **F1 (HIGH, live — open issue #739): MEAN_REVERT still 0 emissions ~24h after
+  #732 deployed.** The liveness probe paged hourly all day (`emitted_total=0`,
+  monotonic). Truth report: 15,410 generated → 15,410 gated → **zero rows in the
+  confidence tables** — every candidate dies pre-scoring, so this is NOT the
+  §3.6a scoring class and NOT the execution gate #732 fixed. Both pre-scoring
+  kill sites reject reasonlessly (`_reject("gated", None)`,
+  `scanner/__init__.py:5713`/`5718`). **Prime structural suspect:**
+  `REGIME_SETUP_COMPATIBILITY` lists MEAN_REVERT under CLEAN_RANGE + DIRTY_RANGE
+  only, while its ≥2.5σ trigger is exactly the move that flips the MarketState
+  classifier OUT of the range states — trigger anti-correlated with its own
+  compat map. FUNDING_EXTREME (172/214 gated, 0 emitted) and LIQ_REVERSAL
+  (32/32) share the signature. Recommended sequence in the doc: (1) reason-tag
+  the two silent gated rejects (off money path, ships normally), (2) read one
+  real window, (3) compat-map decision dark-first + owner sign-off.
+- **F2 (MED):** the `gated`-stage rejects are the last reasonless rejection
+  layer in the funnel — the exact gap that delayed F1's diagnosis.
+- **F3 (LOW, checklist):** `SIGNAL_EXPIRY_ENABLED` defaults false in code —
+  confirm VPS `.env` value vs B9 next time on the box.
+- **Clean:** ruff re-run clean this session; zero open PRs across all four
+  repos (S61–S63 fully merged incl. owner items #736/#740); backups healthy
+  (#714 closed via #725); breakers wired with -2019/-4411 exclusions; only
+  auto-detected issue open is #739.
+
+### Second half of session (owner screenshots + "implement what's important"):
+three fixes shipped on the same branch, all off the money path, full suite
+**6742 passed** locally, ruff clean, mypy 112 = baseline
+
+- **F4 (HIGH, new): the documented `/enable_user` operator verb NEVER
+  existed.** `kill_switch.enable_user()` had zero operator-facing callers on
+  any surface — the paying customer's "Paused by a safety check — email
+  support" state (owner screenshot, per-user breaker trip, -4411 storm
+  pre-#740) was permanently un-fixable. Shipped: owner-gated
+  `POST /api/admin/users/auto-trade-enable` (phone OR firebase_uid; enable, or
+  audited manual disable; Firestore read-back = engine truth; breaker's 5-min
+  in-memory window self-expires so no engine-side reset needed). Kill-switch
+  adjacent → owner merges the PR. Ops-UI button = follow-up in 360ce-ops.
+- **F5 (MED, new): "Watching 0 symbols" on an armed account** — isolated-api
+  display bug, same container class as #736: no PairManager singleton in the
+  api process + env unset ⇒ runtime-status reported an empty allowlist for
+  every user. Display-only. Shipped: pairs-snapshot fallback
+  (`published_pairs()`, regular+promoting) with user-pref intersection; env
+  hard-narrow still wins.
+- **F2 (from the morning audit) implemented:** the two reasonless pre-scoring
+  kill sites now record `gate_reject:setup_compat:{channel|regime_<STATE>}` /
+  `gate_reject:execution:{trigger_not_confirmed|overextended}` funnel stages;
+  truth report gained "## Pre-scoring gate rejects". One real window after
+  deploy names MEAN_REVERT's killing gate + MarketState (#739/F1 step 1).
+
+**Paper-freeze question (owner screenshot: last paper trade 2d ago, toggle
+ON):** not resolved from here — needs the VPS reads. Facts established:
+per-user paper books fill ONLY while engine-wide `AUTO_EXECUTION_MODE` is
+`paper` (fan-out is TradeMonitor's order manager); the probe shows ONE
+per-user ledger on disk with closes yesterday afternoon, so engine paper mode
+was active — divergence between that ledger and the app's 2d-old history
+points at per-user paper eligibility (`resolve_paper_preferences_uid`) or a
+mode-row change ~07-16. Runbook given to owner (engine auto-mode read, user
+mode row + paper prefs SELECT, ledger mtimes).
+
+### NEXT
+
+1. Owner: merge the session PR (admin enable verb = kill-switch adjacent),
+   deploy, then: (a) re-enable the paid customer via the new endpoint (after
+   they accept the Binance Futures agreement), (b) set
+   `AUTO_TRADE_MANUAL_TAKE_ENABLED=true` in VPS `.env` + `bash deploy.sh`,
+   (c) run the paper-freeze + test-account runbook commands from the session
+   reply.
+2. After a real window: read "## Pre-scoring gate rejects" for MEAN_REVERT →
+   confirm the compat-map hypothesis → compat-map change is dark-first +
+   owner sign-off (F1 step 3).
+3. Unchanged owner queue: alert-take geometry design; proration follow-up;
+   data reads (dispatch_staleness, geometry A/B, @TUNED arms, BTC_DIR
+   shadow); dispatch_log retention; ops-UI per-user enable button.
+
+---
+
 ## 🟢 SESSION 63 2026-07-17 — test-coverage sweep across all three repos + /api/activity filter bug found by it (branch `claude/test-coverage-analysis-9ykleq`, 360-v2 + lumin-app + 360ce-ops)
 
 **Owner ask:** analyze test coverage across the codebase, then implement all

@@ -86,6 +86,7 @@ def register(
     *,
     auth: Callable,
     identity_dep: Callable,
+    get_engine: Optional[Callable[[], Any]] = None,
 ) -> None:
     """Wire ``GET /api/auto-trade/user-status`` onto the given app.
 
@@ -400,12 +401,43 @@ def register(
         # ``effective_allowed_symbols`` is the intersection with this
         # user's symbol_preference (defaults to engine-wide when the
         # user has set no preference).
-        allowlist = sorted(_tripwires._load_symbol_allowlist())
+        allowlist_set = _tripwires._load_symbol_allowlist()
+        if not allowlist_set and get_engine is not None:
+            # Isolated-mode display truth (2026-07-18, same container class
+            # as the KMS-init bug #736): the PairManager singleton lives in
+            # the ENGINE process, so this api container's in-process
+            # resolution returns the block-all empty set and every user
+            # rendered "Watching 0 symbols" while the engine container was
+            # trading a full universe.  Fall back to the engine-published
+            # pairs snapshot (regular + mover-promoted) — the same source
+            # /api/pairs serves.  Display-only: real order gating runs
+            # engine-side where the singleton exists.
+            try:
+                _eng = get_engine()
+                _pp = (
+                    _eng.published_pairs()
+                    if hasattr(_eng, "published_pairs")
+                    else None
+                )
+                if isinstance(_pp, dict):
+                    allowlist_set = {
+                        str(row.get("symbol", "")).upper()
+                        for group in ("regular", "promoting")
+                        for row in (_pp.get(group) or [])
+                        if isinstance(row, dict) and row.get("symbol")
+                    }
+            except Exception:
+                log.exception(
+                    "runtime_status: pairs-snapshot allowlist fallback failed"
+                )
+        allowlist = sorted(allowlist_set)
         try:
             # Helper does two synchronous SQLite reads (user row +
             # auto-trade row) — run off the event loop.
             effective = await asyncio.to_thread(
-                _tripwires.effective_allowed_symbols_for_user, firebase_uid
+                _tripwires.effective_allowed_symbols_for_user,
+                firebase_uid,
+                allowlist=allowlist_set,
             )
         except Exception:
             log.exception(

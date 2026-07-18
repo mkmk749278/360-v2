@@ -200,3 +200,133 @@ def test_grant_503_when_user_store_unconfigured():
     assert r.status_code == 503
     r2 = client.get("/api/admin/users/lookup", params={"phone": "+15551230000"})
     assert r2.status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# Auto-trade enable/disable (the missing /enable_user operator verb,
+# 2026-07-18 — audit finding: kill_switch.enable_user had NO operator-
+# facing caller on any surface, so a breaker-tripped user stayed
+# disabled forever)
+# ---------------------------------------------------------------------------
+
+from unittest.mock import MagicMock  # noqa: E402
+
+
+@pytest.fixture
+def _fake_kill_switch(monkeypatch):
+    """In-memory kill-switch double honouring the write→read-back contract."""
+    from src.execution import kill_switch
+
+    state: dict = {}
+
+    fake = MagicMock()
+    fake.enable_user = MagicMock(
+        side_effect=lambda uid: state.__setitem__(uid, False)
+    )
+    fake.disable_user = MagicMock(
+        side_effect=lambda uid, reason="": state.__setitem__(uid, True)
+    )
+    fake.is_user_disabled = MagicMock(
+        side_effect=lambda uid: state.get(uid, False)
+    )
+    monkeypatch.setattr(kill_switch, "_client", fake)
+    yield fake
+    kill_switch.reset_for_test()
+
+
+def test_auto_trade_enable_requires_owner(grant_setup, _fake_kill_switch):
+    _, non_owner_client, *_ = grant_setup
+    r = non_owner_client.post(
+        "/api/admin/users/auto-trade-enable",
+        json={"firebase_uid": "fb-someone-123", "enabled": True},
+    )
+    assert r.status_code in (401, 403)
+
+
+def test_auto_trade_enable_by_firebase_uid_round_trip(
+    grant_setup, _fake_kill_switch
+):
+    owner_client, *_ = grant_setup
+    # Disable first (manual operator disable with an audit reason) …
+    r = owner_client.post(
+        "/api/admin/users/auto-trade-enable",
+        json={
+            "firebase_uid": "fb-breaker-victim",
+            "enabled": False,
+            "reason": "manual test disable",
+        },
+    )
+    assert r.status_code == 200
+    assert r.json()["auto_trade_disabled"] is True
+    assert r.json()["ok"] is True
+    # … then re-enable: the read-back must show the flag cleared.
+    r = owner_client.post(
+        "/api/admin/users/auto-trade-enable",
+        json={"firebase_uid": "fb-breaker-victim", "enabled": True},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["auto_trade_disabled"] is False
+    assert body["ok"] is True
+    _fake_kill_switch.enable_user.assert_called_once_with("fb-breaker-victim")
+
+
+def test_auto_trade_enable_by_phone_resolves_firebase_uid(
+    grant_setup, _fake_kill_switch
+):
+    owner_client, _, user_store, user_id = grant_setup
+    user_store.set_firebase_uid(user_id, "fb-of-15551230000")
+    r = owner_client.post(
+        "/api/admin/users/auto-trade-enable",
+        json={"phone": "+15551230000", "enabled": True},
+    )
+    assert r.status_code == 200
+    body = r.json()
+    assert body["firebase_uid"] == "fb-of-15551230000"
+    assert body["phone"] == "+15551230000"
+    assert body["auto_trade_disabled"] is False
+
+
+def test_auto_trade_enable_phone_without_firebase_uid_is_409(
+    grant_setup, _fake_kill_switch
+):
+    owner_client, *_ = grant_setup
+    r = owner_client.post(
+        "/api/admin/users/auto-trade-enable",
+        json={"phone": "+15551230000", "enabled": True},
+    )
+    assert r.status_code == 409
+    assert "firebase_uid" in r.json()["detail"]
+
+
+def test_auto_trade_enable_unknown_phone_is_404(grant_setup, _fake_kill_switch):
+    owner_client, *_ = grant_setup
+    r = owner_client.post(
+        "/api/admin/users/auto-trade-enable",
+        json={"phone": "+15559999999", "enabled": True},
+    )
+    assert r.status_code == 404
+
+
+def test_auto_trade_enable_requires_exactly_one_identifier(
+    grant_setup, _fake_kill_switch
+):
+    owner_client, *_ = grant_setup
+    for payload in (
+        {"enabled": True},
+        {"phone": "+15551230000", "firebase_uid": "fb-x-12345678", "enabled": True},
+    ):
+        r = owner_client.post("/api/admin/users/auto-trade-enable", json=payload)
+        assert r.status_code == 422
+
+
+def test_auto_trade_enable_503_when_kill_switch_uninitialised(grant_setup):
+    from src.execution import kill_switch
+
+    kill_switch.reset_for_test()
+    owner_client, *_ = grant_setup
+    r = owner_client.post(
+        "/api/admin/users/auto-trade-enable",
+        json={"firebase_uid": "fb-anyone-123", "enabled": True},
+    )
+    assert r.status_code == 503

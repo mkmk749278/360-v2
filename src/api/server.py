@@ -2195,6 +2195,9 @@ def build_app(
         app,
         auth=auth,
         identity_dep=user_claims,
+        # Isolated mode: the facade's published_pairs() backs the symbol-
+        # allowlist display when this process has no PairManager singleton.
+        get_engine=lambda: engine,
     )
 
     # ``GET /api/region`` (Play Store A6 / E2, 2026-05-20) — client

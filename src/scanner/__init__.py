@@ -5709,11 +5709,36 @@ class Scanner:
                 and chan_name in CHANNEL_VOLATILE_FAMILY_GOVERNED
             ):
                 self._suppression_counters[f"volatile_unsuitable:family_block:{chan_name}"] += 1
+            # 2026-07-18 audit F2: this and the execution reject below were the
+            # last two reasonless kills in the funnel — a path 100%-blocked here
+            # showed only "Gated == Generated, classification (none)" in the
+            # truth report (how MEAN_REVERT's zero-emission hid behind the
+            # already-fixed execution gate, #739).  Bounded cardinality: the
+            # regime token is one of six MarketState values.
+            _ms_token = getattr(ctx.market_state, "value", str(ctx.market_state))
+            _compat_token = (
+                "channel" if not setup.channel_compatible else f"regime_{_ms_token}"
+            )
+            self._increment_path_funnel(
+                f"gate_reject:setup_compat:{_compat_token}",
+                chan_name,
+                _setup_class_name,
+            )
             log.debug("Rejected {} {} setup: {}", symbol, chan_name, setup.reason)
             return _reject("gated", None)
 
         execution = self._evaluate_execution(sig, ctx, setup)
         if not execution.passed:
+            _exec_token = (
+                "trigger_not_confirmed"
+                if not execution.trigger_confirmed
+                else "overextended"
+            )
+            self._increment_path_funnel(
+                f"gate_reject:execution:{_exec_token}",
+                chan_name,
+                _setup_class_name,
+            )
             log.debug("Rejected {} {} execution: {}", symbol, chan_name, execution.reason)
             return _reject("gated", None)
 
