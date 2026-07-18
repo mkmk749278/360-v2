@@ -423,6 +423,34 @@ class KillSwitchClient:
             self._user_cache.pop(firebase_uid, None)
         log.info("kill_switch: user enabled uid={}", firebase_uid)
 
+    def last_self_reenable_at(self, firebase_uid: str):
+        """UTC datetime of the user's last self-service re-enable, or
+        ``None``.  Backs the self-serve breaker-recovery cooldown
+        (2026-07-18) — uncached: this is only read on the explicit
+        re-enable tap, never on a hot path."""
+        doc = (
+            self._db.collection("users")
+            .document(firebase_uid)
+            .get()
+        )
+        if not doc.exists:
+            return None
+        data = doc.to_dict() or {}
+        return data.get("auto_trade_self_reenabled_at")
+
+    def record_self_reenable(self, firebase_uid: str) -> None:
+        """Stamp the self-service re-enable time (rate-limit anchor)."""
+        from datetime import datetime, timezone
+
+        (
+            self._db.collection("users")
+            .document(firebase_uid)
+            .set(
+                {"auto_trade_self_reenabled_at": datetime.now(timezone.utc)},
+                merge=True,
+            )
+        )
+
     def _read_user_disabled(self, firebase_uid: str) -> bool:
         doc = (
             self._db.collection("users")

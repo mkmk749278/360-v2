@@ -77,9 +77,32 @@ points at per-user paper eligibility (`resolve_paper_preferences_uid`) or a
 mode-row change ~07-16. Runbook given to owner (engine auto-mode read, user
 mode row + paper prefs SELECT, ledger mtimes).
 
+### Third wave (owner: "we can't re-enable one by one — subscribers must
+recover automatically"; picked **self-serve button** via AskUserQuestion)
+
+Self-service breaker recovery, engine + app (PR #742 already merged; this
+wave is a follow-up PR pair):
+
+- **Engine:** `POST /api/auto-trade/resume-disabled-mine` (user-authed) —
+  a breaker-disabled user clears their OWN flag; rate-limited once per
+  `AUTO_TRADE_SELF_REENABLE_COOLDOWN_HOURS` (config, default 6; B8) via a
+  Firestore stamp (`users/{uid}.auto_trade_self_reenabled_at`, two new
+  additive KillSwitchClient methods, read only on the tap — no hot-path
+  reads); 429 carries human-readable retry copy; no-op honest response when
+  not disabled; runtime cache invalidated; blast radius unchanged (breaker
+  re-trips on new qualifying failures; -2019/-4411 never feed it). 8 new
+  route tests; api suite 679 green; ruff clean; mypy 112 = baseline.
+- **App (lumin-app, same branch name):** paused card's "Email support" CTA
+  replaced by primary **"Re-enable auto-trade"** (busy state, snackbar
+  outcomes, 429 copy rendered verbatim) with Email support demoted to
+  secondary; `SelfReenableResult` model + `resumeDisabledMine()` on both
+  repository impls; SWR invalidation on success; 5 new HttpRepository
+  tests (CI runs them — no Flutter in this container).
+
 ### NEXT
 
-1. Owner: merge the session PR (admin enable verb = kill-switch adjacent),
+1. Owner: merge the self-serve recovery PR pair (engine PR is kill-switch
+   adjacent — owner-approved in-session via AskUserQuestion, owner merges),
    deploy, then: (a) re-enable the paid customer via the new endpoint (after
    they accept the Binance Futures agreement), (b) set
    `AUTO_TRADE_MANUAL_TAKE_ENABLED=true` in VPS `.env` + `bash deploy.sh`,

@@ -486,6 +486,114 @@ def register(
         _runtime_cache[firebase_uid] = (result, time.monotonic())
         return result
 
+    @app.post(
+        "/api/auto-trade/resume-disabled-mine",
+        tags=["auto-mode"],
+        dependencies=[Depends(auth)],
+    )
+    async def auto_trade_resume_disabled_mine(
+        identity: Any = Depends(identity_dep),
+    ) -> dict:
+        """Self-service recovery from a per-user breaker disable
+        (owner-approved 2026-07-18).
+
+        The per-user circuit breaker (B18 #5) persists its disable in
+        Firestore; until this endpoint the only recovery was the owner-run
+        ``/api/admin/users/auto-trade-enable`` — a support round-trip and
+        subscriber downtime for every trip.  The paused card's
+        "Re-enable auto-trade" button calls this instead: the signed-in
+        user clears their OWN flag, rate-limited to once per
+        ``AUTO_TRADE_SELF_REENABLE_COOLDOWN_HOURS`` (default 6) so a
+        genuinely failing account can't flap through a failure storm.
+        Blast radius is unchanged — the breaker re-trips on new
+        qualifying failures exactly as before, and user-setup rejections
+        (-2019 / -4411) never feed it (#740).
+
+        Response: ``{ok, auto_trade_disabled, already_enabled}``.
+        429 with a human-readable retry hint inside the cooldown.
+        """
+        from datetime import datetime, timedelta, timezone
+
+        from src.execution import kill_switch as _kill_switch
+
+        firebase_uid = _extract_firebase_uid(identity)
+        if firebase_uid is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail=(
+                    "Re-enabling auto-trade requires Firebase sign-in. "
+                    "Sign in with your Lumin account and try again."
+                ),
+            )
+        if not _kill_switch.is_initialised():
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="auto-trade controls are not available right now",
+            )
+        ks = _kill_switch.get_client()
+
+        disabled = bool(
+            await asyncio.to_thread(ks.is_user_disabled, firebase_uid)
+        )
+        if not disabled:
+            # Nothing to do — surface honestly so the app can just
+            # refresh its status instead of showing an error.
+            return {
+                "ok": True,
+                "auto_trade_disabled": False,
+                "already_enabled": True,
+            }
+
+        import config as _config
+
+        cooldown_hours = float(
+            getattr(_config, "AUTO_TRADE_SELF_REENABLE_COOLDOWN_HOURS", 6.0)
+        )
+        last = await asyncio.to_thread(
+            ks.last_self_reenable_at, firebase_uid
+        )
+        if last is not None and cooldown_hours > 0:
+            try:
+                now = datetime.now(timezone.utc)
+                elapsed = now - last
+                remaining = timedelta(hours=cooldown_hours) - elapsed
+                if remaining.total_seconds() > 0:
+                    mins = max(1, int(remaining.total_seconds() // 60))
+                    raise HTTPException(
+                        status_code=status.HTTP_429_TOO_MANY_REQUESTS,
+                        detail=(
+                            f"You already re-enabled auto-trade recently. "
+                            f"Try again in about {mins} minutes, or contact "
+                            f"support if this keeps happening."
+                        ),
+                    )
+            except HTTPException:
+                raise
+            except Exception:
+                # Malformed/legacy timestamp → treat as no prior
+                # self-re-enable rather than locking the user out.
+                log.exception(
+                    "resume_disabled_mine: cooldown read failed uid={}",
+                    firebase_uid,
+                )
+
+        await asyncio.to_thread(ks.enable_user, firebase_uid)
+        await asyncio.to_thread(ks.record_self_reenable, firebase_uid)
+        disabled_now = bool(
+            await asyncio.to_thread(ks.is_user_disabled, firebase_uid)
+        )
+        invalidate_runtime_cache(firebase_uid)
+        log.warning(
+            "resume_disabled_mine: uid={} self re-enabled "
+            "(read_back_disabled={})",
+            firebase_uid, disabled_now,
+        )
+        return {
+            "ok": not disabled_now,
+            "auto_trade_disabled": disabled_now,
+            "already_enabled": False,
+        }
+
     @app.get(
         "/api/auto-trade/positions",
         tags=["auto-mode"],

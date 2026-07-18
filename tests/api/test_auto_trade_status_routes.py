@@ -925,3 +925,114 @@ def test_recent_events_returns_user_events_from_firestore(
     assert rejected["reject_class"] == "OrderRejectedByBinance"
     assert rejected["reject_binance_code"] == -2019
     assert rejected["reject_binance_msg"] == "Margin is insufficient."
+
+
+# ---------------------------------------------------------------------------
+# resume-disabled-mine — self-serve breaker recovery (owner-approved
+# 2026-07-18): the paused card's "Re-enable auto-trade" button
+# ---------------------------------------------------------------------------
+
+
+def _install_self_reenable_kill_switch(
+    *, disabled: bool, last_self_reenable=None
+):
+    """Kill-switch double with a mutable disabled flag + cooldown stamp."""
+    from src.execution import kill_switch
+
+    state = {"disabled": disabled, "stamp": last_self_reenable}
+    fake = MagicMock()
+    fake.is_user_disabled = MagicMock(side_effect=lambda uid: state["disabled"])
+    fake.enable_user = MagicMock(
+        side_effect=lambda uid: state.__setitem__("disabled", False)
+    )
+    fake.last_self_reenable_at = MagicMock(side_effect=lambda uid: state["stamp"])
+    fake.record_self_reenable = MagicMock(
+        side_effect=lambda uid: state.__setitem__("stamp", "now")
+    )
+    kill_switch._client = fake
+    return fake
+
+
+def test_resume_disabled_mine_requires_firebase_identity() -> None:
+    app = _build_app(identity=None)
+    r = TestClient(app).post("/api/auto-trade/resume-disabled-mine")
+    assert r.status_code == 401
+
+
+def test_resume_disabled_mine_503_when_kill_switch_uninitialised() -> None:
+    app = _build_app(identity=_firebase_user(uid="fb-rdm-0"))
+    r = TestClient(app).post("/api/auto-trade/resume-disabled-mine")
+    assert r.status_code == 503
+
+
+def test_resume_disabled_mine_noop_when_not_disabled() -> None:
+    fake = _install_self_reenable_kill_switch(disabled=False)
+    app = _build_app(identity=_firebase_user(uid="fb-rdm-1"))
+    body = TestClient(app).post("/api/auto-trade/resume-disabled-mine").json()
+    assert body == {
+        "ok": True, "auto_trade_disabled": False, "already_enabled": True,
+    }
+    fake.enable_user.assert_not_called()
+
+
+def test_resume_disabled_mine_reenables_and_stamps_cooldown() -> None:
+    fake = _install_self_reenable_kill_switch(disabled=True)
+    app = _build_app(identity=_firebase_user(uid="fb-rdm-2"))
+    r = TestClient(app).post("/api/auto-trade/resume-disabled-mine")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["ok"] is True
+    assert body["auto_trade_disabled"] is False
+    assert body["already_enabled"] is False
+    fake.enable_user.assert_called_once_with("fb-rdm-2")
+    fake.record_self_reenable.assert_called_once_with("fb-rdm-2")
+
+
+def test_resume_disabled_mine_rate_limited_inside_cooldown() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    recent = datetime.now(timezone.utc) - timedelta(hours=1)
+    fake = _install_self_reenable_kill_switch(
+        disabled=True, last_self_reenable=recent
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-rdm-3"))
+    r = TestClient(app).post("/api/auto-trade/resume-disabled-mine")
+    assert r.status_code == 429
+    assert "Try again in about" in r.json()["detail"]
+    fake.enable_user.assert_not_called()
+
+
+def test_resume_disabled_mine_allows_after_cooldown_expires() -> None:
+    from datetime import datetime, timedelta, timezone
+
+    stale = datetime.now(timezone.utc) - timedelta(hours=7)
+    fake = _install_self_reenable_kill_switch(
+        disabled=True, last_self_reenable=stale
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-rdm-4"))
+    r = TestClient(app).post("/api/auto-trade/resume-disabled-mine")
+    assert r.status_code == 200
+    assert r.json()["auto_trade_disabled"] is False
+    fake.enable_user.assert_called_once()
+
+
+def test_resume_disabled_mine_malformed_stamp_fails_open() -> None:
+    """A legacy/garbage cooldown stamp must not lock the user out."""
+    fake = _install_self_reenable_kill_switch(
+        disabled=True, last_self_reenable="not-a-datetime"
+    )
+    app = _build_app(identity=_firebase_user(uid="fb-rdm-5"))
+    r = TestClient(app).post("/api/auto-trade/resume-disabled-mine")
+    assert r.status_code == 200
+    assert r.json()["auto_trade_disabled"] is False
+    fake.enable_user.assert_called_once()
+
+
+def test_resume_disabled_mine_invalidates_runtime_cache() -> None:
+    from src.api import auto_trade_status_routes as mod
+
+    _install_self_reenable_kill_switch(disabled=True)
+    mod._runtime_cache["fb-rdm-6"] = ({"armed": False}, 10.0**9)
+    app = _build_app(identity=_firebase_user(uid="fb-rdm-6"))
+    TestClient(app).post("/api/auto-trade/resume-disabled-mine")
+    assert "fb-rdm-6" not in mod._runtime_cache
