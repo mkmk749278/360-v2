@@ -81,6 +81,7 @@ def _build_registry() -> Dict[str, Tunable]:
         MARK_FEED_STALENESS_ENABLED,
         MARK_FEED_STALENESS_MAX_AGE_SEC,
         MEAN_REVERT_LIVE,
+        RANGE_FADE_LIVE,
         MOVER_AVWAP_SCALP_ENABLED,
         MOVER_RUNNER_EXIT_ENABLED,
         MOVER_TREND_PULLBACK_ENABLED,
@@ -359,6 +360,27 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=MEAN_REVERT_LIVE,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="range_fade_live",
+            label="RANGE_FADE live (context-gated)",
+            description=(
+                "Emit RANGE_FADE signals live (fade a ≥2-touch range edge "
+                "back to the mid; range = 48×15m ≥ 4·ATR wide, stop 1·ATR "
+                "beyond the edge). Graduated DARK from SHADOW_RANGE_FADE — "
+                "the Strategy Lab allocator's top pick in range/quiet "
+                "contexts (+0.841R n=24 ASIA/QUIET/NORMAL; +0.885R n=15 "
+                "OVERLAP/RANGE/NORMAL) — but blanket activation measured "
+                "net-negative (gate audit +0.20R/suppression, n=223), so "
+                "even when ON it emits only in contexts whose shadow cell "
+                "verdict is STRONG (context-edge gate; env-relaxable to "
+                "POSITIVE). Off = shadow-only ([SHADOW] "
+                "RANGE_FADE_WOULD_FIRE log, no signal); the shadow unit "
+                "keeps stamping as the ungated control arm either way."
+            ),
+            type="bool",
+            default=RANGE_FADE_LIVE,
             category="Signal gating",
         ),
         Tunable(

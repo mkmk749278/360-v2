@@ -264,8 +264,8 @@ def test_scalp_channel_tracks_exception_non_generation_reason(monkeypatch):
     assert telemetry["attempts"]["STANDARD"] == 1
     assert telemetry["no_signal"]["STANDARD"] == 1
     assert telemetry["no_signal_reason"]["STANDARD:exception"] == 1
-    # 18 active evaluators (2026-07-15 added MEAN_REVERT).
-    assert sum(telemetry["attempts"].values()) == 18
+    # 19 active evaluators (2026-07-18 added RANGE_FADE).
+    assert sum(telemetry["attempts"].values()) == 19
     assert telemetry["attempts"]["FUNDING_EXTREME"] == 1
     assert telemetry["no_signal_reason"]["FUNDING_EXTREME:none"] == 1
 

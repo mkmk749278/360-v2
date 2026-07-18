@@ -278,6 +278,12 @@ class TestProtectedPathsPreserveSLTP:
         - Its ±1.5·ATR stop and mean-target TP1 are EXACTLY the geometry the
           shadow ledger forward-measured at +0.67R over n=550 — recomputing
           them downstream would invalidate the evidence the path went live on.
+
+        RANGE_FADE is included for the same reason (2026-07-18 graduation):
+        - Its edge+1·ATR stop and range-mid TP1 are EXACTLY the geometry the
+          shadow ledger forward-measured (STRONG cells up to +0.885R) —
+          recomputing them downstream would invalidate the context-gate's
+          evidence base.
         """
         expected = {
             SetupClass.POST_DISPLACEMENT_CONTINUATION,
@@ -292,6 +298,7 @@ class TestProtectedPathsPreserveSLTP:
             SetupClass.DIVERGENCE_CONTINUATION,
             SetupClass.FUNDING_EXTREME_SIGNAL,
             SetupClass.MEAN_REVERT,
+            SetupClass.RANGE_FADE,
         }
         assert STRUCTURAL_SLTP_PROTECTED_SETUPS == expected, (
             "STRUCTURAL_SLTP_PROTECTED_SETUPS diverged from the PR-02/PR-14 specification. "

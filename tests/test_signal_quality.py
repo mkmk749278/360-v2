@@ -2456,6 +2456,9 @@ class TestPortfolioRoles:
         # 2026-07-15: statistical mean-reversion (18th path), graduated live
         # from SHADOW_MEAN_REVERT.
         SetupClass.MEAN_REVERT,
+        # 2026-07-18: range-edge fade (19th path), graduated DARK +
+        # context-gated from SHADOW_RANGE_FADE.
+        SetupClass.RANGE_FADE,
     })
 
     def test_every_active_path_has_a_role(self):
@@ -2538,6 +2541,7 @@ class TestPortfolioRoles:
             SetupClass.MOVER_TREND_PULLBACK,
             SetupClass.MOVER_AVWAP_SCALP,
             SetupClass.MEAN_REVERT,
+            SetupClass.RANGE_FADE,
         }
         actual_support = {
             sc for sc, role in ACTIVE_PATH_PORTFOLIO_ROLES.items()

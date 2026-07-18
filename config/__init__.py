@@ -1010,6 +1010,36 @@ MOVER_AVWAP_SL_BUFFER_ATR: float = _safe_float("MOVER_AVWAP_SL_BUFFER_ATR", "0.5
 # function, so live and shadow can never drift.
 MEAN_REVERT_LIVE: bool = _safe_bool("MEAN_REVERT_LIVE", "true")
 
+# ── RANGE_FADE path (2026-07-18, 19th evaluator — DARK, context-gated) ─────────
+# Fade a tested range edge back to the mid: range = 48×15m window, width
+# ≥ 4·ATR, ≥ 2 distinct touches per edge; stop = 1·ATR beyond the faded edge,
+# TP1 = range mid, 240-min validity.  Graduated from the shadow unit
+# SHADOW_RANGE_FADE (Strategy Lab 2026-07-18: the allocator's TOP pick in the
+# live context — +0.841R over n=24 ASIA/QUIET/NORMAL, with STRONG cells in
+# OVERLAP/RANGE (+0.885R), NY/MARKDOWN/EXPANDED (+0.799R), LONDON/QUIET/
+# COMPRESSED (+0.650R) and more).  BUT the same ledger measures BLANKET
+# activation as net-negative (gate audit: suppressing the unit "saved"
+# +0.20R/candidate over n=223 — the losses in its NEGATIVE cells outweigh the
+# wins in its STRONG ones).  So this path is CONTEXT-GATED: it emits only in
+# market contexts whose SHADOW_RANGE_FADE cell has a measured POSITIVE/STRONG
+# Wilson-bound verdict (the allocator's own eligibility rule) — everywhere
+# else it stays shadow-only.  Ships dark per production doctrine: default OFF;
+# the owner activates via the `range_fade_live` runtime tunable (ops Control →
+# Signal gating).  The shadow unit keeps stamping unconditionally as the
+# ungated control arm.
+RANGE_FADE_LIVE: bool = _safe_bool("RANGE_FADE_LIVE", "false")
+#: Master switch for the context-edge gate.  OFF = emit in every context the
+#: regime/compat gates allow (NOT recommended — blanket activation is measured
+#: net-negative, see above); kept env-overridable per B8 for diagnosis.
+RANGE_FADE_CONTEXT_GATE_ENABLED: bool = _safe_bool(
+    "RANGE_FADE_CONTEXT_GATE_ENABLED", "true"
+)
+#: Minimum edge-matrix verdict for the current context cell to emit:
+#: "strong" (default) = STRONG only; "positive" = POSITIVE or STRONG.
+RANGE_FADE_CONTEXT_MIN_VERDICT: str = _safe_choice(
+    "RANGE_FADE_CONTEXT_MIN_VERDICT", "strong", frozenset({"strong", "positive"})
+)
+
 # ── Counter-trend hard-block on confirmed strong movers (Session 30, owner-approved) ─
 # §3.2 #5 reserves HARD blocks for structural impossibility.  Fading a CONFIRMED
 # strong mover with a reversal IS that case: SYNUSDT (+300%/7d, 4h+1h both stacked
@@ -1705,6 +1735,7 @@ SIGNAL_TYPE_LABELS: Dict[str, str] = {
     "POST_DISPLACEMENT_CONTINUATION": "➡️ DISPLACEMENT CONTINUATION",
     "TREND_PULLBACK_EMA":            "📈 TREND PULLBACK EMA",
     "MEAN_REVERT":                   "🎯 MEAN REVERT",
+    "RANGE_FADE":                    "↔️ RANGE FADE",
 }
 
 CHANNEL_EMOJIS: Dict[str, str] = {

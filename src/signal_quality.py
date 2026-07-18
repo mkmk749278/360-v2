@@ -86,6 +86,15 @@ class SetupClass(str, Enum):
     # Shares its detection function with the shadow unit so the two can never
     # drift; the shadow unit keeps running as the ungated control arm.
     MEAN_REVERT = "MEAN_REVERT"
+    # 2026-07-18 (19th evaluator, DARK + context-gated): fade a tested range
+    # edge back to the mid.  Graduated from SHADOW_RANGE_FADE — the shadow
+    # ledger's allocator top pick in range/quiet contexts (+0.841R n=24
+    # ASIA/QUIET/NORMAL; +0.885R n=15 OVERLAP/RANGE/NORMAL) — but blanket
+    # activation measured net-negative (gate audit +0.20R saved/candidate,
+    # n=223), so emission is gated on the current context cell's measured
+    # verdict.  Shares its detection function with the shadow unit so the two
+    # can never drift; the shadow unit keeps running as the ungated control.
+    RANGE_FADE = "RANGE_FADE"
     # PR-01: auxiliary-channel evaluator identities — preserved as distinct setup classes
     # so that downstream scoring and suppression diagnostics reflect true channel intent.
     FVG_RETEST = "FVG_RETEST"
@@ -142,6 +151,7 @@ ACTIVE_PATH_PORTFOLIO_ROLES: Dict[SetupClass, PortfolioRole] = {
     SetupClass.MOVER_TREND_PULLBACK: PortfolioRole.SUPPORT,  # fires on strong movers — situational but recurring
     SetupClass.MOVER_AVWAP_SCALP: PortfolioRole.SUPPORT,  # anchored-VWAP mover continuation — same family
     SetupClass.MEAN_REVERT: PortfolioRole.SUPPORT,  # range/quiet is ~70% of tape — situational but frequent
+    SetupClass.RANGE_FADE: PortfolioRole.SUPPORT,  # same tape as MEAN_REVERT; context-gated to its measured-edge cells
     # ── specialist ────────────────────────────────────────────────────────
     # Low-frequency, narrow-context, high-selectivity paths.  Valid only
     # under precise market conditions and expected to fire rarely.
@@ -181,6 +191,7 @@ STRUCTURAL_SLTP_PROTECTED_SETUPS: frozenset[SetupClass] = frozenset({
     SetupClass.DIVERGENCE_CONTINUATION, # swing-based TPs from divergence detection window
     SetupClass.FUNDING_EXTREME_SIGNAL,  # liquidation-cluster SL + structural FVG/OB TP1
     SetupClass.MEAN_REVERT,             # ±1.5·ATR stop / mean-target geometry IS the measured edge — never recompute
+    SetupClass.RANGE_FADE,              # edge±1·ATR stop / mid-target geometry IS the measured edge — never recompute
 })
 
 
@@ -227,6 +238,7 @@ CHANNEL_SETUP_COMPATIBILITY: Dict[str, set[SetupClass]] = {
         # signals stop dying at the compatibility hard gate pre-scoring.
         SetupClass.MA_CROSS_TREND_SHIFT,
         SetupClass.MEAN_REVERT,
+        SetupClass.RANGE_FADE,
     },
     "360_SCALP_FVG": {
         SetupClass.TREND_PULLBACK_CONTINUATION,
@@ -380,6 +392,9 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         # MEAN_REVERT: prime regime — fading a statistical over-extension back to
         # the mean IS the range trade (shadow edge measured here).
         SetupClass.MEAN_REVERT,
+        # RANGE_FADE: prime regime — fading a tested range edge back to the mid
+        # IS the range trade (shadow edge measured here).
+        SetupClass.RANGE_FADE,
     },
     MarketState.DIRTY_RANGE: {
         SetupClass.LIQUIDITY_SWEEP_REVERSAL,
@@ -405,6 +420,10 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         # MEAN_REVERT: valid in dirty range — the z-trigger already demands a
         # genuine statistical extreme; noise widens sd and raises the bar.
         SetupClass.MEAN_REVERT,
+        # RANGE_FADE: valid in dirty range — the ≥2-touch edge requirement
+        # already demands tested structure; noise widens ATR and raises the
+        # minimum tradeable width.
+        SetupClass.RANGE_FADE,
     },
     MarketState.BREAKOUT_EXPANSION: {
         SetupClass.BREAKOUT_RETEST,
@@ -493,6 +512,7 @@ _MAX_SL_PCT_BY_SETUP: Dict[str, float] = {
     "FUNDING_EXTREME_SIGNAL":         3.0,  # Liq-cluster SL; can be 2-3% away
     "MA_CROSS_TREND_SHIFT":           3.0,  # Structural SL beyond opposite-side swing
     "MEAN_REVERT":                    3.0,  # ±1.5·ATR stop; high-ATR pairs reach ~3%
+    "RANGE_FADE":                     3.0,  # edge±1·ATR stop (≤ ~1.35·ATR from entry); same cap class as MEAN_REVERT
 }
 
 # LSR loss-side tighten (geometry rebuild — ships dark; mirrors config flags
@@ -539,7 +559,11 @@ _MIN_RISK_DISTANCE_PCT_RECLAIM_RETEST = 0.0001  # 0.01% reclaim/retest structura
 
 def _min_rr_for_setup(setup: SetupClass) -> float:
     """Return canonical minimum R:R (reward/risk) by setup family policy."""
-    if setup == SetupClass.RANGE_REJECTION:
+    if setup in (SetupClass.RANGE_REJECTION, SetupClass.RANGE_FADE):
+        # RANGE_FADE: TP1 = the range mid vs an edge+1·ATR stop; on a
+        # minimum-width (4·ATR) range that is ~2·ATR reward vs ~1.35·ATR risk,
+        # but noisy edges can land just under 1.2 — the range-fade family
+        # floor is the measured-geometry-faithful bound.
         return _MIN_RR_RANGE
     if setup in (SetupClass.LIQUIDATION_REVERSAL, SetupClass.FUNDING_EXTREME_SIGNAL,
                  SetupClass.EXHAUSTION_FADE, SetupClass.MEAN_REVERT):
@@ -1064,6 +1088,9 @@ def classify_setup(
         "MOVER_AVWAP_SCALP",
         # 2026-07-15: statistical mean-reversion — same identity-preservation need.
         "MEAN_REVERT",
+        # 2026-07-18: range-edge fade — same identity-preservation need (wrong
+        # identity = wrong SL cap, wrong context gate, wrong telemetry).
+        "RANGE_FADE",
         # PR-01: active auxiliary channel evaluator identities — these channels
         # self-classify their output; downstream must not reclassify to a generic class.
         "FVG_RETEST",
@@ -1224,6 +1251,20 @@ def execution_quality_check(
             else signal.entry > anchor
         )
         note = "Fade the over-extension back to the rolling mean; invalidation is continued extension beyond the stop."
+    elif setup == SetupClass.RANGE_FADE:
+        # Counter-trend fade at a range edge: the anchor is the range MID the
+        # trade targets (stamped by the evaluator as range_fade_mid == TP1).
+        # Trigger confirmed when the entry sits on the faded-edge side of the
+        # mid.  The generic else-branch below is a trend-continuation trigger
+        # (short EMA aligned WITH the trade) — structurally false for a fade;
+        # this is the exact gate class that 100%-killed MEAN_REVERT for a day
+        # before its own branch existed (2026-07-16).
+        anchor = _safe_float(getattr(signal, "range_fade_mid", None), bb_mid or signal.entry)
+        trigger_confirmed = (
+            signal.entry < anchor if signal.direction == Direction.LONG
+            else signal.entry > anchor
+        )
+        note = "Fade the tested range edge back to the mid; invalidation is acceptance beyond the edge stop."
     else:
         anchor = ema_anchor
         trigger_confirmed = (
@@ -1259,6 +1300,12 @@ def execution_quality_check(
         # survived the (previously broken) trigger.  5.0 ATR still rejects
         # catastrophic dislocations (news candles) where fading is suicide.
         SetupClass.MEAN_REVERT: 5.0,
+        # RANGE_FADE: the entry sits at the range EDGE, so its distance from
+        # the mid anchor is ~half the range width — ≥2 ATR by the detector's
+        # own 4-ATR minimum-width rule, more on wide ranges.  Distance from
+        # the anchor is the setup, not staleness.  8.0 ATR (a ~16-ATR-wide
+        # "range") still rejects dislocations that only look like ranges.
+        SetupClass.RANGE_FADE: 8.0,
     }.get(setup, 1.5)
     passed = trigger_confirmed and extension_ratio <= max_extension
     zone_low = min(anchor, signal.entry)
@@ -1809,8 +1856,8 @@ class SignalScoringEngine:
                           "SR_FLIP_RETEST", "POST_DISPLACEMENT_CONTINUATION",
                           "DIVERGENCE_CONTINUATION"],
         "RANGING": ["SWING_STANDARD", "SR_FLIP_RETEST", "FAILED_AUCTION_RECLAIM",
-                    "MEAN_REVERT"],
-        "QUIET": ["QUIET_COMPRESSION_BREAK", "MEAN_REVERT"],
+                    "MEAN_REVERT", "RANGE_FADE"],
+        "QUIET": ["QUIET_COMPRESSION_BREAK", "MEAN_REVERT", "RANGE_FADE"],
         "VOLATILE": ["WHALE_MOMENTUM", "LIQUIDITY_SWEEP_REVERSAL",
                      "VOLUME_SURGE_BREAKOUT", "BREAKDOWN_SHORT",
                      "CONTINUATION_LIQUIDITY_SWEEP", "POST_DISPLACEMENT_CONTINUATION",
@@ -1844,6 +1891,9 @@ class SignalScoringEngine:
         # MEAN_REVERT fades the move by design — same double-penalty argument
         # as LSR above; the z-trigger is its own quality gate.
         "MEAN_REVERT",
+        # RANGE_FADE fades the move by design too — and its context-edge gate
+        # is a far stricter quality filter than regime affinity ever was.
+        "RANGE_FADE",
     })
 
     # ── Family classification sets ─────────────────────────────────────────

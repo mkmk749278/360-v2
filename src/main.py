@@ -1994,6 +1994,64 @@ class CryptoSignalEngine:
             min_streak=6,
         ))
 
+        # RANGE_FADE live path (2026-07-18): same two-probe contract as
+        # MEAN_REVERT above — a detection probe against the shadow unit's
+        # stamp rate (dead live wiring), and an emission-backlog probe
+        # (generated-but-fully-gated).  One structural difference: the
+        # context-edge gate legitimately blocks RANGE_FADE for hours at a
+        # time (only STRONG-verdict context cells emit), so a context block
+        # counts as path-alive in the emission probe — otherwise every long
+        # non-STRONG stretch would page a healthy gate.
+        def _range_fade_detections():
+            if not bool(_rt.get("range_fade_live")):
+                return None
+            total = 0.0
+            for ch in getattr(self._scanner, "channels", []) or []:
+                total += float(getattr(ch, "_range_fade_detections", 0) or 0)
+            return total
+
+        fl.add_rate(RateProbe(
+            name="range_fade_path",
+            counter=_range_fade_detections,
+            upstream=_shadow_stamp_total,
+            min_upstream_delta=30.0,
+            min_streak=72,         # ~6 h — edge touches are sparse
+        ))
+
+        _rf_emit_state: Dict[str, Optional[float]] = {"prog": None, "det": None}
+
+        def _range_fade_emission_health():
+            if not bool(_rt.get("range_fade_live")):
+                return True, "disabled by tunable"
+            det = _range_fade_detections() or 0.0
+            emitted = float(
+                getattr(self._scanner, "_range_fade_emitted_total", 0) or 0
+            )
+            blocked = float(
+                getattr(self._scanner, "_range_fade_context_blocked_total", 0) or 0
+            )
+            progress = emitted + blocked
+            if _rf_emit_state["prog"] is None or progress != _rf_emit_state["prog"]:
+                _rf_emit_state["prog"] = progress
+                _rf_emit_state["det"] = det
+                return True, (
+                    f"emitted_total={emitted:g} context_blocked={blocked:g}"
+                )
+            backlog = det - (_rf_emit_state["det"] or 0.0)
+            if backlog >= 60:
+                return False, (
+                    f"{backlog:g} detections since last emission/context-block "
+                    f"(emitted_total={emitted:g} context_blocked={blocked:g}) "
+                    "— check gate rejections"
+                )
+            return True, f"backlog {backlog:g} detections since last progress"
+
+        fl.add_predicate(PredicateProbe(
+            name="range_fade_emission",
+            fn=_range_fade_emission_health,
+            min_streak=6,
+        ))
+
         # Tuned-variant pipeline (2026-07-16, tune-don't-disable): the residue
         # seen − stamped − skipped grows only on silent pipeline failures
         # (uncomputable ATR arms, store rejects) — by-design skips (cooldown,

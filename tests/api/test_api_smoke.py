@@ -1100,13 +1100,13 @@ def test_auto_trade_global_enable_disable_happy_path(
 # ---------------------------------------------------------------------------
 
 
-def test_agents_returns_18_evaluators(client: TestClient) -> None:
-    """API surface includes one entry per evaluator.  2026-07-15 added the
-    18th evaluator (MEAN_REVERT; 2026-06-28 added the 17th, MOVER_AVWAP_SCALP)."""
+def test_agents_returns_19_evaluators(client: TestClient) -> None:
+    """API surface includes one entry per evaluator.  2026-07-18 added the
+    19th evaluator (RANGE_FADE; 2026-07-15 added the 18th, MEAN_REVERT)."""
     r = client.get("/api/agents")
     assert r.status_code == 200
     body = r.json()
-    assert body["total"] == 18
+    assert body["total"] == 19
     by_setup = {a["setup_class"]: a for a in body["items"]}
     assert "TREND_PULLBACK_EMA" in by_setup
     assert by_setup["TREND_PULLBACK_EMA"]["display_name"] == "The Pullback Sniper"

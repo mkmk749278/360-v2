@@ -92,6 +92,10 @@ _AGENT_DISPLAY_NAMES: Dict[str, str] = {
     # 2026-07-15 (18th evaluator) — statistical mean-reversion, graduated live
     # from the SHADOW_MEAN_REVERT shadow unit (+0.67R / 59% win / n=550).
     "MEAN_REVERT": "The Rubber Band",
+    # 2026-07-18 (19th evaluator) — range-edge fade to mid, graduated dark +
+    # context-gated from the SHADOW_RANGE_FADE shadow unit (allocator top pick
+    # in range/quiet contexts, e.g. +0.841R n=24 ASIA/QUIET/NORMAL).
+    "RANGE_FADE": "The Range Keeper",
 }
 
 # Mapping: telemetry path token  →  setup_class string (path tokens come
@@ -122,6 +126,8 @@ _PATH_TO_SETUP: Dict[str, str] = {
     "MOVER_AVWAP_SCALP": "MOVER_AVWAP_SCALP",
     # _evaluate_mean_revert → MEAN_REVERT.
     "MEAN_REVERT": "MEAN_REVERT",
+    # _evaluate_range_fade → RANGE_FADE.
+    "RANGE_FADE": "RANGE_FADE",
 }
 
 

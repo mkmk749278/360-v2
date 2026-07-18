@@ -112,6 +112,8 @@ from config import (
     MOVER_MAX_SPREAD_PCT,
     COUNTERTREND_MOVER_HARD_BLOCK_ENABLED,
     COUNTERTREND_MOVER_MIN_FAN_PCT,
+    RANGE_FADE_CONTEXT_GATE_ENABLED,
+    RANGE_FADE_CONTEXT_MIN_VERDICT,
     SURGE_PROMOTION_MAX_PAIRS,
     SURGE_PROMOTION_VOLUME_MULTIPLIER,
     TIER2_SCAN_EVERY_N_CYCLES,
@@ -473,6 +475,10 @@ _SCALP_SETUP_TO_FAMILY: Dict[str, str] = {
     # falls into family "other", which is BLOCKED in RANGING-low-ADX, i.e.
     # exactly this path's home regime (fail-closed comment below).
     "MEAN_REVERT": "mean_reversion",
+    # 2026-07-18: RANGE_FADE fades a range edge back to the mid — reversion to
+    # value, same family; unmapped would fall to "other" (blocked in
+    # RANGING-low-ADX, its home regime — same fail-closed trap MEAN_REVERT hit).
+    "RANGE_FADE": "mean_reversion",
     "QUIET_COMPRESSION_BREAK": "compression",
     "DIVERGENCE_CONTINUATION": "divergence",
 }
@@ -899,7 +905,30 @@ _YOUNG_PAIR_EVALUATORS: frozenset[str] = frozenset({
     # _evaluate_mean_revert is DELIBERATELY absent: the z-score needs a stable
     # 20-bar statistical mean, and a fresh listing's distribution is a
     # one-sided ramp — the "extension" would just be the listing move itself.
+    # _evaluate_range_fade is DELIBERATELY absent for the same reason: a
+    # "range" on a fresh listing is 12h of listing ramp, not tested structure.
 })
+
+def _range_fade_context_allowed(verdict: str) -> bool:
+    """Pure eligibility rule for the RANGE_FADE context-edge gate.
+
+    Mirrors the allocator's own promotion rule (``strategy_allocator``):
+    a context cell must carry a measured Wilson-bound verdict to emit —
+    STRONG always qualifies; POSITIVE only when the operator relaxed
+    ``RANGE_FADE_CONTEXT_MIN_VERDICT`` to "positive".  Everything else
+    (NEGATIVE / FLAT / INSUFFICIENT_DATA / unknown) blocks: an unverified
+    edge is not an edge, and the shadow arm keeps measuring the cell so a
+    context that turns STRONG self-unlocks without a deploy.
+    """
+    from src.strategy_edge import VERDICT_POSITIVE, VERDICT_STRONG
+
+    if verdict == VERDICT_STRONG:
+        return True
+    return (
+        RANGE_FADE_CONTEXT_MIN_VERDICT == "positive"
+        and verdict == VERDICT_POSITIVE
+    )
+
 
 # PR-7C: runtime validation focus paths for concise operator summaries.
 _PR7C_TARGET_SETUPS: frozenset[str] = frozenset({
@@ -1281,6 +1310,13 @@ class Scanner:
         # mean_revert_emission liveness probe — the rolling funnel counters
         # above are flushed periodically so they can't drive a probe.
         self._mean_revert_emitted_total: int = 0
+        # RANGE_FADE monotonic counters (same probe contract): emissions, and
+        # context-edge-gate blocks.  The emission probe treats a context block
+        # as proof the path is alive — a RANGE_FADE candidate legitimately
+        # dies here whenever the current context cell isn't measured
+        # POSITIVE/STRONG, which can hold for many hours.
+        self._range_fade_emitted_total: int = 0
+        self._range_fade_context_blocked_total: int = 0
 
         # Scoring tier telemetry: accumulates candidate counts per setup_class
         # and score tier across cycles; logged every 100 scan cycles to diagnose
@@ -3457,8 +3493,12 @@ class Scanner:
 
     def _increment_path_funnel(self, stage: str, chan_name: str, setup_class_name: Any) -> None:
         self._path_funnel_counters[self._path_funnel_key(stage, chan_name, setup_class_name)] += 1
-        if stage == "emitted" and self._normalize_setup_class(setup_class_name) == "MEAN_REVERT":
-            self._mean_revert_emitted_total += 1
+        if stage == "emitted":
+            _emitted_setup = self._normalize_setup_class(setup_class_name)
+            if _emitted_setup == "MEAN_REVERT":
+                self._mean_revert_emitted_total += 1
+            elif _emitted_setup == "RANGE_FADE":
+                self._range_fade_emitted_total += 1
 
     @staticmethod
     def _dependency_count_bucket(value: int) -> str:
@@ -7384,6 +7424,65 @@ class Scanner:
                 symbol, chan_name, _mc_exc,
             )
 
+        # ── RANGE_FADE context-edge gate (2026-07-18, the path's activation
+        # contract) ──────────────────────────────────────────────────────────
+        # The shadow ledger measured SHADOW_RANGE_FADE blanket activation
+        # net-negative (+0.20R saved per suppressed candidate, n=223) while
+        # specific context cells are STRONG (+0.841R ASIA/QUIET/NORMAL,
+        # +0.885R OVERLAP/RANGE/NORMAL, …).  So RANGE_FADE emits ONLY when the
+        # current context cell for its shadow control arm carries a measured
+        # POSITIVE/STRONG Wilson-bound verdict — the allocator's own
+        # eligibility rule, consumed live for the first time.  Cold matrix /
+        # thin cell / NEGATIVE cell / store error → suppress (fail-CLOSED: an
+        # unverifiable edge is not an edge; the shadow arm keeps measuring the
+        # cell either way, so a cell that turns STRONG self-unlocks).  Cost:
+        # in-memory dict lookup, no I/O (Cost Discipline).  Every rejection is
+        # tagged (funnel + suppression tracker + shadow ledger stamp), so this
+        # gate's own save/miss balance lands in the gate audit as
+        # ``context_edge:RANGE_FADE``.
+        if (
+            RANGE_FADE_CONTEXT_GATE_ENABLED
+            and str(getattr(sig, "setup_class", "") or "") == "RANGE_FADE"
+        ):
+            _rf_allowed = False
+            _rf_verdict = "UNKNOWN"
+            _rf_ctx_key = str(getattr(sig, "mc_context_key", "") or "")
+            try:
+                from src.strategy_edge import (
+                    get_strategy_edge_store as _get_edge_store,
+                )
+                from src.strategy_portfolio import SHADOW_RANGE_FADE as _RF_SHADOW
+                if _rf_ctx_key:
+                    _rf_verdict = _get_edge_store().verdict(_RF_SHADOW, _rf_ctx_key)
+                    _rf_allowed = _range_fade_context_allowed(_rf_verdict)
+            except Exception as _rf_exc:
+                # Fail-closed by leaving _rf_allowed False — but never
+                # silently: a broken edge store must page, not just suppress.
+                fail_open.record("scanner.range_fade_context_gate", _rf_exc)
+            if not _rf_allowed:
+                self._range_fade_context_blocked_total += 1
+                self._suppression_counters[
+                    f"context_edge:RANGE_FADE:{_rf_verdict}"
+                ] += 1
+                log.info(
+                    "CONTEXT_EDGE suppressed {} RANGE_FADE: context={} "
+                    "verdict={} (needs {}+)",
+                    symbol, _rf_ctx_key or "(unknown)", _rf_verdict,
+                    RANGE_FADE_CONTEXT_MIN_VERDICT.upper(),
+                )
+                self.suppression_tracker.record(SuppressionEvent(
+                    symbol=symbol,
+                    channel=chan_name,
+                    reason=REASON_COHORT_EDGE,
+                    regime=_regime_key,
+                    would_be_confidence=sig.confidence,
+                ))
+                self._increment_path_funnel(
+                    "gate_reject:context_edge", chan_name, "RANGE_FADE"
+                )
+                self._stamp_suppressed(sig, "context_edge:RANGE_FADE")
+                return _reject("filtered", cross_verified)
+
         # QUIET regime safety net for scalp channels: signals must clear the
         # global 65.0 confidence floor (the paid B-tier minimum) when market
         # is compressed.  Per OWNER_BRIEF §2.1a "only the final paid signal
@@ -7838,6 +7937,9 @@ class Scanner:
                     # _evaluate_mean_revert is DELIBERATELY absent: a mover
                     # promotion is a trending/ignition context — the anti-thesis
                     # of fading an extension back to the mean.
+                    # _evaluate_range_fade is DELIBERATELY absent for the same
+                    # reason: an igniting mover has no tested two-sided range
+                    # to fade — the "edge" would be the launchpad.
                 })
                 _is_mover = symbol in self._mover_promoted_pairs
                 # spread_pct is a PERCENT of mid (0.5 == 0.5%), same unit as the

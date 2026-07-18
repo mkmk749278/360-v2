@@ -158,6 +158,10 @@ class Signal:
     # a counter-trend fade cannot be judged against the generic EMA
     # trend-alignment anchor.
     mean_revert_mean: Optional[float] = None
+    # RANGE_FADE: the range mid the fade targets (== TP1 at creation); the
+    # structural anchor for execution quality checks — a counter-trend fade
+    # cannot be judged against the generic EMA trend-alignment anchor.
+    range_fade_mid: Optional[float] = None
     # Best TP level reached during this signal's lifetime (0 = none, 1 = TP1, 2 = TP2)
     best_tp_hit: int = 0
     # PnL % frozen at the moment the highest TP was hit (used for signal quality stats)
