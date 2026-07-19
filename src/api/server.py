@@ -2150,6 +2150,17 @@ def build_app(
         owner_required=owner_required,
     )
 
+    # ---- Admin force-close one signal (owner-only, ops "Close" button) ----
+    # POST /api/admin/close-signal — force-close a stuck OPEN signal via the
+    # expiry-close primitives. Single-process direct; isolated via the shared
+    # manual command consumer (kind="close").
+    from . import close_signal_route as _close_signal_route
+    _close_signal_route.register(
+        app,
+        engine=engine,
+        owner_required=owner_required,
+    )
+
     # ---- Admin manual tier grant (owner-only comp, ops control plane) ----
     from . import admin_grant_route as _admin_grant_route
     _admin_grant_route.register(

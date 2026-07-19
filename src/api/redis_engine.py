@@ -401,6 +401,32 @@ class RedisEngineFacade:
         await self._redis.client.lpush(_store.KEY_CMD_TAKE, envelope)
         return True
 
+    async def enqueue_close_signal(
+        self, *, request_id: str, signal_id: str
+    ) -> bool:
+        """LPUSH an admin-close envelope for the ManualTakeConsumer (kind="close").
+
+        Owner "Close" button on a stuck signal.  Shares the manual command queue
+        + result key (the consumer routes on ``kind``); the caller polls
+        :meth:`read_manual_take_result` with the same ``request_id``.  Returns
+        False when Redis is down so the route can 503 rather than pretend the
+        close was accepted.
+        """
+        if not self._redis.available:
+            log.warning(
+                "redis_engine.enqueue_close_signal: Redis unavailable — "
+                "refusing close signal_id={}", signal_id,
+            )
+            return False
+        envelope = json.dumps({
+            "kind": "close",
+            "request_id": request_id,
+            "signal_id": signal_id,
+            "ts": time.time(),
+        })
+        await self._redis.client.lpush(_store.KEY_CMD_TAKE, envelope)
+        return True
+
     async def read_manual_take_result(self, request_id: str) -> Optional[dict]:
         """Return the engine's take outcome for ``request_id``, or ``None``
         while it hasn't been written yet (the route polls this)."""

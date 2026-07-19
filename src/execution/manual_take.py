@@ -96,8 +96,12 @@ class ManualTakeConsumer:
         # the signal take; "manual_trade" is the manual trade builder. Both
         # share this queue + the take_result key so one consumer + one bridge
         # serve both.
-        if str(envelope.get("kind") or "take") == "manual_trade":
+        _kind = str(envelope.get("kind") or "take")
+        if _kind == "manual_trade":
             await self._process_manual_trade(envelope, raw)
+            return
+        if _kind == "close":
+            await self._process_close(envelope, raw)
             return
         request_id = str(envelope.get("request_id") or "")
         uid = str(envelope.get("uid") or "")
@@ -162,6 +166,41 @@ class ManualTakeConsumer:
             log.exception(
                 "ManualTakeConsumer: result write failed request_id={} "
                 "(order outcome itself is recorded in dispatch_log)",
+                request_id,
+            )
+
+    async def _process_close(self, envelope: Dict[str, Any], raw: str) -> None:
+        """Handle an admin close envelope (kind="close").
+
+        Owner-initiated force-close of one stuck signal.  No staleness gate: a
+        close is safe at any age (unlike firing a market entry), and a stuck
+        signal is exactly the case where the request may sit briefly.  Always
+        writes a result so the api's poll resolves.
+        """
+        request_id = str(envelope.get("request_id") or "")
+        signal_id = str(envelope.get("signal_id") or "")
+        if not (request_id and signal_id):
+            log.warning(
+                "ManualTakeConsumer: dropping incomplete close envelope {!r}", raw,
+            )
+            return
+        log.info("ManualTakeConsumer: close signal_id={}", signal_id)
+        try:
+            result: Dict[str, Any] = await self._engine.close_signal_admin(signal_id)
+        except Exception as exc:
+            log.exception(
+                "ManualTakeConsumer: close crashed signal_id={}", signal_id,
+            )
+            result = {"closed": False, "signal_id": signal_id, "reason": str(exc)}
+        try:
+            await self._redis.client.set(
+                _store.KEY_TAKE_RESULT_PREFIX + request_id,
+                json.dumps(result, default=str),
+                ex=_store.TTL_TAKE_RESULT,
+            )
+        except Exception:
+            log.exception(
+                "ManualTakeConsumer: close result write failed request_id={}",
                 request_id,
             )
 

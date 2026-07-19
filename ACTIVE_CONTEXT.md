@@ -4,6 +4,71 @@
 
 ---
 
+## 🟢 SESSION 71 2026-07-19 — Ops panel overhaul (grouped IA, readable Truth, CSV+JSON everywhere, modern restyle) + owner "Close" button for stuck signals (paired PRs: 360ce-ops #69 + 360-v2 #755)
+
+**Owner ask (Truth PDF + follow-ups):** the Truth report is unreadable; make data
+downloadable (Strategy Lab, Profit, anything) flexible for both owner + CTE; look at
+every tab and upgrade to user-friendly, merging tabs that show the same data; make the
+control panel rich/minimal/modern, best UI overall; and **add a manual Close button for
+signals — "some might not close, we need to close them."**
+
+### Shipped — ops UX (360ce-ops #69, one branch, 3 commits)
+
+- **Full IA redesign (owner picked this over light-touch):** 16 flat tabs → 6 groups
+  with a secondary sub-nav (Overview / Signals / Performance / Autonomy / Control /
+  Diagnostics), all in `base.html` via a NAV table keyed off each route's existing
+  `active` token (only `users.py` needed a distinct token). The Performance group
+  absorbs the four overlapping outcome-analytics tabs (Profit / Performance / Raw Edge /
+  Invalidations). **Every URL unchanged** — presentational merge, nothing 404s.
+- **Readable Truth report** (`routes/truth.py._shape` + `truth.html`): Executive-summary
+  cards, Feature-liveness green/red table, Confidence-gate per-setup kept-vs-filtered
+  table; every other section collapsed into an expandable raw-JSON block + jump index.
+  Raw md/JSON downloads kept.
+- **CSV + JSON on every data view** (owner picked both formats): JSON exports added
+  alongside the existing CSVs (Profit/Performance/Raw Edge/Invalidations); **Strategy
+  Lab got both** (edge-matrix CSV + full-view JSON) — it had none. Data tab is now a
+  central "Analysis views" export directory.
+- **Modern restyle** (`static/style.css` rewritten as one design system — elevation
+  ramp, richer palette, shadows, pill nav/badges, transitions, tabular figures, focus
+  rings; all class names preserved; the two conflicting `.badge` defs consolidated) +
+  **Control page** at-a-glance status strip + responsive card grid.
+- Verified: **380 ops tests pass** + full render smoke-test. (The 65 initial "failures"
+  were a pre-existing Starlette/Jinja version mismatch in the dev container, cleared by
+  installing the repo's pinned versions — NOT the change; two assertions updated for the
+  renamed Data heading + Positions sub-nav placement.)
+
+### Shipped — owner Close button (360-v2 #755, engine, OWNER-SIGN-OFF)
+
+- **`TradeMonitor.close_signal_manual(signal_id)`** reuses the EXACT expiry-close
+  primitives (realise-or-ZERO PnL for never-filled, record outcome, flatten broker
+  position, remove from active book) — no new exit path. Idempotent (not_found), never
+  raises. `CryptoSignalEngine.close_signal_admin` delegates.
+- **`POST /api/admin/close-signal`** (`close_signal_route`, owner-gated, in `build_app`
+  → both modes): single-process direct; **isolated mode rides the existing manual-command
+  Redis bridge with a new `kind="close"`** (`ManualTakeConsumer._process_close` +
+  `redis_engine.enqueue_close_signal`) — no new consumer, shares the take result key. No
+  staleness gate (a close is safe at any age).
+- **Ops side (in #69):** per-row "Close" button on ACTIVE signals →
+  `POST /control/close-signal` (`engine_api.close_signal`) — owner-gated, audited
+  (`close_signal`), PRG + confirm, session flash, open-redirect guarded, graceful while
+  the engine endpoint is undeployed.
+- Verified: `tests/test_manual_close_signal.py` (monitor close filled/never-filled/
+  not-found + consumer close-kind routing + missing-id drop); ruff clean; mypy 105 =
+  baseline (0 new). The isolated-smoke loop-teardown flake when async files run first is
+  pre-existing (same with `test_expiry_no_fill.py`); natural order passes.
+
+### NEXT
+
+1. Owner: merge **#755 first** (owner-sign-off — touches the exit path), then/with **#69**
+   (the Close button needs #755 deployed to function). Both off the emission money path.
+2. After deploy: the Signals feed Close button flatts a stuck OPEN signal at the mark;
+   watch the audit log (`close_signal`) + the signal leaving the active book.
+3. Carried from S69/S70: retire the bespoke RANGE_FADE gate into `context_emission_policy`
+   (behaviour-equivalent cleanup); flip `context_emission_cohort_aware` ON once cohort
+   cells populate.
+
+---
+
 ## 🟢 SESSION 70 2026-07-19 — The three emission follow-ups shipped LIVE + ops-controlled: dispatch_cooldown leak, MEAN_REVERT compat (#739), Phase-5 pair-cohorts (branch `claude/strategy-lab-signals-analysis-ntw48u`, 360-v2)
 
 **Owner ask:** "fix all three and update docs" — the follow-ups flagged at the end of
