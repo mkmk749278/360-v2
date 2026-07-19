@@ -1769,6 +1769,66 @@ class TradeMonitor:
         await self._post_signal_closed(sig, is_tp=True, tp_label="TP1", close_price=sig.tp1)
         self._remove(sig.signal_id)
 
+    async def close_signal_manual(
+        self, signal_id: str, reason: str = "manual_close"
+    ) -> Dict[str, Any]:
+        """Owner-initiated force-close of ONE active signal (ops "Close" button).
+
+        For a signal stuck OPEN that the normal exit path (TP/SL/expiry/pre-TP)
+        never resolved — the "some don't close, we need to close them" case.
+        Reuses the exact expiry-close primitives so there is no new exit path:
+        realise PnL at the current mark (or ZERO if the entry never filled —
+        Hard Limit: never fabricate a never-taken trade's outcome), record the
+        outcome, defensively flatten any broker position, and drop it from the
+        active book.
+
+        Idempotent: a signal already gone returns ``closed=False,
+        reason="not_found"`` (not an error — the button did its job).  Never
+        raises to the caller; failures are logged and surfaced in the result.
+        """
+        from src import fail_open
+        sig = self._get_signals().get(signal_id)
+        if sig is None:
+            return {"closed": False, "signal_id": signal_id, "reason": "not_found"}
+        price = self._latest_price(sig.symbol)
+        if price is None:
+            try:
+                from src.execution import mark_price_feed as _mpf
+                _feed = _mpf.get_instance()
+                if _feed is not None:
+                    price = _feed.get_price(sig.symbol)
+            except Exception as _exc:
+                fail_open.record("trade_monitor.close_signal_manual_price", _exc)
+        # Fill reference for the broker flatten + PnL: the live mark, else the
+        # signal's entry as a last-resort reference so a naked position still
+        # gets flattened at a known price.
+        fill = float(price) if price is not None else float(getattr(sig, "entry", 0.0) or 0.0)
+        if getattr(sig, "entry_never_filled", False) or price is None:
+            sig.pnl_pct = 0.0
+            realized = 0.0
+        else:
+            self._set_realized_pnl(sig, price)
+            realized = float(getattr(sig, "pnl_pct", 0.0) or 0.0)
+        sig.status = "CLOSED"
+        try:
+            await self._post_update(sig, f"🛑 CLOSED (manual — {reason})")
+            self._record_outcome(sig, hit_tp=0, hit_sl=False, expired=True)
+            await self._broker_close_full(sig, reason=reason, fill_price=fill)
+        except Exception as _exc:
+            fail_open.record("trade_monitor.close_signal_manual", _exc)
+        self._remove(sig.signal_id)
+        log.info(
+            "manual close {} {} at {} pnl={:.2f}% (reason={})",
+            signal_id, sig.symbol, fill, realized, reason,
+        )
+        return {
+            "closed": True,
+            "signal_id": signal_id,
+            "symbol": sig.symbol,
+            "status": "CLOSED",
+            "pnl_pct": realized,
+        }
+
     async def _evaluate_signal(self, sig: Signal) -> None:
         # Terminal-status guard (2026-05-08): if the signal already reached
         # a terminal lifecycle state, return immediately — re-evaluating

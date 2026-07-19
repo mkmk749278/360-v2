@@ -964,6 +964,27 @@ class CryptoSignalEngine:
             setup_class=getattr(signal, "setup_class", None),
         )
 
+    async def close_signal_admin(self, signal_id: str) -> Dict[str, Any]:
+        """Owner force-close of ONE active signal (ops "Close" button).
+
+        For a signal stuck OPEN that the exit machinery never resolved.
+        Delegates to :meth:`TradeMonitor.close_signal_manual`, which reuses the
+        expiry-close primitives (realise-or-zero PnL, record outcome, flatten
+        any broker position, remove from the active book).  Owner-gated at the
+        route.  Called directly in single-process mode; via the shared manual
+        command consumer (Redis, ``kind="close"``) in isolated mode.
+        """
+        signal_id = str(signal_id or "").strip()
+        if not signal_id:
+            return {"closed": False, "signal_id": signal_id, "reason": "missing_id"}
+        try:
+            return await self.monitor.close_signal_manual(
+                signal_id, reason="manual_close"
+            )
+        except Exception as exc:  # never leak an exception to the API bridge
+            log.exception("close_signal_admin failed for %s", signal_id)
+            return {"closed": False, "signal_id": signal_id, "reason": f"error: {exc}"}
+
     async def build_manual_trade_for_user(
         self, firebase_uid: str, payload: Dict[str, Any]
     ) -> Dict[str, Any]:
