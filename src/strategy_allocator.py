@@ -41,6 +41,14 @@ from src.strategy_portfolio import is_context_aligned
 _ALIGNED_MULT = 1.2
 _MISALIGNED_MULT = 0.8
 
+# Provenance multipliers: a cell whose edge is confirmed by real EMITTED
+# outcomes is trusted fully; one proven only on suppressed/shadow
+# counterfactuals (held-to-stop, never actually traded) is still eligible but
+# ranked with a haircut — counterfactual MFE systematically overstates what a
+# live exit would have kept, so equal measured edge is not equal confidence.
+_PROV_EMITTED_MULT = 1.0
+_PROV_COUNTERFACTUAL_MULT = 0.85
+
 
 @dataclass(frozen=True)
 class AllocatorLimits:
@@ -48,17 +56,26 @@ class AllocatorLimits:
 
     max_concurrent: int
     max_weight: float
+    # Emission-side concurrency envelope — how many strategies the autonomous
+    # emission policy may promote at once, separate from (and ≥) the capital
+    # allocation cap.  A signals business wants more breadth than a capital
+    # allocator: emitting a signal is not allocating capital.  Defaulted so the
+    # two-arg AllocatorLimits(n, w) construction (tests, older callers) still works.
+    max_emission_concurrent: int = 10
 
     @staticmethod
     def from_config() -> "AllocatorLimits":
         from config import (
+            ALLOCATOR_EMISSION_MAX_CONCURRENT,
             ALLOCATOR_MAX_CONCURRENT_STRATEGIES,
             ALLOCATOR_MAX_STRATEGY_WEIGHT,
         )
 
+        _cap = max(1, int(ALLOCATOR_MAX_CONCURRENT_STRATEGIES))
         return AllocatorLimits(
-            max_concurrent=max(1, int(ALLOCATOR_MAX_CONCURRENT_STRATEGIES)),
+            max_concurrent=_cap,
             max_weight=min(1.0, max(0.01, float(ALLOCATOR_MAX_STRATEGY_WEIGHT))),
+            max_emission_concurrent=max(_cap, int(ALLOCATOR_EMISSION_MAX_CONCURRENT)),
         )
 
 
@@ -107,7 +124,12 @@ def recommend(
                 if aligned is False
                 else 1.0
             )
-            row["score"] = float(edge_r) * mult
+            # Provenance haircut: real emitted outcomes are trusted fully;
+            # counterfactual-only edges (no emitted sample) are ranked lower.
+            emitted_backed = int(cell.get("n_emitted", 0)) > 0
+            prov_mult = _PROV_EMITTED_MULT if emitted_backed else _PROV_COUNTERFACTUAL_MULT
+            row["provenance"] = "emitted" if emitted_backed else "counterfactual"
+            row["score"] = float(edge_r) * mult * prov_mult
             row["reason"] = (
                 f"{verdict} edge {float(edge_r):+.3f}R over n={row['n']}"
                 + (
@@ -117,6 +139,7 @@ def recommend(
                     if aligned is False
                     else ""
                 )
+                + ("" if emitted_backed else " [counterfactual-only]")
             )
             eligible.append(row)
         elif verdict == VERDICT_NEGATIVE:
@@ -134,8 +157,12 @@ def recommend(
     for r in active:
         raw = (r["score"] / total_score) if total_score > 0 else 0.0
         r["weight"] = round(min(raw, lim.max_weight), 4)
+    # Emission-eligible set: the wider breadth the autonomous emission policy may
+    # promote (top-ranked eligible up to the emission cap).  Superset of the
+    # capital ``active`` list; carries no capital weight (emission ≠ allocation).
+    emission = eligible[: lim.max_emission_concurrent]
     demote.sort(key=lambda r: (r["edge_r"] if r["edge_r"] is not None else 0.0))
-    return {"activate": active, "demote": demote}
+    return {"activate": active, "demote": demote, "emission_activate": emission}
 
 
 def build_recommendation_payload(
@@ -159,6 +186,12 @@ def build_recommendation_payload(
         "context_key": context_key,
         "activate": rec["activate"],
         "demote": rec["demote"],
+        # Emission-side view: what the live context-emission policy would promote
+        # for breadth (informational — the policy itself decides per-candidate at
+        # the scanner emission gate; this list is the allocator's ranked read of
+        # the same edge matrix, for ops).
+        "emission_activate": rec.get("emission_activate", []),
+        "emission_max_concurrent": lim.max_emission_concurrent,
         "unallocated_weight": round(
             max(0.0, 1.0 - sum(r.get("weight", 0.0) for r in rec["activate"])), 4
         ),

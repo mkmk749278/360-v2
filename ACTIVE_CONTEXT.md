@@ -4,6 +4,99 @@
 
 ---
 
+## 🟢 SESSION 69 2026-07-19 — Autonomous context-adaptive emission: the edge matrix now DRIVES the confidence floor (Layer C→emission consumer), LIVE by owner directive with full ops control + allocator upgrade (branch `claude/strategy-lab-signals-analysis-ntw48u`, 360-v2)
+
+**Owner ask (2 PDFs: Profit tab + Strategy Lab, 2026-07-19):** analyse the data;
+build a *fully autonomous best-signals emitting system that dynamically adjusts based
+on the Strategy Lab data*; **"no darks — make it live but give controls in ops"**;
+as CTE decide the open questions and open PRs; upgrade the strategy allocator for
+best data results; update ACTIVE_CONTEXT clearly.
+
+### The problem the data proved (Strategy Lab p97–99 + Profit 7d)
+
+Emission is decided by ONE context-blind gate — `sig.confidence < min_conf` (65 +
+component floors) at `scanner/__init__.py`. That floor was tuned around the
+trend/mover setups, so **MTP + FAR = 62% of ~42 emissions** while every other path
+detects hundreds–thousands of setups and ~99.8% die at the gate — *even in cells the
+edge matrix measures STRONG* (QUIET_COMPRESSION_BREAK +2.21R OVERLAP/QUIET/COMPRESSED
+emits **0/1055**; SR_FLIP_RETEST +1.29R LONDON/VOL_EXP/CASCADE emits **1/4790**;
+LIQ_SWEEP +1.53R ASIA/ACCUM emits **1/1035**). The edge lives in `session×regime×path`
+cells; the emission decision only read a global score. The whole Layer A–E Strategy
+Lab (built S53, PR #720) measures this per context, and the allocator (Layer D)
+computes the right answer — but it was `RECOMMENDATION_ONLY`, **consumed by nothing**.
+Gate audit: `min_confidence` blocks 797R of winners (net −0.11), `dispatch_cooldown`
+is a pure loss (235R missed, **100% would-win**, DROP).
+
+### Shipped — the Layer-C → emission consumer (one PR, 360-v2)
+
+- **`src/context_emission_policy.py`** (new, pure, O(1) in-memory — no hot-path I/O):
+  turns the single global floor into a **per-(strategy × context) floor driven by the
+  measured edge matrix**. STRONG cell → *relax* toward the quality anchor (emit the
+  path's best setups where it wins); POSITIVE → relax half; **NEGATIVE → hard-suppress**
+  (stay silent where it loses); cold/thin/FLAT → global floor unchanged (never guess).
+  The two-sided generalisation of the S67 RANGE_FADE gate to *every* strategy. Control-arm
+  alias (RANGE_FADE→SHADOW_RANGE_FADE, MEAN_REVERT→SHADOW_MEAN_REVERT) for thin graduated
+  paths; own cell preferred when populated. Fail-open to the global floor on any edge-store
+  error (recorded via `fail_open`, never silent).
+- **Scanner emission-gate wiring:** computes the decision on every post-scoring candidate,
+  stamps 4 monotonic counters + a `context_floor:<verdict>:<divergence>` suppression
+  counter, logs `[CONTEXT_FLOOR_SHADOW]` on every relax/tighten divergence, and (live)
+  applies it — relaxing the effective floor or suppressing NEGATIVE cells
+  (`_stamp_suppressed(sig, "context_floor:<SETUP>")` so the gate audit prices it).
+- **Allocator upgrade** (`strategy_allocator.py`): (1) **provenance weighting** — a cell
+  proven only on suppressed/shadow counterfactuals is haircut ×0.85 vs an emitted-confirmed
+  one (counterfactual MFE overstates a live exit); (2) **emission-concurrency envelope**
+  (`ALLOCATOR_EMISSION_MAX_CONCURRENT=10`, separate from the capital cap of 6) + an
+  `emission_activate` ranked list in the ops payload.
+
+### LIVE + ops controls (owner directive — NOT dark)
+
+Ships **applying**, default-ON, with EVERY knob a runtime tunable (ops Control → Signal
+gating, applied ≤5s, no redeploy): `context_emission_enabled` (instant kill →
+pre-policy behaviour), `context_emission_live` (apply vs measure-only), quality anchor
+(50–75), STRONG/POSITIVE relax pts, min samples, suppress-NEGATIVE. **CTE decisions
+(owner-delegated):** anchor **60** (STRONG→60, POSITIVE→62 off 65; n≥30 to relax;
+sub-anchor never reaches paid), provenance haircut **×0.85**, emission cap **10**,
+pair-cohort **deferred to Phase 5**. Conservative live defaults; owner widens/narrows
+in ops as the matrix proves out.
+
+**CTE flag on doctrine:** this overrides dark-flag-first for a money-path (emission)
+change — subscribers see the new set immediately, no shadow window. Accepted because
+the owner directed it, it touches **emission only** (no execution/sizing/blast-radius —
+no capital-safety limit relaxed), the safety envelope stays enforced in the math, and
+it's instantly reversible from ops. The relax side (new 60–64 signals in STRONG cells)
+is the only subscriber-visible change; bounded by anchor + n≥30.
+
+### Verification
+
+New `tests/test_context_emission_policy.py` (18 — truth table, anchor clamp, control-arm
+alias, thin/cold, divergence classifier, store-error fail-open) + allocator tests
+(+3: provenance ranking, emission set, payload). **Ran green:** policy+allocator 30,
+range_fade/mean_revert/feature_liveness (incl. the new `context_emission_policy` probe on
+real stores), scanner/suppression/edge/confidence **202 passed**, tunables/fail-open 22.
+ruff clean; mypy 0 new errors (suppression_audit.py:214 is the pre-existing baseline).
+Liveness probe `context_emission_policy` wired in `main._build_feature_liveness` (pages
+if scanning is active ~6h with zero policy evaluations).
+
+### Watch after deploy (Strategy Lab)
+
+New `context_floor:*` gate-audit rows; per-path emission counts climbing (QCB / SR_FLIP /
+LIQ_SWEEP / DIV_CONT in their STRONG cells); NEGATIVE-cell emissions → 0. If the relax
+side misbehaves: raise the anchor toward 65 or flip `context_emission_live` OFF in ops.
+
+### NEXT
+
+1. Owner: merge the PR (new emission/scoring path = owner-sign-off item — shipped LIVE
+   per directive, so review + merge, not a dark flag to flip). Deploy, then watch the
+   Strategy Lab rows above over a real window.
+2. **Follow-up PRs (flagged, not built this session):** `dispatch_cooldown` DROP leak
+   (235R, 100% would-win) → make live-tunable + tune off the audit; MEAN_REVERT
+   compat-map (#739) so the 18th path can emit at all; Phase 5 pair-cohort dimension.
+3. RANGE_FADE (19th) is now covered by the general policy too — its bespoke context gate
+   can be retired into `context_emission_policy` in a later cleanup (behaviour-equivalent).
+
+---
+
 ## 🟢 SESSION 68 2026-07-18 — Web (PWA) channel Phases 1+2 built: the iPhone path ships as an installable web app (branch `claude/loop-continuation-scheduled-resets-9ouhm5`, paired PRs in lumin-app + 360-v2)
 
 **Owner ask:** execute the approved iPhone PWA plan

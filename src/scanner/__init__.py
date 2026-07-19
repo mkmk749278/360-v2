@@ -1317,6 +1317,15 @@ class Scanner:
         # POSITIVE/STRONG, which can hold for many hours.
         self._range_fade_emitted_total: int = 0
         self._range_fade_context_blocked_total: int = 0
+        # Context-adaptive emission policy (Layer C consumer) monotonic counters:
+        # every candidate the policy evaluated, and the four divergence outcomes
+        # vs the global floor (would-emit = relax opportunity, would-suppress =
+        # measured-losing cell, applied = live floor actually moved/suppressed).
+        # Drive the context_emission liveness probe + Strategy Lab telemetry.
+        self._context_floor_evaluated_total: int = 0
+        self._context_floor_would_emit_total: int = 0
+        self._context_floor_would_suppress_total: int = 0
+        self._context_floor_applied_total: int = 0
 
         # Scoring tier telemetry: accumulates candidate counts per setup_class
         # and score tier across cycles; logged every 100 scan cycles to diagnose
@@ -7601,14 +7610,100 @@ class Scanner:
         _market_component_floor = 12.0
         _execution_component_floor = 10.0
         _risk_component_floor = 10.0
+        # ── Context-adaptive emission floor (Layer C → emission consumer) ──
+        # The measured Strategy×Context edge matrix sets a per-(strategy,
+        # context) confidence floor: RELAX toward the quality anchor in cells
+        # measured STRONG/POSITIVE (so a path emits its best setups where it is
+        # measured to win), HARD-SUPPRESS NEGATIVE cells (stay silent where it
+        # loses), leave the global floor untouched on cold/thin/FLAT cells.  The
+        # two-sided generalisation of the S67 RANGE_FADE gate to every strategy.
+        # LIVE by owner directive (2026-07-19) with full ops control — the
+        # context_emission_* runtime tunables enable/disable, toggle apply-vs-
+        # measure-only, and shape anchor/relax/samples with no redeploy.  Fail
+        # open to the global floor on any edge-store error (recorded, never
+        # silent).  O(1) in-memory lookup against the already-warm edge store —
+        # no hot-path Firestore/network read (Cost Discipline).
+        _emission_floor = float(min_conf)
+        _components_ok = (
+            sig.component_scores.get("market", 0.0) >= _market_component_floor
+            and sig.component_scores.get("execution", 0.0) >= _execution_component_floor
+            and sig.component_scores.get("risk", 0.0) >= _risk_component_floor
+        )
+        _cep_ctx_key = str(getattr(sig, "mc_context_key", "") or "")
+        _cep_setup = str(getattr(sig, "setup_class", "") or "")
+        _cep_params = None
+        try:
+            from src import context_emission_policy as _cep
+            _cep_params = _cep.PolicyParams.from_config()
+        except Exception as _cep_pexc:
+            fail_open.record("scanner.context_emission_params", _cep_pexc)
+        if _cep_params is not None and _cep_params.enabled and _cep_ctx_key and _cep_setup:
+            _cep_decision = None
+            try:
+                _cep_decision = _cep.effective_floor(
+                    _cep_setup, _cep_ctx_key, float(min_conf), params=_cep_params
+                )
+            except Exception as _cep_exc:
+                # Unverifiable edge → fall back to the global floor, and page.
+                fail_open.record("scanner.context_emission_policy", _cep_exc)
+            if _cep_decision is not None:
+                self._context_floor_evaluated_total += 1
+                _cep_div = _cep.classify_divergence(
+                    float(sig.confidence), float(min_conf), _cep_decision,
+                    components_ok=_components_ok,
+                )
+                self._suppression_counters[
+                    f"context_floor:{_cep_decision.verdict}:{_cep_div}"
+                ] += 1
+                if _cep_div == _cep.DIV_RELAX:
+                    self._context_floor_would_emit_total += 1
+                elif _cep_div == _cep.DIV_TIGHTEN:
+                    self._context_floor_would_suppress_total += 1
+                if _cep_div in (_cep.DIV_RELAX, _cep.DIV_TIGHTEN):
+                    log.info(
+                        "[CONTEXT_FLOOR_SHADOW] {} {} {} ctx={} verdict={} "
+                        "floor {:.1f}->{:.1f} conf={:.1f} div={} live={} ({})",
+                        symbol, chan_name, _cep_setup, _cep_ctx_key,
+                        _cep_decision.verdict, float(min_conf),
+                        _cep_decision.effective_floor, float(sig.confidence),
+                        _cep_div, _cep_params.live, _cep_decision.reason,
+                    )
+                # LIVE application — instant off via the context_emission_live /
+                # context_emission_enabled ops tunables.
+                if _cep_params.live:
+                    if _cep_decision.suppressed:
+                        self._context_floor_applied_total += 1
+                        self._suppression_counters[
+                            f"context_floor_suppress:{_cep_setup}"
+                        ] += 1
+                        log.info(
+                            "CONTEXT_FLOOR suppressed {} {} {}: NEGATIVE cell {} ({})",
+                            symbol, chan_name, _cep_setup, _cep_ctx_key,
+                            _cep_decision.reason,
+                        )
+                        self.suppression_tracker.record(SuppressionEvent(
+                            symbol=symbol,
+                            channel=chan_name,
+                            reason=REASON_COHORT_EDGE,
+                            regime=_regime_key,
+                            would_be_confidence=sig.confidence,
+                        ))
+                        self._increment_path_funnel(
+                            "gate_reject:context_floor", chan_name, _cep_setup
+                        )
+                        self._stamp_suppressed(sig, f"context_floor:{_cep_setup}")
+                        return _reject("filtered", cross_verified)
+                    if _cep_decision.effective_floor < _emission_floor:
+                        self._context_floor_applied_total += 1
+                        _emission_floor = float(_cep_decision.effective_floor)
         if (
-            sig.confidence < min_conf
+            sig.confidence < _emission_floor
             or sig.component_scores.get("market", 0.0) < _market_component_floor
             or sig.component_scores.get("execution", 0.0) < _execution_component_floor
             or sig.component_scores.get("risk", 0.0) < _risk_component_floor
         ):
             _reason = "min_confidence"
-            _threshold = float(min_conf)
+            _threshold = float(_emission_floor)
             if sig.component_scores.get("market", 0.0) < _market_component_floor:
                 _reason = "market_component_floor"
                 _threshold = _market_component_floor

@@ -1,9 +1,22 @@
 # Plan — Fully Autonomous, Context-Adaptive Best-Signal Emission
 
-*Author: CTE · Date: 2026-07-19 · Status: PROPOSAL (owner sign-off required to build Phase 1+)*
+*Author: CTE · Date: 2026-07-19 · Status: BUILT + LIVE (owner directive) — §7 decisions taken by CTE; controls in ops.*
 
 > **Goal (owner, verbatim):** a fully autonomous best-signals emitting system that
 > dynamically adjusts based on the Strategy Lab data.
+
+> **Owner directive (2026-07-19), verbatim:** *"no darks make it live but give
+> controls in ops."*  So this ships **applying, not dark**, with every knob exposed
+> as a runtime tunable on the ops Control page.  CTE flag on the doctrine trade-off:
+> this overrides the production dark-flag-first rule for a money-path (emission)
+> change — real subscribers see the changed signal set immediately, without a shadow
+> window first.  It is accepted because (a) the owner explicitly directed it, (b) it
+> is an **emission** change only — no execution / sizing / blast-radius behaviour is
+> touched, so no capital-safety limit is relaxed, and (c) the full safety envelope
+> stays enforced in the math and is instantly reversible from ops (`context_emission_enabled`
+> OFF → pre-policy behaviour, applied ≤5s, no redeploy).  The relax side is the only
+> part that changes what paid users see; it is bounded by the quality anchor and a
+> sample floor and starts conservative (anchor 60, STRONG→60 / POSITIVE→62).
 
 This document is the engineering plan to get there. It is grounded in the
 2026-07-19 Strategy Lab + Profit-tab read (see *Evidence* below) and the code as
@@ -217,21 +230,45 @@ Profit tab). This plan is emission quality, not exit machinery.
 
 ---
 
-## 7. Open decisions for the owner (before Phase 1)
+## 7. Decisions — taken by CTE (owner delegated 2026-07-19)
 
-1. **Quality anchor** — do we allow a context-proven minimum below 65 in STRONG cells
-   (e.g. ≥60 @ n≥30), or keep 65 hard and only relax component/secondary gates?
-   (Phase 1 shadow informs this; the decision is yours — it's a paid-tier business rule.)
-2. **Provenance weighting** — how much to trust *suppressed-counterfactual* outcomes vs
-   *emitted-real* outcomes when a cell's verdict sets the floor.
-3. **Concurrency cap for emission** — keep Layer E's 6, or raise it (a signals business
-   may want more breadth than a capital allocator)?
-4. **Pair-cohort taxonomy** — liquidity tiers? mover-vs-established? funding-regime?
+1. **Quality anchor = 60** (`CONTEXT_EMISSION_QUALITY_ANCHOR`, ops-tunable 50–75).
+   A STRONG cell may emit down to ~60 off the 65 base (STRONG relax 5pts), POSITIVE
+   to ~62 (3pts) — a context-*proven* minimum, gated on n≥30 real outcomes, never a
+   blanket drop. Owner raises the anchor toward 65 in ops to shrink/kill the relax
+   side; 65 = suppress-only. Sub-anchor never reaches paid users (hard clamp).
+2. **Provenance weighting = emitted fully trusted, counterfactual-only haircut ×0.85**
+   (`_PROV_*` in the allocator). Held-to-stop counterfactual MFE overstates a live
+   exit, so equal measured edge is not equal confidence — a cell proven only on
+   suppressed/shadow outcomes ranks below an emitted-confirmed one.
+3. **Emission concurrency = 10** (`ALLOCATOR_EMISSION_MAX_CONCURRENT`), separate from
+   and ≥ the capital cap of 6. Emitting a signal is not allocating capital; a signals
+   business wants breadth. Ops-tunable.
+4. **Pair-cohort taxonomy = deferred to Phase 5** — liquidity-tier + mover-vs-established
+   cohort added to the context key (per-symbol is too sparse for n≥15). Not in this build.
 
 ---
 
-## 8. What ships when you say "go"
+## 8. What shipped (this PR) vs what's next
 
-Default sequence, all dark-first, nothing changes live output until you sign off on a
-shadow read: **Phase 0 → Phase 1 → (window) → sign-off → Phase 3 → Phase 4.**
-Phase 0 alone recovers measurable missed-R immediately and is safe to auto-merge.
+**Shipped LIVE (this PR), per owner directive:**
+- `src/context_emission_policy.py` — the two-sided per-(strategy×context) floor.
+- Scanner emission-gate wiring: relax STRONG/POSITIVE, suppress NEGATIVE, apply live
+  (with `[CONTEXT_FLOOR_SHADOW]` divergence logging + monotonic counters either way).
+- Allocator upgrade: provenance weighting + emission-concurrency envelope + emission
+  view in the ops payload.
+- **Full ops control** (Control → Signal gating): `context_emission_enabled` (kill),
+  `context_emission_live` (apply vs measure-only), quality anchor, STRONG/POSITIVE
+  relax points, min samples, suppress-NEGATIVE — all applied ≤5s, no redeploy.
+- Liveness probe `context_emission_policy`; config env defaults; tests.
+
+**Watch after deploy:** Strategy Lab — new `context_floor:*` gate-audit rows + the
+per-path emission counts climbing (QCB / SR_FLIP / LIQ_SWEEP / DIV_CONT in their STRONG
+cells). If the relax side misbehaves, raise the anchor toward 65 (or flip
+`context_emission_live` OFF) in ops.
+
+**Next (separate PRs):**
+- The `dispatch_cooldown` DROP leak (235R, 100% would-win) — make it live-tunable and
+  tune it off the audit. Cleanest remaining single leak.
+- MEAN_REVERT compat-map (#739) so the 18th path can enter measurement.
+- Phase 5 pair-cohort dimension.

@@ -1873,6 +1873,28 @@ class CryptoSignalEngine:
             min_streak=36,         # ~3 h
         ))
 
+        def _cep_total():
+            # None when the policy is disabled by tunable → probe skips (can't
+            # false-page an intentionally-off feature), mirroring _supp_total.
+            try:
+                if not bool(_rt.get("context_emission_enabled")):
+                    return None
+            except Exception:
+                return None
+            return float(getattr(self._scanner, "_context_floor_evaluated_total", 0))
+
+        # Context-adaptive emission policy: candidates reach the emission gate
+        # (scanning active) but the policy evaluated zero of them for ~6 h →
+        # the Layer-C consumer silently stopped (import broke / params always
+        # None).  A live money-path consumer that can flat-line unseen is unfinished.
+        fl.add_rate(RateProbe(
+            name="context_emission_policy",
+            counter=_cep_total,
+            upstream=lambda: float(getattr(self._scanner, "_scan_cycle_count", 0)),
+            min_upstream_delta=15.0,
+            min_streak=72,         # ~6 h
+        ))
+
         def _mc_health():
             if not bool(_rt.get("market_context_enabled")):
                 return True, "disabled by tunable"
