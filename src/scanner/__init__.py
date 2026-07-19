@@ -852,8 +852,45 @@ _STRUCTURE_MISALIGN_PATHS: frozenset = frozenset({
 # FAILED_AUCTION_RECLAIM signals dispatched on BNBUSDT in 5h, all
 # immediately invalidating at SL.  Cooldown persisted to disk so a
 # redeploy doesn't let duplicates through.
-DISPATCH_COOLDOWN_SEC: float = float(os.getenv("DISPATCH_COOLDOWN_SEC", "1800"))
+# Gate audit (2026-07-19) read dispatch_cooldown DROP: 312 blocked, 100%
+# would-win, 235.1R missed, EV −0.75 — the 30-min window blocked profitable
+# re-entries on continuing moves.  Default lowered to 15 min and made a live
+# ops tunable (dispatch_cooldown_sec / dispatch_cooldown_enabled) so the owner
+# tunes it off the audit with no redeploy; still guards against 15s
+# bit-identical re-emission spam.  Env default kept env-overridable per B8.
+from config import (  # noqa: E402
+    DISPATCH_COOLDOWN_ENABLED,
+    DISPATCH_COOLDOWN_SEC,
+)
 DISPATCH_COOLDOWN_PATH: str = "data/signal_dispatch_cooldown.json"
+
+
+def _dispatch_cooldown_enabled() -> bool:
+    """Cooldown off-switch: an explicit ops override wins; otherwise the module
+    global (env/config default, and monkeypatch-compatible for tests)."""
+    try:
+        from src import runtime_tunables as _rt
+        _v = _rt.get("dispatch_cooldown_enabled")
+        _reg = _rt.registry().get("dispatch_cooldown_enabled")
+        if _v is not None and _reg is not None and bool(_v) != bool(_reg.default):
+            return bool(_v)  # genuine ops override
+    except Exception:
+        pass
+    return bool(DISPATCH_COOLDOWN_ENABLED)
+
+
+def _dispatch_cooldown_sec() -> float:
+    """Re-emission window (s): an explicit ops override wins; otherwise the module
+    global (env/config default, and monkeypatch-compatible for tests)."""
+    try:
+        from src import runtime_tunables as _rt
+        _v = _rt.get("dispatch_cooldown_sec")
+        _reg = _rt.registry().get("dispatch_cooldown_sec")
+        if _v is not None and _reg is not None and float(_v) != float(_reg.default):
+            return float(_v)  # genuine ops override
+    except Exception:
+        pass
+    return float(DISPATCH_COOLDOWN_SEC)
 
 # Consecutive-loss streak registry (2026-07-09, dark-flagged escalation).
 # Mirrors DISPATCH_COOLDOWN_PATH's atomic-write persistence pattern.
@@ -4632,6 +4669,17 @@ class Scanner:
             sig.liquidity_info = " | ".join(liq_parts)
         sig.spread_pct = ctx.spread_pct
         sig.volume_24h_usd = volume_24h
+        # Pair-cohort (liquidity tier) for the edge matrix's Phase-5 cohort
+        # dimension — stamped on every candidate so the dual-write feeders and
+        # the cohort-aware emission policy can key on it.  Pure, fail-safe.
+        try:
+            from src.pair_cohort import classify_cohort as _classify_cohort
+            sig.mc_pair_cohort = _classify_cohort(
+                getattr(sig, "symbol", "") or "", volume_24h_usd=volume_24h
+            )
+        except Exception as _coh_exc:
+            sig.mc_pair_cohort = ""
+            fail_open.record("scanner.pair_cohort_stamp", _coh_exc)
         sig.pair_quality_score = ctx.pair_quality.score
         sig.pair_quality_label = ctx.pair_quality.label
         # How long (minutes) the setup remains actionable — sourced from config.
@@ -4857,6 +4905,7 @@ class Scanner:
                 context_key=str(getattr(sig, "mc_context_key", "") or ""),
                 regime=str(getattr(sig, "entry_regime", "") or ""),
                 valid_for_minutes=float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
+                pair_cohort=str(getattr(sig, "mc_pair_cohort", "") or ""),
             )
         except Exception as exc:
             fail_open.record("scanner.stamp_suppressed", exc)
@@ -4946,7 +4995,11 @@ class Scanner:
         # BNBUSDT FAR signals in 5 h).
         try:
             cd_key = self._cooldown_key_for(sig)
-            if cd_key is not None and self._is_cooldown_active(cd_key):
+            if (
+                cd_key is not None
+                and _dispatch_cooldown_enabled()
+                and self._is_cooldown_active(cd_key)
+            ):
                 remaining_s = self._dispatch_cooldown[cd_key] - time.time()
                 self._suppression_counters[
                     f"dispatch_cooldown:{cd_key[1]}"
@@ -5083,8 +5136,8 @@ class Scanner:
             self._stamp_geometry_ab(sig)
             try:
                 cd_key = self._cooldown_key_for(sig)
-                if cd_key is not None:
-                    self._dispatch_cooldown[cd_key] = time.time() + DISPATCH_COOLDOWN_SEC
+                if cd_key is not None and _dispatch_cooldown_enabled():
+                    self._dispatch_cooldown[cd_key] = time.time() + _dispatch_cooldown_sec()
                     self._persist_dispatch_cooldown()
             except Exception as exc:
                 log.debug("cooldown stamp error (non-fatal): {}", exc)
@@ -7641,7 +7694,9 @@ class Scanner:
             _cep_decision = None
             try:
                 _cep_decision = _cep.effective_floor(
-                    _cep_setup, _cep_ctx_key, float(min_conf), params=_cep_params
+                    _cep_setup, _cep_ctx_key, float(min_conf),
+                    cohort=str(getattr(sig, "mc_pair_cohort", "") or ""),
+                    params=_cep_params,
                 )
             except Exception as _cep_exc:
                 # Unverifiable edge → fall back to the global floor, and page.

@@ -362,6 +362,7 @@ class Signal:
     mc_btc_led: bool = False
     mc_cascade_active: bool = False
     mc_context_key: str = ""                      # composite key for the edge matrix
+    mc_pair_cohort: str = ""                       # liquidity cohort (MAJOR/MIDCAP/ALTCOIN) for the Phase-5 cohort matrix
 
     # ---- Stop-geometry A/B stamp (src/geometry_ab.py, observe-only) ----
     # The would-be ATR/structure stop for this candidate — stamped so the

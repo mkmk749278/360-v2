@@ -628,6 +628,25 @@ class TradeMonitor:
                         source="emitted",
                     )
                 )
+                # Phase-5 cohort cell: dual-write the emitted outcome under the
+                # cohort-refined key (additive; never fragments the base cell).
+                _emit_cohort = str(getattr(sig, "mc_pair_cohort", "") or "")
+                if _emit_cohort:
+                    from src.pair_cohort import cohort_context_key as _cck
+                    self._strategy_edge_store.record(
+                        _StrategyOutcome(
+                            strategy=sig.setup_class or "",
+                            context_key=_cck(
+                                getattr(sig, "mc_context_key", "") or "", _emit_cohort
+                            ),
+                            side=_se_side,
+                            won=signal_quality_hit_tp >= 1,
+                            pnl_pct=float(signal_quality_pnl),
+                            r_multiple=float(_r_multiple),
+                            mfe_pct=_mfe_pct,
+                            source="emitted",
+                        )
+                    )
             except Exception as exc:
                 log.debug("strategy_edge.record failed (non-critical): {}", exc)
 

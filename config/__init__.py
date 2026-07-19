@@ -1080,6 +1080,13 @@ CONTEXT_EMISSION_MIN_SAMPLES: int = _safe_int("CONTEXT_EMISSION_MIN_SAMPLES", "3
 CONTEXT_EMISSION_SUPPRESS_NEGATIVE: bool = _safe_bool(
     "CONTEXT_EMISSION_SUPPRESS_NEGATIVE", "true"
 )
+#: Phase-5 pair-cohort awareness.  When ON the policy reads the cohort-refined
+#: cell (context_key + liquidity tier) first, falling back to the base cell when
+#: the cohort cell is thin.  Default OFF: cohort cells accumulate in parallel
+#: (dual-write) and the owner flips this ON in ops once they have samples.
+CONTEXT_EMISSION_COHORT_AWARE: bool = _safe_bool(
+    "CONTEXT_EMISSION_COHORT_AWARE", "false"
+)
 #: Emission-side concurrency cap for the allocator — separate from the capital
 #: allocator's ALLOCATOR_MAX_CONCURRENT_STRATEGIES (6).  A signals business wants
 #: more breadth than a capital allocator: emitting a signal is not allocating
@@ -1087,6 +1094,15 @@ CONTEXT_EMISSION_SUPPRESS_NEGATIVE: bool = _safe_bool(
 ALLOCATOR_EMISSION_MAX_CONCURRENT: int = _safe_int(
     "ALLOCATOR_EMISSION_MAX_CONCURRENT", "10"
 )
+
+# ── Dispatch cooldown — per-(symbol, setup, direction) re-emission guard ─────
+# Gate audit (2026-07-19) read it DROP: 312 blocked, 100% would-win, 235.1R
+# missed, EV −0.75 — the 30-min window blocked profitable re-entries on
+# continuing moves.  Default lowered to 15 min and exposed as live ops tunables
+# (dispatch_cooldown_sec / dispatch_cooldown_enabled) so the owner tunes it off
+# the audit with no redeploy; still guards against 15s bit-identical spam.
+DISPATCH_COOLDOWN_ENABLED: bool = _safe_bool("DISPATCH_COOLDOWN_ENABLED", "true")
+DISPATCH_COOLDOWN_SEC: float = _safe_float("DISPATCH_COOLDOWN_SEC", "900")
 
 # ── Counter-trend hard-block on confirmed strong movers (Session 30, owner-approved) ─
 # §3.2 #5 reserves HARD blocks for structural impossibility.  Fading a CONFIRMED

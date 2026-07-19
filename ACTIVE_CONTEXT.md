@@ -4,6 +4,69 @@
 
 ---
 
+## 🟢 SESSION 70 2026-07-19 — The three emission follow-ups shipped LIVE + ops-controlled: dispatch_cooldown leak, MEAN_REVERT compat (#739), Phase-5 pair-cohorts (branch `claude/strategy-lab-signals-analysis-ntw48u`, 360-v2)
+
+**Owner ask:** "fix all three and update docs" — the follow-ups flagged at the end of
+S69 (dispatch_cooldown DROP leak, MEAN_REVERT compat-map, Phase-5 pair-cohorts). Branch
+reset onto merged main (S69 #752 is in) per the merged-PR protocol; one PR for all three.
+
+### Fix 1 — dispatch_cooldown DROP leak (gate audit: 235R missed, 100% would-win)
+
+The per-(symbol, setup, direction) 30-min re-emission guard blocked profitable
+re-entries on continuing moves. **Default lowered 1800→900s** and exposed as two live
+ops tunables (`dispatch_cooldown_enabled`, `dispatch_cooldown_sec` 0–7200s, Control →
+Signal gating). Helpers honour an explicit ops override, else fall back to the module
+global — so the existing monkeypatch tests (`test_signal_lifecycle_bugs`) and the env
+default both keep working. Still guards against 15s bit-identical spam.
+
+### Fix 2 — MEAN_REVERT compat-map (#739 / S64 audit F1) — the 18th path can finally emit
+
+Root cause confirmed: `REGIME_SETUP_COMPATIBILITY` listed MEAN_REVERT under CLEAN/DIRTY_
+RANGE only, but its ≥2.5σ 15m trigger is exactly the spike that flips the classifier OUT
+of range INTO **VOLATILE_UNSUITABLE / BREAKOUT_EXPANSION** — so it was gated pre-scoring
+by its own trigger (0 emissions all window despite 172 detections). Added MEAN_REVERT to
+both those states (additive — range homes intact). An exhaustion fade of a statistical
+over-extension is a volatility event, home alongside LIQUIDATION_REVERSAL. Safety net:
+the S69 context-emission policy auto-suppresses any cell where MEAN_REVERT's edge turns
+NEGATIVE, and `mean_revert_live` stays the ops kill.
+
+### Fix 3 — Phase-5 pair-cohort dimension (the honest "which pairs")
+
+`src/pair_cohort.py`: liquidity cohort MAJOR/MIDCAP/ALTCOIN (reuses the engine's own
+volume-tier thresholds + `PAIR_TIER_MAP`). Every candidate stamps `mc_pair_cohort`
+(new `Signal` field, set in `_populate_signal_context`). The edge-store feeders
+(`main._feed_edge` suppressed/shadow + `trade_monitor` emitted) **dual-write** a
+cohort-refined cell (`context_key/COHORT`) **alongside** the base cell — additive, so the
+live matrix the policy reads is **never fragmented** (per-symbol was too sparse for n≥15;
+cohort keys don't match the base `context_key` so they never leak into the allocator).
+`context_emission_cohort_aware` tunable (default **OFF**): when ON the policy reads the
+cohort cell first with base fallback when thin. Wired end-to-end: `pair_cohort` threaded
+through `suppression_audit.stamp_candidate` → `SuppressedCandidateRecord` (asdict) → the
+feed `rec`, and `context_emission_policy.effective_floor(..., cohort=...)`.
+
+### Verification
+
+New `tests/test_pair_cohort.py` (7 — cohort classification, key composition, cohort-aware
+prefer/fallback/off) + `tests/test_emission_followups.py` (7 — MEAN_REVERT compat both
+states + range intact, cooldown/cohort tunables registered, lowered default). Ran green:
+new 37 (incl. S69 policy/allocator), `test_signal_lifecycle_bugs` + suppression_audit +
+mean_revert + signal_quality + scanner + range_fade **446 passed**. ruff clean; **mypy 105
+= baseline (0 new)**. All three ship **LIVE with ops control** per the owner's standing
+"no darks, controls in ops" directive; guardrails intact (cohort default OFF until cells
+populate; MEAN_REVERT protected by the NEGATIVE-cell auto-suppress; cooldown reversible).
+
+### NEXT
+
+1. Owner: merge the PR (MEAN_REVERT compat = scoring-eligibility change → owner-sign-off;
+   shipped live per directive, so review + merge). Deploy, then watch the Strategy Lab:
+   MEAN_REVERT emission count leaving 0; `dispatch_cooldown` missed-R shrinking; cohort
+   cells (`.../MAJOR` etc.) accumulating — flip `context_emission_cohort_aware` ON once
+   they pass n≥15.
+2. Remaining cleanup: retire the bespoke RANGE_FADE context gate into the unified
+   `context_emission_policy` (behaviour-equivalent).
+
+---
+
 ## 🟢 SESSION 69 2026-07-19 — Autonomous context-adaptive emission: the edge matrix now DRIVES the confidence floor (Layer C→emission consumer), LIVE by owner directive with full ops control + allocator upgrade (branch `claude/strategy-lab-signals-analysis-ntw48u`, 360-v2)
 
 **Owner ask (2 PDFs: Profit tab + Strategy Lab, 2026-07-19):** analyse the data;

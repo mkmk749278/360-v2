@@ -73,6 +73,7 @@ class PolicyParams:
     positive_relax: float
     min_samples: int
     suppress_negative: bool
+    cohort_aware: bool = False
 
     @staticmethod
     def from_config() -> "PolicyParams":
@@ -83,6 +84,7 @@ class PolicyParams:
         back to the frozen config default, so the policy is always well-defined.
         """
         from config import (
+            CONTEXT_EMISSION_COHORT_AWARE,
             CONTEXT_EMISSION_LIVE,
             CONTEXT_EMISSION_MIN_SAMPLES,
             CONTEXT_EMISSION_POLICY_ENABLED,
@@ -109,6 +111,7 @@ class PolicyParams:
             positive_relax=max(0.0, float(_rt("context_emission_positive_relax", CONTEXT_EMISSION_POSITIVE_RELAX))),  # type: ignore[arg-type]
             min_samples=max(1, int(_rt("context_emission_min_samples", CONTEXT_EMISSION_MIN_SAMPLES))),  # type: ignore[call-overload]
             suppress_negative=bool(_rt("context_emission_suppress_negative", CONTEXT_EMISSION_SUPPRESS_NEGATIVE)),
+            cohort_aware=bool(_rt("context_emission_cohort_aware", CONTEXT_EMISSION_COHORT_AWARE)),
         )
 
 
@@ -147,6 +150,7 @@ def effective_floor(
     context_key: str,
     base_floor: float,
     *,
+    cohort: str = "",
     store: Optional[object] = None,
     params: Optional[PolicyParams] = None,
 ) -> EmissionDecision:
@@ -180,6 +184,27 @@ def effective_floor(
         from src.strategy_edge import get_strategy_edge_store
 
         store = get_strategy_edge_store()
+
+    # Phase-5 cohort refinement: prefer the cohort-refined context cell when the
+    # policy is cohort-aware AND that cell actually has a verdict (for the
+    # strategy or its control arm); otherwise fall back to the base context cell.
+    effective_ctx = context_key
+    if p.cohort_aware and cohort:
+        from src.pair_cohort import cohort_context_key
+
+        cohort_ctx = cohort_context_key(context_key, cohort)
+        alias = _CONTROL_ARM.get(strategy.upper())
+        cohort_has_data = (
+            store.verdict(strategy, cohort_ctx) != "INSUFFICIENT_DATA"  # type: ignore[attr-defined]
+            or (
+                alias is not None
+                and store.verdict(alias, cohort_ctx) != "INSUFFICIENT_DATA"  # type: ignore[attr-defined]
+            )
+        )
+        if cohort_has_data:
+            effective_ctx = cohort_ctx
+
+    context_key = effective_ctx
     matrix_strategy = _resolve_matrix_strategy(strategy, store)
     # Prefer the strategy's own cell; fall back to the shadow control arm only
     # when own data is thin (INSUFFICIENT), so a path with real emitted outcomes

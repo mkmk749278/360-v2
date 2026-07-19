@@ -1704,6 +1704,7 @@ class CryptoSignalEngine:
                         # persist=False: hundreds of records can resolve in
                         # one cycle — one batched save() below, not one full
                         # JSON dump per record (2026-07-13 wedge contributor).
+                        _src = SOURCE_SHADOW if _is_shadow_unit else SOURCE_SUPPRESSED
                         get_strategy_edge_store().record(
                             StrategyOutcome(
                                 strategy=str(rec.get("setup_class", "")),
@@ -1713,12 +1714,31 @@ class CryptoSignalEngine:
                                 pnl_pct=float(outcome.get("pnl_pct", 0.0)),
                                 r_multiple=float(outcome.get("r_multiple", 0.0)),
                                 mfe_pct=float(outcome.get("mfe_pct", 0.0)),
-                                source=SOURCE_SHADOW
-                                if _is_shadow_unit
-                                else SOURCE_SUPPRESSED,
+                                source=_src,
                             ),
                             persist=False,
                         )
+                        # Phase-5 cohort cell: dual-write the same outcome under
+                        # the cohort-refined key so the cohort matrix accumulates
+                        # in parallel without fragmenting the base cell.
+                        _cohort = str(rec.get("pair_cohort", "") or "")
+                        if _cohort:
+                            from src.pair_cohort import cohort_context_key
+                            get_strategy_edge_store().record(
+                                StrategyOutcome(
+                                    strategy=str(rec.get("setup_class", "")),
+                                    context_key=cohort_context_key(
+                                        str(rec.get("context_key", "")), _cohort
+                                    ),
+                                    side=str(rec.get("side", "")),
+                                    won=bool(outcome.get("won")),
+                                    pnl_pct=float(outcome.get("pnl_pct", 0.0)),
+                                    r_multiple=float(outcome.get("r_multiple", 0.0)),
+                                    mfe_pct=float(outcome.get("mfe_pct", 0.0)),
+                                    source=_src,
+                                ),
+                                persist=False,
+                            )
 
                     def _classify_suppressed_batch() -> dict:
                         counters = _sa.get_store().classify_pending(

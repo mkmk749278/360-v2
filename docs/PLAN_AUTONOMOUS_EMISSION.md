@@ -267,8 +267,20 @@ per-path emission counts climbing (QCB / SR_FLIP / LIQ_SWEEP / DIV_CONT in their
 cells). If the relax side misbehaves, raise the anchor toward 65 (or flip
 `context_emission_live` OFF) in ops.
 
-**Next (separate PRs):**
-- The `dispatch_cooldown` DROP leak (235R, 100% would-win) — make it live-tunable and
-  tune it off the audit. Cleanest remaining single leak.
-- MEAN_REVERT compat-map (#739) so the 18th path can enter measurement.
-- Phase 5 pair-cohort dimension.
+**Shipped (follow-up PR, 2026-07-19 — all three, LIVE + ops-controlled):**
+- **`dispatch_cooldown` DROP leak** (235R, 100% would-win): default lowered 1800→900s
+  and made two live ops tunables (`dispatch_cooldown_enabled`, `dispatch_cooldown_sec`,
+  0–7200s). An explicit ops override wins; otherwise the module global (monkeypatch-safe).
+- **MEAN_REVERT compat-map (#739 / F1):** the 18th path was compat-listed under
+  CLEAN/DIRTY_RANGE only, but its ≥2.5σ trigger flips the classifier INTO
+  VOLATILE_UNSUITABLE / BREAKOUT_EXPANSION — so it was gated pre-scoring by its own
+  trigger (0 emissions). Added to both those states (additive; range homes intact). The
+  context-emission policy auto-suppresses any cell where its edge turns NEGATIVE.
+- **Phase 5 pair-cohort dimension:** `src/pair_cohort.py` (MAJOR/MIDCAP/ALTCOIN by
+  liquidity). Every candidate stamps `mc_pair_cohort`; the edge-store feeders **dual-write**
+  a cohort-refined cell (`context_key/COHORT`) **alongside** the base cell — additive, never
+  fragments the live matrix. `context_emission_cohort_aware` (default OFF) makes the policy
+  read the cohort cell first, base fallback when thin — the owner flips it ON in ops once
+  cohort cells populate.
+
+**Still open:** retire the bespoke RANGE_FADE gate into `context_emission_policy` (behaviour-equivalent cleanup).

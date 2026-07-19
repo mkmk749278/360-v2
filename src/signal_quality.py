@@ -449,6 +449,13 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         SetupClass.FVG_RETEST,
         SetupClass.FVG_RETEST_HTF_CONFLUENCE,
         SetupClass.SMC_ORDERBLOCK,
+        # MEAN_REVERT (#739 / F1): a fresh ≥2.5σ 15m extension classifies here as
+        # often as VOLATILE_UNSUITABLE — the fade must be eligible in the exact
+        # state its own trigger creates, or it can never emit (see the
+        # VOLATILE_UNSUITABLE note below).  The z-trigger already demands a
+        # genuine statistical extreme; the context-emission policy prices and
+        # auto-suppresses the cells where fading an expansion actually loses.
+        SetupClass.MEAN_REVERT,
     },
     MarketState.VOLATILE_UNSUITABLE: {
         # Whale-driven and liquidity-sweep signals are valid precisely in
@@ -468,6 +475,16 @@ REGIME_SETUP_COMPATIBILITY: Dict[MarketState, set[SetupClass]] = {
         # cascade / panic / volatile conditions — suppressing them in
         # VOLATILE_UNSUITABLE is architecturally wrong.
         SetupClass.LIQUIDATION_REVERSAL,
+        # MEAN_REVERT (#739 / S64 audit F1): the 18th path was compat-listed
+        # under CLEAN/DIRTY_RANGE ONLY, but its ≥2.5σ 15m trigger is exactly the
+        # spike that flips the classifier OUT of a range state INTO
+        # VOLATILE_UNSUITABLE / BREAKOUT_EXPANSION — so it was gated pre-scoring
+        # by its own trigger (0 emissions all window despite 172 detections).
+        # An exhaustion fade of a statistical over-extension is a volatility
+        # event, home alongside LIQUIDATION_REVERSAL here.  Safety net: the
+        # context-emission policy auto-suppresses any cell where MEAN_REVERT's
+        # measured edge turns NEGATIVE, and `mean_revert_live` is the ops kill.
+        SetupClass.MEAN_REVERT,
     },
 }
 
