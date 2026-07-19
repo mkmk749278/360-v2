@@ -69,6 +69,13 @@ def _build_registry() -> Dict[str, Tunable]:
         BE_THEN_TP1_DEFAULT_ENABLED,
         BTC_DIR_PENALTY_APPLY,
         COHORT_EDGE_GATE_ENABLED,
+        CONTEXT_EMISSION_LIVE,
+        CONTEXT_EMISSION_MIN_SAMPLES,
+        CONTEXT_EMISSION_POLICY_ENABLED,
+        CONTEXT_EMISSION_POSITIVE_RELAX,
+        CONTEXT_EMISSION_QUALITY_ANCHOR,
+        CONTEXT_EMISSION_STRONG_RELAX,
+        CONTEXT_EMISSION_SUPPRESS_NEGATIVE,
         FEATURE_LIVENESS_ENABLED,
         COHORT_EDGE_GATE_MIN_N,
         COHORT_EDGE_SUPPRESS_BELOW,
@@ -381,6 +388,117 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=RANGE_FADE_LIVE,
+            category="Signal gating",
+        ),
+        # ── Context-adaptive emission policy (Layer C → emission) ──────────
+        # The autonomous best-signal mechanism: the measured edge matrix drives
+        # a per-(strategy×context) confidence floor.  LIVE by owner directive
+        # 2026-07-19 with full ops control — `context_emission_enabled` is the
+        # instant kill, `context_emission_live` toggles apply vs measure-only,
+        # and the anchor/relax/samples knobs shape it without a redeploy.
+        Tunable(
+            key="context_emission_enabled",
+            label="Context emission policy",
+            description=(
+                "Master switch for the context-adaptive emission policy: the "
+                "measured Strategy×Context edge matrix drives the confidence "
+                "floor per (strategy, context) — relax the floor in cells "
+                "measured STRONG/POSITIVE so a path emits its best setups where "
+                "it wins, hard-suppress NEGATIVE cells so it stays silent where "
+                "it loses, leave the global floor untouched on cold/thin cells. "
+                "OFF = the single global floor decides everything (pre-policy "
+                "behaviour). Generalises the RANGE_FADE context gate to every "
+                "strategy. See docs/PLAN_AUTONOMOUS_EMISSION.md."
+            ),
+            type="bool",
+            default=CONTEXT_EMISSION_POLICY_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="context_emission_live",
+            label="Context emission — apply live",
+            description=(
+                "ON = the policy's per-context floor is APPLIED to live "
+                "emission (relax STRONG cells, suppress NEGATIVE cells). OFF = "
+                "measure-only: the would-be decision is stamped and logged "
+                "([CONTEXT_FLOOR_SHADOW]) for the Strategy Lab but live output "
+                "is unchanged — the safe way to preview the policy on a real "
+                "window before it changes what subscribers see."
+            ),
+            type="bool",
+            default=CONTEXT_EMISSION_LIVE,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="context_emission_quality_anchor",
+            label="Context emission — quality anchor",
+            description=(
+                "Absolute confidence floor the policy will never relax below, "
+                "no matter how strong a cell measures — paid-tier integrity by "
+                "construction. Raise toward the 65 base to shrink the relax "
+                "side (65 = suppress-only, no relaxation); lower for more "
+                "breadth in proven cells."
+            ),
+            type="float",
+            default=CONTEXT_EMISSION_QUALITY_ANCHOR,
+            category="Signal gating",
+            min_value=50.0,
+            max_value=75.0,
+        ),
+        Tunable(
+            key="context_emission_strong_relax",
+            label="Context emission — STRONG relax (pts)",
+            description=(
+                "Max confidence points to lower the floor in a STRONG cell "
+                "(clamped at the quality anchor). 5 = a STRONG cell emits down "
+                "to ~60 off a 65 base."
+            ),
+            type="float",
+            default=CONTEXT_EMISSION_STRONG_RELAX,
+            category="Signal gating",
+            min_value=0.0,
+            max_value=15.0,
+        ),
+        Tunable(
+            key="context_emission_positive_relax",
+            label="Context emission — POSITIVE relax (pts)",
+            description=(
+                "Max confidence points to lower the floor in a POSITIVE cell "
+                "(clamped at the quality anchor). Kept below the STRONG relax so "
+                "a merely-positive cell emits a narrower, higher-bar slice."
+            ),
+            type="float",
+            default=CONTEXT_EMISSION_POSITIVE_RELAX,
+            category="Signal gating",
+            min_value=0.0,
+            max_value=15.0,
+        ),
+        Tunable(
+            key="context_emission_min_samples",
+            label="Context emission — min samples to relax",
+            description=(
+                "Relaxation requires at least this many forward-measured "
+                "outcomes in the cell (stricter than the edge-matrix floor of "
+                "15 — we only lower the bar on well-populated evidence). "
+                "Suppression of NEGATIVE cells uses the matrix's own floor."
+            ),
+            type="int",
+            default=CONTEXT_EMISSION_MIN_SAMPLES,
+            category="Signal gating",
+            min_value=15,
+            max_value=200,
+        ),
+        Tunable(
+            key="context_emission_suppress_negative",
+            label="Context emission — suppress NEGATIVE cells",
+            description=(
+                "ON = a path is hard-suppressed in any context where its "
+                "measured edge is NEGATIVE (the protective, RANGE_FADE-gate "
+                "side — strictly removes measured losers). OFF = relax-only "
+                "(never suppress on context)."
+            ),
+            type="bool",
+            default=CONTEXT_EMISSION_SUPPRESS_NEGATIVE,
             category="Signal gating",
         ),
         Tunable(

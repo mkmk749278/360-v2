@@ -102,3 +102,51 @@ def test_payload_is_recommendation_only_and_carries_limits() -> None:
         "max_strategy_weight": 0.25,
     }
     assert payload["generated_at_iso"].endswith("Z")
+
+
+def _cell_prov(strategy, edge_r, verdict, n, n_emitted, ctx=CTX) -> dict:
+    return {
+        "strategy": strategy,
+        "context_key": ctx,
+        "n": n,
+        "n_emitted": n_emitted,
+        "edge_r": edge_r,
+        "verdict": verdict,
+    }
+
+
+def test_counterfactual_only_ranked_below_emitted_equal_edge() -> None:
+    # Equal measured edge, neither strategy in an affinity design context (mult
+    # 1.0) — the one backed by real emitted outcomes must rank first.
+    matrix = {
+        f"AAA|{CTX}": _cell_prov("AAA", 0.20, "STRONG", 30, 15),
+        f"BBB|{CTX}": _cell_prov("BBB", 0.20, "STRONG", 30, 0),
+    }
+    rec = recommend(CTX, matrix, limits=AllocatorLimits(6, 0.9))
+    assert [r["strategy"] for r in rec["activate"]] == ["AAA", "BBB"]
+    assert rec["activate"][0]["provenance"] == "emitted"
+    assert rec["activate"][1]["provenance"] == "counterfactual"
+    assert rec["activate"][0]["score"] > rec["activate"][1]["score"]
+
+
+def test_emission_set_is_wider_than_capital_set() -> None:
+    matrix = {
+        f"S{i}|{CTX}": _cell_prov(f"S{i}", 0.10 + i * 0.01, "POSITIVE", 30, 15)
+        for i in range(8)
+    }
+    rec = recommend(CTX, matrix, limits=AllocatorLimits(3, 0.9, 6))
+    assert len(rec["activate"]) == 3  # capital cap
+    assert len(rec["emission_activate"]) == 6  # wider emission cap
+    # Emission set is a superset of the capital set, same ranking.
+    cap = [r["strategy"] for r in rec["activate"]]
+    emit = [r["strategy"] for r in rec["emission_activate"]]
+    assert emit[: len(cap)] == cap
+
+
+def test_payload_carries_emission_fields() -> None:
+    matrix = {f"ONLY|{CTX}": _cell_prov("ONLY", 0.30, "STRONG", 30, 15)}
+    payload = build_recommendation_payload(
+        context_key=CTX, matrix=matrix, limits=AllocatorLimits(6, 0.35, 10)
+    )
+    assert payload["emission_max_concurrent"] == 10
+    assert [r["strategy"] for r in payload["emission_activate"]] == ["ONLY"]

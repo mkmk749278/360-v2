@@ -1040,6 +1040,54 @@ RANGE_FADE_CONTEXT_MIN_VERDICT: str = _safe_choice(
     "RANGE_FADE_CONTEXT_MIN_VERDICT", "strong", frozenset({"strong", "positive"})
 )
 
+# ── Context-adaptive emission policy (Layer C → emission consumer) ───────────
+# Generalises the RANGE_FADE context gate into a two-sided per-(strategy×context)
+# emission policy driven by the measured edge matrix: relax the confidence floor
+# in cells measured STRONG/POSITIVE, hard-suppress NEGATIVE cells, leave the
+# global floor untouched on cold/thin/FLAT cells.  See
+# docs/PLAN_AUTONOMOUS_EMISSION.md and src/context_emission_policy.py.
+#
+# LIVE by owner directive (2026-07-19): ships applying, not dark — with EVERY knob
+# exposed as a runtime tunable (ops Control → Signal gating), so the owner tunes or
+# disables it live with no redeploy (`context_emission_enabled` is the instant
+# off-switch; `context_emission_live` toggles apply-vs-measure-only).  The safety
+# envelope stays enforced in the math regardless of the knobs: the effective floor
+# never drops below CONTEXT_EMISSION_QUALITY_ANCHOR (paid-tier integrity),
+# relaxation needs CONTEXT_EMISSION_MIN_SAMPLES of real evidence, suppression only
+# fires on a measured-NEGATIVE cell, and any edge-store error fails open to the
+# global floor (recorded via fail_open).  This is an emission change only — no
+# execution / sizing / blast-radius behaviour is touched.
+CONTEXT_EMISSION_POLICY_ENABLED: bool = _safe_bool(
+    "CONTEXT_EMISSION_POLICY_ENABLED", "true"
+)
+CONTEXT_EMISSION_LIVE: bool = _safe_bool("CONTEXT_EMISSION_LIVE", "true")
+#: Relaxation never drops the effective floor below this absolute quality anchor
+#: — paid-tier integrity by construction (scrap never reaches paid users).
+CONTEXT_EMISSION_QUALITY_ANCHOR: float = _safe_float(
+    "CONTEXT_EMISSION_QUALITY_ANCHOR", "60.0"
+)
+#: Max confidence points to relax the floor in a STRONG / POSITIVE cell.  Kept
+#: modest live (STRONG floor → ~60, POSITIVE → ~62 off a 65 base) so the relax
+#: side stays high-quality; the owner widens it in ops as the matrix proves out.
+CONTEXT_EMISSION_STRONG_RELAX: float = _safe_float("CONTEXT_EMISSION_STRONG_RELAX", "5.0")
+CONTEXT_EMISSION_POSITIVE_RELAX: float = _safe_float(
+    "CONTEXT_EMISSION_POSITIVE_RELAX", "4.0"
+)
+#: Relaxation requires at least this many samples in the cell (stricter than the
+#: edge-matrix floor of 15 — we relax the bar only on well-populated evidence).
+CONTEXT_EMISSION_MIN_SAMPLES: int = _safe_int("CONTEXT_EMISSION_MIN_SAMPLES", "30")
+#: Whether a NEGATIVE cell hard-suppresses the path (the RANGE_FADE-gate side).
+CONTEXT_EMISSION_SUPPRESS_NEGATIVE: bool = _safe_bool(
+    "CONTEXT_EMISSION_SUPPRESS_NEGATIVE", "true"
+)
+#: Emission-side concurrency cap for the allocator — separate from the capital
+#: allocator's ALLOCATOR_MAX_CONCURRENT_STRATEGIES (6).  A signals business wants
+#: more breadth than a capital allocator: emitting a signal is not allocating
+#: capital, so more strategies may be promoted for emission at once.
+ALLOCATOR_EMISSION_MAX_CONCURRENT: int = _safe_int(
+    "ALLOCATOR_EMISSION_MAX_CONCURRENT", "10"
+)
+
 # ── Counter-trend hard-block on confirmed strong movers (Session 30, owner-approved) ─
 # §3.2 #5 reserves HARD blocks for structural impossibility.  Fading a CONFIRMED
 # strong mover with a reversal IS that case: SYNUSDT (+300%/7d, 4h+1h both stacked
