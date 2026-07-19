@@ -875,7 +875,8 @@ def _dispatch_cooldown_enabled() -> bool:
         if _v is not None and _reg is not None and bool(_v) != bool(_reg.default):
             return bool(_v)  # genuine ops override
     except Exception:
-        pass
+        # Tunable-read fallback (not a data path) — use the module global.
+        return bool(DISPATCH_COOLDOWN_ENABLED)
     return bool(DISPATCH_COOLDOWN_ENABLED)
 
 
@@ -889,7 +890,8 @@ def _dispatch_cooldown_sec() -> float:
         if _v is not None and _reg is not None and float(_v) != float(_reg.default):
             return float(_v)  # genuine ops override
     except Exception:
-        pass
+        # Tunable-read fallback (not a data path) — use the module global.
+        return float(DISPATCH_COOLDOWN_SEC)
     return float(DISPATCH_COOLDOWN_SEC)
 
 # Consecutive-loss streak registry (2026-07-09, dark-flagged escalation).
