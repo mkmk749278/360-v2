@@ -83,6 +83,10 @@ class SuppressedCandidateRecord:
     regime: str
     valid_for_minutes: float
     suppress_timestamp: float
+    # Pair-cohort (liquidity tier) for the Phase-5 cohort-refined edge cell —
+    # dual-written alongside the base cell so cohort matrices accumulate without
+    # fragmenting the base one.
+    pair_cohort: str = ""
     # Filled by classify_pending once the window elapses.
     classified_at: Optional[float] = None
     classification: Optional[str] = None
@@ -404,6 +408,7 @@ def stamp_candidate(
     context_key: str = "",
     regime: str = "",
     valid_for_minutes: float = 0.0,
+    pair_cohort: str = "",
     store: Optional[SuppressedCandidateStore] = None,
 ) -> Optional[SuppressedCandidateRecord]:
     """Stamp a suppressed candidate (fail-open).  Scopes to tradeable geometry only."""
@@ -428,6 +433,7 @@ def stamp_candidate(
             context_key=context_key or "",
             regime=regime or "",
             valid_for_minutes=float(valid_for_minutes or 0.0),
+            pair_cohort=str(pair_cohort or ""),
             suppress_timestamp=time.time(),
         )
         (store or get_store()).stamp(rec)

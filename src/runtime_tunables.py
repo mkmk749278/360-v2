@@ -69,6 +69,7 @@ def _build_registry() -> Dict[str, Tunable]:
         BE_THEN_TP1_DEFAULT_ENABLED,
         BTC_DIR_PENALTY_APPLY,
         COHORT_EDGE_GATE_ENABLED,
+        CONTEXT_EMISSION_COHORT_AWARE,
         CONTEXT_EMISSION_LIVE,
         CONTEXT_EMISSION_MIN_SAMPLES,
         CONTEXT_EMISSION_POLICY_ENABLED,
@@ -79,6 +80,8 @@ def _build_registry() -> Dict[str, Tunable]:
         FEATURE_LIVENESS_ENABLED,
         COHORT_EDGE_GATE_MIN_N,
         COHORT_EDGE_SUPPRESS_BELOW,
+        DISPATCH_COOLDOWN_ENABLED,
+        DISPATCH_COOLDOWN_SEC,
         GEOMETRY_AB_ENABLED,
         TUNED_VARIANTS_ENABLED,
         LOSS_STREAK_CAP_HOURS,
@@ -500,6 +503,53 @@ def _build_registry() -> Dict[str, Tunable]:
             type="bool",
             default=CONTEXT_EMISSION_SUPPRESS_NEGATIVE,
             category="Signal gating",
+        ),
+        Tunable(
+            key="context_emission_cohort_aware",
+            label="Context emission — pair-cohort aware",
+            description=(
+                "ON = the policy looks up the pair-cohort-refined cell "
+                "(context_key + liquidity tier MAJOR/MIDCAP/ALTCOIN) first, "
+                "falling back to the base cell when the cohort cell is thin — "
+                "so a path's floor adapts to how it performs on *this kind of "
+                "pair* in this context. Cohort cells accumulate in parallel "
+                "regardless (additive, never fragments the base matrix); flip "
+                "this ON once they have samples. OFF = base context cell only."
+            ),
+            type="bool",
+            default=CONTEXT_EMISSION_COHORT_AWARE,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="dispatch_cooldown_enabled",
+            label="Dispatch cooldown",
+            description=(
+                "Per-(symbol, setup, direction) re-emission guard: blocks the "
+                "same setup from re-firing within the cooldown window after a "
+                "dispatch (stops 15s bit-identical spam). Gate audit read it "
+                "DROP (235R missed, 100% would-win — the window blocked "
+                "profitable re-entries). OFF = no cooldown (every re-detection "
+                "can emit); tune the window below instead of disabling outright."
+            ),
+            type="bool",
+            default=DISPATCH_COOLDOWN_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="dispatch_cooldown_sec",
+            label="Dispatch cooldown window (s)",
+            description=(
+                "Seconds the same (symbol, setup, direction) is blocked from "
+                "re-emitting after a dispatch. Lowered from 1800 to 900 off the "
+                "gate audit; raise toward 1800 for fewer repeat alerts, lower "
+                "toward ~300 to let continuing moves re-enter sooner."
+            ),
+            type="float",
+            default=DISPATCH_COOLDOWN_SEC,
+            category="Signal gating",
+            min_value=0.0,
+            max_value=7200.0,
+            unit="s",
         ),
         Tunable(
             key="loss_streak_escalation_enabled",
