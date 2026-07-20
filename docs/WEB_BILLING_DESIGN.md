@@ -21,6 +21,27 @@ Owner direction (2026-07-20): **route by region and offer multiple rails** —
 Razorpay for India, Stripe for the rest of the world, a crypto-transfer path,
 and manual (owner-granted) subscriptions as the fallback.
 
+### 1.1 Launch reality — solo operator, no business entity (decided 2026-07-20)
+
+The owner is solo with **no registered business**. That reorders — but does not
+change — the plan:
+
+- **Razorpay & Stripe both require merchant KYC.** Razorpay is achievable as a
+  **sole proprietorship** (personal PAN + bank account, no company registration),
+  but still needs KYC + activation, and — the real risk — a **business-category
+  review** that may flag a crypto-trading-signals app (both providers restrict
+  trading-advice / crypto-adjacent businesses). Stripe India is harder still for a
+  solo individual (typically wants a registered business). Neither is a "sign up
+  today and charge tonight" path.
+- **Crypto (NOWPayments) and manual have near-zero onboarding** — email + a wallet
+  for the former, nothing for the latter — and no business entity required.
+
+**Therefore the launch rails are CRYPTO (NOWPayments) + MANUAL. Razorpay and
+Stripe stay designed-and-dark, activated later if/when the owner registers a
+proprietorship and clears each provider's category review.** The architecture is
+unchanged (all rails converge on `aset_tier`); only the **activation order** flips.
+See §10.
+
 ## 2. The one invariant that governs everything
 
 **The engine is the single source of truth for entitlement, and there is exactly
@@ -147,23 +168,39 @@ the existing `CF-IPCountry` detection to return which rails to surface:
   `Stripe-Signature` header verified with the endpoint signing secret (timestamped
   HMAC, replay-guarded). Same map → `aset_tier`.
 
-### 4.3 Crypto transfer
+### 4.3 Crypto transfer — NOWPayments (LAUNCH RAIL, decided 2026-07-20)
 
-Two candidate implementations — **owner to pick one at sign-off**:
+**Processor: NOWPayments.** Chosen over Coinbase Commerce and over a self-watched
+address for two reasons: (1) **light onboarding** — email + a receiving wallet, no
+business KYC, which a solo operator can actually complete; (2) it has an actual
+**Subscriptions / recurring-billing product**, which Coinbase Commerce lacks
+(Commerce is one-time charges only, forcing us to hand-roll the schedule).
 
-- **(A) Hosted processor (recommended): Coinbase Commerce or NOWPayments.** They
-  give us a hosted checkout + a signed webhook on confirmation, so we never watch
-  the chain ourselves or hold funds custody logic. Engine verifies the webhook
-  signature exactly like the card rails → `aset_tier(paid_until = now + 30d)`
-  (crypto is a **fixed-period pass, not auto-renewing** — no mandate exists on
-  chain; the user re-pays to extend). Lowest build + lowest risk.
-- **(B) Self-watched address.** Engine issues a unique address/amount per order,
-  polls a chain API for N confirmations, then grants. More moving parts, custody
-  and reorg edge cases, an uncached polling loop to cost-review. Not recommended
-  for v1.
+**On "can it automatically manage subscriptions?" — the honest limit:** *no crypto
+rail can silently auto-charge*, because there is **no on-chain pull/mandate**
+primitive (nothing equivalent to a card mandate or UPI-autopay — funds cannot be
+debited from a user's wallet on a schedule). What NOWPayments Subscriptions *does*
+manage for us: it auto-generates a recurring **invoice each billing cycle, emails
+the customer a payment link, tracks paid/unpaid, and fires a webhook** on payment.
+So the lifecycle (schedule, invoicing, reminders, status) is managed; the customer
+still actively **one-tap pays each cycle** from the emailed link. That is as close
+to "managed recurring" as crypto allows, and it's why NOWPayments beats Commerce
+here.
 
-Either way crypto grants a **time-boxed pass**, and the UI states "renew manually
-before {date}" — there is no silent renewal.
+**Flow:** engine creates a NOWPayments subscription/invoice for the chosen tier
+(server-side, API key never on the client) → user pays via the hosted NOWPayments
+checkout → NOWPayments webhook (`payment.finished`/`confirmed`) → engine **verifies
+the webhook signature** (HMAC over the raw body with the IPN secret) → `aset_tier(
+tier, paid_until = now + billing_period)`. On a missed renewal the invoice simply
+isn't paid, `paid_until` lapses, and the existing expiry reaper downgrades to
+`free` — no on-chain action needed from us.
+
+**UX:** the paywall/renewal card states the paid-through date and "we'll email you
+a renewal link before {date}" — never implies a silent auto-charge.
+
+*(Deferred, not chosen: a self-watched unique-address model — engine polls a chain
+API for N confirmations. Rejected for v1: custody/reorg edge cases and an uncached
+polling loop to cost-review. NOWPayments' signed webhook avoids both.)*
 
 ### 4.4 Manual subscription (owner)
 
@@ -197,10 +234,13 @@ sandbox-verified + owner activation per rail**, not a shadow signal window:
 | Flag | Default | Meaning |
 |---|---|---|
 | `WEB_BILLING_ENABLED` | **false** | master off-switch; all web billing endpoints 503 when false |
-| `WEB_BILLING_RAZORPAY_ENABLED` | false | India rail |
-| `WEB_BILLING_STRIPE_ENABLED` | false | RoW rail |
-| `WEB_BILLING_CRYPTO_ENABLED` | false | crypto rail |
+| `WEB_BILLING_CRYPTO_ENABLED` | false | crypto rail (NOWPayments) — **launch rail** |
+| `WEB_BILLING_RAZORPAY_ENABLED` | false | India cards — later phase (needs merchant entity) |
+| `WEB_BILLING_STRIPE_ENABLED` | false | RoW cards — later phase (needs merchant entity) |
 | `WEB_BILLING_TEST_MODE` | true | use provider **sandbox/test keys**; must be flipped to false with live keys only after owner sign-off |
+
+(Manual grant has no flag — it's the always-available owner-only `admin_grant_tier`
+path, gated by owner auth, not a billing flag.)
 
 Ops Control plane gets per-rail toggles (mirrors the existing
 `play_billing_enabled` control), so activation is an owner action from
@@ -228,52 +268,71 @@ sandbox end-to-end purchase is verified.
 ## 8. Cost
 
 Webhooks and checkout creation are **per-purchase, low-frequency** — not a hot
-path, no per-tick/scan/order reads. The only loop to avoid is crypto option (B)'s
-chain polling, which is another reason (A) is recommended. Idempotency store is a
-tiny table / short-TTL Redis set. No Cost-Discipline hot-path concern.
+path, no per-tick/scan/order reads. NOWPayments' signed webhook means no chain
+polling loop (the reason the self-watched-address model was rejected, §4.3).
+Idempotency store is a tiny table / short-TTL Redis set. No Cost-Discipline
+hot-path concern.
 
 ## 9. Legal / compliance follow-ons (tracked, not blocking the design)
 
 - `mkmk749278/lumin-legal`: `terms.md` currently states Google Play Billing as the
   billing model (corrected when B16 shipped). Web rails require a terms update to
-  describe Razorpay/Stripe/crypto billing, refunds, and cancellation — **owner-
-  sign-off legal change**, shipped alongside activation, not before.
-- Provider onboarding is an **owner task**: Razorpay + Stripe accounts, KYC, plan/
-  price objects, and — importantly — confirming each provider permits our business
-  category. (Both Razorpay and Stripe restrict some crypto-adjacent businesses; we
-  present as a **signals/education subscription**, not an exchange, but this must be
-  confirmed at account setup. Flagged as a real go/no-go item.)
+  describe crypto (NOWPayments) billing, the manual-renewal model, refunds, and
+  cancellation — **owner-sign-off legal change**, shipped alongside activation, not
+  before. (Card-rail terms follow when Razorpay/Stripe activate.)
+- **Launch-rail onboarding (owner task, light):** a NOWPayments account (email +
+  receiving wallet, no business KYC) and the IPN/webhook secret. Manual needs
+  nothing new.
+- **Card-rail onboarding (owner task, later, heavier):** Razorpay (sole-prop KYC:
+  personal PAN + bank) and/or Stripe accounts, plan/price objects, and — the real
+  go/no-go — **confirming each provider permits our business category** (both
+  restrict trading-advice / crypto-adjacent businesses; we present as a
+  **signals/education subscription**, not an exchange). Until an entity exists and
+  the category clears, these rails stay dark.
 
 ## 10. Proposed delivery order (after sign-off)
 
-Each step is its own PR, engine + app paired where needed, each dark:
+Each step is its own PR, engine + app paired where needed, each dark. **Order
+reflects the solo-launch reality (§1.1): crypto + manual first, cards later.**
 
-1. **Seam + config** — `billing_web.py` skeleton with the verifier interface,
-   `/api/billing/web/config`, flags, idempotency store, `WebBillingVerifier` unit-
-   tested with fake provider payloads. (No live provider yet; all rails "disabled"
-   in config → endpoint returns manual-only.) *Off-money-path-ish: ships behind
-   master OFF.*
-2. **Razorpay rail** — checkout create + webhook + signature tests, sandbox keys.
-3. **Stripe rail** — same shape, sandbox keys.
-4. **Crypto rail** — processor (A) integration + webhook.
-5. **App paywall + `web_billing_service.dart`** — region-adaptive UI, entitlement
-   poll-after-return.
-6. **Legal + activation** — terms update, live keys, per-rail owner activation
-   from Ops after each sandbox verification.
+1. **Seam + config** — `billing_web.py` with the `WebBillingVerifier` interface,
+   `/api/billing/web/config` (region + enabled rails), `/api/billing/web/checkout`,
+   the flags, and the idempotency store, unit-tested with fake provider payloads.
+   No live provider yet; all rails disabled → config returns manual-only. Ships
+   behind master OFF.
+2. **Crypto rail (NOWPayments) — LAUNCH** — checkout/subscription create + IPN
+   webhook + signature verification tests, sandbox keys.
+3. **App paywall + `web_billing_service.dart`** — region-adaptive UI, crypto +
+   manual rails, entitlement poll-after-return. This is the point web users can
+   actually pay.
+4. **Legal + activation (launch rails)** — terms update for crypto/manual, live
+   NOWPayments keys, owner activation from Ops after a sandbox purchase verifies.
+5. **Razorpay rail (later, entity-gated)** — checkout + webhook + signature tests,
+   sandbox keys. Activates only once the owner has a Razorpay merchant account and
+   the category is cleared.
+6. **Stripe rail (later, entity-gated)** — same shape.
 
-## 11. Decisions needed from owner (sign-off gate)
+Steps 1–4 are the shippable launch. 5–6 wait on merchant onboarding and don't
+block anything.
 
-1. **Crypto:** hosted processor (A, recommended) vs self-watched address (B)? If
-   (A): Coinbase Commerce or NOWPayments?
-2. **Recurring vs pass:** cards = recurring subscription (proposed). Crypto =
-   fixed 30-day pass (proposed, no on-chain mandate exists). Confirm.
-3. **Pricing parity:** keep ₹1000/₹2000 for India; what USD for Stripe (₹ ≈ $12 /
-   $24 at current rate — round to $11.99 / $23.99?), and crypto amount (USDT peg to
-   the USD price)?
-4. **Crypto region scope:** offer crypto everywhere, or exclude specific
-   jurisdictions?
-5. **Provider category confirmation** — owner to confirm Razorpay & Stripe accept
-   our business at onboarding (§9).
+## 11. Decisions — resolved 2026-07-20 + remaining
+
+**Resolved with the owner:**
+1. ~~Crypto processor?~~ → **NOWPayments** (light onboarding + real Subscriptions
+   product; Coinbase Commerce lacks recurring). Self-watched address rejected.
+2. ~~Recurring model?~~ → **NOWPayments managed recurring invoices** (auto-invoice +
+   email each cycle, one-tap pay; no silent auto-debit possible on crypto). Cards,
+   when they land, use provider auto-renew. Confirmed.
+3. ~~Launch rails?~~ → **Crypto + manual first; Razorpay/Stripe dark until a
+   merchant entity exists and category clears** (§1.1).
+
+**Still needed from owner before/at implementation:**
+- **A. Pricing:** keep ₹1000/₹2000 for the crypto/USD price? Crypto billed in **USDT
+  pegged to a USD price** — propose **$12 (assist) / $24 (auto)** ≈ current ₹ parity.
+  Confirm the numbers.
+- **B. Crypto region scope:** offer crypto **everywhere**, or exclude specific
+  jurisdictions? (Default proposal: everywhere; region is UX-only anyway.)
+- **C. Billing period:** monthly to match Play? (Proposed: monthly.)
 
 ---
 
