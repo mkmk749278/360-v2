@@ -145,6 +145,40 @@ def _resolve_matrix_strategy(strategy: str, store: object) -> str:
     return alias if alias else strategy
 
 
+def _apply_controller_override(strategy: str, p: PolicyParams) -> PolicyParams:
+    """Overlay the Layer-G autonomous per-strategy override onto the params.
+
+    Money-path, DARK-FLAG-FIRST: gated on ``EMISSION_CONTROLLER_ENABLED``. When
+    the flag is OFF (default) this returns ``p`` unchanged with **zero store
+    access**, so behaviour is byte-identical to pre-Layer-G. When ON, the
+    controller's per-strategy override (``min_samples`` / ``suppress_negative``)
+    replaces the global value — an O(1) in-memory dict read, no disk/network
+    (Cost Discipline). Any error falls back to ``p`` (fail toward today's proven
+    behaviour, never toward more emission).
+    """
+    try:
+        import config
+
+        if not config.EMISSION_CONTROLLER_ENABLED:
+            return p
+        from src.emission_controller import get_default_store
+
+        ov = get_default_store().get_override(strategy)
+        if ov.min_samples is None and ov.suppress_negative is None:
+            return p
+        import dataclasses
+
+        return dataclasses.replace(
+            p,
+            min_samples=p.min_samples if ov.min_samples is None else max(1, int(ov.min_samples)),
+            suppress_negative=(
+                p.suppress_negative if ov.suppress_negative is None else bool(ov.suppress_negative)
+            ),
+        )
+    except Exception:
+        return p
+
+
 def effective_floor(
     strategy: str,
     context_key: str,
@@ -161,7 +195,7 @@ def effective_floor(
     records it via ``fail_open.record`` (the S67 RANGE_FADE-gate pattern) — an
     unverifiable edge must page, not silently relax or suppress.
     """
-    p = params or PolicyParams.from_config()
+    p = _apply_controller_override(strategy, params or PolicyParams.from_config())
     base = float(base_floor)
     anchor = min(p.quality_anchor, base)  # never *raise* the floor via the anchor
 

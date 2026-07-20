@@ -1087,6 +1087,53 @@ CONTEXT_EMISSION_SUPPRESS_NEGATIVE: bool = _safe_bool(
 CONTEXT_EMISSION_COHORT_AWARE: bool = _safe_bool(
     "CONTEXT_EMISSION_COHORT_AWARE", "false"
 )
+
+# ---------------------------------------------------------------------------
+# Layer G — Autonomous Emission Controller
+# (docs/PLAN_AUTONOMOUS_EMISSION_CONTROLLER.md)
+# ---------------------------------------------------------------------------
+# The outer loop: consumes the gate KEEP/DROP verdicts + edge matrix and moves
+# the PER-STRATEGY context_emission_policy params (suppress_negative,
+# min_samples) inside a bounded, owner-approved envelope — no human in the loop.
+# DARK-FLAG-FIRST + owner-sign-off (money path).  Default **OFF**: when OFF the
+# controller loop is inert AND effective_floor ignores every override, so
+# behaviour is byte-identical to today.  Flipping ON lets the controller
+# self-promote inside the envelope; each adjustment is still dark-first per the
+# boot-grace + K-cycle stability + EV bar in the decision core.
+EMISSION_CONTROLLER_ENABLED: bool = _safe_bool("EMISSION_CONTROLLER_ENABLED", "false")
+#: Cycle cadence — a dedicated background loop (default 30 min).
+EMISSION_CONTROLLER_INTERVAL_SEC: int = _safe_int(
+    "EMISSION_CONTROLLER_INTERVAL_SEC", "1800"
+)
+#: Persisted controller state (overrides + verdict history + cycle index).
+EMISSION_CONTROLLER_PERSIST_PATH: str = os.getenv(
+    "EMISSION_CONTROLLER_PERSIST_PATH", "data/emission_controller_state.json"
+)
+#: Append-only audit ledger — every adjustment (applied or shadow) stamped with
+#: the EV that justified it.  This is the record the owner reviews.
+EMISSION_CONTROLLER_LEDGER_PATH: str = os.getenv(
+    "EMISSION_CONTROLLER_LEDGER_PATH", "data/emission_controller_ledger.jsonl"
+)
+# --- Envelope (owner-tunable bounds; the controller can NEVER exceed these) ---
+EMISSION_CONTROLLER_STABILITY_CYCLES: int = _safe_int(
+    "EMISSION_CONTROLLER_STABILITY_CYCLES", "3"
+)
+EMISSION_CONTROLLER_BOOT_GRACE_CYCLES: int = _safe_int(
+    "EMISSION_CONTROLLER_BOOT_GRACE_CYCLES", "3"
+)
+EMISSION_CONTROLLER_MIN_GATE_N: int = _safe_int("EMISSION_CONTROLLER_MIN_GATE_N", "40")
+EMISSION_CONTROLLER_PROMOTE_EV_R: float = _safe_float(
+    "EMISSION_CONTROLLER_PROMOTE_EV_R", "0.25"
+)
+EMISSION_CONTROLLER_MAX_CHANGES_PER_CYCLE: int = _safe_int(
+    "EMISSION_CONTROLLER_MAX_CHANGES_PER_CYCLE", "2"
+)
+EMISSION_CONTROLLER_MIN_SAMPLES_FLOOR: int = _safe_int(
+    "EMISSION_CONTROLLER_MIN_SAMPLES_FLOOR", "15"
+)
+EMISSION_CONTROLLER_MIN_SAMPLES_STEP: int = _safe_int(
+    "EMISSION_CONTROLLER_MIN_SAMPLES_STEP", "5"
+)
 #: Emission-side concurrency cap for the allocator — separate from the capital
 #: allocator's ALLOCATOR_MAX_CONCURRENT_STRATEGIES (6).  A signals business wants
 #: more breadth than a capital allocator: emitting a signal is not allocating

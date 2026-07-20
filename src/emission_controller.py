@@ -28,8 +28,16 @@ override read + liveness probe) applies only the adjustments this core marks
 """
 from __future__ import annotations
 
+import json
+import os
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+from src.utils import get_logger
+
+log = get_logger("emission_controller")
 
 # Verdict tokens (mirror src/suppression_audit.py) + our own history tokens.
 V_KEEP = "KEEP"
@@ -192,6 +200,7 @@ def run_cycle(
     prior: ControllerState,
     bounds: ControllerBounds,
     cycles_since_start: int,
+    unlocked_cell_r: Optional[Dict[str, float]] = None,
 ) -> ControllerDecision:
     """Advance the controller one cycle.
 
@@ -259,7 +268,15 @@ def run_cycle(
         health = strategy_health.get(strategy) or {}
         h_avg_r = health.get("emitted_avg_r")
         h_n = int(health.get("emitted_n", 0) or 0)
+        # Strategy-aggregate health (coarse) OR the specific unlocked cell's own
+        # edge going negative (precise) triggers a tighten.  The per-cell signal
+        # closes the gap where a single losing unlocked cell hides inside an
+        # otherwise-healthy strategy average and never self-corrects (review #1).
         losing = h_avg_r is not None and float(h_avg_r) < bounds.health_raise_ev_r and h_n >= bounds.health_min_n
+        if unlocked_cell_r is not None:
+            _cell_r = unlocked_cell_r.get(strategy)
+            if _cell_r is not None and float(_cell_r) < bounds.health_raise_ev_r:
+                losing = True
 
         has_unlock = bounds.min_samples_floor <= cell_n < cur_min
         if cur_min < bounds.min_samples_ceiling and losing:
@@ -334,3 +351,142 @@ def _gate_change_ok(
     if last is not None and (state.cycle - last) < k:
         return (f"rate_limited since_cycle={state.cycle - last}<{k}", False)
     return ("stable+bar+grace → promote", True)
+
+
+# ---------------------------------------------------------------------------
+# Persistence store + hot-path override accessor
+# ---------------------------------------------------------------------------
+#
+# The decision core above is pure.  This store gives it a home: it persists the
+# ``ControllerState`` (overrides + verdict history + cycle index) across
+# restarts, exposes an O(1) in-memory ``get_override(strategy)`` for the scanner
+# hot path (never touches disk), and appends every adjustment to an audit
+# ledger.  Thread-safe: the background loop writes under a lock while the
+# scanner reads the (immutable-per-cycle) override snapshot lock-free-ish.
+
+
+class EmissionControllerStore:
+    """State home for the emission controller.
+
+    * ``get_override(strategy)`` — hot-path read (scanner, per candidate). Returns
+      the per-strategy :class:`StrategyOverride`; ``None`` fields follow global.
+      In-memory dict lookup — no disk, no network (Cost Discipline).
+    * ``load`` / ``save`` — JSON persistence of the full state.
+    * ``apply_decision`` — swap in the new state, persist, and append every
+      adjustment (applied *and* shadow/pending) to the JSONL ledger.
+    """
+
+    def __init__(self, path: str, ledger_path: str = "") -> None:
+        self._path = path
+        self._ledger_path = ledger_path
+        self._lock = threading.Lock()
+        self._state: ControllerState = ControllerState()
+        # A plain dict snapshot of overrides for lock-free-ish hot reads. Replaced
+        # atomically (single reference assignment) whenever the state changes.
+        self._override_snapshot: Dict[str, StrategyOverride] = {}
+
+    # ---- lifecycle -------------------------------------------------------
+
+    def load(self) -> "EmissionControllerStore":
+        try:
+            if os.path.exists(self._path):
+                with open(self._path, "r", encoding="utf-8") as fh:
+                    self._state = ControllerState.from_dict(json.load(fh))
+        except Exception as exc:  # corrupt/partial file → start clean, don't crash boot
+            log.warning("emission_controller: state load failed ({}), starting clean", exc)
+            self._state = ControllerState()
+        self._override_snapshot = dict(self._state.overrides)
+        return self
+
+    def save(self) -> None:
+        try:
+            os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
+            tmp = f"{self._path}.tmp"
+            with open(tmp, "w", encoding="utf-8") as fh:
+                json.dump(self._state.to_dict(), fh)
+            os.replace(tmp, self._path)  # atomic
+        except Exception as exc:
+            log.warning("emission_controller: state save failed ({})", exc)
+
+    # ---- hot path (scanner, per candidate) -------------------------------
+
+    def get_override(self, strategy: str) -> StrategyOverride:
+        """O(1) in-memory read. Empty override (all ``None`` → follow global)
+        when the strategy has none."""
+        return self._override_snapshot.get(strategy) or StrategyOverride()
+
+    @property
+    def state(self) -> ControllerState:
+        return self._state
+
+    # ---- background loop (per cycle) -------------------------------------
+
+    def apply_decision(self, decision: "ControllerDecision") -> None:
+        """Persist the new state, refresh the hot-path snapshot, ledger every
+        adjustment. Applied adjustments change emission; pending/shadow ones are
+        recorded for the owner to review but change nothing."""
+        with self._lock:
+            self._state = decision.state
+            # Atomic reference swap so a concurrent hot-path reader sees either
+            # the old or the new full snapshot, never a half-updated dict.
+            self._override_snapshot = dict(decision.state.overrides)
+            self.save()
+            self._append_ledger(decision.adjustments)
+
+    def _append_ledger(self, adjustments: "List[Adjustment]") -> None:
+        if not self._ledger_path or not adjustments:
+            return
+        try:
+            os.makedirs(os.path.dirname(self._ledger_path) or ".", exist_ok=True)
+            ts = time.time()
+            with open(self._ledger_path, "a", encoding="utf-8") as fh:
+                for a in adjustments:
+                    row = a.to_dict()
+                    row["ts"] = ts
+                    row["cycle"] = self._state.cycle
+                    fh.write(json.dumps(row) + "\n")
+        except Exception as exc:
+            log.warning("emission_controller: ledger append failed ({})", exc)
+
+
+# Module-level singleton (mirrors src.strategy_edge / src.api.users pattern).
+_store: Optional[EmissionControllerStore] = None
+_store_lock = threading.Lock()
+
+
+def get_default_store(
+    path: Optional[str] = None, ledger_path: Optional[str] = None
+) -> EmissionControllerStore:
+    """Return (and lazily build) the process-global controller store."""
+    global _store
+    with _store_lock:
+        if _store is None:
+            import config
+            _store = EmissionControllerStore(
+                path or config.EMISSION_CONTROLLER_PERSIST_PATH,
+                ledger_path if ledger_path is not None else config.EMISSION_CONTROLLER_LEDGER_PATH,
+            ).load()
+        return _store
+
+
+def _reset_default_store() -> None:
+    """Test hook — drop the singleton so a test can inject a fresh path."""
+    global _store
+    with _store_lock:
+        _store = None
+
+
+def bounds_from_config() -> ControllerBounds:
+    """Build the envelope from config (owner-tunable). The controller can never
+    act outside these bounds."""
+    import config
+    return ControllerBounds(
+        stability_cycles=int(config.EMISSION_CONTROLLER_STABILITY_CYCLES),
+        boot_grace_cycles=int(config.EMISSION_CONTROLLER_BOOT_GRACE_CYCLES),
+        min_gate_n=int(config.EMISSION_CONTROLLER_MIN_GATE_N),
+        promote_ev_r=float(config.EMISSION_CONTROLLER_PROMOTE_EV_R),
+        max_changes_per_cycle=int(config.EMISSION_CONTROLLER_MAX_CHANGES_PER_CYCLE),
+        min_samples_floor=int(config.EMISSION_CONTROLLER_MIN_SAMPLES_FLOOR),
+        min_samples_ceiling=int(config.CONTEXT_EMISSION_MIN_SAMPLES),
+        min_samples_step=int(config.EMISSION_CONTROLLER_MIN_SAMPLES_STEP),
+    )

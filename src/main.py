@@ -282,6 +282,9 @@ class CryptoSignalEngine:
             alert_callback=self.telegram.send_admin_alert,
         )
 
+        # Layer-G emission controller cycle counter (liveness probe reads it).
+        self._emission_controller_cycles = 0
+
         # Performance tracker (must be created before TradeMonitor)
         self._performance_tracker = PerformanceTracker(
             storage_path=PERFORMANCE_TRACKER_PATH
@@ -1651,6 +1654,137 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.error("Snapshot save error: %s", exc)
 
+    def _gather_emission_controller_inputs(self):
+        """Build the pure controller inputs from the live edge matrix.
+
+        R-consistent by construction: ``best_strong_cell``, ``strategy_health``
+        and ``unlocked_cell_r`` all come from the ``strategy_edge`` matrix (edge
+        in R), never from percent-based performance aggregates.  ``gate_metrics``
+        (the KEEP/DROP ablation that drives the suppress-toggle) needs the
+        suppression-ablation records; until that runtime source is wired+validated
+        it stays empty and the suppress knob simply never acts — the min_samples
+        knob (the primary unlock path) is fully live.  Returns ``None`` when the
+        matrix is unavailable so the loop no-ops rather than act on nothing.
+        """
+        from src.strategy_edge import get_strategy_edge_store, _EDGE_STRONG_R
+        from src.analysis_bundle import flatten_strategy_matrix
+        from src import context_emission_policy as _cep
+        from src import emission_controller as _ec
+
+        try:
+            matrix = get_strategy_edge_store().matrix()
+        except Exception:
+            return None
+        rows = flatten_strategy_matrix(matrix or {})
+        if not rows:
+            return None
+
+        p = _cep.PolicyParams.from_config()
+        cur_min_by_strategy = {}
+        store = _ec.get_default_store()
+        strong = float(_EDGE_STRONG_R)
+
+        best: dict = {}
+        health_num: dict = {}   # strategy -> n-weighted sum of edge_r
+        health_den: dict = {}   # strategy -> total n
+        for r in rows:
+            s = r.get("strategy")
+            if not s:
+                continue
+            n = int(r.get("n") or 0)
+            edge = r.get("edge_r")
+            if edge is None:
+                continue
+            edge = float(edge)
+            health_num[s] = health_num.get(s, 0.0) + edge * n
+            health_den[s] = health_den.get(s, 0) + n
+            # unlock candidate: a STRONG-edge cell sitting below this strategy's
+            # current relax floor (e.g. the +2.21R n=29 cell under the n>=30 gate).
+            cur_min = cur_min_by_strategy.get(s)
+            if cur_min is None:
+                ov = store.get_override(s)
+                cur_min = int(ov.min_samples) if ov.min_samples is not None else int(p.min_samples)
+                cur_min_by_strategy[s] = cur_min
+            if edge >= strong and 1 <= n < cur_min:
+                cand = best.get(s)
+                if cand is None or n > cand["n"]:
+                    best[s] = {"n": n, "edge": edge}
+
+        strategy_health = {
+            s: {"emitted_avg_r": (health_num[s] / health_den[s]) if health_den[s] else None,
+                "emitted_n": health_den[s]}
+            for s in health_den
+        }
+        # unlocked_cell_r: the edge of the cell each strategy's override is keeping
+        # unlocked — powers the per-cell reversal (review #1).
+        unlocked_cell_r = {s: c["edge"] for s, c in best.items()}
+
+        return {
+            "gate_metrics": self._emission_controller_gate_metrics(),
+            "best_strong_cell": best,
+            "strategy_health": strategy_health,
+            "unlocked_cell_r": unlocked_cell_r,
+            "global_params": {"suppress_negative": bool(p.suppress_negative),
+                              "min_samples": int(p.min_samples)},
+        }
+
+    def _emission_controller_gate_metrics(self) -> dict:
+        """The ``context_floor:<S>`` KEEP/DROP ablation that drives the
+        suppress-toggle.  Requires the suppression-ablation record source
+        (``suppression_audit.compute_gate_suppression_metrics``); returns ``{}``
+        until that runtime feed is wired + validated, which keeps the suppress
+        knob safely idle (the min_samples knob is unaffected)."""
+        return {}
+
+    async def _emission_controller_loop(self) -> None:
+        """Layer G — autonomous emission controller cycle.
+
+        See ``docs/PLAN_AUTONOMOUS_EMISSION_CONTROLLER.md``.  DARK by default:
+        gated on ``EMISSION_CONTROLLER_ENABLED``.  When off, the loop idles.  When
+        on, every cadence it reads the edge matrix + gate verdicts, runs the pure
+        decision core, and applies/stamps the result.  The core's boot-grace +
+        K-cycle hysteresis + EV bar keep each adjustment dark-first even once the
+        master flag is on — the *data* promotes each change, never a person.
+        """
+        import config as _cfg
+        from src import emission_controller as _ec
+
+        cycles_since_start = 0
+        interval = max(60, int(getattr(_cfg, "EMISSION_CONTROLLER_INTERVAL_SEC", 1800)))
+        while True:
+            await asyncio.sleep(interval)
+            if not bool(getattr(_cfg, "EMISSION_CONTROLLER_ENABLED", False)):
+                continue
+            cycles_since_start += 1
+            try:
+                inputs = await asyncio.to_thread(self._gather_emission_controller_inputs)
+                if inputs is None:
+                    continue
+                store = _ec.get_default_store()
+                decision = _ec.run_cycle(
+                    gate_metrics=inputs["gate_metrics"],
+                    best_strong_cell=inputs["best_strong_cell"],
+                    strategy_health=inputs["strategy_health"],
+                    unlocked_cell_r=inputs["unlocked_cell_r"],
+                    global_params=inputs["global_params"],
+                    prior=store.state,
+                    bounds=_ec.bounds_from_config(),
+                    cycles_since_start=cycles_since_start,
+                )
+                await asyncio.to_thread(store.apply_decision, decision)
+                self._emission_controller_cycles += 1
+                applied = decision.applied
+                if applied:
+                    log.info(
+                        "emission_controller: {} applied, {} shadow (cycle {})",
+                        len(applied),
+                        len(decision.adjustments) - len(applied),
+                        store.state.cycle,
+                    )
+            except Exception as exc:
+                from src import fail_open
+                fail_open.record("emission_controller.loop", exc)
+
     async def _invalidation_audit_loop(self) -> None:
         """Periodically classify pending invalidation kills as PROTECTIVE /
         PREMATURE / NEUTRAL based on post-kill price action.
@@ -1934,6 +2068,27 @@ class CryptoSignalEngine:
             upstream=lambda: float(getattr(self._scanner, "_scan_cycle_count", 0)),
             min_upstream_delta=15.0,
             min_streak=72,         # ~6 h
+        ))
+
+        def _ec_cycles():
+            # None when the controller is disabled → probe skips (can't false-page
+            # an intentionally-off feature). When enabled, the 30-min loop bumps
+            # this every cycle; a flat-line while scanning is active = the
+            # autonomous money-path loop silently died → page.
+            try:
+                import config as _c
+                if not bool(_c.EMISSION_CONTROLLER_ENABLED):
+                    return None
+            except Exception:
+                return None
+            return float(getattr(self, "_emission_controller_cycles", 0))
+
+        fl.add_rate(RateProbe(
+            name="emission_controller",
+            counter=_ec_cycles,
+            upstream=lambda: float(getattr(self._scanner, "_scan_cycle_count", 0)),
+            min_upstream_delta=15.0,
+            min_streak=48,         # ~4 h (loop cadence is 30 min → tolerant window)
         ))
 
         def _mc_health():
