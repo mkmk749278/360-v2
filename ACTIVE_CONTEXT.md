@@ -4,6 +4,59 @@
 
 ---
 
+## 🟢 SESSION 72 2026-07-20 — Analysis "mediator": get the signal data to a CTE session without manual CSV upload (paired PRs: 360-v2 + 360ce-ops, branch `claude/autonomous-best-signal-system-qv49lv`)
+
+**Owner ask:** "can we build some mediator to get the data to you to analyse from
+ops or engine" — stop hand-exporting the Strategy Lab / Profit / Performance CSVs
+and uploading them. Owner picked **both** mechanisms.
+
+### Shipped — A: secretless git dead-drop (360-v2, off money-path)
+
+- **`src/analysis_bundle.py`** (new, pure): flattens `StrategyEdgeStore.matrix()`
+  to the full per-cell matrix (the summarised `truth_snapshot.json` only carries
+  per-strategy best/worst cells), aggregates per-setup performance **mirroring ops
+  `performance.py:_classify_outcome` verbatim** (PROFIT_LOCKED counts as win), CSV
+  writer, and a `bundle.json` index with a gate-verdict + strongest/weakest-cell
+  rollup. `tests/test_analysis_bundle.py` (10).
+- **`scripts/build_truth_report.py`**: new `--analysis-dir` / `--git-sha`; emits
+  `analysis/{strategy_lab_matrix,performance_setup}.{json,csv}`,
+  `analysis/suppression_audit.json`, `analysis/bundle.json`.
+- **`.github/workflows/vps-monitor.yml`**: writes the analysis dir, validates it,
+  preserves it across the monitor-logs checkout, and `git add`s it. So any session
+  reads `git show origin/monitor-logs:monitor/report/analysis/…` — **no token, no
+  live network**. On-demand freshness via the existing `workflow_dispatch`.
+- Tunables are Firestore-persisted (no file to `cat`), so A deliberately omits live
+  tunables — B is their source. Not a scaffold: A is a complete, consumed artefact set.
+
+### Shipped — B: live on-demand bundle (360ce-ops, token-gated)
+
+- **`GET /api/v1/analysis-bundle`** (`app/routes/api_v1.py`): one token-gated call
+  composing strategy_lab (`_build_view`), profit held-to-stop replay (ops-only —
+  the reason B exists alongside A), performance aggregate, invalidations (capped),
+  live tunables, truth snapshot, alerts. Every section isolated via `_section(factory)`
+  → a failing source degrades to `{"error": …}` for that key, never 500s the bundle;
+  row/record caps bound the payload. Tests +4 (24 total in `test_api_v1.py`).
+
+### Verification
+
+- Engine: `test_analysis_bundle.py` 10/10; ruff clean on `src/`; mypy 0 new; end-to-end
+  script smoke (fixtures → correct CSV/JSON artefacts). Unrelated collection errors
+  (rust signing-service pyo3) are pre-existing env, not this change.
+- Ops: `test_api_v1.py` 24/24; ruff clean. The 65 full-suite failures are the S71
+  pre-existing Starlette/Jinja version-mismatch (template renders), untouched here —
+  zero involve `api_v1`/`analysis`.
+
+### NEXT
+
+1. Owner: both PRs are off money-path → normal review/merge. After the engine PR
+   deploys, trigger `vps-monitor` (workflow_dispatch) to seed the first analysis drop;
+   CTE reads it from `monitor-logs`. Provision an ops app-token for B when live pulls wanted.
+2. Carried from S71: merge #755 then #69 (owner Close button); retire the bespoke
+   RANGE_FADE gate into `context_emission_policy`; flip `context_emission_cohort_aware`
+   ON once cohort cells populate.
+
+---
+
 ## 🟢 SESSION 71 2026-07-19 — Ops panel overhaul (grouped IA, readable Truth, CSV+JSON everywhere, modern restyle) + owner "Close" button for stuck signals (paired PRs: 360ce-ops #69 + 360-v2 #755)
 
 **Owner ask (Truth PDF + follow-ups):** the Truth report is unreadable; make data

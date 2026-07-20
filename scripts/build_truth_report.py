@@ -13,6 +13,14 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
+from src.analysis_bundle import (
+    PERFORMANCE_SETUP_COLUMNS,
+    STRATEGY_MATRIX_COLUMNS,
+    aggregate_performance_by_setup,
+    build_bundle_index,
+    flatten_strategy_matrix,
+    rows_to_csv,
+)
 from src.runtime_truth_report import (
     build_snapshot,
     count_log_markers,
@@ -57,6 +65,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--suppressed-candidates-json", default="")
     parser.add_argument("--feature-liveness-json", default="")
     parser.add_argument("--strategy-edge-json", default="")
+    # Analysis dead-drop: when set, emit the machine-readable analysis bundle
+    # (full per-cell edge matrix + per-setup performance + suppression verdicts
+    # + index) as JSON/CSV under this directory, for the monitor-logs branch.
+    parser.add_argument("--analysis-dir", default="")
+    parser.add_argument("--git-sha", default="")
     return parser.parse_args()
 
 
@@ -147,14 +160,17 @@ def main() -> int:
     # matrix through the store itself so the report's Wilson edges/verdicts
     # are computed by the exact same code the allocator reads.
     strategy_edge: dict = {}
+    strategy_matrix_raw: dict = {}
     if args.strategy_edge_json and Path(args.strategy_edge_json).exists():
         try:
             from src.strategy_edge import StrategyEdgeStore
 
             _edge_store = StrategyEdgeStore(persist_path=args.strategy_edge_json)
-            strategy_edge = summarize_strategy_edge(_edge_store.matrix())
+            strategy_matrix_raw = _edge_store.matrix()
+            strategy_edge = summarize_strategy_edge(strategy_matrix_raw)
         except Exception:
             strategy_edge = {}
+            strategy_matrix_raw = {}
 
     snapshot, comparison = build_snapshot(
         channel=args.channel,
@@ -191,7 +207,74 @@ def main() -> int:
     Path(args.truth_report_md).write_text(report_md, encoding="utf-8")
     Path(args.truth_snapshot_json).write_text(json.dumps(snapshot, indent=2, sort_keys=True), encoding="utf-8")
     Path(args.window_comparison_json).write_text(json.dumps(comparison, indent=2, sort_keys=True), encoding="utf-8")
+
+    if args.analysis_dir:
+        _write_analysis_bundle(
+            analysis_dir=Path(args.analysis_dir),
+            strategy_matrix_raw=strategy_matrix_raw,
+            records=records,
+            suppression_audit=suppression_audit,
+            lookback_hours=args.lookback_hours,
+            channel=args.channel,
+            git_sha=args.git_sha,
+            now_ts=time.time(),
+        )
     return 0
+
+
+def _write_analysis_bundle(
+    *,
+    analysis_dir: Path,
+    strategy_matrix_raw: dict,
+    records: list,
+    suppression_audit: dict,
+    lookback_hours: int,
+    channel: str,
+    git_sha: str,
+    now_ts: float,
+) -> None:
+    """Emit the secretless analysis dead-drop: the full per-cell edge matrix,
+    per-setup performance, suppression verdicts, and an index — as JSON+CSV.
+
+    These are the exact artefacts the owner/CTE previously browser-exported and
+    uploaded by hand; here they land on monitor-logs each run so a session reads
+    them from git. The summarised matrix already in ``truth_snapshot.json`` only
+    carries per-strategy best/worst cells — this emits every cell the allocator
+    routes on. Best-effort: an empty edge store yields empty artefacts, never a
+    crash that would sink the whole report build.
+    """
+    analysis_dir.mkdir(parents=True, exist_ok=True)
+
+    matrix_rows = flatten_strategy_matrix(strategy_matrix_raw)
+    performance_rows = aggregate_performance_by_setup(records)
+
+    _write_json(str(analysis_dir / "strategy_lab_matrix.json"), matrix_rows)
+    (analysis_dir / "strategy_lab_matrix.csv").write_text(
+        rows_to_csv(matrix_rows, STRATEGY_MATRIX_COLUMNS), encoding="utf-8"
+    )
+    _write_json(str(analysis_dir / "performance_setup.json"), performance_rows)
+    (analysis_dir / "performance_setup.csv").write_text(
+        rows_to_csv(performance_rows, PERFORMANCE_SETUP_COLUMNS), encoding="utf-8"
+    )
+    _write_json(str(analysis_dir / "suppression_audit.json"), suppression_audit)
+
+    index = build_bundle_index(
+        generated_at_ts=now_ts,
+        lookback_hours=lookback_hours,
+        channel=channel,
+        matrix_rows=matrix_rows,
+        performance_rows=performance_rows,
+        suppression_audit=suppression_audit,
+        git_sha=git_sha,
+        artifacts=[
+            "analysis/strategy_lab_matrix.json",
+            "analysis/strategy_lab_matrix.csv",
+            "analysis/performance_setup.json",
+            "analysis/performance_setup.csv",
+            "analysis/suppression_audit.json",
+        ],
+    )
+    _write_json(str(analysis_dir / "bundle.json"), index)
 
 
 if __name__ == "__main__":

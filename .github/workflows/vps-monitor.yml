@@ -257,6 +257,8 @@ jobs:
             --suppressed-candidates-json monitor/raw/suppressed_candidates.json
             --strategy-edge-json monitor/raw/strategy_edge_store.json
             --feature-liveness-json monitor/raw/feature_liveness.json
+            --analysis-dir monitor/report/analysis
+            --git-sha "${{ github.sha }}"
           )
 
           if [ "${COMPARE_PREVIOUS_WINDOW}" = "true" ]; then
@@ -276,6 +278,13 @@ jobs:
           test -s monitor/report/window_comparison.json
           test -s monitor/report/signals_last100.json
           test -s monitor/report/dispatch_log.json
+          # Analysis dead-drop (secretless CTE channel): the index must always
+          # build even on an empty edge store; the per-cell matrix/perf CSVs
+          # accompany it.
+          test -s monitor/report/analysis/bundle.json
+          test -f monitor/report/analysis/strategy_lab_matrix.csv
+          test -f monitor/report/analysis/performance_setup.csv
+          test -f monitor/report/analysis/suppression_audit.json
 
       - name: Preserve curated outputs for branch switch
         run: |
@@ -287,6 +296,9 @@ jobs:
           cp monitor/report/signals_last100.json /tmp/runtime-truth-report/signals_last100.json
           cp monitor/report/dispatch_log.json /tmp/runtime-truth-report/dispatch_log.json
           cp monitor/report/truth_report.md /tmp/runtime-truth-report/latest.txt
+          # Analysis dead-drop survives the monitor-logs checkout the same way.
+          mkdir -p /tmp/runtime-truth-report/analysis
+          cp monitor/report/analysis/. /tmp/runtime-truth-report/analysis/ -r
 
       - name: Upload runtime truth artifacts
         uses: actions/upload-artifact@v4
@@ -324,10 +336,12 @@ jobs:
           cp /tmp/runtime-truth-report/signals_last100.json monitor/report/signals_last100.json
           cp /tmp/runtime-truth-report/dispatch_log.json monitor/report/dispatch_log.json
           cp /tmp/runtime-truth-report/latest.txt monitor/latest.txt
+          mkdir -p monitor/report/analysis
+          cp /tmp/runtime-truth-report/analysis/. monitor/report/analysis/ -r
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add monitor/latest.txt monitor/report/truth_report.md monitor/report/truth_snapshot.json monitor/report/window_comparison.json monitor/report/signals_last100.json monitor/report/dispatch_log.json
+          git add monitor/latest.txt monitor/report/truth_report.md monitor/report/truth_snapshot.json monitor/report/window_comparison.json monitor/report/signals_last100.json monitor/report/dispatch_log.json monitor/report/analysis
           git diff --staged --quiet || git commit -m "chore: runtime truth snapshot $(date -u '+%Y-%m-%d %H:%M UTC')"
           git remote set-url origin https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}
           git push --force origin monitor-logs
