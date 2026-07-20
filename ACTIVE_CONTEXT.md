@@ -4,6 +4,69 @@
 
 ---
 
+## 🟢 SESSION 73 2026-07-20 — Web billing Phase 3: the PWA crypto (NOWPayments) subscription rail — built, merged, and taken LIVE (paired PRs: 360-v2 #757/#759 + lumin-app #133, branch `claude/web-app-implementation-xzkbzo`)
+
+**Owner ask:** finish the web app (PWA) and give it its own way to sell the paid
+tiers — Play/Apple billing is store-bound, the website is neither. Owner is **solo,
+no business entity**, so card processors (Razorpay/Stripe) that need merchant KYC
+were deferred; **crypto (NOWPayments) + manual** are the launch rails.
+
+### Shipped — engine (360-v2, PRs #757 + #759)
+
+- **`src/api/billing_web.py`** — the crypto rail, selling the **existing**
+  `assist`/`auto` tiers through the one entitlement path (`UserStore.aset_tier`) —
+  no new tiers, no parallel store (design §2).
+  - `GET /api/billing/web/config` (public; region-aware rails + prices),
+  - `POST /api/billing/web/checkout` (authed; engine creates the NOWPayments invoice
+    server-side — **API key never leaves the engine, engine sets the price**, client
+    only names a tier),
+  - `POST /api/billing/web/crypto/webhook` (NOWPayments IPN: **HMAC-SHA512 over
+    sorted JSON**, deduped on `payment_id`, amount-checked, then `aset_tier`).
+  - Verifier confirmed against NOWPayments' **official reference** (sorted-key JSON,
+    compact separators, `x-nowpayments-sig`). Renewal stacks from later of (now,
+    expiry). 27 tests.
+- **Dark-flag-first:** `WEB_BILLING_ENABLED` / `WEB_BILLING_CRYPTO_ENABLED` (default
+  false), `WEB_BILLING_TEST_MODE` (sandbox vs live). Config in `config/__init__.py`.
+- **`deploy.yml`** injects `NOWPAYMENTS_API_KEY` + `NOWPAYMENTS_IPN_SECRET` from
+  GitHub secrets into the VPS `.env` (like Binance/OpenAI) — #759. Also hardened
+  provider-error surfacing (httpx errors + provider status → clean 502, not a masked
+  "Failed to fetch").
+- **`docs/WEB_BILLING_DESIGN.md`** (design of record) + **`docs/WEB_BILLING_ACTIVATION.md`**
+  (enable/disable, secret-injection flow, the 4 verify checks, the real-payment test).
+
+### Shipped — app (lumin-app #133)
+
+- `lib/data/web_billing_service.dart` + `web_paywall_page.dart` + repository models
+  (`WebBillingConfig/Rail/TierPrice/WebCheckout`). Web-only: Settings→Subscription
+  branches on `kDistribution == web` → crypto/manual paywall; native keeps Play
+  Billing (Play anti-steering honoured at compile time). Polls the engine for the
+  webhook-granted tier after checkout. 22 tests.
+
+### Live state (as of session end)
+
+- **LIVE in production**: `WEB_BILLING_ENABLED=true`, `CRYPTO_ENABLED=true`,
+  `TEST_MODE=false`. Pricing **$15 assist / $25 auto, USDT, monthly, everywhere**.
+- Verified without a real payment: `/config` live, invoice creation returns a real
+  NOWPayments checkout (owner saw the $15 USDT page), webhook armed (`401`),
+  signature algorithm matches vendor docs.
+- **Incident caught & fixed:** the `NOWPAYMENTS_IPN_SECRET` GitHub secret had a
+  **stray trailing `w`** (len 33, ended `28rw` vs the dashboard's `M28r`). Checks
+  #1–#3 all passed but a real payment would have failed signature verification →
+  money taken, no grant. Fixed by re-copying the secret (regenerated, now len 32) +
+  redeploy. Lesson in the activation runbook: always run the `first4/last4/len`
+  value-match check, copy secrets with the dashboard button.
+
+### NOT done / open
+
+- **Real end-to-end payment test** — owner had no funds at session end. The one
+  remaining 100% confirmation; will print `web billing GRANT: … tier=assist`.
+- **Razorpay/Stripe rails** — designed, dark, entity-gated (need a merchant entity
+  + provider category clearance). Reserved flags exist.
+- **Legal:** `lumin-legal` `terms.md` still describes Play billing only — needs a
+  crypto/manual billing + manual-renewal update (owner-sign-off) before wide launch.
+
+---
+
 ## 🟢 SESSION 72 2026-07-20 — Analysis "mediator": get the signal data to a CTE session without manual CSV upload (paired PRs: 360-v2 + 360ce-ops, branch `claude/autonomous-best-signal-system-qv49lv`)
 
 **Owner ask:** "can we build some mediator to get the data to you to analyse from
