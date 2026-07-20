@@ -42,6 +42,18 @@ proprietorship and clears each provider's category review.** The architecture is
 unchanged (all rails converge on `aset_tier`); only the **activation order** flips.
 See §10.
 
+### 1.2 No app-store billing tax or rules on the web channel
+
+The PWA is a **website**, not an App Store / Play Store product, so neither Apple's
+IAP mandate nor Google Play's Billing policy governs payments made on it — any
+processor is allowed and there is no store cut. **The one compliance guardrail:**
+Google Play forbids the *Play-distributed Android app* from steering users to
+outside payment, so web/crypto billing **must never appear inside the Play build.**
+This is already guaranteed structurally — billing is split at **compile time**
+(`LUMIN_DISTRIBUTION`): the `play` build keeps Google Play Billing, the `web` build
+gets these rails, and `web_billing_service.dart` is web-only (conditional import).
+The Play app never sees the web rails. Compliant by construction, not by policy.
+
 ## 2. The one invariant that governs everything
 
 **The engine is the single source of truth for entitlement, and there is exactly
@@ -119,24 +131,30 @@ Two engine entry points (both new, both in `src/api/billing_web.py`):
 `GET /api/billing/web/config` (public, pre-auth-capable like `/api/region`) uses
 the existing `CF-IPCountry` detection to return which rails to surface:
 
+At launch (crypto + manual only, cards dark), the response is the same everywhere:
+
 ```json
 {
   "country_code": "IN",
-  "currency": "INR",
   "rails": [
-    {"id": "razorpay", "tiers": {"assist": {"amount": 100000, "display": "₹1000/mo"},
-                                  "auto":   {"amount": 200000, "display": "₹2000/mo"}}},
-    {"id": "crypto",  "tiers": {"assist": {"amount_usdt": "12", ...}, ...}},
-    {"id": "manual",  "contact": "..."}
+    {"id": "crypto", "currency": "USDT",
+     "tiers": {"assist": {"amount": "15", "display": "$15/mo"},
+               "auto":   {"amount": "25", "display": "$25/mo"}}},
+    {"id": "manual", "contact": "..."}
   ]
 }
 ```
 
-- India (`IN`) → Razorpay primary. Rest → Stripe primary. Crypto offered in both
-  (subject to a per-region enable flag — some jurisdictions we may not want crypto
-  in). Manual is always available as "contact us" but the *grant* is owner-only.
-- Amounts are in the provider's minor unit (paise/cents) and come from engine
-  config — the client renders what the engine says, never the reverse.
+When the card rails later activate, the region router adds `razorpay` (for `IN`, INR)
+or `stripe` (rest, local currency) as the region-appropriate primary alongside crypto.
+
+- **Launch:** crypto (USDT, **$15 assist / $25 auto, monthly**) offered
+  **everywhere** — no jurisdiction exclusions (owner decision 2026-07-20). Manual is
+  always available as "contact us"; the *grant* is owner-only.
+- **Later:** `IN` → Razorpay primary; rest → Stripe primary; crypto stays offered
+  alongside.
+- Amounts come from engine config — the client renders what the engine says, never
+  the reverse (card amounts in the provider's minor unit; crypto as a USDT string).
 - Region is a **UX router, not a security control** (mirrors `region_routes.py`'s
   own caveat) — the webhook verifier is what actually protects entitlement.
 
@@ -326,13 +344,16 @@ block anything.
 3. ~~Launch rails?~~ → **Crypto + manual first; Razorpay/Stripe dark until a
    merchant entity exists and category clears** (§1.1).
 
-**Still needed from owner before/at implementation:**
-- **A. Pricing:** keep ₹1000/₹2000 for the crypto/USD price? Crypto billed in **USDT
-  pegged to a USD price** — propose **$12 (assist) / $24 (auto)** ≈ current ₹ parity.
-  Confirm the numbers.
-- **B. Crypto region scope:** offer crypto **everywhere**, or exclude specific
-  jurisdictions? (Default proposal: everywhere; region is UX-only anyway.)
-- **C. Billing period:** monthly to match Play? (Proposed: monthly.)
+**Resolved 2026-07-20 (owner):**
+- **A. Pricing:** crypto billed in **USDT — $15 (assist) / $25 (auto) per month.**
+  (Independent of the Play ₹1000/₹2000; the web/crypto price is its own number.)
+- **B. Crypto region scope:** **everywhere** — no jurisdiction exclusions. It's a
+  website, not an app-store product; region stays UX-only.
+- **C. Billing period:** **monthly.**
+
+All Phase-3 launch decisions are now closed. No open owner questions remain for the
+crypto + manual launch; card rails (§10 steps 5–6) reopen their own onboarding
+questions only if/when the owner pursues a merchant entity.
 
 ---
 
