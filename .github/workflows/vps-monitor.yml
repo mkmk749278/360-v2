@@ -171,6 +171,10 @@ jobs:
             "docker exec 360scalp-v2-engine sh -c 'cat /app/data/feature_liveness.json 2>/dev/null || echo {}'" \
             > monitor/raw/feature_liveness.json || echo '{}' > monitor/raw/feature_liveness.json
 
+          timeout -k 10 45 ssh -i ~/.ssh/vps_key -o ConnectTimeout=30 "${{ secrets.VPS_USER }}@${{ secrets.VPS_HOST }}" \
+            "docker exec 360scalp-v2-engine sh -c 'cat /app/data/emission_controller_store.json 2>/dev/null || echo {}'" \
+            > monitor/raw/emission_controller_store.json || echo '{}' > monitor/raw/emission_controller_store.json
+
           # Read engine logs from the persistent loguru file sink at
           # /app/logs/engine_*.log (30 days × 50MB rotation) instead of
           # docker compose logs.  Docker's json-file driver caps at 30MB total
@@ -258,6 +262,7 @@ jobs:
             --strategy-edge-json monitor/raw/strategy_edge_store.json
             --feature-liveness-json monitor/raw/feature_liveness.json
             --analysis-dir monitor/report/analysis
+            --emission-controller-json monitor/raw/emission_controller_store.json
             --git-sha "${{ github.sha }}"
           )
 

@@ -165,3 +165,29 @@ def test_insufficient_gate_sample_never_advances_stability():
     decs, state = _drive([(thin, {}, {})] * 5, b)
     assert all(not a.applied for d in decs for a in d.adjustments)
     assert state.overrides.get("MTP", StrategyOverride()).suppress_negative is None
+
+
+# ---- build_inputs (store → controller inputs) ------------------------------
+
+
+def test_build_inputs_maps_gates_and_cells():
+    from src.emission_controller import build_inputs
+    by_gate = {
+        "context_floor:MOVER_TREND_PULLBACK": {"n": 100, "ev_per_suppression_r": -0.38, "verdict": "DROP"},
+        "context_floor:FAILED_AUCTION_RECLAIM": {"n": 80, "ev_per_suppression_r": 0.12, "verdict": "KEEP"},
+        "min_confidence": {"n": 50, "ev_per_suppression_r": 0.6, "verdict": "KEEP"},  # not a context_floor gate
+    }
+    matrix = {
+        "QUIET_COMPRESSION_BREAK|A": {"strategy": "QUIET_COMPRESSION_BREAK", "n": 29, "verdict": "STRONG", "edge_r": 2.21, "avg_r": 0.3, "n_emitted": 2},
+        "QUIET_COMPRESSION_BREAK|B": {"strategy": "QUIET_COMPRESSION_BREAK", "n": 12, "verdict": "STRONG", "edge_r": 1.9, "avg_r": 0.1, "n_emitted": 0},
+        "MOVER_TREND_PULLBACK|A": {"strategy": "MOVER_TREND_PULLBACK", "n": 50, "verdict": "NEGATIVE", "edge_r": -0.5, "avg_r": -0.2, "n_emitted": 5},
+    }
+    out = build_inputs(by_gate=by_gate, matrix=matrix)
+    assert set(out["gate_metrics"]) == {"MOVER_TREND_PULLBACK", "FAILED_AUCTION_RECLAIM"}  # min_confidence dropped
+    assert out["gate_metrics"]["MOVER_TREND_PULLBACK"]["verdict"] == "DROP"
+    # largest-n STRONG cell wins (n=29 over n=12); NEGATIVE cell is not a strong candidate
+    assert out["best_strong_cell"]["QUIET_COMPRESSION_BREAK"] == {"n": 29, "edge": 2.21}
+    assert "MOVER_TREND_PULLBACK" not in out["best_strong_cell"]
+    # health R is sample-weighted; MTP negative
+    assert out["strategy_health"]["MOVER_TREND_PULLBACK"]["emitted_avg_r"] == -0.2
+    assert out["strategy_health"]["QUIET_COMPRESSION_BREAK"]["emitted_n"] == 2

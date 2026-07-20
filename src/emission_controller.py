@@ -320,6 +320,70 @@ def run_cycle(
     return ControllerDecision(state=state, adjustments=final)
 
 
+def build_inputs(
+    *,
+    by_gate: Dict[str, Dict[str, Any]],
+    matrix: Dict[str, Dict[str, Any]],
+    strong_verdict: str = "STRONG",
+) -> Dict[str, Dict[str, Dict[str, Any]]]:
+    """Map the live stores into ``run_cycle`` inputs (pure).
+
+    ``by_gate``: ``suppression_audit.compute_gate_suppression_metrics`` output
+        (gate_name -> {n, ev_per_suppression_r, verdict}).
+    ``matrix``:  ``StrategyEdgeStore.matrix`` output ("S|ctx" -> per-cell stats).
+
+    Returns ``{"gate_metrics", "best_strong_cell", "strategy_health"}``. The
+    ``strategy_health`` R is the per-strategy sample-weighted ``avg_r`` across its
+    cells (an all-source proxy — the emitted arm alone is too thin to trust) used
+    only for the conservative min_samples auto-tighten; the suppress loop runs off
+    the clean per-gate EV.
+    """
+    gate_metrics: Dict[str, Dict[str, Any]] = {}
+    for gate_name, m in (by_gate or {}).items():
+        if not isinstance(m, dict) or not str(gate_name).startswith("context_floor:"):
+            continue
+        strategy = str(gate_name).split("context_floor:", 1)[1]
+        gate_metrics[strategy] = {
+            "n": int(m.get("n", 0) or 0),
+            "ev_per_suppression_r": m.get("ev_per_suppression_r"),
+            "verdict": str(m.get("verdict") or ""),
+        }
+
+    best_strong_cell: Dict[str, Dict[str, Any]] = {}
+    health_acc: Dict[str, Dict[str, float]] = {}
+    for cell in (matrix or {}).values():
+        if not isinstance(cell, dict):
+            continue
+        strat = str(cell.get("strategy") or "")
+        if not strat:
+            continue
+        n = int(cell.get("n", 0) or 0)
+        if str(cell.get("verdict") or "") == strong_verdict and n > 0:
+            edge = cell.get("edge_r")
+            prev = best_strong_cell.get(strat)
+            if prev is None or n > prev["n"]:
+                best_strong_cell[strat] = {"n": n, "edge": float(edge) if edge is not None else None}
+        acc = health_acc.setdefault(strat, {"r_weight": 0.0, "n": 0.0, "emitted_n": 0.0})
+        avg_r = cell.get("avg_r")
+        if avg_r is not None and n > 0:
+            acc["r_weight"] += float(avg_r) * n
+            acc["n"] += n
+        acc["emitted_n"] += int(cell.get("n_emitted", 0) or 0)
+
+    strategy_health: Dict[str, Dict[str, Any]] = {}
+    for strat, acc in health_acc.items():
+        strategy_health[strat] = {
+            "emitted_avg_r": (acc["r_weight"] / acc["n"]) if acc["n"] else None,
+            "emitted_n": int(acc["emitted_n"]),
+        }
+
+    return {
+        "gate_metrics": gate_metrics,
+        "best_strong_cell": best_strong_cell,
+        "strategy_health": strategy_health,
+    }
+
+
 def _gate_change_ok(
     *, past_grace: bool, evmag: Optional[float], bounds: ControllerBounds,
     key: str, state: ControllerState, k: int,
