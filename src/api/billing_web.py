@@ -221,14 +221,30 @@ async def _create_invoice_http(payload: dict) -> dict:
     """Create a NOWPayments invoice.  Injectable — tests pass a fake."""
     headers = {"x-api-key": config.NOWPAYMENTS_API_KEY, "Content-Type": "application/json"}
     url = f"{config.NOWPAYMENTS_API_BASE.rstrip('/')}/invoice"
-    async with httpx.AsyncClient(timeout=20.0) as client:
-        resp = await client.post(url, json=payload, headers=headers)
+    try:
+        async with httpx.AsyncClient(timeout=20.0) as client:
+            resp = await client.post(url, json=payload, headers=headers)
+    except httpx.RequestError as exc:
+        # Network-level failure (DNS, connect, timeout) — previously escaped as
+        # an unhandled 500 (which the browser then reported as a bare "failed
+        # to fetch").  Return a clean, CORS-carrying 502 instead.
+        log.warning("NOWPayments invoice create — provider unreachable: {}", type(exc).__name__)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail="payment provider is unreachable — please try again in a moment",
+        )
     if resp.status_code >= 400:
-        # Never echo the provider body verbatim (may carry request context).
+        # Never echo the provider body verbatim (may carry request context), but
+        # DO surface the status code — a 401/403 here is a deployment-side
+        # key/environment/IP problem, not the user's, and a bare "retry later"
+        # hid that.  The engine sets the price, so this is never a client fault.
         log.warning("NOWPayments invoice create failed: HTTP {}", resp.status_code)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail="payment provider rejected the checkout request — retry later",
+            detail=(
+                f"payment provider rejected the checkout (HTTP {resp.status_code}) "
+                "— please try again later"
+            ),
         )
     return resp.json()
 

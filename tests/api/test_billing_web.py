@@ -306,3 +306,70 @@ def test_webhook_503_when_ipn_unconfigured():
     client = TestClient(app)
     body = {"payment_status": "finished"}
     assert _post_ipn(client, body, sig="x").status_code == 503
+
+
+# ---------------------------------------------------------------------------
+# _create_invoice_http — provider failures surface cleanly (not a bare 500)
+# ---------------------------------------------------------------------------
+
+
+class _FakeResp:
+    def __init__(self, status_code: int, payload: Optional[dict] = None):
+        self.status_code = status_code
+        self._payload = payload or {}
+
+    def json(self) -> dict:
+        return self._payload
+
+
+class _FakeAsyncClient:
+    def __init__(self, behavior):
+        self._behavior = behavior
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *a):
+        return False
+
+    async def post(self, url, json=None, headers=None):
+        return self._behavior()
+
+
+def _patch_httpx(monkeypatch, behavior):
+    monkeypatch.setattr(
+        billing_web.httpx, "AsyncClient", lambda *a, **k: _FakeAsyncClient(behavior)
+    )
+
+
+async def test_create_invoice_success(monkeypatch):
+    _patch_httpx(monkeypatch, lambda: _FakeResp(200, {"invoice_url": "u", "id": "i"}))
+    out = await billing_web._create_invoice_http({"price_amount": 25})
+    assert out["invoice_url"] == "u"
+
+
+async def test_create_invoice_surfaces_provider_status(monkeypatch):
+    # A provider 403 (key/environment/IP) becomes a clean 502 that NAMES the
+    # status — previously it was hidden behind a bare "retry later".
+    _patch_httpx(monkeypatch, lambda: _FakeResp(403))
+    from fastapi import HTTPException as _HTTPExc
+
+    with pytest.raises(_HTTPExc) as ei:
+        await billing_web._create_invoice_http({})
+    assert ei.value.status_code == 502
+    assert "403" in ei.value.detail
+
+
+async def test_create_invoice_handles_unreachable_provider(monkeypatch):
+    # A network error must NOT escape as an unhandled 500 (which the browser
+    # reports as a bare "failed to fetch") — it becomes a 502.
+    def _raise():
+        raise billing_web.httpx.ConnectError("boom")
+
+    _patch_httpx(monkeypatch, _raise)
+    from fastapi import HTTPException as _HTTPExc
+
+    with pytest.raises(_HTTPExc) as ei:
+        await billing_web._create_invoice_http({})
+    assert ei.value.status_code == 502
+    assert "unreachable" in ei.value.detail
