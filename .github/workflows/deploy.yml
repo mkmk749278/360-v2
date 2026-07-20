@@ -111,6 +111,18 @@ jobs:
               && sed -i "s|^OPENAI_API_KEY=.*|OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}|" .env \
               || echo "OPENAI_API_KEY=${{ secrets.OPENAI_API_KEY }}" >> .env
 
+            # NOWPayments (web billing crypto rail — Phase 3).  These are the
+            # engine-side secrets; GitHub secrets don't reach the engine unless
+            # injected here (same pattern as Binance/OpenAI above).  Empty secret
+            # → the crypto rail refuses at runtime with a clean 503, never a crash.
+            grep -q "^NOWPAYMENTS_API_KEY=" .env \
+              && sed -i "s|^NOWPAYMENTS_API_KEY=.*|NOWPAYMENTS_API_KEY=${{ secrets.NOWPAYMENTS_API_KEY }}|" .env \
+              || echo "NOWPAYMENTS_API_KEY=${{ secrets.NOWPAYMENTS_API_KEY }}" >> .env
+
+            grep -q "^NOWPAYMENTS_IPN_SECRET=" .env \
+              && sed -i "s|^NOWPAYMENTS_IPN_SECRET=.*|NOWPAYMENTS_IPN_SECRET=${{ secrets.NOWPAYMENTS_IPN_SECRET }}|" .env \
+              || echo "NOWPAYMENTS_IPN_SECRET=${{ secrets.NOWPAYMENTS_IPN_SECRET }}" >> .env
+
             # ── Rebuild and restart all containers ───────────────────────────
             # deploy.sh reads API_PROCESS_ISOLATED from .env and selects the
             # correct compose files / profile automatically (isolated mode adds
