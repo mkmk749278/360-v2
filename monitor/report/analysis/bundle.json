@@ -1,0 +1,111 @@
+{
+  "generated_at": "2026-07-20T10:14:20.628644+00:00",
+  "generated_at_ts": 1784542460.6286445,
+  "lookback_hours": 24,
+  "channel": "360_SCALP",
+  "git_sha": "841604a65c604925bbaf0be317d2623625a3f20f",
+  "source": "vps-monitor/analysis_bundle",
+  "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
+  "artifacts": [
+    "analysis/strategy_lab_matrix.json",
+    "analysis/strategy_lab_matrix.csv",
+    "analysis/performance_setup.json",
+    "analysis/performance_setup.csv",
+    "analysis/suppression_audit.json"
+  ],
+  "counts": {
+    "strategy_matrix_cells": 2873,
+    "strategy_matrix_scored_cells": 895,
+    "performance_setups": 14,
+    "suppression_gates": 15
+  },
+  "headlines": {
+    "strongest_cells": [
+      {
+        "strategy": "QUIET_COMPRESSION_BREAK",
+        "context_key": "OVERLAP/QUIET/COMPRESSED/BTC_NEUTRAL",
+        "edge_r": 2.2075660141256432,
+        "n": 29,
+        "verdict": "STRONG"
+      },
+      {
+        "strategy": "FAILED_AUCTION_RECLAIM",
+        "context_key": "LONDON/MARKDOWN/EXPANDED/BTC_NEUTRAL",
+        "edge_r": 1.7001787794871692,
+        "n": 45,
+        "verdict": "STRONG"
+      },
+      {
+        "strategy": "SHADOW_RANGE_FADE",
+        "context_key": "OVERLAP/MARKUP/NORMAL/BTC_NEUTRAL",
+        "edge_r": 1.62667020755291,
+        "n": 16,
+        "verdict": "STRONG"
+      },
+      {
+        "strategy": "BREAKDOWN_SHORT",
+        "context_key": "ASIA/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL",
+        "edge_r": 1.5814246964947585,
+        "n": 22,
+        "verdict": "STRONG"
+      },
+      {
+        "strategy": "BREAKDOWN_SHORT",
+        "context_key": "ASIA/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL/ALTCOIN",
+        "edge_r": 1.5814246964947585,
+        "n": 22,
+        "verdict": "STRONG"
+      }
+    ],
+    "weakest_cells": [
+      {
+        "strategy": "WHALE_MOMENTUM",
+        "context_key": "OVERLAP/MARKDOWN/CASCADE/BTC_FALLING",
+        "edge_r": -1.0,
+        "n": 17,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "VOLUME_SURGE_BREAKOUT",
+        "context_key": "ASIA/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL/MIDCAP",
+        "edge_r": -1.0,
+        "n": 35,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "VOLUME_SURGE_BREAKOUT",
+        "context_key": "OVERLAP/DISTRIBUTION/EXPANDED/BTC_NEUTRAL/ALTCOIN",
+        "edge_r": -1.0,
+        "n": 15,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "VOLUME_SURGE_BREAKOUT",
+        "context_key": "OVERLAP/DISTRIBUTION/EXPANDED/BTC_NEUTRAL",
+        "edge_r": -1.0,
+        "n": 15,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "VOLUME_SURGE_BREAKOUT",
+        "context_key": "OVERLAP/MARKUP/NORMAL/BTC_FALLING",
+        "edge_r": -1.0,
+        "n": 22,
+        "verdict": "NEGATIVE"
+      }
+    ],
+    "gate_verdict_counts": {
+      "KEEP": 4,
+      "DROP": 5,
+      "INSUFFICIENT_SAMPLE": 3,
+      "TUNE": 3
+    },
+    "drop_gates": [
+      "dispatch_staleness",
+      "shadow_unit:SHADOW_RANGE_FADE",
+      "level_still_in_play",
+      "context_floor:SR_FLIP_RETEST",
+      "context_floor:MOVER_TREND_PULLBACK"
+    ]
+  }
+}
