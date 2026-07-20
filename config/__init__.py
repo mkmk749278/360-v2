@@ -3336,6 +3336,87 @@ GOOGLE_PLAY_RTDN_AUDIENCE: str = os.getenv("GOOGLE_PLAY_RTDN_AUDIENCE", "")
 GOOGLE_PLAY_RTDN_PATH_SECRET: str = os.getenv("GOOGLE_PLAY_RTDN_PATH_SECRET", "")
 
 # ---------------------------------------------------------------------------
+# Web billing (Phase 3 — the PWA's own payment rails, docs/WEB_BILLING_DESIGN.md)
+# ---------------------------------------------------------------------------
+# The web channel (app.luminapp.org) sells the SAME two paid tiers as Play
+# (assist / auto) but through its own rails, since Play/Apple billing is
+# store-bound.  Launch rail: crypto via NOWPayments + the existing owner
+# manual-grant.  Every rail converges on the one entitlement write path
+# (UserStore.aset_tier) — no new tiers, no parallel entitlement store.
+#
+# DARK-FLAG-FIRST (production money-path doctrine): everything ships
+# **default-OFF**.  With WEB_BILLING_ENABLED=false the checkout + webhook
+# endpoints 503 and /api/billing/web/config returns manual-only.  The owner
+# activates per-rail from Ops after a sandbox purchase verifies end-to-end.
+
+#: Master off-switch for all web billing.  false → checkout/webhook 503,
+#: config endpoint surfaces only the always-available manual rail.
+WEB_BILLING_ENABLED: bool = _safe_bool("WEB_BILLING_ENABLED", "false")
+
+#: Crypto rail (NOWPayments) — the launch rail.  Gated by the master flag too.
+WEB_BILLING_CRYPTO_ENABLED: bool = _safe_bool("WEB_BILLING_CRYPTO_ENABLED", "false")
+
+#: Card rails — designed, dark, and NOT built in this PR (need a merchant
+#: entity + provider category clearance, see design §1.1).  Reserved so the
+#: config surface is stable; the rails activate in a later change.
+WEB_BILLING_RAZORPAY_ENABLED: bool = _safe_bool("WEB_BILLING_RAZORPAY_ENABLED", "false")
+WEB_BILLING_STRIPE_ENABLED: bool = _safe_bool("WEB_BILLING_STRIPE_ENABLED", "false")
+
+#: Sandbox vs live provider keys.  Must stay true until the owner has
+#: verified a sandbox purchase and signed off; only then flip to false with
+#: live NOWPayments keys.  Selects the NOWPayments API base below.
+WEB_BILLING_TEST_MODE: bool = _safe_bool("WEB_BILLING_TEST_MODE", "true")
+
+#: NOWPayments credentials.  Secrets — engine env only, never in the app
+#: bundle, never logged, never surfaced in errors (Hard Limits, mirrors the
+#: Binance-secret discipline).  Empty → the crypto rail refuses at runtime
+#: with a clean 503 (unconfigured), never a route failure.
+NOWPAYMENTS_API_KEY: str = os.getenv("NOWPAYMENTS_API_KEY", "")
+NOWPAYMENTS_IPN_SECRET: str = os.getenv("NOWPAYMENTS_IPN_SECRET", "")
+
+#: NOWPayments REST base.  Defaults follow WEB_BILLING_TEST_MODE (sandbox in
+#: test, live otherwise) but can be overridden explicitly.
+NOWPAYMENTS_API_BASE: str = os.getenv(
+    "NOWPAYMENTS_API_BASE",
+    "https://api-sandbox.nowpayments.io/v1"
+    if WEB_BILLING_TEST_MODE
+    else "https://api.nowpayments.io/v1",
+)
+
+#: Web/crypto pricing — independent of the Play ₹ prices (design decision
+#: 2026-07-20).  Priced in USD; NOWPayments converts to the payer's chosen
+#: crypto.  Monthly.
+WEB_BILLING_ASSIST_USD: float = _safe_float("WEB_BILLING_ASSIST_USD", "15")
+WEB_BILLING_AUTO_USD: float = _safe_float("WEB_BILLING_AUTO_USD", "25")
+WEB_BILLING_PERIOD_DAYS: int = _safe_int("WEB_BILLING_PERIOD_DAYS", "30")
+
+#: tier → monthly USD price, the single source of truth the checkout reads.
+#: The client names a *tier*; the engine sets the money — a tampered client
+#: can never assert its own price (design §7).
+WEB_BILLING_TIER_USD: dict[str, float] = {
+    "assist": WEB_BILLING_ASSIST_USD,
+    "auto": WEB_BILLING_AUTO_USD,
+}
+
+#: Price currency handed to NOWPayments (the fiat the amount is denominated
+#: in; the payer still pays in crypto NOWPayments converts to).
+WEB_BILLING_PRICE_CURRENCY: str = os.getenv("WEB_BILLING_PRICE_CURRENCY", "usd")
+
+#: Base URL the NOWPayments IPN callback is built from — the engine's public
+#: API host.  The full callback is ``<base>/api/billing/web/crypto/webhook``.
+WEB_BILLING_CALLBACK_BASE: str = os.getenv(
+    "WEB_BILLING_CALLBACK_BASE", "https://api.luminapp.org"
+)
+
+#: Where NOWPayments returns the payer after pay / cancel (the web app).
+WEB_BILLING_SUCCESS_URL: str = os.getenv(
+    "WEB_BILLING_SUCCESS_URL", "https://app.luminapp.org/#/billing/success"
+)
+WEB_BILLING_CANCEL_URL: str = os.getenv(
+    "WEB_BILLING_CANCEL_URL", "https://app.luminapp.org/#/billing/cancel"
+)
+
+# ---------------------------------------------------------------------------
 # Market Alerts (Lumin app Pulse → Alerts feed) + FCM push
 # ---------------------------------------------------------------------------
 # 100eyes-class informational alerts: single-condition, non-directional

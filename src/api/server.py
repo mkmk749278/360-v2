@@ -2234,6 +2234,22 @@ def build_app(
         identity_dep=user_claims,
     )
 
+    # ---- Web billing (Phase 3, docs/WEB_BILLING_DESIGN.md) ----
+    # GET /api/billing/web/config · POST /api/billing/web/checkout ·
+    # POST /api/billing/web/crypto/webhook.  The PWA's own payment rails —
+    # crypto via NOWPayments (launch) selling the SAME assist/auto tiers
+    # through the one aset_tier entitlement path.  DARK: gated on
+    # WEB_BILLING_ENABLED + WEB_BILLING_CRYPTO_ENABLED (both default false),
+    # so checkout/webhook 503 and config returns manual-only until the owner
+    # activates from Ops after a sandbox purchase verifies.
+    from . import billing_web as _billing_web
+    _billing_web.register(
+        app,
+        user_store=user_store,
+        auth=auth,
+        identity_dep=user_claims,
+    )
+
     # ``GET /api/region`` (Play Store A6 / E2, 2026-05-20) — client
     # region detection for the Play Store launch.  Public endpoint
     # (no auth) so the client can call it before sign-in.  Reads
