@@ -35,8 +35,8 @@ suppression) and is surfaced by the caller via ``fail_open.record``.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
-from typing import Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, Optional
 
 from src.strategy_edge import (
     VERDICT_NEGATIVE,
@@ -74,6 +74,11 @@ class PolicyParams:
     min_samples: int
     suppress_negative: bool
     cohort_aware: bool = False
+    # Layer-G per-strategy overrides: {STRATEGY -> {suppress_negative, min_samples}}.
+    # Set by the autonomous emission controller; each key may be None (follow the
+    # global value above). Loaded once per params build from the in-memory
+    # controller store (O(1), no hot-path I/O); empty when the controller is off.
+    per_strategy: Dict[str, Dict[str, Any]] = field(default_factory=dict)
 
     @staticmethod
     def from_config() -> "PolicyParams":
@@ -103,6 +108,18 @@ class PolicyParams:
             except Exception:
                 return default
 
+        # Layer-G per-strategy overrides — only when the controller is enabled
+        # (master switch). In-memory read; failures fall back to no overrides
+        # (i.e. today's global-only behaviour), never to a guess.
+        per_strategy: Dict[str, Dict[str, Any]] = {}
+        try:
+            if bool(_rt("emission_controller_enabled", True)):
+                from src.emission_controller_store import get_emission_controller_store
+
+                per_strategy = get_emission_controller_store().overrides_snapshot()
+        except Exception:
+            per_strategy = {}
+
         return PolicyParams(
             enabled=bool(_rt("context_emission_enabled", CONTEXT_EMISSION_POLICY_ENABLED)),
             live=bool(_rt("context_emission_live", CONTEXT_EMISSION_LIVE)),
@@ -112,7 +129,22 @@ class PolicyParams:
             min_samples=max(1, int(_rt("context_emission_min_samples", CONTEXT_EMISSION_MIN_SAMPLES))),  # type: ignore[call-overload]
             suppress_negative=bool(_rt("context_emission_suppress_negative", CONTEXT_EMISSION_SUPPRESS_NEGATIVE)),
             cohort_aware=bool(_rt("context_emission_cohort_aware", CONTEXT_EMISSION_COHORT_AWARE)),
+            per_strategy=per_strategy,
         )
+
+    def resolve_suppress_negative(self, strategy: str) -> bool:
+        """Effective suppress-NEGATIVE for ``strategy`` — the controller's per-
+        strategy override when set, else the global value."""
+        ov = self.per_strategy.get((strategy or "").upper()) or {}
+        v = ov.get("suppress_negative")
+        return self.suppress_negative if v is None else bool(v)
+
+    def resolve_min_samples(self, strategy: str) -> int:
+        """Effective relax sample-floor for ``strategy`` — controller override when
+        set, else the global value."""
+        ov = self.per_strategy.get((strategy or "").upper()) or {}
+        v = ov.get("min_samples")
+        return self.min_samples if v is None else int(v)
 
 
 @dataclass(frozen=True)
@@ -219,7 +251,7 @@ def effective_floor(
     n = store.sample_count(lookup, context_key)  # type: ignore[attr-defined]
 
     if verdict == VERDICT_NEGATIVE:
-        if p.suppress_negative:
+        if p.resolve_suppress_negative(strategy):
             return EmissionDecision(
                 effective_floor=base,
                 verdict=verdict,
@@ -235,8 +267,9 @@ def effective_floor(
         return _base(f"negative_no_suppress n={n}", verdict, lookup)
 
     if verdict in (VERDICT_STRONG, VERDICT_POSITIVE):
-        if n < p.min_samples:
-            return _base(f"{verdict.lower()}_thin n={n}<{p.min_samples}", verdict, lookup)
+        eff_min_samples = p.resolve_min_samples(strategy)
+        if n < eff_min_samples:
+            return _base(f"{verdict.lower()}_thin n={n}<{eff_min_samples}", verdict, lookup)
         relax_cap = p.strong_relax if verdict == VERDICT_STRONG else p.positive_relax
         relaxed = min(relax_cap, max(0.0, base - anchor))
         return EmissionDecision(
