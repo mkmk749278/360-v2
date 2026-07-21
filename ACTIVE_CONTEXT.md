@@ -67,6 +67,55 @@ were deferred; **crypto (NOWPayments) + manual** are the launch rails.
 
 ---
 
+## 🟢 SESSION 72b 2026-07-20 — Layer G: autonomous emission controller (closed-loop policy tuner), branch `claude/autonomous-best-signal-system-qv49lv` (OWNER-SIGN-OFF, money-path)
+
+**Owner directive:** "we are making an autonomous system, everything needs to adjust
+dynamically based on data — we can't look daily and adjust" → then: "I don't confirm
+anything, everything is autonomous but dark-first, first make it live autonomously."
+
+**The gap it closes:** the suppression-audit gate verdicts (KEEP/TUNE/DROP) + edge
+matrix are measured every cycle but nothing acted on them — where the edge matrix sat
+before PR 752. On fresh 2026-07-20 data the loop is provably needed:
+`context_floor:MOVER_TREND_PULLBACK` DROP −0.38R (n=1447) and `:SR_FLIP_RETEST` DROP
+−0.37R (n=718) are killing winners, while QCB's +2.21R cell sits at n=29, one under the
+n≥30 relax floor, emitting ~nothing.
+
+**Layer G** consumes those verdicts and moves the `context_emission_policy` params
+**per strategy**, inside a bounded envelope, with **no human in the loop** — the data
+promotes each change, not a person:
+- `src/emission_controller.py` — pure decision core (11 tests): only two per-strategy
+  knobs (suppress_negative toggle, min_samples floor), hard-clamped; nothing promotes
+  on first sight (boot-grace + K-cycle stability + EV-magnitude bar on the loosen
+  direction + min gate sample); blast-radius capped/cycle; promotion clears history so
+  a reversal needs fresh opposite evidence; symmetric auto-revert.
+- `src/emission_controller_store.py` — singleton, JSON-persisted (not Firestore),
+  **O(1) in-memory hot-path read** (`override_for`) since the scanner calls the policy
+  per candidate (Cost Discipline). 8 integration tests.
+- `context_emission_policy` — resolves suppress/min_samples per-strategy (override when
+  set, global otherwise); global behaviour unchanged with no overrides. Gated by
+  `emission_controller_enabled`.
+- Loop in `main` (30-min cadence, off-thread, fail-open) + liveness probe
+  `emission_controller` + 7 envelope tunables (Control → Signal gating) + monitor-logs
+  surfacing (`analysis/emission_controller.json`).
+
+**Rollout (per directive):** ships `emission_controller_enabled=ON`. Dark period is
+**self-administered** — boot-grace observes only, then each candidate self-promotes when
+its evidence clears the bar. No `_live` confirm-flag; owner owns the envelope + the kill
+(`emission_controller_enabled=OFF` → static). Design: `docs/PLAN_AUTONOMOUS_EMISSION_CONTROLLER.md`.
+
+**Verify:** 42 Layer-G/policy/bundle tests green; full cycle runs end-to-end against the
+real suppression/edge stores; ruff clean; no new mypy. **OWNER-SIGN-OFF item** (new
+money-path control loop) → review + merge, not auto-merge.
+
+### NEXT
+1. Owner: review + merge the Layer-G PR (money-path, no auto-merge). After deploy, watch
+   `analysis/emission_controller.json` on monitor-logs — first self-promotions expected:
+   MTP + SR_FLIP suppress→off, QCB min_samples 30→25.
+2. Carried: retire the bespoke RANGE_FADE gate into `context_emission_policy`; the ops
+   `/api/v1/analysis-bundle` could add the controller ledger (read-only follow-up).
+
+---
+
 ## 🟢 SESSION 72 2026-07-20 — Analysis "mediator": get the signal data to a CTE session without manual CSV upload (paired PRs: 360-v2 + 360ce-ops, branch `claude/autonomous-best-signal-system-qv49lv`)
 
 **Owner ask:** "can we build some mediator to get the data to you to analyse from
