@@ -69,6 +69,7 @@ def parse_args() -> argparse.Namespace:
     # (full per-cell edge matrix + per-setup performance + suppression verdicts
     # + index) as JSON/CSV under this directory, for the monitor-logs branch.
     parser.add_argument("--analysis-dir", default="")
+    parser.add_argument("--emission-controller-json", default="")
     parser.add_argument("--git-sha", default="")
     return parser.parse_args()
 
@@ -209,11 +210,17 @@ def main() -> int:
     Path(args.window_comparison_json).write_text(json.dumps(comparison, indent=2, sort_keys=True), encoding="utf-8")
 
     if args.analysis_dir:
+        emission_controller: dict = {}
+        if args.emission_controller_json and Path(args.emission_controller_json).exists():
+            loaded_ec = load_json_file(Path(args.emission_controller_json), default={})
+            if isinstance(loaded_ec, dict):
+                emission_controller = loaded_ec
         _write_analysis_bundle(
             analysis_dir=Path(args.analysis_dir),
             strategy_matrix_raw=strategy_matrix_raw,
             records=records,
             suppression_audit=suppression_audit,
+            emission_controller=emission_controller,
             lookback_hours=args.lookback_hours,
             channel=args.channel,
             git_sha=args.git_sha,
@@ -228,6 +235,7 @@ def _write_analysis_bundle(
     strategy_matrix_raw: dict,
     records: list,
     suppression_audit: dict,
+    emission_controller: dict,
     lookback_hours: int,
     channel: str,
     git_sha: str,
@@ -258,6 +266,10 @@ def _write_analysis_bundle(
     )
     _write_json(str(analysis_dir / "suppression_audit.json"), suppression_audit)
 
+    # Layer-G controller ledger + live overrides (state + ledger passthrough) —
+    # how the owner watches the autonomous tuner's envelope from monitor-logs.
+    _write_json(str(analysis_dir / "emission_controller.json"), emission_controller or {})
+
     index = build_bundle_index(
         generated_at_ts=now_ts,
         lookback_hours=lookback_hours,
@@ -272,6 +284,7 @@ def _write_analysis_bundle(
             "analysis/performance_setup.json",
             "analysis/performance_setup.csv",
             "analysis/suppression_audit.json",
+            "analysis/emission_controller.json",
         ],
     )
     _write_json(str(analysis_dir / "bundle.json"), index)

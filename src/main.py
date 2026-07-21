@@ -1834,6 +1834,17 @@ class CryptoSignalEngine:
             self._publish_market_context()
             # ── Layer D: allocator recommendation (observe-only) ───────────
             self._write_allocator_recommendation()
+            # ── Layer G: autonomous emission controller ────────────────────
+            # Consumes the gate verdicts + edge matrix and moves the per-strategy
+            # emission overrides itself (dark-first, self-promoting). Own cadence
+            # guard inside; off-thread so the audit loop never blocks on it.
+            try:
+                from src import runtime_tunables as _rt
+                if bool(_rt.get("emission_controller_enabled")):
+                    await asyncio.to_thread(self._emission_controller_cycle)
+            except Exception as _ecc_exc:
+                from src import fail_open
+                fail_open.record("main.emission_controller_cycle", _ecc_exc)
             # ── Feature liveness: output-vs-upstream watchdog (2026-07-14) ─
             try:
                 from src import runtime_tunables as _rt
@@ -1848,6 +1859,66 @@ class CryptoSignalEngine:
     # ------------------------------------------------------------------
     # Autonomous-portfolio observe-only publishers (Layers A + D)
     # ------------------------------------------------------------------
+
+    def _emission_controller_cycle(self) -> None:
+        """One Layer-G cycle: read the measured gate verdicts + edge matrix, decide
+        per-strategy emission overrides inside the envelope, and commit them to the
+        controller store. Own cadence guard (EMISSION_CONTROLLER_INTERVAL_SEC, def
+        30 min) so it's independent of the audit-loop tick. Boot-grace counts
+        *in-process* cycles so a restart re-enters pure observation. Fail-open:
+        any error leaves the last committed overrides untouched."""
+        import os as _os
+        import time as _t
+
+        from src import runtime_tunables as _rt
+        from src import suppression_audit as _sa
+        from src.context_emission_policy import PolicyParams
+        from src.emission_controller import ControllerBounds, build_inputs, run_cycle
+        from src.emission_controller_store import get_emission_controller_store
+        from src.strategy_edge import VERDICT_STRONG, get_strategy_edge_store
+
+        now = _t.monotonic()
+        interval = float(_os.getenv("EMISSION_CONTROLLER_INTERVAL_SEC", "1800"))
+        last = getattr(self, "_emission_controller_last_run", 0.0)
+        if last and (now - last) < interval:
+            return
+        self._emission_controller_last_run = now
+        cycles = getattr(self, "_emission_controller_cycles_since_start", 0) + 1
+        self._emission_controller_cycles_since_start = cycles
+
+        by_gate = _sa.compute_gate_suppression_metrics(_sa.get_store().records())
+        matrix = get_strategy_edge_store().matrix()
+        inputs = build_inputs(by_gate=by_gate, matrix=matrix, strong_verdict=VERDICT_STRONG)
+
+        gp = PolicyParams.from_config()
+        bounds = ControllerBounds(
+            stability_cycles=int(_rt.get("emission_controller_stability_cycles") or 3),
+            boot_grace_cycles=int(_rt.get("emission_controller_boot_grace_cycles") or 3),
+            min_gate_n=int(_rt.get("emission_controller_min_gate_n") or 40),
+            promote_ev_r=float(_rt.get("emission_controller_promote_ev_r") or 0.25),
+            max_changes_per_cycle=int(_rt.get("emission_controller_max_changes_per_cycle") or 2),
+            min_samples_floor=int(_rt.get("emission_controller_min_samples_floor") or 15),
+            min_samples_ceiling=int(gp.min_samples),
+        )
+        store = get_emission_controller_store()
+        decision = run_cycle(
+            gate_metrics=inputs["gate_metrics"],
+            best_strong_cell=inputs["best_strong_cell"],
+            strategy_health=inputs["strategy_health"],
+            global_params={"suppress_negative": gp.suppress_negative, "min_samples": gp.min_samples},
+            prior=store.state,
+            bounds=bounds,
+            cycles_since_start=cycles,
+        )
+        store.commit(decision.state, decision.adjustments)
+        self._emission_controller_last_decision_ts = _t.time()
+        for a in decision.adjustments:
+            tag = "APPLY" if a.applied else "SHADOW"
+            log.info(
+                "[EMISSION_CONTROLLER:{}] {} {} {}->{} status={} verdict={} ev={} n={} cyc={} ({})",
+                tag, a.strategy, a.param, a.old, a.new, a.status, a.verdict,
+                a.ev_per_suppression_r, a.n, cycles, a.reason,
+            )
 
     def _build_feature_liveness(self):
         """Wire the feature-liveness probes (2026-07-14 incident response).
@@ -1935,6 +2006,28 @@ class CryptoSignalEngine:
             min_upstream_delta=15.0,
             min_streak=72,         # ~6 h
         ))
+
+        def _ec_health():
+            # Layer G: the controller must keep cycling once enabled. A money-path
+            # tuner that silently stops (import broke / loop wedged) would freeze
+            # the overrides at a stale snapshot — surfaced, never swallowed.
+            if not bool(_rt.get("emission_controller_enabled")):
+                return True, "disabled by tunable"
+            ts = getattr(self, "_emission_controller_last_decision_ts", 0.0)
+            if not ts:
+                return True, "no cycle yet (boot)"
+            age = _time.time() - ts
+            interval = float(__import__("os").getenv("EMISSION_CONTROLLER_INTERVAL_SEC", "1800"))
+            if age > 3 * interval:
+                return False, f"no controller cycle in {age:.0f}s"
+            try:
+                from src.emission_controller_store import get_emission_controller_store
+                live = len(get_emission_controller_store().active_overrides())
+            except Exception:
+                live = -1
+            return True, f"last cycle {age:.0f}s ago; live_overrides={live}"
+
+        fl.add_predicate(PredicateProbe(name="emission_controller", fn=_ec_health, min_streak=6))
 
         def _mc_health():
             if not bool(_rt.get("market_context_enabled")):

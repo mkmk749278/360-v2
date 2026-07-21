@@ -520,6 +520,100 @@ def _build_registry() -> Dict[str, Tunable]:
             default=CONTEXT_EMISSION_COHORT_AWARE,
             category="Signal gating",
         ),
+        # ── Layer G — autonomous emission controller (S72) ──────────────────
+        # The outer loop: consumes the suppression-audit gate verdicts + edge
+        # matrix and moves the per-strategy emission overrides itself, dark-first
+        # + self-promoting (docs/PLAN_AUTONOMOUS_EMISSION_CONTROLLER.md). Master
+        # switch + envelope; there is deliberately no "confirm/go-live" flag —
+        # promotion is data-gated, not human-gated.
+        Tunable(
+            key="emission_controller_enabled",
+            label="Emission controller — master / kill",
+            description=(
+                "ON = the autonomous controller reads its measured gate verdicts "
+                "and adjusts per-strategy emission overrides inside its envelope. "
+                "OFF = kill: the emission policy reads global params only and all "
+                "controller overrides are ignored (instant revert to static)."
+            ),
+            type="bool",
+            default=True,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="emission_controller_boot_grace_cycles",
+            label="Emission controller — boot-grace cycles",
+            description=(
+                "Pure-observation cycles after each (re)start before ANY override "
+                "can be promoted live. The system-level dark period; needs no "
+                "human. Stamps would-be adjustments meanwhile."
+            ),
+            type="int",
+            default=3,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="emission_controller_stability_cycles",
+            label="Emission controller — stability window (K)",
+            description=(
+                "A per-strategy override only promotes after its triggering "
+                "verdict is consistent across this many consecutive cycles "
+                "(hysteresis — never a single-window reflex). A reversal needs K "
+                "fresh opposite cycles."
+            ),
+            type="int",
+            default=3,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="emission_controller_promote_ev_r",
+            label="Emission controller — promote EV bar (R)",
+            description=(
+                "Minimum |EV/suppression| in R before the controller turns a "
+                "strategy's NEGATIVE suppression OFF (the risky, more-emissions "
+                "direction). Re-protecting (suppression back ON) is not gated by "
+                "this bar."
+            ),
+            type="float",
+            default=0.25,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="emission_controller_min_gate_n",
+            label="Emission controller — min gate sample",
+            description=(
+                "A context_floor:<strategy> gate verdict counts toward stability "
+                "only when its suppression sample is at least this many — thin "
+                "verdicts never advance a promotion."
+            ),
+            type="int",
+            default=40,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="emission_controller_max_changes_per_cycle",
+            label="Emission controller — blast radius / cycle",
+            description=(
+                "Cap on distinct per-strategy overrides the controller may "
+                "promote in a single cycle (measured-harm fixes prioritised by "
+                "|EV|). Bounds how fast live behaviour can move."
+            ),
+            type="int",
+            default=2,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="emission_controller_min_samples_floor",
+            label="Emission controller — relax-floor lower bound",
+            description=(
+                "Lower clamp for the per-strategy relax sample floor the "
+                "controller may set (it steps down from the global default to "
+                "unlock thin-but-STRONG cells, never below this). The strongest "
+                "cell today (QUIET_COMPRESSION_BREAK, +2.21R) sits at n=29."
+            ),
+            type="int",
+            default=15,
+            category="Signal gating",
+        ),
         Tunable(
             key="dispatch_cooldown_enabled",
             label="Dispatch cooldown",
