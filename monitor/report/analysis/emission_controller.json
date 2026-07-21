@@ -1,1 +1,321 @@
-{}
+{
+  "state": {
+    "overrides": {
+      "FUNDING_EXTREME_SIGNAL": {
+        "suppress_negative": null,
+        "min_samples": 25
+      },
+      "MOVER_TREND_PULLBACK@ATR": {
+        "suppress_negative": null,
+        "min_samples": 25
+      }
+    },
+    "history": {
+      "BREAKDOWN_SHORT|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "BREAKDOWN_SHORT|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "DIVERGENCE_CONTINUATION|suppress_negative": [
+        "KEEP",
+        "KEEP",
+        "KEEP"
+      ],
+      "DIVERGENCE_CONTINUATION|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "FAILED_AUCTION_RECLAIM|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "FAILED_AUCTION_RECLAIM|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "FUNDING_EXTREME_SIGNAL|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "FUNDING_EXTREME_SIGNAL|min_samples": [],
+      "LIQUIDITY_SWEEP_REVERSAL|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "LIQUIDITY_SWEEP_REVERSAL|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "MEAN_REVERT|suppress_negative": [
+        "KEEP",
+        "KEEP",
+        "KEEP"
+      ],
+      "MEAN_REVERT|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "MOVER_TREND_PULLBACK|suppress_negative": [
+        "KEEP",
+        "KEEP",
+        "KEEP"
+      ],
+      "MOVER_TREND_PULLBACK|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "MOVER_TREND_PULLBACK@ATR|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "MOVER_TREND_PULLBACK@ATR|min_samples": [],
+      "MOVER_TREND_PULLBACK@FIXED|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "MOVER_TREND_PULLBACK@FIXED|min_samples": [
+        "LOWER",
+        "LOWER",
+        "HOLD"
+      ],
+      "QUIET_COMPRESSION_BREAK|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "QUIET_COMPRESSION_BREAK|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "QUIET_COMPRESSION_BREAK@ATR|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "QUIET_COMPRESSION_BREAK@ATR|min_samples": [
+        "LOWER",
+        "LOWER",
+        "LOWER"
+      ],
+      "QUIET_COMPRESSION_BREAK@FIXED|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "QUIET_COMPRESSION_BREAK@FIXED|min_samples": [
+        "LOWER",
+        "LOWER",
+        "LOWER"
+      ],
+      "RANGE_FADE|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "RANGE_FADE|min_samples": [
+        "LOWER",
+        "LOWER",
+        "LOWER"
+      ],
+      "SHADOW_FUNDING_FADE|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "SHADOW_FUNDING_FADE|min_samples": [
+        "LOWER",
+        "LOWER",
+        "LOWER"
+      ],
+      "SHADOW_MEAN_REVERT|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "SHADOW_MEAN_REVERT|min_samples": [
+        "LOWER",
+        "LOWER",
+        "LOWER"
+      ],
+      "SHADOW_RANGE_FADE|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "SHADOW_RANGE_FADE|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "SR_FLIP_RETEST|suppress_negative": [
+        "KEEP",
+        "KEEP",
+        "KEEP"
+      ],
+      "SR_FLIP_RETEST|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "TREND_PULLBACK_EMA|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "TREND_PULLBACK_EMA|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "VOLUME_SURGE_BREAKOUT|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "VOLUME_SURGE_BREAKOUT|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "WHALE_MOMENTUM|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "WHALE_MOMENTUM|min_samples": [
+        "LOWER",
+        "LOWER",
+        "LOWER"
+      ]
+    },
+    "last_change_cycle": {
+      "FUNDING_EXTREME_SIGNAL|min_samples": 4,
+      "MOVER_TREND_PULLBACK@ATR|min_samples": 4
+    },
+    "cycle": 4
+  },
+  "ledger": [
+    {
+      "strategy": "FUNDING_EXTREME_SIGNAL",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=20)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 20
+    },
+    {
+      "strategy": "MOVER_TREND_PULLBACK@ATR",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=29)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 29
+    }
+  ],
+  "pending": [
+    {
+      "strategy": "QUIET_COMPRESSION_BREAK@ATR",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": false,
+      "status": "PENDING",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17) | deferred:blast_radius",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 17
+    },
+    {
+      "strategy": "QUIET_COMPRESSION_BREAK@FIXED",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": false,
+      "status": "PENDING",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17) | deferred:blast_radius",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 17
+    },
+    {
+      "strategy": "RANGE_FADE",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": false,
+      "status": "PENDING",
+      "reason": "stable+bar+grace → promote (strong_cell_n=24) | deferred:blast_radius",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 24
+    },
+    {
+      "strategy": "SHADOW_FUNDING_FADE",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": false,
+      "status": "PENDING",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15) | deferred:blast_radius",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15
+    },
+    {
+      "strategy": "SHADOW_MEAN_REVERT",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": false,
+      "status": "PENDING",
+      "reason": "stable+bar+grace → promote (strong_cell_n=18) | deferred:blast_radius",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 18
+    },
+    {
+      "strategy": "WHALE_MOMENTUM",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": false,
+      "status": "PENDING",
+      "reason": "stable+bar+grace → promote (strong_cell_n=18) | deferred:blast_radius",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 18
+    }
+  ],
+  "active_overrides": {
+    "FUNDING_EXTREME_SIGNAL": {
+      "min_samples": 25
+    },
+    "MOVER_TREND_PULLBACK@ATR": {
+      "min_samples": 25
+    }
+  }
+}

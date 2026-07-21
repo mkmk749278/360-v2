@@ -19,12 +19,12 @@
   },
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 157,
+    "n": 158,
     "wins": 22,
-    "losses": 52,
+    "losses": 53,
     "neutral": 83,
-    "win_rate_pct": 14.0,
-    "avg_pnl_pct": -0.2507
+    "win_rate_pct": 13.9,
+    "avg_pnl_pct": -0.25
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",

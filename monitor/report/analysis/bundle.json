@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-21T01:15:17.100768+00:00",
-  "generated_at_ts": 1784596517.1007683,
-  "lookback_hours": 48,
+  "generated_at": "2026-07-21T04:02:45.602010+00:00",
+  "generated_at_ts": 1784606565.6020095,
+  "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "2eeaadedf46f3227a10a74be72e4f7a5c2fb8d5a",
+  "git_sha": "d35ddfeb8c34e3b7eaaefbbe411b1499dedfb386",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 3081,
-    "strategy_matrix_scored_cells": 1006,
+    "strategy_matrix_cells": 3103,
+    "strategy_matrix_scored_cells": 1028,
     "performance_setups": 14,
     "suppression_gates": 17
   },
@@ -96,15 +96,14 @@
       }
     ],
     "gate_verdict_counts": {
-      "TUNE": 7,
-      "KEEP": 3,
-      "DROP": 3,
-      "INSUFFICIENT_SAMPLE": 4
+      "KEEP": 7,
+      "DROP": 2,
+      "TUNE": 5,
+      "INSUFFICIENT_SAMPLE": 3
     },
     "drop_gates": [
       "shadow_unit:SHADOW_RANGE_FADE",
-      "dispatch_staleness",
-      "context_floor:DIVERGENCE_CONTINUATION"
+      "dispatch_staleness"
     ]
   }
 }
