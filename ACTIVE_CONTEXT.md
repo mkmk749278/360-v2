@@ -4,6 +4,71 @@
 
 ---
 
+## 🟢 SESSION 74 2026-07-21 — Referral programme Phase 2: rewards, referee discount, 50% commission (all four repos, branch `claude/referral-program-incentives-kg50am`)
+
+**Owner ask:** complete the invite screen's "rewards are coming soon" — 7 days of
+full Auto per successful invitation, the invited person gets 50% off both plans one
+time, and for people promoting full-time, 50% commission per successful paid user.
+Decisions locked via AskUserQuestion: reward triggers **on join** (growth > revenue);
+commission runs for the referee's **first 3 billing periods** (cross-channel).
+
+### Shipped — engine (360-v2)
+
+- **`src/api/referral_rewards.py`** (new) — reward grants, commission accrual, and
+  **entitlement composition**: the user row stays the single entitlement truth, but
+  every `aset_tier` write site (Play verify, RTDN, web IPN, expiry downgrade) now
+  composes Play state ⊕ the reward ledger, so a banked reward survives Play rewrites
+  AND a paying subscriber is never zeroed when a stacked reward lapses (RTDN revoke +
+  `_maybe_downgrade_expired` re-resolve from stored `play_purchases` snapshots
+  instead of writing blanket free).
+- **Ledgers** in `user_overrides.py`: `user_reward_grants` (7d Auto per join,
+  sequential stacking, 90d cap, DB-level one-shot per referee),
+  `referral_commissions` (idempotent per `(purchase_token, period_expiry)` — RTDN
+  redeliveries never double-credit), `user_referral_redemptions.converted_at`
+  (migration; NULL = referee still holds the one-time 50% discount).
+- **Commission = 50% of what the referee ACTUALLY paid**: Play uses
+  `REFERRAL_COMMISSION_PRICES` (halved when the purchase used the `referral50`
+  offer — `billing_play.py` now parses `offerDetails.offerId`); the web rail passes
+  the confirmed USD amount from the IPN. Unpriced product → accrues nothing.
+- **Web rail (`billing_web.py`)**: eligible referee's checkout is priced at 50% off
+  server-side, the discount flag rides the HMAC-echoed `order_id` so the webhook's
+  amount defence checks the right price; grant path runs the same hooks/composition.
+- **API**: `/api/referral/me` extended (reward + commission + discount state, all
+  fields defaulted for old clients); `/api/referral/claim` banks the reward and
+  returns `discount_eligible`; owner-gated `GET /api/referral/admin/commissions` +
+  `POST .../mark-paid` for the manual-payout ledger.
+- **Config**: `REFERRAL_REWARDS_ENABLED` (default **true** — operational kill
+  switch mirroring `GOOGLE_PLAY_BILLING_ENABLED`; off stops NEW rewards, never
+  confiscates banked time) + days/tier/cap/rate/periods/prices/offer knobs.
+- **Tests**: 19 new in `test_referral_rewards.py` + endpoint tests in smoke + 4 web
+  referral tests. Full suite 6958 passed; ruff clean; mypy 105 = baseline (no new).
+- **`docs/REFERRAL_REWARDS.md`** — runbook incl. **OWNER ACTION: create the
+  `referral50` developer-determined offer (50% off, 1 period) on BOTH base plans in
+  Play Console**; payout runbook; anti-abuse posture.
+
+### Shipped — app / ops / legal (same branch in each repo)
+
+- **lumin-app**: referral page rewrite (reward hero, banked-days + active-until,
+  paid-friends count, per-currency commission earned/paid, share copy sells the 50%
+  off); paywall buys the `referral50` offer variant when the engine says eligible
+  (pure `pickPlanOffer` helper + `in_app_purchase_android` direct dep), 50%-OFF pill
+  + base-price strikethrough; web paywall shows the engine-priced discount; signup
+  referral card promises the discount. All rendered from engine truth
+  (`rewards_enabled` gates the copy).
+- **360ce-ops**: `/referrals` owner panel — accrued/paid totals by currency,
+  commission table with referrer phone, checkbox mark-paid (PRG + confirm +
+  audited), engine re-read after write.
+- **lumin-legal**: `terms.md` referral-programme section **proposed on the branch —
+  owner-sign-off to merge** (mechanics, 3-period cap, anti-abuse forfeiture, manual
+  payouts, programme may change, rewards ≠ investment returns).
+
+### Open
+
+- Owner: create the two `referral50` Play offers (runbook above), merge the legal
+  terms, then merge the four branch PRs (engine first, app second).
+- Payout cadence is owner-manual; consider a monthly reminder Routine once volume
+  appears.
+
 ## 🟢 SESSION 73 2026-07-20 — Web billing Phase 3: the PWA crypto (NOWPayments) subscription rail — built, merged, and taken LIVE (paired PRs: 360-v2 #757/#759 + lumin-app #133, branch `claude/web-app-implementation-xzkbzo`)
 
 **Owner ask:** finish the web app (PWA) and give it its own way to sell the paid
