@@ -92,15 +92,25 @@ _SELLABLE_TIERS = frozenset({"assist", "auto"})
 
 _ORDER_PREFIX = "luminweb"
 
+#: order_id flag: this checkout was priced with the referee's one-time
+#: referral discount.  Carried through the IPN so the webhook's
+#: amount-match defence knows which expected price applies (eligibility
+#: may have been consumed between checkout and IPN — the order itself is
+#: the record of what was charged).
+_ORDER_FLAG_REFERRAL_DISCOUNT = "d"
 
-def encode_order_id(user_id: int, tier: str) -> str:
-    return f"{_ORDER_PREFIX}:{user_id}:{tier}:{secrets.token_hex(6)}"
+
+def encode_order_id(user_id: int, tier: str, *, discounted: bool = False) -> str:
+    flags = _ORDER_FLAG_REFERRAL_DISCOUNT if discounted else "-"
+    return f"{_ORDER_PREFIX}:{user_id}:{tier}:{flags}:{secrets.token_hex(6)}"
 
 
-def decode_order_id(order_id: str) -> Optional[tuple[int, str]]:
-    """Return ``(user_id, tier)`` from an order_id we minted, else ``None``."""
+def decode_order_id(order_id: str) -> Optional[tuple[int, str, bool]]:
+    """Return ``(user_id, tier, discounted)`` from an order_id we minted,
+    else ``None``.  Accepts the pre-2026-07-21 4-part shape (no flags —
+    an IPN can arrive for an invoice minted before a deploy)."""
     parts = (order_id or "").split(":")
-    if len(parts) != 4 or parts[0] != _ORDER_PREFIX:
+    if len(parts) not in (4, 5) or parts[0] != _ORDER_PREFIX:
         return None
     try:
         user_id = int(parts[1])
@@ -109,7 +119,8 @@ def decode_order_id(order_id: str) -> Optional[tuple[int, str]]:
     tier = parts[2]
     if tier not in _SELLABLE_TIERS:
         return None
-    return user_id, tier
+    discounted = len(parts) == 5 and _ORDER_FLAG_REFERRAL_DISCOUNT in parts[3]
+    return user_id, tier, discounted
 
 
 # ---------------------------------------------------------------------------
@@ -265,6 +276,10 @@ class WebCheckoutResponse(BaseModel):
     invoice_url: str
     invoice_id: str
     order_id: str
+    #: True when the referee's one-time referral discount priced this
+    #: invoice (Phase 2, 2026-07-21) — the paywall shows the applied cut.
+    discounted: bool = False
+    discount_percent: int = 0
 
 
 # ---------------------------------------------------------------------------
@@ -281,6 +296,7 @@ def register(
     verifier: Optional[NowPaymentsIpnVerifier] = None,
     idempotency: Optional[InMemoryIdempotencyStore] = None,
     invoice_creator: Callable[[dict], Awaitable[dict]] = _create_invoice_http,
+    referral_rewards: Any = None,
 ) -> None:
     """Wire the web-billing endpoints onto ``app``.
 
@@ -374,7 +390,19 @@ def register(
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="user not found")
 
         amount_usd = config.WEB_BILLING_TIER_USD[tier]  # engine sets the money
-        order_id = encode_order_id(user.user_id, tier)
+        # Referee's one-time referral discount (Phase 2) — the engine owns
+        # the price on this rail, so the discount is applied right here and
+        # stamped into the order_id for the webhook's amount check.
+        discounted = False
+        if referral_rewards is not None:
+            discounted = await referral_rewards.discount_eligible(user.user_id)
+            if discounted:
+                amount_usd = round(
+                    amount_usd
+                    * (1.0 - float(config.REFERRAL_DISCOUNT_PERCENT) / 100.0),
+                    2,
+                )
+        order_id = encode_order_id(user.user_id, tier, discounted=discounted)
         payload = {
             "price_amount": amount_usd,
             "price_currency": config.WEB_BILLING_PRICE_CURRENCY,
@@ -407,6 +435,10 @@ def register(
             invoice_url=invoice_url,
             invoice_id=invoice_id,
             order_id=order_id,
+            discounted=discounted,
+            discount_percent=(
+                int(config.REFERRAL_DISCOUNT_PERCENT) if discounted else 0
+            ),
         )
 
     # ---- POST /api/billing/web/crypto/webhook ----------------------------
@@ -452,11 +484,19 @@ def register(
         if decoded is None:
             log.warning("web billing IPN: unrecognised order_id={!r}", order_id)
             raise HTTPException(status_code=422, detail="unrecognised order_id")
-        user_id, tier = decoded
+        user_id, tier, discounted = decoded
 
         # Defence: the amount actually invoiced must match the tier's price —
-        # a signed IPN for a tampered-down amount never upgrades a user.
+        # a signed IPN for a tampered-down amount never upgrades a user.  A
+        # referral-discounted order (flagged in the order_id WE minted and
+        # HMAC-echoed back) is checked against the discounted price.
         expected_usd = config.WEB_BILLING_TIER_USD.get(tier)
+        if expected_usd is not None and discounted:
+            expected_usd = round(
+                expected_usd
+                * (1.0 - float(config.REFERRAL_DISCOUNT_PERCENT) / 100.0),
+                2,
+            )
         price_amount = _as_float(payload.get("price_amount"))
         if expected_usd is None or price_amount is None or price_amount + 1e-6 < expected_usd:
             log.warning(
@@ -477,21 +517,40 @@ def register(
         current = _coerce_dt(getattr(await user_store.aget_by_id(user_id), "paid_until", None))
         base = max(now, current) if current else now
         paid_until = base + timedelta(days=config.WEB_BILLING_PERIOD_DAYS)
+        write_tier, write_until = tier, paid_until
+        if referral_rewards is not None:
+            # Referral hooks (Phase 2): commission accrues from the ACTUAL
+            # USD amount paid on this rail; the entitlement write composes
+            # with the reward ledger like every other aset_tier site.
+            await referral_rewards.on_paid_period(
+                user_id,
+                product_id=f"web_{tier}",
+                purchase_token=f"npw:{payment_id}",
+                period_expiry=paid_until,
+                amount=price_amount,
+                currency="USD",
+            )
+            write_tier, write_until = await referral_rewards.compose_entitlement(
+                user_id, tier, paid_until,
+            )
         try:
-            updated = await user_store.aset_tier(user_id, tier=tier, paid_until=paid_until)
+            updated = await user_store.aset_tier(
+                user_id, tier=write_tier, paid_until=write_until,
+            )
         except LookupError:
             raise HTTPException(status_code=404, detail="user not found for order")
 
         log.info(
             "web billing GRANT: user_id={} tier={} paid_until={} payment_id={}",
-            user_id, tier, paid_until.isoformat(), payment_id[:12],
+            user_id, write_tier,
+            write_until.isoformat() if write_until else None, payment_id[:12],
         )
         return {
             "ok": True,
             "granted": True,
             "user_id": getattr(updated, "user_id", user_id),
-            "tier": tier,
-            "paid_until": paid_until.isoformat(),
+            "tier": write_tier,
+            "paid_until": write_until.isoformat() if write_until else None,
         }
 
 

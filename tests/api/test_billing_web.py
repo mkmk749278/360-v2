@@ -61,6 +61,23 @@ async def _fake_invoice_ok(payload: dict) -> dict:
     return {"invoice_url": "https://nowpayments.example/pay/abc", "id": "inv_123"}
 
 
+class FakeReferralRewards:
+    """Stands in for ReferralRewardsService — records the hook calls."""
+
+    def __init__(self, *, eligible: bool = False):
+        self.eligible = eligible
+        self.paid_calls: list[dict] = []
+
+    async def discount_eligible(self, user_id: int) -> bool:
+        return self.eligible
+
+    async def on_paid_period(self, user_id: int, **kwargs) -> None:
+        self.paid_calls.append({"user_id": user_id, **kwargs})
+
+    async def compose_entitlement(self, user_id: int, tier: str, paid_until):
+        return tier, paid_until
+
+
 def _build_app(
     *,
     user_store: FakeUserStore,
@@ -68,6 +85,7 @@ def _build_app(
     allow_auth: bool = True,
     invoice_creator=_fake_invoice_ok,
     idempotency: Optional[billing_web.InMemoryIdempotencyStore] = None,
+    referral_rewards: Any = None,
 ) -> FastAPI:
     app = FastAPI()
 
@@ -86,6 +104,7 @@ def _build_app(
         verifier=billing_web.NowPaymentsIpnVerifier(IPN_SECRET),
         idempotency=idempotency or billing_web.InMemoryIdempotencyStore(),
         invoice_creator=invoice_creator,
+        referral_rewards=referral_rewards,
     )
     return app
 
@@ -111,7 +130,7 @@ def enable_crypto(monkeypatch):
 
 def test_order_id_roundtrip():
     oid = billing_web.encode_order_id(42, "auto")
-    assert billing_web.decode_order_id(oid) == (42, "auto")
+    assert billing_web.decode_order_id(oid) == (42, "auto", False)
 
 
 @pytest.mark.parametrize(
@@ -213,7 +232,7 @@ def test_checkout_happy_path_sets_price_and_order(enable_crypto):
     assert body["invoice_url"].endswith("/pay/xyz")
     # engine set the money, not the client:
     assert captured["price_amount"] == 25.0
-    assert billing_web.decode_order_id(body["order_id"]) == (7, "auto")
+    assert billing_web.decode_order_id(body["order_id"]) == (7, "auto", False)
 
 
 # ---------------------------------------------------------------------------
@@ -373,3 +392,94 @@ async def test_create_invoice_handles_unreachable_provider(monkeypatch):
         await billing_web._create_invoice_http({})
     assert ei.value.status_code == 502
     assert "unreachable" in ei.value.detail
+
+
+# ---------------------------------------------------------------------------
+# Referral Phase 2 (2026-07-21) — discounted checkout + commission hooks
+# ---------------------------------------------------------------------------
+
+
+def test_checkout_applies_referral_discount_for_eligible_referee(
+    enable_crypto, monkeypatch,
+):
+    monkeypatch.setattr(config, "REFERRAL_DISCOUNT_PERCENT", 50)
+    captured: dict = {}
+
+    async def _capturing_invoice(payload: dict) -> dict:
+        captured.update(payload)
+        return {"invoice_url": "https://nowpayments.example/pay/d", "id": "inv_d"}
+
+    store = FakeUserStore(by_uid={"u1": SimpleNamespace(user_id=7)})
+    client = TestClient(
+        _build_app(
+            user_store=store,
+            identity={"firebase_uid": "u1"},
+            invoice_creator=_capturing_invoice,
+            referral_rewards=FakeReferralRewards(eligible=True),
+        )
+    )
+    body = client.post("/api/billing/web/checkout", json={"tier": "auto"}).json()
+    assert body["amount_usd"] == 12.5
+    assert body["discounted"] is True and body["discount_percent"] == 50
+    assert captured["price_amount"] == 12.5
+    assert billing_web.decode_order_id(body["order_id"]) == (7, "auto", True)
+
+
+def test_checkout_full_price_when_not_eligible(enable_crypto):
+    store = FakeUserStore(by_uid={"u1": SimpleNamespace(user_id=7)})
+    client = TestClient(
+        _build_app(
+            user_store=store,
+            identity={"firebase_uid": "u1"},
+            referral_rewards=FakeReferralRewards(eligible=False),
+        )
+    )
+    body = client.post("/api/billing/web/checkout", json={"tier": "auto"}).json()
+    assert body["amount_usd"] == 25.0 and body["discounted"] is False
+    assert billing_web.decode_order_id(body["order_id"]) == (7, "auto", False)
+
+
+def test_webhook_accepts_discounted_amount_only_on_flagged_order(
+    enable_crypto, monkeypatch,
+):
+    monkeypatch.setattr(config, "REFERRAL_DISCOUNT_PERCENT", 50)
+    store = FakeUserStore(by_id={3: SimpleNamespace(user_id=3, paid_until=None)})
+    rewards = FakeReferralRewards()
+    client = TestClient(_build_app(user_store=store, referral_rewards=rewards))
+
+    # Discount-flagged order at the discounted price → grant.
+    body = {
+        "payment_status": "finished",
+        "payment_id": "pd1",
+        "order_id": billing_web.encode_order_id(3, "auto", discounted=True),
+        "price_amount": 12.5,
+    }
+    assert _post_ipn(client, body).json()["granted"] is True
+
+    # UNflagged order at the discounted price → amount defence rejects.
+    body2 = {
+        "payment_status": "finished",
+        "payment_id": "pd2",
+        "order_id": billing_web.encode_order_id(3, "auto"),
+        "price_amount": 12.5,
+    }
+    assert _post_ipn(client, body2).status_code == 422
+
+
+def test_webhook_grant_fires_commission_hook_with_actual_amount(enable_crypto):
+    store = FakeUserStore(by_id={3: SimpleNamespace(user_id=3, paid_until=None)})
+    rewards = FakeReferralRewards()
+    client = TestClient(_build_app(user_store=store, referral_rewards=rewards))
+    body = {
+        "payment_status": "finished",
+        "payment_id": "pay_c",
+        "order_id": billing_web.encode_order_id(3, "auto"),
+        "price_amount": 25.0,
+    }
+    assert _post_ipn(client, body).json()["granted"] is True
+    assert len(rewards.paid_calls) == 1
+    call = rewards.paid_calls[0]
+    assert call["user_id"] == 3
+    assert call["amount"] == 25.0 and call["currency"] == "USD"
+    assert call["purchase_token"] == "npw:pay_c"
+    assert call["period_expiry"] is not None

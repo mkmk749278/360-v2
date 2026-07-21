@@ -210,6 +210,16 @@ class PlayPurchaseStore:
             ).fetchone()
         return self._row_to_purchase(row) if row is not None else None
 
+    def list_for_user(self, user_id: int) -> list[PlayPurchase]:
+        """All tokens ever seen for a user (indexed; event-time only —
+        referral-reward entitlement re-resolution, never a hot loop)."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM play_purchases WHERE user_id = ?",
+                (int(user_id),),
+            ).fetchall()
+        return [self._row_to_purchase(row) for row in rows]
+
     # ---- async variants -------------------------------------------------
 
     async def aupsert(
@@ -233,6 +243,9 @@ class PlayPurchaseStore:
 
     async def aget(self, purchase_token: str) -> Optional[PlayPurchase]:
         return await asyncio.to_thread(self.get, purchase_token)
+
+    async def alist_for_user(self, user_id: int) -> list[PlayPurchase]:
+        return await asyncio.to_thread(self.list_for_user, user_id)
 
     async def arelink(self, *, old_token: str, new_token: str) -> None:
         await asyncio.to_thread(

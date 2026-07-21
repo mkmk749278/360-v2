@@ -877,13 +877,76 @@ class SymbolManagementUpdate(BaseModel):
     )
 
 
+class ReferralCommissionTotal(BaseModel):
+    """Accrued/paid commission totals in one currency.  Currencies never
+    sum across each other (Play accrues in INR from configured prices, the
+    web rail in USD from actual payments)."""
+
+    currency: str = Field(..., description="ISO currency code, e.g. INR.")
+    accrued: float = Field(..., description="Total awaiting payout.")
+    paid: float = Field(..., description="Total already paid out.")
+
+
 class ReferralStatsResponse(BaseModel):
-    """A user's stable referral code plus how many friends have joined
-    via it. Phase 1: tracking + attribution only, no reward grant."""
+    """A user's referral state — code + join counter (Phase 1) and the
+    reward / commission / discount picture (Phase 2, 2026-07-21).
+
+    Every Phase-2 field is defaulted so pre-upgrade clients (and a
+    rewards-disabled engine) keep working against the Phase-1 shape."""
 
     code: str = Field(..., description="This user's stable referral code.")
     referred_count: int = Field(
         ..., description="Number of accounts that have redeemed this code."
+    )
+    rewards_enabled: bool = Field(
+        default=False,
+        description="Whether the incentive programme is live on the engine. "
+        "False = the fields below are inert and the app renders Phase-1 UX.",
+    )
+    reward_days_per_invite: int = Field(
+        default=0, description="Free-tier days banked per friend who joins."
+    )
+    reward_tier: Optional[str] = Field(
+        default=None, description="Tier the join reward grants (e.g. 'auto')."
+    )
+    reward_days_earned: int = Field(
+        default=0, description="Lifetime reward days this user has banked."
+    )
+    reward_active_tier: Optional[str] = Field(
+        default=None, description="Tier of the currently-running reward, if any."
+    )
+    reward_active_until: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 UTC end of the currently-running reward window.",
+    )
+    paid_referred_count: int = Field(
+        default=0,
+        description="How many referred friends have become paid subscribers.",
+    )
+    commission_rate: float = Field(
+        default=0.0, description="Commission fraction per qualifying period."
+    )
+    commission_max_periods: int = Field(
+        default=0,
+        description="Commission is earned on a referred user's first N "
+        "billing periods only.",
+    )
+    commission_totals: List[ReferralCommissionTotal] = Field(
+        default_factory=list,
+        description="Per-currency accrued/paid commission totals.",
+    )
+    discount_eligible: bool = Field(
+        default=False,
+        description="True while THIS user (as a referee) still holds the "
+        "one-time 50%-off first billing cycle.",
+    )
+    discount_offer_id: Optional[str] = Field(
+        default=None,
+        description="Play Console offer id the app should purchase when "
+        "discount_eligible (e.g. 'referral50').",
+    )
+    discount_percent: int = Field(
+        default=0, description="Display discount percentage (web rail actual)."
     )
 
 
@@ -903,6 +966,48 @@ class ReferralClaimResponse(BaseModel):
         description="Set when ok=False: 'invalid_code' | 'self_referral' "
         "| 'already_redeemed'.",
     )
+    discount_eligible: bool = Field(
+        default=False,
+        description="True when the successful claim unlocked the one-time "
+        "50%-off first billing cycle for this user.",
+    )
+
+
+class ReferralCommissionItem(BaseModel):
+    """One accrued/paid commission row (owner admin surface)."""
+
+    commission_id: int
+    referrer_id: int
+    referee_id: int
+    referrer_phone: Optional[str] = Field(
+        default=None,
+        description="Referrer's phone (payout identity for manual payouts).",
+    )
+    product_id: str
+    period_expiry: str
+    amount: float
+    currency: str
+    rate: float
+    status: str = Field(..., description="'accrued' | 'paid'.")
+    created_at: str
+    paid_at: Optional[str] = None
+
+
+class ReferralCommissionsResponse(BaseModel):
+    """Owner admin listing of referral commissions."""
+
+    items: List[ReferralCommissionItem]
+
+
+class ReferralCommissionsMarkPaidRequest(BaseModel):
+    """Owner marking accrued commissions as settled (manual payout done)."""
+
+    commission_ids: List[int] = Field(..., description="Rows to flip to paid.")
+
+
+class ReferralCommissionsMarkPaidResponse(BaseModel):
+    ok: bool
+    updated: int = Field(..., description="Rows actually transitioned.")
 
 
 class UserAutoTradeSettings(AutoTradeSettings):

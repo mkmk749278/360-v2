@@ -96,6 +96,22 @@ class PlayBillingError(Exception):
         self.retryable = retryable
 
 
+def is_entitled_snapshot(raw_state: str, expiry: Optional[datetime]) -> bool:
+    """Whether a (state, expiry) snapshot means the user has paid access.
+
+    Shared between the live :class:`PlaySubscriptionState` and the
+    *stored* snapshots in ``play_purchases`` (referral-reward entitlement
+    re-resolution consults the last observed state without a Google call).
+    """
+    if raw_state not in _ENTITLED_STATES:
+        return False
+    if expiry is None:
+        # ACTIVE with no expiry shouldn't happen, but fail safe to
+        # entitled only when the state is explicitly active.
+        return raw_state == "SUBSCRIPTION_STATE_ACTIVE"
+    return expiry > datetime.now(timezone.utc)
+
+
 @dataclass(frozen=True)
 class PlaySubscriptionState:
     """Normalised view of a ``purchases.subscriptionsv2.get`` response."""
@@ -106,17 +122,16 @@ class PlaySubscriptionState:
     expiry: Optional[datetime]
     acknowledged: bool
     linked_purchase_token: Optional[str]
+    # Play offer the purchase was made under (``lineItems[].offerDetails
+    # .offerId``); None for a plain base-plan purchase.  Referral rewards
+    # use this to tell a 50%-off first cycle from a full-price one — the
+    # commission must be computed on what the referee actually paid.
+    offer_id: Optional[str] = None
 
     @property
     def is_entitled(self) -> bool:
         """True when the user should currently have paid access."""
-        if self.raw_state not in _ENTITLED_STATES:
-            return False
-        if self.expiry is None:
-            # ACTIVE with no expiry shouldn't happen, but fail safe to
-            # entitled only when the state is explicitly active.
-            return self.raw_state == "SUBSCRIPTION_STATE_ACTIVE"
-        return self.expiry > datetime.now(timezone.utc)
+        return is_entitled_snapshot(self.raw_state, self.expiry)
 
 
 @dataclass(frozen=True)
@@ -264,6 +279,7 @@ class PlayBillingVerifier:
 
         product_id = ""
         expiry: Optional[datetime] = None
+        offer_id: Optional[str] = None
         for item in line_items:
             pid = item.get("productId")
             if pid and not product_id:
@@ -271,6 +287,9 @@ class PlayBillingVerifier:
             exp = _parse_rfc3339(item.get("expiryTime"))
             if exp is not None and (expiry is None or exp > expiry):
                 expiry = exp
+            offer = item.get("offerDetails")
+            if offer_id is None and isinstance(offer, dict) and offer.get("offerId"):
+                offer_id = str(offer["offerId"])
 
         ack_state = str(body.get("acknowledgementState", ""))
         acknowledged = ack_state == "ACKNOWLEDGEMENT_STATE_ACKNOWLEDGED"
@@ -283,6 +302,7 @@ class PlayBillingVerifier:
             expiry=expiry,
             acknowledged=acknowledged,
             linked_purchase_token=str(linked) if linked else None,
+            offer_id=offer_id,
         )
 
     async def acknowledge(self, *, product_id: str, purchase_token: str) -> None:

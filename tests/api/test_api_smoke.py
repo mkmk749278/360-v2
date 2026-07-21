@@ -2615,7 +2615,7 @@ def test_referral_claim_success_via_endpoint(engine, tmp_path) -> None:
     client.headers["Authorization"] = f"Bearer {_auth_user_token(2)}"
     r = client.post("/api/referral/claim", json={"code": code})
     assert r.status_code == 200
-    assert r.json() == {"ok": True, "reason": None}
+    assert r.json() == {"ok": True, "reason": None, "discount_eligible": True}
 
     client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
     assert client.get("/api/referral/me").json()["referred_count"] == 1
@@ -2630,7 +2630,7 @@ def test_referral_claim_self_referral_rejected_via_endpoint(
     code = client.get("/api/referral/me").json()["code"]
     r = client.post("/api/referral/claim", json={"code": code})
     assert r.status_code == 200
-    assert r.json() == {"ok": False, "reason": "self_referral"}
+    assert r.json() == {"ok": False, "reason": "self_referral", "discount_eligible": False}
 
 
 def test_referral_claim_unknown_code_rejected_via_endpoint(
@@ -2641,4 +2641,62 @@ def test_referral_claim_unknown_code_rejected_via_endpoint(
     client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
     r = client.post("/api/referral/claim", json={"code": "NOSUCH1"})
     assert r.status_code == 200
-    assert r.json() == {"ok": False, "reason": "invalid_code"}
+    assert r.json() == {"ok": False, "reason": "invalid_code", "discount_eligible": False}
+
+
+def test_referral_claim_banks_reward_and_me_reports_it(engine, tmp_path) -> None:
+    """Phase 2 (2026-07-21): a successful claim banks the referrer's 7 days
+    of Auto (row upgraded immediately) and /api/referral/me reports the
+    reward + commission picture."""
+    client, user_store, _store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")  # uid=1, referrer
+    user_store.get_or_create_by_phone("+15550000002")  # uid=2, referee
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    code = client.get("/api/referral/me").json()["code"]
+
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(2)}"
+    r = client.post("/api/referral/claim", json={"code": code})
+    assert r.json()["ok"] is True
+
+    referrer = user_store.get_by_id(1)
+    assert referrer.tier == "auto" and referrer.paid_until is not None
+
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    body = client.get("/api/referral/me").json()
+    assert body["rewards_enabled"] is True
+    assert body["reward_days_earned"] == 7
+    assert body["reward_active_tier"] == "auto"
+    assert body["reward_active_until"] is not None
+    assert body["paid_referred_count"] == 0
+    assert body["commission_totals"] == []
+    # The referrer has not been referred themselves — no discount.
+    assert body["discount_eligible"] is False
+
+    # The referee side sees their one-time discount.
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(2)}"
+    referee_body = client.get("/api/referral/me").json()
+    assert referee_body["discount_eligible"] is True
+    assert referee_body["discount_offer_id"] == "referral50"
+
+
+def test_referral_admin_commissions_owner_gated(engine, tmp_path) -> None:
+    client, user_store, _store = _phase2_app_with_overrides(engine, tmp_path)
+    user_store.get_or_create_by_phone("+15550000001")
+    client.headers["Authorization"] = f"Bearer {_auth_user_token(1)}"
+    assert client.get("/api/referral/admin/commissions").status_code == 403
+    assert client.post(
+        "/api/referral/admin/commissions/mark-paid",
+        json={"commission_ids": [1]},
+    ).status_code == 403
+
+    from src.api.auth import OWNER_TIER, mint_token
+    client.headers["Authorization"] = (
+        f"Bearer {mint_token(secret=_TEST_SECRET, tier=OWNER_TIER)}"
+    )
+    r = client.get("/api/referral/admin/commissions")
+    assert r.status_code == 200 and r.json() == {"items": []}
+    r = client.post(
+        "/api/referral/admin/commissions/mark-paid",
+        json={"commission_ids": []},
+    )
+    assert r.status_code == 200 and r.json() == {"ok": True, "updated": 0}

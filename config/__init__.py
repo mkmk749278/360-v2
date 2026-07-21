@@ -3336,6 +3336,97 @@ GOOGLE_PLAY_RTDN_AUDIENCE: str = os.getenv("GOOGLE_PLAY_RTDN_AUDIENCE", "")
 GOOGLE_PLAY_RTDN_PATH_SECRET: str = os.getenv("GOOGLE_PLAY_RTDN_PATH_SECRET", "")
 
 # ---------------------------------------------------------------------------
+# Referral rewards (Phase 2, owner-approved 2026-07-21 — growth over revenue)
+# ---------------------------------------------------------------------------
+# The invite screen's Phase 1 (code + join counter) gains real incentives:
+#   * referrer: REFERRAL_REWARD_DAYS of REFERRAL_REWARD_TIER per friend who
+#     joins with their code (stacking, capped);
+#   * referee: one-time 50%-off first billing cycle — on Play via the
+#     developer-determined offer REFERRAL_DISCOUNT_OFFER_ID (owner creates it
+#     in Play Console on BOTH base plans; see docs/REFERRAL_REWARDS.md), on
+#     the web rail priced server-side at checkout;
+#   * referrer commission: REFERRAL_COMMISSION_RATE of each verified paid
+#     billing period of a referred user, first REFERRAL_COMMISSION_MAX_PERIODS
+#     periods only, accrued to a ledger and paid out manually by the owner
+#     (ops → Referrals).
+# See src/api/referral_rewards.py.  Every hook is event-driven (claim /
+# verify / RTDN / one-shot expiry transition) — nothing on a hot path.
+
+#: Master switch — operational kill switch, NOT a dark flag (mirrors
+#: GOOGLE_PLAY_BILLING_ENABLED: the owner explicitly ordered the programme
+#: live, and there is nothing to shadow-measure — a reward ledger either
+#: grants or it doesn't; it never alters signal output or dispatch).  When
+#: false: no grants, no commission accrual, no discount eligibility, and the
+#: referral endpoints keep serving Phase-1 tracking untouched.  Entitlement
+#: composition still honours grants banked while it was on — flipping this
+#: off stops NEW rewards, it does not confiscate granted time.
+REFERRAL_REWARDS_ENABLED: bool = _safe_bool("REFERRAL_REWARDS_ENABLED", "true")
+
+#: Days of free tier the referrer banks per friend who joins with their code.
+REFERRAL_REWARD_DAYS: int = _safe_int("REFERRAL_REWARD_DAYS", "7")
+
+#: Tier the join reward grants.  ``auto`` per owner decision ("full auto").
+REFERRAL_REWARD_TIER: str = _safe_choice(
+    "REFERRAL_REWARD_TIER", "auto", frozenset({"assist", "auto"})
+)
+
+#: Abuse bound: total banked reward window can extend at most this many days
+#: into the future (grants stack sequentially; beyond the cap they clamp to
+#: zero).  Phone-OTP already prices each fake join at a unique phone number;
+#: this bounds what even that buys.
+REFERRAL_REWARD_STACK_CAP_DAYS: int = _safe_int("REFERRAL_REWARD_STACK_CAP_DAYS", "90")
+
+#: Commission fraction of each qualifying paid period (0.5 = 50%).
+REFERRAL_COMMISSION_RATE: float = _safe_float("REFERRAL_COMMISSION_RATE", "0.5")
+
+#: Commission is earned on a referred user's first N billing periods only
+#: (owner decision 2026-07-21: 3), counted across Play + web channels.
+REFERRAL_COMMISSION_MAX_PERIODS: int = _safe_int("REFERRAL_COMMISSION_MAX_PERIODS", "3")
+
+#: product_id → full-cycle price used to compute Play commission amounts
+#: (subscriptionsv2 does not return the amount paid; these MUST track the
+#: Play Console base-plan prices).  The web rail ignores this — it accrues
+#: from the actual USD amount the webhook confirms.
+_REFERRAL_PRICES_RAW = os.getenv(
+    "REFERRAL_COMMISSION_PRICES",
+    "lumin_assist_monthly:1000,lumin_auto_monthly:2000",
+)
+
+
+def _parse_referral_prices(raw: str) -> dict[str, float]:
+    out: dict[str, float] = {}
+    for part in raw.split(","):
+        part = part.strip()
+        if not part or ":" not in part:
+            continue
+        pid, _, price = part.partition(":")
+        try:
+            out[pid.strip()] = float(price)
+        except ValueError:
+            logging.warning(
+                "Invalid REFERRAL_COMMISSION_PRICES entry %r — skipped", part
+            )
+    return out
+
+
+REFERRAL_COMMISSION_PRICES: dict[str, float] = _parse_referral_prices(
+    _REFERRAL_PRICES_RAW
+)
+
+#: Currency the Play-side commission amounts above are denominated in.
+REFERRAL_COMMISSION_CURRENCY: str = os.getenv("REFERRAL_COMMISSION_CURRENCY", "INR")
+
+#: Play Console offer id (on BOTH base plans) carrying the referee's 50%-off
+#: first cycle.  The app buys this offer only when the engine reports the
+#: user discount-eligible; the engine recognises it in the verified purchase
+#: (``offerDetails.offerId``) to halve the commission base for that cycle.
+REFERRAL_DISCOUNT_OFFER_ID: str = os.getenv("REFERRAL_DISCOUNT_OFFER_ID", "referral50")
+
+#: Display + web-rail discount percentage.  On Play the REAL discount is
+#: whatever the Play Console offer defines — keep the two in lockstep.
+REFERRAL_DISCOUNT_PERCENT: int = _safe_int("REFERRAL_DISCOUNT_PERCENT", "50")
+
+# ---------------------------------------------------------------------------
 # Web billing (Phase 3 — the PWA's own payment rails, docs/WEB_BILLING_DESIGN.md)
 # ---------------------------------------------------------------------------
 # The web channel (app.luminapp.org) sells the SAME two paid tiers as Play

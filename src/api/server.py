@@ -69,6 +69,7 @@ from .auth import (
 from .billing_callback import SIGNATURE_HEADER, BillingWebhookVerifier
 from .billing_play import PlayBillingError, PlayBillingVerifier
 from .play_purchases import PlayPurchaseStore
+from .referral_rewards import ReferralRewardsService
 from .otp import IssueStatus, OtpStore, VerifyStatus
 from .otp_delivery import (
     ChainedOtpProvider,
@@ -112,6 +113,9 @@ from .schemas import (
     PulseSnapshot,
     ReferralClaimRequest,
     ReferralClaimResponse,
+    ReferralCommissionsMarkPaidRequest,
+    ReferralCommissionsMarkPaidResponse,
+    ReferralCommissionsResponse,
     ReferralStatsResponse,
     SignalDetail,
     SignalExpirySetRequest,
@@ -661,6 +665,17 @@ def build_app(
     if user_store is not None and otp_delivery is None:
         otp_delivery = LogOnlyOtpProvider()
 
+    # Referral rewards (Phase 2, 2026-07-21) — reward grants, commission
+    # accrual, and the entitlement composition every aset_tier write site
+    # routes through so a banked reward survives Play/RTDN rewrites.
+    referral_rewards: Optional[ReferralRewardsService] = None
+    if user_store is not None and user_overrides is not None:
+        referral_rewards = ReferralRewardsService(
+            user_store=user_store,
+            overrides=user_overrides,
+            play_purchases=play_purchases,
+        )
+
     # ---- Health (no auth — used by Docker/k8s probes + first-launch reachability) ----
 
     @app.get("/api/health", response_model=HealthResponse, tags=["meta"])
@@ -1064,6 +1079,25 @@ def build_app(
                 new_token=state.purchase_token,
             )
         tier, paid_until = play_verifier.entitlement_for(state)
+        if referral_rewards is not None:
+            # Referral hooks (Phase 2): a verified paid period of a referee
+            # marks the conversion + accrues the referrer's commission, and
+            # the entitlement write composes with the reward ledger so a
+            # banked reward is never clobbered by a Play-derived downgrade.
+            if state.is_entitled:
+                from config import REFERRAL_DISCOUNT_OFFER_ID as _ref_offer
+                await referral_rewards.on_paid_period(
+                    user_id,
+                    product_id=state.product_id or "",
+                    purchase_token=state.purchase_token,
+                    period_expiry=state.expiry,
+                    discounted=bool(
+                        state.offer_id and state.offer_id == _ref_offer
+                    ),
+                )
+            tier, paid_until = await referral_rewards.compose_entitlement(
+                user_id, tier, paid_until,
+            )
         await user_store.aset_tier(user_id, tier=tier, paid_until=paid_until)
         await play_purchases.aupsert(
             purchase_token=state.purchase_token,
@@ -1224,11 +1258,29 @@ def build_app(
                     status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
                     detail=exc.detail,
                 )
-            # Definitive (token gone / expired from Google's view) → revoke.
-            await user_store.aset_tier(mapping.user_id, tier="free", paid_until=None)
+            # Definitive (token gone / expired from Google's view) → mark
+            # the stored snapshot dead, then re-resolve from local ledgers
+            # instead of a blanket free: an active referral reward (or a
+            # different still-live token) must survive this revoke.
+            await play_purchases.aupsert(
+                purchase_token=note.purchase_token,
+                user_id=mapping.user_id,
+                product_id=product_id,
+                state="SUBSCRIPTION_STATE_EXPIRED",
+                expiry=mapping.expiry,
+            )
+            if referral_rewards is not None:
+                tier, paid_until = await referral_rewards.resolve_entitlement(
+                    mapping.user_id
+                )
+            else:
+                tier, paid_until = "free", None
+            await user_store.aset_tier(
+                mapping.user_id, tier=tier, paid_until=paid_until,
+            )
             log.info(
-                "Play RTDN {}: user_id={} token gone → downgraded to free",
-                note.notification_label, mapping.user_id,
+                "Play RTDN {}: user_id={} token gone → resolved tier={}",
+                note.notification_label, mapping.user_id, tier,
             )
             return PlayRtdnResponse(ok=True, handled=f"{note.notification_label}:revoked")
 
@@ -1319,11 +1371,22 @@ def build_app(
             or user.paid_until > datetime.now(timezone.utc)
         ):
             return user
+        # Re-resolve from local ledgers rather than writing a blanket free:
+        # the lapsed window may have been a referral reward stacked on a
+        # still-live subscription (or vice-versa) — the survivor wins.
+        if referral_rewards is not None:
+            tier, paid_until = await referral_rewards.resolve_entitlement(
+                user.user_id
+            )
+        else:
+            tier, paid_until = "free", None
         log.info(
-            "Play entitlement expired for user_id={} (paid_until={}) → free",
-            user.user_id, user.paid_until.isoformat(),
+            "Entitlement expired for user_id={} (paid_until={}) → resolved {}",
+            user.user_id, user.paid_until.isoformat(), tier,
         )
-        return await user_store.aset_tier(user.user_id, tier="free", paid_until=None)
+        return await user_store.aset_tier(
+            user.user_id, tier=tier, paid_until=paid_until,
+        )
 
     def _profile_response(user) -> ProfileResponse:  # type: ignore[no-untyped-def]
         return ProfileResponse(
@@ -2248,6 +2311,7 @@ def build_app(
         user_store=user_store,
         auth=auth,
         identity_dep=user_claims,
+        referral_rewards=referral_rewards,
     )
 
     # ``GET /api/region`` (Play Store A6 / E2, 2026-05-20) — client
@@ -2742,7 +2806,7 @@ def build_app(
             uid, payload.symbol, payload.mode,
         )
 
-    # ---- Referrals (Phase 1: free invite/share tracking, no reward) ----
+    # ---- Referrals (Phase 2, 2026-07-21: rewards + commission live) ----
 
     @app.get(
         "/api/referral/me",
@@ -2752,8 +2816,9 @@ def build_app(
     async def referral_me(
         identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> ReferralStatsResponse:
-        """Return this user's stable referral code plus how many friends
-        have joined via it. Generates the code on first call."""
+        """This user's referral state: stable code + join counter, plus
+        (when the programme is live) banked reward days, commission
+        totals, and their own one-time-discount eligibility."""
         if user_overrides is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -2761,6 +2826,8 @@ def build_app(
             )
         uid = _resolve_user_id(identity)
         stats = await user_overrides.aget_referral_stats(uid)
+        if referral_rewards is not None:
+            stats.update(await referral_rewards.stats_extras(uid))
         return ReferralStatsResponse(**stats)
 
     @app.post(
@@ -2772,10 +2839,11 @@ def build_app(
         payload: ReferralClaimRequest,
         identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
     ) -> ReferralClaimResponse:
-        """Redeem someone else's referral code. Phase 1 grants no reward —
-        this only attributes the join to the referrer's counter. Rejects
-        an unknown code, self-referral, and a referee who has already
-        redeemed any code (first redemption is final)."""
+        """Redeem someone else's referral code.  A successful claim banks
+        the referrer's reward days and unlocks the referee's one-time
+        50%-off first billing cycle.  Rejects an unknown code,
+        self-referral, and a referee who has already redeemed any code
+        (first redemption is final)."""
         if user_overrides is None:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -2783,9 +2851,61 @@ def build_app(
             )
         uid = _resolve_user_id(identity)
         result = await user_overrides.aredeem_referral_code(uid, payload.code)
+        discount_eligible = False
+        if result["ok"] and referral_rewards is not None:
+            await referral_rewards.on_redemption(
+                referee_id=uid, referrer_id=int(result["referrer_id"]),
+            )
+            discount_eligible = await referral_rewards.discount_eligible(uid)
         return ReferralClaimResponse(
-            ok=result["ok"], reason=result.get("reason"),
+            ok=result["ok"],
+            reason=result.get("reason"),
+            discount_eligible=discount_eligible,
         )
+
+    # Owner admin — the manual-payout surface behind the ops Referrals
+    # panel.  Read the accrued ledger, settle rows after paying out.
+
+    @app.get(
+        "/api/referral/admin/commissions",
+        response_model=ReferralCommissionsResponse,
+        tags=["referral"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def referral_admin_commissions(
+        commission_status: Optional[str] = Query(
+            default=None, alias="status", pattern="^(accrued|paid)$",
+        ),
+        limit: int = Query(default=500, ge=1, le=2000),
+    ) -> ReferralCommissionsResponse:
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        items = await user_overrides.alist_referral_commissions(
+            status=commission_status, limit=limit,
+        )
+        return ReferralCommissionsResponse(items=items)
+
+    @app.post(
+        "/api/referral/admin/commissions/mark-paid",
+        response_model=ReferralCommissionsMarkPaidResponse,
+        tags=["referral"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def referral_admin_mark_paid(
+        payload: ReferralCommissionsMarkPaidRequest,
+    ) -> ReferralCommissionsMarkPaidResponse:
+        if user_overrides is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="per-user overrides not configured",
+            )
+        updated = await user_overrides.amark_referral_commissions_paid(
+            payload.commission_ids
+        )
+        return ReferralCommissionsMarkPaidResponse(ok=True, updated=updated)
 
     # ---- Agents ----
 

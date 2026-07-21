@@ -47,7 +47,7 @@ import json
 import secrets
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, FrozenSet, Iterable, List, Optional, Tuple
 
@@ -259,13 +259,28 @@ CREATE TABLE IF NOT EXISTS user_symbol_management (
 
 _VALID_MANAGEMENT_MODES: FrozenSet[str] = frozenset({"full", "entry"})
 
-# 2026-06-27 — referral tracking (Phase 1: free invite/share + attribution
-# only, no reward grant yet — Phase 2's "1 week free Auto for both" grant
-# is deferred until Play Billing is live and wires off the same
-# ``user_referral_redemptions`` row, see ACTIVE_CONTEXT.md Session 34).
+# 2026-06-27 — referral tracking (Phase 1: free invite/share + attribution).
 # One stable code per user, generated lazily on first read. A referee can
 # redeem at most once ever — ``referee_id`` as the PK makes that a DB-level
 # invariant, not just an application check.
+#
+# 2026-07-21 — Phase 2 (owner-approved): rewards on top of the same rows.
+#   * ``user_reward_grants`` — durable ledger of time-boxed tier grants
+#     (referral join → 7 days of Auto for the referrer, stacking).  A grant
+#     must SURVIVE Play verify / RTDN overwrites of the user row, so the
+#     entitlement write sites compose the user row from Play state + this
+#     ledger (src/api/referral_rewards.py) instead of trusting either alone.
+#     ``UNIQUE (user_id, source, ref_id)`` makes each reward one-shot per
+#     originating event (e.g. one grant per referee ever).
+#   * ``referral_commissions`` — accrual ledger: 50% (env-tunable) of each
+#     verified paid billing period of a referred user, for that user's first
+#     N periods, credited to the referrer.  ``UNIQUE (purchase_token,
+#     period_expiry)`` makes RTDN redeliveries / re-verifies idempotent.
+#     Payout is owner-manual: rows move accrued → paid via the owner admin
+#     endpoint (ops Referrals panel).
+#   * ``user_referral_redemptions.converted_at`` (ALTER, migration below) —
+#     stamped on the referee's first verified paid purchase; while NULL the
+#     referee is eligible for the one-time 50%-off first cycle.
 _REFERRAL_SCHEMA = """
 CREATE TABLE IF NOT EXISTS user_referral_codes (
     user_id    INTEGER PRIMARY KEY,
@@ -283,6 +298,39 @@ CREATE TABLE IF NOT EXISTS user_referral_redemptions (
 );
 CREATE INDEX IF NOT EXISTS idx_user_referral_redemptions_referrer
 ON user_referral_redemptions(referrer_id);
+CREATE TABLE IF NOT EXISTS user_reward_grants (
+    grant_id   INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id    INTEGER NOT NULL,
+    tier       TEXT    NOT NULL,
+    source     TEXT    NOT NULL,
+    ref_id     TEXT    NOT NULL,
+    starts_at  TEXT    NOT NULL,
+    expires_at TEXT    NOT NULL,
+    created_at TEXT    NOT NULL,
+    UNIQUE (user_id, source, ref_id),
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_reward_grants_user
+ON user_reward_grants(user_id, expires_at);
+CREATE TABLE IF NOT EXISTS referral_commissions (
+    commission_id  INTEGER PRIMARY KEY AUTOINCREMENT,
+    referrer_id    INTEGER NOT NULL,
+    referee_id     INTEGER NOT NULL,
+    product_id     TEXT    NOT NULL,
+    purchase_token TEXT    NOT NULL,
+    period_expiry  TEXT    NOT NULL,
+    amount         REAL    NOT NULL,
+    currency       TEXT    NOT NULL,
+    rate           REAL    NOT NULL,
+    status         TEXT    NOT NULL DEFAULT 'accrued',
+    created_at     TEXT    NOT NULL,
+    paid_at        TEXT,
+    UNIQUE (purchase_token, period_expiry)
+);
+CREATE INDEX IF NOT EXISTS idx_referral_commissions_referrer
+ON referral_commissions(referrer_id, status);
+CREATE INDEX IF NOT EXISTS idx_referral_commissions_referee
+ON referral_commissions(referee_id);
 """
 
 # Unambiguous alphabet — excludes 0/O and 1/I so a code read aloud or typed
@@ -301,6 +349,19 @@ def _generate_referral_code() -> str:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _parse_reward_ts(raw: Any) -> Optional[datetime]:
+    """Parse a stored reward-grant timestamp; None on absence/garbage."""
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw))
+    except ValueError:
+        return None
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    return ts
 
 
 def _normalise_regime_input(items: Any) -> list[str]:
@@ -526,7 +587,25 @@ class UserOverridesStore:
         self._migrate_auto_trade_path_regime_preference()
         self._migrate_auto_trade_notional_usd()
         self._migrate_auto_trade_pause_columns()
+        self._migrate_referral_converted_at()
         log.info("UserOverridesStore opened at {}", self._path)
+
+    def _migrate_referral_converted_at(self) -> None:
+        """Idempotent ALTER for ``user_referral_redemptions.converted_at``
+        (2026-07-21 referral Phase 2).
+
+        NULL = the referee has never completed a verified paid purchase —
+        they are still eligible for the one-time 50%-off first cycle.
+        Stamped (ISO-8601 UTC) on the first verified paid period, which
+        also starts the referrer's commission window.
+        """
+        cur = self._conn.execute("PRAGMA table_info(user_referral_redemptions)")
+        cols = {row["name"] for row in cur.fetchall()}
+        if "converted_at" not in cols:
+            self._conn.execute(
+                "ALTER TABLE user_referral_redemptions ADD COLUMN converted_at TEXT"
+            )
+            log.info("migrated user_referral_redemptions: added converted_at")
 
     def _migrate_auto_trade_path_regime_preference(self) -> None:
         """Idempotent ALTER for the ``path_preference`` / ``regime_preference``
@@ -1088,6 +1167,274 @@ class UserOverridesStore:
             )
             return {"ok": True, "referrer_id": referrer_id}
 
+    # ---- referral rewards (Phase 2, 2026-07-21) --------------------------
+    # Ledger primitives only — reward policy (days, tier, caps, commission
+    # rates/prices) and entitlement composition live in
+    # ``src/api/referral_rewards.py``; these methods never read config.
+
+    def grant_referral_reward(
+        self,
+        referrer_id: int,
+        referee_id: int,
+        *,
+        days: int,
+        tier: str,
+        cap_days: int,
+    ) -> Dict[str, Any]:
+        """Bank ``days`` of ``tier`` for ``referrer_id``, keyed one-shot to
+        ``referee_id``'s join.
+
+        Grants stack SEQUENTIALLY: a new grant starts where the latest
+        existing grant ends (or now, whichever is later), so five invites
+        while a reward is running extend the window instead of overlapping
+        into nothing.  ``cap_days`` bounds the total banked future window
+        — a farm of fake joins can bank at most that far ahead.  Dedup is
+        DB-level (``UNIQUE (user_id, source, ref_id)``): re-processing the
+        same referee grants nothing.
+        """
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT MAX(expires_at) AS latest FROM user_reward_grants "
+                "WHERE user_id = ?",
+                (int(referrer_id),),
+            ).fetchone()
+            latest = _parse_reward_ts(row["latest"]) if row is not None else None
+            start = max(now, latest) if latest is not None else now
+            cap_end = now + timedelta(days=int(cap_days))
+            end = min(start + timedelta(days=int(days)), cap_end)
+            # Sub-minute residues (clock drift between "now" here and the
+            # previous grant's cap) are not a real reward — treat as capped.
+            if end <= start + timedelta(minutes=1):
+                log.info(
+                    "referral reward NOT granted (cap {}d reached): "
+                    "referrer_id={} referee_id={}",
+                    cap_days, referrer_id, referee_id,
+                )
+                return {"granted": False, "reason": "cap_reached"}
+            try:
+                self._conn.execute(
+                    "INSERT INTO user_reward_grants "
+                    "(user_id, tier, source, ref_id, starts_at, expires_at, "
+                    "created_at) VALUES (?, ?, 'referral_join', ?, ?, ?, ?)",
+                    (
+                        int(referrer_id),
+                        str(tier),
+                        str(int(referee_id)),
+                        start.isoformat(),
+                        end.isoformat(),
+                        now.isoformat(),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                return {"granted": False, "reason": "duplicate"}
+            log.info(
+                "referral reward granted: referrer_id={} referee_id={} "
+                "tier={} {} → {}",
+                referrer_id, referee_id, tier,
+                start.isoformat(), end.isoformat(),
+            )
+            return {"granted": True, "expires_at": end.isoformat()}
+
+    def get_active_reward(
+        self, user_id: int, *, now: Optional[datetime] = None
+    ) -> Optional[Dict[str, Any]]:
+        """The user's currently-running reward window, or None.
+
+        Grants share one sequential timeline per user (see
+        :meth:`grant_referral_reward`), so "active" is simply the row
+        covering ``now`` with the furthest expiry.
+        """
+        ts = (now or datetime.now(timezone.utc)).isoformat()
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT tier, MAX(expires_at) AS expires_at "
+                "FROM user_reward_grants "
+                "WHERE user_id = ? AND starts_at <= ? AND expires_at > ?",
+                (int(user_id), ts, ts),
+            ).fetchone()
+        if row is None or row["expires_at"] is None:
+            return None
+        return {"tier": str(row["tier"]), "expires_at": str(row["expires_at"])}
+
+    def get_reward_summary(self, user_id: int) -> Dict[str, Any]:
+        """Lifetime reward stats for the invite screen."""
+        now = datetime.now(timezone.utc)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT starts_at, expires_at FROM user_reward_grants "
+                "WHERE user_id = ?",
+                (int(user_id),),
+            ).fetchall()
+        total_seconds = 0.0
+        for row in rows:
+            start = _parse_reward_ts(row["starts_at"])
+            end = _parse_reward_ts(row["expires_at"])
+            if start is not None and end is not None and end > start:
+                total_seconds += (end - start).total_seconds()
+        active = self.get_active_reward(user_id, now=now)
+        return {
+            "reward_days_earned": int(round(total_seconds / 86400.0)),
+            "reward_active_tier": active["tier"] if active else None,
+            "reward_active_until": active["expires_at"] if active else None,
+        }
+
+    def get_redemption_for_referee(
+        self, referee_id: int
+    ) -> Optional[Dict[str, Any]]:
+        """The redemption row that made ``referee_id`` a referee, or None."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT referrer_id, code, redeemed_at, converted_at "
+                "FROM user_referral_redemptions WHERE referee_id = ?",
+                (int(referee_id),),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "referrer_id": int(row["referrer_id"]),
+            "code": str(row["code"]),
+            "redeemed_at": str(row["redeemed_at"]),
+            "converted_at": row["converted_at"],
+        }
+
+    def mark_referral_converted(self, referee_id: int) -> bool:
+        """Stamp the referee's first verified paid purchase.  Returns True
+        only on the first call (the conversion moment); later paid periods
+        return False.  Consumes the referee's one-time discount."""
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE user_referral_redemptions SET converted_at = ? "
+                "WHERE referee_id = ? AND converted_at IS NULL",
+                (_now_iso(), int(referee_id)),
+            )
+            return cur.rowcount > 0
+
+    def count_commission_periods(self, referee_id: int) -> int:
+        """How many billing periods of this referee have already accrued
+        commission (enforces the first-N-periods cap across channels)."""
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM referral_commissions "
+                "WHERE referee_id = ?",
+                (int(referee_id),),
+            ).fetchone()
+        return int(row["n"])
+
+    def accrue_referral_commission(
+        self,
+        *,
+        referrer_id: int,
+        referee_id: int,
+        product_id: str,
+        purchase_token: str,
+        period_expiry: str,
+        amount: float,
+        currency: str,
+        rate: float,
+    ) -> bool:
+        """Insert one accrual row; idempotent on (purchase_token,
+        period_expiry) so RTDN redeliveries / re-verifies of the same
+        billing period never double-credit.  Returns True when a new row
+        was actually inserted."""
+        with self._lock:
+            cur = self._conn.execute(
+                "INSERT OR IGNORE INTO referral_commissions "
+                "(referrer_id, referee_id, product_id, purchase_token, "
+                "period_expiry, amount, currency, rate, status, created_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'accrued', ?)",
+                (
+                    int(referrer_id),
+                    int(referee_id),
+                    str(product_id),
+                    str(purchase_token),
+                    str(period_expiry),
+                    float(amount),
+                    str(currency).upper(),
+                    float(rate),
+                    _now_iso(),
+                ),
+            )
+            inserted = cur.rowcount > 0
+        if inserted:
+            log.info(
+                "referral commission accrued: referrer_id={} referee_id={} "
+                "product={} amount={} {}",
+                referrer_id, referee_id, product_id, amount, currency,
+            )
+        return inserted
+
+    def get_commission_summary(self, referrer_id: int) -> Dict[str, Any]:
+        """Per-currency accrued/paid totals + paid-referral count for the
+        invite screen.  Currencies can mix (Play accrues in INR from the
+        configured prices; the web rail accrues in USD from the actual
+        payment), so totals are grouped, never summed across currencies."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT currency, status, SUM(amount) AS total "
+                "FROM referral_commissions WHERE referrer_id = ? "
+                "GROUP BY currency, status",
+                (int(referrer_id),),
+            ).fetchall()
+            converted = self._conn.execute(
+                "SELECT COUNT(*) AS n FROM user_referral_redemptions "
+                "WHERE referrer_id = ? AND converted_at IS NOT NULL",
+                (int(referrer_id),),
+            ).fetchone()
+        totals: Dict[str, Dict[str, float]] = {}
+        for row in rows:
+            cur_totals = totals.setdefault(
+                str(row["currency"]), {"accrued": 0.0, "paid": 0.0}
+            )
+            key = "paid" if str(row["status"]) == "paid" else "accrued"
+            cur_totals[key] += float(row["total"] or 0.0)
+        return {
+            "commission_totals": [
+                {"currency": currency, **amounts}
+                for currency, amounts in sorted(totals.items())
+            ],
+            "paid_referred_count": int(converted["n"]),
+        }
+
+    def list_referral_commissions(
+        self, *, status: Optional[str] = None, limit: int = 500
+    ) -> List[Dict[str, Any]]:
+        """Owner admin listing (ops Referrals panel).  Joins ``users`` for
+        the referrer's phone — same SQLite file, so no cross-store hop —
+        because the owner pays out manually and needs to know who to pay."""
+        query = (
+            "SELECT c.commission_id, c.referrer_id, c.referee_id, "
+            "c.product_id, c.period_expiry, c.amount, c.currency, c.rate, "
+            "c.status, c.created_at, c.paid_at, u.phone_e164 AS referrer_phone "
+            "FROM referral_commissions c "
+            "LEFT JOIN users u ON u.user_id = c.referrer_id "
+        )
+        params: List[Any] = []
+        if status:
+            query += "WHERE c.status = ? "
+            params.append(str(status))
+        query += "ORDER BY c.created_at DESC LIMIT ?"
+        params.append(int(limit))
+        with self._lock:
+            rows = self._conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def mark_referral_commissions_paid(self, ids: Iterable[int]) -> int:
+        """Flip accrued rows to paid (owner has settled them).  Returns the
+        number of rows actually transitioned."""
+        id_list = [int(i) for i in ids]
+        if not id_list:
+            return 0
+        placeholders = ",".join("?" for _ in id_list)
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE referral_commissions SET status = 'paid', paid_at = ? "
+                f"WHERE commission_id IN ({placeholders}) "
+                "AND status = 'accrued'",
+                [_now_iso(), *id_list],
+            )
+            return int(cur.rowcount)
+
     # ---- paper subscription windows -------------------------------------
 
     def _open_paper_subscription_locked(self, user_id: int, now: str) -> str:
@@ -1352,6 +1699,61 @@ class UserOverridesStore:
 
     async def aget_referral_stats(self, user_id: int) -> Dict[str, Any]:
         return await asyncio.to_thread(self.get_referral_stats, user_id)
+
+    async def agrant_referral_reward(
+        self,
+        referrer_id: int,
+        referee_id: int,
+        *,
+        days: int,
+        tier: str,
+        cap_days: int,
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(
+            lambda: self.grant_referral_reward(
+                referrer_id, referee_id, days=days, tier=tier, cap_days=cap_days,
+            )
+        )
+
+    async def aget_active_reward(
+        self, user_id: int
+    ) -> Optional[Dict[str, Any]]:
+        return await asyncio.to_thread(self.get_active_reward, user_id)
+
+    async def aget_reward_summary(self, user_id: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.get_reward_summary, user_id)
+
+    async def aget_redemption_for_referee(
+        self, referee_id: int
+    ) -> Optional[Dict[str, Any]]:
+        return await asyncio.to_thread(self.get_redemption_for_referee, referee_id)
+
+    async def amark_referral_converted(self, referee_id: int) -> bool:
+        return await asyncio.to_thread(self.mark_referral_converted, referee_id)
+
+    async def acount_commission_periods(self, referee_id: int) -> int:
+        return await asyncio.to_thread(self.count_commission_periods, referee_id)
+
+    async def aaccrue_referral_commission(self, **kwargs: Any) -> bool:
+        return await asyncio.to_thread(
+            lambda: self.accrue_referral_commission(**kwargs)
+        )
+
+    async def aget_commission_summary(self, referrer_id: int) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.get_commission_summary, referrer_id)
+
+    async def alist_referral_commissions(
+        self, *, status: Optional[str] = None, limit: int = 500
+    ) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(
+            lambda: self.list_referral_commissions(status=status, limit=limit)
+        )
+
+    async def amark_referral_commissions_paid(self, ids: Iterable[int]) -> int:
+        ids_list = list(ids)
+        return await asyncio.to_thread(
+            self.mark_referral_commissions_paid, ids_list
+        )
 
     async def aredeem_referral_code(
         self, user_id: int, code: str

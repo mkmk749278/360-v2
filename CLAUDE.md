@@ -190,6 +190,7 @@ Binance REST API
 | Per-user settings | `src/api/user_overrides.py` |
 | Binance connect (key intake) | `src/api/binance_connect_routes.py`, `src/security/binance_connect_validator.py` |
 | Play Billing verify (B16, entitlement truth) | `src/api/billing_play.py` |
+| Referral rewards (grants · commission · composition) | `src/api/referral_rewards.py` |
 | FCM push (topics `alerts`/`signals`) | `src/push_notifications.py` |
 | Truth report | `src/runtime_truth_report.py` |
 | Invalidation audit | `src/invalidation_audit.py` |
