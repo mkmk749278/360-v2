@@ -36,6 +36,7 @@ class EmissionControllerStore:
         self._lock = threading.RLock()
         self._state = ControllerState()
         self._ledger: Deque[dict] = deque(maxlen=_LEDGER_MAX)
+        self._pending: List[dict] = []   # current cycle's would-be (shadow) candidates
         self._load()
 
     # ---- hot path (in-memory, O(1)) --------------------------------------
@@ -56,21 +57,37 @@ class EmissionControllerStore:
             return self._state
 
     def commit(self, new_state: ControllerState, adjustments: List[Adjustment]) -> None:
-        """Replace state with the controller's new state and append *applied*
-        adjustments to the ledger; persist best-effort only when something
-        actually changed."""
-        applied = [a for a in adjustments if a.applied]
+        """Replace state with the controller's new state and persist **every
+        cycle** (a 30-min small-file write, not a hot path).
+
+        The durable ``ledger`` holds only **applied** adjustments — the audit of
+        what actually changed — so a real promotion is never evicted by repeated
+        shadow re-stamps under the ring-buffer cap. The current cycle's **pending
+        (would-be)** candidates are kept as a separate overwritten snapshot, so
+        the shadow ledger is observable during the dark / boot-grace period
+        (otherwise the store would sit empty until the first live change) and the
+        stability history survives a restart.
+        """
         with self._lock:
             self._state = new_state
             for a in adjustments:
-                self._ledger.append(a.to_dict())
-            if applied:
-                self._persist_locked()
+                if a.applied:
+                    self._ledger.append(a.to_dict())
+            self._pending = [a.to_dict() for a in adjustments if not a.applied]
+            self._persist_locked()
 
     def ledger(self, limit: int = 50) -> List[dict]:
+        """The durable audit trail of *applied* adjustments (most recent last)."""
         with self._lock:
             items = list(self._ledger)
         return items[-max(1, limit):]
+
+    def pending(self) -> List[dict]:
+        """The current cycle's would-be (shadow) candidates — what the controller
+        *would* do right now but hasn't promoted yet (boot-grace, thin evidence,
+        below the EV bar, or blast-radius-deferred)."""
+        with self._lock:
+            return list(self._pending)
 
     def active_overrides(self) -> Dict[str, Dict[str, Any]]:
         """Only strategies with at least one non-None override — the live footprint."""
@@ -85,7 +102,12 @@ class EmissionControllerStore:
     def _persist_locked(self) -> None:
         try:
             os.makedirs(os.path.dirname(self._path) or ".", exist_ok=True)
-            payload = {"state": self._state.to_dict(), "ledger": list(self._ledger)}
+            payload = {
+                "state": self._state.to_dict(),
+                "ledger": list(self._ledger),
+                "pending": list(self._pending),
+                "active_overrides": self.active_overrides(),
+            }
             tmp = f"{self._path}.tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
                 json.dump(payload, fh, ensure_ascii=False, indent=2)
@@ -104,6 +126,9 @@ class EmissionControllerStore:
                 led = payload.get("ledger")
                 if isinstance(led, list):
                     self._ledger = deque(led, maxlen=_LEDGER_MAX)
+                pend = payload.get("pending")
+                if isinstance(pend, list):
+                    self._pending = pend
         except Exception as exc:
             log.warning("emission_controller_store load failed: {}", exc)
 
