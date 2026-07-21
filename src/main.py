@@ -1901,6 +1901,12 @@ class CryptoSignalEngine:
             min_samples_ceiling=int(gp.min_samples),
         )
         store = get_emission_controller_store()
+        # Per-cell tighten signal: the edge of each strategy's unlock-candidate
+        # cell, so a min_samples loosening auto-reverts when that specific cell's
+        # edge sours (not just the coarse strategy aggregate).
+        unlocked_cell_r = {
+            s: c["edge"] for s, c in inputs["best_strong_cell"].items() if c.get("edge") is not None
+        }
         decision = run_cycle(
             gate_metrics=inputs["gate_metrics"],
             best_strong_cell=inputs["best_strong_cell"],
@@ -1909,6 +1915,7 @@ class CryptoSignalEngine:
             prior=store.state,
             bounds=bounds,
             cycles_since_start=cycles,
+            unlocked_cell_r=unlocked_cell_r,
         )
         store.commit(decision.state, decision.adjustments)
         self._emission_controller_last_decision_ts = _t.time()

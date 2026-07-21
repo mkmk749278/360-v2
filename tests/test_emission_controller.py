@@ -191,3 +191,33 @@ def test_build_inputs_maps_gates_and_cells():
     # health R is sample-weighted; MTP negative
     assert out["strategy_health"]["MOVER_TREND_PULLBACK"]["emitted_avg_r"] == -0.2
     assert out["strategy_health"]["QUIET_COMPRESSION_BREAK"]["emitted_n"] == 2
+
+
+def test_unlocked_cell_r_triggers_tighten_even_when_aggregate_healthy():
+    # Strategy aggregate looks fine (no strategy_health), but the specific
+    # unlocked cell's own edge has gone negative → per-cell reversal tightens.
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2)
+    start = ControllerState(overrides={"QCB": StrategyOverride(min_samples=20)})
+    cell = {"QCB": {"n": 25, "edge": 2.2}}
+    unlocked = {"QCB": -0.5}  # the cell we unlocked now measures NEGATIVE
+    state = start
+    cs = 0
+    applied = []
+    for _ in range(2):
+        cs += 1
+        dec = run_cycle(gate_metrics={}, best_strong_cell=cell, strategy_health={},
+                        global_params=GLOBAL, prior=state, bounds=b, cycles_since_start=cs,
+                        unlocked_cell_r=unlocked)
+        state = dec.state
+        applied = [a for a in dec.adjustments if a.applied and a.param == "min_samples"]
+    assert len(applied) == 1 and applied[0].new == 25  # 20 -> 25, tightened back
+    assert state.overrides["QCB"].min_samples == 25
+
+
+def test_unlocked_cell_r_none_is_backward_compatible():
+    # Omitting unlocked_cell_r reproduces the pre-port behaviour exactly.
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2)
+    cell = {"QCB": {"n": 25, "edge": 2.2}}
+    decs, state = _drive([(({}), cell, {}), (({}), cell, {})], b)
+    applied = [a for a in decs[1].adjustments if a.applied and a.param == "min_samples"]
+    assert len(applied) == 1 and applied[0].new == 25  # still lowers to unlock (30->25)

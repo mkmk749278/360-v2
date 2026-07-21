@@ -192,11 +192,14 @@ def run_cycle(
     prior: ControllerState,
     bounds: ControllerBounds,
     cycles_since_start: int,
+    unlocked_cell_r: Optional[Dict[str, float]] = None,
 ) -> ControllerDecision:
     """Advance the controller one cycle.
 
     ``gate_metrics``:  strategy -> {n, ev_per_suppression_r, verdict}  (context_floor:S gate)
     ``best_strong_cell``: strategy -> {n, edge}  (largest-n cell at/above STRONG edge)
+    ``unlocked_cell_r``:  strategy -> edge_r of the cell a prior min_samples-lower unlocked
+                          (optional; per-cell tighten signal, precise auto-revert)
     ``strategy_health``:  strategy -> {emitted_avg_r, emitted_n}
     ``global_params``:    {suppress_negative: bool, min_samples: int}  (the PolicyParams defaults)
     ``cycles_since_start``: in-process cycles since boot (resets on restart → boot grace)
@@ -259,7 +262,16 @@ def run_cycle(
         health = strategy_health.get(strategy) or {}
         h_avg_r = health.get("emitted_avg_r")
         h_n = int(health.get("emitted_n", 0) or 0)
+        # Strategy-aggregate health (coarse) OR the specific unlocked cell's own
+        # edge going negative (precise) triggers a min_samples tighten. The
+        # per-cell signal closes the gap where one losing unlocked cell hides
+        # inside an otherwise-healthy strategy average and never self-corrects
+        # (ported from the closed #762, review #1).
         losing = h_avg_r is not None and float(h_avg_r) < bounds.health_raise_ev_r and h_n >= bounds.health_min_n
+        if unlocked_cell_r is not None:
+            _cell_r = unlocked_cell_r.get(strategy)
+            if _cell_r is not None and float(_cell_r) < bounds.health_raise_ev_r:
+                losing = True
 
         has_unlock = bounds.min_samples_floor <= cell_n < cur_min
         if cur_min < bounds.min_samples_ceiling and losing:
