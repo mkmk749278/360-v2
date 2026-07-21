@@ -4,6 +4,36 @@
 
 ---
 
+## 🟢 SESSION 75 2026-07-21 — Surface subscription + referral benefits across the app (lumin-app #135, merged)
+
+**Owner ask:** the invite/subscription benefits were "nowhere" in the app —
+show them everywhere to push and encourage users to subscribe and invite.
+
+**Problem:** the B16 Assist/Auto value prop and the Session-74 referral deal
+(7 free Auto days + 50% commission per join; referee 50% off) were only
+reachable via Menu → Settings. A free user in the feed never saw why to
+subscribe or invite.
+
+### Shipped — lumin-app (`lib/shared/widgets/upsell_banners.dart`, new)
+
+- **`UpgradeBanner`** — tier-aware subscription upsell on Pulse, Signals, Trade
+  and top of Menu. Free users hear the whole ladder; Assist users are nudged to
+  Auto; **hides itself at Auto+** (listens on `tierRevision`, vanishes the instant
+  a purchase lands).
+- **`InviteBanner`** — renders the standing reward deal from `GET /api/referral/me`,
+  only promising rewards while `rewards_enabled` (falls back to a plain invite
+  otherwise). On Pulse and top of Menu.
+- Shared `openPaywall`/`openReferralPage` helpers (Play vs web by channel);
+  dismissible per session; pure-card / scope-wrapper split so the presentational
+  cards are widget-tested (9 cases, mirrors `CurrentPlanCard`). Menu Invite-row
+  subtitle now hints at the reward.
+
+**Scope:** off-money-path UI only — no engine/entitlement/gating logic touched;
+banners render engine state and gate nothing. Shipped normally (not dark-first).
+CI green (APK+`flutter test`, web build); squash-merged to `main`.
+
+---
+
 ## 🟢 SESSION 74 2026-07-21 — Referral programme Phase 2: rewards, referee discount, 50% commission (all four repos, branch `claude/referral-program-incentives-kg50am`)
 
 **Owner ask:** complete the invite screen's "rewards are coming soon" — 7 days of
