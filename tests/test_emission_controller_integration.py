@@ -60,13 +60,37 @@ def test_store_override_read_and_persist_roundtrip(tmp_path):
     assert st2.ledger()[-1]["strategy"] == "MTP"
 
 
-def test_store_commit_without_applied_does_not_require_persist(tmp_path):
+def test_store_shadow_pending_is_observable_and_persisted(tmp_path):
+    import os
     p = str(tmp_path / "ec.json")
     st = EmissionControllerStore(persist_path=p)
     pend = Adjustment("MTP", "suppress_negative", True, False, applied=False,
                       status="PENDING", reason="boot_grace", verdict="DROP", ev_per_suppression_r=-0.4, n=100)
     st.commit(ControllerState(), [pend])
-    assert st.ledger()[-1]["applied"] is False  # pending candidates still stamped
+    # pending (would-be) candidates go to pending(), NOT the durable ledger
+    assert st.ledger() == [] or all(x["applied"] for x in st.ledger())
+    assert st.pending() and st.pending()[-1]["strategy"] == "MTP"
+    assert st.pending()[-1]["applied"] is False
+    # persisted every cycle (even with nothing applied) so the dark period is visible
+    assert os.path.exists(p)
+    reloaded = EmissionControllerStore(persist_path=p)
+    assert reloaded.pending() and reloaded.pending()[-1]["strategy"] == "MTP"
+
+
+def test_store_ledger_holds_only_applied_no_shadow_eviction(tmp_path):
+    p = str(tmp_path / "ec.json")
+    st = EmissionControllerStore(persist_path=p)
+    applied = Adjustment("MTP", "suppress_negative", True, False, applied=True,
+                         status="PROMOTED", reason="promote", verdict="DROP", ev_per_suppression_r=-0.4, n=100)
+    st.commit(ControllerState(overrides={"MTP": StrategyOverride(suppress_negative=False)}), [applied])
+    # many subsequent shadow-only cycles must NOT evict the real promotion
+    for _ in range(300):
+        pend = Adjustment("SRF", "suppress_negative", True, False, applied=False,
+                          status="PENDING", reason="boot_grace", verdict="DROP", ev_per_suppression_r=-0.3, n=100)
+        st.commit(st.state, [pend])
+    led = st.ledger(limit=500)
+    assert any(x["strategy"] == "MTP" and x["applied"] for x in led)  # promotion survived
+    assert all(x["applied"] for x in led)                             # ledger is applied-only
 
 
 # ---- policy honours per-strategy overrides ---------------------------------
