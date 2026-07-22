@@ -7,6 +7,15 @@ system is net-negative despite it. This document is the single source of truth f
 the fix programme that follows. It supersedes ad-hoc "tune a gate" requests — those
 are treated here as symptoms, not fixes.
 
+> **Activation status (2026-07-22, owner directive):** the owner has directed
+> **"make everything live, no darks."** W1's cost model and W2's reconciliation ship
+> **live by default** (`EDGE_COST_MODEL_ENABLED=true`) rather than dark-first. The
+> dark-first framing below documents the original plan; the owner has explicitly
+> signed off on live activation for this programme after being briefed on the risk
+> that the cost constants are still unvalidated (the W2 reconciliation validates them
+> in-flight). Safety limits (blast-radius, kill switch, watchdog) remain fully
+> enforced.
+
 > **One-line finding:** every "edge" number in the system is measured **gross** —
 > no fees, no funding, no slippage — so the whole autonomous brain optimises a
 > proxy that is not money. The gross edge we harvest (~+0.08R) is **smaller than

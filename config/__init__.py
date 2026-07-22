@@ -296,7 +296,7 @@ PRE_TP_FEE_PCT_ROUND_TRIP: float = float(
 # is not money.  ``src/trade_costs.py`` nets every recorded R using these constants.
 # DARK by default: while OFF, net R == gross R byte-for-byte, so enabling changes
 # nothing until shadow-measured + owner-signed-off (money-path dark-first doctrine).
-EDGE_COST_MODEL_ENABLED: bool = _safe_bool("EDGE_COST_MODEL_ENABLED", "false")
+EDGE_COST_MODEL_ENABLED: bool = _safe_bool("EDGE_COST_MODEL_ENABLED", "true")
 # Taker entry + taker exit on Binance USDⓈ-M futures (~0.05% per side).  Distinct
 # from PRE_TP_FEE_PCT_ROUND_TRIP (0.07%, which assumes a maker exit) — the edge
 # model is conservative and assumes taker both legs, the realistic scalp case.
@@ -313,6 +313,14 @@ EDGE_SLIPPAGE_PCT_PER_SIDE: float = float(
 EDGE_FUNDING_PCT_ESTIMATE: float = float(
     os.getenv("EDGE_FUNDING_PCT_ESTIMATE", "0.01")
 )
+# W2 optimism-tax watchdog: page when a strategy's REALIZED net-R diverges from its
+# COUNTERFACTUAL net-R by more than this (in R) on an adequate sample — the signal
+# that our idealised counterfactual (and thus every decision built on it) is
+# systematically wrong, or the cost constants above are mis-calibrated.
+EDGE_RECONCILIATION_ALERT_DELTA_R: float = float(
+    os.getenv("EDGE_RECONCILIATION_ALERT_DELTA_R", "0.30")
+)
+EDGE_RECONCILIATION_MIN_N: int = int(os.getenv("EDGE_RECONCILIATION_MIN_N", "20"))
 # Setups that are STRUCTURALLY built for bigger moves — pre-TP would cap
 # the thesis.  Breakouts (VSB / BDS / ORB) belong here.  Comma-separated.
 PRE_TP_SETUP_BLACKLIST_RAW: str = os.getenv(

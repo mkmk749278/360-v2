@@ -4,12 +4,22 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
+import config
+import pytest
+
 from src.channels.base import Signal
 from src.smc import Direction
 from src.strategy_edge import StrategyEdgeStore
 from src.trade_monitor import TradeMonitor
 
 CTX = "OVERLAP/MARKUP/NORMAL/BTC_NEUTRAL"
+
+
+@pytest.fixture(autouse=True)
+def _gross_edge_defaults(monkeypatch):
+    # These assert the gross realised-R recording; the cost model (now live by
+    # default) is covered in test_trade_costs.py / test_edge_reconciliation.py.
+    monkeypatch.setattr(config, "EDGE_COST_MODEL_ENABLED", False, raising=False)
 
 
 def _make_signal(*, entry: float = 100.0) -> Signal:
