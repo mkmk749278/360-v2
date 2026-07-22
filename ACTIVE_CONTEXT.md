@@ -4,6 +4,62 @@
 
 ---
 
+## 🟢 SESSION 76 2026-07-22 — Autonomous system audit → cost-aware R made LIVE (owner directive); W1–W4 chain now net-steering (360-v2 #770 + #771, merged)
+
+**Owner ask:** full audit of the autonomous system — what's working, gaps,
+bottlenecks — because *"we're doing all this and still in negative edge only."*
+Then: *"fix all, full documentation"* → *"make everything live, no darks."*
+
+### Root cause found (the whole audit in one line)
+
+Every recorded R — counterfactual (`suppression_audit.candidate_outcome`), shadow,
+AND realized (`trade_monitor.py:610`) — was measured **GROSS**: wins booked at full
+R-to-TP1, losses at exactly −1.0R, **no fees/funding/slippage**. `strategy_edge`
+only *labelled* its fields "net-of-fees" without applying any. The gross edge
+harvested (~+0.08R) is **smaller than the per-trade cost drag never subtracted
+(~0.15–0.25R)** → net-negative while the dashboards read positive. And the emission
+policy that would harvest winners sat effectively idle because the edge it steered
+on was a cost-free fantasy.
+
+Full design-of-record: **`docs/AUTONOMOUS_SYSTEM_AUDIT_AND_REMEDIATION.md`** (W1–W7,
+sequenced, acceptance criteria).
+
+### Shipped LIVE (owner directed live activation, overriding dark-first — briefed 3×)
+
+- **W1 (#770) — cost-aware R.** New `src/trade_costs.py` (pure, leverage-independent,
+  fail-toward-gross `net_r`). Wired into both seams: counterfactual (`suppression_audit`)
+  + realized (`trade_monitor`). `gross_r_multiple` carried alongside net.
+  `EDGE_COST_MODEL_ENABLED` flipped **default true** → the already-live emission
+  controller now steers on **net** R. Reuses/extends the fee constants; new
+  `EDGE_TAKER_FEE_PCT_ROUND_TRIP=0.10 / SLIPPAGE_PCT_PER_SIDE=0.02 / FUNDING_PCT_ESTIMATE=0.01`.
+- **W2 (#771) — reconciliation + optimism-tax watchdog.** `net_r_multiple` computed
+  **always** (flag-independent) through the edge store (matrix `avg_net_r` +
+  `net_r_by_source`). `strategy_edge.reconcile_matrix()` → per-strategy REALIZED
+  (emitted) vs COUNTERFACTUAL (suppressed) net-R + delta, surfaced in the truth
+  report. New `edge_reconciliation` liveness probe pages when realized net-R diverges
+  from counterfactual net-R beyond `EDGE_RECONCILIATION_ALERT_DELTA_R` (0.30) on
+  adequate sample — validates the cost constants in-flight.
+- **W3/W4 needed no new flip:** `CONTEXT_EMISSION_LIVE` + `CONTEXT_EMISSION_POLICY_ENABLED`
+  were already `true`; the emission policy (suppress NEGATIVE / relax STRONG-POSITIVE)
+  and the emission controller were already live. Making the cost model live
+  re-points **both** at net edge automatically.
+
+### Open / next
+
+- **DATA WINDOW (the real gate now):** the per-cell rolling window (50) is gross until
+  new net outcomes replace it. Verdicts (KEEP/DROP, STRONG/NEGATIVE) become net-honest
+  as data rolls — do NOT judge or retire strategies until a fresh net window
+  accumulates. Watch the truth-report reconciliation + `cost_drag_r` and the
+  `edge_reconciliation` probe. **The cost constants are estimates** — the reconciliation
+  is what validates/tunes them.
+- **W3 explicit retirement** (retire confirmed net-negative strategies), **W5** (broaden
+  the controller's action space), **W6** (regime/universe focus), **W7** (latency) —
+  all pending the validated net window; acting sooner would steer on gross.
+- Guardrails intact throughout: blast-radius caps, kill switch (`emission_controller_enabled`),
+  the new watchdog, policy sample floors (Wilson-LB + `CONTEXT_EMISSION_MIN_SAMPLES=30`).
+
+---
+
 ## 🟢 SESSION 75 2026-07-21 — Surface subscription + referral benefits across the app (lumin-app #135, merged)
 
 **Owner ask:** the invite/subscription benefits were "nowhere" in the app —
