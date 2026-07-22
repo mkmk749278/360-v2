@@ -3,11 +3,47 @@
     "overrides": {
       "FUNDING_EXTREME_SIGNAL": {
         "suppress_negative": null,
-        "min_samples": 25
+        "min_samples": 20
       },
       "MOVER_TREND_PULLBACK@ATR": {
         "suppress_negative": null,
         "min_samples": 25
+      },
+      "QUIET_COMPRESSION_BREAK@ATR": {
+        "suppress_negative": null,
+        "min_samples": 15
+      },
+      "QUIET_COMPRESSION_BREAK@FIXED": {
+        "suppress_negative": null,
+        "min_samples": 15
+      },
+      "RANGE_FADE": {
+        "suppress_negative": null,
+        "min_samples": 20
+      },
+      "SHADOW_FUNDING_FADE": {
+        "suppress_negative": null,
+        "min_samples": 15
+      },
+      "SHADOW_MEAN_REVERT": {
+        "suppress_negative": null,
+        "min_samples": 15
+      },
+      "WHALE_MOMENTUM": {
+        "suppress_negative": null,
+        "min_samples": 15
+      },
+      "MOVER_TREND_PULLBACK": {
+        "suppress_negative": false,
+        "min_samples": null
+      },
+      "SR_FLIP_RETEST": {
+        "suppress_negative": false,
+        "min_samples": null
+      },
+      "MEAN_REVERT": {
+        "suppress_negative": false,
+        "min_samples": null
       }
     },
     "history": {
@@ -22,9 +58,9 @@
         "HOLD"
       ],
       "DIVERGENCE_CONTINUATION|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "DIVERGENCE_CONTINUATION|min_samples": [
         "HOLD",
@@ -46,7 +82,11 @@
         "SKIP",
         "SKIP"
       ],
-      "FUNDING_EXTREME_SIGNAL|min_samples": [],
+      "FUNDING_EXTREME_SIGNAL|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
       "LIQUIDITY_SWEEP_REVERSAL|suppress_negative": [
         "SKIP",
         "SKIP",
@@ -58,9 +98,9 @@
         "HOLD"
       ],
       "MEAN_REVERT|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "DROP",
+        "DROP",
+        "DROP"
       ],
       "MEAN_REVERT|min_samples": [
         "HOLD",
@@ -68,9 +108,9 @@
         "HOLD"
       ],
       "MOVER_TREND_PULLBACK|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "MOVER_TREND_PULLBACK|min_samples": [
         "HOLD",
@@ -82,15 +122,19 @@
         "SKIP",
         "SKIP"
       ],
-      "MOVER_TREND_PULLBACK@ATR|min_samples": [],
+      "MOVER_TREND_PULLBACK@ATR|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
       "MOVER_TREND_PULLBACK@FIXED|suppress_negative": [
         "SKIP",
         "SKIP",
         "SKIP"
       ],
       "MOVER_TREND_PULLBACK@FIXED|min_samples": [
-        "LOWER",
-        "LOWER",
+        "HOLD",
+        "HOLD",
         "HOLD"
       ],
       "QUIET_COMPRESSION_BREAK|suppress_negative": [
@@ -109,9 +153,9 @@
         "SKIP"
       ],
       "QUIET_COMPRESSION_BREAK@ATR|min_samples": [
-        "LOWER",
-        "LOWER",
-        "LOWER"
+        "HOLD",
+        "HOLD",
+        "HOLD"
       ],
       "QUIET_COMPRESSION_BREAK@FIXED|suppress_negative": [
         "SKIP",
@@ -119,9 +163,9 @@
         "SKIP"
       ],
       "QUIET_COMPRESSION_BREAK@FIXED|min_samples": [
-        "LOWER",
-        "LOWER",
-        "LOWER"
+        "HOLD",
+        "HOLD",
+        "HOLD"
       ],
       "RANGE_FADE|suppress_negative": [
         "SKIP",
@@ -129,9 +173,9 @@
         "SKIP"
       ],
       "RANGE_FADE|min_samples": [
-        "LOWER",
-        "LOWER",
-        "LOWER"
+        "HOLD",
+        "HOLD",
+        "HOLD"
       ],
       "SHADOW_FUNDING_FADE|suppress_negative": [
         "SKIP",
@@ -139,9 +183,9 @@
         "SKIP"
       ],
       "SHADOW_FUNDING_FADE|min_samples": [
-        "LOWER",
-        "LOWER",
-        "LOWER"
+        "HOLD",
+        "HOLD",
+        "HOLD"
       ],
       "SHADOW_MEAN_REVERT|suppress_negative": [
         "SKIP",
@@ -149,9 +193,9 @@
         "SKIP"
       ],
       "SHADOW_MEAN_REVERT|min_samples": [
-        "LOWER",
-        "LOWER",
-        "LOWER"
+        "HOLD",
+        "HOLD",
+        "HOLD"
       ],
       "SHADOW_RANGE_FADE|suppress_negative": [
         "SKIP",
@@ -164,9 +208,9 @@
         "HOLD"
       ],
       "SR_FLIP_RETEST|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "SR_FLIP_RETEST|min_samples": [
         "HOLD",
@@ -199,16 +243,25 @@
         "SKIP"
       ],
       "WHALE_MOMENTUM|min_samples": [
-        "LOWER",
-        "LOWER",
-        "LOWER"
+        "HOLD",
+        "HOLD",
+        "HOLD"
       ]
     },
     "last_change_cycle": {
-      "FUNDING_EXTREME_SIGNAL|min_samples": 4,
-      "MOVER_TREND_PULLBACK@ATR|min_samples": 4
+      "FUNDING_EXTREME_SIGNAL|min_samples": 7,
+      "MOVER_TREND_PULLBACK@ATR|min_samples": 4,
+      "QUIET_COMPRESSION_BREAK@ATR|min_samples": 14,
+      "QUIET_COMPRESSION_BREAK@FIXED|min_samples": 14,
+      "RANGE_FADE|min_samples": 9,
+      "SHADOW_FUNDING_FADE|min_samples": 15,
+      "SHADOW_MEAN_REVERT|min_samples": 18,
+      "WHALE_MOMENTUM|min_samples": 22,
+      "MOVER_TREND_PULLBACK|suppress_negative": 23,
+      "SR_FLIP_RETEST|suppress_negative": 26,
+      "MEAN_REVERT|suppress_negative": 46
     },
-    "cycle": 4
+    "cycle": 51
   },
   "ledger": [
     {
@@ -234,17 +287,15 @@
       "verdict": "LOWER",
       "ev_per_suppression_r": null,
       "n": 29
-    }
-  ],
-  "pending": [
+    },
     {
       "strategy": "QUIET_COMPRESSION_BREAK@ATR",
       "param": "min_samples",
       "old": 30,
       "new": 25,
-      "applied": false,
-      "status": "PENDING",
-      "reason": "stable+bar+grace → promote (strong_cell_n=17) | deferred:blast_radius",
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17)",
       "verdict": "LOWER",
       "ev_per_suppression_r": null,
       "n": 17
@@ -254,9 +305,9 @@
       "param": "min_samples",
       "old": 30,
       "new": 25,
-      "applied": false,
-      "status": "PENDING",
-      "reason": "stable+bar+grace → promote (strong_cell_n=17) | deferred:blast_radius",
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17)",
       "verdict": "LOWER",
       "ev_per_suppression_r": null,
       "n": 17
@@ -266,9 +317,9 @@
       "param": "min_samples",
       "old": 30,
       "new": 25,
-      "applied": false,
-      "status": "PENDING",
-      "reason": "stable+bar+grace → promote (strong_cell_n=24) | deferred:blast_radius",
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=24)",
       "verdict": "LOWER",
       "ev_per_suppression_r": null,
       "n": 24
@@ -278,9 +329,117 @@
       "param": "min_samples",
       "old": 30,
       "new": 25,
-      "applied": false,
-      "status": "PENDING",
-      "reason": "stable+bar+grace → promote (strong_cell_n=15) | deferred:blast_radius",
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15
+    },
+    {
+      "strategy": "FUNDING_EXTREME_SIGNAL",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=20)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 20
+    },
+    {
+      "strategy": "SHADOW_MEAN_REVERT",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=18)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 18
+    },
+    {
+      "strategy": "QUIET_COMPRESSION_BREAK@ATR",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 17
+    },
+    {
+      "strategy": "QUIET_COMPRESSION_BREAK@FIXED",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 17
+    },
+    {
+      "strategy": "RANGE_FADE",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=24)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 24
+    },
+    {
+      "strategy": "SHADOW_FUNDING_FADE",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 15
+    },
+    {
+      "strategy": "QUIET_COMPRESSION_BREAK@ATR",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 17
+    },
+    {
+      "strategy": "QUIET_COMPRESSION_BREAK@FIXED",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 17
+    },
+    {
+      "strategy": "SHADOW_FUNDING_FADE",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=15)",
       "verdict": "LOWER",
       "ev_per_suppression_r": null,
       "n": 15
@@ -288,11 +447,11 @@
     {
       "strategy": "SHADOW_MEAN_REVERT",
       "param": "min_samples",
-      "old": 30,
-      "new": 25,
-      "applied": false,
-      "status": "PENDING",
-      "reason": "stable+bar+grace → promote (strong_cell_n=18) | deferred:blast_radius",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=18)",
       "verdict": "LOWER",
       "ev_per_suppression_r": null,
       "n": 18
@@ -302,20 +461,120 @@
       "param": "min_samples",
       "old": 30,
       "new": 25,
-      "applied": false,
-      "status": "PENDING",
-      "reason": "stable+bar+grace → promote (strong_cell_n=18) | deferred:blast_radius",
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=18)",
       "verdict": "LOWER",
       "ev_per_suppression_r": null,
       "n": 18
+    },
+    {
+      "strategy": "SHADOW_MEAN_REVERT",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=18)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 18
+    },
+    {
+      "strategy": "WHALE_MOMENTUM",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=18)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 18
+    },
+    {
+      "strategy": "WHALE_MOMENTUM",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=18)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 18
+    },
+    {
+      "strategy": "MOVER_TREND_PULLBACK",
+      "param": "suppress_negative",
+      "old": true,
+      "new": false,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote",
+      "verdict": "DROP",
+      "ev_per_suppression_r": -0.2538409330284686,
+      "n": 371
+    },
+    {
+      "strategy": "SR_FLIP_RETEST",
+      "param": "suppress_negative",
+      "old": true,
+      "new": false,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote",
+      "verdict": "DROP",
+      "ev_per_suppression_r": -0.4890908047930408,
+      "n": 55
+    },
+    {
+      "strategy": "MEAN_REVERT",
+      "param": "suppress_negative",
+      "old": true,
+      "new": false,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote",
+      "verdict": "DROP",
+      "ev_per_suppression_r": -1.357830045967234,
+      "n": 133
     }
   ],
+  "pending": [],
   "active_overrides": {
     "FUNDING_EXTREME_SIGNAL": {
-      "min_samples": 25
+      "min_samples": 20
     },
     "MOVER_TREND_PULLBACK@ATR": {
       "min_samples": 25
+    },
+    "QUIET_COMPRESSION_BREAK@ATR": {
+      "min_samples": 15
+    },
+    "QUIET_COMPRESSION_BREAK@FIXED": {
+      "min_samples": 15
+    },
+    "RANGE_FADE": {
+      "min_samples": 20
+    },
+    "SHADOW_FUNDING_FADE": {
+      "min_samples": 15
+    },
+    "SHADOW_MEAN_REVERT": {
+      "min_samples": 15
+    },
+    "WHALE_MOMENTUM": {
+      "min_samples": 15
+    },
+    "MOVER_TREND_PULLBACK": {
+      "suppress_negative": false
+    },
+    "SR_FLIP_RETEST": {
+      "suppress_negative": false
+    },
+    "MEAN_REVERT": {
+      "suppress_negative": false
     }
   }
 }
