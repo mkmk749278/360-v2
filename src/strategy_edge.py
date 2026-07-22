@@ -75,6 +75,9 @@ class StrategyOutcome:
     # Pre-cost R carried alongside the (possibly netted) r_multiple so the W2
     # reconciliation can show the optimism tax.  None → gross == r_multiple.
     gross_r_multiple: Optional[float] = None
+    # Always-netted R (flag-independent) — lets the reconciliation show net edge
+    # while the live path (r_multiple) stays gross until sign-off.  None → == r_multiple.
+    net_r_multiple: Optional[float] = None
 
 
 @dataclass
@@ -86,6 +89,7 @@ class _Record:
     timestamp: datetime
     source: str = SOURCE_EMITTED
     gross_r_multiple: float = 0.0  # pre-cost R (== r_multiple when cost model off)
+    net_r_multiple: float = 0.0    # always-netted R (flag-independent)
 
 
 class StrategyEdgeStore:
@@ -138,6 +142,11 @@ class StrategyEdgeStore:
             gross_r_multiple=(
                 float(outcome.gross_r_multiple)
                 if outcome.gross_r_multiple is not None
+                else float(outcome.r_multiple)
+            ),
+            net_r_multiple=(
+                float(outcome.net_r_multiple)
+                if outcome.net_r_multiple is not None
                 else float(outcome.r_multiple)
             ),
         )
@@ -209,6 +218,14 @@ class StrategyEdgeStore:
             avg_pnl = sum(r.pnl_pct for r in records) / n
             avg_r = sum(r.r_multiple for r in records) / n
             avg_gross_r = sum(r.gross_r_multiple for r in records) / n
+            avg_net_r = sum(r.net_r_multiple for r in records) / n
+            # Per-source always-net R — the W2 realized-vs-counterfactual split.
+            _by_src: Dict[str, list] = defaultdict(list)
+            for _r in records:
+                _by_src[_r.source].append(_r.net_r_multiple)
+            net_r_by_source = {
+                src: (sum(vals) / len(vals)) for src, vals in _by_src.items() if vals
+            }
             mfe_records = [r for r in records if r.mfe_pct > 0]
             capture = (
                 sum(r.pnl_pct for r in mfe_records) / sum(r.mfe_pct for r in mfe_records)
@@ -226,6 +243,8 @@ class StrategyEdgeStore:
                 "avg_pnl_pct": avg_pnl,
                 "avg_r": avg_r,
                 "avg_gross_r": avg_gross_r,
+                "avg_net_r": avg_net_r,
+                "net_r_by_source": net_r_by_source,
                 "mfe_capture": capture,
                 "edge_r": self.edge_r(strategy, ctx),
                 "verdict": self.verdict(strategy, ctx),
@@ -263,6 +282,9 @@ class StrategyEdgeStore:
                                 gross_r_multiple=float(
                                     r.get("gr", r.get("r", 0.0))
                                 ),
+                                net_r_multiple=float(
+                                    r.get("nr", r.get("r", 0.0))
+                                ),
                             )
                         )
         except Exception:
@@ -281,6 +303,7 @@ class StrategyEdgeStore:
                             "pnl_pct": r.pnl_pct,
                             "r": r.r_multiple,
                             "gr": r.gross_r_multiple,
+                            "nr": r.net_r_multiple,
                             "mfe": r.mfe_pct,
                             "ts": r.timestamp.isoformat(),
                             "src": r.source,
@@ -300,6 +323,47 @@ class StrategyEdgeStore:
         except Exception:
             # Persistence is best-effort; the in-memory store stays correct.
             pass
+
+
+def reconcile_matrix(matrix: Dict[str, Dict]) -> Dict[str, Dict]:
+    """Per-strategy **realized** (emitted) vs **counterfactual** (suppressed) net-R.
+
+    The W2 answer to 'does our idealised counterfactual overstate what actually
+    happens?'  For each strategy it pools the always-net R across cells, split by
+    source, so ``delta_r = realized − counterfactual`` is the optimism tax on real
+    emitted trades.  Mean-based and weighted by each source's n, so the cohort
+    dual-write (which scales n but not the mean) does not distort it.  Geometry A/B
+    arms (``X@FIXED`` / ``X@ATR``) are excluded — they are their own rollup.
+    """
+    acc: Dict[str, Dict[str, float]] = {}
+    for cell in (matrix or {}).values():
+        if not isinstance(cell, dict):
+            continue
+        strat = str(cell.get("strategy") or "")
+        if not strat or "@" in strat:
+            continue
+        by_src = cell.get("net_r_by_source") or {}
+        ne = int(cell.get("n_emitted", 0) or 0)
+        ns = int(cell.get("n_suppressed", 0) or 0)
+        a = acc.setdefault(strat, {"es": 0.0, "en": 0, "ss": 0.0, "sn": 0})
+        if SOURCE_EMITTED in by_src and ne > 0:
+            a["es"] += float(by_src[SOURCE_EMITTED]) * ne
+            a["en"] += ne
+        if SOURCE_SUPPRESSED in by_src and ns > 0:
+            a["ss"] += float(by_src[SOURCE_SUPPRESSED]) * ns
+            a["sn"] += ns
+    out: Dict[str, Dict] = {}
+    for strat, a in acc.items():
+        rnet = (a["es"] / a["en"]) if a["en"] else None
+        cnet = (a["ss"] / a["sn"]) if a["sn"] else None
+        out[strat] = {
+            "realized_net_r": rnet,
+            "realized_n": int(a["en"]),
+            "counterfactual_net_r": cnet,
+            "counterfactual_n": int(a["sn"]),
+            "delta_r": (rnet - cnet) if (rnet is not None and cnet is not None) else None,
+        }
+    return out
 
 
 # Module-global singleton, mirroring _cohort_edge_store in the scanner.

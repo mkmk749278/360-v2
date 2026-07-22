@@ -1,7 +1,17 @@
 """Tests for the Suppression Quality Audit / shadow ledger (src/suppression_audit.py)."""
 from __future__ import annotations
 
+import config
+import pytest
+
 from src import suppression_audit as sa
+
+
+@pytest.fixture(autouse=True)
+def _gross_edge_defaults(monkeypatch):
+    # These assert the gross geometry→R mapping; the cost model (now live by
+    # default) is covered in test_trade_costs.py / test_edge_reconciliation.py.
+    monkeypatch.setattr(config, "EDGE_COST_MODEL_ENABLED", False, raising=False)
 
 
 def _rec(side="LONG", entry=100.0, sl=99.0, tp1=102.0, gate="quiet_scalp_block",

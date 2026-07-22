@@ -1006,6 +1006,9 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         agg["cost_drag_r"] = round(agg["avg_gross_r"] - agg["avg_r"], 4)
 
     scored_cells.sort(key=lambda c: c["edge_r"], reverse=True)
+    # W2: realized (emitted) vs counterfactual (suppressed) net-R per strategy —
+    # the optimism tax measured on real emitted trades.
+    from src.strategy_edge import reconcile_matrix
     return {
         "per_strategy": per_strategy,
         "top_cells": scored_cells[:5],
@@ -1013,6 +1016,7 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         "total_outcomes": total_outcomes,
         "scored_cells": len(scored_cells),
         "geometry_ab": summarize_geometry_ab(matrix),
+        "reconciliation": reconcile_matrix(matrix),
     }
 
 

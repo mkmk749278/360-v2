@@ -206,7 +206,7 @@ def candidate_outcome(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         final = float(record.get("post_price_final") or 0.0)
         if final <= 0 or sl_distance <= 0:
             return {"won": False, "pnl_pct": 0.0, "r_multiple": 0.0,
-                    "gross_r_multiple": 0.0, "mfe_pct": 0.0}
+                    "gross_r_multiple": 0.0, "net_r_multiple": 0.0, "mfe_pct": 0.0}
         side = str(record.get("side") or "").upper()
         move = (final - entry) if side == "LONG" else (entry - final)
         gross_r = move / sl_distance
@@ -214,13 +214,19 @@ def candidate_outcome(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         pnl = move / entry * 100.0
         mfe = max(0.0, move / entry * 100.0)
 
-    net_r = trade_costs.net_r(gross_r, entry=entry, sl_distance=sl_distance)
+    # ``r_multiple`` is flag-gated (the value the LIVE edge_r / controller reads):
+    # gross while the cost model is dark, net once it's signed on.  ``net_r_multiple``
+    # is ALWAYS netted regardless of the flag, so the reconciliation (W2) can show the
+    # optimism tax without flipping the live-affecting flag.
+    live_r = trade_costs.net_r(gross_r, entry=entry, sl_distance=sl_distance)
+    always_net_r = trade_costs.net_r(gross_r, entry=entry, sl_distance=sl_distance, enabled=True)
     cost_pct = trade_costs.round_trip_cost_pct() if trade_costs.is_enabled() else 0.0
     return {
         "won": won,
         "pnl_pct": pnl - cost_pct,
-        "r_multiple": net_r,
+        "r_multiple": live_r,
         "gross_r_multiple": gross_r,
+        "net_r_multiple": always_net_r,
         "mfe_pct": mfe,
     }
 

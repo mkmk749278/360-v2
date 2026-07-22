@@ -617,6 +617,13 @@ class TradeMonitor:
                 _r_multiple = trade_costs.net_r(
                     _gross_r_multiple, entry=_entry, sl_distance=_orig_sl_dist
                 )
+                # Always-netted (flag-independent) realised R for the W2
+                # reconciliation surface — the live r_multiple above stays gross
+                # until the cost model is signed on.
+                _net_r_multiple = trade_costs.net_r(
+                    _gross_r_multiple, entry=_entry, sl_distance=_orig_sl_dist,
+                    enabled=True,
+                )
                 _mfe_pct = max(
                     0.0,
                     float(getattr(sig, "max_favorable_excursion_pct", 0.0) or 0.0),
@@ -634,6 +641,7 @@ class TradeMonitor:
                         mfe_pct=_mfe_pct,
                         source="emitted",
                         gross_r_multiple=float(_gross_r_multiple),
+                        net_r_multiple=float(_net_r_multiple),
                     )
                 )
                 # Phase-5 cohort cell: dual-write the emitted outcome under the
@@ -654,6 +662,7 @@ class TradeMonitor:
                             mfe_pct=_mfe_pct,
                             source="emitted",
                             gross_r_multiple=float(_gross_r_multiple),
+                            net_r_multiple=float(_net_r_multiple),
                         )
                     )
             except Exception as exc:

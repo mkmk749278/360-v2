@@ -1737,6 +1737,7 @@ class CryptoSignalEngine:
                                 mfe_pct=float(outcome.get("mfe_pct", 0.0)),
                                 source=_src,
                                 gross_r_multiple=outcome.get("gross_r_multiple"),
+                                net_r_multiple=outcome.get("net_r_multiple"),
                             ),
                             persist=False,
                         )
@@ -1812,6 +1813,7 @@ class CryptoSignalEngine:
                                 mfe_pct=float(outcome.get("mfe_pct", 0.0)),
                                 source=SOURCE_SHADOW,
                                 gross_r_multiple=outcome.get("gross_r_multiple"),
+                                net_r_multiple=outcome.get("net_r_multiple"),
                             ),
                             persist=False,
                         )
@@ -2086,6 +2088,40 @@ class CryptoSignalEngine:
             return frac >= 0.7, f"{ok_n}/{len(syms)} symbols with ≥20 15m candles"
 
         fl.add_predicate(PredicateProbe(name="candle_coverage", fn=_coverage, min_streak=6))
+
+        def _optimism_tax_health():
+            # W2: the counterfactual net-R we steer on must track the net-R real
+            # emitted trades actually realise.  A sustained gap on adequate sample
+            # means the idealised counterfactual (or the cost constants) is wrong —
+            # page rather than let the whole autonomous brain drift on a bad number.
+            try:
+                from config import (
+                    EDGE_RECONCILIATION_ALERT_DELTA_R as _bound,
+                    EDGE_RECONCILIATION_MIN_N as _min_n,
+                )
+                from src.strategy_edge import get_strategy_edge_store, reconcile_matrix
+                recon = reconcile_matrix(get_strategy_edge_store().matrix())
+            except Exception as _rex:
+                from src import fail_open
+                fail_open.record("main.optimism_tax_probe", _rex)
+                return True, "reconciliation unavailable (fail-open)"
+            worst_strat, worst_delta = None, 0.0
+            for strat, r in recon.items():
+                d = r.get("delta_r")
+                if (
+                    d is not None
+                    and int(r.get("realized_n", 0)) >= _min_n
+                    and int(r.get("counterfactual_n", 0)) >= _min_n
+                    and abs(d) > abs(worst_delta)
+                ):
+                    worst_strat, worst_delta = strat, float(d)
+            if worst_strat is None:
+                return True, "no strategy past reconciliation sample floor yet"
+            if abs(worst_delta) >= _bound:
+                return False, f"{worst_strat} realized−counterfactual={worst_delta:+.2f}R (bound {_bound})"
+            return True, f"max divergence {worst_strat} {worst_delta:+.2f}R (< {_bound})"
+
+        fl.add_predicate(PredicateProbe(name="edge_reconciliation", fn=_optimism_tax_health, min_streak=6))
 
         def _btc_ref():
             cd = self.data_store.get_candles("BTCUSDT", "5m") or {}
