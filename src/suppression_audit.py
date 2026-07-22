@@ -151,47 +151,77 @@ def _r_to_tp1(record: Dict[str, Any]) -> float:
 def suppression_value_delta_r(record: Dict[str, Any]) -> Optional[float]:
     """EV of the *suppression* in R (positive = suppressing helped).
 
-    WOULD_LOSE -> +1.0R saved (stop avoided); WOULD_WIN -> -R_to_TP1 (profit forgone);
-    WOULD_EXPIRE -> 0.0.  ``None`` until classified.
+    Gross: WOULD_LOSE -> +1.0R saved (stop avoided); WOULD_WIN -> -R_to_TP1 (profit
+    forgone); WOULD_EXPIRE -> 0.0.  ``None`` until classified.
+
+    Net (when the cost model is enabled): suppressing also avoids the round-trip
+    cost, so a saved loss is worth +(1.0 + cost_R), a forgone win only
+    -(R_to_TP1 - cost_R), and a would-expire trade saves its cost (+cost_R).  With
+    the model disabled these collapse to the gross values byte-for-byte.
     """
+    from src import trade_costs
+
     cls = record.get("classification")
+    if cls not in (WOULD_LOSE, WOULD_WIN, WOULD_EXPIRE):
+        return None
+    entry = float(record.get("entry") or 0.0)
+    sl_distance = float(record.get("sl_distance") or 0.0)
+    cost_r = trade_costs.cost_in_r(entry, sl_distance) if trade_costs.is_enabled() else 0.0
     if cls == WOULD_LOSE:
-        return 1.0
+        return 1.0 + cost_r
     if cls == WOULD_WIN:
-        return -_r_to_tp1(record)
-    if cls == WOULD_EXPIRE:
-        return 0.0
-    return None
+        return -(_r_to_tp1(record) - cost_r)
+    return cost_r  # WOULD_EXPIRE
 
 
 def candidate_outcome(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """The candidate's own would-be outcome (for the Strategy x Context edge matrix).
 
-    Returns ``{won, pnl_pct, r_multiple, mfe_pct}`` or ``None`` if unclassified.
+    Returns ``{won, pnl_pct, r_multiple, gross_r_multiple, mfe_pct}`` or ``None`` if
+    unclassified.  ``r_multiple`` / ``pnl_pct`` are **net of costs** when the cost
+    model is enabled; ``gross_r_multiple`` always carries the pre-cost R so the
+    W2 reconciliation can show the optimism tax.  ``won`` stays outcome-based
+    (reached TP1 before SL) — profitability lives in the netted R, not the flag.
     """
+    from src import trade_costs
+
     cls = record.get("classification")
     entry = float(record.get("entry") or 0.0)
     if not cls or cls == INSUFFICIENT or entry <= 0:
         return None
-    r_tp1 = _r_to_tp1(record)
-    if cls == WOULD_WIN:
-        pnl = abs(float(record.get("tp1", 0.0)) - entry) / entry * 100.0
-        return {"won": True, "pnl_pct": pnl, "r_multiple": r_tp1, "mfe_pct": pnl}
-    if cls == WOULD_LOSE:
-        pnl = -float(record.get("sl_distance", 0.0)) / entry * 100.0
-        return {"won": False, "pnl_pct": pnl, "r_multiple": -1.0, "mfe_pct": 0.0}
-    # WOULD_EXPIRE - mark to the final close from the candidate's side.
-    final = float(record.get("post_price_final") or 0.0)
     sl_distance = float(record.get("sl_distance") or 0.0)
-    if final <= 0 or sl_distance <= 0:
-        return {"won": False, "pnl_pct": 0.0, "r_multiple": 0.0, "mfe_pct": 0.0}
-    side = str(record.get("side") or "").upper()
-    move = (final - entry) if side == "LONG" else (entry - final)
+    r_tp1 = _r_to_tp1(record)
+
+    if cls == WOULD_WIN:
+        gross_r = r_tp1
+        won = True
+        pnl = abs(float(record.get("tp1", 0.0)) - entry) / entry * 100.0
+        mfe = pnl
+    elif cls == WOULD_LOSE:
+        gross_r = -1.0
+        won = False
+        pnl = -sl_distance / entry * 100.0
+        mfe = 0.0
+    else:  # WOULD_EXPIRE — mark to the final close from the candidate's side.
+        final = float(record.get("post_price_final") or 0.0)
+        if final <= 0 or sl_distance <= 0:
+            return {"won": False, "pnl_pct": 0.0, "r_multiple": 0.0,
+                    "gross_r_multiple": 0.0, "mfe_pct": 0.0}
+        side = str(record.get("side") or "").upper()
+        move = (final - entry) if side == "LONG" else (entry - final)
+        gross_r = move / sl_distance
+        won = move > 0
+        pnl = move / entry * 100.0
+        mfe = max(0.0, move / entry * 100.0)
+
+    net_r = trade_costs.net_r(gross_r, entry=entry, sl_distance=sl_distance)
+    cost_pct = trade_costs.round_trip_cost_pct() if trade_costs.is_enabled() else 0.0
     return {
-        "won": move > 0,
-        "pnl_pct": move / entry * 100.0,
-        "r_multiple": move / sl_distance,
-        "mfe_pct": max(0.0, move / entry * 100.0),
+        "won": won,
+        "pnl_pct": pnl - cost_pct,
+        "r_multiple": net_r,
+        "gross_r_multiple": gross_r,
+        "mfe_pct": mfe,
     }
 
 

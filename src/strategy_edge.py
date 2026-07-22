@@ -67,11 +67,14 @@ class StrategyOutcome:
     strategy: str
     context_key: str
     side: str                 # LONG | SHORT
-    won: bool                 # net-of-fees win
-    pnl_pct: float            # realised PnL %, net of fees
-    r_multiple: float         # realised PnL ÷ initial risk (R)
+    won: bool                 # reached TP1 before SL (outcome, not profitability)
+    pnl_pct: float            # realised PnL %, net of costs when the cost model is on
+    r_multiple: float         # realised PnL ÷ initial risk (R), net of costs when on
     mfe_pct: float = 0.0      # max favourable excursion %, for capture analysis
     source: str = SOURCE_EMITTED  # emitted | suppressed | shadow
+    # Pre-cost R carried alongside the (possibly netted) r_multiple so the W2
+    # reconciliation can show the optimism tax.  None → gross == r_multiple.
+    gross_r_multiple: Optional[float] = None
 
 
 @dataclass
@@ -82,6 +85,7 @@ class _Record:
     mfe_pct: float
     timestamp: datetime
     source: str = SOURCE_EMITTED
+    gross_r_multiple: float = 0.0  # pre-cost R (== r_multiple when cost model off)
 
 
 class StrategyEdgeStore:
@@ -131,6 +135,11 @@ class StrategyEdgeStore:
             mfe_pct=float(outcome.mfe_pct),
             timestamp=datetime.now(timezone.utc),
             source=(outcome.source or SOURCE_EMITTED).lower(),
+            gross_r_multiple=(
+                float(outcome.gross_r_multiple)
+                if outcome.gross_r_multiple is not None
+                else float(outcome.r_multiple)
+            ),
         )
         with self._lock:
             self._records[key].append(rec)
@@ -199,6 +208,7 @@ class StrategyEdgeStore:
             wins = sum(1 for r in records if r.won)
             avg_pnl = sum(r.pnl_pct for r in records) / n
             avg_r = sum(r.r_multiple for r in records) / n
+            avg_gross_r = sum(r.gross_r_multiple for r in records) / n
             mfe_records = [r for r in records if r.mfe_pct > 0]
             capture = (
                 sum(r.pnl_pct for r in mfe_records) / sum(r.mfe_pct for r in mfe_records)
@@ -215,6 +225,7 @@ class StrategyEdgeStore:
                 "win_rate": wins / n,
                 "avg_pnl_pct": avg_pnl,
                 "avg_r": avg_r,
+                "avg_gross_r": avg_gross_r,
                 "mfe_capture": capture,
                 "edge_r": self.edge_r(strategy, ctx),
                 "verdict": self.verdict(strategy, ctx),
@@ -248,6 +259,10 @@ class StrategyEdgeStore:
                                 else datetime.now(timezone.utc),
                                 # Pre-provenance store files load as emitted.
                                 source=str(r.get("src", SOURCE_EMITTED)),
+                                # Pre-cost store files: gross == the stored R.
+                                gross_r_multiple=float(
+                                    r.get("gr", r.get("r", 0.0))
+                                ),
                             )
                         )
         except Exception:
@@ -265,6 +280,7 @@ class StrategyEdgeStore:
                             "won": r.won,
                             "pnl_pct": r.pnl_pct,
                             "r": r.r_multiple,
+                            "gr": r.gross_r_multiple,
                             "mfe": r.mfe_pct,
                             "ts": r.timestamp.isoformat(),
                             "src": r.source,

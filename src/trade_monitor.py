@@ -607,8 +607,15 @@ class TradeMonitor:
                     if (_entry > 0 and _orig_sl_dist > 0)
                     else 0.0
                 )
-                _r_multiple = (
+                _gross_r_multiple = (
                     signal_quality_pnl / _risk_pct if _risk_pct > 0 else 0.0
+                )
+                # Net the realised R the same way the counterfactual arm is netted
+                # (W1) — costs are subtracted only when the cost model is enabled,
+                # so default-OFF leaves realised R byte-for-byte unchanged.
+                from src import trade_costs
+                _r_multiple = trade_costs.net_r(
+                    _gross_r_multiple, entry=_entry, sl_distance=_orig_sl_dist
                 )
                 _mfe_pct = max(
                     0.0,
@@ -626,6 +633,7 @@ class TradeMonitor:
                         r_multiple=float(_r_multiple),
                         mfe_pct=_mfe_pct,
                         source="emitted",
+                        gross_r_multiple=float(_gross_r_multiple),
                     )
                 )
                 # Phase-5 cohort cell: dual-write the emitted outcome under the
@@ -645,6 +653,7 @@ class TradeMonitor:
                             r_multiple=float(_r_multiple),
                             mfe_pct=_mfe_pct,
                             source="emitted",
+                            gross_r_multiple=float(_gross_r_multiple),
                         )
                     )
             except Exception as exc:

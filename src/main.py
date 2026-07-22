@@ -1736,6 +1736,7 @@ class CryptoSignalEngine:
                                 r_multiple=float(outcome.get("r_multiple", 0.0)),
                                 mfe_pct=float(outcome.get("mfe_pct", 0.0)),
                                 source=_src,
+                                gross_r_multiple=outcome.get("gross_r_multiple"),
                             ),
                             persist=False,
                         )
@@ -1810,6 +1811,7 @@ class CryptoSignalEngine:
                                 r_multiple=float(outcome.get("r_multiple", 0.0)),
                                 mfe_pct=float(outcome.get("mfe_pct", 0.0)),
                                 source=SOURCE_SHADOW,
+                                gross_r_multiple=outcome.get("gross_r_multiple"),
                             ),
                             persist=False,
                         )
