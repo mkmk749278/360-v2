@@ -965,6 +965,7 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
             "cells": 0,
             "_win_weight": 0.0,
             "_r_weight": 0.0,
+            "_gross_r_weight": 0.0,
             "best_cell": None,
             "worst_cell": None,
         })
@@ -975,6 +976,11 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         agg["cells"] += 1
         agg["_win_weight"] += float(cell.get("win_rate", 0.0) or 0.0) * n
         agg["_r_weight"] += float(cell.get("avg_r", 0.0) or 0.0) * n
+        # Gross R (pre-cost) alongside net avg_r — the W1 optimism-tax surface.
+        # Falls back to avg_r for pre-cost store rows so the delta reads 0.
+        agg["_gross_r_weight"] += float(
+            cell.get("avg_gross_r", cell.get("avg_r", 0.0)) or 0.0
+        ) * n
         edge = cell.get("edge_r")
         if edge is not None:
             slim = {
@@ -994,6 +1000,10 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         n = agg["n"]
         agg["win_rate"] = (agg.pop("_win_weight") / n) if n else 0.0
         agg["avg_r"] = (agg.pop("_r_weight") / n) if n else 0.0
+        agg["avg_gross_r"] = (agg.pop("_gross_r_weight") / n) if n else 0.0
+        # The optimism tax: how much cost the gross number was hiding (>= 0 when
+        # the cost model is live; 0 while it's dark and gross == net).
+        agg["cost_drag_r"] = round(agg["avg_gross_r"] - agg["avg_r"], 4)
 
     scored_cells.sort(key=lambda c: c["edge_r"], reverse=True)
     return {

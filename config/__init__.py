@@ -289,6 +289,30 @@ PRE_TP_LEVERAGE: float = float(os.getenv("PRE_TP_LEVERAGE", "10.0"))
 PRE_TP_FEE_PCT_ROUND_TRIP: float = float(
     os.getenv("PRE_TP_FEE_PCT_ROUND_TRIP", "0.07")
 )
+
+# ── Edge cost model (W1 keystone — see docs/AUTONOMOUS_SYSTEM_AUDIT_AND_REMEDIATION.md) ──
+# The suppression counterfactual, shadow ledger, and realized arm all measured edge
+# GROSS (no fees/funding/slippage), so the autonomous brain optimised a proxy that
+# is not money.  ``src/trade_costs.py`` nets every recorded R using these constants.
+# DARK by default: while OFF, net R == gross R byte-for-byte, so enabling changes
+# nothing until shadow-measured + owner-signed-off (money-path dark-first doctrine).
+EDGE_COST_MODEL_ENABLED: bool = _safe_bool("EDGE_COST_MODEL_ENABLED", "false")
+# Taker entry + taker exit on Binance USDⓈ-M futures (~0.05% per side).  Distinct
+# from PRE_TP_FEE_PCT_ROUND_TRIP (0.07%, which assumes a maker exit) — the edge
+# model is conservative and assumes taker both legs, the realistic scalp case.
+EDGE_TAKER_FEE_PCT_ROUND_TRIP: float = float(
+    os.getenv("EDGE_TAKER_FEE_PCT_ROUND_TRIP", "0.10")
+)
+# Slippage allowance per side (percent of notional) — market entries/exits on a
+# scalp rarely fill at the exact stamped price.
+EDGE_SLIPPAGE_PCT_PER_SIDE: float = float(
+    os.getenv("EDGE_SLIPPAGE_PCT_PER_SIDE", "0.02")
+)
+# Per-trade funding allowance (percent).  Most scalps don't cross a funding
+# timestamp; a small expected value keeps the model honest without over-charging.
+EDGE_FUNDING_PCT_ESTIMATE: float = float(
+    os.getenv("EDGE_FUNDING_PCT_ESTIMATE", "0.01")
+)
 # Setups that are STRUCTURALLY built for bigger moves — pre-TP would cap
 # the thesis.  Breakouts (VSB / BDS / ORB) belong here.  Comma-separated.
 PRE_TP_SETUP_BLACKLIST_RAW: str = os.getenv(
