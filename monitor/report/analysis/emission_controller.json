@@ -58,9 +58,9 @@
         "HOLD"
       ],
       "DIVERGENCE_CONTINUATION|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "DIVERGENCE_CONTINUATION|min_samples": [
         "HOLD",
@@ -68,9 +68,9 @@
         "HOLD"
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "FAILED_AUCTION_RECLAIM|min_samples": [
         "HOLD",
@@ -98,9 +98,9 @@
         "HOLD"
       ],
       "MEAN_REVERT|suppress_negative": [
-        "DROP",
-        "DROP",
-        "DROP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "MEAN_REVERT|min_samples": [
         "HOLD",
@@ -261,7 +261,7 @@
       "SR_FLIP_RETEST|suppress_negative": 26,
       "MEAN_REVERT|suppress_negative": 46
     },
-    "cycle": 51
+    "cycle": 95
   },
   "ledger": [
     {

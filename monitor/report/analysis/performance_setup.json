@@ -1,12 +1,12 @@
 [
   {
     "setup": "FAILED_AUCTION_RECLAIM",
-    "n": 196,
+    "n": 198,
     "wins": 31,
-    "losses": 59,
-    "neutral": 106,
-    "win_rate_pct": 15.8,
-    "avg_pnl_pct": 0.2084
+    "losses": 60,
+    "neutral": 107,
+    "win_rate_pct": 15.7,
+    "avg_pnl_pct": 0.1932
   },
   {
     "setup": "SR_FLIP_RETEST",
@@ -19,12 +19,12 @@
   },
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 162,
+    "n": 172,
     "wins": 22,
-    "losses": 55,
-    "neutral": 85,
-    "win_rate_pct": 13.6,
-    "avg_pnl_pct": -0.274
+    "losses": 59,
+    "neutral": 91,
+    "win_rate_pct": 12.8,
+    "avg_pnl_pct": -0.3434
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
@@ -46,12 +46,21 @@
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
-    "n": 28,
-    "wins": 1,
+    "n": 29,
+    "wins": 2,
     "losses": 7,
     "neutral": 20,
-    "win_rate_pct": 3.6,
-    "avg_pnl_pct": -0.2196
+    "win_rate_pct": 6.9,
+    "avg_pnl_pct": -0.056
+  },
+  {
+    "setup": "VOLUME_SURGE_BREAKOUT",
+    "n": 24,
+    "wins": 3,
+    "losses": 11,
+    "neutral": 10,
+    "win_rate_pct": 12.5,
+    "avg_pnl_pct": -0.0391
   },
   {
     "setup": "BREAKDOWN_SHORT",
@@ -61,15 +70,6 @@
     "neutral": 5,
     "win_rate_pct": 17.4,
     "avg_pnl_pct": 0.5157
-  },
-  {
-    "setup": "VOLUME_SURGE_BREAKOUT",
-    "n": 23,
-    "wins": 3,
-    "losses": 11,
-    "neutral": 9,
-    "win_rate_pct": 13.0,
-    "avg_pnl_pct": -0.0408
   },
   {
     "setup": "TREND_PULLBACK_EMA",

@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-22T04:03:49.955374+00:00",
-  "generated_at_ts": 1784693029.955374,
-  "lookback_hours": 24,
+  "generated_at": "2026-07-23T02:29:51.738773+00:00",
+  "generated_at_ts": 1784773791.738773,
+  "lookback_hours": 72,
   "channel": "360_SCALP",
-  "git_sha": "1b7ff2e65ce716fa6c6a157af86513979e34045f",
+  "git_sha": "e868c9b66715eb4c720c1be340f6739769dfad96",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,10 +15,10 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 3771,
-    "strategy_matrix_scored_cells": 1256,
+    "strategy_matrix_cells": 4021,
+    "strategy_matrix_scored_cells": 1427,
     "performance_setups": 14,
-    "suppression_gates": 12
+    "suppression_gates": 15
   },
   "headlines": {
     "strongest_cells": [
@@ -39,15 +39,8 @@
       {
         "strategy": "QUIET_COMPRESSION_BREAK",
         "context_key": "OVERLAP/QUIET/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": 2.2075660141256432,
-        "n": 29,
-        "verdict": "STRONG"
-      },
-      {
-        "strategy": "SHADOW_RANGE_FADE",
-        "context_key": "OVERLAP/MARKUP/NORMAL/BTC_NEUTRAL",
-        "edge_r": 1.7848079424794043,
-        "n": 18,
+        "edge_r": 1.9506099238066184,
+        "n": 34,
         "verdict": "STRONG"
       },
       {
@@ -56,54 +49,61 @@
         "edge_r": 1.7001787794871692,
         "n": 45,
         "verdict": "STRONG"
+      },
+      {
+        "strategy": "FAILED_AUCTION_RECLAIM",
+        "context_key": "OVERLAP/RANGE/EXPANDED/BTC_NEUTRAL/MIDCAP",
+        "edge_r": 1.6791983402803008,
+        "n": 50,
+        "verdict": "STRONG"
       }
     ],
     "weakest_cells": [
       {
-        "strategy": "WHALE_MOMENTUM",
-        "context_key": "OVERLAP/MARKDOWN/CASCADE/BTC_FALLING",
-        "edge_r": -1.0,
-        "n": 17,
+        "strategy": "RANGE_FADE",
+        "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL/MIDCAP",
+        "edge_r": -1.2124833281927134,
+        "n": 31,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "VOLUME_SURGE_BREAKOUT",
-        "context_key": "ASIA/MARKUP/COMPRESSED/BTC_RISING/MAJOR",
-        "edge_r": -1.0,
-        "n": 29,
+        "strategy": "RANGE_FADE",
+        "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
+        "edge_r": -1.2124833281927134,
+        "n": 31,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "VOLUME_SURGE_BREAKOUT",
-        "context_key": "ASIA/MARKUP/COMPRESSED/BTC_RISING",
-        "edge_r": -1.0,
-        "n": 29,
+        "strategy": "SR_FLIP_RETEST",
+        "context_key": "OVERLAP/DISTRIBUTION/NORMAL/BTC_NEUTRAL/ALTCOIN",
+        "edge_r": -1.1961492780624134,
+        "n": 38,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "VOLUME_SURGE_BREAKOUT",
-        "context_key": "ASIA/VOLATILE_EXPANSION/CASCADE/BTC_NEUTRAL/MIDCAP",
-        "edge_r": -1.0,
-        "n": 35,
+        "strategy": "QUIET_COMPRESSION_BREAK",
+        "context_key": "NY/RANGE/NORMAL/BTC_NEUTRAL/MIDCAP",
+        "edge_r": -1.1875273117721352,
+        "n": 37,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "VOLUME_SURGE_BREAKOUT",
-        "context_key": "OVERLAP/DISTRIBUTION/EXPANDED/BTC_NEUTRAL/ALTCOIN",
-        "edge_r": -1.0,
-        "n": 15,
+        "strategy": "FAILED_AUCTION_RECLAIM",
+        "context_key": "OVERLAP/DISTRIBUTION/NORMAL/BTC_NEUTRAL/MAJOR",
+        "edge_r": -1.1875000000000002,
+        "n": 22,
         "verdict": "NEGATIVE"
       }
     ],
     "gate_verdict_counts": {
+      "KEEP": 7,
       "DROP": 2,
-      "TUNE": 6,
-      "KEEP": 2,
-      "INSUFFICIENT_SAMPLE": 2
+      "TUNE": 1,
+      "INSUFFICIENT_SAMPLE": 5
     },
     "drop_gates": [
       "dispatch_staleness",
-      "context_floor:MEAN_REVERT"
+      "shadow_unit:SHADOW_RANGE_FADE"
     ]
   }
 }
