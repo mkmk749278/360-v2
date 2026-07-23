@@ -71,20 +71,31 @@ def _make_signal(*, entry=100.0, stop_loss=98.0, tp1=103.0) -> Signal:
 
 @pytest.fixture()
 def gate_env(monkeypatch):
-    """Real staleness gate + isolated geometry store + dark defaults."""
-    monkeypatch.setattr(Scanner, "_is_entry_fresh", _REAL_IS_ENTRY_FRESH)
-    from src import geometry_ab as gab
+    """Real staleness gate + isolated geometry store, both rescue flags dark.
 
+    These tests exercise the shadow path (measurement ON, live application
+    OFF: V1 keeps deciding while X@DSV2 / X@GOV disagreements get stamped).
+    The shipped config default is now LIVE, and the runtime-tunables registry
+    snapshots its bool defaults from ``config`` at build time — so a config
+    monkeypatch alone never reaches the read site (StalenessV2Params /
+    PolicyParams resolve the flag via ``runtime_tunables.get`` → registry
+    default, exactly what the ``_v2_live`` helper below documents). Patch
+    ``config`` *and* rebuild the registry so the dark values actually take
+    effect; reset again on teardown so later tests see the shipped defaults.
+    """
+    from src import geometry_ab as gab
+    from src import runtime_tunables as rt
+
+    monkeypatch.setattr(Scanner, "_is_entry_fresh", _REAL_IS_ENTRY_FRESH)
     store = SuppressedCandidateStore(persist_path="")
     monkeypatch.setattr(gab, "get_geometry_store", lambda: store)
-    # These tests exercise the shadow path specifically (measurement ON, live
-    # OFF: V1 keeps deciding, disagreements stamp X@DSV2 / X@GOV arms), so pin
-    # the LIVE flags OFF regardless of the shipped default — which is now live.
     monkeypatch.setattr(config, "DISPATCH_STALENESS_V2_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "DISPATCH_STALENESS_V2_LIVE", False, raising=False)
     monkeypatch.setattr(config, "CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "CONTEXT_EMISSION_GATE_OVERRIDE_LIVE", False, raising=False)
-    return store
+    rt.reset_for_test()  # rebuild the registry against the dark config above
+    yield store
+    rt.reset_for_test()  # restore the shipped (live) defaults for later tests
 
 
 def _seed_price(scanner: Scanner, price: float) -> None:
