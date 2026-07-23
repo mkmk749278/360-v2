@@ -261,7 +261,7 @@
       "SR_FLIP_RETEST|suppress_negative": 26,
       "MEAN_REVERT|suppress_negative": 46
     },
-    "cycle": 95
+    "cycle": 98
   },
   "ledger": [
     {

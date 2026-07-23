@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-23T02:29:51.738773+00:00",
-  "generated_at_ts": 1784773791.738773,
-  "lookback_hours": 72,
+  "generated_at": "2026-07-23T04:01:16.678011+00:00",
+  "generated_at_ts": 1784779276.6780107,
+  "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "e868c9b66715eb4c720c1be340f6739769dfad96",
+  "git_sha": "3e8d1fb13162ed5b686bb81925c124641556e175",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,10 +15,10 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 4021,
-    "strategy_matrix_scored_cells": 1427,
+    "strategy_matrix_cells": 4029,
+    "strategy_matrix_scored_cells": 1434,
     "performance_setups": 14,
-    "suppression_gates": 15
+    "suppression_gates": 14
   },
   "headlines": {
     "strongest_cells": [
@@ -88,21 +88,20 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "FAILED_AUCTION_RECLAIM",
-        "context_key": "OVERLAP/DISTRIBUTION/NORMAL/BTC_NEUTRAL/MAJOR",
-        "edge_r": -1.1875000000000002,
-        "n": 22,
+        "strategy": "DIVERGENCE_CONTINUATION",
+        "context_key": "ASIA/MARKDOWN/NORMAL/BTC_NEUTRAL/ALTCOIN",
+        "edge_r": -1.1875000000000004,
+        "n": 50,
         "verdict": "NEGATIVE"
       }
     ],
     "gate_verdict_counts": {
+      "TUNE": 2,
       "KEEP": 7,
-      "DROP": 2,
-      "TUNE": 1,
-      "INSUFFICIENT_SAMPLE": 5
+      "DROP": 1,
+      "INSUFFICIENT_SAMPLE": 4
     },
     "drop_gates": [
-      "dispatch_staleness",
       "shadow_unit:SHADOW_RANGE_FADE"
     ]
   }
