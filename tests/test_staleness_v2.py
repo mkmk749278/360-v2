@@ -127,10 +127,12 @@ def test_zero_prices_fail_open() -> None:
     assert d.fresh
 
 
-def test_params_from_config_defaults_dark() -> None:
-    # The live flag must default OFF (dark-first); measurement defaults ON.
+def test_params_from_config_defaults_live() -> None:
+    # Measurement and live application both default ON. Live activated
+    # 2026-07-23 on owner directive (V2 replaces the measured-negative flat
+    # V1 drift gate; the runtime tunable dispatch_staleness_v2_live reverts).
     p = StalenessV2Params.from_config()
     assert p.enabled is True
-    assert p.live is False
+    assert p.live is True
     assert p.toward_sl_max_frac > 0
     assert p.toward_tp_max_frac > 0

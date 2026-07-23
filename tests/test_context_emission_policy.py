@@ -273,7 +273,10 @@ def test_missing_context_never_overrides() -> None:
     assert d.would_override is False
 
 
-def test_gate_override_defaults_dark() -> None:
-    # Config default: measurement ON, live application OFF (dark-first).
+def test_gate_override_defaults_live() -> None:
+    # Config default: measurement ON and live application ON. Activated
+    # 2026-07-23 on owner directive (the gate carries a measured-negative
+    # audit verdict; the runtime tunable gate_override_live is the guardrail).
     p = PolicyParams.from_config()
-    assert p.gate_override_live is False
+    assert p.gate_override_enabled is True
+    assert p.gate_override_live is True
