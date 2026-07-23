@@ -67,6 +67,27 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
     monkeypatch.setattr(
         Scanner, "_is_entry_fresh", lambda self, sig, current_price=None: True
     )
+    # Staleness V2 (2026-07-23): now live by default, it evaluates inline in
+    # ``_enqueue_signal`` via ``staleness_v2.evaluate`` — a path the V1 stub
+    # above does not cover — so an unrelated lifecycle test that drifts price
+    # (e.g. TestLevelRearmStateMachine's excursion cases) would now be blocked
+    # by V2 rather than reaching the logic under test. Keep the "staleness
+    # disabled by default" contract for both gates by forcing a fresh V2
+    # verdict. The scanner looks the symbol up on the module at call time, so
+    # this patch reaches it; ``test_staleness_v2`` holds a local ``evaluate``
+    # import and is unaffected, and ``gate_env`` restores the real function to
+    # exercise V2 for real.
+    import src.staleness_v2 as _sv2_mod
+    monkeypatch.setattr(
+        _sv2_mod,
+        "evaluate",
+        lambda **_kw: _sv2_mod.StalenessV2Decision(
+            fresh=True,
+            drift_direction=_sv2_mod.DRIFT_NONE,
+            drift_frac=0.0,
+            reason="test-stub-fresh",
+        ),
+    )
     # Belt-and-braces: nuke any stale ``data/signal_dispatch_cooldown.json``
     # that might exist from a misconfigured run BEFORE the conftest landed.
     # Without this, ``Scanner._load_dispatch_cooldown`` (when conftest

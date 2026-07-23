@@ -17,14 +17,18 @@ from unittest.mock import MagicMock
 import pytest
 
 import config
+from src import staleness_v2 as _sv2
 from src.channels.base import Direction, Signal
 from src.context_emission_policy import GateOverrideDecision
 from src.scanner import Scanner
 from src.suppression_audit import SuppressedCandidateStore
 
-# Captured at import time — the autouse conftest fixture replaces these class
-# attributes per-test, so this is the only handle on the real implementations.
+# Captured at import time — the autouse conftest fixture replaces these per-test
+# (Scanner._is_entry_fresh -> always-fresh V1, staleness_v2.evaluate ->
+# always-fresh V2 stub), so these are the only handles on the real
+# implementations. gate_env restores both to exercise the real gates.
 _REAL_IS_ENTRY_FRESH = Scanner._is_entry_fresh
+_REAL_STALENESS_V2_EVALUATE = _sv2.evaluate
 
 
 def _make_scanner() -> Scanner:
@@ -87,6 +91,7 @@ def gate_env(monkeypatch):
     from src import runtime_tunables as rt
 
     monkeypatch.setattr(Scanner, "_is_entry_fresh", _REAL_IS_ENTRY_FRESH)
+    monkeypatch.setattr(_sv2, "evaluate", _REAL_STALENESS_V2_EVALUATE)
     store = SuppressedCandidateStore(persist_path="")
     monkeypatch.setattr(gab, "get_geometry_store", lambda: store)
     monkeypatch.setattr(config, "DISPATCH_STALENESS_V2_ENABLED", True, raising=False)
