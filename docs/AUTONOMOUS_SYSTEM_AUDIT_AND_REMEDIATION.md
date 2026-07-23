@@ -24,6 +24,111 @@ are treated here as symptoms, not fixes.
 
 ---
 
+## 0. THE ONE UMBRELLA (2026-07-23) — supersedes the W1–W8 framing
+
+The W1–W8 sequence below is correct but reads as eight problems. It is **one**. Every
+leak we have measured by hand on the live tape — MVRTP = the entire −49%,
+anti-predictive confidence (80–100 conf → 7% win), ~20% born-dead entries, 24%
+breakeven-bleed, choked regular paths (mean_revert 3,253 detected / 2 emitted), the
+momentum-biased floor, thin-pair slippage — is a **facet of a single root**:
+
+> **A momentum-shaped emission gate is applied uniformly to every pair, regardless of
+> cohort.** The gate is momentum-shaped twice over, and it is the same one gate for a
+> promoted mover and a regular range pair.
+
+**Code-grounded proof (not assertion):**
+
+1. **One rubric for all pairs.** `src/confidence.py` — `_SCALP_DEFAULT_WEIGHTS` is flat
+   1.0 across every SCALP channel; the docstring states the channels *"raw-sum
+   identically."* A $1B major and a thin promoted altcoin are scored on the same scale.
+2. **The rubric is 75% momentum.** Of the 100 confidence points, `smc` (30) + `trend`
+   (25) + `order_flow` (20) = **75** come from trend/momentum/flow. A mean-revert or
+   range-fade setup scores ~0 on the `trend` block by construction (no EMA alignment, no
+   ADX, no momentum, no MACD push) and **cannot structurally reach the 65 floor.** The
+   score measures *how much a thing is moving*, not whether the setup has edge.
+3. **The threshold compounds it.** `compute_adaptive_threshold` applies `RANGING +5`,
+   `VOLATILE +8`, `TRENDING −3` — it *raises* the bar in the regimes where regular pairs
+   live and *lowers* it for movers.
+4. **"Promoted pair" is a real mechanism.** `src/pair_manager.py` auto-promotes
+   TIER3→TIER2 on a volume surge. A thin coin spikes → promoted → scanned → throws large
+   trend/momentum readings → clears the gate trivially. **That promotion path is MVRTP;
+   MVRTP is the −49%.** Regular TIER1 pairs run range setups the same gate rejects.
+
+Therefore high confidence loses (high confidence = "a mover"); entries are born-dead
+(the gate admits only moves that already happened, so you enter as exit liquidity); the
+good paths are choked (judged on a mover's yardstick). **One gate, two games** — exactly
+the owner's framing: *regular and promoted pairs must not be scored the same.*
+
+### The single fix — 80% already built, switched OFF
+
+Three pieces already exist in the repo:
+
+| Piece | File | State |
+|---|---|---|
+| Liquidity-cohort classification (MAJOR/MIDCAP/ALTCOIN) | `src/pair_cohort.py` | built, **OFF** (`context_emission_cohort_aware`) |
+| Cohort × strategy × context **net-edge** cells | `src/strategy_edge.py` (W1/W2 net-R) | built, dual-write **OFF** |
+| The actuator that relaxes/suppresses emission on measured edge | `src/context_emission_policy.py` | **LIVE**, now net-aware |
+
+The only missing wire:
+
+> **Emission clears on the signal's own `cohort × strategy × context` net-edge cell —
+> not on a momentum-shaped confidence 65.** The emission bar stops being one number and
+> becomes per-cohort, read from the edge the system already measures.
+
+This one wire drains every leak through the same hole:
+- MVRTP's promoted-mover cells read net-negative → **self-retire** (volume drops).
+- mean_revert / range cells read net-positive → **emit and fill the vacated volume**
+  (volume replaced, with edge — the answer to "if we retire MVRTP where does volume come
+  from").
+- Confidence stops being the gate → **anti-predictive confidence stops mattering.**
+- Regular vs promoted judged on their own edge distributions → **the owner's requirement,
+  in code.**
+
+Two measurement axes must land with it so the actuator steers on complete data, not half:
+- **Confidence-bucket axis** on the edge matrix — makes "high confidence loses" a live,
+  self-correcting signal instead of something only a human sees on the tape.
+- **MFE/MAE stamp** per signal — makes born-dead vs went-favorable-then-reversed a
+  first-class metric (feeds the pre-TP partial-bank + entry-confirmation geometry).
+
+**This section is the design of record.** W1 (cost-aware R) and W2 (reconciliation) are
+its prerequisites and are already shipped/live — the cohort cells are only trustworthy
+because R is now net. W3–W8 below are re-read as *components of this one change*, not
+separate workstreams: W3 = flip on cohort cells + cohort-aware emission bar + retire
+net-negative promoted cells; W4 = the emission of the unblocked regular winners is the
+same wire; the confidence-bucket and MFE/MAE axes are the two new detectors this needs.
+
+Doctrine: the emission-authority change is a money-path scoring change. Per owner
+directive ("make everything live, no darks") it activates live with the kill switch
+(`context_emission_*` ops flags) and blast-radius caps retained; the reconciliation
+watchdog (W2, live) validates the cohort cells in-flight. The two measurement axes are
+off-money-path telemetry and ship normally.
+
+### Programme status ledger — every prior solution, in one place
+
+All the work from this programme, consolidated. The W-numbers below are the components
+of §0's one umbrella, not independent tracks.
+
+| # | Workstream | What it does | Status | Where |
+|---|---|---|---|---|
+| W1 | **Cost-aware R** | every recorded R is net of taker+slippage+funding; gross kept alongside | **SHIPPED · LIVE** (`EDGE_COST_MODEL_ENABLED=true`) | merged #770 → `main` |
+| W2 | **Realized-vs-counterfactual reconciliation + watchdog** | always-net observability; pages when realized diverges from counterfactual; truth-report surface | **SHIPPED · LIVE** | merged #771 → `main` |
+| — | **This audit + LLM-critic bridge + edge-decay principle** | design-of-record, §0 umbrella, §2a decay adversary, shadow-critic design | **THIS PR (#772)** — docs only | `docs/session-76-autonomous-audit` |
+| W3 | **Cohort-aware net-edge emission** (the core wire) | flip on `pair_cohort` dual-write; emission clears on `cohort×strategy×context` net cell, not the momentum-65; net-negative promoted-mover cells self-retire (MVRTP) | **NEXT — the one build** | `pair_cohort.py` (built, OFF) + `context_emission_policy.py` (live) |
+| W4 | **Harvest the unblocked regular winners** | the same wire: net-positive mean_revert/range/SR-flip cells emit and refill vacated volume | **Folded into W3** | same |
+| W5 | **Broaden controller action space** | let `emission_controller` act on cohort cells within the bounded envelope | after W3 lands | `emission_controller.py` |
+| W6 | **Regime/universe focus** | scanner scope follows measured cohort edge | after W3 | `pair_manager.py`, `scanner/` |
+| W7 | **Actuation-latency tuning** | close the dispatch-staleness gap on emitted signals | after W3 | dispatch path |
+| W8 | **Edge-decay trajectory monitor** | forward-track each cell's net-R slope so a decayed edge auto-demotes | measurement-first | `strategy_edge.py` |
+| +ax1 | **Confidence-bucket axis** (new detector) | edge matrix keyed on confidence bucket → "high confidence loses" becomes a live signal | lands with W3 | `strategy_edge.py` |
+| +ax2 | **MFE/MAE stamp** (new detector) | per-signal favorable/adverse excursion → born-dead vs reversed made measurable | lands with W3 | signal stamp → reconciliation |
+
+**One-glance state:** the measurement foundation (W1/W2) is **live in `main`**. This PR
+(#772) records the converged design. The remaining work is **one** money-path change
+(W3, absorbing W4) plus its two detector axes; W5–W8 are follow-ons that only make sense
+once emission is cohort-net-edge-driven.
+
+---
+
 ## 1. Purpose & scope
 
 The owner's question: *"We built all of this — market-context engine, per-context
