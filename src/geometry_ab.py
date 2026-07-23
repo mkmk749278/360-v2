@@ -54,7 +54,15 @@ log = get_logger("geometry_ab")
 FIXED_SUFFIX = "@FIXED"
 ATR_SUFFIX = "@ATR"
 TUNED_SUFFIX = "@TUNED"
-_VARIANT_SUFFIXES: Tuple[str, ...] = (FIXED_SUFFIX, ATR_SUFFIX, TUNED_SUFFIX)
+# Dispatch-gate shadow arms (2026-07-23): @DSV2 = staleness-V2 rescue (V1
+# blocked, V2 would pass — entry re-anchored at dispatch-time price), @GOV =
+# STRONG-cell gate override rescue (src/context_emission_policy.gate_override).
+# Same contract as the stop arms: measurement rows, never activatable.
+DSV2_SUFFIX = "@DSV2"
+GOV_SUFFIX = "@GOV"
+_VARIANT_SUFFIXES: Tuple[str, ...] = (
+    FIXED_SUFFIX, ATR_SUFFIX, TUNED_SUFFIX, DSV2_SUFFIX, GOV_SUFFIX
+)
 
 GATE_FIXED = "geometry_ab:fixed"
 GATE_ATR = "geometry_ab:atr"
@@ -327,4 +335,49 @@ def summarize_geometry_ab(
         key=lambda r: abs(r["delta_r"]) if r["delta_r"] is not None else -1.0,
         reverse=True,
     )
+    return rows
+
+
+def summarize_recipe_arms(
+    matrix: Dict[str, Dict], *, min_sample: int = 15
+) -> List[Dict]:
+    """Per-(strategy, arm) rollup for the recipe/rescue shadow arms (pure).
+
+    Pools the @TUNED (tuned recipes / MTP perfect-entry), @DSV2 (staleness-V2
+    rescue) and @GOV (STRONG-cell gate-override rescue) rows across contexts —
+    the dark-first evidence table each of those flags needs before its live
+    flip can be signed off.  Rows under ``min_sample`` are MEASURING, not
+    evidence.  Sorted by sample size descending.
+    """
+    recipe_suffixes = (TUNED_SUFFIX, DSV2_SUFFIX, GOV_SUFFIX)
+    pooled: Dict[Tuple[str, str], Dict[str, float]] = {}
+    for cell in (matrix or {}).values():
+        strategy = str(cell.get("strategy", ""))
+        sfx = next((s for s in recipe_suffixes if strategy.endswith(s)), None)
+        if sfx is None:
+            continue
+        n = int(cell.get("n", 0) or 0)
+        if n <= 0:
+            continue
+        key = (base_strategy(strategy), sfx.lstrip("@"))
+        agg = pooled.setdefault(key, {"n": 0.0, "wins": 0.0, "r_sum": 0.0, "cells": 0.0})
+        agg["n"] += n
+        agg["wins"] += float(cell.get("win_rate", 0.0) or 0.0) * n
+        agg["r_sum"] += float(cell.get("avg_r", 0.0) or 0.0) * n
+        agg["cells"] += 1
+    rows: List[Dict] = []
+    for (base, arm), agg in pooled.items():
+        n = int(agg["n"])
+        rows.append(
+            {
+                "strategy": base,
+                "arm": arm,
+                "n": n,
+                "cells": int(agg["cells"]),
+                "win_rate": (agg["wins"] / n) if n else 0.0,
+                "avg_r": (agg["r_sum"] / n) if n else 0.0,
+                "status": "MEASURED" if n >= min_sample else "MEASURING",
+            }
+        )
+    rows.sort(key=lambda r: r["n"], reverse=True)
     return rows

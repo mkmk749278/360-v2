@@ -53,7 +53,20 @@ _MIN_SAMPLE: int = int(os.getenv("SUPPRESSION_AUDIT_MIN_SAMPLE", "20"))
 WOULD_WIN = "WOULD_WIN"
 WOULD_LOSE = "WOULD_LOSE"
 WOULD_EXPIRE = "WOULD_EXPIRE"
+# Limit-entry arms only: price never came back to the resting entry, so no
+# trade happened.  Scored as 0R in ``candidate_outcome`` — the cost of a
+# patient entry IS the fills it misses, and 0R is that cost stated honestly.
+WOULD_NOT_FILL = "WOULD_NOT_FILL"
 INSUFFICIENT = "INSUFFICIENT_DATA"
+
+# Entry-fill models for stamped candidates.  ``immediate`` (default, all
+# historical records): assume entered at the stamped entry the moment of the
+# stamp — correct for market-style dispatch.  ``limit``: a resting order at
+# ``entry`` that must be TOUCHED by price before TP/SL race — requires the
+# candle-walk classifier (``classify_limit_record``) because window extremes
+# cannot order fill-vs-target events.
+ENTRY_IMMEDIATE = "immediate"
+ENTRY_LIMIT = "limit"
 
 VERDICT_KEEP = "KEEP"           # gate correctly suppresses losers
 VERDICT_DROP = "DROP"           # gate is killing winners
@@ -87,6 +100,9 @@ class SuppressedCandidateRecord:
     # dual-written alongside the base cell so cohort matrices accumulate without
     # fragmenting the base one.
     pair_cohort: str = ""
+    # Entry-fill model (ENTRY_IMMEDIATE | ENTRY_LIMIT).  Defaulted so every
+    # pre-existing persisted record keeps its original semantics on reload.
+    entry_type: str = ENTRY_IMMEDIATE
     # Filled by classify_pending once the window elapses.
     classified_at: Optional[float] = None
     classification: Optional[str] = None
@@ -139,6 +155,67 @@ def classify_suppressed_record(
     return INSUFFICIENT
 
 
+def classify_limit_record(
+    record: Dict[str, Any],
+    highs: List[float],
+    lows: List[float],
+) -> str:
+    """Fill-aware counterfactual for a resting-limit entry arm.
+
+    Walks candles in time order: the order fills on the first candle whose
+    range touches ``entry``; only from that candle on may TP1/SL count.
+    Conservative on every intrabar ambiguity (same bias as
+    ``classify_suppressed_record``): a candle that fills AND breaches the stop
+    is a loss, regardless of whether it also reached TP1 — OHLC cannot order
+    intrabar events and the money path must not be flattered.  Never filled →
+    ``WOULD_NOT_FILL``.  Pure — unit-testable.
+    """
+    side = str(record.get("side") or "").upper()
+    entry = float(record.get("entry") or 0.0)
+    tp1 = float(record.get("tp1") or 0.0)
+    sl = float(record.get("stop_loss") or 0.0)
+    sl_distance = float(record.get("sl_distance") or abs(entry - sl))
+    if entry <= 0 or sl_distance <= 0 or tp1 <= 0 or sl <= 0:
+        return INSUFFICIENT
+    if side not in ("LONG", "SHORT") or highs is None or lows is None:
+        return INSUFFICIENT
+    n = min(len(highs), len(lows))
+    if n == 0:
+        return INSUFFICIENT
+
+    filled = False
+    for i in range(n):
+        high = float(highs[i])
+        low = float(lows[i])
+        if side == "LONG":
+            touched = low <= entry
+            hit_sl = low <= sl
+            hit_tp = high >= tp1
+        else:
+            touched = high >= entry
+            hit_sl = high >= sl
+            hit_tp = low <= tp1
+        if not filled:
+            if not touched:
+                continue
+            filled = True
+            # Touching the limit already implies price traded through toward
+            # the stop side; a same-candle stop breach is a fill-then-stop.
+            if hit_sl:
+                return WOULD_LOSE
+            if hit_tp:
+                # Range spans entry AND target with the stop intact: the fill
+                # is certain and the stop never traded — credit the win (same
+                # tp-with-stop-intact rule the immediate classifier applies).
+                return WOULD_WIN
+            continue
+        if hit_sl:
+            return WOULD_LOSE
+        if hit_tp:
+            return WOULD_WIN
+    return WOULD_EXPIRE if filled else WOULD_NOT_FILL
+
+
 def _r_to_tp1(record: Dict[str, Any]) -> float:
     entry = float(record.get("entry") or 0.0)
     tp1 = float(record.get("tp1") or 0.0)
@@ -189,6 +266,11 @@ def candidate_outcome(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     entry = float(record.get("entry") or 0.0)
     if not cls or cls == INSUFFICIENT or entry <= 0:
         return None
+    if cls == WOULD_NOT_FILL:
+        # No fill, no fees, no PnL — the limit recipe's outcome for this
+        # candidate is exactly zero, and that zero belongs in its average.
+        return {"won": False, "pnl_pct": 0.0, "r_multiple": 0.0,
+                "gross_r_multiple": 0.0, "net_r_multiple": 0.0, "mfe_pct": 0.0}
     sl_distance = float(record.get("sl_distance") or 0.0)
     r_tp1 = _r_to_tp1(record)
 
@@ -352,7 +434,12 @@ class SuppressedCandidateStore:
             low = min(_lows)
             close = ohlc.get("close")
             final = float(close[-1]) if close is not None and len(close) > 0 else 0.0
-            label = classify_suppressed_record(rec, high, low, final)
+            if str(rec.get("entry_type") or ENTRY_IMMEDIATE) == ENTRY_LIMIT:
+                label = classify_limit_record(
+                    rec, [float(h) for h in _highs], [float(low_) for low_ in _lows]
+                )
+            else:
+                label = classify_suppressed_record(rec, high, low, final)
             rec["post_price_max"] = high
             rec["post_price_min"] = low
             rec["post_price_final"] = final
@@ -445,6 +532,7 @@ def stamp_candidate(
     regime: str = "",
     valid_for_minutes: float = 0.0,
     pair_cohort: str = "",
+    entry_type: str = ENTRY_IMMEDIATE,
     store: Optional[SuppressedCandidateStore] = None,
 ) -> Optional[SuppressedCandidateRecord]:
     """Stamp a suppressed candidate (fail-open).  Scopes to tradeable geometry only."""
@@ -470,6 +558,7 @@ def stamp_candidate(
             regime=regime or "",
             valid_for_minutes=float(valid_for_minutes or 0.0),
             pair_cohort=str(pair_cohort or ""),
+            entry_type=str(entry_type or ENTRY_IMMEDIATE),
             suppress_timestamp=time.time(),
         )
         (store or get_store()).stamp(rec)

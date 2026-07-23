@@ -70,7 +70,13 @@ def _build_registry() -> Dict[str, Tunable]:
         BTC_DIR_PENALTY_APPLY,
         COHORT_EDGE_GATE_ENABLED,
         CONTEXT_EMISSION_COHORT_AWARE,
+        CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED,
+        CONTEXT_EMISSION_GATE_OVERRIDE_LIVE,
         CONTEXT_EMISSION_LIVE,
+        DISPATCH_STALENESS_V2_ENABLED,
+        DISPATCH_STALENESS_V2_LIVE,
+        DISPATCH_STALENESS_V2_TOWARD_SL_MAX_FRAC,
+        DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC,
         CONTEXT_EMISSION_MIN_SAMPLES,
         CONTEXT_EMISSION_POLICY_ENABLED,
         CONTEXT_EMISSION_POSITIVE_RELAX,
@@ -519,6 +525,96 @@ def _build_registry() -> Dict[str, Tunable]:
             type="bool",
             default=CONTEXT_EMISSION_COHORT_AWARE,
             category="Signal gating",
+        ),
+        # ── W5 — gate override + dispatch-staleness V2 (2026-07-23) ────────
+        # Both attack the two audited-negative dispatch gates
+        # (dispatch_staleness EV −0.19R n=1225 · level_still_in_play EV
+        # −0.06R n=989).  Measurement flags default ON (observe-only); the
+        # *_live flags are DARK and flip only on owner sign-off over the
+        # @DSV2 / @GOV shadow rows in the Strategy Lab.
+        Tunable(
+            key="context_emission_gate_override_enabled",
+            label="Gate override — measure",
+            description=(
+                "ON = when a STRONG-cell candidate is blocked by "
+                "dispatch_staleness or level_still_in_play, stamp the would-be "
+                "rescue as an X@GOV shadow arm (entry re-anchored at "
+                "dispatch-time price) so the edge matrix measures what the "
+                "override would be worth. Never changes live emission by "
+                "itself. OFF = no measurement."
+            ),
+            type="bool",
+            default=CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="context_emission_gate_override_live",
+            label="Gate override — apply live",
+            description=(
+                "ON = a STRONG-cell candidate (adequate sample, positive "
+                "measured edge) actually overrides a dispatch_staleness / "
+                "level_still_in_play block and emits. Safety gates are never "
+                "overridable. Flip only on owner sign-off over the @GOV "
+                "shadow window."
+            ),
+            type="bool",
+            default=CONTEXT_EMISSION_GATE_OVERRIDE_LIVE,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="dispatch_staleness_v2_enabled",
+            label="Staleness V2 — measure",
+            description=(
+                "ON = evaluate the geometry-aware staleness gate "
+                "(src/staleness_v2.py) beside the flat V1 gate on every "
+                "dispatch attempt and stamp V1-block/V2-pass disagreements as "
+                "X@DSV2 shadow arms. V1 keeps deciding. OFF = no V2 "
+                "evaluation."
+            ),
+            type="bool",
+            default=DISPATCH_STALENESS_V2_ENABLED,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="dispatch_staleness_v2_live",
+            label="Staleness V2 — apply live",
+            description=(
+                "ON = V2 replaces V1 as the deciding staleness gate: drift is "
+                "bounded per direction as a fraction of the candidate's own "
+                "SL/TP distances instead of a flat 0.5%. Flip only on owner "
+                "sign-off over the @DSV2 shadow window."
+            ),
+            type="bool",
+            default=DISPATCH_STALENESS_V2_LIVE,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="dispatch_staleness_v2_toward_sl_max_frac",
+            label="Staleness V2 — max drift toward SL (frac)",
+            description=(
+                "Adverse-drift budget: fraction of the entry→SL distance price "
+                "may consume before the signal is stale (1.0 = price at the "
+                "stop). Applies when V2 is live."
+            ),
+            type="float",
+            default=DISPATCH_STALENESS_V2_TOWARD_SL_MAX_FRAC,
+            category="Signal gating",
+            min_value=0.05,
+            max_value=1.0,
+        ),
+        Tunable(
+            key="dispatch_staleness_v2_toward_tp_max_frac",
+            label="Staleness V2 — max drift toward TP (frac)",
+            description=(
+                "Chase budget: fraction of the entry→TP1 distance price may "
+                "already have travelled before dispatch counts as chasing. "
+                "Applies when V2 is live."
+            ),
+            type="float",
+            default=DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC,
+            category="Signal gating",
+            min_value=0.05,
+            max_value=1.0,
         ),
         # ── Layer G — autonomous emission controller (S72) ──────────────────
         # The outer loop: consumes the suppression-audit gate verdicts + edge

@@ -186,3 +186,107 @@ def test_insufficient_when_no_ohlc(tmp_path):
         fetch_ohlc_since=lambda s, t: None, now_ts=1e12,
     )
     assert counters.get(sa.INSUFFICIENT) == 1
+
+
+# ------------------------------------------------- limit-entry (fill-aware) arms
+def _limit_rec(side="LONG", entry=100.0, sl=98.0, tp1=103.0):
+    r = _rec(side=side, entry=entry, sl=sl, tp1=tp1, gate="tuned_variant:MTP")
+    r["entry_type"] = sa.ENTRY_LIMIT
+    return r
+
+
+def test_limit_long_fill_then_win():
+    # Candle 1 dips to the limit (no stop breach), candle 2 reaches TP1.
+    label = sa.classify_limit_record(
+        _limit_rec(), highs=[100.5, 103.5], lows=[99.8, 100.2]
+    )
+    assert label == sa.WOULD_WIN
+
+
+def test_limit_long_never_filled_is_not_fill():
+    # Price runs to TP without ever touching the resting limit — the immediate
+    # classifier would flatter this as a WIN; the limit walk must not.
+    label = sa.classify_limit_record(
+        _limit_rec(), highs=[104.0, 105.0], lows=[100.5, 103.0]
+    )
+    assert label == sa.WOULD_NOT_FILL
+
+
+def test_limit_long_fill_candle_stop_breach_is_lose():
+    # The candle that touches the limit also trades through the stop —
+    # conservative fill-then-stop, even though a later candle reaches TP.
+    label = sa.classify_limit_record(
+        _limit_rec(), highs=[100.5, 104.0], lows=[97.5, 100.0]
+    )
+    assert label == sa.WOULD_LOSE
+
+
+def test_limit_long_fill_candle_spans_tp_with_stop_intact_is_win():
+    label = sa.classify_limit_record(
+        _limit_rec(), highs=[103.5], lows=[99.9]
+    )
+    assert label == sa.WOULD_WIN
+
+
+def test_limit_long_filled_then_neither_is_expire():
+    label = sa.classify_limit_record(
+        _limit_rec(), highs=[100.4, 101.0], lows=[99.9, 99.5]
+    )
+    assert label == sa.WOULD_EXPIRE
+
+
+def test_limit_short_mirror():
+    # SHORT limit above market: entry 100, SL 102, TP1 97.
+    rec = _limit_rec(side="SHORT", entry=100.0, sl=102.0, tp1=97.0)
+    # Candle 1 pops to the limit, candle 2 drops to target.
+    assert sa.classify_limit_record(rec, highs=[100.2, 99.0], lows=[99.0, 96.8]) == sa.WOULD_WIN
+    # Never touches the limit from below → no fill.
+    assert sa.classify_limit_record(rec, highs=[99.5, 98.0], lows=[97.0, 96.5]) == sa.WOULD_NOT_FILL
+    # Fill candle also breaches the stop → conservative lose.
+    assert sa.classify_limit_record(rec, highs=[102.5, 96.0], lows=[99.9, 95.0]) == sa.WOULD_LOSE
+
+
+def test_limit_degenerate_geometry_insufficient():
+    rec = _limit_rec()
+    rec["stop_loss"] = 0.0
+    rec["sl_distance"] = 0.0
+    assert sa.classify_limit_record(rec, highs=[100.0], lows=[99.0]) == sa.INSUFFICIENT
+    assert sa.classify_limit_record(_limit_rec(), highs=[], lows=[]) == sa.INSUFFICIENT
+
+
+def test_would_not_fill_outcome_is_flat_zero():
+    rec = _limit_rec()
+    rec["classification"] = sa.WOULD_NOT_FILL
+    out = sa.candidate_outcome(rec)
+    assert out is not None
+    assert out["r_multiple"] == 0.0
+    assert out["net_r_multiple"] == 0.0
+    assert out["pnl_pct"] == 0.0
+    assert out["won"] is False
+
+
+def test_classify_pending_routes_limit_records(tmp_path):
+    store = sa.SuppressedCandidateStore(persist_path="")
+    sa.stamp_candidate(
+        gate_name="tuned_variant:MOVER_TREND_PULLBACK", symbol="BTCUSDT",
+        channel="c", setup_class="MOVER_TREND_PULLBACK@TUNED", side="LONG",
+        entry=100, stop_loss=98, tp1=103, entry_type=sa.ENTRY_LIMIT, store=store,
+    )
+    # Window extremes span TP with the limit never touched (lows stay above
+    # entry): the immediate classifier would say WIN, the limit walk NOT_FILL.
+    counters = store.classify_pending(
+        fetch_ohlc_since=lambda s, t: {
+            "high": [104.0, 105.0], "low": [100.5, 103.0], "close": [104.5, 104.8],
+        },
+        now_ts=1e12,
+    )
+    assert counters.get(sa.WOULD_NOT_FILL) == 1
+
+
+def test_stamp_defaults_to_immediate_entry_type(tmp_path):
+    store = sa.SuppressedCandidateStore(persist_path="")
+    rec = sa.stamp_candidate(
+        gate_name="g", symbol="BTCUSDT", channel="c", setup_class="S", side="LONG",
+        entry=100, stop_loss=99, tp1=102, store=store,
+    )
+    assert rec is not None and rec.entry_type == sa.ENTRY_IMMEDIATE

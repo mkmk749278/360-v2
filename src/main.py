@@ -2018,6 +2018,60 @@ class CryptoSignalEngine:
             min_streak=72,         # ~6 h
         ))
 
+        def _gate_counter_sum(prefixes) -> Optional[float]:
+            # Snapshot before summing — the scanner's event loop mutates the
+            # Counter concurrently with this worker thread; a resize mid-read
+            # skips the cycle (None) rather than crashing the registry.
+            c = getattr(self._scanner, "_suppression_counters", None)
+            if c is None:
+                return None
+            try:
+                snap = dict(c)
+            except RuntimeError:
+                return None
+            return float(sum(
+                v for k, v in snap.items()
+                if any(str(k).startswith(p) for p in prefixes)
+            ))
+
+        def _dsv2_evaluated():
+            if not bool(_rt.get("dispatch_staleness_v2_enabled")):
+                return None
+            return _gate_counter_sum(("dsv2:evaluated",))
+
+        # Staleness-V2 shadow: candidates keep reaching the staleness gate
+        # (emitted or staleness-suppressed) while V2 evaluates none of them →
+        # the shadow measurement died (import broke / params never build) and
+        # the @DSV2 evidence the owner will sign off on silently stops
+        # accumulating.  Dispatch attempts are sparse, hence the long streak.
+        fl.add_rate(RateProbe(
+            name="staleness_v2_shadow",
+            counter=_dsv2_evaluated,
+            upstream=lambda: _gate_counter_sum(
+                ("enqueue_stage:emitted:", "enqueue_stage:dispatch_staleness")
+            ),
+            min_upstream_delta=5.0,
+            min_streak=36,         # ~3 h
+        ))
+
+        def _gov_evaluated():
+            if not bool(_rt.get("context_emission_gate_override_enabled")):
+                return None
+            return _gate_counter_sum(("gov:evaluated:",))
+
+        # W5 gate-override shadow: the two overridable gates keep suppressing
+        # while the override evaluated none of the blocks → the @GOV
+        # measurement flat-lined.  Same bar as staleness_v2_shadow.
+        fl.add_rate(RateProbe(
+            name="gate_override_shadow",
+            counter=_gov_evaluated,
+            upstream=lambda: _gate_counter_sum(
+                ("enqueue_stage:dispatch_staleness", "enqueue_stage:level_still_in_play:")
+            ),
+            min_upstream_delta=5.0,
+            min_streak=36,         # ~3 h
+        ))
+
         def _ec_health():
             # Layer G: the controller must keep cycling once enabled. A money-path
             # tuner that silently stops (import broke / loop wedged) would freeze

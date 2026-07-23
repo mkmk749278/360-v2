@@ -61,6 +61,13 @@ DIV_AGREE_SUPPRESS = "agree_suppress"
 DIV_RELAX = "relax"       # policy would emit; the global floor suppresses (missed edge)
 DIV_TIGHTEN = "tighten"   # policy would suppress; the global floor emits (a losing cell)
 
+# W5 — the only dispatch gates the edge matrix may override.  Both carry a
+# measured-negative suppression verdict (2026-07-23 audit: dispatch_staleness
+# EV −0.19R n=1225 · level_still_in_play EV −0.06R n=989).  Safety gates
+# (kill switch, blast radius, data_stale, dispatch_cooldown) are deliberately
+# NOT in this tuple and must never be added without owner sign-off.
+OVERRIDABLE_GATES = ("dispatch_staleness", "level_still_in_play")
+
 
 @dataclass(frozen=True)
 class PolicyParams:
@@ -74,6 +81,11 @@ class PolicyParams:
     min_samples: int
     suppress_negative: bool
     cohort_aware: bool = False
+    # W5 — edge-matrix authority over the audited-negative dispatch gates
+    # (OVERRIDABLE_GATES).  ``gate_override_enabled`` turns on the shadow
+    # measurement; ``gate_override_live`` (dark, owner sign-off) applies it.
+    gate_override_enabled: bool = False
+    gate_override_live: bool = False
     # Layer-G per-strategy overrides: {STRATEGY -> {suppress_negative, min_samples}}.
     # Set by the autonomous emission controller; each key may be None (follow the
     # global value above). Loaded once per params build from the in-memory
@@ -90,6 +102,8 @@ class PolicyParams:
         """
         from config import (
             CONTEXT_EMISSION_COHORT_AWARE,
+            CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED,
+            CONTEXT_EMISSION_GATE_OVERRIDE_LIVE,
             CONTEXT_EMISSION_LIVE,
             CONTEXT_EMISSION_MIN_SAMPLES,
             CONTEXT_EMISSION_POLICY_ENABLED,
@@ -129,6 +143,12 @@ class PolicyParams:
             min_samples=max(1, int(_rt("context_emission_min_samples", CONTEXT_EMISSION_MIN_SAMPLES))),  # type: ignore[call-overload]
             suppress_negative=bool(_rt("context_emission_suppress_negative", CONTEXT_EMISSION_SUPPRESS_NEGATIVE)),
             cohort_aware=bool(_rt("context_emission_cohort_aware", CONTEXT_EMISSION_COHORT_AWARE)),
+            gate_override_enabled=bool(
+                _rt("context_emission_gate_override_enabled", CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED)
+            ),
+            gate_override_live=bool(
+                _rt("context_emission_gate_override_live", CONTEXT_EMISSION_GATE_OVERRIDE_LIVE)
+            ),
             per_strategy=per_strategy,
         )
 
@@ -177,6 +197,50 @@ def _resolve_matrix_strategy(strategy: str, store: object) -> str:
     return alias if alias else strategy
 
 
+def _lookup_cell(
+    strategy: str,
+    context_key: str,
+    cohort: str,
+    store: object,
+    p: "PolicyParams",
+) -> tuple:
+    """Resolve the measurement cell for ``strategy`` in ``context_key``.
+
+    Applies the Phase-5 cohort refinement and the shadow-control-arm fallback
+    exactly as ``effective_floor`` always has; returns
+    ``(lookup_name, effective_context, verdict, edge_r, n)``.
+    """
+    effective_ctx = context_key
+    if p.cohort_aware and cohort:
+        from src.pair_cohort import cohort_context_key
+
+        cohort_ctx = cohort_context_key(context_key, cohort)
+        alias = _CONTROL_ARM.get(strategy.upper())
+        cohort_has_data = (
+            store.verdict(strategy, cohort_ctx) != "INSUFFICIENT_DATA"  # type: ignore[attr-defined]
+            or (
+                alias is not None
+                and store.verdict(alias, cohort_ctx) != "INSUFFICIENT_DATA"  # type: ignore[attr-defined]
+            )
+        )
+        if cohort_has_data:
+            effective_ctx = cohort_ctx
+
+    matrix_strategy = _resolve_matrix_strategy(strategy, store)
+    # Prefer the strategy's own cell; fall back to the shadow control arm only
+    # when own data is thin (INSUFFICIENT), so a path with real emitted outcomes
+    # is judged on itself.
+    own_verdict = store.verdict(strategy, effective_ctx)  # type: ignore[attr-defined]
+    if matrix_strategy != strategy and own_verdict == "INSUFFICIENT_DATA":
+        lookup = matrix_strategy
+    else:
+        lookup = strategy
+    verdict = store.verdict(lookup, effective_ctx)  # type: ignore[attr-defined]
+    edge_r = store.edge_r(lookup, effective_ctx)  # type: ignore[attr-defined]
+    n = store.sample_count(lookup, effective_ctx)  # type: ignore[attr-defined]
+    return lookup, effective_ctx, verdict, edge_r, n
+
+
 def effective_floor(
     strategy: str,
     context_key: str,
@@ -217,38 +281,9 @@ def effective_floor(
 
         store = get_strategy_edge_store()
 
-    # Phase-5 cohort refinement: prefer the cohort-refined context cell when the
-    # policy is cohort-aware AND that cell actually has a verdict (for the
-    # strategy or its control arm); otherwise fall back to the base context cell.
-    effective_ctx = context_key
-    if p.cohort_aware and cohort:
-        from src.pair_cohort import cohort_context_key
-
-        cohort_ctx = cohort_context_key(context_key, cohort)
-        alias = _CONTROL_ARM.get(strategy.upper())
-        cohort_has_data = (
-            store.verdict(strategy, cohort_ctx) != "INSUFFICIENT_DATA"  # type: ignore[attr-defined]
-            or (
-                alias is not None
-                and store.verdict(alias, cohort_ctx) != "INSUFFICIENT_DATA"  # type: ignore[attr-defined]
-            )
-        )
-        if cohort_has_data:
-            effective_ctx = cohort_ctx
-
-    context_key = effective_ctx
-    matrix_strategy = _resolve_matrix_strategy(strategy, store)
-    # Prefer the strategy's own cell; fall back to the shadow control arm only
-    # when own data is thin (INSUFFICIENT), so a path with real emitted outcomes
-    # is judged on itself.
-    own_verdict = store.verdict(strategy, context_key)  # type: ignore[attr-defined]
-    if matrix_strategy != strategy and own_verdict == "INSUFFICIENT_DATA":
-        lookup = matrix_strategy
-    else:
-        lookup = strategy
-    verdict = store.verdict(lookup, context_key)  # type: ignore[attr-defined]
-    edge_r = store.edge_r(lookup, context_key)  # type: ignore[attr-defined]
-    n = store.sample_count(lookup, context_key)  # type: ignore[attr-defined]
+    lookup, context_key, verdict, edge_r, n = _lookup_cell(
+        strategy, context_key, cohort, store, p
+    )
 
     if verdict == VERDICT_NEGATIVE:
         if p.resolve_suppress_negative(strategy):
@@ -287,6 +322,82 @@ def effective_floor(
 
     # FLAT / INSUFFICIENT / unknown → global floor, unchanged.
     return _base(f"neutral n={n}", verdict, lookup)
+
+
+@dataclass(frozen=True)
+class GateOverrideDecision:
+    """W5 — whether measured cell evidence outranks an OVERRIDABLE_GATES block.
+
+    ``would_override=True`` means: this candidate's (strategy, context) cell is
+    measured STRONG on adequate sample, so the audited-negative heuristic gate
+    should yield.  In shadow mode the scanner stamps the would-be rescue as an
+    ``X@GOV`` arm; in live mode (``gate_override_live``) it emits.
+    """
+
+    would_override: bool
+    verdict: str
+    edge_r: Optional[float]
+    n: int
+    matrix_strategy: str
+    reason: str
+
+
+def gate_override(
+    strategy: str,
+    context_key: str,
+    *,
+    cohort: str = "",
+    store: Optional[object] = None,
+    params: Optional[PolicyParams] = None,
+) -> GateOverrideDecision:
+    """Should measured cell evidence override an OVERRIDABLE_GATES suppression?
+
+    The bar is deliberately higher than the confidence-floor relax: STRONG only
+    (never POSITIVE), positive measured edge, and the same per-strategy sample
+    floor the relax side uses.  A store error propagates so the scanner caller
+    fails open to the gate's own decision and records it via ``fail_open`` —
+    an unverifiable edge must never override a live gate.
+    """
+    p = params or PolicyParams.from_config()
+
+    def _no(reason: str, verdict: str = "UNKNOWN", edge: Optional[float] = None, n: int = 0,
+            matrix_strategy: str = "") -> GateOverrideDecision:
+        return GateOverrideDecision(
+            would_override=False,
+            verdict=verdict,
+            edge_r=edge,
+            n=n,
+            matrix_strategy=matrix_strategy or strategy,
+            reason=reason,
+        )
+
+    if not p.gate_override_enabled:
+        return _no("disabled")
+    if not strategy or not context_key:
+        return _no("no_context")
+
+    if store is None:
+        from src.strategy_edge import get_strategy_edge_store
+
+        store = get_strategy_edge_store()
+
+    lookup, _ctx, verdict, edge_r, n = _lookup_cell(strategy, context_key, cohort, store, p)
+
+    if verdict != VERDICT_STRONG:
+        return _no(f"not_strong verdict={verdict}", verdict, edge_r, n, lookup)
+    eff_min_samples = p.resolve_min_samples(strategy)
+    if n < eff_min_samples:
+        return _no(f"strong_thin n={n}<{eff_min_samples}", verdict, edge_r, n, lookup)
+    if edge_r is None or edge_r <= 0:
+        return _no(f"non_positive_edge edge={edge_r}", verdict, edge_r, n, lookup)
+    return GateOverrideDecision(
+        would_override=True,
+        verdict=verdict,
+        edge_r=edge_r,
+        n=n,
+        matrix_strategy=lookup,
+        reason=f"strong_override edge={edge_r:+.3f}R n={n}",
+    )
 
 
 def classify_divergence(
