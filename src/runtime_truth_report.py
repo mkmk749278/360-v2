@@ -942,7 +942,11 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
     split, best & worst context cell) plus the notable cells overall — the
     honest 'which strategy earns in which context' view on real data.
     """
-    from src.geometry_ab import is_geometry_variant, summarize_geometry_ab
+    from src.geometry_ab import (
+        is_geometry_variant,
+        summarize_geometry_ab,
+        summarize_recipe_arms,
+    )
 
     per_strategy: Dict[str, Dict[str, Any]] = {}
     scored_cells: List[Dict[str, Any]] = []
@@ -1016,6 +1020,7 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         "total_outcomes": total_outcomes,
         "scored_cells": len(scored_cells),
         "geometry_ab": summarize_geometry_ab(matrix),
+        "recipe_arms": summarize_recipe_arms(matrix),
         "reconciliation": reconcile_matrix(matrix),
     }
 
@@ -2123,6 +2128,40 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             "- _no geometry pairs classified yet — pairs stamp at every "
             "post-scoring emission/suppression and classify after ~1h of real "
             "candles_"
+        )
+
+    # ── Recipe / rescue shadow arms (@TUNED / @DSV2 / @GOV) ───────────
+    recipe_rows = edge.get("recipe_arms") or []
+    lines.extend(["", "## Recipe & rescue shadow arms (@TUNED / @DSV2 / @GOV)"])
+    lines.append(
+        "_Dark-first evidence rows for pending live flips: **@TUNED** = tuned "
+        "recipes for measured losers incl. the MOVER_TREND_PULLBACK "
+        "perfect-entry study (limit at the pulled-back fast MA, fill-aware — a "
+        "retest that never comes scores 0R, never a fantasy win); **@DSV2** = "
+        "dispatch-staleness V2 rescues (V1 blocked, geometry-aware V2 would "
+        "pass; entry re-anchored at dispatch-time price); **@GOV** = "
+        "STRONG-cell overrides of the two audited-negative gates.  Compare "
+        "each arm's avg R against its base strategy row in the edge matrix "
+        "above; a MEASURED arm sustaining positive net R is the sign-off "
+        "evidence for its flag (`dispatch_staleness_v2_live` / "
+        "`context_emission_gate_override_live`)._"
+    )
+    if recipe_rows:
+        lines.append("")
+        lines.append("| Strategy | Arm | n | Win% | Avg R | Cells | Status |")
+        lines.append("|---|---|---:|---:|---:|---:|---|")
+        for row in recipe_rows:
+            lines.append(
+                f"| {row.get('strategy', '?')} | @{row.get('arm', '?')} | "
+                f"{row.get('n', 0)} | {row.get('win_rate', 0.0) * 100.0:.0f}% | "
+                f"{row.get('avg_r', 0.0):+.2f}R | {row.get('cells', 0)} | "
+                f"{row.get('status', '?')} |"
+            )
+    else:
+        lines.append(
+            "- _no recipe/rescue arms classified yet — @DSV2/@GOV stamp on "
+            "gate suppressions, @TUNED on tuned-setup candidates; arms "
+            "classify after ~1h of real candles_"
         )
 
     # ── Feature liveness & fail-open telemetry (2026-07-14 incident) ──

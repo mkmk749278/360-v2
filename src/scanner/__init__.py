@@ -4840,6 +4840,8 @@ class Scanner:
                         context_key=str(getattr(sig, "mc_context_key", "") or ""),
                         regime=str(getattr(sig, "entry_regime", "") or ""),
                         valid_for_minutes=float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
+                        live_stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                        live_tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
                     )
             except Exception as _tv_exc:
                 fail_open.record("scanner.stamp_tuned_variant", _tv_exc)
@@ -4911,6 +4913,121 @@ class Scanner:
             )
         except Exception as exc:
             fail_open.record("scanner.stamp_suppressed", exc)
+
+    def _stamp_gate_rescue(
+        self, sig: Any, gate_name: str, suffix: str, current_price: Optional[float]
+    ) -> None:
+        """Stamp a would-be-rescued candidate as a shadow arm in the variants ledger.
+
+        Entry is re-anchored at the dispatch-time price with the ORIGINAL
+        absolute SL/TP levels kept — the honest fill for a rescue (the W4
+        entry-at-dispatch note: a rescued dispatch enters where price is now,
+        not where the evaluator saw it).  Geometry the drift has already
+        invalidated (price beyond TP1 or beyond SL) is skipped and counted —
+        those candidates aren't rescuable, and stamping them would fabricate
+        outcomes.  Observe-only + fail-open; rows land as ``X@DSV2`` /
+        ``X@GOV`` in the geometry variants store, feeding the edge matrix as
+        shadow rows excluded from the allocator.
+        """
+        try:
+            entry = float(current_price or 0.0)
+            if entry <= 0:
+                entry = float(getattr(sig, "entry", 0.0) or 0.0)
+            sl = float(getattr(sig, "stop_loss", 0.0) or 0.0)
+            tp1 = float(getattr(sig, "tp1", 0.0) or 0.0)
+            _direction = getattr(sig, "direction", None)
+            side = (getattr(_direction, "value", None) or str(_direction or "")).upper()
+            geometry_ok = (
+                entry > 0 and sl > 0 and tp1 > 0
+                and (
+                    (side == "LONG" and sl < entry < tp1)
+                    or (side == "SHORT" and tp1 < entry < sl)
+                )
+            )
+            if not geometry_ok:
+                self._suppression_counters[f"gate_rescue_degenerate:{gate_name}"] += 1
+                return
+            from src import geometry_ab as _gab
+            from src import suppression_audit as _sa
+            setup = str(getattr(sig, "setup_class", "") or "UNKNOWN")
+            _sa.stamp_candidate(
+                gate_name=gate_name,
+                symbol=str(getattr(sig, "symbol", "") or ""),
+                channel=str(getattr(sig, "channel", "") or ""),
+                setup_class=f"{setup}{suffix}",
+                side=side,
+                entry=entry,
+                stop_loss=sl,
+                tp1=tp1,
+                confidence=float(getattr(sig, "confidence", 0.0) or 0.0),
+                context_key=str(getattr(sig, "mc_context_key", "") or ""),
+                regime=str(getattr(sig, "entry_regime", "") or ""),
+                valid_for_minutes=float(getattr(sig, "valid_for_minutes", 0.0) or 0.0),
+                pair_cohort=str(getattr(sig, "mc_pair_cohort", "") or ""),
+                store=_gab.get_geometry_store(),
+            )
+        except Exception as exc:
+            fail_open.record("scanner.stamp_gate_rescue", exc)
+
+    def _gate_override_allows(
+        self, sig: Any, gate_name: str, current_price: Optional[float]
+    ) -> bool:
+        """W5 — may measured STRONG-cell evidence override this gate's block?
+
+        Called only AFTER ``gate_name`` (one of
+        ``context_emission_policy.OVERRIDABLE_GATES``) has decided to block.
+        Returns True only when the override is eligible AND live
+        (``gate_override_live``) — the caller then lets the dispatch proceed.
+        In shadow mode (live off) the would-be rescue is stamped as an
+        ``X@GOV`` arm and False is returned, so live behaviour is unchanged.
+        Fail-open to the gate's own decision on any error — an unverifiable
+        edge never overrides a live gate.
+        """
+        try:
+            from src import context_emission_policy as _cep
+            params = _cep.PolicyParams.from_config()
+            if not params.gate_override_enabled:
+                return False
+            # Counted before the context check — "evaluated" means the
+            # measurement ran, so the liveness probe can't false-page when
+            # candidates legitimately lack a context key.
+            self._suppression_counters[f"gov:evaluated:{gate_name}"] += 1
+            setup = str(getattr(sig, "setup_class", "") or "")
+            ctx = str(getattr(sig, "mc_context_key", "") or "")
+            if not setup or not ctx:
+                return False
+            try:
+                dec = _cep.gate_override(
+                    setup, ctx,
+                    cohort=str(getattr(sig, "mc_pair_cohort", "") or ""),
+                    params=params,
+                )
+            except Exception as _go_exc:
+                fail_open.record("scanner.gate_override", _go_exc)
+                return False
+            if not dec.would_override:
+                return False
+            symbol = getattr(sig, "symbol", "?")
+            if params.gate_override_live:
+                self._suppression_counters[f"gov:applied:{gate_name}:{setup}"] += 1
+                log.info(
+                    "GATE_OVERRIDE applied {} {} gate={} — {}",
+                    symbol, setup, gate_name, dec.reason,
+                )
+                return True
+            self._suppression_counters[f"gov:rescue:{gate_name}:{setup}"] += 1
+            log.info(
+                "[GATE_OVERRIDE_SHADOW] would rescue {} {} gate={} — {}",
+                symbol, setup, gate_name, dec.reason,
+            )
+            from src.geometry_ab import GOV_SUFFIX
+            self._stamp_gate_rescue(
+                sig, f"gov_rescue:{gate_name}", GOV_SUFFIX, current_price
+            )
+            return False
+        except Exception as exc:
+            fail_open.record("scanner.gate_override_outer", exc)
+            return False
 
     async def _enqueue_signal(self, sig: Any) -> bool:
         self._stamp_origin_setup_identity(sig, getattr(sig, "channel", "") or "UNKNOWN")
@@ -5052,18 +5169,62 @@ class Scanner:
         # reads it, price is too far away for the limit order to fill at sane
         # levels.  Worst case (bug 2026-05-07): current_price already at SL,
         # signal dispatches and immediately invalidates.
+        #
+        # V2 (2026-07-23, dark-first): the flat gate carries a measured-negative
+        # audit verdict (49.7% would-win, EV −0.19R, 318R missed) — it is blind
+        # to the candidate's geometry and the drift's direction.  While
+        # DISPATCH_STALENESS_V2_LIVE is off, V1 keeps deciding and every
+        # V1-block/V2-pass disagreement is stamped as an ``X@DSV2`` shadow arm
+        # (entry re-anchored at dispatch-time price) so the edge matrix
+        # measures what V2 emission would have been worth.  When LIVE (owner
+        # sign-off), V2 replaces V1 both ways.  See src/staleness_v2.py.
         try:
-            if not self._is_entry_fresh(sig):
+            _cur_px = self._dispatch_current_price(sig)
+            _v1_fresh = self._is_entry_fresh(sig, current_price=_cur_px)
+            _v2_dec = None
+            _v2_live = False
+            try:
+                from src import staleness_v2 as _sv2
+                _sv2_params = _sv2.StalenessV2Params.from_config()
+                if _sv2_params.enabled and _cur_px is not None:
+                    _direction = getattr(sig, "direction", None)
+                    _v2_dec = _sv2.evaluate(
+                        side=(getattr(_direction, "value", None) or str(_direction or "")),
+                        entry=float(getattr(sig, "entry", 0.0) or 0.0),
+                        stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                        tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
+                        current_price=_cur_px,
+                        params=_sv2_params,
+                    )
+                    _v2_live = _sv2_params.live
+                    _sc_v2 = getattr(sig, "setup_class", "UNKNOWN")
+                    self._suppression_counters["dsv2:evaluated"] += 1
+                    if _v2_dec.fresh and not _v1_fresh:
+                        self._suppression_counters[f"dsv2:rescue:{_sc_v2}"] += 1
+                    elif (not _v2_dec.fresh) and _v1_fresh:
+                        self._suppression_counters[f"dsv2:tighten:{_sc_v2}"] += 1
+            except Exception as _sv2_exc:
+                fail_open.record("scanner.staleness_v2", _sv2_exc)
+
+            _stale_gate = "dispatch_staleness_v2" if (_v2_live and _v2_dec is not None) else "dispatch_staleness"
+            _blocked = (not _v2_dec.fresh) if (_v2_live and _v2_dec is not None) else (not _v1_fresh)
+            if _blocked and not self._gate_override_allows(sig, "dispatch_staleness", _cur_px):
                 _sc = getattr(sig, "setup_class", "UNKNOWN")
-                self._suppression_counters[f"dispatch_staleness:{_sc}"] += 1
-                self._suppression_counters[f"enqueue_stage:dispatch_staleness:{_sc}"] += 1
+                self._suppression_counters[f"{_stale_gate}:{_sc}"] += 1
+                self._suppression_counters[f"enqueue_stage:{_stale_gate}:{_sc}"] += 1
                 log.info(
-                    "dispatch_staleness skip {} {} entry={:.6f} drifted",
+                    "{} skip {} {} entry={:.6f} drifted",
+                    _stale_gate,
                     getattr(sig, "symbol", "?"),
                     _sc,
                     float(getattr(sig, "entry", 0.0) or 0.0),
                 )
-                self._stamp_suppressed(sig, "dispatch_staleness")
+                self._stamp_suppressed(sig, _stale_gate)
+                # Shadow disagreement arm: V1 killed it, V2 would have let it
+                # through — measure what that emission was worth.
+                if _v2_dec is not None and _v2_dec.fresh and not _v2_live:
+                    from src.geometry_ab import DSV2_SUFFIX
+                    self._stamp_gate_rescue(sig, "dsv2_rescue", DSV2_SUFFIX, _cur_px)
                 return False
         except Exception as exc:
             log.debug("staleness check error (fail-open): {}", exc)
@@ -5078,8 +5239,14 @@ class Scanner:
         # — see LevelInPlayState / _is_level_in_play / _record_level_in_play.
         # Bug observed 2026-05-13: ETHUSDT SR_FLIP SHORT dispatched 13×
         # over 26h at identical entry while price chopped within 0.3%.
+        # W5 (2026-07-23): like dispatch_staleness above, this gate carries a
+        # measured-negative audit verdict (40.7% would-win, EV −0.06R, 148R
+        # missed) — a STRONG-cell candidate may override the block
+        # (shadow-stamped as ``X@GOV`` until gate_override_live is signed on).
         try:
-            if self._is_level_in_play(sig):
+            if self._is_level_in_play(sig) and not self._gate_override_allows(
+                sig, "level_still_in_play", self._dispatch_current_price(sig)
+            ):
                 _sc = getattr(sig, "setup_class", "UNKNOWN")
                 self._suppression_counters[f"level_still_in_play:{_sc}"] += 1
                 self._suppression_counters[f"enqueue_stage:level_still_in_play:{_sc}"] += 1
@@ -5182,7 +5349,42 @@ class Scanner:
             return False
         return time.time() < expiry
 
-    def _is_entry_fresh(self, sig: Any) -> bool:
+    def _dispatch_current_price(self, sig: Any) -> Optional[float]:
+        """Last close on the most-granular candle TF for this signal's symbol.
+
+        The dispatch-time price reference shared by the V1 staleness gate, the
+        V2 shadow evaluation and the rescue-arm stamps — one lookup, one truth.
+        ``None`` when no usable candle exists (callers fail open).
+        """
+        try:
+            symbol = getattr(sig, "symbol", "")
+            if not symbol:
+                return None
+            data_store = getattr(self, "data_store", None)
+            if data_store is None:
+                return None
+            symbol_candles = (
+                data_store.candles.get(symbol)
+                if hasattr(data_store, "candles") else None
+            )
+            if not symbol_candles:
+                return None
+            # Prefer 1m, fall back to 5m / 15m / 1h.
+            for tf in ("1m", "5m", "15m", "1h"):
+                cd = symbol_candles.get(tf)
+                if not cd or "close" not in cd:
+                    continue
+                closes = cd["close"]
+                if closes is None or len(closes) == 0:
+                    continue
+                current_price = float(closes[-1])
+                if current_price > 0:
+                    return current_price
+        except Exception:
+            return None
+        return None
+
+    def _is_entry_fresh(self, sig: Any, current_price: Optional[float] = None) -> bool:
         """Return True if the proposed entry is within tolerance of current price.
 
         ``current_price`` is the last close on the most-granular available
@@ -5194,32 +5396,12 @@ class Scanner:
             entry = float(getattr(sig, "entry", 0.0) or 0.0)
             if entry <= 0:
                 return True
-            symbol = getattr(sig, "symbol", "")
-            if not symbol:
+            if current_price is None:
+                current_price = self._dispatch_current_price(sig)
+            if current_price is None or current_price <= 0:
                 return True
-            data_store = getattr(self, "data_store", None)
-            if data_store is None:
-                return True
-            # Look up the most-granular candle for this symbol.
-            symbol_candles = (
-                data_store.candles.get(symbol)
-                if hasattr(data_store, "candles") else None
-            )
-            if not symbol_candles:
-                return True
-            # Prefer 1m, fall back to 5m / 15m / 1h.
-            for tf in ("1m", "5m", "15m", "1h"):
-                cd = symbol_candles.get(tf)
-                if not cd or "close" not in cd:
-                    continue
-                closes = cd["close"]
-                if closes is None or len(closes) == 0:
-                    continue
-                current_price = float(closes[-1])
-                if current_price <= 0:
-                    continue
-                drift_pct = abs(current_price - entry) / entry * 100.0
-                return drift_pct <= DISPATCH_STALENESS_MAX_DRIFT_PCT
+            drift_pct = abs(current_price - entry) / entry * 100.0
+            return drift_pct <= DISPATCH_STALENESS_MAX_DRIFT_PCT
         except Exception:
             return True  # Fail-open
         return True

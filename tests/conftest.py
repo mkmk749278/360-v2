@@ -64,7 +64,9 @@ def _isolate_disk_backed_registries(tmp_path, monkeypatch):
     # Default: staleness check passes (tests use mocked data_store
     # whose ``.candles`` attribute is a MagicMock that doesn't
     # behave like real candle data).
-    monkeypatch.setattr(Scanner, "_is_entry_fresh", lambda self, sig: True)
+    monkeypatch.setattr(
+        Scanner, "_is_entry_fresh", lambda self, sig, current_price=None: True
+    )
     # Belt-and-braces: nuke any stale ``data/signal_dispatch_cooldown.json``
     # that might exist from a misconfigured run BEFORE the conftest landed.
     # Without this, ``Scanner._load_dispatch_cooldown`` (when conftest

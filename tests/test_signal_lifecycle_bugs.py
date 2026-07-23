@@ -99,7 +99,9 @@ class TestDispatchCooldown:
     async def test_first_dispatch_succeeds(self, monkeypatch):
         """Without prior fire, dispatch goes through."""
         monkeypatch.setattr(_scanner_mod, "DISPATCH_COOLDOWN_SEC", 1800.0)
-        monkeypatch.setattr(Scanner, "_is_entry_fresh", lambda self, sig: True)
+        monkeypatch.setattr(
+            Scanner, "_is_entry_fresh", lambda self, sig, current_price=None: True
+        )
         scanner = _make_scanner_for_lifecycle()
         sig = _make_signal()
         ok = await scanner._enqueue_signal(sig)
@@ -112,7 +114,9 @@ class TestDispatchCooldown:
     async def test_duplicate_within_cooldown_blocked(self, monkeypatch):
         """Same (symbol, setup, direction) within cooldown returns False."""
         monkeypatch.setattr(_scanner_mod, "DISPATCH_COOLDOWN_SEC", 1800.0)
-        monkeypatch.setattr(Scanner, "_is_entry_fresh", lambda self, sig: True)
+        monkeypatch.setattr(
+            Scanner, "_is_entry_fresh", lambda self, sig, current_price=None: True
+        )
         scanner = _make_scanner_for_lifecycle()
         sig1 = _make_signal()
         await scanner._enqueue_signal(sig1)
@@ -124,7 +128,9 @@ class TestDispatchCooldown:
     @pytest.mark.asyncio
     async def test_different_symbol_not_blocked(self, monkeypatch):
         monkeypatch.setattr(_scanner_mod, "DISPATCH_COOLDOWN_SEC", 1800.0)
-        monkeypatch.setattr(Scanner, "_is_entry_fresh", lambda self, sig: True)
+        monkeypatch.setattr(
+            Scanner, "_is_entry_fresh", lambda self, sig, current_price=None: True
+        )
         scanner = _make_scanner_for_lifecycle()
         await scanner._enqueue_signal(_make_signal(symbol="BTCUSDT"))
         ok = await scanner._enqueue_signal(_make_signal(symbol="ETHUSDT"))
@@ -133,7 +139,9 @@ class TestDispatchCooldown:
     @pytest.mark.asyncio
     async def test_different_direction_not_blocked(self, monkeypatch):
         monkeypatch.setattr(_scanner_mod, "DISPATCH_COOLDOWN_SEC", 1800.0)
-        monkeypatch.setattr(Scanner, "_is_entry_fresh", lambda self, sig: True)
+        monkeypatch.setattr(
+            Scanner, "_is_entry_fresh", lambda self, sig, current_price=None: True
+        )
         scanner = _make_scanner_for_lifecycle()
         await scanner._enqueue_signal(_make_signal(direction=Direction.LONG))
         ok = await scanner._enqueue_signal(_make_signal(direction=Direction.SHORT))
@@ -142,7 +150,9 @@ class TestDispatchCooldown:
     @pytest.mark.asyncio
     async def test_different_setup_class_not_blocked(self, monkeypatch):
         monkeypatch.setattr(_scanner_mod, "DISPATCH_COOLDOWN_SEC", 1800.0)
-        monkeypatch.setattr(Scanner, "_is_entry_fresh", lambda self, sig: True)
+        monkeypatch.setattr(
+            Scanner, "_is_entry_fresh", lambda self, sig, current_price=None: True
+        )
         scanner = _make_scanner_for_lifecycle()
         await scanner._enqueue_signal(_make_signal(setup_class="FAILED_AUCTION_RECLAIM"))
         ok = await scanner._enqueue_signal(_make_signal(setup_class="SR_FLIP_RETEST"))
@@ -151,7 +161,9 @@ class TestDispatchCooldown:
     @pytest.mark.asyncio
     async def test_after_cooldown_elapses_re_fires(self, monkeypatch):
         monkeypatch.setattr(_scanner_mod, "DISPATCH_COOLDOWN_SEC", 1800.0)
-        monkeypatch.setattr(Scanner, "_is_entry_fresh", lambda self, sig: True)
+        monkeypatch.setattr(
+            Scanner, "_is_entry_fresh", lambda self, sig, current_price=None: True
+        )
         scanner = _make_scanner_for_lifecycle()
         await scanner._enqueue_signal(_make_signal())
         # Forge expiry (1801s ago).
@@ -179,10 +191,13 @@ def _seed_data_store_close(scanner: Scanner, symbol: str, close: float):
     }
 
 
-def _real_is_entry_fresh(self, sig):
+def _real_is_entry_fresh(self, sig, current_price=None):
     """Inlined copy of the production Scanner._is_entry_fresh logic so
     the staleness tests can run the real algorithm without disturbing
-    other conftest monkeypatches (no module reload here)."""
+    other conftest monkeypatches (no module reload here).  Accepts (and
+    ignores) the ``current_price`` short-circuit the production signature
+    grew for the V2 shadow evaluation — this copy always re-derives the
+    price from the store, which is the behaviour under test."""
     try:
         entry = float(getattr(sig, "entry", 0.0) or 0.0)
         if entry <= 0:
@@ -619,7 +634,9 @@ def _real_level_rearm(monkeypatch):
     """
     monkeypatch.setattr(Scanner, "_is_level_in_play", _REAL_IS_LEVEL_IN_PLAY)
     monkeypatch.setattr(Scanner, "_record_level_in_play", _REAL_RECORD_LEVEL_IN_PLAY)
-    monkeypatch.setattr(Scanner, "_is_entry_fresh", lambda self, sig: True)
+    monkeypatch.setattr(
+            Scanner, "_is_entry_fresh", lambda self, sig, current_price=None: True
+        )
     yield
 
 

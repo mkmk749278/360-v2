@@ -203,6 +203,7 @@ Binance REST API
 | Shadow-only strategy units | `src/shadow_strategies.py` |
 | Stop-geometry A/B (shadow) | `src/geometry_ab.py` |
 | Tuned shadow variants (`@TUNED`) | `src/tuned_variants.py` |
+| Dispatch-staleness V2 (geometry-aware, `@DSV2` shadow) | `src/staleness_v2.py` |
 
 ---
 

@@ -15,6 +15,16 @@ geometry ledger, attacking each path's measured failure mode:
 * **VOLUME_SURGE_BREAKOUT** chases late entries: the tuned arm only takes
   candidates within ``TUNED_VSB_MAX_EXTENSION_ATR`` of the 20-bar mean and
   banks at the MFE-derived TP1 (``TUNED_VSB_TP1_PCT``).
+* **MOVER_TREND_PULLBACK** (added 2026-07-23 — the perfect-entry study):
+  the live path enters at the *close of the reclaim bar*, a full 15m bar off
+  the pullback low, and its realized R runs −0.37R below its own
+  counterfactual (the ``edge_reconciliation`` alert).  The tuned arm rests a
+  **limit at the fast MA the pullback tagged** (SMA-``MOVER_TP_MA_FAST`` of
+  15m closes) with the live arm's absolute SL/TP1 kept — same thesis, paid
+  retest price.  Honesty requires fill-awareness: the arm stamps with
+  ``entry_type="limit"`` so ``suppression_audit.classify_limit_record`` walks
+  candles for the touch first, and a retest that never comes scores
+  ``WOULD_NOT_FILL`` = 0R — the cost of patience is measured, not assumed.
 
 Observe-only end to end: nothing here can reach the signal queue, the arm
 rows are ``source="shadow"`` edge-matrix variants excluded from the
@@ -38,7 +48,12 @@ from src.geometry_ab import (
     is_geometry_variant,
 )
 from src.shadow_strategies import _simple_atr
-from src.suppression_audit import SuppressedCandidateStore, stamp_candidate
+from src.suppression_audit import (
+    ENTRY_IMMEDIATE,
+    ENTRY_LIMIT,
+    SuppressedCandidateStore,
+    stamp_candidate,
+)
 from src.utils import get_logger
 
 log = get_logger("tuned_variants")
@@ -64,7 +79,52 @@ _counters: Dict[str, int] = {"seen": 0, "stamped": 0, "skipped": 0}
 
 
 def tuned_setups() -> Tuple[str, ...]:
-    return ("MOVER_AVWAP_SCALP", "VOLUME_SURGE_BREAKOUT")
+    return ("MOVER_AVWAP_SCALP", "VOLUME_SURGE_BREAKOUT", "MOVER_TREND_PULLBACK")
+
+
+def compute_mtp_retest_arm(
+    *,
+    side: str,
+    entry: float,
+    closes: Sequence[float],
+    live_stop_loss: float,
+    live_tp1: float,
+) -> Optional[Tuple[float, str]]:
+    """Perfect-entry recipe for MOVER_TREND_PULLBACK: → ``(limit_entry, reason)``.
+
+    The limit rests at the fast MA the pullback tagged (the price the live
+    arm's reclaim bar closed *away from*).  Skips, with reason:
+
+    * ``no_improvement`` — the MA is not a better price than the live entry
+      (nothing to study; stamping it would duplicate the live arm), and
+    * ``through_stop`` — the MA sits at/beyond the live SL, so the resting
+      order's geometry would be degenerate.
+    """
+    from config import MOVER_TP_MA_FAST
+
+    side_u = str(side or "").upper()
+    entry_f = float(entry or 0.0)
+    sl = float(live_stop_loss or 0.0)
+    tp1 = float(live_tp1 or 0.0)
+    if entry_f <= 0 or sl <= 0 or tp1 <= 0 or side_u not in ("LONG", "SHORT"):
+        return None
+    if closes is None or len(closes) < MOVER_TP_MA_FAST:
+        return None
+    window = [float(c) for c in closes[-MOVER_TP_MA_FAST:]]
+    limit = sum(window) / len(window)
+    if limit <= 0:
+        return None
+    if side_u == "LONG":
+        if limit >= entry_f:
+            return (0.0, "no_improvement")
+        if limit <= sl:
+            return (0.0, "through_stop")
+    else:
+        if limit <= entry_f:
+            return (0.0, "no_improvement")
+        if limit >= sl:
+            return (0.0, "through_stop")
+    return (limit, "ok")
 
 
 def counters() -> Dict[str, int]:
@@ -146,12 +206,16 @@ def stamp_tuned_variant(
     context_key: str = "",
     regime: str = "",
     valid_for_minutes: float = 0.0,
+    live_stop_loss: float = 0.0,
+    live_tp1: float = 0.0,
     store: Optional[SuppressedCandidateStore] = None,
     now_mono: Optional[float] = None,
 ) -> Optional[float]:
-    """Stamp the ``@TUNED`` arm for one MAS/VSB candidate (fail-open).
+    """Stamp the ``@TUNED`` arm for one MAS/VSB/MTP candidate (fail-open).
 
-    Returns the tuned stop price on stamp, else ``None``.
+    Returns the tuned stop price on stamp, else ``None``.  MTP arms need the
+    live candidate's SL/TP1 (``live_stop_loss`` / ``live_tp1``) — the recipe
+    changes the *entry*, not the exit levels.
     """
     try:
         setup = str(setup_class or "").strip().upper()
@@ -171,18 +235,37 @@ def stamp_tuned_variant(
         if last is not None and mono - last < TUNED_VARIANT_STAMP_COOLDOWN_SEC:
             _bump("skipped")
             return None
-        arm = compute_tuned_arm(
-            setup=setup, side=side_u, entry=entry_f,
-            highs=highs, lows=lows, closes=closes,
-        )
-        if arm is None:
-            # Pipeline failure (no ATR arm / degenerate inputs) — deliberately
-            # NOT counted as skipped so the liveness residue grows.
-            return None
-        stop, tp1, reason = arm
-        if reason == "extension_filter":
-            _bump("skipped")
-            return None
+
+        if setup == "MOVER_TREND_PULLBACK":
+            mtp = compute_mtp_retest_arm(
+                side=side_u, entry=entry_f, closes=closes,
+                live_stop_loss=live_stop_loss, live_tp1=live_tp1,
+            )
+            if mtp is None:
+                # Pipeline failure (degenerate live geometry / short candles)
+                # — NOT counted as skipped so the liveness residue grows.
+                return None
+            limit_entry, mtp_reason = mtp
+            if mtp_reason != "ok":
+                _bump("skipped")
+                return None
+            arm_entry, stop, tp1 = limit_entry, float(live_stop_loss), float(live_tp1)
+            entry_model = ENTRY_LIMIT
+        else:
+            arm = compute_tuned_arm(
+                setup=setup, side=side_u, entry=entry_f,
+                highs=highs, lows=lows, closes=closes,
+            )
+            if arm is None:
+                # Pipeline failure (no ATR arm / degenerate inputs) — deliberately
+                # NOT counted as skipped so the liveness residue grows.
+                return None
+            stop, tp1, reason = arm
+            if reason == "extension_filter":
+                _bump("skipped")
+                return None
+            arm_entry = entry_f
+            entry_model = ENTRY_IMMEDIATE
         # Late-bound store lookup (mirrors stamp_geometry_pair) — the tuned
         # arms live in the same dedicated variants ledger as @FIXED/@ATR.
         from src import geometry_ab as _gab
@@ -193,13 +276,14 @@ def stamp_tuned_variant(
             channel=str(channel or ""),
             setup_class=f"{setup}{TUNED_SUFFIX}",
             side=side_u,
-            entry=entry_f,
+            entry=arm_entry,
             stop_loss=stop,
             tp1=tp1,
             confidence=float(confidence or 0.0),
             context_key=context_key or "",
             regime=regime or "",
             valid_for_minutes=float(valid_for_minutes or 0.0),
+            entry_type=entry_model,
             store=store or _gab.get_geometry_store(),
         )
         if rec is None:

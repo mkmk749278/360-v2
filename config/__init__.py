@@ -1126,6 +1126,50 @@ CONTEXT_EMISSION_COHORT_AWARE: bool = _safe_bool(
 ALLOCATOR_EMISSION_MAX_CONCURRENT: int = _safe_int(
     "ALLOCATOR_EMISSION_MAX_CONCURRENT", "10"
 )
+#: W5 — edge-matrix authority over the two measured-negative dispatch gates
+#: (dispatch_staleness EV −0.19R n=1225, level_still_in_play EV −0.06R n=989,
+#: 2026-07-23 gate audit).  When a candidate's (strategy, context) cell is
+#: measured STRONG on adequate sample, the cell's evidence outranks those two
+#: heuristic gates and the suppression is overridden.  ENABLED turns on the
+#: measurement (each would-be override is stamped as an ``X@GOV`` shadow arm
+#: with entry re-anchored at dispatch-time price — the honest fill per the W4
+#: entry-at-dispatch note); LIVE (dark, owner sign-off) applies the override to
+#: real emission.  Never overrides safety gates (kill switch, blast radius,
+#: data_stale) — only the two audited-negative heuristics listed above.
+CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED: bool = _safe_bool(
+    "CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED", "true"
+)
+CONTEXT_EMISSION_GATE_OVERRIDE_LIVE: bool = _safe_bool(
+    "CONTEXT_EMISSION_GATE_OVERRIDE_LIVE", "false"
+)
+
+# ── Dispatch staleness V2 — geometry-aware drift gate ────────────────────────
+# The V1 gate (DISPATCH_STALENESS_MAX_DRIFT_PCT, flat 0.5% both ways) is the
+# highest-volume suppressor with a measured-negative verdict: 1225 suppressions,
+# 49.7% would-win, EV −0.19R, 318R missed (gate audit 2026-07-23).  A flat
+# percentage is blind to the setup's geometry — 0.5% is fatal drift for a tight
+# scalp stop but noise for a wide mover stop — and blind to direction: drift
+# *toward* the stop compresses remaining risk room (the real 2026-05-07
+# pathology), while drift *toward* target means a chased entry with worse R.
+# V2 normalises drift to the candidate's own SL/TP distances and bounds each
+# direction separately.  ENABLED = shadow measurement (V1 keeps deciding; every
+# V1-block-V2-pass disagreement is stamped as an ``X@DSV2`` arm with entry
+# re-anchored at dispatch-time price, forward-measured like any shadow arm).
+# LIVE (dark, owner sign-off) = V2 replaces V1 as the deciding gate.
+DISPATCH_STALENESS_V2_ENABLED: bool = _safe_bool("DISPATCH_STALENESS_V2_ENABLED", "true")
+DISPATCH_STALENESS_V2_LIVE: bool = _safe_bool("DISPATCH_STALENESS_V2_LIVE", "false")
+#: Max adverse drift toward the stop, as a fraction of the entry→SL distance.
+#: 0.40 = price may consume up to 40% of the stop room before the signal is
+#: stale (1.0 would mean price already AT the stop — the V1 incident case).
+DISPATCH_STALENESS_V2_TOWARD_SL_MAX_FRAC: float = _safe_float(
+    "DISPATCH_STALENESS_V2_TOWARD_SL_MAX_FRAC", "0.40"
+)
+#: Max favourable drift toward TP1, as a fraction of the entry→TP1 distance.
+#: 0.35 = dispatching after price already travelled a third of the way to
+#: target is a chase — the remaining reward no longer pays for the full risk.
+DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC: float = _safe_float(
+    "DISPATCH_STALENESS_V2_TOWARD_TP_MAX_FRAC", "0.35"
+)
 
 # ── Dispatch cooldown — per-(symbol, setup, direction) re-emission guard ─────
 # Gate audit (2026-07-19) read it DROP: 312 blocked, 100% would-win, 235.1R

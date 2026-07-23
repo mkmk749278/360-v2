@@ -4,6 +4,80 @@
 
 ---
 
+## 🟢 SESSION 77 2026-07-23 — Truth-report deep-read → the emission bottleneck attacked dark-first (W5 slice 1 + staleness V2 + MTP perfect-entry study)
+
+**Owner ask:** read the truth report + strategy lab — "what's still missing,
+we're still negative-only" → then "continue with 1 and 2, look at perfect
+entry for MTP, and what happened to the regular-pair paths."
+
+### Diagnosis (the 4 findings, from the 2026-07-23 truth report)
+
+1. **The measured edge never emits.** 54,631 measured outcomes, 14 realized
+   trades.  MEAN_REVERT (77% win, +0.52R, n=2153) and RANGE_FADE's +4.10R
+   cell emitted ZERO (liveness alerts sustained).  The emission policy's only
+   lever was a 5-pt confidence-floor relax — it had no authority over the
+   dispatch gates that actually killed the candidates.
+2. **The two biggest suppressors are measured-negative and untuned:**
+   `dispatch_staleness` (flat 0.5% drift, 1225 kills, **49.7% would-win**,
+   EV −0.19R, 318R missed) and `level_still_in_play` (989 kills, 40.7%
+   would-win).  The staleness gate adversely selects: it passes candidates
+   where price sat still and kills the movers.
+3. **Live exits ≠ measured exits.** Counterfactuals free-run 1h to TP1; live
+   trades get invalidation-killed at median ~30 min, 0% TP rate, 0% pre-TP
+   (PRE_TP_ENABLED=false).  The `edge_reconciliation` probe pages exactly
+   this: MTP realized −0.37R below counterfactual.  MTP enters at the CLOSE
+   of the reclaim bar — a full 15m bar off the pullback low.
+4. **Regular-pair paths aren't broken — they're gate-starved** (see below).
+
+### Shipped (all DARK-FIRST per production doctrine; measurement ON, live flags OFF)
+
+- **`src/staleness_v2.py` (new)** — geometry-aware staleness: drift bounded
+  per direction as a fraction of the candidate's own entry→SL / entry→TP1
+  distances (`DISPATCH_STALENESS_V2_*`).  V1 keeps deciding; every
+  V1-block/V2-pass disagreement stamps an **`X@DSV2`** arm with entry
+  re-anchored at dispatch-time price (the W4 honest-fill note).
+  `DISPATCH_STALENESS_V2_LIVE` + ops tunables flip it after sign-off.
+- **W5 slice 1 — `context_emission_policy.gate_override`**: a STRONG cell
+  (n≥floor, positive edge) may override `dispatch_staleness` /
+  `level_still_in_play` (**`OVERRIDABLE_GATES` — safety gates structurally
+  excluded, test-pinned**).  Shadow **`X@GOV`** rescue arms now; live behind
+  `CONTEXT_EMISSION_GATE_OVERRIDE_LIVE` after sign-off.
+- **MTP perfect-entry study — `MOVER_TREND_PULLBACK@TUNED`**: limit rests at
+  the fast MA the pullback tagged (SMA-7 15m), live SL/TP1 kept.  Honest by
+  construction: new **fill-aware limit classifier** in `suppression_audit`
+  (`classify_limit_record`, candle-walk; `WOULD_NOT_FILL` = 0R — the cost of
+  patience is measured, not assumed).
+- **Truth report**: new "Recipe & rescue shadow arms (@TUNED/@DSV2/@GOV)"
+  section = the sign-off evidence table.  **Liveness probes**
+  `staleness_v2_shadow` + `gate_override_shadow` page if a measurement
+  flat-lines.  Full suite 7023 passed; ruff clean; mypy at/below baseline.
+
+### Regular-pair paths autopsy (owner question answered)
+
+They generate fine (SR_FLIP 3015, MEAN_REVERT 1826, RANGE_FADE 1556, LSR
+2356, DIV 1909, FAR 1653 in-window) — they die in the gate stack:
+regime/execution pre-gates → confidence floor → then the two negative-EV
+dispatch gates above.  Plus three deliberate switch-offs: ORB
+(`feature_disabled`), CLS (merged into LSR), SR_FLIP longs
+(`long_disabled`).  MTP dominates the *realized* book because mover-run
+candidates clear momentum/confidence gates more often — not because regular
+paths are broken.  The two shipped fixes target exactly the stage where
+regular-pair paths die.
+
+### Open / next (in order)
+
+- **Data window**: let @DSV2 / @GOV / MTP@TUNED rows accumulate (truth-report
+  "Recipe & rescue shadow arms" + Strategy Lab), then owner sign-off to flip
+  `dispatch_staleness_v2_live` / `context_emission_gate_override_live`.
+- **Exit-model gap (finding 3)**: invalidation audit has zero classified
+  records this window — needs wiring verified; then either mirror
+  invalidation in counterfactuals or kill the PREMATURE kills.  **PRE_TP
+  decision is owner's** (doctrine says it's the banking path; it is OFF).
+- W3 explicit retirement, W6 regime/universe focus, W7 latency — unchanged,
+  pending validated net window.
+
+---
+
 ## 🟢 SESSION 76 2026-07-22 — Autonomous system audit → cost-aware R made LIVE (owner directive); W1–W4 chain now net-steering (360-v2 #770 + #771, merged)
 
 **Owner ask:** full audit of the autonomous system — what's working, gaps,

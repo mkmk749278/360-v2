@@ -189,3 +189,103 @@ class TestScannerHook:
         sc._stamp_geometry_ab(sig)
         setups = {r["setup_class"] for r in ledger.records()}
         assert f"MOVER_AVWAP_SCALP{TUNED_SUFFIX}" in setups
+
+
+class TestMtpRetestArm:
+    """MOVER_TREND_PULLBACK perfect-entry recipe (2026-07-23): limit at the
+    fast MA the pullback tagged, live SL/TP1 kept, fill-aware measurement."""
+
+    def test_long_limit_rests_at_fast_ma_below_entry(self):
+        # Closes flat at 100, live entry (reclaim-bar close) above at 100.8:
+        # the limit improves to the SMA7 ≈ 100.
+        closes = [100.0] * 40
+        arm = tv.compute_mtp_retest_arm(
+            side="LONG", entry=100.8, closes=closes,
+            live_stop_loss=98.5, live_tp1=102.4,
+        )
+        assert arm is not None
+        limit, reason = arm
+        assert reason == "ok"
+        assert abs(limit - 100.0) < 1e-9
+
+    def test_short_limit_rests_at_fast_ma_above_entry(self):
+        closes = [100.0] * 40
+        arm = tv.compute_mtp_retest_arm(
+            side="SHORT", entry=99.2, closes=closes,
+            live_stop_loss=101.5, live_tp1=97.6,
+        )
+        assert arm is not None
+        limit, reason = arm
+        assert reason == "ok"
+        assert abs(limit - 100.0) < 1e-9
+
+    def test_no_improvement_skipped(self):
+        # Live entry already below the MA (LONG): the limit would be a WORSE
+        # price — nothing to study.
+        closes = [100.0] * 40
+        arm = tv.compute_mtp_retest_arm(
+            side="LONG", entry=99.5, closes=closes,
+            live_stop_loss=98.0, live_tp1=101.5,
+        )
+        assert arm == (0.0, "no_improvement")
+
+    def test_through_stop_skipped(self):
+        # MA sits below the live stop: resting there is degenerate geometry.
+        closes = [97.0] * 40
+        arm = tv.compute_mtp_retest_arm(
+            side="LONG", entry=100.0, closes=closes,
+            live_stop_loss=98.0, live_tp1=102.0,
+        )
+        assert arm == (0.0, "through_stop")
+
+    def test_degenerate_inputs_return_none(self):
+        assert tv.compute_mtp_retest_arm(
+            side="LONG", entry=100.0, closes=[100.0] * 3,
+            live_stop_loss=98.0, live_tp1=102.0,
+        ) is None  # too few closes for the fast MA
+        assert tv.compute_mtp_retest_arm(
+            side="LONG", entry=100.0, closes=[100.0] * 40,
+            live_stop_loss=0.0, live_tp1=102.0,
+        ) is None  # missing live SL
+
+    def test_stamp_mtp_lands_as_limit_entry_variant(self):
+        from src.suppression_audit import ENTRY_LIMIT
+
+        store = SuppressedCandidateStore(persist_path="")
+        highs, lows, closes = _candles()
+        stop = tv.stamp_tuned_variant(
+            symbol="MOVUSDT", channel="360_SCALP",
+            setup_class="MOVER_TREND_PULLBACK", side="LONG",
+            entry=float(closes[-1]) + 0.8,
+            highs=highs, lows=lows, closes=closes,
+            live_stop_loss=float(closes[-1]) - 2.0,
+            live_tp1=float(closes[-1]) + 2.8,
+            store=store,
+        )
+        assert stop is not None
+        recs = store.records()
+        assert len(recs) == 1
+        rec = recs[0]
+        assert rec["setup_class"] == f"MOVER_TREND_PULLBACK{TUNED_SUFFIX}"
+        assert rec["entry_type"] == ENTRY_LIMIT
+        # Entry re-rests at the fast MA; SL/TP1 are the live arm's levels.
+        assert rec["entry"] < float(closes[-1]) + 0.8
+        assert rec["stop_loss"] == pytest.approx(float(closes[-1]) - 2.0)
+        assert rec["tp1"] == pytest.approx(float(closes[-1]) + 2.8)
+        assert tv.counters()["stamped"] == 1
+
+    def test_stamp_mtp_no_improvement_counts_skipped(self):
+        store = SuppressedCandidateStore(persist_path="")
+        highs, lows, closes = _candles()
+        stop = tv.stamp_tuned_variant(
+            symbol="MOVUSDT", channel="360_SCALP",
+            setup_class="MOVER_TREND_PULLBACK", side="LONG",
+            entry=float(closes[-1]) - 5.0,  # live entry already below the MA
+            highs=highs, lows=lows, closes=closes,
+            live_stop_loss=float(closes[-1]) - 8.0,
+            live_tp1=float(closes[-1]) + 2.0,
+            store=store,
+        )
+        assert stop is None
+        assert store.records() == []
+        assert tv.counters()["skipped"] == 1

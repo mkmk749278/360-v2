@@ -450,6 +450,27 @@ policy already models. Keep the pure-core + envelope + blast-radius design.
 **Acceptance:** new actions unit-tested in the pure core; each gated by boot-grace,
 K-stability, EV bar, and blast radius; shadow-stamped before any live promotion.
 
+**First slice shipped 2026-07-23 (Session 77, dark-first):** the edge matrix
+was given (shadow) authority over the two audited-negative dispatch gates —
+the gates the funnel data showed were the actual emission bottleneck
+(dispatch_staleness EV −0.19R n=1225 · level_still_in_play EV −0.06R n=989):
+
+- **`context_emission_policy.gate_override`** — a STRONG cell (n ≥ sample
+  floor, positive edge) may override a `dispatch_staleness` /
+  `level_still_in_play` block.  Measurement default-ON (`X@GOV` rescue arms,
+  entry re-anchored at dispatch-time price per the W4 entry-at-dispatch note);
+  live application behind `CONTEXT_EMISSION_GATE_OVERRIDE_LIVE` /
+  `context_emission_gate_override_live` (dark, owner sign-off).
+- **`src/staleness_v2.py`** — geometry-aware re-derivation of the flat-0.5%
+  staleness gate: drift bounded per direction as a fraction of the candidate's
+  own SL/TP distances.  Measurement default-ON (`X@DSV2` disagreement arms);
+  live behind `DISPATCH_STALENESS_V2_LIVE` / `dispatch_staleness_v2_live`.
+- Truth report gained a **"Recipe & rescue shadow arms"** section; liveness
+  probes `staleness_v2_shadow` / `gate_override_shadow` page if either
+  measurement flat-lines.  Safety gates (kill switch, blast radius,
+  data_stale, cooldown) are structurally non-overridable
+  (`OVERRIDABLE_GATES` is the contract, pinned by test).
+
 ### W6 — Regime/universe focus · *owner-sign-off (scanner scope)*
 
 **Objective:** spend the scan + emission budget where net edge lives.

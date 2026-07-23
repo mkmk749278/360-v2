@@ -196,3 +196,84 @@ def test_divergence_component_block_forces_suppress() -> None:
         classify_divergence(70.0, 65.0, _dec(60.0), components_ok=False)
         == DIV_AGREE_SUPPRESS
     )
+
+
+# ------------------------------------------------------------- W5 gate override
+from src.context_emission_policy import OVERRIDABLE_GATES, gate_override  # noqa: E402
+
+# Params with the override measurement on (live stays dark by default).
+P_GOV = PolicyParams(
+    enabled=True,
+    live=True,
+    quality_anchor=60.0,
+    strong_relax=5.0,
+    positive_relax=3.0,
+    min_samples=30,
+    suppress_negative=True,
+    gate_override_enabled=True,
+    gate_override_live=False,
+)
+
+
+def test_overridable_gates_are_exactly_the_audited_two() -> None:
+    # Safety gates must never creep in here without a deliberate edit + owner
+    # sign-off; the tuple is the contract.
+    assert OVERRIDABLE_GATES == ("dispatch_staleness", "level_still_in_play")
+
+
+def test_strong_cell_with_sample_overrides() -> None:
+    st = _store()
+    _feed(st, "MEAN_REVERT_X", CTX, wins=30, losses=0)  # STRONG, n=30
+    d = gate_override("MEAN_REVERT_X", CTX, store=st, params=P_GOV)
+    assert d.would_override is True
+    assert d.verdict == "STRONG"
+    assert d.n >= 30
+
+
+def test_positive_cell_never_overrides() -> None:
+    # The bar is deliberately higher than the floor-relax: POSITIVE is not enough.
+    st = _store()
+    _feed(st, "DIVERGENCE_X", CTX, wins=20, losses=10)  # POSITIVE
+    d = gate_override("DIVERGENCE_X", CTX, store=st, params=P_GOV)
+    assert d.would_override is False
+    assert "not_strong" in d.reason
+
+
+def test_strong_but_thin_sample_never_overrides() -> None:
+    st = _store()
+    _feed(st, "QCB_X", CTX, wins=20, losses=0)  # STRONG but n=20 < 30
+    d = gate_override("QCB_X", CTX, store=st, params=P_GOV)
+    assert d.would_override is False
+    assert "strong_thin" in d.reason
+
+
+def test_negative_cell_never_overrides() -> None:
+    st = _store()
+    _feed(st, "RF_X", CTX, wins=2, losses=40)
+    d = gate_override("RF_X", CTX, store=st, params=P_GOV)
+    assert d.would_override is False
+
+
+def test_disabled_measurement_never_overrides() -> None:
+    st = _store()
+    _feed(st, "MEAN_REVERT_X", CTX, wins=30, losses=0)
+    off = PolicyParams(
+        enabled=True, live=True, quality_anchor=60.0, strong_relax=5.0,
+        positive_relax=3.0, min_samples=30, suppress_negative=True,
+        gate_override_enabled=False, gate_override_live=False,
+    )
+    d = gate_override("MEAN_REVERT_X", CTX, store=st, params=off)
+    assert d.would_override is False
+    assert d.reason == "disabled"
+
+
+def test_missing_context_never_overrides() -> None:
+    st = _store()
+    d = gate_override("MEAN_REVERT_X", "", store=st, params=P_GOV)
+    assert d.would_override is False
+
+
+def test_gate_override_defaults_dark() -> None:
+    # Config default: measurement ON, live application OFF (dark-first).
+    p = PolicyParams.from_config()
+    assert p.gate_override_live is False
