@@ -25,6 +25,7 @@ import numpy as np
 import pytest
 
 import src.scanner as _scanner_mod
+import src.staleness_v2 as _sv2_mod
 from src.channels.base import Signal
 from src.scanner import (
     DISPATCH_STALENESS_MAX_DRIFT_PCT,
@@ -38,6 +39,10 @@ from src.smc import Direction
 # uses these references via the ``_real_level_rearm`` fixture to opt back in.
 _REAL_IS_LEVEL_IN_PLAY = Scanner._is_level_in_play
 _REAL_RECORD_LEVEL_IN_PLAY = Scanner._record_level_in_play
+# Likewise the real V2 staleness evaluator — the conftest stubs it to
+# always-fresh by default (V2 is live now), so the staleness tests below opt
+# back into the real geometry-aware gate via ``_real_staleness_check``.
+_REAL_SV2_EVALUATE = _sv2_mod.evaluate
 
 
 def _make_scanner_for_lifecycle() -> Scanner:
@@ -233,13 +238,17 @@ def _real_is_entry_fresh(self, sig, current_price=None):
 
 @pytest.fixture
 def _real_staleness_check(monkeypatch):
-    """Restore ONLY the real ``Scanner._is_entry_fresh`` for staleness tests.
+    """Restore the real staleness gate for the staleness tests.
 
-    Replaces the conftest's no-op lambda with the inlined production
-    implementation (above) — narrow patch that doesn't disturb the
-    cooldown / persist no-ops.
+    Replaces the conftest's no-op V1 lambda with the inlined production
+    implementation (above) AND restores the real V2 evaluator (the conftest
+    stubs it to always-fresh by default). With V2 live, V2 is the deciding
+    gate, so both must be real for these tests to exercise the production
+    staleness path — a narrow patch that doesn't disturb the cooldown /
+    persist no-ops.
     """
     monkeypatch.setattr(Scanner, "_is_entry_fresh", _real_is_entry_fresh)
+    monkeypatch.setattr(_sv2_mod, "evaluate", _REAL_SV2_EVALUATE)
     yield
 
 
