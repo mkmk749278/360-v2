@@ -103,6 +103,30 @@ directive ("make everything live, no darks") it activates live with the kill swi
 watchdog (W2, live) validates the cohort cells in-flight. The two measurement axes are
 off-money-path telemetry and ship normally.
 
+### Programme status ledger — every prior solution, in one place
+
+All the work from this programme, consolidated. The W-numbers below are the components
+of §0's one umbrella, not independent tracks.
+
+| # | Workstream | What it does | Status | Where |
+|---|---|---|---|---|
+| W1 | **Cost-aware R** | every recorded R is net of taker+slippage+funding; gross kept alongside | **SHIPPED · LIVE** (`EDGE_COST_MODEL_ENABLED=true`) | merged #770 → `main` |
+| W2 | **Realized-vs-counterfactual reconciliation + watchdog** | always-net observability; pages when realized diverges from counterfactual; truth-report surface | **SHIPPED · LIVE** | merged #771 → `main` |
+| — | **This audit + LLM-critic bridge + edge-decay principle** | design-of-record, §0 umbrella, §2a decay adversary, shadow-critic design | **THIS PR (#772)** — docs only | `docs/session-76-autonomous-audit` |
+| W3 | **Cohort-aware net-edge emission** (the core wire) | flip on `pair_cohort` dual-write; emission clears on `cohort×strategy×context` net cell, not the momentum-65; net-negative promoted-mover cells self-retire (MVRTP) | **NEXT — the one build** | `pair_cohort.py` (built, OFF) + `context_emission_policy.py` (live) |
+| W4 | **Harvest the unblocked regular winners** | the same wire: net-positive mean_revert/range/SR-flip cells emit and refill vacated volume | **Folded into W3** | same |
+| W5 | **Broaden controller action space** | let `emission_controller` act on cohort cells within the bounded envelope | after W3 lands | `emission_controller.py` |
+| W6 | **Regime/universe focus** | scanner scope follows measured cohort edge | after W3 | `pair_manager.py`, `scanner/` |
+| W7 | **Actuation-latency tuning** | close the dispatch-staleness gap on emitted signals | after W3 | dispatch path |
+| W8 | **Edge-decay trajectory monitor** | forward-track each cell's net-R slope so a decayed edge auto-demotes | measurement-first | `strategy_edge.py` |
+| +ax1 | **Confidence-bucket axis** (new detector) | edge matrix keyed on confidence bucket → "high confidence loses" becomes a live signal | lands with W3 | `strategy_edge.py` |
+| +ax2 | **MFE/MAE stamp** (new detector) | per-signal favorable/adverse excursion → born-dead vs reversed made measurable | lands with W3 | signal stamp → reconciliation |
+
+**One-glance state:** the measurement foundation (W1/W2) is **live in `main`**. This PR
+(#772) records the converged design. The remaining work is **one** money-path change
+(W3, absorbing W4) plus its two detector axes; W5–W8 are follow-ons that only make sense
+once emission is cohort-net-edge-driven.
+
 ---
 
 ## 1. Purpose & scope
