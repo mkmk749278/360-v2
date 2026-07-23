@@ -75,6 +75,40 @@ already-built emission policy and controller earn the right to go live.
 
 ---
 
+## 2a. Design principle: edge decay is the adversary (2026-07-22)
+
+Markets are **adaptive systems, not fixed ones** (unlike physics, whose laws don't
+fight back). A profitable pattern, once discovered and exploited — including **by us
+and our own growing flow** — changes the market and stops working. We design around
+three consequences:
+
+1. **There may be no stable edge to "find."** The realistic goal is to harvest
+   *transient* edges faster than they decay and net of costs — not to discover a law.
+   This reframes the business honestly: we are risk/execution managers of decaying
+   edges, not oracles.
+2. **We are a source of our own decay.** Emitting a working pattern to real users'
+   auto-trade, at scale, erodes it. Retail crypto scalping (15s scans, 5–60 min holds)
+   is the most crowded, adaptive corner of the market — MM/HFT bots are the opponents —
+   so **capacity is a real limit**: a signal that works at 100 users may not survive
+   10,000.
+3. **Not all edges decay equally.** Pure TA patterns (EMA cross, breakout-retest)
+   decay fastest — most discovered. **Structural / microstructure edges** (funding
+   extremes, liquidation cascades, forced-flow reversals) decay slowest, because they
+   arise from mechanics (leverage, margin calls) that being *known* can't arbitrage
+   away. Weight toward the slow-decay structural edges. (Tellingly, the truth report's
+   strongest cells were VOLATILE_EXPANSION/CASCADE — forced flow — not quiet-range TA.)
+
+**Design responses (some already in place):**
+- Rolling per-context edge window (already do) — decay surfaces as a cell drifting
+  STRONG → FLAT → NEGATIVE.
+- The realized-vs-counterfactual reconciliation (W2) **doubles as a decay detector**:
+  the gap between what our counterfactual predicts and what emitted trades realise *is*
+  the market adapting to our emission.
+- **Add an edge-decay trajectory monitor (W8)** — measure edge *slope* per cell, not
+  just level, so we de-allocate a dying edge before it crosses negative.
+- **Elevate faster adaptation (W7):** if edges decay in hours, a ~90-min promotion
+  latency harvests already-dead patterns. Speed of adaptation is itself an edge.
+
 ## 3. Evidence & diagnosis
 
 ### 3.1 The counterfactual R is gross (root cause)
@@ -333,6 +367,26 @@ Retain hysteresis and self-revert.
 **Acceptance:** promotion latency reduced with no measured oscillation in shadow.
 
 ---
+
+### W8 — Edge-decay trajectory monitor · *owner-sign-off (measurement first)*
+
+**Objective:** detect a decaying edge *before* the rolling average crosses negative —
+the direct operational response to §2a.
+
+**Changes:** per (strategy × context) cell, retain timestamped edge_r buckets and
+compute a trend/slope. Surface a `decaying` flag + the slope in the truth report and
+the ops Strategy Lab. Feed it to the controller as an early de-allocation signal (a
+fast-negative slope tightens/suppresses *ahead of* the level crossing), inside the
+existing bounded envelope. Prefer this signal for the fastest-decaying (pure-TA)
+strategies; structural strategies (funding / cascade / forced-flow) tolerate a slower
+trigger.
+
+**Dark/observe-first then live:** the slope is measured and shown first; it drives
+actuation only after the net-R window validates that the trajectory signal is real and
+not noise. Ships within the controller's blast-radius + kill-switch envelope.
+
+**Acceptance:** truth report renders per-cell edge trajectory + a `decaying` flag; no
+actuation until validated on net data.
 
 ## 7. Sequencing & dependencies
 
