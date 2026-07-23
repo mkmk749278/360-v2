@@ -1140,7 +1140,7 @@ CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED: bool = _safe_bool(
     "CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED", "true"
 )
 CONTEXT_EMISSION_GATE_OVERRIDE_LIVE: bool = _safe_bool(
-    "CONTEXT_EMISSION_GATE_OVERRIDE_LIVE", "false"
+    "CONTEXT_EMISSION_GATE_OVERRIDE_LIVE", "true"
 )
 
 # ── Dispatch staleness V2 — geometry-aware drift gate ────────────────────────
@@ -1157,7 +1157,7 @@ CONTEXT_EMISSION_GATE_OVERRIDE_LIVE: bool = _safe_bool(
 # re-anchored at dispatch-time price, forward-measured like any shadow arm).
 # LIVE (dark, owner sign-off) = V2 replaces V1 as the deciding gate.
 DISPATCH_STALENESS_V2_ENABLED: bool = _safe_bool("DISPATCH_STALENESS_V2_ENABLED", "true")
-DISPATCH_STALENESS_V2_LIVE: bool = _safe_bool("DISPATCH_STALENESS_V2_LIVE", "false")
+DISPATCH_STALENESS_V2_LIVE: bool = _safe_bool("DISPATCH_STALENESS_V2_LIVE", "true")
 #: Max adverse drift toward the stop, as a fraction of the entry→SL distance.
 #: 0.40 = price may consume up to 40% of the stop room before the signal is
 #: stale (1.0 would mean price already AT the stop — the V1 incident case).

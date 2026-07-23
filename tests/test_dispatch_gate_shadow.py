@@ -77,7 +77,9 @@ def gate_env(monkeypatch):
 
     store = SuppressedCandidateStore(persist_path="")
     monkeypatch.setattr(gab, "get_geometry_store", lambda: store)
-    # Pin the V2/GOV flags to their shipped defaults regardless of test env.
+    # These tests exercise the shadow path specifically (measurement ON, live
+    # OFF: V1 keeps deciding, disagreements stamp X@DSV2 / X@GOV arms), so pin
+    # the LIVE flags OFF regardless of the shipped default — which is now live.
     monkeypatch.setattr(config, "DISPATCH_STALENESS_V2_ENABLED", True, raising=False)
     monkeypatch.setattr(config, "DISPATCH_STALENESS_V2_LIVE", False, raising=False)
     monkeypatch.setattr(config, "CONTEXT_EMISSION_GATE_OVERRIDE_ENABLED", True, raising=False)
