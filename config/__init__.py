@@ -321,6 +321,32 @@ EDGE_RECONCILIATION_ALERT_DELTA_R: float = float(
     os.getenv("EDGE_RECONCILIATION_ALERT_DELTA_R", "0.30")
 )
 EDGE_RECONCILIATION_MIN_N: int = int(os.getenv("EDGE_RECONCILIATION_MIN_N", "20"))
+
+# --- Precise-entry arming stage (src/armed_signal.py, 2026-07-23) -----------
+# Separate the setup (detection) from the trigger (precise entry).  A validated
+# no-look-ahead replay of live MVRTP signals lifted avg R -0.50 -> -0.09 by
+# waiting for the turn instead of emitting mid-pullback.  ARMED_ENTRY_ENABLED is
+# the master for the @ARMED shadow arm (forward-measured alongside emit-on-detect).
+# ARMED_ENTRY_LIVE_APPLY makes a TRIGGERED outcome the emitted entry/stop and
+# drops EXPIRED candidates — the money-path flip, guarded by the armed_entry kill
+# switch + edge-reconciliation watchdog; graduates on measured net-R.
+ARMED_ENTRY_ENABLED: bool = _safe_bool("ARMED_ENTRY_ENABLED", "true")
+ARMED_ENTRY_LIVE_APPLY: bool = _safe_bool("ARMED_ENTRY_LIVE_APPLY", "false")
+# Setup classes routed through the arming stage (the mover family — the paths the
+# replay showed enter mid-pullback).  Comma-separated SetupClass values.
+ARMED_ENTRY_SETUPS_RAW: str = os.getenv(
+    "ARMED_ENTRY_SETUPS",
+    "MOVER_TREND_PULLBACK,MOVER_AVWAP_SCALP",
+)
+ARMED_ENTRY_SETUPS: frozenset = frozenset(
+    s.strip() for s in ARMED_ENTRY_SETUPS_RAW.split(",") if s.strip()
+)
+ARMED_ENTRY_EXPIRE_BARS: int = _safe_int("ARMED_ENTRY_EXPIRE_BARS", "24")
+ARMED_ENTRY_VOL_MULT: float = _safe_float("ARMED_ENTRY_VOL_MULT", "1.2")
+ARMED_ENTRY_SWING_LOOKBACK: int = _safe_int("ARMED_ENTRY_SWING_LOOKBACK", "8")
+ARMED_ENTRY_MAX_SL_PCT: float = _safe_float("ARMED_ENTRY_MAX_SL_PCT", "3.0")
+ARMED_ENTRY_BUFFER_PCT: float = _safe_float("ARMED_ENTRY_BUFFER_PCT", "0.15")
+
 # Setups that are STRUCTURALLY built for bigger moves — pre-TP would cap
 # the thesis.  Breakouts (VSB / BDS / ORB) belong here.  Comma-separated.
 PRE_TP_SETUP_BLACKLIST_RAW: str = os.getenv(

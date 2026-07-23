@@ -54,7 +54,11 @@ log = get_logger("geometry_ab")
 FIXED_SUFFIX = "@FIXED"
 ATR_SUFFIX = "@ATR"
 TUNED_SUFFIX = "@TUNED"
-_VARIANT_SUFFIXES: Tuple[str, ...] = (FIXED_SUFFIX, ATR_SUFFIX, TUNED_SUFFIX)
+# @ARMED (src/armed_signal.py, 2026-07-23): precise-entry arm — same variant
+# plumbing, excluded from the allocator and per-strategy rollups.  It is
+# evidence about WHEN to enter a setup, not an activatable strategy.
+ARMED_SUFFIX = "@ARMED"
+_VARIANT_SUFFIXES: Tuple[str, ...] = (FIXED_SUFFIX, ATR_SUFFIX, TUNED_SUFFIX, ARMED_SUFFIX)
 
 GATE_FIXED = "geometry_ab:fixed"
 GATE_ATR = "geometry_ab:atr"
