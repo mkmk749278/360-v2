@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-23T04:01:16.678011+00:00",
-  "generated_at_ts": 1784779276.6780107,
+  "generated_at": "2026-07-24T04:00:48.453250+00:00",
+  "generated_at_ts": 1784865648.4532504,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "3e8d1fb13162ed5b686bb81925c124641556e175",
+  "git_sha": "d648df42cd5c8a4a8f1255c9f798b6f556eba28f",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,10 +15,10 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 4029,
-    "strategy_matrix_scored_cells": 1434,
+    "strategy_matrix_cells": 4308,
+    "strategy_matrix_scored_cells": 1591,
     "performance_setups": 14,
-    "suppression_gates": 14
+    "suppression_gates": 12
   },
   "headlines": {
     "strongest_cells": [
@@ -60,49 +60,50 @@
     ],
     "weakest_cells": [
       {
-        "strategy": "RANGE_FADE",
-        "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL/MIDCAP",
-        "edge_r": -1.2124833281927134,
-        "n": 31,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "RANGE_FADE",
-        "context_key": "LONDON/DISTRIBUTION/NORMAL/BTC_NEUTRAL",
-        "edge_r": -1.2124833281927134,
-        "n": 31,
+        "strategy": "SR_FLIP_RETEST",
+        "context_key": "OFF_HOURS/DISTRIBUTION/EXPANDED/BTC_NEUTRAL/MIDCAP",
+        "edge_r": -1.299999999999998,
+        "n": 22,
         "verdict": "NEGATIVE"
       },
       {
         "strategy": "SR_FLIP_RETEST",
-        "context_key": "OVERLAP/DISTRIBUTION/NORMAL/BTC_NEUTRAL/ALTCOIN",
-        "edge_r": -1.1961492780624134,
-        "n": 38,
+        "context_key": "OFF_HOURS/DISTRIBUTION/EXPANDED/BTC_NEUTRAL",
+        "edge_r": -1.299999999999998,
+        "n": 22,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "QUIET_COMPRESSION_BREAK",
-        "context_key": "NY/RANGE/NORMAL/BTC_NEUTRAL/MIDCAP",
-        "edge_r": -1.1875273117721352,
-        "n": 37,
-        "verdict": "NEGATIVE"
-      },
-      {
-        "strategy": "DIVERGENCE_CONTINUATION",
-        "context_key": "ASIA/MARKDOWN/NORMAL/BTC_NEUTRAL/ALTCOIN",
-        "edge_r": -1.1875000000000004,
+        "strategy": "SR_FLIP_RETEST",
+        "context_key": "OVERLAP/ACCUMULATION/NORMAL/BTC_NEUTRAL/ALTCOIN",
+        "edge_r": -1.2788689287075883,
         "n": 50,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "SR_FLIP_RETEST",
+        "context_key": "OVERLAP/ACCUMULATION/NORMAL/BTC_NEUTRAL",
+        "edge_r": -1.2788689287075883,
+        "n": 50,
+        "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "SR_FLIP_RETEST",
+        "context_key": "ASIA/DISTRIBUTION/NORMAL/BTC_NEUTRAL/MAJOR",
+        "edge_r": -1.2614762372073423,
+        "n": 31,
         "verdict": "NEGATIVE"
       }
     ],
     "gate_verdict_counts": {
       "TUNE": 2,
-      "KEEP": 7,
-      "DROP": 1,
-      "INSUFFICIENT_SAMPLE": 4
+      "DROP": 2,
+      "KEEP": 6,
+      "INSUFFICIENT_SAMPLE": 2
     },
     "drop_gates": [
-      "shadow_unit:SHADOW_RANGE_FADE"
+      "context_floor:LIQUIDITY_SWEEP_REVERSAL",
+      "shadow_unit:SHADOW_MEAN_REVERT"
     ]
   }
 }

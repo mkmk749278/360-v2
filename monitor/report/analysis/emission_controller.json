@@ -44,6 +44,18 @@
       "MEAN_REVERT": {
         "suppress_negative": false,
         "min_samples": null
+      },
+      "SR_FLIP_RETEST@FIXED": {
+        "suppress_negative": null,
+        "min_samples": 15
+      },
+      "MEAN_REVERT@ATR": {
+        "suppress_negative": null,
+        "min_samples": 20
+      },
+      "MEAN_REVERT@FIXED": {
+        "suppress_negative": null,
+        "min_samples": 20
       }
     },
     "history": {
@@ -88,9 +100,9 @@
         "HOLD"
       ],
       "LIQUIDITY_SWEEP_REVERSAL|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "LIQUIDITY_SWEEP_REVERSAL|min_samples": [
         "HOLD",
@@ -138,9 +150,9 @@
         "HOLD"
       ],
       "QUIET_COMPRESSION_BREAK|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP",
+        "KEEP"
       ],
       "QUIET_COMPRESSION_BREAK|min_samples": [
         "HOLD",
@@ -246,6 +258,36 @@
         "HOLD",
         "HOLD",
         "HOLD"
+      ],
+      "SR_FLIP_RETEST@FIXED|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "SR_FLIP_RETEST@FIXED|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "MEAN_REVERT@ATR|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "MEAN_REVERT@ATR|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
+      ],
+      "MEAN_REVERT@FIXED|suppress_negative": [
+        "SKIP",
+        "SKIP",
+        "SKIP"
+      ],
+      "MEAN_REVERT@FIXED|min_samples": [
+        "HOLD",
+        "HOLD",
+        "HOLD"
       ]
     },
     "last_change_cycle": {
@@ -259,9 +301,12 @@
       "WHALE_MOMENTUM|min_samples": 22,
       "MOVER_TREND_PULLBACK|suppress_negative": 23,
       "SR_FLIP_RETEST|suppress_negative": 26,
-      "MEAN_REVERT|suppress_negative": 46
+      "MEAN_REVERT|suppress_negative": 46,
+      "SR_FLIP_RETEST@FIXED|min_samples": 126,
+      "MEAN_REVERT@ATR|min_samples": 124,
+      "MEAN_REVERT@FIXED|min_samples": 124
     },
-    "cycle": 98
+    "cycle": 144
   },
   "ledger": [
     {
@@ -539,6 +584,90 @@
       "verdict": "DROP",
       "ev_per_suppression_r": -1.357830045967234,
       "n": 133
+    },
+    {
+      "strategy": "SR_FLIP_RETEST@FIXED",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 17
+    },
+    {
+      "strategy": "MEAN_REVERT@ATR",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=23)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 23
+    },
+    {
+      "strategy": "MEAN_REVERT@FIXED",
+      "param": "min_samples",
+      "old": 30,
+      "new": 25,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=23)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 23
+    },
+    {
+      "strategy": "SR_FLIP_RETEST@FIXED",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 17
+    },
+    {
+      "strategy": "MEAN_REVERT@ATR",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=23)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 23
+    },
+    {
+      "strategy": "MEAN_REVERT@FIXED",
+      "param": "min_samples",
+      "old": 25,
+      "new": 20,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=23)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 23
+    },
+    {
+      "strategy": "SR_FLIP_RETEST@FIXED",
+      "param": "min_samples",
+      "old": 20,
+      "new": 15,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote (strong_cell_n=17)",
+      "verdict": "LOWER",
+      "ev_per_suppression_r": null,
+      "n": 17
     }
   ],
   "pending": [],
@@ -575,6 +704,15 @@
     },
     "MEAN_REVERT": {
       "suppress_negative": false
+    },
+    "SR_FLIP_RETEST@FIXED": {
+      "min_samples": 15
+    },
+    "MEAN_REVERT@ATR": {
+      "min_samples": 20
+    },
+    "MEAN_REVERT@FIXED": {
+      "min_samples": 20
     }
   }
 }
