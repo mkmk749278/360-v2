@@ -42,7 +42,51 @@ class ListenKeyError(Exception):
 
 class ListenKeyAcquireError(ListenKeyError):
     """Could not acquire a listenKey (signing service error, Binance
-    error, or user key invalid)."""
+    error, or user key invalid).
+
+    Carries the Binance status/code so the worker can distinguish a
+    *permanent* auth failure (dead/invalid key — 401 / ``-2015``) and an
+    *IP ban* (``418`` / ``-1003``) from a transient blip, and back off
+    accordingly instead of hammering a dead key into a ban.
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        binance_status: Optional[int] = None,
+        error_code: Optional[str] = None,
+        error_message: Optional[str] = None,
+    ) -> None:
+        super().__init__(message)
+        # ``binance_status`` is the Binance HTTP status (401/418/…), the
+        # reliable classification signal. ``error_code`` is the signing
+        # service's own ``ERR_*`` constant (a string, e.g.
+        # "BINANCE_HTTP_ERROR"), NOT the numeric Binance code — that
+        # (``-2015``/``-1003``) lives in ``error_message``, so we substring it.
+        self.binance_status = binance_status
+        self.error_code = error_code
+        self.error_message = error_message
+
+    @property
+    def is_auth_failure(self) -> bool:
+        """Dead/invalid key: HTTP 401, or Binance ``-2015`` (bad key/IP/
+        permission) in the message.
+
+        Retrying this fast is pointless and — via the resulting request
+        storm — actively dangerous (it earns the IP ban below).
+        """
+        if self.binance_status == 401:
+            return True
+        return "-2015" in (self.error_message or "")
+
+    @property
+    def is_ip_ban(self) -> bool:
+        """The whole box is IP-banned (HTTP 418/403, Binance ``-1003``).
+        Retrying into an active ban only extends it — back off for the window."""
+        if self.binance_status in (418, 403):
+            return True
+        return "-1003" in (self.error_message or "")
 
 
 class ListenKeyKeepaliveError(ListenKeyError):
@@ -128,7 +172,10 @@ async def acquire(
         raise ListenKeyAcquireError(
             f"listenKey POST failed: code={resp.error_code} "
             f"binance_status={resp.binance_status} "
-            f"message={resp.error_message}"
+            f"message={resp.error_message}",
+            binance_status=resp.binance_status,
+            error_code=resp.error_code,
+            error_message=resp.error_message,
         )
     listen_key = (resp.binance_body or {}).get("listenKey")
     if not isinstance(listen_key, str) or not listen_key:
