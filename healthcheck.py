@@ -1,9 +1,26 @@
 #!/usr/bin/env python3
-"""Healthcheck — verifies the 360-Crypto-scalping-V2 engine is running and healthy."""
+"""Healthcheck — verifies the 360-Crypto-scalping-V2 engine is running and healthy.
+
+Restart-loop guard (2026-07-24 incident): this healthcheck gates the docker
+HEALTHCHECK, and an ``autoheal`` sidecar restarts the container whenever it goes
+unhealthy. That is the right medicine for a *transient* scanner hang (a deadlock
+a restart clears) but the wrong medicine for a *persistent* condition a restart
+can't fix — e.g. a Binance **REST IP-ban** that blocks the boot-time historical
+seed. In that case every restart re-runs the seed (still banned), the scanner
+never produces a heartbeat, we go unhealthy again ~10 min later, and autoheal
+loops forever — each loop re-restoring signals as entry-0 shells and re-extending
+the ban with fresh banned REST calls. So we let autoheal restart a genuine
+mid-run hang **once**, but stop reporting unhealthy when a restart is
+demonstrably not curing it (the scanner has not produced a single fresh
+heartbeat since this boot, well past the grace period). The process stays up and
+serving on the WebSocket feed; vps-liveness + the feature-liveness watchdog still
+page a human for the underlying outage.
+"""
+import json
 import os
 import sys
 import time
-from typing import Optional
+from typing import Optional, Tuple
 
 # Maximum age (seconds) of the heartbeat file before the scanner is
 # considered stale.  Must be longer than a worst-case scan cycle.
@@ -26,6 +43,60 @@ _STAT_AFTER_COMM_OFFSET = 2
 # enough to have produced a heartbeat" so that a missing file is treated as a
 # real failure rather than hiding bugs.
 _UNKNOWN_UPTIME_SECONDS = 999
+
+
+def _restart_loop_guard_enabled() -> bool:
+    """Whether to break an autoheal restart loop on a persistent stale beat.
+
+    On by default; ``HEALTHCHECK_RESTART_LOOP_GUARD=false`` restores the strict
+    legacy behaviour (always fail on a post-grace stale heartbeat).
+    """
+    return os.getenv("HEALTHCHECK_RESTART_LOOP_GUARD", "true").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
+
+
+# How many autoheal restarts to allow before concluding a never-beats-since-boot
+# condition is persistent (external outage / boot failure a restart can't fix)
+# and breaking the loop. Small enough that the loop self-limits within ~30 min,
+# large enough that a genuinely transient boot hiccup still gets restart attempts.
+_RESTART_GUARD_STATE_PATH = os.path.join(
+    os.path.dirname(__file__), "data", "healthcheck_restart_guard"
+)
+
+
+def _max_restart_attempts() -> int:
+    try:
+        return max(1, int(os.getenv("HEALTHCHECK_MAX_RESTART_ATTEMPTS", "3")))
+    except ValueError:
+        return 3
+
+
+def _read_restart_guard() -> Tuple[int, int]:
+    """Persisted ``(boot_marker, consecutive_never_beat_boots)``; (0, 0) on failure."""
+    try:
+        with open(_RESTART_GUARD_STATE_PATH) as fh:
+            data = json.load(fh)
+        return int(data.get("boot", 0)), int(data.get("count", 0))
+    except Exception:
+        return 0, 0
+
+
+def _write_restart_guard(boot_marker: int, count: int) -> bool:
+    try:
+        os.makedirs(os.path.dirname(_RESTART_GUARD_STATE_PATH), exist_ok=True)
+        with open(_RESTART_GUARD_STATE_PATH, "w") as fh:
+            json.dump({"boot": boot_marker, "count": count}, fh)
+        return True
+    except Exception:
+        return False
+
+
+def _reset_restart_guard() -> None:
+    """Clear the restart counter — called on a genuinely fresh heartbeat."""
+    boot_marker, count = _read_restart_guard()
+    if count != 0:
+        _write_restart_guard(boot_marker, 0)
 
 
 def _find_engine_pid() -> Optional[int]:
@@ -145,14 +216,59 @@ def _scanner_heartbeat_fresh(engine_pid: Optional[int]) -> bool:
                 if engine_pid is not None
                 else _UNKNOWN_UPTIME_SECONDS
             )
-            if age > uptime and uptime < _HEARTBEAT_GRACE_PERIOD_SECONDS:
+            # "Never beat this boot": the heartbeat mtime predates the current
+            # engine process (age older than uptime), so the scanner has not
+            # written a single fresh beat since this (re)start.
+            never_beat_this_boot = age > uptime
+            if never_beat_this_boot and uptime < _HEARTBEAT_GRACE_PERIOD_SECONDS:
                 return True  # pre-restart mtime; engine still warming up
+            if never_beat_this_boot and _restart_loop_guard_enabled():
+                # Past the grace period and STILL no fresh beat since boot. Let
+                # autoheal restart a BOUNDED number of times — a transient
+                # boot-time failure can be cured by a restart — but once the
+                # condition survives that many restarts it is persistent (a
+                # Binance REST IP-ban blocking the boot seed, a boot-time crash;
+                # neither cured by more restarts, and each loop re-restores
+                # signals as entry-0 shells and re-extends the ban). Then report
+                # healthy-but-DEGRADED so autoheal stops thrashing: the process
+                # is alive and serving on the WS feed, and vps-liveness +
+                # feature-liveness still page a human.
+                #
+                # The counter is keyed on the engine process start (uptime), so
+                # it increments once per restarted boot and resets on a genuine
+                # fresh beat. Unknown uptime keeps the strict (fail) path.
+                if uptime != _UNKNOWN_UPTIME_SECONDS:
+                    boot_marker = int(time.time() - uptime)
+                    prev_boot, count = _read_restart_guard()
+                    if boot_marker != prev_boot:
+                        count += 1
+                        _write_restart_guard(boot_marker, count)
+                    if count >= _max_restart_attempts():
+                        print(
+                            f"Heartbeat unrefreshed across {count} restart(s) "
+                            f"(age={age:.0f}s, uptime ~{uptime:.0f}s) — a restart is "
+                            f"not curing it; reporting DEGRADED (not unhealthy) to "
+                            f"break the autoheal loop. Process alive on WS; external "
+                            f"outage suspected. Path: {_HEARTBEAT_PATH}",
+                            file=sys.stderr,
+                        )
+                        return True
+                    print(
+                        f"Heartbeat unrefreshed since boot (age={age:.0f}s, uptime "
+                        f"~{uptime:.0f}s) — failing so autoheal restarts "
+                        f"(attempt {count}/{_max_restart_attempts()}).",
+                        file=sys.stderr,
+                    )
+                    return False
+            # Beat this boot then went stale (genuine mid-run hang), or the
+            # guard is disabled / uptime unknown → fail so autoheal restarts.
             print(
                 f"Heartbeat is stale: age={age:.1f}s > max={_HEARTBEAT_MAX_AGE_SECONDS:.0f}s "
                 f"(engine uptime ~{uptime:.0f}s). Path: {_HEARTBEAT_PATH}",
                 file=sys.stderr,
             )
             return False
+        _reset_restart_guard()  # genuine fresh beat — clear any restart counter
         return True
     except OSError:
         return True  # Cannot stat — treat as fresh to avoid false negatives
