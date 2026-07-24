@@ -1,5 +1,21 @@
 #!/usr/bin/env python3
-"""Healthcheck — verifies the 360-Crypto-scalping-V2 engine is running and healthy."""
+"""Healthcheck — verifies the 360-Crypto-scalping-V2 engine is running and healthy.
+
+Restart-loop guard (2026-07-24 incident): this healthcheck gates the docker
+HEALTHCHECK, and an ``autoheal`` sidecar restarts the container whenever it goes
+unhealthy. That is the right medicine for a *transient* scanner hang (a deadlock
+a restart clears) but the wrong medicine for a *persistent* condition a restart
+can't fix — e.g. a Binance **REST IP-ban** that blocks the boot-time historical
+seed. In that case every restart re-runs the seed (still banned), the scanner
+never produces a heartbeat, we go unhealthy again ~10 min later, and autoheal
+loops forever — each loop re-restoring signals as entry-0 shells and re-extending
+the ban with fresh banned REST calls. So we let autoheal restart a genuine
+mid-run hang **once**, but stop reporting unhealthy when a restart is
+demonstrably not curing it (the scanner has not produced a single fresh
+heartbeat since this boot, well past the grace period). The process stays up and
+serving on the WebSocket feed; vps-liveness + the feature-liveness watchdog still
+page a human for the underlying outage.
+"""
 import os
 import sys
 import time
@@ -26,6 +42,17 @@ _STAT_AFTER_COMM_OFFSET = 2
 # enough to have produced a heartbeat" so that a missing file is treated as a
 # real failure rather than hiding bugs.
 _UNKNOWN_UPTIME_SECONDS = 999
+
+
+def _restart_loop_guard_enabled() -> bool:
+    """Whether to break an autoheal restart loop on a persistent stale beat.
+
+    On by default; ``HEALTHCHECK_RESTART_LOOP_GUARD=false`` restores the strict
+    legacy behaviour (always fail on a post-grace stale heartbeat).
+    """
+    return os.getenv("HEALTHCHECK_RESTART_LOOP_GUARD", "true").strip().lower() not in {
+        "0", "false", "no", "off",
+    }
 
 
 def _find_engine_pid() -> Optional[int]:
@@ -145,8 +172,35 @@ def _scanner_heartbeat_fresh(engine_pid: Optional[int]) -> bool:
                 if engine_pid is not None
                 else _UNKNOWN_UPTIME_SECONDS
             )
-            if age > uptime and uptime < _HEARTBEAT_GRACE_PERIOD_SECONDS:
+            # "Never beat this boot": the heartbeat mtime predates the current
+            # engine process (age older than uptime), so the scanner has not
+            # written a single fresh beat since this (re)start.
+            never_beat_this_boot = age > uptime
+            if never_beat_this_boot and uptime < _HEARTBEAT_GRACE_PERIOD_SECONDS:
                 return True  # pre-restart mtime; engine still warming up
+            if never_beat_this_boot and _restart_loop_guard_enabled():
+                # Past the grace period and STILL no fresh beat since boot: a
+                # restart is demonstrably not fixing this (a persistent external
+                # outage — e.g. a Binance REST IP-ban blocking the boot seed —
+                # or a boot-time scanner failure; neither is cured by another
+                # restart). Report healthy-but-degraded so autoheal stops
+                # thrashing: the process is alive and serving on the WS feed,
+                # and vps-liveness + feature-liveness still page a human. Once
+                # the scanner beats again (condition cleared) strict freshness
+                # resumes automatically.
+                print(
+                    f"Heartbeat has not refreshed since boot (age={age:.0f}s, "
+                    f"engine uptime ~{uptime:.0f}s) — a restart is not curing it, "
+                    f"so reporting DEGRADED (not unhealthy) to avoid an autoheal "
+                    f"restart loop. Process alive; external data outage suspected. "
+                    f"Path: {_HEARTBEAT_PATH}",
+                    file=sys.stderr,
+                )
+                return True
+            # Beat this boot then went stale → a genuine mid-run hang a restart
+            # can clear. Fail so autoheal restarts (once — if it re-hangs
+            # immediately, the next post-grace check hits the guard above and
+            # stops the loop).
             print(
                 f"Heartbeat is stale: age={age:.1f}s > max={_HEARTBEAT_MAX_AGE_SECONDS:.0f}s "
                 f"(engine uptime ~{uptime:.0f}s). Path: {_HEARTBEAT_PATH}",
