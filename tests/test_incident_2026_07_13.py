@@ -188,7 +188,15 @@ class TestHealthcheckWarmupGrace:
         assert healthcheck._scanner_heartbeat_fresh(engine_pid=1234) is True
 
     def test_stale_after_grace_fails(self, tmp_path, monkeypatch):
+        # First never-beat-since-boot occurrence past grace still FAILS so
+        # autoheal gets its (bounded) restart attempt. Isolate the restart-guard
+        # state to a fresh file so the counter starts at 0 regardless of any
+        # prior run (the loop-break only triggers after repeated restarts —
+        # covered in test_healthcheck.py).
         monkeypatch.setattr(healthcheck, "_HEARTBEAT_PATH", self._hb(tmp_path, age=2000))
+        monkeypatch.setattr(
+            healthcheck, "_RESTART_GUARD_STATE_PATH", str(tmp_path / "restart_guard")
+        )
         monkeypatch.setattr(
             healthcheck,
             "_engine_uptime_seconds",
