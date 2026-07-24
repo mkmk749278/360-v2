@@ -565,7 +565,12 @@ def run_entries_for_symbol(
     """Run the Backtester over one symbol's entry-TF candles; return signal_details
     dicts augmented with the entry-candle open_time (candle_index -> open_ms)."""
     import numpy as np  # noqa: PLC0415 — lazy: VPS-only dep
-    sys.path.insert(0, ".")
+    # Put the repo root (parent of scripts/) on the path from this file's
+    # location, so the engine import works regardless of the caller's cwd (e.g.
+    # `docker exec ... python /app/scripts/exit_method_backtest.py`).
+    _root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if _root not in sys.path:
+        sys.path.insert(0, _root)
     from src.backtester import Backtester  # noqa: PLC0415,E402
 
     open_ms = [r[0] for r in entry_rows]
