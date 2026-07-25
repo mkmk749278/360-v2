@@ -96,6 +96,58 @@ a full minute's budget at each window roll, and its spacing loop **spun forever*
 once the remainder rounded below a float ulp (34M sleeps advancing the clock 24s).
 Both are now pinned by regression tests.
 
+### Part 3 — the run finished, fetched cleanly, and produced NOTHING
+
+Third run: **rate limiting confirmed working on real data** — zero 429s, all 20
+symbols fetched. But every symbol reported `0 price-action entries`, and a
+`[warn] kline cache write failed (Permission denied: '/data')` per symbol.
+
+**Root cause — the Backtester has emitted zero signals since 2026-07-11.**
+`_backtest_channel` passed `ai_insight=` to `channel.evaluate`. **No channel has
+ever accepted that argument** — `BaseChannel.evaluate` and
+`ScalpChannel.evaluate` both take `(symbol, candles, indicators, smc_data,
+spread_pct, volume_24h_usd, regime=…)`. Every candle raised `TypeError`, and the
+handler did `log.debug(...)` + `continue`. So the measurement path was **dead for
+two weeks** (since #713), silently.
+
+It survived because **every existing assertion is guarded** —
+`if results[0].total_signals > 0: …`. A backtester that never emits satisfies the
+entire suite. This also breaks the Hard Limit "never swallow an exception
+silently in a data/measurement path": the arm now calls
+`fail_open.record("backtester.channel_evaluate", exc)` and logs at WARNING.
+
+Everything built on `Backtester` was affected: `run_monte_carlo`,
+`run_per_pair_sweep`, `run_regime_stress_test`, `run_walk_forward`, and the
+bake-off.
+
+**Correction to Part 1's numbers.** The Θ(n²) measurements were taken while every
+evaluator threw instantly — so they measured a dead loop. With evaluators
+actually running, cost was still superlinear (0.63 → 1.27 ms/candle as n grew),
+because `_evaluate_sr_flip_retest` does `list(highs)` on every candle
+(`scalp.py:3845`) while reading only `[-50:]` — the copy grew with the window.
+
+Fixed by handing evaluators a **bounded tail** (`_EVAL_WINDOW = 300`), which is
+what the live scanner does anyway (fixed window from `HistoricalDataStore`), so
+it is a fidelity improvement as well as a speed one. Deepest lookback anywhere is
+50 bars (scalp) / 100 (SMC detector). **Verified signal-identical** at bounds
+150 / 300 / 600 vs unbounded. Indicators are unaffected — they still come off the
+full-history tape, indexed at `i`.
+
+Real numbers now, evaluators live and firing:
+
+| | before | after |
+|---|---|---|
+| ms/candle | 0.63 → 1.27 (rising) | **~0.62 flat** |
+| 6mo 5m, 20 pairs (compute) | ~92 min (superlinear) | **~11 min** |
+
+Cold run ≈ 11 min compute + ~28 min paced fetch ≈ **39 min**; warm ≈ 11 min. Both
+inside the 3600s ops timeout.
+
+**Also fixed:** the kline cache defaulted to `/data/exit_backtest/klines` — the
+**ops** container's volume, but the script runs in the **engine** container. It
+now defaults beside `--out-dir` (writable by construction), and the unwritable
+warning fires once instead of 40 times.
+
 **Open follow-up (ops, not done here):** on timeout the ops runner
 (`360ce-ops:app/data_sources/exit_backtest.py`) kills the process and
 discards both pipes, so the owner got `timeout after 1800s` and nothing else —

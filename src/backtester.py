@@ -12,6 +12,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
+from src import fail_open
 from src.channels.base import Signal
 from src.channels.scalp import ScalpChannel
 from src.detector import SMCDetector
@@ -21,14 +22,16 @@ from src.utils import get_logger
 
 log = get_logger("backtester")
 
-# Thresholds for converting a numeric AI sentiment score ([-1, 1]) to a label.
-_AI_BULLISH_THRESHOLD = 0.2
-_AI_BEARISH_THRESHOLD = -0.2
-
 # Channel name substrings used to identify SCALP channels for automatic
 # execution_delay_candles assignment.  Scalp channels target M1/M5 candles
 # where 0.5–3 s of live-trading latency corresponds to ~1 candle of slippage.
 _SCALP_CHANNEL_NAMES = ("360_SCALP",)
+
+# Bars of history handed to each evaluator call. The live scanner feeds a
+# bounded window from HistoricalDataStore; matching that is both faithful and
+# what keeps the loop linear. Deepest lookback in the evaluators is 50 bars
+# (scalp.py) and 100 in the SMC detector, so this is ~3x the deepest need.
+_EVAL_WINDOW = 300
 
 
 @dataclass
@@ -580,6 +583,7 @@ class Backtester:
         slippage_pct: float = 0.02,
         funding_rate_per_8h: float = 0.01,
         max_concurrent_positions: int = 5,
+        eval_window: int = _EVAL_WINDOW,
     ) -> None:
         if channels is None:
             channels = [
@@ -593,6 +597,7 @@ class Backtester:
         self._slippage_pct = slippage_pct
         self._funding_rate_per_8h = funding_rate_per_8h
         self._max_concurrent_positions = max_concurrent_positions
+        self._eval_window = max(1, eval_window)
         # AI confidence suppression threshold — signals below this are skipped.
         # Default 0.0 disables suppression (backward compatible).
         self._min_confidence_threshold: float = 0.0
@@ -647,15 +652,14 @@ class Backtester:
         volume_24h_usd:
             Simulated 24h volume.
         simulated_ai_score:
-            AI sentiment score passed to each channel evaluation, in the range
-            ``[-1.0, 1.0]``.  Defaults to ``0.0`` (Neutral).
-
-            **Note:** The backtester cannot replay historical AI sentiment data,
-            so this value is the same for every candle window.  A value of
-            ``0.0`` maps to ``score_ai_sentiment(0) ≈ 7.5/15``, which is a
-            neutral mid-point — not zero.  To simulate pessimistic conditions
-            (e.g. bearish news sentiment that would lower confidence in live
-            trading), pass a negative value such as ``-0.5``.
+            **Currently has no effect.**  It used to be folded into an
+            ``ai_insight`` dict and handed to ``channel.evaluate``, but no
+            channel accepts that argument any more — ``BaseChannel.evaluate``
+            and ``ScalpChannel.evaluate`` both dropped it, and passing it raised
+            ``TypeError`` on every candle from 2026-07-11 (#713) until it was
+            removed here.  The parameter is retained so existing callers keep
+            working; wire it back through the channel signature before treating
+            it as meaningful.
         config:
             :class:`BacktestConfig` for the flat-data mode.  Activates
             per-pair / per-config sweep path.
@@ -1041,16 +1045,6 @@ class Backtester:
         is_scalp = any(channel.config.name.startswith(n) for n in _SCALP_CHANNEL_NAMES)
         execution_delay = 1 if is_scalp else 0
 
-        # Derive a human-readable sentiment label from the numeric score so
-        # channels that inspect the label field also behave consistently.
-        if simulated_ai_score > _AI_BULLISH_THRESHOLD:
-            ai_label = "Bullish"
-        elif simulated_ai_score < _AI_BEARISH_THRESHOLD:
-            ai_label = "Bearish"
-        else:
-            ai_label = "Neutral"
-        ai_insight = {"label": ai_label, "summary": "", "score": simulated_ai_score}
-
         # Indicators are causal, so compute each one ONCE per timeframe here and
         # read it back by index inside the loop. Recomputing them per candle over
         # the growing prefix was Theta(n^2) and ~99% of this function's runtime
@@ -1068,18 +1062,27 @@ class Backtester:
             if len(open_positions) >= self._max_concurrent_positions:
                 continue
 
-            # Slice candles up to index i for the evaluation window
+            # Evaluation window: a BOUNDED tail ending at i, not the whole
+            # prefix. The live scanner feeds evaluators a fixed-size window from
+            # HistoricalDataStore, so handing them an ever-growing history was
+            # both unfaithful and quadratic — `_evaluate_sr_flip_retest` does
+            # `list(highs)` per candle (scalp.py:3845) while only reading
+            # `[-50:]`, so the copy grew without bound. Deepest lookback anywhere
+            # is 50 bars (scalp) / 100 (SMC detector); _EVAL_WINDOW leaves ample
+            # margin. Indicators are unaffected — they come off the full-history
+            # tape below, indexed at i.
+            lo_i = max(0, i - self._eval_window)
             window: Dict[str, Dict] = {}
             for tf, cd in candles_by_tf.items():
                 window[tf] = {
-                    k: v[:i] if hasattr(v, "__getitem__") else v
+                    k: v[lo_i:i] if hasattr(v, "__getitem__") else v
                     for k, v in cd.items()
                 }
 
             # Indicators for each timeframe, read off the pre-computed tape.
             indicators: Dict[str, Dict] = {}
             for tf, cd in window.items():
-                indicators[tf] = tapes[tf].at(len(cd.get("close", [])))
+                indicators[tf] = tapes[tf].at(min(i, tapes[tf].n))
 
             # SMC detection
             smc_result = self._smc_detector.detect(symbol, window, [])
@@ -1091,12 +1094,18 @@ class Backtester:
                     candles=window,
                     indicators=indicators,
                     smc_data=smc_data,
-                    ai_insight=ai_insight,
                     spread_pct=spread_pct,
                     volume_24h_usd=volume_24h_usd,
                 )
             except Exception as exc:
-                log.debug("Channel eval error at candle %d: %s", i, exc)
+                # Hard Limit: never swallow an exception silently in a
+                # measurement path. This arm used to log at DEBUG and move on,
+                # which is how a stale `ai_insight=` kwarg (added 2026-07-11,
+                # #713; no channel has ever accepted it) made EVERY candle raise
+                # TypeError — the Backtester emitted zero signals for two weeks
+                # and nothing paged, because no test asserts it emits any.
+                fail_open.record("backtester.channel_evaluate", exc)
+                log.warning("Channel eval error at candle %d: %s", i, exc)
                 continue
 
             # ScalpChannel returns List[Signal]; other channels return Optional[Signal].

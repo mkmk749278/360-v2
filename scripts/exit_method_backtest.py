@@ -692,6 +692,9 @@ def _get_paced(url: str, pacer: WeightPacer, *, weight: int = _PAGE_WEIGHT) -> A
 # over the SAME candles. Fetching 1.38M candles (~5,540 weight) again for every
 # sweep is what turns a cheap question into a rate-limit incident, so closed
 # candles are cached per (symbol, interval) and only the gap is fetched.
+_CACHE_WARNED = False
+
+
 def _cache_path(cache_dir: str, symbol: str, interval: str) -> str:
     return os.path.join(cache_dir, f"{symbol}_{interval}.csv.gz")
 
@@ -719,7 +722,14 @@ def _save_cache(path: str, rows: Sequence[Row]) -> None:
             csv.writer(fh).writerows(rows)
         os.replace(tmp, path)
     except OSError as exc:
-        print(f"[warn] kline cache write failed ({exc}); continuing", file=sys.stderr)
+        # Once, not once per symbol per timeframe — an unwritable cache dir is a
+        # single fact, and repeating it 40x buries the run's real progress.
+        global _CACHE_WARNED
+        if not _CACHE_WARNED:
+            _CACHE_WARNED = True
+            print(f"[warn] kline cache disabled — cannot write {path} ({exc}). "
+                  "The run continues but re-runs will refetch (and cost weight); "
+                  "point --cache-dir at a writable path.", file=sys.stderr)
 
 
 def _fetch_range(symbol: str, interval: str, start_ms: int, end_ms: int,
@@ -1019,8 +1029,13 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                         f"{_DEFAULT_WEIGHT_PER_MIN} = the headroom the engine's "
                         "limiter leaves free (it budgets 2,200 of 2,400). Raising "
                         "this eats into live trading's budget on the same IP.")
-    p.add_argument("--cache-dir", type=str, default="/data/exit_backtest/klines",
-                   help="on-disk kline cache; re-runs then cost ~0 weight")
+    p.add_argument("--cache-dir", type=str, default="",
+                   help="on-disk kline cache; re-runs then cost ~0 weight. "
+                        "Default: a 'kline_cache' dir beside --out-dir, which is "
+                        "writable by construction (the run must write outputs "
+                        "there anyway). An absolute path like /data is NOT a safe "
+                        "default — that volume belongs to the ops container, and "
+                        "this script runs inside the engine container.")
     p.add_argument("--no-cache", action="store_true",
                    help="ignore the kline cache and refetch everything")
     return p.parse_args(argv)
@@ -1043,7 +1058,14 @@ def main(argv: Optional[List[str]] = None) -> int:
     start_ms = now_ms - int(args.months * 30 * 24 * 3600 * 1000)
 
     pacer = WeightPacer(args.weight_per_min)
-    cache_dir = None if args.no_cache else (args.cache_dir or None)
+    # Sit the cache beside the outputs. ops invokes with
+    # --out-dir /app/scripts/out/ops_<ts>, so this lands at
+    # /app/scripts/out/kline_cache — stable across runs, and writable for the
+    # same reason the outputs are.
+    cache_dir = None if args.no_cache else (
+        args.cache_dir or os.path.join(os.path.dirname(os.path.abspath(out_dir)),
+                                       "kline_cache")
+    )
     print(f"[pace] budget {pacer.per_min} weight/min "
           f"(IP cap {_FUTURES_WEIGHT_CAP}, engine reserves 2,200); "
           f"page limit {_PAGE_LIMIT} (weight {_PAGE_WEIGHT}); "
