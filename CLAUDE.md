@@ -240,6 +240,39 @@ Telegram are both acceptable paging paths.
 
 ---
 
+## The Autonomous Portfolio (Layers A–G) — LIVE
+
+Edge lives in `session × regime × strategy` cells, not in a global confidence score.
+The portfolio measures every strategy in every context on real data and lets that
+measurement decide emission. Full description: `OWNER_BRIEF.md § 3.11`.
+
+| Layer | Module | State |
+|---|---|---|
+| A — market context vector | `src/market_context.py` | LIVE |
+| B — strategy registry / affinity | `src/strategy_portfolio.py` | LIVE |
+| C — Strategy×Context edge matrix | `src/strategy_edge.py` | LIVE — everything routes on it |
+| C→consumer — per-context emission floor | `src/context_emission_policy.py` | **LIVE** (money path) |
+| D — allocator | `src/strategy_allocator.py` | **Recommendation-only; consumed by nothing** |
+| G — closed-loop emission controller | `src/emission_controller.py` | **LIVE**, self-promoting inside a bounded envelope |
+
+**Four rules when touching any of it:**
+
+- **Measurement arms are not strategies.** `@FIXED`/`@ATR`/`@TUNED`/`@DSV2`/`@GOV`/
+  `@SARBASE`/`@SAREXIT` are stamped from the same candidates as the real rows —
+  include them in a per-strategy rollup and you double-count the candidate. The
+  authoritative suffix list is `geometry_ab._VARIANT_SUFFIXES`; ops mirrors it in
+  `strategy_lab.MEASUREMENT_SUFFIXES`. **Keep the two in sync** — they drifted once
+  and silently inflated the ops rollup for a week.
+- **Counterfactuals are optimistic** (~0.38R measured on MTP). Never quote a
+  counterfactual R as an expected live result.
+- **Zero emissions ≠ broken.** Fully gated + measured-negative is the gates working;
+  fully gated + measured-positive is money on the table. `gated_path_verdict` tells
+  them apart — don't "fix" the first case.
+- **After any scoring or cost change, wait for a fresh window** before judging a
+  verdict. Rolling per-cell windows keep serving pre-change data.
+
+---
+
 ## Telemetry & Diagnosis
 
 - **Suppression telemetry** — every gate rejection tagged. First stop when "no signals firing." Surface via `/suppressed` Telegram command.

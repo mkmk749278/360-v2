@@ -327,6 +327,69 @@ Shared scoring infrastructure — purely a scoring layer, never invents a setup.
 
 Soft-penalty bonus magnitudes bounded: confluence ≤9 pts, structure-align 3 pts. A sub-50 candidate cannot reach paid (65) by scoring bonuses alone.
 
+## 3.11 The Autonomous Portfolio / Strategy Lab (Layers A–G) — LIVE
+
+*Added 2026-07-25. Built across Sessions 53–77 and running in production, but this
+brief had no description of it at all — the single largest documentation gap in the
+system. Design-of-record: `docs/PLAN_AUTONOMOUS_PORTFOLIO.md`,
+`docs/PLAN_AUTONOMOUS_EMISSION.md`, `docs/PLAN_AUTONOMOUS_EMISSION_CONTROLLER.md`,
+`docs/AUTONOMOUS_SYSTEM_AUDIT_AND_REMEDIATION.md` (W1–W7).*
+
+**The thesis.** A confidence score alone cannot decide emission, because edge lives in
+`session × regime × strategy` cells, not in a global number. The portfolio measures
+every strategy in every market context on real data, and lets that measurement — not
+opinion, and not a human checking daily — decide what emits.
+
+| Layer | Module | Role | State |
+|---|---|---|---|
+| **A — Market context** | `src/market_context.py` | Global BTC-anchored vector (session / phase / volatility / funding / rotation) → `context_key`, published each 5-min cycle | LIVE |
+| **B — Strategy registry** | `src/strategy_portfolio.py` | Context-affinity tags per SetupClass + shadow units; `is_context_aligned()` | LIVE |
+| **C — Edge matrix** | `src/strategy_edge.py` | Every strategy × context measured on real data, provenance-split (emitted / suppressed / shadow), Wilson lower-bounded. **Everything routes on this.** | LIVE |
+| **C→consumer — Emission policy** | `src/context_emission_policy.py` | Per-(strategy × context) confidence floor from the matrix: STRONG → relax toward the quality anchor, POSITIVE → half-relax, **NEGATIVE → hard-suppress**, cold/thin → global floor unchanged | **LIVE** (S69, owner-directed) |
+| **D — Allocator** | `src/strategy_allocator.py` | What it *would* activate now and at what weight, inside the safety envelope (≤6 concurrent, ≤0.35 each) | **Recommendation-only — consumed by nothing.** Phase-4 master-arm never armed |
+| **G — Emission controller** | `src/emission_controller.py` + `_store.py` | Closed loop: reads gate verdicts + matrix and moves the policy's per-strategy knobs itself, inside a bounded envelope, **no human in the loop** | **LIVE** (S72b) |
+
+**What feeds the matrix**
+
+- **Suppression audit / shadow ledger** (`src/suppression_audit.py`) — every
+  post-scoring gate-suppressed candidate is stamped with full geometry and
+  forward-measured on real candles (WOULD_WIN / WOULD_LOSE / WOULD_EXPIRE), giving a
+  per-gate **KEEP / TUNE / DROP** verdict. This is how a gate earns its place.
+- **Shadow strategy units** (`src/shadow_strategies.py`) — 4 units with no path to the
+  signal queue, measured as if they were live.
+- **Counterfactual measurement arms** — `@FIXED`/`@ATR` (stop geometry),
+  `@TUNED` (tuned recipes), `@DSV2`/`@GOV` (dispatch rescues),
+  `@SARBASE`/`@SAREXIT` (exit method). **These are evidence, never strategies** — they
+  are stamped from the same candidates as the real rows and must be excluded from any
+  per-strategy rollup or the candidate is double-counted.
+
+**Cost-aware R (W1/W2, Session 76) — the correction that mattered most.** Every R —
+counterfactual, shadow *and* realized — used to be measured **gross**: wins at full
+R-to-TP1, losses at exactly −1.0R, no fees/funding/slippage, while the fields were
+*labelled* net. The harvested gross edge (~+0.08R) was smaller than the per-trade cost
+drag never subtracted (~0.15–0.25R), so the dashboards read positive while the book was
+net-negative, and the emission policy steered on a cost-free fantasy. `src/trade_costs.py`
+now nets both seams; `reconcile_matrix()` + the `edge_reconciliation` liveness probe
+validate the cost constants in flight.
+
+**Where to read it:** ops **Strategy Lab** (`/strategy-lab`) and the truth report's
+Suppression Quality Audit / Edge Matrix / shadow-arm sections.
+
+**Standing cautions — read before acting on any number here**
+
+1. **Counterfactuals are optimistic.** They free-run to TP1; live trades get killed
+   earlier. Measured at ~**0.38R** on MOVER_TREND_PULLBACK. Discount accordingly — the
+   `edge_reconciliation` probe exists to keep that number honest.
+2. **A fresh window is required after any scoring/cost change.** Per-cell windows roll;
+   verdicts stay stale until they refill. Do not retire or promote a strategy on a
+   window that predates the change.
+3. **Zero emissions is not automatically a fault.** A path fully gated because its
+   counterfactuals measure negative is correctly gated (RANGE_FADE: −0.98R, 3% win).
+   A path fully gated with *positive* counterfactuals is costing money. The emission
+   liveness probes distinguish these (`feature_liveness.gated_path_verdict`).
+4. **The allocator is still recommendation-only.** Nothing consumes its weights;
+   arming it is an owner decision that has never been taken.
+
 ---
 
 # PART IV — BUSINESS RULES
