@@ -181,35 +181,58 @@ class TestPairStamping:
         assert self._stamp(store, now_mono=1010.0, provenance=sa.PROVENANCE_SUPPRESSED) is False
         assert len(store.records()) == 2
 
-    def test_a_suppressed_stamp_can_never_swallow_an_emitted_one(self, tmp_path):
+    def test_a_suppressed_stamp_can_never_swallow_a_queued_one(self, tmp_path):
         """Owner-caught 2026-07-25: one shared cooldown budget per
-        (symbol, setup, side) let a suppressed candidate block a REAL emitted
+        (symbol, setup, side) let a suppressed candidate block a REAL queued
         signal minutes later. Suppressed outnumber emissions by orders of
-        magnitude, so the emitted sample — the only population that can justify
-        changing what subscribers receive — was silently, non-randomly thinned.
+        magnitude, so the sample that can lead to a live change was silently,
+        non-randomly thinned. The cooldown stays keyed by provenance.
         """
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
         assert self._stamp(
             store, now_mono=1000.0, provenance=sa.PROVENANCE_SUPPRESSED
         ) is True
-        # Same symbol/setup/side, 10s later, but this one actually went out.
+        # Same symbol/setup/side, 10s later, but this one passed every gate.
         assert self._stamp(
-            store, now_mono=1010.0, provenance=sa.PROVENANCE_EMITTED
-        ) is True, "an emitted signal must never be dropped from the measurement"
-        emitted = [r for r in store.records() if r["provenance"] == sa.PROVENANCE_EMITTED]
-        assert len(emitted) == 2      # both arms of the emitted pair
+            store, now_mono=1010.0, provenance=sa.PROVENANCE_ENQUEUED
+        ) is True, "a queued candidate must never be dropped from the measurement"
+        queued = [r for r in store.records() if r["provenance"] == sa.PROVENANCE_ENQUEUED]
+        assert len(queued) == 2      # both arms of the queued pair
 
-    def test_emitted_stamps_are_never_throttled_against_each_other(self, tmp_path):
-        """Duplicate emissions are already prevented upstream by
-        dispatch_cooldown, so this arm must not second-guess them."""
-        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
-        for t in (1000.0, 1005.0, 1010.0):
-            assert self._stamp(store, now_mono=t, provenance=sa.PROVENANCE_EMITTED) is True
-        assert len(store.records()) == 6
+    def test_stamping_can_never_write_emitted(self, tmp_path):
+        """The stamp site does not know whether a signal was delivered.
 
-    def test_an_emitted_stamp_does_not_consume_the_suppressed_budget(self, tmp_path):
+        It fires when ``signal_queue.put`` accepts a candidate; the router then
+        applies its own gate layer and drops most of what it dequeues. EMITTED
+        is written ONLY by ``promote_to_emitted`` after confirmed delivery, so
+        no stamp may produce it — that conflation was a ~30x inflation of the
+        one population allowed to justify changing live output.
+        """
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
-        assert self._stamp(store, now_mono=1000.0, provenance=sa.PROVENANCE_EMITTED) is True
+        for prov in (sa.PROVENANCE_SUPPRESSED, sa.PROVENANCE_ENQUEUED, ""):
+            self._stamp(store, now_mono=1000.0, provenance=prov, symbol=f"X{prov}USDT")
+        assert not [
+            r for r in store.records() if r["provenance"] == sa.PROVENANCE_EMITTED
+        ]
+
+    def test_a_persisting_queued_candidate_is_throttled_not_re_stamped(self, tmp_path):
+        """The bug this replaces: EMITTED used to bypass the cooldown on the
+        premise that "an emission is a discrete dispatch event". It was not —
+        it was an enqueue, so every 15s re-detection of one persisting setup
+        stamped again. Real data: one WLFIUSDT setup produced 5 'emitted' rows
+        at an identical entry inside 6.7h.
+        """
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store, now_mono=1000.0, provenance=sa.PROVENANCE_ENQUEUED) is True
+        for t in (1005.0, 1010.0):
+            assert self._stamp(
+                store, now_mono=t, provenance=sa.PROVENANCE_ENQUEUED
+            ) is False, "a re-detected persisting candidate must not re-stamp"
+        assert len(store.records()) == 2
+
+    def test_a_queued_stamp_does_not_consume_the_suppressed_budget(self, tmp_path):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store, now_mono=1000.0, provenance=sa.PROVENANCE_ENQUEUED) is True
         assert self._stamp(
             store, now_mono=1001.0, provenance=sa.PROVENANCE_SUPPRESSED
         ) is True, "the suppressed arm has its own cooldown keyspace"
@@ -230,12 +253,12 @@ class TestPairStamping:
         considered" — and only the first can justify changing live output.
         """
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
-        assert self._stamp(store, provenance=sa.PROVENANCE_EMITTED) is True
+        assert self._stamp(store, provenance=sa.PROVENANCE_ENQUEUED) is True
         recs = store.records()
         assert len(recs) == 2
         # Both arms are ONE candidate — they must agree, or a pair could be
-        # split across the emitted/suppressed filter.
-        assert {r["provenance"] for r in recs} == {sa.PROVENANCE_EMITTED}
+        # split across the emitted/queued/suppressed filter.
+        assert {r["provenance"] for r in recs} == {sa.PROVENANCE_ENQUEUED}
 
     def test_suppressed_provenance_is_recorded_too(self, tmp_path):
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
@@ -295,9 +318,14 @@ class TestScannerWiringCarriesProvenance:
         assert invocations, "expected to find the stamp call sites"
         for call in invocations:
             assert "provenance=" in call, f"call site without provenance: {call}"
-        # Both halves of the sample must be represented.
+        # Both halves of the sample must be represented. The enqueue site
+        # stamps ENQUEUED, never EMITTED — only the router, after confirmed
+        # delivery, may promote a record to EMITTED.
         joined = " ".join(invocations)
-        assert "PROVENANCE_EMITTED" in joined
+        assert "PROVENANCE_ENQUEUED" in joined
+        assert "PROVENANCE_EMITTED" not in joined, (
+            "the scanner cannot know a signal was delivered — the router does"
+        )
         assert "PROVENANCE_SUPPRESSED" in joined
 
 
@@ -487,3 +515,188 @@ class TestSummary:
             "c": {"strategy": "SR_FLIP_RETEST", "n": 100, "win_rate": 0.5, "avg_r": 0.1},
         }
         assert sar.summarize_sar_exit(matrix) == []
+
+
+class TestProvenancePromotionOnDispatch:
+    """The enqueue-vs-dispatch fix (owner-caught 2026-07-25).
+
+    The scanner stamped ``emitted`` the moment ``signal_queue.put`` accepted a
+    candidate, and its comment claimed "the signal really did go out". It had
+    not. ``SignalRouter._process`` consumes that queue and applies a second
+    gate layer — correlation lock, per-symbol/per-channel cooldown, per-channel
+    concurrent cap, correlation group limit, global same-direction throttle,
+    TP/SL sanity, staleness — dropping most of what it dequeues.
+
+    Measured over one 6.7h window: 90 distinct candidates reached the queue, 3
+    reached the feed. The surplus was not a random sample either — it skewed to
+    81% SHORT against a 52% SHORT real feed, because the same-direction
+    throttle rejected the short pile-up *after* it had been stamped emitted.
+
+    So EMITTED must be written at delivery, by the router, and nowhere else.
+    """
+
+    def _stamp(self, store, **kw):
+        base = dict(
+            symbol="BTCUSDT", channel="scalp", setup_class="SR_FLIP_RETEST",
+            side="LONG", entry=100.0, stop_loss=99.0, tp1=102.0, store=store,
+            provenance=sa.PROVENANCE_ENQUEUED,
+        )
+        base.update(kw)
+        return sar.stamp_sar_pair(**base)
+
+    def _promote(self, store, **kw):
+        base = dict(
+            symbol="BTCUSDT", setup_class="SR_FLIP_RETEST", side="LONG",
+            entry=100.0, store=store,
+        )
+        base.update(kw)
+        return sar.promote_to_emitted(**base)
+
+    def test_promotion_flips_both_arms_of_the_delivered_candidate(self, tmp_path):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store) is True
+
+        assert self._promote(store) == 2, "a half-promoted pair biases the A/B"
+        assert {r["provenance"] for r in store.records()} == {sa.PROVENANCE_EMITTED}
+
+    def test_a_queued_candidate_the_router_drops_stays_queued(self, tmp_path):
+        """The whole point: no promotion call ⇒ it is not in the emitted set."""
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store) is True
+
+        assert not [
+            r for r in store.records() if r["provenance"] == sa.PROVENANCE_EMITTED
+        ]
+        assert {r["provenance"] for r in store.records()} == {sa.PROVENANCE_ENQUEUED}
+
+    def test_promotion_never_touches_a_suppressed_record(self, tmp_path):
+        """A gate-killed candidate must never become emitted — that would put
+        a signal users never saw into the population that justifies changes."""
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store, provenance=sa.PROVENANCE_SUPPRESSED) is True
+
+        assert self._promote(store) == 0
+        assert {r["provenance"] for r in store.records()} == {sa.PROVENANCE_SUPPRESSED}
+
+    def test_promotion_matches_on_entry_so_a_different_candidate_is_untouched(
+        self, tmp_path,
+    ):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store) is True
+
+        # Same symbol/setup/side, different price ⇒ a different candidate.
+        assert self._promote(store, entry=123.0) == 0
+        assert {r["provenance"] for r in store.records()} == {sa.PROVENANCE_ENQUEUED}
+
+    def test_one_dispatch_promotes_one_candidate_not_the_whole_history(
+        self, tmp_path,
+    ):
+        """A setup that persists across scan cycles accumulates rows. A single
+        dispatch must promote the newest candidate only — relabelling the
+        history would re-inflate exactly what this fix removes."""
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        # Two distinct detections, far enough apart to clear the cooldown.
+        assert self._stamp(store, now_mono=1000.0) is True
+        # ``now_mono`` drives only the cooldown; ``suppress_timestamp`` is wall
+        # clock, and the test body runs in microseconds. Age the first pair so
+        # the two detections are separated in wall time as they are in prod.
+        with store._lock:
+            for rec in store._buffer:
+                rec["suppress_timestamp"] -= 600.0
+        assert self._stamp(store, now_mono=100000.0) is True
+        assert len(store.records()) == 4
+
+        assert self._promote(store) == 2
+        provs = [r["provenance"] for r in store.records()]
+        assert provs.count(sa.PROVENANCE_EMITTED) == 2
+        assert provs.count(sa.PROVENANCE_ENQUEUED) == 2
+
+    def test_promotion_cannot_rewrite_an_already_measured_record(self, tmp_path):
+        """Once a record is classified its outcome is in the edge matrix.
+        Re-labelling it would retroactively move a measured result between
+        populations."""
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store) is True
+        with store._lock:
+            for rec in store._buffer:
+                rec["classification"] = "TP1_FIRST"
+
+        assert self._promote(store) == 0
+
+    def test_promotion_ignores_a_stamp_older_than_the_window(self, tmp_path):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store) is True
+
+        assert self._promote(store, max_age_sec=0.0) == 0
+
+    def test_promotion_is_fail_open(self, tmp_path):
+        """A measurement re-label must never break dispatch."""
+        class _Boom:
+            def promote_provenance(self, **_kw):
+                raise RuntimeError("ledger down")
+
+        assert sar.promote_to_emitted(
+            symbol="BTCUSDT", setup_class="SR_FLIP_RETEST", side="LONG",
+            entry=100.0, store=_Boom(),
+        ) == 0
+
+
+class TestPreFixRecordsAreRelabelledOnLoad:
+    """Records persisted before the fix carry ``emitted`` written at the
+    enqueue site, so ~97% were never delivered. They load as ``enqueued``:
+    the truthful label, and it fails safe by removing them from the emitted
+    sample rather than inventing membership in it."""
+
+    def _write(self, path, ts, provenance):
+        import json
+        path.write_text(json.dumps([{
+            "gate_name": "sar_exit_shadow:base",
+            "setup_class": "SR_FLIP_RETEST@SARBASE",
+            "symbol": "BTCUSDT", "channel": "scalp", "side": "LONG",
+            "entry": 100.0, "stop_loss": 99.0, "tp1": 102.0, "sl_distance": 1.0,
+            "confidence": 70.0, "context_key": "", "regime": "",
+            "valid_for_minutes": 0.0, "suppress_timestamp": ts,
+            "provenance": provenance, "classification": None,
+        }]))
+
+    def test_a_pre_fix_emitted_record_loads_as_enqueued(self, tmp_path):
+        p = tmp_path / "s.json"
+        self._write(p, sa._PROVENANCE_FIX_TS - 3600, sa.PROVENANCE_EMITTED)
+
+        store = SuppressedCandidateStore(persist_path=str(p), maxlen=100)
+        assert [r["provenance"] for r in store.records()] == [sa.PROVENANCE_ENQUEUED]
+
+    def test_a_post_fix_emitted_record_is_trusted(self, tmp_path):
+        p = tmp_path / "s.json"
+        self._write(p, sa._PROVENANCE_FIX_TS + 3600, sa.PROVENANCE_EMITTED)
+
+        store = SuppressedCandidateStore(persist_path=str(p), maxlen=100)
+        assert [r["provenance"] for r in store.records()] == [sa.PROVENANCE_EMITTED]
+
+    def test_suppressed_records_are_left_alone(self, tmp_path):
+        p = tmp_path / "s.json"
+        self._write(p, sa._PROVENANCE_FIX_TS - 3600, sa.PROVENANCE_SUPPRESSED)
+
+        store = SuppressedCandidateStore(persist_path=str(p), maxlen=100)
+        assert [r["provenance"] for r in store.records()] == [sa.PROVENANCE_SUPPRESSED]
+
+
+class TestRouterPromotesOnConfirmedDelivery:
+    """The promotion must be wired at the router's confirmed-delivery point,
+    after every drop gate. Wiring it anywhere earlier reintroduces the bug."""
+
+    def test_the_router_promotes_after_registering_the_delivered_signal(self):
+        import inspect
+
+        from src import signal_router
+
+        src_text = inspect.getsource(signal_router)
+        assert "promote_to_emitted" in src_text, (
+            "the router is the only component that knows a signal was delivered"
+        )
+        # It must sit after the confirmed-delivery registration, not before it.
+        register = src_text.index("Register only after confirmed delivery")
+        promote = src_text.index("promote_to_emitted")
+        assert promote > register, (
+            "promotion before confirmed delivery is the bug being fixed"
+        )

@@ -291,12 +291,18 @@ def stamp_sar_pair(
     Returns ``True`` when the pair was stamped, else ``False`` (cooldown or bad
     geometry).  Both arms always stamp together — a lone arm biases the A/B.
 
-    ``provenance`` records whether the candidate was actually emitted to
-    subscribers or killed by a gate.  Both arms of a pair carry the same value
-    (they are one candidate), and it is what lets the measurement answer
-    "would this exit have improved the signals we SENT" separately from
-    "…every candidate we considered" — only the former can justify changing
-    what users receive.
+    ``provenance`` records where the candidate stood at stamp time —
+    ``SUPPRESSED`` (a scanner gate killed it) or ``ENQUEUED`` (it passed every
+    scanner gate and the queue accepted it).  Both arms of a pair carry the
+    same value (they are one candidate).
+
+    **This function never writes EMITTED.**  Whether a queued candidate is
+    actually delivered is not known here: the router applies its own gate
+    layer afterwards and drops most of what it dequeues.  ``EMITTED`` is
+    written only by :func:`promote_to_emitted`, from the router, after
+    confirmed delivery — which is what lets the measurement answer "would this
+    exit have improved the signals we SENT" separately from "…every candidate
+    we considered".  Only the former can justify changing what users receive.
 
     Note the trail arm carries the live SL/TP1 **as levels it never consults**:
     they are stored so ``sl_distance`` (the shared R denominator) and the
@@ -316,29 +322,34 @@ def stamp_sar_pair(
         if side_u not in ("LONG", "SHORT"):
             return False
         prov = str(provenance or "")
-        # The cooldown is keyed by provenance, and EMITTED bypasses it entirely.
+        # The cooldown is keyed by provenance so a *suppressed* stamp cannot
+        # swallow a real signal's stamp minutes later (2026-07-25, owner-caught):
+        # suppressed candidates outnumber emissions by orders of magnitude, so
+        # one shared (symbol, setup, side) budget thinned the emitted sample
+        # silently and non-randomly.
         #
-        # Both were wrong before (2026-07-25, owner-caught): one shared
-        # (symbol, setup, side) budget meant a *suppressed* stamp could swallow
-        # a real emitted signal minutes later. Suppressed candidates outnumber
-        # emissions by orders of magnitude, so the emitted sample — the only
-        # population that can justify changing what subscribers receive — was
-        # being silently and non-randomly thinned. The symptom was the emitted
-        # list not matching the app's live signals.
+        # The EMITTED cooldown bypass that shipped alongside that fix has been
+        # REMOVED, because its premise was false. It reasoned that "an emission
+        # is a discrete dispatch event, and duplicates are already prevented
+        # upstream by dispatch_cooldown" — but this stamp never fired on a
+        # dispatch. It fired when ``signal_queue.put`` accepted the candidate,
+        # which the router then usually rejected. So the bypass let every
+        # re-detection of a persisting setup stamp as EMITTED and *amplified*
+        # the very mismatch it was meant to fix (one WLFIUSDT setup produced 5
+        # "emitted" rows at an identical entry inside 6.7h).
         #
-        # The cooldown exists to throttle the SAME persisting candidate being
-        # re-detected every 15s scan. An emission is not that: it is a discrete
-        # dispatch event, and duplicates are already prevented upstream by
-        # dispatch_cooldown. So an emitted candidate always stamps.
+        # EMITTED now arrives only via :func:`promote_to_emitted`, called by the
+        # router after confirmed delivery — at which point the "discrete
+        # dispatch event" premise is finally true. The stamp path handles
+        # SUPPRESSED and ENQUEUED, and both take the cooldown: both are
+        # scan-cycle events on a candidate that may persist for many cycles.
         cd_key = (str(symbol or ""), setup, side_u, prov)
         mono = time.monotonic() if now_mono is None else float(now_mono)
         from config import SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC
-        from src.suppression_audit import PROVENANCE_EMITTED
 
-        if prov != PROVENANCE_EMITTED:
-            last = _last_pair_stamp.get(cd_key)
-            if last is not None and mono - last < SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC:
-                return False
+        last = _last_pair_stamp.get(cd_key)
+        if last is not None and mono - last < SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC:
+            return False
         target = store or get_sar_store()
 
         def _stamp_arm(gate: str, suffix: str, exit_model: str):
@@ -371,6 +382,64 @@ def stamp_sar_pair(
         from src import fail_open
         fail_open.record("sar_exit_shadow.stamp_pair", exc)
         return False
+
+
+def promote_to_emitted(
+    *,
+    symbol: str,
+    setup_class: str,
+    side: str,
+    entry: float,
+    store: Optional[SuppressedCandidateStore] = None,
+    max_age_sec: Optional[float] = None,
+) -> int:
+    """Mark a candidate's arms EMITTED after the router confirmed delivery.
+
+    This is the only writer of ``PROVENANCE_EMITTED`` (2026-07-25 fix). The
+    scanner stamps ``ENQUEUED`` when the queue accepts a candidate; the router
+    calls this once it has actually posted the signal. Everything that never
+    gets here stays ``ENQUEUED``, which is the honest label for "we considered
+    it, we queued it, and our own routing caps dropped it".
+
+    Returns the number of arm records promoted — 2 on the normal path (both
+    ``@SARBASE`` and ``@SAREXIT``), 0 when no matching stamp is in the window.
+    A 0 is not an error: the stamp cooldown may legitimately have throttled a
+    re-detected setup, and the earlier arms for that same candidate are already
+    in the ledger.
+
+    Fail-open: a measurement re-label must never break dispatch.
+    """
+    try:
+        setup = str(setup_class or "").strip()
+        if not setup or is_sar_variant(setup):
+            return 0
+        from src.suppression_audit import (
+            PROVENANCE_EMITTED,
+            PROVENANCE_ENQUEUED,
+        )
+
+        if max_age_sec is None:
+            # Generous relative to the scanner→router hop (sub-second in
+            # practice) but bounded so a promotion can never reach a candidate
+            # from an earlier, unrelated detection of the same setup.
+            from config import SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC
+            max_age_sec = max(300.0, float(SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC))
+        target = store or get_sar_store()
+        return target.promote_provenance(
+            symbol=str(symbol or ""),
+            side=str(side or ""),
+            # Both arms share the base setup as their prefix, so one call
+            # promotes the pair together.
+            setup_prefix=setup,
+            entry=float(entry or 0.0),
+            from_provenance=PROVENANCE_ENQUEUED,
+            to_provenance=PROVENANCE_EMITTED,
+            max_age_sec=float(max_age_sec),
+        )
+    except Exception as exc:
+        from src import fail_open
+        fail_open.record("sar_exit_shadow.promote_to_emitted", exc)
+        return 0
 
 
 # ---------------------------------------------------------------------------
