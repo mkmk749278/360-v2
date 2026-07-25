@@ -950,6 +950,155 @@ class ReferralStatsResponse(BaseModel):
     )
 
 
+class TrialStateResponse(BaseModel):
+    """Body of ``GET /api/trial`` and ``POST /api/trial/claim``.
+
+    The signup free trial (2026-07-25): 7 days of the full ``auto`` tier,
+    granted server-side with no payment method, activated only when the user
+    taps the welcome offer.
+
+    The app renders this and decides nothing itself — the engine is the
+    source of truth for anything money-adjacent the UI shows.  In particular
+    the welcome sheet appears **iff** ``offer_available`` is true, which is
+    false for every user while the offer is dark, even though those users are
+    already being counted in the ops cohort.
+
+    Every field is defaulted so a pre-upgrade client, or an engine with the
+    trial unwired, keeps deserialising.
+    """
+
+    offer_available: bool = Field(
+        default=False,
+        description="True when this user can activate a trial right now. "
+        "The ONLY signal the app uses to show the welcome offer.",
+    )
+    days: int = Field(
+        default=0, description="Length of the trial window being offered."
+    )
+    tier: Optional[str] = Field(
+        default=None,
+        description="Tier the trial grants (e.g. 'auto' — full automation).",
+    )
+    claimed: bool = Field(
+        default=False,
+        description="True once this user has activated their one trial "
+        "(stays true after it lapses — a trial is one-shot per user).",
+    )
+    active: bool = Field(
+        default=False,
+        description="True while the claimed trial window is still running.",
+    )
+    claimed_at: Optional[str] = Field(
+        default=None, description="ISO-8601 UTC activation time."
+    )
+    expires_at: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 UTC end of the trial window; null if unclaimed.",
+    )
+    seconds_remaining: Optional[int] = Field(
+        default=None, description="Seconds left in the window; null if unclaimed."
+    )
+    days_remaining: Optional[int] = Field(
+        default=None,
+        description="Whole days left, rounded up — what the countdown chip "
+        "renders ('3 days left').",
+    )
+    converted: bool = Field(
+        default=False,
+        description="True once this user paid for a subscription after "
+        "trialling.",
+    )
+    ineligible_reason: Optional[str] = Field(
+        default=None,
+        description="Why no offer is available: 'offer_not_available' | "
+        "'already_trialled' | 'already_subscribed' | 'account_too_old' | "
+        "'not_onboarded'.  Null when the offer IS available.",
+    )
+
+
+class TrialClaimResponse(TrialStateResponse):
+    """Result of ``POST /api/trial/claim`` — the post-claim state plus the
+    verdict, so one round trip both activates and refreshes the UI."""
+
+    ok: bool = Field(
+        default=False, description="True when the trial was activated."
+    )
+    reason: Optional[str] = Field(
+        default=None,
+        description="Set when ok=False; same vocabulary as "
+        "``ineligible_reason``.",
+    )
+
+
+class TrialFunnelItem(BaseModel):
+    """One user's row in the trial funnel (owner admin surface)."""
+
+    user_id: int
+    tier: str
+    days: int
+    eligible_at: str
+    offered_at: Optional[str] = None
+    claimed_at: Optional[str] = None
+    expires_at: Optional[str] = None
+    converted_at: Optional[str] = None
+    shadow: int = Field(
+        default=0,
+        description="1 = the user entered the cohort while the offer was "
+        "dark, i.e. they were measured but never actually offered anything.",
+    )
+
+
+class TrialFunnelSummary(BaseModel):
+    """Aggregate trial funnel counters for ops → Trials."""
+
+    cohort: int = Field(default=0, description="Users ever seen trial-eligible.")
+    cohort_dark: int = Field(
+        default=0, description="Of those, measured while the offer was off."
+    )
+    cohort_live: int = Field(
+        default=0, description="Of those, seen while the offer was live."
+    )
+    offered: int = Field(default=0, description="Users actually shown the offer.")
+    claimed: int = Field(default=0, description="Users who activated a trial.")
+    active: int = Field(default=0, description="Trials running right now.")
+    lapsed: int = Field(default=0, description="Trials that have ended.")
+    converted: int = Field(
+        default=0, description="Trialists who went on to pay."
+    )
+    claim_rate: Optional[float] = Field(
+        default=None,
+        description="claimed / offered; null when nobody has been offered "
+        "yet — an unmeasured rate must not render as a real 0%.",
+    )
+    conversion_rate: Optional[float] = Field(
+        default=None,
+        description="converted / claimed; null when nobody has trialled yet.",
+    )
+
+
+class TrialFunnelResponse(BaseModel):
+    """Owner admin view of the signup trial — flag state beside the numbers.
+
+    The flags travel with the counters on purpose: a cohort of 400 means
+    something entirely different depending on whether those users were ever
+    actually offered anything.
+    """
+
+    offer_live: bool = Field(
+        ..., description="SIGNUP_TRIAL_ENABLED — the user-visible flag."
+    )
+    measuring: bool = Field(
+        ..., description="SIGNUP_TRIAL_MEASUREMENT_ENABLED — the cohort stamp."
+    )
+    days: int
+    tier: str
+    max_account_age_days: int = Field(
+        default=0, description="0 = no age limit on eligibility."
+    )
+    summary: TrialFunnelSummary
+    trials: List[TrialFunnelItem] = Field(default_factory=list)
+
+
 class ReferralClaimRequest(BaseModel):
     """A new user redeeming someone else's referral code, typically
     captured once during onboarding."""

@@ -297,6 +297,7 @@ def register(
     idempotency: Optional[InMemoryIdempotencyStore] = None,
     invoice_creator: Callable[[dict], Awaitable[dict]] = _create_invoice_http,
     referral_rewards: Any = None,
+    signup_trial: Any = None,
 ) -> None:
     """Wire the web-billing endpoints onto ``app``.
 
@@ -533,6 +534,10 @@ def register(
             write_tier, write_until = await referral_rewards.compose_entitlement(
                 user_id, tier, paid_until,
             )
+        if signup_trial is not None:
+            # Trial → paid conversion, same as the Play rail.  Fail-open
+            # inside the service — a funnel stamp never blocks a grant.
+            await signup_trial.on_paid_period(user_id)
         try:
             updated = await user_store.aset_tier(
                 user_id, tier=write_tier, paid_until=write_until,
