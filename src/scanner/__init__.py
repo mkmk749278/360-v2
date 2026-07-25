@@ -4790,8 +4790,14 @@ class Scanner:
         except Exception as exc:
             fail_open.record("scanner.shadow_strategies", exc)
 
-    def _stamp_geometry_ab(self, sig: Any) -> None:
+    def _stamp_geometry_ab(self, sig: Any, provenance: str = "") -> None:
         """Stop-geometry A/B pair stamp for a post-scoring candidate.
+
+        ``provenance`` says which of the two call sites this came from —
+        emitted to subscribers, or killed by a gate.  Both are stamped (they
+        are each half the sample), but only the emitted half can justify
+        changing what users actually receive, so the distinction has to be
+        recorded at the stamp; it cannot be recovered later.
 
         Observe-only + fail-open (Phase 3 item 8): stamps this candidate's
         fixed-% stop and its would-be ATR/structure stop as a counterfactual
@@ -4866,6 +4872,7 @@ class Scanner:
                         valid_for_minutes=float(
                             getattr(sig, "valid_for_minutes", 0.0) or 0.0
                         ),
+                        provenance=provenance,
                     )
             except Exception as _sar_exc:
                 fail_open.record("scanner.stamp_sar_exit_shadow", _sar_exc)
@@ -4908,7 +4915,8 @@ class Scanner:
         # pair regardless of whether the suppression audit itself is enabled
         # (each measurement has its own tunable).
         try:
-            self._stamp_geometry_ab(sig)
+            from src.suppression_audit import PROVENANCE_SUPPRESSED
+            self._stamp_geometry_ab(sig, provenance=PROVENANCE_SUPPRESSED)
         except Exception as exc:
             # _stamp_geometry_ab records its own failures internally; this
             # outer guard is effectively unreachable, counted for completeness.
@@ -5326,7 +5334,10 @@ class Scanner:
             self._suppression_counters[f"enqueue_stage:emitted:{_sc_final}"] += 1
             # Emitted candidates are the other half of the stop-geometry A/B
             # sample (observe-only; stamps the pair + sig.geo_atr_stop).
-            self._stamp_geometry_ab(sig)
+            # This site is reached only after signal_queue.put succeeded, so
+            # "emitted" here means the signal really did go out.
+            from src.suppression_audit import PROVENANCE_EMITTED
+            self._stamp_geometry_ab(sig, provenance=PROVENANCE_EMITTED)
             try:
                 cd_key = self._cooldown_key_for(sig)
                 if cd_key is not None and _dispatch_cooldown_enabled():

@@ -282,6 +282,7 @@ def stamp_sar_pair(
     context_key: str = "",
     regime: str = "",
     valid_for_minutes: float = 0.0,
+    provenance: str = "",
     store: Optional[SuppressedCandidateStore] = None,
     now_mono: Optional[float] = None,
 ) -> bool:
@@ -289,6 +290,13 @@ def stamp_sar_pair(
 
     Returns ``True`` when the pair was stamped, else ``False`` (cooldown or bad
     geometry).  Both arms always stamp together — a lone arm biases the A/B.
+
+    ``provenance`` records whether the candidate was actually emitted to
+    subscribers or killed by a gate.  Both arms of a pair carry the same value
+    (they are one candidate), and it is what lets the measurement answer
+    "would this exit have improved the signals we SENT" separately from
+    "…every candidate we considered" — only the former can justify changing
+    what users receive.
 
     Note the trail arm carries the live SL/TP1 **as levels it never consults**:
     they are stored so ``sl_distance`` (the shared R denominator) and the
@@ -331,6 +339,7 @@ def stamp_sar_pair(
                 regime=regime or "",
                 valid_for_minutes=float(valid_for_minutes or 0.0),
                 exit_model=exit_model,
+                provenance=str(provenance or ""),
                 store=target,
             )
 

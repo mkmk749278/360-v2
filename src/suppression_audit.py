@@ -81,6 +81,16 @@ ENTRY_LIMIT = "limit"
 EXIT_STATIC = "static"
 EXIT_TRAILING = "trailing"
 
+# Provenance of a stamped candidate: did this candidate actually reach
+# subscribers, or did a gate kill it?  Shadow ledgers stamp from BOTH points in
+# the scanner, which doubles the sample but mixes two different questions —
+# "would this exit have improved the signals we SENT" vs "…every candidate we
+# considered".  Only the first can justify changing what users receive, so the
+# provenance has to travel with the record or the two can never be separated.
+# Empty string = unknown (every record stamped before 2026-07-25).
+PROVENANCE_EMITTED = "emitted"
+PROVENANCE_SUPPRESSED = "suppressed"
+
 VERDICT_KEEP = "KEEP"           # gate correctly suppresses losers
 VERDICT_DROP = "DROP"           # gate is killing winners
 VERDICT_TUNE = "TUNE"
@@ -120,6 +130,9 @@ class SuppressedCandidateRecord:
     # every record written before 2026-07-25 is a static SL/TP1 race and must
     # keep scoring as one after a reload.
     exit_model: str = EXIT_STATIC
+    # PROVENANCE_EMITTED | PROVENANCE_SUPPRESSED | "" (unknown, pre-2026-07-25).
+    # Defaulted so persisted records reload unchanged.
+    provenance: str = ""
     # Filled by classify_pending once the window elapses.
     classified_at: Optional[float] = None
     classification: Optional[str] = None
@@ -638,6 +651,7 @@ def stamp_candidate(
     pair_cohort: str = "",
     entry_type: str = ENTRY_IMMEDIATE,
     exit_model: str = EXIT_STATIC,
+    provenance: str = "",
     store: Optional[SuppressedCandidateStore] = None,
 ) -> Optional[SuppressedCandidateRecord]:
     """Stamp a suppressed candidate (fail-open).  Scopes to tradeable geometry only."""
@@ -665,6 +679,7 @@ def stamp_candidate(
             pair_cohort=str(pair_cohort or ""),
             entry_type=str(entry_type or ENTRY_IMMEDIATE),
             exit_model=str(exit_model or EXIT_STATIC),
+            provenance=str(provenance or ""),
             suppress_timestamp=time.time(),
         )
         (store or get_store()).stamp(rec)
