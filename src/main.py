@@ -2356,6 +2356,31 @@ class CryptoSignalEngine:
         # read the gate rejection reasons, not the evaluator.  (RateProbe is
         # unsuitable: MEAN_REVERT detections are sparse per 5-min cycle and
         # any quiet cycle would reset its streak.)
+        def _gated_path_verdict_for(strategy: str, backlog: float, emitted: float):
+            """Shared verdict for 'generates candidates, emits none' (#781).
+
+            Both emission probes paged identically whether the gating was
+            correct or costly. On real data those were opposite cases —
+            RANGE_FADE's blocked candidates measure −0.98R (gating is right),
+            MEAN_REVERT's measure positive (gating is expensive) — so a single
+            undifferentiated alert made both unactionable and trained us to
+            ignore the pager. The edge measurement was there the whole time.
+            """
+            from src.feature_liveness import gated_path_verdict
+            from src.strategy_edge import get_strategy_edge_store, pooled_suppressed_edge
+
+            try:
+                edge = pooled_suppressed_edge(
+                    get_strategy_edge_store().matrix(), strategy
+                )
+            except Exception as _pex:
+                from src import fail_open
+                fail_open.record("main.gated_path_edge", _pex)
+                edge = None
+            return gated_path_verdict(
+                backlog=backlog, emitted_total=emitted, edge=edge, label=strategy
+            )
+
         _mr_emit_state: Dict[str, Optional[float]] = {"emit": None, "det": None}
 
         def _mean_revert_emission_health():
@@ -2369,10 +2394,7 @@ class CryptoSignalEngine:
                 return True, f"emitted_total={emit:g}"
             backlog = det - (_mr_emit_state["det"] or 0.0)
             if backlog >= 60:
-                return False, (
-                    f"{backlog:g} detections since last emission "
-                    f"(emitted_total={emit:g}) — check gate rejections"
-                )
+                return _gated_path_verdict_for("MEAN_REVERT", backlog, emit)
             return True, f"backlog {backlog:g} detections since last emission"
 
         fl.add_predicate(PredicateProbe(
@@ -2426,11 +2448,7 @@ class CryptoSignalEngine:
                 )
             backlog = det - (_rf_emit_state["det"] or 0.0)
             if backlog >= 60:
-                return False, (
-                    f"{backlog:g} detections since last emission/context-block "
-                    f"(emitted_total={emitted:g} context_blocked={blocked:g}) "
-                    "— check gate rejections"
-                )
+                return _gated_path_verdict_for("RANGE_FADE", backlog, emitted)
             return True, f"backlog {backlog:g} detections since last progress"
 
         fl.add_predicate(PredicateProbe(

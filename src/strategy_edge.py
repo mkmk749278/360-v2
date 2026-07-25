@@ -325,6 +325,45 @@ class StrategyEdgeStore:
             pass
 
 
+def pooled_suppressed_edge(
+    matrix: Dict[str, Dict], strategy: str
+) -> Optional[Dict[str, float]]:
+    """Pooled counterfactual edge for one strategy's **suppressed** candidates.
+
+    Answers "if we had emitted the candidates the gates killed, what would they
+    have paid?" — sample-weighted across contexts, always-net R.
+
+    This exists for the emission liveness probes.  A path that generates
+    candidates and emits none is only a *fault* if those candidates were worth
+    emitting; when the counterfactual says they lose money, full gating is the
+    gates working, not a dead path.  Without this number the probe cannot tell
+    those two apart and pages identically for both — which is how ``#781`` sat
+    alerting for days with two of its three alerts being correct behaviour.
+
+    Returns ``None`` when the strategy has no suppressed sample at all (nothing
+    measured yet — a different state from "measured and negative", and one that
+    must never be read as evidence either way).
+    """
+    total_n = 0
+    weighted = 0.0
+    for cell in (matrix or {}).values():
+        if not isinstance(cell, dict):
+            continue
+        if str(cell.get("strategy") or "") != str(strategy or ""):
+            continue
+        ns = int(cell.get("n_suppressed", 0) or 0)
+        if ns <= 0:
+            continue
+        by_src = cell.get("net_r_by_source") or {}
+        if SOURCE_SUPPRESSED not in by_src:
+            continue
+        weighted += float(by_src[SOURCE_SUPPRESSED]) * ns
+        total_n += ns
+    if total_n <= 0:
+        return None
+    return {"n": total_n, "avg_r": weighted / total_n}
+
+
 def reconcile_matrix(matrix: Dict[str, Dict]) -> Dict[str, Dict]:
     """Per-strategy **realized** (emitted) vs **counterfactual** (suppressed) net-R.
 
