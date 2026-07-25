@@ -70,6 +70,7 @@ from .billing_callback import SIGNATURE_HEADER, BillingWebhookVerifier
 from .billing_play import PlayBillingError, PlayBillingVerifier
 from .play_purchases import PlayPurchaseStore
 from .referral_rewards import ReferralRewardsService
+from .signup_trial import SignupTrialService
 from .otp import IssueStatus, OtpStore, VerifyStatus
 from .otp_delivery import (
     ChainedOtpProvider,
@@ -127,6 +128,9 @@ from .schemas import (
     TelegramOtpVerifyRequest,
     TelegramOtpVerifyResponse,
     TickersResponse,
+    TrialClaimResponse,
+    TrialFunnelResponse,
+    TrialStateResponse,
     TunableEntry,
     TunablesSetRequest,
     TunablesState,
@@ -669,10 +673,22 @@ def build_app(
     # accrual, and the entitlement composition every aset_tier write site
     # routes through so a banked reward survives Play/RTDN rewrites.
     referral_rewards: Optional[ReferralRewardsService] = None
+    signup_trial: Optional[SignupTrialService] = None
     if user_store is not None and user_overrides is not None:
         referral_rewards = ReferralRewardsService(
             user_store=user_store,
             overrides=user_overrides,
+            play_purchases=play_purchases,
+        )
+        # Signup free trial (2026-07-25).  Shares the reward ledger and the
+        # entitlement composition above — that is the whole point: a trial
+        # grant has to survive the same Play/RTDN rewrites a referral reward
+        # does.  Both dark-first flags are read at call time inside the
+        # service, so nothing here depends on boot-time config.
+        signup_trial = SignupTrialService(
+            user_store=user_store,
+            overrides=user_overrides,
+            rewards=referral_rewards,
             play_purchases=play_purchases,
         )
 
@@ -1098,6 +1114,10 @@ def build_app(
             tier, paid_until = await referral_rewards.compose_entitlement(
                 user_id, tier, paid_until,
             )
+        if signup_trial is not None and state.is_entitled:
+            # Trial → paid conversion (the number that decides whether the
+            # offer is worth what it gives away).  Fail-open inside.
+            await signup_trial.on_paid_period(user_id)
         await user_store.aset_tier(user_id, tier=tier, paid_until=paid_until)
         await play_purchases.aupsert(
             purchase_token=state.purchase_token,
@@ -1431,6 +1451,15 @@ def build_app(
                 detail=f"user_id={uid} not found",
             )
         user = await _maybe_downgrade_expired(user)
+        if signup_trial is not None:
+            # Trial cohort stamp.  Deliberately on the profile read: it is
+            # the one path EVERY app session hits, including releases that
+            # know nothing about trials — which is exactly what lets the
+            # would-be cohort accumulate during the dark window.  Costs one
+            # indexed single-row SELECT the first time a user is seen per
+            # process and nothing afterwards (bounded in-process set), and
+            # this is a per-foreground path, not a scanner/tick/order loop.
+            await signup_trial.observe(user)
         return _profile_response(user)
 
     @app.put(
@@ -2312,6 +2341,7 @@ def build_app(
         auth=auth,
         identity_dep=user_claims,
         referral_rewards=referral_rewards,
+        signup_trial=signup_trial,
     )
 
     # ``GET /api/region`` (Play Store A6 / E2, 2026-05-20) — client
@@ -2906,6 +2936,88 @@ def build_app(
             payload.commission_ids
         )
         return ReferralCommissionsMarkPaidResponse(ok=True, updated=updated)
+
+    # ---- Signup free trial (2026-07-25) ----
+    # 7 days of the full ``auto`` tier for a new customer, no payment method,
+    # activated only when the user taps the welcome offer.  Ships DARK: the
+    # cohort is measured from day one (ops → Trials) while
+    # SIGNUP_TRIAL_ENABLED keeps ``offer_available`` false for everyone until
+    # the owner signs off.  See src/api/signup_trial.py.
+
+    async def _trial_user(identity) -> User:  # type: ignore[no-untyped-def]
+        """The caller's user row, or a clean 4xx/5xx if there isn't one."""
+        if user_store is None or signup_trial is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="trial service not configured",
+            )
+        uid = _resolve_user_id(identity)
+        user = await user_store.aget_by_id(uid)
+        if user is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"user_id={uid} not found",
+            )
+        return user
+
+    @app.get(
+        "/api/trial",
+        response_model=TrialStateResponse,
+        tags=["billing"],
+    )
+    async def trial_state(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> TrialStateResponse:
+        """This user's trial offer + window.  The app renders exactly this
+        and never infers availability on its own."""
+        user = await _trial_user(identity)
+        assert signup_trial is not None  # _trial_user 503s otherwise
+        return TrialStateResponse(**await signup_trial.state_for(user))
+
+    @app.post(
+        "/api/trial/claim",
+        response_model=TrialClaimResponse,
+        tags=["billing"],
+    )
+    async def trial_claim(
+        identity: Optional[Union[TokenClaims, User]] = Depends(user_claims),
+    ) -> TrialClaimResponse:
+        """Activate the trial — the welcome sheet's CTA.
+
+        Opt-in by design (owner decision 2026-07-25): nothing here ever runs
+        without a deliberate user tap, because a claim puts server-side
+        auto-execution within reach of their real capital.
+
+        Idempotent: a double-tap returns ``ok=false`` with
+        ``already_trialled`` and the unchanged window, never a second grant.
+        A refusal is a 200 with ``ok=false`` — the app renders the reason;
+        an unavailable offer is not an error condition.
+        """
+        user = await _trial_user(identity)
+        assert signup_trial is not None
+        return TrialClaimResponse(**await signup_trial.claim(user))
+
+    @app.get(
+        "/api/trial/admin/funnel",
+        response_model=TrialFunnelResponse,
+        tags=["billing"],
+        dependencies=[Depends(owner_required)],
+    )
+    async def trial_admin_funnel(
+        limit: int = Query(default=200, ge=1, le=2000),
+    ) -> TrialFunnelResponse:
+        """Owner-only funnel behind the ops → Trials panel.
+
+        This is the surface that makes the dark phase readable: cohort,
+        offered, claimed, active, converted — beside the two flag states, so
+        the numbers can never imply the offer was live when it wasn't.
+        """
+        if signup_trial is None:
+            raise HTTPException(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+                detail="trial service not configured",
+            )
+        return TrialFunnelResponse(**await signup_trial.funnel(limit=limit))
 
     # ---- Agents ----
 

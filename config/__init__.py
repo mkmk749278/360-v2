@@ -3542,6 +3542,67 @@ REFERRAL_DISCOUNT_OFFER_ID: str = os.getenv("REFERRAL_DISCOUNT_OFFER_ID", "refer
 REFERRAL_DISCOUNT_PERCENT: int = _safe_int("REFERRAL_DISCOUNT_PERCENT", "50")
 
 # ---------------------------------------------------------------------------
+# Signup free trial (owner-approved 2026-07-25 — "7 days so they can
+# understand our services")
+# ---------------------------------------------------------------------------
+# Signals + levels are already free; the paywall is on trade automation.  So
+# the trial unlocks AUTOMATION for a brand-new user with no payment method:
+# SIGNUP_TRIAL_DAYS of SIGNUP_TRIAL_TIER, granted server-side into the same
+# ``user_reward_grants`` ledger the referral rewards use, so it survives Play
+# verify / RTDN / expiry rewrites of the user row.
+#
+# Owner decisions (AskUserQuestion 2026-07-25):
+#   * tier = ``auto`` (the full product — hands-off server-side execution);
+#   * server-granted, NO payment method required;
+#   * OPT-IN — the trial is never auto-applied.  The app shows a welcome
+#     offer and the user taps to activate (``POST /api/trial/claim``).
+#
+# DARK-FIRST (CLAUDE.md § Project Phase).  This is a money-path change — a
+# trial grant puts the engine on a new user's real capital — so it ships with
+# TWO flags:
+#   * SIGNUP_TRIAL_MEASUREMENT_ENABLED (default ON) — stamps the eligible
+#     cohort + offer/claim/conversion funnel into ``user_trials`` from the
+#     moment it deploys, readable the same day in ops → Trials.  Grants
+#     nothing.
+#   * SIGNUP_TRIAL_ENABLED (default OFF) — the user-visible effect: the offer
+#     becomes claimable and a claim actually writes entitlement.  Owner flips
+#     this after reading the measured cohort.
+# See src/api/signup_trial.py.  Every hook is event-driven (profile read,
+# claim, verified paid period) — nothing on a scanner / tick / order path.
+
+#: User-visible effect flag.  OFF → ``GET /api/trial`` reports the offer
+#: unavailable and ``POST /api/trial/claim`` returns 409; the eligibility
+#: cohort is still measured (see below).  Flip to true only after owner
+#: sign-off on the measured cohort — this puts auto-execution on the real
+#: capital of users who have paid nothing.
+SIGNUP_TRIAL_ENABLED: bool = _safe_bool("SIGNUP_TRIAL_ENABLED", "false")
+
+#: Measurement flag.  ON from ship day per dark-first doctrine: records who
+#: WOULD be offered a trial, when the offer was shown, when it was claimed,
+#: and whether the user later paid.  Turning this off blinds ops → Trials and
+#: is only for a measured-cost emergency.
+SIGNUP_TRIAL_MEASUREMENT_ENABLED: bool = _safe_bool(
+    "SIGNUP_TRIAL_MEASUREMENT_ENABLED", "true"
+)
+
+#: Length of the trial window, in days (owner: 7).
+SIGNUP_TRIAL_DAYS: int = _safe_int("SIGNUP_TRIAL_DAYS", "7")
+
+#: Tier the trial grants.  ``auto`` per owner decision — the full product, so
+#: a trialist experiences what they are being asked to buy.
+SIGNUP_TRIAL_TIER: str = _safe_choice(
+    "SIGNUP_TRIAL_TIER", "auto", frozenset({"assist", "auto"})
+)
+
+#: Restrict the offer to accounts younger than this many days.  ``0`` = no age
+#: limit, i.e. every free user who has never paid and never trialled gets the
+#: welcome offer once — including the free users who signed up before the
+#: trial shipped.  Set to e.g. 7 to make it strictly a new-signup offer.
+SIGNUP_TRIAL_MAX_ACCOUNT_AGE_DAYS: int = _safe_int(
+    "SIGNUP_TRIAL_MAX_ACCOUNT_AGE_DAYS", "0"
+)
+
+# ---------------------------------------------------------------------------
 # Web billing (Phase 3 — the PWA's own payment rails, docs/WEB_BILLING_DESIGN.md)
 # ---------------------------------------------------------------------------
 # The web channel (app.luminapp.org) sells the SAME two paid tiers as Play

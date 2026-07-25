@@ -333,6 +333,47 @@ CREATE INDEX IF NOT EXISTS idx_referral_commissions_referee
 ON referral_commissions(referee_id);
 """
 
+# 2026-07-25 — signup free trial (owner-approved: 7 days of Auto, no card,
+# opt-in).  The GRANT itself lives in ``user_reward_grants`` above with
+# ``source='signup_trial'`` so it shares one sequential entitlement timeline
+# with referral rewards and is picked up unchanged by the composition in
+# src/api/referral_rewards.py.  This table is the FUNNEL — the thing ops
+# reads, and the reason the measurement flag can be ON while the
+# user-visible flag is OFF:
+#
+#   eligible_at  — first time we saw this user as trial-eligible (stamped
+#                  even while dark; that is the would-be cohort)
+#   offered_at   — first time the app was actually told the offer is live
+#   claimed_at   — the user tapped "Start my 7 free days" (opt-in, never
+#                  auto-applied per owner decision)
+#   expires_at   — claimed_at + days; mirrors the reward grant's expiry
+#   converted_at — their first verified paid period after claiming, i.e. the
+#                  trial paid for itself
+#   shadow       — 1 when the row was created while SIGNUP_TRIAL_ENABLED was
+#                  off, so the dark cohort is never mistaken for a live one
+#
+# ``user_id`` as the PK is the one-shot-ever invariant: a trial is offered,
+# claimed and burned at most once per user, at DB level rather than by
+# application check.
+_TRIAL_SCHEMA = """
+CREATE TABLE IF NOT EXISTS user_trials (
+    user_id      INTEGER PRIMARY KEY,
+    tier         TEXT    NOT NULL,
+    days         INTEGER NOT NULL,
+    eligible_at  TEXT    NOT NULL,
+    offered_at   TEXT,
+    claimed_at   TEXT,
+    expires_at   TEXT,
+    converted_at TEXT,
+    shadow       INTEGER NOT NULL DEFAULT 0,
+    FOREIGN KEY (user_id) REFERENCES users(user_id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_user_trials_claimed
+ON user_trials(claimed_at);
+CREATE INDEX IF NOT EXISTS idx_user_trials_expires
+ON user_trials(expires_at);
+"""
+
 # Unambiguous alphabet — excludes 0/O and 1/I so a code read aloud or typed
 # by hand from a share-sheet message doesn't bounce on lookalike characters.
 _REFERRAL_CODE_ALPHABET = "23456789ABCDEFGHJKLMNPQRSTUVWXYZ"
@@ -579,7 +620,7 @@ class UserOverridesStore:
         self._conn.execute("PRAGMA foreign_keys=ON")
         self._conn.executescript(
             _PRETP_SCHEMA + _INVALIDATION_SCHEMA + _AUTO_TRADE_SCHEMA
-            + _SYMBOL_MGMT_SCHEMA + _REFERRAL_SCHEMA
+            + _SYMBOL_MGMT_SCHEMA + _REFERRAL_SCHEMA + _TRIAL_SCHEMA
         )
         self._migrate_pretp_grab_fraction()
         self._migrate_pretp_protect_manual_entries()
@@ -1192,49 +1233,94 @@ class UserOverridesStore:
         DB-level (``UNIQUE (user_id, source, ref_id)``): re-processing the
         same referee grants nothing.
         """
-        now = datetime.now(timezone.utc)
         with self._lock:
-            row = self._conn.execute(
-                "SELECT MAX(expires_at) AS latest FROM user_reward_grants "
-                "WHERE user_id = ?",
-                (int(referrer_id),),
-            ).fetchone()
-            latest = _parse_reward_ts(row["latest"]) if row is not None else None
-            start = max(now, latest) if latest is not None else now
-            cap_end = now + timedelta(days=int(cap_days))
-            end = min(start + timedelta(days=int(days)), cap_end)
-            # Sub-minute residues (clock drift between "now" here and the
-            # previous grant's cap) are not a real reward — treat as capped.
-            if end <= start + timedelta(minutes=1):
-                log.info(
-                    "referral reward NOT granted (cap {}d reached): "
-                    "referrer_id={} referee_id={}",
-                    cap_days, referrer_id, referee_id,
-                )
-                return {"granted": False, "reason": "cap_reached"}
-            try:
-                self._conn.execute(
-                    "INSERT INTO user_reward_grants "
-                    "(user_id, tier, source, ref_id, starts_at, expires_at, "
-                    "created_at) VALUES (?, ?, 'referral_join', ?, ?, ?, ?)",
-                    (
-                        int(referrer_id),
-                        str(tier),
-                        str(int(referee_id)),
-                        start.isoformat(),
-                        end.isoformat(),
-                        now.isoformat(),
-                    ),
-                )
-            except sqlite3.IntegrityError:
-                return {"granted": False, "reason": "duplicate"}
+            result = self._grant_tier_window_locked(
+                referrer_id,
+                tier=tier,
+                source="referral_join",
+                ref_id=str(int(referee_id)),
+                days=days,
+                cap_days=cap_days,
+            )
+        if not result.get("granted"):
+            log.info(
+                "referral reward NOT granted ({}): referrer_id={} referee_id={}",
+                result.get("reason"), referrer_id, referee_id,
+            )
+        else:
             log.info(
                 "referral reward granted: referrer_id={} referee_id={} "
-                "tier={} {} → {}",
-                referrer_id, referee_id, tier,
-                start.isoformat(), end.isoformat(),
+                "tier={} → {}",
+                referrer_id, referee_id, tier, result["expires_at"],
             )
-            return {"granted": True, "expires_at": end.isoformat()}
+        return result
+
+    def _grant_tier_window_locked(
+        self,
+        user_id: int,
+        *,
+        tier: str,
+        source: str,
+        ref_id: str,
+        days: int,
+        cap_days: int,
+    ) -> Dict[str, Any]:
+        """Insert one time-boxed tier grant on the user's single sequential
+        entitlement timeline.  Caller holds ``self._lock``.
+
+        Shared by every grant source (referral joins, the signup free
+        trial) so they cannot overlap and silently waste each other's
+        days: a new grant always starts at the later of *now* and the
+        furthest existing expiry.  ``UNIQUE (user_id, source, ref_id)``
+        makes each originating event one-shot.
+
+        ``cap_days`` bounds the total banked window measured from *now* —
+        the abuse bound on a source that can fire repeatedly (referral
+        joins).  Pass ``0`` for no cap, which is right for a source the
+        DB already limits to once per user ever: the signup trial promises
+        7 days, so a trialist who happens to hold a referral window must
+        get their 7 days appended, not clamped to nothing.
+
+        Returns ``{"granted": True, "starts_at", "expires_at"}`` or
+        ``{"granted": False, "reason": "cap_reached" | "duplicate"}``.
+        """
+        now = datetime.now(timezone.utc)
+        row = self._conn.execute(
+            "SELECT MAX(expires_at) AS latest FROM user_reward_grants "
+            "WHERE user_id = ?",
+            (int(user_id),),
+        ).fetchone()
+        latest = _parse_reward_ts(row["latest"]) if row is not None else None
+        start = max(now, latest) if latest is not None else now
+        end = start + timedelta(days=int(days))
+        if int(cap_days) > 0:
+            end = min(end, now + timedelta(days=int(cap_days)))
+        # Sub-minute residues (clock drift between "now" here and the
+        # previous grant's cap) are not a real grant — treat as capped.
+        if end <= start + timedelta(minutes=1):
+            return {"granted": False, "reason": "cap_reached"}
+        try:
+            self._conn.execute(
+                "INSERT INTO user_reward_grants "
+                "(user_id, tier, source, ref_id, starts_at, expires_at, "
+                "created_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (
+                    int(user_id),
+                    str(tier),
+                    str(source),
+                    str(ref_id),
+                    start.isoformat(),
+                    end.isoformat(),
+                    now.isoformat(),
+                ),
+            )
+        except sqlite3.IntegrityError:
+            return {"granted": False, "reason": "duplicate"}
+        return {
+            "granted": True,
+            "starts_at": start.isoformat(),
+            "expires_at": end.isoformat(),
+        }
 
     def get_active_reward(
         self, user_id: int, *, now: Optional[datetime] = None
@@ -1434,6 +1520,231 @@ class UserOverridesStore:
                 [_now_iso(), *id_list],
             )
             return int(cur.rowcount)
+
+    # ---- signup free trial (2026-07-25) ---------------------------------
+    # Ledger primitives only — eligibility policy, the two dark-first flags
+    # and entitlement composition live in ``src/api/signup_trial.py``; these
+    # methods never read config.
+
+    def observe_trial_eligibility(
+        self, user_id: int, *, tier: str, days: int, shadow: bool
+    ) -> Dict[str, Any]:
+        """Record that ``user_id`` is trial-eligible, and return the row.
+
+        Idempotent and one-shot: the first observation creates the funnel
+        row (``eligible_at`` = now), every later call returns it unchanged.
+        This is what makes the measurement flag independent of the
+        user-visible one — the would-be cohort accumulates from ship day
+        with ``shadow=1``, so the owner reads a real number before deciding
+        whether to switch grants on.
+
+        ``shadow`` is recorded only on creation: a row first seen while the
+        offer was dark keeps ``shadow=1`` forever, which is the honest
+        reading (we never actually offered that user anything on that day).
+        """
+        with self._lock:
+            existing = self._get_trial_locked(user_id)
+            if existing is not None:
+                return existing
+            self._conn.execute(
+                "INSERT INTO user_trials "
+                "(user_id, tier, days, eligible_at, shadow) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (
+                    int(user_id), str(tier), int(days), _now_iso(),
+                    1 if shadow else 0,
+                ),
+            )
+            row = self._get_trial_locked(user_id)
+            assert row is not None  # just inserted
+            log.info(
+                "trial cohort: user_id={} tier={} days={} shadow={}",
+                user_id, tier, days, shadow,
+            )
+            return row
+
+    def mark_trial_offered(self, user_id: int) -> bool:
+        """Stamp ``offered_at`` the first time the app is told the offer is
+        genuinely live for this user.  Returns True on the transition.
+
+        Deliberately separate from ``eligible_at``: the gap between the two
+        is the dark window, and the gap between ``offered_at`` and
+        ``claimed_at`` is what tells us whether the welcome copy works.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE user_trials SET offered_at = ? "
+                "WHERE user_id = ? AND offered_at IS NULL",
+                (_now_iso(), int(user_id)),
+            )
+            return int(cur.rowcount) > 0
+
+    def claim_trial(
+        self, user_id: int, *, tier: str, days: int
+    ) -> Dict[str, Any]:
+        """Burn the user's one trial and bank the entitlement grant.
+
+        Atomic under one lock across BOTH tables: the ``user_trials`` row is
+        stamped ``claimed_at``/``expires_at`` and the matching
+        ``user_reward_grants`` window is inserted in the same critical
+        section, so a crash or a double-tap can never leave a claimed trial
+        with no entitlement (or an entitlement with no claim record).
+
+        The ``claimed_at IS NULL`` guard plus ``UNIQUE (user_id, source,
+        ref_id)`` on the grant make this idempotent at DB level — a
+        double-tap gets ``already_claimed``, never a second 7 days.
+
+        Returns ``{"claimed": bool, "reason"?, "tier", "expires_at"?}``.
+        """
+        with self._lock:
+            row = self._get_trial_locked(user_id)
+            if row is None:
+                return {"claimed": False, "reason": "not_eligible"}
+            if row["claimed_at"] is not None:
+                return {
+                    "claimed": False,
+                    "reason": "already_claimed",
+                    "expires_at": row["expires_at"],
+                }
+            grant = self._grant_tier_window_locked(
+                user_id,
+                tier=tier,
+                source="signup_trial",
+                ref_id="1",  # one trial per user ever — a constant ref_id
+                days=days,
+                # No cap: the PK above already limits this to once per user
+                # ever, and capping from *now* would silently shrink the
+                # promised window for a user who holds a referral reward.
+                cap_days=0,
+            )
+            if not grant.get("granted"):
+                # Do NOT stamp the claim, or the user would burn their one
+                # trial for zero days.
+                return {"claimed": False, "reason": str(grant.get("reason"))}
+            now = _now_iso()
+            self._conn.execute(
+                "UPDATE user_trials SET claimed_at = ?, expires_at = ?, "
+                # You cannot claim what you were never offered: backfill
+                # offered_at so the funnel stays monotone (offered >=
+                # claimed) even when a client claims without reading state
+                # first, which would otherwise push claim_rate above 1.
+                "offered_at = COALESCE(offered_at, ?), "
+                "tier = ?, days = ? WHERE user_id = ?",
+                (
+                    now, grant["expires_at"], now, str(tier), int(days),
+                    int(user_id),
+                ),
+            )
+            log.info(
+                "trial claimed: user_id={} tier={} days={} → {}",
+                user_id, tier, days, grant["expires_at"],
+            )
+            return {
+                "claimed": True,
+                "tier": str(tier),
+                "expires_at": grant["expires_at"],
+            }
+
+    def mark_trial_converted(self, user_id: int) -> bool:
+        """Stamp ``converted_at`` on the user's first verified paid period
+        after claiming a trial.  Returns True on the transition.
+
+        Only claimed trials convert — an unclaimed cohort row staying NULL
+        forever is the correct reading, so the trial→paid rate in ops is
+        computed on people who actually trialled.
+        """
+        with self._lock:
+            cur = self._conn.execute(
+                "UPDATE user_trials SET converted_at = ? "
+                "WHERE user_id = ? AND claimed_at IS NOT NULL "
+                "AND converted_at IS NULL",
+                (_now_iso(), int(user_id)),
+            )
+            converted = int(cur.rowcount) > 0
+        if converted:
+            log.info("trial converted to paid: user_id={}", user_id)
+        return converted
+
+    def _get_trial_locked(self, user_id: int) -> Optional[Dict[str, Any]]:
+        row = self._conn.execute(
+            "SELECT user_id, tier, days, eligible_at, offered_at, claimed_at, "
+            "expires_at, converted_at, shadow FROM user_trials "
+            "WHERE user_id = ?",
+            (int(user_id),),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def get_trial(self, user_id: int) -> Optional[Dict[str, Any]]:
+        """The user's trial funnel row, or None if never observed."""
+        with self._lock:
+            return self._get_trial_locked(user_id)
+
+    def trial_funnel_summary(self) -> Dict[str, Any]:
+        """Aggregate trial funnel for ops → Trials (one grouped scan of a
+        table with one row per eligible user; owner-only endpoint, never a
+        hot path).
+
+        ``cohort_dark`` vs ``cohort_live`` keeps the dark-window
+        observations visibly separate from users who were really offered
+        the trial, so the panel can't imply we shipped something we
+        hadn't.
+        """
+        now = _now_iso()
+        with self._lock:
+            row = self._conn.execute(
+                """
+                SELECT
+                    COUNT(*)                                      AS cohort,
+                    SUM(CASE WHEN shadow = 1 THEN 1 ELSE 0 END)   AS cohort_dark,
+                    SUM(CASE WHEN offered_at IS NOT NULL THEN 1 ELSE 0 END)
+                                                                  AS offered,
+                    SUM(CASE WHEN claimed_at IS NOT NULL THEN 1 ELSE 0 END)
+                                                                  AS claimed,
+                    SUM(CASE WHEN claimed_at IS NOT NULL
+                              AND expires_at > ? THEN 1 ELSE 0 END)
+                                                                  AS active,
+                    SUM(CASE WHEN claimed_at IS NOT NULL
+                              AND expires_at <= ? THEN 1 ELSE 0 END)
+                                                                  AS lapsed,
+                    SUM(CASE WHEN converted_at IS NOT NULL THEN 1 ELSE 0 END)
+                                                                  AS converted
+                FROM user_trials
+                """,
+                (now, now),
+            ).fetchone()
+        cohort = int(row["cohort"] or 0)
+        claimed = int(row["claimed"] or 0)
+        offered = int(row["offered"] or 0)
+        converted = int(row["converted"] or 0)
+        return {
+            "cohort": cohort,
+            "cohort_dark": int(row["cohort_dark"] or 0),
+            "cohort_live": cohort - int(row["cohort_dark"] or 0),
+            "offered": offered,
+            "claimed": claimed,
+            "active": int(row["active"] or 0),
+            "lapsed": int(row["lapsed"] or 0),
+            "converted": converted,
+            # Rates are None (not 0.0) when the denominator is empty — an
+            # unmeasured rate must not render as a real 0%.
+            "claim_rate": (claimed / offered) if offered else None,
+            "conversion_rate": (converted / claimed) if claimed else None,
+        }
+
+    def list_trials(
+        self, *, limit: int = 200, claimed_only: bool = False
+    ) -> List[Dict[str, Any]]:
+        """Most-recent trial rows for the ops table (bounded)."""
+        clause = "WHERE claimed_at IS NOT NULL " if claimed_only else ""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT user_id, tier, days, eligible_at, offered_at, "
+                "claimed_at, expires_at, converted_at, shadow "
+                f"FROM user_trials {clause}"
+                "ORDER BY COALESCE(claimed_at, eligible_at) DESC LIMIT ?",
+                (int(limit),),
+            ).fetchall()
+        return [dict(r) for r in rows]
 
     # ---- paper subscription windows -------------------------------------
 
@@ -1747,6 +2058,41 @@ class UserOverridesStore:
     ) -> List[Dict[str, Any]]:
         return await asyncio.to_thread(
             lambda: self.list_referral_commissions(status=status, limit=limit)
+        )
+
+    async def aobserve_trial_eligibility(
+        self, user_id: int, *, tier: str, days: int, shadow: bool
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(
+            lambda: self.observe_trial_eligibility(
+                user_id, tier=tier, days=days, shadow=shadow,
+            )
+        )
+
+    async def amark_trial_offered(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self.mark_trial_offered, user_id)
+
+    async def aclaim_trial(
+        self, user_id: int, *, tier: str, days: int
+    ) -> Dict[str, Any]:
+        return await asyncio.to_thread(
+            lambda: self.claim_trial(user_id, tier=tier, days=days)
+        )
+
+    async def amark_trial_converted(self, user_id: int) -> bool:
+        return await asyncio.to_thread(self.mark_trial_converted, user_id)
+
+    async def aget_trial(self, user_id: int) -> Optional[Dict[str, Any]]:
+        return await asyncio.to_thread(self.get_trial, user_id)
+
+    async def atrial_funnel_summary(self) -> Dict[str, Any]:
+        return await asyncio.to_thread(self.trial_funnel_summary)
+
+    async def alist_trials(
+        self, *, limit: int = 200, claimed_only: bool = False
+    ) -> List[Dict[str, Any]]:
+        return await asyncio.to_thread(
+            lambda: self.list_trials(limit=limit, claimed_only=claimed_only)
         )
 
     async def amark_referral_commissions_paid(self, ids: Iterable[int]) -> int:
