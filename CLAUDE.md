@@ -39,11 +39,28 @@ This **restores the dark-flag-first discipline** the testing phase had relaxed �
 trigger the old "ship live" section itself named ("revisit at subscriber launch") has
 now fired:
 
-- **Money-path changes ship DARK-FLAG-FIRST.** Anything touching scoring, evaluator
-  paths, exit / FSM behaviour, dispatch, or paid-channel routing ships **default-OFF**,
-  is **shadow-measured on a real data window**, and is **activated only after owner
-  sign-off** on the shadow result. We no longer learn-by-shipping-live on the money
-  path — there are users behind it now.
+- **Money-path changes ship DARK-FLAG-FIRST**, and "dark" means **invisible to
+  users, fully live to the owner** — not switched off.
+
+  Every such change has **two** flags, and they are not the same flag:
+
+  | Flag | Default | What it controls |
+  |---|---|---|
+  | **Measurement** | **ON** | Stamping, shadow arms, counterfactuals, ops panels. Runs for real from the moment it ships and is fully visible in ops. |
+  | **User-visible effect** | **OFF** | Anything that changes what subscribers see or what the money path does. Activated only after owner sign-off on the measured result. |
+
+  Shipping a *measurement* default-OFF is the wrong reading of this rule. An
+  observe-only path that stamps nothing until someone remembers to flip it
+  produces an empty ops panel, no data, and a decision that keeps getting
+  deferred — which is exactly what happened to the SAR exit arm on 2026-07-25
+  (shipped OFF, owner had to enable it and then ask where to look). **If it
+  cannot reach a subscriber or the money path, turn it on when you ship it.**
+
+  Anything touching scoring, evaluator paths, exit / FSM behaviour, dispatch, or
+  paid-channel routing keeps its **user-visible** flag default-OFF, is
+  **shadow-measured on a real data window**, and is **activated only after owner
+  sign-off** on the shadow result. We no longer learn-by-shipping-live on the
+  money path — there are users behind it now.
 - **Stamp-and-shadow before you act.** A change that alters which signals emit or how
   they score must first run observe-only: stamp the *would-be* effect on every signal
   without applying it, so we confirm it touches the right signals before it changes
@@ -52,7 +69,12 @@ now fired:
   telemetry, infra. These never gated on a shadow window and still don't.
 - **A reversible env off-switch (default ON) is NOT a substitute for dark-first** on a
   production money-path change — the kill switch protects against a live failure;
-  dark-first prevents shipping that failure to users at all.
+  dark-first prevents shipping that failure to users at all. (This applies to the
+  *user-visible* flag. The measurement flag beside it should be ON — see above.)
+- **Dark work must be observable, or it isn't dark — it's just off.** A dark change
+  ships together with the ops surface that shows what it is doing: a panel, a table,
+  or a truth-report section the owner can read the same day. "Measured but nowhere to
+  look" is an unfinished change.
 - **Safety limits remain fully enforced** (always were): blast-radius caps,
   naked-position invariant, secret handling, withdraw-key rejection (Hard Limits below,
   B12/B18). Production raises the stakes on these, never lowers them.

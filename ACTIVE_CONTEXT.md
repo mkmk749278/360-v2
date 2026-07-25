@@ -303,6 +303,45 @@ positive, much less dramatic — **do not act on the gross number.**
 change which signals emit on a live app. Evidence is above; decision is the
 owner's.
 
+### Part 7 — doctrine corrected (owner, 2026-07-25): two false premises removed
+
+**1. Telegram is NOT banned in India. It works.**
+
+That claim was load-bearing in three places and each one used it as a *reason*:
+ops owning the control plane, B1 (in-app feed primary), and B16 (Telegram payment
+path retired). **Owner reaffirmed all three rules — only the false premise is
+removed.** They now stand as product decisions rather than as consequences of a
+ban. Corrected in `OWNER_BRIEF.md` (§2.2, B1, B16) and `360ce-ops/CLAUDE.md`.
+
+Historical session entries in this file still contain the old claim (e.g. the
+S-?? per-user re-enable note around L1466). **Those are left as written** —
+rewriting a past session's record would falsify the log. `OWNER_BRIEF.md` is read
+*before* this file in the session protocol, so the correction lands first.
+
+**2. "Dark" means invisible to USERS, live to the OWNER — not switched off.**
+
+The old wording said money-path changes ship "default-OFF", and I read that
+literally on the SAR exit arm: shipped it OFF, so it stamped nothing, the ops
+panel was empty, and the owner had to enable it and then ask where to look. That
+is the wrong reading and it cost a day of measurement.
+
+There are **two flags**, not one:
+
+| Flag | Default | Controls |
+|---|---|---|
+| **Measurement** | **ON** | Stamping, shadow arms, counterfactuals, ops panels — runs for real on ship, fully visible in ops |
+| **User-visible effect** | **OFF** | What subscribers see / what the money path does — owner sign-off to activate |
+
+Corollary now in both briefs: **dark work must ship with its ops surface.** A
+dark change isn't finished until there's a panel, table, or truth-report section
+the owner can read the same day. "Measured but nowhere to look" is unfinished.
+
+**Not changed, flagged instead** (out of the scope the owner set): `OWNER_BRIEF`
+L342 still lists signal delivery as "Telegram paid channel + free channel", which
+sits oddly beside B1's in-app-first rule; and B18 still says the kill switch is
+"<5s from Telegram" though ops owns control now. Both predate this session and
+neither is a Telegram-ban claim.
+
 ### Open / next
 
 1. ~~Owner: switch the arm on~~ — **done 2026-07-25**, stamping now.
