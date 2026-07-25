@@ -315,13 +315,30 @@ def stamp_sar_pair(
         side_u = str(side or "").upper()
         if side_u not in ("LONG", "SHORT"):
             return False
-        cd_key = (str(symbol or ""), setup, side_u)
+        prov = str(provenance or "")
+        # The cooldown is keyed by provenance, and EMITTED bypasses it entirely.
+        #
+        # Both were wrong before (2026-07-25, owner-caught): one shared
+        # (symbol, setup, side) budget meant a *suppressed* stamp could swallow
+        # a real emitted signal minutes later. Suppressed candidates outnumber
+        # emissions by orders of magnitude, so the emitted sample — the only
+        # population that can justify changing what subscribers receive — was
+        # being silently and non-randomly thinned. The symptom was the emitted
+        # list not matching the app's live signals.
+        #
+        # The cooldown exists to throttle the SAME persisting candidate being
+        # re-detected every 15s scan. An emission is not that: it is a discrete
+        # dispatch event, and duplicates are already prevented upstream by
+        # dispatch_cooldown. So an emitted candidate always stamps.
+        cd_key = (str(symbol or ""), setup, side_u, prov)
         mono = time.monotonic() if now_mono is None else float(now_mono)
         from config import SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC
+        from src.suppression_audit import PROVENANCE_EMITTED
 
-        last = _last_pair_stamp.get(cd_key)
-        if last is not None and mono - last < SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC:
-            return False
+        if prov != PROVENANCE_EMITTED:
+            last = _last_pair_stamp.get(cd_key)
+            if last is not None and mono - last < SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC:
+                return False
         target = store or get_sar_store()
 
         def _stamp_arm(gate: str, suffix: str, exit_model: str):
