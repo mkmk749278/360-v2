@@ -188,11 +188,84 @@ class TestPairStamping:
         assert self._stamp(store, side="SIDEWAYS", symbol="SOLUSDT") is False
         assert store.records() == []
 
+    def test_provenance_travels_with_both_arms(self, tmp_path):
+        """Emitted vs gate-suppressed must be recorded AT the stamp.
+
+        The two scanner call sites are the only place that distinction exists;
+        nothing downstream can recover it. Without it the ledger silently mixes
+        "would this exit improve the signals we SENT" with "…every candidate we
+        considered" — and only the first can justify changing live output.
+        """
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store, provenance=sa.PROVENANCE_EMITTED) is True
+        recs = store.records()
+        assert len(recs) == 2
+        # Both arms are ONE candidate — they must agree, or a pair could be
+        # split across the emitted/suppressed filter.
+        assert {r["provenance"] for r in recs} == {sa.PROVENANCE_EMITTED}
+
+    def test_suppressed_provenance_is_recorded_too(self, tmp_path):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store, provenance=sa.PROVENANCE_SUPPRESSED) is True
+        assert {r["provenance"] for r in store.records()} == {sa.PROVENANCE_SUPPRESSED}
+
+    def test_provenance_defaults_to_unknown_not_to_emitted(self, tmp_path):
+        """Records stamped before this shipped have no provenance. They must
+        read as unknown — counting them as emitted would inflate the only
+        population that can justify a live change."""
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store) is True
+        assert {r["provenance"] for r in store.records()} == {""}
+
     def test_measurement_arms_are_never_activatable_strategies(self):
         """The allocator must not be able to recommend a measurement row."""
         assert is_geometry_variant("SR_FLIP_RETEST@SAREXIT")
         assert is_geometry_variant("SR_FLIP_RETEST@SARBASE")
         assert not is_geometry_variant("SR_FLIP_RETEST")
+
+
+class TestScannerWiringCarriesProvenance:
+    """The two scanner call sites are the ONLY place emitted-vs-suppressed
+    exists. If a site stops passing it, every record silently becomes
+    'unknown' and the emitted-only view goes quietly empty — a failure that
+    looks exactly like 'no signals yet'."""
+
+    def test_the_suppressed_call_site_marks_records_suppressed(self):
+        from types import SimpleNamespace
+
+        from src.scanner import Scanner
+
+        seen: list = []
+
+        class _Stub:
+            def _stamp_geometry_ab(self, sig, provenance=""):
+                seen.append(provenance)
+
+        sig = SimpleNamespace(
+            symbol="ETHUSDT", channel="360_SCALP", setup_class="BREAKOUT_RETEST",
+            entry=100.0, stop_loss=99.0, tp1=101.5,
+        )
+        Scanner._stamp_suppressed(_Stub(), sig, "quiet_scalp_block")
+        assert seen == [sa.PROVENANCE_SUPPRESSED]
+
+    def test_every_stamp_call_site_passes_provenance_explicitly(self):
+        """A new call site must not be able to default to unknown."""
+        import inspect
+        import re
+
+        import src.scanner as scanner_mod
+
+        src_text = inspect.getsource(scanner_mod)
+        calls = re.findall(r"_stamp_geometry_ab\((?!self,?\s*sig:)[^)]*\)", src_text)
+        # Drop the definition itself; what remains are invocations.
+        invocations = [c for c in calls if not c.startswith("_stamp_geometry_ab(self")]
+        assert invocations, "expected to find the stamp call sites"
+        for call in invocations:
+            assert "provenance=" in call, f"call site without provenance: {call}"
+        # Both halves of the sample must be represented.
+        joined = " ".join(invocations)
+        assert "PROVENANCE_EMITTED" in joined
+        assert "PROVENANCE_SUPPRESSED" in joined
 
 
 class TestOutcomeScoring:
