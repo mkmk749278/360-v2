@@ -104,7 +104,7 @@ money-path changes follow dark-first from here.
 - Paid-channel routing changes
 - Regime-per-exit design decisions (§3.2b — data research in progress)
 
-Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in ~45s. **Production phase: the app is LIVE on the Play Store** — a `main` deploy reaches real users, so money-path changes ship **dark (default-OFF) + shadow-measured + owner sign-off to activate** per § Project Phase; off-money-path work ships normally.
+Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in ~45s. **Production phase: the app is LIVE on the Play Store** — a `main` deploy reaches real users, so money-path changes ship **dark + shadow-measured + owner sign-off to activate** per § Project Phase — measurement flag ON and visible in ops, user-visible flag OFF. Off-money-path work ships normally.
 
 ---
 
@@ -148,9 +148,9 @@ Binance WS/REST
       ↓
 HistoricalDataStore + OrderFlowStore
       ↓
-Scanner (15s × 75 pairs) → 18 evaluators → gate chain → scoring
+Scanner (15s × 75 pairs) → 19 evaluators (17 live) → gate chain → scoring
       ↓
-SignalRouter → Telegram (paid A+/B only) · FCM push topics → Lumin app
+SignalRouter → in-app Lumin feed (primary, B1) · FCM push topics · Telegram mirror
       ↓
 ┌─────────────────────────────────────────────────────┐
 │ ENGINE CONTAINER                                    │
@@ -173,6 +173,16 @@ Binance REST API
 
 **Per-user settings:** API writes SQLite (shared volume) → engine reads at dispatch (fresh SELECT, WAL mode). Change takes effect on next signal dispatch.
 
+**Delivery surfaces (owner, 2026-07-25):** the **Lumin app is the primary surface for
+users** — that is where signals are managed and read. Telegram *works in India* (the
+old "banned in-region" claim in these docs was false) but remains a **mirror**, not the
+primary channel. **Telegram's wider role is a dedicated future session** — don't expand
+or re-architect Telegram routing as a side-effect of other work.
+
+**Control vs alerting:** control (kill switch, auto-mode flips, manual close) is
+**ops-only** — it needs the audit trail. Alerting is read-only, so FCM push *and*
+Telegram are both acceptable paging paths.
+
 ---
 
 ## Module Map
@@ -181,7 +191,7 @@ Binance REST API
 |---|---|
 | Boot, WS/REST init | `src/bootstrap.py`, `src/main.py` |
 | Scanner + gate chain | `src/scanner/__init__.py` |
-| 18 evaluators | `src/channels/scalp.py` |
+| 19 evaluators (17 live; ORB + CLS disabled) | `src/channels/scalp.py` |
 | Confidence scoring | `src/signal_quality.py`, `src/confidence.py` |
 | Regime classification | `src/regime.py` |
 | MTF policy | `src/mtf.py` |

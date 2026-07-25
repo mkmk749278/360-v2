@@ -336,11 +336,28 @@ Corollary now in both briefs: **dark work must ship with its ops surface.** A
 dark change isn't finished until there's a panel, table, or truth-report section
 the owner can read the same day. "Measured but nowhere to look" is unfinished.
 
-**Not changed, flagged instead** (out of the scope the owner set): `OWNER_BRIEF`
-L342 still lists signal delivery as "Telegram paid channel + free channel", which
-sits oddly beside B1's in-app-first rule; and B18 still says the kill switch is
-"<5s from Telegram" though ops owns control now. Both predate this session and
-neither is a Telegram-ban claim.
+**Also corrected in the same pass (owner: "fix all of them"):**
+
+| Was | Now | Evidence |
+|---|---|---|
+| "The 15 Signal Evaluators" | **19** (17 live; ORB + CLS disabled) | 19 `_evaluate_*` in `scalp.py`, 19 `EVAL::*` rows in the truth report. MOVER_TREND_PULLBACK, MOVER_AVWAP_SCALP, MEAN_REVERT and RANGE_FADE had been generating for weeks with no table row. |
+| §3.9 `invalidation_mode` "engine default: tight" | **loose** | `INVALIDATION_MODE_DEFAULT="loose"`; B17 and Profile D already said loose — the brief contradicted itself |
+| "release 266 … 14 installs at 2026-06-30" | release 282+ as of 2026-07-16 | matched to CLAUDE.md; stale install count removed rather than guessed |
+| §5.1 agent "in design — 2026-06-03" | **LIVE** | it is a running container in 360ce-ops and filed #781 |
+| Part V ops "read-only consumer" | **control plane since 2026-06-20** | kill switch / mode flips / manual close all ship |
+| §3.6 tiers → "Paid channel" | in-app feed + Telegram mirror | contradicted B1/B16 — signals are free, the paywall is automation |
+| B9 "must post Telegram notification" | no silent disappearances, app-primary | the rule is the honesty, not the channel |
+| B18 kill switch "<5s from Telegram" | operated from the ops control plane | owner: control is ops-only for the audit trail; alerting may use both |
+
+**Owner rulings recorded:** the **app is the primary surface for users**, Telegram is a
+mirror; **Telegram's wider role is a dedicated future session** — do not expand it as a
+side-effect of other work. Control is ops-only; alerting may go to FCM *and* Telegram.
+
+**Still open after this pass:** `§2.1` still says "360 Crypto Eye is the
+signal-engine brand (Telegram channel, technical identity)" and `B15` still says
+"Telegram channel never renames" — both fine as brand statements, but they are the
+kind of Telegram-role wording the owner has reserved for a dedicated session. Left
+alone deliberately.
 
 ### Open / next
 
