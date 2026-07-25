@@ -382,6 +382,74 @@ def candidate_outcome(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     }
 
 
+def gate_metrics_by_setup(
+    records: List[Dict[str, Any]],
+    *,
+    setup_class: str = "",
+    min_sample: int = 1,
+) -> Dict[str, Dict[str, Any]]:
+    """Which gates kill a given setup, and what that costs — per (setup, gate).
+
+    The per-gate table answers "is this gate net-helping?" but pools every
+    setup into one row, so it cannot answer the question the emission probes
+    actually tell you to ask: *"this path emits nothing — which gate is
+    stopping it?"*  Both fields were already on every stamped record; nothing
+    cross-tabbed them, so #781 said "check gate rejections" for days with no
+    view that could.
+
+    Keyed ``"SETUP|gate"``.  Pass ``setup_class`` to scope to one path.
+    """
+    from src import trade_costs  # noqa: F401  (parity with the per-gate table)
+
+    by_key: Dict[str, Dict[str, Any]] = {}
+    want = str(setup_class or "").strip().upper()
+    for rec in records or []:
+        cls = rec.get("classification")
+        if cls in (None, INSUFFICIENT):
+            continue
+        setup = str(rec.get("setup_class") or "UNKNOWN")
+        if want and setup.upper() != want:
+            continue
+        gate = str(rec.get("gate_name") or "unknown")
+        agg = by_key.setdefault(
+            f"{setup}|{gate}",
+            {
+                "setup_class": setup, "gate_name": gate, "n": 0,
+                "would_win": 0, "would_lose": 0, "would_expire": 0,
+                "_ev_sum": 0.0,
+            },
+        )
+        agg["n"] += 1
+        if cls == WOULD_WIN:
+            agg["would_win"] += 1
+        elif cls == WOULD_LOSE:
+            agg["would_lose"] += 1
+        elif cls == WOULD_EXPIRE:
+            agg["would_expire"] += 1
+        ev = suppression_value_delta_r(rec)
+        if ev is not None:
+            agg["_ev_sum"] += ev
+
+    out: Dict[str, Dict[str, Any]] = {}
+    for key, agg in by_key.items():
+        n = agg["n"]
+        if n < min_sample:
+            continue
+        ev_per = agg.pop("_ev_sum") / n if n else 0.0
+        agg["would_win_pct"] = (agg["would_win"] / n) if n else 0.0
+        # EV from the SUPPRESSION's perspective: positive = the gate helped.
+        # Negative means this gate is destroying value on this specific path,
+        # which is the actionable form of "why does this path never emit".
+        agg["ev_per_suppression_r"] = ev_per
+        agg["verdict"] = (
+            VERDICT_KEEP if ev_per >= _KEEP_EV_R
+            else VERDICT_DROP if ev_per <= _DROP_EV_R
+            else VERDICT_TUNE
+        ) if n >= _MIN_SAMPLE else VERDICT_INSUFFICIENT
+        out[key] = agg
+    return out
+
+
 def compute_gate_suppression_metrics(
     records: List[Dict[str, Any]],
     *,

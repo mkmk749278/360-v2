@@ -51,6 +51,59 @@ log = get_logger("feature_liveness")
 
 _DEFAULT_PATH = os.getenv("FEATURE_LIVENESS_PATH", "data/feature_liveness.json")
 
+# A fully-gated path is only a fault when the candidates it stopped emitting
+# were worth emitting.  Below this pooled counterfactual R (over at least
+# ``_GATED_PATH_MIN_N`` suppressed samples) the gates are doing their job and
+# zero emissions is the correct outcome, not a dead path.
+_GATED_PATH_NEGATIVE_R = float(os.getenv("FEATURE_LIVENESS_GATED_NEGATIVE_R", "-0.10"))
+_GATED_PATH_MIN_N = int(os.getenv("FEATURE_LIVENESS_GATED_MIN_N", "200"))
+
+
+def gated_path_verdict(
+    *,
+    backlog: float,
+    emitted_total: float,
+    edge: Optional[Dict[str, float]],
+    label: str,
+    negative_r: float = _GATED_PATH_NEGATIVE_R,
+    min_n: int = _GATED_PATH_MIN_N,
+) -> Tuple[bool, str]:
+    """Is "generates candidates, emits none" a fault here?  (pure)
+
+    Three outcomes, and the whole point is that they are different:
+
+    * **measured-negative** → healthy.  The gates are refusing candidates that
+      lose money; emitting them would cost us.  Reported, never paged.
+    * **measured-positive** → violating, and now the alert says what the
+      blockage is *costing* instead of only that it exists.
+    * **not yet measured** → violating, because an unmeasured silent path is
+      exactly the 2026-07-14 failure this module was built for.
+
+    This does not silence a detected problem — the detection is unchanged and
+    the state is always reported.  It reclassifies it using a measurement that
+    was available all along, so a page means money is being left on the table
+    rather than "a gate is working".
+    """
+    if edge is None or int(edge.get("n", 0)) < min_n:
+        seen = 0 if edge is None else int(edge.get("n", 0))
+        return False, (
+            f"{backlog:g} detections since last emission (emitted_total={emitted_total:g}) "
+            f"— and only {seen} suppressed samples measured (need {min_n}), so we cannot "
+            f"tell a dead path from a correctly-gated one. Check gate rejections."
+        )
+    avg_r = float(edge.get("avg_r", 0.0))
+    n = int(edge.get("n", 0))
+    if avg_r <= negative_r:
+        return True, (
+            f"fully gated, and correctly: {label} counterfactuals measure "
+            f"{avg_r:+.2f}R over n={n} — emitting them would lose money"
+        )
+    return False, (
+        f"{backlog:g} detections since last emission (emitted_total={emitted_total:g}) "
+        f"— and the blocked candidates measure {avg_r:+.2f}R over n={n}, so the "
+        f"gating is COSTING us. Check gate rejections."
+    )
+
 # A fail-open site alerts when it grew in this many consecutive cycles…
 _FAIL_OPEN_STREAK_CYCLES = int(os.getenv("FEATURE_LIVENESS_FAIL_OPEN_STREAK", "3"))
 # …or immediately when it grew by at least this much in ONE cycle (a hot loop

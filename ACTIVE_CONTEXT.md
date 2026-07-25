@@ -242,22 +242,84 @@ asserted only that the parameter was *accepted*, which an inert parameter always
 is, so it passed throughout. Replaced with a regression test that fails if it
 comes back.
 
+### Part 6 — the arm made owner-readable (ops), and #781 diagnosed
+
+**Owner switched `sar_exit_shadow_enabled` ON 2026-07-25.** Pairs are stamping;
+first resolutions land ~48h later.
+
+Ops surfaces shipped (360ce-ops #82 · #83 · #84):
+
+- **`/sar-exit`** — the A/B summary: paired totals (total/avg/**median** R, win%,
+  PF per arm), per-strategy rollup (leader only when BOTH arms clear n≥15), and
+  the paired-trade table.
+- **`/signals/sar`** — the arm as a *signal feed* under the Signals tab. A SAR
+  trade has **no TP and no SL** — the trail is its only exit — so those columns
+  don't exist; it's entry / closed-at / status / held / R / vs-live. Statuses:
+  RUNNING (inside its 48h window), CLOSED_TRAIL, CLOSED_WINDOW, NO_DATA.
+- **Source filter** — All / Emitted to live / Gate-suppressed, backed by a new
+  `provenance` field recorded at the stamp (360-v2 #786). The arm stamps from
+  *both* scanner call sites, so the ledger mixes signals that reached
+  subscribers with candidates a gate killed; only the **emitted** half can
+  justify changing what users receive. Pre-#786 records read UNKNOWN and match
+  neither filter — counting them as emitted would inflate the one number an
+  adoption decision reads.
+- Ops-side fix: `MEASUREMENT_SUFFIXES` had drifted to `@FIXED`/`@ATR` only while
+  the engine wrote `@TUNED`/`@DSV2`/`@GOV` for over a week, so those arms were
+  counted in the Strategy Lab's **per-strategy rollup as strategies** —
+  double-counting their own candidates.
+
+### Issue #781 — diagnosed on real data; the three alerts have three answers
+
+The truth report settles what six days of paging could not:
+
+| Alert | Measured | Verdict |
+|---|---|---|
+| `range_fade_emission` | RANGE_FADE suppressed counterfactuals **−0.98R at 3% win, n=1804** | **Gates are RIGHT.** Emitting would lose money. False alarm. |
+| `mean_revert_emission` | MEAN_REVERT **+0.60R at 80% win, n=2999**, 83/83 killed pre-scoring by `execution:overextended` (cap 5.0 ATR) | **Gating is COSTING us** — real, and money-path |
+| `edge_reconciliation` | MOVER_TREND_PULLBACK realized−counterfactual **−0.38R** (bound 0.3) | **Working correctly** — it is measuring a real optimism bias in counterfactuals |
+
+The third calibrates the second: counterfactuals run ~0.38R optimistic where we
+have both sides, so MEAN_REVERT's +0.60R is realistically nearer +0.2R. Still
+positive, much less dramatic — **do not act on the gross number.**
+
+**Shipped (off money-path):**
+
+- **Edge-aware emission probes** (`feature_liveness.gated_path_verdict` +
+  `strategy_edge.pooled_suppressed_edge`). A fully-gated path is a fault only
+  when its blocked candidates measure *positive*; measured-negative reports
+  healthy **with the number visible**, unmeasured still pages. This is a
+  reclassification, not a mute — the detection is unchanged, so the Hard Limit
+  holds, and a page now means money on the table.
+- **Gate rejections by setup** (`suppression_audit.gate_metrics_by_setup` + a
+  truth-report section). The per-gate table pools every setup into one row, so
+  *"this path emits nothing — which gate is stopping it?"* was unanswerable
+  even though gate and setup were both on every stamped record. #781 said
+  "check gate rejections" for days with no view that could.
+- **SAR exit A/B section in the truth report** — the arm now appears alongside
+  its siblings instead of only in its own ops tab.
+
+**NOT done — owner-sign-off, money-path:** raising MEAN_REVERT's
+`execution:overextended` cap (5.0 ATR) or disabling RANGE_FADE outright. Both
+change which signals emit on a live app. Evidence is above; decision is the
+owner's.
+
 ### Open / next
 
-1. **Owner: switch the arm on** (`sar_exit_shadow_enabled`) to start
-   accumulating. It stamps nothing until then — that is the dark-first contract,
-   not an oversight.
+1. ~~Owner: switch the arm on~~ — **done 2026-07-25**, stamping now.
 2. **Read the pair once both arms clear n≥15 per cell** via
    `summarize_sar_exit`; thin arms report MEASURING, never a winner. Activation
    remains a separate dark-first, owner-signed change.
 3. **Promotion criterion still undecided** (Part 4 caveat 1) — deliberately, to
    be settled on this arm's forward data.
-4. **`#781` liveness alerts are unaddressed**: `mean_revert_emission` (465
-   detections, emitted_total=0) and `range_fade_emission` (1,409 detections,
-   emitted_total=0, context_blocked=0) sustained since 2026-07-24, plus
-   `edge_reconciliation` MOVER_TREND_PULLBACK at −0.38R against a 0.3 bound. Two
-   evaluator paths are detecting thousands of setups and emitting nothing —
-   Session 70's MEAN_REVERT compat-map was supposed to have fixed exactly that.
+4. **`#781` — diagnosed and the tooling fixed (see Part 6).** The remaining
+   piece is an owner call: MEAN_REVERT's `execution:overextended` cap, and
+   whether RANGE_FADE (−0.98R, 3% win) should be disabled rather than left to
+   be gated 100% of the time. Both are money-path.
+5. **The emitted-vs-suppressed split may be thin.** Gates kill most candidates,
+   so the emitted subset of the SAR arm will grow far slower than the pooled
+   one. If it can't reach n≥15 per strategy in reasonable time, read the pooled
+   number as primary and treat the emitted split as a directional check —
+   and say so explicitly rather than quietly pooling them.
 
 ---
 

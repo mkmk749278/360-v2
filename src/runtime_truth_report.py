@@ -925,13 +925,19 @@ def summarize_suppression_audit(records: List[Dict[str, Any]]) -> Dict[str, Any]
         })
         inner[label] = inner.get(label, 0) + 1
 
-    from src.suppression_audit import compute_gate_suppression_metrics
+    from src.suppression_audit import (
+        compute_gate_suppression_metrics,
+        gate_metrics_by_setup,
+    )
 
     return {
         "totals": totals,
         "pending": pending,
         "by_setup": by_setup,
         "by_gate": compute_gate_suppression_metrics(clean),
+        # Which gate kills which path (#781) — the per-gate table pools setups
+        # and so cannot answer "this path emits nothing, what is stopping it?"
+        "by_setup_gate": gate_metrics_by_setup(clean),
     }
 
 
@@ -947,6 +953,7 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         summarize_geometry_ab,
         summarize_recipe_arms,
     )
+    from src.sar_exit_shadow import summarize_sar_exit
 
     per_strategy: Dict[str, Dict[str, Any]] = {}
     scored_cells: List[Dict[str, Any]] = []
@@ -1021,6 +1028,7 @@ def summarize_strategy_edge(matrix: Dict[str, Any]) -> Dict[str, Any]:
         "scored_cells": len(scored_cells),
         "geometry_ab": summarize_geometry_ab(matrix),
         "recipe_arms": summarize_recipe_arms(matrix),
+        "sar_exit": summarize_sar_exit(matrix),
         "reconciliation": reconcile_matrix(matrix),
     }
 
@@ -2163,6 +2171,81 @@ def format_truth_report_markdown(snapshot: Dict[str, Any], comparison: Dict[str,
             "gate suppressions, @TUNED on tuned-setup candidates; arms "
             "classify after ~1h of real candles_"
         )
+
+    # ── SAR exit A/B (2026-07-25 bake-off verdict, forward-measured) ──
+    sar_rows = edge.get("sar_exit") or []
+    lines.extend(["", "## SAR exit A/B (live geometry vs a trailing 15m Parabolic SAR)"])
+    lines.append(
+        "_The 102,496-entry exit-method bake-off ranked SAR-on-15m the only "
+        "profitable trailing exit (PF 1.60 vs SuperTrend 0.93 / ATR 0.72).  A "
+        "backtest verdict is not a promotion, so every post-scoring candidate "
+        "now stamps a pair — **@SARBASE** (the live evaluator geometry) and "
+        "**@SAREXIT** (the same entry exited by the trail) — forward-measured "
+        "over the SAME 192-bar (48h) window and divided by the same live stop "
+        "distance, so the comparison carries no hold-time confound.  "
+        "Observe-only and default-OFF; adopting a SAR exit stays a separate "
+        "dark-first, owner-signed change._"
+    )
+    if sar_rows:
+        lines.append("")
+        lines.append(
+            "| Strategy | n live | Win%/R live | n SAR | Win%/R SAR | "
+            "ΔR (SAR−live) | Leader |"
+        )
+        lines.append("|---|---:|---|---:|---|---:|---|")
+        for row in sar_rows:
+            base = row.get("base", {}) or {}
+            sar = row.get("sar", {}) or {}
+            delta = row.get("delta_r")
+            delta_cell = f"{delta:+.2f}" if delta is not None else "—"
+            lines.append(
+                f"| {row.get('strategy', '?')} "
+                f"| {base.get('n', 0)} "
+                f"| {base.get('win_rate', 0.0) * 100.0:.0f}% / {base.get('avg_r', 0.0):+.2f}R "
+                f"| {sar.get('n', 0)} "
+                f"| {sar.get('win_rate', 0.0) * 100.0:.0f}% / {sar.get('avg_r', 0.0):+.2f}R "
+                f"| {delta_cell} "
+                f"| **{row.get('leader', 'MEASURING')}** |"
+            )
+    else:
+        lines.append(
+            "- _no SAR pairs classified yet — pairs stamp at every post-scoring "
+            "emission/suppression once `sar_exit_shadow_enabled` is on, and each "
+            "needs a 48h forward window before both arms resolve_"
+        )
+
+    # ── Which gates kill which path (#781: "check gate rejections") ────
+    by_setup = (snapshot.get("suppression_audit", {}) or {}).get("by_setup_gate") or {}
+    lines.extend(["", "## Gate rejections by setup (why a path never emits)"])
+    lines.append(
+        "_The per-gate table above pools every setup into one row, so it cannot "
+        "answer the question the emission probes tell you to ask: *this path "
+        "emits nothing — which gate is stopping it, and is that gate right?*  "
+        "Both fields were always on the stamped records; this cross-tabs them.  "
+        "EV is from the **suppression's** perspective: positive = the gate "
+        "saved money on this path, negative = it is destroying value here._"
+    )
+    if by_setup:
+        lines.append("")
+        lines.append("| Setup | Gate | n | WOULD_WIN% | EV/suppression (R) | Verdict |")
+        lines.append("|---|---|---:|---:|---:|---|")
+        for row in sorted(
+            by_setup.values(),
+            key=lambda r: r.get("ev_per_suppression_r", 0.0),
+        )[:25]:
+            lines.append(
+                f"| {row.get('setup_class', '?')} | {row.get('gate_name', '?')} | "
+                f"{row.get('n', 0)} | {row.get('would_win_pct', 0.0) * 100.0:.1f}% | "
+                f"{row.get('ev_per_suppression_r', 0.0):+.2f} | "
+                f"**{row.get('verdict', '?')}** |"
+            )
+        lines.append("")
+        lines.append(
+            "- _sorted most-costly first: the top rows are gates whose "
+            "suppressions lose more than they save on that specific path_"
+        )
+    else:
+        lines.append("- _no classified suppressions yet_")
 
     # ── Feature liveness & fail-open telemetry (2026-07-14 incident) ──
     fl = snapshot.get("feature_liveness", {}) or {}

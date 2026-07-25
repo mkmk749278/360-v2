@@ -290,3 +290,74 @@ def test_stamp_defaults_to_immediate_entry_type(tmp_path):
         entry=100, stop_loss=99, tp1=102, store=store,
     )
     assert rec is not None and rec.entry_type == sa.ENTRY_IMMEDIATE
+
+
+class TestGateMetricsBySetup:
+    """#781 asked "check gate rejections" for days with no view that could
+    answer it: the per-gate table pools every setup into one row, so "this
+    path emits nothing — which gate is stopping it?" was unanswerable even
+    though both fields were on every stamped record."""
+
+    def _rec(self, setup, gate, cls, **kw):
+        base = {
+            "setup_class": setup, "gate_name": gate, "classification": cls,
+            "side": "LONG", "entry": 100.0, "stop_loss": 99.0, "tp1": 102.0,
+            "sl_distance": 1.0,
+        }
+        base.update(kw)
+        return base
+
+    def test_splits_one_gate_across_the_setups_it_kills(self):
+        from src.suppression_audit import gate_metrics_by_setup
+
+        recs = (
+            [self._rec("MEAN_REVERT", "min_confidence", "WOULD_WIN")] * 10
+            + [self._rec("RANGE_FADE", "min_confidence", "WOULD_LOSE")] * 10
+        )
+        out = gate_metrics_by_setup(recs)
+        assert set(out) == {"MEAN_REVERT|min_confidence", "RANGE_FADE|min_confidence"}
+        # Same gate, opposite verdicts per path — exactly what the pooled
+        # per-gate row cannot show.
+        assert out["MEAN_REVERT|min_confidence"]["ev_per_suppression_r"] < 0
+        assert out["RANGE_FADE|min_confidence"]["ev_per_suppression_r"] > 0
+
+    def test_scopes_to_one_setup(self):
+        from src.suppression_audit import gate_metrics_by_setup
+
+        recs = (
+            [self._rec("MEAN_REVERT", "g1", "WOULD_WIN")] * 3
+            + [self._rec("RANGE_FADE", "g1", "WOULD_LOSE")] * 3
+        )
+        out = gate_metrics_by_setup(recs, setup_class="mean_revert")
+        assert set(out) == {"MEAN_REVERT|g1"}
+
+    def test_unclassified_records_are_excluded(self):
+        from src.suppression_audit import gate_metrics_by_setup
+
+        recs = [
+            self._rec("MEAN_REVERT", "g1", None),
+            self._rec("MEAN_REVERT", "g1", "INSUFFICIENT_DATA"),
+            self._rec("MEAN_REVERT", "g1", "WOULD_WIN"),
+        ]
+        out = gate_metrics_by_setup(recs)
+        assert out["MEAN_REVERT|g1"]["n"] == 1
+
+    def test_counts_and_win_pct(self):
+        from src.suppression_audit import gate_metrics_by_setup
+
+        recs = (
+            [self._rec("X", "g", "WOULD_WIN")] * 2
+            + [self._rec("X", "g", "WOULD_LOSE")] * 6
+            + [self._rec("X", "g", "WOULD_EXPIRE")] * 2
+        )
+        row = gate_metrics_by_setup(recs)["X|g"]
+        assert row["n"] == 10
+        assert row["would_win"] == 2 and row["would_lose"] == 6
+        assert row["would_expire"] == 2
+        assert row["would_win_pct"] == 0.2
+
+    def test_empty_and_junk(self):
+        from src.suppression_audit import gate_metrics_by_setup
+
+        assert gate_metrics_by_setup([]) == {}
+        assert gate_metrics_by_setup(None) == {}
