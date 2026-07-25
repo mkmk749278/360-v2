@@ -223,14 +223,23 @@ class TestFeeDeduction:
         if results_no_fee[0].total_signals > 0:
             assert results_with_fee[0].total_pnl_pct < results_no_fee[0].total_pnl_pct
 
-    def test_simulated_ai_score_passed_to_channel(self):
-        """Backtester.run() should accept simulated_ai_score without error."""
-        bt = Backtester(channels=[ScalpChannel()], min_window=30, lookahead_candles=5)
-        candles = _make_candles(n=200)
-        candles_by_tf = {"5m": candles, "1m": candles}
-        results = bt.run(candles_by_tf, channel_name="360_SCALP", simulated_ai_score=-0.5)
-        assert isinstance(results, list)
-        assert len(results) == 1
+    def test_no_inert_ai_score_parameter_survives(self):
+        """``simulated_ai_score`` is gone, and must not come back as a no-op.
+
+        It was threaded through ``run`` → ``_backtest_channel`` and consumed by
+        nothing: its only consumer was the ``ai_insight=`` kwarg that no channel
+        has accepted since #713, which is what killed every backtest signal for
+        two weeks. The old test here asserted only that the parameter was
+        *accepted* — which an inert parameter always is — so it passed
+        throughout. A knob the engine stores and never reads is a scaffold;
+        rewire it through the channel signature or leave it out.
+        """
+        import inspect
+
+        for fn in (Backtester.run, Backtester._backtest_channel):
+            assert "simulated_ai_score" not in inspect.signature(fn).parameters, (
+                f"{fn.__qualname__} carries an inert parameter"
+            )
 
 
 class TestSlippageModel:

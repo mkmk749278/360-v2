@@ -582,6 +582,45 @@ GEOMETRY_AB_MAX_STOP_PCT: float = _safe_float("GEOMETRY_AB_MAX_STOP_PCT", "5.0")
 GEOMETRY_AB_STAMP_COOLDOWN_SEC: float = _safe_float("GEOMETRY_AB_STAMP_COOLDOWN_SEC", "600")
 
 # ---------------------------------------------------------------------------
+# Parabolic-SAR exit shadow arm (2026-07-25 — src/sar_exit_shadow.py)
+# ---------------------------------------------------------------------------
+# The 102,496-entry exit-method bake-off ranked SAR-on-15m the only profitable
+# trailing exit (PF 1.60 vs SuperTrend 0.93 / ATR 0.72), robust across months,
+# regimes, directions and all 20 symbols.  A backtest verdict is not a
+# promotion: this arm forward-measures it on REAL live signals in real market
+# context before anything is proposed for activation.
+#
+# DEFAULT-OFF.  The app is live on the Play Store and this touches the exit
+# question — dark-first means the owner turns the measurement on deliberately,
+# after reading what it will cost and what it will produce.  Even switched on it
+# is observe-only: no live exit, FSM transition, or dispatch consults it.
+SAR_EXIT_SHADOW_ENABLED: bool = _safe_bool("SAR_EXIT_SHADOW_ENABLED", "false")
+# Wilder's acceleration factor: start/increment, and its cap.  These are the
+# bake-off's defaults — changing them makes the shadow measure a different
+# indicator than the one the 6-month result describes.
+SAR_EXIT_SHADOW_STEP: float = _safe_float("SAR_EXIT_SHADOW_STEP", "0.02")
+SAR_EXIT_SHADOW_MAX_STEP: float = _safe_float("SAR_EXIT_SHADOW_MAX_STEP", "0.2")
+# Measurement window, in bars, after entry: the bake-off's max_forward_bars.
+# 192 × 15m = 48h.  BOTH arms of the pair get this window — that is the fix for
+# the bake-off's one confounded comparison, where the engine baseline got 100
+# minutes and the trails got 48 hours.
+SAR_EXIT_SHADOW_WINDOW_BARS: int = _safe_int("SAR_EXIT_SHADOW_WINDOW_BARS", "192")
+# Pre-entry bars fed to the SAR so it has converged before the trade starts.
+# Without this the first bars of every trade are measured against a SAR still
+# seeded from its own first two bars — a different indicator, and a
+# systematically tighter one.
+SAR_EXIT_SHADOW_WARMUP_BARS: int = _safe_int("SAR_EXIT_SHADOW_WARMUP_BARS", "50")
+# Bar size of the trail, in minutes.  15m is what the bake-off measured; the
+# classifier reads this timeframe straight from the warm in-memory data store.
+SAR_EXIT_SHADOW_BAR_MINUTES: float = _safe_float("SAR_EXIT_SHADOW_BAR_MINUTES", "15")
+# Min seconds between two pairs for the same (symbol, setup, side) — the same
+# persisting candidate re-detects every 15s scan; one pair per window is a fair
+# sample, thousands of near-duplicates are not.  Mirrors the geometry A/B.
+SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC: float = _safe_float(
+    "SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC", "600"
+)
+
+# ---------------------------------------------------------------------------
 # Tuned-variant shadow arms (2026-07-16 — owner: "tune, don't disable")
 # ---------------------------------------------------------------------------
 # MOVER_AVWAP_SCALP and VOLUME_SURGE_BREAKOUT are three-windows-confirmed

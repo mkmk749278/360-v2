@@ -68,6 +68,19 @@ INSUFFICIENT = "INSUFFICIENT_DATA"
 ENTRY_IMMEDIATE = "immediate"
 ENTRY_LIMIT = "limit"
 
+# Exit models for stamped candidates.  ``static`` (default, all historical
+# records): the stamped SL/TP1 are fixed levels and the outcome is the TP1-vs-SL
+# race — the only model this ledger had until 2026-07-25.  ``trailing``: the
+# exit level MOVES bar by bar, so the outcome is a continuous exit price rather
+# than a ±1R/TP1 binary, and it can only be resolved by walking candles in
+# order.  The walk itself is NOT implemented here: a trailing record is resolved
+# by the ``trail_classifier`` its own ledger supplies to ``classify_pending``,
+# which writes back the ``trail_*`` fields this module then scores.  That keeps
+# each trailing method (SAR, ATR, SuperTrend, …) in its own module and leaves
+# this one method-agnostic.
+EXIT_STATIC = "static"
+EXIT_TRAILING = "trailing"
+
 VERDICT_KEEP = "KEEP"           # gate correctly suppresses losers
 VERDICT_DROP = "DROP"           # gate is killing winners
 VERDICT_TUNE = "TUNE"
@@ -103,12 +116,25 @@ class SuppressedCandidateRecord:
     # Entry-fill model (ENTRY_IMMEDIATE | ENTRY_LIMIT).  Defaulted so every
     # pre-existing persisted record keeps its original semantics on reload.
     entry_type: str = ENTRY_IMMEDIATE
+    # Exit model (EXIT_STATIC | EXIT_TRAILING).  Defaulted for the same reason:
+    # every record written before 2026-07-25 is a static SL/TP1 race and must
+    # keep scoring as one after a reload.
+    exit_model: str = EXIT_STATIC
     # Filled by classify_pending once the window elapses.
     classified_at: Optional[float] = None
     classification: Optional[str] = None
     post_price_max: Optional[float] = None
     post_price_min: Optional[float] = None
     post_price_final: Optional[float] = None
+    # Trailing-exit results, written back by the ledger's own trail_classifier
+    # (EXIT_TRAILING records only).  ``trail_exit_price`` is where the moving
+    # stop actually took the trade out; ``trail_mfe_pct`` is the best excursion
+    # reached before that.  ``candidate_outcome`` scores from these instead of
+    # the TP1/SL levels.
+    trail_exit_price: Optional[float] = None
+    trail_mfe_pct: Optional[float] = None
+    trail_hold_min: Optional[float] = None
+    trail_exit_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -274,6 +300,36 @@ def candidate_outcome(record: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     sl_distance = float(record.get("sl_distance") or 0.0)
     r_tp1 = _r_to_tp1(record)
 
+    if str(record.get("exit_model") or EXIT_STATIC) == EXIT_TRAILING:
+        # A moving stop has no TP1-vs-SL binary: it exits wherever the trail
+        # caught price, so R is continuous.  The R *denominator* is still the
+        # live geometry's sl_distance — that is precisely what makes a trailing
+        # arm comparable in R against the static control arm stamped from the
+        # same candidate.
+        exit_price = float(record.get("trail_exit_price") or 0.0)
+        if exit_price <= 0 or sl_distance <= 0:
+            return {"won": False, "pnl_pct": 0.0, "r_multiple": 0.0,
+                    "gross_r_multiple": 0.0, "net_r_multiple": 0.0, "mfe_pct": 0.0}
+        side = str(record.get("side") or "").upper()
+        move = (exit_price - entry) if side == "LONG" else (entry - exit_price)
+        gross_r = move / sl_distance
+        won = move > 0
+        pnl = move / entry * 100.0
+        mfe = float(record.get("trail_mfe_pct") or 0.0)
+        live_r = trade_costs.net_r(gross_r, entry=entry, sl_distance=sl_distance)
+        always_net_r = trade_costs.net_r(
+            gross_r, entry=entry, sl_distance=sl_distance, enabled=True
+        )
+        cost_pct = trade_costs.round_trip_cost_pct() if trade_costs.is_enabled() else 0.0
+        return {
+            "won": won,
+            "pnl_pct": pnl - cost_pct,
+            "r_multiple": live_r,
+            "gross_r_multiple": gross_r,
+            "net_r_multiple": always_net_r,
+            "mfe_pct": mfe,
+        }
+
     if cls == WOULD_WIN:
         gross_r = r_tp1
         won = True
@@ -397,6 +453,9 @@ class SuppressedCandidateStore:
         now_ts: Optional[float] = None,
         window_sec: float = _WINDOW_SEC,
         on_classified: Optional[Callable[[dict], None]] = None,
+        trail_classifier: Optional[
+            Callable[[dict, Dict[str, List[float]]], Optional[Dict[str, Any]]]
+        ] = None,
     ) -> Dict[str, int]:
         now = now_ts if now_ts is not None else time.time()
         counters: Dict[str, int] = {}
@@ -430,9 +489,54 @@ class SuppressedCandidateStore:
                 _mark(rec, INSUFFICIENT, now)
                 counters[INSUFFICIENT] = counters.get(INSUFFICIENT, 0) + 1
                 continue
+            # Trailing arms resolve through their own ledger's walker: the exit
+            # level moves per bar, so window extremes cannot express the
+            # outcome.  The walker owns post_price_* too, because its candle
+            # window may carry a pre-entry warmup prefix that must not leak
+            # into the recorded excursion.
+            if str(rec.get("exit_model") or EXIT_STATIC) == EXIT_TRAILING:
+                detail = None
+                if trail_classifier is not None:
+                    try:
+                        detail = trail_classifier(rec, ohlc)
+                    except Exception as exc:
+                        from src import fail_open
+                        fail_open.record("suppression_audit.trail_classifier", exc)
+                        detail = None
+                if not detail or not detail.get("classification"):
+                    _mark(rec, INSUFFICIENT, now)
+                    counters[INSUFFICIENT] = counters.get(INSUFFICIENT, 0) + 1
+                    continue
+                label = str(detail["classification"])
+                for key, value in detail.items():
+                    if key != "classification":
+                        rec[key] = value
+                _mark(rec, label, now)
+                counters[label] = counters.get(label, 0) + 1
+                if on_classified is not None and label != INSUFFICIENT:
+                    try:
+                        on_classified(rec)
+                    except Exception as exc:
+                        log.debug("on_classified hook failed (fail-open): {}", exc)
+                continue
+            # A fetcher may supply a pre-entry warmup prefix (trailing ledgers
+            # need one so their indicator has converged before the trade
+            # starts) and mark the trade's first bar with ``entry_index``.
+            # Static arms sharing that fetcher must skip the prefix, or
+            # pre-entry price action gets scored as the trade's own outcome.
+            _ei = int(ohlc.get("entry_index") or 0)  # type: ignore[arg-type]
+            if _ei > 0:
+                _highs = _highs[_ei:]
+                _lows = _lows[_ei:]
+                if _highs is None or _lows is None or len(_highs) == 0 or len(_lows) == 0:
+                    _mark(rec, INSUFFICIENT, now)
+                    counters[INSUFFICIENT] = counters.get(INSUFFICIENT, 0) + 1
+                    continue
             high = max(_highs)
             low = min(_lows)
             close = ohlc.get("close")
+            if close is not None and _ei > 0:
+                close = close[_ei:]
             final = float(close[-1]) if close is not None and len(close) > 0 else 0.0
             if str(rec.get("entry_type") or ENTRY_IMMEDIATE) == ENTRY_LIMIT:
                 label = classify_limit_record(
@@ -533,6 +637,7 @@ def stamp_candidate(
     valid_for_minutes: float = 0.0,
     pair_cohort: str = "",
     entry_type: str = ENTRY_IMMEDIATE,
+    exit_model: str = EXIT_STATIC,
     store: Optional[SuppressedCandidateStore] = None,
 ) -> Optional[SuppressedCandidateRecord]:
     """Stamp a suppressed candidate (fail-open).  Scopes to tradeable geometry only."""
@@ -559,6 +664,7 @@ def stamp_candidate(
             valid_for_minutes=float(valid_for_minutes or 0.0),
             pair_cohort=str(pair_cohort or ""),
             entry_type=str(entry_type or ENTRY_IMMEDIATE),
+            exit_model=str(exit_model or EXIT_STATIC),
             suppress_timestamp=time.time(),
         )
         (store or get_store()).stamp(rec)

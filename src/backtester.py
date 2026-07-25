@@ -622,7 +622,6 @@ class Backtester:
         channel_name: Optional[str] = None,
         spread_pct: float = 0.01,
         volume_24h_usd: float = 10_000_000.0,
-        simulated_ai_score: float = 0.0,
         config: Optional[BacktestConfig] = None,
         tag_regimes: bool = False,
     ) -> List[BacktestResult]:
@@ -651,15 +650,6 @@ class Backtester:
             Simulated spread percentage.
         volume_24h_usd:
             Simulated 24h volume.
-        simulated_ai_score:
-            **Currently has no effect.**  It used to be folded into an
-            ``ai_insight`` dict and handed to ``channel.evaluate``, but no
-            channel accepts that argument any more — ``BaseChannel.evaluate``
-            and ``ScalpChannel.evaluate`` both dropped it, and passing it raised
-            ``TypeError`` on every candle from 2026-07-11 (#713) until it was
-            removed here.  The parameter is retained so existing callers keep
-            working; wire it back through the channel signature before treating
-            it as meaningful.
         config:
             :class:`BacktestConfig` for the flat-data mode.  Activates
             per-pair / per-config sweep path.
@@ -683,7 +673,6 @@ class Backtester:
         for chan in channels:
             result = self._backtest_channel(
                 chan, candles_by_tf, symbol, spread_pct, volume_24h_usd,
-                simulated_ai_score,
             )
             results.append(result)
             log.info("Backtest %s: %s", chan.config.name, result.summary())
@@ -713,7 +702,7 @@ class Backtester:
         candles_by_tf = {tf: historical_data for tf in channel.config.timeframes}
         symbol = cfg.pair or "UNKNOWN"
         return self._backtest_channel(
-            channel, candles_by_tf, symbol, 0.01, 10_000_000.0, 0.0,
+            channel, candles_by_tf, symbol, 0.01, 10_000_000.0,
             tag_regimes=tag_regimes,
         )
 
@@ -1013,7 +1002,6 @@ class Backtester:
         symbol: str,
         spread_pct: float,
         volume_24h_usd: float,
-        simulated_ai_score: float = 0.0,
         tag_regimes: bool = False,
     ) -> BacktestResult:
         """Run a single channel backtest across all candle windows."""

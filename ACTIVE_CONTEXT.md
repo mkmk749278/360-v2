@@ -155,6 +155,110 @@ the script's per-symbol `[ok] SYM: N entries` progress on stderr is lost
 exactly when it is most wanted. Streaming stderr into a ring buffer so the
 failure card can show the tail would make the next long-run failure legible.
 
+### Part 4 — the bake-off's answer, and the shadow arm that has to confirm it
+
+With the Backtester alive, the 6-month run completed on the VPS: 5m entries →
+15m exits, 20-pair fixed universe, **102,496 entries**.
+
+| Method | Total % | Median | Win % | PF |
+|---|---|---|---|---|
+| Engine baseline | −8,172.7 | −0.126 | 42 | 0.74 |
+| ATR-trail | −15,054.4 | −0.363 | 33 | 0.72 |
+| SuperTrend | −3,490.6 | −0.187 | 35 | 0.93 |
+| **Parabolic SAR** | **+11,660.6** | −0.070 | 40 | **1.60** |
+
+**Every robustness test passed.** Outliers: top-1 trade = **0.1%** of gross
+profit, top-100 = 3.1%; drop-top-3 leaves PF at **1.60** (total −0.5%) — which
+kills the original worry, where one RIFUSDT trade carried the entire 7-day
++28.9%. Time: positive in **7/7 months** (PF 1.11–2.39) while the baseline was
+negative in all 7. Regime: QUIET 1.58 · RANGING 1.53 · TRENDING_DOWN 1.77 ·
+TRENDING_UP 1.18. Direction: LONG 1.14 · SHORT 1.72. Breadth: **20/20 symbols
+profitable**, top-2 = 17% of total. The only negative cell in the entire matrix
+is TRENDING_DOWN × LONG (PF 0.90).
+
+**Caveats that must travel with these numbers:**
+
+1. **Median is negative (−0.070), so it fails the script's stated criterion.**
+   That criterion is the wrong instrument: negative median + positive mean is
+   the *defining signature* of a trend-following exit, so the rule rejects that
+   whole class by construction. It was written to catch the one-trade artifact,
+   and drop-top-N is the correct test for that — which SAR passes decisively.
+   **Owner ruling 2026-07-25: DEFERRED** — decide the promotion criterion on
+   forward-measured data, not on klines-only backtest entries.
+2. **The baseline comparison was confounded by hold time** — baseline got
+   `lookahead 20` × 5m = 100 min, trails got `max_forward_bars 192` × 15m = 48h,
+   29× longer. The trail-vs-trail ranking *is* clean (identical window; only SAR
+   profitable). Fixed structurally in Part 5 below rather than by re-running.
+3. **It is really two setup classes.** `SR_FLIP_RETEST` (n=51,018, PF 1.90)
+   carries **83%** of the total; `FAILED_AUCTION_RECLAIM` (n=51,215, PF 1.23) is
+   the rest. Nothing else has meaningful n — klines can't reconstruct the
+   order-flow families. Note SR_FLIP's **long side is statically disabled live**.
+4. **Mild decay trend:** 2.39 → 2.00 → 1.59 → 1.28 → 1.56 → 1.73 → 1.11 (Jan and
+   Jul are partial months — don't over-read).
+5. **Fidelity, per the script's own header:** klines-only entries, `Backtester`
+   ≠ live scanner, so **absolute PnL is not truth**. Trust the relative ranking.
+
+### Part 5 — `@SAREXIT` forward-shadow arm shipped DARK (owner-directed)
+
+Owner picked the doctrine-mandated next step: forward-measure the verdict on
+real live signals before proposing anything. New `src/sar_exit_shadow.py` stamps
+a counterfactual **pair** per post-scoring candidate, into its own ledger:
+
+- `SETUP@SARBASE` — the live evaluator geometry (entry / SL / TP1), static
+- `SETUP@SAREXIT` — the same entry, exited by a trailing 15m Parabolic SAR
+
+**Both arms are measured over the identical 192-bar (48h) window**, which is
+Part 4's caveat 2 fixed at the root: the control arm gets exactly the window the
+trail gets, so the comparison the owner has to sign off on is honest from the
+first record. Both divide by the **live** `sl_distance`, so the trail is scored
+in the risk units of the stop it would replace.
+
+The SAR math is a **verbatim port** of the bake-off script's `parabolic_sar` /
+trail walk, and `tests/test_sar_exit_shadow.py` locks the two implementations
+together on shared fixtures (bit-identical series; exit price / MFE / hold to
+1e-12). If they ever drift we would not know which number was lying, and the
+entire value of this arm is that it confirms or kills one we already have.
+
+Supporting change: `src/suppression_audit.py` grew a **method-agnostic**
+trailing-exit concept — an `exit_model` field (defaulted, so every persisted
+record keeps its semantics), a pluggable `trail_classifier` hook, and a
+continuous-R branch in `candidate_outcome`. No SAR knowledge lives in the
+generic module; the next trailing method plugs into the same seam.
+
+**DARK by default** (`SAR_EXIT_SHADOW_ENABLED=false`, tunable
+`sar_exit_shadow_enabled`), observe-only even when on: nothing in dispatch, the
+FSM, or any live exit reads it, and the arms are registered in
+`geometry_ab._VARIANT_SUFFIXES` so the allocator can never *recommend* a
+measurement row. Cost: O(1) in-memory stamps on suppression/emission events
+only, warm in-memory 15m candles, classification batched on the existing 5-min
+audit loop — no network read, no Firestore read, nothing on a hot path.
+Registered a feature-liveness probe (`sar_exit_shadow`) against the same
+upstream that caught the geometry A/B's 25-hour silent death.
+
+**Also removed a scaffold:** `Backtester.run(simulated_ai_score=…)` was threaded
+through two signatures and consumed by nothing — its only consumer was the
+`ai_insight=` kwarg that killed every backtest signal in Part 3. The old test
+asserted only that the parameter was *accepted*, which an inert parameter always
+is, so it passed throughout. Replaced with a regression test that fails if it
+comes back.
+
+### Open / next
+
+1. **Owner: switch the arm on** (`sar_exit_shadow_enabled`) to start
+   accumulating. It stamps nothing until then — that is the dark-first contract,
+   not an oversight.
+2. **Read the pair once both arms clear n≥15 per cell** via
+   `summarize_sar_exit`; thin arms report MEASURING, never a winner. Activation
+   remains a separate dark-first, owner-signed change.
+3. **Promotion criterion still undecided** (Part 4 caveat 1) — deliberately, to
+   be settled on this arm's forward data.
+4. **`#781` liveness alerts are unaddressed**: `mean_revert_emission` (465
+   detections, emitted_total=0) and `range_fade_emission` (1,409 detections,
+   emitted_total=0, context_blocked=0) sustained since 2026-07-24, plus
+   `edge_reconciliation` MOVER_TREND_PULLBACK at −0.38R against a 0.3 bound. Two
+   evaluator paths are detecting thousands of setups and emitting nothing —
+   Session 70's MEAN_REVERT compat-map was supposed to have fixed exactly that.
+
 ---
 
 ## 🟢 SESSION 77 2026-07-23 — Truth-report deep-read → the emission bottleneck attacked dark-first (W5 slice 1 + staleness V2 + MTP perfect-entry study)

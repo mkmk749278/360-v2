@@ -4845,6 +4845,30 @@ class Scanner:
                     )
             except Exception as _tv_exc:
                 fail_open.record("scanner.stamp_tuned_variant", _tv_exc)
+            # Exit-method arm (2026-07-25): forward-measures the bake-off's
+            # SAR-15m verdict on live signals.  Own tunable and own fail-open
+            # site — it must keep measuring if the stop A/B is toggled off, and
+            # its failures must not be attributed to the geometry stamp.
+            try:
+                from src import sar_exit_shadow as _sar
+                if bool(_rt.get("sar_exit_shadow_enabled")):
+                    _sar.stamp_sar_pair(
+                        symbol=symbol,
+                        channel=str(getattr(sig, "channel", "") or ""),
+                        setup_class=str(getattr(sig, "setup_class", "") or ""),
+                        side=_side,
+                        entry=float(getattr(sig, "entry", 0.0) or 0.0),
+                        stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
+                        tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
+                        confidence=float(getattr(sig, "confidence", 0.0) or 0.0),
+                        context_key=str(getattr(sig, "mc_context_key", "") or ""),
+                        regime=str(getattr(sig, "entry_regime", "") or ""),
+                        valid_for_minutes=float(
+                            getattr(sig, "valid_for_minutes", 0.0) or 0.0
+                        ),
+                    )
+            except Exception as _sar_exc:
+                fail_open.record("scanner.stamp_sar_exit_shadow", _sar_exc)
             if not bool(_rt.get("geometry_ab_enabled")):
                 return
             alt_stop = _gab.stamp_geometry_pair(
