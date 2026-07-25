@@ -177,9 +177,42 @@ class TestPairStamping:
 
     def test_cooldown_blocks_the_near_duplicate_rescan(self, tmp_path):
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
-        assert self._stamp(store, now_mono=1000.0) is True
-        assert self._stamp(store, now_mono=1010.0) is False
+        assert self._stamp(store, now_mono=1000.0, provenance=sa.PROVENANCE_SUPPRESSED) is True
+        assert self._stamp(store, now_mono=1010.0, provenance=sa.PROVENANCE_SUPPRESSED) is False
         assert len(store.records()) == 2
+
+    def test_a_suppressed_stamp_can_never_swallow_an_emitted_one(self, tmp_path):
+        """Owner-caught 2026-07-25: one shared cooldown budget per
+        (symbol, setup, side) let a suppressed candidate block a REAL emitted
+        signal minutes later. Suppressed outnumber emissions by orders of
+        magnitude, so the emitted sample — the only population that can justify
+        changing what subscribers receive — was silently, non-randomly thinned.
+        """
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(
+            store, now_mono=1000.0, provenance=sa.PROVENANCE_SUPPRESSED
+        ) is True
+        # Same symbol/setup/side, 10s later, but this one actually went out.
+        assert self._stamp(
+            store, now_mono=1010.0, provenance=sa.PROVENANCE_EMITTED
+        ) is True, "an emitted signal must never be dropped from the measurement"
+        emitted = [r for r in store.records() if r["provenance"] == sa.PROVENANCE_EMITTED]
+        assert len(emitted) == 2      # both arms of the emitted pair
+
+    def test_emitted_stamps_are_never_throttled_against_each_other(self, tmp_path):
+        """Duplicate emissions are already prevented upstream by
+        dispatch_cooldown, so this arm must not second-guess them."""
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        for t in (1000.0, 1005.0, 1010.0):
+            assert self._stamp(store, now_mono=t, provenance=sa.PROVENANCE_EMITTED) is True
+        assert len(store.records()) == 6
+
+    def test_an_emitted_stamp_does_not_consume_the_suppressed_budget(self, tmp_path):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store, now_mono=1000.0, provenance=sa.PROVENANCE_EMITTED) is True
+        assert self._stamp(
+            store, now_mono=1001.0, provenance=sa.PROVENANCE_SUPPRESSED
+        ) is True, "the suppressed arm has its own cooldown keyspace"
 
     def test_bad_geometry_stamps_nothing(self, tmp_path):
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
