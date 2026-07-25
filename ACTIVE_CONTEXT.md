@@ -4,6 +4,91 @@
 
 ---
 
+## 🟡 SESSION 79 2026-07-25 — 7-day free trial for new customers (all four repos, branch `claude/free-trial-new-customers-moo099`)
+
+**Owner ask:** *"offer 7 days free trial for every new customer so that they
+can understand our services."*
+
+**Two decisions taken via AskUserQuestion**, because signals + levels are
+already free here — the paywall is on *automation*, so a trial gives away
+server-side execution on a new user's real capital:
+
+| Decision | Owner's answer |
+|---|---|
+| Tier | **`auto`** — the full product, not a reduced demo |
+| Mechanism | **server-granted, no card** (not a Play trial offer) |
+| Activation | **opt-in** — welcome pop-up, user taps to start |
+
+Play's own free-trial offer was rejected as the mechanism: it only reaches
+users who already got to checkout *with a card*, which is not "every new
+customer." Accepted trade-off: **no auto-conversion at day 7** — the trialist
+must choose to subscribe, which the in-app countdown/upsell exists to drive.
+
+**The design decision that matters is where the grant lives.** Entitlement
+truth is one `(tier, paid_until)` on the user row, and Play verify / RTDN /
+the read-time expiry downgrade all rewrite it wholesale — a trial written
+straight onto that row is erased by the first RTDN. So the grant is banked in
+`user_reward_grants` (`source='signup_trial'`), the same durable ledger the
+referral rewards use, and the composition already wired into every entitlement
+write site picks it up unchanged. Dispatch consumes it the moment the row is
+recomposed; expiry needs no new job (the existing read-time downgrade
+re-resolves from the ledgers). Grants share **one sequential timeline** with
+referral rewards; the trial takes **no cap** (the one-row-per-user PK bounds it
+to once ever, and capping from *now* would shrink the promised week for a user
+holding a referral window).
+
+**Ships DARK, per § Project Phase — two flags, not one:**
+
+| Env | Default | Effect |
+|---|---|---|
+| `SIGNUP_TRIAL_MEASUREMENT_ENABLED` | **true** | Stamps the eligible cohort + offer/claim/conversion funnel from the deploy. Grants nothing. |
+| `SIGNUP_TRIAL_ENABLED` | **false** | User-visible: the offer becomes claimable and a claim writes entitlement. |
+
+The cohort stamp rides the **profile read** — the one path every app session
+hits, including releases that know nothing about trials — which is what lets
+the would-be cohort accumulate while dark. One indexed single-row SELECT the
+first time a user is seen per process, then a bounded in-process set
+short-circuits it; per-foreground path, not a scanner/tick/order loop.
+
+**Observability shipped with it** (a dark change with nowhere to look is
+unfinished): ops → **Trials** reads `GET /api/trial/admin/funnel` and shows
+cohort / offered / claimed / running / converted beside *both* flag states,
+keeps `cohort_dark` permanently separate from `cohort_live`, and renders an
+empty-denominator rate as "not measured yet" rather than a fake 0%.
+
+**Eligibility = new customers only:** never trialled (DB-level PK), no paid
+history (a *lapsed* subscriber counts; a purchase that never completed does
+not — a declined card leaves you a new customer), onboarded, and optionally an
+account-age limit.
+
+> ⚠️ **Open item for the owner before activation.**
+> `SIGNUP_TRIAL_MAX_ACCOUNT_AGE_DAYS` defaults to `0` (no limit), so flipping
+> the offer live hands a trial to **every never-paid free user, including the
+> base that predates this feature** — a one-time burst of accounts able to arm
+> auto-trade. Set the limit first if that isn't wanted. Flagged in the runbook
+> and in the ops panel.
+
+**PRs (all draft, none auto-mergeable — Business Rules change):**
+
+| Repo | PR | Contents |
+|---|---|---|
+| 360-v2 | **#791** | `src/api/signup_trial.py`, `user_trials` ledger + generic `_grant_tier_window_locked`, `/api/trial{,/claim,/admin/funnel}`, config block, `docs/SIGNUP_TRIAL_ACTIVATION.md`, 22 tests |
+| 360ce-ops | **#87** | `/trials` panel — the dark-window read |
+| lumin-app | **#136** | Welcome sheet + countdown banner + Settings re-entry tile |
+| lumin-legal | **#5** | Terms §4b — opt-in, no card, no auto-charge, free of charge ≠ free of risk |
+
+**Verification:** engine `tests/api/` 694 passed with 22 new (the 27 failures
+are the sandbox's pre-existing missing-`firebase_admin` set, identical on
+`main`); ruff clean, no new mypy errors. Ops `pytest -q` 493 passed, zero
+failures. **lumin-app: no Flutter SDK in the session container**, so
+`flutter test` had not run locally at PR time — CI is its first execution.
+
+**Next step is the owner's:** read the dark cohort in ops → Trials over a real
+window, decide the account-age limit, then activate per
+`docs/SIGNUP_TRIAL_ACTIVATION.md`.
+
+---
+
 ## 🟢 SESSION 78 2026-07-25 — Ops bake-off "timeout after 1800s" → the Backtester was Θ(n²)
 
 **Owner ask:** screenshot of the ops Performance tab — exit-method bake-off
