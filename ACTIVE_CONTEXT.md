@@ -50,6 +50,52 @@ mypy clean on `backtester.py` (it was at zero errors — kept there), ruff clean
 **Off money path** — the `Backtester` is an analysis tool; it emits no live
 signals, so this ships normally (no dark flag / shadow window needed).
 
+### Part 2 — the next run 429'd on all 20 symbols (same session)
+
+With compute fixed, the first real run failed fast (`rc=1`) with **HTTP 429 on
+every symbol**, BTCUSDT included — i.e. the IP was already at budget when it
+started, not gradually exhausted. **The speedup unmasked this**: the script used
+to be too slow to reach the fetch wall.
+
+**This was a production hazard, not an analysis annoyance.** The script runs via
+`docker exec` inside the engine container — same IP as live trading — with raw
+`urllib` at a fixed 0.12s pause and `limit=1500`, bypassing every piece of
+rate-limit machinery both repos already have (`src/rate_limiter.py`,
+`src/binance.py`, ops' `_BanCircuit`). Binance escalates sustained 429s to a 418
+IP ban, which would stop live signals and order execution. The box was already
+IP-banned on 2026-07-24 (#778).
+
+The numbers: `src/rate_limiter.py` budgets the engine **2,200 of the 2,400
+weight/min** futures cap, leaving **~200/min** spare. The script was demanding
+~5,000/min — ~25x the headroom.
+
+**Fixed in the script's fetch layer:**
+- **`limit=499` (weight 2), not 1500 (weight 10).** Candles-per-weight peaks at
+  499 (249.5) — the 1500 cap was the *worst* setting available (150). 1.66x more
+  data for the same weight.
+- **`WeightPacer`** — paces to a `--weight-per-min` budget (default 200 = the
+  engine's spare headroom) and **yields when `X-MBX-USED-WEIGHT-1M` shows live
+  traffic near the cap**. That header is server-authoritative and covers all
+  traffic from the IP, so it gives cross-process cooperation the engine's
+  in-process limiter cannot (the script is a separate process).
+- **No bursting.** Requests are spaced `60*weight/per_min`; `src/rate_limiter.py`
+  records that burning the budget in a burst is what trips Binance's hard 429
+  lockout (~42s at 100% usage).
+- **`Retry-After` + exponential backoff**; a 418/403 ban **aborts the run**
+  instead of being retried — retrying into a ban is what deepens it.
+- **On-disk kline cache** (gzip CSV, per symbol+interval, closed candles only).
+  Sweeping exit knobs over the same candles is the whole point, so re-runs now
+  cost ~0 weight and finish in minutes; only the missing gap is fetched.
+
+Cold 6-month/20-pair run: ~5,540 weight ≈ **28 min** at 200/min, so ops'
+`EXIT_BACKTEST_TIMEOUT_SEC` default went **1800 → 3600** (30 min was too tight by
+construction) and the Profit-tab copy now states the real expectation.
+
+Two bugs the new tests caught in my own pacer before it shipped: it **bursted**
+a full minute's budget at each window roll, and its spacing loop **spun forever**
+once the remainder rounded below a float ulp (34M sleeps advancing the clock 24s).
+Both are now pinned by regression tests.
+
 **Open follow-up (ops, not done here):** on timeout the ops runner
 (`360ce-ops:app/data_sources/exit_backtest.py`) kills the process and
 discards both pipes, so the owner got `timeout after 1800s` and nothing else —
