@@ -1024,6 +1024,24 @@ class SignalRouter:
         self._position_lock[signal.symbol] = signal.direction
         self._schedule_persist()
 
+        # Provenance promotion (2026-07-25) — this is the ONLY place a shadow
+        # record becomes EMITTED. The scanner stamps ENQUEUED when the queue
+        # accepts a candidate, but every gate above this line can still drop
+        # it, so "queued" and "sent" are different populations and only this
+        # one can justify changing what subscribers receive. Measurement-only:
+        # re-labels a ledger row, touches no exit, FSM or dispatch behaviour.
+        try:
+            from src import sar_exit_shadow as _sar
+            _sar.promote_to_emitted(
+                symbol=signal.symbol,
+                setup_class=str(getattr(signal, "setup_class", "") or ""),
+                side=signal.direction.value,
+                entry=float(getattr(signal, "entry", 0.0) or 0.0),
+            )
+        except Exception as _prom_exc:
+            from src import fail_open
+            fail_open.record("router.promote_sar_provenance", _prom_exc)
+
         # FCM push to the app's `signals` topic — fire-and-forget, off the
         # dispatch path (push_notifications never blocks and never raises).
         push_signal_published(signal)

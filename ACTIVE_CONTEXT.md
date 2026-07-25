@@ -4,6 +4,78 @@
 
 ---
 
+## 🟢 SESSION 80 2026-07-25 — "Emitted" never meant emitted: enqueue ≠ dispatch (~30x inflation)
+
+**Owner ask:** four SAR numbers that should agree and didn't — "actual Emitted
+signals to users about 4 to 6 … SAR Emitted about 100 … actual signals 300 …
+SAR Dark 700 plus … no SAR is closed yet".
+
+**Three of the four reconciled cleanly. The fourth was a real bug.**
+
+| Ops showed | Reality |
+|---|---|
+| "Emitted to live (98)" | **90 distinct candidates reached the QUEUE. 3 reached the feed.** |
+| "All (300)" | 300-row page cap; 246 distinct setups (202 suppressed + 98 "emitted") |
+| "760 arms stamped" | 380 trades × 2 arms — reconciles with the 300 cap, not a discrepancy |
+| app shows 4–6 | correct: 1 ACTIVE + 4 TP1_HIT + 5 PROFIT_LOCKED; **50 real signals in 4.2 days** |
+
+**Root cause.** `scanner/__init__.py` stamped `PROVENANCE_EMITTED` immediately
+after `signal_queue.put()` succeeded, with a comment asserting *"the signal
+really did go out."* **It had not.** `SignalRouter._process` consumes that
+queue and applies a whole second gate layer — correlation lock, per-symbol and
+per-channel cooldown, per-channel concurrent cap (default 5), correlation group
+limit, global same-direction throttle, TP/SL sanity, staleness — and drops most
+of what it dequeues. **Enqueue is not dispatch.**
+
+The contamination was **not random**: the old "emitted" set was **81% SHORT**
+against a **52% SHORT** real feed, because the same-direction throttle rejected
+the short pile-up *after* it had been stamped emitted. Per
+`sar_exit_shadow.py`'s own docstring, the emitted sample is "the only population
+that can justify changing what users receive" — so every exit decision from it
+would have been made on signals users never received. The same
+`_stamp_geometry_ab` site feeds the `@FIXED`/`@ATR` arms, so they carried it too.
+
+**Compounding defect.** Earlier the same day a session had "fixed" this symptom
+by making EMITTED **bypass the stamp cooldown**, reasoning "an emission is a
+discrete dispatch event, duplicates prevented upstream by dispatch_cooldown."
+That premise was false *because* the stamp was at enqueue — so the bypass let
+every 15s re-detection stamp as emitted and **amplified** the mismatch (one
+WLFIUSDT setup produced 5 "emitted" rows at an identical entry in 6.7h; EPICUSDT
+14 rows, SLXUSDT 13). Bypass removed; the premise is now true for promotion.
+
+**Fix — three provenance states, and only the router writes the last one:**
+`suppressed` (scanner gate killed it) · `enqueued` (passed the scanner, queue
+took it, router dropped it — nobody saw it) · `emitted` (router confirmed
+delivery). `PROVENANCE_EMITTED` is written **only** by
+`sar_exit_shadow.promote_to_emitted`, called from the router's
+`# Register only after confirmed delivery` point. Pre-fix records are relabelled
+`enqueued` on load (truthful, and fails safe by removing them from the emitted
+sample rather than inventing membership).
+
+**Not dark-flagged, deliberately.** This is a *measurement* correction: it
+changes what gets recorded, not which signals emit, how they score, or any
+exit / FSM / dispatch behaviour. No subscriber sees any difference, so there is
+no user-visible effect to gate — and per § Project Phase, shipping a
+measurement default-OFF is the wrong reading of the rule. It ships **ON**, with
+its ops surface in the same change (labels corrected to DELIVERED / QUEUED /
+SUPPRESSED, and the new queued stage separately filterable so the routing caps'
+cost is itself measurable).
+
+**Answered for the owner:** "no SAR closed" is arithmetic, not breakage — the
+arm needs 48h and the oldest stamp was 6.7h old — and `RUNNING` is a
+measurement window, **not** an open position, so nothing needs keeping
+activated. Performance → Dark signals *does* resolve SAR (8 rows, holds
+5–235 min) because it replays a bounded forward window while the
+`@SARBASE`/`@SAREXIT` arm waits 48h: two pipelines, different rules, both
+labelled "SAR" — presentation fault, numbers fine.
+
+**Not yet trustworthy:** the emitted sample restarts from zero today. Mean SAR
+3.02% vs real 1.99% on the 8 resolved dark rows is n=8 and counterfactuals run
+optimistic (~0.38R on MTP) — **not evidence of edge.** Wait for a fresh window
+of genuinely-delivered signals before judging the SAR exit.
+
+---
+
 ## 🟡 SESSION 79 2026-07-25 — 7-day free trial for new customers (all four repos, branch `claude/free-trial-new-customers-moo099`)
 
 **Owner ask:** *"offer 7 days free trial for every new customer so that they

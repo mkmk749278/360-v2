@@ -265,6 +265,18 @@ measurement decide emission. Full description: `OWNER_BRIEF.md § 3.11`.
   and silently inflated the ops rollup for a week.
 - **Counterfactuals are optimistic** (~0.38R measured on MTP). Never quote a
   counterfactual R as an expected live result.
+- **"Emitted" means DELIVERED, and only the router knows that.** Provenance has
+  three states, not two: `suppressed` (a scanner gate killed it), `enqueued` (it
+  passed every scanner gate and `signal_queue.put` accepted it), `emitted` (the
+  router confirmed delivery). Enqueue is **not** dispatch — `SignalRouter._process`
+  applies its own layer (correlation lock, per-symbol/per-channel cooldown,
+  per-channel concurrency cap, correlation group limit, global same-direction
+  throttle, TP/SL sanity, staleness) and drops most of what it dequeues. Stamping
+  `emitted` at the enqueue site inflated the only population allowed to justify a
+  live change by ~30x, non-randomly (81% SHORT vs a 52% SHORT real feed), and the
+  ops page read "Emitted to live (98)" for a window with 3 real signals
+  (owner-caught 2026-07-25). `PROVENANCE_EMITTED` is written **only** by
+  `sar_exit_shadow.promote_to_emitted`, from the router, after confirmed delivery.
 - **Zero emissions ≠ broken.** Fully gated + measured-negative is the gates working;
   fully gated + measured-positive is money on the table. `gated_path_verdict` tells
   them apart — don't "fix" the first case.
