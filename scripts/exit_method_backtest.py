@@ -52,16 +52,19 @@ from __future__ import annotations
 
 import argparse
 import csv
+import gzip
 import json
 import math
 import os
 import statistics
 import sys
 import time
+import urllib.error
 import urllib.request
+from collections import deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Deque, Dict, List, Optional, Sequence, Tuple
 
 # --------------------------------------------------------------------------- #
 # Universe & setup taxonomy
@@ -96,8 +99,41 @@ _TF_MIN: Dict[str, int] = {
     "1m": 1, "3m": 3, "5m": 5, "15m": 15, "30m": 30, "1h": 60, "2h": 120, "4h": 240,
 }
 _MINUTE_MS = 60_000
-_MAX_LIMIT = 1500  # Binance klines hard cap per request.
+_MAX_LIMIT = 1500  # Binance klines hard cap per request (weight 10 — see below).
 _FAPI = "https://fapi.binance.com/fapi/v1/klines"
+
+# --- Rate-limit budget (2026-07-25) ---------------------------------------- #
+# This script runs via `docker exec` INSIDE the engine container, so it shares
+# the production IP with live trading — but as a separate *process*, so it
+# cannot see the engine's in-process limiter (src/rate_limiter.py). It must
+# therefore stay inside the headroom that limiter deliberately leaves free.
+#
+# Binance klines weight tiers (exact, mirrored from src/binance.fetch_klines):
+#     limit < 100 -> 1 | 100..499 -> 2 | 500..1000 -> 5 | > 1000 -> 10
+# So candles-per-weight peaks at limit=499 (249.5), NOT at the 1500 cap (150).
+# Paging at 499 buys 1.66x more data for the same weight.
+_PAGE_LIMIT = 499
+_PAGE_WEIGHT = 2
+
+# Binance's per-IP futures cap. src/rate_limiter.py budgets the engine 2,200 of
+# it, so ~200/min is the spare this job may use without touching live trading.
+_FUTURES_WEIGHT_CAP = 2_400
+_DEFAULT_WEIGHT_PER_MIN = 200
+
+# When the IP-wide used-weight header says live traffic is this deep into the
+# cap, stand down entirely — the money path outranks the analysis job.
+_YIELD_ABOVE_USED_WEIGHT = 2_000
+_YIELD_SLEEP_SEC = 10.0
+
+# Transient HTTP the fetch retries (with Retry-After when Binance sends it).
+_RETRY_STATUSES = frozenset({429, 500, 502, 503, 504})
+# A ban is NOT retryable — hammering it is what deepens the ban (cf. #778).
+_BAN_STATUSES = frozenset({403, 418})
+_MAX_ATTEMPTS = 5
+
+
+class BinanceBanned(RuntimeError):
+    """The IP is banned/blocked — abort the whole run rather than hammer it."""
 
 # The exit methods compared, in report order. "engine" is the backtester's own
 # realised pnl (baseline); the other three are trailing-only replays.
@@ -515,25 +551,190 @@ def per_regime_pf(records: Sequence[SignalRecord], method: str) -> Dict[str, Tup
 # --------------------------------------------------------------------------- #
 # Kline fetch (stdlib urllib; uses env proxies automatically). Run on the VPS.
 # --------------------------------------------------------------------------- #
-def _get(url: str, timeout: float = 30.0) -> Any:
+Row = Tuple[int, float, float, float, float, float]
+
+
+class WeightPacer:
+    """Self-throttle to a weight/min budget, and yield to live trading.
+
+    Two mechanisms, because one is not enough here:
+
+    * **Own budget** — a rolling-60s token bucket capped at ``per_min``. This is
+      what keeps the job inside the headroom ``src/rate_limiter.py`` leaves free
+      (it budgets the engine 2,200 of Binance's 2,400/min futures cap).
+    * **Cooperation** — the engine's limiter lives in another process, so its
+      counter is invisible here. But ``X-MBX-USED-WEIGHT-1M`` on every response
+      is server-authoritative and covers *all* traffic from this IP, engine
+      included. Reading it lets this job notice live trading eating the budget
+      and stand down, without any shared memory.
+    """
+
+    def __init__(self, per_min: int = _DEFAULT_WEIGHT_PER_MIN, *,
+                 yield_above: int = _YIELD_ABOVE_USED_WEIGHT,
+                 now: Optional[Any] = None, sleep: Optional[Any] = None) -> None:
+        self.per_min = max(_PAGE_WEIGHT, per_min)
+        self.yield_above = yield_above
+        # Clock injected so the throttling logic is testable without patching the
+        # global time module (and without real multi-second sleeps in CI).
+        self._now = now or time.monotonic
+        self._sleep = sleep or time.sleep
+        self._spent: Deque[Tuple[float, int]] = deque()
+        self._last: Optional[float] = None
+        self.waited_sec = 0.0
+        self.yielded_sec = 0.0
+
+    def _used(self, now: float) -> int:
+        while self._spent and now - self._spent[0][0] >= 60.0:
+            self._spent.popleft()
+        return sum(w for _, w in self._spent)
+
+    def spend(self, weight: int) -> None:
+        """Block until ``weight`` fits — smoothly, never in a burst.
+
+        Two guards. The **spacing** guard is the important one: a plain token
+        bucket would let the job fire a whole minute's budget instantly and then
+        idle, and ``src/rate_limiter.py`` records that burning the budget in a
+        burst is precisely what trips Binance's hard 429 lockout (~42s at 100%
+        usage) — which is why the engine's own limiter carries burst protection.
+        Spacing requests at ``60 * weight / per_min`` spends the same budget as a
+        flat trickle. The **window** guard then backstops it against drift.
+        """
+        gap = 60.0 * weight / float(self.per_min)
+        now = self._now()
+
+        # Spacing. Computed against the *scheduled* slot, then advanced to it —
+        # never re-measured in a loop. Looping on `now - last < gap` spins
+        # forever once the remainder rounds below a float ulp.
+        if self._last is not None:
+            target = self._last + gap
+            if now < target:
+                self.nap(target - now)
+                now = max(self._now(), target)
+
+        # Window backstop. Each pass sleeps >= 0.05s, so it always terminates.
+        while self._spent and self._used(now) + weight > self.per_min:
+            nap = min(60.0, max(0.05, 60.0 - (now - self._spent[0][0]) + 0.01))
+            self.nap(nap)
+            now = max(self._now(), now + nap)
+
+        self._spent.append((now, weight))
+        self._last = now
+
+    def nap(self, seconds: float) -> None:
+        """Sleep on the pacer's clock, counting it as throttled time."""
+        self._sleep(seconds)
+        self.waited_sec += seconds
+
+    def observe(self, used_weight: Optional[int]) -> None:
+        """React to IP-wide usage — back off when live traffic is near the cap."""
+        if used_weight is None or used_weight < self.yield_above:
+            return
+        print(f"[pace] IP used-weight {used_weight}/{_FUTURES_WEIGHT_CAP} — "
+              f"yielding {_YIELD_SLEEP_SEC:g}s to live traffic", file=sys.stderr)
+        self._sleep(_YIELD_SLEEP_SEC)
+        self.yielded_sec += _YIELD_SLEEP_SEC
+
+
+def _as_int(v: Optional[str]) -> Optional[int]:
+    try:
+        return int(v) if v is not None else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _get(url: str, timeout: float = 30.0) -> Tuple[Any, Optional[int]]:
+    """GET returning (payload, IP-wide used weight from the response header)."""
     req = urllib.request.Request(url, headers={"User-Agent": "exit-backtest/1"})
     with urllib.request.urlopen(req, timeout=timeout) as resp:
-        return json.loads(resp.read().decode("utf-8"))
+        payload = json.loads(resp.read().decode("utf-8"))
+        used = _as_int(resp.headers.get("X-MBX-USED-WEIGHT-1M")
+                       or resp.headers.get("X-MBX-USED-WEIGHT"))
+        return payload, used
 
 
-def fetch_klines(
-    symbol: str, interval: str, start_ms: int, end_ms: int, *, pause: float = 0.12
-) -> List[Tuple[int, float, float, float, float, float]]:
+def _get_paced(url: str, pacer: WeightPacer, *, weight: int = _PAGE_WEIGHT) -> Any:
+    """One paced, retrying request. Raises BinanceBanned on a ban (never retries it)."""
+    delay = 1.0
+    for attempt in range(1, _MAX_ATTEMPTS + 1):
+        pacer.spend(weight)
+        try:
+            payload, used = _get(url)
+            pacer.observe(used)
+            return payload
+        except urllib.error.HTTPError as exc:
+            body = ""
+            try:
+                body = exc.read().decode("utf-8", errors="replace")[:400]
+            except Exception:  # noqa: BLE001 — diagnostics only
+                pass
+            if exc.code in _BAN_STATUSES:
+                raise BinanceBanned(
+                    f"HTTP {exc.code} from Binance — this IP is blocked/banned. "
+                    f"Aborting so we do not deepen it. {body}") from exc
+            if exc.code not in _RETRY_STATUSES or attempt == _MAX_ATTEMPTS:
+                raise
+            wait = _as_int(exc.headers.get("Retry-After")) if exc.headers else None
+            nap = float(wait) if wait else delay
+            print(f"[pace] HTTP {exc.code} — retry {attempt}/{_MAX_ATTEMPTS} "
+                  f"in {nap:g}s", file=sys.stderr)
+            pacer.nap(nap)
+            delay = min(30.0, delay * 2)
+        except urllib.error.URLError:
+            if attempt == _MAX_ATTEMPTS:
+                raise
+            pacer.nap(delay)
+            delay = min(30.0, delay * 2)
+    raise RuntimeError("unreachable")
+
+
+# --- On-disk kline cache ---------------------------------------------------- #
+# Re-runs are the norm here: the whole point is sweeping exit methods and knobs
+# over the SAME candles. Fetching 1.38M candles (~5,540 weight) again for every
+# sweep is what turns a cheap question into a rate-limit incident, so closed
+# candles are cached per (symbol, interval) and only the gap is fetched.
+def _cache_path(cache_dir: str, symbol: str, interval: str) -> str:
+    return os.path.join(cache_dir, f"{symbol}_{interval}.csv.gz")
+
+
+def _load_cache(path: str) -> List[Row]:
+    try:
+        with gzip.open(path, "rt", newline="") as fh:
+            out: List[Row] = []
+            for r in csv.reader(fh):
+                try:
+                    out.append((int(r[0]), float(r[1]), float(r[2]),
+                                float(r[3]), float(r[4]), float(r[5])))
+                except (IndexError, TypeError, ValueError):
+                    continue
+            return out
+    except (OSError, EOFError, gzip.BadGzipFile):
+        return []
+
+
+def _save_cache(path: str, rows: Sequence[Row]) -> None:
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = f"{path}.tmp"
+        with gzip.open(tmp, "wt", newline="") as fh:
+            csv.writer(fh).writerows(rows)
+        os.replace(tmp, path)
+    except OSError as exc:
+        print(f"[warn] kline cache write failed ({exc}); continuing", file=sys.stderr)
+
+
+def _fetch_range(symbol: str, interval: str, start_ms: int, end_ms: int,
+                 pacer: WeightPacer) -> List[Row]:
     """Paginated (open_ms, o, h, l, c, volume) for [start_ms, end_ms]. Ascending."""
-    out: List[Tuple[int, float, float, float, float, float]] = []
+    step_ms = _TF_MIN[interval] * _MINUTE_MS
+    out: List[Row] = []
     cursor = start_ms
-    # Bound the loop: 6mo of 5m is ~52k candles = ~35 pages; cap generously.
-    for _ in range(400):
+    # 6mo of 5m at 499/page is ~104 pages; cap generously but never unbounded.
+    for _ in range(2000):
         if cursor > end_ms:
             break
         url = (f"{_FAPI}?symbol={symbol}&interval={interval}"
-               f"&startTime={cursor}&endTime={end_ms}&limit={_MAX_LIMIT}")
-        rows = _get(url)
+               f"&startTime={cursor}&endTime={end_ms}&limit={_PAGE_LIMIT}")
+        rows = _get_paced(url, pacer)
         if not isinstance(rows, list) or not rows:
             break
         for row in rows:
@@ -542,13 +743,45 @@ def fetch_klines(
                             float(row[3]), float(row[4]), float(row[5])))
             except (IndexError, TypeError, ValueError):
                 continue
-        last_open = int(rows[-1][0])
-        cursor = last_open + _MINUTE_MS
-        if len(rows) < _MAX_LIMIT:
+        if len(rows) < _PAGE_LIMIT:
             break
-        if pause:
-            time.sleep(pause)
+        cursor = int(rows[-1][0]) + step_ms
     return out
+
+
+def fetch_klines(
+    symbol: str, interval: str, start_ms: int, end_ms: int, *,
+    pacer: Optional[WeightPacer] = None, cache_dir: Optional[str] = None,
+) -> List[Row]:
+    """Closed candles for [start_ms, end_ms], served from cache where possible."""
+    pacer = pacer or WeightPacer()
+    step_ms = _TF_MIN[interval] * _MINUTE_MS
+    # Never cache the still-forming bar — it would freeze a partial candle.
+    closed_end = min(end_ms, int(time.time() * 1000) - step_ms)
+
+    cached: List[Row] = _load_cache(_cache_path(cache_dir, symbol, interval)) \
+        if cache_dir else []
+    merged: Dict[int, Row] = {r[0]: r for r in cached}
+
+    if cached:
+        head, tail = cached[0][0], cached[-1][0]
+        gaps = []
+        if start_ms < head - step_ms:          # missing older history
+            gaps.append((start_ms, head - step_ms))
+        if closed_end > tail + step_ms:        # missing newer candles
+            gaps.append((tail + step_ms, closed_end))
+    else:
+        gaps = [(start_ms, closed_end)] if closed_end > start_ms else []
+
+    for g_start, g_end in gaps:
+        for r in _fetch_range(symbol, interval, g_start, g_end, pacer):
+            merged[r[0]] = r
+
+    rows = [merged[k] for k in sorted(merged)]
+    if cache_dir and gaps:
+        _save_cache(_cache_path(cache_dir, symbol, interval),
+                    [r for r in rows if r[0] <= closed_end])
+    return [r for r in rows if start_ms <= r[0] <= end_ms]
 
 
 # --------------------------------------------------------------------------- #
@@ -781,6 +1014,15 @@ def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
                    help="cap on exit-TF bars the trail may run (0 = unbounded)")
     p.add_argument("--out-dir", type=str, default="",
                    help="output dir (default scripts/out/exit_backtest_<ts>)")
+    p.add_argument("--weight-per-min", type=int, default=_DEFAULT_WEIGHT_PER_MIN,
+                   help="Binance request-weight/min this job may use. Default "
+                        f"{_DEFAULT_WEIGHT_PER_MIN} = the headroom the engine's "
+                        "limiter leaves free (it budgets 2,200 of 2,400). Raising "
+                        "this eats into live trading's budget on the same IP.")
+    p.add_argument("--cache-dir", type=str, default="/data/exit_backtest/klines",
+                   help="on-disk kline cache; re-runs then cost ~0 weight")
+    p.add_argument("--no-cache", action="store_true",
+                   help="ignore the kline cache and refetch everything")
     return p.parse_args(argv)
 
 
@@ -800,14 +1042,30 @@ def main(argv: Optional[List[str]] = None) -> int:
     now_ms = int(time.time() * 1000)
     start_ms = now_ms - int(args.months * 30 * 24 * 3600 * 1000)
 
+    pacer = WeightPacer(args.weight_per_min)
+    cache_dir = None if args.no_cache else (args.cache_dir or None)
+    print(f"[pace] budget {pacer.per_min} weight/min "
+          f"(IP cap {_FUTURES_WEIGHT_CAP}, engine reserves 2,200); "
+          f"page limit {_PAGE_LIMIT} (weight {_PAGE_WEIGHT}); "
+          f"cache {cache_dir or 'OFF'}", file=sys.stderr)
+
     all_records: List[SignalRecord] = []
     for sym in universe:
         try:
-            entry_rows = fetch_klines(sym, args.entry_tf, start_ms, now_ms)
+            entry_rows = fetch_klines(sym, args.entry_tf, start_ms, now_ms,
+                                      pacer=pacer, cache_dir=cache_dir)
             if args.exit_tf == args.entry_tf:
                 exit_rows = entry_rows
             else:
-                exit_rows = fetch_klines(sym, args.exit_tf, start_ms, now_ms)
+                exit_rows = fetch_klines(sym, args.exit_tf, start_ms, now_ms,
+                                         pacer=pacer, cache_dir=cache_dir)
+        except BinanceBanned as exc:
+            # Every remaining symbol would hit the same wall; continuing is what
+            # turns a rate-limit into a longer ban on the live trading IP.
+            print(f"[error] {exc}", file=sys.stderr)
+            print("[error] aborting run — retry once the ban window clears",
+                  file=sys.stderr)
+            return 2
         except Exception as exc:  # noqa: BLE001 — per-symbol degrade, keep going
             print(f"[warn] {sym}: fetch failed ({type(exc).__name__}: {exc}); skipping",
                   file=sys.stderr)
@@ -818,8 +1076,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                   file=sys.stderr)
             continue
         recs = build_records_for_symbol(sym, entry_rows, exit_rows, knobs)
-        print(f"[ok] {sym}: {len(recs)} price-action entries", file=sys.stderr)
+        # flush: this is the only progress a long run emits, and the ops runner
+        # shows it live — buffering it defeats the purpose.
+        print(f"[ok] {sym}: {len(recs)} price-action entries", file=sys.stderr,
+              flush=True)
         all_records.extend(recs)
+
+    print(f"[pace] done — {pacer.waited_sec:.0f}s throttled, "
+          f"{pacer.yielded_sec:.0f}s yielded to live traffic", file=sys.stderr)
 
     if not all_records:
         print("[error] no entries generated — check universe / window / Binance "
