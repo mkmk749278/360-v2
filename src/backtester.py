@@ -228,6 +228,101 @@ def _compute_indicators(candles: Dict) -> Dict:
     return ind
 
 
+def _ffill_last_valid(a: "np.ndarray") -> "np.ndarray":
+    """``out[j]`` = last non-NaN value of ``a`` at or before ``j`` (NaN if none).
+
+    Reproduces the ``valid = a[~np.isnan(a)]; valid[-1]`` idiom of
+    :func:`_compute_indicators` — which reads the last *valid* value in the
+    prefix, not necessarily the value at the prefix end — as an O(n) tape.
+    """
+    n = len(a)
+    if n == 0:
+        return a
+    idx = np.where(~np.isnan(a), np.arange(n), -1)
+    idx = np.maximum.accumulate(idx)
+    out = np.full(n, np.nan, dtype=float)
+    seen = idx >= 0
+    out[seen] = a[idx[seen]]
+    return out
+
+
+class _IndicatorTape:
+    """Indicators for one timeframe, computed once and read back by index.
+
+    WHY THIS EXISTS (2026-07-25).  ``_backtest_channel`` used to call
+    ``_compute_indicators(window[:i])`` on *every* candle, recomputing all eight
+    indicators over the whole prefix each time.  That makes a run Theta(n^2):
+    measured at 14.6 us * n^2, i.e. ~11 hours for a single symbol over 6 months
+    of 5m bars, and ~219 hours for the 20-pair universe — which is why the ops
+    exit-method bake-off could only ever report "timeout after 1800s".  Indicator
+    recomputation was ~99% of that wall time.
+
+    Every indicator involved is *causal*, so computing each one once over the
+    full series and reading index ``i-1`` is **bit-identical** to recomputing it
+    over ``[:i]`` and reading ``[-1]`` (verified to 0.0 relative error across all
+    eight), while turning the loop into O(n).  Same numbers, ~100x less work.
+    """
+
+    __slots__ = ("n", "_ema9", "_ema21", "_ema200", "_adx", "_atr", "_rsi",
+                 "_bb_u", "_bb_m", "_bb_l", "_mom")
+
+    def __init__(self, candles: Dict) -> None:
+        c = np.asarray(candles.get("close", []), dtype=float)
+        h = np.asarray(candles.get("high", []), dtype=float)
+        lo = np.asarray(candles.get("low", []), dtype=float)
+        self.n = len(c)
+
+        # Each guarded by the same length gate _compute_indicators applies, so a
+        # series too short for an indicator never computes it at all.
+        self._ema9 = ema(c, 9) if self.n >= 21 else None
+        self._ema21 = ema(c, 21) if self.n >= 21 else None
+        self._ema200 = ema(c, 200) if self.n >= 200 else None
+        self._adx = _ffill_last_valid(adx(h, lo, c, 14)) if self.n >= 30 else None
+        self._atr = _ffill_last_valid(atr(h, lo, c, 14)) if self.n >= 15 else None
+        self._rsi = _ffill_last_valid(rsi(c, 14)) if self.n >= 15 else None
+        if self.n >= 20:
+            self._bb_u, self._bb_m, self._bb_l = bollinger_bands(c, 20)
+        else:
+            self._bb_u = self._bb_m = self._bb_l = None
+        self._mom = momentum(c, 3) if self.n >= 4 else None
+
+    @staticmethod
+    def _opt(arr: "Optional[np.ndarray]", j: int) -> Optional[float]:
+        """``float(arr[j])`` unless it is NaN — mirrors the ``else None`` arms."""
+        if arr is None:
+            return None
+        v = arr[j]
+        return None if np.isnan(v) else float(v)
+
+    def at(self, i: int) -> Dict:
+        """Indicator dict as of a prefix of length ``i`` (i.e. ``candles[:i]``)."""
+        # A window slice can be shorter than the series it came from; the gates
+        # below must see the *window* length, exactly as _compute_indicators did.
+        m = min(i, self.n)
+        if m <= 0:
+            return {}
+        j = m - 1
+        ind: Dict = {}
+        if m >= 21 and self._ema9 is not None and self._ema21 is not None:
+            ind["ema9_last"] = float(self._ema9[j])
+            ind["ema21_last"] = float(self._ema21[j])
+        if m >= 200 and self._ema200 is not None:
+            ind["ema200_last"] = float(self._ema200[j])
+        if m >= 30 and self._adx is not None:
+            ind["adx_last"] = self._opt(self._adx, j)
+        if m >= 15 and self._atr is not None:
+            ind["atr_last"] = self._opt(self._atr, j)
+        if m >= 15 and self._rsi is not None:
+            ind["rsi_last"] = self._opt(self._rsi, j)
+        if m >= 20 and self._bb_u is not None:
+            ind["bb_upper_last"] = self._opt(self._bb_u, j)
+            ind["bb_mid_last"] = self._opt(self._bb_m, j)
+            ind["bb_lower_last"] = self._opt(self._bb_l, j)
+        if m >= 4 and self._mom is not None:
+            ind["momentum_last"] = self._opt(self._mom, j)
+        return ind
+
+
 def _simulate_trade(
     signal: Signal,
     future_candles: Dict,
@@ -956,6 +1051,14 @@ class Backtester:
             ai_label = "Neutral"
         ai_insight = {"label": ai_label, "summary": "", "score": simulated_ai_score}
 
+        # Indicators are causal, so compute each one ONCE per timeframe here and
+        # read it back by index inside the loop. Recomputing them per candle over
+        # the growing prefix was Theta(n^2) and ~99% of this function's runtime
+        # (see _IndicatorTape). Same values, O(n) work.
+        tapes: Dict[str, _IndicatorTape] = {
+            tf: _IndicatorTape(cd) for tf, cd in candles_by_tf.items()
+        }
+
         # Track open simulated positions (candle index when each trade closes)
         open_positions: List[int] = []
 
@@ -973,10 +1076,10 @@ class Backtester:
                     for k, v in cd.items()
                 }
 
-            # Compute indicators for each timeframe
+            # Indicators for each timeframe, read off the pre-computed tape.
             indicators: Dict[str, Dict] = {}
             for tf, cd in window.items():
-                indicators[tf] = _compute_indicators(cd)
+                indicators[tf] = tapes[tf].at(len(cd.get("close", [])))
 
             # SMC detection
             smc_result = self._smc_detector.detect(symbol, window, [])

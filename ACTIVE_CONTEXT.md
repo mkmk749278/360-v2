@@ -4,6 +4,61 @@
 
 ---
 
+## 🟢 SESSION 78 2026-07-25 — Ops bake-off "timeout after 1800s" → the Backtester was Θ(n²)
+
+**Owner ask:** screenshot of the ops Performance tab — exit-method bake-off
+`FAILED rc=None / timeout after 1800s`.
+
+**The timeout was the symptom, not the bug.** `Backtester._backtest_channel`
+called `_compute_indicators(window[:i])` on *every* candle, recomputing all
+eight indicators over the whole growing prefix each time. Measured on this
+box: cost is a clean **14.6 µs × n²** (T/n² constant to 3 significant figures
+across n = 500…3000), i.e.
+
+| window | per symbol | 20-pair universe |
+|---|---|---|
+| 6mo × 5m (n=51,840) | **656 min** | **219 hours** |
+
+The ops job allows 1800 s. It was short by ~440×, so **no timeout value could
+ever have made it pass** — and indicator recomputation was ~99% of the wall
+time (an indicators-only microbenchmark reproduced 649 of the 656 min).
+
+**Fix — `_IndicatorTape` (`src/backtester.py`).** Every indicator involved is
+*causal*, so each is now computed **once** over the full series and read back
+by index instead of recomputed per prefix. Verified **bit-identical** (0.0
+relative error on all eight; 166 prefixes incl. every length gate), so no
+backtest number anywhere moves — `run_monte_carlo`, `run_per_pair_sweep` and
+`run_regime_stress_test` all ride the same loop and are unaffected in output.
+
+Post-fix the loop is **linear** (~0.31 ms/candle at every n measured):
+
+| | before | after |
+|---|---|---|
+| 6mo × 5m, one symbol | 656 min | **16.5 s** |
+| 20-pair universe (compute) | 219 h | **~5.5 min** |
+
+Comfortably inside the existing 1800 s ops timeout — the bake-off can now
+actually answer the question it was written for (does SAR-15m's PF 1.51
+survive on thousands of trades, or was it one RIFUSDT trade).
+
+**Guarded against regression** — `tests/test_backtester_indicator_tape.py`
+locks equivalence at every length gate *and* asserts **structurally** (by
+counting indicator calls, not by timing, so it can't flake in CI) that
+indicator work does not grow with candle count. Full suite: 7077 passed,
+mypy clean on `backtester.py` (it was at zero errors — kept there), ruff clean.
+
+**Off money path** — the `Backtester` is an analysis tool; it emits no live
+signals, so this ships normally (no dark flag / shadow window needed).
+
+**Open follow-up (ops, not done here):** on timeout the ops runner
+(`360ce-ops:app/data_sources/exit_backtest.py`) kills the process and
+discards both pipes, so the owner got `timeout after 1800s` and nothing else —
+the script's per-symbol `[ok] SYM: N entries` progress on stderr is lost
+exactly when it is most wanted. Streaming stderr into a ring buffer so the
+failure card can show the tail would make the next long-run failure legible.
+
+---
+
 ## 🟢 SESSION 77 2026-07-23 — Truth-report deep-read → the emission bottleneck attacked dark-first (W5 slice 1 + staleness V2 + MTP perfect-entry study)
 
 **Owner ask:** read the truth report + strategy lab — "what's still missing,
