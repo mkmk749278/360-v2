@@ -204,6 +204,7 @@ Binance REST API
 | Stop-geometry A/B (shadow) | `src/geometry_ab.py` |
 | Tuned shadow variants (`@TUNED`) | `src/tuned_variants.py` |
 | Dispatch-staleness V2 (geometry-aware, `@DSV2` shadow) | `src/staleness_v2.py` |
+| SAR exit shadow arm (`@SARBASE`/`@SAREXIT`, dark) | `src/sar_exit_shadow.py` |
 
 ---
 

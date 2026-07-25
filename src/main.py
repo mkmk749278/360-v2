@@ -1684,6 +1684,63 @@ class CryptoSignalEngine:
                 "close": list(closes[-n_candles:]),
             }
 
+        def fetch_ohlc_15m_since(symbol: str, since_ts: float):
+            """15m OHLC for the SAR exit ledger, with a pre-entry warmup prefix.
+
+            A trailing exit is only meaningful on the bars it trails, so this
+            ledger reads 15m rather than the 1m the static audits use.  Two
+            things differ from ``fetch_ohlc_since``:
+
+            * **Warmup prefix** — ``SAR_EXIT_SHADOW_WARMUP_BARS`` bars *before*
+              the stamp are included so the SAR has converged by the time the
+              trade starts, and ``entry_index`` marks the trade's first bar.
+              Both the trail walk and the static control arm slice from there.
+            * **Hard post-entry cap** — the window is capped at
+              ``SAR_EXIT_SHADOW_WINDOW_BARS``, the same bound the trail walk
+              uses.  Without it a backlogged record would hand the control arm
+              a longer window than the trail and quietly re-introduce the
+              hold-time confound this pair exists to remove.
+
+            Reads the already-warm in-memory store: no network, no Firestore.
+            """
+            from config import (
+                SAR_EXIT_SHADOW_BAR_MINUTES,
+                SAR_EXIT_SHADOW_WARMUP_BARS,
+                SAR_EXIT_SHADOW_WINDOW_BARS,
+            )
+
+            candles = self.data_store.get_candles(symbol, "15m")
+            if not candles:
+                return None
+            highs = candles.get("high")
+            lows = candles.get("low")
+            closes = candles.get("close")
+            opens = candles.get("open")
+            if highs is None or lows is None or closes is None:
+                return None
+            if len(highs) == 0 or len(lows) == 0 or len(closes) == 0:
+                return None
+            bar_sec = max(1.0, float(SAR_EXIT_SHADOW_BAR_MINUTES) * 60.0)
+            elapsed_sec = max(0.0, time.time() - since_ts)
+            n_post = int(elapsed_sec // bar_sec) + 1
+            n_post = min(n_post, int(SAR_EXIT_SHADOW_WINDOW_BARS) + 1)
+            warmup = max(0, int(SAR_EXIT_SHADOW_WARMUP_BARS))
+            total = min(n_post + warmup, len(highs))
+            if total <= 0:
+                return None
+            entry_index = max(0, total - n_post)
+            out = {
+                "high": list(highs[-total:]),
+                "low": list(lows[-total:]),
+                "close": list(closes[-total:]),
+                "entry_index": entry_index,
+            }
+            # Opens are optional: without them a gap through the stop fills at
+            # the stop (the optimistic read) instead of at the worse open.
+            if opens is not None and len(opens) >= total:
+                out["open"] = list(opens[-total:])
+            return out
+
         while True:
             await asyncio.sleep(300)  # 5 min cadence
             try:
@@ -1834,6 +1891,64 @@ class CryptoSignalEngine:
             except Exception as exc:
                 log.warning("Geometry A/B classify error (fail-open): {}", exc)
 
+            # ── Exit-method A/B: classify the SARBASE/SAREXIT pair ledger ──
+            # Same forward measure on a LONGER window (the bake-off's 192 ×
+            # 15m = 48h) and a 15m fetcher, because a trailing exit is only
+            # meaningful on the bars it trails.  Both arms ride the identical
+            # window and the identical R denominator, so the pair answers
+            # "does SAR beat our live geometry" without the hold-time
+            # confound the backtest's baseline comparison carried.
+            try:
+                from src import runtime_tunables as _rt
+                if bool(_rt.get("sar_exit_shadow_enabled")):
+                    from src import sar_exit_shadow as _sar
+                    from src import suppression_audit as _sa
+                    from src.strategy_edge import (
+                        SOURCE_SHADOW,
+                        StrategyOutcome,
+                        get_strategy_edge_store,
+                    )
+
+                    def _feed_sar_edge(rec: dict) -> None:
+                        outcome = _sa.candidate_outcome(rec)
+                        if not outcome:
+                            return
+                        get_strategy_edge_store().record(
+                            StrategyOutcome(
+                                strategy=str(rec.get("setup_class", "")),
+                                context_key=str(rec.get("context_key", "")),
+                                side=str(rec.get("side", "")),
+                                won=bool(outcome.get("won")),
+                                pnl_pct=float(outcome.get("pnl_pct", 0.0)),
+                                r_multiple=float(outcome.get("r_multiple", 0.0)),
+                                mfe_pct=float(outcome.get("mfe_pct", 0.0)),
+                                source=SOURCE_SHADOW,
+                                gross_r_multiple=outcome.get("gross_r_multiple"),
+                                net_r_multiple=outcome.get("net_r_multiple"),
+                            ),
+                            persist=False,
+                        )
+
+                    def _classify_sar_batch() -> dict:
+                        from config import SAR_EXIT_SHADOW_WINDOW_BARS as _wb
+                        from config import SAR_EXIT_SHADOW_BAR_MINUTES as _bm
+                        counters = _sar.get_sar_store().classify_pending(
+                            fetch_ohlc_since=fetch_ohlc_15m_since,
+                            window_sec=float(_wb) * float(_bm) * 60.0,
+                            on_classified=_feed_sar_edge,
+                            trail_classifier=_sar.classify_sar_record,
+                        )
+                        get_strategy_edge_store().save()
+                        return counters
+
+                    sar_counters = await asyncio.to_thread(_classify_sar_batch)
+                    if sar_counters:
+                        log.info("SAR exit A/B classified: {}", sar_counters)
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                log.warning("SAR exit A/B classify error (fail-open): {}", exc)
+
             # ── Layer A: publish the current global context for ops ────────
             self._publish_market_context()
             # ── Layer D: allocator recommendation (observe-only) ───────────
@@ -1972,6 +2087,23 @@ class CryptoSignalEngine:
         fl.add_rate(RateProbe(
             name="geometry_ab",
             counter=_geom_total,
+            upstream=_supp_total_raw,
+            min_upstream_delta=10.0,
+            min_streak=6,          # 30 min sustained
+        ))
+        def _sar_total():
+            if not bool(_rt.get("sar_exit_shadow_enabled")):
+                return None
+            from src import sar_exit_shadow as _sar
+            return float(_sar.get_sar_store().stamped_total)
+
+        # Exit-method A/B: same event stream as the geometry pairs, so the same
+        # subtraction catches the same failure — suppression events flowing
+        # while zero SAR pairs land means the stamp broke.  This is the probe
+        # the geometry A/B did not have when it stamped nothing for 25 hours.
+        fl.add_rate(RateProbe(
+            name="sar_exit_shadow",
+            counter=_sar_total,
             upstream=_supp_total_raw,
             min_upstream_delta=10.0,
             min_streak=6,          # 30 min sustained

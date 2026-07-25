@@ -89,6 +89,7 @@ def _build_registry() -> Dict[str, Tunable]:
         DISPATCH_COOLDOWN_ENABLED,
         DISPATCH_COOLDOWN_SEC,
         GEOMETRY_AB_ENABLED,
+        SAR_EXIT_SHADOW_ENABLED,
         TUNED_VARIANTS_ENABLED,
         LOSS_STREAK_CAP_HOURS,
         LOSS_STREAK_ESCALATION_ENABLED,
@@ -894,6 +895,25 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=GEOMETRY_AB_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="sar_exit_shadow_enabled",
+            label="SAR exit shadow arm",
+            description=(
+                "Stamp a SETUP@SARBASE / SETUP@SAREXIT counterfactual pair "
+                "for every post-scoring candidate — the live evaluator "
+                "geometry vs the same entry exited by a trailing 15m "
+                "Parabolic SAR — and forward-measure both over the SAME "
+                "48h window, so the edge matrix shows whether the "
+                "bake-off's PF 1.60 survives on real live signals. Both "
+                "arms share the live sl_distance as their R denominator. "
+                "DEFAULT-OFF (dark-first): observe-only even when on — no "
+                "live exit, FSM transition or dispatch reads it, and "
+                "activating a SAR exit is a separate owner-signed change."
+            ),
+            type="bool",
+            default=SAR_EXIT_SHADOW_ENABLED,
             category="Measurement",
         ),
         Tunable(

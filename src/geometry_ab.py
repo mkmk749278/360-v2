@@ -60,8 +60,16 @@ TUNED_SUFFIX = "@TUNED"
 # Same contract as the stop arms: measurement rows, never activatable.
 DSV2_SUFFIX = "@DSV2"
 GOV_SUFFIX = "@GOV"
+# Exit-method shadow arms (2026-07-25, src/sar_exit_shadow.py): @SARBASE = the
+# live geometry measured over the trail's window, @SAREXIT = the same entry
+# exited by a trailing 15m Parabolic SAR.  Declared here — not just in their own
+# module — because this tuple is what keeps the allocator from ever
+# *recommending* a measurement arm as an activatable strategy.
+SARBASE_SUFFIX = "@SARBASE"
+SAREXIT_SUFFIX = "@SAREXIT"
 _VARIANT_SUFFIXES: Tuple[str, ...] = (
-    FIXED_SUFFIX, ATR_SUFFIX, TUNED_SUFFIX, DSV2_SUFFIX, GOV_SUFFIX
+    FIXED_SUFFIX, ATR_SUFFIX, TUNED_SUFFIX, DSV2_SUFFIX, GOV_SUFFIX,
+    SARBASE_SUFFIX, SAREXIT_SUFFIX,
 )
 
 GATE_FIXED = "geometry_ab:fixed"
