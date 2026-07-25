@@ -3,13 +3,16 @@
 **Read this first every session. Then read `ACTIVE_CONTEXT.md`.**
 
 > **⚠️ PHASE: PRODUCTION (LIVE).** The Lumin app is live on the Google Play
-> **production** track (release 266, public in the launch region, real installs —
-> 14 at 2026-06-30). Closed testing is over. Real users see signals and can run
+> **production** track (release 282+ as of 2026-07-16, public in the launch region,
+> real installs on real devices). Closed testing is over. Real users see signals and can run
 > auto-trade on their own capital. **Money-path changes** (scoring, evaluator paths,
-> exit/FSM, dispatch, paid-channel routing) now ship **dark-flag-first**: default-OFF,
-> shadow-measured on a real window, **activated only after owner sign-off**. This
-> supersedes the testing-phase "ship live, no dark flags" cadence. Safety limits
-> (§1.4, B12, B18) were always enforced and stay so. See `CLAUDE.md § Project Phase`.
+> exit/FSM, dispatch, paid-channel routing) now ship **dark-flag-first**, where
+> **dark means invisible to users and fully live to the owner** — not switched off.
+> Two flags, not one: the **measurement** ships **ON** and visible in ops from day
+> one; the **user-visible effect** ships **OFF** and is **activated only after owner
+> sign-off** on the measured result. This supersedes the testing-phase "ship live, no
+> dark flags" cadence. Safety limits (§1.4, B12, B18) were always enforced and stay
+> so. See `CLAUDE.md § Project Phase`.
 
 ---
 
@@ -75,7 +78,16 @@ The top-level crypto signals company in every aspect. Not a side project. Not a 
 
 ## 2.2 The Product
 
-**A+ and B tier (65+ confidence)** are delivered **free** to the **in-app Lumin Signals feed** (full levels) and mirrored to TELEGRAM_ACTIVE_CHANNEL_ID for any reachable user. Sub-65 → FILTERED → dropped silently. The in-app feed is the primary surface (B1) because Telegram is banned in-region. **Monetization is the auto-trade paywall (B16): Assist ₹1000/mo one-tap, Auto ₹2000/mo hands-off** — not the signal information itself.
+**A+ and B tier (65+ confidence)** are delivered **free** to the **in-app Lumin Signals feed** (full levels) and mirrored to TELEGRAM_ACTIVE_CHANNEL_ID. Sub-65 → FILTERED → dropped silently. The in-app feed is the primary surface (B1) — a standing product decision, because the app is the product and the paywall is automation, not information. **Monetization is the auto-trade paywall (B16): Assist ₹1000/mo one-tap, Auto ₹2000/mo hands-off** — not the signal information itself.
+
+> **Correction 2026-07-25 (owner): Telegram is NOT banned in India — it works.**
+> This brief previously used "Telegram is banned in-region" as the *reason* for the
+> in-app-first architecture (B1) and for retiring the Telegram payment path (B16).
+> That premise was false. **The rules themselves are unchanged** — the owner
+> reaffirmed the current architecture on 2026-07-25 — but they now stand as product
+> decisions rather than as consequences of a ban. Telegram is a working, reachable
+> mirror channel. Do not re-derive any product, routing, or payment choice from the
+> old premise.
 
 The free channel is fed only by storytelling mirrors (signal-result posts as social proof) and content-engine outputs. Never by sub-paid-tier engine signals.
 
@@ -104,7 +116,7 @@ At 10× leverage on Binance USDT-M futures, round-trip fees ≈ **0.7% of margin
 
 ## 3.1 What 360 Crypto Eye Is
 
-24/7 automated signal engine. Scans 75 Binance USDT-M futures pairs every 15 seconds, detects scalp setups via Smart Money Concepts (SMC) and order-flow logic, scores via a multi-component pipeline, dispatches paid-tier signals to Telegram, and executes server-side Binance trades on behalf of auto-trade subscribers.
+24/7 automated signal engine. Scans 75 Binance USDT-M futures pairs every 15 seconds, detects scalp setups via Smart Money Concepts (SMC) and order-flow logic, scores via a multi-component pipeline, delivers A+/B signals to the in-app Lumin feed (primary surface, B1) with a Telegram mirror, and executes server-side Binance trades on behalf of auto-trade subscribers.
 
 **Repos:**
 | Repo | Purpose |
@@ -176,25 +188,33 @@ Infrastructure: `src/level_book.py` (1d/4h/1h pivots + VP zones), `src/structure
 
 The question is never *"does the signal align with HTF?"* but *"is this a profitable scalp setup regardless of broader direction?"*
 
-## 3.5 The 15 Signal Evaluators
+## 3.5 The 19 Signal Evaluators (17 live, 2 disabled)
+
+*Corrected 2026-07-25: this table said "15" and was missing four paths that have
+been generating for weeks. The count here now matches `_evaluate_*` in
+`src/channels/scalp.py` and the `EVAL::*` rows in the truth report — both 19.*
 
 | # | Setup Class | Family | Direction source |
 |---|---|---|---|
-| 1 | LIQUIDITY_SWEEP_REVERSAL | Reversal | Sweep object + EMA |
+| 1 | LIQUIDITY_SWEEP_REVERSAL | Reversal | Sweep object + EMA (evaluator `standard`) |
 | 2 | WHALE_MOMENTUM | Order-flow | Tick imbalance |
 | 3 | TREND_PULLBACK_EMA | Trend continuation | Regime / EMA stack |
 | 4 | LIQUIDATION_REVERSAL | Reversal | Cascade sign |
 | 5 | VOLUME_SURGE_BREAKOUT | Breakout | Price vs swing high |
 | 6 | BREAKDOWN_SHORT | Breakout | Price vs swing low |
-| 7 | OPENING_RANGE_BREAKOUT | Session breakout | Price vs range |
+| 7 | OPENING_RANGE_BREAKOUT | Session breakout | Price vs range — **disabled** (`feature_disabled`) |
 | 8 | SR_FLIP_RETEST | Structure | Breakout direction |
 | 9 | FUNDING_EXTREME_SIGNAL | Order-flow | Funding sign (contrarian) |
 | 10 | QUIET_COMPRESSION_BREAK | Quiet specialist | Price vs Bollinger band |
 | 11 | DIVERGENCE_CONTINUATION | Trend continuation | Regime / EMA |
-| 12 | CONTINUATION_LIQUIDITY_SWEEP | Trend continuation | EMA alignment |
+| 12 | CONTINUATION_LIQUIDITY_SWEEP | Trend continuation | EMA alignment — **disabled** (merged into LSR) |
 | 13 | POST_DISPLACEMENT_CONTINUATION | Breakout continuation | EMA alignment |
 | 14 | FAILED_AUCTION_RECLAIM | Structure reclaim | Failed-auction side |
 | 15 | MA_CROSS_TREND_SHIFT | Discrete trend-shift | EMA50/200 4h or EMA21/50 1h crossover |
+| 16 | MOVER_TREND_PULLBACK | Mover continuation | Mover run + pullback |
+| 17 | MOVER_AVWAP_SCALP | Mover mean-revert | Anchored VWAP |
+| 18 | MEAN_REVERT | Counter-trend fade | Stretch from 20-bar mean |
+| 19 | RANGE_FADE | Counter-trend fade | Range edge vs mid |
 
 Each evaluator lives in `src/channels/scalp.py` as `_evaluate_<name>` and owns its SL/TP geometry (B7).
 
@@ -202,9 +222,14 @@ Each evaluator lives in `src/channels/scalp.py` as `_evaluate_<name>` and owns i
 
 | Tier | Score | Routing |
 |---|---|---|
-| A+ | 80–100 | Paid channel |
-| B | 65–79 | Paid channel |
+| A+ | 80–100 | In-app Lumin feed (primary, B1) + Telegram mirror |
+| B | 65–79 | In-app Lumin feed (primary, B1) + Telegram mirror |
 | FILTERED | < 65 | Dropped silently |
+
+*Corrected 2026-07-25: this table said "Paid channel", which contradicted B1/B16
+— signals and full levels are **free**; the paywall is automation, not
+information. **The app is the primary surface for users; Telegram is a mirror.**
+Telegram's wider role is a separate owner session — do not expand it here.*
 
 ### 3.6a Scoring Doctrine — "Score a setup on the evidence that defines it"
 
@@ -228,7 +253,7 @@ HistoricalDataStore + OrderFlowStore
         ↓
 Scanner — every 15s × 75 pairs
         ↓
-ScalpChannel.evaluate() — 15 evaluators per pair
+ScalpChannel.evaluate() — 19 evaluators per pair (17 live)
         ↓
 Gate chain (SMC, MTF, regime, spread, volume)
         ↓
@@ -238,7 +263,7 @@ SignalScoringEngine — confidence 0–100
         ↓
 _enqueue_signal (universal SL min 0.80%)
         ↓
-SignalRouter → Telegram (paid A+/B only)
+SignalRouter → in-app Lumin feed (primary) + Telegram mirror
         ↓
 ┌──────────────────────────────────────────────────────────────┐
 │  TradeMonitor (5s poll backstop)                             │
@@ -282,7 +307,7 @@ Binance REST API
 **Per-user dials (all consumed at dispatch, fresh read per signal):**
 - `threshold_pct` — pre-TP trigger (0.10–1.00% raw from entry)
 - `grab_fraction` — fraction closed at pre-TP (30%–100%)
-- `invalidation_mode` — loose / standard / tight (engine default: tight)
+- `invalidation_mode` — loose / standard / tight (engine default: **loose**, `INVALIDATION_MODE_DEFAULT`)
 - `notional_usd` — position size
 
 **Blast-radius caps (see B18 — non-negotiable):** symbol allowlist, per-user rate limit, per-user position cap, global kill switch, global + per-user circuit breakers.
@@ -302,13 +327,76 @@ Shared scoring infrastructure — purely a scoring layer, never invents a setup.
 
 Soft-penalty bonus magnitudes bounded: confluence ≤9 pts, structure-align 3 pts. A sub-50 candidate cannot reach paid (65) by scoring bonuses alone.
 
+## 3.11 The Autonomous Portfolio / Strategy Lab (Layers A–G) — LIVE
+
+*Added 2026-07-25. Built across Sessions 53–77 and running in production, but this
+brief had no description of it at all — the single largest documentation gap in the
+system. Design-of-record: `docs/PLAN_AUTONOMOUS_PORTFOLIO.md`,
+`docs/PLAN_AUTONOMOUS_EMISSION.md`, `docs/PLAN_AUTONOMOUS_EMISSION_CONTROLLER.md`,
+`docs/AUTONOMOUS_SYSTEM_AUDIT_AND_REMEDIATION.md` (W1–W7).*
+
+**The thesis.** A confidence score alone cannot decide emission, because edge lives in
+`session × regime × strategy` cells, not in a global number. The portfolio measures
+every strategy in every market context on real data, and lets that measurement — not
+opinion, and not a human checking daily — decide what emits.
+
+| Layer | Module | Role | State |
+|---|---|---|---|
+| **A — Market context** | `src/market_context.py` | Global BTC-anchored vector (session / phase / volatility / funding / rotation) → `context_key`, published each 5-min cycle | LIVE |
+| **B — Strategy registry** | `src/strategy_portfolio.py` | Context-affinity tags per SetupClass + shadow units; `is_context_aligned()` | LIVE |
+| **C — Edge matrix** | `src/strategy_edge.py` | Every strategy × context measured on real data, provenance-split (emitted / suppressed / shadow), Wilson lower-bounded. **Everything routes on this.** | LIVE |
+| **C→consumer — Emission policy** | `src/context_emission_policy.py` | Per-(strategy × context) confidence floor from the matrix: STRONG → relax toward the quality anchor, POSITIVE → half-relax, **NEGATIVE → hard-suppress**, cold/thin → global floor unchanged | **LIVE** (S69, owner-directed) |
+| **D — Allocator** | `src/strategy_allocator.py` | What it *would* activate now and at what weight, inside the safety envelope (≤6 concurrent, ≤0.35 each) | **Recommendation-only — consumed by nothing.** Phase-4 master-arm never armed |
+| **G — Emission controller** | `src/emission_controller.py` + `_store.py` | Closed loop: reads gate verdicts + matrix and moves the policy's per-strategy knobs itself, inside a bounded envelope, **no human in the loop** | **LIVE** (S72b) |
+
+**What feeds the matrix**
+
+- **Suppression audit / shadow ledger** (`src/suppression_audit.py`) — every
+  post-scoring gate-suppressed candidate is stamped with full geometry and
+  forward-measured on real candles (WOULD_WIN / WOULD_LOSE / WOULD_EXPIRE), giving a
+  per-gate **KEEP / TUNE / DROP** verdict. This is how a gate earns its place.
+- **Shadow strategy units** (`src/shadow_strategies.py`) — 4 units with no path to the
+  signal queue, measured as if they were live.
+- **Counterfactual measurement arms** — `@FIXED`/`@ATR` (stop geometry),
+  `@TUNED` (tuned recipes), `@DSV2`/`@GOV` (dispatch rescues),
+  `@SARBASE`/`@SAREXIT` (exit method). **These are evidence, never strategies** — they
+  are stamped from the same candidates as the real rows and must be excluded from any
+  per-strategy rollup or the candidate is double-counted.
+
+**Cost-aware R (W1/W2, Session 76) — the correction that mattered most.** Every R —
+counterfactual, shadow *and* realized — used to be measured **gross**: wins at full
+R-to-TP1, losses at exactly −1.0R, no fees/funding/slippage, while the fields were
+*labelled* net. The harvested gross edge (~+0.08R) was smaller than the per-trade cost
+drag never subtracted (~0.15–0.25R), so the dashboards read positive while the book was
+net-negative, and the emission policy steered on a cost-free fantasy. `src/trade_costs.py`
+now nets both seams; `reconcile_matrix()` + the `edge_reconciliation` liveness probe
+validate the cost constants in flight.
+
+**Where to read it:** ops **Strategy Lab** (`/strategy-lab`) and the truth report's
+Suppression Quality Audit / Edge Matrix / shadow-arm sections.
+
+**Standing cautions — read before acting on any number here**
+
+1. **Counterfactuals are optimistic.** They free-run to TP1; live trades get killed
+   earlier. Measured at ~**0.38R** on MOVER_TREND_PULLBACK. Discount accordingly — the
+   `edge_reconciliation` probe exists to keep that number honest.
+2. **A fresh window is required after any scoring/cost change.** Per-cell windows roll;
+   verdicts stay stale until they refill. Do not retire or promote a strategy on a
+   window that predates the change.
+3. **Zero emissions is not automatically a fault.** A path fully gated because its
+   counterfactuals measure negative is correctly gated (RANGE_FADE: −0.98R, 3% win).
+   A path fully gated with *positive* counterfactuals is costing money. The emission
+   liveness probes distinguish these (`feature_liveness.gated_path_verdict`).
+4. **The allocator is still recommendation-only.** Nothing consumes its weights;
+   arming it is an owner decision that has never been taken.
+
 ---
 
 # PART IV — BUSINESS RULES
 
 | # | Rule |
 |---|---|
-| B1 | **Signals are delivered in-app, free, in full.** The Lumin **Signals** feed (direction, setup, confidence, **entry/SL/TP**, analysis — all free) is the primary delivery channel, because Telegram is banned in-region and reaches no one there. The paywall is **automation, not information** (B16): free users see and can manually act on every signal; paid tiers automate placement. The Telegram channel (TELEGRAM_ACTIVE_CHANNEL_ID) remains a single optional mirror for any reachable user — never more than one channel, no duplicate routing. |
+| B1 | **Signals are delivered in-app, free, in full.** The Lumin **Signals** feed (direction, setup, confidence, **entry/SL/TP**, analysis — all free) is the primary delivery channel — a product decision: the app is the product surface, and the paywall is **automation, not information** (B16). Free users see and can manually act on every signal; paid tiers automate placement. The Telegram channel (TELEGRAM_ACTIVE_CHANNEL_ID) remains a single optional mirror — never more than one channel, no duplicate routing. *(2026-07-25: the old justification "because Telegram is banned in-region" was factually wrong — Telegram works in India. The rule is unchanged and owner-reaffirmed; only the false premise is removed.)* |
 | B2 | Zero manual effort at runtime — everything self-manages |
 | B3 | SL hits posted honestly — same visual weight as TP wins |
 | B4 | No duplicate signals on same symbol within cooldown window |
@@ -316,16 +404,16 @@ Soft-penalty bonus magnitudes bounded: confluence ≤9 pts, structure-align 3 pt
 | B6 | System must survive Binance API degradation gracefully |
 | B7 | Every evaluator owns its SL/TP calculation — no shared universal formulas |
 | B8 | All config values must be env-var overridable |
-| B9 | Expired signals must post Telegram notification — no silent disappearances |
+| B9 | **No silent disappearances.** An expired signal must be surfaced — primarily in the in-app Lumin feed (B1), mirrored to Telegram. The rule is the honesty, not the channel. |
 | B10 | Discuss and agree before building major architecture changes |
 | B11 | **Net-of-fees economics.** At 10× leverage, round-trip fee ≈ 0.7% of margin. Every threshold, gate, and scoring band must be fee-aware. A neutral close is a net loss to the subscriber. |
 | B12 | **Auto-trade safety.** No live execution without: daily-loss kill switch, concurrent-position cap, per-symbol exposure cap, leverage cap (≤30×), restart reconciliation, structured order audit log. Paper-book reset refuses while open positions exist — flattening is a separate explicit action. |
 | B13 | **Identity.** Firebase Phone Auth (primary, universal). Google Sign-In on Android. Telegram OTP as opt-in upgrade for DM features. No email, no password. |
 | B14 | Build constraint. All build/deploy paths work via VPS + GitHub Actions. No local Android Studio required. |
 | B15 | **Brand.** Lumin = consumer app brand. 360 Crypto Eye = engine + signal-source brand. Telegram channel never renames. App About page always credits 360 Crypto Eye. |
-| B16 | **Revenue — Google Play Billing, two-tier auto-trade model.** Signals + **entry/SL/TP levels + analysis are FREE.** The paywall is on **trade automation**, sold as two monthly Play subscriptions: **Assist (`lumin_assist_monthly`, ₹1000/mo)** — one-tap "take trade" (the app places the order client-side on the user's own Binance keys); **Auto (`lumin_auto_monthly`, ₹2000/mo)** — hands-off server-side auto-execution. Tier hierarchy `free < assist < auto`. The Telegram-bot payment path is **retired** (Telegram banned in-region). Because the paid feature is *automation software functionality* (executed on the user's own keys — Lumin never custodies funds), it is presented as an app feature, NOT "investment advice"; the **Financial features declaration** applies and the framing is load-bearing. **Entitlement is server-side and is the source of truth:** the app sends the Play `purchaseToken` → engine verifies against the Google Play Developer API (`purchases.subscriptionsv2`), acknowledges, and sets `UserStore.tier` (`assist`/`auto`) + `paid_until`; **RTDN** keeps renewals/cancellations/holds/expiries live. **The money-path gate lives in `signal_dispatch`: hands-off execution runs only for `auto` users** (`AUTO_TRADE_TIER_GATE_ENABLED`, default ON, fail-closed). Assist is gated client-side (one-tap UI). SA key via env only (never logged/committed). ⚠️ Charging for automated crypto execution carries Play financial-services scrutiny + possible Indian regulatory exposure — owner to keep legal sanity-check current. |
+| B16 | **Revenue — Google Play Billing, two-tier auto-trade model.** Signals + **entry/SL/TP levels + analysis are FREE.** The paywall is on **trade automation**, sold as two monthly Play subscriptions: **Assist (`lumin_assist_monthly`, ₹1000/mo)** — one-tap "take trade" (the app places the order client-side on the user's own Binance keys); **Auto (`lumin_auto_monthly`, ₹2000/mo)** — hands-off server-side auto-execution. Tier hierarchy `free < assist < auto`. The Telegram-bot payment path is **retired** — Google Play Billing is the payment rail for this app. *(2026-07-25: retirement previously attributed to "Telegram banned in-region", which was false. The retirement stands as an owner decision; only the wrong reason is removed — no new rationale is asserted here.)* Because the paid feature is *automation software functionality* (executed on the user's own keys — Lumin never custodies funds), it is presented as an app feature, NOT "investment advice"; the **Financial features declaration** applies and the framing is load-bearing. **Entitlement is server-side and is the source of truth:** the app sends the Play `purchaseToken` → engine verifies against the Google Play Developer API (`purchases.subscriptionsv2`), acknowledges, and sets `UserStore.tier` (`assist`/`auto`) + `paid_until`; **RTDN** keeps renewals/cancellations/holds/expiries live. **The money-path gate lives in `signal_dispatch`: hands-off execution runs only for `auto` users** (`AUTO_TRADE_TIER_GATE_ENABLED`, default ON, fail-closed). Assist is gated client-side (one-tap UI). SA key via env only (never logged/committed). ⚠️ Charging for automated crypto execution carries Play financial-services scrutiny + possible Indian regulatory exposure — owner to keep legal sanity-check current. |
 | B17 | **Per-user exit controls.** *Session-34 default flip: the engine default is now TP1-full + fixed SL — pre-TP and invalidation are OFF by default and survive only as per-user opt-ins.* Pre-TP grab fraction: 0% (engine default — disabled) or 30%–100% if a user opts in. Pre-TP threshold: 0.10–1.00% raw. Invalidation mode: loose (engine default — TP/SL only, no thesis kill) / standard / tight. TP-ladder split env-overridable via `TP{1,2,3}_CLOSE_FRACTION` (default 1.0/0.0/0.0 = TP1-full). All stored in `user_pretp_settings` + `user_invalidation_settings`; NULL = engine default (now no-pre-TP / loose). `grab_fraction=1.0` = full close at the pre-TP threshold; `grab_fraction=0` = no pre-TP (default). Regime-per-exit extension in design (§3.2b). |
-| B18 | **Server-side execution custody.** Non-custodial of funds; custodial of trade-authorisation keys only. Connect-time validation: withdraw permission disabled (auto-reject if enabled — no permissive mode), Futures enabled, IP whitelist set to engine VPS IP. Plaintext API secret materialises only in signing service process memory for one request — never logged, never written to disk. Master key in Cloud KMS HSM; engine has Decrypt IAM only. Blast-radius caps (non-negotiable): symbol allowlist (auto-tracks PairManager universe), per-user rate limit (10 orders/min, 50/hr), per-user position cap ($500 default), global kill switch (<5s from Telegram), global circuit breaker (>10 rejections/60s → auto-disable), per-user circuit breaker (>3 rejections/5min → auto-disable user). Any change to signing service / KMS / connect-time validation / blast-radius caps / circuit-breaker thresholds requires owner sign-off. |
+| B18 | **Server-side execution custody.** Non-custodial of funds; custodial of trade-authorisation keys only. Connect-time validation: withdraw permission disabled (auto-reject if enabled — no permissive mode), Futures enabled, IP whitelist set to engine VPS IP. Plaintext API secret materialises only in signing service process memory for one request — never logged, never written to disk. Master key in Cloud KMS HSM; engine has Decrypt IAM only. Blast-radius caps (non-negotiable): symbol allowlist (auto-tracks PairManager universe), per-user rate limit (10 orders/min, 50/hr), per-user position cap ($500 default), global kill switch (operated from the ops control plane — owner-gated, audited, PRG-confirmed), global circuit breaker (>10 rejections/60s → auto-disable), per-user circuit breaker (>3 rejections/5min → auto-disable user). Any change to signing service / KMS / connect-time validation / blast-radius caps / circuit-breaker thresholds requires owner sign-off. |
 
 ---
 
@@ -339,14 +427,16 @@ Soft-penalty bonus magnitudes bounded: confluence ≤9 pts, structure-align 3 pt
 | Deploy | `git push` to `main` → GitHub Actions → `bash deploy.sh` → VPS ~45s. Doc-only changes (`OWNER_BRIEF.md`, `ACTIVE_CONTEXT.md`, `CLAUDE.md`) are `paths-ignore`'d and do not trigger redeploy. |
 | Monitor | GitHub Actions "VPS Runtime Audit / Truth Report" → `monitor-logs` branch |
 | 24/7 Agent | Autonomous monitoring agent (in design — §5.1). Watches engine health, detects anomalies, files GitHub Issues for CTE review. |
-| Signal delivery | Telegram paid channel + free channel (storytelling mirrors) |
-| Lumin app | **Play Store PRODUCTION track — LIVE** (release 266, public in launch region; 14 installs at 2026-06-30) — package `org.luminapp.lumin`. AAB built by CI on every `main` push. API via Cloudflare (`api.luminapp.org`, SSL, Mumbai edge). |
-| Ops dashboard | `github.com/mkmk749278/360ce-ops` → `ops.luminapp.org`. Live. Owner-only auth. Read-only consumer of engine artifacts (API, data volume, monitor-logs, diag scripts). |
+| Signal delivery | **In-app Lumin Signals feed (primary, B1)**; Telegram channel is a single optional mirror. Free Telegram channel carries storytelling mirrors only — never engine signals. |
+| Lumin app | **Play Store PRODUCTION track — LIVE** (release 282+ as of 2026-07-16, public in launch region) — package `org.luminapp.lumin`. AAB built by CI on every `main` push. API via Cloudflare (`api.luminapp.org`, SSL, Mumbai edge). |
+| Ops dashboard | `github.com/mkmk749278/360ce-ops` → `ops.luminapp.org`. Live. Owner-only auth. **Engine control plane since 2026-06-20** — kill switch, auto-mode flips, manual close — all owner-gated, audited and PRG-confirmed, plus the diagnostic surfaces (API, data volume, monitor-logs, diag scripts). No longer read-only. |
 | Legal | `github.com/mkmk749278/lumin-legal` → GitHub Pages. Source-of-truth for Play Console + in-app legal links. |
 
-## 5.1 24/7 Autonomous Monitoring Agent (in design — 2026-06-03)
+## 5.1 24/7 Autonomous Monitoring Agent (**LIVE** — built and running)
 
-A scheduled agent (GitHub Actions cron, every 30 min) that autonomously monitors the live system and files findings for CTE review:
+*Corrected 2026-07-25: this section said "in design" long after the agent shipped. It runs as its own container in `360ce-ops` (`app/agent/`, `python -m app.agent.runner`, 60s poll cycle) with a Redis-backed dedup/escalation FSM, and it files the `auto-detected` issues this brief tells you to read at session start (e.g. #781).*
+
+An always-on agent that autonomously monitors the live system and files findings for CTE review:
 
 **Checks:**
 - Container health (all containers running? signing service healthy?)
@@ -357,7 +447,7 @@ A scheduled agent (GitHub Actions cron, every 30 min) that autonomously monitors
 - Error log scanning (crash patterns, repeated Binance errors, FSM transitions)
 - Deploy health (last successful deploy, last CI run)
 
-**On anomaly:** creates a GitHub Issue tagged `auto-detected` + `severity:low/medium/high` with structured findings. High-severity = Telegram admin alert immediately.
+**On anomaly:** creates a GitHub Issue tagged `auto-detected` + `severity:low/medium/high` with structured findings. High-severity pages the owner immediately via **FCM push** (Telegram notifier retained in code as a parallel alert path — alerting is read-only, so both are fine; *control* stays ops-only for the audit trail).
 
 **CTE session protocol:** at every session start, check open `auto-detected` GitHub Issues before reading ACTIVE_CONTEXT.
 

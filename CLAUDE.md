@@ -39,11 +39,28 @@ This **restores the dark-flag-first discipline** the testing phase had relaxed �
 trigger the old "ship live" section itself named ("revisit at subscriber launch") has
 now fired:
 
-- **Money-path changes ship DARK-FLAG-FIRST.** Anything touching scoring, evaluator
-  paths, exit / FSM behaviour, dispatch, or paid-channel routing ships **default-OFF**,
-  is **shadow-measured on a real data window**, and is **activated only after owner
-  sign-off** on the shadow result. We no longer learn-by-shipping-live on the money
-  path — there are users behind it now.
+- **Money-path changes ship DARK-FLAG-FIRST**, and "dark" means **invisible to
+  users, fully live to the owner** — not switched off.
+
+  Every such change has **two** flags, and they are not the same flag:
+
+  | Flag | Default | What it controls |
+  |---|---|---|
+  | **Measurement** | **ON** | Stamping, shadow arms, counterfactuals, ops panels. Runs for real from the moment it ships and is fully visible in ops. |
+  | **User-visible effect** | **OFF** | Anything that changes what subscribers see or what the money path does. Activated only after owner sign-off on the measured result. |
+
+  Shipping a *measurement* default-OFF is the wrong reading of this rule. An
+  observe-only path that stamps nothing until someone remembers to flip it
+  produces an empty ops panel, no data, and a decision that keeps getting
+  deferred — which is exactly what happened to the SAR exit arm on 2026-07-25
+  (shipped OFF, owner had to enable it and then ask where to look). **If it
+  cannot reach a subscriber or the money path, turn it on when you ship it.**
+
+  Anything touching scoring, evaluator paths, exit / FSM behaviour, dispatch, or
+  paid-channel routing keeps its **user-visible** flag default-OFF, is
+  **shadow-measured on a real data window**, and is **activated only after owner
+  sign-off** on the shadow result. We no longer learn-by-shipping-live on the
+  money path — there are users behind it now.
 - **Stamp-and-shadow before you act.** A change that alters which signals emit or how
   they score must first run observe-only: stamp the *would-be* effect on every signal
   without applying it, so we confirm it touches the right signals before it changes
@@ -52,7 +69,12 @@ now fired:
   telemetry, infra. These never gated on a shadow window and still don't.
 - **A reversible env off-switch (default ON) is NOT a substitute for dark-first** on a
   production money-path change — the kill switch protects against a live failure;
-  dark-first prevents shipping that failure to users at all.
+  dark-first prevents shipping that failure to users at all. (This applies to the
+  *user-visible* flag. The measurement flag beside it should be ON — see above.)
+- **Dark work must be observable, or it isn't dark — it's just off.** A dark change
+  ships together with the ops surface that shows what it is doing: a panel, a table,
+  or a truth-report section the owner can read the same day. "Measured but nowhere to
+  look" is an unfinished change.
 - **Safety limits remain fully enforced** (always were): blast-radius caps,
   naked-position invariant, secret handling, withdraw-key rejection (Hard Limits below,
   B12/B18). Production raises the stakes on these, never lowers them.
@@ -82,7 +104,7 @@ money-path changes follow dark-first from here.
 - Paid-channel routing changes
 - Regime-per-exit design decisions (§3.2b — data research in progress)
 
-Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in ~45s. **Production phase: the app is LIVE on the Play Store** — a `main` deploy reaches real users, so money-path changes ship **dark (default-OFF) + shadow-measured + owner sign-off to activate** per § Project Phase; off-money-path work ships normally.
+Never push to `claude/general-session-*` or harness-assigned long-lived branches. The auto-deploy on `main` ships in ~45s. **Production phase: the app is LIVE on the Play Store** — a `main` deploy reaches real users, so money-path changes ship **dark + shadow-measured + owner sign-off to activate** per § Project Phase — measurement flag ON and visible in ops, user-visible flag OFF. Off-money-path work ships normally.
 
 ---
 
@@ -126,9 +148,9 @@ Binance WS/REST
       ↓
 HistoricalDataStore + OrderFlowStore
       ↓
-Scanner (15s × 75 pairs) → 18 evaluators → gate chain → scoring
+Scanner (15s × 75 pairs) → 19 evaluators (17 live) → gate chain → scoring
       ↓
-SignalRouter → Telegram (paid A+/B only) · FCM push topics → Lumin app
+SignalRouter → in-app Lumin feed (primary, B1) · FCM push topics · Telegram mirror
       ↓
 ┌─────────────────────────────────────────────────────┐
 │ ENGINE CONTAINER                                    │
@@ -151,6 +173,16 @@ Binance REST API
 
 **Per-user settings:** API writes SQLite (shared volume) → engine reads at dispatch (fresh SELECT, WAL mode). Change takes effect on next signal dispatch.
 
+**Delivery surfaces (owner, 2026-07-25):** the **Lumin app is the primary surface for
+users** — that is where signals are managed and read. Telegram *works in India* (the
+old "banned in-region" claim in these docs was false) but remains a **mirror**, not the
+primary channel. **Telegram's wider role is a dedicated future session** — don't expand
+or re-architect Telegram routing as a side-effect of other work.
+
+**Control vs alerting:** control (kill switch, auto-mode flips, manual close) is
+**ops-only** — it needs the audit trail. Alerting is read-only, so FCM push *and*
+Telegram are both acceptable paging paths.
+
 ---
 
 ## Module Map
@@ -159,7 +191,7 @@ Binance REST API
 |---|---|
 | Boot, WS/REST init | `src/bootstrap.py`, `src/main.py` |
 | Scanner + gate chain | `src/scanner/__init__.py` |
-| 18 evaluators | `src/channels/scalp.py` |
+| 19 evaluators (17 live; ORB + CLS disabled) | `src/channels/scalp.py` |
 | Confidence scoring | `src/signal_quality.py`, `src/confidence.py` |
 | Regime classification | `src/regime.py` |
 | MTF policy | `src/mtf.py` |
@@ -205,6 +237,39 @@ Binance REST API
 | Tuned shadow variants (`@TUNED`) | `src/tuned_variants.py` |
 | Dispatch-staleness V2 (geometry-aware, `@DSV2` shadow) | `src/staleness_v2.py` |
 | SAR exit shadow arm (`@SARBASE`/`@SAREXIT`, dark) | `src/sar_exit_shadow.py` |
+
+---
+
+## The Autonomous Portfolio (Layers A–G) — LIVE
+
+Edge lives in `session × regime × strategy` cells, not in a global confidence score.
+The portfolio measures every strategy in every context on real data and lets that
+measurement decide emission. Full description: `OWNER_BRIEF.md § 3.11`.
+
+| Layer | Module | State |
+|---|---|---|
+| A — market context vector | `src/market_context.py` | LIVE |
+| B — strategy registry / affinity | `src/strategy_portfolio.py` | LIVE |
+| C — Strategy×Context edge matrix | `src/strategy_edge.py` | LIVE — everything routes on it |
+| C→consumer — per-context emission floor | `src/context_emission_policy.py` | **LIVE** (money path) |
+| D — allocator | `src/strategy_allocator.py` | **Recommendation-only; consumed by nothing** |
+| G — closed-loop emission controller | `src/emission_controller.py` | **LIVE**, self-promoting inside a bounded envelope |
+
+**Four rules when touching any of it:**
+
+- **Measurement arms are not strategies.** `@FIXED`/`@ATR`/`@TUNED`/`@DSV2`/`@GOV`/
+  `@SARBASE`/`@SAREXIT` are stamped from the same candidates as the real rows —
+  include them in a per-strategy rollup and you double-count the candidate. The
+  authoritative suffix list is `geometry_ab._VARIANT_SUFFIXES`; ops mirrors it in
+  `strategy_lab.MEASUREMENT_SUFFIXES`. **Keep the two in sync** — they drifted once
+  and silently inflated the ops rollup for a week.
+- **Counterfactuals are optimistic** (~0.38R measured on MTP). Never quote a
+  counterfactual R as an expected live result.
+- **Zero emissions ≠ broken.** Fully gated + measured-negative is the gates working;
+  fully gated + measured-positive is money on the table. `gated_path_verdict` tells
+  them apart — don't "fix" the first case.
+- **After any scoring or cost change, wait for a fresh window** before judging a
+  verdict. Rolling per-cell windows keep serving pre-change data.
 
 ---
 

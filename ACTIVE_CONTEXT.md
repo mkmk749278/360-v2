@@ -303,6 +303,62 @@ positive, much less dramatic — **do not act on the gross number.**
 change which signals emit on a live app. Evidence is above; decision is the
 owner's.
 
+### Part 7 — doctrine corrected (owner, 2026-07-25): two false premises removed
+
+**1. Telegram is NOT banned in India. It works.**
+
+That claim was load-bearing in three places and each one used it as a *reason*:
+ops owning the control plane, B1 (in-app feed primary), and B16 (Telegram payment
+path retired). **Owner reaffirmed all three rules — only the false premise is
+removed.** They now stand as product decisions rather than as consequences of a
+ban. Corrected in `OWNER_BRIEF.md` (§2.2, B1, B16) and `360ce-ops/CLAUDE.md`.
+
+Historical session entries in this file still contain the old claim (e.g. the
+S-?? per-user re-enable note around L1466). **Those are left as written** —
+rewriting a past session's record would falsify the log. `OWNER_BRIEF.md` is read
+*before* this file in the session protocol, so the correction lands first.
+
+**2. "Dark" means invisible to USERS, live to the OWNER — not switched off.**
+
+The old wording said money-path changes ship "default-OFF", and I read that
+literally on the SAR exit arm: shipped it OFF, so it stamped nothing, the ops
+panel was empty, and the owner had to enable it and then ask where to look. That
+is the wrong reading and it cost a day of measurement.
+
+There are **two flags**, not one:
+
+| Flag | Default | Controls |
+|---|---|---|
+| **Measurement** | **ON** | Stamping, shadow arms, counterfactuals, ops panels — runs for real on ship, fully visible in ops |
+| **User-visible effect** | **OFF** | What subscribers see / what the money path does — owner sign-off to activate |
+
+Corollary now in both briefs: **dark work must ship with its ops surface.** A
+dark change isn't finished until there's a panel, table, or truth-report section
+the owner can read the same day. "Measured but nowhere to look" is unfinished.
+
+**Also corrected in the same pass (owner: "fix all of them"):**
+
+| Was | Now | Evidence |
+|---|---|---|
+| "The 15 Signal Evaluators" | **19** (17 live; ORB + CLS disabled) | 19 `_evaluate_*` in `scalp.py`, 19 `EVAL::*` rows in the truth report. MOVER_TREND_PULLBACK, MOVER_AVWAP_SCALP, MEAN_REVERT and RANGE_FADE had been generating for weeks with no table row. |
+| §3.9 `invalidation_mode` "engine default: tight" | **loose** | `INVALIDATION_MODE_DEFAULT="loose"`; B17 and Profile D already said loose — the brief contradicted itself |
+| "release 266 … 14 installs at 2026-06-30" | release 282+ as of 2026-07-16 | matched to CLAUDE.md; stale install count removed rather than guessed |
+| §5.1 agent "in design — 2026-06-03" | **LIVE** | it is a running container in 360ce-ops and filed #781 |
+| Part V ops "read-only consumer" | **control plane since 2026-06-20** | kill switch / mode flips / manual close all ship |
+| §3.6 tiers → "Paid channel" | in-app feed + Telegram mirror | contradicted B1/B16 — signals are free, the paywall is automation |
+| B9 "must post Telegram notification" | no silent disappearances, app-primary | the rule is the honesty, not the channel |
+| B18 kill switch "<5s from Telegram" | operated from the ops control plane | owner: control is ops-only for the audit trail; alerting may use both |
+
+**Owner rulings recorded:** the **app is the primary surface for users**, Telegram is a
+mirror; **Telegram's wider role is a dedicated future session** — do not expand it as a
+side-effect of other work. Control is ops-only; alerting may go to FCM *and* Telegram.
+
+**Still open after this pass:** `§2.1` still says "360 Crypto Eye is the
+signal-engine brand (Telegram channel, technical identity)" and `B15` still says
+"Telegram channel never renames" — both fine as brand statements, but they are the
+kind of Telegram-role wording the owner has reserved for a dedicated session. Left
+alone deliberately.
+
 ### Open / next
 
 1. ~~Owner: switch the arm on~~ — **done 2026-07-25**, stamping now.
