@@ -114,8 +114,16 @@ class HistoricalDataStore:
         volume_usd = np.array([float(c[7]) for c in raw])
         taker_buy_vol_usd = np.array([float(c[10]) for c in raw])
 
+        # Bar open time (ms).  Carried so a consumer can locate the bar covering
+        # a given wall clock instead of inferring an index from elapsed time —
+        # inference assumes the array is gap-free and its last bar is current,
+        # and neither holds on a feed that dropped frames or froze (the
+        # MVLLUSDT 11-hour freeze below is the standing counter-example).
+        open_time = np.array([float(c[0]) for c in raw])
+
         return {
             "open": opens, "high": highs, "low": lows, "close": closes, "volume": volumes,
+            "open_time": open_time,
             "volume_usd": volume_usd, "taker_buy_vol_usd": taker_buy_vol_usd,
         }
 
@@ -576,6 +584,18 @@ class HistoricalDataStore:
         for key in core_keys:
             combined = np.concatenate([existing.get(key, np.array([])), new_data.get(key, np.array([]))])
             result[key] = combined[-limit:] if len(combined) > limit else combined
+        # ``open_time`` is index-aligned with the OHLC arrays, so it is merged
+        # only when BOTH sides carry it.  Concatenating a present side onto a
+        # missing one would yield a short array whose index i no longer names
+        # bar i — a silently wrong timestamp is worse than none, because a
+        # consumer can detect absence (and refuse) but not misalignment.
+        if len(existing.get("open_time", ())) == len(existing.get("close", ())) and len(
+            new_data.get("open_time", ())
+        ) == len(new_data.get("close", ())):
+            combined = np.concatenate(
+                [existing.get("open_time", np.array([])), new_data.get("open_time", np.array([]))]
+            )
+            result["open_time"] = combined[-limit:] if len(combined) > limit else combined
         # Extended keys: only carry forward if the fresh fetch included them
         for key in extended_keys:
             if key in new_data and len(new_data[key]) > 0:
@@ -647,14 +667,28 @@ class HistoricalDataStore:
         return bool(self.candles)
 
     def update_candle(self, symbol: str, interval: str, candle: Dict[str, float]) -> None:
-        """Append a single candle (from WebSocket) to the store."""
+        """Append a single candle (from WebSocket) to the store.
+
+        ``candle["open_time"]`` (ms) is optional but strongly preferred — see
+        ``fetch_candles``.  When the caller omits it, or when the bucket
+        predates timestamp tracking, the slot is filled with NaN rather than a
+        guess: a consumer that needs real times checks ``np.isfinite`` over the
+        window it intends to use and refuses, which is recoverable, whereas an
+        invented timestamp is silently wrong forever.
+        """
+        keys = ("open", "high", "low", "close", "volume", "open_time")
         bucket = self.candles.setdefault(symbol, {}).setdefault(
             interval,
-            {k: np.empty(0, dtype=np.float64) for k in ("open", "high", "low", "close", "volume")},
+            {k: np.empty(0, dtype=np.float64) for k in keys},
         )
-        for key in ("open", "high", "low", "close", "volume"):
+        # A bucket seeded before this field existed (or by a legacy path) needs
+        # its history padded so index i still names bar i.
+        n_existing = len(bucket.get("close", ()))
+        if len(bucket.get("open_time", ())) != n_existing:
+            bucket["open_time"] = np.full(n_existing, np.nan, dtype=np.float64)
+        for key in keys:
             arr = bucket[key]
-            arr = np.append(arr, candle.get(key, 0.0))
+            arr = np.append(arr, float(candle.get(key, np.nan if key == "open_time" else 0.0)))
             if len(arr) > _MAX_CANDLES_PER_BUCKET:
                 arr = arr[-_MAX_CANDLES_PER_BUCKET:]
             bucket[key] = arr
