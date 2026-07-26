@@ -387,3 +387,12 @@ python -m src.main
 - **Candle fixtures in tests use the production shape** — the `numpy_seeded_store` conftest fixture (real `HistoricalDataStore` via `update_candle`), never hand-built list dicts, for any code that consumes the data store
 - **New measurement pipelines register a liveness probe** (`src/feature_liveness.py`, wired in `main._build_feature_liveness`) — a feature whose output can silently flat-line without paging is unfinished
 - **`xfail` is strict** — a passing xfail fails CI; remove the marker the moment its premise dies (5 tests rotted invisibly under non-strict markers, 2026-07-14)
+- **Never hand-write a collaborator's return shape in a test — drive the real
+  collaborator.** A mock whose keys you chose cannot verify a contract you got
+  wrong; it asserts your assumption back at you and goes green over dead code.
+  `classify_pending`'s guard read `exit_reason` where a trail classifier returns
+  `trail_exit_reason`, so every early classification was silently discarded —
+  and the tests passed, because they mocked the classifier with the invented key
+  (2026-07-26, #798). Where a seam must be faked, fake it from the real
+  producer's output, and **verify a fix by reverting it**: if the new test does
+  not fail against the old code, it is not testing the fix.

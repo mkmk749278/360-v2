@@ -4,7 +4,7 @@
 
 ---
 
-## 🟢 SESSION 81 2026-07-26 — #794 did not actually fix it: a guessed cutoff trusted 8h of pre-fix data (88x)
+## 🟢 SESSION 81 2026-07-26 — #794 didn't fix it (88x), and #795's second half shipped inert (#795, #798)
 
 **Owner ask:** *"still not matching and still Everything is running state when
 they actually close and shows real output"* — with the ops export and the real
@@ -116,29 +116,62 @@ per-scan / per-order path.
 predicting a future deploy. `_migrate_provenance` is now schema-gated, and any
 future provenance change bumps `PROVENANCE_SCHEMA` instead of adding a date.
 
-**Shipped:** #795, squashed to `main` as `06a8858`, **deploy green**. The
-migration runs on ledger load, so it took effect at the deploy's engine restart
-— not gradually. 62 tests in `test_sar_exit_shadow.py`; full suite 7207 passed,
-0 failed; `ruff` clean; `mypy` unchanged at 107.
+**Shipped:** #795 → `06a8858` (provenance schema + early-resolution path) and
+#798 → `db476d8` (the guard key that made the second half actually fire), both
+deploy green. The migration runs on ledger load, so it took effect at the
+deploy's engine restart — not gradually. 67 tests in `test_sar_exit_shadow.py`;
+full suite 7212 passed, 0 failed; `ruff` clean; `mypy` unchanged at 107.
 
-**Unverified end-to-end:** the panel collapsing from 88 toward ~0 is a
-prediction until the owner reads it. Verified in code and against the exported
-rows (88/88 relabel), but ops is owner-only and cannot be checked from a
-session. **If "Delivered to users" did not collapse after `06a8858`, that is a
-real signal — re-diagnose, don't assume the fix worked.**
+### Verified after deploy — half of it worked, half shipped inert (#798)
+
+**Bug 1 confirmed fixed on production data.** Owner's post-deploy exports:
+"Delivered to users" **88 → 3**, "Queued, dropped by router" **3 → 104**. The
+three surviving `emitted` rows (B2USDT SHORT, DIAUSDT LONG, DEXEUSDT SHORT)
+match the app feed on symbol/side/entry/time. Router promotion fires on
+confirmed delivery; the schema marker holds across reload.
+
+**Bug 2 did not work at all — the guard read a key that never exists.** The
+mid-window check was `detail.get("exit_reason")`, the *walker's* internal key
+(`simulate_sar_exit`'s return). A **trail classifier** returns
+`trail_exit_reason` — the ledger's field name, renamed at exactly that boundary
+inside `classify_sar_record`. So the lookup was always `None`, never matched
+`REASON_TRAIL`, and `continue` fired on every early candidate. The path ran on
+schedule, fetched candles, walked the SAR, computed the correct exit, **and
+discarded it.** Fixed in #798 (`db476d8`, deploy green).
+
+The tell was again two pipelines disagreeing: the SAR ledger read 0 of 107
+resolved with the oldest row ~7h old, while the dark-signals replay showed the
+same trades exiting with `sar_hold` of 15/15/15/30/105 minutes. Same math, one
+side dropping its answer.
+
+**Why the tests passed against a dead path.** They hand-wrote the classifier's
+return with the invented key — `{"classification": "WIN", "exit_reason": ...}` —
+so they asserted against code that never ran. **A mock whose shape you chose
+cannot verify a contract you got wrong.** Coverage is rebuilt around the real
+`classify_sar_record`, over an OHLC dict shaped exactly like
+`fetch_ohlc_15m_since` returns, and the fix was checked by *reverting* the guard
+to confirm the new tests actually fail on the old key.
+
+**Still unverified end-to-end:** rows leaving RUNNING with `CLOSED_TRAIL` is a
+prediction until read in ops. **If they are still RUNNING ~15 min after
+`db476d8`, that is a third distinct cause — re-diagnose from a fresh export,
+don't assume.** (`delta_r` staying blank is *not* a fault: it needs the paired
+`@SARBASE` control, which still waits its full 48h window by design.)
 
 **Still true from Session 80:** the emitted sample restarts from zero, and now
 genuinely does — including the one real WIFUSDT delivery, which a pre-fix record
 carries no evidence for and so cannot be rescued. No SAR exit decision until a
 fresh window of *delivered* signals accumulates.
 
-**Process note worth keeping.** Two claims were repeated to the owner as settled
-and were wrong: that #794 had fixed the inflation (it had made it worse, 88x),
-and that "no SAR closed is arithmetic, not breakage" (the classifier was
-refusing to read data it already had). Both were caught by the owner comparing
-the panel against the real feed — the check no amount of internal
-self-consistency testing substitutes for. **When a measurement panel and the
-live feed disagree, the panel is the suspect.**
+**Process note worth keeping.** **Three** claims were stated to the owner as
+settled and were wrong: that #794 fixed the inflation (it made it worse, 88x);
+that "no SAR closed is arithmetic, not breakage" (the classifier was refusing to
+read data it already had); and that #795 fixed the resolution (it shipped
+inert). Every one was caught by the owner comparing a panel against real data —
+never by an internal test, because the internal tests were confirming the same
+assumption the code made. **When a measurement panel and the live feed disagree,
+the panel is the suspect — and when a panel and a second pipeline over the same
+trades disagree, one of them is discarding its answer.**
 
 ---
 
