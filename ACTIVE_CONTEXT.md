@@ -4,6 +4,54 @@
 
 ---
 
+## 🟢 SESSION 82 2026-07-26 — iPhone PWA: every setup screen needed two taps (lumin-app #137, merged)
+
+**Owner ask:** *"in iPhone web app while setting up, screens are not working
+properly, we need to press couple of times to go next screen — they are like
+freezing. After login everything is smooth."* Four screenshots: welcome slides
+1–3 and the phone sign-in form.
+
+**The diagnostic was in the ask.** "Smooth after login" is not a footnote — it
+localises the bug. Every `NavShell` tab owns a real scrollable that consumes a
+vertical drag. The screens that misbehave do not: the welcome carousel is a
+`PageView` that scrolls **horizontally only**, and `WelcomeConsentPage` /
+`PhoneSignInPage` are plain non-scrolling Columns. So any defect that depends on
+the Flutter scene absorbing vertical drags breaks on exactly the pre-login set
+and nowhere else.
+
+**Four causes, all on that path. Fixed together — any one left in place still
+costs the user a tap.**
+
+| # | Cause | Fix |
+|---|---|---|
+| 1 | The HTML document was free to scroll. Flutter paints into one canvas so there is nothing to scroll, but Safari rubber-bands the document on any drag the scene did not consume — including the small one starting an ordinary tap. Canvas shifts under the finger, the tap resolves against stale coordinates, the press only resets the overscroll. | `web/index.html`: `body` pinned out of flow at `inset: 0`, `overscroll-behavior: none`, `touch-action: manipulation` |
+| 2 | Seven text fields autofocused at mount. A browser raises the keyboard **only** inside a user gesture, so Flutter believed the field was focused while the user saw no keyboard — the first tap went into settling that. | New `lib/shared/platform_input.dart` → `kAutofocusTextFields` (`!kIsWeb`), applied at all seven sites. Native unchanged. |
+| 3 | `_FirstRunGate._advance` re-ran the async flag read, so every "Get Started" / "Continue" dropped to the blank splash for ≥1 frame and swallowed taps landing there. | Stage order is fixed → walk it synchronously, read storage once on mount. |
+| 4 | The carousel learned its slide from `onPageChanged`, which fires part-way through the 300ms animation; a tap before that read a stale index and re-targeted the slide already in flight. | Adopt the target on the frame the tap lands; guard `_done` so a double tap continues once. |
+
+**Off money-path** — onboarding chrome, web shell CSS, input focus. No engine
+contract, dispatch, FSM, scoring or entitlement surface touched, so it shipped
+via the normal PR path, not the dark-flag rule.
+
+**Verification:** `flutter analyze` no new issues (130 pre-existing
+`withOpacity` / `activeColor` deprecations unchanged) · full `flutter test`
+green incl. 7 new tests · `flutter build web --release --no-web-resources-cdn`
+clean. The new carousel test was confirmed to **fail** against the pre-fix
+widget and pass after, so it pins behaviour rather than restating the code.
+`test/web_shell_test.dart` guards the `index.html` block, which `flutter create`
+would otherwise regenerate away.
+
+**⚠️ Open item — not device-verified.** No iPhone in the session environment, so
+causes 1–2 are reasoned from the symptom and the platform rules, **not observed
+on hardware**. Owner to re-test the setup flow on `app.luminapp.org` from the
+iPhone. If any two-tap behaviour survives, the next lever is Flutter web's
+`flt-semantics-placeholder`, which can absorb the first pointer event of a
+session — `SemanticsBinding.instance.ensureSemantics()` on web removes it, at
+the cost of an always-on semantics tree. Deliberately left out rather than
+shipped speculatively.
+
+---
+
 ## 🟢 SESSION 81 2026-07-26 — #794 did not actually fix it: a guessed cutoff trusted 8h of pre-fix data (88x)
 
 **Owner ask:** *"still not matching and still Everything is running state when
