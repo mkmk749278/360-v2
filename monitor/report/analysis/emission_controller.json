@@ -64,6 +64,10 @@
       "MOVER_AVWAP_SCALP": {
         "suppress_negative": null,
         "min_samples": 20
+      },
+      "DIVERGENCE_CONTINUATION": {
+        "suppress_negative": false,
+        "min_samples": null
       }
     },
     "history": {
@@ -78,7 +82,7 @@
         "HOLD"
       ],
       "DIVERGENCE_CONTINUATION|suppress_negative": [
-        "KEEP",
+        "SKIP",
         "SKIP",
         "SKIP"
       ],
@@ -88,7 +92,7 @@
         "HOLD"
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
-        "SKIP",
+        "KEEP",
         "KEEP",
         "KEEP"
       ],
@@ -324,9 +328,10 @@
       "MEAN_REVERT@ATR|min_samples": 124,
       "MEAN_REVERT@FIXED|min_samples": 124,
       "LIQUIDITY_SWEEP_REVERSAL|suppress_negative": 149,
-      "MOVER_AVWAP_SCALP|min_samples": 173
+      "MOVER_AVWAP_SCALP|min_samples": 173,
+      "DIVERGENCE_CONTINUATION|suppress_negative": 210
     },
-    "cycle": 186
+    "cycle": 234
   },
   "ledger": [
     {
@@ -724,6 +729,18 @@
       "verdict": "LOWER",
       "ev_per_suppression_r": null,
       "n": 22
+    },
+    {
+      "strategy": "DIVERGENCE_CONTINUATION",
+      "param": "suppress_negative",
+      "old": true,
+      "new": false,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote",
+      "verdict": "DROP",
+      "ev_per_suppression_r": -0.3881123592077425,
+      "n": 113
     }
   ],
   "pending": [],
@@ -775,6 +792,9 @@
     },
     "MOVER_AVWAP_SCALP": {
       "min_samples": 20
+    },
+    "DIVERGENCE_CONTINUATION": {
+      "suppress_negative": false
     }
   }
 }

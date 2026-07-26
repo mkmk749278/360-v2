@@ -1,245 +1,499 @@
 {
   "totals": {
-    "WOULD_WIN": 714,
-    "WOULD_LOSE": 1155,
-    "WOULD_EXPIRE": 2170,
+    "WOULD_WIN": 513,
+    "WOULD_LOSE": 1300,
+    "WOULD_EXPIRE": 2687,
     "INSUFFICIENT_DATA": 0
   },
-  "pending": 961,
+  "pending": 500,
   "by_setup": {
-    "SR_FLIP_RETEST": {
-      "WOULD_WIN": 186,
-      "WOULD_LOSE": 623,
-      "WOULD_EXPIRE": 330,
-      "INSUFFICIENT_DATA": 0
-    },
-    "SHADOW_FUNDING_FADE": {
-      "WOULD_WIN": 43,
-      "WOULD_LOSE": 15,
-      "WOULD_EXPIRE": 0,
-      "INSUFFICIENT_DATA": 0
-    },
-    "SHADOW_MEAN_REVERT": {
-      "WOULD_WIN": 8,
-      "WOULD_LOSE": 29,
-      "WOULD_EXPIRE": 5,
-      "INSUFFICIENT_DATA": 0
-    },
-    "FAILED_AUCTION_RECLAIM": {
-      "WOULD_WIN": 2,
-      "WOULD_LOSE": 83,
-      "WOULD_EXPIRE": 739,
-      "INSUFFICIENT_DATA": 0
-    },
     "MOVER_TREND_PULLBACK": {
-      "WOULD_WIN": 314,
-      "WOULD_LOSE": 217,
-      "WOULD_EXPIRE": 658,
+      "WOULD_WIN": 118,
+      "WOULD_LOSE": 619,
+      "WOULD_EXPIRE": 471,
       "INSUFFICIENT_DATA": 0
     },
     "SHADOW_RANGE_FADE": {
-      "WOULD_WIN": 32,
-      "WOULD_LOSE": 23,
-      "WOULD_EXPIRE": 32,
-      "INSUFFICIENT_DATA": 0
-    },
-    "DIVERGENCE_CONTINUATION": {
-      "WOULD_WIN": 74,
-      "WOULD_LOSE": 120,
-      "WOULD_EXPIRE": 44,
+      "WOULD_WIN": 28,
+      "WOULD_LOSE": 11,
+      "WOULD_EXPIRE": 13,
       "INSUFFICIENT_DATA": 0
     },
     "QUIET_COMPRESSION_BREAK": {
-      "WOULD_WIN": 0,
-      "WOULD_LOSE": 0,
-      "WOULD_EXPIRE": 247,
+      "WOULD_WIN": 23,
+      "WOULD_LOSE": 1,
+      "WOULD_EXPIRE": 172,
+      "INSUFFICIENT_DATA": 0
+    },
+    "FAILED_AUCTION_RECLAIM": {
+      "WOULD_WIN": 77,
+      "WOULD_LOSE": 327,
+      "WOULD_EXPIRE": 1178,
       "INSUFFICIENT_DATA": 0
     },
     "LIQUIDITY_SWEEP_REVERSAL": {
-      "WOULD_WIN": 23,
-      "WOULD_LOSE": 13,
-      "WOULD_EXPIRE": 111,
+      "WOULD_WIN": 15,
+      "WOULD_LOSE": 12,
+      "WOULD_EXPIRE": 1,
       "INSUFFICIENT_DATA": 0
     },
-    "MOVER_AVWAP_SCALP": {
-      "WOULD_WIN": 28,
-      "WOULD_LOSE": 0,
+    "SHADOW_MEAN_REVERT": {
+      "WOULD_WIN": 3,
+      "WOULD_LOSE": 2,
+      "WOULD_EXPIRE": 15,
+      "INSUFFICIENT_DATA": 0
+    },
+    "SHADOW_FUNDING_FADE": {
+      "WOULD_WIN": 10,
+      "WOULD_LOSE": 5,
       "WOULD_EXPIRE": 0,
       "INSUFFICIENT_DATA": 0
     },
-    "SHADOW_CASCADE_REVERSAL": {
-      "WOULD_WIN": 1,
-      "WOULD_LOSE": 2,
-      "WOULD_EXPIRE": 2,
+    "SR_FLIP_RETEST": {
+      "WOULD_WIN": 164,
+      "WOULD_LOSE": 264,
+      "WOULD_EXPIRE": 786,
       "INSUFFICIENT_DATA": 0
     },
-    "FUNDING_EXTREME_SIGNAL": {
-      "WOULD_WIN": 3,
-      "WOULD_LOSE": 30,
-      "WOULD_EXPIRE": 1,
+    "DIVERGENCE_CONTINUATION": {
+      "WOULD_WIN": 75,
+      "WOULD_LOSE": 34,
+      "WOULD_EXPIRE": 51,
       "INSUFFICIENT_DATA": 0
     },
     "VOLUME_SURGE_BREAKOUT": {
       "WOULD_WIN": 0,
-      "WOULD_LOSE": 0,
-      "WOULD_EXPIRE": 1,
+      "WOULD_LOSE": 18,
+      "WOULD_EXPIRE": 0,
+      "INSUFFICIENT_DATA": 0
+    },
+    "FUNDING_EXTREME_SIGNAL": {
+      "WOULD_WIN": 0,
+      "WOULD_LOSE": 7,
+      "WOULD_EXPIRE": 0,
       "INSUFFICIENT_DATA": 0
     }
   },
   "by_gate": {
-    "min_confidence": {
-      "WOULD_WIN": 290,
-      "WOULD_LOSE": 608,
-      "WOULD_EXPIRE": 345,
-      "saved_r": 804.7697043033866,
-      "missed_r": 333.0204605789909,
-      "n": 1243,
-      "would_win_pct": 23.33065164923572,
-      "ev_per_suppression_r": 0.379524733487044,
-      "verdict": "KEEP"
-    },
-    "level_still_in_play": {
-      "WOULD_WIN": 131,
-      "WOULD_LOSE": 203,
-      "WOULD_EXPIRE": 623,
-      "saved_r": 311.6169434983196,
-      "missed_r": 45.69994875742788,
-      "n": 957,
-      "would_win_pct": 13.688610240334379,
-      "ev_per_suppression_r": 0.27786519826634454,
-      "verdict": "KEEP"
-    },
-    "shadow_unit:SHADOW_FUNDING_FADE": {
-      "WOULD_WIN": 43,
-      "WOULD_LOSE": 15,
-      "WOULD_EXPIRE": 0,
-      "saved_r": 16.167379664400222,
-      "missed_r": 30.870802669870226,
-      "n": 58,
-      "would_win_pct": 74.13793103448276,
-      "ev_per_suppression_r": -0.25350729319775867,
-      "verdict": "DROP"
-    },
-    "shadow_unit:SHADOW_MEAN_REVERT": {
-      "WOULD_WIN": 8,
-      "WOULD_LOSE": 29,
-      "WOULD_EXPIRE": 5,
-      "saved_r": 30.817712168232188,
-      "missed_r": 19.20101905110809,
-      "n": 42,
-      "would_win_pct": 19.047619047619047,
-      "ev_per_suppression_r": 0.2765879313600975,
-      "verdict": "KEEP"
-    },
-    "context_floor:FAILED_AUCTION_RECLAIM": {
-      "WOULD_WIN": 0,
-      "WOULD_LOSE": 41,
-      "WOULD_EXPIRE": 424,
-      "saved_r": 115.52222703900837,
-      "missed_r": 0.0,
-      "n": 465,
-      "would_win_pct": 0.0,
-      "ev_per_suppression_r": 0.2484348968580825,
-      "verdict": "KEEP"
-    },
     "dispatch_staleness_v2": {
-      "WOULD_WIN": 119,
-      "WOULD_LOSE": 100,
-      "WOULD_EXPIRE": 364,
-      "saved_r": 137.70798618080104,
-      "missed_r": 54.92900026762944,
-      "n": 583,
-      "would_win_pct": 20.411663807890225,
-      "ev_per_suppression_r": 0.1419879689762806,
+      "WOULD_WIN": 33,
+      "WOULD_LOSE": 110,
+      "WOULD_EXPIRE": 233,
+      "saved_r": 139.62457560266893,
+      "missed_r": 18.05301930475459,
+      "n": 376,
+      "would_win_pct": 8.77659574468085,
+      "ev_per_suppression_r": 0.3233286071753041,
       "verdict": "KEEP"
     },
     "shadow_unit:SHADOW_RANGE_FADE": {
-      "WOULD_WIN": 32,
-      "WOULD_LOSE": 23,
-      "WOULD_EXPIRE": 32,
-      "saved_r": 30.994410487071967,
-      "missed_r": 76.87387686107395,
-      "n": 87,
-      "would_win_pct": 36.7816091954023,
-      "ev_per_suppression_r": -0.5273501882069194,
+      "WOULD_WIN": 28,
+      "WOULD_LOSE": 11,
+      "WOULD_EXPIRE": 13,
+      "saved_r": 12.389437514517596,
+      "missed_r": 66.54350349601879,
+      "n": 52,
+      "would_win_pct": 53.84615384615385,
+      "ev_per_suppression_r": -1.0414243457980998,
       "verdict": "DROP"
     },
     "quiet_scalp_block": {
-      "WOULD_WIN": 42,
-      "WOULD_LOSE": 74,
-      "WOULD_EXPIRE": 176,
-      "saved_r": 137.15974868126906,
-      "missed_r": 41.05932454508585,
-      "n": 292,
-      "would_win_pct": 14.383561643835616,
-      "ev_per_suppression_r": 0.32911104156227133,
+      "WOULD_WIN": 25,
+      "WOULD_LOSE": 50,
+      "WOULD_EXPIRE": 364,
+      "saved_r": 134.42767122749336,
+      "missed_r": 33.25387317298557,
+      "n": 439,
+      "would_win_pct": 5.694760820045558,
+      "ev_per_suppression_r": 0.23046423247040498,
       "verdict": "KEEP"
     },
-    "context_floor:DIVERGENCE_CONTINUATION": {
-      "WOULD_WIN": 47,
-      "WOULD_LOSE": 60,
-      "WOULD_EXPIRE": 21,
-      "saved_r": 72.63145977194361,
-      "missed_r": 71.79106627182775,
-      "n": 128,
-      "would_win_pct": 36.71875,
-      "ev_per_suppression_r": 0.006565574219655201,
+    "level_still_in_play": {
+      "WOULD_WIN": 110,
+      "WOULD_LOSE": 20,
+      "WOULD_EXPIRE": 556,
+      "saved_r": 101.54824955706604,
+      "missed_r": 59.94558485455958,
+      "n": 686,
+      "would_win_pct": 16.034985422740526,
+      "ev_per_suppression_r": 0.060645283822895725,
       "verdict": "TUNE"
     },
-    "shadow_unit:SHADOW_CASCADE_REVERSAL": {
-      "WOULD_WIN": 1,
-      "WOULD_LOSE": 2,
-      "WOULD_EXPIRE": 2,
-      "saved_r": 2.136845147654541,
-      "missed_r": 0.8441580734794686,
-      "n": 5,
-      "would_win_pct": 20.0,
-      "ev_per_suppression_r": 0.2585374148350145,
-      "verdict": "INSUFFICIENT_SAMPLE"
+    "min_confidence": {
+      "WOULD_WIN": 195,
+      "WOULD_LOSE": 831,
+      "WOULD_EXPIRE": 595,
+      "saved_r": 1108.137185261609,
+      "missed_r": 226.25980247755294,
+      "n": 1621,
+      "would_win_pct": 12.02961135101789,
+      "ev_per_suppression_r": 0.5440329320074374,
+      "verdict": "KEEP"
     },
     "context_floor:QUIET_COMPRESSION_BREAK": {
       "WOULD_WIN": 0,
-      "WOULD_LOSE": 0,
+      "WOULD_LOSE": 1,
       "WOULD_EXPIRE": 112,
-      "saved_r": 16.45718609298118,
+      "saved_r": 15.74434308582909,
       "missed_r": 0.0,
-      "n": 112,
+      "n": 113,
       "would_win_pct": 0.0,
-      "ev_per_suppression_r": 0.1469391615444748,
+      "ev_per_suppression_r": 0.13933046978609814,
       "verdict": "KEEP"
     },
-    "data_stale": {
-      "WOULD_WIN": 1,
-      "WOULD_LOSE": 0,
-      "WOULD_EXPIRE": 0,
-      "saved_r": 0.0,
-      "missed_r": 0.2625324069021434,
-      "n": 1,
-      "would_win_pct": 100.0,
-      "ev_per_suppression_r": -0.2625324069021434,
-      "verdict": "INSUFFICIENT_SAMPLE"
+    "context_floor:FAILED_AUCTION_RECLAIM": {
+      "WOULD_WIN": 73,
+      "WOULD_LOSE": 270,
+      "WOULD_EXPIRE": 798,
+      "saved_r": 442.3729443049216,
+      "missed_r": 137.382092621272,
+      "n": 1141,
+      "would_win_pct": 6.397896581945661,
+      "ev_per_suppression_r": 0.2673013599330846,
+      "verdict": "KEEP"
     },
-    "context_floor:VOLUME_SURGE_BREAKOUT": {
-      "WOULD_WIN": 0,
-      "WOULD_LOSE": 0,
-      "WOULD_EXPIRE": 1,
-      "saved_r": 0.1738743070483073,
-      "missed_r": 0.0,
-      "n": 1,
-      "would_win_pct": 0.0,
-      "ev_per_suppression_r": 0.1738743070483073,
+    "shadow_unit:SHADOW_MEAN_REVERT": {
+      "WOULD_WIN": 3,
+      "WOULD_LOSE": 2,
+      "WOULD_EXPIRE": 15,
+      "saved_r": 2.8439528400631637,
+      "missed_r": 5.552064985952008,
+      "n": 20,
+      "would_win_pct": 15.0,
+      "ev_per_suppression_r": -0.1354056072944422,
+      "verdict": "TUNE"
+    },
+    "shadow_unit:SHADOW_FUNDING_FADE": {
+      "WOULD_WIN": 10,
+      "WOULD_LOSE": 5,
+      "WOULD_EXPIRE": 0,
+      "saved_r": 5.1645240137221275,
+      "missed_r": 7.2534043720709525,
+      "n": 15,
+      "would_win_pct": 66.66666666666666,
+      "ev_per_suppression_r": -0.13925869055658832,
       "verdict": "INSUFFICIENT_SAMPLE"
     },
     "dispatch_cooldown": {
-      "WOULD_WIN": 0,
+      "WOULD_WIN": 36,
       "WOULD_LOSE": 0,
-      "WOULD_EXPIRE": 65,
-      "saved_r": 11.497751411591448,
-      "missed_r": 0.0,
-      "n": 65,
-      "would_win_pct": 0.0,
-      "ev_per_suppression_r": 0.17688848325525305,
+      "WOULD_EXPIRE": 1,
+      "saved_r": 0.0833667820811392,
+      "missed_r": 45.68338833114541,
+      "n": 37,
+      "would_win_pct": 97.2972972972973,
+      "ev_per_suppression_r": -1.232433014839575,
+      "verdict": "DROP"
+    }
+  },
+  "by_setup_gate": {
+    "MOVER_TREND_PULLBACK|dispatch_staleness_v2": {
+      "setup_class": "MOVER_TREND_PULLBACK",
+      "gate_name": "dispatch_staleness_v2",
+      "n": 361,
+      "would_win": 26,
+      "would_lose": 110,
+      "would_expire": 225,
+      "would_win_pct": 0.07202216066481995,
+      "ev_per_suppression_r": 0.3354634967657454,
       "verdict": "KEEP"
+    },
+    "SHADOW_RANGE_FADE|shadow_unit:SHADOW_RANGE_FADE": {
+      "setup_class": "SHADOW_RANGE_FADE",
+      "gate_name": "shadow_unit:SHADOW_RANGE_FADE",
+      "n": 52,
+      "would_win": 28,
+      "would_lose": 11,
+      "would_expire": 13,
+      "would_win_pct": 0.5384615384615384,
+      "ev_per_suppression_r": -1.0414243457981,
+      "verdict": "DROP"
+    },
+    "QUIET_COMPRESSION_BREAK|quiet_scalp_block": {
+      "setup_class": "QUIET_COMPRESSION_BREAK",
+      "gate_name": "quiet_scalp_block",
+      "n": 33,
+      "would_win": 0,
+      "would_lose": 0,
+      "would_expire": 33,
+      "would_win_pct": 0.0,
+      "ev_per_suppression_r": 0.16425489415040392,
+      "verdict": "KEEP"
+    },
+    "MOVER_TREND_PULLBACK|level_still_in_play": {
+      "setup_class": "MOVER_TREND_PULLBACK",
+      "gate_name": "level_still_in_play",
+      "n": 126,
+      "would_win": 53,
+      "would_lose": 17,
+      "would_expire": 56,
+      "would_win_pct": 0.42063492063492064,
+      "ev_per_suppression_r": -0.18047917571816677,
+      "verdict": "TUNE"
+    },
+    "MOVER_TREND_PULLBACK|quiet_scalp_block": {
+      "setup_class": "MOVER_TREND_PULLBACK",
+      "gate_name": "quiet_scalp_block",
+      "n": 86,
+      "would_win": 12,
+      "would_lose": 0,
+      "would_expire": 74,
+      "would_win_pct": 0.13953488372093023,
+      "ev_per_suppression_r": -0.07042694691197232,
+      "verdict": "TUNE"
+    },
+    "MOVER_TREND_PULLBACK|min_confidence": {
+      "setup_class": "MOVER_TREND_PULLBACK",
+      "gate_name": "min_confidence",
+      "n": 622,
+      "would_win": 14,
+      "would_lose": 492,
+      "would_expire": 116,
+      "would_win_pct": 0.022508038585209004,
+      "ev_per_suppression_r": 0.8892503066869551,
+      "verdict": "KEEP"
+    },
+    "QUIET_COMPRESSION_BREAK|context_floor:QUIET_COMPRESSION_BREAK": {
+      "setup_class": "QUIET_COMPRESSION_BREAK",
+      "gate_name": "context_floor:QUIET_COMPRESSION_BREAK",
+      "n": 113,
+      "would_win": 0,
+      "would_lose": 1,
+      "would_expire": 112,
+      "would_win_pct": 0.0,
+      "ev_per_suppression_r": 0.13933046978609814,
+      "verdict": "KEEP"
+    },
+    "FAILED_AUCTION_RECLAIM|quiet_scalp_block": {
+      "setup_class": "FAILED_AUCTION_RECLAIM",
+      "gate_name": "quiet_scalp_block",
+      "n": 201,
+      "would_win": 4,
+      "would_lose": 9,
+      "would_expire": 188,
+      "would_win_pct": 0.01990049751243781,
+      "ev_per_suppression_r": 0.19065947281306742,
+      "verdict": "KEEP"
+    },
+    "FAILED_AUCTION_RECLAIM|context_floor:FAILED_AUCTION_RECLAIM": {
+      "setup_class": "FAILED_AUCTION_RECLAIM",
+      "gate_name": "context_floor:FAILED_AUCTION_RECLAIM",
+      "n": 1141,
+      "would_win": 73,
+      "would_lose": 270,
+      "would_expire": 798,
+      "would_win_pct": 0.06397896581945661,
+      "ev_per_suppression_r": 0.26730135993308307,
+      "verdict": "KEEP"
+    },
+    "LIQUIDITY_SWEEP_REVERSAL|quiet_scalp_block": {
+      "setup_class": "LIQUIDITY_SWEEP_REVERSAL",
+      "gate_name": "quiet_scalp_block",
+      "n": 16,
+      "would_win": 3,
+      "would_lose": 12,
+      "would_expire": 1,
+      "would_win_pct": 0.1875,
+      "ev_per_suppression_r": 0.8532750101256981,
+      "verdict": "INSUFFICIENT_SAMPLE"
+    },
+    "SHADOW_MEAN_REVERT|shadow_unit:SHADOW_MEAN_REVERT": {
+      "setup_class": "SHADOW_MEAN_REVERT",
+      "gate_name": "shadow_unit:SHADOW_MEAN_REVERT",
+      "n": 20,
+      "would_win": 3,
+      "would_lose": 2,
+      "would_expire": 15,
+      "would_win_pct": 0.15,
+      "ev_per_suppression_r": -0.13540560729444215,
+      "verdict": "TUNE"
+    },
+    "FAILED_AUCTION_RECLAIM|level_still_in_play": {
+      "setup_class": "FAILED_AUCTION_RECLAIM",
+      "gate_name": "level_still_in_play",
+      "n": 171,
+      "would_win": 0,
+      "would_lose": 0,
+      "would_expire": 171,
+      "would_win_pct": 0.0,
+      "ev_per_suppression_r": 0.15260877031546932,
+      "verdict": "KEEP"
+    },
+    "SHADOW_FUNDING_FADE|shadow_unit:SHADOW_FUNDING_FADE": {
+      "setup_class": "SHADOW_FUNDING_FADE",
+      "gate_name": "shadow_unit:SHADOW_FUNDING_FADE",
+      "n": 15,
+      "would_win": 10,
+      "would_lose": 5,
+      "would_expire": 0,
+      "would_win_pct": 0.6666666666666666,
+      "ev_per_suppression_r": -0.13925869055658838,
+      "verdict": "INSUFFICIENT_SAMPLE"
+    },
+    "SR_FLIP_RETEST|min_confidence": {
+      "setup_class": "SR_FLIP_RETEST",
+      "gate_name": "min_confidence",
+      "n": 777,
+      "would_win": 123,
+      "would_lose": 235,
+      "would_expire": 419,
+      "would_win_pct": 0.1583011583011583,
+      "ev_per_suppression_r": 0.36011179572436236,
+      "verdict": "KEEP"
+    },
+    "DIVERGENCE_CONTINUATION|min_confidence": {
+      "setup_class": "DIVERGENCE_CONTINUATION",
+      "gate_name": "min_confidence",
+      "n": 128,
+      "would_win": 58,
+      "would_lose": 31,
+      "would_expire": 39,
+      "would_win_pct": 0.453125,
+      "ev_per_suppression_r": -0.29596809947359715,
+      "verdict": "DROP"
+    },
+    "SR_FLIP_RETEST|quiet_scalp_block": {
+      "setup_class": "SR_FLIP_RETEST",
+      "gate_name": "quiet_scalp_block",
+      "n": 92,
+      "would_win": 6,
+      "would_lose": 26,
+      "would_expire": 60,
+      "would_win_pct": 0.06521739130434782,
+      "ev_per_suppression_r": 0.4866592367884388,
+      "verdict": "KEEP"
+    },
+    "SR_FLIP_RETEST|level_still_in_play": {
+      "setup_class": "SR_FLIP_RETEST",
+      "gate_name": "level_still_in_play",
+      "n": 337,
+      "would_win": 35,
+      "would_lose": 3,
+      "would_expire": 299,
+      "would_win_pct": 0.10385756676557864,
+      "ev_per_suppression_r": 0.12784303700309266,
+      "verdict": "KEEP"
+    },
+    "DIVERGENCE_CONTINUATION|quiet_scalp_block": {
+      "setup_class": "DIVERGENCE_CONTINUATION",
+      "gate_name": "quiet_scalp_block",
+      "n": 11,
+      "would_win": 0,
+      "would_lose": 3,
+      "would_expire": 8,
+      "would_win_pct": 0.0,
+      "ev_per_suppression_r": 0.4602272727272732,
+      "verdict": "INSUFFICIENT_SAMPLE"
+    },
+    "QUIET_COMPRESSION_BREAK|level_still_in_play": {
+      "setup_class": "QUIET_COMPRESSION_BREAK",
+      "gate_name": "level_still_in_play",
+      "n": 26,
+      "would_win": 0,
+      "would_lose": 0,
+      "would_expire": 26,
+      "would_win_pct": 0.0,
+      "ev_per_suppression_r": 0.10044346565039507,
+      "verdict": "KEEP"
+    },
+    "FAILED_AUCTION_RECLAIM|min_confidence": {
+      "setup_class": "FAILED_AUCTION_RECLAIM",
+      "gate_name": "min_confidence",
+      "n": 69,
+      "would_win": 0,
+      "would_lose": 48,
+      "would_expire": 21,
+      "would_win_pct": 0.0,
+      "ev_per_suppression_r": 0.8167373428727023,
+      "verdict": "KEEP"
+    },
+    "VOLUME_SURGE_BREAKOUT|min_confidence": {
+      "setup_class": "VOLUME_SURGE_BREAKOUT",
+      "gate_name": "min_confidence",
+      "n": 18,
+      "would_win": 0,
+      "would_lose": 18,
+      "would_expire": 0,
+      "would_win_pct": 0.0,
+      "ev_per_suppression_r": 1.178131651261317,
+      "verdict": "INSUFFICIENT_SAMPLE"
+    },
+    "LIQUIDITY_SWEEP_REVERSAL|level_still_in_play": {
+      "setup_class": "LIQUIDITY_SWEEP_REVERSAL",
+      "gate_name": "level_still_in_play",
+      "n": 5,
+      "would_win": 5,
+      "would_lose": 0,
+      "would_expire": 0,
+      "would_win_pct": 1.0,
+      "ev_per_suppression_r": -0.23678721578721723,
+      "verdict": "INSUFFICIENT_SAMPLE"
+    },
+    "LIQUIDITY_SWEEP_REVERSAL|dispatch_staleness_v2": {
+      "setup_class": "LIQUIDITY_SWEEP_REVERSAL",
+      "gate_name": "dispatch_staleness_v2",
+      "n": 7,
+      "would_win": 7,
+      "would_lose": 0,
+      "would_expire": 0,
+      "would_win_pct": 1.0,
+      "ev_per_suppression_r": -0.14725229064564752,
+      "verdict": "INSUFFICIENT_SAMPLE"
+    },
+    "DIVERGENCE_CONTINUATION|level_still_in_play": {
+      "setup_class": "DIVERGENCE_CONTINUATION",
+      "gate_name": "level_still_in_play",
+      "n": 21,
+      "would_win": 17,
+      "would_lose": 0,
+      "would_expire": 4,
+      "would_win_pct": 0.8095238095238095,
+      "ev_per_suppression_r": -0.29827411328409736,
+      "verdict": "DROP"
+    },
+    "SR_FLIP_RETEST|dispatch_staleness_v2": {
+      "setup_class": "SR_FLIP_RETEST",
+      "gate_name": "dispatch_staleness_v2",
+      "n": 8,
+      "would_win": 0,
+      "would_lose": 0,
+      "would_expire": 8,
+      "would_win_pct": 0.0,
+      "ev_per_suppression_r": 0.1874999999999987,
+      "verdict": "INSUFFICIENT_SAMPLE"
+    },
+    "QUIET_COMPRESSION_BREAK|dispatch_cooldown": {
+      "setup_class": "QUIET_COMPRESSION_BREAK",
+      "gate_name": "dispatch_cooldown",
+      "n": 24,
+      "would_win": 23,
+      "would_lose": 0,
+      "would_expire": 1,
+      "would_win_pct": 0.9583333333333334,
+      "ev_per_suppression_r": -1.8108018335246117,
+      "verdict": "DROP"
+    },
+    "MOVER_TREND_PULLBACK|dispatch_cooldown": {
+      "setup_class": "MOVER_TREND_PULLBACK",
+      "gate_name": "dispatch_cooldown",
+      "n": 13,
+      "would_win": 13,
+      "would_lose": 0,
+      "would_expire": 0,
+      "would_win_pct": 1.0,
+      "ev_per_suppression_r": -0.1646751957287367,
+      "verdict": "INSUFFICIENT_SAMPLE"
+    },
+    "FUNDING_EXTREME_SIGNAL|min_confidence": {
+      "setup_class": "FUNDING_EXTREME_SIGNAL",
+      "gate_name": "min_confidence",
+      "n": 7,
+      "would_win": 0,
+      "would_lose": 7,
+      "would_expire": 0,
+      "would_win_pct": 0.0,
+      "ev_per_suppression_r": 1.3256424426637123,
+      "verdict": "INSUFFICIENT_SAMPLE"
     }
   }
 }

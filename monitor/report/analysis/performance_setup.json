@@ -19,12 +19,12 @@
   },
   {
     "setup": "MOVER_TREND_PULLBACK",
-    "n": 179,
-    "wins": 22,
-    "losses": 62,
+    "n": 182,
+    "wins": 23,
+    "losses": 64,
     "neutral": 95,
-    "win_rate_pct": 12.3,
-    "avg_pnl_pct": -0.3682
+    "win_rate_pct": 12.6,
+    "avg_pnl_pct": -0.3347
   },
   {
     "setup": "DIVERGENCE_CONTINUATION",
@@ -37,12 +37,12 @@
   },
   {
     "setup": "LIQUIDITY_SWEEP_REVERSAL",
-    "n": 77,
-    "wins": 13,
-    "losses": 38,
+    "n": 79,
+    "wins": 14,
+    "losses": 39,
     "neutral": 26,
-    "win_rate_pct": 16.9,
-    "avg_pnl_pct": -0.2451
+    "win_rate_pct": 17.7,
+    "avg_pnl_pct": -0.1832
   },
   {
     "setup": "MOVER_AVWAP_SCALP",
