@@ -683,6 +683,22 @@ class SuppressedCandidateStore:
                 promoted += 1
             return promoted
 
+    def clear(self) -> int:
+        """Drop every record and persist the empty ledger.  Returns the count.
+
+        Owner-initiated purge: when a defect is found in how records were
+        *resolved*, the rows are evidence of the bug rather than of the thing
+        being measured, and leaving them in poisons every consumer that pools
+        them (the edge matrix keys on the same cells).  ``stamped_total`` is
+        deliberately NOT reset — the liveness probes watch it for a monotonic
+        heartbeat and a reset would read as a dead feature.
+        """
+        with self._lock:
+            n = len(self._buffer)
+            self._buffer.clear()
+        self._save()
+        return n
+
     def records(self) -> List[dict]:
         with self._lock:
             return list(self._buffer)

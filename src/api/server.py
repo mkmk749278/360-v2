@@ -2242,6 +2242,16 @@ def build_app(
         owner_required=owner_required,
     )
 
+    # ---- Admin SAR shadow-ledger purge (owner-only) ----
+    # Separate from reset-signals on purpose: one wipes what users see, the
+    # other wipes a measurement window.  See sar_ledger_route's docstring.
+    from . import sar_ledger_route as _sar_ledger_route
+    _sar_ledger_route.register(
+        app,
+        engine=engine,
+        owner_required=owner_required,
+    )
+
     # ---- Admin force-close one signal (owner-only, ops "Close" button) ----
     # POST /api/admin/close-signal — force-close a stuck OPEN signal via the
     # expiry-close primitives. Single-process direct; isolated via the shared

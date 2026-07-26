@@ -345,6 +345,25 @@ class RedisEngineFacade:
         loop.create_task(_write_cmd())
         return True, "full signal reset queued (takes effect on next engine cycle, ≤15s)"
 
+    def request_sar_ledger_clear(self) -> tuple:
+        """Queue an owner-initiated SAR shadow-ledger purge for the engine.
+
+        Fire-and-forget like the reset command — the engine container holds the
+        buffer and the persist file, so clearing has to happen there.
+        """
+        loop = asyncio.get_running_loop()
+
+        async def _write_cmd() -> None:
+            if self._redis.available:
+                await self._redis.client.set(
+                    _store.KEY_CMD_CLEAR_SAR_LEDGER, "1", ex=_store.TTL_CMD_RESET
+                )
+            else:
+                log.warning("redis_engine.request_sar_ledger_clear: Redis unavailable — command lost")
+
+        loop.create_task(_write_cmd())
+        return True, "SAR ledger clear queued (takes effect on next engine cycle, \u226415s)"
+
     # ------------------------------------------------------------------
     # Manual take (owner-approved 2026-07-17)
     # ------------------------------------------------------------------

@@ -94,6 +94,7 @@ class SnapshotWriter:
         await self._apply_pending_mode_cmd()
         # Check for a pending full-signal-reset command from the API container.
         await self._apply_pending_reset_cmd()
+        await self._apply_pending_sar_clear_cmd()
 
     # ------------------------------------------------------------------
     # Individual writers
@@ -343,6 +344,25 @@ class SnapshotWriter:
             log.info("snapshot_writer: full signal reset complete: {}", result)
         except Exception:
             log.exception("snapshot_writer: failed to apply reset_signals command")
+
+    # ------------------------------------------------------------------
+    # SAR shadow-ledger purge command
+    # ------------------------------------------------------------------
+
+    async def _apply_pending_sar_clear_cmd(self) -> None:
+        """Pick up an owner-initiated SAR ledger purge queued by the API."""
+        if not self._redis.available:
+            return
+        try:
+            raw = await self._redis.client.get(_store.KEY_CMD_CLEAR_SAR_LEDGER)
+            if raw is None:
+                return
+            await self._redis.client.delete(_store.KEY_CMD_CLEAR_SAR_LEDGER)
+            from src import sar_exit_shadow as _sar
+            n = _sar.get_sar_store().clear()
+            log.info("snapshot_writer: SAR ledger cleared on owner request ({} records)", n)
+        except Exception:
+            log.exception("snapshot_writer: failed to apply clear_sar_ledger command")
 
     # ------------------------------------------------------------------
     # Internal helper

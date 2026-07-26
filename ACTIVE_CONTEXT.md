@@ -4,6 +4,141 @@
 
 ---
 
+## 🟢 SESSION 83 2026-07-26 — The SAR arm was replaying the wrong candle (#800, ops #89 + #90)
+
+**Owner ask:** *"what happening to counter SAR signals — within 15 mins they are
+seeing huge loss"*, with the `sar_signals` CSV attached. The question was about
+counter-SAR entries. The answer was that the arm had not been measuring anything.
+
+### The export disproved itself
+
+| TRUMPUSDT SHORT | stamped | entry | exit |
+|---|---|---|---|
+| | 09:55:35 | 1.582 | **1.598** |
+| | 12:21:29 | 1.574 | **1.598** |
+| | 13:01:03 | 1.570 | **1.598** |
+
+Exit price was a pure function of **(symbol, side)** — stamp time irrelevant.
+XRPUSDT's nine rows gave two prices, one per side; DOGEUSDT, HYPEUSDT, BNBUSDT
+the same. 41% of supposed one-bar moves exceeded 5%, the worst was **51.8% in a
+single 15m bar**, all 172 rows claimed exactly a 15-minute hold, and `delta_r`
+was populated on **0 of 172** — so there was no A/B either. Mean −4.40R,
+cumulative −757R, all of it fabricated.
+
+### Root cause — an index inferred instead of looked up
+
+`fetch_ohlc_15m_since` found the entry bar arithmetically: `n_post = elapsed //
+bar_sec`, counted back from the end of the array. That assumes the candle array
+is gap-free **and** its last bar is current. Neither holds — feeds drop frames,
+and a frozen feed keeps serving its last bar, which is why
+`last_kline_age_seconds` exists at all (the MVLLUSDT 11-hour freeze). When the
+assumption broke, `min()` on the length and `max(0, …)` on the index **absorbed
+it silently**, so the walk replayed an unrelated bar and still returned a
+confident verdict. A stale feed pinned every record for a symbol to the same
+physical bar — exactly the constant-exit-price signature above.
+
+The store could not have caught it: `update_candle` kept only OHLCV, **no
+timestamps**.
+
+**Fix:** candles carry `open_time` (seed + WS), the entry bar is located by
+searching it, and the window is verified — finite timestamps, contiguous bars,
+and the stamp actually *inside* the selected bar. Anything else returns `None`
+and the record resolves INSUFFICIENT.
+
+### Rules this bought
+
+- **A clamp is not a guard.** `min()`/`max(0, …)` on an index turn "I cannot
+  answer this" into a wrong answer with no signal. Where an input may not
+  support the computation, **refuse** — a record that cannot be honestly
+  replayed must produce no verdict. "We don't know" is a usable output; an
+  invented number is not.
+- **Positional data needs its own key.** Any array consumed by *when* something
+  happened must carry the timestamp; inferring the index from wall-clock
+  arithmetic is a silent-corruption class, not an optimisation.
+- **When rows are evidence of a defect, purge — don't migrate.** No field can
+  rescue a row whose candles were wrong. The ledger restarted on
+  `sar_exit_candidates_v2.json`; v1 stays on disk for forensics, never read.
+
+### Counter-SAR — the original question, now answerable
+
+A trailing SAR is a stop that is *already somewhere* at entry. Agreed → its level
+sits behind the entry and the trail rides (the method being measured). Opposed →
+its level is already the wrong side of price, so the trade dies on the first
+testable bar for **≈ −0.25R** (0.6% stop) or **≈ −0.50R** (0.3% stop) — a scratch
+still pays the round trip. That figure says we took a signal against the
+indicator; it says nothing about trail quality. Pooled, the headline moves with
+the agreement mix rather than with the exit, so `sar_aligned_at_entry` is
+recorded and the buckets are reported separately with an **opposed-share**.
+
+**Process note.** The alignment split first shipped engine-side with nothing
+calling `summarize_sar_alignment` and nothing rendering the flag — a scaffold,
+caught by the owner asking the question a second time. Ops #90 closed it. *A
+measurement is not shipped until a surface reads it.*
+
+### Open
+
+- **The v2 ledger starts empty.** No verdict until a clean window accumulates.
+  The buckets fill at very different rates — opposed resolves in 15 minutes,
+  aligned sits RUNNING for hours — so an early read is biased against SAR.
+- **Watch for INSUFFICIENT clustered on particular symbols**: that is a real 15m
+  feed gap the old code was papering over, worth chasing on its own.
+- **Activation policy for opposed signals is undecided and owner-sign-off**: skip
+  the signal (SAR as entry filter), keep the live static geometry, or trail and
+  accept the scratch. Decide against the panel, not ahead of it.
+- Also shipped: owner-gated `POST /api/admin/sar-ledger/clear` + ops Clear
+  button (confirm · PRG · audited), so a poisoned window can be discarded
+  without waiting on a deploy.
+
+---
+
+## 🟢 SESSION 82 2026-07-26 — iPhone PWA: every setup screen needed two taps (lumin-app #137, merged)
+
+**Owner ask:** *"in iPhone web app while setting up, screens are not working
+properly, we need to press couple of times to go next screen — they are like
+freezing. After login everything is smooth."* Four screenshots: welcome slides
+1–3 and the phone sign-in form.
+
+**The diagnostic was in the ask.** "Smooth after login" is not a footnote — it
+localises the bug. Every `NavShell` tab owns a real scrollable that consumes a
+vertical drag. The screens that misbehave do not: the welcome carousel is a
+`PageView` that scrolls **horizontally only**, and `WelcomeConsentPage` /
+`PhoneSignInPage` are plain non-scrolling Columns. So any defect that depends on
+the Flutter scene absorbing vertical drags breaks on exactly the pre-login set
+and nowhere else.
+
+**Four causes, all on that path. Fixed together — any one left in place still
+costs the user a tap.**
+
+| # | Cause | Fix |
+|---|---|---|
+| 1 | The HTML document was free to scroll. Flutter paints into one canvas so there is nothing to scroll, but Safari rubber-bands the document on any drag the scene did not consume — including the small one starting an ordinary tap. Canvas shifts under the finger, the tap resolves against stale coordinates, the press only resets the overscroll. | `web/index.html`: `body` pinned out of flow at `inset: 0`, `overscroll-behavior: none`, `touch-action: manipulation` |
+| 2 | Seven text fields autofocused at mount. A browser raises the keyboard **only** inside a user gesture, so Flutter believed the field was focused while the user saw no keyboard — the first tap went into settling that. | New `lib/shared/platform_input.dart` → `kAutofocusTextFields` (`!kIsWeb`), applied at all seven sites. Native unchanged. |
+| 3 | `_FirstRunGate._advance` re-ran the async flag read, so every "Get Started" / "Continue" dropped to the blank splash for ≥1 frame and swallowed taps landing there. | Stage order is fixed → walk it synchronously, read storage once on mount. |
+| 4 | The carousel learned its slide from `onPageChanged`, which fires part-way through the 300ms animation; a tap before that read a stale index and re-targeted the slide already in flight. | Adopt the target on the frame the tap lands; guard `_done` so a double tap continues once. |
+
+**Off money-path** — onboarding chrome, web shell CSS, input focus. No engine
+contract, dispatch, FSM, scoring or entitlement surface touched, so it shipped
+via the normal PR path, not the dark-flag rule.
+
+**Verification:** `flutter analyze` no new issues (130 pre-existing
+`withOpacity` / `activeColor` deprecations unchanged) · full `flutter test`
+green incl. 7 new tests · `flutter build web --release --no-web-resources-cdn`
+clean. The new carousel test was confirmed to **fail** against the pre-fix
+widget and pass after, so it pins behaviour rather than restating the code.
+`test/web_shell_test.dart` guards the `index.html` block, which `flutter create`
+would otherwise regenerate away.
+
+**⚠️ Open item — not device-verified.** No iPhone in the session environment, so
+causes 1–2 are reasoned from the symptom and the platform rules, **not observed
+on hardware**. Owner to re-test the setup flow on `app.luminapp.org` from the
+iPhone. If any two-tap behaviour survives, the next lever is Flutter web's
+`flt-semantics-placeholder`, which can absorb the first pointer event of a
+session — `SemanticsBinding.instance.ensureSemantics()` on web removes it, at
+the cost of an always-on semantics tree. Deliberately left out rather than
+shipped speculatively.
+
+---
+
 ## 🟢 SESSION 81 2026-07-26 — #794 didn't fix it (88x), and #795's second half shipped inert (#795, #798)
 
 **Owner ask:** *"still not matching and still Everything is running state when
