@@ -277,6 +277,24 @@ measurement decide emission. Full description: `OWNER_BRIEF.md § 3.11`.
   ops page read "Emitted to live (98)" for a window with 3 real signals
   (owner-caught 2026-07-25). `PROVENANCE_EMITTED` is written **only** by
   `sar_exit_shadow.promote_to_emitted`, from the router, after confirmed delivery.
+
+  Two corollaries, both paid for on 2026-07-26 when the first fix didn't hold:
+
+  - **Provenance is schema-gated, never date-gated.** The original migration
+    trusted anything stamped after a hardcoded cutoff set to when the fix was
+    *written*; the PR shipped 8h later, so 88 rows of old-code stamps were
+    trusted and the panel read 88 against a true 1 — worse than the bug it
+    replaced. `_migrate_provenance` now keys on `prov_schema` /
+    `PROVENANCE_SCHEMA`, written by the code itself. **A data migration must
+    never be gated on a timestamp predicting a future deploy** — bump the
+    schema instead.
+  - **`provenance` is not `strategy_edge.source`.** Two different fields that
+    share the word "emitted". Layer C never reads the ledger's `provenance`;
+    every edge-store writer sets `source` independently (`SUPPRESSED`/`SHADOW`),
+    and the allocator's `emitted_backed` reads the matrix cell's `n_emitted`.
+    Provenance is **display/analysis-only** — which is exactly why a 30x error
+    in it survived: it corrupts what the owner reads to decide, not what routes.
+    Don't re-derive either field from the other.
 - **Zero emissions ≠ broken.** Fully gated + measured-negative is the gates working;
   fully gated + measured-positive is money on the table. `gated_path_verdict` tells
   them apart — don't "fix" the first case.
@@ -369,3 +387,22 @@ python -m src.main
 - **Candle fixtures in tests use the production shape** — the `numpy_seeded_store` conftest fixture (real `HistoricalDataStore` via `update_candle`), never hand-built list dicts, for any code that consumes the data store
 - **New measurement pipelines register a liveness probe** (`src/feature_liveness.py`, wired in `main._build_feature_liveness`) — a feature whose output can silently flat-line without paging is unfinished
 - **`xfail` is strict** — a passing xfail fails CI; remove the marker the moment its premise dies (5 tests rotted invisibly under non-strict markers, 2026-07-14)
+- **A clamp is not a guard.** `min()` on a length or `max(0, …)` on an index
+  turns "these inputs cannot support this computation" into a wrong answer with
+  no signal. Where an input may not support the work, **refuse** — return None,
+  mark INSUFFICIENT, and let the caller record that it doesn't know. The SAR
+  shadow arm inferred its entry-bar index from elapsed time and clamped when the
+  candle array didn't match; it then replayed an unrelated bar and published 172
+  confident rows averaging −4.4R that described nothing (owner-caught
+  2026-07-26, #800). Corollary: **any array consumed by *when* something happened
+  must carry its own timestamps** — deriving the index from wall-clock
+  arithmetic assumes gap-free, current data and fails silently when that breaks.
+- **Never hand-write a collaborator's return shape in a test — drive the real
+  collaborator.** A mock whose keys you chose cannot verify a contract you got
+  wrong; it asserts your assumption back at you and goes green over dead code.
+  `classify_pending`'s guard read `exit_reason` where a trail classifier returns
+  `trail_exit_reason`, so every early classification was silently discarded —
+  and the tests passed, because they mocked the classifier with the invented key
+  (2026-07-26, #798). Where a seam must be faked, fake it from the real
+  producer's output, and **verify a fix by reverting it**: if the new test does
+  not fail against the old code, it is not testing the fix.

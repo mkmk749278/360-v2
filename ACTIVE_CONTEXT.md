@@ -4,6 +4,93 @@
 
 ---
 
+## 🟢 SESSION 83 2026-07-26 — The SAR arm was replaying the wrong candle (#800, ops #89 + #90)
+
+**Owner ask:** *"what happening to counter SAR signals — within 15 mins they are
+seeing huge loss"*, with the `sar_signals` CSV attached. The question was about
+counter-SAR entries. The answer was that the arm had not been measuring anything.
+
+### The export disproved itself
+
+| TRUMPUSDT SHORT | stamped | entry | exit |
+|---|---|---|---|
+| | 09:55:35 | 1.582 | **1.598** |
+| | 12:21:29 | 1.574 | **1.598** |
+| | 13:01:03 | 1.570 | **1.598** |
+
+Exit price was a pure function of **(symbol, side)** — stamp time irrelevant.
+XRPUSDT's nine rows gave two prices, one per side; DOGEUSDT, HYPEUSDT, BNBUSDT
+the same. 41% of supposed one-bar moves exceeded 5%, the worst was **51.8% in a
+single 15m bar**, all 172 rows claimed exactly a 15-minute hold, and `delta_r`
+was populated on **0 of 172** — so there was no A/B either. Mean −4.40R,
+cumulative −757R, all of it fabricated.
+
+### Root cause — an index inferred instead of looked up
+
+`fetch_ohlc_15m_since` found the entry bar arithmetically: `n_post = elapsed //
+bar_sec`, counted back from the end of the array. That assumes the candle array
+is gap-free **and** its last bar is current. Neither holds — feeds drop frames,
+and a frozen feed keeps serving its last bar, which is why
+`last_kline_age_seconds` exists at all (the MVLLUSDT 11-hour freeze). When the
+assumption broke, `min()` on the length and `max(0, …)` on the index **absorbed
+it silently**, so the walk replayed an unrelated bar and still returned a
+confident verdict. A stale feed pinned every record for a symbol to the same
+physical bar — exactly the constant-exit-price signature above.
+
+The store could not have caught it: `update_candle` kept only OHLCV, **no
+timestamps**.
+
+**Fix:** candles carry `open_time` (seed + WS), the entry bar is located by
+searching it, and the window is verified — finite timestamps, contiguous bars,
+and the stamp actually *inside* the selected bar. Anything else returns `None`
+and the record resolves INSUFFICIENT.
+
+### Rules this bought
+
+- **A clamp is not a guard.** `min()`/`max(0, …)` on an index turn "I cannot
+  answer this" into a wrong answer with no signal. Where an input may not
+  support the computation, **refuse** — a record that cannot be honestly
+  replayed must produce no verdict. "We don't know" is a usable output; an
+  invented number is not.
+- **Positional data needs its own key.** Any array consumed by *when* something
+  happened must carry the timestamp; inferring the index from wall-clock
+  arithmetic is a silent-corruption class, not an optimisation.
+- **When rows are evidence of a defect, purge — don't migrate.** No field can
+  rescue a row whose candles were wrong. The ledger restarted on
+  `sar_exit_candidates_v2.json`; v1 stays on disk for forensics, never read.
+
+### Counter-SAR — the original question, now answerable
+
+A trailing SAR is a stop that is *already somewhere* at entry. Agreed → its level
+sits behind the entry and the trail rides (the method being measured). Opposed →
+its level is already the wrong side of price, so the trade dies on the first
+testable bar for **≈ −0.25R** (0.6% stop) or **≈ −0.50R** (0.3% stop) — a scratch
+still pays the round trip. That figure says we took a signal against the
+indicator; it says nothing about trail quality. Pooled, the headline moves with
+the agreement mix rather than with the exit, so `sar_aligned_at_entry` is
+recorded and the buckets are reported separately with an **opposed-share**.
+
+**Process note.** The alignment split first shipped engine-side with nothing
+calling `summarize_sar_alignment` and nothing rendering the flag — a scaffold,
+caught by the owner asking the question a second time. Ops #90 closed it. *A
+measurement is not shipped until a surface reads it.*
+
+### Open
+
+- **The v2 ledger starts empty.** No verdict until a clean window accumulates.
+  The buckets fill at very different rates — opposed resolves in 15 minutes,
+  aligned sits RUNNING for hours — so an early read is biased against SAR.
+- **Watch for INSUFFICIENT clustered on particular symbols**: that is a real 15m
+  feed gap the old code was papering over, worth chasing on its own.
+- **Activation policy for opposed signals is undecided and owner-sign-off**: skip
+  the signal (SAR as entry filter), keep the live static geometry, or trail and
+  accept the scratch. Decide against the panel, not ahead of it.
+- Also shipped: owner-gated `POST /api/admin/sar-ledger/clear` + ops Clear
+  button (confirm · PRG · audited), so a poisoned window can be discarded
+  without waiting on a deploy.
+
+---
+
 ## 🟢 SESSION 82 2026-07-26 — iPhone PWA: every setup screen needed two taps (lumin-app #137, merged)
 
 **Owner ask:** *"in iPhone web app while setting up, screens are not working
@@ -52,7 +139,7 @@ shipped speculatively.
 
 ---
 
-## 🟢 SESSION 81 2026-07-26 — #794 did not actually fix it: a guessed cutoff trusted 8h of pre-fix data (88x)
+## 🟢 SESSION 81 2026-07-26 — #794 didn't fix it (88x), and #795's second half shipped inert (#795, #798)
 
 **Owner ask:** *"still not matching and still Everything is running state when
 they actually close and shows real output"* — with the ops export and the real
@@ -117,13 +204,109 @@ them and must not import `sar_exit_shadow` — that dependency runs the other wa
 **Engine-only.** Ops already renders the right labels and reads `classification`
 — both fixes surface there with no ops change.
 
+### Early resolution is result-identical — proven, not assumed
+
+Resolving early would be worthless (and dangerous) if it changed the answer:
+these outcomes feed the Strategy×Context edge matrix through `on_classified`.
+It doesn't, and the property is now pinned by test rather than argued:
+
+- The SAR level at bar *i* depends only on bars ≤ *i*, and `fetch_ohlc_15m_since`
+  anchors the slice so entry always lands `warmup` bars in — so the series start
+  is the same absolute time whenever you ask.
+- `TestEarlyResolutionIsResultIdentical` asserts, across four seed/side fixtures,
+  that **every** truncation still containing the exit bar yields an identical
+  exit price, exit bar and hold time; and the converse — truncating *before* the
+  exit bar reports `REASON_WINDOW`, which is exactly what the new guard refuses
+  to book.
+
+Early resolution changes **when we learn** an outcome, never **what it is**.
+
+### Does this touch the autonomous portfolio? — audited, no
+
+Owner asked directly. Traced, because Layer C is LIVE on the money path via
+`context_emission_policy` and Layer G self-promotes off it:
+
+> **`strategy_edge.source` and the ledger's `provenance` are two different
+> fields that happen to share the word "emitted".** Layer C never reads the
+> ledger's `provenance`.
+
+All four writers into the edge store set `source` independently of it:
+`main.py:1786`/`:1807` use `SHADOW if _is_shadow_unit else SUPPRESSED`;
+`main.py:1862` and `:1916` (`_feed_sar_edge`) hardcode `SOURCE_SHADOW`. The
+allocator's `emitted_backed` reads `cell["n_emitted"]` — an edge-matrix count,
+not the ledger — and Layer D is recommendation-only regardless.
+
+**So `provenance` is display/analysis-only** (ops panels, truth report). That is
+also *why this bug survived*: it corrupted the number the owner reads to make
+decisions, not the machinery that routes. Arguably worse, but it means the
+blast radius of the fix is zero. **Don't re-derive one field from the other.**
+
+**Cost:** the early path adds no I/O. `fetch_ohlc_15m_since` reads the warm
+in-memory store (no network, no Firestore); the loop is 5-minutely and runs in
+`asyncio.to_thread`. Per pass it is a slice plus a ~200-element SAR walk per
+pending record — single-digit ms, off the event loop, and not a per-tick /
+per-scan / per-order path.
+
 **The transferable lesson:** a data migration must never be gated on a timestamp
 predicting a future deploy. `_migrate_provenance` is now schema-gated, and any
 future provenance change bumps `PROVENANCE_SCHEMA` instead of adding a date.
 
+**Shipped:** #795 → `06a8858` (provenance schema + early-resolution path) and
+#798 → `db476d8` (the guard key that made the second half actually fire), both
+deploy green. The migration runs on ledger load, so it took effect at the
+deploy's engine restart — not gradually. 67 tests in `test_sar_exit_shadow.py`;
+full suite 7212 passed, 0 failed; `ruff` clean; `mypy` unchanged at 107.
+
+### Verified after deploy — half of it worked, half shipped inert (#798)
+
+**Bug 1 confirmed fixed on production data.** Owner's post-deploy exports:
+"Delivered to users" **88 → 3**, "Queued, dropped by router" **3 → 104**. The
+three surviving `emitted` rows (B2USDT SHORT, DIAUSDT LONG, DEXEUSDT SHORT)
+match the app feed on symbol/side/entry/time. Router promotion fires on
+confirmed delivery; the schema marker holds across reload.
+
+**Bug 2 did not work at all — the guard read a key that never exists.** The
+mid-window check was `detail.get("exit_reason")`, the *walker's* internal key
+(`simulate_sar_exit`'s return). A **trail classifier** returns
+`trail_exit_reason` — the ledger's field name, renamed at exactly that boundary
+inside `classify_sar_record`. So the lookup was always `None`, never matched
+`REASON_TRAIL`, and `continue` fired on every early candidate. The path ran on
+schedule, fetched candles, walked the SAR, computed the correct exit, **and
+discarded it.** Fixed in #798 (`db476d8`, deploy green).
+
+The tell was again two pipelines disagreeing: the SAR ledger read 0 of 107
+resolved with the oldest row ~7h old, while the dark-signals replay showed the
+same trades exiting with `sar_hold` of 15/15/15/30/105 minutes. Same math, one
+side dropping its answer.
+
+**Why the tests passed against a dead path.** They hand-wrote the classifier's
+return with the invented key — `{"classification": "WIN", "exit_reason": ...}` —
+so they asserted against code that never ran. **A mock whose shape you chose
+cannot verify a contract you got wrong.** Coverage is rebuilt around the real
+`classify_sar_record`, over an OHLC dict shaped exactly like
+`fetch_ohlc_15m_since` returns, and the fix was checked by *reverting* the guard
+to confirm the new tests actually fail on the old key.
+
+**Still unverified end-to-end:** rows leaving RUNNING with `CLOSED_TRAIL` is a
+prediction until read in ops. **If they are still RUNNING ~15 min after
+`db476d8`, that is a third distinct cause — re-diagnose from a fresh export,
+don't assume.** (`delta_r` staying blank is *not* a fault: it needs the paired
+`@SARBASE` control, which still waits its full 48h window by design.)
+
 **Still true from Session 80:** the emitted sample restarts from zero, and now
-genuinely does. No SAR exit decision until a fresh window of *delivered* signals
-accumulates.
+genuinely does — including the one real WIFUSDT delivery, which a pre-fix record
+carries no evidence for and so cannot be rescued. No SAR exit decision until a
+fresh window of *delivered* signals accumulates.
+
+**Process note worth keeping.** **Three** claims were stated to the owner as
+settled and were wrong: that #794 fixed the inflation (it made it worse, 88x);
+that "no SAR closed is arithmetic, not breakage" (the classifier was refusing to
+read data it already had); and that #795 fixed the resolution (it shipped
+inert). Every one was caught by the owner comparing a panel against real data —
+never by an internal test, because the internal tests were confirming the same
+assumption the code made. **When a measurement panel and the live feed disagree,
+the panel is the suspect — and when a panel and a second pipeline over the same
+trades disagree, one of them is discarding its answer.**
 
 ---
 
