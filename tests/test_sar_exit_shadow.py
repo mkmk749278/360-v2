@@ -857,3 +857,73 @@ class TestATrailingTradeResolvesWhenItActuallyCloses:
         )
         assert counters == {}
         assert store.records()[0]["classification"] is None
+
+
+class TestEarlyResolutionIsResultIdentical:
+    """Resolving early must not change the answer, only when we learn it.
+
+    The SAR level at bar i depends only on bars <= i, and the ledger's fetch
+    anchors the series so entry always sits `warmup` bars in. So a trail exit
+    found at T+1h is the same exit the full 48h walk would have found. If that
+    were not true, early resolution would be silently rewriting outcomes that
+    feed the Strategy x Context edge matrix.
+    """
+
+    @pytest.mark.parametrize("seed,side", [(2, "LONG"), (5, "SHORT"), (13, "LONG"), (21, "SHORT")])
+    def test_a_trail_exit_is_the_same_whenever_it_is_computed(self, seed, side):
+        drift = 0.5 if side == "LONG" else -0.5
+        opens, highs, lows, closes = _walk(60, seed=seed, drift=drift)
+        o2, h2, l2, c2 = _walk(140, seed=seed + 100, drift=-drift, start=closes[-1])
+        opens, highs, lows, closes = opens + o2, highs + h2, lows + l2, closes + c2
+        entry_idx, entry = 55, closes[55]
+
+        full = sar.simulate_sar_exit(
+            highs=highs, lows=lows, closes=closes, opens=opens,
+            entry_idx=entry_idx, entry=entry, side=side,
+            step=0.02, max_step=0.2, max_bars=192, bar_minutes=15,
+        )
+        assert full is not None and full["exit_reason"] == sar.REASON_TRAIL, (
+            "fixture must actually produce a trail exit or it proves nothing"
+        )
+        exit_bar = full["exit_idx"]
+
+        # Every truncation that still contains the exit bar must agree exactly.
+        agreed = 0
+        for n in range(exit_bar + 1, len(closes) + 1):
+            early = sar.simulate_sar_exit(
+                highs=highs[:n], lows=lows[:n], closes=closes[:n], opens=opens[:n],
+                entry_idx=entry_idx, entry=entry, side=side,
+                step=0.02, max_step=0.2, max_bars=192, bar_minutes=15,
+            )
+            assert early is not None
+            assert early["exit_reason"] == sar.REASON_TRAIL
+            assert early["exit_price"] == pytest.approx(full["exit_price"], rel=1e-12)
+            assert early["exit_idx"] == full["exit_idx"]
+            assert early["hold_min"] == pytest.approx(full["hold_min"], rel=1e-12)
+            agreed += 1
+        assert agreed > 0
+
+    @pytest.mark.parametrize("seed,side", [(2, "LONG"), (5, "SHORT")])
+    def test_before_the_exit_bar_the_walk_reports_window_not_a_trail(self, seed, side):
+        """Which is exactly what classify_pending refuses to book mid-window."""
+        drift = 0.5 if side == "LONG" else -0.5
+        opens, highs, lows, closes = _walk(60, seed=seed, drift=drift)
+        o2, h2, l2, c2 = _walk(140, seed=seed + 100, drift=-drift, start=closes[-1])
+        opens, highs, lows, closes = opens + o2, highs + h2, lows + l2, closes + c2
+        entry_idx, entry = 55, closes[55]
+
+        full = sar.simulate_sar_exit(
+            highs=highs, lows=lows, closes=closes, opens=opens,
+            entry_idx=entry_idx, entry=entry, side=side,
+            step=0.02, max_step=0.2, max_bars=192, bar_minutes=15,
+        )
+        assert full is not None and full["exit_reason"] == sar.REASON_TRAIL
+
+        truncated = sar.simulate_sar_exit(
+            highs=highs[:full["exit_idx"]], lows=lows[:full["exit_idx"]],
+            closes=closes[:full["exit_idx"]], opens=opens[:full["exit_idx"]],
+            entry_idx=entry_idx, entry=entry, side=side,
+            step=0.02, max_step=0.2, max_bars=192, bar_minutes=15,
+        )
+        assert truncated is not None
+        assert truncated["exit_reason"] == sar.REASON_WINDOW
