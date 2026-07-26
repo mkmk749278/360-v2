@@ -5332,12 +5332,24 @@ class Scanner:
         _sc_final = getattr(sig, "setup_class", "UNKNOWN")
         if ok:
             self._suppression_counters[f"enqueue_stage:emitted:{_sc_final}"] += 1
-            # Emitted candidates are the other half of the stop-geometry A/B
+            # Queued candidates are the other half of the stop-geometry A/B
             # sample (observe-only; stamps the pair + sig.geo_atr_stop).
-            # This site is reached only after signal_queue.put succeeded, so
-            # "emitted" here means the signal really did go out.
-            from src.suppression_audit import PROVENANCE_EMITTED
-            self._stamp_geometry_ab(sig, provenance=PROVENANCE_EMITTED)
+            #
+            # Stamped ENQUEUED, *not* EMITTED. This site is reached when
+            # signal_queue.put succeeded — which is not dispatch. SignalRouter
+            # ._process consumes the queue and applies a second gate layer
+            # (correlation lock, per-symbol/per-channel cooldown, per-channel
+            # concurrent cap, correlation group limit, global same-direction
+            # throttle, TP/SL sanity, staleness), dropping most of what it
+            # dequeues. The old comment here asserted "the signal really did go
+            # out" and was wrong by ~30x (owner-caught 2026-07-25: 90 distinct
+            # queued candidates vs 3 in the feed over one 6.7h window).
+            #
+            # The router promotes the record to EMITTED after confirmed
+            # delivery. Anything that stays ENQUEUED is exactly that: queued,
+            # then dropped by our own routing caps.
+            from src.suppression_audit import PROVENANCE_ENQUEUED
+            self._stamp_geometry_ab(sig, provenance=PROVENANCE_ENQUEUED)
             try:
                 cd_key = self._cooldown_key_for(sig)
                 if cd_key is not None and _dispatch_cooldown_enabled():

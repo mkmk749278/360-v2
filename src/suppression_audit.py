@@ -88,8 +88,27 @@ EXIT_TRAILING = "trailing"
 # considered".  Only the first can justify changing what users receive, so the
 # provenance has to travel with the record or the two can never be separated.
 # Empty string = unknown (every record stamped before 2026-07-25).
+#
+# There are THREE states, not two, and conflating the middle one with EMITTED
+# was a real measurement bug (owner-caught 2026-07-25, ~30x inflation):
+#
+#   SUPPRESSED — a gate in the SCANNER killed the candidate.
+#   ENQUEUED   — it passed every scanner gate and ``signal_queue.put`` accepted
+#                it.  This is NOT dispatch.  ``SignalRouter._process`` then
+#                applies a whole second layer (correlation lock, per-symbol and
+#                per-channel cooldown, per-channel concurrent cap, correlation
+#                group limit, global same-direction throttle, TP/SL sanity,
+#                staleness) and drops most of what it dequeues.
+#   EMITTED     — the router confirmed delivery.  A subscriber really saw it.
+#
+# Only EMITTED can justify changing what users receive.  Measured over one
+# 6.7h window: 90 distinct candidates reached the queue, 3 reached the feed —
+# and the surplus is not a random sample of the rest (it is dominated by
+# candidates arriving while the book was full or correlation-locked, which
+# skewed the old "emitted" set to 81% SHORT against a 52% SHORT real feed).
 PROVENANCE_EMITTED = "emitted"
 PROVENANCE_SUPPRESSED = "suppressed"
+PROVENANCE_ENQUEUED = "enqueued"
 
 VERDICT_KEEP = "KEEP"           # gate correctly suppresses losers
 VERDICT_DROP = "DROP"           # gate is killing winners
@@ -501,6 +520,40 @@ def compute_gate_suppression_metrics(
 # ---------------------------------------------------------------------------
 
 
+# Epoch of the enqueue-vs-dispatch provenance fix.  Every record stamped
+# before this had ``provenance="emitted"`` written at the *enqueue* site, which
+# was not dispatch (see the PROVENANCE_* block at the top of this module), so
+# roughly 97% of those rows were never delivered to anyone.
+#
+# They are relabelled ENQUEUED on load.  That is the truthful label — they were
+# queued, and we cannot now recover which few were actually sent — and it fails
+# in the safe direction: it removes them from the emitted sample rather than
+# inventing membership in it.  Overridable so a test can pin the boundary.
+_PROVENANCE_FIX_TS: float = float(
+    os.getenv("PROVENANCE_ENQUEUE_FIX_TS", "1785002400")  # 2026-07-25T18:00Z
+)
+
+
+# Window inside which two stamps are treated as arms of the SAME candidate.
+# Both arms of a measurement pair are written in one call stack (microseconds
+# apart); separate detections are gated by the stamp cooldown, which is orders
+# of magnitude larger.
+_PAIR_EPSILON_SEC: float = 1.0
+
+
+def _migrate_provenance(rec: dict) -> dict:
+    """Downgrade a pre-fix ``emitted`` stamp to ``enqueued`` (in place)."""
+    try:
+        if rec.get("provenance") != PROVENANCE_EMITTED:
+            return rec
+        if float(rec.get("suppress_timestamp") or 0.0) >= _PROVENANCE_FIX_TS:
+            return rec
+        rec["provenance"] = PROVENANCE_ENQUEUED
+    except (TypeError, ValueError):
+        pass
+    return rec
+
+
 class SuppressedCandidateStore:
     def __init__(self, persist_path: Optional[str] = None, maxlen: Optional[int] = None) -> None:
         self._lock = threading.Lock()
@@ -517,6 +570,83 @@ class SuppressedCandidateStore:
         with self._lock:
             self._buffer.append(asdict(record))
             self.stamped_total += 1
+
+    def promote_provenance(
+        self,
+        *,
+        symbol: str,
+        side: str,
+        setup_prefix: str,
+        entry: float,
+        from_provenance: str,
+        to_provenance: str,
+        max_age_sec: float,
+        now_ts: Optional[float] = None,
+    ) -> int:
+        """Re-label the newest matching candidate's arms in place.
+
+        Used when the truth about a record is only known *later* than the
+        stamp: the scanner stamps ENQUEUED when the queue accepts a candidate,
+        and the router — which is the actual dispatcher — promotes it to
+        EMITTED once delivery is confirmed.
+
+        Matches on ``(symbol, side, entry)`` plus a ``setup_prefix`` so both
+        measurement arms of one candidate (e.g. ``FOO@SARBASE`` and
+        ``FOO@SAREXIT``) are promoted together — a half-promoted pair would
+        bias the A/B exactly as a lone stamp does.  Only unclassified records
+        inside ``max_age_sec`` are eligible, so a promotion can never reach
+        back and rewrite an already-measured outcome.
+
+        Ties are broken by the newest stamp, and only the newest candidate is
+        promoted: a persisting setup re-detected across scan cycles must not
+        have all its historical rows relabelled by one dispatch.
+
+        Returns the number of arm records promoted (0 when nothing matched).
+        """
+        now = time.time() if now_ts is None else float(now_ts)
+        prefix = str(setup_prefix or "")
+        side_u = str(side or "").upper()
+        try:
+            entry_f = float(entry or 0.0)
+        except (TypeError, ValueError):
+            return 0
+        with self._lock:
+            candidates: List[dict] = []
+            for rec in self._buffer:
+                if rec.get("provenance") != from_provenance:
+                    continue
+                if rec.get("classification") is not None:
+                    continue
+                if str(rec.get("symbol") or "") != str(symbol or ""):
+                    continue
+                if str(rec.get("side") or "").upper() != side_u:
+                    continue
+                setup = str(rec.get("setup_class") or "")
+                if not setup.startswith(prefix):
+                    continue
+                ts = float(rec.get("suppress_timestamp") or 0.0)
+                if now - ts > max_age_sec:
+                    continue
+                # Same underlying candidate ⇒ identical entry price. A
+                # re-detection at a different price is a different candidate.
+                if abs(float(rec.get("entry") or 0.0) - entry_f) > 1e-12:
+                    continue
+                candidates.append(rec)
+            if not candidates:
+                return 0
+            newest = max(float(r.get("suppress_timestamp") or 0.0) for r in candidates)
+            promoted = 0
+            for rec in candidates:
+                # Arms of ONE candidate are stamped in the same call stack, so
+                # their timestamps differ by microseconds — an exact match
+                # would promote a single arm and bias the A/B. Distinct
+                # detections of a persisting setup are separated by the stamp
+                # cooldown (tens of seconds), so this epsilon cannot merge two.
+                if newest - float(rec.get("suppress_timestamp") or 0.0) > _PAIR_EPSILON_SEC:
+                    continue
+                rec["provenance"] = to_provenance
+                promoted += 1
+            return promoted
 
     def records(self) -> List[dict]:
         with self._lock:
@@ -662,7 +792,7 @@ class SuppressedCandidateStore:
                 with self._lock:
                     for r in raw[-(self._buffer.maxlen or _MAX_RECORDS):]:
                         if isinstance(r, dict):
-                            self._buffer.append(r)
+                            self._buffer.append(_migrate_provenance(r))
         except Exception:
             pass  # fail-open on a bad store file
 
