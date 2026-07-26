@@ -647,38 +647,85 @@ class TestPreFixRecordsAreRelabelledOnLoad:
     the truthful label, and it fails safe by removing them from the emitted
     sample rather than inventing membership in it."""
 
-    def _write(self, path, ts, provenance):
+    def _write(self, path, provenance, *, schema=None, ts=None):
         import json
-        path.write_text(json.dumps([{
+        import time as _t
+        rec = {
             "gate_name": "sar_exit_shadow:base",
             "setup_class": "SR_FLIP_RETEST@SARBASE",
             "symbol": "BTCUSDT", "channel": "scalp", "side": "LONG",
             "entry": 100.0, "stop_loss": 99.0, "tp1": 102.0, "sl_distance": 1.0,
             "confidence": 70.0, "context_key": "", "regime": "",
-            "valid_for_minutes": 0.0, "suppress_timestamp": ts,
+            "valid_for_minutes": 0.0,
+            "suppress_timestamp": _t.time() if ts is None else ts,
             "provenance": provenance, "classification": None,
-        }]))
+        }
+        if schema is not None:
+            rec["prov_schema"] = schema
+        path.write_text(json.dumps([rec]))
 
     def test_a_pre_fix_emitted_record_loads_as_enqueued(self, tmp_path):
+        """No schema marker ⇒ written by the enqueue-site stamp ⇒ not delivery."""
         p = tmp_path / "s.json"
-        self._write(p, sa._PROVENANCE_FIX_TS - 3600, sa.PROVENANCE_EMITTED)
+        self._write(p, sa.PROVENANCE_EMITTED)  # no prov_schema at all
 
         store = SuppressedCandidateStore(persist_path=str(p), maxlen=100)
         assert [r["provenance"] for r in store.records()] == [sa.PROVENANCE_ENQUEUED]
 
     def test_a_post_fix_emitted_record_is_trusted(self, tmp_path):
         p = tmp_path / "s.json"
-        self._write(p, sa._PROVENANCE_FIX_TS + 3600, sa.PROVENANCE_EMITTED)
+        self._write(p, sa.PROVENANCE_EMITTED, schema=sa.PROVENANCE_SCHEMA)
 
         store = SuppressedCandidateStore(persist_path=str(p), maxlen=100)
         assert [r["provenance"] for r in store.records()] == [sa.PROVENANCE_EMITTED]
 
     def test_suppressed_records_are_left_alone(self, tmp_path):
         p = tmp_path / "s.json"
-        self._write(p, sa._PROVENANCE_FIX_TS - 3600, sa.PROVENANCE_SUPPRESSED)
+        self._write(p, sa.PROVENANCE_SUPPRESSED)
 
         store = SuppressedCandidateStore(persist_path=str(p), maxlen=100)
         assert [r["provenance"] for r in store.records()] == [sa.PROVENANCE_SUPPRESSED]
+
+    def test_a_recent_pre_fix_record_is_not_trusted_by_being_recent(self, tmp_path):
+        """The bug this replaced: a wall-clock cutoff set to when the fix was
+        *written* trusted everything stamped after it, including eight hours of
+        old-code stamps written before the fix actually deployed. 88 rows of
+        enqueue-site data rendered as "Delivered to users" for a window whose
+        real feed was one signal. Recency is not provenance."""
+        p = tmp_path / "s.json"
+        import time as _t
+        self._write(p, sa.PROVENANCE_EMITTED, ts=_t.time())  # stamped seconds ago
+
+        store = SuppressedCandidateStore(persist_path=str(p), maxlen=100)
+        assert [r["provenance"] for r in store.records()] == [sa.PROVENANCE_ENQUEUED]
+
+    def test_a_promoted_record_survives_a_reload(self, tmp_path):
+        """Promotion is what makes EMITTED true, so it must mark the record —
+        otherwise the load-time migration downgrades a genuine delivery."""
+        p = tmp_path / "s.json"
+        self._write(p, sa.PROVENANCE_ENQUEUED, schema=sa.PROVENANCE_SCHEMA)
+        store = SuppressedCandidateStore(persist_path=str(p), maxlen=100)
+
+        assert store.promote_provenance(
+            symbol="BTCUSDT", side="LONG", setup_prefix="SR_FLIP_RETEST",
+            entry=100.0, from_provenance=sa.PROVENANCE_ENQUEUED,
+            to_provenance=sa.PROVENANCE_EMITTED, max_age_sec=3600.0,
+        ) == 1
+        rec = store.records()[0]
+        assert rec["provenance"] == sa.PROVENANCE_EMITTED
+        assert sa._migrate_provenance(dict(rec))["provenance"] == sa.PROVENANCE_EMITTED
+
+    def test_a_stamped_record_carries_the_schema_marker(self):
+        """The marker has to be written at the stamp site or every fresh record
+        loads as pre-fix."""
+        store = SuppressedCandidateStore(persist_path="", maxlen=10)
+        sa.stamp_candidate(
+            gate_name="g", symbol="BTCUSDT", channel="scalp",
+            setup_class="SR_FLIP_RETEST", side="LONG",
+            entry=100.0, stop_loss=99.0, tp1=102.0,
+            provenance=sa.PROVENANCE_ENQUEUED, store=store,
+        )
+        assert store.records()[0]["prov_schema"] == sa.PROVENANCE_SCHEMA
 
 
 class TestRouterPromotesOnConfirmedDelivery:
@@ -700,3 +747,113 @@ class TestRouterPromotesOnConfirmedDelivery:
         assert promote > register, (
             "promotion before confirmed delivery is the bug being fixed"
         )
+
+
+class TestATrailingTradeResolvesWhenItActuallyCloses:
+    """A trailing arm's exit is knowable the moment the forward candles cover
+    it. Holding every row at RUNNING until the full 48h window elapsed made the
+    tab read "0 resolved, 88 still running" for trades that had closed hours
+    earlier (owner-caught 2026-07-26)."""
+
+    WINDOW = 48 * 3600.0
+
+    def _store_with_pending(self, ts):
+        store = SuppressedCandidateStore(persist_path="", maxlen=10)
+        rec = sa.SuppressedCandidateRecord(
+            gate_name="sar_exit_shadow:base",
+            setup_class="SR_FLIP_RETEST@SARBASE",
+            symbol="BTCUSDT", channel="scalp", side="LONG",
+            entry=100.0, stop_loss=99.0, tp1=102.0, sl_distance=1.0,
+            confidence=70.0, context_key="", regime="",
+            valid_for_minutes=0.0, suppress_timestamp=ts,
+            exit_model=sa.EXIT_TRAILING,
+        )
+        store.stamp(rec)
+        return store
+
+    @staticmethod
+    def _ohlc(_symbol, _since):
+        return {"high": [1.0, 1.0], "low": [1.0, 1.0], "close": [1.0, 1.0]}
+
+    def test_a_trail_exit_resolves_immediately_not_in_48h(self):
+        import time as _t
+        store = self._store_with_pending(_t.time() - 600.0)  # 10 min old
+
+        counters = store.classify_pending(
+            fetch_ohlc_since=self._ohlc,
+            window_sec=self.WINDOW,
+            trail_classifier=lambda rec, ohlc: {
+                "classification": "WIN",
+                "exit_reason": sa.REASON_TRAIL,
+                "trail_exit_price": 101.0,
+            },
+        )
+        assert counters.get("WIN") == 1
+        assert store.records()[0]["classification"] == "WIN"
+
+    def test_an_unexited_trade_stays_running_and_is_not_marked_to_close(self):
+        """A "window" verdict mid-window is the walker running out of bars, not
+        the trade closing. Booking it would record an arbitrary price as a
+        realized result."""
+        import time as _t
+        store = self._store_with_pending(_t.time() - 600.0)
+
+        counters = store.classify_pending(
+            fetch_ohlc_since=self._ohlc,
+            window_sec=self.WINDOW,
+            trail_classifier=lambda rec, ohlc: {
+                "classification": "LOSS",
+                "exit_reason": sa.REASON_WINDOW,
+                "trail_exit_price": 99.5,
+            },
+        )
+        assert counters == {}
+        assert store.records()[0]["classification"] is None
+
+    def test_a_window_verdict_is_accepted_once_the_window_has_elapsed(self):
+        import time as _t
+        store = self._store_with_pending(_t.time() - self.WINDOW - 60.0)
+
+        counters = store.classify_pending(
+            fetch_ohlc_since=self._ohlc,
+            window_sec=self.WINDOW,
+            trail_classifier=lambda rec, ohlc: {
+                "classification": "LOSS",
+                "exit_reason": sa.REASON_WINDOW,
+                "trail_exit_price": 99.5,
+            },
+        )
+        assert counters.get("LOSS") == 1
+
+    def test_missing_candles_mid_window_are_not_a_verdict(self):
+        """Mid-window the candles may simply not exist yet; only a record whose
+        full window passed without data is genuinely INSUFFICIENT."""
+        import time as _t
+        store = self._store_with_pending(_t.time() - 600.0)
+
+        counters = store.classify_pending(
+            fetch_ohlc_since=lambda *_a: None,
+            window_sec=self.WINDOW,
+            trail_classifier=lambda rec, ohlc: None,
+        )
+        assert counters == {}
+        assert store.records()[0]["classification"] is None
+
+    def test_a_static_arm_still_waits_for_its_full_window(self):
+        """Static outcomes are a TP/SL race decided by window extremes — they
+        cannot be resolved from a partial window."""
+        import time as _t
+        store = SuppressedCandidateStore(persist_path="", maxlen=10)
+        store.stamp(sa.SuppressedCandidateRecord(
+            gate_name="g", setup_class="SR_FLIP_RETEST", symbol="BTCUSDT",
+            channel="scalp", side="LONG", entry=100.0, stop_loss=99.0,
+            tp1=102.0, sl_distance=1.0, confidence=70.0,
+            context_key="", regime="", valid_for_minutes=0.0,
+            suppress_timestamp=_t.time() - 600.0, exit_model=sa.EXIT_STATIC,
+        ))
+
+        counters = store.classify_pending(
+            fetch_ohlc_since=self._ohlc, window_sec=self.WINDOW,
+        )
+        assert counters == {}
+        assert store.records()[0]["classification"] is None

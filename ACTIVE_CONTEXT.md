@@ -4,6 +4,81 @@
 
 ---
 
+## 🟢 SESSION 81 2026-07-26 — #794 did not actually fix it: a guessed cutoff trusted 8h of pre-fix data (88x)
+
+**Owner ask:** *"still not matching and still Everything is running state when
+they actually close and shows real output"* — with the ops export and the real
+signal export attached.
+
+**Both complaints were correct. Two distinct bugs, one of them ours from #794.**
+
+### Bug 1 — the migration cutoff was a wish, not a fact
+
+#794 relabelled pre-fix `emitted` rows by comparing `suppress_timestamp` against
+a **hardcoded wall clock**: `PROVENANCE_ENQUEUE_FIX_TS = 1785002400`
+(2026-07-25T18:00Z) — set to when the fix was *written*. The PR then sat unmerged
+overnight and shipped at **2026-07-26T02:10Z**, an **8.17-hour gap**. Every
+record stamped in that gap was written by the *old* enqueue-site code yet sat
+*after* the cutoff, so the migration **trusted** it.
+
+Measured on the owner's two exports:
+
+| | |
+|---|---|
+| SAR ledger window | 2026-07-25T19:30 → 2026-07-26T02:04 (6.6h) |
+| Rows ops labelled "Delivered to users" | **88** |
+| Rows stamped after the real deploy | **0** |
+| Real signals delivered in that window | **1** (WIFUSDT LONG @ 0.1574, 21:46:03) |
+| SAR "delivered" rows matching *any* real signal ever | **1 of 88** |
+
+So the panel read 88 against a true 1 — **88x, worse than the ~30x #794 was
+written to remove.** The duplicate-stamp signature was still there too
+(CHILLGUY/EPIC/WLFI each 4 rows at an identical entry), because those rows are
+old-code stamps that the cutoff waved through.
+
+**Fix: key on who wrote the record, not when.** New `prov_schema` field,
+`PROVENANCE_SCHEMA = 2`, written at the stamp site and by `promote_provenance`.
+`_migrate_provenance` downgrades any `emitted` record lacking the current marker.
+A marker written by the code itself cannot drift from its own deploy time; a
+guessed timestamp always can. Replaying the owner's 88 production rows through
+the fixed migration relabels **88/88 → `enqueued`**.
+
+That includes the one genuinely-delivered WIFUSDT row — unavoidable, since a
+pre-fix record carries no evidence of delivery — and it is the safe direction:
+lose one true positive, drop 87 false ones.
+
+### Bug 2 — nothing ever resolved because the classifier refused to look
+
+`classify_pending` skipped **any** record younger than the full window
+(`if now - ts < eff_window: continue`), so a trailing arm whose stop caught price
+after 40 minutes still read `RUNNING` for **48 hours**. Hence "0 resolved, 88
+still running" on a tab where the underlying signals had visibly closed.
+
+A trailing arm's exit is knowable the moment the forward candles cover it — no
+later bar can un-catch a trail. Trailing records now classify **early**, with one
+guard: only a real `REASON_TRAIL` exit counts mid-window. A `REASON_WINDOW`
+verdict on partial candles is just the walker running out of bars, and booking it
+would record an arbitrary price as a realized result — so it is rejected until
+the window genuinely elapses. Static arms are unchanged (their outcome is a TP/SL
+race decided by window extremes and cannot be read from a partial window).
+
+`REASON_TRAIL`/`REASON_WINDOW` moved to `suppression_audit` (the ledger needs
+them and must not import `sar_exit_shadow` — that dependency runs the other way);
+`sar_exit_shadow` re-exports them so there is one definition.
+
+**Engine-only.** Ops already renders the right labels and reads `classification`
+— both fixes surface there with no ops change.
+
+**The transferable lesson:** a data migration must never be gated on a timestamp
+predicting a future deploy. `_migrate_provenance` is now schema-gated, and any
+future provenance change bumps `PROVENANCE_SCHEMA` instead of adding a date.
+
+**Still true from Session 80:** the emitted sample restarts from zero, and now
+genuinely does. No SAR exit decision until a fresh window of *delivered* signals
+accumulates.
+
+---
+
 ## 🟢 SESSION 80 2026-07-25 — "Emitted" never meant emitted: enqueue ≠ dispatch (~30x inflation)
 
 **Owner ask:** four SAR numbers that should agree and didn't — "actual Emitted
