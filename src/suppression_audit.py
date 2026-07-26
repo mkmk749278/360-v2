@@ -81,6 +81,14 @@ ENTRY_LIMIT = "limit"
 EXIT_STATIC = "static"
 EXIT_TRAILING = "trailing"
 
+# Why a trailing arm stopped.  Canonical here rather than in the individual
+# trailing modules: ``classify_pending`` has to distinguish them to resolve a
+# trade early (a real trail exit is final; a "window" mark on partial candles is
+# just the walker running out of bars), and this module must not import
+# ``sar_exit_shadow`` — that dependency runs the other way.
+REASON_TRAIL = "trail"      # the moving stop caught price
+REASON_WINDOW = "window"    # never stopped out — marked to the window's close
+
 # Provenance of a stamped candidate: did this candidate actually reach
 # subscribers, or did a gate kill it?  Shadow ledgers stamp from BOTH points in
 # the scanner, which doubles the sample but mixes two different questions —
@@ -152,6 +160,10 @@ class SuppressedCandidateRecord:
     # PROVENANCE_EMITTED | PROVENANCE_SUPPRESSED | "" (unknown, pre-2026-07-25).
     # Defaulted so persisted records reload unchanged.
     provenance: str = ""
+    # Which generation of the provenance contract wrote this record.  0 = written
+    # before the enqueue-vs-dispatch fix, when ``emitted`` was stamped at the
+    # enqueue site and therefore cannot be trusted.  See PROVENANCE_SCHEMA.
+    prov_schema: int = 0
     # Filled by classify_pending once the window elapses.
     classified_at: Optional[float] = None
     classification: Optional[str] = None
@@ -520,18 +532,31 @@ def compute_gate_suppression_metrics(
 # ---------------------------------------------------------------------------
 
 
-# Epoch of the enqueue-vs-dispatch provenance fix.  Every record stamped
-# before this had ``provenance="emitted"`` written at the *enqueue* site, which
-# was not dispatch (see the PROVENANCE_* block at the top of this module), so
-# roughly 97% of those rows were never delivered to anyone.
+# Generation of the provenance contract.  Bumped when the *meaning* of the
+# ``provenance`` field changes, so records can be told apart by what wrote them
+# rather than by when they were written.
 #
-# They are relabelled ENQUEUED on load.  That is the truthful label — they were
-# queued, and we cannot now recover which few were actually sent — and it fails
-# in the safe direction: it removes them from the emitted sample rather than
-# inventing membership in it.  Overridable so a test can pin the boundary.
-_PROVENANCE_FIX_TS: float = float(
-    os.getenv("PROVENANCE_ENQUEUE_FIX_TS", "1785002400")  # 2026-07-25T18:00Z
-)
+#   0 — pre-fix.  ``emitted`` was stamped at the *enqueue* site, which is not
+#       dispatch (see the PROVENANCE_* block at the top of this module), so
+#       roughly 97% of those rows were never delivered to anyone.
+#   2 — post-fix.  The scanner stamps ENQUEUED; only the router's
+#       ``promote_to_emitted`` writes EMITTED, after confirmed delivery.
+#
+# A schema-0 ``emitted`` record is relabelled ENQUEUED on load.  That is the
+# truthful label — it was queued, and which few were actually sent is not
+# recoverable — and it fails in the safe direction: it removes them from the
+# emitted sample rather than inventing membership in it.
+#
+# **This is deliberately not a timestamp.**  The first cut of this migration
+# used a hardcoded wall-clock cutoff set to when the fix was *written*
+# (2026-07-25T18:00Z).  The PR then sat unmerged for eight hours and shipped at
+# 2026-07-26T02:10Z, so every record stamped in that gap was written by the old
+# enqueue-site code yet sat *after* the cutoff and was trusted — 88 rows of
+# pre-fix data rendered as "Delivered to users (88)" in ops for a window whose
+# real feed was 3 signals, i.e. exactly the ~30x inflation the fix existed to
+# remove (owner-caught 2026-07-26).  A marker written by the code itself cannot
+# drift from its own deploy time; a guessed timestamp always can.
+PROVENANCE_SCHEMA: int = 2
 
 
 # Window inside which two stamps are treated as arms of the SAME candidate.
@@ -542,11 +567,16 @@ _PAIR_EPSILON_SEC: float = 1.0
 
 
 def _migrate_provenance(rec: dict) -> dict:
-    """Downgrade a pre-fix ``emitted`` stamp to ``enqueued`` (in place)."""
+    """Downgrade a pre-fix ``emitted`` stamp to ``enqueued`` (in place).
+
+    Keyed on who wrote the record, not on when.  Anything claiming EMITTED
+    without the current schema marker was written by the enqueue-site stamp and
+    is not evidence of delivery.
+    """
     try:
         if rec.get("provenance") != PROVENANCE_EMITTED:
             return rec
-        if float(rec.get("suppress_timestamp") or 0.0) >= _PROVENANCE_FIX_TS:
+        if int(rec.get("prov_schema") or 0) >= PROVENANCE_SCHEMA:
             return rec
         rec["provenance"] = PROVENANCE_ENQUEUED
     except (TypeError, ValueError):
@@ -645,6 +675,11 @@ class SuppressedCandidateStore:
                 if newest - float(rec.get("suppress_timestamp") or 0.0) > _PAIR_EPSILON_SEC:
                     continue
                 rec["provenance"] = to_provenance
+                # The promotion itself is what makes EMITTED trustworthy — it
+                # ran under the current contract, from the router, after
+                # confirmed delivery.  Mark the record accordingly so the
+                # load-time migration does not downgrade it again.
+                rec["prov_schema"] = PROVENANCE_SCHEMA
                 promoted += 1
             return promoted
 
@@ -683,11 +718,31 @@ class SuppressedCandidateStore:
             # Respect the candidate's own validity window, floored at the default.
             vfm = float(rec.get("valid_for_minutes") or 0.0)
             eff_window = max(window_sec, vfm * 60.0) if vfm > 0 else window_sec
-            if now - ts < eff_window:
+            window_elapsed = (now - ts) >= eff_window
+            # A trailing arm's exit is knowable as soon as the forward candles
+            # cover it: the trail either caught price or it didn't, and no later
+            # bar can un-catch it.  Waiting the whole window would park a trade
+            # that closed in 40 minutes at RUNNING for 48h — which is exactly
+            # what the ops tab showed (0 of 300 resolved, every row RUNNING,
+            # owner-caught 2026-07-26).  Static arms still need the full window,
+            # because their outcome is a TP/SL race decided by window extremes.
+            #
+            # Only a *trail* exit may resolve early.  A "window" verdict on
+            # partial candles is the walker marking to the last bar it can see,
+            # which would book a still-open trade at an arbitrary price — so it
+            # is rejected below until the window has genuinely elapsed.
+            trailing = str(rec.get("exit_model") or EXIT_STATIC) == EXIT_TRAILING
+            early = trailing and not window_elapsed
+            if not window_elapsed and not early:
                 continue
             symbol = str(rec.get("symbol") or "")
             ohlc = fetch_ohlc_since(symbol, ts) if symbol else None
             if not ohlc:
+                # Mid-window the candles simply may not exist yet; that is not a
+                # verdict.  Only a record whose full window has passed without
+                # usable data is genuinely INSUFFICIENT.
+                if early:
+                    continue
                 _mark(rec, INSUFFICIENT, now)
                 counters[INSUFFICIENT] = counters.get(INSUFFICIENT, 0) + 1
                 continue
@@ -697,6 +752,8 @@ class SuppressedCandidateStore:
             _highs = ohlc.get("high")
             _lows = ohlc.get("low")
             if _highs is None or _lows is None or len(_highs) == 0 or len(_lows) == 0:
+                if early:
+                    continue
                 _mark(rec, INSUFFICIENT, now)
                 counters[INSUFFICIENT] = counters.get(INSUFFICIENT, 0) + 1
                 continue
@@ -705,7 +762,7 @@ class SuppressedCandidateStore:
             # outcome.  The walker owns post_price_* too, because its candle
             # window may carry a pre-entry warmup prefix that must not leak
             # into the recorded excursion.
-            if str(rec.get("exit_model") or EXIT_STATIC) == EXIT_TRAILING:
+            if trailing:
                 detail = None
                 if trail_classifier is not None:
                     try:
@@ -715,8 +772,14 @@ class SuppressedCandidateStore:
                         fail_open.record("suppression_audit.trail_classifier", exc)
                         detail = None
                 if not detail or not detail.get("classification"):
+                    if early:
+                        continue
                     _mark(rec, INSUFFICIENT, now)
                     counters[INSUFFICIENT] = counters.get(INSUFFICIENT, 0) + 1
+                    continue
+                # Mid-window, only a real trail exit is a result.  Anything else
+                # is the walker running out of candles, not the trade closing.
+                if early and str(detail.get("exit_reason") or "") != REASON_TRAIL:
                     continue
                 label = str(detail["classification"])
                 for key, value in detail.items():
@@ -878,6 +941,9 @@ def stamp_candidate(
             entry_type=str(entry_type or ENTRY_IMMEDIATE),
             exit_model=str(exit_model or EXIT_STATIC),
             provenance=str(provenance or ""),
+            # Stamped by the current contract, so its provenance is trustworthy
+            # on reload without consulting a wall clock.
+            prov_schema=PROVENANCE_SCHEMA,
             suppress_timestamp=time.time(),
         )
         (store or get_store()).stamp(rec)

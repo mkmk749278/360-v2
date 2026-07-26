@@ -80,8 +80,14 @@ _DEFAULT_PATH: str = os.getenv("SAR_EXIT_SHADOW_PATH", "data/sar_exit_candidates
 _MAX_RECORDS: int = int(os.getenv("SAR_EXIT_SHADOW_MAX_RECORDS", "4000"))
 
 # Exit reasons recorded on the trail arm (diagnostic only).
-REASON_TRAIL = "trail"      # the moving stop caught price
-REASON_WINDOW = "window"    # never stopped out — marked to the window's close
+# Re-exported from the ledger module, which owns them: ``classify_pending``
+# needs the same two values to decide whether a mid-window verdict is a real
+# exit or just the end of the available candles.  One definition, imported here,
+# so the two can never drift.
+from src.suppression_audit import (  # noqa: E402
+    REASON_TRAIL,
+    REASON_WINDOW,
+)
 
 
 # ---------------------------------------------------------------------------
