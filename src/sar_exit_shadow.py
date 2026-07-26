@@ -76,7 +76,14 @@ SAREXIT_SUFFIX = "@SAREXIT"
 GATE_SARBASE = "sar_exit_shadow:base"
 GATE_SAREXIT = "sar_exit_shadow:trail"
 
-_DEFAULT_PATH: str = os.getenv("SAR_EXIT_SHADOW_PATH", "data/sar_exit_candidates.json")
+# v2 (2026-07-26): every record written before this point was resolved by a
+# walker that located the entry bar by counting elapsed time, so it replayed a
+# different bar than the trade — see ``main.fetch_ohlc_15m_since``.  The whole
+# file is evidence of a bug, not of an exit method, so the ledger starts over on
+# a new path rather than migrating: there is no field that could rescue a row
+# whose candles were wrong.  The v1 file is left on disk for forensics and is
+# never read again.
+_DEFAULT_PATH: str = os.getenv("SAR_EXIT_SHADOW_PATH", "data/sar_exit_candidates_v2.json")
 _MAX_RECORDS: int = int(os.getenv("SAR_EXIT_SHADOW_MAX_RECORDS", "4000"))
 
 # Exit reasons recorded on the trail arm (diagnostic only).
@@ -232,12 +239,20 @@ def simulate_sar_exit(
         else:
             mfe = max(0.0, (entry - best_fav) / entry * 100.0)
         hold_min = max(0.0, float((exit_idx or entry_idx) - entry_idx) * float(bar_minutes))
+        # Was the indicator already on our side when the trade started?  A
+        # bearish SAR sits ABOVE price, so a LONG entered into one is behind its
+        # own trailing stop from bar zero and is stopped on the first testable
+        # bar — a structurally different trade from one the trail actually
+        # rides, and it must not be pooled with them (see summarize_sar_exit).
+        entry_sar = float(series[entry_idx])  # non-None, checked above
+        aligned = (entry_sar < entry) if is_long else (entry_sar > entry)
         return {
             "exit_price": float(exit_price),
             "exit_reason": reason,
             "mfe_pct": float(mfe),
             "hold_min": hold_min,
             "exit_idx": int(exit_idx if exit_idx is not None else entry_idx),
+            "sar_aligned_at_entry": bool(aligned),
         }
     except Exception as exc:
         from src import fail_open
@@ -520,6 +535,7 @@ def classify_sar_record(
         "trail_mfe_pct": float(result["mfe_pct"]),
         "trail_hold_min": float(result["hold_min"]),
         "trail_exit_reason": str(result["exit_reason"]),
+        "sar_aligned_at_entry": bool(result["sar_aligned_at_entry"]),
         "post_price_max": post_high,
         "post_price_min": post_low,
         "post_price_final": float(closes[-1]),
@@ -529,6 +545,61 @@ def classify_sar_record(
 # ---------------------------------------------------------------------------
 # Rollup for ops / the truth report
 # ---------------------------------------------------------------------------
+
+
+def summarize_sar_alignment(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Split resolved ``@SAREXIT`` rows by whether SAR agreed with us at entry.
+
+    Why this is not one number (2026-07-26): the trail arm pools two
+    structurally different populations.  When SAR already points our way the
+    trail rides and the exit is a real measurement of the method.  When it
+    points the other way its level is *already* on the wrong side of price, so
+    the trade is stopped on the first testable bar for a near-deterministic
+    loss that says nothing about trail quality — it says we took a signal
+    against the indicator.  Averaged together they answer a question nobody
+    asked ("what if we applied a SAR trail blindly, including against
+    ourselves"), and the pooled figure moves with the alignment mix rather than
+    with the exit.
+
+    Pure.  Returns per-bucket n / win-rate / avg-R plus the opposed share, which
+    is the number that says how much of the pooled average is not about SAR.
+    """
+    buckets: Dict[str, Dict[str, float]] = {
+        k: {"n": 0.0, "wins": 0.0, "r_sum": 0.0, "hold_sum": 0.0} for k in ("aligned", "opposed")
+    }
+    for rec in records or []:
+        if not str(rec.get("setup_class", "")).endswith(SAREXIT_SUFFIX):
+            continue
+        if rec.get("classification") is None:
+            continue
+        flag = rec.get("sar_aligned_at_entry")
+        if flag is None:
+            continue  # pre-fix row, or one the walker refused to replay
+        b = buckets["aligned" if flag else "opposed"]
+        b["n"] += 1
+        r = float(rec.get("r_multiple") or 0.0)
+        b["r_sum"] += r
+        b["wins"] += 1.0 if r > 0 else 0.0
+        b["hold_sum"] += float(rec.get("trail_hold_min") or 0.0)
+
+    def _out(b: Dict[str, float]) -> Dict[str, Any]:
+        n = b["n"]
+        return {
+            "n": int(n),
+            "win_rate": (b["wins"] / n) if n else 0.0,
+            "avg_r": (b["r_sum"] / n) if n else 0.0,
+            "avg_hold_min": (b["hold_sum"] / n) if n else 0.0,
+        }
+
+    aligned = _out(buckets["aligned"])
+    opposed = _out(buckets["opposed"])
+    total = aligned["n"] + opposed["n"]
+    return {
+        "aligned": aligned,
+        "opposed": opposed,
+        "total": total,
+        "opposed_share": (opposed["n"] / total) if total else 0.0,
+    }
 
 
 def summarize_sar_exit(matrix: Dict[str, Dict], *, min_sample: int = 15) -> List[Dict]:

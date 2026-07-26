@@ -1423,6 +1423,10 @@ class CryptoSignalEngine:
                 "low": float(k.get("l", 0)),
                 "close": float(k.get("c", 0)),
                 "volume": float(k.get("v", 0)),
+                # "t" = kline open time (ms).  Stored so consumers can locate
+                # the bar covering a wall clock rather than inferring an index
+                # from elapsed time (see fetch_ohlc_15m_since).
+                "open_time": float(k.get("t", 0) or 0) or float("nan"),
             }
             if k.get("x"):  # candle closed
                 self.data_store.update_candle(symbol, interval, candle)
@@ -1701,8 +1705,31 @@ class CryptoSignalEngine:
               a longer window than the trail and quietly re-introduce the
               hold-time confound this pair exists to remove.
 
+            **The entry bar is found by timestamp, never by counting elapsed
+            time** (2026-07-26 fix).  The first cut located it arithmetically —
+            ``n_post = elapsed // bar_seconds``, index counted back from the end
+            of the array — which silently assumes the array is gap-free and its
+            last bar is the current one.  Neither holds: feeds drop frames, and
+            a frozen feed keeps serving its last bar (``last_kline_age_seconds``
+            exists because of an 11-hour MVLLUSDT freeze).  When the assumption
+            broke, ``min()``/``max(0, …)`` clamped the index instead of failing,
+            so the walk replayed a *different bar than the trade* and still
+            returned a confident verdict.  Owner-caught 2026-07-26 on the ops
+            export: exit price was a pure function of (symbol, side) —
+            TRUMPUSDT signals stamped three hours apart all "exited" at 1.598 —
+            41% of one-bar moves exceeded 5%, and the arm read −4.4R average on
+            172 fabricated rows.
+
+            So: locate the bar by ``open_time``, verify the slice is contiguous
+            and real, and return ``None`` when it isn't.  A record that cannot
+            be honestly replayed must produce no verdict — ``classify_pending``
+            leaves it pending and eventually marks it INSUFFICIENT, which is a
+            truthful "we don't know" rather than an invented number.
+
             Reads the already-warm in-memory store: no network, no Firestore.
             """
+            import numpy as np
+
             from config import (
                 SAR_EXIT_SHADOW_BAR_MINUTES,
                 SAR_EXIT_SHADOW_WARMUP_BARS,
@@ -1716,29 +1743,47 @@ class CryptoSignalEngine:
             lows = candles.get("low")
             closes = candles.get("close")
             opens = candles.get("open")
-            if highs is None or lows is None or closes is None:
+            open_time = candles.get("open_time")
+            if highs is None or lows is None or closes is None or open_time is None:
                 return None
-            if len(highs) == 0 or len(lows) == 0 or len(closes) == 0:
+            n = len(highs)
+            if n == 0 or len(lows) != n or len(closes) != n or len(open_time) != n:
                 return None
-            bar_sec = max(1.0, float(SAR_EXIT_SHADOW_BAR_MINUTES) * 60.0)
-            elapsed_sec = max(0.0, time.time() - since_ts)
-            n_post = int(elapsed_sec // bar_sec) + 1
-            n_post = min(n_post, int(SAR_EXIT_SHADOW_WINDOW_BARS) + 1)
+
+            bar_ms = max(1.0, float(SAR_EXIT_SHADOW_BAR_MINUTES) * 60_000.0)
+            since_ms = float(since_ts) * 1000.0
+            # The entry bar is the last one that had already opened at stamp time.
+            idx = int(np.searchsorted(np.asarray(open_time), since_ms, side="right")) - 1
+            if idx < 0:
+                return None  # array begins after the stamp — history already rolled off
+
             warmup = max(0, int(SAR_EXIT_SHADOW_WARMUP_BARS))
-            total = min(n_post + warmup, len(highs))
-            if total <= 0:
+            start = idx - warmup
+            if start < 0:
+                return None  # not enough pre-entry bars for the SAR to converge
+            end = min(n, idx + 1 + int(SAR_EXIT_SHADOW_WINDOW_BARS))
+
+            ot = np.asarray(open_time[start:end], dtype=np.float64)
+            if not np.all(np.isfinite(ot)):
+                return None  # padded/unknown timestamps in the window
+            # Contiguity: the SAR walk steps bar by bar, so a gap would silently
+            # compress real time and mis-date every exit after it.
+            if len(ot) > 1 and not np.all(np.abs(np.diff(ot) - bar_ms) < 1.0):
                 return None
-            entry_index = max(0, total - n_post)
+            # The entry bar must actually contain the stamp, not merely precede it.
+            if not (0.0 <= since_ms - float(ot[idx - start]) < bar_ms):
+                return None
+
             out = {
-                "high": list(highs[-total:]),
-                "low": list(lows[-total:]),
-                "close": list(closes[-total:]),
-                "entry_index": entry_index,
+                "high": list(highs[start:end]),
+                "low": list(lows[start:end]),
+                "close": list(closes[start:end]),
+                "entry_index": idx - start,
             }
             # Opens are optional: without them a gap through the stop fills at
             # the stop (the optimistic read) instead of at the worse open.
-            if opens is not None and len(opens) >= total:
-                out["open"] = list(opens[-total:])
+            if opens is not None and len(opens) == n:
+                out["open"] = list(opens[start:end])
             return out
 
         while True:

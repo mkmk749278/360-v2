@@ -32,6 +32,11 @@ KEY_ALERTS         = "snapshot:alerts"         # List[Alert dict]         — wr
 KEY_CMD_SET_MODE   = "snapshot:cmd:set_mode"   # str "off|paper|live"     — consumed once
 KEY_CMD_RESET_SIGNALS = "snapshot:cmd:reset_signals"  # set to "1" by API; consumed once by engine
 TTL_CMD_RESET = 120  # 2-min TTL — engine consumes before this; if engine is down, client must retry
+# Owner-initiated purge of the SAR exit shadow ledger.  Same fire-and-forget
+# shape as the reset command: the engine container owns the in-memory buffer,
+# so the API container must not clear the file underneath it — the engine would
+# simply persist its buffer back over the top on the next save.
+KEY_CMD_CLEAR_SAR_LEDGER = "snapshot:cmd:clear_sar_ledger"
 
 # ── Manual-take command channel (owner-approved 2026-07-17) ────────────────
 # Unlike the two single-value command keys above, a manual take carries a
