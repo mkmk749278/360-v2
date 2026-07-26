@@ -779,7 +779,16 @@ class SuppressedCandidateStore:
                     continue
                 # Mid-window, only a real trail exit is a result.  Anything else
                 # is the walker running out of candles, not the trade closing.
-                if early and str(detail.get("exit_reason") or "") != REASON_TRAIL:
+                #
+                # The key is ``trail_exit_reason`` — the ledger's field name,
+                # which is what a trail classifier returns.  The first cut of
+                # this guard read ``exit_reason`` (the *walker's* internal name,
+                # one layer down), so it was always None, never matched, and
+                # silently discarded every early classification: the whole path
+                # ran, computed the right answer, and threw it away. The tab
+                # stayed at "0 resolved" and the fix shipped inert
+                # (owner-caught 2026-07-26).
+                if early and str(detail.get("trail_exit_reason") or "") != REASON_TRAIL:
                     continue
                 label = str(detail["classification"])
                 for key, value in detail.items():
