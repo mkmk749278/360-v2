@@ -784,7 +784,7 @@ class TestATrailingTradeResolvesWhenItActuallyCloses:
             window_sec=self.WINDOW,
             trail_classifier=lambda rec, ohlc: {
                 "classification": "WIN",
-                "exit_reason": sa.REASON_TRAIL,
+                "trail_exit_reason": sa.REASON_TRAIL,
                 "trail_exit_price": 101.0,
             },
         )
@@ -803,7 +803,7 @@ class TestATrailingTradeResolvesWhenItActuallyCloses:
             window_sec=self.WINDOW,
             trail_classifier=lambda rec, ohlc: {
                 "classification": "LOSS",
-                "exit_reason": sa.REASON_WINDOW,
+                "trail_exit_reason": sa.REASON_WINDOW,
                 "trail_exit_price": 99.5,
             },
         )
@@ -819,7 +819,7 @@ class TestATrailingTradeResolvesWhenItActuallyCloses:
             window_sec=self.WINDOW,
             trail_classifier=lambda rec, ohlc: {
                 "classification": "LOSS",
-                "exit_reason": sa.REASON_WINDOW,
+                "trail_exit_reason": sa.REASON_WINDOW,
                 "trail_exit_price": 99.5,
             },
         )
@@ -927,3 +927,104 @@ class TestEarlyResolutionIsResultIdentical:
         )
         assert truncated is not None
         assert truncated["exit_reason"] == sar.REASON_WINDOW
+
+
+class TestEarlyResolutionThroughTheRealClassifier:
+    """End-to-end through ``classify_sar_record`` — no hand-written detail dict.
+
+    The mid-window guard originally read ``exit_reason``, the *walker's*
+    internal key, while a trail classifier returns ``trail_exit_reason``, the
+    ledger's field name. It therefore never matched and silently discarded every
+    early classification: the path ran, computed the right answer, and threw it
+    away, so the tab sat at "0 resolved" while the dark-signals pipeline showed
+    the same trades exiting in 15-105 minutes (owner-caught 2026-07-26).
+
+    The tests that were supposed to cover this mocked the classifier with an
+    invented key, so they passed against a dead path. These drive the real one,
+    which is the only way the key contract is actually exercised.
+    """
+
+    WINDOW = 48 * 3600.0
+
+    def _ohlc_that_trail_exits(self, side):
+        """Shaped exactly like ``fetch_ohlc_15m_since`` returns, warmup included."""
+        drift = 0.5 if side == "LONG" else -0.5
+        o1, h1, l1, c1 = _walk(40, seed=4, drift=drift)
+        o2, h2, l2, c2 = _walk(60, seed=404, drift=-drift, start=c1[-1])
+        return {
+            "open": o1 + o2, "high": h1 + h2, "low": l1 + l2, "close": c1 + c2,
+            "entry_index": 40,
+        }, c1[-1]
+
+    def _pending_store(self, side, entry, age_sec):
+        import time as _t
+        store = SuppressedCandidateStore(persist_path="", maxlen=10)
+        store.stamp(sa.SuppressedCandidateRecord(
+            gate_name="sar_exit_shadow:sar",
+            setup_class="SR_FLIP_RETEST@SAREXIT",
+            symbol="BTCUSDT", channel="scalp", side=side,
+            entry=entry, stop_loss=entry * 0.99, tp1=entry * 1.02,
+            sl_distance=entry * 0.01, confidence=70.0,
+            context_key="", regime="", valid_for_minutes=0.0,
+            suppress_timestamp=_t.time() - age_sec,
+            exit_model=sa.EXIT_TRAILING,
+        ))
+        return store
+
+    @pytest.mark.parametrize("side", ["LONG", "SHORT"])
+    def test_a_trail_exit_resolves_mid_window_via_the_real_classifier(self, side):
+        ohlc, entry = self._ohlc_that_trail_exits(side)
+        # Sanity: the fixture must really trail-exit, or this proves nothing.
+        probe = sar.classify_sar_record({"entry": entry, "side": side}, ohlc)
+        assert probe is not None
+        assert probe["trail_exit_reason"] == sar.REASON_TRAIL
+
+        store = self._pending_store(side, entry, age_sec=3600.0)  # 1h old, window is 48h
+        counters = store.classify_pending(
+            fetch_ohlc_since=lambda *_a: ohlc,
+            window_sec=self.WINDOW,
+            trail_classifier=sar.classify_sar_record,
+        )
+
+        assert counters, "the record must resolve an hour in, not in 48h"
+        rec = store.records()[0]
+        assert rec["classification"] is not None
+        assert rec["trail_exit_reason"] == sar.REASON_TRAIL
+        assert rec["trail_exit_price"] is not None
+        assert float(rec["trail_hold_min"]) > 0.0
+
+    @pytest.mark.parametrize("side", ["LONG", "SHORT"])
+    def test_a_window_mark_is_still_refused_mid_window_via_the_real_classifier(self, side):
+        """Truncate before the exit bar: the real classifier reports a window
+        mark, and the guard must leave the record pending rather than book it."""
+        ohlc, entry = self._ohlc_that_trail_exits(side)
+        full = sar.classify_sar_record({"entry": entry, "side": side}, ohlc)
+        assert full["trail_exit_reason"] == sar.REASON_TRAIL
+        cut = int(ohlc["entry_index"] + float(full["trail_hold_min"]) / 15.0)
+        short = {k: (v[:cut] if isinstance(v, list) else v) for k, v in ohlc.items()}
+        probe = sar.classify_sar_record({"entry": entry, "side": side}, short)
+        assert probe is not None
+        assert probe["trail_exit_reason"] == sar.REASON_WINDOW
+
+        store = self._pending_store(side, entry, age_sec=3600.0)
+        counters = store.classify_pending(
+            fetch_ohlc_since=lambda *_a: short,
+            window_sec=self.WINDOW,
+            trail_classifier=sar.classify_sar_record,
+        )
+
+        assert counters == {}
+        assert store.records()[0]["classification"] is None
+
+    def test_the_guard_reads_the_key_a_trail_classifier_actually_returns(self):
+        """Pins the contract itself, so the two names can't drift apart again."""
+        import inspect
+        src_text = inspect.getsource(sa.SuppressedCandidateStore.classify_pending)
+        assert "trail_exit_reason" in src_text
+        # The walker's internal key must not be what the guard keys on.
+        assert 'detail.get("exit_reason")' not in src_text
+        # And the classifier must really return that field.
+        ohlc, entry = self._ohlc_that_trail_exits("LONG")
+        assert "trail_exit_reason" in sar.classify_sar_record(
+            {"entry": entry, "side": "LONG"}, ohlc
+        )
