@@ -69,13 +69,76 @@ them and must not import `sar_exit_shadow` — that dependency runs the other wa
 **Engine-only.** Ops already renders the right labels and reads `classification`
 — both fixes surface there with no ops change.
 
+### Early resolution is result-identical — proven, not assumed
+
+Resolving early would be worthless (and dangerous) if it changed the answer:
+these outcomes feed the Strategy×Context edge matrix through `on_classified`.
+It doesn't, and the property is now pinned by test rather than argued:
+
+- The SAR level at bar *i* depends only on bars ≤ *i*, and `fetch_ohlc_15m_since`
+  anchors the slice so entry always lands `warmup` bars in — so the series start
+  is the same absolute time whenever you ask.
+- `TestEarlyResolutionIsResultIdentical` asserts, across four seed/side fixtures,
+  that **every** truncation still containing the exit bar yields an identical
+  exit price, exit bar and hold time; and the converse — truncating *before* the
+  exit bar reports `REASON_WINDOW`, which is exactly what the new guard refuses
+  to book.
+
+Early resolution changes **when we learn** an outcome, never **what it is**.
+
+### Does this touch the autonomous portfolio? — audited, no
+
+Owner asked directly. Traced, because Layer C is LIVE on the money path via
+`context_emission_policy` and Layer G self-promotes off it:
+
+> **`strategy_edge.source` and the ledger's `provenance` are two different
+> fields that happen to share the word "emitted".** Layer C never reads the
+> ledger's `provenance`.
+
+All four writers into the edge store set `source` independently of it:
+`main.py:1786`/`:1807` use `SHADOW if _is_shadow_unit else SUPPRESSED`;
+`main.py:1862` and `:1916` (`_feed_sar_edge`) hardcode `SOURCE_SHADOW`. The
+allocator's `emitted_backed` reads `cell["n_emitted"]` — an edge-matrix count,
+not the ledger — and Layer D is recommendation-only regardless.
+
+**So `provenance` is display/analysis-only** (ops panels, truth report). That is
+also *why this bug survived*: it corrupted the number the owner reads to make
+decisions, not the machinery that routes. Arguably worse, but it means the
+blast radius of the fix is zero. **Don't re-derive one field from the other.**
+
+**Cost:** the early path adds no I/O. `fetch_ohlc_15m_since` reads the warm
+in-memory store (no network, no Firestore); the loop is 5-minutely and runs in
+`asyncio.to_thread`. Per pass it is a slice plus a ~200-element SAR walk per
+pending record — single-digit ms, off the event loop, and not a per-tick /
+per-scan / per-order path.
+
 **The transferable lesson:** a data migration must never be gated on a timestamp
 predicting a future deploy. `_migrate_provenance` is now schema-gated, and any
 future provenance change bumps `PROVENANCE_SCHEMA` instead of adding a date.
 
+**Shipped:** #795, squashed to `main` as `06a8858`, **deploy green**. The
+migration runs on ledger load, so it took effect at the deploy's engine restart
+— not gradually. 62 tests in `test_sar_exit_shadow.py`; full suite 7207 passed,
+0 failed; `ruff` clean; `mypy` unchanged at 107.
+
+**Unverified end-to-end:** the panel collapsing from 88 toward ~0 is a
+prediction until the owner reads it. Verified in code and against the exported
+rows (88/88 relabel), but ops is owner-only and cannot be checked from a
+session. **If "Delivered to users" did not collapse after `06a8858`, that is a
+real signal — re-diagnose, don't assume the fix worked.**
+
 **Still true from Session 80:** the emitted sample restarts from zero, and now
-genuinely does. No SAR exit decision until a fresh window of *delivered* signals
-accumulates.
+genuinely does — including the one real WIFUSDT delivery, which a pre-fix record
+carries no evidence for and so cannot be rescued. No SAR exit decision until a
+fresh window of *delivered* signals accumulates.
+
+**Process note worth keeping.** Two claims were repeated to the owner as settled
+and were wrong: that #794 had fixed the inflation (it had made it worse, 88x),
+and that "no SAR closed is arithmetic, not breakage" (the classifier was
+refusing to read data it already had). Both were caught by the owner comparing
+the panel against the real feed — the check no amount of internal
+self-consistency testing substitutes for. **When a measurement panel and the
+live feed disagree, the panel is the suspect.**
 
 ---
 

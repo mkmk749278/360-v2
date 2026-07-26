@@ -277,6 +277,24 @@ measurement decide emission. Full description: `OWNER_BRIEF.md § 3.11`.
   ops page read "Emitted to live (98)" for a window with 3 real signals
   (owner-caught 2026-07-25). `PROVENANCE_EMITTED` is written **only** by
   `sar_exit_shadow.promote_to_emitted`, from the router, after confirmed delivery.
+
+  Two corollaries, both paid for on 2026-07-26 when the first fix didn't hold:
+
+  - **Provenance is schema-gated, never date-gated.** The original migration
+    trusted anything stamped after a hardcoded cutoff set to when the fix was
+    *written*; the PR shipped 8h later, so 88 rows of old-code stamps were
+    trusted and the panel read 88 against a true 1 — worse than the bug it
+    replaced. `_migrate_provenance` now keys on `prov_schema` /
+    `PROVENANCE_SCHEMA`, written by the code itself. **A data migration must
+    never be gated on a timestamp predicting a future deploy** — bump the
+    schema instead.
+  - **`provenance` is not `strategy_edge.source`.** Two different fields that
+    share the word "emitted". Layer C never reads the ledger's `provenance`;
+    every edge-store writer sets `source` independently (`SUPPRESSED`/`SHADOW`),
+    and the allocator's `emitted_backed` reads the matrix cell's `n_emitted`.
+    Provenance is **display/analysis-only** — which is exactly why a 30x error
+    in it survived: it corrupts what the owner reads to decide, not what routes.
+    Don't re-derive either field from the other.
 - **Zero emissions ≠ broken.** Fully gated + measured-negative is the gates working;
   fully gated + measured-positive is money on the table. `gated_path_verdict` tells
   them apart — don't "fix" the first case.
