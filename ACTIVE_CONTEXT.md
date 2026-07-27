@@ -4,6 +4,116 @@
 
 ---
 
+## 🟡 SESSION 85 2026-07-27 — we had the engine capped at 1.5 of the host's 4 cores (#803, #805)
+
+**Owner ask:** *"can we add one more IP to VPS and scan full Binance futures in our
+scanning universe — advantages, disadvantages, Binance minutes?"*
+
+The answer is no, and the reason is not the one the question assumes. But the
+investigation found something better than the thing it was looking for.
+
+### The premise doesn't hold
+
+We run at **~10% of one IP's 2,400/min futures weight budget**. Binance's rate limit
+is not what stops us. And the asymmetry that settles the IP question: **weight is
+per-IP, order limits are per-account** — a second IP buys market-data budget and
+**exactly zero order throughput**.
+
+Three things get conflated in "scan the full universe", and they have different answers:
+
+| | Limited by | 2nd IP helps? |
+|---|---|---|
+| **Knowing** what every pair does | `!ticker@arr` — **already solved**, ~500 pairs, 1 WS conn, zero REST | not needed |
+| **Deep-scanning** every pair | engine CPU | **no** |
+| **Emitting** more signals | `MAX_SAME_DIRECTION_GLOBAL=3` | **no** |
+
+That last row is decisive: **more pairs cannot produce more delivered signals**, only a
+different candidate pool for the same 3 slots — and the extra pairs are by construction
+the least liquid.
+
+### What the measurement found (`scripts/diag_capacity.sh`, new)
+
+First time anyone has looked at the box:
+
+| | Measured | |
+|---|---|---|
+| Host | **4 cores / 7.8 GB** | at **~25% load** |
+| Engine CPU | **130% of a 150% cap** | **~87% of allowance** |
+| Engine RAM | **459 MB / 1 GB** | 45%, **0 OOM kills, 0 restarts** |
+
+**We capped the engine at 1.5 cores and left ~3 host cores idle behind our own limit.**
+At 87% on 75 pairs — with mover promotion already taking the scan set to 105 — the
+engine was very likely **being throttled at candle boundaries**, i.e. exactly when every
+timeframe recomputes and exactly when the market is worth scanning. Safe ceiling today
+is **~85 pairs**, *below* where mover promotion already reaches.
+
+### Two methodological corrections worth keeping
+
+1. **RAM was never the constraint.** The first draft called it *Critical* ("6.7× against
+   a 1 GB limit → OOM-kill → re-seed loop"). Measured 459 MB, never OOM-killed. An
+   arithmetic guess dressed as a finding; marked measured-false in the doc.
+2. **Extrapolating capacity from scan wall-clock hides Docker throttling** — throttling
+   lives *inside* cycle times. Measuring CPU consumption directly is what exposed the
+   87%. **When capacity is the question, measure CPU, not latency.**
+
+### Shipped
+
+| PR | What | State |
+|---|---|---|
+| [#803](https://github.com/mkmk749278/360-v2/pull/803) | Research doc + `scripts/diag_capacity.sh` | Draft, CI green — owner merge decision |
+| [#805](https://github.com/mkmk749278/360-v2/pull/805) | Engine 1.5→2.5 cores, 1g→3g; redis capped (had none) | Draft — **needs owner deploy window** (recreate ⇒ re-seed) |
+
+After #805: safe ceiling **~120–145 pairs**, RAM out of the picture past 600. Full
+universe (~500) needs **8–9 cores** for the engine alone — this box has 4, so it stays a
+hardware project with the §8 business case still unmade.
+
+### ⚠️ The landmine, if a second IP is ever revisited
+
+Every server-side auto-trade user has whitelisted **exactly one VPS IP**. Order traffic
+egressing from a second IP returns `-2014` on every key — **including stop-loss placement
+on an open position**. Direct hit on the naked-position invariant. Egress pinning must be
+OS-level per container (~20 `ClientSession()` sites in `src/`) and the signing container
+must **fail closed**. Full rules: research doc §6.
+
+### 🔴 The QCB thread — carried to Session 86, highest value
+
+Owner: *"our concentration we may get more chances for QCB path right?"* Right instinct,
+wrong mechanism, and the correction is the useful part.
+
+`QUIET_COMPRESSION_BREAK` best cell is **+2.21R** (OVERLAP/QUIET/COMPRESSED) and emits
+**0 of 1,055**. The cell sits at **n=29, one sample under the n≥30 relax floor**.
+
+- More pairs → **proportionally** more QCB candidates. `VOL_COMPRESSED` is a *per-symbol*
+  ATR percentile (`market_context.py:144`), so ~20% of any pair set is compressed at any
+  time — **do not claim illiquid alts compress more often; the percentile normalises that
+  away.**
+- **But supply is not the bottleneck** — feeding more candidates into a 0/1055 converter
+  yields 0/1,760.
+- **The real benefit is measurement velocity:** more candidates fill n=29 → n≥30 faster,
+  the Layer G controller relaxes the floor, QCB starts emitting. Genuine reason to widen
+  the universe; *not* a throughput argument.
+
+Layer G already shipped to self-promote `QCB min_samples 30→25` (envelope: ceiling 30,
+step 5, floor 15 — **one step unlocks it**). **First action next session:** check
+`monitor-logs:monitor/analysis/emission_controller.json` for whether that promotion has
+fired, and if not, why. That gates a +2.21R path currently emitting nothing — worth more
+than anything about universe size.
+
+### Open follow-ups (all in `docs/HANDOFF_SESSION_86.md` §5)
+
+- **`SCAN_STAGE_TIMING_ENABLED` is OFF** — no scan-cycle data at all; the 16s figure used
+  throughout is from **2026-06-04**. Enable alongside the #805 deploy.
+- **No Binance weight gauge anywhere** — `rate_limiter.update_from_header` parses the
+  authoritative `X-MBX-USED-WEIGHT-1M` and discards it; no ops panel in any of the 24
+  route modules. Off money path, ships normally.
+- `src/api_limits.py` is **dead code with the wrong constant** (1200 = old *spot* limit;
+  futures is 2400). Instantiated at `scanner/__init__.py:1425-1426`, never read.
+- `/fapi/v1/trades` declared `weight=1` at `historical_data.py:144,150` while fetched
+  with `limit=1000` — under-declaring makes our limiter *optimistic*.
+- **Three uncapped containers remain in `360ce-ops`** (`360ce-ops`, `-agent`, `-redis`).
+
+---
+
 ## 🟢 SESSION 84 2026-07-27 — SAR agreement was decidable at entry and recorded 48h late (#802, ops #91)
 
 **Owner ask:** *"what is that Any SAR agreement — at entry we only have two
