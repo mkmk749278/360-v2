@@ -2153,6 +2153,47 @@ class CryptoSignalEngine:
             min_upstream_delta=10.0,
             min_streak=6,          # 30 min sustained
         ))
+        def _sar_alignment_crosscheck() -> Tuple[bool, str]:
+            """Stamp-time vs resolve-time SAR agreement must never diverge.
+
+            The two paths compute the same quantity — the indicator's side on
+            the last bar closed at entry — from different candle windows. They
+            are allowed to be seeded differently (the resolver walks a 50-bar
+            warmup, the scanner a much longer history) because SAR re-seeds on
+            every flip, so convergence is the norm and a stray disagreement is
+            noise. A *sustained* one is not: it means the replay window is not
+            reconstructing the bar the scanner saw, which is precisely how #800
+            published 172 confident rows describing nothing.
+
+            Passes while the arm is off or before anything has resolved: this
+            probe answers "are the two paths diverging", and with no data the
+            honest answer is "no evidence of divergence". Whether the arm is
+            *stamping at all* is already covered by the ``sar_exit_shadow``
+            rate probe above, so nothing is hidden by not paging here.
+
+            Deliberately does NOT raise to signal those states — ``PredicateProbe``
+            turns an exception into a ``fail_open.record``, and a feature that is
+            merely idle is not a swallowed failure. Filling that counter with
+            non-failures is how a real one stops standing out.
+            """
+            if not bool(_rt.get("sar_exit_shadow_enabled")):
+                return True, "disabled by tunable"
+            from src import sar_exit_shadow as _sar
+            counts = _sar.alignment_crosscheck()
+            checked = counts["agree"] + counts["disagree"]
+            if checked == 0:
+                return True, "no alignment cross-checks yet"
+            bad = counts["disagree"] / checked
+            detail = f"{counts['disagree']}/{checked} disagreed ({bad:.1%})"
+            # Tolerates isolated seed-boundary cases; catches a systematic
+            # off-by-one, which would push this straight toward 100%.
+            return bad <= 0.05, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="sar_alignment_crosscheck",
+            fn=_sar_alignment_crosscheck,
+            min_streak=6,          # 30 min sustained
+        ))
         # Suppression stamps themselves vs scanner activity.  Suppressions can
         # be legitimately sparse in a dead market, so the streak is long: six
         # hours of active scanning with zero stamps is the anomaly bar.

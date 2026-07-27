@@ -1,6 +1,6 @@
 # Stamp SAR agreement at entry, not at resolution
 
-**Status:** PROPOSAL — owner sign-off required, not implemented
+**Status:** IMPLEMENTED — owner signed off 2026-07-27 ("implement engine side too")
 **Raised:** 2026-07-27, owner-caught from the live `/signals/sar` panel
 **Engine module:** `src/sar_exit_shadow.py`
 **Ops counterpart:** `mkmk749278/360ce-ops#91` (merged separately; already forward-compatible with this change)
@@ -168,7 +168,41 @@ at exactly 15.0m (the first testable bar) but one held 75m — SAR flipped to ou
 side before it was touched and the trail genuinely rode. "Opposed at entry" is a
 property of one instant, not a stable property of the trade.
 
-## Open question for the owner
+## What implementation found that the proposal did not anticipate
+
+The proposal said "compute `aligned` with the **same expression** as the resolve
+path". That was not sufficient, and taking it literally would have shipped a
+detector that fired forever on a definitional off-by-one.
+
+**The two paths were not looking at the same bar.**
+
+- The candle store appends **closed candles only** — `src/main.py`:
+  `if k.get("x"):  # candle closed`. So the newest bar the scanner holds when it
+  stamps is the last *completed* one.
+- The resolver's entry bar is "the last one that had already opened at stamp
+  time" (`src/main.py`, `fetch_ohlc_since`) — the bar **containing** the stamp,
+  which was still *forming* when the signal fired.
+
+Those are adjacent bars, and across a SAR flip they sit on **opposite sides of
+price**. Mirroring the resolve-path index at stamp time would therefore have
+disagreed with it on every flip bar, and — worse — the resolver's own answer was
+never knowable at entry in the first place, so it could not be the definition of
+"what we knew when we took the trade".
+
+**Resolution:** both paths now read the last bar **closed at entry**
+(`entry_idx - 1` in the resolver's window). That is the newest SAR level that
+existed when the evaluator decided, it is identical in both paths, and it makes
+a cross-check disagreement mean something. `tests/test_sar_exit_shadow.py::
+TestResolveCrossCheck::test_resolver_reads_the_bar_closed_at_entry_not_the_forming_one`
+pins it with a fixture that straddles a flip, and asserts the fixture straddles
+one so the test cannot rot into a tautology.
+
+Note this **changes the resolver's existing definition** (it previously read
+`entry_idx`). That is a redefinition of a published measurement, and it was free
+to make only because the owner had just cleared the ledger — there was no
+population to invalidate. It would not have been free a day earlier.
+
+## Open question for the owner — CLOSED
 
 Should the stamp-time flag be **backfilled** onto the 261 currently-running rows
 at deploy?
@@ -182,3 +216,8 @@ at deploy?
 
 Recommendation: **no backfill.** A clean 277-row population accumulates within a
 day of the deploy, and it is worth more than a fast one we cannot fully trust.
+
+**Resolved 2026-07-27:** moot. The owner cleared the ledger before this shipped,
+so there is nothing to backfill — every row written from the deploy onward
+carries its verdict from the moment it is stamped. No reconstruction code was
+written, which is the outcome the recommendation was arguing for anyway.

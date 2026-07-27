@@ -4873,6 +4873,13 @@ class Scanner:
                             getattr(sig, "valid_for_minutes", 0.0) or 0.0
                         ),
                         provenance=provenance,
+                        # Decides SAR agreement here, at stamp time, from the
+                        # same warm arrays the evaluator just scored on. The
+                        # comparison needs no future candle, so deferring it to
+                        # the 48h resolve left 94% of the ledger unlabelled and
+                        # the agreement mix on screen two days stale.
+                        highs=highs,
+                        lows=lows,
                     )
             except Exception as _sar_exc:
                 fail_open.record("scanner.stamp_sar_exit_shadow", _sar_exc)
