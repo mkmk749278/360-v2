@@ -73,19 +73,41 @@ that resolve, and only fresh-data records resolve.
   *every seeded intraday timeframe has a live feed* — the general invariant, not a
   copy of the stream list. Verified by reverting: 3 of 4 fail against the old code.
 
+### Follow-up shipped the same session — the guard (`src/data_freshness.py`)
+
+#811 fixed the cause; the guard makes the *next* freeze impossible to score on
+unnoticed. `candle_coverage` pages when the feed dies, but it cannot say whether a
+**particular signal** was built on a dead bar, and it does not stop that signal — a
+watchdog that reports after the geometry shipped is a detector, not a guard.
+
+- **Refuses, never clamps.** Where 15m is known-stale its indicators are withheld, and
+  every consumer already owns a *written* fallback for absent 15m: MOVER falls to 5m
+  ATR, QCB to the legacy 5m compression check, `resolve_pre_tp_threshold` to its
+  `"static"` source. Refusal routes into tested paths rather than inventing one.
+- **Unknown ≠ stale, deliberately asymmetric.** `last_kline_age_seconds` returns None
+  on a restored snapshot. Monitoring counts that as not-fresh and pages; the money path
+  refuses **only on a positive age above the bound** — degrading every pair's geometry
+  after a snapshot restore would be worse than the failure being guarded.
+- **Dark-first, two flags.** Counting is ON and visible through the new
+  `stale_tf_scoring` liveness probe (which reports what *would* have been withheld);
+  `stale_tf_refuse_enabled` ships **false** and is registered as an ops tunable.
+- Wiring is tested against the real `_build_scan_context`, not the module alone — a
+  guard nobody invokes is a scaffold and unit tests can't tell the two apart. Verified
+  by reverting: deleting the scanner hook fails `TestScannerWiring`.
+
+**Owner decision pending:** arm `stale_tf_refuse_enabled` once a window shows what it
+would have withheld. If the counters stay at zero, that is #811 working.
+
 ### Open — next session
 
-1. **Owner-agreed follow-up PR:** refuse-on-stale guards in the BTC regime kill switch
-   and the 15m ATR geometry path, so a future freeze fails loudly instead of silently.
-   Money-path, so it gets its own review.
-2. **The 245 stuck ledger rows** are unresolvable from the in-memory store (their bars
+1. **The 245 stuck ledger rows** are unresolvable from the in-memory store (their bars
    rolled past). Either re-resolve from REST once 15m is live, or clear and restart the
    window. Do not read the arm's verdict off the current population.
-3. `delta_r` is empty on **all** 25 closed rows — `@SARBASE` needs the full 48h window,
+2. `delta_r` is empty on **all** 25 closed rows — `@SARBASE` needs the full 48h window,
    so the A/B this arm exists to run currently has **n = 0 comparisons**.
-4. The resolved subsample is **72% "SAR opposed" vs 40% in the stamped population**
+3. The resolved subsample is **72% "SAR opposed" vs 40% in the stamped population**
    (only movers resolve). Any split panel over closed rows describes nine small caps.
-5. `_feed_sar_edge` writes both alignment cohorts into Layer C under one
+4. `_feed_sar_edge` writes both alignment cohorts into Layer C under one
    `SETUP@SAREXIT` key. `summarize_sar_alignment` splits them; the edge feed does not.
 
 ### What the exit did on 2026-07-27 (real candles, 297 rows, net of 0.10% RT taker)

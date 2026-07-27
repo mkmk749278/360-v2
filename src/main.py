@@ -2451,6 +2451,40 @@ class CryptoSignalEngine:
 
         fl.add_predicate(PredicateProbe(name="candle_coverage", fn=_coverage, min_streak=6))
 
+        def _stale_tf_scoring():
+            """Did any signal get scored on a *known-stale* timeframe?
+
+            ``candle_coverage`` above answers "is the feed alive"; this answers
+            "did we size geometry off a dead bar anyway", which is the question
+            the 2.5-day 15m freeze needed and nobody could ask.  It is also the
+            ops surface for the dark half of the guard: while
+            ``stale_tf_refuse_enabled`` is off the counters show what *would*
+            have been withheld, which is what the activation decision reads.
+
+            Returns True when idle — never raises to signal "nothing happened"
+            (that would fill the fail_open counter with non-failures).
+            """
+            from src import data_freshness as _df
+
+            snap = _df.snapshot()
+            counts = snap.get("counts") or {}
+            scored = sum(v for k, v in counts.items() if k.startswith("scoring:"))
+            gated = sum(v for k, v in counts.items() if k.startswith("gate:"))
+            if not scored and not gated:
+                return True, "no known-stale timeframe reached scoring"
+            withheld = sum(v for k, v in counts.items() if k.startswith("withheld:"))
+            last = (snap.get("last") or {}).get("scoring:15m") or {}
+            return False, (
+                f"scored on stale TF {scored}x (gate reads {gated}x, "
+                f"withheld {withheld}x — refusal "
+                f"{'ARMED' if _df.refusal_enabled() else 'dark'}); "
+                f"last {last.get('symbol', '?')} age={last.get('age_sec', '?')}s"
+            )
+
+        fl.add_predicate(
+            PredicateProbe(name="stale_tf_scoring", fn=_stale_tf_scoring, min_streak=6)
+        )
+
         def _optimism_tax_health():
             # W2: the counterfactual net-R we steer on must track the net-R real
             # emitted trades actually realise.  A sustained gap on adequate sample
