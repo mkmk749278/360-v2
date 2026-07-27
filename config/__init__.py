@@ -948,6 +948,16 @@ MOVER_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int("MOVER_CANDLE_REFRESH_MAX_PE
 #: while one late frame is not.  Depth was the only thing this probe checked
 #: until 2026-07-27, and a boot-frozen array passed it for 2.5 days.
 CANDLE_COVERAGE_MAX_AGE_SEC: float = _safe_float("CANDLE_COVERAGE_MAX_AGE_SEC", "2700")
+#: Age above which ``src.data_freshness`` calls a timeframe *known* stale at
+#: scoring time.  Same three-bar bound as the coverage probe, deliberately: one
+#: number for "this series stopped", read by the watchdog and the guard alike.
+STALE_TF_MAX_AGE_SEC: float = _safe_float("STALE_TF_MAX_AGE_SEC", "2700")
+#: The user-visible half of the staleness guard — withholding stale indicators
+#: from a live evaluator and letting a gate decline to rule.  Ships **false**
+#: (dark-first): the measurement beside it runs from day one and is visible via
+#: the ``stale_tf_scoring`` liveness probe, and this flips only on owner
+#: sign-off, once a real window shows what it would have withheld.
+STALE_TF_REFUSE_ENABLED: bool = _safe_bool("STALE_TF_REFUSE_ENABLED", "false")
 #: Max bid/ask spread (as a PERCENT of mid — same unit as ScanContext.spread_pct,
 #: i.e. 0.5 == 0.5%) a mover-promoted pair may have to be scanned by the scalp
 #: channel. Movers are lower-cap and run wider than blue chips, so this is looser

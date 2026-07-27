@@ -90,6 +90,7 @@ def _build_registry() -> Dict[str, Tunable]:
         DISPATCH_COOLDOWN_SEC,
         GEOMETRY_AB_ENABLED,
         SAR_EXIT_SHADOW_ENABLED,
+        STALE_TF_REFUSE_ENABLED,
         TUNED_VARIANTS_ENABLED,
         LOSS_STREAK_CAP_HOURS,
         LOSS_STREAK_ESCALATION_ENABLED,
@@ -943,6 +944,28 @@ def _build_registry() -> Dict[str, Tunable]:
             ),
             type="bool",
             default=SAR_EXIT_SHADOW_ENABLED,
+            category="Measurement",
+        ),
+        Tunable(
+            key="stale_tf_refuse_enabled",
+            label="Refuse to score on a known-stale timeframe",
+            description=(
+                "When a symbol's 15m series has stopped updating, withhold "
+                "its indicators from the evaluators and let the BTC regime "
+                "kill switch decline to rule, instead of sizing geometry "
+                "from a frozen bar. Every consumer already owns a written "
+                "fallback for absent 15m (MOVER falls to 5m ATR, QCB to the "
+                "legacy 5m compression check, pre-TP to its static "
+                "threshold), so refusing routes into tested paths. "
+                "DEFAULT-OFF (dark-first): the measurement beside it runs "
+                "from day one — see the stale_tf_scoring liveness probe — "
+                "and this flips only on owner sign-off once a real window "
+                "shows what it would have withheld. Unknown age is never "
+                "treated as stale: a missing stamp must not degrade "
+                "geometry after a snapshot restore."
+            ),
+            type="bool",
+            default=STALE_TF_REFUSE_ENABLED,
             category="Measurement",
         ),
         Tunable(

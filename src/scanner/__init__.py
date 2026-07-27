@@ -2990,6 +2990,23 @@ class Scanner:
                 indicators[_tf] = _ind
         self._stage_timing["indicators"] += time.monotonic() - _t_ind
 
+        # ── Known-stale timeframe guard (follow-up to #811) ────────────────
+        # The indicator cache is keyed on candle COUNT, so a series that stops
+        # updating is a permanent cache hit serving a frozen bar — which is
+        # exactly how 15m ATR sized live SL/TP geometry and the pre-TP
+        # threshold for 2.5 days.  Counting is unconditional and surfaces on
+        # the `stale_tf_scoring` liveness probe; withholding is dark
+        # (`stale_tf_refuse_enabled`, default off).  Two in-memory dict reads
+        # per scanned symbol — nothing added to the hot path but arithmetic.
+        try:
+            from src import data_freshness as _df
+
+            indicators = _df.audit_indicators(
+                store=self.data_store, symbol=symbol, indicators=indicators
+            )
+        except Exception as _df_exc:
+            fail_open.record("scanner.data_freshness_audit", _df_exc)
+
         # ── SMC detect (skipped entirely on cache hit) ──
         _t_smc = time.monotonic()
         if _smc_cache_hit:
@@ -5308,6 +5325,14 @@ class Scanner:
         # Fails-open when BTC data is unavailable (warmup, feed drop).
         try:
             _btc_15m = self.data_store.get_candles("BTCUSDT", "15m") or {}
+            # A whipsaw verdict read off a frozen BTC 15m series is not a
+            # fail-open or a fail-closed — it is a verdict from whenever the
+            # data stopped, re-served on every signal since (2.5 days, pre-#811).
+            # Counted always; declines to rule only when the dark flag is armed.
+            from src import data_freshness as _df
+
+            if _df.gate_should_skip(self.data_store, "BTCUSDT", "15m", "regime_kill"):
+                _btc_15m = {}
             _rks_blocked, _rks_reason = self._regime_kill_switch.check(sig, _btc_15m)
             if _rks_blocked:
                 _sc_rks = getattr(sig, "setup_class", "UNKNOWN")
