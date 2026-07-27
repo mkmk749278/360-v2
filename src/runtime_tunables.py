@@ -699,6 +699,35 @@ def _build_registry() -> Dict[str, Tunable]:
             category="Signal gating",
         ),
         Tunable(
+            key="emission_controller_routable_enabled",
+            label="Emission controller — routability measurement",
+            description=(
+                "ON = classify every candidate by whether the emission policy can "
+                "actually read its strategy key, report the standing dead-override "
+                "footprint, and compute the counterfactual (which live candidates "
+                "would have promoted instead of unroutable ones). Measurement only "
+                "— changes no behaviour. Read it on the ops Layer-G panel."
+            ),
+            type="bool",
+            default=True,
+            category="Signal gating",
+        ),
+        Tunable(
+            key="emission_controller_routable_live",
+            label="Emission controller — enforce routability (owner sign-off)",
+            description=(
+                "ON = act on the measurement: exclude unroutable keys (measurement "
+                "arms, shadow-only units) from the action space and prune the dead "
+                "overrides already persisted. Side effect: real strategies stop "
+                "competing with phantoms for the per-cycle budget, so their "
+                "overrides promote sooner — an emission-timing change. Default OFF "
+                "until the measured result is signed off."
+            ),
+            type="bool",
+            default=False,
+            category="Signal gating",
+        ),
+        Tunable(
             key="emission_controller_min_samples_floor",
             label="Emission controller — relax-floor lower bound",
             description=(

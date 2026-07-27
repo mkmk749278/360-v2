@@ -1182,6 +1182,31 @@ CONTEXT_EMISSION_GATE_OVERRIDE_LIVE: bool = _safe_bool(
     "CONTEXT_EMISSION_GATE_OVERRIDE_LIVE", "true"
 )
 
+# ── Layer G routability — the controller's action space vs the policy's keys ──
+#: Layer G keys its inputs by *matrix* strategy (which includes the measurement
+#: arms `X@ATR`/`X@FIXED`/… and the shadow-only `SHADOW_*` units) but its output
+#: is read by `resolve_min_samples(setup_class)` — a live `SetupClass` value.
+#: So an override stored under any other key is unreachable by construction.
+#: Measured on production 2026-07-27 (cycle 279): 9 of 18 persisted overrides
+#: were dead keys, and 23 of 40 lifetime promotions had gone to them.  Those
+#: phantom rows also *outcompete* real strategies for the 2-per-cycle budget —
+#: an arm never emits, so the `losing` auto-tighten brake can never fire on it,
+#: and blast-radius ties resolve alphabetically in its favour.
+#:
+#: MEASURE (default ON, per § Project Phase: measurement is never shipped off)
+#: classifies every candidate, reports the standing dead-override footprint, and
+#: computes the counterfactual — which live candidates *would* have promoted
+#: instead.  It changes no behaviour.  Read it on the ops Layer-G panel.
+#: LIVE (default OFF, owner sign-off) closes the action space and prunes the
+#: dead keys.  Its side effect is that real overrides then promote sooner, which
+#: is an emission-timing change — hence the gate.
+EMISSION_CONTROLLER_ROUTABLE_ENABLED: bool = _safe_bool(
+    "EMISSION_CONTROLLER_ROUTABLE_ENABLED", "true"
+)
+EMISSION_CONTROLLER_ROUTABLE_LIVE: bool = _safe_bool(
+    "EMISSION_CONTROLLER_ROUTABLE_LIVE", "false"
+)
+
 # ── Dispatch staleness V2 — geometry-aware drift gate ────────────────────────
 # The V1 gate (DISPATCH_STALENESS_MAX_DRIFT_PCT, flat 0.5% both ways) is the
 # highest-volume suppressor with a measured-negative verdict: 1225 suppressions,

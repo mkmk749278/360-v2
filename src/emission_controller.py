@@ -29,7 +29,7 @@ override read + liveness probe) applies only the adjustments this core marks
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Set
 
 # Verdict tokens (mirror src/suppression_audit.py) + our own history tokens.
 V_KEEP = "KEEP"
@@ -48,6 +48,93 @@ PARAM_MIN_SAMPLES = "min_samples"
 
 STATUS_PROMOTED = "PROMOTED"
 STATUS_PENDING = "PENDING"
+STATUS_PRUNED = "PRUNED"
+
+# ---------------------------------------------------------------------------
+# Routability — the controller's action space vs what the policy can read
+# ---------------------------------------------------------------------------
+# The controller's *inputs* are keyed by **matrix** strategy, which includes the
+# measurement arms (``X@ATR``/``X@FIXED``/``X@SAREXIT``/…) and the shadow-only
+# units (``SHADOW_*``).  Its *output* is read by
+# ``context_emission_policy.PolicyParams.resolve_min_samples`` /
+# ``resolve_suppress_negative``, which the scanner only ever calls with a live
+# ``SetupClass`` value.  So an override stored under any other key is
+# **unreachable by construction**: persisted, logged ``[APPLY]``, rendered in ops
+# as an "active override" — and read by nothing.
+#
+# Measured on production 2026-07-27 (controller cycle 279): 9 of 18 persisted
+# overrides were dead keys and 23 of 40 lifetime promotions had gone to them.
+# Worse, the phantoms *outcompete* the real rows for a 2-per-cycle budget:
+#
+#   * the auto-tighten brake cannot fire on them — an arm never emits, so
+#     ``n_emitted`` stays 0, ``strategy_health`` never reaches ``health_min_n``,
+#     and ``losing`` is permanently False, making an arm unconditionally
+#     promotable in the LOWER direction where a real strategy would be held;
+#   * ties in the blast-radius sort resolve in their favour — every min_samples
+#     candidate has ``ev_per_suppression_r=None`` → sort key 0.0, so the stable
+#     sort falls through to ``sorted(strategies)`` (alphabetical) and e.g.
+#     ``QUIET_COMPRESSION_BREAK@ATR`` precedes ``RANGE_FADE``.
+#
+# **This is measured live, not dark.** ``routable`` is always classified and
+# always reported (``ControllerDecision.routability``), including the
+# counterfactual: *which live candidates would have promoted had the action space
+# been closed*. That is the number an activation decision needs, and it cannot be
+# obtained by shipping the measurement switched off — a dark path that stamps
+# nothing produces an empty ops panel and a decision that keeps being deferred
+# (§ Project Phase; the SAR arm paid for that lesson on 2026-07-25).
+#
+# ``enforce_routable`` is the separate, default-OFF switch that actually closes
+# the action space and prunes the dead keys. Measurement ON, effect OFF.
+#
+# ``routable`` is a **parameter**, never an import: this module is pure by
+# construction and ``geometry_ab`` does file/env I/O at import time. The
+# integration layer supplies the live ``SetupClass`` set. ``routable=None``
+# disables classification entirely (legacy behaviour, unchanged).
+
+
+def _routable_set(routable: Optional[Iterable[str]]) -> Optional[Set[str]]:
+    if routable is None:
+        return None
+    return {str(s).upper() for s in routable}
+
+
+@dataclass(frozen=True)
+class RoutabilityReport:
+    """What the controller's un-closed action space is costing, per cycle.
+
+    Always populated when ``routable`` is supplied, whether or not enforcement
+    is on — this is the evidence the activation decision reads.
+
+    ``promoted_unroutable``/``starved_routable`` are the decision-relevant pair:
+    the promotions this cycle spent on keys nothing reads, and the live
+    candidates that would have taken those slots instead. Both are ``"S|param"``.
+    """
+
+    enforced: bool
+    routable_candidates: int
+    unroutable_candidates: int
+    unroutable_strategies: List[str] = field(default_factory=list)
+    dead_overrides: Dict[str, Dict[str, Any]] = field(default_factory=dict)
+    promoted_unroutable: List[str] = field(default_factory=list)
+    starved_routable: List[str] = field(default_factory=list)
+    pruned: List[str] = field(default_factory=list)
+
+    @property
+    def wasted_promotions(self) -> int:
+        return len(self.promoted_unroutable)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "enforced": self.enforced,
+            "routable_candidates": self.routable_candidates,
+            "unroutable_candidates": self.unroutable_candidates,
+            "unroutable_strategies": list(self.unroutable_strategies),
+            "dead_overrides": {k: dict(v) for k, v in self.dead_overrides.items()},
+            "promoted_unroutable": list(self.promoted_unroutable),
+            "starved_routable": list(self.starved_routable),
+            "pruned": list(self.pruned),
+            "wasted_promotions": self.wasted_promotions,
+        }
 
 
 @dataclass(frozen=True)
@@ -126,6 +213,7 @@ class _Candidate:
     verdict: str
     ev_per_suppression_r: Optional[float]
     n: int
+    routable: Optional[bool] = None   # None = not classified (routable not supplied)
 
 
 @dataclass(frozen=True)
@@ -135,11 +223,16 @@ class Adjustment:
     old: Any
     new: Any
     applied: bool
-    status: str            # PROMOTED | PENDING
+    status: str            # PROMOTED | PENDING | PRUNED
     reason: str
     verdict: str = ""
     ev_per_suppression_r: Optional[float] = None
     n: int = 0
+    # Whether the emission policy can actually read this strategy key. Stamped by
+    # the engine so **ops renders it rather than re-deriving it** — a mirrored
+    # suffix list in the dashboard is the drift class that silently inflated the
+    # Strategy Lab rollup for a week. ``None`` = not classified.
+    routable: Optional[bool] = None
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -153,6 +246,7 @@ class Adjustment:
             "verdict": self.verdict,
             "ev_per_suppression_r": self.ev_per_suppression_r,
             "n": self.n,
+            "routable": self.routable,
         }
 
 
@@ -160,6 +254,7 @@ class Adjustment:
 class ControllerDecision:
     state: ControllerState
     adjustments: List[Adjustment]   # promoted + pending candidates (HOLD not listed)
+    routability: Optional[RoutabilityReport] = None
 
     @property
     def applied(self) -> List[Adjustment]:
@@ -193,6 +288,8 @@ def run_cycle(
     bounds: ControllerBounds,
     cycles_since_start: int,
     unlocked_cell_r: Optional[Dict[str, float]] = None,
+    routable: Optional[Iterable[str]] = None,
+    enforce_routable: bool = False,
 ) -> ControllerDecision:
     """Advance the controller one cycle.
 
@@ -203,10 +300,21 @@ def run_cycle(
     ``strategy_health``:  strategy -> {emitted_avg_r, emitted_n}
     ``global_params``:    {suppress_negative: bool, min_samples: int}  (the PolicyParams defaults)
     ``cycles_since_start``: in-process cycles since boot (resets on restart → boot grace)
+    ``routable``:      the strategy keys the emission policy can actually look up
+                       (live ``SetupClass`` values). Supplying it turns on
+                       **measurement**: every candidate is classified, the dead
+                       overrides are reported, and the counterfactual is computed.
+                       It changes no behaviour on its own. ``None`` = no
+                       classification (legacy).
+    ``enforce_routable``: apply what the measurement shows — exclude unroutable
+                       keys from the action space and prune the dead overrides.
+                       **Default OFF**; flip only after owner sign-off on the
+                       measured result (§ Project Phase). Ignored without
+                       ``routable``.
 
-    Returns the new state + the candidate adjustments. An adjustment with
-    ``applied=True`` should be written to the override store; every adjustment
-    (applied or pending) is stamped to the shadow ledger.
+    Returns the new state, the candidate adjustments, and (when ``routable`` is
+    given) the ``RoutabilityReport``. An adjustment with ``applied=True`` should be
+    written to the override store; every adjustment is stamped to the ledger.
     """
     k = max(1, bounds.stability_cycles)
     state = ControllerState(
@@ -220,6 +328,56 @@ def run_cycle(
     past_grace = cycles_since_start > bounds.boot_grace_cycles
 
     strategies = set(gate_metrics) | set(best_strong_cell) | set(state.overrides)
+
+    allowed = _routable_set(routable)
+    enforcing = allowed is not None and enforce_routable
+
+    def _is_routable(strategy: str) -> Optional[bool]:
+        return None if allowed is None else (strategy.upper() in allowed)
+
+    # The unroutable keys in play this cycle, resolved once: both the report and
+    # the prune walk the same list, so they can never disagree about what is dead.
+    unroutable_now: List[str] = (
+        [] if allowed is None
+        else sorted(s for s in strategies if s.upper() not in allowed)
+    )
+
+    # Dead overrides — persisted entries under keys the policy never looks up.
+    # Reported every cycle whether or not we enforce, so the ops panel shows the
+    # standing footprint rather than only the moment it is cleaned up.
+    dead_overrides: Dict[str, Dict[str, Any]] = {}
+    for strategy in unroutable_now:
+        ov = state.overrides.get(strategy)
+        if ov is None:
+            continue
+        live_vals = {k: v for k, v in ov.to_dict().items() if v is not None}
+        if live_vals:
+            dead_overrides[strategy] = live_vals
+
+    # Enforcement: close the action space and prune. Pruning is derived from
+    # ``routable`` every cycle rather than run as a one-shot migration, so the
+    # invariant re-establishes itself on every run and needs no schema stamp or
+    # deploy-date gate (cf. #802 — never date-gate a migration).
+    prunes: List[Adjustment] = []
+    if enforcing:
+        unroutable_set = set(unroutable_now)
+        for strategy in unroutable_now:
+            ov = state.overrides.pop(strategy, None)
+            for param in (PARAM_SUPPRESS, PARAM_MIN_SAMPLES):
+                key = f"{strategy}|{param}"
+                state.history.pop(key, None)
+                state.last_change_cycle.pop(key, None)
+                old = getattr(ov, param, None) if ov is not None else None
+                if old is None:
+                    continue
+                prunes.append(Adjustment(
+                    strategy=strategy, param=param, old=old, new=None, applied=True,
+                    status=STATUS_PRUNED, routable=False,
+                    reason="unroutable: the emission policy never looks this key up "
+                           "(measurement arm or shadow-only unit) — override was dead",
+                ))
+        strategies = strategies - unroutable_set
+
     candidates: List[_Candidate] = []
 
     for strategy in sorted(strategies):
@@ -253,6 +411,7 @@ def run_cycle(
                 # store None when reverting to the global default, else the explicit value
                 store_val=None if desired_suppress == g_suppress else desired_suppress,
                 promotable=ok, reason=reason, verdict=gverdict, ev_per_suppression_r=gev, n=gn,
+                routable=_is_routable(strategy),
             ))
 
         # ---- min_samples, driven by a thin STRONG cell + emitted health ----
@@ -297,16 +456,40 @@ def run_cycle(
                 store_val=None if desired_min == g_min else desired_min,
                 promotable=ok, reason=reason + f" (strong_cell_n={cell_n})",
                 verdict=mtoken, ev_per_suppression_r=None, n=cell_n,
+                routable=_is_routable(strategy),
             ))
 
     # ---- blast radius: promote at most max_changes_per_cycle, prefer measured harm ----
-    promotable = sorted(
-        (c for c in candidates if c.promotable),
-        key=lambda c: abs(c.ev_per_suppression_r or 0.0), reverse=True,
-    )
-    promote_ids = {id(c) for c in promotable[: max(0, bounds.max_changes_per_cycle)]}
+    budget = max(0, bounds.max_changes_per_cycle)
 
-    final: List[Adjustment] = []
+    def _rank(pool: List[_Candidate]) -> List[_Candidate]:
+        return sorted(pool, key=lambda c: abs(c.ev_per_suppression_r or 0.0), reverse=True)
+
+    promotable = _rank([c for c in candidates if c.promotable])
+    promote_ids = {id(c) for c in promotable[:budget]}
+
+    # The counterfactual, computed whenever classification is on: re-run the exact
+    # same bounded selection over routable candidates only, and diff. This is what
+    # makes the cost readable instead of inferred — "these two dead keys took the
+    # budget; these two live strategies would have moved instead." Under
+    # enforcement the pools are identical and both lists come out empty.
+    promoted_unroutable: List[str] = []
+    starved_routable: List[str] = []
+    if allowed is not None:
+        routable_only = _rank([c for c in promotable if c.routable])
+        would_ids = {id(c) for c in routable_only[:budget]}
+        promoted_unroutable = [
+            f"{c.strategy}|{c.param}" for c in promotable
+            if id(c) in promote_ids and not c.routable
+        ]
+        starved_routable = [
+            f"{c.strategy}|{c.param}" for c in routable_only
+            if id(c) in would_ids and id(c) not in promote_ids
+        ]
+
+    # Prunes remove dead state rather than change live policy, so they are audited
+    # but deliberately do not consume the promotion budget.
+    final: List[Adjustment] = list(prunes)
     for c in candidates:
         if id(c) in promote_ids:
             ov = state.overrides.setdefault(c.strategy, StrategyOverride())
@@ -319,17 +502,32 @@ def run_cycle(
             final.append(Adjustment(
                 strategy=c.strategy, param=c.param, old=c.old, new=c.new, applied=True,
                 status=STATUS_PROMOTED, reason=c.reason, verdict=c.verdict,
-                ev_per_suppression_r=c.ev_per_suppression_r, n=c.n,
+                ev_per_suppression_r=c.ev_per_suppression_r, n=c.n, routable=c.routable,
             ))
         else:
             reason = c.reason if not c.promotable else c.reason + " | deferred:blast_radius"
             final.append(Adjustment(
                 strategy=c.strategy, param=c.param, old=c.old, new=c.new, applied=False,
                 status=STATUS_PENDING, reason=reason, verdict=c.verdict,
-                ev_per_suppression_r=c.ev_per_suppression_r, n=c.n,
+                ev_per_suppression_r=c.ev_per_suppression_r, n=c.n, routable=c.routable,
             ))
 
-    return ControllerDecision(state=state, adjustments=final)
+    report: Optional[RoutabilityReport] = None
+    if allowed is not None:
+        report = RoutabilityReport(
+            enforced=enforcing,
+            routable_candidates=sum(1 for c in candidates if c.routable),
+            unroutable_candidates=sum(1 for c in candidates if c.routable is False),
+            unroutable_strategies=sorted(
+                {c.strategy for c in candidates if c.routable is False} | set(dead_overrides)
+            ),
+            dead_overrides=dead_overrides,
+            promoted_unroutable=promoted_unroutable,
+            starved_routable=starved_routable,
+            pruned=[f"{a.strategy}|{a.param}" for a in prunes],
+        )
+
+    return ControllerDecision(state=state, adjustments=final, routability=report)
 
 
 def build_inputs(

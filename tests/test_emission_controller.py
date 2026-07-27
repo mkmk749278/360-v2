@@ -221,3 +221,173 @@ def test_unlocked_cell_r_none_is_backward_compatible():
     decs, state = _drive([(({}), cell, {}), (({}), cell, {})], b)
     applied = [a for a in decs[1].adjustments if a.applied and a.param == "min_samples"]
     assert len(applied) == 1 and applied[0].new == 25  # still lowers to unlock (30->25)
+
+
+# ---- routability: the action space vs what the policy can read --------------
+#
+# Layer G keys its inputs by *matrix* strategy (measurement arms `X@ATR`,
+# shadow-only `SHADOW_*`) but its output is read under a live `SetupClass` key,
+# so overrides on the other keys are unreachable. Measured on production
+# 2026-07-27 (cycle 279): 9 of 18 persisted overrides were dead, 23 of 40
+# lifetime promotions had gone to them.
+#
+# `routable` turns on measurement (always safe); `enforce_routable` acts on it.
+
+
+def _routable_drive(cycles, bounds, state=None, start_since=0, routable=None,
+                    enforce=False):
+    """Same driver as ``_drive`` but with the routability parameters supplied."""
+    state = state or ControllerState()
+    cs = start_since
+    decisions = []
+    for gm, cell, health in cycles:
+        cs += 1
+        dec = run_cycle(
+            gate_metrics=gm, best_strong_cell=cell, strategy_health=health,
+            global_params=GLOBAL, prior=state, bounds=bounds, cycles_since_start=cs,
+            routable=routable, enforce_routable=enforce,
+        )
+        state = dec.state
+        decisions.append(dec)
+    return decisions, state
+
+
+def test_routable_omitted_leaves_behaviour_and_report_untouched():
+    # The whole feature is opt-in: no `routable`, no classification, no report.
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2)
+    cell = {"QCB@ATR": {"n": 25, "edge": 2.2}}
+    decs, state = _drive([({}, cell, {}), ({}, cell, {})], b)
+    assert decs[1].routability is None
+    assert all(a.routable is None for d in decs for a in d.adjustments)
+    # ...and the arm still promotes, exactly as it does in production today.
+    assert state.overrides["QCB@ATR"].min_samples == 25
+
+
+def test_measurement_reports_dead_overrides_without_changing_anything():
+    # Measurement must be safe to ship ON: it names the dead keys and touches
+    # nothing. This is the "dark means invisible to users, live to the owner"
+    # half of the doctrine.
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2)
+    start = ControllerState(overrides={
+        "QCB@ATR": StrategyOverride(min_samples=15),      # unroutable, dead
+        "SHADOW_FUNDING_FADE": StrategyOverride(min_samples=15),   # unroutable, dead
+        "RANGE_FADE": StrategyOverride(min_samples=20),    # routable, real
+    })
+    decs, state = _routable_drive(
+        [({}, {}, {})], b, state=start, start_since=5, routable={"RANGE_FADE"},
+    )
+    rep = decs[0].routability
+    assert rep is not None and rep.enforced is False
+    assert sorted(rep.dead_overrides) == ["QCB@ATR", "SHADOW_FUNDING_FADE"]
+    assert rep.dead_overrides["QCB@ATR"] == {"min_samples": 15}
+    assert rep.pruned == []
+    # nothing removed, nothing promoted — measurement is inert
+    assert set(state.overrides) == {"QCB@ATR", "SHADOW_FUNDING_FADE", "RANGE_FADE"}
+    assert state.overrides["RANGE_FADE"].min_samples == 20
+
+
+def test_measurement_names_the_live_candidates_that_phantoms_starve():
+    # The decision-relevant counterfactual. Budget of 1; both an unroutable arm
+    # and a live strategy are promotable. All min_samples candidates tie at sort
+    # key 0.0 (ev is None), so the stable sort falls back to alphabetical and
+    # "QCB@ATR" < "RANGE_FADE" — the phantom wins the slot.
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2, max_changes_per_cycle=1)
+    cell = {"QCB@ATR": {"n": 25, "edge": 2.2}, "RANGE_FADE": {"n": 25, "edge": 1.1}}
+    decs, state = _routable_drive(
+        [({}, cell, {}), ({}, cell, {})], b, routable={"RANGE_FADE"},
+    )
+    rep = decs[1].routability
+    # the wasted promotion is named, and so is what it displaced
+    assert rep.promoted_unroutable == ["QCB@ATR|min_samples"]
+    assert rep.starved_routable == ["RANGE_FADE|min_samples"]
+    assert rep.wasted_promotions == 1
+    # measurement did not intervene: the phantom really did take the slot
+    assert state.overrides["QCB@ATR"].min_samples == 25
+    assert "RANGE_FADE" not in state.overrides
+
+
+def test_enforcement_gives_the_slot_to_the_live_strategy():
+    # Same inputs as the test above, enforcement ON: the live strategy promotes
+    # instead, and the counterfactual collapses to empty (nothing left to waste).
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2, max_changes_per_cycle=1)
+    cell = {"QCB@ATR": {"n": 25, "edge": 2.2}, "RANGE_FADE": {"n": 25, "edge": 1.1}}
+    decs, state = _routable_drive(
+        [({}, cell, {}), ({}, cell, {})], b, routable={"RANGE_FADE"}, enforce=True,
+    )
+    rep = decs[1].routability
+    assert rep.enforced is True
+    assert rep.promoted_unroutable == [] and rep.starved_routable == []
+    assert state.overrides["RANGE_FADE"].min_samples == 25
+    assert "QCB@ATR" not in state.overrides
+
+
+def test_enforcement_prunes_dead_overrides_and_their_history():
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2)
+    start = ControllerState(
+        overrides={
+            "QCB@ATR": StrategyOverride(min_samples=15),
+            "RANGE_FADE": StrategyOverride(min_samples=20),
+        },
+        history={"QCB@ATR|min_samples": ["LOWER", "LOWER"]},
+        last_change_cycle={"QCB@ATR|min_samples": 3},
+    )
+    decs, state = _routable_drive(
+        [({}, {}, {})], b, state=start, start_since=5,
+        routable={"RANGE_FADE"}, enforce=True,
+    )
+    pruned = [a for a in decs[0].adjustments if a.status == "PRUNED"]
+    assert [(a.strategy, a.param, a.old, a.new) for a in pruned] == [
+        ("QCB@ATR", "min_samples", 15, None)
+    ]
+    assert pruned[0].applied and pruned[0].routable is False
+    # state, history and rate-limit bookkeeping all cleared for the dead key
+    assert "QCB@ATR" not in state.overrides
+    assert "QCB@ATR|min_samples" not in state.history
+    assert "QCB@ATR|min_samples" not in state.last_change_cycle
+    # the real override is untouched
+    assert state.overrides["RANGE_FADE"].min_samples == 20
+
+
+def test_prunes_do_not_consume_the_promotion_budget():
+    # A prune removes dead state; it must not cost a live strategy its slot.
+    # With budget=1 and one prune due, the live promotion still lands.
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2, max_changes_per_cycle=1)
+    start = ControllerState(overrides={"QCB@ATR": StrategyOverride(min_samples=15)})
+    cell = {"RANGE_FADE": {"n": 25, "edge": 1.1}}
+    decs, state = _routable_drive(
+        [({}, cell, {}), ({}, cell, {})], b, state=start, start_since=5,
+        routable={"RANGE_FADE"}, enforce=True,
+    )
+    statuses = {(a.strategy, a.status) for a in decs[0].adjustments} | {
+        (a.strategy, a.status) for a in decs[1].adjustments
+    }
+    assert ("QCB@ATR", "PRUNED") in statuses
+    assert state.overrides["RANGE_FADE"].min_samples == 25   # promotion not starved
+
+
+def test_enforcement_is_idempotent_across_cycles():
+    # Pruning is re-derived every cycle rather than run as a one-shot migration,
+    # so a second cycle must be a no-op rather than re-emitting the same prune.
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2)
+    start = ControllerState(overrides={"QCB@ATR": StrategyOverride(min_samples=15)})
+    decs, state = _routable_drive(
+        [({}, {}, {}), ({}, {}, {})], b, state=start, start_since=5,
+        routable={"RANGE_FADE"}, enforce=True,
+    )
+    assert len([a for a in decs[0].adjustments if a.status == "PRUNED"]) == 1
+    assert [a for a in decs[1].adjustments if a.status == "PRUNED"] == []
+    assert decs[1].routability.dead_overrides == {}
+    assert "QCB@ATR" not in state.overrides
+
+
+def test_routable_matching_is_case_insensitive():
+    # The policy upper-cases its lookup key; the filter must agree or it would
+    # prune live strategies.
+    b = _bounds(boot_grace_cycles=1, stability_cycles=2)
+    start = ControllerState(overrides={"RANGE_FADE": StrategyOverride(min_samples=20)})
+    decs, state = _routable_drive(
+        [({}, {}, {})], b, state=start, start_since=5,
+        routable={"range_fade"}, enforce=True,
+    )
+    assert decs[0].routability.dead_overrides == {}
+    assert state.overrides["RANGE_FADE"].min_samples == 20

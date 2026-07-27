@@ -19,9 +19,14 @@ import json
 import os
 import threading
 from collections import deque
-from typing import Any, Deque, Dict, List, Optional
+from typing import Any, Deque, Dict, Iterable, List, Optional
 
-from src.emission_controller import Adjustment, ControllerState, StrategyOverride
+from src.emission_controller import (
+    STATUS_PRUNED,
+    Adjustment,
+    ControllerState,
+    StrategyOverride,
+)
 from src.utils import get_logger
 
 log = get_logger("emission_controller_store")
@@ -37,6 +42,7 @@ class EmissionControllerStore:
         self._state = ControllerState()
         self._ledger: Deque[dict] = deque(maxlen=_LEDGER_MAX)
         self._pending: List[dict] = []   # current cycle's would-be (shadow) candidates
+        self._routability: Dict[str, Any] = {}   # latest RoutabilityReport (measurement)
         self._load()
 
     # ---- hot path (in-memory, O(1)) --------------------------------------
@@ -56,7 +62,12 @@ class EmissionControllerStore:
         with self._lock:
             return self._state
 
-    def commit(self, new_state: ControllerState, adjustments: List[Adjustment]) -> None:
+    def commit(
+        self,
+        new_state: ControllerState,
+        adjustments: List[Adjustment],
+        routability: Optional[Dict[str, Any]] = None,
+    ) -> None:
         """Replace state with the controller's new state and persist **every
         cycle** (a 30-min small-file write, not a hot path).
 
@@ -74,6 +85,8 @@ class EmissionControllerStore:
                 if a.applied:
                     self._ledger.append(a.to_dict())
             self._pending = [a.to_dict() for a in adjustments if not a.applied]
+            if routability is not None:
+                self._routability = dict(routability)
             self._persist_locked()
 
     def ledger(self, limit: int = 50) -> List[dict]:
@@ -88,6 +101,60 @@ class EmissionControllerStore:
         below the EV bar, or blast-radius-deferred)."""
         with self._lock:
             return list(self._pending)
+
+    def routability(self) -> Dict[str, Any]:
+        """The latest cycle's ``RoutabilityReport`` — the live measurement of what
+        the controller's un-closed action space is costing. Empty until the first
+        cycle runs with classification on."""
+        with self._lock:
+            return dict(self._routability)
+
+    def routability_summary(self, routable: Optional[Iterable[str]] = None) -> Dict[str, Any]:
+        """Latest cycle report + **lifetime** promotion attribution over the ledger.
+
+        The lifetime split is what makes the cost legible on day one rather than
+        after a week of fresh cycles: rows written before classification shipped
+        carry no ``routable`` stamp, so they are classified at read time against
+        ``routable``. The stamped value always wins where present — a second
+        computation of the same quantity is a detector, not a replacement — and
+        ``classified_at_read`` reports how much of the number came from the
+        read-time pass, so a blank has a cause rather than a caption.
+        """
+        allowed = {str(s).upper() for s in routable} if routable is not None else None
+        with self._lock:
+            rows = list(self._ledger)
+            latest = dict(self._routability)
+
+        counts = {"routable": 0, "unroutable": 0, "unknown": 0, "pruned": 0}
+        classified_at_read = 0
+        by_key: Dict[str, int] = {}
+        for row in rows:
+            if str(row.get("status") or "") == STATUS_PRUNED:
+                counts["pruned"] += 1
+                continue
+            flag = row.get("routable")
+            if flag is None and allowed is not None:
+                flag = str(row.get("strategy") or "").upper() in allowed
+                classified_at_read += 1
+            if flag is None:
+                counts["unknown"] += 1
+            elif flag:
+                counts["routable"] += 1
+            else:
+                counts["unroutable"] += 1
+                key = str(row.get("strategy") or "?")
+                by_key[key] = by_key.get(key, 0) + 1
+
+        return {
+            "latest_cycle": latest,
+            "lifetime_promotions": sum(
+                counts[k] for k in ("routable", "unroutable", "unknown")
+            ),
+            "lifetime_counts": counts,
+            "lifetime_unroutable_by_key": dict(sorted(by_key.items())),
+            "classified_at_read": classified_at_read,
+            "ledger_rows": len(rows),
+        }
 
     def active_overrides(self) -> Dict[str, Dict[str, Any]]:
         """Only strategies with at least one non-None override — the live footprint."""
@@ -107,6 +174,11 @@ class EmissionControllerStore:
                 "ledger": list(self._ledger),
                 "pending": list(self._pending),
                 "active_overrides": self.active_overrides(),
+                # The routability measurement, for the ops Layer-G panel. Stamped
+                # here by the engine so the dashboard renders it rather than
+                # re-deriving the suffix list — that mirror is the drift class
+                # which silently inflated the Strategy Lab rollup for a week.
+                "routability": dict(self._routability),
             }
             tmp = f"{self._path}.tmp"
             with open(tmp, "w", encoding="utf-8") as fh:
@@ -129,6 +201,9 @@ class EmissionControllerStore:
                 pend = payload.get("pending")
                 if isinstance(pend, list):
                     self._pending = pend
+                rout = payload.get("routability")
+                if isinstance(rout, dict):
+                    self._routability = rout
         except Exception as exc:
             log.warning("emission_controller_store load failed: {}", exc)
 
