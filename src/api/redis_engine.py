@@ -30,7 +30,19 @@ log = get_logger("api.redis_engine")
 
 
 class _MockSignal:
-    """Minimal signal stub used in per-user window-filter reads."""
+    """Minimal signal stub used in per-user window-filter reads.
+
+    Carries a signal's *identity and timing only* — never its geometry.  It
+    exists so ``build_positions`` and the paper subscription-window filters can
+    ask "when was this dispatched"; it is **not** a Signal and must never be
+    handed to anything that renders signal detail.  ``_signal_to_detail`` reads
+    every field through ``getattr(..., default)``, so a stub renders as a
+    confident, complete card of defaults — blank symbol, 0.00 entry/SL/TP,
+    "Engine • UNCLASSIFIED", ACTIVE, ageing forever.  Subscribers saw exactly
+    that on the live Signals tab (owner-caught 2026-07-27) after the API's
+    cold-cache path fell back to ``build_signals(facade)``.  Use
+    :meth:`RedisEngineFacade.published_signals_all` for detail.
+    """
     __slots__ = ("signal_id", "dispatch_timestamp", "timestamp")
 
     def __init__(self, signal_id: str, dispatch_ts: Optional[str]) -> None:
@@ -485,11 +497,34 @@ class RedisEngineFacade:
 
     async def refresh_signals_all(self) -> None:
         """Pull ``snapshot:signals_all`` into the local cache (cheap single
-        GET; called by the take route before pre-validation)."""
+        GET; called by the take route before pre-validation, and by the
+        ``/api/signals`` cold-cache path).
+
+        Keeps the last-good payload when the key is missing or expired —
+        mirroring :meth:`refresh_state`.  A stale-but-real snapshot is the
+        only signal data this container has; discarding it on an engine
+        outage is what left the signals route with nothing but stubs to
+        render.
+        """
         if not self._redis.available:
             return
         try:
             raw = await self._redis.client.get(_store.KEY_SIGNALS_ALL)
-            self._signals_all_cache = _store.decode(raw)
+            decoded = _store.decode(raw)
+            if decoded is not None:
+                self._signals_all_cache = decoded
         except Exception:
             log.exception("redis_engine: failed to refresh signals_all")
+
+    def published_signals_all(self) -> Optional[list]:
+        """Return the last-good ``snapshot:signals_all`` payload (list of
+        SignalDetail dicts), or ``None`` if the engine has never published
+        one to this container.
+
+        This is the *only* source of signal detail in isolated mode.  The
+        facade's :attr:`router` deliberately carries stubs with nothing but
+        ``signal_id`` + ``dispatch_timestamp`` (see :class:`_MockSignal`), so
+        ``build_signals`` must never be pointed at this object — it would
+        render one zeroed card per stub.
+        """
+        return self._signals_all_cache

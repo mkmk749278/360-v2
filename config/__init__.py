@@ -3277,6 +3277,17 @@ API_CORS_ORIGINS: str = os.getenv("API_CORS_ORIGINS", "*")
 #: Default false → existing single-process behaviour is unchanged.
 API_PROCESS_ISOLATED: bool = _safe_bool("API_PROCESS_ISOLATED", "false")
 
+#: Seconds of ``snapshot:engine_state`` silence after which the isolated API
+#: container reports ``engine_connected=false`` on ``/api/health``.
+#:
+#: The writer publishes every ~15s under a 60s TTL, so 120s is 2x the TTL —
+#: late enough that a slow scan cycle or a single missed write can't flap it,
+#: early enough that a dead engine is visible inside one agent poll (60s).
+#:
+#: This ONLY changes what ``/api/health`` *reports*.  It must never change
+#: the endpoint's HTTP status — see the note in ``server.py``'s health handler.
+API_ENGINE_STALE_SEC: int = _safe_int("API_ENGINE_STALE_SEC", "120")
+
 # ---------------------------------------------------------------------------
 # Multi-user expansion (Phase 2 — phone-OTP auth + billing webhook)
 # ---------------------------------------------------------------------------

@@ -40,6 +40,7 @@ post-state as the SMS path.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -157,6 +158,14 @@ from .users import User, UserStore
 log = get_logger("api.server")
 
 _API_VERSION = "0.0.2"
+
+# Engine-silence threshold for /api/health's engine_connected field.  Read at
+# import so tests can monkeypatch the module constant; env-overridable via
+# API_ENGINE_STALE_SEC (config/__init__.py).
+try:
+    from config import API_ENGINE_STALE_SEC as _ENGINE_STALE_SEC
+except ImportError:  # pragma: no cover — config always present in prod
+    _ENGINE_STALE_SEC = 120
 
 # Request-latency log thresholds.  A request slower than the INFO bar is
 # worth a line; one slower than the WARNING bar is a subscriber-visible
@@ -541,6 +550,7 @@ def build_app(
     * ``billing_verifier`` (BillingWebhookVerifier): when ``None`` or
       ``not is_configured()``, ``/internal/billing/grant`` returns 503.
     """
+    from .snapshot_cache import filter_signal_items
     from .snapshot_cache import snapshot_cache as _snapshot_cache
 
     @asynccontextmanager
@@ -696,9 +706,50 @@ def build_app(
 
     @app.get("/api/health", response_model=HealthResponse, tags=["meta"])
     async def health() -> HealthResponse:
+        """Liveness of THIS container, plus whether it still hears the engine.
+
+        **This endpoint must always return 200 while the process is serving.**
+        It backs the api container's docker HEALTHCHECK, which carries
+        ``autoheal=true`` — so a non-200 on engine staleness would make
+        autoheal restart-loop the API for the entire duration of an engine
+        outage. Restarting the API cannot cure a dead engine; that is the
+        exact loop #778 had to break on the engine container, and re-creating
+        it here would be self-inflicted. Report the condition, don't fail on it.
+
+        The 2026-07-27 outage is what added the two engine fields. The API ran
+        ``healthy`` for 3 hours with a dead engine and a dead Redis behind it,
+        because every signal the ops agent inspected was read *through* this
+        container's last-good snapshot — and a frozen snapshot looks perfectly
+        healthy. ``state_age_seconds`` measures something the freeze cannot
+        touch: how long since Redis actually answered. It existed on the
+        facade already and was surfaced nowhere, which is why the detection
+        mechanism ended up being a subscriber's screenshot.
+        """
         boot = getattr(engine, "_boot_time", 0.0) or 0.0
         uptime = time.monotonic() - boot if boot else 0.0
-        return HealthResponse(uptime_seconds=max(0.0, uptime), version=_API_VERSION)
+
+        # Single-process mode: the engine is this process, so it is connected
+        # by construction and the age question is meaningless (None, not 0.0 —
+        # "not applicable" is not "just refreshed").
+        age_raw = getattr(engine, "state_age_seconds", None)
+        engine_connected = True
+        age: Optional[float] = None
+        if isinstance(age_raw, (int, float)):
+            if math.isfinite(age_raw):
+                age = float(age_raw)
+                engine_connected = age <= _ENGINE_STALE_SEC
+            else:
+                # inf — the facade has never had a successful Redis read since
+                # this container started. Never reachable, not "infinitely
+                # stale"; inf is also not valid JSON, so it must not go out.
+                engine_connected = False
+
+        return HealthResponse(
+            uptime_seconds=max(0.0, uptime),
+            version=_API_VERSION,
+            engine_connected=engine_connected,
+            engine_state_age_seconds=age,
+        )
 
     # ---- Auth endpoints (legacy JWT — replaced by Firebase Phone Auth) ----
     # POST /api/auth/anonymous and /api/auth/refresh were retired when the
@@ -1550,6 +1601,62 @@ def build_app(
 
     # ---- Signals ----
 
+    async def _cold_signals(
+        *,
+        status: str = "all",
+        limit: int = 50,
+        setup_class: Optional[str] = None,
+    ) -> List[SignalDetail]:
+        """Serve signals when the snapshot cache is cold or stale.
+
+        Which source is legitimate depends on what ``engine`` actually is:
+
+        * **Single-process** — the real engine is in-process, so
+          ``build_signals`` reads the live router book.  Unchanged.
+        * **Isolated (RedisEngineFacade)** — the facade holds no signal
+          geometry.  Its ``router.active_signals`` is a map of identity-only
+          stubs, and pointing ``build_signals`` at it fabricated one zeroed
+          "ACTIVE" card per stub — blank symbol, 0.00 entry/SL/TP, ageing
+          forever — which is what live subscribers were shown for hours during
+          the 2026-07-24 IP-ban outage and again on 2026-07-27.  The only real
+          detail this container ever has is the engine's published
+          ``snapshot:signals_all``; when that is gone too, an empty list is the
+          honest answer.  The app renders its "no signals" empty state, and
+          engine deadness is reported by the paths that actually measure it
+          (vps-liveness, feature-liveness, the agent's engine-stale detector) —
+          not by inventing trades.
+        """
+        published = getattr(engine, "published_signals_all", None)
+        if not callable(published):
+            return build_signals(
+                engine, status=status, limit=limit, setup_class=setup_class,
+            )
+
+        try:
+            await engine.refresh_signals_all()
+        except Exception:
+            log.exception("/api/signals: signals_all refresh failed — serving last good")
+        raw = published()
+        if not isinstance(raw, list):
+            log.warning(
+                "/api/signals: snapshot cache stale and no published snapshot "
+                "available — serving empty rather than stub-derived signals",
+            )
+            return []
+
+        parsed: List[SignalDetail] = []
+        for d in raw:
+            try:
+                parsed.append(SignalDetail(**d))
+            except Exception:
+                log.warning(
+                    "/api/signals: skipping malformed published signal sid={}",
+                    (d or {}).get("signal_id", "?") if isinstance(d, dict) else "?",
+                )
+        return filter_signal_items(
+            parsed, status=status, limit=limit, setup_class=setup_class,
+        )
+
     @app.get(
         "/api/signals",
         response_model=SignalsResponse,
@@ -1569,9 +1676,10 @@ def build_app(
             status=status, limit=limit, setup_class=setup_class,
         )
         if items is None:
-            # Cache cold (first 5 s after startup) — fall back to live build.
-            items = build_signals(
-                engine, status=status, limit=limit, setup_class=setup_class,
+            # Cache cold (first 5 s after startup) or stale (engine stopped
+            # publishing) — rebuild from whatever real source this process has.
+            items = await _cold_signals(
+                status=status, limit=limit, setup_class=setup_class,
             )
         response.headers["Cache-Control"] = "public, max-age=10, stale-while-revalidate=30"
         return SignalsResponse(items=items, total=len(items))
@@ -1589,7 +1697,11 @@ def build_app(
         # old signals not yet evicted from the engine's active_signals
         # + _signal_history.
         cached = _snapshot_cache.filter_signals(status="all", limit=500)
-        pool = cached if cached is not None else build_signals(engine, status="all", limit=1000)
+        pool = (
+            cached
+            if cached is not None
+            else await _cold_signals(status="all", limit=1000)
+        )
         for it in pool:
             if it.signal_id == signal_id:
                 return it

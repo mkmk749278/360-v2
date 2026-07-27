@@ -22,7 +22,17 @@ env/
 *.swo
 
 # Environment
+#
+# The glob matters as much as the base name.  ``.env`` alone left the
+# production VPS carrying seven UNTRACKED-but-not-ignored copies of it
+# (.env.bak, .env.bak.<epoch> x5, .env.save) — every one a verbatim snapshot of
+# the live secrets: Binance keys, KMS config, Firebase credentials, the ops
+# bearer token.  Untracked is not safe; it means a single ``git add -A`` run on
+# the box stages production secrets into a commit.  Ignore every derivative,
+# not just the canonical name.  ``.env.example`` stays tracked as the template.
 .env
+.env.*
+!.env.example
 
 # OS
 .DS_Store

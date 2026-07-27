@@ -120,9 +120,11 @@ PROFILE_ARGS=()
 
 if grep -qE '^API_PROCESS_ISOLATED=(true|1|yes)$' .env 2>/dev/null; then
     PROFILE_ARGS=(--profile isolated)
+    _mode_label="isolated mode"
     echo "🔀 API_PROCESS_ISOLATED=true — isolated mode: 'api' container serves HTTP."
 else
     COMPOSE_FILES+=(-f docker-compose.singleprocess.yml)
+    _mode_label="single-process mode"
     echo "⚙️  API_PROCESS_ISOLATED=false — single-process mode: engine serves HTTP."
 fi
 
@@ -181,9 +183,16 @@ else
     echo "    docker logs 360scalp-v2-api --tail 50"
     echo "    docker logs 360scalp-v2-engine --tail 50"
 fi
+# The footer used to hardcode the single-process compose overlay regardless of
+# which mode had just been deployed.  On the live VPS (isolated) it printed
+# commands carrying -f docker-compose.singleprocess.yml — a different config to
+# the one running, so following them targets the wrong service topology.  It is
+# read at exactly the wrong moment: during an incident, when the deploy output
+# is the first thing anyone looks at.  Echo the flags this run actually used.
+_cmd="docker compose ${COMPOSE_FILES[*]} ${PROFILE_ARGS[*]}"
 echo ""
-echo "📋 Useful commands (single-process mode):"
-echo "  docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml logs -f engine"
-echo "  docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml restart engine"
-echo "  docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml down"
-echo "  docker compose -f docker-compose.yml -f docker-compose.singleprocess.yml up -d --build"
+echo "📋 Useful commands (${_mode_label}):"
+echo "  ${_cmd} logs -f engine"
+echo "  ${_cmd} restart engine"
+echo "  ${_cmd} down"
+echo "  ${_cmd} up -d --build"

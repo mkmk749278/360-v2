@@ -495,7 +495,34 @@ def _original_stop_loss(sig: Any, direction_str: str) -> float:
     return float(getattr(sig, "stop_loss", 0.0) or 0.0)
 
 
+class UnrenderableSignal(ValueError):
+    """A candidate object cannot support a signal card.
+
+    Raised — never clamped — by :func:`_signal_to_detail` when the object it
+    was handed carries no symbol or no entry price.  ``_signal_to_detail``
+    reads every field through ``getattr(..., default)``, so an object that
+    merely *looks* signal-shaped (a stub carrying only ``signal_id`` and
+    ``dispatch_timestamp``) renders as a complete, confident card with every
+    field at its dataclass default: blank symbol, entry/SL/TP1/TP2 all 0.00,
+    confidence 0.0, tier "B", setup ``UNCLASSIFIED``, direction LONG, status
+    ACTIVE, and an ``open Nh`` age that grows forever because nothing can ever
+    close it.  Subscribers saw exactly that on the live Signals tab
+    (owner-caught 2026-07-27) whenever the API fell back to building detail
+    off ``RedisEngineFacade``.
+
+    A clamp is not a guard (CLAUDE.md): where the input cannot support the
+    work, refuse and let the caller record that it doesn't know.
+    """
+
+
 def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
+    symbol = str(getattr(sig, "symbol", "") or "").strip()
+    entry_val = float(getattr(sig, "entry", 0.0) or 0.0)
+    if not symbol or entry_val <= 0.0:
+        raise UnrenderableSignal(
+            f"signal_id={getattr(sig, 'signal_id', '?')!r} "
+            f"symbol={symbol!r} entry={entry_val!r}"
+        )
     direction = getattr(sig, "direction", None)
     direction_str = (
         direction.value
@@ -520,9 +547,9 @@ def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
 
     return SignalDetail(
         signal_id=getattr(sig, "signal_id", "") or "",
-        symbol=getattr(sig, "symbol", ""),
+        symbol=symbol,
         direction=direction_str,  # type: ignore[arg-type]
-        entry=float(getattr(sig, "entry", 0.0) or 0.0),
+        entry=entry_val,
         stop_loss=float(getattr(sig, "stop_loss", 0.0) or 0.0),
         original_stop_loss=_original_stop_loss(sig, direction_str),
         tp1=float(getattr(sig, "tp1", 0.0) or 0.0),
@@ -615,10 +642,19 @@ def build_signals(
         key=lambda s: getattr(s, "timestamp", None) or _now(),
         reverse=True,
     )
-    return [
-        _signal_to_detail(s, is_open=id(s) in open_ids)
-        for s in signals[:limit]
-    ]
+    # Refuse — and count — anything that cannot support a card, rather than
+    # publishing a zeroed shell.  A drop here is never routine: it means a
+    # caller handed us objects that are not signals (see UnrenderableSignal),
+    # so it goes through fail_open so the liveness watchdog pages instead of
+    # the app quietly showing phantoms.
+    out: List[SignalDetail] = []
+    for s in signals[:limit]:
+        try:
+            out.append(_signal_to_detail(s, is_open=id(s) in open_ids))
+        except UnrenderableSignal as exc:
+            from src import fail_open
+            fail_open.record("api.snapshot.unrenderable_signal", exc)
+    return out
 
 
 # ---------------------------------------------------------------------------
