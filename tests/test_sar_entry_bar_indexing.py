@@ -96,7 +96,15 @@ class TestEntryBarContract:
 
 
 class TestAlignmentIsRecorded:
-    """Counter-SAR entries must be identifiable, not silently pooled."""
+    """Counter-SAR entries must be identifiable, not silently pooled.
+
+    The authoritative verdict moved to STAMP time on 2026-07-27 (it needs no
+    future candle, and deferring it left 94% of the ledger unlabelled for up to
+    48h). What the resolver returns is now ``sar_aligned_at_resolve`` — the
+    cross-check, read at the last bar CLOSED at entry so it measures the same
+    bar the scanner did. These cases still pin the direction convention: a
+    bearish SAR sits above price, so it opposes a LONG and agrees with a SHORT.
+    """
 
     @staticmethod
     def _downtrend(n=80):
@@ -117,7 +125,7 @@ class TestAlignmentIsRecorded:
             side="LONG", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15.0,
         )
         assert r is not None
-        assert r["sar_aligned_at_entry"] is False
+        assert r["sar_aligned_at_resolve"] is False
 
     def test_short_with_a_bearish_sar_is_flagged_aligned(self):
         h, l, c, o = self._downtrend()
@@ -126,7 +134,7 @@ class TestAlignmentIsRecorded:
             side="SHORT", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15.0,
         )
         assert r is not None
-        assert r["sar_aligned_at_entry"] is True
+        assert r["sar_aligned_at_resolve"] is True
 
     def test_opposed_entries_exit_on_the_first_testable_bar(self):
         """Not a bug — it is what a SAR trail does to a counter-trend entry.

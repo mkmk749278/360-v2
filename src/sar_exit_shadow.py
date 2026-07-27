@@ -147,6 +147,127 @@ def parabolic_sar(
     return out
 
 
+# The SAR needs at least two bars before it produces a level at all
+# (``parabolic_sar`` leaves index 0 as None), and a level read off a barely-seeded
+# recursion is not worth stamping.  Refuse below this rather than emit a verdict
+# nobody should trust.
+_MIN_ALIGNMENT_BARS = 10
+
+
+def _aligned_at(
+    series: Sequence[Optional[float]], idx: int, entry: float, side: str
+) -> Optional[bool]:
+    """Which side of the entry the SAR sat on, at one bar.  Refuses, never clamps.
+
+    The single definition of "agreement", shared by the stamp path and the
+    resolve-path cross-check.  Two copies of this comparison is how the two
+    silently drift into measuring different things, so there is exactly one.
+
+    A bearish SAR sits ABOVE price, so a LONG taken into one is behind its own
+    trailing stop from bar zero.  Returns ``None`` — never ``False`` — when the
+    bar cannot answer: out of range, no level yet, or unusable prices.  *A clamp
+    is not a guard*: "this input cannot support the computation" must stay
+    distinguishable from "the indicator opposed us".
+    """
+    if idx < 0 or idx >= len(series):
+        return None
+    level = series[idx]
+    if level is None:
+        return None
+    level = float(level)
+    if level <= 0.0 or entry <= 0.0:
+        return None
+    return (level < entry) if str(side or "").upper() == "LONG" else (level > entry)
+
+
+def alignment_at_entry(
+    *,
+    highs: Optional[Sequence[float]],
+    lows: Optional[Sequence[float]],
+    entry: float,
+    side: str,
+    step: Optional[float] = None,
+    max_step: Optional[float] = None,
+) -> Optional[bool]:
+    """Was the SAR on our side when the signal fired?  Decided at stamp time.
+
+    This is the whole point of the 2026-07-27 change: the comparison consumes
+    **no future candle**.  It reads the indicator level on the last closed bar
+    and the entry price, both of which the scanner is holding when it stamps.
+    Nothing here needs a resolution 48h later, and nothing here infers an index
+    from wall-clock arithmetic — the bug class that produced #800.
+
+    ``highs``/``lows`` are the scanner's warm 15m arrays, which by contract hold
+    **closed bars only** (``main.py``: ``if k.get("x")``).  So the last element
+    is the last completed bar — the newest SAR level that existed when the
+    evaluator decided.  That is deliberately *not* the bar containing the stamp:
+    that bar was still forming at entry, so its level is only knowable in
+    hindsight and cannot be what "we knew at entry" means.
+
+    Fail-open and refusing: any problem returns ``None``, the record carries no
+    verdict, and ops renders "not yet decided" rather than a guess.
+    """
+    try:
+        # Never boolean-test these — they arrive as numpy arrays and truthiness
+        # raises (hard limit; tests/test_no_numpy_truthiness_regression.py).
+        if highs is None or lows is None:
+            return None
+        n = len(highs)
+        if n < _MIN_ALIGNMENT_BARS or len(lows) != n:
+            return None
+        entry = float(entry or 0.0)
+        if entry <= 0.0:
+            return None
+        side_u = str(side or "").upper()
+        if side_u not in ("LONG", "SHORT"):
+            return None
+        from config import SAR_EXIT_SHADOW_MAX_STEP, SAR_EXIT_SHADOW_STEP
+
+        series = parabolic_sar(
+            [float(h) for h in highs],
+            [float(low) for low in lows],
+            SAR_EXIT_SHADOW_STEP if step is None else float(step),
+            SAR_EXIT_SHADOW_MAX_STEP if max_step is None else float(max_step),
+        )
+        return _aligned_at(series, n - 1, entry, side_u)
+    except Exception as exc:
+        from src import fail_open
+        fail_open.record("sar_exit_shadow.alignment_at_entry", exc)
+        return None
+
+
+# Stamp-vs-resolve agreement counters.  Not decoration: the two paths compute
+# the same quantity from different candle windows, and a persistent disagreement
+# means the walker is not reconstructing the bar the scanner saw.  Surfaced by
+# the feature-liveness probe so it pages instead of sitting in a file.
+_alignment_agree = 0
+_alignment_disagree = 0
+_alignment_lock = threading.Lock()
+
+
+def _record_alignment_check(agreed: bool) -> None:
+    global _alignment_agree, _alignment_disagree
+    with _alignment_lock:
+        if agreed:
+            _alignment_agree += 1
+        else:
+            _alignment_disagree += 1
+
+
+def alignment_crosscheck() -> Dict[str, int]:
+    """Agreement counters for the stamp-vs-resolve cross-check (pure read)."""
+    with _alignment_lock:
+        return {"agree": _alignment_agree, "disagree": _alignment_disagree}
+
+
+def reset_alignment_crosscheck() -> None:
+    """Test hook — the counters are process-lifetime and module-global."""
+    global _alignment_agree, _alignment_disagree
+    with _alignment_lock:
+        _alignment_agree = 0
+        _alignment_disagree = 0
+
+
 def simulate_sar_exit(
     *,
     highs: Sequence[float],
@@ -244,15 +365,22 @@ def simulate_sar_exit(
         # own trailing stop from bar zero and is stopped on the first testable
         # bar — a structurally different trade from one the trail actually
         # rides, and it must not be pooled with them (see summarize_sar_exit).
-        entry_sar = float(series[entry_idx])  # non-None, checked above
-        aligned = (entry_sar < entry) if is_long else (entry_sar > entry)
+        #
+        # Read at ``entry_idx - 1``, the last bar CLOSED when the signal fired —
+        # not at ``entry_idx``.  The resolver's entry bar is the one *containing*
+        # the stamp, which was still forming at entry; its level only exists in
+        # hindsight.  Aligning both paths on the last closed bar is what makes
+        # the stamp-time value and this one the same quantity, and therefore
+        # what makes a disagreement mean something (2026-07-27).  This is a
+        # cross-check now — the authority is the value stamped at entry.
+        aligned = _aligned_at(series, entry_idx - 1, entry, side)
         return {
             "exit_price": float(exit_price),
             "exit_reason": reason,
             "mfe_pct": float(mfe),
             "hold_min": hold_min,
             "exit_idx": int(exit_idx if exit_idx is not None else entry_idx),
-            "sar_aligned_at_entry": bool(aligned),
+            "sar_aligned_at_resolve": aligned,
         }
     except Exception as exc:
         from src import fail_open
@@ -304,6 +432,8 @@ def stamp_sar_pair(
     regime: str = "",
     valid_for_minutes: float = 0.0,
     provenance: str = "",
+    highs: Optional[Sequence[float]] = None,
+    lows: Optional[Sequence[float]] = None,
     store: Optional[SuppressedCandidateStore] = None,
     now_mono: Optional[float] = None,
 ) -> bool:
@@ -372,6 +502,13 @@ def stamp_sar_pair(
         if last is not None and mono - last < SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC:
             return False
         target = store or get_sar_store()
+        # Computed AFTER the cooldown gate on purpose: the SAR walk is pure CPU
+        # over already-warm in-memory arrays (no Firestore, no network, nothing
+        # on a hot path), but it should still only run for candidates that
+        # actually stamp rather than on every throttled re-detection.
+        aligned = alignment_at_entry(
+            highs=highs, lows=lows, entry=entry, side=side_u
+        )
 
         def _stamp_arm(gate: str, suffix: str, exit_model: str):
             return stamp_candidate(
@@ -389,6 +526,11 @@ def stamp_sar_pair(
                 valid_for_minutes=float(valid_for_minutes or 0.0),
                 exit_model=exit_model,
                 provenance=str(provenance or ""),
+                # Both arms of a pair carry it — they are one candidate with one
+                # entry, so the agreement fact is a property of the pair, and a
+                # rollup that joins the arms must not have to guess which side
+                # holds it.
+                sar_aligned_at_entry=aligned,
                 store=target,
             )
 
@@ -529,13 +671,30 @@ def classify_sar_record(
 
     post_high = max(float(h) for h in highs[entry_idx:]) if len(highs) > entry_idx else 0.0
     post_low = min(float(low) for low in lows[entry_idx:]) if len(lows) > entry_idx else 0.0
+    # Cross-check, not overwrite.  ``sar_aligned_at_entry`` was decided when the
+    # signal fired and is never touched here; this records what the replay
+    # window thinks and counts whether the two agree.  A sustained disagreement
+    # is the walker failing to reconstruct the bar the scanner saw — #800's
+    # failure mode, turned into something that reports on itself.  Tri-state is
+    # preserved: None means the replay could not decide, not "opposed".
+    resolved_alignment = result["sar_aligned_at_resolve"]
+    stamped_alignment = record.get("sar_aligned_at_entry")
+    if resolved_alignment is not None and stamped_alignment is not None:
+        agreed = bool(resolved_alignment) == bool(stamped_alignment)
+        _record_alignment_check(agreed)
+        if not agreed:
+            log.warning(
+                "SAR alignment cross-check disagreed: {} {} stamped={} resolved={}",
+                record.get("symbol"), record.get("side"),
+                stamped_alignment, resolved_alignment,
+            )
     return {
         "classification": label,
         "trail_exit_price": exit_price,
         "trail_mfe_pct": float(result["mfe_pct"]),
         "trail_hold_min": float(result["hold_min"]),
         "trail_exit_reason": str(result["exit_reason"]),
-        "sar_aligned_at_entry": bool(result["sar_aligned_at_entry"]),
+        "sar_aligned_at_resolve": resolved_alignment,
         "post_price_max": post_high,
         "post_price_min": post_low,
         "post_price_final": float(closes[-1]),
@@ -572,9 +731,13 @@ def summarize_sar_alignment(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]
             continue
         if rec.get("classification") is None:
             continue
+        # Reads the STAMP-time value. Never falls back to the resolve-time
+        # cross-check: a fallback would quietly re-introduce the resolution
+        # dependency this change exists to remove, and would mix two windows in
+        # one bucket the moment they ever disagreed.
         flag = rec.get("sar_aligned_at_entry")
         if flag is None:
-            continue  # pre-fix row, or one the walker refused to replay
+            continue  # stamped before the entry-time flag, or undecidable then
         b = buckets["aligned" if flag else "opposed"]
         b["n"] += 1
         r = float(rec.get("r_multiple") or 0.0)
