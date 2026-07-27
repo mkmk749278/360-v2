@@ -4,6 +4,116 @@
 
 ---
 
+## 🟢 SESSION 84 2026-07-27 — SAR agreement was decidable at entry and recorded 48h late (#802, ops #91)
+
+**Owner ask:** *"what is that Any SAR agreement — at entry we only have two
+situations right, agreed or opposed"*, from the live `/signals/sar` panel.
+
+The question was about a dropdown label. The label was fine; what it exposed was
+that **94% of the ledger carried no verdict at all**.
+
+### The cross-tab that settled it
+
+Full export, 277 rows:
+
+| | has verdict | blank |
+|---|---|---|
+| `CLOSED_TRAIL` | 16 | 0 |
+| `RUNNING` | 0 | 261 |
+
+Perfectly diagonal, zero exceptions. The panel blamed those blanks on *"the
+walker refused to replay them, or they predate the flag."* **Neither cause
+accounted for a single row.** After #800 that is the worst possible false alarm —
+a data-fault claim over a population that was merely still open.
+
+### Root cause — a fact recorded where it was convenient, not where it was known
+
+`aligned = entry_sar < entry` compares the indicator level on the entry bar
+against the entry price. **No future candle participates.** Both numbers exist
+the instant the scanner stamps. But the line lived inside `simulate_sar_exit`,
+which runs when the walker resolves the trade up to 48h later.
+
+So the agreement mix on screen always described a two-day-old population, the
+sample read 16 when it could read 277, and *"how many of the signals we are
+sending go against the indicator"* — an **entry-filter** question about the live
+money path — was unanswerable.
+
+**Fix (#802):** `stamp_sar_pair` takes the warm 15m arrays and writes
+`sar_aligned_at_entry` onto both arms at stamp time, after the cooldown gate.
+Undecidable inputs write nothing — `None` never collapses to `False`. The resolve
+path keeps computing the same quantity under `sar_aligned_at_resolve` as a
+**cross-check, never an overwrite**, behind a `sar_alignment_crosscheck` liveness
+probe: a sustained divergence means the walker is not reconstructing the bar the
+scanner saw, which is #800's failure mode made self-reporting.
+
+### The off-by-one the proposal missed
+
+The proposal said "use the same expression as the resolve path". Taken literally
+that ships a detector firing forever on a definitional difference:
+
+- The store appends **closed candles only** (`main.py`: `if k.get("x")`), so the
+  newest bar at stamp time is the last *completed* one.
+- The resolver's entry bar is the one **containing** the stamp — still *forming*
+  when the signal fired.
+
+Adjacent bars, and **across a SAR flip they sit on opposite sides of price**.
+Worse, the resolver's answer was never knowable at entry, so it could not be the
+definition of "what we knew when we took the trade". Both paths now read the last
+bar **closed at entry**. This redefined a published measurement, which was free
+only because the owner had cleared the ledger the same hour.
+
+### What the data actually says about counter-SAR signals
+
+Not what it looks like. The opposed bucket's −0.11R is the **trail's** result, and
+an opposed SAR is a stop already breached at entry — the walk has no choice but to
+exit on the first testable bar. The row records ~15 minutes of drift. 38% win over
+8 trades, gross of fees, is a coin flip minus a round trip, not a verdict on the
+signal.
+
+Also, from the same export: **every opposed row is `enqueued`. Zero were ever
+delivered.** An entry filter today would suppress a population with no measured
+instances at the delivery layer.
+
+The question "are counter-SAR *entries* bad" needs the **live-geometry arm**
+(`@SARBASE`) split by agreement — impossible before #802, since only trail-resolved
+rows got a flag. Collectable from this deploy onward.
+
+### Ops #91 — the panel measured a population the page was not showing
+
+`summarize_alignment(all_rows)` ignored every filter, so with Source set to
+Gate-suppressed the page showed 149 rows under a split over all 267. That is #88
+again: only the delivered population can justify changing what subscribers
+receive. Also shipped: a **distinct-exits** column (three BUSDT rows stamped
+00:04/00:47/01:34 all exited at 0.1959, one rally carrying 3/8 of the agreed
+bucket — +1.24R is really ~+0.90R over ~5 independent moves), pending-vs-unresolved
+split, and the alignment `<select>` given its own label instead of borrowing
+"Status".
+
+### Rules this bought
+
+- **Record a fact where it becomes true, not where it is convenient.** Deferring a
+  derivable value to a later pass does not just delay it — it silently shrinks
+  every population that reads it, and the shortfall looks like missing data rather
+  than late data.
+- **"Blank" needs a cause before it gets a caption.** Not-yet-resolved and
+  could-not-be-resolved are different states; pooling them under one sentence
+  reported a fault that was not happening.
+- **Closed bar ≠ current bar.** The store holds closed candles only; a resolver
+  locating "the bar containing the stamp" is looking at the bar *after* the newest
+  one the scanner had. Any stamp-time/replay-time comparison must reconcile that or
+  it compares different bars.
+- **Redefining a live measurement is only cheap while its population is empty.**
+
+### Open
+
+- `delta_r` empty on all 277 rows — **zero paired `@SARBASE` comparisons**, so the
+  A/B has produced no comparison at all. Unverified whether that is ledger youth or
+  a join bug. Next look.
+- Ops panel splitting the live-geometry arm by agreement — the one thing standing
+  between the owner and the counter-SAR decision.
+
+---
+
 ## 🟢 SESSION 83 2026-07-26 — The SAR arm was replaying the wrong candle (#800, ops #89 + #90)
 
 **Owner ask:** *"what happening to counter SAR signals — within 15 mins they are
