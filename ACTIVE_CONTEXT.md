@@ -4,6 +4,103 @@
 
 ---
 
+## 🟡 SESSION 86 2026-07-27 — the QCB unlock doesn't exist; Layer G was tuning phantoms (#806)
+
+Session 85's handoff called the QCB emission unlock *"the highest-value item on this
+list, by a distance"* — the difference between **0 and non-zero** on a +2.21R path.
+Checked it first, as instructed. **It closed as measured-false in three independent
+ways.** The check itself then found a real bug (#806), which is the actual finding.
+
+### §4 is closed — do not re-open it
+
+All figures from `monitor-logs`, controller **cycle 279**:
+
+| Handoff §4 claim | Measured now |
+|---|---|
+| Best cell `n=29`, **one sample short** of the n≥30 relax floor | **n=50** — crossed it unaided; the window cap, not a threshold |
+| That cell is **+2.21R** | **+0.32R edge / +0.44 avg_r** (`OVERLAP/QUIET/COMPRESSED/BTC_NEUTRAL`) |
+| QCB converts **0 of 1,055** → unlock the floor | QCB **emits 23**; generated 3,005 → gated 1,927 |
+| Layer G should self-promote `QCB min_samples 30→25` | **HOLD is correct.** `has_unlock = 15 <= 50 < 30` is False — nothing is sample-blocked |
+
+And the decisive one. QCB's dominant suppressor is `context_floor` (**733 of 979**), and
+that gate is **measured protective**:
+
+```
+context_floor:QUIET_COMPRESSION_BREAK   n=662   EV +0.164 R/suppression   verdict=KEEP
+```
+
+`VERDICT_KEEP` is defined as *"gate correctly suppresses losers"* and positive EV means
+the gate **saved** R (`suppression_audit.py:121,485-493`). So those 733 suppressions are
+the gates working. Per CLAUDE.md § The Autonomous Portfolio: *"Zero emissions ≠ broken.
+Fully gated + measured-negative is the gates working — don't 'fix' the first case."*
+**§4 was pointing at exactly the case the doctrine says not to fix.**
+
+Why it looked otherwise: the +2.21R was a thin-sample counterfactual that regressed
+toward +0.44 as the window filled — *"counterfactuals are optimistic"* and *"wait for a
+fresh window before judging a verdict"*, both already in the brief. A handoff that
+quotes a cell R as a live opportunity is quoting the number those two rules exist to
+distrust. **21 QCB cells are STRONG and most sit at the n=50 window cap** — the path is
+measured and floor-relaxed where it wins. There is nothing to unlock.
+
+### What the check actually found — Layer G tunes keys nothing reads (#806)
+
+Layer G's **inputs** are keyed by *matrix* strategy (`build_inputs` walks
+`StrategyEdgeStore.matrix()` verbatim → includes `X@ATR`, `X@FIXED`, `SHADOW_*`). Its
+**output** is read by `PolicyParams.resolve_min_samples(strategy)`, and both callsites
+pass `sig.setup_class` — a live `SetupClass` value (`scanner/__init__.py:5039,7934`).
+So an override under any other key is **unreachable by construction**: stored,
+persisted, logged `[EMISSION_CONTROLLER:APPLY]`, shown in ops as an "active override",
+read by nothing.
+
+| | |
+|---|---|
+| Persisted overrides that are dead keys | **9 of 18** |
+| Lifetime promotions spent on unroutable keys | **23 of 40** (17 variant arms + 6 shadow units) |
+| `best_strong_cell` keys unroutable | **8 of 23** |
+| `gate_metrics` keys unroutable | **0 of 4** — the suppress loop is correctly keyed |
+
+The phantoms don't merely leak, they **outcompete the real rows** for a 2-per-cycle
+budget, for two compounding reasons:
+
+- **The auto-tighten brake cannot fire on them.** `losing` needs `h_n >= health_min_n`
+  (20) where `h_n` is summed `n_emitted`. An arm never emits → 0 forever → permanently
+  `losing=False` → unconditionally promotable. Armed for only **3 of 23** strategies;
+  `MOVER_AVWAP_SCALP` (emitted_n=20, avg_r −0.317) fired it correctly twice (20→25→30),
+  which is precisely why its absence on the arms matters.
+- **The sort prefers them.** Every `min_samples` candidate has
+  `ev_per_suppression_r=None` → sort key `0.0`, so all tie and the stable sort falls
+  back to alphabetical: `QUIET_COMPRESSION_BREAK@ATR` before `RANGE_FADE`,
+  `SR_FLIP_RETEST@FIXED` before `WHALE_MOMENTUM`. Structural, not incidental.
+
+This is *"Measurement arms are not strategies"* broken in a **third** place — CLAUDE.md
+names the ops rollup and `geometry_ab._VARIANT_SUFFIXES`; the controller is a consumer
+nobody added to that list.
+
+**Not fixed this session — owner chose write-up only.** Fix design is in #806. Note its
+side effect: live strategies stop competing with phantoms, so real overrides promote
+*sooner* — that changes emission timing, so activation is § Project Phase sign-off, not
+a cleanup PR.
+
+**A distinct sub-case, flagged not proposed:** `_CONTROL_ARM` makes `SHADOW_MEAN_REVERT`
+/ `SHADOW_RANGE_FADE` the *cell* source for live `MEAN_REVERT` / `RANGE_FADE`, but the
+cell resolves under the shadow name while the override resolves under the live one
+(`context_emission_policy.py:305,388`) — measurement and override under two keys that
+never meet. Folding them together would be a real money-path change.
+
+### The transferable lesson
+
+**A handoff's numbers are a snapshot, not a finding — re-measure before acting on the
+item it ranked first.** Every §4 figure was accurate when written and wrong ~12h later,
+because rolling per-cell windows keep moving. The cost of re-deriving was three
+commands; the cost of acting on it would have been relaxing a floor the audit measures
+as protective at n=662, on a live money path with real users behind it.
+
+Corollary: **a stale premise is most dangerous when it is confidently ranked.** §4 came
+with a mechanism, code references and a "do this first" — all of which survived the
+data changing underneath them.
+
+---
+
 ## 🟡 SESSION 85 2026-07-27 — we had the engine capped at 1.5 of the host's 4 cores (#803, #805)
 
 **Owner ask:** *"can we add one more IP to VPS and scan full Binance futures in our

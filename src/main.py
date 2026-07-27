@@ -2071,6 +2071,20 @@ class CryptoSignalEngine:
         unlocked_cell_r = {
             s: c["edge"] for s, c in inputs["best_strong_cell"].items() if c.get("edge") is not None
         }
+        # Routability: the only strategy keys the emission policy can look up are
+        # the live SetupClass values — both scanner callsites pass
+        # ``sig.setup_class``. The controller's inputs are keyed by *matrix*
+        # strategy, which also carries the measurement arms and shadow-only units,
+        # so overrides land under keys nothing reads. ``SetupClass`` is the
+        # authoritative set and is read here (not inside the pure core) so
+        # ``emission_controller`` stays import-free.
+        routable = None
+        enforce_routable = False
+        if bool(_rt.get("emission_controller_routable_enabled")):
+            from src.signal_quality import SetupClass
+
+            routable = {c.value for c in SetupClass}
+            enforce_routable = bool(_rt.get("emission_controller_routable_live"))
         decision = run_cycle(
             gate_metrics=inputs["gate_metrics"],
             best_strong_cell=inputs["best_strong_cell"],
@@ -2080,8 +2094,33 @@ class CryptoSignalEngine:
             bounds=bounds,
             cycles_since_start=cycles,
             unlocked_cell_r=unlocked_cell_r,
+            routable=routable,
+            enforce_routable=enforce_routable,
         )
-        store.commit(decision.state, decision.adjustments)
+        rep = decision.routability
+        store.commit(
+            decision.state,
+            decision.adjustments,
+            routability=rep.to_dict() if rep is not None else None,
+        )
+        if rep is not None:
+            self._emission_controller_routability = rep
+            # WARN, not INFO: a promotion spent on a key nothing reads is budget
+            # taken from a live strategy, and it must not be discoverable only by
+            # reading a panel nobody opened.
+            if rep.promoted_unroutable:
+                log.warning(
+                    "[EMISSION_CONTROLLER:ROUTABILITY] {} promotion(s) went to unroutable "
+                    "keys {} — live candidates starved this cycle: {} (enforced={})",
+                    len(rep.promoted_unroutable), rep.promoted_unroutable,
+                    rep.starved_routable or "none", rep.enforced,
+                )
+            log.info(
+                "[EMISSION_CONTROLLER:ROUTABILITY] enforced={} routable_cand={} "
+                "unroutable_cand={} dead_overrides={} pruned={}",
+                rep.enforced, rep.routable_candidates, rep.unroutable_candidates,
+                len(rep.dead_overrides), len(rep.pruned),
+            )
         self._emission_controller_last_decision_ts = _t.time()
         for a in decision.adjustments:
             tag = "APPLY" if a.applied else "SHADOW"
@@ -2311,6 +2350,38 @@ class CryptoSignalEngine:
             return True, f"last cycle {age:.0f}s ago; live_overrides={live}"
 
         fl.add_predicate(PredicateProbe(name="emission_controller", fn=_ec_health, min_streak=6))
+
+        def _ec_routability_health():
+            # The routability measurement must actually be producing a report once
+            # enabled — an empty report is indistinguishable from "no problem
+            # found" on the ops panel, which is precisely how the dead-key waste
+            # went unnoticed for 279 cycles. Returns True with a reason when idle
+            # or off: signalling "disabled" by raising converts to a
+            # fail_open.record, and filling that counter with non-failures is how a
+            # real failure stops standing out.
+            if not bool(_rt.get("emission_controller_enabled")):
+                return True, "controller disabled by tunable"
+            if not bool(_rt.get("emission_controller_routable_enabled")):
+                return True, "routability measurement disabled by tunable"
+            rep = getattr(self, "_emission_controller_routability", None)
+            if rep is None:
+                return True, "no cycle yet (boot)"
+            enforced = "enforcing" if rep.enforced else "measuring"
+            dead = len(rep.dead_overrides)
+            # While measuring, a standing dead-override footprint is the finding,
+            # not a fault — report it loudly but do not page on it. Under
+            # enforcement it should trend to zero, and staying non-zero means the
+            # prune is not doing its job.
+            if rep.enforced and dead:
+                return False, f"enforcing yet {dead} dead override(s) persist: {sorted(rep.dead_overrides)}"
+            return True, (
+                f"{enforced}; dead_overrides={dead} wasted_promotions={rep.wasted_promotions} "
+                f"pruned={len(rep.pruned)}"
+            )
+
+        fl.add_predicate(PredicateProbe(
+            name="emission_controller_routability", fn=_ec_routability_health, min_streak=6,
+        ))
 
         def _mc_health():
             if not bool(_rt.get("market_context_enabled")):
