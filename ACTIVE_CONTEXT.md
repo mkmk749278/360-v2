@@ -76,10 +76,38 @@ This is *"Measurement arms are not strategies"* broken in a **third** place — 
 names the ops rollup and `geometry_ab._VARIANT_SUFFIXES`; the controller is a consumer
 nobody added to that list.
 
-**Not fixed this session — owner chose write-up only.** Fix design is in #806. Note its
-side effect: live strategies stop competing with phantoms, so real overrides promote
-*sooner* — that changes emission timing, so activation is § Project Phase sign-off, not
-a cleanup PR.
+**Fixed and shipped (#807 + ops #93), measurement live.** The owner's initial call was
+write-up only; they then reframed it — *"just dark-flagging is, we don't [get] actual
+data… do it like the SAR signals, how we are observing, then data is in front of us,
+then we analyse, then take decision"*. That is § Project Phase as written
+(**measurement ON, user-visible effect OFF**) and the correction to the SAR arm's
+mistake of shipping the measurement switched off. So it shipped as two flags:
+
+| Flag | Default | Effect |
+|---|---|---|
+| `emission_controller_routable_enabled` | **ON** | Classifies candidates, reports the standing dead-override footprint, computes the counterfactual. Changes nothing. |
+| `emission_controller_routable_live` | **OFF** | Closes the action space and prunes the dead keys. **Owner decision — still open.** |
+
+The decision-relevant output is the **counterfactual**: `run_cycle` re-runs its own
+bounded selection over routable candidates only and diffs, naming both halves — the
+promotions spent on dead keys *and* the live candidates that would have taken those
+slots. Read off the controller's real decision, not inferred.
+
+Two design points worth not re-deriving:
+
+- **The dead-override count is a standing footprint, not candidate-derived.** Verified
+  against real production state: cycle 279 has **0 candidates but 9 dead overrides**. A
+  candidate-derived report would have read all-zeros on the panel and hidden the very
+  thing it exists to show.
+- **Enforcement's prune is re-derived from `routable` every cycle**, never a one-shot
+  migration, so the invariant re-establishes itself and needs no schema stamp or
+  deploy-date gate (#802's lesson applied rather than re-learned).
+
+**Layer G had no ops surface at all** before this — live and self-promoting on the money
+path since S72 with nowhere to watch it, which is *how the waste survived 279 cycles*.
+Ops #93 adds `/emission-controller` (nav: Autonomy → Layer G). The panel renders the
+engine's `routable` stamp and deliberately holds **no suffix constant** — the fix for a
+drifting mirror is not a second mirror.
 
 **A distinct sub-case, flagged not proposed:** `_CONTROL_ARM` makes `SHADOW_MEAN_REVERT`
 / `SHADOW_RANGE_FADE` the *cell* source for live `MEAN_REVERT` / `RANGE_FADE`, but the
