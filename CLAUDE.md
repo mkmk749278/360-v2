@@ -263,6 +263,19 @@ measurement decide emission. Full description: `OWNER_BRIEF.md § 3.11`.
   authoritative suffix list is `geometry_ab._VARIANT_SUFFIXES`; ops mirrors it in
   `strategy_lab.MEASUREMENT_SUFFIXES`. **Keep the two in sync** — they drifted once
   and silently inflated the ops rollup for a week.
+
+  **There is a third consumer, and it is the one that bit us: Layer G.** The rule is
+  not only about *rollups*. Any code that keys off the edge matrix inherits the arms,
+  and if its *output* is keyed by live strategy the two ends silently disagree. The
+  emission controller took its `best_strong_cell` straight from the matrix while
+  `resolve_min_samples` reads a live `SetupClass`, so 9 of 18 persisted overrides and
+  23 of 40 promotions went to keys nothing reads — and because an arm never emits, it
+  can never trip the auto-tighten brake, making it *more* promotable than the real
+  strategy it was starving (2026-07-27, #806/#807). Before writing matrix-derived
+  state anywhere, ask **"who reads this key, and are they keyed the same way?"**
+  Layer G now takes a `routable` set as a parameter and reports what falls outside it;
+  the ops Layer-G panel renders that stamp rather than mirroring the suffix list,
+  because **the fix for a drifting mirror is not a second mirror.**
 - **Counterfactuals are optimistic** (~0.38R measured on MTP). Never quote a
   counterfactual R as an expected live result.
 - **"Emitted" means DELIVERED, and only the router knows that.** Provenance has
