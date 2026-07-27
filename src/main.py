@@ -2417,18 +2417,37 @@ class CryptoSignalEngine:
         fl.add_predicate(PredicateProbe(name="shadow_units", fn=_shadow_health, min_streak=6))
 
         def _coverage():
+            # Counts bars AND their age.  Counting alone is what let a 500-bar
+            # 15m array frozen at boot score 100% for 2.5 days (2026-07-27): no
+            # ``@kline_15m`` stream existed, nothing re-seeded a core pair, and
+            # this probe — the one thing whose job is to notice a feature
+            # flat-lining — asserted only that the bars were *there*.  Depth is
+            # not liveness; ``last_kline_age_seconds`` is the freshness fact and
+            # the store has always exposed it.
+            from config import CANDLE_COVERAGE_MAX_AGE_SEC as _max_age
+
             pairs = getattr(self.pair_mgr, "pairs", {}) or {}
             syms = list(pairs.keys())
             if not syms:
                 return False, "no universe symbols"
             ok_n = 0
+            fresh_n = 0
             for s in syms:
                 cd = self.data_store.get_candles(s, "15m") or {}
                 closes = cd.get("close")
-                if closes is not None and len(closes) >= 20:
-                    ok_n += 1
-            frac = ok_n / len(syms)
-            return frac >= 0.7, f"{ok_n}/{len(syms)} symbols with ≥20 15m candles"
+                if closes is None or len(closes) < 20:
+                    continue
+                ok_n += 1
+                age = self.data_store.last_kline_age_seconds(s, "15m")
+                # ``None`` = never stamped, which is not evidence of freshness.
+                if age is not None and float(age) <= float(_max_age):
+                    fresh_n += 1
+            n = len(syms)
+            healthy = (ok_n / n) >= 0.7 and (fresh_n / n) >= 0.7
+            return healthy, (
+                f"{ok_n}/{n} symbols with ≥20 15m candles, "
+                f"{fresh_n}/{n} updated within {int(float(_max_age) // 60)}m"
+            )
 
         fl.add_predicate(PredicateProbe(name="candle_coverage", fn=_coverage, min_streak=6))
 

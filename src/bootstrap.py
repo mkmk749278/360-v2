@@ -908,6 +908,21 @@ class Bootstrap:
             s = sym.lower()
             futures_kline_streams.append(f"{s}@kline_1m")
             futures_kline_streams.append(f"{s}@kline_5m")
+            # 15m was missing from this list until 2026-07-27, and nothing else
+            # ever refreshed it for a core pair: ``seed_symbol`` runs on universe
+            # entry (never, under TOP50_FUTURES_ONLY), ``WS_FALLBACK_POLL_INTERVALS``
+            # is 1m/5m, and ``_gap_refill`` only refills subscribed streams.  Only
+            # mover pairs — which are re-seeded every MOVER_CANDLE_REFRESH_SEC
+            # precisely because they sit outside this subscription set — had live
+            # 15m data.  So every core pair's 15m array was frozen at boot while
+            # 15m ATR fed live SL/TP geometry, MTF weights, BTC-State, the BTC
+            # regime kill switch and the SAR exit ledger.  Caught by replaying the
+            # SAR ledger against real candles: 245 of 272 "RUNNING" rows had
+            # already hit their trail (median 4.4h earlier), and resolution was
+            # all-or-nothing per symbol — only the nine re-seeded movers ever
+            # resolved.  Stamped SAR-alignment flags matched live data 96% on
+            # those symbols and 60% (coin-flip) on every other.
+            futures_kline_streams.append(f"{s}@kline_15m")
             futures_kline_streams.append(f"{s}@kline_1h")
             futures_kline_streams.append(f"{s}@kline_4h")
             # Separate @forceOrder (liquidation) streams into their own pool

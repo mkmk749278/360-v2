@@ -4,6 +4,107 @@
 
 ---
 
+## 🔴 SESSION 87 2026-07-27 — the 15m timeframe has had no live feed, ever
+
+Owner asked for a real analysis of the SAR ledger: *how does it close on a flip, and
+does it match live data with timing.* Every one of the 300 rows in the
+`sar_signals_20260727165736Z.csv` export was replayed against independently fetched
+15m candles using the engine's **own** `simulate_sar_exit` / `parabolic_sar` (imported,
+not re-derived), so the only thing under test was the data and the timing.
+
+### The exits that resolve are honest
+
+| Check | Result |
+|---|---|
+| Closed rows landing on the **same 15m bar** as an independent replay | **21 / 25** |
+| Median abs. price error on those | **0.148%** (max 0.456%) — cross-venue basis |
+| Stamped `sar_aligned` reproduced | **24 / 25** |
+
+The 4 timing misses are all symbols with no Binance data path from this session
+(Binance REST answers 451 from our egress region; candles came from Binance **spot**
+for 205 rows, Gate/MEXC perp for the rest). **No repeat of #800** — exit prices are not
+a function of (symbol, side), holds vary, exit bars are real bars.
+
+### But almost nothing resolves, and the root cause is not in the ledger
+
+272 rows read RUNNING. On real candles **245 of them had already hit their trail —
+median 4.4 hours earlier**, the oldest at 08:30. Resolution is **all-or-nothing per
+symbol**: PENGU 0/17, BOME 0/16, RE 0/16, LAB 0/14 … while STORJ 6/8, ZRO 5/5,
+USELESS 5/5 resolve fine. The nine that work are exactly the **mover-promoted** pairs.
+
+**There is no `@kline_15m` subscription anywhere in production code.** `bootstrap.py`
+subscribed 1m/5m/1h/4h; `update_streams_for_top50` (whose default *does* include 15m)
+is never called; `WS_FALLBACK_POLL_INTERVALS` is 1m/5m; `_gap_refill` only refills
+subscribed streams; `seed_symbol` runs on universe entry and `TOP50_FUTURES_ONLY`
+makes `new_symbols` permanently empty. Movers are the sole exception **by design** —
+`_seed_mover_pair` + `MOVER_CANDLE_REFRESH_SEC=120` re-seed them precisely because
+they sit outside the WS set. So a core pair's 15m array is frozen at the last boot.
+
+Confirmed three ways from the ledger itself:
+
+| Test | Result |
+|---|---|
+| Stamped `sar_aligned` vs live data — fresh-15m (mover) symbols | 26/27 = **96.3%** |
+| Same, every other symbol | 163/270 = **60.4%** (coin flip) |
+| Per-symbol fit of a **frozen** SAR series | PENGU 17/17 · BOME 16/16 · RE 16/16 · LAB 14/14 · NIL 12/12 · SYN 10/10 · GWEI 5/5 (live explains 0/5) |
+| Fitted freeze times | cluster at **2026-07-25 03:00–03:15 UTC** across 10 independent core symbols — the last boot |
+
+### Blast radius: this was never a measurement-only bug
+
+15m ATR feeds **live SL/TP geometry** (`channels/scalp.py:6650,6800`), MTF weights,
+structure state, BTC-State (0.30 weight), the 15m CVD divergence path (its
+`interval == "15m"` branch in `_on_ws_message` was unreachable), and the **BTC regime
+kill switch** — a dispatch gate reading "the last 4h of 15m candles" with no timestamp
+check, so its verdict had been frozen for 2.5 days.
+
+**And the watchdog was blind by construction.** `candle_coverage` asserted ≥20 15m
+candles *exist* — never their age — so a 500-bar array frozen for 2.5 days scored
+100%. `last_kline_age_seconds` was already on the store and unused here. The #802
+`alignment_crosscheck` counter was blind for the same reason: it only fires on records
+that resolve, and only fresh-data records resolve.
+
+### Shipped (this PR)
+
+- `@kline_15m` added to the Tier-1 futures subscription set — one stream per pair,
+  ~25% more messages on a pool sized at 200 streams/conn, no REST weight, no Firestore.
+- `candle_coverage` now checks **depth AND age** (`CANDLE_COVERAGE_MAX_AGE_SEC`,
+  default 2700 = 3 bars), so this class of freeze can never again be invisible.
+- `tests/test_ws_15m_subscription.py` drives the real `start_websockets` and asserts
+  *every seeded intraday timeframe has a live feed* — the general invariant, not a
+  copy of the stream list. Verified by reverting: 3 of 4 fail against the old code.
+
+### Open — next session
+
+1. **Owner-agreed follow-up PR:** refuse-on-stale guards in the BTC regime kill switch
+   and the 15m ATR geometry path, so a future freeze fails loudly instead of silently.
+   Money-path, so it gets its own review.
+2. **The 245 stuck ledger rows** are unresolvable from the in-memory store (their bars
+   rolled past). Either re-resolve from REST once 15m is live, or clear and restart the
+   window. Do not read the arm's verdict off the current population.
+3. `delta_r` is empty on **all** 25 closed rows — `@SARBASE` needs the full 48h window,
+   so the A/B this arm exists to run currently has **n = 0 comparisons**.
+4. The resolved subsample is **72% "SAR opposed" vs 40% in the stamped population**
+   (only movers resolve). Any split panel over closed rows describes nine small caps.
+5. `_feed_sar_edge` writes both alignment cohorts into Layer C under one
+   `SETUP@SAREXIT` key. `summarize_sar_alignment` splits them; the edge feed does not.
+
+### What the exit did on 2026-07-27 (real candles, 297 rows, net of 0.10% RT taker)
+
+| cohort | n | win | gross avg | **net avg** | one-bar | median hold |
+|---|---|---|---|---|---|---|
+| ALL | 270 | 56.3% | +0.297% | +0.197% | 49.6% | 30m |
+| **SAR agreed at entry** | 151 | 53.0% | +0.107% | **+0.007%** | 22.5% | 60m |
+| SAR opposed at entry | 119 | 60.5% | +0.537% | +0.437% | 84.0% | 15m |
+
+The agreed cohort is the only one testing the exit — it nets **+0.007%/trade**, i.e.
+it pays the fees and returns nothing, while median MFE before the trail fired was
+0.859%. The opposed cohort is not trail performance at all: its stop is on the wrong
+side of price from bar zero, so 84% of it is "exit at the next bar's open" — a ~7-minute
+drift measurement. One censored day, gross of slippage; **not a verdict**, and nothing
+resembling the bake-off's PF 1.60 yet.
+
+---
+
 ## 🟡 SESSION 86 2026-07-27 — the QCB unlock doesn't exist; Layer G was tuning phantoms (#806)
 
 Session 85's handoff called the QCB emission unlock *"the highest-value item on this
