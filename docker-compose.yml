@@ -40,6 +40,15 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+    # Capped 2026-07-27: this container previously ran with no memory limit
+    # at all. Redis self-limits its *dataset* to 128 MB via --maxmemory, but
+    # that is not a container bound — fragmentation and the copy-on-write
+    # fork during a background save both live outside it. An unbounded
+    # container that leaks can exhaust the host and take the engine down
+    # with it; the engine's own cap does not protect it from that direction.
+    # 256m is ~37x measured usage (6.9 MB) and 2x the redis dataset ceiling.
+    mem_limit: 256m
+    cpus: "0.5"
     labels:
       - autoheal=true
 
@@ -77,8 +86,29 @@ services:
       - API_PROCESS_ISOLATED=${API_PROCESS_ISOLATED:-false}
       - API_HOST=${API_HOST:-0.0.0.0}
       - API_PORT=${API_PORT:-8000}
-    mem_limit: 1g
-    cpus: "1.5"
+    # Resource caps raised 2026-07-27 after measuring the box (see
+    # docs/UNIVERSE_EXPANSION_AND_SECOND_IP_2026_07_27.md §1b).
+    #
+    # The host is 4 cores / 7.8 GB running at ~25% load. We had the engine
+    # capped at 1.5 cores and it was measured at 130% CPU — 87% of its own
+    # allowance — while scanning 75 pairs, with ~3 host cores sitting idle
+    # behind the cap. Mover promotion already takes the scan set to 105
+    # pairs during an active market, so the engine was very likely being
+    # throttled at candle boundaries: exactly when every timeframe
+    # recomputes and exactly when the market is worth scanning.
+    #
+    # Memory was never the constraint: measured 459 MB against the old 1 GB
+    # cap, zero OOM kills over the container's lifetime. Raised to 3g anyway
+    # so RAM stays out of the way as the scan set grows (the RAM-derived
+    # ceiling moves past 600 pairs), not because it was under pressure.
+    #
+    # Budget check against the 4-core host: engine 2.5 + api 0.5 + signing
+    # 0.5 + autoheal 0.1 + watchdog 0.2 = 3.8 of 4. These are ceilings, not
+    # reservations, and measured total usage is ~1 core. The signing service
+    # keeps its own separate 0.5-core cap, so the order path can never be
+    # starved by a busy scanner — the only part of this that touches safety.
+    mem_limit: 3g
+    cpus: "2.5"
     logging:
       driver: json-file
       options:
