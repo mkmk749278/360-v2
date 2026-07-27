@@ -942,6 +942,12 @@ MOVER_CANDLE_REFRESH_SEC: float = _safe_float("MOVER_CANDLE_REFRESH_SEC", "120")
 #: Max mover re-seeds per scan cycle — bounds the REST weight burst when many
 #: promoted movers go stale in the same cycle (each re-seed is ~6 kline calls).
 MOVER_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int("MOVER_CANDLE_REFRESH_MAX_PER_CYCLE", "8")
+#: How old the newest 15m bar may be before the ``candle_coverage`` liveness
+#: probe stops calling a symbol's 15m series live.  Three bars: a 15m stream
+#: writes on close, so two consecutive misses is already a real feed problem
+#: while one late frame is not.  Depth was the only thing this probe checked
+#: until 2026-07-27, and a boot-frozen array passed it for 2.5 days.
+CANDLE_COVERAGE_MAX_AGE_SEC: float = _safe_float("CANDLE_COVERAGE_MAX_AGE_SEC", "2700")
 #: Max bid/ask spread (as a PERCENT of mid — same unit as ScanContext.spread_pct,
 #: i.e. 0.5 == 0.5%) a mover-promoted pair may have to be scanned by the scalp
 #: channel. Movers are lower-cap and run wider than blue chips, so this is looser

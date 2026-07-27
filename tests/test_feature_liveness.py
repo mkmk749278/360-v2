@@ -405,6 +405,87 @@ class TestEngineWiring:
         # Healthy stub state on cycle one → nothing alerting.
         assert payload["alerts"] == []
 
+    def test_candle_coverage_pages_on_a_frozen_15m_series(
+        self, tmp_path, monkeypatch, numpy_seeded_store
+    ):
+        """Depth is not liveness (2026-07-27).
+
+        A 15m array can be 500 bars deep and 2.5 days old — which is exactly
+        what every core pair carried while no ``@kline_15m`` stream existed.
+        The probe counted bars only, so the one watchdog whose job is to notice
+        a feature flat-lining reported 100% healthy throughout.  Here the bars
+        are plentiful and the freshness stamp is old; the probe must page.
+        """
+        import time as _time
+        from types import SimpleNamespace
+
+        from src import feature_liveness as fl_mod
+        from src import runtime_tunables
+        from src.main import CryptoSignalEngine
+
+        monkeypatch.setattr(runtime_tunables, "get", lambda key: True)
+        monkeypatch.setattr(
+            fl_mod, "_DEFAULT_PATH", str(tmp_path / "feature_liveness.json")
+        )
+        import config as _cfg
+        monkeypatch.setattr(_cfg, "FEATURE_LIVENESS_BOOT_GRACE_SEC", 0.0)
+        store = numpy_seeded_store("BTCUSDT", ("5m", "15m"), n=120)
+        # Backdate the store's own freshness stamp — the real field
+        # ``last_kline_age_seconds`` reads — leaving the candles untouched.
+        store._last_kline_update_ts["BTCUSDT"]["15m"] = _time.time() - 6 * 3600
+
+        stub = SimpleNamespace(
+            _scanner=SimpleNamespace(_scan_cycle_count=10, _shadow_last_stamp={}),
+            pair_mgr=SimpleNamespace(pairs={"BTCUSDT": object()}),
+            data_store=store,
+            _last_market_context_publish_ts=_time.time(),
+            _last_atr_percentile=55.0,
+        )
+        fl = CryptoSignalEngine._build_feature_liveness(stub)
+        payload = fl.run_cycle()
+        for _ in range(6):  # sustained, past PredicateProbe.min_streak
+            payload = fl.run_cycle()
+
+        coverage = payload["features"]["candle_coverage"]
+        assert coverage["status"] == "violating", coverage
+        assert "candle_coverage" in [a["feature"] for a in payload["alerts"]]
+        # The detail must say which half failed — depth was fine here.
+        assert "≥20 15m candles" in coverage["detail"]
+        assert "0/1 updated within" in coverage["detail"]
+
+    def test_candle_coverage_stays_quiet_while_the_feed_is_live(
+        self, tmp_path, monkeypatch, numpy_seeded_store
+    ):
+        """The freshness half must not fire on a normally-fed series — the
+        fixture writes through ``update_candle``, the same path the WS handler
+        uses, so its stamp is current."""
+        import time as _time
+        from types import SimpleNamespace
+
+        from src import feature_liveness as fl_mod
+        from src import runtime_tunables
+        from src.main import CryptoSignalEngine
+
+        monkeypatch.setattr(runtime_tunables, "get", lambda key: True)
+        monkeypatch.setattr(
+            fl_mod, "_DEFAULT_PATH", str(tmp_path / "feature_liveness.json")
+        )
+        import config as _cfg
+        monkeypatch.setattr(_cfg, "FEATURE_LIVENESS_BOOT_GRACE_SEC", 0.0)
+        store = numpy_seeded_store("BTCUSDT", ("5m", "15m"), n=120)
+        stub = SimpleNamespace(
+            _scanner=SimpleNamespace(_scan_cycle_count=10, _shadow_last_stamp={}),
+            pair_mgr=SimpleNamespace(pairs={"BTCUSDT": object()}),
+            data_store=store,
+            _last_market_context_publish_ts=_time.time(),
+            _last_atr_percentile=55.0,
+        )
+        fl = CryptoSignalEngine._build_feature_liveness(stub)
+        for _ in range(7):
+            payload = fl.run_cycle()
+        assert payload["features"]["candle_coverage"]["status"] == "ok"
+        assert "candle_coverage" not in [a["feature"] for a in payload["alerts"]]
+
 
 class TestTruthReportSection:
     def test_markdown_renders_manifest_and_alerts(self):
