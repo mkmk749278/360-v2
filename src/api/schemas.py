@@ -536,6 +536,29 @@ class HealthResponse(BaseModel):
     ok: bool = True
     uptime_seconds: float
     version: str = "0.0.1"
+    engine_connected: bool = Field(
+        True,
+        description=(
+            "Isolated mode: whether this API container has heard from the "
+            "engine recently (``snapshot:engine_state`` refreshed within "
+            "API_ENGINE_STALE_SEC). False means the engine container is dead, "
+            "wedged, or cut off from Redis — everything this API serves is "
+            "then last-known-good, not live. Always true in single-process "
+            "mode, where the engine IS this process. This is the field the "
+            "ops agent pages on: it is derived from *when Redis last "
+            "answered*, so unlike every other engine-derived value it cannot "
+            "be faked by a frozen snapshot."
+        ),
+    )
+    engine_state_age_seconds: Optional[float] = Field(
+        None,
+        description=(
+            "Seconds since this container last read a decodable "
+            "``snapshot:engine_state``. ``null`` in single-process mode (the "
+            "question does not apply) and when the engine has never been "
+            "reachable since API start — ``engine_connected`` disambiguates."
+        ),
+    )
 
 
 # ---------------------------------------------------------------------------

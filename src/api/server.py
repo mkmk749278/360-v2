@@ -40,6 +40,7 @@ post-state as the SMS path.
 from __future__ import annotations
 
 import asyncio
+import math
 import os
 import time
 from contextlib import asynccontextmanager
@@ -157,6 +158,14 @@ from .users import User, UserStore
 log = get_logger("api.server")
 
 _API_VERSION = "0.0.2"
+
+# Engine-silence threshold for /api/health's engine_connected field.  Read at
+# import so tests can monkeypatch the module constant; env-overridable via
+# API_ENGINE_STALE_SEC (config/__init__.py).
+try:
+    from config import API_ENGINE_STALE_SEC as _ENGINE_STALE_SEC
+except ImportError:  # pragma: no cover — config always present in prod
+    _ENGINE_STALE_SEC = 120
 
 # Request-latency log thresholds.  A request slower than the INFO bar is
 # worth a line; one slower than the WARNING bar is a subscriber-visible
@@ -697,9 +706,50 @@ def build_app(
 
     @app.get("/api/health", response_model=HealthResponse, tags=["meta"])
     async def health() -> HealthResponse:
+        """Liveness of THIS container, plus whether it still hears the engine.
+
+        **This endpoint must always return 200 while the process is serving.**
+        It backs the api container's docker HEALTHCHECK, which carries
+        ``autoheal=true`` — so a non-200 on engine staleness would make
+        autoheal restart-loop the API for the entire duration of an engine
+        outage. Restarting the API cannot cure a dead engine; that is the
+        exact loop #778 had to break on the engine container, and re-creating
+        it here would be self-inflicted. Report the condition, don't fail on it.
+
+        The 2026-07-27 outage is what added the two engine fields. The API ran
+        ``healthy`` for 3 hours with a dead engine and a dead Redis behind it,
+        because every signal the ops agent inspected was read *through* this
+        container's last-good snapshot — and a frozen snapshot looks perfectly
+        healthy. ``state_age_seconds`` measures something the freeze cannot
+        touch: how long since Redis actually answered. It existed on the
+        facade already and was surfaced nowhere, which is why the detection
+        mechanism ended up being a subscriber's screenshot.
+        """
         boot = getattr(engine, "_boot_time", 0.0) or 0.0
         uptime = time.monotonic() - boot if boot else 0.0
-        return HealthResponse(uptime_seconds=max(0.0, uptime), version=_API_VERSION)
+
+        # Single-process mode: the engine is this process, so it is connected
+        # by construction and the age question is meaningless (None, not 0.0 —
+        # "not applicable" is not "just refreshed").
+        age_raw = getattr(engine, "state_age_seconds", None)
+        engine_connected = True
+        age: Optional[float] = None
+        if isinstance(age_raw, (int, float)):
+            if math.isfinite(age_raw):
+                age = float(age_raw)
+                engine_connected = age <= _ENGINE_STALE_SEC
+            else:
+                # inf — the facade has never had a successful Redis read since
+                # this container started. Never reachable, not "infinitely
+                # stale"; inf is also not valid JSON, so it must not go out.
+                engine_connected = False
+
+        return HealthResponse(
+            uptime_seconds=max(0.0, uptime),
+            version=_API_VERSION,
+            engine_connected=engine_connected,
+            engine_state_age_seconds=age,
+        )
 
     # ---- Auth endpoints (legacy JWT — replaced by Firebase Phone Auth) ----
     # POST /api/auth/anonymous and /api/auth/refresh were retired when the
