@@ -541,6 +541,7 @@ def build_app(
     * ``billing_verifier`` (BillingWebhookVerifier): when ``None`` or
       ``not is_configured()``, ``/internal/billing/grant`` returns 503.
     """
+    from .snapshot_cache import filter_signal_items
     from .snapshot_cache import snapshot_cache as _snapshot_cache
 
     @asynccontextmanager
@@ -1550,6 +1551,62 @@ def build_app(
 
     # ---- Signals ----
 
+    async def _cold_signals(
+        *,
+        status: str = "all",
+        limit: int = 50,
+        setup_class: Optional[str] = None,
+    ) -> List[SignalDetail]:
+        """Serve signals when the snapshot cache is cold or stale.
+
+        Which source is legitimate depends on what ``engine`` actually is:
+
+        * **Single-process** — the real engine is in-process, so
+          ``build_signals`` reads the live router book.  Unchanged.
+        * **Isolated (RedisEngineFacade)** — the facade holds no signal
+          geometry.  Its ``router.active_signals`` is a map of identity-only
+          stubs, and pointing ``build_signals`` at it fabricated one zeroed
+          "ACTIVE" card per stub — blank symbol, 0.00 entry/SL/TP, ageing
+          forever — which is what live subscribers were shown for hours during
+          the 2026-07-24 IP-ban outage and again on 2026-07-27.  The only real
+          detail this container ever has is the engine's published
+          ``snapshot:signals_all``; when that is gone too, an empty list is the
+          honest answer.  The app renders its "no signals" empty state, and
+          engine deadness is reported by the paths that actually measure it
+          (vps-liveness, feature-liveness, the agent's engine-stale detector) —
+          not by inventing trades.
+        """
+        published = getattr(engine, "published_signals_all", None)
+        if not callable(published):
+            return build_signals(
+                engine, status=status, limit=limit, setup_class=setup_class,
+            )
+
+        try:
+            await engine.refresh_signals_all()
+        except Exception:
+            log.exception("/api/signals: signals_all refresh failed — serving last good")
+        raw = published()
+        if not isinstance(raw, list):
+            log.warning(
+                "/api/signals: snapshot cache stale and no published snapshot "
+                "available — serving empty rather than stub-derived signals",
+            )
+            return []
+
+        parsed: List[SignalDetail] = []
+        for d in raw:
+            try:
+                parsed.append(SignalDetail(**d))
+            except Exception:
+                log.warning(
+                    "/api/signals: skipping malformed published signal sid={}",
+                    (d or {}).get("signal_id", "?") if isinstance(d, dict) else "?",
+                )
+        return filter_signal_items(
+            parsed, status=status, limit=limit, setup_class=setup_class,
+        )
+
     @app.get(
         "/api/signals",
         response_model=SignalsResponse,
@@ -1569,9 +1626,10 @@ def build_app(
             status=status, limit=limit, setup_class=setup_class,
         )
         if items is None:
-            # Cache cold (first 5 s after startup) — fall back to live build.
-            items = build_signals(
-                engine, status=status, limit=limit, setup_class=setup_class,
+            # Cache cold (first 5 s after startup) or stale (engine stopped
+            # publishing) — rebuild from whatever real source this process has.
+            items = await _cold_signals(
+                status=status, limit=limit, setup_class=setup_class,
             )
         response.headers["Cache-Control"] = "public, max-age=10, stale-while-revalidate=30"
         return SignalsResponse(items=items, total=len(items))
@@ -1589,7 +1647,11 @@ def build_app(
         # old signals not yet evicted from the engine's active_signals
         # + _signal_history.
         cached = _snapshot_cache.filter_signals(status="all", limit=500)
-        pool = cached if cached is not None else build_signals(engine, status="all", limit=1000)
+        pool = (
+            cached
+            if cached is not None
+            else await _cold_signals(status="all", limit=1000)
+        )
         for it in pool:
             if it.signal_id == signal_id:
                 return it

@@ -32,6 +32,51 @@ _ACTIVITY_INTERVAL_S = 30
 _AGENTS_INTERVAL_S = 60
 
 
+def filter_signal_items(
+    items: List[Any],
+    *,
+    status: str = "all",
+    limit: int = 50,
+    setup_class: Optional[str] = None,
+) -> List[Any]:
+    """Apply the ``/api/signals`` query filters to already-built items.
+
+    Module-level so the cold-cache path in ``server.py`` filters a
+    last-good Redis snapshot with exactly these semantics rather than a
+    second, drifting copy of them.
+
+    ``is_open`` is authoritative (2026-07-10): a runner mover rides open at
+    status TP1_HIT/TP2_HIT while a BE-then-TP1 non-mover CLOSES at TP1_HIT —
+    the status string alone can't split the views.  Old snapshots (Redis mode
+    across a deploy) may lack the field; those fall back to the legacy status
+    heuristic, and only those.
+    """
+
+    def _is_open(s: Any) -> bool:
+        fields_set = getattr(s, "model_fields_set", None)
+        if fields_set is not None and "is_open" not in fields_set:
+            # Pydantic item whose payload predates the field (stale Redis
+            # snapshot across the deploy) — legacy heuristic.
+            return s.status == "ACTIVE"
+        v = getattr(s, "is_open", None)
+        if v is None:
+            return s.status == "ACTIVE"
+        return bool(v)
+
+    if status == "open":
+        out: List[Any] = [s for s in items if _is_open(s)]
+    elif status == "closed":
+        out = [s for s in items if not _is_open(s)]
+    else:
+        out = list(items)
+
+    if setup_class:
+        target = setup_class.strip().upper()
+        out = [s for s in out if s.setup_class.upper() == target]
+
+    return out[:limit]
+
+
 class SnapshotCache:
     def __init__(self) -> None:
         self._signals_all: Optional[List[Any]] = None  # List[SignalDetail]
@@ -303,35 +348,9 @@ class SnapshotCache:
             return None
         cached = self._signals_all
         assert cached is not None  # guaranteed by is_warm check
-
-        # ``is_open`` is authoritative (2026-07-10): a runner mover rides open
-        # at status TP1_HIT/TP2_HIT while a BE-then-TP1 non-mover CLOSES at
-        # TP1_HIT — the status string alone can't split the views.  Old
-        # snapshots (Redis mode across a deploy) may lack the field; fall
-        # back to the legacy status heuristic for those items only.
-        def _is_open(s: Any) -> bool:
-            fields_set = getattr(s, "model_fields_set", None)
-            if fields_set is not None and "is_open" not in fields_set:
-                # Pydantic item whose payload predates the field (stale Redis
-                # snapshot across the deploy) — legacy heuristic.
-                return s.status == "ACTIVE"
-            v = getattr(s, "is_open", None)
-            if v is None:
-                return s.status == "ACTIVE"
-            return bool(v)
-
-        if status == "open":
-            items: List[Any] = [s for s in cached if _is_open(s)]
-        elif status == "closed":
-            items = [s for s in cached if not _is_open(s)]
-        else:
-            items = list(cached)
-
-        if setup_class:
-            target = setup_class.strip().upper()
-            items = [s for s in items if s.setup_class.upper() == target]
-
-        return items[:limit]
+        return filter_signal_items(
+            cached, status=status, limit=limit, setup_class=setup_class,
+        )
 
     def filter_activity(
         self,
