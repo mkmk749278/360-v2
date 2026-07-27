@@ -179,6 +179,20 @@ class SuppressedCandidateRecord:
     trail_mfe_pct: Optional[float] = None
     trail_hold_min: Optional[float] = None
     trail_exit_reason: Optional[str] = None
+    # Was the trailing indicator on our side when the signal fired?  Written at
+    # STAMP time (2026-07-27), not at resolution: it compares the indicator
+    # level on the last closed bar against the entry, and both numbers exist the
+    # instant the candidate is stamped.  Computing it in the resolve path meant
+    # 261 of 277 rows carried no verdict for up to 48h purely because of where
+    # the line sat, and the agreement mix on screen always described a two-day-old
+    # population.  ``None`` means "we could not decide", never "opposed" —
+    # the caller refuses rather than defaulting.
+    sar_aligned_at_entry: Optional[bool] = None
+    # The resolve-path recomputation of the same quantity, kept as a CROSS-CHECK
+    # and never as the authority.  The two must agree; a disagreement means the
+    # walker's replay window is not reconstructing the bar the scanner actually
+    # saw, which is exactly the #800 failure mode made self-reporting.
+    sar_aligned_at_resolve: Optional[bool] = None
 
 
 # ---------------------------------------------------------------------------
@@ -938,6 +952,7 @@ def stamp_candidate(
     entry_type: str = ENTRY_IMMEDIATE,
     exit_model: str = EXIT_STATIC,
     provenance: str = "",
+    sar_aligned_at_entry: Optional[bool] = None,
     store: Optional[SuppressedCandidateStore] = None,
 ) -> Optional[SuppressedCandidateRecord]:
     """Stamp a suppressed candidate (fail-open).  Scopes to tradeable geometry only."""
@@ -966,6 +981,12 @@ def stamp_candidate(
             entry_type=str(entry_type or ENTRY_IMMEDIATE),
             exit_model=str(exit_model or EXIT_STATIC),
             provenance=str(provenance or ""),
+            # Tri-state on purpose: True / False / None-for-undecidable. Not
+            # coerced with bool(), which would turn "we could not tell" into
+            # "opposed" and silently invent half a population.
+            sar_aligned_at_entry=(
+                None if sar_aligned_at_entry is None else bool(sar_aligned_at_entry)
+            ),
             # Stamped by the current contract, so its provenance is trustworthy
             # on reload without consulting a wall clock.
             prov_schema=PROVENANCE_SCHEMA,

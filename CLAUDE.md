@@ -397,6 +397,31 @@ python -m src.main
   2026-07-26, #800). Corollary: **any array consumed by *when* something happened
   must carry its own timestamps** — deriving the index from wall-clock
   arithmetic assumes gap-free, current data and fails silently when that breaks.
+- **Record a fact where it becomes true, not where it is convenient.** A value
+  derivable at stamp time but computed in a later pass does not merely arrive
+  late — it silently shrinks every population that reads it, and the shortfall
+  reads as *missing* data rather than *late* data. SAR agreement
+  (`entry_sar < entry`) consumes no future candle, yet lived in the 48h resolve
+  path, so 261 of 277 rows carried no verdict and the agreement mix on screen
+  always described a two-day-old population (owner-caught 2026-07-27, #802).
+  Corollary: **"blank" needs a cause before it gets a caption** — not-yet-resolved
+  and could-not-be-resolved are different states, and the panel pooled them into
+  one sentence that reported a data fault which was not happening.
+- **Closed bar ≠ current bar.** `update_candle` appends only on `k["x"]`, so the
+  newest bar the scanner holds is the last *completed* one — while a replay that
+  locates "the bar containing the stamp" lands on the bar *after* it. They are
+  adjacent, and across an indicator flip they sit on opposite sides of price. Any
+  stamp-time-vs-replay-time comparison must reconcile that explicitly or it
+  compares different bars and calls the difference a fault. Related:
+  **redefining a live measurement is only cheap while its population is empty** —
+  #802's redefinition was free solely because the ledger had just been cleared.
+- **A second computation of the same quantity is a detector, not a duplicate** —
+  provided it never overwrites the first. Keeping the resolve-path SAR alignment
+  beside the stamp-time one, under its own key with a disagreement counter on the
+  liveness watchdog, turns a known-dangerous replay path into one that reports on
+  itself. **Do not signal "idle" or "disabled" by raising** inside a
+  `PredicateProbe`: it converts to a `fail_open.record`, and filling that counter
+  with non-failures is how a real one stops standing out — `return True, "…"`.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

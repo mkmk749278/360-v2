@@ -1028,3 +1028,241 @@ class TestEarlyResolutionThroughTheRealClassifier:
         assert "trail_exit_reason" in sar.classify_sar_record(
             {"entry": entry, "side": "LONG"}, ohlc
         )
+
+
+# ---------------------------------------------------------------------------
+# SAR agreement decided at ENTRY, not at resolution (2026-07-27)
+# ---------------------------------------------------------------------------
+#
+# Owner-caught: at the moment a signal fires the SAR is either behind the entry
+# or in front of it — two states, no third — yet 261 of 277 ledger rows carried
+# no verdict.  Cross-tabbing the export was perfectly diagonal: every resolved
+# row had one, every running row was blank.  The comparison consumes no future
+# candle; it was simply sitting inside the function that runs 48h later.
+
+
+def _rising(n: int = 60) -> tuple[list[float], list[float]]:
+    """A clean uptrend — SAR converges below price, so a LONG is aligned."""
+    highs = [100.0 + i for i in range(n)]
+    lows = [99.0 + i for i in range(n)]
+    return highs, lows
+
+
+def _falling(n: int = 60) -> tuple[list[float], list[float]]:
+    """A clean downtrend — SAR sits above price, so a LONG is opposed."""
+    highs = [100.0 + (n - i) for i in range(n)]
+    lows = [99.0 + (n - i) for i in range(n)]
+    return highs, lows
+
+
+class TestAlignmentAtEntry:
+    def test_uptrend_long_is_aligned_and_short_is_opposed(self):
+        highs, lows = _rising()
+        entry = lows[-1] + 0.5
+        assert sar.alignment_at_entry(
+            highs=highs, lows=lows, entry=entry, side="LONG"
+        ) is True
+        # Same bar, same level, opposite side — the verdict must invert.
+        assert sar.alignment_at_entry(
+            highs=highs, lows=lows, entry=entry, side="SHORT"
+        ) is False
+
+    def test_downtrend_long_is_opposed(self):
+        highs, lows = _falling()
+        entry = highs[-1] - 0.5
+        assert sar.alignment_at_entry(
+            highs=highs, lows=lows, entry=entry, side="LONG"
+        ) is False
+
+    def test_it_consumes_no_future_candle(self):
+        """The claim the whole change rests on.
+
+        If the verdict depended on anything after the entry bar, appending more
+        bars would be able to change it. It must not.
+        """
+        highs, lows = _rising(60)
+        entry = lows[-1] + 0.5
+        before = sar.alignment_at_entry(
+            highs=highs, lows=lows, entry=entry, side="LONG"
+        )
+        # Twenty more bars, violently reversing. The past cannot change.
+        after_highs = highs + [highs[-1] - 5.0 * i for i in range(1, 21)]
+        after_lows = lows + [lows[-1] - 5.0 * i for i in range(1, 21)]
+        assert sar.alignment_at_entry(
+            highs=after_highs[:60], lows=after_lows[:60], entry=entry, side="LONG"
+        ) == before
+
+    def test_undecidable_inputs_refuse_rather_than_default(self):
+        """None is not False. A clamp is not a guard.
+
+        Defaulting an undecidable input to False would invent an 'opposed'
+        population out of missing data — the exact class of silent wrongness
+        that produced 172 fabricated rows in #800.
+        """
+        highs, lows = _rising()
+        entry = lows[-1] + 0.5
+        assert sar.alignment_at_entry(
+            highs=None, lows=lows, entry=entry, side="LONG"
+        ) is None
+        assert sar.alignment_at_entry(
+            highs=highs, lows=lows, entry=entry, side=""
+        ) is None
+        assert sar.alignment_at_entry(
+            highs=highs, lows=lows, entry=0.0, side="LONG"
+        ) is None
+        # Too short for the recursion to have converged.
+        assert sar.alignment_at_entry(
+            highs=highs[:3], lows=lows[:3], entry=entry, side="LONG"
+        ) is None
+        # Ragged arrays: refuse, do not zip to the shorter one.
+        assert sar.alignment_at_entry(
+            highs=highs, lows=lows[:-5], entry=entry, side="LONG"
+        ) is None
+
+    def test_numpy_arrays_do_not_raise(self):
+        """Hard limit: candle arrays are numpy and must never be truth-tested."""
+        np = pytest.importorskip("numpy")
+        highs, lows = _rising()
+        assert sar.alignment_at_entry(
+            highs=np.asarray(highs), lows=np.asarray(lows),
+            entry=lows[-1] + 0.5, side="LONG",
+        ) is True
+
+
+class TestAlignmentIsStampedNotDeferred:
+    def test_the_flag_lands_on_both_arms_at_stamp_time(self, tmp_path):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        highs, lows = _rising()
+        entry = lows[-1] + 0.5
+        assert sar.stamp_sar_pair(
+            symbol="BTCUSDT", channel="scalp", setup_class="SR_FLIP_RETEST",
+            side="LONG", entry=entry, stop_loss=entry - 1.0, tp1=entry + 2.0,
+            highs=highs, lows=lows, store=store,
+        ) is True
+        recs = store.records()
+        assert len(recs) == 2
+        # Nothing has resolved — that is the whole point.
+        assert all(r["classification"] is None for r in recs)
+        assert all(r["sar_aligned_at_entry"] is True for r in recs), (
+            "the verdict must exist the moment the pair is stamped"
+        )
+
+    def test_without_candles_the_row_carries_no_verdict(self, tmp_path):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert sar.stamp_sar_pair(
+            symbol="BTCUSDT", channel="scalp", setup_class="SR_FLIP_RETEST",
+            side="LONG", entry=100.0, stop_loss=99.0, tp1=102.0, store=store,
+        ) is True
+        # Stamping still succeeds — the arm keeps measuring; it just does not
+        # claim an agreement it could not compute.
+        assert all(r["sar_aligned_at_entry"] is None for r in store.records())
+
+    def test_the_rollup_reads_the_stamped_value(self):
+        """summarize_sar_alignment must not fall back to the resolve-time key.
+
+        A fallback would re-introduce the 48h dependency this change removes.
+        """
+        recs = [{
+            "setup_class": f"MTP{sar.SAREXIT_SUFFIX}",
+            "classification": "WOULD_WIN",
+            "r_multiple": 1.0,
+            "trail_hold_min": 15.0,
+            "sar_aligned_at_entry": False,
+            "sar_aligned_at_resolve": True,   # must be ignored here
+        }]
+        out = sar.summarize_sar_alignment(recs)
+        assert out["opposed"]["n"] == 1
+        assert out["aligned"]["n"] == 0
+
+
+class TestResolveCrossCheck:
+    """The resolve path recomputes the same quantity and must agree.
+
+    Both paths read the last bar CLOSED at entry. The resolver's ``entry_idx``
+    is the bar *containing* the stamp, which was still forming — reading that
+    one would have made the two paths measure different bars and fired the
+    cross-check on a definitional off-by-one forever.
+    """
+
+    def test_both_paths_agree_on_the_same_series(self):
+        highs, lows = _rising(60)
+        entry = lows[-1] + 0.5
+        stamped = sar.alignment_at_entry(
+            highs=highs, lows=lows, entry=entry, side="LONG"
+        )
+        # Replay: the entry bar is the one AFTER the last bar the scanner saw.
+        replay_highs = highs + [highs[-1] + 1.0]
+        replay_lows = lows + [lows[-1] + 1.0]
+        res = sar.simulate_sar_exit(
+            highs=replay_highs, lows=replay_lows, closes=replay_lows,
+            opens=None, entry_idx=len(highs), entry=entry, side="LONG",
+            step=0.02, max_step=0.2, max_bars=10, bar_minutes=15,
+        )
+        assert res is not None
+        assert res["sar_aligned_at_resolve"] == stamped
+
+    def test_disagreement_is_counted_and_agreement_is_too(self):
+        sar.reset_alignment_crosscheck()
+        assert sar.alignment_crosscheck() == {"agree": 0, "disagree": 0}
+        sar._record_alignment_check(True)
+        sar._record_alignment_check(False)
+        sar._record_alignment_check(True)
+        assert sar.alignment_crosscheck() == {"agree": 2, "disagree": 1}
+        sar.reset_alignment_crosscheck()
+
+    def test_an_undecidable_replay_does_not_count_as_disagreement(self):
+        """None on either side means 'no comparison', not 'they differ'.
+
+        Counting it as a disagreement would page on missing data rather than on
+        the replay actually being wrong.
+        """
+        sar.reset_alignment_crosscheck()
+        ohlc, entry = self._ohlc_no_alignment()
+        sar.classify_sar_record(
+            {"entry": entry, "side": "LONG", "sar_aligned_at_entry": True}, ohlc
+        )
+        counts = sar.alignment_crosscheck()
+        assert counts["disagree"] == 0
+        sar.reset_alignment_crosscheck()
+
+    @staticmethod
+    def _ohlc_no_alignment():
+        """entry_index 0 → there is no bar closed before it, so no verdict."""
+        highs = [100.0 + i for i in range(40)]
+        lows = [99.0 + i for i in range(40)]
+        return (
+            {"high": highs, "low": lows, "close": lows, "entry_index": 0},
+            lows[0] + 0.5,
+        )
+
+    def test_resolver_reads_the_bar_closed_at_entry_not_the_forming_one(self):
+        """The off-by-one that would have made the cross-check fire forever.
+
+        The store appends CLOSED candles only, so the newest bar the scanner
+        holds at stamp time is the last completed one. The resolver's
+        ``entry_idx`` is the bar *containing* the stamp — the one still forming
+        at entry. Those are adjacent, and across a SAR flip they sit on
+        opposite sides of price, so reading the wrong one inverts the verdict.
+        """
+        # Clean uptrend, then a bar that crashes through the trailing stop and
+        # flips the SAR from below price to above it.
+        highs = [100.0 + i for i in range(40)] + [60.0]
+        lows = [99.0 + i for i in range(40)] + [55.0]
+        series = sar.parabolic_sar(highs, lows, 0.02, 0.2)
+        flip = len(highs) - 1
+
+        entry = lows[flip - 1] + 0.5
+        below = sar._aligned_at(series, flip - 1, entry, "LONG")
+        at_flip = sar._aligned_at(series, flip, entry, "LONG")
+        assert below is True and at_flip is False, (
+            "fixture must straddle a flip or it cannot detect the off-by-one"
+        )
+
+        res = sar.simulate_sar_exit(
+            highs=highs, lows=lows, closes=lows, opens=None,
+            entry_idx=flip, entry=entry, side="LONG",
+            step=0.02, max_step=0.2, max_bars=10, bar_minutes=15,
+        )
+        assert res is not None
+        # The bar closed at entry, not the one still forming.
+        assert res["sar_aligned_at_resolve"] is True
