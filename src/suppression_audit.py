@@ -88,6 +88,17 @@ EXIT_TRAILING = "trailing"
 # ``sar_exit_shadow`` — that dependency runs the other way.
 REASON_TRAIL = "trail"      # the moving stop caught price
 REASON_WINDOW = "window"    # never stopped out — marked to the window's close
+# A conditional-handover arm runs the live geometry until the indicator comes
+# onside, so it can also finish on the static levels it started behind
+# (owner design, 2026-07-27).  These are *final* the moment the candles cover
+# them — a stop that was hit cannot be un-hit by a later bar — so they resolve
+# early exactly like REASON_TRAIL.  Leaving them out of ``_FINAL_REASONS`` would
+# park every never-handed-over trade at RUNNING for the full 48h window, which
+# is the failure #798 already paid for once.
+REASON_STATIC_SL = "static_sl"    # the live stop-loss closed it before handover
+REASON_STATIC_TP1 = "static_tp1"  # the live TP1 closed it before handover
+#: Exit reasons that are decided, not merely "as far as the candles go".
+_FINAL_REASONS = frozenset({REASON_TRAIL, REASON_STATIC_SL, REASON_STATIC_TP1})
 
 # Provenance of a stamped candidate: did this candidate actually reach
 # subscribers, or did a gate kill it?  Shadow ledgers stamp from BOTH points in
@@ -818,7 +829,7 @@ class SuppressedCandidateStore:
                 # ran, computed the right answer, and threw it away. The tab
                 # stayed at "0 resolved" and the fix shipped inert
                 # (owner-caught 2026-07-26).
-                if early and str(detail.get("trail_exit_reason") or "") != REASON_TRAIL:
+                if early and str(detail.get("trail_exit_reason") or "") not in _FINAL_REASONS:
                     continue
                 label = str(detail["classification"])
                 for key, value in detail.items():

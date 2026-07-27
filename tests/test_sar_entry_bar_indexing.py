@@ -120,12 +120,25 @@ class TestAlignmentIsRecorded:
 
     def test_long_into_a_bearish_sar_is_flagged_opposed(self):
         h, l, c, o = self._downtrend()
+        entry = c[59]
         r = simulate_sar_exit(
-            highs=h, lows=l, closes=c, opens=o, entry_idx=60, entry=c[59],
+            highs=h, lows=l, closes=c, opens=o, entry_idx=60, entry=entry,
             side="LONG", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15.0,
+            # Under conditional handover an opposed entry runs on its LIVE
+            # geometry, so the replay needs that geometry to exist.
+            stop_loss=entry * 0.98, tp1=entry * 1.02,
         )
         assert r is not None
         assert r["sar_aligned_at_resolve"] is False
+
+    def test_opposed_entry_without_geometry_refuses_rather_than_guessing(self):
+        """An opposed entry starts on its live SL/TP1. Without them there is no
+        defined behaviour to replay, and a clamp is not a guard."""
+        h, l, c, o = self._downtrend()
+        assert simulate_sar_exit(
+            highs=h, lows=l, closes=c, opens=o, entry_idx=60, entry=c[59],
+            side="LONG", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15.0,
+        ) is None
 
     def test_short_with_a_bearish_sar_is_flagged_aligned(self):
         h, l, c, o = self._downtrend()
@@ -136,19 +149,30 @@ class TestAlignmentIsRecorded:
         assert r is not None
         assert r["sar_aligned_at_resolve"] is True
 
-    def test_opposed_entries_exit_on_the_first_testable_bar(self):
-        """Not a bug — it is what a SAR trail does to a counter-trend entry.
+    def test_opposed_entries_run_on_live_geometry_not_the_trail(self):
+        """Premise replaced, 2026-07-27 (owner design).
 
-        Worth pinning because it is precisely why the two populations must not
-        be averaged together.
+        This case used to pin the opposite behaviour — an opposed entry stopped
+        out on the first testable bar, because the trail was applied from bar
+        zero even though its level sat on the wrong side of price. Measured on
+        the real feed that made 84% of the opposed cohort a one-bar exit at the
+        next bar's open: a ~7-minute drift measurement wearing an exit method's
+        name. Under conditional handover the trade runs on the geometry it was
+        given, so the trail must NOT be what closes it here.
         """
         h, l, c, o = self._downtrend()
+        entry = c[59]
         r = simulate_sar_exit(
-            highs=h, lows=l, closes=c, opens=o, entry_idx=60, entry=c[59],
+            highs=h, lows=l, closes=c, opens=o, entry_idx=60, entry=entry,
             side="LONG", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15.0,
+            # A stop wide enough to survive several bars of this -1%/bar
+            # fixture: the point is that the trade is NOT closed on bar one.
+            stop_loss=entry * 0.90, tp1=entry * 1.20,
         )
-        assert r["hold_min"] == pytest.approx(15.0)
-        assert r["exit_reason"] == "trail"
+        assert r is not None
+        assert r["exit_reason"] == "static_sl", "the live stop must own this exit"
+        assert r["hold_min"] > 15.0, "no longer stopped on the first testable bar"
+        assert r["handover_bars"] is None, "SAR never came onside in a downtrend"
 
 
 class TestAlignmentRollup:

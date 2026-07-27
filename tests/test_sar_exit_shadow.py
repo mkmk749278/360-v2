@@ -94,13 +94,156 @@ class TestParityWithTheBakeOff:
             step=0.02, max_step=0.2,
             max_bars=len(bars),          # unbounded, to match the script
             bar_minutes=15,
+            # Only consulted when SAR opposes at entry — see below.
+            stop_loss=entry * (0.90 if side == "LONG" else 1.10),
+            tp1=entry * (1.20 if side == "LONG" else 0.80),
         )
-
-        assert mine is not None, "the trail walk must resolve on clean data"
+        assert mine is not None, "the walk must resolve on clean data"
         assert theirs.exit_price is not None
-        assert mine["exit_price"] == pytest.approx(theirs.exit_price, rel=1e-12)
-        assert mine["mfe_pct"] == pytest.approx(theirs.mfe_pct, rel=1e-12)
-        assert mine["hold_min"] == pytest.approx(float(theirs.hold_mins), rel=1e-12)
+
+        # Parity is scoped to the leg the two share (2026-07-27). The script is
+        # trail-from-bar-zero; this arm is that ONLY when SAR is already onside
+        # at entry. When SAR opposes, the arm deliberately runs the live
+        # geometry until a handover, so demanding parity there would be
+        # demanding it reproduce the behaviour the owner replaced. The shared
+        # leg still must not drift — that is the whole reason the SAR math is a
+        # verbatim port rather than a re-derivation.
+        series = sar.parabolic_sar(highs, lows, 0.02, 0.2)
+        aligned = sar._aligned_at(series, entry_idx - 1, entry, side)
+        assert aligned is not None, "fixture must have a decidable entry bar"
+
+        if aligned:
+            assert mine["handover_bars"] == 0, "onside at entry = trail from bar one"
+            assert mine["exit_price"] == pytest.approx(theirs.exit_price, rel=1e-12)
+            assert mine["mfe_pct"] == pytest.approx(theirs.mfe_pct, rel=1e-12)
+            assert mine["hold_min"] == pytest.approx(float(theirs.hold_mins), rel=1e-12)
+        else:
+            # The divergence is the design, so pin it rather than skip it: the
+            # trail cannot be what closed the trade before any handover.
+            if mine["handover_bars"] is None:
+                assert mine["exit_reason"] != sar.REASON_TRAIL
+
+
+class TestConditionalHandover:
+    """The 2026-07-27 owner design: live geometry until SAR agrees, then trail.
+
+    Hand-built monotone fixtures on purpose — the handover rule is about WHICH
+    leg owns the exit, and a deterministic ramp is the only way to say exactly
+    which bar should own it. The randomised walks above cover the SAR maths.
+    """
+
+    @staticmethod
+    def _ramp(values):
+        """(opens, highs, lows, closes) tracing `values` with tight wicks."""
+        opens = list(values)
+        closes = list(values[1:]) + [values[-1]]
+        highs = [max(o, c) + 0.05 for o, c in zip(opens, closes)]
+        lows = [min(o, c) - 0.05 for o, c in zip(opens, closes)]
+        return opens, highs, lows, closes
+
+    def _down_then_up_then_down(self):
+        """Falls (SAR above), turns up (SAR crosses under), then rolls over
+        again so the trail has something to actually catch."""
+        vals = [100.0 - i for i in range(60)]
+        vals += [vals[-1] + 1.5 * (i + 1) for i in range(30)]
+        vals += [vals[-1] - 2.5 * (i + 1) for i in range(20)]
+        return self._ramp(vals)
+
+    def test_opposed_entry_hands_over_when_sar_comes_onside(self):
+        o, h, l, c = self._down_then_up_then_down()
+        entry_idx = 58                     # still falling: SAR opposes a LONG
+        entry = c[entry_idx - 1]
+        res = sar.simulate_sar_exit(
+            highs=h, lows=l, closes=c, opens=o, entry_idx=entry_idx, entry=entry,
+            side="LONG", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15,
+            # Both deliberately unreachable: if either one closed this trade the
+            # test would pass for the wrong reason.
+            stop_loss=entry * 0.50, tp1=entry * 50.0,
+        )
+        assert res is not None
+        assert res["sar_aligned_at_resolve"] is False, "fixture must start opposed"
+        assert res["handover_bars"] is not None, "SAR turns up — control must pass"
+        assert res["handover_bars"] > 0, "handover is later than the entry bar"
+        assert res["exit_reason"] == sar.REASON_TRAIL, "the trail owns the exit after handover"
+        assert res["exit_idx"] > entry_idx + res["handover_bars"], "exit follows handover"
+
+    def test_never_onside_means_the_live_stop_closes_it(self):
+        vals = [100.0 - i for i in range(80)]
+        o, h, l, c = self._ramp(vals)
+        entry = c[59]
+        res = sar.simulate_sar_exit(
+            highs=h, lows=l, closes=c, opens=o, entry_idx=60, entry=entry,
+            side="LONG", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15,
+            stop_loss=entry * 0.95, tp1=entry * 1.10,
+        )
+        assert res is not None
+        assert res["handover_bars"] is None
+        assert res["exit_reason"] == sar.REASON_STATIC_SL
+
+    def test_tp1_before_handover_closes_the_trade(self):
+        """While the static leg governs, it governs fully.
+
+        A downtrend with a bounce too small to turn the SAR: TP1 is reached
+        while the indicator still opposes, so the live target takes it — the
+        trade never reaches a handover at all.
+        """
+        vals = [100.0 - i for i in range(41)]
+        vals += [60.0 + 0.35 * (i + 1) for i in range(4)]        # the bounce
+        vals += [61.4 - 0.8 * (i + 1) for i in range(35)]        # rolls over
+        o, h, l, c = self._ramp(vals)
+        entry_idx = 41
+        entry = c[entry_idx - 1]
+        res = sar.simulate_sar_exit(
+            highs=h, lows=l, closes=c, opens=o, entry_idx=entry_idx, entry=entry,
+            side="LONG", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15,
+            stop_loss=entry * 0.90, tp1=entry * 1.005,
+        )
+        assert res is not None
+        assert res["sar_aligned_at_resolve"] is False
+        assert res["exit_reason"] == sar.REASON_STATIC_TP1
+        assert res["handover_bars"] is None, "the bounce must not turn the SAR"
+        assert res["exit_price"] == pytest.approx(entry * 1.005)
+
+    def test_a_bar_that_stops_and_flips_is_a_stop(self):
+        """Intrabar precedence: the static stop was live at that bar's open, so
+        it fills even if the same bar turns SAR onside. Counterfactuals are
+        already optimistic — this must not add another way to flatter them."""
+        # Down to bar 40, then one violent up-bar that both takes out a stop
+        # sitting just below and turns the SAR.
+        vals = [100.0 - i for i in range(41)]
+        vals += [vals[-1] + 20.0 * (i + 1) for i in range(20)]
+        o, h, l, c = self._ramp(vals)
+        entry_idx, = (39,)
+        entry = c[entry_idx - 1]
+        stop = min(l[entry_idx: entry_idx + 3]) + 0.01   # inside the next bars' range
+        res = sar.simulate_sar_exit(
+            highs=h, lows=l, closes=c, opens=o, entry_idx=entry_idx, entry=entry,
+            side="LONG", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15,
+            stop_loss=stop, tp1=entry * 5.0,
+        )
+        assert res is not None
+        assert res["exit_reason"] == sar.REASON_STATIC_SL
+
+    def test_aligned_entry_is_unchanged_by_the_redesign(self):
+        """The onside cohort must behave exactly as before: trail from bar one,
+        geometry never consulted. Pinned so the redesign cannot silently move
+        the population it was not supposed to touch."""
+        o, h, l, c = self._ramp([100.0 + i for i in range(60)] + [160.0 - 3.0 * i for i in range(40)])
+        entry_idx = 55
+        entry = c[entry_idx - 1]
+        common = dict(
+            highs=h, lows=l, closes=c, opens=o, entry_idx=entry_idx, entry=entry,
+            side="LONG", step=0.02, max_step=0.2, max_bars=192, bar_minutes=15,
+        )
+        with_geometry = sar.simulate_sar_exit(**common, stop_loss=entry * 0.5, tp1=entry * 1.01)
+        assert with_geometry is not None
+        assert with_geometry["sar_aligned_at_resolve"] is True
+        assert with_geometry["handover_bars"] == 0
+        # An absurdly tight TP1 would dominate any static leg — proof none ran.
+        assert with_geometry["exit_reason"] != sar.REASON_STATIC_TP1
+        no_geometry = sar.simulate_sar_exit(**common)
+        assert no_geometry is not None, "an aligned entry needs no geometry at all"
+        assert no_geometry["exit_price"] == with_geometry["exit_price"]
 
 
 class TestTrailWalk:
@@ -419,7 +562,9 @@ class TestClassifyEndToEnd:
         assert trail["classification"] is not None
         assert base["classification"] is not None
         assert trail["trail_exit_price"] is not None
-        assert trail["trail_exit_reason"] in (sar.REASON_TRAIL, sar.REASON_WINDOW)
+        # Reasons come from the ledger module's own vocabulary, not a tuple
+        # re-typed here — a second copy is how the two silently drift.
+        assert trail["trail_exit_reason"] in (sa._FINAL_REASONS | {sa.REASON_WINDOW})
         # Both arms scored — the pair is comparable, which is the point.
         assert sa.candidate_outcome(trail) is not None
         assert sa.candidate_outcome(base) is not None

@@ -98,6 +98,40 @@ watchdog that reports after the geometry shipped is a detector, not a guard.
 **Owner decision pending:** arm `stale_tf_refuse_enabled` once a window shows what it
 would have withheld. If the counters stay at zero, that is #811 working.
 
+### Redesign after the clear — conditional handover (owner directive)
+
+Owner cleared the ledger for fresh data, which is the **only moment redefining a live
+measurement is free** — the same window #802 used. Owner's design, shipped into it:
+
+> for opposed we do continue with paths SL and TPs and meanwhile if SAR alignment
+> happened then it drops SLs and TPs follows SAR exit; if no alignment happens then
+> original SLs TPs close the signal
+
+So `@SAREXIT` is no longer trail-from-bar-zero:
+
+| At entry | Behaviour |
+|---|---|
+| SAR onside | trail governs from bar one (unchanged) |
+| SAR opposed | runs on **live SL/TP1** — bar for bar the control arm — and hands over to the trail only if SAR later comes onside |
+| never comes onside | live geometry closes it; both arms agree **exactly** |
+
+This removes the artefact today's analysis found: 84% of the opposed cohort was a
+one-bar exit at the next bar's open — a ~7-minute drift measurement wearing an exit
+method's name, dragging a pooled headline that moved with the alignment mix. It also
+**sharpens the A/B**: a trade that never hands over contributes exactly 0 to `delta_r`,
+so the comparison is decided only by trades where SAR actually took over. `handover_n`
+/ `handover_share` are recorded and rendered for exactly that reason.
+
+Two intrabar rules, both deliberately unflattering (counterfactuals are already
+optimistic): a bar that takes out the static stop **and** flips SAR onside is a **stop**;
+a TP1 touch before handover closes at TP1.
+
+`REASON_STATIC_SL` / `REASON_STATIC_TP1` joined `_FINAL_REASONS` in
+`suppression_audit` — without that every never-handed-over trade would park at RUNNING
+for the full 48h, the exact failure #798 already paid for. Ops maps both to their own
+statuses; they previously fell through to NO_DATA, which would have reported a data
+fault about trades that resolved fine.
+
 ### Open — next session
 
 1. **The 245 stuck ledger rows** are unresolvable from the in-memory store (their bars

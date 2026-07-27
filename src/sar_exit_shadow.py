@@ -15,7 +15,23 @@ For every post-scoring candidate the scanner already stamps geometry arms for,
 this stamps a second counterfactual **pair** into its own ledger:
 
     ``SETUP@SARBASE``  — the live evaluator geometry (entry / SL / TP1), static
-    ``SETUP@SAREXIT``  — the same entry, exited by a trailing 15m Parabolic SAR
+    ``SETUP@SAREXIT``  — the same entry under a **conditional handover** exit
+
+**What the trail arm does (owner design, 2026-07-27).**  It is not
+trail-from-bar-zero.  If the SAR is already onside when the signal fires, the
+trail governs immediately.  If the SAR *opposes*, the trade runs on its live
+SL/TP1 — bar for bar the control arm — and only if the SAR later comes onside
+are those levels dropped and the trail handed control.  If it never comes
+onside, the live geometry closes the trade and the two arms agree exactly.
+
+The first cut applied the trail unconditionally, which meant an opposed entry
+began behind its own stop and was closed on the first testable bar at that
+bar's open.  Measured on 2026-07-27's real feed that was 84% of the opposed
+cohort — 119 of 297 candidates whose "exit" was a ~7-minute drift measurement
+wearing an exit method's name, dragging a pooled headline that then moved with
+the alignment mix rather than with the exit.  Handover also sharpens the A/B:
+a trade that never hands over contributes exactly 0 to ``delta_r``, so the
+comparison is decided only by trades where SAR actually took over.
 
 Both arms are forward-measured over the **identical window**, which is the
 point of the pair.  The bake-off's headline "SAR beats our current exit" was
@@ -92,6 +108,8 @@ _MAX_RECORDS: int = int(os.getenv("SAR_EXIT_SHADOW_MAX_RECORDS", "4000"))
 # exit or just the end of the available candles.  One definition, imported here,
 # so the two can never drift.
 from src.suppression_audit import (  # noqa: E402
+    REASON_STATIC_SL,
+    REASON_STATIC_TP1,
     REASON_TRAIL,
     REASON_WINDOW,
 )
@@ -281,18 +299,52 @@ def simulate_sar_exit(
     max_step: float,
     max_bars: int,
     bar_minutes: float,
+    stop_loss: float = 0.0,
+    tp1: float = 0.0,
 ) -> Optional[Dict[str, Any]]:
-    """Replay one signal from ``entry_idx`` under a SAR-trailing-only exit.
+    """Replay one signal under the **conditional-handover** SAR exit.
 
-    Pure.  Returns ``{exit_price, exit_reason, mfe_pct, hold_min, exit_idx}``
-    or ``None`` when the inputs can't support an honest replay (no SAR level at
-    entry, degenerate entry, bad side).  A pair that cannot compute its trail
-    arm is skipped entirely, never guessed.
+    Owner design, 2026-07-27 — and it is not the same experiment as the
+    trail-from-bar-zero arm it replaces:
 
-    The exit-fill model is the bake-off's: when a bar *gaps through* the stop,
-    the fill is the bar's open (worse than the stop), not the stop itself.
-    Without opens the stop price is used, which is the optimistic read — hence
-    the caller supplies opens whenever the data store has them.
+    * **SAR already onside at entry** → the trail governs immediately, exactly
+      as before.
+    * **SAR opposed at entry** → the trade runs on its *live* geometry (SL /
+      TP1), identical to the ``@SARBASE`` control, and only **if** the SAR
+      later comes onside are those levels dropped and the trail handed control
+      from the next bar.  If it never comes onside, the live SL/TP1 closes the
+      trade and this arm's result equals the control's **by construction**.
+
+    Why the change: the old arm applied the trail from bar zero regardless, so
+    an opposed entry sat behind its own stop before it began and was closed on
+    the first testable bar at that bar's open.  Measured on 2026-07-27's real
+    feed, 84% of the opposed cohort exited in one bar — that population was a
+    ~7-minute drift measurement wearing an exit method's name, and pooling it
+    with the rides made the arm's headline move with the alignment mix instead
+    of with the exit.  Under handover the same trades measure the thing the
+    owner actually wants to know: *does letting SAR take over once it agrees
+    beat holding the original geometry?*  It also sharpens the A/B — a trade
+    that never hands over contributes exactly 0 to ``delta_r``, so the
+    comparison isolates the handover decision instead of diluting it.
+
+    Two intrabar rules, both deliberately unflattering (counterfactuals are
+    optimistic; do not add a third way to flatter them):
+
+    * A bar that takes out the static stop **and** flips SAR onside is a stop —
+      the stop was live at that bar's open.
+    * A TP1 touch before handover closes the trade at TP1.  While the static
+      leg governs, it governs fully.
+
+    Pure.  Returns ``{exit_price, exit_reason, mfe_pct, hold_min, exit_idx,
+    handover_idx, handover_bars, sar_aligned_at_resolve}`` or ``None`` when the
+    inputs can't support an honest replay.  Refuses rather than guesses: an
+    undecidable entry alignment means we do not know which leg governs, and an
+    opposed entry without usable geometry has no static leg to run.
+
+    The exit-fill model is the bake-off's: when a bar *gaps through* a level,
+    the fill is the bar's open (worse than the level), not the level itself.
+    Without opens the level is used, which is the optimistic read — hence the
+    caller supplies opens whenever the data store has them.
     """
     try:
         is_long = str(side or "").upper() == "LONG"
@@ -306,43 +358,82 @@ def simulate_sar_exit(
         if series[entry_idx] is None:
             return None
 
+        # Which leg governs at entry.  Read at ``entry_idx - 1`` — the last bar
+        # CLOSED when the signal fired — so this is the same quantity the
+        # scanner stamps as ``sar_aligned_at_entry``.  ``None`` means the bar
+        # cannot answer, and "which leg governs" is not a question to guess at.
+        aligned = _aligned_at(series, entry_idx - 1, entry, side)
+        if aligned is None:
+            return None
+        stop_loss = float(stop_loss or 0.0)
+        tp1 = float(tp1 or 0.0)
+        static_usable = stop_loss > 0.0 and tp1 > 0.0
+        if not aligned and not static_usable:
+            return None  # opposed entry with no live geometry to run
+
         # The walk is bounded to the measurement window; `end` is exclusive.
         end = n if max_bars <= 0 else min(n, entry_idx + 1 + int(max_bars))
         best_fav = entry
         exit_price: Optional[float] = None
         exit_idx: Optional[int] = None
         reason = REASON_WINDOW
+        # Handover at the entry bar itself when SAR already agrees: the trail is
+        # then testable from the next bar, which is the pre-2026-07-27 behaviour
+        # for this cohort, bar for bar.
+        handover_idx: Optional[int] = entry_idx if aligned else None
+
+        def _fill(level: float, bar_open: Optional[float]) -> float:
+            """Gap-through fill: the worse of the level and the bar's open."""
+            if bar_open is None:
+                return level
+            if is_long:
+                return bar_open if bar_open < level else level
+            return bar_open if bar_open > level else level
 
         for i in range(entry_idx, end):
             stop_level = series[i]
-            if stop_level is None:
-                continue
-            # No same-bar exit: the entry bar's SAR is the level the trade
-            # starts behind, not a level it can already have breached.
+            # No same-bar exit: the entry bar's levels are what the trade starts
+            # behind, not levels it can already have breached.
             if i > entry_idx:
                 bar_open = (
                     float(opens[i])
                     if opens is not None and i < len(opens) and float(opens[i] or 0.0) > 0
                     else None
                 )
-                if is_long and float(lows[i]) <= stop_level:
-                    exit_price = (
-                        bar_open
-                        if bar_open is not None and bar_open < stop_level
-                        else stop_level
-                    )
-                    exit_idx = i
-                    reason = REASON_TRAIL
-                    break
-                if (not is_long) and float(highs[i]) >= stop_level:
-                    exit_price = (
-                        bar_open
-                        if bar_open is not None and bar_open > stop_level
-                        else stop_level
-                    )
-                    exit_idx = i
-                    reason = REASON_TRAIL
-                    break
+                if handover_idx is None:
+                    # ── Static leg: the live geometry, SL before TP1 ──────────
+                    if is_long and float(lows[i]) <= stop_loss:
+                        exit_price = _fill(stop_loss, bar_open)
+                        exit_idx, reason = i, REASON_STATIC_SL
+                        break
+                    if (not is_long) and float(highs[i]) >= stop_loss:
+                        exit_price = _fill(stop_loss, bar_open)
+                        exit_idx, reason = i, REASON_STATIC_SL
+                        break
+                    if is_long and float(highs[i]) >= tp1:
+                        exit_price = tp1
+                        exit_idx, reason = i, REASON_STATIC_TP1
+                        break
+                    if (not is_long) and float(lows[i]) <= tp1:
+                        exit_price = tp1
+                        exit_idx, reason = i, REASON_STATIC_TP1
+                        break
+                    # Still open — did the indicator come onside on this bar?
+                    # Same definition of "onside" as at entry, read against this
+                    # bar's close rather than the entry price.  One definition,
+                    # two reference prices — never two definitions.
+                    if _aligned_at(series, i, float(closes[i]), side) is True:
+                        handover_idx = i
+                elif stop_level is not None and i > handover_idx:
+                    # ── Trail leg: the SAR is the only exit from here ─────────
+                    if is_long and float(lows[i]) <= stop_level:
+                        exit_price = _fill(stop_level, bar_open)
+                        exit_idx, reason = i, REASON_TRAIL
+                        break
+                    if (not is_long) and float(highs[i]) >= stop_level:
+                        exit_price = _fill(stop_level, bar_open)
+                        exit_idx, reason = i, REASON_TRAIL
+                        break
             if is_long:
                 best_fav = max(best_fav, float(highs[i]))
             else:
@@ -360,20 +451,14 @@ def simulate_sar_exit(
         else:
             mfe = max(0.0, (entry - best_fav) / entry * 100.0)
         hold_min = max(0.0, float((exit_idx or entry_idx) - entry_idx) * float(bar_minutes))
-        # Was the indicator already on our side when the trade started?  A
-        # bearish SAR sits ABOVE price, so a LONG entered into one is behind its
-        # own trailing stop from bar zero and is stopped on the first testable
-        # bar — a structurally different trade from one the trail actually
-        # rides, and it must not be pooled with them (see summarize_sar_exit).
-        #
-        # Read at ``entry_idx - 1``, the last bar CLOSED when the signal fired —
-        # not at ``entry_idx``.  The resolver's entry bar is the one *containing*
-        # the stamp, which was still forming at entry; its level only exists in
-        # hindsight.  Aligning both paths on the last closed bar is what makes
-        # the stamp-time value and this one the same quantity, and therefore
-        # what makes a disagreement mean something (2026-07-27).  This is a
-        # cross-check now — the authority is the value stamped at entry.
-        aligned = _aligned_at(series, entry_idx - 1, entry, side)
+        # ``aligned`` (computed above, at ``entry_idx - 1``) is the resolve-path
+        # cross-check of the value the scanner stamped at entry — the authority
+        # remains the stamp.  Read at the last bar CLOSED when the signal fired,
+        # not at ``entry_idx``: the resolver's entry bar is the one *containing*
+        # the stamp, which was still forming at entry, so its level only exists
+        # in hindsight.  Aligning both paths on the last closed bar is what makes
+        # the two the same quantity, and therefore what makes a disagreement mean
+        # something (2026-07-27).
         return {
             "exit_price": float(exit_price),
             "exit_reason": reason,
@@ -381,6 +466,13 @@ def simulate_sar_exit(
             "hold_min": hold_min,
             "exit_idx": int(exit_idx if exit_idx is not None else entry_idx),
             "sar_aligned_at_resolve": aligned,
+            # When control passed to the trail — the fact the whole redesign
+            # exists to measure.  ``None`` means it never did, and such a trade
+            # is the control arm bar for bar.
+            "handover_idx": (None if handover_idx is None else int(handover_idx)),
+            "handover_bars": (
+                None if handover_idx is None else int(handover_idx - entry_idx)
+            ),
         }
     except Exception as exc:
         from src import fail_open
@@ -455,10 +547,12 @@ def stamp_sar_pair(
     exit have improved the signals we SENT" separately from "…every candidate
     we considered".  Only the former can justify changing what users receive.
 
-    Note the trail arm carries the live SL/TP1 **as levels it never consults**:
-    they are stored so ``sl_distance`` (the shared R denominator) and the
-    control arm's geometry travel with the record.  The trail's own exit comes
-    entirely from the SAR walk at classification time.
+    The trail arm carries the live SL/TP1 for two reasons now.  They have always
+    supplied ``sl_distance``, the R denominator both arms share.  Since the
+    conditional-handover redesign (2026-07-27) the arm also *runs* on them
+    whenever SAR opposes at entry — so the stamp writes nothing new, but the
+    levels stopped being "stored and never consulted" and a record missing them
+    can no longer be replayed at all when its entry is opposed.
     """
     try:
         setup = str(setup_class or "").strip()
@@ -652,6 +746,13 @@ def classify_sar_record(
         max_step=SAR_EXIT_SHADOW_MAX_STEP,
         max_bars=SAR_EXIT_SHADOW_WINDOW_BARS,
         bar_minutes=SAR_EXIT_SHADOW_BAR_MINUTES,
+        # The live geometry stopped being "levels it never consults" on
+        # 2026-07-27: under conditional handover the trade runs on them until
+        # the indicator comes onside.  They were already carried on the record
+        # as the shared R denominator, so nothing new is stored — what changed
+        # is that this arm now reads them.
+        stop_loss=float(record.get("stop_loss") or 0.0),
+        tp1=float(record.get("tp1") or 0.0),
     )
     if result is None:
         return None
@@ -695,6 +796,10 @@ def classify_sar_record(
         "trail_hold_min": float(result["hold_min"]),
         "trail_exit_reason": str(result["exit_reason"]),
         "sar_aligned_at_resolve": resolved_alignment,
+        # Did control ever pass to the trail, and how late?  ``None`` = never,
+        # which means this row is the control arm bar for bar and contributes
+        # exactly 0 to delta_r — the population that makes the A/B readable.
+        "sar_handover_bars": result.get("handover_bars"),
         "post_price_max": post_high,
         "post_price_min": post_low,
         "post_price_final": float(closes[-1]),
@@ -709,23 +814,39 @@ def classify_sar_record(
 def summarize_sar_alignment(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """Split resolved ``@SAREXIT`` rows by whether SAR agreed with us at entry.
 
-    Why this is not one number (2026-07-26): the trail arm pools two
-    structurally different populations.  When SAR already points our way the
-    trail rides and the exit is a real measurement of the method.  When it
-    points the other way its level is *already* on the wrong side of price, so
-    the trade is stopped on the first testable bar for a near-deterministic
-    loss that says nothing about trail quality — it says we took a signal
-    against the indicator.  Averaged together they answer a question nobody
-    asked ("what if we applied a SAR trail blindly, including against
-    ourselves"), and the pooled figure moves with the alignment mix rather than
-    with the exit.
+    Why this is still not one number — but for a different reason than it was
+    (rewritten 2026-07-27 for the conditional-handover design).  Alignment at
+    entry now decides **which leg the trade starts on**, so the two buckets
+    still describe different experiments:
 
-    Pure.  Returns per-bucket n / win-rate / avg-R plus the opposed share, which
-    is the number that says how much of the pooled average is not about SAR.
+    * **aligned** — the trail governed from bar one.  A pure measurement of the
+      exit method, and identical to what this arm always measured here.
+    * **opposed** — the trade started on its live SL/TP1 and only switched if
+      SAR came onside.  Its result is the control arm's *unless* a handover
+      happened, so its avg-R is dominated by the live geometry, not by SAR.
+
+    What is no longer true: the old docstring called the opposed bucket "a
+    near-deterministic loss" because the trail was applied from bar zero even
+    when its level sat on the wrong side of price.  Under handover that is
+    simply not what happens, and the copy went with the design — a panel that
+    asserts a cause its numbers no longer show is wrong on screen even when
+    every figure in it is right.
+
+    ``handover`` counts the rows where control actually passed to the trail.
+    That is the population the A/B lives on: a row that never handed over
+    contributes exactly 0 to ``delta_r`` by construction, so a shrinking
+    handover share means the comparison is being decided by fewer trades than
+    the totals suggest.
+
+    Pure.  Returns per-bucket n / win-rate / avg-R / avg-hold, the opposed
+    share, and the handover counts.
     """
     buckets: Dict[str, Dict[str, float]] = {
         k: {"n": 0.0, "wins": 0.0, "r_sum": 0.0, "hold_sum": 0.0} for k in ("aligned", "opposed")
     }
+    handover_n = 0
+    handover_bars_sum = 0.0
+    resolved_n = 0
     for rec in records or []:
         if not str(rec.get("setup_class", "")).endswith(SAREXIT_SUFFIX):
             continue
@@ -744,6 +865,14 @@ def summarize_sar_alignment(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]
         b["r_sum"] += r
         b["wins"] += 1.0 if r > 0 else 0.0
         b["hold_sum"] += float(rec.get("trail_hold_min") or 0.0)
+        resolved_n += 1
+        # ``None`` = control passed to the trail never; 0 = at the entry bar.
+        # Test for None explicitly: 0 is a real handover and the falsiest of
+        # values, which is exactly how it would go missing.
+        hb = rec.get("sar_handover_bars")
+        if hb is not None:
+            handover_n += 1
+            handover_bars_sum += float(hb)
 
     def _out(b: Dict[str, float]) -> Dict[str, Any]:
         n = b["n"]
@@ -762,6 +891,11 @@ def summarize_sar_alignment(records: Sequence[Dict[str, Any]]) -> Dict[str, Any]
         "opposed": opposed,
         "total": total,
         "opposed_share": (opposed["n"] / total) if total else 0.0,
+        # Rows where the trail actually took control — the only ones that can
+        # differ from the control arm at all.
+        "handover_n": handover_n,
+        "handover_share": (handover_n / resolved_n) if resolved_n else 0.0,
+        "avg_handover_bars": (handover_bars_sum / handover_n) if handover_n else 0.0,
     }
 
 
