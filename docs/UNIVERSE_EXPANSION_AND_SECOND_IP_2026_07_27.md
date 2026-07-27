@@ -18,7 +18,7 @@ different limits and different answers:
 | Thing | Limited by | Second IP helps? | Verdict |
 |---|---|---|---|
 | **Knowing** what every pair is doing | `!ticker@arr` WS stream | Not needed | **Already done today** — full universe (~500+ pairs), 1 connection, zero REST |
-| **Deep-scanning** every pair through 17 evaluators | Engine CPU (1.5 vCPU) + RAM (1 GB) + event loop | **No** | **This is the wall.** ~6–7× the compute we currently have |
+| **Deep-scanning** every pair through 17 evaluators | Engine CPU (capped at 1.5 of the host's 4 cores) + event loop | **No** | **This is the wall** — but see **§1b**: the cap is self-imposed, and raising it is free |
 | **Emitting** more signals | Router concurrency caps (5 per channel, 3 same-direction global) | **No** | **Hard-capped.** More pairs cannot produce more delivered signals |
 
 And there is one genuine hazard that must be settled before any second IP goes near the
@@ -28,6 +28,93 @@ exactly one IP on their Binance key.
 **Recommendation:** don't do the full-universe scan. Do the three things in **§12**
 instead — they capture most of the upside for a fraction of the risk and cost, and two
 of them are config changes, not rewrites.
+
+---
+
+## 1b. MEASURED ON THE VPS (2026-07-27) — supersedes the projections below
+
+The first draft of this document projected CPU and RAM headroom from a single
+2026-06-04 scan-timing datapoint and had **no memory figure at all**. The owner ran
+`scripts/diag_capacity.sh` on production. Real numbers, and they change the conclusion:
+
+| | Measured | Read |
+|---|---|---|
+| Host cores | **4** | |
+| Host RAM | **7.8 GB** (1.5 used, 6.3 free) | |
+| Host load, 15 min | **1.02** of 4 cores | **~25 % busy** |
+| Engine RAM | **459 MB / 1 GB cap (45 %)** | Comfortable |
+| **Engine CPU** | **130 % of a 150 % cap (~87 %)** | **Nearly saturated** |
+| Engine OOM-killed | **false** | Never hit the memory wall |
+| Engine restarts | **0** | Stable |
+| Scan-cycle timing | **not logged** | `SCAN_STAGE_TIMING_ENABLED` is off |
+
+### What this changes
+
+**The VPS is not the problem — our own container limit is.** The host is a 4-core /
+7.8 GB box running at a quarter of capacity, and we capped the engine at `cpus: "1.5"`
+and `mem_limit: 1g`. Roughly **3 idle cores and 6 GB of unused RAM** are sitting behind
+that cap.
+
+**Memory was never the binding constraint.** §7 assumed RAM would OOM before CPU gave
+out. At 45 % of a 1 GB cap with zero OOM kills in the engine's lifetime, that was wrong.
+**CPU is the only thing governing this system.**
+
+**The CPU ceiling is lower than §7 projected.** Extrapolating from scan *wall-clock*
+hides Docker throttling; CPU consumption does not. At 87 % of cap on 75 pairs, the
+honest ceiling at the **current** container limit is **~85 pairs**.
+
+> ⚠️ **That is below where mover promotion already takes us.** With
+> `MOVER_PROMOTION_MAX_PAIRS=30` we scan up to 105 pairs during an active market, so we
+> are **probably already hitting the CPU cap and being throttled at candle boundaries** —
+> precisely when the market is most worth scanning. This is a live finding, not a
+> hypothetical, and it is the strongest argument in this document for acting now.
+
+One nuance in fairness to the data: 130 % is a one-second `docker stats` sample, and the
+15-minute load average of 1.02 implies *sustained* engine use nearer 0.9 cores (~60 % of
+cap) with spikes to 87 %. **Spikes are what matter** — they land exactly when every
+timeframe recomputes at once.
+
+### The fix is a config change, not a purchase
+
+```yaml
+# docker-compose.yml, engine service
+    mem_limit: 3g        # was 1g
+    cpus: "2.5"          # was 1.5
+```
+
+Budget against a 4-core / 7.8 GB host: CPU quotas total 3.8 of 4 (quotas are ceilings,
+not reservations; real total usage is ~1 core), RAM caps total ~4 GB of 7.8 GB. The
+signing service keeps its **own separate 0.5-core cap**, so the order path can never be
+starved by a busy scanner — which is the only part of this that touches safety.
+
+| | Now | After |
+|---|---|---|
+| Engine CPU | 1.5 cores (87 % used) | 2.5 cores (~52 % used) |
+| Engine RAM | 1 GB (45 % used) | 3 GB (~15 % used) |
+| **Safe pair ceiling** | **~85** | **~120–145** |
+| Binding constraint | CPU | Still CPU |
+
+At a 3 GB cap the RAM-derived ceiling exceeds 600 pairs, so memory drops out of the
+question entirely. Applying the change **recreates the container and triggers a full
+re-seed** — a few minutes degraded, so do it in a quiet window.
+
+**Full-universe scanning still needs different hardware.** At ~1.3 cores for 75 pairs,
+~500 pairs is ~8–9 cores. This box has 4. §8's business case against it is unchanged.
+
+### Also found
+
+- **Four containers run with no memory limit:** `360ce-ops`, `360ce-ops-agent`,
+  `360ce-ops-redis`, `360scalp-v2-redis` (`cap=none`). Tiny today (43/26/3/7 MB), but an
+  unbounded container that leaks can exhaust the host and **take the engine down with
+  it**. The engine is protected by its own cap; the host is not protected from these.
+  Suggested: 256 MB each — ~10× current use.
+- **Scan-stage timing is disabled**, so we still have no scan-time data and the 16 s
+  figure quoted throughout §7 remains a **2026-06-04** number, predating substantial
+  evaluator work. Enable it and re-measure before trusting any per-pair cost here:
+  ```bash
+  grep -q SCAN_STAGE_TIMING_ENABLED .env || echo 'SCAN_STAGE_TIMING_ENABLED=true' >> .env
+  docker compose up -d engine
+  ```
 
 ---
 
@@ -288,9 +375,15 @@ through the code.
 Scan cost is dominated by indicator + SMC recompute at candle closes, and it is
 **roughly linear in symbol count**. Extrapolating the measured production numbers:
 
+> ⚠️ **Superseded by §1b.** This table extrapolates from scan *wall-clock*, which hides
+> Docker CPU throttling. The direct CPU measurement (engine at 87 % of its 1.5-core cap
+> at 75 pairs) puts the real ceiling at **~85 pairs at the current container limit** —
+> lower than anything below. Treat this table as the shape of the problem, not the number.
+> The 16 s datapoint is also from **2026-06-04** and predates substantial evaluator work.
+
 | Universe | Typical cycle | Worst case (1m + 5m close) |
 |---|---|---|
-| 75 pairs (today) | ~3 s | **~16 s** (measured) |
+| 75 pairs (today) | ~3 s | **~16 s** (measured 2026-06-04) |
 | 200 pairs | ~8 s | **~43 s** (projected) |
 | 500 pairs | ~20 s | **~107 s** (projected) |
 
@@ -319,9 +412,11 @@ by ~6.7× going from 75 to 500 pairs, against a hard `mem_limit: 1g`.** The like
 is OOM-kill, and the engine restarts into a full re-seed, which is the most expensive
 thing it does.
 
-> **Measure, don't guess.** `docker stats 360scalp-v2-engine` gives current RSS. If we're
-> at 400 MB today, 500 pairs is dead on arrival. If we're at 120 MB, 200 pairs might fit.
-> This one number decides whether any expansion is even discussable.
+> ✅ **MEASURED 2026-07-27 — this projection was wrong. See §1b.** The engine sits at
+> **459 MB of its 1 GB cap (45 %)** and has **never been OOM-killed** (0 restarts). RAM
+> was never the binding constraint. Raising the cap to 3 GB pushes the RAM-derived
+> ceiling past 600 pairs, at which point memory stops mattering entirely. **CPU is the
+> only real constraint** — and it binds harder than this section estimated.
 
 ### Event loop
 
@@ -440,8 +535,8 @@ better served by targeted admission rules than by brute-force scanning.
 
 | # | Risk | Severity |
 |---|---|---|
-| 1 | Scan cycle 16 s → ~107 s worst case; permanent backlog past the 1m bar | **Critical** |
-| 2 | RAM ~6.7× against a hard 1 GB limit → OOM-kill → re-seed loop | **Critical** |
+| 1 | **CPU. Engine already at 87 % of its 1.5-core cap at 75 pairs** (measured §1b) — and mover promotion takes us to 105, so we are likely throttled today. Scan cycle stretches past the 1m bar into permanent backlog | **Critical** |
+| 2 | ~~RAM 6.7× against a hard 1 GB limit → OOM-kill~~ — **measured false (§1b):** 459 MB / 1 GB, zero OOM kills in the engine's lifetime. Not a constraint, and stops being one entirely at a 3 GB cap | ~~Critical~~ → **Not a risk** |
 | 3 | Order egress via wrong IP → `-2014` on every user key → naked positions | **Critical** (only if IP work is done carelessly) |
 | 4 | Event-loop saturation → delayed pongs → false WS-unhealthy → **scans less than today** | **High** |
 | 5 | OI silently degrades to ~4 min stale, no error raised | **High** |
@@ -457,22 +552,32 @@ better served by targeted admission rules than by brute-force scanning.
 
 ## 11. What to measure before deciding anything
 
-Per CLAUDE.md § Real-Data-First Diagnosis — get real numbers off prod first. All four are
-minutes of work and all four are currently unknown:
+Per CLAUDE.md § Real-Data-First Diagnosis — get real numbers off prod first.
+
+**Status: done 2026-07-27.** `scripts/diag_capacity.sh` was written for exactly this and
+run on production; results are in **§1b**. It reports host cores/RAM/load, every
+container's usage against its configured cap, engine scan-cycle distribution and Binance
+weight, and derives a safe pair ceiling from the measured per-pair cost — taking the
+lower of the CPU- and RAM-bound figures and naming which one binds.
 
 ```bash
-# 1. Actual engine RSS against the 1 GB limit — this single number gates everything
-docker stats --no-stream 360scalp-v2-engine
-
-# 2. Real scan-cycle distribution over 24 h (not the Session-18 snapshot)
-docker logs 360scalp-v2-engine --since 24h | grep "Scan stage timing" | tail -50
-
-# 3. Real Binance weight utilisation — the "Binance minutes" answer
-docker logs 360scalp-v2-engine --since 1h | grep -i "weight"
-
-# 4. How often mover promotion is actually saturating its 30-pair cap
-docker logs 360scalp-v2-engine --since 24h | grep -c "dynamically promoted"
+bash scripts/diag_capacity.sh
 ```
+
+**Still outstanding — the one number we do not have:**
+
+```bash
+# Scan-stage timing is DISABLED, so there is no scan-cycle data at all.
+# The 16 s figure used throughout §7 is from 2026-06-04.
+grep -q SCAN_STAGE_TIMING_ENABLED .env || echo 'SCAN_STAGE_TIMING_ENABLED=true' >> .env
+docker compose up -d engine
+# wait ~1 h, then:
+bash scripts/diag_capacity.sh
+```
+
+Until that runs, the per-pair cost in this document is inferred from a CPU snapshot
+rather than measured directly. The inference is sound enough to act on the container-cap
+change (§1b), but not precise enough to pick a final pair number.
 
 **#3 has no ops surface today.** `rate_limiter.update_from_header` already parses the
 authoritative `X-MBX-USED-WEIGHT-1M` header on every response and then discards it — it's
@@ -499,6 +604,14 @@ what we decide about the universe.
   the bottleneck.
 
 ### Do — in this order
+
+**0. Raise the engine's container limits — this is the actual unlock (§1b).**
+`cpus: 1.5 → 2.5`, `mem_limit: 1g → 3g`. Free, reversible, one file. The engine is at
+87 % of its CPU cap at 75 pairs while 3 host cores sit idle, and mover promotion already
+pushes us past the safe ceiling during active markets. Everything else in this list
+assumes headroom that does not currently exist. Infra, off money path, ships normally —
+but the restart triggers a re-seed, so pick a quiet window. Cap the four unlimited
+containers (§1b) in the same change.
 
 **1. Ship the weight gauge (this week, off money path, no gate).**
 Publish `futures_rate_limiter.usage_pct` to the snapshot; add it to ops Pulse. We cannot
@@ -538,11 +651,13 @@ rules are mandatory and non-negotiable** — the signing container pins to IP #1
 closed, and asserts its own public IP at boot.
 
 **5. If full-universe scanning is genuinely wanted — it's a hardware decision, not a
-config one.** The honest shape is a dedicated scanner node: bigger box (4–8 vCPU, 8 GB+),
-multiple engine processes sharded by symbol range, results into the existing Redis bridge.
-That is a real project with a real monthly cost, and per § Cost Discipline it needs a
-business case measured against §8's caps *first*. Given that the router can only deliver
-3 same-direction positions regardless, **I do not think that case exists today.**
+config one.** ~500 pairs needs roughly **8–9 cores** for the engine alone (measured: ~1.3
+cores at 75 pairs). **This box has 4**, so even after the §1b cap increase it cannot get
+there — the honest shape is a dedicated scanner node with multiple engine processes
+sharded by symbol range, feeding the existing Redis bridge. That is a real project with a
+real monthly cost, and per § Cost Discipline it needs a business case measured against
+§8's caps *first*. Given that the router can only deliver 3 same-direction positions
+regardless, **I do not think that case exists today.**
 
 ---
 
