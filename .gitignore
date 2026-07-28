@@ -74,3 +74,14 @@ data/pricing_freshness.json
 data/pricing_freshness.json.tmp
 data/watchdog_state.json
 data/watchdog_audit.jsonl
+# Feature-liveness watchdog state.  Runtime output like every entry above, but
+# it was the one that got committed — the sole tracked file under data/ — so
+# every local `pytest` run rewrote it and left the tree dirty on a
+# timestamp-only diff.  That trains reviewers to wave through changes to the
+# file whose whole job is to page when a measurement flat-lines.  Production
+# reads it from the 360scalp-v2-data volume, the writer recreates it
+# (`makedirs` + atomic replace), and monitor_heartbeat treats "missing" as a
+# pre-rollout build, so nothing needs it in the checkout.  `.tmp` sibling
+# ignored for the same reason data/pricing_freshness.json.tmp is.
+data/feature_liveness.json
+data/feature_liveness.json.tmp

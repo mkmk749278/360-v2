@@ -218,6 +218,17 @@ async def _signed_get(
                 body = {}
             if status_code == 200:
                 return body
+            # Parsed-but-not-a-dict error bodies (a bare ``null``, or the
+            # array shape /fapi/v2/balance itself returns) used to reach
+            # ``body.get`` and raise AttributeError — which is NOT a
+            # BinanceConnectValidationError, so it escaped the failure
+            # taxonomy entirely and surfaced to the user as a 500 with no
+            # fix-up instruction instead of a retryable 503.  Non-dict here
+            # simply means "no Binance error code available", same as an
+            # unparseable body.  The 200 path above is deliberately left
+            # untouched: /fapi/v2/balance legitimately returns a list.
+            if not isinstance(body, dict):
+                body = {}
             # Binance 4xx error codes — see
             # https://binance-docs.github.io/apidocs/futures/en/#error-codes
             code = body.get("code")
