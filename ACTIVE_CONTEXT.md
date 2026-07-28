@@ -4,6 +4,124 @@
 
 ---
 
+## 🟢 SESSION 88 2026-07-28 — the SAR panel's verdict was an artifact, three times over (#815, #816, #817, ops #97, #98)
+
+Owner asked a narrow question — *compare DEXE @ 2.95 across the Signals tab and the
+Performance tab, which do I trust* — and every layer under it turned out to be
+misreporting. Five PRs, all merged, all measurement-path.
+
+### 1. RUNNING and `real_is_active` are different fields (no bug — a reading error)
+
+`/signals/sar` status `RUNNING` means **the ledger record has not resolved yet**
+(`sar_exit.py:255`), not that a position is open. The dark page's `real_is_active`
+comes from the live `/api/signals` status, where `RUNNING` *is* in `_ACTIVE_STATUSES`
+— so `False` genuinely meant the real signal had closed. Both surfaces were right;
+they answer different questions. The real DEXE trade banked **+4.10%** while the SAR
+counterfactual was still holding at **+13.12%** with only **+1.34% locked in** by its
+stop. Quote the floor beside the mark or the counterfactual reads better than it is.
+
+### 2. The resolver could not resolve a rotated-out mover, and said nothing (#815)
+
+Four mover rows sat at RUNNING showing marks of −6% to −10% for trades that had
+**already stopped out at their 3% cap** — COTIUSDT 15 minutes after entry, KAITOUSDT
+120. `fetch_ohlc_15m_since` reads only the warm in-memory store, and a promoted mover
+has no WS subscription at all: `scanner._refresh_stale_mover_candles` is its only 15m
+writer and runs solely for **actively scanned** movers. Rotate out → array freezes →
+walker returns WINDOW → `classify_pending` rightly refuses it → 48h → INSUFFICIENT.
+
+This is the **mirror of #811**: that fix gave *core* pairs a `@kline_15m` stream and
+left movers on the REST-reseed path, which works right up until the symbol stops being
+scanned.
+
+Neither watchdog could see it. The miss was silent by construction (`if early:
+continue`, no counter), and `candle_coverage` walks `pair_mgr.pairs` — the *current*
+universe, which by definition excludes the symbols at risk. It scored 100% throughout.
+
+Fixed: `historical_data.refresh_timeframe` (replace, never merge — `_merge_candles`
+has no `open_time` dedup, so an overlapping pull duplicates bars and a duplicate reads
+as a zero-width gap to the contiguity guard, making a record *permanently*
+unresolvable); a bounded oldest-first refresh on the audit loop; per-cycle miss
+counters carrying a **cause**; and a `sar_ledger_candles` probe keyed on records we
+owe a verdict on rather than on the live universe.
+
+### 3. One move was buying ten rows (#816)
+
+221 of 300 rows in the owner's export were re-stamps. SLXUSDT SHORT
+MOVER_TREND_PULLBACK alone produced **10 rows in 2h10m across a 0.37% entry spread** —
+36% of the whole resolved population.
+
+| resolved population | n | win | avg R |
+|---|---|---|---|
+| per row (what the page showed) | 28 | 32% | **−0.364** |
+| per move | 11 | 55% | **+0.003** |
+
+**The sign flipped.** The cooldown bounds the stamp *rate*, not rows-per-move, and its
+key carries provenance — so a candidate oscillating across a gate boundary holds two
+budgets. All **21 of 21** sub-cooldown repeats were provenance flips; zero were genuine
+cooldown misses.
+
+The provenance key is **kept** (2026-07-25's reason still holds). Instead the move is
+tracked provenance-free and a re-stamp must carry *new information* to earn a row —
+the only such information being a suppressed→enqueued upgrade, spent **once per move**.
+SLX becomes 2 rows. Rows carry `stamp_schema` so the two sampling regimes are never
+pooled silently; `SAR_EXIT_SHADOW_SAME_MOVE_PCT=0` restores the old behaviour.
+
+### 4. The page truncated before it filtered (ops #97)
+
+`reduce_sar_signals` defaulted to `limit=300` and cut *before* `filter_sar_signals`, so
+every filter ran on ~4.17h of a ~2,000-pair ledger. That starves the rarest and most
+important population hardest: **"Delivered to users" silently meant "delivered, within
+the newest 300"** — 4 emitted rows against 152 enqueued and 144 suppressed. The cap now
+lives in the route, after filtering, bounding only the rendered table. `distinct_moves`
+discloses concentration beside every count.
+
+### 5. Closed-signal records never carried their regime (#817)
+
+Found while scoping the track record. `app/routes/performance.py` has read
+`r.get("entry_regime")` since it was written; `SignalRecord` carried neither that nor
+`entry_regime_15m`. **The per-regime table on `/performance` has been bucketing every
+closed signal into UNKNOWN** — a full-looking table describing nothing. Stamped now at
+*both* terminal call sites (`trade_monitor` + `main` expiry); stamping one would skew
+the population by outcome type. **No backfill** — the regime at entry is knowable only
+at entry, so pre-deploy rows read UNPLACED rather than being handed a guess.
+
+### 6. `/track-record` — paper trading without the month-long wait (ops #98)
+
+Owner's ask: new users wait a week to a month for their per-user paper book
+(`paper_book_registry`) to say anything, while the engine has recorded every closed
+signal all along. Owner's call: **implement the record, no backfill.**
+
+Two things turned out already to exist — `signal_history_store` persists the app feed,
+and `PerformanceTracker` has been writing every closed signal, **uncapped**, to
+`data/signal_performance.json`, which ops already mounts and reads. So no new engine
+API was needed; only the regime field was genuinely missing.
+
+`/track-record` renders it: day/week/month buckets, window presets + custom range
+(inclusive end), regime/setup/symbol/side filters, CSV export. **Recorded, never
+reconstructed** — nothing replays candles, which is what separates it from
+free-run / dark-signals / exit-backtest. R is the headline, not portfolio %, because a
+portfolio return needs an invented position size and `MAX_SAME_DIRECTION_GLOBAL=3`
+means two users on identical settings get different fills.
+
+### Open — next session
+
+1. **Regime buckets read UNPLACED until new signals close.** Don't judge the regime
+   filter until a fresh window accumulates.
+2. **`PerformanceTracker` is uncapped and `_save()` rewrites the whole array per
+   close.** O(n) per close, unbounded growth. Retention means *deleting history* —
+   its own change, its own reasoning.
+3. **TAGUSDT rows are stamped `agreed`**, where the trail governs from bar zero and the
+   SL is never consulted, so their −6.5% may be real arm losses. Futures-only, so not
+   replayable from this sandbox; #815 should now resolve them.
+4. **`fetch_and_store_fallback` merges without stamping freshness**, unlike
+   `seed_symbol` and `_gap_fetch_and_merge`. It feeds the dispatch staleness gate, so
+   it wants its own change rather than riding along in a measurement PR.
+5. **Lumin move for the track record** is now a presentation job, not a data one. The
+   gating question is unchanged and is the owner's: **subscribers-only, or visible
+   pre-signup?** Pre-signup makes it a financial promotion in the launch region.
+
+---
+
 ## 🔴 SESSION 87 2026-07-27 — the 15m timeframe has had no live feed, ever
 
 Owner asked for a real analysis of the SAR ledger: *how does it close on a flip, and
