@@ -1688,8 +1688,13 @@ class CryptoSignalEngine:
                 "close": list(closes[-n_candles:]),
             }
 
-        def fetch_ohlc_15m_since(symbol: str, since_ts: float):
+        def _ohlc_15m_detail(symbol: str, since_ts: float):
             """15m OHLC for the SAR exit ledger, with a pre-entry warmup prefix.
+
+            Returns ``(window, reason)``.  ``window`` is None when the record
+            cannot be honestly replayed, and ``reason`` then names *which*
+            precondition failed — see ``fetch_ohlc_15m_since`` for why a bare
+            None was not enough (2026-07-28).
 
             A trailing exit is only meaningful on the bars it trails, so this
             ledger reads 15m rather than the 1m the static audits use.  Two
@@ -1738,41 +1743,44 @@ class CryptoSignalEngine:
 
             candles = self.data_store.get_candles(symbol, "15m")
             if not candles:
-                return None
+                return None, "no 15m array (symbol left the scanned universe?)"
             highs = candles.get("high")
             lows = candles.get("low")
             closes = candles.get("close")
             opens = candles.get("open")
             open_time = candles.get("open_time")
             if highs is None or lows is None or closes is None or open_time is None:
-                return None
+                return None, "15m array missing a required series"
             n = len(highs)
             if n == 0 or len(lows) != n or len(closes) != n or len(open_time) != n:
-                return None
+                return None, "15m array empty or ragged"
 
             bar_ms = max(1.0, float(SAR_EXIT_SHADOW_BAR_MINUTES) * 60_000.0)
             since_ms = float(since_ts) * 1000.0
             # The entry bar is the last one that had already opened at stamp time.
             idx = int(np.searchsorted(np.asarray(open_time), since_ms, side="right")) - 1
             if idx < 0:
-                return None  # array begins after the stamp — history already rolled off
+                # array begins after the stamp — history already rolled off
+                return None, "15m history rolled off before the stamp"
 
             warmup = max(0, int(SAR_EXIT_SHADOW_WARMUP_BARS))
             start = idx - warmup
             if start < 0:
-                return None  # not enough pre-entry bars for the SAR to converge
+                # not enough pre-entry bars for the SAR to converge
+                return None, f"fewer than {warmup} warmup bars before entry"
             end = min(n, idx + 1 + int(SAR_EXIT_SHADOW_WINDOW_BARS))
 
             ot = np.asarray(open_time[start:end], dtype=np.float64)
             if not np.all(np.isfinite(ot)):
-                return None  # padded/unknown timestamps in the window
+                # padded/unknown timestamps in the window
+                return None, "non-finite bar timestamps in the window"
             # Contiguity: the SAR walk steps bar by bar, so a gap would silently
             # compress real time and mis-date every exit after it.
             if len(ot) > 1 and not np.all(np.abs(np.diff(ot) - bar_ms) < 1.0):
-                return None
+                return None, "gap or duplicate bar in the 15m window"
             # The entry bar must actually contain the stamp, not merely precede it.
             if not (0.0 <= since_ms - float(ot[idx - start]) < bar_ms):
-                return None
+                return None, "located bar does not contain the stamp"
 
             out = {
                 "high": list(highs[start:end]),
@@ -1784,7 +1792,107 @@ class CryptoSignalEngine:
             # the stop (the optimistic read) instead of at the worse open.
             if opens is not None and len(opens) == n:
                 out["open"] = list(opens[start:end])
-            return out
+            return out, ""
+
+        def fetch_ohlc_15m_since(symbol: str, since_ts: float):
+            """``_ohlc_15m_detail``, with the miss counted and its cause kept.
+
+            ``classify_pending`` reads a None here as "not yet" and moves on —
+            correct mid-window, but silent, so a record whose candles will never
+            arrive looks exactly like one stamped a minute ago for two days.  The
+            cause is knowable at exactly this point and nowhere later, so it is
+            recorded here (2026-07-28).
+            """
+            from src import sar_exit_shadow as _sar_shadow
+
+            window, reason = _ohlc_15m_detail(symbol, since_ts)
+            _sar_shadow.record_candle_fetch(symbol, window is not None, reason)
+            return window
+
+        async def _refresh_sar_ledger_candles() -> None:
+            """Keep 15m candles alive for symbols the ledger still owes a verdict.
+
+            The resolver reads the warm in-memory store and nothing else.  For a
+            promoted mover that store has exactly one writer —
+            ``scanner._refresh_stale_mover_candles``, which runs only for
+            *actively scanned* movers — so a rotated-out mover's 15m array simply
+            stops advancing.  The walker then sees a window ending before the
+            exit, returns a WINDOW verdict, ``classify_pending`` rightly refuses
+            it as "ran out of candles", and the record sits RUNNING until it ages
+            into INSUFFICIENT.  Four such rows were showing −6% to −10% marks on
+            /signals/sar for trades that had already stopped out at their 3% cap
+            (owner-caught 2026-07-28).
+
+            Bounded work, mirroring the mover refresher: at most
+            ``SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE`` symbols per audit
+            cycle, one attempt per ``SAR_EXIT_SHADOW_CANDLE_REFRESH_SEC`` per
+            symbol regardless of outcome, oldest-unresolved first.  Public
+            klines only — no Firestore, and this is the 5-minute audit loop, not
+            a hot path.
+            """
+            from config import (
+                SAR_EXIT_SHADOW_BAR_MINUTES as _bm,
+                SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE as _max_per_cycle,
+                SAR_EXIT_SHADOW_CANDLE_REFRESH_SEC as _refresh_sec,
+                SAR_EXIT_SHADOW_WINDOW_BARS as _wb,
+                SEED_TIMEFRAMES,
+            )
+
+            from src import sar_exit_shadow as _sar_shadow
+
+            if int(_max_per_cycle) <= 0:
+                return
+            symbols = _sar_shadow.unresolved_symbols(
+                window_sec=float(_wb) * float(_bm) * 60.0
+            )
+            if not symbols:
+                return
+            depth = next(
+                (tf.limit for tf in SEED_TIMEFRAMES if tf.interval == "15m"), 500
+            )
+            now_mono = time.monotonic()
+            due: List[str] = []
+            for sym in symbols:
+                if now_mono - _sar_candle_refresh_at.get(sym, 0.0) < float(_refresh_sec):
+                    continue
+                age = self.data_store.last_kline_age_seconds(sym, "15m")
+                # ``age is None`` = never stamped, which is not evidence of
+                # freshness — refresh it, same as the mover refresher does.
+                if age is not None and float(age) <= float(_refresh_sec):
+                    continue
+                due.append(sym)
+                if len(due) >= int(_max_per_cycle):
+                    break
+            if not due:
+                return
+            for sym in due:
+                _sar_candle_refresh_at[sym] = now_mono
+            # Drop throttle entries for symbols with nothing left to resolve.
+            if len(_sar_candle_refresh_at) > 512:
+                keep = set(symbols)
+                for stale in [s for s in _sar_candle_refresh_at if s not in keep]:
+                    _sar_candle_refresh_at.pop(stale, None)
+
+            async def _one(sym: str) -> bool:
+                info = self.pair_mgr.pairs.get(sym)
+                market = getattr(info, "market", None) or "futures"
+                return await self.data_store.refresh_timeframe(
+                    sym, "15m", int(depth), str(market)
+                )
+
+            results = await asyncio.gather(
+                *[_one(s) for s in due], return_exceptions=True
+            )
+            refreshed = sum(1 for r in results if r is True)
+            log.info(
+                "SAR ledger candle refresh: {}/{} symbols refreshed "
+                "({} unresolved symbols pending)",
+                refreshed, len(due), len(symbols),
+            )
+
+        # Per-symbol refresh throttle.  Loop-scoped rather than an instance
+        # attribute: it is meaningless outside this loop's lifetime.
+        _sar_candle_refresh_at: Dict[str, float] = {}
 
         while True:
             await asyncio.sleep(300)  # 5 min cadence
@@ -1974,6 +2082,12 @@ class CryptoSignalEngine:
                             persist=False,
                         )
 
+                    # Refresh first, classify second: a symbol that rotated out
+                    # of the mover set has no other 15m writer, and classifying
+                    # against its frozen array would just re-book the same
+                    # unresolvable verdict for another cycle.
+                    await _refresh_sar_ledger_candles()
+
                     def _classify_sar_batch() -> dict:
                         from config import SAR_EXIT_SHADOW_WINDOW_BARS as _wb
                         from config import SAR_EXIT_SHADOW_BAR_MINUTES as _bm
@@ -1987,6 +2101,18 @@ class CryptoSignalEngine:
                         return counters
 
                     sar_counters = await asyncio.to_thread(_classify_sar_batch)
+                    # Publish this cycle's fetch counters for the liveness probe.
+                    # Rolled after the batch, and only after it: the probe must
+                    # read a completed cycle, never one still filling.
+                    _sar.roll_candle_fetch_cycle()
+                    _candle_health = _sar.candle_fetch_health()
+                    if int(_candle_health.get("miss") or 0):
+                        log.warning(
+                            "SAR ledger candle misses this cycle: {} (ok={}) reasons={}",
+                            _candle_health["miss"],
+                            _candle_health["ok"],
+                            _candle_health["reasons"],
+                        )
                     if sar_counters:
                         log.info("SAR exit A/B classified: {}", sar_counters)
             except asyncio.CancelledError:
@@ -2231,6 +2357,58 @@ class CryptoSignalEngine:
         fl.add_predicate(PredicateProbe(
             name="sar_alignment_crosscheck",
             fn=_sar_alignment_crosscheck,
+            min_streak=6,          # 30 min sustained
+        ))
+
+        def _sar_ledger_candles() -> Tuple[bool, str]:
+            """Can the resolver still fetch candles for the trades it owes?
+
+            ``candle_coverage`` cannot answer this. It walks
+            ``pair_mgr.pairs`` — the *current* universe — and the population at
+            risk here is precisely the symbols that have left it: a promoted
+            mover has no WS subscription, its only 15m writer runs for actively
+            scanned movers, and when it rotates out its array freezes. Every
+            ledger record on that symbol is then unresolvable forever, while
+            coverage reads a healthy 100%. That is how four rows sat at RUNNING
+            on /signals/sar showing −6% to −10% marks for trades that had
+            already stopped out at their 3% cap (owner-caught 2026-07-28).
+
+            So this probe reads the population that matters: fetches attempted
+            for records we still owe a verdict on, counted per classify cycle.
+            A miss is not fatal on its own — a symbol can be mid-refresh — so
+            it pages on a *rate*, sustained across cycles by ``min_streak``.
+
+            Returns True when idle rather than raising: ``PredicateProbe``
+            converts an exception into a ``fail_open.record``, and an arm with
+            nothing to resolve is not a swallowed failure.
+            """
+            if not bool(_rt.get("sar_exit_shadow_enabled")):
+                return True, "disabled by tunable"
+            from src import sar_exit_shadow as _sar
+            health = _sar.candle_fetch_health()
+            ok = int(health.get("ok") or 0)
+            miss = int(health.get("miss") or 0)
+            attempted = ok + miss
+            if attempted == 0:
+                return True, "no records awaited a verdict last cycle"
+            rate = miss / attempted
+            if miss == 0:
+                return True, f"{ok}/{attempted} resolvable"
+            reasons = health.get("reasons") or {}
+            top = max(reasons.items(), key=lambda kv: kv[1])[0] if reasons else "unknown"
+            syms = sorted(health.get("symbols") or {})
+            detail = (
+                f"{miss}/{attempted} unfetchable ({rate:.0%}); "
+                f"top cause: {top}; symbols: {', '.join(syms[:5])}"
+                + (f" +{len(syms) - 5} more" if len(syms) > 5 else "")
+            )
+            # A refresh takes one cycle to land, so a single stale symbol is
+            # normal. A third of the population failing is the freeze.
+            return rate <= 0.33, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="sar_ledger_candles",
+            fn=_sar_ledger_candles,
             min_streak=6,          # 30 min sustained
         ))
         # Suppression stamps themselves vs scanner activity.  Suppressions can

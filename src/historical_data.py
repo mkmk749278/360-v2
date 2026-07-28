@@ -525,6 +525,61 @@ class HistoricalDataStore:
             symbol, interval, len(data.get("close", [])),
         )
 
+    async def refresh_timeframe(
+        self, symbol: str, interval: str, limit: int, market: str = "futures"
+    ) -> bool:
+        """Re-pull ONE timeframe via REST, **replacing** the bucket, and stamp it.
+
+        For a caller that needs a single timeframe kept alive on a symbol that may
+        have left the scanned universe.  That caller is the SAR exit ledger's
+        resolver (2026-07-28): it owes verdicts on trades whose symbol has since
+        rotated out of the mover set, and a promoted mover has no WS subscription
+        at all — ``_refresh_stale_mover_candles`` is its only writer and that runs
+        only for *actively scanned* movers.  So the moment a mover rotates out its
+        15m array stops advancing, the walker sees a window that ends before the
+        exit, and every record on that symbol sits RUNNING until it silently ages
+        into INSUFFICIENT.
+
+        Neither existing path fits: ``seed_symbol`` pulls every timeframe plus the
+        tick book, and ``fetch_and_store_fallback`` merges.
+
+        **Replace, never merge.** ``_merge_candles`` concatenates blindly — it has
+        no dedupe on ``open_time`` — so merging an overlapping REST pull duplicates
+        bars, and a duplicate reads as a zero-width gap to the contiguity guard in
+        ``main.fetch_ohlc_15m_since``, which then refuses the whole window.  A
+        refresh written to make a record resolvable would have made it permanently
+        unresolvable.  A fresh REST pull is contiguous and current by construction,
+        so replacement is both simpler and the only correct write here.
+
+        Callers pass the timeframe's own seed depth (``SEED_TIMEFRAMES``) so a
+        replacement can never shorten an array another consumer is reading.
+
+        Returns True when bars were written.  Never raises: a refresh failure
+        leaves existing data untouched, and the caller records that it could not
+        refresh rather than inheriting an exception mid-batch.
+        """
+        try:
+            data = await self.fetch_candles(symbol, interval, limit, market)
+            if not data:
+                return False
+            closes = data.get("close")
+            # None/len, never truthiness — these are numpy arrays (hard limit).
+            if closes is None or len(closes) == 0:
+                return False
+            if len(closes) > _MAX_CANDLES_PER_BUCKET:
+                data = {k: v[-_MAX_CANDLES_PER_BUCKET:] for k, v in data.items()}
+            self.candles.setdefault(symbol, {})[interval] = data
+            # REST writes count as freshness — see ``seed_symbol`` for why.
+            self._last_kline_update_ts.setdefault(symbol, {})[interval] = time.time()
+            log.debug(
+                "Refreshed %s %s: %d candles", symbol, interval, len(data["close"])
+            )
+            return True
+        except Exception as exc:
+            from src import fail_open
+            fail_open.record("historical_data.refresh_timeframe", exc)
+            return False
+
     async def _gap_fetch_and_merge(
         self, symbol: str, interval: str, gap: int, limit: int, market: str
     ) -> None:

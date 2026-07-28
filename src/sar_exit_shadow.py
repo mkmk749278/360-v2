@@ -700,6 +700,129 @@ def promote_to_emitted(
 
 
 # ---------------------------------------------------------------------------
+# Resolver candle health — the ledger's data dependency, made visible
+# ---------------------------------------------------------------------------
+#
+# ``classify_pending`` treats a mid-window candle fetch that returns nothing as
+# "not yet", which is right — mid-window the bars may genuinely not exist.  But
+# it is also silent: no counter, no log, no ``fail_open`` entry.  A record whose
+# candles will *never* arrive is therefore indistinguishable from one stamped a
+# minute ago, for two full days, after which it flips to INSUFFICIENT with no
+# stated cause.  That is how four mover rows sat at RUNNING showing marks of
+# −6% to −10% while the trades they describe had already stopped out at their
+# 3% cap hours earlier (owner-caught 2026-07-28 on /signals/sar).
+#
+# The liveness probe could not have caught it either: ``candle_coverage`` walks
+# ``pair_mgr.pairs``, the *current* universe, and a rotated-out mover is not in
+# it.  The one watchdog whose job is noticing a feature flat-line was blind to
+# this by construction.  So the ledger counts its own data dependency here, and
+# ``main`` registers a probe that reads the population that actually matters:
+# the symbols we still owe a verdict on.
+#
+# Counters are per classify-cycle, not cumulative: a cumulative miss count never
+# recovers after a transient outage, so it would page forever over a fault that
+# healed.  ``roll_candle_fetch_cycle`` moves the live bucket to ``last`` at the
+# end of each batch; the probe reads ``last``.
+
+_candle_cur: Dict[str, Any] = {"ok": 0, "miss": 0, "reasons": {}, "symbols": {}}
+_candle_last: Dict[str, Any] = {"ok": 0, "miss": 0, "reasons": {}, "symbols": {}}
+_candle_lock = threading.Lock()
+
+# Bound the per-symbol map: one entry per symbol with an unresolved record, and
+# the ledger itself is capped at _MAX_RECORDS.  The cap is belt-and-braces
+# against a pathological universe, not an expected path.
+_CANDLE_SYMBOL_CAP = 256
+
+
+def record_candle_fetch(symbol: str, ok: bool, reason: str = "") -> None:
+    """Count one resolver candle fetch.  Pure bookkeeping — never raises."""
+    try:
+        sym = str(symbol or "?")
+        with _candle_lock:
+            if ok:
+                _candle_cur["ok"] = int(_candle_cur["ok"]) + 1
+                _candle_cur["symbols"].pop(sym, None)
+                return
+            _candle_cur["miss"] = int(_candle_cur["miss"]) + 1
+            why = str(reason or "unknown")
+            reasons = _candle_cur["reasons"]
+            reasons[why] = int(reasons.get(why, 0)) + 1
+            symbols = _candle_cur["symbols"]
+            if sym in symbols or len(symbols) < _CANDLE_SYMBOL_CAP:
+                symbols[sym] = why
+    except Exception as exc:
+        from src import fail_open
+        fail_open.record("sar_exit_shadow.record_candle_fetch", exc)
+
+
+def roll_candle_fetch_cycle() -> None:
+    """Publish this cycle's counters and start a fresh bucket."""
+    global _candle_cur, _candle_last
+    with _candle_lock:
+        _candle_last = _candle_cur
+        _candle_cur = {"ok": 0, "miss": 0, "reasons": {}, "symbols": {}}
+
+
+def candle_fetch_health() -> Dict[str, Any]:
+    """Last completed cycle's resolver candle health (pure read)."""
+    with _candle_lock:
+        last = _candle_last
+        return {
+            "ok": int(last["ok"]),
+            "miss": int(last["miss"]),
+            "reasons": dict(last["reasons"]),
+            "symbols": dict(last["symbols"]),
+        }
+
+
+def reset_candle_fetch_health() -> None:
+    """Test hook — the counters are process-lifetime and module-global."""
+    global _candle_cur, _candle_last
+    with _candle_lock:
+        _candle_cur = {"ok": 0, "miss": 0, "reasons": {}, "symbols": {}}
+        _candle_last = {"ok": 0, "miss": 0, "reasons": {}, "symbols": {}}
+
+
+def unresolved_symbols(
+    *, window_sec: float, now_ts: Optional[float] = None, limit: Optional[int] = None
+) -> List[str]:
+    """Symbols carrying a still-resolvable, still-unresolved ledger record.
+
+    Ordered **oldest stamp first**, so a bounded per-cycle refresh budget is
+    spent on the records closest to ageing out of their window rather than on
+    whichever symbol happens to sort first.
+
+    Records past their window are excluded: their verdict is already decided
+    (``classify_pending`` marks them INSUFFICIENT on the next pass), so
+    refreshing their candles would buy nothing and burn REST weight.
+    """
+    try:
+        now = time.time() if now_ts is None else float(now_ts)
+        cutoff = now - float(window_sec)
+        oldest: Dict[str, float] = {}
+        for rec in get_sar_store().records():
+            if rec.get("classification") is not None:
+                continue
+            ts = float(rec.get("suppress_timestamp") or 0.0)
+            if ts <= 0.0 or ts < cutoff:
+                continue
+            sym = str(rec.get("symbol") or "")
+            if not sym:
+                continue
+            prev = oldest.get(sym)
+            if prev is None or ts < prev:
+                oldest[sym] = ts
+        ordered = [s for s, _ in sorted(oldest.items(), key=lambda kv: kv[1])]
+        if limit is not None and limit >= 0:
+            ordered = ordered[: int(limit)]
+        return ordered
+    except Exception as exc:
+        from src import fail_open
+        fail_open.record("sar_exit_shadow.unresolved_symbols", exc)
+        return []
+
+
+# ---------------------------------------------------------------------------
 # Trail classifier — the hook handed to SuppressedCandidateStore.classify_pending
 # ---------------------------------------------------------------------------
 
