@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-27T04:28:59.320593+00:00",
-  "generated_at_ts": 1785126539.3205929,
+  "generated_at": "2026-07-28T03:53:11.685643+00:00",
+  "generated_at_ts": 1785210791.685643,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "e81a7557b4568ac0627c34ebf9b07149d2f285e7",
+  "git_sha": "515b368f9665a1fc98f7cc811d14c77d40480cd4",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 5126,
-    "strategy_matrix_scored_cells": 1935,
+    "strategy_matrix_cells": 5379,
+    "strategy_matrix_scored_cells": 2048,
     "performance_setups": 14,
     "suppression_gates": 13
   },
@@ -69,8 +69,8 @@
       {
         "strategy": "SR_FLIP_RETEST@SAREXIT",
         "context_key": "LONDON/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -8.55678509934854,
-        "n": 17,
+        "edge_r": -8.108288012814326,
+        "n": 18,
         "verdict": "NEGATIVE"
       },
       {
@@ -81,31 +81,25 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "SR_FLIP_RETEST@SAREXIT",
-        "context_key": "NY/MARKDOWN/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": -6.517561341750975,
-        "n": 22,
-        "verdict": "NEGATIVE"
-      },
-      {
         "strategy": "MOVER_TREND_PULLBACK@SAREXIT",
         "context_key": "OVERLAP/QUIET/COMPRESSED/BTC_NEUTRAL",
         "edge_r": -6.3980814909694885,
         "n": 17,
         "verdict": "NEGATIVE"
+      },
+      {
+        "strategy": "SR_FLIP_RETEST@SAREXIT",
+        "context_key": "NY/MARKDOWN/COMPRESSED/BTC_NEUTRAL",
+        "edge_r": -5.042773895332088,
+        "n": 27,
+        "verdict": "NEGATIVE"
       }
     ],
     "gate_verdict_counts": {
-      "KEEP": 6,
-      "DROP": 4,
-      "TUNE": 2,
-      "INSUFFICIENT_SAMPLE": 1
+      "KEEP": 4,
+      "TUNE": 5,
+      "INSUFFICIENT_SAMPLE": 4
     },
-    "drop_gates": [
-      "shadow_unit:SHADOW_MEAN_REVERT",
-      "shadow_unit:SHADOW_RANGE_FADE",
-      "shadow_unit:SHADOW_FUNDING_FADE",
-      "dispatch_staleness_v2"
-    ]
+    "drop_gates": []
   }
 }
