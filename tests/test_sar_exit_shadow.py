@@ -55,12 +55,16 @@ def _bars(opens, highs, lows, closes):
 
 @pytest.fixture(autouse=True)
 def _clear_cooldown():
-    """The pair cooldown is module-global; a leaked entry silently kills the
+    """The pair throttles are module-global; a leaked entry silently kills the
     next test's stamp (and a silently-skipped stamp is exactly the failure
-    mode this arm is built to detect)."""
-    sar._last_pair_stamp.clear()
+    mode this arm is built to detect).
+
+    Clears BOTH maps via the module's own hook — the same-move map added on
+    2026-07-28 leaks exactly the same way, and a second hand-maintained list of
+    globals to clear is how the first one would drift out of date."""
+    sar.reset_pair_throttles()
     yield
-    sar._last_pair_stamp.clear()
+    sar.reset_pair_throttles()
 
 
 class TestParityWithTheBakeOff:
@@ -373,12 +377,31 @@ class TestPairStamping:
             ) is False, "a re-detected persisting candidate must not re-stamp"
         assert len(store.records()) == 2
 
-    def test_a_queued_stamp_does_not_consume_the_suppressed_budget(self, tmp_path):
+    def test_a_suppressed_stamp_adds_nothing_to_a_move_already_queued(self, tmp_path):
+        """Changed contract, 2026-07-28 — and deliberately not symmetric.
+
+        This used to assert the reverse ("the suppressed arm has its own
+        cooldown keyspace"), on the reasoning that the two provenances hold
+        independent budgets. They do, and that is still true across *different*
+        moves — but on the SAME move at the same entry it produced two ledger
+        rows for one trade, which is the double-count the whole same-move gate
+        exists to stop.
+
+        The asymmetry is the point. suppressed→enqueued is new information (the
+        candidate got further than last time we looked) and is allowed exactly
+        once per move — that is the 2026-07-25 property, and the test above
+        pins it. enqueued→suppressed is not: we already hold the better row for
+        this move.
+        """
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
         assert self._stamp(store, now_mono=1000.0, provenance=sa.PROVENANCE_ENQUEUED) is True
         assert self._stamp(
             store, now_mono=1001.0, provenance=sa.PROVENANCE_SUPPRESSED
-        ) is True, "the suppressed arm has its own cooldown keyspace"
+        ) is False, "the move is already represented by a strictly better row"
+        # …but a genuinely different move on the same pair still stamps.
+        assert self._stamp(
+            store, now_mono=1001.0, provenance=sa.PROVENANCE_SUPPRESSED, entry=105.0,
+        ) is True, "5% away is a different move, not a re-detection"
 
     def test_bad_geometry_stamps_nothing(self, tmp_path):
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)

@@ -71,6 +71,9 @@ from typing import Any, Dict, List, Optional, Sequence, Tuple
 from src.suppression_audit import (
     EXIT_STATIC,
     EXIT_TRAILING,
+    PROVENANCE_EMITTED,
+    PROVENANCE_ENQUEUED,
+    PROVENANCE_SUPPRESSED,
     WOULD_EXPIRE,
     WOULD_LOSE,
     WOULD_WIN,
@@ -491,7 +494,33 @@ _store_lock = threading.Lock()
 # 0.0 default swallows every stamp for the first COOLDOWN seconds after boot,
 # because monotonic() starts near zero on a fresh host (bug class caught in S53
 # and re-checked here).
-_last_pair_stamp: Dict[Tuple[str, str, str], float] = {}
+_last_pair_stamp: Dict[Tuple[str, str, str, str], float] = {}
+
+# Stamp-rule generation written onto every row this module produces.  Bumped
+# 2026-07-28 with the same-move gate below: rows either side of the bump are
+# sampled differently and pooling them silently would repeat the mistake the
+# gate exists to fix.  See ``SuppressedCandidateRecord.stamp_schema``.
+STAMP_SCHEMA: int = 1
+
+# Last stamp per (symbol, setup, side) — provenance-FREE, unlike the cooldown
+# key above.  This is what makes "the same move" a thing the stamp path can
+# recognise: entry price, monotonic time, and which provenance last claimed it.
+_last_pair_move: Dict[Tuple[str, str, str], Dict[str, Any]] = {}
+
+# Ordering over provenance, used only to decide whether a re-stamp on a move we
+# already have carries *new* information.  EMITTED never arrives through the
+# stamp path (``promote_to_emitted`` owns it) but is ranked for completeness.
+_PROV_RANK: Dict[str, int] = {
+    PROVENANCE_SUPPRESSED: 0,
+    PROVENANCE_ENQUEUED: 1,
+    PROVENANCE_EMITTED: 2,
+}
+
+
+def reset_pair_throttles() -> None:
+    """Test hook — both throttle maps are process-lifetime and module-global."""
+    _last_pair_stamp.clear()
+    _last_pair_move.clear()
 
 
 def get_sar_store() -> SuppressedCandidateStore:
@@ -590,11 +619,59 @@ def stamp_sar_pair(
         # scan-cycle events on a candidate that may persist for many cycles.
         cd_key = (str(symbol or ""), setup, side_u, prov)
         mono = time.monotonic() if now_mono is None else float(now_mono)
-        from config import SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC
+        from config import (
+            SAR_EXIT_SHADOW_SAME_MOVE_MAX_SEC,
+            SAR_EXIT_SHADOW_SAME_MOVE_PCT,
+            SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC,
+        )
 
         last = _last_pair_stamp.get(cd_key)
         if last is not None and mono - last < SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC:
             return False
+
+        # ── Same-move gate (2026-07-28) ──────────────────────────────────────
+        # The cooldown above bounds the stamp *rate*; it cannot bound how many
+        # rows one move contributes, and on a mover setup that persists for
+        # hours those are very different numbers.  SLXUSDT SHORT produced 10
+        # rows in 2h10m across an entry spread of 0.37% — one setup, one move,
+        # one price — and supplied 36% of a whole resolved population.  Counted
+        # as written that population read 32% win / −0.364R; one row per move it
+        # read 55% / +0.003R.  The sign of the arm's verdict was an artifact of
+        # re-detection (owner-caught 2026-07-28).
+        #
+        # Two things conspired.  The cooldown period is short relative to how
+        # long these setups live, AND the cooldown key carries provenance — so a
+        # candidate oscillating across a gate boundary holds two budgets and can
+        # stamp twice as fast.  All 21 sub-cooldown repeats in the owner's export
+        # were provenance flips; zero were genuine cooldown misses.
+        #
+        # The provenance key is NOT removed: it exists because a suppressed
+        # stamp must never swallow a real signal's stamp (2026-07-25), and that
+        # reason still holds.  Instead the move itself is tracked, provenance-
+        # free, and a re-stamp on a move we already have must carry *new*
+        # information to earn a row.  The only new information available here is
+        # a provenance upgrade — suppressed→enqueued, this candidate got further
+        # than the last time we looked.  That upgrade is allowed exactly once
+        # per move (it re-anchors), so the 2026-07-25 fix keeps working while
+        # the ratchet stops: SLXUSDT becomes 2 rows, not 10.
+        #
+        # Bounded in time as well as price: after SAME_MOVE_MAX_SEC the same
+        # level is no longer the same move — price can return to it by a
+        # different path, and that genuinely is new evidence.
+        move_key = (str(symbol or ""), setup, side_u)
+        prev = _last_pair_move.get(move_key)
+        if prev is not None and float(prev.get("entry") or 0.0) > 0.0:
+            prev_entry = float(prev["entry"])
+            drift_pct = abs(entry - prev_entry) / prev_entry * 100.0
+            age = mono - float(prev.get("mono") or 0.0)
+            same_move = (
+                drift_pct < float(SAR_EXIT_SHADOW_SAME_MOVE_PCT)
+                and age < float(SAR_EXIT_SHADOW_SAME_MOVE_MAX_SEC)
+            )
+            if same_move:
+                prev_rank = _PROV_RANK.get(str(prev.get("prov") or ""), -1)
+                if _PROV_RANK.get(prov, -1) <= prev_rank:
+                    return False
         target = store or get_sar_store()
         # Computed AFTER the cooldown gate on purpose: the SAR walk is pure CPU
         # over already-warm in-memory arrays (no Firestore, no network, nothing
@@ -625,6 +702,7 @@ def stamp_sar_pair(
                 # rollup that joins the arms must not have to guess which side
                 # holds it.
                 sar_aligned_at_entry=aligned,
+                stamp_schema=STAMP_SCHEMA,
                 store=target,
             )
 
@@ -634,6 +712,18 @@ def stamp_sar_pair(
         if _stamp_arm(GATE_SAREXIT, SAREXIT_SUFFIX, EXIT_TRAILING) is None:
             return False
         _last_pair_stamp[cd_key] = mono
+        # Re-anchor the move on every accepted stamp, including a provenance
+        # upgrade — that is what spends the one upgrade a move is allowed.
+        _last_pair_move[move_key] = {"entry": entry, "mono": mono, "prov": prov}
+        # Bounded: one entry per live (symbol, setup, side), and the universe is
+        # 75 pairs. The sweep is belt-and-braces against a pathological run.
+        if len(_last_pair_move) > 4096:
+            floor = mono - float(SAR_EXIT_SHADOW_SAME_MOVE_MAX_SEC)
+            for stale in [
+                k for k, v in _last_pair_move.items()
+                if float(v.get("mono") or 0.0) < floor
+            ]:
+                _last_pair_move.pop(stale, None)
         return True
     except Exception as exc:
         from src import fail_open

@@ -619,6 +619,21 @@ SAR_EXIT_SHADOW_BAR_MINUTES: float = _safe_float("SAR_EXIT_SHADOW_BAR_MINUTES", 
 SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC: float = _safe_float(
     "SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC", "600"
 )
+# Same-move gate (2026-07-28).  The cooldown above bounds the stamp RATE; it
+# cannot bound how many rows one move contributes, and a mover setup that
+# persists for hours produces one row per cooldown period regardless.  A
+# re-stamp whose entry sits within this band of the last accepted stamp for the
+# same (symbol, setup, side) is the same move, not new evidence.  0 disables the
+# gate and restores pre-2026-07-28 sampling.
+SAR_EXIT_SHADOW_SAME_MOVE_PCT: float = _safe_float(
+    "SAR_EXIT_SHADOW_SAME_MOVE_PCT", "0.5"
+)
+# …and a move is only "the same" for so long: price can return to a level by a
+# different path hours later, which genuinely is new evidence.  4h ≈ the longest
+# mover setup observed to persist.
+SAR_EXIT_SHADOW_SAME_MOVE_MAX_SEC: float = _safe_float(
+    "SAR_EXIT_SHADOW_SAME_MOVE_MAX_SEC", "14400"
+)
 # Resolver candle refresh (2026-07-28).  A promoted mover has no WS subscription;
 # ``scanner._refresh_stale_mover_candles`` is its only 15m writer and it runs only
 # for *actively scanned* movers.  When a mover rotates out, its 15m array freezes,
