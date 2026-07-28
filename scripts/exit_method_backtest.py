@@ -268,23 +268,37 @@ def supertrend(
     return line, direction
 
 
-def parabolic_sar(
+def parabolic_sar_levels(
     highs: List[float], lows: List[float], step: float, max_step: float
-) -> List[Optional[float]]:
-    """Parabolic SAR (Wilder). Returns the stop-and-reverse level per bar."""
+) -> Tuple[List[Optional[float]], List[Optional[float]]]:
+    """Parabolic SAR (Wilder) → (published indicator, stop in force per bar).
+
+    See ``src.sar_exit_shadow.parabolic_sar_levels`` for the full reasoning —
+    this is the same correction, applied here because **this script produced the
+    PF 1.60 headline** that the shadow arm exists to confirm or kill, using the
+    published level as the fill. On a reversal bar that level is the prior
+    trend's extreme, so every SAR trail exit filled at the bar's open instead of
+    the stop price breached: mean **+0.222%** per exit in the trade's favour over
+    820 real 15m flips. A bake-off number carrying that bias overstates the SAR
+    arm specifically, while ``atr`` (own ratcheted trail) and ``supertrend``
+    (close-based flip) are unaffected — so it also skewed the ranking between
+    methods, not just the level. **Re-run before quoting PF 1.60 again.**
+    """
     n = len(highs)
-    out: List[Optional[float]] = [None] * n
+    published: List[Optional[float]] = [None] * n
+    in_force: List[Optional[float]] = [None] * n
     if n < 2:
-        return out
+        return published, in_force
     up = highs[1] >= highs[0]
     af = step
     ep = highs[1] if up else lows[1]
     sar = lows[0] if up else highs[0]
-    out[1] = sar
+    published[1] = sar
     for i in range(2, n):
         sar = sar + af * (ep - sar)
         if up:
             sar = min(sar, lows[i - 1], lows[i - 2])
+            in_force[i] = sar
             if lows[i] < sar:
                 up = False
                 sar = ep
@@ -296,6 +310,7 @@ def parabolic_sar(
                     af = min(af + step, max_step)
         else:
             sar = max(sar, highs[i - 1], highs[i - 2])
+            in_force[i] = sar
             if highs[i] > sar:
                 up = True
                 sar = ep
@@ -305,8 +320,19 @@ def parabolic_sar(
                 if lows[i] < ep:
                     ep = lows[i]
                     af = min(af + step, max_step)
-        out[i] = sar
-    return out
+        published[i] = sar
+    return published, in_force
+
+
+def parabolic_sar(
+    highs: List[float], lows: List[float], step: float, max_step: float
+) -> List[Optional[float]]:
+    """Parabolic SAR (Wilder). Returns the stop-and-reverse level per bar.
+
+    The **published** indicator series. A simulator wants the second return of
+    ``parabolic_sar_levels`` — they differ on reversal bars.
+    """
+    return parabolic_sar_levels(highs, lows, step, max_step)[0]
 
 
 @dataclass(frozen=True)
@@ -334,7 +360,9 @@ def _stop_series(
         line, direction = supertrend(highs, lows, closes, period, mult)
         return line, direction
     if method == "sar":
-        return parabolic_sar(highs, lows, sar_step, sar_max), None
+        # The stop in force per bar, not the published level — the caller uses
+        # this series as a fill price. See ``parabolic_sar_levels``.
+        return parabolic_sar_levels(highs, lows, sar_step, sar_max)[1], None
     return wilder_atr(highs, lows, closes, period), None
 
 
