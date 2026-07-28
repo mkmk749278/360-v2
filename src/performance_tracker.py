@@ -66,6 +66,21 @@ class SignalRecord:
     signal_quality_pnl_pct: float = 0.0   # TP-based PnL for signal quality stats
     signal_quality_hit_tp: int = 0         # highest TP reached (for signal quality classification)
     session_name: str = ""                 # Trading session label  (Rec 12)
+    # Market regime at entry, stamped where it becomes true (2026-07-28).
+    #
+    # The ops /performance page has read ``entry_regime`` off these records
+    # since it was written, and the engine never wrote it — so its per-regime
+    # table silently bucketed every closed signal into UNKNOWN.  A regime
+    # filter over the track record needs this, and it CANNOT be backfilled:
+    # the 5m/15m regime at entry is knowable only at entry, and records already
+    # on disk will keep reading UNKNOWN rather than pretend to a value.
+    #
+    # ``Signal`` carries both (``entry_regime`` = 5m, ``entry_regime_15m`` =
+    # the HTF label the exit-runner gate reads).  Both travel, because a setup
+    # whose HTF context disagrees with its LTF one is a different trade, and
+    # collapsing to a single label would make that undetectable.
+    entry_regime: str = ""
+    entry_regime_15m: str = ""
 
 
 @dataclass
@@ -140,6 +155,8 @@ class PerformanceTracker:
         signal_quality_pnl_pct: Optional[float] = None,
         signal_quality_hit_tp: Optional[int] = None,
         session_name: str = "",
+        entry_regime: str = "",
+        entry_regime_15m: str = "",
     ) -> None:
         """Record the outcome of a completed signal."""
         # Default signal quality fields to the actual PnL values when not provided
@@ -185,6 +202,8 @@ class PerformanceTracker:
             signal_quality_pnl_pct=normalize_pnl_pct(sq_pnl),
             signal_quality_hit_tp=sq_hit_tp,
             session_name=session_name,
+            entry_regime=str(entry_regime or ""),
+            entry_regime_15m=str(entry_regime_15m or ""),
         )
         self._records.append(record)
         self._save()

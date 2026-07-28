@@ -784,6 +784,11 @@ class CryptoSignalEngine:
                     max_adverse_excursion_pct=float(
                         getattr(sig, "max_adverse_excursion_pct", 0.0) or 0.0
                     ),
+                    # Stamped where it becomes true: the regime at entry is
+                    # knowable only from the Signal, and no later pass can
+                    # recover it (2026-07-28).
+                    entry_regime=str(getattr(sig, "entry_regime", "") or ""),
+                    entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
                 )
         except Exception as exc:
             log.warning(f"perf_tracker record_outcome failed (expiry): {exc}")
