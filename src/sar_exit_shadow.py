@@ -102,7 +102,17 @@ GATE_SAREXIT = "sar_exit_shadow:trail"
 # a new path rather than migrating: there is no field that could rescue a row
 # whose candles were wrong.  The v1 file is left on disk for forensics and is
 # never read again.
-_DEFAULT_PATH: str = os.getenv("SAR_EXIT_SHADOW_PATH", "data/sar_exit_candidates_v2.json")
+#
+# v3 (2026-07-28, owner-approved): same reasoning, different bug.  Every v2 row
+# took its trail fill from the *published* SAR level, which on a reversal bar is
+# the prior trend's extreme — so the exit landed on the right bar at the bar's
+# open instead of at the level price breached.  Measured over 820 real 15m flips
+# that overstated each trail exit by a mean **+0.222%**, in the trade's favour
+# 95% of the time, which is more than the entire edge the arm was reporting.
+# ``r_multiple`` / ``pnl_pct`` / ``delta_r`` on a v2 row are all downstream of
+# that fill, so no field can rescue one and a mixed population cannot be pooled.
+# Starts over on a new path; v2 is left on disk for forensics and never read.
+_DEFAULT_PATH: str = os.getenv("SAR_EXIT_SHADOW_PATH", "data/sar_exit_candidates_v3.json")
 _MAX_RECORDS: int = int(os.getenv("SAR_EXIT_SHADOW_MAX_RECORDS", "4000"))
 
 # Exit reasons recorded on the trail arm (diagnostic only).
@@ -123,27 +133,52 @@ from src.suppression_audit import (  # noqa: E402
 # ---------------------------------------------------------------------------
 
 
-def parabolic_sar(
+def parabolic_sar_levels(
     highs: Sequence[float], lows: Sequence[float], step: float, max_step: float
-) -> List[Optional[float]]:
-    """Parabolic SAR (Wilder). Returns the stop-and-reverse level per bar.
+) -> Tuple[List[Optional[float]], List[Optional[float]]]:
+    """Parabolic SAR (Wilder), returning **two** series that are not the same thing.
 
-    Verbatim port of the bake-off script's implementation — see the module
-    docstring for why this is a copy and not a re-derivation.
+    ``published[i]`` — the indicator value at bar ``i``, i.e. what a chart draws
+    and what "which side of price is the SAR on" reads. On a reversal bar this
+    is the *post-flip* level: the prior trend's extreme point, which sits on the
+    far side of price.
+
+    ``in_force[i]`` — the stop that was actually **live during** bar ``i``: the
+    projected-and-clamped level, computed from bars ``< i`` only and therefore
+    knowable before the bar trades. This is the price a position is stopped at.
+
+    They are identical on every bar except a reversal, and that exception is the
+    whole reason this function exists (2026-07-28). Both simulators previously
+    read ``published[i]`` as the stop in force. On a flip bar that is the trend's
+    extreme, sitting on the wrong side of price, so ``lows[i] <= stop`` was
+    trivially true and the gap-through branch filled at **the bar's open**
+    instead of at the level price actually breached. The exit landed on the right
+    bar at the wrong price — and because a flip bar normally opens on the
+    profitable side of the stop and wicks through it, the error was
+    one-directional: measured over 820 real 15m flips across 10 symbols, mean
+    **+0.222%** per trail exit, flattering the trade in **95%** of cases (only 1%
+    were genuine gap-throughs where filling at the open is correct). That is
+    larger than the entire edge the arm was reporting — Session 88's +0.197%
+    net/trade corrects to roughly +0.02%.
+
+    *Counterfactuals are optimistic; do not add a third way to flatter them.*
     """
     n = len(highs)
-    out: List[Optional[float]] = [None] * n
+    published: List[Optional[float]] = [None] * n
+    in_force: List[Optional[float]] = [None] * n
     if n < 2:
-        return out
+        return published, in_force
     up = highs[1] >= highs[0]
     af = step
     ep = highs[1] if up else lows[1]
     sar = lows[0] if up else highs[0]
-    out[1] = sar
+    published[1] = sar
     for i in range(2, n):
         sar = sar + af * (ep - sar)
         if up:
             sar = min(sar, lows[i - 1], lows[i - 2])
+            # Clamped, still pre-flip: the level this bar can breach.
+            in_force[i] = sar
             if lows[i] < sar:
                 up = False
                 sar = ep
@@ -155,6 +190,7 @@ def parabolic_sar(
                     af = min(af + step, max_step)
         else:
             sar = max(sar, highs[i - 1], highs[i - 2])
+            in_force[i] = sar
             if highs[i] > sar:
                 up = True
                 sar = ep
@@ -164,8 +200,23 @@ def parabolic_sar(
                 if lows[i] < ep:
                     ep = lows[i]
                     af = min(af + step, max_step)
-        out[i] = sar
-    return out
+        published[i] = sar
+    return published, in_force
+
+
+def parabolic_sar(
+    highs: Sequence[float], lows: Sequence[float], step: float, max_step: float
+) -> List[Optional[float]]:
+    """Parabolic SAR (Wilder). Returns the stop-and-reverse level per bar.
+
+    Verbatim port of the bake-off script's implementation — see the module
+    docstring for why this is a copy and not a re-derivation. This is the
+    **published** series: the indicator, unchanged, pinned across three repos by
+    ``tests/test_sar_chart_contract.py``. A simulator that needs the stop a bar
+    could actually be filled at wants ``parabolic_sar_levels``' second return
+    value instead — they differ on reversal bars.
+    """
+    return parabolic_sar_levels(highs, lows, step, max_step)[0]
 
 
 # The SAR needs at least two bars before it produces a level at all
@@ -357,7 +408,13 @@ def simulate_sar_exit(
         n = min(len(highs), len(lows), len(closes))
         if entry <= 0 or n < 3 or entry_idx < 0 or entry_idx >= n:
             return None
-        series = parabolic_sar(highs, lows, step, max_step)
+        # Two series, deliberately.  ``series`` is the published indicator and
+        # answers "which side of price is the SAR on" — alignment, handover.
+        # ``stops`` is the level live *during* each bar and is the only thing a
+        # fill may be taken at.  Reading the published value as a stop is what
+        # filled every trail exit at the bar's open and flattered this arm by
+        # ~0.222%/trade (see ``parabolic_sar_levels``).
+        series, stops = parabolic_sar_levels(highs, lows, step, max_step)
         if series[entry_idx] is None:
             return None
 
@@ -394,7 +451,10 @@ def simulate_sar_exit(
             return bar_open if bar_open > level else level
 
         for i in range(entry_idx, end):
-            stop_level = series[i]
+            # The stop that was live during this bar — NOT the published level,
+            # which on a reversal bar is the prior trend's extreme sitting on the
+            # far side of price.
+            stop_level = stops[i]
             # No same-bar exit: the entry bar's levels are what the trade starts
             # behind, not levels it can already have breached.
             if i > entry_idx:
