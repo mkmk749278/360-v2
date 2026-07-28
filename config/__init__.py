@@ -619,6 +619,23 @@ SAR_EXIT_SHADOW_BAR_MINUTES: float = _safe_float("SAR_EXIT_SHADOW_BAR_MINUTES", 
 SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC: float = _safe_float(
     "SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC", "600"
 )
+# Resolver candle refresh (2026-07-28).  A promoted mover has no WS subscription;
+# ``scanner._refresh_stale_mover_candles`` is its only 15m writer and it runs only
+# for *actively scanned* movers.  When a mover rotates out, its 15m array freezes,
+# the walker's window ends before the exit, and every ledger record on that symbol
+# sits RUNNING for 48h and then goes INSUFFICIENT.  So the resolver keeps its own
+# data alive for the symbols it still owes a verdict on.
+# Cost: public Binance klines only — no Firestore, no hot path.  At the ceiling
+# (8 symbols per 5-minute audit cycle, 500 bars = weight 5) that is ~480 request
+# weight/hour against a 2,400/min budget.  0 to disable the refresh entirely.
+SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int(
+    "SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE", "8"
+)
+# Per-symbol throttle, and the staleness bar a symbol must clear to be a
+# candidate.  900s = one 15m bar: below that there is no new bar to fetch.
+SAR_EXIT_SHADOW_CANDLE_REFRESH_SEC: float = _safe_float(
+    "SAR_EXIT_SHADOW_CANDLE_REFRESH_SEC", "900"
+)
 
 # ---------------------------------------------------------------------------
 # Tuned-variant shadow arms (2026-07-16 — owner: "tune, don't disable")
