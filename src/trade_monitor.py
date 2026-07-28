@@ -504,6 +504,12 @@ class TradeMonitor:
                 stop_loss=float(sig.stop_loss),
                 signal_quality_pnl_pct=signal_quality_pnl,
                 signal_quality_hit_tp=signal_quality_hit_tp,
+                # Stamped where it becomes true: the regime at entry is knowable
+                # only from the Signal, and no later pass can recover it. This is
+                # the main terminal path — the expiry path in main.py stamps the
+                # same two fields (2026-07-28).
+                entry_regime=str(getattr(sig, "entry_regime", "") or ""),
+                entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
             )
         # Circuit breaker ALWAYS uses actual PnL (real exit price)
         if self._circuit_breaker is not None:
