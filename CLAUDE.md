@@ -224,6 +224,8 @@ Telegram are both acceptable paging paths.
 | Play Billing verify (B16, entitlement truth) | `src/api/billing_play.py` |
 | Referral rewards (grants · commission · composition) | `src/api/referral_rewards.py` |
 | FCM push (topics `alerts`/`signals`) | `src/push_notifications.py` |
+| Closed-signal record (feeds ops `/track-record`, `/performance`) | `src/performance_tracker.py` |
+| Signal-history persistence (app feed) | `src/signal_history_store.py` |
 | Truth report | `src/runtime_truth_report.py` |
 | Invalidation audit | `src/invalidation_audit.py` |
 | Fail-open exception telemetry | `src/fail_open.py` |
@@ -435,6 +437,35 @@ python -m src.main
   itself. **Do not signal "idle" or "disabled" by raising** inside a
   `PredicateProbe`: it converts to a `fail_open.record`, and filling that counter
   with non-failures is how a real one stops standing out — `return True, "…"`.
+- **A field one repo reads and no repo writes fails silently and looks full.**
+  `app/routes/performance.py` read `entry_regime` off closed-signal records from the
+  day it was written; `SignalRecord` never carried it, so the per-regime table
+  bucketed **every** signal into UNKNOWN for months — not a crash, not an empty
+  table, a full-looking table describing nothing (owner-caught 2026-07-28, #817).
+  A cross-repo field name is a **contract**: pin it in a test on the producing
+  side, so renaming it fails loudly instead of quietly emptying a page. Corollary:
+  **some facts have exactly one moment at which they are knowable.** The regime at
+  entry is one; there is no honest backfill, so pre-fix rows stay UNPLACED rather
+  than being handed a guess.
+- **A throttle on rate is not a throttle on evidence.** The SAR stamp cooldown
+  bounded how *often* a candidate could stamp and said nothing about how many rows
+  one move could contribute — so a mover setup persisting for hours produced one row
+  per cooldown period, and SLXUSDT SHORT bought **10 rows in 2h10m inside a 0.37%
+  entry spread**, 36% of a whole resolved population. Counted per row that
+  population read 32% win / −0.364R; per move, 55% / +0.003R. **The sign of the
+  verdict was an artifact of re-detection** (2026-07-28, #816). Ask what the *unit
+  of evidence* is, then throttle on that. Related: **a key that splits a budget
+  multiplies it** — the cooldown key carried provenance, so a candidate oscillating
+  across a gate boundary held two budgets; 21 of 21 sub-cooldown repeats were
+  provenance flips, not cooldown misses.
+- **A watchdog keyed on the live universe cannot see what left it.**
+  `candle_coverage` walks `pair_mgr.pairs` and scored 100% while every ledger record
+  on a rotated-out mover was permanently unresolvable, because a rotated-out symbol
+  is by definition not in that map (2026-07-28, #815). Key a probe on **the
+  population that would be harmed** — here, the records still owed a verdict — not
+  on the population that happens to be convenient. And a fail-open `continue` with
+  no counter is how the harm stays invisible: `if early: continue` was silent by
+  construction for two full days per record.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.
