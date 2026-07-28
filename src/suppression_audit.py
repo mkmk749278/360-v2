@@ -175,6 +175,14 @@ class SuppressedCandidateRecord:
     # before the enqueue-vs-dispatch fix, when ``emitted`` was stamped at the
     # enqueue site and therefore cannot be trusted.  See PROVENANCE_SCHEMA.
     prov_schema: int = 0
+    # Which generation of the *stamp* rule wrote this record.  0 = written when
+    # the only throttle was a per-(symbol, setup, side, provenance) cooldown, so
+    # one persisting setup on one move could contribute many rows — SLXUSDT
+    # produced 10 inside 2h10m at a 0.37% entry spread, 36% of a whole resolved
+    # population (owner-caught 2026-07-28).  Rows either side of a bump are
+    # sampled differently and must not be pooled silently; see
+    # ``sar_exit_shadow.STAMP_SCHEMA``.
+    stamp_schema: int = 0
     # Filled by classify_pending once the window elapses.
     classified_at: Optional[float] = None
     classification: Optional[str] = None
@@ -964,6 +972,7 @@ def stamp_candidate(
     exit_model: str = EXIT_STATIC,
     provenance: str = "",
     sar_aligned_at_entry: Optional[bool] = None,
+    stamp_schema: int = 0,
     store: Optional[SuppressedCandidateStore] = None,
 ) -> Optional[SuppressedCandidateRecord]:
     """Stamp a suppressed candidate (fail-open).  Scopes to tradeable geometry only."""
@@ -1001,6 +1010,9 @@ def stamp_candidate(
             # Stamped by the current contract, so its provenance is trustworthy
             # on reload without consulting a wall clock.
             prov_schema=PROVENANCE_SCHEMA,
+            # Which stamp-rule generation produced this row.  Callers that have
+            # no dedup rule of their own leave it 0 and are unaffected.
+            stamp_schema=int(stamp_schema or 0),
             suppress_timestamp=time.time(),
         )
         (store or get_store()).stamp(rec)

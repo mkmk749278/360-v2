@@ -38,14 +38,17 @@ BAR_MS = 15 * 60 * 1000.0
 
 @pytest.fixture(autouse=True)
 def _clear_pair_cooldown():
-    """The stamp cooldown is a module-global keyed by (symbol, setup, side).
+    """The stamp throttles are module-globals.
 
     Without this, the second test to stamp a given symbol is silently throttled
     and its ``stamp_sar_pair`` returns False — a green suite measuring nothing.
+    Goes through the module's own hook rather than naming the maps: the
+    same-move map added on 2026-07-28 leaks identically, and a hand-maintained
+    list of globals to clear is exactly what drifts.
     """
-    sar._last_pair_stamp.clear()
+    sar.reset_pair_throttles()
     yield
-    sar._last_pair_stamp.clear()
+    sar.reset_pair_throttles()
 
 
 # ---------------------------------------------------------------------------
