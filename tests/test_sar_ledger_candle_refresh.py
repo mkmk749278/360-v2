@@ -398,3 +398,134 @@ class TestUnresolvedSymbols:
         self._stamp(store, "AAAUSDT")
         self._stamp(store, "BBBUSDT")
         assert len(sar.unresolved_symbols(window_sec=48 * 3600.0, limit=1)) == 1
+
+
+# ---------------------------------------------------------------------------
+# The 2026-07-29 defect: a budget smaller than the ledger starves it silently
+# ---------------------------------------------------------------------------
+# The refresh loop took the first ``MAX_PER_CYCLE`` due symbols off an
+# oldest-first list and ``break``ed. With a per-symbol throttle of 900s on a
+# 300s loop, a cycle cap of N sustains only 3N distinct symbols — at the old
+# default of 8 that was 24, while the ledger carried 85. The 61 starved symbols
+# were never fetched, so they never counted as a fetch *miss* either: the
+# candle-health probe read a clean 100% while most of the ledger got no candles.
+#
+# What the owner saw on the 2026-07-29 export: 63 of 85 symbols resolved 0% of
+# their rows and 15 resolved 100% (resolution is a per-symbol property, not a
+# per-trade one — the signature of a data fault, not of market behaviour);
+# resolution decayed 25 → 20 → 3 → 1 per hour as the ledger grew; and 395 of 401
+# RUNNING rows described trades that had already closed. DEXEUSDT sat RUNNING
+# for 19.2h having hit its stop 1 minute after entry; EULUSDT for 12.2h, 4
+# minutes after entry.
+#
+# The contract now: the cap still bounds the work, but what it turns away is
+# counted and published, so a budget too small can no longer look like one that
+# fits.
+
+
+class TestRefreshBatchPlanning:
+    """``plan_refresh_batch`` — the selection the loop used to inline."""
+
+    def _ages(self, stale=()):
+        """Age lookup: listed symbols are stale (due), the rest are fresh."""
+        return lambda s: (None if s in stale else 0.0)
+
+    def test_the_cap_still_bounds_the_work(self):
+        syms = [f"S{i}USDT" for i in range(10)]
+        due, starved = sar.plan_refresh_batch(
+            syms, last_refresh_at={}, age_seconds=self._ages(set(syms)),
+            now_mono=10_000.0, refresh_sec=900.0, max_per_cycle=4,
+        )
+        assert len(due) == 4
+
+    def test_symbols_turned_away_by_the_cap_are_counted_not_dropped(self):
+        """The regression. The old loop ``break``ed here and reported nothing,
+        so a starved ledger and a healthy one produced identical telemetry."""
+        syms = [f"S{i}USDT" for i in range(10)]
+        due, starved = sar.plan_refresh_batch(
+            syms, last_refresh_at={}, age_seconds=self._ages(set(syms)),
+            now_mono=10_000.0, refresh_sec=900.0, max_per_cycle=4,
+        )
+        assert starved == 6
+        assert len(due) + starved == 10
+
+    def test_oldest_first_order_is_preserved_under_the_cap(self):
+        """A bounded budget must go to the records closest to ageing out."""
+        syms = ["OLDESTUSDT", "MIDUSDT", "NEWESTUSDT"]
+        due, _ = sar.plan_refresh_batch(
+            syms, last_refresh_at={}, age_seconds=self._ages(set(syms)),
+            now_mono=10_000.0, refresh_sec=900.0, max_per_cycle=2,
+        )
+        assert due == ["OLDESTUSDT", "MIDUSDT"]
+
+    def test_a_throttled_symbol_is_neither_served_nor_starved(self):
+        """It is not waiting on budget — it was served recently. Counting it as
+        starvation would page over a healthy ledger."""
+        due, starved = sar.plan_refresh_batch(
+            ["AAAUSDT"], last_refresh_at={"AAAUSDT": 9_900.0},
+            age_seconds=self._ages({"AAAUSDT"}),
+            now_mono=10_000.0, refresh_sec=900.0, max_per_cycle=1,
+        )
+        assert due == [] and starved == 0
+
+    def test_a_symbol_with_fresh_candles_is_not_due(self):
+        due, starved = sar.plan_refresh_batch(
+            ["AAAUSDT"], last_refresh_at={}, age_seconds=lambda s: 60.0,
+            now_mono=10_000.0, refresh_sec=900.0, max_per_cycle=1,
+        )
+        assert due == [] and starved == 0
+
+    def test_never_stamped_is_not_evidence_of_freshness(self):
+        """``age is None`` means we have never written a bar for this symbol —
+        exactly the rotated-out mover the refresh exists for."""
+        due, _ = sar.plan_refresh_batch(
+            ["AAAUSDT"], last_refresh_at={}, age_seconds=lambda s: None,
+            now_mono=10_000.0, refresh_sec=900.0, max_per_cycle=1,
+        )
+        assert due == ["AAAUSDT"]
+
+    def test_the_shipped_default_covers_the_observed_ledger(self):
+        """85 symbols were in the 2026-07-29 export. With a 900s throttle on a
+        300s loop a cap of N sustains 3N symbols, so the default must clear 85
+        with headroom or the same starvation returns."""
+        from config import (
+            SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE as cap,
+            SAR_EXIT_SHADOW_CANDLE_REFRESH_SEC as refresh_sec,
+        )
+        sustained = int(cap) * (float(refresh_sec) / 300.0)
+        assert sustained >= 85, (
+            f"cap {cap} sustains only {sustained:.0f} symbols; the ledger "
+            f"carried 85 on 2026-07-29"
+        )
+
+
+class TestRefreshBudgetHealth:
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        sar.reset_refresh_budget_health()
+        yield
+        sar.reset_refresh_budget_health()
+
+    def test_counters_are_published_per_cycle_not_cumulatively(self):
+        """A cumulative starvation count never recovers once the ledger drains,
+        so it would page forever over a fault that healed."""
+        sar.record_refresh_budget(due=10, served=4, starved=6, pending=20)
+        sar.roll_refresh_budget_cycle()
+        assert sar.refresh_budget_health()["starved"] == 6
+
+        sar.record_refresh_budget(due=4, served=4, starved=0, pending=4)
+        sar.roll_refresh_budget_cycle()
+        assert sar.refresh_budget_health()["starved"] == 0
+
+    def test_health_reads_the_last_completed_cycle_never_one_still_filling(self):
+        sar.record_refresh_budget(due=9, served=9, starved=0, pending=9)
+        sar.roll_refresh_budget_cycle()
+        sar.record_refresh_budget(due=3, served=1, starved=2, pending=7)
+        assert sar.refresh_budget_health()["served"] == 9
+
+    def test_pending_counts_every_symbol_owed_a_verdict(self):
+        """Not just this cycle's due list — the population at risk is what a
+        probe has to reason about."""
+        sar.record_refresh_budget(due=4, served=4, starved=0, pending=85)
+        sar.roll_refresh_budget_cycle()
+        assert sar.refresh_budget_health()["pending"] == 85

@@ -641,10 +641,27 @@ SAR_EXIT_SHADOW_SAME_MOVE_MAX_SEC: float = _safe_float(
 # sits RUNNING for 48h and then goes INSUFFICIENT.  So the resolver keeps its own
 # data alive for the symbols it still owes a verdict on.
 # Cost: public Binance klines only — no Firestore, no hot path.  At the ceiling
-# (8 symbols per 5-minute audit cycle, 500 bars = weight 5) that is ~480 request
-# weight/hour against a 2,400/min budget.  0 to disable the refresh entirely.
+# (40 symbols per 5-minute audit cycle, 500 bars = weight 5) that is ~2,400
+# request weight/hour — 40 weight/min against a 2,400/min budget, 1.7%.  0 to
+# disable the refresh entirely.
+#
+# Why 40 and not 8 (2026-07-29).  The budget is not a rate limit, it is a
+# *population* limit: with a per-symbol throttle of ``_REFRESH_SEC`` (900s) on a
+# 300s loop, a cycle ceiling of N sustains N × (900/300) = 3N distinct symbols.
+# At 8 that was 24 symbols, and the ledger was carrying 85 — so 61 of them could
+# never reach the front of an oldest-first queue and resolved *nothing*.  The
+# owner's export showed it exactly: 63 of 85 symbols resolved 0% of their rows
+# while 15 resolved 100%, resolution decayed 25 → 20 → 3 → 1 per hour as the
+# ledger grew, and 395 of 401 RUNNING rows were records whose trade had already
+# closed — DEXEUSDT sat RUNNING for 19h having hit its stop 1 minute after entry.
+# 40 sustains 120 symbols, comfortable headroom over the observed 85.
+#
+# This is a ceiling, not a target: only symbols whose 15m array is actually
+# stale are fetched, so a healthy ledger spends far less.  The starvation
+# shortfall is now counted and paged on rather than being silently truncated —
+# see ``sar_exit_shadow.refresh_budget_health``.
 SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE: int = _safe_int(
-    "SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE", "8"
+    "SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE", "40"
 )
 # Per-symbol throttle, and the staleness bar a symbol must clear to be a
 # candidate.  900s = one 15m bar: below that there is no new bar to fetch.

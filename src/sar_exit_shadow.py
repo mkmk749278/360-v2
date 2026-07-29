@@ -66,7 +66,7 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Any, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 from src.suppression_audit import (
     EXIT_STATIC,
@@ -931,6 +931,116 @@ def reset_candle_fetch_health() -> None:
     with _candle_lock:
         _candle_cur = {"ok": 0, "miss": 0, "reasons": {}, "symbols": {}}
         _candle_last = {"ok": 0, "miss": 0, "reasons": {}, "symbols": {}}
+
+
+# ---------------------------------------------------------------------------
+# Refresh-budget accounting (2026-07-29)
+# ---------------------------------------------------------------------------
+# ``record_candle_fetch`` above answers "could we fetch the window we asked
+# for".  It cannot answer "did we ask at all", and that is the failure the
+# owner's 2026-07-29 export actually caught: the refresh loop takes the first
+# ``MAX_PER_CYCLE`` due symbols off an *oldest-stamp-first* list and ``break``s.
+# The symbols past the cap were never fetched, so they were never counted as a
+# miss either — the fetch health read a clean 100% while 61 of 85 ledger
+# symbols were being starved of candles every single cycle.
+#
+# A truncation that discards work must say how much it discarded, or a budget
+# that is too small looks exactly like a budget that is exactly right.  The
+# shortfall is knowable at the truncation point and nowhere later, so it is
+# counted there.
+#
+# Per-cycle like the fetch counters, and for the same reason: a cumulative
+# starvation count never recovers after the ledger drains, so it would page
+# forever over a fault that healed.
+
+_budget_cur: Dict[str, int] = {"due": 0, "served": 0, "starved": 0, "pending": 0}
+_budget_last: Dict[str, int] = {"due": 0, "served": 0, "starved": 0, "pending": 0}
+_budget_lock = threading.Lock()
+
+
+def record_refresh_budget(
+    *, due: int, served: int, starved: int, pending: int
+) -> None:
+    """Record one refresh cycle's budget outcome.  Never raises.
+
+    ``due`` — symbols eligible for a refresh this cycle (stale enough and past
+    their per-symbol throttle).  ``served`` — how many the budget allowed.
+    ``starved`` — eligible symbols the cap turned away.  ``pending`` — every
+    symbol still owed a verdict, whether due this cycle or not.
+    """
+    try:
+        with _budget_lock:
+            _budget_cur["due"] = int(due)
+            _budget_cur["served"] = int(served)
+            _budget_cur["starved"] = int(starved)
+            _budget_cur["pending"] = int(pending)
+    except Exception as exc:
+        from src import fail_open
+        fail_open.record("sar_exit_shadow.record_refresh_budget", exc)
+
+
+def roll_refresh_budget_cycle() -> None:
+    """Publish this cycle's budget counters and start a fresh bucket."""
+    global _budget_cur, _budget_last
+    with _budget_lock:
+        _budget_last = _budget_cur
+        _budget_cur = {"due": 0, "served": 0, "starved": 0, "pending": 0}
+
+
+def refresh_budget_health() -> Dict[str, int]:
+    """Last completed cycle's refresh-budget outcome (pure read)."""
+    with _budget_lock:
+        return dict(_budget_last)
+
+
+def reset_refresh_budget_health() -> None:
+    """Test hook — the counters are process-lifetime and module-global."""
+    global _budget_cur, _budget_last
+    with _budget_lock:
+        _budget_cur = {"due": 0, "served": 0, "starved": 0, "pending": 0}
+        _budget_last = {"due": 0, "served": 0, "starved": 0, "pending": 0}
+
+
+def plan_refresh_batch(
+    symbols: Sequence[str],
+    *,
+    last_refresh_at: Dict[str, float],
+    age_seconds: Callable[[str], Optional[float]],
+    now_mono: float,
+    refresh_sec: float,
+    max_per_cycle: int,
+) -> Tuple[List[str], int]:
+    """Choose this cycle's refresh batch → ``(due, starved)``.
+
+    ``symbols`` arrives oldest-unresolved-first and that order is preserved:
+    a bounded budget is spent on the records closest to ageing out of their
+    window.  A symbol is skipped when it was refreshed within ``refresh_sec``
+    (per-symbol throttle) or when its 15m array is already fresher than that
+    (nothing new to fetch).  ``age_seconds`` returning ``None`` means "never
+    stamped", which is not evidence of freshness — those are refreshed.
+
+    ``starved`` counts symbols that were eligible but turned away by
+    ``max_per_cycle``.  It exists because the loop this replaces ``break``ed at
+    the cap, so a budget too small for the ledger was indistinguishable from
+    one that fit — the starved symbols were never fetched and so were never
+    counted as a fetch miss either.  Every caller must publish this number.
+
+    Pure apart from ``age_seconds``, which reads the in-memory candle store.
+    """
+    due: List[str] = []
+    starved = 0
+    cap = int(max_per_cycle)
+    for sym in symbols:
+        if now_mono - float(last_refresh_at.get(sym, 0.0)) < float(refresh_sec):
+            continue
+        age = age_seconds(sym)
+        if age is not None and float(age) <= float(refresh_sec):
+            continue
+        if len(due) >= cap:
+            starved += 1
+            continue
+        due.append(sym)
+    return due, starved
 
 
 def unresolved_symbols(

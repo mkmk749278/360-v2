@@ -1856,18 +1856,37 @@ class CryptoSignalEngine:
                 (tf.limit for tf in SEED_TIMEFRAMES if tf.interval == "15m"), 500
             )
             now_mono = time.monotonic()
-            due: List[str] = []
-            for sym in symbols:
-                if now_mono - _sar_candle_refresh_at.get(sym, 0.0) < float(_refresh_sec):
-                    continue
-                age = self.data_store.last_kline_age_seconds(sym, "15m")
-                # ``age is None`` = never stamped, which is not evidence of
-                # freshness — refresh it, same as the mover refresher does.
-                if age is not None and float(age) <= float(_refresh_sec):
-                    continue
-                due.append(sym)
-                if len(due) >= int(_max_per_cycle):
-                    break
+            # Selection lives in the ledger module as a pure function so it can
+            # be driven directly by a test rather than through this loop's I/O.
+            # It counts what the cap turns away instead of ``break``ing at it:
+            # the old loop stopped, so a budget too small for the ledger was
+            # indistinguishable from one that fit — the starved symbols were
+            # never fetched, therefore never counted as a fetch miss either, and
+            # the candle-health probe read a clean 100% while most of the ledger
+            # got no candles at all (owner-caught 2026-07-29).
+            due, starved = _sar_shadow.plan_refresh_batch(
+                symbols,
+                last_refresh_at=_sar_candle_refresh_at,
+                age_seconds=lambda s: self.data_store.last_kline_age_seconds(s, "15m"),
+                now_mono=now_mono,
+                refresh_sec=float(_refresh_sec),
+                max_per_cycle=int(_max_per_cycle),
+            )
+            _sar_shadow.record_refresh_budget(
+                due=len(due) + starved,
+                served=len(due),
+                starved=starved,
+                pending=len(symbols),
+            )
+            if starved:
+                log.warning(
+                    "SAR ledger candle refresh STARVED: {} of {} due symbols "
+                    "turned away by the per-cycle cap ({}); {} symbols still "
+                    "await a verdict. Records on the starved symbols cannot "
+                    "resolve until they are served — raise "
+                    "SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE.",
+                    starved, len(due) + starved, int(_max_per_cycle), len(symbols),
+                )
             if not due:
                 return
             for sym in due:
@@ -2110,6 +2129,7 @@ class CryptoSignalEngine:
                     # Rolled after the batch, and only after it: the probe must
                     # read a completed cycle, never one still filling.
                     _sar.roll_candle_fetch_cycle()
+                    _sar.roll_refresh_budget_cycle()
                     _candle_health = _sar.candle_fetch_health()
                     if int(_candle_health.get("miss") or 0):
                         log.warning(
