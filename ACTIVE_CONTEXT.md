@@ -4,6 +4,88 @@
 
 ---
 
+## 🟢 SESSION 90 2026-07-29 — a marker captioned ENTRY was drawn at the exit (#828, #829, app #142, ops #104)
+
+Session started as conflict cleanup and became two owner-caught display faults, both
+of the same shape: **a value read for one purpose, reused as if it meant another.**
+
+### What shipped
+
+| Repo | Change |
+|---|---|
+| 360-v2 #828 | Liveness probes for the SAR resolver (rebase of #827; its conflicts were a squash-merge artifact, not a code disagreement) |
+| **360-v2 #829** | **`dispatch_timestamp` / `terminal_outcome_timestamp` on `SignalDetail`**, `timestamp` normalised tz-aware |
+| **lumin-app #142** | **Chart markers anchored on those stamps**, exit marker added |
+| **ops #104** | **SAR ledger path v2→v3**, plus a drift guard for the next bump |
+
+### 1. The chart drew the exit and called it the entry
+
+Owner compared the ops signals CSV against the app's charts. Seven signals, seven
+positive offsets — 2, 6, 18, 33, 41, 62, 65 minutes — and the only near-zero one was
+the only signal still open. **The offset was the hold time.** On COTIUSDT and ZILUSDT
+the arrow captioned ENTRY sat exactly on the SL line: the stop being hit, drawn as
+the entry.
+
+`_signalFromJson` read `minutes_ago` and dropped `timestamp`, so `ChartOverlay` had
+nothing to anchor to and computed `now - minutesAgo`. `minutes_ago` is recency of the
+signal's **last** event — for a closed signal the terminal one, deliberately, because
+it feeds an "SL_HIT 3m ago" caption.
+
+`minutes_ago` was **not** redefined: it is correct for the label it serves. The engine
+now publishes the instants instead, so no consumer derives one.
+
+Blast radius was wider than the arrow. `signal_snap` picked its *timeframe* from
+`minutes_ago` too — a trade opened 6h ago that closed 2 minutes ago scored as 2
+minutes old, got a 15m window ending long after its entry, and lost its marker
+entirely rather than misplacing it.
+
+### 2. Ops was reading a ledger the engine abandoned nine hours earlier
+
+Owner reported the Clear SAR ledger button doing nothing. **The clear path has no
+defect** — traced every hop. #822 bumped the engine ledger v2→v3 at 00:12 IST and ops
+still read v2. The button correctly emptied v3 while the page re-read an orphan that
+nothing writes, prunes or clears.
+
+Everything on `/signals/sar` — 507 rows, the agreed/opposed split, the win rates —
+was the population #822 had just ruled untrustworthy. Expect far fewer rows now; the
+small number is the honest one.
+
+### Rules earned
+
+- **A recency label is not a timestamp.** "3m ago" and "happened at 04:05" answer
+  different questions, and the difference is invisible until something plots it. Any
+  consumer that needs a *point in time* must be given one; deriving it from a caption
+  reintroduces whatever the caption was measuring from. The app now takes `timestamp`
+  / `terminal_outcome_timestamp` and computes nothing.
+- **An orphaned file is worse than a missing one.** A missing path surfaces as an
+  error the page shows; an orphan renders as data — complete, confident, and wrong.
+  #817 said *a field one repo reads and no repo writes fails silently and looks full*;
+  this is the same failure at **file** scale. When a producer versions a path, the
+  consumer needs a check that the two ends still agree, not a second copy of the
+  constant. The fix for a drifting mirror is still not another mirror.
+- **A naive datetime is a bug waiting for a timezone.** `DateTime.parse` binds a
+  zone-less stamp to the *device* zone — 5h30m of silent error on an IST phone, on
+  the field a chart marker is placed by. Normalise at the producer; parse
+  defensively at the consumer.
+- **A test can assert the bug.** The replaced `opened time precedes now` pinned
+  `now - minutesAgo` as *correct*, which is why nothing caught this for months. And
+  a test written with the same constant on both sides follows the code wherever it
+  points: ops' first abandoned-file test passed happily with the path reverted to v2.
+  **The revert check is what catches a test that asserts nothing** — run it on the
+  test, not only on the fix.
+- **A squash-merged base makes an honest branch look conflicted.** #827's three
+  conflicting files were exactly the three files its already-merged parent touched;
+  `git diff` between the pre-squash commit and the squashed one was empty. Replay the
+  branch's own commit onto the new base rather than adjudicating a conflict that is
+  a history artifact.
+
+**Open:** #829's `dispatch_timestamp` is published and nothing reads it yet — the app
+anchors on `timestamp` so the chart agrees with the ops CSV. If "when could a user
+have acted" ever matters more than "when did the engine stamp it", that is the field
+to switch to.
+
+---
+
 ## 🟢 SESSION 89 2026-07-28 — the SAR arm's edge was inside its own fill error (#822, ops #101, app #140)
 
 Owner asked for Parabolic SAR on the app charts, "aligned with our Signals". Shipping
