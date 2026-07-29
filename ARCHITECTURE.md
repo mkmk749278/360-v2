@@ -28,10 +28,11 @@ second mirror"*).
 
 We run a 24/7 crypto-futures scalping signal engine and the products around it.
 
-1. **Ingest** — Binance WebSocket + REST feed a candle/order-flow store for 75 USDT-M
-   futures pairs across 6 timeframes.
-2. **Generate** — a scanner sweeps every 15s, runs 19 evaluators (17 live) per pair,
-   pushes survivors through a gate chain, and scores them 0–100.
+1. **Ingest** — Binance WebSocket + REST feed a candle/order-flow store for the top **75**
+   USDT-M futures pairs across **7 timeframes**, out of a full futures universe of ~600.
+2. **Generate** — a scanner sweeps continuously (back-to-back cycles, 1s pause), runs
+   **19 evaluators (17 live)** per eligible pair, pushes survivors through a gate chain,
+   and scores them 0–100. Exact counts and where they're set: **§9**.
 3. **Deliver** — A+ (80+) and B (65–79) go to the in-app Lumin feed (primary surface),
    with FCM push and a Telegram mirror. Below 65 is dropped.
 4. **Execute** — for subscribers who armed auto-trade, each signal is dispatched
@@ -90,12 +91,12 @@ graph TD
   BIN["Binance USDT-M Futures<br/>WebSocket ~300 streams + REST"]
 
   subgraph INGEST["1 · INGEST"]
-    HDS["HistoricalDataStore<br/>OHLCV × 6 TFs · numpy arrays"]
+    HDS["HistoricalDataStore<br/>OHLCV × 7 TFs · numpy arrays"]
     OFS["OrderFlowStore<br/>OI · CVD · funding · liquidations"]
     PM["PairManager<br/>75-pair universe + movers"]
   end
 
-  subgraph GEN["2 · GENERATE  (every 15s × 75 pairs)"]
+  subgraph GEN["2 · GENERATE  (continuous sweep · 75 core + promotions)"]
     SCAN["Scanner"]
     EVAL["ScalpChannel · 19 evaluators<br/>each owns its own SL/TP geometry"]
     GATE["Gate chain<br/>SMC · MTF · regime · spread · volume · cohort"]
@@ -208,14 +209,36 @@ never re-derive one from the other.
 
 | Piece | Module | Notes |
 |---|---|---|
-| Pair universe | `src/pair_manager.py` | Top USDT-M futures by volume + promoted "movers". **A symbol can rotate out** — anything keyed on the live universe goes blind to what left it (#815) |
-| Candle store | `src/historical_data.py` | 6 timeframes, **numpy arrays** — never boolean-test them (`is None` / `len()`); `update_candle` appends only on `k["x"]`, so the newest bar is the last *closed* one |
+| Pair universe | `src/pair_manager.py` | Top **75** USDT-M futures by 24h volume + dynamic promotions. **A symbol can rotate out** — anything keyed on the live universe goes blind to what left it (#815) |
+| Candle store | `src/historical_data.py` | **7 timeframes**, **numpy arrays** — never boolean-test them (`is None` / `len()`); `update_candle` appends only on `k["x"]`, so the newest bar is the last *closed* one |
 | Order flow | `src/order_flow.py` | OI, CVD, funding, liquidations |
 | WS transport | `src/bootstrap.py`, `src/main.py` | Multi-connection, heartbeat, auto-reconnect, REST fallback |
 
+**The scanned universe is not fixed** — it is a core set plus two promotion paths:
+
+```
+full futures universe  ~600 pairs   ← !ticker@arr sees all of it; only the mover
+                                      detector reads at this width
+        │
+        ├─ core scan set        top 75 by 24h volume   TOP50_FUTURES_COUNT=75
+        │                       (TOP50_FUTURES_ONLY=true → all treated Tier 1,
+        │                        full scan every cycle; spot excluded entirely)
+        ├─ mover promotions     ≤ 30, 6h TTL           MOVER_PROMOTION_MAX_PAIRS=30
+        │                       ≥15% 24h move + ≥$5M vol, or an ignition burst
+        └─ volume-surge promos  ≤ 5                    SURGE_PROMOTION_MAX_PAIRS=5
+
+  → up to ~110 pairs in a cycle, minus whatever `_prefilter_pairs` drops.
+    WS degraded → hard cap at WS_DEGRADED_MAX_PAIRS=75.
+```
+
+Stablecoin pairs and TradFi/commodity perps are blacklisted out of the universe
+(the latter after a paid user's auto-trade was rejected `-4411`, Session 65).
+
 ### 4.2 Generate
 
-`Scanner` (`src/scanner/__init__.py`) — 15s cadence × 75 pairs:
+`Scanner` (`src/scanner/__init__.py`) — cycles run **back-to-back with a 1s sleep**, so
+the effective cadence is the sweep's own duration (~3s since the Session-18 latency fix;
+watch `telemetry.scan_latency`). It is **not** a fixed 15s timer, whatever older docs say.
 
 ```
 per pair → 19 evaluators (src/channels/scalp.py, _evaluate_*)
@@ -226,6 +249,18 @@ per pair → 19 evaluators (src/channels/scalp.py, _evaluate_*)
          → SignalScoringEngine  (src/signal_quality.py, src/confidence.py) → 0-100
          → _enqueue_signal (universal SL floor 0.80%)
 ```
+
+**Not every path runs on every pair.** Two allowlists compose — both must allow an
+evaluator for it to run, and the mover restriction always supersedes:
+
+| Restriction | When | Paths allowed |
+|---|---|---|
+| *(none)* | Structurally aged pair in the core set | all **17 live** |
+| `_YOUNG_PAIR_EVALUATORS` | 1d level count < `MIN_1D_LEVELS_FOR_STRUCTURE_PATHS` — a fresh listing has no aged structure to read | **8**: VSB · BDS · ORB · WHALE · LIQ_REVERSAL · FUNDING · MTP · MAVWAP |
+| `_mover_evaluators` | Pair is mover-promoted — an ignition context | **4**: VSB · BDS · MTP · MAVWAP |
+
+`MEAN_REVERT` is deliberately absent from both: a z-score needs a stable 20-bar mean,
+and fading an extension is the anti-thesis of a mover promotion.
 
 - **Every evaluator owns its own SL/TP geometry (B7).** No shared universal formula.
 - **`SetupClass`** (`src/signal_quality.py`) is stringly coupled to `_MAX_SL_PCT_BY_SETUP`
@@ -483,7 +518,70 @@ substantive legal-content changes.
 
 ---
 
-## §9 — Keeping this file true
+## §9 — Inventory: every number, and where it is set
+
+Counted from the code on 2026-07-29, not from prose. Each row names the constant or
+symbol that decides it — re-count there rather than trusting this table blind.
+
+### Pairs
+
+| Quantity | Count | Set by |
+|---|---|---|
+| Full Binance USDT-M futures universe | ~600 | Exchange. Only the `!ticker@arr` mover detector reads at this width |
+| **Core scan set — scanned every cycle** | **75** | `TOP50_FUTURES_COUNT` (name is legacy; the value is 75), gated by `TOP50_FUTURES_ONLY=true` |
+| Mover promotions (concurrent, 6h TTL) | ≤ 30 | `MOVER_PROMOTION_MAX_PAIRS`, `MOVER_PROMOTION_TTL_SEC=21600` |
+| Volume-surge promotions | ≤ 5 | `SURGE_PROMOTION_MAX_PAIRS` |
+| **Effective ceiling per cycle** | **~110** | Sum of the above, less `_prefilter_pairs` |
+| WS-degraded emergency cap | 75 | `WS_DEGRADED_MAX_PAIRS` |
+| REST pair-list fetch depth | 150 | `TOP_PAIRS_COUNT` |
+| Legacy three-tier scheme (Tier1/Tier2) | 75 / 200 | `TIER1_PAIR_COUNT`, `TIER2_PAIR_COUNT` — **inactive** while `TOP50_FUTURES_ONLY=true` |
+| Timeframes seeded per pair | **7** | `SEED_TIMEFRAMES` — 1m, 5m, 15m, 1h, 4h, 1d (500 candles each) + 1w (200) |
+
+### Paths
+
+"Path" means three different things depending on who's asking — all three are below.
+
+| Quantity | Count | Set by |
+|---|---|---|
+| **Evaluators in `ScalpChannel`** | **19** | `_evaluate_*` methods, registered in the `evaluate()` dispatch tuple |
+| **— live** | **17** | |
+| **— disabled** | **2** | `OPENING_RANGE_BREAKOUT` (`SCALP_ORB_ENABLED=false`, pending rebuild) · `CONTINUATION_LIQUIDITY_SWEEP` (2026-05-17, absorbed into LSR's HTF-POI catchment; revert with `CLS_DISABLED_2026_05_17=false`) |
+| Portfolio roles — **core / support / specialist** | **7 / 8 / 4** | `ACTIVE_PATH_PORTFOLIO_ROLES` (19 entries, one per evaluator) |
+| Paths reaching a **young** pair | 8 | `_YOUNG_PAIR_EVALUATORS` |
+| Paths reaching a **mover-promoted** pair | 4 | `_mover_evaluators` |
+| `SetupClass` enum members | **29** | `src/signal_quality.py` — 19 live-evaluator identities + 4 auxiliary-channel identities + 6 legacy/unrouted values |
+| **Channels** | **8** | `ALL_CHANNELS` — `360_SCALP` + 7 auxiliary |
+| — enabled by default | **2** | `360_SCALP` and `360_SCALP_DIVERGENCE` (limited-live). FVG · ORDERBLOCK · CVD · VWAP · SUPERTREND · ICHIMOKU are off; 3 of them keep a radar/discovery role |
+| Shadow strategy units (no path to the queue) | **4** | `shadow_strategies.py` — range-fade · mean-revert · funding-fade · cascade-reversal |
+| Counterfactual measurement arms | **7** | `geometry_ab._VARIANT_SUFFIXES` — `@FIXED @ATR @TUNED @DSV2 @GOV @SARBASE @SAREXIT` |
+
+**So: 17 live signal-producing paths**, measured in the edge matrix alongside 4 shadow
+units and 7 counterfactual arms. The arms are stamped from the *same* candidates as the
+real rows — never roll them up as strategies.
+
+> The README's "9 scalp strategies / top-50 pairs / single Telegram channel" describes
+> the 2.0 engine and is stale on every count. This section is the live inventory.
+
+### Everything else
+
+| Quantity | Count | Where |
+|---|---|---|
+| Repos | 4 | §1 |
+| Containers in production | 8 | engine · api · redis · signing · autoheal · watchdog + ops web · ops agent (ops redis makes 9 with its own) |
+| Confidence tiers | 3 | A+ 80–100 · B 65–79 · FILTERED < 65 |
+| Position FSM states | **8** | `PositionState` — PENDING_ENTRY · PENDING · OPEN · PRE_TP_FIRED · TP1_HIT · TP2_HIT · TRAILING · CLOSED |
+| Execution profiles | 4 | D (TP1-full, **default**) · A · B · C — B17 |
+| Portfolio layers | 7 | A · B · C · C-consumer · D · G (D recommendation-only) |
+| Engine API endpoints | ~70 | `src/api/` — ~43 consumed by the app, rest ops/admin/webhooks |
+| Ops dashboard routes | ~60 | `360ce-ops/app/routes/` |
+| SQLite tables | 13 | §5 |
+| Redis snapshot keys | 7 state + 4 command | §5 |
+| Business rules | 18 | `OWNER_BRIEF.md` Part IV (B5 retired) |
+| Engine Python modules | 224 | `src/**/*.py` |
+
+---
+
+## §10 — Keeping this file true
 
 Update `ARCHITECTURE.md` in the same PR when a change:
 
