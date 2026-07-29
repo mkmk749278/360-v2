@@ -479,6 +479,33 @@ in §3. Android platform scaffolding is **not checked in** — CI regenerates `a
 with `flutter create` and patches it; native config changes are edits to the workflow's
 patch steps.
 
+### The infrastructure outside the code
+
+The parts of this system that no repo contains, and that a session cannot discover by
+reading source. Procedures live in `docs/DR_RUNBOOK.md`; this is the map.
+
+| Layer | Fact |
+|---|---|
+| **Host** | Single Ubuntu VPS, Docker Compose, 24/7. 4 cores — the engine container was capped at 1.5 of them until Session 85. Its IP is **not recorded in any repo** — see the whitelist hazard below |
+| **Domain** | `luminapp.org` — **registered at Namecheap**, nameservers delegated to **Cloudflare**; all DNS records are managed in Cloudflare, not at the registrar. Change records in Cloudflare; touch Namecheap only for renewal and nameserver changes |
+| **DNS records** | `api.luminapp.org` → engine API · `ops.luminapp.org` → ops dashboard · `app.luminapp.org` → the PWA channel. All resolve to the one VPS |
+| **TLS / edge** | Cloudflare terminates TLS (Mumbai edge for the launch region) |
+| **Deploy path** | GitHub Actions SSHes in using `VPS_HOST` / `VPS_USER` / `VPS_SSH_KEY` repo secrets. There is no manual deploy step in the normal flow |
+| **Scheduled workflows** | `deploy.yml` (on `main`) · `vps-backup.yml` (nightly 21:45 UTC) · `vps-liveness.yml` · `vps-monitor.yml` (truth report → `monitor-logs`) · `ci.yml` |
+| **Secrets** | 26 GitHub Actions secrets across the repos — VPS SSH, Binance, Telegram, Firebase/FCM, Android signing keystore, NOWPayments, backup passphrase, GHCR/PAT. **`.env` exists only on the VPS and in the owner's password manager — never in a repo, by design.** The continuity pack (`docs/CONTINUITY_PACK_TEMPLATE.md`) must hold a current copy or DR fails at step 4 |
+| **Backups** | Nightly encrypted snapshot of the data volume: 14 local rotations + a 30-day GitHub artifact. **RPO ≤ 24h, RTO ≤ 2h.** A failed backup files a `severity:high` `auto-detected` issue |
+| **Google Cloud** | Firestore (key blobs, position state, kill switch) · Cloud KMS HSM (master key; engine holds Decrypt only) · Firebase Auth · FCM. Firestore bills under the "App Engine" line |
+| **Store / distribution** | Google Play — `org.luminapp.lumin`, production track. GitHub Releases for the sideload APK. GitHub Pages for `lumin-legal` |
+
+**⚠️ The VPS IP is load-bearing, and changing it is a user-visible outage.** Every paid
+auto-trade user has IP-whitelisted **this exact address** on their own Binance API key
+(B18, connect-time validation). A new IP — new box, provider migration, or a second IP
+added to the same box — silently breaks every one of those keys until each user edits
+their whitelist themselves. It is not an infrastructure decision; it is a migration
+with a user-comms plan. `docs/UNIVERSE_EXPANSION_AND_SECOND_IP_2026_07_27.md` §6 calls
+this the whitelist landmine, and `docs/DR_RUNBOOK.md` Scenario A sequences the DNS
+cutover around it.
+
 ---
 
 ## §7 — Invariants that constrain every design
@@ -499,6 +526,7 @@ Violating one of these is never a trade-off to be weighed; it's a blocked design
 | 10 | A money-path change ships dark, shadow-measured, owner-signed-off — with its ops surface |
 | 11 | Every new measurement pipeline registers a liveness probe |
 | 12 | Refuse, don't clamp — an input that can't support the computation returns None/INSUFFICIENT |
+| 13 | The engine's public IP does not change without a user-comms plan — every paid user's Binance key is whitelisted to it (§6) |
 
 **Owner sign-off required** (never auto-merge): signing service / KMS / connect-time
 validation / blast-radius caps · Position FSM transitions · new evaluator paths or
