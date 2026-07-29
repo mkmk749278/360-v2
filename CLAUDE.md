@@ -25,8 +25,20 @@ Ask before every code change: **"How does this make signals more profitable for 
 ## Read Every Session (in order)
 
 1. Check open GitHub Issues tagged `auto-detected` (monitoring agent findings)
-2. `OWNER_BRIEF.md` — doctrine, business rules, architecture
-3. `ACTIVE_CONTEXT.md` — current state, open items, recent changes
+2. **`ARCHITECTURE.md`** — the whole system on one map: what exists, where it lives,
+   what talks to what. Skim §0–§2 (~5 min), then jump to the subsystem you're touching.
+   Start here — everything below reads faster once the map is in place.
+3. `OWNER_BRIEF.md` — doctrine, business rules, the *why*
+4. `ACTIVE_CONTEXT.md` — current state, open items, recent changes
+
+**The four documents divide cleanly — don't duplicate across them:**
+
+| Doc | Answers | Churn |
+|---|---|---|
+| `ARCHITECTURE.md` | *What is the system, and where does anything live?* | Only when a subsystem is added or rewired |
+| `OWNER_BRIEF.md` | *What are the rules, and why?* | Rare — owner-sign-off territory |
+| `ACTIVE_CONTEXT.md` | *What happened lately, what's open?* | Every session |
+| `CLAUDE.md` (this file) | *How do I work here?* | When a lesson is paid for |
 
 ---
 
@@ -142,6 +154,10 @@ Cloud cost is part of "production-grade." Every change is reviewed for cost the 
 ---
 
 ## Architecture
+
+*Quick-reference sketch. **Full map: `ARCHITECTURE.md`** — repo boundaries, the
+three planes (money / measurement / display), FSM state diagram, state-and-storage
+map, deployment topology, and a "where do I look when…" index.*
 
 ```
 Binance WS/REST

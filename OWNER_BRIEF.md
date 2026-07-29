@@ -1,6 +1,8 @@
 # Lumin / 360 Crypto Eye — Owner Brief
 
-**Read this first every session. Then read `ACTIVE_CONTEXT.md`.**
+**This is the doctrine — the rules and the *why*. For *what exists and where it
+lives*, read `ARCHITECTURE.md` first: it is the one-map view of all four repos and
+takes ~10 minutes. Then this brief, then `ACTIVE_CONTEXT.md`.**
 
 > **⚠️ PHASE: PRODUCTION (LIVE).** The Lumin app is live on the Google Play
 > **production** track (release 282+ as of 2026-07-16, public in the launch region,
