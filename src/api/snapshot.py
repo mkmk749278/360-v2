@@ -152,8 +152,25 @@ def _minutes_since(ts: Optional[Any]) -> int:
     cycle.  We can't fix the source (legacy records) — and even
     once we do, defensive parsing here costs us nothing and keeps
     the surface area resilient to future serialisation drift."""
-    if ts is None:
+    parsed = _as_datetime(ts)
+    if parsed is None:
         return 0
+    return max(0, int((_now() - parsed).total_seconds() // 60))
+
+
+def _as_datetime(ts: Optional[Any]) -> Optional[datetime]:
+    """Coerce a lifecycle stamp to a tz-aware ``datetime``, or ``None``.
+
+    The same tolerant parse ``_minutes_since`` needs, factored out so the two
+    cannot drift: a stamp that counts as unreadable for the "N ago" label must
+    also be unreadable when we publish the instant itself.
+
+    Returns ``None`` rather than a guess.  A consumer plotting this on a chart
+    can then omit its marker instead of drawing one at a fabricated time —
+    which is the failure this whole change exists to end.
+    """
+    if ts is None:
+        return None
     if isinstance(ts, str):
         try:
             # Accept the common shapes: ``2026-05-20T04:25:00Z`` (Z
@@ -161,12 +178,12 @@ def _minutes_since(ts: Optional[Any]) -> int:
             # ``2026-05-20T04:25:00+00:00``, naive ``2026-05-20T04:25:00``.
             ts = datetime.fromisoformat(ts.replace("Z", "+00:00"))
         except (ValueError, TypeError):
-            return 0
+            return None
     if not isinstance(ts, datetime):
-        return 0
+        return None
     if ts.tzinfo is None:
         ts = ts.replace(tzinfo=timezone.utc)
-    return max(0, int((_now() - ts).total_seconds() // 60))
+    return ts
 
 
 def _agent_name_for(setup_class: str) -> str:
@@ -530,7 +547,11 @@ def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
         else str(direction or "LONG")
     ).upper()
     setup_class = getattr(sig, "setup_class", "UNCLASSIFIED") or "UNCLASSIFIED"
-    timestamp = getattr(sig, "timestamp", None) or _now()
+    # Normalised to tz-aware, because a naive stamp serialises without a zone
+    # and a client that parses it gets *local* time: 5h30m of silent error on
+    # an IST phone, on the very field a chart anchors its entry marker to.
+    # Same ``or _now()`` fallback this line has always had for a missing stamp.
+    timestamp = _as_datetime(getattr(sig, "timestamp", None)) or _now()
     status = getattr(sig, "status", "ACTIVE") or "ACTIVE"
     dispatch_ts = getattr(sig, "dispatch_timestamp", None)
     terminal_ts = getattr(sig, "terminal_outcome_timestamp", None)
@@ -538,6 +559,14 @@ def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
     # For closed signals minutes_ago reflects recency of the terminal event
     # ("SL_HIT 3m ago"), not the signal's total age since creation.
     # For active signals minutes_ago reflects how long the trade has been open.
+    #
+    # It is a *label*, and only a label.  The Lumin chart reconstructed the
+    # entry instant from it as ``now - minutes_ago``, so on every closed signal
+    # the arrow captioned ENTRY was drawn at the exit — offset by the whole
+    # hold time (owner-caught 2026-07-29: COTIUSDT stamped 03:00 rendered at
+    # 04:05, sitting exactly on its own SL line).  The remedy is not to redefine
+    # this field, which is correct for the label it feeds, but to publish the
+    # instants themselves below so no consumer has to derive one.
     if status in _TERMINAL_STATUSES and terminal_ts is not None:
         minutes_ago = _minutes_since(terminal_ts)
     elif dispatch_ts is not None:
@@ -579,6 +608,16 @@ def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
         ),
         timestamp=timestamp,
         minutes_ago=minutes_ago,
+        # The instants themselves, so a chart plots what happened rather than
+        # arithmetic on a label.  ``terminal_outcome_timestamp`` is published
+        # only for a signal that has actually terminated: on an open signal it
+        # is absent because there is no exit yet, which is a different state
+        # from "closed but the stamp predates the field", and both must read as
+        # "no marker" rather than as a guess.
+        dispatch_timestamp=_as_datetime(dispatch_ts),
+        terminal_outcome_timestamp=(
+            _as_datetime(terminal_ts) if status in _TERMINAL_STATUSES else None
+        ),
         hold_mins=_hold_mins(dispatch_ts, terminal_ts if status in _TERMINAL_STATUSES else None),
         # Regime stamps (scanner._populate_signal_context). Surfaced so the
         # Ops Profit-Lab / combo analyzer can slice by the same entry_regime

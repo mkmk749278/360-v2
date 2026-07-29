@@ -280,3 +280,113 @@ class TestOriginalStopLoss:
                    original_sl_distance=2.0)
         d = _signal_to_detail(sig)
         assert d.stop_loss == d.original_stop_loss == 98.0
+
+
+# ---------------------------------------------------------------------------
+# Lifecycle instants — the cross-repo contract the Lumin chart plots on
+# ---------------------------------------------------------------------------
+
+class TestLifecycleInstantsArePublished:
+    """``SignalDetail`` must carry the instants, not just the "N ago" label.
+
+    The Lumin chart had no entry timestamp to draw on — ``_signalFromJson``
+    read ``minutes_ago`` and dropped ``timestamp`` — so it reconstructed one as
+    ``now - minutes_ago`` and captioned the result ENTRY.  For a closed signal
+    ``minutes_ago`` measures from the *terminal* event, so the arrow landed on
+    the exit, offset by the entire hold time: COTIUSDT stamped 03:00:33 UTC
+    rendered at 04:05, sitting exactly on its own SL line (owner-caught
+    2026-07-29).
+
+    These field names are a cross-repo contract (CLAUDE.md).  Pinned here, on
+    the producing side, so a rename fails loudly instead of quietly moving the
+    app's markers back to a fabricated time.
+    """
+
+    def test_closed_signal_publishes_both_instants(self):
+        sig = _make_sig(
+            status="SL_HIT",
+            created_offset_mins=125,
+            dispatch_offset_mins=124,
+            terminal_offset_mins=60,
+        )
+        d = _signal_to_detail(sig)
+        assert d.dispatch_timestamp == sig.dispatch_timestamp
+        assert d.terminal_outcome_timestamp == sig.terminal_outcome_timestamp
+
+    def test_the_entry_instant_is_not_recoverable_from_minutes_ago(self):
+        """The regression itself, stated as arithmetic.
+
+        A consumer doing ``now - minutes_ago`` lands on the exit; the same
+        consumer reading ``timestamp`` lands on the entry.  If this assertion
+        ever flips, the app's ENTRY marker is back on the exit.
+        """
+        sig = _make_sig(
+            status="SL_HIT",
+            created_offset_mins=125,   # entry
+            dispatch_offset_mins=124,
+            terminal_offset_mins=60,   # exit, 65 minutes later
+        )
+        d = _signal_to_detail(sig)
+        now = datetime.now(timezone.utc)
+
+        reconstructed = now - timedelta(minutes=d.minutes_ago)
+        # What the old app drew: the exit, ~65 minutes past the real entry.
+        assert abs((reconstructed - sig.terminal_outcome_timestamp).total_seconds()) < 90
+        assert (reconstructed - d.timestamp).total_seconds() > 60 * 60
+
+        # What it can draw now: the entry itself.
+        assert abs((d.timestamp - sig.timestamp).total_seconds()) < 1
+
+    def test_open_signal_has_no_terminal_instant(self):
+        """Absent because there is no exit — not because we failed to read one."""
+        sig = _make_sig(status="ACTIVE", terminal_offset_mins=None)
+        d = _signal_to_detail(sig)
+        assert d.terminal_outcome_timestamp is None
+        assert d.dispatch_timestamp == sig.dispatch_timestamp
+
+    def test_terminal_instant_withheld_when_status_is_not_terminal(self):
+        # A stray stamp on a still-open signal must not publish an exit the
+        # chart would then draw.  Status is the authority.
+        sig = _make_sig(status="ACTIVE", terminal_offset_mins=10)
+        assert _signal_to_detail(sig).terminal_outcome_timestamp is None
+
+    def test_iso_string_stamps_are_parsed(self):
+        # The Firestore-round-trip shape _minutes_since was already hardened for.
+        sig = _make_sig(status="SL_HIT", terminal_offset_mins=30)
+        sig.dispatch_timestamp = "2026-07-29T05:31:03Z"
+        sig.terminal_outcome_timestamp = "2026-07-29T05:37:00+00:00"
+        d = _signal_to_detail(sig)
+        assert d.dispatch_timestamp == datetime(2026, 7, 29, 5, 31, 3, tzinfo=timezone.utc)
+        assert d.terminal_outcome_timestamp == datetime(2026, 7, 29, 5, 37, tzinfo=timezone.utc)
+
+    def test_unreadable_stamp_refuses_rather_than_guesses(self):
+        # Refuse, don't clamp: an unparseable stamp yields no instant, so the
+        # consumer omits its marker instead of drawing one at epoch or at now.
+        sig = _make_sig(status="SL_HIT", terminal_offset_mins=30)
+        sig.dispatch_timestamp = "not-a-date"
+        sig.terminal_outcome_timestamp = "not-a-date"
+        d = _signal_to_detail(sig)
+        assert d.dispatch_timestamp is None
+        assert d.terminal_outcome_timestamp is None
+
+    def test_naive_stamps_are_returned_utc_aware(self):
+        # A naive stamp compared against a tz-aware one raises; the app would
+        # see a 500 instead of a chart.
+        sig = _make_sig(status="SL_HIT", terminal_offset_mins=30)
+        sig.terminal_outcome_timestamp = datetime(2026, 7, 29, 4, 5, 0)
+        d = _signal_to_detail(sig)
+        assert d.terminal_outcome_timestamp is not None
+        assert d.terminal_outcome_timestamp.tzinfo is not None
+
+    def test_creation_stamp_is_published_tz_aware(self):
+        """A naive stamp serialises without a zone and parses as *local* time.
+
+        On an IST phone that is 5h30m of silent error, on the one field the
+        chart anchors its entry marker to — a worse version of the bug being
+        fixed.  Normalise at the producer.
+        """
+        sig = _make_sig(status="ACTIVE")
+        sig.timestamp = datetime(2026, 7, 29, 6, 20, 21)  # naive, as stored
+        d = _signal_to_detail(sig)
+        assert d.timestamp.tzinfo is not None
+        assert d.timestamp == datetime(2026, 7, 29, 6, 20, 21, tzinfo=timezone.utc)
