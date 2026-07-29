@@ -76,6 +76,10 @@
       "POST_DISPLACEMENT_CONTINUATION": {
         "suppress_negative": null,
         "min_samples": 25
+      },
+      "TREND_PULLBACK_EMA": {
+        "suppress_negative": false,
+        "min_samples": null
       }
     },
     "history": {
@@ -100,9 +104,9 @@
         "HOLD"
       ],
       "FAILED_AUCTION_RECLAIM|suppress_negative": [
-        "KEEP",
-        "KEEP",
-        "KEEP"
+        "SKIP",
+        "SKIP",
+        "SKIP"
       ],
       "FAILED_AUCTION_RECLAIM|min_samples": [
         "HOLD",
@@ -171,8 +175,8 @@
       ],
       "QUIET_COMPRESSION_BREAK|suppress_negative": [
         "KEEP",
-        "SKIP",
-        "SKIP"
+        "KEEP",
+        "KEEP"
       ],
       "QUIET_COMPRESSION_BREAK|min_samples": [
         "HOLD",
@@ -250,9 +254,9 @@
         "HOLD"
       ],
       "TREND_PULLBACK_EMA|suppress_negative": [
-        "SKIP",
-        "SKIP",
-        "SKIP"
+        "DROP",
+        "DROP",
+        "DROP"
       ],
       "TREND_PULLBACK_EMA|min_samples": [
         "HOLD",
@@ -338,6 +342,12 @@
         "HOLD",
         "HOLD",
         "HOLD"
+      ],
+      "MOVER_TREND_PULLBACK@TUNED|suppress_negative": [
+        "SKIP"
+      ],
+      "MOVER_TREND_PULLBACK@TUNED|min_samples": [
+        "LOWER"
       ]
     },
     "last_change_cycle": {
@@ -359,9 +369,10 @@
       "MOVER_AVWAP_SCALP|min_samples": 276,
       "DIVERGENCE_CONTINUATION|suppress_negative": 210,
       "FAILED_AUCTION_RECLAIM@ATR|min_samples": 264,
-      "POST_DISPLACEMENT_CONTINUATION|min_samples": 273
+      "POST_DISPLACEMENT_CONTINUATION|min_samples": 273,
+      "TREND_PULLBACK_EMA|suppress_negative": 362
     },
-    "cycle": 327
+    "cycle": 372
   },
   "ledger": [
     {
@@ -843,6 +854,19 @@
       "verdict": "RAISE",
       "ev_per_suppression_r": null,
       "n": 22
+    },
+    {
+      "strategy": "TREND_PULLBACK_EMA",
+      "param": "suppress_negative",
+      "old": true,
+      "new": false,
+      "applied": true,
+      "status": "PROMOTED",
+      "reason": "stable+bar+grace → promote",
+      "verdict": "DROP",
+      "ev_per_suppression_r": -0.8481253375600427,
+      "n": 44,
+      "routable": true
     }
   ],
   "pending": [],
@@ -900,6 +924,9 @@
     },
     "POST_DISPLACEMENT_CONTINUATION": {
       "min_samples": 25
+    },
+    "TREND_PULLBACK_EMA": {
+      "suppress_negative": false
     }
   },
   "routability": {

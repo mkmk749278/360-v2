@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-28T03:53:11.685643+00:00",
-  "generated_at_ts": 1785210791.685643,
+  "generated_at": "2026-07-29T03:55:15.152257+00:00",
+  "generated_at_ts": 1785297315.152257,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "515b368f9665a1fc98f7cc811d14c77d40480cd4",
+  "git_sha": "c6f490d26c496e7529724785eee9ca87ed3a60c8",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,8 +15,8 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 5379,
-    "strategy_matrix_scored_cells": 2048,
+    "strategy_matrix_cells": 5877,
+    "strategy_matrix_scored_cells": 2250,
     "performance_setups": 14,
     "suppression_gates": 13
   },
@@ -62,8 +62,8 @@
       {
         "strategy": "SR_FLIP_RETEST@SAREXIT",
         "context_key": "ASIA/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -10.66510813728027,
-        "n": 22,
+        "edge_r": -10.303614169241467,
+        "n": 23,
         "verdict": "NEGATIVE"
       },
       {
@@ -83,23 +83,26 @@
       {
         "strategy": "MOVER_TREND_PULLBACK@SAREXIT",
         "context_key": "OVERLAP/QUIET/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": -6.3980814909694885,
-        "n": 17,
+        "edge_r": -5.7262775856404895,
+        "n": 19,
         "verdict": "NEGATIVE"
       },
       {
         "strategy": "SR_FLIP_RETEST@SAREXIT",
         "context_key": "NY/MARKDOWN/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": -5.042773895332088,
-        "n": 27,
+        "edge_r": -4.5328505298266615,
+        "n": 30,
         "verdict": "NEGATIVE"
       }
     ],
     "gate_verdict_counts": {
-      "KEEP": 4,
-      "TUNE": 5,
-      "INSUFFICIENT_SAMPLE": 4
+      "KEEP": 7,
+      "TUNE": 2,
+      "INSUFFICIENT_SAMPLE": 3,
+      "DROP": 1
     },
-    "drop_gates": []
+    "drop_gates": [
+      "context_floor:TREND_PULLBACK_EMA"
+    ]
   }
 }
