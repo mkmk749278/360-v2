@@ -4,6 +4,14 @@
 talks to what, and which rules constrain a change — without reading 6,000 lines of
 history.**
 
+**The standing rule that keeps it that way: if a session has to go read the code to
+answer a question about the *shape* of the system — how many pairs, how many paths,
+what writes this file, which flag gates that — the answer belongs in here, and putting
+it here is part of that session's work.** Answering "how many pairs and how many
+paths" once cost ~40 searches across four repos; §9 now answers it in one lookup and
+§10 gives the command to re-check it in one line. Every such question is a one-time
+cost that should never be paid twice.
+
 This is the **map**, not the doctrine and not the news:
 
 | Document | Answers | Size |
@@ -559,6 +567,37 @@ symbol that decides it — re-count there rather than trusting this table blind.
 units and 7 counterfactual arms. The arms are stamped from the *same* candidates as the
 real rows — never roll them up as strategies.
 
+### Every path, in dispatch order
+
+`Y` = runs on a young/unaged pair · `M` = runs on a mover-promoted pair. Both blank
+means the path needs an aged multi-TF level foundation and only sees core pairs.
+
+| # | SetupClass | Evaluator (`ScalpChannel.`) | Role | Y | M | State |
+|---|---|---|---|:-:|:-:|---|
+| 1 | LIQUIDITY_SWEEP_REVERSAL | `_evaluate_standard` | core | | | live |
+| 2 | TREND_PULLBACK_EMA | `_evaluate_trend_pullback` | core | | | live |
+| 3 | LIQUIDATION_REVERSAL | `_evaluate_liquidation_reversal` | support | Y | | live |
+| 4 | WHALE_MOMENTUM | `_evaluate_whale_momentum` | specialist | Y | | live |
+| 5 | VOLUME_SURGE_BREAKOUT | `_evaluate_volume_surge_breakout` | core | Y | M | live |
+| 6 | BREAKDOWN_SHORT | `_evaluate_breakdown_short` | core | Y | M | live |
+| 7 | MOVER_TREND_PULLBACK | `_evaluate_mover_trend_pullback` | support | Y | M | live |
+| 8 | MOVER_AVWAP_SCALP | `_evaluate_mover_avwap_scalp` | support | Y | M | live |
+| 9 | OPENING_RANGE_BREAKOUT | `_evaluate_opening_range_breakout` | support | Y | | **disabled** — `SCALP_ORB_ENABLED=false`, pending a true-session-open rebuild |
+| 10 | SR_FLIP_RETEST | `_evaluate_sr_flip_retest` | core | | | live — shorts only by default (`SR_FLIP_LONG_ENABLED=false`) |
+| 11 | FUNDING_EXTREME_SIGNAL | `_evaluate_funding_extreme` | specialist | Y | | live |
+| 12 | QUIET_COMPRESSION_BREAK | `_evaluate_quiet_compression_break` | specialist | | | live |
+| 13 | DIVERGENCE_CONTINUATION | `_evaluate_divergence_continuation` | support | | | live |
+| 14 | CONTINUATION_LIQUIDITY_SWEEP | `_evaluate_continuation_liquidity_sweep` | core | | | **disabled** 2026-05-17 — absorbed into LSR's HTF-POI catchment; `CLS_DISABLED_2026_05_17=false` reverts |
+| 15 | POST_DISPLACEMENT_CONTINUATION | `_evaluate_post_displacement_continuation` | core | | | live |
+| 16 | FAILED_AUCTION_RECLAIM | `_evaluate_failed_auction_reclaim` | support | | | live |
+| 17 | MA_CROSS_TREND_SHIFT | `_evaluate_ma_cross_trend_shift` | specialist | | | live — 24h per-pair cooldown |
+| 18 | MEAN_REVERT | `_evaluate_mean_revert` | support | | | live — graduated from `SHADOW_MEAN_REVERT`; shadow unit still runs as the ungated control |
+| 19 | RANGE_FADE | `_evaluate_range_fade` | support | | | live — **context-gated**: emits only in cells the edge matrix measures positive |
+
+`setup_class` is assigned as a **string literal** in each evaluator, not the enum — which
+is exactly why the rename rule (`SetupClass` ↔ `_MAX_SL_PCT_BY_SETUP` ↔ telemetry names)
+has to be applied by hand in all three places.
+
 > The README's "9 scalp strategies / top-50 pairs / single Telegram channel" describes
 > the 2.0 engine and is stale on every count. This section is the live inventory.
 
@@ -578,17 +617,127 @@ real rows — never roll them up as strategies.
 | Redis snapshot keys | 7 state + 4 command | §5 |
 | Business rules | 18 | `OWNER_BRIEF.md` Part IV (B5 retired) |
 | Engine Python modules | 224 | `src/**/*.py` |
+| Env-overridable settings | **587** | `config/__init__.py` — every value, per B8 |
+| `*_ENABLED` feature flags | 68 | `config/__init__.py` |
+| Feature-liveness probes | **23** | `main._build_feature_liveness` |
+
+### Flags whose default surprises people
+
+Most `*_ENABLED` flags are ON. These are the ones where the default is the opposite of
+what the name suggests, or where the default *is* the doctrine:
+
+| Flag | Default | Why |
+|---|---|---|
+| `PRE_TP_ENABLED` | **false** | Session-34 default flip — TP1-full is the exit; pre-TP is a per-user opt-in (B17) |
+| `SIGNAL_EXPIRY_ENABLED` | **false** | |
+| `FSM_LIMIT_ENTRY_ENABLED` | **false** | Entry is MARKET; `PENDING_ENTRY` only exists when this is on |
+| `SR_FLIP_LONG_ENABLED` | **false** | SR_FLIP is shorts-only until the long thesis re-earns its place |
+| `SAR_EXIT_SHADOW_ENABLED` | **false** in code | Owner-enabled in the live env. **This is the flag that taught us measurements must ship ON** — see §3 |
+| `WEB_BILLING_*` | **false** | Crypto/Stripe/Razorpay rails built, not switched on |
+| `SIGNUP_TRIAL_ENABLED` | **false** | |
+| `AUTO_TRADE_TIER_GATE_ENABLED` | **true** | Fail-closed: hands-off execution runs only for `auto` tier (B16) |
+| `ALLOCATOR_RECOMMEND_ENABLED` | **true** | Layer D recommends; nothing consumes it |
+| `CHANNEL_SCALP_DIVERGENCE_ENABLED` | **true** | The one auxiliary channel in limited-live |
+
+### The 23 liveness probes
+
+A feature whose output can silently flat-line without paging is unfinished — this is the
+list that enforces it (`RateProbe` = throughput, `PredicateProbe` = health assertion):
+
+```
+auto_dispatch · btc_reference · candle_coverage · context_emission_policy
+edge_reconciliation · emission_controller · emission_controller_routability
+gate_override_shadow · geometry_ab · market_context · mean_revert_emission
+mean_revert_path · range_fade_emission · range_fade_path · sar_alignment_crosscheck
+sar_exit_shadow · sar_ledger_candles · shadow_units · stale_tf_scoring
+staleness_v2_shadow · strategy_edge · suppression_audit · tuned_variants
+```
+
+Never signal "idle" or "disabled" by raising inside a `PredicateProbe` — that converts to
+a `fail_open.record` and buries real failures in noise. `return True, "…"` instead.
+
+### Who writes each data file, and who reads it
+
+The measurement plane's substrate. Ops mounts `data/` **read-only** at `/engine-data`.
+
+| File | Written by | Read by (ops) |
+|---|---|---|
+| `signal_performance.json` | `performance_tracker.py` | `/track-record` · `/performance` · agent detectors |
+| `signal_history.json` | `signal_history_store.py` | app feed via `/api/signals` · agent detectors |
+| `invalidation_records.json` | `invalidation_audit.py` | `/invalidations` · signal detail |
+| `strategy_edge_store.json` | `strategy_edge.py` | `/strategy-lab` · `/raw-edge` |
+| `suppressed_candidates.json` | `suppression_audit.py` | `/strategy-lab` gate audit · truth report |
+| `emission_controller_store.json` | `emission_controller_store.py` | `/emission-controller` |
+| `market_context.json` | `main.py` · `strategy_portfolio.py` | Strategy Lab context tables |
+| `feature_liveness.json` | `feature_liveness.py` | `/pulse` |
+| `dispatch_log.json` | `signal_router.py` · `main.py` | monitor-logs surfaces |
+| `geometry_ab_candidates.json` | `geometry_ab.py` | via edge matrix |
+| `cohort_edge_store.json` | `stat_filter.py` | cohort gate |
+| `level_book.json` · `alerts.json` · `pnl_history.json` · `confidence_log.json` | their own modules | engine-internal |
 
 ---
 
-## §10 — Keeping this file true
+## §10 — Re-derive any of this in one command
+
+**Numbers rot; commands don't.** Every count in §9 came from one of these. Run the
+command rather than trusting the number — and if it disagrees, fix §9 in that PR.
+
+```bash
+# ── Pairs ────────────────────────────────────────────────────────────────────
+grep -nE 'TOP50_FUTURES_COUNT|TOP50_FUTURES_ONLY|MOVER_PROMOTION_MAX_PAIRS|SURGE_PROMOTION_MAX_PAIRS|WS_DEGRADED_MAX_PAIRS' config/__init__.py
+grep -n 'SEED_TIMEFRAMES' -A 12 config/__init__.py            # timeframes actually seeded
+
+# ── Paths ────────────────────────────────────────────────────────────────────
+grep -cE '^\s*(async )?def _evaluate_' src/channels/scalp.py   # evaluator count
+grep -nE 'setup_class="[A-Z_]+"' src/channels/scalp.py         # each path's identity
+grep -n 'ACTIVE_PATH_PORTFOLIO_ROLES' -A 40 src/signal_quality.py   # role per path
+grep -n '_YOUNG_PAIR_EVALUATORS' -A 16 src/scanner/__init__.py      # young-pair allowlist
+grep -n '_mover_evaluators = frozenset' -A 14 src/scanner/__init__.py  # mover allowlist
+grep -n '_VARIANT_SUFFIXES' -A 4 src/geometry_ab.py            # measurement arms
+grep -nE '^def evaluate_' src/shadow_strategies.py             # shadow units
+grep -n 'ALL_CHANNELS' -A 10 config/__init__.py                # channels
+grep -n 'CHANNEL_ENABLE_DEFAULTS' -A 12 config/__init__.py     # which are on
+
+# ── Wiring ───────────────────────────────────────────────────────────────────
+grep -rhoE '"/api/[a-zA-Z0-9_/{}-]+"' src/api/ | sort -u       # engine endpoints
+grep -rhoE '@router\.(get|post)\("[^"]*"' app/routes/*.py      # ops routes (in 360ce-ops)
+grep -rhoE 'CREATE TABLE IF NOT EXISTS [a-z_]+' src/ | sort -u # SQLite tables
+grep -rhoE '"snapshot:[a-z_:]+"' src/ | sort -u                # Redis keys
+grep -oE 'name="[a-z_0-9]+"' src/main.py | sort -u             # liveness probes
+grep -oE '^[A-Z_]+_ENABLED: bool = _safe_bool\("[A-Z_]+", *"(true|false)"' config/__init__.py
+
+# ── State ────────────────────────────────────────────────────────────────────
+sed -n '/class PositionState/,/CLOSED = /p' src/execution/position_state.py
+grep -rhoE '[a-z_]+\.json' src/ config/ | sort | uniq -c | sort -rn   # data files by use
+```
+
+**Live system, not source:**
+
+```bash
+docker logs 360scalp-v2-engine --tail 100 | grep 'Scanner config'   # universe actually loaded
+docker exec 360scalp-v2-redis redis-cli KEYS "snapshot:*"
+git fetch origin monitor-logs && git show origin/monitor-logs:monitor/report/truth_report.md
+```
+
+The truth report's `EVAL::*` rows are the authoritative answer to "which paths are
+actually generating" — code says what *can* fire, the report says what *did*. Counters
+are cumulative over a long window, so a just-merged change won't show yet.
+
+---
+
+## §11 — Keeping this file true
 
 Update `ARCHITECTURE.md` in the same PR when a change:
 
 - adds, removes, or renames a **subsystem, container, or store**;
 - changes a **cross-repo contract** (endpoint, field name, auth scheme);
 - moves a Layer A–G component's **state** (recommendation-only → live, dark → active);
-- adds an **invariant** or a new plane-crossing rule.
+- adds an **invariant** or a new plane-crossing rule;
+- changes any **count in §9** — a new evaluator, a flipped flag default, a new probe,
+  a new data file, a changed cap. The number and its constant move together;
+- required you to **grep for a structural fact that wasn't here**. Add the fact to §9
+  and the command to §10. That is the whole maintenance model: the file grows by
+  exactly the questions sessions actually ask, and never by speculation.
 
 Do **not** update it for a bug fix, a tuning change, or a session narrative — those
 belong in `ACTIVE_CONTEXT.md`. If this file and the code disagree, the code is right and
