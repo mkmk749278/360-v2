@@ -2125,11 +2125,30 @@ class CryptoSignalEngine:
                         return counters
 
                     sar_counters = await asyncio.to_thread(_classify_sar_batch)
+                    # Progress, not just fetch health: a window that exists but
+                    # ends before the trade's exit is a *successful* fetch and
+                    # still resolves nothing, so the candle probe reads 100%
+                    # while the ledger produces no verdicts at all (the
+                    # 2026-07-29 freeze).  Count verdicts against the backlog.
+                    from config import SAR_EXIT_SHADOW_BAR_MINUTES as _sar_bm
+                    from config import SAR_EXIT_SHADOW_WINDOW_BARS as _sar_wb
+                    from src.suppression_audit import STALLED as _SAR_STALLED
+                    _sar.record_resolution_cycle(
+                        resolved=sum(
+                            int(v) for k, v in sar_counters.items()
+                            if k != _SAR_STALLED
+                        ),
+                        stalled=int(sar_counters.get(_SAR_STALLED, 0) or 0),
+                        pending=_sar.unresolved_record_count(
+                            window_sec=float(_sar_wb) * float(_sar_bm) * 60.0
+                        ),
+                    )
                     # Publish this cycle's fetch counters for the liveness probe.
                     # Rolled after the batch, and only after it: the probe must
                     # read a completed cycle, never one still filling.
                     _sar.roll_candle_fetch_cycle()
                     _sar.roll_refresh_budget_cycle()
+                    _sar.roll_resolution_cycle()
                     _candle_health = _sar.candle_fetch_health()
                     if int(_candle_health.get("miss") or 0):
                         log.warning(
@@ -2434,6 +2453,93 @@ class CryptoSignalEngine:
         fl.add_predicate(PredicateProbe(
             name="sar_ledger_candles",
             fn=_sar_ledger_candles,
+            min_streak=6,          # 30 min sustained
+        ))
+
+        def _sar_resolution_progress() -> Tuple[bool, str]:
+            """The ledger must actually produce verdicts, not merely fetch data.
+
+            ``sar_ledger_candles`` above asks whether the fetch returned a
+            window.  A frozen or too-short window is still a window, so a record
+            that can never resolve is counted there as a *success* — which is
+            how, on 2026-07-29, 395 of 401 rows sat at RUNNING describing trades
+            that had already closed while every probe read green.  Checked
+            against real Binance candles, DEXEUSDT had hit its stop 1 minute
+            after entry and sat unresolved for 19.2h.
+
+            Deliberately not a stall *rate*: mid-window stalling is the healthy
+            steady state, and a ledger holding 400 open trades stalls on nearly
+            all of them every cycle, forever.  Paging on that would page on a
+            working arm.  The signal is **progress against a non-empty backlog** —
+            zero verdicts for an hour while records are owed one.  A quiet
+            market cannot trip it, because a non-empty backlog is the
+            precondition.
+
+            Returns True when idle rather than raising: ``PredicateProbe``
+            converts an exception into a ``fail_open.record``, and an arm with
+            nothing to resolve is not a swallowed failure.
+            """
+            if not bool(_rt.get("sar_exit_shadow_enabled")):
+                return True, "disabled by tunable"
+            from src import sar_exit_shadow as _sar
+            h = _sar.resolution_health()
+            pending = int(h.get("pending") or 0)
+            resolved = int(h.get("resolved") or 0)
+            stalled = int(h.get("stalled") or 0)
+            if pending == 0:
+                return True, "no records await a verdict"
+            if resolved > 0:
+                return True, f"{resolved} resolved, {stalled} still mid-window"
+            return False, (
+                f"0 verdicts produced while {pending} records await one "
+                f"({stalled} had candles and still resolved nothing). The "
+                f"ledger is not advancing — check resolver candle freshness."
+            )
+
+        fl.add_predicate(PredicateProbe(
+            name="sar_resolution_progress",
+            fn=_sar_resolution_progress,
+            min_streak=12,         # 1 hour sustained — healthy is 6-25/hour
+        ))
+
+        def _sar_refresh_budget() -> Tuple[bool, str]:
+            """The per-cycle refresh cap must not be smaller than the ledger.
+
+            The cap sustains ``max_per_cycle × (refresh_sec / loop_sec)``
+            distinct symbols.  Below the ledger's symbol count the surplus is
+            starved every cycle and its records can never resolve — 63 of 85
+            symbols resolved 0% of their rows on 2026-07-29 for exactly this
+            reason.  The starved count is published by the refresh loop (#825);
+            nothing read it until now.
+
+            A single starved cycle is not a fault: the ledger can spike. Half an
+            hour of sustained starvation means the budget is genuinely too
+            small.
+            """
+            if not bool(_rt.get("sar_exit_shadow_enabled")):
+                return True, "disabled by tunable"
+            from config import SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE as _cap
+            from src import sar_exit_shadow as _sar
+            if int(_cap) <= 0:
+                return True, "refresh disabled by config"
+            h = _sar.refresh_budget_health()
+            pending = int(h.get("pending") or 0)
+            starved = int(h.get("starved") or 0)
+            served = int(h.get("served") or 0)
+            if pending == 0:
+                return True, "no symbols await a verdict"
+            if starved == 0:
+                return True, f"{served} refreshed, none turned away"
+            return False, (
+                f"{starved} due symbols turned away by the per-cycle cap "
+                f"({_cap}); {pending} symbols await a verdict. Their records "
+                f"cannot resolve — raise "
+                f"SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE."
+            )
+
+        fl.add_predicate(PredicateProbe(
+            name="sar_refresh_budget",
+            fn=_sar_refresh_budget,
             min_streak=6,          # 30 min sustained
         ))
         # Suppression stamps themselves vs scanner activity.  Suppressions can

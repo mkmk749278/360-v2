@@ -100,6 +100,24 @@ REASON_STATIC_TP1 = "static_tp1"  # the live TP1 closed it before handover
 #: Exit reasons that are decided, not merely "as far as the candles go".
 _FINAL_REASONS = frozenset({REASON_TRAIL, REASON_STATIC_SL, REASON_STATIC_TP1})
 
+#: Counter key for a mid-window record that HAD candles and still produced no
+#: verdict — the walker ran out of bars before the trade's exit.
+#:
+#: This is not an error and the ``continue`` below is correct: mid-window, "not
+#: yet" is the honest answer.  But it was silent, and silence here is how a
+#: ledger that resolves *nothing* reads as healthy.  ``sar_ledger_candles``
+#: measures whether the fetch returned a window, and a frozen or too-short
+#: window is still a window — so a record that can never resolve is counted as
+#: a successful fetch and then dropped without a trace.  On 2026-07-29 that
+#: combination held 395 of 401 rows at RUNNING for trades that had already
+#: closed, with every watchdog green (see #825).
+#:
+#: A fail-open ``continue`` with no counter is how the harm stays invisible
+#: (#815, and the same lesson again here).  So the cycle counts it, and
+#: ``main`` pages on the *rate*: stalling is normal, stalling for everything
+#: across many cycles is the freeze.
+STALLED = "STALLED_NO_VERDICT"
+
 # Provenance of a stamped candidate: did this candidate actually reach
 # subscribers, or did a gate kill it?  Shadow ledgers stamp from BOTH points in
 # the scanner, which doubles the sample but mixes two different questions —
@@ -822,6 +840,7 @@ class SuppressedCandidateStore:
                         detail = None
                 if not detail or not detail.get("classification"):
                     if early:
+                        counters[STALLED] = counters.get(STALLED, 0) + 1
                         continue
                     _mark(rec, INSUFFICIENT, now)
                     counters[INSUFFICIENT] = counters.get(INSUFFICIENT, 0) + 1
@@ -838,6 +857,10 @@ class SuppressedCandidateStore:
                 # stayed at "0 resolved" and the fix shipped inert
                 # (owner-caught 2026-07-26).
                 if early and str(detail.get("trail_exit_reason") or "") not in _FINAL_REASONS:
+                    # The walker reached the end of its candles without the
+                    # trade closing.  Mid-window that is honest; sustained
+                    # across every record it means the candles never advance.
+                    counters[STALLED] = counters.get(STALLED, 0) + 1
                     continue
                 label = str(detail["classification"])
                 for key, value in detail.items():
