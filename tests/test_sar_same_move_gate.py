@@ -54,7 +54,9 @@ def _stamp(store, *, entry, prov, mono, symbol="SLXUSDT"):
 
 def _pairs(store):
     """Stamped pairs, not records — each accepted stamp writes two arms."""
-    return len(store.records()) // 2
+    # Three rows per candidate since 2026-07-29: one control + a 15m trail +
+    # a 5m trail. The control is stamped once and serves both trails.
+    return len(store.records()) // 3
 
 
 class TestTheRealSLXSequence:

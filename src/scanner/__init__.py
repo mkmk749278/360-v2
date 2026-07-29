@@ -4837,6 +4837,13 @@ class Scanner:
             highs = c15.get("high")
             lows = c15.get("low")
             closes = c15.get("close")
+            # 5m series for the second SAR trail arm.  Already warm — the
+            # evaluators score on it — so this is a dict lookup, not a fetch.
+            # Absent leaves that arm's alignment undecidable (stamped None),
+            # never coerced into "opposed".
+            c5 = self.data_store.get_candles(symbol, "5m") or {}
+            highs_5m = c5.get("high")
+            lows_5m = c5.get("low")
             if highs is None or lows is None or closes is None:
                 return
             _direction = getattr(sig, "direction", None)
@@ -4897,6 +4904,12 @@ class Scanner:
                         # the agreement mix on screen two days stale.
                         highs=highs,
                         lows=lows,
+                        # Alignment is per timeframe: SAR can be onside on 5m
+                        # and opposed on 15m for the same entry, and under
+                        # conditional handover that decides whether the trail
+                        # governs from bar one.
+                        highs_alt=highs_5m,
+                        lows_alt=lows_5m,
                     )
             except Exception as _sar_exc:
                 fail_open.record("scanner.stamp_sar_exit_shadow", _sar_exc)

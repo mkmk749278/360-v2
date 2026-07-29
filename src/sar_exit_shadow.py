@@ -115,6 +115,17 @@ TRAIL_ARMS: Dict[str, float] = {
     SAREXIT5_SUFFIX: 5.0,
 }
 
+
+def tf_label(bar_minutes: float) -> str:
+    """Minutes -> the data store's timeframe key ("5m", "15m", "1h").
+
+    One conversion, used by the resolver to pick a candle series and by the
+    telemetry to label a counter, so the two can never disagree about which
+    series a number describes.
+    """
+    m = int(round(float(bar_minutes)))
+    return f"{m // 60}h" if m >= 60 and m % 60 == 0 else f"{m}m"
+
 # v2 (2026-07-26): every record written before this point was resolved by a
 # walker that located the entry bar by counting elapsed time, so it replayed a
 # different bar than the trade — see ``main.fetch_ohlc_15m_since``.  The whole
@@ -658,6 +669,11 @@ def stamp_sar_pair(
     provenance: str = "",
     highs: Optional[Sequence[float]] = None,
     lows: Optional[Sequence[float]] = None,
+    # Alt-timeframe series for the second trail arm.  Absent (older caller, or
+    # the 5m array not warm yet) means that arm's alignment is undecidable and
+    # is stamped None — tri-state, never coerced to "opposed".
+    highs_alt: Optional[Sequence[float]] = None,
+    lows_alt: Optional[Sequence[float]] = None,
     store: Optional[SuppressedCandidateStore] = None,
     now_mono: Optional[float] = None,
 ) -> bool:
@@ -723,6 +739,9 @@ def stamp_sar_pair(
         cd_key = (str(symbol or ""), setup, side_u, prov)
         mono = time.monotonic() if now_mono is None else float(now_mono)
         from config import (
+            SAR_EXIT_SHADOW_ALT_BAR_MINUTES,
+            SAR_EXIT_SHADOW_ALT_ENABLED,
+            SAR_EXIT_SHADOW_BAR_MINUTES,
             SAR_EXIT_SHADOW_SAME_MOVE_MAX_SEC,
             SAR_EXIT_SHADOW_SAME_MOVE_PCT,
             SAR_EXIT_SHADOW_STAMP_COOLDOWN_SEC,
@@ -783,8 +802,37 @@ def stamp_sar_pair(
         aligned = alignment_at_entry(
             highs=highs, lows=lows, entry=entry, side=side_u
         )
+        # Alignment is PER TIMEFRAME, not per candidate.  SAR can sit onside on
+        # 5m and opposed on 15m for the same entry — routinely, not as an edge
+        # case — and under conditional handover that decides whether the trail
+        # governs from bar one or the trade runs on its live levels until the
+        # indicator comes onside.  So the two trail arms can take genuinely
+        # different paths from an identical entry, which is the point of
+        # measuring them side by side.
+        #
+        # The note this replaces called the agreement fact "a property of the
+        # pair".  True while there was one trail; false the moment there are
+        # two, and stamping the 15m verdict onto the 5m arm would have made the
+        # arms look more alike than they are.
+        aligned_alt = alignment_at_entry(
+            highs=highs_alt, lows=lows_alt, entry=entry, side=side_u
+        )
 
-        def _stamp_arm(gate: str, suffix: str, exit_model: str):
+        # ``aligned_for_arm`` is REQUIRED, with no default.  It briefly had one,
+        # falling back to the 15m verdict when the caller passed None — and None
+        # is exactly what ``alignment_at_entry`` returns for "could not decide".
+        # So an undecidable 5m arm silently inherited the 15m answer: no error,
+        # no missing field, just two arms agreeing more often than they should
+        # and a measurement that flattered its own conclusion.  Tri-state values
+        # must not share a sentinel with "argument omitted".
+        def _stamp_arm(
+            gate: str,
+            suffix: str,
+            exit_model: str,
+            *,
+            aligned_for_arm: Optional[bool],
+            bar_minutes: Optional[float] = None,
+        ):
             return stamp_candidate(
                 gate_name=gate,
                 symbol=str(symbol or ""),
@@ -804,15 +852,42 @@ def stamp_sar_pair(
                 # entry, so the agreement fact is a property of the pair, and a
                 # rollup that joins the arms must not have to guess which side
                 # holds it.
-                sar_aligned_at_entry=aligned,
+                sar_aligned_at_entry=aligned_for_arm,
+                # Which candle series the resolver must replay this row on.
+                # Carried ON THE ROW rather than inferred from the suffix: the
+                # resolver needs a fact, and a string match is not one.
+                bar_minutes=bar_minutes,
                 stamp_schema=STAMP_SCHEMA,
                 store=target,
             )
 
-        # Both arms stamp together or not at all — a lone arm biases the A/B.
-        if _stamp_arm(GATE_SARBASE, SARBASE_SUFFIX, EXIT_STATIC) is None:
+        # Every arm stamps together or none do — a lone arm biases the A/B, and
+        # with two trails a missing one silently turns the three-way comparison
+        # into a two-way one on an unmarked subset of candidates.
+        #
+        # The control stamps ONCE and serves both trails: the live geometry has
+        # no trail timeframe, so a second control would be the same numbers
+        # under a second name and would double-count the candidate in any
+        # rollup that pools them.
+        if _stamp_arm(
+            GATE_SARBASE, SARBASE_SUFFIX, EXIT_STATIC, aligned_for_arm=aligned,
+        ) is None:
             return False
-        if _stamp_arm(GATE_SAREXIT, SAREXIT_SUFFIX, EXIT_TRAILING) is None:
+        if _stamp_arm(
+            GATE_SAREXIT,
+            SAREXIT_SUFFIX,
+            EXIT_TRAILING,
+            aligned_for_arm=aligned,
+            bar_minutes=SAR_EXIT_SHADOW_BAR_MINUTES,
+        ) is None:
+            return False
+        if SAR_EXIT_SHADOW_ALT_ENABLED and _stamp_arm(
+            GATE_SAREXIT5,
+            SAREXIT5_SUFFIX,
+            EXIT_TRAILING,
+            aligned_for_arm=aligned_alt,
+            bar_minutes=SAR_EXIT_SHADOW_ALT_BAR_MINUTES,
+        ) is None:
             return False
         _last_pair_stamp[cd_key] = mono
         # Re-anchor the move on every accepted stamp, including a provenance
@@ -927,10 +1002,20 @@ _candle_lock = threading.Lock()
 _CANDLE_SYMBOL_CAP = 256
 
 
-def record_candle_fetch(symbol: str, ok: bool, reason: str = "") -> None:
-    """Count one resolver candle fetch.  Pure bookkeeping — never raises."""
+def record_candle_fetch(
+    symbol: str, ok: bool, reason: str = "", timeframe: str = ""
+) -> None:
+    """Count one resolver candle fetch.  Pure bookkeeping — never raises.
+
+    ``timeframe`` is folded into the symbol key rather than counted separately:
+    a 5m series can be starved while the 15m one is healthy, and a pooled
+    counter reads the average and pages for neither.  Keying the miss by
+    ``SYMBOL@5m`` keeps one counter and still names which series failed.
+    """
     try:
         sym = str(symbol or "?")
+        if timeframe:
+            sym = f"{sym}@{timeframe}"
         with _candle_lock:
             if ok:
                 _candle_cur["ok"] = int(_candle_cur["ok"]) + 1
@@ -1236,11 +1321,31 @@ def classify_sar_record(
     slice only, so the warmup bars never leak into the recorded excursion.
     """
     from config import (
+        SAR_EXIT_SHADOW_ALT_BAR_MINUTES,
+        SAR_EXIT_SHADOW_ALT_WINDOW_BARS,
         SAR_EXIT_SHADOW_BAR_MINUTES,
         SAR_EXIT_SHADOW_MAX_STEP,
         SAR_EXIT_SHADOW_STEP,
         SAR_EXIT_SHADOW_WINDOW_BARS,
     )
+
+    # The row's OWN timeframe, and the window that matches it.  Both come from
+    # the record rather than from config alone: two trail arms are stamped from
+    # every candidate, and walking a 5m row with a 15m bar size would mis-date
+    # every exit on it while returning a perfectly confident verdict.
+    #
+    # The windows differ in BARS but match in wall-clock: 192 × 15m and 576 × 5m
+    # are both 48h.  A shorter window would truncate one arm early and lose it
+    # the comparison for a reason that has nothing to do with its timeframe.
+    _rec_bm = record.get("bar_minutes")
+    if _rec_bm is not None and abs(
+        float(_rec_bm) - float(SAR_EXIT_SHADOW_ALT_BAR_MINUTES)
+    ) < 1e-9:
+        _bar_minutes = float(SAR_EXIT_SHADOW_ALT_BAR_MINUTES)
+        _window_bars = int(SAR_EXIT_SHADOW_ALT_WINDOW_BARS)
+    else:
+        _bar_minutes = float(SAR_EXIT_SHADOW_BAR_MINUTES)
+        _window_bars = int(SAR_EXIT_SHADOW_WINDOW_BARS)
 
     highs = ohlc.get("high")
     lows = ohlc.get("low")
@@ -1261,8 +1366,8 @@ def classify_sar_record(
         side=str(record.get("side") or ""),
         step=SAR_EXIT_SHADOW_STEP,
         max_step=SAR_EXIT_SHADOW_MAX_STEP,
-        max_bars=SAR_EXIT_SHADOW_WINDOW_BARS,
-        bar_minutes=SAR_EXIT_SHADOW_BAR_MINUTES,
+        max_bars=_window_bars,
+        bar_minutes=_bar_minutes,
         # The live geometry stopped being "levels it never consults" on
         # 2026-07-27: under conditional handover the trade runs on them until
         # the indicator comes onside.  They were already carried on the record

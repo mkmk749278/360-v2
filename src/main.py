@@ -1430,7 +1430,7 @@ class CryptoSignalEngine:
                 "volume": float(k.get("v", 0)),
                 # "t" = kline open time (ms).  Stored so consumers can locate
                 # the bar covering a wall clock rather than inferring an index
-                # from elapsed time (see fetch_ohlc_15m_since).
+                # from elapsed time (see _ohlc_sar_detail).
                 "open_time": float(k.get("t", 0) or 0) or float("nan"),
             }
             if k.get("x"):  # candle closed
@@ -1670,7 +1670,11 @@ class CryptoSignalEngine:
         """
         from src.invalidation_audit import classify_pending_records, prune_old_records
 
-        def fetch_ohlc_since(symbol: str, since_ts: float):
+        def fetch_ohlc_since(symbol: str, since_ts: float, _rec: dict | None = None):
+            # ``_rec`` unused: these ledgers have a single timeframe. The
+            # parameter exists because ``classify_pending`` now hands the record
+            # to every fetcher — the SAR ledger stamps two trail timeframes and
+            # its fetcher must know which one a row belongs to.
             candles = self.data_store.get_candles(symbol, "1m")
             if not candles:
                 return None
@@ -1693,12 +1697,13 @@ class CryptoSignalEngine:
                 "close": list(closes[-n_candles:]),
             }
 
-        def _ohlc_15m_detail(symbol: str, since_ts: float):
+        def _ohlc_sar_detail(symbol: str, since_ts: float, tf: str,
+                             window_bars: int, bar_minutes: float):
             """15m OHLC for the SAR exit ledger, with a pre-entry warmup prefix.
 
             Returns ``(window, reason)``.  ``window`` is None when the record
             cannot be honestly replayed, and ``reason`` then names *which*
-            precondition failed — see ``fetch_ohlc_15m_since`` for why a bare
+            precondition failed — see ``fetch_sar_ohlc_since`` for why a bare
             None was not enough (2026-07-28).
 
             A trailing exit is only meaningful on the bars it trails, so this
@@ -1740,40 +1745,36 @@ class CryptoSignalEngine:
             """
             import numpy as np
 
-            from config import (
-                SAR_EXIT_SHADOW_BAR_MINUTES,
-                SAR_EXIT_SHADOW_WARMUP_BARS,
-                SAR_EXIT_SHADOW_WINDOW_BARS,
-            )
+            from config import SAR_EXIT_SHADOW_WARMUP_BARS
 
-            candles = self.data_store.get_candles(symbol, "15m")
+            candles = self.data_store.get_candles(symbol, tf)
             if not candles:
-                return None, "no 15m array (symbol left the scanned universe?)"
+                return None, f"no {tf} array (symbol left the scanned universe?)"
             highs = candles.get("high")
             lows = candles.get("low")
             closes = candles.get("close")
             opens = candles.get("open")
             open_time = candles.get("open_time")
             if highs is None or lows is None or closes is None or open_time is None:
-                return None, "15m array missing a required series"
+                return None, f"{tf} array missing a required series"
             n = len(highs)
             if n == 0 or len(lows) != n or len(closes) != n or len(open_time) != n:
-                return None, "15m array empty or ragged"
+                return None, f"{tf} array empty or ragged"
 
-            bar_ms = max(1.0, float(SAR_EXIT_SHADOW_BAR_MINUTES) * 60_000.0)
+            bar_ms = max(1.0, float(bar_minutes) * 60_000.0)
             since_ms = float(since_ts) * 1000.0
             # The entry bar is the last one that had already opened at stamp time.
             idx = int(np.searchsorted(np.asarray(open_time), since_ms, side="right")) - 1
             if idx < 0:
                 # array begins after the stamp — history already rolled off
-                return None, "15m history rolled off before the stamp"
+                return None, f"{tf} history rolled off before the stamp"
 
             warmup = max(0, int(SAR_EXIT_SHADOW_WARMUP_BARS))
             start = idx - warmup
             if start < 0:
                 # not enough pre-entry bars for the SAR to converge
                 return None, f"fewer than {warmup} warmup bars before entry"
-            end = min(n, idx + 1 + int(SAR_EXIT_SHADOW_WINDOW_BARS))
+            end = min(n, idx + 1 + int(window_bars))
 
             ot = np.asarray(open_time[start:end], dtype=np.float64)
             if not np.all(np.isfinite(ot)):
@@ -1782,7 +1783,7 @@ class CryptoSignalEngine:
             # Contiguity: the SAR walk steps bar by bar, so a gap would silently
             # compress real time and mis-date every exit after it.
             if len(ot) > 1 and not np.all(np.abs(np.diff(ot) - bar_ms) < 1.0):
-                return None, "gap or duplicate bar in the 15m window"
+                return None, f"gap or duplicate bar in the {tf} window"
             # The entry bar must actually contain the stamp, not merely precede it.
             if not (0.0 <= since_ms - float(ot[idx - start]) < bar_ms):
                 return None, "located bar does not contain the stamp"
@@ -1799,8 +1800,25 @@ class CryptoSignalEngine:
                 out["open"] = list(opens[start:end])
             return out, ""
 
-        def fetch_ohlc_15m_since(symbol: str, since_ts: float):
-            """``_ohlc_15m_detail``, with the miss counted and its cause kept.
+        def fetch_sar_ohlc_since(symbol: str, since_ts: float, rec: dict | None = None):
+            """``_ohlc_sar_detail`` for the row's OWN trail timeframe.
+
+            Two trail arms are stamped from every candidate since 2026-07-29 —
+            15m and 5m — and which series a row must be replayed on is a
+            property of the row, carried as ``bar_minutes`` at stamp time. A
+            fetcher keyed only on the symbol would hand both arms the same
+            candles: no error, no missing data, just two arms that agree
+            perfectly and a comparison that measures nothing.
+
+            The control arm has no trail timeframe and replays on the 15m
+            series, the one its 48h window is expressed in. That is not an
+            arbitrary default — the control is the same live geometry in both
+            comparisons, so giving it one series keeps a single control rather
+            than silently forking it per trail.
+
+            Window bars are per-timeframe on purpose: 192 bars is 48h at 15m
+            but 16h at 5m, and a trail truncated early would lose for a reason
+            unrelated to its timeframe.
 
             ``classify_pending`` reads a None here as "not yet" and moves on —
             correct mid-window, but silent, so a record whose candles will never
@@ -1808,10 +1826,36 @@ class CryptoSignalEngine:
             cause is knowable at exactly this point and nowhere later, so it is
             recorded here (2026-07-28).
             """
+            from config import (
+                SAR_EXIT_SHADOW_ALT_BAR_MINUTES,
+                SAR_EXIT_SHADOW_ALT_WINDOW_BARS,
+                SAR_EXIT_SHADOW_BAR_MINUTES,
+                SAR_EXIT_SHADOW_WINDOW_BARS,
+            )
             from src import sar_exit_shadow as _sar_shadow
 
-            window, reason = _ohlc_15m_detail(symbol, since_ts)
-            _sar_shadow.record_candle_fetch(symbol, window is not None, reason)
+            bm = None
+            if isinstance(rec, dict):
+                raw = rec.get("bar_minutes")
+                bm = float(raw) if raw is not None else None
+            if bm is not None and abs(bm - float(SAR_EXIT_SHADOW_ALT_BAR_MINUTES)) < 1e-9:
+                tf = _sar_shadow.tf_label(SAR_EXIT_SHADOW_ALT_BAR_MINUTES)
+                window_bars = int(SAR_EXIT_SHADOW_ALT_WINDOW_BARS)
+                bar_minutes = float(SAR_EXIT_SHADOW_ALT_BAR_MINUTES)
+            else:
+                tf = _sar_shadow.tf_label(SAR_EXIT_SHADOW_BAR_MINUTES)
+                window_bars = int(SAR_EXIT_SHADOW_WINDOW_BARS)
+                bar_minutes = float(SAR_EXIT_SHADOW_BAR_MINUTES)
+
+            window, reason = _ohlc_sar_detail(
+                symbol, since_ts, tf, window_bars, bar_minutes
+            )
+            # Counted per timeframe: a 5m series can be starved while the 15m
+            # one is healthy, and a pooled counter would read the average and
+            # page for neither.
+            _sar_shadow.record_candle_fetch(
+                symbol, window is not None, reason, timeframe=tf
+            )
             return window
 
         async def _refresh_sar_ledger_candles() -> None:
@@ -2116,7 +2160,7 @@ class CryptoSignalEngine:
                         from config import SAR_EXIT_SHADOW_WINDOW_BARS as _wb
                         from config import SAR_EXIT_SHADOW_BAR_MINUTES as _bm
                         counters = _sar.get_sar_store().classify_pending(
-                            fetch_ohlc_since=fetch_ohlc_15m_since,
+                            fetch_ohlc_since=fetch_sar_ohlc_since,
                             window_sec=float(_wb) * float(_bm) * 60.0,
                             on_classified=_feed_sar_edge,
                             trail_classifier=_sar.classify_sar_record,

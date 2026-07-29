@@ -147,7 +147,7 @@ def test_classify_pending_matures_and_hooks_edge(tmp_path):
     )
     seen = []
 
-    def ohlc(symbol, since):
+    def ohlc(symbol, since, _rec=None):
         return {"high": [102.5], "low": [99.5], "close": [102.1]}
 
     # now well past the window so the record matures.
@@ -169,7 +169,7 @@ def test_classify_pending_waits_inside_window(tmp_path):
     # now_ts only 10s after stamp -> still inside the 3600s window.
     import time as _t
     counters = store.classify_pending(
-        fetch_ohlc_since=lambda s, t: {"high": [103], "low": [98], "close": [100]},
+        fetch_ohlc_since=lambda s, t, _r=None: {"high": [103], "low": [98], "close": [100]},
         now_ts=_t.time() + 10,
     )
     assert counters == {}
@@ -183,7 +183,7 @@ def test_insufficient_when_no_ohlc(tmp_path):
         entry=100, stop_loss=99, tp1=102, store=store,
     )
     counters = store.classify_pending(
-        fetch_ohlc_since=lambda s, t: None, now_ts=1e12,
+        fetch_ohlc_since=lambda s, t, _r=None: None, now_ts=1e12,
     )
     assert counters.get(sa.INSUFFICIENT) == 1
 
@@ -275,7 +275,7 @@ def test_classify_pending_routes_limit_records(tmp_path):
     # Window extremes span TP with the limit never touched (lows stay above
     # entry): the immediate classifier would say WIN, the limit walk NOT_FILL.
     counters = store.classify_pending(
-        fetch_ohlc_since=lambda s, t: {
+        fetch_ohlc_since=lambda s, t, _r=None: {
             "high": [104.0, 105.0], "low": [100.5, 103.0], "close": [104.5, 104.8],
         },
         now_ts=1e12,

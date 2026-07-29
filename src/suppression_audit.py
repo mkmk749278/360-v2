@@ -225,6 +225,12 @@ class SuppressedCandidateRecord:
     # population.  ``None`` means "we could not decide", never "opposed" —
     # the caller refuses rather than defaulting.
     sar_aligned_at_entry: Optional[bool] = None
+    #: Trail timeframe in minutes for a trailing arm; None for a static one.
+    #: Recorded ON THE ROW rather than inferred from the strategy suffix,
+    #: because the resolver has to know which candle series to replay and a
+    #: string match is not a fact about the measurement (2026-07-29, when a
+    #: second trail timeframe was added beside the first).
+    bar_minutes: Optional[float] = None
     # The resolve-path recomputation of the same quantity, kept as a CROSS-CHECK
     # and never as the authority.  The two must agree; a disagreement means the
     # walker's replay window is not reconstructing the bar the scanner actually
@@ -762,7 +768,18 @@ class SuppressedCandidateStore:
     def classify_pending(
         self,
         *,
-        fetch_ohlc_since: Callable[[str, float], Optional[Dict[str, List[float]]]],
+        # (symbol, since_ts, record) -> ohlc | None.
+        #
+        # The record is passed because the series to replay is a property of
+        # the ROW, not of the symbol: since 2026-07-29 two trail arms are
+        # stamped from the same candidate on different timeframes, and a
+        # fetcher that sees only (symbol, ts) cannot tell 5m from 15m. It would
+        # silently hand every arm the same candles and the comparison would
+        # measure nothing — both arms identical, difference zero, and no error
+        # anywhere.
+        fetch_ohlc_since: Callable[
+            [str, float, dict], Optional[Dict[str, List[float]]]
+        ],
         now_ts: Optional[float] = None,
         window_sec: float = _WINDOW_SEC,
         on_classified: Optional[Callable[[dict], None]] = None,
@@ -803,7 +820,7 @@ class SuppressedCandidateStore:
             if not window_elapsed and not early:
                 continue
             symbol = str(rec.get("symbol") or "")
-            ohlc = fetch_ohlc_since(symbol, ts) if symbol else None
+            ohlc = fetch_ohlc_since(symbol, ts, rec) if symbol else None
             if not ohlc:
                 # Mid-window the candles simply may not exist yet; that is not a
                 # verdict.  Only a record whose full window has passed without
@@ -995,6 +1012,7 @@ def stamp_candidate(
     exit_model: str = EXIT_STATIC,
     provenance: str = "",
     sar_aligned_at_entry: Optional[bool] = None,
+    bar_minutes: Optional[float] = None,
     stamp_schema: int = 0,
     store: Optional[SuppressedCandidateStore] = None,
 ) -> Optional[SuppressedCandidateRecord]:
@@ -1030,6 +1048,10 @@ def stamp_candidate(
             sar_aligned_at_entry=(
                 None if sar_aligned_at_entry is None else bool(sar_aligned_at_entry)
             ),
+            # None for a static arm: "this row has no trail timeframe" is a
+            # different answer from "its trail is 15m", and a consumer
+            # bucketing by timeframe must not pool the two.
+            bar_minutes=(None if bar_minutes is None else float(bar_minutes)),
             # Stamped by the current contract, so its provenance is trustworthy
             # on reload without consulting a wall clock.
             prov_schema=PROVENANCE_SCHEMA,

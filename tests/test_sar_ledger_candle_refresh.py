@@ -93,7 +93,7 @@ def _fetcher(opens, highs, lows, closes, entry_index, *, visible_bars=None):
     """
     end = len(closes) if visible_bars is None else entry_index + 1 + visible_bars
 
-    def _fetch(symbol: str, since_ts: float):
+    def _fetch(symbol: str, since_ts: float, _rec=None):
         return {
             "open": list(opens[:end]),
             "high": list(highs[:end]),
@@ -580,7 +580,9 @@ class TestStalledRecordsAreCounted:
         _stamp_pair(store)
         counters = self._run(store, visible_bars=self.SL_AT - 2)
 
-        assert counters.get(sa.STALLED) == 1
+        # Two, not one: both trail arms (15m and 5m) stall on the same short
+        # window. The control arm is static and does not go through this path.
+        assert counters.get(sa.STALLED) == 2
         assert _trail_record(store)["classification"] is None, (
             "counting the stall must not change the verdict — it is still 'not yet'"
         )
@@ -641,7 +643,7 @@ class TestUnresolvedRecordCount:
         self._stamp(store, "BBBUSDT")
         # Two symbols, but each stamp writes a @SARBASE/@SAREXIT pair.
         assert len(sar.unresolved_symbols(window_sec=48 * 3600.0)) == 2
-        assert sar.unresolved_record_count(window_sec=48 * 3600.0) == 4
+        assert sar.unresolved_record_count(window_sec=48 * 3600.0) == 6
 
     def test_resolved_records_are_excluded(self, store):
         self._stamp(store, "AAAUSDT")

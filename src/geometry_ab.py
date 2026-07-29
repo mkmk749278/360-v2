@@ -66,10 +66,14 @@ GOV_SUFFIX = "@GOV"
 # module — because this tuple is what keeps the allocator from ever
 # *recommending* a measurement arm as an activatable strategy.
 SARBASE_SUFFIX = "@SARBASE"
+#: 5m trail arm (2026-07-29). Registered here so the allocator can never
+#: recommend it — a measurement arm is evidence about how to exit a strategy,
+#: not an activatable strategy. Mirrored in ops' MEASUREMENT_SUFFIXES.
+SAREXIT5_SUFFIX = "@SAREXIT5"
 SAREXIT_SUFFIX = "@SAREXIT"
 _VARIANT_SUFFIXES: Tuple[str, ...] = (
     FIXED_SUFFIX, ATR_SUFFIX, TUNED_SUFFIX, DSV2_SUFFIX, GOV_SUFFIX,
-    SARBASE_SUFFIX, SAREXIT_SUFFIX,
+    SARBASE_SUFFIX, SAREXIT_SUFFIX, SAREXIT5_SUFFIX,
 )
 
 GATE_FIXED = "geometry_ab:fixed"

@@ -88,7 +88,7 @@ class TestClassifyToEdgeFeed:
         fresh_store.records()[0]["suppress_timestamp"] = time.time() - 7200
         edge_store = StrategyEdgeStore(min_samples=1, persist_path="")
 
-        def fetch_ohlc_since(symbol, since_ts):
+        def fetch_ohlc_since(symbol, since_ts, _rec=None):
             # Price runs straight to TP1 without touching SL → WOULD_WIN.
             return {"high": [100.5, 102.0], "low": [99.8, 100.2], "close": [100.4, 101.9]}
 

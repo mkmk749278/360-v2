@@ -311,22 +311,35 @@ class TestPairStamping:
         assert self._stamp(store) is True
 
         recs = store.records()
-        assert len(recs) == 2, "a lone arm biases the A/B — both or neither"
+        assert len(recs) == 3, "a lone arm biases the A/B — all three or none"
         by_setup = {r["setup_class"]: r for r in recs}
-        assert set(by_setup) == {"SR_FLIP_RETEST@SARBASE", "SR_FLIP_RETEST@SAREXIT"}
+        assert set(by_setup) == {
+            "SR_FLIP_RETEST@SARBASE",
+            "SR_FLIP_RETEST@SAREXIT",
+            "SR_FLIP_RETEST@SAREXIT5",
+        }
         assert by_setup["SR_FLIP_RETEST@SARBASE"]["exit_model"] == sa.EXIT_STATIC
         assert by_setup["SR_FLIP_RETEST@SAREXIT"]["exit_model"] == sa.EXIT_TRAILING
-        # Both arms share the R denominator — that is what makes them comparable.
+        assert by_setup["SR_FLIP_RETEST@SAREXIT5"]["exit_model"] == sa.EXIT_TRAILING
+        # Each trail arm carries the timeframe the resolver must replay it on.
+        # The control carries None — it has no trail, and "no trail timeframe"
+        # is a different fact from "its trail is 15m".
+        assert by_setup["SR_FLIP_RETEST@SARBASE"]["bar_minutes"] is None
+        assert by_setup["SR_FLIP_RETEST@SAREXIT"]["bar_minutes"] == 15.0
+        assert by_setup["SR_FLIP_RETEST@SAREXIT5"]["bar_minutes"] == 5.0
+        # Every arm shares the R denominator — that is what makes them
+        # comparable, and it is why ONE control serves both trails.
         assert (
             by_setup["SR_FLIP_RETEST@SARBASE"]["sl_distance"]
             == by_setup["SR_FLIP_RETEST@SAREXIT"]["sl_distance"]
+            == by_setup["SR_FLIP_RETEST@SAREXIT5"]["sl_distance"]
         )
 
     def test_cooldown_blocks_the_near_duplicate_rescan(self, tmp_path):
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
         assert self._stamp(store, now_mono=1000.0, provenance=sa.PROVENANCE_SUPPRESSED) is True
         assert self._stamp(store, now_mono=1010.0, provenance=sa.PROVENANCE_SUPPRESSED) is False
-        assert len(store.records()) == 2
+        assert len(store.records()) == 3
 
     def test_a_suppressed_stamp_can_never_swallow_a_queued_one(self, tmp_path):
         """Owner-caught 2026-07-25: one shared cooldown budget per
@@ -344,7 +357,7 @@ class TestPairStamping:
             store, now_mono=1010.0, provenance=sa.PROVENANCE_ENQUEUED
         ) is True, "a queued candidate must never be dropped from the measurement"
         queued = [r for r in store.records() if r["provenance"] == sa.PROVENANCE_ENQUEUED]
-        assert len(queued) == 2      # both arms of the queued pair
+        assert len(queued) == 3      # all three arms of the queued candidate
 
     def test_stamping_can_never_write_emitted(self, tmp_path):
         """The stamp site does not know whether a signal was delivered.
@@ -375,7 +388,7 @@ class TestPairStamping:
             assert self._stamp(
                 store, now_mono=t, provenance=sa.PROVENANCE_ENQUEUED
             ) is False, "a re-detected persisting candidate must not re-stamp"
-        assert len(store.records()) == 2
+        assert len(store.records()) == 3
 
     def test_a_suppressed_stamp_adds_nothing_to_a_move_already_queued(self, tmp_path):
         """Changed contract, 2026-07-28 — and deliberately not symmetric.
@@ -421,7 +434,7 @@ class TestPairStamping:
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
         assert self._stamp(store, provenance=sa.PROVENANCE_ENQUEUED) is True
         recs = store.records()
-        assert len(recs) == 2
+        assert len(recs) == 3
         # Both arms are ONE candidate — they must agree, or a pair could be
         # split across the emitted/queued/suppressed filter.
         assert {r["provenance"] for r in recs} == {sa.PROVENANCE_ENQUEUED}
@@ -547,7 +560,7 @@ class TestClassifyEndToEnd:
     """The whole path: stamp → classify → outcome, both arms, one window."""
 
     def _fetcher(self, opens, highs, lows, closes, entry_index):
-        def _fetch(symbol, since_ts):
+        def _fetch(symbol, since_ts, _rec=None):
             return {
                 "open": list(opens), "high": list(highs),
                 "low": list(lows), "close": list(closes),
@@ -575,9 +588,9 @@ class TestClassifyEndToEnd:
 
         # Unguarded: the path must be ALIVE. A classifier that resolves nothing
         # is the exact failure this suite exists to catch.
-        assert sum(counters.values()) == 2, counters
+        assert sum(counters.values()) == 3, counters
         assert counters.get(sa.INSUFFICIENT, 0) == 0
-        assert len(fed) == 2
+        assert len(fed) == 3
 
         by_setup = {r["setup_class"]: r for r in store.records()}
         trail = by_setup["SR_FLIP_RETEST@SAREXIT"]
@@ -724,7 +737,7 @@ class TestProvenancePromotionOnDispatch:
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
         assert self._stamp(store) is True
 
-        assert self._promote(store) == 2, "a half-promoted pair biases the A/B"
+        assert self._promote(store) == 3, "a half-promoted candidate biases the A/B"
         assert {r["provenance"] for r in store.records()} == {sa.PROVENANCE_EMITTED}
 
     def test_a_queued_candidate_the_router_drops_stays_queued(self, tmp_path):
@@ -772,12 +785,12 @@ class TestProvenancePromotionOnDispatch:
             for rec in store._buffer:
                 rec["suppress_timestamp"] -= 600.0
         assert self._stamp(store, now_mono=100000.0) is True
-        assert len(store.records()) == 4
+        assert len(store.records()) == 6
 
-        assert self._promote(store) == 2
+        assert self._promote(store) == 3
         provs = [r["provenance"] for r in store.records()]
-        assert provs.count(sa.PROVENANCE_EMITTED) == 2
-        assert provs.count(sa.PROVENANCE_ENQUEUED) == 2
+        assert provs.count(sa.PROVENANCE_EMITTED) == 3
+        assert provs.count(sa.PROVENANCE_ENQUEUED) == 3
 
     def test_promotion_cannot_rewrite_an_already_measured_record(self, tmp_path):
         """Once a record is classified its outcome is in the edge matrix.
@@ -940,7 +953,7 @@ class TestATrailingTradeResolvesWhenItActuallyCloses:
         return store
 
     @staticmethod
-    def _ohlc(_symbol, _since):
+    def _ohlc(_symbol, _since, _rec=None):
         return {"high": [1.0, 1.0], "low": [1.0, 1.0], "close": [1.0, 1.0]}
 
     def test_a_trail_exit_resolves_immediately_not_in_48h(self):
@@ -1316,12 +1329,18 @@ class TestAlignmentIsStampedNotDeferred:
             highs=highs, lows=lows, store=store,
         ) is True
         recs = store.records()
-        assert len(recs) == 2
+        assert len(recs) == 3
         # Nothing has resolved — that is the whole point.
         assert all(r["classification"] is None for r in recs)
-        assert all(r["sar_aligned_at_entry"] is True for r in recs), (
-            "the verdict must exist the moment the pair is stamped"
+        by = {r["setup_class"]: r for r in recs}
+        # The two arms measured on the supplied series carry the verdict at
+        # stamp time. The 5m arm got no series here, so it carries None —
+        # undecidable, never silently borrowed from the 15m answer.
+        assert by["SR_FLIP_RETEST@SARBASE"]["sar_aligned_at_entry"] is True, (
+            "the verdict must exist the moment the candidate is stamped"
         )
+        assert by["SR_FLIP_RETEST@SAREXIT"]["sar_aligned_at_entry"] is True
+        assert by["SR_FLIP_RETEST@SAREXIT5"]["sar_aligned_at_entry"] is None
 
     def test_without_candles_the_row_carries_no_verdict(self, tmp_path):
         store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
@@ -1442,3 +1461,97 @@ class TestResolveCrossCheck:
         assert res is not None
         # The bar closed at entry, not the one still forming.
         assert res["sar_aligned_at_resolve"] is True
+
+
+class TestTwoTrailTimeframesAreMeasuredSeparately:
+    """5m and 15m trails, one control, three rows per candidate (2026-07-29).
+
+    Owner asked which trail timeframe carries edge. That is a question the
+    ledger can answer on real data, so it is measured rather than chosen.
+
+    The invariants below are the ones that make the answer trustworthy:
+    ONE control (a second would double-count the candidate in any rollup that
+    pools arms), each trail row carrying its OWN timeframe (the resolver has to
+    know which candles to replay, and a suffix string-match is not a fact), and
+    alignment decided PER timeframe (SAR routinely sits onside on 5m and opposed
+    on 15m for the same entry, and under conditional handover that decides
+    whether the trail governs from bar one).
+    """
+
+    def _stamp(self, store, **kw):
+        # Warm arrays where the 15m and 5m SAR land on OPPOSITE sides of the
+        # entry, which is the case the per-arm alignment exists for: 15m
+        # trending up under price, 5m just flipped above it.
+        up = [1.0 + 0.01 * i for i in range(60)]
+        down = [1.6 - 0.01 * i for i in range(60)]
+        return sar.stamp_sar_pair(
+            symbol="ETHUSDT", channel="scalp", setup_class="SR_FLIP_RETEST",
+            side="LONG", entry=1.5, stop_loss=1.45, tp1=1.6, confidence=70.0,
+            highs=[h + 0.01 for h in up], lows=up,
+            highs_alt=[h + 0.01 for h in down], lows_alt=down,
+            store=store, **kw,
+        )
+
+    def test_one_control_serves_both_trails(self, tmp_path):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        assert self._stamp(store) is True
+        setups = [r["setup_class"] for r in store.records()]
+        # Exactly one control row. A second would be the same numbers under a
+        # second name — the candidate counted twice.
+        assert setups.count("SR_FLIP_RETEST@SARBASE") == 1
+        assert setups.count("SR_FLIP_RETEST@SAREXIT") == 1
+        assert setups.count("SR_FLIP_RETEST@SAREXIT5") == 1
+
+    def test_each_trail_row_knows_its_own_timeframe(self, tmp_path):
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        self._stamp(store)
+        bm = {r["setup_class"]: r["bar_minutes"] for r in store.records()}
+        assert bm["SR_FLIP_RETEST@SAREXIT"] == 15.0
+        assert bm["SR_FLIP_RETEST@SAREXIT5"] == 5.0
+        assert bm["SR_FLIP_RETEST@SARBASE"] is None
+
+    def test_alignment_is_decided_per_timeframe_not_copied(self, tmp_path):
+        # The regression this guards: stamping the 15m verdict onto the 5m arm
+        # would make the two arms look more alike than they are, and under
+        # conditional handover it would put the 5m arm on the wrong exit model
+        # from bar one.
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        self._stamp(store)
+        aligned = {
+            r["setup_class"]: r["sar_aligned_at_entry"] for r in store.records()
+        }
+        assert aligned["SR_FLIP_RETEST@SAREXIT"] != aligned["SR_FLIP_RETEST@SAREXIT5"]
+
+    def test_an_absent_alt_series_leaves_that_arm_undecided_not_opposed(self, tmp_path):
+        # Tri-state, never coerced: "we could not tell" must not become
+        # "opposed" and silently invent half a population.
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        up = [1.0 + 0.01 * i for i in range(60)]
+        assert sar.stamp_sar_pair(
+            symbol="ETHUSDT", channel="scalp", setup_class="SR_FLIP_RETEST",
+            side="LONG", entry=1.5, stop_loss=1.45, tp1=1.6, confidence=70.0,
+            highs=[h + 0.01 for h in up], lows=up,
+            highs_alt=None, lows_alt=None, store=store,
+        ) is True
+        by = {r["setup_class"]: r for r in store.records()}
+        assert by["SR_FLIP_RETEST@SAREXIT5"]["sar_aligned_at_entry"] is None
+
+    def test_the_alt_arm_is_registered_as_a_measurement_variant(self):
+        # Unregistered, the allocator would treat it as a recommendable
+        # strategy. "X@SAREXIT5" ends with neither existing suffix, so a
+        # two-way check returns False for it silently.
+        from src.geometry_ab import base_strategy
+        assert sar.is_sar_variant("SR_FLIP_RETEST@SAREXIT5") is True
+        assert is_geometry_variant("SR_FLIP_RETEST@SAREXIT5") is True
+        assert base_strategy("SR_FLIP_RETEST@SAREXIT5") == "SR_FLIP_RETEST"
+
+    def test_trail_bar_minutes_reports_none_for_a_non_trail_strategy(self):
+        assert sar.trail_bar_minutes("SR_FLIP_RETEST@SAREXIT") == 15.0
+        assert sar.trail_bar_minutes("SR_FLIP_RETEST@SAREXIT5") == 5.0
+        assert sar.trail_bar_minutes("SR_FLIP_RETEST@SARBASE") is None
+        assert sar.trail_bar_minutes("SR_FLIP_RETEST") is None
+
+    def test_tf_label_matches_the_data_store_keys(self):
+        assert sar.tf_label(5) == "5m"
+        assert sar.tf_label(15) == "15m"
+        assert sar.tf_label(60) == "1h"

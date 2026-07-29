@@ -279,7 +279,7 @@ class TestClassifyDoctrineScenario:
         measured by the same classifier the suppression audit uses."""
         _stamp(fresh_geometry_store)
 
-        def fetch_ohlc_since(symbol, since_ts):
+        def fetch_ohlc_since(symbol, since_ts, _rec=None):
             return {"high": [102.0], "low": [98.7], "close": [101.9]}
 
         fresh_geometry_store.classify_pending(
