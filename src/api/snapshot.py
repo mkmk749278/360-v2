@@ -547,7 +547,11 @@ def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
         else str(direction or "LONG")
     ).upper()
     setup_class = getattr(sig, "setup_class", "UNCLASSIFIED") or "UNCLASSIFIED"
-    timestamp = getattr(sig, "timestamp", None) or _now()
+    # Normalised to tz-aware, because a naive stamp serialises without a zone
+    # and a client that parses it gets *local* time: 5h30m of silent error on
+    # an IST phone, on the very field a chart anchors its entry marker to.
+    # Same ``or _now()`` fallback this line has always had for a missing stamp.
+    timestamp = _as_datetime(getattr(sig, "timestamp", None)) or _now()
     status = getattr(sig, "status", "ACTIVE") or "ACTIVE"
     dispatch_ts = getattr(sig, "dispatch_timestamp", None)
     terminal_ts = getattr(sig, "terminal_outcome_timestamp", None)

@@ -377,3 +377,16 @@ class TestLifecycleInstantsArePublished:
         d = _signal_to_detail(sig)
         assert d.terminal_outcome_timestamp is not None
         assert d.terminal_outcome_timestamp.tzinfo is not None
+
+    def test_creation_stamp_is_published_tz_aware(self):
+        """A naive stamp serialises without a zone and parses as *local* time.
+
+        On an IST phone that is 5h30m of silent error, on the one field the
+        chart anchors its entry marker to — a worse version of the bug being
+        fixed.  Normalise at the producer.
+        """
+        sig = _make_sig(status="ACTIVE")
+        sig.timestamp = datetime(2026, 7, 29, 6, 20, 21)  # naive, as stored
+        d = _signal_to_detail(sig)
+        assert d.timestamp.tzinfo is not None
+        assert d.timestamp == datetime(2026, 7, 29, 6, 20, 21, tzinfo=timezone.utc)
