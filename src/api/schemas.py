@@ -123,7 +123,36 @@ class SignalDetail(BaseModel):
         description="Absolute price the engine watches for pre-TP fire",
     )
     timestamp: datetime
-    minutes_ago: int
+    minutes_ago: int = Field(
+        ...,
+        description=(
+            "Recency of the signal's LAST event, for an 'N ago' label — NOT its "
+            "age. Closed signals measure from the terminal event, active ones "
+            "from dispatch. Never reconstruct a point in time from this: "
+            "``now - minutes_ago`` lands on the exit for every closed signal. "
+            "Use ``timestamp`` / ``dispatch_timestamp`` / "
+            "``terminal_outcome_timestamp`` — the app drew its chart ENTRY "
+            "marker at the exit for months on exactly this mistake "
+            "(owner-caught 2026-07-29)."
+        ),
+    )
+    dispatch_timestamp: Optional[datetime] = Field(
+        None,
+        description=(
+            "When the signal was dispatched to subscribers — the moment a "
+            "reader could have acted on it. None on records that predate the "
+            "stamp."
+        ),
+    )
+    terminal_outcome_timestamp: Optional[datetime] = Field(
+        None,
+        description=(
+            "When the signal reached its terminal state (SL_HIT / TP / "
+            "invalidation). None while the signal is still open, and on "
+            "closed records that predate the stamp — the two are different "
+            "states and a consumer must not pool them."
+        ),
+    )
     hold_mins: Optional[int] = Field(
         None,
         description=(
