@@ -486,10 +486,11 @@ reading source. Procedures live in `docs/DR_RUNBOOK.md`; this is the map.
 
 | Layer | Fact |
 |---|---|
-| **Host** | Single Ubuntu VPS, Docker Compose, 24/7. 4 cores — the engine container was capped at 1.5 of them until Session 85. Its IP is **not recorded in any repo** — see the whitelist hazard below |
+| **Host** | Single Ubuntu VPS at **`194.163.141.135`**, Docker Compose, 24/7. 4 cores — the engine container was capped at 1.5 of them until Session 85. This address is load-bearing: see the whitelist hazard below |
 | **Domain** | `luminapp.org` — **registered at Namecheap**, nameservers delegated to **Cloudflare**; all DNS records are managed in Cloudflare, not at the registrar. Change records in Cloudflare; touch Namecheap only for renewal and nameserver changes |
-| **DNS records** | `api.luminapp.org` → engine API · `ops.luminapp.org` → ops dashboard · `app.luminapp.org` → the PWA channel. All resolve to the one VPS |
-| **TLS / edge** | Cloudflare terminates TLS (Mumbai edge for the launch region) |
+| **DNS records** | `api.luminapp.org` → engine API · `ops.luminapp.org` → ops dashboard · `app.luminapp.org` → the PWA channel. All three resolve to the one VPS |
+| **TLS / edge** | Cloudflare terminates TLS (Mumbai edge for the launch region). **Per-record proxy mode is unverified** — see the open items below |
+| **Backup layers** | Nightly encrypted data-volume backup **only**. No provider-level VPS snapshots, so DR is always a rebuild-from-scratch: the runbook's ≤2h RTO has no shortcut behind it, which is exactly why the quarterly restore drill is not optional |
 | **Deploy path** | GitHub Actions SSHes in using `VPS_HOST` / `VPS_USER` / `VPS_SSH_KEY` repo secrets. There is no manual deploy step in the normal flow |
 | **Scheduled workflows** | `deploy.yml` (on `main`) · `vps-backup.yml` (nightly 21:45 UTC) · `vps-liveness.yml` · `vps-monitor.yml` (truth report → `monitor-logs`) · `ci.yml` |
 | **Secrets** | 26 GitHub Actions secrets across the repos — VPS SSH, Binance, Telegram, Firebase/FCM, Android signing keystore, NOWPayments, backup passphrase, GHCR/PAT. **`.env` exists only on the VPS and in the owner's password manager — never in a repo, by design.** The continuity pack (`docs/CONTINUITY_PACK_TEMPLATE.md`) must hold a current copy or DR fails at step 4 |
@@ -505,6 +506,18 @@ their whitelist themselves. It is not an infrastructure decision; it is a migrat
 with a user-comms plan. `docs/UNIVERSE_EXPANSION_AND_SECOND_IP_2026_07_27.md` §6 calls
 this the whitelist landmine, and `docs/DR_RUNBOOK.md` Scenario A sequences the DNS
 cutover around it.
+
+**Open infrastructure items** (owner-confirmed unknown, 2026-07-29 — not findings, and
+not yet acted on):
+
+| Item | Why it matters | How to settle it |
+|---|---|---|
+| **Cloudflare proxy mode per record** | Proxied means Cloudflare absorbs DDoS and hides the origin; DNS-only means the VPS answers the internet directly and the edge protections aren't in the path at all. Which one is live changes the threat model, not just the routing | Cloudflare dashboard → DNS → the cloud icon per record. Or `dig +short api.luminapp.org` — a Cloudflare-owned address means proxied, `194.163.141.135` means DNS-only |
+| **Origin firewall on 443/80** | `deploy_vps.sh` configures **no** firewall, so unless ufw was set up by hand the origin accepts connections from anywhere. Combined with a *proxied* record that is a bypass: an attacker who knows the address reaches the origin without passing the edge — and the address is in this file | `sudo ufw status` on the box. Restricting 443 to [Cloudflare's published ranges](https://www.cloudflare.com/ips/) closes it, but **only after** confirming the records are proxied — locking the origin while records are DNS-only takes the whole system offline |
+
+These two compose, and the order matters: confirm proxy mode first, firewall second.
+Neither is urgent enough to interrupt product work, and neither should be left open
+indefinitely on a box that holds the signing service.
 
 ---
 
@@ -745,6 +758,15 @@ grep -rhoE '[a-z_]+\.json' src/ config/ | sort | uniq -c | sort -rn   # data fil
 docker logs 360scalp-v2-engine --tail 100 | grep 'Scanner config'   # universe actually loaded
 docker exec 360scalp-v2-redis redis-cli KEYS "snapshot:*"
 git fetch origin monitor-logs && git show origin/monitor-logs:monitor/report/truth_report.md
+```
+
+**Infrastructure, from anywhere:**
+
+```bash
+dig +short api.luminapp.org ops.luminapp.org app.luminapp.org  # Cloudflare IP = proxied,
+                                                               # 194.163.141.135 = DNS-only
+curl -sI https://api.luminapp.org/api/health | grep -i '^server\|^cf-'   # cf-ray ⇒ through the edge
+ssh <vps> 'sudo ufw status; docker ps --format "{{.Names}}\t{{.Status}}"'
 ```
 
 The truth report's `EVAL::*` rows are the authoritative answer to "which paths are
