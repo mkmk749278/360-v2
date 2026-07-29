@@ -91,9 +91,29 @@ log = get_logger("sar_exit_shadow")
 # activatable strategy.
 SARBASE_SUFFIX = "@SARBASE"
 SAREXIT_SUFFIX = "@SAREXIT"
+#: 5m trail, measured beside the 15m one (owner, 2026-07-29).
+#:
+#: ``@SAREXIT`` is **not** renamed to ``@SAREXIT15`` even though that is what it
+#: means. The edge matrix, the ops rollup and every resolved row in the v3
+#: ledger key on the existing string; renaming would orphan the whole
+#: accumulated population to make one constant read better. So: ``@SAREXIT`` is
+#: the 15m arm, by history, and the timeframe each row was measured on is
+#: recorded on the row itself as ``bar_minutes`` rather than inferred from its
+#: name.
+SAREXIT5_SUFFIX = "@SAREXIT5"
 
 GATE_SARBASE = "sar_exit_shadow:base"
 GATE_SAREXIT = "sar_exit_shadow:trail"
+GATE_SAREXIT5 = "sar_exit_shadow:trail5"
+
+#: Trail arms keyed by the suffix that identifies them, so a consumer asking
+#: "which timeframe is this row?" reads one table instead of matching strings.
+#: The control arm is absent on purpose: the live geometry does not have a trail
+#: timeframe, which is exactly why one control serves both trails.
+TRAIL_ARMS: Dict[str, float] = {
+    SAREXIT_SUFFIX: 15.0,
+    SAREXIT5_SUFFIX: 5.0,
+}
 
 # v2 (2026-07-26): every record written before this point was resolved by a
 # walker that located the entry bar by counting elapsed time, so it replayed a
@@ -594,9 +614,32 @@ def get_sar_store() -> SuppressedCandidateStore:
 
 
 def is_sar_variant(strategy: str) -> bool:
-    """True for ``X@SARBASE`` / ``X@SAREXIT`` measurement rows."""
+    """True for ``X@SARBASE`` / ``X@SAREXIT`` / ``X@SAREXIT5`` measurement rows.
+
+    Order matters: ``@SAREXIT5`` ends with neither ``@SAREXIT`` nor
+    ``@SARBASE``, so a plain two-way check silently returns False for it and the
+    allocator would treat a measurement arm as a recommendable strategy.
+    """
     s = str(strategy or "")
-    return s.endswith(SARBASE_SUFFIX) or s.endswith(SAREXIT_SUFFIX)
+    return (
+        s.endswith(SARBASE_SUFFIX)
+        or s.endswith(SAREXIT_SUFFIX)
+        or s.endswith(SAREXIT5_SUFFIX)
+    )
+
+
+def trail_bar_minutes(strategy: str) -> Optional[float]:
+    """Trail timeframe for a stamped arm, or None if it has no trail.
+
+    The control arm and every non-SAR strategy return None — "this row has no
+    trail timeframe" is a different answer from "its trail is 15m", and a
+    consumer bucketing by timeframe must not pool the two.
+    """
+    s = str(strategy or "")
+    for suffix, minutes in TRAIL_ARMS.items():
+        if s.endswith(suffix):
+            return minutes
+    return None
 
 
 def stamp_sar_pair(

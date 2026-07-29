@@ -613,6 +613,33 @@ SAR_EXIT_SHADOW_WARMUP_BARS: int = _safe_int("SAR_EXIT_SHADOW_WARMUP_BARS", "50"
 # Bar size of the trail, in minutes.  15m is what the bake-off measured; the
 # classifier reads this timeframe straight from the warm in-memory data store.
 SAR_EXIT_SHADOW_BAR_MINUTES: float = _safe_float("SAR_EXIT_SHADOW_BAR_MINUTES", "15")
+# Second trail timeframe, measured beside the first (owner, 2026-07-29): "which
+# timeframe gives edge" is a question the ledger can answer on real data, so it
+# should not be settled by picking one.
+#
+# A THIRD ARM, not a second pair.  The control is the live geometry, which does
+# not change with the trail's bar size — so a candidate stamps @SARBASE (control)
+# + @SAREXIT (15m) + @SAREXIT5 (5m), three rows, and the comparison is a
+# per-candidate triple join.  Pooling the two trail arms as if they were separate
+# trades would count every candidate twice: the same entry measured two ways is
+# one piece of evidence, not two (the #816 lesson in a new place).
+#
+# Measurement flag, so it is ON at ship time per CLAUDE.md § Project Phase.  It
+# cannot reach a subscriber or the money path — the arm is observe-only and
+# routes nothing — and a measurement that ships OFF produces an empty panel and
+# a decision that keeps getting deferred.
+SAR_EXIT_SHADOW_ALT_ENABLED: bool = _safe_bool("SAR_EXIT_SHADOW_ALT_ENABLED", "true")
+SAR_EXIT_SHADOW_ALT_BAR_MINUTES: float = _safe_float(
+    "SAR_EXIT_SHADOW_ALT_BAR_MINUTES", "5"
+)
+# The alt arm's post-entry window in BARS.  Deliberately its own setting rather
+# than sharing WINDOW_BARS: the comparison is only fair if both trails get the
+# same wall-clock window, and 192 bars is 48h at 15m but 16h at 5m.  576 × 5m
+# = 48h, matching.  A trail that is stopped out early by a shorter window would
+# look worse for a reason that has nothing to do with its timeframe.
+SAR_EXIT_SHADOW_ALT_WINDOW_BARS: int = _safe_int(
+    "SAR_EXIT_SHADOW_ALT_WINDOW_BARS", "576"
+)
 # Min seconds between two pairs for the same (symbol, setup, side) — the same
 # persisting candidate re-detects every 15s scan; one pair per window is a fair
 # sample, thousands of near-duplicates are not.  Mirrors the geometry A/B.
