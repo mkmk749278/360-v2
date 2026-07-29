@@ -975,7 +975,12 @@ class TestATrailingTradeResolvesWhenItActuallyCloses:
                 "trail_exit_price": 99.5,
             },
         )
-        assert counters == {}
+        # No *verdict* — but the refusal is counted now rather than silent.
+        # A ledger refusing everything used to be indistinguishable from one
+        # resolving everything (2026-07-29).
+        assert sa.WOULD_WIN not in counters and sa.WOULD_LOSE not in counters
+        assert "LOSS" not in counters
+        assert counters == {sa.STALLED: 1}
         assert store.records()[0]["classification"] is None
 
     def test_a_window_verdict_is_accepted_once_the_window_has_elapsed(self):
@@ -1181,7 +1186,10 @@ class TestEarlyResolutionThroughTheRealClassifier:
             trail_classifier=sar.classify_sar_record,
         )
 
-        assert counters == {}
+        # Refused, and counted as refused: the walker ran out of bars, which is
+        # honest mid-window but must not be silent — that silence is what let
+        # 395 of 401 rows sit RUNNING on closed trades (2026-07-29).
+        assert counters == {sa.STALLED: 1}
         assert store.records()[0]["classification"] is None
 
     def test_the_guard_reads_the_key_a_trail_classifier_actually_returns(self):

@@ -529,3 +529,129 @@ class TestRefreshBudgetHealth:
         sar.record_refresh_budget(due=4, served=4, starved=0, pending=85)
         sar.roll_refresh_budget_cycle()
         assert sar.refresh_budget_health()["pending"] == 85
+
+
+# ---------------------------------------------------------------------------
+# The silence, not the stall: a ledger producing no verdicts must page
+# ---------------------------------------------------------------------------
+# The stall itself is correct and expected — mid-window, "not yet" is the honest
+# answer, and a ledger holding 400 open trades stalls on nearly all of them
+# every cycle. What was wrong is that the stall was *unrecorded*: a fail-open
+# ``continue`` with no counter, so a ledger resolving nothing looked exactly
+# like one resolving everything.
+#
+# ``sar_ledger_candles`` could not close the gap because it measures whether the
+# fetch returned a window, and a frozen or too-short window is still a window —
+# counted as a success, then dropped. On 2026-07-29 that combination held 395 of
+# 401 rows at RUNNING for trades that had already closed (DEXEUSDT: stop hit 1
+# minute after entry, unresolved 19.2h later) with every watchdog green.
+
+
+class TestStalledRecordsAreCounted:
+    """A mid-window record that had candles and produced no verdict is counted.
+
+    Drives the real ``classify_sar_record`` over a real frozen series — the
+    same construction the resolvability tests above use — rather than a mock
+    whose keys we chose. A mock here would assert our own assumption about the
+    walker's return shape, which is precisely the failure #798 shipped.
+    """
+
+    WARMUP = 40
+    POST = 30
+    SL_AT = 6
+
+    def _run(self, store, *, visible_bars):
+        opens, highs, lows, closes = _opposed_long_path(
+            self.WARMUP, self.POST, sl_at=self.SL_AT
+        )
+        return store.classify_pending(
+            fetch_ohlc_since=_fetcher(
+                opens, highs, lows, closes, self.WARMUP, visible_bars=visible_bars,
+            ),
+            now_ts=time.time() + 600,   # mid-window
+            window_sec=48 * 3600.0,
+            trail_classifier=sar.classify_sar_record,
+        )
+
+    def test_a_short_window_counts_as_stalled(self, tmp_path):
+        """The regression. This ``continue`` reported nothing before, so a
+        frozen ledger and a healthy one produced identical telemetry."""
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        _stamp_pair(store)
+        counters = self._run(store, visible_bars=self.SL_AT - 2)
+
+        assert counters.get(sa.STALLED) == 1
+        assert _trail_record(store)["classification"] is None, (
+            "counting the stall must not change the verdict — it is still 'not yet'"
+        )
+
+    def test_a_resolved_record_is_not_counted_as_stalled(self, tmp_path):
+        """Same record, same clock; the only difference is candles that reach
+        past the stop. A counter that fired on both would be noise."""
+        store = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        _stamp_pair(store)
+        counters = self._run(store, visible_bars=None)
+
+        assert counters.get(sa.STALLED, 0) == 0
+        assert _trail_record(store)["classification"] is not None
+
+
+class TestResolutionHealth:
+    @pytest.fixture(autouse=True)
+    def _clean(self):
+        sar.reset_resolution_health()
+        yield
+        sar.reset_resolution_health()
+
+    def test_counters_are_published_per_cycle_not_cumulatively(self):
+        sar.record_resolution_cycle(resolved=0, stalled=40, pending=400)
+        sar.roll_resolution_cycle()
+        assert sar.resolution_health()["resolved"] == 0
+
+        sar.record_resolution_cycle(resolved=7, stalled=33, pending=380)
+        sar.roll_resolution_cycle()
+        assert sar.resolution_health()["resolved"] == 7
+
+    def test_health_reads_the_last_completed_cycle_never_one_still_filling(self):
+        sar.record_resolution_cycle(resolved=5, stalled=1, pending=9)
+        sar.roll_resolution_cycle()
+        sar.record_resolution_cycle(resolved=0, stalled=9, pending=9)
+        assert sar.resolution_health()["resolved"] == 5
+
+
+class TestUnresolvedRecordCount:
+    """The population at risk is records, not symbols: one symbol carrying 40
+    stuck records and one carrying 1 are the same entry in
+    ``unresolved_symbols``, and the harm scales with records."""
+
+    @pytest.fixture()
+    def store(self, tmp_path, monkeypatch):
+        s = SuppressedCandidateStore(persist_path=str(tmp_path / "s.json"), maxlen=100)
+        monkeypatch.setattr(sar, "get_sar_store", lambda: s)
+        return s
+
+    def _stamp(self, store, symbol):
+        assert sar.stamp_sar_pair(
+            symbol=symbol, channel="scalp", setup_class="MOVER_TREND_PULLBACK",
+            side="LONG", entry=100.0, stop_loss=97.0, tp1=106.0, store=store,
+        ) is True
+
+    def test_counts_every_unresolved_record_not_every_symbol(self, store):
+        self._stamp(store, "AAAUSDT")
+        self._stamp(store, "BBBUSDT")
+        # Two symbols, but each stamp writes a @SARBASE/@SAREXIT pair.
+        assert len(sar.unresolved_symbols(window_sec=48 * 3600.0)) == 2
+        assert sar.unresolved_record_count(window_sec=48 * 3600.0) == 4
+
+    def test_resolved_records_are_excluded(self, store):
+        self._stamp(store, "AAAUSDT")
+        for rec in store.records():
+            rec["classification"] = sa.WOULD_LOSE
+        assert sar.unresolved_record_count(window_sec=48 * 3600.0) == 0
+
+    def test_records_past_their_window_are_excluded(self, store):
+        """Their verdict is already decided; they are not awaiting progress."""
+        self._stamp(store, "AAAUSDT")
+        for rec in store.records():
+            rec["suppress_timestamp"] = time.time() - 72 * 3600
+        assert sar.unresolved_record_count(window_sec=48 * 3600.0) == 0
