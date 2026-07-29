@@ -4,6 +4,94 @@
 
 ---
 
+## 🟢 SESSION 89 2026-07-28 — the SAR arm's edge was inside its own fill error (#822, ops #101, app #140)
+
+Owner asked for Parabolic SAR on the app charts, "aligned with our Signals". Shipping
+the indicator took one PR. Asking what "aligned" should mean took the rest of the
+session and ended with the arm's headline number deleted.
+
+### What shipped
+
+| Repo | Change |
+|---|---|
+| lumin-app #140 | SAR chip on the charts — dots, engine's 0.02/0.2, own caption module |
+| 360-v2 #821 | Cross-repo vector pinning the app's port to `parabolic_sar` |
+| **360-v2 #822** | **The fill fix**, bake-off script, ledger v2→v3, replay script |
+| **ops #101** | Same fill fix, plus ops' third SAR copy finally pinned |
+
+### The bug
+
+`parabolic_sar` overwrites `out[i]` on a **reversal bar** with the post-flip level —
+the prior trend's extreme, sitting on the *far side* of price. Both simulators read
+that as "the stop in force during bar i", so `lows[i] <= stop` was trivially true on a
+flip bar and the gap-through branch filled at **the bar's open** instead of the level
+price actually breached. Right bar, wrong price.
+
+One-directional, because a flip bar normally opens on the profitable side of the stop
+and wicks through it:
+
+| | |
+|---|---|
+| 820 real 15m flips, 10 symbols | mean **+0.222%**/trail exit, flatters the trade **95%** of the time |
+| 186 delivered signals replayed | trail exits **−0.814%** once corrected, **0 of 186 improved** |
+| genuine gap-throughs (open is correct) | **1%** |
+
+Session 88 read **+0.197% net/trade** for this arm. Corrected: **≈ +0.02%**.
+**The measured edge was smaller than the measurement error.**
+
+### Three consequences bigger than the ledger
+
+1. **PF 1.60 is affected.** `scripts/exit_method_backtest.py` carries the identical
+   bug, and that script produced the headline this arm exists to confirm or kill.
+   Fixed; **re-run before quoting PF 1.60 again.**
+2. **It skewed the ranking, not just the level.** `atr` builds its own ratcheted trail
+   and `supertrend` exits on the close — neither reads the flip-overwritten series.
+   The bias landed on **SAR alone**, the method being considered for adoption.
+3. **The ledger cannot answer the adoption question at all.** A 467-row / 8.6h export
+   held **5 delivered** rows, 2 closed, and `delta_r` empty on **all 467** — the A/B
+   has n=0. 462 of 467 rows describe signals no subscriber ever saw.
+
+### What the delivered population actually says
+
+`scripts/replay_signal_history_sar.py` (new) replays a `signal_history` export through
+this module's **own** `simulate_sar_exit`. First run — 186 signals, spot proxy, 37%
+coverage, **directional only**:
+
+| | win | mean net | mean R |
+|---|---|---|---|
+| SAR arm (replayed) | 28.5% | +0.202% | +0.67 |
+| **engine's real exit** | **37.1%** | **+0.256%** | **+2.46** |
+
+The live exit wins on all three, against a counterfactual that never paid a spread.
+Alignment split came out **agreed +0.42% vs opposed −0.06%** — the *opposite* ordering
+to the ledger panel, which is itself evidence the ledger's split was biased.
+
+**Open — do this next:** re-run on the VPS with `--market futures`. Binance futures is
+451-blocked from the dev container, so 63% of rows were unreachable and the gap is
+systematically the small-cap perps where the fill error is largest. Also: mean and
+median disagree violently on both arms (SAR +0.202% vs −0.442%), and 44% of rows are
+repeats of a symbol+side pair, so neither mean is a typical trade.
+
+### Rules earned
+
+- **A published indicator value is not a fill price.** Wilder's SAR publishes the
+  post-flip level on a reversal bar; the level a position is *stopped at* is the
+  projected-and-clamped one, knowable before the bar trades. Any simulator that reads
+  an indicator series as a stop must ask which of the two it is holding.
+- **Three copies, two pinned, is unpinned.** #821 locked engine↔app and left ops'
+  transcription free. The copy nobody is watching is the one that drifts.
+- **A fixture anchored to a frozen date, rendered by a route reading the real clock,
+  is a time bomb** — and it names the wrong thing when it goes off. ops' trials test
+  went red at 12:00 UTC on **a date, not a commit** (#101), reading as a broken trials
+  page. Reducer tests inject their clock and stay frozen; route fixtures rebuild from
+  `now()`.
+- **"Is it measuring accurately?" is a question worth asking before every replay.**
+  The owner asked it here and it deleted a headline number. Everything downstream of
+  a wrong fill — `r_multiple`, `pnl_pct`, `delta_r` — is wrong with it, which is why
+  v2 could not be migrated and had to be dropped.
+
+---
+
 ## 🟢 SESSION 88 2026-07-28 — the SAR panel's verdict was an artifact, three times over (#815, #816, #817, ops #97, #98)
 
 Owner asked a narrow question — *compare DEXE @ 2.95 across the Signals tab and the
