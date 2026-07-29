@@ -1001,6 +1001,97 @@ def reset_refresh_budget_health() -> None:
         _budget_last = {"due": 0, "served": 0, "starved": 0, "pending": 0}
 
 
+# ---------------------------------------------------------------------------
+# Resolution-progress accounting (2026-07-29)
+# ---------------------------------------------------------------------------
+# The two counters above answer "could we fetch candles" and "did we ask".
+# Neither answers the question an owner actually has, which is "is this ledger
+# producing verdicts at all".  On 2026-07-29 the answer was no for 11.6 hours
+# and every probe stayed green.
+#
+# A *rate* of stalled records is the wrong signal here and it is worth being
+# explicit about why: mid-window stalling is the healthy steady state.  A
+# ledger holding 400 open records will stall on nearly all of them every cycle,
+# forever, because their trades have not closed yet.  A probe that pages on
+# "most records stalled" would page constantly on a perfectly healthy arm.
+#
+# What separates healthy from frozen is *progress*: in a working ledger some
+# records resolve every cycle (the owner's export shows 6-25 per hour).  Zero
+# resolutions against a non-empty backlog, sustained for an hour, is the
+# freeze — and it cannot be confused with a quiet market, because the backlog
+# being non-empty is the precondition.
+
+_resolve_cur: Dict[str, int] = {"resolved": 0, "stalled": 0, "pending": 0}
+_resolve_last: Dict[str, int] = {"resolved": 0, "stalled": 0, "pending": 0}
+_resolve_lock = threading.Lock()
+
+
+def record_resolution_cycle(*, resolved: int, stalled: int, pending: int) -> None:
+    """Record one classify cycle's progress.  Never raises.
+
+    ``resolved`` — records that got a verdict this cycle.  ``stalled`` — records
+    that had candles and still produced none.  ``pending`` — records still owed
+    a verdict and still inside their window, the population at risk.
+    """
+    try:
+        with _resolve_lock:
+            _resolve_cur["resolved"] = int(resolved)
+            _resolve_cur["stalled"] = int(stalled)
+            _resolve_cur["pending"] = int(pending)
+    except Exception as exc:
+        from src import fail_open
+        fail_open.record("sar_exit_shadow.record_resolution_cycle", exc)
+
+
+def roll_resolution_cycle() -> None:
+    """Publish this cycle's progress counters and start a fresh bucket."""
+    global _resolve_cur, _resolve_last
+    with _resolve_lock:
+        _resolve_last = _resolve_cur
+        _resolve_cur = {"resolved": 0, "stalled": 0, "pending": 0}
+
+
+def resolution_health() -> Dict[str, int]:
+    """Last completed cycle's resolution progress (pure read)."""
+    with _resolve_lock:
+        return dict(_resolve_last)
+
+
+def reset_resolution_health() -> None:
+    """Test hook — the counters are process-lifetime and module-global."""
+    global _resolve_cur, _resolve_last
+    with _resolve_lock:
+        _resolve_cur = {"resolved": 0, "stalled": 0, "pending": 0}
+        _resolve_last = {"resolved": 0, "stalled": 0, "pending": 0}
+
+
+def unresolved_record_count(
+    *, window_sec: float, now_ts: Optional[float] = None
+) -> int:
+    """Records still owed a verdict and still inside their window.
+
+    The denominator ``unresolved_symbols`` does not give: a symbol carrying 40
+    stuck records and one carrying 1 are the same entry there, and the harm
+    scales with records, not symbols.
+    """
+    try:
+        now = time.time() if now_ts is None else float(now_ts)
+        cutoff = now - float(window_sec)
+        total = 0
+        for rec in get_sar_store().records():
+            if rec.get("classification") is not None:
+                continue
+            ts = float(rec.get("suppress_timestamp") or 0.0)
+            if ts <= 0.0 or ts < cutoff:
+                continue
+            total += 1
+        return total
+    except Exception as exc:
+        from src import fail_open
+        fail_open.record("sar_exit_shadow.unresolved_record_count", exc)
+        return 0
+
+
 def plan_refresh_batch(
     symbols: Sequence[str],
     *,
