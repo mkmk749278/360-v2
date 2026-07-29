@@ -488,8 +488,8 @@ reading source. Procedures live in `docs/DR_RUNBOOK.md`; this is the map.
 |---|---|
 | **Host** | Single Ubuntu VPS at **`194.163.141.135`**, Docker Compose, 24/7. 4 cores — the engine container was capped at 1.5 of them until Session 85. This address is load-bearing: see the whitelist hazard below |
 | **Domain** | `luminapp.org` — **registered at Namecheap**, nameservers delegated to **Cloudflare**; all DNS records are managed in Cloudflare, not at the registrar. Change records in Cloudflare; touch Namecheap only for renewal and nameserver changes |
-| **DNS records** | `api.luminapp.org` → engine API · `ops.luminapp.org` → ops dashboard · `app.luminapp.org` → the PWA channel. All three resolve to the one VPS |
-| **TLS / edge** | Cloudflare terminates TLS (Mumbai edge for the launch region). **Per-record proxy mode is unverified** — see the open items below |
+| **DNS records** | Three records, one box, **two different routing modes** — verified 2026-07-29: `api.luminapp.org` → Cloudflare (proxied) · `ops.luminapp.org` → Cloudflare (proxied) · **`app.luminapp.org` → `194.163.141.135` directly (DNS-only)** |
+| **TLS / edge** | Cloudflare terminates TLS for `api` and `ops` (`server: cloudflare`, `cf-ray` present). **`app` is served by the VPS's own `nginx/1.24.0` with its own certificate** — no Cloudflare in the path at all |
 | **Backup layers** | Nightly encrypted data-volume backup **only**. No provider-level VPS snapshots, so DR is always a rebuild-from-scratch: the runbook's ≤2h RTO has no shortcut behind it, which is exactly why the quarterly restore drill is not optional |
 | **Deploy path** | GitHub Actions SSHes in using `VPS_HOST` / `VPS_USER` / `VPS_SSH_KEY` repo secrets. There is no manual deploy step in the normal flow |
 | **Scheduled workflows** | `deploy.yml` (on `main`) · `vps-backup.yml` (nightly 21:45 UTC) · `vps-liveness.yml` · `vps-monitor.yml` (truth report → `monitor-logs`) · `ci.yml` |
@@ -507,17 +507,45 @@ with a user-comms plan. `docs/UNIVERSE_EXPANSION_AND_SECOND_IP_2026_07_27.md` §
 this the whitelist landmine, and `docs/DR_RUNBOOK.md` Scenario A sequences the DNS
 cutover around it.
 
-**Open infrastructure items** (owner-confirmed unknown, 2026-07-29 — not findings, and
-not yet acted on):
+### The edge configuration is mixed, and that has consequences
 
-| Item | Why it matters | How to settle it |
-|---|---|---|
-| **Cloudflare proxy mode per record** | Proxied means Cloudflare absorbs DDoS and hides the origin; DNS-only means the VPS answers the internet directly and the edge protections aren't in the path at all. Which one is live changes the threat model, not just the routing | Cloudflare dashboard → DNS → the cloud icon per record. Or `dig +short api.luminapp.org` — a Cloudflare-owned address means proxied, `194.163.141.135` means DNS-only |
-| **Origin firewall on 443/80** | `deploy_vps.sh` configures **no** firewall, so unless ufw was set up by hand the origin accepts connections from anywhere. Combined with a *proxied* record that is a bypass: an attacker who knows the address reaches the origin without passing the edge — and the address is in this file | `sudo ufw status` on the box. Restricting 443 to [Cloudflare's published ranges](https://www.cloudflare.com/ips/) closes it, but **only after** confirming the records are proxied — locking the origin while records are DNS-only takes the whole system offline |
+Measured 2026-07-29 from outside the network:
 
-These two compose, and the order matters: confirm proxy mode first, firewall second.
-Neither is urgent enough to interrupt product work, and neither should be left open
-indefinitely on a box that holds the signing service.
+```
+api.luminapp.org  → 104.21.24.34, 172.67.216.188   server: cloudflare   cf-ray ✓   PROXIED
+ops.luminapp.org  → 104.21.24.34, 172.67.216.188   server: cloudflare   cf-ray ✓   PROXIED
+app.luminapp.org  → 194.163.141.135                Server: nginx/1.24.0            DNS-ONLY
+```
+
+Three facts follow, and none of them are obvious from the Cloudflare dashboard's
+per-record view:
+
+1. **The origin address is public.** One `dig app.luminapp.org` returns
+   `194.163.141.135`. Whatever concealment proxying `api` and `ops` was meant to
+   provide is already void — the PWA record publishes the same box. *(This is also
+   why recording the IP in this file costs nothing: it was never private.)*
+2. **The PWA gets no edge.** `app.luminapp.org` is a real user surface — the iPhone
+   channel — served straight off the VPS with no Cloudflare DDoS absorption, no WAF,
+   and no edge caching. Its TLS is the box's own nginx certificate, which makes
+   **certificate renewal on the VPS load-bearing for a user-facing surface**: an
+   expired cert there is a hard browser-level failure for every PWA user, and nothing
+   in the monitoring agent's Tier-0 detectors watches for it.
+3. **Proxying `api`/`ops` only buys protection if the origin refuses direct
+   connections** — which is the open item below. With the address public, an
+   attacker who can reach the origin on 443 bypasses the edge by sending the right
+   `Host` header. Whether that works is untested; it depends entirely on the firewall.
+
+**Open item — the origin firewall.** `deploy_vps.sh` configures **no** firewall: no
+`ufw`, no `iptables`. Unless one was added by hand, the origin accepts 443 from
+anywhere, and fact 3 above is live rather than theoretical. Settle it with
+`sudo ufw status` on the box.
+
+The fix is **not** simply locking 443 to [Cloudflare's ranges](https://www.cloudflare.com/ips/)
+— that would take `app.luminapp.org` offline instantly, because the PWA is DNS-only and
+its traffic does not come from Cloudflare. Any origin lockdown has to either proxy the
+`app` record first, or scope the restriction per-`server_name` in nginx rather than at
+the packet filter. **Confirm which before touching the firewall** — the safe-looking
+step is the one that breaks a live user surface.
 
 ---
 
@@ -763,10 +791,19 @@ git fetch origin monitor-logs && git show origin/monitor-logs:monitor/report/tru
 **Infrastructure, from anywhere:**
 
 ```bash
-dig +short api.luminapp.org ops.luminapp.org app.luminapp.org  # Cloudflare IP = proxied,
-                                                               # 194.163.141.135 = DNS-only
-curl -sI https://api.luminapp.org/api/health | grep -i '^server\|^cf-'   # cf-ray ⇒ through the edge
+# Per-record routing mode — Cloudflare IP = proxied, 194.163.141.135 = direct
+for h in api ops app; do printf '%-6s ' $h; dig +short $h.luminapp.org | tr '\n' ' '; echo; done
+
+# Confirms it from the response side: cf-ray + "server: cloudflare" ⇒ through the edge,
+# "Server: nginx" ⇒ straight off the box
+curl -sI https://api.luminapp.org/api/health | grep -iE '^server:|^cf-ray'
+
+# Is the origin reachable directly? Run from a host with unproxied egress — a
+# --resolve through an HTTP proxy is silently ignored and answers via Cloudflare.
+curl -sI --resolve api.luminapp.org:443:194.163.141.135 https://api.luminapp.org/api/health
+
 ssh <vps> 'sudo ufw status; docker ps --format "{{.Names}}\t{{.Status}}"'
+openssl s_client -connect app.luminapp.org:443 2>/dev/null | openssl x509 -noout -dates
 ```
 
 The truth report's `EVAL::*` rows are the authoritative answer to "which paths are
