@@ -85,6 +85,7 @@ def _build_registry() -> Dict[str, Tunable]:
         CONTEXT_EMISSION_SUPPRESS_NEGATIVE,
         FEATURE_LIVENESS_ENABLED,
         COHORT_EDGE_GATE_MIN_N,
+        COHORT_EDGE_MAX_AGE_DAYS,
         COHORT_EDGE_SUPPRESS_BELOW,
         DISPATCH_COOLDOWN_ENABLED,
         DISPATCH_COOLDOWN_SEC,
@@ -278,6 +279,24 @@ def _build_registry() -> Dict[str, Tunable]:
             category="Signal gating",
             min_value=5,
             max_value=100,
+        ),
+        Tunable(
+            key="cohort_edge_max_age_days",
+            label="Cohort gate: evidence expiry",
+            description=(
+                "How long a resolved outcome counts as evidence. Past this "
+                "age it stops counting, so a suppressed cohort — which emits "
+                "nothing and therefore resolves nothing — falls back below "
+                "the sample floor and is re-tested on live fills instead of "
+                "being locked out on the day it first measured negative. "
+                "0 disables expiry (a verdict then lasts forever)."
+            ),
+            type="float",
+            default=COHORT_EDGE_MAX_AGE_DAYS,
+            category="Signal gating",
+            min_value=0.0,
+            max_value=90.0,
+            unit="days",
         ),
         Tunable(
             key="mark_feed_staleness_enabled",

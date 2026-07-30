@@ -2996,6 +2996,15 @@ BE_ARM_TP1_CAP_FRACTION: float = _safe_float("BE_ARM_TP1_CAP_FRACTION", "0.5")
 COHORT_EDGE_GATE_ENABLED: bool = _safe_bool("COHORT_EDGE_GATE_ENABLED", "true")
 COHORT_EDGE_GATE_MIN_N: int = _safe_int("COHORT_EDGE_GATE_MIN_N", "10")
 COHORT_EDGE_SUPPRESS_BELOW: float = _safe_float("COHORT_EDGE_SUPPRESS_BELOW", "-0.05")
+# Evidence expiry for the cohort gate (2026-07-30).  Without it the gate is an
+# absorbing state: a suppressed cohort emits nothing, resolves nothing, and
+# keeps the verdict that armed it forever.  Records older than this stop
+# counting, the cohort falls back under COHORT_EDGE_GATE_MIN_N, and it re-earns
+# its verdict on fresh live fills.  14d chosen from the live cohort census
+# (2026-07-30): 6 of 11 armed cohorts still reach n>=10 inside 14 days, so the
+# gate keeps working on the high-volume cohorts while no verdict can outlive
+# two weeks.  0 disables expiry (pre-2026-07-30 behaviour).
+COHORT_EDGE_MAX_AGE_DAYS: float = _safe_float("COHORT_EDGE_MAX_AGE_DAYS", "14")
 
 # Mark-feed freshness guard for the trade monitor. ``_latest_price`` /
 # ``_candle_extremes`` read the last 1m candle from the scan store, which keeps

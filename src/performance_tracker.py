@@ -81,6 +81,16 @@ class SignalRecord:
     # collapsing to a single label would make that undetectable.
     entry_regime: str = ""
     entry_regime_15m: str = ""
+    # How the pair entered the scan set when this signal fired (2026-07-30):
+    # CORE / MOVER_IGNITION / MOVER_TOP24H / SURGE, "" for pre-fix records.
+    #
+    # Promoted pairs produced 73 of the last 100 delivered signals and no
+    # field on this record said so — the largest population in the book was
+    # analysable only through setup_class as a proxy.  Like entry_regime this
+    # is knowable exactly once: the promotion that admitted the pair expires
+    # after 6 h, typically before the signal closes, so there is no backfill
+    # and older records keep "" rather than being handed a guess.
+    pair_admission: str = ""
 
 
 @dataclass
@@ -157,6 +167,7 @@ class PerformanceTracker:
         session_name: str = "",
         entry_regime: str = "",
         entry_regime_15m: str = "",
+        pair_admission: str = "",
     ) -> None:
         """Record the outcome of a completed signal."""
         # Default signal quality fields to the actual PnL values when not provided
@@ -204,6 +215,7 @@ class PerformanceTracker:
             session_name=session_name,
             entry_regime=str(entry_regime or ""),
             entry_regime_15m=str(entry_regime_15m or ""),
+            pair_admission=str(pair_admission or ""),
         )
         self._records.append(record)
         self._save()

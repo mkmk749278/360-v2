@@ -341,6 +341,20 @@ class Signal:
     # monitor has a baseline for regime/momentum comparisons.
     entry_regime: str = ""                        # 5m market regime when signal was opened
     entry_regime_15m: str = ""                    # 15m (higher-TF) regime at entry — exit-runner gate
+    # How this pair got into the scan set at the moment the signal fired
+    # (2026-07-30).  One of ``CORE`` (top-N by volume), ``MOVER_IGNITION``
+    # (real-time !ticker@arr burst), ``MOVER_TOP24H`` (sustained 24h %-move),
+    # ``SURGE`` (volume-surge promotion), or ``""`` when unknown.
+    #
+    # Why this is a field and not a lookup: promoted pairs produced 73 of the
+    # last 100 delivered signals, and NOTHING recorded that they were promoted.
+    # The closed-signal record carried 38 fields and not one of them could
+    # answer "was this a core pair or a mover we admitted for six hours?" —
+    # so the highest-volume path in the book could only be analysed through
+    # setup_class as a proxy.  Admission is knowable exactly once, at scan
+    # time, and the promotion has evicted itself long before the signal
+    # closes; there is no honest backfill, so pre-fix records stay "".
+    pair_admission: str = ""
     atr_percentile_at_entry: float = 50.0         # ATR percentile (0-100) at entry — trail-width input
     atr_value_at_entry: float = 0.0               # Absolute ATR(14) value at entry — converts percentile to Binance callbackRate
     entry_momentum_slope: float = 0.0             # EMA slope at entry (% diff)

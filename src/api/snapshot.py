@@ -624,6 +624,7 @@ def _signal_to_detail(sig: Any, *, is_open: bool = False) -> SignalDetail:
         # the FSM uses to route exits (§3.2b). Empty string when unavailable.
         entry_regime=str(getattr(sig, "entry_regime", "") or ""),
         entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
+        pair_admission=str(getattr(sig, "pair_admission", "") or ""),
         market_phase=str(getattr(sig, "market_phase", "") or ""),
     )
 

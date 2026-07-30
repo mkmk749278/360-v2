@@ -16,6 +16,35 @@ from unittest.mock import AsyncMock, MagicMock
 from src.scanner import Scanner
 
 
+# The mover-admission funnel is now fail-CLOSED on exchangeInfo metadata
+# (2026-07-30): "we do not know what this instrument is" rejects.  Seed the
+# REAL symbol_filters cache through its own test seams so these tests exercise
+# the production collaborator rather than a shape we invented.
+import pytest as _pytest  # noqa: E402
+
+from src.execution import symbol_filters as _sf  # noqa: E402
+
+
+@_pytest.fixture(autouse=True)
+def _seed_exchange_metadata():
+    _sf.reset_for_test()
+    _known = (
+        "BTCUSDT", "ETHUSDT", "GUAUSDT", "SKYAIUSDT", "AAAUSDT", "BBBUSDT",
+        "CCCUSDT", "DDDUSDT", "EEEUSDT", "FFFUSDT", "PEPEUSDT", "WIFUSDT",
+        "SAMSUNGUSDT", "HOODUSDT", "COINUSDT", "QCOMUSDT", "PLTRUSDT",
+    )
+    _sf._set_cache_for_test({
+        s: _sf.SymbolFilters(symbol=s, step_size=0.001, tick_size=0.01,
+                             min_qty=0.001, min_notional=5.0)
+        for s in _known
+    })
+    _sf._set_tradfi_perps_for_test(
+        {"SAMSUNGUSDT", "HOODUSDT", "COINUSDT", "QCOMUSDT", "PLTRUSDT"}
+    )
+    yield
+    _sf.reset_for_test()
+
+
 def _info(vol, vola):
     return SimpleNamespace(volume_24h_usd=vol, volatility_24h=vola)
 
