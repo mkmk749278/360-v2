@@ -66,7 +66,16 @@ from __future__ import annotations
 import os
 import threading
 import time
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import (
+    Any,
+    Callable,
+    Dict,
+    List,
+    NamedTuple,
+    Optional,
+    Sequence,
+    Tuple,
+)
 
 from src.suppression_audit import (
     EXIT_STATIC,
@@ -162,12 +171,39 @@ def parabolic_sar_levels(
     net/trade corrects to roughly +0.02%.
 
     *Counterfactuals are optimistic; do not add a third way to flatter them.*
+
+    Implemented on ``_sar_walk`` so the live mechanism (``parabolic_sar_live``)
+    and this replay share one walk. Two SAR loops in one module is the drifting
+    mirror this repo has already paid for twice.
+    """
+    published, in_force, _state = _sar_walk(highs, lows, step, max_step)
+    return published, in_force
+
+
+class _SarState(NamedTuple):
+    """Wilder's running state after the last closed bar."""
+
+    up: bool
+    af: float
+    ep: float
+    sar: float
+
+
+def _sar_walk(
+    highs: Sequence[float], lows: Sequence[float], step: float, max_step: float
+) -> Tuple[List[Optional[float]], List[Optional[float]], Optional[_SarState]]:
+    """The one Wilder SAR walk. See ``parabolic_sar_levels`` for the semantics.
+
+    Returns the two series plus the terminal state, which is what a *live*
+    reader needs and a replay throws away: the projection of the next bar's
+    stop is only computable from ``(up, af, ep, sar)`` as of the last closed
+    bar. ``None`` state means the walk never ran (fewer than 2 bars).
     """
     n = len(highs)
     published: List[Optional[float]] = [None] * n
     in_force: List[Optional[float]] = [None] * n
     if n < 2:
-        return published, in_force
+        return published, in_force, None
     up = highs[1] >= highs[0]
     af = step
     ep = highs[1] if up else lows[1]
@@ -201,7 +237,63 @@ def parabolic_sar_levels(
                     ep = lows[i]
                     af = min(af + step, max_step)
         published[i] = sar
-    return published, in_force
+    return published, in_force, _SarState(up=up, af=af, ep=ep, sar=sar)
+
+
+class SarLive(NamedTuple):
+    """What a live SAR mechanism needs to act on the bar that has not closed.
+
+    ``up`` — the direction as of the last **closed** bar.
+    ``next_stop`` — the level in force during the bar now forming, projected
+    and clamped from closed bars only. This is the price a live stop order
+    would be parked at, and it is knowable before the bar trades.
+    ``last_closed_ms`` — open time of the last closed bar, so a caller can tell
+    a fresh read from a frozen one without wall-clock arithmetic.
+    """
+
+    up: bool
+    next_stop: float
+    last_closed_ms: Optional[float]
+
+
+def parabolic_sar_live(
+    highs: Sequence[float],
+    lows: Sequence[float],
+    step: float,
+    max_step: float,
+    last_closed_ms: Optional[float] = None,
+) -> Optional[SarLive]:
+    """Direction and next-bar stop for a **live** position. Refuses, never clamps.
+
+    ``parabolic_sar_levels`` answers "where was the stop during bar i", which is
+    a question only a replay can ask — every bar it reports has already closed.
+    A live mechanism has to park a stop on the bar that is *currently trading*,
+    and that level is a projection from the closed bars, not an entry in either
+    published series.
+
+    This is the **closed bar ≠ current bar** rule made explicit: the store's
+    newest bar is the last completed one (``update_candle`` appends on ``k["x"]``
+    only), so ``next_stop`` is deliberately one step past the end of the arrays.
+    Reading ``in_force[-1]`` instead would park the stop one bar in the past —
+    adjacent to the right answer, and on the far side of price across a flip.
+
+    Returns ``None`` when the walk cannot support the projection (fewer than 3
+    bars). A caller that cannot get a level must record that it does not know;
+    there is no defensible clamp here.
+    """
+    n = len(highs)
+    if n < 3 or len(lows) != n:
+        return None
+    _published, _in_force, state = _sar_walk(highs, lows, step, max_step)
+    if state is None:
+        return None
+    raw = state.sar + state.af * (state.ep - state.sar)
+    nxt = (
+        min(raw, lows[n - 1], lows[n - 2])
+        if state.up
+        else max(raw, highs[n - 1], highs[n - 2])
+    )
+    return SarLive(up=state.up, next_stop=float(nxt), last_closed_ms=last_closed_ms)
 
 
 def parabolic_sar(

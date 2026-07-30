@@ -2542,6 +2542,51 @@ class CryptoSignalEngine:
             fn=_sar_refresh_budget,
             min_streak=6,          # 30 min sustained
         ))
+
+        def _sar_live_arms() -> Tuple[bool, str]:
+            """The live SAR mechanism must be able to step the arms it holds.
+
+            Keyed on **the arms owed a verdict**, not on the live pair universe.
+            That distinction is the whole point: #815's ``candle_coverage``
+            walked ``pair_mgr.pairs`` and scored 100% while every record on a
+            rotated-out mover was permanently unresolvable, because a
+            rotated-out symbol is by definition not in that map.  An open arm
+            stays in this population whether or not its symbol is still scanned,
+            so a rotation shows up here the cycle it happens.
+
+            ``no_series`` counts arms whose candles the store could not supply
+            this cycle.  A few is normal churn — a symbol seeding, a fresh
+            listing.  Sustained misses mean arms are frozen: their stop is not
+            being advanced, so the mechanism is not being measured on them and
+            any number they later produce describes a gap.
+
+            Returns True when idle rather than raising — an arm-less ledger is
+            not a swallowed failure, and filling ``fail_open`` with non-failures
+            is how a real one stops standing out.
+            """
+            from config import SAR_LIVE_SHADOW_ENABLED as _live_on
+            if not _live_on:
+                return True, "disabled by config"
+            from src import sar_live_shadow as _live
+            h = _live.step_health()
+            stepped = int(h.get("stepped") or 0)
+            missed = int(h.get("no_series") or 0)
+            if stepped == 0 and missed == 0:
+                return True, "no open arms"
+            if missed == 0:
+                return True, f"{stepped} arms stepped, no candle misses"
+            symbols = ", ".join(sorted(h.get("symbols") or {})[:6])
+            return False, (
+                f"{missed} live SAR arms could not be stepped this cycle "
+                f"({stepped} could): {symbols}. Their stops are frozen, so the "
+                f"mechanism is not being measured on those trades."
+            )
+
+        fl.add_predicate(PredicateProbe(
+            name="sar_live_arms",
+            fn=_sar_live_arms,
+            min_streak=12,         # 1 min sustained (monitor ticks every 5s)
+        ))
         # Suppression stamps themselves vs scanner activity.  Suppressions can
         # be legitimately sparse in a dead market, so the streak is long: six
         # hours of active scanning with zero stamps is the anomaly bar.
