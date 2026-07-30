@@ -70,6 +70,36 @@ What this module refuses to do
   nothing. A clamp here would publish confident rows describing a bar we never
   saw.
 * **No silent excepts.** Every fail-open path calls ``fail_open.record``.
+
+Why the sweep is keyed on the ledger, not on the live signal list (#834)
+-----------------------------------------------------------------------
+The first cut stepped an arm only from ``observe_signal``, called once per
+**active** signal per monitor tick. Two consequences, both owner-caught on
+2026-07-30 within hours of the deploy:
+
+* The moment ``trade_monitor`` closed the signal, the router popped it from
+  ``active_signals`` and nothing ever touched the arm again. It sat RUNNING
+  forever with the stop it happened to hold at that instant — and the arm's
+  whole premise is that it exits on *its own* SAR flip, which is normally
+  **later** than the signal's SL. Truncating the population at the live exit
+  and then never resolving it is worse than not measuring it.
+* Even while the signal was live, stepping needs the store's candles to
+  advance. A surge-promoted symbol that rotates back out of the scan universe
+  stops receiving klines (the Session 44/45/46 frozen-candle class), so the
+  newest closed bar never changes and the step loop is a clean no-op. KORUUSDT
+  SHORT: 2h19m open, ``bars_seen: 0``, SAR direction still the one read at
+  entry, parked 5m stop blown through by 5.45% of price.
+
+Both failures were invisible for the same reason: ``record_step`` counted a
+*present* series as a healthy step, so the liveness probe read "2 arms stepped,
+no candle misses" while neither arm had advanced a single bar. A probe keyed on
+the arms whose signal is still active cannot see an arm whose signal is gone —
+#815's lesson, one file over.
+
+So: ``observe_signal`` **opens** arms (it needs the signal for entry/SL/TP), and
+``sweep`` **advances** them, iterating the ledger's own open set. An arm is
+stepped for as long as it is owed a verdict, whether or not its signal, or even
+its symbol, is still in the engine's live universe.
 """
 from __future__ import annotations
 
@@ -106,6 +136,19 @@ CLOSED_STATUSES = frozenset(
 EXIT_SAR_FLIP = "sar_flip"
 EXIT_STATIC_SL = "static_sl"
 EXIT_STATIC_TP1 = "static_tp1"
+
+#: Why an arm stopped being measurable. These are not exits — nothing filled,
+#: and every one of them is excluded from the verdict rather than scored.
+EXIT_NO_SAR_AT_ENTRY = "no_sar_at_entry"
+EXIT_BAR_ROLLED_OUT = "bar_rolled_out_of_window"
+EXIT_FEED_STALLED = "candle_feed_stalled"
+EXIT_OPEN_AT_HORIZON = "still_open_at_horizon"
+
+#: A stall is described, never guessed at: "the store has no series for this
+#: symbol/timeframe" and "the series exists but its newest closed bar is hours
+#: old" are different faults with different fixes.
+STALL_NO_SERIES = "no_series"
+STALL_BARS_BEHIND = "bars_behind"
 
 #: Bumped whenever a stored row's meaning changes. Readers gate on the schema,
 #: never on a date — a migration keyed to a timestamp that predicts a future
@@ -217,6 +260,94 @@ def _series(
 # --------------------------------------------------------------------------- #
 # The arm
 # --------------------------------------------------------------------------- #
+
+
+def timeframe_seconds(timeframe: str) -> Optional[float]:
+    """Bar width in seconds, or None when we do not know the timeframe.
+
+    Ported from ``historical_data._INTERVAL_SECONDS`` rather than re-tabulated:
+    a second table of bar widths is a mirror, and the fix for a drifting mirror
+    is not a second mirror. None means *refuse* — an unknown bar width cannot
+    support a staleness judgement, and guessing 60s would silently declare every
+    15m arm stalled.
+    """
+    try:
+        from src.historical_data import _INTERVAL_SECONDS
+
+        width = _INTERVAL_SECONDS.get(str(timeframe or ""))
+        return float(width) if width else None
+    except Exception as exc:
+        fail_open.record("sar_live_shadow.timeframe_seconds", exc)
+        return None
+
+
+def bars_behind(
+    latest_bar_ms: Optional[float], timeframe: str, now: float
+) -> Optional[float]:
+    """How many bar-widths the store's newest CLOSED bar lags *now*.
+
+    Zero means the newest closed bar is the one that should be newest: the bar
+    now trading has not finished, so there is genuinely nothing to step. That is
+    the healthy quiet case, and it is the one the old code could not tell apart
+    from a feed that stopped two hours ago.
+
+    ``update_candle`` appends on ``k["x"]`` only, so a bar opening at ``t``
+    becomes the newest closed bar at ``t + width``; the lag is measured from
+    there, not from the open.
+    """
+    if latest_bar_ms is None:
+        return None
+    width = timeframe_seconds(timeframe)
+    if width is None or width <= 0:
+        return None
+    closed_at = float(latest_bar_ms) / 1000.0 + width
+    return max(0.0, (now - closed_at) / width)
+
+
+def _note_series_state(
+    arm: Dict[str, Any],
+    *,
+    now: float,
+    latest_bar_ms: Optional[float],
+    stall_reason: str = "",
+    stall_bars: float,
+    abandon_sec: float,
+) -> bool:
+    """Record whether this arm can be advanced right now. Returns True if it was
+    retired as unmeasurable.
+
+    **This is the fix for the bug that made #832 unreadable.** An arm's stop is
+    only as current as the last bar it consumed, and nothing published that
+    fact — so a 2h19m-old parked stop rendered identically to one computed a
+    minute ago, beside a live price, under the words "right now". The staleness
+    lives on the row so ops cannot fail to see it, and it is stamped here where
+    it becomes true rather than derived by a reader.
+
+    A stall is not immediately fatal: a rotated-out mover may be re-promoted and
+    resume. Past ``abandon_sec`` the gap is unrecoverable, and a fill computed
+    across bars we never saw would be #800 again — so the arm refuses.
+    """
+    arm["series_bar_ms"] = latest_bar_ms
+    behind = bars_behind(latest_bar_ms, str(arm.get("timeframe") or ""), now)
+    arm["bars_behind"] = behind
+    stalled = bool(stall_reason) or (behind is not None and behind > float(stall_bars))
+    if not stalled:
+        arm["stalled"] = False
+        arm["stalled_since"] = None
+        arm["stall_reason"] = None
+        return False
+    arm["stalled"] = True
+    arm["stall_reason"] = stall_reason or STALL_BARS_BEHIND
+    if arm.get("stalled_since") is None:
+        arm["stalled_since"] = now
+    if now - float(arm["stalled_since"]) < float(abandon_sec):
+        return False
+    arm["status"] = STATUS_INSUFFICIENT
+    arm["exit_reason"] = EXIT_FEED_STALLED
+    arm["closed_at"] = now
+    arm["current_price"] = None
+    arm["unrealized_pct"] = None
+    return True
 
 
 def _is_long(side: str) -> bool:
@@ -339,6 +470,16 @@ def new_arm(
         "opened_bar_ms": opened_ms,
         "last_bar_ms": opened_ms,
         "bars_seen": 0,
+        # Freshness of the measurement itself, not of the price beside it. An
+        # open row is only as live as ``last_advance_at``: the parked stop was
+        # computed on the bar consumed then and cannot have moved since.
+        "last_swept_at": now,
+        "last_advance_at": now,
+        "series_bar_ms": opened_ms,
+        "bars_behind": 0.0,
+        "stalled": False,
+        "stalled_since": None,
+        "stall_reason": None,
         "status": STATUS_RUNNING,
         "exit_reason": None,
         "closed_at": None,
@@ -366,7 +507,7 @@ def new_arm(
         # Refuse. An arm that cannot read SAR at entry does not get a governor
         # invented for it — it measures nothing and says so.
         arm["status"] = STATUS_INSUFFICIENT
-        arm["exit_reason"] = "no_sar_at_entry"
+        arm["exit_reason"] = EXIT_NO_SAR_AT_ENTRY
         arm["aligned_at_entry"] = None
         arm["governor"] = None
         arm["sar_stop"] = None
@@ -471,7 +612,7 @@ def step_arm(
             # We cannot know what happened in between, and inventing a starting
             # index would be a clamp. The arm stops measuring and says why.
             arm["status"] = STATUS_INSUFFICIENT
-            arm["exit_reason"] = "bar_rolled_out_of_window"
+            arm["exit_reason"] = EXIT_BAR_ROLLED_OUT
             arm["closed_at"] = now
             return True
         n = len(times)
@@ -489,6 +630,9 @@ def step_arm(
             hi, lo, op, cl = highs[i], lows[i], opens[i], closes[i]
             arm["last_bar_ms"] = times[i]
             arm["bars_seen"] = int(arm.get("bars_seen") or 0) + 1
+            # When the arm last actually moved. ``last_swept_at`` says we looked;
+            # this says we advanced. Ops leads its rows with the difference.
+            arm["last_advance_at"] = now
             # Every consumed bar is a change worth persisting. Without this the
             # file would only move on a handover or a close, and ops could not
             # tell a frozen arm from a live one — which is the exact failure
@@ -600,9 +744,9 @@ class SarLiveLedger:
     #: reinterpreting rows written under different rules.
     #:
     #: **This filename and the row keys below are a cross-repo contract.**
-    #: ``tests/test_sar_live_contract.py`` pins them on this, the producing,
-    #: side — #817's ``entry_regime`` was read by ops for months while nothing
-    #: wrote it, and the page looked full the whole time.
+    #: ``tests/test_sar_live_shadow.py::OPS_CONTRACT_KEYS`` pins them on this,
+    #: the producing, side — #817's ``entry_regime`` was read by ops for months
+    #: while nothing wrote it, and the page looked full the whole time.
     DEFAULT_PATH = os.getenv("SAR_LIVE_SHADOW_PATH", "data/sar_live_arms_v1.json")
 
     def __init__(self, path: Optional[str] = None, max_resolved: int = 2000) -> None:
@@ -773,8 +917,23 @@ def reset_ledger(ledger: Optional[SarLiveLedger] = None) -> None:
 
 
 # --------------------------------------------------------------------------- #
-# Orchestration — called from the monitor loop, once per open signal per tick
+# Orchestration
 # --------------------------------------------------------------------------- #
+#
+# Two entry points, deliberately split (#834):
+#
+#   ``observe_signal(sig, store)``  — OPEN arms. Needs the signal, because entry,
+#                                     SL, TP1 and side come from it. Called once
+#                                     per active signal per monitor tick.
+#   ``sweep(store, price_fn=...)``  — ADVANCE arms. Needs only the ledger and the
+#                                     store, so an arm keeps being measured after
+#                                     its signal closes and after its symbol
+#                                     leaves the scan universe. Called once per
+#                                     monitor cycle.
+#
+# Before the split, advancing was a side-effect of the signal still being active,
+# which quietly made "the arm exits when SAR flips" mean "…or when the live SL
+# fired, whichever came first, and then it never resolves at all".
 
 
 def _side_of(sig: Any) -> str:
@@ -794,7 +953,12 @@ def observe_signal(
     ledger: Optional[SarLiveLedger] = None,
     now_ts: Optional[float] = None,
 ) -> None:
-    """Open this signal's arms on first sight, then advance them.
+    """Open this signal's arms on first sight. Advancing is ``sweep``'s job.
+
+    This function reads the signal and nothing else reads the signal — entry, SL,
+    TP1, side and setup class are only knowable here. Once the arms exist they
+    are the ledger's, and the ledger is swept independently, because an arm
+    outlives the signal that created it (see the module docstring).
 
     Fail-open throughout: this is a measurement riding the monitor loop, and a
     measurement must never be able to break the loop that carries real exits.
@@ -836,7 +1000,10 @@ def observe_signal(
                     continue  # already resolved — do not re-open it
                 series = _series(store, symbol, tf, wu)
                 if series is None:
-                    record_step(symbol, False, f"no_series:{tf}")
+                    # Not counted in arm health: no arm exists yet, so nothing is
+                    # owed a verdict. The probe's population is arms, and mixing
+                    # "could not open" into it would let a quiet failure to
+                    # *advance* hide behind a busy failure to *open*.
                     continue
                 live = _cached_sar_live(
                     symbol,
@@ -862,22 +1029,182 @@ def observe_signal(
                         now_ts=now,
                     )
                 )
-                record_step(symbol, True)
+                continue
+            # The arm already exists — ``sweep`` advances it. Marking it here as
+            # well would only duplicate what the sweep does moments later, and
+            # counting it here is what made the liveness probe read healthy over
+            # frozen arms.
+            mark_arm(arm, price)
+    except Exception as exc:
+        fail_open.record("sar_live_shadow.observe_signal", exc)
+
+
+def sweep(
+    store: Any,
+    *,
+    price_fn: Optional[Any] = None,
+    step: Optional[float] = None,
+    max_step: Optional[float] = None,
+    warmup: Optional[int] = None,
+    stall_bars: Optional[float] = None,
+    abandon_sec: Optional[float] = None,
+    max_open_hours: Optional[float] = None,
+    ledger: Optional[SarLiveLedger] = None,
+    now_ts: Optional[float] = None,
+) -> Dict[str, int]:
+    """Advance every open arm in the ledger. Returns a per-cycle tally.
+
+    Keyed on **the arms owed a verdict**, which is the population that gets
+    harmed when this stops working — not on the live signal list and not on the
+    pair universe, both of which drop a symbol precisely when its arm most needs
+    watching (#815, #834).
+
+    Every arm lands in exactly one bucket each cycle, and the bucket is recorded:
+
+    ``advanced``   consumed at least one new closed bar (or closed)
+    ``current``    up to date; the bar now trading has not finished — the quiet case
+    ``stalled``    the series exists but its newest closed bar is bars behind
+    ``no_series``  the store cannot supply candles for this symbol/timeframe
+    ``retired``    stopped being measurable this cycle and left the open set
+
+    ``current`` and ``stalled`` are the two the old code merged into one silent
+    no-op, and the merge is why 2h19m of frozen arms read as healthy.
+    """
+    tally = {"advanced": 0, "current": 0, "stalled": 0, "no_series": 0, "retired": 0}
+    try:
+        from config import (
+            SAR_EXIT_SHADOW_MAX_STEP,
+            SAR_EXIT_SHADOW_STEP,
+            SAR_LIVE_SHADOW_ABANDON_SEC,
+            SAR_LIVE_SHADOW_ENABLED,
+            SAR_LIVE_SHADOW_MAX_OPEN_HOURS,
+            SAR_LIVE_SHADOW_STALL_BARS,
+            SAR_LIVE_SHADOW_WARMUP_BARS,
+        )
+
+        if not SAR_LIVE_SHADOW_ENABLED:
+            return tally
+        s = SAR_EXIT_SHADOW_STEP if step is None else step
+        ms = SAR_EXIT_SHADOW_MAX_STEP if max_step is None else max_step
+        wu = SAR_LIVE_SHADOW_WARMUP_BARS if warmup is None else warmup
+        sb = SAR_LIVE_SHADOW_STALL_BARS if stall_bars is None else stall_bars
+        ab = SAR_LIVE_SHADOW_ABANDON_SEC if abandon_sec is None else abandon_sec
+        mo = (
+            SAR_LIVE_SHADOW_MAX_OPEN_HOURS
+            if max_open_hours is None
+            else max_open_hours
+        )
+        book = ledger if ledger is not None else get_ledger()
+        now = time.time() if now_ts is None else float(now_ts)
+
+        for snapshot in book.open_arms():
+            arm_id = str(snapshot.get("arm_id") or "")
+            arm = book.get(arm_id)
+            if arm is None:
+                continue
+            symbol = str(arm.get("symbol") or "")
+            tf = str(arm.get("timeframe") or "")
+            arm["last_swept_at"] = now
+            changed = False
+
+            # A healthy arm that simply never flips. The mechanism specifies no
+            # time stop and the owner disabled signal expiry, so rather than
+            # invent a market close, the arm refuses and is excluded from the
+            # verdict — visibly, with its own reason.
+            opened_at = float(arm.get("opened_at") or now)
+            if mo > 0 and (now - opened_at) > float(mo) * 3600.0:
+                arm["status"] = STATUS_INSUFFICIENT
+                arm["exit_reason"] = EXIT_OPEN_AT_HORIZON
+                arm["closed_at"] = now
+                arm["current_price"] = None
+                arm["unrealized_pct"] = None
+                book.retire(arm_id)
+                tally["retired"] += 1
+                # Deliberately NOT a health miss. The arm reached a bound we
+                # chose; nothing failed, and paging on it would fill the probe
+                # with non-failures until a real one stopped standing out.
+                log.info(
+                    "SAR live arm {} retired at the {}h horizon without a flip",
+                    arm_id, mo,
+                )
                 continue
 
             series = _series(store, symbol, tf, wu)
             if series is None:
-                record_step(symbol, False, f"no_series:{tf}")
+                tally["no_series"] += 1
+                record_step(symbol, False, f"{STALL_NO_SERIES}:{tf}")
+                if _note_series_state(
+                    arm,
+                    now=now,
+                    latest_bar_ms=None,
+                    stall_reason=STALL_NO_SERIES,
+                    stall_bars=sb,
+                    abandon_sec=ab,
+                ):
+                    book.retire(arm_id)
+                    tally["retired"] += 1
+                else:
+                    book.mark_dirty()
                 continue
-            record_step(symbol, True)
+
+            before = int(arm.get("bars_seen") or 0)
             changed = step_arm(arm, series, step=s, max_step=ms, now_ts=now)
-            mark_arm(arm, price)
-            if arm.get("status") != STATUS_RUNNING:
-                book.retire(arm_id)
-            elif changed:
+            advanced = int(arm.get("bars_seen") or 0) > before
+
+            # Only a still-running arm has a "how current am I" question; a
+            # closed one already carries its verdict.
+            if arm.get("status") == STATUS_RUNNING:
+                _note_series_state(
+                    arm,
+                    now=now,
+                    latest_bar_ms=series["open_time"][-1],
+                    stall_bars=sb,
+                    abandon_sec=ab,
+                )
+
+            if advanced:
+                tally["advanced"] += 1
+                record_step(symbol, True)
+            elif arm.get("stalled"):
+                tally["stalled"] += 1
+                record_step(symbol, False, f"{STALL_BARS_BEHIND}:{tf}")
+            else:
+                tally["current"] += 1
+                record_step(symbol, True)
+
+            if arm.get("status") == STATUS_RUNNING:
+                mark_arm(arm, _price_of(price_fn, symbol))
                 book.mark_dirty()
+            else:
+                # Closed by ``step_arm`` (a real exit) or retired by
+                # ``_note_series_state`` (unmeasurable). Either way it leaves the
+                # open set, and ``retire`` marks the ledger dirty itself.
+                book.retire(arm_id)
+                tally["retired"] += 1
+                continue
+            if changed:
+                book.mark_dirty()
+        return tally
     except Exception as exc:
-        fail_open.record("sar_live_shadow.observe_signal", exc)
+        fail_open.record("sar_live_shadow.sweep", exc)
+        return tally
+
+
+def _price_of(price_fn: Optional[Any], symbol: str) -> Optional[float]:
+    """Mark price for a symbol, or None. Never raises into the sweep.
+
+    The caller supplies this because the engine's price chain (1m close, falling
+    back to the all-symbols mark feed) already handles the rotated-out symbol
+    case that a frozen candle store does not — and an arm on a rotated-out symbol
+    is exactly the arm that needs a real mark beside its stalled stop.
+    """
+    if price_fn is None:
+        return None
+    try:
+        return price_fn(symbol)
+    except Exception as exc:
+        fail_open.record("sar_live_shadow.price_fn", exc)
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -890,20 +1217,40 @@ def observe_signal(
 # could not be stepped this cycle — a rotated-out symbol shows up here by
 # construction, because the arm is in the population whether or not the symbol
 # still is.
+#
+# #834: the first cut got the population right and the *predicate* wrong. It
+# recorded a step as OK whenever a series came back, so an arm whose candles had
+# not moved for 2h19m counted as healthy and the probe reported "2 arms stepped,
+# no candle misses" over two frozen arms. Presence of data is not currency of
+# data, and the two are only distinguishable by comparing the newest closed bar
+# against the clock — which is what ``bars_behind`` now does. A stalled arm is a
+# miss, and it is named separately from a missing series because they have
+# different fixes.
 
-_health_cur: Dict[str, Any] = {"stepped": 0, "no_series": 0, "symbols": {}}
-_health_last: Dict[str, Any] = {"stepped": 0, "no_series": 0, "symbols": {}}
+
+def _blank_health() -> Dict[str, Any]:
+    return {"stepped": 0, "no_series": 0, "stalled": 0, "symbols": {}}
+
+
+_health_cur: Dict[str, Any] = _blank_health()
+_health_last: Dict[str, Any] = _blank_health()
 _health_lock = threading.Lock()
 
 
 def record_step(symbol: str, ok: bool, reason: str = "") -> None:
+    """Bucket one arm's cycle. ``reason`` is ``"<why>:<timeframe>"`` on a miss."""
     try:
         with _health_lock:
             if ok:
                 _health_cur["stepped"] = int(_health_cur["stepped"]) + 1
                 _health_cur["symbols"].pop(symbol, None)
                 return
-            _health_cur["no_series"] = int(_health_cur["no_series"]) + 1
+            key = (
+                "stalled"
+                if str(reason or "").startswith(STALL_BARS_BEHIND)
+                else "no_series"
+            )
+            _health_cur[key] = int(_health_cur[key]) + 1
             if len(_health_cur["symbols"]) < 256:
                 _health_cur["symbols"][symbol] = reason or "unknown"
     except Exception as exc:
@@ -914,7 +1261,7 @@ def roll_health_cycle() -> None:
     global _health_cur, _health_last
     with _health_lock:
         _health_last = _health_cur
-        _health_cur = {"stepped": 0, "no_series": 0, "symbols": {}}
+        _health_cur = _blank_health()
 
 
 def step_health() -> Dict[str, Any]:
@@ -922,6 +1269,7 @@ def step_health() -> Dict[str, Any]:
         return {
             "stepped": int(_health_last["stepped"]),
             "no_series": int(_health_last["no_series"]),
+            "stalled": int(_health_last["stalled"]),
             "symbols": dict(_health_last["symbols"]),
         }
 
@@ -929,5 +1277,5 @@ def step_health() -> Dict[str, Any]:
 def reset_health() -> None:
     global _health_cur, _health_last
     with _health_lock:
-        _health_cur = {"stepped": 0, "no_series": 0, "symbols": {}}
-        _health_last = {"stepped": 0, "no_series": 0, "symbols": {}}
+        _health_cur = _blank_health()
+        _health_last = _blank_health()

@@ -505,6 +505,25 @@ python -m src.main
   never zero, and no replay had ever produced it. **Where two fills are defensible,
   publish both** — collapsing them into one number before the gap is known is
   choosing the answer, and the one you would have chosen is the flattering one.
+- **A measurement that rides another subsystem's loop inherits that subsystem's
+  lifetime — and "nothing to do" is the same no-op as "nothing works".** The SAR
+  live arm was stepped from `observe_signal`, once per **active** signal, so the
+  moment the router popped a closed signal the arm sat RUNNING forever — while its
+  whole premise is that it exits on its *own* SAR flip, normally later than the
+  signal's SL. Independently, `step_arm` iterates "bars newer than the last one I
+  consumed": empty between bar closes (healthy) and empty forever for a
+  rotated-out mover whose klines stopped (the Session 44/45/46 frozen-candle
+  class). Both produced KORUUSDT SHORT open 2h19m at `bars_seen: 0`, still
+  carrying entry-time SAR direction and a parked stop the price had crossed by
+  5.45%, while the probe read *"2 arms stepped, no candle misses"* and ops read
+  *"LIVE — 3 arms running"* (owner-caught 2026-07-30, #834). Key the sweep on **the
+  population owed a verdict** (#815's rule, which that probe's docstring already
+  claimed), and **check the clock**: presence of data is not currency of data, so
+  every arm stamps `bars_behind` / `last_advance_at` and a stalled arm is a *miss*,
+  named apart from a missing series because the fixes differ. Corollary: **a
+  surface cannot grade its own liveness on a clock it supplies** — ops fetched the
+  live price itself and printed it beside a two-hour-old stop under the words
+  "right now", breaking from the other side the rule its own docstring carried.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

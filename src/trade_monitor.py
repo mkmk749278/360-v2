@@ -898,6 +898,16 @@ class TradeMonitor:
 
         await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
         self._publish_pricing_freshness(signals)
+        # Advance every open arm, from the LEDGER — not from the signal list
+        # above (#834).  ``observe_signal`` opens arms because only the signal
+        # knows entry/SL/TP; stepping must outlive the signal, because the arm's
+        # premise is that it exits on its own SAR flip, which is normally later
+        # than the live SL.  When stepping rode the signal list, the router
+        # popped the signal on close and the arm sat RUNNING forever with a
+        # frozen stop — KORUUSDT SHORT: 2h19m, bars_seen 0, parked stop blown
+        # through by 5.45% while the ops page called it the level the mechanism
+        # "would have parked right now".
+        sar_live_shadow.sweep(self._store, price_fn=self._price_for)
         # Per-cycle, not cumulative: a cumulative miss count never recovers
         # after a transient outage, so it would page forever over a fault that
         # healed.
@@ -981,6 +991,19 @@ class TradeMonitor:
         except Exception:
             pass
         return None
+
+    def _price_for(self, symbol: str) -> Optional[float]:
+        """Freshest price for any symbol, in or out of the scan universe.
+
+        The SAR live sweep marks arms on symbols the engine may no longer be
+        scanning — that is the case it exists to cover — so it needs the same
+        candle-then-mark-feed chain ``_process_signal`` uses, exposed as a
+        callable rather than duplicated inside the measurement module.
+        """
+        price = self._latest_price(symbol)
+        if price is None:
+            price = self._mark_feed_price(symbol)
+        return price
 
     def _candle_stale(self, symbol: str) -> bool:
         """True when the store's last 1m kline for ``symbol`` is older than the

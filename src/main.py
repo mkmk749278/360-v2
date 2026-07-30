@@ -2560,6 +2560,12 @@ class CryptoSignalEngine:
             being advanced, so the mechanism is not being measured on them and
             any number they later produce describes a gap.
 
+            ``stalled`` counts the case this probe used to *pass* on (#834): the
+            store returned a series, so the old predicate called it a healthy
+            step, but its newest closed bar was hours old.  Presence of data is
+            not currency of data.  Two frozen KORUUSDT arms read as "2 arms
+            stepped, no candle misses" for 2h19m under the old rule.
+
             Returns True when idle rather than raising — an arm-less ledger is
             not a swallowed failure, and filling ``fail_open`` with non-failures
             is how a real one stops standing out.
@@ -2570,16 +2576,19 @@ class CryptoSignalEngine:
             from src import sar_live_shadow as _live
             h = _live.step_health()
             stepped = int(h.get("stepped") or 0)
-            missed = int(h.get("no_series") or 0)
+            no_series = int(h.get("no_series") or 0)
+            stalled = int(h.get("stalled") or 0)
+            missed = no_series + stalled
             if stepped == 0 and missed == 0:
                 return True, "no open arms"
             if missed == 0:
-                return True, f"{stepped} arms stepped, no candle misses"
+                return True, f"{stepped} arms current, none stalled"
             symbols = ", ".join(sorted(h.get("symbols") or {})[:6])
             return False, (
-                f"{missed} live SAR arms could not be stepped this cycle "
-                f"({stepped} could): {symbols}. Their stops are frozen, so the "
-                f"mechanism is not being measured on those trades."
+                f"{missed} live SAR arms could not be advanced this cycle "
+                f"({no_series} no candles, {stalled} bars behind; {stepped} "
+                f"current): {symbols}. Their stops are frozen, so the mechanism "
+                f"is not being measured on those trades."
             )
 
         fl.add_predicate(PredicateProbe(

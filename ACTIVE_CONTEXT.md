@@ -4,6 +4,80 @@
 
 ---
 
+## 🟢 SESSION 92 2026-07-30 — the live arm was not live (#834, ops #108)
+
+Owner, hours after #832/#833 deployed, on the KORUUSDT SHORT arms: *"see that koru has
+close when SAR flip but not closed why … we are treating SAR live as live signals but
+its reactions is not."* Correct on both counts, and the arm had two independent reasons
+to be frozen.
+
+### The evidence, from the owner's two CSV exports
+
+| Arm | Opened | Bars seen at 10:30 UTC | Parked stop | Price | State |
+|---|---|---|---|---|---|
+| KORUUSDT 5m | 08:11:30 | **0** | 11.79 | 12.47 | RUNNING, stop crossed by 5.45% |
+| KORUUSDT 15m | 08:11:30 | **0** | 12.3337 | 12.47 | RUNNING, stop crossed by 1.09% |
+| SLXUSDT 15m | 07:48:47 | **1** (in 2h42m) | 0.0875968 | 0.08709 | RUNNING |
+
+Both KORU arms still carried `sar_up: False` — the direction read at entry — while the
+app's chart showed SAR flipped up on both timeframes. The arms had not recomputed
+anything in 2h19m. The ops page read **"LIVE — 3 arms running, stepped inside the
+monitor loop"**, and the liveness probe read *"2 arms stepped, no candle misses"*.
+
+### Two causes, and they compound
+
+1. **Stepping rode the live signal list.** `observe_signal` was called once per
+   **active** signal per tick, so when `trade_monitor` closed the signal the router
+   popped it from `active_signals` and nothing touched the arm again — permanently
+   RUNNING, never resolved. The arm's premise is that it exits on *its own* SAR flip,
+   which is normally **later** than the signal's SL, so tying its life to the signal's
+   truncated the population at the live exit and then abandoned it.
+2. **A no-op and a dead feed were the same code path.** `step_arm` iterates bars newer
+   than the last one it consumed. Between bar closes there are none — healthy. For a
+   surge-promoted symbol that rotated back out of the scan universe there are none
+   *ever* (the Session 44/45/46 frozen-candle class, already mitigated for **price** by
+   the mark-feed fallback but never for **candles**). Identical no-op, and
+   `record_step(symbol, True)` called it a healthy step because a series came back.
+
+### What shipped
+
+| Repo | Change |
+|---|---|
+| **360-v2 #834** | `sar_live_shadow.sweep()` — advances every open arm from the **ledger**, not the signal list; per-arm staleness (`bars_behind`, `stalled`, `last_advance_at`); stalled arms retire `INSUFFICIENT / candle_feed_stalled` past 1h; a 48h horizon on arms that never flip; the liveness probe now separates `stalled` from `no_series` |
+| **ops #108** | `/signals/sar-live` grades liveness on the **arms**, not the file — per-row *Last advance*, `stalled` / `no candles` / `crossed` badges, ARMS STALLED / PARTLY STALLED states, freshness columns in the CSV |
+
+`scripts/gen_ops_sar_live_fixture.py` generates ops' freshness fixture from this
+engine, so the consumer's test data is engine output rather than a hand-typed shape.
+
+### Rules earned
+
+- **A measurement that rides another subsystem's loop inherits that subsystem's
+  lifetime.** The monitor loop sees a signal until it closes; the arm needed to be
+  seen until *it* closes. Key the sweep on the population owed a verdict — which is
+  what #815 already said, and the probe's own docstring already claimed.
+- **"Nothing to do" and "nothing works" are the same no-op unless something reads the
+  clock.** A loop over "bars newer than the last one I saw" is silent by construction
+  when the feed dies. Presence of data is not currency of data.
+- **A page cannot grade its own liveness on a clock it supplies.** Ops fetched the live
+  Binance price and printed it beside a two-hour-old stop under the words "right now" —
+  breaking, from the other side, the very rule its docstring carried: *a working price
+  feed is not evidence the measurement is running.*
+
+### Open
+
+- **No verdict has been lost, because there was none.** The arms in the ledger at the
+  time of the report had produced 2 resolutions. Any pre-fix arm still open will now
+  either resume or retire `candle_feed_stalled`; both are visible.
+- **`SAR_LIVE_SHADOW_MAX_OPEN_HOURS=48` is a measurement-population decision, not a
+  mechanism one.** An arm that never flips is retired unmeasured rather than handed an
+  invented market close — the mechanism as specified has no time stop and
+  `SIGNAL_EXPIRY_ENABLED` is off. Say so if the horizon should instead exit at market.
+- **#833's risk stamps read blank on pre-#833 arms** (`sar_risk_pct` etc. absent from
+  rows already persisted). The sweep re-stamps them on the next bar consumed, so this
+  self-heals; no schema bump.
+
+---
+
 ## 🟢 SESSION 91 2026-07-30 — a replay cannot tell you whether a mechanism is operable (#832, ops #106)
 
 Owner asked whether the SAR ledger and the dark-signals bake-off were both measuring
