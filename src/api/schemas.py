@@ -175,6 +175,18 @@ class SignalDetail(BaseModel):
         "",
         description="15m stateless regime label at entry (HTF confirmation for runners).",
     )
+    pair_admission: str = Field(
+        "",
+        description=(
+            "How the pair entered the scan set when this signal fired: CORE "
+            "(top-N by 24h volume), MOVER_IGNITION (real-time !ticker@arr "
+            "burst), MOVER_TOP24H (sustained 24h %-move), SURGE (volume-surge "
+            "promotion). Empty for signals stamped before 2026-07-30. Promoted "
+            "pairs are the majority of the delivered book and this is the only "
+            "field that says so — the promotion expires long before the signal "
+            "closes, so it cannot be recovered later."
+        ),
+    )
     market_phase: str = Field(
         "",
         description=(

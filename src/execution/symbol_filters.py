@@ -234,6 +234,48 @@ def tradfi_perp_symbols() -> list[str]:
     return sorted(_TRADFI_PERPS)
 
 
+# Verdict reasons returned by :func:`crypto_perp_admission`.  Stringly-typed
+# so the scanner can use them directly as suppression-counter suffixes.
+ADMIT_OK = ""
+ADMIT_REJECT_METADATA_UNAVAILABLE = "metadata_unavailable"
+ADMIT_REJECT_UNKNOWN_SYMBOL = "unknown_to_exchange_info"
+ADMIT_REJECT_TRADFI = "tradfi_perp"
+
+
+def crypto_perp_admission(symbol: str) -> tuple[bool, str]:
+    """Structural verdict: may *symbol* enter the scanning universe?
+
+    ``is_tradfi_perp`` alone is **fail-open** by design — it answers False on
+    an unpopulated cache so a boot-time race can never wrongly reject a real
+    crypto pair on a path that already has a static name-list floor beneath it.
+
+    The mover-admission path has no such floor worth trusting.  It synthesises
+    pairs straight off ``!ticker@arr``, which carries the **whole ~600-pair
+    board** — every tokenised stock, ETF and commodity perp Binance lists,
+    including ones listed after the last human edited a blacklist.  On that
+    path "we do not know what this instrument is" must reject, not admit:
+    SMCI / SOXS / IBM / NOK / LRCX reached the paid signal book precisely
+    because absence-of-knowledge read as permission (2026-07-30).
+
+    So this is the **fail-closed** counterpart, and it is a refusal rather
+    than a clamp — three distinct reasons, each separately countable:
+
+    * cache empty              → reject ``metadata_unavailable``
+    * symbol absent from cache → reject ``unknown_to_exchange_info``
+    * ``TRADIFI_PERPETUAL``    → reject ``tradfi_perp``
+
+    Returns ``(admitted, reason)``; *reason* is ``""`` when admitted.
+    """
+    sym = symbol.upper()
+    if not _FILTERS:
+        return False, ADMIT_REJECT_METADATA_UNAVAILABLE
+    if sym in _TRADFI_PERPS:
+        return False, ADMIT_REJECT_TRADFI
+    if sym not in _FILTERS:
+        return False, ADMIT_REJECT_UNKNOWN_SYMBOL
+    return True, ADMIT_OK
+
+
 # ---------------------------------------------------------------------------
 # Refresh + bootstrap
 # ---------------------------------------------------------------------------

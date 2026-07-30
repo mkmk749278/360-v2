@@ -511,6 +511,7 @@ class TradeMonitor:
                 # same two fields (2026-07-28).
                 entry_regime=str(getattr(sig, "entry_regime", "") or ""),
                 entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
+                pair_admission=str(getattr(sig, "pair_admission", "") or ""),
             )
         # Circuit breaker ALWAYS uses actual PnL (real exit price)
         if self._circuit_breaker is not None:
@@ -899,7 +900,7 @@ class TradeMonitor:
         await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
         self._publish_pricing_freshness(signals)
         # Advance every open arm, from the LEDGER — not from the signal list
-        # above (#834).  ``observe_signal`` opens arms because only the signal
+        # above (#835).  ``observe_signal`` opens arms because only the signal
         # knows entry/SL/TP; stepping must outlive the signal, because the arm's
         # premise is that it exits on its own SAR flip, which is normally later
         # than the live SL.  When stepping rode the signal list, the router

@@ -424,7 +424,7 @@ def test_observe_retires_an_arm_once_it_closes():
             {"open": bar[0], "high": bar[1], "low": bar[2], "close": bar[3],
              "volume": 1.0, "open_time": 1_700_000_000_000 + i * BAR_MS},
         )
-    # Advancing is the sweep's job, not ``observe_signal``'s (#834).
+    # Advancing is the sweep's job, not ``observe_signal``'s (#835).
     live.sweep(
         store, price_fn=lambda _s: 183.0, ledger=ledger, now_ts=_now_at(len(bars))
     )
@@ -453,7 +453,7 @@ OPS_CONTRACT_KEYS = frozenset({
     "mfe_pct", "current_price", "unrealized_pct", "ambiguous_bar",
     "sar_risk_pct", "max_sar_risk_pct", "handover_risk_pct",
     "handover_wider_than_sl",
-    # Freshness of the measurement, not of the price beside it (#834). Ops leads
+    # Freshness of the measurement, not of the price beside it (#835). Ops leads
     # every open row with these: without them a two-hour-old parked stop renders
     # identically to one computed a minute ago.
     "last_swept_at", "last_advance_at", "series_bar_ms", "bars_behind",
@@ -521,7 +521,7 @@ def test_health_counters_are_per_cycle_not_cumulative():
 
 
 def test_a_stalled_arm_is_a_miss_named_apart_from_a_missing_series():
-    """#834: presence of data is not currency of data.
+    """#835: presence of data is not currency of data.
 
     The old predicate had one failure bucket, so a stalled arm — series present,
     newest closed bar hours old — had nowhere to land and was counted as a
@@ -539,7 +539,7 @@ def test_a_stalled_arm_is_a_miss_named_apart_from_a_missing_series():
 
 
 # --------------------------------------------------------------------------- #
-# A frozen arm is not a quiet one (#834)
+# A frozen arm is not a quiet one (#835)
 # --------------------------------------------------------------------------- #
 #
 # The bug the owner caught on 2026-07-30: KORUUSDT SHORT sat RUNNING for 2h19m

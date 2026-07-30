@@ -4,7 +4,7 @@
 
 ---
 
-## 🟢 SESSION 92 2026-07-30 — the live arm was not live (#834, ops #108)
+## 🟢 SESSION 94 2026-07-30 — the live arm was not live (#835, ops #108)
 
 Owner, hours after #832/#833 deployed, on the KORUUSDT SHORT arms: *"see that koru has
 close when SAR flip but not closed why … we are treating SAR live as live signals but
@@ -43,7 +43,7 @@ monitor loop"**, and the liveness probe read *"2 arms stepped, no candle misses"
 
 | Repo | Change |
 |---|---|
-| **360-v2 #834** | `sar_live_shadow.sweep()` — advances every open arm from the **ledger**, not the signal list; per-arm staleness (`bars_behind`, `stalled`, `last_advance_at`); stalled arms retire `INSUFFICIENT / candle_feed_stalled` past 1h; a 48h horizon on arms that never flip; the liveness probe now separates `stalled` from `no_series` |
+| **360-v2 #835** | `sar_live_shadow.sweep()` — advances every open arm from the **ledger**, not the signal list; per-arm staleness (`bars_behind`, `stalled`, `last_advance_at`); stalled arms retire `INSUFFICIENT / candle_feed_stalled` past 1h; a 48h horizon on arms that never flip; the liveness probe now separates `stalled` from `no_series` |
 | **ops #108** | `/signals/sar-live` grades liveness on the **arms**, not the file — per-row *Last advance*, `stalled` / `no candles` / `crossed` badges, ARMS STALLED / PARTLY STALLED states, freshness columns in the CSV |
 
 `scripts/gen_ops_sar_live_fixture.py` generates ops' freshness fixture from this
@@ -75,6 +75,216 @@ engine, so the consumer's test data is engine output rather than a hand-typed sh
 - **#833's risk stamps read blank on pre-#833 arms** (`sar_risk_pct` etc. absent from
   rows already persisted). The sweep re-stamps them on the next bar consumed, so this
   self-heals; no schema bump.
+## 🔴 SESSION 93 2026-07-30 — the feed did not decline, it was gated off on 07-07, and the gate could never let go
+
+**Owner:** *"if we demote MTP you can see our engine seems to be dead for users"*
+→ *"fix the 07-07 gates and push"*. Correct on both counts, and Session 92's
+"MTP goes dark" recommendation was wrong.
+
+### The volume cliff, from the 500-signal history
+
+| | |
+|---|---|
+| 07-02 → 07-06 | 43–55 delivered/day, MOVER ~25% |
+| **07-08 onward** | **4–15/day** |
+| last 7 days | 11.4/day, **MOVER 74%** (91% / 93% / 100% on 07-28/29/30) |
+| non-mover today | **3.0/day** |
+
+First half 23.9/day → last half 11.0/day. Not a decline — a step, dated to
+**2026-07-07**, when Session 43 shipped cohort-edge STEP 2 ACTIVE. Removing MTP
+takes 12.4/day → 5.0/day; removing all movers → 3.3/day. MTP is not the
+disease, it is the only path still emitting.
+
+### Two defects in `cohort_edge`, both structural
+
+1. **Absorbing state.** The gate suppresses on measured expectancy;
+   `CohortEdgeStore` is written only by `trade_monitor` resolving a *delivered*
+   signal. Suppressed → never emits → never resolves → never records → the
+   count-bounded (`_window=30`) deque never rotates. **Nothing bounded record
+   age**, so a cohort locked on 07-07 was still judged on 07-07 data on 07-30,
+   permanently. Live census: 29 cohorts, 11 reach n≥10, **9 of those 11 measure
+   below the −0.05 threshold** — i.e. 9 locked cohorts with no path back.
+2. **Invisible.** `_reject()` does not stamp; each gate calls
+   `_stamp_suppressed` itself, and this one never did. It is the **only** live
+   gate with no row in the Suppression Quality Audit — no WOULD_WIN%, no
+   EV/suppression, no verdict. 23 days of unmeasured suppression next to a
+   table that ranked every other gate. `pair_analysis:critical` had the same
+   omission (its 30-day window does self-release, so only the stamp was missing).
+
+**`context_floor` was left alone deliberately** — it already stamps, and Layer G
+has already written `suppress_negative: false` for MOVER_TREND_PULLBACK,
+MOVER_AVWAP_SCALP, SR_FLIP_RETEST, MEAN_REVERT, LIQUIDITY_SWEEP_REVERSAL and
+DIVERGENCE_CONTINUATION. That loop self-corrects; `cohort_edge` could not.
+The audit's `context_floor:MOVER_AVWAP_SCALP` **DROP** verdict (n=126, 58.7%
+WOULD_WIN, −0.53R/suppression) is historical suppressions, already released.
+
+### Shipped
+
+| Change | Where |
+|---|---|
+| **Evidence expiry** — `sample_count`/`expectancy` count only records inside the window; gate releases and re-earns its verdict on real fills | `stat_filter.CohortEdgeStore` |
+| `COHORT_EDGE_MAX_AGE_DAYS=14` + `cohort_edge_max_age_days` ops tunable (0 restores old behaviour, no deploy) | `config/`, `runtime_tunables` |
+| `freshness()` / `frozen_cohorts()` — fresh-vs-total per cohort, and which cohorts stopped being re-measured | `stat_filter` |
+| `_stamp_suppressed(sig, "cohort_edge")` and `"pair_analysis_critical"` | `scanner` |
+| `cohort_edge_gate` liveness probe — pages if expiry is off while the gate is on, or if every cohort shares one `macro_dir` | `main._build_feature_liveness` |
+
+**14 days is measured, not guessed:** 6 of 11 armed cohorts still reach n≥10
+inside 14 days (3 at 7d, 7 at 21d), so the gate keeps working on the
+high-volume cohorts while no verdict can outlive two weeks.
+
+Tests: `tests/test_cohort_edge_absorbing_state.py`. All five core assertions
+verified by reverting each half separately. Suite 7503 passed / 58 skipped;
+ruff clean; mypy 104 (no new). A first cut used `except Exception: pass` and
+`test_fail_open_sweep` caught it — now `fail_open.record`, failing open toward
+the store's default window, never toward "no expiry".
+
+### What the 500-signal + 7-day analysis actually said about MTP
+
+- 28d: MTP n=147, **−0.543%/trade, −79.8% total**, 23.8% win, TP1 reached 2/147.
+- 7d (`real_pnl_pct`, trail-aware): MTP −0.176%, whole book **+15.4%**. Improving.
+- **Two thirds of MTP's stop-out loss never went favourable at all** — 55 of 85
+  stop-outs never reached +1%, −138.4% of a −212.9% total. An exit change cannot
+  touch those; the "give-back" story is the minority.
+- A **+1.0% first target** is the only variant that improves MTP on *both*
+  windows (28d +31pp, 7d +20pp); every other target improves one and degrades
+  the other. Even at +1.0%, MTP is still −48.7% over 28 days. Non-movers
+  realised +32.78% and beat *every* fixed target — the trail is right there.
+
+### Open
+
+- **`sl_distance_pct_at_entry` is unusable and it is Session 43's field.**
+  Missing on 152/378 taken rows, missingness outcome-correlated (`PROFIT_LOCKED`
+  39/42 present vs 3/42 absent), 125/226 values exactly 3.00 (the
+  `noise_floor_max_sl_pct` clamp), disagrees with the signal's own geometry on
+  218/226 rows. Written only inside the fail-open `_apply_noise_floor_stop`,
+  while `original_sl_distance` is stamped earlier and never updated when the
+  stop widens. **No R figure from these records is verifiable** — ops
+  `/track-record` divides by this. Fix before publishing any R.
+- **Watch the release.** `cohort_edge` rows should now appear in the
+  Suppression Quality Audit with a KEEP/TUNE/DROP verdict, and non-mover
+  volume should recover as locked cohorts age out. Re-read in a fresh window —
+  do not judge from the pre-change report.
+- **MTP entry quality, not MTP existence.** 55 stop-outs that never went
+  favourable is an entry-trigger signature. Needs `pair_admission` (shipped
+  Session 92) plus a never-went-favourable stamp to filter against.
+- **`macro_dir` was `DECLINE` on all 29 cohorts.** A BTC macro flip resets every
+  cohort to n=0 and disarms the gate in one step. Probe added; no fix — the
+  behaviour is correct, the surprise was not.
+
+---
+
+## 🔴 SESSION 92 2026-07-30 — tokenised stocks were in the live paid book, and the path that put them there was the one nobody had filtered
+
+**Owner ask:** *"discuss on scan universe"* → *"talk more on promoted pairs"* →
+*"fix everything, automatic is important, we can't regularly check pairs."*
+
+The discussion was supposed to be about universe *size*. Reading the delivered
+signal book instead of the config made it a different session.
+
+### What the emitted population actually says
+
+`monitor-logs:signals_last100` — the last 100 signals the router **delivered**:
+
+| | |
+|---|---|
+| Distinct symbols | 53 |
+| Median 24h volume | **$25.7M** |
+| Under $100M / $50M | 84 / 62 |
+| `MOVER_*` setup classes | **73 / 100** |
+
+The top-75 core scan — the subject of every capacity discussion this repo has
+had, including Session 85's — produces a **minority** of what subscribers
+receive. The delivered book is dominated by pairs admitted for 6h at a time
+through mover promotion.
+
+### Finding 1 — five stock perps, live, in the paid book
+
+| Symbol | What it is | vol | pnl |
+|---|---|---|---|
+| SMCIUSDT | Super Micro Computer | $22.3M | −1.52%, 0 |
+| SOXSUSDT | Direxion Semi Bear 3X ETF | $38.0M | −1.93%, −3.00% |
+| IBMUSDT | IBM | $57.7M | −1.68% |
+| NOKUSDT | Nokia | $25.9M | 0 |
+| LRCXUSDT | Lam Research | $5.4M | −2.37% |
+
+**7 delivered signals, mean −1.50%, zero TP hits, all seven stopped out.**
+LRCXUSDT had already appeared in the Session-91 SAR export and nobody had
+noticed what it was.
+
+Root cause, one grep: `is_tradfi_perp` appeared in **all four** `pair_manager`
+fetch paths and **nowhere in the scanner**. `_ensure_mover_pair` — the one
+admission path that reaches outside the top-N onto the whole ~600-pair
+`!ticker@arr` board, i.e. exactly where stock perps live — checked two static
+name lists and nothing else. This is #B18 (WDCUSDT, `-4411` on a paid user's
+auto-trade, 2026-07-18) recurring with five new tickers, because the
+"structural filter" written to prevent the recurrence was never wired to the
+path that leaks.
+
+### Finding 2 — the 6h prune ate half of every promotion window
+
+`refresh_top50_futures` deleted everything outside the fresh top-N from
+`pair_mgr.pairs`, including the synthetic movers the scanner had parked there.
+Refresh period 6h; `MOVER_PROMOTION_TTL_SEC` 6h → mean ~50% of each window
+lost. Invisible three ways: the scanner never re-admitted (its own
+`symbol in _mover_promoted_pairs` skip), the dead symbol kept consuming
+promotion budget until TTL, and the scan-set builder dropped it on a
+`pair_mgr.pairs.get(...) is not None` guard **with no else-branch**.
+
+### Finding 3 — nothing recorded that a signal came from a promoted pair
+
+`SignalRecord` carried 38 fields and not one answered "core or promoted?" The
+population producing 73% of the book was analysable only through `setup_class`
+as a proxy. Under that proxy: `MOVER_*` n=73 mean −0.259% with **zero** TP
+hits; non-mover n=27 mean +0.581% with all 9 TP hits; `MOVER_TREND_PULLBACK`
+alone n=60 mean −0.445%. Volume tells you nothing — `<$50M` and `>=$50M` split
+−0.032% vs −0.033%. **Illiquidity is not the discriminator; MTP is.** (n=100,
+one window, `pnl_pct` not R-normalised — not a verdict, a reason to measure.)
+
+### Shipped — branch `claude/scan-universe-discussion-am3vnp`
+
+| Area | Change |
+|---|---|
+| **Structural gate** | `symbol_filters.crypto_perp_admission` — **fail-closed** verdict (`metadata_unavailable` / `unknown_to_exchange_info` / `tradfi_perp`), called by `_ensure_mover_pair`, each reason separately counted |
+| **Floor** | SMCI/SOXS/IBM/NOK/LRCX added to `_NON_CRYPTO_BLACKLIST`; `EURUSDT` de-duplicated across the two sets |
+| **Hold registry** | `PairManager.hold_symbol` / `release_symbol` / `held_symbols`; **both** prune paths honour it; scanner claims on admit, releases on expiry |
+| **Silent drop** | scan-set builder now counts `promoted_pair_vanished` and WARNs with the symbols |
+| **Provenance** | `Signal.pair_admission` → `SignalRecord.pair_admission` → `SignalDetail` — `CORE` / `MOVER_IGNITION` / `MOVER_TOP24H` / `SURGE`, stamped at scan time |
+| **Probes** | `promoted_pair_integrity` (keyed on pairs under promotion, not on the universe map) + `mover_admission_metadata` (a fail-closed gate needs a probe on *why* it closes) |
+| **Dead code** | `run_periodic_top50_refresh` deleted — wired to nothing, advertised a 90s cadence the engine never ran; docstring corrected to the real 6h `_pair_refresh_loop` |
+| **Types** | `_mover_promoted_pairs` was annotated `Dict[str, int]` while every write stored a monotonic float |
+
+Tests: `tests/test_scan_universe_admission.py`, `tests/test_promoted_pair_provenance.py`.
+**All nine core assertions verified by reverting the fix** — they fail against
+the old code. Full suite 7491 passed / 58 skipped; ruff clean; mypy 105 → 104.
+
+Two existing test files were driving `Scanner._populate_signal_context(None, …)`
+and mover admission against an unseeded metadata cache — both now drive the
+real collaborators.
+
+### Dark-first note
+
+The admission gate **narrows** what emits and closes a live leak into the paid
+book, so it ships enforcing rather than shadow-first; the measurement half
+(provenance, counters, probes) is ON from the same deploy per § Project Phase.
+
+### Open
+
+- **`pair_admission` has no ops surface yet.** Dark work must be observable —
+  the engine now stamps it and nothing renders it. Next: a `/track-record`
+  and Strategy-Lab split by admission, which is what makes "is MTP bad, or is
+  MTP-on-promoted-pairs bad?" answerable. **No backfill** — the promotion
+  expires long before the signal closes, so pre-deploy records stay `""`.
+- **MTP is 60% of the delivered book at −0.445% mean and zero TP hits.** Do
+  not act until `pair_admission` has a window; the proxy is not the fact.
+- **Universe size is not the lever** and Session 85's QCB premise is stale —
+  QCB now emits (2621 generated / 689 gated / **14 emitted**), and Layer G has
+  persisted `min_samples: 15` for `QUIET_COMPRESSION_BREAK@ATR`/`@FIXED`.
+  Those are **arm** keys; the live unsuffixed key carries no override — worth
+  confirming the relaxation reached a routable key (#806/#807 pattern).
+- **Surge promotion is effectively dead** under `TOP50_FUTURES_ONLY`:
+  `_update_volume_baseline` only considers pairs in `pair_mgr.pairs` that are
+  *not* in the scan set, and the map is pruned to exactly the scan set plus
+  held movers. Left alone deliberately — deleting it is a separate change.
 
 ---
 

@@ -71,7 +71,7 @@ What this module refuses to do
   saw.
 * **No silent excepts.** Every fail-open path calls ``fail_open.record``.
 
-Why the sweep is keyed on the ledger, not on the live signal list (#834)
+Why the sweep is keyed on the ledger, not on the live signal list (#835)
 -----------------------------------------------------------------------
 The first cut stepped an arm only from ``observe_signal``, called once per
 **active** signal per monitor tick. Two consequences, both owner-caught on
@@ -920,7 +920,7 @@ def reset_ledger(ledger: Optional[SarLiveLedger] = None) -> None:
 # Orchestration
 # --------------------------------------------------------------------------- #
 #
-# Two entry points, deliberately split (#834):
+# Two entry points, deliberately split (#835):
 #
 #   ``observe_signal(sig, store)``  — OPEN arms. Needs the signal, because entry,
 #                                     SL, TP1 and side come from it. Called once
@@ -1057,7 +1057,7 @@ def sweep(
     Keyed on **the arms owed a verdict**, which is the population that gets
     harmed when this stops working — not on the live signal list and not on the
     pair universe, both of which drop a symbol precisely when its arm most needs
-    watching (#815, #834).
+    watching (#815, #835).
 
     Every arm lands in exactly one bucket each cycle, and the bucket is recorded:
 
@@ -1218,7 +1218,7 @@ def _price_of(price_fn: Optional[Any], symbol: str) -> Optional[float]:
 # construction, because the arm is in the population whether or not the symbol
 # still is.
 #
-# #834: the first cut got the population right and the *predicate* wrong. It
+# #835: the first cut got the population right and the *predicate* wrong. It
 # recorded a step as OK whenever a series came back, so an arm whose candles had
 # not moved for 2h19m counted as healthy and the probe reported "2 arms stepped,
 # no candle misses" over two frozen arms. Presence of data is not currency of
