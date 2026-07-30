@@ -18,6 +18,18 @@ MAX_STEP = 0.2
 BAR_MS = 900_000.0  # 15m
 
 
+def _now_at(bar_index: int, width_sec: float = BAR_MS / 1000.0) -> float:
+    """Wall-clock at which bar ``bar_index`` is the newest CLOSED bar.
+
+    The seeded fixtures stamp bars in 2023, so a sweep run against the real clock
+    would call every arm stalled by several hundred thousand bars. Tests that
+    care about staleness set ``now_ts`` explicitly — which is the point: the arm's
+    freshness is a comparison between its newest bar and the clock, and a test
+    that cannot move the clock cannot test it.
+    """
+    return (1_700_000_000_000.0 + bar_index * BAR_MS) / 1000.0 + width_sec
+
+
 def _series(bars):
     """Build the module's own internal series shape from (o, h, l, c) tuples."""
     return {
@@ -412,7 +424,10 @@ def test_observe_retires_an_arm_once_it_closes():
             {"open": bar[0], "high": bar[1], "low": bar[2], "close": bar[3],
              "volume": 1.0, "open_time": 1_700_000_000_000 + i * BAR_MS},
         )
-    live.observe_signal(sig, store, price=183.0, ledger=ledger, timeframes=["15m"])
+    # Advancing is the sweep's job, not ``observe_signal``'s (#835).
+    live.sweep(
+        store, price_fn=lambda _s: 183.0, ledger=ledger, now_ts=_now_at(len(bars))
+    )
     assert ledger.open_arms() == []
     resolved = ledger.resolved_arms()
     assert len(resolved) == 1
@@ -438,6 +453,11 @@ OPS_CONTRACT_KEYS = frozenset({
     "mfe_pct", "current_price", "unrealized_pct", "ambiguous_bar",
     "sar_risk_pct", "max_sar_risk_pct", "handover_risk_pct",
     "handover_wider_than_sl",
+    # Freshness of the measurement, not of the price beside it (#835). Ops leads
+    # every open row with these: without them a two-hour-old parked stop renders
+    # identically to one computed a minute ago.
+    "last_swept_at", "last_advance_at", "series_bar_ms", "bars_behind",
+    "stalled", "stalled_since", "stall_reason",
 })
 
 
@@ -498,6 +518,250 @@ def test_health_counters_are_per_cycle_not_cumulative():
     live.record_step("A", True)
     live.roll_health_cycle()
     assert live.step_health()["no_series"] == 0
+
+
+def test_a_stalled_arm_is_a_miss_named_apart_from_a_missing_series():
+    """#835: presence of data is not currency of data.
+
+    The old predicate had one failure bucket, so a stalled arm — series present,
+    newest closed bar hours old — had nowhere to land and was counted as a
+    healthy step. Missing candles and stale candles have different fixes and are
+    counted separately.
+    """
+    live.reset_health()
+    live.record_step("GONEUSDT", False, f"{live.STALL_NO_SERIES}:15m")
+    live.record_step("FROZENUSDT", False, f"{live.STALL_BARS_BEHIND}:5m")
+    live.record_step("OKUSDT", True)
+    live.roll_health_cycle()
+    h = live.step_health()
+    assert (h["stepped"], h["no_series"], h["stalled"]) == (1, 1, 1)
+    assert h["symbols"]["FROZENUSDT"].startswith(live.STALL_BARS_BEHIND)
+
+
+# --------------------------------------------------------------------------- #
+# A frozen arm is not a quiet one (#835)
+# --------------------------------------------------------------------------- #
+#
+# The bug the owner caught on 2026-07-30: KORUUSDT SHORT sat RUNNING for 2h19m
+# with ``bars_seen: 0``, its SAR direction still the one read at entry, and a
+# parked 5m stop the live price had blown through by 5.45% — while ops rendered
+# it as "the stop the mechanism would have parked right now" and the liveness
+# probe read "2 arms stepped, no candle misses".
+#
+# Two causes, both here:
+#   1. stepping rode the *live signal list*, so a closed signal orphaned its arm;
+#   2. stepping is a no-op when no new bar has closed, which is indistinguishable
+#      from a feed that stopped hours ago unless someone checks the clock.
+
+
+def test_bars_behind_separates_a_quiet_bar_from_a_dead_feed():
+    latest = 1_700_000_000_000.0
+    # The bar that opened at ``latest`` closes one width later; at that instant
+    # it IS the newest closed bar and nothing is owed.
+    assert live.bars_behind(latest, "15m", latest / 1000.0 + 900.0) == 0.0
+    # Two hours later, eight bars should have closed and none has.
+    assert live.bars_behind(latest, "15m", latest / 1000.0 + 900.0 + 7200.0) == 8.0
+    # An unknown timeframe refuses rather than guessing 60s and calling every
+    # 15m arm stalled.
+    assert live.bars_behind(latest, "7m", latest / 1000.0) is None
+    assert live.bars_behind(None, "15m", latest / 1000.0) is None
+
+
+def test_the_sweep_advances_an_arm_whose_signal_is_gone():
+    """The orphan case. No signal is passed to ``sweep`` at all — by design.
+
+    An arm exits on *its own* SAR flip, which is normally later than the live
+    SL. Tying its stepping to the signal's lifetime truncated the population at
+    the live exit and then never resolved it, which is worse than not measuring.
+    """
+    live.reset_sar_cache()
+    ledger = live.SarLiveLedger(path="/tmp/sar_live_test_orphan.json")
+    bars = _falling(80)
+    store = _seed_store("GONEUSDT", bars, intervals=("15m",))
+    sar = parabolic_sar_live(
+        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
+        last_closed_ms=1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS,
+    )
+    ledger.add(live.new_arm(
+        signal_id="SIG-ORPHAN", symbol="GONEUSDT", side="SHORT",
+        setup_class="BREAKDOWN_SHORT", timeframe="15m",
+        entry=100.0, stop_loss=103.0, tp1=97.0, sar=sar,
+        opened_ms=1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS,
+        now_ts=_now_at(len(bars) - 1),
+    ))
+    # A new bar closes. The signal that created this arm is long gone.
+    store.update_candle("GONEUSDT", "15m", {
+        "open": bars[-1][3], "high": bars[-1][3] * 1.05, "low": bars[-1][2],
+        "close": bars[-1][3] * 1.04, "volume": 1.0,
+        "open_time": 1_700_000_000_000.0 + len(bars) * BAR_MS,
+    })
+    tally = live.sweep(
+        store, price_fn=lambda _s: 104.0, ledger=ledger, now_ts=_now_at(len(bars))
+    )
+    assert tally["advanced"] == 1
+    arm = (ledger.open_arms() + ledger.resolved_arms())[0]
+    assert arm["bars_seen"] == 1
+
+
+def test_a_stalled_arm_says_so_instead_of_publishing_a_stale_stop_as_current():
+    """The KORUUSDT row. No new bar for hours, arm still RUNNING.
+
+    It stays open — a rotated-out mover can be re-promoted — but it is flagged,
+    the lag is on the row in bar-widths, and ``last_advance_at`` does not move.
+    Without that, a two-hour-old level renders identically to a fresh one.
+    """
+    live.reset_sar_cache()
+    ledger = live.SarLiveLedger(path="/tmp/sar_live_test_stall.json")
+    bars = _falling(80)
+    store = _seed_store("KORUUSDT", bars, intervals=("15m",))
+    last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
+    sar = parabolic_sar_live(
+        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
+        last_closed_ms=last_ms,
+    )
+    opened = _now_at(len(bars) - 1)
+    ledger.add(live.new_arm(
+        signal_id="SIG-STALL", symbol="KORUUSDT", side="SHORT",
+        setup_class="BREAKDOWN_SHORT", timeframe="15m",
+        entry=11.77, stop_loss=12.1231, tp1=11.26, sar=sar,
+        opened_ms=last_ms, now_ts=opened,
+    ))
+    frozen_stop = ledger.get("SIG-STALL:15m")["sar_stop"]
+
+    # 2h19m of wall-clock, no new bar: exactly the owner's export.
+    later = opened + 2 * 3600 + 19 * 60
+    tally = live.sweep(
+        store, price_fn=lambda _s: 12.47, ledger=ledger, now_ts=later
+    )
+
+    assert tally == {
+        "advanced": 0, "current": 0, "stalled": 1, "no_series": 0, "retired": 0
+    }
+    arm = ledger.get("SIG-STALL:15m")
+    assert arm["status"] == live.STATUS_RUNNING
+    assert arm["stalled"] is True
+    assert arm["stall_reason"] == live.STALL_BARS_BEHIND
+    assert arm["bars_behind"] == pytest.approx(9.27, abs=0.02)
+    # The stop is unchanged and openly not current: it was computed on a bar
+    # over two hours old and nothing pretends otherwise.
+    assert arm["sar_stop"] == frozen_stop
+    assert arm["last_advance_at"] == opened
+    assert arm["last_swept_at"] == later
+    # The mark is still real — a working price feed is not evidence the
+    # measurement is running, which is why both facts sit on the row.
+    assert arm["current_price"] == 12.47
+
+
+def test_a_stall_past_the_abandon_bound_refuses_rather_than_filling():
+    """Past the bound the gap in bars is unrecoverable — so no fill is invented.
+
+    #800 published 172 confident rows describing bars it never saw. An arm that
+    cannot be advanced is INSUFFICIENT and excluded from every R figure, not
+    scored against whatever price happens to be on screen.
+    """
+    live.reset_sar_cache()
+    ledger = live.SarLiveLedger(path="/tmp/sar_live_test_abandon.json")
+    bars = _falling(80)
+    store = _seed_store("KORUUSDT", bars, intervals=("15m",))
+    last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
+    sar = parabolic_sar_live(
+        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
+        last_closed_ms=last_ms,
+    )
+    opened = _now_at(len(bars) - 1)
+    ledger.add(live.new_arm(
+        signal_id="SIG-ABANDON", symbol="KORUUSDT", side="SHORT",
+        setup_class="BREAKDOWN_SHORT", timeframe="15m",
+        entry=11.77, stop_loss=12.1231, tp1=11.26, sar=sar,
+        opened_ms=last_ms, now_ts=opened,
+    ))
+    live.sweep(store, ledger=ledger, now_ts=opened + 3600, abandon_sec=1800)
+    tally = live.sweep(store, ledger=ledger, now_ts=opened + 7200, abandon_sec=1800)
+    assert tally["retired"] == 1
+    assert ledger.open_arms() == []
+    arm = ledger.resolved_arms()[0]
+    assert arm["status"] == live.STATUS_INSUFFICIENT
+    assert arm["exit_reason"] == live.EXIT_FEED_STALLED
+    assert arm["fill_level"] is None and arm["r_level"] is None
+
+
+def test_a_current_arm_between_bars_is_not_a_stall():
+    """The quiet case must stay quiet, or the fix pages on healthy engines.
+
+    This is the mirror of the heartbeat lesson one file over: "nothing to do" is
+    not a fault, and a detector that cannot say so gets muted.
+    """
+    live.reset_sar_cache()
+    ledger = live.SarLiveLedger(path="/tmp/sar_live_test_current.json")
+    bars = _falling(80)
+    store = _seed_store("LIVEUSDT", bars, intervals=("15m",))
+    last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
+    sar = parabolic_sar_live(
+        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
+        last_closed_ms=last_ms,
+    )
+    opened = _now_at(len(bars) - 1)
+    ledger.add(live.new_arm(
+        signal_id="SIG-QUIET", symbol="LIVEUSDT", side="SHORT",
+        setup_class="BREAKDOWN_SHORT", timeframe="15m",
+        entry=100.0, stop_loss=103.0, tp1=97.0, sar=sar,
+        opened_ms=last_ms, now_ts=opened,
+    ))
+    # Mid-bar: the bar now trading has not closed. Nothing is owed.
+    tally = live.sweep(store, ledger=ledger, now_ts=opened + 400.0)
+    assert tally["current"] == 1 and tally["stalled"] == 0
+    assert ledger.get("SIG-QUIET:15m")["stalled"] is False
+
+
+def test_an_arm_the_store_cannot_supply_is_a_miss_not_a_step():
+    live.reset_sar_cache()
+    ledger = live.SarLiveLedger(path="/tmp/sar_live_test_noseries.json")
+    bars = _falling(80)
+    store = _seed_store("LIVEUSDT", bars, intervals=("15m",))
+    last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
+    sar = parabolic_sar_live(
+        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
+        last_closed_ms=last_ms,
+    )
+    ledger.add(live.new_arm(
+        signal_id="SIG-NOSERIES", symbol="DELISTEDUSDT", side="SHORT",
+        setup_class="X", timeframe="15m", entry=100.0, stop_loss=103.0,
+        tp1=97.0, sar=sar, opened_ms=last_ms, now_ts=_now_at(len(bars) - 1),
+    ))
+    tally = live.sweep(store, ledger=ledger, now_ts=_now_at(len(bars)))
+    assert tally["no_series"] == 1
+    arm = ledger.get("SIG-NOSERIES:15m")
+    assert arm["stalled"] is True
+    assert arm["stall_reason"] == live.STALL_NO_SERIES
+
+
+def test_an_arm_open_past_the_horizon_refuses_rather_than_running_forever():
+    """SIGNAL_EXPIRY_ENABLED is off and the mechanism has no time stop, so an arm
+    that never flips would otherwise sit in the open set indefinitely. It is
+    retired unmeasured rather than handed an invented market close."""
+    live.reset_sar_cache()
+    ledger = live.SarLiveLedger(path="/tmp/sar_live_test_horizon.json")
+    bars = _falling(80)
+    store = _seed_store("LIVEUSDT", bars, intervals=("15m",))
+    last_ms = 1_700_000_000_000.0 + (len(bars) - 1) * BAR_MS
+    sar = parabolic_sar_live(
+        [b[1] for b in bars], [b[2] for b in bars], STEP, MAX_STEP,
+        last_closed_ms=last_ms,
+    )
+    opened = _now_at(len(bars) - 1)
+    ledger.add(live.new_arm(
+        signal_id="SIG-HORIZON", symbol="LIVEUSDT", side="SHORT",
+        setup_class="X", timeframe="15m", entry=100.0, stop_loss=103.0,
+        tp1=97.0, sar=sar, opened_ms=last_ms, now_ts=opened,
+    ))
+    tally = live.sweep(
+        store, ledger=ledger, now_ts=opened + 49 * 3600, max_open_hours=48
+    )
+    assert tally["retired"] == 1
+    arm = ledger.resolved_arms()[0]
+    assert arm["status"] == live.STATUS_INSUFFICIENT
+    assert arm["exit_reason"] == live.EXIT_OPEN_AT_HORIZON
+    assert arm["r_level"] is None
 
 
 # --------------------------------------------------------------------------- #

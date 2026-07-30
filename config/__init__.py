@@ -707,6 +707,33 @@ SAR_LIVE_SHADOW_WARMUP_BARS: int = _safe_int("SAR_LIVE_SHADOW_WARMUP_BARS", "50"
 # ~1000 signals of history.
 SAR_LIVE_SHADOW_MAX_RESOLVED: int = _safe_int("SAR_LIVE_SHADOW_MAX_RESOLVED", "2000")
 
+# How many bar-widths the store's newest CLOSED bar may lag "now" before the
+# arm is stalled rather than merely between bars (2026-07-30, #835).
+#
+# The arm transitions only when a new closed bar appears, so "nothing to do"
+# and "this symbol's candles stopped arriving two hours ago" produce the
+# identical no-op.  KORUUSDT SHORT sat RUNNING for 2h19m with bars_seen=0 and a
+# parked stop the live price had already blown through by 5.45%, while the ops
+# page called it "the stop the mechanism would have parked right now".  Two
+# bar-widths is jitter (a late WS frame, a seed in flight); three is the feed.
+SAR_LIVE_SHADOW_STALL_BARS: float = _safe_float("SAR_LIVE_SHADOW_STALL_BARS", "3")
+
+# How long an arm may stay stalled before it is retired as unmeasurable.
+# A rotated-out mover can be re-promoted, so a stall is not immediately fatal —
+# but past this bound the gap in its bars is unrecoverable and a fill computed
+# across it would describe bars we never saw.  Refuse (INSUFFICIENT), never
+# clamp: the arm is counted and excluded from every R figure.
+SAR_LIVE_SHADOW_ABANDON_SEC: int = _safe_int("SAR_LIVE_SHADOW_ABANDON_SEC", "3600")
+
+# Hard horizon on a *healthy* arm that never flips.  SIGNAL_EXPIRY_ENABLED is
+# OFF by owner decision, so a signal can run for days and the arm's own
+# mechanism ("exit when SAR flips") specifies no time stop.  Rather than invent
+# a market close the owner never specified, an arm past this horizon retires
+# INSUFFICIENT and is excluded from the verdict, visibly.
+SAR_LIVE_SHADOW_MAX_OPEN_HOURS: float = _safe_float(
+    "SAR_LIVE_SHADOW_MAX_OPEN_HOURS", "48"
+)
+
 # ---------------------------------------------------------------------------
 # Tuned-variant shadow arms (2026-07-16 — owner: "tune, don't disable")
 # ---------------------------------------------------------------------------
