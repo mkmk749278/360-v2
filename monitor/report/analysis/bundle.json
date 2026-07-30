@@ -1,9 +1,9 @@
 {
-  "generated_at": "2026-07-29T03:55:15.152257+00:00",
-  "generated_at_ts": 1785297315.152257,
+  "generated_at": "2026-07-30T03:46:51.672425+00:00",
+  "generated_at_ts": 1785383211.672425,
   "lookback_hours": 24,
   "channel": "360_SCALP",
-  "git_sha": "c6f490d26c496e7529724785eee9ca87ed3a60c8",
+  "git_sha": "513dc5da45cf77388ae7b56c61bb7dcd6a819033",
   "source": "vps-monitor/analysis_bundle",
   "note": "Secretless engine dead-drop. Live tunable values + profit exit-replay come from ops GET /api/v1/analysis-bundle (they need the ops-only simulator).",
   "artifacts": [
@@ -15,10 +15,10 @@
     "analysis/emission_controller.json"
   ],
   "counts": {
-    "strategy_matrix_cells": 5877,
-    "strategy_matrix_scored_cells": 2250,
+    "strategy_matrix_cells": 6239,
+    "strategy_matrix_scored_cells": 2403,
     "performance_setups": 14,
-    "suppression_gates": 13
+    "suppression_gates": 12
   },
   "headlines": {
     "strongest_cells": [
@@ -61,16 +61,16 @@
     "weakest_cells": [
       {
         "strategy": "SR_FLIP_RETEST@SAREXIT",
-        "context_key": "ASIA/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -10.303614169241467,
-        "n": 23,
+        "context_key": "LONDON/MARKDOWN/NORMAL/BTC_NEUTRAL",
+        "edge_r": -7.687653990621922,
+        "n": 19,
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "SR_FLIP_RETEST@SAREXIT",
-        "context_key": "LONDON/MARKDOWN/NORMAL/BTC_NEUTRAL",
-        "edge_r": -8.108288012814326,
-        "n": 18,
+        "strategy": "DIVERGENCE_CONTINUATION@SAREXIT",
+        "context_key": "ASIA/MARKDOWN/NORMAL/BTC_NEUTRAL",
+        "edge_r": -7.498036285766418,
+        "n": 26,
         "verdict": "NEGATIVE"
       },
       {
@@ -81,28 +81,30 @@
         "verdict": "NEGATIVE"
       },
       {
-        "strategy": "MOVER_TREND_PULLBACK@SAREXIT",
-        "context_key": "OVERLAP/QUIET/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": -5.7262775856404895,
-        "n": 19,
+        "strategy": "SR_FLIP_RETEST@SAREXIT",
+        "context_key": "ASIA/ACCUMULATION/NORMAL/BTC_NEUTRAL",
+        "edge_r": -5.7298607411777915,
+        "n": 15,
         "verdict": "NEGATIVE"
       },
       {
         "strategy": "SR_FLIP_RETEST@SAREXIT",
-        "context_key": "NY/MARKDOWN/COMPRESSED/BTC_NEUTRAL",
-        "edge_r": -4.5328505298266615,
-        "n": 30,
+        "context_key": "NY/QUIET/COMPRESSED/BTC_NEUTRAL",
+        "edge_r": -5.728722411173456,
+        "n": 15,
         "verdict": "NEGATIVE"
       }
     ],
     "gate_verdict_counts": {
-      "KEEP": 7,
-      "TUNE": 2,
-      "INSUFFICIENT_SAMPLE": 3,
-      "DROP": 1
+      "KEEP": 5,
+      "DROP": 3,
+      "INSUFFICIENT_SAMPLE": 2,
+      "TUNE": 2
     },
     "drop_gates": [
-      "context_floor:TREND_PULLBACK_EMA"
+      "shadow_unit:SHADOW_RANGE_FADE",
+      "shadow_unit:SHADOW_MEAN_REVERT",
+      "context_floor:MOVER_AVWAP_SCALP"
     ]
   }
 }
