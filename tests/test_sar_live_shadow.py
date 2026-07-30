@@ -436,6 +436,8 @@ OPS_CONTRACT_KEYS = frozenset({
     "fill_level", "fill_confirm", "pnl_level_pct", "pnl_confirm_pct",
     "r_level", "r_confirm", "confirm_slippage_pct",
     "mfe_pct", "current_price", "unrealized_pct", "ambiguous_bar",
+    "sar_risk_pct", "max_sar_risk_pct", "handover_risk_pct",
+    "handover_wider_than_sl",
 })
 
 
@@ -554,3 +556,110 @@ def test_the_change_throttle_still_bounds_write_rate(tmp_path):
     ledger.flush(force=True)
     ledger.add(_arm(_rising(60), "LONG", entry=160.0, sl=155.0, tp1=175.0))
     assert ledger.flush(min_interval_sec=3600.0, heartbeat_sec=3600.0) is False
+
+
+# --------------------------------------------------------------------------- #
+# Risk stamps — what the SAR stop actually puts at risk
+# --------------------------------------------------------------------------- #
+#
+# Owner-caught 2026-07-30 on the first two live arms: MUUUSDT SHORT, entry
+# 18.67, designed SL 19.2301 (3.00%). The 5m SAR stop sat at 18.9684 — 1.60%,
+# tighter than designed. The 15m sat at 19.3734 — 3.77%, *wider*, i.e. outside
+# the stop the evaluator sized the trade for. A stop-out there scores -1.26R.
+#
+# The arm's behaviour is unchanged: these are stamps so the resolved population
+# can be split, not a cap. Capping is a separate decision the owner can now make
+# with data behind it.
+
+
+def test_risk_is_stamped_against_the_sl_the_trade_was_sized_for():
+    bars = _rising(60)
+    arm = _arm(bars, "LONG", entry=160.0, sl=152.0, tp1=999.0)  # 5% designed
+    assert arm["governor"] == live.GOV_SAR
+    stop = arm["sar_stop"]
+    expected = (160.0 - stop) / 160.0 * 100.0
+    assert arm["sar_risk_pct"] == pytest.approx(expected)
+    assert arm["handover_risk_pct"] == pytest.approx(expected)
+    assert arm["handover_wider_than_sl"] is (expected > 5.0)
+
+
+def test_a_sar_stop_wider_than_the_designed_sl_is_flagged():
+    """The 15m MUUUSDT case, reproduced from its real numbers."""
+    bars = _rising(60)
+    stop = _live_of(bars).next_stop
+    # Designed SL deliberately tighter than where SAR parked.
+    tight = 160.0 - (160.0 - stop) * 0.5
+    arm = _arm(bars, "LONG", entry=160.0, sl=tight, tp1=999.0)
+    assert arm["sar_risk_pct"] > arm["sl_distance_pct"]
+    assert arm["handover_wider_than_sl"] is True
+
+
+def test_a_sar_stop_inside_the_designed_sl_is_not_flagged():
+    """The 5m MUUUSDT case — SAR tighter than the signal's own stop."""
+    bars = _rising(60)
+    stop = _live_of(bars).next_stop
+    wide = 160.0 - (160.0 - stop) * 2.0
+    arm = _arm(bars, "LONG", entry=160.0, sl=wide, tp1=999.0)
+    assert arm["sar_risk_pct"] < arm["sl_distance_pct"]
+    assert arm["handover_wider_than_sl"] is False
+
+
+def test_short_side_risk_is_measured_above_the_entry():
+    bars = _falling(60)  # SAR bearish -> a SHORT is aligned
+    entry = bars[-1][3]  # enter at the last close, as a real signal does
+    arm = _arm(bars, "SHORT", entry=entry, sl=entry * 1.03, tp1=entry * 0.94)
+    assert arm["aligned_at_entry"] is True
+    stop = arm["sar_stop"]
+    assert stop > entry                      # a SHORT's stop sits above entry
+    assert arm["sar_risk_pct"] == pytest.approx((stop - entry) / entry * 100.0)
+    assert arm["sar_risk_pct"] > 0
+
+
+def test_max_risk_tracks_the_widest_the_stop_ever_sat_not_just_the_handover():
+    """SAR's two-bar clamp can move the level away from price, so the widest
+    point is not knowable at handover and must be tracked per bar."""
+    bars = _rising(60)
+    arm = _arm(bars, "LONG", entry=160.0, sl=140.0, tp1=999.0)
+    at_handover = arm["max_sar_risk_pct"]
+    live.step_arm(arm, _series(bars + _rising(10, start=161.0)),
+                  step=STEP, max_step=MAX_STEP)
+    # Trailing up on a LONG reduces risk; the max must not follow it down.
+    assert arm["sar_risk_pct"] < at_handover
+    assert arm["max_sar_risk_pct"] == pytest.approx(at_handover)
+
+
+def test_risk_becomes_negative_once_the_trail_passes_break_even():
+    """A stop on the profitable side is a locked gain, not a risk — the sign is
+    kept rather than clamped, because 'zero risk' would be a different claim."""
+    bars = _rising(60) + _rising(40, start=161.0)
+    arm = _arm(_rising(60), "LONG", entry=100.0, sl=97.0, tp1=9999.0)
+    live.step_arm(arm, _series(bars), step=STEP, max_step=MAX_STEP)
+    assert arm["sar_stop"] > 100.0
+    assert arm["sar_risk_pct"] < 0
+
+
+def test_the_geometry_leg_carries_no_handover_risk_until_it_hands_over():
+    bars = _rising(60)
+    arm = _arm(bars, "SHORT", entry=160.0, sl=200.0, tp1=100.0)
+    assert arm["governor"] == live.GOV_GEOMETRY
+    assert arm["handover_risk_pct"] is None
+    assert arm["handover_wider_than_sl"] is None
+    live.step_arm(arm, _series(bars + _falling(25, start=158.0, step_dn=2.0)),
+                  step=STEP, max_step=MAX_STEP)
+    assert arm["governor"] == live.GOV_SAR
+    # Stamped at the moment the SL stopped governing, not reconstructed later.
+    assert arm["handover_risk_pct"] is not None
+    assert arm["handover_wider_than_sl"] in (True, False)
+
+
+def test_risk_stamps_do_not_change_which_stop_the_arm_uses():
+    """Stamp only. The exit must be identical to the pre-stamp behaviour."""
+    bars = _rising(60)
+    arm = _arm(bars, "LONG", entry=160.0, sl=152.0, tp1=999.0)
+    parked = arm["sar_stop"]
+    breach = (parked + 0.4, parked + 0.5, parked - 2.0, parked - 1.5)
+    live.step_arm(arm, _series(bars + [breach]), step=STEP, max_step=MAX_STEP)
+    assert arm["status"] == live.STATUS_CLOSED_SAR_FLIP
+    assert arm["fill_level"] == pytest.approx(parked)
+    # R still divides by the SL distance at entry, not by the SAR risk.
+    assert arm["r_level"] == pytest.approx(arm["pnl_level_pct"] / 5.0)
