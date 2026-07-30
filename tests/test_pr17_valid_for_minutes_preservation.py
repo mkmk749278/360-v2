@@ -14,6 +14,7 @@ Covers:
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 from config import CHANNEL_SCALP, SIGNAL_VALID_FOR_MINUTES
 from src.channels.base import Direction, Signal, build_channel_signal
@@ -50,10 +51,32 @@ def _make_scanner_sig(channel: str = "360_SCALP", valid_for_minutes: int = 0) ->
     )
 
 
+def _make_scanner() -> Scanner:
+    """A real Scanner instance.
+
+    This used to pass ``self=None`` to the unbound method, which asserted that
+    ``_populate_signal_context`` never touches scanner state.  That stopped
+    being true when the pair-admission provenance stamp landed (2026-07-30) —
+    the stamp reads ``_mover_promoted_pairs``, and it has to, because the
+    promotion expires long before the signal closes.  A ``None`` self is a
+    hand-written stand-in for a collaborator; drive the real one.
+    """
+    router = MagicMock(active_signals={})
+    router.cleanup_expired.return_value = 0
+    sq = MagicMock()
+    sq.put = AsyncMock(return_value=True)
+    return Scanner(
+        pair_mgr=MagicMock(pairs={}), data_store=MagicMock(), channels=[],
+        smc_detector=MagicMock(), regime_detector=MagicMock(),
+        predictive=MagicMock(), exchange_mgr=MagicMock(), spot_client=None,
+        telemetry=MagicMock(), signal_queue=sq, router=router,
+    )
+
+
 def _call_populate(sig: SimpleNamespace, channel: str = "360_SCALP") -> None:
-    """Exercise Scanner._populate_signal_context() with a minimal mock."""
+    """Exercise Scanner._populate_signal_context() against a real Scanner."""
     ctx = _make_ctx(channel)
-    Scanner._populate_signal_context(None, sig, volume_24h=1_000_000.0, ctx=ctx)  # type: ignore[arg-type]
+    _make_scanner()._populate_signal_context(sig, volume_24h=1_000_000.0, ctx=ctx)
 
 
 # ---------------------------------------------------------------------------
@@ -213,8 +236,8 @@ class TestPopulateSignalContextPreservesEvaluatorValue:
 
         # Simulate what the scanner does next:
         ctx = _make_ctx()
-        Scanner._populate_signal_context(  # type: ignore[arg-type]
-            None, sig, volume_24h=1_000_000.0, ctx=ctx
+        _make_scanner()._populate_signal_context(
+            sig, volume_24h=1_000_000.0, ctx=ctx
         )
 
         assert sig.valid_for_minutes == 3, (
@@ -238,8 +261,8 @@ class TestNoRegressionDefaultFallback:
         assert sig.valid_for_minutes == 0  # sentinel before context population
 
         ctx = _make_ctx()
-        Scanner._populate_signal_context(  # type: ignore[arg-type]
-            None, sig, volume_24h=1_000_000.0, ctx=ctx
+        _make_scanner()._populate_signal_context(
+            sig, volume_24h=1_000_000.0, ctx=ctx
         )
 
         assert sig.valid_for_minutes == SIGNAL_VALID_FOR_MINUTES.get("360_SCALP", 15), (

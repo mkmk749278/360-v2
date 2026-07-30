@@ -511,6 +511,7 @@ class TradeMonitor:
                 # same two fields (2026-07-28).
                 entry_regime=str(getattr(sig, "entry_regime", "") or ""),
                 entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
+                pair_admission=str(getattr(sig, "pair_admission", "") or ""),
             )
         # Circuit breaker ALWAYS uses actual PnL (real exit price)
         if self._circuit_breaker is not None:

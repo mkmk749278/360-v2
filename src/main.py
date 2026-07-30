@@ -789,6 +789,7 @@ class CryptoSignalEngine:
                     # recover it (2026-07-28).
                     entry_regime=str(getattr(sig, "entry_regime", "") or ""),
                     entry_regime_15m=str(getattr(sig, "entry_regime_15m", "") or ""),
+                    pair_admission=str(getattr(sig, "pair_admission", "") or ""),
                 )
         except Exception as exc:
             log.warning(f"perf_tracker record_outcome failed (expiry): {exc}")
@@ -2804,6 +2805,78 @@ class CryptoSignalEngine:
             )
 
         fl.add_predicate(PredicateProbe(name="candle_coverage", fn=_coverage, min_streak=6))
+
+        def _promoted_pair_integrity():
+            """Is every pair we believe we are scanning actually in the universe?
+
+            The scanner holds a promoted mover for 6 h, and `pair_manager`'s
+            prune paths used to delete it out from under that hold on the 6 h
+            refresh — after which the scan-set builder dropped it on a
+            ``.get(...) is not None`` guard with no else-branch, while the
+            symbol went on consuming promotion budget until its TTL expired.
+            Mean ~50% of every mover's window, invisible by construction
+            (2026-07-30).
+
+            Keyed on the population that would be harmed — the pairs still
+            under promotion — not on the universe map, which is exactly the
+            place a rotated-out symbol is guaranteed not to be (#815's rule).
+            """
+            sc = getattr(self, "_scanner", None)
+            if sc is None:
+                return True, "scanner not constructed"
+            promoted = dict(getattr(sc, "_mover_promoted_pairs", {}) or {})
+            if not promoted:
+                # Quiet market, nothing promoted.  Not a fault — and saying so
+                # is the difference between "empty" and "broken".
+                return True, "no pairs under promotion"
+            pairs = getattr(self.pair_mgr, "pairs", {}) or {}
+            missing = [s for s in promoted if s not in pairs]
+            held = set(getattr(self.pair_mgr, "held_symbols", list)())
+            unheld = [
+                s for s in promoted
+                if s in getattr(sc, "_synthetic_mover_pairs", set()) and s not in held
+            ]
+            detail = (
+                f"{len(promoted) - len(missing)}/{len(promoted)} promoted pairs "
+                f"present in universe"
+            )
+            if missing:
+                detail += f"; missing={missing[:5]}"
+            if unheld:
+                detail += f"; synthetic-but-unheld={unheld[:5]}"
+            return (not missing and not unheld), detail
+
+        fl.add_predicate(PredicateProbe(
+            name="promoted_pair_integrity", fn=_promoted_pair_integrity, min_streak=3,
+        ))
+
+        def _mover_admission_metadata():
+            """Is the structural TradFi gate deciding, or just refusing?
+
+            ``crypto_perp_admission`` is fail-CLOSED: with no exchangeInfo
+            metadata it rejects every candidate.  That is the right default on
+            a path that reaches the whole ~600-pair board, but a permanently
+            empty cache would then starve mover promotion completely and look
+            exactly like a quiet market.  A fail-closed gate needs a probe on
+            the reason it is closing, or the safe default becomes a silent
+            outage.
+            """
+            from src.execution import symbol_filters as _sf
+
+            n_known = len(_sf.all_cached_symbols())
+            if n_known == 0:
+                return False, (
+                    "exchangeInfo symbol cache EMPTY — every mover admission "
+                    "is being refused for metadata_unavailable"
+                )
+            return True, (
+                f"{n_known} symbols known, {len(_sf.tradfi_perp_symbols())} "
+                f"marked TRADIFI_PERPETUAL"
+            )
+
+        fl.add_predicate(PredicateProbe(
+            name="mover_admission_metadata", fn=_mover_admission_metadata, min_streak=3,
+        ))
 
         def _stale_tf_scoring():
             """Did any signal get scored on a *known-stale* timeframe?

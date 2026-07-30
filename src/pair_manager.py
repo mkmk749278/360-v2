@@ -20,7 +20,7 @@ import asyncio
 import itertools
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Dict, List, Optional, Tuple
+from typing import AbstractSet, Dict, List, Optional, Tuple
 
 import time
 
@@ -50,7 +50,9 @@ log = get_logger("pair_manager")
 # volume rankings so they must be explicitly excluded.
 _STABLECOIN_BLACKLIST: frozenset = frozenset({
     "USDCUSDT", "BUSDUSDT", "TUSDUSDT", "USDPUSDT", "FDUSDUSDT",
-    "USD1USDT", "DAIUSDT", "EURUSDT", "USDCBUSD", "USDTDAI",
+    # (EURUSDT is FX, not a stablecoin — it lives in _NON_CRYPTO_BLACKLIST
+    # below.  It was listed in both sets, which the union hid.)
+    "USD1USDT", "DAIUSDT", "USDCBUSD", "USDTDAI",
     # USD-pegged stablecoins that produce untradeable signals against USDT
     "RLUSDUSDT", "PYUSDUSDT", "USDDUSDT", "GUSDUSDT",
     "FRAXUSDT", "LUSDUSDT", "SUSDUSDT", "CUSDUSDT",
@@ -105,6 +107,17 @@ _NON_CRYPTO_BLACKLIST: frozenset = frozenset({
     # filter (see is_tradfi_perp below) is what stops the next new
     # stock perp without a human editing this list.
     "WDCUSDT",                              # Western Digital
+    # 2026-07-30: five more stock/ETF perps found in the LIVE delivered
+    # signal book (monitor-logs signals_last100), every one admitted through
+    # MOVER PROMOTION, which never called ``is_tradfi_perp`` at all.  Seven
+    # delivered signals, mean −1.50%, zero TP hits, all seven stopped out.
+    # The structural gate (``symbol_filters.crypto_perp_admission``) is what
+    # now stops the next one; these stay as the documented floor.
+    "SMCIUSDT",                             # Super Micro Computer
+    "SOXSUSDT",                             # Direxion Daily Semiconductor Bear 3X
+    "IBMUSDT",                              # IBM
+    "NOKUSDT",                              # Nokia
+    "LRCXUSDT",                             # Lam Research
 })
 
 # Combined blacklist used by every fetch path.  Easier to reason about
@@ -197,6 +210,52 @@ class PairManager:
         # deny-set + per-symbol filters) because the bootstrap refresh
         # hadn't run yet.  Guards the retry cadence (see _SYMBOL_META_RETRY_S).
         self._symbol_meta_last_attempt: float = 0.0
+        # Symbols another subsystem has explicitly parked in this universe and
+        # is still using — see :meth:`hold_symbol`.  Never pruned.
+        self._held_symbols: AbstractSet[str] = set()
+
+    # ------------------------------------------------------------------
+    # Externally-held symbols (scanner mover promotions)
+    # ------------------------------------------------------------------
+    #
+    # The scanner admits movers from OUTSIDE the top-N (``!ticker@arr`` sees
+    # the whole board) by synthesising a TIER3 ``PairInfo`` straight into
+    # ``self.pairs``, and holds them for ``MOVER_PROMOTION_TTL_SEC`` (6 h).
+    # Every prune path here walked ``self.pairs`` and deleted anything absent
+    # from the fresh top-N — with no idea those entries were on loan.  The
+    # refresh cadence is ALSO 6 h (``PAIR_FETCH_INTERVAL_HOURS``), so a mover
+    # promoted at a uniformly random point in the cycle lost a mean ~50% of
+    # its window, and the loss was silent by construction: the scanner kept
+    # the symbol in ``_mover_promoted_pairs`` (so it never re-admitted it,
+    # and it kept consuming promotion budget) while the scan-set builder
+    # dropped it on a ``pair_mgr.pairs.get(...) is not None`` guard with no
+    # else-branch (2026-07-30).
+    #
+    # A hold is a claim, not a hint: the holder owns release.
+
+    #: Class-level default so "is this symbol held?" is answerable on **any**
+    #: instance, including the ``__new__``-constructed ones in the test suite.
+    #: A prune predicate that can raise ``AttributeError`` is not a predicate —
+    #: and this one guards the money path's scan set.
+    _held_symbols: AbstractSet[str] = frozenset()
+
+    def hold_symbol(self, symbol: str) -> None:
+        """Protect *symbol* from every prune path until released."""
+        held = self.__dict__.get("_held_symbols")
+        if not isinstance(held, set):
+            held = set(self._held_symbols)
+            self._held_symbols = held  # type: ignore[assignment]
+        held.add(symbol)
+
+    def release_symbol(self, symbol: str) -> None:
+        """Drop the prune protection previously taken by :meth:`hold_symbol`."""
+        held = self.__dict__.get("_held_symbols")
+        if isinstance(held, set):
+            held.discard(symbol)
+
+    def held_symbols(self) -> List[str]:
+        """Sorted snapshot of currently-held symbols (diagnostics + probes)."""
+        return sorted(self._held_symbols)
 
     # ------------------------------------------------------------------
     # Public helpers
@@ -518,7 +577,10 @@ class PairManager:
         # --- Prune delisted / dropped pairs ---
         removed_symbols: List[str] = []
         if PAIR_PRUNE_ENABLED and seen_in_fetch:
-            stale = [sym for sym in self.pairs if sym not in seen_in_fetch]
+            stale = [
+                sym for sym in self.pairs
+                if sym not in seen_in_fetch and sym not in self._held_symbols
+            ]
             for sym in stale:
                 removed_symbols.append(sym)
                 del self.pairs[sym]
@@ -904,8 +966,15 @@ class PairManager:
         """Refresh and return the top-*count* USDT-M futures pairs by volume.
 
         The result is cached and the method is rate-limited to at most one
-        real fetch per ``TOP50_UPDATE_INTERVAL_SECONDS`` seconds (default 90s).
-        Pass ``force=True`` to bypass the interval guard.
+        real fetch per ``TOP50_UPDATE_INTERVAL_SECONDS`` seconds (default
+        3600s).  Pass ``force=True`` to bypass the interval guard.
+
+        **The live cadence is not that interval.**  The only caller in the
+        running engine is ``main._pair_refresh_loop``, which fires every
+        ``PAIR_FETCH_INTERVAL_HOURS`` (6 h) with ``force=True`` — so the
+        interval guard only ever applies to the bootstrap's un-forced call.
+        This docstring previously advertised "default 90s", a third number
+        matching neither; corrected 2026-07-30.
 
         Parameters
         ----------
@@ -959,8 +1028,13 @@ class PairManager:
                 self.pairs[p.symbol].tier = PairTier.TIER1
 
         # Prune pairs that have dropped out of the top-N so that
-        # self.pairs only contains the active scanning universe.
-        stale = [sym for sym in self.pairs if sym not in top_symbols]
+        # self.pairs only contains the active scanning universe.  Held
+        # symbols (scanner mover promotions) are on loan to another
+        # subsystem and are never pruned — see :meth:`hold_symbol`.
+        stale = [
+            sym for sym in self.pairs
+            if sym not in top_symbols and sym not in self._held_symbols
+        ]
         for sym in stale:
             del self.pairs[sym]
             self._prev_volumes.pop(sym, None)
@@ -971,16 +1045,11 @@ class PairManager:
 
         return list(self._top50_futures_cache)
 
-    async def run_periodic_top50_refresh(self) -> None:
-        """Infinite loop that refreshes the top-50 futures list at the
-        configured minimum interval (``TOP50_UPDATE_INTERVAL_SECONDS``).
-        """
-        while True:
-            try:
-                await self.refresh_top50_futures(force=True)
-            except Exception as exc:
-                log.warning("run_periodic_top50_refresh error: %s", exc)
-            await asyncio.sleep(TOP50_UPDATE_INTERVAL_SECONDS)
+    # NOTE (2026-07-30): ``run_periodic_top50_refresh`` was deleted here.  It
+    # was wired to nothing — ``main._pair_refresh_loop`` is the sole driver of
+    # the top-N refresh — so it advertised a 90s/1h rotation the engine never
+    # performed and sent three sessions looking for a cadence that did not
+    # exist.  Dead code that describes behaviour is worse than dead code.
 
     async def close(self) -> None:
         await self._spot_client.close()

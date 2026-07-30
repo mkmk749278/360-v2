@@ -135,6 +135,7 @@ Never push to `claude/general-session-*` or harness-assigned long-lived branches
 - **Never add an uncached Firestore / network read (or write) to a per-tick, per-scan, or per-order hot loop.** Cache it and gate the cache on an invalidation signal.
 - **Never boolean-test candle/series arrays** (`arr or []`, `if not arr`) — the data store holds numpy arrays and truthiness raises; use `is None` / `len()` checks. Enforced by `tests/test_no_numpy_truthiness_regression.py` (2026-07-14: 8 features died silently to this).
 - **Never swallow an exception silently in a data/measurement path.** Every fail-open `except` calls `fail_open.record(site, exc)` — behavior stays fail-open, but the failure counts, WARNs, and pages via the feature-liveness watchdog.
+- **Never admit a symbol to the scan universe on a name list alone.** Every admission path calls `symbol_filters.crypto_perp_admission`, which is **fail-closed** on Binance's own `contractType`. A hand-maintained ticker list cannot see next week's listing, and the owner must never be the process by which we notice one.
 
 ---
 
@@ -505,6 +506,52 @@ python -m src.main
   never zero, and no replay had ever produced it. **Where two fills are defensible,
   publish both** — collapsing them into one number before the gap is known is
   choosing the answer, and the one you would have chosen is the flattering one.
+- **A deny-list is a floor; only a structural gate is a filter.** A list of
+  names excludes exactly the tickers a human already typed, so it is silent by
+  construction on the next listing — and "add it when we see it" makes the
+  owner the detection mechanism. Binance publishes `contractType ==
+  TRADIFI_PERPETUAL`; every `pair_manager` fetch path read it, and
+  `scanner._ensure_mover_pair` — the **one** path that reaches outside the
+  top-N into the whole ~600-pair `!ticker@arr` board, which is precisely where
+  stock perps live — never did. SMCI / SOXS / IBM / NOK / LRCX reached the
+  **live paid book**: 7 delivered signals, mean −1.50%, zero TP hits
+  (owner-directed audit 2026-07-30, after #B18 had already cost a paid user's
+  auto-trade a `-4411` on WDCUSDT and the "structural filter" written to
+  prevent the recurrence was never wired to the leaking path). Corollary:
+  **when a fix is described as structural, name the paths it covers and check
+  each one** — the doc said the filter "stops the next new stock perp without
+  a human editing this list", and that sentence was false for the only path
+  that mattered.
+- **Absence of knowledge is not permission — decide the direction of every
+  fail per path.** `is_tradfi_perp` answers False on an empty metadata cache,
+  which is right where a name-list floor sits beneath it and wrong where the
+  input is the whole exchange. The same predicate needs a **fail-closed**
+  sibling (`crypto_perp_admission`: `metadata_unavailable` /
+  `unknown_to_exchange_info` / `tradfi_perp`, each separately counted) on the
+  open path. And a fail-closed gate needs a probe on *why* it is closing —
+  otherwise a dead exchangeInfo cache silently refuses every candidate and
+  reads exactly like a quiet market (`mover_admission_metadata`).
+- **A borrowed entry needs a hold, or the owner of the map will delete it.**
+  The scanner parks promoted movers directly in `pair_mgr.pairs` for a 6h TTL;
+  `pair_manager`'s prune walked that same map and deleted everything outside
+  the fresh top-N, on a refresh whose period is *also* 6h. Mean ~50% of every
+  promotion window lost, and invisible three ways at once: the scanner never
+  re-admitted (its own `symbol in _mover_promoted_pairs` skip), the symbol kept
+  consuming promotion budget until TTL, and the scan-set builder dropped it on
+  a `pair_mgr.pairs.get(...) is not None` guard **with no else-branch**
+  (2026-07-30). Shared mutable state across a module boundary needs an explicit
+  claim (`hold_symbol` / `release_symbol`) — and the claim's holder owns
+  release, or the map grows without bound and the prune stops meaning anything.
+- **Ask what fraction of the delivered book a path owns before you rank it.**
+  Every capacity discussion in this repo had been about the core 75, while
+  `signals_last100` showed the delivered book running at a **$25.7M median 24h
+  volume, 53 distinct symbols, 73 of 100 in `MOVER_*` setups** — i.e. dominated
+  by pairs admitted for six hours at a time through a path with no structural
+  filter, no WS klines (REST re-seed only, up to ~2 min stale), a spread gate
+  50× looser than the median delivered spread, and half its window silently
+  pruned away. **Universe *size* was never the question**; the admission path
+  was. Read the emitted population first — the code's shape tells you what was
+  intended, not what ships.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

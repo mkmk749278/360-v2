@@ -4,6 +4,121 @@
 
 ---
 
+## 🔴 SESSION 92 2026-07-30 — tokenised stocks were in the live paid book, and the path that put them there was the one nobody had filtered
+
+**Owner ask:** *"discuss on scan universe"* → *"talk more on promoted pairs"* →
+*"fix everything, automatic is important, we can't regularly check pairs."*
+
+The discussion was supposed to be about universe *size*. Reading the delivered
+signal book instead of the config made it a different session.
+
+### What the emitted population actually says
+
+`monitor-logs:signals_last100` — the last 100 signals the router **delivered**:
+
+| | |
+|---|---|
+| Distinct symbols | 53 |
+| Median 24h volume | **$25.7M** |
+| Under $100M / $50M | 84 / 62 |
+| `MOVER_*` setup classes | **73 / 100** |
+
+The top-75 core scan — the subject of every capacity discussion this repo has
+had, including Session 85's — produces a **minority** of what subscribers
+receive. The delivered book is dominated by pairs admitted for 6h at a time
+through mover promotion.
+
+### Finding 1 — five stock perps, live, in the paid book
+
+| Symbol | What it is | vol | pnl |
+|---|---|---|---|
+| SMCIUSDT | Super Micro Computer | $22.3M | −1.52%, 0 |
+| SOXSUSDT | Direxion Semi Bear 3X ETF | $38.0M | −1.93%, −3.00% |
+| IBMUSDT | IBM | $57.7M | −1.68% |
+| NOKUSDT | Nokia | $25.9M | 0 |
+| LRCXUSDT | Lam Research | $5.4M | −2.37% |
+
+**7 delivered signals, mean −1.50%, zero TP hits, all seven stopped out.**
+LRCXUSDT had already appeared in the Session-91 SAR export and nobody had
+noticed what it was.
+
+Root cause, one grep: `is_tradfi_perp` appeared in **all four** `pair_manager`
+fetch paths and **nowhere in the scanner**. `_ensure_mover_pair` — the one
+admission path that reaches outside the top-N onto the whole ~600-pair
+`!ticker@arr` board, i.e. exactly where stock perps live — checked two static
+name lists and nothing else. This is #B18 (WDCUSDT, `-4411` on a paid user's
+auto-trade, 2026-07-18) recurring with five new tickers, because the
+"structural filter" written to prevent the recurrence was never wired to the
+path that leaks.
+
+### Finding 2 — the 6h prune ate half of every promotion window
+
+`refresh_top50_futures` deleted everything outside the fresh top-N from
+`pair_mgr.pairs`, including the synthetic movers the scanner had parked there.
+Refresh period 6h; `MOVER_PROMOTION_TTL_SEC` 6h → mean ~50% of each window
+lost. Invisible three ways: the scanner never re-admitted (its own
+`symbol in _mover_promoted_pairs` skip), the dead symbol kept consuming
+promotion budget until TTL, and the scan-set builder dropped it on a
+`pair_mgr.pairs.get(...) is not None` guard **with no else-branch**.
+
+### Finding 3 — nothing recorded that a signal came from a promoted pair
+
+`SignalRecord` carried 38 fields and not one answered "core or promoted?" The
+population producing 73% of the book was analysable only through `setup_class`
+as a proxy. Under that proxy: `MOVER_*` n=73 mean −0.259% with **zero** TP
+hits; non-mover n=27 mean +0.581% with all 9 TP hits; `MOVER_TREND_PULLBACK`
+alone n=60 mean −0.445%. Volume tells you nothing — `<$50M` and `>=$50M` split
+−0.032% vs −0.033%. **Illiquidity is not the discriminator; MTP is.** (n=100,
+one window, `pnl_pct` not R-normalised — not a verdict, a reason to measure.)
+
+### Shipped — branch `claude/scan-universe-discussion-am3vnp`
+
+| Area | Change |
+|---|---|
+| **Structural gate** | `symbol_filters.crypto_perp_admission` — **fail-closed** verdict (`metadata_unavailable` / `unknown_to_exchange_info` / `tradfi_perp`), called by `_ensure_mover_pair`, each reason separately counted |
+| **Floor** | SMCI/SOXS/IBM/NOK/LRCX added to `_NON_CRYPTO_BLACKLIST`; `EURUSDT` de-duplicated across the two sets |
+| **Hold registry** | `PairManager.hold_symbol` / `release_symbol` / `held_symbols`; **both** prune paths honour it; scanner claims on admit, releases on expiry |
+| **Silent drop** | scan-set builder now counts `promoted_pair_vanished` and WARNs with the symbols |
+| **Provenance** | `Signal.pair_admission` → `SignalRecord.pair_admission` → `SignalDetail` — `CORE` / `MOVER_IGNITION` / `MOVER_TOP24H` / `SURGE`, stamped at scan time |
+| **Probes** | `promoted_pair_integrity` (keyed on pairs under promotion, not on the universe map) + `mover_admission_metadata` (a fail-closed gate needs a probe on *why* it closes) |
+| **Dead code** | `run_periodic_top50_refresh` deleted — wired to nothing, advertised a 90s cadence the engine never ran; docstring corrected to the real 6h `_pair_refresh_loop` |
+| **Types** | `_mover_promoted_pairs` was annotated `Dict[str, int]` while every write stored a monotonic float |
+
+Tests: `tests/test_scan_universe_admission.py`, `tests/test_promoted_pair_provenance.py`.
+**All nine core assertions verified by reverting the fix** — they fail against
+the old code. Full suite 7491 passed / 58 skipped; ruff clean; mypy 105 → 104.
+
+Two existing test files were driving `Scanner._populate_signal_context(None, …)`
+and mover admission against an unseeded metadata cache — both now drive the
+real collaborators.
+
+### Dark-first note
+
+The admission gate **narrows** what emits and closes a live leak into the paid
+book, so it ships enforcing rather than shadow-first; the measurement half
+(provenance, counters, probes) is ON from the same deploy per § Project Phase.
+
+### Open
+
+- **`pair_admission` has no ops surface yet.** Dark work must be observable —
+  the engine now stamps it and nothing renders it. Next: a `/track-record`
+  and Strategy-Lab split by admission, which is what makes "is MTP bad, or is
+  MTP-on-promoted-pairs bad?" answerable. **No backfill** — the promotion
+  expires long before the signal closes, so pre-deploy records stay `""`.
+- **MTP is 60% of the delivered book at −0.445% mean and zero TP hits.** Do
+  not act until `pair_admission` has a window; the proxy is not the fact.
+- **Universe size is not the lever** and Session 85's QCB premise is stale —
+  QCB now emits (2621 generated / 689 gated / **14 emitted**), and Layer G has
+  persisted `min_samples: 15` for `QUIET_COMPRESSION_BREAK@ATR`/`@FIXED`.
+  Those are **arm** keys; the live unsuffixed key carries no override — worth
+  confirming the relaxation reached a routable key (#806/#807 pattern).
+- **Surge promotion is effectively dead** under `TOP50_FUTURES_ONLY`:
+  `_update_volume_baseline` only considers pairs in `pair_mgr.pairs` that are
+  *not* in the scan set, and the map is pruned to exactly the scan set plus
+  held movers. Left alone deliberately — deleting it is a separate change.
+
+---
+
 ## 🟢 SESSION 91 2026-07-30 — a replay cannot tell you whether a mechanism is operable (#832, ops #106)
 
 Owner asked whether the SAR ledger and the dark-signals bake-off were both measuring

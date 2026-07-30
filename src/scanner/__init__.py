@@ -183,6 +183,7 @@ from src.pair_manager import (
     _PAIR_BLACKLIST,
     classify_pair_tier,
 )
+from src.execution.symbol_filters import crypto_perp_admission
 from src.confluence_detector import ConfluenceDetector
 from src.level_book import LevelBook
 from src.structure_state import LEG_DOMINANCE_THRESHOLD, StructureTracker
@@ -1460,9 +1461,16 @@ class Scanner:
         self._volume_baseline: Dict[str, float] = {}
         # symbol → cycles remaining (non-scan pairs temporarily added to universe)
         self._promoted_pairs: Dict[str, int] = {}
+        # symbol → which promotion source admitted it ("MOVER_IGNITION" /
+        # "MOVER_TOP24H").  Read at signal-stamp time so the closed-signal
+        # record carries how the pair entered the scan set; cleared with the
+        # promotion itself.
+        self._mover_promotion_source: Dict[str, str] = {}
         # Movers promotion: symbol → cycles remaining for pairs promoted by 24h % change.
         # These are scanned with a RESTRICTED evaluator set (VSB + BREAKDOWN_SHORT only).
-        self._mover_promoted_pairs: Dict[str, int] = {}
+        # symbol → monotonic EXPIRY timestamp (not a cycle count — the
+        # annotation said ``int`` while every write stored a float).
+        self._mover_promoted_pairs: Dict[str, float] = {}
 
     # ------------------------------------------------------------------
     # Dynamic tier query helper
@@ -1805,6 +1813,22 @@ class Scanner:
 
         return now_promoted[:SURGE_PROMOTION_MAX_PAIRS]
 
+    def _pair_admission_for(self, symbol: str) -> str:
+        """How *symbol* entered the current scan set.
+
+        ``CORE`` means it earned its place on 24h volume (the top-N set).
+        The promoted values name which promotion source admitted it, because
+        those are three different populations with three different risk
+        profiles and pooling them is how "movers" became unanalysable.
+        """
+        if not symbol:
+            return ""
+        if symbol in self._mover_promoted_pairs:
+            return self._mover_promotion_source.get(symbol, "MOVER_TOP24H")
+        if symbol in self._promoted_pairs:
+            return "SURGE"
+        return "CORE"
+
     async def _seed_mover_pair(self, symbol: str, info: Any) -> bool:
         """Backfill candles + CVD for a freshly-promoted mover pair.
 
@@ -1869,8 +1893,25 @@ class Scanner:
         # mover path re-admits them around every filter: SAMSUNG/HOOD/COIN/
         # QCOM/PLTR-style equity perps were promoted, scanned, and emitted
         # to the paid channel in the 2026-07-01..03 window.
+        #
+        # The name lists are the FLOOR, not the gate.  They only ever exclude
+        # tickers a human already typed, so they cannot see a stock perp
+        # Binance listed this week — and this is the one admission path that
+        # reaches outside the top-N into the whole board, which is exactly
+        # where those live.  Every `pair_manager` fetch path called
+        # `is_tradfi_perp`; this one never did, and on 2026-07-30 the live
+        # delivered book carried SMCI / SOXS / IBM / NOK / LRCX signals
+        # (7 delivered, mean −1.50%, zero TP hits) as a direct result.
         if symbol in _SYMBOL_BLACKLIST or symbol in _MOVER_UNIVERSE_BLACKLIST:
+            self._suppression_counters["mover_admission_rejected:blacklist"] += 1
             log.debug("mover admission blocked (blacklist): {}", symbol)
+            return None
+        # Structural gate — fail-CLOSED.  "We do not know what this instrument
+        # is" must reject on this path; absence of knowledge is not permission.
+        _admitted, _reason = crypto_perp_admission(symbol)
+        if not _admitted:
+            self._suppression_counters[f"mover_admission_rejected:{_reason}"] += 1
+            log.debug("mover admission blocked ({}): {}", _reason, symbol)
             return None
         if (change_pct is None or vol is None) and self.mover_ignition_detector is not None:
             m = self.mover_ignition_detector.meta(symbol)
@@ -1888,6 +1929,9 @@ class Scanner:
         )
         self.pair_mgr.pairs[symbol] = info
         self._synthetic_mover_pairs.add(symbol)
+        # Claim it so no pair_manager prune path can evict it mid-promotion
+        # while we still believe we are scanning it (2026-07-30).
+        self.pair_mgr.hold_symbol(symbol)
         return info
 
     async def _update_movers_promotion(self, sorted_pairs_set: set) -> List[str]:
@@ -1930,6 +1974,7 @@ class Scanner:
             for symbol, direction in drained.items():
                 if symbol in sorted_pairs_set:
                     self._mover_promoted_pairs.pop(symbol, None)
+                    self._mover_promotion_source.pop(symbol, None)
                     continue
                 if symbol in self._mover_promoted_pairs:
                     continue
@@ -1960,6 +2005,7 @@ class Scanner:
                 break
             if symbol in sorted_pairs_set:
                 self._mover_promoted_pairs.pop(symbol, None)
+                self._mover_promotion_source.pop(symbol, None)
                 continue
             if symbol in self._mover_promoted_pairs or symbol in seen:
                 continue
@@ -1996,6 +2042,9 @@ class Scanner:
                 # ``symbol in self._mover_promoted_pairs`` skip above keeping the
                 # original; a fresh ignition after expiry restamps it).
                 self._mover_promoted_pairs[symbol] = now_mono + MOVER_PROMOTION_TTL_SEC
+                self._mover_promotion_source[symbol] = (
+                    "MOVER_IGNITION" if symbol in ignition_dirs else "MOVER_TOP24H"
+                )
 
         # Evict pairs that entered the main scan, or whose promotion TTL elapsed.
         # A synthetically-admitted pair (one we added to pair_mgr to scan it) is
@@ -2003,7 +2052,9 @@ class Scanner:
         for sym in list(self._mover_promoted_pairs.keys()):
             if sym in sorted_pairs_set or now_mono >= self._mover_promoted_pairs[sym]:
                 del self._mover_promoted_pairs[sym]
+                self._mover_promotion_source.pop(sym, None)
                 if sym in self._synthetic_mover_pairs:
+                    self.pair_mgr.release_symbol(sym)
                     self.pair_mgr.pairs.pop(sym, None)
                     self._synthetic_mover_pairs.discard(sym)
 
@@ -2278,12 +2329,32 @@ class Scanner:
                     _added = 0
                     _promoted_syms = {sym for sym, _ in filtered_pairs}
                     filtered_pairs = list(filtered_pairs)
+                    _vanished: List[str] = []
                     for _promo_sym in _all_promoted:
                         if _promo_sym not in _promoted_syms:
                             _promo_info = self.pair_mgr.pairs.get(_promo_sym)
                             if _promo_info is not None:
                                 filtered_pairs.append((_promo_sym, _promo_info))
                                 _added += 1
+                            else:
+                                # A pair we believe we are scanning is no
+                                # longer in the universe.  Before the hold
+                                # registry this branch did not exist and the
+                                # drop was silent for the rest of the 6h TTL
+                                # while the symbol kept consuming promotion
+                                # budget.  Never silent again: count it, and
+                                # let the liveness probe page on a streak.
+                                _vanished.append(_promo_sym)
+                                self._suppression_counters[
+                                    "promoted_pair_vanished"
+                                ] += 1
+                    if _vanished:
+                        log.warning(
+                            "{} promoted pair(s) vanished from pair_mgr before "
+                            "their promotion expired: {} — a prune path is "
+                            "evicting held symbols",
+                            len(_vanished), _vanished[:10],
+                        )
                     if _added:
                         log.info(
                             "Added {} dynamically promoted pair(s) to scan cycle "
@@ -4688,6 +4759,12 @@ class Scanner:
             sig.liquidity_info = " | ".join(liq_parts)
         sig.spread_pct = ctx.spread_pct
         sig.volume_24h_usd = volume_24h
+        # How this pair got into the scan set — recorded where it becomes
+        # true.  The promotion that admitted it expires after 6 h, long
+        # before most signals close, so this is not derivable later; a
+        # closed-signal record that lacks it cannot be repaired (#817's
+        # rule, applied to admission instead of regime).
+        sig.pair_admission = self._pair_admission_for(getattr(sig, "symbol", ""))
         # Pair-cohort (liquidity tier) for the edge matrix's Phase-5 cohort
         # dimension — stamped on every candidate so the dual-write feeders and
         # the cohort-aware emission policy can key on it.  Pure, fail-safe.
