@@ -254,7 +254,8 @@ Telegram are both acceptable paging paths.
 | Stop-geometry A/B (shadow) | `src/geometry_ab.py` |
 | Tuned shadow variants (`@TUNED`) | `src/tuned_variants.py` |
 | Dispatch-staleness V2 (geometry-aware, `@DSV2` shadow) | `src/staleness_v2.py` |
-| SAR exit shadow arm (`@SARBASE`/`@SAREXIT`, dark) | `src/sar_exit_shadow.py` |
+| SAR exit shadow arm (`@SARBASE`/`@SAREXIT`, dark, **replay**) | `src/sar_exit_shadow.py` |
+| SAR exit mechanism (**live**, forward-stepped in the monitor loop, dark) | `src/sar_live_shadow.py` |
 
 ---
 
@@ -482,6 +483,28 @@ python -m src.main
   on the population that happens to be convenient. And a fail-open `continue` with
   no counter is how the harm stays invisible: `if early: continue` was silent by
   construction for two full days per record.
+- **A replay cannot validate a mechanism, only a hypothesis.** Every measurement
+  arm before 2026-07-30 stamped a candidate and scored it later, which answers
+  *"would this have been profitable"* and is silent on *"could we actually have
+  done it"* — whether the level is computable in time, placeable, and actionable
+  before the outcome is known. Worse, a deferred verdict inherits its resolver's
+  health: the SAR replay ledger had **8 of 19 rows unresolved, including all four
+  of the window's winners**, so its −0.682R read was a fact about a starved
+  refresh budget, not about SAR (owner-caught 2026-07-30, #832). Before quoting a
+  counterfactual, ask **what fraction of the population resolved, and is the
+  unresolved part random?** A loss-selected sample is worse than no sample,
+  because it looks like an answer. When the question is whether to *adopt* a
+  mechanism, measure it forward on the money-path clock — `sar_live_shadow.py` is
+  the pattern.
+- **A resting stop is part of the mechanism, not an implementation detail.**
+  "Exit at market when the indicator flips" specifies no stop between bars, which
+  breaches the naked-position invariant the moment it is live — so measuring it
+  literally measures something unshippable. Model the stop that would actually be
+  parked, and record **both** fills: the level touched intrabar, and the confirmed
+  flip exited at the close. Their difference is the cost of confirmation, it is
+  never zero, and no replay had ever produced it. **Where two fills are defensible,
+  publish both** — collapsing them into one number before the gap is known is
+  choosing the answer, and the one you would have chosen is the flattering one.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

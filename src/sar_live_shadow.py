@@ -228,6 +228,69 @@ def _aligned(sar_up: bool, side: str) -> bool:
     return bool(sar_up) if _is_long(side) else (not bool(sar_up))
 
 
+def _risk_pct(entry: float, stop: float, side: str) -> Optional[float]:
+    """How much of the entry a stop puts at risk, as a positive percentage.
+
+    Negative would mean the stop sits on the *profitable* side of entry — a
+    locked-in gain, not a risk — and that is a real state once SAR trails past
+    break-even, so the sign is kept rather than clamped to zero.
+    """
+    if entry <= 0 or stop <= 0:
+        return None
+    raw = (stop - entry) if not _is_long(side) else (entry - stop)
+    return raw / entry * 100.0
+
+
+def _apply_stop(arm: Dict[str, Any], stop: Optional[float]) -> None:
+    """Park a stop on the arm and keep its risk stamps with it.
+
+    **Why the risk is stamped and not derived later.** When SAR agrees at entry
+    it governs and the signal's own SL is never used — so the risk the arm
+    actually carries is the SAR stop's distance, which can be *wider* than the
+    stop the evaluator sized the trade for. The first two live arms showed both
+    directions on one signal: MUUUSDT SHORT, designed SL 3.00%, 5m SAR at 1.60%
+    and 15m SAR at **3.77%** (owner-caught 2026-07-30). A stop-out on that 15m
+    arm scores −1.26R, and reading it as "SAR did worse" would be reading the
+    risk difference rather than the exit quality.
+
+    ``max_sar_risk_pct`` is tracked per bar rather than assumed equal to the
+    handover value: SAR's two-bar clamp (``max(sar, highs[i-1], highs[i-2])``)
+    can move the level *away* from price, so the stop is not monotonically
+    favourable and the widest point is not knowable in advance.
+
+    Stamp only — nothing here changes which stop the arm uses.
+    """
+    arm["sar_stop"] = stop
+    if stop is None:
+        arm["sar_risk_pct"] = None
+        return
+    risk = _risk_pct(float(arm["entry"]), float(stop), arm["side"])
+    arm["sar_risk_pct"] = risk
+    if risk is None:
+        return
+    prior = arm.get("max_sar_risk_pct")
+    arm["max_sar_risk_pct"] = risk if prior is None else max(float(prior), risk)
+
+
+def _stamp_handover(arm: Dict[str, Any], *, now: float, bar_ms: Any) -> None:
+    """Record the handover, and the risk being taken at the moment it happens.
+
+    The handover is the decision point — it is where the signal's SL stops
+    governing — so the comparison against that SL is a fact about *this
+    instant*, recorded here rather than reconstructed from a later pass. That
+    is #802's lesson: a value derivable at stamp time but computed later does
+    not merely arrive late, it silently shrinks every population that reads it.
+    """
+    arm["handover_at"] = now
+    arm["handover_bar_ms"] = bar_ms
+    risk = arm.get("sar_risk_pct")
+    sl_d = float(arm.get("sl_distance_pct") or 0.0)
+    arm["handover_risk_pct"] = risk
+    arm["handover_wider_than_sl"] = (
+        None if (risk is None or sl_d <= 0) else bool(float(risk) > sl_d)
+    )
+
+
 def _pnl_pct(entry: float, exit_price: float, side: str) -> float:
     if entry <= 0:
         return 0.0
@@ -292,6 +355,12 @@ def new_arm(
         "ambiguous_bar": False,
         "handover_at": None,
         "handover_bar_ms": None,
+        # Risk stamps — what the SAR stop actually puts at risk, beside the
+        # SL distance the evaluator sized the trade for. Stamp only.
+        "sar_risk_pct": None,
+        "max_sar_risk_pct": None,
+        "handover_risk_pct": None,
+        "handover_wider_than_sl": None,
     }
     if sar is None:
         # Refuse. An arm that cannot read SAR at entry does not get a governor
@@ -307,13 +376,12 @@ def new_arm(
     aligned = _aligned(sar.up, side)
     arm["aligned_at_entry"] = aligned
     arm["governor"] = GOV_SAR if aligned else GOV_GEOMETRY
-    arm["sar_stop"] = sar.next_stop
+    _apply_stop(arm, sar.next_stop)
     arm["sar_up"] = bool(sar.up)
     if aligned:
         # The handover is immediate, so it is stamped at entry rather than left
         # blank — "SAR governed from bar one" is a fact about this arm.
-        arm["handover_at"] = now
-        arm["handover_bar_ms"] = opened_ms
+        _stamp_handover(arm, now=now, bar_ms=opened_ms)
     return arm
 
 
@@ -476,9 +544,8 @@ def step_arm(
                     arm["sar_up"] = bool(live.up)
                     if _aligned(live.up, side):
                         arm["governor"] = GOV_SAR
-                        arm["handover_at"] = now
-                        arm["handover_bar_ms"] = times[i]
-                        arm["sar_stop"] = live.next_stop
+                        _apply_stop(arm, live.next_stop)
+                        _stamp_handover(arm, now=now, bar_ms=times[i])
                         changed = True
                 continue
 
@@ -490,7 +557,7 @@ def step_arm(
                     highs[: i + 1], lows[: i + 1], step, max_step, last_closed_ms=times[i]
                 )
                 if live is not None:
-                    arm["sar_stop"] = live.next_stop
+                    _apply_stop(arm, live.next_stop)
                     arm["sar_up"] = bool(live.up)
                 continue
             parked = float(parked)
@@ -510,7 +577,7 @@ def step_arm(
                 highs[: i + 1], lows[: i + 1], step, max_step, last_closed_ms=times[i]
             )
             if live is not None:
-                arm["sar_stop"] = live.next_stop
+                _apply_stop(arm, live.next_stop)
                 arm["sar_up"] = bool(live.up)
         return changed
     except Exception as exc:
@@ -595,14 +662,48 @@ class SarLiveLedger:
         with self._lock:
             self._dirty = True
 
-    def flush(self, min_interval_sec: float = 15.0, force: bool = False) -> bool:
-        """Write to disk when something changed. Throttled — this runs in a 5s loop."""
+    def flush(
+        self,
+        min_interval_sec: float = 15.0,
+        force: bool = False,
+        heartbeat_sec: float = 60.0,
+    ) -> bool:
+        """Persist the ledger. Throttled on change, and written on a heartbeat.
+
+        **The heartbeat is not an optimisation — it is what makes the file's
+        mtime mean something.** The first cut wrote only when an arm changed, so
+        with no open signals the file was never created at all, and ops rendered
+        UNAVAILABLE: *"the engine is not writing it — check the flag and the
+        container"*. That is a fault message, and a healthy engine with a quiet
+        market produced it (owner-caught 2026-07-30, minutes after deploy). It is
+        this repo's own lesson — **"blank" needs a cause before it gets a
+        caption** — reintroduced one file over.
+
+        The three states a reader needs are only separable if a live loop keeps
+        touching the file:
+
+        ===================  ==========================================
+        File missing         the monitor loop is not running the arms
+        File current, empty  running, nothing open — the quiet case
+        File stale           the loop stopped stepping
+        ===================  ==========================================
+
+        So a write happens when the ledger changed (bounded by
+        ``min_interval_sec``) **or** when ``heartbeat_sec`` has elapsed
+        regardless. ``_last_write`` starts at 0, so the first tick after boot
+        always writes and the file exists within one poll.
+
+        Cost: one small local write per minute when idle. No network, no
+        Firestore — this is nowhere near the hot-path budget the cost rules
+        guard.
+        """
         try:
             with self._lock:
-                if not self._dirty and not force:
-                    return False
                 now = time.time()
-                if not force and (now - self._last_write) < float(min_interval_sec):
+                since = now - self._last_write
+                due = self._dirty and since >= float(min_interval_sec)
+                beat = since >= float(heartbeat_sec)
+                if not (force or due or beat):
                     return False
                 payload = {
                     "schema": LEDGER_SCHEMA,

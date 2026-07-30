@@ -84,4 +84,14 @@ data/watchdog_audit.jsonl
 # pre-rollout build, so nothing needs it in the checkout.  `.tmp` sibling
 # ignored for the same reason data/pricing_freshness.json.tmp is.
 data/feature_liveness.json
-data/feature_liveness.json.tmp
+# Live SAR mechanism arms (src/sar_live_shadow.py). Runtime output: the engine
+# rewrites it on a 60s heartbeat, and any test that exercises TradeMonitor's
+# poll writes it too — which is how it briefly got tracked (2026-07-30).
+data/sar_live_arms_v1.json
+data/sar_live_arms_v1.json.tmp
+data/feature_liveness.json
+# Live SAR mechanism arms (src/sar_live_shadow.py). Runtime output: the engine
+# rewrites it on a 60s heartbeat, and any test that exercises TradeMonitor's
+# poll writes it too — which is how it briefly got tracked (2026-07-30).
+data/sar_live_arms_v1.json
+data/sar_live_arms_v1.json.tmp.tmp

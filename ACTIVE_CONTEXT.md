@@ -4,6 +4,167 @@
 
 ---
 
+## 🟢 SESSION 91 2026-07-30 — a replay cannot tell you whether a mechanism is operable (#832, ops #106)
+
+Owner asked whether the SAR ledger and the dark-signals bake-off were both measuring
+correctly, and if not which to believe. Neither, as it turned out — and the reason
+generalises past SAR.
+
+### What shipped
+
+| Repo | Change |
+|---|---|
+| **360-v2 #832** | **`src/sar_live_shadow.py`** — the SAR exit measured forward in the monitor loop, 5m + 15m arms per signal |
+| **ops #106** | **`/signals/sar-live`** — Live tab (running arms, distance to the parked stop) + Resolved tab (the verdict) |
+
+### The diagnosis, from the owner's three CSV exports
+
+`/signals/sar` had **8 of 19 rows unresolved, and all four of the window's winners
+were in that bucket.** Its resolved population read 2 wins / 11, −0.682R — a fact
+about the resolver's refresh budget (40 symbols/cycle against ~85 ledger symbols),
+not about SAR. Five of the eight had provably blown through their own SL or TP1:
+BTWUSDT SHORT sat RUNNING 8% past its static stop; ESPORTSUSDT SHORT straight through
+TP1.
+
+Two rows also carried an entry 0.4–0.6% from the dispatched one (LRCX 262.17 vs
+263.774). Backing the extreme out of each side's MFE gave the **identical** low from
+both, so the price path agreed and only the entry did not — a promotion that attached
+to a different detection of the same setup (#816 again).
+
+Dark signals resolved all 21 and is honest, but it is still hindsight. Split by
+whether the trail actually exited:
+
+| Population | SAR-trail | Engine actual | Delta |
+|---|---|---|---|
+| All 21 | +0.069% | −0.306% | +0.375pp |
+| The 18 that exited | −1.017% | −1.087% | **+0.070pp** |
+
+**The entire apparent edge lived in three un-exited marks.** Separately, 5 of 21 real
+exits were break-even-shift saves at −0.10% that the trail bleeds to −2.9%.
+
+### Rules earned
+
+- **A replay cannot validate a mechanism, only a hypothesis.** It answers "would this
+  have been profitable" and is silent on "could we actually have done it". And a
+  deferred verdict inherits its resolver's health — a loss-selected sample is worse
+  than no sample, because it looks like an answer. Ask what fraction resolved, and
+  whether the unresolved part is random.
+- **A resting stop is part of the mechanism.** "Exit at market on the flip" specifies
+  no stop between bars and would breach the naked-position invariant live, so
+  measuring it literally measures something unshippable. Both fills are recorded —
+  parked stop touched intrabar, and confirmed flip at the close — and their
+  difference is the cost of confirmation, which nothing had ever measured.
+- **"Blank" needs a cause before it gets a caption — and this session broke that rule
+  and then caught it.** `flush()` wrote only when an arm changed, so with no open
+  signals the file was never created and ops rendered UNAVAILABLE: *"the engine is
+  not writing it, check the flag and the container."* A healthy engine in a quiet
+  market produced a fault message. Owner caught it on screen minutes after deploy.
+  The ledger now writes on a **60s heartbeat**, which is what makes the file's mtime
+  mean anything: missing = loop not running, current-and-empty = nothing open,
+  stale = loop stopped. Three states are only separable if a live loop keeps touching
+  the file.
+
+### Open
+
+- **`/signals/sar` still misreports.** `SAR_EXIT_SHADOW_CANDLE_REFRESH_MAX_PER_CYCLE`
+  is 40 against ~85 ledger symbols. Untouched deliberately — worth fixing only if that
+  page should stay trustworthy alongside the live arm, which the live arm may make moot.
+- **#830 is superseded.** It adds a third *replay* arm (`@SAREXIT5`) to answer the 5m
+  vs 15m question that #832 now answers live, and would take each candidate from 2
+  resolve targets to 3 on the resolver that is already starving. Its `aligned_for_arm`
+  / `classify_pending` bug fixes are in its own new code, so closing it loses nothing.
+  Its Session-90 notes are salvaged above.
+- **`sar_disclosure.dart` says "our signal research runs on 15m".** No longer true —
+  we now measure 5m and 15m. Hold the reword until the live arm has a window, so the
+  copy is changed once.
+- **No verdict yet, by construction.** Arms resolve as today's signals close, and 5m
+  will resolve fastest and dominate early. That is a timing artefact — do not read the
+  first window as a timeframe result.
+
+---
+
+## 🟢 SESSION 90 2026-07-29 — a marker captioned ENTRY was drawn at the exit (#828, #829, app #142, ops #104)
+
+Session started as conflict cleanup and became two owner-caught display faults, both
+of the same shape: **a value read for one purpose, reused as if it meant another.**
+
+### What shipped
+
+| Repo | Change |
+|---|---|
+| 360-v2 #828 | Liveness probes for the SAR resolver (rebase of #827; its conflicts were a squash-merge artifact, not a code disagreement) |
+| **360-v2 #829** | **`dispatch_timestamp` / `terminal_outcome_timestamp` on `SignalDetail`**, `timestamp` normalised tz-aware |
+| **lumin-app #142** | **Chart markers anchored on those stamps**, exit marker added |
+| **ops #104** | **SAR ledger path v2→v3**, plus a drift guard for the next bump |
+
+### 1. The chart drew the exit and called it the entry
+
+Owner compared the ops signals CSV against the app's charts. Seven signals, seven
+positive offsets — 2, 6, 18, 33, 41, 62, 65 minutes — and the only near-zero one was
+the only signal still open. **The offset was the hold time.** On COTIUSDT and ZILUSDT
+the arrow captioned ENTRY sat exactly on the SL line: the stop being hit, drawn as
+the entry.
+
+`_signalFromJson` read `minutes_ago` and dropped `timestamp`, so `ChartOverlay` had
+nothing to anchor to and computed `now - minutesAgo`. `minutes_ago` is recency of the
+signal's **last** event — for a closed signal the terminal one, deliberately, because
+it feeds an "SL_HIT 3m ago" caption.
+
+`minutes_ago` was **not** redefined: it is correct for the label it serves. The engine
+now publishes the instants instead, so no consumer derives one.
+
+Blast radius was wider than the arrow. `signal_snap` picked its *timeframe* from
+`minutes_ago` too — a trade opened 6h ago that closed 2 minutes ago scored as 2
+minutes old, got a 15m window ending long after its entry, and lost its marker
+entirely rather than misplacing it.
+
+### 2. Ops was reading a ledger the engine abandoned nine hours earlier
+
+Owner reported the Clear SAR ledger button doing nothing. **The clear path has no
+defect** — traced every hop. #822 bumped the engine ledger v2→v3 at 00:12 IST and ops
+still read v2. The button correctly emptied v3 while the page re-read an orphan that
+nothing writes, prunes or clears.
+
+Everything on `/signals/sar` — 507 rows, the agreed/opposed split, the win rates —
+was the population #822 had just ruled untrustworthy. Expect far fewer rows now; the
+small number is the honest one.
+
+### Rules earned
+
+- **A recency label is not a timestamp.** "3m ago" and "happened at 04:05" answer
+  different questions, and the difference is invisible until something plots it. Any
+  consumer that needs a *point in time* must be given one; deriving it from a caption
+  reintroduces whatever the caption was measuring from. The app now takes `timestamp`
+  / `terminal_outcome_timestamp` and computes nothing.
+- **An orphaned file is worse than a missing one.** A missing path surfaces as an
+  error the page shows; an orphan renders as data — complete, confident, and wrong.
+  #817 said *a field one repo reads and no repo writes fails silently and looks full*;
+  this is the same failure at **file** scale. When a producer versions a path, the
+  consumer needs a check that the two ends still agree, not a second copy of the
+  constant. The fix for a drifting mirror is still not another mirror.
+- **A naive datetime is a bug waiting for a timezone.** `DateTime.parse` binds a
+  zone-less stamp to the *device* zone — 5h30m of silent error on an IST phone, on
+  the field a chart marker is placed by. Normalise at the producer; parse
+  defensively at the consumer.
+- **A test can assert the bug.** The replaced `opened time precedes now` pinned
+  `now - minutesAgo` as *correct*, which is why nothing caught this for months. And
+  a test written with the same constant on both sides follows the code wherever it
+  points: ops' first abandoned-file test passed happily with the path reverted to v2.
+  **The revert check is what catches a test that asserts nothing** — run it on the
+  test, not only on the fix.
+- **A squash-merged base makes an honest branch look conflicted.** #827's three
+  conflicting files were exactly the three files its already-merged parent touched;
+  `git diff` between the pre-squash commit and the squashed one was empty. Replay the
+  branch's own commit onto the new base rather than adjudicating a conflict that is
+  a history artifact.
+
+**Open:** #829's `dispatch_timestamp` is published and nothing reads it yet — the app
+anchors on `timestamp` so the chart agrees with the ops CSV. If "when could a user
+have acted" ever matters more than "when did the engine stamp it", that is the field
+to switch to.
+
+---
+
 ## 🟢 SESSION 89 2026-07-28 — the SAR arm's edge was inside its own fill error (#822, ops #101, app #140)
 
 Owner asked for Parabolic SAR on the app charts, "aligned with our Signals". Shipping
