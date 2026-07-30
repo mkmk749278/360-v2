@@ -7519,6 +7519,16 @@ class Scanner:
             )
             if _c_exp is not None:
                 sig.cohort_edge_expectancy = _c_exp
+            # Keep the store's expiry window under ops control alongside the
+            # other two thresholds — see COHORT_EDGE_MAX_AGE_DAYS.
+            try:
+                _cohort_edge_store.set_max_age_days(
+                    float(_rt.get("cohort_edge_max_age_days"))
+                )
+            except Exception as _cage_exc:
+                # Fail-open toward the store's own default window — never
+                # toward "no expiry", which would restore the absorbing state.
+                fail_open.record("scanner.cohort_edge_max_age", _cage_exc)
             if (
                 _rt.get("cohort_edge_gate_enabled")
                 and _c_exp is not None
@@ -7537,6 +7547,13 @@ class Scanner:
                     regime=_regime_key,
                     would_be_confidence=sig.confidence,
                 ))
+                # Forward-measure what this gate blocks.  Every other live
+                # gate stamps here; this one never did, so it was the ONLY
+                # gate absent from the Suppression Quality Audit — no
+                # WOULD_WIN%, no EV/suppression, no KEEP/TUNE/DROP verdict.
+                # A gate that cannot be measured cannot earn its place, and
+                # this one had been suppressing unmeasured since 2026-07-07.
+                self._stamp_suppressed(sig, "cohort_edge")
                 return _reject("filtered", cross_verified)
         except Exception as _ce_exc:
             log.debug("cohort_edge gate error for {} {} (fail open): {}", symbol, chan_name, _ce_exc)
@@ -7566,6 +7583,13 @@ class Scanner:
                         would_be_confidence=sig.confidence,
                     ))
                     self._suppression_counters[f"pair_analysis:critical:{chan_name}"] += 1
+                    # Same omission as cohort_edge above: this gate reads the
+                    # performance tracker, which only ever sees DELIVERED
+                    # signals, so a suppressed pair stops producing the very
+                    # records that could clear it.  Its 30-day window means it
+                    # does self-release; the stamp is what makes the cost of
+                    # holding it visible in the meantime.
+                    self._stamp_suppressed(sig, "pair_analysis_critical")
                     return _reject("filtered", cross_verified)
                 if _pa_quality.quality_label == "WEAK":
                     _pa_penalty = 8.0

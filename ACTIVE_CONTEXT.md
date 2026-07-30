@@ -4,6 +4,104 @@
 
 ---
 
+## 🔴 SESSION 93 2026-07-30 — the feed did not decline, it was gated off on 07-07, and the gate could never let go
+
+**Owner:** *"if we demote MTP you can see our engine seems to be dead for users"*
+→ *"fix the 07-07 gates and push"*. Correct on both counts, and Session 92's
+"MTP goes dark" recommendation was wrong.
+
+### The volume cliff, from the 500-signal history
+
+| | |
+|---|---|
+| 07-02 → 07-06 | 43–55 delivered/day, MOVER ~25% |
+| **07-08 onward** | **4–15/day** |
+| last 7 days | 11.4/day, **MOVER 74%** (91% / 93% / 100% on 07-28/29/30) |
+| non-mover today | **3.0/day** |
+
+First half 23.9/day → last half 11.0/day. Not a decline — a step, dated to
+**2026-07-07**, when Session 43 shipped cohort-edge STEP 2 ACTIVE. Removing MTP
+takes 12.4/day → 5.0/day; removing all movers → 3.3/day. MTP is not the
+disease, it is the only path still emitting.
+
+### Two defects in `cohort_edge`, both structural
+
+1. **Absorbing state.** The gate suppresses on measured expectancy;
+   `CohortEdgeStore` is written only by `trade_monitor` resolving a *delivered*
+   signal. Suppressed → never emits → never resolves → never records → the
+   count-bounded (`_window=30`) deque never rotates. **Nothing bounded record
+   age**, so a cohort locked on 07-07 was still judged on 07-07 data on 07-30,
+   permanently. Live census: 29 cohorts, 11 reach n≥10, **9 of those 11 measure
+   below the −0.05 threshold** — i.e. 9 locked cohorts with no path back.
+2. **Invisible.** `_reject()` does not stamp; each gate calls
+   `_stamp_suppressed` itself, and this one never did. It is the **only** live
+   gate with no row in the Suppression Quality Audit — no WOULD_WIN%, no
+   EV/suppression, no verdict. 23 days of unmeasured suppression next to a
+   table that ranked every other gate. `pair_analysis:critical` had the same
+   omission (its 30-day window does self-release, so only the stamp was missing).
+
+**`context_floor` was left alone deliberately** — it already stamps, and Layer G
+has already written `suppress_negative: false` for MOVER_TREND_PULLBACK,
+MOVER_AVWAP_SCALP, SR_FLIP_RETEST, MEAN_REVERT, LIQUIDITY_SWEEP_REVERSAL and
+DIVERGENCE_CONTINUATION. That loop self-corrects; `cohort_edge` could not.
+The audit's `context_floor:MOVER_AVWAP_SCALP` **DROP** verdict (n=126, 58.7%
+WOULD_WIN, −0.53R/suppression) is historical suppressions, already released.
+
+### Shipped
+
+| Change | Where |
+|---|---|
+| **Evidence expiry** — `sample_count`/`expectancy` count only records inside the window; gate releases and re-earns its verdict on real fills | `stat_filter.CohortEdgeStore` |
+| `COHORT_EDGE_MAX_AGE_DAYS=14` + `cohort_edge_max_age_days` ops tunable (0 restores old behaviour, no deploy) | `config/`, `runtime_tunables` |
+| `freshness()` / `frozen_cohorts()` — fresh-vs-total per cohort, and which cohorts stopped being re-measured | `stat_filter` |
+| `_stamp_suppressed(sig, "cohort_edge")` and `"pair_analysis_critical"` | `scanner` |
+| `cohort_edge_gate` liveness probe — pages if expiry is off while the gate is on, or if every cohort shares one `macro_dir` | `main._build_feature_liveness` |
+
+**14 days is measured, not guessed:** 6 of 11 armed cohorts still reach n≥10
+inside 14 days (3 at 7d, 7 at 21d), so the gate keeps working on the
+high-volume cohorts while no verdict can outlive two weeks.
+
+Tests: `tests/test_cohort_edge_absorbing_state.py`. All five core assertions
+verified by reverting each half separately. Suite 7503 passed / 58 skipped;
+ruff clean; mypy 104 (no new). A first cut used `except Exception: pass` and
+`test_fail_open_sweep` caught it — now `fail_open.record`, failing open toward
+the store's default window, never toward "no expiry".
+
+### What the 500-signal + 7-day analysis actually said about MTP
+
+- 28d: MTP n=147, **−0.543%/trade, −79.8% total**, 23.8% win, TP1 reached 2/147.
+- 7d (`real_pnl_pct`, trail-aware): MTP −0.176%, whole book **+15.4%**. Improving.
+- **Two thirds of MTP's stop-out loss never went favourable at all** — 55 of 85
+  stop-outs never reached +1%, −138.4% of a −212.9% total. An exit change cannot
+  touch those; the "give-back" story is the minority.
+- A **+1.0% first target** is the only variant that improves MTP on *both*
+  windows (28d +31pp, 7d +20pp); every other target improves one and degrades
+  the other. Even at +1.0%, MTP is still −48.7% over 28 days. Non-movers
+  realised +32.78% and beat *every* fixed target — the trail is right there.
+
+### Open
+
+- **`sl_distance_pct_at_entry` is unusable and it is Session 43's field.**
+  Missing on 152/378 taken rows, missingness outcome-correlated (`PROFIT_LOCKED`
+  39/42 present vs 3/42 absent), 125/226 values exactly 3.00 (the
+  `noise_floor_max_sl_pct` clamp), disagrees with the signal's own geometry on
+  218/226 rows. Written only inside the fail-open `_apply_noise_floor_stop`,
+  while `original_sl_distance` is stamped earlier and never updated when the
+  stop widens. **No R figure from these records is verifiable** — ops
+  `/track-record` divides by this. Fix before publishing any R.
+- **Watch the release.** `cohort_edge` rows should now appear in the
+  Suppression Quality Audit with a KEEP/TUNE/DROP verdict, and non-mover
+  volume should recover as locked cohorts age out. Re-read in a fresh window —
+  do not judge from the pre-change report.
+- **MTP entry quality, not MTP existence.** 55 stop-outs that never went
+  favourable is an entry-trigger signature. Needs `pair_admission` (shipped
+  Session 92) plus a never-went-favourable stamp to filter against.
+- **`macro_dir` was `DECLINE` on all 29 cohorts.** A BTC macro flip resets every
+  cohort to n=0 and disarms the gate in one step. Probe added; no fix — the
+  behaviour is correct, the surprise was not.
+
+---
+
 ## 🔴 SESSION 92 2026-07-30 — tokenised stocks were in the live paid book, and the path that put them there was the one nobody had filtered
 
 **Owner ask:** *"discuss on scan universe"* → *"talk more on promoted pairs"* →

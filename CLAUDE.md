@@ -506,6 +506,35 @@ python -m src.main
   never zero, and no replay had ever produced it. **Where two fills are defensible,
   publish both** — collapsing them into one number before the gap is known is
   choosing the answer, and the one you would have chosen is the flattering one.
+- **A gate whose evidence only arrives from what it lets through is an
+  absorbing state.** `cohort_edge` suppresses on measured expectancy, and the
+  only writer of that measurement is `trade_monitor` resolving a *delivered*
+  signal — so suppressed → never emits → never resolves → never records → the
+  count-bounded deque never rotates → the verdict is permanent. Cohorts locked
+  when STEP 2 went ACTIVE on **2026-07-07** were still being judged on that
+  day's outcomes 23 days later, and the delivered feed fell ~48/day → ~9/day
+  the next day. Same shape as Layer G's "an arm that never emits can never
+  trip the auto-tighten brake" (#806), inverted: a cohort that never emits can
+  never earn its way back. **Bound the evidence by AGE, not just by count**
+  (`COHORT_EDGE_MAX_AGE_DAYS`, 14d from the live cohort census) so the gate
+  releases on its own and re-earns the verdict on real fills. Do **not** close
+  the loop by feeding the store with suppressed counterfactuals — they are
+  optimistic (~0.38R) and this store decides live emission; release by time,
+  judge on fills.
+- **Every live gate stamps `_stamp_suppressed`, no exceptions.** `_reject()`
+  does not stamp — each gate calls it explicitly, and `cohort_edge` /
+  `pair_analysis:critical` never did. They were therefore the only live gates
+  absent from the Suppression Quality Audit: no WOULD_WIN%, no EV/suppression,
+  no KEEP/TUNE/DROP. **A gate that cannot be measured cannot earn its place**,
+  and one of them had been suppressing unmeasured for 23 days while the audit
+  table beside it confidently ranked every other gate. When output drops, list
+  the gates and check which ones have no row.
+- **Ask what a composite key's least-varying component is doing.** All 29 live
+  cohorts on 2026-07-30 ended in `macro_dir=DECLINE` — the component added no
+  discrimination while BTC stayed put, and a macro flip resets *every* cohort
+  to n=0 simultaneously, disarming the whole gate in one step. A key component
+  that is constant today is a coordinated cliff tomorrow; probe for it
+  (`cohort_edge_gate`) rather than discovering it on a P&L chart.
 - **A deny-list is a floor; only a structural gate is a filter.** A list of
   names excludes exactly the tickers a human already typed, so it is silent by
   construction on the next listing — and "add it when we see it" makes the

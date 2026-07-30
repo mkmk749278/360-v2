@@ -20,7 +20,7 @@ import os
 import threading
 from collections import defaultdict, deque
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Deque, Dict, List, Optional, Tuple
 
 from src.confidence_calibration import wilson_lower_bound
@@ -207,10 +207,31 @@ class CohortEdgeStore:
         window: Optional[int] = None,
         min_samples: Optional[int] = None,
         persist_path: Optional[str] = None,
+        max_age_days: Optional[float] = None,
     ) -> None:
         self._window: int = window if window is not None else _env_int("COHORT_EDGE_WINDOW", 30)
         self._min_samples: int = (
             min_samples if min_samples is not None else _env_int("COHORT_EDGE_MIN_SAMPLES", 10)
+        )
+        # Evidence expiry (2026-07-30).  ``_window`` is a COUNT bound, and a
+        # count bound alone made this gate an absorbing state: a suppressed
+        # cohort emits nothing, so it resolves nothing, so its deque never
+        # rotates — the verdict that armed the gate is the verdict forever.
+        # Cohorts frozen when STEP 2 went ACTIVE on 2026-07-07 were still
+        # being judged on that day's evidence 23 days later, with no path
+        # back.  Records older than this are not evidence: they stop counting
+        # toward ``sample_count`` and ``expectancy``, ``n`` falls under
+        # ``_min_samples``, the gate fails open, and the cohort re-earns its
+        # verdict on fresh live outcomes.  A genuinely losing cohort re-arms
+        # after ``_min_samples`` trades; a changed market gets a second look.
+        #
+        # NOT solved by feeding the store with suppressed counterfactuals:
+        # counterfactuals are optimistic (~0.38R measured) and this store
+        # decides live emission.  The gate is released by time, then judged
+        # on real fills only.
+        self._max_age_days: float = (
+            max_age_days if max_age_days is not None
+            else float(_env_int("COHORT_EDGE_MAX_AGE_DAYS", 14))
         )
         self._lock = threading.Lock()
         # Key: (setup_class, side, regime_family, macro_dir) → deque of _OutcomeRecord
@@ -322,6 +343,53 @@ class CohortEdgeStore:
             # Persistence is best-effort; the in-memory store stays correct.
             pass
 
+    def _fresh(self, records) -> list:
+        """Records still inside the evidence window.
+
+        ``max_age_days <= 0`` disables expiry (every record counts) — kept so
+        the behaviour can be restored from the ops panel without a deploy.
+        """
+        if records is None:
+            return []
+        if self._max_age_days <= 0:
+            return list(records)
+        cutoff = datetime.now(timezone.utc) - timedelta(days=self._max_age_days)
+        return [r for r in records if r.timestamp >= cutoff]
+
+    def set_max_age_days(self, days: float) -> None:
+        """Update the evidence window at runtime (ops tunable).  Cheap and
+        idempotent — called on the scan path, so it must stay allocation-free
+        when the value has not changed."""
+        d = float(days)
+        if d != self._max_age_days:
+            self._max_age_days = d
+
+    def freshness(
+        self, setup_class: str, side: str, regime: str, macro_dir: str,
+    ) -> Tuple[int, int]:
+        """``(fresh, total)`` record counts for this cohort — diagnostics and
+        the liveness probe.  ``fresh < total`` means evidence is expiring;
+        ``fresh == 0 < total`` is a cohort the gate has stopped re-measuring."""
+        key = self.cohort_key(setup_class, side, regime, macro_dir)
+        with self._lock:
+            records = self._records.get(key)
+            return len(self._fresh(records)), (len(records) if records else 0)
+
+    def frozen_cohorts(self) -> Dict[str, int]:
+        """Cohorts holding stale-only evidence — ``{key: total_records}``.
+
+        A non-empty result after a full evidence window means the gate armed
+        on those cohorts and nothing has re-tested them since.  With expiry
+        on, they are already failing open; the probe reports them so the
+        release is visible rather than silent.
+        """
+        out: Dict[str, int] = {}
+        with self._lock:
+            for key, records in self._records.items():
+                if records and not self._fresh(records):
+                    out["/".join(key)] = len(records)
+        return out
+
     def expectancy(
         self,
         setup_class: str,
@@ -337,8 +405,8 @@ class CohortEdgeStore:
         """
         key = self.cohort_key(setup_class, side, regime, macro_dir)
         with self._lock:
-            records = self._records.get(key)
-            if records is None or len(records) < self._min_samples:
+            records = self._fresh(self._records.get(key))
+            if len(records) < self._min_samples:
                 return None
             wins = [r for r in records if r.won]
             losses = [r for r in records if not r.won]
@@ -355,8 +423,7 @@ class CohortEdgeStore:
         """Return the number of outcomes recorded for this cohort."""
         key = self.cohort_key(setup_class, side, regime, macro_dir)
         with self._lock:
-            records = self._records.get(key)
-            return len(records) if records else 0
+            return len(self._fresh(self._records.get(key)))
 
     def shadow_verdict(
         self,

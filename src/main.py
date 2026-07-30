@@ -2878,6 +2878,58 @@ class CryptoSignalEngine:
             name="mover_admission_metadata", fn=_mover_admission_metadata, min_streak=3,
         ))
 
+        def _cohort_edge_gate():
+            """Is the cohort gate still able to change its mind?
+
+            The gate suppresses on MEASURED expectancy, and the only thing that
+            feeds that measurement is a DELIVERED signal resolving.  So a
+            suppressed cohort produces no new evidence about itself — before
+            the evidence-expiry window (2026-07-30) the verdict that armed the
+            gate was the verdict permanently, and cohorts locked when STEP 2
+            went ACTIVE on 2026-07-07 were still being judged on that day's
+            data 23 days later.
+
+            Two things are worth paging on, and neither is "the gate is
+            suppressing" — that is the gate working:
+
+            * expiry switched off while the gate is on — the absorbing state
+              is back, and nothing else in the system would say so;
+            * every cohort sharing one ``macro_dir`` — the key's 4th component
+              was DECLINE on all 29 live cohorts on 2026-07-30, so a BTC macro
+              flip resets every cohort to n=0 at once and fully disarms the
+              gate in a single step.  Not a fault, but never discover it from
+              a P&L chart.
+            """
+            from src import runtime_tunables as _rt
+            from src.scanner import _cohort_edge_store as _ces
+
+            stats = _ces.all_stats()
+            if not stats:
+                return True, "no cohort outcomes recorded yet"
+            frozen = _ces.frozen_cohorts()
+            macros = {k.split("/")[3] for k in stats if len(k.split("/")) >= 4}
+            gate_on = bool(_rt.get("cohort_edge_gate_enabled"))
+            try:
+                max_age = float(_rt.get("cohort_edge_max_age_days"))
+            except Exception:
+                max_age = 0.0
+            detail = (
+                f"{len(stats)} cohorts, {len(frozen)} holding stale-only evidence, "
+                f"expiry={max_age:g}d, macro_dirs={sorted(macros)}"
+            )
+            if gate_on and max_age <= 0:
+                return False, "gate ON with evidence expiry DISABLED — " + detail
+            if len(macros) == 1 and len(stats) >= 10:
+                return False, (
+                    f"all {len(stats)} cohorts share macro_dir={macros.pop()} — a "
+                    f"macro flip resets every cohort at once; " + detail
+                )
+            return True, detail
+
+        fl.add_predicate(PredicateProbe(
+            name="cohort_edge_gate", fn=_cohort_edge_gate, min_streak=6,
+        ))
+
         def _stale_tf_scoring():
             """Did any signal get scored on a *known-stale* timeframe?
 
