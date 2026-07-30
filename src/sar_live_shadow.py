@@ -595,14 +595,48 @@ class SarLiveLedger:
         with self._lock:
             self._dirty = True
 
-    def flush(self, min_interval_sec: float = 15.0, force: bool = False) -> bool:
-        """Write to disk when something changed. Throttled — this runs in a 5s loop."""
+    def flush(
+        self,
+        min_interval_sec: float = 15.0,
+        force: bool = False,
+        heartbeat_sec: float = 60.0,
+    ) -> bool:
+        """Persist the ledger. Throttled on change, and written on a heartbeat.
+
+        **The heartbeat is not an optimisation — it is what makes the file's
+        mtime mean something.** The first cut wrote only when an arm changed, so
+        with no open signals the file was never created at all, and ops rendered
+        UNAVAILABLE: *"the engine is not writing it — check the flag and the
+        container"*. That is a fault message, and a healthy engine with a quiet
+        market produced it (owner-caught 2026-07-30, minutes after deploy). It is
+        this repo's own lesson — **"blank" needs a cause before it gets a
+        caption** — reintroduced one file over.
+
+        The three states a reader needs are only separable if a live loop keeps
+        touching the file:
+
+        ===================  ==========================================
+        File missing         the monitor loop is not running the arms
+        File current, empty  running, nothing open — the quiet case
+        File stale           the loop stopped stepping
+        ===================  ==========================================
+
+        So a write happens when the ledger changed (bounded by
+        ``min_interval_sec``) **or** when ``heartbeat_sec`` has elapsed
+        regardless. ``_last_write`` starts at 0, so the first tick after boot
+        always writes and the file exists within one poll.
+
+        Cost: one small local write per minute when idle. No network, no
+        Firestore — this is nowhere near the hot-path budget the cost rules
+        guard.
+        """
         try:
             with self._lock:
-                if not self._dirty and not force:
-                    return False
                 now = time.time()
-                if not force and (now - self._last_write) < float(min_interval_sec):
+                since = now - self._last_write
+                due = self._dirty and since >= float(min_interval_sec)
+                beat = since >= float(heartbeat_sec)
+                if not (force or due or beat):
                     return False
                 payload = {
                     "schema": LEDGER_SCHEMA,

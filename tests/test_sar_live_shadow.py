@@ -496,3 +496,61 @@ def test_health_counters_are_per_cycle_not_cumulative():
     live.record_step("A", True)
     live.roll_health_cycle()
     assert live.step_health()["no_series"] == 0
+
+
+# --------------------------------------------------------------------------- #
+# The heartbeat — "blank" needs a cause before it gets a caption
+# --------------------------------------------------------------------------- #
+#
+# Ops separates three states off this file: missing (loop not running), current
+# but empty (running, nothing open), stale (loop stopped stepping). They are only
+# separable if a live loop keeps touching the file even when nothing changes.
+# Without that, an idle engine looked identical to a broken one and the panel
+# reported a fault that was not happening (owner-caught 2026-07-30).
+
+
+def test_an_empty_ledger_still_writes_so_idle_is_distinguishable_from_broken(tmp_path):
+    path = str(tmp_path / "arms.json")
+    ledger = live.SarLiveLedger(path=path)
+    assert ledger.open_arms() == [] and ledger.resolved_arms() == []
+    # First tick after boot: _last_write is 0, so the heartbeat is already due.
+    assert ledger.flush() is True
+    import json as _json
+
+    payload = _json.loads(open(path).read())
+    assert payload["open"] == []
+    assert payload["written_at"] > 0
+
+
+def test_the_heartbeat_advances_mtime_with_no_arm_changes(tmp_path):
+    path = str(tmp_path / "arms.json")
+    ledger = live.SarLiveLedger(path=path)
+    ledger.flush()
+    first = ledger._last_write
+    # Nothing changed and the heartbeat is not due — no write.
+    assert ledger.flush(heartbeat_sec=60.0) is False
+    assert ledger._last_write == first
+    # Heartbeat due, still nothing changed — writes anyway, which is the point.
+    assert ledger.flush(heartbeat_sec=0.0) is True
+    assert ledger._last_write > first
+
+
+def test_a_change_still_writes_ahead_of_the_heartbeat(tmp_path):
+    path = str(tmp_path / "arms.json")
+    ledger = live.SarLiveLedger(path=path)
+    ledger.flush(force=True)
+    ledger.add(_arm(_rising(60), "LONG", entry=160.0, sl=155.0, tp1=175.0))
+    # Dirty and past the change throttle, but nowhere near the heartbeat.
+    assert ledger.flush(min_interval_sec=0.0, heartbeat_sec=3600.0) is True
+    import json as _json
+
+    assert len(_json.loads(open(path).read())["open"]) == 1
+
+
+def test_the_change_throttle_still_bounds_write_rate(tmp_path):
+    """This runs in a 5s loop; a dirty ledger must not write on every tick."""
+    path = str(tmp_path / "arms.json")
+    ledger = live.SarLiveLedger(path=path)
+    ledger.flush(force=True)
+    ledger.add(_arm(_rising(60), "LONG", entry=160.0, sl=155.0, tp1=175.0))
+    assert ledger.flush(min_interval_sec=3600.0, heartbeat_sec=3600.0) is False

@@ -361,6 +361,37 @@ per-gate KEEP/TUNE/DROP), `shadow_strategies.py` (4 units with no path to the qu
 and the counterfactual arms (`geometry_ab.py`, `tuned_variants.py`, `staleness_v2.py`,
 `sar_exit_shadow.py`).
 
+**Replay measurement vs live measurement — a distinction added 2026-07-30 (#832).**
+Everything above is *replay*: a candidate is stamped, then a resolver walks candles
+forward some time later and scores it. That answers "what would this have done,
+looking back". It cannot answer whether a mechanism is **operable** — whether the
+level can be computed in time, parked, and acted on before the outcome is known —
+and a replay's population is only as good as its resolver. On 2026-07-30 the SAR
+replay ledger had 8 of 19 rows unresolved, *including all four of the window's
+winners*, so its verdict was an artefact of which symbols the refresh budget reached.
+
+`src/sar_live_shadow.py` is the first arm of the second kind. It runs inside
+`TradeMonitor`'s poll, stepping each open signal's arms bar by bar, so a row carries
+the stop the mechanism **would have parked right now**. Nothing is deferred, so
+nothing can be starved.
+
+| | Replay arms | `sar_live_shadow` |
+|---|---|---|
+| When scored | minutes to 48h later, by a resolver | forward, in the monitor loop |
+| Candle source | resolver refresh (budget-capped) | in-memory store, already warm |
+| Failure mode | rows never resolve; population silently loss-selects | arm cannot step → counted + paged |
+| Answers | "would this have been profitable" | "…and could we actually have done it" |
+
+**The live SAR arm's shape** (owner-specified): SAR onside at generation governs from
+bar one and the original SL/TP1 are never used; SAR opposed keeps them live until SAR
+comes onside, then cancels them and hands over; TP1 closes in full if it lands first.
+Measured on **5m and 15m as independent arms** per signal. Two fills are recorded —
+the parked stop touched intrabar, and the flip confirmed at the bar close and exited
+at market — because *"close at market on the flip"* implies no resting stop between
+bars, which would breach the naked-position invariant (§7) the moment it went live.
+The gap between the two fills is the cost of confirmation, and it is the number an
+adoption decision needs. Ops surface: `/signals/sar-live`.
+
 **Four standing cautions:**
 1. **Measurement arms are not strategies.** `@FIXED @ATR @TUNED @DSV2 @GOV @SARBASE
    @SAREXIT` are stamped from the *same candidates* as real rows. Authoritative list:
@@ -440,7 +471,7 @@ main.dart → Firebase.init → NotificationService → AppConfig.load
 | **SQLite** (shared volume) | `users` `user_auto_trade_settings` `user_pretp_settings` `user_invalidation_settings` `user_symbol_management` `paper_trades` `user_paper_subscriptions` `play_purchases` `user_trials` `user_referral_codes` `user_referral_redemptions` `user_reward_grants` `referral_commissions` | durable | API writes, engine reads fresh at dispatch (WAL) |
 | **Firestore** | KMS-encrypted Binance keys, per-user position state | durable | **Reads dominate the cloud bill** — every hot-path reader must be cached and invalidation-gated |
 | **Cloud KMS (HSM)** | Master key | durable | Engine holds Decrypt IAM only |
-| **`data/*.json`** (volume, mounted read-only into ops) | `signal_performance.json` `signal_history.json` `invalidation_records.json` `strategy_edge_store.json` `suppressed_candidates.json` `emission_controller_store.json` `market_context.json` `feature_liveness.json` `dispatch_log.json` `pnl_history.json` `alerts.json` `level_book.json` `circuit_breaker_status.json` … | durable | The measurement plane's substrate |
+| **`data/*.json`** (volume, mounted read-only into ops) | `signal_performance.json` `signal_history.json` `invalidation_records.json` `strategy_edge_store.json` `suppressed_candidates.json` `emission_controller_store.json` `market_context.json` `feature_liveness.json` `dispatch_log.json` `pnl_history.json` `alerts.json` `level_book.json` `circuit_breaker_status.json` `sar_live_arms_v1.json` … | durable | The measurement plane's substrate |
 | **`monitor-logs` branch** | Truth report, runtime audit artifacts | per CI run | `git show origin/monitor-logs:monitor/report/truth_report.md` |
 
 **Cost rule, learned at ₹4,552/month:** a single uncached Firestore query on the
@@ -590,6 +621,8 @@ substantive legal-content changes.
 | A feature silently flat-lined | `feature_liveness.py` probes + `fail_open` counters |
 | Engine state vs app disagreement | The engine is the source of truth; check what the app derived locally |
 | Something rotated out of the universe | Any watchdog keyed on the live universe is blind to it by construction (#815) |
+| "Would exit method X work?" | Is the arm a replay or live (§4.5)? A replay answers profitability; only a live arm answers operability, and only its population cannot be starved |
+| `/signals/sar-live` reads FROZEN or UNAVAILABLE | The engine is not writing `sar_live_arms_v1.json` — `SAR_LIVE_SHADOW_ENABLED` and the monitor loop, not the page. A live price feed is not evidence the measurement is running |
 
 **Diagnosis order is always: real data → vendor docs → external verification → code.**
 
