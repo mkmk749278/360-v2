@@ -59,6 +59,7 @@ from src.channels.base import Signal, TrailingStopState
 from src.dca import check_dca_entry, recalculate_after_dca
 from src.execution import be_policy as _be_policy
 from src.execution import runner_policy as _runner_policy
+from src import sar_live_shadow
 from src import user_settings as _user_settings
 from src.historical_data import HistoricalDataStore
 from src.indicators import atr as _compute_atr
@@ -886,9 +887,22 @@ class TradeMonitor:
             # _broker_close_full; nothing to do for them here.
             await self._check_per_user_invalidation(sig)
             await self._evaluate_signal(sig)
+            # Live SAR exit mechanism (dark measurement, 2026-07-30).  Rides
+            # this loop deliberately: it is the only clock on which "could we
+            # have parked the stop in time" is answerable, and it is the loop
+            # that already sees every signal whether or not it is auto-traded.
+            # Pure CPU over in-memory candles — no network, no Firestore, and
+            # the SAR walk is cached per closed bar (see _cached_sar_live), so
+            # this adds nothing to the hot-path cost budget.  Fail-open inside.
+            sar_live_shadow.observe_signal(sig, self._store, price=price)
 
         await asyncio.gather(*[_process_signal(sig) for sig in signals.values()])
         self._publish_pricing_freshness(signals)
+        # Per-cycle, not cumulative: a cumulative miss count never recovers
+        # after a transient outage, so it would page forever over a fault that
+        # healed.
+        sar_live_shadow.roll_health_cycle()
+        sar_live_shadow.get_ledger().flush()
 
     # Written next to the other data-volume status files (scanner heartbeat,
     # circuit_breaker_status.json) so the watchdog + liveness probe can read

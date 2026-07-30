@@ -670,6 +670,44 @@ SAR_EXIT_SHADOW_CANDLE_REFRESH_SEC: float = _safe_float(
 )
 
 # ---------------------------------------------------------------------------
+# Live SAR exit mechanism (2026-07-30 — owner-specified, measured forward)
+# ---------------------------------------------------------------------------
+# The replay arms above answer "what would SAR have done, looking back". They
+# cannot answer whether the stop can be computed and parked in time, on the
+# money-path clock, before the outcome is known — and the 2026-07-30 export
+# showed why that matters: 8 of 19 replay rows unresolved, including all four
+# of the window's winners, so the arm's verdict was an artefact of which
+# symbols the resolver reached.  ``src/sar_live_shadow.py`` runs the mechanism
+# forward inside the monitor loop instead.
+#
+# This is a **measurement** flag, so it ships ON (Project Phase rule: an
+# observe-only path that stamps nothing until someone flips it produces an
+# empty ops panel and a decision that keeps getting deferred).  Nothing here
+# reaches a subscriber or the money path — the arms place no orders and change
+# no exit.  The user-visible flag does not exist yet because the user-visible
+# effect does not exist yet.
+SAR_LIVE_SHADOW_ENABLED: bool = _safe_bool("SAR_LIVE_SHADOW_ENABLED", "true")
+
+# Both timeframes run as independent arms per signal, so the timeframe question
+# is answered by the same window that answers the mechanism question.  Both are
+# already seeded and live-updated in the store (SEED_TIMEFRAMES) — no new
+# network reads, which is what keeps this off the cost radar.
+SAR_LIVE_SHADOW_TIMEFRAMES: List[str] = [
+    tf.strip()
+    for tf in os.getenv("SAR_LIVE_SHADOW_TIMEFRAMES", "5m,15m").split(",")
+    if tf.strip()
+]
+
+# Minimum closed bars before an arm will open.  Below this the SAR walk has not
+# converged and the arm refuses (INSUFFICIENT) rather than opening on a level
+# that is still an artefact of its seed.
+SAR_LIVE_SHADOW_WARMUP_BARS: int = _safe_int("SAR_LIVE_SHADOW_WARMUP_BARS", "50")
+
+# How many resolved arms the ledger keeps.  Two arms per signal, so this is
+# ~1000 signals of history.
+SAR_LIVE_SHADOW_MAX_RESOLVED: int = _safe_int("SAR_LIVE_SHADOW_MAX_RESOLVED", "2000")
+
+# ---------------------------------------------------------------------------
 # Tuned-variant shadow arms (2026-07-16 — owner: "tune, don't disable")
 # ---------------------------------------------------------------------------
 # MOVER_AVWAP_SCALP and VOLUME_SURGE_BREAKOUT are three-windows-confirmed
