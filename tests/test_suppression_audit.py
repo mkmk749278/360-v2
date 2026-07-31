@@ -361,3 +361,110 @@ class TestGateMetricsBySetup:
 
         assert gate_metrics_by_setup([]) == {}
         assert gate_metrics_by_setup(None) == {}
+
+
+# --------------------------------------------------------------------------- #
+# Per-gate fairness — one shared ring makes the loudest gate the only measured
+# one, which is how setup_compat / execution could never be stamped safely
+# --------------------------------------------------------------------------- #
+
+
+def _gate_rec(gate, i=0, symbol="AAAUSDT"):
+    return sa.SuppressedCandidateRecord(
+        gate_name=gate, setup_class="X", symbol=symbol, channel="360_SCALP",
+        side="LONG", entry=100.0, stop_loss=97.0, tp1=106.0, sl_distance=3.0,
+        confidence=70.0, context_key="NY/RANGE", regime="RANGING",
+        valid_for_minutes=60.0, suppress_timestamp=1_700_000_000.0 + i,
+    )
+
+
+def test_a_loud_gate_cannot_evict_a_quiet_gates_evidence():
+    """The whole reason the pre-scoring gates could not be stamped before.
+
+    On 2026-07-31 the shared 5000-ring was exactly full, ``level_still_in_play``
+    and ``min_confidence`` held half of it, and ``cohort_edge`` — stamped for
+    17h by then — had no row at all.
+    """
+    store = sa.SuppressedCandidateStore(persist_path="", per_gate_max=5)
+    store.stamp(_gate_rec("quiet_gate"))
+    for i in range(500):
+        store.stamp(_gate_rec("execution:overextended", i=i))
+    gates = {r["gate_name"] for r in store.records()}
+    assert "quiet_gate" in gates, "a loud gate evicted the quiet gate's only row"
+    loud = [r for r in store.records() if r["gate_name"] == "execution:overextended"]
+    assert len(loud) == 5, "the loud gate must be bounded by its own ring, not the store"
+
+
+def test_eviction_is_counted_per_gate_so_a_verdict_can_state_its_denominator():
+    store = sa.SuppressedCandidateStore(persist_path="", per_gate_max=3)
+    for i in range(10):
+        store.stamp(_gate_rec("execution:overextended", i=i))
+    s = store.sampling()["execution:overextended"]
+    assert s == {"held": 3, "evicted": 7, "cap": 3}
+
+
+def test_the_global_ceiling_trims_the_fullest_gate_not_the_oldest_record():
+    """Evicting globally-oldest is what made the shared ring unfair."""
+    store = sa.SuppressedCandidateStore(persist_path="", maxlen=6, per_gate_max=100)
+    store.stamp(_gate_rec("quiet_gate", i=0))          # the oldest record of all
+    for i in range(1, 12):
+        store.stamp(_gate_rec("loud_gate", i=i))
+    gates = [r["gate_name"] for r in store.records()]
+    assert "quiet_gate" in gates
+    assert len(gates) == 6
+
+
+def test_a_gate_refused_past_the_cardinality_cap_is_counted_not_silent():
+    store = sa.SuppressedCandidateStore(persist_path="", per_gate_max=2)
+    for i in range(sa._MAX_GATES + 5):
+        store.stamp(_gate_rec(f"gate_{i}", i=i))
+    assert store.gates_refused == 5
+    assert len({r["gate_name"] for r in store.records()}) == sa._MAX_GATES
+
+
+def test_prune_keeps_the_partition_rather_than_re_pooling_the_gates():
+    store = sa.SuppressedCandidateStore(persist_path="", per_gate_max=4)
+    store.stamp(_gate_rec("quiet_gate", i=0))
+    for i in range(50):
+        store.stamp(_gate_rec("loud_gate", i=i))
+    store._prune(now=1_700_000_100.0)
+    for i in range(50, 100):
+        store.stamp(_gate_rec("loud_gate", i=i))
+    assert "quiet_gate" in {r["gate_name"] for r in store.records()}
+
+
+# --------------------------------------------------------------------------- #
+# Pre-scoring rows are audited but must never route
+# --------------------------------------------------------------------------- #
+
+
+def test_a_pre_scoring_row_is_audited_but_refused_by_the_edge_matrix():
+    """Layer C reads the matrix LIVE to set per-context emission floors, so a
+    row admitted there is a money-path change. The audit is display-only."""
+    store = sa.SuppressedCandidateStore(persist_path="")
+    sa.stamp_candidate(
+        gate_name="setup_compat:regime_STRONG_TREND", symbol="AAAUSDT",
+        channel="360_SCALP", setup_class="MEAN_REVERT", side="LONG",
+        entry=100.0, stop_loss=97.0, tp1=106.0, confidence=61.0,
+        pre_scoring=True, store=store,
+    )
+    (rec,) = store.records()
+    assert rec["pre_scoring"] is True
+    assert sa.feeds_edge_matrix(rec) is False
+
+
+def test_a_post_scoring_row_still_feeds_the_matrix():
+    store = sa.SuppressedCandidateStore(persist_path="")
+    sa.stamp_candidate(
+        gate_name="min_confidence", symbol="AAAUSDT", channel="360_SCALP",
+        setup_class="SR_FLIP_RETEST", side="LONG", entry=100.0,
+        stop_loss=97.0, tp1=106.0, confidence=61.0, store=store,
+    )
+    (rec,) = store.records()
+    assert rec["pre_scoring"] is False
+    assert sa.feeds_edge_matrix(rec) is True
+
+
+def test_records_written_before_the_flag_are_treated_as_post_scoring():
+    """A reload must not turn every historical row into a pre-scoring one."""
+    assert sa.feeds_edge_matrix({"gate_name": "min_confidence"}) is True

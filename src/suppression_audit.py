@@ -39,7 +39,28 @@ log = get_logger("suppression_audit")
 # the invalidation audit's 60-min window (scalps run 5-60 min, OWNER_BRIEF §3.2).
 _WINDOW_SEC: float = float(os.getenv("SUPPRESSION_AUDIT_WINDOW_SEC", "3600"))
 # Bounded rolling sample - this is a measurement, not a complete ledger.
-_MAX_RECORDS: int = int(os.getenv("SUPPRESSION_AUDIT_MAX_RECORDS", "5000"))
+_MAX_RECORDS: int = int(os.getenv("SUPPRESSION_AUDIT_MAX_RECORDS", "16000"))
+# Per-gate ring size.
+#
+# This store was ONE count-bounded deque, and a single shared ring makes the
+# LOUDEST gate the only measured one: on 2026-07-31 it sat at exactly its 5000
+# cap with ``level_still_in_play`` (1331) and ``min_confidence`` (1237) holding
+# half of it, while ``cohort_edge`` — whose missing stamp #834 had just fixed —
+# still had no row at all.  A quiet gate's rows are evicted by a loud gate's
+# before their measurement window elapses, so the gate that suppresses least is
+# the one we can say least about.  That is backwards: a gate earns its place by
+# being measured, and the rare ones are exactly the ones nobody has checked.
+#
+# Partitioning per gate makes fairness structural rather than a tuning exercise,
+# and it is what makes stamping the two high-volume pre-scoring gates safe —
+# MOVER_TREND_PULLBACK's 24,327 execution rejects can no longer evict anyone
+# else's evidence.  A verdict on every gate beats a precise verdict on two.
+_PER_GATE_MAX: int = int(os.getenv("SUPPRESSION_AUDIT_PER_GATE_MAX", "400"))
+# Bounded cardinality guard.  Gate tokens are a closed vocabulary (six
+# MarketState values, two execution reasons, a fixed gate list), so a store
+# growing past this means a caller is minting unbounded gate names — counted
+# and refused rather than allowed to grow the footprint without bound.
+_MAX_GATES: int = int(os.getenv("SUPPRESSION_AUDIT_MAX_GATES", "64"))
 # Drop classified records older than this so the buffer stays a fresh window.
 _RETENTION_SEC: float = float(os.getenv("SUPPRESSION_AUDIT_RETENTION_SEC", str(7 * 24 * 3600)))
 _DEFAULT_PATH: str = os.getenv("SUPPRESSION_AUDIT_PATH", "data/suppressed_candidates.json")
@@ -201,6 +222,13 @@ class SuppressedCandidateRecord:
     # sampled differently and must not be pooled silently; see
     # ``sar_exit_shadow.STAMP_SCHEMA``.
     stamp_schema: int = 0
+    # True when the gate that killed this candidate fired BEFORE the scoring
+    # engine ran (``setup_compat`` / ``execution``).  Such a row carries the
+    # evaluator's geometry and its evaluator confidence, but never a scored
+    # one — so it can be audited (did the gate save or cost us?) and must NOT
+    # reach the Strategy×Context edge matrix, which Layer C consumes live to
+    # set per-context emission floors.  Measurement ON, money path untouched.
+    pre_scoring: bool = False
     # Filled by classify_pending once the window elapses.
     classified_at: Optional[float] = None
     classification: Optional[str] = None
@@ -636,9 +664,29 @@ def _migrate_provenance(rec: dict) -> dict:
 
 
 class SuppressedCandidateStore:
-    def __init__(self, persist_path: Optional[str] = None, maxlen: Optional[int] = None) -> None:
+    def __init__(
+        self,
+        persist_path: Optional[str] = None,
+        maxlen: Optional[int] = None,
+        per_gate_max: Optional[int] = None,
+    ) -> None:
         self._lock = threading.Lock()
-        self._buffer: Deque[dict] = deque(maxlen=maxlen if maxlen is not None else _MAX_RECORDS)
+        # One bounded ring PER GATE, not one shared ring — see _PER_GATE_MAX.
+        # ``maxlen`` stays honoured as a global ceiling so an operator can still
+        # bound total footprint, and so existing callers keep their meaning.
+        self._per_gate_max: int = int(
+            per_gate_max if per_gate_max is not None else _PER_GATE_MAX
+        )
+        self._global_max: int = int(maxlen if maxlen is not None else _MAX_RECORDS)
+        self._gates: Dict[str, Deque[dict]] = {}
+        #: Gates refused because the store already holds ``_MAX_GATES`` names.
+        #: Counted, never silent: a refusal here means a caller is minting gate
+        #: names and some gate is going unmeasured.
+        self.gates_refused: int = 0
+        #: Records dropped by the per-gate ring, keyed by gate. The sampling
+        #: rate belongs on screen beside the verdict — a rate measured on 400
+        #: of 24,000 suppressions is a sample, and the reader must know it.
+        self.evicted_by_gate: Dict[str, int] = {}
         # Monotonic since-boot stamp counter — the ring buffer evicts, so the
         # feature-liveness probes need a counter that can't go backwards.
         self.stamped_total: int = 0
@@ -647,10 +695,63 @@ class SuppressedCandidateStore:
             self._load()
 
     # ---- hot path: O(1), no I/O ----
+    @property
+    def _buffer(self) -> List[dict]:
+        """Every record, newest last. Read-only view over the per-gate rings.
+
+        Kept as ``_buffer`` because the eviction policy changed, not the
+        contract: callers still see one chronologically ordered population.
+        """
+        out: List[dict] = []
+        for ring in self._gates.values():
+            out.extend(ring)
+        out.sort(key=lambda r: float(r.get("suppress_timestamp") or 0.0))
+        return out
+
     def stamp(self, record: SuppressedCandidateRecord) -> None:
         with self._lock:
-            self._buffer.append(asdict(record))
+            rec = asdict(record)
+            gate = str(rec.get("gate_name") or "")
+            ring = self._gates.get(gate)
+            if ring is None:
+                if len(self._gates) >= _MAX_GATES:
+                    self.gates_refused += 1
+                    return
+                ring = deque(maxlen=self._per_gate_max)
+                self._gates[gate] = ring
+            if len(ring) == ring.maxlen:
+                self.evicted_by_gate[gate] = self.evicted_by_gate.get(gate, 0) + 1
+            ring.append(rec)
             self.stamped_total += 1
+            self._enforce_global_ceiling()
+
+    def _enforce_global_ceiling(self) -> None:
+        """Trim the fullest gate first when the global ceiling is exceeded.
+
+        Evicting the globally-oldest record is what made the shared ring unfair
+        in the first place; taking from whichever gate holds most keeps the
+        pressure on the gate that can best afford it. Caller holds the lock.
+        """
+        total = sum(len(r) for r in self._gates.values())
+        while total > self._global_max:
+            gate, ring = max(self._gates.items(), key=lambda kv: len(kv[1]))
+            if not ring:
+                return
+            ring.popleft()
+            self.evicted_by_gate[gate] = self.evicted_by_gate.get(gate, 0) + 1
+            total -= 1
+
+    def sampling(self) -> Dict[str, Dict[str, int]]:
+        """Per-gate held vs evicted, so a verdict can state its denominator."""
+        with self._lock:
+            return {
+                gate: {
+                    "held": len(ring),
+                    "evicted": int(self.evicted_by_gate.get(gate, 0)),
+                    "cap": int(ring.maxlen or 0),
+                }
+                for gate, ring in self._gates.items()
+            }
 
     def promote_provenance(
         self,
@@ -745,18 +846,24 @@ class SuppressedCandidateStore:
         heartbeat and a reset would read as a dead feature.
         """
         with self._lock:
-            n = len(self._buffer)
-            self._buffer.clear()
+            n = sum(len(r) for r in self._gates.values())
+            self._gates.clear()
+            self.evicted_by_gate.clear()
         self._save()
         return n
 
     def records(self) -> List[dict]:
         with self._lock:
-            return list(self._buffer)
+            return self._buffer
 
     def pending_count(self) -> int:
         with self._lock:
-            return sum(1 for r in self._buffer if r.get("classification") is None)
+            return sum(
+                1
+                for ring in self._gates.values()
+                for r in ring
+                if r.get("classification") is None
+            )
 
     # ---- periodic loop: classify + persist + prune ----
     def classify_pending(
@@ -773,7 +880,7 @@ class SuppressedCandidateStore:
         now = now_ts if now_ts is not None else time.time()
         counters: Dict[str, int] = {}
         with self._lock:
-            snapshot = list(self._buffer)
+            snapshot = self._buffer
         for rec in snapshot:
             if rec.get("classification") is not None:
                 continue
@@ -914,16 +1021,23 @@ class SuppressedCandidateStore:
         return counters
 
     def _prune(self, now: float) -> None:
+        """Drop classified records past retention, per gate.
+
+        Rebuilt ring by ring: pruning into one shared deque would silently
+        re-pool the gates and undo the partition on the first prune cycle.
+        """
         with self._lock:
-            keep = deque(
-                (
-                    r for r in self._buffer
-                    if r.get("classification") is None
-                    or (now - float(r.get("suppress_timestamp") or now)) < _RETENTION_SEC
-                ),
-                maxlen=self._buffer.maxlen,
-            )
-            self._buffer = keep
+            for gate, ring in list(self._gates.items()):
+                kept = deque(
+                    (
+                        r for r in ring
+                        if r.get("classification") is None
+                        or (now - float(r.get("suppress_timestamp") or now))
+                        < _RETENTION_SEC
+                    ),
+                    maxlen=self._per_gate_max,
+                )
+                self._gates[gate] = kept
 
     # ---- persistence (batched, off the hot path) ----
     def _load(self) -> None:
@@ -934,9 +1048,23 @@ class SuppressedCandidateStore:
                 raw = json.load(fh)
             if isinstance(raw, list):
                 with self._lock:
-                    for r in raw[-(self._buffer.maxlen or _MAX_RECORDS):]:
-                        if isinstance(r, dict):
-                            self._buffer.append(_migrate_provenance(r))
+                    # Bucket by gate on the way in. Truncating the raw list
+                    # first would reload the same unfair sample the partition
+                    # exists to end — the tail of one file is whichever gate
+                    # was loudest when it was written.
+                    for r in raw:
+                        if not isinstance(r, dict):
+                            continue
+                        gate = str(r.get("gate_name") or "")
+                        ring = self._gates.get(gate)
+                        if ring is None:
+                            if len(self._gates) >= _MAX_GATES:
+                                self.gates_refused += 1
+                                continue
+                            ring = deque(maxlen=self._per_gate_max)
+                            self._gates[gate] = ring
+                        ring.append(_migrate_provenance(r))
+                    self._enforce_global_ceiling()
         except Exception:
             pass  # fail-open on a bad store file
 
@@ -945,7 +1073,7 @@ class SuppressedCandidateStore:
             return
         try:
             with self._lock:
-                payload = list(self._buffer)
+                payload = self._buffer
             dirname = os.path.dirname(self._persist_path)
             if dirname:
                 os.makedirs(dirname, exist_ok=True)
@@ -976,6 +1104,24 @@ def get_store() -> SuppressedCandidateStore:
     return _store
 
 
+def feeds_edge_matrix(rec: dict) -> bool:
+    """May this classified record become a Strategy×Context edge-matrix cell?
+
+    Named and exported rather than written inline at the call site, because the
+    answer is a **money-path** decision: Layer C's ``context_emission_policy``
+    reads those cells live to set per-context emission floors, so whatever
+    returns True here can change what subscribers receive.
+
+    False for a pre-scoring reject.  ``setup_compat`` / ``execution`` fire ahead
+    of the scoring engine, so the row carries the evaluator's confidence and no
+    scored one, and there are ~38k of them per window against ~4.5k
+    post-scoring suppressions — admitting them would not just add rows, it
+    would swamp the matrix with a differently-measured population.  They are
+    still fully audited; the audit is display-and-analysis, the matrix routes.
+    """
+    return not bool(rec.get("pre_scoring"))
+
+
 def stamp_candidate(
     *,
     gate_name: str,
@@ -996,6 +1142,7 @@ def stamp_candidate(
     provenance: str = "",
     sar_aligned_at_entry: Optional[bool] = None,
     stamp_schema: int = 0,
+    pre_scoring: bool = False,
     store: Optional[SuppressedCandidateStore] = None,
 ) -> Optional[SuppressedCandidateRecord]:
     """Stamp a suppressed candidate (fail-open).  Scopes to tradeable geometry only."""
@@ -1036,6 +1183,7 @@ def stamp_candidate(
             # Which stamp-rule generation produced this row.  Callers that have
             # no dedup rule of their own leave it 0 and are unaffected.
             stamp_schema=int(stamp_schema or 0),
+            pre_scoring=bool(pre_scoring),
             suppress_timestamp=time.time(),
         )
         (store or get_store()).stamp(rec)
