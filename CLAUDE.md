@@ -672,6 +672,19 @@ python -m src.main
   preceded. And when a degraded mode ships, **count it**: the probe fails when
   the whole open book is advancing on undatable windows, which is neither
   stalled nor healthy and was invisible to a probe watching only for stalls.
+- **A test hook that means "don't persist" must not touch the disk, and a
+  non-failure must never reach `fail_open`.** Both ledgers take `path=""` as
+  "in memory" — what every test constructs with — and neither checked it before
+  running its atomic write. So `flush` created `.tmp` in the process's cwd,
+  which under pytest is the repo root, where `git add -A` committed it; it
+  differed on every branch and conflicted on every merge from #839 to #845.
+  The file was only the symptom. `os.replace(".tmp", "")` then raised into
+  `fail_open`, so **every test run recorded a failure that was not one**, for
+  two months, in the counter whose whole purpose is making a real failure stand
+  out. Same rule the `PredicateProbe` guidance above already carries, broken one
+  layer down: *do not signal a non-event by raising*. When a path is a no-op,
+  return before the side effect — and if a repo artifact keeps conflicting, ask
+  what wrote it rather than resolving it again.
 - **Never hand-write a collaborator's return shape in a test — drive the real
   collaborator.** A mock whose keys you chose cannot verify a contract you got
   wrong; it asserts your assumption back at you and goes green over dead code.

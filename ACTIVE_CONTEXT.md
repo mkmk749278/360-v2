@@ -4,6 +4,57 @@
 
 ---
 
+## 🟢 SESSION 98 2026-07-31 — two owner directives, and a test artifact in the repo (engine #844/#845, ops #114/#115)
+
+### SR_FLIP longs now emit into the dark feed (#844 + ops #114)
+
+Owner: *"enable sr flip longs to here at dark feed"*. The long side has been off
+since 2026-06-29 on a measured −21.8% / 19% win, and its only evidence since was
+a `[SHADOW] SR_FLIP_LONG_V2_WOULD_FIRE` log line — a candidate **count**, which
+cannot settle a re-enable. Dark rows give it forward-resolved outcomes.
+
+First *evaluator-internal* disable the lane admits, and that dictated the shape:
+`long_disabled` fires before the gate chain, so publishing there would produce
+rows the page's own first sentence describes falsely. The candidate is
+**carried** instead — evaluator finishes, every gate still applies, diverted at
+the one enqueue site. `will_admit` decides the carry; it is **not** permission,
+so the mark is re-checked with `is_dark` before returning. Both tests fail with
+that guard removed. Lane off ⇒ rejected as before.
+
+### SAR exit arms over the dark feed (#845 + ops #115)
+
+Owner: *"observe this dark feed too with SAR exit mechanism along with regular"*.
+Each dark row now carries two outcomes — its own SL/TP1, and a SAR handover from
+the same entry.
+
+- **Own ledger** (`dark_sar_arms_v1.json`). `sar_live_arms_v1.json` is the
+  adoption evidence and every arm in it reached a subscriber; these reached
+  nobody. A consumer pointed at a file it never opens cannot mix them.
+- **Health is per lane.** Was module-global — a dark stall would have paged as
+  though the delivered-signal arms froze. `dark_sar_arms` is its own probe.
+- **The comparison population is the trap.** Only rows decided by *both* count;
+  a row that resolved while its arm still runs describes one mechanism, not two.
+  Expect the panel to read empty for the first hours — that is designed.
+
+### `.tmp` — a test artifact committed since #839
+
+Surfaced as a merge conflict on every branch. Both ledgers take `path=""` to mean
+"in memory" and neither checked it before the atomic write, so `flush` wrote
+`.tmp` into pytest's cwd (the repo root) and `git add -A` committed it. The file
+was the symptom; `os.replace(".tmp", "")` then raised into **`fail_open`** — a
+non-failure filling the counter that exists so real ones stand out, on every test
+run for two months. Both flushes now return early; `.tmp` is gitignored.
+
+### Open
+
+1. **#832's SAR verdict is owed a re-check** — `_ohlc_15m_detail` refused on the
+   same undatable-bars condition #842 fixed, so "8 of 19 unresolved → starved
+   refresh budget" may have been that bug wearing another name.
+2. Elapsed-time candle slice still backs the suppression and invalidation audits.
+3. Neither new surface confirmed on screen — engine deploy #757, ops #119.
+
+---
+
 ## 🟢 SESSION 97 2026-07-31 — bar timestamps never survived a restart (engine #842, ops #113)
 
 Owner, from the live dark feed hours after Session 96 deployed: every open row
